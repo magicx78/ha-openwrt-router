@@ -1,69 +1,109 @@
 # OpenWrt Router – Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue)](https://www.home-assistant.io/)
 
-A custom Home Assistant integration for OpenWrt routers using ubus / rpcd JSON-RPC.
+A Home Assistant custom integration for [OpenWrt](https://openwrt.org/) routers, communicating via the built-in **ubus / rpcd JSON-RPC API**.
 
 ## Features
 
-- **Sensors**: Uptime, WAN status, connected client count
-- **Switches**: WiFi 2.4 GHz, 5 GHz, 6 GHz, Guest WiFi (auto-detected)
-- **Device Tracker**: All associated WiFi clients (marks as `not_home` when disconnected)
+- **Sensors**: Router uptime, WAN status, connected client count
+- **Switches**: Toggle WiFi radios (2.4 GHz, 5 GHz, 6 GHz, Guest)
+- **Device Tracker**: Track WiFi clients (marks as `not_home` when disconnected)
 - **Button**: Reload WiFi configuration
-- **Diagnostics**: Safe diagnostic dump (passwords/tokens redacted)
+- **Diagnostics**: Redacted diagnostic data for bug reports
 
 ## Requirements
 
-- OpenWrt 19.07 or later (tested on 24.10)
-- `rpcd` and `uhttpd` running on the router
-- A user with ubus access (usually `root`)
+- OpenWrt **19.07** or newer (tested on 24.10)
+- `rpcd` with `rpcd-mod-rpcsys` installed on the router
+- HTTP access to the router (port 80 by default)
 
-## Installation via HACS
+### Enable rpcd on OpenWrt
 
-1. In HACS → Integrations → ⋮ → Custom repositories
-2. Add: `https://github.com/YOUR_GITHUB_USERNAME/ha-openwrt-router` (Category: Integration)
-3. Install "OpenWrt Router"
+```sh
+opkg update
+opkg install rpcd rpcd-mod-rpcsys
+uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock'
+uci set rpcd.@rpcd[0].timeout=30
+uci commit rpcd
+service rpcd restart
+```
+
+## Installation
+
+### Via HACS (recommended)
+
+1. Open HACS → Integrations → ⋮ → Custom repositories
+2. Add `https://github.com/YOUR_USERNAME/ha-openwrt-router` as **Integration**
+3. Install **OpenWrt Router**
 4. Restart Home Assistant
 
-## Manual Installation
+### Manual
 
-1. Copy `custom_components/openwrt_router/` to your HA `config/custom_components/` folder
+1. Copy `custom_components/openwrt_router/` into your HA config directory
 2. Restart Home Assistant
-3. Go to **Settings → Devices & Services → Add Integration → OpenWrt Router**
 
 ## Configuration
 
-| Field    | Default | Description                        |
-|----------|---------|------------------------------------|
-| Host     | –       | Router IP or hostname              |
-| Port     | 80      | HTTP port                          |
-| Username | root    | rpcd username                      |
-| Password | –       | Router password                    |
+Add the integration via **Settings → Devices & Services → Add Integration → OpenWrt Router**.
+
+| Field    | Default | Description                     |
+|----------|---------|---------------------------------|
+| Host     | –       | Router IP address or hostname   |
+| Port     | 80      | HTTP port of the router         |
+| Username | root    | rpcd/ubus username              |
+| Password | –       | rpcd/ubus password              |
+
+## Entities
+
+### Sensors
+| Entity | Description |
+|--------|-------------|
+| `sensor.openwrt_uptime` | Router uptime in seconds |
+| `sensor.openwrt_wan_status` | WAN connection state |
+| `sensor.openwrt_connected_clients` | Number of associated WiFi clients |
+
+### Switches
+| Entity | Description |
+|--------|-------------|
+| `switch.openwrt_wifi_2_4ghz` | Enable/disable 2.4 GHz radio |
+| `switch.openwrt_wifi_5ghz` | Enable/disable 5 GHz radio |
+| `switch.openwrt_wifi_6ghz` | Enable/disable 6 GHz radio (if available) |
+| `switch.openwrt_guest_wifi` | Enable/disable guest SSID |
+
+> Switches are only created when the corresponding radio/SSID is detected.
+
+### Device Tracker
+One `device_tracker` entity is created per detected WiFi client (identified by MAC address).
+
+### Button
+| Entity | Description |
+|--------|-------------|
+| `button.openwrt_reload_wifi` | Trigger a WiFi configuration reload |
 
 ## Architecture
 
 ```
-Config Flow → Config Entry → DataUpdateCoordinator (30s) → Entities
-                                        ↕
-                                    OpenWrtAPI
-                                        ↕
-                             OpenWrt Router (ubus/rpcd)
+Config Flow → Config Entry → OpenWrtRuntimeData
+                                 ├── api: OpenWrtAPI
+                                 └── coordinator: OpenWrtCoordinator (30s poll)
+                                           ↕
+                                   OpenWrt Router (ubus JSON-RPC HTTP POST /ubus)
 ```
 
-## Roadmap / TODOs
+## Known Limitations / TODO
 
-- [ ] Bandwidth sensors (RX/TX per interface)
-- [ ] Traffic statistics
-- [ ] Per-client online time
-- [ ] Parental control support
-- [ ] Link quality metrics
-- [ ] HTTPS support
-- [ ] Options flow (custom scan interval)
+- Bandwidth sensors (RX/TX bytes per interface) — planned
+- Traffic statistics — planned
+- DHCP lease enrichment (client IP addresses) — partial stub
+- Per-client online time — planned
+- Link quality metrics (signal/noise per radio) — planned
+- Parental control support — planned
+- HTTPS support — planned
 
 ## Contributing
 
-Pull requests welcome! Please open an issue first for major changes.
+PRs welcome! Please open an issue first for major changes.
 
 ## License
 
