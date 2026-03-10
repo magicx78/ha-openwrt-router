@@ -3,11 +3,11 @@
   "name": "OpenWrt Router",
   "version": "1.0.0",
   "config_flow": true,
-  "documentation": "https://github.com/your-github/openwrt_router",
-  "issue_tracker": "https://github.com/your-github/openwrt_router/issues",
+  "documentation": "https://github.com/magicx78/ha-openwrt-router",
+  "issue_tracker": "https://github.com/magicx78/ha-openwrt-router/issues",
   "requirements": ["aiohttp>=3.9.0"],
   "dependencies": [],
-  "codeowners": ["@your-github"],
+  "codeowners": ["@magicx78"],
   "iot_class": "local_polling",
   "quality_scale": "silver"
 }
