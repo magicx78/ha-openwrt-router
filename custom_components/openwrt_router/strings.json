@@ -1,0 +1,71 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to OpenWrt Router",
+        "description": "Enter the connection details for your OpenWrt router. The router must have rpcd and uhttpd running.",
+        "data": {
+          "host": "Host / IP Address",
+          "port": "HTTP Port",
+          "username": "Username",
+          "password": "Password"
+        },
+        "data_description": {
+          "host": "Hostname or IP address of the router (e.g. 192.168.1.1)",
+          "port": "HTTP port, usually 80",
+          "username": "rpcd username, usually 'root'",
+          "password": "Router password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate with OpenWrt Router",
+        "description": "The session with **{host}** (user: {username}) has expired. Please enter your password again.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the router. Check the host and port and ensure the router is reachable.",
+      "invalid_auth": "Authentication failed. Check the username and password.",
+      "timeout": "Connection timed out. The router may be unreachable or overloaded.",
+      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details."
+    },
+    "abort": {
+      "already_configured": "This router is already configured.",
+      "reauth_successful": "Re-authentication was successful."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "uptime": {
+        "name": "Uptime"
+      },
+      "wan_status": {
+        "name": "WAN Status"
+      },
+      "client_count": {
+        "name": "Connected Clients"
+      }
+    },
+    "switch": {
+      "wifi_24ghz": {
+        "name": "WiFi 2.4 GHz"
+      },
+      "wifi_5ghz": {
+        "name": "WiFi 5 GHz"
+      },
+      "wifi_6ghz": {
+        "name": "WiFi 6 GHz"
+      },
+      "guest_wifi": {
+        "name": "Guest WiFi"
+      }
+    },
+    "button": {
+      "reload_wifi": {
+        "name": "Reload WiFi"
+      }
+    }
+  }
+}
