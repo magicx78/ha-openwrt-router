@@ -21,6 +21,7 @@ from .const import (
     CLIENT_KEY_MAC,
     DOMAIN,
     FEATURE_AVAILABLE_RADIOS,
+    FEATURE_DHCP_LEASES,
     FEATURE_HAS_5GHZ,
     FEATURE_HAS_6GHZ,
     FEATURE_HAS_GUEST_WIFI,
@@ -29,6 +30,7 @@ from .const import (
     KEY_CLIENT_COUNT,
     KEY_CLIENTS,
     KEY_CPU_LOAD,
+    KEY_DHCP_LEASES,
     KEY_FEATURES,
     KEY_MEMORY,
     KEY_ROUTER_INFO,
@@ -56,8 +58,9 @@ class OpenWrtCoordinatorData:
         wan_status: WAN interface status dict.
         wan_connected: Convenience bool derived from wan_status.
         wifi_radios: List of normalised radio / SSID descriptors.
-        clients: List of currently associated WiFi clients.
+        clients: List of currently associated WiFi clients (ip/hostname enriched).
         client_count: Number of connected clients.
+        dhcp_leases: MAC → {ip, hostname} mapping from the DHCP lease table.
         features: Feature detection map (populated on first refresh).
     """
 
@@ -72,6 +75,7 @@ class OpenWrtCoordinatorData:
         self.wifi_radios: list[dict[str, Any]] = []
         self.clients: list[dict[str, Any]] = []
         self.client_count: int = 0
+        self.dhcp_leases: dict[str, dict[str, str]] = {}
         self.features: dict[str, Any] = {}
 
     def as_dict(self) -> dict[str, Any]:
@@ -86,6 +90,7 @@ class OpenWrtCoordinatorData:
             KEY_WIFI_RADIOS: self.wifi_radios,
             KEY_CLIENTS: self.clients,
             KEY_CLIENT_COUNT: self.client_count,
+            KEY_DHCP_LEASES: self.dhcp_leases,
             KEY_FEATURES: self.features,
         }
 
@@ -158,7 +163,10 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # --- WiFi radios ---
             data.wifi_radios = await self.api.get_wifi_status()
 
-            # --- Connected clients ---
+            # --- DHCP leases (for IP / hostname enrichment) ---
+            data.dhcp_leases = await self.api.get_dhcp_leases()
+
+            # --- Connected clients (enriched with IP + hostname from leases) ---
             data.clients = await self.api.get_connected_clients()
             data.client_count = len(data.clients)
 
@@ -213,12 +221,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
 
             _LOGGER.info(
                 "OpenWrt feature detection complete: "
-                "iwinfo=%s, 5GHz=%s, 6GHz=%s, guest=%s, radios=%s",
+                "iwinfo=%s, 5GHz=%s, 6GHz=%s, guest=%s, radios=%s, dhcp_leases=%s",
                 features.get(FEATURE_HAS_IWINFO),
                 features.get(FEATURE_HAS_5GHZ),
                 features.get(FEATURE_HAS_6GHZ),
                 features.get(FEATURE_HAS_GUEST_WIFI),
                 features.get(FEATURE_AVAILABLE_RADIOS),
+                features.get(FEATURE_DHCP_LEASES),
             )
         except Exception as err:  # noqa: BLE001
             # Feature detection failure is non-fatal – continue with empty features
@@ -330,6 +339,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
     def available_radios(self) -> list[str]:
         """Return list of detected radio interface names."""
         return list(self.features.get(FEATURE_AVAILABLE_RADIOS, []))
+
+    @property
+    def has_dhcp_leases(self) -> bool:
+        """Return True if DHCP lease file is readable on the router."""
+        return bool(self.features.get(FEATURE_DHCP_LEASES, False))
 
     # TODO: add bandwidth_data property once bandwidth sensors are implemented
     # TODO: add traffic_stats property once traffic statistics are implemented
