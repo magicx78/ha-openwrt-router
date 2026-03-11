@@ -298,7 +298,7 @@ class OpenWrtAPI:
             result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
             return self._parse_iwinfo_info(result)
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "Neither network.wireless nor iwinfo is available on this router"
             )
             return []
@@ -306,6 +306,7 @@ class OpenWrtAPI:
     async def get_connected_clients(
         self,
         leases: dict[str, dict[str, str]] | None = None,
+        radios: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """Return a list of currently associated WiFi clients.
 
@@ -316,12 +317,16 @@ class OpenWrtAPI:
             leases: Pre-fetched DHCP lease dict (MAC → {ip, hostname}).
                     If provided, skips a second get_dhcp_leases() call.
                     If None, fetches leases internally.
+            radios: Pre-fetched radio list from get_wifi_status().
+                    If provided, skips a second get_wifi_status() call.
+                    If None, fetches radios internally.
 
         Returns:
             List of client dicts with keys defined by CLIENT_KEY_* constants.
         """
-        # We need interface names – fetch wifi status for discovery
-        radios = await self.get_wifi_status()
+        # Use pre-fetched radios if available to avoid a redundant WiFi API call
+        if radios is None:
+            radios = await self.get_wifi_status()
         clients: list[dict[str, Any]] = []
 
         for radio in radios:
