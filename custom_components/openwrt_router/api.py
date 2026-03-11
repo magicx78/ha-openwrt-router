@@ -215,15 +215,20 @@ class OpenWrtAPI:
 
         Returns:
             {
-                "uptime": int,   # seconds since boot
-                "load": list[int],
-                "memory": dict,
+                "uptime": int,        # seconds since boot
+                "load": list[int],    # raw load values (* 65536)
+                "cpu_load": float,    # 1-min load average as percentage (0-100)
+                "memory": dict,       # total, free, shared, buffered, available (bytes)
             }
         """
         result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_INFO, {})
+        raw_load: list[int] = result.get("load", [0, 0, 0])
+        # OpenWrt encodes load averages as integer * 65536
+        cpu_load = round(raw_load[0] / 65536 * 100, 1) if raw_load else 0.0
         return {
             "uptime": result.get("uptime", 0),
-            "load": result.get("load", []),
+            "load": raw_load,
+            "cpu_load": cpu_load,
             "memory": result.get("memory", {}),
         }
 
@@ -251,17 +256,20 @@ class OpenWrtAPI:
             ):
                 ipv4_list = iface.get("ipv4-address", [])
                 ipv4 = ipv4_list[0].get("address", "") if ipv4_list else ""
+                stats: dict[str, Any] = iface.get("statistics", {})
                 return {
                     "connected": iface.get("up", False),
                     "interface": iface.get("interface", ""),
                     "ipv4": ipv4,
                     "uptime": iface.get("uptime", 0),
                     "proto": iface.get("proto", ""),
+                    "rx_bytes": stats.get("rx_bytes", 0),
+                    "tx_bytes": stats.get("tx_bytes", 0),
                 }
 
         # No WAN interface found – treat as disconnected
         _LOGGER.debug("No WAN interface found in network dump")
-        return {"connected": False, "interface": "", "ipv4": "", "uptime": 0}
+        return {"connected": False, "interface": "", "ipv4": "", "uptime": 0, "rx_bytes": 0, "tx_bytes": 0}
 
     async def get_wifi_status(self) -> list[dict[str, Any]]:
         """Return a list of WiFi radio / SSID descriptors.
