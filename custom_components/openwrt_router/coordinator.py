@@ -180,8 +180,12 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             )
             data.client_count = len(data.clients)
 
-            # Carry forward features (they don't change between polls)
-            data.features = self.data.features if self.data else {}
+            # Carry forward features from the previous cycle.
+            # Only applies when detection already ran in a prior cycle –
+            # on the first poll data.features was just set by _detect_features()
+            # and must not be overwritten (self.data is still None then).
+            if self._features_detected and not data.features:
+                data.features = self.data.features if self.data else {}
 
         except OpenWrtAuthError as err:
             # HA will trigger a re-auth config flow for the user
