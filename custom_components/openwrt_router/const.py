@@ -20,6 +20,11 @@ DEFAULT_SESSION_ID = "00000000000000000000000000000000"
 # Update interval
 SCAN_INTERVAL_SECONDS = 30
 
+# How many poll cycles between re-fetching static board info (model, hostname, release).
+# 20 cycles × 30 s = ~10 minutes.  Hostname changes are rare; this avoids a
+# system/board call on every poll while still detecting changes eventually.
+BOARD_REFRESH_CYCLES = 20
+
 # Config entry keys
 CONF_HOST = "host"
 CONF_PORT = "port"

@@ -130,6 +130,11 @@ class OpenWrtAPI:
         # Session token – refreshed on login / expiry
         self._token: str = DEFAULT_SESSION_ID
 
+        # Cached WiFi API method: None=unknown, "wireless", "iwinfo", "none"
+        # Set on first get_wifi_status() call and reused to avoid retrying
+        # known-unavailable APIs on every poll cycle.
+        self._wifi_method: str | None = None
+
     # ------------------------------------------------------------------
     # Public auth API
     # ------------------------------------------------------------------
@@ -284,23 +289,40 @@ class OpenWrtAPI:
         Returns:
             List of radio dicts with keys defined by RADIO_KEY_* constants.
         """
-        # Attempt 1: network.wireless status (richer data, newer rpcd)
+        # Fast path: use cached method from previous call
+        if self._wifi_method == "none":
+            return []
+        if self._wifi_method == "wireless":
+            try:
+                result = await self._call(UBUS_WIRELESS_OBJECT, UBUS_WIRELESS_STATUS, {})
+                return self._parse_wireless_status(result)
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                # Method disappeared (e.g. firmware update) – re-probe
+                self._wifi_method = None
+        if self._wifi_method == "iwinfo":
+            try:
+                result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
+                return self._parse_iwinfo_info(result)
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                self._wifi_method = None
+
+        # First call or cache invalidated – probe both methods
         try:
             result = await self._call(UBUS_WIRELESS_OBJECT, UBUS_WIRELESS_STATUS, {})
+            self._wifi_method = "wireless"
+            _LOGGER.debug("WiFi method: network.wireless/status")
             return self._parse_wireless_status(result)
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-            _LOGGER.debug(
-                "network.wireless/status not available, falling back to iwinfo"
-            )
+            _LOGGER.debug("network.wireless/status not available, falling back to iwinfo")
 
-        # Attempt 2: iwinfo.info (widely available fallback)
         try:
             result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
+            self._wifi_method = "iwinfo"
+            _LOGGER.debug("WiFi method: iwinfo/info")
             return self._parse_iwinfo_info(result)
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-            _LOGGER.debug(
-                "Neither network.wireless nor iwinfo is available on this router"
-            )
+            self._wifi_method = "none"
+            _LOGGER.debug("Neither network.wireless nor iwinfo is available on this router")
             return []
 
     async def get_connected_clients(
@@ -500,14 +522,6 @@ class OpenWrtAPI:
             "dhcp_leases": False,
         }
 
-        # Check iwinfo availability
-        try:
-            await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
-            features["has_iwinfo"] = True
-            _LOGGER.debug("Feature detected: iwinfo available")
-        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-            pass
-
         # Check UCI availability
         try:
             await self._call(
@@ -583,6 +597,9 @@ class OpenWrtAPI:
 
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError) as err:
             _LOGGER.debug("Could not detect WiFi features: %s", err)
+
+        # Derive has_iwinfo from the cached WiFi method (set by get_wifi_status above)
+        features["has_iwinfo"] = self._wifi_method in ("wireless", "iwinfo")
 
         _LOGGER.debug("Detected features: %s", features)
         return features
