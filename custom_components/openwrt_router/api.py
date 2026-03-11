@@ -288,7 +288,7 @@ class OpenWrtAPI:
         try:
             result = await self._call(UBUS_WIRELESS_OBJECT, UBUS_WIRELESS_STATUS, {})
             return self._parse_wireless_status(result)
-        except OpenWrtMethodNotFoundError:
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
             _LOGGER.debug(
                 "network.wireless/status not available, falling back to iwinfo"
             )
@@ -297,7 +297,7 @@ class OpenWrtAPI:
         try:
             result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
             return self._parse_iwinfo_info(result)
-        except OpenWrtMethodNotFoundError:
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
             _LOGGER.warning(
                 "Neither network.wireless nor iwinfo is available on this router"
             )
@@ -441,6 +441,13 @@ class OpenWrtAPI:
                 "rpcd file module not available – DHCP lease enrichment disabled"
             )
             return {}
+        except OpenWrtAuthError:
+            _LOGGER.debug(
+                "rpcd file/read permission denied for %s – "
+                "add /tmp/dhcp.leases to rpcd ACL to enable enrichment",
+                DHCP_LEASES_PATH,
+            )
+            return {}
         except OpenWrtResponseError as err:
             _LOGGER.debug("Could not read DHCP leases: %s", err)
             return {}
@@ -523,6 +530,11 @@ class OpenWrtAPI:
             )
             features["dhcp_leases"] = bool(result.get("data") is not None)
             _LOGGER.debug("Feature detected: DHCP lease file readable")
+        except OpenWrtAuthError:
+            _LOGGER.debug(
+                "Feature not available: DHCP lease file – permission denied "
+                "(add /tmp/dhcp.leases to rpcd ACL, see integration docs)"
+            )
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
             _LOGGER.debug("Feature not available: DHCP lease file (rpcd-mod-file missing?)")
 
@@ -687,6 +699,21 @@ class OpenWrtAPI:
             raise OpenWrtConnectionError(
                 f"Network error communicating with {self._ubus_url}: {err}"
             ) from err
+
+        # Handle JSON-RPC level errors (e.g. rpcd access denied before ubus dispatch)
+        if "error" in data:
+            rpc_error = data["error"]
+            error_code = rpc_error.get("code", 0)
+            error_msg = rpc_error.get("message", "unknown")
+            # -32002: rpcd access denied (object not in session ACL or not registered)
+            # Treat as "not available" so callers can fall back gracefully
+            if error_code == -32002:
+                raise OpenWrtMethodNotFoundError(
+                    f"rpcd access denied for {ubus_object}/{method}: {error_msg}"
+                )
+            raise OpenWrtResponseError(
+                f"JSON-RPC error {error_code} for {ubus_object}/{method}: {error_msg}"
+            )
 
         # Decode JSON-RPC envelope
         rpc_result = data.get("result")
