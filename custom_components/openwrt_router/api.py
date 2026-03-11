@@ -303,11 +303,19 @@ class OpenWrtAPI:
             )
             return []
 
-    async def get_connected_clients(self) -> list[dict[str, Any]]:
+    async def get_connected_clients(
+        self,
+        leases: dict[str, dict[str, str]] | None = None,
+    ) -> list[dict[str, Any]]:
         """Return a list of currently associated WiFi clients.
 
         Calls:
             iwinfo assoclist  (once per discovered radio interface)
+
+        Args:
+            leases: Pre-fetched DHCP lease dict (MAC → {ip, hostname}).
+                    If provided, skips a second get_dhcp_leases() call.
+                    If None, fetches leases internally.
 
         Returns:
             List of client dicts with keys defined by CLIENT_KEY_* constants.
@@ -343,8 +351,9 @@ class OpenWrtAPI:
             except OpenWrtResponseError as err:
                 _LOGGER.debug("Failed to get assoclist for %s: %s", ifname, err)
 
-        # Enrich with IP addresses from network dump
-        clients = await self._enrich_clients_with_ip(clients)
+        # Enrich with IP / hostname – use pre-fetched leases to avoid a second
+        # file/read call when the coordinator has already fetched them.
+        clients = await self._enrich_clients_with_ip(clients, leases=leases)
         return clients
 
     async def set_wifi_state(self, uci_section: str, enabled: bool) -> bool:
@@ -827,21 +836,22 @@ class OpenWrtAPI:
         return any(kw in ssid_lower for kw in GUEST_SSID_KEYWORDS)
 
     async def _enrich_clients_with_ip(
-        self, clients: list[dict[str, Any]]
+        self,
+        clients: list[dict[str, Any]],
+        leases: dict[str, dict[str, str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Add IP address and hostname to client records from DHCP leases.
 
-        Reads the DHCP lease table once and applies MAC→IP and MAC→hostname
-        mappings to the client list in-place.  Falls back gracefully if
-        the lease file is unavailable (e.g. rpcd-mod-file not installed).
-
         Args:
             clients: List of client dicts (modified in-place).
+            leases: Pre-fetched lease dict to avoid a redundant API call.
+                    If None, fetches leases via get_dhcp_leases().
 
         Returns:
             The same client list with ip / hostname fields filled where known.
         """
-        leases = await self.get_dhcp_leases()
+        if leases is None:
+            leases = await self.get_dhcp_leases()
         if not leases:
             return clients
 
