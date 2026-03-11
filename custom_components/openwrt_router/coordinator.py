@@ -166,8 +166,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # --- DHCP leases (for IP / hostname enrichment) ---
             data.dhcp_leases = await self.api.get_dhcp_leases()
 
-            # --- Connected clients (pass leases to avoid a second file/read) ---
-            data.clients = await self.api.get_connected_clients(leases=data.dhcp_leases)
+            # --- Connected clients (pass radios+leases to avoid redundant API calls) ---
+            data.clients = await self.api.get_connected_clients(
+                leases=data.dhcp_leases,
+                radios=data.wifi_radios,
+            )
             data.client_count = len(data.clients)
 
             # Carry forward features (they don't change between polls)
