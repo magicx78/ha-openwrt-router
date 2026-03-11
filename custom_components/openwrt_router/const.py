@@ -89,6 +89,13 @@ SUFFIX_WIFI_50 = "wifi_5ghz"
 SUFFIX_WIFI_60 = "wifi_6ghz"
 SUFFIX_GUEST_WIFI = "guest_wifi"
 SUFFIX_RELOAD_WIFI = "reload_wifi"
+SUFFIX_CPU_LOAD = "cpu_load"
+SUFFIX_MEMORY_USAGE = "memory_usage"
+SUFFIX_MEMORY_FREE = "memory_free"
+SUFFIX_WAN_IP = "wan_ip"
+SUFFIX_WAN_RX = "wan_rx"
+SUFFIX_WAN_TX = "wan_tx"
+SUFFIX_FIRMWARE = "firmware"
 
 # Device tracker
 SOURCE_TYPE_ROUTER = "router"
@@ -118,6 +125,8 @@ KEY_WIFI_RADIOS = "wifi_radios"
 KEY_CLIENTS = "clients"
 KEY_CLIENT_COUNT = "client_count"
 KEY_FEATURES = "features"
+KEY_CPU_LOAD = "cpu_load"
+KEY_MEMORY = "memory"
 
 # WiFi radio state keys
 RADIO_KEY_NAME = "name"
@@ -142,8 +151,6 @@ ERROR_INVALID_AUTH = "invalid_auth"
 ERROR_UNKNOWN = "unknown"
 ERROR_TIMEOUT = "timeout"
 
-# TODO: bandwidth sensors - add SUFFIX_BANDWIDTH_RX, SUFFIX_BANDWIDTH_TX
-# TODO: traffic statistics - add KEY_TRAFFIC_RX, KEY_TRAFFIC_TX per interface
 # TODO: per-client online time - add CLIENT_KEY_CONNECTED_SINCE
 # TODO: parental control - add UBUS_PARENTAL_OBJECT
 # TODO: link quality metrics - add CLIENT_KEY_SIGNAL_QUALITY, CLIENT_KEY_NOISE

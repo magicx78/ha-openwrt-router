@@ -28,7 +28,9 @@ from .const import (
     FEATURE_UCI_AVAILABLE,
     KEY_CLIENT_COUNT,
     KEY_CLIENTS,
+    KEY_CPU_LOAD,
     KEY_FEATURES,
+    KEY_MEMORY,
     KEY_ROUTER_INFO,
     KEY_UPTIME,
     KEY_WAN_CONNECTED,
@@ -49,6 +51,8 @@ class OpenWrtCoordinatorData:
     Attributes:
         router_info: Static board information (model, hostname, release).
         uptime: System uptime in seconds.
+        cpu_load: 1-minute CPU load average as percentage (0-100).
+        memory: Memory stats dict (total, free, shared, buffered bytes).
         wan_status: WAN interface status dict.
         wan_connected: Convenience bool derived from wan_status.
         wifi_radios: List of normalised radio / SSID descriptors.
@@ -61,6 +65,8 @@ class OpenWrtCoordinatorData:
         """Initialise with sensible defaults."""
         self.router_info: dict[str, Any] = {}
         self.uptime: int = 0
+        self.cpu_load: float = 0.0
+        self.memory: dict[str, Any] = {}
         self.wan_status: dict[str, Any] = {}
         self.wan_connected: bool = False
         self.wifi_radios: list[dict[str, Any]] = []
@@ -73,6 +79,8 @@ class OpenWrtCoordinatorData:
         return {
             KEY_ROUTER_INFO: self.router_info,
             KEY_UPTIME: self.uptime,
+            KEY_CPU_LOAD: self.cpu_load,
+            KEY_MEMORY: self.memory,
             KEY_WAN_STATUS: self.wan_status,
             KEY_WAN_CONNECTED: self.wan_connected,
             KEY_WIFI_RADIOS: self.wifi_radios,
@@ -140,6 +148,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # --- Dynamic system status ---
             status = await self.api.get_router_status()
             data.uptime = status.get("uptime", 0)
+            data.cpu_load = status.get("cpu_load", 0.0)
+            data.memory = status.get("memory", {})
 
             # --- WAN status ---
             data.wan_status = await self.api.get_wan_status()

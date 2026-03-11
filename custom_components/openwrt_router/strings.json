@@ -46,6 +46,27 @@
       },
       "client_count": {
         "name": "Connected Clients"
+      },
+      "cpu_load": {
+        "name": "CPU Load"
+      },
+      "memory_usage": {
+        "name": "Memory Usage"
+      },
+      "memory_free": {
+        "name": "Memory Free"
+      },
+      "wan_ip": {
+        "name": "WAN IP Address"
+      },
+      "wan_rx": {
+        "name": "WAN Download"
+      },
+      "wan_tx": {
+        "name": "WAN Upload"
+      },
+      "firmware": {
+        "name": "Firmware Version"
       }
     },
     "switch": {

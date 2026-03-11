@@ -21,7 +21,13 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, UnitOfTime
+from homeassistant.const import (
+    EntityCategory,
+    UnitOfDataRate,
+    UnitOfInformation,
+    UnitOfTime,
+    PERCENTAGE,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -31,8 +37,15 @@ from . import OpenWrtConfigEntry
 from .const import (
     DOMAIN,
     SUFFIX_CLIENT_COUNT,
+    SUFFIX_CPU_LOAD,
+    SUFFIX_FIRMWARE,
+    SUFFIX_MEMORY_FREE,
+    SUFFIX_MEMORY_USAGE,
     SUFFIX_UPTIME,
+    SUFFIX_WAN_IP,
+    SUFFIX_WAN_RX,
     SUFFIX_WAN_STATUS,
+    SUFFIX_WAN_TX,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
 
@@ -96,6 +109,82 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
                 }
                 for c in data.clients
             ]
+        },
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_CPU_LOAD,
+        translation_key="cpu_load",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=PERCENTAGE,
+        icon="mdi:cpu-64-bit",
+        value_fn=lambda data: data.cpu_load,
+        extra_attrs_fn=lambda data: {
+            "load_1min": round(data.cpu_load, 1),
+        },
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_MEMORY_USAGE,
+        translation_key="memory_usage",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=PERCENTAGE,
+        icon="mdi:memory",
+        value_fn=lambda data: _calc_memory_pct(data.memory),
+        extra_attrs_fn=lambda data: {
+            "total_mb": round(data.memory.get("total", 0) / 1024 / 1024, 1),
+            "free_mb": round(data.memory.get("free", 0) / 1024 / 1024, 1),
+            "used_mb": round(
+                (data.memory.get("total", 0) - data.memory.get("free", 0)) / 1024 / 1024, 1
+            ),
+        },
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_MEMORY_FREE,
+        translation_key="memory_free",
+        device_class=SensorDeviceClass.DATA_SIZE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfInformation.MEGABYTES,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:memory",
+        value_fn=lambda data: round(data.memory.get("free", 0) / 1024 / 1024, 1),
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_WAN_IP,
+        translation_key="wan_ip",
+        icon="mdi:ip-network",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda data: data.wan_status.get("ipv4") or None,
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_WAN_RX,
+        translation_key="wan_rx",
+        device_class=SensorDeviceClass.DATA_SIZE,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfInformation.BYTES,
+        icon="mdi:download-network",
+        value_fn=lambda data: data.wan_status.get("rx_bytes", 0),
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_WAN_TX,
+        translation_key="wan_tx",
+        device_class=SensorDeviceClass.DATA_SIZE,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfInformation.BYTES,
+        icon="mdi:upload-network",
+        value_fn=lambda data: data.wan_status.get("tx_bytes", 0),
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_FIRMWARE,
+        translation_key="firmware",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:package-up",
+        value_fn=lambda data: (
+            data.router_info.get("release", {}).get("version", "")
+            or data.router_info.get("kernel", "")
+        ),
+        extra_attrs_fn=lambda data: {
+            "distribution": data.router_info.get("release", {}).get("distribution", ""),
+            "kernel": data.router_info.get("kernel", ""),
+            "board": data.router_info.get("board_name", ""),
         },
     ),
 )
@@ -199,6 +288,15 @@ class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
 # ------------------------------------------------------------------
 # Utility functions
 # ------------------------------------------------------------------
+
+def _calc_memory_pct(memory: dict) -> float | None:
+    """Calculate memory usage percentage from memory dict."""
+    total = memory.get("total", 0)
+    free = memory.get("free", 0)
+    if not total:
+        return None
+    return round((total - free) / total * 100, 1)
+
 
 def _format_uptime(seconds: int) -> str:
     """Convert uptime seconds into a human-readable string.
