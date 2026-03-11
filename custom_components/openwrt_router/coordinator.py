@@ -19,6 +19,7 @@ from .api import (
 )
 from .const import (
     CLIENT_KEY_MAC,
+    BOARD_REFRESH_CYCLES,
     DOMAIN,
     FEATURE_AVAILABLE_RADIOS,
     FEATURE_DHCP_LEASES,
@@ -122,6 +123,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         )
         self.api = api
         self._features_detected = False
+        self._board_poll_count = 0
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator interface
@@ -147,8 +149,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 await self._detect_features(data)
 
             # --- Static router info (model, hostname) ---
-            # Fetched every cycle to detect hostname changes; lightweight call
-            data.router_info = await self.api.get_router_info()
+            # Fetched on first cycle and every BOARD_REFRESH_CYCLES thereafter.
+            # Hostname changes are rare; this avoids a wasted call every 30 s.
+            self._board_poll_count += 1
+            if self._board_poll_count == 1 or self._board_poll_count % BOARD_REFRESH_CYCLES == 0:
+                data.router_info = await self.api.get_router_info()
+            else:
+                data.router_info = self.data.router_info if self.data else {}
 
             # --- Dynamic system status ---
             status = await self.api.get_router_status()
