@@ -15,7 +15,15 @@ if DST.exists():
 shutil.copytree(SRC, DST)
 print("Sync done. Starting Home Assistant on http://localhost:8123 ...")
 
-venv_hass = ROOT / "venv" / "Scripts" / "hass"
+# Support both Linux (bin/) and Windows (Scripts/) venv layouts
+venv_hass = ROOT / "venv" / "bin" / "hass"
+if not venv_hass.exists():
+    venv_hass = ROOT / "venv" / "Scripts" / "hass"
+
+if not venv_hass.exists():
+    print("ERROR: hass not found in venv. Run: venv/bin/pip install homeassistant")
+    sys.exit(1)
+
 result = subprocess.run(
     [str(venv_hass), "--config", str(ROOT / "ha_config"), "-v"],
     cwd=str(ROOT),

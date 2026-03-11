@@ -9,6 +9,7 @@ from typing import Any
 import aiohttp
 
 from .const import (
+    CLIENT_KEY_HOSTNAME,
     CLIENT_KEY_IP,
     CLIENT_KEY_MAC,
     CLIENT_KEY_RADIO,
@@ -16,6 +17,7 @@ from .const import (
     CLIENT_KEY_SSID,
     DEFAULT_SESSION_ID,
     DEFAULT_TIMEOUT,
+    DHCP_LEASES_PATH,
     GUEST_SSID_KEYWORDS,
     RADIO_BAND_24GHZ_KEYWORDS,
     RADIO_BAND_5GHZ_KEYWORDS,
@@ -27,6 +29,8 @@ from .const import (
     RADIO_KEY_NAME,
     RADIO_KEY_SSID,
     RADIO_KEY_UCI_SECTION,
+    UBUS_FILE_OBJECT,
+    UBUS_FILE_READ,
     UBUS_IWINFO_ASSOCLIST,
     UBUS_IWINFO_INFO,
     UBUS_IWINFO_OBJECT,
@@ -327,7 +331,8 @@ class OpenWrtAPI:
                     clients.append(
                         {
                             CLIENT_KEY_MAC: assoc.get("mac", "").upper(),
-                            CLIENT_KEY_IP: "",  # IP resolved via network dump if needed
+                            CLIENT_KEY_IP: "",
+                            CLIENT_KEY_HOSTNAME: "",
                             CLIENT_KEY_SIGNAL: assoc.get("signal", 0),
                             CLIENT_KEY_SSID: radio.get(RADIO_KEY_SSID, ""),
                             CLIENT_KEY_RADIO: ifname,
@@ -397,6 +402,43 @@ class OpenWrtAPI:
             )
             return False
 
+    async def get_dhcp_leases(self) -> dict[str, dict[str, str]]:
+        """Return a MAC → {ip, hostname} mapping from the DHCP lease table.
+
+        Reads /tmp/dhcp.leases via the rpcd file module (requires
+        rpcd-mod-file on the router, available by default on most
+        OpenWrt installations).
+
+        The dnsmasq lease file format is one entry per line::
+
+            <expiry-timestamp> <mac> <ip> <hostname> <client-id>
+
+        Example line::
+
+            1741600000 b8:27:eb:aa:bb:cc 192.168.1.100 raspberrypi *
+
+        Returns:
+            dict mapping uppercase MAC to {"ip": str, "hostname": str}.
+            Returns empty dict if the file is unavailable or unreadable.
+        """
+        try:
+            result = await self._call(
+                UBUS_FILE_OBJECT,
+                UBUS_FILE_READ,
+                {"path": DHCP_LEASES_PATH},
+            )
+        except OpenWrtMethodNotFoundError:
+            _LOGGER.debug(
+                "rpcd file module not available – DHCP lease enrichment disabled"
+            )
+            return {}
+        except OpenWrtResponseError as err:
+            _LOGGER.debug("Could not read DHCP leases: %s", err)
+            return {}
+
+        raw: str = result.get("data", "")
+        return self._parse_dhcp_leases(raw)
+
     async def get_uci_wireless(self) -> dict[str, Any]:
         """Fetch the full UCI wireless configuration.
 
@@ -434,6 +476,7 @@ class OpenWrtAPI:
             "ssids": [],
             "uci_available": False,
             "network_reload": False,
+            "dhcp_leases": False,
         }
 
         # Check iwinfo availability
@@ -461,6 +504,18 @@ class OpenWrtAPI:
             features["network_reload"] = True  # assume available; fail gracefully at runtime
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
             pass
+
+        # Check DHCP lease file availability via rpcd file module
+        try:
+            result = await self._call(
+                UBUS_FILE_OBJECT,
+                UBUS_FILE_READ,
+                {"path": DHCP_LEASES_PATH},
+            )
+            features["dhcp_leases"] = bool(result.get("data") is not None)
+            _LOGGER.debug("Feature detected: DHCP lease file readable")
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+            _LOGGER.debug("Feature not available: DHCP lease file (rpcd-mod-file missing?)")
 
         # Detect radios and bands via wifi status
         try:
@@ -774,33 +829,66 @@ class OpenWrtAPI:
     async def _enrich_clients_with_ip(
         self, clients: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Attempt to add IP addresses to client records from the network dump.
+        """Add IP address and hostname to client records from DHCP leases.
 
-        Falls back gracefully if the network dump is not available.
+        Reads the DHCP lease table once and applies MAC→IP and MAC→hostname
+        mappings to the client list in-place.  Falls back gracefully if
+        the lease file is unavailable (e.g. rpcd-mod-file not installed).
+
+        Args:
+            clients: List of client dicts (modified in-place).
+
+        Returns:
+            The same client list with ip / hostname fields filled where known.
         """
-        try:
-            dump = await self._call(UBUS_NETWORK_OBJECT, UBUS_NETWORK_DUMP, {})
-        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+        leases = await self.get_dhcp_leases()
+        if not leases:
             return clients
 
-        # Build MAC → IP mapping from interface lease data
-        mac_to_ip: dict[str, str] = {}
-        for iface in dump.get("interface", []):
-            for host in iface.get("ipv4-address", []):
-                # ipv4-address entries don't always have MAC; skip
-                pass
-            # Lease info may be in route or other subkeys depending on version
-            # This is a best-effort enrichment
-            for route in iface.get("route", []):
-                # Not reliable for client MAC→IP; skip
-                pass
-
-        # Apply enrichment (currently a stub – full DHCP lease parsing
-        # requires reading /tmp/dhcp.leases or a separate ubus call)
-        # TODO: parse DHCP leases via ubus network.interface or file read
         for client in clients:
-            mac = client.get(CLIENT_KEY_MAC, "")
-            if mac in mac_to_ip:
-                client[CLIENT_KEY_IP] = mac_to_ip[mac]
+            mac = client.get(CLIENT_KEY_MAC, "").upper()
+            lease = leases.get(mac)
+            if not lease:
+                continue
+            if lease.get("ip"):
+                client[CLIENT_KEY_IP] = lease["ip"]
+            if lease.get("hostname"):
+                client[CLIENT_KEY_HOSTNAME] = lease["hostname"]
 
         return clients
+
+    # ------------------------------------------------------------------
+    # Parsing helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_dhcp_leases(raw: str) -> dict[str, dict[str, str]]:
+        """Parse a dnsmasq-format lease file into a MAC → lease dict.
+
+        Each non-empty line has the form::
+
+            <expiry> <mac> <ip> <hostname> <client-id>
+
+        Hostnames reported as '*' (unknown) are stored as empty string.
+
+        Args:
+            raw: Raw file content as a single string.
+
+        Returns:
+            dict mapping uppercase MAC to {"ip": str, "hostname": str}.
+        """
+        leases: dict[str, dict[str, str]] = {}
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 4:
+                _LOGGER.debug("Skipping malformed DHCP lease line: %r", line)
+                continue
+            # fields: expiry mac ip hostname [client-id]
+            mac = parts[1].upper()
+            ip = parts[2]
+            hostname = parts[3] if parts[3] != "*" else ""
+            leases[mac] = {"ip": ip, "hostname": hostname}
+        return leases

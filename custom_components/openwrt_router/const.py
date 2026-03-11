@@ -59,6 +59,11 @@ UBUS_UCI_COMMIT = "commit"
 UBUS_NETWORK_RELOAD = "network"
 UBUS_NETWORK_RELOAD_METHOD = "reload"
 
+# rpcd file module (for reading /tmp/dhcp.leases)
+UBUS_FILE_OBJECT = "file"
+UBUS_FILE_READ = "read"
+DHCP_LEASES_PATH = "/tmp/dhcp.leases"
+
 # Known WAN interface names (OpenWrt conventions across versions)
 WAN_INTERFACE_NAMES = ("wan", "wan6", "pppoe-wan", "wwan")
 
@@ -79,6 +84,7 @@ FEATURE_AVAILABLE_RADIOS = "available_radios"
 FEATURE_SSIDS = "ssids"
 FEATURE_UCI_AVAILABLE = "uci_available"
 FEATURE_NETWORK_RELOAD = "network_reload"
+FEATURE_DHCP_LEASES = "dhcp_leases"
 
 # Entity unique ID suffixes
 SUFFIX_UPTIME = "uptime"
@@ -154,3 +160,6 @@ ERROR_TIMEOUT = "timeout"
 # TODO: per-client online time - add CLIENT_KEY_CONNECTED_SINCE
 # TODO: parental control - add UBUS_PARENTAL_OBJECT
 # TODO: link quality metrics - add CLIENT_KEY_SIGNAL_QUALITY, CLIENT_KEY_NOISE
+
+# DHCP lease data key (coordinator)
+KEY_DHCP_LEASES = "dhcp_leases"
