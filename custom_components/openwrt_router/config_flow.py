@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import re
 from typing import Any
 
 import aiohttp
@@ -25,11 +27,41 @@ from .const import (
     DOMAIN,
     ERROR_CANNOT_CONNECT,
     ERROR_INVALID_AUTH,
+    ERROR_INVALID_HOST,
     ERROR_TIMEOUT,
     ERROR_UNKNOWN,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _validate_host(host: str) -> str | None:
+    """Validate host input against SSRF-prone values.
+
+    Rejects loopback, link-local, and unspecified IP addresses, as well as
+    hostnames containing characters outside the allowed set.
+
+    Args:
+        host: Raw host string from user input.
+
+    Returns:
+        An error key string if the host is invalid, or None if it is acceptable.
+    """
+    host = host.strip()
+    if not host:
+        return ERROR_INVALID_HOST
+    # Try to parse as an IP address first
+    try:
+        addr = ipaddress.ip_address(host)
+        if addr.is_loopback or addr.is_link_local or addr.is_unspecified:
+            return ERROR_INVALID_HOST
+        return None  # valid routable IP
+    except ValueError:
+        pass
+    # Validate as a hostname: only alphanumerics, dots, hyphens, underscores
+    if not re.match(r'^[a-zA-Z0-9._\-]{1,253}$', host):
+        return ERROR_INVALID_HOST
+    return None
 
 
 class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -67,59 +99,63 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             username: str = user_input[CONF_USERNAME].strip()
             password: str = user_input[CONF_PASSWORD]  # never logged
 
-            try:
-                board_info = await self._validate_input(host, port, username, password)
-
-            except OpenWrtAuthError:
-                _LOGGER.debug("Config flow: authentication failed for %s", host)
-                errors["base"] = ERROR_INVALID_AUTH
-
-            except OpenWrtTimeoutError:
-                _LOGGER.debug("Config flow: timeout connecting to %s", host)
-                errors["base"] = ERROR_TIMEOUT
-
-            except OpenWrtConnectionError:
-                _LOGGER.debug("Config flow: cannot connect to %s", host)
-                errors["base"] = ERROR_CANNOT_CONNECT
-
-            except OpenWrtResponseError:
-                _LOGGER.debug("Config flow: unexpected response from %s", host)
-                errors["base"] = ERROR_CANNOT_CONNECT
-
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Config flow: unexpected error for %s", host)
-                errors["base"] = ERROR_UNKNOWN
-
+            host_error = _validate_host(host)
+            if host_error:
+                errors["host"] = host_error
             else:
-                # Build a unique_id from the router MAC address.
-                # Fall back to host:port if MAC is unavailable.
-                mac: str = board_info.get("mac", "").replace(":", "").lower()
-                unique_id = mac if mac else f"{host}_{port}"
+                try:
+                    board_info = await self._validate_input(host, port, username, password)
 
-                await self.async_set_unique_id(unique_id)
-                self._abort_if_unique_id_configured(
-                    updates={
-                        CONF_HOST: host,
-                        CONF_PORT: port,
-                    }
-                )
+                except OpenWrtAuthError:
+                    _LOGGER.debug("Config flow: authentication failed for %s", host)
+                    errors["base"] = ERROR_INVALID_AUTH
 
-                title = board_info.get("hostname") or host
-                _LOGGER.info(
-                    "Config flow: successfully connected to %s (model: %s)",
-                    title,
-                    board_info.get("model", "unknown"),
-                )
+                except OpenWrtTimeoutError:
+                    _LOGGER.debug("Config flow: timeout connecting to %s", host)
+                    errors["base"] = ERROR_TIMEOUT
 
-                return self.async_create_entry(
-                    title=title,
-                    data={
-                        CONF_HOST: host,
-                        CONF_PORT: port,
-                        CONF_USERNAME: username,
-                        CONF_PASSWORD: password,
-                    },
-                )
+                except OpenWrtConnectionError:
+                    _LOGGER.debug("Config flow: cannot connect to %s", host)
+                    errors["base"] = ERROR_CANNOT_CONNECT
+
+                except OpenWrtResponseError:
+                    _LOGGER.debug("Config flow: unexpected response from %s", host)
+                    errors["base"] = ERROR_CANNOT_CONNECT
+
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("Config flow: unexpected error for %s", host)
+                    errors["base"] = ERROR_UNKNOWN
+
+                else:
+                    # Build a unique_id from the router MAC address.
+                    # Fall back to host:port if MAC is unavailable.
+                    mac: str = board_info.get("mac", "").replace(":", "").lower()
+                    unique_id = mac if mac else f"{host}_{port}"
+
+                    await self.async_set_unique_id(unique_id)
+                    self._abort_if_unique_id_configured(
+                        updates={
+                            CONF_HOST: host,
+                            CONF_PORT: port,
+                        }
+                    )
+
+                    title = board_info.get("hostname") or host
+                    _LOGGER.info(
+                        "Config flow: successfully connected to %s (model: %s)",
+                        title,
+                        board_info.get("model", "unknown"),
+                    )
+
+                    return self.async_create_entry(
+                        title=title,
+                        data={
+                            CONF_HOST: host,
+                            CONF_PORT: port,
+                            CONF_USERNAME: username,
+                            CONF_PASSWORD: password,
+                        },
+                    )
 
         # Build the user form schema, pre-filling defaults where sensible
         schema = self._build_user_schema(user_input)

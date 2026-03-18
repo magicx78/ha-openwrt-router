@@ -55,6 +55,12 @@ async def async_get_config_entry_diagnostics(
     coordinator_data: dict[str, Any] = {}
     if coordinator.data:
         coordinator_data = _redact(coordinator.data.as_dict())
+        # DHCP leases are personally identifiable (MAC → IP → hostname for every
+        # LAN client).  Replace the full list with a count so the diagnostics
+        # export remains useful for troubleshooting without leaking PII.
+        if "dhcp_leases" in coordinator_data:
+            lease_count = len(coordinator.data.dhcp_leases)
+            coordinator_data["dhcp_leases"] = f"<{lease_count} leases redacted>"
 
     diagnostics: dict[str, Any] = {
         "integration": DOMAIN,
