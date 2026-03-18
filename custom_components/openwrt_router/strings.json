@@ -28,6 +28,7 @@
     "error": {
       "cannot_connect": "Unable to connect to the router. Check the host and port and ensure the router is reachable.",
       "invalid_auth": "Authentication failed. Check the username and password.",
+      "invalid_host": "Invalid host address. Use a valid IP or hostname.",
       "timeout": "Connection timed out. The router may be unreachable or overloaded.",
       "unknown": "An unexpected error occurred. Check the Home Assistant logs for details."
     },
@@ -69,20 +70,7 @@
         "name": "Firmware Version"
       }
     },
-    "switch": {
-      "wifi_24ghz": {
-        "name": "WiFi 2.4 GHz"
-      },
-      "wifi_5ghz": {
-        "name": "WiFi 5 GHz"
-      },
-      "wifi_6ghz": {
-        "name": "WiFi 6 GHz"
-      },
-      "guest_wifi": {
-        "name": "Guest WiFi"
-      }
-    },
+    "switch": {},
     "button": {
       "reload_wifi": {
         "name": "Reload WiFi"

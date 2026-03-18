@@ -161,6 +161,7 @@ ERROR_CANNOT_CONNECT = "cannot_connect"
 ERROR_INVALID_AUTH = "invalid_auth"
 ERROR_UNKNOWN = "unknown"
 ERROR_TIMEOUT = "timeout"
+ERROR_INVALID_HOST = "invalid_host"
 
 # TODO: per-client online time - add CLIENT_KEY_CONNECTED_SINCE
 # TODO: parental control - add UBUS_PARENTAL_OBJECT

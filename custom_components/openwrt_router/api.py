@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 from typing import Any
 
@@ -123,8 +124,16 @@ class OpenWrtAPI:
         self._username = username
         self._password = password  # never logged
         self._session = session
-        self._timeout = aiohttp.ClientTimeout(total=timeout)
-        self._ubus_url = f"http://{host}:{port}/ubus"
+        # M-1: granular timeouts — short connect budget, full timeout for reads
+        self._timeout = aiohttp.ClientTimeout(
+            total=timeout,
+            connect=min(5, timeout),
+            sock_connect=min(5, timeout),
+            sock_read=timeout,
+        )
+        # L-2: IPv6-safe URL — bare IPv6 addresses require square brackets
+        host_str = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        self._ubus_url = f"http://{host_str}:{port}/ubus"
         self._rpc_id = 0
 
         # Session token – refreshed on login / expiry
@@ -134,6 +143,12 @@ class OpenWrtAPI:
         # Set on first get_wifi_status() call and reused to avoid retrying
         # known-unavailable APIs on every poll cycle.
         self._wifi_method: str | None = None
+
+        # L-1: track consecutive login failures to suppress log spam
+        self._login_failure_count: int = 0
+
+        # M-4: warn once when using the root account
+        self._root_warning_logged: bool = False
 
     # ------------------------------------------------------------------
     # Public auth API
@@ -152,6 +167,14 @@ class OpenWrtAPI:
         """
         _LOGGER.debug("Logging in to %s as %s", self._ubus_url, self._username)
 
+        # M-4: warn once if using the privileged root account
+        if self._username == "root" and not self._root_warning_logged:
+            _LOGGER.warning(
+                "OpenWrt Router: Using 'root' as rpcd user grants full router access. "
+                "Consider creating a dedicated restricted rpcd user for better security."
+            )
+            self._root_warning_logged = True
+
         payload = self._build_call(
             UBUS_SESSION_OBJECT_LOGIN,
             UBUS_SESSION_METHOD_LOGIN,
@@ -162,14 +185,27 @@ class OpenWrtAPI:
         try:
             result = await self._raw_call(payload)
         except OpenWrtResponseError as err:
+            # L-1: count failures; suppress repeated ERROR spam after threshold
+            self._login_failure_count += 1
+            if self._login_failure_count >= 5:
+                _LOGGER.warning(
+                    "OpenWrt Router at %s appears persistently unreachable "
+                    "(login failed %d times). Will keep retrying silently.",
+                    self._ubus_url,
+                    self._login_failure_count,
+                )
             raise OpenWrtAuthError(f"Login failed: {err}") from err
 
         token = (result or {}).get("ubus_rpc_session")
         if not token or token == DEFAULT_SESSION_ID:
+            # L-1: also count invalid-token responses as failures
+            self._login_failure_count += 1
             raise OpenWrtAuthError(
                 "Router returned an invalid session token – check credentials."
             )
 
+        # L-1: successful login resets the failure counter
+        self._login_failure_count = 0
         self._token = token
         _LOGGER.debug("Login successful, session established")
         return True
@@ -283,19 +319,34 @@ class OpenWrtAPI:
     async def get_wifi_status(self) -> list[dict[str, Any]]:
         """Return a list of WiFi radio / SSID descriptors.
 
-        Tries wireless.status first (OpenWrt 21+); falls back to
-        iwinfo.info per interface if not available.
+        Tries network.wireless/status first (OpenWrt 21+), then iwinfo/info,
+        then falls back to UCI wireless config.
 
         Returns:
             List of radio dicts with keys defined by RADIO_KEY_* constants.
         """
         # Fast path: use cached method from previous call
+        if self._wifi_method == "uci":
+            try:
+                values = await self.get_uci_wireless()
+                if values:
+                    return self._parse_uci_wireless(values)
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                self._wifi_method = None
         if self._wifi_method == "none":
             return []
         if self._wifi_method == "wireless":
             try:
                 result = await self._call(UBUS_WIRELESS_OBJECT, UBUS_WIRELESS_STATUS, {})
-                return self._parse_wireless_status(result)
+                parsed = self._parse_wireless_status(result)
+                if parsed:
+                    return parsed
+                # Empty result means no real radios detected via this method –
+                # fall through to re-probe with iwinfo / UCI
+                _LOGGER.debug(
+                    "network.wireless/status returned empty result, re-probing"
+                )
+                self._wifi_method = None
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                 # Method disappeared (e.g. firmware update) – re-probe
                 self._wifi_method = None
@@ -306,24 +357,45 @@ class OpenWrtAPI:
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                 self._wifi_method = None
 
-        # First call or cache invalidated – probe both methods
+        # First call or cache invalidated – probe all three methods in order
         try:
             result = await self._call(UBUS_WIRELESS_OBJECT, UBUS_WIRELESS_STATUS, {})
-            self._wifi_method = "wireless"
-            _LOGGER.debug("WiFi method: network.wireless/status")
-            return self._parse_wireless_status(result)
+            parsed = self._parse_wireless_status(result)
+            if parsed:
+                self._wifi_method = "wireless"
+                _LOGGER.debug("WiFi method: network.wireless/status")
+                return parsed
+            _LOGGER.debug(
+                "network.wireless/status returned empty result, falling back to iwinfo"
+            )
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
             _LOGGER.debug("network.wireless/status not available, falling back to iwinfo")
 
         try:
             result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
-            self._wifi_method = "iwinfo"
-            _LOGGER.debug("WiFi method: iwinfo/info")
-            return self._parse_iwinfo_info(result)
+            parsed = self._parse_iwinfo_info(result)
+            if parsed:
+                self._wifi_method = "iwinfo"
+                _LOGGER.debug("WiFi method: iwinfo/info")
+                return parsed
+            _LOGGER.debug("iwinfo/info returned empty result, falling back to UCI")
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-            self._wifi_method = "none"
-            _LOGGER.debug("Neither network.wireless nor iwinfo is available on this router")
-            return []
+            _LOGGER.debug("iwinfo/info not available, falling back to UCI")
+
+        try:
+            values = await self.get_uci_wireless()
+            if values:
+                self._wifi_method = "uci"
+                _LOGGER.debug("WiFi method: UCI wireless config")
+                return self._parse_uci_wireless(values)
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+            _LOGGER.debug("UCI wireless config not available")
+
+        self._wifi_method = "none"
+        _LOGGER.debug(
+            "No WiFi API available on this router (tried wireless, iwinfo, UCI)"
+        )
+        return []
 
     async def get_connected_clients(
         self,
@@ -740,8 +812,11 @@ class OpenWrtAPI:
         # Decode JSON-RPC envelope
         rpc_result = data.get("result")
         if not isinstance(rpc_result, (list, tuple)) or len(rpc_result) < 1:
+            # H-3: never include raw response data in error strings — it may
+            # contain session tokens or other secrets.
             raise OpenWrtResponseError(
-                f"Malformed ubus response for {ubus_object}/{method}: {data}"
+                f"Malformed ubus response for {ubus_object}/{method} "
+                f"(keys: {list(data.keys()) if isinstance(data, dict) else type(data).__name__})"
             )
 
         status_code: int = rpc_result[0]
@@ -839,6 +914,68 @@ class OpenWrtAPI:
             )
 
         return radios
+
+    def _parse_uci_wireless(
+        self, values: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Parse UCI wireless config into a normalised radio list.
+
+        The UCI wireless config contains both wifi-device sections (physical
+        radios) and wifi-iface sections (virtual SSIDs).  Each wifi-iface is
+        mapped to its parent wifi-device via the 'device' field.
+
+        Args:
+            values: The 'values' dict from a ``uci get wireless`` response,
+                    keyed by section name.
+
+        Returns:
+            List of radio dicts ordered by UCI section index, with keys
+            defined by RADIO_KEY_* constants.
+        """
+        # First pass: collect wifi-device metadata keyed by device name
+        devices: dict[str, dict[str, Any]] = {}
+        for section_name, section_data in values.items():
+            if not isinstance(section_data, dict):
+                continue
+            if section_data.get(".type") == "wifi-device":
+                devices[section_name] = section_data
+
+        # Second pass: build a radio entry for each wifi-iface
+        radios: list[tuple[int, dict[str, Any]]] = []
+        for section_name, section_data in values.items():
+            if not isinstance(section_data, dict):
+                continue
+            if section_data.get(".type") != "wifi-iface":
+                continue
+
+            device_name: str = section_data.get("device", "")
+            ssid: str = section_data.get("ssid", "")
+            disabled_str: str = str(section_data.get("disabled", "0"))
+            enabled: bool = disabled_str == "0"
+
+            device_data = devices.get(device_name, {})
+            band: str = self._detect_band(device_name, device_data)
+
+            # Preserve UCI section ordering for stable entity creation
+            index: int = section_data.get(".index", 0)
+
+            radios.append(
+                (
+                    index,
+                    {
+                        RADIO_KEY_NAME: device_name,
+                        RADIO_KEY_IFNAME: section_name,
+                        RADIO_KEY_SSID: ssid,
+                        RADIO_KEY_BAND: band,
+                        RADIO_KEY_ENABLED: enabled,
+                        RADIO_KEY_IS_GUEST: self._is_guest_ssid(ssid),
+                        RADIO_KEY_UCI_SECTION: section_name,
+                    },
+                )
+            )
+
+        radios.sort(key=lambda t: t[0])
+        return [r for _, r in radios]
 
     def _detect_band(self, identifier: str, data: dict[str, Any]) -> str:
         """Heuristically determine the WiFi band from identifier and data.
@@ -948,6 +1085,16 @@ class OpenWrtAPI:
             # fields: expiry mac ip hostname [client-id]
             mac = parts[1].upper()
             ip = parts[2]
-            hostname = parts[3] if parts[3] != "*" else ""
+            # L-3: validate IP address to reject garbage / injection attempts
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                _LOGGER.debug(
+                    "Skipping DHCP lease line with invalid IP: %r", line
+                )
+                continue
+            # L-3: cap hostname to RFC 1035 maximum (253 chars)
+            raw_hostname = parts[3] if parts[3] != "*" else ""
+            hostname = raw_hostname[:253] if raw_hostname else ""
             leases[mac] = {"ip": ip, "hostname": hostname}
         return leases
