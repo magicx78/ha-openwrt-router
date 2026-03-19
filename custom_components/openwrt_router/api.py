@@ -302,14 +302,21 @@ class OpenWrtAPI:
                 ipv4_list = iface.get("ipv4-address", [])
                 ipv4 = ipv4_list[0].get("address", "") if ipv4_list else ""
                 stats: dict[str, Any] = iface.get("statistics", {})
+                rx_bytes = stats.get("rx_bytes") or None
+                tx_bytes = stats.get("tx_bytes") or None
+                if not rx_bytes or not tx_bytes:
+                    _LOGGER.debug(
+                        "Interface %s: statistics not available (rx=%s, tx=%s)",
+                        iface_name, rx_bytes, tx_bytes
+                    )
                 return {
                     "connected": iface.get("up", False),
                     "interface": iface.get("interface", ""),
                     "ipv4": ipv4,
                     "uptime": iface.get("uptime", 0),
                     "proto": iface.get("proto", ""),
-                    "rx_bytes": stats.get("rx_bytes", 0),
-                    "tx_bytes": stats.get("tx_bytes", 0),
+                    "rx_bytes": rx_bytes,
+                    "tx_bytes": tx_bytes,
                 }
 
         # No WAN interface found – treat as disconnected
