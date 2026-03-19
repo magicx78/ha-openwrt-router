@@ -79,7 +79,7 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
     Control is sent via api.set_wifi_state(uci_section, enabled).
     """
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
     _attr_device_class = SwitchDeviceClass.SWITCH
 
     def __init__(
