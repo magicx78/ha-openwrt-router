@@ -161,7 +161,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfInformation.BYTES,
         icon="mdi:download-network",
-        value_fn=lambda data: data.wan_status.get("rx_bytes", 0),
+        value_fn=lambda data: data.wan_status.get("rx_bytes") or None,
     ),
     OpenWrtSensorEntityDescription(
         key=SUFFIX_WAN_TX,
@@ -170,7 +170,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfInformation.BYTES,
         icon="mdi:upload-network",
-        value_fn=lambda data: data.wan_status.get("tx_bytes", 0),
+        value_fn=lambda data: data.wan_status.get("tx_bytes") or None,
     ),
     OpenWrtSensorEntityDescription(
         key=SUFFIX_FIRMWARE,
