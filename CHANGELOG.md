@@ -2,6 +2,17 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.0.3] - 2026-03-19
+
+### Fixed
+- **WAN RX/TX Bytes Now Show Actual Data**: Fixed issue where WAN Download/Upload sensors showed "unavailable"
+  - Changed from reading `network.interface/dump` to directly reading `/sys/class/net/{interface}/statistics/`
+  - Uses kernel filesystem as source of truth for interface statistics
+  - Works on routers like Cudy WR3000 where stats may not be included in network interface dump
+  - Example: Now shows actual 93.9 GB RX / 1.9 GB TX instead of unavailable
+
+---
+
 ## [1.0.2] - 2026-03-19
 
 ### Fixed
