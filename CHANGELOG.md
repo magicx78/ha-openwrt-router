@@ -2,6 +2,15 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.0.2] - 2026-03-19
+
+### Fixed
+- **WAN Statistics Handling**: Show "unavailable" instead of "0 B" when router doesn't provide WAN statistics
+  - WAN Download and WAN Upload sensors now properly display unavailable state
+  - Added debug logging to identify routers without statistics support
+
+---
+
 ## [1.0.1] - 2026-03-19
 
 ### Fixed
