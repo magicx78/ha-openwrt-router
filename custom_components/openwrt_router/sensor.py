@@ -225,7 +225,7 @@ class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
     """
 
     entity_description: OpenWrtSensorEntityDescription
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(
         self,
