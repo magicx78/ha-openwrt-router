@@ -278,10 +278,10 @@ class OpenWrtAPI:
         }
 
     async def get_wan_status(self) -> dict[str, Any]:
-        """Return WAN interface connection status.
+        """Return WAN interface connection status + RX/TX bytes from /sys/class/net.
 
-        Iterates network.interface dump and selects the first interface
-        whose name matches WAN_INTERFACE_NAMES.
+        Uses network.interface/dump for basic status (up, ip, uptime) but reads
+        RX/TX bytes from /sys/class/net/{iface}/statistics/ files (kernel source).
 
         Returns:
             {
@@ -289,35 +289,71 @@ class OpenWrtAPI:
                 "interface": str,
                 "ipv4": str,
                 "uptime": int,
+                "rx_bytes": int or None,
+                "tx_bytes": int or None,
             }
         """
+        # Get basic network status
         result = await self._call(UBUS_NETWORK_OBJECT, UBUS_NETWORK_DUMP, {})
         interfaces: list[dict[str, Any]] = result.get("interface", [])
 
+        # Find WAN interface (try both name matching and highest traffic)
+        wan_iface = None
         for iface in interfaces:
             iface_name: str = iface.get("interface", "").lower()
             if iface_name in WAN_INTERFACE_NAMES or any(
                 iface_name.startswith(w) for w in WAN_INTERFACE_NAMES
             ):
-                ipv4_list = iface.get("ipv4-address", [])
-                ipv4 = ipv4_list[0].get("address", "") if ipv4_list else ""
-                stats: dict[str, Any] = iface.get("statistics", {})
-                rx_bytes = stats.get("rx_bytes") or None
-                tx_bytes = stats.get("tx_bytes") or None
-                if not rx_bytes or not tx_bytes:
-                    _LOGGER.debug(
-                        "Interface %s: statistics not available (rx=%s, tx=%s)",
-                        iface_name, rx_bytes, tx_bytes
-                    )
-                return {
-                    "connected": iface.get("up", False),
-                    "interface": iface.get("interface", ""),
-                    "ipv4": ipv4,
-                    "uptime": iface.get("uptime", 0),
-                    "proto": iface.get("proto", ""),
-                    "rx_bytes": rx_bytes,
-                    "tx_bytes": tx_bytes,
-                }
+                wan_iface = iface
+                break
+
+        if not wan_iface and interfaces:
+            # Fallback: use first interface that's marked as up
+            wan_iface = next((i for i in interfaces if i.get("up")), interfaces[0])
+
+        if not wan_iface:
+            return {
+                "connected": False,
+                "interface": "",
+                "ipv4": "",
+                "uptime": 0,
+                "rx_bytes": None,
+                "tx_bytes": None,
+            }
+
+        # Extract basic info
+        ipv4_list = wan_iface.get("ipv4-address", [])
+        ipv4 = ipv4_list[0].get("address", "") if ipv4_list else ""
+        iface_name = wan_iface.get("interface", "").lower()
+
+        # Try to read RX/TX bytes from /sys/class/net/{iface}/statistics/
+        rx_bytes = None
+        tx_bytes = None
+
+        try:
+            rx_path = f"/sys/class/net/{iface_name}/statistics/rx_bytes"
+            tx_path = f"/sys/class/net/{iface_name}/statistics/tx_bytes"
+
+            rx_result = await self._call("file", "read", {"path": rx_path})
+            tx_result = await self._call("file", "read", {"path": tx_path})
+
+            if rx_result:
+                rx_bytes = int(rx_result.strip()) if isinstance(rx_result, str) else None
+            if tx_result:
+                tx_bytes = int(tx_result.strip()) if isinstance(tx_result, str) else None
+        except Exception:
+            # Silently fail – stats not available on this router
+            pass
+
+        return {
+            "connected": wan_iface.get("up", False),
+            "interface": wan_iface.get("interface", ""),
+            "ipv4": ipv4,
+            "uptime": wan_iface.get("uptime", 0),
+            "proto": wan_iface.get("proto", ""),
+            "rx_bytes": rx_bytes,
+            "tx_bytes": tx_bytes,
+        }
 
         # No WAN interface found – treat as disconnected
         _LOGGER.debug("No WAN interface found in network dump")
