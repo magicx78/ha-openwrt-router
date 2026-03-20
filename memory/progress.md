@@ -1,6 +1,6 @@
 # Progress — ha-openwrt-router
 
-## Letzter Stand: 2026-03-20 (v1.0.6 abgeschlossen)
+## Letzter Stand: 2026-03-20 (v1.0.7 abgeschlossen — SSL/HTTPS Ready für HACS PR)
 
 ---
 
@@ -82,6 +82,7 @@
 
 | Version | Date | Feature / Fix |
 |---------|------|-------|
+| **1.0.7** | 2026-03-20 | **SSL/HTTPS**: Secure connections, config flow with protocol dropdown |
 | **1.0.6** | 2026-03-20 | **Sensor Visibility**: Alle Sensoren sichtbar unter "Sensoren", nicht unter "Diagnose" |
 | **1.0.5** | 2026-03-20 | **UX Enhancement**: WiFi Switches zeigen Band-Info + Client-Count |
 | **1.0.4** | 2026-03-19 | Sensor Display Names: Zeigen jetzt echte Namen statt Device-Hostname |
