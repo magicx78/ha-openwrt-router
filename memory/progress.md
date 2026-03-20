@@ -1,6 +1,6 @@
 # Progress — ha-openwrt-router
 
-## Letzter Stand: 2026-03-20 (v1.0.5 abgeschlossen)
+## Letzter Stand: 2026-03-20 (v1.0.6 abgeschlossen)
 
 ---
 
@@ -65,12 +65,24 @@
   - `_count_clients_for_ssid()`: Zählt Clients für SSID
 - Commit: 82e4395, GitHub Release v1.0.5 erstellt
 
+### ✅ TASK-08: Sensor Visibility Verbesserung
+**Status:** DONE — v1.0.6 abgeschlossen
+- Problem: Sensoren waren unter "Diagnose" versteckt, nicht sichtbar in "Sensoren"
+- Lösung: `entity_category=EntityCategory.DIAGNOSTIC` entfernt
+  - Uptime: jetzt sichtbar ✅
+  - Memory Free: jetzt sichtbar ✅
+  - WAN IP: jetzt sichtbar ✅
+  - Firmware: jetzt sichtbar ✅
+- Result: Alle Sensoren erscheinen in Home Assistant Sensors Tab
+- Commit: 4a3efb7, GitHub Release v1.0.6 erstellt
+
 ---
 
 ## Version-Releases
 
 | Version | Date | Feature / Fix |
 |---------|------|-------|
+| **1.0.6** | 2026-03-20 | **Sensor Visibility**: Alle Sensoren sichtbar unter "Sensoren", nicht unter "Diagnose" |
 | **1.0.5** | 2026-03-20 | **UX Enhancement**: WiFi Switches zeigen Band-Info + Client-Count |
 | **1.0.4** | 2026-03-19 | Sensor Display Names: Zeigen jetzt echte Namen statt Device-Hostname |
 | **1.0.3** | 2026-03-19 | WAN RX/TX Bytes: Jetzt aus `/sys/class/net/` Kernel FS statt leerer API Response |
