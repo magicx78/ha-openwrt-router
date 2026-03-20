@@ -35,6 +35,7 @@ from .const import (
     KEY_FEATURES,
     KEY_MEMORY,
     KEY_ROUTER_INFO,
+    KEY_UPDATES_AVAILABLE,
     KEY_UPTIME,
     KEY_WAN_CONNECTED,
     KEY_WAN_STATUS,
@@ -62,6 +63,7 @@ class OpenWrtCoordinatorData:
         clients: List of currently associated WiFi clients (ip/hostname enriched).
         client_count: Number of connected clients.
         dhcp_leases: MAC → {ip, hostname} mapping from the DHCP lease table.
+        updates_available: Update status and list of available packages.
         features: Feature detection map (populated on first refresh).
     """
 
@@ -77,6 +79,7 @@ class OpenWrtCoordinatorData:
         self.clients: list[dict[str, Any]] = []
         self.client_count: int = 0
         self.dhcp_leases: dict[str, dict[str, str]] = {}
+        self.updates_available: dict[str, Any] = {"available": False, "system": [], "addons": []}
         self.features: dict[str, Any] = {}
 
     def as_dict(self) -> dict[str, Any]:
@@ -92,6 +95,7 @@ class OpenWrtCoordinatorData:
             KEY_CLIENTS: self.clients,
             KEY_CLIENT_COUNT: self.client_count,
             KEY_DHCP_LEASES: self.dhcp_leases,
+            KEY_UPDATES_AVAILABLE: self.updates_available,
             KEY_FEATURES: self.features,
         }
 

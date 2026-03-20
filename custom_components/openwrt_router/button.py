@@ -19,7 +19,13 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import OpenWrtConfigEntry
 from .api import OpenWrtAPI
-from .const import DOMAIN, SUFFIX_RELOAD_WIFI
+from .const import (
+    DOMAIN,
+    SUFFIX_RELOAD_WIFI,
+    SUFFIX_CHECK_UPDATES,
+    SUFFIX_PERFORM_UPDATES,
+    KEY_UPDATES_AVAILABLE,
+)
 from .coordinator import OpenWrtCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,6 +43,20 @@ BUTTON_DESCRIPTIONS: tuple[OpenWrtButtonEntityDescription, ...] = (
         device_class=ButtonDeviceClass.RESTART,
         entity_category=EntityCategory.CONFIG,
         icon="mdi:wifi-sync",
+    ),
+    OpenWrtButtonEntityDescription(
+        key=SUFFIX_CHECK_UPDATES,
+        translation_key="check_updates",
+        device_class=ButtonDeviceClass.UPDATE,
+        entity_category=EntityCategory.CONFIG,
+        icon="mdi:package-search",
+    ),
+    OpenWrtButtonEntityDescription(
+        key=SUFFIX_PERFORM_UPDATES,
+        translation_key="perform_updates",
+        device_class=ButtonDeviceClass.UPDATE,
+        entity_category=EntityCategory.CONFIG,
+        icon="mdi:package-up",
     ),
 )
 
@@ -121,15 +141,29 @@ class OpenWrtButtonEntity(ButtonEntity):
     async def async_press(self) -> None:
         """Handle a button press.
 
-        Sends the reload command to the router, then requests a coordinator
-        refresh so that entity states reflect the post-reload configuration.
+        Routes to the appropriate action based on button type:
+        - reload_wifi: Reload WiFi configuration
+        - check_updates: Check for available package updates
+        - perform_updates: Trigger package updates
         """
+        button_key = self.entity_description.key
         _LOGGER.debug(
-            "Button pressed: %s – reloading WiFi on %s",
-            self.entity_description.key,
+            "Button pressed: %s on %s",
+            button_key,
             self._entry.data.get("host"),
         )
 
+        if button_key == SUFFIX_RELOAD_WIFI:
+            await self._press_reload_wifi()
+        elif button_key == SUFFIX_CHECK_UPDATES:
+            await self._press_check_updates()
+        elif button_key == SUFFIX_PERFORM_UPDATES:
+            await self._press_perform_updates()
+        else:
+            _LOGGER.warning("Unknown button key: %s", button_key)
+
+    async def _press_reload_wifi(self) -> None:
+        """Handle reload WiFi button press."""
         success = await self._api.reload_wifi()
         if success:
             _LOGGER.info(
@@ -144,3 +178,68 @@ class OpenWrtButtonEntity(ButtonEntity):
 
         # Refresh coordinator data after reload (config may have changed)
         await self._coordinator.async_request_refresh()
+
+    async def _press_check_updates(self) -> None:
+        """Handle check for updates button press."""
+        _LOGGER.info("Checking for available updates on %s", self._entry.data.get("host"))
+
+        try:
+            updates = await self._api.get_available_updates()
+            # Store the result in coordinator data so sensors can display it
+            self._coordinator.data.updates_available = updates
+            await self._coordinator.async_request_refresh()
+
+            update_count = len(updates.get("system", [])) + len(updates.get("addons", []))
+            if update_count > 0:
+                _LOGGER.info(
+                    "Found %d available updates on %s: %d system, %d addons",
+                    update_count,
+                    self._entry.data.get("host"),
+                    len(updates.get("system", [])),
+                    len(updates.get("addons", [])),
+                )
+            else:
+                _LOGGER.info(
+                    "No updates available on %s", self._entry.data.get("host")
+                )
+        except Exception as err:
+            _LOGGER.error(
+                "Error checking for updates on %s: %s",
+                self._entry.data.get("host"),
+                err,
+            )
+
+    async def _press_perform_updates(self) -> None:
+        """Handle perform updates button press.
+
+        Note: This button should ideally be paired with a service selector
+        to choose between 'system', 'addons', or 'both' updates.
+        For now, we perform 'both' by default.
+        """
+        update_type = "both"  # TODO: Allow user to select via service call
+        _LOGGER.info(
+            "Initiating %s package updates on %s",
+            update_type,
+            self._entry.data.get("host"),
+        )
+
+        try:
+            result = await self._api.perform_update(update_type=update_type)
+            if result.get("status") == "initiated":
+                _LOGGER.info(
+                    "Update initiated on %s: %s",
+                    self._entry.data.get("host"),
+                    result.get("message"),
+                )
+            else:
+                _LOGGER.error(
+                    "Update failed on %s: %s",
+                    self._entry.data.get("host"),
+                    result.get("message"),
+                )
+        except Exception as err:
+            _LOGGER.error(
+                "Error performing updates on %s: %s",
+                self._entry.data.get("host"),
+                err,
+            )

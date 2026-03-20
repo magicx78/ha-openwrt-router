@@ -42,10 +42,13 @@ from .const import (
     SUFFIX_MEMORY_FREE,
     SUFFIX_MEMORY_USAGE,
     SUFFIX_UPTIME,
+    SUFFIX_UPDATE_STATUS,
+    SUFFIX_UPDATES_AVAILABLE,
     SUFFIX_WAN_IP,
     SUFFIX_WAN_RX,
     SUFFIX_WAN_STATUS,
     SUFFIX_WAN_TX,
+    KEY_UPDATES_AVAILABLE,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
 
@@ -181,6 +184,30 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
             "distribution": data.router_info.get("release", {}).get("distribution", ""),
             "kernel": data.router_info.get("kernel", ""),
             "board": data.router_info.get("board_name", ""),
+        },
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_UPDATE_STATUS,
+        translation_key="update_status",
+        icon="mdi:package-search",
+        value_fn=lambda data: (
+            "available"
+            if data.updates_available.get("available")
+            else "current"
+        ),
+        extra_attrs_fn=lambda data: {
+            "system_updates_count": len(
+                data.updates_available.get("system", [])
+            ),
+            "addon_updates_count": len(
+                data.updates_available.get("addons", [])
+            ),
+            "system_packages": [
+                p.get("name") for p in data.updates_available.get("system", [])
+            ],
+            "addon_packages": [
+                p.get("name") for p in data.updates_available.get("addons", [])
+            ],
         },
     ),
 )

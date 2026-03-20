@@ -68,12 +68,21 @@
       },
       "firmware": {
         "name": "Firmware Version"
+      },
+      "update_status": {
+        "name": "Update Status"
       }
     },
     "switch": {},
     "button": {
       "reload_wifi": {
         "name": "Reload WiFi"
+      },
+      "check_updates": {
+        "name": "Check for Updates"
+      },
+      "perform_updates": {
+        "name": "Perform Updates"
       }
     }
   }

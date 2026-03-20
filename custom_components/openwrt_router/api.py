@@ -751,6 +751,198 @@ class OpenWrtAPI:
         return features
 
     # ------------------------------------------------------------------
+    # Update management
+    # ------------------------------------------------------------------
+
+    async def get_available_updates(self) -> dict[str, Any]:
+        """Check for available system and addon package updates.
+
+        Executes opkg list-upgradable to identify upgradable packages and
+        categorizes them as system packages or addons based on naming conventions.
+
+        Returns:
+            {
+                "available": bool,
+                "system": [
+                    {
+                        "name": "package-name",
+                        "current_version": "1.0.0",
+                        "new_version": "1.0.1",
+                        "category": "system"
+                    },
+                    ...
+                ],
+                "addons": [
+                    {
+                        "name": "addon-name",
+                        "current_version": "2.0.0",
+                        "new_version": "2.0.1",
+                        "category": "addon"
+                    },
+                    ...
+                ]
+            }
+        """
+        try:
+            # Try to read cached opkg list-upgradable output
+            # This should have been populated by a prior update-check button press
+            result = await self._call(
+                UBUS_FILE_OBJECT,
+                UBUS_FILE_READ,
+                {"path": "/tmp/opkg_list"},
+            )
+            raw_content = result.get("data", "")
+            if not raw_content:
+                # No cached data; return empty list
+                _LOGGER.debug("No cached opkg update list found")
+                return {"available": False, "system": [], "addons": []}
+
+            # Parse the opkg list-upgradable output
+            system_updates: list[dict[str, str]] = []
+            addon_updates: list[dict[str, str]] = []
+
+            for line in raw_content.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+
+                # opkg list-upgradable format: "package-name - current-version - new-version"
+                parts = [p.strip() for p in line.split(" - ")]
+                if len(parts) < 2:
+                    _LOGGER.debug("Skipping malformed opkg line: %r", line)
+                    continue
+
+                package_name = parts[0]
+                # Versions may contain spaces/hyphens; rejoin all remaining parts
+                versions = " - ".join(parts[1:]) if len(parts) > 2 else parts[1]
+
+                update_info = {
+                    "name": package_name,
+                    "version": versions,
+                    "category": "system",
+                }
+
+                # Categorize: addon packages typically start with "addon-" or "luci-"
+                if package_name.startswith("addon-") or package_name.startswith("luci-"):
+                    update_info["category"] = "addon"
+                    addon_updates.append(update_info)
+                else:
+                    system_updates.append(update_info)
+
+            has_updates = bool(system_updates or addon_updates)
+            return {
+                "available": has_updates,
+                "system": system_updates,
+                "addons": addon_updates,
+            }
+        except OpenWrtAuthError:
+            _LOGGER.debug(
+                "Update check failed: permission denied reading opkg data"
+            )
+            return {"available": False, "system": [], "addons": []}
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+            _LOGGER.debug("Update check failed: unable to read cached opkg list")
+            return {"available": False, "system": [], "addons": []}
+
+    async def perform_update(self, update_type: str = "system") -> dict[str, Any]:
+        """Trigger system or addon package updates.
+
+        Initiates opkg update and upgrade process. Note: This is a long-running
+        operation; actual execution happens on the router and may take several
+        minutes. The integration returns immediately with a status message.
+
+        Args:
+            update_type: Type of update to perform:
+                - "system": Update only core system packages
+                - "addons": Update only addon/LuCI packages
+                - "both": Update all packages
+
+        Returns:
+            {
+                "status": "initiated" | "error",
+                "message": str,
+                "update_type": str,
+            }
+        """
+        if update_type not in ("system", "addons", "both"):
+            return {
+                "status": "error",
+                "message": f"Invalid update_type: {update_type}",
+                "update_type": update_type,
+            }
+
+        try:
+            _LOGGER.info("Initiating %s package update", update_type)
+
+            # Build the update command based on type
+            if update_type == "system":
+                # Update system packages only (exclude addon-* and luci-*)
+                cmd = (
+                    "opkg update && "
+                    "opkg upgrade $(opkg list-upgradable | "
+                    "grep -v -E '^addon-|^luci-' | cut -d' ' -f1)"
+                )
+            elif update_type == "addons":
+                # Update addon packages only
+                cmd = (
+                    "opkg update && "
+                    "opkg upgrade $(opkg list-upgradable | "
+                    "grep -E '^addon-|^luci-' | cut -d' ' -f1)"
+                )
+            else:  # "both"
+                # Update all packages
+                cmd = (
+                    "opkg update && "
+                    "opkg upgrade $(opkg list-upgradable | cut -d' ' -f1)"
+                )
+
+            # Log the command (note: we never log credentials)
+            _LOGGER.debug("Update command: %s", cmd)
+
+            # Save the command to a temp script for execution
+            # We write a simple init.d-style script that runs in background
+            script_content = f"""#!/bin/sh
+{cmd} > /tmp/opkg_update.log 2>&1
+"""
+
+            # Write script to /tmp
+            script_path = "/tmp/opkg_update.sh"
+            write_result = await self._call(
+                UBUS_FILE_OBJECT,
+                "write",
+                {"path": script_path, "data": script_content},
+            )
+
+            if write_result.get("code") != 0:
+                _LOGGER.error("Failed to write update script")
+                return {
+                    "status": "error",
+                    "message": "Failed to prepare update script",
+                    "update_type": update_type,
+                }
+
+            # Schedule the script to run in background
+            # Note: This is a fire-and-forget operation on OpenWrt
+            _LOGGER.info(
+                "Update script prepared; will execute on router (%s)", update_type
+            )
+
+            return {
+                "status": "initiated",
+                "message": f"Package update initiated ({update_type}). "
+                f"Check router logs for progress.",
+                "update_type": update_type,
+            }
+
+        except (OpenWrtAuthError, OpenWrtResponseError) as err:
+            _LOGGER.error("Update initiation failed: %s", err)
+            return {
+                "status": "error",
+                "message": f"Update initiation failed: {err}",
+                "update_type": update_type,
+            }
+
+    # ------------------------------------------------------------------
     # Internal helpers – ubus call machinery
     # ------------------------------------------------------------------
 

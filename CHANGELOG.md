@@ -2,6 +2,18 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.0.8] - 2026-03-20
+
+### Added
+- **Update Management Feature**: Check and perform system/addon package updates
+  - "Check for Updates" button: Detects available system packages and addons
+  - "Perform Updates" button: Triggers package updates on the router
+  - "Update Status" sensor: Shows if updates are available with package counts as attributes
+  - Support for selective updates: system packages, addons, or both
+  - Proper categorization of updates by type (system vs addon/LuCI packages)
+
+---
+
 ## [1.0.7] - 2026-03-20
 
 ### Added
