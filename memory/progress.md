@@ -1,6 +1,6 @@
 # Progress — ha-openwrt-router
 
-## Letzter Stand: 2026-03-20 (v1.0.7 abgeschlossen — SSL/HTTPS Ready für HACS PR)
+## Letzter Stand: 2026-03-20 (v1.0.8 abgeschlossen — Update Management Feature Ready)
 
 ---
 
@@ -76,12 +76,56 @@
 - Result: Alle Sensoren erscheinen in Home Assistant Sensors Tab
 - Commit: 4a3efb7, GitHub Release v1.0.6 erstellt
 
+### ✅ TASK-09: SSL/HTTPS Support
+**Status:** DONE — v1.0.7 abgeschlossen
+- Feature: Sichere HTTPS-Verbindungen zu OpenWrt Routern
+  - Config Flow mit Protocol Dropdown: HTTP, HTTPS, HTTPS Self-Signed
+  - Automatische Port-Anpassung (80 für HTTP, 443 für HTTPS)
+  - Self-signed Certificate Support für private/Lab-Netzwerke
+  - Proper SSL Context mit Certificate Validation für Production
+  - Token-Übertragung geschützt wenn HTTPS aktiviert
+- `api.py`: SSL Context Handling und HTTPS URL-Konstruktion
+- `config_flow.py`: Multi-Step Protocol-Auswahl
+- Commit: Vollständig implementiert, GitHub Release v1.0.7 erstellt
+
+### ✅ TASK-10: Update Management Feature
+**Status:** DONE — v1.0.8 abgeschlossen ✨
+- Feature: Komplett System/Addon Package Update Management
+- **[UPDATE-01] api.py**: Core Update API
+  - `get_available_updates()`: Scannt verfügbare System- und Addon-Pakete
+  - `perform_update(update_type)`: Triggert Updates (system/addons/both)
+  - Automatische Kategorisierung nach Package-Namen
+- **[UPDATE-02] const.py**: Update-Konstanten
+  - SUFFIX_UPDATE_STATUS, SUFFIX_UPDATES_AVAILABLE
+  - SUFFIX_CHECK_UPDATES, SUFFIX_PERFORM_UPDATES
+  - KEY_UPDATES_AVAILABLE für Coordinator
+- **[UPDATE-03] button.py**: Benutzer-Buttons
+  - "Check for Updates" Button: Scannt für verfügbare Pakete
+  - "Perform Updates" Button: Startet Update-Prozess
+  - Proper Logging und Error Handling
+- **[UPDATE-04] sensor.py**: Update Status Display
+  - "Update Status" Sensor: zeigt "available" oder "current"
+  - Attributes: system_updates_count, addon_updates_count
+  - Package-Listen für detaillierte Inspektion
+- **[UPDATE-05] coordinator.py**: Daten-Management
+  - updates_available Field zu OpenWrtCoordinatorData
+  - Initialisiert mit leerer Update-Liste
+  - Wird über Polls weitergeleitet
+- **[UPDATE-06] strings.json**: UI Übersetzungen
+  - Button Namen und Beschreibungen
+  - Sensor Namen und Labels
+- **[UPDATE-07] manifest.json**: Version zu 1.0.8
+- **[UPDATE-08] CHANGELOG.md**: Release Notes
+- Commit: 8358bd5, GitHub Tag v1.0.8 erstellt
+- Status: **Bereit für HACS Default Store PR**
+
 ---
 
 ## Version-Releases
 
 | Version | Date | Feature / Fix |
-|---------|------|-------|
+|---------|------|----------|
+| **1.0.8** | 2026-03-20 | **Update Management**: Check and perform system/addon package updates |
 | **1.0.7** | 2026-03-20 | **SSL/HTTPS**: Secure connections, config flow with protocol dropdown |
 | **1.0.6** | 2026-03-20 | **Sensor Visibility**: Alle Sensoren sichtbar unter "Sensoren", nicht unter "Diagnose" |
 | **1.0.5** | 2026-03-20 | **UX Enhancement**: WiFi Switches zeigen Band-Info + Client-Count |
@@ -93,20 +137,28 @@
 
 ---
 
+## HACS Status
+
+- [x] `hacs.json` vorhanden
+- [x] `custom_components/openwrt_router/` korrekte Struktur
+- [x] `README.md` vorhanden
+- [x] `brand/icon.png` vorhanden (256×256px)
+- [x] GitHub Tags für alle Releases erstellt (v1.0.0-v1.0.8)
+- [x] CHANGELOG.md vollständig dokumentiert
+- [x] manifest.json mit `issue_tracker` Key
+- [x] v1.0.8 Implementation: Update Management Feature
+- ⏳ **Nächster Schritt:** GitHub Release v1.0.8 erstellen (manuell via Web oder mit gh CLI)
+- ⏳ **Dann:** HACS Default Store PR einreichen
+
+---
+
 ## Bekannte Probleme — GELÖST ✅
 
 1. ❌ **Sensor "Device Hostname" statt echte Namen** → ✅ GELÖST v1.0.4
-   - Ursache: `_attr_has_entity_name = True` in sensor.py
-   - Fix: Geändert zu False, Entity Registry gelöscht
-
 2. ❌ **WAN Download/Upload "Unavailable"** → ✅ GELÖST v1.0.3
-   - Ursache: API antwortet leer auf `network.interface/dump` → statistics Feld fehlte
-   - Fix: Read direkt aus `/sys/class/net/wan/statistics/`
-   - Beweise: LuCI Screenshot zeigte Daten existieren (93,9 GB RX / 1,9 GB TX)
-
 3. ❌ **WiFi Switch Namen zeigen Device-Hostname** → ✅ GELÖST v1.0.1
-   - Ursache: `_attr_has_entity_name = True` in switch.py
-   - Fix: Geändert zu False, alte Entries gelöscht
+4. ❌ **Keine Secure HTTPS Connection möglich** → ✅ GELÖST v1.0.7
+5. ❌ **Keine Update-Management Features** → ✅ GELÖST v1.0.8
 
 ---
 
@@ -117,16 +169,18 @@
 - [ ] DHCP Lease Enrichment (Client-IPs in Device Tracker)
 - [ ] Per-Client Online-Zeit
 - [ ] Link Quality Metriken (Signal/Noise)
-- [ ] HTTPS Support
 - [ ] Parental Control API
 
 ---
 
 ## Next Steps
 
-Projekt ist aktuell **STABLE** auf v1.0.4:
-- ✅ Alle Sensor/Switch Namen korrekt
-- ✅ WAN RX/TX zeigen echte Daten
-- ✅ Entity Registry sauber
-- ✅ Tests bestanden
-- ⏳ **Nächste Aktion:** Auf User-Anfrage warten oder Features aus Todo-Liste implementieren
+Projekt ist aktuell **STABLE** auf v1.0.8:
+- ✅ Update Management Feature vollständig implementiert
+- ✅ Alle Komponenten getestet und validiert
+- ✅ Commit durchgeführt, Tag erstellt
+- ⏳ **Nächste Aktion:**
+  1. GitHub Release v1.0.8 erstellen
+  2. HACS Default Store PR einreichen
+  3. Auf User-Feedback oder neue Feature-Requests warten
+
