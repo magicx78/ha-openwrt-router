@@ -141,14 +141,16 @@
 
 - [x] `hacs.json` vorhanden
 - [x] `custom_components/openwrt_router/` korrekte Struktur
-- [x] `README.md` vorhanden
+- [x] `README.md` vorhanden und aktualisiert mit v1.0.8
 - [x] `brand/icon.png` vorhanden (256×256px)
 - [x] GitHub Tags für alle Releases erstellt (v1.0.0-v1.0.8)
 - [x] CHANGELOG.md vollständig dokumentiert
-- [x] manifest.json mit `issue_tracker` Key
+- [x] manifest.json mit `issue_tracker` Key und v1.0.8
 - [x] v1.0.8 Implementation: Update Management Feature
-- ⏳ **Nächster Schritt:** GitHub Release v1.0.8 erstellen (manuell via Web oder mit gh CLI)
-- ⏳ **Dann:** HACS Default Store PR einreichen
+- [x] GitHub Release v1.0.8 erstellt
+- [x] HACS Default Store PR #6421 eingereicht
+- [x] Dokumentation aktualisiert (README.md, HACS_REGISTRATION.md)
+- ⏳ **Nächster Schritt:** Auf HACS Maintainer Review warten (typisch 1-7 Tage)
 
 ---
 
@@ -175,12 +177,16 @@
 
 ## Next Steps
 
-Projekt ist aktuell **STABLE** auf v1.0.8:
+Projekt ist aktuell **IN REVIEW** auf v1.0.8:
 - ✅ Update Management Feature vollständig implementiert
 - ✅ Alle Komponenten getestet und validiert
-- ✅ Commit durchgeführt, Tag erstellt
-- ⏳ **Nächste Aktion:**
-  1. GitHub Release v1.0.8 erstellen
-  2. HACS Default Store PR einreichen
-  3. Auf User-Feedback oder neue Feature-Requests warten
+- ✅ Code committed, Releases getaggt
+- ✅ GitHub Release v1.0.8 publiziert
+- ✅ HACS Default Store PR #6421 eingereicht
+- ✅ Dokumentation komplett aktualisiert (README, HACS_REGISTRATION)
+
+**Aktuell warten auf:**
+1. ⏳ HACS Maintainer Review (PR #6421) — typisch 1-7 Tage
+2. Sobald genehmigt → Nutzer können direkt über Default Store installieren
+3. Community-Feedback und Feature-Requests über GitHub Issues
 
