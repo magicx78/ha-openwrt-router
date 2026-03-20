@@ -2,6 +2,27 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.0.5] - 2026-03-20
+
+### Changed
+- **WiFi Switch Display Enhanced**: Switches now show band information and connected client count
+  - Switch names now display: "secure-IoT (2.4 GHz)" instead of just "secure-IoT"
+  - Band information (2.4 GHz, 5 GHz, 6 GHz) automatically appended
+  - Connected client count visible in switch attributes: "connected_clients"
+  - Better UX for managing multiple WiFi networks
+
+---
+
+## [1.0.4] - 2026-03-19
+
+### Fixed
+- **Sensor Display Names**: Sensors now show their actual names instead of device hostname
+  - Changed `_attr_has_entity_name` from True to False in sensor.py
+  - Sensors now display: "WAN Status", "CPU Load", "Memory Usage", "Connected Clients" etc.
+  - Previously all sensors showed "sECUREaP-gATEWAy" (the device name)
+
+---
+
 ## [1.0.3] - 2026-03-19
 
 ### Fixed
