@@ -112,8 +112,10 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
         uid_key = self._uci_section or self._ifname
         self._attr_unique_id = f"{entry.entry_id}_wifi_ssid_{uid_key}"
 
-        # Entity name = SSID
-        self._attr_name = self._ssid
+        # Entity name = SSID (Band)
+        # Format: "secure-IoT (2.4 GHz)" or "Guest-WLAN (5 GHz)"
+        band_display = self._format_band(self._band)
+        self._attr_name = f"{self._ssid} ({band_display})" if band_display else self._ssid
 
         # Icon: star for guest networks
         self._attr_icon = "mdi:wifi-star" if self._is_guest else "mdi:wifi"
@@ -149,16 +151,22 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return additional attributes (ssid, band, ifname, uci_section)."""
+        """Return additional attributes (ssid, band, ifname, uci_section, client_count)."""
         radio = self._get_current_radio()
         if radio is None:
             return {}
+
+        # Count clients connected to this SSID
+        ssid = radio.get(RADIO_KEY_SSID, "")
+        client_count = self._count_clients_for_ssid(ssid) if ssid else 0
+
         return {
-            "ssid": radio.get(RADIO_KEY_SSID, ""),
+            "ssid": ssid,
             "band": radio.get(RADIO_KEY_BAND, ""),
             "ifname": radio.get(RADIO_KEY_IFNAME, ""),
             "uci_section": radio.get(RADIO_KEY_UCI_SECTION, ""),
             "is_guest": radio.get(RADIO_KEY_IS_GUEST, False),
+            "connected_clients": client_count,
         }
 
     async def async_turn_on(self, **kwargs: Any) -> None:
@@ -205,3 +213,36 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
                 return radio
 
         return None
+
+    def _format_band(self, band: str) -> str:
+        """Format band code to human-readable string.
+
+        Args:
+            band: Band code (e.g. "2g", "5g", "6g", "60g").
+
+        Returns:
+            Formatted band string (e.g. "2.4 GHz", "5 GHz") or empty string if unknown.
+        """
+        band_map = {
+            "2g": "2.4 GHz",
+            "5g": "5 GHz",
+            "6g": "6 GHz",
+            "60g": "60 GHz",
+        }
+        return band_map.get(band, "")
+
+    def _count_clients_for_ssid(self, ssid: str) -> int:
+        """Count clients currently connected to this SSID.
+
+        Args:
+            ssid: SSID name to match.
+
+        Returns:
+            Number of connected clients for this SSID.
+        """
+        if not self.coordinator.data or not ssid:
+            return 0
+        return sum(
+            1 for client in self.coordinator.data.clients
+            if client.get("ssid") == ssid
+        )
