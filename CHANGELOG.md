@@ -2,6 +2,18 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.0.7] - 2026-03-20
+
+### Added
+- **SSL/HTTPS Support**: Secure connections to OpenWrt routers
+  - Config Flow with Protocol Dropdown: HTTP, HTTPS, HTTPS Self-Signed
+  - Automatic port adjustment (80 for HTTP, 443 for HTTPS)
+  - Self-signed certificate support for private/lab networks
+  - Proper SSL context with certificate validation for production use
+  - Token transmission now protected over HTTPS when enabled
+
+---
+
 ## [1.0.6] - 2026-03-20
 
 ### Changed

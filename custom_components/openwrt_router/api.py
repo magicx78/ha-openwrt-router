@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import ssl
 from typing import Any
 
 import aiohttp
@@ -16,8 +17,12 @@ from .const import (
     CLIENT_KEY_RADIO,
     CLIENT_KEY_SIGNAL,
     CLIENT_KEY_SSID,
+    DEFAULT_PROTOCOL,
     DEFAULT_SESSION_ID,
     DEFAULT_TIMEOUT,
+    PROTOCOL_HTTP,
+    PROTOCOL_HTTPS,
+    PROTOCOL_HTTPS_INSECURE,
     DHCP_LEASES_PATH,
     GUEST_SSID_KEYWORDS,
     RADIO_BAND_24GHZ_KEYWORDS,
@@ -105,16 +110,18 @@ class OpenWrtAPI:
         password: str,
         session: aiohttp.ClientSession,
         timeout: int = DEFAULT_TIMEOUT,
+        protocol: str = DEFAULT_PROTOCOL,
     ) -> None:
         """Initialise the API client.
 
         Args:
             host: Router hostname or IP address.
-            port: HTTP port (default 80).
+            port: HTTP/HTTPS port (default 80 for HTTP, 443 for HTTPS).
             username: rpcd username (usually 'root').
             password: rpcd password.
             session: Shared aiohttp ClientSession.
             timeout: Request timeout in seconds.
+            protocol: Connection protocol ("http", "https", "https-insecure").
 
         Note:
             The password is stored in memory only and is never logged.
@@ -124,6 +131,7 @@ class OpenWrtAPI:
         self._username = username
         self._password = password  # never logged
         self._session = session
+        self._protocol = protocol
         # M-1: granular timeouts — short connect budget, full timeout for reads
         self._timeout = aiohttp.ClientTimeout(
             total=timeout,
@@ -131,9 +139,13 @@ class OpenWrtAPI:
             sock_connect=min(5, timeout),
             sock_read=timeout,
         )
+        # Build SSL context for HTTPS connections
+        self._ssl_context = self._build_ssl_context()
+
         # L-2: IPv6-safe URL — bare IPv6 addresses require square brackets
         host_str = f"[{host}]" if ":" in host and not host.startswith("[") else host
-        self._ubus_url = f"http://{host_str}:{port}/ubus"
+        scheme = "https" if protocol != PROTOCOL_HTTP else "http"
+        self._ubus_url = f"{scheme}://{host_str}:{port}/ubus"
         self._rpc_id = 0
 
         # Session token – refreshed on login / expiry
@@ -209,6 +221,25 @@ class OpenWrtAPI:
         self._token = token
         _LOGGER.debug("Login successful, session established")
         return True
+
+    def _build_ssl_context(self) -> ssl.SSLContext | None:
+        """Build SSL context for HTTPS connections.
+
+        Returns:
+            SSLContext configured for the selected protocol, or None for HTTP.
+        """
+        if self._protocol == PROTOCOL_HTTP:
+            return None
+
+        # Create SSL context
+        ssl_context = ssl.create_default_context()
+
+        if self._protocol == PROTOCOL_HTTPS_INSECURE:
+            # Allow self-signed certificates
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+        return ssl_context
 
     async def test_connection(self) -> dict[str, Any]:
         """Login and fetch board info; used by config flow to validate setup.
@@ -809,6 +840,7 @@ class OpenWrtAPI:
                 self._ubus_url,
                 json=payload,
                 timeout=self._timeout,
+                ssl=self._ssl_context,
             ) as resp:
                 if resp.status == 403:
                     raise OpenWrtAuthError("HTTP 403 – access denied by router")

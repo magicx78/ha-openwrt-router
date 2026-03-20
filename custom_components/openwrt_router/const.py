@@ -10,7 +10,12 @@ INTEGRATION_NAME = "OpenWrt Router"
 DEFAULT_HOST = ""
 DEFAULT_PORT = 80
 DEFAULT_USERNAME = "root"
-DEFAULT_VERIFY_SSL = False
+DEFAULT_PROTOCOL = "http"
+
+# Protocol options
+PROTOCOL_HTTP = "http"
+PROTOCOL_HTTPS = "https"
+PROTOCOL_HTTPS_INSECURE = "https-insecure"
 
 # HTTP / ubus
 UBUS_PATH = "/ubus"
@@ -30,6 +35,7 @@ CONF_HOST = "host"
 CONF_PORT = "port"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
+CONF_PROTOCOL = "protocol"
 
 # Runtime data keys (stored in coordinator / entry.runtime_data)
 DATA_COORDINATOR = "coordinator"
