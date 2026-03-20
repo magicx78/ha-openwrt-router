@@ -1,147 +1,123 @@
 # HACS Default Store Registrierung
 
-Dieses Projekt ist jetzt bereit für die **HACS Default Store** Registrierung. Das bedeutet, dass Nutzer die Integration direkt über HACS installieren können (ohne Custom Repository).
+Dieses Projekt ist **[IN REVIEW]** für die **HACS Default Store** Registrierung. Die Integration wurde am 2026-03-20 als PR #6421 eingereicht.
 
 ---
 
 ## Status
 
 ✅ **Alles vorbereitet:**
-- `manifest.json` mit korrekter Version (1.0.4)
+- `manifest.json` mit korrekter Version (1.0.8) ← aktualisiert
 - `hacs.json` mit `category: "integration"`
-- 5x GitHub Releases (v1.0.0 - v1.0.4) mit Release-Notes
-- `README.md` vorhanden
-- `CHANGELOG.md` mit allen Versionen
+- 8x GitHub Releases (v1.0.0 - v1.0.8) mit Release-Notes ← vollständig
+- `README.md` vorhanden und aktualisiert mit v1.0.8
+- `CHANGELOG.md` mit allen Versionen dokumentiert
+- `brand/icon.png` vorhanden (256×256px)
 
-❌ **Noch nicht im Default Store** (nächster Schritt)
-
----
-
-## Schritt 1: Manuell (über Web UI)
-
-1. **Gehe zu:** https://github.com/hacs/default
-2. **Fork das Repo** (Button oben rechts)
-3. **Dein Fork öffnen** (github.com/deinusername/default)
-4. **Branch erstellen:** `add-openwrt-router`
-5. **Datei bearbeiten:** `repositories.json`
-
-### repositories.json eintrag hinzufügen (am Ende vor der schließenden `]`):
-
-```json
-{
-  "repository": "magicx78/ha-openwrt-router",
-  "category": "integration",
-  "topics": [
-    "openwrt",
-    "router",
-    "wifi",
-    "wan"
-  ]
-}
-```
-
-6. **Commit & Push**
-7. **Pull Request erstellen** gegen `hacs/default` main branch
+🔄 **PR eingereicht:**
+- PR #6421: https://github.com/hacs/default/pull/6421
+- Status: **Awaiting HACS Maintainer Review** (typisch 1-7 Tage)
+- Sobald genehmigt: Nutzer können direkt über HACS installieren
 
 ---
 
-## Schritt 2: Warten auf Approval
+## Eingereichte PR — Warten auf Approval
 
-**HACS Team** wird prüfen:
+**Pull Request:** https://github.com/hacs/default/pull/6421
+**Status:** ⏳ **Awaiting Review** (eingereicht 2026-03-20)
+
+**HACS Team wird prüfen:**
 - ✅ `manifest.json` ist korrekt
 - ✅ `hacs.json` vorhanden
-- ✅ GitHub Releases existieren
+- ✅ GitHub Releases existieren (v1.0.0-v1.0.8)
 - ✅ Keine Malware/Sicherheitsprobleme
 - ✅ Code-Qualität
+- ✅ Documentation (README, CHANGELOG aktualisiert)
 
-Typische Genehmigung: **1-3 Tage**
+**Typische Genehmigung:** 1-7 Tage
 
----
+## Was passiert nach Approval?
 
-## Danach: Automatische Updates
+Sobald der PR #6421 genehmigt und gemergt wird:
 
-Sobald der PR merged ist:
-1. Nutzer öffnen HACS
-2. Suchen "OpenWrt Router"
-3. Installieren direkt (kein Custom Repository nötig)
-4. Bei neuer Version → HACS zeigt Update-Button automatisch
-
----
-
-## Lokale HACS-Validierung
-
-Um zu testen, dass alles funktioniert:
-
-```bash
-# Teste die Manifest-Datei
-python3 -m json.tool custom_components/openwrt_router/manifest.json
-
-# Teste die HACS-Konfiguration
-python3 -m json.tool hacs.json
-```
-
-Beide sollten **valid JSON** sein (keine Fehler).
+1. Nutzer können die Integration direkt suchen: HACS → Integrations → "OpenWrt Router"
+2. Installation ohne Custom Repository
+3. Updates werden automatisch von HACS verwaltet
+4. Dieser Dokumentations-Eintrag wird archiviert
 
 ---
 
-## Struktur-Anforderungen (alle ✅)
+## Struktur-Anforderungen (alle ✅ erfüllt)
 
 ```
 ha-openwrt-router/
 ├── custom_components/openwrt_router/
-│   ├── __init__.py
-│   ├── manifest.json          ✅ domain, version, requirements
+│   ├── __init__.py                ✅
+│   ├── manifest.json              ✅ v1.0.8, domain, requirements
 │   ├── const.py
-│   ├── api.py
+│   ├── api.py                     ✅ Update Management API
 │   ├── coordinator.py
-│   ├── sensor.py
-│   ├── switch.py
+│   ├── config_flow.py             ✅ SSL/HTTPS Support
+│   ├── sensor.py                  ✅ 11 Sensoren + Update Status
+│   ├── switch.py                  ✅ WiFi + Band Info + Client Count
+│   ├── button.py                  ✅ Reload WiFi + Update Buttons
 │   ├── device_tracker.py
-│   └── ...
-├── README.md                  ✅ vorhanden
-├── CHANGELOG.md               ✅ vorhanden
-├── hacs.json                  ✅ vorhanden
-├── .github/workflows/         ⏸️  optional aber empfohlen
-│   ├── hassfest.yaml         (validiert manifest.json)
-│   └── hacs.yaml             (validiert HACS-Struktur)
-└── brand/
-    └── icon.png              ⏸️  optional, 256×256px
+│   ├── diagnostics.py
+│   ├── strings.json
+│   └── translations/en.json
+├── README.md                       ✅ v1.0.8, aktualisiert
+├── CHANGELOG.md                    ✅ Vollständig dokumentiert
+├── hacs.json                       ✅ category: "integration"
+├── brand/icon.png                  ✅ 256×256px
+├── .github/workflows/
+│   ├── hassfest.yaml              ✅ manifest validation
+│   ├── hacs.yaml                  ✅ HACS validation
+│   └── tests.yaml                 (optional)
+└── tests/                          (optional aber empfohlen)
 
 ```
 
 ---
 
-## Häufige Fehler
+## Version-History für HACS
 
-❌ Version in `manifest.json` stimmt nicht mit Release überein
-✅ **Gelöst:** v1.0.4 in manifest.json
-
-❌ `hacs.json` hat kein `category` Feld
-✅ **Gelöst:** `"category": "integration"` hinzugefügt
-
-❌ GitHub Releases existieren nicht
-✅ **Gelöst:** 5 Releases mit Release-Notes erstellt
+| Version | Release Date | Key Features |
+|---------|---|---|
+| 1.0.8 | 2026-03-20 | **Update Management**: Check & perform package updates |
+| 1.0.7 | 2026-03-20 | **SSL/HTTPS**: Secure connections, self-signed cert support |
+| 1.0.6 | 2026-03-20 | Sensor visibility improvements |
+| 1.0.5 | 2026-03-20 | WiFi switch UX (band info, client count) |
+| 1.0.4 | 2026-03-19 | Sensor display names |
+| 1.0.3 | 2026-03-19 | WAN statistics (kernel fs) |
+| 1.0.1 | 2026-03-19 | Entity naming consistency |
+| 1.0.0 | 2026-03-11 | Initial release |
 
 ---
 
-## Nächste Aktion
+## Lokale Validierung (vor PR submission)
 
-**Nutzer sollte:**
-1. Zu https://github.com/hacs/default gehen
-2. Fork erstellen
-3. Pull Request mit Integration eintrag stellen
-4. Auf Approval warten
+Die Validierung wurde durchgeführt:
 
-**Automated Option:** Falls GitHub CLI verfügbar:
 ```bash
-gh repo fork hacs/default
-git clone gh://deinusername/default
-# ... make changes to repositories.json ...
-gh pr create --repo hacs/default --title "Add OpenWrt Router integration"
+✅ manifest.json — valid JSON, version 1.0.8
+✅ hacs.json — valid JSON, category definiert
+✅ hassfest — no errors
+✅ HACS Action — no warnings
 ```
 
 ---
 
-## Kontakt
+## Roadmap nach Approval
 
-GitHub Issues: https://github.com/magicx78/ha-openwrt-router/issues
+1. **Nutzer sehen Integration im Default Store** (HACS → Integrations → "OpenWrt Router")
+2. **Installation ohne Custom Repository** (nur suchen & installieren)
+3. **Automatische Updates** (wenn neue Version tagged wird)
+4. **Community-Feedback** (über GitHub Issues)
+
+---
+
+## Support & Issues
+
+- **GitHub Issues:** https://github.com/magicx78/ha-openwrt-router/issues
+- **HACS PR:** https://github.com/hacs/default/pull/6421
+- **Community:** Feel free to star ⭐ and fork!
