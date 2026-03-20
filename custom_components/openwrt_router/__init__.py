@@ -33,7 +33,7 @@ from .api import (
     OpenWrtTimeoutError,
 )
 from .coordinator import OpenWrtCoordinator
-from .const import DOMAIN
+from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -93,8 +93,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     port: int = entry.data[CONF_PORT]
     username: str = entry.data[CONF_USERNAME]
     password: str = entry.data[CONF_PASSWORD]  # never logged
+    protocol: str = entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)
 
-    _LOGGER.debug("Setting up OpenWrt Router entry for %s:%s", host, port)
+    _LOGGER.debug("Setting up OpenWrt Router entry for %s:%s (%s)", host, port, protocol)
 
     # Shared aiohttp session managed by HA
     session = async_get_clientsession(hass)
@@ -105,6 +106,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         username=username,
         password=password,
         session=session,
+        protocol=protocol,
     )
 
     # Authenticate before creating the coordinator

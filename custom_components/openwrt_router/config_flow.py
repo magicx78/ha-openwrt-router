@@ -22,7 +22,9 @@ from .api import (
     OpenWrtResponseError,
 )
 from .const import (
+    CONF_PROTOCOL,
     DEFAULT_PORT,
+    DEFAULT_PROTOCOL,
     DEFAULT_USERNAME,
     DOMAIN,
     ERROR_CANNOT_CONNECT,
@@ -30,6 +32,9 @@ from .const import (
     ERROR_INVALID_HOST,
     ERROR_TIMEOUT,
     ERROR_UNKNOWN,
+    PROTOCOL_HTTP,
+    PROTOCOL_HTTPS,
+    PROTOCOL_HTTPS_INSECURE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,13 +73,18 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the config flow for OpenWrt Router.
 
     Steps:
-        user → validate credentials → create entry
+        user → protocol → create entry
 
     The unique_id is set to the router MAC address retrieved during
     validation so that the same physical router cannot be added twice.
     """
 
     VERSION = 1
+
+    def __init__(self) -> None:
+        """Initialize the config flow."""
+        super().__init__()
+        self._board_info: dict[str, Any] = {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -147,15 +157,15 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                         board_info.get("model", "unknown"),
                     )
 
-                    return self.async_create_entry(
-                        title=title,
-                        data={
-                            CONF_HOST: host,
-                            CONF_PORT: port,
-                            CONF_USERNAME: username,
-                            CONF_PASSWORD: password,
-                        },
-                    )
+                    # Store validated info and proceed to protocol selection
+                    self._board_info = board_info
+                    self._user_data = {
+                        CONF_HOST: host,
+                        CONF_PORT: port,
+                        CONF_USERNAME: username,
+                        CONF_PASSWORD: password,
+                    }
+                    return await self.async_step_protocol()
 
         # Build the user form schema, pre-filling defaults where sensible
         schema = self._build_user_schema(user_input)
@@ -164,6 +174,40 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=schema,
             errors=errors,
+        )
+
+    async def async_step_protocol(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle protocol selection (HTTP/HTTPS).
+
+        Args:
+            user_input: Protocol choice from user or None on first render.
+
+        Returns:
+            A ConfigFlowResult that either shows the form or creates the entry.
+        """
+        if user_input is not None:
+            protocol: str = user_input[CONF_PROTOCOL]
+
+            # Create the config entry with protocol selection
+            title = self._board_info.get("hostname") or self._user_data.get(CONF_HOST, "")
+            return self.async_create_entry(
+                title=title,
+                data={
+                    **self._user_data,
+                    CONF_PROTOCOL: protocol,
+                },
+            )
+
+        # Show protocol selection form
+        schema = self._build_protocol_schema()
+        return self.async_show_form(
+            step_id="protocol",
+            data_schema=schema,
+            description_placeholders={
+                "host": self._user_data.get(CONF_HOST, ""),
+            },
         )
 
     async def async_step_reauth(
@@ -293,5 +337,27 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                     default=defaults.get(CONF_USERNAME, DEFAULT_USERNAME),
                 ): str,
                 vol.Required(CONF_PASSWORD): str,
+            }
+        )
+
+    @staticmethod
+    def _build_protocol_schema() -> vol.Schema:
+        """Build the data entry schema for the protocol step.
+
+        Returns:
+            voluptuous Schema with protocol dropdown.
+        """
+        return vol.Schema(
+            {
+                vol.Required(
+                    CONF_PROTOCOL,
+                    default=DEFAULT_PROTOCOL,
+                ): vol.In(
+                    {
+                        PROTOCOL_HTTP: "HTTP (Port 80, unsecure)",
+                        PROTOCOL_HTTPS: "HTTPS (Port 443, verify certificate)",
+                        PROTOCOL_HTTPS_INSECURE: "HTTPS Self-Signed (Port 443, ignore certificate errors)",
+                    }
+                ),
             }
         )
