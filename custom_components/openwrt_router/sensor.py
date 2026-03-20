@@ -74,7 +74,6 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfTime.SECONDS,
-        entity_category=EntityCategory.DIAGNOSTIC,
         icon="mdi:timer-outline",
         value_fn=lambda data: data.uptime,
         extra_attrs_fn=lambda data: {
@@ -143,7 +142,6 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DATA_SIZE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfInformation.MEGABYTES,
-        entity_category=EntityCategory.DIAGNOSTIC,
         icon="mdi:memory",
         value_fn=lambda data: round(data.memory.get("free", 0) / 1024 / 1024, 1),
     ),
@@ -151,7 +149,6 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         key=SUFFIX_WAN_IP,
         translation_key="wan_ip",
         icon="mdi:ip-network",
-        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda data: data.wan_status.get("ipv4") or None,
     ),
     OpenWrtSensorEntityDescription(
@@ -175,7 +172,6 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
     OpenWrtSensorEntityDescription(
         key=SUFFIX_FIRMWARE,
         translation_key="firmware",
-        entity_category=EntityCategory.DIAGNOSTIC,
         icon="mdi:package-up",
         value_fn=lambda data: (
             data.router_info.get("release", {}).get("version", "")

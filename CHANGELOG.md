@@ -2,6 +2,16 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.0.6] - 2026-03-20
+
+### Changed
+- **Sensor Visibility**: Move sensors from "Diagnose" to main "Sensoren" section
+  - Uptime, Memory Free, WAN IP, Firmware now appear in Sensors (not Diagnostics)
+  - Better UX: All important metrics visible without expanding Diagnostics
+  - Devices in Home Assistant now show sub-entities under Sensors
+
+---
+
 ## [1.0.5] - 2026-03-20
 
 ### Changed
