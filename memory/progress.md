@@ -1,6 +1,6 @@
 # Progress — ha-openwrt-router
 
-## Letzter Stand: 2026-03-23 (v1.1.0 abgeschlossen — Extended Monitoring Features Ready) ✨
+## Letzter Stand: 2026-03-23 (v1.1.0 + HOTFIX — WiFi Switches Fixed) ✨
 
 ---
 
@@ -14,6 +14,14 @@
 ---
 
 ## Erledigte Major Tasks
+
+### 🔥 HOTFIX: WiFi Switches Exception Handling (v1.1.0)
+**Status:** FIXED — Exception handling added
+- Problem: WiFi switches (ein/ausschalten) nicht möglich
+- Root Cause: New API methods (disk_space, tmpfs_stats, network_interfaces, active_connections) could throw exceptions without being caught
+- Solution: Wrapped each call in try-except with graceful fallback to empty values
+- Commit: `2fcc13a` fix(coordinator): add exception handling for new monitoring API calls
+- Impact: WiFi switches now work even if monitoring features are unavailable
 
 ### ✅ TASK-001-016: Extended System Monitoring (v1.1.0) — COMPLETE ✨
 **Status:** DONE — Full feature implementation
