@@ -173,7 +173,20 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             else:
                 data.router_info = self.data.router_info if self.data else {}
 
-            # --- Dynamic system status ---
+            # --- Priority 1: WiFi & Core Status (critical for switches) ---
+            # Must run before optional monitoring calls
+            data.wan_status = await self.api.get_wan_status()
+            data.wan_connected = data.wan_status.get("wan_connected", False) or data.wan_status.get("connected", False)
+
+            data.wifi_radios = await self.api.get_wifi_status()
+            data.dhcp_leases = await self.api.get_dhcp_leases()
+            data.clients = await self.api.get_connected_clients(
+                leases=data.dhcp_leases,
+                radios=data.wifi_radios,
+            )
+            data.client_count = len(data.clients)
+
+            # --- Priority 2: Dynamic system status ---
             status = await self.api.get_router_status()
             data.uptime = status.get("uptime", 0)
             data.cpu_load = status.get("cpu_load", 0.0)
@@ -181,7 +194,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             data.cpu_load_15min = status.get("cpu_load_15min", 0.0)
             data.memory = status.get("memory", {})
 
-            # --- Disk & Storage Stats ---
+            # --- Priority 3: Extended Monitoring (optional, graceful fallback) ---
+            # These are non-critical; failures don't affect core functionality
             try:
                 data.disk_space = await self.api.get_disk_space()
             except Exception as err:  # noqa: BLE001
@@ -194,7 +208,6 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 _LOGGER.debug("Error fetching tmpfs stats: %s", err)
                 data.tmpfs = {}
 
-            # --- Network Interface Stats ---
             try:
                 data.network_interfaces = await self.api.get_network_interfaces()
             except Exception as err:  # noqa: BLE001
@@ -206,23 +219,6 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching active connections: %s", err)
                 data.active_connections = 0
-
-            # --- WAN status ---
-            data.wan_status = await self.api.get_wan_status()
-            data.wan_connected = data.wan_status.get("wan_connected", False) or data.wan_status.get("connected", False)
-
-            # --- WiFi radios ---
-            data.wifi_radios = await self.api.get_wifi_status()
-
-            # --- DHCP leases (for IP / hostname enrichment) ---
-            data.dhcp_leases = await self.api.get_dhcp_leases()
-
-            # --- Connected clients (pass radios+leases to avoid redundant API calls) ---
-            data.clients = await self.api.get_connected_clients(
-                leases=data.dhcp_leases,
-                radios=data.wifi_radios,
-            )
-            data.client_count = len(data.clients)
 
             # Carry forward features from the previous cycle.
             # Only applies when detection already ran in a prior cycle –
