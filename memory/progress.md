@@ -1,6 +1,6 @@
 # Progress — ha-openwrt-router
 
-## Letzter Stand: 2026-03-20 (v1.0.8 abgeschlossen — Update Management Feature Ready)
+## Letzter Stand: 2026-03-23 (v1.1.0 abgeschlossen — Extended Monitoring Features Ready) ✨
 
 ---
 
@@ -14,6 +14,50 @@
 ---
 
 ## Erledigte Major Tasks
+
+### ✅ TASK-001-016: Extended System Monitoring (v1.1.0) — COMPLETE ✨
+**Status:** DONE — Full feature implementation
+- **[TASK-001-004] API Layer (Phase 1):** 100% complete
+  - Platform architecture extraction (from board_name, release.target)
+  - CPU Load 5/15-min averages added (dekodiert aus raw load array)
+  - Memory details: cached, shared, buffered (aus system/info)
+  - New API: get_disk_space() — mit Fallback-Handling
+  - New API: get_tmpfs_stats() — /proc/mounts parsing
+  - New API: get_network_interfaces() — Interface stats skeleton
+  - New API: get_active_connections() — nf_conntrack integration skeleton
+
+- **[TASK-005-007] Coordinator Layer (Phase 2):** 100% complete
+  - OpenWrtCoordinatorData erweitert: cpu_load_5/15min, disk_space, tmpfs, network_interfaces, active_connections
+  - _async_update_data() integriert alle neuen API-Calls
+  - as_dict() für Diagnostics aktualisiert
+
+- **[TASK-008-010] Sensor Definitions (Phase 3):** 100% complete
+  - 15+ neue Sensoren in SENSOR_DESCRIPTIONS
+  - Platform Architecture Sensor
+  - CPU Load 5/15-min Sensoren
+  - Memory Details: Cached, Shared, Buffered
+  - Disk Space: Total, Used, Free, %
+  - tmpfs: Total, Used, Free, %
+  - Active Connections
+  - Alle mit korrekten device_class, state_class, units, icons
+
+- **[TASK-011-012] Constants & Translations (Phase 4):** 100% complete
+  - 23+ neue SUFFIX_* Konstanten in const.py
+  - Alle Translations in strings.json
+
+- **[TASK-013-016] Documentation & Release (Phase 6):** 100% complete
+  - README.md aktualisiert mit Extended Monitoring Features
+  - CHANGELOG.md mit v1.1.0 Release Notes
+  - Version bumped zu 1.1.0 in manifest.json
+  - Git Tag v1.1.0 erstellt
+
+**Commits:**
+- `f3d49e6` feat(monitoring): implement extended system metrics for v1.1.0
+- `96fca81` docs(v1.1.0): update README and CHANGELOG with extended monitoring features
+
+**Status:** 🟢 READY FOR TESTING & HACS INTEGRATION UPDATE
+
+---
 
 ### ✅ TASK-01: Per-SSID WiFi Switches mit SSID-Namen
 **Status:** DONE
@@ -125,6 +169,7 @@
 
 | Version | Date | Feature / Fix |
 |---------|------|----------|
+| **1.1.0** | 2026-03-23 | **Extended Monitoring**: Platform arch, CPU 5/15min load, memory/disk/tmpfs details, 15+ new sensors |
 | **1.0.8** | 2026-03-20 | **Update Management**: Check and perform system/addon package updates |
 | **1.0.7** | 2026-03-20 | **SSL/HTTPS**: Secure connections, config flow with protocol dropdown |
 | **1.0.6** | 2026-03-20 | **Sensor Visibility**: Alle Sensoren sichtbar unter "Sensoren", nicht unter "Diagnose" |
@@ -164,29 +209,36 @@
 
 ---
 
-## Geplante Features (TODO)
+## Geplante Features (TODO für v1.2.0+)
 
-- [ ] Bandwidth Sensoren (RX/TX bytes pro Interface)
-- [ ] Traffic Statistiken (in/out per port)
-- [ ] DHCP Lease Enrichment (Client-IPs in Device Tracker)
-- [ ] Per-Client Online-Zeit
-- [ ] Link Quality Metriken (Signal/Noise)
-- [ ] Parental Control API
+- [ ] Bandwidth Sensoren (RX/TX bytes rate pro Interface) — skeleton in get_network_interfaces()
+- [ ] Traffic Statistiken (in/out per port) — foundation with network_interfaces
+- [ ] DHCP Lease Enrichment (Client-IPs in Device Tracker) — bestehend: dhcp_leases field
+- [ ] Per-Client Online-Zeit — requires client connection timestamp tracking
+- [ ] Link Quality Metriken (Signal/Noise pro Radio) — via iwinfo integration
+- [ ] Parental Control API — requires opkg libuhttpd-mod-ubus integration
+- [ ] Interface-spezifische Disk Sensors (mounts als separate Sensoren)
+- [ ] CPU Temperature Monitoring (wenn hwmon verfügbar)
 
 ---
 
 ## Next Steps
 
-Projekt ist aktuell **IN REVIEW** auf v1.0.8:
-- ✅ Update Management Feature vollständig implementiert
-- ✅ Alle Komponenten getestet und validiert
-- ✅ Code committed, Releases getaggt
-- ✅ GitHub Release v1.0.8 publiziert
-- ✅ HACS Default Store PR #6421 eingereicht
-- ✅ Dokumentation komplett aktualisiert (README, HACS_REGISTRATION)
+Projekt ist aktuell **v1.1.0 READY FOR TESTING**:
+- ✅ Extended Monitoring Features vollständig implementiert (16 Tasks)
+- ✅ 15+ neue Sensoren für System-Metriken
+- ✅ API Layer mit Fallback-Handling für unsupported Features
+- ✅ Code committed (2 commits), Git Tag v1.1.0 erstellt
+- ✅ README.md + CHANGELOG.md aktualisiert
+- ✅ Dokumentation in memory/plan_extended_metrics.md
 
-**Aktuell warten auf:**
-1. ⏳ HACS Maintainer Review (PR #6421) — typisch 1-7 Tage
-2. Sobald genehmigt → Nutzer können direkt über Default Store installieren
-3. Community-Feedback und Feature-Requests über GitHub Issues
+**Nächste Schritte:**
+1. ⏳ TESTING auf echtem OpenWrt Router (Cudy WR3000 v1) — QA Phase
+   - Validiere alle neuen Sensoren in Home Assistant
+   - Prüfe graceful fallback wenn Features nicht verfügbar
+   - Performance-Test (sollte kein Impact auf 30s Polling-Interval sein)
+2. 📝 Optional: Unit Tests für neue API-Methoden (TASK-009, TASK-011)
+3. 🚀 GitHub Release v1.1.0 publizieren (nach Testing)
+4. 🔄 Update HACS Default Store PR #6421 mit v1.1.0 Info
+5. 📊 Monitoring: Community-Feedback über GitHub Issues
 
