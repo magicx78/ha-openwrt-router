@@ -182,12 +182,30 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             data.memory = status.get("memory", {})
 
             # --- Disk & Storage Stats ---
-            data.disk_space = await self.api.get_disk_space()
-            data.tmpfs = await self.api.get_tmpfs_stats()
+            try:
+                data.disk_space = await self.api.get_disk_space()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching disk space: %s", err)
+                data.disk_space = {}
+
+            try:
+                data.tmpfs = await self.api.get_tmpfs_stats()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching tmpfs stats: %s", err)
+                data.tmpfs = {}
 
             # --- Network Interface Stats ---
-            data.network_interfaces = await self.api.get_network_interfaces()
-            data.active_connections = await self.api.get_active_connections()
+            try:
+                data.network_interfaces = await self.api.get_network_interfaces()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching network interfaces: %s", err)
+                data.network_interfaces = []
+
+            try:
+                data.active_connections = await self.api.get_active_connections()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching active connections: %s", err)
+                data.active_connections = 0
 
             # --- WAN status ---
             data.wan_status = await self.api.get_wan_status()
