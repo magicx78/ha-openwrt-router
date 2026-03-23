@@ -632,9 +632,10 @@ class OpenWrtAPI:
         return clients
 
     async def set_wifi_state(self, uci_section: str, enabled: bool) -> bool:
-        """Enable or disable a WiFi interface via UCI.
+        """Enable or disable a WiFi interface via UCI or SSH fallback.
 
         Sets uci wireless.<section>.disabled = 0|1 then commits.
+        If ubus UCI is blocked (ACL-restricted router), falls back to SSH script.
 
         Args:
             uci_section: UCI section name (e.g. 'default_radio0').
@@ -653,6 +654,7 @@ class OpenWrtAPI:
             "Setting WiFi section %s %s (disabled=%s)", uci_section, action, disabled_value
         )
 
+        # Try ubus/UCI first
         try:
             # Set UCI value
             await self._call(
@@ -683,10 +685,89 @@ class OpenWrtAPI:
             _LOGGER.warning("UCI method not available on router: %s", err)
             raise
         except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtConnectionError) as err:
+            # Fall back to SSH if ubus is blocked
+            if "access denied" in str(err).lower() or "permission" in str(err).lower():
+                _LOGGER.warning(
+                    "ubus UCI blocked (ACL-restricted), attempting SSH fallback: %s", err
+                )
+                try:
+                    return await self._set_wifi_state_ssh(uci_section, enabled)
+                except Exception as ssh_err:
+                    _LOGGER.error("SSH fallback also failed: %s", ssh_err)
+                    raise OpenWrtResponseError(
+                        f"Failed to {action} WiFi section {uci_section} (ubus blocked, SSH failed): {err}"
+                    ) from err
+
             _LOGGER.error("Failed to %s WiFi section %s: %s", action, uci_section, err)
             raise OpenWrtResponseError(
                 f"Failed to {action} WiFi section {uci_section}: {err}"
             ) from err
+
+    async def _set_wifi_state_ssh(self, uci_section: str, enabled: bool) -> bool:
+        """Enable or disable WiFi interface via SSH script (fallback for ACL-restricted routers).
+
+        Calls /root/ha-wifi-control.sh on the router via SSH.
+
+        Args:
+            uci_section: UCI section name (e.g. 'default_radio0').
+            enabled: True to enable, False to disable.
+
+        Returns:
+            True on success.
+
+        Raises:
+            Exception: If SSH command fails.
+        """
+        action_cmd = "enable-ssid" if enabled else "disable-ssid"
+        action_desc = "enable" if enabled else "disable"
+
+        # Build SSH command using sshpass for password auth
+        ssh_cmd = [
+            "sshpass",
+            "-p",
+            self._password,
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            f"{self._username}@{self._host}",
+            f"/root/ha-wifi-control.sh {action_cmd} {uci_section}",
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+
+            if proc.returncode == 0:
+                output = stdout.decode().strip()
+                _LOGGER.info(
+                    "SSH WiFi control successful: %s (output: %s)",
+                    uci_section,
+                    output,
+                )
+                return True
+            else:
+                error_msg = stderr.decode().strip()
+                _LOGGER.error(
+                    "SSH WiFi control failed for %s: %s", uci_section, error_msg
+                )
+                raise OpenWrtResponseError(
+                    f"SSH {action_desc} failed for {uci_section}: {error_msg}"
+                )
+
+        except asyncio.TimeoutError:
+            _LOGGER.error("SSH command timed out for WiFi section %s", uci_section)
+            raise OpenWrtTimeoutError(f"SSH {action_desc} timed out for {uci_section}")
+        except Exception as err:
+            _LOGGER.error(
+                "SSH command failed for WiFi section %s: %s", uci_section, err
+            )
+            raise
 
     async def reload_wifi(self) -> bool:
         """Reload network / WiFi configuration on the router.
