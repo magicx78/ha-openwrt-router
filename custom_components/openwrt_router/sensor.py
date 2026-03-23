@@ -91,13 +91,11 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
     OpenWrtSensorEntityDescription(
         key=SUFFIX_UPTIME,
         translation_key="uptime",
-        device_class=SensorDeviceClass.DURATION,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTime.SECONDS,
         icon="mdi:timer-outline",
-        value_fn=lambda data: data.uptime,
+        value_fn=lambda data: _format_uptime(data.uptime),
         extra_attrs_fn=lambda data: {
-            "uptime_formatted": _format_uptime(data.uptime),
+            "uptime_seconds": data.uptime,
+            "uptime_raw": str(timedelta(seconds=data.uptime)),
         },
     ),
     OpenWrtSensorEntityDescription(
@@ -109,7 +107,8 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
             "interface": data.wan_status.get("interface", ""),
             "ip_address": data.wan_status.get("ipv4", ""),
             "protocol": data.wan_status.get("proto", ""),
-            "uptime": data.wan_status.get("uptime", 0),
+            "uptime_seconds": data.wan_status.get("uptime", 0),
+            "uptime_formatted": _format_uptime(data.wan_status.get("uptime", 0)),
         },
     ),
     OpenWrtSensorEntityDescription(
