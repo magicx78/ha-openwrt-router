@@ -681,12 +681,15 @@ class OpenWrtAPI:
             _LOGGER.info("WiFi section %s %s successfully", uci_section, action)
             return True
 
-        except OpenWrtMethodNotFoundError as err:
-            _LOGGER.warning("UCI method not available on router: %s", err)
-            raise
-        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtConnectionError) as err:
-            # Fall back to SSH if ubus is blocked
-            if "access denied" in str(err).lower() or "permission" in str(err).lower():
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+            OpenWrtConnectionError,
+        ) as err:
+            # Fall back to SSH if ubus is blocked (any access denied error)
+            err_str = str(err).lower()
+            if "access denied" in err_str or "permission" in err_str:
                 _LOGGER.warning(
                     "ubus UCI blocked (ACL-restricted), attempting SSH fallback: %s", err
                 )
@@ -696,7 +699,7 @@ class OpenWrtAPI:
                     _LOGGER.error("SSH fallback also failed: %s", ssh_err)
                     raise OpenWrtResponseError(
                         f"Failed to {action} WiFi section {uci_section} (ubus blocked, SSH failed): {err}"
-                    ) from err
+                    ) from ssh_err
 
             _LOGGER.error("Failed to %s WiFi section %s: %s", action, uci_section, err)
             raise OpenWrtResponseError(
