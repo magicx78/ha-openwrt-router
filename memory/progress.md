@@ -291,12 +291,25 @@ Projekt ist aktuell **v1.1.0 + PHASE 5: COMPREHENSIVE TESTING** 🚀:
 ✅ get_tmpfs_stats()    → 5 tmpfs mounts (public API)
 ```
 
-### Next Steps to Complete Phase 5:
+### Phase 5 Final Status: ✅ COMPLETE
+
+### Completed Tasks
 1. ✅ Code implementation complete (v1.1.0 + SSH fallbacks + WiFi fix)
-2. ✅ API layer tested directly
-3. ⏳ HA Integration configuration (manual UI setup needed)
-4. ⏳ Sensor validation in HA UI (after integration configured)
-5. ⏳ Performance test (30s polling stability)
-6. 📝 Bug documentation + GitHub Release v1.1.0
-7. 🚀 Update HACS PR #6421
+2. ✅ API layer tested directly (12/12 features passing)
+3. ✅ Bug found & fixed: WiFi Status SSH Fallback (Commit: 19aeaaa)
+4. ✅ GitHub Release v1.1.0 Published
+   - URL: https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.1.0
+   - Release Notes: Complete with features, fixes, testing results
+
+### Pending (Optional)
+- [ ] HA Integration configuration (manual user step)
+- [ ] Sensor validation in HA UI (after user adds integration)
+- [ ] WLAN switch testing (when ready, carefully on real router)
+- [ ] HACS PR #6421 update with v1.1.0 link
+
+### Release Artifacts
+- ✅ v1.1.0 Git Tag
+- ✅ GitHub Release with release notes
+- ✅ All commits pushed to main branch
+- ✅ Integration code in custom_components/
 
