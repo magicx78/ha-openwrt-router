@@ -270,16 +270,33 @@ Projekt ist aktuell **v1.1.0 + PHASE 5: COMPREHENSIVE TESTING** 🚀:
 
 ### Coordinator Multi-Agent Status
 - [1/4] ✅ INFRA-SETUP AGENT: All endpoints verified
-- [2/4] ⏳ DEPLOYMENT AGENT: v1.1.0 to HA Dev Server
-- [3/4] ⏳ FEATURE-TEST AGENT: WiFi/Metrics/WAN/Disk (WLAN tests careful!)
-- [4/4] ⏳ SENSOR-VALIDATOR AGENT: 15+ sensors in HA UI
+- [2/4] ✅ DEPLOYMENT AGENT: v1.1.0 synced to HA Dev Server
+- [3/4] ✅ FEATURE-TEST AGENT: All APIs tested (with SSH fallbacks)
+- [4/4] ⏳ SENSOR-VALIDATOR AGENT: Integration configured in HA
 
-### Next Immediate Steps:
-1. 📦 Deploy v1.1.0 to Home Assistant Dev Server (localhost:8123)
-2. 🧪 Validate all 15+ sensors visible in HA UI
-3. 📊 Verify sensor values, formatting (uptime display, byte units, CPU%)
-4. ⚠️  WLAN tests ONLY on real router — status read only, no enable/disable
-5. 🔄 Performance check: 30s polling interval stability
-6. 📝 Document any bugs found
-7. 🚀 Publish GitHub Release v1.1.0 + update HACS PR #6421
+### Key Bug Fix (Phase 5)
+**WiFi Status SSH Fallback** (Commit: 19aeaaa)
+- Issue: WiFi radios not detected (ACL blocked all ubus calls)
+- Root Cause: get_wifi_status() had no SSH fallback
+- Solution: Implemented _get_wifi_status_ssh() + integrated fallback
+- Result: ✅ Now detects 2 radios (radio0=2.4GHz, radio1=5GHz)
+
+### API Test Results (Direct Integration Test)
+```
+✅ API Initialization
+✅ get_router_status()  → Uptime (SSH), CPU 1/5/15min (SSH), Memory (SSH)
+✅ get_wan_status()     → RX/TX Bytes (SSH fallback working)
+✅ get_wifi_status()    → 2 Radios detected (radio0, radio1) — SSH fallback NOW WORKS!
+✅ get_disk_space()     → 2 mounts (public API)
+✅ get_tmpfs_stats()    → 5 tmpfs mounts (public API)
+```
+
+### Next Steps to Complete Phase 5:
+1. ✅ Code implementation complete (v1.1.0 + SSH fallbacks + WiFi fix)
+2. ✅ API layer tested directly
+3. ⏳ HA Integration configuration (manual UI setup needed)
+4. ⏳ Sensor validation in HA UI (after integration configured)
+5. ⏳ Performance test (30s polling stability)
+6. 📝 Bug documentation + GitHub Release v1.1.0
+7. 🚀 Update HACS PR #6421
 
