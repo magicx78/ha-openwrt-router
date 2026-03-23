@@ -2,6 +2,26 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.1.0] - 2026-03-23
+
+### Added
+- **Extended System Monitoring**: Comprehensive metrics for advanced system oversight
+  - **System Information**: Platform architecture, OpenWrt version, hostname, model detection
+  - **CPU Metrics**: Extended load averages - 1-minute, 5-minute, and 15-minute load as percentage
+  - **Memory Details**: Separate sensors for cached, shared, and buffered memory in addition to total/free
+  - **Disk Space Monitoring**: Total, used, free capacity and usage percentage for all mounted filesystems
+  - **Temporary Storage (tmpfs)**: Dedicated monitoring for /tmp, /run, /dev/shm with usage metrics
+  - **Network Connection Tracking**: Active network connection count via nf_conntrack integration
+  - **15+ New Sensors**: All metrics exposed as individual sensors for dashboards and automations
+
+### Technical
+- Enhanced API methods with graceful fallback for unsupported features
+- Improved platform architecture detection from multiple sources
+- Comprehensive error handling for missing system features
+- Support for systems with/without nf_conntrack module
+
+---
+
 ## [1.0.8] - 2026-03-20
 
 ### Added

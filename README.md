@@ -4,12 +4,20 @@
 
 A production-ready Home Assistant custom integration for [OpenWrt](https://openwrt.org/) routers, communicating via the built-in **ubus / rpcd JSON-RPC API**.
 
-**Current Version:** v1.0.8 — Update Management, SSL/HTTPS Support, Full Sensor Suite ✅
+**Current Version:** v1.1.0 — Extended System Monitoring, Platform Info, Advanced Metrics ✅
 
 ## Features
 
+### Extended System Monitoring (v1.1.0)
+- **System Information**: Platform architecture, OpenWrt version, hostname, model
+- **Advanced CPU Metrics**: 1/5/15-minute load averages as percentage
+- **Memory Details**: Total, used, free, cached, shared, buffered memory
+- **Disk Space**: Total, used, free capacity and usage percentage (all mounts)
+- **Temporary Storage (tmpfs)**: Usage tracking for /tmp, /run, /dev/shm, etc.
+- **Network Connections**: Active connection count (nf_conntrack integration)
+
 ### Monitoring & Status
-- **Sensors**: Router uptime, WAN status, connected client count, CPU load, memory usage, firmware version, update status
+- **Sensors**: Router uptime, WAN status, connected client count, CPU load (1/5/15min), memory usage, disk/tmpfs stats, firmware version, update status
 - **WAN Statistics**: Download/Upload bytes with automatic data source detection
 - **Device Tracker**: Track WiFi clients (marks as `not_home` when disconnected)
 
@@ -29,7 +37,8 @@ A production-ready Home Assistant custom integration for [OpenWrt](https://openw
 
 | Version | Release Date | Key Features |
 |---------|---|---|
-| **1.0.8** | 2026-03-20 | Update Management, selective package updates |
+| **1.1.0** | 2026-03-23 | Extended monitoring: CPU/Memory/Disk/tmpfs/Network metrics, Platform info |
+| 1.0.8 | 2026-03-20 | Update Management, selective package updates |
 | 1.0.7 | 2026-03-20 | SSL/HTTPS Support, self-signed certificates |
 | 1.0.6 | 2026-03-20 | Sensor visibility improvements |
 | 1.0.5 | 2026-03-20 | WiFi switch UX (band info, client count) |
