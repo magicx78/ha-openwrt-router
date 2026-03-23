@@ -1,6 +1,6 @@
 # Progress — ha-openwrt-router
 
-## Letzter Stand: 2026-03-23 (v1.1.0 + HOTFIX — WiFi Switches Fixed) ✨
+## Letzter Stand: 2026-03-23 (v1.1.0 — Complete SSH Fallbacks for ACL-Restricted Routers) 🚀
 
 ---
 
@@ -230,23 +230,56 @@
 
 ---
 
+## TESTING PHASE FINDINGS (2026-03-23)
+
+### Router ACL Configuration
+- **Issue:** OpenWrt Router (Cudy WR3000 v1, 10.10.10.1) has **restrictive rpcd ACL**
+- **Impact:** session.login blocked, system/board and system/info not accessible without auth
+- **Solution:** Implemented graceful fallback for ACL-restricted routers
+- **Result:** Integration now works with read-only public APIs
+
+### Test Results Summary
+- ✅ **PASS (6):** API Init, Router Connection, WiFi Status, Disk Space, tmpfs, Active Connections
+- ⚠️ **WARN (1):** Network Interfaces (feature unavailable but graceful)
+- ❌ **FAIL (1):** WAN Status (network.interface/dump not accessible)
+
+### Commit History (Testing Phase)
+- `df0ae42` – fix(api): graceful fallback for routers with restrictive rpcd ACL
+
+---
+
 ## Next Steps
 
-Projekt ist aktuell **v1.1.0 READY FOR TESTING**:
+Projekt ist aktuell **v1.1.0 + PHASE 5: COMPREHENSIVE TESTING** 🚀:
 - ✅ Extended Monitoring Features vollständig implementiert (16 Tasks)
 - ✅ 15+ neue Sensoren für System-Metriken
-- ✅ API Layer mit Fallback-Handling für unsupported Features
-- ✅ Code committed (2 commits), Git Tag v1.1.0 erstellt
+- ✅ API Layer mit SSH Fallback-Handling für ACL-restricted Routers
+- ✅ Code committed (5 commits: SSH Fallbacks), Git Tag v1.1.0 erstellt
 - ✅ README.md + CHANGELOG.md aktualisiert
-- ✅ Dokumentation in memory/plan_extended_metrics.md
 
-**Nächste Schritte:**
-1. ⏳ TESTING auf echtem OpenWrt Router (Cudy WR3000 v1) — QA Phase
-   - Validiere alle neuen Sensoren in Home Assistant
-   - Prüfe graceful fallback wenn Features nicht verfügbar
-   - Performance-Test (sollte kein Impact auf 30s Polling-Interval sein)
-2. 📝 Optional: Unit Tests für neue API-Methoden (TASK-009, TASK-011)
-3. 🚀 GitHub Release v1.1.0 publizieren (nach Testing)
-4. 🔄 Update HACS Default Store PR #6421 mit v1.1.0 Info
-5. 📊 Monitoring: Community-Feedback über GitHub Issues
+## Phase 5: COMPREHENSIVE TESTING (2026-03-23 ongoing)
+
+### Infrastructure Verification ✅
+- ✅ Real Router (10.10.10.1) reachable via ping
+- ✅ API responds with "Access denied" (-32002) — ACL restrictions confirmed
+- ✅ SSH access operational (sshpass + password auth)
+- ✅ All 3 router scripts installed and executable:
+  - ✅ `/root/ha-system-metrics.sh` → uptime, CPU 1/5/15min, memory
+  - ✅ `/root/ha-wan-status.sh` → WAN status, RX/TX bytes (1.7TB/1.5TB)
+  - ✅ `/root/ha-wifi-control.sh` → Radio status, 5+ SSIDs (phy0: 2.4GHz, phy1: 5GHz)
+
+### Coordinator Multi-Agent Status
+- [1/4] ✅ INFRA-SETUP AGENT: All endpoints verified
+- [2/4] ⏳ DEPLOYMENT AGENT: v1.1.0 to HA Dev Server
+- [3/4] ⏳ FEATURE-TEST AGENT: WiFi/Metrics/WAN/Disk (WLAN tests careful!)
+- [4/4] ⏳ SENSOR-VALIDATOR AGENT: 15+ sensors in HA UI
+
+### Next Immediate Steps:
+1. 📦 Deploy v1.1.0 to Home Assistant Dev Server (localhost:8123)
+2. 🧪 Validate all 15+ sensors visible in HA UI
+3. 📊 Verify sensor values, formatting (uptime display, byte units, CPU%)
+4. ⚠️  WLAN tests ONLY on real router — status read only, no enable/disable
+5. 🔄 Performance check: 30s polling interval stability
+6. 📝 Document any bugs found
+7. 🚀 Publish GitHub Release v1.1.0 + update HACS PR #6421
 
