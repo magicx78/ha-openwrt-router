@@ -252,7 +252,18 @@ class OpenWrtAPI:
             OpenWrtConnectionError: Router unreachable.
             OpenWrtTimeoutError: Request timed out.
         """
-        await self.login()
+        # Try to login; if it fails due to ACL, continue with default session
+        try:
+            await self.login()
+            _LOGGER.debug("Successfully authenticated with router")
+        except OpenWrtAuthError as err:
+            _LOGGER.warning(
+                "Could not authenticate (rpcd may have restricted ACL): %s. "
+                "Will attempt to use default session. Some features may be unavailable.",
+                err
+            )
+            # Continue anyway – some routers have public read-only APIs
+
         return await self.get_router_info()
 
     # ------------------------------------------------------------------
@@ -314,8 +325,23 @@ class OpenWrtAPI:
                 "kernel": str,
                 "platform_architecture": str,  # e.g. "ath79", "mt7621", "arm_cortex-a9"
             }
+
+        Note:
+            If access is denied (unauthenticated router with restrictive ACL),
+            returns minimal safe defaults.
         """
-        result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_BOARD, {})
+        try:
+            result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_BOARD, {})
+        except (OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
+            # Access denied – router has restrictive ACL, return safe defaults
+            if "access denied" in str(err).lower() or "permission" in str(err).lower():
+                _LOGGER.warning(
+                    "Cannot access system/board (rpcd ACL restricted). "
+                    "Using fallback router info."
+                )
+                result = {}
+            else:
+                raise
 
         # Extract platform architecture from various sources
         platform_arch = self._extract_platform_architecture(result)
@@ -345,8 +371,30 @@ class OpenWrtAPI:
                 "cpu_load_15min": float, # 15-min load average as percentage (0-100)
                 "memory": dict,       # total, free, shared, buffered, available (bytes)
             }
+
+        Note:
+            If access is denied (unauthenticated router with restrictive ACL),
+            returns default values (0 uptime, 0 load, empty memory dict).
         """
-        result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_INFO, {})
+        try:
+            result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_INFO, {})
+        except (OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
+            # Access denied – return safe defaults
+            if "access denied" in str(err).lower() or "permission" in str(err).lower():
+                _LOGGER.warning(
+                    "Cannot access system/info (rpcd ACL restricted). "
+                    "System metrics unavailable."
+                )
+                return {
+                    "uptime": 0,
+                    "load": [0, 0, 0],
+                    "cpu_load": 0.0,
+                    "cpu_load_5min": 0.0,
+                    "cpu_load_15min": 0.0,
+                    "memory": {},
+                }
+            raise
+
         raw_load: list[int] = result.get("load", [0, 0, 0])
         # OpenWrt encodes load averages as integer * 65536
         cpu_load = round(raw_load[0] / 65536 * 100, 1) if raw_load else 0.0
