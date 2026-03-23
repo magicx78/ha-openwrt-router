@@ -72,6 +72,8 @@ class OpenWrtCoordinatorData:
         self.router_info: dict[str, Any] = {}
         self.uptime: int = 0
         self.cpu_load: float = 0.0
+        self.cpu_load_5min: float = 0.0
+        self.cpu_load_15min: float = 0.0
         self.memory: dict[str, Any] = {}
         self.wan_status: dict[str, Any] = {}
         self.wan_connected: bool = False
@@ -79,6 +81,10 @@ class OpenWrtCoordinatorData:
         self.clients: list[dict[str, Any]] = []
         self.client_count: int = 0
         self.dhcp_leases: dict[str, dict[str, str]] = {}
+        self.disk_space: dict[str, Any] = {}
+        self.tmpfs: dict[str, Any] = {}
+        self.network_interfaces: list[dict[str, Any]] = []
+        self.active_connections: int = 0
         self.updates_available: dict[str, Any] = {"available": False, "system": [], "addons": []}
         self.features: dict[str, Any] = {}
 
@@ -88,6 +94,8 @@ class OpenWrtCoordinatorData:
             KEY_ROUTER_INFO: self.router_info,
             KEY_UPTIME: self.uptime,
             KEY_CPU_LOAD: self.cpu_load,
+            "cpu_load_5min": self.cpu_load_5min,
+            "cpu_load_15min": self.cpu_load_15min,
             KEY_MEMORY: self.memory,
             KEY_WAN_STATUS: self.wan_status,
             KEY_WAN_CONNECTED: self.wan_connected,
@@ -95,6 +103,10 @@ class OpenWrtCoordinatorData:
             KEY_CLIENTS: self.clients,
             KEY_CLIENT_COUNT: self.client_count,
             KEY_DHCP_LEASES: self.dhcp_leases,
+            "disk_space": self.disk_space,
+            "tmpfs": self.tmpfs,
+            "network_interfaces": self.network_interfaces,
+            "active_connections": self.active_connections,
             KEY_UPDATES_AVAILABLE: self.updates_available,
             KEY_FEATURES: self.features,
         }
@@ -165,7 +177,17 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             status = await self.api.get_router_status()
             data.uptime = status.get("uptime", 0)
             data.cpu_load = status.get("cpu_load", 0.0)
+            data.cpu_load_5min = status.get("cpu_load_5min", 0.0)
+            data.cpu_load_15min = status.get("cpu_load_15min", 0.0)
             data.memory = status.get("memory", {})
+
+            # --- Disk & Storage Stats ---
+            data.disk_space = await self.api.get_disk_space()
+            data.tmpfs = await self.api.get_tmpfs_stats()
+
+            # --- Network Interface Stats ---
+            data.network_interfaces = await self.api.get_network_interfaces()
+            data.active_connections = await self.api.get_active_connections()
 
             # --- WAN status ---
             data.wan_status = await self.api.get_wan_status()

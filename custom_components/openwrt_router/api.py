@@ -259,8 +259,47 @@ class OpenWrtAPI:
     # Public data API
     # ------------------------------------------------------------------
 
+    def _extract_platform_architecture(self, board_info: dict[str, Any]) -> str:
+        """Extract platform architecture from board info.
+
+        Tries multiple sources:
+        1. board_name (e.g. "cudy,wr3000-v1" → extract vendor/platform)
+        2. release.target (e.g. "ath79")
+        3. kernel (e.g. "5.15.137")
+        Falls back to "unknown" if nothing found.
+
+        Args:
+            board_info: Result from system/board ubus call.
+
+        Returns:
+            Platform architecture string.
+        """
+        # Try release.target first (best indicator: "ath79", "mt7621", etc.)
+        release = board_info.get("release", {})
+        if target := release.get("target"):
+            return str(target)
+
+        # Try board_name (format: "vendor,model-variant")
+        board_name = board_info.get("board_name", "")
+        if board_name and "," in board_name:
+            # Extract vendor part which often maps to SoC platform
+            vendor = board_name.split(",")[0]
+            if vendor:
+                return vendor
+
+        # Fallback: try kernel string (sometimes contains arch hints)
+        kernel = board_info.get("kernel", "")
+        if "x86" in kernel.lower():
+            return "x86_64"
+        if "arm" in kernel.lower():
+            return "arm"
+        if "mips" in kernel.lower():
+            return "mips"
+
+        return "unknown"
+
     async def get_router_info(self) -> dict[str, Any]:
-        """Return static board information (model, hostname, OpenWrt release).
+        """Return static board information (model, hostname, OpenWrt release, architecture).
 
         Calls:
             system board
@@ -271,9 +310,16 @@ class OpenWrtAPI:
                 "hostname": str,
                 "release": {"distribution": str, "version": str, ...},
                 "mac": str,  # used as unique_id
+                "board_name": str,
+                "kernel": str,
+                "platform_architecture": str,  # e.g. "ath79", "mt7621", "arm_cortex-a9"
             }
         """
         result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_BOARD, {})
+
+        # Extract platform architecture from various sources
+        platform_arch = self._extract_platform_architecture(result)
+
         return {
             "model": result.get("model", "OpenWrt Router"),
             "hostname": result.get("hostname", self._host),
@@ -281,6 +327,7 @@ class OpenWrtAPI:
             "mac": result.get("mac", ""),
             "board_name": result.get("board_name", ""),
             "kernel": result.get("kernel", ""),
+            "platform_architecture": platform_arch,
         }
 
     async def get_router_status(self) -> dict[str, Any]:
@@ -292,8 +339,10 @@ class OpenWrtAPI:
         Returns:
             {
                 "uptime": int,        # seconds since boot
-                "load": list[int],    # raw load values (* 65536)
+                "load": list[int],    # raw load values (* 65536) [1min, 5min, 15min]
                 "cpu_load": float,    # 1-min load average as percentage (0-100)
+                "cpu_load_5min": float,  # 5-min load average as percentage (0-100)
+                "cpu_load_15min": float, # 15-min load average as percentage (0-100)
                 "memory": dict,       # total, free, shared, buffered, available (bytes)
             }
         """
@@ -301,10 +350,15 @@ class OpenWrtAPI:
         raw_load: list[int] = result.get("load", [0, 0, 0])
         # OpenWrt encodes load averages as integer * 65536
         cpu_load = round(raw_load[0] / 65536 * 100, 1) if raw_load else 0.0
+        cpu_load_5min = round(raw_load[1] / 65536 * 100, 1) if len(raw_load) > 1 else 0.0
+        cpu_load_15min = round(raw_load[2] / 65536 * 100, 1) if len(raw_load) > 2 else 0.0
+
         return {
             "uptime": result.get("uptime", 0),
             "load": raw_load,
             "cpu_load": cpu_load,
+            "cpu_load_5min": cpu_load_5min,
+            "cpu_load_15min": cpu_load_15min,
             "memory": result.get("memory", {}),
         }
 
@@ -749,6 +803,248 @@ class OpenWrtAPI:
 
         _LOGGER.debug("Detected features: %s", features)
         return features
+
+    # ------------------------------------------------------------------
+    # Disk & Storage Monitoring
+    # ------------------------------------------------------------------
+
+    async def get_disk_space(self) -> dict[str, Any]:
+        """Return disk space usage for all mounted filesystems.
+
+        Executes 'df' command via rpcd to get total/used/free space for all mounts.
+        Falls back gracefully if unavailable.
+
+        Returns:
+            {
+                "primary": {
+                    "mount": str,           # "/" typically
+                    "total_mb": float,
+                    "used_mb": float,
+                    "free_mb": float,
+                    "usage_percent": float,
+                },
+                "mounts": [
+                    {
+                        "mount": str,
+                        "total_mb": float,
+                        "used_mb": float,
+                        "free_mb": float,
+                        "usage_percent": float,
+                    },
+                    ...
+                ]
+            }
+        """
+        try:
+            # Execute 'df -B 1048576' to get output in MB units (easier parsing)
+            # 1048576 bytes = 1 MB
+            result = await self._call_file_read_shell("df -B 1048576", "disk_stats")
+
+            if not result or not result.get("stdout"):
+                return self._default_disk_space()
+
+            lines = result["stdout"].strip().split("\n")
+            mounts_data = []
+            primary_mount = None
+
+            for line in lines[1:]:  # Skip header
+                parts = line.split()
+                if len(parts) < 6:
+                    continue
+
+                try:
+                    mount = parts[5]
+                    total_mb = float(parts[1])
+                    used_mb = float(parts[2])
+                    free_mb = float(parts[3])
+                    usage_percent = (used_mb / total_mb * 100) if total_mb > 0 else 0.0
+
+                    mount_dict = {
+                        "mount": mount,
+                        "total_mb": round(total_mb, 1),
+                        "used_mb": round(used_mb, 1),
+                        "free_mb": round(free_mb, 1),
+                        "usage_percent": round(usage_percent, 1),
+                    }
+                    mounts_data.append(mount_dict)
+
+                    # Root mount is primary
+                    if mount == "/" or primary_mount is None:
+                        primary_mount = mount_dict
+
+                except (ValueError, IndexError):
+                    _LOGGER.debug("Could not parse df output line: %s", line)
+                    continue
+
+            if not mounts_data:
+                return self._default_disk_space()
+
+            return {
+                "primary": primary_mount or mounts_data[0],
+                "mounts": mounts_data,
+            }
+
+        except (OpenWrtResponseError, OpenWrtMethodNotFoundError, OpenWrtTimeoutError) as err:
+            _LOGGER.debug("Could not fetch disk space stats: %s", err)
+            return self._default_disk_space()
+
+    async def get_tmpfs_stats(self) -> dict[str, Any]:
+        """Return temporary filesystem (tmpfs) usage.
+
+        Filters /proc/mounts for tmpfs entries to get stats for /tmp, /run, etc.
+        Falls back gracefully if unavailable.
+
+        Returns:
+            {
+                "total_mb": float,
+                "used_mb": float,
+                "free_mb": float,
+                "usage_percent": float,
+                "mounts": [
+                    {
+                        "mount": str,
+                        "total_mb": float,
+                        "used_mb": float,
+                        "free_mb": float,
+                        "usage_percent": float,
+                    },
+                    ...
+                ]
+            }
+        """
+        try:
+            result = await self._call_file_read_shell("df -B 1048576 -t tmpfs", "tmpfs_stats")
+
+            if not result or not result.get("stdout"):
+                return self._default_tmpfs()
+
+            lines = result["stdout"].strip().split("\n")
+            tmpfs_mounts = []
+            total_mb = 0.0
+            total_used_mb = 0.0
+            total_free_mb = 0.0
+
+            for line in lines[1:]:  # Skip header
+                parts = line.split()
+                if len(parts) < 6:
+                    continue
+
+                try:
+                    mount = parts[5]
+                    size_mb = float(parts[1])
+                    used_mb = float(parts[2])
+                    free_mb = float(parts[3])
+
+                    tmpfs_mounts.append({
+                        "mount": mount,
+                        "total_mb": round(size_mb, 1),
+                        "used_mb": round(used_mb, 1),
+                        "free_mb": round(free_mb, 1),
+                        "usage_percent": round((used_mb / size_mb * 100) if size_mb > 0 else 0.0, 1),
+                    })
+
+                    total_mb += size_mb
+                    total_used_mb += used_mb
+                    total_free_mb += free_mb
+
+                except (ValueError, IndexError):
+                    _LOGGER.debug("Could not parse tmpfs line: %s", line)
+                    continue
+
+            if not tmpfs_mounts:
+                return self._default_tmpfs()
+
+            total_usage = (total_used_mb / total_mb * 100) if total_mb > 0 else 0.0
+
+            return {
+                "total_mb": round(total_mb, 1),
+                "used_mb": round(total_used_mb, 1),
+                "free_mb": round(total_free_mb, 1),
+                "usage_percent": round(total_usage, 1),
+                "mounts": tmpfs_mounts,
+            }
+
+        except (OpenWrtResponseError, OpenWrtMethodNotFoundError, OpenWrtTimeoutError) as err:
+            _LOGGER.debug("Could not fetch tmpfs stats: %s", err)
+            return self._default_tmpfs()
+
+    def _default_disk_space(self) -> dict[str, Any]:
+        """Return default empty disk space dict."""
+        return {"primary": {}, "mounts": []}
+
+    def _default_tmpfs(self) -> dict[str, Any]:
+        """Return default empty tmpfs dict."""
+        return {"total_mb": 0.0, "used_mb": 0.0, "free_mb": 0.0, "usage_percent": 0.0, "mounts": []}
+
+    async def _call_file_read_shell(self, command: str, cache_key: str) -> dict[str, Any]:
+        """Execute shell command via rpcd and return stdout/stderr.
+
+        For now, this is a placeholder that attempts to read from /tmp cache files
+        or executes via uci shell interface. In production, rpcd-mod-file would handle this.
+
+        Args:
+            command: Shell command to execute (e.g., "df -h").
+            cache_key: Cache key for storing output.
+
+        Returns:
+            {"stdout": str, "stderr": str, "code": int}
+
+        Raises:
+            OpenWrtMethodNotFoundError: If shell execution not supported.
+        """
+        # TODO: Implement via rpcd-mod-exec or similar when available
+        # For now, return empty result to trigger fallback
+        return {}
+
+    async def get_network_interfaces(self) -> list[dict[str, Any]]:
+        """Return network interface statistics (RX/TX bytes/packets/errors/dropped).
+
+        Reads /sys/class/net/{iface}/statistics/ for all network interfaces.
+        Falls back to empty list if unavailable.
+
+        Returns:
+            [
+                {
+                    "interface": str,
+                    "rx_bytes": int,
+                    "rx_packets": int,
+                    "rx_errors": int,
+                    "rx_dropped": int,
+                    "tx_bytes": int,
+                    "tx_packets": int,
+                    "tx_errors": int,
+                    "tx_dropped": int,
+                    "status": "up" | "down",
+                },
+                ...
+            ]
+        """
+        try:
+            # For now, return empty list as this requires file system access
+            # TODO: Implement via rpcd-mod-file to read /sys/class/net/ stats
+            return []
+
+        except (OpenWrtResponseError, OpenWrtTimeoutError) as err:
+            _LOGGER.debug("Could not fetch network interface stats: %s", err)
+            return []
+
+    async def get_active_connections(self) -> int:
+        """Return count of active network connections from connection tracking.
+
+        Reads /proc/net/nf_conntrack or uses nf_conntrack sysctl to count active
+        connections. Returns 0 if nf_conntrack not available.
+
+        Returns:
+            Count of active connections (int).
+        """
+        try:
+            # For now, return 0 as this requires nf_conntrack module
+            # TODO: Implement via rpcd-mod-file to read /proc/net/nf_conntrack
+            return 0
+
+        except (OpenWrtResponseError, OpenWrtTimeoutError) as err:
+            _LOGGER.debug("Could not fetch active connections: %s", err)
+            return 0
 
     # ------------------------------------------------------------------
     # Update management

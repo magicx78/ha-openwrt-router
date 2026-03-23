@@ -71,6 +71,51 @@
       },
       "update_status": {
         "name": "Update Status"
+      },
+      "platform_architecture": {
+        "name": "Platform Architecture"
+      },
+      "cpu_load_5min": {
+        "name": "CPU Load (5-minute)"
+      },
+      "cpu_load_15min": {
+        "name": "CPU Load (15-minute)"
+      },
+      "memory_cached": {
+        "name": "Memory Cached"
+      },
+      "memory_shared": {
+        "name": "Memory Shared"
+      },
+      "memory_buffered": {
+        "name": "Memory Buffered"
+      },
+      "disk_total": {
+        "name": "Disk Total"
+      },
+      "disk_used": {
+        "name": "Disk Used"
+      },
+      "disk_free": {
+        "name": "Disk Free"
+      },
+      "disk_usage": {
+        "name": "Disk Usage"
+      },
+      "tmpfs_total": {
+        "name": "Temporary Storage Total"
+      },
+      "tmpfs_used": {
+        "name": "Temporary Storage Used"
+      },
+      "tmpfs_free": {
+        "name": "Temporary Storage Free"
+      },
+      "tmpfs_usage": {
+        "name": "Temporary Storage Usage"
+      },
+      "active_connections": {
+        "name": "Active Network Connections"
       }
     },
     "switch": {},
