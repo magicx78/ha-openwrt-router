@@ -360,7 +360,7 @@ class OpenWrtAPI:
         """Return dynamic system metrics (uptime, load, memory).
 
         Calls:
-            system info
+            system info (ubus) or /root/ha-system-metrics.sh (SSH fallback)
 
         Returns:
             {
@@ -373,26 +373,32 @@ class OpenWrtAPI:
             }
 
         Note:
-            If access is denied (unauthenticated router with restrictive ACL),
-            returns default values (0 uptime, 0 load, empty memory dict).
+            If ubus is blocked (ACL-restricted router), falls back to SSH script.
         """
         try:
             result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_INFO, {})
-        except (OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
-            # Access denied – return safe defaults
-            if "access denied" in str(err).lower() or "permission" in str(err).lower():
+        except (OpenWrtMethodNotFoundError, OpenWrtAuthError, OpenWrtResponseError) as err:
+            # Access denied – try SSH fallback
+            err_str = str(err).lower()
+            if "access denied" in err_str or "permission" in err_str:
                 _LOGGER.warning(
-                    "Cannot access system/info (rpcd ACL restricted). "
-                    "System metrics unavailable."
+                    "Cannot access system/info via ubus (rpcd ACL restricted), "
+                    "attempting SSH fallback"
                 )
-                return {
-                    "uptime": 0,
-                    "load": [0, 0, 0],
-                    "cpu_load": 0.0,
-                    "cpu_load_5min": 0.0,
-                    "cpu_load_15min": 0.0,
-                    "memory": {},
-                }
+                try:
+                    return await self._get_router_status_ssh()
+                except Exception as ssh_err:
+                    _LOGGER.warning(
+                        "SSH fallback also failed, returning empty metrics: %s", ssh_err
+                    )
+                    return {
+                        "uptime": 0,
+                        "load": [0, 0, 0],
+                        "cpu_load": 0.0,
+                        "cpu_load_5min": 0.0,
+                        "cpu_load_15min": 0.0,
+                        "memory": {},
+                    }
             raise
 
         raw_load: list[int] = result.get("load", [0, 0, 0])
@@ -415,6 +421,7 @@ class OpenWrtAPI:
 
         Uses network.interface/dump for basic status (up, ip, uptime) but reads
         RX/TX bytes from /sys/class/net/{iface}/statistics/ files (kernel source).
+        Falls back to SSH script if ubus is blocked (ACL-restricted router).
 
         Returns:
             {
@@ -427,7 +434,32 @@ class OpenWrtAPI:
             }
         """
         # Get basic network status
-        result = await self._call(UBUS_NETWORK_OBJECT, UBUS_NETWORK_DUMP, {})
+        try:
+            result = await self._call(UBUS_NETWORK_OBJECT, UBUS_NETWORK_DUMP, {})
+        except (OpenWrtMethodNotFoundError, OpenWrtAuthError, OpenWrtResponseError) as err:
+            # ubus blocked – try SSH fallback
+            err_str = str(err).lower()
+            if "access denied" in err_str or "permission" in err_str:
+                _LOGGER.warning(
+                    "Cannot access network dump via ubus (rpcd ACL restricted), "
+                    "attempting SSH fallback for WAN status"
+                )
+                try:
+                    return await self._get_wan_status_ssh()
+                except Exception as ssh_err:
+                    _LOGGER.warning(
+                        "SSH fallback also failed, returning minimal WAN status: %s",
+                        ssh_err,
+                    )
+                    return {
+                        "connected": False,
+                        "interface": "",
+                        "ipv4": "",
+                        "uptime": 0,
+                        "rx_bytes": None,
+                        "tx_bytes": None,
+                    }
+            raise
         interfaces: list[dict[str, Any]] = result.get("interface", [])
 
         # Find WAN interface (try both name matching and highest traffic)
@@ -705,6 +737,125 @@ class OpenWrtAPI:
             raise OpenWrtResponseError(
                 f"Failed to {action} WiFi section {uci_section}: {err}"
             ) from err
+
+    async def _get_router_status_ssh(self) -> dict[str, Any]:
+        """Get router status via SSH script (fallback for ACL-restricted routers).
+
+        Calls /root/ha-system-metrics.sh on the router via SSH.
+
+        Returns:
+            Dict with uptime, cpu_load, memory metrics.
+
+        Raises:
+            Exception: If SSH command fails.
+        """
+        ssh_cmd = [
+            "sshpass",
+            "-p",
+            self._password,
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            f"{self._username}@{self._host}",
+            "/root/ha-system-metrics.sh",
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+
+            if proc.returncode == 0:
+                import json
+
+                data = json.loads(stdout.decode())
+                _LOGGER.debug("SSH system metrics retrieved successfully")
+                return {
+                    "uptime": data.get("uptime", 0),
+                    "load": [0, 0, 0],  # Not available via SSH script
+                    "cpu_load": float(data.get("cpu_load", 0.0)),
+                    "cpu_load_5min": float(data.get("cpu_load_5min", 0.0)),
+                    "cpu_load_15min": float(data.get("cpu_load_15min", 0.0)),
+                    "memory": {
+                        "total": data.get("memory_total", 0),
+                        "free": data.get("memory_free", 0),
+                        "cached": data.get("memory_cached", 0),
+                        "buffers": data.get("memory_buffers", 0),
+                    },
+                }
+            else:
+                error_msg = stderr.decode().strip()
+                _LOGGER.error("SSH system metrics failed: %s", error_msg)
+                raise OpenWrtResponseError(f"SSH metrics failed: {error_msg}")
+
+        except asyncio.TimeoutError:
+            _LOGGER.error("SSH system metrics timed out")
+            raise OpenWrtTimeoutError("SSH system metrics timed out")
+        except Exception as err:
+            _LOGGER.error("SSH system metrics error: %s", err)
+            raise
+
+    async def _get_wan_status_ssh(self) -> dict[str, Any]:
+        """Get WAN status via SSH script (fallback for ACL-restricted routers).
+
+        Calls /root/ha-wan-status.sh on the router via SSH.
+
+        Returns:
+            Dict with WAN connection status and RX/TX bytes.
+
+        Raises:
+            Exception: If SSH command fails.
+        """
+        ssh_cmd = [
+            "sshpass",
+            "-p",
+            self._password,
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            f"{self._username}@{self._host}",
+            "/root/ha-wan-status.sh",
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+
+            if proc.returncode == 0:
+                import json
+
+                data = json.loads(stdout.decode())
+                _LOGGER.debug("SSH WAN status retrieved successfully")
+                return {
+                    "connected": bool(data.get("wan_connected", False)),
+                    "interface": "",  # Not available via SSH script
+                    "ipv4": "",  # Not available via SSH script
+                    "uptime": 0,  # Not available via SSH script
+                    "rx_bytes": data.get("rx_bytes"),
+                    "tx_bytes": data.get("tx_bytes"),
+                }
+            else:
+                error_msg = stderr.decode().strip()
+                _LOGGER.error("SSH WAN status failed: %s", error_msg)
+                raise OpenWrtResponseError(f"SSH WAN status failed: {error_msg}")
+
+        except asyncio.TimeoutError:
+            _LOGGER.error("SSH WAN status timed out")
+            raise OpenWrtTimeoutError("SSH WAN status timed out")
+        except Exception as err:
+            _LOGGER.error("SSH WAN status error: %s", err)
+            raise
 
     async def _set_wifi_state_ssh(self, uci_section: str, enabled: bool) -> bool:
         """Enable or disable WiFi interface via SSH script (fallback for ACL-restricted routers).
