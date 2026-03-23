@@ -599,9 +599,20 @@ class OpenWrtAPI:
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
             _LOGGER.debug("UCI wireless config not available")
 
+        # SSH Fallback: try to get WiFi status via SSH script
+        try:
+            _LOGGER.debug("Attempting WiFi status via SSH fallback")
+            result = await self._get_wifi_status_ssh()
+            if result:
+                self._wifi_method = "ssh"
+                _LOGGER.debug("WiFi method: SSH fallback")
+                return result
+        except Exception as e:
+            _LOGGER.debug(f"SSH WiFi fallback failed: {e}")
+
         self._wifi_method = "none"
         _LOGGER.debug(
-            "No WiFi API available on this router (tried wireless, iwinfo, UCI)"
+            "No WiFi API available on this router (tried wireless, iwinfo, UCI, SSH)"
         )
         return []
 
@@ -921,6 +932,83 @@ class OpenWrtAPI:
             _LOGGER.error(
                 "SSH command failed for WiFi section %s: %s", uci_section, err
             )
+            raise
+
+    async def _get_wifi_status_ssh(self) -> list[dict[str, Any]]:
+        """Get WiFi status via SSH script (fallback for ACL-restricted routers).
+
+        Calls /root/ha-wifi-control.sh status on the router via SSH.
+
+        Returns:
+            List of radio dicts with WiFi status.
+
+        Raises:
+            Exception: If SSH command fails.
+        """
+        # Build SSH command using sshpass for password auth
+        ssh_cmd = [
+            "sshpass",
+            "-p",
+            self._password,
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            f"{self._username}@{self._host}",
+            "/root/ha-wifi-control.sh status",
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+
+            if proc.returncode == 0:
+                import json
+                data = json.loads(stdout.decode())
+                _LOGGER.debug("SSH WiFi status retrieved successfully")
+
+                # Parse radio data from ha-wifi-control.sh status response
+                radios = []
+                for radio_name, radio_info in data.items():
+                    if not isinstance(radio_info, dict):
+                        continue
+
+                    # Extract radio information
+                    interfaces = radio_info.get("interfaces", [])
+                    ssids = []
+
+                    for iface in interfaces:
+                        if isinstance(iface, dict):
+                            config = iface.get("config", {})
+                            ssid = config.get("ssid", "")
+                            if ssid:
+                                ssids.append(ssid)
+
+                    band = radio_info.get("config", {}).get("band", "unknown")
+
+                    radios.append({
+                        "radio": radio_name,
+                        "band": band,
+                        "disabled": radio_info.get("disabled", False),
+                        "ssids": ssids,
+                    })
+
+                return radios if radios else []
+            else:
+                error_msg = stderr.decode().strip()
+                _LOGGER.error("SSH WiFi status failed: %s", error_msg)
+                raise OpenWrtResponseError(f"SSH WiFi status failed: {error_msg}")
+
+        except asyncio.TimeoutError:
+            _LOGGER.error("SSH WiFi status timed out")
+            raise OpenWrtTimeoutError("SSH WiFi status timed out")
+        except Exception as err:
+            _LOGGER.error("SSH WiFi status error: %s", err)
             raise
 
     async def reload_wifi(self) -> bool:
