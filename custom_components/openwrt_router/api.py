@@ -597,28 +597,48 @@ class OpenWrtAPI:
 
         Raises:
             OpenWrtMethodNotFoundError: If UCI is not available.
+            UpdateFailed: If the operation fails.
         """
         disabled_value = "0" if enabled else "1"
-        _LOGGER.debug(
-            "Setting WiFi section %s disabled=%s", uci_section, disabled_value
+        action = "enable" if enabled else "disable"
+        _LOGGER.info(
+            "Setting WiFi section %s %s (disabled=%s)", uci_section, action, disabled_value
         )
 
-        await self._call(
-            UBUS_UCI_OBJECT,
-            UBUS_UCI_SET,
-            {
-                "config": "wireless",
-                "section": uci_section,
-                "values": {"disabled": disabled_value},
-            },
-        )
-        await self._call(
-            UBUS_UCI_OBJECT,
-            UBUS_UCI_COMMIT,
-            {"config": "wireless"},
-        )
-        await self.reload_wifi()
-        return True
+        try:
+            # Set UCI value
+            await self._call(
+                UBUS_UCI_OBJECT,
+                UBUS_UCI_SET,
+                {
+                    "config": "wireless",
+                    "section": uci_section,
+                    "values": {"disabled": disabled_value},
+                },
+            )
+            _LOGGER.debug("UCI set successful for %s", uci_section)
+
+            # Commit changes
+            await self._call(
+                UBUS_UCI_OBJECT,
+                UBUS_UCI_COMMIT,
+                {"config": "wireless"},
+            )
+            _LOGGER.debug("UCI commit successful")
+
+            # Reload network config
+            await self.reload_wifi()
+            _LOGGER.info("WiFi section %s %s successfully", uci_section, action)
+            return True
+
+        except OpenWrtMethodNotFoundError as err:
+            _LOGGER.warning("UCI method not available on router: %s", err)
+            raise
+        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtConnectionError) as err:
+            _LOGGER.error("Failed to %s WiFi section %s: %s", action, uci_section, err)
+            raise OpenWrtResponseError(
+                f"Failed to {action} WiFi section {uci_section}: {err}"
+            ) from err
 
     async def reload_wifi(self) -> bool:
         """Reload network / WiFi configuration on the router.
