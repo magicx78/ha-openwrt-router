@@ -18,7 +18,6 @@ ha-openwrt-router/
 │   ├── api.py               # ALLE Netzwerkaufrufe — OpenWrtAPI Klasse
 │   ├── coordinator.py       # OpenWrtCoordinator (DataUpdateCoordinator)
 │   ├── config_flow.py       # UI Setup Wizard
-│   ├── entity.py            # OpenWrtEntity Basisklasse
 │   ├── sensor.py            # Uptime, WAN Status, Client Count
 │   ├── switch.py            # WiFi Radios (2.4/5/6 GHz, Guest)
 │   ├── device_tracker.py    # WiFi Clients per MAC
@@ -29,8 +28,13 @@ ha-openwrt-router/
 ├── tests/
 │   ├── conftest.py
 │   ├── test_api.py
+│   ├── test_button.py
+│   ├── test_config_flow.py
 │   ├── test_coordinator.py
-│   └── test_config_flow.py
+│   ├── test_dhcp_leases.py
+│   ├── test_diagnostics.py
+│   ├── test_sensor.py
+│   └── test_switch.py
 ├── scripts/
 ├── .github/workflows/
 │   ├── hassfest.yaml        # HA manifest validation
@@ -48,7 +52,6 @@ ha-openwrt-router/
 ```
 api.py          ← ALLE HTTP-Calls. Nie woanders.
 coordinator.py  ← Polling (30s), Fehlerbehandlung, Daten-Distribution
-entity.py       ← Basisklasse: device_info, unique_id
 sensor.py       ← Lesen aus coordinator.data — kein Netzwerk
 switch.py       ← Lesen + Schreiben über api.py — kein direktes HTTP
 config_flow.py  ← Ruft api.async_test_connection() auf
