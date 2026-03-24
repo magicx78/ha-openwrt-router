@@ -2,6 +2,27 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.2.0] - 2026-03-24
+
+### Added
+- **Comprehensive Test Suite**: 247 tests across 11 files covering all modules
+  - API parsing, error handling, session management (63 tests)
+  - Coordinator polling, feature detection, error wrapping (33 tests)
+  - Config flow host validation and setup steps (25 tests)
+  - All entity platforms: sensor, switch, button, device_tracker, diagnostics
+  - Integration setup/unload/reload lifecycle tests
+- **CI/CD Pipelines**: GitHub Actions for automated quality checks
+  - `hassfest.yaml`: Home Assistant manifest validation
+  - `hacs.yaml`: HACS repository validation
+  - `tests.yaml`: Pytest on Python 3.12 and 3.13
+- **Brand Icon**: 256x256 PNG icon for HACS store listing
+- **Translations**: English translation file (`translations/en.json`)
+
+### Fixed
+- Removed non-existent `entity.py` reference from documentation
+
+---
+
 ## [1.1.0] - 2026-03-23
 
 ### Added
