@@ -1,62 +1,9 @@
-"""Unit tests for DHCP lease parsing (standalone, no HA required)."""
-import sys
-import types
-import importlib.util
-import pathlib
+"""Unit tests for DHCP lease parsing.
 
-ROOT = pathlib.Path(__file__).parent.parent
-
-# ---------------------------------------------------------------------------
-# Stub every module that api.py or const.py would try to import from HA/aiohttp
-# ---------------------------------------------------------------------------
-_STUB_MODS = [
-    "aiohttp",
-    "homeassistant",
-    "homeassistant.config_entries",
-    "homeassistant.core",
-    "homeassistant.exceptions",
-    "homeassistant.helpers",
-    "homeassistant.helpers.update_coordinator",
-    "homeassistant.helpers.device_registry",
-    "homeassistant.helpers.entity_platform",
-    "homeassistant.components",
-    "homeassistant.components.sensor",
-    "homeassistant.components.switch",
-    "homeassistant.components.device_tracker",
-    "homeassistant.components.button",
-    "homeassistant.const",
-]
-for _m in _STUB_MODS:
-    if _m not in sys.modules:
-        sys.modules[_m] = types.ModuleType(_m)
-
-# aiohttp needs a few class attributes
-_aio = sys.modules["aiohttp"]
-_aio.ClientSession = object        # type: ignore[attr-defined]
-_aio.ClientTimeout = lambda **kw: None  # type: ignore[attr-defined]
-_aio.ClientConnectorError = Exception  # type: ignore[attr-defined]
-_aio.ClientError = Exception       # type: ignore[attr-defined]
-
-# ---------------------------------------------------------------------------
-# Load const.py then api.py directly (bypasses __init__.py)
-# ---------------------------------------------------------------------------
-def _load(name: str, rel: str):
-    spec = importlib.util.spec_from_file_location(name, ROOT / rel)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-_const = _load(
-    "custom_components.openwrt_router.const",
-    "custom_components/openwrt_router/const.py",
-)
-_api = _load(
-    "custom_components.openwrt_router.api",
-    "custom_components/openwrt_router/api.py",
-)
-
-OpenWrtAPI = _api.OpenWrtAPI
+These tests verify the _parse_dhcp_leases static method of OpenWrtAPI.
+Now uses the standard import path (HA is installed in venv).
+"""
+from custom_components.openwrt_router.api import OpenWrtAPI
 
 # ---------------------------------------------------------------------------
 # Test data
@@ -76,19 +23,16 @@ def test_parse_normal():
     assert leases["AC:DE:48:11:22:33"] == {"ip": "192.168.1.101", "hostname": "myphone"}
     # hostname is '*' → stored as empty string
     assert leases["00:11:22:33:44:55"] == {"ip": "192.168.1.102", "hostname": ""}
-    print("✓ normal lease file parsed correctly")
 
 
 def test_parse_empty():
     assert OpenWrtAPI._parse_dhcp_leases("") == {}
     assert OpenWrtAPI._parse_dhcp_leases("\n\n") == {}
-    print("✓ empty / whitespace-only input → empty dict")
 
 
 def test_parse_malformed_lines_ignored():
     leases = OpenWrtAPI._parse_dhcp_leases("bad\nonly two fields\n")
     assert leases == {}
-    print("✓ malformed lines silently skipped")
 
 
 def test_parse_uppercase_mac():
@@ -96,7 +40,6 @@ def test_parse_uppercase_mac():
     leases = OpenWrtAPI._parse_dhcp_leases(raw)
     assert "AA:BB:CC:DD:EE:FF" in leases
     assert leases["AA:BB:CC:DD:EE:FF"]["ip"] == "10.0.0.1"
-    print("✓ uppercase MAC stored correctly")
 
 
 if __name__ == "__main__":
