@@ -6,3 +6,23 @@ __pycache__/
 venv/
 ha_config/
 .claude/
+
+# Backups & router configs (sensible Daten)
+backup-extraction/
+router-backup*/
+router-config-backup*/
+restore-final.sh
+*.tar
+*.tar.gz
+
+# MeshCentral agent
+meshagent
+meshagent.msh
+meshinstall.sh
+
+# Local memory/scripts
+memory/
+setup.sh
+
+# VM images
+vm/
