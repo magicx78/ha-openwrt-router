@@ -2,6 +2,20 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.4.0] - 2026-04-06
+
+### Added
+- **Per-Interface Bandwidth Sensors**: Dynamic `sensor.<iface>_rx` / `sensor.<iface>_tx` entities for every network interface (wan, loopback, br-lan, etc.) using existing `network.interface/dump` data
+- **Per-Client Online Time**: `connected_since` ISO timestamp attribute in device tracker entities — tracks when each WiFi client first connected (resets on HA restart)
+- **Radio Signal/Noise Sensors**: Dynamic `sensor.<iface>_signal` / `sensor.<iface>_noise` entities per WiFi radio (requires iwinfo support; only created when noise data available)
+
+### Technical
+- `coordinator.py`: Added `_client_first_seen` dict tracking UTC connection timestamps per MAC
+- `api.py`: Extended `_parse_iwinfo_info()` to extract noise/signal/quality/quality_max from iwinfo response
+- `const.py`: Added `CLIENT_KEY_CONNECTED_SINCE`
+
+---
+
 ## [1.3.0] - 2026-04-05
 
 ### Fixed

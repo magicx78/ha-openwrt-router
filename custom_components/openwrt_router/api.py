@@ -1922,6 +1922,10 @@ class OpenWrtAPI:
                     RADIO_KEY_ENABLED: True,  # iwinfo only shows up interfaces
                     RADIO_KEY_IS_GUEST: self._is_guest_ssid(ssid),
                     RADIO_KEY_UCI_SECTION: "",  # not available via iwinfo
+                    "noise": iface_data.get("noise"),
+                    "signal": iface_data.get("signal"),
+                    "quality": iface_data.get("quality"),
+                    "quality_max": iface_data.get("quality_max"),
                 }
             )
 
