@@ -20,6 +20,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import OpenWrtConfigEntry
 from .api import OpenWrtAPI
 from .const import (
+    CONF_PROTOCOL,
+    DEFAULT_PROTOCOL,
     DOMAIN,
     SUFFIX_RELOAD_WIFI,
     SUFFIX_CHECK_UPDATES,
@@ -134,7 +136,8 @@ class OpenWrtButtonEntity(ButtonEntity):
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"http://{self._entry.data['host']}:{self._entry.data['port']}"
+                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
 
@@ -184,10 +187,10 @@ class OpenWrtButtonEntity(ButtonEntity):
         _LOGGER.info("Checking for available updates on %s", self._entry.data.get("host"))
 
         try:
-            updates = await self._api.get_available_updates()
-            # Store the result in coordinator data so sensors can display it
-            self._coordinator.data.updates_available = updates
+            await self._api.get_available_updates()
+            # Trigger coordinator refresh — it will fetch updates_available itself
             await self._coordinator.async_request_refresh()
+            updates = self._coordinator.data.updates_available or {}
 
             update_count = len(updates.get("system", [])) + len(updates.get("addons", []))
             if update_count > 0:

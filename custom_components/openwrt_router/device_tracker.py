@@ -27,6 +27,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import OpenWrtConfigEntry
 from .const import (
     CLIENT_KEY_IP,
+    CONF_PROTOCOL,
+    DEFAULT_PROTOCOL,
     CLIENT_KEY_MAC,
     CLIENT_KEY_RADIO,
     CLIENT_KEY_SIGNAL,
@@ -188,7 +190,8 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"http://{self._entry.data['host']}:{self._entry.data['port']}"
+                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
 

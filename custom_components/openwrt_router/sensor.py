@@ -50,9 +50,9 @@ from .const import (
     SUFFIX_MEMORY_CACHED,
     SUFFIX_MEMORY_FREE,
     SUFFIX_MEMORY_SHARED,
+    SUFFIX_MEMORY_TOTAL,
     SUFFIX_MEMORY_USAGE,
-    SUFFIX_NETWORK_RX_BYTES,
-    SUFFIX_NETWORK_TX_BYTES,
+    SUFFIX_MEMORY_USED,
     SUFFIX_PLATFORM_ARCHITECTURE,
     SUFFIX_TMPFS_FREE,
     SUFFIX_TMPFS_TOTAL,
@@ -65,6 +65,8 @@ from .const import (
     SUFFIX_WAN_RX,
     SUFFIX_WAN_STATUS,
     SUFFIX_WAN_TX,
+    CONF_PROTOCOL,
+    DEFAULT_PROTOCOL,
     KEY_UPDATES_AVAILABLE,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
@@ -154,6 +156,25 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
                 (data.memory.get("total", 0) - data.memory.get("free", 0)) / 1024 / 1024, 1
             ),
         },
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_MEMORY_TOTAL,
+        translation_key="memory_total",
+        device_class=SensorDeviceClass.DATA_SIZE,
+        native_unit_of_measurement=UnitOfInformation.MEGABYTES,
+        icon="mdi:memory",
+        value_fn=lambda data: round(data.memory.get("total", 0) / 1024 / 1024, 1),
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_MEMORY_USED,
+        translation_key="memory_used",
+        device_class=SensorDeviceClass.DATA_SIZE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfInformation.MEGABYTES,
+        icon="mdi:memory",
+        value_fn=lambda data: round(
+            (data.memory.get("total", 0) - data.memory.get("free", 0)) / 1024 / 1024, 1
+        ),
     ),
     OpenWrtSensorEntityDescription(
         key=SUFFIX_MEMORY_FREE,
@@ -387,7 +408,7 @@ class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
     """
 
     entity_description: OpenWrtSensorEntityDescription
-    _attr_has_entity_name = False
+    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -419,7 +440,8 @@ class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"http://{self._entry.data['host']}:{self._entry.data['port']}"
+                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
 

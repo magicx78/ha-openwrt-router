@@ -54,6 +54,12 @@
       "memory_usage": {
         "name": "Memory Usage"
       },
+      "memory_total": {
+        "name": "Memory Total"
+      },
+      "memory_used": {
+        "name": "Memory Used"
+      },
       "memory_free": {
         "name": "Memory Free"
       },
