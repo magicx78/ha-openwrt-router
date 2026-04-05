@@ -112,6 +112,8 @@ SUFFIX_CPU_LOAD = "cpu_load"
 SUFFIX_CPU_LOAD_5MIN = "cpu_load_5min"
 SUFFIX_CPU_LOAD_15MIN = "cpu_load_15min"
 SUFFIX_MEMORY_USAGE = "memory_usage"
+SUFFIX_MEMORY_TOTAL = "memory_total"
+SUFFIX_MEMORY_USED = "memory_used"
 SUFFIX_MEMORY_FREE = "memory_free"
 SUFFIX_MEMORY_CACHED = "memory_cached"
 SUFFIX_MEMORY_SHARED = "memory_shared"
@@ -127,8 +129,6 @@ SUFFIX_TMPFS_USAGE = "tmpfs_usage"
 SUFFIX_WAN_IP = "wan_ip"
 SUFFIX_WAN_RX = "wan_rx"
 SUFFIX_WAN_TX = "wan_tx"
-SUFFIX_NETWORK_RX_BYTES = "network_rx_bytes"
-SUFFIX_NETWORK_TX_BYTES = "network_tx_bytes"
 SUFFIX_ACTIVE_CONNECTIONS = "active_connections"
 SUFFIX_PLATFORM_ARCHITECTURE = "platform_architecture"
 SUFFIX_FIRMWARE = "firmware"
@@ -193,9 +193,9 @@ ERROR_UNKNOWN = "unknown"
 ERROR_TIMEOUT = "timeout"
 ERROR_INVALID_HOST = "invalid_host"
 
-# TODO: per-client online time - add CLIENT_KEY_CONNECTED_SINCE
+CLIENT_KEY_CONNECTED_SINCE = "connected_since"
+
 # TODO: parental control - add UBUS_PARENTAL_OBJECT
-# TODO: link quality metrics - add CLIENT_KEY_SIGNAL_QUALITY, CLIENT_KEY_NOISE
 
 # DHCP lease data key (coordinator)
 KEY_DHCP_LEASES = "dhcp_leases"

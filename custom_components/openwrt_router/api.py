@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
+import re
 import ssl
+import time
 from typing import Any
 
 import aiohttp
@@ -158,6 +161,11 @@ class OpenWrtAPI:
 
         # L-1: track consecutive login failures to suppress log spam
         self._login_failure_count: int = 0
+
+        # P-6: track consecutive auth failures for backoff (wrong credentials)
+        # After MAX_AUTH_FAILURES consecutive failures, stop retrying until reset.
+        self._auth_failure_count: int = 0
+        self._auth_backoff_until: float = 0.0
 
         # M-4: warn once when using the root account
         self._root_warning_logged: bool = False
@@ -520,10 +528,6 @@ class OpenWrtAPI:
             "tx_bytes": tx_bytes,
         }
 
-        # No WAN interface found – treat as disconnected
-        _LOGGER.debug("No WAN interface found in network dump")
-        return {"connected": False, "interface": "", "ipv4": "", "uptime": 0, "rx_bytes": 0, "tx_bytes": 0}
-
     async def get_wifi_status(self) -> list[dict[str, Any]]:
         """Return a list of WiFi radio / SSID descriptors.
 
@@ -608,7 +612,7 @@ class OpenWrtAPI:
                 _LOGGER.debug("WiFi method: SSH fallback")
                 return result
         except Exception as e:
-            _LOGGER.debug(f"SSH WiFi fallback failed: {e}")
+            _LOGGER.debug("SSH WiFi fallback failed: %s", e)
 
         self._wifi_method = "none"
         _LOGGER.debug(
@@ -782,9 +786,12 @@ class OpenWrtAPI:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
 
             if proc.returncode == 0:
-                import json
-
-                data = json.loads(stdout.decode())
+                try:
+                    data = json.loads(stdout.decode())
+                except ValueError as parse_err:
+                    raise OpenWrtResponseError(
+                        f"SSH system metrics returned invalid JSON: {parse_err}"
+                    ) from parse_err
                 _LOGGER.debug("SSH system metrics retrieved successfully")
                 return {
                     "uptime": data.get("uptime", 0),
@@ -844,9 +851,12 @@ class OpenWrtAPI:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
 
             if proc.returncode == 0:
-                import json
-
-                data = json.loads(stdout.decode())
+                try:
+                    data = json.loads(stdout.decode())
+                except ValueError as parse_err:
+                    raise OpenWrtResponseError(
+                        f"SSH WAN status returned invalid JSON: {parse_err}"
+                    ) from parse_err
                 _LOGGER.debug("SSH WAN status retrieved successfully")
                 return {
                     "connected": bool(data.get("wan_connected", False)),
@@ -883,10 +893,15 @@ class OpenWrtAPI:
         Raises:
             Exception: If SSH command fails.
         """
-        action_cmd = "enable-ssid" if enabled else "disable-ssid"
         action_desc = "enable" if enabled else "disable"
+        disabled_val = "0" if enabled else "1"
 
-        # Build SSH command using sshpass for password auth
+        # Use direct UCI commands — no helper script required on the router
+        uci_cmd = (
+            f"uci set wireless.{uci_section}.disabled='{disabled_val}' && "
+            f"uci commit wireless && "
+            f"wifi reload"
+        )
         ssh_cmd = [
             "sshpass",
             "-p",
@@ -897,7 +912,7 @@ class OpenWrtAPI:
             "-o",
             "UserKnownHostsFile=/dev/null",
             f"{self._username}@{self._host}",
-            f"/root/ha-wifi-control.sh {action_cmd} {uci_section}",
+            uci_cmd,
         ]
 
         try:
@@ -935,17 +950,17 @@ class OpenWrtAPI:
             raise
 
     async def _get_wifi_status_ssh(self) -> list[dict[str, Any]]:
-        """Get WiFi status via SSH script (fallback for ACL-restricted routers).
+        """Get WiFi status via direct UCI commands over SSH.
 
-        Calls /root/ha-wifi-control.sh status on the router via SSH.
+        Uses `uci show wireless` — no helper script required on the router.
 
         Returns:
-            List of radio dicts with WiFi status.
+            List of radio dicts compatible with get_wifi_status() output.
 
         Raises:
-            Exception: If SSH command fails.
+            OpenWrtResponseError: If SSH command fails.
+            OpenWrtTimeoutError: If SSH command times out.
         """
-        # Build SSH command using sshpass for password auth
         ssh_cmd = [
             "sshpass",
             "-p",
@@ -956,7 +971,7 @@ class OpenWrtAPI:
             "-o",
             "UserKnownHostsFile=/dev/null",
             f"{self._username}@{self._host}",
-            "/root/ha-wifi-control.sh status",
+            "uci show wireless",
         ]
 
         try:
@@ -967,48 +982,55 @@ class OpenWrtAPI:
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
 
-            if proc.returncode == 0:
-                import json
-                data = json.loads(stdout.decode())
-                _LOGGER.debug("SSH WiFi status retrieved successfully")
+            if proc.returncode != 0:
+                error_msg = stderr.decode().strip()
+                _LOGGER.error("SSH WiFi status (uci) failed: %s", error_msg)
+                raise OpenWrtResponseError(f"SSH uci show wireless failed: {error_msg}")
 
-                # Parse radio data from ha-wifi-control.sh status response
-                radios = []
-                for radio_name, radio_info in data.items():
-                    if not isinstance(radio_info, dict):
-                        continue
+            # Parse UCI output: wireless.<section>.<key>='<value>'
+            uci: dict[str, dict[str, str]] = {}
+            for line in stdout.decode().splitlines():
+                m = re.match(r"wireless\.(\w+)\.(\w+)='?([^']*)'?", line)
+                if m:
+                    section, key, val = m.group(1), m.group(2), m.group(3)
+                    uci.setdefault(section, {})[key] = val
 
-                    # Extract radio information
-                    interfaces = radio_info.get("interfaces", [])
-                    ssids = []
+            # Group wifi-iface sections by their parent radio device
+            radio_ifaces: dict[str, list[tuple[str, dict[str, str]]]] = {}
+            for section, attrs in uci.items():
+                device = attrs.get("device", "")
+                if device and "ssid" in attrs:
+                    radio_ifaces.setdefault(device, []).append((section, attrs))
 
-                    for iface in interfaces:
-                        if isinstance(iface, dict):
-                            config = iface.get("config", {})
-                            ssid = config.get("ssid", "")
-                            if ssid:
-                                ssids.append(ssid)
+            radios: list[dict[str, Any]] = []
+            for radio_name, iface_list in radio_ifaces.items():
+                radio_attrs = uci.get(radio_name, {})
+                band = radio_attrs.get("band", "unknown")
 
-                    band = radio_info.get("config", {}).get("band", "unknown")
-
+                for uci_section, attrs in iface_list:
+                    is_disabled = attrs.get("disabled", "0") == "1"
+                    ssid = attrs.get("ssid", "")
+                    is_guest = "guest" in uci_section.lower() or "guest" in ssid.lower()
                     radios.append({
-                        "radio": radio_name,
-                        "band": band,
-                        "disabled": radio_info.get("disabled", False),
-                        "ssids": ssids,
+                        RADIO_KEY_NAME: radio_name,
+                        RADIO_KEY_BAND: band,
+                        RADIO_KEY_ENABLED: not is_disabled,
+                        RADIO_KEY_SSID: ssid,
+                        RADIO_KEY_IFNAME: uci_section,
+                        RADIO_KEY_UCI_SECTION: uci_section,
+                        RADIO_KEY_IS_GUEST: is_guest,
                     })
 
-                return radios if radios else []
-            else:
-                error_msg = stderr.decode().strip()
-                _LOGGER.error("SSH WiFi status failed: %s", error_msg)
-                raise OpenWrtResponseError(f"SSH WiFi status failed: {error_msg}")
+            _LOGGER.debug("SSH WiFi status via uci: %d SSIDs found", len(radios))
+            return radios
 
         except asyncio.TimeoutError:
-            _LOGGER.error("SSH WiFi status timed out")
-            raise OpenWrtTimeoutError("SSH WiFi status timed out")
+            _LOGGER.error("SSH WiFi status (uci) timed out")
+            raise OpenWrtTimeoutError("SSH uci show wireless timed out")
+        except (OpenWrtResponseError, OpenWrtTimeoutError):
+            raise
         except Exception as err:
-            _LOGGER.error("SSH WiFi status error: %s", err)
+            _LOGGER.error("SSH WiFi status (uci) error: %s", err)
             raise
 
     async def reload_wifi(self) -> bool:
@@ -1388,52 +1410,51 @@ class OpenWrtAPI:
         return {}
 
     async def get_network_interfaces(self) -> list[dict[str, Any]]:
-        """Return network interface statistics (RX/TX bytes/packets/errors/dropped).
-
-        Reads /sys/class/net/{iface}/statistics/ for all network interfaces.
-        Falls back to empty list if unavailable.
+        """Return network interface statistics from network.interface/dump.
 
         Returns:
             [
                 {
                     "interface": str,
                     "rx_bytes": int,
-                    "rx_packets": int,
-                    "rx_errors": int,
-                    "rx_dropped": int,
                     "tx_bytes": int,
-                    "tx_packets": int,
-                    "tx_errors": int,
-                    "tx_dropped": int,
                     "status": "up" | "down",
                 },
                 ...
             ]
         """
         try:
-            # For now, return empty list as this requires file system access
-            # TODO: Implement via rpcd-mod-file to read /sys/class/net/ stats
-            return []
-
-        except (OpenWrtResponseError, OpenWrtTimeoutError) as err:
+            result = await self._call(UBUS_NETWORK_OBJECT, UBUS_NETWORK_DUMP, {})
+            interfaces: list[dict[str, Any]] = result.get("interface", [])
+            return [
+                {
+                    "interface": iface.get("interface", ""),
+                    "rx_bytes": iface.get("statistics", {}).get("rx_bytes", 0),
+                    "tx_bytes": iface.get("statistics", {}).get("tx_bytes", 0),
+                    "status": "up" if iface.get("up") else "down",
+                }
+                for iface in interfaces
+            ]
+        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError) as err:
             _LOGGER.debug("Could not fetch network interface stats: %s", err)
             return []
 
     async def get_active_connections(self) -> int:
-        """Return count of active network connections from connection tracking.
+        """Return count of active network connections.
 
-        Reads /proc/net/nf_conntrack or uses nf_conntrack sysctl to count active
-        connections. Returns 0 if nf_conntrack not available.
+        Reads /proc/net/nf_conntrack line count via rpcd-mod-file.
+        Returns 0 if nf_conntrack is not available on this router.
 
         Returns:
             Count of active connections (int).
         """
         try:
-            # For now, return 0 as this requires nf_conntrack module
-            # TODO: Implement via rpcd-mod-file to read /proc/net/nf_conntrack
-            return 0
-
-        except (OpenWrtResponseError, OpenWrtTimeoutError) as err:
+            result = await self._call("file", "read", {"path": "/proc/net/nf_conntrack"})
+            data: str = result.get("data", "")
+            if not data:
+                return 0
+            return sum(1 for line in data.splitlines() if line.strip())
+        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError) as err:
             _LOGGER.debug("Could not fetch active connections: %s", err)
             return 0
 
@@ -1586,41 +1607,49 @@ class OpenWrtAPI:
             # Log the command (note: we never log credentials)
             _LOGGER.debug("Update command: %s", cmd)
 
-            # Save the command to a temp script for execution
-            # We write a simple init.d-style script that runs in background
-            script_content = f"""#!/bin/sh
-{cmd} > /tmp/opkg_update.log 2>&1
-"""
-
-            # Write script to /tmp
-            script_path = "/tmp/opkg_update.sh"
-            write_result = await self._call(
-                UBUS_FILE_OBJECT,
-                "write",
-                {"path": script_path, "data": script_content},
+            # Execute update via SSH (rpcd-mod-file does not support write)
+            ssh_cmd = [
+                "sshpass",
+                "-p",
+                self._password,
+                "ssh",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                f"{self._username}@{self._host}",
+                f"nohup sh -c '{cmd} > /tmp/opkg_update.log 2>&1' &",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-
-            if write_result.get("code") != 0:
-                _LOGGER.error("Failed to write update script")
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+            if proc.returncode != 0:
+                error_msg = stderr.decode().strip()
+                _LOGGER.error("Update SSH command failed: %s", error_msg)
                 return {
                     "status": "error",
-                    "message": "Failed to prepare update script",
+                    "message": f"Update SSH command failed: {error_msg}",
                     "update_type": update_type,
                 }
 
-            # Schedule the script to run in background
-            # Note: This is a fire-and-forget operation on OpenWrt
-            _LOGGER.info(
-                "Update script prepared; will execute on router (%s)", update_type
-            )
-
+            _LOGGER.info("Update initiated on router via SSH (%s)", update_type)
             return {
                 "status": "initiated",
                 "message": f"Package update initiated ({update_type}). "
-                f"Check router logs for progress.",
+                "Check /tmp/opkg_update.log on the router for progress.",
                 "update_type": update_type,
             }
 
+        except asyncio.TimeoutError:
+            _LOGGER.error("Update SSH command timed out")
+            return {
+                "status": "error",
+                "message": "Update SSH command timed out",
+                "update_type": update_type,
+            }
         except (OpenWrtAuthError, OpenWrtResponseError) as err:
             _LOGGER.error("Update initiation failed: %s", err)
             return {
@@ -1656,13 +1685,42 @@ class OpenWrtAPI:
             OpenWrtAuthError: Auth failed even after re-login attempt.
             OpenWrtResponseError: Unexpected or malformed response.
         """
+        # P-6: if repeated auth failures suggest wrong credentials, stop hammering
+        _MAX_AUTH_FAILURES = 3
+        if self._auth_failure_count >= _MAX_AUTH_FAILURES:
+            now = time.monotonic()
+            if now < self._auth_backoff_until:
+                raise OpenWrtAuthError(
+                    "Authentication blocked after repeated failures — "
+                    "check credentials (backoff active)"
+                )
+            # Backoff expired: reset and try again
+            self._auth_failure_count = 0
+
         payload = self._build_call(ubus_object, method, params)
         try:
-            return await self._raw_call(payload)
+            result = await self._raw_call(payload)
+            # Successful call resets the auth failure counter
+            self._auth_failure_count = 0
+            return result
         except OpenWrtAuthError:
             if retry_on_auth:
                 _LOGGER.debug("Session expired, attempting re-login")
-                await self.login()
+                try:
+                    await self.login()
+                    self._auth_failure_count = 0
+                except OpenWrtAuthError:
+                    self._auth_failure_count += 1
+                    # Exponential backoff: 30s, 60s, 120s … capped at 300s
+                    backoff = min(30 * (2 ** (self._auth_failure_count - 1)), 300)
+                    self._auth_backoff_until = time.monotonic() + backoff
+                    _LOGGER.warning(
+                        "Auth failure %d/%d — next retry in %ds",
+                        self._auth_failure_count,
+                        _MAX_AUTH_FAILURES,
+                        backoff,
+                    )
+                    raise
                 payload = self._build_call(ubus_object, method, params)
                 return await self._raw_call(payload)
             raise
@@ -1864,6 +1922,10 @@ class OpenWrtAPI:
                     RADIO_KEY_ENABLED: True,  # iwinfo only shows up interfaces
                     RADIO_KEY_IS_GUEST: self._is_guest_ssid(ssid),
                     RADIO_KEY_UCI_SECTION: "",  # not available via iwinfo
+                    "noise": iface_data.get("noise"),
+                    "signal": iface_data.get("signal"),
+                    "quality": iface_data.get("quality"),
+                    "quality_max": iface_data.get("quality_max"),
                 }
             )
 

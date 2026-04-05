@@ -2,6 +2,40 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.4.0] - 2026-04-06
+
+### Added
+- **Per-Interface Bandwidth Sensors**: Dynamic `sensor.<iface>_rx` / `sensor.<iface>_tx` entities for every network interface (wan, loopback, br-lan, etc.) using existing `network.interface/dump` data
+- **Per-Client Online Time**: `connected_since` ISO timestamp attribute in device tracker entities — tracks when each WiFi client first connected (resets on HA restart)
+- **Radio Signal/Noise Sensors**: Dynamic `sensor.<iface>_signal` / `sensor.<iface>_noise` entities per WiFi radio (requires iwinfo support; only created when noise data available)
+
+### Technical
+- `coordinator.py`: Added `_client_first_seen` dict tracking UTC connection timestamps per MAC
+- `api.py`: Extended `_parse_iwinfo_info()` to extract noise/signal/quality/quality_max from iwinfo response
+- `const.py`: Added `CLIENT_KEY_CONNECTED_SINCE`
+
+---
+
+## [1.3.0] - 2026-04-05
+
+### Fixed
+- **Entity ID naming**: Sensors no longer include the config entry hash in their entity IDs (e.g. `sensor.openwrt_firmware_version` instead of `sensor.openwrt_router_01knfp2yyvf5j20wwpdze0sp99_firmware`)
+- **P1**: `perform_update()` — replaced non-existent `file/write` ubus call with SSH subprocess
+- **P2**: `get_network_interfaces()` now reads from `network.interface/dump`; `get_active_connections()` reads `/proc/net/nf_conntrack`
+- **P3**: Button entity no longer mutates coordinator data directly (race condition)
+- **P4**: `configuration_url` now uses the configured protocol (HTTP/HTTPS) in all entity platforms
+- **P5**: Removed unreachable dead code in `get_wan_status()`
+- **P6**: Exponential backoff on repeated auth failures (3 strikes → 30 s → 300 s max)
+- **P7**: SSH JSON parse calls wrapped in `try/except ValueError`
+- **P8**: Logging uses `%s` pattern instead of f-strings
+- **WiFi SSH fallback**: Uses direct UCI commands instead of a helper script that may not be present on all routers
+
+### Added
+- **Memory Total sensor**: Expose total RAM as a standalone sensor (`memory_total`)
+- **Memory Used sensor**: Expose used RAM as a standalone sensor (`memory_used`)
+
+---
+
 ## [1.2.0] - 2026-03-24
 
 ### Added

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -18,6 +18,7 @@ from .api import (
     OpenWrtResponseError,
 )
 from .const import (
+    CLIENT_KEY_CONNECTED_SINCE,
     CLIENT_KEY_MAC,
     BOARD_REFRESH_CYCLES,
     DOMAIN,
@@ -140,6 +141,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self.api = api
         self._features_detected = False
         self._board_poll_count = 0
+        self._client_first_seen: dict[str, datetime] = {}
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator interface
@@ -185,6 +187,26 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 radios=data.wifi_radios,
             )
             data.client_count = len(data.clients)
+
+            # --- Per-client online time tracking ---
+            now = datetime.now(UTC)
+            current_macs: set[str] = set()
+            for client in data.clients:
+                mac: str = client.get(CLIENT_KEY_MAC, "")
+                if not mac:
+                    continue
+                current_macs.add(mac)
+                if mac not in self._client_first_seen:
+                    self._client_first_seen[mac] = now
+                client[CLIENT_KEY_CONNECTED_SINCE] = (
+                    self._client_first_seen[mac].isoformat()
+                )
+            # Remove MACs that are no longer connected
+            self._client_first_seen = {
+                mac: ts
+                for mac, ts in self._client_first_seen.items()
+                if mac in current_macs
+            }
 
             # --- Priority 2: Dynamic system status ---
             status = await self.api.get_router_status()
