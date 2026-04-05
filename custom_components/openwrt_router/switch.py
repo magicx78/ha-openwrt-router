@@ -19,6 +19,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import OpenWrtConfigEntry
 from .api import OpenWrtAPI
 from .const import (
+    CONF_PROTOCOL,
+    DEFAULT_PROTOCOL,
     DOMAIN,
     RADIO_KEY_BAND,
     RADIO_KEY_ENABLED,
@@ -132,7 +134,8 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"http://{self._entry.data['host']}:{self._entry.data['port']}"
+                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
 
