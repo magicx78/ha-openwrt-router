@@ -193,9 +193,9 @@ ERROR_UNKNOWN = "unknown"
 ERROR_TIMEOUT = "timeout"
 ERROR_INVALID_HOST = "invalid_host"
 
-# TODO: per-client online time - add CLIENT_KEY_CONNECTED_SINCE
+CLIENT_KEY_CONNECTED_SINCE = "connected_since"
+
 # TODO: parental control - add UBUS_PARENTAL_OBJECT
-# TODO: link quality metrics - add CLIENT_KEY_SIGNAL_QUALITY, CLIENT_KEY_NOISE
 
 # DHCP lease data key (coordinator)
 KEY_DHCP_LEASES = "dhcp_leases"

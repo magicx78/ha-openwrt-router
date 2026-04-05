@@ -26,6 +26,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import OpenWrtConfigEntry
 from .const import (
+    CLIENT_KEY_CONNECTED_SINCE,
     CLIENT_KEY_IP,
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
@@ -176,6 +177,7 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
             "radio": client.get(CLIENT_KEY_RADIO, ""),
             "signal": client.get(CLIENT_KEY_SIGNAL, 0),
             "ip_address": client.get(CLIENT_KEY_IP, ""),
+            "connected_since": client.get(CLIENT_KEY_CONNECTED_SINCE),
         }
 
     @property
@@ -195,5 +197,4 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
             ),
         )
 
-    # TODO: add per-client online time once CLIENT_KEY_CONNECTED_SINCE is implemented
     # TODO: add parental control support once the parental control API is implemented

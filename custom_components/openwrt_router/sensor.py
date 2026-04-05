@@ -385,9 +385,11 @@ async def async_setup_entry(
         entry: Config entry carrying runtime_data.
         async_add_entities: Callback to register new entities with HA.
     """
+    from homeassistant.core import callback
+
     coordinator: OpenWrtCoordinator = entry.runtime_data.coordinator
 
-    entities = [
+    static_entities: list[SensorEntity] = [
         OpenWrtSensorEntity(
             coordinator=coordinator,
             entry=entry,
@@ -395,9 +397,46 @@ async def async_setup_entry(
         )
         for description in SENSOR_DESCRIPTIONS
     ]
+    async_add_entities(static_entities)
 
-    async_add_entities(entities)
-    _LOGGER.debug("Added %d OpenWrt sensor entities", len(entities))
+    # Track which dynamic entities have already been created
+    tracked_interfaces: set[str] = set()
+    tracked_radios: set[str] = set()
+
+    @callback
+    def _add_dynamic_sensors() -> None:
+        """Create per-interface and per-radio sensors when data is available."""
+        if not coordinator.data:
+            return
+
+        new_entities: list[SensorEntity] = []
+
+        for iface in coordinator.data.network_interfaces:
+            ifname = iface.get("interface", "")
+            if not ifname or ifname in tracked_interfaces:
+                continue
+            tracked_interfaces.add(ifname)
+            new_entities.append(OpenWrtInterfaceSensor(coordinator, entry, ifname, "rx_bytes"))
+            new_entities.append(OpenWrtInterfaceSensor(coordinator, entry, ifname, "tx_bytes"))
+            _LOGGER.debug("Adding bandwidth sensors for interface %s", ifname)
+
+        for radio in coordinator.data.wifi_radios:
+            ifname = radio.get("ifname", "")
+            if not ifname or ifname in tracked_radios:
+                continue
+            if radio.get("noise") is not None:
+                tracked_radios.add(ifname)
+                new_entities.append(OpenWrtRadioSensor(coordinator, entry, ifname, "noise"))
+                new_entities.append(OpenWrtRadioSensor(coordinator, entry, ifname, "signal"))
+                _LOGGER.debug("Adding signal/noise sensors for radio %s", ifname)
+
+        if new_entities:
+            async_add_entities(new_entities)
+
+    _add_dynamic_sensors()
+    entry.async_on_unload(coordinator.async_add_listener(_add_dynamic_sensors))
+
+    _LOGGER.debug("Added %d static OpenWrt sensor entities", len(static_entities))
 
 
 class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
@@ -467,6 +506,137 @@ class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
             return self.entity_description.extra_attrs_fn(self.coordinator.data)
         except Exception:  # noqa: BLE001
             return {}
+
+
+class OpenWrtInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
+    """Bandwidth sensor for a single network interface (RX or TX bytes).
+
+    Created dynamically for each interface found in coordinator.data.network_interfaces.
+    """
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.DATA_SIZE
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_native_unit_of_measurement = UnitOfInformation.BYTES
+
+    def __init__(
+        self,
+        coordinator: OpenWrtCoordinator,
+        entry: OpenWrtConfigEntry,
+        interface: str,
+        metric: str,  # "rx_bytes" or "tx_bytes"
+    ) -> None:
+        super().__init__(coordinator)
+        self._interface = interface
+        self._metric = metric
+        self._entry = entry
+        direction = "rx" if metric == "rx_bytes" else "tx"
+        self._attr_unique_id = f"{entry.entry_id}_{interface}_{direction}"
+        self._attr_translation_key = f"interface_{direction}"
+        self._attr_icon = "mdi:download-network" if direction == "rx" else "mdi:upload-network"
+
+    @property
+    def name(self) -> str:
+        """Return sensor name including interface name."""
+        direction = "RX" if self._metric == "rx_bytes" else "TX"
+        return f"{self._interface} {direction}"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return current byte count for this interface."""
+        if not self.coordinator.data:
+            return None
+        for iface in self.coordinator.data.network_interfaces:
+            if iface.get("interface") == self._interface:
+                return iface.get(self._metric)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return interface status."""
+        if not self.coordinator.data:
+            return {}
+        for iface in self.coordinator.data.network_interfaces:
+            if iface.get("interface") == self._interface:
+                return {"status": iface.get("status", "unknown")}
+        return {}
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Group under the router device card."""
+        router_info = self.coordinator.router_info
+        release = router_info.get("release", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=router_info.get("hostname") or self._entry.title,
+            manufacturer="OpenWrt",
+            model=router_info.get("model", "OpenWrt Router"),
+            sw_version=release.get("version", ""),
+            configuration_url=(
+                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
+            ),
+        )
+
+
+class OpenWrtRadioSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
+    """Signal quality sensor for a single WiFi radio interface.
+
+    Created dynamically for each radio that exposes noise/signal via iwinfo.
+    """
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "dBm"
+
+    def __init__(
+        self,
+        coordinator: OpenWrtCoordinator,
+        entry: OpenWrtConfigEntry,
+        ifname: str,
+        metric: str,  # "noise" or "signal"
+    ) -> None:
+        super().__init__(coordinator)
+        self._ifname = ifname
+        self._metric = metric
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_radio_{ifname}_{metric}"
+        self._attr_translation_key = f"radio_{metric}"
+        self._attr_icon = "mdi:wifi-strength-2" if metric == "signal" else "mdi:sine-wave"
+
+    @property
+    def name(self) -> str:
+        """Return sensor name including interface name."""
+        label = "Signal" if self._metric == "signal" else "Noise"
+        return f"{self._ifname} {label}"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return current dBm value."""
+        if not self.coordinator.data:
+            return None
+        for radio in self.coordinator.data.wifi_radios:
+            if radio.get("ifname") == self._ifname:
+                val = radio.get(self._metric)
+                return int(val) if val is not None else None
+        return None
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Group under the router device card."""
+        router_info = self.coordinator.router_info
+        release = router_info.get("release", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=router_info.get("hostname") or self._entry.title,
+            manufacturer="OpenWrt",
+            model=router_info.get("model", "OpenWrt Router"),
+            sw_version=release.get("version", ""),
+            configuration_url=(
+                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
+            ),
+        )
 
 
 # ------------------------------------------------------------------
