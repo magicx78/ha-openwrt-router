@@ -939,9 +939,10 @@ class OpenWrtAPI:
             "Setting WiFi section %s %s (disabled=%s)", uci_section, action, disabled_value
         )
 
-        # Try ubus/UCI first
+        # Step 1: Stage UCI change
+        staged = False
+        set_err: Exception | None = None
         try:
-            # Set UCI value
             await self._call(
                 UBUS_UCI_OBJECT,
                 UBUS_UCI_SET,
@@ -951,61 +952,79 @@ class OpenWrtAPI:
                     "values": {"disabled": disabled_value},
                 },
             )
-            _LOGGER.debug("UCI set successful for %s", uci_section)
-
-            # Commit changes
-            await self._call(
-                UBUS_UCI_OBJECT,
-                UBUS_UCI_COMMIT,
-                {"config": "wireless"},
-            )
-            _LOGGER.debug("UCI commit successful")
-
-            # Reload network config
-            await self.reload_wifi()
-            _LOGGER.info("WiFi section %s %s successfully", uci_section, action)
-            return True
-
+            staged = True
+            _LOGGER.debug("UCI set staged for %s (disabled=%s)", uci_section, disabled_value)
         except (
             OpenWrtMethodNotFoundError,
             OpenWrtResponseError,
             OpenWrtTimeoutError,
             OpenWrtConnectionError,
         ) as err:
-            err_str = str(err).lower()
-            if "access denied" in err_str or "permission" in err_str:
-                _LOGGER.warning(
-                    "uci/commit access denied — trying network.wireless reload fallback: %s", err
-                )
+            set_err = err
+            _LOGGER.debug("UCI set failed for %s: %s", uci_section, err)
 
-                # Fallback 1: network.wireless/up or /down (OpenWrt 21+/25)
-                # This applies pending UCI changes without needing explicit commit ACL
-                try:
-                    reload_method = "up" if enabled else "down"
-                    await self._call(UBUS_WIRELESS_OBJECT, reload_method, {})
-                    _LOGGER.info(
-                        "WiFi section %s %s via network.wireless/%s",
-                        uci_section, action, reload_method,
+        # Step 2: Commit — or try alternative apply paths
+        if staged:
+            try:
+                await self._call(UBUS_UCI_OBJECT, UBUS_UCI_COMMIT, {"config": "wireless"})
+                _LOGGER.debug("UCI commit successful")
+                await self.reload_wifi()
+                _LOGGER.info("WiFi section %s %s successfully", uci_section, action)
+                return True
+            except (
+                OpenWrtMethodNotFoundError,
+                OpenWrtResponseError,
+                OpenWrtTimeoutError,
+                OpenWrtConnectionError,
+            ) as commit_err:
+                err_str = str(commit_err).lower()
+                if "access denied" in err_str or "permission" in err_str:
+                    _LOGGER.warning(
+                        "uci/commit blocked — trying uci/apply fallback for %s: %s",
+                        uci_section, commit_err,
                     )
-                    return True
-                except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtTimeoutError):
-                    _LOGGER.debug("network.wireless/%s not available", reload_method)
+                    # Fallback 1: uci/apply — same effect as commit but separate ACL entry
+                    try:
+                        await self._call(
+                            UBUS_UCI_OBJECT,
+                            "apply",
+                            {"rollback": False, "timeout": 0},
+                        )
+                        _LOGGER.info(
+                            "WiFi section %s %s via uci/apply", uci_section, action
+                        )
+                        return True
+                    except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtTimeoutError):
+                        _LOGGER.debug("uci/apply not available")
 
-                # Fallback 2: SSH
-                try:
-                    return await self._set_wifi_state_ssh(uci_section, enabled)
-                except Exception as ssh_err:
-                    _LOGGER.error("SSH fallback also failed: %s", ssh_err)
+                    # Revert the staged-but-uncommitted change to keep router clean
+                    try:
+                        await self._call(
+                            UBUS_UCI_OBJECT, "revert", {"config": "wireless"}
+                        )
+                        _LOGGER.debug("Reverted staged UCI change for wireless")
+                    except Exception:
+                        pass
 
-                raise OpenWrtResponseError(
-                    f"Failed to {action} WiFi section {uci_section} (ubus blocked, SSH failed): {err}. "
-                    "Fix: grant 'uci commit' permission in rpcd ACL — see README."
-                ) from err
+                    set_err = commit_err  # surface commit error in final message
+                else:
+                    _LOGGER.error("UCI commit failed for %s: %s", uci_section, commit_err)
+                    raise OpenWrtResponseError(
+                        f"Failed to {action} WiFi section {uci_section}: {commit_err}"
+                    ) from commit_err
 
-            _LOGGER.error("Failed to %s WiFi section %s: %s", action, uci_section, err)
-            raise OpenWrtResponseError(
-                f"Failed to {action} WiFi section {uci_section}: {err}"
-            ) from err
+        # Fallback 2: SSH (works even when rpcd ACL blocks uci/commit)
+        try:
+            return await self._set_wifi_state_ssh(uci_section, enabled)
+        except Exception as ssh_err:
+            _LOGGER.debug("SSH fallback failed: %s", ssh_err)
+
+        root_err = set_err or Exception("uci/set and uci/commit both blocked")
+        raise OpenWrtResponseError(
+            f"Cannot {action} WiFi section '{uci_section}': rpcd ACL blocks uci/commit "
+            f"and SSH fallback is unavailable. "
+            f"Fix: add 'uci commit wireless' permission to the rpcd ACL for this user."
+        ) from root_err
 
     async def _get_router_status_ssh(self) -> dict[str, Any]:
         """Get router status via SSH script (fallback for ACL-restricted routers).
