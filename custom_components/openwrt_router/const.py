@@ -178,6 +178,16 @@ RADIO_KEY_IS_GUEST = "is_guest"
 RADIO_KEY_IFNAME = "ifname"
 RADIO_KEY_UCI_SECTION = "uci_section"
 
+# AP Interface detail keys (from iwinfo/info and network.wireless/status)
+RADIO_KEY_CHANNEL = "channel"
+RADIO_KEY_FREQUENCY = "frequency"
+RADIO_KEY_TXPOWER = "txpower"
+RADIO_KEY_BITRATE = "bitrate"
+RADIO_KEY_HWMODE = "hwmode"
+RADIO_KEY_HTMODE = "htmode"
+RADIO_KEY_MODE = "mode"    # "Master" | "Client" | "Monitor" | None
+RADIO_KEY_BSSID = "bssid"
+
 # Client data keys
 CLIENT_KEY_MAC = "mac"
 CLIENT_KEY_IP = "ip"
@@ -199,3 +209,16 @@ CLIENT_KEY_CONNECTED_SINCE = "connected_since"
 
 # DHCP lease data key (coordinator)
 KEY_DHCP_LEASES = "dhcp_leases"
+
+# Service Management (procd / rc)
+UBUS_RC_OBJECT = "rc"
+UBUS_RC_LIST = "list"
+UBUS_RC_INIT = "init"
+UBUS_SERVICE_OBJECT = "service"
+UBUS_SERVICE_LIST = "list"
+
+# Services to monitor/control by default (OpenWrt critical services)
+DEFAULT_SERVICES = ["dnsmasq", "dropbear", "firewall", "network", "uhttpd", "wpad"]
+
+KEY_SERVICES = "services"
+FEATURE_HAS_SERVICES = "has_services"

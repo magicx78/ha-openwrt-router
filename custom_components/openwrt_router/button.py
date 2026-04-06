@@ -22,6 +22,7 @@ from .api import OpenWrtAPI
 from .const import (
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
+    DEFAULT_SERVICES,
     DOMAIN,
     SUFFIX_RELOAD_WIFI,
     SUFFIX_CHECK_UPDATES,
@@ -78,7 +79,7 @@ async def async_setup_entry(
     coordinator: OpenWrtCoordinator = entry.runtime_data.coordinator
     api: OpenWrtAPI = entry.runtime_data.api
 
-    entities = [
+    entities: list[OpenWrtButtonEntity | OpenWrtServiceRestartButton] = [
         OpenWrtButtonEntity(
             coordinator=coordinator,
             api=api,
@@ -87,6 +88,20 @@ async def async_setup_entry(
         )
         for description in BUTTON_DESCRIPTIONS
     ]
+
+    # --- Service restart buttons (one per detected service) ---
+    if coordinator.data:
+        detected_names = {s["name"] for s in coordinator.data.services}
+        for svc_name in DEFAULT_SERVICES:
+            if svc_name in detected_names:
+                entities.append(
+                    OpenWrtServiceRestartButton(
+                        coordinator=coordinator,
+                        api=api,
+                        entry=entry,
+                        service_name=svc_name,
+                    )
+                )
 
     async_add_entities(entities)
     _LOGGER.debug("Added %d OpenWrt button entities", len(entities))
@@ -246,3 +261,59 @@ class OpenWrtButtonEntity(ButtonEntity):
                 self._entry.data.get("host"),
                 err,
             )
+
+
+class OpenWrtServiceRestartButton(ButtonEntity):
+    """A button that restarts a single procd/rc service on the router."""
+
+    _attr_has_entity_name = False
+    _attr_device_class = ButtonDeviceClass.RESTART
+
+    _SERVICE_ICONS: dict[str, str] = {
+        "dnsmasq": "mdi:dns",
+        "dropbear": "mdi:console-network",
+        "firewall": "mdi:wall-fire",
+        "network": "mdi:lan",
+        "uhttpd": "mdi:web",
+        "wpad": "mdi:wifi-lock",
+    }
+
+    def __init__(
+        self,
+        coordinator: OpenWrtCoordinator,
+        api: OpenWrtAPI,
+        entry: OpenWrtConfigEntry,
+        service_name: str,
+    ) -> None:
+        self._coordinator = coordinator
+        self._api = api
+        self._entry = entry
+        self._service_name = service_name
+        self._attr_unique_id = f"{entry.entry_id}_service_{service_name}_restart"
+        self._attr_name = f"Restart: {service_name}"
+        self._attr_icon = self._SERVICE_ICONS.get(service_name, "mdi:restart")
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        router_info = self._coordinator.router_info
+        release = router_info.get("release", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=router_info.get("hostname") or self._entry.title,
+            manufacturer="OpenWrt",
+            model=router_info.get("model", "OpenWrt Router"),
+            sw_version=release.get("version", ""),
+            configuration_url=(
+                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
+            ),
+        )
+
+    async def async_press(self) -> None:
+        _LOGGER.info("Restarting service %s", self._service_name)
+        success = await self._api.control_service(self._service_name, "restart")
+        if success:
+            _LOGGER.info("Service %s restarted successfully", self._service_name)
+        else:
+            _LOGGER.warning("Failed to restart service %s", self._service_name)
+        await self._coordinator.async_request_refresh()

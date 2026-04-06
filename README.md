@@ -1,11 +1,11 @@
 # OpenWrt Router – Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.6.0-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.6.0)
+[![Version](https://img.shields.io/badge/version-1.7.0-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.7.0)
 
 A production-ready Home Assistant custom integration for [OpenWrt](https://openwrt.org/) routers, communicating via the built-in **ubus / rpcd JSON-RPC API**.
 
-**Current Version:** v1.6.0 — Bandwidth Rate Sensors (bytes/s), Traffic Charts ✅
+**Current Version:** v1.7.0 — Service Management (start/stop/restart dnsmasq, firewall, dropbear, …) ✅
 
 ## Features
 
@@ -30,6 +30,9 @@ A production-ready Home Assistant custom integration for [OpenWrt](https://openw
   - Signal strength attribute per client
 
 ### Management & Control
+- **Service Management** (v1.7.0): Monitor and control procd/rc system services
+  - Start/Stop switches: `dnsmasq`, `dropbear`, `firewall`, `network`, `uhttpd`, `wpad`
+  - Restart buttons per service — auto-discovered from router
 - **Update Management**: Check for system/addon package updates, perform selective updates
 - **Button Actions**: Reload WiFi, Check Updates, Perform Updates
 - **SSL/HTTPS**: Secure connections with self-signed certificate support
@@ -40,6 +43,7 @@ A production-ready Home Assistant custom integration for [OpenWrt](https://openw
 
 | Version | Release Date | Key Features |
 |---------|---|---|
+| **1.7.0** | 2026-04-06 | Service management (start/stop/restart), OpenWrt 25 bugfixes |
 | **1.6.0** | 2026-04-06 | Bandwidth rate sensors (bytes/s), traffic chart support |
 | **1.5.0** | 2026-04-06 | QA strategy, regression tests, test fixtures, ruff CI, 268 tests |
 | **1.4.0** | 2026-04-06 | Per-interface bandwidth sensors, per-client online time, radio signal/noise |
@@ -188,9 +192,8 @@ Config Flow → Config Entry → OpenWrtRuntimeData
 
 ## Roadmap
 
-- [ ] Bandwidth rate sensors (bytes/s, not just total)
 - [ ] Parental control support
-- [ ] Per-interface traffic charts/history
+- [ ] Per-interface traffic charts/history (long-term statistics visualization)
 
 ## Contributing
 

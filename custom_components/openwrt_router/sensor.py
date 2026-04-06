@@ -24,6 +24,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     EntityCategory,
     UnitOfDataRate,
+    UnitOfFrequency,
     UnitOfInformation,
     UnitOfTime,
     PERCENTAGE,
@@ -68,6 +69,18 @@ from .const import (
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
     KEY_UPDATES_AVAILABLE,
+    RADIO_KEY_BAND,
+    RADIO_KEY_BITRATE,
+    RADIO_KEY_BSSID,
+    RADIO_KEY_CHANNEL,
+    RADIO_KEY_FREQUENCY,
+    RADIO_KEY_HTMODE,
+    RADIO_KEY_HWMODE,
+    RADIO_KEY_IFNAME,
+    RADIO_KEY_MODE,
+    RADIO_KEY_SSID,
+    RADIO_KEY_TXPOWER,
+    CLIENT_KEY_RADIO,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
 
@@ -402,10 +415,15 @@ async def async_setup_entry(
     # Track which dynamic entities have already been created
     tracked_interfaces: set[str] = set()
     tracked_radios: set[str] = set()
+    tracked_ap_metrics: set[str] = set()  # "ifname_metric"
+
+    # AP metrics always created when available; optional ones only if value non-None
+    _AP_METRICS_ALWAYS = ("channel", "mode", "quality", "ap_clients")
+    _AP_METRICS_OPTIONAL = ("frequency", "txpower", "bitrate", "hwmode", "htmode")
 
     @callback
     def _add_dynamic_sensors() -> None:
-        """Create per-interface and per-radio sensors when data is available."""
+        """Create per-interface, per-radio, and per-AP-interface sensors when data is available."""
         if not coordinator.data:
             return
 
@@ -424,13 +442,34 @@ async def async_setup_entry(
 
         for radio in coordinator.data.wifi_radios:
             ifname = radio.get("ifname", "")
-            if not ifname or ifname in tracked_radios:
+            if not ifname:
                 continue
-            if radio.get("noise") is not None:
+
+            # Signal/noise sensors (existing, only when iwinfo available)
+            if ifname not in tracked_radios and radio.get("noise") is not None:
                 tracked_radios.add(ifname)
                 new_entities.append(OpenWrtRadioSensor(coordinator, entry, ifname, "noise"))
                 new_entities.append(OpenWrtRadioSensor(coordinator, entry, ifname, "signal"))
                 _LOGGER.debug("Adding signal/noise sensors for radio %s", ifname)
+
+            # (AP interface detail sensors are created from coordinator.data.ap_interfaces below)
+
+        # AP interface detail sensors from ap_interfaces (populated after get_connected_clients)
+        for ap_iface in coordinator.data.ap_interfaces:
+            ifname = ap_iface.get(RADIO_KEY_IFNAME, "")
+            if not ifname:
+                continue
+            for metric in _AP_METRICS_ALWAYS + _AP_METRICS_OPTIONAL:
+                key = f"{ifname}_{metric}"
+                if key in tracked_ap_metrics:
+                    continue
+                if metric in _AP_METRICS_OPTIONAL and ap_iface.get(metric) is None:
+                    continue
+                if metric == "quality" and ap_iface.get("quality") is None:
+                    continue
+                tracked_ap_metrics.add(key)
+                new_entities.append(OpenWrtAPInterfaceSensor(coordinator, entry, ifname, metric))
+                _LOGGER.debug("Adding AP interface sensor %s for %s", metric, ifname)
 
         if new_entities:
             async_add_entities(new_entities)
@@ -694,6 +733,134 @@ class OpenWrtRadioSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
                 val = radio.get(self._metric)
                 return int(val) if val is not None else None
         return None
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Group under the router device card."""
+        router_info = self.coordinator.router_info
+        release = router_info.get("release", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=router_info.get("hostname") or self._entry.title,
+            manufacturer="OpenWrt",
+            model=router_info.get("model", "OpenWrt Router"),
+            sw_version=release.get("version", ""),
+            configuration_url=(
+                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
+            ),
+        )
+
+
+class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
+    """AP Interface sensor for a single WiFi radio.
+
+    Created dynamically per interface for each available metric:
+    channel, frequency, txpower, bitrate, hwmode, htmode, mode,
+    signal quality (%), and per-AP connected client count.
+
+    Signal (dBm) and Noise (dBm) are handled by OpenWrtRadioSensor.
+    """
+
+    _attr_has_entity_name = True
+
+    # metric → (icon, unit, device_class, state_class)
+    _METRIC_CONFIG: dict[str, tuple[str, str | None, str | None, str | None]] = {
+        "channel":   ("mdi:wifi-marker",         None,                                    None,                          None),
+        "frequency":  ("mdi:sine-wave",           UnitOfFrequency.MEGAHERTZ,              SensorDeviceClass.FREQUENCY,   None),
+        "txpower":    ("mdi:transmission-tower",  "dBm",                                  None,                          SensorStateClass.MEASUREMENT),
+        "bitrate":    ("mdi:speedometer",         UnitOfDataRate.MEGABITS_PER_SECOND,     SensorDeviceClass.DATA_RATE,   SensorStateClass.MEASUREMENT),
+        "hwmode":     ("mdi:chip",                None,                                    None,                          None),
+        "htmode":     ("mdi:cog-box",             None,                                    None,                          None),
+        "mode":       ("mdi:wifi-cog",            None,                                    None,                          None),
+        "quality":    ("mdi:signal",              PERCENTAGE,                              None,                          SensorStateClass.MEASUREMENT),
+        "ap_clients": ("mdi:account-network",     None,                                    None,                          SensorStateClass.MEASUREMENT),
+    }
+
+    def __init__(
+        self,
+        coordinator: OpenWrtCoordinator,
+        entry: OpenWrtConfigEntry,
+        ifname: str,
+        metric: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._ifname = ifname
+        self._metric = metric
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_ap_{ifname}_{metric}"
+
+        cfg = self._METRIC_CONFIG.get(metric, ("mdi:wifi", None, None, None))
+        self._attr_icon = cfg[0]
+        self._attr_native_unit_of_measurement = cfg[1]
+        self._attr_device_class = cfg[2]
+        self._attr_state_class = cfg[3]
+
+    @property
+    def name(self) -> str:
+        """Human-readable sensor name."""
+        labels = {
+            "channel":   "Channel",
+            "frequency":  "Frequency",
+            "txpower":    "TX Power",
+            "bitrate":    "Bitrate",
+            "hwmode":     "HW Mode",
+            "htmode":     "HT Mode",
+            "mode":       "Mode",
+            "quality":    "Signal Quality",
+            "ap_clients": "AP Clients",
+        }
+        return f"{self._ifname} {labels.get(self._metric, self._metric)}"
+
+    @property
+    def native_value(self) -> int | float | str | None:
+        """Return current value for this AP interface metric."""
+        if not self.coordinator.data:
+            return None
+
+        if self._metric == "ap_clients":
+            return sum(
+                1
+                for c in self.coordinator.data.clients
+                if c.get(CLIENT_KEY_RADIO) == self._ifname
+            )
+
+        ap_iface = next(
+            (a for a in self.coordinator.data.ap_interfaces if a.get(RADIO_KEY_IFNAME) == self._ifname),
+            None,
+        )
+        if ap_iface is None:
+            return None
+        if self._metric == "quality":
+            quality = ap_iface.get("quality")
+            quality_max = ap_iface.get("quality_max") or 100
+            if quality is None:
+                return None
+            return round(quality / quality_max * 100)
+        return ap_iface.get(self._metric)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes depending on metric."""
+        if not self.coordinator.data:
+            return {}
+        radio: dict[str, Any] = next(
+            (a for a in self.coordinator.data.ap_interfaces if a.get(RADIO_KEY_IFNAME) == self._ifname),
+            {},
+        )
+        if self._metric == "mode":
+            return {
+                "ssid": radio.get(RADIO_KEY_SSID),
+                "bssid": radio.get(RADIO_KEY_BSSID),
+                "band": radio.get(RADIO_KEY_BAND),
+            }
+        if self._metric == "channel":
+            return {
+                "frequency_mhz": radio.get(RADIO_KEY_FREQUENCY),
+                "htmode": radio.get(RADIO_KEY_HTMODE),
+                "hwmode": radio.get(RADIO_KEY_HWMODE),
+            }
+        return {}
 
     @property
     def device_info(self) -> DeviceInfo:

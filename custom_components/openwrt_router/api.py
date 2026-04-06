@@ -32,11 +32,19 @@ from .const import (
     RADIO_BAND_5GHZ_KEYWORDS,
     RADIO_BAND_6GHZ_KEYWORDS,
     RADIO_KEY_BAND,
+    RADIO_KEY_BITRATE,
+    RADIO_KEY_BSSID,
+    RADIO_KEY_CHANNEL,
     RADIO_KEY_ENABLED,
+    RADIO_KEY_FREQUENCY,
+    RADIO_KEY_HTMODE,
+    RADIO_KEY_HWMODE,
     RADIO_KEY_IFNAME,
     RADIO_KEY_IS_GUEST,
+    RADIO_KEY_MODE,
     RADIO_KEY_NAME,
     RADIO_KEY_SSID,
+    RADIO_KEY_TXPOWER,
     RADIO_KEY_UCI_SECTION,
     UBUS_FILE_OBJECT,
     UBUS_FILE_READ,
@@ -158,6 +166,11 @@ class OpenWrtAPI:
         # Set on first get_wifi_status() call and reused to avoid retrying
         # known-unavailable APIs on every poll cycle.
         self._wifi_method: str | None = None
+
+        # Cached hostapd interface names (e.g. ["phy0-ap0"]).
+        # Populated on first get_connected_clients() call via discovery.
+        # None = not yet discovered; [] = no interfaces found.
+        self._hostapd_ifaces: list[str] | None = None
 
         # L-1: track consecutive login failures to suppress log spam
         self._login_failure_count: int = 0
@@ -620,6 +633,124 @@ class OpenWrtAPI:
         )
         return []
 
+    async def get_ap_interface_details(self) -> list[dict[str, Any]]:
+        """Return per-interface AP details.
+
+        Primary path: iwinfo/info per-device (routers with iwinfo via rpcd).
+        Fallback: UCI wireless config (routers without iwinfo, e.g. Cudy WR3000).
+
+        Called after get_connected_clients() so that self._hostapd_ifaces is
+        already populated.  Each entry mirrors the RADIO_KEY_* schema so that
+        OpenWrtAPInterfaceSensor can read from coordinator.data.ap_interfaces.
+
+        Returns:
+            List of dicts, one per discovered AP interface.
+        """
+        result: list[dict[str, Any]] = []
+
+        # Primary path: iwinfo per-device (requires hostapd iface discovery)
+        ifnames: list[str] = self._hostapd_ifaces or []
+        for ifname in ifnames:
+            try:
+                info = await self._call(
+                    UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {"device": ifname}
+                )
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                _LOGGER.debug("iwinfo/info unavailable for %s", ifname)
+                continue
+
+            band = self._detect_band(ifname, info)
+            ssid: str = info.get("ssid", "")
+            result.append(
+                {
+                    RADIO_KEY_IFNAME: ifname,
+                    RADIO_KEY_SSID: ssid,
+                    RADIO_KEY_BAND: band,
+                    RADIO_KEY_IS_GUEST: self._is_guest_ssid(ssid),
+                    RADIO_KEY_MODE: info.get("mode"),
+                    RADIO_KEY_BSSID: info.get("bssid"),
+                    RADIO_KEY_CHANNEL: info.get("channel"),
+                    RADIO_KEY_FREQUENCY: info.get("frequency"),
+                    RADIO_KEY_TXPOWER: info.get("txpower"),
+                    RADIO_KEY_BITRATE: info.get("bitrate"),
+                    RADIO_KEY_HWMODE: info.get("hwmode"),
+                    RADIO_KEY_HTMODE: info.get("htmode"),
+                    "signal": info.get("signal"),
+                    "noise": info.get("noise"),
+                    "quality": info.get("quality"),
+                    "quality_max": info.get("quality_max"),
+                }
+            )
+            _LOGGER.debug(
+                "AP interface %s: mode=%s ch=%s freq=%s hwmode=%s htmode=%s",
+                ifname, info.get("mode"), info.get("channel"),
+                info.get("frequency"), info.get("hwmode"), info.get("htmode"),
+            )
+
+        if result:
+            return result
+
+        # Fallback: UCI wireless config for routers without iwinfo via rpcd.
+        # Uses UCI section name (e.g. "default_radio0") as stable RADIO_KEY_IFNAME.
+        if self._wifi_method == "uci":
+            try:
+                values = await self.get_uci_wireless()
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                _LOGGER.debug("UCI wireless config unavailable for AP interface details")
+                return []
+
+            devices: dict[str, dict[str, Any]] = {}
+            ifaces: list[tuple[int, str, dict[str, Any]]] = []
+            for section_name, section_data in values.items():
+                if not isinstance(section_data, dict):
+                    continue
+                if section_data.get(".type") == "wifi-device":
+                    devices[section_name] = section_data
+                elif section_data.get(".type") == "wifi-iface":
+                    ifaces.append(
+                        (section_data.get(".index", 0), section_name, section_data)
+                    )
+
+            for _index, section_name, section_data in sorted(ifaces, key=lambda t: t[0]):
+                device_name: str = section_data.get("device", "")
+                device_data = devices.get(device_name, {})
+                ssid_uci: str = section_data.get("ssid", "")
+                mode_uci: str = section_data.get("mode", "ap")
+                channel_str = device_data.get("channel")
+                channel_val: int | None = (
+                    int(channel_str)
+                    if channel_str and str(channel_str).isdigit()
+                    else None
+                )
+                band_uci = self._detect_band(device_name, device_data)
+                result.append(
+                    {
+                        RADIO_KEY_IFNAME: section_name,
+                        RADIO_KEY_SSID: ssid_uci,
+                        RADIO_KEY_BAND: band_uci,
+                        RADIO_KEY_IS_GUEST: self._is_guest_ssid(ssid_uci),
+                        RADIO_KEY_MODE: mode_uci,
+                        RADIO_KEY_BSSID: None,
+                        RADIO_KEY_CHANNEL: channel_val,
+                        RADIO_KEY_FREQUENCY: None,
+                        RADIO_KEY_TXPOWER: None,
+                        RADIO_KEY_BITRATE: None,
+                        RADIO_KEY_HWMODE: device_data.get("hwmode") or device_data.get("type"),
+                        RADIO_KEY_HTMODE: device_data.get("htmode"),
+                        "signal": None,
+                        "noise": None,
+                        "quality": None,
+                        "quality_max": None,
+                    }
+                )
+                _LOGGER.debug(
+                    "AP UCI interface %s: mode=%s ch=%s htmode=%s band=%s",
+                    section_name, mode_uci, channel_val,
+                    device_data.get("htmode"), band_uci,
+                )
+
+        return result
+
     async def get_connected_clients(
         self,
         leases: dict[str, dict[str, str]] | None = None,
@@ -646,32 +777,139 @@ class OpenWrtAPI:
             radios = await self.get_wifi_status()
         clients: list[dict[str, Any]] = []
 
-        for radio in radios:
-            ifname: str = radio.get(RADIO_KEY_IFNAME, "")
-            if not ifname:
-                continue
+        # Build SSID lookup: ifname → ssid (from radio descriptors)
+        ifname_to_ssid: dict[str, str] = {
+            r.get(RADIO_KEY_IFNAME, ""): r.get(RADIO_KEY_SSID, "")
+            for r in radios
+            if r.get(RADIO_KEY_IFNAME)
+        }
+
+        # Discover hostapd interfaces — try methods in order of reliability.
+        # Results are cached in self._hostapd_ifaces after first successful discovery.
+        hostapd_ifnames: list[str] = []
+
+        if self._hostapd_ifaces is not None:
+            # Use cached result from previous poll
+            hostapd_ifnames = self._hostapd_ifaces
+        else:
+            # Method 1: iwinfo/devices (OpenWrt 21+/25) — physical ifnames like phy0-ap0
             try:
-                result = await self._call(
-                    UBUS_IWINFO_OBJECT,
-                    UBUS_IWINFO_ASSOCLIST,
-                    {"device": ifname},
-                )
-                assocs: list[dict[str, Any]] = result.get("results", [])
-                for assoc in assocs:
+                devices_result = await self._call(UBUS_IWINFO_OBJECT, "devices", {})
+                hostapd_ifnames = devices_result.get("devices", [])
+                if hostapd_ifnames:
+                    _LOGGER.debug("iwinfo/devices: %s", hostapd_ifnames)
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                _LOGGER.debug("iwinfo/devices not available")
+
+            # Method 2: probe known naming patterns (OpenWrt 23+/25 uses phy<N>-ap<M>)
+            # Only runs once — result cached immediately after.
+            if not hostapd_ifnames:
+                probe_candidates = [
+                    f"phy{phy}-ap{ap}" for phy in range(4) for ap in range(4)
+                ] + [f"wlan{n}" for n in range(4)]
+                found: list[str] = []
+                for candidate in probe_candidates:
+                    try:
+                        await self._call(f"hostapd.{candidate}", "get_clients", {})
+                        found.append(candidate)
+                        # Get SSID while we're here
+                        try:
+                            status = await self._call(f"hostapd.{candidate}", "get_status", {})
+                            ssid = status.get("ssid", "")
+                            if ssid:
+                                ifname_to_ssid[candidate] = ssid
+                        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                            pass
+                    except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                        pass
+                if found:
+                    hostapd_ifnames = found
+                    _LOGGER.debug("Discovered hostapd interfaces via probing: %s", found)
+
+            # Method 3: UCI radio ifnames (last resort, may be wrong on OpenWrt 25)
+            if not hostapd_ifnames:
+                hostapd_ifnames = [k for k in ifname_to_ssid if k]
+                if hostapd_ifnames:
+                    _LOGGER.debug(
+                        "Using UCI radio ifnames as hostapd candidates: %s", hostapd_ifnames
+                    )
+
+            # Cache the result (even if empty) to avoid re-probing every poll
+            self._hostapd_ifaces = hostapd_ifnames
+
+        # Build ifname→ssid map for any hostapd interfaces not yet known
+        # Try hostapd.*/get_status first (works even without iwinfo ACL), then iwinfo/info
+        for ifname in hostapd_ifnames:
+            if ifname in ifname_to_ssid:
+                continue
+            # Try hostapd get_status (reliable on OpenWrt 25)
+            try:
+                status = await self._call(f"hostapd.{ifname}", "get_status", {})
+                ifname_to_ssid[ifname] = status.get("ssid", "")
+                continue
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                pass
+            # Fallback: iwinfo/info
+            try:
+                info = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {"device": ifname})
+                ifname_to_ssid[ifname] = info.get("ssid", "")
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                ifname_to_ssid[ifname] = ""
+
+        # Primary: hostapd.*/get_clients — returns {clients: {mac: {signal, ...}}}
+        # Preferred in OpenWrt 21+/25; more reliable than iwinfo/assoclist
+        seen_macs: set[str] = set()
+        for ifname in hostapd_ifnames:
+            ssid = ifname_to_ssid.get(ifname, "")
+            try:
+                result = await self._call(f"hostapd.{ifname}", "get_clients", {})
+                hostapd_clients: dict[str, Any] = result.get("clients", {})
+                for mac_raw, sta_data in hostapd_clients.items():
+                    mac = mac_raw.upper()
+                    if mac in seen_macs:
+                        continue
+                    seen_macs.add(mac)
+                    signal = sta_data.get("signal", 0) if isinstance(sta_data, dict) else 0
                     clients.append(
                         {
-                            CLIENT_KEY_MAC: assoc.get("mac", "").upper(),
+                            CLIENT_KEY_MAC: mac,
                             CLIENT_KEY_IP: "",
                             CLIENT_KEY_HOSTNAME: "",
-                            CLIENT_KEY_SIGNAL: assoc.get("signal", 0),
-                            CLIENT_KEY_SSID: radio.get(RADIO_KEY_SSID, ""),
+                            CLIENT_KEY_SIGNAL: signal,
+                            CLIENT_KEY_SSID: ssid,
                             CLIENT_KEY_RADIO: ifname,
                         }
                     )
-            except OpenWrtMethodNotFoundError:
-                _LOGGER.debug("iwinfo assoclist not available for %s", ifname)
-            except OpenWrtResponseError as err:
-                _LOGGER.debug("Failed to get assoclist for %s: %s", ifname, err)
+                _LOGGER.debug(
+                    "hostapd.%s/get_clients: %d clients (ssid=%s)",
+                    ifname, len(hostapd_clients), ssid,
+                )
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                # Fallback: iwinfo/assoclist for this interface
+                try:
+                    result = await self._call(
+                        UBUS_IWINFO_OBJECT,
+                        UBUS_IWINFO_ASSOCLIST,
+                        {"device": ifname},
+                    )
+                    assocs: list[dict[str, Any]] = result.get("results", [])
+                    for assoc in assocs:
+                        mac = assoc.get("mac", "").upper()
+                        if not mac or mac in seen_macs:
+                            continue
+                        seen_macs.add(mac)
+                        clients.append(
+                            {
+                                CLIENT_KEY_MAC: mac,
+                                CLIENT_KEY_IP: "",
+                                CLIENT_KEY_HOSTNAME: "",
+                                CLIENT_KEY_SIGNAL: assoc.get("signal", 0),
+                                CLIENT_KEY_SSID: ssid,
+                                CLIENT_KEY_RADIO: ifname,
+                            }
+                        )
+                except (OpenWrtMethodNotFoundError, OpenWrtResponseError) as err:
+                    _LOGGER.debug("Failed to get clients for %s: %s", ifname, err)
 
         # Enrich with IP / hostname – use pre-fetched leases to avoid a second
         # file/read call when the coordinator has already fetched them.
@@ -734,19 +972,35 @@ class OpenWrtAPI:
             OpenWrtTimeoutError,
             OpenWrtConnectionError,
         ) as err:
-            # Fall back to SSH if ubus is blocked (any access denied error)
             err_str = str(err).lower()
             if "access denied" in err_str or "permission" in err_str:
                 _LOGGER.warning(
-                    "ubus UCI blocked (ACL-restricted), attempting SSH fallback: %s", err
+                    "uci/commit access denied — trying network.wireless reload fallback: %s", err
                 )
+
+                # Fallback 1: network.wireless/up or /down (OpenWrt 21+/25)
+                # This applies pending UCI changes without needing explicit commit ACL
+                try:
+                    reload_method = "up" if enabled else "down"
+                    await self._call(UBUS_WIRELESS_OBJECT, reload_method, {})
+                    _LOGGER.info(
+                        "WiFi section %s %s via network.wireless/%s",
+                        uci_section, action, reload_method,
+                    )
+                    return True
+                except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtTimeoutError):
+                    _LOGGER.debug("network.wireless/%s not available", reload_method)
+
+                # Fallback 2: SSH
                 try:
                     return await self._set_wifi_state_ssh(uci_section, enabled)
                 except Exception as ssh_err:
                     _LOGGER.error("SSH fallback also failed: %s", ssh_err)
-                    raise OpenWrtResponseError(
-                        f"Failed to {action} WiFi section {uci_section} (ubus blocked, SSH failed): {err}"
-                    ) from ssh_err
+
+                raise OpenWrtResponseError(
+                    f"Failed to {action} WiFi section {uci_section} (ubus blocked, SSH failed): {err}. "
+                    "Fix: grant 'uci commit' permission in rpcd ACL — see README."
+                ) from err
 
             _LOGGER.error("Failed to %s WiFi section %s: %s", action, uci_section, err)
             raise OpenWrtResponseError(
@@ -1440,23 +1694,44 @@ class OpenWrtAPI:
             return []
 
     async def get_active_connections(self) -> int:
-        """Return count of active network connections.
+        """Return count of active network connections from nf_conntrack.
 
-        Reads /proc/net/nf_conntrack line count via rpcd-mod-file.
-        Returns 0 if nf_conntrack is not available on this router.
+        Tries two paths in order:
+        1. /proc/sys/net/netfilter/nf_conntrack_count  — single integer, OpenWrt 21+
+        2. /proc/net/nf_conntrack                      — full table, count non-empty lines
+
+        Returns 0 if neither path is readable (module not loaded or ACL blocked).
 
         Returns:
             Count of active connections (int).
         """
+        # Fast path: single-number file (preferred, much smaller read)
         try:
-            result = await self._call("file", "read", {"path": "/proc/net/nf_conntrack"})
-            data: str = result.get("data", "")
-            if not data:
-                return 0
-            return sum(1 for line in data.splitlines() if line.strip())
+            result = await self._call(
+                "file", "read",
+                {"path": "/proc/sys/net/netfilter/nf_conntrack_count"},
+            )
+            data: str = result.get("data", "").strip()
+            if data.isdigit():
+                return int(data)
+        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError):
+            pass
+
+        # Fallback: full conntrack table, count non-empty lines
+        try:
+            result = await self._call(
+                "file", "read",
+                {"path": "/proc/net/nf_conntrack"},
+            )
+            data = result.get("data", "")
+            if data:
+                return sum(1 for line in data.splitlines() if line.strip())
         except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError) as err:
-            _LOGGER.debug("Could not fetch active connections: %s", err)
-            return 0
+            _LOGGER.warning(
+                "Could not read nf_conntrack (module not loaded or ACL blocked): %s", err
+            )
+
+        return 0
 
     # ------------------------------------------------------------------
     # Update management
@@ -1657,6 +1932,96 @@ class OpenWrtAPI:
                 "message": f"Update initiation failed: {err}",
                 "update_type": update_type,
             }
+
+    # ------------------------------------------------------------------
+    # Service Management (procd / rc)
+    # ------------------------------------------------------------------
+
+    async def get_services(self, names: list[str] | None = None) -> list[dict[str, Any]]:
+        """Return status for OpenWrt system services.
+
+        Tries rc/list first (stable across versions), then falls back to
+        procd service/list (OpenWrt 21+/25).  Results are filtered to the
+        requested service names when *names* is provided.
+
+        Args:
+            names: Optional list of service names to include.
+                   If None, all discovered services are returned.
+
+        Returns:
+            List of dicts:  {"name": str, "running": bool, "enabled": bool}
+        """
+        services: list[dict[str, Any]] = []
+
+        # Method 1: rc/list — returns {name: {running: 0|1, enabled: 0|1}}
+        try:
+            result = await self._call("rc", "list", {})
+            if isinstance(result, dict):
+                for svc_name, info in result.items():
+                    if not isinstance(info, dict):
+                        continue
+                    services.append(
+                        {
+                            "name": svc_name,
+                            "running": bool(info.get("running", 0)),
+                            "enabled": bool(info.get("enabled", 0)),
+                        }
+                    )
+                if services:
+                    _LOGGER.debug("Fetched %d services via rc/list", len(services))
+                    if names is not None:
+                        services = [s for s in services if s["name"] in names]
+                    return services
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError) as err:
+            _LOGGER.debug("rc/list not available: %s", err)
+
+        # Method 2: procd service/list (OpenWrt 21+/25)
+        try:
+            result = await self._call("service", "list", {})
+            if isinstance(result, dict):
+                for svc_name, info in result.items():
+                    if not isinstance(info, dict):
+                        continue
+                    instances = info.get("instances", {})
+                    running = any(
+                        inst.get("running", False)
+                        for inst in instances.values()
+                        if isinstance(inst, dict)
+                    )
+                    services.append(
+                        {
+                            "name": svc_name,
+                            "running": running,
+                            "enabled": True,  # procd-managed services are enabled
+                        }
+                    )
+                _LOGGER.debug("Fetched %d services via service/list", len(services))
+                if names is not None:
+                    services = [s for s in services if s["name"] in names]
+                return services
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError) as err:
+            _LOGGER.warning("Could not fetch service list (rc/list + service/list failed): %s", err)
+
+        return services
+
+    async def control_service(self, name: str, action: str) -> bool:
+        """Start, stop, restart, enable, or disable a procd/rc service.
+
+        Args:
+            name:   Service name (e.g. "dnsmasq", "firewall").
+            action: One of "start", "stop", "restart", "enable", "disable".
+
+        Returns:
+            True on success, False on failure.
+        """
+        _LOGGER.info("Service control: %s %s", action, name)
+        try:
+            await self._call("rc", "init", {"name": name, "action": action})
+            _LOGGER.debug("Service %s %s OK", name, action)
+            return True
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError) as err:
+            _LOGGER.error("Failed to %s service %s: %s", action, name, err)
+            return False
 
     # ------------------------------------------------------------------
     # Internal helpers – ubus call machinery
@@ -1894,6 +2259,14 @@ class OpenWrtAPI:
                         RADIO_KEY_ENABLED: not disabled,
                         RADIO_KEY_IS_GUEST: self._is_guest_ssid(ssid),
                         RADIO_KEY_UCI_SECTION: config.get("section", ""),
+                        RADIO_KEY_CHANNEL: radio_data.get("channel"),
+                        RADIO_KEY_FREQUENCY: radio_data.get("frequency"),
+                        RADIO_KEY_HWMODE: radio_data.get("hwmode"),
+                        RADIO_KEY_MODE: "Master",  # wireless/status only shows AP interfaces
+                        RADIO_KEY_BSSID: None,
+                        RADIO_KEY_TXPOWER: None,
+                        RADIO_KEY_BITRATE: None,
+                        RADIO_KEY_HTMODE: None,
                     }
                 )
 
@@ -1926,6 +2299,14 @@ class OpenWrtAPI:
                     "signal": iface_data.get("signal"),
                     "quality": iface_data.get("quality"),
                     "quality_max": iface_data.get("quality_max"),
+                    RADIO_KEY_MODE: iface_data.get("mode"),
+                    RADIO_KEY_BSSID: iface_data.get("bssid"),
+                    RADIO_KEY_CHANNEL: iface_data.get("channel"),
+                    RADIO_KEY_FREQUENCY: iface_data.get("frequency"),
+                    RADIO_KEY_TXPOWER: iface_data.get("txpower"),
+                    RADIO_KEY_BITRATE: iface_data.get("bitrate"),
+                    RADIO_KEY_HWMODE: iface_data.get("hwmode"),
+                    RADIO_KEY_HTMODE: iface_data.get("htmode"),
                 }
             )
 
@@ -1980,7 +2361,10 @@ class OpenWrtAPI:
                     index,
                     {
                         RADIO_KEY_NAME: device_name,
-                        RADIO_KEY_IFNAME: section_name,
+                        # UCI does not expose the real physical ifname (e.g. phy0-ap0).
+                        # Leave it empty so get_connected_clients() uses hostapd discovery
+                        # instead of blindly constructing "hostapd.<section_name>".
+                        RADIO_KEY_IFNAME: "",
                         RADIO_KEY_SSID: ssid,
                         RADIO_KEY_BAND: band,
                         RADIO_KEY_ENABLED: enabled,

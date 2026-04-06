@@ -21,6 +21,7 @@ from .api import OpenWrtAPI
 from .const import (
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
+    DEFAULT_SERVICES,
     DOMAIN,
     RADIO_KEY_BAND,
     RADIO_KEY_ENABLED,
@@ -47,7 +48,7 @@ async def async_setup_entry(
     coordinator: OpenWrtCoordinator = entry.runtime_data.coordinator
     api: OpenWrtAPI = entry.runtime_data.api
 
-    entities: list[OpenWrtWifiSwitchEntity] = []
+    entities: list[OpenWrtWifiSwitchEntity | OpenWrtServiceSwitch] = []
 
     if coordinator.data:
         for radio in coordinator.data.wifi_radios:
@@ -69,8 +70,22 @@ async def async_setup_entry(
                 )
             )
 
+    # --- Service switches (one per detected service) ---
+    if coordinator.data:
+        detected_names = {s["name"] for s in coordinator.data.services}
+        for svc_name in DEFAULT_SERVICES:
+            if svc_name in detected_names:
+                entities.append(
+                    OpenWrtServiceSwitch(
+                        coordinator=coordinator,
+                        api=api,
+                        entry=entry,
+                        service_name=svc_name,
+                    )
+                )
+
     async_add_entities(entities)
-    _LOGGER.debug("Added %d OpenWrt WiFi switch entities", len(entities))
+    _LOGGER.debug("Added %d OpenWrt switch entities", len(entities))
 
 
 class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntity):
@@ -249,3 +264,97 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
             1 for client in self.coordinator.data.clients
             if client.get("ssid") == ssid
         )
+
+
+class OpenWrtServiceSwitch(CoordinatorEntity[OpenWrtCoordinator], SwitchEntity):
+    """Switch entity to start/stop a procd-managed OpenWrt service.
+
+    State: True = service is running, False = stopped.
+    Turn on  → rc/init start
+    Turn off → rc/init stop
+    """
+
+    _attr_has_entity_name = False
+    _attr_device_class = SwitchDeviceClass.SWITCH
+    _attr_entity_category = None  # visible by default
+
+    # Icon map for well-known services
+    _SERVICE_ICONS: dict[str, str] = {
+        "dnsmasq": "mdi:dns",
+        "dropbear": "mdi:console-network",
+        "firewall": "mdi:wall-fire",
+        "network": "mdi:lan",
+        "uhttpd": "mdi:web",
+        "wpad": "mdi:wifi-lock",
+    }
+
+    def __init__(
+        self,
+        coordinator: OpenWrtCoordinator,
+        api: OpenWrtAPI,
+        entry: OpenWrtConfigEntry,
+        service_name: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._api = api
+        self._entry = entry
+        self._service_name = service_name
+
+        self._attr_unique_id = f"{entry.entry_id}_service_{service_name}"
+        self._attr_name = f"Service: {service_name}"
+        self._attr_icon = self._SERVICE_ICONS.get(service_name, "mdi:cog")
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        router_info = self.coordinator.router_info
+        release = router_info.get("release", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=router_info.get("hostname") or self._entry.title,
+            manufacturer="OpenWrt",
+            model=router_info.get("model", "OpenWrt Router"),
+            sw_version=release.get("version", ""),
+            configuration_url=(
+                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
+            ),
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        svc = self._get_service()
+        if svc is None:
+            return None
+        return svc.get("running", False)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._get_service() is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        svc = self._get_service()
+        if svc is None:
+            return {}
+        return {
+            "enabled": svc.get("enabled", False),
+            "running": svc.get("running", False),
+        }
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        _LOGGER.debug("Starting service %s", self._service_name)
+        await self._api.control_service(self._service_name, "start")
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        _LOGGER.debug("Stopping service %s", self._service_name)
+        await self._api.control_service(self._service_name, "stop")
+        await self.coordinator.async_request_refresh()
+
+    def _get_service(self) -> dict[str, Any] | None:
+        if not self.coordinator.data:
+            return None
+        for svc in self.coordinator.data.services:
+            if svc.get("name") == self._service_name:
+                return svc
+        return None

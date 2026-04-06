@@ -2,6 +2,56 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.8.0] - 2026-04-06
+
+### Added
+- **AP Interface Sensors**: Per-radio channel, mode, HT mode, HW mode, and connected client count sensors.
+  - `sensor.<section>_channel` — active WiFi channel (e.g. 1, 36)
+  - `sensor.<section>_mode` — AP mode (`ap`, `client`, `monitor`)
+  - `sensor.<section>_ap_clients` — number of currently associated clients
+  - `sensor.<section>_ht_mode` — HT/VHT/HE mode (e.g. HE20, HE80, VHT80)
+  - `sensor.<section>_hw_mode` — hardware mode or device type (e.g. mt7986, 11ax)
+  - Optional (iwinfo only): `frequency` (MHz), `tx_power` (dBm), `bitrate` (Mbps), `signal_quality` (%)
+- **UCI fallback** for AP interface discovery: Routers without `iwinfo` access via rpcd (e.g. Cudy WR3000 on OpenWrt 25) now expose AP sensors via UCI wireless config. UCI section names (e.g. `default_radio0`) are used as stable entity identifiers.
+
+### Technical
+- `const.py`: Added `RADIO_KEY_CHANNEL`, `RADIO_KEY_FREQUENCY`, `RADIO_KEY_TXPOWER`, `RADIO_KEY_BITRATE`, `RADIO_KEY_HWMODE`, `RADIO_KEY_HTMODE`, `RADIO_KEY_MODE`, `RADIO_KEY_BSSID`.
+- `api.py`: New `get_ap_interface_details()` method — iwinfo primary path, UCI fallback. Extends `_parse_iwinfo_info()` and `_parse_wireless_status()` with new fields.
+- `coordinator.py`: Added `data.ap_interfaces` field; fetched after clients each poll.
+- `sensor.py`: New `OpenWrtAPInterfaceSensor` class; `_add_dynamic_sensors()` extended to iterate `ap_interfaces`.
+
+### Tests
+- 294 passing (no regressions)
+
+---
+
+## [1.7.0] - 2026-04-06
+
+### Added
+- **Service Management**: Monitor and control procd/rc system services directly from Home Assistant.
+  - **Service Switches** (`switch.service_<name>`): Start/stop individual services — `dnsmasq`, `dropbear`, `firewall`, `network`, `uhttpd`, `wpad`. State reflects real-time running status.
+  - **Service Restart Buttons** (`button.restart_<name>`): One-click restart per service with dedicated icons.
+  - Auto-discovery: Uses `rc/list` (OpenWrt 19+) with `service/list` (procd) as fallback. Only services present on the router appear as entities.
+  - Feature-gated: Service entities are only created when `rc/list` or `service/list` is accessible.
+
+### Fixed
+- **Active Connections = 0**: Now reads `/proc/sys/net/netfilter/nf_conntrack_count` (fast single-int file) with `/proc/net/nf_conntrack` as fallback.
+- **WiFi Switch Access Denied**: Added `network.wireless/up` (or `/down`) as fallback when `uci/commit` is blocked by rpcd ACL.
+- **Connected Clients = 0** (OpenWrt 25): Fixed hostapd interface name discovery — probes `phy{N}-ap{M}` naming used since OpenWrt 21+/25, caches result to avoid repeated probing.
+- **SSID via hostapd**: Uses `hostapd.*/get_status` to retrieve SSID even when `iwinfo/info` is blocked by rpcd ACL.
+
+### Technical
+- `api.py`: Added `get_services()` (rc/list → service/list fallback) and `control_service(name, action)`.
+- `const.py`: Added `UBUS_RC_OBJECT`, `UBUS_RC_INIT`, `UBUS_SERVICE_OBJECT`, `DEFAULT_SERVICES`, `KEY_SERVICES`, `FEATURE_HAS_SERVICES`.
+- `coordinator.py`: Added `data.services` field; fetches service status each poll when `has_services` feature detected; service probed during feature detection.
+- `switch.py`: Added `OpenWrtServiceSwitch` — start/stop toggle per service with per-service icons.
+- `button.py`: Added `OpenWrtServiceRestartButton` — restart per service.
+
+### Tests
+- 275 passing (no regressions from new service management code)
+
+---
+
 ## [1.6.0] - 2026-04-06
 
 ### Added

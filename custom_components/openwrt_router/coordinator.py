@@ -21,6 +21,7 @@ from .const import (
     CLIENT_KEY_CONNECTED_SINCE,
     CLIENT_KEY_MAC,
     BOARD_REFRESH_CYCLES,
+    DEFAULT_SERVICES,
     DOMAIN,
     FEATURE_AVAILABLE_RADIOS,
     FEATURE_DHCP_LEASES,
@@ -28,6 +29,7 @@ from .const import (
     FEATURE_HAS_6GHZ,
     FEATURE_HAS_GUEST_WIFI,
     FEATURE_HAS_IWINFO,
+    FEATURE_HAS_SERVICES,
     FEATURE_UCI_AVAILABLE,
     KEY_CLIENT_COUNT,
     KEY_CLIENTS,
@@ -36,6 +38,7 @@ from .const import (
     KEY_FEATURES,
     KEY_MEMORY,
     KEY_ROUTER_INFO,
+    KEY_SERVICES,
     KEY_UPDATES_AVAILABLE,
     KEY_UPTIME,
     KEY_WAN_CONNECTED,
@@ -87,6 +90,8 @@ class OpenWrtCoordinatorData:
         self.network_interfaces: list[dict[str, Any]] = []
         self.active_connections: int = 0
         self.updates_available: dict[str, Any] = {"available": False, "system": [], "addons": []}
+        self.services: list[dict[str, Any]] = []
+        self.ap_interfaces: list[dict[str, Any]] = []
         self.features: dict[str, Any] = {}
 
     def as_dict(self) -> dict[str, Any]:
@@ -109,6 +114,8 @@ class OpenWrtCoordinatorData:
             "network_interfaces": self.network_interfaces,
             "active_connections": self.active_connections,
             KEY_UPDATES_AVAILABLE: self.updates_available,
+            KEY_SERVICES: self.services,
+            "ap_interfaces": self.ap_interfaces,
             KEY_FEATURES: self.features,
         }
 
@@ -190,6 +197,15 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             )
             data.client_count = len(data.clients)
 
+            # --- AP Interface Details (channel, freq, txpower, hwmode, etc.) ---
+            # Called after get_connected_clients() so _hostapd_ifaces is populated.
+            # Falls back gracefully to [] if iwinfo is unavailable.
+            try:
+                data.ap_interfaces = await self.api.get_ap_interface_details()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching AP interface details: %s", err)
+                data.ap_interfaces = []
+
             # --- Per-client online time tracking ---
             now = datetime.now(UTC)
             current_macs: set[str] = set()
@@ -267,6 +283,21 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 _LOGGER.debug("Error fetching active connections: %s", err)
                 data.active_connections = 0
 
+            # --- Service status (dnsmasq, firewall, etc.) ---
+            if self.data and self.data.features.get(FEATURE_HAS_SERVICES, False):
+                try:
+                    data.services = await self.api.get_services(names=DEFAULT_SERVICES)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Error fetching service status: %s", err)
+                    data.services = self.data.services if self.data else []
+            elif not self._features_detected:
+                # First poll: try fetching services regardless (feature detection hasn't run yet)
+                try:
+                    data.services = await self.api.get_services(names=DEFAULT_SERVICES)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Error fetching service status on first poll: %s", err)
+                    data.services = []
+
             # Carry forward features from the previous cycle.
             # Only applies when detection already ran in a prior cycle –
             # on the first poll data.features was just set by _detect_features()
@@ -317,6 +348,15 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         _LOGGER.debug("Running OpenWrt feature detection")
         try:
             features = await self.api.detect_features()
+
+            # Probe service management availability
+            try:
+                svcs = await self.api.get_services(names=DEFAULT_SERVICES)
+                features[FEATURE_HAS_SERVICES] = len(svcs) > 0
+                data.services = svcs
+            except Exception:  # noqa: BLE001
+                features[FEATURE_HAS_SERVICES] = False
+
             data.features = features
             self._features_detected = True
 

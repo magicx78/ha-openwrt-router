@@ -8,11 +8,27 @@ import pytest
 from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
 from custom_components.openwrt_router.sensor import (
     SENSOR_DESCRIPTIONS,
+    OpenWrtAPInterfaceSensor,
     OpenWrtSensorEntity,
     _calc_memory_pct,
     _format_uptime,
 )
-from custom_components.openwrt_router.const import DOMAIN
+from custom_components.openwrt_router.const import (
+    DOMAIN,
+    RADIO_KEY_BAND,
+    RADIO_KEY_BITRATE,
+    RADIO_KEY_BSSID,
+    RADIO_KEY_CHANNEL,
+    RADIO_KEY_FREQUENCY,
+    RADIO_KEY_HTMODE,
+    RADIO_KEY_HWMODE,
+    RADIO_KEY_IFNAME,
+    RADIO_KEY_MODE,
+    RADIO_KEY_NAME,
+    RADIO_KEY_SSID,
+    RADIO_KEY_TXPOWER,
+    CLIENT_KEY_RADIO,
+)
 
 
 # =====================================================================
@@ -409,3 +425,179 @@ class TestInterfaceRateSensor:
 
         tx_sensor = OpenWrtInterfaceRateSensor(coord, entry, "wan", "tx_rate")
         assert tx_sensor.native_value == pytest.approx(67.89)
+
+
+# =====================================================================
+# AP Interface Sensors
+# =====================================================================
+
+def _make_ap_sensor(metric="channel", ifname="phy0-ap0", radio_data=None, clients=None):
+    """Helper: create OpenWrtAPInterfaceSensor with inline coordinator data."""
+    from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
+
+    coord = MagicMock()
+    data = OpenWrtCoordinatorData()
+
+    base_ap = {
+        RADIO_KEY_IFNAME: ifname,
+        RADIO_KEY_SSID: "TestNet",
+        RADIO_KEY_BAND: "2.4g",
+        RADIO_KEY_MODE: "Master",
+        RADIO_KEY_CHANNEL: 6,
+        RADIO_KEY_FREQUENCY: 2437,
+        RADIO_KEY_TXPOWER: 20,
+        RADIO_KEY_BITRATE: 72.2,
+        RADIO_KEY_HWMODE: "11n",
+        RADIO_KEY_HTMODE: "HT20",
+        RADIO_KEY_BSSID: "AA:BB:CC:DD:EE:01",
+        "signal": -55,
+        "noise": -92,
+        "quality": 65,
+        "quality_max": 100,
+    }
+    if radio_data:
+        base_ap.update(radio_data)
+
+    data.ap_interfaces = [base_ap]
+    data.clients = clients or []
+    coord.data = data
+    coord.router_info = {}
+
+    entry = MagicMock()
+    entry.entry_id = "entry_ap"
+    entry.data = {"host": "192.168.1.1", "port": 80}
+
+    return OpenWrtAPInterfaceSensor(coord, entry, ifname, metric)
+
+
+class TestOpenWrtAPInterfaceSensor:
+    """Tests for OpenWrtAPInterfaceSensor (AP Interface Management)."""
+
+    def test_channel_native_value(self):
+        """T-AP1: channel sensor returns integer channel number."""
+        s = _make_ap_sensor("channel")
+        assert s.native_value == 6
+
+    def test_frequency_native_value(self):
+        """T-AP2: frequency sensor returns MHz value."""
+        s = _make_ap_sensor("frequency")
+        assert s.native_value == 2437
+
+    def test_txpower_native_value(self):
+        """T-AP3: txpower sensor returns dBm value."""
+        s = _make_ap_sensor("txpower")
+        assert s.native_value == 20
+
+    def test_bitrate_native_value(self):
+        """T-AP4: bitrate sensor returns Mbps value."""
+        s = _make_ap_sensor("bitrate")
+        assert s.native_value == pytest.approx(72.2)
+
+    def test_hwmode_native_value(self):
+        """T-AP5: hwmode sensor returns 802.11 mode string."""
+        s = _make_ap_sensor("hwmode")
+        assert s.native_value == "11n"
+
+    def test_htmode_native_value(self):
+        """T-AP6: htmode sensor returns channel width string."""
+        s = _make_ap_sensor("htmode")
+        assert s.native_value == "HT20"
+
+    def test_mode_native_value(self):
+        """T-AP7: mode sensor returns AP mode string."""
+        s = _make_ap_sensor("mode")
+        assert s.native_value == "Master"
+
+    def test_quality_calculation(self):
+        """T-AP8: quality sensor calculates percentage from quality/quality_max."""
+        s = _make_ap_sensor("quality", radio_data={"quality": 65, "quality_max": 100})
+        assert s.native_value == 65
+
+    def test_quality_calculation_non_100_max(self):
+        """T-AP8b: quality sensor handles non-100 quality_max."""
+        s = _make_ap_sensor("quality", radio_data={"quality": 50, "quality_max": 70})
+        assert s.native_value == round(50 / 70 * 100)
+
+    def test_quality_none_when_no_data(self):
+        """T-AP8c: quality sensor returns None when quality field absent."""
+        s = _make_ap_sensor("quality", radio_data={"quality": None, "quality_max": None})
+        assert s.native_value is None
+
+    def test_ap_clients_count(self):
+        """T-AP9: ap_clients sensor counts only clients on this radio."""
+        clients = [
+            {CLIENT_KEY_RADIO: "phy0-ap0"},
+            {CLIENT_KEY_RADIO: "phy0-ap0"},
+            {CLIENT_KEY_RADIO: "phy1-ap0"},  # different radio, not counted
+        ]
+        s = _make_ap_sensor("ap_clients", ifname="phy0-ap0", clients=clients)
+        assert s.native_value == 2
+
+    def test_ap_clients_zero_when_no_clients(self):
+        """T-AP10: ap_clients returns 0 when no clients on this radio."""
+        s = _make_ap_sensor("ap_clients", ifname="phy0-ap0", clients=[])
+        assert s.native_value == 0
+
+    def test_unique_id_format(self):
+        """T-AP11: unique_id follows stable ifname_metric pattern."""
+        s = _make_ap_sensor("channel", ifname="phy0-ap0")
+        assert s._attr_unique_id == "entry_ap_ap_phy0-ap0_channel"
+
+    def test_mode_extra_attrs(self):
+        """T-AP12: mode sensor returns ssid/bssid/band as extra attributes."""
+        s = _make_ap_sensor("mode")
+        attrs = s.extra_state_attributes
+        assert attrs["ssid"] == "TestNet"
+        assert attrs["bssid"] == "AA:BB:CC:DD:EE:01"
+        assert attrs["band"] == "2.4g"
+
+    def test_channel_extra_attrs(self):
+        """T-AP13: channel sensor returns frequency/htmode/hwmode as extra attributes."""
+        s = _make_ap_sensor("channel")
+        attrs = s.extra_state_attributes
+        assert attrs["frequency_mhz"] == 2437
+        assert attrs["htmode"] == "HT20"
+        assert attrs["hwmode"] == "11n"
+
+    def test_optional_metric_none_value(self):
+        """T-AP14: optional metric sensor returns None when router field is None."""
+        s = _make_ap_sensor("txpower", radio_data={RADIO_KEY_TXPOWER: None})
+        assert s.native_value is None
+
+    def test_returns_none_when_no_coordinator_data(self):
+        """T-AP15: sensor returns None when coordinator has no data."""
+        from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
+        coord = MagicMock()
+        coord.data = None
+        coord.router_info = {}
+        entry = MagicMock()
+        entry.entry_id = "e"
+        entry.data = {"host": "192.168.1.1", "port": 80}
+        s = OpenWrtAPInterfaceSensor(coord, entry, "phy0-ap0", "channel")
+        assert s.native_value is None
+
+    def test_returns_none_when_ap_interface_not_in_data(self):
+        """T-AP15b: sensor returns None when ifname not found in ap_interfaces."""
+        from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
+        coord = MagicMock()
+        data = OpenWrtCoordinatorData()
+        data.ap_interfaces = []
+        data.clients = []
+        coord.data = data
+        coord.router_info = {}
+        entry = MagicMock()
+        entry.entry_id = "e"
+        entry.data = {"host": "192.168.1.1", "port": 80}
+        s = OpenWrtAPInterfaceSensor(coord, entry, "phy0-ap0", "channel")
+        assert s.native_value is None
+
+    def test_client_mode_no_ap_clients_sensor(self):
+        """T-AP16: ap_clients sensor counts 0 for Client-mode interface (no hosted clients)."""
+        clients = [{CLIENT_KEY_RADIO: "phy0-sta0"}]
+        s = _make_ap_sensor(
+            "ap_clients",
+            ifname="phy0-sta0",
+            radio_data={RADIO_KEY_MODE: "Client", RADIO_KEY_IFNAME: "phy0-sta0"},
+            clients=clients,
+        )
+        assert s.native_value == 1  # the client list still counts by radio match
