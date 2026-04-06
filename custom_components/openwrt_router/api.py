@@ -175,6 +175,10 @@ class OpenWrtAPI:
         # True when rpcd ACL blocks hostapd.*/get_clients — SSH fallback is used instead.
         self._hostapd_acl_blocked: bool = False
 
+        # Cached ifname→ssid map from luci-rpc/getWirelessDevices (populated once when
+        # hostapd.*/get_status is also ACL-blocked; None = not yet fetched).
+        self._luci_rpc_ssid_map: dict[str, str] | None = None
+
         # L-1: track consecutive login failures to suppress log spam
         self._login_failure_count: int = 0
 
@@ -870,8 +874,12 @@ class OpenWrtAPI:
             try:
                 info = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {"device": ifname})
                 ifname_to_ssid[ifname] = info.get("ssid", "")
+                continue
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-                ifname_to_ssid[ifname] = ""
+                pass
+            # Last fallback: luci-rpc/getWirelessDevices (builds ifname→ssid cache once)
+            ssid_from_luci = await self._get_ssid_from_luci_rpc(ifname)
+            ifname_to_ssid[ifname] = ssid_from_luci
 
         # When rpcd ACL blocks hostapd.*/get_clients, use SSH to query ubus directly.
         if self._hostapd_acl_blocked and hostapd_ifnames:
@@ -1461,22 +1469,85 @@ class OpenWrtAPI:
             )
         except OpenWrtMethodNotFoundError:
             _LOGGER.debug(
-                "rpcd file module not available – DHCP lease enrichment disabled"
+                "rpcd file module not available – trying luci-rpc/getDHCPLeases fallback"
             )
-            return {}
+            return await self._get_dhcp_leases_luci_rpc()
         except OpenWrtAuthError:
             _LOGGER.debug(
-                "rpcd file/read permission denied for %s – "
-                "add /tmp/dhcp.leases to rpcd ACL to enable enrichment",
+                "rpcd file/read blocked for %s – trying luci-rpc/getDHCPLeases fallback",
                 DHCP_LEASES_PATH,
             )
-            return {}
+            return await self._get_dhcp_leases_luci_rpc()
         except OpenWrtResponseError as err:
-            _LOGGER.debug("Could not read DHCP leases: %s", err)
-            return {}
+            _LOGGER.debug("Could not read DHCP leases via file/read: %s", err)
+            return await self._get_dhcp_leases_luci_rpc()
 
         raw: str = result.get("data", "")
         return self._parse_dhcp_leases(raw)
+
+    async def _get_dhcp_leases_luci_rpc(self) -> dict[str, dict[str, str]]:
+        """Fetch DHCP leases via luci-rpc/getDHCPLeases (fallback for file/read ACL blocks).
+
+        Returns:
+            dict mapping uppercase MAC to {"ip": str, "hostname": str}, or {} on failure.
+        """
+        try:
+            result = await self._call("luci-rpc", "getDHCPLeases", {})
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError) as err:
+            _LOGGER.debug("luci-rpc/getDHCPLeases also unavailable: %s", err)
+            return {}
+
+        leases: dict[str, dict[str, str]] = {}
+        # Response is a list under key "leases" or directly a list
+        entries = result.get("leases", result) if isinstance(result, dict) else result
+        if not isinstance(entries, list):
+            return {}
+        for entry in entries:
+            mac = entry.get("macaddr", "").upper()
+            if not mac:
+                continue
+            leases[mac] = {
+                "ip": entry.get("ipaddr", ""),
+                "hostname": entry.get("hostname", ""),
+            }
+        _LOGGER.debug("luci-rpc/getDHCPLeases: %d leases", len(leases))
+        return leases
+
+    async def _get_ssid_from_luci_rpc(self, ifname: str) -> str:
+        """Return SSID for a given interface name using luci-rpc/getWirelessDevices cache.
+
+        Fetches once and caches in self._luci_rpc_ssid_map.  Used when both
+        hostapd.*/get_status and iwinfo/info are blocked by rpcd ACL.
+
+        Args:
+            ifname: Physical interface name, e.g. "phy0-ap0".
+
+        Returns:
+            SSID string, or "" if unavailable.
+        """
+        if self._luci_rpc_ssid_map is None:
+            # Fetch once and cache
+            ssid_map: dict[str, str] = {}
+            try:
+                result = await self._call("luci-rpc", "getWirelessDevices", {})
+                # Response: {radio0: {interfaces: [{ifname: "phy0-ap0", config: {ssid: ...}}]}}
+                for _radio, radio_data in result.items():
+                    if not isinstance(radio_data, dict):
+                        continue
+                    for iface in radio_data.get("interfaces", []):
+                        iface_name = iface.get("ifname", "")
+                        ssid = iface.get("config", {}).get("ssid", "")
+                        if iface_name:
+                            ssid_map[iface_name] = ssid
+                _LOGGER.debug(
+                    "luci-rpc/getWirelessDevices: built ssid map for %d interfaces",
+                    len(ssid_map),
+                )
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError) as err:
+                _LOGGER.debug("luci-rpc/getWirelessDevices unavailable: %s", err)
+            self._luci_rpc_ssid_map = ssid_map
+
+        return self._luci_rpc_ssid_map.get(ifname, "")
 
     async def get_uci_wireless(self) -> dict[str, Any]:
         """Fetch the full UCI wireless configuration.
@@ -1547,11 +1618,27 @@ class OpenWrtAPI:
             _LOGGER.debug("Feature detected: DHCP lease file readable")
         except OpenWrtAuthError:
             _LOGGER.debug(
-                "Feature not available: DHCP lease file – permission denied "
-                "(add /tmp/dhcp.leases to rpcd ACL, see integration docs)"
+                "Feature not available: DHCP lease file – permission denied, "
+                "trying luci-rpc/getDHCPLeases"
             )
+            # Probe luci-rpc as fallback
+            try:
+                await self._call("luci-rpc", "getDHCPLeases", {})
+                features["dhcp_leases"] = True
+                _LOGGER.debug("Feature detected: DHCP leases via luci-rpc/getDHCPLeases")
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError):
+                pass
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-            _LOGGER.debug("Feature not available: DHCP lease file (rpcd-mod-file missing?)")
+            _LOGGER.debug(
+                "Feature not available: DHCP lease file (rpcd-mod-file missing?), "
+                "trying luci-rpc/getDHCPLeases"
+            )
+            try:
+                await self._call("luci-rpc", "getDHCPLeases", {})
+                features["dhcp_leases"] = True
+                _LOGGER.debug("Feature detected: DHCP leases via luci-rpc/getDHCPLeases")
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError):
+                pass
 
         # Detect radios and bands via wifi status
         try:
