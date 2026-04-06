@@ -1,11 +1,11 @@
 # OpenWrt Router – Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.4.0)
+[![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.5.0)
 
 A production-ready Home Assistant custom integration for [OpenWrt](https://openwrt.org/) routers, communicating via the built-in **ubus / rpcd JSON-RPC API**.
 
-**Current Version:** v1.4.0 — Per-Interface Bandwidth Sensors, Per-Client Online Time, Radio Quality ✅
+**Current Version:** v1.5.0 — QA Strategy, Regression Tests, 268 Tests ✅
 
 ## Features
 
@@ -40,6 +40,7 @@ A production-ready Home Assistant custom integration for [OpenWrt](https://openw
 
 | Version | Release Date | Key Features |
 |---------|---|---|
+| **1.5.0** | 2026-04-06 | QA strategy, regression tests, test fixtures, ruff CI, 268 tests |
 | **1.4.0** | 2026-04-06 | Per-interface bandwidth sensors, per-client online time, radio signal/noise |
 | **1.3.0** | 2026-04-05 | Clean entity IDs, memory sensors (total/used), HACS issue_tracker |
 | 1.2.0 | 2026-04 | Entity ID fixes, P1–P8 bug fixes, SSL improvements |
