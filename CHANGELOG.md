@@ -2,6 +2,28 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.9.2] - 2026-04-07
+
+### Added
+- **WiFi switch client list attribute**: Each WiFi switch now exposes a `clients` attribute containing a list of all connected clients on that SSID. Each entry shows:
+  - `name` — hostname (falls back to MAC if no hostname)
+  - `mac` — MAC address
+  - `ip` — IP address (from DHCP lease enrichment)
+  - `signal_dbm` — WiFi signal strength in dBm
+  - `connected_since` — ISO-8601 timestamp of when the client first appeared
+  - `dhcp_expires` — Remaining DHCP lease time (e.g. `"2h 14m"`, `"45m"`, `"<1m"`, `"expired"`)
+- **DHCP lease expiry tracking**: `_parse_dhcp_leases()` and `luci-rpc/getDHCPLeases` now store the `expires` Unix timestamp. Expiry is propagated to connected client dicts and displayed as remaining time in switch attributes.
+
+### Technical
+- `const.py`: Added `CLIENT_KEY_DHCP_EXPIRES = "dhcp_expires"`.
+- `api.py`: DHCP lease dicts now include `"expires"` (Unix timestamp). `_enrich_clients_with_ip()` propagates `CLIENT_KEY_DHCP_EXPIRES` to client dicts.
+- `switch.py`: Replaced `_count_clients_for_ssid()` with `_get_clients_for_ssid()` returning full enriched list. Added `_format_dhcp_expires()` helper (converts epoch to human-readable remaining time).
+
+### Tests
+- 296 passing (no regressions)
+
+---
+
 ## [1.9.1] - 2026-04-06
 
 ### Fixed
