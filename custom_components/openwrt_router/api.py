@@ -172,6 +172,9 @@ class OpenWrtAPI:
         # None = not yet discovered; [] = no interfaces found.
         self._hostapd_ifaces: list[str] | None = None
 
+        # True when rpcd ACL blocks hostapd.*/get_clients — SSH fallback is used instead.
+        self._hostapd_acl_blocked: bool = False
+
         # L-1: track consecutive login failures to suppress log spam
         self._login_failure_count: int = 0
 
@@ -808,6 +811,7 @@ class OpenWrtAPI:
                     f"phy{phy}-ap{ap}" for phy in range(4) for ap in range(4)
                 ] + [f"wlan{n}" for n in range(4)]
                 found: list[str] = []
+                acl_blocked_candidates: list[str] = []
                 for candidate in probe_candidates:
                     try:
                         await self._call(f"hostapd.{candidate}", "get_clients", {})
@@ -820,11 +824,24 @@ class OpenWrtAPI:
                                 ifname_to_ssid[candidate] = ssid
                         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                             pass
-                    except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-                        pass
+                    except (OpenWrtMethodNotFoundError, OpenWrtResponseError) as probe_err:
+                        # Distinguish ACL-blocked (object exists) from not-found
+                        if "access denied" in str(probe_err).lower():
+                            acl_blocked_candidates.append(candidate)
                 if found:
                     hostapd_ifnames = found
                     _LOGGER.debug("Discovered hostapd interfaces via probing: %s", found)
+                elif acl_blocked_candidates:
+                    # rpcd ACL blocks get_clients — interface names are still valid,
+                    # use SSH to fetch client data each poll.
+                    hostapd_ifnames = acl_blocked_candidates
+                    self._hostapd_acl_blocked = True
+                    _LOGGER.warning(
+                        "hostapd.*/get_clients blocked by rpcd ACL — using SSH fallback "
+                        "for client counting. Interfaces: %s. "
+                        "Fix: add get_clients/get_status to /usr/share/rpcd/acl.d/",
+                        acl_blocked_candidates,
+                    )
 
             # Method 3: UCI radio ifnames (last resort, may be wrong on OpenWrt 25)
             if not hostapd_ifnames:
@@ -855,6 +872,15 @@ class OpenWrtAPI:
                 ifname_to_ssid[ifname] = info.get("ssid", "")
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                 ifname_to_ssid[ifname] = ""
+
+        # When rpcd ACL blocks hostapd.*/get_clients, use SSH to query ubus directly.
+        if self._hostapd_acl_blocked and hostapd_ifnames:
+            try:
+                ssh_clients = await self._get_clients_via_ssh(hostapd_ifnames, ifname_to_ssid, leases)
+                if ssh_clients is not None:
+                    return ssh_clients
+            except Exception as ssh_err:
+                _LOGGER.debug("SSH client fallback failed: %s", ssh_err)
 
         # Primary: hostapd.*/get_clients — returns {clients: {mac: {signal, ...}}}
         # Preferred in OpenWrt 21+/25; more reliable than iwinfo/assoclist
@@ -1150,6 +1176,90 @@ class OpenWrtAPI:
         except Exception as err:
             _LOGGER.error("SSH WAN status error: %s", err)
             raise
+
+    async def _get_clients_via_ssh(
+        self,
+        ifnames: list[str],
+        ifname_to_ssid: dict[str, str],
+        leases: dict[str, dict[str, str]] | None,
+    ) -> list[dict[str, Any]] | None:
+        """Fetch connected WiFi clients via SSH when rpcd ACL blocks hostapd.*/get_clients.
+
+        Runs ``ubus call hostapd.<iface> get_clients`` for each known interface
+        over a single SSH connection.
+
+        Returns:
+            List of client dicts (same schema as get_connected_clients), or None on failure.
+        """
+        # Build a shell one-liner that outputs JSON array of {iface, clients} objects.
+        iface_args = " ".join(f"hostapd.{i}" for i in ifnames)
+        shell_cmd = (
+            "first=1; echo '['; "
+            f"for iface in {iface_args}; do "
+            "[ $first -eq 0 ] && echo ','; first=0; "
+            'printf \'{"iface":"%s","data":\' "${iface#hostapd.}"; '
+            "ubus call $iface get_clients 2>/dev/null || echo '{\"clients\":{}}'; "
+            "echo '}'; "
+            "done; echo ']'"
+        )
+        ssh_cmd = [
+            "sshpass", "-p", self._password,
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            f"{self._username}@{self._host}",
+            shell_cmd,
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        except (asyncio.TimeoutError, Exception) as err:
+            _LOGGER.debug("SSH get_clients timed out or failed: %s", err)
+            return None
+
+        if proc.returncode != 0:
+            _LOGGER.debug("SSH get_clients returned exit code %s", proc.returncode)
+            return None
+
+        try:
+            entries: list[dict[str, Any]] = json.loads(stdout.decode())
+        except ValueError:
+            _LOGGER.debug("SSH get_clients returned invalid JSON")
+            return None
+
+        clients: list[dict[str, Any]] = []
+        seen_macs: set[str] = set()
+        for entry in entries:
+            ifname: str = entry.get("iface", "")
+            ssid = ifname_to_ssid.get(ifname, "")
+            hostapd_clients: dict[str, Any] = entry.get("data", {}).get("clients", {})
+            for mac_raw, sta_data in hostapd_clients.items():
+                mac = mac_raw.upper()
+                if mac in seen_macs:
+                    continue
+                seen_macs.add(mac)
+                signal = sta_data.get("signal", 0) if isinstance(sta_data, dict) else 0
+                lease = (leases or {}).get(mac, {})
+                clients.append(
+                    {
+                        CLIENT_KEY_MAC: mac,
+                        CLIENT_KEY_IP: lease.get("ip", ""),
+                        CLIENT_KEY_HOSTNAME: lease.get("hostname", ""),
+                        CLIENT_KEY_SIGNAL: signal,
+                        CLIENT_KEY_SSID: ssid,
+                        CLIENT_KEY_RADIO: ifname,
+                    }
+                )
+        _LOGGER.debug(
+            "SSH client fallback: %d clients across %d interfaces",
+            len(clients), len(entries),
+        )
+        return clients
 
     async def _set_wifi_state_ssh(self, uci_section: str, enabled: bool) -> bool:
         """Enable or disable WiFi interface via SSH script (fallback for ACL-restricted routers).
