@@ -2,6 +2,23 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.6.0] - 2026-04-06
+
+### Added
+- **Bandwidth Rate Sensors**: Dynamic `sensor.<iface>_rx_rate` / `sensor.<iface>_tx_rate` entities (bytes/s) per network interface — created alongside existing byte-total sensors. Returns `unavailable` on the first poll (two data points needed); `0` on counter wraparound/reset.
+- **Traffic Charts/History**: The existing cumulative byte sensors (`state_class: TOTAL_INCREASING`) already enable HA Long-Term Statistics — add them to a Statistics card or Energy Dashboard for per-interface traffic history.
+
+### Technical
+- `coordinator.py`: Added `_prev_interface_bytes` dict and `_prev_poll_time` timestamp; injects `rx_rate`/`tx_rate` (B/s) into each interface dict on every poll after the first.
+- `sensor.py`: Added `OpenWrtInterfaceRateSensor` class (`DATA_RATE`, `MEASUREMENT`, `B/s`); registered in `_add_dynamic_sensors()` alongside byte-total sensors.
+
+### Tests
+- T-R1–R4: Rate is `None` on first poll, correctly calculated on second poll, `0` on counter wraparound, sensor returns `None` before rate is available
+- T-S7–S9: `OpenWrtInterfaceRateSensor` unique_id format, device_class/unit, native_value
+- **275 tests passing** (was 268)
+
+---
+
 ## [1.5.0] - 2026-04-06
 
 ### Added

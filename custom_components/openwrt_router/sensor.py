@@ -418,6 +418,8 @@ async def async_setup_entry(
             tracked_interfaces.add(ifname)
             new_entities.append(OpenWrtInterfaceSensor(coordinator, entry, ifname, "rx_bytes"))
             new_entities.append(OpenWrtInterfaceSensor(coordinator, entry, ifname, "tx_bytes"))
+            new_entities.append(OpenWrtInterfaceRateSensor(coordinator, entry, ifname, "rx_rate"))
+            new_entities.append(OpenWrtInterfaceRateSensor(coordinator, entry, ifname, "tx_rate"))
             _LOGGER.debug("Adding bandwidth sensors for interface %s", ifname)
 
         for radio in coordinator.data.wifi_radios:
@@ -544,6 +546,78 @@ class OpenWrtInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity
     @property
     def native_value(self) -> int | None:
         """Return current byte count for this interface."""
+        if not self.coordinator.data:
+            return None
+        for iface in self.coordinator.data.network_interfaces:
+            if iface.get("interface") == self._interface:
+                return iface.get(self._metric)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return interface status."""
+        if not self.coordinator.data:
+            return {}
+        for iface in self.coordinator.data.network_interfaces:
+            if iface.get("interface") == self._interface:
+                return {"status": iface.get("status", "unknown")}
+        return {}
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Group under the router device card."""
+        router_info = self.coordinator.router_info
+        release = router_info.get("release", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=router_info.get("hostname") or self._entry.title,
+            manufacturer="OpenWrt",
+            model=router_info.get("model", "OpenWrt Router"),
+            sw_version=release.get("version", ""),
+            configuration_url=(
+                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
+            ),
+        )
+
+
+class OpenWrtInterfaceRateSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
+    """Bandwidth rate sensor (bytes/s) for a single network interface (RX or TX).
+
+    Created dynamically alongside OpenWrtInterfaceSensor.
+    Returns None until the second coordinator poll (rate needs two data points).
+    """
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.DATA_RATE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfDataRate.BYTES_PER_SECOND
+    _attr_suggested_display_precision = 1
+
+    def __init__(
+        self,
+        coordinator: OpenWrtCoordinator,
+        entry: OpenWrtConfigEntry,
+        interface: str,
+        metric: str,  # "rx_rate" or "tx_rate"
+    ) -> None:
+        super().__init__(coordinator)
+        self._interface = interface
+        self._metric = metric
+        self._entry = entry
+        direction = "rx" if metric == "rx_rate" else "tx"
+        self._attr_unique_id = f"{entry.entry_id}_{interface}_{direction}_rate"
+        self._attr_icon = "mdi:download-network-outline" if direction == "rx" else "mdi:upload-network-outline"
+
+    @property
+    def name(self) -> str:
+        """Return sensor name including interface and direction."""
+        direction = "RX" if self._metric == "rx_rate" else "TX"
+        return f"{self._interface} {direction} Rate"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return current bytes/s rate for this interface, or None if not yet available."""
         if not self.coordinator.data:
             return None
         for iface in self.coordinator.data.network_interfaces:

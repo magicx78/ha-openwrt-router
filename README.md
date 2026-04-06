@@ -1,11 +1,11 @@
 # OpenWrt Router – Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.5.0)
+[![Version](https://img.shields.io/badge/version-1.6.0-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.6.0)
 
 A production-ready Home Assistant custom integration for [OpenWrt](https://openwrt.org/) routers, communicating via the built-in **ubus / rpcd JSON-RPC API**.
 
-**Current Version:** v1.5.0 — QA Strategy, Regression Tests, 268 Tests ✅
+**Current Version:** v1.6.0 — Bandwidth Rate Sensors (bytes/s), Traffic Charts ✅
 
 ## Features
 
@@ -40,6 +40,7 @@ A production-ready Home Assistant custom integration for [OpenWrt](https://openw
 
 | Version | Release Date | Key Features |
 |---------|---|---|
+| **1.6.0** | 2026-04-06 | Bandwidth rate sensors (bytes/s), traffic chart support |
 | **1.5.0** | 2026-04-06 | QA strategy, regression tests, test fixtures, ruff CI, 268 tests |
 | **1.4.0** | 2026-04-06 | Per-interface bandwidth sensors, per-client online time, radio signal/noise |
 | **1.3.0** | 2026-04-05 | Clean entity IDs, memory sensors (total/used), HACS issue_tracker |
@@ -129,13 +130,17 @@ Add via **Settings → Devices & Services → Add Integration → OpenWrt Router
 | `sensor.{hostname}_platform_architecture` | CPU architecture |
 | `sensor.{hostname}_active_network_connections` | nf_conntrack count |
 
-### Sensors (Dynamic — v1.4.0)
+### Sensors (Dynamic — v1.4.0+)
 | Entity | Description |
 |--------|-------------|
 | `sensor.{hostname}_{iface}_rx` | RX bytes for interface (lan, wan, loopback, ...) |
 | `sensor.{hostname}_{iface}_tx` | TX bytes for interface |
+| `sensor.{hostname}_{iface}_rx_rate` | RX rate in bytes/s (v1.6.0) |
+| `sensor.{hostname}_{iface}_tx_rate` | TX rate in bytes/s (v1.6.0) |
 | `sensor.{hostname}_{iface}_signal` | WiFi radio signal dBm (iwinfo routers) |
 | `sensor.{hostname}_{iface}_noise` | WiFi radio noise floor dBm (iwinfo routers) |
+
+> **Traffic Charts**: The cumulative RX/TX byte sensors use `state_class: total_increasing` — add them to a **Statistics card** or the **Energy Dashboard** to get per-interface traffic history graphs automatically.
 
 ### Switches
 One switch per detected SSID with band info and connected client count:

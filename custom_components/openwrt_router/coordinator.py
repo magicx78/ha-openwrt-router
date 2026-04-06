@@ -142,6 +142,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._features_detected = False
         self._board_poll_count = 0
         self._client_first_seen: dict[str, datetime] = {}
+        self._prev_interface_bytes: dict[str, dict[str, int]] = {}
+        self._prev_poll_time: datetime | None = None
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator interface
@@ -235,6 +237,29 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching network interfaces: %s", err)
                 data.network_interfaces = []
+
+            # --- Bandwidth rate calculation (bytes/s) ---
+            poll_now = datetime.now(UTC)
+            if self._prev_poll_time is not None:
+                elapsed = (poll_now - self._prev_poll_time).total_seconds()
+                if elapsed > 0:
+                    for iface in data.network_interfaces:
+                        ifname = iface.get("interface", "")
+                        prev = self._prev_interface_bytes.get(ifname, {})
+                        for key, rate_key in (("rx_bytes", "rx_rate"), ("tx_bytes", "tx_rate")):
+                            curr = iface.get(key) or 0
+                            prev_val = prev.get(key, 0) or 0
+                            delta = curr - prev_val
+                            iface[rate_key] = round(max(0, delta) / elapsed, 2) if delta >= 0 else 0
+            self._prev_poll_time = poll_now
+            self._prev_interface_bytes = {
+                iface.get("interface", ""): {
+                    "rx_bytes": iface.get("rx_bytes") or 0,
+                    "tx_bytes": iface.get("tx_bytes") or 0,
+                }
+                for iface in data.network_interfaces
+                if iface.get("interface")
+            }
 
             try:
                 data.active_connections = await self.api.get_active_connections()

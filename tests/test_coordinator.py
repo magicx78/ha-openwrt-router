@@ -421,3 +421,98 @@ class TestClientTracking:
         await coord._async_update_data()
         # _client_first_seen must remain empty — no valid MACs
         assert len(coord._client_first_seen) == 0
+
+
+# =====================================================================
+# T-R1 through T-R4: Bandwidth rate calculation
+# =====================================================================
+
+from datetime import datetime, UTC, timedelta as _timedelta
+
+
+class TestBandwidthRateCalculation:
+    """Tests for per-interface bytes/s rate calculation in the coordinator."""
+
+    def _make_coordinator_with_interfaces(self, interfaces):
+        """Return a coordinator whose get_network_interfaces returns *interfaces*."""
+        coord, api = _make_coordinator()
+        api.get_network_interfaces = AsyncMock(return_value=interfaces)
+        return coord, api
+
+    @pytest.mark.asyncio
+    async def test_rate_none_on_first_poll(self):
+        """T-R1: rx_rate / tx_rate are absent on the very first poll (no prev data)."""
+        coord, _ = self._make_coordinator_with_interfaces([
+            {"interface": "wan", "rx_bytes": 1000, "tx_bytes": 500, "status": "up"},
+        ])
+        data = await coord._async_update_data()
+        iface = next(i for i in data.network_interfaces if i["interface"] == "wan")
+        # On first poll _prev_poll_time was None → rates not injected
+        assert iface.get("rx_rate") is None
+        assert iface.get("tx_rate") is None
+
+    @pytest.mark.asyncio
+    async def test_rate_calculated_on_second_poll(self):
+        """T-R2: Correct bytes/s after second poll (1000 bytes / 10 s = 100 B/s)."""
+        coord, api = self._make_coordinator_with_interfaces([
+            {"interface": "wan", "rx_bytes": 0, "tx_bytes": 0, "status": "up"},
+        ])
+        # First poll — establishes baseline
+        await coord._async_update_data()
+
+        # Manually set prev state to simulate 10s elapsed with 0 bytes
+        coord._prev_poll_time = datetime.now(UTC) - _timedelta(seconds=10)
+        coord._prev_interface_bytes = {"wan": {"rx_bytes": 0, "tx_bytes": 0}}
+
+        api.get_network_interfaces = AsyncMock(return_value=[
+            {"interface": "wan", "rx_bytes": 1000, "tx_bytes": 500, "status": "up"},
+        ])
+        data = await coord._async_update_data()
+
+        iface = next(i for i in data.network_interfaces if i["interface"] == "wan")
+        assert iface["rx_rate"] == pytest.approx(100.0, abs=2.0)
+        assert iface["tx_rate"] == pytest.approx(50.0, abs=2.0)
+
+    @pytest.mark.asyncio
+    async def test_rate_zero_on_counter_wraparound(self):
+        """T-R3: Rate is 0 when counter decreases (wraparound protection)."""
+        coord, api = self._make_coordinator_with_interfaces([
+            {"interface": "lan", "rx_bytes": 5000, "tx_bytes": 5000, "status": "up"},
+        ])
+        await coord._async_update_data()
+
+        # Set prev state to simulate 10s elapsed with high bytes (so new value is lower)
+        coord._prev_poll_time = datetime.now(UTC) - _timedelta(seconds=10)
+        coord._prev_interface_bytes = {"lan": {"rx_bytes": 5000, "tx_bytes": 5000}}
+
+        # Counter reset: new values lower than previous
+        api.get_network_interfaces = AsyncMock(return_value=[
+            {"interface": "lan", "rx_bytes": 100, "tx_bytes": 100, "status": "up"},
+        ])
+        data = await coord._async_update_data()
+
+        iface = next(i for i in data.network_interfaces if i["interface"] == "lan")
+        assert iface["rx_rate"] == 0
+        assert iface["tx_rate"] == 0
+
+    @pytest.mark.asyncio
+    async def test_rate_sensor_native_value_none_before_second_poll(self):
+        """T-R4: OpenWrtInterfaceRateSensor returns None when rx_rate not yet in data."""
+        from unittest.mock import MagicMock
+        from custom_components.openwrt_router.sensor import OpenWrtInterfaceRateSensor
+        from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
+
+        coord, _ = _make_coordinator()
+        data = OpenWrtCoordinatorData()
+        data.network_interfaces = [
+            {"interface": "wan", "rx_bytes": 1000, "tx_bytes": 500, "status": "up"}
+            # no rx_rate key — first poll
+        ]
+        coord.data = data
+
+        entry = MagicMock()
+        entry.entry_id = "test_entry"
+        entry.data = {"host": "192.168.1.1", "port": 80}
+
+        sensor = OpenWrtInterfaceRateSensor(coord, entry, "wan", "rx_rate")
+        assert sensor.native_value is None

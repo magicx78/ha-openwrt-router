@@ -354,3 +354,58 @@ class TestDynamicRadioSensors:
         assert "phy0-ap0" in radio_ifnames
         assert "phy1-ap0" not in radio_ifnames
         assert "phy2-ap0" not in radio_ifnames
+
+
+# =====================================================================
+# T-S7 through T-S9: OpenWrtInterfaceRateSensor
+# =====================================================================
+
+from custom_components.openwrt_router.sensor import OpenWrtInterfaceRateSensor
+from homeassistant.const import UnitOfDataRate
+from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+
+
+class TestInterfaceRateSensor:
+    """Tests for the bandwidth rate (bytes/s) sensor."""
+
+    def _make_sensor(self, metric="rx_rate", interface="wan"):
+        coord = MagicMock()
+        entry = MagicMock()
+        entry.entry_id = "entry_abc"
+        entry.data = {"host": "192.168.1.1", "port": 80}
+        return OpenWrtInterfaceRateSensor(coord, entry, interface, metric)
+
+    def test_unique_id_format(self):
+        """T-S7: unique_id follows stable pattern."""
+        s = self._make_sensor("rx_rate", "wan")
+        assert s._attr_unique_id == "entry_abc_wan_rx_rate"
+        s2 = self._make_sensor("tx_rate", "lan")
+        assert s2._attr_unique_id == "entry_abc_lan_tx_rate"
+
+    def test_device_class_and_unit(self):
+        """T-S8: Sensor has DATA_RATE device class and B/s unit."""
+        s = self._make_sensor()
+        assert s._attr_device_class == SensorDeviceClass.DATA_RATE
+        assert s._attr_native_unit_of_measurement == UnitOfDataRate.BYTES_PER_SECOND
+        assert s._attr_state_class == SensorStateClass.MEASUREMENT
+
+    def test_native_value_returns_rate(self):
+        """T-S9: native_value reads rx_rate / tx_rate from coordinator data."""
+        from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
+
+        coord = MagicMock()
+        data = OpenWrtCoordinatorData()
+        data.network_interfaces = [
+            {"interface": "wan", "rx_bytes": 5000, "tx_bytes": 2000,
+             "rx_rate": 123.45, "tx_rate": 67.89, "status": "up"}
+        ]
+        coord.data = data
+        entry = MagicMock()
+        entry.entry_id = "e1"
+        entry.data = {"host": "192.168.1.1", "port": 80}
+
+        rx_sensor = OpenWrtInterfaceRateSensor(coord, entry, "wan", "rx_rate")
+        assert rx_sensor.native_value == pytest.approx(123.45)
+
+        tx_sensor = OpenWrtInterfaceRateSensor(coord, entry, "wan", "tx_rate")
+        assert tx_sensor.native_value == pytest.approx(67.89)
