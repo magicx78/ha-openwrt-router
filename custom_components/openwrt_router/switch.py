@@ -157,7 +157,9 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
         """Return entity name as 'SSID (Band)', updated whenever coordinator data changes."""
         radio = self._get_current_radio()
         ssid = (radio.get(RADIO_KEY_SSID, "") if radio else "") or self._ssid
-        band_display = self._format_band(self._band)
+        # Read band from current coordinator data; fall back to value captured at init
+        band = (radio.get(RADIO_KEY_BAND, "") if radio else "") or self._band
+        band_display = self._format_band(band)
         return f"{ssid} ({band_display})" if band_display else ssid
 
     @property
@@ -249,6 +251,7 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
         """
         band_map = {
             "2g": "2.4 GHz",
+            "2.4g": "2.4 GHz",  # _detect_band() returns "2.4g" for 2.4 GHz radios
             "5g": "5 GHz",
             "6g": "6 GHz",
             "60g": "60 GHz",

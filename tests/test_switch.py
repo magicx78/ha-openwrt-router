@@ -51,10 +51,10 @@ class TestSwitchCreation:
         switch = _make_switch(mock_coordinator, mock_config_entry, radio=radio)
         assert switch.name == "OpenWrt-Home-5G (5 GHz)"
 
-    def test_name_without_known_band(self, mock_coordinator, mock_config_entry):
-        # "2.4g" is not in _format_band's map (it uses "2g"), so band display is empty
+    def test_name_with_24g_band(self, mock_coordinator, mock_config_entry):
+        # "2.4g" returned by _detect_band must display as "2.4 GHz"
         switch = _make_switch(mock_coordinator, mock_config_entry)
-        assert switch.name == "OpenWrt-Home"
+        assert switch.name == "OpenWrt-Home (2.4 GHz)"
 
     def test_unique_id(self, mock_coordinator, mock_config_entry):
         switch = _make_switch(mock_coordinator, mock_config_entry)
