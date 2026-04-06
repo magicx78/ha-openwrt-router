@@ -2,6 +2,21 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.9.1] - 2026-04-06
+
+### Fixed
+- **WiFi toggle: `uci/apply` fallback komplett übersprungen**: `uci/commit` blockiert via rpcd ACL → wirft `OpenWrtAuthError` → war NICHT in der except-Klausel → `uci/apply` wurde nie versucht. Fix: `OpenWrtAuthError` zu beiden except-Klauseln hinzugefügt.
+- **Connected Clients = 0 bei read-only SSH**: SSH-Fallback lief `ubus call hostapd.*/get_clients` — erfordert ubus-Socket-Zugriff, schlägt bei read-only SSH-Usern fehl. Neuer Fallback: `iw dev {iface} station dump` (Kernel nl80211, rein lesend, kein ubus nötig).
+
+### Technical
+- `api.py`: `OpenWrtAuthError` in `set_wifi_state()` except-Klauseln ergänzt (commit + apply).
+- `api.py`: Neue Methode `_get_clients_via_iw_ssh()` — parst `iw station dump` Output, wird automatisch aufgerufen wenn ubus SSH-Fallback fehlschlägt.
+
+### Tests
+- 294 passing (no regressions)
+
+---
+
 ## [1.9.0] - 2026-04-06
 
 ### Fixed

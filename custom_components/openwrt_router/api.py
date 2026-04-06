@@ -1007,12 +1007,13 @@ class OpenWrtAPI:
                 return True
             except (
                 OpenWrtMethodNotFoundError,
+                OpenWrtAuthError,
                 OpenWrtResponseError,
                 OpenWrtTimeoutError,
                 OpenWrtConnectionError,
             ) as commit_err:
                 err_str = str(commit_err).lower()
-                if "access denied" in err_str or "permission" in err_str:
+                if isinstance(commit_err, OpenWrtAuthError) or "access denied" in err_str or "permission" in err_str:
                     _LOGGER.warning(
                         "uci/commit blocked — trying uci/apply fallback for %s: %s",
                         uci_section, commit_err,
@@ -1028,8 +1029,8 @@ class OpenWrtAPI:
                             "WiFi section %s %s via uci/apply", uci_section, action
                         )
                         return True
-                    except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtTimeoutError):
-                        _LOGGER.debug("uci/apply not available")
+                    except (OpenWrtMethodNotFoundError, OpenWrtAuthError, OpenWrtResponseError, OpenWrtTimeoutError):
+                        _LOGGER.debug("uci/apply also blocked")
 
                     # Revert the staged-but-uncommitted change to keep router clean
                     try:
@@ -1231,14 +1232,17 @@ class OpenWrtAPI:
             return None
 
         if proc.returncode != 0:
-            _LOGGER.debug("SSH get_clients returned exit code %s", proc.returncode)
-            return None
+            _LOGGER.debug(
+                "SSH ubus get_clients failed (exit %s) — trying iw fallback",
+                proc.returncode,
+            )
+            return await self._get_clients_via_iw_ssh(ifnames, ifname_to_ssid, leases)
 
         try:
             entries: list[dict[str, Any]] = json.loads(stdout.decode())
         except ValueError:
-            _LOGGER.debug("SSH get_clients returned invalid JSON")
-            return None
+            _LOGGER.debug("SSH get_clients returned invalid JSON — trying iw fallback")
+            return await self._get_clients_via_iw_ssh(ifnames, ifname_to_ssid, leases)
 
         clients: list[dict[str, Any]] = []
         seen_macs: set[str] = set()
@@ -1268,6 +1272,93 @@ class OpenWrtAPI:
             len(clients), len(entries),
         )
         return clients
+
+    async def _get_clients_via_iw_ssh(
+        self,
+        ifnames: list[str],
+        ifname_to_ssid: dict[str, str],
+        leases: dict[str, dict[str, str]] | None,
+    ) -> list[dict[str, Any]] | None:
+        """Fetch connected WiFi clients via 'iw dev <iface> station dump' over SSH.
+
+        Read-only alternative to the ubus hostapd fallback — works when the SSH
+        user has no access to the ubus socket.  Parses the kernel nl80211
+        station table directly.
+
+        Returns:
+            List of client dicts (same schema as get_connected_clients), or None on failure.
+        """
+        if not ifnames:
+            return None
+
+        # Build a shell one-liner: print a marker before each iface then dump stations.
+        iface_cmds = "; ".join(
+            f"echo '=== {i} ==='; iw dev {i} station dump 2>/dev/null"
+            for i in ifnames
+        )
+        ssh_cmd = [
+            "sshpass", "-p", self._password,
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            f"{self._username}@{self._host}",
+            iface_cmds,
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        except (asyncio.TimeoutError, Exception) as err:
+            _LOGGER.debug("SSH iw station dump timed out or failed: %s", err)
+            return None
+
+        output = stdout.decode(errors="replace")
+        clients: list[dict[str, Any]] = []
+        seen_macs: set[str] = set()
+        current_iface = ifnames[0] if ifnames else ""
+
+        for line in output.splitlines():
+            line = line.strip()
+            # Interface marker injected by the shell command above
+            if line.startswith("=== ") and line.endswith(" ==="):
+                current_iface = line[4:-4]
+                continue
+            # "Station aa:bb:cc:dd:ee:ff (on phy0-ap0)"
+            if line.startswith("Station "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    mac = parts[1].upper()
+                    if mac not in seen_macs:
+                        seen_macs.add(mac)
+                        lease = (leases or {}).get(mac, {})
+                        clients.append(
+                            {
+                                CLIENT_KEY_MAC: mac,
+                                CLIENT_KEY_IP: lease.get("ip", ""),
+                                CLIENT_KEY_HOSTNAME: lease.get("hostname", ""),
+                                CLIENT_KEY_SIGNAL: 0,
+                                CLIENT_KEY_SSID: ifname_to_ssid.get(current_iface, ""),
+                                CLIENT_KEY_RADIO: current_iface,
+                            }
+                        )
+                continue
+            # "signal:  -65 [-65] dBm"  — update last appended client's signal
+            if line.startswith("signal:") and clients:
+                parts = line.split()
+                try:
+                    clients[-1][CLIENT_KEY_SIGNAL] = int(parts[1])
+                except (IndexError, ValueError):
+                    pass
+
+        _LOGGER.debug(
+            "SSH iw fallback: %d clients across %d interfaces",
+            len(clients), len(ifnames),
+        )
+        return clients if clients else None
 
     async def _set_wifi_state_ssh(self, uci_section: str, enabled: bool) -> bool:
         """Enable or disable WiFi interface via SSH script (fallback for ACL-restricted routers).
