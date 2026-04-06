@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<!--
+  OpenWrt Network Topology Card
+  ==============================
+  Lovelace custom card for the ha-openwrt-router integration.
+
+  Usage in Lovelace (requires custom:html-template-card or similar):
+  ─────────────────────────────────────────────────────────────────
+  type: custom:html-template-card
+  ignore_line_breaks: true
+  content: !include lovelace/network-topology-card.html
+
+  Alternatively embed via:
+    type: iframe
+    url: /local/network-topology-card.html
+    aspect_ratio: 100%
+
+  The card reads sensor.openwrt_router_network_topology.
+  Adjust TOPOLOGY_ENTITY below if your entity ID differs.
+  ─────────────────────────────────────────────────────────────────
+  Layout (left → right):
+    [Internet] → [Router/Gateway] → [Radio 2,4 GHz] → [Client ...]
+                                 → [Radio 5 GHz]   → [Client ...]
+                                 → [LAN]            → [Client ...]
+-->
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Netzwerk-Topologie</title>
+  <style>
+    :root {
+      --color-bg: #1c1c1e;
+      --color-card: #2c2c2e;
+      --color-border: #3a3a3c;
+      --color-text: #f5f5f7;
+      --color-muted: #8e8e93;
+      --color-good: #30d158;
+      --color-fair: #ffd60a;
+      --color-poor: #ff453a;
+      --color-wan: #0a84ff;
+      --color-radio: #5e5ce6;
+      --color-lan: #32ade6;
+      --color-gateway: #0a84ff;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--color-bg);
+      color: var(--color-text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px;
+      padding: 16px;
+      min-height: 100vh;
+    }
+
+    #topology-root {
+      width: 100%;
+      overflow-x: auto;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────── */
+    .topo-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--color-border);
+    }
+    .topo-title {
+      font-size: 16px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .topo-meta {
+      color: var(--color-muted);
+      font-size: 11px;
+    }
+
+    /* ── Columns layout ─────────────────────────────────────────── */
+    .topo-canvas {
+      display: flex;
+      align-items: flex-start;
+      gap: 0;
+      position: relative;
+      min-height: 120px;
+    }
+
+    .topo-column {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      min-width: 160px;
+      padding: 0 8px;
+      flex-shrink: 0;
+    }
+
+    .topo-column-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--color-muted);
+      margin-bottom: 4px;
+    }
+
+    /* ── Connector lines via SVG overlay ───────────────────────── */
+    .topo-svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      overflow: visible;
+    }
+
+    .link-wifi {
+      stroke: var(--color-radio);
+      stroke-width: 1.5;
+      stroke-dasharray: 6 3;
+      fill: none;
+      opacity: 0.6;
+    }
+    .link-lan {
+      stroke: var(--color-lan);
+      stroke-width: 1.5;
+      fill: none;
+      opacity: 0.6;
+    }
+    .link-internal {
+      stroke: var(--color-gateway);
+      stroke-width: 2;
+      fill: none;
+      opacity: 0.5;
+    }
+    .link-label {
+      fill: var(--color-muted);
+      font-size: 10px;
+      text-anchor: middle;
+    }
+
+    /* ── Node cards ─────────────────────────────────────────────── */
+    .node {
+      background: var(--color-card);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+      padding: 10px 12px;
+      width: 148px;
+      position: relative;
+      transition: box-shadow 0.2s;
+    }
+    .node:hover {
+      box-shadow: 0 0 0 2px var(--color-border);
+    }
+
+    .node-gateway {
+      border-color: var(--color-gateway);
+      background: #0a84ff18;
+    }
+    .node-radio {
+      border-color: var(--color-radio);
+      background: #5e5ce618;
+    }
+    .node-client-wifi {
+      border-color: var(--color-border);
+    }
+    .node-client-lan {
+      border-color: var(--color-lan);
+      background: #32ade618;
+    }
+
+    .node-icon {
+      font-size: 20px;
+      margin-bottom: 4px;
+    }
+    .node-name {
+      font-weight: 600;
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 124px;
+    }
+    .node-sub {
+      color: var(--color-muted);
+      font-size: 10px;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Signal pill */
+    .signal-pill {
+      display: inline-block;
+      margin-top: 4px;
+      padding: 1px 6px;
+      border-radius: 20px;
+      font-size: 10px;
+      font-weight: 600;
+    }
+    .signal-good  { background: #30d15820; color: var(--color-good); }
+    .signal-fair  { background: #ffd60a20; color: var(--color-fair); }
+    .signal-poor  { background: #ff453a20; color: var(--color-poor); }
+    .signal-unknown { background: #3a3a3c; color: var(--color-muted); }
+
+    /* Status dot */
+    .status-dot {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+    }
+    .status-online   { background: var(--color-good); }
+    .status-disabled { background: var(--color-muted); }
+    .status-offline  { background: var(--color-poor); }
+
+    /* WAN indicator */
+    .wan-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 20px;
+      font-size: 10px;
+      font-weight: 600;
+      margin-top: 4px;
+    }
+    .wan-connected    { background: #30d15820; color: var(--color-good); }
+    .wan-disconnected { background: #ff453a20; color: var(--color-poor); }
+
+    /* ── Legend ─────────────────────────────────────────────────── */
+    .topo-legend {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-top: 20px;
+      padding-top: 12px;
+      border-top: 1px solid var(--color-border);
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--color-muted);
+    }
+    .legend-line {
+      width: 28px;
+      height: 2px;
+    }
+    .legend-wifi { background: var(--color-radio); opacity: 0.8; }
+    .legend-lan  { background: var(--color-lan); }
+    .legend-internal { background: var(--color-gateway); opacity: 0.7; }
+
+    /* ── Error / loading states ─────────────────────────────────── */
+    .topo-error {
+      padding: 24px;
+      text-align: center;
+      color: var(--color-muted);
+    }
+    .topo-error code {
+      display: block;
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--color-poor);
+    }
+  </style>
+</head>
+<body>
+<div id="topology-root">
+  <div class="topo-error">
+    <div>⏳ Lade Topologie-Daten...</div>
+  </div>
+</div>
+
+<script>
+// ─── Configuration ────────────────────────────────────────────────
+// Adjust this entity ID to match your HA instance.
+// Pattern: sensor.<entry_title>_network_topology (lowercase, spaces → _)
+const TOPOLOGY_ENTITY = "sensor.openwrt_router_network_topology";
+const REFRESH_INTERVAL_MS = 30000;
+
+// ─── HA API helper ────────────────────────────────────────────────
+async function fetchTopology() {
+  // Works when served via HA proxy (iframe card or html-template-card)
+  const res = await fetch(
+    `/api/states/${TOPOLOGY_ENTITY}`,
+    { headers: { Authorization: `Bearer ${getToken()}` } }
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+  const state = await res.json();
+  const raw = state.attributes?.topology_json;
+  if (!raw) throw new Error("Attribut topology_json nicht gefunden");
+  return JSON.parse(raw);
+}
+
+function getToken() {
+  // Long-lived access token – set via Lovelace custom resource variable
+  // or fall back to the window-level hassToken injected by HA frontend.
+  return window.hassToken || window._hassToken || "";
+}
+
+// ─── Icons ────────────────────────────────────────────────────────
+const ICONS = {
+  gateway: "🌐",
+  radio: "📡",
+  client_wifi: "💻",
+  client_lan: "🖥️",
+  client_phone: "📱",
+  internet: "☁️",
+};
+
+function nodeIcon(node) {
+  if (node.type === "gateway") return ICONS.gateway;
+  if (node.type === "radio") return ICONS.radio;
+  if (node.connection_type === "lan") return ICONS.client_lan;
+  return ICONS.client_wifi;
+}
+
+// ─── Signal pill ──────────────────────────────────────────────────
+function signalPill(node) {
+  if (node.type !== "client" || node.connection_type === "lan") return "";
+  const q = node.signal_quality || "unknown";
+  const label = node.signal ? `${node.signal} dBm` : "–";
+  return `<span class="signal-pill signal-${q}">${label}</span>`;
+}
+
+// ─── Render ───────────────────────────────────────────────────────
+function render(topo) {
+  const root = document.getElementById("topology-root");
+  if (!topo || !topo.nodes) {
+    root.innerHTML = `<div class="topo-error">Keine Topologie-Daten<code>nodes missing</code></div>`;
+    return;
+  }
+
+  const { nodes, links, meta } = topo;
+
+  // Organise into columns
+  const gateway   = nodes.find(n => n.type === "gateway");
+  const radios    = nodes.filter(n => n.type === "radio");
+  const wifiClients = nodes.filter(n => n.type === "client" && n.connection_type === "wifi");
+  const lanClients  = nodes.filter(n => n.type === "client" && n.connection_type === "lan");
+
+  // Updated timestamp
+  const updatedAt = meta?.updated
+    ? new Date(meta.updated).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })
+    : "–";
+
+  // ── Build HTML ───────────────────────────────────────────────
+  let html = `
+    <div class="topo-header">
+      <div class="topo-title">🗺️ Netzwerk-Topologie</div>
+      <div class="topo-meta">${meta?.client_count ?? 0} Geräte · ${updatedAt} Uhr</div>
+    </div>
+    <div class="topo-canvas" id="topo-canvas">
+      <svg class="topo-svg" id="topo-svg"></svg>
+  `;
+
+  // Column 0: Internet symbol
+  html += `<div class="topo-column">
+    <div class="topo-column-label">Internet</div>
+    <div class="node node-gateway" id="node-internet">
+      <div class="status-dot status-${meta?.wan_connected ? 'online' : 'offline'}"></div>
+      <div class="node-icon">${ICONS.internet}</div>
+      <div class="node-name">Internet</div>
+      <div class="node-sub">${meta?.wan_ip || "–"}</div>
+      <span class="wan-badge wan-${meta?.wan_connected ? 'connected' : 'disconnected'}">
+        ${meta?.wan_connected ? "verbunden" : "getrennt"}
+      </span>
+    </div>
+  </div>`;
+
+  // Column 1: Gateway
+  html += `<div class="topo-column">
+    <div class="topo-column-label">Router</div>`;
+  if (gateway) {
+    html += `<div class="node node-gateway" id="node-${gateway.id}">
+      <div class="status-dot status-online"></div>
+      <div class="node-icon">${nodeIcon(gateway)}</div>
+      <div class="node-name">${escHtml(gateway.name)}</div>
+      <div class="node-sub">${escHtml(gateway.model || "OpenWrt")}</div>
+      ${gateway.firmware ? `<div class="node-sub">${escHtml(gateway.firmware)}</div>` : ""}
+    </div>`;
+  }
+  html += `</div>`;
+
+  // Column 2: Radios
+  html += `<div class="topo-column">
+    <div class="topo-column-label">Access Points</div>`;
+  for (const radio of radios) {
+    html += `<div class="node node-radio" id="node-${radio.id}">
+      <div class="status-dot status-${radio.status}"></div>
+      <div class="node-icon">${nodeIcon(radio)}</div>
+      <div class="node-name">${escHtml(radio.band_label || radio.band)}</div>
+      <div class="node-sub">${escHtml(radio.ssid || "–")}</div>
+      ${radio.channel ? `<div class="node-sub">Kanal ${radio.channel}</div>` : ""}
+    </div>`;
+  }
+  // LAN pseudo-node
+  if (lanClients.length > 0) {
+    html += `<div class="node node-client-lan" id="node-lan-group">
+      <div class="node-icon">🔌</div>
+      <div class="node-name">LAN</div>
+      <div class="node-sub">${lanClients.length} Gerät${lanClients.length > 1 ? "e" : ""}</div>
+    </div>`;
+  }
+  html += `</div>`;
+
+  // Column 3: Clients (grouped by parent radio)
+  html += `<div class="topo-column">
+    <div class="topo-column-label">Geräte</div>`;
+  for (const client of wifiClients) {
+    const cssClass = client.connection_type === "lan" ? "node-client-lan" : "node-client-wifi";
+    html += `<div class="node ${cssClass}" id="node-${client.id}">
+      <div class="status-dot status-online"></div>
+      <div class="node-icon">${nodeIcon(client)}</div>
+      <div class="node-name">${escHtml(client.name)}</div>
+      <div class="node-sub">${escHtml(client.ssid || client.ip || "–")}</div>
+      ${signalPill(client)}
+    </div>`;
+  }
+  for (const client of lanClients) {
+    html += `<div class="node node-client-lan" id="node-${client.id}">
+      <div class="status-dot status-online"></div>
+      <div class="node-icon">${nodeIcon(client)}</div>
+      <div class="node-name">${escHtml(client.name)}</div>
+      <div class="node-sub">${escHtml(client.ip || "LAN")}</div>
+    </div>`;
+  }
+  html += `</div>`;
+
+  html += `</div>`; // topo-canvas
+
+  // Legend
+  html += `
+    <div class="topo-legend">
+      <div class="legend-item">
+        <div class="legend-line legend-internal" style="border-top:2px solid var(--color-gateway);opacity:0.7;height:0;"></div>
+        <span>WAN / intern</span>
+      </div>
+      <div class="legend-item">
+        <div style="width:28px;height:2px;border-top:2px dashed var(--color-radio);opacity:0.8;"></div>
+        <span>WLAN-Verbindung</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-line legend-lan" style="height:0;border-top:2px solid var(--color-lan);"></div>
+        <span>LAN-Verbindung</span>
+      </div>
+      <div class="legend-item"><span class="signal-pill signal-good">gut (&gt; −65 dBm)</span></div>
+      <div class="legend-item"><span class="signal-pill signal-fair">mittel</span></div>
+      <div class="legend-item"><span class="signal-pill signal-poor">schwach (&lt; −75 dBm)</span></div>
+    </div>
+  `;
+
+  root.innerHTML = html;
+
+  // Draw SVG connector lines after DOM is rendered
+  requestAnimationFrame(() => drawLinks(nodes, links, radios, lanClients));
+}
+
+// ─── SVG connector lines ──────────────────────────────────────────
+function drawLinks(nodes, links, radios, lanClients) {
+  const canvas = document.getElementById("topo-canvas");
+  const svg = document.getElementById("topo-svg");
+  if (!canvas || !svg) return;
+
+  const canvasRect = canvas.getBoundingClientRect();
+  svg.setAttribute("viewBox", `0 0 ${canvasRect.width} ${canvasRect.height}`);
+  svg.setAttribute("width", canvasRect.width);
+  svg.setAttribute("height", canvasRect.height);
+
+  let svgContent = "";
+
+  // Helper: get centre of a node element relative to canvas
+  function centre(id) {
+    const el = document.getElementById(`node-${id}`);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      x: r.left - canvasRect.left + r.width / 2,
+      y: r.top  - canvasRect.top  + r.height / 2,
+      right: r.right - canvasRect.left,
+      left:  r.left  - canvasRect.left,
+    };
+  }
+
+  // Internet → Gateway
+  const inet = centre("internet");
+  const gw   = centre("gateway");
+  if (inet && gw) {
+    svgContent += bezier(inet.right, inet.y, gw.left, gw.y, "link-internal");
+  }
+
+  // Gateway → Radios
+  for (const radio of (radios || [])) {
+    const g = centre("gateway");
+    const r = centre(radio.id);
+    if (g && r) svgContent += bezier(g.right, g.y, r.left, r.y, "link-internal");
+  }
+
+  // Gateway → LAN group
+  if (lanClients && lanClients.length > 0) {
+    const g = centre("gateway");
+    const l = centre("lan-group");
+    if (g && l) svgContent += bezier(g.right, g.y, l.left, l.y, "link-lan");
+  }
+
+  // Radios → WiFi clients (lookup parent)
+  const nodeMap = {};
+  for (const link of (links || [])) {
+    if (link.medium === "wifi") {
+      const src = centre(link.source);
+      const tgt = centre(link.target);
+      if (src && tgt) {
+        svgContent += bezier(src.right, src.y, tgt.left, tgt.y, "link-wifi", link.label);
+      }
+    }
+  }
+
+  // LAN group → LAN clients
+  for (const client of (lanClients || [])) {
+    const l = centre("lan-group");
+    const c = centre(client.id);
+    if (l && c) svgContent += bezier(l.right, l.y, c.left, c.y, "link-lan");
+  }
+
+  svg.innerHTML = svgContent;
+}
+
+function bezier(x1, y1, x2, y2, cssClass, label) {
+  const mx = (x1 + x2) / 2;
+  const path = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+  let out = `<path d="${path}" class="${cssClass}"/>`;
+  if (label) {
+    out += `<text x="${mx}" y="${(y1 + y2) / 2 - 4}" class="link-label">${escHtml(label)}</text>`;
+  }
+  return out;
+}
+
+function escHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// ─── Main loop ────────────────────────────────────────────────────
+async function main() {
+  const root = document.getElementById("topology-root");
+  try {
+    const topo = await fetchTopology();
+    render(topo);
+  } catch (err) {
+    root.innerHTML = `
+      <div class="topo-error">
+        <div>⚠️ Konnte Topologie nicht laden</div>
+        <code>${escHtml(err.message)}</code>
+        <div style="margin-top:8px;color:#636366;font-size:10px;">
+          Entity: ${TOPOLOGY_ENTITY}<br>
+          Prüfe: Long-Lived Access Token in window.hassToken gesetzt?
+        </div>
+      </div>`;
+  }
+}
+
+// Start + periodic refresh
+main();
+setInterval(main, REFRESH_INTERVAL_MS);
+
+// Redraw lines on window resize
+window.addEventListener("resize", () => {
+  const canvas = document.getElementById("topo-canvas");
+  if (!canvas) return;
+  const root = document.getElementById("topology-root");
+  // Minimal: just re-trigger draw if data already rendered
+  const svg = document.getElementById("topo-svg");
+  if (svg) {
+    // Re-query cached topology from last render if available
+    if (window._lastTopo) requestAnimationFrame(() =>
+      drawLinks(window._lastTopo.nodes, window._lastTopo.links,
+        window._lastTopo.nodes.filter(n => n.type === "radio"),
+        window._lastTopo.nodes.filter(n => n.type === "client" && n.connection_type === "lan"))
+    );
+  }
+});
+</script>
+</body>
+</html>

@@ -59,6 +59,7 @@ from .const import (
     SUFFIX_TMPFS_TOTAL,
     SUFFIX_TMPFS_USAGE,
     SUFFIX_TMPFS_USED,
+    SUFFIX_NETWORK_TOPOLOGY,
     SUFFIX_UPTIME,
     SUFFIX_UPDATE_STATUS,
     SUFFIX_UPDATES_AVAILABLE,
@@ -83,6 +84,7 @@ from .const import (
     CLIENT_KEY_RADIO,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
+from .topology import build_topology, topology_to_json
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -382,6 +384,29 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:lan-connect",
         value_fn=lambda data: data.active_connections,
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_NETWORK_TOPOLOGY,
+        translation_key="network_topology",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:lan",
+        native_unit_of_measurement="clients",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda data: len(data.clients),
+        extra_attrs_fn=lambda data: {
+            "topology_json": topology_to_json(
+                build_topology(
+                    router_info=data.router_info,
+                    wan_status=data.wan_status,
+                    wan_connected=data.wan_connected,
+                    wifi_radios=data.wifi_radios,
+                    ap_interfaces=data.ap_interfaces,
+                    clients=data.clients,
+                    dhcp_leases=data.dhcp_leases,
+                    network_interfaces=data.network_interfaces,
+                )
+            )
+        },
     ),
 )
 
