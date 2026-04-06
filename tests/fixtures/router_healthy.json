@@ -1,0 +1,29 @@
+{
+  "system_info": {
+    "hostname": "OpenWrt",
+    "model": "MediaTek Filogic 880",
+    "uptime": 12345,
+    "localtime": 1712345678
+  },
+  "memory": {
+    "total": 524288000,
+    "free": 262144000,
+    "shared": 4096000,
+    "buffered": 16384000,
+    "available": 278528000
+  },
+  "network_interfaces": [
+    {"interface": "lan", "rx_bytes": 1000000, "tx_bytes": 500000, "status": "up"},
+    {"interface": "wan", "rx_bytes": 5000000, "tx_bytes": 2000000, "status": "up"},
+    {"interface": "loopback", "rx_bytes": 100, "tx_bytes": 100, "status": "up"}
+  ],
+  "wan_status": "up",
+  "wan_ip": "1.2.3.4",
+  "clients": [
+    {"mac": "AA:BB:CC:DD:EE:FF", "ip": "192.168.1.100", "ssid": "HomeWifi", "radio": "radio0", "signal": -65}
+  ],
+  "wifi_radios": [
+    {"ifname": "radio0", "enabled": true, "ssid": "HomeWifi", "signal": -65, "noise": -95},
+    {"ifname": "radio1", "enabled": true, "ssid": "HomeWifi5G", "signal": -60, "noise": -92}
+  ]
+}

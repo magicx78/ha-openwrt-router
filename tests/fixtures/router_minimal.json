@@ -1,0 +1,17 @@
+{
+  "system_info": {
+    "hostname": "OpenWrt",
+    "uptime": 100
+  },
+  "memory": {
+    "total": 131072000,
+    "free": 65536000
+  },
+  "network_interfaces": [
+    {"interface": "lan", "rx_bytes": 0, "tx_bytes": 0, "status": "up"}
+  ],
+  "wan_status": "unknown",
+  "wan_ip": null,
+  "clients": [],
+  "wifi_radios": []
+}

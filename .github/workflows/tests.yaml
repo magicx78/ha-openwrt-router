@@ -21,6 +21,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install homeassistant
-          pip install pytest pytest-asyncio aiohttp
+          pip install pytest pytest-asyncio aiohttp ruff
+      - name: Lint and format check (ruff)
+        run: |
+          ruff check .
+          ruff format --check .
       - name: Run tests
         run: pytest tests/ -v --tb=short

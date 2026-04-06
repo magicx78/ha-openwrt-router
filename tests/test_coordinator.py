@@ -344,3 +344,80 @@ class TestCoordinatorDataAsDict:
         assert "disk_space" in d
         assert "tmpfs" in d
         assert "active_connections" in d
+
+
+# =====================================================================
+# T-C1 through T-C5: Client tracking and _client_first_seen
+# =====================================================================
+
+from custom_components.openwrt_router.const import CLIENT_KEY_CONNECTED_SINCE
+
+
+class TestClientTracking:
+    """Tests for per-client online-time tracking via _client_first_seen."""
+
+    @pytest.mark.asyncio
+    async def test_t_c1_client_first_seen_populated_on_first_poll(self):
+        """T-C1: _client_first_seen is populated when a client appears."""
+        coord, api = _make_coordinator()
+        mac = "AA:BB:CC:DD:EE:FF"
+        api.get_connected_clients = AsyncMock(return_value=[
+            {"mac": mac, "ip": "192.168.1.10", "hostname": "device"}
+        ])
+        await coord._async_update_data()
+        assert mac in coord._client_first_seen
+
+    @pytest.mark.asyncio
+    async def test_t_c2_client_first_seen_stable_on_second_poll(self):
+        """T-C2: _client_first_seen timestamp does not change on second poll."""
+        coord, api = _make_coordinator()
+        mac = "AA:BB:CC:DD:EE:FF"
+        api.get_connected_clients = AsyncMock(return_value=[
+            {"mac": mac, "ip": "192.168.1.10", "hostname": "device"}
+        ])
+        await coord._async_update_data()
+        first_seen = coord._client_first_seen[mac]
+        await coord._async_update_data()
+        assert coord._client_first_seen[mac] == first_seen
+
+    @pytest.mark.asyncio
+    async def test_t_c3_client_first_seen_cleaned_up_after_disconnect(self):
+        """T-C3: _client_first_seen entry removed when client is gone."""
+        coord, api = _make_coordinator()
+        mac = "AA:BB:CC:DD:EE:FF"
+        api.get_connected_clients = AsyncMock(return_value=[
+            {"mac": mac, "ip": "192.168.1.10", "hostname": "device"}
+        ])
+        await coord._async_update_data()
+        assert mac in coord._client_first_seen
+
+        api.get_connected_clients = AsyncMock(return_value=[])
+        await coord._async_update_data()
+        assert mac not in coord._client_first_seen
+
+    @pytest.mark.asyncio
+    async def test_t_c4_connected_since_in_client_after_poll(self):
+        """T-C4: connected_since is present in client dict after polling."""
+        coord, api = _make_coordinator()
+        mac = "AA:BB:CC:DD:EE:FF"
+        api.get_connected_clients = AsyncMock(return_value=[
+            {"mac": mac, "ip": "192.168.1.10", "hostname": "device"}
+        ])
+        data = await coord._async_update_data()
+        client = next(c for c in data.clients if c.get("mac") == mac)
+        assert CLIENT_KEY_CONNECTED_SINCE in client
+        # Must be a non-empty string
+        assert isinstance(client[CLIENT_KEY_CONNECTED_SINCE], str)
+        assert len(client[CLIENT_KEY_CONNECTED_SINCE]) > 0
+
+    @pytest.mark.asyncio
+    async def test_t_c5_client_with_missing_mac_is_skipped(self):
+        """T-C5: Client entry without a MAC is skipped in _client_first_seen."""
+        coord, api = _make_coordinator()
+        api.get_connected_clients = AsyncMock(return_value=[
+            {"mac": "", "ip": "192.168.1.10", "hostname": "ghost"},
+            {"ip": "192.168.1.11", "hostname": "no_mac"},  # MAC key missing
+        ])
+        await coord._async_update_data()
+        # _client_first_seen must remain empty — no valid MACs
+        assert len(coord._client_first_seen) == 0

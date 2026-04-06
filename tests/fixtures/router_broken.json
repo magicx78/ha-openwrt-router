@@ -1,0 +1,17 @@
+{
+  "system_info": null,
+  "memory": {},
+  "network_interfaces": [
+    {"interface": "lan", "rx_bytes": "not-a-number", "tx_bytes": null, "status": "up"},
+    {"rx_bytes": 100}
+  ],
+  "wan_status": "",
+  "wan_ip": 12345,
+  "clients": [
+    {"mac": "", "signal": "strong"},
+    null
+  ],
+  "wifi_radios": [
+    {"ifname": "radio0", "noise": "bad"}
+  ]
+}

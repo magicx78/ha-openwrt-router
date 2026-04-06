@@ -249,3 +249,64 @@ class TestTrackerDeviceInfo:
         tracker = _make_tracker(mock_coordinator, mock_config_entry)
         info = tracker.device_info
         assert info["name"] == "OpenWrt-Dev"  # entry.title
+
+
+# =====================================================================
+# T-DT1 through T-DT3: connected_since in extra_state_attributes
+# =====================================================================
+
+from custom_components.openwrt_router.const import CLIENT_KEY_CONNECTED_SINCE
+
+
+class TestTrackerConnectedSince:
+    """Tests that connected_since is surfaced in extra_state_attributes."""
+
+    def _tracker_with_connected_since(self, mock_coordinator, mock_config_entry):
+        """Return a tracker whose client has a connected_since timestamp."""
+        mock_coordinator.get_client_by_mac = MagicMock(return_value={
+            CLIENT_KEY_MAC: "B8:27:EB:AA:BB:01",
+            CLIENT_KEY_IP: "192.168.1.101",
+            CLIENT_KEY_SIGNAL: -55,
+            CLIENT_KEY_SSID: "OpenWrt-Home",
+            CLIENT_KEY_RADIO: "phy0-ap0",
+            "hostname": "raspberrypi",
+            CLIENT_KEY_CONNECTED_SINCE: "2026-04-06T10:00:00+00:00",
+        })
+        mock_coordinator.is_client_connected = MagicMock(return_value=True)
+        return _make_tracker(mock_coordinator, mock_config_entry)
+
+    def test_t_dt1_connected_since_present_when_online(
+        self, mock_coordinator, mock_config_entry
+    ):
+        """T-DT1: connected_since appears in extra_state_attributes for connected client."""
+        tracker = self._tracker_with_connected_since(mock_coordinator, mock_config_entry)
+        attrs = tracker.extra_state_attributes
+        assert "connected_since" in attrs
+        assert attrs["connected_since"] == "2026-04-06T10:00:00+00:00"
+
+    def test_t_dt2_no_connected_since_when_offline(
+        self, mock_coordinator, mock_config_entry
+    ):
+        """T-DT2: Offline client has connected: False and no connected_since."""
+        mock_coordinator.get_client_by_mac = MagicMock(return_value=None)
+        mock_coordinator.is_client_connected = MagicMock(return_value=False)
+        tracker = _make_tracker(
+            mock_coordinator, mock_config_entry, mac="00:00:00:00:00:00"
+        )
+        attrs = tracker.extra_state_attributes
+        assert attrs["connected"] is False
+        assert "connected_since" not in attrs
+
+    def test_t_dt3_connected_since_is_iso_format(
+        self, mock_coordinator, mock_config_entry
+    ):
+        """T-DT3: connected_since value is a valid ISO-8601 datetime string."""
+        from datetime import datetime
+        tracker = self._tracker_with_connected_since(mock_coordinator, mock_config_entry)
+        attrs = tracker.extra_state_attributes
+        ts = attrs.get("connected_since", "")
+        # Must parse without error
+        try:
+            datetime.fromisoformat(ts)
+        except ValueError:
+            pytest.fail(f"connected_since '{ts}' is not a valid ISO datetime")

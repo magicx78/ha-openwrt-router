@@ -200,3 +200,157 @@ class TestAllSensorValueFns:
                     assert isinstance(attrs, dict)
                 except Exception as e:
                     pytest.fail(f"extra_attrs_fn for {desc.key} raised {e}")
+
+
+# =====================================================================
+# T-S1 through T-S6: Dynamic interface and radio sensors
+# =====================================================================
+
+from unittest.mock import MagicMock, patch, AsyncMock
+from custom_components.openwrt_router.sensor import (
+    OpenWrtInterfaceSensor,
+    OpenWrtRadioSensor,
+    async_setup_entry,
+)
+from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
+
+
+class TestDynamicInterfaceSensors:
+    """T-S1: Dynamic interface sensors are created for wan, lan, loopback."""
+
+    def _make_coordinator_with_interfaces(self, mock_coordinator, interfaces):
+        data = OpenWrtCoordinatorData()
+        data.network_interfaces = interfaces
+        data.wifi_radios = []
+        mock_coordinator.data = data
+        return mock_coordinator
+
+    def test_t_s1_sensors_created_for_wan_lan_loopback(
+        self, mock_coordinator, mock_config_entry
+    ):
+        """T-S1: rx and tx sensors created for each interface."""
+        self._make_coordinator_with_interfaces(
+            mock_coordinator,
+            [
+                {"interface": "wan", "rx_bytes": 100, "tx_bytes": 50},
+                {"interface": "lan", "rx_bytes": 200, "tx_bytes": 80},
+                {"interface": "loopback", "rx_bytes": 10, "tx_bytes": 10},
+            ],
+        )
+        added: list = []
+
+        from custom_components.openwrt_router import OpenWrtRuntimeData
+        mock_config_entry.runtime_data = OpenWrtRuntimeData(
+            api=AsyncMock(), coordinator=mock_coordinator
+        )
+        mock_config_entry.async_on_unload = MagicMock()
+
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            async_setup_entry(
+                hass=MagicMock(),
+                entry=mock_config_entry,
+                async_add_entities=lambda entities, **kw: added.extend(entities),
+            )
+        )
+        interface_sensors = [
+            e for e in added if isinstance(e, OpenWrtInterfaceSensor)
+        ]
+        iface_names = {s._interface for s in interface_sensors}
+        assert "wan" in iface_names
+        assert "lan" in iface_names
+        assert "loopback" in iface_names
+
+    def test_t_s2_no_wan_sensor_when_wan_absent(
+        self, mock_coordinator, mock_config_entry
+    ):
+        """T-S2: No wan sensor created when wan is not in network_interfaces."""
+        self._make_coordinator_with_interfaces(
+            mock_coordinator,
+            [
+                {"interface": "lan", "rx_bytes": 200, "tx_bytes": 80},
+            ],
+        )
+        added: list = []
+
+        from custom_components.openwrt_router import OpenWrtRuntimeData
+        mock_config_entry.runtime_data = OpenWrtRuntimeData(
+            api=AsyncMock(), coordinator=mock_coordinator
+        )
+        mock_config_entry.async_on_unload = MagicMock()
+
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            async_setup_entry(
+                hass=MagicMock(),
+                entry=mock_config_entry,
+                async_add_entities=lambda entities, **kw: added.extend(entities),
+            )
+        )
+        interface_sensors = [
+            e for e in added if isinstance(e, OpenWrtInterfaceSensor)
+        ]
+        iface_names = {s._interface for s in interface_sensors}
+        assert "wan" not in iface_names
+
+    def test_t_s3_interface_with_none_rx_bytes(self, mock_coordinator, mock_config_entry):
+        """T-S3: Interface sensor with None rx_bytes returns None, does not crash."""
+        data = OpenWrtCoordinatorData()
+        data.network_interfaces = [
+            {"interface": "lan", "rx_bytes": None, "tx_bytes": 50}
+        ]
+        data.wifi_radios = []
+        mock_coordinator.data = data
+
+        sensor = OpenWrtInterfaceSensor(mock_coordinator, mock_config_entry, "lan", "rx_bytes")
+        assert sensor.native_value is None
+
+    def test_t_s5_interface_sensor_unique_id_stable(
+        self, mock_coordinator, mock_config_entry
+    ):
+        """T-S5: unique_id is deterministic — entry_id + interface + direction."""
+        sensor = OpenWrtInterfaceSensor(mock_coordinator, mock_config_entry, "wan", "rx_bytes")
+        assert sensor._attr_unique_id == "test_entry_id_wan_rx"
+
+        sensor_tx = OpenWrtInterfaceSensor(mock_coordinator, mock_config_entry, "wan", "tx_bytes")
+        assert sensor_tx._attr_unique_id == "test_entry_id_wan_tx"
+
+
+class TestDynamicRadioSensors:
+    """T-S4 / T-S6: Radio sensors and listener behavior."""
+
+    def test_t_s6_radio_sensor_only_when_noise_not_none(
+        self, mock_coordinator, mock_config_entry
+    ):
+        """T-S6: Radio sensor is only created when noise is not None."""
+        data = OpenWrtCoordinatorData()
+        data.network_interfaces = []
+        # radio0 has noise, radio1 does not
+        data.wifi_radios = [
+            {"ifname": "phy0-ap0", "signal": -65, "noise": -95},
+            {"ifname": "phy1-ap0", "signal": -60, "noise": None},
+            {"ifname": "phy2-ap0", "signal": -55},  # noise key absent
+        ]
+        mock_coordinator.data = data
+        added: list = []
+
+        from custom_components.openwrt_router import OpenWrtRuntimeData
+        mock_config_entry.runtime_data = OpenWrtRuntimeData(
+            api=AsyncMock(), coordinator=mock_coordinator
+        )
+        mock_config_entry.async_on_unload = MagicMock()
+
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            async_setup_entry(
+                hass=MagicMock(),
+                entry=mock_config_entry,
+                async_add_entities=lambda entities, **kw: added.extend(entities),
+            )
+        )
+        radio_sensors = [e for e in added if isinstance(e, OpenWrtRadioSensor)]
+        radio_ifnames = {s._ifname for s in radio_sensors}
+        # Only phy0-ap0 qualifies
+        assert "phy0-ap0" in radio_ifnames
+        assert "phy1-ap0" not in radio_ifnames
+        assert "phy2-ap0" not in radio_ifnames
