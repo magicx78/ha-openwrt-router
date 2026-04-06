@@ -44,6 +44,8 @@ from custom_components.openwrt_router.api import (  # noqa: E402
     OpenWrtTimeoutError,
 )
 from custom_components.openwrt_router.const import (  # noqa: E402
+    CLIENT_KEY_CONNECTED_SINCE,
+    CLIENT_KEY_DHCP_EXPIRES,
     CLIENT_KEY_HOSTNAME,
     CLIENT_KEY_IP,
     CLIENT_KEY_MAC,
@@ -438,6 +440,8 @@ def mock_coordinator_data():
             CLIENT_KEY_SIGNAL: -55,
             CLIENT_KEY_SSID: "OpenWrt-Home",
             CLIENT_KEY_RADIO: "phy0-ap0",
+            CLIENT_KEY_CONNECTED_SINCE: "2026-04-07T10:00:00+00:00",
+            CLIENT_KEY_DHCP_EXPIRES: 9999999999,
         },
         {
             CLIENT_KEY_MAC: "AC:DE:48:11:22:01",
@@ -446,12 +450,14 @@ def mock_coordinator_data():
             CLIENT_KEY_SIGNAL: -70,
             CLIENT_KEY_SSID: "OpenWrt-Home-5G",
             CLIENT_KEY_RADIO: "phy1-ap0",
+            CLIENT_KEY_CONNECTED_SINCE: "2026-04-07T10:05:00+00:00",
+            CLIENT_KEY_DHCP_EXPIRES: 9999999999,
         },
     ]
     data.client_count = 2
     data.dhcp_leases = {
-        "B8:27:EB:AA:BB:01": {"ip": "192.168.1.101", "hostname": "raspberrypi"},
-        "AC:DE:48:11:22:01": {"ip": "192.168.1.102", "hostname": "myphone"},
+        "B8:27:EB:AA:BB:01": {"ip": "192.168.1.101", "hostname": "raspberrypi", "expires": 9999999999},
+        "AC:DE:48:11:22:01": {"ip": "192.168.1.102", "hostname": "myphone", "expires": 9999999999},
     }
     data.disk_space = {
         "primary": {

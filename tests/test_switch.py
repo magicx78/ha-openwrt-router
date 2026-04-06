@@ -162,6 +162,7 @@ class TestSwitchAttributes:
         assert attrs["uci_section"] == "default_radio0"
         assert attrs["is_guest"] is False
         assert "connected_clients" in attrs
+        assert "clients" in attrs
 
     def test_extra_attrs_empty_when_radio_missing(self, mock_coordinator, mock_config_entry):
         switch = _make_switch(mock_coordinator, mock_config_entry)
@@ -173,6 +174,28 @@ class TestSwitchAttributes:
         attrs = switch.extra_state_attributes
         # One client is on OpenWrt-Home
         assert attrs["connected_clients"] == 1
+
+    def test_clients_list_structure(self, mock_coordinator, mock_config_entry):
+        """Client list must include name, mac, ip, signal_dbm, connected_since, dhcp_expires."""
+        switch = _make_switch(mock_coordinator, mock_config_entry)
+        clients = switch.extra_state_attributes["clients"]
+        assert len(clients) == 1
+        c = clients[0]
+        assert c["name"] == "raspberrypi"
+        assert c["mac"] == "B8:27:EB:AA:BB:01"
+        assert c["ip"] == "192.168.1.101"
+        assert c["signal_dbm"] == -55
+        assert c["connected_since"] == "2026-04-07T10:00:00+00:00"
+        # dhcp_expires is a non-empty string (far-future timestamp 9999999999)
+        assert c["dhcp_expires"] != ""
+
+    def test_clients_list_uses_mac_when_no_hostname(self, mock_coordinator, mock_config_entry):
+        """When hostname is absent, name should fall back to MAC."""
+        from custom_components.openwrt_router.const import CLIENT_KEY_HOSTNAME
+        mock_coordinator.data.clients[0][CLIENT_KEY_HOSTNAME] = ""
+        switch = _make_switch(mock_coordinator, mock_config_entry)
+        clients = switch.extra_state_attributes["clients"]
+        assert clients[0]["name"] == "B8:27:EB:AA:BB:01"
 
 
 # =====================================================================

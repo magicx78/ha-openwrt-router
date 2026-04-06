@@ -17,12 +17,12 @@ SAMPLE_LEASES = """\
 
 def test_parse_normal():
     leases = OpenWrtAPI._parse_dhcp_leases(SAMPLE_LEASES)
-    # hostname present → stored as-is
-    assert leases["B8:27:EB:AA:BB:CC"] == {"ip": "192.168.1.100", "hostname": "raspberrypi"}
+    # hostname present → stored as-is; expires timestamp parsed
+    assert leases["B8:27:EB:AA:BB:CC"] == {"ip": "192.168.1.100", "hostname": "raspberrypi", "expires": 1741600000}
     # hostname present (not '*') → stored
-    assert leases["AC:DE:48:11:22:33"] == {"ip": "192.168.1.101", "hostname": "myphone"}
+    assert leases["AC:DE:48:11:22:33"] == {"ip": "192.168.1.101", "hostname": "myphone", "expires": 1741600001}
     # hostname is '*' → stored as empty string
-    assert leases["00:11:22:33:44:55"] == {"ip": "192.168.1.102", "hostname": ""}
+    assert leases["00:11:22:33:44:55"] == {"ip": "192.168.1.102", "hostname": "", "expires": 1741600002}
 
 
 def test_parse_empty():

@@ -81,9 +81,9 @@ class TestParseDhcpLeases:
             "1741600002 00:11:22:33:44:55 192.168.1.102 * *\n"
         )
         leases = OpenWrtAPI._parse_dhcp_leases(raw)
-        assert leases["B8:27:EB:AA:BB:CC"] == {"ip": "192.168.1.100", "hostname": "raspberrypi"}
-        assert leases["AC:DE:48:11:22:33"] == {"ip": "192.168.1.101", "hostname": "myphone"}
-        assert leases["00:11:22:33:44:55"] == {"ip": "192.168.1.102", "hostname": ""}
+        assert leases["B8:27:EB:AA:BB:CC"] == {"ip": "192.168.1.100", "hostname": "raspberrypi", "expires": 1741600000}
+        assert leases["AC:DE:48:11:22:33"] == {"ip": "192.168.1.101", "hostname": "myphone", "expires": 1741600001}
+        assert leases["00:11:22:33:44:55"] == {"ip": "192.168.1.102", "hostname": "", "expires": 1741600002}
 
     def test_empty(self):
         assert OpenWrtAPI._parse_dhcp_leases("") == {}

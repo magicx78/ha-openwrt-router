@@ -14,6 +14,7 @@ from typing import Any
 import aiohttp
 
 from .const import (
+    CLIENT_KEY_DHCP_EXPIRES,
     CLIENT_KEY_HOSTNAME,
     CLIENT_KEY_IP,
     CLIENT_KEY_MAC,
@@ -1262,6 +1263,7 @@ class OpenWrtAPI:
                         CLIENT_KEY_MAC: mac,
                         CLIENT_KEY_IP: lease.get("ip", ""),
                         CLIENT_KEY_HOSTNAME: lease.get("hostname", ""),
+                        CLIENT_KEY_DHCP_EXPIRES: int(lease.get("expires", 0)),
                         CLIENT_KEY_SIGNAL: signal,
                         CLIENT_KEY_SSID: ssid,
                         CLIENT_KEY_RADIO: ifname,
@@ -1340,6 +1342,7 @@ class OpenWrtAPI:
                                 CLIENT_KEY_MAC: mac,
                                 CLIENT_KEY_IP: lease.get("ip", ""),
                                 CLIENT_KEY_HOSTNAME: lease.get("hostname", ""),
+                                CLIENT_KEY_DHCP_EXPIRES: int(lease.get("expires", 0)),
                                 CLIENT_KEY_SIGNAL: 0,
                                 CLIENT_KEY_SSID: ifname_to_ssid.get(current_iface, ""),
                                 CLIENT_KEY_RADIO: current_iface,
@@ -1600,6 +1603,7 @@ class OpenWrtAPI:
             leases[mac] = {
                 "ip": entry.get("ipaddr", ""),
                 "hostname": entry.get("hostname", ""),
+                "expires": int(entry.get("expires", 0)),
             }
         _LOGGER.debug("luci-rpc/getDHCPLeases: %d leases", len(leases))
         return leases
@@ -2757,6 +2761,8 @@ class OpenWrtAPI:
                 client[CLIENT_KEY_IP] = lease["ip"]
             if lease.get("hostname"):
                 client[CLIENT_KEY_HOSTNAME] = lease["hostname"]
+            if lease.get("expires"):
+                client[CLIENT_KEY_DHCP_EXPIRES] = int(lease["expires"])
 
         return clients
 
@@ -2790,6 +2796,10 @@ class OpenWrtAPI:
                 _LOGGER.debug("Skipping malformed DHCP lease line: %r", line)
                 continue
             # fields: expiry mac ip hostname [client-id]
+            try:
+                expires = int(parts[0])
+            except ValueError:
+                expires = 0
             mac = parts[1].upper()
             ip = parts[2]
             # L-3: validate IP address to reject garbage / injection attempts
@@ -2803,5 +2813,5 @@ class OpenWrtAPI:
             # L-3: cap hostname to RFC 1035 maximum (253 chars)
             raw_hostname = parts[3] if parts[3] != "*" else ""
             hostname = raw_hostname[:253] if raw_hostname else ""
-            leases[mac] = {"ip": ip, "hostname": hostname}
+            leases[mac] = {"ip": ip, "hostname": hostname, "expires": expires}
         return leases

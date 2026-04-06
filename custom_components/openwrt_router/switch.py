@@ -7,6 +7,8 @@ The switch name is the SSID itself (e.g. "HomeNet", "HomeNet-5G", "Guest").
 from __future__ import annotations
 
 import logging
+import time
+from datetime import UTC, datetime
 from typing import Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
@@ -19,6 +21,13 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import OpenWrtConfigEntry
 from .api import OpenWrtAPI
 from .const import (
+    CLIENT_KEY_CONNECTED_SINCE,
+    CLIENT_KEY_DHCP_EXPIRES,
+    CLIENT_KEY_HOSTNAME,
+    CLIENT_KEY_IP,
+    CLIENT_KEY_MAC,
+    CLIENT_KEY_SIGNAL,
+    CLIENT_KEY_SSID,
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
     DEFAULT_SERVICES,
@@ -177,14 +186,13 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return additional attributes (ssid, band, ifname, uci_section, client_count)."""
+        """Return additional attributes including connected client list."""
         radio = self._get_current_radio()
         if radio is None:
             return {}
 
-        # Count clients connected to this SSID
         ssid = radio.get(RADIO_KEY_SSID, "")
-        client_count = self._count_clients_for_ssid(ssid) if ssid else 0
+        clients = self._get_clients_for_ssid(ssid) if ssid else []
 
         return {
             "ssid": ssid,
@@ -192,7 +200,8 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
             "ifname": radio.get(RADIO_KEY_IFNAME, ""),
             "uci_section": radio.get(RADIO_KEY_UCI_SECTION, ""),
             "is_guest": radio.get(RADIO_KEY_IS_GUEST, False),
-            "connected_clients": client_count,
+            "connected_clients": len(clients),
+            "clients": clients,
         }
 
     async def async_turn_on(self, **kwargs: Any) -> None:
@@ -258,21 +267,62 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
         }
         return band_map.get(band, "")
 
-    def _count_clients_for_ssid(self, ssid: str) -> int:
-        """Count clients currently connected to this SSID.
+    def _get_clients_for_ssid(self, ssid: str) -> list[dict[str, Any]]:
+        """Return enriched client list for this SSID.
+
+        Each entry contains name (hostname or MAC), mac, ip, signal,
+        connected_since, and dhcp_expires (as ISO-8601 datetime string or
+        empty string when unknown).
 
         Args:
             ssid: SSID name to match.
 
         Returns:
-            Number of connected clients for this SSID.
+            List of dicts, one per connected client.
         """
         if not self.coordinator.data or not ssid:
-            return 0
-        return sum(
-            1 for client in self.coordinator.data.clients
-            if client.get("ssid") == ssid
-        )
+            return []
+        result = []
+        for client in self.coordinator.data.clients:
+            if client.get(CLIENT_KEY_SSID) != ssid:
+                continue
+            mac: str = client.get(CLIENT_KEY_MAC, "")
+            ip: str = client.get(CLIENT_KEY_IP, "")
+            hostname: str = client.get(CLIENT_KEY_HOSTNAME, "")
+            signal: int = client.get(CLIENT_KEY_SIGNAL, 0)
+            connected_since: str = client.get(CLIENT_KEY_CONNECTED_SINCE, "")
+            expires_ts: int = client.get(CLIENT_KEY_DHCP_EXPIRES, 0)
+            dhcp_expires = self._format_dhcp_expires(expires_ts)
+            result.append(
+                {
+                    "name": hostname or mac,
+                    "mac": mac,
+                    "ip": ip,
+                    "signal_dbm": signal,
+                    "connected_since": connected_since,
+                    "dhcp_expires": dhcp_expires,
+                }
+            )
+        return result
+
+    @staticmethod
+    def _format_dhcp_expires(expires_ts: int) -> str:
+        """Convert a Unix expiry timestamp to a human-readable remaining time.
+
+        Returns strings like "2h 14m", "45m", "<1m", or "" when unknown.
+        """
+        if not expires_ts:
+            return ""
+        remaining = int(expires_ts - time.time())
+        if remaining <= 0:
+            return "expired"
+        hours, rem = divmod(remaining, 3600)
+        minutes = rem // 60
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        if minutes > 0:
+            return f"{minutes}m"
+        return "<1m"
 
 
 class OpenWrtServiceSwitch(CoordinatorEntity[OpenWrtCoordinator], SwitchEntity):

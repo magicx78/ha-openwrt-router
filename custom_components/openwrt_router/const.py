@@ -204,6 +204,7 @@ ERROR_TIMEOUT = "timeout"
 ERROR_INVALID_HOST = "invalid_host"
 
 CLIENT_KEY_CONNECTED_SINCE = "connected_since"
+CLIENT_KEY_DHCP_EXPIRES = "dhcp_expires"
 
 # TODO: parental control - add UBUS_PARENTAL_OBJECT
 
