@@ -129,10 +129,8 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
         uid_key = self._uci_section or self._ifname
         self._attr_unique_id = f"{entry.entry_id}_wifi_ssid_{uid_key}"
 
-        # Entity name = SSID (Band)
-        # Format: "secure-IoT (2.4 GHz)" or "Guest-WLAN (5 GHz)"
-        band_display = self._format_band(self._band)
-        self._attr_name = f"{self._ssid} ({band_display})" if band_display else self._ssid
+        # Entity name is computed dynamically via the name property so that
+        # SSIDs fetched after setup (e.g. via luci-rpc fallback) are reflected.
 
         # Icon: star for guest networks
         self._attr_icon = "mdi:wifi-star" if self._is_guest else "mdi:wifi"
@@ -153,6 +151,14 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
+
+    @property
+    def name(self) -> str:
+        """Return entity name as 'SSID (Band)', updated whenever coordinator data changes."""
+        radio = self._get_current_radio()
+        ssid = (radio.get(RADIO_KEY_SSID, "") if radio else "") or self._ssid
+        band_display = self._format_band(self._band)
+        return f"{ssid} ({band_display})" if band_display else ssid
 
     @property
     def is_on(self) -> bool | None:
