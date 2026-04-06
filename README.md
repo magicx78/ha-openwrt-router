@@ -1,11 +1,13 @@
 # OpenWrt Router – Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.7.0-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.7.0)
+[![Version](https://img.shields.io/badge/version-1.9.1-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.9.1)
 
 A production-ready Home Assistant custom integration for [OpenWrt](https://openwrt.org/) routers, communicating via the built-in **ubus / rpcd JSON-RPC API**.
 
-**Current Version:** v1.7.0 — Service Management (start/stop/restart dnsmasq, firewall, dropbear, …) ✅
+**Current Version:** v1.9.1 — Full ACL fallback support, WiFi switch SSID display, `iw` SSH read-only client fallback ✅
+
+---
 
 ## Features
 
@@ -17,15 +19,17 @@ A production-ready Home Assistant custom integration for [OpenWrt](https://openw
 - **Temporary Storage (tmpfs)**: Usage tracking for /tmp, /run, /dev/shm
 - **Network Connections**: Active connection count (nf_conntrack)
 
-### Network & Traffic (v1.4.0)
-- **Per-Interface Bandwidth Sensors**: Automatic RX/TX byte sensors per network interface (lan, loopback, wan, wan6, ...) — discovered dynamically
+### Network & Traffic
+- **Per-Interface Bandwidth Sensors**: Automatic RX/TX byte sensors per network interface (lan, loopback, wan, wan6, …) — discovered dynamically
+- **Bandwidth Rate Sensors** (v1.6.0): RX/TX in bytes/s for real-time traffic monitoring
 - **WAN Statistics**: WAN download/upload bytes, WAN IP, WAN status
 - **Radio Signal/Noise**: dBm sensors per WiFi radio (on iwinfo-capable routers)
 
 ### WiFi & Clients
-- **Switches**: Toggle WiFi radios per SSID (2.4 GHz, 5 GHz, 6 GHz, Guest) with band info and connected client count
+- **WiFi Switches**: Toggle per SSID with correct **SSID + Band** label — `OpenWrt (2.4 GHz)`, `OpenWrt (5 GHz)`, `Guest-WLAN (2.4 GHz)`, etc.
+- **AP Interface Sensors** (v1.8.0): Per-radio channel, frequency, TX power, HT mode, HW mode, connected client count
 - **Device Tracker**: Track WiFi clients by MAC — marked `home`/`not_home` automatically
-  - **Per-Client Online Time** (v1.4.0): `connected_since` timestamp attribute per tracked client
+  - **Per-Client Online Time** (v1.4.0): `connected_since` timestamp per tracked client
   - **DHCP Enrichment**: IP address and hostname from DHCP lease table
   - Signal strength attribute per client
 
@@ -33,28 +37,51 @@ A production-ready Home Assistant custom integration for [OpenWrt](https://openw
 - **Service Management** (v1.7.0): Monitor and control procd/rc system services
   - Start/Stop switches: `dnsmasq`, `dropbear`, `firewall`, `network`, `uhttpd`, `wpad`
   - Restart buttons per service — auto-discovered from router
-- **Update Management**: Check for system/addon package updates, perform selective updates
+- **Update Management**: Check for system/package updates, perform selective updates
 - **Button Actions**: Reload WiFi, Check Updates, Perform Updates
 - **SSL/HTTPS**: Secure connections with self-signed certificate support
 - **Diagnostics**: Redacted diagnostic export for bug reports
 - **Config Flow**: Multi-step setup wizard with protocol selection
 
+---
+
+## ACL Fallback Support (v1.9.x)
+
+This integration works on **ACL-restricted routers** (e.g. Cudy WR3000 on OpenWrt 25) where standard rpcd calls are blocked. All fallback chains are automatic — no router configuration required.
+
+| Blocked Call | Fallback |
+|---|---|
+| `uci/commit` | → `uci/apply` → SSH `uci set + commit + wifi reload` |
+| `hostapd.*/get_clients` | → SSH `ubus call` → SSH `iw station dump` (read-only) |
+| `file/read /tmp/dhcp.leases` | → `luci-rpc/getDHCPLeases` |
+| `hostapd.*/get_status` (SSID lookup) | → `iwinfo/info` → `luci-rpc/getWirelessDevices` |
+| `network.wireless/status` | → `iwinfo/info` → UCI wireless config |
+
+> **Read-only SSH**: The `iw dev {iface} station dump` fallback reads directly from the kernel nl80211 layer — no ubus socket access required.
+
+---
+
 ## Version History
 
-| Version | Release Date | Key Features |
-|---------|---|---|
-| **1.7.0** | 2026-04-06 | Service management (start/stop/restart), OpenWrt 25 bugfixes |
-| **1.6.0** | 2026-04-06 | Bandwidth rate sensors (bytes/s), traffic chart support |
-| **1.5.0** | 2026-04-06 | QA strategy, regression tests, test fixtures, ruff CI, 268 tests |
-| **1.4.0** | 2026-04-06 | Per-interface bandwidth sensors, per-client online time, radio signal/noise |
-| **1.3.0** | 2026-04-05 | Clean entity IDs, memory sensors (total/used), HACS issue_tracker |
-| 1.2.0 | 2026-04 | Entity ID fixes, P1–P8 bug fixes, SSL improvements |
-| 1.1.0 | 2026-03-23 | Extended monitoring: CPU/Memory/Disk/tmpfs metrics, platform info |
-| 1.0.8 | 2026-03-20 | Update Management, selective package updates |
-| 1.0.7 | 2026-03-20 | SSL/HTTPS Support, self-signed certificates |
+| Version | Date | Key Features |
+|---------|------|---|
+| **1.9.1** | 2026-04-07 | Fix `OpenWrtAuthError` bypass of `uci/apply`; `iw` read-only SSH fallback for clients |
+| **1.9.0** | 2026-04-06 | WiFi switch shows SSID+Band correctly; full ACL fallback chain |
+| **1.8.0** | 2026-04-06 | AP Interface Sensors (channel, mode, htmode, ap_clients); UCI fallback |
+| **1.7.0** | 2026-04-06 | Service management (start/stop/restart); OpenWrt 25 bugfixes |
+| **1.6.0** | 2026-04-06 | Bandwidth rate sensors (bytes/s); traffic chart support |
+| **1.5.0** | 2026-04-06 | QA strategy, regression tests, 294 tests, ruff CI |
+| **1.4.0** | 2026-04-06 | Per-interface bandwidth sensors; per-client online time; radio signal/noise |
+| 1.3.0 | 2026-04-05 | Clean entity IDs; memory total/used; HACS issue_tracker |
+| 1.2.0 | 2026-04 | Entity ID fixes; P1–P8 bug fixes; SSL improvements |
+| 1.1.0 | 2026-03-23 | Extended monitoring: CPU/Memory/Disk/tmpfs |
+| 1.0.8 | 2026-03-20 | Update Management |
+| 1.0.7 | 2026-03-20 | SSL/HTTPS support |
 | 1.0.0 | 2026-03-11 | Initial release |
 
-**Tested on:** OpenWrt 25.12.1 (MediaTek Filogic) | Compatible with 19.07+
+**Tested on:** OpenWrt 25.12.1 (MediaTek Filogic, Cudy WR3000) | Compatible with 19.07+
+
+---
 
 ## Requirements
 
@@ -73,103 +100,108 @@ uci commit rpcd
 service rpcd restart
 ```
 
+---
+
 ## Installation
 
 ### Via HACS (Recommended)
 
-**Option 1: Custom Repository** (Current)
+**Option 1: Custom Repository**
 1. Open HACS → Integrations → ⋮ → Custom repositories
 2. Add `https://github.com/magicx78/ha-openwrt-router` as **Integration**
 3. Search for and install **OpenWrt Router**
 4. Restart Home Assistant
 
 **Option 2: Default Store** (Coming Soon)
-Once approved by HACS maintainers, you'll be able to install directly from the HACS default store.
 
 ### Manual Installation
 
-1. Copy `custom_components/openwrt_router/` into your Home Assistant config directory
+1. Copy `custom_components/openwrt_router/` into your HA config directory
 2. Restart Home Assistant
+
+---
 
 ## Configuration
 
 Add via **Settings → Devices & Services → Add Integration → OpenWrt Router**.
 
-| Field    | Default | Description |
-|----------|---------|-------------|
-| Host     | –       | Router IP address or hostname |
-| Protocol | HTTP    | HTTP, HTTPS, or HTTPS Self-Signed |
-| Port     | 80*     | Auto-adjusts to 443 for HTTPS |
-| Username | root    | rpcd/ubus username |
-| Password | –       | rpcd/ubus password |
+| Field | Default | Description |
+|-------|---------|-------------|
+| Host | – | Router IP address or hostname |
+| Protocol | HTTP | HTTP, HTTPS, or HTTPS Self-Signed |
+| Port | 80* | Auto-adjusts to 443 for HTTPS |
+| Username | root | rpcd/ubus username |
+| Password | – | rpcd/ubus password |
+| SSH Username | – | Optional: for SSH fallback (client counting, WiFi toggle) |
+| SSH Password | – | Optional: SSH password |
+
+> **SSH Fallback**: Configure SSH credentials to enable fallback for routers with restricted rpcd ACL. Only read access is needed for client counting (`iw station dump`). Write access enables WiFi toggle fallback.
+
+---
 
 ## Entities
 
 ### Sensors (Static)
 | Entity | Description |
 |--------|-------------|
-| `sensor.{hostname}_uptime` | Router uptime (formatted) |
-| `sensor.{hostname}_wan_status` | WAN connection state |
-| `sensor.{hostname}_connected_clients` | Associated WiFi client count |
-| `sensor.{hostname}_cpu_load` | 1-min CPU load % |
-| `sensor.{hostname}_cpu_load_5_minute` | 5-min CPU load % |
-| `sensor.{hostname}_cpu_load_15_minute` | 15-min CPU load % |
-| `sensor.{hostname}_memory_total` | Total RAM (MB) |
-| `sensor.{hostname}_memory_used` | Used RAM (MB) |
-| `sensor.{hostname}_memory_free` | Free RAM (MB) |
-| `sensor.{hostname}_memory_usage` | RAM usage % |
-| `sensor.{hostname}_memory_cached` | Cached RAM (MB) |
-| `sensor.{hostname}_memory_shared` | Shared RAM (MB) |
-| `sensor.{hostname}_memory_buffered` | Buffered RAM (MB) |
-| `sensor.{hostname}_disk_total` | Disk total (GB) |
-| `sensor.{hostname}_disk_used` | Disk used (GB) |
-| `sensor.{hostname}_disk_free` | Disk free (GB) |
-| `sensor.{hostname}_disk_usage` | Disk usage % |
-| `sensor.{hostname}_temporary_storage_*` | tmpfs total/used/free/usage |
-| `sensor.{hostname}_wan_ip_address` | WAN IP |
-| `sensor.{hostname}_wan_download` | WAN RX bytes |
-| `sensor.{hostname}_wan_upload` | WAN TX bytes |
-| `sensor.{hostname}_firmware_version` | OpenWrt version |
-| `sensor.{hostname}_update_status` | Update availability |
-| `sensor.{hostname}_platform_architecture` | CPU architecture |
-| `sensor.{hostname}_active_network_connections` | nf_conntrack count |
+| `sensor.{name}_uptime` | Router uptime |
+| `sensor.{name}_wan_status` | WAN connection state |
+| `sensor.{name}_connected_clients` | Total WiFi client count |
+| `sensor.{name}_cpu_load` | 1-min CPU load % |
+| `sensor.{name}_cpu_load_5_minute` | 5-min CPU load % |
+| `sensor.{name}_cpu_load_15_minute` | 15-min CPU load % |
+| `sensor.{name}_memory_total/used/free/usage/cached/shared/buffered` | RAM details (MB/%) |
+| `sensor.{name}_disk_total/used/free/usage` | Disk details (GB/%) |
+| `sensor.{name}_temporary_storage_*` | tmpfs usage |
+| `sensor.{name}_wan_ip_address` | WAN IP |
+| `sensor.{name}_wan_download/upload` | WAN RX/TX bytes |
+| `sensor.{name}_firmware_version` | OpenWrt version |
+| `sensor.{name}_update_status` | Update availability |
+| `sensor.{name}_platform_architecture` | CPU architecture |
+| `sensor.{name}_active_network_connections` | nf_conntrack count |
 
-### Sensors (Dynamic — v1.4.0+)
+### Sensors (Dynamic)
 | Entity | Description |
 |--------|-------------|
-| `sensor.{hostname}_{iface}_rx` | RX bytes for interface (lan, wan, loopback, ...) |
-| `sensor.{hostname}_{iface}_tx` | TX bytes for interface |
-| `sensor.{hostname}_{iface}_rx_rate` | RX rate in bytes/s (v1.6.0) |
-| `sensor.{hostname}_{iface}_tx_rate` | TX rate in bytes/s (v1.6.0) |
-| `sensor.{hostname}_{iface}_signal` | WiFi radio signal dBm (iwinfo routers) |
-| `sensor.{hostname}_{iface}_noise` | WiFi radio noise floor dBm (iwinfo routers) |
+| `sensor.{name}_{iface}_rx/tx` | RX/TX bytes per interface |
+| `sensor.{name}_{iface}_rx_rate/tx_rate` | RX/TX bytes/s (v1.6.0) |
+| `sensor.{name}_{iface}_signal/noise` | WiFi signal/noise dBm (iwinfo) |
+| `sensor.{name}_{iface}_channel` | WiFi channel (v1.8.0) |
+| `sensor.{name}_{iface}_mode` | AP mode: Master/Client (v1.8.0) |
+| `sensor.{name}_{iface}_ap_clients` | Clients per radio (v1.8.0) |
+| `sensor.{name}_{iface}_frequency` | Frequency in MHz (v1.8.0) |
+| `sensor.{name}_{iface}_ht_mode` | HT/VHT/HE mode (v1.8.0) |
 
-> **Traffic Charts**: The cumulative RX/TX byte sensors use `state_class: total_increasing` — add them to a **Statistics card** or the **Energy Dashboard** to get per-interface traffic history graphs automatically.
+> **Traffic Charts**: RX/TX byte sensors use `state_class: total_increasing` — add to a **Statistics card** or **Energy Dashboard** for traffic history graphs.
 
 ### Switches
-One switch per detected SSID with band info and connected client count:
-- `switch.{hostname}` — 2.4 GHz radio
-- `switch.{hostname}_5_ghz` — 5 GHz radio
-- `switch.{hostname}_6_ghz` — 6 GHz radio (if present)
-- `switch.{hostname}_guest` — Guest SSID (if present)
+One switch per detected SSID — label shows **SSID + Band**:
+- `switch.{ssid}_2_4_ghz` — e.g. `OpenWrt (2.4 GHz)`
+- `switch.{ssid}_5_ghz` — e.g. `OpenWrt (5 GHz)`
+- `switch.{ssid}_6_ghz` — 6 GHz (if present)
+- Guest SSIDs with `mdi:wifi-star` icon
+- Service switches: `switch.service_{name}` for dnsmasq, dropbear, firewall, …
 
 ### Device Tracker
-One `device_tracker` entity per detected WiFi client:
+One entity per WiFi client:
 - `home` when connected, `not_home` when disconnected
-- Attributes: `mac`, `ip_address`, `ssid`, `radio`, `signal`, **`connected_since`** (v1.4.0)
+- Attributes: `mac`, `ip_address`, `hostname`, `ssid`, `radio`, `signal`, `connected_since`
 
 ### Buttons
 | Entity | Description |
 |--------|-------------|
-| `button.{hostname}_reload_wifi` | Reload WiFi configuration |
-| `button.{hostname}_check_for_updates` | Scan for available updates |
-| `button.{hostname}_perform_updates` | Trigger update process |
+| `button.{name}_reload_wifi` | Reload WiFi configuration |
+| `button.{name}_check_for_updates` | Scan for available updates |
+| `button.{name}_perform_updates` | Trigger update process |
+| `button.restart_{service}` | Restart dnsmasq / dropbear / firewall / … |
+
+---
 
 ## Architecture
 
 ```
 Config Flow → Config Entry → OpenWrtRuntimeData
-                                 ├── api: OpenWrtAPI       ← ALL HTTP calls
+                                 ├── api: OpenWrtAPI       ← ALL HTTP/SSH calls
                                  └── coordinator: OpenWrtCoordinator (30s poll)
                                            ↕
                                    OpenWrt Router (ubus JSON-RPC POST /ubus)
@@ -177,23 +209,15 @@ Config Flow → Config Entry → OpenWrtRuntimeData
 
 **Rule:** Entities never call the API directly. All network calls go through `api.py`.
 
-## Implemented Features ✅
-
-- [x] **v1.4.0**: Per-interface bandwidth sensors (dynamic RX/TX per network interface)
-- [x] **v1.4.0**: Per-client online time (`connected_since` attribute in device tracker)
-- [x] **v1.4.0**: Radio signal/noise sensors (iwinfo-capable routers)
-- [x] **v1.3.0**: Clean entity IDs (no hash suffix), memory total/used sensors
-- [x] **v1.2.0**: Bug fixes (P1–P8), SSL improvements, DHCP enrichment
-- [x] **v1.1.0**: Extended system monitoring (CPU/Memory/Disk/tmpfs/Platform)
-- [x] **v1.0.8**: Update Management (check + perform updates)
-- [x] **v1.0.7**: SSL/HTTPS + self-signed certificate support
-- [x] **v1.0.5**: WiFi switch UX (band info, client count)
-- [x] **v1.0.3**: WAN statistics (kernel source)
+---
 
 ## Roadmap
 
 - [ ] Parental control support
-- [ ] Per-interface traffic charts/history (long-term statistics visualization)
+- [ ] Per-interface traffic history (long-term statistics)
+- [ ] HACS Default Store submission
+
+---
 
 ## Contributing
 
