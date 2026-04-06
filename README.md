@@ -1,11 +1,11 @@
 # OpenWrt Router – Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.9.1-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.9.1)
+[![Version](https://img.shields.io/badge/version-1.9.2-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.9.2)
 
 A production-ready Home Assistant custom integration for [OpenWrt](https://openwrt.org/) routers, communicating via the built-in **ubus / rpcd JSON-RPC API**.
 
-**Current Version:** v1.9.1 — Full ACL fallback support, WiFi switch SSID display, `iw` SSH read-only client fallback ✅
+**Current Version:** v1.9.2 — WiFi switch client list (name, MAC, IP, DHCP expiry, signal) ✅
 
 ---
 
@@ -27,6 +27,7 @@ A production-ready Home Assistant custom integration for [OpenWrt](https://openw
 
 ### WiFi & Clients
 - **WiFi Switches**: Toggle per SSID with correct **SSID + Band** label — `OpenWrt (2.4 GHz)`, `OpenWrt (5 GHz)`, `Guest-WLAN (2.4 GHz)`, etc.
+- **WiFi Switch Client List** (v1.9.2): Each switch exposes a `clients` attribute with all connected clients showing name, MAC, IP, signal strength, online time and remaining DHCP lease time
 - **AP Interface Sensors** (v1.8.0): Per-radio channel, frequency, TX power, HT mode, HW mode, connected client count
 - **Device Tracker**: Track WiFi clients by MAC — marked `home`/`not_home` automatically
   - **Per-Client Online Time** (v1.4.0): `connected_since` timestamp per tracked client
@@ -42,6 +43,41 @@ A production-ready Home Assistant custom integration for [OpenWrt](https://openw
 - **SSL/HTTPS**: Secure connections with self-signed certificate support
 - **Diagnostics**: Redacted diagnostic export for bug reports
 - **Config Flow**: Multi-step setup wizard with protocol selection
+
+---
+
+## WiFi Switch Client List (v1.9.2)
+
+Each WiFi switch now exposes a `clients` attribute listing every device currently connected to that SSID:
+
+```yaml
+# Example: switch.secure_iot_2_4_ghz attributes
+ssid: "secure-IoT"
+band: "2.4g"
+connected_clients: 8
+clients:
+  - name: "mein-laptop"               # hostname from DHCP, falls back to MAC
+    mac: "B8:27:EB:AA:BB:01"
+    ip: "192.168.1.101"
+    signal_dbm: -55
+    connected_since: "2026-04-07T10:00:00+00:00"
+    dhcp_expires: "11h 42m"           # remaining DHCP lease time
+  - name: "B8:27:EB:CC:DD:EE"         # no hostname → MAC shown
+    mac: "B8:27:EB:CC:DD:EE"
+    ip: "192.168.1.108"
+    signal_dbm: -72
+    connected_since: "2026-04-07T11:15:00+00:00"
+    dhcp_expires: "23h 58m"
+```
+
+**Display in HA**: Open the switch entity detail page → scroll to Attributes. Or use a Markdown card:
+```yaml
+type: markdown
+content: |
+  {% for c in state_attr('switch.secure_iot_2_4_ghz', 'clients') %}
+  **{{ c.name }}** — {{ c.ip }} — {{ c.signal_dbm }} dBm — expires {{ c.dhcp_expires }}
+  {% endfor %}
+```
 
 ---
 
@@ -65,12 +101,13 @@ This integration works on **ACL-restricted routers** (e.g. Cudy WR3000 on OpenWr
 
 | Version | Date | Key Features |
 |---------|------|---|
+| **1.9.2** | 2026-04-07 | WiFi switch `clients` attribute — per-client name, MAC, IP, signal, DHCP expiry |
 | **1.9.1** | 2026-04-07 | Fix `OpenWrtAuthError` bypass of `uci/apply`; `iw` read-only SSH fallback for clients |
 | **1.9.0** | 2026-04-06 | WiFi switch shows SSID+Band correctly; full ACL fallback chain |
 | **1.8.0** | 2026-04-06 | AP Interface Sensors (channel, mode, htmode, ap_clients); UCI fallback |
 | **1.7.0** | 2026-04-06 | Service management (start/stop/restart); OpenWrt 25 bugfixes |
 | **1.6.0** | 2026-04-06 | Bandwidth rate sensors (bytes/s); traffic chart support |
-| **1.5.0** | 2026-04-06 | QA strategy, regression tests, 294 tests, ruff CI |
+| **1.5.0** | 2026-04-06 | QA strategy, regression tests, ruff CI |
 | **1.4.0** | 2026-04-06 | Per-interface bandwidth sensors; per-client online time; radio signal/noise |
 | 1.3.0 | 2026-04-05 | Clean entity IDs; memory total/used; HACS issue_tracker |
 | 1.2.0 | 2026-04 | Entity ID fixes; P1–P8 bug fixes; SSL improvements |
@@ -175,12 +212,26 @@ Add via **Settings → Devices & Services → Add Integration → OpenWrt Router
 > **Traffic Charts**: RX/TX byte sensors use `state_class: total_increasing` — add to a **Statistics card** or **Energy Dashboard** for traffic history graphs.
 
 ### Switches
-One switch per detected SSID — label shows **SSID + Band**:
+
+**WiFi Switches** — one per detected SSID, label shows **SSID + Band**:
 - `switch.{ssid}_2_4_ghz` — e.g. `OpenWrt (2.4 GHz)`
 - `switch.{ssid}_5_ghz` — e.g. `OpenWrt (5 GHz)`
 - `switch.{ssid}_6_ghz` — 6 GHz (if present)
 - Guest SSIDs with `mdi:wifi-star` icon
-- Service switches: `switch.service_{name}` for dnsmasq, dropbear, firewall, …
+
+Each WiFi switch has these attributes:
+
+| Attribute | Description |
+|-----------|-------------|
+| `ssid` | Network name |
+| `band` | Band code (`2.4g`, `5g`, `6g`) |
+| `connected_clients` | Number of connected clients |
+| `clients` | List of connected clients (name, mac, ip, signal_dbm, connected_since, dhcp_expires) |
+| `ifname` | Interface name (e.g. `phy0-ap0`) |
+| `uci_section` | UCI section name |
+| `is_guest` | Guest network flag |
+
+**Service Switches** — `switch.service_{name}` for dnsmasq, dropbear, firewall, network, uhttpd, wpad
 
 ### Device Tracker
 One entity per WiFi client:
