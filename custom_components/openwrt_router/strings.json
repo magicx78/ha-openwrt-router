@@ -122,6 +122,9 @@
       },
       "active_connections": {
         "name": "Active Network Connections"
+      },
+      "network_topology": {
+        "name": "Network Topology"
       }
     },
     "switch": {},
