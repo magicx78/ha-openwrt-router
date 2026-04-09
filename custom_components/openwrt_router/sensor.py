@@ -576,7 +576,7 @@ class OpenWrtInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity
         self._metric = metric
         self._entry = entry
         direction = "rx" if metric == "rx_bytes" else "tx"
-        self._attr_unique_id = f"{entry.entry_id}_{interface}_{direction}"
+        self._attr_unique_id = f"{entry.entry_id}_iface_{interface}_{direction}"
         self._attr_translation_key = f"interface_{direction}"
         self._attr_icon = "mdi:download-network" if direction == "rx" else "mdi:upload-network"
 

@@ -354,14 +354,31 @@ class TestRawCallErrors:
 
     @pytest.mark.asyncio
     async def test_rpcd_error_minus32002(self):
+        """Fix 4: rpcd -32002 must raise OpenWrtAuthError (triggers re-login retry)."""
         envelope = {
             "jsonrpc": "2.0", "id": 1,
             "error": {"code": -32002, "message": "Access denied"},
         }
         api = _make_api_with_response(json_data=envelope)
         payload = api._build_call("system", "board", {})
-        with pytest.raises(OpenWrtMethodNotFoundError):
+        with pytest.raises(OpenWrtAuthError):
             await api._raw_call(payload)
+
+    @pytest.mark.asyncio
+    async def test_rpcd_error_minus32002_not_method_not_found(self):
+        """Fix 4: OpenWrtMethodNotFoundError must NOT be raised for -32002."""
+        envelope = {
+            "jsonrpc": "2.0", "id": 1,
+            "error": {"code": -32002, "message": "Access denied"},
+        }
+        api = _make_api_with_response(json_data=envelope)
+        payload = api._build_call("network.wireless", "status", {})
+        try:
+            await api._raw_call(payload)
+        except OpenWrtAuthError:
+            pass  # Expected — fix is in place
+        except OpenWrtMethodNotFoundError:
+            pytest.fail("Fix 4 regression: -32002 must not raise OpenWrtMethodNotFoundError")
 
     @pytest.mark.asyncio
     async def test_generic_ubus_error(self):
@@ -540,3 +557,95 @@ class TestBuildCall:
         p1 = mock_api._build_call("a", "b", {})
         p2 = mock_api._build_call("a", "b", {})
         assert p2["id"] > p1["id"]
+
+
+# =====================================================================
+# Fix 3: luci-rpc DHCP Leases — dhcp_leases key (OpenWrt 25)
+# =====================================================================
+
+class TestGetDhcpLeasesLuciRpc:
+    """Fix 3: _get_dhcp_leases_luci_rpc handles dhcp_leases/leases/list responses."""
+
+    @pytest.mark.asyncio
+    async def test_openwrt25_dhcp_leases_key(self, mock_api):
+        """Fix 3: OpenWrt 25 returns 'dhcp_leases' key — must be parsed correctly."""
+        result = {
+            "dhcp_leases": [
+                {
+                    "macaddr": "aa:bb:cc:dd:ee:01",
+                    "ipaddr": "192.168.1.101",
+                    "hostname": "host1",
+                    "expires": 1741700000,
+                },
+            ]
+        }
+        mock_api._call = AsyncMock(return_value=result)
+        leases = await mock_api._get_dhcp_leases_luci_rpc()
+        assert "AA:BB:CC:DD:EE:01" in leases
+        assert leases["AA:BB:CC:DD:EE:01"]["ip"] == "192.168.1.101"
+        assert leases["AA:BB:CC:DD:EE:01"]["hostname"] == "host1"
+        assert leases["AA:BB:CC:DD:EE:01"]["expires"] == 1741700000
+
+    @pytest.mark.asyncio
+    async def test_legacy_leases_key(self, mock_api):
+        """Fix 3: Older OpenWrt uses 'leases' key — must still work."""
+        result = {
+            "leases": [
+                {
+                    "macaddr": "bb:cc:dd:ee:ff:01",
+                    "ipaddr": "192.168.1.102",
+                    "hostname": "host2",
+                    "expires": 1741700001,
+                },
+            ]
+        }
+        mock_api._call = AsyncMock(return_value=result)
+        leases = await mock_api._get_dhcp_leases_luci_rpc()
+        assert "BB:CC:DD:EE:FF:01" in leases
+        assert leases["BB:CC:DD:EE:FF:01"]["hostname"] == "host2"
+
+    @pytest.mark.asyncio
+    async def test_direct_list_response(self, mock_api):
+        """Fix 3: Direct list response (no wrapper key) also works."""
+        result = [
+            {
+                "macaddr": "cc:dd:ee:ff:00:01",
+                "ipaddr": "192.168.1.103",
+                "hostname": "host3",
+                "expires": 0,
+            },
+        ]
+        mock_api._call = AsyncMock(return_value=result)
+        leases = await mock_api._get_dhcp_leases_luci_rpc()
+        assert "CC:DD:EE:FF:00:01" in leases
+
+    @pytest.mark.asyncio
+    async def test_dhcp_leases_takes_priority_over_leases(self, mock_api):
+        """Fix 3: 'dhcp_leases' key takes priority when both are present."""
+        result = {
+            "dhcp_leases": [
+                {"macaddr": "aa:00:00:00:00:01", "ipaddr": "10.0.0.1", "hostname": "new", "expires": 100},
+            ],
+            "leases": [
+                {"macaddr": "bb:00:00:00:00:02", "ipaddr": "10.0.0.2", "hostname": "old", "expires": 100},
+            ],
+        }
+        mock_api._call = AsyncMock(return_value=result)
+        leases = await mock_api._get_dhcp_leases_luci_rpc()
+        assert "AA:00:00:00:00:01" in leases
+        assert "BB:00:00:00:00:02" not in leases  # dhcp_leases wins
+
+    @pytest.mark.asyncio
+    async def test_empty_dhcp_leases_list(self, mock_api):
+        """Fix 3: Empty dhcp_leases list returns empty dict, no crash."""
+        result = {"dhcp_leases": []}
+        mock_api._call = AsyncMock(return_value=result)
+        leases = await mock_api._get_dhcp_leases_luci_rpc()
+        assert leases == {}
+
+    @pytest.mark.asyncio
+    async def test_call_error_returns_empty(self, mock_api):
+        """Fix 3: If _call raises, returns {} gracefully."""
+        mock_api._call = AsyncMock(side_effect=OpenWrtAuthError("blocked"))
+        leases = await mock_api._get_dhcp_leases_luci_rpc()
+        assert leases == {}

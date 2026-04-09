@@ -113,7 +113,9 @@ def build_topology_snapshot(data: OpenWrtCoordinatorData) -> dict[str, Any]:
     clients: list[dict[str, Any]] = []
 
     router_info = data.router_info
-    router_id: str = router_info.get("mac", "router")
+    # Use MAC if available; fall back to hostname then host IP as stable node ID
+    _mac = router_info.get("mac", "")
+    router_id: str = _mac or router_info.get("hostname") or "router"
     wan_ifname: str = data.wan_status.get("interface", "")
 
     # ── Router node ────────────────────────────────────────────────

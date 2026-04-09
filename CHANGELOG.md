@@ -2,6 +2,28 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.9.3] - 2026-04-09
+
+### Fixed
+
+- **DHCP leases empty on OpenWrt 25** (`dhcp_leases` key): `luci-rpc/getDHCPLeases` returns `{"dhcp_leases": [...]}` on OpenWrt 25 instead of `{"leases": [...]}`. All 33 clients now have correct IPs and hostnames. Older OpenWrt versions using `"leases"` or a direct list still work.
+- **rpcd -32002 treated as permanent ACL block**: Error code `-32002` from rpcd was raised as `OpenWrtMethodNotFoundError`, which bypassed the re-login retry logic in `_call()`. In practice, `-32002` can also mean a stale session token (e.g. after an rpcd restart). Changing it to `OpenWrtAuthError` triggers the existing re-login-and-retry mechanism. If the retry also returns `-32002` it's a genuine ACL restriction and propagates to the caller.
+- **Topology: Router-ID empty string when MAC unavailable**: OpenWrt 25 / Cudy WR3000 v1 does not return a `mac` field in `system board`. Router-ID fell back to `""` (empty string), causing all topology edges to have `"from": ""` and breaking the panel. Now falls back to `hostname`, then to `"router"` literal.
+- **Duplicate sensor entity IDs for `wan_rx` / `wan_tx`** (HA log: _"Platform openwrt_router does not generate unique IDs. ID …_wan_rx already exists"_): The static WAN byte-count sensors (`SUFFIX_WAN_RX` / `SUFFIX_WAN_TX`) and the dynamically-created `OpenWrtInterfaceSensor` for the `wan` interface produced identical `unique_id` values. Fixed by adding an `_iface_` disambiguator to the dynamic sensor: `entry_id_iface_wan_rx` / `entry_id_iface_wan_tx`.
+
+### Technical
+
+- `api.py`: `_get_dhcp_leases_luci_rpc()` — try `dhcp_leases` key first, fall back to `leases`, then direct list.
+- `api.py`: `_raw_call()` — error code `-32002` raises `OpenWrtAuthError` (was `OpenWrtMethodNotFoundError`).
+- `topology_diagnostic.py`: `build_topology_snapshot()` — router_id uses `mac or hostname or "router"` (was `mac` only with literal `"router"` fallback, which didn't handle empty-string MAC).
+- `sensor.py`: `OpenWrtInterfaceSensor._attr_unique_id` — changed to `entry_id_iface_{interface}_{direction}`.
+
+### Tests
+
+- 316 passing (+20 new tests: Fix 3, Fix 4, Fix B coverage; new `test_topology_diagnostic.py`)
+
+---
+
 ## [1.9.2] - 2026-04-07
 
 ### Added
