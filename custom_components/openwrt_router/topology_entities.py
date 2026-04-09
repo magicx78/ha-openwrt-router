@@ -35,7 +35,7 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory
+from homeassistant.const import EntityCategory, MATCH_ALL
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -78,6 +78,11 @@ class _TopologyEntityBase(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    # Topology snapshots exceed HA's 16 KB recorder limit (40+ nodes, 33+ clients).
+    # Exclude all attributes from the recorder — the sensor state (node count / active
+    # interface count) is still recorded. Attributes are available in-memory at any
+    # time and are read by the topology panel from the live state object.
+    _unrecorded_attributes = frozenset({MATCH_ALL})
 
     def __init__(
         self,

@@ -24,6 +24,18 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ---
 
+## [1.9.3-patch1] - 2026-04-10
+
+### Fixed
+
+- **Topology sensor attributes exceed HA Recorder 16 KB limit** (WARNING: _"State attributes for sensor.secureap_gateway_network_topology exceed maximum size of 16384 bytes"_): Topology snapshots with 40+ nodes and 33+ clients regularly exceed the recorder limit. The sensor _state_ (node count / active interface count) is still recorded. Attributes are excluded via `_unrecorded_attributes = frozenset({MATCH_ALL})` — they remain available in-memory at all times and the topology panel continues to read them from the live state object.
+
+### Technical
+
+- `topology_entities.py`: `_TopologyEntityBase._unrecorded_attributes = frozenset({MATCH_ALL})` — excludes all topology attributes from SQLite recorder without affecting in-memory availability.
+
+---
+
 ## [1.9.2] - 2026-04-07
 
 ### Added
