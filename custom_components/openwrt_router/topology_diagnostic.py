@@ -95,11 +95,20 @@ def _validate_rx_tx(
     return (True, None)
 
 
-def build_topology_snapshot(data: OpenWrtCoordinatorData) -> dict[str, Any]:
+def build_topology_snapshot(
+    data: OpenWrtCoordinatorData,
+    role: str = "unknown",
+    host_ip: str = "",
+) -> dict[str, Any]:
     """Build a topology snapshot from coordinator data.
 
     Output schema matches /api/topology/snapshot from the provisioning
     server so both can be compared side-by-side.
+
+    Args:
+        data: Coordinator data for a single router.
+        role: Router role — "gateway", "ap", or "unknown".
+        host_ip: Config entry host IP (LAN IP of this router).
 
     Null semantics:
         signal=None  → preserved as None
@@ -127,13 +136,16 @@ def build_topology_snapshot(data: OpenWrtCoordinatorData) -> dict[str, Any]:
         "inferred": False,
         "status": "provisioned",
         "project": None,
-        "role": "ap1",
-        "ip": data.wan_status.get("ipv4"),
+        "role": role,
+        "ip": data.wan_status.get("ipv4") or host_ip,
         "attributes": {
             "board_name": router_info.get("board_name"),
             "model": router_info.get("model"),
             "firmware": (router_info.get("release") or {}).get("version"),
             "mac": router_id,
+            "host_ip": host_ip,
+            "wan_proto": data.wan_status.get("proto", ""),
+            "wan_connected": data.wan_connected,
         },
     })
 

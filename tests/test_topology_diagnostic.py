@@ -95,6 +95,51 @@ class TestRouterIdFallback:
 # Snapshot schema sanity
 # =====================================================================
 
+class TestRouterRoleAndHostIp:
+    """Tests for the new role and host_ip parameters."""
+
+    def test_default_role_is_unknown(self):
+        """Default role is 'unknown' when not specified."""
+        data = _make_data(router_info={"hostname": "test"})
+        snapshot = build_topology_snapshot(data)
+        router_node = next(n for n in snapshot["nodes"] if n["type"] == "router")
+        assert router_node["role"] == "unknown"
+
+    def test_explicit_gateway_role(self):
+        """Explicit role='gateway' is set on the router node."""
+        data = _make_data(router_info={"hostname": "gw"})
+        snapshot = build_topology_snapshot(data, role="gateway", host_ip="10.10.10.1")
+        router_node = next(n for n in snapshot["nodes"] if n["type"] == "router")
+        assert router_node["role"] == "gateway"
+        assert router_node["attributes"]["host_ip"] == "10.10.10.1"
+
+    def test_explicit_ap_role(self):
+        """Explicit role='ap' is set on the router node."""
+        data = _make_data(router_info={"hostname": "ap2"})
+        snapshot = build_topology_snapshot(data, role="ap", host_ip="10.10.10.2")
+        router_node = next(n for n in snapshot["nodes"] if n["type"] == "router")
+        assert router_node["role"] == "ap"
+
+    def test_host_ip_used_as_fallback_ip(self):
+        """host_ip used as node IP when WAN ipv4 is absent."""
+        data = _make_data(router_info={"hostname": "ap2"}, wan_status={})
+        snapshot = build_topology_snapshot(data, host_ip="10.10.10.2")
+        router_node = next(n for n in snapshot["nodes"] if n["type"] == "router")
+        assert router_node["ip"] == "10.10.10.2"
+
+    def test_wan_attributes_present(self):
+        """Router node includes wan_proto and wan_connected in attributes."""
+        data = _make_data(
+            router_info={"hostname": "gw"},
+            wan_status={"proto": "dhcp", "ipv4": "185.1.1.1"},
+        )
+        data.wan_connected = True
+        snapshot = build_topology_snapshot(data, role="gateway")
+        router_node = next(n for n in snapshot["nodes"] if n["type"] == "router")
+        assert router_node["attributes"]["wan_proto"] == "dhcp"
+        assert router_node["attributes"]["wan_connected"] is True
+
+
 class TestSnapshotSchema:
     """Validate the top-level snapshot structure."""
 

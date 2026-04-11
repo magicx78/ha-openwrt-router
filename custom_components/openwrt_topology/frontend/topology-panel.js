@@ -1,4 +1,4 @@
-const PANEL_TAG = "openwrt-topology-panel";
+const PANEL_TAG = "openwrt-topo-panel-v2";
 
 function esc(v) {
   return String(v)
@@ -59,26 +59,20 @@ class OpenWrtTopologyPanel extends HTMLElement {
     this.render();
   }
 
-  laneFor(node) {
-    const t = String(node.type || "unknown").toLowerCase();
-    if (t === "router" || t === "gateway") return 0;
-    if (t === "ap" || t === "access_point" || t === "switch" || t === "interface" || t === "ssid" || t === "unknown") return 1;
-    return 2;
-  }
-
   colorFor(node) {
     const t = String(node.type || "unknown").toLowerCase();
     const a = node.attributes || {};
-    if (node.status === "inactive") return "#475569";
-    if (t === "router" || t === "gateway") return "#1d4ed8";
-    if (t === "ap" || t === "access_point") return "#059669";
-    if (t === "interface") {
+    const role = String(node.role || "").toLowerCase();
+    if (node.status === "inactive" || node.status === "offline") return "#475569";
+    if (t === "router" || t === "gateway") {
+      return role === "gateway" ? "#d97706" : "#1d4ed8";
+    }
+    if (t === "interface" || t === "ap" || t === "access_point") {
       const band = String(a.band || "").toLowerCase();
       if (band.includes("5")) return "#7c3aed";
       if (band.includes("6")) return "#db2777";
       return "#059669";
     }
-    if (t === "ssid") return "#7c3aed";
     if (t === "client") {
       const sig = a.signal;
       if (sig === null || sig === undefined) return "#0891b2";
@@ -92,30 +86,94 @@ class OpenWrtTopologyPanel extends HTMLElement {
 
   shapeClassFor(node) {
     const t = String(node.type || "unknown").toLowerCase();
-    if (t === "router" || t === "gateway") return "shape-router";
+    const role = String(node.role || "").toLowerCase();
+    if (t === "router" || t === "gateway") {
+      return role === "gateway" ? "shape-gateway" : "shape-router";
+    }
     if (t === "interface" || t === "ap" || t === "access_point" || t === "switch") return "shape-square";
-    if (t === "ssid") return "shape-diamond";
     return "shape-pill";
   }
 
-  computeLayout(nodes) {
-    const byLane = [[], [], []];
-    for (const node of nodes) byLane[this.laneFor(node)].push(node);
+  computeLayout(nodes, edges) {
+    // Group nodes by router (ap_mac attribute = router_id)
+    const routers = nodes.filter((n) => n.type === "router");
+    const ifaces = nodes.filter((n) => n.type === "interface");
+    const clients = nodes.filter((n) => n.type === "client");
+
+    // Sort: gateway first, then alphabetical
+    routers.sort((a, b) => {
+      if (a.role === "gateway" && b.role !== "gateway") return -1;
+      if (b.role === "gateway" && a.role !== "gateway") return 1;
+      return (a.label || "").localeCompare(b.label || "");
+    });
+
+    // Build router → interfaces → clients mapping
+    const routerGroups = routers.map((r) => {
+      const rId = r.id;
+      const myIfaces = ifaces.filter((i) => (i.attributes || {}).ap_mac === rId);
+      const myClients = [];
+      for (const iface of myIfaces) {
+        const ifaceClients = clients.filter((c) => {
+          // Find client connected to this interface via edges
+          return edges.some(
+            (e) => (e.from === iface.id && e.to === c.id) || (e.to === iface.id && e.from === c.id)
+          );
+        });
+        myClients.push(...ifaceClients);
+      }
+      // Also find clients directly connected to router (no interface match)
+      const directClients = clients.filter((c) => {
+        return edges.some(
+          (e) => (e.from === rId && e.to === c.id) || (e.to === rId && e.from === c.id)
+        ) && !myClients.includes(c);
+      });
+      myClients.push(...directClients);
+      return { router: r, ifaces: myIfaces, clients: myClients };
+    });
+
+    // Assign orphan clients (not linked to any router group)
+    const assignedClientIds = new Set(routerGroups.flatMap((g) => g.clients.map((c) => c.id)));
+    const orphanClients = clients.filter((c) => !assignedClientIds.has(c.id));
+    if (orphanClients.length > 0 && routerGroups.length > 0) {
+      routerGroups[0].clients.push(...orphanClients);
+    }
 
     const pos = {};
-    const laneX = [140, 400, 700];
-    const clientCount = byLane[2].length;
-    const maxItems = Math.max(byLane[0].length, byLane[1].length, clientCount);
-    const canvasH = Math.max(650, maxItems * 56 + 80);
+    const colX = { router: 120, iface: 380, client: 680 };
+    let y = 60;
+    const ROW_H = 46;
+    const GROUP_GAP = 30;
 
-    for (let lane = 0; lane < byLane.length; lane += 1) {
-      const list = byLane[lane];
-      const step = Math.max(50, Math.floor((canvasH - 80) / Math.max(1, list.length)));
-      for (let i = 0; i < list.length; i += 1) {
-        pos[list[i].id] = { x: laneX[lane], y: 60 + i * step };
+    for (const group of routerGroups) {
+      const groupStartY = y;
+      // Router node centered vertically in its group
+      const groupRows = Math.max(1, group.ifaces.length, group.clients.length);
+      const routerY = groupStartY + Math.floor((groupRows * ROW_H) / 2);
+      pos[group.router.id] = { x: colX.router, y: routerY };
+
+      // Interfaces
+      for (let i = 0; i < group.ifaces.length; i++) {
+        pos[group.ifaces[i].id] = { x: colX.iface, y: groupStartY + i * ROW_H };
+      }
+
+      // Clients
+      for (let i = 0; i < group.clients.length; i++) {
+        pos[group.clients[i].id] = { x: colX.client, y: groupStartY + i * ROW_H };
+      }
+
+      y = groupStartY + groupRows * ROW_H + GROUP_GAP;
+    }
+
+    // Position orphan interfaces (shouldn't happen but safety)
+    for (const iface of ifaces) {
+      if (!pos[iface.id]) {
+        pos[iface.id] = { x: colX.iface, y };
+        y += ROW_H;
       }
     }
-    pos._canvasH = canvasH;
+
+    pos._canvasH = Math.max(650, y + 40);
+    pos._routerGroups = routerGroups;
     return pos;
   }
 
@@ -125,8 +183,10 @@ class OpenWrtTopologyPanel extends HTMLElement {
     const rows = [
       ["Name", node.label || node.id],
       ["Typ", node.type],
+      ["Rolle", node.role],
       ["ID", node.id],
-      ["IP", a.ip || node.ip],
+      ["IP", a.ip || a.host_ip || node.ip],
+      ["Host-IP", a.host_ip],
       ["Status", node.status],
       ["Signal", a.signal !== null && a.signal !== undefined ? `${a.signal} dBm` : null],
       ["Bitrate", a.bitrate],
@@ -136,10 +196,14 @@ class OpenWrtTopologyPanel extends HTMLElement {
       ["Radio", a.radio],
       ["Hostname", a.hostname],
       ["MAC", a.mac],
+      ["WAN Proto", a.wan_proto],
+      ["WAN Connected", a.wan_connected !== undefined ? String(a.wan_connected) : null],
+      ["Uplink", a.link_type],
+      ["Firmware", a.firmware],
+      ["Model", a.model],
       ["Inferred", node.inferred ? "ja" : "nein"],
-      ["Valid", node.valid === false ? "false" : "true"],
       ["Source", node.source],
-    ].filter(([, v]) => v !== null && v !== undefined && v !== "");
+    ].filter(([, v]) => v !== null && v !== undefined && v !== "" && v !== "unknown");
     const body = rows
       .map(([k, v]) => `<div class="row"><span class="k">${esc(k)}:</span><span class="v">${esc(v)}</span></div>`)
       .join("");
@@ -165,12 +229,13 @@ class OpenWrtTopologyPanel extends HTMLElement {
     const snap = this._snapshot;
     const nodes = Array.isArray(snap?.nodes) ? snap.nodes : [];
     const edges = Array.isArray(snap?.edges) ? snap.edges : [];
-    const layout = this.computeLayout(nodes);
+    const layout = this.computeLayout(nodes, edges);
     const canvasH = layout._canvasH || 700;
     const selected = nodes.find((n) => n.id === this._selected) || null;
 
     const meta = snap?.meta || {};
-    const stats = `${meta.node_count || nodes.length} Nodes  |  ${meta.client_count || 0} Clients  |  ${meta.interface_count || 0} Interfaces`;
+    const routerCount = meta.router_count || nodes.filter((n) => n.type === "router").length;
+    const stats = `${routerCount} Router  |  ${meta.client_count || 0} Clients  |  ${meta.interface_count || 0} Interfaces  |  ${meta.node_count || nodes.length} Nodes`;
 
     const edgeSvg = edges
       .map((e) => {
@@ -179,10 +244,18 @@ class OpenWrtTopologyPanel extends HTMLElement {
         const p1 = layout[from];
         const p2 = layout[to];
         if (!p1 || !p2) return "";
-        const isClient = String(e.relationship || "").includes("client");
+        const rel = String(e.relationship || "");
+        const isUplink = rel.includes("uplink") || rel.includes("mesh");
+        const isClient = rel.includes("client");
         const dashed = e.inferred ? "4,5" : isClient ? "6,4" : "";
-        const color = e.inferred ? "#475569" : isClient ? "#334155" : "#475569";
-        const w = isClient ? "1.5" : "2";
+        let color, w;
+        if (isUplink) {
+          color = rel.includes("wifi") ? "#7c3aed" : "#d97706";
+          w = "3";
+        } else {
+          color = e.inferred ? "#475569" : "#334155";
+          w = isClient ? "1.5" : "2";
+        }
         return `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" stroke="${color}" stroke-width="${w}" ${dashed ? `stroke-dasharray="${dashed}"` : ""} />`;
       })
       .join("");
@@ -193,7 +266,7 @@ class OpenWrtTopologyPanel extends HTMLElement {
         const cls = [
           "node",
           this.shapeClassFor(n),
-          n.status === "inactive" ? "inactive" : "",
+          n.status === "inactive" || n.status === "offline" ? "inactive" : "",
           n.valid === false ? "invalid" : "",
           n.inferred ? "inferred" : "",
           this._selected === n.id ? "selected" : "",
@@ -207,6 +280,24 @@ class OpenWrtTopologyPanel extends HTMLElement {
       })
       .join("");
 
+    // Group separator lines
+    const groups = layout._routerGroups || [];
+    let groupLabelsHtml = "";
+    if (groups.length > 1) {
+      let gy = 60;
+      const ROW_H = 46, GROUP_GAP = 30;
+      for (const g of groups) {
+        const rows = Math.max(1, g.ifaces.length, g.clients.length);
+        const endY = gy + rows * ROW_H;
+        const role = g.router.role === "gateway" ? "Gateway" : "AP";
+        groupLabelsHtml += `<div class="group-label" style="top:${gy - 14}px">${esc(role)}: ${esc(g.router.label || g.router.id)}</div>`;
+        if (g !== groups[groups.length - 1]) {
+          groupLabelsHtml += `<div class="group-sep" style="top:${endY + GROUP_GAP / 2 - 1}px"></div>`;
+        }
+        gy = endY + GROUP_GAP;
+      }
+    }
+
     this.shadowRoot.innerHTML = `
       <style>
         :host { display:block; height:100%; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
@@ -219,15 +310,16 @@ class OpenWrtTopologyPanel extends HTMLElement {
         .canvas { position:relative; overflow:auto; }
         .canvas-inner { position:relative; width:900px; min-height:${canvasH}px; margin:6px; }
         svg { position:absolute; inset:0; pointer-events:none; }
-        .lane-label { position:absolute; top:10px; font-size:11px; color:#64748b; font-weight:600; text-transform:uppercase; letter-spacing:1px; }
-        .lane-0 { left:80px; } .lane-1 { left:340px; } .lane-2 { left:650px; }
+        .col-label { position:absolute; top:10px; font-size:11px; color:#64748b; font-weight:600; text-transform:uppercase; letter-spacing:1px; }
+        .col-0 { left:70px; } .col-1 { left:330px; } .col-2 { left:640px; }
+        .group-label { position:absolute; left:10px; font-size:10px; color:#94a3b8; font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+        .group-sep { position:absolute; left:10px; right:10px; height:1px; background:#334155; }
         .node { position:absolute; transform:translate(-50%,-50%); background:var(--node-bg,#64748b); color:#fff; border:2px solid rgba(255,255,255,.15); min-width:80px; min-height:32px; padding:4px 10px; cursor:pointer; font-size:12px; font-weight:500; transition:all .15s; }
         .node:hover { filter:brightness(1.2); z-index:10; }
-        .shape-router { border-radius:10px; min-width:130px; font-size:14px; font-weight:700; border:3px solid rgba(255,255,255,.3); }
+        .shape-gateway { border-radius:10px; min-width:140px; font-size:14px; font-weight:700; border:3px solid rgba(255,255,255,.4); }
+        .shape-router { border-radius:10px; min-width:120px; font-size:13px; font-weight:700; border:3px solid rgba(255,255,255,.25); }
         .shape-square { border-radius:8px; }
         .shape-pill { border-radius:16px; }
-        .shape-diamond { transform:translate(-50%,-50%) rotate(45deg); border-radius:6px; }
-        .shape-diamond span { display:inline-block; transform:rotate(-45deg); }
         .inactive { opacity:.35; }
         .invalid { border-color:#ef4444 !important; }
         .inferred { outline:2px dashed #fbbf24; outline-offset:3px; }
@@ -235,7 +327,7 @@ class OpenWrtTopologyPanel extends HTMLElement {
         .side { border-left:1px solid #1e293b; padding:16px; overflow:auto; background:#1e293b; }
         .side h3 { margin:0 0 12px; font-size:14px; font-weight:600; color:#94a3b8; text-transform:uppercase; letter-spacing:1px; }
         .row { margin-bottom:5px; font-size:13px; display:flex; }
-        .k { min-width:100px; color:#64748b; flex-shrink:0; }
+        .k { min-width:110px; color:#64748b; flex-shrink:0; }
         .v { color:#e2e8f0; word-break:break-all; }
         .hint { margin-top:12px; font-size:12px; padding:6px 8px; border-radius:6px; }
         .hint.inf { background:#1e3a5f; color:#93c5fd; }
@@ -245,11 +337,12 @@ class OpenWrtTopologyPanel extends HTMLElement {
         .legend h4 { margin:0 0 8px; font-size:12px; color:#64748b; text-transform:uppercase; }
         .legend-item { display:flex; align-items:center; gap:8px; margin-bottom:4px; font-size:12px; }
         .legend-dot { width:12px; height:12px; border-radius:3px; flex-shrink:0; }
+        .legend-line { width:24px; height:0; flex-shrink:0; }
       </style>
       <div class="page">
         <div class="head">
           <div>
-            <h2>OpenWrt Network Topology</h2>
+            <h2>OpenWrt Mesh Topology</h2>
             <div class="stats">${esc(stats)}</div>
           </div>
           <button id="reload">Neu laden</button>
@@ -257,9 +350,10 @@ class OpenWrtTopologyPanel extends HTMLElement {
         <div class="canvas">
           ${this._error ? `<div class="error">Fehler: ${esc(this._error)}</div>` : ""}
           <div class="canvas-inner">
-            <div class="lane-label lane-0">Router</div>
-            <div class="lane-label lane-1">Interfaces</div>
-            <div class="lane-label lane-2">Clients</div>
+            <div class="col-label col-0">Router</div>
+            <div class="col-label col-1">Interfaces</div>
+            <div class="col-label col-2">Clients</div>
+            ${groupLabelsHtml}
             <svg viewBox="0 0 900 ${canvasH}" preserveAspectRatio="none">${edgeSvg}</svg>
             ${nodeHtml}
           </div>
@@ -269,14 +363,17 @@ class OpenWrtTopologyPanel extends HTMLElement {
           ${this.detailsHtml(selected)}
           <div class="legend">
             <h4>Legende</h4>
-            <div class="legend-item"><div class="legend-dot" style="background:#1d4ed8"></div> Router</div>
-            <div class="legend-item"><div class="legend-dot" style="background:#059669"></div> Interface (2.4 GHz)</div>
-            <div class="legend-item"><div class="legend-dot" style="background:#7c3aed"></div> Interface (5 GHz)</div>
-            <div class="legend-item"><div class="legend-dot" style="background:#059669"></div> Client (gut: &gt;-50 dBm)</div>
-            <div class="legend-item"><div class="legend-dot" style="background:#0891b2"></div> Client (ok / unbekannt)</div>
-            <div class="legend-item"><div class="legend-dot" style="background:#d97706"></div> Client (schwach: -65...-75)</div>
-            <div class="legend-item"><div class="legend-dot" style="background:#dc2626"></div> Client (schlecht: &lt;-75)</div>
-            <div class="legend-item"><div class="legend-dot" style="background:#475569"></div> Inaktiv</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#d97706"></div> Gateway (WAN)</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#1d4ed8"></div> AP Router</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#059669"></div> Interface 2.4 GHz</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#7c3aed"></div> Interface 5 GHz</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#059669"></div> Client (gut &gt;-50)</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#0891b2"></div> Client (ok / ?)</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#d97706"></div> Client (schwach)</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#dc2626"></div> Client (schlecht)</div>
+            <div class="legend-item"><div class="legend-line" style="border-top:3px solid #d97706"></div> LAN Uplink</div>
+            <div class="legend-item"><div class="legend-line" style="border-top:3px solid #7c3aed"></div> WiFi Uplink</div>
+            <div class="legend-item"><div class="legend-line" style="border-top:2px dashed #fbbf24"></div> Inferred</div>
           </div>
         </div>
       </div>
