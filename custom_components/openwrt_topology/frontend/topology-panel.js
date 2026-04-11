@@ -1,4 +1,4 @@
-const PANEL_TAG = "openwrt-topo-panel-v2";
+const PANEL_TAG = "openwrt-topology-panel";
 
 function esc(v) {
   return String(v)
