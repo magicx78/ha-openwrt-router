@@ -158,6 +158,15 @@ def build_topology_snapshot(
         if iface.get("interface")
     }
 
+    # ── Build ifname→ssid lookup from wifi_radios for consistent labels ──
+    _radio_ssid_map: dict[str, str] = {}
+    _radio_section_map: dict[str, str] = {}
+    for _radio in data.wifi_radios or []:
+        _rif = _radio.get("ifname", "")
+        if _rif:
+            _radio_ssid_map[_rif] = _radio.get("ssid", "")
+            _radio_section_map[_rif] = _radio.get("uci_section", "")
+
     # ── AP interface nodes ─────────────────────────────────────────
     for ap in data.ap_interfaces or []:
         ifname: str = ap.get("ifname", "")
@@ -166,6 +175,19 @@ def build_topology_snapshot(
 
         iface_type = _classify_iface_type(ifname, wan_ifname)
         iface_id = f"iface:{router_id}:{ifname}"
+
+        # Build human-readable label: prefer SSID+band, then UCI section, then ifname
+        _ssid = ap.get("ssid") or _radio_ssid_map.get(ifname, "")
+        _band = ap.get("band", "")
+        _section = _radio_section_map.get(ifname, "")
+        if _ssid and _band:
+            iface_label = f"{_ssid} ({_band})"
+        elif _ssid:
+            iface_label = _ssid
+        elif _section:
+            iface_label = _section
+        else:
+            iface_label = ifname
 
         # rx/tx: try network_interfaces; AP ifnames often absent → None/None
         net = net_iface_map.get(ifname, {})
@@ -203,7 +225,7 @@ def build_topology_snapshot(
         nodes.append({
             "id": iface_id,
             "type": "interface",
-            "label": ifname,
+            "label": iface_label,
             "source": TOPOLOGY_SOURCE,
             "inferred": inferred,
             "inference_reason": "interface_type_unknown" if inferred else None,
