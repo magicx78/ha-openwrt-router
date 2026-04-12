@@ -189,7 +189,12 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             data.wan_status = await self.api.get_wan_status()
             data.wan_connected = data.wan_status.get("wan_connected", False) or data.wan_status.get("connected", False)
 
-            data.wifi_radios = await self.api.get_wifi_status()
+            try:
+                data.wifi_radios = await self.api.get_wifi_status()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("WiFi status unavailable (ACL?): %s", err)
+                data.wifi_radios = self.data.wifi_radios if self.data else []
+
             data.dhcp_leases = await self.api.get_dhcp_leases()
             data.clients = await self.api.get_connected_clients(
                 leases=data.dhcp_leases,

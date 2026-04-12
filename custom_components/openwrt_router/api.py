@@ -2401,7 +2401,17 @@ class OpenWrtAPI:
                     )
                     raise
                 payload = self._build_call(ubus_object, method, params)
-                return await self._raw_call(payload)
+                try:
+                    return await self._raw_call(payload)
+                except OpenWrtAuthError:
+                    # Re-login succeeded but method STILL returns -32002
+                    # → genuine ACL restriction, NOT a credential issue.
+                    # Convert to MethodNotFoundError so the coordinator
+                    # does not trigger ConfigEntryAuthFailed.
+                    raise OpenWrtMethodNotFoundError(
+                        f"rpcd ACL blocks {ubus_object}/{method} "
+                        f"(authenticated OK, method not permitted)"
+                    ) from None
             raise
 
     def _build_call(
