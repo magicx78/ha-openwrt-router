@@ -1,15 +1,40 @@
 # PROGRESS — OpenWrt HA Integration
 
-Entwicklungsprotokoll · Letzte Session: 2026-04-14
+Entwicklungsprotokoll · Letzte Session: 2026-04-15
 
 ---
 
-## Status: ✅ v1.10.0 — Alles in openwrt_router integriert
+## Status: ✅ v1.10.1 — CCTV IoT-Karte + SSH-Exec Infrastruktur
 
 - Panel läuft als Teil von `openwrt_router` (kein separates `openwrt_topology` mehr)
 - FritzBox-Style Visualisierung live: Karten-Nodes, Bezier-Linien, Signal-Pills
 - ACL-Provisioning automatisch beim Hinzufügen eines neuen Routers
-- 353 Tests grün, committed `8490022`, gepusht auf `feature/topology-ha-test`
+- **CCTV IoT-Karte** live mit Filter (IoT / Klee / Letzte 10 Min)
+- **SSH-Exec Infrastruktur**: `scripts/ssh_exec.py` + 9 Profile konfiguriert
+- 376 Tests grün
+
+---
+
+## Was wurde gebaut (2026-04-15)
+
+### SSH-Exec Infrastruktur
+
+| Datei | Aktion |
+|-------|--------|
+| `scripts/ssh_exec.py` | NEU — Validierung + sequenzielle SSH-Ausführung, JSON-Output |
+
+9 SSH-Profile in `~/.config/ssh-profiles.json` nutzbar: OpenwrtGatewayRouter, HomeAssistant, homelab, sECUREaP-aP3/4, AP2, Proxmox_2, Docker_DockGe, openclaw.
+
+### CCTV IoT-Karte repariert + erweitert
+
+| Änderung | Detail |
+|----------|--------|
+| Fehler behoben | `switch.secure_iot_2_4_ghz` existiert nicht → 4 echte Entities aggregiert |
+| `| default([], true)` | Verhindert TypeError wenn Entity None zurückgibt |
+| Filter-Dropdown | `input_select.netz_filter` (Alle / IoT / Klee / Letzte 10 Min) |
+| `custom:mushroom-select-card` | Selector-Karte in CCTV-Ansicht |
+
+Geändert auf HA: `/config/.storage/lovelace.lovelace` + `/config/configuration.yaml`
 
 ---
 
