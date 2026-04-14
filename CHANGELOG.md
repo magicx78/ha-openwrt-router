@@ -2,34 +2,49 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
-## [1.9.4-dev] - 2026-04-12
+## [1.9.4-dev] - 2026-04-14
 
 ### Added
 
-- **Multi-Router Mesh Topology**: New `topology_mesh.py` aggregates topology snapshots from all configured OpenWrt routers into a single unified mesh view. Supports 1 gateway + N AP clients.
-- **Automatic role detection**: Routers are classified as `gateway` (WAN uplink with non-private IP) or `ap` (no WAN) based on WAN status data — no manual configuration needed.
-- **Inter-router edge detection**: Three methods to discover connections between routers:
-  1. DHCP lease cross-reference (AP's host IP in gateway's DHCP leases → LAN uplink)
-  2. WiFi client MAC cross-reference (AP's MAC as WiFi client on another router → WiFi uplink)
-  3. Subnet fallback (same /24 → inferred mesh_member)
-- **Client deduplication**: Roaming clients (same MAC on multiple APs) appear once — strongest signal wins.
-- **Mesh topology panel**: Redesigned `topology-panel.js` with per-router group layout:
-  - Gateway node in gold/amber, AP nodes in blue
-  - Inter-router edges: thick gold (LAN) or purple (WiFi)
-  - Signal-based client colors: green (>-50), cyan (ok), orange (-65…-75), red (<-75)
-  - Band-based interface colors: green (2.4 GHz), purple (5 GHz), pink (6 GHz)
-  - Legend with all color/line meanings
-  - Stats header: "N Router | N Clients | N Interfaces | N Nodes"
+- **Panel integrated into openwrt_router**: The topology panel is now part of the `openwrt_router` integration — no separate `openwrt_topology` component needed. The panel registers automatically when the first router entry is set up.
+  - `topology_panel.py` — registers sidebar panel, static frontend path, and `/api/openwrt_topology/snapshot` endpoint
+  - Moved `frontend/topology-panel.js` into `openwrt_router/frontend/`
+  - `manifest.json` updated with `"dependencies": ["frontend", "http", "panel_custom"]`
+
+- **Auto-ACL provisioning**: When a new router is added, the integration automatically checks for the rpcd ACL file (`/usr/share/rpcd/acl.d/ha-openwrt-router.json`). If missing, it deploys it via SSH and restarts rpcd — fixing the common "Authentication failed" error when adding AP clients that have no ACL file.
+  - `acl_provisioning.py` — SSH check + deploy + rpcd restart (best-effort, graceful skip if SSH unavailable)
+  - Called from `async_setup_entry()` after first coordinator refresh
+
+- **Multi-Router Mesh Topology**: `topology_mesh.py` aggregates per-router snapshots from all configured OpenWrt entries into a single unified mesh view (1 gateway + N AP clients).
+  - Automatic role detection: `gateway` (WAN uplink, non-private IP) vs `ap`
+  - Inter-router edge detection via DHCP lease cross-reference, WiFi client MAC, or subnet fallback
+  - Client deduplication: roaming clients (same MAC on multiple APs) appear once — strongest signal wins
+
+- **FritzBox-style panel redesign**: Topology panel now uses card-style nodes with iOS-inspired dark palette:
+  - Card nodes with band-specific border colors (gateway: blue, AP: purple, 2.4 GHz: green, 5 GHz: purple, 6 GHz: magenta)
+  - Status dots (green/red/grey) per card
+  - Signal quality pills for WiFi clients: `gut` (>-65 dBm) / `mittel` / `schwach` (<-75 dBm)
+  - WAN badge (✓/✗) on gateway card
+  - Bezier SVG connector lines with per-type styling (dashed WLAN, solid LAN, thick uplinks)
+  - CSS variable palette (`--cg`, `--cr`, `--cl`, `--good`, `--fair`, `--poor`)
+  - Multi-router group labels + separator lines
+
+### Removed
+
+- **`openwrt_topology/` component**: Entire separate component deleted. Panel functionality moved into `openwrt_router`.
 
 ### Technical
 
+- `topology_panel.py` (NEW): Panel registration, API view, idempotent setup
+- `acl_provisioning.py` (NEW): `check_and_deploy_acl()`, `_check_acl_exists()`, `_deploy_acl()`, `_ssh_exec()`
 - `topology_mesh.py` (NEW): `build_mesh_snapshot()`, `_detect_router_role()`, `_detect_inter_router_edges()`, `_deduplicate_clients()`
-- `topology_diagnostic.py`: `build_topology_snapshot()` gains optional `role` and `host_ip` parameters. Router node attributes now include `host_ip`, `wan_proto`, `wan_connected`.
-- `panel.py` (openwrt_topology): API endpoint uses `build_mesh_snapshot()` as primary source, with legacy fallbacks.
+- `topology_diagnostic.py`: `build_topology_snapshot()` gains optional `role` and `host_ip` parameters. Router node attributes now include `host_ip`, `wan_proto`, `wan_connected`. Interface labels prefer SSID+band over raw ifname.
+- `coordinator.py`: `get_wifi_status()` wrapped in try/except to prevent `ConfigEntryAuthFailed` on ACL-restricted AP routers.
+- `api.py`: Post-relogin `-32002` raised as `OpenWrtMethodNotFoundError` (genuine ACL block), not `OpenWrtAuthError`.
 
 ### Tests
 
-- 344 passing (+28 new: mesh aggregation, role detection, inter-router edges, client deduplication, topology role parameters)
+- 353 passing (+37 new: ACL provisioning, mesh aggregation, role detection, inter-router edges, client deduplication, topology role/host_ip parameters)
 
 ---
 
