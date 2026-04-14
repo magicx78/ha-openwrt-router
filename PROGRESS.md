@@ -4,12 +4,12 @@ Entwicklungsprotokoll · Letzte Session: 2026-04-14
 
 ---
 
-## Status: ✅ v1.9.4-dev — Alles in openwrt_router integriert
+## Status: ✅ v1.10.0 — Alles in openwrt_router integriert
 
 - Panel läuft als Teil von `openwrt_router` (kein separates `openwrt_topology` mehr)
 - FritzBox-Style Visualisierung live: Karten-Nodes, Bezier-Linien, Signal-Pills
 - ACL-Provisioning automatisch beim Hinzufügen eines neuen Routers
-- 353 Tests grün, committed `cd7cb2f`, gepusht auf `feature/topology-ha-test`
+- 353 Tests grün, committed `8490022`, gepusht auf `feature/topology-ha-test`
 
 ---
 
