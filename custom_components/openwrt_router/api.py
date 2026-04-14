@@ -1592,8 +1592,11 @@ class OpenWrtAPI:
             return {}
 
         leases: dict[str, dict[str, str]] = {}
-        # Response is a list under key "leases" or directly a list
-        entries = result.get("leases", result) if isinstance(result, dict) else result
+        # Response is a list under key "dhcp_leases" (OpenWrt 25), "leases" (older), or directly a list
+        if isinstance(result, dict):
+            entries = result.get("dhcp_leases", result.get("leases", result))
+        else:
+            entries = result
         if not isinstance(entries, list):
             return {}
         for entry in entries:
@@ -2398,7 +2401,17 @@ class OpenWrtAPI:
                     )
                     raise
                 payload = self._build_call(ubus_object, method, params)
-                return await self._raw_call(payload)
+                try:
+                    return await self._raw_call(payload)
+                except OpenWrtAuthError:
+                    # Re-login succeeded but method STILL returns -32002
+                    # → genuine ACL restriction, NOT a credential issue.
+                    # Convert to MethodNotFoundError so the coordinator
+                    # does not trigger ConfigEntryAuthFailed.
+                    raise OpenWrtMethodNotFoundError(
+                        f"rpcd ACL blocks {ubus_object}/{method} "
+                        f"(authenticated OK, method not permitted)"
+                    ) from None
             raise
 
     def _build_call(
@@ -2487,10 +2500,14 @@ class OpenWrtAPI:
             rpc_error = data["error"]
             error_code = rpc_error.get("code", 0)
             error_msg = rpc_error.get("message", "unknown")
-            # -32002: rpcd access denied (object not in session ACL or not registered)
-            # Treat as "not available" so callers can fall back gracefully
+            # -32002: rpcd access denied. Two root causes that look identical:
+            #   (a) method not in user's ACL  → permanent, should not re-login
+            #   (b) session token invalid/expired (e.g. rpcd restarted) → transient
+            # Raise OpenWrtAuthError so _call re-logins and retries once.
+            # If the retry also returns -32002 it's a genuine ACL restriction and
+            # OpenWrtAuthError propagates to the caller (who treats it as ACL blocked).
             if error_code == -32002:
-                raise OpenWrtMethodNotFoundError(
+                raise OpenWrtAuthError(
                     f"rpcd access denied for {ubus_object}/{method}: {error_msg}"
                 )
             raise OpenWrtResponseError(

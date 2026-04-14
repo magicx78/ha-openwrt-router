@@ -324,12 +324,31 @@ class TestDynamicInterfaceSensors:
     def test_t_s5_interface_sensor_unique_id_stable(
         self, mock_coordinator, mock_config_entry
     ):
-        """T-S5: unique_id is deterministic — entry_id + interface + direction."""
+        """T-S5: unique_id has _iface_ prefix to avoid collision with static WAN sensors."""
         sensor = OpenWrtInterfaceSensor(mock_coordinator, mock_config_entry, "wan", "rx_bytes")
-        assert sensor._attr_unique_id == "test_entry_id_wan_rx"
+        assert sensor._attr_unique_id == "test_entry_id_iface_wan_rx"
 
         sensor_tx = OpenWrtInterfaceSensor(mock_coordinator, mock_config_entry, "wan", "tx_bytes")
-        assert sensor_tx._attr_unique_id == "test_entry_id_wan_tx"
+        assert sensor_tx._attr_unique_id == "test_entry_id_iface_wan_tx"
+
+    def test_t_s5b_no_collision_with_static_wan_sensors(
+        self, mock_coordinator, mock_config_entry
+    ):
+        """Fix B: OpenWrtInterfaceSensor unique_id must NOT match static WAN sensor IDs.
+
+        Static sensors use entry_id + '_wan_rx' / '_wan_tx'.
+        Dynamic interface sensors must use entry_id + '_iface_wan_rx' etc.
+        """
+        rx_sensor = OpenWrtInterfaceSensor(mock_coordinator, mock_config_entry, "wan", "rx_bytes")
+        tx_sensor = OpenWrtInterfaceSensor(mock_coordinator, mock_config_entry, "wan", "tx_bytes")
+
+        # Must NOT equal static sensor IDs
+        assert rx_sensor._attr_unique_id != "test_entry_id_wan_rx"
+        assert tx_sensor._attr_unique_id != "test_entry_id_wan_tx"
+
+        # Must include _iface_ disambiguator
+        assert "_iface_" in rx_sensor._attr_unique_id
+        assert "_iface_" in tx_sensor._attr_unique_id
 
 
 class TestDynamicRadioSensors:

@@ -35,6 +35,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import OpenWrtConfigEntry
+from .topology_entities import setup_topology_entities
 from .const import (
     DOMAIN,
     SUFFIX_ACTIVE_CONNECTIONS,
@@ -502,6 +503,9 @@ async def async_setup_entry(
     _add_dynamic_sensors()
     entry.async_on_unload(coordinator.async_add_listener(_add_dynamic_sensors))
 
+    # Topology diagnostic sensors (feature/topology-ha-test)
+    setup_topology_entities(coordinator, entry, async_add_entities)
+
     _LOGGER.debug("Added %d static OpenWrt sensor entities", len(static_entities))
 
 
@@ -597,7 +601,7 @@ class OpenWrtInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity
         self._metric = metric
         self._entry = entry
         direction = "rx" if metric == "rx_bytes" else "tx"
-        self._attr_unique_id = f"{entry.entry_id}_{interface}_{direction}"
+        self._attr_unique_id = f"{entry.entry_id}_iface_{interface}_{direction}"
         self._attr_translation_key = f"interface_{direction}"
         self._attr_icon = "mdi:download-network" if direction == "rx" else "mdi:upload-network"
 

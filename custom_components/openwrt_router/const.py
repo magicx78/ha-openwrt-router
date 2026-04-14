@@ -135,6 +135,8 @@ SUFFIX_PLATFORM_ARCHITECTURE = "platform_architecture"
 SUFFIX_FIRMWARE = "firmware"
 SUFFIX_UPDATE_STATUS = "update_status"
 SUFFIX_UPDATES_AVAILABLE = "updates_available"
+SUFFIX_TOPOLOGY_SNAPSHOT = "network_topology"
+SUFFIX_TOPOLOGY_STATUS = "topology_status"
 
 # Device tracker
 SOURCE_TYPE_ROUTER = "router"

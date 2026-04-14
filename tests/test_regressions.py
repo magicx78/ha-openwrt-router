@@ -204,7 +204,7 @@ class TestReg04UniqueIdStable:
         sensor_b = OpenWrtInterfaceSensor(coord, entry, "wan", "rx_bytes")
 
         assert sensor_a._attr_unique_id == sensor_b._attr_unique_id
-        assert sensor_a._attr_unique_id == "fixed_entry_id_wan_rx"
+        assert sensor_a._attr_unique_id == "fixed_entry_id_iface_wan_rx"
 
     def test_interface_sensor_unique_id_different_for_tx(self):
         coord, _ = _make_coordinator()
@@ -218,8 +218,8 @@ class TestReg04UniqueIdStable:
         tx = OpenWrtInterfaceSensor(coord, entry, "wan", "tx_bytes")
 
         assert rx._attr_unique_id != tx._attr_unique_id
-        assert rx._attr_unique_id == "fixed_entry_id_wan_rx"
-        assert tx._attr_unique_id == "fixed_entry_id_wan_tx"
+        assert rx._attr_unique_id == "fixed_entry_id_iface_wan_rx"
+        assert tx._attr_unique_id == "fixed_entry_id_iface_wan_tx"
 
 
 # =====================================================================

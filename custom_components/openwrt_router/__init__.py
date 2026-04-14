@@ -137,6 +137,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # Forward setup to all platforms (sensor, switch, device_tracker, button)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    # Register topology panel (idempotent — only registers once per HA session)
+    from .topology_panel import async_setup_topology_panel
+
+    await async_setup_topology_panel(hass)
+
+    # Auto-provision rpcd ACL on router if missing (best-effort, non-blocking)
+    try:
+        from .acl_provisioning import check_and_deploy_acl
+
+        deployed = await check_and_deploy_acl(api)
+        if deployed:
+            _LOGGER.info("Deployed rpcd ACL to %s — refreshing data", host)
+            await coordinator.async_request_refresh()
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug("ACL provisioning skipped (SSH not available)")
+
     _LOGGER.info(
         "OpenWrt Router '%s' set up successfully (model: %s, host: %s:%s)",
         entry.title,
