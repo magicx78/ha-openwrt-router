@@ -1,7 +1,7 @@
-"""Tests for acl_provisioning.py — Auto-deploy rpcd ACL."""
+"""Tests for acl_provisioning.py — Auto-deploy rpcd ACL via ubus file API."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -9,70 +9,144 @@ from custom_components.openwrt_router.acl_provisioning import (
     ACL_FILE_PATH,
     RPCD_ACL_CONTENT,
     check_and_deploy_acl,
-    _check_acl_exists,
 )
+from custom_components.openwrt_router.api import OpenWrtMethodNotFoundError
 
 
-def _make_api(host="10.10.10.2", username="root", password="secret"):
-    """Create a mock API with host/username/password."""
+def _make_api(host="10.10.10.2"):
+    """Create a mock OpenWrtAPI with a controllable _call coroutine."""
     api = MagicMock()
     api._host = host
-    api._username = username
-    api._password = password
+    api._call = AsyncMock()
     return api
 
 
 class TestCheckAndDeployAcl:
     @pytest.mark.asyncio
     async def test_returns_false_when_acl_exists(self):
-        """No deployment if ACL file already exists."""
+        """No deployment if file/stat succeeds (file already exists)."""
         api = _make_api()
-        with patch(
-            "custom_components.openwrt_router.acl_provisioning._check_acl_exists",
-            new=AsyncMock(return_value=True),
-        ):
-            result = await check_and_deploy_acl(api)
+        # file/stat returns metadata dict → file exists
+        api._call.return_value = {"type": "regular", "size": 512}
+
+        result = await check_and_deploy_acl(api)
+
         assert result is False
+        # Only the stat call should have been made
+        api._call.assert_awaited_once_with("file", "stat", {"path": ACL_FILE_PATH})
 
     @pytest.mark.asyncio
     async def test_deploys_when_acl_missing(self):
-        """Deploy ACL when file is missing, return True."""
+        """Deploy ACL and return True when file/stat raises MethodNotFoundError."""
         api = _make_api()
-        with patch(
-            "custom_components.openwrt_router.acl_provisioning._check_acl_exists",
-            new=AsyncMock(return_value=False),
-        ), patch(
-            "custom_components.openwrt_router.acl_provisioning._deploy_acl",
-            new=AsyncMock(),
-        ) as mock_deploy:
-            result = await check_and_deploy_acl(api)
+
+        def _side_effect(obj, method, params):
+            if method == "stat":
+                raise OpenWrtMethodNotFoundError("NOT_FOUND")
+            return {}  # write + exec succeed
+
+        api._call.side_effect = _side_effect
+
+        result = await check_and_deploy_acl(api)
+
         assert result is True
-        mock_deploy.assert_awaited_once()
+        calls = [c.args[1] for c in api._call.call_args_list]  # method names
+        assert "stat" in calls
+        assert "write" in calls
 
     @pytest.mark.asyncio
-    async def test_returns_false_on_ssh_unavailable(self):
-        """Graceful skip when SSH is not available."""
+    async def test_restarts_rpcd_after_deploy(self):
+        """rpcd restart (file/exec) is attempted after writing the ACL."""
         api = _make_api()
-        with patch(
-            "custom_components.openwrt_router.acl_provisioning._check_acl_exists",
-            new=AsyncMock(side_effect=RuntimeError("sshpass not found")),
-        ):
-            result = await check_and_deploy_acl(api)
+
+        def _side_effect(obj, method, params):
+            if method == "stat":
+                raise OpenWrtMethodNotFoundError("NOT_FOUND")
+            return {}
+
+        api._call.side_effect = _side_effect
+
+        await check_and_deploy_acl(api)
+
+        methods = [c.args[1] for c in api._call.call_args_list]
+        assert "exec" in methods
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_write_fails(self):
+        """Graceful degradation when file/write is rejected."""
+        api = _make_api()
+
+        def _side_effect(obj, method, params):
+            if method == "stat":
+                raise OpenWrtMethodNotFoundError("NOT_FOUND")
+            if method == "write":
+                raise RuntimeError("permission denied")
+            return {}
+
+        api._call.side_effect = _side_effect
+
+        result = await check_and_deploy_acl(api)
+
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_returns_false_on_deploy_failure(self):
-        """Graceful degradation when deployment fails."""
+    async def test_returns_true_even_if_rpcd_restart_fails(self):
+        """ACL was written; non-fatal rpcd restart failure still returns True."""
         api = _make_api()
-        with patch(
-            "custom_components.openwrt_router.acl_provisioning._check_acl_exists",
-            new=AsyncMock(return_value=False),
-        ), patch(
-            "custom_components.openwrt_router.acl_provisioning._deploy_acl",
-            new=AsyncMock(side_effect=RuntimeError("permission denied")),
-        ):
-            result = await check_and_deploy_acl(api)
-        assert result is False
+
+        def _side_effect(obj, method, params):
+            if method == "stat":
+                raise OpenWrtMethodNotFoundError("NOT_FOUND")
+            if method == "exec":
+                raise RuntimeError("rpcd restart failed")
+            return {}
+
+        api._call.side_effect = _side_effect
+
+        result = await check_and_deploy_acl(api)
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_continues_to_write_when_stat_raises_unexpected_error(self):
+        """If stat fails with a non-MethodNotFound error, still attempt write."""
+        api = _make_api()
+
+        def _side_effect(obj, method, params):
+            if method == "stat":
+                raise RuntimeError("file module unavailable")
+            return {}  # write + exec succeed
+
+        api._call.side_effect = _side_effect
+
+        result = await check_and_deploy_acl(api)
+
+        assert result is True
+        methods = [c.args[1] for c in api._call.call_args_list]
+        assert "write" in methods
+
+    @pytest.mark.asyncio
+    async def test_write_includes_acl_content(self):
+        """file/write payload must contain the ACL JSON."""
+        import json
+
+        api = _make_api()
+
+        captured: list[dict] = []
+
+        def _side_effect(obj, method, params):
+            if method == "stat":
+                raise OpenWrtMethodNotFoundError("NOT_FOUND")
+            captured.append({"method": method, "params": params})
+            return {}
+
+        api._call.side_effect = _side_effect
+
+        await check_and_deploy_acl(api)
+
+        write_call = next(c for c in captured if c["method"] == "write")
+        written = json.loads(write_call["params"]["data"])
+        assert written == RPCD_ACL_CONTENT
 
 
 class TestAclContent:

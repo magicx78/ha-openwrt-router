@@ -1,19 +1,15 @@
 """acl_provisioning.py — Auto-deploy rpcd ACL to OpenWrt routers.
 
 When a router is added to Home Assistant, this module checks if the
-rpcd ACL file exists on the router. If missing, it deploys it via SSH
-and restarts rpcd so the integration gets proper API access.
+rpcd ACL file exists on the router. If missing, it deploys it via the
+ubus file API (no SSH or sshpass required).
 
-The ACL grants read access to the ubus methods needed by the integration:
+The ACL grants access to the ubus methods needed by the integration:
 hostapd, network.wireless, network.interface, luci-rpc, iwinfo, system.
-
-This is best-effort: if SSH/sshpass is unavailable, the integration
-continues with its existing fallback chain (SSH commands, iw, luci-rpc).
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -57,123 +53,73 @@ RPCD_ACL_CONTENT: dict = {
 async def check_and_deploy_acl(api: OpenWrtAPI) -> bool:
     """Check if rpcd ACL exists on router, deploy if missing.
 
+    Uses the ubus file API (file/stat + file/write + file/exec) so no
+    SSH or sshpass is required. All operations run through the already-
+    authenticated api instance.
+
     Args:
-        api: Authenticated OpenWrtAPI instance with host/username/password.
+        api: Authenticated OpenWrtAPI instance.
 
     Returns:
-        True if ACL was deployed (router needs rpcd restart + data refresh).
-        False if ACL already existed or deployment was skipped.
-
-    Raises:
-        No exceptions — all errors are caught and logged.
+        True if ACL was newly deployed (caller should refresh coordinator).
+        False if ACL already existed, deployment was skipped, or the ubus
+        file module is unavailable.
     """
-    host = api._host
-    username = api._username
-    password = api._password
+    from .api import OpenWrtMethodNotFoundError  # avoid circular at module level
 
-    # Step 1: Check if ACL file exists
+    # Step 1: Check whether the ACL file already exists.
+    # file/stat returns status 0 + metadata when the file exists, and
+    # raises OpenWrtMethodNotFoundError (ubus status NOT_FOUND = 4) when it
+    # doesn't. Any other exception means the file module is unavailable.
     try:
-        exists = await _check_acl_exists(host, username, password)
-    except Exception as err:  # noqa: BLE001
+        await api._call("file", "stat", {"path": ACL_FILE_PATH})
+        _LOGGER.debug("rpcd ACL already exists on %s", api._host)
+        return False
+    except OpenWrtMethodNotFoundError:
+        # Status NOT_FOUND → file doesn't exist. Proceed to deploy.
         _LOGGER.debug(
-            "Cannot check ACL on %s (SSH unavailable): %s", host, err
+            "rpcd ACL missing on %s — will deploy via ubus file/write", api._host
         )
-        return False
-
-    if exists:
-        _LOGGER.debug("rpcd ACL already exists on %s", host)
-        return False
-
-    # Step 2: Deploy ACL file
-    try:
-        acl_json = json.dumps(RPCD_ACL_CONTENT, indent=2)
-        await _deploy_acl(host, username, password, acl_json)
-        _LOGGER.info(
-            "Deployed rpcd ACL to %s:%s — restarting rpcd",
-            host,
-            ACL_FILE_PATH,
-        )
-        return True
     except Exception as err:  # noqa: BLE001
-        _LOGGER.warning(
-            "Failed to deploy rpcd ACL to %s: %s. "
-            "Integration will use fallback methods.",
-            host,
+        # file module unavailable or permission denied on stat.
+        # Still attempt the write; worst case it fails gracefully below.
+        _LOGGER.debug(
+            "Cannot verify ACL on %s via file/stat (%s) — attempting write anyway",
+            api._host,
             err,
         )
+
+    # Step 2: Write the ACL file via ubus file/write.
+    acl_json = json.dumps(RPCD_ACL_CONTENT, indent=2)
+    try:
+        await api._call("file", "write", {"path": ACL_FILE_PATH, "data": acl_json})
+        _LOGGER.info("Deployed rpcd ACL to %s:%s", api._host, ACL_FILE_PATH)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning(
+            "Cannot deploy ACL to %s via ubus file/write: %s. "
+            "The ACL must be deployed manually: "
+            "scp ha-openwrt-router.json root@%s:%s",
+            api._host,
+            err,
+            api._host,
+            ACL_FILE_PATH,
+        )
         return False
 
-
-async def _check_acl_exists(
-    host: str, username: str, password: str
-) -> bool:
-    """Check if the ACL file exists on the router via SSH."""
-    cmd = f"test -f {ACL_FILE_PATH} && echo EXISTS || echo MISSING"
-    stdout = await _ssh_exec(host, username, password, cmd)
-    return "EXISTS" in stdout
-
-
-async def _deploy_acl(
-    host: str, username: str, password: str, acl_json: str
-) -> None:
-    """Deploy ACL file to router and restart rpcd via SSH."""
-    # Write ACL file using cat heredoc (handles special chars safely)
-    write_cmd = (
-        f"cat > {ACL_FILE_PATH} << 'ACLEOF'\n"
-        f"{acl_json}\n"
-        f"ACLEOF"
-    )
-    await _ssh_exec(host, username, password, write_cmd)
-
-    # Restart rpcd to pick up new ACL
-    await _ssh_exec(host, username, password, "/etc/init.d/rpcd restart")
-
-
-async def _ssh_exec(
-    host: str,
-    username: str,
-    password: str,
-    command: str,
-    timeout: float = 10.0,
-) -> str:
-    """Execute a command on the router via sshpass + SSH.
-
-    Uses the same SSH pattern as api.py SSH fallback methods.
-
-    Returns:
-        stdout as string.
-
-    Raises:
-        RuntimeError: SSH command failed or timed out.
-    """
-    ssh_cmd = [
-        "sshpass",
-        "-p",
-        password,
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "ConnectTimeout=5",
-        f"{username}@{host}",
-        command,
-    ]
-
-    proc = await asyncio.create_subprocess_exec(
-        *ssh_cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout_bytes, stderr_bytes = await asyncio.wait_for(
-        proc.communicate(), timeout=timeout
-    )
-
-    if proc.returncode != 0:
-        stderr = stderr_bytes.decode(errors="replace").strip()
-        raise RuntimeError(
-            f"SSH command failed on {host} (rc={proc.returncode}): {stderr}"
+    # Step 3: Restart rpcd so it picks up the new ACL file.
+    try:
+        await api._call(
+            "file",
+            "exec",
+            {"command": "/etc/init.d/rpcd", "params": ["restart"]},
+        )
+        _LOGGER.debug("Restarted rpcd on %s", api._host)
+    except Exception as err:  # noqa: BLE001
+        # Non-fatal: rpcd will pick up the ACL on next restart/reload anyway.
+        _LOGGER.debug(
+            "Could not restart rpcd on %s (non-fatal, ACL active after next restart): %s",
+            api._host,
+            err,
         )
 
-    return stdout_bytes.decode(errors="replace").strip()
+    return True

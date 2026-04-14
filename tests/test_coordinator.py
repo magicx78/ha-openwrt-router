@@ -150,11 +150,39 @@ class TestBoardInfoRefresh:
 
 class TestErrorHandling:
     @pytest.mark.asyncio
-    async def test_auth_error_raises_config_entry_auth_failed(self):
+    async def test_auth_error_raises_update_failed_on_first_attempt(self):
+        """Single auth error → UpdateFailed (transient), not ConfigEntryAuthFailed."""
         coord, api = _make_coordinator()
         api.get_wan_status = AsyncMock(side_effect=OpenWrtAuthError("bad"))
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
+        assert coord._consecutive_auth_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_auth_error_raises_config_entry_auth_failed_after_three_attempts(self):
+        """Three consecutive auth errors → ConfigEntryAuthFailed (real credential issue)."""
+        coord, api = _make_coordinator()
+        api.get_wan_status = AsyncMock(side_effect=OpenWrtAuthError("bad"))
+        for _ in range(2):
+            with pytest.raises(UpdateFailed):
+                await coord._async_update_data()
         with pytest.raises(ConfigEntryAuthFailed):
             await coord._async_update_data()
+        assert coord._consecutive_auth_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_auth_failure_counter_resets_on_success(self):
+        """Successful poll after auth error resets the consecutive failure counter."""
+        coord, api = _make_coordinator()
+        api.get_wan_status = AsyncMock(side_effect=OpenWrtAuthError("bad"))
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
+        assert coord._consecutive_auth_failures == 1
+        # Next poll succeeds
+        api.get_wan_status = AsyncMock(return_value={"wan_connected": True})
+        coord.data = None
+        await coord._async_update_data()
+        assert coord._consecutive_auth_failures == 0
 
     @pytest.mark.asyncio
     async def test_connection_error_raises_update_failed(self):

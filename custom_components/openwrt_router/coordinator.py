@@ -151,6 +151,10 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._client_first_seen: dict[str, datetime] = {}
         self._prev_interface_bytes: dict[str, dict[str, int]] = {}
         self._prev_poll_time: datetime | None = None
+        # Auth resilience: only trigger re-auth dialog after N consecutive
+        # failures — single transient errors (session refresh hiccup, brief
+        # network issue) raise UpdateFailed so the next poll can recover.
+        self._consecutive_auth_failures: int = 0
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator interface
@@ -311,22 +315,41 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 data.features = self.data.features if self.data else {}
 
         except OpenWrtAuthError as err:
-            # HA will trigger a re-auth config flow for the user
-            raise ConfigEntryAuthFailed(
-                f"Authentication failed for OpenWrt router: {err}"
+            self._consecutive_auth_failures += 1
+            _MAX_CONSECUTIVE = 3
+            if self._consecutive_auth_failures >= _MAX_CONSECUTIVE:
+                # Persistent failure: credentials are genuinely wrong.
+                # Reset counter so the next setup attempt starts fresh.
+                self._consecutive_auth_failures = 0
+                raise ConfigEntryAuthFailed(
+                    f"Authentication failed for OpenWrt router: {err}"
+                ) from err
+            # Transient failure (session refresh hiccup, brief network issue):
+            # raise UpdateFailed so HA skips this poll and retries in 30 s.
+            _LOGGER.warning(
+                "Auth error (attempt %d/%d — will retry before showing re-auth dialog): %s",
+                self._consecutive_auth_failures,
+                _MAX_CONSECUTIVE,
+                err,
+            )
+            raise UpdateFailed(
+                f"Auth error (transient, attempt {self._consecutive_auth_failures}/{_MAX_CONSECUTIVE}): {err}"
             ) from err
 
         except OpenWrtConnectionError as err:
+            self._consecutive_auth_failures = 0
             raise UpdateFailed(
                 f"Cannot connect to OpenWrt router: {err}"
             ) from err
 
         except OpenWrtTimeoutError as err:
+            self._consecutive_auth_failures = 0
             raise UpdateFailed(
                 f"OpenWrt router request timed out: {err}"
             ) from err
 
         except OpenWrtResponseError as err:
+            self._consecutive_auth_failures = 0
             raise UpdateFailed(
                 f"Unexpected response from OpenWrt router: {err}"
             ) from err
@@ -335,6 +358,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             _LOGGER.exception("Unexpected error fetching OpenWrt data")
             raise UpdateFailed(f"Unexpected error: {err}") from err
 
+        self._consecutive_auth_failures = 0
         return data
 
     # ------------------------------------------------------------------
