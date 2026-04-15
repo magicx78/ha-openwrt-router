@@ -103,9 +103,14 @@ async def _soap_call(
             if r.status == 200:
                 return _parse_soap(await r.text())
             if r.status not in (401, 500) or not user:
-                _LOGGER.debug("Fritz!Box %s → HTTP %s", url_path, r.status)
+                _LOGGER.warning("Fritz!Box %s → HTTP %s (no credentials or unexpected status)", url_path, r.status)
                 return {}
             www_auth = r.headers.get("WWW-Authenticate", "")
+            if r.status == 500 and not www_auth:
+                _LOGGER.warning(
+                    "Fritz!Box %s → HTTP 500 without auth challenge — trying Basic/Digest fallback",
+                    url_path,
+                )
 
         # Attempt 2a: 401 with Digest challenge → use Digest auth
         realm_m = re.search(r'realm="([^"]+)"', www_auth)
@@ -117,7 +122,11 @@ async def _soap_call(
             async with session.post(url, data=body, headers=headers, timeout=to) as r:
                 if r.status == 200:
                     return _parse_soap(await r.text())
-                _LOGGER.debug("Fritz!Box Digest auth failed: HTTP %s", r.status)
+                body_snippet = (await r.text())[:400]
+                _LOGGER.warning(
+                    "Fritz!Box Digest auth failed: HTTP %s — body: %.400s",
+                    r.status, body_snippet,
+                )
                 return {}
 
         # Attempt 2b: 500 without Digest challenge (some Fritz!Box firmware) → Basic auth
@@ -141,7 +150,11 @@ async def _soap_call(
                     async with session.post(url, data=body, headers=h2, timeout=to) as r:
                         if r.status == 200:
                             return _parse_soap(await r.text())
-            _LOGGER.debug("Fritz!Box auth failed: HTTP %s", r.status)
+            body_snippet = (await r.text())[:400]
+            _LOGGER.warning(
+                "Fritz!Box auth failed after all attempts: HTTP %s — body: %.400s",
+                r.status, body_snippet,
+            )
             return {}
 
     except (aiohttp.ClientError, TimeoutError) as err:

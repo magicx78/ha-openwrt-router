@@ -1,5 +1,5 @@
 /**
- * ClientStrip — Compact row of client dots below each AP node.
+ * ClientStrip — Compact row of client dots below each AP/Gateway node.
  *
  * Shows up to MAX_VISIBLE client dots. Each dot is color-coded by status
  * and carries a category icon. Hovering reveals a tooltip with client info.
@@ -7,7 +7,7 @@
  */
 
 import React, { useState } from 'react';
-import { Client, NodeLayout, DeviceCategory } from '../types';
+import { Client, DeviceCategory } from '../types';
 import {
   IconSmartphone,
   IconLaptop,
@@ -21,22 +21,19 @@ const MAX_VISIBLE = 8;
 
 interface Props {
   clients: Client[];
-  layout: NodeLayout;
   dimmed: boolean;
   onSelectClient: (client: Client) => void;
 }
 
-export function ClientStrip({ clients, layout, dimmed, onSelectClient }: Props) {
-  const visible = clients.slice(0, MAX_VISIBLE);
+export function ClientStrip({ clients, dimmed, onSelectClient }: Props) {
+  const visible  = clients.slice(0, MAX_VISIBLE);
   const overflow = clients.length - MAX_VISIBLE;
 
   return (
     <div
       className="client-strip"
       style={{
-        left: layout.cx,
-        top: layout.cy,
-        opacity: dimmed ? 0.2 : 1,
+        opacity:    dimmed ? 0.2 : 1,
         transition: 'opacity 0.2s ease',
       }}
     >

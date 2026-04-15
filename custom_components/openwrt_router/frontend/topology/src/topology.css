@@ -4,9 +4,8 @@
 /* ── App shell ───────────────────────────────────────────────────────── */
 /*
  * CSS custom properties are defined HERE on .topo-app, not on :root.
- * Reason: HA may render panels inside a shadow-DOM context where :root
- * selectors do not work. Defining variables on the component root means
- * they always cascade to every descendant regardless of outer context.
+ * Reason: HA renders panels inside a shadow-DOM context where :root
+ * selectors do not work. Variables on the component root always cascade.
  */
 .topo-app {
   /* Surfaces */
@@ -45,8 +44,8 @@
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #080c14;   /* literal fallback — always dark regardless of theme */
-  background: var(--bg); /* preferred — uses variable once defined above */
+  background: #080c14;
+  background: var(--bg);
   color: rgba(255, 255, 255, 0.90);
   color: var(--text-primary);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
@@ -63,6 +62,7 @@
   background: rgba(10, 14, 28, 0.9);
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 .filter-bar__title {
@@ -121,28 +121,83 @@
 .filter-search input::placeholder { color: var(--text-muted); }
 .filter-search svg { color: var(--text-muted); flex-shrink: 0; }
 
-/* ── Topology canvas ─────────────────────────────────────────────────── */
+/* ── Scroll container ────────────────────────────────────────────────── */
 .topo-scroll {
   flex: 1;
-  overflow-x: auto;
-  overflow-y: auto;
-  /* Ensure proper scrolling inside HA panel */
+  overflow: auto;
   min-height: 0;
+  cursor: default;
 }
 
-.topo-canvas {
-  position: relative;
-  /* width + height set via inline style from layout */
-  flex-shrink: 0;
-  background: var(--bg);
+/* ── Zoom / Pan wrapper ──────────────────────────────────────────────── */
+/*
+ * All nodes live inside this wrapper. A CSS transform is applied for
+ * zoom + pan. transform-origin: 0 0 so that translate + scale compose
+ * predictably (screen coords = pan + logical * zoom).
+ */
+.topo-zoom-wrapper {
+  display: inline-block;
+  min-width: 100%;
+  transform-origin: 0 0;
+  will-change: transform;
+  cursor: grab;
+  user-select: none;
+  position: relative; /* SVG overlay anchors here */
 }
+.topo-zoom-wrapper.dragging { cursor: grabbing; }
 
-/* SVG overlay — connections layer */
+/* ── SVG connections overlay ─────────────────────────────────────────── */
 .connections-svg {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
   overflow: visible;
+}
+
+/* ── Flexbox layout tree ─────────────────────────────────────────────── */
+.topo-layout {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 36px;
+  padding: 36px 56px 52px;
+  position: relative;
+  z-index: 1; /* above SVG overlay */
+}
+
+/* Each horizontal row */
+.topo-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+/* Gateway column (node + optional client strip stacked) */
+.topo-col-gateway {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+/* AP row — wraps to next line when width is insufficient */
+.topo-row--aps {
+  flex-wrap: wrap;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+/* Per-AP column: node card + client strip stacked */
+.topo-col-ap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 180px;   /* grow/shrink, min base 180 px */
+  max-width: 240px;  /* don't let a single AP card get huge */
 }
 
 /* ── Connection line animations ──────────────────────────────────────── */
@@ -194,10 +249,10 @@
 }
 
 /* Highlighted state (hover) */
-.edge-highlighted .edge-wired-bg  { stroke: rgba(96, 165, 250, 0.30); }
-.edge-highlighted .edge-wired-flow { stroke: #60a5fa; stroke-width: 3; }
-.edge-highlighted .edge-mesh-bg   { stroke: rgba(34, 211, 238, 0.28); }
-.edge-highlighted .edge-mesh-flow { stroke: #22d3ee; stroke-width: 3.5; }
+.edge-highlighted .edge-wired-bg   { stroke: rgba(96, 165, 250, 0.30); }
+.edge-highlighted .edge-wired-flow  { stroke: #60a5fa; stroke-width: 3; }
+.edge-highlighted .edge-mesh-bg    { stroke: rgba(34, 211, 238, 0.28); }
+.edge-highlighted .edge-mesh-flow  { stroke: #22d3ee; stroke-width: 3.5; }
 .edge-highlighted .edge-internet-flow { stroke: rgba(255,255,255,0.7); stroke-width: 2; }
 
 /* Dimmed state */
@@ -225,8 +280,6 @@
 
 /* ── Internet node ───────────────────────────────────────────────────── */
 .internet-node {
-  position: absolute;
-  transform: translate(-50%, -50%);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -251,9 +304,11 @@
 }
 
 /* ── Node card base ──────────────────────────────────────────────────── */
+/*
+ * No position: absolute — nodes flow in Flexbox.
+ * clamp() ensures cards scale with viewport but stay within readable bounds.
+ */
 .node-card {
-  position: absolute;
-  transform: translate(-50%, -50%);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -276,7 +331,7 @@
 
 /* ── Gateway card ────────────────────────────────────────────────────── */
 .gateway-card {
-  width: 224px;
+  width: clamp(200px, 22vw, 280px);
   padding: 14px 16px 12px;
 }
 .gateway-card__header {
@@ -325,7 +380,7 @@
 
 /* ── AP card ─────────────────────────────────────────────────────────── */
 .ap-card {
-  width: 180px;
+  width: clamp(160px, 18vw, 220px);
   padding: 12px 14px 10px;
 }
 .ap-card__header {
@@ -405,7 +460,7 @@
 
 /* ── Status dot ──────────────────────────────────────────────────────── */
 .status-dot {
-  display: inline-block; /* required: width/height ignored on inline <span> */
+  display: inline-block;
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -423,18 +478,17 @@
 
 /* ── Client strip ────────────────────────────────────────────────────── */
 .client-strip {
-  position: absolute;
-  transform: translate(-50%, -50%);
-  width: 180px;
-  height: 52px;
+  width: clamp(140px, 18vw, 220px);
+  min-height: 44px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  padding: 0 10px;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 10px;
   cursor: default;
 }
 
@@ -647,181 +701,37 @@
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
 
-/* ── Mobile view (< 560px) ───────────────────────────────────────────── */
-.mobile-view {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 16px 16px 32px;
-  gap: 0;
-  width: 100%;
+/* ═══════════════════════════════════════════════════════════════════════
+   Responsive breakpoints — only 2 needed (tablet + mobile)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Tablet (≤ 640 px): tighter padding, smaller gaps ───────────────── */
+@media (max-width: 640px) {
+  .topo-layout {
+    gap: 24px;
+    padding: 24px 20px 36px;
+  }
+  .topo-row--aps { gap: 14px; }
+  .topo-col-ap   { flex: 1 1 140px; max-width: 200px; }
+  .gateway-card  { width: clamp(180px, 80vw, 300px); }
+  .ap-card       { width: clamp(140px, 70vw, 200px); }
+  .client-strip  { width: clamp(120px, 70vw, 200px); }
 }
 
-.mobile-internet {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 0;
+/* ── Mobile (≤ 420 px): single-column AP layout, minimal padding ─────── */
+@media (max-width: 420px) {
+  .topo-layout {
+    gap: 16px;
+    padding: 16px 10px 28px;
+  }
+  .topo-row--aps { gap: 10px; }
+  .topo-col-ap   { flex: 0 0 100%; max-width: 100%; }
+  .gateway-card  { width: clamp(160px, 92vw, 340px); }
+  .ap-card       { width: clamp(140px, 88vw, 320px); }
+  .client-strip  { width: clamp(120px, 88vw, 320px); }
 }
 
-.mobile-internet__dot {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  background: rgba(255,255,255,0.04);
-  border: 1.5px solid rgba(255,255,255,0.14);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-secondary);
-}
-
-.mobile-internet__label {
-  font-size: 10px;
-  color: var(--text-muted);
-  letter-spacing: 0.05em;
-}
-
-.mobile-connector {
-  width: 2px;
-  height: 28px;
-  background: linear-gradient(to bottom, rgba(59,130,246,0.7), rgba(59,130,246,0.2));
-  margin: 0 auto;
-  border-radius: 1px;
-  position: relative;
-  overflow: hidden;
-}
-
-/* Animated flow dot running down the connector line */
-.mobile-connector::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  width: 100%;
-  height: 8px;
-  background: linear-gradient(to bottom, transparent, rgba(59,130,246,0.9), transparent);
-  border-radius: 1px;
-  animation: mobile-flow 1.8s ease-in-out infinite;
-}
-
-@keyframes mobile-flow {
-  0%   { top: -8px; opacity: 0; }
-  20%  { opacity: 1; }
-  80%  { opacity: 1; }
-  100% { top: 28px; opacity: 0; }
-}
-
-.mobile-card {
-  width: 100%;
-  max-width: 360px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px 14px 10px;
-  cursor: pointer;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.mobile-card:hover {
-  border-color: var(--border-hover);
-  box-shadow: 0 0 0 1px var(--border-hover), 0 4px 16px rgba(0,0,0,0.4);
-}
-
-.mobile-card.selected {
-  border-color: var(--blue);
-  box-shadow: 0 0 0 1px var(--blue), 0 0 16px var(--blue-dim);
-}
-
-.mobile-card--gateway {
-  max-width: 360px;
-}
-
-.mobile-card__header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-
-.mobile-card__icon {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-sm);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.mobile-card__icon--blue {
-  background: var(--blue-dim);
-  border: 1px solid rgba(59,130,246,0.2);
-  color: var(--blue);
-}
-
-.mobile-card__icon--cyan {
-  background: var(--cyan-dim);
-  border: 1px solid rgba(6,182,212,0.2);
-  color: var(--cyan);
-}
-
-.mobile-card__info { flex: 1; min-width: 0; }
-
-.mobile-card__name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mobile-card__sub {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 1px;
-}
-
-.mobile-card__meta {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.mobile-meta-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11.5px;
-}
-
-.mobile-meta-row span:first-child { color: var(--text-muted); }
-.mobile-meta-row span:last-child  {
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-.mobile-card__footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.mobile-client-strip {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 6px 10px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-top: none;
-  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
-  width: 100%;
-  max-width: 360px;
-}
-
-/* ── Mobile — detail panel as bottom sheet (< 560px) ─────────────────── */
+/* ── Detail panel: bottom sheet on mobile ───────────────────────────── */
 @media (max-width: 560px) {
   .detail-panel {
     width: 100%;
@@ -833,16 +743,8 @@
     border-top: 1px solid var(--border);
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   }
-  .detail-panel.open {
-    transform: translateY(0);
-  }
-}
+  .detail-panel.open { transform: translateY(0); }
 
-/* Drag-handle pill above header text (mobile) */
-.detail-panel__handle {
-  display: none;
-}
-@media (max-width: 560px) {
   .detail-panel__handle {
     display: block;
     width: 36px;
@@ -852,13 +754,8 @@
     margin: 10px auto 0;
     flex-shrink: 0;
   }
-  .detail-panel__header {
-    padding-top: 10px;
-  }
-}
+  .detail-panel__header { padding-top: 10px; }
 
-/* Backdrop dimming the main content when detail panel is open on mobile */
-@media (max-width: 560px) {
   .topo-app:has(.detail-panel.open) .topo-scroll {
     pointer-events: none;
   }
@@ -872,3 +769,5 @@
     pointer-events: none;
   }
 }
+
+.detail-panel__handle { display: none; }

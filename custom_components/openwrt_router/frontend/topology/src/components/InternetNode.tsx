@@ -1,17 +1,9 @@
 import React from 'react';
-import { NodeLayout } from '../types';
 import { IconGlobe } from './Icons';
 
-interface Props {
-  layout: NodeLayout;
-}
-
-export function InternetNode({ layout }: Props) {
+export function InternetNode() {
   return (
-    <div
-      className="internet-node"
-      style={{ left: layout.cx, top: layout.cy }}
-    >
+    <div className="internet-node">
       <div className="internet-node__circle">
         <IconGlobe size={22} />
       </div>

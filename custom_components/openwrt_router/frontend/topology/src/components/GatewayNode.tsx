@@ -1,11 +1,10 @@
 import React from 'react';
-import { Gateway, NodeLayout } from '../types';
+import { Gateway } from '../types';
 import { StatusDot } from './StatusDot';
-import { IconRouter, IconSignal } from './Icons';
+import { IconRouter } from './Icons';
 
 interface Props {
   gateway: Gateway;
-  layout: NodeLayout;
   selected: boolean;
   dimmed: boolean;
   onSelect: () => void;
@@ -13,7 +12,7 @@ interface Props {
   clientCount?: number;
 }
 
-export function GatewayNode({ gateway, layout, selected, dimmed, onSelect, onHover, clientCount }: Props) {
+export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, clientCount }: Props) {
   const cls = [
     'node-card gateway-card',
     selected ? 'selected' : '',
@@ -25,7 +24,6 @@ export function GatewayNode({ gateway, layout, selected, dimmed, onSelect, onHov
   return (
     <div
       className={cls}
-      style={{ left: layout.cx, top: layout.cy }}
       onClick={onSelect}
       onMouseEnter={() => onHover(gateway.id)}
       onMouseLeave={() => onHover(null)}

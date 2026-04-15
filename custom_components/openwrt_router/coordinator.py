@@ -275,7 +275,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                         data.dsl_stats = dsl if isinstance(dsl, dict) else {}
                         data.wan_traffic = traffic if isinstance(traffic, dict) else {}
                     except Exception as err:  # noqa: BLE001
-                        _LOGGER.debug("Fritz!Box poll failed: %s", err)
+                        _LOGGER.warning("Fritz!Box poll failed: %s", err)
                         data.dsl_stats = self.data.dsl_stats if self.data else {}
                         data.wan_traffic = self.data.wan_traffic if self.data else {}
                 else:

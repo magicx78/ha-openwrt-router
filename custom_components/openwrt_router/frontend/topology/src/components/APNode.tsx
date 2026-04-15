@@ -1,19 +1,18 @@
 import React from 'react';
-import { AccessPoint, NodeLayout, NodeStatus } from '../types';
+import { AccessPoint } from '../types';
 import { StatusDot } from './StatusDot';
-import { IconAP, IconRouter } from './Icons';
+import { IconAP } from './Icons';
 import { SignalBar } from './SignalBar';
 
 interface Props {
   ap: AccessPoint;
-  layout: NodeLayout;
   selected: boolean;
   dimmed: boolean;
   onSelect: () => void;
   onHover: (id: string | null) => void;
 }
 
-export function APNode({ ap, layout, selected, dimmed, onSelect, onHover }: Props) {
+export function APNode({ ap, selected, dimmed, onSelect, onHover }: Props) {
   const iconCls = ap.status === 'warning' ? 'warning' : ap.uplinkType;
 
   const cls = [
@@ -27,7 +26,6 @@ export function APNode({ ap, layout, selected, dimmed, onSelect, onHover }: Prop
   return (
     <div
       className={cls}
-      style={{ left: layout.cx, top: layout.cy }}
       onClick={onSelect}
       onMouseEnter={() => onHover(ap.id)}
       onMouseLeave={() => onHover(null)}
