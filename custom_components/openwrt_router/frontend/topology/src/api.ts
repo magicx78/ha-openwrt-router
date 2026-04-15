@@ -232,17 +232,20 @@ export interface HassLike {
  */
 export async function fetchTopologyData(hass: HassLike): Promise<TopologyData> {
   const token = (hass as any).auth?.data?.access_token as string | undefined;
+  console.debug('[openwrt-topology] fetchTopologyData — token?', !!token, 'auth keys:', Object.keys((hass as any).auth ?? {}));
   let snap: Snapshot;
 
   if (token) {
-    // Native fetch — no AbortSignal, not affected by HA navigation state.
+    console.debug('[openwrt-topology] using window.fetch');
     const response = await window.fetch('/api/openwrt_topology/snapshot', {
       headers: { Authorization: `Bearer ${token}` },
     });
+    console.debug('[openwrt-topology] fetch response status:', response.status);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     snap = (await response.json()) as Snapshot;
+    console.debug('[openwrt-topology] snapshot nodes:', snap.nodes?.length, 'clients:', snap.clients?.length);
   } else {
-    // Fallback: callApi (may throw AbortError during HA panel transitions)
+    console.debug('[openwrt-topology] no token — falling back to callApi');
     snap = await hass.callApi<Snapshot>('GET', 'openwrt_topology/snapshot');
   }
 

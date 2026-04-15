@@ -9,7 +9,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Root } from 'react-dom/client';
-import './topology.css';
+import topologyCSS from './topology.css?inline';
 import { TopologyView } from './TopologyView';
 import { fetchTopologyData, type HassLike } from './api';
 import { MOCK_DATA } from './mockData';
@@ -26,7 +26,21 @@ class OpenWrtTopologyPanel extends HTMLElement {
   connectedCallback() {
     this.style.display = 'block';
     this.style.height = '100%';
-    this._root = createRoot(this);
+
+    // Inject CSS as a sibling <style> element — NOT inside the React container.
+    // React's createRoot().render() would otherwise remove it when it replaces
+    // the container's children on first render.
+    const styleEl = document.createElement('style');
+    styleEl.textContent = topologyCSS;
+    this.appendChild(styleEl);
+
+    // Mount React into a separate <div> so React DOM updates never touch the
+    // <style> element injected above.
+    const reactContainer = document.createElement('div');
+    reactContainer.style.cssText = 'height:100%;display:contents';
+    this.appendChild(reactContainer);
+
+    this._root = createRoot(reactContainer);
     this._renderPlaceholder('Loading topology…');
 
     // Wait 500 ms for HA navigation transition to complete before first fetch.
