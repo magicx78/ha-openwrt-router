@@ -19,8 +19,9 @@ import { MOCK_DATA } from './mockData';
 class OpenWrtTopologyPanel extends HTMLElement {
   private _root: Root | null = null;
   private _hass: HassLike | null = null;
-  private _hasLoaded = false;
   private _refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private _retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private _fetching = false;
 
   connectedCallback() {
     this.style.display = 'block';
@@ -28,37 +29,30 @@ class OpenWrtTopologyPanel extends HTMLElement {
     this._root = createRoot(this);
     this._renderPlaceholder('Loading topology…');
 
-    // HA may call set hass before connectedCallback — trigger fetch now if so.
-    if (this._hass && !this._hasLoaded) {
-      this._hasLoaded = true;
-      void this._fetchAndRender();
-    }
+    // Wait 500 ms for HA navigation transition to complete before first fetch.
+    // HA's callApi uses the navigation AbortSignal — fetching immediately
+    // causes an AbortError while the panel transition is still in progress.
+    this._retryTimer = setTimeout(() => void this._fetchAndRender(), 500);
 
     // Periodic refresh every 30 s
-    this._refreshTimer = setInterval(() => {
-      if (this._hass) void this._fetchAndRender();
-    }, 30_000);
+    this._refreshTimer = setInterval(() => void this._fetchAndRender(), 30_000);
   }
 
   disconnectedCallback() {
     if (this._refreshTimer) clearInterval(this._refreshTimer);
+    if (this._retryTimer) clearTimeout(this._retryTimer);
     this._root?.unmount();
     this._root = null;
-    this._hasLoaded = false;
   }
 
-  // HA calls this setter on every state update; only fetch on first call.
-  // Guard: _root may not exist yet if called before connectedCallback.
+  // HA calls this setter on every state update — just store the reference.
   set hass(hass: HassLike) {
     this._hass = hass;
-    if (!this._hasLoaded && this._root) {
-      this._hasLoaded = true;
-      void this._fetchAndRender();
-    }
   }
 
   private async _fetchAndRender() {
-    if (!this._hass || !this._root) return;
+    if (!this._hass || !this._root || this._fetching) return;
+    this._fetching = true;
     try {
       const topologyData = await fetchTopologyData(this._hass);
       if (!this._root) return; // unmounted while fetching
@@ -68,9 +62,9 @@ class OpenWrtTopologyPanel extends HTMLElement {
         </React.StrictMode>,
       );
     } catch (err) {
-      // AbortError = HA navigation cancelled mid-fetch — reset so connectedCallback retries
+      // AbortError = HA navigation still in progress — retry after 1 s
       if ((err as Error)?.name === 'AbortError') {
-        this._hasLoaded = false;
+        this._retryTimer = setTimeout(() => void this._fetchAndRender(), 1_000);
         return;
       }
       if (!this._root) return;
@@ -85,6 +79,8 @@ class OpenWrtTopologyPanel extends HTMLElement {
           Topology load failed: {String(err)}
         </div>,
       );
+    } finally {
+      this._fetching = false;
     }
   }
 
