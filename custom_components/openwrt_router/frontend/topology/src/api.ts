@@ -79,19 +79,85 @@ interface Snapshot {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+function formatUptime(seconds: number): string {
+  if (!seconds || seconds <= 0) return '';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+/** Map internal band codes to display strings. */
+function formatBand(raw: string): string {
+  const b = raw.toLowerCase();
+  if (b === '2.4g' || b === '2.4ghz' || b === '2g') return '2.4 GHz';
+  if (b === '5g'   || b === '5ghz')                  return '5 GHz';
+  if (b === '6g'   || b === '6ghz')                  return '6 GHz';
+  return raw; // pass through anything else (e.g. "unknown" or empty)
+}
+
+/** Format seconds-since-connection as human duration: "5h 23m" or "42m". */
+export function formatConnectedSince(seconds: number): string {
+  if (!seconds || seconds <= 0) return '';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `< 1m`;
+}
+
+/** Format a unix timestamp as "HH:MM (noch Xh Ym)" or "Abgelaufen". */
+export function formatLeaseExpiry(unixTs: number): string {
+  if (!unixTs || unixTs <= 0) return '';
+  const expiry = new Date(unixTs * 1000);
+  const now = Date.now();
+  const diffMs = expiry.getTime() - now;
+  if (diffMs <= 0) return 'Abgelaufen';
+  const diffH = Math.floor(diffMs / 3_600_000);
+  const diffM = Math.floor((diffMs % 3_600_000) / 60_000);
+  const time = expiry.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+  if (diffH > 0) return `${time} (noch ${diffH}h ${diffM}m)`;
+  return `${time} (noch ${diffM}m)`;
+}
+
 function guessCategory(hostname: string, ssid?: string): DeviceCategory {
   const h = (hostname || '').toLowerCase();
   const s = (ssid || '').toLowerCase();
-  if (/iphone|android|pixel|samsung.*(s\d|a\d)|oneplus|galaxy/.test(h)) return 'smartphone';
-  if (/ipad/.test(h)) return 'smartphone';
-  if (/macbook|laptop|thinkpad|notebook|mbp|dell|hp-/.test(h)) return 'laptop';
+
+  // Guest SSID or guest hostname → always guest
   if (s.includes('guest') || /guest/.test(h)) return 'guest';
-  if (
-    /tv|chromecast|firetv|appletv|shield|roku|hue|ring|nest|iot|smart|bridge|sensor|cam|plug|bulb|esp|tasmota|wyze|echo|alexa|wemo|homepod|synology|nas|printer/.test(
-      h,
-    )
-  )
-    return 'iot';
+
+  // Smartphones & tablets
+  if (/iphone|ipad|ipod/.test(h)) return 'smartphone';
+  if (/android|pixel[- ]?\d|oneplus|huawei|xiaomi|redmi|oppo|vivo|realme/.test(h)) return 'smartphone';
+  if (/samsung|galaxy|sm-[a-z]\d{3}|sch-|sgh-/.test(h)) return 'smartphone';
+  if (/motorola|moto[- g|z|e]|nokia|lg-|htc|sony.*xperia|fairphone/.test(h)) return 'smartphone';
+
+  // Laptops & desktops
+  if (/macbook|macmini|imac|mac-studio/.test(h)) return 'laptop';
+  if (/thinkpad|thinkbook|ideapad|lenovo/.test(h)) return 'laptop';
+  if (/latitude|xps|inspiron|optiplex|vostro/.test(h)) return 'laptop'; // Dell
+  if (/elitebook|probook|pavilion|envy|omen/.test(h)) return 'laptop';  // HP
+  if (/surface|msft/.test(h)) return 'laptop';
+  if (/chromebook|acer|asus.*laptop|zenbook|vivobook/.test(h)) return 'laptop';
+  if (/\bnotebook\b|\blaptop\b|\bdesktop\b|\bworkstation\b|\bpc\b/.test(h)) return 'laptop';
+
+  // IoT / smart home / embedded
+  if (/\b(shelly|tasmota|sonoff|wled|esphome|esp8266|esp32)\b/.test(h)) return 'iot';
+  if (/\b(tuya|meross|govee|kasa|tplink|lifx|wemo|hue|ring|nest)\b/.test(h)) return 'iot';
+  if (/\b(chromecast|firetv|appletv|shield|roku|fire-?tv|apple-?tv)\b/.test(h)) return 'iot';
+  if (/\b(echo|alexa|homepod|google-home|nest-?hub)\b/.test(h)) return 'iot';
+  if (/\b(synology|qnap|nas|diskstation)\b/.test(h)) return 'iot';
+  if (/\b(printer|epson|canon|brother|hp.*deskjet|hp.*laserjet)\b/.test(h)) return 'iot';
+  if (/\b(cam|camera|ipcam|doorbell|wyze|reolink|amcrest|hikvision|dahua)\b/.test(h)) return 'iot';
+  if (/\b(sensor|bridge|hub|zigbee|zwave|z-wave|iot|smart)\b/.test(h)) return 'iot';
+  if (/\b(plug|switch|bulb|strip|dimmer|relay|outlet)\b/.test(h)) return 'iot';
+  if (/^(esp|shelly|tasmota|sonoff|wled|athom|blitzwolf)\d/.test(h)) return 'iot';
+
   return 'other';
 }
 
@@ -141,7 +207,9 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     model: gwNode.attributes?.model ?? '',
     ip: gwNode.attributes?.host_ip ?? '',
     wanIp: gwNode.ip ?? '',
-    uptime: '',
+    uptime: gwNode.attributes?.uptime != null
+      ? formatUptime(gwNode.attributes.uptime as number)
+      : '',
     status: 'online',
   };
 
@@ -189,6 +257,10 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     const hostname = (attr?.hostname as string) || n.label || (attr?.mac as string) || '';
     const apId = (attr?.ap_mac as string) ?? gwNode.id;
 
+    const connectedSince = attr?.connected_since as number | undefined;
+    const dhcpExpires = attr?.dhcp_expires as number | undefined;
+    const rawBand = (attr?.band as string) ?? '';
+
     return {
       id: n.id,
       name: hostname,
@@ -198,8 +270,10 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       apId,
       category: guessCategory(hostname, attr?.ssid as string | undefined),
       signal: signal ?? -65,
-      band: '',
+      band: formatBand(rawBand),
       status: signalStatus(signal),
+      connectedSince: connectedSince && connectedSince > 0 ? connectedSince : undefined,
+      dhcpExpires: dhcpExpires && dhcpExpires > 0 ? dhcpExpires : undefined,
     };
   });
 

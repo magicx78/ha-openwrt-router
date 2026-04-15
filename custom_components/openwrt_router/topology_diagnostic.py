@@ -146,6 +146,7 @@ def build_topology_snapshot(
             "host_ip": host_ip,
             "wan_proto": data.wan_status.get("proto", ""),
             "wan_connected": data.wan_connected,
+            "uptime": data.uptime if data.uptime else None,
         },
     })
 
@@ -158,14 +159,16 @@ def build_topology_snapshot(
         if iface.get("interface")
     }
 
-    # ── Build ifname→ssid lookup from wifi_radios for consistent labels ──
+    # ── Build ifname→ssid/band lookup from wifi_radios for consistent labels ──
     _radio_ssid_map: dict[str, str] = {}
     _radio_section_map: dict[str, str] = {}
+    _radio_band_map: dict[str, str] = {}
     for _radio in data.wifi_radios or []:
         _rif = _radio.get("ifname", "")
         if _rif:
             _radio_ssid_map[_rif] = _radio.get("ssid", "")
             _radio_section_map[_rif] = _radio.get("uci_section", "")
+            _radio_band_map[_rif] = _radio.get("band", "")
 
     # ── AP interface nodes ─────────────────────────────────────────
     for ap in data.ap_interfaces or []:
@@ -311,6 +314,7 @@ def build_topology_snapshot(
                 "hostname": client.get("hostname"),
                 "ssid": client.get("ssid"),
                 "radio": c_radio,
+                "band": _radio_band_map.get(c_radio, ""),
                 "signal": c_signal,       # None stays None
                 "connected_since": client.get("connected_since"),
                 "dhcp_expires": client.get("dhcp_expires"),

@@ -39,6 +39,8 @@ export interface Client {
   band: string;
   status: NodeStatus;
   manufacturer?: string;
+  connectedSince?: number; // seconds since connection (from hostapd connected_time)
+  dhcpExpires?: number;    // unix timestamp when DHCP lease expires
 }
 
 export interface TopologyData {

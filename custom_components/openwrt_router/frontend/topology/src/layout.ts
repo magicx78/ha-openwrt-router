@@ -28,7 +28,10 @@ const AP_H = 100;
 const AP_SPACING_IDEAL = 260; // ideal center-to-center distance between APs
 const AP_SPACING_MIN   = 180; // minimum spacing — cards stay readable
 
-// Vertical Y of each row's center
+// Mobile breakpoint: below this width, switch to single-column layout
+const MOBILE_BREAKPOINT = 560;
+
+// Vertical Y of each row's center (desktop)
 const INTERNET_CY = CANVAS_PAD_TOP + INTERNET_R;
 const GATEWAY_CY  = INTERNET_CY + INTERNET_R + 44 + GATEWAY_H / 2;
 const AP_CY       = GATEWAY_CY + GATEWAY_H / 2 + 88 + AP_H / 2;
@@ -36,9 +39,36 @@ const CLIENT_STRIP_H  = 52;
 const CLIENT_STRIP_CY = AP_CY + AP_H / 2 + 12 + CLIENT_STRIP_H / 2;
 const CANVAS_H = CLIENT_STRIP_CY + CLIENT_STRIP_H / 2 + 36;
 
+// Mobile row spacing
+const MOBILE_PAD_X    = 16;
+const MOBILE_AP_GAP   = 20;   // gap between AP bottom and next AP top
+const MOBILE_STRIP_GAP = 8;   // gap between AP bottom and client strip top
+
 // ── Main layout function ──────────────────────────────────────────────────
 
 export function computeLayout(
+  data: TopologyData,
+  containerWidth: number,
+): TopologyLayout {
+  // On mobile, TopologyView renders a separate MobileView (no canvas).
+  // Return an empty layout so the canvas is never shown.
+  if (containerWidth > 0 && containerWidth < MOBILE_BREAKPOINT) {
+    return {
+      internetNode:      { id: 'internet', cx: 0, cy: 0, width: 0, height: 0 },
+      gatewayNode:       { id: 'gw', cx: 0, cy: 0, width: 0, height: 0 },
+      apNodes:           new Map(),
+      clientStripNodes:  new Map(),
+      edges:             [],
+      canvasWidth:       0,
+      canvasHeight:      0,
+    };
+  }
+  return computeDesktopLayout(data, containerWidth);
+}
+
+// ── Desktop layout ────────────────────────────────────────────────────────
+
+function computeDesktopLayout(
   data: TopologyData,
   containerWidth: number,
 ): TopologyLayout {
@@ -156,6 +186,124 @@ export function computeLayout(
     edges,
     canvasWidth: Math.max(cw, apStartCX + totalSpan + AP_W / 2 + CANVAS_PAD_X),
     canvasHeight: CANVAS_H,
+  };
+}
+
+// ── Mobile layout (single-column, no horizontal scroll) ──────────────────
+
+function computeMobileLayout(
+  data: TopologyData,
+  containerWidth: number,
+): TopologyLayout {
+  const cw = containerWidth;
+  const cx = cw / 2;
+
+  // Internet node
+  const internetCY = CANVAS_PAD_TOP + INTERNET_R;
+  const internetNode: NodeLayout = {
+    id: 'internet',
+    cx,
+    cy: internetCY,
+    width: INTERNET_R * 2,
+    height: INTERNET_R * 2,
+  };
+
+  // Gateway node — narrower on mobile to fit
+  const gwW = Math.min(GATEWAY_W, cw - 2 * MOBILE_PAD_X);
+  const gatewayCY = internetCY + INTERNET_R + 36 + GATEWAY_H / 2;
+  const gatewayNode: NodeLayout = {
+    id: data.gateway.id,
+    cx,
+    cy: gatewayCY,
+    width: gwW,
+    height: GATEWAY_H,
+  };
+
+  // APs — stacked vertically, centered
+  const apW = Math.min(AP_W, cw - 2 * MOBILE_PAD_X);
+  const apNodes = new Map<string, NodeLayout>();
+  const clientStripNodes = new Map<string, NodeLayout>();
+
+  let cursorY = gatewayCY + GATEWAY_H / 2 + 56; // top of first AP row
+
+  data.accessPoints.forEach(ap => {
+    const apCY = cursorY + AP_H / 2;
+    apNodes.set(ap.id, {
+      id: ap.id,
+      cx,
+      cy: apCY,
+      width: apW,
+      height: AP_H,
+    });
+
+    const stripCY = apCY + AP_H / 2 + MOBILE_STRIP_GAP + CLIENT_STRIP_H / 2;
+    clientStripNodes.set(ap.id, {
+      id: `strip-${ap.id}`,
+      cx,
+      cy: stripCY,
+      width: apW,
+      height: CLIENT_STRIP_H,
+    });
+
+    cursorY = stripCY + CLIENT_STRIP_H / 2 + MOBILE_AP_GAP;
+  });
+
+  const canvasHeight = cursorY + 24;
+
+  // ── Edges ─────────────────────────────────────────────────────────────
+  const edges: EdgeLayout[] = [];
+
+  // Internet → Gateway (straight vertical)
+  edges.push({
+    id: 'edge-internet-gw',
+    sourceId: 'internet',
+    targetId: data.gateway.id,
+    kind: 'internet',
+    path: vLine(cx, internetCY + INTERNET_R, gatewayCY - GATEWAY_H / 2),
+    status: 'online',
+  });
+
+  const gwBy = gatewayCY + GATEWAY_H / 2;
+
+  data.accessPoints.forEach(ap => {
+    const apL = apNodes.get(ap.id)!;
+    const apTop = apL.cy - AP_H / 2;
+
+    if (ap.uplinkTo === data.gateway.id) {
+      // Straight vertical line — all APs are centered under gateway
+      edges.push({
+        id: `edge-gw-${ap.id}`,
+        sourceId: data.gateway.id,
+        targetId: ap.id,
+        kind: 'gateway-wired' as EdgeKind,
+        path: vLine(cx, gwBy, apTop),
+        status: ap.status,
+      });
+    } else {
+      // Mesh uplink — straight vertical to parent AP bottom
+      const parentL = apNodes.get(ap.uplinkTo);
+      if (parentL) {
+        const parentBottom = parentL.cy + AP_H / 2;
+        edges.push({
+          id: `edge-${ap.uplinkTo}-${ap.id}`,
+          sourceId: ap.uplinkTo,
+          targetId: ap.id,
+          kind: 'ap-mesh' as EdgeKind,
+          path: vLine(cx, parentBottom + CLIENT_STRIP_H + MOBILE_STRIP_GAP, apTop),
+          status: ap.status,
+        });
+      }
+    }
+  });
+
+  return {
+    internetNode,
+    gatewayNode,
+    apNodes,
+    clientStripNodes,
+    edges,
+    canvasWidth: cw,
+    canvasHeight,
   };
 }
 

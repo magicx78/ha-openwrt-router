@@ -1,7 +1,14 @@
 /* ── Reset & base ────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-:root {
+/* ── App shell ───────────────────────────────────────────────────────── */
+/*
+ * CSS custom properties are defined HERE on .topo-app, not on :root.
+ * Reason: HA may render panels inside a shadow-DOM context where :root
+ * selectors do not work. Defining variables on the component root means
+ * they always cascade to every descendant regardless of outer context.
+ */
+.topo-app {
   /* Surfaces */
   --bg:            #080c14;
   --surface:       rgba(12, 18, 38, 0.96);
@@ -32,22 +39,18 @@
   --radius:    12px;
   --radius-sm: 8px;
   --radius-xs: 5px;
-}
 
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-  background: var(--bg);
-  color: var(--text-primary);
-  -webkit-font-smoothing: antialiased;
-}
-
-/* ── App shell ───────────────────────────────────────────────────────── */
-.topo-app {
+  /* Layout */
   height: 100%;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  background: #080c14;   /* literal fallback — always dark regardless of theme */
+  background: var(--bg); /* preferred — uses variable once defined above */
+  color: rgba(255, 255, 255, 0.90);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
   position: relative; /* DetailPanel anchors to this */
 }
 
@@ -360,7 +363,10 @@ body {
   font-weight: 600;
   color: var(--text-primary);
   line-height: 1.3;
-  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100px;
 }
 .ap-card__ip {
   font-size: 11px;
@@ -399,10 +405,12 @@ body {
 
 /* ── Status dot ──────────────────────────────────────────────────────── */
 .status-dot {
+  display: inline-block; /* required: width/height ignored on inline <span> */
   width: 7px;
   height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
+  vertical-align: middle;
 }
 .status-dot.online  { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .status-dot.warning { background: var(--amber); animation: pulse-amber 1.8s ease-in-out infinite; }
@@ -594,6 +602,28 @@ body {
   color: var(--text-muted);
 }
 
+/* ── HA entity link button ───────────────────────────────────────────── */
+.detail-ha-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--blue);
+  text-decoration: none;
+  font-size: 12.5px;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s;
+}
+.detail-ha-link:hover {
+  background: var(--blue-dim);
+  border-color: var(--blue);
+}
+
 /* ── Signal bar ──────────────────────────────────────────────────────── */
 .signal-bar {
   display: flex;
@@ -616,3 +646,229 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+/* ── Mobile view (< 560px) ───────────────────────────────────────────── */
+.mobile-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px 16px 32px;
+  gap: 0;
+  width: 100%;
+}
+
+.mobile-internet {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 0;
+}
+
+.mobile-internet__dot {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.04);
+  border: 1.5px solid rgba(255,255,255,0.14);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+}
+
+.mobile-internet__label {
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+}
+
+.mobile-connector {
+  width: 2px;
+  height: 28px;
+  background: linear-gradient(to bottom, rgba(59,130,246,0.7), rgba(59,130,246,0.2));
+  margin: 0 auto;
+  border-radius: 1px;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Animated flow dot running down the connector line */
+.mobile-connector::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 8px;
+  background: linear-gradient(to bottom, transparent, rgba(59,130,246,0.9), transparent);
+  border-radius: 1px;
+  animation: mobile-flow 1.8s ease-in-out infinite;
+}
+
+@keyframes mobile-flow {
+  0%   { top: -8px; opacity: 0; }
+  20%  { opacity: 1; }
+  80%  { opacity: 1; }
+  100% { top: 28px; opacity: 0; }
+}
+
+.mobile-card {
+  width: 100%;
+  max-width: 360px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px 10px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.mobile-card:hover {
+  border-color: var(--border-hover);
+  box-shadow: 0 0 0 1px var(--border-hover), 0 4px 16px rgba(0,0,0,0.4);
+}
+
+.mobile-card.selected {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 1px var(--blue), 0 0 16px var(--blue-dim);
+}
+
+.mobile-card--gateway {
+  max-width: 360px;
+}
+
+.mobile-card__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.mobile-card__icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.mobile-card__icon--blue {
+  background: var(--blue-dim);
+  border: 1px solid rgba(59,130,246,0.2);
+  color: var(--blue);
+}
+
+.mobile-card__icon--cyan {
+  background: var(--cyan-dim);
+  border: 1px solid rgba(6,182,212,0.2);
+  color: var(--cyan);
+}
+
+.mobile-card__info { flex: 1; min-width: 0; }
+
+.mobile-card__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-card__sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+
+.mobile-card__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mobile-meta-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+}
+
+.mobile-meta-row span:first-child { color: var(--text-muted); }
+.mobile-meta-row span:last-child  {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.mobile-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mobile-client-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  width: 100%;
+  max-width: 360px;
+}
+
+/* ── Mobile — detail panel as bottom sheet (< 560px) ─────────────────── */
+@media (max-width: 560px) {
+  .detail-panel {
+    width: 100%;
+    top: auto;
+    bottom: 0;
+    height: 72vh;
+    transform: translateY(100%);
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+  .detail-panel.open {
+    transform: translateY(0);
+  }
+}
+
+/* Drag-handle pill above header text (mobile) */
+.detail-panel__handle {
+  display: none;
+}
+@media (max-width: 560px) {
+  .detail-panel__handle {
+    display: block;
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.15);
+    margin: 10px auto 0;
+    flex-shrink: 0;
+  }
+  .detail-panel__header {
+    padding-top: 10px;
+  }
+}
+
+/* Backdrop dimming the main content when detail panel is open on mobile */
+@media (max-width: 560px) {
+  .topo-app:has(.detail-panel.open) .topo-scroll {
+    pointer-events: none;
+  }
+  .topo-app:has(.detail-panel.open)::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    bottom: 72vh;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 199;
+    pointer-events: none;
+  }
+}

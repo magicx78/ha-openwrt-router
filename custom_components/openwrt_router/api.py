@@ -14,6 +14,7 @@ from typing import Any
 import aiohttp
 
 from .const import (
+    CLIENT_KEY_CONNECTED_SINCE,
     CLIENT_KEY_DHCP_EXPIRES,
     CLIENT_KEY_HOSTNAME,
     CLIENT_KEY_IP,
@@ -904,7 +905,9 @@ class OpenWrtAPI:
                     if mac in seen_macs:
                         continue
                     seen_macs.add(mac)
-                    signal = sta_data.get("signal", 0) if isinstance(sta_data, dict) else 0
+                    sta = sta_data if isinstance(sta_data, dict) else {}
+                    signal = sta.get("signal", 0)
+                    connected_time = sta.get("connected_time", 0) or 0
                     clients.append(
                         {
                             CLIENT_KEY_MAC: mac,
@@ -913,6 +916,7 @@ class OpenWrtAPI:
                             CLIENT_KEY_SIGNAL: signal,
                             CLIENT_KEY_SSID: ssid,
                             CLIENT_KEY_RADIO: ifname,
+                            CLIENT_KEY_CONNECTED_SINCE: connected_time,
                         }
                     )
                 _LOGGER.debug(

@@ -2,6 +2,33 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.11.0] - 2026-04-15
+
+### Added
+
+- **Client Detail Panel — new fields**:
+  - **IP address** now shown prominently at the top of the Gerät section
+  - **Band** (2.4 GHz / 5 GHz / 6 GHz) — derived from `wifi_radios` via `topology_diagnostic.py`
+  - **Verbunden seit** — connection duration from `hostapd connected_time` (e.g. "2h 34m")
+  - **Lease bis** — DHCP lease expiry formatted as "22:15 (noch 3h 12m)" or "Abgelaufen"
+  - **Status badge** — dot + text label (● Online / ● Warnung / ● Offline)
+  - **„In HA anzeigen →"** link — navigates to the device_tracker entity in HA
+
+- **Mobile connector line animation** — animated light-dot flowing through the vertical connector bars in MobileView
+
+### Fixed
+
+- **Topology dark theme not rendering on HA light theme** (critical): CSS custom properties were defined on `:root {}` which does not work when HA renders the panel in a shadow-DOM context. All variables moved to `.topo-app {}` (component root) so they cascade to all descendants regardless of outer DOM context. Literal color fallbacks added before each `var()` reference.
+- **StatusDot invisible in detail panel**: `<span class="status-dot">` had no `display: inline-block` — browsers ignore `width`/`height` on inline elements. Fixed in CSS; all status rows now use the new `StatusBadge` component (dot + text).
+- **SVG connection lines and animations invisible**: Caused by the same `:root` CSS variable scoping bug — strokes using `var(--blue)` resolved to `undefined`. Fixed by the `.topo-app` variable move.
+
+### Technical
+
+- `topology_diagnostic.py`: Added `_radio_band_map` built from `data.wifi_radios`; `band` field added to client node attributes
+- `api.py`: Extracts `connected_time` from `hostapd/get_clients` `sta_data`; stored as `CLIENT_KEY_CONNECTED_SINCE`
+- `api.ts`: Added `formatBand()`, `formatConnectedSince()`, `formatLeaseExpiry()` helpers; `Client` type extended with `connectedSince?` and `dhcpExpires?`
+- `topology_panel.py`: Version bumped to `20260415e` for cache-busting
+
 ## [1.10.1] - 2026-04-14
 
 ### Added

@@ -19,6 +19,7 @@ import { APNode } from './components/APNode';
 import { ClientStrip } from './components/ClientStrip';
 import { DetailPanel } from './components/DetailPanel';
 import { FilterBar } from './components/FilterBar';
+import { MobileView } from './components/MobileView';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -103,6 +104,9 @@ export function TopologyView({ data }: Props) {
     data.accessPoints.filter(a => a.status !== 'online').length +
     data.clients.filter(c => c.status !== 'online').length;
 
+  // ── Mobile breakpoint ───────────────────────────────────────────────
+  const isMobile = containerWidth > 0 && containerWidth < 560;
+
   // ── Render ──────────────────────────────────────────────────────────
   const dimmedEdges = new Set(
     layout.edges
@@ -122,69 +126,86 @@ export function TopologyView({ data }: Props) {
       />
 
       <div className="topo-scroll" ref={containerRef}>
-        <div
-          className="topo-canvas"
-          style={{ width: layout.canvasWidth, height: layout.canvasHeight }}
-          onClick={e => {
-            if (e.currentTarget === e.target) setSelectedEntity(null);
-          }}
-        >
-          {/* ── Layer 1: SVG connections (below nodes) ── */}
-          <ConnectionLayer
-            edges={layout.edges}
-            width={layout.canvasWidth}
-            height={layout.canvasHeight}
-            highlightedEdges={hoverCtx.highlightedEdges}
-            dimmedEdges={dimmedEdges}
+        {isMobile ? (
+          <MobileView
+            data={data}
+            onSelectGateway={selectGateway}
+            onSelectAP={selectAP}
+            onSelectClient={selectClient}
+            clientsForAP={clientsForAP}
+            selectedId={
+              selectedEntity?.type === 'gateway'
+                ? data.gateway.id
+                : selectedEntity?.type === 'ap'
+                  ? selectedEntity.data.id
+                  : null
+            }
           />
+        ) : (
+          <div
+            className="topo-canvas"
+            style={{ width: layout.canvasWidth, height: layout.canvasHeight }}
+            onClick={e => {
+              if (e.currentTarget === e.target) setSelectedEntity(null);
+            }}
+          >
+            {/* ── Layer 1: SVG connections (below nodes) ── */}
+            <ConnectionLayer
+              edges={layout.edges}
+              width={layout.canvasWidth}
+              height={layout.canvasHeight}
+              highlightedEdges={hoverCtx.highlightedEdges}
+              dimmedEdges={dimmedEdges}
+            />
 
-          {/* ── Layer 2: HTML nodes ── */}
+            {/* ── Layer 2: HTML nodes ── */}
 
-          {/* Internet */}
-          <InternetNode layout={layout.internetNode} />
+            {/* Internet */}
+            <InternetNode layout={layout.internetNode} />
 
-          {/* Gateway */}
-          <GatewayNode
-            gateway={data.gateway}
-            layout={layout.gatewayNode}
-            selected={selectedEntity?.type === 'gateway'}
-            dimmed={hoverCtx.dimmedNodes.has(data.gateway.id)}
-            onSelect={selectGateway}
-            onHover={setHoveredNodeId}
-          />
+            {/* Gateway */}
+            <GatewayNode
+              gateway={data.gateway}
+              layout={layout.gatewayNode}
+              selected={selectedEntity?.type === 'gateway'}
+              dimmed={hoverCtx.dimmedNodes.has(data.gateway.id)}
+              onSelect={selectGateway}
+              onHover={setHoveredNodeId}
+            />
 
-          {/* Access Points + Client Strips */}
-          {data.accessPoints.map(ap => {
-            const apLayout = layout.apNodes.get(ap.id);
-            const stripLayout = layout.clientStripNodes.get(ap.id);
-            if (!apLayout || !stripLayout) return null;
+            {/* Access Points + Client Strips */}
+            {data.accessPoints.map(ap => {
+              const apLayout = layout.apNodes.get(ap.id);
+              const stripLayout = layout.clientStripNodes.get(ap.id);
+              if (!apLayout || !stripLayout) return null;
 
-            const apClients = clientsForAP(ap.id);
-            const isHidden =
-              filter === 'clients' ||
-              (filter === 'warnings' && ap.status === 'online' && apClients.length === 0);
-            if (isHidden) return null;
+              const apClients = clientsForAP(ap.id);
+              const isHidden =
+                filter === 'clients' ||
+                (filter === 'warnings' && ap.status === 'online' && apClients.length === 0);
+              if (isHidden) return null;
 
-            return (
-              <React.Fragment key={ap.id}>
-                <APNode
-                  ap={ap}
-                  layout={apLayout}
-                  selected={selectedEntity?.type === 'ap' && selectedEntity.data.id === ap.id}
-                  dimmed={hoverCtx.dimmedNodes.has(ap.id)}
-                  onSelect={() => selectAP(ap)}
-                  onHover={setHoveredNodeId}
-                />
-                <ClientStrip
-                  clients={apClients}
-                  layout={stripLayout}
-                  dimmed={hoverCtx.dimmedNodes.has(ap.id)}
-                  onSelectClient={selectClient}
-                />
-              </React.Fragment>
-            );
-          })}
-        </div>
+              return (
+                <React.Fragment key={ap.id}>
+                  <APNode
+                    ap={ap}
+                    layout={apLayout}
+                    selected={selectedEntity?.type === 'ap' && selectedEntity.data.id === ap.id}
+                    dimmed={hoverCtx.dimmedNodes.has(ap.id)}
+                    onSelect={() => selectAP(ap)}
+                    onHover={setHoveredNodeId}
+                  />
+                  <ClientStrip
+                    clients={apClients}
+                    layout={stripLayout}
+                    dimmed={hoverCtx.dimmedNodes.has(ap.id)}
+                    onSelectClient={selectClient}
+                  />
+                </React.Fragment>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* ── Detail panel (fixed right side) ── */}

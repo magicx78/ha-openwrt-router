@@ -180,8 +180,27 @@ def _detect_inter_router_edges(
     ]
 
     if unconnected and gateways:
-        gw_rid = gateways[0][0]
+        gw_rid, gw_hip_fallback, _ = gateways[0]
+        try:
+            gw_subnet = ipaddress.ip_network(f"{gw_hip_fallback}/24", strict=False)
+        except (ValueError, TypeError):
+            gw_subnet = None
+
         for ap_rid, ap_hip, _ in unconnected:
+            # Only infer an uplink if the AP is on the same /24 as the gateway.
+            # Routers on different subnets (e.g. VPN, WireGuard) are excluded.
+            if gw_subnet is not None:
+                try:
+                    ap_net = ipaddress.ip_network(f"{ap_hip}/24", strict=False)
+                    if not gw_subnet.overlaps(ap_net):
+                        _LOGGER.debug(
+                            "Subnet fallback: skipping %s (%s) — not in gateway subnet %s",
+                            ap_rid, ap_hip, gw_subnet,
+                        )
+                        continue
+                except (ValueError, TypeError):
+                    pass  # Can't parse AP IP → include it anyway
+
             edge_id = f"{gw_rid}--uplink--{ap_rid}"
             if edge_id not in seen_edges:
                 edges.append({
