@@ -1,0 +1,29 @@
+{
+  "root": {
+    "description": "Full access for Home Assistant openwrt_router integration",
+    "read": {
+      "file": {
+        "/etc/config/ddns": ["read"],
+        "/var/run/ddns": ["list"],
+        "/var/run/ddns/*": ["read"]
+      },
+      "ubus": {
+        "file": ["read"],
+        "hostapd.*": ["get_clients", "get_status"],
+        "network.wireless": ["status", "up", "down"],
+        "network.interface": ["dump"],
+        "network.interface.*": ["status", "statistics"],
+        "network.interface.wan": ["status", "statistics"],
+        "luci-rpc": ["getDHCPLeases", "getHostHints", "getWirelessDevices"],
+        "iwinfo": ["info", "assoclist", "devices", "scan", "freqlist"],
+        "system": ["board", "info"],
+        "uci": ["get"]
+      }
+    },
+    "write": {
+      "ubus": {
+        "network.wireless": ["up", "down"]
+      }
+    }
+  }
+}

@@ -18,13 +18,14 @@ from aiohttp import web
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.http.view import HomeAssistantView
 from homeassistant.components.panel_custom import async_register_panel
+from homeassistant.components.frontend import async_remove_panel
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-_PANEL_VERSION = "20260415e"
+_PANEL_VERSION = "20260415h"
 _PANEL_REGISTERED_KEY = f"{DOMAIN}_panel_registered_{_PANEL_VERSION}"
 _STATIC_URL = "/openwrt_router_topology"
 
@@ -56,6 +57,9 @@ async def async_setup_topology_panel(hass: HomeAssistant) -> None:
     """
     if hass.data.get(_PANEL_REGISTERED_KEY):
         return
+    # Set flag immediately (before any await) to prevent race condition when
+    # multiple config entries call this function concurrently at startup.
+    hass.data[_PANEL_REGISTERED_KEY] = True
 
     frontend_dir = Path(__file__).resolve().parent / "frontend"
 
@@ -72,6 +76,10 @@ async def async_setup_topology_panel(hass: HomeAssistant) -> None:
     # Register API endpoint
     hass.http.register_view(OpenWrtMeshSnapshotView())
 
+    # Remove existing panel registration if present from a previous HA session.
+    # async_register_panel raises if the URL path is already registered.
+    async_remove_panel(hass, "openwrt-topology")
+
     # Register sidebar panel
     await async_register_panel(
         hass,
@@ -84,7 +92,6 @@ async def async_setup_topology_panel(hass: HomeAssistant) -> None:
         config={"apiBase": "/api/openwrt_topology/snapshot"},
     )
 
-    hass.data[_PANEL_REGISTERED_KEY] = True
     _LOGGER.debug("Topology panel registered")
 
 
