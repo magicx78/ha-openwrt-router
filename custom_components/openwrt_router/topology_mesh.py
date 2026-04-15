@@ -20,7 +20,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DOMAIN, KEY_DSL_HISTORY, KEY_DSL_STATS, KEY_DDNS_STATUS, KEY_PING_MS, KEY_WAN_TRAFFIC
 from .coordinator import OpenWrtCoordinatorData
 from .topology_diagnostic import TOPOLOGY_SOURCE, build_topology_snapshot
 
@@ -332,6 +332,58 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         if edge["id"] not in seen_edge_ids:
             seen_edge_ids.add(edge["id"])
             deduped_edges.append(edge)
+
+    # Cross-enrich client nodes with DHCP leases from ALL routers.
+    # Secondary APs don't run DHCP — their clients have no IP/hostname from
+    # their own coordinator. The gateway's DHCP table covers all LAN clients.
+    merged_leases: dict[str, dict[str, Any]] = {}
+    for _, _, data in router_data:
+        for lease_mac, lease_info in (data.dhcp_leases or {}).items():
+            key = lease_mac.lower().replace("-", ":").replace(".", ":")
+            if key not in merged_leases:
+                merged_leases[key] = lease_info
+
+    for node in deduped_nodes:
+        if node.get("type") != "client":
+            continue
+        attrs = node.get("attributes", {})
+        mac = (attrs.get("mac") or "").lower()
+        if not mac:
+            continue
+        lease = merged_leases.get(mac)
+        if not lease:
+            continue
+        if not attrs.get("ip") and lease.get("ip"):
+            attrs["ip"] = lease["ip"]
+        if not attrs.get("hostname") and lease.get("hostname"):
+            attrs["hostname"] = lease["hostname"]
+            # Also update the node label if it was falling back to MAC
+            if node.get("label") == mac:
+                node["label"] = attrs["hostname"]
+        if not attrs.get("dhcp_expires") and lease.get("expires"):
+            attrs["dhcp_expires"] = int(lease["expires"])
+
+    # Inject DSL history + ping + DuckDNS into the gateway router node.
+    # Only the coordinator with role=gateway has this data (others return empty).
+    # ping_ms and ddns_status are always polled (independent of Fritz!Box).
+    # dsl_stats / wan_traffic are only present when Fritz!Box is configured and reachable.
+    for rid, hip, data in router_data:
+        if _detect_router_role(data, hip) != "gateway":
+            continue
+        for node in deduped_nodes:
+            if node.get("type") == "router" and node.get("id") == rid:
+                attrs = node.setdefault("attributes", {})
+                dsl_stats = getattr(data, "dsl_stats", {}) or {}
+                wan_traffic = getattr(data, "wan_traffic", {}) or {}
+                if dsl_stats:
+                    attrs["dsl_stats"] = dsl_stats
+                if wan_traffic:
+                    attrs["wan_traffic"] = wan_traffic
+                attrs["ping_ms"] = getattr(data, "ping_ms", None)
+                attrs["dsl_history"] = getattr(data, "dsl_history", []) or []
+                attrs["ddns_status"] = getattr(data, "ddns_status", []) or []
+                break
+        break  # only one gateway
 
     router_count = sum(1 for n in deduped_nodes if n.get("type") == "router")
     client_count = sum(1 for n in deduped_nodes if n.get("type") == "client")
