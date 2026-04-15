@@ -164,10 +164,6 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 try:
                     board_info = await self._validate_input(host, port, username, password)
 
-                except OpenWrtRpcdSetupError:
-                    _LOGGER.debug("Config flow: rpcd not configured on %s", host)
-                    errors["base"] = ERROR_RPCD_SETUP
-
                 except OpenWrtAuthError:
                     _LOGGER.debug("Config flow: authentication failed for %s", host)
                     errors["base"] = ERROR_INVALID_AUTH
@@ -285,9 +281,10 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
         try:
             await self._validate_input(host, port, username, password)
-        except OpenWrtRpcdSetupError:
+        except OpenWrtResponseError:
+            # HTTP connection works but ubus response is garbled → rpcd not responding
             return await self.async_step_reauth_rpcd_setup()
-        except (OpenWrtConnectionError, OpenWrtTimeoutError, OpenWrtResponseError):
+        except (OpenWrtConnectionError, OpenWrtTimeoutError):
             return await self.async_step_reauth_cannot_connect()
         except OpenWrtAuthError:
             # Credentials genuinely changed — ask for new password
@@ -319,7 +316,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
             try:
                 await self._validate_input(host, port, username, password)
-            except OpenWrtRpcdSetupError:
+            except OpenWrtResponseError:
                 errors["base"] = ERROR_RPCD_SETUP
             except (OpenWrtConnectionError, OpenWrtTimeoutError):
                 return await self.async_step_reauth_cannot_connect()

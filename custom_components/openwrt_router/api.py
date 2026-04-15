@@ -292,19 +292,6 @@ class OpenWrtAPI:
 
         try:
             result = await self._raw_call(payload)
-        except OpenWrtAuthError as err:
-            # status=6 on session/login means rpcd's session module is not
-            # accessible.  Most likely cause on OpenWrt 25.x: the ubus socket
-            # path changed from /var/run/ubus.sock to /var/run/ubus/ubus.sock
-            # but rpcd still points to the old path.  Raise a specific error
-            # so config_flow can show setup instructions instead of "wrong password".
-            self._login_failure_count += 1
-            raise OpenWrtRpcdSetupError(
-                f"rpcd session module blocked on {self._host} "
-                f"(ubus returned permission-denied for session/login). "
-                "Ensure rpcd and rpcd-mod-rpcsys are installed and the ubus "
-                "socket path is set to /var/run/ubus/ubus.sock."
-            ) from err
         except OpenWrtResponseError as err:
             # L-1: count failures; suppress repeated ERROR spam after threshold
             self._login_failure_count += 1
@@ -362,14 +349,9 @@ class OpenWrtAPI:
             OpenWrtTimeoutError: Request timed out.
         """
         # Try to login; if it fails due to ACL, continue with default session.
-        # OpenWrtRpcdSetupError is NOT caught here — it means rpcd itself is
-        # broken and get_router_info() would fail too, so we let it propagate
-        # to config_flow which shows a helpful setup-instructions message.
         try:
             await self.login()
             _LOGGER.debug("Successfully authenticated with router")
-        except OpenWrtRpcdSetupError:
-            raise
         except OpenWrtAuthError as err:
             _LOGGER.warning(
                 "Could not authenticate (rpcd may have restricted ACL): %s. "

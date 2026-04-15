@@ -217,12 +217,29 @@ class TestProtocolStep:
 
 
 class TestUserStepRpcdSetup:
-    """Tests for the new rpcd_setup_required error in the user step."""
+    """status=6 on session/login in OpenWrt 25.x = wrong credentials, not rpcd setup issue.
+    OpenWrtResponseError (garbled HTTP) = rpcd not responding → ERROR_CANNOT_CONNECT.
+    """
 
     @pytest.mark.asyncio
-    async def test_rpcd_setup_error_shows_rpcd_error(self):
+    async def test_auth_error_status6_maps_to_invalid_auth(self):
+        """status=6 on login (OpenWrtAuthError) must show invalid_auth, not rpcd_setup."""
         flow = _make_flow()
-        with patch.object(flow, "_validate_input", side_effect=OpenWrtRpcdSetupError("rpcd down")):
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtAuthError("permission denied")):
+            result = await flow.async_step_user(user_input={
+                "host": "10.10.10.4",
+                "port": 80,
+                "username": "root",
+                "password": "wrong",
+            })
+        assert result["type"] == "form"
+        assert result["errors"]["base"] == ERROR_INVALID_AUTH
+
+    @pytest.mark.asyncio
+    async def test_response_error_maps_to_cannot_connect(self):
+        """Garbled ubus response (rpcd not responding) → cannot_connect error."""
+        flow = _make_flow()
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtResponseError("garbled")):
             result = await flow.async_step_user(user_input={
                 "host": "10.10.10.4",
                 "port": 80,
@@ -230,20 +247,7 @@ class TestUserStepRpcdSetup:
                 "password": "test",
             })
         assert result["type"] == "form"
-        assert result["errors"]["base"] == ERROR_RPCD_SETUP
-
-    @pytest.mark.asyncio
-    async def test_rpcd_setup_error_not_swallowed_as_auth_error(self):
-        """OpenWrtRpcdSetupError must NOT map to ERROR_INVALID_AUTH."""
-        flow = _make_flow()
-        with patch.object(flow, "_validate_input", side_effect=OpenWrtRpcdSetupError("rpcd down")):
-            result = await flow.async_step_user(user_input={
-                "host": "10.10.10.4",
-                "port": 80,
-                "username": "root",
-                "password": "test",
-            })
-        assert result["errors"]["base"] != ERROR_INVALID_AUTH
+        assert result["errors"]["base"] == ERROR_CANNOT_CONNECT
 
 
 def _make_reauth_flow(entry_data: dict):
@@ -278,9 +282,10 @@ class TestReauthDiagnosis:
         assert result["type"] == "abort"
 
     @pytest.mark.asyncio
-    async def test_rpcd_setup_error_routes_to_rpcd_setup_step(self):
+    async def test_response_error_routes_to_rpcd_setup_step(self):
+        """Garbled ubus response during reauth → rpcd not responding → setup step."""
         flow, entry = _make_reauth_flow(_REAUTH_DATA)
-        with patch.object(flow, "_validate_input", side_effect=OpenWrtRpcdSetupError("rpcd down")):
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtResponseError("garbled")):
             result = await flow.async_step_reauth({})
         assert result["type"] == "form"
         assert result["step_id"] == "reauth_rpcd_setup"
@@ -332,7 +337,7 @@ class TestReauthRpcdSetupStep:
     @pytest.mark.asyncio
     async def test_retry_still_failing_shows_error(self):
         flow, _ = _make_reauth_flow(_REAUTH_DATA)
-        with patch.object(flow, "_validate_input", side_effect=OpenWrtRpcdSetupError("still down")):
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtResponseError("still garbled")):
             result = await flow.async_step_reauth_rpcd_setup(user_input={})
         assert result["type"] == "form"
         assert result["errors"]["base"] == ERROR_RPCD_SETUP
