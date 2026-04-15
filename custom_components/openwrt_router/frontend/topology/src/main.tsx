@@ -61,8 +61,11 @@ class OpenWrtTopologyPanel extends HTMLElement {
         </React.StrictMode>,
       );
     } catch (err) {
-      // AbortError = HA navigation cancelled mid-fetch — not an error, just ignore
-      if ((err as Error)?.name === 'AbortError') return;
+      // AbortError = HA navigation cancelled mid-fetch — reset so next hass update retries
+      if ((err as Error)?.name === 'AbortError') {
+        this._hasLoaded = false;
+        return;
+      }
       if (!this._root) return;
       this._root.render(
         <div
