@@ -23,13 +23,13 @@ _LOGGER = logging.getLogger(__name__)
 
 _TR064_PORT = 49000
 
-_DSL_URL = "/upnp/control/wandslinterfaceconfig1"
+_DSL_URL = "/upnp/control/wandslifconfig1"
 _DSL_SERVICE = "urn:dslforum-org:service:WANDSLInterfaceConfig:1"
-_DSL_ACTION = "GetDSLInfo"
+_DSL_ACTION = "GetInfo"
 
 _COMMON_URL = "/upnp/control/wancommonifconfig1"
 _COMMON_SERVICE = "urn:dslforum-org:service:WANCommonInterfaceConfig:1"
-_COMMON_ACTION = "GetAddonInfos"
+_COMMON_ACTION = "GetCommonLinkProperties"
 
 _SOAP_TEMPLATE = (
     '<?xml version="1.0" encoding="utf-8"?>'
@@ -235,7 +235,16 @@ async def get_wan_traffic(
     )
     if not data:
         return {}
+    # Layer1 rates are in bits/s; AVM utilization is in tenths of a percent (0–10000)
+    max_ds  = _i(data, "NewLayer1DownstreamMaxBitRate")
+    max_us  = _i(data, "NewLayer1UpstreamMaxBitRate")
+    util_ds = _f(data, "NewX_AVM-DE_DownstreamCurrentUtilization")  # 0–10000
+    util_us = _f(data, "NewX_AVM-DE_UpstreamCurrentUtilization")
     return {
-        "downstream_bps": _i(data, "NewByteReceiveRate"),
-        "upstream_bps": _i(data, "NewByteSendRate"),
+        # Estimated current throughput in bytes/s (utilization × max / 10000 / 8)
+        "downstream_bps": round(max_ds * util_ds / 10000 / 8) if max_ds else 0,
+        "upstream_bps":   round(max_us * util_us / 10000 / 8) if max_us else 0,
+        "downstream_max_kbps": max_ds // 1000,
+        "upstream_max_kbps":   max_us // 1000,
+        "link_status": data.get("NewPhysicalLinkStatus", ""),
     }
