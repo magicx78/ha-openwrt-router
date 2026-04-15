@@ -28,6 +28,12 @@ class OpenWrtTopologyPanel extends HTMLElement {
     this._root = createRoot(this);
     this._renderPlaceholder('Loading topology…');
 
+    // HA may call set hass before connectedCallback — trigger fetch now if so.
+    if (this._hass && !this._hasLoaded) {
+      this._hasLoaded = true;
+      void this._fetchAndRender();
+    }
+
     // Periodic refresh every 30 s
     this._refreshTimer = setInterval(() => {
       if (this._hass) void this._fetchAndRender();
@@ -42,9 +48,10 @@ class OpenWrtTopologyPanel extends HTMLElement {
   }
 
   // HA calls this setter on every state update; only fetch on first call.
+  // Guard: _root may not exist yet if called before connectedCallback.
   set hass(hass: HassLike) {
     this._hass = hass;
-    if (!this._hasLoaded) {
+    if (!this._hasLoaded && this._root) {
       this._hasLoaded = true;
       void this._fetchAndRender();
     }
@@ -61,7 +68,7 @@ class OpenWrtTopologyPanel extends HTMLElement {
         </React.StrictMode>,
       );
     } catch (err) {
-      // AbortError = HA navigation cancelled mid-fetch — reset so next hass update retries
+      // AbortError = HA navigation cancelled mid-fetch — reset so connectedCallback retries
       if ((err as Error)?.name === 'AbortError') {
         this._hasLoaded = false;
         return;
