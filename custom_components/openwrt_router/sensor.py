@@ -415,6 +415,7 @@ async def async_setup_entry(
 
     # Track which dynamic entities have already been created
     tracked_interfaces: set[str] = set()
+    tracked_ports: set[str] = set()
     tracked_radios: set[str] = set()
     tracked_ap_metrics: set[str] = set()  # "ifname_metric"
 
@@ -440,6 +441,17 @@ async def async_setup_entry(
             new_entities.append(OpenWrtInterfaceRateSensor(coordinator, entry, ifname, "rx_rate"))
             new_entities.append(OpenWrtInterfaceRateSensor(coordinator, entry, ifname, "tx_rate"))
             _LOGGER.debug("Adding bandwidth sensors for interface %s", ifname)
+
+        for port in coordinator.data.port_stats:
+            port_name = port.get("name", "")
+            if not port_name or port_name in tracked_ports:
+                continue
+            tracked_ports.add(port_name)
+            new_entities.append(OpenWrtPortSensor(coordinator, entry, port_name, "status"))
+            new_entities.append(OpenWrtPortSensor(coordinator, entry, port_name, "speed_mbps"))
+            new_entities.append(OpenWrtPortSensor(coordinator, entry, port_name, "rx_bytes"))
+            new_entities.append(OpenWrtPortSensor(coordinator, entry, port_name, "tx_bytes"))
+            _LOGGER.debug("Adding port sensors for %s", port_name)
 
         for radio in coordinator.data.wifi_radios:
             ifname = radio.get("ifname", "")
@@ -865,6 +877,108 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
                 "hwmode": radio.get(RADIO_KEY_HWMODE),
             }
         return {}
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Group under the router device card."""
+        router_info = self.coordinator.router_info
+        release = router_info.get("release", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=router_info.get("hostname") or self._entry.title,
+            manufacturer="OpenWrt",
+            model=router_info.get("model", "OpenWrt Router"),
+            sw_version=release.get("version", ""),
+            configuration_url=(
+                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
+            ),
+        )
+
+
+class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
+    """Sensor for a physical switch port metric (link, speed, RX/TX bytes).
+
+    Created dynamically for each port returned by coordinator.data.port_stats.
+    Metrics: "status" (up/down text), "speed_mbps", "rx_bytes", "tx_bytes".
+    """
+
+    _attr_has_entity_name = True
+
+    # (icon, unit, device_class, state_class, entity_category)
+    _METRIC_CONFIG: dict[str, tuple[str, str | None, str | None, str | None, EntityCategory | None]] = {
+        "status":     ("mdi:ethernet",           None,                                    None,                          None,                           None),
+        "speed_mbps": ("mdi:speedometer",         UnitOfDataRate.MEGABITS_PER_SECOND,     SensorDeviceClass.DATA_RATE,   SensorStateClass.MEASUREMENT,   None),
+        "rx_bytes":   ("mdi:download-network",    UnitOfInformation.BYTES,                SensorDeviceClass.DATA_SIZE,   SensorStateClass.TOTAL_INCREASING, EntityCategory.DIAGNOSTIC),
+        "tx_bytes":   ("mdi:upload-network",      UnitOfInformation.BYTES,                SensorDeviceClass.DATA_SIZE,   SensorStateClass.TOTAL_INCREASING, EntityCategory.DIAGNOSTIC),
+    }
+    _METRIC_LABELS = {
+        "status":     "Link",
+        "speed_mbps": "Speed",
+        "rx_bytes":   "RX",
+        "tx_bytes":   "TX",
+    }
+
+    def __init__(
+        self,
+        coordinator: OpenWrtCoordinator,
+        entry: OpenWrtConfigEntry,
+        port_name: str,
+        metric: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._port = port_name
+        self._metric = metric
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_port_{port_name}_{metric}"
+
+        cfg = self._METRIC_CONFIG.get(metric, ("mdi:ethernet", None, None, None, None))
+        self._attr_icon = cfg[0]
+        self._attr_native_unit_of_measurement = cfg[1]
+        self._attr_device_class = cfg[2]
+        self._attr_state_class = cfg[3]
+        self._attr_entity_category = cfg[4]
+
+    @property
+    def name(self) -> str:
+        """Human-readable name including port and metric."""
+        label = self._METRIC_LABELS.get(self._metric, self._metric)
+        return f"{self._port} {label}"
+
+    def _get_port(self) -> dict[str, Any] | None:
+        """Return the port dict from coordinator data, or None."""
+        if not self.coordinator.data:
+            return None
+        return next(
+            (p for p in self.coordinator.data.port_stats if p.get("name") == self._port),
+            None,
+        )
+
+    @property
+    def native_value(self) -> str | int | None:
+        """Return current value for this port metric."""
+        port = self._get_port()
+        if port is None:
+            return None
+        if self._metric == "status":
+            return "up" if port.get("up") else "down"
+        return port.get(self._metric)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra attributes for the status sensor."""
+        if self._metric != "status":
+            return {}
+        port = self._get_port()
+        if port is None:
+            return {}
+        attrs: dict[str, Any] = {
+            "rx_packets": port.get("rx_packets"),
+            "tx_packets": port.get("tx_packets"),
+        }
+        if port.get("duplex"):
+            attrs["duplex"] = port["duplex"]
+        return attrs
 
     @property
     def device_info(self) -> DeviceInfo:

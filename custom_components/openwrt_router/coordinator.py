@@ -52,6 +52,7 @@ from .const import (
     KEY_FEATURES,
     KEY_MEMORY,
     KEY_PING_MS,
+    KEY_PORT_STATS,
     KEY_ROUTER_INFO,
     KEY_SERVICES,
     KEY_UPDATES_AVAILABLE,
@@ -105,6 +106,7 @@ class OpenWrtCoordinatorData:
         self.disk_space: dict[str, Any] = {}
         self.tmpfs: dict[str, Any] = {}
         self.network_interfaces: list[dict[str, Any]] = []
+        self.port_stats: list[dict[str, Any]] = []
         self.active_connections: int = 0
         self.updates_available: dict[str, Any] = {"available": False, "system": [], "addons": []}
         self.services: list[dict[str, Any]] = []
@@ -136,6 +138,7 @@ class OpenWrtCoordinatorData:
             "disk_space": self.disk_space,
             "tmpfs": self.tmpfs,
             "network_interfaces": self.network_interfaces,
+            KEY_PORT_STATS: self.port_stats,
             "active_connections": self.active_connections,
             KEY_UPDATES_AVAILABLE: self.updates_available,
             KEY_SERVICES: self.services,
@@ -373,6 +376,12 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching network interfaces: %s", err)
                 data.network_interfaces = []
+
+            try:
+                data.port_stats = await self.api.get_port_stats()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching port stats: %s", err)
+                data.port_stats = []
 
             # --- Bandwidth rate calculation (bytes/s) ---
             poll_now = datetime.now(UTC)

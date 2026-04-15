@@ -53,6 +53,8 @@ from .const import (
     UBUS_IWINFO_ASSOCLIST,
     UBUS_IWINFO_INFO,
     UBUS_IWINFO_OBJECT,
+    UBUS_DEVICE_OBJECT,
+    UBUS_DEVICE_STATUS,
     UBUS_NETWORK_DUMP,
     UBUS_NETWORK_OBJECT,
     UBUS_NETWORK_RELOAD,
@@ -171,6 +173,35 @@ def _parse_uci_config(raw: str) -> dict[str, dict[str, Any]]:
         sections[current_name] = current_data
 
     return sections
+
+
+def _parse_port_speed(raw: Any) -> tuple[int | None, str | None]:
+    """Parse OpenWrt port speed string into (Mbps, duplex).
+
+    OpenWrt network.device/status returns speed as a string like "100F",
+    "1000H", "2500F" (number + F/H for Full/Half duplex) or sometimes as
+    an integer (-1 for no link).
+
+    Returns:
+        (speed_mbps, duplex) where speed_mbps is None for unknown/no-link,
+        and duplex is "full", "half", or None.
+    """
+    if raw is None:
+        return None, None
+    if isinstance(raw, str) and raw:
+        duplex_char = raw[-1].upper()
+        duplex = "full" if duplex_char == "F" else ("half" if duplex_char == "H" else None)
+        num_part = raw.rstrip("FfHh")
+        try:
+            mbps = int(num_part)
+            return (mbps if mbps > 0 else None), duplex
+        except ValueError:
+            return None, None
+    try:
+        mbps = int(raw)
+        return (mbps if mbps > 0 else None), None
+    except (TypeError, ValueError):
+        return None, None
 
 
 class OpenWrtAPI:
@@ -2076,6 +2107,76 @@ class OpenWrtAPI:
         except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError) as err:
             _LOGGER.debug("Could not fetch network interface stats: %s", err)
             return []
+
+    async def get_port_stats(self) -> list[dict[str, Any]]:
+        """Return per-port link status and traffic counters from network.device/status.
+
+        Queries the network.device ubus object which reports physical switch ports
+        (lan1, lan2, lan3, wan, etc.) with link speed and byte counters.
+
+        Filtered out: bridges (br-*), loopback (lo*), VLAN sub-interfaces
+        (name contains "."), and tagged interfaces (name contains "@").
+        Only devtype "ethernet" entries are included (physical ports and
+        DSA conduit interfaces).
+
+        The speed field from OpenWrt is a string like "100F" or "1000F"
+        (speed + duplex: F=Full, H=Half) and is parsed to an integer (Mbps).
+        Returns None / -1 for unknown or no-link speed.
+
+        Returns:
+            [
+                {
+                    "name": str,          # "lan1", "wan", "eth0", etc.
+                    "up": bool,
+                    "speed_mbps": int | None,  # Mbps or None if no link / unknown
+                    "duplex": str | None,      # "full" | "half" | None
+                    "rx_bytes": int,
+                    "tx_bytes": int,
+                    "rx_packets": int,
+                    "tx_packets": int,
+                },
+                ...
+            ]
+            Sorted by name. Returns [] if the ubus object is not accessible.
+        """
+        try:
+            result = await self._call(UBUS_DEVICE_OBJECT, UBUS_DEVICE_STATUS, {})
+        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError) as err:
+            _LOGGER.debug("Port stats unavailable (network.device ACL?): %s", err)
+            return []
+
+        ports: list[dict[str, Any]] = []
+        for name, dev in result.items():
+            if not isinstance(dev, dict):
+                continue
+            # Skip bridges, loopback, VLAN sub-interfaces, and tagged interfaces
+            if (
+                name.startswith(("br-", "lo"))
+                or "@" in name
+                or "." in name
+            ):
+                continue
+            # Only include ethernet devtype entries (physical ports / DSA conduit)
+            if dev.get("devtype") not in ("ethernet", None):
+                continue
+
+            raw_speed = dev.get("speed")
+            speed_mbps, duplex = _parse_port_speed(raw_speed)
+
+            stats = dev.get("statistics", {})
+            ports.append({
+                "name": name,
+                "up": bool(dev.get("up", False)),
+                "speed_mbps": speed_mbps,
+                "duplex": duplex,
+                "rx_bytes": int(stats.get("rx_bytes", 0)),
+                "tx_bytes": int(stats.get("tx_bytes", 0)),
+                "rx_packets": int(stats.get("rx_packets", 0)),
+                "tx_packets": int(stats.get("tx_packets", 0)),
+            })
+
+        ports.sort(key=lambda p: p["name"])
+        return ports
 
     async def get_active_connections(self) -> int:
         """Return count of active network connections from nf_conntrack.

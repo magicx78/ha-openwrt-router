@@ -54,6 +54,9 @@ UBUS_NETWORK_OBJECT = "network.interface"
 UBUS_NETWORK_DUMP = "dump"
 UBUS_NETWORK_INTERFACE = "status"
 
+UBUS_DEVICE_OBJECT = "network.device"
+UBUS_DEVICE_STATUS = "status"
+
 UBUS_IWINFO_OBJECT = "iwinfo"
 UBUS_IWINFO_INFO = "info"
 UBUS_IWINFO_ASSOCLIST = "assoclist"
@@ -159,6 +162,7 @@ OPENWRT_MIN_VERSION = "19.07"
 
 # Coordinator data keys
 KEY_ROUTER_INFO = "router_info"
+KEY_PORT_STATS = "port_stats"
 KEY_UPTIME = "uptime"
 KEY_WAN_STATUS = "wan_status"
 KEY_WAN_CONNECTED = "wan_connected"
