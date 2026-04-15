@@ -78,7 +78,7 @@ async def async_setup_topology_panel(hass: HomeAssistant) -> None:
         webcomponent_name="openwrt-topology-panel",
         sidebar_title="Network Topology",
         sidebar_icon="mdi:graph-outline",
-        module_url=f"{_STATIC_URL}/topology-panel.js",
+        module_url=f"{_STATIC_URL}/dist/topology-bundle.js",
         require_admin=False,
         config={"apiBase": "/api/openwrt_topology/snapshot"},
     )
