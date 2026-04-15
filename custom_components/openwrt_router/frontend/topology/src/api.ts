@@ -153,8 +153,10 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
   for (const edge of interRouterEdges) {
     const apId = edge.to;
     if (apId === gwNode.id) continue;
+    // lan_uplink = confirmed wired, wifi_uplink = confirmed mesh,
+    // mesh_member = inferred (unknown) → show as wired to avoid false "mesh" label
     const uplinkType: UplinkType =
-      edge.relationship === 'lan_uplink' ? 'wired' : 'mesh';
+      edge.relationship === 'wifi_uplink' ? 'mesh' : 'wired';
     const backhaulSignal = (edge.attributes?.signal as number | undefined) ?? -60;
     uplinkMap.set(apId, { uplinkTo: edge.from, uplinkType, backhaulSignal });
   }
@@ -223,5 +225,16 @@ export interface HassLike {
  */
 export async function fetchTopologyData(hass: HassLike): Promise<TopologyData> {
   const snap = await hass.callApi<Snapshot>('GET', 'openwrt_topology/snapshot');
+
+  // Debug: log snapshot summary to browser console
+  console.debug('[openwrt-topology] snapshot received:', {
+    router_nodes: snap.nodes?.filter(n => n.type === 'router').length,
+    interface_nodes: snap.nodes?.filter(n => n.type === 'interface').length,
+    client_nodes: snap.nodes?.filter(n => n.type === 'client').length,
+    flat_clients: snap.clients?.length,
+    meta: snap.meta,
+    router_roles: snap.nodes?.filter(n => n.type === 'router').map(n => ({ id: n.id, role: n.role, label: n.label })),
+  });
+
   return adaptSnapshot(snap);
 }

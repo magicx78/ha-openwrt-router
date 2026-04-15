@@ -43,10 +43,12 @@ body {
 
 /* ── App shell ───────────────────────────────────────────────────────── */
 .topo-app {
+  height: 100%;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  position: relative; /* DetailPanel anchors to this */
 }
 
 /* ── Filter bar ──────────────────────────────────────────────────────── */
@@ -121,12 +123,15 @@ body {
   flex: 1;
   overflow-x: auto;
   overflow-y: auto;
+  /* Ensure proper scrolling inside HA panel */
+  min-height: 0;
 }
 
 .topo-canvas {
   position: relative;
   /* width + height set via inline style from layout */
   flex-shrink: 0;
+  background: var(--bg);
 }
 
 /* SVG overlay — connections layer */
@@ -484,7 +489,7 @@ body {
 
 /* ── Detail panel ────────────────────────────────────────────────────── */
 .detail-panel {
-  position: fixed;
+  position: absolute;
   top: 0;
   right: 0;
   bottom: 0;

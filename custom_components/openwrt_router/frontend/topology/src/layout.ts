@@ -17,23 +17,24 @@ import {
 
 // ── Fixed geometry constants ──────────────────────────────────────────────
 
-const CANVAS_PAD_X = 80;     // horizontal breathing room on each side
+const CANVAS_PAD_X = 60;     // horizontal breathing room on each side
 const CANVAS_PAD_TOP = 28;
 
 const INTERNET_R = 30;       // internet circle radius
 const GATEWAY_W = 224;
 const GATEWAY_H = 112;
-const AP_W = 180;
+const AP_W = 170;
 const AP_H = 100;
-const AP_SPACING = 280;      // center-to-center horizontal distance between APs
+const AP_SPACING_IDEAL = 260; // ideal center-to-center distance between APs
+const AP_SPACING_MIN   = 180; // minimum spacing — cards stay readable
 
 // Vertical Y of each row's center
-const INTERNET_CY = CANVAS_PAD_TOP + INTERNET_R;                 // ~58
-const GATEWAY_CY = INTERNET_CY + INTERNET_R + 44 + GATEWAY_H / 2; // ~188
-const AP_CY = GATEWAY_CY + GATEWAY_H / 2 + 88 + AP_H / 2;        // ~376
-const CLIENT_STRIP_H = 52;
-const CLIENT_STRIP_CY = AP_CY + AP_H / 2 + 12 + CLIENT_STRIP_H / 2; // ~464
-const CANVAS_H = CLIENT_STRIP_CY + CLIENT_STRIP_H / 2 + 36;      // ~526
+const INTERNET_CY = CANVAS_PAD_TOP + INTERNET_R;
+const GATEWAY_CY  = INTERNET_CY + INTERNET_R + 44 + GATEWAY_H / 2;
+const AP_CY       = GATEWAY_CY + GATEWAY_H / 2 + 88 + AP_H / 2;
+const CLIENT_STRIP_H  = 52;
+const CLIENT_STRIP_CY = AP_CY + AP_H / 2 + 12 + CLIENT_STRIP_H / 2;
+const CANVAS_H = CLIENT_STRIP_CY + CLIENT_STRIP_H / 2 + 36;
 
 // ── Main layout function ──────────────────────────────────────────────────
 
@@ -43,10 +44,15 @@ export function computeLayout(
 ): TopologyLayout {
   const n = data.accessPoints.length;
 
-  // Canvas width: widest of container, minimum for APs, or a hard minimum
-  const minForAPs = CANVAS_PAD_X * 2 + Math.max(n - 1, 0) * AP_SPACING + AP_W;
-  const cw = Math.max(containerWidth - 2, minForAPs, 880);
+  // Canvas always fits in the container — spacing shrinks if needed.
+  const cw = Math.max(containerWidth, 880);
   const cx = cw / 2;
+
+  // Dynamic AP spacing: never wider than the container.
+  const available = cw - 2 * CANVAS_PAD_X - AP_W;
+  const apSpacing = n > 1
+    ? Math.max(AP_SPACING_MIN, Math.min(AP_SPACING_IDEAL, available / (n - 1)))
+    : AP_SPACING_IDEAL;
 
   // ── Internet & Gateway (always centered) ─────────────────────────────
   const internetNode: NodeLayout = {
@@ -66,14 +72,14 @@ export function computeLayout(
   };
 
   // ── Access Points (evenly distributed, centered on canvas) ───────────
-  const totalSpan = Math.max(n - 1, 0) * AP_SPACING;
+  const totalSpan = Math.max(n - 1, 0) * apSpacing;
   const apStartCX = cx - totalSpan / 2;
 
   const apNodes = new Map<string, NodeLayout>();
   data.accessPoints.forEach((ap, i) => {
     apNodes.set(ap.id, {
       id: ap.id,
-      cx: apStartCX + i * AP_SPACING,
+      cx: apStartCX + i * apSpacing,
       cy: AP_CY,
       width: AP_W,
       height: AP_H,
@@ -148,7 +154,7 @@ export function computeLayout(
     apNodes,
     clientStripNodes,
     edges,
-    canvasWidth: cw,
+    canvasWidth: Math.max(cw, apStartCX + totalSpan + AP_W / 2 + CANVAS_PAD_X),
     canvasHeight: CANVAS_H,
   };
 }

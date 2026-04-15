@@ -51,16 +51,20 @@ class OpenWrtTopologyPanel extends HTMLElement {
   }
 
   private async _fetchAndRender() {
-    if (!this._hass) return;
+    if (!this._hass || !this._root) return;
     try {
       const topologyData = await fetchTopologyData(this._hass);
-      this._root?.render(
+      if (!this._root) return; // unmounted while fetching
+      this._root.render(
         <React.StrictMode>
           <TopologyView data={topologyData} />
         </React.StrictMode>,
       );
     } catch (err) {
-      this._root?.render(
+      // AbortError = HA navigation cancelled mid-fetch — not an error, just ignore
+      if ((err as Error)?.name === 'AbortError') return;
+      if (!this._root) return;
+      this._root.render(
         <div
           style={{
             color: 'var(--error-color, #db4437)',
@@ -68,7 +72,7 @@ class OpenWrtTopologyPanel extends HTMLElement {
             fontFamily: 'var(--paper-font-body1_-_font-family, sans-serif)',
           }}
         >
-          Failed to load topology: {String(err)}
+          Topology load failed: {String(err)}
         </div>,
       );
     }
