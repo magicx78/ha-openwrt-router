@@ -18,7 +18,8 @@ import { GatewayNode } from './components/GatewayNode';
 import { APNode } from './components/APNode';
 import { ClientStrip } from './components/ClientStrip';
 import { DetailPanel } from './components/DetailPanel';
-import { FilterBar } from './components/FilterBar';
+import { StatusBar } from './components/StatusBar';
+import { Sidebar } from './components/Sidebar';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -35,6 +36,9 @@ const MAX_ZOOM  = 3.0;
 const ZOOM_STEP = 0.12;
 
 export function TopologyView({ data }: Props) {
+  // ── Sidebar ──────────────────────────────────────────────────────────────
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
   // ── Zoom / Pan ──────────────────────────────────────────────────────────
   const [zoom, setZoom] = useState(1.0);
   const [pan,  setPan]  = useState({ x: 0, y: 0 });
@@ -63,6 +67,12 @@ export function TopologyView({ data }: Props) {
   const [searchQuery, setSearchQuery] = useState('');
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<SelectedEntity>(null);
+
+  // ── Fit view ─────────────────────────────────────────────────────────────
+  const fitView = useCallback(() => {
+    setZoom(1.0);
+    setPan({ x: 0, y: 0 });
+  }, []);
 
   // ── Wheel zoom (must be non-passive to call preventDefault) ─────────────
   useEffect(() => {
@@ -136,7 +146,7 @@ export function TopologyView({ data }: Props) {
   const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     // Don't start pan when clicking on interactive elements
-    if ((e.target as HTMLElement).closest('.node-card, .client-strip, .filter-bar, button, input')) return;
+    if ((e.target as HTMLElement).closest('.node-card, .client-strip, .status-bar, .topo-sidebar, button, input')) return;
     lastPos.current = { x: e.clientX, y: e.clientY };
     setDragging(true);
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -185,6 +195,8 @@ export function TopologyView({ data }: Props) {
     setSelectedEntity({ type: 'client', data: client, apName: ap?.name ?? client.apId });
   };
 
+  const totalNodes   = data.accessPoints.length + 1; // +1 for gateway
+  const onlineNodes  = [data.gateway, ...data.accessPoints].filter(n => n.status === 'online').length;
   const warningCount =
     data.accessPoints.filter(a => a.status !== 'online').length +
     data.clients.filter(c => c.status !== 'online').length;
@@ -197,116 +209,130 @@ export function TopologyView({ data }: Props) {
   // ── Render ───────────────────────────────────────────────────────────────
   return (
     <div className="topo-app">
-      <FilterBar
-        filter={filter}
-        searchQuery={searchQuery}
-        totalClients={data.clients.length}
+      {/* ── Left sidebar ─────────────────────────────────────── */}
+      <Sidebar
+        open={sidebarOpen}
         warningCount={warningCount}
-        onFilterChange={setFilter}
-        onSearchChange={setSearchQuery}
+        onToggle={() => setSidebarOpen(o => !o)}
       />
 
-      {/* Zoom/pan scroll container */}
-      <div
-        ref={scrollRef}
-        className="topo-scroll"
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-        onClick={e => { if (e.currentTarget === e.target) setSelectedEntity(null); }}
-      >
-        {/* Zoom wrapper — transform applied here */}
+      {/* ── Main column ─────────────────────────────────────── */}
+      <div className="topo-main">
+        <StatusBar
+          filter={filter}
+          searchQuery={searchQuery}
+          totalNodes={totalNodes}
+          onlineNodes={onlineNodes}
+          totalClients={data.clients.length}
+          warningCount={warningCount}
+          pingMs={data.gateway.pingMs}
+          onFilterChange={setFilter}
+          onSearchChange={setSearchQuery}
+          onFitView={fitView}
+        />
+
+        {/* Zoom/pan scroll container */}
         <div
-          ref={wrapperRef}
-          className={`topo-zoom-wrapper${dragging ? ' dragging' : ''}`}
-          style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+          ref={scrollRef}
+          className="topo-scroll"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          onClick={e => { if (e.currentTarget === e.target) setSelectedEntity(null); }}
         >
-          {/* SVG connections layer — absolute overlay, behind flex nodes */}
-          <svg
-            className="connections-svg"
-            viewBox={`0 0 ${svgSize.w} ${svgSize.h}`}
-            aria-hidden="true"
+          {/* Zoom wrapper — transform applied here */}
+          <div
+            ref={wrapperRef}
+            className={`topo-zoom-wrapper${dragging ? ' dragging' : ''}`}
+            style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
           >
-            <ConnectionLayer
-              edges={edges}
-              highlightedEdges={hoverCtx.highlightedEdges}
-              dimmedEdges={dimmedEdges}
-            />
-          </svg>
+            {/* SVG connections layer — absolute overlay, behind flex nodes */}
+            <svg
+              className="connections-svg"
+              viewBox={`0 0 ${svgSize.w} ${svgSize.h}`}
+              aria-hidden="true"
+            >
+              <ConnectionLayer
+                edges={edges}
+                highlightedEdges={hoverCtx.highlightedEdges}
+                dimmedEdges={dimmedEdges}
+              />
+            </svg>
 
-          {/* ── Flexbox layout tree ── */}
-          <div className="topo-layout">
+            {/* ── Flexbox layout tree ── */}
+            <div className="topo-layout">
 
-            {/* Row 1: Internet */}
-            <div className="topo-row topo-row--internet">
-              <div ref={setNodeRef('internet')} style={{ width: 'fit-content' }}>
-                <InternetNode />
-              </div>
-            </div>
-
-            {/* Row 2: Gateway (+ optional gateway client strip below) */}
-            <div className="topo-row topo-row--gateway">
-              <div className="topo-col-gateway">
-                <div ref={setNodeRef(data.gateway.id)} style={{ width: 'fit-content' }}>
-                  <GatewayNode
-                    gateway={data.gateway}
-                    selected={selectedEntity?.type === 'gateway'}
-                    dimmed={hoverCtx.dimmedNodes.has(data.gateway.id)}
-                    onSelect={selectGateway}
-                    onHover={setHoveredNodeId}
-                    clientCount={gwClients.length > 0 ? gwClients.length : undefined}
-                  />
+              {/* Row 1: Internet */}
+              <div className="topo-row topo-row--internet">
+                <div ref={setNodeRef('internet')} style={{ width: 'fit-content' }}>
+                  <InternetNode />
                 </div>
-                {clientsForAP(data.gateway.id).length > 0 && (
-                  <ClientStrip
-                    clients={clientsForAP(data.gateway.id)}
-                    dimmed={hoverCtx.dimmedNodes.has(data.gateway.id)}
-                    onSelectClient={selectClient}
-                  />
-                )}
               </div>
-            </div>
 
-            {/* Row 3: Access Points — flex-wrap so they reflow at any width */}
-            <div className="topo-row topo-row--aps">
-              {data.accessPoints.map(ap => {
-                const apClients = clientsForAP(ap.id);
-                const isHidden =
-                  filter === 'clients' ||
-                  (filter === 'warnings' && ap.status === 'online' && apClients.length === 0);
-                if (isHidden) return null;
-
-                return (
-                  <div key={ap.id} className="topo-col-ap">
-                    <div ref={setNodeRef(ap.id)} style={{ width: 'fit-content' }}>
-                      <APNode
-                        ap={ap}
-                        selected={selectedEntity?.type === 'ap' && selectedEntity.data.id === ap.id}
-                        dimmed={hoverCtx.dimmedNodes.has(ap.id)}
-                        onSelect={() => selectAP(ap)}
-                        onHover={setHoveredNodeId}
-                      />
-                    </div>
-                    <ClientStrip
-                      clients={apClients}
-                      dimmed={hoverCtx.dimmedNodes.has(ap.id)}
-                      onSelectClient={selectClient}
+              {/* Row 2: Gateway (+ optional gateway client strip below) */}
+              <div className="topo-row topo-row--gateway">
+                <div className="topo-col-gateway">
+                  <div ref={setNodeRef(data.gateway.id)} style={{ width: 'fit-content' }}>
+                    <GatewayNode
+                      gateway={data.gateway}
+                      selected={selectedEntity?.type === 'gateway'}
+                      dimmed={hoverCtx.dimmedNodes.has(data.gateway.id)}
+                      onSelect={selectGateway}
+                      onHover={setHoveredNodeId}
+                      clientCount={gwClients.length > 0 ? gwClients.length : undefined}
                     />
                   </div>
-                );
-              })}
-            </div>
+                  {clientsForAP(data.gateway.id).length > 0 && (
+                    <ClientStrip
+                      clients={clientsForAP(data.gateway.id)}
+                      dimmed={hoverCtx.dimmedNodes.has(data.gateway.id)}
+                      onSelectClient={selectClient}
+                    />
+                  )}
+                </div>
+              </div>
 
-          </div>{/* end .topo-layout */}
-        </div>{/* end .topo-zoom-wrapper */}
-      </div>{/* end .topo-scroll */}
+              {/* Row 3: Access Points — flex-wrap so they reflow at any width */}
+              <div className="topo-row topo-row--aps">
+                {data.accessPoints.map(ap => {
+                  const apClients = clientsForAP(ap.id);
+                  const isHidden =
+                    filter === 'clients' ||
+                    (filter === 'warnings' && ap.status === 'online' && apClients.length === 0);
+                  if (isHidden) return null;
 
-      {/* Detail panel (slides in from right / up from bottom on mobile) */}
-      <DetailPanel
-        entity={selectedEntity}
-        onClose={() => setSelectedEntity(null)}
-      />
+                  return (
+                    <div key={ap.id} className="topo-col-ap">
+                      <div ref={setNodeRef(ap.id)} style={{ width: 'fit-content' }}>
+                        <APNode
+                          ap={ap}
+                          selected={selectedEntity?.type === 'ap' && selectedEntity.data.id === ap.id}
+                          dimmed={hoverCtx.dimmedNodes.has(ap.id)}
+                          onSelect={() => selectAP(ap)}
+                          onHover={setHoveredNodeId}
+                        />
+                      </div>
+                      <ClientStrip
+                        clients={apClients}
+                        dimmed={hoverCtx.dimmedNodes.has(ap.id)}
+                        onSelectClient={selectClient}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+
+            </div>{/* end .topo-layout */}
+          </div>{/* end .topo-zoom-wrapper */}
+        </div>{/* end .topo-scroll */}
+
+        {/* Detail panel (slides in from right / up from bottom on mobile) */}
+        <DetailPanel
+          entity={selectedEntity}
+          onClose={() => setSelectedEntity(null)}
+        />
+      </div>{/* end .topo-main */}
     </div>
   );
 }
