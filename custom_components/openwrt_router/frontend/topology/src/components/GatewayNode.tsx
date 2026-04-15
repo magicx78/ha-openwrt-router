@@ -10,9 +10,10 @@ interface Props {
   dimmed: boolean;
   onSelect: () => void;
   onHover: (id: string | null) => void;
+  clientCount?: number;
 }
 
-export function GatewayNode({ gateway, layout, selected, dimmed, onSelect, onHover }: Props) {
+export function GatewayNode({ gateway, layout, selected, dimmed, onSelect, onHover, clientCount }: Props) {
   const cls = [
     'node-card gateway-card',
     selected ? 'selected' : '',
@@ -52,6 +53,12 @@ export function GatewayNode({ gateway, layout, selected, dimmed, onSelect, onHov
           <span>Uptime</span>
           <span>{gateway.uptime}</span>
         </div>
+        {clientCount != null && clientCount > 0 && (
+          <div className="gateway-card__row">
+            <span>Clients</span>
+            <span><strong>{clientCount}</strong></span>
+          </div>
+        )}
       </div>
     </div>
   );

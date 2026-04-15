@@ -308,17 +308,35 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     # Deduplicate clients (same MAC on multiple APs during roaming)
     deduped_clients = _deduplicate_clients(all_clients)
 
-    # Deduplicate client nodes
-    seen_client_ids: set[str] = set()
+    # Build MAC → winning ap_mac map from the deduplicated client list.
+    # _deduplicate_clients() picks the router with the strongest signal.
+    # We must match client *nodes* to this winner so that ap_mac in the
+    # topology correctly reflects which router the client is associated with.
+    winning_ap_mac: dict[str, str] = {
+        c["mac"]: c.get("ap_mac", "")
+        for c in deduped_clients
+        if c.get("mac")
+    }
+
+    # Deduplicate client nodes — prefer the node whose ap_mac matches the
+    # dedup winner (strongest-signal router).  If we encounter a duplicate
+    # node ID and the new node has the winning ap_mac, replace the earlier one.
+    seen_client_ids: dict[str, int] = {}  # node_id → index in deduped_nodes
     deduped_nodes: list[dict[str, Any]] = []
     for node in all_nodes:
         if node.get("type") == "client":
-            if node["id"] in seen_client_ids:
-                continue
-            # Keep only the node whose MAC is in deduped_clients
+            node_id = node["id"]
             mac = (node.get("attributes", {}).get("mac") or "").lower()
-            if mac and any(c.get("mac") == mac for c in deduped_clients):
-                seen_client_ids.add(node["id"])
+
+            if node_id in seen_client_ids:
+                # Replace the stored node if this one has the winning ap_mac
+                node_ap_mac = (node.get("attributes", {}).get("ap_mac") or "")
+                if mac and node_ap_mac == winning_ap_mac.get(mac, ""):
+                    deduped_nodes[seen_client_ids[node_id]] = node
+                continue
+
+            if mac and mac in winning_ap_mac:
+                seen_client_ids[node_id] = len(deduped_nodes)
                 deduped_nodes.append(node)
             elif not mac:
                 deduped_nodes.append(node)

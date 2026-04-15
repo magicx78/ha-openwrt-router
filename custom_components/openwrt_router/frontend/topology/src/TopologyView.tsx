@@ -11,7 +11,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { TopologyData, FilterType, AccessPoint, Client, Gateway } from './types';
-import { computeLayout, computeHoverContext } from './layout';
+import { computeLayout, computeHoverContext, CLIENT_STRIP_H } from './layout';
 import { ConnectionLayer } from './components/ConnectionLayer';
 import { InternetNode } from './components/InternetNode';
 import { GatewayNode } from './components/GatewayNode';
@@ -68,6 +68,9 @@ export function TopologyView({ data }: Props) {
       || ap.ip.includes(searchQuery);
     return true;
   });
+
+  // Clients directly connected to the gateway router
+  const gwClients = data.clients.filter(c => c.apId === data.gateway.id);
 
   const clientsForAP = useCallback(
     (apId: string): Client[] => {
@@ -171,7 +174,23 @@ export function TopologyView({ data }: Props) {
               dimmed={hoverCtx.dimmedNodes.has(data.gateway.id)}
               onSelect={selectGateway}
               onHover={setHoveredNodeId}
+              clientCount={gwClients.length > 0 ? gwClients.length : undefined}
             />
+            {/* Gateway client strip — clients connected directly to the gateway router */}
+            {gwClients.length > 0 && (
+              <ClientStrip
+                clients={gwClients}
+                layout={{
+                  id: `strip-${data.gateway.id}`,
+                  cx: layout.gatewayNode.cx,
+                  cy: layout.gatewayNode.cy + layout.gatewayNode.height / 2 + 12 + CLIENT_STRIP_H / 2,
+                  width: layout.gatewayNode.width,
+                  height: CLIENT_STRIP_H,
+                }}
+                dimmed={hoverCtx.dimmedNodes.has(data.gateway.id)}
+                onSelectClient={selectClient}
+              />
+            )}
 
             {/* Access Points + Client Strips */}
             {data.accessPoints.map(ap => {
