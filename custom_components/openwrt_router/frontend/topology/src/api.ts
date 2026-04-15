@@ -216,25 +216,34 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
 /** HA hass object — only the parts we need. */
 export interface HassLike {
   callApi<T>(method: 'GET' | 'POST', path: string): Promise<T>;
+  // Available on the real hass object; used to extract Bearer token.
+  auth?: { accessToken?: string };
 }
 
 /**
- * Fetch topology snapshot using the HA hass.callApi() method.
- * This uses the already-authenticated HA WebSocket connection and
- * avoids any manual token extraction.
+ * Fetch topology snapshot.
+ *
+ * Preferred: window.fetch() with Bearer token extracted from hass.auth.
+ * This bypasses HA's navigation AbortController (which fires "Transition was
+ * skipped" and cancels callApi calls during panel transitions).
+ *
+ * Fallback: hass.callApi() — used if no token is available.
  */
 export async function fetchTopologyData(hass: HassLike): Promise<TopologyData> {
-  const snap = await hass.callApi<Snapshot>('GET', 'openwrt_topology/snapshot');
+  const token = (hass as any).auth?.accessToken as string | undefined;
+  let snap: Snapshot;
 
-  // Debug: log snapshot summary to browser console
-  console.debug('[openwrt-topology] snapshot received:', {
-    router_nodes: snap.nodes?.filter(n => n.type === 'router').length,
-    interface_nodes: snap.nodes?.filter(n => n.type === 'interface').length,
-    client_nodes: snap.nodes?.filter(n => n.type === 'client').length,
-    flat_clients: snap.clients?.length,
-    meta: snap.meta,
-    router_roles: snap.nodes?.filter(n => n.type === 'router').map(n => ({ id: n.id, role: n.role, label: n.label })),
-  });
+  if (token) {
+    // Native fetch — no AbortSignal, not affected by HA navigation state.
+    const response = await window.fetch('/api/openwrt_topology/snapshot', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    snap = (await response.json()) as Snapshot;
+  } else {
+    // Fallback: callApi (may throw AbortError during HA panel transitions)
+    snap = await hass.callApi<Snapshot>('GET', 'openwrt_topology/snapshot');
+  }
 
   return adaptSnapshot(snap);
 }
