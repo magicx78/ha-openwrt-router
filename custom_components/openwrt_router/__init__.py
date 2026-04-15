@@ -126,6 +126,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         hass=hass,
         api=api,
         entry_title=entry.title,
+        entry=entry,
     )
 
     # First refresh – raises ConfigEntryNotReady if it fails

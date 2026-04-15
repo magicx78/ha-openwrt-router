@@ -5,11 +5,12 @@
  * All data is passed in via props; the panel has no data-fetching logic.
  */
 
-import React from 'react';
-import { Gateway, AccessPoint, Client, NodeStatus } from '../types';
+import React, { useState } from 'react';
+import { Gateway, AccessPoint, Client, NodeStatus, DdnsService } from '../types';
 import { IconX } from './Icons';
 import { StatusDot, statusLabel } from './StatusDot';
 import { SignalBar } from './SignalBar';
+import { SpeedChart } from './SpeedChart';
 import { signalQuality } from '../layout';
 import { formatConnectedSince, formatLeaseExpiry } from '../api';
 
@@ -52,6 +53,12 @@ export function DetailPanel({ entity, onClose }: Props) {
 // ── Gateway detail ────────────────────────────────────────────────────────
 
 function GatewayDetail({ data }: { data: Gateway }) {
+  const [chartMode, setChartMode] = useState<'speed' | 'ping'>('speed');
+  const history = data.dslHistory ?? [];
+  const dsl = data.dslStats;
+  const hasDsl = !!dsl && dsl.downstream_kbps > 0;
+  const hasPing = data.pingMs != null;
+
   return (
     <>
       <div className="detail-section">
@@ -65,8 +72,122 @@ function GatewayDetail({ data }: { data: Gateway }) {
         <Row label="LAN IP"  value={data.ip} />
         <Row label="WAN IP"  value={data.wanIp} />
         <Row label="Uptime"  value={data.uptime} />
+        {hasPing && <Row label="Ping (8.8.8.8)" value={`${data.pingMs} ms`} />}
       </div>
+
+      {hasDsl && (
+        <div className="detail-section">
+          <div className="detail-section__heading">DSL (Fritz!Box)</div>
+          <Row label="↓ Sync"        value={`${(dsl!.downstream_kbps / 1000).toFixed(1)} Mbps`} />
+          <Row label="↑ Sync"        value={`${(dsl!.upstream_kbps / 1000).toFixed(1)} Mbps`} />
+          <Row label="↓ Max"         value={`${(dsl!.downstream_max_kbps / 1000).toFixed(1)} Mbps`} />
+          <Row label="↑ Max"         value={`${(dsl!.upstream_max_kbps / 1000).toFixed(1)} Mbps`} />
+          {dsl!.snr_down_db > 0 && <Row label="SNR ↓"  value={`${dsl!.snr_down_db} dB`} />}
+          {dsl!.snr_up_db > 0   && <Row label="SNR ↑"  value={`${dsl!.snr_up_db} dB`} />}
+          {dsl!.attn_down_db > 0 && <Row label="Dämpfung ↓" value={`${dsl!.attn_down_db} dB`} />}
+          {dsl!.attn_up_db > 0   && <Row label="Dämpfung ↑" value={`${dsl!.attn_up_db} dB`} />}
+        </div>
+      )}
+
+      {history.length >= 2 && (
+        <div className="detail-section">
+          <div className="detail-section__heading" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span>24h Verlauf</span>
+            <span style={{ display: 'flex', gap: 6 }}>
+              <ChartTabBtn active={chartMode === 'speed'} onClick={() => setChartMode('speed')}>
+                DSL
+              </ChartTabBtn>
+              <ChartTabBtn active={chartMode === 'ping'} onClick={() => setChartMode('ping')}>
+                Ping
+              </ChartTabBtn>
+            </span>
+          </div>
+          <SpeedChart history={history} width={310} height={110} mode={chartMode} />
+        </div>
+      )}
+
+      {(data.ddnsServices ?? []).length > 0 && (
+        <div className="detail-section">
+          <div className="detail-section__heading">DuckDNS / DDNS</div>
+          {(data.ddnsServices ?? []).map(svc => (
+            <DdnsRow key={svc.section} svc={svc} />
+          ))}
+        </div>
+      )}
     </>
+  );
+}
+
+function ChartTabBtn({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        fontSize: 10,
+        padding: '1px 7px',
+        borderRadius: 4,
+        border: 'none',
+        cursor: 'pointer',
+        background: active ? 'var(--accent, #60a5fa)' : 'rgba(255,255,255,0.08)',
+        color: active ? '#fff' : 'var(--text-secondary, #8899aa)',
+        fontWeight: active ? 600 : 400,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DdnsRow({ svc }: { svc: DdnsService }) {
+  const statusColor = svc.status === 'ok'
+    ? '#4ade80'
+    : svc.status === 'error'
+    ? '#f87171'
+    : '#fb923c';
+
+  const lastUpdateStr = svc.last_update
+    ? new Date(svc.last_update * 1000).toLocaleString('de-DE', {
+        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+      })
+    : null;
+
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary, #e0eaf8)' }}>
+          {svc.domain || svc.section}
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
+          <span style={{ width: 7, height: 7, borderRadius: '50%', background: statusColor, display: 'inline-block' }} />
+          <span style={{ color: statusColor }}>
+            {svc.status === 'ok' ? 'Aktiv' : svc.status === 'error' ? 'Fehler' : 'Unbekannt'}
+          </span>
+        </span>
+      </div>
+      {svc.ip && (
+        <div style={{ fontSize: 11, color: 'var(--text-secondary, #8899aa)' }}>
+          IP: {svc.ip}
+        </div>
+      )}
+      {lastUpdateStr && (
+        <div style={{ fontSize: 11, color: 'var(--text-secondary, #8899aa)' }}>
+          Zuletzt: {lastUpdateStr}
+        </div>
+      )}
+      {svc.service_name && (
+        <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 1 }}>
+          {svc.service_name}
+        </div>
+      )}
+    </div>
   );
 }
 

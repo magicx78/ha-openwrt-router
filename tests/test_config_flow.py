@@ -9,6 +9,7 @@ from custom_components.openwrt_router.api import (
     OpenWrtAuthError,
     OpenWrtConnectionError,
     OpenWrtResponseError,
+    OpenWrtRpcdSetupError,
     OpenWrtTimeoutError,
 )
 from custom_components.openwrt_router.config_flow import (
@@ -21,6 +22,7 @@ from custom_components.openwrt_router.const import (
     ERROR_CANNOT_CONNECT,
     ERROR_INVALID_AUTH,
     ERROR_INVALID_HOST,
+    ERROR_RPCD_SETUP,
     ERROR_TIMEOUT,
     ERROR_UNKNOWN,
     PROTOCOL_HTTP,
@@ -212,6 +214,169 @@ class TestProtocolStep:
         result = await flow.async_step_protocol(user_input=None)
         assert result["type"] == "form"
         assert result["step_id"] == "protocol"
+
+
+class TestUserStepRpcdSetup:
+    """Tests for the new rpcd_setup_required error in the user step."""
+
+    @pytest.mark.asyncio
+    async def test_rpcd_setup_error_shows_rpcd_error(self):
+        flow = _make_flow()
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtRpcdSetupError("rpcd down")):
+            result = await flow.async_step_user(user_input={
+                "host": "10.10.10.4",
+                "port": 80,
+                "username": "root",
+                "password": "test",
+            })
+        assert result["type"] == "form"
+        assert result["errors"]["base"] == ERROR_RPCD_SETUP
+
+    @pytest.mark.asyncio
+    async def test_rpcd_setup_error_not_swallowed_as_auth_error(self):
+        """OpenWrtRpcdSetupError must NOT map to ERROR_INVALID_AUTH."""
+        flow = _make_flow()
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtRpcdSetupError("rpcd down")):
+            result = await flow.async_step_user(user_input={
+                "host": "10.10.10.4",
+                "port": 80,
+                "username": "root",
+                "password": "test",
+            })
+        assert result["errors"]["base"] != ERROR_INVALID_AUTH
+
+
+def _make_reauth_flow(entry_data: dict):
+    """Create a flow with a mocked reauth entry."""
+    flow = OpenWrtConfigFlow()
+    flow.hass = MagicMock()
+    flow.context = {"source": "reauth", "entry_id": "test_id"}
+    mock_entry = MagicMock()
+    mock_entry.data = entry_data
+    flow._get_reauth_entry = MagicMock(return_value=mock_entry)
+    return flow, mock_entry
+
+
+_REAUTH_DATA = {
+    "host": "10.10.10.4",
+    "port": 80,
+    "username": "root",
+    "password": "secret",
+}
+
+
+class TestReauthDiagnosis:
+    """async_step_reauth should diagnose first, never blindly ask for password."""
+
+    @pytest.mark.asyncio
+    async def test_existing_credentials_work_auto_resolves(self):
+        """If existing credentials still work → silent reload, no form shown."""
+        flow, entry = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(flow, "_validate_input", return_value={"hostname": "AP4"}), \
+             patch.object(flow, "async_update_reload_and_abort", return_value={"type": "abort", "reason": "reauth_successful"}):
+            result = await flow.async_step_reauth({})
+        assert result["type"] == "abort"
+
+    @pytest.mark.asyncio
+    async def test_rpcd_setup_error_routes_to_rpcd_setup_step(self):
+        flow, entry = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtRpcdSetupError("rpcd down")):
+            result = await flow.async_step_reauth({})
+        assert result["type"] == "form"
+        assert result["step_id"] == "reauth_rpcd_setup"
+
+    @pytest.mark.asyncio
+    async def test_connection_error_routes_to_cannot_connect_step(self):
+        flow, entry = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtConnectionError("down")):
+            result = await flow.async_step_reauth({})
+        assert result["type"] == "form"
+        assert result["step_id"] == "reauth_cannot_connect"
+
+    @pytest.mark.asyncio
+    async def test_timeout_error_routes_to_cannot_connect_step(self):
+        flow, entry = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtTimeoutError("slow")):
+            result = await flow.async_step_reauth({})
+        assert result["type"] == "form"
+        assert result["step_id"] == "reauth_cannot_connect"
+
+    @pytest.mark.asyncio
+    async def test_auth_error_routes_to_confirm_step(self):
+        """Wrong password → show password form."""
+        flow, entry = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtAuthError("bad")):
+            result = await flow.async_step_reauth({})
+        assert result["type"] == "form"
+        assert result["step_id"] == "reauth_confirm"
+
+
+class TestReauthRpcdSetupStep:
+    """async_step_reauth_rpcd_setup: shows instructions, retries on submit."""
+
+    @pytest.mark.asyncio
+    async def test_shows_form_on_first_call(self):
+        flow, _ = _make_reauth_flow(_REAUTH_DATA)
+        result = await flow.async_step_reauth_rpcd_setup(user_input=None)
+        assert result["type"] == "form"
+        assert result["step_id"] == "reauth_rpcd_setup"
+
+    @pytest.mark.asyncio
+    async def test_retry_success_auto_resolves(self):
+        flow, _ = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(flow, "_validate_input", return_value={"hostname": "AP4"}), \
+             patch.object(flow, "async_update_reload_and_abort", return_value={"type": "abort", "reason": "reauth_successful"}):
+            result = await flow.async_step_reauth_rpcd_setup(user_input={})
+        assert result["type"] == "abort"
+
+    @pytest.mark.asyncio
+    async def test_retry_still_failing_shows_error(self):
+        flow, _ = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtRpcdSetupError("still down")):
+            result = await flow.async_step_reauth_rpcd_setup(user_input={})
+        assert result["type"] == "form"
+        assert result["errors"]["base"] == ERROR_RPCD_SETUP
+
+    @pytest.mark.asyncio
+    async def test_retry_auth_error_switches_to_confirm(self):
+        flow, _ = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtAuthError("wrong pw")):
+            result = await flow.async_step_reauth_rpcd_setup(user_input={})
+        assert result["step_id"] == "reauth_confirm"
+
+
+class TestReauthCannotConnectStep:
+    """async_step_reauth_cannot_connect: shows message, retries on submit."""
+
+    @pytest.mark.asyncio
+    async def test_shows_form_on_first_call(self):
+        flow, _ = _make_reauth_flow(_REAUTH_DATA)
+        result = await flow.async_step_reauth_cannot_connect(user_input=None)
+        assert result["type"] == "form"
+        assert result["step_id"] == "reauth_cannot_connect"
+
+    @pytest.mark.asyncio
+    async def test_retry_success_auto_resolves(self):
+        flow, _ = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(flow, "_validate_input", return_value={"hostname": "AP4"}), \
+             patch.object(flow, "async_update_reload_and_abort", return_value={"type": "abort", "reason": "reauth_successful"}):
+            result = await flow.async_step_reauth_cannot_connect(user_input={})
+        assert result["type"] == "abort"
+
+    @pytest.mark.asyncio
+    async def test_retry_still_failing_shows_error(self):
+        flow, _ = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtConnectionError("still down")):
+            result = await flow.async_step_reauth_cannot_connect(user_input={})
+        assert result["type"] == "form"
+        assert result["errors"]["base"] == ERROR_CANNOT_CONNECT
+
+    @pytest.mark.asyncio
+    async def test_retry_rpcd_setup_switches_step(self):
+        flow, _ = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(flow, "_validate_input", side_effect=OpenWrtRpcdSetupError("rpcd")):
+            result = await flow.async_step_reauth_cannot_connect(user_input={})
+        assert result["step_id"] == "reauth_rpcd_setup"
 
 
 class TestBuildSchemas:

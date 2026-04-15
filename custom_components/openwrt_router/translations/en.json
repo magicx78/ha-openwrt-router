@@ -1,4 +1,24 @@
 {
+  "options": {
+    "step": {
+      "init": {
+        "title": "Fritz!Box DSL Modem",
+        "description": "Optional: Fritz!Box credentials for DSL statistics and 24h speed chart. Leave empty to disable.",
+        "data": {
+          "fritzbox_host": "Fritz!Box Host / IP",
+          "fritzbox_port": "TR-064 Port",
+          "fritzbox_user": "Username",
+          "fritzbox_password": "Password"
+        },
+        "data_description": {
+          "fritzbox_host": "IP address of the Fritz!Box modem (e.g. 172.16.1.254)",
+          "fritzbox_port": "TR-064 port, default 49000",
+          "fritzbox_user": "Fritz!Box username",
+          "fritzbox_password": "Fritz!Box password"
+        }
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {
@@ -17,9 +37,17 @@
           "password": "Router password"
         }
       },
+      "reauth_rpcd_setup": {
+        "title": "rpcd Not Responding on {host}",
+        "description": "The router **{host}** is blocking authentication — rpcd may not be configured.\n\nSSH into the router and run:\n\n`opkg update && opkg install rpcd rpcd-mod-rpcsys && uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock' && uci set rpcd.@rpcd[0].timeout=30 && uci commit rpcd && service rpcd restart`\n\nThen click **Submit** to retry."
+      },
+      "reauth_cannot_connect": {
+        "title": "Router Unreachable: {host}",
+        "description": "Cannot reach **{host}**. Make sure the router is powered on and reachable on the network.\n\nClick **Submit** to retry."
+      },
       "reauth_confirm": {
         "title": "Re-authenticate with OpenWrt Router",
-        "description": "The session with **{host}** (user: {username}) has expired. Please enter your password again.",
+        "description": "The credentials for **{host}** (user: {username}) are no longer valid. Please enter the new password.",
         "data": {
           "password": "Password"
         }
@@ -30,7 +58,8 @@
       "invalid_auth": "Authentication failed. Check the username and password.",
       "invalid_host": "Invalid host address. Use a valid IP or hostname.",
       "timeout": "Connection timed out. The router may be unreachable or overloaded.",
-      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details."
+      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details.",
+      "rpcd_setup_required": "rpcd is not configured on this router. SSH into the router and run: opkg update && opkg install rpcd rpcd-mod-rpcsys && uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock' && uci set rpcd.@rpcd[0].timeout=30 && uci commit rpcd && service rpcd restart"
     },
     "abort": {
       "already_configured": "This router is already configured.",

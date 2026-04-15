@@ -27,6 +27,53 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+
+def _seconds_since(value: Any) -> int | None:
+    """Convert connected_since to elapsed seconds.
+
+    The coordinator stores connected_since as:
+    - int/float: seconds (from hostapd connected_time, initial api.py value)
+    - str: ISO timestamp (coordinator.py overwrites with isoformat())
+
+    Returns elapsed seconds as int, or None if not parseable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and value > 0:
+        return int(value)
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            diff = (datetime.now(timezone.utc) - dt).total_seconds()
+            return max(0, int(diff))
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def _band_for_radio(ifname: str, band_map: dict[str, str]) -> str:
+    """Resolve band for a client's radio interface name.
+
+    Two lookup strategies:
+    1. Direct match (iwinfo path): ifname = 'phy0-ap0' → band_map['phy0-ap0']
+    2. phy→radio mapping (UCI path): 'phy0-ap0' → phy0 index 0 → 'radio0'
+       UCI radios have name='radio0' but ifname='' so band_map is keyed by name.
+    """
+    if not ifname:
+        return ""
+    band = band_map.get(ifname, "")
+    if band:
+        return band
+    # UCI fallback: phy0-ap0 → extract phy index → radio<N>
+    m = re.match(r"^phy(\d+)", ifname)
+    if m:
+        band = band_map.get(f"radio{m.group(1)}", "")
+        if band:
+            return band
+    return ""
+
 from .coordinator import OpenWrtCoordinatorData
 
 # Topology schema version — stays in sync with provisioning server
@@ -160,15 +207,23 @@ def build_topology_snapshot(
     }
 
     # ── Build ifname→ssid/band lookup from wifi_radios for consistent labels ──
+    # Keys: physical ifname (iwinfo path, e.g. 'phy0-ap0') AND radio name
+    # (UCI path, e.g. 'radio0'). UCI path leaves ifname='', so we key by name
+    # to support the phy→radio fallback in _band_for_radio().
     _radio_ssid_map: dict[str, str] = {}
     _radio_section_map: dict[str, str] = {}
     _radio_band_map: dict[str, str] = {}
     for _radio in data.wifi_radios or []:
         _rif = _radio.get("ifname", "")
+        _rname = _radio.get("name", "")
+        _band = _radio.get("band", "")
         if _rif:
             _radio_ssid_map[_rif] = _radio.get("ssid", "")
             _radio_section_map[_rif] = _radio.get("uci_section", "")
-            _radio_band_map[_rif] = _radio.get("band", "")
+            _radio_band_map[_rif] = _band
+        # Also key by radio name (UCI path: 'radio0', 'radio1')
+        if _rname and _rname not in _radio_band_map:
+            _radio_band_map[_rname] = _band
 
     # ── AP interface nodes ─────────────────────────────────────────
     for ap in data.ap_interfaces or []:
@@ -314,9 +369,9 @@ def build_topology_snapshot(
                 "hostname": client.get("hostname"),
                 "ssid": client.get("ssid"),
                 "radio": c_radio,
-                "band": _radio_band_map.get(c_radio, ""),
+                "band": _band_for_radio(c_radio, _radio_band_map),
                 "signal": c_signal,       # None stays None
-                "connected_since": client.get("connected_since"),
+                "connected_since": _seconds_since(client.get("connected_since")),
                 "dhcp_expires": client.get("dhcp_expires"),
             },
         })

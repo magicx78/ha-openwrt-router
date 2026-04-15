@@ -10,19 +10,27 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import (
     OpenWrtAPI,
     OpenWrtAuthError,
     OpenWrtConnectionError,
+    OpenWrtRpcdSetupError,
     OpenWrtTimeoutError,
     OpenWrtResponseError,
 )
 from .const import (
+    CONF_FRITZBOX_HOST,
+    CONF_FRITZBOX_PASSWORD,
+    CONF_FRITZBOX_PORT,
+    CONF_FRITZBOX_USER,
     CONF_PROTOCOL,
+    DEFAULT_FRITZBOX_HOST,
+    DEFAULT_FRITZBOX_PORT,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL,
     DEFAULT_USERNAME,
@@ -30,6 +38,7 @@ from .const import (
     ERROR_CANNOT_CONNECT,
     ERROR_INVALID_AUTH,
     ERROR_INVALID_HOST,
+    ERROR_RPCD_SETUP,
     ERROR_TIMEOUT,
     ERROR_UNKNOWN,
     PROTOCOL_HTTP,
@@ -69,6 +78,39 @@ def _validate_host(host: str) -> str | None:
     return None
 
 
+class OpenWrtOptionsFlow(OptionsFlow):
+    """Options flow — configure Fritz!Box modem credentials per router entry."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        opts = self.config_entry.options
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_FRITZBOX_HOST,
+                    default=opts.get(CONF_FRITZBOX_HOST, DEFAULT_FRITZBOX_HOST),
+                ): str,
+                vol.Optional(
+                    CONF_FRITZBOX_PORT,
+                    default=opts.get(CONF_FRITZBOX_PORT, DEFAULT_FRITZBOX_PORT),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+                vol.Optional(
+                    CONF_FRITZBOX_USER,
+                    default=opts.get(CONF_FRITZBOX_USER, ""),
+                ): str,
+                vol.Optional(
+                    CONF_FRITZBOX_PASSWORD,
+                    default=opts.get(CONF_FRITZBOX_PASSWORD, ""),
+                ): str,
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
+
+
 class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the config flow for OpenWrt Router.
 
@@ -80,6 +122,12 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     """
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OpenWrtOptionsFlow:
+        """Return the options flow handler."""
+        return OpenWrtOptionsFlow()
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -115,6 +163,10 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 try:
                     board_info = await self._validate_input(host, port, username, password)
+
+                except OpenWrtRpcdSetupError:
+                    _LOGGER.debug("Config flow: rpcd not configured on %s", host)
+                    errors["base"] = ERROR_RPCD_SETUP
 
                 except OpenWrtAuthError:
                     _LOGGER.debug("Config flow: authentication failed for %s", host)
@@ -213,26 +265,127 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
     ) -> ConfigFlowResult:
-        """Handle re-authentication when the session token has become invalid.
+        """Diagnose why re-auth was triggered, then route to the right sub-step.
 
-        Triggered automatically by HA when ConfigEntryAuthFailed is raised
-        in the coordinator.
+        Tries the existing credentials first.  If they still work the entry is
+        silently reloaded — the user never sees a dialog.  Only when the
+        credentials are genuinely wrong does the password form appear.
 
         Args:
             entry_data: Current config entry data (host, port, username).
 
         Returns:
-            ConfigFlowResult showing re-auth form or updating entry on success.
+            ConfigFlowResult routed to the appropriate sub-step.
         """
-        return await self.async_step_reauth_confirm()
+        reauth_entry = self._get_reauth_entry()
+        host: str = reauth_entry.data[CONF_HOST]
+        port: int = reauth_entry.data[CONF_PORT]
+        username: str = reauth_entry.data[CONF_USERNAME]
+        password: str = reauth_entry.data[CONF_PASSWORD]
+
+        try:
+            await self._validate_input(host, port, username, password)
+        except OpenWrtRpcdSetupError:
+            return await self.async_step_reauth_rpcd_setup()
+        except (OpenWrtConnectionError, OpenWrtTimeoutError, OpenWrtResponseError):
+            return await self.async_step_reauth_cannot_connect()
+        except OpenWrtAuthError:
+            # Credentials genuinely changed — ask for new password
+            return await self.async_step_reauth_confirm()
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Re-auth: unexpected error during diagnosis for %s", host)
+            return await self.async_step_reauth_confirm()
+        else:
+            # Existing credentials still work — silent auto-resolve, no user prompt
+            _LOGGER.debug("Re-auth: existing credentials for %s still valid, reloading", host)
+            return self.async_update_reload_and_abort(reauth_entry)
+
+    async def async_step_reauth_rpcd_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show rpcd setup instructions with a 'I've fixed it — retry' button.
+
+        Displayed when session/login returns permission denied, which means
+        rpcd is misconfigured (wrong socket path, missing package, etc.).
+        """
+        reauth_entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host: str = reauth_entry.data[CONF_HOST]
+            port: int = reauth_entry.data[CONF_PORT]
+            username: str = reauth_entry.data[CONF_USERNAME]
+            password: str = reauth_entry.data[CONF_PASSWORD]
+
+            try:
+                await self._validate_input(host, port, username, password)
+            except OpenWrtRpcdSetupError:
+                errors["base"] = ERROR_RPCD_SETUP
+            except (OpenWrtConnectionError, OpenWrtTimeoutError):
+                return await self.async_step_reauth_cannot_connect()
+            except OpenWrtAuthError:
+                return await self.async_step_reauth_confirm()
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Re-auth rpcd setup: unexpected error")
+                errors["base"] = ERROR_UNKNOWN
+            else:
+                return self.async_update_reload_and_abort(reauth_entry)
+
+        return self.async_show_form(
+            step_id="reauth_rpcd_setup",
+            data_schema=vol.Schema({}),
+            errors=errors,
+            description_placeholders={
+                "host": reauth_entry.data.get(CONF_HOST, ""),
+            },
+        )
+
+    async def async_step_reauth_cannot_connect(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show 'router unreachable' message with a retry button.
+
+        Displayed when the router cannot be reached during re-auth diagnosis.
+        """
+        reauth_entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host: str = reauth_entry.data[CONF_HOST]
+            port: int = reauth_entry.data[CONF_PORT]
+            username: str = reauth_entry.data[CONF_USERNAME]
+            password: str = reauth_entry.data[CONF_PASSWORD]
+
+            try:
+                await self._validate_input(host, port, username, password)
+            except OpenWrtRpcdSetupError:
+                return await self.async_step_reauth_rpcd_setup()
+            except (OpenWrtConnectionError, OpenWrtTimeoutError):
+                errors["base"] = ERROR_CANNOT_CONNECT
+            except OpenWrtAuthError:
+                return await self.async_step_reauth_confirm()
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Re-auth cannot connect: unexpected error")
+                errors["base"] = ERROR_UNKNOWN
+            else:
+                return self.async_update_reload_and_abort(reauth_entry)
+
+        return self.async_show_form(
+            step_id="reauth_cannot_connect",
+            data_schema=vol.Schema({}),
+            errors=errors,
+            description_placeholders={
+                "host": reauth_entry.data.get(CONF_HOST, ""),
+            },
+        )
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show the re-auth form and validate new credentials.
 
-        Only the password field is shown; host/port/username are preserved
-        from the existing config entry.
+        Only reached when existing credentials are genuinely rejected.
+        Host/port/username are preserved; only the password can change.
         """
         errors: dict[str, str] = {}
         reauth_entry = self._get_reauth_entry()
@@ -246,6 +399,8 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             try:
                 await self._validate_input(host, port, username, password)
 
+            except OpenWrtRpcdSetupError:
+                return await self.async_step_reauth_rpcd_setup()
             except OpenWrtAuthError:
                 errors["base"] = ERROR_INVALID_AUTH
             except (OpenWrtConnectionError, OpenWrtTimeoutError):

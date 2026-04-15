@@ -23,9 +23,15 @@ ACL_FILE_PATH = "/usr/share/rpcd/acl.d/ha-openwrt-router.json"
 
 RPCD_ACL_CONTENT: dict = {
     "root": {
-        "description": "Home Assistant openwrt_router integration",
+        "description": "Full access for Home Assistant openwrt_router integration",
         "read": {
+            "file": {
+                "/etc/config/ddns": ["read"],
+                "/var/run/ddns": ["list"],
+                "/var/run/ddns/*": ["read"],
+            },
             "ubus": {
+                "file": ["read"],
                 "hostapd.*": ["get_clients", "get_status"],
                 "network.wireless": ["status", "up", "down"],
                 "network.interface": ["dump"],
@@ -44,7 +50,13 @@ RPCD_ACL_CONTENT: dict = {
                     "freqlist",
                 ],
                 "system": ["board", "info"],
-            }
+                "uci": ["get"],
+            },
+        },
+        "write": {
+            "ubus": {
+                "network.wireless": ["up", "down"],
+            },
         },
     }
 }

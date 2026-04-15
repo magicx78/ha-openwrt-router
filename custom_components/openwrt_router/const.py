@@ -205,9 +205,30 @@ ERROR_INVALID_AUTH = "invalid_auth"
 ERROR_UNKNOWN = "unknown"
 ERROR_TIMEOUT = "timeout"
 ERROR_INVALID_HOST = "invalid_host"
+ERROR_RPCD_SETUP = "rpcd_setup_required"
 
 CLIENT_KEY_CONNECTED_SINCE = "connected_since"
 CLIENT_KEY_DHCP_EXPIRES = "dhcp_expires"
+
+# Fritz!Box config (stored in config entry options)
+CONF_FRITZBOX_HOST = "fritzbox_host"
+CONF_FRITZBOX_USER = "fritzbox_user"
+CONF_FRITZBOX_PASSWORD = "fritzbox_password"
+CONF_FRITZBOX_PORT = "fritzbox_port"
+DEFAULT_FRITZBOX_HOST = "172.16.1.254"
+DEFAULT_FRITZBOX_PORT = 49000
+
+# Fritz!Box coordinator data keys
+KEY_DSL_STATS = "dsl_stats"
+KEY_WAN_TRAFFIC = "wan_traffic"
+KEY_DSL_HISTORY = "dsl_history"   # list of HistoryPoint dicts
+KEY_PING_MS = "ping_ms"
+KEY_DDNS_STATUS = "ddns_status"
+
+# History: store one point every N poll cycles (N × 30s = interval)
+# 2 cycles × 30s = 60s resolution, 1440 points = 24h
+DSL_HISTORY_INTERVAL_CYCLES = 2
+DSL_HISTORY_MAX_POINTS = 1440
 
 # TODO: parental control - add UBUS_PARENTAL_OBJECT
 
