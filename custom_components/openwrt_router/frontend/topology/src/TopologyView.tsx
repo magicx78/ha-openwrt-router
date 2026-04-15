@@ -39,6 +39,9 @@ export function TopologyView({ data }: Props) {
   // ── Sidebar ──────────────────────────────────────────────────────────────
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  // ── Traffic overlay mode ─────────────────────────────────────────────────
+  const [trafficMode, setTrafficMode] = useState(false);
+
   // ── Zoom / Pan ──────────────────────────────────────────────────────────
   const [zoom, setZoom] = useState(1.0);
   const [pan,  setPan]  = useState({ x: 0, y: 0 });
@@ -207,8 +210,11 @@ export function TopologyView({ data }: Props) {
   };
 
   // ── Render ───────────────────────────────────────────────────────────────
+  // ── Focus mode class — applied when any node is hovered ─────────────────
+  const hasActiveFocus = hoveredNodeId !== null;
+
   return (
-    <div className="topo-app">
+    <div className={`topo-app${trafficMode ? ' traffic-mode' : ''}`}>
       {/* ── Left sidebar ─────────────────────────────────────── */}
       <Sidebar
         open={sidebarOpen}
@@ -226,15 +232,17 @@ export function TopologyView({ data }: Props) {
           totalClients={data.clients.length}
           warningCount={warningCount}
           pingMs={data.gateway.pingMs}
+          trafficMode={trafficMode}
           onFilterChange={setFilter}
           onSearchChange={setSearchQuery}
           onFitView={fitView}
+          onToggleTraffic={() => setTrafficMode(m => !m)}
         />
 
         {/* Zoom/pan scroll container */}
         <div
           ref={scrollRef}
-          className="topo-scroll"
+          className={`topo-scroll${hasActiveFocus ? ' has-focus' : ''}`}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}

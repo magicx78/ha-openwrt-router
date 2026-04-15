@@ -1,6 +1,6 @@
 import React from 'react';
 import { FilterType } from '../types';
-import { IconSearch, IconFitView } from './Icons';
+import { IconSearch, IconFitView, IconTraffic } from './Icons';
 
 interface Props {
   filter: FilterType;
@@ -10,9 +10,11 @@ interface Props {
   totalClients: number;
   warningCount: number;
   pingMs: number | null | undefined;
+  trafficMode: boolean;
   onFilterChange: (f: FilterType) => void;
   onSearchChange: (q: string) => void;
   onFitView: () => void;
+  onToggleTraffic: () => void;
 }
 
 const FILTERS: { key: FilterType; label: string }[] = [
@@ -30,9 +32,11 @@ export function StatusBar({
   totalClients,
   warningCount,
   pingMs,
+  trafficMode,
   onFilterChange,
   onSearchChange,
   onFitView,
+  onToggleTraffic,
 }: Props) {
   const allOnline = onlineNodes === totalNodes;
 
@@ -88,6 +92,15 @@ export function StatusBar({
           onChange={e => onSearchChange(e.target.value)}
         />
       </div>
+
+      {/* ── Traffic toggle ─────────────────────────────────────── */}
+      <button
+        className={`status-bar__action${trafficMode ? ' active' : ''}`}
+        onClick={onToggleTraffic}
+        title={trafficMode ? 'Traffic-Overlay ausschalten' : 'Traffic-Overlay einschalten'}
+      >
+        <IconTraffic size={15} />
+      </button>
 
       {/* ── Fit-view button ────────────────────────────────────── */}
       <button

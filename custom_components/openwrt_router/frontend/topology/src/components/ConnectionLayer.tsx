@@ -17,12 +17,13 @@ interface Props {
 export function ConnectionLayer({ edges, highlightedEdges, dimmedEdges }: Props) {
   return (
     <>
-      {edges.map(edge => (
+      {edges.map((edge, idx) => (
         <EdgeGroup
           key={edge.id}
           edge={edge}
           highlighted={highlightedEdges.has(edge.id)}
           dimmed={dimmedEdges.has(edge.id)}
+          animIndex={idx}
         />
       ))}
     </>
@@ -35,10 +36,12 @@ interface EdgeGroupProps {
   edge: EdgeLayout;
   highlighted: boolean;
   dimmed: boolean;
+  animIndex: number;
 }
 
-function EdgeGroup({ edge, highlighted, dimmed }: EdgeGroupProps) {
+function EdgeGroup({ edge, highlighted, dimmed, animIndex }: EdgeGroupProps) {
   const cls = [
+    'edge-group',
     dimmed && !highlighted ? 'edge-dimmed' : '',
     highlighted            ? 'edge-highlighted' : '',
     edge.status === 'warning' ? 'edge-warning' : '',
@@ -46,9 +49,12 @@ function EdgeGroup({ edge, highlighted, dimmed }: EdgeGroupProps) {
     .filter(Boolean)
     .join(' ');
 
+  // Staggered enter: each edge delays slightly after the previous
+  const style = { '--edge-delay': `${0.08 + animIndex * 0.06}s` } as React.CSSProperties;
+
   if (edge.kind === 'internet') {
     return (
-      <g className={cls}>
+      <g className={cls} style={style}>
         <path className="edge-internet-bg"   d={edge.path} />
         <path className="edge-internet-flow" d={edge.path} />
       </g>
@@ -57,7 +63,7 @@ function EdgeGroup({ edge, highlighted, dimmed }: EdgeGroupProps) {
 
   if (edge.kind === 'gateway-wired') {
     return (
-      <g className={cls}>
+      <g className={cls} style={style}>
         <path className="edge-wired-bg"   d={edge.path} />
         <path className="edge-wired-flow" d={edge.path} />
       </g>
@@ -66,7 +72,7 @@ function EdgeGroup({ edge, highlighted, dimmed }: EdgeGroupProps) {
 
   // ap-mesh
   return (
-    <g className={cls}>
+    <g className={cls} style={style}>
       <path className="edge-mesh-bg"   d={edge.path} />
       <path className="edge-mesh-flow" d={edge.path} />
     </g>
