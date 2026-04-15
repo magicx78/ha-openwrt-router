@@ -211,13 +211,17 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
 
 // ── HA API fetch ─────────────────────────────────────────────────────────
 
-export async function fetchTopologyData(accessToken: string): Promise<TopologyData> {
-  const resp = await fetch('/api/openwrt_topology/snapshot', {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!resp.ok) {
-    throw new Error(`Snapshot API returned ${resp.status} ${resp.statusText}`);
-  }
-  const snap: Snapshot = await resp.json();
+/** HA hass object — only the parts we need. */
+export interface HassLike {
+  callApi<T>(method: 'GET' | 'POST', path: string): Promise<T>;
+}
+
+/**
+ * Fetch topology snapshot using the HA hass.callApi() method.
+ * This uses the already-authenticated HA WebSocket connection and
+ * avoids any manual token extraction.
+ */
+export async function fetchTopologyData(hass: HassLike): Promise<TopologyData> {
+  const snap = await hass.callApi<Snapshot>('GET', 'openwrt_topology/snapshot');
   return adaptSnapshot(snap);
 }

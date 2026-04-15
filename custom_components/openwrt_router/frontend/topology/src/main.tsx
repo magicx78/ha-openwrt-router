@@ -11,14 +11,14 @@ import { createRoot } from 'react-dom/client';
 import type { Root } from 'react-dom/client';
 import './topology.css';
 import { TopologyView } from './TopologyView';
-import { fetchTopologyData } from './api';
+import { fetchTopologyData, type HassLike } from './api';
 import { MOCK_DATA } from './mockData';
 
 // ── HA Webcomponent ──────────────────────────────────────────────────────
 
 class OpenWrtTopologyPanel extends HTMLElement {
   private _root: Root | null = null;
-  private _hass: Record<string, unknown> | null = null;
+  private _hass: HassLike | null = null;
   private _hasLoaded = false;
   private _refreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -30,8 +30,7 @@ class OpenWrtTopologyPanel extends HTMLElement {
 
     // Periodic refresh every 30 s
     this._refreshTimer = setInterval(() => {
-      const token = this._getToken();
-      if (token) void this._fetchAndRender(token);
+      if (this._hass) void this._fetchAndRender();
     }, 30_000);
   }
 
@@ -43,27 +42,18 @@ class OpenWrtTopologyPanel extends HTMLElement {
   }
 
   // HA calls this setter on every state update; only fetch on first call.
-  set hass(hass: Record<string, unknown>) {
+  set hass(hass: HassLike) {
     this._hass = hass;
     if (!this._hasLoaded) {
-      const token = this._getToken();
-      if (token) {
-        this._hasLoaded = true;
-        void this._fetchAndRender(token);
-      }
+      this._hasLoaded = true;
+      void this._fetchAndRender();
     }
   }
 
-  private _getToken(): string | null {
-    // HA exposes the token at hass.auth.data.access_token
-    const auth = this._hass?.auth as Record<string, unknown> | undefined;
-    const data = auth?.data as Record<string, unknown> | undefined;
-    return (data?.access_token as string) ?? null;
-  }
-
-  private async _fetchAndRender(token: string) {
+  private async _fetchAndRender() {
+    if (!this._hass) return;
     try {
-      const topologyData = await fetchTopologyData(token);
+      const topologyData = await fetchTopologyData(this._hass);
       this._root?.render(
         <React.StrictMode>
           <TopologyView data={topologyData} />
