@@ -13,10 +13,22 @@ interface Props {
 }
 
 export function APNode({ ap, selected, dimmed, onSelect, onHover }: Props) {
-  const iconCls = ap.status === 'warning' ? 'warning' : ap.uplinkType;
+  const statusClass = ap.status === 'online'
+    ? 'status-online'
+    : ap.status === 'warning'
+      ? 'status-warning'
+      : 'status-offline';
+
+  // Icon color: offline → red, warning → amber, otherwise uplink-based
+  const iconCls = ap.status === 'offline'
+    ? 'offline'
+    : ap.status === 'warning'
+      ? 'warning'
+      : ap.uplinkType;
 
   const cls = [
     'node-card ap-card',
+    statusClass,
     selected ? 'selected' : '',
     dimmed ? 'dimmed' : '',
   ]
@@ -46,7 +58,7 @@ export function APNode({ ap, selected, dimmed, onSelect, onHover }: Props) {
           {ap.uplinkType === 'wired' ? 'Kabel' : 'Mesh'}
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <SignalBar dbm={ap.backhaulSignal} />
+          {ap.status !== 'offline' && <SignalBar dbm={ap.backhaulSignal} />}
           <span className="ap-card__clients">
             <strong>{ap.clientCount}</strong> Clients
           </span>
