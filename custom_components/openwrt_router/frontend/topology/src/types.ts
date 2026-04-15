@@ -46,6 +46,7 @@ export interface Gateway {
   pingMs?: number | null;
   dslHistory?: DslHistoryPoint[];
   ddnsServices?: DdnsService[];
+  wanTraffic?: { downstream_bps?: number; upstream_bps?: number };
 }
 
 export interface AccessPoint {

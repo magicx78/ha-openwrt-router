@@ -25,7 +25,7 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-_PANEL_VERSION = "20260416a"
+_PANEL_VERSION = "20260416b"
 _PANEL_REGISTERED_KEY = f"{DOMAIN}_panel_registered_{_PANEL_VERSION}"
 _STATIC_URL = "/openwrt_router_topology"
 

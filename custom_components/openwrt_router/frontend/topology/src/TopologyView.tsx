@@ -20,6 +20,7 @@ import { ClientStrip } from './components/ClientStrip';
 import { DetailPanel } from './components/DetailPanel';
 import { StatusBar } from './components/StatusBar';
 import { Sidebar } from './components/Sidebar';
+import { EdgeTooltip } from './components/EdgeTooltip';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -38,6 +39,13 @@ const ZOOM_STEP = 0.12;
 export function TopologyView({ data }: Props) {
   // ── Sidebar ──────────────────────────────────────────────────────────────
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // ── Edge hover tooltip ────────────────────────────────────────────────────
+  const [hoveredEdge, setHoveredEdge] = useState<{ edgeId: string; x: number; y: number } | null>(null);
+
+  const onEdgeHover = useCallback((edgeId: string | null, x: number, y: number) => {
+    setHoveredEdge(edgeId ? { edgeId, x, y } : null);
+  }, []);
 
   // ── Traffic overlay mode ─────────────────────────────────────────────────
   const [trafficMode, setTrafficMode] = useState(false);
@@ -265,6 +273,7 @@ export function TopologyView({ data }: Props) {
                 edges={edges}
                 highlightedEdges={hoverCtx.highlightedEdges}
                 dimmedEdges={dimmedEdges}
+                onEdgeHover={!dragging ? onEdgeHover : undefined}
               />
             </svg>
 
@@ -341,6 +350,17 @@ export function TopologyView({ data }: Props) {
           onClose={() => setSelectedEntity(null)}
         />
       </div>{/* end .topo-main */}
+
+      {/* Edge hover tooltip — fixed overlay, outside zoom transform */}
+      {hoveredEdge && !dragging && (
+        <EdgeTooltip
+          edgeId={hoveredEdge.edgeId}
+          x={hoveredEdge.x}
+          y={hoveredEdge.y}
+          edges={edges}
+          data={data}
+        />
+      )}
     </div>
   );
 }

@@ -440,6 +440,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     pingMs: gwAttr.ping_ms as number | null | undefined,
     dslHistory: (gwAttr.dsl_history as DslHistoryPoint[] | undefined) ?? [],
     ddnsServices: (gwAttr.ddns_status as DdnsService[] | undefined) ?? [],
+    wanTraffic: gwAttr.wan_traffic as { downstream_bps?: number; upstream_bps?: number } | undefined,
   };
 
   // AP nodes = all router nodes that are not the gateway
