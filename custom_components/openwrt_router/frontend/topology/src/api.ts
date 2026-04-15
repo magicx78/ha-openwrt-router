@@ -216,8 +216,9 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
 /** HA hass object — only the parts we need. */
 export interface HassLike {
   callApi<T>(method: 'GET' | 'POST', path: string): Promise<T>;
-  // Available on the real hass object; used to extract Bearer token.
-  auth?: { accessToken?: string };
+  // The real HA Auth object (home-assistant-js-websocket) exposes the token
+  // under auth.data.access_token — there is no auth.accessToken property.
+  auth?: { data?: { access_token?: string } };
 }
 
 /**
@@ -230,7 +231,7 @@ export interface HassLike {
  * Fallback: hass.callApi() — used if no token is available.
  */
 export async function fetchTopologyData(hass: HassLike): Promise<TopologyData> {
-  const token = (hass as any).auth?.accessToken as string | undefined;
+  const token = (hass as any).auth?.data?.access_token as string | undefined;
   let snap: Snapshot;
 
   if (token) {
