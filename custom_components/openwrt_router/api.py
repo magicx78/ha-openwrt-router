@@ -107,6 +107,63 @@ class OpenWrtResponseError(Exception):
     """Raised when the router returns an unexpected response."""
 
 
+def _parse_uci_config(raw: str) -> dict[str, dict[str, Any]]:
+    """Parse an OpenWrt UCI config file into a dict of sections.
+
+    Only returns sections of type 'service' (the interesting ones for DDNS).
+    Each key is the section name; the value is a dict of option → value.
+
+    UCI format example::
+
+        config service 'duckdns'
+            option enabled '1'
+            option service_name 'duckdns.org'
+            option lookup_host 'myhome.duckdns.org'
+    """
+    import re as _re
+
+    sections: dict[str, dict[str, Any]] = {}
+    current_name: str | None = None
+    current_type: str | None = None
+    current_data: dict[str, Any] = {}
+
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        # config <type> '<name>'  OR  config <type>
+        m = _re.match(r"^config\s+(\S+)(?:\s+'([^']*)')?", line)
+        if m:
+            # Save previous section
+            if current_name and current_type == "service":
+                sections[current_name] = current_data
+            current_type = m.group(1)
+            current_name = m.group(2) or current_type
+            current_data = {".type": current_type}
+            continue
+
+        # option <key> '<value>'
+        m = _re.match(r"^option\s+(\S+)\s+'([^']*)'", line)
+        if m and current_name:
+            current_data[m.group(1)] = m.group(2)
+            continue
+
+        # list <key> '<value>'  (multi-value, rare in ddns)
+        m = _re.match(r"^list\s+(\S+)\s+'([^']*)'", line)
+        if m and current_name:
+            key = m.group(1)
+            current_data.setdefault(key, [])
+            if isinstance(current_data[key], list):
+                current_data[key].append(m.group(2))
+
+    # Flush last section
+    if current_name and current_type == "service":
+        sections[current_name] = current_data
+
+    return sections
+
+
 class OpenWrtAPI:
     """Async client for OpenWrt ubus / rpcd JSON-RPC.
 
@@ -2836,3 +2893,116 @@ class OpenWrtAPI:
             hostname = raw_hostname[:253] if raw_hostname else ""
             leases[mac] = {"ip": ip, "hostname": hostname, "expires": expires}
         return leases
+
+    # ------------------------------------------------------------------
+    # DDNS status
+    # ------------------------------------------------------------------
+
+    async def get_ddns_status(self, uptime_seconds: int = 0) -> list[dict[str, Any]]:
+        """Read DDNS service status from OpenWrt.
+
+        Reads /etc/config/ddns via file/read (no UCI ACL required) and parses
+        the UCI config format manually.  Falls back to uci/get if the file
+        is unreadable.
+
+        Runtime status is read from /var/run/ddns/<section>.{ip,err,update}.
+        The .update file contains seconds-since-boot; uptime_seconds converts
+        it to a Unix timestamp (approximate — based on previous poll's uptime).
+
+        Returns a list of DDNS service dicts:
+            section      — UCI section name (e.g. 'duckdns')
+            service_name — DDNS provider (e.g. 'duckdns.org')
+            domain       — configured domain (e.g. 'myhome.duckdns.org')
+            enabled      — bool
+            ip           — last registered IP (from runtime status file)
+            last_update  — unix timestamp of last successful update (int | None)
+            status       — 'ok' | 'error' | 'unknown'
+        """
+        # --- Step 1: read /etc/config/ddns via file/read (no ACL restriction) ---
+        sections: dict[str, dict[str, Any]] = {}
+        try:
+            file_result = await self._call(
+                UBUS_FILE_OBJECT, UBUS_FILE_READ, {"path": "/etc/config/ddns"}
+            )
+            raw = file_result.get("data", "")
+            if raw:
+                sections = _parse_uci_config(raw)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # --- Fallback: uci/get (may be ACL-blocked on secondary APs) ---
+        if not sections:
+            try:
+                result = await self._call("uci", "get", {"config": "ddns"})
+                for k, v in result.get("values", {}).items():
+                    if isinstance(v, dict) and v.get(".type") == "service":
+                        sections[k] = v
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("DDNS: config unavailable: %s", err)
+                return []
+
+        # --- Step 2: for each service section read runtime status file ---
+        services: list[dict[str, Any]] = []
+        for section_name, section_data in sections.items():
+            if not isinstance(section_data, dict):
+                continue
+
+            enabled = str(section_data.get("enabled", "0")) == "1"
+            service_name = section_data.get("service_name", "")
+            domain = section_data.get("lookup_host") or section_data.get("domain", "")
+
+            ip: str = ""
+            last_update: int | None = None
+            status = "unknown"
+
+            # Read /var/run/ddns/<section>.ip — current IP
+            try:
+                ip_result = await self._call(
+                    UBUS_FILE_OBJECT, UBUS_FILE_READ,
+                    {"path": f"/var/run/ddns/{section_name}.ip"},
+                )
+                ip = (ip_result.get("data", "") or "").strip()
+            except Exception:  # noqa: BLE001
+                ip = ""
+
+            # Read /var/run/ddns/<section>.err — empty = ok, non-empty = error
+            if ip:
+                try:
+                    err_result = await self._call(
+                        UBUS_FILE_OBJECT, UBUS_FILE_READ,
+                        {"path": f"/var/run/ddns/{section_name}.err"},
+                    )
+                    err_data = (err_result.get("data", "") or "").strip()
+                    status = "error" if err_data else "ok"
+                except Exception:  # noqa: BLE001
+                    status = "ok"  # .err missing → assume ok if .ip present
+            else:
+                status = "unknown"
+
+            # Read /var/run/ddns/<section>.update — seconds since boot
+            # Convert to Unix timestamp using uptime_seconds from previous poll.
+            try:
+                upd_result = await self._call(
+                    UBUS_FILE_OBJECT, UBUS_FILE_READ,
+                    {"path": f"/var/run/ddns/{section_name}.update"},
+                )
+                upd_str = (upd_result.get("data", "") or "").strip()
+                if upd_str and uptime_seconds > 0:
+                    update_uptime = int(upd_str)
+                    last_update = int(time.time()) - (uptime_seconds - update_uptime)
+            except Exception:  # noqa: BLE001
+                last_update = None
+
+            services.append(
+                {
+                    "section": section_name,
+                    "service_name": service_name,
+                    "domain": domain,
+                    "enabled": enabled,
+                    "ip": ip,
+                    "last_update": last_update,
+                    "status": status,
+                }
+            )
+
+        return services
