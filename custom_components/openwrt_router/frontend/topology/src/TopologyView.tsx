@@ -19,8 +19,12 @@ import { APNode } from './components/APNode';
 import { ClientStrip } from './components/ClientStrip';
 import { DetailPanel } from './components/DetailPanel';
 import { StatusBar } from './components/StatusBar';
-import { Sidebar } from './components/Sidebar';
+import { Sidebar, SidebarTab } from './components/Sidebar';
 import { EdgeTooltip } from './components/EdgeTooltip';
+import { DevicesView } from './components/DevicesView';
+import { ClientsView } from './components/ClientsView';
+import { AlertsView } from './components/AlertsView';
+import { SettingsView } from './components/SettingsView';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -37,8 +41,9 @@ const MAX_ZOOM  = 3.0;
 const ZOOM_STEP = 0.12;
 
 export function TopologyView({ data }: Props) {
-  // ── Sidebar ──────────────────────────────────────────────────────────────
+  // ── Sidebar + active tab ─────────────────────────────────────────────────
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<SidebarTab>('topology');
 
   // ── Edge hover tooltip ────────────────────────────────────────────────────
   const [hoveredEdge, setHoveredEdge] = useState<{ edgeId: string; x: number; y: number } | null>(null);
@@ -226,8 +231,10 @@ export function TopologyView({ data }: Props) {
       {/* ── Left sidebar ─────────────────────────────────────── */}
       <Sidebar
         open={sidebarOpen}
+        activeTab={activeTab}
         warningCount={warningCount}
         onToggle={() => setSidebarOpen(o => !o)}
+        onTabChange={setActiveTab}
       />
 
       {/* ── Main column ─────────────────────────────────────── */}
@@ -241,16 +248,38 @@ export function TopologyView({ data }: Props) {
           warningCount={warningCount}
           pingMs={data.gateway.pingMs}
           trafficMode={trafficMode}
+          topologyControls={activeTab === 'topology'}
           onFilterChange={setFilter}
           onSearchChange={setSearchQuery}
           onFitView={fitView}
           onToggleTraffic={() => setTrafficMode(m => !m)}
         />
 
-        {/* Zoom/pan scroll container */}
+        {/* ── Non-topology views ───────────────────────────────── */}
+        {activeTab === 'devices' && (
+          <DevicesView
+            data={data}
+            onSelectGateway={selectGateway}
+            onSelectAP={ap => setSelectedEntity({ type: 'ap', data: ap, clients: data.clients.filter(c => c.apId === ap.id) })}
+          />
+        )}
+        {activeTab === 'clients' && (
+          <ClientsView data={data} onSelectClient={selectClient} />
+        )}
+        {activeTab === 'alerts' && (
+          <AlertsView
+            data={data}
+            onSelectGateway={selectGateway}
+            onSelectAP={ap => setSelectedEntity({ type: 'ap', data: ap, clients: data.clients.filter(c => c.apId === ap.id) })}
+            onSelectClient={selectClient}
+          />
+        )}
+        {activeTab === 'settings' && <SettingsView />}
+
+        {/* ── Topology zoom/pan canvas ─────────────────────────── */}
         <div
           ref={scrollRef}
-          className={`topo-scroll${hasActiveFocus ? ' has-focus' : ''}`}
+          className={`topo-scroll${hasActiveFocus ? ' has-focus' : ''}${activeTab !== 'topology' ? ' topo-scroll--hidden' : ''}`}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}

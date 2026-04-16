@@ -11,6 +11,7 @@ interface Props {
   warningCount: number;
   pingMs: number | null | undefined;
   trafficMode: boolean;
+  topologyControls?: boolean; // show filter/search/fit controls (default true)
   onFilterChange: (f: FilterType) => void;
   onSearchChange: (q: string) => void;
   onFitView: () => void;
@@ -33,6 +34,7 @@ export function StatusBar({
   warningCount,
   pingMs,
   trafficMode,
+  topologyControls = true,
   onFilterChange,
   onSearchChange,
   onFitView,
@@ -62,54 +64,58 @@ export function StatusBar({
         )}
       </div>
 
-      <span className="status-bar__divider" />
+      {topologyControls && (
+        <>
+          <span className="status-bar__divider" />
 
-      {/* ── Filters ────────────────────────────────────────────── */}
-      <div className="status-bar__filters">
-        {FILTERS.map(f => (
+          {/* ── Filters ──────────────────────────────────────────── */}
+          <div className="status-bar__filters">
+            {FILTERS.map(f => (
+              <button
+                key={f.key}
+                className={`filter-btn ${filter === f.key ? 'active' : ''}`}
+                onClick={() => onFilterChange(f.key)}
+              >
+                {f.label}
+                {f.key === 'warnings' && warningCount > 0 && (
+                  <span className="filter-btn__badge">{warningCount}</span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          <span className="status-bar__gap" />
+
+          {/* ── Search ───────────────────────────────────────────── */}
+          <div className="status-bar__search">
+            <IconSearch size={13} />
+            <input
+              type="text"
+              placeholder="Gerät suchen…"
+              value={searchQuery}
+              onChange={e => onSearchChange(e.target.value)}
+            />
+          </div>
+
+          {/* ── Traffic toggle ───────────────────────────────────── */}
           <button
-            key={f.key}
-            className={`filter-btn ${filter === f.key ? 'active' : ''}`}
-            onClick={() => onFilterChange(f.key)}
+            className={`status-bar__action${trafficMode ? ' active' : ''}`}
+            onClick={onToggleTraffic}
+            title={trafficMode ? 'Traffic-Overlay ausschalten' : 'Traffic-Overlay einschalten'}
           >
-            {f.label}
-            {f.key === 'warnings' && warningCount > 0 && (
-              <span className="filter-btn__badge">{warningCount}</span>
-            )}
+            <IconTraffic size={15} />
           </button>
-        ))}
-      </div>
 
-      <span className="status-bar__gap" />
-
-      {/* ── Search ─────────────────────────────────────────────── */}
-      <div className="status-bar__search">
-        <IconSearch size={13} />
-        <input
-          type="text"
-          placeholder="Gerät suchen…"
-          value={searchQuery}
-          onChange={e => onSearchChange(e.target.value)}
-        />
-      </div>
-
-      {/* ── Traffic toggle ─────────────────────────────────────── */}
-      <button
-        className={`status-bar__action${trafficMode ? ' active' : ''}`}
-        onClick={onToggleTraffic}
-        title={trafficMode ? 'Traffic-Overlay ausschalten' : 'Traffic-Overlay einschalten'}
-      >
-        <IconTraffic size={15} />
-      </button>
-
-      {/* ── Fit-view button ────────────────────────────────────── */}
-      <button
-        className="status-bar__action"
-        onClick={onFitView}
-        title="Ansicht anpassen"
-      >
-        <IconFitView size={15} />
-      </button>
+          {/* ── Fit-view button ──────────────────────────────────── */}
+          <button
+            className="status-bar__action"
+            onClick={onFitView}
+            title="Ansicht anpassen"
+          >
+            <IconFitView size={15} />
+          </button>
+        </>
+      )}
     </div>
   );
 }

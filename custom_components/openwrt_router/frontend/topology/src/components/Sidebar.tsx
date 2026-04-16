@@ -9,7 +9,7 @@ import {
   IconChevronRight,
 } from './Icons';
 
-type SidebarTab = 'topology' | 'devices' | 'clients' | 'alerts' | 'settings';
+export type SidebarTab = 'topology' | 'devices' | 'clients' | 'alerts' | 'settings';
 
 interface NavItem {
   id: SidebarTab;
@@ -20,14 +20,13 @@ interface NavItem {
 
 interface Props {
   open: boolean;
+  activeTab: SidebarTab;
   warningCount: number;
   onToggle: () => void;
+  onTabChange: (tab: SidebarTab) => void;
 }
 
-export function Sidebar({ open, warningCount, onToggle }: Props) {
-  // Only topology tab is active — others are stubs for future use
-  const activeTab: SidebarTab = 'topology';
-
+export function Sidebar({ open, activeTab, warningCount, onToggle, onTabChange }: Props) {
   const items: NavItem[] = [
     { id: 'topology', label: 'Topologie',  Icon: IconTopology },
     { id: 'devices',  label: 'Geräte',     Icon: IconDevices },
@@ -50,6 +49,7 @@ export function Sidebar({ open, warningCount, onToggle }: Props) {
             key={id}
             className={`sidebar-item${activeTab === id ? ' active' : ''}`}
             title={!open ? label : undefined}
+            onClick={() => onTabChange(id)}
           >
             <span
               className="sidebar-item__icon sidebar-item__icon-badge"
