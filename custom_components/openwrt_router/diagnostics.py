@@ -8,16 +8,13 @@ returned to the user.
 
 from __future__ import annotations
 
-import copy
 import logging
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from . import OpenWrtConfigEntry
 from .const import (
-    CONF_PASSWORD,
     DIAGNOSTICS_REDACT_KEYS,
     DIAGNOSTICS_REDACTED,
     DOMAIN,

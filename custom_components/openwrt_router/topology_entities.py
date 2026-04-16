@@ -34,7 +34,6 @@ import logging
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory, MATCH_ALL
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback

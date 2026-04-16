@@ -26,7 +26,6 @@ from .const import (
     DEFAULT_SESSION_ID,
     DEFAULT_TIMEOUT,
     PROTOCOL_HTTP,
-    PROTOCOL_HTTPS,
     PROTOCOL_HTTPS_INSECURE,
     DHCP_LEASES_PATH,
     GUEST_SSID_KEYWORDS,
@@ -289,6 +288,9 @@ class OpenWrtAPI:
         # M-4: warn once when using the root account
         self._root_warning_logged: bool = False
 
+        # Track DDNS availability — None=unknown, False=not available (skip future polls)
+        self._ddns_available: bool | None = None
+
     # ------------------------------------------------------------------
     # Public auth API
     # ------------------------------------------------------------------
@@ -317,7 +319,11 @@ class OpenWrtAPI:
         payload = self._build_call(
             UBUS_SESSION_OBJECT_LOGIN,
             UBUS_SESSION_METHOD_LOGIN,
-            {"username": self._username, "password": self._password},
+            {
+                "username": self._username,
+                "password": self._password,
+                "timeout": 86400,  # 24h — prevents frequent re-logins on devices with short default TTL
+            },
             use_default_session=True,
         )
 
@@ -615,7 +621,8 @@ class OpenWrtAPI:
 
         # Extract basic info
         ipv4_list = wan_iface.get("ipv4-address", [])
-        ipv4 = ipv4_list[0].get("address", "") if ipv4_list else ""
+        ipv4_entry = ipv4_list[0] if ipv4_list else {}
+        ipv4 = ipv4_entry.get("address", "") if isinstance(ipv4_entry, dict) else ""
         iface_name = wan_iface.get("interface", "").lower()
 
         # Try to read RX/TX bytes from /sys/class/net/{iface}/statistics/
@@ -3028,6 +3035,10 @@ class OpenWrtAPI:
             last_update  — unix timestamp of last successful update (int | None)
             status       — 'ok' | 'error' | 'unknown'
         """
+        # Skip if we already confirmed this device has no DDNS config
+        if self._ddns_available is False:
+            return []
+
         # --- Step 1: read /etc/config/ddns via file/read (no ACL restriction) ---
         sections: dict[str, dict[str, Any]] = {}
         try:
@@ -3048,8 +3059,12 @@ class OpenWrtAPI:
                     if isinstance(v, dict) and v.get(".type") == "service":
                         sections[k] = v
             except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("DDNS: config unavailable: %s", err)
+                _LOGGER.debug("DDNS: config unavailable on %s: %s", self._host, err)
+                self._ddns_available = False
                 return []
+
+        # Mark DDNS as available so future polls skip the discovery overhead
+        self._ddns_available = True
 
         # --- Step 2: for each service section read runtime status file ---
         services: list[dict[str, Any]] = []

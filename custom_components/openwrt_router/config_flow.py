@@ -7,7 +7,6 @@ import logging
 import re
 from typing import Any
 
-import aiohttp
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow

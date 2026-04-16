@@ -33,7 +33,7 @@ from .api import (
     OpenWrtTimeoutError,
 )
 from .coordinator import OpenWrtCoordinator
-from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN
+from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN as DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 

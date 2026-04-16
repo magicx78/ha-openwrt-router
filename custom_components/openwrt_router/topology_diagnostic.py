@@ -27,6 +27,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from .coordinator import OpenWrtCoordinatorData
+
 
 def _seconds_since(value: Any) -> int | None:
     """Convert connected_since to elapsed seconds.
@@ -74,7 +76,6 @@ def _band_for_radio(ifname: str, band_map: dict[str, str]) -> str:
             return band
     return ""
 
-from .coordinator import OpenWrtCoordinatorData
 
 # Topology schema version — stays in sync with provisioning server
 TOPOLOGY_SCHEMA_VERSION = "1.0"

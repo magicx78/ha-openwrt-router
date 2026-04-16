@@ -18,7 +18,6 @@ import logging
 from typing import Any
 
 from homeassistant.components.device_tracker import ScannerEntity, SourceType
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback

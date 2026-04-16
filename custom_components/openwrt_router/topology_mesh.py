@@ -20,9 +20,9 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, KEY_DSL_HISTORY, KEY_DSL_STATS, KEY_DDNS_STATUS, KEY_PING_MS, KEY_WAN_TRAFFIC
+from .const import DOMAIN
 from .coordinator import OpenWrtCoordinatorData
-from .topology_diagnostic import TOPOLOGY_SOURCE, build_topology_snapshot
+from .topology_diagnostic import build_topology_snapshot
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -86,7 +86,6 @@ def _detect_inter_router_edges(
     seen_edges: set[str] = set()
 
     # Build lookup maps
-    router_ids = {host_ip: rid for rid, host_ip, _ in router_data}
     router_macs: dict[str, str] = {}  # MAC → router_id
     for rid, _, data in router_data:
         mac = (data.router_info.get("mac") or "").upper()

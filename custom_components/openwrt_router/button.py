@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 from homeassistant.components.button import ButtonDeviceClass, ButtonEntity, ButtonEntityDescription
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -27,7 +25,6 @@ from .const import (
     SUFFIX_RELOAD_WIFI,
     SUFFIX_CHECK_UPDATES,
     SUFFIX_PERFORM_UPDATES,
-    KEY_UPDATES_AVAILABLE,
 )
 from .coordinator import OpenWrtCoordinator
 

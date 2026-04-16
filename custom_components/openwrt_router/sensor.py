@@ -20,13 +20,11 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     EntityCategory,
     UnitOfDataRate,
     UnitOfFrequency,
     UnitOfInformation,
-    UnitOfTime,
     PERCENTAGE,
 )
 from homeassistant.core import HomeAssistant
@@ -62,25 +60,19 @@ from .const import (
     SUFFIX_TMPFS_USED,
     SUFFIX_UPTIME,
     SUFFIX_UPDATE_STATUS,
-    SUFFIX_UPDATES_AVAILABLE,
     SUFFIX_WAN_IP,
     SUFFIX_WAN_RX,
     SUFFIX_WAN_STATUS,
     SUFFIX_WAN_TX,
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
-    KEY_UPDATES_AVAILABLE,
     RADIO_KEY_BAND,
-    RADIO_KEY_BITRATE,
     RADIO_KEY_BSSID,
-    RADIO_KEY_CHANNEL,
     RADIO_KEY_FREQUENCY,
     RADIO_KEY_HTMODE,
     RADIO_KEY_HWMODE,
     RADIO_KEY_IFNAME,
-    RADIO_KEY_MODE,
     RADIO_KEY_SSID,
-    RADIO_KEY_TXPOWER,
     CLIENT_KEY_RADIO,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
