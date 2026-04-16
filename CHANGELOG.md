@@ -2,6 +2,27 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.11.1] - 2026-04-16
+
+### Fixed
+
+- **fritz1750e frequent re-logins**: `login()` now requests a 24-hour session timeout from rpcd (`"timeout": 86400`). Previously, rpcd used its firmware default (often 30–300 s), causing a new login on nearly every poll cycle.
+- **DDNS log spam on devices without DDNS**: `get_ddns_status()` now tracks per-device availability. After the first failed attempt (both `file/read` and `uci/get` paths fail), subsequent poll cycles skip DDNS entirely instead of logging `"DDNS: config unavailable"` every 30 s.
+- **Defensive `ipv4-address` parsing**: Added `isinstance` guard when reading the first entry of the `ipv4-address` list from `network.interface.wan/status` — prevents `AttributeError` if the router returns an unexpected non-dict entry.
+
+### Technical
+
+- 30 unused imports removed across 9 files (ruff F401) — CI `ruff check` would have failed on every push
+- `topology_diagnostic.py`: misplaced module-level import moved to top of file (ruff E402)
+- `topology_mesh.py`: removed dead `router_ids` assignment (ruff F841)
+- `__init__.py`: explicit re-export `DOMAIN as DOMAIN` for ruff F401 compliance
+
+### Tests
+
+- 396 passing (no regressions)
+
+---
+
 ## [1.11.0] - 2026-04-15
 
 ### Added
