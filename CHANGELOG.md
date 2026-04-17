@@ -2,6 +2,26 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.11.2] - 2026-04-17
+
+### Added
+
+- **Topology canvas dot-grid**: `.topo-scroll` background uses `radial-gradient` dot pattern (28 px spacing) — scrolls fixed, does not move with pan/zoom
+- **Edge glow on hover**: CSS `drop-shadow` per edge type (`gateway-wired` / `ap-mesh` / `internet`) applied via child class — no SVG filter needed
+- **Internet node pulse animation**: `internet-pulse` keyframe (3.5s ease-in-out infinite) on the internet node
+- **Edge tooltip accent line**: 2px colored `border-top` per edge type in `EdgeTooltip`
+
+### Changed
+
+- Edge background opacity increased: wired `0.12 → 0.18`, mesh `0.10 → 0.16`
+- Panel version bump: `20260416d`
+
+### Fixed
+
+- Removed stale `.edge-highlighted .edge-mesh-bg { drop-shadow(...blue...) }` — was applying wrong color on mesh edge hover
+
+---
+
 ## [1.11.1] - 2026-04-16
 
 ### Fixed
