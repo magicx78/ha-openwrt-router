@@ -45,6 +45,7 @@ interface EdgeGroupProps {
 function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover }: EdgeGroupProps) {
   const cls = [
     'edge-group',
+    `edge-group--${edge.kind}`,
     dimmed && !highlighted ? 'edge-dimmed' : '',
     highlighted            ? 'edge-highlighted' : '',
     edge.status === 'warning' ? 'edge-warning' : '',

@@ -86,7 +86,7 @@ export function EdgeTooltip({ edgeId, x, y, edges, data }: Props) {
   };
 
   return (
-    <div className="edge-tooltip" style={style}>
+    <div className={`edge-tooltip edge-tooltip--${badgeMod}`} style={style}>
       <div className="edge-tooltip__header">
         <span className="edge-tooltip__title">{title}</span>
         <span className={`edge-tooltip__badge edge-tooltip__badge--${badgeMod}`}>{badge}</span>
