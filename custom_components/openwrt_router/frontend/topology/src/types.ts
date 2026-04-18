@@ -56,7 +56,8 @@ export interface Gateway {
 
 export interface SsidInfo {
   ssid: string;
-  band: string; // '2.4 GHz' | '5 GHz' | '6 GHz'
+  band: string;    // '2.4 GHz' | '5 GHz' | '6 GHz'
+  channel?: number; // WiFi channel (e.g. 6, 36, 100)
 }
 
 export interface PortStat {

@@ -1649,6 +1649,7 @@
 .ssid-badge--24g { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.25); color: #93c5fd; }
 .ssid-badge--5g  { background: rgba(34,197,94,0.12);  border-color: rgba(34,197,94,0.25);  color: #86efac; }
 .ssid-badge--6g  { background: rgba(168,85,247,0.12); border-color: rgba(168,85,247,0.25); color: #c4b5fd; }
+.ssid-badge__ch  { font-size: 9px; opacity: 0.65; font-weight: 500; letter-spacing: 0.2px; }
 
 /* ── Ghost Mode ──────────────────────────────────────────────────────── */
 .ghost-node { opacity: 0.45; filter: grayscale(0.85); }

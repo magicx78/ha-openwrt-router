@@ -151,9 +151,14 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, clie
       {gateway.ssids && gateway.ssids.length > 0 && (
         <div className="gateway-card__ssids">
           {gateway.ssids.map((s, i) => (
-            <span key={i} className={`ssid-badge ${bandClass(s.band)}`}>
+            <span
+              key={i}
+              className={`ssid-badge ${bandClass(s.band)}`}
+              title={[s.ssid, s.band, s.channel ? `Kanal ${s.channel}` : ''].filter(Boolean).join(' · ')}
+            >
               {s.band && <span className="ssid-badge__band">{s.band}</span>}
               <span className="ssid-badge__name">{s.ssid}</span>
+              {s.channel && <span className="ssid-badge__ch">ch{s.channel}</span>}
             </span>
           ))}
         </div>

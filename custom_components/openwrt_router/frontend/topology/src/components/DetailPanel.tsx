@@ -6,7 +6,7 @@
  */
 
 import React, { useState } from 'react';
-import { Gateway, AccessPoint, Client, NodeStatus, DdnsService } from '../types';
+import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat } from '../types';
 import { IconX } from './Icons';
 import { StatusDot, statusLabel } from './StatusDot';
 import { SignalBar } from './SignalBar';
@@ -103,6 +103,40 @@ function GatewayDetail({ data }: { data: Gateway }) {
             </span>
           </div>
           <SpeedChart history={history} width={310} height={110} mode={chartMode} />
+        </div>
+      )}
+
+      {(data.cpuLoad != null || data.memUsage != null) && (
+        <div className="detail-section">
+          <div className="detail-section__heading">System</div>
+          {data.cpuLoad != null && (
+            <Row label="CPU" value={
+              <span style={{ color: data.cpuLoad > 80 ? 'var(--red)' : data.cpuLoad > 60 ? 'var(--amber)' : 'var(--green)' }}>
+                {data.cpuLoad.toFixed(0)}%
+              </span>
+            } />
+          )}
+          {data.memUsage != null && (
+            <Row label="RAM" value={
+              <span style={{ color: data.memUsage > 85 ? 'var(--red)' : data.memUsage > 70 ? 'var(--amber)' : 'var(--green)' }}>
+                {data.memUsage.toFixed(0)}%
+              </span>
+            } />
+          )}
+        </div>
+      )}
+
+      {(data.ssids ?? []).length > 0 && (
+        <div className="detail-section">
+          <div className="detail-section__heading">WLAN-Netze</div>
+          <SsidList ssids={data.ssids!} />
+        </div>
+      )}
+
+      {(data.portStats ?? []).length > 0 && (
+        <div className="detail-section">
+          <div className="detail-section__heading">Ports</div>
+          <PortList ports={data.portStats!} />
         </div>
       )}
 
@@ -210,6 +244,33 @@ function APDetail({ data, clients }: { data: AccessPoint; clients: Client[] }) {
         <Row label="Signal"  value={<><SignalBar dbm={data.backhaulSignal} /> {data.backhaulSignal} dBm</>} />
         <Row label="Qualität" value={q} />
       </div>
+      {(data.ssids ?? []).length > 0 && (
+        <div className="detail-section">
+          <div className="detail-section__heading">WLAN-Netze</div>
+          <SsidList ssids={data.ssids!} />
+        </div>
+      )}
+
+      {(data.cpuLoad != null || data.memUsage != null) && (
+        <div className="detail-section">
+          <div className="detail-section__heading">System</div>
+          {data.cpuLoad != null && (
+            <Row label="CPU" value={
+              <span style={{ color: data.cpuLoad > 80 ? 'var(--red)' : data.cpuLoad > 60 ? 'var(--amber)' : 'var(--green)' }}>
+                {data.cpuLoad.toFixed(0)}%
+              </span>
+            } />
+          )}
+          {data.memUsage != null && (
+            <Row label="RAM" value={
+              <span style={{ color: data.memUsage > 85 ? 'var(--red)' : data.memUsage > 70 ? 'var(--amber)' : 'var(--green)' }}>
+                {data.memUsage.toFixed(0)}%
+              </span>
+            } />
+          )}
+        </div>
+      )}
+
       <div className="detail-section">
         <div className="detail-section__heading">Clients ({clients.length})</div>
         <div className="detail-client-list">
@@ -281,6 +342,59 @@ function ClientDetail({ data, apName }: { data: Client; apName: string }) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+function SsidList({ ssids }: { ssids: SsidInfo[] }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {ssids.map((s, i) => (
+        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11.5, color: 'var(--text-primary)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {s.ssid}
+          </span>
+          <span style={{ display: 'flex', gap: 5, flexShrink: 0 }}>
+            {s.band && (
+              <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 4, background: 'rgba(59,130,246,0.15)', color: '#93c5fd' }}>
+                {s.band}
+              </span>
+            )}
+            {s.channel && (
+              <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 4, background: 'rgba(255,255,255,0.07)', color: 'var(--text-secondary)' }}>
+                ch{s.channel}
+              </span>
+            )}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PortList({ ports }: { ports: PortStat[] }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+      {ports.map(p => (
+        <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{
+            width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+            background: p.up ? 'var(--green)' : 'var(--text-muted)',
+            boxShadow: p.up ? '0 0 5px rgba(34,197,94,0.6)' : 'none',
+          }} />
+          <span style={{ fontSize: 11.5, color: p.up ? 'var(--text-primary)' : 'var(--text-muted)', flex: 1 }}>
+            {p.name}
+          </span>
+          {p.up && p.speed_mbps != null && (
+            <span style={{ fontSize: 10.5, color: 'var(--green)', fontWeight: 500 }}>
+              {p.speed_mbps >= 1000 ? `${p.speed_mbps / 1000}G` : `${p.speed_mbps}M`}
+            </span>
+          )}
+          {!p.up && (
+            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>no link</span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (

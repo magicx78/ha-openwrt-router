@@ -480,10 +480,12 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     if (!iface) continue;
     const ssid = iface.attributes?.ssid as string | undefined;
     const band = iface.attributes?.band as string | undefined;
+    const channel = iface.attributes?.channel as number | undefined;
     if (!ssid) continue;
     const list = ssidsByRouter.get(edge.from) ?? [];
-    if (!list.find((s) => s.ssid === ssid && s.band === (band ? formatBand(band) : ''))) {
-      list.push({ ssid, band: band ? formatBand(band) : '' });
+    const formattedBand = band ? formatBand(band) : '';
+    if (!list.find((s) => s.ssid === ssid && s.band === formattedBand)) {
+      list.push({ ssid, band: formattedBand, channel });
     }
     ssidsByRouter.set(edge.from, list);
   }
