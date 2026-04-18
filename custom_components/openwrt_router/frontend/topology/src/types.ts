@@ -41,14 +41,21 @@ export interface Gateway {
   wanIp: string;
   uptime: string;
   status: NodeStatus;
-  cpuLoad?: number;    // 0-100 percent
-  memUsage?: number;   // 0-100 percent
+  cpuLoad?: number;     // 0-100 percent
+  memUsage?: number;    // 0-100 percent
+  cpuHistory?: number[]; // ring buffer of recent cpu_load values (frontend-accumulated)
+  ssids?: SsidInfo[];   // WiFi networks at gateway
   // Fritz!Box / DSL data (optional — only present when Fritz!Box is configured)
   dslStats?: DslStats;
   pingMs?: number | null;
   dslHistory?: DslHistoryPoint[];
   ddnsServices?: DdnsService[];
   wanTraffic?: { downstream_bps?: number; upstream_bps?: number };
+}
+
+export interface SsidInfo {
+  ssid: string;
+  band: string; // '2.4 GHz' | '5 GHz' | '6 GHz'
 }
 
 export interface AccessPoint {
@@ -61,6 +68,9 @@ export interface AccessPoint {
   clientCount: number;
   backhaulSignal: number; // dBm
   status: NodeStatus;
+  ssids?: SsidInfo[];      // WiFi networks broadcast by this AP
+  cpuLoad?: number;        // 0-100 percent
+  memUsage?: number;       // 0-100 percent
 }
 
 export interface Client {

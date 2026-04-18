@@ -12,6 +12,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { TopologyData, FilterType, AccessPoint, Client, Gateway, EdgeLayout } from './types';
 import { useAlerts } from './useAlerts';
+import { useGhostDevices, formatLastSeen } from './useGhostDevices';
 import { computeEdgesFromBounds, computeHoverContext, NodeBounds } from './layout';
 import { ConnectionLayer } from './components/ConnectionLayer';
 import { InternetNode } from './components/InternetNode';
@@ -57,6 +58,13 @@ export function TopologyView({ data }: Props) {
   // ── Traffic overlay mode ─────────────────────────────────────────────────
   const [trafficMode, setTrafficMode] = useState(false);
 
+  // ── WLAN Heatmap toggle ──────────────────────────────────────────────────
+  const [heatmapMode, setHeatmapMode] = useState(false);
+
+  // ── Ghost Mode ───────────────────────────────────────────────────────────
+  const [ghostMode, setGhostMode] = useState(false);
+  const ghosts = useGhostDevices(data.accessPoints, data.clients, ghostMode);
+
   // ── Zoom / Pan ──────────────────────────────────────────────────────────
   const [zoom, setZoom] = useState(1.0);
   const [pan,  setPan]  = useState({ x: 0, y: 0 });
@@ -79,6 +87,16 @@ export function TopologyView({ data }: Props) {
   // ── Dynamic SVG state ────────────────────────────────────────────────────
   const [edges,   setEdges]   = useState<EdgeLayout[]>([]);
   const [svgSize, setSvgSize] = useState({ w: 800, h: 600 });
+
+  // ── CPU history ring buffer (accumulates cpuLoad across polls) ──────────
+  const CPU_HISTORY_MAX = 20;
+  const cpuHistoryRef = useRef<number[]>([]);
+  if (data.gateway.cpuLoad != null) {
+    const h = cpuHistoryRef.current;
+    if (h.length === 0 || h[h.length - 1] !== data.gateway.cpuLoad) {
+      cpuHistoryRef.current = [...h, data.gateway.cpuLoad].slice(-CPU_HISTORY_MAX);
+    }
+  }
 
   // ── Filter / search / hover / selection ─────────────────────────────────
   const [filter,      setFilter]      = useState<FilterType>('all');
@@ -258,11 +276,15 @@ export function TopologyView({ data }: Props) {
           warningCount={warningCount}
           pingMs={data.gateway.pingMs}
           trafficMode={trafficMode}
+          heatmapMode={heatmapMode}
+          ghostMode={ghostMode}
           topologyControls={activeTab === 'topology'}
           onFilterChange={setFilter}
           onSearchChange={setSearchQuery}
           onFitView={fitView}
           onToggleTraffic={() => setTrafficMode(m => !m)}
+          onToggleHeatmap={() => setHeatmapMode(m => !m)}
+          onToggleGhost={() => setGhostMode(m => !m)}
         />
 
         {/* ── Non-topology views ───────────────────────────────── */}
@@ -325,7 +347,7 @@ export function TopologyView({ data }: Props) {
               {/* Row 1: Internet */}
               <div className="topo-row topo-row--internet">
                 <div ref={setNodeRef('internet')} style={{ width: 'fit-content' }}>
-                  <InternetNode />
+                  <InternetNode pingMs={data.gateway.pingMs} />
                 </div>
               </div>
 
@@ -334,7 +356,7 @@ export function TopologyView({ data }: Props) {
                 <div className="topo-col-gateway">
                   <div ref={setNodeRef(data.gateway.id)} style={{ width: 'fit-content' }}>
                     <GatewayNode
-                      gateway={data.gateway}
+                      gateway={{ ...data.gateway, cpuHistory: cpuHistoryRef.current }}
                       selected={selectedEntity?.type === 'gateway'}
                       dimmed={hoverCtx.dimmedNodes.has(data.gateway.id)}
                       onSelect={selectGateway}
@@ -366,10 +388,12 @@ export function TopologyView({ data }: Props) {
                       <div ref={setNodeRef(ap.id)} style={{ width: 'fit-content' }}>
                         <APNode
                           ap={ap}
+                          clients={apClients}
                           selected={selectedEntity?.type === 'ap' && selectedEntity.data.id === ap.id}
                           dimmed={hoverCtx.dimmedNodes.has(ap.id)}
                           onSelect={() => selectAP(ap)}
                           onHover={setHoveredNodeId}
+                          heatmap={heatmapMode}
                         />
                       </div>
                       <ClientStrip
@@ -380,6 +404,24 @@ export function TopologyView({ data }: Props) {
                     </div>
                   );
                 })}
+
+                {/* Ghost APs */}
+                {ghosts.aps.map(gAP => (
+                  <div key={`ghost-${gAP.id}`} className="topo-col-ap ghost-node">
+                    <div className="ap-card node-card ghost-ap">
+                      <div className="ap-card__header">
+                        <div className="ghost-ap__icon">👻</div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div className="ap-card__name">{gAP.name}</div>
+                          <div className="ap-card__ip">{gAP.ip}</div>
+                        </div>
+                      </div>
+                      <div className="ghost-ap__lastseen">
+                        Zuletzt gesehen: {formatLastSeen(gAP.lastSeenMs)}
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
 
             </div>{/* end .topo-layout */}

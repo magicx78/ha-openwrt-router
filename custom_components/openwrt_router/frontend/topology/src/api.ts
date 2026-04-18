@@ -17,6 +17,7 @@ import type {
   DslStats,
   DslHistoryPoint,
   DdnsService,
+  SsidInfo,
 } from './types';
 
 // ── Raw snapshot types ───────────────────────────────────────────────────
@@ -467,6 +468,24 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     clientCountMap.set(c.ap_mac, (clientCountMap.get(c.ap_mac) ?? 0) + 1);
   }
 
+  // Build ssids per router: has_interface edges → interface nodes with ssid+band
+  const ssidsByRouter = new Map<string, SsidInfo[]>();
+  const ifaceNodes = snap.nodes.filter((n) => n.type === 'interface');
+  const ifaceById = new Map(ifaceNodes.map((n) => [n.id, n]));
+  for (const edge of snap.edges) {
+    if (edge.relationship !== 'has_interface') continue;
+    const iface = ifaceById.get(edge.to);
+    if (!iface) continue;
+    const ssid = iface.attributes?.ssid as string | undefined;
+    const band = iface.attributes?.band as string | undefined;
+    if (!ssid) continue;
+    const list = ssidsByRouter.get(edge.from) ?? [];
+    if (!list.find((s) => s.ssid === ssid && s.band === (band ? formatBand(band) : ''))) {
+      list.push({ ssid, band: band ? formatBand(band) : '' });
+    }
+    ssidsByRouter.set(edge.from, list);
+  }
+
   const accessPoints: AccessPoint[] = apRouterNodes.map((n) => {
     const uplink = uplinkMap.get(n.id);
     return {
@@ -479,8 +498,15 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       clientCount: clientCountMap.get(n.id) ?? 0,
       backhaulSignal: uplink?.backhaulSignal ?? -60,
       status: 'online' as NodeStatus,
+      ssids: ssidsByRouter.get(n.id) ?? [],
+      cpuLoad: n.attributes?.cpu_load as number | undefined,
+      memUsage: n.attributes?.mem_usage as number | undefined,
     };
   });
+
+  // Also extract SSIDs for gateway
+  const gatewaySsids = ssidsByRouter.get(gwNode.id) ?? [];
+  gateway.ssids = gatewaySsids.length > 0 ? gatewaySsids : undefined;
 
   // Build client list from client nodes
   const clients: Client[] = clientNodes.map((n) => {

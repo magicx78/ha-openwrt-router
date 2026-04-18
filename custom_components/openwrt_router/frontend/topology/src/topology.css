@@ -1577,3 +1577,88 @@
 .talker-bytes--down { color: var(--blue); }
 .talker-bytes--up   { color: var(--amber, #f97316); }
 
+/* ── StatusBar health banner ─────────────────────────────────────────── */
+.status-bar__health {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 12px; font-weight: 600; padding: 2px 8px;
+  border-radius: 10px; white-space: nowrap;
+}
+.status-bar__health-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+}
+.health-ok   { background: rgba(34,197,94,0.12);  color: var(--green); }
+.health-ok   .status-bar__health-dot { background: var(--green); }
+.health-warn { background: rgba(245,158,11,0.12); color: var(--amber); }
+.health-warn .status-bar__health-dot { background: var(--amber); }
+.health-crit { background: rgba(239,68,68,0.12);  color: var(--red); }
+.health-crit .status-bar__health-dot { background: var(--red); }
+
+/* ── InternetNode ping display ───────────────────────────────────────── */
+.internet-node__ping {
+  font-size: 11px; font-weight: 700; margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.ping-excellent { color: var(--green); }
+.ping-good      { color: #86efac; }
+.ping-fair      { color: var(--amber); }
+.ping-poor      { color: var(--red); }
+
+@keyframes internet-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.4); }
+  50%       { box-shadow: 0 0 0 6px rgba(59,130,246,0); }
+}
+.internet-node__circle--pulse {
+  animation: internet-pulse 2.5s ease-in-out infinite;
+}
+
+/* ── GatewayNode 2-column layout ─────────────────────────────────────── */
+.gateway-card__body2 {
+  display: flex; gap: 10px; padding: 6px 10px;
+}
+.gateway-card__col {
+  flex: 1; display: flex; flex-direction: column; gap: 3px;
+}
+.gateway-card__col--right {
+  flex: 0 0 auto; min-width: 90px;
+  border-left: 1px solid var(--border);
+  padding-left: 10px;
+}
+
+.gateway-metric { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; }
+.gateway-metric__row { display: flex; justify-content: space-between; align-items: center; gap: 4px; }
+.gateway-metric__label { font-size: 10.5px; color: var(--text-muted); }
+.gateway-metric__value { font-size: 11.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.metric-ok   { color: var(--green); }
+.metric-warn { color: var(--amber); }
+.metric-critical { color: var(--red); }
+
+/* ── SSID badges (gateway + AP) ──────────────────────────────────────── */
+.gateway-card__ssids,
+.ap-card__ssids {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  padding: 4px 10px 8px;
+}
+.ssid-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 6px; border-radius: 8px;
+  font-size: 10px; font-weight: 500;
+  border: 1px solid transparent; white-space: nowrap; max-width: 120px;
+}
+.ssid-badge__name { overflow: hidden; text-overflow: ellipsis; }
+.ssid-badge__band { font-weight: 700; opacity: 0.8; }
+.ssid-badge--24g { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.25); color: #93c5fd; }
+.ssid-badge--5g  { background: rgba(34,197,94,0.12);  border-color: rgba(34,197,94,0.25);  color: #86efac; }
+.ssid-badge--6g  { background: rgba(168,85,247,0.12); border-color: rgba(168,85,247,0.25); color: #c4b5fd; }
+
+/* ── Ghost Mode ──────────────────────────────────────────────────────── */
+.ghost-node { opacity: 0.45; filter: grayscale(0.85); }
+.ghost-ap {
+  border: 1px dashed var(--border-hover) !important;
+  background: rgba(12,18,38,0.6) !important;
+}
+.ghost-ap__icon { font-size: 16px; margin-right: 4px; }
+.ghost-ap__lastseen {
+  font-size: 10.5px; color: var(--text-muted);
+  padding: 3px 10px 7px; font-style: italic;
+}
+
