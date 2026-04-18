@@ -51,11 +51,19 @@ export interface Gateway {
   dslHistory?: DslHistoryPoint[];
   ddnsServices?: DdnsService[];
   wanTraffic?: { downstream_bps?: number; upstream_bps?: number };
+  portStats?: PortStat[];
 }
 
 export interface SsidInfo {
   ssid: string;
   band: string; // '2.4 GHz' | '5 GHz' | '6 GHz'
+}
+
+export interface PortStat {
+  name: string;        // "lan1", "wan", "eth0", etc.
+  up: boolean;
+  speed_mbps: number | null;  // Mbps or null if no link
+  duplex?: string | null;     // "full" | "half" | null
 }
 
 export interface AccessPoint {

@@ -2,6 +2,7 @@ import React from 'react';
 import { Gateway } from '../types';
 import { StatusDot } from './StatusDot';
 import { IconRouter } from './Icons';
+import { PortStrip } from './PortStrip';
 
 interface Props {
   gateway: Gateway;
@@ -156,6 +157,11 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, clie
             </span>
           ))}
         </div>
+      )}
+
+      {/* ── Port strip ── */}
+      {gateway.portStats && gateway.portStats.length > 0 && (
+        <PortStrip ports={gateway.portStats} />
       )}
     </div>
   );

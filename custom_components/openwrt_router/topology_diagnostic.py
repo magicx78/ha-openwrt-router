@@ -152,6 +152,23 @@ def _validate_rx_tx(
     return (True, None)
 
 
+def _slim_port_stats(port_stats: list[dict]) -> list[dict]:
+    """Strip bulky byte counters from port_stats for the frontend snapshot.
+
+    Only name, up, speed_mbps and duplex are needed for the PortStrip UI.
+    rx/tx byte totals are large integers that inflate the snapshot payload.
+    """
+    return [
+        {
+            "name": p.get("name", ""),
+            "up": bool(p.get("up", False)),
+            "speed_mbps": p.get("speed_mbps"),
+            "duplex": p.get("duplex"),
+        }
+        for p in (port_stats or [])
+    ]
+
+
 def build_topology_snapshot(
     data: OpenWrtCoordinatorData,
     role: str = "unknown",
@@ -206,6 +223,7 @@ def build_topology_snapshot(
             "uptime": data.uptime if data.uptime else None,
             "cpu_load": data.cpu_load,
             "mem_usage": _calc_mem_usage(data.memory),
+            "port_stats": _slim_port_stats(data.port_stats),
         },
     })
 
