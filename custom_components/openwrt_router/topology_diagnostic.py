@@ -90,6 +90,15 @@ KNOWN_LIMITATIONS: list[str] = [
 ]
 
 
+def _calc_mem_usage(memory: dict) -> float | None:
+    """Return memory usage as percentage (0-100), or None if data missing."""
+    total = memory.get("total") if memory else None
+    free = memory.get("free") if memory else None
+    if not total:
+        return None
+    return round((1 - free / total) * 100, 1)
+
+
 def _classify_iface_type(ifname: str, wan_ifname: str = "") -> str:
     """Classify a network interface name into a topology type.
 
@@ -195,6 +204,8 @@ def build_topology_snapshot(
             "wan_proto": data.wan_status.get("proto", ""),
             "wan_connected": data.wan_connected,
             "uptime": data.uptime if data.uptime else None,
+            "cpu_load": data.cpu_load,
+            "mem_usage": _calc_mem_usage(data.memory),
         },
     })
 
@@ -339,6 +350,9 @@ def build_topology_snapshot(
         c_iface_id: str = ifname_to_iface_id.get(c_radio, router_id)
         c_inferred = c_iface_id == router_id  # True if we couldn't find the AP iface
 
+        c_rx_bytes: int | None = client.get("rx_bytes")
+        c_tx_bytes: int | None = client.get("tx_bytes")
+
         clients.append({
             "id": client_id,
             "mac": mac,
@@ -347,6 +361,8 @@ def build_topology_snapshot(
             "bitrate": None,              # not provided by coordinator
             "connected": True,
             "last_seen": client.get("connected_since"),
+            "rx_bytes": c_rx_bytes,
+            "tx_bytes": c_tx_bytes,
             "source": TOPOLOGY_SOURCE,
             "inferred": c_inferred,
             "inference_reason": (
@@ -374,6 +390,8 @@ def build_topology_snapshot(
                 "signal": c_signal,       # None stays None
                 "connected_since": _seconds_since(client.get("connected_since")),
                 "dhcp_expires": client.get("dhcp_expires"),
+                "rx_bytes": c_rx_bytes,
+                "tx_bytes": c_tx_bytes,
             },
         })
         edges.append({

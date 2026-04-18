@@ -4,12 +4,13 @@ import {
   IconDevices,
   IconClients,
   IconAlerts,
+  IconTraffic,
   IconSettings,
   IconChevronLeft,
   IconChevronRight,
 } from './Icons';
 
-export type SidebarTab = 'topology' | 'devices' | 'clients' | 'alerts' | 'settings';
+export type SidebarTab = 'topology' | 'devices' | 'clients' | 'traffic' | 'alerts' | 'settings';
 
 interface NavItem {
   id: SidebarTab;
@@ -31,6 +32,7 @@ export function Sidebar({ open, activeTab, warningCount, onToggle, onTabChange }
     { id: 'topology', label: 'Topologie',  Icon: IconTopology },
     { id: 'devices',  label: 'Geräte',     Icon: IconDevices },
     { id: 'clients',  label: 'Clients',    Icon: IconClients },
+    { id: 'traffic',  label: 'Traffic',    Icon: IconTraffic },
     { id: 'alerts',   label: 'Alarme',     Icon: IconAlerts,  badge: warningCount > 0 ? warningCount : undefined },
     { id: 'settings', label: 'Einst.',     Icon: IconSettings },
   ];

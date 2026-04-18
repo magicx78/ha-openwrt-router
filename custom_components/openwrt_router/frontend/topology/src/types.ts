@@ -41,6 +41,8 @@ export interface Gateway {
   wanIp: string;
   uptime: string;
   status: NodeStatus;
+  cpuLoad?: number;    // 0-100 percent
+  memUsage?: number;   // 0-100 percent
   // Fritz!Box / DSL data (optional — only present when Fritz!Box is configured)
   dslStats?: DslStats;
   pingMs?: number | null;
@@ -75,6 +77,8 @@ export interface Client {
   manufacturer?: string;
   connectedSince?: number; // seconds since connection (from hostapd connected_time)
   dhcpExpires?: number;    // unix timestamp when DHCP lease expires
+  rxBytes?: number | null; // bytes received since connection (from hostapd)
+  txBytes?: number | null; // bytes transmitted since connection (from hostapd)
 }
 
 export interface TopologyData {

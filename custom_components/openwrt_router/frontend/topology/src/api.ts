@@ -436,6 +436,8 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     wanIp: gwNode.ip ?? '',
     uptime: gwAttr.uptime != null ? formatUptime(gwAttr.uptime as number) : '',
     status: 'online',
+    cpuLoad: gwAttr.cpu_load as number | undefined,
+    memUsage: gwAttr.mem_usage as number | undefined,
     dslStats: gwAttr.dsl_stats as DslStats | undefined,
     pingMs: gwAttr.ping_ms as number | null | undefined,
     dslHistory: (gwAttr.dsl_history as DslHistoryPoint[] | undefined) ?? [],
@@ -506,6 +508,8 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       manufacturer: lookupManufacturer(mac),
       connectedSince: connectedSince && connectedSince > 0 ? connectedSince : undefined,
       dhcpExpires: dhcpExpires && dhcpExpires > 0 ? dhcpExpires : undefined,
+      rxBytes: attr?.rx_bytes as number | null | undefined,
+      txBytes: attr?.tx_bytes as number | null | undefined,
     };
   });
 

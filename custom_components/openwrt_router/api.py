@@ -1021,6 +1021,8 @@ class OpenWrtAPI:
                             CLIENT_KEY_SSID: ssid,
                             CLIENT_KEY_RADIO: ifname,
                             CLIENT_KEY_CONNECTED_SINCE: connected_time,
+                            "rx_bytes": sta.get("rx_bytes"),
+                            "tx_bytes": sta.get("tx_bytes"),
                         }
                     )
                 _LOGGER.debug(

@@ -1,10 +1,11 @@
 /**
- * AlertsView — shows all devices and clients that are offline or in warning state.
- * Groups by severity section. Empty state when everything is healthy.
+ * AlertsView — shows anomaly alerts + offline/warning devices.
+ * Uses useAlerts hook for threshold-based rules, plus status-based checks.
  */
 
 import React from 'react';
 import { TopologyData, AccessPoint, Client, NodeStatus } from '../types';
+import { useAlerts, Alert } from '../useAlerts';
 import { StatusDot } from './StatusDot';
 import { IconRouter, IconAP, IconSmartphone, IconLaptop, IconIoT, IconGuest, IconOther } from './Icons';
 
@@ -27,13 +28,32 @@ function ClientIcon({ category }: { category: Client['category'] }) {
 }
 
 export function AlertsView({ data, onSelectGateway, onSelectAP, onSelectClient }: Props) {
+  const anomalyAlerts = useAlerts(data);
+
+  // Status-based checks (offline / warning nodes)
   const offlineNodes   = data.accessPoints.filter(a => a.status === 'offline');
   const warningNodes   = data.accessPoints.filter(a => a.status === 'warning');
   const offlineClients = data.clients.filter(c => c.status === 'offline');
   const warningClients = data.clients.filter(c => c.status === 'warning');
   const gwOffline      = data.gateway.status !== 'online';
 
-  const total = offlineNodes.length + warningNodes.length + offlineClients.length + warningClients.length + (gwOffline ? 1 : 0);
+  const statusTotal = offlineNodes.length + warningNodes.length + offlineClients.length + warningClients.length + (gwOffline ? 1 : 0);
+  const total = anomalyAlerts.length + statusTotal;
+
+  // Build AP name lookup
+  const apNames = new Map<string, string>();
+  apNames.set(data.gateway.id, data.gateway.name);
+  data.accessPoints.forEach(ap => apNames.set(ap.id, ap.name));
+
+  // Lookup maps for click handlers
+  const apById = new Map(data.accessPoints.map(ap => [ap.id, ap]));
+  const clientById = new Map(data.clients.map(c => [c.id, c]));
+
+  function handleAlertClick(alert: Alert) {
+    if (alert.nodeType === 'gateway') { onSelectGateway(); return; }
+    if (alert.nodeType === 'ap') { const ap = apById.get(alert.nodeId); if (ap) onSelectAP(ap); return; }
+    if (alert.nodeType === 'client') { const cl = clientById.get(alert.nodeId); if (cl) onSelectClient(cl); }
+  }
 
   if (total === 0) {
     return (
@@ -50,10 +70,8 @@ export function AlertsView({ data, onSelectGateway, onSelectAP, onSelectClient }
     );
   }
 
-  // Build AP name lookup
-  const apNames = new Map<string, string>();
-  apNames.set(data.gateway.id, data.gateway.name);
-  data.accessPoints.forEach(ap => apNames.set(ap.id, ap.name));
+  const criticalAlerts = anomalyAlerts.filter(a => a.severity === 'critical');
+  const warningAlerts  = anomalyAlerts.filter(a => a.severity === 'warning');
 
   return (
     <div className="topo-view">
@@ -62,9 +80,27 @@ export function AlertsView({ data, onSelectGateway, onSelectAP, onSelectClient }
         <span className="view-count alert-count">{total} Problem{total !== 1 ? 'e' : ''}</span>
       </div>
 
-      {/* Gateway offline */}
+      {/* ── Anomaly alerts: critical ── */}
+      {criticalAlerts.length > 0 && (
+        <AlertSection heading={`${criticalAlerts.length} kritisch`} severity="offline">
+          {criticalAlerts.map(alert => (
+            <AnomalyRow key={alert.id} alert={alert} onClick={() => handleAlertClick(alert)} />
+          ))}
+        </AlertSection>
+      )}
+
+      {/* ── Anomaly alerts: warning ── */}
+      {warningAlerts.length > 0 && (
+        <AlertSection heading={`${warningAlerts.length} Warnung${warningAlerts.length !== 1 ? 'en' : ''}`} severity="warning">
+          {warningAlerts.map(alert => (
+            <AnomalyRow key={alert.id} alert={alert} onClick={() => handleAlertClick(alert)} />
+          ))}
+        </AlertSection>
+      )}
+
+      {/* ── Status-based: gateway ── */}
       {gwOffline && (
-        <AlertSection heading={`Gateway ${data.gateway.status === 'offline' ? 'offline' : 'warnung'}`} severity={data.gateway.status}>
+        <AlertSection heading={`Gateway ${data.gateway.status}`} severity={data.gateway.status}>
           <AlertNodeRow
             icon={<IconRouter size={16} />}
             name={data.gateway.name}
@@ -75,7 +111,7 @@ export function AlertsView({ data, onSelectGateway, onSelectAP, onSelectClient }
         </AlertSection>
       )}
 
-      {/* Offline APs */}
+      {/* ── Offline APs ── */}
       {offlineNodes.length > 0 && (
         <AlertSection heading={`${offlineNodes.length} AP offline`} severity="offline">
           {offlineNodes.map(ap => (
@@ -91,7 +127,7 @@ export function AlertsView({ data, onSelectGateway, onSelectAP, onSelectClient }
         </AlertSection>
       )}
 
-      {/* Warning APs */}
+      {/* ── Warning APs ── */}
       {warningNodes.length > 0 && (
         <AlertSection heading={`${warningNodes.length} AP mit Warnung`} severity="warning">
           {warningNodes.map(ap => (
@@ -107,7 +143,7 @@ export function AlertsView({ data, onSelectGateway, onSelectAP, onSelectClient }
         </AlertSection>
       )}
 
-      {/* Offline clients */}
+      {/* ── Offline clients ── */}
       {offlineClients.length > 0 && (
         <AlertSection heading={`${offlineClients.length} Client offline`} severity="offline">
           {offlineClients.map(c => (
@@ -121,7 +157,7 @@ export function AlertsView({ data, onSelectGateway, onSelectAP, onSelectClient }
         </AlertSection>
       )}
 
-      {/* Warning clients */}
+      {/* ── Warning clients ── */}
       {warningClients.length > 0 && (
         <AlertSection heading={`${warningClients.length} Client mit Warnung`} severity="warning">
           {warningClients.map(c => (
@@ -142,13 +178,29 @@ export function AlertsView({ data, onSelectGateway, onSelectAP, onSelectClient }
 
 function AlertSection({ heading, severity, children }: {
   heading: string;
-  severity: NodeStatus;
+  severity: NodeStatus | 'offline';
   children: React.ReactNode;
 }) {
   return (
     <div className="alert-section">
       <div className={`alert-section__heading alert-section__heading--${severity}`}>{heading}</div>
       {children}
+    </div>
+  );
+}
+
+function AnomalyRow({ alert, onClick }: { alert: Alert; onClick: () => void }) {
+  return (
+    <div className={`alert-row alert-anomaly alert-anomaly--${alert.severity}`} onClick={onClick}>
+      <div className="alert-row__icon">
+        <span className={`anomaly-icon anomaly-icon--${alert.severity}`}>
+          {alert.severity === 'critical' ? '✕' : '!'}
+        </span>
+      </div>
+      <div className="alert-row__info">
+        <div className="alert-row__name">{alert.message}</div>
+        <div className="alert-row__sub">{alert.nodeName}</div>
+      </div>
     </div>
   );
 }

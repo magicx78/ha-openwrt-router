@@ -35,6 +35,8 @@
   --blue:       #3b82f6;  /* selected / focus / navigation */
   --blue-dim:   rgba(59, 130, 246, 0.18);
   --cyan:       #06b6d4;  /* mesh links */
+  --traffic-down-color: #3b82f6;
+  --traffic-up-color:   #f97316;
   --cyan-dim:   rgba(6, 182, 212, 0.18);
   --slate:      rgba(148, 163, 184, 0.5); /* neutral / inactive */
 
@@ -1457,3 +1459,121 @@
   font-size: 11.5px; color: var(--text-muted); line-height: 1.5;
   padding-top: 6px; border-top: 1px solid var(--border);
 }
+
+/* ── Anomaly alerts ──────────────────────────────────────────────────── */
+.alert-anomaly {
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background 0.12s;
+}
+.alert-anomaly--critical { border-left-color: var(--red); }
+.alert-anomaly--warning  { border-left-color: var(--amber); }
+.alert-anomaly:hover { background: var(--surface-hover); }
+
+.anomaly-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  font-size: 10px; font-weight: 700; line-height: 1;
+}
+.anomaly-icon--critical {
+  background: rgba(239, 68, 68, 0.18); color: var(--red);
+}
+.anomaly-icon--warning {
+  background: rgba(245, 158, 11, 0.18); color: var(--amber);
+}
+
+/* ── DevicesView — Client distribution row ───────────────────────────── */
+.device-row__distribution {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; padding: 4px 8px 6px 40px;
+  font-size: 11px;
+}
+
+.dist-signal { font-weight: 600; white-space: nowrap; min-width: 70px; }
+.dist-signal.signal-excellent { color: var(--green); }
+.dist-signal.signal-good      { color: #86efac; }
+.dist-signal.signal-fair      { color: var(--amber); }
+.dist-signal.signal-poor      { color: var(--red); }
+
+.dist-bar {
+  flex: 1; height: 4px; border-radius: 2px;
+  background: var(--border); overflow: hidden;
+}
+.dist-bar__fill {
+  height: 100%; border-radius: 2px;
+  background: linear-gradient(90deg, var(--blue), var(--cyan));
+  transition: width 0.3s ease;
+}
+.dist-load { color: var(--text-muted); white-space: nowrap; min-width: 30px; text-align: right; }
+
+/* ── TrafficView ─────────────────────────────────────────────────────── */
+.traffic-section {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.traffic-section__title {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.07em; color: var(--text-muted); margin-bottom: 10px;
+}
+.traffic-no-data {
+  font-size: 12px; color: var(--text-muted); padding: 8px 0;
+}
+.traffic-divider { height: 1px; background: var(--border); margin: 0 14px; }
+
+.traffic-rates {
+  display: flex; gap: 16px; margin-bottom: 10px;
+}
+.traffic-rate {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.traffic-rate__arrow {
+  font-size: 16px; font-weight: 700; line-height: 1;
+}
+.traffic-rate--down .traffic-rate__arrow { color: var(--blue); }
+.traffic-rate--up   .traffic-rate__arrow { color: var(--amber, #f97316); }
+.traffic-rate__value {
+  font-size: 15px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums;
+}
+.traffic-rate__label { font-size: 11px; color: var(--text-muted); }
+
+.traffic-sparkline-wrap { margin-top: 4px; }
+.traffic-sparkline-peak {
+  font-size: 10px; color: var(--text-muted); text-align: right; margin-top: 2px; margin-bottom: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Top Talker list ─────────────────────────────────────────────────── */
+.talker-list { display: flex; flex-direction: column; gap: 6px; }
+
+.talker-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 4px; border-radius: 6px; cursor: pointer;
+  transition: background 0.12s;
+}
+.talker-row:hover { background: var(--surface-hover); }
+
+.talker-row__icon { flex-shrink: 0; color: var(--text-secondary); }
+
+.talker-row__info { flex: 1; min-width: 0; }
+.talker-row__name {
+  font-size: 12px; font-weight: 500; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.talker-bar {
+  height: 3px; border-radius: 2px;
+  background: var(--border); overflow: hidden; margin-top: 4px;
+}
+.talker-bar__fill {
+  height: 100%; border-radius: 2px;
+  background: linear-gradient(90deg, var(--blue), var(--cyan));
+  transition: width 0.3s ease;
+}
+
+.talker-row__bytes {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 1px; flex-shrink: 0; font-size: 10.5px; font-variant-numeric: tabular-nums;
+}
+.talker-bytes--down { color: var(--blue); }
+.talker-bytes--up   { color: var(--amber, #f97316); }
+

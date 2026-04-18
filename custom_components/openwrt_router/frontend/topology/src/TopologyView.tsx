@@ -11,6 +11,7 @@
 
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { TopologyData, FilterType, AccessPoint, Client, Gateway, EdgeLayout } from './types';
+import { useAlerts } from './useAlerts';
 import { computeEdgesFromBounds, computeHoverContext, NodeBounds } from './layout';
 import { ConnectionLayer } from './components/ConnectionLayer';
 import { InternetNode } from './components/InternetNode';
@@ -24,6 +25,7 @@ import { EdgeTooltip } from './components/EdgeTooltip';
 import { DevicesView } from './components/DevicesView';
 import { ClientsView } from './components/ClientsView';
 import { AlertsView } from './components/AlertsView';
+import { TrafficView } from './components/TrafficView';
 import { SettingsView } from './components/SettingsView';
 
 type SelectedEntity =
@@ -211,11 +213,19 @@ export function TopologyView({ data }: Props) {
     setSelectedEntity({ type: 'client', data: client, apName: ap?.name ?? client.apId });
   };
 
-  const totalNodes   = data.accessPoints.length + 1; // +1 for gateway
-  const onlineNodes  = [data.gateway, ...data.accessPoints].filter(n => n.status === 'online').length;
-  const warningCount =
-    data.accessPoints.filter(a => a.status !== 'online').length +
-    data.clients.filter(c => c.status !== 'online').length;
+  const totalNodes  = data.accessPoints.length + 1; // +1 for gateway
+  const onlineNodes = [data.gateway, ...data.accessPoints].filter(n => n.status === 'online').length;
+  const alerts      = useAlerts(data);
+  const warningCount = alerts.length;
+
+  // Highlight a client in the topology graph (called from TrafficView Top Talker)
+  const highlightClient = useCallback((clientId: string) => {
+    const client = data.clients.find(c => c.id === clientId);
+    if (!client) return;
+    const ap = data.accessPoints.find(a => a.id === client.apId);
+    setSelectedEntity({ type: 'client', data: client, apName: ap?.name ?? client.apId });
+    setActiveTab('topology');
+  }, [data]);
 
   // ── Ref setter helper ────────────────────────────────────────────────────
   const setNodeRef = (id: string) => (el: HTMLDivElement | null) => {
@@ -265,6 +275,9 @@ export function TopologyView({ data }: Props) {
         )}
         {activeTab === 'clients' && (
           <ClientsView data={data} onSelectClient={selectClient} />
+        )}
+        {activeTab === 'traffic' && (
+          <TrafficView data={data} onHighlightClient={highlightClient} />
         )}
         {activeTab === 'alerts' && (
           <AlertsView
