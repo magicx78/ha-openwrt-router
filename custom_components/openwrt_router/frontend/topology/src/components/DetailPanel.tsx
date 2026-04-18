@@ -6,7 +6,7 @@
  */
 
 import React, { useState } from 'react';
-import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat } from '../types';
+import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat, VlanInfo } from '../types';
 import { IconX } from './Icons';
 import { StatusDot, statusLabel } from './StatusDot';
 import { SignalBar } from './SignalBar';
@@ -137,6 +137,13 @@ function GatewayDetail({ data }: { data: Gateway }) {
         <div className="detail-section">
           <div className="detail-section__heading">Ports</div>
           <PortList ports={data.portStats!} />
+        </div>
+      )}
+
+      {(data.vlans ?? []).length > 0 && (
+        <div className="detail-section">
+          <div className="detail-section__heading">VLANs</div>
+          <VlanList vlans={data.vlans!} />
         </div>
       )}
 
@@ -390,6 +397,30 @@ function PortList({ ports }: { ports: PortStat[] }) {
           {!p.up && (
             <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>no link</span>
           )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function VlanList({ vlans }: { vlans: VlanInfo[] }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+      {vlans.map(v => (
+        <div key={v.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{
+            width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+            background: v.status === 'up' ? 'var(--green)' : v.status === 'down' ? 'var(--red)' : 'var(--text-muted)',
+          }} />
+          <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--accent, #60a5fa)', minWidth: 52 }}>
+            VLAN {v.id}
+          </span>
+          <span style={{ fontSize: 10.5, color: 'var(--text-secondary)', flex: 1 }}>
+            {v.interface}
+          </span>
+          <span style={{ fontSize: 10, color: v.status === 'up' ? 'var(--green)' : 'var(--text-muted)' }}>
+            {v.status}
+          </span>
         </div>
       ))}
     </div>

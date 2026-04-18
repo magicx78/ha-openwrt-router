@@ -19,6 +19,7 @@ import type {
   DdnsService,
   SsidInfo,
   PortStat,
+  VlanInfo,
 } from './types';
 
 // ── Raw snapshot types ───────────────────────────────────────────────────
@@ -446,6 +447,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     ddnsServices: (gwAttr.ddns_status as DdnsService[] | undefined) ?? [],
     wanTraffic: gwAttr.wan_traffic as { downstream_bps?: number; upstream_bps?: number } | undefined,
     portStats: (gwAttr.port_stats as PortStat[] | undefined) ?? [],
+    vlans: (gwAttr.vlans as VlanInfo[] | undefined) ?? [],
   };
 
   // AP nodes = all router nodes that are not the gateway

@@ -152,6 +152,33 @@ def _validate_rx_tx(
     return (True, None)
 
 
+def _extract_vlans(network_interfaces: list[dict]) -> list[dict]:
+    """Extract VLAN sub-interfaces from network_interfaces.
+
+    Detects interfaces named br-lan.N, eth0.N, etc. (IEEE 802.1Q VLANs).
+    Returns a list of {id, interface, status} dicts sorted by VLAN ID.
+    Only includes numeric VLAN IDs (VLAN 1 is native/untagged, skip it).
+    """
+    vlans: list[dict] = []
+    seen: set[int] = set()
+    for iface in (network_interfaces or []):
+        name: str = iface.get("interface", "") or ""
+        # Match patterns: br-lan.10, eth0.20, lan0.100, etc.
+        m = re.match(r"^[a-zA-Z][a-zA-Z0-9_-]*\.(\d+)$", name)
+        if not m:
+            continue
+        vlan_id = int(m.group(1))
+        if vlan_id <= 1 or vlan_id in seen:  # skip native VLAN and duplicates
+            continue
+        seen.add(vlan_id)
+        vlans.append({
+            "id": vlan_id,
+            "interface": name,
+            "status": iface.get("status", "unknown"),
+        })
+    return sorted(vlans, key=lambda v: v["id"])
+
+
 def _slim_port_stats(port_stats: list[dict]) -> list[dict]:
     """Strip bulky byte counters from port_stats for the frontend snapshot.
 
@@ -224,6 +251,7 @@ def build_topology_snapshot(
             "cpu_load": data.cpu_load,
             "mem_usage": _calc_mem_usage(data.memory),
             "port_stats": _slim_port_stats(data.port_stats),
+            "vlans": _extract_vlans(data.network_interfaces),
         },
     })
 

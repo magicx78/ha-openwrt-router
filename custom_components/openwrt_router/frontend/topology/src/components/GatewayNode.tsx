@@ -1,5 +1,5 @@
 import React from 'react';
-import { Gateway } from '../types';
+import { Gateway, VlanInfo } from '../types';
 import { StatusDot } from './StatusDot';
 import { IconRouter } from './Icons';
 import { PortStrip } from './PortStrip';
@@ -159,6 +159,22 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, clie
               {s.band && <span className="ssid-badge__band">{s.band}</span>}
               <span className="ssid-badge__name">{s.ssid}</span>
               {s.channel && <span className="ssid-badge__ch">ch{s.channel}</span>}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* ── VLAN badges ── */}
+      {gateway.vlans && gateway.vlans.length > 0 && (
+        <div className="gateway-card__vlans">
+          {gateway.vlans.map((v) => (
+            <span
+              key={v.id}
+              className={`vlan-badge${v.status === 'up' ? ' vlan-badge--up' : v.status === 'down' ? ' vlan-badge--down' : ''}`}
+              title={`VLAN ${v.id} · ${v.interface} · ${v.status}`}
+            >
+              <span className="vlan-badge__id">VLAN {v.id}</span>
+              <span className="vlan-badge__iface">{v.interface}</span>
             </span>
           ))}
         </div>

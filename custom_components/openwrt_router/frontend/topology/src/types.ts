@@ -52,6 +52,7 @@ export interface Gateway {
   ddnsServices?: DdnsService[];
   wanTraffic?: { downstream_bps?: number; upstream_bps?: number };
   portStats?: PortStat[];
+  vlans?: VlanInfo[];
 }
 
 export interface SsidInfo {
@@ -65,6 +66,12 @@ export interface PortStat {
   up: boolean;
   speed_mbps: number | null;  // Mbps or null if no link
   duplex?: string | null;     // "full" | "half" | null
+}
+
+export interface VlanInfo {
+  id: number;          // VLAN ID (e.g. 10, 20, 100)
+  interface: string;   // e.g. "br-lan.10", "eth0.20"
+  status: string;      // "up" | "down" | "unknown"
 }
 
 export interface AccessPoint {

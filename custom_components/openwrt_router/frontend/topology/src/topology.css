@@ -1768,3 +1768,41 @@
 }
 .node-tooltip__value.warn { color: var(--amber); }
 
+/* ── VLAN Badges (#6) ────────────────────────────────────────────────── */
+.gateway-card__vlans {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 10px 4px;
+  border-top: 1px solid var(--border);
+}
+.vlan-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid rgba(148,163,184,0.2);
+  background: rgba(148,163,184,0.07);
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+.vlan-badge--up {
+  border-color: rgba(34,197,94,0.25);
+  background: rgba(34,197,94,0.08);
+  color: #86efac;
+}
+.vlan-badge--down {
+  border-color: rgba(239,68,68,0.25);
+  background: rgba(239,68,68,0.08);
+  color: #fca5a5;
+}
+.vlan-badge__id {
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.vlan-badge__iface {
+  font-size: 9px;
+  opacity: 0.7;
+}
+
