@@ -1710,3 +1710,60 @@
   line-height: 1;
 }
 
+/* ── Node Hover Tooltip (#13) ────────────────────────────────────────── */
+.node-tooltip {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 9px 11px;
+  min-width: 160px;
+  max-width: 220px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.45);
+  pointer-events: none;
+  animation: tooltip-in 0.12s ease-out;
+}
+@keyframes tooltip-in {
+  from { opacity: 0; transform: translateY(-50%) scale(0.93); }
+  to   { opacity: 1; transform: translateY(-50%) scale(1); }
+}
+.node-tooltip__title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.node-tooltip__subtitle {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.node-tooltip__sep {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 0;
+}
+.node-tooltip__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 1.5px 0;
+}
+.node-tooltip__label {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.node-tooltip__value {
+  font-size: 10.5px;
+  color: var(--text-primary);
+  font-weight: 500;
+  text-align: right;
+  white-space: nowrap;
+}
+.node-tooltip__value.warn { color: var(--amber); }
+

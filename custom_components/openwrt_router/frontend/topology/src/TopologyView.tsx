@@ -23,6 +23,7 @@ import { DetailPanel } from './components/DetailPanel';
 import { StatusBar } from './components/StatusBar';
 import { Sidebar, SidebarTab } from './components/Sidebar';
 import { EdgeTooltip } from './components/EdgeTooltip';
+import { NodeTooltip } from './components/NodeTooltip';
 import { DevicesView } from './components/DevicesView';
 import { ClientsView } from './components/ClientsView';
 import { AlertsView } from './components/AlertsView';
@@ -445,6 +446,16 @@ export function TopologyView({ data }: Props) {
           data={data}
         />
       )}
+
+      {/* Node hover tooltip — appears beside the hovered gateway / AP card */}
+      {hoveredNodeId && !dragging && (() => {
+        const el = nodeRefs.current.get(hoveredNodeId);
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return (
+          <NodeTooltip nodeId={hoveredNodeId} data={data} anchorRect={rect} />
+        );
+      })()}
     </div>
   );
 }
