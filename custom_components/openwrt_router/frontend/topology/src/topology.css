@@ -1873,3 +1873,90 @@
 .vlan-overlay__status.up   { color: var(--green); }
 .vlan-overlay__status.down { color: var(--red); }
 
+/* ── VLAN Color Palette (#22 full) ───────────────────────────────────── */
+/*
+ * 7-color palette indexed by VLAN ID mod 7.
+ * Applied via [data-vlan="N"] on .node-card and .client-dot.
+ * .vlan-mode class on .topo-app enables all VLAN color rules.
+ */
+.topo-app {
+  --vlan-c0: #3b82f6;   /* blue   */
+  --vlan-c1: #22c55e;   /* green  */
+  --vlan-c2: #f97316;   /* orange */
+  --vlan-c3: #a855f7;   /* violet */
+  --vlan-c4: #ef4444;   /* red    */
+  --vlan-c5: #eab308;   /* yellow */
+  --vlan-c6: #06b6d4;   /* teal   */
+}
+
+/* Map each VLAN ID to a palette slot (ID mod 7).
+   We enumerate common IDs; unknown IDs fall back to no accent. */
+.vlan-mode [data-vlan]   { --vlan-color: var(--vlan-c0); }
+
+/* IDs 1-99: mod 7 assignments */
+.vlan-mode [data-vlan="1"],  .vlan-mode [data-vlan="8"],  .vlan-mode [data-vlan="15"],
+.vlan-mode [data-vlan="22"], .vlan-mode [data-vlan="29"], .vlan-mode [data-vlan="36"],
+.vlan-mode [data-vlan="43"], .vlan-mode [data-vlan="50"], .vlan-mode [data-vlan="57"],
+.vlan-mode [data-vlan="64"], .vlan-mode [data-vlan="71"], .vlan-mode [data-vlan="78"],
+.vlan-mode [data-vlan="85"], .vlan-mode [data-vlan="92"], .vlan-mode [data-vlan="99"]
+  { --vlan-color: var(--vlan-c0); }
+
+.vlan-mode [data-vlan="2"],  .vlan-mode [data-vlan="9"],  .vlan-mode [data-vlan="16"],
+.vlan-mode [data-vlan="23"], .vlan-mode [data-vlan="30"], .vlan-mode [data-vlan="37"],
+.vlan-mode [data-vlan="44"], .vlan-mode [data-vlan="51"], .vlan-mode [data-vlan="58"],
+.vlan-mode [data-vlan="65"], .vlan-mode [data-vlan="72"], .vlan-mode [data-vlan="79"],
+.vlan-mode [data-vlan="86"], .vlan-mode [data-vlan="93"], .vlan-mode [data-vlan="100"]
+  { --vlan-color: var(--vlan-c1); }
+
+.vlan-mode [data-vlan="3"],  .vlan-mode [data-vlan="10"], .vlan-mode [data-vlan="17"],
+.vlan-mode [data-vlan="24"], .vlan-mode [data-vlan="31"], .vlan-mode [data-vlan="38"],
+.vlan-mode [data-vlan="45"], .vlan-mode [data-vlan="52"], .vlan-mode [data-vlan="59"],
+.vlan-mode [data-vlan="66"], .vlan-mode [data-vlan="73"], .vlan-mode [data-vlan="80"],
+.vlan-mode [data-vlan="87"], .vlan-mode [data-vlan="94"], .vlan-mode [data-vlan="200"]
+  { --vlan-color: var(--vlan-c2); }
+
+.vlan-mode [data-vlan="4"],  .vlan-mode [data-vlan="11"], .vlan-mode [data-vlan="18"],
+.vlan-mode [data-vlan="25"], .vlan-mode [data-vlan="32"], .vlan-mode [data-vlan="39"],
+.vlan-mode [data-vlan="46"], .vlan-mode [data-vlan="53"], .vlan-mode [data-vlan="60"],
+.vlan-mode [data-vlan="67"], .vlan-mode [data-vlan="74"], .vlan-mode [data-vlan="81"],
+.vlan-mode [data-vlan="88"], .vlan-mode [data-vlan="95"], .vlan-mode [data-vlan="300"]
+  { --vlan-color: var(--vlan-c3); }
+
+.vlan-mode [data-vlan="5"],  .vlan-mode [data-vlan="12"], .vlan-mode [data-vlan="19"],
+.vlan-mode [data-vlan="26"], .vlan-mode [data-vlan="33"], .vlan-mode [data-vlan="40"],
+.vlan-mode [data-vlan="47"], .vlan-mode [data-vlan="54"], .vlan-mode [data-vlan="61"],
+.vlan-mode [data-vlan="68"], .vlan-mode [data-vlan="75"], .vlan-mode [data-vlan="82"],
+.vlan-mode [data-vlan="89"], .vlan-mode [data-vlan="96"], .vlan-mode [data-vlan="400"]
+  { --vlan-color: var(--vlan-c4); }
+
+.vlan-mode [data-vlan="6"],  .vlan-mode [data-vlan="13"], .vlan-mode [data-vlan="20"],
+.vlan-mode [data-vlan="27"], .vlan-mode [data-vlan="34"], .vlan-mode [data-vlan="41"],
+.vlan-mode [data-vlan="48"], .vlan-mode [data-vlan="55"], .vlan-mode [data-vlan="62"],
+.vlan-mode [data-vlan="69"], .vlan-mode [data-vlan="76"], .vlan-mode [data-vlan="83"],
+.vlan-mode [data-vlan="90"], .vlan-mode [data-vlan="97"], .vlan-mode [data-vlan="500"]
+  { --vlan-color: var(--vlan-c5); }
+
+.vlan-mode [data-vlan="7"],  .vlan-mode [data-vlan="14"], .vlan-mode [data-vlan="21"],
+.vlan-mode [data-vlan="28"], .vlan-mode [data-vlan="35"], .vlan-mode [data-vlan="42"],
+.vlan-mode [data-vlan="49"], .vlan-mode [data-vlan="56"], .vlan-mode [data-vlan="63"],
+.vlan-mode [data-vlan="70"], .vlan-mode [data-vlan="77"], .vlan-mode [data-vlan="84"],
+.vlan-mode [data-vlan="91"], .vlan-mode [data-vlan="98"], .vlan-mode [data-vlan="600"]
+  { --vlan-color: var(--vlan-c6); }
+
+/* Apply color to node cards (border accent) */
+.vlan-mode .node-card[data-vlan] {
+  border-color: var(--vlan-color);
+  box-shadow: 0 0 0 1px var(--vlan-color), inset 0 0 20px rgba(0,0,0,0.1);
+}
+
+/* Apply color to client dots (ring + background tint) */
+.vlan-mode .client-dot[data-vlan] {
+  outline: 2px solid var(--vlan-color);
+  outline-offset: 1px;
+}
+
+/* Show VLAN color swatch in overlay legend */
+.vlan-overlay__row[data-vlan] .vlan-overlay__dot {
+  background: var(--vlan-color, var(--text-muted));
+}
+

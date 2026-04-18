@@ -11,6 +11,7 @@ interface Props {
   onSelect: () => void;
   onHover: (id: string | null) => void;
   clientCount?: number;
+  vlanMode?: boolean;
 }
 
 function trendArrow(history: number[]): string {
@@ -54,7 +55,7 @@ function bandClass(band: string): string {
   return 'ssid-badge--24g';
 }
 
-export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, clientCount }: Props) {
+export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, clientCount, vlanMode }: Props) {
   const statusClass = gateway.status === 'online'
     ? 'status-online'
     : gateway.status === 'warning'
@@ -72,9 +73,13 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, clie
   const cpu = gateway.cpuLoad;
   const mem = gateway.memUsage;
 
+  // Gateway hosts all VLANs — no single "primary", use first VLAN ID for border accent
+  const firstVlan = vlanMode && (gateway.vlans ?? []).length > 0 ? gateway.vlans![0].id : undefined;
+
   return (
     <div
       className={cls}
+      data-vlan={firstVlan ?? undefined}
       onClick={onSelect}
       onMouseEnter={() => onHover(gateway.id)}
       onMouseLeave={() => onHover(null)}

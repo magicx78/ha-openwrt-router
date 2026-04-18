@@ -396,6 +396,38 @@ function signalStatus(signal: number | null | undefined): NodeStatus {
   return 'warning';
 }
 
+// ── VLAN subnet matching ─────────────────────────────────────────────────
+
+function ipToNum(ip: string): number {
+  const p = ip.split('.').map(Number);
+  return (((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0);
+}
+
+function ipInSubnet(ip: string, gatewayIp: string, prefix: number): boolean {
+  if (!ip || !gatewayIp || prefix <= 0) return false;
+  const mask = prefix >= 32 ? 0xffffffff : (~0 << (32 - prefix)) >>> 0;
+  return (ipToNum(ip) & mask) === (ipToNum(gatewayIp) & mask);
+}
+
+/** Return the VLAN ID for a client IP, or null if no match. */
+function matchVlan(ip: string, vlans: import('./types').VlanInfo[]): number | null {
+  if (!ip) return null;
+  for (const v of vlans) {
+    if (v.ipv4 && v.prefix != null && ipInSubnet(ip, v.ipv4, v.prefix)) return v.id;
+  }
+  return null;
+}
+
+/** Return the most-common VLAN ID among a list of vlanIds (null = unknown). */
+function primaryVlan(vlanIds: (number | null | undefined)[]): number | undefined {
+  const counts = new Map<number, number>();
+  for (const id of vlanIds) {
+    if (id != null) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  if (!counts.size) return undefined;
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
 // ── Core adapter ─────────────────────────────────────────────────────────
 
 export function adaptSnapshot(snap: Snapshot): TopologyData {
@@ -447,7 +479,13 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     ddnsServices: (gwAttr.ddns_status as DdnsService[] | undefined) ?? [],
     wanTraffic: gwAttr.wan_traffic as { downstream_bps?: number; upstream_bps?: number } | undefined,
     portStats: (gwAttr.port_stats as PortStat[] | undefined) ?? [],
-    vlans: (gwAttr.vlans as VlanInfo[] | undefined) ?? [],
+    vlans: ((gwAttr.vlans as any[] | undefined) ?? []).map((v: any): VlanInfo => ({
+      id: v.id,
+      interface: v.interface,
+      status: v.status ?? 'unknown',
+      ipv4: v.ipv4_addr ?? undefined,
+      prefix: v.prefix_len ?? undefined,
+    })),
   };
 
   // AP nodes = all router nodes that are not the gateway
@@ -542,8 +580,15 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       dhcpExpires: dhcpExpires && dhcpExpires > 0 ? dhcpExpires : undefined,
       rxBytes: attr?.rx_bytes as number | null | undefined,
       txBytes: attr?.tx_bytes as number | null | undefined,
+      vlanId: matchVlan((attr?.ip as string) ?? '', gateway.vlans ?? []) ?? undefined,
     };
   });
+
+  // Assign primaryVlanId to APs now that clients are available
+  for (const ap of accessPoints) {
+    const apClients = clients.filter(c => c.apId === ap.id);
+    ap.primaryVlanId = primaryVlan(apClients.map(c => c.vlanId ?? null));
+  }
 
   return {
     gateway,

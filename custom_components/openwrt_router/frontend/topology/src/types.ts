@@ -72,6 +72,8 @@ export interface VlanInfo {
   id: number;          // VLAN ID (e.g. 10, 20, 100)
   interface: string;   // e.g. "br-lan.10", "eth0.20"
   status: string;      // "up" | "down" | "unknown"
+  ipv4?: string;       // gateway IP in this VLAN, e.g. "192.168.10.1"
+  prefix?: number;     // subnet prefix length, e.g. 24
 }
 
 export interface AccessPoint {
@@ -87,6 +89,7 @@ export interface AccessPoint {
   ssids?: SsidInfo[];      // WiFi networks broadcast by this AP
   cpuLoad?: number;        // 0-100 percent
   memUsage?: number;       // 0-100 percent
+  primaryVlanId?: number;  // majority VLAN among connected clients
 }
 
 export interface Client {
@@ -105,6 +108,7 @@ export interface Client {
   dhcpExpires?: number;    // unix timestamp when DHCP lease expires
   rxBytes?: number | null; // bytes received since connection (from hostapd)
   txBytes?: number | null; // bytes transmitted since connection (from hostapd)
+  vlanId?: number;         // VLAN this client belongs to (matched via subnet)
 }
 
 export interface TopologyData {

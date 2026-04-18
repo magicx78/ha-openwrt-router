@@ -258,8 +258,14 @@ export function TopologyView({ data }: Props) {
   // ── Focus mode class — applied when any node is hovered ─────────────────
   const hasActiveFocus = hoveredNodeId !== null;
 
+  const appClass = [
+    'topo-app',
+    trafficMode ? 'traffic-mode' : '',
+    vlanMode    ? 'vlan-mode'    : '',
+  ].filter(Boolean).join(' ');
+
   return (
-    <div className={`topo-app${trafficMode ? ' traffic-mode' : ''}`}>
+    <div className={appClass}>
       {/* ── Left sidebar ─────────────────────────────────────── */}
       <Sidebar
         open={sidebarOpen}
@@ -368,6 +374,7 @@ export function TopologyView({ data }: Props) {
                       onSelect={selectGateway}
                       onHover={setHoveredNodeId}
                       clientCount={gwClients.length > 0 ? gwClients.length : undefined}
+                      vlanMode={vlanMode}
                     />
                   </div>
                   {clientsForAP(data.gateway.id).length > 0 && (
@@ -375,6 +382,7 @@ export function TopologyView({ data }: Props) {
                       clients={clientsForAP(data.gateway.id)}
                       dimmed={hoverCtx.dimmedNodes.has(data.gateway.id)}
                       onSelectClient={selectClient}
+                      vlanMode={vlanMode}
                     />
                   )}
                 </div>
@@ -400,12 +408,14 @@ export function TopologyView({ data }: Props) {
                           onSelect={() => selectAP(ap)}
                           onHover={setHoveredNodeId}
                           heatmap={heatmapMode}
+                          vlanMode={vlanMode}
                         />
                       </div>
                       <ClientStrip
                         clients={apClients}
                         dimmed={hoverCtx.dimmedNodes.has(ap.id)}
                         onSelectClient={selectClient}
+                        vlanMode={vlanMode}
                       />
                     </div>
                   );
@@ -463,7 +473,7 @@ export function TopologyView({ data }: Props) {
             ) : (
               <div className="vlan-overlay__list">
                 {vlans.map(v => (
-                  <div key={v.id} className="vlan-overlay__row">
+                  <div key={v.id} className="vlan-overlay__row" data-vlan={v.id}>
                     <span className={`vlan-overlay__dot${v.status === 'up' ? ' up' : v.status === 'down' ? ' down' : ''}`} />
                     <span className="vlan-overlay__id">VLAN {v.id}</span>
                     <span className="vlan-overlay__iface">{v.interface}</span>

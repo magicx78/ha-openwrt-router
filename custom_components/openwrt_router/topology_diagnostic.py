@@ -175,6 +175,8 @@ def _extract_vlans(network_interfaces: list[dict]) -> list[dict]:
             "id": vlan_id,
             "interface": name,
             "status": iface.get("status", "unknown"),
+            "ipv4_addr": iface.get("ipv4_addr"),
+            "prefix_len": iface.get("prefix_len"),
         })
     return sorted(vlans, key=lambda v: v["id"])
 
