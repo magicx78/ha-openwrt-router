@@ -137,6 +137,7 @@ export interface EdgeLayout {
   kind: EdgeKind;
   path: string; // SVG path d attribute
   status: NodeStatus;
+  vlanId?: number; // primary VLAN of the target AP (used for edge coloring in vlan-mode)
 }
 
 export interface TopologyLayout {

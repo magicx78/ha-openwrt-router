@@ -55,6 +55,31 @@ export function NodeTooltip({ nodeId, data, anchorRect }: Props) {
           <Row label="Ping" value={`${gw.pingMs} ms`} warn={gw.pingMs > 80} />
         )}
         <Row label="Clients" value={data.clients.filter(c => c.apId === gw.id).length} />
+        {gw.ssids && gw.ssids.length > 0 && (
+          <>
+            <div className="node-tooltip__sep" />
+            {gw.ssids.map((s, i) => (
+              <Row
+                key={i}
+                label={s.band}
+                value={s.ssid + (s.channel != null ? ` ch${s.channel}` : '')}
+              />
+            ))}
+          </>
+        )}
+        {gw.vlans && gw.vlans.length > 0 && (
+          <>
+            <div className="node-tooltip__sep" />
+            {gw.vlans.map(v => (
+              <Row
+                key={v.id}
+                label={`VLAN ${v.id}`}
+                value={v.interface}
+                warn={v.status !== 'up'}
+              />
+            ))}
+          </>
+        )}
       </>
     );
   } else {
@@ -87,6 +112,18 @@ export function NodeTooltip({ nodeId, data, anchorRect }: Props) {
             value={`${avgSig} dBm`}
             warn={avgSig < -72}
           />
+        )}
+        {ap.ssids && ap.ssids.length > 0 && (
+          <>
+            <div className="node-tooltip__sep" />
+            {ap.ssids.map((s, i) => (
+              <Row
+                key={i}
+                label={s.band}
+                value={s.ssid + (s.channel != null ? ` ch${s.channel}` : '')}
+              />
+            ))}
+          </>
         )}
       </>
     );

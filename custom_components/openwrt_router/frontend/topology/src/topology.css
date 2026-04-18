@@ -1710,6 +1710,59 @@
   font-weight: 500;
   line-height: 1;
 }
+/* WAN port accent */
+.port-strip__port--wan {
+  border-color: rgba(96,165,250,0.35);
+  background: rgba(96,165,250,0.06);
+}
+.port-strip__port--wan.port-strip__port--up {
+  border-color: rgba(96,165,250,0.55);
+  background: rgba(96,165,250,0.12);
+}
+.port-strip__port--wan .port-strip__led {
+  background: #60a5fa;
+  box-shadow: 0 0 5px 1px rgba(96,165,250,0.55);
+}
+.port-strip__port--wan .port-strip__name { color: #60a5fa; }
+/* SFP port accent */
+.port-strip__port--sfp {
+  border-color: rgba(168,85,247,0.35);
+  background: rgba(168,85,247,0.06);
+}
+.port-strip__port--sfp.port-strip__port--up {
+  border-color: rgba(168,85,247,0.55);
+  background: rgba(168,85,247,0.12);
+}
+.port-strip__port--sfp .port-strip__led {
+  background: #a855f7;
+  box-shadow: 0 0 5px 1px rgba(168,85,247,0.55);
+}
+/* Port hover popover */
+.port-strip__port { position: relative; }
+.port-tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 200;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+}
+.port-tooltip__name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.port-tooltip__meta {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
 
 /* ── Node Hover Tooltip (#13) ────────────────────────────────────────── */
 .node-tooltip {
@@ -1958,5 +2011,16 @@
 /* Show VLAN color swatch in overlay legend */
 .vlan-overlay__row[data-vlan] .vlan-overlay__dot {
   background: var(--vlan-color, var(--text-muted));
+}
+
+/* VLAN-colored edges — applied when vlan-mode is active and edge carries a vlanId */
+.vlan-mode .edge-group[data-vlan] .edge-wired-bg,
+.vlan-mode .edge-group[data-vlan] .edge-mesh-bg {
+  stroke: var(--vlan-color);
+  opacity: 0.18;
+}
+.vlan-mode .edge-group[data-vlan] .edge-wired-flow,
+.vlan-mode .edge-group[data-vlan] .edge-mesh-flow {
+  stroke: var(--vlan-color);
 }
 

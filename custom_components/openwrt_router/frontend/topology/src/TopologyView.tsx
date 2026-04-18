@@ -350,6 +350,7 @@ export function TopologyView({ data }: Props) {
                 highlightedEdges={hoverCtx.highlightedEdges}
                 dimmedEdges={dimmedEdges}
                 onEdgeHover={!dragging ? onEdgeHover : undefined}
+                vlanMode={vlanMode}
               />
             </svg>
 
