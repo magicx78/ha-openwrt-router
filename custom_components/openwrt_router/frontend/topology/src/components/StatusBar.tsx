@@ -1,6 +1,6 @@
 import React from 'react';
 import { FilterType } from '../types';
-import { IconSearch, IconFitView, IconTraffic } from './Icons';
+import { IconSearch, IconFitView, IconTraffic, IconVlan } from './Icons';
 
 // Simple heatmap icon (signal waves)
 function IconHeatmap({ size = 15 }: { size?: number }) {
@@ -24,6 +24,7 @@ interface Props {
   trafficMode: boolean;
   heatmapMode: boolean;
   ghostMode: boolean;
+  vlanMode: boolean;
   topologyControls?: boolean;
   onFilterChange: (f: FilterType) => void;
   onSearchChange: (q: string) => void;
@@ -31,6 +32,7 @@ interface Props {
   onToggleTraffic: () => void;
   onToggleHeatmap: () => void;
   onToggleGhost: () => void;
+  onToggleVlan: () => void;
 }
 
 const FILTERS: { key: FilterType; label: string }[] = [
@@ -51,6 +53,7 @@ export function StatusBar({
   trafficMode,
   heatmapMode,
   ghostMode,
+  vlanMode,
   topologyControls = true,
   onFilterChange,
   onSearchChange,
@@ -58,6 +61,7 @@ export function StatusBar({
   onToggleTraffic,
   onToggleHeatmap,
   onToggleGhost,
+  onToggleVlan,
 }: Props) {
   const allOnline = onlineNodes === totalNodes;
   const healthClass = warningCount === 0 ? 'health-ok' : warningCount <= 2 ? 'health-warn' : 'health-crit';
@@ -137,6 +141,15 @@ export function StatusBar({
             title={ghostMode ? 'Ghost-Modus ausschalten' : 'Verschwundene Geräte anzeigen'}
           >
             <span style={{ fontSize: 13, lineHeight: 1 }}>👻</span>
+          </button>
+
+          {/* ── VLAN toggle ──────────────────────────────────────── */}
+          <button
+            className={`status-bar__action${vlanMode ? ' active' : ''}`}
+            onClick={onToggleVlan}
+            title={vlanMode ? 'VLAN-Overlay ausschalten' : 'VLAN-Overlay einschalten'}
+          >
+            <IconVlan size={15} />
           </button>
 
           {/* ── Traffic toggle ───────────────────────────────────── */}

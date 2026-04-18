@@ -64,6 +64,9 @@ export function TopologyView({ data }: Props) {
 
   // ── Ghost Mode ───────────────────────────────────────────────────────────
   const [ghostMode, setGhostMode] = useState(false);
+
+  // ── VLAN Overlay mode ────────────────────────────────────────────────────
+  const [vlanMode, setVlanMode] = useState(false);
   const ghosts = useGhostDevices(data.accessPoints, data.clients, ghostMode);
 
   // ── Zoom / Pan ──────────────────────────────────────────────────────────
@@ -279,6 +282,7 @@ export function TopologyView({ data }: Props) {
           trafficMode={trafficMode}
           heatmapMode={heatmapMode}
           ghostMode={ghostMode}
+          vlanMode={vlanMode}
           topologyControls={activeTab === 'topology'}
           onFilterChange={setFilter}
           onSearchChange={setSearchQuery}
@@ -286,6 +290,7 @@ export function TopologyView({ data }: Props) {
           onToggleTraffic={() => setTrafficMode(m => !m)}
           onToggleHeatmap={() => setHeatmapMode(m => !m)}
           onToggleGhost={() => setGhostMode(m => !m)}
+          onToggleVlan={() => setVlanMode(m => !m)}
         />
 
         {/* ── Non-topology views ───────────────────────────────── */}
@@ -446,6 +451,30 @@ export function TopologyView({ data }: Props) {
           data={data}
         />
       )}
+
+      {/* VLAN Overlay — floating legend panel when vlanMode is active */}
+      {vlanMode && activeTab === 'topology' && (() => {
+        const vlans = data.gateway.vlans ?? [];
+        return (
+          <div className="vlan-overlay">
+            <div className="vlan-overlay__title">VLANs ({vlans.length})</div>
+            {vlans.length === 0 ? (
+              <div className="vlan-overlay__empty">Keine VLANs erkannt</div>
+            ) : (
+              <div className="vlan-overlay__list">
+                {vlans.map(v => (
+                  <div key={v.id} className="vlan-overlay__row">
+                    <span className={`vlan-overlay__dot${v.status === 'up' ? ' up' : v.status === 'down' ? ' down' : ''}`} />
+                    <span className="vlan-overlay__id">VLAN {v.id}</span>
+                    <span className="vlan-overlay__iface">{v.interface}</span>
+                    <span className={`vlan-overlay__status${v.status === 'up' ? ' up' : v.status === 'down' ? ' down' : ''}`}>{v.status}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Node hover tooltip — appears beside the hovered gateway / AP card */}
       {hoveredNodeId && !dragging && (() => {
