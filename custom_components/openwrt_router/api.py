@@ -203,6 +203,50 @@ def _parse_port_speed(raw: Any) -> tuple[int | None, str | None]:
         return None, None
 
 
+def _parse_ip_addr_output(output: str) -> list[dict[str, Any]]:
+    """Parse combined 'ip -o addr show; ip link show' output into interface dicts."""
+    up_ifaces: set[str] = set()
+    for line in output.splitlines():
+        if "state UP" in line or ",UP," in line:
+            parts = line.split()
+            if len(parts) >= 2:
+                up_ifaces.add(parts[1].rstrip(":").split("@")[0])
+
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        if "inet " not in line:
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        iface = parts[1].rstrip(":").split("@")[0]
+        if iface in seen:
+            continue
+        seen.add(iface)
+        ipv4_addr: str | None = None
+        prefix_len: int | None = None
+        for i, p in enumerate(parts):
+            if p == "inet" and i + 1 < len(parts):
+                addr_pfx = parts[i + 1]
+                if "/" in addr_pfx:
+                    ipv4_addr, pfx = addr_pfx.split("/", 1)
+                    try:
+                        prefix_len = int(pfx)
+                    except ValueError:
+                        pass
+                break
+        out.append({
+            "interface": iface,
+            "rx_bytes": 0,
+            "tx_bytes": 0,
+            "status": "up" if iface in up_ifaces else "down",
+            "ipv4_addr": ipv4_addr,
+            "prefix_len": prefix_len,
+        })
+    return out
+
+
 class OpenWrtAPI:
     """Async client for OpenWrt ubus / rpcd JSON-RPC.
 
@@ -2118,7 +2162,29 @@ class OpenWrtAPI:
                 })
             return out
         except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError) as err:
-            _LOGGER.debug("Could not fetch network interface stats: %s", err)
+            _LOGGER.debug("network.interface/dump failed: %s — trying SSH fallback", err)
+            return await self._get_network_interfaces_ssh()
+
+    async def _get_network_interfaces_ssh(self) -> list[dict[str, Any]]:
+        """SSH fallback: parse 'ip -o addr show' for interface and VLAN data."""
+        ssh_cmd = [
+            "sshpass", "-p", self._password,
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            f"{self._username}@{self._host}",
+            "ip -o addr show; ip link show",
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+            return _parse_ip_addr_output(stdout.decode(errors="replace"))
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("SSH fallback for network interfaces failed: %s", err)
             return []
 
     async def get_port_stats(self) -> list[dict[str, Any]]:

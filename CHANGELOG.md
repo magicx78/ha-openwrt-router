@@ -2,6 +2,12 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.12.2] - 2026-04-19
+
+### Fixed
+
+- **Topology: VLAN-Badges** — SSH-Fallback für `get_network_interfaces()` wenn ubus ACL-beschränkt ist; liest VLANs direkt per `ip -o addr show` aus
+
 ## [1.12.1] - 2026-04-19
 
 ### Fixed
