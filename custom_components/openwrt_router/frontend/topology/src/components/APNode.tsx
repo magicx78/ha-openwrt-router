@@ -121,20 +121,27 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
         </div>
       </div>
 
-      {/* SSID badges */}
-      {ap.ssids && ap.ssids.length > 0 && (
+      {/* SSID count badge + VLAN badges */}
+      {((ap.ssids && ap.ssids.length > 0) || ap.primaryVlanId != null) && (
         <div className="ap-card__ssids">
-          {ap.ssids.slice(0, 4).map((s, i) => (
+          {ap.ssids && ap.ssids.length > 0 && (
             <span
-              key={i}
-              className={`ssid-badge ${bandClass(s.band)}`}
-              title={[s.ssid, s.band, s.channel ? `Kanal ${s.channel}` : ''].filter(Boolean).join(' · ')}
+              className="ssid-count-badge"
+              title={ap.ssids.map(s =>
+                [s.ssid, s.band, s.channel ? `ch${s.channel}` : ''].filter(Boolean).join(' · ')
+              ).join('\n')}
             >
-              {s.band && <span className="ssid-badge__band">{s.band}</span>}
-              <span className="ssid-badge__name">{s.ssid}</span>
-              {s.channel && <span className="ssid-badge__ch">ch{s.channel}</span>}
+              📶 {ap.ssids.length}
             </span>
-          ))}
+          )}
+          {ap.primaryVlanId != null && (
+            <span
+              className="vlan-badge vlan-badge--up"
+              title={`VLAN ${ap.primaryVlanId}`}
+            >
+              <span className="vlan-badge__id">VLAN {ap.primaryVlanId}</span>
+            </span>
+          )}
         </div>
       )}
     </div>

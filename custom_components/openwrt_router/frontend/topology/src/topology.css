@@ -1666,6 +1666,25 @@
 .ssid-badge--6g  { background: rgba(168,85,247,0.12); border-color: rgba(168,85,247,0.25); color: #c4b5fd; }
 .ssid-badge__ch  { font-size: 9px; opacity: 0.65; font-weight: 500; letter-spacing: 0.2px; }
 
+/* ── SSID count badge — compact number pill with hover tooltip ── */
+.ssid-count-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 700; cursor: default;
+  background: rgba(59,130,246,0.14); border: 1px solid rgba(59,130,246,0.30);
+  color: #93c5fd; white-space: nowrap;
+  position: relative;
+}
+.ssid-count-badge:hover::after {
+  content: attr(title);
+  position: absolute; bottom: calc(100% + 6px); left: 0;
+  background: #1e293b; border: 1px solid rgba(148,163,184,0.25);
+  color: #e2e8f0; font-size: 11px; font-weight: 400; line-height: 1.5;
+  padding: 6px 10px; border-radius: 6px; white-space: pre; z-index: 9999;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5); pointer-events: none;
+  min-width: 160px;
+}
+
 /* ── Ghost Mode ──────────────────────────────────────────────────────── */
 .ghost-node { opacity: 0.45; filter: grayscale(0.85); }
 .ghost-ap {
