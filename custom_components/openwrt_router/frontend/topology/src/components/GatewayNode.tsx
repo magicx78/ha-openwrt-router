@@ -12,6 +12,7 @@ interface Props {
   onSelect: () => void;
   onHover: (id: string | null) => void;
   onContextMenu?: (x: number, y: number) => void;
+  onDoubleClick?: () => void;
   clientCount?: number;
   vlanMode?: boolean;
   healthMode?: boolean;
@@ -69,7 +70,7 @@ export function computeHealth(cpu?: number, mem?: number, signalDbm?: number): '
   return 'ok';
 }
 
-export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onContextMenu, clientCount, vlanMode, healthMode }: Props) {
+export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onContextMenu, onDoubleClick, clientCount, vlanMode, healthMode }: Props) {
   const statusClass = gateway.status === 'online'
     ? 'status-online'
     : gateway.status === 'warning'
@@ -103,6 +104,7 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onCo
       onMouseEnter={() => onHover(gateway.id)}
       onMouseLeave={() => onHover(null)}
       onContextMenu={e => { e.preventDefault(); onContextMenu?.(e.clientX, e.clientY); }}
+      onDoubleClick={e => { e.stopPropagation(); onDoubleClick?.(); }}
     >
       {/* ── Header ── */}
       <div className="gateway-card__header">

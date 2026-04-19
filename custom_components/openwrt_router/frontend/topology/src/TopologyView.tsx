@@ -78,7 +78,8 @@ export function TopologyView({ data }: Props) {
   // ── Zoom / Pan ──────────────────────────────────────────────────────────
   const [zoom, setZoom] = useState(1.0);
   const [pan,  setPan]  = useState({ x: 0, y: 0 });
-  const [dragging, setDragging] = useState(false);
+  const [dragging,   setDragging]   = useState(false);
+  const [zoomFlying, setZoomFlying] = useState(false);
   const lastPos = useRef<{ x: number; y: number } | null>(null);
 
   // Keep refs in sync so wheel handler (captured by addEventListener) reads
@@ -162,6 +163,32 @@ export function TopologyView({ data }: Props) {
       x: p.x + sr.width  / 2 - nodeCX,
       y: p.y + sr.height / 2 - nodeCY,
     }));
+  }, []);
+
+  // ── Double-click zoom: fly to node at 2×, or reset if already zoomed in ──
+  const zoomToNode = useCallback((nodeId: string) => {
+    const el = nodeRefs.current.get(nodeId);
+    const sc = scrollRef.current;
+    if (!el || !sc) return;
+
+    if (zoomRef.current >= 1.75) {
+      // Already zoomed in — reset to fit
+      setZoomFlying(true);
+      setZoom(1.0);
+      setPan({ x: 0, y: 0 });
+    } else {
+      const er = el.getBoundingClientRect();
+      const sr = sc.getBoundingClientRect();
+      const TARGET = 2.0;
+      // Node center in logical coords
+      const logX = (er.left + er.width  / 2 - sr.left - panRef.current.x) / zoomRef.current;
+      const logY = (er.top  + er.height / 2 - sr.top  - panRef.current.y) / zoomRef.current;
+      setZoomFlying(true);
+      setZoom(TARGET);
+      setPan({ x: sr.width / 2 - logX * TARGET, y: sr.height / 2 - logY * TARGET });
+    }
+    // Remove flying class after animation completes
+    setTimeout(() => setZoomFlying(false), 380);
   }, []);
 
   // ── Wheel zoom (must be non-passive to call preventDefault) ─────────────
@@ -458,7 +485,7 @@ export function TopologyView({ data }: Props) {
           {/* Zoom wrapper — transform applied here */}
           <div
             ref={wrapperRef}
-            className={`topo-zoom-wrapper${dragging ? ' dragging' : ''}`}
+            className={`topo-zoom-wrapper${dragging ? ' dragging' : ''}${zoomFlying ? ' zoom-flying' : ''}`}
             style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
           >
             {/* SVG connections layer — absolute overlay, behind flex nodes */}
@@ -497,6 +524,7 @@ export function TopologyView({ data }: Props) {
                       onSelect={selectGateway}
                       onHover={setHoveredNodeId}
                       onContextMenu={(x, y) => setContextMenu({ nodeId: data.gateway.id, kind: 'gateway', x, y })}
+                      onDoubleClick={() => zoomToNode(data.gateway.id)}
                       clientCount={gwClients.length > 0 ? gwClients.length : undefined}
                       vlanMode={vlanMode}
                       healthMode={healthMode}
@@ -535,6 +563,7 @@ export function TopologyView({ data }: Props) {
                           onSelect={() => selectAP(ap)}
                           onHover={setHoveredNodeId}
                           onContextMenu={(x, y) => setContextMenu({ nodeId: ap.id, kind: 'ap', x, y })}
+                          onDoubleClick={() => zoomToNode(ap.id)}
                           onToggleExpand={() => setExpandedApId(id => id === ap.id ? null : ap.id)}
                           heatmap={heatmapMode}
                           vlanMode={vlanMode}
