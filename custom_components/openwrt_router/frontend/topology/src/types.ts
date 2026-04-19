@@ -41,6 +41,7 @@ export interface Gateway {
   wanIp: string;
   uptime: string;
   status: NodeStatus;
+  firmwareVersion?: string; // OpenWrt release version e.g. "23.05.2"
   cpuLoad?: number;     // 0-100 percent
   memUsage?: number;    // 0-100 percent
   cpuHistory?: number[]; // ring buffer of recent cpu_load values (frontend-accumulated)
@@ -86,6 +87,7 @@ export interface AccessPoint {
   clientCount: number;
   backhaulSignal: number; // dBm
   status: NodeStatus;
+  firmwareVersion?: string; // OpenWrt release version e.g. "23.05.2"
   ssids?: SsidInfo[];      // WiFi networks broadcast by this AP
   cpuLoad?: number;        // 0-100 percent
   memUsage?: number;       // 0-100 percent

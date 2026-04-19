@@ -85,6 +85,7 @@ function GatewayDetail({ data, actions }: { data: Gateway; actions?: DetailPanel
         <Row label="Name"   value={data.name} />
         <Row label="Modell" value={data.model} />
         <Row label="Status" value={<StatusBadge status={data.status} />} />
+        {data.firmwareVersion && <Row label="Firmware" value={data.firmwareVersion} />}
       </div>
       <div className="detail-section">
         <div className="detail-section__heading">Netzwerk</div>
@@ -269,6 +270,7 @@ function APDetail({ data, clients, actions }: { data: AccessPoint; clients: Clie
         <Row label="Modell"  value={data.model} />
         <Row label="IP"      value={data.ip} />
         <Row label="Status"  value={<StatusDot status={data.status} />} />
+        {data.firmwareVersion && <Row label="Firmware" value={data.firmwareVersion} />}
       </div>
       <div className="detail-section">
         <div className="detail-section__heading">Uplink</div>

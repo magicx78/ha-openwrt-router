@@ -54,6 +54,7 @@ export function NodeTooltip({ nodeId, data, anchorRect }: Props) {
         {gw.pingMs != null && gw.pingMs > 0 && (
           <Row label="Ping" value={`${gw.pingMs} ms`} warn={gw.pingMs > 80} />
         )}
+        {gw.firmwareVersion && <Row label="Firmware" value={gw.firmwareVersion} />}
         <Row label="Clients" value={data.clients.filter(c => c.apId === gw.id).length} />
         {gw.ssids && gw.ssids.length > 0 && (
           <>
@@ -105,6 +106,7 @@ export function NodeTooltip({ nodeId, data, anchorRect }: Props) {
         {ap.memUsage != null && (
           <Row label="RAM" value={`${ap.memUsage.toFixed(0)}%`} warn={ap.memUsage > 85} />
         )}
+        {ap.firmwareVersion && <Row label="Firmware" value={ap.firmwareVersion} />}
         <Row label="Clients" value={ap.clientCount} />
         {avgSig != null && (
           <Row
