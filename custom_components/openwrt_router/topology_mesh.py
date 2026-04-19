@@ -407,8 +407,8 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                 wan_traffic = getattr(data, "wan_traffic", {}) or {}
                 if dsl_stats:
                     attrs["dsl_stats"] = dsl_stats
-                if wan_traffic:
-                    attrs["wan_traffic"] = wan_traffic
+                # Always include wan_traffic so frontend can show native OpenWrt throughput
+                attrs["wan_traffic"] = wan_traffic
                 attrs["ping_ms"] = getattr(data, "ping_ms", None)
                 attrs["dsl_history"] = getattr(data, "dsl_history", []) or []
                 attrs["ddns_status"] = getattr(data, "ddns_status", []) or []
