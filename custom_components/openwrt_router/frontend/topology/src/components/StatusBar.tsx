@@ -1,5 +1,6 @@
 import React from 'react';
 import { FilterType } from '../types';
+import { GroupBy } from '../TopologyView';
 import { IconSearch, IconFitView, IconTraffic, IconVlan } from './Icons';
 
 // Simple heatmap icon (signal waves)
@@ -26,6 +27,7 @@ interface Props {
   ghostMode: boolean;
   vlanMode: boolean;
   healthMode: boolean;
+  groupBy: GroupBy;
   topologyControls?: boolean;
   onFilterChange: (f: FilterType) => void;
   onSearchChange: (q: string) => void;
@@ -35,6 +37,7 @@ interface Props {
   onToggleGhost: () => void;
   onToggleVlan: () => void;
   onToggleHealth: () => void;
+  onGroupByChange: (g: GroupBy) => void;
 }
 
 const FILTERS: { key: FilterType; label: string }[] = [
@@ -57,6 +60,7 @@ export function StatusBar({
   ghostMode,
   vlanMode,
   healthMode,
+  groupBy,
   topologyControls = true,
   onFilterChange,
   onSearchChange,
@@ -66,6 +70,7 @@ export function StatusBar({
   onToggleGhost,
   onToggleVlan,
   onToggleHealth,
+  onGroupByChange,
 }: Props) {
   const allOnline = onlineNodes === totalNodes;
   const healthClass = warningCount === 0 ? 'health-ok' : warningCount <= 2 ? 'health-warn' : 'health-crit';
@@ -173,6 +178,19 @@ export function StatusBar({
           >
             <IconTraffic size={15} />
           </button>
+
+          {/* ── Grouping selector ────────────────────────────────── */}
+          <select
+            className={`status-bar__select${groupBy !== 'none' ? ' active' : ''}`}
+            value={groupBy}
+            onChange={e => onGroupByChange(e.target.value as GroupBy)}
+            title="APs gruppieren"
+          >
+            <option value="none">Gruppe: Aus</option>
+            <option value="type">Nach Typ</option>
+            <option value="vlan">Nach VLAN</option>
+            <option value="status">Nach Status</option>
+          </select>
 
           {/* ── Fit-view button ──────────────────────────────────── */}
           <button

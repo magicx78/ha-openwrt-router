@@ -39,6 +39,22 @@ type SelectedEntity =
   | { type: 'client'; data: Client; apName: string }
   | null;
 
+export type GroupBy = 'none' | 'type' | 'vlan' | 'status';
+
+function groupAPs(aps: AccessPoint[], by: GroupBy): Array<{ label: string; items: AccessPoint[] }> {
+  if (by === 'none') return [{ label: '', items: aps }];
+  const map = new Map<string, AccessPoint[]>();
+  for (const ap of aps) {
+    const key =
+      by === 'type'   ? (ap.uplinkType === 'wired' ? 'Kabelgebunden' : 'Mesh')
+    : by === 'vlan'   ? (ap.primaryVlanId != null ? `VLAN ${ap.primaryVlanId}` : 'Kein VLAN')
+    :                   (ap.status === 'online' ? 'Online' : ap.status === 'warning' ? 'Warnung' : 'Offline');
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(ap);
+  }
+  return Array.from(map.entries()).map(([label, items]) => ({ label, items }));
+}
+
 interface Props {
   data: TopologyData;
 }
@@ -127,6 +143,7 @@ export function TopologyView({ data }: Props) {
   // ── Filter / search / hover / selection ─────────────────────────────────
   const [filter,      setFilter]      = useState<FilterType>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [groupBy,     setGroupBy]     = useState<GroupBy>('none');
 
   // ── AP exit animation tracking ────────────────────────────────────────────
   const [exitingApIds, setExitingApIds] = useState<Set<string>>(new Set());
@@ -437,6 +454,7 @@ export function TopologyView({ data }: Props) {
           ghostMode={ghostMode}
           vlanMode={vlanMode}
           healthMode={healthMode}
+          groupBy={groupBy}
           topologyControls={activeTab === 'topology'}
           onFilterChange={setFilter}
           onSearchChange={setSearchQuery}
@@ -446,6 +464,7 @@ export function TopologyView({ data }: Props) {
           onToggleGhost={() => setGhostMode(m => !m)}
           onToggleVlan={() => setVlanMode(m => !m)}
           onToggleHealth={() => setHealthMode(m => !m)}
+          onGroupByChange={setGroupBy}
         />
 
         {/* ── Non-topology views ───────────────────────────────── */}
@@ -541,16 +560,15 @@ export function TopologyView({ data }: Props) {
                 </div>
               </div>
 
-              {/* Row 3: Access Points — flex-wrap so they reflow at any width */}
-              <div className="topo-row topo-row--aps">
-                {data.accessPoints.map(ap => {
+              {/* Row 3: Access Points — flat or grouped */}
+              {(() => {
+                const renderAPCol = (ap: AccessPoint) => {
                   const apClients = clientsForAP(ap.id);
                   const isHidden =
                     filter === 'clients' ||
                     (filter === 'warnings' && ap.status === 'online' && apClients.length === 0);
                   const isExiting = exitingApIds.has(ap.id);
                   if (isHidden && !isExiting) return null;
-
                   return (
                     <div key={ap.id} className={`topo-col-ap${isExiting ? ' ap-exiting' : ''}`}>
                       <div ref={setNodeRef(ap.id)} style={{ width: 'fit-content' }}>
@@ -582,10 +600,9 @@ export function TopologyView({ data }: Props) {
                       )}
                     </div>
                   );
-                })}
+                };
 
-                {/* Ghost APs */}
-                {ghosts.aps.map(gAP => (
+                const ghostCols = ghosts.aps.map(gAP => (
                   <div key={`ghost-${gAP.id}`} className="topo-col-ap ghost-node">
                     <div className="ap-card node-card ghost-ap">
                       <div className="ap-card__header">
@@ -600,8 +617,33 @@ export function TopologyView({ data }: Props) {
                       </div>
                     </div>
                   </div>
-                ))}
-              </div>
+                ));
+
+                const groups = groupAPs(data.accessPoints, groupBy);
+                return groupBy === 'none' ? (
+                  <div className="topo-row topo-row--aps">
+                    {groups[0].items.map(renderAPCol)}
+                    {ghostCols}
+                  </div>
+                ) : (
+                  <div className="topo-groups">
+                    {groups.map(g => (
+                      <div key={g.label} className="ap-group">
+                        <div className="ap-group__label">{g.label}</div>
+                        <div className="ap-group__row">
+                          {g.items.map(renderAPCol)}
+                        </div>
+                      </div>
+                    ))}
+                    {ghostCols.length > 0 && (
+                      <div className="ap-group">
+                        <div className="ap-group__label">Verschwunden</div>
+                        <div className="ap-group__row">{ghostCols}</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
             </div>{/* end .topo-layout */}
           </div>{/* end .topo-zoom-wrapper */}

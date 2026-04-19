@@ -2028,6 +2028,66 @@
   background: var(--vlan-color, var(--text-muted));
 }
 
+/* ── Grouping mode ───────────────────────────────────────────────────────── */
+.topo-groups {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  width: 100%;
+  padding-top: 4px;
+}
+
+.ap-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  animation: node-enter 200ms ease-out both;
+}
+
+.ap-group__label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.04);
+}
+
+.ap-group__row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 20px;
+}
+
+/* ── Status-bar group select ─────────────────────────────────────────────── */
+.status-bar__select {
+  height: 26px;
+  padding: 0 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 150ms;
+}
+
+.status-bar__select:hover,
+.status-bar__select:focus { border-color: var(--accent); }
+
+.status-bar__select.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* ── Inspector action bar ────────────────────────────────────────────────── */
 .inspector-actions {
   display: flex;
