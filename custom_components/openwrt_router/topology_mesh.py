@@ -412,6 +412,7 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                 attrs["ping_ms"] = getattr(data, "ping_ms", None)
                 attrs["dsl_history"] = getattr(data, "dsl_history", []) or []
                 attrs["ddns_status"] = getattr(data, "ddns_status", []) or []
+                attrs["topology_snapshots"] = getattr(data, "topology_snapshots", []) or []
                 break
         break  # only one gateway
 

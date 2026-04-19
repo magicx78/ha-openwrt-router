@@ -70,6 +70,14 @@ export interface Gateway {
   portStats?: PortStat[];
   vlans?: VlanInfo[];
   vlansStale?: boolean;  // true = VLAN-Daten aus Cache (Router war kurzzeitig offline)
+  topologySnapshots?: TopologySnapshot[];
+}
+
+export interface TopologySnapshot {
+  ts: number;           // unix timestamp
+  routers: Array<{ id: string; hostname: string; ip: string; status: string }>;
+  client_count: number;
+  wan_connected: boolean;
 }
 
 export interface SsidInfo {

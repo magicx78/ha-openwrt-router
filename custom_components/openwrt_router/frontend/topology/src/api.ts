@@ -22,6 +22,7 @@ import type {
   PortStat,
   VlanInfo,
   RouterEvent,
+  TopologySnapshot,
 } from './types';
 
 // ── Raw snapshot types ───────────────────────────────────────────────────
@@ -499,6 +500,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       prefix: v.prefix_len ?? undefined,
     })),
     vlansStale: (gwAttr.vlans_stale as boolean | undefined) ?? false,
+    topologySnapshots: (gwAttr.topology_snapshots as TopologySnapshot[] | undefined) ?? [],
   };
 
   // AP nodes = all router nodes that are not the gateway

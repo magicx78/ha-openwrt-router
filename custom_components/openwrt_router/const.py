@@ -244,6 +244,11 @@ DSL_HISTORY_MAX_POINTS = 1440
 CPU_HISTORY_MAX_POINTS = 120
 KEY_CPU_HISTORY = "cpu_history"
 
+# Topology snapshots: one snapshot every 10 poll cycles (5 min), max 20 = ~100 min history
+TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES = 10
+TOPOLOGY_SNAPSHOT_MAX = 20
+KEY_TOPOLOGY_SNAPSHOTS = "topology_snapshots"
+
 # TODO: parental control - add UBUS_PARENTAL_OBJECT
 
 # DHCP lease data key (coordinator)

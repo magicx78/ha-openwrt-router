@@ -63,12 +63,15 @@ function avgSignalDbm(clients: Client[]): number | null {
   return Math.round(sigs.reduce((a, b) => a + b, 0) / sigs.length);
 }
 
-function heatmapGlow(dbm: number | null, uplinkSignal: number): string {
+export type HeatmapLevel = 'excellent' | 'good' | 'fair' | 'poor' | 'offline';
+
+export function heatmapLevel(dbm: number | null, uplinkSignal: number, offline: boolean): HeatmapLevel {
+  if (offline) return 'offline';
   const sig = dbm ?? uplinkSignal;
-  if (sig >= -65) return '0 0 14px 4px rgba(34,197,94,0.45)';   // green
-  if (sig >= -75) return '0 0 14px 4px rgba(134,239,172,0.35)'; // light green
-  if (sig >= -80) return '0 0 14px 4px rgba(245,158,11,0.40)';  // amber
-  return '0 0 14px 4px rgba(239,68,68,0.40)';                   // red
+  if (sig >= -65) return 'excellent';
+  if (sig >= -75) return 'good';
+  if (sig >= -80) return 'fair';
+  return 'poor';
 }
 
 function bandClass(band: string): string {
@@ -99,10 +102,7 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
       : ap.uplinkType;
 
   const avg = ap.status !== 'offline' ? avgSignalDbm(clients) : null;
-
-  const glowStyle = heatmap && ap.status !== 'offline'
-    ? { boxShadow: heatmapGlow(avg, ap.backhaulSignal) }
-    : undefined;
+  const hmLevel = heatmap ? heatmapLevel(avg, ap.backhaulSignal, ap.status === 'offline') : undefined;
 
   const flashing = useStatusFlash(ap.status);
 
@@ -120,9 +120,9 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
   return (
     <div
       className={cls}
-      style={glowStyle}
       data-vlan={vlanAttr}
       data-health={health}
+      data-heatmap={hmLevel}
       onClick={onSelect}
       onMouseEnter={() => onHover(ap.id)}
       onMouseLeave={() => onHover(null)}
