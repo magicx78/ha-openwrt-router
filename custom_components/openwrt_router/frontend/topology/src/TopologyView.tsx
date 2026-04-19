@@ -29,6 +29,7 @@ import { ClientsView } from './components/ClientsView';
 import { AlertsView } from './components/AlertsView';
 import { TrafficView } from './components/TrafficView';
 import { SettingsView } from './components/SettingsView';
+import { Minimap, MinimapNode } from './components/Minimap';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -92,6 +93,10 @@ export function TopologyView({ data }: Props) {
   const [edges,   setEdges]   = useState<EdgeLayout[]>([]);
   const [svgSize, setSvgSize] = useState({ w: 800, h: 600 });
 
+  // ── Minimap state — node bounds + container size ─────────────────────────
+  const [minimapNodes, setMinimapNodes] = useState<MinimapNode[]>([]);
+  const [containerSize, setContainerSize] = useState({ w: 800, h: 600 });
+
   // ── CPU history ring buffer (accumulates cpuLoad across polls) ──────────
   const CPU_HISTORY_MAX = 20;
   const cpuHistoryRef = useRef<number[]>([]);
@@ -112,6 +117,16 @@ export function TopologyView({ data }: Props) {
   const fitView = useCallback(() => {
     setZoom(1.0);
     setPan({ x: 0, y: 0 });
+  }, []);
+
+  // ── Minimap pan: click on minimap → center that logical point in viewport ─
+  const onMinimapPan = useCallback((logicalX: number, logicalY: number) => {
+    const sc = scrollRef.current;
+    if (!sc) return;
+    setPan({
+      x: sc.clientWidth  / 2 - logicalX * zoomRef.current,
+      y: sc.clientHeight / 2 - logicalY * zoomRef.current,
+    });
   }, []);
 
   // ── Wheel zoom (must be non-passive to call preventDefault) ─────────────
@@ -160,6 +175,21 @@ export function TopologyView({ data }: Props) {
 
     setSvgSize({ w: wrapperEl.offsetWidth, h: wrapperEl.offsetHeight });
     setEdges(computeEdgesFromBounds(data, bounds));
+
+    // Derive minimap nodes from measured bounds
+    const mmNodes: MinimapNode[] = [];
+    const ib = bounds.get('internet');
+    if (ib) mmNodes.push({ id: 'internet', cx: ib.cx, cy: ib.cy, status: 'online', kind: 'internet' });
+    const gb = bounds.get(data.gateway.id);
+    if (gb) mmNodes.push({ id: data.gateway.id, cx: gb.cx, cy: gb.cy, status: data.gateway.status, kind: 'gateway' });
+    data.accessPoints.forEach(ap => {
+      const b = bounds.get(ap.id);
+      if (b) mmNodes.push({ id: ap.id, cx: b.cx, cy: b.cy, status: ap.status, kind: 'ap' });
+    });
+    setMinimapNodes(mmNodes);
+
+    const sc = scrollRef.current;
+    if (sc) setContainerSize({ w: sc.clientWidth, h: sc.clientHeight });
   }, [data, zoom]); // zoom in deps → new fn → effect re-runs
 
   // Run after every render where deps changed (before paint = no flash)
@@ -171,6 +201,7 @@ export function TopologyView({ data }: Props) {
   useEffect(() => {
     const ro = new ResizeObserver(recomputeEdges);
     if (wrapperRef.current) ro.observe(wrapperRef.current);
+    if (scrollRef.current)  ro.observe(scrollRef.current);
     return () => ro.disconnect();
   }, [recomputeEdges]);
 
@@ -186,7 +217,7 @@ export function TopologyView({ data }: Props) {
   const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     // Don't start pan when clicking on interactive elements
-    if ((e.target as HTMLElement).closest('.node-card, .client-strip, .status-bar, .topo-sidebar, button, input')) return;
+    if ((e.target as HTMLElement).closest('.node-card, .client-strip, .status-bar, .topo-sidebar, .minimap, button, input')) return;
     lastPos.current = { x: e.clientX, y: e.clientY };
     setDragging(true);
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -443,6 +474,20 @@ export function TopologyView({ data }: Props) {
 
             </div>{/* end .topo-layout */}
           </div>{/* end .topo-zoom-wrapper */}
+
+          {/* Minimap — bottom-right overview, only in topology tab */}
+          {activeTab === 'topology' && minimapNodes.length > 0 && (
+            <Minimap
+              nodes={minimapNodes}
+              canvasW={svgSize.w}
+              canvasH={svgSize.h}
+              pan={pan}
+              zoom={zoom}
+              containerW={containerSize.w}
+              containerH={containerSize.h}
+              onPanTo={onMinimapPan}
+            />
+          )}
         </div>{/* end .topo-scroll */}
 
         {/* Detail panel (slides in from right / up from bottom on mobile) */}

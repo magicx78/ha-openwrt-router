@@ -353,6 +353,7 @@
   overflow: auto;
   min-height: 0;
   cursor: default;
+  position: relative;
   background-image: radial-gradient(rgba(255,255,255,0.035) 1px, transparent 1px);
   background-size: 28px 28px;
 }
@@ -2011,6 +2012,38 @@
 /* Show VLAN color swatch in overlay legend */
 .vlan-overlay__row[data-vlan] .vlan-overlay__dot {
   background: var(--vlan-color, var(--text-muted));
+}
+
+/* ── Minimap ──────────────────────────────────────────────────────────────── */
+.minimap {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  z-index: 40;
+  width: 160px;
+  height: 100px;
+  background: rgba(10, 15, 28, 0.88);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(4px);
+  overflow: hidden;
+  pointer-events: all;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+
+.minimap__svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+}
+
+.minimap__viewport {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  opacity: 0.8;
 }
 
 /* VLAN-colored edges — applied when vlan-mode is active and edge carries a vlanId */
