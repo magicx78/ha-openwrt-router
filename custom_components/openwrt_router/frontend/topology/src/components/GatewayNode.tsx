@@ -3,6 +3,7 @@ import { Gateway, VlanInfo } from '../types';
 import { StatusDot } from './StatusDot';
 import { IconRouter } from './Icons';
 import { PortStrip } from './PortStrip';
+import { useStatusFlash } from '../useStatusFlash';
 
 interface Props {
   gateway: Gateway;
@@ -75,11 +76,14 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onCo
       ? 'status-warning'
       : 'status-offline';
 
+  const flashing = useStatusFlash(gateway.status);
+
   const cls = [
     'node-card gateway-card',
     statusClass,
-    selected ? 'selected' : '',
-    dimmed ? 'dimmed' : '',
+    selected   ? 'selected'     : '',
+    dimmed     ? 'dimmed'       : '',
+    flashing   ? 'status-flash' : '',
   ].filter(Boolean).join(' ');
 
   const history = gateway.cpuHistory ?? [];

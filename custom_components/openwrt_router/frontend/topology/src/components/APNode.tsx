@@ -4,6 +4,7 @@ import { StatusDot } from './StatusDot';
 import { IconAP } from './Icons';
 import { SignalBar } from './SignalBar';
 import { computeHealth } from './GatewayNode';
+import { useStatusFlash } from '../useStatusFlash';
 
 interface Props {
   ap: AccessPoint;
@@ -59,11 +60,14 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
     ? { boxShadow: heatmapGlow(avg, ap.backhaulSignal) }
     : undefined;
 
+  const flashing = useStatusFlash(ap.status);
+
   const cls = [
     'node-card ap-card',
     statusClass,
-    selected ? 'selected' : '',
-    dimmed ? 'dimmed' : '',
+    selected  ? 'selected'     : '',
+    dimmed    ? 'dimmed'       : '',
+    flashing  ? 'status-flash' : '',
   ].filter(Boolean).join(' ');
 
   const vlanAttr = vlanMode && ap.primaryVlanId != null ? ap.primaryVlanId : undefined;

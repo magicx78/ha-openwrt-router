@@ -2014,6 +2014,32 @@
   background: var(--vlan-color, var(--text-muted));
 }
 
+/* ── Status-change flash animation ──────────────────────────────────────── */
+/* Triggered by useStatusFlash hook — lasts ~650 ms, then class is removed  */
+
+@keyframes flash-online {
+  0%   { box-shadow: 0 0  0  0   rgba(34,197,94,0.7); }
+  60%  { box-shadow: 0 0 20px 6px rgba(34,197,94,0.25); }
+  100% { box-shadow: 0 0  0  0   rgba(34,197,94,0); }
+}
+@keyframes flash-warning {
+  0%   { box-shadow: 0 0  0  0   rgba(245,158,11,0.75); }
+  60%  { box-shadow: 0 0 20px 6px rgba(245,158,11,0.3); }
+  100% { box-shadow: 0 0  0  0   rgba(245,158,11,0); }
+}
+@keyframes flash-offline {
+  0%   { box-shadow: 0 0  0  0   rgba(239,68,68,0.75); }
+  60%  { box-shadow: 0 0 20px 6px rgba(239,68,68,0.3); }
+  100% { box-shadow: 0 0  0  0   rgba(239,68,68,0); }
+}
+
+.node-card.status-online.status-flash  { animation: flash-online  0.65s ease-out; }
+.node-card.status-warning.status-flash { animation: flash-warning 0.65s ease-out; }
+.node-card.status-offline.status-flash { animation: flash-offline 0.65s ease-out; }
+
+/* StatusDot also fades smoothly when status changes */
+.status-dot { transition: background 250ms ease, box-shadow 250ms ease; }
+
 /* ── Health mode — node coloring by CPU/RAM/signal ───────────────────────── */
 .health-badge {
   font-size: 9px;
