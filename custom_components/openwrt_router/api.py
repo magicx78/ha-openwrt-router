@@ -2167,8 +2167,12 @@ class OpenWrtAPI:
             for iface in interfaces:
                 ipv4_list = iface.get("ipv4-address") or []
                 first_ipv4 = ipv4_list[0] if ipv4_list else {}
+                # Use l3_device (e.g. "br-lan.10") for VLAN detection;
+                # fall back to logical name (e.g. "lan") if l3_device absent.
+                l3_device: str = iface.get("l3_device", "") or iface.get("interface", "")
                 out.append({
-                    "interface": iface.get("interface", ""),
+                    "interface": l3_device,
+                    "logical_name": iface.get("interface", ""),
                     "rx_bytes": iface.get("statistics", {}).get("rx_bytes", 0),
                     "tx_bytes": iface.get("statistics", {}).get("tx_bytes", 0),
                     "status": "up" if iface.get("up") else "down",
