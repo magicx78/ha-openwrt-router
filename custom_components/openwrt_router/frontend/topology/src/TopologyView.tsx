@@ -134,10 +134,7 @@ export function TopologyView({ data }: Props) {
   const CPU_HISTORY_MAX = 20;
   const cpuHistoryRef = useRef<number[]>([]);
   if (data.gateway.cpuLoad != null) {
-    const h = cpuHistoryRef.current;
-    if (h.length === 0 || h[h.length - 1] !== data.gateway.cpuLoad) {
-      cpuHistoryRef.current = [...h, data.gateway.cpuLoad].slice(-CPU_HISTORY_MAX);
-    }
+    cpuHistoryRef.current = [...cpuHistoryRef.current, data.gateway.cpuLoad].slice(-CPU_HISTORY_MAX);
   }
 
   // ── Filter / search / hover / selection ─────────────────────────────────

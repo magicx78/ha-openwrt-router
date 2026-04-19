@@ -544,3 +544,104 @@ class TestBandwidthRateCalculation:
 
         sensor = OpenWrtInterfaceRateSensor(coord, entry, "wan", "rx_rate")
         assert sensor.native_value is None
+
+
+# =====================================================================
+# Event timeline — _record_events
+# =====================================================================
+
+class TestRecordEvents:
+    """Unit tests for _record_events() — RAM formula, WAN tracking, CPU spikes."""
+
+    def _make_data(self, *, wan_connected=False, cpu=0.0, total=0, free=0, buffered=0):
+        from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
+        d = OpenWrtCoordinatorData()
+        d.wan_connected = wan_connected
+        d.wan_status = {"ipv4_address": "1.2.3.4"} if wan_connected else {}
+        d.cpu_load = cpu
+        d.memory = {"total": total, "free": free, "buffered": buffered}
+        return d
+
+    def _make_coord(self):
+        coord, _ = _make_coordinator()
+        return coord
+
+    def test_no_events_on_first_call(self):
+        """No events on very first call (prev state unknown → no transition)."""
+        coord = self._make_coord()
+        d = self._make_data(wan_connected=True, total=1000, free=500)
+        coord._record_events(d)
+        assert d.events == []
+
+    def test_wan_connect_event(self):
+        coord = self._make_coord()
+        # Establish baseline: WAN was disconnected
+        coord._prev_wan_connected = False
+        d = self._make_data(wan_connected=True, total=1000, free=500)
+        coord._record_events(d)
+        assert len(d.events) == 1
+        assert d.events[0]["type"] == "info"
+        assert "WAN" in d.events[0]["message"]
+
+    def test_wan_disconnect_event(self):
+        coord = self._make_coord()
+        coord._prev_wan_connected = True
+        d = self._make_data(wan_connected=False, total=1000, free=500)
+        coord._record_events(d)
+        assert len(d.events) == 1
+        assert d.events[0]["type"] == "error"
+
+    def test_mem_spike_excludes_buffered(self):
+        """RAM warning must NOT fire when apparent usage is high but buffered
+        memory accounts for the difference (effective pressure < 90%)."""
+        coord = self._make_coord()
+        coord._prev_wan_connected = False
+        # total=1000, free=50, buffered=200 → effective=(1000-50-200)/1000=75% < 90%
+        d = self._make_data(wan_connected=False, total=1000, free=50, buffered=200)
+        coord._record_events(d)
+        # No mem warning should fire (75% is below 90% threshold)
+        mem_events = [e for e in d.events if "RAM" in e.get("message", "")]
+        assert mem_events == []
+
+    def test_mem_spike_fires_when_effective_pressure_high(self):
+        """RAM warning fires when effective pressure (excluding buffered) >= 90%."""
+        coord = self._make_coord()
+        coord._prev_wan_connected = False
+        # total=1000, free=50, buffered=20 → effective=(1000-50-20)/1000=93% >= 90%
+        d = self._make_data(wan_connected=False, total=1000, free=50, buffered=20)
+        coord._record_events(d)
+        mem_events = [e for e in d.events if "RAM" in e.get("message", "")]
+        assert len(mem_events) == 1
+        assert mem_events[0]["type"] == "warn"
+
+    def test_mem_spike_no_buffered_field(self):
+        """RAM threshold works correctly when buffered key is absent (falls back to 0)."""
+        coord = self._make_coord()
+        coord._prev_wan_connected = False
+        d = self._make_data(wan_connected=False, total=1000, free=50)
+        # buffered defaults to 0 → (1000-50)/1000=95% >= 90%
+        d.memory = {"total": 1000, "free": 50}  # no 'buffered' key
+        coord._record_events(d)
+        mem_events = [e for e in d.events if "RAM" in e.get("message", "")]
+        assert len(mem_events) == 1
+
+    def test_cpu_spike_event(self):
+        coord = self._make_coord()
+        coord._prev_wan_connected = False
+        d = self._make_data(wan_connected=False, cpu=85.0, total=1000, free=500)
+        coord._record_events(d)
+        cpu_events = [e for e in d.events if "CPU" in e.get("message", "")]
+        assert len(cpu_events) == 1
+        assert cpu_events[0]["type"] == "warn"
+        assert coord._cpu_warn_active is True
+
+    def test_cpu_recovery_event(self):
+        coord = self._make_coord()
+        coord._prev_wan_connected = False
+        coord._cpu_warn_active = True
+        d = self._make_data(wan_connected=False, cpu=55.0, total=1000, free=500)
+        coord._record_events(d)
+        cpu_events = [e for e in d.events if "CPU" in e.get("message", "")]
+        assert len(cpu_events) == 1
+        assert cpu_events[0]["type"] == "info"
+        assert coord._cpu_warn_active is False

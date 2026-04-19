@@ -91,12 +91,17 @@ KNOWN_LIMITATIONS: list[str] = [
 
 
 def _calc_mem_usage(memory: dict) -> float | None:
-    """Return memory usage as percentage (0-100), or None if data missing."""
+    """Return effective memory pressure as percentage (0-100), or None if missing.
+
+    Excludes reclaimable kernel buffers so disk-cache doesn't inflate the
+    health indicator. Formula: (total - free - buffered) / total.
+    """
     total = memory.get("total") if memory else None
     free = memory.get("free") if memory else None
     if not total:
         return None
-    return round((1 - free / total) * 100, 1)
+    buffered = (memory.get("buffered") or 0) if memory else 0
+    return round((total - free - buffered) / total * 100, 1)
 
 
 def _classify_iface_type(ifname: str, wan_ifname: str = "") -> str:
@@ -254,7 +259,7 @@ def build_topology_snapshot(
             "mem_usage": _calc_mem_usage(data.memory),
             "port_stats": _slim_port_stats(data.port_stats),
             "vlans": _extract_vlans(data.network_interfaces),
-            "events": data.events if data.events else [],
+            "events": data.events,
         },
     })
 

@@ -529,9 +529,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             })
 
         # Memory spike (>= 90%) / recovery (< 80%)
+        # Use effective pressure: exclude reclaimable kernel buffers so a
+        # large disk-cache doesn't falsely trigger the warning threshold.
+        # Formula: (total - free - buffered) / total
         mem_total = data.memory.get("total", 0) or 0
         mem_free = data.memory.get("free", 0) or 0
-        mem_pct = round(100 * (1 - mem_free / mem_total)) if mem_total > 0 else 0
+        mem_buffered = data.memory.get("buffered", 0) or 0
+        mem_pct = round(100 * (mem_total - mem_free - mem_buffered) / mem_total) if mem_total > 0 else 0
         if not self._mem_warn_active and mem_pct >= 90:
             self._mem_warn_active = True
             self._event_history.appendleft({
