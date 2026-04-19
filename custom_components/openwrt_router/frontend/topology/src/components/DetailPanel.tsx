@@ -20,12 +20,20 @@ type SelectedEntity =
   | { type: 'client';  data: Client;      apName: string }
   | null;
 
+export interface DetailPanelActions {
+  onFocusNode: (nodeId: string) => void;
+  onShowClients: () => void;
+  onShowAlerts: () => void;
+  onToggleVlan: () => void;
+}
+
 interface Props {
   entity: SelectedEntity;
   onClose: () => void;
+  actions?: DetailPanelActions;
 }
 
-export function DetailPanel({ entity, onClose }: Props) {
+export function DetailPanel({ entity, onClose, actions }: Props) {
   return (
     <div className={`detail-panel ${entity ? 'open' : ''}`}>
       <div className="detail-panel__handle" aria-hidden="true" />
@@ -42,17 +50,28 @@ export function DetailPanel({ entity, onClose }: Props) {
       </div>
 
       <div className="detail-panel__body">
-        {entity?.type === 'gateway' && <GatewayDetail data={entity.data} />}
-        {entity?.type === 'ap'      && <APDetail data={entity.data} clients={entity.clients} />}
-        {entity?.type === 'client'  && <ClientDetail data={entity.data} apName={entity.apName} />}
+        {entity?.type === 'gateway' && <GatewayDetail data={entity.data} actions={actions} />}
+        {entity?.type === 'ap'      && <APDetail data={entity.data} clients={entity.clients} actions={actions} />}
+        {entity?.type === 'client'  && <ClientDetail data={entity.data} apName={entity.apName} actions={actions} />}
       </div>
     </div>
   );
 }
 
+// ── Action bar ────────────────────────────────────────────────────────────
+
+function ActionBtn({ icon, label, onClick }: { icon: string; label: string; onClick: () => void }) {
+  return (
+    <button className="inspector-action" onClick={onClick}>
+      <span className="inspector-action__icon">{icon}</span>
+      <span>{label}</span>
+    </button>
+  );
+}
+
 // ── Gateway detail ────────────────────────────────────────────────────────
 
-function GatewayDetail({ data }: { data: Gateway }) {
+function GatewayDetail({ data, actions }: { data: Gateway; actions?: DetailPanelActions }) {
   const [chartMode, setChartMode] = useState<'speed' | 'ping'>('speed');
   const history = data.dslHistory ?? [];
   const dsl = data.dslStats;
@@ -152,6 +171,15 @@ function GatewayDetail({ data }: { data: Gateway }) {
           ))}
         </div>
       )}
+
+      {actions && (
+        <div className="inspector-actions">
+          <ActionBtn icon="◎" label="Fokus"   onClick={() => actions.onFocusNode(data.id)} />
+          <ActionBtn icon="👥" label="Clients" onClick={actions.onShowClients} />
+          <ActionBtn icon="⚠" label="Alarme"  onClick={actions.onShowAlerts} />
+          <ActionBtn icon="▦" label="VLANs"   onClick={actions.onToggleVlan} />
+        </div>
+      )}
     </>
   );
 }
@@ -231,7 +259,7 @@ function DdnsRow({ svc }: { svc: DdnsService }) {
 
 // ── AP detail ─────────────────────────────────────────────────────────────
 
-function APDetail({ data, clients }: { data: AccessPoint; clients: Client[] }) {
+function APDetail({ data, clients, actions }: { data: AccessPoint; clients: Client[]; actions?: DetailPanelActions }) {
   const q = signalQuality(data.backhaulSignal);
   return (
     <>
@@ -274,6 +302,14 @@ function APDetail({ data, clients }: { data: AccessPoint; clients: Client[] }) {
           ))}
         </div>
       </div>
+
+      {actions && (
+        <div className="inspector-actions">
+          <ActionBtn icon="◎" label="Fokus"   onClick={() => actions.onFocusNode(data.id)} />
+          <ActionBtn icon="👥" label="Clients" onClick={actions.onShowClients} />
+          <ActionBtn icon="⚠" label="Alarme"  onClick={actions.onShowAlerts} />
+        </div>
+      )}
     </>
   );
 }
@@ -290,7 +326,7 @@ function haEntityId(mac: string, hostname: string): string {
   return `device_tracker.${slug}`;
 }
 
-function ClientDetail({ data, apName }: { data: Client; apName: string }) {
+function ClientDetail({ data, apName, actions }: { data: Client; apName: string; actions?: DetailPanelActions }) {
   const q = signalQuality(data.signal);
   const entityId = haEntityId(data.mac, data.hostname);
   const connectedStr = data.connectedSince ? formatConnectedSince(data.connectedSince) : '';
@@ -324,6 +360,13 @@ function ClientDetail({ data, apName }: { data: Client; apName: string }) {
         <div className="detail-section">
           <div className="detail-section__heading">Daten (Session)</div>
           <BytesBars rx={data.rxBytes ?? 0} tx={data.txBytes ?? 0} />
+        </div>
+      )}
+
+      {actions && (
+        <div className="inspector-actions">
+          <ActionBtn icon="◎" label="AP Fokus" onClick={() => actions.onFocusNode(data.apId)} />
+          <ActionBtn icon="⚠" label="Alarme"   onClick={actions.onShowAlerts} />
         </div>
       )}
 

@@ -2028,6 +2028,42 @@
   background: var(--vlan-color, var(--text-muted));
 }
 
+/* ── Inspector action bar ────────────────────────────────────────────────── */
+.inspector-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 16px 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.inspector-action {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms;
+  white-space: nowrap;
+}
+
+.inspector-action:hover {
+  background: rgba(59,130,246,0.15);
+  border-color: rgba(59,130,246,0.4);
+  color: var(--accent);
+}
+
+.inspector-action__icon {
+  font-size: 11px;
+  line-height: 1;
+}
+
 /* ── Inspector mini bars (traffic / resource usage) ─────────────────────── */
 .mini-bar-group {
   display: flex;

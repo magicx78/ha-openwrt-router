@@ -19,7 +19,7 @@ import { InternetNode } from './components/InternetNode';
 import { GatewayNode } from './components/GatewayNode';
 import { APNode } from './components/APNode';
 import { ClientStrip } from './components/ClientStrip';
-import { DetailPanel } from './components/DetailPanel';
+import { DetailPanel, DetailPanelActions } from './components/DetailPanel';
 import { StatusBar } from './components/StatusBar';
 import { Sidebar, SidebarTab } from './components/Sidebar';
 import { EdgeTooltip } from './components/EdgeTooltip';
@@ -625,6 +625,12 @@ export function TopologyView({ data }: Props) {
         <DetailPanel
           entity={selectedEntity}
           onClose={() => setSelectedEntity(null)}
+          actions={{
+            onFocusNode:   (id) => { zoomToNode(id); },
+            onShowClients: ()   => { setActiveTab('clients'); },
+            onShowAlerts:  ()   => { setActiveTab('alerts'); },
+            onToggleVlan:  ()   => { setVlanMode(m => !m); },
+          } satisfies DetailPanelActions}
         />
       </div>{/* end .topo-main */}
 
