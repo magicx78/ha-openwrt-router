@@ -87,10 +87,13 @@ def _detect_inter_router_edges(
 
     # Build lookup maps
     router_macs: dict[str, str] = {}  # MAC → router_id
-    for rid, _, data in router_data:
+    router_ips:  dict[str, str] = {}  # host_ip → router_id
+    for rid, hip, data in router_data:
         mac = (data.router_info.get("mac") or "").upper()
         if mac:
             router_macs[mac] = rid
+        if hip:
+            router_ips[hip] = rid
 
     # Find gateway(s) for directed edges
     gateways = [
@@ -99,7 +102,41 @@ def _detect_inter_router_edges(
         if _detect_router_role(data, hip) == "gateway"
     ]
 
-    # Method 1: DHCP lease cross-reference (LAN connections)
+    # Method 2 (WiFi client cross-reference) runs FIRST — more precise than DHCP.
+    # A router seen as a WiFi client on another router is definitively a wifi_uplink.
+    # Running this first means Method 1 (DHCP) cannot overwrite it via seen_edges.
+    for src_rid, src_hip, src_data in router_data:
+        for client in src_data.clients or []:
+            client_mac = (client.get("mac") or "").upper()
+            client_ip  = (client.get("ip") or "")
+            # Match by MAC first, fall back to host IP (covers cases where the AP
+            # registers with a different MAC than router_info.mac, e.g. wlan0 vs br-lan)
+            target_rid = router_macs.get(client_mac) or router_ips.get(client_ip)
+            if not target_rid or target_rid == src_rid:
+                continue
+            edge_id = f"{src_rid}--uplink--{target_rid}"
+            if edge_id in seen_edges:
+                continue
+            edges.append({
+                "id": edge_id,
+                "from": src_rid,
+                "to": target_rid,
+                "relationship": "wifi_uplink",
+                "source": MESH_SOURCE,
+                "inferred": False,
+                "inference_reason": None,
+                "attributes": {
+                    "link_type": "wifi",
+                    "detection_method": "wifi_client_mac",
+                    "client_mac": client_mac,
+                    "signal": client.get("signal"),
+                },
+            })
+            seen_edges.add(edge_id)
+
+    # Method 1: DHCP lease cross-reference (LAN connections).
+    # Runs after Method 2 so that WiFi uplinks already in seen_edges are not
+    # downgraded to lan_uplink just because the AP also has a DHCP lease.
     for gw_rid, gw_hip, gw_data in gateways:
         dhcp = gw_data.dhcp_leases or {}
         for ap_rid, ap_hip, ap_data in router_data:
@@ -133,34 +170,6 @@ def _detect_inter_router_edges(
                         "link_type": "lan",
                         "detection_method": found_via,
                         "ap_host_ip": ap_hip,
-                    },
-                })
-                seen_edges.add(edge_id)
-
-    # Method 2: WiFi client cross-reference (WiFi uplinks)
-    for src_rid, src_hip, src_data in router_data:
-        for client in src_data.clients or []:
-            client_mac = (client.get("mac") or "").upper()
-            if client_mac in router_macs:
-                target_rid = router_macs[client_mac]
-                if target_rid == src_rid:
-                    continue
-                edge_id = f"{src_rid}--uplink--{target_rid}"
-                if edge_id in seen_edges:
-                    continue
-                edges.append({
-                    "id": edge_id,
-                    "from": src_rid,
-                    "to": target_rid,
-                    "relationship": "wifi_uplink",
-                    "source": MESH_SOURCE,
-                    "inferred": False,
-                    "inference_reason": None,
-                    "attributes": {
-                        "link_type": "wifi",
-                        "detection_method": "wifi_client_mac",
-                        "client_mac": client_mac,
-                        "signal": client.get("signal"),
                     },
                 })
                 seen_edges.add(edge_id)
