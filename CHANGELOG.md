@@ -2,6 +2,14 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.12.1] - 2026-04-19
+
+### Fixed
+
+- **Topology: SSID-Badges** zeigen jetzt nur noch die Anzahl (`📶 N`) statt volle Namen — Hover-Tooltip listet alle SSIDs mit Band und Kanal
+- **Topology: VLAN-Badges im AP-Node** ergänzt (fehlten komplett)
+- **Topology: Uplink-Typ** — WiFi-Client-Erkennung hat Vorrang vor DHCP-Erkennung; WLAN-Repeater werden korrekt als "Mesh" statt "Kabel" angezeigt
+
 ## [1.12.0] - 2026-04-19
 
 ### Added
