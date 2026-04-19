@@ -2014,6 +2014,108 @@
   background: var(--vlan-color, var(--text-muted));
 }
 
+/* ── AP client count button (expand toggle) ──────────────────────────────── */
+.ap-card__clients {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  transition: color 120ms, background 120ms;
+}
+
+.ap-card__clients:hover {
+  color: var(--accent);
+  background: rgba(59,130,246,0.1);
+}
+
+.ap-card__clients.expanded {
+  color: var(--accent);
+}
+
+.ap-card__clients-chevron {
+  font-size: 8px;
+  opacity: 0.6;
+}
+
+/* ── Inline AP client list ───────────────────────────────────────────────── */
+.ap-client-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  max-width: 280px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  overflow: hidden;
+  animation: node-enter 150ms ease;
+}
+
+.ap-client-list--empty {
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.ap-client-list__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 10px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  color: var(--text-primary);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 80ms;
+}
+
+.ap-client-list__row:last-child { border-bottom: none; }
+.ap-client-list__row:hover { background: var(--surface-3); }
+
+.ap-client-list__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.ap-client-list__ip {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+}
+
+.ap-client-list__sig {
+  font-size: 9px;
+  font-family: var(--font-mono, monospace);
+  letter-spacing: -1px;
+  white-space: nowrap;
+}
+.ap-client-list__sig.sig-excellent { color: var(--success); }
+.ap-client-list__sig.sig-good      { color: #86efac; }
+.ap-client-list__sig.sig-fair      { color: var(--warning); }
+.ap-client-list__sig.sig-poor      { color: var(--danger); }
+
+.ap-client-list__band {
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 /* ── Context menu ─────────────────────────────────────────────────────────── */
 .ctx-menu {
   min-width: 168px;

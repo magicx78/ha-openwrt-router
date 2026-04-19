@@ -31,6 +31,7 @@ import { TrafficView } from './components/TrafficView';
 import { SettingsView } from './components/SettingsView';
 import { Minimap, MinimapNode } from './components/Minimap';
 import { ContextMenu, ContextMenuEntry } from './components/ContextMenu';
+import { APClientList } from './components/APClientList';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -97,6 +98,9 @@ export function TopologyView({ data }: Props) {
   // ── Minimap state — node bounds + container size ─────────────────────────
   const [minimapNodes, setMinimapNodes] = useState<MinimapNode[]>([]);
   const [containerSize, setContainerSize] = useState({ w: 800, h: 600 });
+
+  // ── Expanded AP client list state ─────────────────────────────────────────
+  const [expandedApId, setExpandedApId] = useState<string | null>(null);
 
   // ── Context menu state ────────────────────────────────────────────────────
   const [contextMenu, setContextMenu] = useState<{
@@ -486,19 +490,25 @@ export function TopologyView({ data }: Props) {
                           clients={apClients}
                           selected={selectedEntity?.type === 'ap' && selectedEntity.data.id === ap.id}
                           dimmed={hoverCtx.dimmedNodes.has(ap.id)}
+                          expanded={expandedApId === ap.id}
                           onSelect={() => selectAP(ap)}
                           onHover={setHoveredNodeId}
                           onContextMenu={(x, y) => setContextMenu({ nodeId: ap.id, kind: 'ap', x, y })}
+                          onToggleExpand={() => setExpandedApId(id => id === ap.id ? null : ap.id)}
                           heatmap={heatmapMode}
                           vlanMode={vlanMode}
                         />
                       </div>
-                      <ClientStrip
-                        clients={apClients}
-                        dimmed={hoverCtx.dimmedNodes.has(ap.id)}
-                        onSelectClient={selectClient}
-                        vlanMode={vlanMode}
-                      />
+                      {expandedApId === ap.id ? (
+                        <APClientList clients={apClients} onSelectClient={selectClient} />
+                      ) : (
+                        <ClientStrip
+                          clients={apClients}
+                          dimmed={hoverCtx.dimmedNodes.has(ap.id)}
+                          onSelectClient={selectClient}
+                          vlanMode={vlanMode}
+                        />
+                      )}
                     </div>
                   );
                 })}

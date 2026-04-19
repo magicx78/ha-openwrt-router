@@ -9,9 +9,11 @@ interface Props {
   clients: Client[];
   selected: boolean;
   dimmed: boolean;
+  expanded?: boolean;
   onSelect: () => void;
   onHover: (id: string | null) => void;
   onContextMenu?: (x: number, y: number) => void;
+  onToggleExpand?: () => void;
   heatmap?: boolean;
   vlanMode?: boolean;
 }
@@ -36,7 +38,7 @@ function bandClass(band: string): string {
   return 'ssid-badge--24g';
 }
 
-export function APNode({ ap, clients, selected, dimmed, onSelect, onHover, onContextMenu, heatmap, vlanMode }: Props) {
+export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHover, onContextMenu, onToggleExpand, heatmap, vlanMode }: Props) {
   const statusClass = ap.status === 'online'
     ? 'status-online'
     : ap.status === 'warning'
@@ -91,9 +93,14 @@ export function APNode({ ap, clients, selected, dimmed, onSelect, onHover, onCon
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {ap.status !== 'offline' && <SignalBar dbm={ap.backhaulSignal} />}
-          <span className="ap-card__clients">
+          <button
+            className={`ap-card__clients${expanded ? ' expanded' : ''}`}
+            onClick={e => { e.stopPropagation(); onToggleExpand?.(); }}
+            title={expanded ? 'Clients einklappen' : 'Clients ausklappen'}
+          >
             <strong>{ap.clientCount}</strong> Clients
-          </span>
+            <span className="ap-card__clients-chevron">{expanded ? '▲' : '▼'}</span>
+          </button>
         </div>
       </div>
 
