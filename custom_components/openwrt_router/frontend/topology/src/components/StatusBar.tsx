@@ -25,6 +25,7 @@ interface Props {
   heatmapMode: boolean;
   ghostMode: boolean;
   vlanMode: boolean;
+  healthMode: boolean;
   topologyControls?: boolean;
   onFilterChange: (f: FilterType) => void;
   onSearchChange: (q: string) => void;
@@ -33,6 +34,7 @@ interface Props {
   onToggleHeatmap: () => void;
   onToggleGhost: () => void;
   onToggleVlan: () => void;
+  onToggleHealth: () => void;
 }
 
 const FILTERS: { key: FilterType; label: string }[] = [
@@ -54,6 +56,7 @@ export function StatusBar({
   heatmapMode,
   ghostMode,
   vlanMode,
+  healthMode,
   topologyControls = true,
   onFilterChange,
   onSearchChange,
@@ -62,6 +65,7 @@ export function StatusBar({
   onToggleHeatmap,
   onToggleGhost,
   onToggleVlan,
+  onToggleHealth,
 }: Props) {
   const allOnline = onlineNodes === totalNodes;
   const healthClass = warningCount === 0 ? 'health-ok' : warningCount <= 2 ? 'health-warn' : 'health-crit';
@@ -124,6 +128,15 @@ export function StatusBar({
               onChange={e => onSearchChange(e.target.value)}
             />
           </div>
+
+          {/* ── Health mode toggle ───────────────────────────────── */}
+          <button
+            className={`status-bar__action${healthMode ? ' active' : ''}`}
+            onClick={onToggleHealth}
+            title={healthMode ? 'Health-Modus ausschalten' : 'Health-Modus einschalten'}
+          >
+            <span style={{ fontSize: 13, lineHeight: 1 }}>♥</span>
+          </button>
 
           {/* ── Heatmap toggle ───────────────────────────────────── */}
           <button

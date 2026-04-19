@@ -2014,6 +2014,45 @@
   background: var(--vlan-color, var(--text-muted));
 }
 
+/* ── Health mode — node coloring by CPU/RAM/signal ───────────────────────── */
+.health-badge {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.health-badge--ok       { background: rgba(34,197,94,0.18);  color: var(--success); }
+.health-badge--caution  { background: rgba(250,204,21,0.18); color: #fde047; }
+.health-badge--warning  { background: rgba(245,158,11,0.22); color: var(--warning); }
+.health-badge--critical { background: rgba(239,68,68,0.22);  color: var(--danger); }
+
+/* Override node card borders in health mode */
+.health-mode .node-card[data-health="ok"] {
+  border-color: var(--success);
+  box-shadow: 0 0 0 1px rgba(34,197,94,0.3);
+}
+.health-mode .node-card[data-health="caution"] {
+  border-color: #fde047;
+  box-shadow: 0 0 0 1px rgba(250,204,21,0.3);
+}
+.health-mode .node-card[data-health="warning"] {
+  border-color: var(--warning);
+  box-shadow: 0 0 8px rgba(245,158,11,0.35);
+  animation: pulse-amber 2s infinite;
+}
+.health-mode .node-card[data-health="critical"] {
+  border-color: var(--danger);
+  box-shadow: 0 0 12px rgba(239,68,68,0.45);
+  animation: pulse-danger 1.5s infinite;
+}
+
+@keyframes pulse-danger {
+  0%, 100% { box-shadow: 0 0 8px  rgba(239,68,68,0.35); }
+  50%       { box-shadow: 0 0 18px rgba(239,68,68,0.65); }
+}
+
 /* ── AP client count button (expand toggle) ──────────────────────────────── */
 .ap-card__clients {
   display: flex;

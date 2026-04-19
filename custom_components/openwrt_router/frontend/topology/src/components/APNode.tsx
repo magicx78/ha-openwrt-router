@@ -3,6 +3,7 @@ import { AccessPoint, Client } from '../types';
 import { StatusDot } from './StatusDot';
 import { IconAP } from './Icons';
 import { SignalBar } from './SignalBar';
+import { computeHealth } from './GatewayNode';
 
 interface Props {
   ap: AccessPoint;
@@ -16,6 +17,7 @@ interface Props {
   onToggleExpand?: () => void;
   heatmap?: boolean;
   vlanMode?: boolean;
+  healthMode?: boolean;
 }
 
 function avgSignalDbm(clients: Client[]): number | null {
@@ -38,7 +40,7 @@ function bandClass(band: string): string {
   return 'ssid-badge--24g';
 }
 
-export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHover, onContextMenu, onToggleExpand, heatmap, vlanMode }: Props) {
+export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHover, onContextMenu, onToggleExpand, heatmap, vlanMode, healthMode }: Props) {
   const statusClass = ap.status === 'online'
     ? 'status-online'
     : ap.status === 'warning'
@@ -65,12 +67,14 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
   ].filter(Boolean).join(' ');
 
   const vlanAttr = vlanMode && ap.primaryVlanId != null ? ap.primaryVlanId : undefined;
+  const health = healthMode ? computeHealth(ap.cpuLoad, ap.memUsage, ap.backhaulSignal) : undefined;
 
   return (
     <div
       className={cls}
       style={glowStyle}
       data-vlan={vlanAttr}
+      data-health={health}
       onClick={onSelect}
       onMouseEnter={() => onHover(ap.id)}
       onMouseLeave={() => onHover(null)}
@@ -84,7 +88,14 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
           <div className="ap-card__name">{ap.name}</div>
           <div className="ap-card__ip">{ap.ip}</div>
         </div>
-        <StatusDot status={ap.status} />
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+          <StatusDot status={ap.status} />
+          {health && (
+            <span className={`health-badge health-badge--${health}`}>
+              {ap.cpuLoad != null ? `CPU ${ap.cpuLoad}%` : `${ap.backhaulSignal} dBm`}
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="ap-card__footer">

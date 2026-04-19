@@ -70,6 +70,9 @@ export function TopologyView({ data }: Props) {
 
   // ── VLAN Overlay mode ────────────────────────────────────────────────────
   const [vlanMode, setVlanMode] = useState(false);
+
+  // ── Health mode ───────────────────────────────────────────────────────────
+  const [healthMode, setHealthMode] = useState(false);
   const ghosts = useGhostDevices(data.accessPoints, data.clients, ghostMode);
 
   // ── Zoom / Pan ──────────────────────────────────────────────────────────
@@ -343,8 +346,9 @@ export function TopologyView({ data }: Props) {
 
   const appClass = [
     'topo-app',
-    trafficMode ? 'traffic-mode' : '',
-    vlanMode    ? 'vlan-mode'    : '',
+    trafficMode ? 'traffic-mode'  : '',
+    vlanMode    ? 'vlan-mode'     : '',
+    healthMode  ? 'health-mode'   : '',
   ].filter(Boolean).join(' ');
 
   return (
@@ -372,6 +376,7 @@ export function TopologyView({ data }: Props) {
           heatmapMode={heatmapMode}
           ghostMode={ghostMode}
           vlanMode={vlanMode}
+          healthMode={healthMode}
           topologyControls={activeTab === 'topology'}
           onFilterChange={setFilter}
           onSearchChange={setSearchQuery}
@@ -380,6 +385,7 @@ export function TopologyView({ data }: Props) {
           onToggleHeatmap={() => setHeatmapMode(m => !m)}
           onToggleGhost={() => setGhostMode(m => !m)}
           onToggleVlan={() => setVlanMode(m => !m)}
+          onToggleHealth={() => setHealthMode(m => !m)}
         />
 
         {/* ── Non-topology views ───────────────────────────────── */}
@@ -460,6 +466,7 @@ export function TopologyView({ data }: Props) {
                       onContextMenu={(x, y) => setContextMenu({ nodeId: data.gateway.id, kind: 'gateway', x, y })}
                       clientCount={gwClients.length > 0 ? gwClients.length : undefined}
                       vlanMode={vlanMode}
+                      healthMode={healthMode}
                     />
                   </div>
                   {clientsForAP(data.gateway.id).length > 0 && (
@@ -497,6 +504,7 @@ export function TopologyView({ data }: Props) {
                           onToggleExpand={() => setExpandedApId(id => id === ap.id ? null : ap.id)}
                           heatmap={heatmapMode}
                           vlanMode={vlanMode}
+                          healthMode={healthMode}
                         />
                       </div>
                       {expandedApId === ap.id ? (

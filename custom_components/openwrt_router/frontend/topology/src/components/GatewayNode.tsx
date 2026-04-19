@@ -13,6 +13,7 @@ interface Props {
   onContextMenu?: (x: number, y: number) => void;
   clientCount?: number;
   vlanMode?: boolean;
+  healthMode?: boolean;
 }
 
 function trendArrow(history: number[]): string {
@@ -56,7 +57,18 @@ function bandClass(band: string): string {
   return 'ssid-badge--24g';
 }
 
-export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onContextMenu, clientCount, vlanMode }: Props) {
+export function computeHealth(cpu?: number, mem?: number, signalDbm?: number): 'ok' | 'caution' | 'warning' | 'critical' {
+  const c = cpu ?? 0;
+  const m = mem ?? 0;
+  if (c > 80 || m > 85) return 'critical';
+  if (c > 60 || m > 70) return 'warning';
+  if (c > 40 || m > 55) return 'caution';
+  if (signalDbm != null && signalDbm < -80) return 'warning';
+  if (signalDbm != null && signalDbm < -72) return 'caution';
+  return 'ok';
+}
+
+export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onContextMenu, clientCount, vlanMode, healthMode }: Props) {
   const statusClass = gateway.status === 'online'
     ? 'status-online'
     : gateway.status === 'warning'
@@ -74,6 +86,7 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onCo
   const cpu = gateway.cpuLoad;
   const mem = gateway.memUsage;
 
+  const health = healthMode ? computeHealth(cpu, mem) : undefined;
   // Gateway hosts all VLANs — no single "primary", use first VLAN ID for border accent
   const firstVlan = vlanMode && (gateway.vlans ?? []).length > 0 ? gateway.vlans![0].id : undefined;
 
@@ -81,6 +94,7 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onCo
     <div
       className={cls}
       data-vlan={firstVlan ?? undefined}
+      data-health={health}
       onClick={onSelect}
       onMouseEnter={() => onHover(gateway.id)}
       onMouseLeave={() => onHover(null)}
@@ -97,7 +111,13 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onCo
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
           <StatusDot status={gateway.status} />
-          <span className="gateway-card__role">Gateway</span>
+          {health ? (
+            <span className={`health-badge health-badge--${health}`}>
+              {cpu != null ? `CPU ${cpu}%` : health}
+            </span>
+          ) : (
+            <span className="gateway-card__role">Gateway</span>
+          )}
         </div>
       </div>
 
