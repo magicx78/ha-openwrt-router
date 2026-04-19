@@ -6,6 +6,41 @@ import { SignalBar } from './SignalBar';
 import { computeHealth } from './GatewayNode';
 import { useStatusFlash } from '../useStatusFlash';
 
+function trendArrow(history: number[]): string {
+  if (history.length < 3) return '→';
+  const recent = history.slice(-3);
+  const delta = recent[2] - recent[0];
+  if (delta > 5)  return '↑';
+  if (delta < -5) return '↓';
+  return '→';
+}
+
+function trendClass(history: number[], current: number): string {
+  if (current > 80) return 'metric-critical';
+  if (current > 60) return 'metric-warn';
+  return 'metric-ok';
+}
+
+function MiniSparklineAP({ values, color }: { values: number[]; color: string }) {
+  if (values.length < 2) return null;
+  const w = 52, h = 16;
+  const max = Math.max(...values, 1);
+  const step = w / (values.length - 1);
+  const coords = values.map((v, i) => `${(i * step).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`);
+  return (
+    <svg width={w} height={h} style={{ display: 'block', overflow: 'visible' }}>
+      <polyline
+        points={coords.join(' ')}
+        fill="none"
+        stroke={color}
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 interface Props {
   ap: AccessPoint;
   clients: Client[];
@@ -144,6 +179,26 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
           )}
         </div>
       )}
+
+      {/* CPU sparkline + trend (shown when backend history available) */}
+      {(ap.cpuHistoryBackend?.length ?? 0) >= 3 && (() => {
+        const cpuVals = ap.cpuHistoryBackend!.map(p => p.cpu);
+        const cpu = ap.cpuLoad ?? cpuVals[cpuVals.length - 1] ?? 0;
+        const sparkColor = cpu > 80 ? '#ef4444' : cpu > 60 ? '#f59e0b' : '#22c55e';
+        return (
+          <div className="ap-card__metrics">
+            <div className="gateway-metric">
+              <div className="gateway-metric__row">
+                <span className="gateway-metric__label">CPU</span>
+                <span className={`gateway-metric__value ${trendClass(cpuVals, cpu)}`}>
+                  {cpu.toFixed(0)}%&nbsp;{trendArrow(cpuVals)}
+                </span>
+              </div>
+              <MiniSparklineAP values={cpuVals} color={sparkColor} />
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

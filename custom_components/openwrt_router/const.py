@@ -234,6 +234,10 @@ KEY_DDNS_STATUS = "ddns_status"
 DSL_HISTORY_INTERVAL_CYCLES = 2
 DSL_HISTORY_MAX_POINTS = 1440
 
+# CPU history: one point per poll (30s resolution), 120 points = 1h rolling window
+CPU_HISTORY_MAX_POINTS = 120
+KEY_CPU_HISTORY = "cpu_history"
+
 # TODO: parental control - add UBUS_PARENTAL_OBJECT
 
 # DHCP lease data key (coordinator)

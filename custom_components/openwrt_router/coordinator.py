@@ -32,8 +32,10 @@ from .const import (
     DEFAULT_FRITZBOX_PORT,
     DEFAULT_SERVICES,
     DOMAIN,
+    CPU_HISTORY_MAX_POINTS,
     DSL_HISTORY_INTERVAL_CYCLES,
     DSL_HISTORY_MAX_POINTS,
+    KEY_CPU_HISTORY,
     FEATURE_AVAILABLE_RADIOS,
     FEATURE_DHCP_LEASES,
     FEATURE_HAS_5GHZ,
@@ -120,6 +122,12 @@ class OpenWrtCoordinatorData:
         self.ddns_status: list[dict[str, Any]] = []
         # Per-router event history (status changes, spikes) — max 30 entries
         self.events: list[dict[str, Any]] = []
+        # CPU + memory history (1h rolling window at 30s resolution)
+        self.cpu_history: list[dict[str, Any]] = []
+        # Port VLAN mapping (port name → list of VLAN IDs) from UCI
+        self.port_vlan_map: dict[str, list[int]] = {}
+        # Bridge FDB: MAC address → port name
+        self.port_fdb_map: dict[str, str] = {}
 
     def as_dict(self) -> dict[str, Any]:
         """Return data as a plain dict (used for diagnostics)."""
@@ -150,6 +158,7 @@ class OpenWrtCoordinatorData:
             KEY_PING_MS: self.ping_ms,
             KEY_DSL_HISTORY: self.dsl_history,
             KEY_DDNS_STATUS: self.ddns_status,
+            KEY_CPU_HISTORY: self.cpu_history,
         }
 
 
@@ -196,6 +205,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         # DSL history: deque of {ts, dsl_down, dsl_up, ping_ms} — 24 h at 60s resolution
         self._dsl_history: deque[dict[str, Any]] = deque(maxlen=DSL_HISTORY_MAX_POINTS)
         self._history_cycle_count: int = 0
+        # CPU history: deque of {ts, cpu, mem} — 1h at 30s resolution
+        self._cpu_history: deque[dict[str, Any]] = deque(maxlen=CPU_HISTORY_MAX_POINTS)
         # Event timeline tracking
         self._event_history: deque[dict[str, Any]] = deque(maxlen=30)
         self._prev_wan_connected: bool | None = None
@@ -388,6 +399,31 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching port stats: %s", err)
                 data.port_stats = []
+
+            try:
+                data.port_vlan_map = await self.api.get_port_vlan_map()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching port VLAN map: %s", err)
+                data.port_vlan_map = {}
+
+            try:
+                data.port_fdb_map = await self.api.get_bridge_fdb()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching bridge FDB: %s", err)
+                data.port_fdb_map = {}
+
+            # --- CPU history (30s resolution, 1h rolling window) ---
+            import time as _time
+            mem = data.memory
+            mem_total = mem.get("total", 0) or 0
+            mem_free = (mem.get("free", 0) or 0) + (mem.get("buffered", 0) or 0)
+            mem_pct = round((1.0 - mem_free / mem_total) * 100.0, 1) if mem_total > 0 else 0.0
+            self._cpu_history.append({
+                "ts": int(_time.time()),
+                "cpu": round(data.cpu_load, 1),
+                "mem": mem_pct,
+            })
+            data.cpu_history = list(self._cpu_history)
 
             # --- Bandwidth rate calculation (bytes/s) ---
             poll_now = datetime.now(UTC)

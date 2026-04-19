@@ -16,6 +16,7 @@ import type {
   UplinkType,
   DslStats,
   DslHistoryPoint,
+  CpuHistoryPoint,
   DdnsService,
   SsidInfo,
   PortStat,
@@ -481,7 +482,15 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     dslHistory: (gwAttr.dsl_history as DslHistoryPoint[] | undefined) ?? [],
     ddnsServices: (gwAttr.ddns_status as DdnsService[] | undefined) ?? [],
     wanTraffic: gwAttr.wan_traffic as { downstream_bps?: number; upstream_bps?: number } | undefined,
-    portStats: (gwAttr.port_stats as PortStat[] | undefined) ?? [],
+    portStats: ((gwAttr.port_stats as any[] | undefined) ?? []).map((p: any): PortStat => ({
+      name: p.name,
+      up: p.up,
+      speed_mbps: p.speed_mbps,
+      duplex: p.duplex,
+      vlanIds: p.vlan_ids ?? [],
+      connectedDevice: p.connected_device ?? undefined,
+    })),
+    cpuHistoryBackend: (gwAttr.cpu_history as CpuHistoryPoint[] | undefined) ?? [],
     vlans: ((gwAttr.vlans as any[] | undefined) ?? []).map((v: any): VlanInfo => ({
       id: v.id,
       interface: v.interface,
@@ -550,6 +559,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       ssids: ssidsByRouter.get(n.id) ?? [],
       cpuLoad: n.attributes?.cpu_load as number | undefined,
       memUsage: n.attributes?.mem_usage as number | undefined,
+      cpuHistoryBackend: (n.attributes?.cpu_history as CpuHistoryPoint[] | undefined) ?? [],
     };
   });
 

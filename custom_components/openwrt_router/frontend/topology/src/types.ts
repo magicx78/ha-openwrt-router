@@ -30,6 +30,12 @@ export interface DslHistoryPoint {
   ping_ms: number | null;
 }
 
+export interface CpuHistoryPoint {
+  ts: number;   // unix timestamp
+  cpu: number;  // 0-100 percent
+  mem?: number; // 0-100 percent
+}
+
 export interface DdnsService {
   section: string;
   service_name: string;
@@ -51,7 +57,8 @@ export interface Gateway {
   firmwareVersion?: string; // OpenWrt release version e.g. "23.05.2"
   cpuLoad?: number;     // 0-100 percent
   memUsage?: number;    // 0-100 percent
-  cpuHistory?: number[]; // ring buffer of recent cpu_load values (frontend-accumulated)
+  cpuHistory?: number[]; // ring buffer of recent cpu_load values (frontend-accumulated, fallback)
+  cpuHistoryBackend?: CpuHistoryPoint[]; // 1h history from backend (preferred)
   events?: RouterEvent[]; // recent status-change events (newest first)
   ssids?: SsidInfo[];   // WiFi networks at gateway
   // Fritz!Box / DSL data (optional — only present when Fritz!Box is configured)
@@ -75,6 +82,8 @@ export interface PortStat {
   up: boolean;
   speed_mbps: number | null;  // Mbps or null if no link
   duplex?: string | null;     // "full" | "half" | null
+  vlanIds?: number[];         // VLAN IDs on this port (from UCI bridge-vlan)
+  connectedDevice?: string;   // hostname or MAC of device connected to this port
 }
 
 export interface VlanInfo {
@@ -100,6 +109,7 @@ export interface AccessPoint {
   ssids?: SsidInfo[];      // WiFi networks broadcast by this AP
   cpuLoad?: number;        // 0-100 percent
   memUsage?: number;       // 0-100 percent
+  cpuHistoryBackend?: CpuHistoryPoint[]; // 1h history from backend
   primaryVlanId?: number;  // majority VLAN among connected clients
 }
 

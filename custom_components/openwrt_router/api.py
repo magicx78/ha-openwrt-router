@@ -2257,6 +2257,112 @@ class OpenWrtAPI:
         ports.sort(key=lambda p: p["name"])
         return ports
 
+    async def get_port_vlan_map(self) -> dict[str, list[int]]:
+        """Return mapping of port name → list of VLAN IDs from UCI network config.
+
+        Queries uci/get for "network" config and parses:
+        - DSA bridge-vlan sections (@bridge-vlan[*]) — OpenWrt 21+
+        - Legacy swconfig switch_vlan sections (@switch_vlan[*]) — OpenWrt 19 and older
+
+        Returns:
+            {"lan1": [10, 20], "lan2": [10], "wan": []}
+            Returns {} on any error (ACL block, UCI unavailable, parse failure).
+        """
+        try:
+            result = await self._call(UBUS_UCI_OBJECT, UBUS_UCI_GET, {"config": "network"})
+        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
+            _LOGGER.debug("Port VLAN map unavailable (UCI): %s", err)
+            return {}
+
+        values = result.get("values", {})
+        port_vlan: dict[str, list[int]] = {}
+
+        for section in values.values():
+            if not isinstance(section, dict):
+                continue
+            stype = section.get(".type", "")
+
+            # DSA bridge-vlan: device = port name, vids = list of VLAN IDs
+            if stype == "bridge-vlan":
+                device = section.get("device", "")
+                vids = section.get("vids", [])
+                if not device:
+                    continue
+                if isinstance(vids, str):
+                    vids = [vids]
+                parsed: list[int] = []
+                for vid in vids:
+                    try:
+                        # VID may be "10" or "10:t" (tagged) — strip suffix
+                        parsed.append(int(str(vid).split(":")[0]))
+                    except (ValueError, TypeError):
+                        pass
+                if parsed:
+                    port_vlan.setdefault(device, [])
+                    port_vlan[device].extend(v for v in parsed if v not in port_vlan[device])
+
+            # Legacy swconfig switch_vlan: ports = "0 1 2t" style string
+            elif stype == "switch_vlan":
+                vid_str = section.get("vid") or section.get("vlan")
+                ports_str = section.get("ports", "")
+                if not vid_str or not ports_str:
+                    continue
+                try:
+                    vid = int(vid_str)
+                except (ValueError, TypeError):
+                    continue
+                for token in str(ports_str).split():
+                    # token like "1", "2t" (tagged), "0u" (untagged) — skip CPU port (usually 6)
+                    port_num_str = token.rstrip("tu")
+                    try:
+                        port_num = int(port_num_str)
+                    except (ValueError, TypeError):
+                        continue
+                    if port_num >= 6:
+                        continue
+                    port_name = f"lan{port_num}" if port_num > 0 else "wan"
+                    port_vlan.setdefault(port_name, [])
+                    if vid not in port_vlan[port_name]:
+                        port_vlan[port_name].append(vid)
+
+        return port_vlan
+
+    async def get_bridge_fdb(self) -> dict[str, str]:
+        """Return MAC-address → port-name mapping from the bridge forwarding database.
+
+        Executes: bridge fdb show br br-lan
+        Parses lines like: "aa:bb:cc:dd:ee:ff dev lan1 master br-lan"
+
+        Returns:
+            {"aa:bb:cc:dd:ee:ff": "lan1", ...}
+            Returns {} if file/exec is ACL-blocked or bridge command unavailable.
+        """
+        try:
+            result = await self._call(
+                UBUS_FILE_OBJECT,
+                "exec",
+                {"command": "/sbin/bridge", "params": ["fdb", "show", "br", "br-lan"]},
+            )
+        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
+            _LOGGER.debug("Bridge FDB unavailable (ACL or missing bridge cmd): %s", err)
+            return {}
+
+        stdout = result.get("stdout", "") or ""
+        fdb: dict[str, str] = {}
+        for line in stdout.splitlines():
+            parts = line.split()
+            # Expected: <mac> dev <port> [master br-lan] [...]
+            if len(parts) >= 3 and parts[1] == "dev":
+                mac = parts[0].lower()
+                port = parts[2]
+                # Skip self/permanent entries and bridge MAC itself
+                if "self" in parts or "permanent" in parts:
+                    continue
+                # Only keep physical LAN/WAN port names
+                if port.startswith(("lan", "wan", "eth")):
+                    fdb[mac] = port
+        return fdb
+
     async def get_active_connections(self) -> int:
         """Return count of active network connections from nf_conntrack.
 

@@ -1653,6 +1653,12 @@
   display: flex; flex-wrap: wrap; gap: 4px;
   padding: 4px 10px 8px;
 }
+
+/* CPU sparkline strip at bottom of AP card */
+.ap-card__metrics {
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--border);
+}
 .ssid-badge {
   display: inline-flex; align-items: center; gap: 3px;
   padding: 2px 6px; border-radius: 8px;
@@ -1771,6 +1777,16 @@
   background: #a855f7;
   box-shadow: 0 0 5px 1px rgba(168,85,247,0.55);
 }
+/* VLAN-colored port: border and LED use the VLAN accent color */
+.port-strip__port--vlan-colored {
+  border-color: var(--port-vlan-color) !important;
+  background: color-mix(in srgb, var(--port-vlan-color) 8%, transparent) !important;
+}
+.port-strip__port--vlan-colored .port-strip__led {
+  background: var(--port-vlan-color) !important;
+  box-shadow: 0 0 5px 1px color-mix(in srgb, var(--port-vlan-color) 55%, transparent) !important;
+}
+
 /* Port hover popover */
 .port-strip__port { position: relative; }
 .port-tooltip {

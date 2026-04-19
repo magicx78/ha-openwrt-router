@@ -186,21 +186,51 @@ def _extract_vlans(network_interfaces: list[dict]) -> list[dict]:
     return sorted(vlans, key=lambda v: v["id"])
 
 
-def _slim_port_stats(port_stats: list[dict]) -> list[dict]:
-    """Strip bulky byte counters from port_stats for the frontend snapshot.
+def _slim_port_stats(
+    port_stats: list[dict],
+    port_vlan_map: dict[str, list[int]] | None = None,
+    bridge_fdb: dict[str, str] | None = None,
+    dhcp_leases: dict[str, dict[str, str]] | None = None,
+) -> list[dict]:
+    """Strip bulky byte counters and enrich with VLAN + device info.
 
-    Only name, up, speed_mbps and duplex are needed for the PortStrip UI.
-    rx/tx byte totals are large integers that inflate the snapshot payload.
+    Args:
+        port_stats: Raw port stats from coordinator.
+        port_vlan_map: port name → list of VLAN IDs (from UCI).
+        bridge_fdb: MAC address → port name (from bridge fdb show).
+        dhcp_leases: MAC → {ip, hostname} for resolving connected device names.
     """
-    return [
-        {
-            "name": p.get("name", ""),
+    # Build reverse FDB: port name → list of MACs
+    port_to_macs: dict[str, list[str]] = {}
+    for mac, port in (bridge_fdb or {}).items():
+        port_to_macs.setdefault(port, []).append(mac)
+
+    result = []
+    for p in (port_stats or []):
+        name = p.get("name", "")
+        # Resolve connected device from FDB + DHCP leases
+        connected_device: str | None = None
+        macs_on_port = port_to_macs.get(name, [])
+        if macs_on_port and dhcp_leases:
+            for mac in macs_on_port:
+                lease = dhcp_leases.get(mac)
+                if lease:
+                    hostname = lease.get("hostname") or lease.get("ip") or mac
+                    connected_device = hostname
+                    break
+            if connected_device is None:
+                # Fall back to raw MAC
+                connected_device = macs_on_port[0]
+
+        result.append({
+            "name": name,
             "up": bool(p.get("up", False)),
             "speed_mbps": p.get("speed_mbps"),
             "duplex": p.get("duplex"),
-        }
-        for p in (port_stats or [])
-    ]
+            "vlan_ids": (port_vlan_map or {}).get(name, []),
+            "connected_device": connected_device,
+        })
+    return result
 
 
 def build_topology_snapshot(
@@ -257,9 +287,15 @@ def build_topology_snapshot(
             "uptime": data.uptime if data.uptime else None,
             "cpu_load": data.cpu_load,
             "mem_usage": _calc_mem_usage(data.memory),
-            "port_stats": _slim_port_stats(data.port_stats),
+            "port_stats": _slim_port_stats(
+                data.port_stats,
+                port_vlan_map=getattr(data, "port_vlan_map", None),
+                bridge_fdb=getattr(data, "port_fdb_map", None),
+                dhcp_leases=data.dhcp_leases,
+            ),
             "vlans": _extract_vlans(data.network_interfaces),
-            "events": data.events,
+            "events": data.events if data.events else [],
+            "cpu_history": getattr(data, "cpu_history", []),
         },
     })
 

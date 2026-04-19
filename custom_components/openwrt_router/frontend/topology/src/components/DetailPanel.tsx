@@ -6,7 +6,7 @@
  */
 
 import React, { useState } from 'react';
-import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat, VlanInfo, RouterEvent } from '../types';
+import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat, VlanInfo, RouterEvent, CpuHistoryPoint } from '../types';
 import { IconX } from './Icons';
 import { StatusDot, statusLabel } from './StatusDot';
 import { SignalBar } from './SignalBar';
@@ -72,8 +72,10 @@ function ActionBtn({ icon, label, onClick }: { icon: string; label: string; onCl
 // ── Gateway detail ────────────────────────────────────────────────────────
 
 function GatewayDetail({ data, actions }: { data: Gateway; actions?: DetailPanelActions }) {
-  const [chartMode, setChartMode] = useState<'speed' | 'ping'>('speed');
+  const [chartMode, setChartMode] = useState<'speed' | 'ping' | 'cpu'>('speed');
   const history = data.dslHistory ?? [];
+  const cpuHistory = data.cpuHistoryBackend ?? [];
+  const hasCpuHistory = cpuHistory.length >= 2;
   const dsl = data.dslStats;
   const hasDsl = !!dsl && dsl.downstream_kbps > 0;
   const hasPing = data.pingMs != null;
@@ -119,20 +121,34 @@ function GatewayDetail({ data, actions }: { data: Gateway; actions?: DetailPanel
         </div>
       )}
 
-      {history.length >= 2 && (
+      {(history.length >= 2 || hasCpuHistory) && (
         <div className="detail-section">
           <div className="detail-section__heading" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span>24h Verlauf</span>
+            <span>Verlauf</span>
             <span style={{ display: 'flex', gap: 6 }}>
-              <ChartTabBtn active={chartMode === 'speed'} onClick={() => setChartMode('speed')}>
-                DSL
-              </ChartTabBtn>
-              <ChartTabBtn active={chartMode === 'ping'} onClick={() => setChartMode('ping')}>
-                Ping
-              </ChartTabBtn>
+              {history.length >= 2 && (
+                <ChartTabBtn active={chartMode === 'speed'} onClick={() => setChartMode('speed')}>
+                  DSL
+                </ChartTabBtn>
+              )}
+              {history.length >= 2 && (
+                <ChartTabBtn active={chartMode === 'ping'} onClick={() => setChartMode('ping')}>
+                  Ping
+                </ChartTabBtn>
+              )}
+              {hasCpuHistory && (
+                <ChartTabBtn active={chartMode === 'cpu'} onClick={() => setChartMode('cpu')}>
+                  CPU
+                </ChartTabBtn>
+              )}
             </span>
           </div>
-          <SpeedChart history={history} width={310} height={110} mode={chartMode} />
+          <SpeedChart
+            history={chartMode === 'cpu' ? cpuHistory : history}
+            width={310}
+            height={110}
+            mode={chartMode === 'cpu' ? 'cpu' : chartMode as 'speed' | 'ping'}
+          />
         </div>
       )}
 
@@ -326,6 +342,18 @@ function APDetail({ data, clients, actions }: { data: AccessPoint; clients: Clie
         <div className="detail-section">
           <div className="detail-section__heading">System</div>
           <ResourceBars cpu={data.cpuLoad} mem={data.memUsage} />
+        </div>
+      )}
+
+      {(data.cpuHistoryBackend?.length ?? 0) >= 2 && (
+        <div className="detail-section">
+          <div className="detail-section__heading">CPU Verlauf (1h)</div>
+          <SpeedChart
+            history={data.cpuHistoryBackend!}
+            width={290}
+            height={80}
+            mode="cpu"
+          />
         </div>
       )}
 
@@ -526,26 +554,52 @@ function SsidList({ ssids }: { ssids: SsidInfo[] }) {
   );
 }
 
+const VLAN_COLORS_PANEL = [
+  '#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6',
+  '#ef4444', '#eab308', '#14b8a6',
+];
+
 function PortList({ ports }: { ports: PortStat[] }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
       {ports.map(p => (
-        <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{
-            width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-            background: p.up ? 'var(--green)' : 'var(--text-muted)',
-            boxShadow: p.up ? '0 0 5px rgba(34,197,94,0.6)' : 'none',
-          }} />
-          <span style={{ fontSize: 11.5, color: p.up ? 'var(--text-primary)' : 'var(--text-muted)', flex: 1 }}>
-            {p.name}
-          </span>
-          {p.up && p.speed_mbps != null && (
-            <span style={{ fontSize: 10.5, color: 'var(--green)', fontWeight: 500 }}>
-              {p.speed_mbps >= 1000 ? `${p.speed_mbps / 1000}G` : `${p.speed_mbps}M`}
+        <div key={p.name} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+              background: p.up ? 'var(--green)' : 'var(--text-muted)',
+              boxShadow: p.up ? '0 0 5px rgba(34,197,94,0.6)' : 'none',
+            }} />
+            <span style={{ fontSize: 11.5, color: p.up ? 'var(--text-primary)' : 'var(--text-muted)', flex: 1 }}>
+              {p.name}
             </span>
+            {p.up && p.speed_mbps != null && (
+              <span style={{ fontSize: 10.5, color: 'var(--green)', fontWeight: 500 }}>
+                {p.speed_mbps >= 1000 ? `${p.speed_mbps / 1000}G` : `${p.speed_mbps}M`}
+              </span>
+            )}
+            {!p.up && (
+              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>no link</span>
+            )}
+          </div>
+          {(p.vlanIds ?? []).length > 0 && (
+            <div style={{ display: 'flex', gap: 4, paddingLeft: 16 }}>
+              {p.vlanIds!.map(id => (
+                <span key={id} style={{
+                  fontSize: 10, padding: '0 5px', borderRadius: 3,
+                  background: `${VLAN_COLORS_PANEL[id % VLAN_COLORS_PANEL.length]}22`,
+                  color: VLAN_COLORS_PANEL[id % VLAN_COLORS_PANEL.length],
+                  border: `1px solid ${VLAN_COLORS_PANEL[id % VLAN_COLORS_PANEL.length]}55`,
+                }}>
+                  VLAN {id}
+                </span>
+              ))}
+            </div>
           )}
-          {!p.up && (
-            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>no link</span>
+          {p.connectedDevice && (
+            <div style={{ fontSize: 10, color: '#93c5fd', paddingLeft: 16 }}>
+              → {p.connectedDevice}
+            </div>
           )}
         </div>
       ))}

@@ -87,7 +87,10 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onCo
     flashing   ? 'status-flash' : '',
   ].filter(Boolean).join(' ');
 
-  const history = gateway.cpuHistory ?? [];
+  // Prefer backend history (persistent across reloads) over frontend-accumulated buffer
+  const history = (gateway.cpuHistoryBackend?.length ?? 0) > 1
+    ? gateway.cpuHistoryBackend!.map(p => p.cpu)
+    : (gateway.cpuHistory ?? []);
   const cpu = gateway.cpuLoad;
   const mem = gateway.memUsage;
 

@@ -1,5 +1,14 @@
 import React, { useState } from 'react';
-import { PortStat } from '../types';
+import type { PortStat } from '../types';
+
+const VLAN_COLORS = [
+  '#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6',
+  '#ef4444', '#eab308', '#14b8a6',
+];
+
+function vlanColor(vlanId: number): string {
+  return VLAN_COLORS[vlanId % VLAN_COLORS.length];
+}
 
 interface Props {
   ports: PortStat[];
@@ -45,11 +54,19 @@ export function PortStrip({ ports, vlanMode }: Props) {
 function PortChip({ port: p, vlanMode }: { port: PortStat; vlanMode?: boolean }) {
   const [showTooltip, setShowTooltip] = useState(false);
 
+  const primaryVlan = (p.vlanIds ?? []).length > 0 ? p.vlanIds![0] : undefined;
+  const hasVlanColor = primaryVlan != null;
+
   const cls = [
     'port-strip__port',
     p.up ? 'port-strip__port--up' : '',
     portTypeClass(p.name),
+    hasVlanColor ? 'port-strip__port--vlan-colored' : '',
   ].filter(Boolean).join(' ');
+
+  const vlanStyle = hasVlanColor
+    ? ({ '--port-vlan-color': vlanColor(primaryVlan!) } as React.CSSProperties)
+    : undefined;
 
   const linkDesc = p.up
     ? [p.speed_mbps ? `${p.speed_mbps} Mbps` : 'up', p.duplex ?? ''].filter(Boolean).join(' ')
@@ -58,6 +75,7 @@ function PortChip({ port: p, vlanMode }: { port: PortStat; vlanMode?: boolean })
   return (
     <div
       className={cls}
+      style={vlanStyle}
       onMouseEnter={() => setShowTooltip(true)}
       onMouseLeave={() => setShowTooltip(false)}
     >
@@ -70,6 +88,16 @@ function PortChip({ port: p, vlanMode }: { port: PortStat; vlanMode?: boolean })
         <div className="port-tooltip">
           <div className="port-tooltip__name">{p.name}</div>
           <div className="port-tooltip__meta">{linkDesc}</div>
+          {(p.vlanIds ?? []).length > 0 && (
+            <div className="port-tooltip__meta">
+              VLAN: {p.vlanIds!.join(', ')}
+            </div>
+          )}
+          {p.connectedDevice && (
+            <div className="port-tooltip__meta" style={{ color: '#93c5fd' }}>
+              → {p.connectedDevice}
+            </div>
+          )}
         </div>
       )}
     </div>
