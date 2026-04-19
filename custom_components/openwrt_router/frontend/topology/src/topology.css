@@ -2028,6 +2028,54 @@
   background: var(--vlan-color, var(--text-muted));
 }
 
+/* ── Inspector mini bars (traffic / resource usage) ─────────────────────── */
+.mini-bar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.mini-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mini-bar__label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  width: 24px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.mini-bar__track {
+  flex: 1;
+  height: 6px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.mini-bar__fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 400ms ease;
+  min-width: 2px;
+}
+
+.mini-bar__value {
+  font-size: 10px;
+  color: var(--text-secondary);
+  width: 64px;
+  flex-shrink: 0;
+  text-align: right;
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+}
+
 /* ── Status-change flash animation ──────────────────────────────────────── */
 /* Triggered by useStatusFlash hook — lasts ~650 ms, then class is removed  */
 

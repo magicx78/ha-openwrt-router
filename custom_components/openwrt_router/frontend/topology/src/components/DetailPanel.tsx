@@ -75,6 +75,16 @@ function GatewayDetail({ data }: { data: Gateway }) {
         {hasPing && <Row label="Ping (8.8.8.8)" value={`${data.pingMs} ms`} />}
       </div>
 
+      {data.wanTraffic && (data.wanTraffic.downstream_bps != null || data.wanTraffic.upstream_bps != null) && (
+        <div className="detail-section">
+          <div className="detail-section__heading">WAN Aktivität</div>
+          <WanTrafficBars
+            down={data.wanTraffic.downstream_bps ?? 0}
+            up={data.wanTraffic.upstream_bps ?? 0}
+          />
+        </div>
+      )}
+
       {hasDsl && (
         <div className="detail-section">
           <div className="detail-section__heading">DSL (Fritz!Box)</div>
@@ -109,20 +119,7 @@ function GatewayDetail({ data }: { data: Gateway }) {
       {(data.cpuLoad != null || data.memUsage != null) && (
         <div className="detail-section">
           <div className="detail-section__heading">System</div>
-          {data.cpuLoad != null && (
-            <Row label="CPU" value={
-              <span style={{ color: data.cpuLoad > 80 ? 'var(--red)' : data.cpuLoad > 60 ? 'var(--amber)' : 'var(--green)' }}>
-                {data.cpuLoad.toFixed(0)}%
-              </span>
-            } />
-          )}
-          {data.memUsage != null && (
-            <Row label="RAM" value={
-              <span style={{ color: data.memUsage > 85 ? 'var(--red)' : data.memUsage > 70 ? 'var(--amber)' : 'var(--green)' }}>
-                {data.memUsage.toFixed(0)}%
-              </span>
-            } />
-          )}
+          <ResourceBars cpu={data.cpuLoad} mem={data.memUsage} />
         </div>
       )}
 
@@ -261,20 +258,7 @@ function APDetail({ data, clients }: { data: AccessPoint; clients: Client[] }) {
       {(data.cpuLoad != null || data.memUsage != null) && (
         <div className="detail-section">
           <div className="detail-section__heading">System</div>
-          {data.cpuLoad != null && (
-            <Row label="CPU" value={
-              <span style={{ color: data.cpuLoad > 80 ? 'var(--red)' : data.cpuLoad > 60 ? 'var(--amber)' : 'var(--green)' }}>
-                {data.cpuLoad.toFixed(0)}%
-              </span>
-            } />
-          )}
-          {data.memUsage != null && (
-            <Row label="RAM" value={
-              <span style={{ color: data.memUsage > 85 ? 'var(--red)' : data.memUsage > 70 ? 'var(--amber)' : 'var(--green)' }}>
-                {data.memUsage.toFixed(0)}%
-              </span>
-            } />
-          )}
+          <ResourceBars cpu={data.cpuLoad} mem={data.memUsage} />
         </div>
       )}
 
@@ -336,6 +320,13 @@ function ClientDetail({ data, apName }: { data: Client; apName: string }) {
         <Row label="Qualität" value={q} />
       </div>
 
+      {(data.rxBytes != null || data.txBytes != null) && (
+        <div className="detail-section">
+          <div className="detail-section__heading">Daten (Session)</div>
+          <BytesBars rx={data.rxBytes ?? 0} tx={data.txBytes ?? 0} />
+        </div>
+      )}
+
       {/* ── HA entity link ── */}
       <a
         className="detail-ha-link"
@@ -345,6 +336,76 @@ function ClientDetail({ data, apName }: { data: Client; apName: string }) {
         In HA anzeigen →
       </a>
     </>
+  );
+}
+
+// ── Mini traffic / resource bars ─────────────────────────────────────────
+
+function formatBps(bps: number): string {
+  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
+  if (bps >= 1_000)     return `${(bps / 1_000).toFixed(0)} kbps`;
+  return `${bps} bps`;
+}
+
+function formatBytes(b: number): string {
+  if (b >= 1_073_741_824) return `${(b / 1_073_741_824).toFixed(2)} GB`;
+  if (b >= 1_048_576)     return `${(b / 1_048_576).toFixed(1)} MB`;
+  if (b >= 1_024)         return `${(b / 1_024).toFixed(0)} KB`;
+  return `${b} B`;
+}
+
+function MiniBar({ label, pct, color, value }: {
+  label: string; pct: number; color: string; value: string;
+}) {
+  return (
+    <div className="mini-bar">
+      <span className="mini-bar__label">{label}</span>
+      <div className="mini-bar__track">
+        <div className="mini-bar__fill" style={{ width: `${Math.min(100, pct)}%`, background: color }} />
+      </div>
+      <span className="mini-bar__value">{value}</span>
+    </div>
+  );
+}
+
+function WanTrafficBars({ down, up }: { down: number; up: number }) {
+  const max = Math.max(down, up, 1);
+  return (
+    <div className="mini-bar-group">
+      <MiniBar label="↓" pct={down / max * 100} color="var(--accent)"  value={formatBps(down)} />
+      <MiniBar label="↑" pct={up   / max * 100} color="var(--success)" value={formatBps(up)} />
+    </div>
+  );
+}
+
+function BytesBars({ rx, tx }: { rx: number; tx: number }) {
+  const max = Math.max(rx, tx, 1);
+  return (
+    <div className="mini-bar-group">
+      <MiniBar label="RX" pct={rx / max * 100} color="var(--accent)"  value={formatBytes(rx)} />
+      <MiniBar label="TX" pct={tx / max * 100} color="var(--success)" value={formatBytes(tx)} />
+    </div>
+  );
+}
+
+function ResourceBars({ cpu, mem }: { cpu?: number; mem?: number }) {
+  return (
+    <div className="mini-bar-group">
+      {cpu != null && (
+        <MiniBar
+          label="CPU" pct={cpu}
+          color={cpu > 80 ? 'var(--danger)' : cpu > 60 ? 'var(--warning)' : 'var(--success)'}
+          value={`${cpu.toFixed(0)}%`}
+        />
+      )}
+      {mem != null && (
+        <MiniBar
+          label="RAM" pct={mem}
+          color={mem > 85 ? 'var(--danger)' : mem > 70 ? 'var(--warning)' : 'var(--accent)'}
+          value={`${mem.toFixed(0)}%`}
+        />
+      )}
+    </div>
   );
 }
 
