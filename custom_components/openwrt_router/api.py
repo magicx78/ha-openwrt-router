@@ -1021,6 +1021,8 @@ class OpenWrtAPI:
                             CLIENT_KEY_SSID: ssid,
                             CLIENT_KEY_RADIO: ifname,
                             CLIENT_KEY_CONNECTED_SINCE: connected_time,
+                            "rx_bytes": sta.get("rx_bytes"),
+                            "tx_bytes": sta.get("tx_bytes"),
                         }
                     )
                 _LOGGER.debug(
@@ -2102,15 +2104,19 @@ class OpenWrtAPI:
         try:
             result = await self._call(UBUS_NETWORK_OBJECT, UBUS_NETWORK_DUMP, {})
             interfaces: list[dict[str, Any]] = result.get("interface", [])
-            return [
-                {
+            out = []
+            for iface in interfaces:
+                ipv4_list = iface.get("ipv4-address") or []
+                first_ipv4 = ipv4_list[0] if ipv4_list else {}
+                out.append({
                     "interface": iface.get("interface", ""),
                     "rx_bytes": iface.get("statistics", {}).get("rx_bytes", 0),
                     "tx_bytes": iface.get("statistics", {}).get("tx_bytes", 0),
                     "status": "up" if iface.get("up") else "down",
-                }
-                for iface in interfaces
-            ]
+                    "ipv4_addr": first_ipv4.get("address"),
+                    "prefix_len": first_ipv4.get("mask"),
+                })
+            return out
         except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError) as err:
             _LOGGER.debug("Could not fetch network interface stats: %s", err)
             return []

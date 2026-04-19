@@ -35,6 +35,8 @@
   --blue:       #3b82f6;  /* selected / focus / navigation */
   --blue-dim:   rgba(59, 130, 246, 0.18);
   --cyan:       #06b6d4;  /* mesh links */
+  --traffic-down-color: #3b82f6;
+  --traffic-up-color:   #f97316;
   --cyan-dim:   rgba(6, 182, 212, 0.18);
   --slate:      rgba(148, 163, 184, 0.5); /* neutral / inactive */
 
@@ -351,6 +353,7 @@
   overflow: auto;
   min-height: 0;
   cursor: default;
+  position: relative;
   background-image: radial-gradient(rgba(255,255,255,0.035) 1px, transparent 1px);
   background-size: 28px 28px;
 }
@@ -365,7 +368,9 @@
   user-select: none;
   position: relative;
 }
-.topo-zoom-wrapper.dragging { cursor: grabbing; }
+.topo-zoom-wrapper.dragging    { cursor: grabbing; }
+/* Applied briefly during programmatic zoom-to-node so it animates smoothly */
+.topo-zoom-wrapper.zoom-flying { transition: transform 320ms cubic-bezier(0.25,0.46,0.45,0.94); }
 
 /* ── SVG connections overlay ─────────────────────────────────────────── */
 .connections-svg {
@@ -412,6 +417,18 @@
   gap: 8px;
   flex: 1 1 180px;
   max-width: 240px;
+  /* layout-transition: collapse smoothly when AP is hidden by filter change */
+  transition: max-width 220ms ease-out, opacity 180ms ease-out, padding 220ms ease-out;
+}
+
+/* Exit animation: collapse the column width to 0 so surrounding nodes slide in */
+.topo-col-ap.ap-exiting {
+  max-width: 0 !important;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  padding: 0;
+  gap: 0;
 }
 
 /* ── Connection line animations ──────────────────────────────────────── */
@@ -1457,3 +1474,1026 @@
   font-size: 11.5px; color: var(--text-muted); line-height: 1.5;
   padding-top: 6px; border-top: 1px solid var(--border);
 }
+
+/* ── Anomaly alerts ──────────────────────────────────────────────────── */
+.alert-anomaly {
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background 0.12s;
+}
+.alert-anomaly--critical { border-left-color: var(--red); }
+.alert-anomaly--warning  { border-left-color: var(--amber); }
+.alert-anomaly:hover { background: var(--surface-hover); }
+
+.anomaly-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  font-size: 10px; font-weight: 700; line-height: 1;
+}
+.anomaly-icon--critical {
+  background: rgba(239, 68, 68, 0.18); color: var(--red);
+}
+.anomaly-icon--warning {
+  background: rgba(245, 158, 11, 0.18); color: var(--amber);
+}
+
+/* ── DevicesView — Client distribution row ───────────────────────────── */
+.device-row__distribution {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; padding: 4px 8px 6px 40px;
+  font-size: 11px;
+}
+
+.dist-signal { font-weight: 600; white-space: nowrap; min-width: 70px; }
+.dist-signal.signal-excellent { color: var(--green); }
+.dist-signal.signal-good      { color: #86efac; }
+.dist-signal.signal-fair      { color: var(--amber); }
+.dist-signal.signal-poor      { color: var(--red); }
+
+.dist-bar {
+  flex: 1; height: 4px; border-radius: 2px;
+  background: var(--border); overflow: hidden;
+}
+.dist-bar__fill {
+  height: 100%; border-radius: 2px;
+  background: linear-gradient(90deg, var(--blue), var(--cyan));
+  transition: width 0.3s ease;
+}
+.dist-load { color: var(--text-muted); white-space: nowrap; min-width: 30px; text-align: right; }
+
+/* ── TrafficView ─────────────────────────────────────────────────────── */
+.traffic-section {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.traffic-section__title {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.07em; color: var(--text-muted); margin-bottom: 10px;
+}
+.traffic-no-data {
+  font-size: 12px; color: var(--text-muted); padding: 8px 0;
+}
+.traffic-divider { height: 1px; background: var(--border); margin: 0 14px; }
+
+.traffic-rates {
+  display: flex; gap: 16px; margin-bottom: 10px;
+}
+.traffic-rate {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.traffic-rate__arrow {
+  font-size: 16px; font-weight: 700; line-height: 1;
+}
+.traffic-rate--down .traffic-rate__arrow { color: var(--blue); }
+.traffic-rate--up   .traffic-rate__arrow { color: var(--amber, #f97316); }
+.traffic-rate__value {
+  font-size: 15px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums;
+}
+.traffic-rate__label { font-size: 11px; color: var(--text-muted); }
+
+.traffic-sparkline-wrap { margin-top: 4px; }
+.traffic-sparkline-peak {
+  font-size: 10px; color: var(--text-muted); text-align: right; margin-top: 2px; margin-bottom: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Top Talker list ─────────────────────────────────────────────────── */
+.talker-list { display: flex; flex-direction: column; gap: 6px; }
+
+.talker-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 4px; border-radius: 6px; cursor: pointer;
+  transition: background 0.12s;
+}
+.talker-row:hover { background: var(--surface-hover); }
+
+.talker-row__icon { flex-shrink: 0; color: var(--text-secondary); }
+
+.talker-row__info { flex: 1; min-width: 0; }
+.talker-row__name {
+  font-size: 12px; font-weight: 500; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.talker-bar {
+  height: 3px; border-radius: 2px;
+  background: var(--border); overflow: hidden; margin-top: 4px;
+}
+.talker-bar__fill {
+  height: 100%; border-radius: 2px;
+  background: linear-gradient(90deg, var(--blue), var(--cyan));
+  transition: width 0.3s ease;
+}
+
+.talker-row__bytes {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 1px; flex-shrink: 0; font-size: 10.5px; font-variant-numeric: tabular-nums;
+}
+.talker-bytes--down { color: var(--blue); }
+.talker-bytes--up   { color: var(--amber, #f97316); }
+
+/* ── StatusBar health banner ─────────────────────────────────────────── */
+.status-bar__health {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 12px; font-weight: 600; padding: 2px 8px;
+  border-radius: 10px; white-space: nowrap;
+}
+.status-bar__health-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+}
+.health-ok   { background: rgba(34,197,94,0.12);  color: var(--green); }
+.health-ok   .status-bar__health-dot { background: var(--green); }
+.health-warn { background: rgba(245,158,11,0.12); color: var(--amber); }
+.health-warn .status-bar__health-dot { background: var(--amber); }
+.health-crit { background: rgba(239,68,68,0.12);  color: var(--red); }
+.health-crit .status-bar__health-dot { background: var(--red); }
+
+/* ── InternetNode ping display ───────────────────────────────────────── */
+.internet-node__ping {
+  font-size: 11px; font-weight: 700; margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.ping-excellent { color: var(--green); }
+.ping-good      { color: #86efac; }
+.ping-fair      { color: var(--amber); }
+.ping-poor      { color: var(--red); }
+
+@keyframes internet-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.4); }
+  50%       { box-shadow: 0 0 0 6px rgba(59,130,246,0); }
+}
+.internet-node__circle--pulse {
+  animation: internet-pulse 2.5s ease-in-out infinite;
+}
+
+/* ── GatewayNode 2-column layout ─────────────────────────────────────── */
+.gateway-card__body2 {
+  display: flex; gap: 10px; padding: 6px 10px;
+}
+.gateway-card__col {
+  flex: 1; display: flex; flex-direction: column; gap: 3px;
+}
+.gateway-card__col--right {
+  flex: 0 0 auto; min-width: 90px;
+  border-left: 1px solid var(--border);
+  padding-left: 10px;
+}
+
+.gateway-metric { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; }
+.gateway-metric__row { display: flex; justify-content: space-between; align-items: center; gap: 4px; }
+.gateway-metric__label { font-size: 10.5px; color: var(--text-muted); }
+.gateway-metric__value { font-size: 11.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.metric-ok   { color: var(--green); }
+.metric-warn { color: var(--amber); }
+.metric-critical { color: var(--red); }
+
+/* ── SSID badges (gateway + AP) ──────────────────────────────────────── */
+.gateway-card__ssids,
+.ap-card__ssids {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  padding: 4px 10px 8px;
+}
+.ssid-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 6px; border-radius: 8px;
+  font-size: 10px; font-weight: 500;
+  border: 1px solid transparent; white-space: nowrap; max-width: 120px;
+}
+.ssid-badge__name { overflow: hidden; text-overflow: ellipsis; }
+.ssid-badge__band { font-weight: 700; opacity: 0.8; }
+.ssid-badge--24g { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.25); color: #93c5fd; }
+.ssid-badge--5g  { background: rgba(34,197,94,0.12);  border-color: rgba(34,197,94,0.25);  color: #86efac; }
+.ssid-badge--6g  { background: rgba(168,85,247,0.12); border-color: rgba(168,85,247,0.25); color: #c4b5fd; }
+.ssid-badge__ch  { font-size: 9px; opacity: 0.65; font-weight: 500; letter-spacing: 0.2px; }
+
+/* ── Ghost Mode ──────────────────────────────────────────────────────── */
+.ghost-node { opacity: 0.45; filter: grayscale(0.85); }
+.ghost-ap {
+  border: 1px dashed var(--border-hover) !important;
+  background: rgba(12,18,38,0.6) !important;
+}
+.ghost-ap__icon { font-size: 16px; margin-right: 4px; }
+.ghost-ap__lastseen {
+  font-size: 10.5px; color: var(--text-muted);
+  padding: 3px 10px 7px; font-style: italic;
+}
+
+/* ── Port Strip ──────────────────────────────────────────────────────── */
+.port-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--border);
+}
+.port-strip__port {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 32px;
+  padding: 4px 5px;
+  border-radius: 5px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+}
+.port-strip__port--up {
+  background: rgba(34,197,94,0.07);
+  border-color: rgba(34,197,94,0.2);
+}
+.port-strip__led {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  box-shadow: none;
+}
+.port-strip__port--up .port-strip__led {
+  background: var(--green);
+  box-shadow: 0 0 5px 1px rgba(34,197,94,0.55);
+}
+.port-strip__name {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.3px;
+  line-height: 1;
+}
+.port-strip__port--up .port-strip__name { color: var(--text-primary); }
+.port-strip__speed {
+  font-size: 8.5px;
+  color: var(--green);
+  font-weight: 500;
+  line-height: 1;
+}
+/* WAN port accent */
+.port-strip__port--wan {
+  border-color: rgba(96,165,250,0.35);
+  background: rgba(96,165,250,0.06);
+}
+.port-strip__port--wan.port-strip__port--up {
+  border-color: rgba(96,165,250,0.55);
+  background: rgba(96,165,250,0.12);
+}
+.port-strip__port--wan .port-strip__led {
+  background: #60a5fa;
+  box-shadow: 0 0 5px 1px rgba(96,165,250,0.55);
+}
+.port-strip__port--wan .port-strip__name { color: #60a5fa; }
+/* SFP port accent */
+.port-strip__port--sfp {
+  border-color: rgba(168,85,247,0.35);
+  background: rgba(168,85,247,0.06);
+}
+.port-strip__port--sfp.port-strip__port--up {
+  border-color: rgba(168,85,247,0.55);
+  background: rgba(168,85,247,0.12);
+}
+.port-strip__port--sfp .port-strip__led {
+  background: #a855f7;
+  box-shadow: 0 0 5px 1px rgba(168,85,247,0.55);
+}
+/* Port hover popover */
+.port-strip__port { position: relative; }
+.port-tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 200;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+}
+.port-tooltip__name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.port-tooltip__meta {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* ── Node Hover Tooltip (#13) ────────────────────────────────────────── */
+.node-tooltip {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 9px 11px;
+  min-width: 160px;
+  max-width: 220px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.45);
+  pointer-events: none;
+  animation: tooltip-in 0.12s ease-out;
+}
+@keyframes tooltip-in {
+  from { opacity: 0; transform: translateY(-50%) scale(0.93); }
+  to   { opacity: 1; transform: translateY(-50%) scale(1); }
+}
+.node-tooltip__title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.node-tooltip__subtitle {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.node-tooltip__sep {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 0;
+}
+.node-tooltip__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 1.5px 0;
+}
+.node-tooltip__label {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.node-tooltip__value {
+  font-size: 10.5px;
+  color: var(--text-primary);
+  font-weight: 500;
+  text-align: right;
+  white-space: nowrap;
+}
+.node-tooltip__value.warn { color: var(--amber); }
+
+/* ── VLAN Badges (#6) ────────────────────────────────────────────────── */
+.gateway-card__vlans {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 10px 4px;
+  border-top: 1px solid var(--border);
+}
+.vlan-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid rgba(148,163,184,0.2);
+  background: rgba(148,163,184,0.07);
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+.vlan-badge--up {
+  border-color: rgba(34,197,94,0.25);
+  background: rgba(34,197,94,0.08);
+  color: #86efac;
+}
+.vlan-badge--down {
+  border-color: rgba(239,68,68,0.25);
+  background: rgba(239,68,68,0.08);
+  color: #fca5a5;
+}
+.vlan-badge__id {
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.vlan-badge__iface {
+  font-size: 9px;
+  opacity: 0.7;
+}
+
+/* ── VLAN Overlay (#22) ──────────────────────────────────────────────── */
+.vlan-overlay {
+  position: fixed;
+  top: 80px;
+  right: 16px;
+  z-index: 120;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  min-width: 200px;
+  max-width: 260px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.45);
+  animation: tooltip-in 0.15s ease both;
+}
+.vlan-overlay__title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent, #60a5fa);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 8px;
+}
+.vlan-overlay__empty {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.vlan-overlay__list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.vlan-overlay__row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.vlan-overlay__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+.vlan-overlay__dot.up   { background: var(--green); box-shadow: 0 0 4px rgba(34,197,94,0.5); }
+.vlan-overlay__dot.down { background: var(--red); }
+.vlan-overlay__id {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-primary);
+  min-width: 52px;
+}
+.vlan-overlay__iface {
+  font-size: 10px;
+  color: var(--text-secondary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vlan-overlay__status {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.vlan-overlay__status.up   { color: var(--green); }
+.vlan-overlay__status.down { color: var(--red); }
+
+/* ── VLAN Color Palette (#22 full) ───────────────────────────────────── */
+/*
+ * 7-color palette indexed by VLAN ID mod 7.
+ * Applied via [data-vlan="N"] on .node-card and .client-dot.
+ * .vlan-mode class on .topo-app enables all VLAN color rules.
+ */
+.topo-app {
+  --vlan-c0: #3b82f6;   /* blue   */
+  --vlan-c1: #22c55e;   /* green  */
+  --vlan-c2: #f97316;   /* orange */
+  --vlan-c3: #a855f7;   /* violet */
+  --vlan-c4: #ef4444;   /* red    */
+  --vlan-c5: #eab308;   /* yellow */
+  --vlan-c6: #06b6d4;   /* teal   */
+}
+
+/* Map each VLAN ID to a palette slot (ID mod 7).
+   We enumerate common IDs; unknown IDs fall back to no accent. */
+.vlan-mode [data-vlan]   { --vlan-color: var(--vlan-c0); }
+
+/* IDs 1-99: mod 7 assignments */
+.vlan-mode [data-vlan="1"],  .vlan-mode [data-vlan="8"],  .vlan-mode [data-vlan="15"],
+.vlan-mode [data-vlan="22"], .vlan-mode [data-vlan="29"], .vlan-mode [data-vlan="36"],
+.vlan-mode [data-vlan="43"], .vlan-mode [data-vlan="50"], .vlan-mode [data-vlan="57"],
+.vlan-mode [data-vlan="64"], .vlan-mode [data-vlan="71"], .vlan-mode [data-vlan="78"],
+.vlan-mode [data-vlan="85"], .vlan-mode [data-vlan="92"], .vlan-mode [data-vlan="99"]
+  { --vlan-color: var(--vlan-c0); }
+
+.vlan-mode [data-vlan="2"],  .vlan-mode [data-vlan="9"],  .vlan-mode [data-vlan="16"],
+.vlan-mode [data-vlan="23"], .vlan-mode [data-vlan="30"], .vlan-mode [data-vlan="37"],
+.vlan-mode [data-vlan="44"], .vlan-mode [data-vlan="51"], .vlan-mode [data-vlan="58"],
+.vlan-mode [data-vlan="65"], .vlan-mode [data-vlan="72"], .vlan-mode [data-vlan="79"],
+.vlan-mode [data-vlan="86"], .vlan-mode [data-vlan="93"], .vlan-mode [data-vlan="100"]
+  { --vlan-color: var(--vlan-c1); }
+
+.vlan-mode [data-vlan="3"],  .vlan-mode [data-vlan="10"], .vlan-mode [data-vlan="17"],
+.vlan-mode [data-vlan="24"], .vlan-mode [data-vlan="31"], .vlan-mode [data-vlan="38"],
+.vlan-mode [data-vlan="45"], .vlan-mode [data-vlan="52"], .vlan-mode [data-vlan="59"],
+.vlan-mode [data-vlan="66"], .vlan-mode [data-vlan="73"], .vlan-mode [data-vlan="80"],
+.vlan-mode [data-vlan="87"], .vlan-mode [data-vlan="94"], .vlan-mode [data-vlan="200"]
+  { --vlan-color: var(--vlan-c2); }
+
+.vlan-mode [data-vlan="4"],  .vlan-mode [data-vlan="11"], .vlan-mode [data-vlan="18"],
+.vlan-mode [data-vlan="25"], .vlan-mode [data-vlan="32"], .vlan-mode [data-vlan="39"],
+.vlan-mode [data-vlan="46"], .vlan-mode [data-vlan="53"], .vlan-mode [data-vlan="60"],
+.vlan-mode [data-vlan="67"], .vlan-mode [data-vlan="74"], .vlan-mode [data-vlan="81"],
+.vlan-mode [data-vlan="88"], .vlan-mode [data-vlan="95"], .vlan-mode [data-vlan="300"]
+  { --vlan-color: var(--vlan-c3); }
+
+.vlan-mode [data-vlan="5"],  .vlan-mode [data-vlan="12"], .vlan-mode [data-vlan="19"],
+.vlan-mode [data-vlan="26"], .vlan-mode [data-vlan="33"], .vlan-mode [data-vlan="40"],
+.vlan-mode [data-vlan="47"], .vlan-mode [data-vlan="54"], .vlan-mode [data-vlan="61"],
+.vlan-mode [data-vlan="68"], .vlan-mode [data-vlan="75"], .vlan-mode [data-vlan="82"],
+.vlan-mode [data-vlan="89"], .vlan-mode [data-vlan="96"], .vlan-mode [data-vlan="400"]
+  { --vlan-color: var(--vlan-c4); }
+
+.vlan-mode [data-vlan="6"],  .vlan-mode [data-vlan="13"], .vlan-mode [data-vlan="20"],
+.vlan-mode [data-vlan="27"], .vlan-mode [data-vlan="34"], .vlan-mode [data-vlan="41"],
+.vlan-mode [data-vlan="48"], .vlan-mode [data-vlan="55"], .vlan-mode [data-vlan="62"],
+.vlan-mode [data-vlan="69"], .vlan-mode [data-vlan="76"], .vlan-mode [data-vlan="83"],
+.vlan-mode [data-vlan="90"], .vlan-mode [data-vlan="97"], .vlan-mode [data-vlan="500"]
+  { --vlan-color: var(--vlan-c5); }
+
+.vlan-mode [data-vlan="7"],  .vlan-mode [data-vlan="14"], .vlan-mode [data-vlan="21"],
+.vlan-mode [data-vlan="28"], .vlan-mode [data-vlan="35"], .vlan-mode [data-vlan="42"],
+.vlan-mode [data-vlan="49"], .vlan-mode [data-vlan="56"], .vlan-mode [data-vlan="63"],
+.vlan-mode [data-vlan="70"], .vlan-mode [data-vlan="77"], .vlan-mode [data-vlan="84"],
+.vlan-mode [data-vlan="91"], .vlan-mode [data-vlan="98"], .vlan-mode [data-vlan="600"]
+  { --vlan-color: var(--vlan-c6); }
+
+/* Apply color to node cards (border accent) */
+.vlan-mode .node-card[data-vlan] {
+  border-color: var(--vlan-color);
+  box-shadow: 0 0 0 1px var(--vlan-color), inset 0 0 20px rgba(0,0,0,0.1);
+}
+
+/* Apply color to client dots (ring + background tint) */
+.vlan-mode .client-dot[data-vlan] {
+  outline: 2px solid var(--vlan-color);
+  outline-offset: 1px;
+}
+
+/* Show VLAN color swatch in overlay legend */
+.vlan-overlay__row[data-vlan] .vlan-overlay__dot {
+  background: var(--vlan-color, var(--text-muted));
+}
+
+/* ── Grouping mode ───────────────────────────────────────────────────────── */
+.topo-groups {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  width: 100%;
+  padding-top: 4px;
+}
+
+.ap-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  animation: node-enter 200ms ease-out both;
+}
+
+.ap-group__label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.04);
+}
+
+.ap-group__row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 20px;
+}
+
+/* ── Status-bar group select ─────────────────────────────────────────────── */
+.status-bar__select {
+  height: 26px;
+  padding: 0 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 150ms;
+}
+
+.status-bar__select:hover,
+.status-bar__select:focus { border-color: var(--accent); }
+
+.status-bar__select.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ── Inspector action bar ────────────────────────────────────────────────── */
+.inspector-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 16px 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.inspector-action {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms;
+  white-space: nowrap;
+}
+
+.inspector-action:hover {
+  background: rgba(59,130,246,0.15);
+  border-color: rgba(59,130,246,0.4);
+  color: var(--accent);
+}
+
+.inspector-action__icon {
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* ── Inspector mini bars (traffic / resource usage) ─────────────────────── */
+.mini-bar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.mini-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mini-bar__label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  width: 24px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.mini-bar__track {
+  flex: 1;
+  height: 6px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.mini-bar__fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 400ms ease;
+  min-width: 2px;
+}
+
+.mini-bar__value {
+  font-size: 10px;
+  color: var(--text-secondary);
+  width: 64px;
+  flex-shrink: 0;
+  text-align: right;
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+}
+
+/* ── Status-change flash animation ──────────────────────────────────────── */
+/* Triggered by useStatusFlash hook — lasts ~650 ms, then class is removed  */
+
+@keyframes flash-online {
+  0%   { box-shadow: 0 0  0  0   rgba(34,197,94,0.7); }
+  60%  { box-shadow: 0 0 20px 6px rgba(34,197,94,0.25); }
+  100% { box-shadow: 0 0  0  0   rgba(34,197,94,0); }
+}
+@keyframes flash-warning {
+  0%   { box-shadow: 0 0  0  0   rgba(245,158,11,0.75); }
+  60%  { box-shadow: 0 0 20px 6px rgba(245,158,11,0.3); }
+  100% { box-shadow: 0 0  0  0   rgba(245,158,11,0); }
+}
+@keyframes flash-offline {
+  0%   { box-shadow: 0 0  0  0   rgba(239,68,68,0.75); }
+  60%  { box-shadow: 0 0 20px 6px rgba(239,68,68,0.3); }
+  100% { box-shadow: 0 0  0  0   rgba(239,68,68,0); }
+}
+
+.node-card.status-online.status-flash  { animation: flash-online  0.65s ease-out; }
+.node-card.status-warning.status-flash { animation: flash-warning 0.65s ease-out; }
+.node-card.status-offline.status-flash { animation: flash-offline 0.65s ease-out; }
+
+/* StatusDot also fades smoothly when status changes */
+.status-dot { transition: background 250ms ease, box-shadow 250ms ease; }
+
+/* ── Health mode — node coloring by CPU/RAM/signal ───────────────────────── */
+.health-badge {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.health-badge--ok       { background: rgba(34,197,94,0.18);  color: var(--success); }
+.health-badge--caution  { background: rgba(250,204,21,0.18); color: #fde047; }
+.health-badge--warning  { background: rgba(245,158,11,0.22); color: var(--warning); }
+.health-badge--critical { background: rgba(239,68,68,0.22);  color: var(--danger); }
+
+/* Override node card borders in health mode */
+.health-mode .node-card[data-health="ok"] {
+  border-color: var(--success);
+  box-shadow: 0 0 0 1px rgba(34,197,94,0.3);
+}
+.health-mode .node-card[data-health="caution"] {
+  border-color: #fde047;
+  box-shadow: 0 0 0 1px rgba(250,204,21,0.3);
+}
+.health-mode .node-card[data-health="warning"] {
+  border-color: var(--warning);
+  box-shadow: 0 0 8px rgba(245,158,11,0.35);
+  animation: pulse-amber 2s infinite;
+}
+.health-mode .node-card[data-health="critical"] {
+  border-color: var(--danger);
+  box-shadow: 0 0 12px rgba(239,68,68,0.45);
+  animation: pulse-danger 1.5s infinite;
+}
+
+@keyframes pulse-danger {
+  0%, 100% { box-shadow: 0 0 8px  rgba(239,68,68,0.35); }
+  50%       { box-shadow: 0 0 18px rgba(239,68,68,0.65); }
+}
+
+/* ── AP client count button (expand toggle) ──────────────────────────────── */
+.ap-card__clients {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  transition: color 120ms, background 120ms;
+}
+
+.ap-card__clients:hover {
+  color: var(--accent);
+  background: rgba(59,130,246,0.1);
+}
+
+.ap-card__clients.expanded {
+  color: var(--accent);
+}
+
+.ap-card__clients-chevron {
+  font-size: 8px;
+  opacity: 0.6;
+}
+
+/* ── Inline AP client list ───────────────────────────────────────────────── */
+.ap-client-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  max-width: 280px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  overflow: hidden;
+  animation: node-enter 150ms ease;
+}
+
+.ap-client-list--empty {
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.ap-client-list__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 10px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  color: var(--text-primary);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 80ms;
+}
+
+.ap-client-list__row:last-child { border-bottom: none; }
+.ap-client-list__row:hover { background: var(--surface-3); }
+
+.ap-client-list__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.ap-client-list__ip {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+}
+
+.ap-client-list__sig {
+  font-size: 9px;
+  font-family: var(--font-mono, monospace);
+  letter-spacing: -1px;
+  white-space: nowrap;
+}
+.ap-client-list__sig.sig-excellent { color: var(--success); }
+.ap-client-list__sig.sig-good      { color: #86efac; }
+.ap-client-list__sig.sig-fair      { color: var(--warning); }
+.ap-client-list__sig.sig-poor      { color: var(--danger); }
+
+.ap-client-list__band {
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* ── Context menu ─────────────────────────────────────────────────────────── */
+.ctx-menu {
+  min-width: 168px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  animation: ctx-appear 100ms ease;
+}
+
+@keyframes ctx-appear {
+  from { opacity: 0; transform: scale(0.96) translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.ctx-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 14px;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background 80ms;
+}
+
+.ctx-menu__item:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--accent);
+}
+
+.ctx-menu__item:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.ctx-menu__icon {
+  font-size: 12px;
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.ctx-menu__sep {
+  height: 1px;
+  margin: 3px 8px;
+  background: var(--border);
+}
+
+/* ── Minimap ──────────────────────────────────────────────────────────────── */
+.minimap {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  z-index: 40;
+  width: 160px;
+  height: 100px;
+  background: rgba(10, 15, 28, 0.88);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(4px);
+  overflow: hidden;
+  pointer-events: all;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+
+.minimap__svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+}
+
+.minimap__viewport {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  opacity: 0.8;
+}
+
+/* VLAN-colored edges — applied when vlan-mode is active and edge carries a vlanId */
+.vlan-mode .edge-group[data-vlan] .edge-wired-bg,
+.vlan-mode .edge-group[data-vlan] .edge-mesh-bg {
+  stroke: var(--vlan-color);
+  opacity: 0.18;
+}
+.vlan-mode .edge-group[data-vlan] .edge-wired-flow,
+.vlan-mode .edge-group[data-vlan] .edge-mesh-flow {
+  stroke: var(--vlan-color);
+}
+
+/* ── Event timeline ──────────────────────────────────────────────────────── */
+.event-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 0;
+}
+
+.event-timeline__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  background: rgba(255,255,255,0.04);
+  border-left: 3px solid transparent;
+}
+
+.event-timeline__item.event-info  { border-left-color: var(--accent-blue, #3b82f6); }
+.event-timeline__item.event-warn  { border-left-color: var(--warn, #f59e0b); }
+.event-timeline__item.event-error { border-left-color: var(--critical, #ef4444); }
+
+.event-timeline__icon {
+  font-size: 11px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.event-info  .event-timeline__icon { color: var(--accent-blue, #3b82f6); }
+.event-warn  .event-timeline__icon { color: var(--warn, #f59e0b); }
+.event-error .event-timeline__icon { color: var(--critical, #ef4444); }
+
+.event-timeline__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.event-timeline__msg {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary, #e0eaf8);
+  line-height: 1.3;
+}
+
+.event-timeline__detail {
+  font-size: 11px;
+  color: var(--text-secondary, #8899aa);
+}
+
+.event-timeline__age {
+  font-size: 10px;
+  color: var(--text-muted, #566678);
+  flex-shrink: 0;
+  align-self: center;
+}
+

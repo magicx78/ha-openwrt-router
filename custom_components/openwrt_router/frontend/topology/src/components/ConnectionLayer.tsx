@@ -13,9 +13,10 @@ interface Props {
   highlightedEdges: Set<string>;
   dimmedEdges: Set<string>;
   onEdgeHover?: (edgeId: string | null, x: number, y: number) => void;
+  vlanMode?: boolean;
 }
 
-export function ConnectionLayer({ edges, highlightedEdges, dimmedEdges, onEdgeHover }: Props) {
+export function ConnectionLayer({ edges, highlightedEdges, dimmedEdges, onEdgeHover, vlanMode }: Props) {
   return (
     <>
       {edges.map((edge, idx) => (
@@ -26,6 +27,7 @@ export function ConnectionLayer({ edges, highlightedEdges, dimmedEdges, onEdgeHo
           dimmed={dimmedEdges.has(edge.id)}
           animIndex={idx}
           onEdgeHover={onEdgeHover}
+          vlanMode={vlanMode}
         />
       ))}
     </>
@@ -40,9 +42,10 @@ interface EdgeGroupProps {
   dimmed: boolean;
   animIndex: number;
   onEdgeHover?: (edgeId: string | null, x: number, y: number) => void;
+  vlanMode?: boolean;
 }
 
-function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover }: EdgeGroupProps) {
+function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover, vlanMode }: EdgeGroupProps) {
   const cls = [
     'edge-group',
     `edge-group--${edge.kind}`,
@@ -55,6 +58,7 @@ function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover }: EdgeGr
 
   // Staggered enter: each edge delays slightly after the previous
   const style = { '--edge-delay': `${0.08 + animIndex * 0.06}s` } as React.CSSProperties;
+  const vlanAttr = vlanMode && edge.vlanId != null ? edge.vlanId : undefined;
 
   // Transparent wide hit area — pointer-events: all overrides the parent SVG's
   // pointer-events: none so only these explicit hit paths receive mouse events.
@@ -82,7 +86,7 @@ function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover }: EdgeGr
 
   if (edge.kind === 'gateway-wired') {
     return (
-      <g className={cls} style={style}>
+      <g className={cls} style={style} data-vlan={vlanAttr}>
         <path className="edge-wired-bg"   d={edge.path} />
         <path className="edge-wired-flow" d={edge.path} />
         {hitPath}
@@ -92,7 +96,7 @@ function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover }: EdgeGr
 
   // ap-mesh
   return (
-    <g className={cls} style={style}>
+    <g className={cls} style={style} data-vlan={vlanAttr}>
       <path className="edge-mesh-bg"   d={edge.path} />
       <path className="edge-mesh-flow" d={edge.path} />
       {hitPath}

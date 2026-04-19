@@ -1,5 +1,12 @@
 // ── Domain types ──────────────────────────────────────────────────────────
 
+export interface RouterEvent {
+  ts: number;          // unix timestamp
+  type: 'info' | 'warn' | 'error';
+  message: string;
+  detail?: string;
+}
+
 export type NodeStatus = 'online' | 'offline' | 'warning';
 export type UplinkType = 'wired' | 'mesh';
 export type DeviceCategory = 'smartphone' | 'laptop' | 'iot' | 'guest' | 'other';
@@ -41,12 +48,41 @@ export interface Gateway {
   wanIp: string;
   uptime: string;
   status: NodeStatus;
+  firmwareVersion?: string; // OpenWrt release version e.g. "23.05.2"
+  cpuLoad?: number;     // 0-100 percent
+  memUsage?: number;    // 0-100 percent
+  cpuHistory?: number[]; // ring buffer of recent cpu_load values (frontend-accumulated)
+  events?: RouterEvent[]; // recent status-change events (newest first)
+  ssids?: SsidInfo[];   // WiFi networks at gateway
   // Fritz!Box / DSL data (optional — only present when Fritz!Box is configured)
   dslStats?: DslStats;
   pingMs?: number | null;
   dslHistory?: DslHistoryPoint[];
   ddnsServices?: DdnsService[];
   wanTraffic?: { downstream_bps?: number; upstream_bps?: number };
+  portStats?: PortStat[];
+  vlans?: VlanInfo[];
+}
+
+export interface SsidInfo {
+  ssid: string;
+  band: string;    // '2.4 GHz' | '5 GHz' | '6 GHz'
+  channel?: number; // WiFi channel (e.g. 6, 36, 100)
+}
+
+export interface PortStat {
+  name: string;        // "lan1", "wan", "eth0", etc.
+  up: boolean;
+  speed_mbps: number | null;  // Mbps or null if no link
+  duplex?: string | null;     // "full" | "half" | null
+}
+
+export interface VlanInfo {
+  id: number;          // VLAN ID (e.g. 10, 20, 100)
+  interface: string;   // e.g. "br-lan.10", "eth0.20"
+  status: string;      // "up" | "down" | "unknown"
+  ipv4?: string;       // gateway IP in this VLAN, e.g. "192.168.10.1"
+  prefix?: number;     // subnet prefix length, e.g. 24
 }
 
 export interface AccessPoint {
@@ -59,6 +95,12 @@ export interface AccessPoint {
   clientCount: number;
   backhaulSignal: number; // dBm
   status: NodeStatus;
+  firmwareVersion?: string; // OpenWrt release version e.g. "23.05.2"
+  events?: RouterEvent[]; // recent status-change events (newest first)
+  ssids?: SsidInfo[];      // WiFi networks broadcast by this AP
+  cpuLoad?: number;        // 0-100 percent
+  memUsage?: number;       // 0-100 percent
+  primaryVlanId?: number;  // majority VLAN among connected clients
 }
 
 export interface Client {
@@ -75,6 +117,9 @@ export interface Client {
   manufacturer?: string;
   connectedSince?: number; // seconds since connection (from hostapd connected_time)
   dhcpExpires?: number;    // unix timestamp when DHCP lease expires
+  rxBytes?: number | null; // bytes received since connection (from hostapd)
+  txBytes?: number | null; // bytes transmitted since connection (from hostapd)
+  vlanId?: number;         // VLAN this client belongs to (matched via subnet)
 }
 
 export interface TopologyData {
@@ -103,6 +148,7 @@ export interface EdgeLayout {
   kind: EdgeKind;
   path: string; // SVG path d attribute
   status: NodeStatus;
+  vlanId?: number; // primary VLAN of the target AP (used for edge coloring in vlan-mode)
 }
 
 export interface TopologyLayout {

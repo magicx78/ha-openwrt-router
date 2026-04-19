@@ -77,6 +77,7 @@ export function computeEdgesFromBounds(
         kind:     'gateway-wired' as EdgeKind,
         path:     `M ${sx} ${sy} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${ey}`,
         status:   ap.status,
+        vlanId:   ap.primaryVlanId,
       });
     } else {
       // Mesh: quadratic arc between AP tops
@@ -93,6 +94,7 @@ export function computeEdgesFromBounds(
           kind:     'ap-mesh' as EdgeKind,
           path:     `M ${sx} ${sy} Q ${midX} ${arcPeakY} ${ex} ${ey}`,
           status:   ap.status,
+          vlanId:   ap.primaryVlanId,
         });
       }
     }

@@ -23,9 +23,10 @@ interface Props {
   clients: Client[];
   dimmed: boolean;
   onSelectClient: (client: Client) => void;
+  vlanMode?: boolean;
 }
 
-export function ClientStrip({ clients, dimmed, onSelectClient }: Props) {
+export function ClientStrip({ clients, dimmed, onSelectClient, vlanMode }: Props) {
   const visible  = clients.slice(0, MAX_VISIBLE);
   const overflow = clients.length - MAX_VISIBLE;
 
@@ -42,6 +43,7 @@ export function ClientStrip({ clients, dimmed, onSelectClient }: Props) {
           key={client.id}
           client={client}
           onSelect={() => onSelectClient(client)}
+          vlanMode={vlanMode}
         />
       ))}
       {overflow > 0 && (
@@ -56,15 +58,17 @@ export function ClientStrip({ clients, dimmed, onSelectClient }: Props) {
 interface DotProps {
   client: Client;
   onSelect: () => void;
+  vlanMode?: boolean;
 }
 
-function ClientDot({ client, onSelect }: DotProps) {
+function ClientDot({ client, onSelect, vlanMode }: DotProps) {
   const [showTooltip, setShowTooltip] = useState(false);
   const q = signalQuality(client.signal);
 
   return (
     <div
       className={`client-dot ${client.status}`}
+      data-vlan={vlanMode && client.vlanId != null ? client.vlanId : undefined}
       onClick={e => { e.stopPropagation(); onSelect(); }}
       onMouseEnter={() => setShowTooltip(true)}
       onMouseLeave={() => setShowTooltip(false)}

@@ -17,6 +17,10 @@ import type {
   DslStats,
   DslHistoryPoint,
   DdnsService,
+  SsidInfo,
+  PortStat,
+  VlanInfo,
+  RouterEvent,
 } from './types';
 
 // ── Raw snapshot types ───────────────────────────────────────────────────
@@ -393,6 +397,38 @@ function signalStatus(signal: number | null | undefined): NodeStatus {
   return 'warning';
 }
 
+// ── VLAN subnet matching ─────────────────────────────────────────────────
+
+function ipToNum(ip: string): number {
+  const p = ip.split('.').map(Number);
+  return (((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0);
+}
+
+function ipInSubnet(ip: string, gatewayIp: string, prefix: number): boolean {
+  if (!ip || !gatewayIp || prefix <= 0) return false;
+  const mask = prefix >= 32 ? 0xffffffff : (~0 << (32 - prefix)) >>> 0;
+  return (ipToNum(ip) & mask) === (ipToNum(gatewayIp) & mask);
+}
+
+/** Return the VLAN ID for a client IP, or null if no match. */
+function matchVlan(ip: string, vlans: import('./types').VlanInfo[]): number | null {
+  if (!ip) return null;
+  for (const v of vlans) {
+    if (v.ipv4 && v.prefix != null && ipInSubnet(ip, v.ipv4, v.prefix)) return v.id;
+  }
+  return null;
+}
+
+/** Return the most-common VLAN ID among a list of vlanIds (null = unknown). */
+function primaryVlan(vlanIds: (number | null | undefined)[]): number | undefined {
+  const counts = new Map<number, number>();
+  for (const id of vlanIds) {
+    if (id != null) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  if (!counts.size) return undefined;
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
 // ── Core adapter ─────────────────────────────────────────────────────────
 
 export function adaptSnapshot(snap: Snapshot): TopologyData {
@@ -436,11 +472,23 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     wanIp: gwNode.ip ?? '',
     uptime: gwAttr.uptime != null ? formatUptime(gwAttr.uptime as number) : '',
     status: 'online',
+    firmwareVersion: (gwAttr.firmware as string | undefined) || undefined,
+    events: ((gwAttr.events as RouterEvent[] | undefined) ?? []).slice(0, 30),
+    cpuLoad: gwAttr.cpu_load as number | undefined,
+    memUsage: gwAttr.mem_usage as number | undefined,
     dslStats: gwAttr.dsl_stats as DslStats | undefined,
     pingMs: gwAttr.ping_ms as number | null | undefined,
     dslHistory: (gwAttr.dsl_history as DslHistoryPoint[] | undefined) ?? [],
     ddnsServices: (gwAttr.ddns_status as DdnsService[] | undefined) ?? [],
     wanTraffic: gwAttr.wan_traffic as { downstream_bps?: number; upstream_bps?: number } | undefined,
+    portStats: (gwAttr.port_stats as PortStat[] | undefined) ?? [],
+    vlans: ((gwAttr.vlans as any[] | undefined) ?? []).map((v: any): VlanInfo => ({
+      id: v.id,
+      interface: v.interface,
+      status: v.status ?? 'unknown',
+      ipv4: v.ipv4_addr ?? undefined,
+      prefix: v.prefix_len ?? undefined,
+    })),
   };
 
   // AP nodes = all router nodes that are not the gateway
@@ -465,6 +513,26 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     clientCountMap.set(c.ap_mac, (clientCountMap.get(c.ap_mac) ?? 0) + 1);
   }
 
+  // Build ssids per router: has_interface edges → interface nodes with ssid+band
+  const ssidsByRouter = new Map<string, SsidInfo[]>();
+  const ifaceNodes = snap.nodes.filter((n) => n.type === 'interface');
+  const ifaceById = new Map(ifaceNodes.map((n) => [n.id, n]));
+  for (const edge of snap.edges) {
+    if (edge.relationship !== 'has_interface') continue;
+    const iface = ifaceById.get(edge.to);
+    if (!iface) continue;
+    const ssid = iface.attributes?.ssid as string | undefined;
+    const band = iface.attributes?.band as string | undefined;
+    const channel = iface.attributes?.channel as number | undefined;
+    if (!ssid) continue;
+    const list = ssidsByRouter.get(edge.from) ?? [];
+    const formattedBand = band ? formatBand(band) : '';
+    if (!list.find((s) => s.ssid === ssid && s.band === formattedBand)) {
+      list.push({ ssid, band: formattedBand, channel });
+    }
+    ssidsByRouter.set(edge.from, list);
+  }
+
   const accessPoints: AccessPoint[] = apRouterNodes.map((n) => {
     const uplink = uplinkMap.get(n.id);
     return {
@@ -477,8 +545,17 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       clientCount: clientCountMap.get(n.id) ?? 0,
       backhaulSignal: uplink?.backhaulSignal ?? -60,
       status: 'online' as NodeStatus,
+      firmwareVersion: (n.attributes?.firmware as string | undefined) || undefined,
+      events: ((n.attributes?.events as RouterEvent[] | undefined) ?? []).slice(0, 30),
+      ssids: ssidsByRouter.get(n.id) ?? [],
+      cpuLoad: n.attributes?.cpu_load as number | undefined,
+      memUsage: n.attributes?.mem_usage as number | undefined,
     };
   });
+
+  // Also extract SSIDs for gateway
+  const gatewaySsids = ssidsByRouter.get(gwNode.id) ?? [];
+  gateway.ssids = gatewaySsids.length > 0 ? gatewaySsids : undefined;
 
   // Build client list from client nodes
   const clients: Client[] = clientNodes.map((n) => {
@@ -506,8 +583,17 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       manufacturer: lookupManufacturer(mac),
       connectedSince: connectedSince && connectedSince > 0 ? connectedSince : undefined,
       dhcpExpires: dhcpExpires && dhcpExpires > 0 ? dhcpExpires : undefined,
+      rxBytes: attr?.rx_bytes as number | null | undefined,
+      txBytes: attr?.tx_bytes as number | null | undefined,
+      vlanId: matchVlan((attr?.ip as string) ?? '', gateway.vlans ?? []) ?? undefined,
     };
   });
+
+  // Assign primaryVlanId to APs now that clients are available
+  for (const ap of accessPoints) {
+    const apClients = clients.filter(c => c.apId === ap.id);
+    ap.primaryVlanId = primaryVlan(apClients.map(c => c.vlanId ?? null));
+  }
 
   return {
     gateway,
