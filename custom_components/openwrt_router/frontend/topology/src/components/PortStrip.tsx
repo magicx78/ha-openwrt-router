@@ -39,12 +39,19 @@ function portTypeClass(name: string): string {
   return 'port-strip__port--lan';
 }
 
+function isPhysicalPort(name: string): boolean {
+  // Only WAN and numbered LAN/ETH ports — skip phy*, wg*, br-*, loopback, etc.
+  return /^(wan\d*|lan\d+|eth\d+(\.\d+)?|ge-\d|fe-\d)$/i.test(name);
+}
+
 export function PortStrip({ ports, vlanMode }: Props) {
   if (!ports || ports.length === 0) return null;
+  const physical = ports.filter((p) => isPhysicalPort(p.name));
+  if (physical.length === 0) return null;
 
   return (
     <div className="port-strip">
-      {ports.map((p) => (
+      {physical.map((p) => (
         <PortChip key={p.name} port={p} vlanMode={vlanMode} />
       ))}
     </div>

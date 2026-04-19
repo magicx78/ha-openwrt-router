@@ -700,8 +700,30 @@ class OpenWrtAPI:
             if tx_result:
                 tx_bytes = int(tx_result.strip()) if isinstance(tx_result, str) else None
         except Exception:
-            # Silently fail – stats not available on this router
             pass
+
+        # SSH fallback if ubus file/read is ACL-blocked
+        if rx_bytes is None and self._password:
+            try:
+                ssh_cmd = [
+                    "sshpass", "-p", self._password,
+                    "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                    f"{self._username}@{self._host}",
+                    f"cat /sys/class/net/{iface_name}/statistics/rx_bytes"
+                    f" /sys/class/net/{iface_name}/statistics/tx_bytes",
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *ssh_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+                lines = stdout.decode().strip().splitlines()
+                if len(lines) >= 2:
+                    rx_bytes = int(lines[0].strip())
+                    tx_bytes = int(lines[1].strip())
+            except Exception:
+                pass
 
         return {
             "connected": wan_iface.get("up", False),
@@ -2254,8 +2276,8 @@ class OpenWrtAPI:
                 or "." in name
             ):
                 continue
-            # Only include ethernet devtype entries (physical ports / DSA conduit)
-            if dev.get("devtype") not in ("ethernet", None):
+            # Include ethernet and DSA switch ports; skip wifi, tun, etc.
+            if dev.get("devtype") not in ("ethernet", "dsa", None):
                 continue
 
             raw_speed = dev.get("speed")
