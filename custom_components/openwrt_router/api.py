@@ -26,6 +26,8 @@ from .const import (
     DEFAULT_SESSION_ID,
     DEFAULT_TIMEOUT,
     PROTOCOL_HTTP,
+    SESSION_LIFETIME_SECONDS,
+    SESSION_REFRESH_MARGIN_SECONDS,
     PROTOCOL_HTTPS_INSECURE,
     DHCP_LEASES_PATH,
     GUEST_SSID_KEYWORDS,
@@ -303,6 +305,7 @@ class OpenWrtAPI:
 
         # Session token – refreshed on login / expiry
         self._token: str = DEFAULT_SESSION_ID
+        self._token_expires_at: float = 0.0
 
         # Cached WiFi API method: None=unknown, "wireless", "iwinfo", "none"
         # Set on first get_wifi_status() call and reused to avoid retrying
@@ -396,6 +399,7 @@ class OpenWrtAPI:
         # L-1: successful login resets the failure counter
         self._login_failure_count = 0
         self._token = token
+        self._token_expires_at = time.monotonic() + SESSION_LIFETIME_SECONDS
         _LOGGER.debug("Login successful, session established")
         return True
 
@@ -442,6 +446,17 @@ class OpenWrtAPI:
             # Continue anyway – some routers have public read-only APIs
 
         return await self.get_router_info()
+
+    async def _ensure_fresh_token(self) -> None:
+        """Proactively refresh the session token before it expires.
+
+        OpenWrt rpcd ignores the requested timeout on some firmware versions
+        and silently invalidates tokens after ~300 s. This prevents mid-poll
+        expiry by re-logging in SESSION_REFRESH_MARGIN_SECONDS before deadline.
+        """
+        if time.monotonic() >= self._token_expires_at - SESSION_REFRESH_MARGIN_SECONDS:
+            _LOGGER.debug("Proactive session refresh (token nearing expiry)")
+            await self.login()
 
     # ------------------------------------------------------------------
     # Public data API
@@ -2720,6 +2735,8 @@ class OpenWrtAPI:
             OpenWrtAuthError: Auth failed even after re-login attempt.
             OpenWrtResponseError: Unexpected or malformed response.
         """
+        await self._ensure_fresh_token()
+
         # P-6: if repeated auth failures suggest wrong credentials, stop hammering
         _MAX_AUTH_FAILURES = 3
         if self._auth_failure_count >= _MAX_AUTH_FAILURES:

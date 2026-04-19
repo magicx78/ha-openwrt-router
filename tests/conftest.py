@@ -324,8 +324,10 @@ def mock_api(mock_aiohttp_session):
         session=mock_aiohttp_session,
         protocol="http",
     )
+    import time
     # Pre-authenticate so tests don't need to call login() first
     api._token = MOCK_SESSION_TOKEN
+    api._token_expires_at = time.monotonic() + 3600  # valid for 1h in tests
     return api
 
 

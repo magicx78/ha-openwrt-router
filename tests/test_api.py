@@ -468,6 +468,36 @@ class TestAutoRelogin:
         mock_api.login.assert_not_awaited()
 
 
+class TestEnsureFreshToken:
+    @pytest.mark.asyncio
+    async def test_no_refresh_when_token_valid(self, mock_api):
+        """No re-login when token has plenty of time left."""
+        import time
+        mock_api._token_expires_at = time.monotonic() + 3600
+        mock_api.login = AsyncMock()
+        await mock_api._ensure_fresh_token()
+        mock_api.login.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refresh_when_token_expired(self, mock_api):
+        """Re-login triggered when token is past expiry."""
+        import time
+        mock_api._token_expires_at = time.monotonic() - 1  # already expired
+        mock_api.login = AsyncMock()
+        await mock_api._ensure_fresh_token()
+        mock_api.login.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_refresh_within_margin(self, mock_api):
+        """Re-login triggered when within SESSION_REFRESH_MARGIN_SECONDS."""
+        import time
+        from custom_components.openwrt_router.const import SESSION_REFRESH_MARGIN_SECONDS
+        mock_api._token_expires_at = time.monotonic() + SESSION_REFRESH_MARGIN_SECONDS - 10
+        mock_api.login = AsyncMock()
+        await mock_api._ensure_fresh_token()
+        mock_api.login.assert_awaited_once()
+
+
 # =====================================================================
 # High-Level API Methods
 # =====================================================================

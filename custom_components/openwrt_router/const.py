@@ -22,6 +22,12 @@ UBUS_PATH = "/ubus"
 DEFAULT_TIMEOUT = 10  # seconds
 DEFAULT_SESSION_ID = "00000000000000000000000000000000"
 
+# Session management
+# OpenWrt default rpcd TTL is 300s regardless of the requested timeout.
+# We track expiry and refresh 60s before deadline to avoid mid-poll expiry.
+SESSION_LIFETIME_SECONDS = 300
+SESSION_REFRESH_MARGIN_SECONDS = 60
+
 # Update interval
 SCAN_INTERVAL_SECONDS = 30
 
