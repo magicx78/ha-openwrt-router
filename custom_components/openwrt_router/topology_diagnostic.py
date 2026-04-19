@@ -254,6 +254,7 @@ def build_topology_snapshot(
             "mem_usage": _calc_mem_usage(data.memory),
             "port_stats": _slim_port_stats(data.port_stats),
             "vlans": _extract_vlans(data.network_interfaces),
+            "events": data.events if data.events else [],
         },
     })
 

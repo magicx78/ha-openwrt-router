@@ -6,7 +6,7 @@
  */
 
 import React, { useState } from 'react';
-import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat, VlanInfo } from '../types';
+import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat, VlanInfo, RouterEvent } from '../types';
 import { IconX } from './Icons';
 import { StatusDot, statusLabel } from './StatusDot';
 import { SignalBar } from './SignalBar';
@@ -173,6 +173,13 @@ function GatewayDetail({ data, actions }: { data: Gateway; actions?: DetailPanel
         </div>
       )}
 
+      {(data.events ?? []).length > 0 && (
+        <div className="detail-section">
+          <div className="detail-section__heading">Ereignisse</div>
+          <EventTimeline events={data.events!} />
+        </div>
+      )}
+
       {actions && (
         <div className="inspector-actions">
           <ActionBtn icon="◎" label="Fokus"   onClick={() => actions.onFocusNode(data.id)} />
@@ -258,6 +265,36 @@ function DdnsRow({ svc }: { svc: DdnsService }) {
   );
 }
 
+// ── Event timeline ────────────────────────────────────────────────────────
+
+function EventTimeline({ events }: { events: RouterEvent[] }) {
+  const typeIcon: Record<string, string> = { info: 'ℹ', warn: '⚠', error: '✕' };
+  const typeClass: Record<string, string> = { info: 'event-info', warn: 'event-warn', error: 'event-error' };
+
+  function relTime(ts: number): string {
+    const diff = Math.floor(Date.now() / 1000) - ts;
+    if (diff < 60)   return `${diff}s`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+    return `${Math.floor(diff / 86400)}d`;
+  }
+
+  return (
+    <div className="event-timeline">
+      {events.slice(0, 10).map((ev, i) => (
+        <div key={i} className={`event-timeline__item ${typeClass[ev.type] ?? ''}`}>
+          <span className="event-timeline__icon">{typeIcon[ev.type] ?? '·'}</span>
+          <div className="event-timeline__body">
+            <span className="event-timeline__msg">{ev.message}</span>
+            {ev.detail && <span className="event-timeline__detail">{ev.detail}</span>}
+          </div>
+          <span className="event-timeline__age">{relTime(ev.ts)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── AP detail ─────────────────────────────────────────────────────────────
 
 function APDetail({ data, clients, actions }: { data: AccessPoint; clients: Client[]; actions?: DetailPanelActions }) {
@@ -304,6 +341,13 @@ function APDetail({ data, clients, actions }: { data: AccessPoint; clients: Clie
           ))}
         </div>
       </div>
+
+      {(data.events ?? []).length > 0 && (
+        <div className="detail-section">
+          <div className="detail-section__heading">Ereignisse</div>
+          <EventTimeline events={data.events!} />
+        </div>
+      )}
 
       {actions && (
         <div className="inspector-actions">

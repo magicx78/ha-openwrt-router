@@ -1,5 +1,12 @@
 // ── Domain types ──────────────────────────────────────────────────────────
 
+export interface RouterEvent {
+  ts: number;          // unix timestamp
+  type: 'info' | 'warn' | 'error';
+  message: string;
+  detail?: string;
+}
+
 export type NodeStatus = 'online' | 'offline' | 'warning';
 export type UplinkType = 'wired' | 'mesh';
 export type DeviceCategory = 'smartphone' | 'laptop' | 'iot' | 'guest' | 'other';
@@ -45,6 +52,7 @@ export interface Gateway {
   cpuLoad?: number;     // 0-100 percent
   memUsage?: number;    // 0-100 percent
   cpuHistory?: number[]; // ring buffer of recent cpu_load values (frontend-accumulated)
+  events?: RouterEvent[]; // recent status-change events (newest first)
   ssids?: SsidInfo[];   // WiFi networks at gateway
   // Fritz!Box / DSL data (optional — only present when Fritz!Box is configured)
   dslStats?: DslStats;
@@ -88,6 +96,7 @@ export interface AccessPoint {
   backhaulSignal: number; // dBm
   status: NodeStatus;
   firmwareVersion?: string; // OpenWrt release version e.g. "23.05.2"
+  events?: RouterEvent[]; // recent status-change events (newest first)
   ssids?: SsidInfo[];      // WiFi networks broadcast by this AP
   cpuLoad?: number;        // 0-100 percent
   memUsage?: number;       // 0-100 percent

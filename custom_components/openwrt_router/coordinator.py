@@ -118,6 +118,8 @@ class OpenWrtCoordinatorData:
         self.dsl_history: list[dict[str, Any]] = []   # filled by coordinator from _dsl_history
         # DuckDNS / DDNS status (gateway only)
         self.ddns_status: list[dict[str, Any]] = []
+        # Per-router event history (status changes, spikes) — max 30 entries
+        self.events: list[dict[str, Any]] = []
 
     def as_dict(self) -> dict[str, Any]:
         """Return data as a plain dict (used for diagnostics)."""
@@ -194,6 +196,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         # DSL history: deque of {ts, dsl_down, dsl_up, ping_ms} — 24 h at 60s resolution
         self._dsl_history: deque[dict[str, Any]] = deque(maxlen=DSL_HISTORY_MAX_POINTS)
         self._history_cycle_count: int = 0
+        # Event timeline tracking
+        self._event_history: deque[dict[str, Any]] = deque(maxlen=30)
+        self._prev_wan_connected: bool | None = None
+        self._cpu_warn_active: bool = False
+        self._mem_warn_active: bool = False
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator interface
@@ -478,7 +485,69 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             raise UpdateFailed(f"Unexpected error: {err}") from err
 
         self._consecutive_auth_failures = 0
+        self._record_events(data)
         return data
+
+    # ------------------------------------------------------------------
+    # Event timeline
+    # ------------------------------------------------------------------
+
+    def _record_events(self, data: OpenWrtCoordinatorData) -> None:
+        """Detect state changes and append events to the ring buffer."""
+        ts = int(time.time())
+
+        # WAN connect / disconnect
+        if self._prev_wan_connected is not None and data.wan_connected != self._prev_wan_connected:
+            if data.wan_connected:
+                self._event_history.appendleft({
+                    "ts": ts, "type": "info",
+                    "message": "WAN verbunden",
+                    "detail": data.wan_status.get("ipv4_address") or data.wan_status.get("address") or "",
+                })
+            else:
+                self._event_history.appendleft({
+                    "ts": ts, "type": "error",
+                    "message": "WAN getrennt",
+                })
+        self._prev_wan_connected = data.wan_connected
+
+        # CPU spike (>= 80%) / recovery (< 65%)
+        cpu = data.cpu_load
+        if not self._cpu_warn_active and cpu >= 80:
+            self._cpu_warn_active = True
+            self._event_history.appendleft({
+                "ts": ts, "type": "warn",
+                "message": "CPU-Last erhöht",
+                "detail": f"{cpu:.0f}%",
+            })
+        elif self._cpu_warn_active and cpu < 65:
+            self._cpu_warn_active = False
+            self._event_history.appendleft({
+                "ts": ts, "type": "info",
+                "message": "CPU-Last normalisiert",
+                "detail": f"{cpu:.0f}%",
+            })
+
+        # Memory spike (>= 90%) / recovery (< 80%)
+        mem_total = data.memory.get("total", 0) or 0
+        mem_free = data.memory.get("free", 0) or 0
+        mem_pct = round(100 * (1 - mem_free / mem_total)) if mem_total > 0 else 0
+        if not self._mem_warn_active and mem_pct >= 90:
+            self._mem_warn_active = True
+            self._event_history.appendleft({
+                "ts": ts, "type": "warn",
+                "message": "RAM-Auslastung erhöht",
+                "detail": f"{mem_pct}%",
+            })
+        elif self._mem_warn_active and mem_pct < 80:
+            self._mem_warn_active = False
+            self._event_history.appendleft({
+                "ts": ts, "type": "info",
+                "message": "RAM-Auslastung normalisiert",
+                "detail": f"{mem_pct}%",
+            })
+
+        data.events = list(self._event_history)
 
     # ------------------------------------------------------------------
     # Feature detection

@@ -20,6 +20,7 @@ import type {
   SsidInfo,
   PortStat,
   VlanInfo,
+  RouterEvent,
 } from './types';
 
 // ── Raw snapshot types ───────────────────────────────────────────────────
@@ -472,6 +473,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     uptime: gwAttr.uptime != null ? formatUptime(gwAttr.uptime as number) : '',
     status: 'online',
     firmwareVersion: (gwAttr.firmware as string | undefined) || undefined,
+    events: ((gwAttr.events as RouterEvent[] | undefined) ?? []).slice(0, 30),
     cpuLoad: gwAttr.cpu_load as number | undefined,
     memUsage: gwAttr.mem_usage as number | undefined,
     dslStats: gwAttr.dsl_stats as DslStats | undefined,
@@ -544,6 +546,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       backhaulSignal: uplink?.backhaulSignal ?? -60,
       status: 'online' as NodeStatus,
       firmwareVersion: (n.attributes?.firmware as string | undefined) || undefined,
+      events: ((n.attributes?.events as RouterEvent[] | undefined) ?? []).slice(0, 30),
       ssids: ssidsByRouter.get(n.id) ?? [],
       cpuLoad: n.attributes?.cpu_load as number | undefined,
       memUsage: n.attributes?.mem_usage as number | undefined,
