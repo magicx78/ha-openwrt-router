@@ -415,6 +415,18 @@
   gap: 8px;
   flex: 1 1 180px;
   max-width: 240px;
+  /* layout-transition: collapse smoothly when AP is hidden by filter change */
+  transition: max-width 220ms ease-out, opacity 180ms ease-out, padding 220ms ease-out;
+}
+
+/* Exit animation: collapse the column width to 0 so surrounding nodes slide in */
+.topo-col-ap.ap-exiting {
+  max-width: 0 !important;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  padding: 0;
+  gap: 0;
 }
 
 /* ── Connection line animations ──────────────────────────────────────── */

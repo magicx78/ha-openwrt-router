@@ -126,6 +126,10 @@ export function TopologyView({ data }: Props) {
   // ── Filter / search / hover / selection ─────────────────────────────────
   const [filter,      setFilter]      = useState<FilterType>('all');
   const [searchQuery, setSearchQuery] = useState('');
+
+  // ── AP exit animation tracking ────────────────────────────────────────────
+  const [exitingApIds, setExitingApIds] = useState<Set<string>>(new Set());
+  const prevHiddenRef = useRef<Set<string>>(new Set());
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<SelectedEntity>(null);
 
@@ -288,6 +292,35 @@ export function TopologyView({ data }: Props) {
   );
 
   const gwClients = data.clients.filter(c => c.apId === data.gateway.id);
+
+  // ── Detect newly-hidden APs → play exit animation before removing ─────────
+  useEffect(() => {
+    const currentlyHidden = new Set(
+      data.accessPoints
+        .filter(ap => {
+          const apC = clientsForAP(ap.id);
+          return filter === 'clients' ||
+            (filter === 'warnings' && ap.status === 'online' && apC.length === 0);
+        })
+        .map(ap => ap.id),
+    );
+    const newlyHidden = new Set<string>();
+    for (const id of currentlyHidden) {
+      if (!prevHiddenRef.current.has(id)) newlyHidden.add(id);
+    }
+    prevHiddenRef.current = currentlyHidden;
+    if (newlyHidden.size === 0) return;
+
+    setExitingApIds(prev => new Set([...prev, ...newlyHidden]));
+    const t = setTimeout(() => {
+      setExitingApIds(prev => {
+        const next = new Set(prev);
+        newlyHidden.forEach(id => next.delete(id));
+        return next;
+      });
+    }, 240);
+    return () => clearTimeout(t);
+  }, [filter, searchQuery, data.accessPoints, clientsForAP]);
 
   const selectGateway = () => setSelectedEntity({ type: 'gateway', data: data.gateway });
   const selectAP = (ap: AccessPoint) =>
@@ -487,10 +520,11 @@ export function TopologyView({ data }: Props) {
                   const isHidden =
                     filter === 'clients' ||
                     (filter === 'warnings' && ap.status === 'online' && apClients.length === 0);
-                  if (isHidden) return null;
+                  const isExiting = exitingApIds.has(ap.id);
+                  if (isHidden && !isExiting) return null;
 
                   return (
-                    <div key={ap.id} className="topo-col-ap">
+                    <div key={ap.id} className={`topo-col-ap${isExiting ? ' ap-exiting' : ''}`}>
                       <div ref={setNodeRef(ap.id)} style={{ width: 'fit-content' }}>
                         <APNode
                           ap={ap}
