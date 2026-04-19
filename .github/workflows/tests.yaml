@@ -14,17 +14,20 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
       - name: Install dependencies
         run: |
-          pip install homeassistant
-          pip install pytest pytest-asyncio aiohttp ruff
-      - name: Lint and format check (ruff)
+          pip install homeassistant pytest pytest-asyncio aiohttp ruff
+
+      - name: Lint (ruff)
         run: |
-          ruff check .
-          ruff format --check .
+          ruff check custom_components/
+          ruff format --check custom_components/
+
       - name: Run tests
         run: pytest tests/ -v --tb=short

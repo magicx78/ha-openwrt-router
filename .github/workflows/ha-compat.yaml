@@ -1,0 +1,130 @@
+name: HA Compatibility Check
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # jeden Montag 06:00 UTC
+  workflow_dispatch:        # manuell auslösbar
+
+jobs:
+  compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Neueste HA-Version ermitteln
+        id: ha_version
+        run: |
+          VERSION=$(curl -s https://api.github.com/repos/home-assistant/core/releases/latest \
+            | jq -r .tag_name)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "HA Latest: $VERSION"
+
+      - name: Aktuelle Integration-Version lesen
+        id: int_version
+        run: |
+          VERSION=$(jq -r .version custom_components/openwrt_router/manifest.json)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Abhängigkeiten installieren
+        run: |
+          pip install homeassistant pytest pytest-asyncio aiohttp ruff
+
+      - name: Lint-Check
+        run: ruff check custom_components/
+
+      - name: Tests ausführen
+        id: tests
+        run: pytest tests/ -v --tb=short
+        continue-on-error: true
+
+      - name: HA Breaking Changes prüfen
+        id: breaking
+        run: |
+          # Prüfe ob relevante HA-APIs noch existieren
+          python3 - <<'PYEOF'
+          import importlib, sys
+          checks = [
+              ("homeassistant.helpers.update_coordinator", "DataUpdateCoordinator"),
+              ("homeassistant.config_entries",             "ConfigEntry"),
+              ("homeassistant.helpers.aiohttp_client",     "async_get_clientsession"),
+              ("homeassistant.helpers.entity_platform",    "AddEntitiesCallback"),
+              ("homeassistant.exceptions",                 "ConfigEntryAuthFailed"),
+          ]
+          failed = []
+          for module, attr in checks:
+              try:
+                  mod = importlib.import_module(module)
+                  if not hasattr(mod, attr):
+                      failed.append(f"{module}.{attr} fehlt")
+              except ImportError as e:
+                  failed.append(f"{module}: ImportError — {e}")
+          if failed:
+              print("BREAKING CHANGES erkannt:")
+              for f in failed:
+                  print(f"  ✗ {f}")
+              sys.exit(1)
+          else:
+              print("Alle geprüften HA-APIs vorhanden ✓")
+          PYEOF
+        continue-on-error: true
+
+      - name: Issue erstellen wenn Probleme gefunden
+        if: steps.tests.outcome == 'failure' || steps.breaking.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const haVersion = '${{ steps.ha_version.outputs.version }}';
+            const intVersion = '${{ steps.int_version.outputs.version }}';
+            const testsOk = '${{ steps.tests.outcome }}' === 'success';
+            const breakingOk = '${{ steps.breaking.outcome }}' === 'success';
+
+            const title = `Kompatibilitätsproblem mit HA ${haVersion}`;
+
+            // Prüfe ob schon ein offenes Issue existiert
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'ha-compat',
+            });
+            const exists = issues.data.some(i => i.title.includes(haVersion));
+            if (exists) {
+              console.log('Issue existiert bereits — übersprungen');
+              return;
+            }
+
+            const body = [
+              `## Automatischer HA-Kompatibilitätscheck`,
+              ``,
+              `| | |`,
+              `|---|---|`,
+              `| **HA Version** | ${haVersion} |`,
+              `| **Integration** | v${intVersion} |`,
+              `| **Tests** | ${testsOk ? '✅ OK' : '❌ Fehlgeschlagen'} |`,
+              `| **API-Check** | ${breakingOk ? '✅ OK' : '❌ Breaking Changes'} |`,
+              ``,
+              `### Nächste Schritte`,
+              `1. [HA ${haVersion} Release Notes](https://github.com/home-assistant/core/releases/tag/${haVersion}) prüfen`,
+              `2. Breaking Changes in \`custom_components/openwrt_router/\` beheben`,
+              `3. Tests lokal ausführen: \`pytest tests/ -v\``,
+              `4. Dieses Issue schließen nach dem Fix`,
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['ha-compat', 'bug'],
+            });
+            console.log(`Issue erstellt: ${title}`);
+
+      - name: Erfolgsmeldung
+        if: steps.tests.outcome == 'success' && steps.breaking.outcome == 'success'
+        run: |
+          echo "✅ Kompatibel mit HA ${{ steps.ha_version.outputs.version }}"
