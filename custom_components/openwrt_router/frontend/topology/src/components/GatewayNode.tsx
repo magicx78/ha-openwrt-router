@@ -10,6 +10,7 @@ interface Props {
   dimmed: boolean;
   onSelect: () => void;
   onHover: (id: string | null) => void;
+  onContextMenu?: (x: number, y: number) => void;
   clientCount?: number;
   vlanMode?: boolean;
 }
@@ -55,7 +56,7 @@ function bandClass(band: string): string {
   return 'ssid-badge--24g';
 }
 
-export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, clientCount, vlanMode }: Props) {
+export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onContextMenu, clientCount, vlanMode }: Props) {
   const statusClass = gateway.status === 'online'
     ? 'status-online'
     : gateway.status === 'warning'
@@ -83,6 +84,7 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, clie
       onClick={onSelect}
       onMouseEnter={() => onHover(gateway.id)}
       onMouseLeave={() => onHover(null)}
+      onContextMenu={e => { e.preventDefault(); onContextMenu?.(e.clientX, e.clientY); }}
     >
       {/* ── Header ── */}
       <div className="gateway-card__header">

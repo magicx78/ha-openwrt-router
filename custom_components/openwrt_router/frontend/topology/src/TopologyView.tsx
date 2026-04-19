@@ -30,6 +30,7 @@ import { AlertsView } from './components/AlertsView';
 import { TrafficView } from './components/TrafficView';
 import { SettingsView } from './components/SettingsView';
 import { Minimap, MinimapNode } from './components/Minimap';
+import { ContextMenu, ContextMenuEntry } from './components/ContextMenu';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -97,6 +98,14 @@ export function TopologyView({ data }: Props) {
   const [minimapNodes, setMinimapNodes] = useState<MinimapNode[]>([]);
   const [containerSize, setContainerSize] = useState({ w: 800, h: 600 });
 
+  // ── Context menu state ────────────────────────────────────────────────────
+  const [contextMenu, setContextMenu] = useState<{
+    nodeId: string;
+    kind: 'gateway' | 'ap';
+    x: number;
+    y: number;
+  } | null>(null);
+
   // ── CPU history ring buffer (accumulates cpuLoad across polls) ──────────
   const CPU_HISTORY_MAX = 20;
   const cpuHistoryRef = useRef<number[]>([]);
@@ -127,6 +136,21 @@ export function TopologyView({ data }: Props) {
       x: sc.clientWidth  / 2 - logicalX * zoomRef.current,
       y: sc.clientHeight / 2 - logicalY * zoomRef.current,
     });
+  }, []);
+
+  // ── Pan canvas to center a node in the viewport ───────────────────────────
+  const panToNode = useCallback((nodeId: string) => {
+    const el = nodeRefs.current.get(nodeId);
+    const sc = scrollRef.current;
+    if (!el || !sc) return;
+    const er = el.getBoundingClientRect();
+    const sr = sc.getBoundingClientRect();
+    const nodeCX = er.left + er.width  / 2 - sr.left;
+    const nodeCY = er.top  + er.height / 2 - sr.top;
+    setPan(p => ({
+      x: p.x + sr.width  / 2 - nodeCX,
+      y: p.y + sr.height / 2 - nodeCY,
+    }));
   }, []);
 
   // ── Wheel zoom (must be non-passive to call preventDefault) ─────────────
@@ -285,6 +309,30 @@ export function TopologyView({ data }: Props) {
     nodeRefs.current.set(id, el);
   };
 
+  // ── Context menu item builders ────────────────────────────────────────────
+  const buildGatewayMenuItems = useCallback((): ContextMenuEntry[] => [
+    { icon: '🔍', label: 'Details', onClick: () => selectGateway() },
+    { icon: '◎', label: 'Fokus', onClick: () => { selectGateway(); panToNode(data.gateway.id); } },
+    { separator: true },
+    { icon: '⚠', label: 'Alarme', onClick: () => setActiveTab('alerts') },
+    { icon: '▦', label: 'VLANs ein/aus', onClick: () => setVlanMode(m => !m) },
+  ], [data.gateway.id, panToNode]);
+
+  const buildAPMenuItems = useCallback((ap: AccessPoint): ContextMenuEntry[] => [
+    { icon: '🔍', label: 'Details', onClick: () => selectAP(ap) },
+    { icon: '◎', label: 'Fokus', onClick: () => { selectAP(ap); panToNode(ap.id); } },
+    { separator: true },
+    { icon: '👥', label: 'Clients', onClick: () => setActiveTab('clients') },
+    { icon: '⚠', label: 'Alarme', onClick: () => setActiveTab('alerts') },
+  ], [panToNode]);
+
+  const contextMenuItems = useCallback((): ContextMenuEntry[] => {
+    if (!contextMenu) return [];
+    if (contextMenu.kind === 'gateway') return buildGatewayMenuItems();
+    const ap = data.accessPoints.find(a => a.id === contextMenu.nodeId);
+    return ap ? buildAPMenuItems(ap) : [];
+  }, [contextMenu, buildGatewayMenuItems, buildAPMenuItems, data.accessPoints]);
+
   // ── Render ───────────────────────────────────────────────────────────────
   // ── Focus mode class — applied when any node is hovered ─────────────────
   const hasActiveFocus = hoveredNodeId !== null;
@@ -405,6 +453,7 @@ export function TopologyView({ data }: Props) {
                       dimmed={hoverCtx.dimmedNodes.has(data.gateway.id)}
                       onSelect={selectGateway}
                       onHover={setHoveredNodeId}
+                      onContextMenu={(x, y) => setContextMenu({ nodeId: data.gateway.id, kind: 'gateway', x, y })}
                       clientCount={gwClients.length > 0 ? gwClients.length : undefined}
                       vlanMode={vlanMode}
                     />
@@ -439,6 +488,7 @@ export function TopologyView({ data }: Props) {
                           dimmed={hoverCtx.dimmedNodes.has(ap.id)}
                           onSelect={() => selectAP(ap)}
                           onHover={setHoveredNodeId}
+                          onContextMenu={(x, y) => setContextMenu({ nodeId: ap.id, kind: 'ap', x, y })}
                           heatmap={heatmapMode}
                           vlanMode={vlanMode}
                         />
@@ -541,6 +591,16 @@ export function TopologyView({ data }: Props) {
           <NodeTooltip nodeId={hoveredNodeId} data={data} anchorRect={rect} />
         );
       })()}
+
+      {/* Right-click context menu */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenuItems()}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 }

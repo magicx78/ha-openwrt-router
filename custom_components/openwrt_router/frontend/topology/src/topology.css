@@ -2014,6 +2014,63 @@
   background: var(--vlan-color, var(--text-muted));
 }
 
+/* ── Context menu ─────────────────────────────────────────────────────────── */
+.ctx-menu {
+  min-width: 168px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  animation: ctx-appear 100ms ease;
+}
+
+@keyframes ctx-appear {
+  from { opacity: 0; transform: scale(0.96) translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.ctx-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 14px;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background 80ms;
+}
+
+.ctx-menu__item:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--accent);
+}
+
+.ctx-menu__item:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.ctx-menu__icon {
+  font-size: 12px;
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.ctx-menu__sep {
+  height: 1px;
+  margin: 3px 8px;
+  background: var(--border);
+}
+
 /* ── Minimap ──────────────────────────────────────────────────────────────── */
 .minimap {
   position: absolute;

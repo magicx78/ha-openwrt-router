@@ -11,6 +11,7 @@ interface Props {
   dimmed: boolean;
   onSelect: () => void;
   onHover: (id: string | null) => void;
+  onContextMenu?: (x: number, y: number) => void;
   heatmap?: boolean;
   vlanMode?: boolean;
 }
@@ -35,7 +36,7 @@ function bandClass(band: string): string {
   return 'ssid-badge--24g';
 }
 
-export function APNode({ ap, clients, selected, dimmed, onSelect, onHover, heatmap, vlanMode }: Props) {
+export function APNode({ ap, clients, selected, dimmed, onSelect, onHover, onContextMenu, heatmap, vlanMode }: Props) {
   const statusClass = ap.status === 'online'
     ? 'status-online'
     : ap.status === 'warning'
@@ -71,6 +72,7 @@ export function APNode({ ap, clients, selected, dimmed, onSelect, onHover, heatm
       onClick={onSelect}
       onMouseEnter={() => onHover(ap.id)}
       onMouseLeave={() => onHover(null)}
+      onContextMenu={e => { e.preventDefault(); onContextMenu?.(e.clientX, e.clientY); }}
     >
       <div className="ap-card__header">
         <div className={`ap-card__icon ${iconCls}`}>
