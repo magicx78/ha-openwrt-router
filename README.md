@@ -1,7 +1,7 @@
 # OpenWrt Router – Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.11.1-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.11.1)
+[![Version](https://img.shields.io/badge/version-1.12.0-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.12.0)
 [![Tests](https://img.shields.io/badge/tests-396%20passing-brightgreen.svg)](https://github.com/magicx78/ha-openwrt-router/actions)
 
 A production-ready Home Assistant custom integration for [OpenWrt](https://openwrt.org/) routers, communicating via the built-in **ubus / rpcd JSON-RPC API**. Supports multi-AP mesh networks with a live topology panel.
@@ -28,7 +28,7 @@ A production-ready Home Assistant custom integration for [OpenWrt](https://openw
 
 A built-in network map panel is automatically registered when the integration is set up. It shows your entire mesh network — gateway, APs, wired uplinks, WiFi backhaul, and all connected clients — in a live, interactive view.
 
-**5 sidebar views:**
+### Sidebar views
 
 | Tab | Description |
 |-----|-------------|
@@ -38,11 +38,49 @@ A built-in network map panel is automatically registered when the integration is
 | **Alarms** | Only offline or warning devices and clients, grouped |
 | **Settings** | HA links, polling interval, GitHub link, about |
 
-**Edge hover tooltip**: hover over any connection line to see link type, signal strength, WAN traffic, or IP.
+### Topology interactions
 
-**Traffic overlay**: toggle real-time animated flow on all edges.
+| Action | Result |
+|--------|--------|
+| **Click** node | Select — dim others, open Inspector panel on the right |
+| **Double-click** node | Zoom to 2× centered on node; double-click again to reset |
+| **Right-click** node | Context menu: Focus, Zoom, Clients, VLAN-Overlay, Alerts |
+| **Hover** node | Quick-info tooltip — IP, uptime, CPU/RAM, firmware, SSIDs, VLANs |
+| **Hover** edge | Link type, signal strength, WAN traffic |
+| **Click** AP client count | Inline client list with signal bars and band |
+| **Minimap** (bottom-right) | Click to pan canvas; shows all nodes as coloured dots |
 
-**Focus mode**: click a node to highlight its connections and dim everything else.
+### Topology modes (toolbar)
+
+| Toggle | Description |
+|--------|-------------|
+| ♥ Health | Colour nodes by CPU / RAM / signal — green → amber → red |
+| ≋ Heatmap | Signal-strength glow on each AP |
+| 👻 Ghost | Show recently-offline devices greyed out |
+| VLAN | Highlight edges and nodes by VLAN subnet membership |
+| Traffic | Animated flow arrows on links |
+| **Group** selector | Organise APs into visual groups: by type, VLAN, or online status |
+
+### Inspector panel (right sidebar)
+
+Opens when a node is clicked. Shows:
+- **Gateway**: model, firmware, LAN/WAN IP, uptime, ping, CPU/RAM bars, WAN traffic bars, DSL stats + 24 h chart, SSIDs, ports, VLANs, DDNS status, event timeline
+- **Access Point**: model, firmware, IP, uplink type + backhaul signal, CPU/RAM bars, SSIDs, client list, event timeline
+- **Client**: hostname, IP, MAC, vendor, band, signal, connected since, DHCP expiry, session traffic, HA device-tracker link
+
+### Event timeline
+
+The Inspector panel shows a per-device event timeline — status changes recorded in memory since the last HA restart:
+
+- WAN connected / disconnected
+- CPU spike ≥ 80% / recovery
+- RAM spike ≥ 90% / recovery
+
+### Animations
+
+- Nodes animate in/out when filters change (layout transition)
+- Status-change flash on online ↔ offline ↔ warning transitions
+- Programmatic zoom uses smooth cubic-bezier transition
 
 ---
 
@@ -223,6 +261,7 @@ Topology Panel (sidebar)
 
 | Version | Date | Key Features |
 |---------|------|---|
+| **1.12.0** | 2026-04-19 | Full topology UI/UX spec: minimap, context menus, health mode, event timeline, group mode, inspector mini-charts, firmware version, zoom-to-node, status animations |
 | **1.11.1** | 2026-04-16 | 24h rpcd session timeout; DDNS skip for devices without DDNS; ruff CI fix |
 | **1.11.0** | 2026-04-15 | Client Detail Panel (IP, band, connected since, lease expiry, HA link) |
 | **1.10.1** | 2026-04-14 | Topology panel 5 views; edge tooltip; Phase 2 UI; Fritz!Box TR-064 fix |
@@ -244,6 +283,8 @@ Topology Panel (sidebar)
 - [ ] HACS Default Store submission
 - [ ] Parental control support
 - [ ] Shift+click multi-device compare in topology
+- [ ] Persistent event history (survive HA restarts)
+- [ ] Per-client traffic history chart
 
 ---
 

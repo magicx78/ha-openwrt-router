@@ -2,6 +2,38 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.12.0] - 2026-04-19
+
+### Added
+
+- **Minimap** — 160×100 canvas overview (bottom-right corner of topology). Shows all nodes as coloured status dots and the current viewport as a dashed blue rectangle. Click to pan the canvas. Only visible in Topology tab.
+- **Right-click context menu** on Gateway and AP nodes — items: Focus, Zoom to node, Clients, VLAN-Overlay, Alerts tab.
+- **AP client expansion** — click the client-count button on any AP card to reveal an inline list of connected clients with signal bars, band, and IP.
+- **Health mode** (♥ toggle) — colours every node by system health: `ok` (green) → `caution` (amber) → `warning` (orange) → `critical` (red). Scoring based on CPU load, RAM usage, and backhaul signal.
+- **Status-change flash animation** — when a node transitions between online/warning/offline states a 650 ms colour-flash plays on the card. The status dot cross-fades via `transition: background-color 300ms`.
+- **Layout transition** — AP columns animate out (`max-width: 0, opacity: 0`) when hidden by a filter change, and animate back in when revealed.
+- **Gruppen-Modus** (group selector in toolbar) — organise APs into visual groups: by uplink type, by primary VLAN, or by online status.
+- **Double-click to zoom** — double-click any node to zoom to 2× centered on that node. Double-click again (or when zoom ≥ 1.75) to reset to fit-view. Transition uses `cubic-bezier(0.4, 0, 0.2, 1)`.
+- **Firmware version** — shown in hover tooltip and Inspector "Allgemein" section for Gateway and APs. Backend already computed `release.version`; now surfaced to the frontend.
+- **Mini traffic & resource bars in Inspector** — compact horizontal bars for WAN downstream/upstream (Mbps), CPU%, RAM%, and client session RX/TX bytes.
+- **Context actions in Inspector** — action bar at the bottom of the Inspector panel: Focus, Clients, Alerts (Gateway adds VLANs button).
+- **Event timeline per device** — chronological list of status changes in the Inspector panel. Backend tracks WAN connect/disconnect, CPU ≥ 80% spike, RAM ≥ 90% spike in a ring-buffer (`deque(maxlen=30)`); events survive between polls but reset on HA restart.
+
+### Changed
+
+- `TopologyView`: AP render replaced with `groupAPs()` IIFE supporting flat and grouped layouts.
+- `StatusBar`: added Health toggle, VLAN toggle, Group selector.
+- `DetailPanel`: added `EventTimeline`, `ResourceBars`, `WanTrafficBars`, `BytesBars`, `MiniBar`, `ActionBtn` components; `DetailPanelActions` interface exported.
+
+### Technical
+
+- New files: `Minimap.tsx`, `ContextMenu.tsx`, `APClientList.tsx`, `useStatusFlash.ts`
+- `coordinator.py`: `events` field on `OpenWrtCoordinatorData`, `_record_events()` method, `_event_history` deque, WAN/CPU/RAM state tracking
+- `topology_diagnostic.py`: `events` included in router node attributes
+- `types.ts`: `RouterEvent`, `firmwareVersion?` on `Gateway`/`AccessPoint`, `events?` on both
+
+---
+
 ## [1.11.2] - 2026-04-17
 
 ### Added
