@@ -1,12 +1,70 @@
 # PROGRESS — OpenWrt HA Integration
 
-Entwicklungsprotokoll · Letzte Session: 2026-04-19 · Aktuell: **v1.12.0**
+Entwicklungsprotokoll · Letzte Session: 2026-04-19 · Aktuell: **v1.13.0**
 
 ---
 
-## Status: ✅ v1.12.0 — Topology UI/UX Spec vollständig umgesetzt
+## Status: ✅ v1.13.0 — VLAN-Badge Stale-Cache (Offline-Router)
 
-Alle 12 Features der UI/UX-Spec implementiert. Panel ist produktionsreif.
+---
+
+## Was wurde gebaut (2026-04-19) — v1.13.0
+
+### VLAN-Badges robust bei Offline-Router
+
+**Problem:** Bei nicht erreichbarem Router war `network_interfaces = []` → `_extract_vlans([])` → leere VLAN-Badge-Liste → Badges verschwanden still.
+
+**Lösung: Stale-Cache im Coordinator**
+
+| Datei | Änderung |
+|-------|----------|
+| `coordinator.py` | `_last_known_network_interfaces` + `_last_known_port_vlan_map` Cache-Felder; `vlans_stale: bool` Flag in `OpenWrtCoordinatorData`; bei Fetch-Fehler → Cache verwenden statt `[]`/`{}` |
+| `topology_diagnostic.py` | `vlans_stale` in Router-Node-Attributes schreiben |
+| `types.ts` | `vlansStale?: boolean` im `Gateway`-Typ |
+| `api.ts` | `vlansStale` aus `gwAttr.vlans_stale` übernehmen |
+| `GatewayNode.tsx` | Stale-Badges: gestrichelt + 55% Opacity + ⚠-Icon mit Tooltip |
+| `topology.css` | `.vlan-badge--stale` + `.vlan-stale-hint` |
+| `frontend/dist/topology-bundle.js` | Rebuild (304 kB) |
+
+**Verhalten:**
+- Router online → Badges normal (frische Daten)
+- Router offline / Fetch-Fehler → Badges gedimmt + gestrichelt + ⚠ (gecachte Daten)
+- Router wieder online → Badges kehren zur Normaldarstellung zurück
+
+---
+
+## Was wurde gebaut (2026-04-19) — v1.12.1
+
+### Port VLAN Map + Bridge FDB + CPU-History
+
+**`api.py`:**
+- `get_port_vlan_map()` — UCI-basiertes Parsing von DSA bridge-vlan (OpenWrt 21+) und legacy swconfig switch_vlan (OpenWrt 19); gibt `{"lan1": [10, 20], ...}` zurück, {} bei Fehler
+- `get_bridge_fdb()` — Bridge FDB via SSH (`bridge fdb show`); gibt `{MAC: port}` zurück
+
+**`coordinator.py`:**
+- `cpu_history: list[dict]` — 1h rolling window (120 Punkte à 30s)
+- `port_vlan_map: dict[str, list[int]]` — Port → VLAN-IDs aus UCI
+- `port_fdb_map: dict[str, str]` — MAC → Port aus Bridge FDB
+- `_cpu_history: deque(maxlen=120)` Ring-Buffer
+
+**`const.py`:**
+- `CPU_HISTORY_MAX_POINTS = 120`
+- `KEY_CPU_HISTORY = "cpu_history"`
+
+**`topology_diagnostic.py`:** Diagnosedaten um cpu_history, port_vlan_map, port_fdb_map erweitert
+
+### Topology UI Polish
+
+| Komponente | Änderung |
+|-----------|---------|
+| `APNode.tsx` | VLAN-Badge-Rendering (+55 Zeilen) |
+| `DetailPanel.tsx` | Erweiterte Sektionen, SpeedChart-Integration (+106 Zeilen) |
+| `GatewayNode.tsx` | Minor fixes |
+| `PortStrip.tsx` | VLAN-Overlay (+30 Zeilen) |
+| `SpeedChart.tsx` | CPU-History-Chart (+56 Zeilen) |
+| `topology.css` | Neue Badge- und Chart-Stile (+16 Zeilen) |
+| `types.ts` | Neue Typen für cpu_history, port_vlan_map |
+| `api.ts` | Adapter für neue Backend-Felder |
 
 ---
 

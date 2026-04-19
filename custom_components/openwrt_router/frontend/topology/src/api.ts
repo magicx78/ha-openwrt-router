@@ -498,6 +498,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       ipv4: v.ipv4_addr ?? undefined,
       prefix: v.prefix_len ?? undefined,
     })),
+    vlansStale: (gwAttr.vlans_stale as boolean | undefined) ?? false,
   };
 
   // AP nodes = all router nodes that are not the gateway

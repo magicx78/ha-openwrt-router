@@ -1908,6 +1908,16 @@
   font-size: 9px;
   opacity: 0.7;
 }
+.vlan-badge--stale {
+  opacity: 0.55;
+  border-style: dashed;
+}
+.vlan-stale-hint {
+  font-size: 10px;
+  color: #fbbf24;
+  align-self: center;
+  cursor: default;
+}
 
 /* ── VLAN Overlay (#22) ──────────────────────────────────────────────── */
 .vlan-overlay {

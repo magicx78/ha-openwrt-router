@@ -2,6 +2,14 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.13.0] - 2026-04-19
+
+### Fixed
+
+- **Topology: VLAN-Badges bei Offline-Router** — `network_interfaces` und `port_vlan_map` werden jetzt gecacht; bei nicht erreichbarem Router bleiben die VLAN-Badges sichtbar (gedimmt + gestrichelt + ⚠-Icon statt leer)
+- **Coordinator**: `_last_known_network_interfaces` + `_last_known_port_vlan_map` als Stale-Cache; `vlans_stale: bool` Flag in `OpenWrtCoordinatorData`
+- **Frontend**: `vlansStale`-Prop in `Gateway`-Typ; `vlan-badge--stale` + `vlan-stale-hint` CSS; Tooltip erklärt gecachten Zustand
+
 ## [1.12.3] - 2026-04-19
 
 ### Fixed

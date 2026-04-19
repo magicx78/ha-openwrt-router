@@ -69,6 +69,7 @@ export interface Gateway {
   wanTraffic?: { downstream_bps?: number; upstream_bps?: number };
   portStats?: PortStat[];
   vlans?: VlanInfo[];
+  vlansStale?: boolean;  // true = VLAN-Daten aus Cache (Router war kurzzeitig offline)
 }
 
 export interface SsidInfo {

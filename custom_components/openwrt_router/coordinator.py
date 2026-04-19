@@ -128,6 +128,8 @@ class OpenWrtCoordinatorData:
         self.port_vlan_map: dict[str, list[int]] = {}
         # Bridge FDB: MAC address → port name
         self.port_fdb_map: dict[str, str] = {}
+        # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
+        self.vlans_stale: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """Return data as a plain dict (used for diagnostics)."""
@@ -212,6 +214,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._prev_wan_connected: bool | None = None
         self._cpu_warn_active: bool = False
         self._mem_warn_active: bool = False
+        # Stale-data cache: letzte bekannte Werte für VLAN-Badges bei Offline-Router
+        self._last_known_network_interfaces: list[dict[str, Any]] = []
+        self._last_known_port_vlan_map: dict[str, list[int]] = {}
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator interface
@@ -390,9 +395,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
 
             try:
                 data.network_interfaces = await self.api.get_network_interfaces()
+                if data.network_interfaces:
+                    self._last_known_network_interfaces = data.network_interfaces
+                data.vlans_stale = False
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching network interfaces: %s", err)
-                data.network_interfaces = []
+                data.network_interfaces = self._last_known_network_interfaces
+                data.vlans_stale = bool(self._last_known_network_interfaces)
 
             try:
                 data.port_stats = await self.api.get_port_stats()
@@ -402,9 +411,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
 
             try:
                 data.port_vlan_map = await self.api.get_port_vlan_map()
+                if data.port_vlan_map:
+                    self._last_known_port_vlan_map = data.port_vlan_map
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching port VLAN map: %s", err)
-                data.port_vlan_map = {}
+                data.port_vlan_map = self._last_known_port_vlan_map
 
             try:
                 data.port_fdb_map = await self.api.get_bridge_fdb()

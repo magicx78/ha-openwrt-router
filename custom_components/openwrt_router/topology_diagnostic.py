@@ -294,6 +294,7 @@ def build_topology_snapshot(
                 dhcp_leases=data.dhcp_leases,
             ),
             "vlans": _extract_vlans(data.network_interfaces),
+            "vlans_stale": getattr(data, "vlans_stale", False),
             "events": data.events if data.events else [],
             "cpu_history": getattr(data, "cpu_history", []),
         },
