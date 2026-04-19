@@ -2161,7 +2161,7 @@ class OpenWrtAPI:
                     "prefix_len": first_ipv4.get("mask"),
                 })
             return out
-        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError) as err:
+        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
             _LOGGER.debug("network.interface/dump failed: %s — trying SSH fallback", err)
             return await self._get_network_interfaces_ssh()
 

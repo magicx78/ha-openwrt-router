@@ -2,6 +2,12 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.12.3] - 2026-04-19
+
+### Fixed
+
+- **Topology: VLAN-Badges** — `OpenWrtAuthError` (ACL-Block, Code -32002) wird jetzt im SSH-Fallback von `get_network_interfaces()` korrekt abgefangen
+
 ## [1.12.2] - 2026-04-19
 
 ### Fixed
