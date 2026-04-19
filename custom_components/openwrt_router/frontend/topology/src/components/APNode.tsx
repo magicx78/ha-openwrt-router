@@ -77,6 +77,14 @@ function bandClass(band: string): string {
   return 'ssid-badge--24g';
 }
 
+function portSpeedLabel(mbps: number | null): string {
+  if (mbps == null) return '?';
+  if (mbps >= 2500) return '2.5G';
+  if (mbps >= 1000) return '1G';
+  if (mbps >= 100)  return '100M';
+  return '10M';
+}
+
 export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHover, onContextMenu, onDoubleClick, onToggleExpand, heatmap, vlanMode, healthMode }: Props) {
   const statusClass = ap.status === 'online'
     ? 'status-online'
@@ -155,6 +163,15 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
           </button>
         </div>
       </div>
+
+      {/* Gateway port badge — only for wired APs with known port */}
+      {ap.gatewayPort && ap.uplinkType === 'wired' && (
+        <div className="ap-card__port-badge">
+          <span className={`port-led port-led--${ap.gatewayPortUp ? 'up' : 'down'}`} />
+          <span className="ap-card__port-name">{ap.gatewayPort.toUpperCase()}</span>
+          <span className="ap-card__port-speed">{portSpeedLabel(ap.gatewayPortSpeed ?? null)}</span>
+        </div>
+      )}
 
       {/* SSID count badge + VLAN badges */}
       {((ap.ssids && ap.ssids.length > 0) || ap.primaryVlanId != null) && (

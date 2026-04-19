@@ -2542,3 +2542,235 @@
   align-self: center;
 }
 
+/* ── Global Footer ──────────────────────────────────────────────────────── */
+:root {
+  --footer-h: 130px;
+}
+
+.global-footer {
+  position: fixed;
+  bottom: 0;
+  left: var(--sidebar-w, 52px);
+  right: 0;
+  height: var(--footer-h);
+  background: rgba(6, 10, 20, 0.97);
+  border-top: 1px solid rgba(255,255,255,0.10);
+  display: grid;
+  grid-template-columns: 200px 220px 1fr 220px;
+  z-index: 30;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+}
+
+.footer-section {
+  padding: 10px 14px;
+  border-right: 1px solid rgba(255,255,255,0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: hidden;
+}
+.footer-section:last-child { border-right: none; }
+
+.footer-section__title {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: rgba(255,255,255,0.35);
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+/* Section 1: Status */
+.footer-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.footer-status__dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.footer-status__dot--ok       { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+.footer-status__dot--warning  { background: #f59e0b; box-shadow: 0 0 6px #f59e0b; }
+.footer-status__dot--critical { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+
+.footer-status__text {
+  font-size: 13px;
+  font-weight: 600;
+  color: #22c55e;
+}
+.footer-status__text--warn { color: #f59e0b; }
+
+.footer-status__sub {
+  font-size: 10px;
+  color: rgba(255,255,255,0.35);
+  line-height: 1.4;
+}
+
+/* Section 2: Traffic */
+.footer-traffic__values {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+.footer-traffic__down {
+  font-size: 16px;
+  font-weight: 700;
+  color: #60a5fa;
+}
+.footer-traffic__up {
+  font-size: 16px;
+  font-weight: 700;
+  color: #a78bfa;
+}
+
+/* Section 3: Top Talkers */
+.footer-section--talkers { justify-content: flex-start; }
+
+.footer-talkers__empty {
+  font-size: 11px;
+  color: rgba(255,255,255,0.3);
+  margin-top: 4px;
+}
+
+.footer-talkers__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.footer-talkers__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+}
+
+.footer-talkers__rank {
+  color: rgba(255,255,255,0.35);
+  width: 14px;
+  flex-shrink: 0;
+}
+
+.footer-talkers__name {
+  flex: 0 0 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255,255,255,0.75);
+}
+
+.footer-talkers__bar-wrap {
+  flex: 1;
+  height: 4px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.footer-talkers__bar {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.footer-talkers__bytes {
+  flex-shrink: 0;
+  width: 52px;
+  text-align: right;
+  color: rgba(255,255,255,0.5);
+  font-size: 10px;
+}
+
+/* Section 4: Clients nach Typ */
+.footer-section--clients-wrap { flex-direction: column; }
+
+.footer-clients-body {
+  display: flex;
+  align-items: center;
+  flex: 1;
+}
+
+.footer-donut {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.footer-donut-empty {
+  font-size: 12px;
+  color: rgba(255,255,255,0.3);
+}
+
+.footer-donut__legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.footer-donut__item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: rgba(255,255,255,0.65);
+}
+
+.footer-donut__dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.footer-donut__count {
+  margin-left: auto;
+  padding-left: 6px;
+  color: rgba(255,255,255,0.45);
+  font-size: 10px;
+}
+
+/* topo-scroll needs bottom padding so footer doesn't overlap content */
+.topo-scroll { padding-bottom: var(--footer-h); }
+
+/* Minimap sits above footer */
+.minimap { bottom: calc(var(--footer-h) + 12px) !important; }
+
+/* Port LED + Badge on APNode */
+.ap-card__port-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-top: 1px solid rgba(255,255,255,0.07);
+  font-size: 10px;
+}
+
+.port-led {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.port-led--up   { background: #22c55e; box-shadow: 0 0 5px #22c55e99; }
+.port-led--down { background: #ef4444; }
+
+.ap-card__port-name {
+  color: rgba(255,255,255,0.75);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.ap-card__port-speed {
+  margin-left: auto;
+  color: rgba(255,255,255,0.45);
+  font-size: 10px;
+}
+

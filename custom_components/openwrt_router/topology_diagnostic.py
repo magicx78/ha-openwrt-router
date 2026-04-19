@@ -229,6 +229,8 @@ def _slim_port_stats(
             "duplex": p.get("duplex"),
             "vlan_ids": (port_vlan_map or {}).get(name, []),
             "connected_device": connected_device,
+            "rx_bytes": p.get("rx_bytes"),
+            "tx_bytes": p.get("tx_bytes"),
         })
     return result
 

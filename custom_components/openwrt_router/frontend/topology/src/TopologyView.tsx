@@ -32,6 +32,7 @@ import { SettingsView } from './components/SettingsView';
 import { Minimap, MinimapNode } from './components/Minimap';
 import { ContextMenu, ContextMenuEntry } from './components/ContextMenu';
 import { APClientList } from './components/APClientList';
+import { GlobalFooter } from './components/GlobalFooter';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -672,6 +673,8 @@ export function TopologyView({ data }: Props) {
           } satisfies DetailPanelActions}
         />
       </div>{/* end .topo-main */}
+
+      <GlobalFooter data={data} />
 
       {/* Edge hover tooltip — fixed overlay, outside zoom transform */}
       {hoveredEdge && !dragging && (

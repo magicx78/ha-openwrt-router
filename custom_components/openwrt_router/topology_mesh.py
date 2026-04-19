@@ -158,6 +158,9 @@ def _detect_inter_router_edges(
                     break
 
             if found_via:
+                # Resolve gateway switch port via bridge FDB (MAC → port)
+                fdb: dict[str, str] = getattr(gw_data, "port_fdb_map", {})
+                gateway_port: str | None = fdb.get(ap_mac.lower())
                 edges.append({
                     "id": edge_id,
                     "from": gw_rid,
@@ -170,6 +173,7 @@ def _detect_inter_router_edges(
                         "link_type": "lan",
                         "detection_method": found_via,
                         "ap_host_ip": ap_hip,
+                        "gateway_port": gateway_port,
                     },
                 })
                 seen_edges.add(edge_id)

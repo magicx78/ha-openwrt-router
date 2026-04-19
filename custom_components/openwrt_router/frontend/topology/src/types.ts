@@ -85,6 +85,8 @@ export interface PortStat {
   duplex?: string | null;     // "full" | "half" | null
   vlanIds?: number[];         // VLAN IDs on this port (from UCI bridge-vlan)
   connectedDevice?: string;   // hostname or MAC of device connected to this port
+  rxBytes?: number | null;
+  txBytes?: number | null;
 }
 
 export interface VlanInfo {
@@ -112,6 +114,9 @@ export interface AccessPoint {
   memUsage?: number;       // 0-100 percent
   cpuHistoryBackend?: CpuHistoryPoint[]; // 1h history from backend
   primaryVlanId?: number;  // majority VLAN among connected clients
+  gatewayPort?: string;        // e.g. "lan1", "lan2" — switch port on gateway
+  gatewayPortSpeed?: number | null;  // Mbps
+  gatewayPortUp?: boolean;
 }
 
 export interface Client {

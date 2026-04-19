@@ -305,7 +305,18 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                         data.wan_traffic = self.data.wan_traffic if self.data else {}
                 else:
                     data.dsl_stats = {}
-                    data.wan_traffic = {}
+                    # Native WAN throughput: delta of rx/tx bytes between polls
+                    prev = self.data.wan_status if self.data else {}
+                    rx_prev = prev.get("rx_bytes") or 0
+                    tx_prev = prev.get("tx_bytes") or 0
+                    rx_now = data.wan_status.get("rx_bytes") or 0
+                    tx_now = data.wan_status.get("tx_bytes") or 0
+                    rx_delta = rx_now - rx_prev if rx_now >= rx_prev else 0
+                    tx_delta = tx_now - tx_prev if tx_now >= tx_prev else 0
+                    data.wan_traffic = {
+                        "downstream_bps": rx_delta // SCAN_INTERVAL_SECONDS,
+                        "upstream_bps": tx_delta // SCAN_INTERVAL_SECONDS,
+                    }
 
                 # Latency: TCP connect to 8.8.8.8:53
                 try:
