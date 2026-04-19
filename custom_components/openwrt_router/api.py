@@ -320,6 +320,9 @@ class OpenWrtAPI:
         # True when rpcd ACL blocks hostapd.*/get_clients — SSH fallback is used instead.
         self._hostapd_acl_blocked: bool = False
 
+        # True when password-auth SSH is unavailable (router requires key-auth)
+        self._ssh_use_key: bool = False
+
         # Cached ifname→ssid map from luci-rpc/getWirelessDevices (populated once when
         # hostapd.*/get_status is also ACL-blocked; None = not yet fetched).
         self._luci_rpc_ssid_map: dict[str, str] | None = None
@@ -1252,6 +1255,34 @@ class OpenWrtAPI:
             f"and SSH fallback is unavailable. "
             f"Fix: add 'uci commit wireless' permission to the rpcd ACL for this user."
         ) from root_err
+
+    def _build_ssh_cmd(self, remote_cmd: str) -> list[str]:
+        """Build SSH command list, preferring key-auth when password-auth fails."""
+        target = f"{self._username}@{self._host}"
+        ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=8"]
+        if self._ssh_use_key:
+            return ["ssh", *ssh_opts, target, remote_cmd]
+        return ["sshpass", "-p", self._password, "ssh", *ssh_opts, target, remote_cmd]
+
+    async def _run_ssh(self, remote_cmd: str, timeout: float = 10.0) -> str | None:
+        """Run a remote SSH command and return stdout. Auto-detects key vs. password auth."""
+        for attempt in range(2):
+            cmd = self._build_ssh_cmd(remote_cmd)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                if proc.returncode == 255 and b"Permission denied" in stderr and not self._ssh_use_key:
+                    _LOGGER.debug("SSH password-auth denied, switching to key-auth")
+                    self._ssh_use_key = True
+                    continue
+                # Return stdout even on non-zero exit (partial output is still useful)
+                out = stdout.decode(errors="replace")
+                return out if out.strip() else None
+            except Exception:  # noqa: BLE001
+                return None
+        return None
 
     async def _get_router_status_ssh(self) -> dict[str, Any]:
         """Get router status via SSH script (fallback for ACL-restricted routers).
@@ -2371,38 +2402,121 @@ class OpenWrtAPI:
     async def get_bridge_fdb(self) -> dict[str, str]:
         """Return MAC-address → port-name mapping from the bridge forwarding database.
 
-        Executes: bridge fdb show br br-lan
-        Parses lines like: "aa:bb:cc:dd:ee:ff dev lan1 master br-lan"
+        Strategy (tries in order):
+        1. /sbin/bridge fdb show via ubus file/exec
+        2. /sys/class/net/br-lan/brforward binary via SSH (DSA routers without bridge binary)
 
         Returns:
             {"aa:bb:cc:dd:ee:ff": "lan1", ...}
-            Returns {} if file/exec is ACL-blocked or bridge command unavailable.
+            Returns {} on total failure.
         """
+        # Method 1: bridge binary via ubus exec
         try:
             result = await self._call(
                 UBUS_FILE_OBJECT,
                 "exec",
                 {"command": "/sbin/bridge", "params": ["fdb", "show", "br", "br-lan"]},
             )
+            stdout = result.get("stdout", "") or ""
+            if stdout.strip():
+                fdb: dict[str, str] = {}
+                for line in stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[1] == "dev":
+                        mac = parts[0].lower()
+                        port = parts[2]
+                        if "self" in parts or "permanent" in parts:
+                            continue
+                        if port.startswith(("lan", "wan", "eth")):
+                            fdb[mac] = port
+                if fdb:
+                    return fdb
         except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
-            _LOGGER.debug("Bridge FDB unavailable (ACL or missing bridge cmd): %s", err)
+            _LOGGER.debug("Bridge FDB via ubus unavailable: %s", err)
+
+        # Method 2: /sys/class/net/br-lan/brforward binary via SSH (no bridge binary)
+        try:
+            port_map_cmd = (
+                "for iface in $(ls /sys/class/net/); do "
+                "  pn=$(cat /sys/class/net/$iface/brport/port_no 2>/dev/null); "
+                "  [ -n \"$pn\" ] && echo \"$pn $iface\"; "
+                "done"
+            )
+            port_out = await self._run_ssh(port_map_cmd)
+            if not port_out:
+                return {}
+            port_no_map: dict[int, str] = {}
+            for line in port_out.splitlines():
+                parts = line.strip().split()
+                if len(parts) == 2:
+                    try:
+                        port_no_map[int(parts[0], 16)] = parts[1]
+                    except ValueError:
+                        pass
+            if not port_no_map:
+                return {}
+
+            # Read brforward binary directly via SSH (raw bytes, no base64 needed)
+            ssh_fwd = self._build_ssh_cmd("cat /sys/class/net/br-lan/brforward")
+            proc_fwd = await asyncio.create_subprocess_exec(
+                *ssh_fwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            fdb_bytes, _ = await asyncio.wait_for(proc_fwd.communicate(), timeout=8.0)
+            if not fdb_bytes or len(fdb_bytes) % 8 != 0:
+                return {}
+
+            fdb = {}
+            for i in range(len(fdb_bytes) // 8):
+                chunk = fdb_bytes[i * 8:(i + 1) * 8]
+                mac = ":".join(f"{b:02x}" for b in chunk[:6])
+                port_no = chunk[6]
+                iface = port_no_map.get(port_no)
+                if iface and iface.startswith(("lan", "wan", "eth")):
+                    fdb[mac] = iface
+            _LOGGER.debug("Bridge FDB via brforward SSH: %d entries", len(fdb))
+            return fdb
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Bridge FDB SSH fallback failed: %s", err)
             return {}
 
-        stdout = result.get("stdout", "") or ""
-        fdb: dict[str, str] = {}
-        for line in stdout.splitlines():
-            parts = line.split()
-            # Expected: <mac> dev <port> [master br-lan] [...]
-            if len(parts) >= 3 and parts[1] == "dev":
-                mac = parts[0].lower()
-                port = parts[2]
-                # Skip self/permanent entries and bridge MAC itself
-                if "self" in parts or "permanent" in parts:
+    async def get_trunk_port_map(self) -> dict[str, str]:
+        """Return {host_ip → port_name} by combining ARP table + bridge FDB.
+
+        Strategy:
+        1. Read /proc/net/arp via SSH → IP → MAC mapping
+        2. Combine with get_bridge_fdb() (MAC → port)
+        → IP → port
+
+        Returns empty dict on failure (graceful degradation).
+        """
+        try:
+            fdb = await self.get_bridge_fdb()
+            if not fdb:
+                return {}
+
+            arp_out = await self._run_ssh("cat /proc/net/arp")
+            if not arp_out:
+                return {}
+
+            result: dict[str, str] = {}
+            for line in arp_out.splitlines()[1:]:  # skip header
+                parts = line.split()
+                if len(parts) < 4:
                     continue
-                # Only keep physical LAN/WAN port names
-                if port.startswith(("lan", "wan", "eth")):
-                    fdb[mac] = port
-        return fdb
+                ip, _hw, flags, mac = parts[:4]
+                try:
+                    if not (int(flags, 16) & 0x2):  # only reachable entries
+                        continue
+                except ValueError:
+                    continue
+                port = fdb.get(mac.lower())
+                if port:
+                    result[ip] = port
+            _LOGGER.debug("Trunk port map (ARP+FDB): %s", result)
+            return result
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("get_trunk_port_map failed: %s", err)
+            return {}
 
     async def get_active_connections(self) -> int:
         """Return count of active network connections from nf_conntrack.

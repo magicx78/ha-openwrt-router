@@ -178,6 +178,38 @@ def _detect_inter_router_edges(
                 })
                 seen_edges.add(edge_id)
 
+    # Method 2.5: ARP/trunk_port_map — IP-based port lookup (no DHCP needed)
+    # Matches AP host_ip directly against gateway's trunk_port_map {ip → port}.
+    # Used when APs have static IPs not appearing in DHCP leases.
+    for gw_rid, gw_hip, gw_data in gateways:
+        trunk_map: dict[str, str] = getattr(gw_data, "trunk_port_map", {})
+        if not trunk_map:
+            continue
+        for ap_rid, ap_hip, ap_data in router_data:
+            if ap_rid == gw_rid:
+                continue
+            edge_id = f"{gw_rid}--uplink--{ap_rid}"
+            if edge_id in seen_edges:
+                continue
+            gateway_port = trunk_map.get(ap_hip)
+            if gateway_port:
+                edges.append({
+                    "id": edge_id,
+                    "from": gw_rid,
+                    "to": ap_rid,
+                    "relationship": "lan_uplink",
+                    "source": MESH_SOURCE,
+                    "inferred": False,
+                    "inference_reason": None,
+                    "attributes": {
+                        "link_type": "lan",
+                        "detection_method": "arp_port",
+                        "ap_host_ip": ap_hip,
+                        "gateway_port": gateway_port,
+                    },
+                })
+                seen_edges.add(edge_id)
+
     # Method 3: Subnet fallback for routers with no detected uplink
     connected_aps = {
         e["to"] for e in edges

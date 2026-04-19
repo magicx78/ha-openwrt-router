@@ -133,6 +133,8 @@ class OpenWrtCoordinatorData:
         self.port_fdb_map: dict[str, str] = {}
         # Topology snapshots: compact state history for before/after comparison
         self.topology_snapshots: list[dict[str, Any]] = []
+        # trunk_port_map: {ap_host_ip → gateway_port_name} from ARP + bridge FDB
+        self.trunk_port_map: dict[str, str] = {}
         # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
         self.vlans_stale: bool = False
 
@@ -441,6 +443,12 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching bridge FDB: %s", err)
                 data.port_fdb_map = {}
+
+            try:
+                data.trunk_port_map = await self.api.get_trunk_port_map()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching trunk port map: %s", err)
+                data.trunk_port_map = {}
 
             # --- CPU history (30s resolution, 1h rolling window) ---
             import time as _time
