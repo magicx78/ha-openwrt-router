@@ -8,6 +8,27 @@
 import React from 'react';
 import { EdgeLayout } from '../types';
 
+function speedLabel(mbps: number | null | undefined): string {
+  if (!mbps) return '';
+  if (mbps >= 2500) return '2.5G';
+  if (mbps >= 1000) return '1G';
+  if (mbps >= 100)  return '100M';
+  return '10M';
+}
+
+// Midpoint of cubic Bézier at t=0.5
+function cubicMid(path: string): { x: number; y: number } | null {
+  const m = path.match(/M\s*([\d.]+)\s+([\d.]+)\s+C\s*([\d.]+)\s+([\d.]+),\s*([\d.]+)\s+([\d.]+),\s*([\d.]+)\s+([\d.]+)/);
+  if (!m) return null;
+  const [, x0, y0, cx1, cy1, cx2, cy2, x1, y1] = m.map(Number);
+  const t = 0.5;
+  const mt = 1 - t;
+  return {
+    x: mt*mt*mt*x0 + 3*mt*mt*t*cx1 + 3*mt*t*t*cx2 + t*t*t*x1,
+    y: mt*mt*mt*y0 + 3*mt*mt*t*cy1 + 3*mt*t*t*cy2 + t*t*t*y1,
+  };
+}
+
 interface Props {
   edges: EdgeLayout[];
   highlightedEdges: Set<string>;
@@ -85,10 +106,42 @@ function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover, vlanMode
   }
 
   if (edge.kind === 'gateway-wired') {
+    const mid = edge.gatewayPort ? cubicMid(edge.path) : null;
+    const gwLabel = edge.gatewayPort
+      ? `${edge.gatewayPort.toUpperCase()}${edge.gatewayPortSpeed ? ' · ' + speedLabel(edge.gatewayPortSpeed) : ''}`
+      : null;
+    const apLabel = edge.apPort ? edge.apPort.toUpperCase() : null;
+
     return (
       <g className={cls} style={style} data-vlan={vlanAttr}>
         <path className="edge-wired-bg"   d={edge.path} />
         <path className="edge-wired-flow" d={edge.path} />
+        {mid && gwLabel && (
+          <>
+            {/* Gateway-side label (upper half) */}
+            <rect
+              x={mid.x - 28} y={mid.y - 22}
+              width={56} height={14}
+              rx={3} className="edge-label-bg"
+            />
+            <text x={mid.x} y={mid.y - 12} className="edge-label edge-label--gw">
+              {gwLabel}
+            </text>
+            {/* AP-side label (lower half) */}
+            {apLabel && (
+              <>
+                <rect
+                  x={mid.x - 20} y={mid.y + 8}
+                  width={40} height={14}
+                  rx={3} className="edge-label-bg"
+                />
+                <text x={mid.x} y={mid.y + 18} className="edge-label edge-label--ap">
+                  {apLabel}
+                </text>
+              </>
+            )}
+          </>
+        )}
         {hitPath}
       </g>
     );

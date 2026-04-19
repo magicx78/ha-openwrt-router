@@ -71,13 +71,16 @@ export function computeEdgesFromBounds(
       const ex = apB.cx,     ey = apB.cy - apB.h / 2;
       const midY = (sy + ey) / 2;
       edges.push({
-        id:       `edge-gw-${ap.id}`,
-        sourceId: data.gateway.id,
-        targetId: ap.id,
-        kind:     'gateway-wired' as EdgeKind,
-        path:     `M ${sx} ${sy} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${ey}`,
-        status:   ap.status,
-        vlanId:   ap.primaryVlanId,
+        id:              `edge-gw-${ap.id}`,
+        sourceId:        data.gateway.id,
+        targetId:        ap.id,
+        kind:            'gateway-wired' as EdgeKind,
+        path:            `M ${sx} ${sy} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${ey}`,
+        status:          ap.status,
+        vlanId:          ap.primaryVlanId,
+        gatewayPort:     ap.gatewayPort,
+        gatewayPortSpeed: ap.gatewayPortSpeed,
+        apPort:          ap.uplinkType === 'wired' ? 'wan' : undefined,
       });
     } else {
       // Mesh: quadratic arc between AP tops

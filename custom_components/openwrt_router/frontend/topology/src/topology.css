@@ -2989,3 +2989,27 @@
 }
 .compare-timeline__btn.active { background: rgba(96,165,250,0.3); border-color: #60a5fa; color: #e0eaf8; }
 .compare-timeline__btn:hover  { background: rgba(255,255,255,0.12); }
+
+/* ── Edge Port Labels ─────────────────────────────────────────────────── */
+.edge-label-bg {
+  fill: rgba(6, 10, 20, 0.88);
+  stroke: rgba(255,255,255,0.12);
+  stroke-width: 0.5;
+}
+.edge-label {
+  fill: rgba(255,255,255,0.80);
+  font-size: 9px;
+  font-family: inherit;
+  font-weight: 600;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+  text-transform: uppercase;
+}
+.edge-label--gw { fill: rgba(96,165,250,0.90); }   /* blue — gateway side */
+.edge-label--ap { fill: rgba(167,139,250,0.85); }  /* purple — AP side */
+
+/* Widen labels on hover */
+.edge-highlighted .edge-label-bg { fill: rgba(15, 23, 42, 0.96); stroke: rgba(255,255,255,0.25); }
+.edge-highlighted .edge-label    { fill: #fff; }

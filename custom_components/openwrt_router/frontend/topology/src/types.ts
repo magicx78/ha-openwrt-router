@@ -172,7 +172,10 @@ export interface EdgeLayout {
   kind: EdgeKind;
   path: string; // SVG path d attribute
   status: NodeStatus;
-  vlanId?: number; // primary VLAN of the target AP (used for edge coloring in vlan-mode)
+  vlanId?: number;            // primary VLAN of the target AP (used for edge coloring in vlan-mode)
+  gatewayPort?: string;       // e.g. "lan3" — switch port on gateway side
+  gatewayPortSpeed?: number | null; // Mbps
+  apPort?: string;            // e.g. "wan" — port on AP side (always WAN for wired uplinks)
 }
 
 export interface TopologyLayout {
