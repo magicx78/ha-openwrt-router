@@ -40,13 +40,22 @@ function portTypeClass(name: string): string {
 }
 
 function isPhysicalPort(name: string): boolean {
-  // Only WAN and numbered LAN/ETH ports — skip phy*, wg*, br-*, loopback, etc.
-  return /^(wan\d*|lan\d+|eth\d+(\.\d+)?|ge-\d|fe-\d)$/i.test(name);
+  // Only WAN and numbered LAN ports — skip eth0 (DSA conduit), phy*, wg*, br-*
+  return /^(wan\d*|lan\d+)$/i.test(name);
+}
+
+function portSortKey(name: string): number {
+  // WAN first, then LAN1, LAN2, LAN3...
+  if (/^wan/i.test(name)) return 0;
+  const m = name.match(/(\d+)$/);
+  return m ? parseInt(m[1]) + 1 : 99;
 }
 
 export function PortStrip({ ports, vlanMode }: Props) {
   if (!ports || ports.length === 0) return null;
-  const physical = ports.filter((p) => isPhysicalPort(p.name));
+  const physical = ports
+    .filter((p) => isPhysicalPort(p.name))
+    .sort((a, b) => portSortKey(a.name) - portSortKey(b.name));
   if (physical.length === 0) return null;
 
   return (

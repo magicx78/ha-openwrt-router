@@ -579,9 +579,16 @@ function PortList({ ports, accessPoints }: { ports: PortStat[]; accessPoints: Ac
     }
   }
 
+  const sortedPorts = [...ports]
+    .filter(p => /^(wan\d*|lan\d+)$/i.test(p.name))
+    .sort((a, b) => {
+      const key = (n: string) => /^wan/i.test(n) ? 0 : (parseInt(n.match(/(\d+)$/)?.[1] ?? '99') + 1);
+      return key(a.name) - key(b.name);
+    });
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-      {ports.map(p => {
+      {sortedPorts.map(p => {
         const apName = apByPort.get(p.name);
         // Show AP name if known, otherwise fall back to connectedDevice (hostname/MAC)
         const deviceLabel = apName ?? p.connectedDevice ?? null;
