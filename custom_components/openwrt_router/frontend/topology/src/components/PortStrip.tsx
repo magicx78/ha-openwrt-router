@@ -16,10 +16,14 @@ interface Props {
 }
 
 function shortName(name: string): string {
-  // lan1 → L1, lan2 → L2, wan → WAN, eth0 → E0
-  const m = name.match(/^(lan|eth|ge|fe)(\d+)$/i);
-  if (m) return m[1][0].toUpperCase() + m[2];
+  // lan1 → LAN1, lan2 → LAN2, wan → WAN, eth0 → ETH0
+  const m = name.match(/^(lan)(\d+)$/i);
+  if (m) return `LAN${m[2]}`;
   if (/^wan\d*$/i.test(name)) return 'WAN';
+  if (/^(eth|ge|fe)(\d+)$/i.test(name)) {
+    const em = name.match(/^(eth|ge|fe)(\d+)$/i)!;
+    return em[1].toUpperCase() + em[2];
+  }
   if (name.length <= 4) return name.toUpperCase();
   return name.slice(0, 4).toUpperCase();
 }
