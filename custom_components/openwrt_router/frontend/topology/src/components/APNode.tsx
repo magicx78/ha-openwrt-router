@@ -5,6 +5,7 @@ import { IconAP } from './Icons';
 import { SignalBar } from './SignalBar';
 import { computeHealth } from './GatewayNode';
 import { useStatusFlash } from '../useStatusFlash';
+import { PortStrip } from './PortStrip';
 
 function trendArrow(history: number[]): string {
   if (history.length < 3) return '→';
@@ -216,6 +217,11 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
           </div>
         );
       })()}
+
+      {/* Port strip — physical ports (WAN, LAN1, ...) */}
+      {ap.portStats && ap.portStats.length > 0 && (
+        <PortStrip ports={ap.portStats} />
+      )}
     </div>
   );
 }

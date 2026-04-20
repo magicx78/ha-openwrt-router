@@ -571,6 +571,14 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       gatewayPort: gwPort,
       gatewayPortSpeed: gwPortStat?.speed_mbps ?? null,
       gatewayPortUp: gwPortStat?.up ?? false,
+      portStats: ((n.attributes?.port_stats as any[] | undefined) ?? []).map((p: any): PortStat => ({
+        name: p.name,
+        up: p.up,
+        speed_mbps: p.speed_mbps,
+        duplex: p.duplex,
+        vlanIds: p.vlan_ids ?? [],
+        connectedDevice: p.connected_device ?? undefined,
+      })),
     };
   });
 

@@ -125,6 +125,7 @@ export interface AccessPoint {
   gatewayPort?: string;        // e.g. "lan1", "lan2" — switch port on gateway
   gatewayPortSpeed?: number | null;  // Mbps
   gatewayPortUp?: boolean;
+  portStats?: PortStat[];      // physical ports on this AP (WAN, LAN1, ...)
 }
 
 export interface Client {
