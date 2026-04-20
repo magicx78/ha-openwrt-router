@@ -147,10 +147,18 @@ export interface Client {
   vlanId?: number;         // VLAN this client belongs to (matched via subnet)
 }
 
+export interface SwitchNode {
+  id: string;
+  label: string;
+  gatewayPort?: string;  // which gateway port this switch is connected to
+  apCount: number;       // how many APs are behind this switch
+}
+
 export interface TopologyData {
   gateway: Gateway;
   accessPoints: AccessPoint[];
   clients: Client[];
+  switchNodes: SwitchNode[];  // inferred switch nodes between gateway and APs
   timestamp: string;
 }
 

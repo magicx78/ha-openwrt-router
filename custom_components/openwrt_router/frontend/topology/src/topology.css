@@ -3013,3 +3013,34 @@
 /* Widen labels on hover */
 .edge-highlighted .edge-label-bg { fill: rgba(15, 23, 42, 0.96); stroke: rgba(255,255,255,0.25); }
 .edge-highlighted .edge-label    { fill: #fff; }
+
+/* ── Switch Node (inferred) ──────────────────────────────────────────────── */
+.topo-row--switches {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  padding: 8px 0;
+}
+.topo-col-switch { display: flex; flex-direction: column; align-items: center; }
+
+.switch-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 8px 16px;
+  background: rgba(255,255,255,0.04);
+  border: 1px dashed rgba(255,255,255,0.25);
+  border-radius: 8px;
+  cursor: default;
+  min-width: 80px;
+}
+.switch-node__icon  { font-size: 18px; color: rgba(255,255,255,0.5); }
+.switch-node__label { font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.65); text-align: center; }
+.switch-node__hint  { font-size: 9px; color: rgba(255,200,0,0.7); font-style: italic; }
+
+/* ── AP/Gateway offline state ────────────────────────────────────────────── */
+.node-card.status-offline {
+  border-color: rgba(239,68,68,0.5) !important;
+  opacity: 0.75;
+}

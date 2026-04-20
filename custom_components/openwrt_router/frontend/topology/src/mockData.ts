@@ -64,4 +64,5 @@ export const MOCK_DATA: TopologyData = {
     { id: 'c12', name: 'Synology NAS', hostname: 'synology', ip: '10.10.10.112', mac: 'AA:BB:CC:0C', apId: 'ap3', category: 'other', signal: -44, band: '5 GHz', status: 'online', manufacturer: 'Synology' },
     { id: 'c13', name: "Alex's MacBook", hostname: 'mbp-alex', ip: '10.10.10.113', mac: 'AA:BB:CC:0D', apId: 'ap3', category: 'laptop', signal: -52, band: '5 GHz', status: 'online', manufacturer: 'Apple' },
   ],
+  switchNodes: [],
 };

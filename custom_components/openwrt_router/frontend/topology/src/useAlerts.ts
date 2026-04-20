@@ -153,6 +153,39 @@ export function useAlerts(data: TopologyData): Alert[] {
       }
     }
 
+    // Rule 9: Nicht registrierter Router erkannt
+    // Clients deren Hostname auf einen Router/Repeater hindeutet
+    const ROUTER_HOSTNAME_PATTERNS = [
+      /repeater/i, /fritz/i, /router/i, /mesh/i, /access.?point/i,
+      /^ap[\-_]?\d/i, /gateway/i, /extender/i, /^rt-/i, /wrt$/i,
+    ];
+    // Router-Hersteller die typischerweise keine normalen Clients sind
+    const ROUTER_MANUFACTURERS = new Set([
+      'TP-Link', 'Netgear', 'Asus', 'Linksys', 'Ubiquiti', 'Mikrotik',
+      'GL.iNet', 'OpenWrt', 'AVM', 'Cudy', 'Xiaomi', 'Huawei',
+    ]);
+    const knownApIds = new Set(data.accessPoints.map(ap => ap.id));
+    for (const client of data.clients) {
+      const nameMatch = ROUTER_HOSTNAME_PATTERNS.some(p =>
+        p.test(client.hostname) || p.test(client.name)
+      );
+      const mfgMatch = client.manufacturer != null &&
+        ROUTER_MANUFACTURERS.has(client.manufacturer) &&
+        // Exclude clients that are clearly not routers (smartphones, IoT)
+        !/phone|tablet|ipad|iphone|android|shelly|tasmota|esphome/i.test(client.hostname);
+
+      if ((nameMatch || mfgMatch) && !knownApIds.has(client.id)) {
+        alerts.push({
+          id: `unregistered-router-${client.id}`,
+          severity: 'warning',
+          message: `Nicht registrierter Router: ${client.name || client.hostname}`,
+          nodeId: client.id,
+          nodeName: client.name || client.hostname,
+          nodeType: 'client',
+        });
+      }
+    }
+
     // Sort: critical first
     return alerts.sort((a, b) => {
       if (a.severity === b.severity) return 0;

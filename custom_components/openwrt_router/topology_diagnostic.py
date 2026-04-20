@@ -299,6 +299,7 @@ def build_topology_snapshot(
             "vlans_stale": getattr(data, "vlans_stale", False),
             "events": data.events if data.events else [],
             "cpu_history": getattr(data, "cpu_history", []),
+            "node_status": "online",  # always online when coordinator is running
         },
     })
 

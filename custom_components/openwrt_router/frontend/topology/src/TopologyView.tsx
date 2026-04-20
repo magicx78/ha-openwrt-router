@@ -560,6 +560,23 @@ export function TopologyView({ data }: Props) {
                 </div>
               </div>
 
+              {/* Row 2.5: Inferred switch nodes */}
+              {data.switchNodes && data.switchNodes.length > 0 && (
+                <div className="topo-row topo-row--switches">
+                  {data.switchNodes.map(sw => (
+                    <div key={sw.id} className="topo-col-switch">
+                      <div ref={setNodeRef(sw.id)} style={{ width: 'fit-content' }}>
+                        <div className="switch-node" title={`Inferred switch on port ${sw.gatewayPort ?? '?'} — ${sw.apCount} APs`}>
+                          <div className="switch-node__icon">⊕</div>
+                          <div className="switch-node__label">{sw.label}</div>
+                          <div className="switch-node__hint">? erkannt</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* Row 3: Access Points — flat or grouped */}
               {(() => {
                 const renderAPCol = (ap: AccessPoint) => {

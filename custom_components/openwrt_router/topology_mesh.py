@@ -290,6 +290,94 @@ def _deduplicate_clients(
     return list(best.values())
 
 
+def _detect_switch_nodes(
+    inter_router_edges: list[dict[str, Any]],
+    router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Detect implicit switch nodes between gateway and APs via Bridge FDB.
+
+    If multiple APs are connected via the same gateway port, an unmanaged
+    switch is likely sitting between them. We insert an inferred switch node
+    and reroute the AP edges through it.
+
+    Returns: (switch_nodes, new_edges_replacing_direct_ap_edges)
+    """
+    switch_nodes: list[dict[str, Any]] = []
+    switch_edges: list[dict[str, Any]] = []
+
+    # Find gateway coordinator data for trunk_port_map
+    gw_trunk_map: dict[str, str] = {}
+    gw_rid = ""
+    for rid, hip, data in router_data:
+        if _detect_router_role(data, hip) == "gateway":
+            gw_trunk_map = getattr(data, "trunk_port_map", {})
+            gw_rid = rid
+            break
+
+    if not gw_trunk_map or not gw_rid:
+        return [], []
+
+    # Group APs by gateway port
+    port_to_aps: dict[str, list[str]] = {}
+    for edge in inter_router_edges:
+        if edge.get("relationship") == "lan_uplink":
+            gw_port = (edge.get("attributes") or {}).get("gateway_port")
+            ap_id = edge.get("to")
+            if gw_port and ap_id and edge.get("from") == gw_rid:
+                port_to_aps.setdefault(gw_port, []).append(ap_id)
+
+    # For each port with >1 AP: insert a switch node
+    for port, ap_ids in port_to_aps.items():
+        if len(ap_ids) < 2:
+            continue
+        switch_id = f"switch:{gw_rid}:{port}"
+        switch_nodes.append({
+            "id": switch_id,
+            "type": "switch",
+            "label": f"Switch ({port.upper()})",
+            "source": MESH_SOURCE,
+            "inferred": True,
+            "inference_reason": f"multiple_aps_on_{port}",
+            "role": "switch",
+            "attributes": {
+                "gateway_port": port,
+                "ap_count": len(ap_ids),
+            },
+        })
+        # Edge: gateway → switch
+        switch_edges.append({
+            "id": f"{gw_rid}--switch--{switch_id}",
+            "from": gw_rid,
+            "to": switch_id,
+            "relationship": "lan_uplink",
+            "source": MESH_SOURCE,
+            "inferred": True,
+            "inference_reason": f"switch_inferred_{port}",
+            "attributes": {
+                "link_type": "lan",
+                "detection_method": "fdb_multi_ap",
+                "gateway_port": port,
+            },
+        })
+        # Edges: switch → each AP (replace direct gateway→AP edges)
+        for ap_id in ap_ids:
+            switch_edges.append({
+                "id": f"{switch_id}--trunk--{ap_id}",
+                "from": switch_id,
+                "to": ap_id,
+                "relationship": "lan_uplink",
+                "source": MESH_SOURCE,
+                "inferred": True,
+                "inference_reason": "switch_inferred",
+                "attributes": {
+                    "link_type": "lan",
+                    "detection_method": "fdb_multi_ap",
+                },
+            })
+
+    return switch_nodes, switch_edges
+
+
 def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     """Build a unified mesh topology from all loaded openwrt_router entries.
 
@@ -323,8 +411,18 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         host_ip = str(entry.data.get("host", ""))
         role = _detect_router_role(data, host_ip)
 
+        # Determine online/offline from last coordinator update success
+        is_online = getattr(coordinator, "last_update_success", True)
+
         # Build per-router snapshot with role and host_ip
         snapshot = build_topology_snapshot(data, role=role, host_ip=host_ip)
+
+        # Inject online/offline status into the router node attributes
+        for node in snapshot.get("nodes", []):
+            if node.get("type") == "router":
+                node.setdefault("attributes", {})["node_status"] = (
+                    "online" if is_online else "offline"
+                )
 
         # Extract router_id from the first router node
         router_node = next(
@@ -348,6 +446,12 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         router_data,
     )
     all_edges.extend(inter_router_edges)
+
+    # Detect implicit switch nodes via Bridge FDB:
+    # If multiple APs share the same gateway port → a switch sits between them.
+    switch_nodes, switch_edges = _detect_switch_nodes(inter_router_edges, router_data)
+    all_nodes.extend(switch_nodes)
+    all_edges.extend(switch_edges)
 
     # Deduplicate clients (same MAC on multiple APs during roaming)
     deduped_clients = _deduplicate_clients(all_clients)

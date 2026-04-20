@@ -23,6 +23,7 @@ import type {
   VlanInfo,
   RouterEvent,
   TopologySnapshot,
+  SwitchNode,
 } from './types';
 
 // ── Raw snapshot types ───────────────────────────────────────────────────
@@ -54,7 +55,7 @@ interface SnapshotNodeAttributes {
 
 interface SnapshotNode {
   id: string;
-  type: 'router' | 'interface' | 'client';
+  type: 'router' | 'interface' | 'client' | 'switch';
   label: string;
   role?: string; // 'gateway' | 'ap' | 'unknown'
   ip?: string;   // WAN IP for routers
@@ -461,6 +462,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       },
       accessPoints: [],
       clients: [],
+      switchNodes: [],
       timestamp: snap.generated_at,
     };
   }
@@ -473,7 +475,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     ip: gwAttr.host_ip ?? '',
     wanIp: gwNode.ip ?? '',
     uptime: gwAttr.uptime != null ? formatUptime(gwAttr.uptime as number) : '',
-    status: 'online',
+    status: (gwAttr.node_status as NodeStatus | undefined) ?? 'online',
     firmwareVersion: (gwAttr.firmware as string | undefined) || undefined,
     events: ((gwAttr.events as RouterEvent[] | undefined) ?? []).slice(0, 30),
     cpuLoad: gwAttr.cpu_load as number | undefined,
@@ -561,7 +563,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       uplinkTo: uplink?.uplinkTo ?? gwNode.id,
       clientCount: clientCountMap.get(n.id) ?? 0,
       backhaulSignal: uplink?.backhaulSignal ?? -60,
-      status: 'online' as NodeStatus,
+      status: (n.attributes?.node_status as NodeStatus | undefined) ?? 'online',
       firmwareVersion: (n.attributes?.firmware as string | undefined) || undefined,
       events: ((n.attributes?.events as RouterEvent[] | undefined) ?? []).slice(0, 30),
       ssids: ssidsByRouter.get(n.id) ?? [],
@@ -624,10 +626,21 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     ap.primaryVlanId = primaryVlan(apClients.map(c => c.vlanId ?? null));
   }
 
+  // Extract inferred switch nodes
+  const switchNodes: SwitchNode[] = snap.nodes
+    .filter((n) => n.type === 'switch')
+    .map((n): SwitchNode => ({
+      id: n.id,
+      label: n.label,
+      gatewayPort: (n.attributes?.gateway_port as string | undefined) || undefined,
+      apCount: (n.attributes?.ap_count as number | undefined) ?? 0,
+    }));
+
   return {
     gateway,
     accessPoints,
     clients,
+    switchNodes,
     timestamp: snap.generated_at,
   };
 }
