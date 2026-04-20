@@ -408,6 +408,24 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                 attrs["ping_ms"] = getattr(data, "ping_ms", None)
                 attrs["dsl_history"] = getattr(data, "dsl_history", []) or []
                 attrs["ddns_status"] = getattr(data, "ddns_status", []) or []
+
+                # Enrich port_stats connected_device: replace MAC with AP name
+                # Use trunk_port_map (ip → port) reversed to build port → AP name
+                trunk_map: dict[str, str] = getattr(data, "trunk_port_map", {})
+                port_to_ap_name: dict[str, str] = {}
+                for ap_rid, ap_hip, ap_data in router_data:
+                    if ap_rid == rid:
+                        continue
+                    ap_name = ap_data.router_info.get("hostname") or ap_hip
+                    port = trunk_map.get(ap_hip)
+                    if port:
+                        port_to_ap_name[port] = ap_name
+
+                port_stats = attrs.get("port_stats") or []
+                for port in port_stats:
+                    ap_name = port_to_ap_name.get(port.get("name", ""))
+                    if ap_name:
+                        port["connected_device"] = ap_name
                 break
         break  # only one gateway
 

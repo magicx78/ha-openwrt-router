@@ -664,6 +664,7 @@ export function TopologyView({ data }: Props) {
         <DetailPanel
           entity={selectedEntity}
           onClose={() => setSelectedEntity(null)}
+          accessPoints={data.accessPoints}
           actions={{
             onFocusNode:   (id) => { zoomToNode(id); },
             onShowClients: ()   => { setActiveTab('clients'); },

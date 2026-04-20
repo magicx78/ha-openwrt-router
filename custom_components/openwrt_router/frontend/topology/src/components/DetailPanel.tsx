@@ -31,9 +31,10 @@ interface Props {
   entity: SelectedEntity;
   onClose: () => void;
   actions?: DetailPanelActions;
+  accessPoints?: AccessPoint[];
 }
 
-export function DetailPanel({ entity, onClose, actions }: Props) {
+export function DetailPanel({ entity, onClose, actions, accessPoints = [] }: Props) {
   return (
     <div className={`detail-panel ${entity ? 'open' : ''}`}>
       <div className="detail-panel__handle" aria-hidden="true" />
@@ -50,7 +51,7 @@ export function DetailPanel({ entity, onClose, actions }: Props) {
       </div>
 
       <div className="detail-panel__body">
-        {entity?.type === 'gateway' && <GatewayDetail data={entity.data} actions={actions} />}
+        {entity?.type === 'gateway' && <GatewayDetail data={entity.data} actions={actions} accessPoints={accessPoints} />}
         {entity?.type === 'ap'      && <APDetail data={entity.data} clients={entity.clients} actions={actions} />}
         {entity?.type === 'client'  && <ClientDetail data={entity.data} apName={entity.apName} actions={actions} />}
       </div>
@@ -71,7 +72,7 @@ function ActionBtn({ icon, label, onClick }: { icon: string; label: string; onCl
 
 // ── Gateway detail ────────────────────────────────────────────────────────
 
-function GatewayDetail({ data, actions }: { data: Gateway; actions?: DetailPanelActions }) {
+function GatewayDetail({ data, actions, accessPoints }: { data: Gateway; actions?: DetailPanelActions; accessPoints?: AccessPoint[] }) {
   const [chartMode, setChartMode] = useState<'speed' | 'ping' | 'cpu'>('speed');
   const history = data.dslHistory ?? [];
   const cpuHistory = data.cpuHistoryBackend ?? [];
@@ -169,7 +170,7 @@ function GatewayDetail({ data, actions }: { data: Gateway; actions?: DetailPanel
       {(data.portStats ?? []).length > 0 && (
         <div className="detail-section">
           <div className="detail-section__heading">Ports</div>
-          <PortList ports={data.portStats!} />
+          <PortList ports={data.portStats!} accessPoints={accessPoints ?? []} />
         </div>
       )}
 
@@ -559,10 +560,36 @@ const VLAN_COLORS_PANEL = [
   '#ef4444', '#eab308', '#14b8a6',
 ];
 
-function PortList({ ports }: { ports: PortStat[] }) {
+function PortList({ ports, accessPoints }: { ports: PortStat[]; accessPoints: AccessPoint[] }) {
+  // Build port → AP name map using connectedDevice MAC → AP MAC matching
+  const apByMac = new Map<string, string>();
+  for (const ap of accessPoints) {
+    // ap.id is used as MAC in some versions — use name as display
+    apByMac.set(ap.ip, ap.name);
+  }
+  const apByPort = new Map<string, string>();
+  for (const p of ports) {
+    if (p.connectedDevice) {
+      // connectedDevice may be hostname or MAC — try to match AP by hostname
+      const matchedAp = accessPoints.find(ap =>
+        ap.name.toLowerCase() === (p.connectedDevice ?? '').toLowerCase() ||
+        ap.ip === p.connectedDevice
+      );
+      if (matchedAp) apByPort.set(p.name, matchedAp.name);
+    }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-      {ports.map(p => (
+      {ports.map(p => {
+        const apName = apByPort.get(p.name);
+        // Show AP name if known, otherwise fall back to connectedDevice (hostname/MAC)
+        const deviceLabel = apName ?? p.connectedDevice ?? null;
+        // If it looks like a raw MAC (xx:xx:xx format), skip it — not useful
+        const isMac = deviceLabel ? /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(deviceLabel) : false;
+        const showDevice = deviceLabel && !isMac;
+
+        return (
         <div key={p.name} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{
@@ -571,7 +598,7 @@ function PortList({ ports }: { ports: PortStat[] }) {
               boxShadow: p.up ? '0 0 5px rgba(34,197,94,0.6)' : 'none',
             }} />
             <span style={{ fontSize: 11.5, color: p.up ? 'var(--text-primary)' : 'var(--text-muted)', flex: 1 }}>
-              {p.name}
+              {p.name.toUpperCase()}
             </span>
             {p.up && p.speed_mbps != null && (
               <span style={{ fontSize: 10.5, color: 'var(--green)', fontWeight: 500 }}>
@@ -596,13 +623,14 @@ function PortList({ ports }: { ports: PortStat[] }) {
               ))}
             </div>
           )}
-          {p.connectedDevice && (
+          {showDevice && (
             <div style={{ fontSize: 10, color: '#93c5fd', paddingLeft: 16 }}>
-              → {p.connectedDevice}
+              → {deviceLabel}
             </div>
           )}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
