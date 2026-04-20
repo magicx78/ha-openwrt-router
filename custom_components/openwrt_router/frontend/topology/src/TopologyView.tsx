@@ -29,9 +29,11 @@ import { ClientsView } from './components/ClientsView';
 import { AlertsView } from './components/AlertsView';
 import { TrafficView } from './components/TrafficView';
 import { SettingsView } from './components/SettingsView';
+import { CompareView } from './components/CompareView';
 import { Minimap, MinimapNode } from './components/Minimap';
 import { ContextMenu, ContextMenuEntry } from './components/ContextMenu';
 import { APClientList } from './components/APClientList';
+import { GlobalFooter } from './components/GlobalFooter';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -487,6 +489,7 @@ export function TopologyView({ data }: Props) {
           />
         )}
         {activeTab === 'settings' && <SettingsView />}
+        {activeTab === 'compare' && <CompareView data={data} />}
 
         {/* ── Topology zoom/pan canvas ─────────────────────────── */}
         <div
@@ -674,6 +677,8 @@ export function TopologyView({ data }: Props) {
         />
       </div>{/* end .topo-main */}
 
+      <GlobalFooter data={data} />
+
       {/* Edge hover tooltip — fixed overlay, outside zoom transform */}
       {hoveredEdge && !dragging && (
         <EdgeTooltip
@@ -708,6 +713,36 @@ export function TopologyView({ data }: Props) {
           </div>
         );
       })()}
+
+      {/* Heatmap Legend — floating panel when heatmapMode is active */}
+      {heatmapMode && activeTab === 'topology' && (
+        <div className="heatmap-legend">
+          <div className="heatmap-legend__title">WLAN Signal</div>
+          <div className="heatmap-legend__rows">
+            <div className="heatmap-legend__row" data-heatmap="excellent">
+              <span className="heatmap-legend__swatch" />
+              <span className="heatmap-legend__label">Ausgezeichnet</span>
+              <span className="heatmap-legend__dbm">≥ −65 dBm</span>
+            </div>
+            <div className="heatmap-legend__row" data-heatmap="good">
+              <span className="heatmap-legend__swatch" />
+              <span className="heatmap-legend__label">Gut</span>
+              <span className="heatmap-legend__dbm">≥ −75 dBm</span>
+            </div>
+            <div className="heatmap-legend__row" data-heatmap="fair">
+              <span className="heatmap-legend__swatch" />
+              <span className="heatmap-legend__label">Schwach</span>
+              <span className="heatmap-legend__dbm">≥ −80 dBm</span>
+            </div>
+            <div className="heatmap-legend__row" data-heatmap="poor">
+              <span className="heatmap-legend__swatch" />
+              <span className="heatmap-legend__label">Kritisch</span>
+              <span className="heatmap-legend__dbm">&lt; −80 dBm</span>
+            </div>
+          </div>
+          <div className="heatmap-legend__hint">Ø-Signal der verbundenen Clients</div>
+        </div>
+      )}
 
       {/* Node hover tooltip — appears beside the hovered gateway / AP card */}
       {hoveredNodeId && !dragging && (() => {

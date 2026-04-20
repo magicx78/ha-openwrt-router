@@ -22,6 +22,7 @@ import type {
   PortStat,
   VlanInfo,
   RouterEvent,
+  TopologySnapshot,
 } from './types';
 
 // ── Raw snapshot types ───────────────────────────────────────────────────
@@ -499,13 +500,14 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       prefix: v.prefix_len ?? undefined,
     })),
     vlansStale: (gwAttr.vlans_stale as boolean | undefined) ?? false,
+    topologySnapshots: (gwAttr.topology_snapshots as TopologySnapshot[] | undefined) ?? [],
   };
 
   // AP nodes = all router nodes that are not the gateway
   const apRouterNodes = routerNodes.filter((n) => n.id !== gwNode.id);
 
   // Build uplink map: ap_id → uplink info (from inter-router edges)
-  const uplinkMap = new Map<string, { uplinkTo: string; uplinkType: UplinkType; backhaulSignal: number }>();
+  const uplinkMap = new Map<string, { uplinkTo: string; uplinkType: UplinkType; backhaulSignal: number; gatewayPort?: string }>();
   for (const edge of interRouterEdges) {
     const apId = edge.to;
     if (apId === gwNode.id) continue;
@@ -514,7 +516,8 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     const uplinkType: UplinkType =
       edge.relationship === 'wifi_uplink' ? 'mesh' : 'wired';
     const backhaulSignal = (edge.attributes?.signal as number | undefined) ?? -60;
-    uplinkMap.set(apId, { uplinkTo: edge.from, uplinkType, backhaulSignal });
+    const gatewayPort = (edge.attributes?.gateway_port as string | undefined) || undefined;
+    uplinkMap.set(apId, { uplinkTo: edge.from, uplinkType, backhaulSignal, gatewayPort });
   }
 
   // Count clients per router (from the clients array, ap_mac = router id)
@@ -545,6 +548,10 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
 
   const accessPoints: AccessPoint[] = apRouterNodes.map((n) => {
     const uplink = uplinkMap.get(n.id);
+    const gwPort = uplink?.gatewayPort;
+    const gwPortStat = gwPort
+      ? (gateway.portStats ?? []).find((p) => p.name === gwPort)
+      : undefined;
     return {
       id: n.id,
       name: n.label,
@@ -561,6 +568,9 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       cpuLoad: n.attributes?.cpu_load as number | undefined,
       memUsage: n.attributes?.mem_usage as number | undefined,
       cpuHistoryBackend: (n.attributes?.cpu_history as CpuHistoryPoint[] | undefined) ?? [],
+      gatewayPort: gwPort,
+      gatewayPortSpeed: gwPortStat?.speed_mbps ?? null,
+      gatewayPortUp: gwPortStat?.up ?? false,
     };
   });
 

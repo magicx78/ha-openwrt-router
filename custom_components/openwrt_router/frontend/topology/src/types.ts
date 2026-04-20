@@ -70,6 +70,14 @@ export interface Gateway {
   portStats?: PortStat[];
   vlans?: VlanInfo[];
   vlansStale?: boolean;  // true = VLAN-Daten aus Cache (Router war kurzzeitig offline)
+  topologySnapshots?: TopologySnapshot[];
+}
+
+export interface TopologySnapshot {
+  ts: number;           // unix timestamp
+  routers: Array<{ id: string; hostname: string; ip: string; status: string }>;
+  client_count: number;
+  wan_connected: boolean;
 }
 
 export interface SsidInfo {
@@ -85,6 +93,8 @@ export interface PortStat {
   duplex?: string | null;     // "full" | "half" | null
   vlanIds?: number[];         // VLAN IDs on this port (from UCI bridge-vlan)
   connectedDevice?: string;   // hostname or MAC of device connected to this port
+  rxBytes?: number | null;
+  txBytes?: number | null;
 }
 
 export interface VlanInfo {
@@ -112,6 +122,9 @@ export interface AccessPoint {
   memUsage?: number;       // 0-100 percent
   cpuHistoryBackend?: CpuHistoryPoint[]; // 1h history from backend
   primaryVlanId?: number;  // majority VLAN among connected clients
+  gatewayPort?: string;        // e.g. "lan1", "lan2" — switch port on gateway
+  gatewayPortSpeed?: number | null;  // Mbps
+  gatewayPortUp?: boolean;
 }
 
 export interface Client {
@@ -159,7 +172,10 @@ export interface EdgeLayout {
   kind: EdgeKind;
   path: string; // SVG path d attribute
   status: NodeStatus;
-  vlanId?: number; // primary VLAN of the target AP (used for edge coloring in vlan-mode)
+  vlanId?: number;            // primary VLAN of the target AP (used for edge coloring in vlan-mode)
+  gatewayPort?: string;       // e.g. "lan3" — switch port on gateway side
+  gatewayPortSpeed?: number | null; // Mbps
+  apPort?: string;            // e.g. "wan" — port on AP side (always WAN for wired uplinks)
 }
 
 export interface TopologyLayout {

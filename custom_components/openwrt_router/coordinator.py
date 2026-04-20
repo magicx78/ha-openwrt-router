@@ -36,6 +36,9 @@ from .const import (
     DSL_HISTORY_INTERVAL_CYCLES,
     DSL_HISTORY_MAX_POINTS,
     KEY_CPU_HISTORY,
+    TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES,
+    TOPOLOGY_SNAPSHOT_MAX,
+    KEY_TOPOLOGY_SNAPSHOTS,
     FEATURE_AVAILABLE_RADIOS,
     FEATURE_DHCP_LEASES,
     FEATURE_HAS_5GHZ,
@@ -128,6 +131,10 @@ class OpenWrtCoordinatorData:
         self.port_vlan_map: dict[str, list[int]] = {}
         # Bridge FDB: MAC address → port name
         self.port_fdb_map: dict[str, str] = {}
+        # Topology snapshots: compact state history for before/after comparison
+        self.topology_snapshots: list[dict[str, Any]] = []
+        # trunk_port_map: {ap_host_ip → gateway_port_name} from ARP + bridge FDB
+        self.trunk_port_map: dict[str, str] = {}
         # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
         self.vlans_stale: bool = False
 
@@ -211,6 +218,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._cpu_history: deque[dict[str, Any]] = deque(maxlen=CPU_HISTORY_MAX_POINTS)
         # Event timeline tracking
         self._event_history: deque[dict[str, Any]] = deque(maxlen=30)
+        # Topology snapshots: compact AP/client state every 5 min, max 20 entries
+        self._topology_snapshots: deque[dict[str, Any]] = deque(maxlen=TOPOLOGY_SNAPSHOT_MAX)
+        self._snapshot_cycle_count: int = 0
         self._prev_wan_connected: bool | None = None
         self._cpu_warn_active: bool = False
         self._mem_warn_active: bool = False
@@ -305,7 +315,18 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                         data.wan_traffic = self.data.wan_traffic if self.data else {}
                 else:
                     data.dsl_stats = {}
-                    data.wan_traffic = {}
+                    # Native WAN throughput: delta of rx/tx bytes between polls
+                    prev = self.data.wan_status if self.data else {}
+                    rx_prev = prev.get("rx_bytes") or 0
+                    tx_prev = prev.get("tx_bytes") or 0
+                    rx_now = data.wan_status.get("rx_bytes") or 0
+                    tx_now = data.wan_status.get("tx_bytes") or 0
+                    rx_delta = rx_now - rx_prev if rx_now >= rx_prev else 0
+                    tx_delta = tx_now - tx_prev if tx_now >= tx_prev else 0
+                    data.wan_traffic = {
+                        "downstream_bps": rx_delta // SCAN_INTERVAL_SECONDS,
+                        "upstream_bps": tx_delta // SCAN_INTERVAL_SECONDS,
+                    }
 
                 # Latency: TCP connect to 8.8.8.8:53
                 try:
@@ -423,6 +444,12 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 _LOGGER.debug("Error fetching bridge FDB: %s", err)
                 data.port_fdb_map = {}
 
+            try:
+                data.trunk_port_map = await self.api.get_trunk_port_map()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching trunk port map: %s", err)
+                data.trunk_port_map = {}
+
             # --- CPU history (30s resolution, 1h rolling window) ---
             import time as _time
             mem = data.memory
@@ -435,6 +462,26 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 "mem": mem_pct,
             })
             data.cpu_history = list(self._cpu_history)
+
+            # --- Topology snapshots (every TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES polls) ---
+            self._snapshot_cycle_count += 1
+            if self._snapshot_cycle_count >= TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES:
+                self._snapshot_cycle_count = 0
+                self._topology_snapshots.append({
+                    "ts": int(_time.time()),
+                    "routers": [
+                        {
+                            "id": c.get("mac", ""),
+                            "hostname": c.get("hostname", ""),
+                            "ip": c.get("ip", ""),
+                            "status": "online",
+                        }
+                        for c in data.clients
+                    ],
+                    "client_count": data.client_count,
+                    "wan_connected": data.wan_connected,
+                })
+            data.topology_snapshots = list(self._topology_snapshots)
 
             # --- Bandwidth rate calculation (bytes/s) ---
             poll_now = datetime.now(UTC)

@@ -8,9 +8,10 @@ import {
   IconSettings,
   IconChevronLeft,
   IconChevronRight,
+  IconCompare,
 } from './Icons';
 
-export type SidebarTab = 'topology' | 'devices' | 'clients' | 'traffic' | 'alerts' | 'settings';
+export type SidebarTab = 'topology' | 'devices' | 'clients' | 'traffic' | 'alerts' | 'compare' | 'settings';
 
 interface NavItem {
   id: SidebarTab;
@@ -34,6 +35,7 @@ export function Sidebar({ open, activeTab, warningCount, onToggle, onTabChange }
     { id: 'clients',  label: 'Clients',    Icon: IconClients },
     { id: 'traffic',  label: 'Traffic',    Icon: IconTraffic },
     { id: 'alerts',   label: 'Alarme',     Icon: IconAlerts,  badge: warningCount > 0 ? warningCount : undefined },
+    { id: 'compare',  label: 'Vergleich',  Icon: IconCompare },
     { id: 'settings', label: 'Einst.',     Icon: IconSettings },
   ];
 

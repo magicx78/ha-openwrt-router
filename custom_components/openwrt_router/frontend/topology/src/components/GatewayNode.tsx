@@ -205,11 +205,10 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onCo
               key={v.id}
               className={`vlan-badge${v.status === 'up' ? ' vlan-badge--up' : v.status === 'down' ? ' vlan-badge--down' : ''}${gateway.vlansStale ? ' vlan-badge--stale' : ''}`}
               title={gateway.vlansStale
-                ? `VLAN ${v.id} · ${v.interface} · gecachte Daten (Router kurzzeitig offline)`
-                : `VLAN ${v.id} · ${v.interface} · ${v.status}`}
+                ? `VLAN ${v.id} · gecachte Daten (Router kurzzeitig offline)`
+                : `VLAN ${v.id} · ${v.status}`}
             >
               <span className="vlan-badge__id">VLAN {v.id}</span>
-              <span className="vlan-badge__iface">{v.interface}</span>
             </span>
           ))}
           {gateway.vlansStale && (

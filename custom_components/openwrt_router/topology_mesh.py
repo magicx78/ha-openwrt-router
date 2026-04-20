@@ -158,6 +158,9 @@ def _detect_inter_router_edges(
                     break
 
             if found_via:
+                # Resolve gateway switch port via bridge FDB (MAC → port)
+                fdb: dict[str, str] = getattr(gw_data, "port_fdb_map", {})
+                gateway_port: str | None = fdb.get(ap_mac.lower())
                 edges.append({
                     "id": edge_id,
                     "from": gw_rid,
@@ -170,6 +173,39 @@ def _detect_inter_router_edges(
                         "link_type": "lan",
                         "detection_method": found_via,
                         "ap_host_ip": ap_hip,
+                        "gateway_port": gateway_port,
+                    },
+                })
+                seen_edges.add(edge_id)
+
+    # Method 2.5: ARP/trunk_port_map — IP-based port lookup (no DHCP needed)
+    # Matches AP host_ip directly against gateway's trunk_port_map {ip → port}.
+    # Used when APs have static IPs not appearing in DHCP leases.
+    for gw_rid, gw_hip, gw_data in gateways:
+        trunk_map: dict[str, str] = getattr(gw_data, "trunk_port_map", {})
+        if not trunk_map:
+            continue
+        for ap_rid, ap_hip, ap_data in router_data:
+            if ap_rid == gw_rid:
+                continue
+            edge_id = f"{gw_rid}--uplink--{ap_rid}"
+            if edge_id in seen_edges:
+                continue
+            gateway_port = trunk_map.get(ap_hip)
+            if gateway_port:
+                edges.append({
+                    "id": edge_id,
+                    "from": gw_rid,
+                    "to": ap_rid,
+                    "relationship": "lan_uplink",
+                    "source": MESH_SOURCE,
+                    "inferred": False,
+                    "inference_reason": None,
+                    "attributes": {
+                        "link_type": "lan",
+                        "detection_method": "arp_port",
+                        "ap_host_ip": ap_hip,
+                        "gateway_port": gateway_port,
                     },
                 })
                 seen_edges.add(edge_id)
@@ -403,14 +439,14 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                 wan_traffic = getattr(data, "wan_traffic", {}) or {}
                 if dsl_stats:
                     attrs["dsl_stats"] = dsl_stats
-                if wan_traffic:
-                    attrs["wan_traffic"] = wan_traffic
+                # Always include wan_traffic so frontend can show native OpenWrt throughput
+                attrs["wan_traffic"] = wan_traffic
                 attrs["ping_ms"] = getattr(data, "ping_ms", None)
                 attrs["dsl_history"] = getattr(data, "dsl_history", []) or []
                 attrs["ddns_status"] = getattr(data, "ddns_status", []) or []
+                attrs["topology_snapshots"] = getattr(data, "topology_snapshots", []) or []
 
-                # Enrich port_stats connected_device: replace MAC with AP name
-                # Use trunk_port_map (ip → port) reversed to build port → AP name
+                # Enrich port_stats: replace raw MAC in connected_device with AP name
                 trunk_map: dict[str, str] = getattr(data, "trunk_port_map", {})
                 port_to_ap_name: dict[str, str] = {}
                 for ap_rid, ap_hip, ap_data in router_data:
@@ -420,9 +456,7 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                     port = trunk_map.get(ap_hip)
                     if port:
                         port_to_ap_name[port] = ap_name
-
-                port_stats = attrs.get("port_stats") or []
-                for port in port_stats:
+                for port in (attrs.get("port_stats") or []):
                     ap_name = port_to_ap_name.get(port.get("name", ""))
                     if ap_name:
                         port["connected_device"] = ap_name

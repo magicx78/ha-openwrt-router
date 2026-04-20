@@ -56,6 +56,15 @@ export function EdgeTooltip({ edgeId, x, y, edges, data }: Props) {
     badge  = 'LAN-Kabel';
     badgeMod = 'wired';
 
+    // Trunk port connection details
+    if (ap?.gatewayPort) {
+      const speed = ap.gatewayPortSpeed
+        ? (ap.gatewayPortSpeed >= 1000 ? `${ap.gatewayPortSpeed / 1000}G` : `${ap.gatewayPortSpeed}M`)
+        : null;
+      const gwPortLabel = speed ? `${ap.gatewayPort.toUpperCase()} · ${speed}` : ap.gatewayPort.toUpperCase();
+      rows.push({ label: 'GW-Port',  value: gwPortLabel });
+      rows.push({ label: 'AP-Port',  value: 'WAN · Trunk' });
+    }
     rows.push({ label: 'Clients', value: String(ap?.clientCount ?? 0) });
     if (ap?.ip)     rows.push({ label: 'IP',     value: ap.ip });
     if (ap?.status) rows.push({ label: 'Status', value: ap.status });
