@@ -462,6 +462,38 @@ class OpenWrtAPI:
 
         return await self.get_router_info()
 
+    async def check_capabilities(self) -> dict[str, bool]:
+        """Check which ubus capabilities are available on this router.
+
+        Returns a dict of capability_name → bool for use in the config flow
+        checklist step. Non-critical failures return False instead of raising.
+        """
+        results: dict[str, bool] = {}
+
+        async def _probe(namespace: str, method: str, params: dict | None = None) -> bool:
+            try:
+                await self._call(namespace, method, params or {})
+                return True
+            except Exception:  # noqa: BLE001
+                return False
+
+        results["system_info"]      = await _probe("system", "info")
+        results["network_wireless"] = await _probe("network.wireless", "status")
+        results["network_dump"]     = await _probe("network.interface", "dump")
+        results["file_read"]        = await _probe("file", "read", {"path": "/etc/openwrt_release"})
+        results["file_exec"]        = await _probe("file", "exec", {"command": "/bin/echo", "params": ["ok"]})
+        results["luci_rpc_dhcp"]    = await _probe("luci-rpc", "getDHCPLeases")
+        results["iwinfo"]           = await _probe("iwinfo", "devices")
+        results["uci_get"]          = await _probe("uci", "get", {"config": "system"})
+
+        # hostapd: try first known interface name, accept any success
+        hostapd_ok = await _probe("hostapd.phy0-ap0", "get_clients")
+        if not hostapd_ok:
+            hostapd_ok = await _probe("hostapd.phy1-ap0", "get_clients")
+        results["hostapd_clients"]  = hostapd_ok
+
+        return results
+
     async def _ensure_fresh_token(self) -> None:
         """Proactively refresh the session token before it expires.
 

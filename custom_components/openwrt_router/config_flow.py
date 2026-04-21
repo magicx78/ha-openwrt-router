@@ -128,10 +128,30 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         """Return the options flow handler."""
         return OpenWrtOptionsFlow()
 
+    # Capability labels shown in the checklist step
+    _CAPABILITY_LABELS: dict[str, str] = {
+        "system_info":      "System-Info (CPU, RAM, Uptime)",
+        "network_wireless": "WLAN-Status (Radios, SSIDs)",
+        "network_dump":     "Netzwerk-Interfaces (WAN/LAN)",
+        "file_read":        "Datei-Lesezugriff (Konfiguration, DHCP)",
+        "file_exec":        "Datei-Ausführung (Bridge FDB, ARP)",
+        "luci_rpc_dhcp":    "DHCP-Leases (Client-IPs)",
+        "iwinfo":           "Signal-Stärke (iwinfo)",
+        "uci_get":          "UCI-Konfiguration",
+        "hostapd_clients":  "WLAN-Clients (hostapd)",
+    }
+
+    # Capabilities that block core functionality if missing
+    _REQUIRED_CAPS: frozenset[str] = frozenset({
+        "system_info", "network_dump", "network_wireless",
+    })
+
     def __init__(self) -> None:
         """Initialize the config flow."""
         super().__init__()
         self._board_info: dict[str, Any] = {}
+        self._capabilities: dict[str, bool] = {}
+        self._user_data: dict[str, Any] = {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -236,16 +256,8 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         if user_input is not None:
             protocol: str = user_input[CONF_PROTOCOL]
-
-            # Create the config entry with protocol selection
-            title = self._board_info.get("hostname") or self._user_data.get(CONF_HOST, "")
-            return self.async_create_entry(
-                title=title,
-                data={
-                    **self._user_data,
-                    CONF_PROTOCOL: protocol,
-                },
-            )
+            self._user_data[CONF_PROTOCOL] = protocol
+            return await self.async_step_checklist()
 
         # Show protocol selection form
         schema = self._build_protocol_schema()
@@ -254,6 +266,84 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=schema,
             description_placeholders={
                 "host": self._user_data.get(CONF_HOST, ""),
+                "model": self._board_info.get("model", ""),
+            },
+        )
+
+    async def async_step_checklist(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show capability checklist and let user proceed or retry.
+
+        Runs after protocol selection. Checks ubus capabilities and displays
+        which are available. Missing required caps show a warning; missing
+        optional caps show guidance. User can always proceed.
+        """
+        host = self._user_data.get(CONF_HOST, "")
+
+        if user_input is not None and user_input.get("action") != "retry":
+            # User chose to proceed → create entry
+            title = self._board_info.get("hostname") or host
+            return self.async_create_entry(title=title, data=self._user_data)
+
+        # Run capability checks
+        session = async_get_clientsession(self.hass)
+        api = OpenWrtAPI(
+            host=host,
+            port=self._user_data[CONF_PORT],
+            username=self._user_data[CONF_USERNAME],
+            password=self._user_data[CONF_PASSWORD],
+            session=session,
+        )
+        try:
+            await api.login()
+            self._capabilities = await api.check_capabilities()
+        except Exception:  # noqa: BLE001
+            self._capabilities = {}
+
+        # Build checklist text
+        lines: list[str] = []
+        missing_required: list[str] = []
+        missing_optional: list[str] = []
+
+        for cap, label in self._CAPABILITY_LABELS.items():
+            ok = self._capabilities.get(cap, False)
+            icon = "✅" if ok else "❌"
+            lines.append(f"{icon} {label}")
+            if not ok:
+                if cap in self._REQUIRED_CAPS:
+                    missing_required.append(label)
+                else:
+                    missing_optional.append(label)
+
+        checklist_text = "\n".join(lines)
+
+        if missing_required:
+            status = (
+                f"⚠️ **Kritische Berechtigungen fehlen** — die Integration kann nicht "
+                f"vollständig arbeiten.\n\n"
+                f"Bitte die rpcd-ACL auf dem Router aktualisieren:\n"
+                f"```\nscp ha-openwrt-router.json root@{host}:"
+                f"/usr/share/rpcd/acl.d/ha-openwrt-router.json\n"
+                f"/etc/init.d/rpcd restart\n```"
+            )
+        elif missing_optional:
+            status = (
+                f"ℹ️ Optionale Funktionen nicht verfügbar — Grundfunktionen OK.\n"
+                f"SSH-Fallback wird für fehlende Calls verwendet (erhöht Router-Last).\n"
+                f"Empfehlung: rpcd-ACL aktualisieren."
+            )
+        else:
+            status = "✅ Alle Berechtigungen vorhanden — optimale Konfiguration."
+
+        return self.async_show_form(
+            step_id="checklist",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "host": host,
+                "model": self._board_info.get("model", ""),
+                "checklist": checklist_text,
+                "status": status,
             },
         )
 

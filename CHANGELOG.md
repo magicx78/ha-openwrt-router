@@ -2,6 +2,12 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.15.4] - 2026-04-21
+
+### Added
+
+- **Config-Flow-Checklist**: Nach Protokollauswahl werden alle ubus-Berechtigungen geprüft (system/info, network/wireless, file/read, file/exec, hostapd/clients, iwinfo, luci-rpc, UCI). Fehlende kritische Caps → rote Warnung mit Anleitung. Fehlende optionale Caps → Info-Hinweis. Setup ist trotzdem möglich.
+
 ## [1.15.3] - 2026-04-21
 
 ### Added
