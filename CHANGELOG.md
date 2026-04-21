@@ -2,6 +2,13 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.15.3] - 2026-04-21
+
+### Added
+
+- **SSH-Fallback-Erkennung**: Wenn ein Router ubus-Calls via SSH auflöst (fehlende ACL-Berechtigungen), erscheint eine persistente HA-Benachrichtigung mit Anleitung + Poll-Intervall wird auf 5 Minuten reduziert bis das Problem behoben ist
+- **rpcd-ACL erweitert**: `file/exec`, `file/stat`, `rc/list`, `service/list`, `network.device/status` hinzugefügt — eliminiert SSH-Fallbacks auf korrekt konfigurierten Routern
+
 ## [1.15.2] - 2026-04-21
 
 ### Changed

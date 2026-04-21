@@ -211,6 +211,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._poll_offset_seconds = poll_offset_seconds
         self._poll_count = 0
         self._throttled = False  # True when interval is doubled due to high CPU load
+        self._ssh_fallback_notified = False  # True after HA notification was fired
         self._client_first_seen: dict[str, datetime] = {}
         self._prev_interface_bytes: dict[str, dict[str, int]] = {}
         self._prev_poll_time: datetime | None = None
@@ -249,6 +250,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             UpdateFailed: Any other error that prevents data retrieval.
         """
         self._poll_count += 1
+        self.api.reset_ssh_fallback_flag()
         # Apply stagger offset once on the second poll (first regular poll after setup).
         # Spreads multiple coordinators evenly across the scan interval.
         if self._poll_count == 2 and self._poll_offset_seconds > 0:
@@ -598,6 +600,32 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
 
         self._consecutive_auth_failures = 0
         self._record_events(data)
+
+        # SSH-Fallback-Erkennung: HA-Warnung + Poll auf 5 min reduzieren
+        if self.api.uses_ssh_fallback and not self._ssh_fallback_notified:
+            self._ssh_fallback_notified = True
+            from homeassistant.components.persistent_notification import async_create
+            async_create(
+                self.hass,
+                (
+                    f"**{self.name}** verwendet SSH-Fallback für einige Datenabrufe, "
+                    f"da ubus-Berechtigungen fehlen (z.B. `file/exec`, `file/stat`).\n\n"
+                    f"Das erhöht die Router-Last erheblich. "
+                    f"Bitte die rpcd-ACL auf dem Router aktualisieren:\n\n"
+                    f"```\nscp ha-openwrt-router.json root@{self.api._host}:"
+                    f"/usr/share/rpcd/acl.d/ha-openwrt-router.json\n"
+                    f"/etc/init.d/rpcd restart\n```\n\n"
+                    f"Poll-Intervall wurde auf 5 Minuten reduziert bis das Problem behoben ist."
+                ),
+                title=f"OpenWrt Router: SSH-Fallback aktiv ({self.api._host})",
+                notification_id=f"openwrt_ssh_fallback_{self.api._host}",
+            )
+            self.update_interval = timedelta(seconds=300)
+            _LOGGER.warning(
+                "%s: SSH-Fallback aktiv — Poll auf 300s reduziert. "
+                "ACL auf Router aktualisieren um ubus vollständig zu nutzen.",
+                self.name,
+            )
 
         # Adaptive polling: double interval when router is overloaded (load > 100%),
         # restore normal interval once load drops back below 80%.

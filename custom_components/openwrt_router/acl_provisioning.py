@@ -31,9 +31,10 @@ RPCD_ACL_CONTENT: dict = {
                 "/var/run/ddns/*": ["read"],
             },
             "ubus": {
-                "file": ["read"],
+                "file": ["read", "stat", "exec"],
                 "hostapd.*": ["get_clients", "get_status"],
                 "network.wireless": ["status", "up", "down"],
+                "network.device": ["status"],
                 "network.interface": ["dump"],
                 "network.interface.*": ["status", "statistics"],
                 "network.interface.wan": ["status", "statistics"],
@@ -51,6 +52,8 @@ RPCD_ACL_CONTENT: dict = {
                 ],
                 "system": ["board", "info"],
                 "uci": ["get"],
+                "rc": ["list"],
+                "service": ["list", "get_data"],
             },
         },
         "write": {

@@ -323,12 +323,24 @@ class OpenWrtAPI:
         # True when password-auth SSH is unavailable (router requires key-auth)
         self._ssh_use_key: bool = False
 
+        # Set to True the first time any SSH fallback is actually used.
+        self._ssh_fallback_used: bool = False
+
         # Cached ifname→ssid map from luci-rpc/getWirelessDevices (populated once when
         # hostapd.*/get_status is also ACL-blocked; None = not yet fetched).
         self._luci_rpc_ssid_map: dict[str, str] | None = None
 
         # L-1: track consecutive login failures to suppress log spam
         self._login_failure_count: int = 0
+
+    @property
+    def uses_ssh_fallback(self) -> bool:
+        """True if any API call fell back to SSH in the last poll cycle."""
+        return self._ssh_fallback_used
+
+    def reset_ssh_fallback_flag(self) -> None:
+        """Reset SSH fallback flag at the start of each poll cycle."""
+        self._ssh_fallback_used = False
 
         # P-6: track consecutive auth failures for backoff (wrong credentials)
         # After MAX_AUTH_FAILURES consecutive failures, stop retrying until reset.
@@ -580,6 +592,7 @@ class OpenWrtAPI:
                     "Cannot access system/info via ubus (rpcd ACL restricted), "
                     "attempting SSH fallback"
                 )
+                self._ssh_fallback_used = True
                 try:
                     return await self._get_router_status_ssh()
                 except Exception as ssh_err:
@@ -639,6 +652,7 @@ class OpenWrtAPI:
                     "Cannot access network dump via ubus (rpcd ACL restricted), "
                     "attempting SSH fallback for WAN status"
                 )
+                self._ssh_fallback_used = True
                 try:
                     return await self._get_wan_status_ssh()
                 except Exception as ssh_err:
@@ -814,6 +828,7 @@ class OpenWrtAPI:
             _LOGGER.debug("UCI wireless config not available")
 
         # SSH Fallback: try to get WiFi status via SSH script
+        self._ssh_fallback_used = True
         try:
             _LOGGER.debug("Attempting WiFi status via SSH fallback")
             result = await self._get_wifi_status_ssh()
@@ -1073,6 +1088,7 @@ class OpenWrtAPI:
 
         # When rpcd ACL blocks hostapd.*/get_clients, use SSH to query ubus directly.
         if self._hostapd_acl_blocked and hostapd_ifnames:
+            self._ssh_fallback_used = True
             try:
                 ssh_clients = await self._get_clients_via_ssh(hostapd_ifnames, ifname_to_ssid, leases)
                 if ssh_clients is not None:
@@ -2278,6 +2294,7 @@ class OpenWrtAPI:
             return out
         except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
             _LOGGER.debug("network.interface/dump failed: %s — trying SSH fallback", err)
+            self._ssh_fallback_used = True
             return await self._get_network_interfaces_ssh()
 
     async def _get_network_interfaces_ssh(self) -> list[dict[str, Any]]:
