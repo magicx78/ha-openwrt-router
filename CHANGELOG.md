@@ -2,6 +2,21 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.15.2] - 2026-04-21
+
+### Changed
+
+- **Polling-Intervall** erhöht von 30s auf 60s — reduziert Router-Last bei mehreren Instanzen
+- **Gestaffeltes Polling** — mehrere Coordinatoren verteilen sich automatisch gleichmäßig über das Intervall (0/15/30/45s Offset), keine simultanen Bursts mehr
+
+### Added
+
+- **Adaptives Polling** — bei CPU-Last >100% (Linux Load Average) wird das Intervall automatisch auf 120s verdoppelt; bei Rückkehr unter 80% wird 60s wiederhergestellt
+
+### Fixed
+
+- **CPU-Anzeige** — Wert >100% wird als "Load" statt "CPU" beschriftet und pulsierend rot hervorgehoben (Linux Load Average kann auf Single-Core-Systemen 100% überschreiten)
+
 ## [1.15.1] - 2026-04-21
 
 ### Fixed

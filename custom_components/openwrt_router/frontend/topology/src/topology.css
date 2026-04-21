@@ -1646,6 +1646,8 @@
 .metric-ok   { color: var(--green); }
 .metric-warn { color: var(--amber); }
 .metric-critical { color: var(--red); }
+.metric--critical { color: var(--red); animation: pulse-red 1.2s ease-in-out infinite; }
+@keyframes pulse-red { 0%,100% { opacity:1; } 50% { opacity:.55; } }
 
 /* ── SSID badges (gateway + AP) ──────────────────────────────────────── */
 .gateway-card__ssids,

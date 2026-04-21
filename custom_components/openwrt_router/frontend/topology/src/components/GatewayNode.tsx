@@ -152,13 +152,16 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onCo
           {cpu != null && (
             <div className="gateway-metric">
               <div className="gateway-metric__row">
-                <span className="gateway-metric__label">CPU</span>
-                <span className={`gateway-metric__value ${trendClass(history, cpu)}`}>
+                <span className="gateway-metric__label">{cpu > 100 ? 'Load' : 'CPU'}</span>
+                <span className={`gateway-metric__value ${cpu > 100 ? 'metric--critical' : trendClass(history, cpu)}`}>
                   {cpu.toFixed(0)}%&nbsp;{trendArrow(history)}
                 </span>
               </div>
               {history.length > 1 && (
-                <MiniSparkline values={history} color={cpu > 80 ? '#ef4444' : cpu > 60 ? '#f59e0b' : '#22c55e'} />
+                <MiniSparkline
+                  values={history}
+                  color={cpu > 100 ? '#ef4444' : cpu > 80 ? '#ef4444' : cpu > 60 ? '#f59e0b' : '#22c55e'}
+                />
               )}
             </div>
           )}

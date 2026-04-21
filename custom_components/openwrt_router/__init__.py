@@ -121,12 +121,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
             f"Cannot reach OpenWrt router at {host}:{port}: {err}"
         ) from err
 
+    # Stagger polling: spread multiple coordinators evenly across the scan interval
+    # so they never all poll simultaneously (e.g. 4 routers × 15s = 0/15/30/45s offsets).
+    from .const import SCAN_INTERVAL_SECONDS
+    loaded_entries = hass.config_entries.async_entries(DOMAIN)
+    stagger_index = sum(
+        1 for e in loaded_entries
+        if e.entry_id != entry.entry_id
+    )
+    poll_offset = (stagger_index * SCAN_INTERVAL_SECONDS) // 4
+
     # Create and populate the coordinator
     coordinator = OpenWrtCoordinator(
         hass=hass,
         api=api,
         entry_title=entry.title,
         entry=entry,
+        poll_offset_seconds=poll_offset,
     )
 
     # First refresh – raises ConfigEntryNotReady if it fails

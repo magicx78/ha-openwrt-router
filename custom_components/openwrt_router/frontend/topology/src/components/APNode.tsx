@@ -142,7 +142,7 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
           <StatusDot status={ap.status} />
           {health && (
             <span className={`health-badge health-badge--${health}`}>
-              {ap.cpuLoad != null ? `CPU ${ap.cpuLoad}%` : `${ap.backhaulSignal} dBm`}
+              {ap.cpuLoad != null ? `${ap.cpuLoad > 100 ? 'Load' : 'CPU'} ${ap.cpuLoad}%` : `${ap.backhaulSignal} dBm`}
             </span>
           )}
         </div>
@@ -202,13 +202,13 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
       {(ap.cpuHistoryBackend?.length ?? 0) >= 3 && (() => {
         const cpuVals = ap.cpuHistoryBackend!.map(p => p.cpu);
         const cpu = ap.cpuLoad ?? cpuVals[cpuVals.length - 1] ?? 0;
-        const sparkColor = cpu > 80 ? '#ef4444' : cpu > 60 ? '#f59e0b' : '#22c55e';
+        const sparkColor = cpu > 100 ? '#ef4444' : cpu > 80 ? '#ef4444' : cpu > 60 ? '#f59e0b' : '#22c55e';
         return (
           <div className="ap-card__metrics">
             <div className="gateway-metric">
               <div className="gateway-metric__row">
-                <span className="gateway-metric__label">CPU</span>
-                <span className={`gateway-metric__value ${trendClass(cpuVals, cpu)}`}>
+                <span className="gateway-metric__label">{cpu > 100 ? 'Load' : 'CPU'}</span>
+                <span className={`gateway-metric__value ${cpu > 100 ? 'metric--critical' : trendClass(cpuVals, cpu)}`}>
                   {cpu.toFixed(0)}%&nbsp;{trendArrow(cpuVals)}
                 </span>
               </div>

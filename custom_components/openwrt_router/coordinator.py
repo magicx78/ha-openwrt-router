@@ -188,6 +188,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         api: OpenWrtAPI,
         entry_title: str,
         entry: Any | None = None,
+        poll_offset_seconds: int = 0,
     ) -> None:
         """Initialise the coordinator.
 
@@ -207,6 +208,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._entry = entry
         self._features_detected = False
         self._board_poll_count = 0
+        self._poll_offset_seconds = poll_offset_seconds
+        self._poll_count = 0
+        self._throttled = False  # True when interval is doubled due to high CPU load
         self._client_first_seen: dict[str, datetime] = {}
         self._prev_interface_bytes: dict[str, dict[str, int]] = {}
         self._prev_poll_time: datetime | None = None
@@ -244,6 +248,15 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             ConfigEntryAuthFailed: Credentials are invalid (triggers re-auth flow).
             UpdateFailed: Any other error that prevents data retrieval.
         """
+        self._poll_count += 1
+        # Apply stagger offset once on the second poll (first regular poll after setup).
+        # Spreads multiple coordinators evenly across the scan interval.
+        if self._poll_count == 2 and self._poll_offset_seconds > 0:
+            _LOGGER.debug(
+                "Stagger offset: delaying first regular poll by %ds", self._poll_offset_seconds
+            )
+            await asyncio.sleep(self._poll_offset_seconds)
+
         data = OpenWrtCoordinatorData()
 
         try:
@@ -585,6 +598,27 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
 
         self._consecutive_auth_failures = 0
         self._record_events(data)
+
+        # Adaptive polling: double interval when router is overloaded (load > 100%),
+        # restore normal interval once load drops back below 80%.
+        cpu = data.cpu_load
+        normal_interval = timedelta(seconds=SCAN_INTERVAL_SECONDS)
+        throttled_interval = timedelta(seconds=SCAN_INTERVAL_SECONDS * 2)
+        if not self._throttled and cpu > 100:
+            self._throttled = True
+            self.update_interval = throttled_interval
+            _LOGGER.warning(
+                "%s: CPU load %.0f%% — reducing poll frequency to %ds",
+                self.name, cpu, SCAN_INTERVAL_SECONDS * 2,
+            )
+        elif self._throttled and cpu < 80:
+            self._throttled = False
+            self.update_interval = normal_interval
+            _LOGGER.info(
+                "%s: CPU load %.0f%% — restoring normal poll frequency (%ds)",
+                self.name, cpu, SCAN_INTERVAL_SECONDS,
+            )
+
         return data
 
     # ------------------------------------------------------------------
