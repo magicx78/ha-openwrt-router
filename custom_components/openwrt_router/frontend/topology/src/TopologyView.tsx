@@ -99,6 +99,7 @@ export function TopologyView({ data }: Props) {
   const [dragging,   setDragging]   = useState(false);
   const [zoomFlying, setZoomFlying] = useState(false);
   const lastPos = useRef<{ x: number; y: number } | null>(null);
+  const zoomFlyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Keep refs in sync so wheel handler (captured by addEventListener) reads
   // the latest zoom/pan without stale closure.
@@ -132,12 +133,23 @@ export function TopologyView({ data }: Props) {
     y: number;
   } | null>(null);
 
-  // ── CPU history ring buffer (accumulates cpuLoad across polls) ──────────
+// ── CPU history ring buffer (accumulates cpuLoad across polls) ──────────
   const CPU_HISTORY_MAX = 20;
   const cpuHistoryRef = useRef<number[]>([]);
-  if (data.gateway.cpuLoad != null) {
-    cpuHistoryRef.current = [...cpuHistoryRef.current, data.gateway.cpuLoad].slice(-CPU_HISTORY_MAX);
-  }
+  const lastCpuSampleTsRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (data.gateway.cpuLoad == null) return;
+
+  // Append once per backend snapshot to avoid duplicate samples on local UI re-renders.
+    if (lastCpuSampleTsRef.current === data.timestamp) return;
+
+    lastCpuSampleTsRef.current = data.timestamp;
+    cpuHistoryRef.current = [
+      ...cpuHistoryRef.current,
+      data.gateway.cpuLoad,
+    ].slice(-CPU_HISTORY_MAX);
+  }, [data.timestamp, data.gateway.cpuLoad]);
 
   // ── Filter / search / hover / selection ─────────────────────────────────
   const [filter,      setFilter]      = useState<FilterType>('all');
@@ -181,6 +193,8 @@ export function TopologyView({ data }: Props) {
     }));
   }, []);
 
+  const zoomResetTimeoutRef = useRef<number | null>(null);
+
   // ── Double-click zoom: fly to node at 2×, or reset if already zoomed in ──
   const zoomToNode = useCallback((nodeId: string) => {
     const el = nodeRefs.current.get(nodeId);
@@ -204,10 +218,29 @@ export function TopologyView({ data }: Props) {
       setPan({ x: sr.width / 2 - logX * TARGET, y: sr.height / 2 - logY * TARGET });
     }
     // Remove flying class after animation completes
-    setTimeout(() => setZoomFlying(false), 380);
+
+const CPU_HISTORY_MAX = 20;
+const cpuHistoryRef = useRef<number[]>([]);
+const lastCpuSampleTsRef = useRef<string | null>(null);
+
+useEffect(() => {
+  if (data.gateway.cpuLoad == null) return;
+  // Append once per backend snapshot to avoid duplicate samples on local UI re-renders.
+  if (lastCpuSampleTsRef.current === data.timestamp) return;
+  lastCpuSampleTsRef.current = data.timestamp;
+  cpuHistoryRef.current = [...cpuHistoryRef.current, data.gateway.cpuLoad].slice(-CPU_HISTORY_MAX);
+}, [data.timestamp, data.gateway.cpuLoad]);
   }, []);
 
   // ── Wheel zoom (must be non-passive to call preventDefault) ─────────────
+  useEffect(() => {
+    return () => {
+      if (zoomFlyTimerRef.current) {
+        clearTimeout(zoomFlyTimerRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;

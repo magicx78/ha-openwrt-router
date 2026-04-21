@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import { AccessPoint, Client } from './types';
 
 const GHOST_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -23,77 +23,95 @@ export function useGhostDevices(
   liveClients: Client[],
   enabled: boolean,
 ): GhostDevices {
-  const ghostAPs    = useRef<Map<string, GhostAP>>(new Map());
+  const ghostAPs = useRef<Map<string, GhostAP>>(new Map());
   const ghostClients = useRef<Map<string, GhostClient>>(new Map());
+  const prevAPs = useRef<Map<string, AccessPoint>>(new Map());
+  const prevClients = useRef<Map<string, Client>>(new Map());
+  const [, setGhostTick] = useState(0);
 
   useEffect(() => {
+    let changed = false;
+
     if (!enabled) {
       ghostAPs.current.clear();
       ghostClients.current.clear();
+      prevAPs.current.clear();
+      prevClients.current.clear();
+      setGhostTick(t => t + 1);
       return;
     }
 
     const now = Date.now();
-    const liveApIds    = new Set(liveAPs.map(a => a.id));
+    const liveApIds = new Set(liveAPs.map(a => a.id));
     const liveClientIds = new Set(liveClients.map(c => c.id));
 
-    // Evict expired ghosts
+    // Evict expired ghosts + remove ghosts that came back
     for (const [id, g] of ghostAPs.current) {
-      if (now - g.lastSeenMs > GHOST_TTL_MS) ghostAPs.current.delete(id);
+      if (now - g.lastSeenMs > GHOST_TTL_MS || liveApIds.has(id)) {
+        ghostAPs.current.delete(id);
+        changed = true;
+      }
     }
     for (const [id, g] of ghostClients.current) {
-      if (now - g.lastSeenMs > GHOST_TTL_MS) ghostClients.current.delete(id);
+      if (now - g.lastSeenMs > GHOST_TTL_MS || liveClientIds.has(id)) {
+        ghostClients.current.delete(id);
+        changed = true;
+      }
     }
-
-    // Add newly disappeared devices as ghosts
-    for (const [id, g] of ghostAPs.current) {
-      if (liveApIds.has(id)) ghostAPs.current.delete(id); // came back online
-    }
-    for (const [id, g] of ghostClients.current) {
-      if (liveClientIds.has(id)) ghostClients.current.delete(id);
-    }
-
-    // Record currently live devices so we can ghost them later
-    // We store live snapshots each render so we can ghost them on next render when gone
-    // (handled via the "previous live" approach below)
-  }, [liveAPs, liveClients, enabled]);
-
-  // Track previous live sets to detect disappearances
-  const prevAPs    = useRef<Map<string, AccessPoint>>(new Map());
-  const prevClients = useRef<Map<string, Client>>(new Map());
-
-  if (enabled) {
-    const now = Date.now();
-    const liveApIds     = new Set(liveAPs.map(a => a.id));
-    const liveClientIds = new Set(liveClients.map(c => c.id));
 
     // AP disappeared → create ghost
     for (const [id, ap] of prevAPs.current) {
       if (!liveApIds.has(id) && !ghostAPs.current.has(id)) {
         ghostAPs.current.set(id, { ...ap, isGhost: true, lastSeenMs: now });
+        changed = true;
       }
     }
     // Client disappeared → create ghost
     for (const [id, cl] of prevClients.current) {
       if (!liveClientIds.has(id) && !ghostClients.current.has(id)) {
         ghostClients.current.set(id, { ...cl, isGhost: true, lastSeenMs: now });
+        changed = true;
       }
     }
 
     // Update previous maps
     prevAPs.current = new Map(liveAPs.map(a => [a.id, a]));
     prevClients.current = new Map(liveClients.map(c => [c.id, c]));
-  } else {
-    prevAPs.current.clear();
-    prevClients.current.clear();
-  }
+    if (changed) setGhostTick(t => t + 1);
+  }, [liveAPs, liveClients, enabled]);
+
+  useEffect(() => {
+    if (!enabled) return;
+
+    const intervalId = window.setInterval(() => {
+      const now = Date.now();
+      let changed = false;
+
+      for (const [id, g] of ghostAPs.current) {
+        if (now - g.lastSeenMs > GHOST_TTL_MS) {
+          ghostAPs.current.delete(id);
+          changed = true;
+        }
+      }
+      for (const [id, g] of ghostClients.current) {
+        if (now - g.lastSeenMs > GHOST_TTL_MS) {
+          ghostClients.current.delete(id);
+          changed = true;
+        }
+      }
+
+      if (changed) setGhostTick(t => t + 1);
+    }, 30 * 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [enabled]);
 
   if (!enabled) {
     return { aps: [], clients: [] };
   }
 
   return {
-    aps:     [...ghostAPs.current.values()],
+    aps: [...ghostAPs.current.values()],
     clients: [...ghostClients.current.values()],
   };
 }
