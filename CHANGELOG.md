@@ -2,6 +2,14 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.15.1] - 2026-04-21
+
+### Fixed
+
+- **Topology: Memory-Leak** — `nodeRefs` Map entfernt jetzt Einträge beim Node-Unmount statt unbegrenzt zu wachsen
+- **Topology: CPU-Spike bei mehreren Routern** — `recomputeEdges` (DOM-Layout-Reflow) wird nicht mehr bei jedem Coordinator-Update ausgelöst; stabilisiert durch `dataRef` + AP-ID-Fingerprint als Dependency statt des gesamten `data`-Objekts
+- **Topology: Merge-Conflict-Artefakt** — duplizierter CPU-History-Block war fälschlicherweise im `zoomToNode`-Callback eingebettet; `zoomFlyTimerRef` wird jetzt korrekt für Animations-Cleanup verwendet
+
 ## [1.13.0] - 2026-04-19
 
 ### Fixed

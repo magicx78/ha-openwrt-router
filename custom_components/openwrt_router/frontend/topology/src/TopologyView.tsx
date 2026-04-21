@@ -193,8 +193,6 @@ export function TopologyView({ data }: Props) {
     }));
   }, []);
 
-  const zoomResetTimeoutRef = useRef<number | null>(null);
-
   // ── Double-click zoom: fly to node at 2×, or reset if already zoomed in ──
   const zoomToNode = useCallback((nodeId: string) => {
     const el = nodeRefs.current.get(nodeId);
@@ -202,7 +200,6 @@ export function TopologyView({ data }: Props) {
     if (!el || !sc) return;
 
     if (zoomRef.current >= 1.75) {
-      // Already zoomed in — reset to fit
       setZoomFlying(true);
       setZoom(1.0);
       setPan({ x: 0, y: 0 });
@@ -210,26 +207,14 @@ export function TopologyView({ data }: Props) {
       const er = el.getBoundingClientRect();
       const sr = sc.getBoundingClientRect();
       const TARGET = 2.0;
-      // Node center in logical coords
       const logX = (er.left + er.width  / 2 - sr.left - panRef.current.x) / zoomRef.current;
       const logY = (er.top  + er.height / 2 - sr.top  - panRef.current.y) / zoomRef.current;
       setZoomFlying(true);
       setZoom(TARGET);
       setPan({ x: sr.width / 2 - logX * TARGET, y: sr.height / 2 - logY * TARGET });
     }
-    // Remove flying class after animation completes
-
-const CPU_HISTORY_MAX = 20;
-const cpuHistoryRef = useRef<number[]>([]);
-const lastCpuSampleTsRef = useRef<string | null>(null);
-
-useEffect(() => {
-  if (data.gateway.cpuLoad == null) return;
-  // Append once per backend snapshot to avoid duplicate samples on local UI re-renders.
-  if (lastCpuSampleTsRef.current === data.timestamp) return;
-  lastCpuSampleTsRef.current = data.timestamp;
-  cpuHistoryRef.current = [...cpuHistoryRef.current, data.gateway.cpuLoad].slice(-CPU_HISTORY_MAX);
-}, [data.timestamp, data.gateway.cpuLoad]);
+    if (zoomFlyTimerRef.current) clearTimeout(zoomFlyTimerRef.current);
+    zoomFlyTimerRef.current = setTimeout(() => setZoomFlying(false), 400);
   }, []);
 
   // ── Wheel zoom (must be non-passive to call preventDefault) ─────────────
@@ -263,10 +248,19 @@ useEffect(() => {
     return () => el.removeEventListener('wheel', onWheel);
   }, []); // stable: uses refs internally
 
+  // Keep a ref to data so recomputeEdges stays stable across data-only updates.
+  // Edge positions depend on DOM layout (zoom, node count), not on data values.
+  const dataRef = useRef(data);
+  dataRef.current = data;
+
+  // Stable AP-ID fingerprint — only changes when nodes are added/removed.
+  const apIdKey = data.accessPoints.map(a => a.id).join(',');
+
   // ── Recompute edge paths from DOM bounding boxes ─────────────────────────
   const recomputeEdges = useCallback(() => {
     const wrapperEl = wrapperRef.current;
     if (!wrapperEl) return;
+    const d  = dataRef.current;
     const wr = wrapperEl.getBoundingClientRect();
     const z  = zoomRef.current;
 
@@ -274,8 +268,6 @@ useEffect(() => {
     nodeRefs.current.forEach((el, id) => {
       if (!el) return;
       const r = el.getBoundingClientRect();
-      // Convert screen coords (affected by zoom) back to logical coords.
-      // Pan cancels out when computing relative to wrapper origin.
       bounds.set(id, {
         cx: (r.left - wr.left) / z + (r.width  / z) / 2,
         cy: (r.top  - wr.top)  / z + (r.height / z) / 2,
@@ -285,15 +277,14 @@ useEffect(() => {
     });
 
     setSvgSize({ w: wrapperEl.offsetWidth, h: wrapperEl.offsetHeight });
-    setEdges(computeEdgesFromBounds(data, bounds));
+    setEdges(computeEdgesFromBounds(d, bounds));
 
-    // Derive minimap nodes from measured bounds
     const mmNodes: MinimapNode[] = [];
     const ib = bounds.get('internet');
     if (ib) mmNodes.push({ id: 'internet', cx: ib.cx, cy: ib.cy, status: 'online', kind: 'internet' });
-    const gb = bounds.get(data.gateway.id);
-    if (gb) mmNodes.push({ id: data.gateway.id, cx: gb.cx, cy: gb.cy, status: data.gateway.status, kind: 'gateway' });
-    data.accessPoints.forEach(ap => {
+    const gb = bounds.get(d.gateway.id);
+    if (gb) mmNodes.push({ id: d.gateway.id, cx: gb.cx, cy: gb.cy, status: d.gateway.status, kind: 'gateway' });
+    d.accessPoints.forEach(ap => {
       const b = bounds.get(ap.id);
       if (b) mmNodes.push({ id: ap.id, cx: b.cx, cy: b.cy, status: ap.status, kind: 'ap' });
     });
@@ -301,7 +292,8 @@ useEffect(() => {
 
     const sc = scrollRef.current;
     if (sc) setContainerSize({ w: sc.clientWidth, h: sc.clientHeight });
-  }, [data, zoom]); // zoom in deps → new fn → effect re-runs
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoom, apIdKey]); // data-only updates do NOT rebuild this fn
 
   // Run after every render where deps changed (before paint = no flash)
   useLayoutEffect(() => {
@@ -422,7 +414,11 @@ useEffect(() => {
 
   // ── Ref setter helper ────────────────────────────────────────────────────
   const setNodeRef = (id: string) => (el: HTMLDivElement | null) => {
-    nodeRefs.current.set(id, el);
+    if (el) {
+      nodeRefs.current.set(id, el);
+    } else {
+      nodeRefs.current.delete(id);
+    }
   };
 
   // ── Context menu item builders ────────────────────────────────────────────
