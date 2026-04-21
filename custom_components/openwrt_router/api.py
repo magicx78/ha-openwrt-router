@@ -1268,6 +1268,7 @@ class OpenWrtAPI:
         """Run a remote SSH command and return stdout. Auto-detects key vs. password auth."""
         for attempt in range(2):
             cmd = self._build_ssh_cmd(remote_cmd)
+            proc = None
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -1280,6 +1281,14 @@ class OpenWrtAPI:
                 # Return stdout even on non-zero exit (partial output is still useful)
                 out = stdout.decode(errors="replace")
                 return out if out.strip() else None
+            except asyncio.TimeoutError:
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                        await asyncio.wait_for(proc.wait(), timeout=3.0)
+                    except Exception:  # noqa: BLE001
+                        proc.kill()
+                return None
             except Exception:  # noqa: BLE001
                 return None
         return None
@@ -1308,6 +1317,7 @@ class OpenWrtAPI:
             "/root/ha-system-metrics.sh",
         ]
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *ssh_cmd,
@@ -1343,6 +1353,12 @@ class OpenWrtAPI:
                 raise OpenWrtResponseError(f"SSH metrics failed: {error_msg}")
 
         except asyncio.TimeoutError:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=3.0)
+                except Exception:  # noqa: BLE001
+                    proc.kill()
             _LOGGER.error("SSH system metrics timed out")
             raise OpenWrtTimeoutError("SSH system metrics timed out")
         except Exception as err:
@@ -1373,6 +1389,7 @@ class OpenWrtAPI:
             "/root/ha-wan-status.sh",
         ]
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *ssh_cmd,
@@ -1403,6 +1420,12 @@ class OpenWrtAPI:
                 raise OpenWrtResponseError(f"SSH WAN status failed: {error_msg}")
 
         except asyncio.TimeoutError:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=3.0)
+                except Exception:  # noqa: BLE001
+                    proc.kill()
             _LOGGER.error("SSH WAN status timed out")
             raise OpenWrtTimeoutError("SSH WAN status timed out")
         except Exception as err:
@@ -1443,6 +1466,7 @@ class OpenWrtAPI:
             shell_cmd,
         ]
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *ssh_cmd,
@@ -1450,8 +1474,17 @@ class OpenWrtAPI:
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-        except (asyncio.TimeoutError, Exception) as err:
-            _LOGGER.debug("SSH get_clients timed out or failed: %s", err)
+        except asyncio.TimeoutError as err:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=3.0)
+                except Exception:  # noqa: BLE001
+                    proc.kill()
+            _LOGGER.debug("SSH get_clients timed out: %s", err)
+            return None
+        except Exception as err:
+            _LOGGER.debug("SSH get_clients failed: %s", err)
             return None
 
         if proc.returncode != 0:
@@ -1529,6 +1562,7 @@ class OpenWrtAPI:
             iface_cmds,
         ]
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *ssh_cmd,
@@ -1536,8 +1570,17 @@ class OpenWrtAPI:
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-        except (asyncio.TimeoutError, Exception) as err:
-            _LOGGER.debug("SSH iw station dump timed out or failed: %s", err)
+        except asyncio.TimeoutError as err:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=3.0)
+                except Exception:  # noqa: BLE001
+                    proc.kill()
+            _LOGGER.debug("SSH iw station dump timed out: %s", err)
+            return None
+        except Exception as err:
+            _LOGGER.debug("SSH iw station dump failed: %s", err)
             return None
 
         output = stdout.decode(errors="replace")

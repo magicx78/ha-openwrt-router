@@ -335,8 +335,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                         asyncio.open_connection("8.8.8.8", 53), timeout=3.0
                     )
                     data.ping_ms = round((time.monotonic() - t0) * 1000, 1)
-                    writer.close()
-                    await writer.wait_closed()
+                    try:
+                        writer.close()
+                        await writer.wait_closed()
+                    except Exception:  # noqa: BLE001
+                        pass
                 except Exception:  # noqa: BLE001
                     data.ping_ms = None
 
@@ -497,6 +500,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                             delta = curr - prev_val
                             iface[rate_key] = round(max(0, delta) / elapsed, 2) if delta >= 0 else 0
             self._prev_poll_time = poll_now
+            # Rebuild from current interfaces only — removes stale entries for
+            # interfaces that no longer exist (tunnels, temporary VLANs, etc.)
             self._prev_interface_bytes = {
                 iface.get("interface", ""): {
                     "rx_bytes": iface.get("rx_bytes") or 0,
