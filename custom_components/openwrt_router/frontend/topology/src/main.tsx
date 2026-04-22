@@ -22,6 +22,7 @@ class OpenWrtTopologyPanel extends HTMLElement {
   private _refreshTimer: ReturnType<typeof setInterval> | null = null;
   private _retryTimer: ReturnType<typeof setTimeout> | null = null;
   private _fetching = false;
+  private _sessionExpired = false;
 
   connectedCallback() {
     this.style.display = 'block';
@@ -60,16 +61,23 @@ class OpenWrtTopologyPanel extends HTMLElement {
   }
 
   // HA calls this setter on every state update — just store the reference.
+  // If a new hass object arrives after session expiry, reset and resume polling.
   set hass(hass: HassLike) {
+    const wasExpired = this._sessionExpired;
     this._hass = hass;
+    if (wasExpired && hass) {
+      this._sessionExpired = false;
+      this._refreshTimer = setInterval(() => void this._fetchAndRender(), 30_000);
+      void this._fetchAndRender();
+    }
   }
 
   private async _fetchAndRender() {
-    if (!this._hass || !this._root || this._fetching) return;
+    if (!this._hass || !this._root || this._fetching || this._sessionExpired) return;
     this._fetching = true;
     try {
       const topologyData = await fetchTopologyData(this._hass);
-      if (!this._root) return; // unmounted while fetching
+      if (!this._root) return;
       this._root.render(
         <React.StrictMode>
           <TopologyView data={topologyData} />
@@ -82,14 +90,28 @@ class OpenWrtTopologyPanel extends HTMLElement {
         return;
       }
       if (!this._root) return;
+
+      // 401 = session expired — stop polling, show reload prompt
+      const is401 = String(err).includes('401');
+      if (is401) {
+        this._sessionExpired = true;
+        if (this._refreshTimer) {
+          clearInterval(this._refreshTimer);
+          this._refreshTimer = null;
+        }
+        this._root.render(
+          <div style={{ color: 'var(--warning-color, #f59e0b)', padding: '24px', fontFamily: 'var(--paper-font-body1_-_font-family, sans-serif)' }}>
+            <strong>Sitzung abgelaufen.</strong>{' '}
+            <a href="#" onClick={e => { e.preventDefault(); window.location.reload(); }} style={{ color: 'var(--primary-color, #03a9f4)' }}>
+              Seite neu laden
+            </a>
+          </div>,
+        );
+        return;
+      }
+
       this._root.render(
-        <div
-          style={{
-            color: 'var(--error-color, #db4437)',
-            padding: '24px',
-            fontFamily: 'var(--paper-font-body1_-_font-family, sans-serif)',
-          }}
-        >
+        <div style={{ color: 'var(--error-color, #db4437)', padding: '24px', fontFamily: 'var(--paper-font-body1_-_font-family, sans-serif)' }}>
           Topology load failed: {String(err)}
         </div>,
       );

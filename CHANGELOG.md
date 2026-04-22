@@ -2,6 +2,12 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.15.5] - 2026-04-22
+
+### Fixed
+
+- **Topology: Polling bei abgelaufener Sitzung** — bei HTTP 401 wird der Refresh-Timer gestoppt statt weiter zu pollen; stattdessen erscheint eine "Sitzung abgelaufen — Seite neu laden"-Meldung. Sobald HA ein neues `hass`-Objekt liefert, wird das Polling automatisch wiederaufgenommen.
+
 ## [1.15.4] - 2026-04-21
 
 ### Added
