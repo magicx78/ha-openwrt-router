@@ -2,6 +2,13 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.15.6] - 2026-04-22
+
+### Fixed
+
+- **rpcd Memory Leak (kritisch)**: `file/exec` wurde aus der ACL und aus `get_bridge_fdb` entfernt — rpcd akkumulierte pro Poll-Zyklus Speicher durch großen stdout-Output vom `bridge fdb show`-Befehl (136 MB statt <5 MB). Bridge FDB wird nun via `file/read` auf `/sys/class/net/br-lan/brforward` gelesen (kein Shell-Exec nötig).
+- **ACL**: `file/exec` → `file/list` ersetzt; alle Router aktualisiert
+
 ## [1.15.5] - 2026-04-22
 
 ### Fixed

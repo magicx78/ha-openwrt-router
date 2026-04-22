@@ -31,7 +31,7 @@ RPCD_ACL_CONTENT: dict = {
                 "/var/run/ddns/*": ["read"],
             },
             "ubus": {
-                "file": ["read", "stat", "exec"],
+                "file": ["read", "stat", "list"],
                 "hostapd.*": ["get_clients", "get_status"],
                 "network.wireless": ["status", "up", "down"],
                 "network.device": ["status"],

@@ -481,7 +481,7 @@ class OpenWrtAPI:
         results["network_wireless"] = await _probe("network.wireless", "status")
         results["network_dump"]     = await _probe("network.interface", "dump")
         results["file_read"]        = await _probe("file", "read", {"path": "/etc/openwrt_release"})
-        results["file_exec"]        = await _probe("file", "exec", {"command": "/bin/echo", "params": ["ok"]})
+        results["file_list"]        = await _probe("file", "list", {"path": "/sys/class/net"})
         results["luci_rpc_dhcp"]    = await _probe("luci-rpc", "getDHCPLeases")
         results["iwinfo"]           = await _probe("iwinfo", "devices")
         results["uci_get"]          = await _probe("uci", "get", {"config": "system"})
@@ -2495,36 +2495,66 @@ class OpenWrtAPI:
         """Return MAC-address → port-name mapping from the bridge forwarding database.
 
         Strategy (tries in order):
-        1. /sbin/bridge fdb show via ubus file/exec
-        2. /sys/class/net/br-lan/brforward binary via SSH (DSA routers without bridge binary)
+        1. file/read on /sys/class/net/br-lan/brforward binary (no exec needed)
+        2. /sys/class/net/br-lan/brforward binary via SSH fallback
+
+        Note: file/exec is intentionally NOT used — rpcd leaks memory per exec call
+        when stdout is large, causing gradual RAM exhaustion over polling cycles.
 
         Returns:
             {"aa:bb:cc:dd:ee:ff": "lan1", ...}
             Returns {} on total failure.
         """
-        # Method 1: bridge binary via ubus exec
+        # Build port_no → interface name map from sysfs (via file/read, no exec)
+        async def _get_port_map() -> dict[int, str]:
+            port_map: dict[int, str] = {}
+            try:
+                # Read bridge members from sysfs — each brport has a port_no file
+                for_result = await self._call(
+                    UBUS_FILE_OBJECT, "list",
+                    {"path": "/sys/class/net", "depth": 1},
+                )
+                ifaces = [e.get("name", "") for e in for_result.get("entries", []) if e.get("type") == "directory"]
+            except Exception:  # noqa: BLE001
+                ifaces = ["lan1", "lan2", "lan3", "lan4", "wan", "eth0", "eth1"]
+            for iface in ifaces:
+                try:
+                    pno_result = await self._call(
+                        UBUS_FILE_OBJECT, "read",
+                        {"path": f"/sys/class/net/{iface}/brport/port_no"},
+                    )
+                    pno_str = (pno_result.get("data") or "").strip()
+                    if pno_str:
+                        port_map[int(pno_str, 16)] = iface
+                except Exception:  # noqa: BLE001
+                    pass
+            return port_map
+
+        # Method 1: file/read on brforward binary (avoids file/exec memory leak)
         try:
+            port_no_map = await _get_port_map()
             result = await self._call(
-                UBUS_FILE_OBJECT,
-                "exec",
-                {"command": "/sbin/bridge", "params": ["fdb", "show", "br", "br-lan"]},
+                UBUS_FILE_OBJECT, "read",
+                {"path": "/sys/class/net/br-lan/brforward"},
             )
-            stdout = result.get("stdout", "") or ""
-            if stdout.strip():
+            raw = result.get("data", "") or ""
+            # brforward is base64-encoded when returned via file/read
+            import base64
+            fdb_bytes = base64.b64decode(raw) if raw else b""
+            if fdb_bytes and len(fdb_bytes) % 8 == 0:
                 fdb: dict[str, str] = {}
-                for line in stdout.splitlines():
-                    parts = line.split()
-                    if len(parts) >= 3 and parts[1] == "dev":
-                        mac = parts[0].lower()
-                        port = parts[2]
-                        if "self" in parts or "permanent" in parts:
-                            continue
-                        if port.startswith(("lan", "wan", "eth")):
-                            fdb[mac] = port
+                for i in range(len(fdb_bytes) // 8):
+                    chunk = fdb_bytes[i * 8:(i + 1) * 8]
+                    mac = ":".join(f"{b:02x}" for b in chunk[:6])
+                    port_no = chunk[6]
+                    iface = port_no_map.get(port_no)
+                    if iface and iface.startswith(("lan", "wan", "eth")):
+                        fdb[mac] = iface
                 if fdb:
+                    _LOGGER.debug("Bridge FDB via file/read: %d entries", len(fdb))
                     return fdb
         except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
-            _LOGGER.debug("Bridge FDB via ubus unavailable: %s", err)
+            _LOGGER.debug("Bridge FDB via file/read unavailable: %s", err)
 
         # Method 2: /sys/class/net/br-lan/brforward binary via SSH (no bridge binary)
         try:
