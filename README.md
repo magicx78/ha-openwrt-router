@@ -1,7 +1,7 @@
 # OpenWrt Router – Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.12.0-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.12.0)
+[![Version](https://img.shields.io/badge/version-1.15.6-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.15.6)
 [![Tests](https://img.shields.io/badge/tests-396%20passing-brightgreen.svg)](https://github.com/magicx78/ha-openwrt-router/actions)
 
 A production-ready Home Assistant custom integration for [OpenWrt](https://openwrt.org/) routers, communicating via the built-in **ubus / rpcd JSON-RPC API**. Supports multi-AP mesh networks with a live topology panel.
@@ -261,6 +261,16 @@ Topology Panel (sidebar)
 
 | Version | Date | Key Features |
 |---------|------|---|
+| **1.15.6** | 2026-04-22 | **rpcd Memory Leak Fix (CRITICAL)** — `file/exec` removed from ACL; Bridge FDB now via `file/read` on `/sys/class/net/br-lan/brforward` (136 MB → <5 MB) |
+| **1.15.5** | 2026-04-22 | **Topology Polling Fix** — stops on HTTP 401 (session expired); shows HA notification instead of continuous retries |
+| **1.15.4** | 2026-04-21 | **Config-Flow Capability Checklist** — verifies ubus permissions during setup; red warnings for critical caps missing |
+| **1.15.3** | 2026-04-21 | **SSH Fallback Detection** — persistent HA notification when ACL forces SSH; poll interval drops to 5m during remediation |
+| **1.15.2** | 2026-04-21 | **Staggered & Adaptive Polling** — multiple coordinators distribute 60s interval evenly (0/15/30/45s offset); auto-doubles to 120s on CPU >100% |
+| **1.15.1** | 2026-04-21 | **Topology Memory Leak & CPU Spike Fixes** — nodeRefs cleanup; stabilized recomputeEdges dependency |
+| **1.13.0** | 2026-04-19 | **VLAN Badge Caching** — offline routers show stale VLAN badges (not empty) |
+| **1.12.3** | 2026-04-19 | **VLAN Badge SSH Fallback** — OpenWrtAuthError correctly caught in get_network_interfaces() |
+| **1.12.2** | 2026-04-19 | **VLAN Badge Support** — SSH fallback reads VLANs via `ip -o addr show` |
+| **1.12.1** | 2026-04-19 | **SSID/VLAN Badge UI** — SSID badges compact to count only; VLAN badges added to AP nodes; WiFi-client uplink detection fixed |
 | **1.12.0** | 2026-04-19 | Full topology UI/UX spec: minimap, context menus, health mode, event timeline, group mode, inspector mini-charts, firmware version, zoom-to-node, status animations |
 | **1.11.1** | 2026-04-16 | 24h rpcd session timeout; DDNS skip for devices without DDNS; ruff CI fix |
 | **1.11.0** | 2026-04-15 | Client Detail Panel (IP, band, connected since, lease expiry, HA link) |
@@ -271,7 +281,7 @@ Topology Panel (sidebar)
 | **1.7.0** | 2026-04-06 | Service management (start/stop/restart) |
 | **1.6.0** | 2026-04-06 | Bandwidth rate sensors (bytes/s) |
 | **1.4.0** | 2026-04-06 | Per-interface bandwidth; per-client online time; radio signal/noise |
-| **1.2.0** | 2026-04 | Full test suite (247 tests); CI/CD pipelines; HACS icon |
+| **1.2.0** | 2026-03-24 | Full test suite (247 tests); CI/CD pipelines; HACS icon |
 | **1.0.0** | 2026-03-11 | Initial release |
 
 **Tested on:** OpenWrt 25.12.1 (MediaTek Filogic, Cudy WR3000 v1) | Compatible with OpenWrt 19.07+
