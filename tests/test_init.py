@@ -337,6 +337,67 @@ class TestMergeOrphanMacDevices:
             _merge_orphan_mac_devices(MagicMock(), _make_entry())
             dev_reg.async_remove_device.assert_not_called()
 
+    def test_disables_legacy_dynamic_sensors(self):
+        """v1.17.4 mass-disable migration."""
+        from custom_components.openwrt_router import _disable_legacy_dynamic_sensors
+
+        ent_iface = MagicMock(
+            entity_id="sensor.x_eth0_rx",
+            unique_id="entry_iface_eth0_rx",
+            disabled_by=None,
+        )
+        ent_radio = MagicMock(
+            entity_id="sensor.x_phy0_signal",
+            unique_id="entry_radio_phy0_signal",
+            disabled_by=None,
+        )
+        ent_ap = MagicMock(
+            entity_id="sensor.x_phy0_ap0_channel",
+            unique_id="entry_ap_phy0-ap0_channel",
+            disabled_by=None,
+        )
+        ent_port = MagicMock(
+            entity_id="sensor.x_lan1_link",
+            unique_id="entry_port_lan1_status",
+            disabled_by=None,
+        )
+        ent_static = MagicMock(
+            entity_id="sensor.x_uptime",
+            unique_id="entry_uptime",
+            disabled_by=None,
+        )
+        ent_already_disabled = MagicMock(
+            entity_id="sensor.x_disabled",
+            unique_id="entry_iface_old_rx",
+            disabled_by="user",
+        )
+
+        with patch(
+            "custom_components.openwrt_router.er.async_get"
+        ) as mock_er_get, patch(
+            "custom_components.openwrt_router.er.async_entries_for_config_entry",
+            return_value=[
+                ent_iface, ent_radio, ent_ap, ent_port,
+                ent_static, ent_already_disabled,
+            ],
+        ):
+            ent_reg = MagicMock()
+            mock_er_get.return_value = ent_reg
+
+            _disable_legacy_dynamic_sensors(MagicMock(), _make_entry())
+
+            # 4 dynamic disabled, static/already-disabled untouched
+            assert ent_reg.async_update_entity.call_count == 4
+            disabled_ids = {
+                c.args[0] for c in ent_reg.async_update_entity.call_args_list
+            }
+            assert disabled_ids == {
+                "sensor.x_eth0_rx",
+                "sensor.x_phy0_signal",
+                "sensor.x_phy0_ap0_channel",
+                "sensor.x_lan1_link",
+            }
+
     def test_noop_on_clean_install(self):
         """Only one device, the canonical one — nothing to merge."""
         canonical, _, merge, _ = self._setup_registry()

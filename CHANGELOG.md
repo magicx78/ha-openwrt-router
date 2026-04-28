@@ -2,6 +2,21 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.17.4] - 2026-04-29
+
+### Changed
+
+- **Sensor-Explosion zurückgefahren:** Mit dem Fix in v1.17.3 kamen plötzlich ~180 Entitäten pro Router zum Vorschein — viele davon (per-VLAN, per-Switch-Port, per-Radio-Detail, per-AP-Metrik) sind für die meisten Setups unnötig und wurden daher zu Standard-Disabled umgestellt:
+  - `OpenWrtInterfaceSensor`, `OpenWrtInterfaceRateSensor`: Per-Interface RX/TX/Rate
+  - `OpenWrtPortSensor`: Per-Switch-Port Status/Speed/RX/TX
+  - `OpenWrtRadioSensor`: Per-Radio Signal/Noise (dBm)
+  - `OpenWrtAPInterfaceSensor`: Per-AP-Interface Channel/Frequency/TX-Power/Bitrate/HW-Mode/HT-Mode/Mode/Quality/Clients
+- **VLAN-Bridge-Interfaces** (`br-lan.40`, `eth0.30` etc. — alles mit `.` im Namen) werden gar nicht mehr als Sensoren angelegt. Per-VLAN-Status liefert ohnehin `gateway.vlans` als Attribut.
+
+### Fixed
+
+- **One-shot Migration für bestehende Installationen:** Wer von v1.17.3 oder früher migriert, hatte alle dynamischen Sensoren bereits als enabled im Registry. Beim ersten Setup nach dem Update werden diese nun automatisch via `RegistryEntryDisabler.INTEGRATION` deaktiviert (Patterns: `_iface_`, `_rate`, `_radio_`, `_ap_`, `_port_`). Idempotent — manuell wieder aktivierte Sensoren bleiben aktiviert.
+
 ## [1.17.3] - 2026-04-29
 
 ### Fixed

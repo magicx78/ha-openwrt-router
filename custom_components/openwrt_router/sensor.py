@@ -430,6 +430,12 @@ async def async_setup_entry(
             ifname = iface.get("interface", "")
             if not ifname or ifname in tracked_interfaces:
                 continue
+            # Skip VLAN sub-interfaces (e.g. "br-lan.40", "eth0.30") — they
+            # would explode the entity count and the per-VLAN traffic is
+            # already covered by the parent interface plus the VlanInfo
+            # attributes on the gateway.
+            if "." in ifname:
+                continue
             tracked_interfaces.add(ifname)
             new_entities.append(OpenWrtInterfaceSensor(coordinator, entry, ifname, "rx_bytes"))
             new_entities.append(OpenWrtInterfaceSensor(coordinator, entry, ifname, "tx_bytes"))
@@ -570,6 +576,7 @@ class OpenWrtInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity
     _attr_device_class = SensorDeviceClass.DATA_SIZE
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_native_unit_of_measurement = UnitOfInformation.BYTES
+    _attr_entity_registry_enabled_default = False  # disabled by default — see issue with sensor explosion
 
     def __init__(
         self,
@@ -643,6 +650,7 @@ class OpenWrtInterfaceRateSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEn
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfDataRate.BYTES_PER_SECOND
     _attr_suggested_display_precision = 1
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -712,6 +720,7 @@ class OpenWrtRadioSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
     _attr_has_entity_name = True
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "dBm"
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -774,6 +783,7 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
     """
 
     _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
 
     # metric → (icon, unit, device_class, state_class)
     _METRIC_CONFIG: dict[str, tuple[str, str | None, str | None, str | None]] = {
@@ -899,6 +909,7 @@ class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
     """
 
     _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
 
     # (icon, unit, device_class, state_class, entity_category)
     _METRIC_CONFIG: dict[str, tuple[str, str | None, str | None, str | None, EntityCategory | None]] = {

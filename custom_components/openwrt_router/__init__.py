@@ -139,6 +139,48 @@ def _merge_orphan_mac_devices(hass: HomeAssistant, entry: ConfigEntry) -> None:
         dev_reg.async_remove_device(device.id)
 
 
+# Unique-ID suffixes that identify dynamic per-port / per-radio / per-AP /
+# per-interface sensors.  v1.17.4 marks the *classes* as
+# entity_registry_enabled_default = False, which only affects NEW entities.
+# Existing installs (e.g. the user reporting the entity explosion in
+# v1.17.3) already have these registered as enabled, so we additionally
+# disable them once on next setup.  The user can re-enable individually
+# via the HA entity settings.
+_LEGACY_DYNAMIC_PATTERNS = (
+    "_iface_",       # OpenWrtInterfaceSensor   (entry_id_iface_<name>_rx/tx)
+    "_rate",         # OpenWrtInterfaceRateSensor  (entry_id_<name>_rx_rate)
+    "_radio_",       # OpenWrtRadioSensor       (entry_id_radio_<ifname>_signal/noise)
+    "_ap_",          # OpenWrtAPInterfaceSensor (entry_id_ap_<ifname>_<metric>)
+    "_port_",        # OpenWrtPortSensor        (entry_id_port_<name>_<metric>)
+)
+
+
+def _disable_legacy_dynamic_sensors(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Disable dynamic sensors that were registered as enabled by older versions.
+
+    Idempotent — entities the user has explicitly re-enabled stay enabled.
+    """
+    ent_reg = er.async_get(hass)
+    entities = er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+    disabled_count = 0
+    for ent in entities:
+        if ent.disabled_by is not None:
+            continue
+        if not any(pat in ent.unique_id for pat in _LEGACY_DYNAMIC_PATTERNS):
+            continue
+        ent_reg.async_update_entity(
+            ent.entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
+        )
+        disabled_count += 1
+    if disabled_count:
+        _LOGGER.warning(
+            "Disabled %d dynamic OpenWrt sensors (per-iface/port/radio/AP) for "
+            "entry %s — re-enable individually in HA if needed",
+            disabled_count,
+            entry.entry_id,
+        )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
     """Set up OpenWrt Router from a config entry.
 
@@ -225,6 +267,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
 
     # One-shot cleanup of legacy MAC-identified devices left over from v1.17.0
     _merge_orphan_mac_devices(hass, entry)
+
+    # One-shot mass-disable of dynamic sensors that older versions registered
+    # as enabled. Idempotent — only touches entries that are still enabled
+    # AND match the dynamic-sensor unique-id patterns.
+    _disable_legacy_dynamic_sensors(hass, entry)
 
     # Register topology panel (idempotent — only registers once per HA session)
     from .topology_panel import async_setup_topology_panel
