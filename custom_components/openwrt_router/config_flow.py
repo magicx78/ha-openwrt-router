@@ -28,10 +28,16 @@ from .const import (
     CONF_FRITZBOX_PORT,
     CONF_FRITZBOX_USER,
     CONF_PROTOCOL,
+    CONF_SWITCH_HOST,
+    CONF_SWITCH_PASSWORD,
+    CONF_SWITCH_PORT,
+    CONF_SWITCH_PROTOCOL,
+    CONF_SWITCH_USERNAME,
     DEFAULT_FRITZBOX_HOST,
     DEFAULT_FRITZBOX_PORT,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL,
+    DEFAULT_SWITCH_PORT,
     DEFAULT_USERNAME,
     DOMAIN,
     ERROR_CANNOT_CONNECT,
@@ -63,15 +69,13 @@ def _validate_host(host: str) -> str | None:
     host = host.strip()
     if not host:
         return ERROR_INVALID_HOST
-    # Try to parse as an IP address first
     try:
         addr = ipaddress.ip_address(host)
         if addr.is_loopback or addr.is_link_local or addr.is_unspecified:
             return ERROR_INVALID_HOST
-        return None  # valid routable IP
+        return None
     except ValueError:
         pass
-    # Validate as a hostname: only alphanumerics, dots, hyphens, underscores
     if not re.match(r'^[a-zA-Z0-9._\-]{1,253}$', host):
         return ERROR_INVALID_HOST
     return None
@@ -114,7 +118,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the config flow for OpenWrt Router.
 
     Steps:
-        user → protocol → create entry
+        user → devices → [fritzbox] → [switch_dev] → checklist → create entry
 
     The unique_id is set to the router MAC address retrieved during
     validation so that the same physical router cannot be added twice.
@@ -128,7 +132,6 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         """Return the options flow handler."""
         return OpenWrtOptionsFlow()
 
-    # Capability labels shown in the checklist step
     _CAPABILITY_LABELS: dict[str, str] = {
         "system_info":      "System-Info (CPU, RAM, Uptime)",
         "network_wireless": "WLAN-Status (Radios, SSIDs)",
@@ -141,7 +144,6 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         "hostapd_clients":  "WLAN-Clients (hostapd)",
     }
 
-    # Capabilities that block core functionality if missing
     _REQUIRED_CAPS: frozenset[str] = frozenset({
         "system_info", "network_dump", "network_wireless",
     })
@@ -152,36 +154,34 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         self._board_info: dict[str, Any] = {}
         self._capabilities: dict[str, bool] = {}
         self._user_data: dict[str, Any] = {}
+        self._add_fritzbox: bool = False
+        self._add_switch: bool = False
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the initial user-facing setup step.
 
-        Presents a form asking for host, port, username and password.
+        Presents a form asking for host, port, protocol, username and password.
         On submission, attempts to login and read the board info.
-
-        Args:
-            user_input: Form values submitted by the user, or None on first render.
-
-        Returns:
-            A ConfigFlowResult that either shows the form again (with errors)
-            or creates the config entry.
         """
         errors: dict[str, str] = {}
 
         if user_input is not None:
             host: str = user_input[CONF_HOST].strip()
             port: int = user_input[CONF_PORT]
+            protocol: str = user_input[CONF_PROTOCOL]
             username: str = user_input[CONF_USERNAME].strip()
-            password: str = user_input[CONF_PASSWORD]  # never logged
+            password: str = user_input[CONF_PASSWORD]
 
             host_error = _validate_host(host)
             if host_error:
                 errors["host"] = host_error
             else:
                 try:
-                    board_info = await self._validate_input(host, port, username, password)
+                    board_info = await self._validate_input(
+                        host, port, username, password, protocol
+                    )
 
                 except OpenWrtAuthError:
                     _LOGGER.debug("Config flow: authentication failed for %s", host)
@@ -204,8 +204,6 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = ERROR_UNKNOWN
 
                 else:
-                    # Build a unique_id from the router MAC address.
-                    # Fall back to host:port if MAC is unavailable.
                     mac: str = board_info.get("mac", "").replace(":", "").lower()
                     unique_id = mac if mac else f"{host}_{port}"
 
@@ -224,45 +222,45 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                         board_info.get("model", "unknown"),
                     )
 
-                    # Store validated info and proceed to protocol selection
                     self._board_info = board_info
                     self._user_data = {
                         CONF_HOST: host,
                         CONF_PORT: port,
+                        CONF_PROTOCOL: protocol,
                         CONF_USERNAME: username,
                         CONF_PASSWORD: password,
                     }
-                    return await self.async_step_protocol()
+                    return await self.async_step_devices()
 
-        # Build the user form schema, pre-filling defaults where sensible
         schema = self._build_user_schema(user_input)
-
         return self.async_show_form(
             step_id="user",
             data_schema=schema,
             errors=errors,
         )
 
-    async def async_step_protocol(
+    async def async_step_devices(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle protocol selection (HTTP/HTTPS).
-
-        Args:
-            user_input: Protocol choice from user or None on first render.
-
-        Returns:
-            A ConfigFlowResult that either shows the form or creates the entry.
-        """
+        """Ask which additional devices to configure alongside this router."""
         if user_input is not None:
-            protocol: str = user_input[CONF_PROTOCOL]
-            self._user_data[CONF_PROTOCOL] = protocol
+            self._add_fritzbox = bool(user_input.get("add_fritzbox", False))
+            self._add_switch = bool(user_input.get("add_switch", False))
+
+            if self._add_fritzbox:
+                return await self.async_step_fritzbox()
+            if self._add_switch:
+                return await self.async_step_switch_dev()
             return await self.async_step_checklist()
 
-        # Show protocol selection form
-        schema = self._build_protocol_schema()
+        schema = vol.Schema(
+            {
+                vol.Optional("add_fritzbox", default=False): bool,
+                vol.Optional("add_switch", default=False): bool,
+            }
+        )
         return self.async_show_form(
-            step_id="protocol",
+            step_id="devices",
             data_schema=schema,
             description_placeholders={
                 "host": self._user_data.get(CONF_HOST, ""),
@@ -270,23 +268,93 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             },
         )
 
+    async def async_step_fritzbox(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Collect Fritz!Box DSL modem credentials during initial setup."""
+        if user_input is not None:
+            self._user_data[CONF_FRITZBOX_HOST] = user_input.get(CONF_FRITZBOX_HOST, "")
+            self._user_data[CONF_FRITZBOX_PORT] = user_input.get(
+                CONF_FRITZBOX_PORT, DEFAULT_FRITZBOX_PORT
+            )
+            self._user_data[CONF_FRITZBOX_USER] = user_input.get(CONF_FRITZBOX_USER, "")
+            self._user_data[CONF_FRITZBOX_PASSWORD] = user_input.get(CONF_FRITZBOX_PASSWORD, "")
+
+            if self._add_switch:
+                return await self.async_step_switch_dev()
+            return await self.async_step_checklist()
+
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_FRITZBOX_HOST, default=DEFAULT_FRITZBOX_HOST): str,
+                vol.Optional(
+                    CONF_FRITZBOX_PORT, default=DEFAULT_FRITZBOX_PORT
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+                vol.Optional(CONF_FRITZBOX_USER, default=""): str,
+                vol.Optional(CONF_FRITZBOX_PASSWORD, default=""): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="fritzbox",
+            data_schema=schema,
+            description_placeholders={
+                "host": self._user_data.get(CONF_HOST, ""),
+            },
+        )
+
+    async def async_step_switch_dev(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Collect managed switch connection details during initial setup."""
+        if user_input is not None:
+            self._user_data[CONF_SWITCH_HOST] = user_input.get(CONF_SWITCH_HOST, "")
+            self._user_data[CONF_SWITCH_PORT] = user_input.get(
+                CONF_SWITCH_PORT, DEFAULT_SWITCH_PORT
+            )
+            self._user_data[CONF_SWITCH_PROTOCOL] = user_input.get(
+                CONF_SWITCH_PROTOCOL, DEFAULT_PROTOCOL
+            )
+            self._user_data[CONF_SWITCH_USERNAME] = user_input.get(CONF_SWITCH_USERNAME, "root")
+            self._user_data[CONF_SWITCH_PASSWORD] = user_input.get(CONF_SWITCH_PASSWORD, "")
+            return await self.async_step_checklist()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_SWITCH_HOST, default=""): str,
+                vol.Required(
+                    CONF_SWITCH_PORT, default=DEFAULT_SWITCH_PORT
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+                vol.Required(
+                    CONF_SWITCH_PROTOCOL, default=DEFAULT_PROTOCOL
+                ): vol.In(
+                    {
+                        PROTOCOL_HTTP: "HTTP (Port 80, unsicher)",
+                        PROTOCOL_HTTPS: "HTTPS (Port 443, Zertifikat prüfen)",
+                        PROTOCOL_HTTPS_INSECURE: "HTTPS Self-Signed (Port 443, Zertifikat ignorieren)",
+                    }
+                ),
+                vol.Required(CONF_SWITCH_USERNAME, default="root"): str,
+                vol.Required(CONF_SWITCH_PASSWORD, default=""): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="switch_dev",
+            data_schema=schema,
+            description_placeholders={
+                "host": self._user_data.get(CONF_HOST, ""),
+            },
+        )
+
     async def async_step_checklist(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show capability checklist and let user proceed or retry.
-
-        Runs after protocol selection. Checks ubus capabilities and displays
-        which are available. Missing required caps show a warning; missing
-        optional caps show guidance. User can always proceed.
-        """
+        """Show capability checklist and let user proceed or retry."""
         host = self._user_data.get(CONF_HOST, "")
 
         if user_input is not None and user_input.get("action") != "retry":
-            # User chose to proceed → create entry
             title = self._board_info.get("hostname") or host
             return self.async_create_entry(title=title, data=self._user_data)
 
-        # Run capability checks
         session = async_get_clientsession(self.hass)
         api = OpenWrtAPI(
             host=host,
@@ -294,6 +362,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             username=self._user_data[CONF_USERNAME],
             password=self._user_data[CONF_PASSWORD],
             session=session,
+            protocol=self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL),
         )
         try:
             await api.login()
@@ -301,7 +370,6 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         except Exception:  # noqa: BLE001
             self._capabilities = {}
 
-        # Build checklist text
         lines: list[str] = []
         missing_required: list[str] = []
         missing_optional: list[str] = []
@@ -318,6 +386,17 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
         checklist_text = "\n".join(lines)
 
+        install_hint = ""
+        if missing_required or missing_optional:
+            install_hint = (
+                f"\n\n**Pakete installieren (SSH):**\n"
+                f"```\n"
+                f"opkg update && opkg install luci-mod-rpc luci-lib-jsonc rpcd-mod-rpcsys\n"
+                f"scp ha-openwrt-router.json root@{host}:/usr/share/rpcd/acl.d/ha-openwrt-router.json\n"
+                f"/etc/init.d/rpcd restart\n"
+                f"```"
+            )
+
         if missing_required:
             status = (
                 f"⚠️ **Kritische Berechtigungen fehlen** — die Integration kann nicht "
@@ -326,12 +405,14 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 f"```\nscp ha-openwrt-router.json root@{host}:"
                 f"/usr/share/rpcd/acl.d/ha-openwrt-router.json\n"
                 f"/etc/init.d/rpcd restart\n```"
+                f"{install_hint}"
             )
         elif missing_optional:
             status = (
                 f"ℹ️ Optionale Funktionen nicht verfügbar — Grundfunktionen OK.\n"
                 f"SSH-Fallback wird für fehlende Calls verwendet (erhöht Router-Last).\n"
                 f"Empfehlung: rpcd-ACL aktualisieren."
+                f"{install_hint}"
             )
         else:
             status = "✅ Alle Berechtigungen vorhanden — optimale Konfiguration."
@@ -350,50 +431,33 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
     ) -> ConfigFlowResult:
-        """Diagnose why re-auth was triggered, then route to the right sub-step.
-
-        Tries the existing credentials first.  If they still work the entry is
-        silently reloaded — the user never sees a dialog.  Only when the
-        credentials are genuinely wrong does the password form appear.
-
-        Args:
-            entry_data: Current config entry data (host, port, username).
-
-        Returns:
-            ConfigFlowResult routed to the appropriate sub-step.
-        """
+        """Diagnose why re-auth was triggered, then route to the right sub-step."""
         reauth_entry = self._get_reauth_entry()
         host: str = reauth_entry.data[CONF_HOST]
         port: int = reauth_entry.data[CONF_PORT]
         username: str = reauth_entry.data[CONF_USERNAME]
         password: str = reauth_entry.data[CONF_PASSWORD]
+        protocol: str = reauth_entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)
 
         try:
-            await self._validate_input(host, port, username, password)
+            await self._validate_input(host, port, username, password, protocol)
         except OpenWrtResponseError:
-            # HTTP connection works but ubus response is garbled → rpcd not responding
             return await self.async_step_reauth_rpcd_setup()
         except (OpenWrtConnectionError, OpenWrtTimeoutError):
             return await self.async_step_reauth_cannot_connect()
         except OpenWrtAuthError:
-            # Credentials genuinely changed — ask for new password
             return await self.async_step_reauth_confirm()
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Re-auth: unexpected error during diagnosis for %s", host)
             return await self.async_step_reauth_confirm()
         else:
-            # Existing credentials still work — silent auto-resolve, no user prompt
             _LOGGER.debug("Re-auth: existing credentials for %s still valid, reloading", host)
             return self.async_update_reload_and_abort(reauth_entry)
 
     async def async_step_reauth_rpcd_setup(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show rpcd setup instructions with a 'I've fixed it — retry' button.
-
-        Displayed when session/login returns permission denied, which means
-        rpcd is misconfigured (wrong socket path, missing package, etc.).
-        """
+        """Show rpcd setup instructions with a 'I've fixed it — retry' button."""
         reauth_entry = self._get_reauth_entry()
         errors: dict[str, str] = {}
 
@@ -402,9 +466,10 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             port: int = reauth_entry.data[CONF_PORT]
             username: str = reauth_entry.data[CONF_USERNAME]
             password: str = reauth_entry.data[CONF_PASSWORD]
+            protocol: str = reauth_entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)
 
             try:
-                await self._validate_input(host, port, username, password)
+                await self._validate_input(host, port, username, password, protocol)
             except OpenWrtResponseError:
                 errors["base"] = ERROR_RPCD_SETUP
             except (OpenWrtConnectionError, OpenWrtTimeoutError):
@@ -429,10 +494,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reauth_cannot_connect(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show 'router unreachable' message with a retry button.
-
-        Displayed when the router cannot be reached during re-auth diagnosis.
-        """
+        """Show 'router unreachable' message with a retry button."""
         reauth_entry = self._get_reauth_entry()
         errors: dict[str, str] = {}
 
@@ -441,9 +503,10 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             port: int = reauth_entry.data[CONF_PORT]
             username: str = reauth_entry.data[CONF_USERNAME]
             password: str = reauth_entry.data[CONF_PASSWORD]
+            protocol: str = reauth_entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)
 
             try:
-                await self._validate_input(host, port, username, password)
+                await self._validate_input(host, port, username, password, protocol)
             except OpenWrtRpcdSetupError:
                 return await self.async_step_reauth_rpcd_setup()
             except (OpenWrtConnectionError, OpenWrtTimeoutError):
@@ -468,11 +531,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show the re-auth form and validate new credentials.
-
-        Only reached when existing credentials are genuinely rejected.
-        Host/port/username are preserved; only the password can change.
-        """
+        """Show the re-auth form and validate new credentials."""
         errors: dict[str, str] = {}
         reauth_entry = self._get_reauth_entry()
 
@@ -481,9 +540,10 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             port: int = reauth_entry.data[CONF_PORT]
             username: str = reauth_entry.data[CONF_USERNAME]
             password: str = user_input[CONF_PASSWORD]
+            protocol: str = reauth_entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)
 
             try:
-                await self._validate_input(host, port, username, password)
+                await self._validate_input(host, port, username, password, protocol)
 
             except OpenWrtRpcdSetupError:
                 return await self.async_step_reauth_rpcd_setup()
@@ -519,25 +579,14 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     # ------------------------------------------------------------------
 
     async def _validate_input(
-        self, host: str, port: int, username: str, password: str
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        protocol: str = DEFAULT_PROTOCOL,
     ) -> dict[str, Any]:
-        """Create a temporary API client and test the connection.
-
-        Args:
-            host: Router IP / hostname.
-            port: HTTP port.
-            username: rpcd username.
-            password: rpcd password (never logged).
-
-        Returns:
-            Board info dict from the router.
-
-        Raises:
-            OpenWrtAuthError: Credentials rejected.
-            OpenWrtConnectionError: Router unreachable.
-            OpenWrtTimeoutError: Request timed out.
-            OpenWrtResponseError: Malformed response.
-        """
+        """Create a temporary API client and test the connection."""
         session = async_get_clientsession(self.hass)
         api = OpenWrtAPI(
             host=host,
@@ -545,6 +594,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             username=username,
             password=password,
             session=session,
+            protocol=protocol,
         )
         return await api.test_connection()
 
@@ -552,16 +602,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     def _build_user_schema(
         user_input: dict[str, Any] | None,
     ) -> vol.Schema:
-        """Build the data entry schema for the user step.
-
-        Pre-fills submitted values so they survive validation errors.
-
-        Args:
-            user_input: Previously submitted values or None.
-
-        Returns:
-            voluptuous Schema.
-        """
+        """Build the data entry schema for the user step (includes protocol)."""
         defaults = user_input or {}
         return vol.Schema(
             {
@@ -574,6 +615,16 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                     default=defaults.get(CONF_PORT, DEFAULT_PORT),
                 ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
                 vol.Required(
+                    CONF_PROTOCOL,
+                    default=defaults.get(CONF_PROTOCOL, DEFAULT_PROTOCOL),
+                ): vol.In(
+                    {
+                        PROTOCOL_HTTP: "HTTP (Port 80, unsicher)",
+                        PROTOCOL_HTTPS: "HTTPS (Port 443, Zertifikat prüfen)",
+                        PROTOCOL_HTTPS_INSECURE: "HTTPS Self-Signed (Port 443, Zertifikat ignorieren)",
+                    }
+                ),
+                vol.Required(
                     CONF_USERNAME,
                     default=defaults.get(CONF_USERNAME, DEFAULT_USERNAME),
                 ): str,
@@ -583,11 +634,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     def _build_protocol_schema() -> vol.Schema:
-        """Build the data entry schema for the protocol step.
-
-        Returns:
-            voluptuous Schema with protocol dropdown.
-        """
+        """Kept for backward compatibility — protocol is now part of the user step."""
         return vol.Schema(
             {
                 vol.Required(

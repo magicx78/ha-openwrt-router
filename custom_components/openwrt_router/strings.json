@@ -26,22 +26,63 @@
         "description": "Enter the connection details for your OpenWrt router. The router must have rpcd and uhttpd running.",
         "data": {
           "host": "Host / IP Address",
-          "port": "HTTP Port",
+          "port": "Port",
+          "protocol": "Protocol",
           "username": "Username",
           "password": "Password"
         },
         "data_description": {
           "host": "Hostname or IP address of the router (e.g. 192.168.1.1)",
-          "port": "HTTP port, usually 80",
+          "port": "Port — 443 for HTTPS, 80 for HTTP",
+          "protocol": "Connection protocol (HTTPS Self-Signed recommended for most OpenWrt routers)",
           "username": "rpcd username, usually 'root'",
           "password": "Router password"
         }
       },
-      "protocol": {
-        "title": "Protokoll für {host}",
-        "description": "Wähle das Verbindungsprotokoll für **{host}** ({model}).",
+      "devices": {
+        "title": "Additional Devices — {host}",
+        "description": "Do you want to integrate additional devices connected to this router?\n\n**Model:** {model}",
         "data": {
-          "protocol": "Protokoll"
+          "add_fritzbox": "Fritz!Box DSL Modem",
+          "add_switch": "Managed Switch (OpenWrt)"
+        },
+        "data_description": {
+          "add_fritzbox": "Adds DSL line statistics, 24h speed chart and ping monitoring",
+          "add_switch": "Adds port statistics from a separate OpenWrt-based managed switch"
+        }
+      },
+      "fritzbox": {
+        "title": "Fritz!Box DSL Modem — {host}",
+        "description": "Enter the connection details for your Fritz!Box DSL modem. Leave the password blank if not set.",
+        "data": {
+          "fritzbox_host": "Fritz!Box Host / IP",
+          "fritzbox_port": "TR-064 Port",
+          "fritzbox_user": "Username",
+          "fritzbox_password": "Password"
+        },
+        "data_description": {
+          "fritzbox_host": "IP address of the Fritz!Box modem (e.g. 172.16.1.254)",
+          "fritzbox_port": "TR-064 port, default 49000",
+          "fritzbox_user": "Fritz!Box username (usually 'admin' or custom)",
+          "fritzbox_password": "Fritz!Box password"
+        }
+      },
+      "switch_dev": {
+        "title": "Managed Switch — {host}",
+        "description": "Enter the connection details for the managed switch running OpenWrt/rpcd.",
+        "data": {
+          "switch_host": "Switch Host / IP",
+          "switch_port": "Port",
+          "switch_protocol": "Protocol",
+          "switch_username": "Username",
+          "switch_password": "Password"
+        },
+        "data_description": {
+          "switch_host": "IP address or hostname of the managed switch",
+          "switch_port": "Port — 443 for HTTPS, 80 for HTTP",
+          "switch_protocol": "Connection protocol",
+          "switch_username": "rpcd username, usually 'root'",
+          "switch_password": "Switch password"
         }
       },
       "checklist": {
@@ -65,7 +106,7 @@
       }
     },
     "error": {
-      "cannot_connect": "Unable to connect to the router. Check the host and port and ensure the router is reachable.",
+      "cannot_connect": "Unable to connect to the router. Check the host, port and protocol, and ensure the router is reachable.",
       "invalid_auth": "Authentication failed. Check the username and password.",
       "invalid_host": "Invalid host address. Use a valid IP or hostname.",
       "timeout": "Connection timed out. The router may be unreachable or overloaded.",
