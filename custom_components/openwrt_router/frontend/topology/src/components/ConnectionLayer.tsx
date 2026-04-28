@@ -107,10 +107,22 @@ function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover, vlanMode
 
   if (edge.kind === 'gateway-wired') {
     const mid = edge.gatewayPort ? cubicMid(edge.path) : null;
+    const vlanText = edge.vlanTags && edge.vlanTags.length > 0
+      ? edge.vlanTags.length > 1
+        ? `T:${edge.vlanTags.join(',')}`     // Trunk
+        : `V${edge.vlanTags[0]}`             // Untagged single VLAN
+      : null;
     const gwLabel = edge.gatewayPort
-      ? `${edge.gatewayPort.toUpperCase()}${edge.gatewayPortSpeed ? ' · ' + speedLabel(edge.gatewayPortSpeed) : ''}`
+      ? [
+          edge.gatewayPort.toUpperCase(),
+          vlanText,
+          edge.gatewayPortSpeed ? speedLabel(edge.gatewayPortSpeed) : null,
+        ].filter(Boolean).join(' · ')
       : null;
     const apLabel = edge.apPort ? edge.apPort.toUpperCase() : null;
+    // Width estimate: 6.5px per char + 12px padding, capped at 120
+    const gwLabelW = gwLabel ? Math.min(120, Math.round(gwLabel.length * 6.5) + 12) : 0;
+    const apLabelW = apLabel ? Math.max(40, apLabel.length * 7 + 8) : 0;
 
     return (
       <g className={cls} style={style} data-vlan={vlanAttr}>
@@ -120,8 +132,8 @@ function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover, vlanMode
           <>
             {/* Gateway-side label (upper half) */}
             <rect
-              x={mid.x - 28} y={mid.y - 22}
-              width={56} height={14}
+              x={mid.x - gwLabelW / 2} y={mid.y - 22}
+              width={gwLabelW} height={14}
               rx={3} className="edge-label-bg"
             />
             <text x={mid.x} y={mid.y - 12} className="edge-label edge-label--gw">
@@ -131,8 +143,8 @@ function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover, vlanMode
             {apLabel && (
               <>
                 <rect
-                  x={mid.x - 20} y={mid.y + 8}
-                  width={40} height={14}
+                  x={mid.x - apLabelW / 2} y={mid.y + 8}
+                  width={apLabelW} height={14}
                   rx={3} className="edge-label-bg"
                 />
                 <text x={mid.x} y={mid.y + 18} className="edge-label edge-label--ap">

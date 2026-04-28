@@ -150,7 +150,9 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
 
       <div className="ap-card__footer">
         <span className={`ap-card__badge ${ap.uplinkType}`}>
-          {ap.uplinkType === 'wired' ? 'Kabel' : 'Mesh'}
+          {ap.uplinkType === 'wired'    ? 'Kabel'
+         : ap.uplinkType === 'repeater' ? 'WLAN Repeater'
+         :                                'Mesh?'}
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {ap.status !== 'offline' && <SignalBar dbm={ap.backhaulSignal} />}

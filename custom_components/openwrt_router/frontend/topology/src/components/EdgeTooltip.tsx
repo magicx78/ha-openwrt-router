@@ -53,24 +53,45 @@ export function EdgeTooltip({ edgeId, x, y, edges, data }: Props) {
   } else if (edge.kind === 'gateway-wired') {
     const ap = data.accessPoints.find(a => a.id === edge.targetId);
     title  = ap?.name ?? 'Access Point';
-    badge  = 'LAN-Kabel';
-    badgeMod = 'wired';
 
-    // Trunk port connection details
-    if (ap?.gatewayPort) {
-      const speed = ap.gatewayPortSpeed
-        ? (ap.gatewayPortSpeed >= 1000 ? `${ap.gatewayPortSpeed / 1000}G` : `${ap.gatewayPortSpeed}M`)
-        : null;
-      const gwPortLabel = speed ? `${ap.gatewayPort.toUpperCase()} · ${speed}` : ap.gatewayPort.toUpperCase();
-      rows.push({ label: 'GW-Port',  value: gwPortLabel });
-      rows.push({ label: 'AP-Port',  value: 'WAN · Trunk' });
+    if (ap?.uplinkType === 'repeater') {
+      badge    = 'WLAN Repeater';
+      badgeMod = 'repeater';
+      if (ap.backhaulSignal) rows.push({ label: 'Signal', value: `${ap.backhaulSignal} dBm` });
+    } else if (ap?.uplinkType === 'mesh') {
+      badge    = 'Mesh?';
+      badgeMod = 'mesh';
+      if (ap.backhaulSignal) rows.push({ label: 'Signal', value: `${ap.backhaulSignal} dBm` });
+    } else {
+      badge    = 'LAN-Kabel';
+      badgeMod = 'wired';
+
+      // Trunk port connection details
+      if (ap?.gatewayPort) {
+        const speed = ap.gatewayPortSpeed
+          ? (ap.gatewayPortSpeed >= 1000 ? `${ap.gatewayPortSpeed / 1000}G` : `${ap.gatewayPortSpeed}M`)
+          : null;
+        const gwPortLabel = speed ? `${ap.gatewayPort.toUpperCase()} · ${speed}` : ap.gatewayPort.toUpperCase();
+        rows.push({ label: 'GW-Port',  value: gwPortLabel });
+      }
+      if (ap?.apPort) {
+        rows.push({ label: 'AP-Port', value: ap.apPort.toUpperCase() });
+      }
+      if (ap?.vlanTags && ap.vlanTags.length > 0) {
+        rows.push({
+          label: 'VLAN',
+          value: ap.vlanTags.length > 1
+            ? `Trunk ${ap.vlanTags.join(', ')}`
+            : `${ap.vlanTags[0]}`,
+        });
+      }
     }
     rows.push({ label: 'Clients', value: String(ap?.clientCount ?? 0) });
     if (ap?.ip)     rows.push({ label: 'IP',     value: ap.ip });
     if (ap?.status) rows.push({ label: 'Status', value: ap.status });
 
   } else {
-    // ap-mesh
+    // ap-mesh (parent-AP → child-AP edge)
     const ap = data.accessPoints.find(a => a.id === edge.targetId);
     title  = ap?.name ?? 'Access Point';
     badge  = 'WiFi Mesh';

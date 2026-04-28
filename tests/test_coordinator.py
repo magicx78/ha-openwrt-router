@@ -372,6 +372,10 @@ class TestCoordinatorDataAsDict:
         assert "disk_space" in d
         assert "tmpfs" in d
         assert "active_connections" in d
+        assert "ap_interfaces" in d
+        # STA interfaces are exposed for downstream WLAN-Repeater detection
+        assert "sta_interfaces" in d
+        assert d["sta_interfaces"] == []
 
 
 # =====================================================================

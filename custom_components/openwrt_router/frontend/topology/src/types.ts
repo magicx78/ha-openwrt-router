@@ -8,7 +8,7 @@ export interface RouterEvent {
 }
 
 export type NodeStatus = 'online' | 'offline' | 'warning';
-export type UplinkType = 'wired' | 'mesh';
+export type UplinkType = 'wired' | 'mesh' | 'repeater';
 export type DeviceCategory = 'smartphone' | 'laptop' | 'iot' | 'guest' | 'other';
 export type FilterType = 'all' | 'aps' | 'clients' | 'warnings';
 
@@ -125,6 +125,8 @@ export interface AccessPoint {
   gatewayPort?: string;        // e.g. "lan1", "lan2" — switch port on gateway
   gatewayPortSpeed?: number | null;  // Mbps
   gatewayPortUp?: boolean;
+  apPort?: string;             // physical port on AP side (e.g. "wan") — null for WLAN-Repeater
+  vlanTags?: number[];         // VLAN IDs carried on the gateway port (Trunk = >1)
   portStats?: PortStat[];      // physical ports on this AP (WAN, LAN1, ...)
 }
 
@@ -188,6 +190,7 @@ export interface EdgeLayout {
   gatewayPort?: string;       // e.g. "lan3" — switch port on gateway side
   gatewayPortSpeed?: number | null; // Mbps
   apPort?: string;            // e.g. "wan" — port on AP side (always WAN for wired uplinks)
+  vlanTags?: number[];        // VLANs carried on the gateway port (length>1 ⇒ trunk)
 }
 
 export interface TopologyLayout {

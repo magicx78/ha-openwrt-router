@@ -80,7 +80,8 @@ export function computeEdgesFromBounds(
         vlanId:          ap.primaryVlanId,
         gatewayPort:     ap.gatewayPort,
         gatewayPortSpeed: ap.gatewayPortSpeed,
-        apPort:          ap.uplinkType === 'wired' ? 'wan' : undefined,
+        apPort:          ap.apPort ?? (ap.uplinkType === 'wired' ? 'wan' : undefined),
+        vlanTags:        ap.vlanTags,
       });
     } else {
       // Mesh: quadratic arc between AP tops

@@ -85,7 +85,7 @@ export function MobileView({
               onClick={() => onSelectAP(ap)}
             >
               <div className="mobile-card__header">
-                <div className={`mobile-card__icon mobile-card__icon--${ap.uplinkType === 'mesh' ? 'cyan' : 'blue'}`}>
+                <div className={`mobile-card__icon mobile-card__icon--${ap.uplinkType === 'wired' ? 'blue' : 'cyan'}`}>
                   <IconAP size={16} />
                 </div>
                 <div className="mobile-card__info">
@@ -96,7 +96,9 @@ export function MobileView({
               </div>
               <div className="mobile-card__footer">
                 <span className={`ap-card__badge ${ap.uplinkType}`}>
-                  {ap.uplinkType === 'mesh' ? 'Mesh' : 'Kabel'}
+                  {ap.uplinkType === 'wired'    ? 'Kabel'
+                 : ap.uplinkType === 'repeater' ? 'WLAN Repeater'
+                 :                                'Mesh?'}
                 </span>
                 <span className="ap-card__clients">
                   <strong>{clients.length}</strong> Clients

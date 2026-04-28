@@ -108,6 +108,13 @@ def _detect_inter_router_edges(
             bssid = (ap_iface.get("bssid") or "").upper()
             if bssid and bssid not in router_macs:
                 router_macs[bssid] = rid
+        # Add STA-mode wireless interface MACs so a router that uplinks via
+        # WiFi (repeater / mesh backhaul) is matched in Method 2 even when
+        # its STA MAC differs from the LAN router_info.mac.
+        for sta_iface in (getattr(data, "sta_interfaces", None) or []):
+            sta_mac = (sta_iface.get("mac") or "").upper()
+            if sta_mac and sta_mac not in router_macs:
+                router_macs[sta_mac] = rid
 
     # Find gateway(s) for directed edges
     gateways = [
@@ -144,6 +151,8 @@ def _detect_inter_router_edges(
                     "detection_method": "wifi_client_mac",
                     "client_mac": client_mac,
                     "signal": client.get("signal"),
+                    "ap_port": None,        # wireless uplink → no physical AP port
+                    "vlan_tags": [],
                 },
             })
             seen_edges.add(edge_id)
@@ -175,6 +184,14 @@ def _detect_inter_router_edges(
                 # Resolve gateway switch port via bridge FDB (MAC → port)
                 fdb: dict[str, str] = getattr(gw_data, "port_fdb_map", {})
                 gateway_port: str | None = fdb.get(ap_mac.lower())
+                port_vlan_map: dict[str, list[int]] = getattr(
+                    gw_data, "port_vlan_map", {}
+                )
+                vlan_tags: list[int] = (
+                    list(port_vlan_map.get(gateway_port, []))
+                    if gateway_port
+                    else []
+                )
                 edges.append({
                     "id": edge_id,
                     "from": gw_rid,
@@ -188,6 +205,8 @@ def _detect_inter_router_edges(
                         "detection_method": found_via,
                         "ap_host_ip": ap_hip,
                         "gateway_port": gateway_port,
+                        "ap_port": "wan",     # inter-router LAN-uplink → AP-WAN
+                        "vlan_tags": vlan_tags,
                     },
                 })
                 seen_edges.add(edge_id)
@@ -207,6 +226,12 @@ def _detect_inter_router_edges(
                 continue
             gateway_port = trunk_map.get(ap_hip)
             if gateway_port:
+                port_vlan_map: dict[str, list[int]] = getattr(
+                    gw_data, "port_vlan_map", {}
+                )
+                vlan_tags: list[int] = list(
+                    port_vlan_map.get(gateway_port, [])
+                )
                 edges.append({
                     "id": edge_id,
                     "from": gw_rid,
@@ -220,9 +245,36 @@ def _detect_inter_router_edges(
                         "detection_method": "arp_port",
                         "ap_host_ip": ap_hip,
                         "gateway_port": gateway_port,
+                        "ap_port": "wan",
+                        "vlan_tags": vlan_tags,
                     },
                 })
                 seen_edges.add(edge_id)
+
+    # Repeater override: a router with at least one wireless STA-mode
+    # interface has no Ethernet uplink — even if Method 1 / 2.5 produced a
+    # `lan_uplink` edge (which can happen because the gateway's DHCP server
+    # also leases an IP via WiFi).  Promote those edges to `wifi_uplink` so
+    # the UI shows them as "WLAN Repeater" instead of "Kabel".
+    repeater_rids = {
+        rid
+        for rid, _hip, data in router_data
+        if (getattr(data, "sta_interfaces", None) or [])
+    }
+    for edge in edges:
+        if edge["relationship"] != "lan_uplink":
+            continue
+        if edge["to"] not in repeater_rids:
+            continue
+        edge["relationship"] = "wifi_uplink"
+        attrs = edge.setdefault("attributes", {})
+        attrs["link_type"] = "wifi"
+        attrs["detection_method"] = (
+            f"repeater_override({attrs.get('detection_method', '')})"
+        )
+        attrs["ap_port"] = None
+        attrs["vlan_tags"] = []
+        attrs.pop("gateway_port", None)
 
     # Method 3: Subnet fallback for routers with no detected uplink
     connected_aps = {
@@ -273,6 +325,8 @@ def _detect_inter_router_edges(
                         "link_type": "unknown",
                         "detection_method": "subnet_fallback",
                         "ap_host_ip": ap_hip,
+                        "ap_port": None,
+                        "vlan_tags": [],
                     },
                 })
                 seen_edges.add(edge_id)

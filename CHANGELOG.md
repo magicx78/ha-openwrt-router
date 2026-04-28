@@ -2,6 +2,22 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.17.5] - 2026-04-29
+
+### Fixed
+
+- **Topology: WLAN-Repeater wurden fälschlich als "Kabel" angezeigt.** Method 2 (WiFi-Client-Cross-Reference) in `topology_mesh.py` scheiterte, weil die STA-MAC eines Repeater-Routers nicht im Lookup landete — `router_macs` enthielt nur LAN-MAC + AP-Mode-BSSIDs. Method 1 (DHCP-Lease) hat den Edge dann als `lan_uplink` abgefangen → Frontend mappte das auf `'wired'` → Badge "Kabel". Fix: neue Methode `OpenWrtAPI.get_sta_interface_details()` (iwinfo + UCI-Fallback) sammelt STA-Interface-MACs; `topology_mesh._detect_inter_router_edges()` schreibt sie ins `router_macs`-Lookup. Zusätzlich: Repeater-Override stuft bestehende `lan_uplink`-Edges auf `wifi_uplink` um, sobald `sta_interfaces` für den Ziel-Router vorhanden ist (deckt den Fall ab, dass das Gateway zusätzlich einen DHCP-Lease vergibt).
+
+### Changed
+
+- **Topology-Edges tragen jetzt Port-Info zwischen Routern.** Inter-Router-Edges (`lan_uplink`) liefern in den Attributen zusätzlich `ap_port` (`"wan"`) und `vlan_tags` (Liste von VLAN-IDs am Gateway-Port via `port_vlan_map`). Frontend zeichnet daraus inline auf der Verbindung ein Label wie `LAN3 · V30 · 1G` (Untagged) bzw. `T:10,20,30` (Trunk) plus AP-seitig `WAN`. Tooltip zeigt VLAN strukturiert (`Trunk 10, 20, 30` oder einzelne ID).
+- **Neuer UplinkType `'repeater'`** — Badge "WLAN Repeater" (amber) statt "Mesh"; `'mesh'` ist jetzt explizit Subnet-Fallback ("Mesh?", unverifiziert). MobileView und EdgeTooltip wurden synchron aktualisiert.
+
+### Added
+
+- `OpenWrtCoordinatorData.sta_interfaces` — Liste der STA-Mode-Wireless-Interfaces (für WLAN-Repeater-Erkennung).
+- 4 neue Tests in `tests/test_topology_mesh.py` (STA-MAC-Lookup, Repeater-Override, VLAN-Tag-Anreicherung, Port-Info bei Subnet-Fallback) + 1 in `test_coordinator.py` (`as_dict` exportiert `sta_interfaces`). Total: 438 Tests grün.
+
 ## [1.17.4] - 2026-04-29
 
 ### Changed

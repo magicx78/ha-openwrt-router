@@ -120,6 +120,10 @@ class OpenWrtCoordinatorData:
         self.updates_available: dict[str, Any] = {"available": False, "system": [], "addons": []}
         self.services: list[dict[str, Any]] = []
         self.ap_interfaces: list[dict[str, Any]] = []
+        # STA-mode wireless interfaces (WiFi repeater / mesh backhaul).
+        # Used by topology_mesh to detect wireless-uplinked routers via their
+        # own STA MAC.
+        self.sta_interfaces: list[dict[str, Any]] = []
         self.features: dict[str, Any] = {}
         # Fritz!Box DSL data (gateway only)
         self.dsl_stats: dict[str, Any] = {}
@@ -171,6 +175,7 @@ class OpenWrtCoordinatorData:
             KEY_UPDATES_AVAILABLE: self.updates_available,
             KEY_SERVICES: self.services,
             "ap_interfaces": self.ap_interfaces,
+            "sta_interfaces": self.sta_interfaces,
             KEY_FEATURES: self.features,
             KEY_DSL_STATS: self.dsl_stats,
             KEY_WAN_TRAFFIC: self.wan_traffic,
@@ -311,6 +316,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching AP interface details: %s", err)
                 data.ap_interfaces = []
+
+            # --- STA Interface Details (WiFi repeater / mesh backhaul) ---
+            try:
+                data.sta_interfaces = await self.api.get_sta_interface_details()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching STA interface details: %s", err)
+                data.sta_interfaces = []
 
             # --- Fritz!Box DSL stats + ping + DuckDNS ---
             # Skipped on cycle 1 (first_refresh at startup) to avoid blocking

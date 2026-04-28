@@ -510,17 +510,38 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
   const apRouterNodes = routerNodes.filter((n) => n.id !== gwNode.id);
 
   // Build uplink map: ap_id → uplink info (from inter-router edges)
-  const uplinkMap = new Map<string, { uplinkTo: string; uplinkType: UplinkType; backhaulSignal: number; gatewayPort?: string }>();
+  const uplinkMap = new Map<string, {
+    uplinkTo: string;
+    uplinkType: UplinkType;
+    backhaulSignal: number;
+    gatewayPort?: string;
+    apPort?: string;
+    vlanTags?: number[];
+  }>();
   for (const edge of interRouterEdges) {
     const apId = edge.to;
     if (apId === gwNode.id) continue;
-    // lan_uplink = confirmed wired, wifi_uplink = confirmed mesh,
-    // mesh_member = inferred (unknown) → show as wired to avoid false "mesh" label
+    // wifi_uplink  = WiFi backhaul (verified via STA-MAC or repeater override) → "WLAN Repeater"
+    // lan_uplink   = ethernet uplink (DHCP / ARP / FDB-confirmed)              → "Kabel"
+    // mesh_member  = subnet-fallback (unverified)                              → "Mesh?"
     const uplinkType: UplinkType =
-      edge.relationship === 'wifi_uplink' ? 'mesh' : 'wired';
+      edge.relationship === 'wifi_uplink' ? 'repeater' :
+      edge.relationship === 'mesh_member' ? 'mesh' :
+      'wired';
     const backhaulSignal = (edge.attributes?.signal as number | undefined) ?? -60;
     const gatewayPort = (edge.attributes?.gateway_port as string | undefined) || undefined;
-    uplinkMap.set(apId, { uplinkTo: edge.from, uplinkType, backhaulSignal, gatewayPort });
+    const apPortRaw = edge.attributes?.ap_port as string | null | undefined;
+    const apPort = apPortRaw ?? undefined;
+    const vlanTagsRaw = edge.attributes?.vlan_tags as number[] | undefined;
+    const vlanTags = Array.isArray(vlanTagsRaw) ? vlanTagsRaw : undefined;
+    uplinkMap.set(apId, {
+      uplinkTo: edge.from,
+      uplinkType,
+      backhaulSignal,
+      gatewayPort,
+      apPort,
+      vlanTags,
+    });
   }
 
   // Count clients per router (from the clients array, ap_mac = router id)
@@ -574,6 +595,8 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       gatewayPort: gwPort,
       gatewayPortSpeed: gwPortStat?.speed_mbps ?? null,
       gatewayPortUp: gwPortStat?.up ?? false,
+      apPort: uplink?.apPort,
+      vlanTags: uplink?.vlanTags,
       portStats: ((n.attributes?.port_stats as any[] | undefined) ?? []).map((p: any): PortStat => ({
         name: p.name,
         up: p.up,

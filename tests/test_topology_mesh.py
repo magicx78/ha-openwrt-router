@@ -18,6 +18,10 @@ def _make_data(
     wan_connected: bool = False,
     clients: list | None = None,
     dhcp_leases: dict | None = None,
+    sta_interfaces: list | None = None,
+    port_vlan_map: dict | None = None,
+    port_fdb_map: dict | None = None,
+    trunk_port_map: dict | None = None,
 ) -> OpenWrtCoordinatorData:
     """Create minimal OpenWrtCoordinatorData for mesh tests."""
     data = OpenWrtCoordinatorData()
@@ -26,6 +30,10 @@ def _make_data(
     data.wan_connected = wan_connected
     data.clients = clients or []
     data.dhcp_leases = dhcp_leases or {}
+    data.sta_interfaces = sta_interfaces or []
+    data.port_vlan_map = port_vlan_map or {}
+    data.port_fdb_map = port_fdb_map or {}
+    data.trunk_port_map = trunk_port_map or {}
     return data
 
 
@@ -245,6 +253,146 @@ class TestDetectInterRouterEdges:
         edges = _detect_inter_router_edges([], router_data)
         assert len(edges) == 3
         assert all(e["from"] == "GW:00" for e in edges)
+
+    # ---- WLAN-Repeater detection (sta_interfaces) -----------------------
+
+    def test_sta_mac_added_to_lookup(self):
+        """STA-MAC of repeater router is found in gateway client list →
+        Method 2 produces a wifi_uplink edge even though the repeater's
+        LAN MAC differs from the STA MAC."""
+        gw_data = _make_data(
+            router_info={"mac": "GW:LAN:00:00:00:01"},
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "185.1.1.1"},
+            wan_connected=True,
+            clients=[
+                {"mac": "RP:STA:00:00:00:02", "signal": -58, "radio": "phy0-ap0"},
+            ],
+        )
+        # Repeater's LAN MAC differs from its STA-mode wireless MAC
+        rp_data = _make_data(
+            router_info={"mac": "RP:LAN:00:00:00:02"},
+            sta_interfaces=[
+                {"ifname": "wlan1-sta", "mode": "sta",
+                 "mac": "RP:STA:00:00:00:02", "bssid": "GW:AP:00:00:00:01",
+                 "ssid": "sECUREaP", "signal": -58},
+            ],
+        )
+        router_data = [
+            ("GW:LAN:00:00:00:01", "10.10.10.1", gw_data),
+            ("RP:LAN:00:00:00:02", "10.10.10.2", rp_data),
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert len(edges) == 1
+        assert edges[0]["relationship"] == "wifi_uplink"
+        assert edges[0]["from"] == "GW:LAN:00:00:00:01"
+        assert edges[0]["to"] == "RP:LAN:00:00:00:02"
+        assert edges[0]["attributes"]["ap_port"] is None
+        assert edges[0]["attributes"]["vlan_tags"] == []
+
+    def test_repeater_override_promotes_lan_to_wifi_uplink(self):
+        """Even when the gateway hands out a DHCP lease to a repeater router,
+        the presence of sta_interfaces forces the edge to wifi_uplink."""
+        gw_data = _make_data(
+            router_info={"mac": "GW:00"},
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "185.1.1.1"},
+            wan_connected=True,
+            dhcp_leases={
+                "RP:00": {"ip": "10.10.10.5", "hostname": "repeater"},
+            },
+            port_fdb_map={"rp:00": "lan3"},
+            port_vlan_map={"lan3": [10, 20, 30]},
+        )
+        rp_data = _make_data(
+            router_info={"mac": "RP:00"},
+            # Empty 'mac' to ensure UCI-fallback shape is supported (override
+            # still triggers because sta_interfaces is non-empty)
+            sta_interfaces=[
+                {"ifname": "default_radio0", "mode": "sta",
+                 "mac": "", "bssid": "", "ssid": "sECUREaP", "signal": None},
+            ],
+        )
+        router_data = [
+            ("GW:00", "10.10.10.1", gw_data),
+            ("RP:00", "10.10.10.5", rp_data),
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert len(edges) == 1
+        e = edges[0]
+        assert e["relationship"] == "wifi_uplink"
+        assert e["attributes"]["link_type"] == "wifi"
+        assert e["attributes"]["ap_port"] is None
+        assert e["attributes"]["vlan_tags"] == []
+        # Override marker preserved for diagnostics
+        assert "repeater_override" in e["attributes"]["detection_method"]
+        # gateway_port stripped — wireless link has none
+        assert "gateway_port" not in e["attributes"]
+
+    # ---- Edge enrichment: ap_port + vlan_tags ---------------------------
+
+    def test_lan_uplink_has_ap_port_and_vlan_tags(self):
+        """A confirmed Ethernet uplink carries ap_port='wan' plus the VLAN
+        tags of the gateway port (Trunk = >1 entries)."""
+        gw_data = _make_data(
+            router_info={"mac": "GW:01"},
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "185.1.1.1"},
+            wan_connected=True,
+            dhcp_leases={
+                "AP:01": {"ip": "10.10.10.2", "hostname": "ap1"},
+            },
+            port_fdb_map={"ap:01": "lan3"},
+            port_vlan_map={"lan3": [10, 20, 30]},
+        )
+        ap_data = _make_data(router_info={"mac": "AP:01"})
+        router_data = [
+            ("GW:01", "10.10.10.1", gw_data),
+            ("AP:01", "10.10.10.2", ap_data),
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert len(edges) == 1
+        attrs = edges[0]["attributes"]
+        assert attrs["gateway_port"] == "lan3"
+        assert attrs["ap_port"] == "wan"
+        assert attrs["vlan_tags"] == [10, 20, 30]
+
+    def test_lan_uplink_without_vlan_data(self):
+        """Without port_vlan_map, vlan_tags falls back to []."""
+        gw_data = _make_data(
+            router_info={"mac": "GW:02"},
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "185.1.1.1"},
+            wan_connected=True,
+            dhcp_leases={
+                "AP:02": {"ip": "10.10.10.3", "hostname": "ap2"},
+            },
+            port_fdb_map={"ap:02": "lan2"},
+            # No port_vlan_map provided
+        )
+        ap_data = _make_data(router_info={"mac": "AP:02"})
+        router_data = [
+            ("GW:02", "10.10.10.1", gw_data),
+            ("AP:02", "10.10.10.3", ap_data),
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert len(edges) == 1
+        assert edges[0]["attributes"]["ap_port"] == "wan"
+        assert edges[0]["attributes"]["vlan_tags"] == []
+
+    def test_subnet_fallback_carries_empty_port_info(self):
+        """mesh_member edges always have ap_port=None + vlan_tags=[]."""
+        gw_data = _make_data(
+            router_info={"mac": "GW:03"},
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "185.1.1.1"},
+            wan_connected=True,
+        )
+        ap_data = _make_data(router_info={"mac": "AP:03"})
+        router_data = [
+            ("GW:03", "10.10.10.1", gw_data),
+            ("AP:03", "10.10.10.6", ap_data),
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert len(edges) == 1
+        assert edges[0]["relationship"] == "mesh_member"
+        assert edges[0]["attributes"]["ap_port"] is None
+        assert edges[0]["attributes"]["vlan_tags"] == []
 
 
 # =====================================================================

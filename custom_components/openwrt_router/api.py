@@ -997,6 +997,108 @@ class OpenWrtAPI:
 
         return result
 
+    async def get_sta_interface_details(self) -> list[dict[str, Any]]:
+        """Detect wireless STA-mode interfaces (WiFi repeater / mesh backhaul).
+
+        A router that uplinks to another router via WiFi runs a wifi-iface in
+        ``mode=sta`` (or ``wds-sta``/``mesh``).  The MAC of that STA interface
+        is what the upstream router sees in its associated-clients list.
+
+        Two-stage detection:
+            1. ``iwinfo/info`` enumerates all wireless interfaces and reports
+               their ``mode``.  STA-mode entries are collected and the own
+               MAC is resolved via ``network.device/status``.
+            2. UCI ``wireless`` config fallback for routers without iwinfo
+               (Cudy WR3000 etc.).  No MAC is available but the presence of
+               an STA-mode wifi-iface alone allows ``topology_mesh`` to
+               override a misclassified ``lan_uplink`` edge.
+
+        Returns:
+            List of dicts ``{ifname, mode, ssid, bssid, mac, signal}``.
+            ``mac`` is the STA's own wireless MAC (uppercase, no colons
+            normalised) — empty string if it could not be resolved.
+            ``bssid`` is the upstream peer's BSSID (uppercase).  Empty list
+            on full detection failure.
+        """
+        sta_modes = {
+            "sta", "client", "station",
+            "wds-sta", "wds_sta",
+            "mesh", "mesh point",
+        }
+        result: list[dict[str, Any]] = []
+
+        # --- Step 1: iwinfo enumeration ----------------------------------
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        try:
+            info_all = await self._call(
+                UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {}
+            )
+            if isinstance(info_all, dict):
+                for ifname, iface_data in info_all.items():
+                    if not isinstance(iface_data, dict):
+                        continue
+                    mode = (iface_data.get("mode") or "").lower()
+                    if mode in sta_modes:
+                        candidates.append((ifname, iface_data))
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+            _LOGGER.debug("iwinfo/info unavailable for STA detection")
+
+        for ifname, iface_data in candidates:
+            own_mac = ""
+            try:
+                dev = await self._call(
+                    UBUS_DEVICE_OBJECT, UBUS_DEVICE_STATUS, {"name": ifname}
+                )
+                if isinstance(dev, dict):
+                    own_mac = (dev.get("macaddr") or "").upper()
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                pass
+            result.append({
+                "ifname": ifname,
+                "mode": iface_data.get("mode"),
+                "ssid": iface_data.get("ssid", ""),
+                "bssid": (iface_data.get("bssid") or "").upper(),
+                "mac": own_mac,
+                "signal": iface_data.get("signal"),
+            })
+
+        if result:
+            _LOGGER.debug(
+                "STA interfaces (iwinfo): %s",
+                [(r["ifname"], r["mode"], r["mac"]) for r in result],
+            )
+            return result
+
+        # --- Step 2: UCI fallback (no MAC, mode-only) --------------------
+        try:
+            values = await self.get_uci_wireless()
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+            return []
+        if not isinstance(values, dict):
+            return []
+        for section_name, section_data in values.items():
+            if not isinstance(section_data, dict):
+                continue
+            if section_data.get(".type") != "wifi-iface":
+                continue
+            mode_uci = (section_data.get("mode") or "").lower()
+            if mode_uci not in sta_modes:
+                continue
+            result.append({
+                "ifname": section_name,
+                "mode": mode_uci,
+                "ssid": section_data.get("ssid", ""),
+                "bssid": (section_data.get("bssid") or "").upper(),
+                "mac": "",
+                "signal": None,
+            })
+        if result:
+            _LOGGER.debug(
+                "STA interfaces (UCI fallback): %s",
+                [(r["ifname"], r["mode"]) for r in result],
+            )
+        return result
+
     async def get_connected_clients(
         self,
         leases: dict[str, dict[str, str]] | None = None,
