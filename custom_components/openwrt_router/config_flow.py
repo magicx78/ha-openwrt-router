@@ -124,7 +124,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     validation so that the same physical router cannot be added twice.
     """
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     @callback

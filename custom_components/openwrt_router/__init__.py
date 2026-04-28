@@ -33,7 +33,7 @@ from .api import (
     OpenWrtTimeoutError,
 )
 from .coordinator import OpenWrtCoordinator
-from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN as DOMAIN
+from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN as DOMAIN, PROTOCOL_HTTP
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +63,25 @@ class OpenWrtRuntimeData:
 
 # Type alias for the config entry with our runtime_data type
 type OpenWrtConfigEntry = ConfigEntry[OpenWrtRuntimeData]
+
+
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Migrate config entries from older schema versions.
+
+    v1 → v2: CONF_PROTOCOL was added in v1.16.0.  Entries created before that
+    have no protocol key and must fall back to HTTP (the old hard-coded default).
+    """
+    if config_entry.version == 1:
+        new_data = {**config_entry.data}
+        if CONF_PROTOCOL not in new_data:
+            new_data[CONF_PROTOCOL] = PROTOCOL_HTTP
+        hass.config_entries.async_update_entry(config_entry, data=new_data, version=2)
+        _LOGGER.info(
+            "Migrated OpenWrt entry %s to v2 (protocol=%s)",
+            config_entry.entry_id,
+            new_data[CONF_PROTOCOL],
+        )
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:

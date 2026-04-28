@@ -447,6 +447,65 @@ class TestReauthCannotConnectStep:
         assert result["step_id"] == "reauth_rpcd_setup"
 
 
+class TestMigrateEntry:
+    """async_migrate_entry must add CONF_PROTOCOL to pre-v1.16.0 entries."""
+
+    @pytest.mark.asyncio
+    async def test_v1_without_protocol_gets_http(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from custom_components.openwrt_router import async_migrate_entry
+        from custom_components.openwrt_router.const import CONF_PROTOCOL, PROTOCOL_HTTP
+
+        entry = MagicMock()
+        entry.version = 1
+        entry.entry_id = "test-v1-entry"
+        entry.data = {"host": "192.168.1.1", "port": 80, "username": "root", "password": "pw"}
+
+        hass = MagicMock()
+        captured: dict = {}
+
+        def _update(e, data=None, version=None, **kw):
+            if data:
+                captured["data"] = data
+            if version is not None:
+                captured["version"] = version
+
+        hass.config_entries.async_update_entry.side_effect = _update
+
+        result = await async_migrate_entry(hass, entry)
+
+        assert result is True
+        assert captured["data"][CONF_PROTOCOL] == PROTOCOL_HTTP
+        assert captured["version"] == 2
+
+    @pytest.mark.asyncio
+    async def test_v1_with_existing_protocol_preserved(self):
+        from custom_components.openwrt_router import async_migrate_entry
+        from custom_components.openwrt_router.const import CONF_PROTOCOL, PROTOCOL_HTTPS_INSECURE
+
+        entry = MagicMock()
+        entry.version = 1
+        entry.entry_id = "test-v1-entry-with-proto"
+        entry.data = {"host": "192.168.1.1", "port": 443, "username": "root",
+                      "password": "pw", CONF_PROTOCOL: PROTOCOL_HTTPS_INSECURE}
+
+        hass = MagicMock()
+        captured: dict = {}
+
+        def _update(e, data=None, version=None, **kw):
+            if data:
+                captured["data"] = data
+            if version is not None:
+                captured["version"] = version
+
+        hass.config_entries.async_update_entry.side_effect = _update
+
+        result = await async_migrate_entry(hass, entry)
+
+        assert result is True
+        assert captured["data"][CONF_PROTOCOL] == PROTOCOL_HTTPS_INSECURE
+
+
 class TestBuildSchemas:
     def test_user_schema_defaults(self):
         schema = OpenWrtConfigFlow._build_user_schema(None)
