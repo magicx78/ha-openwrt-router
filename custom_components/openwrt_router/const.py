@@ -8,9 +8,9 @@ INTEGRATION_NAME = "OpenWrt Router"
 
 # Default connection values
 DEFAULT_HOST = ""
-DEFAULT_PORT = 80
+DEFAULT_PORT = 443
 DEFAULT_USERNAME = "root"
-DEFAULT_PROTOCOL = "http"
+DEFAULT_PROTOCOL = "https-insecure"
 
 # Protocol options
 PROTOCOL_HTTP = "http"
@@ -220,13 +220,21 @@ ERROR_RPCD_SETUP = "rpcd_setup_required"
 CLIENT_KEY_CONNECTED_SINCE = "connected_since"
 CLIENT_KEY_DHCP_EXPIRES = "dhcp_expires"
 
-# Fritz!Box config (stored in config entry options)
+# Fritz!Box config (stored in config entry data, set during setup)
 CONF_FRITZBOX_HOST = "fritzbox_host"
 CONF_FRITZBOX_USER = "fritzbox_user"
 CONF_FRITZBOX_PASSWORD = "fritzbox_password"
 CONF_FRITZBOX_PORT = "fritzbox_port"
 DEFAULT_FRITZBOX_HOST = "172.16.1.254"
 DEFAULT_FRITZBOX_PORT = 49000
+
+# Switch config (stored in config entry data, set during setup)
+CONF_SWITCH_HOST = "switch_host"
+CONF_SWITCH_PORT = "switch_port"
+CONF_SWITCH_PROTOCOL = "switch_protocol"
+CONF_SWITCH_USERNAME = "switch_username"
+CONF_SWITCH_PASSWORD = "switch_password"
+DEFAULT_SWITCH_PORT = 443
 
 # Fritz!Box coordinator data keys
 KEY_DSL_STATS = "dsl_stats"

@@ -2,6 +2,20 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.16.0] - 2026-04-28
+
+### Fixed
+
+- **Standard-Port 443 / HTTPS Self-Signed**: Default-Port war fälschlicherweise 80 (HTTP). Da die meisten OpenWrt-Router HTTPS auf Port 443 nutzen, ist der neue Standard 443 + HTTPS Self-Signed.
+- **Login-Bug bei HTTPS**: Die Protokollauswahl wurde bisher erst *nach* dem Verbindungstest angezeigt — der Test verwendete daher immer HTTP, was bei Port 443 unweigerlich scheiterte. Protokoll ist jetzt Teil des ersten Schritts.
+
+### Added
+
+- **Geräte-Auswahl im Setup**: Nach der Router-Verbindung erscheinen Checkboxen für zusätzliche Geräte:
+  - ☐ **Fritz!Box DSL-Modem** — DSL-Statistiken, 24h-Speedchart, Ping
+  - ☐ **Managed Switch (OpenWrt)** — Port-Statistiken eines separaten Switches
+- **Paket-Installationshinweise**: Wenn ubus-Berechtigungen fehlen, zeigt der Checklist-Schritt fertige `opkg`-Befehle zum Kopieren an.
+
 ## [1.15.6] - 2026-04-22
 
 ### Fixed

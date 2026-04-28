@@ -18,6 +18,7 @@ from custom_components.openwrt_router.config_flow import (
 )
 from custom_components.openwrt_router.const import (
     CONF_PROTOCOL,
+    DEFAULT_PROTOCOL,
     DOMAIN,
     ERROR_CANNOT_CONNECT,
     ERROR_INVALID_AUTH,
@@ -26,6 +27,7 @@ from custom_components.openwrt_router.const import (
     ERROR_TIMEOUT,
     ERROR_UNKNOWN,
     PROTOCOL_HTTP,
+    PROTOCOL_HTTPS_INSECURE,
 )
 
 
@@ -79,9 +81,18 @@ def _make_flow():
     """Create an OpenWrtConfigFlow with a mock hass."""
     flow = OpenWrtConfigFlow()
     flow.hass = MagicMock()
-    # Mock the flow context
     flow.context = {"source": "user"}
     return flow
+
+
+# Shared valid user_input for the user step (now includes protocol)
+_VALID_USER_INPUT = {
+    "host": "192.168.1.1",
+    "port": 443,
+    "protocol": PROTOCOL_HTTPS_INSECURE,
+    "username": "root",
+    "password": "test",
+}
 
 
 class TestUserStep:
@@ -97,7 +108,8 @@ class TestUserStep:
         flow = _make_flow()
         result = await flow.async_step_user(user_input={
             "host": "127.0.0.1",
-            "port": 80,
+            "port": 443,
+            "protocol": PROTOCOL_HTTPS_INSECURE,
             "username": "root",
             "password": "test",
         })
@@ -108,12 +120,7 @@ class TestUserStep:
     async def test_auth_error(self):
         flow = _make_flow()
         with patch.object(flow, "_validate_input", side_effect=OpenWrtAuthError("bad")):
-            result = await flow.async_step_user(user_input={
-                "host": "192.168.1.1",
-                "port": 80,
-                "username": "root",
-                "password": "wrong",
-            })
+            result = await flow.async_step_user(user_input=_VALID_USER_INPUT)
         assert result["type"] == "form"
         assert result["errors"]["base"] == ERROR_INVALID_AUTH
 
@@ -121,12 +128,7 @@ class TestUserStep:
     async def test_timeout_error(self):
         flow = _make_flow()
         with patch.object(flow, "_validate_input", side_effect=OpenWrtTimeoutError("slow")):
-            result = await flow.async_step_user(user_input={
-                "host": "192.168.1.1",
-                "port": 80,
-                "username": "root",
-                "password": "test",
-            })
+            result = await flow.async_step_user(user_input=_VALID_USER_INPUT)
         assert result["type"] == "form"
         assert result["errors"]["base"] == ERROR_TIMEOUT
 
@@ -134,12 +136,7 @@ class TestUserStep:
     async def test_connection_error(self):
         flow = _make_flow()
         with patch.object(flow, "_validate_input", side_effect=OpenWrtConnectionError("down")):
-            result = await flow.async_step_user(user_input={
-                "host": "192.168.1.1",
-                "port": 80,
-                "username": "root",
-                "password": "test",
-            })
+            result = await flow.async_step_user(user_input=_VALID_USER_INPUT)
         assert result["type"] == "form"
         assert result["errors"]["base"] == ERROR_CANNOT_CONNECT
 
@@ -147,12 +144,7 @@ class TestUserStep:
     async def test_response_error(self):
         flow = _make_flow()
         with patch.object(flow, "_validate_input", side_effect=OpenWrtResponseError("bad")):
-            result = await flow.async_step_user(user_input={
-                "host": "192.168.1.1",
-                "port": 80,
-                "username": "root",
-                "password": "test",
-            })
+            result = await flow.async_step_user(user_input=_VALID_USER_INPUT)
         assert result["type"] == "form"
         assert result["errors"]["base"] == ERROR_CANNOT_CONNECT
 
@@ -160,92 +152,169 @@ class TestUserStep:
     async def test_unknown_error(self):
         flow = _make_flow()
         with patch.object(flow, "_validate_input", side_effect=RuntimeError("oops")):
-            result = await flow.async_step_user(user_input={
-                "host": "192.168.1.1",
-                "port": 80,
-                "username": "root",
-                "password": "test",
-            })
+            result = await flow.async_step_user(user_input=_VALID_USER_INPUT)
         assert result["type"] == "form"
         assert result["errors"]["base"] == ERROR_UNKNOWN
 
     @pytest.mark.asyncio
-    async def test_success_proceeds_to_protocol(self):
+    async def test_success_proceeds_to_devices(self):
+        """After successful connection the flow moves to the devices selection step."""
         flow = _make_flow()
         board_info = {"hostname": "OpenWrt-Dev", "model": "Test", "mac": "aa:bb:cc:dd:ee:ff"}
 
         with patch.object(flow, "_validate_input", return_value=board_info), \
              patch.object(flow, "async_set_unique_id", new_callable=AsyncMock), \
              patch.object(flow, "_abort_if_unique_id_configured"):
-            result = await flow.async_step_user(user_input={
-                "host": "192.168.1.1",
-                "port": 80,
-                "username": "root",
-                "password": "test",
-            })
-        # Should proceed to protocol step (show form)
+            result = await flow.async_step_user(user_input=_VALID_USER_INPUT)
+
         assert result["type"] == "form"
-        assert result["step_id"] == "protocol"
+        assert result["step_id"] == "devices"
 
-
-class TestProtocolStep:
     @pytest.mark.asyncio
-    async def test_creates_entry(self):
+    async def test_protocol_stored_in_user_data(self):
+        """Protocol selected in user step is stored and used for the connection test."""
         flow = _make_flow()
-        flow._board_info = {"hostname": "OpenWrt-Dev"}
-        flow._user_data = {
-            "host": "192.168.1.1",
-            "port": 80,
-            "username": "root",
-            "password": "test",
-        }
-        result = await flow.async_step_protocol(user_input={
-            CONF_PROTOCOL: PROTOCOL_HTTP,
-        })
-        assert result["type"] == "create_entry"
-        assert result["title"] == "OpenWrt-Dev"
-        assert result["data"][CONF_PROTOCOL] == PROTOCOL_HTTP
-        assert result["data"]["host"] == "192.168.1.1"
+        board_info = {"hostname": "OpenWrt-Dev", "model": "Test", "mac": "aa:bb:cc:dd:ee:ff"}
 
+        with patch.object(flow, "_validate_input", return_value=board_info) as mock_validate, \
+             patch.object(flow, "async_set_unique_id", new_callable=AsyncMock), \
+             patch.object(flow, "_abort_if_unique_id_configured"):
+            await flow.async_step_user(user_input=_VALID_USER_INPUT)
+
+        mock_validate.assert_called_once_with(
+            "192.168.1.1", 443, "root", "test", PROTOCOL_HTTPS_INSECURE
+        )
+        assert flow._user_data[CONF_PROTOCOL] == PROTOCOL_HTTPS_INSECURE
+
+
+class TestDevicesStep:
+    @pytest.mark.asyncio
+    async def test_shows_form_on_first_call(self):
+        flow = _make_flow()
+        flow._user_data = {"host": "192.168.1.1", "port": 443}
+        flow._board_info = {"model": "Test Router"}
+        result = await flow.async_step_devices(user_input=None)
+        assert result["type"] == "form"
+        assert result["step_id"] == "devices"
+
+    @pytest.mark.asyncio
+    async def test_no_extras_goes_to_checklist(self):
+        flow = _make_flow()
+        flow._user_data = {
+            "host": "192.168.1.1", "port": 443,
+            "protocol": PROTOCOL_HTTPS_INSECURE,
+            "username": "root", "password": "test",
+        }
+        flow._board_info = {"hostname": "Router", "model": "Test"}
+
+        with patch.object(flow, "async_step_checklist", return_value={"type": "form", "step_id": "checklist"}) as mock_checklist:
+            result = await flow.async_step_devices(user_input={"add_fritzbox": False, "add_switch": False})
+
+        mock_checklist.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_fritzbox_checked_goes_to_fritzbox_step(self):
+        flow = _make_flow()
+        flow._user_data = {"host": "192.168.1.1", "port": 443}
+        flow._board_info = {}
+
+        with patch.object(flow, "async_step_fritzbox", return_value={"type": "form", "step_id": "fritzbox"}) as mock_fb:
+            await flow.async_step_devices(user_input={"add_fritzbox": True, "add_switch": False})
+
+        mock_fb.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_switch_checked_goes_to_switch_step(self):
+        flow = _make_flow()
+        flow._user_data = {"host": "192.168.1.1", "port": 443}
+        flow._board_info = {}
+
+        with patch.object(flow, "async_step_switch_dev", return_value={"type": "form", "step_id": "switch_dev"}) as mock_sw:
+            await flow.async_step_devices(user_input={"add_fritzbox": False, "add_switch": True})
+
+        mock_sw.assert_called_once()
+
+
+class TestFritzboxStep:
     @pytest.mark.asyncio
     async def test_shows_form_on_first_call(self):
         flow = _make_flow()
         flow._user_data = {"host": "192.168.1.1"}
-        result = await flow.async_step_protocol(user_input=None)
+        result = await flow.async_step_fritzbox(user_input=None)
         assert result["type"] == "form"
-        assert result["step_id"] == "protocol"
+        assert result["step_id"] == "fritzbox"
+
+    @pytest.mark.asyncio
+    async def test_submit_stores_fritzbox_data(self):
+        flow = _make_flow()
+        flow._user_data = {
+            "host": "192.168.1.1", "port": 443,
+            "protocol": PROTOCOL_HTTPS_INSECURE,
+            "username": "root", "password": "test",
+        }
+        flow._board_info = {"hostname": "Router"}
+        flow._add_switch = False
+
+        with patch.object(flow, "async_step_checklist", return_value={"type": "form", "step_id": "checklist"}):
+            await flow.async_step_fritzbox(user_input={
+                "fritzbox_host": "172.16.1.254",
+                "fritzbox_port": 49000,
+                "fritzbox_user": "admin",
+                "fritzbox_password": "secret",
+            })
+
+        assert flow._user_data["fritzbox_host"] == "172.16.1.254"
+        assert flow._user_data["fritzbox_port"] == 49000
+
+
+class TestSwitchDevStep:
+    @pytest.mark.asyncio
+    async def test_shows_form_on_first_call(self):
+        flow = _make_flow()
+        flow._user_data = {"host": "192.168.1.1"}
+        result = await flow.async_step_switch_dev(user_input=None)
+        assert result["type"] == "form"
+        assert result["step_id"] == "switch_dev"
+
+    @pytest.mark.asyncio
+    async def test_submit_stores_switch_data(self):
+        flow = _make_flow()
+        flow._user_data = {
+            "host": "192.168.1.1", "port": 443,
+            "protocol": PROTOCOL_HTTPS_INSECURE,
+            "username": "root", "password": "test",
+        }
+        flow._board_info = {"hostname": "Router"}
+
+        with patch.object(flow, "async_step_checklist", return_value={"type": "form", "step_id": "checklist"}):
+            await flow.async_step_switch_dev(user_input={
+                "switch_host": "192.168.1.2",
+                "switch_port": 443,
+                "switch_protocol": PROTOCOL_HTTPS_INSECURE,
+                "switch_username": "root",
+                "switch_password": "swpass",
+            })
+
+        assert flow._user_data["switch_host"] == "192.168.1.2"
+        assert flow._user_data["switch_protocol"] == PROTOCOL_HTTPS_INSECURE
 
 
 class TestUserStepRpcdSetup:
-    """status=6 on session/login in OpenWrt 25.x = wrong credentials, not rpcd setup issue.
-    OpenWrtResponseError (garbled HTTP) = rpcd not responding → ERROR_CANNOT_CONNECT.
-    """
+    """status=6 on session/login → wrong credentials, not rpcd setup issue."""
 
     @pytest.mark.asyncio
     async def test_auth_error_status6_maps_to_invalid_auth(self):
-        """status=6 on login (OpenWrtAuthError) must show invalid_auth, not rpcd_setup."""
         flow = _make_flow()
         with patch.object(flow, "_validate_input", side_effect=OpenWrtAuthError("permission denied")):
-            result = await flow.async_step_user(user_input={
-                "host": "10.10.10.4",
-                "port": 80,
-                "username": "root",
-                "password": "wrong",
-            })
+            result = await flow.async_step_user(user_input=_VALID_USER_INPUT)
         assert result["type"] == "form"
         assert result["errors"]["base"] == ERROR_INVALID_AUTH
 
     @pytest.mark.asyncio
     async def test_response_error_maps_to_cannot_connect(self):
-        """Garbled ubus response (rpcd not responding) → cannot_connect error."""
         flow = _make_flow()
         with patch.object(flow, "_validate_input", side_effect=OpenWrtResponseError("garbled")):
-            result = await flow.async_step_user(user_input={
-                "host": "10.10.10.4",
-                "port": 80,
-                "username": "root",
-                "password": "test",
-            })
+            result = await flow.async_step_user(user_input=_VALID_USER_INPUT)
         assert result["type"] == "form"
         assert result["errors"]["base"] == ERROR_CANNOT_CONNECT
 
@@ -263,7 +332,8 @@ def _make_reauth_flow(entry_data: dict):
 
 _REAUTH_DATA = {
     "host": "10.10.10.4",
-    "port": 80,
+    "port": 443,
+    "protocol": PROTOCOL_HTTPS_INSECURE,
     "username": "root",
     "password": "secret",
 }
@@ -274,7 +344,6 @@ class TestReauthDiagnosis:
 
     @pytest.mark.asyncio
     async def test_existing_credentials_work_auto_resolves(self):
-        """If existing credentials still work → silent reload, no form shown."""
         flow, entry = _make_reauth_flow(_REAUTH_DATA)
         with patch.object(flow, "_validate_input", return_value={"hostname": "AP4"}), \
              patch.object(flow, "async_update_reload_and_abort", return_value={"type": "abort", "reason": "reauth_successful"}):
@@ -283,7 +352,6 @@ class TestReauthDiagnosis:
 
     @pytest.mark.asyncio
     async def test_response_error_routes_to_rpcd_setup_step(self):
-        """Garbled ubus response during reauth → rpcd not responding → setup step."""
         flow, entry = _make_reauth_flow(_REAUTH_DATA)
         with patch.object(flow, "_validate_input", side_effect=OpenWrtResponseError("garbled")):
             result = await flow.async_step_reauth({})
@@ -308,7 +376,6 @@ class TestReauthDiagnosis:
 
     @pytest.mark.asyncio
     async def test_auth_error_routes_to_confirm_step(self):
-        """Wrong password → show password form."""
         flow, entry = _make_reauth_flow(_REAUTH_DATA)
         with patch.object(flow, "_validate_input", side_effect=OpenWrtAuthError("bad")):
             result = await flow.async_step_reauth({})
@@ -317,8 +384,6 @@ class TestReauthDiagnosis:
 
 
 class TestReauthRpcdSetupStep:
-    """async_step_reauth_rpcd_setup: shows instructions, retries on submit."""
-
     @pytest.mark.asyncio
     async def test_shows_form_on_first_call(self):
         flow, _ = _make_reauth_flow(_REAUTH_DATA)
@@ -351,8 +416,6 @@ class TestReauthRpcdSetupStep:
 
 
 class TestReauthCannotConnectStep:
-    """async_step_reauth_cannot_connect: shows message, retries on submit."""
-
     @pytest.mark.asyncio
     async def test_shows_form_on_first_call(self):
         flow, _ = _make_reauth_flow(_REAUTH_DATA)
@@ -393,10 +456,18 @@ class TestBuildSchemas:
         schema = OpenWrtConfigFlow._build_user_schema({
             "host": "10.0.0.1",
             "port": 8080,
+            "protocol": PROTOCOL_HTTPS_INSECURE,
             "username": "admin",
         })
         assert schema is not None
 
-    def test_protocol_schema(self):
+    def test_user_schema_includes_protocol(self):
+        """Protocol must be part of the user step schema (not a separate step)."""
+        schema = OpenWrtConfigFlow._build_user_schema(None)
+        keys = [str(k) for k in schema.schema]
+        assert any("protocol" in k for k in keys)
+
+    def test_protocol_schema_still_available(self):
+        """_build_protocol_schema kept for backward compatibility."""
         schema = OpenWrtConfigFlow._build_protocol_schema()
         assert schema is not None
