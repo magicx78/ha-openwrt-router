@@ -1,0 +1,77 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'custom_components/openwrt_router/manifest.json'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from manifest
+        id: version
+        run: |
+          VERSION=$(python3 -c "import json; print(json.load(open('custom_components/openwrt_router/manifest.json'))['version'])")
+          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+          echo "Version: v${VERSION}"
+
+      - name: Read changelog entry
+        id: changelog
+        run: |
+          VERSION=$(python3 -c "import json; print(json.load(open('custom_components/openwrt_router/manifest.json'))['version'])")
+          BODY=$(python3 << 'EOF'
+import re, sys
+with open('CHANGELOG.md') as f:
+    content = f.read()
+pattern = rf'## \[{re.escape("VERSION")}\].*?(?=## \[|\Z)'
+pattern = pattern.replace('VERSION', sys.argv[1])
+m = re.search(pattern, content, re.DOTALL)
+print(m.group(0).strip() if m else 'See CHANGELOG.md for details.')
+EOF
+          python3 -c "
+import re, sys
+with open('CHANGELOG.md') as f:
+    content = f.read()
+version = '$VERSION'
+pattern = r'## \\[' + re.escape(version) + r'\\].*?(?=## \\[|\\Z)'
+m = re.search(pattern, content, re.DOTALL)
+print(m.group(0).strip() if m else 'See CHANGELOG.md for details.')
+")
+          EOF=$(python3 -c "print('EOF' + '12345')")
+          echo "body<<EOFMARKER" >> $GITHUB_OUTPUT
+          python3 -c "
+import re
+version = '$VERSION'
+with open('CHANGELOG.md') as f:
+    content = f.read()
+pattern = r'## \\[' + re.escape(version) + r'\\].*?(?=## \\[|\\Z)'
+m = re.search(pattern, content, re.DOTALL)
+print(m.group(0).strip() if m else 'See CHANGELOG.md for details.')
+" >> $GITHUB_OUTPUT
+          echo "EOFMARKER" >> $GITHUB_OUTPUT
+
+      - name: Check if tag exists
+        id: tag_check
+        run: |
+          if git ls-remote --tags origin ${{ steps.version.outputs.version }} | grep -q ${{ steps.version.outputs.version }}; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          body: ${{ steps.changelog.outputs.body }}
+          draft: false
+          prerelease: false
+          target_commitish: main
