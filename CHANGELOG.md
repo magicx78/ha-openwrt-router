@@ -2,6 +2,12 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.16.2] - 2026-04-28
+
+### Added
+
+- **ACL automatisch einrichten**: Im Checklist-Schritt des Setups erscheint eine Checkbox "Berechtigungen automatisch einrichten", wenn ubus-Permissions fehlen. Ein Klick schreibt die rpcd-ACL-Datei direkt via ubus auf den Router und startet rpcd neu — kein SSH, kein manuelles `scp` nötig. Danach werden die Berechtigungen sofort neu geprüft und die aktualisierte Liste angezeigt.
+
 ## [1.16.1] - 2026-04-28
 
 ### Fixed

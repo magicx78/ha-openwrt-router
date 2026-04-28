@@ -87,7 +87,13 @@
       },
       "checklist": {
         "title": "Router Configuration Check — {host}",
-        "description": "**Model:** {model}\n\n**ubus Permissions:**\n\n{checklist}\n\n---\n\n{status}\n\nClick **Submit** to continue (you can proceed even if some permissions are missing)."
+        "description": "**Model:** {model}\n\n**ubus Permissions:**\n\n{checklist}\n\n---\n\n{status}\n\nClick **Submit** to continue (you can proceed even if some permissions are missing).",
+        "data": {
+          "deploy_acl": "Auto-fix missing permissions (deploy ACL via ubus + restart rpcd)"
+        },
+        "data_description": {
+          "deploy_acl": "Writes the rpcd ACL file directly to the router and restarts rpcd — no SSH required. Permissions are re-checked afterwards."
+        }
       },
       "reauth_rpcd_setup": {
         "title": "rpcd Not Responding on {host}",

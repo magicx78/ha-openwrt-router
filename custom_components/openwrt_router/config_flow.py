@@ -351,9 +351,27 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         """Show capability checklist and let user proceed or retry."""
         host = self._user_data.get(CONF_HOST, "")
 
-        if user_input is not None and user_input.get("action") != "retry":
-            title = self._board_info.get("hostname") or host
-            return self.async_create_entry(title=title, data=self._user_data)
+        if user_input is not None:
+            if user_input.get("deploy_acl"):
+                from .acl_provisioning import check_and_deploy_acl
+                session = async_get_clientsession(self.hass)
+                deploy_api = OpenWrtAPI(
+                    host=host,
+                    port=self._user_data[CONF_PORT],
+                    username=self._user_data[CONF_USERNAME],
+                    password=self._user_data[CONF_PASSWORD],
+                    session=session,
+                    protocol=self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL),
+                )
+                try:
+                    await deploy_api.login()
+                    await check_and_deploy_acl(deploy_api)
+                except Exception:  # noqa: BLE001
+                    pass
+                # fall through → re-run capability check and re-show form
+            elif user_input.get("action") != "retry":
+                title = self._board_info.get("hostname") or host
+                return self.async_create_entry(title=title, data=self._user_data)
 
         session = async_get_clientsession(self.hass)
         api = OpenWrtAPI(
@@ -417,9 +435,15 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         else:
             status = "✅ Alle Berechtigungen vorhanden — optimale Konfiguration."
 
+        has_missing = bool(missing_required or missing_optional)
+        schema = vol.Schema(
+            {vol.Optional("deploy_acl", default=False): bool}
+            if has_missing else {}
+        )
+
         return self.async_show_form(
             step_id="checklist",
-            data_schema=vol.Schema({}),
+            data_schema=schema,
             description_placeholders={
                 "host": host,
                 "model": self._board_info.get("model", ""),
