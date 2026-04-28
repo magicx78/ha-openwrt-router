@@ -3,8 +3,7 @@ name: Auto Release
 on:
   push:
     branches: [main]
-    paths:
-      - 'custom_components/openwrt_router/manifest.json'
+  workflow_dispatch:
 
 jobs:
   release:
@@ -19,33 +18,27 @@ jobs:
         run: |
           VERSION=$(python3 -c "import json; print(json.load(open('custom_components/openwrt_router/manifest.json'))['version'])")
           echo "version=v${VERSION}" >> $GITHUB_OUTPUT
-          echo "Version: v${VERSION}"
+          echo "Version detected: v${VERSION}"
 
-      - name: Read changelog entry
+      - name: Check if tag/release exists
+        id: tag_check
+        run: |
+          TAG="v$(python3 -c "import json; print(json.load(open('custom_components/openwrt_router/manifest.json'))['version'])")"
+          if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Release $TAG already exists, skipping."
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Release $TAG does not exist, will create."
+          fi
+
+      - name: Extract changelog entry
         id: changelog
+        if: steps.tag_check.outputs.exists == 'false'
         run: |
           VERSION=$(python3 -c "import json; print(json.load(open('custom_components/openwrt_router/manifest.json'))['version'])")
-          BODY=$(python3 << 'EOF'
-import re, sys
-with open('CHANGELOG.md') as f:
-    content = f.read()
-pattern = rf'## \[{re.escape("VERSION")}\].*?(?=## \[|\Z)'
-pattern = pattern.replace('VERSION', sys.argv[1])
-m = re.search(pattern, content, re.DOTALL)
-print(m.group(0).strip() if m else 'See CHANGELOG.md for details.')
-EOF
-          python3 -c "
-import re, sys
-with open('CHANGELOG.md') as f:
-    content = f.read()
-version = '$VERSION'
-pattern = r'## \\[' + re.escape(version) + r'\\].*?(?=## \\[|\\Z)'
-m = re.search(pattern, content, re.DOTALL)
-print(m.group(0).strip() if m else 'See CHANGELOG.md for details.')
-")
-          EOF=$(python3 -c "print('EOF' + '12345')")
-          echo "body<<EOFMARKER" >> $GITHUB_OUTPUT
-          python3 -c "
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          python3 - <<PYEOF >> $GITHUB_OUTPUT
 import re
 version = '$VERSION'
 with open('CHANGELOG.md') as f:
@@ -53,17 +46,8 @@ with open('CHANGELOG.md') as f:
 pattern = r'## \\[' + re.escape(version) + r'\\].*?(?=## \\[|\\Z)'
 m = re.search(pattern, content, re.DOTALL)
 print(m.group(0).strip() if m else 'See CHANGELOG.md for details.')
-" >> $GITHUB_OUTPUT
-          echo "EOFMARKER" >> $GITHUB_OUTPUT
-
-      - name: Check if tag exists
-        id: tag_check
-        run: |
-          if git ls-remote --tags origin ${{ steps.version.outputs.version }} | grep -q ${{ steps.version.outputs.version }}; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
+PYEOF
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         if: steps.tag_check.outputs.exists == 'false'
