@@ -13,49 +13,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read version from manifest
-        id: version
+      - name: Get version
+        id: ver
         run: |
           VERSION=$(python3 -c "import json; print(json.load(open('custom_components/openwrt_router/manifest.json'))['version'])")
-          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
-          echo "Version detected: v${VERSION}"
+          echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
 
-      - name: Check if tag/release exists
-        id: tag_check
+      - name: Check if release exists
+        id: check
         run: |
-          TAG="v$(python3 -c "import json; print(json.load(open('custom_components/openwrt_router/manifest.json'))['version'])")"
-          if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
+          if git ls-remote --tags origin "${{ steps.ver.outputs.tag }}" | grep -q .; then
             echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Release $TAG already exists, skipping."
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Release $TAG does not exist, will create."
           fi
 
-      - name: Extract changelog entry
-        id: changelog
-        if: steps.tag_check.outputs.exists == 'false'
+      - name: Create release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(python3 -c "import json; print(json.load(open('custom_components/openwrt_router/manifest.json'))['version'])")
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          python3 - <<PYEOF >> $GITHUB_OUTPUT
-import re
-version = '$VERSION'
-with open('CHANGELOG.md') as f:
-    content = f.read()
-pattern = r'## \\[' + re.escape(version) + r'\\].*?(?=## \\[|\\Z)'
-m = re.search(pattern, content, re.DOTALL)
-print(m.group(0).strip() if m else 'See CHANGELOG.md for details.')
-PYEOF
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release
-        if: steps.tag_check.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.version }}
-          name: ${{ steps.version.outputs.version }}
-          body: ${{ steps.changelog.outputs.body }}
-          draft: false
-          prerelease: false
-          target_commitish: main
+          TAG="${{ steps.ver.outputs.tag }}"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "Version $TAG — siehe CHANGELOG.md" \
+            --target main
