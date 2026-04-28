@@ -252,3 +252,106 @@ class TestRuntimeData:
         assert Platform.BUTTON in PLATFORMS
         assert Platform.BINARY_SENSOR in PLATFORMS
         assert len(PLATFORMS) == 5
+
+
+# ---------------------------------------------------------------------------
+# v1.17.2 — orphan device merge
+# ---------------------------------------------------------------------------
+
+class TestMergeOrphanMacDevices:
+    """Regression for v1.17.0 → 1.17.2.
+
+    v1.17.0 used `(DOMAIN, mac)` as device identifier in binary_sensor.py and
+    OpenWrtRouterStatusSensor; v1.17.1 reverted to entry_id but HA does not
+    automatically migrate existing entity↔device links. The setup-time merge
+    moves entities from any non-canonical device to the canonical one and
+    removes the orphan.
+    """
+
+    def _setup_registry(self, canonical_id="dev_canon", orphan_id="dev_orphan"):
+        from custom_components.openwrt_router import _merge_orphan_mac_devices
+        from custom_components.openwrt_router.const import DOMAIN
+
+        canonical = MagicMock()
+        canonical.id = canonical_id
+        canonical.identifiers = {(DOMAIN, "test_entry_id")}
+
+        orphan = MagicMock()
+        orphan.id = orphan_id
+        orphan.identifiers = {(DOMAIN, "aabbccddeeff")}
+
+        return canonical, orphan, _merge_orphan_mac_devices, DOMAIN
+
+    def test_moves_entities_and_removes_orphan(self):
+        canonical, orphan, merge, _ = self._setup_registry()
+
+        ent_a = MagicMock(entity_id="binary_sensor.x_connectivity")
+        ent_b = MagicMock(entity_id="sensor.x_router_status")
+
+        with patch(
+            "custom_components.openwrt_router.dr.async_get"
+        ) as mock_dr_get, patch(
+            "custom_components.openwrt_router.er.async_get"
+        ) as mock_er_get, patch(
+            "custom_components.openwrt_router.dr.async_entries_for_config_entry",
+            return_value=[canonical, orphan],
+        ), patch(
+            "custom_components.openwrt_router.er.async_entries_for_device",
+            return_value=[ent_a, ent_b],
+        ):
+            dev_reg = MagicMock()
+            ent_reg = MagicMock()
+            mock_dr_get.return_value = dev_reg
+            mock_er_get.return_value = ent_reg
+
+            entry = _make_entry()
+            merge(MagicMock(), entry)
+
+            # Both entities re-parented to canonical device
+            assert ent_reg.async_update_entity.call_count == 2
+            ent_reg.async_update_entity.assert_any_call(
+                "binary_sensor.x_connectivity", device_id="dev_canon"
+            )
+            ent_reg.async_update_entity.assert_any_call(
+                "sensor.x_router_status", device_id="dev_canon"
+            )
+            # Orphan removed
+            dev_reg.async_remove_device.assert_called_once_with("dev_orphan")
+
+    def test_noop_when_no_canonical_device(self):
+        """If no canonical device exists yet, leave orphans alone (next setup will merge)."""
+        from custom_components.openwrt_router import _merge_orphan_mac_devices
+
+        with patch(
+            "custom_components.openwrt_router.dr.async_get"
+        ) as mock_dr_get, patch(
+            "custom_components.openwrt_router.er.async_get"
+        ) as mock_er_get, patch(
+            "custom_components.openwrt_router.dr.async_entries_for_config_entry",
+            return_value=[],
+        ):
+            dev_reg = MagicMock()
+            mock_dr_get.return_value = dev_reg
+            mock_er_get.return_value = MagicMock()
+
+            _merge_orphan_mac_devices(MagicMock(), _make_entry())
+            dev_reg.async_remove_device.assert_not_called()
+
+    def test_noop_on_clean_install(self):
+        """Only one device, the canonical one — nothing to merge."""
+        canonical, _, merge, _ = self._setup_registry()
+
+        with patch(
+            "custom_components.openwrt_router.dr.async_get"
+        ) as mock_dr_get, patch(
+            "custom_components.openwrt_router.er.async_get"
+        ) as mock_er_get, patch(
+            "custom_components.openwrt_router.dr.async_entries_for_config_entry",
+            return_value=[canonical],
+        ):
+            dev_reg = MagicMock()
+            mock_dr_get.return_value = dev_reg
+            mock_er_get.return_value = MagicMock()
+
+            merge(MagicMock(), _make_entry())
+            dev_reg.async_remove_device.assert_not_called()

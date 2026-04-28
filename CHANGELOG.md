@@ -2,6 +2,12 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.17.2] - 2026-04-29
+
+### Fixed
+
+- **Doppelte Geräte im HA-Registry nach v1.17.0** (Folge-Fix zu v1.17.1): v1.17.1 stellte den korrekten Device-Identifier wieder her, aber HA verschiebt bestehende Entity↔Device-Verknüpfungen nicht automatisch — Nutzer sahen weiterhin zwei OpenWrt-Geräte (eines mit 3 Entitäten, eines mit den restlichen ~30). Beim Setup läuft jetzt automatisch eine Device-Registry-Migration: Orphan-MAC-Devices werden erkannt, ihre Entitäten auf das kanonische `entry_id`-Device umgehängt, und das Orphan-Device gelöscht. Idempotent — auf neu installierten Systemen passiert nichts.
+
 ## [1.17.1] - 2026-04-28
 
 ### Fixed

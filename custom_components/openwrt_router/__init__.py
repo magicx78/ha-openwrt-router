@@ -24,6 +24,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import (
@@ -83,6 +84,59 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             new_data[CONF_PROTOCOL],
         )
     return True
+
+
+def _merge_orphan_mac_devices(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Merge legacy MAC-identified devices into the canonical entry_id device.
+
+    v1.17.0 created a second HA device per router because binary_sensor and
+    OpenWrtRouterStatusSensor used `(DOMAIN, mac)` instead of `(DOMAIN, entry_id)`
+    as their device identifier. v1.17.1 unified the identifier — but HA does not
+    automatically migrate already-registered entity↔device links, so users still
+    saw two devices: the canonical one with ~30 sensors and an orphan one with
+    just the 3 new entities.
+
+    This routine runs on every setup. For each device tied to *this* config
+    entry whose identifier is NOT `(DOMAIN, entry_id)`:
+      1. Move all of its entities to the canonical device.
+      2. Delete the orphan device.
+
+    Idempotent — does nothing on systems that never had the bug.
+    """
+    dev_reg = dr.async_get(hass)
+    ent_reg = er.async_get(hass)
+
+    devices = dr.async_entries_for_config_entry(dev_reg, entry.entry_id)
+    canonical = next(
+        (d for d in devices if (DOMAIN, entry.entry_id) in d.identifiers),
+        None,
+    )
+    if canonical is None:
+        # No canonical device yet — platforms will create it on first entity
+        # registration; the merge happens on the next setup.
+        return
+
+    for device in devices:
+        if device.id == canonical.id:
+            continue
+        # Only merge devices that solely belong to our domain (don't touch
+        # devices linked to multiple integrations).
+        if any(d != DOMAIN for d, _ in device.identifiers):
+            continue
+        entities = er.async_entries_for_device(
+            ent_reg, device.id, include_disabled_entities=True
+        )
+        for ent in entities:
+            ent_reg.async_update_entity(ent.entity_id, device_id=canonical.id)
+        _LOGGER.warning(
+            "Merged %d entities from orphan device %s (identifiers=%s) into "
+            "canonical OpenWrt device %s — leftover from v1.17.0 device_info bug",
+            len(entities),
+            device.id,
+            device.identifiers,
+            canonical.id,
+        )
+        dev_reg.async_remove_device(device.id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
@@ -168,6 +222,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
 
     # Forward setup to all platforms (sensor, switch, device_tracker, button)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # One-shot cleanup of legacy MAC-identified devices left over from v1.17.0
+    _merge_orphan_mac_devices(hass, entry)
 
     # Register topology panel (idempotent — only registers once per HA session)
     from .topology_panel import async_setup_topology_panel
