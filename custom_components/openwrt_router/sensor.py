@@ -67,6 +67,7 @@ from .const import (
     SUFFIX_WAN_TX,
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
+    url_scheme_for,
     RADIO_KEY_BAND,
     RADIO_KEY_BSSID,
     RADIO_KEY_FREQUENCY,
@@ -530,7 +531,7 @@ class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
@@ -624,7 +625,7 @@ class OpenWrtInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
@@ -696,7 +697,7 @@ class OpenWrtInterfaceRateSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEn
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
@@ -756,7 +757,7 @@ class OpenWrtRadioSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
@@ -884,7 +885,7 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
@@ -986,7 +987,7 @@ class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
@@ -1093,7 +1094,7 @@ class OpenWrtRouterStatusSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnt
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )

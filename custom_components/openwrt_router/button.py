@@ -25,6 +25,7 @@ from .const import (
     SUFFIX_RELOAD_WIFI,
     SUFFIX_CHECK_UPDATES,
     SUFFIX_PERFORM_UPDATES,
+    url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator
 
@@ -148,7 +149,7 @@ class OpenWrtButtonEntity(ButtonEntity):
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
@@ -301,7 +302,7 @@ class OpenWrtServiceRestartButton(ButtonEntity):
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )

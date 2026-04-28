@@ -46,6 +46,7 @@ from .const import (
     DOMAIN,
     SUFFIX_TOPOLOGY_SNAPSHOT,
     SUFFIX_TOPOLOGY_STATUS,
+    url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator
 from .topology_diagnostic import build_topology_snapshot, get_topology_status
@@ -105,7 +106,7 @@ class _TopologyEntityBase(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )

@@ -29,6 +29,7 @@ from .const import (
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
     DEFAULT_SERVICES,
+    url_scheme_for,
     DOMAIN,
     RADIO_KEY_BAND,
     RADIO_KEY_ENABLED,
@@ -154,7 +155,7 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
@@ -372,7 +373,7 @@ class OpenWrtServiceSwitch(CoordinatorEntity[OpenWrtCoordinator], SwitchEntity):
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )

@@ -17,6 +17,17 @@ PROTOCOL_HTTP = "http"
 PROTOCOL_HTTPS = "https"
 PROTOCOL_HTTPS_INSECURE = "https-insecure"
 
+
+def url_scheme_for(protocol: str) -> str:
+    """Return the URL scheme for a stored protocol value.
+
+    `https-insecure` is an internal marker meaning "HTTPS without certificate
+    verification". HA's device_registry rejects any configuration_url whose
+    scheme is not `http` or `https` (ValueError), so we must collapse the
+    marker back to `https` whenever we build a URL that HA might validate.
+    """
+    return "https" if protocol == PROTOCOL_HTTPS_INSECURE else (protocol or PROTOCOL_HTTP)
+
 # HTTP / ubus
 UBUS_PATH = "/ubus"
 DEFAULT_TIMEOUT = 10  # seconds

@@ -2,6 +2,12 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.17.3] - 2026-04-29
+
+### Fixed
+
+- **Wahrer Grund für die "verschwundenen" Entitäten** (Folge zu v1.17.1/v1.17.2): Die Diagnose über zwei Releases hinweg war falsch — es gab keine doppelten Devices. Der echte Fehler: alle Entities mit `device_info.configuration_url` lieferten `https-insecure://host:port` zurück, was HA's `_validate_configuration_url` mit `ValueError: invalid configuration_url` ablehnt. Resultat: 25+ Sensoren scheiterten beim Hinzufügen, nur die 3 Entities ohne `configuration_url` (Connectivity, WAN Connectivity, Router Status) kamen durch. Fix: neuer Helper `url_scheme_for()` in `const.py` der den internen Marker `https-insecure` für URL-Generierung auf `https` collapsed; alle 18 `configuration_url`-Konstruktionen in `sensor.py`, `switch.py`, `button.py`, `device_tracker.py`, `topology_entities.py` umgestellt.
+
 ## [1.17.2] - 2026-04-29
 
 ### Fixed

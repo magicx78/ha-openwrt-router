@@ -29,6 +29,7 @@ from .const import (
     CLIENT_KEY_IP,
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
+    url_scheme_for,
     CLIENT_KEY_MAC,
     CLIENT_KEY_RADIO,
     CLIENT_KEY_SIGNAL,
@@ -191,7 +192,7 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
             model=router_info.get("model", "OpenWrt Router"),
             sw_version=release.get("version", ""),
             configuration_url=(
-                f"{self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)}://"
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
