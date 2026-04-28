@@ -1,7 +1,7 @@
 {
   "domain": "openwrt_router",
   "name": "OpenWrt Router",
-  "version": "1.16.2",
+  "version": "1.17.0",
   "config_flow": true,
   "documentation": "https://github.com/magicx78/ha-openwrt-router",
   "issue_tracker": "https://github.com/magicx78/ha-openwrt-router/issues",

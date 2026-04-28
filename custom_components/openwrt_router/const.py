@@ -106,6 +106,20 @@ FEATURE_UCI_AVAILABLE = "uci_available"
 FEATURE_NETWORK_RELOAD = "network_reload"
 FEATURE_DHCP_LEASES = "dhcp_leases"
 
+# Connectivity / health sensor suffixes
+SUFFIX_CONNECTIVITY = "connectivity"
+SUFFIX_WAN_CONNECTIVITY = "wan_connectivity"
+SUFFIX_ROUTER_STATUS = "router_status"
+
+# Error type values stored in coordinator.data.error_type
+ERROR_TYPE_CONNECTION = "connection"
+ERROR_TYPE_AUTH = "auth"
+ERROR_TYPE_TIMEOUT = "timeout"
+ERROR_TYPE_RESPONSE = "response"
+
+# Persistent notification fires after this many consecutive poll failures
+NOTIFICATION_FAILURE_THRESHOLD = 3
+
 # Entity unique ID suffixes
 SUFFIX_UPTIME = "uptime"
 SUFFIX_WAN_STATUS = "wan_status"

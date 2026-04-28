@@ -24,6 +24,11 @@ from .const import (
     CLIENT_KEY_CONNECTED_SINCE,
     CLIENT_KEY_MAC,
     BOARD_REFRESH_CYCLES,
+    ERROR_TYPE_AUTH,
+    ERROR_TYPE_CONNECTION,
+    ERROR_TYPE_RESPONSE,
+    ERROR_TYPE_TIMEOUT,
+    NOTIFICATION_FAILURE_THRESHOLD,
     CONF_FRITZBOX_HOST,
     CONF_FRITZBOX_PASSWORD,
     CONF_FRITZBOX_PORT,
@@ -137,6 +142,11 @@ class OpenWrtCoordinatorData:
         self.trunk_port_map: dict[str, str] = {}
         # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
         self.vlans_stale: bool = False
+        # Connectivity health tracking (used by binary_sensor / sensor platform)
+        self.error_type: str | None = None
+        self.consecutive_failures: int = 0
+        self.last_seen: datetime | None = None
+        self.notification_sent: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """Return data as a plain dict (used for diagnostics)."""
@@ -558,47 +568,67 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             self._consecutive_auth_failures += 1
             _MAX_CONSECUTIVE = 3
             if self._consecutive_auth_failures >= _MAX_CONSECUTIVE:
-                # Persistent failure: credentials are genuinely wrong.
-                # Reset counter so the next setup attempt starts fresh.
                 self._consecutive_auth_failures = 0
                 raise ConfigEntryAuthFailed(
                     f"Authentication failed for OpenWrt router: {err}"
                 ) from err
-            # Transient failure (session refresh hiccup, brief network issue):
-            # raise UpdateFailed so HA skips this poll and retries in 30 s.
             _LOGGER.warning(
                 "Auth error (attempt %d/%d — will retry before showing re-auth dialog): %s",
                 self._consecutive_auth_failures,
                 _MAX_CONSECUTIVE,
                 err,
             )
+            if self.data:
+                self.data.error_type = ERROR_TYPE_AUTH
+                self.data.consecutive_failures += 1
+                await self._maybe_send_outage_notification()
             raise UpdateFailed(
                 f"Auth error (transient, attempt {self._consecutive_auth_failures}/{_MAX_CONSECUTIVE}): {err}"
             ) from err
 
         except OpenWrtConnectionError as err:
             self._consecutive_auth_failures = 0
+            if self.data:
+                self.data.error_type = ERROR_TYPE_CONNECTION
+                self.data.consecutive_failures += 1
+                await self._maybe_send_outage_notification()
             raise UpdateFailed(
                 f"Cannot connect to OpenWrt router: {err}"
             ) from err
 
         except OpenWrtTimeoutError as err:
             self._consecutive_auth_failures = 0
+            if self.data:
+                self.data.error_type = ERROR_TYPE_TIMEOUT
+                self.data.consecutive_failures += 1
+                await self._maybe_send_outage_notification()
             raise UpdateFailed(
                 f"OpenWrt router request timed out: {err}"
             ) from err
 
         except OpenWrtResponseError as err:
             self._consecutive_auth_failures = 0
+            if self.data:
+                self.data.error_type = ERROR_TYPE_RESPONSE
+                self.data.consecutive_failures += 1
+                await self._maybe_send_outage_notification()
             raise UpdateFailed(
                 f"Unexpected response from OpenWrt router: {err}"
             ) from err
 
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Unexpected error fetching OpenWrt data")
+            if self.data:
+                self.data.error_type = ERROR_TYPE_CONNECTION
+                self.data.consecutive_failures += 1
+                await self._maybe_send_outage_notification()
             raise UpdateFailed(f"Unexpected error: {err}") from err
 
         self._consecutive_auth_failures = 0
+        data.last_seen = datetime.now(UTC)
+        data.consecutive_failures = 0
+        data.error_type = None
+        await self._maybe_clear_outage_notification(data)
         self._record_events(data)
 
         # SSH-Fallback-Erkennung: HA-Warnung + Poll auf 5 min reduzieren
@@ -650,6 +680,54 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         return data
 
     # ------------------------------------------------------------------
+    # Outage notifications
+    # ------------------------------------------------------------------
+
+    async def _maybe_send_outage_notification(self) -> None:
+        """Create a persistent HA notification after NOTIFICATION_FAILURE_THRESHOLD failures."""
+        if not self.data:
+            return
+        if self.data.consecutive_failures < NOTIFICATION_FAILURE_THRESHOLD:
+            return
+        if self.data.notification_sent:
+            return
+        title = self._entry.title if self._entry else DOMAIN
+        error_label = {
+            ERROR_TYPE_AUTH: "Authentifizierungsfehler",
+            ERROR_TYPE_CONNECTION: "Verbindungsfehler",
+            ERROR_TYPE_TIMEOUT: "Timeout",
+            ERROR_TYPE_RESPONSE: "Ungültige Antwort",
+        }.get(self.data.error_type or "", "Unbekannter Fehler")
+        from homeassistant.components.persistent_notification import async_create
+        async_create(
+            self.hass,
+            message=(
+                f"Router **{title}** ist nicht erreichbar.\n\n"
+                f"Fehlertyp: {error_label}\n"
+                f"Fehlgeschlagene Versuche: {self.data.consecutive_failures}"
+            ),
+            title=f"OpenWrt Router Ausfall: {title}",
+            notification_id=f"openwrt_router_outage_{self._entry.entry_id if self._entry else DOMAIN}",
+        )
+        self.data.notification_sent = True
+        _LOGGER.warning(
+            "Router %s unreachable after %d consecutive failures (%s)",
+            title, self.data.consecutive_failures, self.data.error_type,
+        )
+
+    async def _maybe_clear_outage_notification(self, data: OpenWrtCoordinatorData) -> None:
+        """Dismiss the outage notification when the router comes back online."""
+        if not data.notification_sent:
+            return
+        from homeassistant.components.persistent_notification import async_dismiss
+        async_dismiss(
+            self.hass,
+            f"openwrt_router_outage_{self._entry.entry_id if self._entry else DOMAIN}",
+        )
+        data.notification_sent = False
+        title = self._entry.title if self._entry else DOMAIN
+        _LOGGER.info("Router %s is back online — outage notification cleared", title)
+
     # Event timeline
     # ------------------------------------------------------------------
 

@@ -125,7 +125,25 @@
     }
   },
   "entity": {
+    "binary_sensor": {
+      "connectivity": {
+        "name": "Connectivity"
+      },
+      "wan_connectivity": {
+        "name": "WAN Connectivity"
+      }
+    },
     "sensor": {
+      "router_status": {
+        "name": "Router Status",
+        "state": {
+          "online": "Online",
+          "offline": "Offline",
+          "auth_error": "Authentication Error",
+          "timeout": "Timeout",
+          "response_error": "Invalid Response"
+        }
+      },
       "uptime": {
         "name": "Uptime"
       },

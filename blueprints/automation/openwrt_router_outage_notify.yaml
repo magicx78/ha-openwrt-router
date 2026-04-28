@@ -1,0 +1,97 @@
+blueprint:
+  name: OpenWrt Router Ausfall-Benachrichtigung
+  description: >
+    Sendet eine Push-Benachrichtigung wenn ein OpenWrt Router nicht mehr erreichbar ist.
+    Optional: Wiederherstellungs-Meldung wenn der Router wieder online kommt.
+    Nutzt den binary_sensor.XYZ_connectivity aus der OpenWrt Router Integration.
+  domain: automation
+  author: magicx78
+  input:
+    connectivity_sensor:
+      name: Router Verbindungsstatus
+      description: >
+        Wähle den binary_sensor.*_connectivity aus der OpenWrt Router Integration.
+        Der Sensor ist ON wenn der Router erreichbar ist, OFF wenn nicht.
+      selector:
+        entity:
+          domain: binary_sensor
+          device_class: connectivity
+    delay_minutes:
+      name: Wartezeit vor Benachrichtigung (Minuten)
+      description: >
+        Wie lange muss der Router offline sein bevor die Benachrichtigung gesendet wird.
+        Verhindert Benachrichtigungen bei kurzen Verbindungsunterbrechungen.
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: min
+          mode: slider
+    notify_service:
+      name: Benachrichtigungs-Dienst
+      description: >
+        Name des HA Notify-Dienstes, z.B. notify.mobile_app_meinhandy oder notify.notify.
+      default: notify.notify
+      selector:
+        text:
+    message_down:
+      name: Nachricht bei Ausfall
+      description: >
+        Nachrichtentext wenn der Router offline geht.
+        Verfügbare Variablen: {{ trigger.to_state.name }}
+      default: "⚠️ Router ist offline und nicht mehr erreichbar!"
+      selector:
+        text:
+          multiline: false
+    message_up:
+      name: Nachricht bei Wiederherstellung
+      description: Nachrichtentext wenn der Router wieder online kommt.
+      default: "✅ Router ist wieder online."
+      selector:
+        text:
+          multiline: false
+    notify_on_recovery:
+      name: Benachrichtigung bei Wiederherstellung
+      description: Sende eine Benachrichtigung wenn der Router wieder erreichbar ist.
+      default: true
+      selector:
+        boolean:
+
+trigger:
+  - platform: state
+    entity_id: !input connectivity_sensor
+    to: "off"
+    for:
+      minutes: !input delay_minutes
+
+variables:
+  notify_svc: !input notify_service
+  msg_down: !input message_down
+  msg_up: !input message_up
+  do_recovery: !input notify_on_recovery
+  sensor: !input connectivity_sensor
+
+action:
+  - service: "{{ notify_svc }}"
+    data:
+      message: "{{ msg_down }}"
+      title: "OpenWrt Router Ausfall"
+
+  - wait_for_trigger:
+      - platform: state
+        entity_id: !input connectivity_sensor
+        to: "on"
+    timeout:
+      hours: 24
+
+  - condition: template
+    value_template: "{{ do_recovery and wait.trigger is not none }}"
+
+  - service: "{{ notify_svc }}"
+    data:
+      message: "{{ msg_up }}"
+      title: "OpenWrt Router wieder online"
+
+mode: single
+max_exceeded: silent

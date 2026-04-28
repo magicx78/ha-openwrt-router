@@ -250,4 +250,5 @@ class TestRuntimeData:
         assert Platform.SWITCH in PLATFORMS
         assert Platform.DEVICE_TRACKER in PLATFORMS
         assert Platform.BUTTON in PLATFORMS
-        assert len(PLATFORMS) == 4
+        assert Platform.BINARY_SENSOR in PLATFORMS
+        assert len(PLATFORMS) == 5

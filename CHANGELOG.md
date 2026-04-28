@@ -2,6 +2,16 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.17.0] - 2026-04-28
+
+### Added
+
+- **Router Connectivity Binary Sensor** (`binary_sensor.*_connectivity`): Zeigt `ON` wenn der Router erreichbar ist, `OFF` wenn nicht. Immer verfügbar — auch wenn der Router offline ist. Attribute: `last_seen`, `consecutive_failures`, `error_type`.
+- **WAN Connectivity Binary Sensor** (`binary_sensor.*_wan_connectivity`): Zeigt `ON` wenn das Internet verfügbar ist, `OFF` wenn der Router erreichbar ist aber WAN down ist.
+- **Router Status Sensor** (`sensor.*_router_status`): Enum-Sensor mit States `online`, `offline`, `auth_error`, `timeout`, `response_error` — zeigt den genauen Fehlertyp bei Ausfällen.
+- **Persistente HA-Notification**: Nach 3 aufeinanderfolgenden fehlgeschlagenen Polls erscheint eine Warnung im HA-Notification-Center. Wird automatisch gelöscht wenn der Router wieder erreichbar ist.
+- **Automation Blueprint** (`blueprints/automation/openwrt_router_outage_notify.yaml`): Fertiger Blueprint für Push-Benachrichtigungen bei Router-Ausfall. Konfigurierbar: Wartezeit, Notify-Dienst, Nachrichtentext, optionale Wiederherstellungs-Meldung.
+
 ## [1.16.2] - 2026-04-28
 
 ### Added

@@ -58,6 +58,7 @@ from .const import (
     SUFFIX_TMPFS_TOTAL,
     SUFFIX_TMPFS_USAGE,
     SUFFIX_TMPFS_USED,
+    SUFFIX_ROUTER_STATUS,
     SUFFIX_UPTIME,
     SUFFIX_UPDATE_STATUS,
     SUFFIX_WAN_IP,
@@ -403,6 +404,7 @@ async def async_setup_entry(
         )
         for description in SENSOR_DESCRIPTIONS
     ]
+    static_entities.append(OpenWrtRouterStatusSensor(coordinator, entry))
     async_add_entities(static_entities)
 
     # Track which dynamic entities have already been created
@@ -1038,3 +1040,50 @@ def _format_uptime(seconds: int) -> str:
     # TODO: add BandwidthSensor (RX/TX bytes per interface) once API supports it
     # TODO: add TrafficStatsSensor (total transferred data) once API supports it
     # TODO: add LinkQualitySensor (per-radio signal / noise ratio) once API supports it
+
+
+class OpenWrtRouterStatusSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
+    """Enum sensor reporting the router's current connectivity status.
+
+    States: online | offline | auth_error | timeout | response_error
+    Always available so the state is visible even when the router is down.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "router_status"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["online", "offline", "auth_error", "timeout", "response_error"]
+    _attr_icon = "mdi:router-network"
+
+    def __init__(self, coordinator: OpenWrtCoordinator, entry: OpenWrtConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_{SUFFIX_ROUTER_STATUS}"
+        self._entry = entry
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self) -> str:
+        if self.coordinator.last_update_success:
+            return "online"
+        if self.coordinator.data and self.coordinator.data.error_type:
+            et = self.coordinator.data.error_type
+            return {"auth": "auth_error", "timeout": "timeout", "response": "response_error"}.get(et, "offline")
+        return "offline"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        return {
+            "last_seen": data.last_seen.isoformat() if data and data.last_seen else None,
+            "consecutive_failures": data.consecutive_failures if data else 0,
+            "error_type": data.error_type if data else None,
+        }
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        data = self.coordinator.data
+        mac = data.router_info.get("mac", "").replace(":", "").lower() if data else ""
+        return DeviceInfo(identifiers={(DOMAIN, mac or self._entry.entry_id)})
