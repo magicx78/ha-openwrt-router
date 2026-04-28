@@ -111,14 +111,8 @@ class OpenWrtBinarySensorEntity(
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        mac: str = (
-            coordinator.data.router_info.get("mac", "").replace(":", "").lower()
-            if coordinator.data
-            else ""
-        )
-        identifier = mac or entry.entry_id
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, identifier)},
+            identifiers={(DOMAIN, entry.entry_id)},
         )
 
     @property

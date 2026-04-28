@@ -153,32 +153,35 @@ export function useAlerts(data: TopologyData): Alert[] {
       }
     }
 
-    // Rule 9: Nicht registrierter Router erkannt
-    // Clients deren Hostname auf einen Router/Repeater hindeutet
+    // Rule 9: Nicht registrierter Router erkannt (info-only)
+    // Engere Patterns — generische Treffer wie /gateway/i und /router/i wurden entfernt,
+    // weil sie zu viele Smart-Home-Hubs (Bresser, Bosch, etc.) fälschlich treffen.
+    // Nur Patterns die wirklich auf Repeater/AP-Geräte hindeuten:
     const ROUTER_HOSTNAME_PATTERNS = [
-      /repeater/i, /fritz/i, /router/i, /mesh/i, /access.?point/i,
-      /^ap[\-_]?\d/i, /gateway/i, /extender/i, /^rt-/i, /wrt$/i,
+      /repeater/i, /^fritz!?(box|repeater|wlan)/i, /mesh.?ap/i,
+      /^ap[\-_]?\d/i, /extender/i, /^rt-ax/i, /wrt\d+$/i,
     ];
-    // Router-Hersteller die typischerweise keine normalen Clients sind
-    const ROUTER_MANUFACTURERS = new Set([
-      'TP-Link', 'Netgear', 'Asus', 'Linksys', 'Ubiquiti', 'Mikrotik',
-      'GL.iNet', 'OpenWrt', 'AVM', 'Cudy', 'Xiaomi', 'Huawei',
-    ]);
+    // Persistente User-Whitelist — Geräte die der Nutzer als 'kein Router' markiert hat
+    let ignoredIds = new Set<string>();
+    try {
+      const raw = localStorage.getItem('openwrt_topology_ignored_routers');
+      if (raw) ignoredIds = new Set(JSON.parse(raw));
+    } catch {
+      // localStorage not available or corrupt — silently ignore
+    }
     const knownApIds = new Set(data.accessPoints.map(ap => ap.id));
     for (const client of data.clients) {
+      if (ignoredIds.has(client.id)) continue;
       const nameMatch = ROUTER_HOSTNAME_PATTERNS.some(p =>
         p.test(client.hostname) || p.test(client.name)
       );
-      const mfgMatch = client.manufacturer != null &&
-        ROUTER_MANUFACTURERS.has(client.manufacturer) &&
-        // Exclude clients that are clearly not routers (smartphones, IoT)
-        !/phone|tablet|ipad|iphone|android|shelly|tasmota|esphome/i.test(client.hostname);
-
-      if ((nameMatch || mfgMatch) && !knownApIds.has(client.id)) {
+      // Hersteller-Match alleine reicht NICHT mehr — viele AVM/TP-Link Geräte
+      // sind harmlose Endgeräte. Nur wenn auch der Hostname matcht.
+      if (nameMatch && !knownApIds.has(client.id)) {
         alerts.push({
           id: `unregistered-router-${client.id}`,
-          severity: 'warning',
-          message: `Nicht registrierter Router: ${client.name || client.hostname}`,
+          severity: 'info',
+          message: `Möglicher Router/Repeater: ${client.name || client.hostname}`,
           nodeId: client.id,
           nodeName: client.name || client.hostname,
           nodeType: 'client',

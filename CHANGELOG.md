@@ -2,6 +2,15 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.17.1] - 2026-04-28
+
+### Fixed
+
+- **Entitäten verschwinden nach Update auf v1.17.0** (`device_info` Inkonsistenz): Der neue `RouterStatusSensor` und beide `binary_sensor`-Entities verwendeten als Device-Identifier `(DOMAIN, mac)` statt `(DOMAIN, entry.entry_id)` wie alle anderen Plattformen. Folge: HA legte ein zweites Device im Registry an, das nur die 3 neuen Entities trug — die ~30 alten Sensors hingen weiter am ursprünglichen Device, wirkten aber im UI als wären sie verschwunden. Fix: alle Entities verwenden jetzt einheitlich `entry.entry_id`.
+- **Topology: Repeater-Backhaul-Erkennung verbessert** (`topology_mesh.py`): Inter-Router-Edges nutzen jetzt zusätzlich alle Interface-IPs (`network_interfaces`) und AP-BSSIDs (`ap_interfaces`) als Match-Kandidaten. Dadurch werden APs auch dann als WiFi-Uplink erkannt, wenn sie sich über eine sekundäre IP/MAC (z.B. STA-Backhaul) am Gateway anmelden.
+- **Topology: Client-Nodes liefern `is_wifi_client`-Flag** (`topology_diagnostic.py`): Clients aus hostapd erhalten jetzt explizit `is_wifi_client: true`, damit das Frontend WLAN- vs Kabel-Anbindung sicher unterscheiden kann.
+- **Topology-Panel: Falsche "Nicht registrierter Router"-Warnungen** (`useAlerts.ts`): Severity von `warning` auf `info` herabgesetzt, Patterns enger gefasst (kein generisches `/router/i` und `/gateway/i` mehr — diese matchten Smart-Home-Hubs wie *BresserGateway*). Hersteller-Match alleine löst keine Warnung mehr aus. Persistente Whitelist via `localStorage.openwrt_topology_ignored_routers` hinzugefügt.
+
 ## [1.17.0] - 2026-04-28
 
 ### Added

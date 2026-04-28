@@ -44,6 +44,7 @@ interface SnapshotNodeAttributes {
   hostname?: string;
   radio?: string;
   signal?: number | null;
+  is_wifi_client?: boolean;
   // gateway DSL attrs
   dsl_stats?: DslStats;
   wan_traffic?: { downstream_bps?: number; upstream_bps?: number };
@@ -617,6 +618,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       rxBytes: attr?.rx_bytes as number | null | undefined,
       txBytes: attr?.tx_bytes as number | null | undefined,
       vlanId: matchVlan((attr?.ip as string) ?? '', gateway.vlans ?? []) ?? undefined,
+      isWifiClient: (attr?.is_wifi_client as boolean | undefined) ?? (signal != null),
     };
   });
 

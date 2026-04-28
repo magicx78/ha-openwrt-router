@@ -86,14 +86,28 @@ def _detect_inter_router_edges(
     seen_edges: set[str] = set()
 
     # Build lookup maps
+    # Includes router_info.mac + ALL interface IPs/MACs so an AP that connects
+    # to the gateway via a secondary interface (e.g. wireless-STA backhaul with
+    # a different MAC/IP than the management LAN) can still be matched.
     router_macs: dict[str, str] = {}  # MAC → router_id
-    router_ips:  dict[str, str] = {}  # host_ip → router_id
+    router_ips:  dict[str, str] = {}  # IP → router_id
     for rid, hip, data in router_data:
         mac = (data.router_info.get("mac") or "").upper()
         if mac:
             router_macs[mac] = rid
         if hip:
             router_ips[hip] = rid
+        # Add all interface IPs (secondary IPs on STA/mesh interfaces are common)
+        for iface in (data.network_interfaces or []):
+            ipv4 = iface.get("ipv4_addr")
+            if ipv4 and ipv4 not in router_ips:
+                router_ips[ipv4] = rid
+        # Add all AP-interface BSSIDs (in case an AP appears as a WiFi client
+        # of a peer using its hostapd BSSID instead of the LAN MAC)
+        for ap_iface in (data.ap_interfaces or []):
+            bssid = (ap_iface.get("bssid") or "").upper()
+            if bssid and bssid not in router_macs:
+                router_macs[bssid] = rid
 
     # Find gateway(s) for directed edges
     gateways = [

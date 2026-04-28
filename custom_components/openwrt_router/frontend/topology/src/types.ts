@@ -145,6 +145,9 @@ export interface Client {
   rxBytes?: number | null; // bytes received since connection (from hostapd)
   txBytes?: number | null; // bytes transmitted since connection (from hostapd)
   vlanId?: number;         // VLAN this client belongs to (matched via subnet)
+  // True when the backend reported the client via hostapd (WiFi). False/undefined
+  // means the client was learned only from DHCP/ARP and is most likely wired.
+  isWifiClient?: boolean;
 }
 
 export interface SwitchNode {

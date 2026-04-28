@@ -9,6 +9,7 @@ from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
 from custom_components.openwrt_router.sensor import (
     SENSOR_DESCRIPTIONS,
     OpenWrtAPInterfaceSensor,
+    OpenWrtRouterStatusSensor,
     OpenWrtSensorEntity,
     _calc_memory_pct,
     _format_uptime,
@@ -192,6 +193,18 @@ class TestSensorEntity:
         assert (DOMAIN, "test_entry_id") in info["identifiers"]
         assert info["manufacturer"] == "OpenWrt"
         assert info["model"] == "GL.iNet GL-MT3000"
+
+    def test_router_status_device_info_uses_entry_id(
+        self, mock_coordinator, mock_config_entry
+    ):
+        """Regression for v1.17.0 → 1.17.1: identifier must be entry_id, not MAC.
+
+        A MAC-based identifier creates a second device in the HA registry,
+        which made all other entities seem to disappear from the device card.
+        """
+        sensor = OpenWrtRouterStatusSensor(mock_coordinator, mock_config_entry)
+        info = sensor.device_info
+        assert info["identifiers"] == {(DOMAIN, "test_entry_id")}
 
 
 # =====================================================================

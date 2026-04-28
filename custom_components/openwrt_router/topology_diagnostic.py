@@ -486,6 +486,11 @@ def build_topology_snapshot(
                 "dhcp_expires": client.get("dhcp_expires"),
                 "rx_bytes": c_rx_bytes,
                 "tx_bytes": c_tx_bytes,
+                # True when the client originates from hostapd (WiFi client).
+                # Frontend uses this to render a WiFi vs cable indicator and
+                # avoid mis-classifying repeaters/clients that also have a
+                # static DHCP lease as wired.
+                "is_wifi_client": True,
             },
         })
         edges.append({
