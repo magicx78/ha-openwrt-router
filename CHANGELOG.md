@@ -2,6 +2,12 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.17.6] - 2026-04-29
+
+### Fixed
+
+- **Hotfix für v1.17.5: Browser-Cache-Bust für Topology-Panel.** `_PANEL_VERSION` in `topology_panel.py` wurde seit 9 Tagen nicht inkrementiert (steckte auf `"20260420d"`). Der `?v=…`-Query-Parameter am Bundle-URL war damit konstant — Browser luden weiter das gecachte alte Bundle und WLAN-Repeater-Badge / Port-Inline-Label aus v1.17.5 wurden nicht sichtbar. Bump auf `"20260429a"`. Wer nach Update immer noch das alte UI sieht, einmal Hard-Reload (Strg+F5) im Topology-Panel.
+
 ## [1.17.5] - 2026-04-29
 
 ### Fixed
