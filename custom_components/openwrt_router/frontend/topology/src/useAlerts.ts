@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { TopologyData, Gateway, AccessPoint, Client } from './types';
 
-export type AlertSeverity = 'critical' | 'warning';
+export type AlertSeverity = 'critical' | 'warning' | 'info';
 
 export interface Alert {
   id: string;
