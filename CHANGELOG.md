@@ -2,6 +2,13 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.16.1] - 2026-04-28
+
+### Fixed
+
+- **Login-Absturz beim Setup** (`AttributeError: _root_warning_logged`): `_root_warning_logged`, `_auth_failure_count` und `_auth_backoff_until` wurden in `api.py` nur in `reset_ssh_fallback_flag()` initialisiert, nicht in `__init__`. Jeder erste `login()`-Aufruf auf einer frischen API-Instanz schlug mit einem `AttributeError` fehl — der Setup-Wizard zeigte einen generischen Fehler ohne Hinweis auf die Ursache.
+- **Bestehende Integrationen → HTTPS-Fehler nach Update** (Migration v1→v2): `DEFAULT_PROTOCOL` wurde in v1.16.0 von `"http"` auf `"https-insecure"` geändert. Alte Config-Entries ohne gespeichertes `protocol`-Feld fielen auf den neuen Default zurück und versuchten HTTPS/443 statt HTTP/80 — Verbindungsfehler beim Laden bestehender Integrationen. Fix: `async_migrate_entry` ergänzt `protocol: http` automatisch in alten Entries.
+
 ## [1.16.0] - 2026-04-28
 
 ### Fixed

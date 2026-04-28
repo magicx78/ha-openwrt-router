@@ -333,17 +333,7 @@ class OpenWrtAPI:
         # L-1: track consecutive login failures to suppress log spam
         self._login_failure_count: int = 0
 
-    @property
-    def uses_ssh_fallback(self) -> bool:
-        """True if any API call fell back to SSH in the last poll cycle."""
-        return self._ssh_fallback_used
-
-    def reset_ssh_fallback_flag(self) -> None:
-        """Reset SSH fallback flag at the start of each poll cycle."""
-        self._ssh_fallback_used = False
-
         # P-6: track consecutive auth failures for backoff (wrong credentials)
-        # After MAX_AUTH_FAILURES consecutive failures, stop retrying until reset.
         self._auth_failure_count: int = 0
         self._auth_backoff_until: float = 0.0
 
@@ -352,6 +342,18 @@ class OpenWrtAPI:
 
         # Track DDNS availability — None=unknown, False=not available (skip future polls)
         self._ddns_available: bool | None = None
+
+    @property
+    def uses_ssh_fallback(self) -> bool:
+        """True if any API call fell back to SSH in the last poll cycle."""
+        return self._ssh_fallback_used
+
+    def reset_ssh_fallback_flag(self) -> None:
+        """Reset SSH fallback flag at the start of each poll cycle."""
+        self._ssh_fallback_used = False
+        self._auth_failure_count = 0
+        self._auth_backoff_until = 0.0
+        self._root_warning_logged = False
 
     # ------------------------------------------------------------------
     # Public auth API
