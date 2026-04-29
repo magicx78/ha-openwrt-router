@@ -1,8 +1,5 @@
 {
   "name": "OpenWrt Router",
-  "hacs": "1.6.0",
   "homeassistant": "2024.1.0",
-  "category": "integration",
-  "iot_class": "local_polling",
   "render_readme": true
 }

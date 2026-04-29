@@ -1,19 +1,19 @@
 {
   "domain": "openwrt_router",
   "name": "OpenWrt Router",
-  "version": "1.17.9",
+  "codeowners": [
+    "@magicx78"
+  ],
   "config_flow": true,
-  "documentation": "https://github.com/magicx78/ha-openwrt-router",
-  "issue_tracker": "https://github.com/magicx78/ha-openwrt-router/issues",
-  "requirements": [],
   "dependencies": [
     "frontend",
     "http",
     "panel_custom"
   ],
-  "codeowners": [
-    "@magicx78"
-  ],
+  "documentation": "https://github.com/magicx78/ha-openwrt-router",
   "iot_class": "local_polling",
-  "quality_scale": "silver"
+  "issue_tracker": "https://github.com/magicx78/ha-openwrt-router/issues",
+  "quality_scale": "silver",
+  "requirements": [],
+  "version": "1.17.9"
 }

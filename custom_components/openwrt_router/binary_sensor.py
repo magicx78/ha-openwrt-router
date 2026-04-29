@@ -24,7 +24,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import OpenWrtConfigEntry
 from .const import DOMAIN, SUFFIX_CONNECTIVITY, SUFFIX_WAN_CONNECTIVITY
-from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
+from .coordinator import OpenWrtCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
