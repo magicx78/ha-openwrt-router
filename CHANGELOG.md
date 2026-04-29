@@ -2,6 +2,21 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.17.9] - 2026-04-29
+
+### Security
+
+- **🔴 sshpass-Passwort wurde via Kommandozeile exponiert.** Bis v1.17.8 wurden alle SSH-Fallback-Calls in `api.py` als `sshpass -p <password> ssh ...` ausgeführt. Damit landete das Klartext-Passwort in `/proc/<pid>/cmdline` und war für jeden Prozess auf demselben System (HA-Container, WSL2, Docker-Host) via `ps aux` sichtbar. Fix: alle 12 SSH-Aufrufstellen in `api.py` auf `sshpass -e` umgestellt; das Passwort wird jetzt via `SSHPASS`-Env-Variable an den Subprocess übergeben (neue Helper `_ssh_env()` + erweitertes `_build_ssh_cmd`). Affected paths: WAN-Status, RX/TX-Bytes, hostapd-Clients, iw station-dump, WiFi-Control, UCI-Show, Network-Interfaces, Bridge-FDB, opkg-Update.
+- 4 neue Regressions-Tests (`tests/test_sshpass_security_v1179.py`): Quellcode-Scan auf `-p <pw>`-Pattern, `_ssh_env()`-Helper-Verträglichkeit, `_build_ssh_cmd`-Verifikation für Password- und Key-Auth-Pfad.
+
+### Changed
+
+- **`manifest.json`: `requirements` ist jetzt leer.** Der Eintrag `aiohttp>=3.9.0` war redundant — `aiohttp` ist von Home Assistant als Core-Dependency immer mitgeliefert. Externer pip-Eintrag konnte den HACS-Resolver verlangsamen und theoretisch zu Versionskonflikten mit der HA-internen aiohttp-Version führen. HA-Konvention: `requirements` listet nur Libraries die HA NICHT mitbringt.
+
+### Tests
+
+- 448 grün (+4 neu, +3 von v1.17.8 Memory-Suite).
+
 ## [1.17.8] - 2026-04-29
 
 ### Fixed

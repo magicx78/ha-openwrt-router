@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import os
 import re
 import ssl
 import time
@@ -757,7 +758,7 @@ class OpenWrtAPI:
         if rx_bytes is None and self._password:
             try:
                 ssh_cmd = [
-                    "sshpass", "-p", self._password,
+                    "sshpass", "-e",
                     "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
                     f"{self._username}@{self._host}",
                     f"cat /sys/class/net/{iface_name}/statistics/rx_bytes"
@@ -767,6 +768,7 @@ class OpenWrtAPI:
                     *ssh_cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=self._ssh_env(),
                 )
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
                 lines = stdout.decode().strip().splitlines()
@@ -1408,22 +1410,46 @@ class OpenWrtAPI:
             f"Fix: add 'uci commit wireless' permission to the rpcd ACL for this user."
         ) from root_err
 
+    def _ssh_env(self) -> dict[str, str]:
+        """Return env dict for sshpass: passes the password via SSHPASS env-var.
+
+        Using ``sshpass -e`` instead of ``sshpass -p <pw>`` avoids leaking the
+        password into ``/proc/<pid>/cmdline`` where any local process can read
+        it via ``ps aux``.  Always returns a fresh dict so callers can mutate
+        without side-effects on subsequent calls.
+        """
+        env = dict(os.environ)
+        env["SSHPASS"] = self._password
+        return env
+
     def _build_ssh_cmd(self, remote_cmd: str) -> list[str]:
-        """Build SSH command list, preferring key-auth when password-auth fails."""
+        """Build SSH command list, preferring key-auth when password-auth fails.
+
+        For password-auth uses ``sshpass -e`` — the password is passed via the
+        SSHPASS env-var (see :meth:`_ssh_env`), NOT on the command line.
+        Callers MUST spawn the resulting cmd with ``env=self._ssh_env()``.
+        """
         target = f"{self._username}@{self._host}"
         ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=8"]
         if self._ssh_use_key:
             return ["ssh", *ssh_opts, target, remote_cmd]
-        return ["sshpass", "-p", self._password, "ssh", *ssh_opts, target, remote_cmd]
+        return ["sshpass", "-e", "ssh", *ssh_opts, target, remote_cmd]
 
     async def _run_ssh(self, remote_cmd: str, timeout: float = 10.0) -> str | None:
         """Run a remote SSH command and return stdout. Auto-detects key vs. password auth."""
         for attempt in range(2):
             cmd = self._build_ssh_cmd(remote_cmd)
+            # When password-auth is used, sshpass reads the password from
+            # the SSHPASS env-var (no command-line exposure). For key-auth
+            # the env-var is harmless and ignored.
+            env = self._ssh_env() if not self._ssh_use_key else None
             proc = None
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 if proc.returncode == 255 and b"Permission denied" in stderr and not self._ssh_use_key:
@@ -1458,8 +1484,7 @@ class OpenWrtAPI:
         """
         ssh_cmd = [
             "sshpass",
-            "-p",
-            self._password,
+            "-e",
             "ssh",
             "-o",
             "StrictHostKeyChecking=no",
@@ -1475,6 +1500,7 @@ class OpenWrtAPI:
                 *ssh_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._ssh_env(),
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
 
@@ -1530,8 +1556,7 @@ class OpenWrtAPI:
         """
         ssh_cmd = [
             "sshpass",
-            "-p",
-            self._password,
+            "-e",
             "ssh",
             "-o",
             "StrictHostKeyChecking=no",
@@ -1547,6 +1572,7 @@ class OpenWrtAPI:
                 *ssh_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._ssh_env(),
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
 
@@ -1610,7 +1636,7 @@ class OpenWrtAPI:
             "done; echo ']'"
         )
         ssh_cmd = [
-            "sshpass", "-p", self._password,
+            "sshpass", "-e",
             "ssh",
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
@@ -1624,6 +1650,7 @@ class OpenWrtAPI:
                 *ssh_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._ssh_env(),
             )
             stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
         except asyncio.TimeoutError as err:
@@ -1706,7 +1733,7 @@ class OpenWrtAPI:
             for i in ifnames
         )
         ssh_cmd = [
-            "sshpass", "-p", self._password,
+            "sshpass", "-e",
             "ssh",
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
@@ -1720,6 +1747,7 @@ class OpenWrtAPI:
                 *ssh_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._ssh_env(),
             )
             stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
         except asyncio.TimeoutError as err:
@@ -1806,8 +1834,7 @@ class OpenWrtAPI:
         )
         ssh_cmd = [
             "sshpass",
-            "-p",
-            self._password,
+            "-e",
             "ssh",
             "-o",
             "StrictHostKeyChecking=no",
@@ -1822,6 +1849,7 @@ class OpenWrtAPI:
                 *ssh_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._ssh_env(),
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
 
@@ -1865,8 +1893,7 @@ class OpenWrtAPI:
         """
         ssh_cmd = [
             "sshpass",
-            "-p",
-            self._password,
+            "-e",
             "ssh",
             "-o",
             "StrictHostKeyChecking=no",
@@ -1881,6 +1908,7 @@ class OpenWrtAPI:
                 *ssh_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._ssh_env(),
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
 
@@ -2436,7 +2464,7 @@ class OpenWrtAPI:
     async def _get_network_interfaces_ssh(self) -> list[dict[str, Any]]:
         """SSH fallback: parse 'ip -o addr show' for interface and VLAN data."""
         ssh_cmd = [
-            "sshpass", "-p", self._password,
+            "sshpass", "-e",
             "ssh",
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
@@ -2448,6 +2476,7 @@ class OpenWrtAPI:
                 *ssh_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._ssh_env(),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
             return _parse_ip_addr_output(stdout.decode(errors="replace"))
@@ -2685,7 +2714,10 @@ class OpenWrtAPI:
             # Read brforward binary directly via SSH (raw bytes, no base64 needed)
             ssh_fwd = self._build_ssh_cmd("cat /sys/class/net/br-lan/brforward")
             proc_fwd = await asyncio.create_subprocess_exec(
-                *ssh_fwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                *ssh_fwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=self._ssh_env(),
             )
             fdb_bytes, _ = await asyncio.wait_for(proc_fwd.communicate(), timeout=8.0)
             if not fdb_bytes or len(fdb_bytes) % 8 != 0:
@@ -2936,8 +2968,7 @@ class OpenWrtAPI:
             # Execute update via SSH (rpcd-mod-file does not support write)
             ssh_cmd = [
                 "sshpass",
-                "-p",
-                self._password,
+                "-e",
                 "ssh",
                 "-o",
                 "StrictHostKeyChecking=no",
@@ -2950,6 +2981,7 @@ class OpenWrtAPI:
                 *ssh_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._ssh_env(),
             )
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
             if proc.returncode != 0:
