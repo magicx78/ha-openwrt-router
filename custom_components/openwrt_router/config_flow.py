@@ -9,7 +9,12 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -76,7 +81,7 @@ def _validate_host(host: str) -> str | None:
         return None
     except ValueError:
         pass
-    if not re.match(r'^[a-zA-Z0-9._\-]{1,253}$', host):
+    if not re.match(r"^[a-zA-Z0-9._\-]{1,253}$", host):
         return ERROR_INVALID_HOST
     return None
 
@@ -133,20 +138,24 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         return OpenWrtOptionsFlow()
 
     _CAPABILITY_LABELS: dict[str, str] = {
-        "system_info":      "System-Info (CPU, RAM, Uptime)",
+        "system_info": "System-Info (CPU, RAM, Uptime)",
         "network_wireless": "WLAN-Status (Radios, SSIDs)",
-        "network_dump":     "Netzwerk-Interfaces (WAN/LAN)",
-        "file_read":        "Datei-Lesezugriff (Konfiguration, DHCP)",
-        "file_exec":        "Datei-Ausführung (Bridge FDB, ARP)",
-        "luci_rpc_dhcp":    "DHCP-Leases (Client-IPs)",
-        "iwinfo":           "Signal-Stärke (iwinfo)",
-        "uci_get":          "UCI-Konfiguration",
-        "hostapd_clients":  "WLAN-Clients (hostapd)",
+        "network_dump": "Netzwerk-Interfaces (WAN/LAN)",
+        "file_read": "Datei-Lesezugriff (Konfiguration, DHCP)",
+        "file_exec": "Datei-Ausführung (Bridge FDB, ARP)",
+        "luci_rpc_dhcp": "DHCP-Leases (Client-IPs)",
+        "iwinfo": "Signal-Stärke (iwinfo)",
+        "uci_get": "UCI-Konfiguration",
+        "hostapd_clients": "WLAN-Clients (hostapd)",
     }
 
-    _REQUIRED_CAPS: frozenset[str] = frozenset({
-        "system_info", "network_dump", "network_wireless",
-    })
+    _REQUIRED_CAPS: frozenset[str] = frozenset(
+        {
+            "system_info",
+            "network_dump",
+            "network_wireless",
+        }
+    )
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -278,7 +287,9 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_FRITZBOX_PORT, DEFAULT_FRITZBOX_PORT
             )
             self._user_data[CONF_FRITZBOX_USER] = user_input.get(CONF_FRITZBOX_USER, "")
-            self._user_data[CONF_FRITZBOX_PASSWORD] = user_input.get(CONF_FRITZBOX_PASSWORD, "")
+            self._user_data[CONF_FRITZBOX_PASSWORD] = user_input.get(
+                CONF_FRITZBOX_PASSWORD, ""
+            )
 
             if self._add_switch:
                 return await self.async_step_switch_dev()
@@ -314,19 +325,21 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             self._user_data[CONF_SWITCH_PROTOCOL] = user_input.get(
                 CONF_SWITCH_PROTOCOL, DEFAULT_PROTOCOL
             )
-            self._user_data[CONF_SWITCH_USERNAME] = user_input.get(CONF_SWITCH_USERNAME, "root")
-            self._user_data[CONF_SWITCH_PASSWORD] = user_input.get(CONF_SWITCH_PASSWORD, "")
+            self._user_data[CONF_SWITCH_USERNAME] = user_input.get(
+                CONF_SWITCH_USERNAME, "root"
+            )
+            self._user_data[CONF_SWITCH_PASSWORD] = user_input.get(
+                CONF_SWITCH_PASSWORD, ""
+            )
             return await self.async_step_checklist()
 
         schema = vol.Schema(
             {
                 vol.Required(CONF_SWITCH_HOST, default=""): str,
-                vol.Required(
-                    CONF_SWITCH_PORT, default=DEFAULT_SWITCH_PORT
-                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
-                vol.Required(
-                    CONF_SWITCH_PROTOCOL, default=DEFAULT_PROTOCOL
-                ): vol.In(
+                vol.Required(CONF_SWITCH_PORT, default=DEFAULT_SWITCH_PORT): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=65535)
+                ),
+                vol.Required(CONF_SWITCH_PROTOCOL, default=DEFAULT_PROTOCOL): vol.In(
                     {
                         PROTOCOL_HTTP: "HTTP (Port 80, unsicher)",
                         PROTOCOL_HTTPS: "HTTPS (Port 443, Zertifikat prüfen)",
@@ -354,6 +367,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             if user_input.get("deploy_acl"):
                 from .acl_provisioning import check_and_deploy_acl
+
                 session = async_get_clientsession(self.hass)
                 deploy_api = OpenWrtAPI(
                     host=host,
@@ -437,8 +451,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
         has_missing = bool(missing_required or missing_optional)
         schema = vol.Schema(
-            {vol.Optional("deploy_acl", default=False): bool}
-            if has_missing else {}
+            {vol.Optional("deploy_acl", default=False): bool} if has_missing else {}
         )
 
         return self.async_show_form(
@@ -452,9 +465,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             },
         )
 
-    async def async_step_reauth(
-        self, entry_data: dict[str, Any]
-    ) -> ConfigFlowResult:
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
         """Diagnose why re-auth was triggered, then route to the right sub-step."""
         reauth_entry = self._get_reauth_entry()
         host: str = reauth_entry.data[CONF_HOST]
@@ -475,7 +486,9 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.exception("Re-auth: unexpected error during diagnosis for %s", host)
             return await self.async_step_reauth_confirm()
         else:
-            _LOGGER.debug("Re-auth: existing credentials for %s still valid, reloading", host)
+            _LOGGER.debug(
+                "Re-auth: existing credentials for %s still valid, reloading", host
+            )
             return self.async_update_reload_and_abort(reauth_entry)
 
     async def async_step_reauth_rpcd_setup(

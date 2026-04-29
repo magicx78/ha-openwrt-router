@@ -64,9 +64,7 @@ async def async_setup_entry(
             ifname = radio.get(RADIO_KEY_IFNAME, "")
 
             if not uci_section and not ifname:
-                _LOGGER.debug(
-                    "Skipping radio %s – no UCI section or ifname", radio
-                )
+                _LOGGER.debug("Skipping radio %s – no UCI section or ifname", radio)
                 continue
 
             entities.append(
@@ -240,7 +238,10 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
 
         for radio in self.coordinator.data.wifi_radios:
             # Prefer exact UCI section match (most stable)
-            if self._uci_section and radio.get(RADIO_KEY_UCI_SECTION) == self._uci_section:
+            if (
+                self._uci_section
+                and radio.get(RADIO_KEY_UCI_SECTION) == self._uci_section
+            ):
                 return radio
             # Fallback: interface name
             if self._ifname and radio.get(RADIO_KEY_IFNAME) == self._ifname:

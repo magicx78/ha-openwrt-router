@@ -161,7 +161,10 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
             "total_mb": round(data.memory.get("total", 0) / 1024 / 1024, 1),
             "free_mb": round(data.memory.get("free", 0) / 1024 / 1024, 1),
             "used_mb": round(
-                (data.memory.get("total", 0) - data.memory.get("free", 0)) / 1024 / 1024, 1
+                (data.memory.get("total", 0) - data.memory.get("free", 0))
+                / 1024
+                / 1024,
+                1,
             ),
         },
     ),
@@ -236,17 +239,11 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         translation_key="update_status",
         icon="mdi:package-search",
         value_fn=lambda data: (
-            "available"
-            if data.updates_available.get("available")
-            else "current"
+            "available" if data.updates_available.get("available") else "current"
         ),
         extra_attrs_fn=lambda data: {
-            "system_updates_count": len(
-                data.updates_available.get("system", [])
-            ),
-            "addon_updates_count": len(
-                data.updates_available.get("addons", [])
-            ),
+            "system_updates_count": len(data.updates_available.get("system", [])),
+            "addon_updates_count": len(data.updates_available.get("addons", [])),
             "system_packages": [
                 p.get("name") for p in data.updates_available.get("system", [])
             ],
@@ -311,7 +308,9 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DATA_SIZE,
         native_unit_of_measurement=UnitOfInformation.GIGABYTES,
         icon="mdi:harddisk",
-        value_fn=lambda data: round(data.disk_space.get("primary", {}).get("total_mb", 0) / 1024, 1),
+        value_fn=lambda data: round(
+            data.disk_space.get("primary", {}).get("total_mb", 0) / 1024, 1
+        ),
     ),
     OpenWrtSensorEntityDescription(
         key=SUFFIX_DISK_USED,
@@ -320,7 +319,9 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfInformation.GIGABYTES,
         icon="mdi:harddisk-remove",
-        value_fn=lambda data: round(data.disk_space.get("primary", {}).get("used_mb", 0) / 1024, 1),
+        value_fn=lambda data: round(
+            data.disk_space.get("primary", {}).get("used_mb", 0) / 1024, 1
+        ),
     ),
     OpenWrtSensorEntityDescription(
         key=SUFFIX_DISK_FREE,
@@ -328,7 +329,9 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DATA_SIZE,
         native_unit_of_measurement=UnitOfInformation.GIGABYTES,
         icon="mdi:harddisk-plus",
-        value_fn=lambda data: round(data.disk_space.get("primary", {}).get("free_mb", 0) / 1024, 1),
+        value_fn=lambda data: round(
+            data.disk_space.get("primary", {}).get("free_mb", 0) / 1024, 1
+        ),
     ),
     OpenWrtSensorEntityDescription(
         key=SUFFIX_DISK_USAGE,
@@ -336,7 +339,9 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         icon="mdi:percent",
-        value_fn=lambda data: round(data.disk_space.get("primary", {}).get("usage_percent", 0), 1),
+        value_fn=lambda data: round(
+            data.disk_space.get("primary", {}).get("usage_percent", 0), 1
+        ),
     ),
     OpenWrtSensorEntityDescription(
         key=SUFFIX_TMPFS_TOTAL,
@@ -437,10 +442,18 @@ async def async_setup_entry(
             if "." in ifname:
                 continue
             tracked_interfaces.add(ifname)
-            new_entities.append(OpenWrtInterfaceSensor(coordinator, entry, ifname, "rx_bytes"))
-            new_entities.append(OpenWrtInterfaceSensor(coordinator, entry, ifname, "tx_bytes"))
-            new_entities.append(OpenWrtInterfaceRateSensor(coordinator, entry, ifname, "rx_rate"))
-            new_entities.append(OpenWrtInterfaceRateSensor(coordinator, entry, ifname, "tx_rate"))
+            new_entities.append(
+                OpenWrtInterfaceSensor(coordinator, entry, ifname, "rx_bytes")
+            )
+            new_entities.append(
+                OpenWrtInterfaceSensor(coordinator, entry, ifname, "tx_bytes")
+            )
+            new_entities.append(
+                OpenWrtInterfaceRateSensor(coordinator, entry, ifname, "rx_rate")
+            )
+            new_entities.append(
+                OpenWrtInterfaceRateSensor(coordinator, entry, ifname, "tx_rate")
+            )
             _LOGGER.debug("Adding bandwidth sensors for interface %s", ifname)
 
         for port in coordinator.data.port_stats:
@@ -448,10 +461,18 @@ async def async_setup_entry(
             if not port_name or port_name in tracked_ports:
                 continue
             tracked_ports.add(port_name)
-            new_entities.append(OpenWrtPortSensor(coordinator, entry, port_name, "status"))
-            new_entities.append(OpenWrtPortSensor(coordinator, entry, port_name, "speed_mbps"))
-            new_entities.append(OpenWrtPortSensor(coordinator, entry, port_name, "rx_bytes"))
-            new_entities.append(OpenWrtPortSensor(coordinator, entry, port_name, "tx_bytes"))
+            new_entities.append(
+                OpenWrtPortSensor(coordinator, entry, port_name, "status")
+            )
+            new_entities.append(
+                OpenWrtPortSensor(coordinator, entry, port_name, "speed_mbps")
+            )
+            new_entities.append(
+                OpenWrtPortSensor(coordinator, entry, port_name, "rx_bytes")
+            )
+            new_entities.append(
+                OpenWrtPortSensor(coordinator, entry, port_name, "tx_bytes")
+            )
             _LOGGER.debug("Adding port sensors for %s", port_name)
 
         for radio in coordinator.data.wifi_radios:
@@ -462,8 +483,12 @@ async def async_setup_entry(
             # Signal/noise sensors (existing, only when iwinfo available)
             if ifname not in tracked_radios and radio.get("noise") is not None:
                 tracked_radios.add(ifname)
-                new_entities.append(OpenWrtRadioSensor(coordinator, entry, ifname, "noise"))
-                new_entities.append(OpenWrtRadioSensor(coordinator, entry, ifname, "signal"))
+                new_entities.append(
+                    OpenWrtRadioSensor(coordinator, entry, ifname, "noise")
+                )
+                new_entities.append(
+                    OpenWrtRadioSensor(coordinator, entry, ifname, "signal")
+                )
                 _LOGGER.debug("Adding signal/noise sensors for radio %s", ifname)
 
             # (AP interface detail sensors are created from coordinator.data.ap_interfaces below)
@@ -482,7 +507,9 @@ async def async_setup_entry(
                 if metric == "quality" and ap_iface.get("quality") is None:
                     continue
                 tracked_ap_metrics.add(key)
-                new_entities.append(OpenWrtAPInterfaceSensor(coordinator, entry, ifname, metric))
+                new_entities.append(
+                    OpenWrtAPInterfaceSensor(coordinator, entry, ifname, metric)
+                )
                 _LOGGER.debug("Adding AP interface sensor %s for %s", metric, ifname)
 
         if new_entities:
@@ -558,7 +585,10 @@ class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional state attributes."""
-        if self.coordinator.data is None or self.entity_description.extra_attrs_fn is None:
+        if (
+            self.coordinator.data is None
+            or self.entity_description.extra_attrs_fn is None
+        ):
             return {}
         try:
             return self.entity_description.extra_attrs_fn(self.coordinator.data)
@@ -576,7 +606,9 @@ class OpenWrtInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity
     _attr_device_class = SensorDeviceClass.DATA_SIZE
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_native_unit_of_measurement = UnitOfInformation.BYTES
-    _attr_entity_registry_enabled_default = False  # disabled by default — see issue with sensor explosion
+    _attr_entity_registry_enabled_default = (
+        False  # disabled by default — see issue with sensor explosion
+    )
 
     def __init__(
         self,
@@ -592,7 +624,9 @@ class OpenWrtInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity
         direction = "rx" if metric == "rx_bytes" else "tx"
         self._attr_unique_id = f"{entry.entry_id}_iface_{interface}_{direction}"
         self._attr_translation_key = f"interface_{direction}"
-        self._attr_icon = "mdi:download-network" if direction == "rx" else "mdi:upload-network"
+        self._attr_icon = (
+            "mdi:download-network" if direction == "rx" else "mdi:upload-network"
+        )
 
     @property
     def name(self) -> str:
@@ -665,7 +699,11 @@ class OpenWrtInterfaceRateSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEn
         self._entry = entry
         direction = "rx" if metric == "rx_rate" else "tx"
         self._attr_unique_id = f"{entry.entry_id}_{interface}_{direction}_rate"
-        self._attr_icon = "mdi:download-network-outline" if direction == "rx" else "mdi:upload-network-outline"
+        self._attr_icon = (
+            "mdi:download-network-outline"
+            if direction == "rx"
+            else "mdi:upload-network-outline"
+        )
 
     @property
     def name(self) -> str:
@@ -735,7 +773,9 @@ class OpenWrtRadioSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_radio_{ifname}_{metric}"
         self._attr_translation_key = f"radio_{metric}"
-        self._attr_icon = "mdi:wifi-strength-2" if metric == "signal" else "mdi:sine-wave"
+        self._attr_icon = (
+            "mdi:wifi-strength-2" if metric == "signal" else "mdi:sine-wave"
+        )
 
     @property
     def name(self) -> str:
@@ -787,15 +827,30 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
 
     # metric → (icon, unit, device_class, state_class)
     _METRIC_CONFIG: dict[str, tuple[str, str | None, str | None, str | None]] = {
-        "channel":   ("mdi:wifi-marker",         None,                                    None,                          None),
-        "frequency":  ("mdi:sine-wave",           UnitOfFrequency.MEGAHERTZ,              SensorDeviceClass.FREQUENCY,   None),
-        "txpower":    ("mdi:transmission-tower",  "dBm",                                  None,                          SensorStateClass.MEASUREMENT),
-        "bitrate":    ("mdi:speedometer",         UnitOfDataRate.MEGABITS_PER_SECOND,     SensorDeviceClass.DATA_RATE,   SensorStateClass.MEASUREMENT),
-        "hwmode":     ("mdi:chip",                None,                                    None,                          None),
-        "htmode":     ("mdi:cog-box",             None,                                    None,                          None),
-        "mode":       ("mdi:wifi-cog",            None,                                    None,                          None),
-        "quality":    ("mdi:signal",              PERCENTAGE,                              None,                          SensorStateClass.MEASUREMENT),
-        "ap_clients": ("mdi:account-network",     None,                                    None,                          SensorStateClass.MEASUREMENT),
+        "channel": ("mdi:wifi-marker", None, None, None),
+        "frequency": (
+            "mdi:sine-wave",
+            UnitOfFrequency.MEGAHERTZ,
+            SensorDeviceClass.FREQUENCY,
+            None,
+        ),
+        "txpower": (
+            "mdi:transmission-tower",
+            "dBm",
+            None,
+            SensorStateClass.MEASUREMENT,
+        ),
+        "bitrate": (
+            "mdi:speedometer",
+            UnitOfDataRate.MEGABITS_PER_SECOND,
+            SensorDeviceClass.DATA_RATE,
+            SensorStateClass.MEASUREMENT,
+        ),
+        "hwmode": ("mdi:chip", None, None, None),
+        "htmode": ("mdi:cog-box", None, None, None),
+        "mode": ("mdi:wifi-cog", None, None, None),
+        "quality": ("mdi:signal", PERCENTAGE, None, SensorStateClass.MEASUREMENT),
+        "ap_clients": ("mdi:account-network", None, None, SensorStateClass.MEASUREMENT),
     }
 
     def __init__(
@@ -821,14 +876,14 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
     def name(self) -> str:
         """Human-readable sensor name."""
         labels = {
-            "channel":   "Channel",
-            "frequency":  "Frequency",
-            "txpower":    "TX Power",
-            "bitrate":    "Bitrate",
-            "hwmode":     "HW Mode",
-            "htmode":     "HT Mode",
-            "mode":       "Mode",
-            "quality":    "Signal Quality",
+            "channel": "Channel",
+            "frequency": "Frequency",
+            "txpower": "TX Power",
+            "bitrate": "Bitrate",
+            "hwmode": "HW Mode",
+            "htmode": "HT Mode",
+            "mode": "Mode",
+            "quality": "Signal Quality",
             "ap_clients": "AP Clients",
         }
         return f"{self._ifname} {labels.get(self._metric, self._metric)}"
@@ -847,7 +902,11 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
             )
 
         ap_iface = next(
-            (a for a in self.coordinator.data.ap_interfaces if a.get(RADIO_KEY_IFNAME) == self._ifname),
+            (
+                a
+                for a in self.coordinator.data.ap_interfaces
+                if a.get(RADIO_KEY_IFNAME) == self._ifname
+            ),
             None,
         )
         if ap_iface is None:
@@ -866,7 +925,11 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
         if not self.coordinator.data:
             return {}
         radio: dict[str, Any] = next(
-            (a for a in self.coordinator.data.ap_interfaces if a.get(RADIO_KEY_IFNAME) == self._ifname),
+            (
+                a
+                for a in self.coordinator.data.ap_interfaces
+                if a.get(RADIO_KEY_IFNAME) == self._ifname
+            ),
             {},
         )
         if self._metric == "mode":
@@ -912,17 +975,37 @@ class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
     _attr_entity_registry_enabled_default = False
 
     # (icon, unit, device_class, state_class, entity_category)
-    _METRIC_CONFIG: dict[str, tuple[str, str | None, str | None, str | None, EntityCategory | None]] = {
-        "status":     ("mdi:ethernet",           None,                                    None,                          None,                           None),
-        "speed_mbps": ("mdi:speedometer",         UnitOfDataRate.MEGABITS_PER_SECOND,     SensorDeviceClass.DATA_RATE,   SensorStateClass.MEASUREMENT,   None),
-        "rx_bytes":   ("mdi:download-network",    UnitOfInformation.BYTES,                SensorDeviceClass.DATA_SIZE,   SensorStateClass.TOTAL_INCREASING, EntityCategory.DIAGNOSTIC),
-        "tx_bytes":   ("mdi:upload-network",      UnitOfInformation.BYTES,                SensorDeviceClass.DATA_SIZE,   SensorStateClass.TOTAL_INCREASING, EntityCategory.DIAGNOSTIC),
+    _METRIC_CONFIG: dict[
+        str, tuple[str, str | None, str | None, str | None, EntityCategory | None]
+    ] = {
+        "status": ("mdi:ethernet", None, None, None, None),
+        "speed_mbps": (
+            "mdi:speedometer",
+            UnitOfDataRate.MEGABITS_PER_SECOND,
+            SensorDeviceClass.DATA_RATE,
+            SensorStateClass.MEASUREMENT,
+            None,
+        ),
+        "rx_bytes": (
+            "mdi:download-network",
+            UnitOfInformation.BYTES,
+            SensorDeviceClass.DATA_SIZE,
+            SensorStateClass.TOTAL_INCREASING,
+            EntityCategory.DIAGNOSTIC,
+        ),
+        "tx_bytes": (
+            "mdi:upload-network",
+            UnitOfInformation.BYTES,
+            SensorDeviceClass.DATA_SIZE,
+            SensorStateClass.TOTAL_INCREASING,
+            EntityCategory.DIAGNOSTIC,
+        ),
     }
     _METRIC_LABELS = {
-        "status":     "Link",
+        "status": "Link",
         "speed_mbps": "Speed",
-        "rx_bytes":   "RX",
-        "tx_bytes":   "TX",
+        "rx_bytes": "RX",
+        "tx_bytes": "TX",
     }
 
     def __init__(
@@ -956,7 +1039,11 @@ class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
         if not self.coordinator.data:
             return None
         return next(
-            (p for p in self.coordinator.data.port_stats if p.get("name") == self._port),
+            (
+                p
+                for p in self.coordinator.data.port_stats
+                if p.get("name") == self._port
+            ),
             None,
         )
 
@@ -1007,6 +1094,7 @@ class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
 # ------------------------------------------------------------------
 # Utility functions
 # ------------------------------------------------------------------
+
 
 def _calc_memory_pct(memory: dict) -> float | None:
     """Calculate memory usage percentage from memory dict."""
@@ -1067,7 +1155,9 @@ class OpenWrtRouterStatusSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnt
     _attr_options = ["online", "offline", "auth_error", "timeout", "response_error"]
     _attr_icon = "mdi:router-network"
 
-    def __init__(self, coordinator: OpenWrtCoordinator, entry: OpenWrtConfigEntry) -> None:
+    def __init__(
+        self, coordinator: OpenWrtCoordinator, entry: OpenWrtConfigEntry
+    ) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_{SUFFIX_ROUTER_STATUS}"
         self._entry = entry
@@ -1082,14 +1172,20 @@ class OpenWrtRouterStatusSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnt
             return "online"
         if self.coordinator.data and self.coordinator.data.error_type:
             et = self.coordinator.data.error_type
-            return {"auth": "auth_error", "timeout": "timeout", "response": "response_error"}.get(et, "offline")
+            return {
+                "auth": "auth_error",
+                "timeout": "timeout",
+                "response": "response_error",
+            }.get(et, "offline")
         return "offline"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         data = self.coordinator.data
         return {
-            "last_seen": data.last_seen.isoformat() if data and data.last_seen else None,
+            "last_seen": data.last_seen.isoformat()
+            if data and data.last_seen
+            else None,
             "consecutive_failures": data.consecutive_failures if data else 0,
             "error_type": data.error_type if data else None,
         }

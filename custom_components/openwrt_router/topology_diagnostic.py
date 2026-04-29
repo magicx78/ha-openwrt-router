@@ -166,7 +166,7 @@ def _extract_vlans(network_interfaces: list[dict]) -> list[dict]:
     """
     vlans: list[dict] = []
     seen: set[int] = set()
-    for iface in (network_interfaces or []):
+    for iface in network_interfaces or []:
         name: str = iface.get("interface", "") or ""
         # Match patterns: br-lan.10, eth0.20, lan0.100, etc.
         m = re.match(r"^[a-zA-Z][a-zA-Z0-9_-]*\.(\d+)$", name)
@@ -176,13 +176,15 @@ def _extract_vlans(network_interfaces: list[dict]) -> list[dict]:
         if vlan_id <= 1 or vlan_id in seen:  # skip native VLAN and duplicates
             continue
         seen.add(vlan_id)
-        vlans.append({
-            "id": vlan_id,
-            "interface": name,
-            "status": iface.get("status", "unknown"),
-            "ipv4_addr": iface.get("ipv4_addr"),
-            "prefix_len": iface.get("prefix_len"),
-        })
+        vlans.append(
+            {
+                "id": vlan_id,
+                "interface": name,
+                "status": iface.get("status", "unknown"),
+                "ipv4_addr": iface.get("ipv4_addr"),
+                "prefix_len": iface.get("prefix_len"),
+            }
+        )
     return sorted(vlans, key=lambda v: v["id"])
 
 
@@ -206,7 +208,7 @@ def _slim_port_stats(
         port_to_macs.setdefault(port, []).append(mac)
 
     result = []
-    for p in (port_stats or []):
+    for p in port_stats or []:
         name = p.get("name", "")
         # Resolve connected device from FDB + DHCP leases
         connected_device: str | None = None
@@ -222,16 +224,18 @@ def _slim_port_stats(
                 # Fall back to raw MAC
                 connected_device = macs_on_port[0]
 
-        result.append({
-            "name": name,
-            "up": bool(p.get("up", False)),
-            "speed_mbps": p.get("speed_mbps"),
-            "duplex": p.get("duplex"),
-            "vlan_ids": (port_vlan_map or {}).get(name, []),
-            "connected_device": connected_device,
-            "rx_bytes": p.get("rx_bytes"),
-            "tx_bytes": p.get("tx_bytes"),
-        })
+        result.append(
+            {
+                "name": name,
+                "up": bool(p.get("up", False)),
+                "speed_mbps": p.get("speed_mbps"),
+                "duplex": p.get("duplex"),
+                "vlan_ids": (port_vlan_map or {}).get(name, []),
+                "connected_device": connected_device,
+                "rx_bytes": p.get("rx_bytes"),
+                "tx_bytes": p.get("tx_bytes"),
+            }
+        )
     return result
 
 
@@ -268,40 +272,42 @@ def build_topology_snapshot(
     wan_ifname: str = data.wan_status.get("interface", "")
 
     # ── Router node ────────────────────────────────────────────────
-    nodes.append({
-        "id": router_id,
-        "type": "router",
-        "label": router_info.get("hostname") or router_id,
-        "source": TOPOLOGY_SOURCE,
-        "inferred": False,
-        "status": "provisioned",
-        "project": None,
-        "role": role,
-        "ip": data.wan_status.get("ipv4") or host_ip,
-        "attributes": {
-            "board_name": router_info.get("board_name"),
-            "model": router_info.get("model"),
-            "firmware": (router_info.get("release") or {}).get("version"),
-            "mac": router_id,
-            "host_ip": host_ip,
-            "wan_proto": data.wan_status.get("proto", ""),
-            "wan_connected": data.wan_connected,
-            "uptime": data.uptime if data.uptime else None,
-            "cpu_load": data.cpu_load,
-            "mem_usage": _calc_mem_usage(data.memory),
-            "port_stats": _slim_port_stats(
-                data.port_stats,
-                port_vlan_map=getattr(data, "port_vlan_map", None),
-                bridge_fdb=getattr(data, "port_fdb_map", None),
-                dhcp_leases=data.dhcp_leases,
-            ),
-            "vlans": _extract_vlans(data.network_interfaces),
-            "vlans_stale": getattr(data, "vlans_stale", False),
-            "events": data.events if data.events else [],
-            "cpu_history": getattr(data, "cpu_history", []),
-            "node_status": "online",  # always online when coordinator is running
-        },
-    })
+    nodes.append(
+        {
+            "id": router_id,
+            "type": "router",
+            "label": router_info.get("hostname") or router_id,
+            "source": TOPOLOGY_SOURCE,
+            "inferred": False,
+            "status": "provisioned",
+            "project": None,
+            "role": role,
+            "ip": data.wan_status.get("ipv4") or host_ip,
+            "attributes": {
+                "board_name": router_info.get("board_name"),
+                "model": router_info.get("model"),
+                "firmware": (router_info.get("release") or {}).get("version"),
+                "mac": router_id,
+                "host_ip": host_ip,
+                "wan_proto": data.wan_status.get("proto", ""),
+                "wan_connected": data.wan_connected,
+                "uptime": data.uptime if data.uptime else None,
+                "cpu_load": data.cpu_load,
+                "mem_usage": _calc_mem_usage(data.memory),
+                "port_stats": _slim_port_stats(
+                    data.port_stats,
+                    port_vlan_map=getattr(data, "port_vlan_map", None),
+                    bridge_fdb=getattr(data, "port_fdb_map", None),
+                    dhcp_leases=data.dhcp_leases,
+                ),
+                "vlans": _extract_vlans(data.network_interfaces),
+                "vlans_stale": getattr(data, "vlans_stale", False),
+                "events": data.events if data.events else [],
+                "cpu_history": getattr(data, "cpu_history", []),
+                "node_status": "online",  # always online when coordinator is running
+            },
+        }
+    )
 
     # ── Build rx/tx lookup from network_interfaces ─────────────────
     # AP-interface names like phy0-ap0 may or may not appear in
@@ -371,51 +377,57 @@ def build_topology_snapshot(
         bitrate: str | None = ap.get("bitrate")  # string like "867 Mbit/s" or None
         inferred = iface_type == "unknown"
 
-        interfaces.append({
-            "id": iface_id,
-            "ap_mac": router_id,
-            "name": ifname,
-            "interface_type": iface_type,
-            "rx_bytes": rx_bytes,
-            "tx_bytes": tx_bytes,
-            "valid": valid,
-            "status": iface_status,
-            "warning": warning,
-            "source": TOPOLOGY_SOURCE,
-            "inferred": inferred,
-            "inference_reason": "interface_type_unknown" if inferred else None,
-        })
-
-        nodes.append({
-            "id": iface_id,
-            "type": "interface",
-            "label": iface_label,
-            "source": TOPOLOGY_SOURCE,
-            "inferred": inferred,
-            "inference_reason": "interface_type_unknown" if inferred else None,
-            "status": iface_status,
-            "valid": valid,
-            "attributes": {
+        interfaces.append(
+            {
+                "id": iface_id,
                 "ap_mac": router_id,
+                "name": ifname,
                 "interface_type": iface_type,
-                "ssid": ap.get("ssid"),
-                "band": ap.get("band"),
-                "channel": ap.get("channel"),
                 "rx_bytes": rx_bytes,
                 "tx_bytes": tx_bytes,
+                "valid": valid,
+                "status": iface_status,
                 "warning": warning,
-                "signal": signal,
-                "bitrate": bitrate,
-            },
-        })
-        edges.append({
-            "id": f"{router_id}--{iface_id}",
-            "from": router_id,
-            "to": iface_id,
-            "relationship": "has_interface",
-            "source": TOPOLOGY_SOURCE,
-            "inferred": False,
-        })
+                "source": TOPOLOGY_SOURCE,
+                "inferred": inferred,
+                "inference_reason": "interface_type_unknown" if inferred else None,
+            }
+        )
+
+        nodes.append(
+            {
+                "id": iface_id,
+                "type": "interface",
+                "label": iface_label,
+                "source": TOPOLOGY_SOURCE,
+                "inferred": inferred,
+                "inference_reason": "interface_type_unknown" if inferred else None,
+                "status": iface_status,
+                "valid": valid,
+                "attributes": {
+                    "ap_mac": router_id,
+                    "interface_type": iface_type,
+                    "ssid": ap.get("ssid"),
+                    "band": ap.get("band"),
+                    "channel": ap.get("channel"),
+                    "rx_bytes": rx_bytes,
+                    "tx_bytes": tx_bytes,
+                    "warning": warning,
+                    "signal": signal,
+                    "bitrate": bitrate,
+                },
+            }
+        )
+        edges.append(
+            {
+                "id": f"{router_id}--{iface_id}",
+                "from": router_id,
+                "to": iface_id,
+                "relationship": "has_interface",
+                "source": TOPOLOGY_SOURCE,
+                "inferred": False,
+            }
+        )
 
     # ── Build AP-interface id lookup keyed by ifname ───────────────
     # Used to connect clients to their AP interface node.
@@ -425,9 +437,7 @@ def build_topology_snapshot(
         if ap.get("ifname")
     }
     # Reverse: ifname → iface_id
-    ifname_to_iface_id: dict[str, str] = {
-        v: k for k, v in ifname_to_node_id.items()
-    }
+    ifname_to_iface_id: dict[str, str] = {v: k for k, v in ifname_to_node_id.items()}
 
     # ── Client nodes ───────────────────────────────────────────────
     for client in data.clients or []:
@@ -447,67 +457,72 @@ def build_topology_snapshot(
         c_rx_bytes: int | None = client.get("rx_bytes")
         c_tx_bytes: int | None = client.get("tx_bytes")
 
-        clients.append({
-            "id": client_id,
-            "mac": mac,
-            "ap_mac": router_id,
-            "signal": c_signal,           # None stays None
-            "bitrate": None,              # not provided by coordinator
-            "connected": True,
-            "last_seen": client.get("connected_since"),
-            "rx_bytes": c_rx_bytes,
-            "tx_bytes": c_tx_bytes,
-            "source": TOPOLOGY_SOURCE,
-            "inferred": c_inferred,
-            "inference_reason": (
-                "client_ap_interface_unknown" if c_inferred else None
-            ),
-        })
-        nodes.append({
-            "id": client_id,
-            "type": "client",
-            "label": client.get("hostname") or mac,
-            "source": TOPOLOGY_SOURCE,
-            "inferred": c_inferred,
-            "inference_reason": (
-                "client_ap_interface_unknown" if c_inferred else None
-            ),
-            "status": "active",
-            "attributes": {
-                "ap_mac": router_id,
+        clients.append(
+            {
+                "id": client_id,
                 "mac": mac,
-                "ip": client.get("ip"),
-                "hostname": client.get("hostname"),
-                "ssid": client.get("ssid"),
-                "radio": c_radio,
-                "band": _band_for_radio(c_radio, _radio_band_map),
-                "signal": c_signal,       # None stays None
-                "connected_since": _seconds_since(client.get("connected_since")),
-                "dhcp_expires": client.get("dhcp_expires"),
+                "ap_mac": router_id,
+                "signal": c_signal,  # None stays None
+                "bitrate": None,  # not provided by coordinator
+                "connected": True,
+                "last_seen": client.get("connected_since"),
                 "rx_bytes": c_rx_bytes,
                 "tx_bytes": c_tx_bytes,
-                # True when the client originates from hostapd (WiFi client).
-                # Frontend uses this to render a WiFi vs cable indicator and
-                # avoid mis-classifying repeaters/clients that also have a
-                # static DHCP lease as wired.
-                "is_wifi_client": True,
-            },
-        })
-        edges.append({
-            "id": f"{c_iface_id}--{client_id}",
-            "from": c_iface_id,
-            "to": client_id,
-            "relationship": "has_client",
-            "source": TOPOLOGY_SOURCE,
-            "inferred": c_inferred,
-            "inference_reason": (
-                "client_ap_interface_unknown" if c_inferred else None
-            ),
-        })
+                "source": TOPOLOGY_SOURCE,
+                "inferred": c_inferred,
+                "inference_reason": (
+                    "client_ap_interface_unknown" if c_inferred else None
+                ),
+            }
+        )
+        nodes.append(
+            {
+                "id": client_id,
+                "type": "client",
+                "label": client.get("hostname") or mac,
+                "source": TOPOLOGY_SOURCE,
+                "inferred": c_inferred,
+                "inference_reason": (
+                    "client_ap_interface_unknown" if c_inferred else None
+                ),
+                "status": "active",
+                "attributes": {
+                    "ap_mac": router_id,
+                    "mac": mac,
+                    "ip": client.get("ip"),
+                    "hostname": client.get("hostname"),
+                    "ssid": client.get("ssid"),
+                    "radio": c_radio,
+                    "band": _band_for_radio(c_radio, _radio_band_map),
+                    "signal": c_signal,  # None stays None
+                    "connected_since": _seconds_since(client.get("connected_since")),
+                    "dhcp_expires": client.get("dhcp_expires"),
+                    "rx_bytes": c_rx_bytes,
+                    "tx_bytes": c_tx_bytes,
+                    # True when the client originates from hostapd (WiFi client).
+                    # Frontend uses this to render a WiFi vs cable indicator and
+                    # avoid mis-classifying repeaters/clients that also have a
+                    # static DHCP lease as wired.
+                    "is_wifi_client": True,
+                },
+            }
+        )
+        edges.append(
+            {
+                "id": f"{c_iface_id}--{client_id}",
+                "from": c_iface_id,
+                "to": client_id,
+                "relationship": "has_client",
+                "source": TOPOLOGY_SOURCE,
+                "inferred": c_inferred,
+                "inference_reason": (
+                    "client_ap_interface_unknown" if c_inferred else None
+                ),
+            }
+        )
 
     inference_used = any(
-        bool(x.get("inferred"))
-        for x in [*nodes, *edges, *interfaces, *clients]
+        bool(x.get("inferred")) for x in [*nodes, *edges, *interfaces, *clients]
     )
 
     return {
@@ -542,15 +557,9 @@ def get_topology_status(snapshot: dict[str, Any]) -> dict[str, Any]:
     active_ifaces = sum(1 for i in ifaces if i.get("status") == "active")
     inactive_ifaces = sum(1 for i in ifaces if i.get("status") == "inactive")
     invalid_data = sum(1 for i in ifaces if not i.get("valid", True))
-    inferred_nodes = sum(
-        1 for x in [*nodes, *edges] if x.get("inferred")
-    )
-    clients_no_signal = sum(
-        1 for c in clients if c.get("signal") is None
-    )
-    unknown_iface_types = sum(
-        1 for i in ifaces if i.get("interface_type") == "unknown"
-    )
+    inferred_nodes = sum(1 for x in [*nodes, *edges] if x.get("inferred"))
+    clients_no_signal = sum(1 for c in clients if c.get("signal") is None)
+    unknown_iface_types = sum(1 for i in ifaces if i.get("interface_type") == "unknown")
 
     return {
         "active_interfaces": active_ifaces,

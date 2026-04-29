@@ -116,7 +116,11 @@ class OpenWrtCoordinatorData:
         self.network_interfaces: list[dict[str, Any]] = []
         self.port_stats: list[dict[str, Any]] = []
         self.active_connections: int = 0
-        self.updates_available: dict[str, Any] = {"available": False, "system": [], "addons": []}
+        self.updates_available: dict[str, Any] = {
+            "available": False,
+            "system": [],
+            "addons": [],
+        }
         self.services: list[dict[str, Any]] = []
         self.ap_interfaces: list[dict[str, Any]] = []
         # STA-mode wireless interfaces (WiFi repeater / mesh backhaul).
@@ -128,7 +132,9 @@ class OpenWrtCoordinatorData:
         self.dsl_stats: dict[str, Any] = {}
         self.wan_traffic: dict[str, Any] = {}
         self.ping_ms: float | None = None
-        self.dsl_history: list[dict[str, Any]] = []   # filled by coordinator from _dsl_history
+        self.dsl_history: list[
+            dict[str, Any]
+        ] = []  # filled by coordinator from _dsl_history
         # DuckDNS / DDNS status (gateway only)
         self.ddns_status: list[dict[str, Any]] = []
         # Per-router event history (status changes, spikes) — max 30 entries
@@ -238,7 +244,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         # Event timeline tracking
         self._event_history: deque[dict[str, Any]] = deque(maxlen=30)
         # Topology snapshots: compact AP/client state every 5 min, max 20 entries
-        self._topology_snapshots: deque[dict[str, Any]] = deque(maxlen=TOPOLOGY_SNAPSHOT_MAX)
+        self._topology_snapshots: deque[dict[str, Any]] = deque(
+            maxlen=TOPOLOGY_SNAPSHOT_MAX
+        )
         self._snapshot_cycle_count: int = 0
         self._prev_wan_connected: bool | None = None
         self._cpu_warn_active: bool = False
@@ -269,7 +277,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         # Spreads multiple coordinators evenly across the scan interval.
         if self._poll_count == 2 and self._poll_offset_seconds > 0:
             _LOGGER.debug(
-                "Stagger offset: delaying first regular poll by %ds", self._poll_offset_seconds
+                "Stagger offset: delaying first regular poll by %ds",
+                self._poll_offset_seconds,
             )
             await asyncio.sleep(self._poll_offset_seconds)
 
@@ -284,7 +293,10 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # Fetched on first cycle and every BOARD_REFRESH_CYCLES thereafter.
             # Hostname changes are rare; this avoids a wasted call every 30 s.
             self._board_poll_count += 1
-            if self._board_poll_count == 1 or self._board_poll_count % BOARD_REFRESH_CYCLES == 0:
+            if (
+                self._board_poll_count == 1
+                or self._board_poll_count % BOARD_REFRESH_CYCLES == 0
+            ):
                 data.router_info = await self.api.get_router_info()
             else:
                 data.router_info = self.data.router_info if self.data else {}
@@ -292,7 +304,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # --- Priority 1: WiFi & Core Status (critical for switches) ---
             # Must run before optional monitoring calls
             data.wan_status = await self.api.get_wan_status()
-            data.wan_connected = data.wan_status.get("wan_connected", False) or data.wan_status.get("connected", False)
+            data.wan_connected = data.wan_status.get(
+                "wan_connected", False
+            ) or data.wan_status.get("connected", False)
 
             try:
                 data.wifi_radios = await self.api.get_wifi_status()
@@ -336,11 +350,16 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
 
                 if fb_user:  # only poll Fritz!Box when credentials are configured
                     try:
-                        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+                        from homeassistant.helpers.aiohttp_client import (
+                            async_get_clientsession,
+                        )
+
                         session = async_get_clientsession(self.hass)
                         dsl, traffic = await asyncio.gather(
                             get_dsl_stats(session, fb_host, fb_user, fb_pass, fb_port),
-                            get_wan_traffic(session, fb_host, fb_user, fb_pass, fb_port),
+                            get_wan_traffic(
+                                session, fb_host, fb_user, fb_pass, fb_port
+                            ),
                             return_exceptions=True,
                         )
                         data.dsl_stats = dsl if isinstance(dsl, dict) else {}
@@ -396,12 +415,14 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 self._history_cycle_count += 1
                 if self._history_cycle_count >= DSL_HISTORY_INTERVAL_CYCLES:
                     self._history_cycle_count = 0
-                    self._dsl_history.append({
-                        "ts": int(time.time()),
-                        "dsl_down": data.dsl_stats.get("downstream_kbps", 0),
-                        "dsl_up": data.dsl_stats.get("upstream_kbps", 0),
-                        "ping_ms": data.ping_ms,
-                    })
+                    self._dsl_history.append(
+                        {
+                            "ts": int(time.time()),
+                            "dsl_down": data.dsl_stats.get("downstream_kbps", 0),
+                            "dsl_up": data.dsl_stats.get("upstream_kbps", 0),
+                            "ping_ms": data.ping_ms,
+                        }
+                    )
             else:
                 # First poll: carry forward empty defaults — no external calls
                 data.dsl_stats = {}
@@ -421,9 +442,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 current_macs.add(mac)
                 if mac not in self._client_first_seen:
                     self._client_first_seen[mac] = now
-                client[CLIENT_KEY_CONNECTED_SINCE] = (
-                    self._client_first_seen[mac].isoformat()
-                )
+                client[CLIENT_KEY_CONNECTED_SINCE] = self._client_first_seen[
+                    mac
+                ].isoformat()
             # Remove MACs that are no longer connected
             self._client_first_seen = {
                 mac: ts
@@ -491,35 +512,42 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
 
             # --- CPU history (30s resolution, 1h rolling window) ---
             import time as _time
+
             mem = data.memory
             mem_total = mem.get("total", 0) or 0
             mem_free = (mem.get("free", 0) or 0) + (mem.get("buffered", 0) or 0)
-            mem_pct = round((1.0 - mem_free / mem_total) * 100.0, 1) if mem_total > 0 else 0.0
-            self._cpu_history.append({
-                "ts": int(_time.time()),
-                "cpu": round(data.cpu_load, 1),
-                "mem": mem_pct,
-            })
+            mem_pct = (
+                round((1.0 - mem_free / mem_total) * 100.0, 1) if mem_total > 0 else 0.0
+            )
+            self._cpu_history.append(
+                {
+                    "ts": int(_time.time()),
+                    "cpu": round(data.cpu_load, 1),
+                    "mem": mem_pct,
+                }
+            )
             data.cpu_history = list(self._cpu_history)
 
             # --- Topology snapshots (every TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES polls) ---
             self._snapshot_cycle_count += 1
             if self._snapshot_cycle_count >= TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES:
                 self._snapshot_cycle_count = 0
-                self._topology_snapshots.append({
-                    "ts": int(_time.time()),
-                    "routers": [
-                        {
-                            "id": c.get("mac", ""),
-                            "hostname": c.get("hostname", ""),
-                            "ip": c.get("ip", ""),
-                            "status": "online",
-                        }
-                        for c in data.clients
-                    ],
-                    "client_count": data.client_count,
-                    "wan_connected": data.wan_connected,
-                })
+                self._topology_snapshots.append(
+                    {
+                        "ts": int(_time.time()),
+                        "routers": [
+                            {
+                                "id": c.get("mac", ""),
+                                "hostname": c.get("hostname", ""),
+                                "ip": c.get("ip", ""),
+                                "status": "online",
+                            }
+                            for c in data.clients
+                        ],
+                        "client_count": data.client_count,
+                        "wan_connected": data.wan_connected,
+                    }
+                )
             data.topology_snapshots = list(self._topology_snapshots)
 
             # --- Bandwidth rate calculation (bytes/s) ---
@@ -530,11 +558,16 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                     for iface in data.network_interfaces:
                         ifname = iface.get("interface", "")
                         prev = self._prev_interface_bytes.get(ifname, {})
-                        for key, rate_key in (("rx_bytes", "rx_rate"), ("tx_bytes", "tx_rate")):
+                        for key, rate_key in (
+                            ("rx_bytes", "rx_rate"),
+                            ("tx_bytes", "tx_rate"),
+                        ):
                             curr = iface.get(key) or 0
                             prev_val = prev.get(key, 0) or 0
                             delta = curr - prev_val
-                            iface[rate_key] = round(max(0, delta) / elapsed, 2) if delta >= 0 else 0
+                            iface[rate_key] = (
+                                round(max(0, delta) / elapsed, 2) if delta >= 0 else 0
+                            )
             self._prev_poll_time = poll_now
             # Rebuild from current interfaces only — removes stale entries for
             # interfaces that no longer exist (tunnels, temporary VLANs, etc.)
@@ -565,7 +598,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 try:
                     data.services = await self.api.get_services(names=DEFAULT_SERVICES)
                 except Exception as err:  # noqa: BLE001
-                    _LOGGER.debug("Error fetching service status on first poll: %s", err)
+                    _LOGGER.debug(
+                        "Error fetching service status on first poll: %s", err
+                    )
                     data.services = []
 
             # Carry forward features from the previous cycle.
@@ -603,9 +638,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 self.data.error_type = ERROR_TYPE_CONNECTION
                 self.data.consecutive_failures += 1
                 await self._maybe_send_outage_notification()
-            raise UpdateFailed(
-                f"Cannot connect to OpenWrt router: {err}"
-            ) from err
+            raise UpdateFailed(f"Cannot connect to OpenWrt router: {err}") from err
 
         except OpenWrtTimeoutError as err:
             self._consecutive_auth_failures = 0
@@ -613,9 +646,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 self.data.error_type = ERROR_TYPE_TIMEOUT
                 self.data.consecutive_failures += 1
                 await self._maybe_send_outage_notification()
-            raise UpdateFailed(
-                f"OpenWrt router request timed out: {err}"
-            ) from err
+            raise UpdateFailed(f"OpenWrt router request timed out: {err}") from err
 
         except OpenWrtResponseError as err:
             self._consecutive_auth_failures = 0
@@ -646,6 +677,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         if self.api.uses_ssh_fallback and not self._ssh_fallback_notified:
             self._ssh_fallback_notified = True
             from homeassistant.components.persistent_notification import async_create
+
             async_create(
                 self.hass,
                 (
@@ -678,14 +710,18 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             self.update_interval = throttled_interval
             _LOGGER.warning(
                 "%s: CPU load %.0f%% — reducing poll frequency to %ds",
-                self.name, cpu, SCAN_INTERVAL_SECONDS * 2,
+                self.name,
+                cpu,
+                SCAN_INTERVAL_SECONDS * 2,
             )
         elif self._throttled and cpu < 80:
             self._throttled = False
             self.update_interval = normal_interval
             _LOGGER.info(
                 "%s: CPU load %.0f%% — restoring normal poll frequency (%ds)",
-                self.name, cpu, SCAN_INTERVAL_SECONDS,
+                self.name,
+                cpu,
+                SCAN_INTERVAL_SECONDS,
             )
 
         return data
@@ -710,6 +746,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             ERROR_TYPE_RESPONSE: "Ungültige Antwort",
         }.get(self.data.error_type or "", "Unbekannter Fehler")
         from homeassistant.components.persistent_notification import async_create
+
         async_create(
             self.hass,
             message=(
@@ -723,14 +760,19 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self.data.notification_sent = True
         _LOGGER.warning(
             "Router %s unreachable after %d consecutive failures (%s)",
-            title, self.data.consecutive_failures, self.data.error_type,
+            title,
+            self.data.consecutive_failures,
+            self.data.error_type,
         )
 
-    async def _maybe_clear_outage_notification(self, data: OpenWrtCoordinatorData) -> None:
+    async def _maybe_clear_outage_notification(
+        self, data: OpenWrtCoordinatorData
+    ) -> None:
         """Dismiss the outage notification when the router comes back online."""
         if not data.notification_sent:
             return
         from homeassistant.components.persistent_notification import async_dismiss
+
         async_dismiss(
             self.hass,
             f"openwrt_router_outage_{self._entry.entry_id if self._entry else DOMAIN}",
@@ -747,36 +789,53 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         ts = int(time.time())
 
         # WAN connect / disconnect
-        if self._prev_wan_connected is not None and data.wan_connected != self._prev_wan_connected:
+        if (
+            self._prev_wan_connected is not None
+            and data.wan_connected != self._prev_wan_connected
+        ):
             if data.wan_connected:
-                self._event_history.appendleft({
-                    "ts": ts, "type": "info",
-                    "message": "WAN verbunden",
-                    "detail": data.wan_status.get("ipv4_address") or data.wan_status.get("address") or "",
-                })
+                self._event_history.appendleft(
+                    {
+                        "ts": ts,
+                        "type": "info",
+                        "message": "WAN verbunden",
+                        "detail": data.wan_status.get("ipv4_address")
+                        or data.wan_status.get("address")
+                        or "",
+                    }
+                )
             else:
-                self._event_history.appendleft({
-                    "ts": ts, "type": "error",
-                    "message": "WAN getrennt",
-                })
+                self._event_history.appendleft(
+                    {
+                        "ts": ts,
+                        "type": "error",
+                        "message": "WAN getrennt",
+                    }
+                )
         self._prev_wan_connected = data.wan_connected
 
         # CPU spike (>= 80%) / recovery (< 65%)
         cpu = data.cpu_load
         if not self._cpu_warn_active and cpu >= 80:
             self._cpu_warn_active = True
-            self._event_history.appendleft({
-                "ts": ts, "type": "warn",
-                "message": "CPU-Last erhöht",
-                "detail": f"{cpu:.0f}%",
-            })
+            self._event_history.appendleft(
+                {
+                    "ts": ts,
+                    "type": "warn",
+                    "message": "CPU-Last erhöht",
+                    "detail": f"{cpu:.0f}%",
+                }
+            )
         elif self._cpu_warn_active and cpu < 65:
             self._cpu_warn_active = False
-            self._event_history.appendleft({
-                "ts": ts, "type": "info",
-                "message": "CPU-Last normalisiert",
-                "detail": f"{cpu:.0f}%",
-            })
+            self._event_history.appendleft(
+                {
+                    "ts": ts,
+                    "type": "info",
+                    "message": "CPU-Last normalisiert",
+                    "detail": f"{cpu:.0f}%",
+                }
+            )
 
         # Memory spike (>= 90%) / recovery (< 80%)
         # Use effective pressure: exclude reclaimable kernel buffers so a
@@ -785,21 +844,31 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         mem_total = data.memory.get("total", 0) or 0
         mem_free = data.memory.get("free", 0) or 0
         mem_buffered = data.memory.get("buffered", 0) or 0
-        mem_pct = round(100 * (mem_total - mem_free - mem_buffered) / mem_total) if mem_total > 0 else 0
+        mem_pct = (
+            round(100 * (mem_total - mem_free - mem_buffered) / mem_total)
+            if mem_total > 0
+            else 0
+        )
         if not self._mem_warn_active and mem_pct >= 90:
             self._mem_warn_active = True
-            self._event_history.appendleft({
-                "ts": ts, "type": "warn",
-                "message": "RAM-Auslastung erhöht",
-                "detail": f"{mem_pct}%",
-            })
+            self._event_history.appendleft(
+                {
+                    "ts": ts,
+                    "type": "warn",
+                    "message": "RAM-Auslastung erhöht",
+                    "detail": f"{mem_pct}%",
+                }
+            )
         elif self._mem_warn_active and mem_pct < 80:
             self._mem_warn_active = False
-            self._event_history.appendleft({
-                "ts": ts, "type": "info",
-                "message": "RAM-Auslastung normalisiert",
-                "detail": f"{mem_pct}%",
-            })
+            self._event_history.appendleft(
+                {
+                    "ts": ts,
+                    "type": "info",
+                    "message": "RAM-Auslastung normalisiert",
+                    "detail": f"{mem_pct}%",
+                }
+            )
 
         data.events = list(self._event_history)
 

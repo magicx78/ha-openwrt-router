@@ -35,7 +35,9 @@ class OpenWrtBinarySensorEntityDescription(BinarySensorEntityDescription):
 
     # Receives the full coordinator (not just data) so it can read last_update_success
     value_fn: Callable[[OpenWrtCoordinator], bool] = field(default=lambda c: False)
-    attr_fn: Callable[[OpenWrtCoordinator], dict[str, Any]] = field(default=lambda c: {})
+    attr_fn: Callable[[OpenWrtCoordinator], dict[str, Any]] = field(
+        default=lambda c: {}
+    )
     # If True the sensor is always available (even when router is down)
     always_available: bool = False
 
@@ -54,7 +56,9 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[OpenWrtBinarySensorEntityDescription, ...] = (
                 if coord.data and coord.data.last_seen
                 else None
             ),
-            "consecutive_failures": coord.data.consecutive_failures if coord.data else 0,
+            "consecutive_failures": coord.data.consecutive_failures
+            if coord.data
+            else 0,
             "error_type": coord.data.error_type if coord.data else None,
         },
     ),
@@ -66,16 +70,8 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[OpenWrtBinarySensorEntityDescription, ...] = (
         always_available=False,
         value_fn=lambda coord: bool(coord.data and coord.data.wan_connected),
         attr_fn=lambda coord: {
-            "ip_address": (
-                coord.data.wan_status.get("ipv4", "")
-                if coord.data
-                else ""
-            ),
-            "protocol": (
-                coord.data.wan_status.get("proto", "")
-                if coord.data
-                else ""
-            ),
+            "ip_address": (coord.data.wan_status.get("ipv4", "") if coord.data else ""),
+            "protocol": (coord.data.wan_status.get("proto", "") if coord.data else ""),
         },
     ),
 )

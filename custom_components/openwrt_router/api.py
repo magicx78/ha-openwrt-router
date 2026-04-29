@@ -192,7 +192,9 @@ def _parse_port_speed(raw: Any) -> tuple[int | None, str | None]:
         return None, None
     if isinstance(raw, str) and raw:
         duplex_char = raw[-1].upper()
-        duplex = "full" if duplex_char == "F" else ("half" if duplex_char == "H" else None)
+        duplex = (
+            "full" if duplex_char == "F" else ("half" if duplex_char == "H" else None)
+        )
         num_part = raw.rstrip("FfHh")
         try:
             mbps = int(num_part)
@@ -239,14 +241,16 @@ def _parse_ip_addr_output(output: str) -> list[dict[str, Any]]:
                     except ValueError:
                         pass
                 break
-        out.append({
-            "interface": iface,
-            "rx_bytes": 0,
-            "tx_bytes": 0,
-            "status": "up" if iface in up_ifaces else "down",
-            "ipv4_addr": ipv4_addr,
-            "prefix_len": prefix_len,
-        })
+        out.append(
+            {
+                "interface": iface,
+                "rx_bytes": 0,
+                "tx_bytes": 0,
+                "status": "up" if iface in up_ifaces else "down",
+                "ipv4_addr": ipv4_addr,
+                "prefix_len": prefix_len,
+            }
+        )
     return out
 
 
@@ -459,7 +463,7 @@ class OpenWrtAPI:
             _LOGGER.warning(
                 "Could not authenticate (rpcd may have restricted ACL): %s. "
                 "Will attempt to use default session. Some features may be unavailable.",
-                err
+                err,
             )
             # Continue anyway – some routers have public read-only APIs
 
@@ -473,27 +477,31 @@ class OpenWrtAPI:
         """
         results: dict[str, bool] = {}
 
-        async def _probe(namespace: str, method: str, params: dict | None = None) -> bool:
+        async def _probe(
+            namespace: str, method: str, params: dict | None = None
+        ) -> bool:
             try:
                 await self._call(namespace, method, params or {})
                 return True
             except Exception:  # noqa: BLE001
                 return False
 
-        results["system_info"]      = await _probe("system", "info")
+        results["system_info"] = await _probe("system", "info")
         results["network_wireless"] = await _probe("network.wireless", "status")
-        results["network_dump"]     = await _probe("network.interface", "dump")
-        results["file_read"]        = await _probe("file", "read", {"path": "/etc/openwrt_release"})
-        results["file_list"]        = await _probe("file", "list", {"path": "/sys/class/net"})
-        results["luci_rpc_dhcp"]    = await _probe("luci-rpc", "getDHCPLeases")
-        results["iwinfo"]           = await _probe("iwinfo", "devices")
-        results["uci_get"]          = await _probe("uci", "get", {"config": "system"})
+        results["network_dump"] = await _probe("network.interface", "dump")
+        results["file_read"] = await _probe(
+            "file", "read", {"path": "/etc/openwrt_release"}
+        )
+        results["file_list"] = await _probe("file", "list", {"path": "/sys/class/net"})
+        results["luci_rpc_dhcp"] = await _probe("luci-rpc", "getDHCPLeases")
+        results["iwinfo"] = await _probe("iwinfo", "devices")
+        results["uci_get"] = await _probe("uci", "get", {"config": "system"})
 
         # hostapd: try first known interface name, accept any success
         hostapd_ok = await _probe("hostapd.phy0-ap0", "get_clients")
         if not hostapd_ok:
             hostapd_ok = await _probe("hostapd.phy1-ap0", "get_clients")
-        results["hostapd_clients"]  = hostapd_ok
+        results["hostapd_clients"] = hostapd_ok
 
         return results
 
@@ -619,7 +627,11 @@ class OpenWrtAPI:
         """
         try:
             result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_INFO, {})
-        except (OpenWrtMethodNotFoundError, OpenWrtAuthError, OpenWrtResponseError) as err:
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+            OpenWrtResponseError,
+        ) as err:
             # Access denied – try SSH fallback
             err_str = str(err).lower()
             if "access denied" in err_str or "permission" in err_str:
@@ -647,8 +659,12 @@ class OpenWrtAPI:
         raw_load: list[int] = result.get("load", [0, 0, 0])
         # OpenWrt encodes load averages as integer * 65536
         cpu_load = round(raw_load[0] / 65536 * 100, 1) if raw_load else 0.0
-        cpu_load_5min = round(raw_load[1] / 65536 * 100, 1) if len(raw_load) > 1 else 0.0
-        cpu_load_15min = round(raw_load[2] / 65536 * 100, 1) if len(raw_load) > 2 else 0.0
+        cpu_load_5min = (
+            round(raw_load[1] / 65536 * 100, 1) if len(raw_load) > 1 else 0.0
+        )
+        cpu_load_15min = (
+            round(raw_load[2] / 65536 * 100, 1) if len(raw_load) > 2 else 0.0
+        )
 
         return {
             "uptime": result.get("uptime", 0),
@@ -679,7 +695,11 @@ class OpenWrtAPI:
         # Get basic network status
         try:
             result = await self._call(UBUS_NETWORK_OBJECT, UBUS_NETWORK_DUMP, {})
-        except (OpenWrtMethodNotFoundError, OpenWrtAuthError, OpenWrtResponseError) as err:
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+            OpenWrtResponseError,
+        ) as err:
             # ubus blocked – try SSH fallback
             err_str = str(err).lower()
             if "access denied" in err_str or "permission" in err_str:
@@ -748,9 +768,13 @@ class OpenWrtAPI:
             tx_result = await self._call("file", "read", {"path": tx_path})
 
             if rx_result:
-                rx_bytes = int(rx_result.strip()) if isinstance(rx_result, str) else None
+                rx_bytes = (
+                    int(rx_result.strip()) if isinstance(rx_result, str) else None
+                )
             if tx_result:
-                tx_bytes = int(tx_result.strip()) if isinstance(tx_result, str) else None
+                tx_bytes = (
+                    int(tx_result.strip()) if isinstance(tx_result, str) else None
+                )
         except Exception:
             pass
 
@@ -758,8 +782,13 @@ class OpenWrtAPI:
         if rx_bytes is None and self._password:
             try:
                 ssh_cmd = [
-                    "sshpass", "-e",
-                    "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                    "sshpass",
+                    "-e",
+                    "ssh",
+                    "-o",
+                    "StrictHostKeyChecking=no",
+                    "-o",
+                    "UserKnownHostsFile=/dev/null",
                     f"{self._username}@{self._host}",
                     f"cat /sys/class/net/{iface_name}/statistics/rx_bytes"
                     f" /sys/class/net/{iface_name}/statistics/tx_bytes",
@@ -809,7 +838,9 @@ class OpenWrtAPI:
             return []
         if self._wifi_method == "wireless":
             try:
-                result = await self._call(UBUS_WIRELESS_OBJECT, UBUS_WIRELESS_STATUS, {})
+                result = await self._call(
+                    UBUS_WIRELESS_OBJECT, UBUS_WIRELESS_STATUS, {}
+                )
                 parsed = self._parse_wireless_status(result)
                 if parsed:
                     return parsed
@@ -841,7 +872,9 @@ class OpenWrtAPI:
                 "network.wireless/status returned empty result, falling back to iwinfo"
             )
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-            _LOGGER.debug("network.wireless/status not available, falling back to iwinfo")
+            _LOGGER.debug(
+                "network.wireless/status not available, falling back to iwinfo"
+            )
 
         try:
             result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
@@ -931,8 +964,12 @@ class OpenWrtAPI:
             )
             _LOGGER.debug(
                 "AP interface %s: mode=%s ch=%s freq=%s hwmode=%s htmode=%s",
-                ifname, info.get("mode"), info.get("channel"),
-                info.get("frequency"), info.get("hwmode"), info.get("htmode"),
+                ifname,
+                info.get("mode"),
+                info.get("channel"),
+                info.get("frequency"),
+                info.get("hwmode"),
+                info.get("htmode"),
             )
 
         if result:
@@ -944,7 +981,9 @@ class OpenWrtAPI:
             try:
                 values = await self.get_uci_wireless()
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-                _LOGGER.debug("UCI wireless config unavailable for AP interface details")
+                _LOGGER.debug(
+                    "UCI wireless config unavailable for AP interface details"
+                )
                 return []
 
             devices: dict[str, dict[str, Any]] = {}
@@ -959,7 +998,9 @@ class OpenWrtAPI:
                         (section_data.get(".index", 0), section_name, section_data)
                     )
 
-            for _index, section_name, section_data in sorted(ifaces, key=lambda t: t[0]):
+            for _index, section_name, section_data in sorted(
+                ifaces, key=lambda t: t[0]
+            ):
                 device_name: str = section_data.get("device", "")
                 device_data = devices.get(device_name, {})
                 ssid_uci: str = section_data.get("ssid", "")
@@ -983,7 +1024,8 @@ class OpenWrtAPI:
                         RADIO_KEY_FREQUENCY: None,
                         RADIO_KEY_TXPOWER: None,
                         RADIO_KEY_BITRATE: None,
-                        RADIO_KEY_HWMODE: device_data.get("hwmode") or device_data.get("type"),
+                        RADIO_KEY_HWMODE: device_data.get("hwmode")
+                        or device_data.get("type"),
                         RADIO_KEY_HTMODE: device_data.get("htmode"),
                         "signal": None,
                         "noise": None,
@@ -993,8 +1035,11 @@ class OpenWrtAPI:
                 )
                 _LOGGER.debug(
                     "AP UCI interface %s: mode=%s ch=%s htmode=%s band=%s",
-                    section_name, mode_uci, channel_val,
-                    device_data.get("htmode"), band_uci,
+                    section_name,
+                    mode_uci,
+                    channel_val,
+                    device_data.get("htmode"),
+                    band_uci,
                 )
 
         return result
@@ -1023,18 +1068,20 @@ class OpenWrtAPI:
             on full detection failure.
         """
         sta_modes = {
-            "sta", "client", "station",
-            "wds-sta", "wds_sta",
-            "mesh", "mesh point",
+            "sta",
+            "client",
+            "station",
+            "wds-sta",
+            "wds_sta",
+            "mesh",
+            "mesh point",
         }
         result: list[dict[str, Any]] = []
 
         # --- Step 1: iwinfo enumeration ----------------------------------
         candidates: list[tuple[str, dict[str, Any]]] = []
         try:
-            info_all = await self._call(
-                UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {}
-            )
+            info_all = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
             if isinstance(info_all, dict):
                 for ifname, iface_data in info_all.items():
                     if not isinstance(iface_data, dict):
@@ -1055,14 +1102,16 @@ class OpenWrtAPI:
                     own_mac = (dev.get("macaddr") or "").upper()
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                 pass
-            result.append({
-                "ifname": ifname,
-                "mode": iface_data.get("mode"),
-                "ssid": iface_data.get("ssid", ""),
-                "bssid": (iface_data.get("bssid") or "").upper(),
-                "mac": own_mac,
-                "signal": iface_data.get("signal"),
-            })
+            result.append(
+                {
+                    "ifname": ifname,
+                    "mode": iface_data.get("mode"),
+                    "ssid": iface_data.get("ssid", ""),
+                    "bssid": (iface_data.get("bssid") or "").upper(),
+                    "mac": own_mac,
+                    "signal": iface_data.get("signal"),
+                }
+            )
 
         if result:
             _LOGGER.debug(
@@ -1086,14 +1135,16 @@ class OpenWrtAPI:
             mode_uci = (section_data.get("mode") or "").lower()
             if mode_uci not in sta_modes:
                 continue
-            result.append({
-                "ifname": section_name,
-                "mode": mode_uci,
-                "ssid": section_data.get("ssid", ""),
-                "bssid": (section_data.get("bssid") or "").upper(),
-                "mac": "",
-                "signal": None,
-            })
+            result.append(
+                {
+                    "ifname": section_name,
+                    "mode": mode_uci,
+                    "ssid": section_data.get("ssid", ""),
+                    "bssid": (section_data.get("bssid") or "").upper(),
+                    "mac": "",
+                    "signal": None,
+                }
+            )
         if result:
             _LOGGER.debug(
                 "STA interfaces (UCI fallback): %s",
@@ -1165,19 +1216,26 @@ class OpenWrtAPI:
                         found.append(candidate)
                         # Get SSID while we're here
                         try:
-                            status = await self._call(f"hostapd.{candidate}", "get_status", {})
+                            status = await self._call(
+                                f"hostapd.{candidate}", "get_status", {}
+                            )
                             ssid = status.get("ssid", "")
                             if ssid:
                                 ifname_to_ssid[candidate] = ssid
                         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                             pass
-                    except (OpenWrtMethodNotFoundError, OpenWrtResponseError) as probe_err:
+                    except (
+                        OpenWrtMethodNotFoundError,
+                        OpenWrtResponseError,
+                    ) as probe_err:
                         # Distinguish ACL-blocked (object exists) from not-found
                         if "access denied" in str(probe_err).lower():
                             acl_blocked_candidates.append(candidate)
                 if found:
                     hostapd_ifnames = found
-                    _LOGGER.debug("Discovered hostapd interfaces via probing: %s", found)
+                    _LOGGER.debug(
+                        "Discovered hostapd interfaces via probing: %s", found
+                    )
                 elif acl_blocked_candidates:
                     # rpcd ACL blocks get_clients — interface names are still valid,
                     # use SSH to fetch client data each poll.
@@ -1195,7 +1253,8 @@ class OpenWrtAPI:
                 hostapd_ifnames = [k for k in ifname_to_ssid if k]
                 if hostapd_ifnames:
                     _LOGGER.debug(
-                        "Using UCI radio ifnames as hostapd candidates: %s", hostapd_ifnames
+                        "Using UCI radio ifnames as hostapd candidates: %s",
+                        hostapd_ifnames,
                     )
 
             # Cache the result (even if empty) to avoid re-probing every poll
@@ -1215,7 +1274,9 @@ class OpenWrtAPI:
                 pass
             # Fallback: iwinfo/info
             try:
-                info = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {"device": ifname})
+                info = await self._call(
+                    UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {"device": ifname}
+                )
                 ifname_to_ssid[ifname] = info.get("ssid", "")
                 continue
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
@@ -1228,7 +1289,9 @@ class OpenWrtAPI:
         if self._hostapd_acl_blocked and hostapd_ifnames:
             self._ssh_fallback_used = True
             try:
-                ssh_clients = await self._get_clients_via_ssh(hostapd_ifnames, ifname_to_ssid, leases)
+                ssh_clients = await self._get_clients_via_ssh(
+                    hostapd_ifnames, ifname_to_ssid, leases
+                )
                 if ssh_clients is not None:
                     return ssh_clients
             except Exception as ssh_err:
@@ -1259,13 +1322,17 @@ class OpenWrtAPI:
                             CLIENT_KEY_SSID: ssid,
                             CLIENT_KEY_RADIO: ifname,
                             CLIENT_KEY_CONNECTED_SINCE: connected_time,
-                            "rx_bytes": (sta.get("bytes") or {}).get("rx") or sta.get("rx_bytes"),
-                            "tx_bytes": (sta.get("bytes") or {}).get("tx") or sta.get("tx_bytes"),
+                            "rx_bytes": (sta.get("bytes") or {}).get("rx")
+                            or sta.get("rx_bytes"),
+                            "tx_bytes": (sta.get("bytes") or {}).get("tx")
+                            or sta.get("tx_bytes"),
                         }
                     )
                 _LOGGER.debug(
                     "hostapd.%s/get_clients: %d clients (ssid=%s)",
-                    ifname, len(hostapd_clients), ssid,
+                    ifname,
+                    len(hostapd_clients),
+                    ssid,
                 )
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                 # Fallback: iwinfo/assoclist for this interface
@@ -1319,7 +1386,10 @@ class OpenWrtAPI:
         disabled_value = "0" if enabled else "1"
         action = "enable" if enabled else "disable"
         _LOGGER.info(
-            "Setting WiFi section %s %s (disabled=%s)", uci_section, action, disabled_value
+            "Setting WiFi section %s %s (disabled=%s)",
+            uci_section,
+            action,
+            disabled_value,
         )
 
         # Step 1: Stage UCI change
@@ -1336,7 +1406,9 @@ class OpenWrtAPI:
                 },
             )
             staged = True
-            _LOGGER.debug("UCI set staged for %s (disabled=%s)", uci_section, disabled_value)
+            _LOGGER.debug(
+                "UCI set staged for %s (disabled=%s)", uci_section, disabled_value
+            )
         except (
             OpenWrtMethodNotFoundError,
             OpenWrtResponseError,
@@ -1349,7 +1421,9 @@ class OpenWrtAPI:
         # Step 2: Commit — or try alternative apply paths
         if staged:
             try:
-                await self._call(UBUS_UCI_OBJECT, UBUS_UCI_COMMIT, {"config": "wireless"})
+                await self._call(
+                    UBUS_UCI_OBJECT, UBUS_UCI_COMMIT, {"config": "wireless"}
+                )
                 _LOGGER.debug("UCI commit successful")
                 await self.reload_wifi()
                 _LOGGER.info("WiFi section %s %s successfully", uci_section, action)
@@ -1362,10 +1436,15 @@ class OpenWrtAPI:
                 OpenWrtConnectionError,
             ) as commit_err:
                 err_str = str(commit_err).lower()
-                if isinstance(commit_err, OpenWrtAuthError) or "access denied" in err_str or "permission" in err_str:
+                if (
+                    isinstance(commit_err, OpenWrtAuthError)
+                    or "access denied" in err_str
+                    or "permission" in err_str
+                ):
                     _LOGGER.warning(
                         "uci/commit blocked — trying uci/apply fallback for %s: %s",
-                        uci_section, commit_err,
+                        uci_section,
+                        commit_err,
                     )
                     # Fallback 1: uci/apply — same effect as commit but separate ACL entry
                     try:
@@ -1378,7 +1457,12 @@ class OpenWrtAPI:
                             "WiFi section %s %s via uci/apply", uci_section, action
                         )
                         return True
-                    except (OpenWrtMethodNotFoundError, OpenWrtAuthError, OpenWrtResponseError, OpenWrtTimeoutError):
+                    except (
+                        OpenWrtMethodNotFoundError,
+                        OpenWrtAuthError,
+                        OpenWrtResponseError,
+                        OpenWrtTimeoutError,
+                    ):
                         _LOGGER.debug("uci/apply also blocked")
 
                     # Revert the staged-but-uncommitted change to keep router clean
@@ -1392,7 +1476,9 @@ class OpenWrtAPI:
 
                     set_err = commit_err  # surface commit error in final message
                 else:
-                    _LOGGER.error("UCI commit failed for %s: %s", uci_section, commit_err)
+                    _LOGGER.error(
+                        "UCI commit failed for %s: %s", uci_section, commit_err
+                    )
                     raise OpenWrtResponseError(
                         f"Failed to {action} WiFi section {uci_section}: {commit_err}"
                     ) from commit_err
@@ -1430,7 +1516,14 @@ class OpenWrtAPI:
         Callers MUST spawn the resulting cmd with ``env=self._ssh_env()``.
         """
         target = f"{self._username}@{self._host}"
-        ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=8"]
+        ssh_opts = [
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=8",
+        ]
         if self._ssh_use_key:
             return ["ssh", *ssh_opts, target, remote_cmd]
         return ["sshpass", "-e", "ssh", *ssh_opts, target, remote_cmd]
@@ -1451,8 +1544,14 @@ class OpenWrtAPI:
                     stderr=asyncio.subprocess.PIPE,
                     env=env,
                 )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-                if proc.returncode == 255 and b"Permission denied" in stderr and not self._ssh_use_key:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout
+                )
+                if (
+                    proc.returncode == 255
+                    and b"Permission denied" in stderr
+                    and not self._ssh_use_key
+                ):
                     _LOGGER.debug("SSH password-auth denied, switching to key-auth")
                     self._ssh_use_key = True
                     continue
@@ -1636,10 +1735,13 @@ class OpenWrtAPI:
             "done; echo ']'"
         )
         ssh_cmd = [
-            "sshpass", "-e",
+            "sshpass",
+            "-e",
             "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
             f"{self._username}@{self._host}",
             shell_cmd,
         ]
@@ -1705,7 +1807,8 @@ class OpenWrtAPI:
                 )
         _LOGGER.debug(
             "SSH client fallback: %d clients across %d interfaces",
-            len(clients), len(entries),
+            len(clients),
+            len(entries),
         )
         return clients
 
@@ -1729,14 +1832,16 @@ class OpenWrtAPI:
 
         # Build a shell one-liner: print a marker before each iface then dump stations.
         iface_cmds = "; ".join(
-            f"echo '=== {i} ==='; iw dev {i} station dump 2>/dev/null"
-            for i in ifnames
+            f"echo '=== {i} ==='; iw dev {i} station dump 2>/dev/null" for i in ifnames
         )
         ssh_cmd = [
-            "sshpass", "-e",
+            "sshpass",
+            "-e",
             "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
             f"{self._username}@{self._host}",
             iface_cmds,
         ]
@@ -1804,7 +1909,8 @@ class OpenWrtAPI:
 
         _LOGGER.debug(
             "SSH iw fallback: %d clients across %d interfaces",
-            len(clients), len(ifnames),
+            len(clients),
+            len(ifnames),
         )
         return clients if clients else None
 
@@ -1941,15 +2047,17 @@ class OpenWrtAPI:
                     is_disabled = attrs.get("disabled", "0") == "1"
                     ssid = attrs.get("ssid", "")
                     is_guest = "guest" in uci_section.lower() or "guest" in ssid.lower()
-                    radios.append({
-                        RADIO_KEY_NAME: radio_name,
-                        RADIO_KEY_BAND: band,
-                        RADIO_KEY_ENABLED: not is_disabled,
-                        RADIO_KEY_SSID: ssid,
-                        RADIO_KEY_IFNAME: uci_section,
-                        RADIO_KEY_UCI_SECTION: uci_section,
-                        RADIO_KEY_IS_GUEST: is_guest,
-                    })
+                    radios.append(
+                        {
+                            RADIO_KEY_NAME: radio_name,
+                            RADIO_KEY_BAND: band,
+                            RADIO_KEY_ENABLED: not is_disabled,
+                            RADIO_KEY_SSID: ssid,
+                            RADIO_KEY_IFNAME: uci_section,
+                            RADIO_KEY_UCI_SECTION: uci_section,
+                            RADIO_KEY_IS_GUEST: is_guest,
+                        }
+                    )
 
             _LOGGER.debug("SSH WiFi status via uci: %d SSIDs found", len(radios))
             return radios
@@ -2032,7 +2140,11 @@ class OpenWrtAPI:
         """
         try:
             result = await self._call("luci-rpc", "getDHCPLeases", {})
-        except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError) as err:
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtResponseError,
+            OpenWrtAuthError,
+        ) as err:
             _LOGGER.debug("luci-rpc/getDHCPLeases also unavailable: %s", err)
             return {}
 
@@ -2086,7 +2198,11 @@ class OpenWrtAPI:
                     "luci-rpc/getWirelessDevices: built ssid map for %d interfaces",
                     len(ssid_map),
                 )
-            except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError) as err:
+            except (
+                OpenWrtMethodNotFoundError,
+                OpenWrtResponseError,
+                OpenWrtAuthError,
+            ) as err:
                 _LOGGER.debug("luci-rpc/getWirelessDevices unavailable: %s", err)
             self._luci_rpc_ssid_map = ssid_map
 
@@ -2134,9 +2250,7 @@ class OpenWrtAPI:
 
         # Check UCI availability
         try:
-            await self._call(
-                UBUS_UCI_OBJECT, UBUS_UCI_GET, {"config": "wireless"}
-            )
+            await self._call(UBUS_UCI_OBJECT, UBUS_UCI_GET, {"config": "wireless"})
             features["uci_available"] = True
             _LOGGER.debug("Feature detected: UCI available")
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
@@ -2146,7 +2260,9 @@ class OpenWrtAPI:
         try:
             # We don't actually reload, just probe using a no-op UCI get
             # Real check: see if the object exists via a safe call
-            features["network_reload"] = True  # assume available; fail gracefully at runtime
+            features["network_reload"] = (
+                True  # assume available; fail gracefully at runtime
+            )
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
             pass
 
@@ -2168,7 +2284,9 @@ class OpenWrtAPI:
             try:
                 await self._call("luci-rpc", "getDHCPLeases", {})
                 features["dhcp_leases"] = True
-                _LOGGER.debug("Feature detected: DHCP leases via luci-rpc/getDHCPLeases")
+                _LOGGER.debug(
+                    "Feature detected: DHCP leases via luci-rpc/getDHCPLeases"
+                )
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError):
                 pass
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
@@ -2179,7 +2297,9 @@ class OpenWrtAPI:
             try:
                 await self._call("luci-rpc", "getDHCPLeases", {})
                 features["dhcp_leases"] = True
-                _LOGGER.debug("Feature detected: DHCP leases via luci-rpc/getDHCPLeases")
+                _LOGGER.debug(
+                    "Feature detected: DHCP leases via luci-rpc/getDHCPLeases"
+                )
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError):
                 pass
 
@@ -2310,7 +2430,11 @@ class OpenWrtAPI:
                 "mounts": mounts_data,
             }
 
-        except (OpenWrtResponseError, OpenWrtMethodNotFoundError, OpenWrtTimeoutError) as err:
+        except (
+            OpenWrtResponseError,
+            OpenWrtMethodNotFoundError,
+            OpenWrtTimeoutError,
+        ) as err:
             _LOGGER.debug("Could not fetch disk space stats: %s", err)
             return self._default_disk_space()
 
@@ -2339,7 +2463,9 @@ class OpenWrtAPI:
             }
         """
         try:
-            result = await self._call_file_read_shell("df -B 1048576 -t tmpfs", "tmpfs_stats")
+            result = await self._call_file_read_shell(
+                "df -B 1048576 -t tmpfs", "tmpfs_stats"
+            )
 
             if not result or not result.get("stdout"):
                 return self._default_tmpfs()
@@ -2361,13 +2487,17 @@ class OpenWrtAPI:
                     used_mb = float(parts[2])
                     free_mb = float(parts[3])
 
-                    tmpfs_mounts.append({
-                        "mount": mount,
-                        "total_mb": round(size_mb, 1),
-                        "used_mb": round(used_mb, 1),
-                        "free_mb": round(free_mb, 1),
-                        "usage_percent": round((used_mb / size_mb * 100) if size_mb > 0 else 0.0, 1),
-                    })
+                    tmpfs_mounts.append(
+                        {
+                            "mount": mount,
+                            "total_mb": round(size_mb, 1),
+                            "used_mb": round(used_mb, 1),
+                            "free_mb": round(free_mb, 1),
+                            "usage_percent": round(
+                                (used_mb / size_mb * 100) if size_mb > 0 else 0.0, 1
+                            ),
+                        }
+                    )
 
                     total_mb += size_mb
                     total_used_mb += used_mb
@@ -2390,7 +2520,11 @@ class OpenWrtAPI:
                 "mounts": tmpfs_mounts,
             }
 
-        except (OpenWrtResponseError, OpenWrtMethodNotFoundError, OpenWrtTimeoutError) as err:
+        except (
+            OpenWrtResponseError,
+            OpenWrtMethodNotFoundError,
+            OpenWrtTimeoutError,
+        ) as err:
             _LOGGER.debug("Could not fetch tmpfs stats: %s", err)
             return self._default_tmpfs()
 
@@ -2400,9 +2534,17 @@ class OpenWrtAPI:
 
     def _default_tmpfs(self) -> dict[str, Any]:
         """Return default empty tmpfs dict."""
-        return {"total_mb": 0.0, "used_mb": 0.0, "free_mb": 0.0, "usage_percent": 0.0, "mounts": []}
+        return {
+            "total_mb": 0.0,
+            "used_mb": 0.0,
+            "free_mb": 0.0,
+            "usage_percent": 0.0,
+            "mounts": [],
+        }
 
-    async def _call_file_read_shell(self, command: str, cache_key: str) -> dict[str, Any]:
+    async def _call_file_read_shell(
+        self, command: str, cache_key: str
+    ) -> dict[str, Any]:
         """Execute shell command via rpcd and return stdout/stderr.
 
         For now, this is a placeholder that attempts to read from /tmp cache files
@@ -2445,29 +2587,43 @@ class OpenWrtAPI:
                 first_ipv4 = ipv4_list[0] if ipv4_list else {}
                 # Use l3_device (e.g. "br-lan.10") for VLAN detection;
                 # fall back to logical name (e.g. "lan") if l3_device absent.
-                l3_device: str = iface.get("l3_device", "") or iface.get("interface", "")
-                out.append({
-                    "interface": l3_device,
-                    "logical_name": iface.get("interface", ""),
-                    "rx_bytes": iface.get("statistics", {}).get("rx_bytes", 0),
-                    "tx_bytes": iface.get("statistics", {}).get("tx_bytes", 0),
-                    "status": "up" if iface.get("up") else "down",
-                    "ipv4_addr": first_ipv4.get("address"),
-                    "prefix_len": first_ipv4.get("mask"),
-                })
+                l3_device: str = iface.get("l3_device", "") or iface.get(
+                    "interface", ""
+                )
+                out.append(
+                    {
+                        "interface": l3_device,
+                        "logical_name": iface.get("interface", ""),
+                        "rx_bytes": iface.get("statistics", {}).get("rx_bytes", 0),
+                        "tx_bytes": iface.get("statistics", {}).get("tx_bytes", 0),
+                        "status": "up" if iface.get("up") else "down",
+                        "ipv4_addr": first_ipv4.get("address"),
+                        "prefix_len": first_ipv4.get("mask"),
+                    }
+                )
             return out
-        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
-            _LOGGER.debug("network.interface/dump failed: %s — trying SSH fallback", err)
+        except (
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+        ) as err:
+            _LOGGER.debug(
+                "network.interface/dump failed: %s — trying SSH fallback", err
+            )
             self._ssh_fallback_used = True
             return await self._get_network_interfaces_ssh()
 
     async def _get_network_interfaces_ssh(self) -> list[dict[str, Any]]:
         """SSH fallback: parse 'ip -o addr show' for interface and VLAN data."""
         ssh_cmd = [
-            "sshpass", "-e",
+            "sshpass",
+            "-e",
             "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
             f"{self._username}@{self._host}",
             "ip -o addr show; ip link show",
         ]
@@ -2517,7 +2673,11 @@ class OpenWrtAPI:
         """
         try:
             result = await self._call(UBUS_DEVICE_OBJECT, UBUS_DEVICE_STATUS, {})
-        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError) as err:
+        except (
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+            OpenWrtMethodNotFoundError,
+        ) as err:
             _LOGGER.debug("Port stats unavailable (network.device ACL?): %s", err)
             return []
 
@@ -2526,11 +2686,7 @@ class OpenWrtAPI:
             if not isinstance(dev, dict):
                 continue
             # Skip bridges, loopback, VLAN sub-interfaces, and tagged interfaces
-            if (
-                name.startswith(("br-", "lo"))
-                or "@" in name
-                or "." in name
-            ):
+            if name.startswith(("br-", "lo")) or "@" in name or "." in name:
                 continue
             # Include ethernet and DSA switch ports; skip wifi, tun, etc.
             if dev.get("devtype") not in ("ethernet", "dsa", None):
@@ -2540,16 +2696,18 @@ class OpenWrtAPI:
             speed_mbps, duplex = _parse_port_speed(raw_speed)
 
             stats = dev.get("statistics", {})
-            ports.append({
-                "name": name,
-                "up": bool(dev.get("up", False)),
-                "speed_mbps": speed_mbps,
-                "duplex": duplex,
-                "rx_bytes": int(stats.get("rx_bytes", 0)),
-                "tx_bytes": int(stats.get("tx_bytes", 0)),
-                "rx_packets": int(stats.get("rx_packets", 0)),
-                "tx_packets": int(stats.get("tx_packets", 0)),
-            })
+            ports.append(
+                {
+                    "name": name,
+                    "up": bool(dev.get("up", False)),
+                    "speed_mbps": speed_mbps,
+                    "duplex": duplex,
+                    "rx_bytes": int(stats.get("rx_bytes", 0)),
+                    "tx_bytes": int(stats.get("tx_bytes", 0)),
+                    "rx_packets": int(stats.get("rx_packets", 0)),
+                    "tx_packets": int(stats.get("tx_packets", 0)),
+                }
+            )
 
         ports.sort(key=lambda p: p["name"])
         return ports
@@ -2566,8 +2724,15 @@ class OpenWrtAPI:
             Returns {} on any error (ACL block, UCI unavailable, parse failure).
         """
         try:
-            result = await self._call(UBUS_UCI_OBJECT, UBUS_UCI_GET, {"config": "network"})
-        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
+            result = await self._call(
+                UBUS_UCI_OBJECT, UBUS_UCI_GET, {"config": "network"}
+            )
+        except (
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+        ) as err:
             _LOGGER.debug("Port VLAN map unavailable (UCI): %s", err)
             return {}
 
@@ -2596,7 +2761,9 @@ class OpenWrtAPI:
                         pass
                 if parsed:
                     port_vlan.setdefault(device, [])
-                    port_vlan[device].extend(v for v in parsed if v not in port_vlan[device])
+                    port_vlan[device].extend(
+                        v for v in parsed if v not in port_vlan[device]
+                    )
 
             # Legacy swconfig switch_vlan: ports = "0 1 2t" style string
             elif stype == "switch_vlan":
@@ -2638,22 +2805,29 @@ class OpenWrtAPI:
             {"aa:bb:cc:dd:ee:ff": "lan1", ...}
             Returns {} on total failure.
         """
+
         # Build port_no → interface name map from sysfs (via file/read, no exec)
         async def _get_port_map() -> dict[int, str]:
             port_map: dict[int, str] = {}
             try:
                 # Read bridge members from sysfs — each brport has a port_no file
                 for_result = await self._call(
-                    UBUS_FILE_OBJECT, "list",
+                    UBUS_FILE_OBJECT,
+                    "list",
                     {"path": "/sys/class/net", "depth": 1},
                 )
-                ifaces = [e.get("name", "") for e in for_result.get("entries", []) if e.get("type") == "directory"]
+                ifaces = [
+                    e.get("name", "")
+                    for e in for_result.get("entries", [])
+                    if e.get("type") == "directory"
+                ]
             except Exception:  # noqa: BLE001
                 ifaces = ["lan1", "lan2", "lan3", "lan4", "wan", "eth0", "eth1"]
             for iface in ifaces:
                 try:
                     pno_result = await self._call(
-                        UBUS_FILE_OBJECT, "read",
+                        UBUS_FILE_OBJECT,
+                        "read",
                         {"path": f"/sys/class/net/{iface}/brport/port_no"},
                     )
                     pno_str = (pno_result.get("data") or "").strip()
@@ -2667,17 +2841,19 @@ class OpenWrtAPI:
         try:
             port_no_map = await _get_port_map()
             result = await self._call(
-                UBUS_FILE_OBJECT, "read",
+                UBUS_FILE_OBJECT,
+                "read",
                 {"path": "/sys/class/net/br-lan/brforward"},
             )
             raw = result.get("data", "") or ""
             # brforward is base64-encoded when returned via file/read
             import base64
+
             fdb_bytes = base64.b64decode(raw) if raw else b""
             if fdb_bytes and len(fdb_bytes) % 8 == 0:
                 fdb: dict[str, str] = {}
                 for i in range(len(fdb_bytes) // 8):
-                    chunk = fdb_bytes[i * 8:(i + 1) * 8]
+                    chunk = fdb_bytes[i * 8 : (i + 1) * 8]
                     mac = ":".join(f"{b:02x}" for b in chunk[:6])
                     port_no = chunk[6]
                     iface = port_no_map.get(port_no)
@@ -2686,7 +2862,12 @@ class OpenWrtAPI:
                 if fdb:
                     _LOGGER.debug("Bridge FDB via file/read: %d entries", len(fdb))
                     return fdb
-        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
+        except (
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+        ) as err:
             _LOGGER.debug("Bridge FDB via file/read unavailable: %s", err)
 
         # Method 2: /sys/class/net/br-lan/brforward binary via SSH (no bridge binary)
@@ -2694,7 +2875,7 @@ class OpenWrtAPI:
             port_map_cmd = (
                 "for iface in $(ls /sys/class/net/); do "
                 "  pn=$(cat /sys/class/net/$iface/brport/port_no 2>/dev/null); "
-                "  [ -n \"$pn\" ] && echo \"$pn $iface\"; "
+                '  [ -n "$pn" ] && echo "$pn $iface"; '
                 "done"
             )
             port_out = await self._run_ssh(port_map_cmd)
@@ -2725,7 +2906,7 @@ class OpenWrtAPI:
 
             fdb = {}
             for i in range(len(fdb_bytes) // 8):
-                chunk = fdb_bytes[i * 8:(i + 1) * 8]
+                chunk = fdb_bytes[i * 8 : (i + 1) * 8]
                 mac = ":".join(f"{b:02x}" for b in chunk[:6])
                 port_no = chunk[6]
                 iface = port_no_map.get(port_no)
@@ -2791,7 +2972,8 @@ class OpenWrtAPI:
         # Fast path: single-number file (preferred, much smaller read)
         try:
             result = await self._call(
-                "file", "read",
+                "file",
+                "read",
                 {"path": "/proc/sys/net/netfilter/nf_conntrack_count"},
             )
             data: str = result.get("data", "").strip()
@@ -2803,15 +2985,21 @@ class OpenWrtAPI:
         # Fallback: full conntrack table, count non-empty lines
         try:
             result = await self._call(
-                "file", "read",
+                "file",
+                "read",
                 {"path": "/proc/net/nf_conntrack"},
             )
             data = result.get("data", "")
             if data:
                 return sum(1 for line in data.splitlines() if line.strip())
-        except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError) as err:
+        except (
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+            OpenWrtMethodNotFoundError,
+        ) as err:
             _LOGGER.warning(
-                "Could not read nf_conntrack (module not loaded or ACL blocked): %s", err
+                "Could not read nf_conntrack (module not loaded or ACL blocked): %s",
+                err,
             )
 
         return 0
@@ -2889,7 +3077,9 @@ class OpenWrtAPI:
                 }
 
                 # Categorize: addon packages typically start with "addon-" or "luci-"
-                if package_name.startswith("addon-") or package_name.startswith("luci-"):
+                if package_name.startswith("addon-") or package_name.startswith(
+                    "luci-"
+                ):
                     update_info["category"] = "addon"
                     addon_updates.append(update_info)
                 else:
@@ -2902,9 +3092,7 @@ class OpenWrtAPI:
                 "addons": addon_updates,
             }
         except OpenWrtAuthError:
-            _LOGGER.debug(
-                "Update check failed: permission denied reading opkg data"
-            )
+            _LOGGER.debug("Update check failed: permission denied reading opkg data")
             return {"available": False, "system": [], "addons": []}
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
             _LOGGER.debug("Update check failed: unable to read cached opkg list")
@@ -3020,7 +3208,9 @@ class OpenWrtAPI:
     # Service Management (procd / rc)
     # ------------------------------------------------------------------
 
-    async def get_services(self, names: list[str] | None = None) -> list[dict[str, Any]]:
+    async def get_services(
+        self, names: list[str] | None = None
+    ) -> list[dict[str, Any]]:
         """Return status for OpenWrt system services.
 
         Tries rc/list first (stable across versions), then falls back to
@@ -3055,7 +3245,11 @@ class OpenWrtAPI:
                     if names is not None:
                         services = [s for s in services if s["name"] in names]
                     return services
-        except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError) as err:
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtResponseError,
+            OpenWrtAuthError,
+        ) as err:
             _LOGGER.debug("rc/list not available: %s", err)
 
         # Method 2: procd service/list (OpenWrt 21+/25)
@@ -3082,8 +3276,14 @@ class OpenWrtAPI:
                 if names is not None:
                     services = [s for s in services if s["name"] in names]
                 return services
-        except (OpenWrtMethodNotFoundError, OpenWrtResponseError, OpenWrtAuthError) as err:
-            _LOGGER.warning("Could not fetch service list (rc/list + service/list failed): %s", err)
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtResponseError,
+            OpenWrtAuthError,
+        ) as err:
+            _LOGGER.warning(
+                "Could not fetch service list (rc/list + service/list failed): %s", err
+            )
 
         return services
 
@@ -3315,7 +3515,9 @@ class OpenWrtAPI:
         if status_code == UBUS_STATUS_NO_DATA:
             # Some methods return no data when there are no results (e.g. empty assoclist)
             _LOGGER.debug(
-                "ubus returned NO_DATA for %s/%s – treating as empty", ubus_object, method
+                "ubus returned NO_DATA for %s/%s – treating as empty",
+                ubus_object,
+                method,
             )
             return {}
 
@@ -3327,9 +3529,7 @@ class OpenWrtAPI:
     # Parsing helpers
     # ------------------------------------------------------------------
 
-    def _parse_wireless_status(
-        self, status: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    def _parse_wireless_status(self, status: dict[str, Any]) -> list[dict[str, Any]]:
         """Parse network.wireless/status response into normalised radio list.
 
         The wireless status object is keyed by physical radio name
@@ -3411,9 +3611,7 @@ class OpenWrtAPI:
 
         return radios
 
-    def _parse_uci_wireless(
-        self, values: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    def _parse_uci_wireless(self, values: dict[str, Any]) -> list[dict[str, Any]]:
         """Parse UCI wireless config into a normalised radio list.
 
         The UCI wireless config contains both wifi-device sections (physical
@@ -3594,9 +3792,7 @@ class OpenWrtAPI:
             try:
                 ipaddress.ip_address(ip)
             except ValueError:
-                _LOGGER.debug(
-                    "Skipping DHCP lease line with invalid IP: %r", line
-                )
+                _LOGGER.debug("Skipping DHCP lease line with invalid IP: %r", line)
                 continue
             # L-3: cap hostname to RFC 1035 maximum (253 chars)
             raw_hostname = parts[3] if parts[3] != "*" else ""
@@ -3676,7 +3872,8 @@ class OpenWrtAPI:
             # Read /var/run/ddns/<section>.ip — current IP
             try:
                 ip_result = await self._call(
-                    UBUS_FILE_OBJECT, UBUS_FILE_READ,
+                    UBUS_FILE_OBJECT,
+                    UBUS_FILE_READ,
                     {"path": f"/var/run/ddns/{section_name}.ip"},
                 )
                 ip = (ip_result.get("data", "") or "").strip()
@@ -3687,7 +3884,8 @@ class OpenWrtAPI:
             if ip:
                 try:
                     err_result = await self._call(
-                        UBUS_FILE_OBJECT, UBUS_FILE_READ,
+                        UBUS_FILE_OBJECT,
+                        UBUS_FILE_READ,
                         {"path": f"/var/run/ddns/{section_name}.err"},
                     )
                     err_data = (err_result.get("data", "") or "").strip()
@@ -3701,7 +3899,8 @@ class OpenWrtAPI:
             # Convert to Unix timestamp using uptime_seconds from previous poll.
             try:
                 upd_result = await self._call(
-                    UBUS_FILE_OBJECT, UBUS_FILE_READ,
+                    UBUS_FILE_OBJECT,
+                    UBUS_FILE_READ,
                     {"path": f"/var/run/ddns/{section_name}.update"},
                 )
                 upd_str = (upd_result.get("data", "") or "").strip()

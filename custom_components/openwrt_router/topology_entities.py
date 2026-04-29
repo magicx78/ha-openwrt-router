@@ -68,9 +68,7 @@ def setup_topology_entities(
         OpenWrtTopologyStatusSensor(coordinator, entry),
     ]
     async_add_entities(entities)
-    _LOGGER.debug(
-        "Added topology diagnostic sensors for entry %s", entry.entry_id
-    )
+    _LOGGER.debug("Added topology diagnostic sensors for entry %s", entry.entry_id)
 
 
 class _TopologyEntityBase(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
@@ -98,7 +96,7 @@ class _TopologyEntityBase(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
     def device_info(self) -> DeviceInfo:
         """Group under the router device card."""
         router_info = self.coordinator.router_info
-        release = (router_info.get("release") or {})
+        release = router_info.get("release") or {}
         return DeviceInfo(
             identifiers={(DOMAIN, self._entry.entry_id)},
             name=router_info.get("hostname") or self._entry.title,

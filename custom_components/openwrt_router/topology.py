@@ -105,32 +105,36 @@ def build_topology(
     # 1. Gateway node
     # ------------------------------------------------------------------
     gateway_id = "gateway"
-    hostname = router_info.get("hostname") or router_info.get("system", {}).get("hostname", "OpenWrt")
+    hostname = router_info.get("hostname") or router_info.get("system", {}).get(
+        "hostname", "OpenWrt"
+    )
     model = router_info.get("model") or router_info.get("system", {}).get("model", "")
     release = router_info.get("release", {})
     firmware = release.get("version", "") if isinstance(release, dict) else str(release)
 
     wan_ip = wan_status.get("ipv4", "") or wan_status.get("wan_ip", "")
 
-    nodes.append({
-        "id": gateway_id,
-        "name": hostname,
-        "type": "gateway",
-        "model": model,
-        "firmware": firmware,
-        "ip": wan_ip,
-        "wan_connected": wan_connected,
-        "status": "online",
-        "icon": "mdi:router-wireless",
-        "parent_id": None,
-        "attributes": {},
-    })
+    nodes.append(
+        {
+            "id": gateway_id,
+            "name": hostname,
+            "type": "gateway",
+            "model": model,
+            "firmware": firmware,
+            "ip": wan_ip,
+            "wan_connected": wan_connected,
+            "status": "online",
+            "icon": "mdi:router-wireless",
+            "parent_id": None,
+            "attributes": {},
+        }
+    )
 
     # ------------------------------------------------------------------
     # 2. Build AP interface detail lookup: ifname → detail dict
     # ------------------------------------------------------------------
     ap_detail: dict[str, dict[str, Any]] = {}
-    for ap in (ap_interfaces or []):
+    for ap in ap_interfaces or []:
         ifname = ap.get(RADIO_KEY_IFNAME, "")
         if ifname:
             ap_detail[ifname] = ap
@@ -141,7 +145,7 @@ def build_topology(
     # Map ifname → radio_node_id for client assignment later
     ifname_to_radio_id: dict[str, str] = {}
 
-    for radio in (wifi_radios or []):
+    for radio in wifi_radios or []:
         ifname = radio.get(RADIO_KEY_IFNAME, "")
         band = radio.get(RADIO_KEY_BAND, "")
         ssid = radio.get(RADIO_KEY_SSID, "")
@@ -164,36 +168,40 @@ def build_topology(
         else:
             band_label = "2,4 GHz"
 
-        nodes.append({
-            "id": radio_node_id,
-            "name": f"{band_label} · {ssid}" if ssid else band_label,
-            "type": "radio",
-            "band": band,
-            "band_label": band_label,
-            "ssid": ssid,
-            "ifname": ifname,
-            "channel": channel,
-            "frequency": frequency,
-            "txpower": txpower,
-            "enabled": enabled,
-            "status": "online" if enabled else "disabled",
-            "icon": "mdi:wifi",
-            "parent_id": gateway_id,
-            "attributes": {},
-        })
+        nodes.append(
+            {
+                "id": radio_node_id,
+                "name": f"{band_label} · {ssid}" if ssid else band_label,
+                "type": "radio",
+                "band": band,
+                "band_label": band_label,
+                "ssid": ssid,
+                "ifname": ifname,
+                "channel": channel,
+                "frequency": frequency,
+                "txpower": txpower,
+                "enabled": enabled,
+                "status": "online" if enabled else "disabled",
+                "icon": "mdi:wifi",
+                "parent_id": gateway_id,
+                "attributes": {},
+            }
+        )
 
-        links.append({
-            "source": gateway_id,
-            "target": radio_node_id,
-            "medium": "internal",
-            "band": band,
-            "speed": None,
-            "signal": None,
-            "signal_quality": "good",
-            "label": band_label,
-            "confidence": "confirmed",
-            "is_backhaul": False,
-        })
+        links.append(
+            {
+                "source": gateway_id,
+                "target": radio_node_id,
+                "medium": "internal",
+                "band": band,
+                "speed": None,
+                "signal": None,
+                "signal_quality": "good",
+                "label": band_label,
+                "confidence": "confirmed",
+                "is_backhaul": False,
+            }
+        )
 
     # ------------------------------------------------------------------
     # 4. Client nodes
@@ -210,7 +218,7 @@ def build_topology(
     wifi_macs: set[str] = {c.get(CLIENT_KEY_MAC, "").upper() for c in (clients or [])}
 
     # --- WiFi clients ---
-    for client in (clients or []):
+    for client in clients or []:
         mac = client.get(CLIENT_KEY_MAC, "").upper()
         if not mac or mac in seen_macs:
             continue
@@ -231,7 +239,7 @@ def build_topology(
                 ip = lease.get("ip", "")
 
         # Find matching radio for band info
-        for radio in (wifi_radios or []):
+        for radio in wifi_radios or []:
             if radio.get(RADIO_KEY_IFNAME, "") == radio_ifname:
                 band = radio.get(RADIO_KEY_BAND, "")
                 break
@@ -242,37 +250,41 @@ def build_topology(
         client_id = _client_id(mac)
         display_name = hostname_client or ip or mac
 
-        nodes.append({
-            "id": client_id,
-            "name": display_name,
-            "type": "client",
-            "mac": mac,
-            "ip": ip,
-            "hostname": hostname_client,
-            "ssid": ssid,
-            "signal": signal,
-            "signal_quality": _signal_quality(signal),
-            "band": band,
-            "radio": radio_ifname,
-            "connection_type": "wifi",
-            "status": "online",
-            "icon": "mdi:laptop",
-            "parent_id": parent_radio_id,
-            "attributes": {},
-        })
+        nodes.append(
+            {
+                "id": client_id,
+                "name": display_name,
+                "type": "client",
+                "mac": mac,
+                "ip": ip,
+                "hostname": hostname_client,
+                "ssid": ssid,
+                "signal": signal,
+                "signal_quality": _signal_quality(signal),
+                "band": band,
+                "radio": radio_ifname,
+                "connection_type": "wifi",
+                "status": "online",
+                "icon": "mdi:laptop",
+                "parent_id": parent_radio_id,
+                "attributes": {},
+            }
+        )
 
-        links.append({
-            "source": parent_radio_id,
-            "target": client_id,
-            "medium": "wifi",
-            "band": band,
-            "speed": None,
-            "signal": signal,
-            "signal_quality": _signal_quality(signal),
-            "label": f"{signal} dBm" if signal else "",
-            "confidence": "confirmed",
-            "is_backhaul": False,
-        })
+        links.append(
+            {
+                "source": parent_radio_id,
+                "target": client_id,
+                "medium": "wifi",
+                "band": band,
+                "speed": None,
+                "signal": signal,
+                "signal_quality": _signal_quality(signal),
+                "label": f"{signal} dBm" if signal else "",
+                "confidence": "confirmed",
+                "is_backhaul": False,
+            }
+        )
 
     # --- LAN clients (DHCP lease present, no WiFi association) ---
     for mac_upper, lease in lease_lookup.items():
@@ -285,37 +297,41 @@ def build_topology(
         client_id = _client_id(mac_upper)
         display_name = hostname_client or ip or mac_upper
 
-        nodes.append({
-            "id": client_id,
-            "name": display_name,
-            "type": "client",
-            "mac": mac_upper,
-            "ip": ip,
-            "hostname": hostname_client,
-            "ssid": "",
-            "signal": None,
-            "signal_quality": "unknown",
-            "band": "",
-            "radio": "",
-            "connection_type": "lan",
-            "status": "online",
-            "icon": "mdi:desktop-classic",
-            "parent_id": gateway_id,
-            "attributes": {},
-        })
+        nodes.append(
+            {
+                "id": client_id,
+                "name": display_name,
+                "type": "client",
+                "mac": mac_upper,
+                "ip": ip,
+                "hostname": hostname_client,
+                "ssid": "",
+                "signal": None,
+                "signal_quality": "unknown",
+                "band": "",
+                "radio": "",
+                "connection_type": "lan",
+                "status": "online",
+                "icon": "mdi:desktop-classic",
+                "parent_id": gateway_id,
+                "attributes": {},
+            }
+        )
 
-        links.append({
-            "source": gateway_id,
-            "target": client_id,
-            "medium": "lan",
-            "band": "",
-            "speed": None,
-            "signal": None,
-            "signal_quality": "good",
-            "label": "LAN",
-            "confidence": "probable",
-            "is_backhaul": False,
-        })
+        links.append(
+            {
+                "source": gateway_id,
+                "target": client_id,
+                "medium": "lan",
+                "band": "",
+                "speed": None,
+                "signal": None,
+                "signal_quality": "good",
+                "label": "LAN",
+                "confidence": "probable",
+                "is_backhaul": False,
+            }
+        )
 
     # ------------------------------------------------------------------
     # 5. Metadata

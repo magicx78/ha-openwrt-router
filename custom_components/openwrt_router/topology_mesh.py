@@ -75,7 +75,7 @@ def _has_active_sta_interface(data: OpenWrtCoordinatorData) -> bool:
     count entries that show an actual association, indicated by a non-empty
     BSSID together with a numeric signal value.
     """
-    for sta in (getattr(data, "sta_interfaces", None) or []):
+    for sta in getattr(data, "sta_interfaces", None) or []:
         bssid = (sta.get("bssid") or "").strip()
         signal = sta.get("signal")
         if bssid and signal is not None:
@@ -90,7 +90,7 @@ def _has_wan_carrier(data: OpenWrtCoordinatorData) -> bool:
     ``up=True`` the router is physically uplinked via Ethernet, even if a
     STA-mode wireless interface is also configured.
     """
-    for port in (getattr(data, "port_stats", None) or []):
+    for port in getattr(data, "port_stats", None) or []:
         name = (port.get("name") or "").lower()
         if name.startswith("wan") and port.get("up") is True:
             return True
@@ -120,7 +120,7 @@ def _detect_inter_router_edges(
     # to the gateway via a secondary interface (e.g. wireless-STA backhaul with
     # a different MAC/IP than the management LAN) can still be matched.
     router_macs: dict[str, str] = {}  # MAC → router_id
-    router_ips:  dict[str, str] = {}  # IP → router_id
+    router_ips: dict[str, str] = {}  # IP → router_id
     for rid, hip, data in router_data:
         mac = (data.router_info.get("mac") or "").upper()
         if mac:
@@ -128,20 +128,20 @@ def _detect_inter_router_edges(
         if hip:
             router_ips[hip] = rid
         # Add all interface IPs (secondary IPs on STA/mesh interfaces are common)
-        for iface in (data.network_interfaces or []):
+        for iface in data.network_interfaces or []:
             ipv4 = iface.get("ipv4_addr")
             if ipv4 and ipv4 not in router_ips:
                 router_ips[ipv4] = rid
         # Add all AP-interface BSSIDs (in case an AP appears as a WiFi client
         # of a peer using its hostapd BSSID instead of the LAN MAC)
-        for ap_iface in (data.ap_interfaces or []):
+        for ap_iface in data.ap_interfaces or []:
             bssid = (ap_iface.get("bssid") or "").upper()
             if bssid and bssid not in router_macs:
                 router_macs[bssid] = rid
         # Add STA-mode wireless interface MACs so a router that uplinks via
         # WiFi (repeater / mesh backhaul) is matched in Method 2 even when
         # its STA MAC differs from the LAN router_info.mac.
-        for sta_iface in (getattr(data, "sta_interfaces", None) or []):
+        for sta_iface in getattr(data, "sta_interfaces", None) or []:
             sta_mac = (sta_iface.get("mac") or "").upper()
             if sta_mac and sta_mac not in router_macs:
                 router_macs[sta_mac] = rid
@@ -159,7 +159,7 @@ def _detect_inter_router_edges(
     for src_rid, src_hip, src_data in router_data:
         for client in src_data.clients or []:
             client_mac = (client.get("mac") or "").upper()
-            client_ip  = (client.get("ip") or "")
+            client_ip = client.get("ip") or ""
             # Match by MAC first, fall back to host IP (covers cases where the AP
             # registers with a different MAC than router_info.mac, e.g. wlan0 vs br-lan)
             target_rid = router_macs.get(client_mac) or router_ips.get(client_ip)
@@ -168,23 +168,25 @@ def _detect_inter_router_edges(
             edge_id = f"{src_rid}--uplink--{target_rid}"
             if edge_id in seen_edges:
                 continue
-            edges.append({
-                "id": edge_id,
-                "from": src_rid,
-                "to": target_rid,
-                "relationship": "wifi_uplink",
-                "source": MESH_SOURCE,
-                "inferred": False,
-                "inference_reason": None,
-                "attributes": {
-                    "link_type": "wifi",
-                    "detection_method": "wifi_client_mac",
-                    "client_mac": client_mac,
-                    "signal": client.get("signal"),
-                    "ap_port": None,        # wireless uplink → no physical AP port
-                    "vlan_tags": [],
-                },
-            })
+            edges.append(
+                {
+                    "id": edge_id,
+                    "from": src_rid,
+                    "to": target_rid,
+                    "relationship": "wifi_uplink",
+                    "source": MESH_SOURCE,
+                    "inferred": False,
+                    "inference_reason": None,
+                    "attributes": {
+                        "link_type": "wifi",
+                        "detection_method": "wifi_client_mac",
+                        "client_mac": client_mac,
+                        "signal": client.get("signal"),
+                        "ap_port": None,  # wireless uplink → no physical AP port
+                        "vlan_tags": [],
+                    },
+                }
+            )
             seen_edges.add(edge_id)
 
     # Method 1: DHCP lease cross-reference (LAN connections).
@@ -218,27 +220,27 @@ def _detect_inter_router_edges(
                     gw_data, "port_vlan_map", {}
                 )
                 vlan_tags: list[int] = (
-                    list(port_vlan_map.get(gateway_port, []))
-                    if gateway_port
-                    else []
+                    list(port_vlan_map.get(gateway_port, [])) if gateway_port else []
                 )
-                edges.append({
-                    "id": edge_id,
-                    "from": gw_rid,
-                    "to": ap_rid,
-                    "relationship": "lan_uplink",
-                    "source": MESH_SOURCE,
-                    "inferred": False,
-                    "inference_reason": None,
-                    "attributes": {
-                        "link_type": "lan",
-                        "detection_method": found_via,
-                        "ap_host_ip": ap_hip,
-                        "gateway_port": gateway_port,
-                        "ap_port": "wan",     # inter-router LAN-uplink → AP-WAN
-                        "vlan_tags": vlan_tags,
-                    },
-                })
+                edges.append(
+                    {
+                        "id": edge_id,
+                        "from": gw_rid,
+                        "to": ap_rid,
+                        "relationship": "lan_uplink",
+                        "source": MESH_SOURCE,
+                        "inferred": False,
+                        "inference_reason": None,
+                        "attributes": {
+                            "link_type": "lan",
+                            "detection_method": found_via,
+                            "ap_host_ip": ap_hip,
+                            "gateway_port": gateway_port,
+                            "ap_port": "wan",  # inter-router LAN-uplink → AP-WAN
+                            "vlan_tags": vlan_tags,
+                        },
+                    }
+                )
                 seen_edges.add(edge_id)
 
     # Method 2.5: ARP/trunk_port_map — IP-based port lookup (no DHCP needed)
@@ -259,26 +261,26 @@ def _detect_inter_router_edges(
                 port_vlan_map: dict[str, list[int]] = getattr(
                     gw_data, "port_vlan_map", {}
                 )
-                vlan_tags: list[int] = list(
-                    port_vlan_map.get(gateway_port, [])
+                vlan_tags: list[int] = list(port_vlan_map.get(gateway_port, []))
+                edges.append(
+                    {
+                        "id": edge_id,
+                        "from": gw_rid,
+                        "to": ap_rid,
+                        "relationship": "lan_uplink",
+                        "source": MESH_SOURCE,
+                        "inferred": False,
+                        "inference_reason": None,
+                        "attributes": {
+                            "link_type": "lan",
+                            "detection_method": "arp_port",
+                            "ap_host_ip": ap_hip,
+                            "gateway_port": gateway_port,
+                            "ap_port": "wan",
+                            "vlan_tags": vlan_tags,
+                        },
+                    }
                 )
-                edges.append({
-                    "id": edge_id,
-                    "from": gw_rid,
-                    "to": ap_rid,
-                    "relationship": "lan_uplink",
-                    "source": MESH_SOURCE,
-                    "inferred": False,
-                    "inference_reason": None,
-                    "attributes": {
-                        "link_type": "lan",
-                        "detection_method": "arp_port",
-                        "ap_host_ip": ap_hip,
-                        "gateway_port": gateway_port,
-                        "ap_port": "wan",
-                        "vlan_tags": vlan_tags,
-                    },
-                })
                 seen_edges.add(edge_id)
 
     # Repeater override: a router with an *associated* wireless STA-mode
@@ -314,11 +316,7 @@ def _detect_inter_router_edges(
         attrs.pop("gateway_port", None)
 
     # Method 3: Subnet fallback for routers with no detected uplink
-    connected_aps = {
-        e["to"] for e in edges
-    } | {
-        e["from"] for e in edges
-    }
+    connected_aps = {e["to"] for e in edges} | {e["from"] for e in edges}
 
     unconnected = [
         (rid, hip, data)
@@ -342,7 +340,9 @@ def _detect_inter_router_edges(
                     if not gw_subnet.overlaps(ap_net):
                         _LOGGER.debug(
                             "Subnet fallback: skipping %s (%s) — not in gateway subnet %s",
-                            ap_rid, ap_hip, gw_subnet,
+                            ap_rid,
+                            ap_hip,
+                            gw_subnet,
                         )
                         continue
                 except (ValueError, TypeError):
@@ -350,22 +350,24 @@ def _detect_inter_router_edges(
 
             edge_id = f"{gw_rid}--uplink--{ap_rid}"
             if edge_id not in seen_edges:
-                edges.append({
-                    "id": edge_id,
-                    "from": gw_rid,
-                    "to": ap_rid,
-                    "relationship": "mesh_member",
-                    "source": MESH_SOURCE,
-                    "inferred": True,
-                    "inference_reason": "subnet_inference",
-                    "attributes": {
-                        "link_type": "unknown",
-                        "detection_method": "subnet_fallback",
-                        "ap_host_ip": ap_hip,
-                        "ap_port": None,
-                        "vlan_tags": [],
-                    },
-                })
+                edges.append(
+                    {
+                        "id": edge_id,
+                        "from": gw_rid,
+                        "to": ap_rid,
+                        "relationship": "mesh_member",
+                        "source": MESH_SOURCE,
+                        "inferred": True,
+                        "inference_reason": "subnet_inference",
+                        "attributes": {
+                            "link_type": "unknown",
+                            "detection_method": "subnet_fallback",
+                            "ap_host_ip": ap_hip,
+                            "ap_port": None,
+                            "vlan_tags": [],
+                        },
+                    }
+                )
                 seen_edges.add(edge_id)
 
     return edges
@@ -436,49 +438,55 @@ def _detect_switch_nodes(
         if len(ap_ids) < 2:
             continue
         switch_id = f"switch:{gw_rid}:{port}"
-        switch_nodes.append({
-            "id": switch_id,
-            "type": "switch",
-            "label": f"Switch ({port.upper()})",
-            "source": MESH_SOURCE,
-            "inferred": True,
-            "inference_reason": f"multiple_aps_on_{port}",
-            "role": "switch",
-            "attributes": {
-                "gateway_port": port,
-                "ap_count": len(ap_ids),
-            },
-        })
+        switch_nodes.append(
+            {
+                "id": switch_id,
+                "type": "switch",
+                "label": f"Switch ({port.upper()})",
+                "source": MESH_SOURCE,
+                "inferred": True,
+                "inference_reason": f"multiple_aps_on_{port}",
+                "role": "switch",
+                "attributes": {
+                    "gateway_port": port,
+                    "ap_count": len(ap_ids),
+                },
+            }
+        )
         # Edge: gateway → switch
-        switch_edges.append({
-            "id": f"{gw_rid}--switch--{switch_id}",
-            "from": gw_rid,
-            "to": switch_id,
-            "relationship": "lan_uplink",
-            "source": MESH_SOURCE,
-            "inferred": True,
-            "inference_reason": f"switch_inferred_{port}",
-            "attributes": {
-                "link_type": "lan",
-                "detection_method": "fdb_multi_ap",
-                "gateway_port": port,
-            },
-        })
-        # Edges: switch → each AP (replace direct gateway→AP edges)
-        for ap_id in ap_ids:
-            switch_edges.append({
-                "id": f"{switch_id}--trunk--{ap_id}",
-                "from": switch_id,
-                "to": ap_id,
+        switch_edges.append(
+            {
+                "id": f"{gw_rid}--switch--{switch_id}",
+                "from": gw_rid,
+                "to": switch_id,
                 "relationship": "lan_uplink",
                 "source": MESH_SOURCE,
                 "inferred": True,
-                "inference_reason": "switch_inferred",
+                "inference_reason": f"switch_inferred_{port}",
                 "attributes": {
                     "link_type": "lan",
                     "detection_method": "fdb_multi_ap",
+                    "gateway_port": port,
                 },
-            })
+            }
+        )
+        # Edges: switch → each AP (replace direct gateway→AP edges)
+        for ap_id in ap_ids:
+            switch_edges.append(
+                {
+                    "id": f"{switch_id}--trunk--{ap_id}",
+                    "from": switch_id,
+                    "to": ap_id,
+                    "relationship": "lan_uplink",
+                    "source": MESH_SOURCE,
+                    "inferred": True,
+                    "inference_reason": "switch_inferred",
+                    "attributes": {
+                        "link_type": "lan",
+                        "detection_method": "fdb_multi_ap",
+                    },
+                }
+            )
 
     return switch_nodes, switch_edges
 
@@ -566,9 +574,7 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     # We must match client *nodes* to this winner so that ap_mac in the
     # topology correctly reflects which router the client is associated with.
     winning_ap_mac: dict[str, str] = {
-        c["mac"]: c.get("ap_mac", "")
-        for c in deduped_clients
-        if c.get("mac")
+        c["mac"]: c.get("ap_mac", "") for c in deduped_clients if c.get("mac")
     }
 
     # Deduplicate client nodes — prefer the node whose ap_mac matches the
@@ -583,7 +589,7 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
 
             if node_id in seen_client_ids:
                 # Replace the stored node if this one has the winning ap_mac
-                node_ap_mac = (node.get("attributes", {}).get("ap_mac") or "")
+                node_ap_mac = node.get("attributes", {}).get("ap_mac") or ""
                 if mac and node_ap_mac == winning_ap_mac.get(mac, ""):
                     deduped_nodes[seen_client_ids[node_id]] = node
                 continue
@@ -653,7 +659,9 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                 attrs["ping_ms"] = getattr(data, "ping_ms", None)
                 attrs["dsl_history"] = getattr(data, "dsl_history", []) or []
                 attrs["ddns_status"] = getattr(data, "ddns_status", []) or []
-                attrs["topology_snapshots"] = getattr(data, "topology_snapshots", []) or []
+                attrs["topology_snapshots"] = (
+                    getattr(data, "topology_snapshots", []) or []
+                )
 
                 # Enrich port_stats: replace raw MAC in connected_device with AP name
                 trunk_map: dict[str, str] = getattr(data, "trunk_port_map", {})
@@ -665,7 +673,7 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                     port = trunk_map.get(ap_hip)
                     if port:
                         port_to_ap_name[port] = ap_name
-                for port in (attrs.get("port_stats") or []):
+                for port in attrs.get("port_stats") or []:
                     ap_name = port_to_ap_name.get(port.get("name", ""))
                     if ap_name:
                         port["connected_device"] = ap_name

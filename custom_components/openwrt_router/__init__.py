@@ -21,7 +21,13 @@ import logging
 from dataclasses import dataclass
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME, Platform
+from homeassistant.const import (
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_PORT,
+    CONF_USERNAME,
+    Platform,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -147,11 +153,11 @@ def _merge_orphan_mac_devices(hass: HomeAssistant, entry: ConfigEntry) -> None:
 # disable them once on next setup.  The user can re-enable individually
 # via the HA entity settings.
 _LEGACY_DYNAMIC_PATTERNS = (
-    "_iface_",       # OpenWrtInterfaceSensor   (entry_id_iface_<name>_rx/tx)
-    "_rate",         # OpenWrtInterfaceRateSensor  (entry_id_<name>_rx_rate)
-    "_radio_",       # OpenWrtRadioSensor       (entry_id_radio_<ifname>_signal/noise)
-    "_ap_",          # OpenWrtAPInterfaceSensor (entry_id_ap_<ifname>_<metric>)
-    "_port_",        # OpenWrtPortSensor        (entry_id_port_<name>_<metric>)
+    "_iface_",  # OpenWrtInterfaceSensor   (entry_id_iface_<name>_rx/tx)
+    "_rate",  # OpenWrtInterfaceRateSensor  (entry_id_<name>_rx_rate)
+    "_radio_",  # OpenWrtRadioSensor       (entry_id_radio_<ifname>_signal/noise)
+    "_ap_",  # OpenWrtAPInterfaceSensor (entry_id_ap_<ifname>_<metric>)
+    "_port_",  # OpenWrtPortSensor        (entry_id_port_<name>_<metric>)
 )
 
 
@@ -211,7 +217,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     password: str = entry.data[CONF_PASSWORD]  # never logged
     protocol: str = entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)
 
-    _LOGGER.debug("Setting up OpenWrt Router entry for %s:%s (%s)", host, port, protocol)
+    _LOGGER.debug(
+        "Setting up OpenWrt Router entry for %s:%s (%s)", host, port, protocol
+    )
 
     # Shared aiohttp session managed by HA
     session = async_get_clientsession(hass)
@@ -229,9 +237,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     try:
         await api.login()
     except OpenWrtAuthError as err:
-        raise ConfigEntryAuthFailed(
-            f"Authentication failed for {host}: {err}"
-        ) from err
+        raise ConfigEntryAuthFailed(f"Authentication failed for {host}: {err}") from err
     except (OpenWrtConnectionError, OpenWrtTimeoutError) as err:
         raise ConfigEntryNotReady(
             f"Cannot reach OpenWrt router at {host}:{port}: {err}"
@@ -240,11 +246,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # Stagger polling: spread multiple coordinators evenly across the scan interval
     # so they never all poll simultaneously (e.g. 4 routers × 15s = 0/15/30/45s offsets).
     from .const import SCAN_INTERVAL_SECONDS
+
     loaded_entries = hass.config_entries.async_entries(DOMAIN)
-    stagger_index = sum(
-        1 for e in loaded_entries
-        if e.entry_id != entry.entry_id
-    )
+    stagger_index = sum(1 for e in loaded_entries if e.entry_id != entry.entry_id)
     poll_offset = (stagger_index * SCAN_INTERVAL_SECONDS) // 4
 
     # Create and populate the coordinator

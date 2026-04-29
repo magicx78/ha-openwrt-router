@@ -54,9 +54,7 @@ def _digest_header(
     cnonce = hashlib.md5(os.urandom(8)).hexdigest()[:8]
     ha1 = hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
     ha2 = hashlib.md5(f"POST:{uri}".encode()).hexdigest()
-    resp = hashlib.md5(
-        f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}".encode()
-    ).hexdigest()
+    resp = hashlib.md5(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}".encode()).hexdigest()
     return (
         f'Digest username="{username}", realm="{realm}", nonce="{nonce}", '
         f'uri="{uri}", qop=auth, nc={nc}, cnonce="{cnonce}", response="{resp}"'
@@ -103,7 +101,11 @@ async def _soap_call(
             if r.status == 200:
                 return _parse_soap(await r.text())
             if r.status not in (401, 500) or not user:
-                _LOGGER.warning("Fritz!Box %s → HTTP %s (no credentials or unexpected status)", url_path, r.status)
+                _LOGGER.warning(
+                    "Fritz!Box %s → HTTP %s (no credentials or unexpected status)",
+                    url_path,
+                    r.status,
+                )
                 return {}
             www_auth = r.headers.get("WWW-Authenticate", "")
             if r.status == 500 and not www_auth:
@@ -125,15 +127,19 @@ async def _soap_call(
                 body_snippet = (await r.text())[:400]
                 _LOGGER.warning(
                     "Fritz!Box Digest auth failed: HTTP %s — body: %.400s",
-                    r.status, body_snippet,
+                    r.status,
+                    body_snippet,
                 )
                 return {}
 
         # Attempt 2b: 500 without Digest challenge (some Fritz!Box firmware) → Basic auth
         # Fritz!Box supports both Basic and Digest; Basic avoids the nonce round-trip.
         async with session.post(
-            url, data=body, headers=headers, timeout=to,
-            auth=aiohttp.BasicAuth(user, password)
+            url,
+            data=body,
+            headers=headers,
+            timeout=to,
+            auth=aiohttp.BasicAuth(user, password),
         ) as r:
             if r.status == 200:
                 return _parse_soap(await r.text())
@@ -147,13 +153,16 @@ async def _soap_call(
                     h2["Authorization"] = _digest_header(
                         url_path, user, password, realm_m2.group(1), nonce_m2.group(1)
                     )
-                    async with session.post(url, data=body, headers=h2, timeout=to) as r:
+                    async with session.post(
+                        url, data=body, headers=h2, timeout=to
+                    ) as r:
                         if r.status == 200:
                             return _parse_soap(await r.text())
             body_snippet = (await r.text())[:400]
             _LOGGER.warning(
                 "Fritz!Box auth failed after all attempts: HTTP %s — body: %.400s",
-                r.status, body_snippet,
+                r.status,
+                body_snippet,
             )
             return {}
 
@@ -231,20 +240,27 @@ async def get_wan_traffic(
         upstream_bps    — current upstream throughput (bytes/s)
     """
     data = await _soap_call(
-        session, host, port, _COMMON_URL, _COMMON_SERVICE, _COMMON_ACTION, user, password
+        session,
+        host,
+        port,
+        _COMMON_URL,
+        _COMMON_SERVICE,
+        _COMMON_ACTION,
+        user,
+        password,
     )
     if not data:
         return {}
     # Layer1 rates are in bits/s; AVM utilization is in tenths of a percent (0–10000)
-    max_ds  = _i(data, "NewLayer1DownstreamMaxBitRate")
-    max_us  = _i(data, "NewLayer1UpstreamMaxBitRate")
+    max_ds = _i(data, "NewLayer1DownstreamMaxBitRate")
+    max_us = _i(data, "NewLayer1UpstreamMaxBitRate")
     util_ds = _f(data, "NewX_AVM-DE_DownstreamCurrentUtilization")  # 0–10000
     util_us = _f(data, "NewX_AVM-DE_UpstreamCurrentUtilization")
     return {
         # Estimated current throughput in bytes/s (utilization × max / 10000 / 8)
         "downstream_bps": round(max_ds * util_ds / 10000 / 8) if max_ds else 0,
-        "upstream_bps":   round(max_us * util_us / 10000 / 8) if max_us else 0,
+        "upstream_bps": round(max_us * util_us / 10000 / 8) if max_us else 0,
         "downstream_max_kbps": max_ds // 1000,
-        "upstream_max_kbps":   max_us // 1000,
+        "upstream_max_kbps": max_us // 1000,
         "link_status": data.get("NewPhysicalLinkStatus", ""),
     }

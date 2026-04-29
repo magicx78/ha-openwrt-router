@@ -96,9 +96,7 @@ def _redact(data: Any) -> Any:
     """
     if isinstance(data, dict):
         return {
-            key: DIAGNOSTICS_REDACTED
-            if _is_sensitive_key(key)
-            else _redact(value)
+            key: DIAGNOSTICS_REDACTED if _is_sensitive_key(key) else _redact(value)
             for key, value in data.items()
         }
 

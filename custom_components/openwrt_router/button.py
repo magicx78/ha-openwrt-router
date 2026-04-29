@@ -9,7 +9,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from homeassistant.components.button import ButtonDeviceClass, ButtonEntity, ButtonEntityDescription
+from homeassistant.components.button import (
+    ButtonDeviceClass,
+    ButtonEntity,
+    ButtonEntityDescription,
+)
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -197,7 +201,9 @@ class OpenWrtButtonEntity(ButtonEntity):
 
     async def _press_check_updates(self) -> None:
         """Handle check for updates button press."""
-        _LOGGER.info("Checking for available updates on %s", self._entry.data.get("host"))
+        _LOGGER.info(
+            "Checking for available updates on %s", self._entry.data.get("host")
+        )
 
         try:
             await self._api.get_available_updates()
@@ -205,7 +211,9 @@ class OpenWrtButtonEntity(ButtonEntity):
             await self._coordinator.async_request_refresh()
             updates = self._coordinator.data.updates_available or {}
 
-            update_count = len(updates.get("system", [])) + len(updates.get("addons", []))
+            update_count = len(updates.get("system", [])) + len(
+                updates.get("addons", [])
+            )
             if update_count > 0:
                 _LOGGER.info(
                     "Found %d available updates on %s: %d system, %d addons",
@@ -215,9 +223,7 @@ class OpenWrtButtonEntity(ButtonEntity):
                     len(updates.get("addons", [])),
                 )
             else:
-                _LOGGER.info(
-                    "No updates available on %s", self._entry.data.get("host")
-                )
+                _LOGGER.info("No updates available on %s", self._entry.data.get("host"))
         except Exception as err:
             _LOGGER.error(
                 "Error checking for updates on %s: %s",

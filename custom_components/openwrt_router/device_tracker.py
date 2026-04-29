@@ -120,7 +120,9 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
         super().__init__(coordinator)
         self._mac = mac
         self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_tracker_{mac.lower().replace(':', '')}"
+        self._attr_unique_id = (
+            f"{entry.entry_id}_tracker_{mac.lower().replace(':', '')}"
+        )
 
     @property
     def name(self) -> str:

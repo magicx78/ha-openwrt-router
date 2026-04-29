@@ -26,7 +26,10 @@ def url_scheme_for(protocol: str) -> str:
     scheme is not `http` or `https` (ValueError), so we must collapse the
     marker back to `https` whenever we build a URL that HA might validate.
     """
-    return "https" if protocol == PROTOCOL_HTTPS_INSECURE else (protocol or PROTOCOL_HTTP)
+    return (
+        "https" if protocol == PROTOCOL_HTTPS_INSECURE else (protocol or PROTOCOL_HTTP)
+    )
+
 
 # HTTP / ubus
 UBUS_PATH = "/ubus"
@@ -223,7 +226,7 @@ RADIO_KEY_TXPOWER = "txpower"
 RADIO_KEY_BITRATE = "bitrate"
 RADIO_KEY_HWMODE = "hwmode"
 RADIO_KEY_HTMODE = "htmode"
-RADIO_KEY_MODE = "mode"    # "Master" | "Client" | "Monitor" | None
+RADIO_KEY_MODE = "mode"  # "Master" | "Client" | "Monitor" | None
 RADIO_KEY_BSSID = "bssid"
 
 # Client data keys
@@ -264,7 +267,7 @@ DEFAULT_SWITCH_PORT = 443
 # Fritz!Box coordinator data keys
 KEY_DSL_STATS = "dsl_stats"
 KEY_WAN_TRAFFIC = "wan_traffic"
-KEY_DSL_HISTORY = "dsl_history"   # list of HistoryPoint dicts
+KEY_DSL_HISTORY = "dsl_history"  # list of HistoryPoint dicts
 KEY_PING_MS = "ping_ms"
 KEY_DDNS_STATUS = "ddns_status"
 
