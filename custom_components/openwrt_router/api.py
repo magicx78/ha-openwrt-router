@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import ssl
 import time
 from typing import Any
@@ -89,6 +90,144 @@ UBUS_STATUS_TIMEOUT = 7
 UBUS_STATUS_NOT_SUPPORTED = 8
 UBUS_STATUS_UNKNOWN_ERROR = 9
 UBUS_STATUS_CONNECTION_FAILED = 10
+
+
+# -----------------------------------------------------------------------------
+# subprocess lifecycle helper — F4 (v1.18.0)
+# -----------------------------------------------------------------------------
+# Returncode sentinels used by ``_safe_subprocess_exec``.  Real OS returncodes
+# are non-negative; the negatives below signal cleanup states to the caller
+# without forcing a None / Optional dance through every call site.
+SUBPROCESS_RC_TIMEOUT = -1  # process killed because wait_for() timed out
+SUBPROCESS_RC_FAILED_TO_SPAWN = -2  # spawn raised before a Process existed
+SUBPROCESS_RC_CANCELLED = -3  # caller's task was cancelled mid-flight
+
+
+async def _safe_subprocess_exec(
+    cmd: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    timeout: float,
+    binary: bool = False,
+) -> tuple[int, bytes | str, bytes]:
+    """Run a subprocess that NEVER leaks a process or FD on any exit path.
+
+    This is the single entry-point all subprocess.exec calls in this module
+    should funnel through.  It guarantees on every termination — success,
+    timeout, generic exception, ``CancelledError`` (HA shutdown) — that:
+
+    1. ``proc.kill()`` is invoked if the child is still alive,
+    2. ``proc.wait()`` is awaited (no zombies left for procd / kernel reaper),
+    3. stdout / stderr pipes are closed (FDs released),
+
+    even when the caller's task is cancelled.
+
+    Args:
+        cmd: Argv list, e.g. ``["sshpass", "-e", "ssh", ...]``.
+        env: Optional environment overrides (e.g. ``SSHPASS``); ``None`` inherits.
+        timeout: Hard timeout in seconds for ``communicate()``.
+        binary: When True, stdout is returned as raw ``bytes``; when False (default)
+            it is UTF-8-decoded with ``errors="replace"``.  ``brforward`` etc. need
+            ``binary=True`` because the byte stream contains NUL bytes.
+
+    Returns:
+        ``(rc, stdout, stderr)`` where:
+          - ``rc == 0`` → success
+          - ``rc == SUBPROCESS_RC_TIMEOUT`` (-1) → killed due to timeout
+          - ``rc == SUBPROCESS_RC_FAILED_TO_SPAWN`` (-2) → spawn itself raised
+          - ``rc == SUBPROCESS_RC_CANCELLED`` (-3) → re-raised after cleanup
+          - any other non-negative int → child exited with that returncode
+        ``stdout`` is ``bytes`` if ``binary`` else ``str``.
+
+    Never raises ``asyncio.TimeoutError`` to the caller — the timeout is the
+    only normal control-flow path that escapes the wait.  ``CancelledError``
+    IS re-raised after cleanup so HA's shutdown sequence works correctly.
+    """
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+        except (OSError, ValueError) as err:
+            # OSError covers ENOENT (sshpass missing), permission, fork failure.
+            # ValueError covers malformed argv.  Both leave us with no child.
+            _LOGGER.debug("subprocess spawn failed: %s (cmd[0]=%s)", err, cmd[0])
+            return (
+                SUBPROCESS_RC_FAILED_TO_SPAWN,
+                b"" if binary else "",
+                str(err).encode(),
+            )
+
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            return (SUBPROCESS_RC_TIMEOUT, b"" if binary else "", b"timeout")
+
+        rc = proc.returncode if proc.returncode is not None else 0
+        stdout: bytes | str = stdout_b if binary else stdout_b.decode(errors="replace")
+        return rc, stdout, stderr_b
+    finally:
+        if proc is not None and proc.returncode is None:
+            # Child still alive — escalate terminate → wait → kill → final wait.
+            #
+            # All `await proc.wait()` calls are wrapped in asyncio.shield so a
+            # caller cancel CANNOT interrupt the reap and leave a zombie/FD
+            # leak behind.  If a cancel arrives anyway (CancelledError bubbles
+            # out of the shielded await once its inner coro completes), we
+            # still continue escalation through SIGKILL + final wait, then
+            # re-raise CancelledError at the end so the caller sees a clean
+            # cancel — but with no leaked process.
+            cleanup_cancelled = False
+
+            # SIGTERM (synchronous, no cancel point)
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass  # already exited between the check and the call
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("subprocess terminate raised", exc_info=True)
+
+            # Shielded wait for graceful exit
+            try:
+                await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=2.0))
+            except asyncio.CancelledError:
+                cleanup_cancelled = True
+            except asyncio.TimeoutError:
+                pass  # still alive — escalate to SIGKILL
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("subprocess wait after terminate raised", exc_info=True)
+
+            # If still alive after the graceful wait, SIGKILL + final reap.
+            # Note: a pending cancel does NOT cause us to skip this — we must
+            # not leave a child process behind.
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug("subprocess kill raised", exc_info=True)
+                try:
+                    await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=2.0))
+                except asyncio.CancelledError:
+                    cleanup_cancelled = True
+                except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                    _LOGGER.debug(
+                        "subprocess refused to die after SIGKILL — "
+                        "kernel will reap on parent exit"
+                    )
+
+            if cleanup_cancelled:
+                # Re-raise the cancel that arrived during cleanup so the
+                # caller's cancellation semantics are preserved — but only
+                # AFTER we've done our best to reap the child.
+                raise asyncio.CancelledError()
 
 
 class OpenWrtAuthError(Exception):
@@ -359,6 +498,24 @@ class OpenWrtAPI:
         self._auth_failure_count = 0
         self._auth_backoff_until = 0.0
         self._root_warning_logged = False
+
+    async def async_close(self) -> None:
+        """Release client-side state on integration unload.
+
+        Drops the cached rpcd session token so the on-router session times out
+        naturally (default 300s).  Does NOT close ``self._session`` — that is
+        the HA-shared aiohttp ClientSession from ``async_get_clientsession()``
+        and must stay alive for other integrations.
+
+        Intentionally synchronous (no network I/O): an explicit logout RPC
+        could block ``async_unload_entry`` if the router is unreachable.
+        """
+        self._token = DEFAULT_SESSION_ID
+        self._token_expires_at = 0.0
+        self._wifi_method = None
+        self._hostapd_ifaces = None
+        self._luci_rpc_ssid_map = None
+        _LOGGER.debug("OpenWrtAPI(%s) closed — session state cleared", self._host)
 
     # ------------------------------------------------------------------
     # Public auth API
@@ -778,34 +935,25 @@ class OpenWrtAPI:
         except Exception:
             pass
 
-        # SSH fallback if ubus file/read is ACL-blocked
+        # SSH fallback if ubus file/read is ACL-blocked.
+        # Lifecycle (kill / wait / FD close on every exit path) handled by
+        # _run_ssh -> _safe_subprocess_exec.
         if rx_bytes is None and self._password:
-            try:
-                ssh_cmd = [
-                    "sshpass",
-                    "-e",
-                    "ssh",
-                    "-o",
-                    "StrictHostKeyChecking=no",
-                    "-o",
-                    "UserKnownHostsFile=/dev/null",
-                    f"{self._username}@{self._host}",
-                    f"cat /sys/class/net/{iface_name}/statistics/rx_bytes"
-                    f" /sys/class/net/{iface_name}/statistics/tx_bytes",
-                ]
-                proc = await asyncio.create_subprocess_exec(
-                    *ssh_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=self._ssh_env(),
-                )
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
-                lines = stdout.decode().strip().splitlines()
+            out = await self._run_ssh(
+                f"cat /sys/class/net/{iface_name}/statistics/rx_bytes"
+                f" /sys/class/net/{iface_name}/statistics/tx_bytes",
+                timeout=5.0,
+            )
+            if out:
+                lines = out.strip().splitlines()
                 if len(lines) >= 2:
-                    rx_bytes = int(lines[0].strip())
-                    tx_bytes = int(lines[1].strip())
-            except Exception:
-                pass
+                    try:
+                        rx_bytes = int(lines[0].strip())
+                        tx_bytes = int(lines[1].strip())
+                    except ValueError:
+                        _LOGGER.debug(
+                            "WAN rx/tx SSH fallback returned non-numeric output"
+                        )
 
         return {
             "connected": wan_iface.get("up", False),
@@ -1529,46 +1677,207 @@ class OpenWrtAPI:
         return ["sshpass", "-e", "ssh", *ssh_opts, target, remote_cmd]
 
     async def _run_ssh(self, remote_cmd: str, timeout: float = 10.0) -> str | None:
-        """Run a remote SSH command and return stdout. Auto-detects key vs. password auth."""
-        for attempt in range(2):
+        """Run a remote SSH command and return stdout. Auto-detects key vs. password auth.
+
+        All cleanup (kill, wait, FD close) is delegated to
+        :func:`_safe_subprocess_exec` — the helper is leak-free on every exit.
+        """
+        for _attempt in range(2):
             cmd = self._build_ssh_cmd(remote_cmd)
             # When password-auth is used, sshpass reads the password from
             # the SSHPASS env-var (no command-line exposure). For key-auth
             # the env-var is harmless and ignored.
             env = self._ssh_env() if not self._ssh_use_key else None
-            proc = None
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=env,
-                )
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
-                if (
-                    proc.returncode == 255
-                    and b"Permission denied" in stderr
-                    and not self._ssh_use_key
-                ):
-                    _LOGGER.debug("SSH password-auth denied, switching to key-auth")
-                    self._ssh_use_key = True
-                    continue
-                # Return stdout even on non-zero exit (partial output is still useful)
-                out = stdout.decode(errors="replace")
-                return out if out.strip() else None
-            except asyncio.TimeoutError:
-                if proc is not None:
-                    try:
-                        proc.terminate()
-                        await asyncio.wait_for(proc.wait(), timeout=3.0)
-                    except Exception:  # noqa: BLE001
-                        proc.kill()
+            rc, stdout, stderr = await _safe_subprocess_exec(
+                cmd, env=env, timeout=timeout, binary=False
+            )
+            if rc == 255 and b"Permission denied" in stderr and not self._ssh_use_key:
+                _LOGGER.debug("SSH password-auth denied, switching to key-auth")
+                self._ssh_use_key = True
+                continue
+            if rc < 0:
+                # timeout / spawn-failure / cancel — already logged inside helper
                 return None
-            except Exception:  # noqa: BLE001
-                return None
+            # Return stdout even on non-zero exit (partial output is still useful)
+            out = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+            return out if out.strip() else None
         return None
+
+    async def _run_ssh_binary(
+        self, remote_cmd: str, timeout: float = 10.0
+    ) -> bytes | None:
+        """Run a remote SSH command and return raw stdout bytes.
+
+        Binary variant of :meth:`_run_ssh` for outputs that contain NUL bytes
+        or otherwise must not be UTF-8-decoded — currently used to read
+        ``/sys/class/net/br-lan/brforward`` which is a packed 8-byte-record
+        binary stream.
+
+        Returns:
+            stdout bytes, or ``None`` on timeout / spawn-failure / non-zero
+            exit with empty output.
+        """
+        for _attempt in range(2):
+            cmd = self._build_ssh_cmd(remote_cmd)
+            env = self._ssh_env() if not self._ssh_use_key else None
+            rc, stdout, stderr = await _safe_subprocess_exec(
+                cmd, env=env, timeout=timeout, binary=True
+            )
+            if rc == 255 and b"Permission denied" in stderr and not self._ssh_use_key:
+                _LOGGER.debug(
+                    "SSH password-auth denied (binary), switching to key-auth"
+                )
+                self._ssh_use_key = True
+                continue
+            if rc < 0:
+                return None
+            assert isinstance(stdout, bytes)
+            return stdout if stdout else None
+        return None
+
+    async def _run_ssh_detached(
+        self, remote_cmd: str, timeout: float = 10.0
+    ) -> tuple[int, str, bytes]:
+        """Run a fire-and-forget SSH command (e.g. ``opkg update`` via ``nohup``).
+
+        Same return shape as :func:`_safe_subprocess_exec` but always wrapped
+        with redirections that detach the remote process from the SSH session,
+        so the SSH connection can close while the remote command keeps running
+        on the router.
+
+        The remote command is wrapped as::
+
+            nohup sh -c <quoted_remote_cmd> </dev/null >/dev/null 2>&1 &
+
+        where ``<quoted_remote_cmd>`` is produced by :func:`shlex.quote` so
+        single-quotes inside ``remote_cmd`` (e.g. ``grep -v -E '^addon-...'``)
+        do not break the surrounding quoting and inject shell tokens.
+
+        ``</dev/null`` is critical — without it, OpenWrt's ``procd`` kills the
+        child process group when the controlling sshd exits, and the local
+        ``proc.communicate()`` will block waiting for the inherited stdout
+        pipe.  ``nohup`` + ``&`` gives us SIGHUP-immunity + immediate return.
+
+        If the caller needs to capture the remote output, they should embed
+        their own redirection in ``remote_cmd``, e.g.::
+
+            self._run_ssh_detached("opkg update > /tmp/opkg.log 2>&1")
+        """
+        # shlex.quote emits a single-quoted token with embedded quotes safely
+        # escaped (e.g. "a'b" -> "'a'\"'\"'b'") so the remote bash sees
+        # remote_cmd as exactly one argument to `sh -c`.
+        quoted = shlex.quote(remote_cmd)
+        wrapped = f"nohup sh -c {quoted} </dev/null >/dev/null 2>&1 &"
+        cmd = self._build_ssh_cmd(wrapped)
+        env = self._ssh_env() if not self._ssh_use_key else None
+        rc, stdout, stderr = await _safe_subprocess_exec(
+            cmd, env=env, timeout=timeout, binary=False
+        )
+        out = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+        return rc, out, stderr
+
+    # ------------------------------------------------------------------
+    # F5 Aggregator (v1.18.0 — SKELETON ONLY, disabled by default)
+    # ------------------------------------------------------------------
+    # Goal: collapse the 8–15 SSH subprocesses spawned per poll cycle (when
+    # rpcd ACL forces fallback) into ONE remote shell invocation that bundles
+    # all data into a single JSON response.
+    #
+    # Architecture (planned for v1.19.0):
+    #   1. /root/ha-collect.sh on the router (deployed analogously to the
+    #      existing ha-system-metrics.sh) emits a JSON document with:
+    #        - "_v":            "1.18.0"   (AGGREGATOR_SCHEMA_VERSION)
+    #        - "uptime":        int        (from /proc/uptime)
+    #        - "load":          [f, f, f]  (from /proc/loadavg)
+    #        - "memory":        {...}      (from /proc/meminfo)
+    #        - "wan":           {...}      (statistics + iproute output)
+    #        - "wifi":          {...}      (uci show wireless)
+    #        - "clients":       [...]      (ubus hostapd.* OR iw fallback)
+    #        - "interfaces":    [...]      (ip -o addr show; ip link show)
+    #        - "brforward_hex": str        (hexdump'd binary br-lan/brforward)
+    #
+    #   2. _call_aggregator() runs ONE _run_ssh() for the whole batch,
+    #      json.loads'es the response, validates _v matches the integration's
+    #      AGGREGATOR_SCHEMA_VERSION (loose match — minor version may drift),
+    #      and returns the parsed dict.
+    #
+    #   3. Coordinator's _async_update_data() detects the feature flag and
+    #      uses the aggregator response to populate router_status, wan_status,
+    #      wifi_radios, clients, interfaces — bypassing the per-method SSH
+    #      fallbacks entirely.
+    #
+    # Why skeleton only in v1.18.0:
+    #   - The 24h diagnostic (scripts/_prod_24h_sample.sh) must first confirm
+    #     that the per-poll subprocess rate IS the root cause of the crashes.
+    #   - The remote script needs careful testing on real OpenWrt hardware to
+    #     handle missing tools (no jq on minimal builds) and avoid blocking
+    #     reads on unrelated drivers.
+    #   - Schema versioning + drift handling deserves its own dedicated
+    #     review — half-shipping it would create a worse failure mode than
+    #     today's "lots of subprocesses".
+    #
+    # Until enabled, _call_aggregator() raises NotImplementedError to make
+    # accidental wiring unambiguous in stack traces.
+
+    async def _call_aggregator(self) -> dict[str, Any]:
+        """Run /root/ha-collect.sh on the router and return the parsed JSON.
+
+        v1.18.0 skeleton — caller MUST gate this on the ``use_aggregator``
+        feature flag.  Currently raises ``NotImplementedError``.
+
+        Returns:
+            Parsed aggregator response with at minimum the ``_v`` schema-
+            version key.  Caller validates the version against
+            :data:`AGGREGATOR_SCHEMA_VERSION` before using payload fields.
+
+        Raises:
+            NotImplementedError: Aggregator path is skeleton-only in v1.18.0.
+            OpenWrtTimeoutError: SSH command timed out (when implemented).
+            OpenWrtResponseError: Script missing / invalid JSON / schema drift
+                (when implemented).
+        """
+        raise NotImplementedError(
+            "F5 aggregator path is skeleton-only in v1.18.0; "
+            "deploy /root/ha-collect.sh and re-enable in v1.19+. "
+            "See api.py F5 section for design notes."
+        )
+
+    @staticmethod
+    def _parse_aggregator_response(payload: str) -> dict[str, Any]:
+        """Parse + version-check the aggregator JSON.
+
+        v1.18.0 skeleton — verifies the ``_v`` key matches the integration's
+        schema version (major.minor compare, patch is allowed to drift).
+
+        Args:
+            payload: Raw stdout from /root/ha-collect.sh.
+
+        Returns:
+            Parsed dict with the ``_v`` field intact for the caller to log.
+
+        Raises:
+            OpenWrtResponseError: JSON parse failure or schema-version drift.
+        """
+        try:
+            data = json.loads(payload)
+        except ValueError as parse_err:
+            raise OpenWrtResponseError(
+                f"Aggregator returned invalid JSON: {parse_err}"
+            ) from parse_err
+        if not isinstance(data, dict) or "_v" not in data:
+            raise OpenWrtResponseError(
+                "Aggregator response missing schema-version key '_v'"
+            )
+        from .const import AGGREGATOR_SCHEMA_VERSION
+
+        remote_v = str(data["_v"])
+        # Loose compatibility: same major.minor; patch may drift.
+        if remote_v.rsplit(".", 1)[0] != AGGREGATOR_SCHEMA_VERSION.rsplit(".", 1)[0]:
+            raise OpenWrtResponseError(
+                f"Aggregator schema mismatch — remote='{remote_v}', "
+                f"integration='{AGGREGATOR_SCHEMA_VERSION}'"
+            )
+        return data
 
     async def _get_router_status_ssh(self) -> dict[str, Any]:
         """Get router status via SSH script (fallback for ACL-restricted routers).
@@ -1579,68 +1888,50 @@ class OpenWrtAPI:
             Dict with uptime, cpu_load, memory metrics.
 
         Raises:
-            Exception: If SSH command fails.
+            OpenWrtTimeoutError: SSH command timed out.
+            OpenWrtResponseError: SSH command failed or returned invalid JSON.
         """
-        ssh_cmd = [
-            "sshpass",
-            "-e",
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            f"{self._username}@{self._host}",
-            "/root/ha-system-metrics.sh",
-        ]
-
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._ssh_env(),
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-
-            if proc.returncode == 0:
-                try:
-                    data = json.loads(stdout.decode())
-                except ValueError as parse_err:
-                    raise OpenWrtResponseError(
-                        f"SSH system metrics returned invalid JSON: {parse_err}"
-                    ) from parse_err
-                _LOGGER.debug("SSH system metrics retrieved successfully")
-                return {
-                    "uptime": data.get("uptime", 0),
-                    "load": [0, 0, 0],  # Not available via SSH script
-                    "cpu_load": float(data.get("cpu_load", 0.0)),
-                    "cpu_load_5min": float(data.get("cpu_load_5min", 0.0)),
-                    "cpu_load_15min": float(data.get("cpu_load_15min", 0.0)),
-                    "memory": {
-                        "total": data.get("memory_total", 0),
-                        "free": data.get("memory_free", 0),
-                        "cached": data.get("memory_cached", 0),
-                        "buffers": data.get("memory_buffers", 0),
-                    },
-                }
-            else:
-                error_msg = stderr.decode().strip()
-                _LOGGER.error("SSH system metrics failed: %s", error_msg)
-                raise OpenWrtResponseError(f"SSH metrics failed: {error_msg}")
-
-        except asyncio.TimeoutError:
-            if proc is not None:
-                try:
-                    proc.terminate()
-                    await asyncio.wait_for(proc.wait(), timeout=3.0)
-                except Exception:  # noqa: BLE001
-                    proc.kill()
+        cmd = self._build_ssh_cmd("/root/ha-system-metrics.sh")
+        env = self._ssh_env() if not self._ssh_use_key else None
+        rc, stdout, stderr = await _safe_subprocess_exec(
+            cmd, env=env, timeout=10.0, binary=False
+        )
+        if rc == SUBPROCESS_RC_TIMEOUT:
             _LOGGER.error("SSH system metrics timed out")
             raise OpenWrtTimeoutError("SSH system metrics timed out")
-        except Exception as err:
-            _LOGGER.error("SSH system metrics error: %s", err)
-            raise
+        if rc < 0:
+            _LOGGER.error(
+                "SSH system metrics subprocess error rc=%d stderr=%s",
+                rc,
+                stderr.decode(errors="replace").strip(),
+            )
+            raise OpenWrtResponseError("SSH system metrics: subprocess error")
+        if rc != 0:
+            error_msg = stderr.decode(errors="replace").strip()
+            _LOGGER.error("SSH system metrics failed: %s", error_msg)
+            raise OpenWrtResponseError(f"SSH metrics failed: {error_msg}")
+
+        text = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+        try:
+            data = json.loads(text)
+        except ValueError as parse_err:
+            raise OpenWrtResponseError(
+                f"SSH system metrics returned invalid JSON: {parse_err}"
+            ) from parse_err
+        _LOGGER.debug("SSH system metrics retrieved successfully")
+        return {
+            "uptime": data.get("uptime", 0),
+            "load": [0, 0, 0],  # Not available via SSH script
+            "cpu_load": float(data.get("cpu_load", 0.0)),
+            "cpu_load_5min": float(data.get("cpu_load_5min", 0.0)),
+            "cpu_load_15min": float(data.get("cpu_load_15min", 0.0)),
+            "memory": {
+                "total": data.get("memory_total", 0),
+                "free": data.get("memory_free", 0),
+                "cached": data.get("memory_cached", 0),
+                "buffers": data.get("memory_buffers", 0),
+            },
+        }
 
     async def _get_wan_status_ssh(self) -> dict[str, Any]:
         """Get WAN status via SSH script (fallback for ACL-restricted routers).
@@ -1651,63 +1942,45 @@ class OpenWrtAPI:
             Dict with WAN connection status and RX/TX bytes.
 
         Raises:
-            Exception: If SSH command fails.
+            OpenWrtTimeoutError: SSH command timed out.
+            OpenWrtResponseError: SSH command failed or returned invalid JSON.
         """
-        ssh_cmd = [
-            "sshpass",
-            "-e",
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            f"{self._username}@{self._host}",
-            "/root/ha-wan-status.sh",
-        ]
-
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._ssh_env(),
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-
-            if proc.returncode == 0:
-                try:
-                    data = json.loads(stdout.decode())
-                except ValueError as parse_err:
-                    raise OpenWrtResponseError(
-                        f"SSH WAN status returned invalid JSON: {parse_err}"
-                    ) from parse_err
-                _LOGGER.debug("SSH WAN status retrieved successfully")
-                return {
-                    "connected": bool(data.get("wan_connected", False)),
-                    "interface": "",  # Not available via SSH script
-                    "ipv4": "",  # Not available via SSH script
-                    "uptime": 0,  # Not available via SSH script
-                    "rx_bytes": data.get("rx_bytes"),
-                    "tx_bytes": data.get("tx_bytes"),
-                }
-            else:
-                error_msg = stderr.decode().strip()
-                _LOGGER.error("SSH WAN status failed: %s", error_msg)
-                raise OpenWrtResponseError(f"SSH WAN status failed: {error_msg}")
-
-        except asyncio.TimeoutError:
-            if proc is not None:
-                try:
-                    proc.terminate()
-                    await asyncio.wait_for(proc.wait(), timeout=3.0)
-                except Exception:  # noqa: BLE001
-                    proc.kill()
+        cmd = self._build_ssh_cmd("/root/ha-wan-status.sh")
+        env = self._ssh_env() if not self._ssh_use_key else None
+        rc, stdout, stderr = await _safe_subprocess_exec(
+            cmd, env=env, timeout=10.0, binary=False
+        )
+        if rc == SUBPROCESS_RC_TIMEOUT:
             _LOGGER.error("SSH WAN status timed out")
             raise OpenWrtTimeoutError("SSH WAN status timed out")
-        except Exception as err:
-            _LOGGER.error("SSH WAN status error: %s", err)
-            raise
+        if rc < 0:
+            _LOGGER.error(
+                "SSH WAN status subprocess error rc=%d stderr=%s",
+                rc,
+                stderr.decode(errors="replace").strip(),
+            )
+            raise OpenWrtResponseError("SSH WAN status: subprocess error")
+        if rc != 0:
+            error_msg = stderr.decode(errors="replace").strip()
+            _LOGGER.error("SSH WAN status failed: %s", error_msg)
+            raise OpenWrtResponseError(f"SSH WAN status failed: {error_msg}")
+
+        text = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+        try:
+            data = json.loads(text)
+        except ValueError as parse_err:
+            raise OpenWrtResponseError(
+                f"SSH WAN status returned invalid JSON: {parse_err}"
+            ) from parse_err
+        _LOGGER.debug("SSH WAN status retrieved successfully")
+        return {
+            "connected": bool(data.get("wan_connected", False)),
+            "interface": "",  # Not available via SSH script
+            "ipv4": "",  # Not available via SSH script
+            "uptime": 0,  # Not available via SSH script
+            "rx_bytes": data.get("rx_bytes"),
+            "tx_bytes": data.get("tx_bytes"),
+        }
 
     async def _get_clients_via_ssh(
         self,
@@ -1734,49 +2007,26 @@ class OpenWrtAPI:
             "echo '}'; "
             "done; echo ']'"
         )
-        ssh_cmd = [
-            "sshpass",
-            "-e",
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            f"{self._username}@{self._host}",
-            shell_cmd,
-        ]
-
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._ssh_env(),
-            )
-            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-        except asyncio.TimeoutError as err:
-            if proc is not None:
-                try:
-                    proc.terminate()
-                    await asyncio.wait_for(proc.wait(), timeout=3.0)
-                except Exception:  # noqa: BLE001
-                    proc.kill()
-            _LOGGER.debug("SSH get_clients timed out: %s", err)
+        cmd = self._build_ssh_cmd(shell_cmd)
+        env = self._ssh_env() if not self._ssh_use_key else None
+        rc, stdout, _stderr = await _safe_subprocess_exec(
+            cmd, env=env, timeout=10.0, binary=False
+        )
+        if rc == SUBPROCESS_RC_TIMEOUT:
+            _LOGGER.debug("SSH get_clients timed out")
             return None
-        except Exception as err:
-            _LOGGER.debug("SSH get_clients failed: %s", err)
+        if rc < 0:
+            _LOGGER.debug("SSH get_clients subprocess error rc=%d", rc)
             return None
-
-        if proc.returncode != 0:
+        if rc != 0:
             _LOGGER.debug(
-                "SSH ubus get_clients failed (exit %s) — trying iw fallback",
-                proc.returncode,
+                "SSH ubus get_clients failed (exit %s) — trying iw fallback", rc
             )
             return await self._get_clients_via_iw_ssh(ifnames, ifname_to_ssid, leases)
 
+        text = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
         try:
-            entries: list[dict[str, Any]] = json.loads(stdout.decode())
+            entries: list[dict[str, Any]] = json.loads(text)
         except ValueError:
             _LOGGER.debug("SSH get_clients returned invalid JSON — trying iw fallback")
             return await self._get_clients_via_iw_ssh(ifnames, ifname_to_ssid, leases)
@@ -1834,41 +2084,19 @@ class OpenWrtAPI:
         iface_cmds = "; ".join(
             f"echo '=== {i} ==='; iw dev {i} station dump 2>/dev/null" for i in ifnames
         )
-        ssh_cmd = [
-            "sshpass",
-            "-e",
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            f"{self._username}@{self._host}",
-            iface_cmds,
-        ]
-
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._ssh_env(),
-            )
-            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-        except asyncio.TimeoutError as err:
-            if proc is not None:
-                try:
-                    proc.terminate()
-                    await asyncio.wait_for(proc.wait(), timeout=3.0)
-                except Exception:  # noqa: BLE001
-                    proc.kill()
-            _LOGGER.debug("SSH iw station dump timed out: %s", err)
+        cmd = self._build_ssh_cmd(iface_cmds)
+        env = self._ssh_env() if not self._ssh_use_key else None
+        rc, stdout, _stderr = await _safe_subprocess_exec(
+            cmd, env=env, timeout=10.0, binary=False
+        )
+        if rc == SUBPROCESS_RC_TIMEOUT:
+            _LOGGER.debug("SSH iw station dump timed out")
             return None
-        except Exception as err:
-            _LOGGER.debug("SSH iw station dump failed: %s", err)
+        if rc < 0:
+            _LOGGER.debug("SSH iw station dump subprocess error rc=%d", rc)
             return None
 
-        output = stdout.decode(errors="replace")
+        output = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
         clients: list[dict[str, Any]] = []
         seen_macs: set[str] = set()
         current_iface = ifnames[0] if ifnames else ""
@@ -1938,52 +2166,44 @@ class OpenWrtAPI:
             f"uci commit wireless && "
             f"wifi reload"
         )
-        ssh_cmd = [
-            "sshpass",
-            "-e",
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            f"{self._username}@{self._host}",
-            uci_cmd,
-        ]
+        cmd = self._build_ssh_cmd(uci_cmd)
+        env = self._ssh_env() if not self._ssh_use_key else None
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._ssh_env(),
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        rc, stdout, stderr = await _safe_subprocess_exec(
+            cmd, env=env, timeout=10.0, binary=False
+        )
 
-            if proc.returncode == 0:
-                output = stdout.decode().strip()
-                _LOGGER.info(
-                    "SSH WiFi control successful: %s (output: %s)",
-                    uci_section,
-                    output,
-                )
-                return True
-            else:
-                error_msg = stderr.decode().strip()
-                _LOGGER.error(
-                    "SSH WiFi control failed for %s: %s", uci_section, error_msg
-                )
-                raise OpenWrtResponseError(
-                    f"SSH {action_desc} failed for {uci_section}: {error_msg}"
-                )
-
-        except asyncio.TimeoutError:
+        if rc == SUBPROCESS_RC_TIMEOUT:
             _LOGGER.error("SSH command timed out for WiFi section %s", uci_section)
             raise OpenWrtTimeoutError(f"SSH {action_desc} timed out for {uci_section}")
-        except Exception as err:
+        if rc < 0:
+            # spawn-failure or cancel — surface as response error
             _LOGGER.error(
-                "SSH command failed for WiFi section %s: %s", uci_section, err
+                "SSH command failed for WiFi section %s (rc=%d, stderr=%s)",
+                uci_section,
+                rc,
+                stderr.decode(errors="replace").strip(),
             )
-            raise
+            raise OpenWrtResponseError(
+                f"SSH {action_desc} failed for {uci_section}: subprocess error"
+            )
+        if rc == 0:
+            output = (
+                stdout.strip()
+                if isinstance(stdout, str)
+                else stdout.decode(errors="replace").strip()
+            )
+            _LOGGER.info(
+                "SSH WiFi control successful: %s (output: %s)",
+                uci_section,
+                output,
+            )
+            return True
+        error_msg = stderr.decode(errors="replace").strip()
+        _LOGGER.error("SSH WiFi control failed for %s: %s", uci_section, error_msg)
+        raise OpenWrtResponseError(
+            f"SSH {action_desc} failed for {uci_section}: {error_msg}"
+        )
 
     async def _get_wifi_status_ssh(self) -> list[dict[str, Any]]:
         """Get WiFi status via direct UCI commands over SSH.
@@ -1997,79 +2217,67 @@ class OpenWrtAPI:
             OpenWrtResponseError: If SSH command fails.
             OpenWrtTimeoutError: If SSH command times out.
         """
-        ssh_cmd = [
-            "sshpass",
-            "-e",
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            f"{self._username}@{self._host}",
-            "uci show wireless",
-        ]
+        cmd = self._build_ssh_cmd("uci show wireless")
+        env = self._ssh_env() if not self._ssh_use_key else None
+        rc, stdout, stderr = await _safe_subprocess_exec(
+            cmd, env=env, timeout=10.0, binary=False
+        )
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._ssh_env(),
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-
-            if proc.returncode != 0:
-                error_msg = stderr.decode().strip()
-                _LOGGER.error("SSH WiFi status (uci) failed: %s", error_msg)
-                raise OpenWrtResponseError(f"SSH uci show wireless failed: {error_msg}")
-
-            # Parse UCI output: wireless.<section>.<key>='<value>'
-            uci: dict[str, dict[str, str]] = {}
-            for line in stdout.decode().splitlines():
-                m = re.match(r"wireless\.(\w+)\.(\w+)='?([^']*)'?", line)
-                if m:
-                    section, key, val = m.group(1), m.group(2), m.group(3)
-                    uci.setdefault(section, {})[key] = val
-
-            # Group wifi-iface sections by their parent radio device
-            radio_ifaces: dict[str, list[tuple[str, dict[str, str]]]] = {}
-            for section, attrs in uci.items():
-                device = attrs.get("device", "")
-                if device and "ssid" in attrs:
-                    radio_ifaces.setdefault(device, []).append((section, attrs))
-
-            radios: list[dict[str, Any]] = []
-            for radio_name, iface_list in radio_ifaces.items():
-                radio_attrs = uci.get(radio_name, {})
-                band = radio_attrs.get("band", "unknown")
-
-                for uci_section, attrs in iface_list:
-                    is_disabled = attrs.get("disabled", "0") == "1"
-                    ssid = attrs.get("ssid", "")
-                    is_guest = "guest" in uci_section.lower() or "guest" in ssid.lower()
-                    radios.append(
-                        {
-                            RADIO_KEY_NAME: radio_name,
-                            RADIO_KEY_BAND: band,
-                            RADIO_KEY_ENABLED: not is_disabled,
-                            RADIO_KEY_SSID: ssid,
-                            RADIO_KEY_IFNAME: uci_section,
-                            RADIO_KEY_UCI_SECTION: uci_section,
-                            RADIO_KEY_IS_GUEST: is_guest,
-                        }
-                    )
-
-            _LOGGER.debug("SSH WiFi status via uci: %d SSIDs found", len(radios))
-            return radios
-
-        except asyncio.TimeoutError:
+        if rc == SUBPROCESS_RC_TIMEOUT:
             _LOGGER.error("SSH WiFi status (uci) timed out")
             raise OpenWrtTimeoutError("SSH uci show wireless timed out")
-        except (OpenWrtResponseError, OpenWrtTimeoutError):
-            raise
-        except Exception as err:
-            _LOGGER.error("SSH WiFi status (uci) error: %s", err)
-            raise
+        if rc < 0:
+            _LOGGER.error(
+                "SSH WiFi status (uci) subprocess error rc=%d stderr=%s",
+                rc,
+                stderr.decode(errors="replace").strip(),
+            )
+            raise OpenWrtResponseError("SSH uci show wireless: subprocess error")
+        if rc != 0:
+            error_msg = stderr.decode(errors="replace").strip()
+            _LOGGER.error("SSH WiFi status (uci) failed: %s", error_msg)
+            raise OpenWrtResponseError(f"SSH uci show wireless failed: {error_msg}")
+
+        text = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+
+        # Parse UCI output: wireless.<section>.<key>='<value>'
+        uci: dict[str, dict[str, str]] = {}
+        for line in text.splitlines():
+            m = re.match(r"wireless\.(\w+)\.(\w+)='?([^']*)'?", line)
+            if m:
+                section, key, val = m.group(1), m.group(2), m.group(3)
+                uci.setdefault(section, {})[key] = val
+
+        # Group wifi-iface sections by their parent radio device
+        radio_ifaces: dict[str, list[tuple[str, dict[str, str]]]] = {}
+        for section, attrs in uci.items():
+            device = attrs.get("device", "")
+            if device and "ssid" in attrs:
+                radio_ifaces.setdefault(device, []).append((section, attrs))
+
+        radios: list[dict[str, Any]] = []
+        for radio_name, iface_list in radio_ifaces.items():
+            radio_attrs = uci.get(radio_name, {})
+            band = radio_attrs.get("band", "unknown")
+
+            for uci_section, attrs in iface_list:
+                is_disabled = attrs.get("disabled", "0") == "1"
+                ssid = attrs.get("ssid", "")
+                is_guest = "guest" in uci_section.lower() or "guest" in ssid.lower()
+                radios.append(
+                    {
+                        RADIO_KEY_NAME: radio_name,
+                        RADIO_KEY_BAND: band,
+                        RADIO_KEY_ENABLED: not is_disabled,
+                        RADIO_KEY_SSID: ssid,
+                        RADIO_KEY_IFNAME: uci_section,
+                        RADIO_KEY_UCI_SECTION: uci_section,
+                        RADIO_KEY_IS_GUEST: is_guest,
+                    }
+                )
+
+        _LOGGER.debug("SSH WiFi status via uci: %d SSIDs found", len(radios))
+        return radios
 
     async def reload_wifi(self) -> bool:
         """Reload network / WiFi configuration on the router.
@@ -2616,29 +2824,11 @@ class OpenWrtAPI:
 
     async def _get_network_interfaces_ssh(self) -> list[dict[str, Any]]:
         """SSH fallback: parse 'ip -o addr show' for interface and VLAN data."""
-        ssh_cmd = [
-            "sshpass",
-            "-e",
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            f"{self._username}@{self._host}",
-            "ip -o addr show; ip link show",
-        ]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._ssh_env(),
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-            return _parse_ip_addr_output(stdout.decode(errors="replace"))
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("SSH fallback for network interfaces failed: %s", err)
+        out = await self._run_ssh("ip -o addr show; ip link show", timeout=10.0)
+        if out is None:
+            _LOGGER.debug("SSH fallback for network interfaces returned no data")
             return []
+        return _parse_ip_addr_output(out)
 
     async def get_port_stats(self) -> list[dict[str, Any]]:
         """Return per-port link status and traffic counters from network.device/status.
@@ -2892,15 +3082,11 @@ class OpenWrtAPI:
             if not port_no_map:
                 return {}
 
-            # Read brforward binary directly via SSH (raw bytes, no base64 needed)
-            ssh_fwd = self._build_ssh_cmd("cat /sys/class/net/br-lan/brforward")
-            proc_fwd = await asyncio.create_subprocess_exec(
-                *ssh_fwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._ssh_env(),
+            # Read brforward binary directly via SSH (raw bytes, no base64 needed).
+            # The output stream contains NUL bytes — must use the binary helper.
+            fdb_bytes = await self._run_ssh_binary(
+                "cat /sys/class/net/br-lan/brforward", timeout=8.0
             )
-            fdb_bytes, _ = await asyncio.wait_for(proc_fwd.communicate(), timeout=8.0)
             if not fdb_bytes or len(fdb_bytes) % 8 != 0:
                 return {}
 
@@ -3153,27 +3339,23 @@ class OpenWrtAPI:
             # Log the command (note: we never log credentials)
             _LOGGER.debug("Update command: %s", cmd)
 
-            # Execute update via SSH (rpcd-mod-file does not support write)
-            ssh_cmd = [
-                "sshpass",
-                "-e",
-                "ssh",
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                f"{self._username}@{self._host}",
-                f"nohup sh -c '{cmd} > /tmp/opkg_update.log 2>&1' &",
-            ]
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._ssh_env(),
+            # Execute update via SSH (rpcd-mod-file does not support write).
+            # Caller-side log redirection so the user can tail it on the router.
+            # _run_ssh_detached wraps with nohup + </dev/null + & so opkg keeps
+            # running after the sshd channel closes — and the lifecycle helper
+            # guarantees no leaked subprocess locally on the HA host.
+            rc, _stdout, stderr = await self._run_ssh_detached(
+                f"{cmd} > /tmp/opkg_update.log 2>&1", timeout=30.0
             )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
-            if proc.returncode != 0:
-                error_msg = stderr.decode().strip()
+            if rc == SUBPROCESS_RC_TIMEOUT:
+                _LOGGER.error("Update SSH command timed out")
+                return {
+                    "status": "error",
+                    "message": "Update SSH command timed out",
+                    "update_type": update_type,
+                }
+            if rc != 0:
+                error_msg = stderr.decode(errors="replace").strip()
                 _LOGGER.error("Update SSH command failed: %s", error_msg)
                 return {
                     "status": "error",
@@ -3189,13 +3371,6 @@ class OpenWrtAPI:
                 "update_type": update_type,
             }
 
-        except asyncio.TimeoutError:
-            _LOGGER.error("Update SSH command timed out")
-            return {
-                "status": "error",
-                "message": "Update SSH command timed out",
-                "update_type": update_type,
-            }
         except (OpenWrtAuthError, OpenWrtResponseError) as err:
             _LOGGER.error("Update initiation failed: %s", err)
             return {

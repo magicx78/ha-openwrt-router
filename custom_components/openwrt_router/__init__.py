@@ -307,19 +307,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
 async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
     """Unload a config entry.
 
-    Called when the user removes the integration or HA is restarting.
-    Unloads all platform entities; the coordinator and session are cleaned
-    up automatically when no longer referenced.
+    Called when the user removes the integration, on reload, or HA restart.
+
+    v1.18.0 — F3 Lifecycle:
+      1. Unload platform entities (coordinator listeners drop with them).
+      2. Decrement panel refcount; on last-entry unload the sidebar panel is
+         removed and the snapshot HTTP view is soft-disabled (410 Gone).
+      3. Clear cached client-side API state (token, ifname caches) so a
+         fresh setup starts clean.  The shared aiohttp ClientSession is NOT
+         closed — it belongs to HA.
 
     Args:
         hass: Home Assistant instance.
         entry: The config entry being removed.
 
     Returns:
-        True if all platforms unloaded successfully.
+        True if platform unload succeeded.  Panel teardown and api close
+        always run so we don't leak refcount/state on partial failure.
     """
     _LOGGER.debug("Unloading OpenWrt Router entry for %s", entry.data.get(CONF_HOST))
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    # Always run lifecycle cleanup — even if platform unload partially failed
+    # we want refcount + API state in a consistent shape for any subsequent
+    # reload / setup.
+    try:
+        from .topology_panel import async_teardown_topology_panel
+
+        await async_teardown_topology_panel(hass)
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug("Topology panel teardown raised", exc_info=True)
+
+    runtime = getattr(entry, "runtime_data", None)
+    api = getattr(runtime, "api", None) if runtime is not None else None
+    if api is not None and hasattr(api, "async_close"):
+        try:
+            await api.async_close()
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("API async_close raised", exc_info=True)
+
+    return unload_ok
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> None:

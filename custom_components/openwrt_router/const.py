@@ -302,3 +302,19 @@ DEFAULT_SERVICES = ["dnsmasq", "dropbear", "firewall", "network", "uhttpd", "wpa
 
 KEY_SERVICES = "services"
 FEATURE_HAS_SERVICES = "has_services"
+
+# ---------------------------------------------------------------------------
+# F5 Aggregator (v1.18.0 — skeleton only, NOT enabled by default)
+# ---------------------------------------------------------------------------
+# When the SSH-fallback path is active, each poll spawns 8–15 sshpass+ssh
+# subprocesses (one per ubus call replacement).  The aggregator collapses all
+# of those into ONE remote shell invocation that returns a single JSON
+# document — reducing the per-poll subprocess count to 1 per router.
+#
+# Status v1.18.0: SKELETON ONLY.  The aggregator path is gated behind
+# `CONF_USE_AGGREGATOR` and disabled by default.  Production rollout is
+# planned for v1.19.0 once the 24h diagnostic data confirms F5 is needed.
+CONF_USE_AGGREGATOR = "use_aggregator"
+DEFAULT_USE_AGGREGATOR = False
+AGGREGATOR_SCHEMA_VERSION = "1.18.0"
+AGGREGATOR_REMOTE_SCRIPT_PATH = "/root/ha-collect.sh"

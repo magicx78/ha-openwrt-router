@@ -2,6 +2,46 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.18.0] - 2026-04-29
+
+> **Hardening-Release.** Kein garantierter Fix für die sporadischen HA-Crashes unter Last — der Beweis kommt aus der parallel laufenden 24h-Production-Diagnose. v1.18.0 schließt nachweisbare Lecks im Subprocess- und Panel-Lifecycle und liefert das Mess-Tooling, mit dem v1.19 die Restursache adressieren kann.
+
+### Hardening — Subprocess-Lifecycle (F4)
+
+- **Zentraler Helper `_safe_subprocess_exec`** in `api.py`. Alle 11 vormals direkten `asyncio.create_subprocess_exec`-Aufrufe wurden durch `_run_ssh` / `_run_ssh_binary` / `_run_ssh_detached` ersetzt; alle drei Helper laufen über denselben leak-freien Spawn-Pfad. Garantierte Cleanup-Sequenz `terminate → shielded wait(2s) → kill → shielded wait(2s)` auf JEDEM Exit-Pfad: success, non-zero rc, timeout, spawn-fail (`OSError`/`ValueError`), generic exception, `CancelledError` mid-flight UND `CancelledError` mid-cleanup.
+- **6 vormals leak-prone Stellen** in `api.py` migriert: `get_wan_status` rx/tx-Fallback, `_set_wifi_state_ssh`, `_get_wifi_status_ssh`, `_get_network_interfaces_ssh`, `get_bridge_fdb` (binär, NUL-safe), `perform_system_update` (opkg, detached).
+- **Doppel-Cancel-Härte (Release-Gate-Fix)**: beide `proc.wait()` im finally-Block sind jetzt `asyncio.shield`-gewrappt; ein Cancel während des Cleanups markiert intern `cleanup_cancelled=True`, eskaliert aber trotzdem bis SIGKILL + finalem Reap und re-raised `CancelledError` erst danach. Resultat: keine Zombies und keine Pipe-FDs mehr offen, auch unter HA-Shutdown-Druck.
+- **Sentinels** für nicht-OS-Returncodes: `SUBPROCESS_RC_TIMEOUT=-1`, `SUBPROCESS_RC_FAILED_TO_SPAWN=-2`, `SUBPROCESS_RC_CANCELLED=-3`. Caller distinguieren ohne `None`-Optional-Dance.
+
+### Hardening — Panel-Lifecycle (F3)
+
+- **Reference-Counting** in `topology_panel.py`: jede `async_setup_entry` bumpt `_PANEL_REFCOUNT_KEY`, jede `async_unload_entry` dekrementiert. Beim Last-Unload wird die Sidebar via `async_remove_panel` entfernt und der Snapshot-View **soft-disabled** — `OpenWrtMeshSnapshotView.get()` antwortet ab dann mit `HTTP 410 Gone`, bis ein neuer Entry den Flag zurücksetzt. Akzeptierter Trade-off: der statische Frontend-Pfad bleibt registriert (HA aiohttp router ist append-only, byte-konstant, kein Leak).
+- **Setup-Failure-Recovery (Release-Gate-Fix)**: pro-Stage-Flags `_PANEL_STATIC_BOUND_KEY` / `_PANEL_VIEW_BOUND_KEY` lassen einen Retry nach partialer Failure die fehlende Stage ergänzen, ohne bereits gebundene Resources doppelt zu registrieren. Master-Flag `_PANEL_REGISTERED_KEY` wird nur nach vollständigem Erfolg gesetzt; Refcount wird bei Failure rolled-back. `asyncio.Lock` (`_PANEL_SETUP_LOCK_KEY`) serialisiert concurrent Setup-Calls bei HA-Boot mit mehreren Config-Entries.
+- **`async_unload_entry`** ruft jetzt zusätzlich `async_teardown_topology_panel(hass)` und `entry.runtime_data.api.async_close()` (defensive try/except, beide nicht-blockierend bei Router-Ausfall — kein RPC).
+
+### Fixed
+
+- **opkg-Update Quote-Bug (pre-existing, jetzt behoben).** Der Filter-Command `grep -v -E '^addon-|^luci-' | cut -d' ' -f1` enthielt Single-Quotes, die das alte naive Wrapping `nohup sh -c '<cmd>' &` zerbrochen haben — die remote-Bash hat Pipe-Tokens statt Regex-OR interpretiert. `_run_ssh_detached` quoted `remote_cmd` jetzt POSIX-konform via `shlex.quote()`. Verifiziert mit `shlex.split(remote, posix=True)` round-trip-Test.
+
+### Added
+
+- **F5 Aggregator-Skeleton (deaktiviert).** Method `_call_aggregator()` und Schema-Version-Validator `_parse_aggregator_response()` in `api.py`; `CONF_USE_AGGREGATOR` / `DEFAULT_USE_AGGREGATOR=False` / `AGGREGATOR_SCHEMA_VERSION="1.18.0"` / `AGGREGATOR_REMOTE_SCRIPT_PATH="/root/ha-collect.sh"` in `const.py`. `_call_aggregator()` raises `NotImplementedError` bis das Remote-Script in v1.19+ deployed wird. Aktivierung erfolgt erst nach 24h-Diagnose-Auswertung.
+- **24h-Production-Sampler** `scripts/_prod_24h_sample.sh`. Read-only, pure `/proc` + `ps` + `find` (kein `lsof` nötig — funktioniert in Containern). 60s-Intervall, JSONL-Output mit RSS / VmSize / Threads / FD-Total / FD-by-Type (socket / pipe / file) / Subprocess-Count / Zombie-Count. Auswertungs-Decision-Rules im Skript-Header dokumentiert.
+- **API**: neue `OpenWrtAPI.async_close()` Methode dropped Session-Token + Caches ohne RPC. Wird von `async_unload_entry` aufgerufen.
+
+### Tests
+
+- **484 grün** (+36 neue gegenüber v1.17.9):
+  - `tests/test_subprocess_lifecycle.py` — 11 Tests inkl. Cancel-during-cleanup-Eskalation, NUL-Bytes-Round-Trip, Quote-Round-Trip via `shlex.split`.
+  - `tests/test_panel_lifecycle.py` — 13 Tests inkl. Refcount-Idempotenz, Re-Arm nach Last-Unload, Setup-Failure-Rollback (sowohl static-path als auch panel-register), Retry-überspringt-bereits-gebundene-Stages.
+  - `tests/test_aggregator_skeleton.py` — 11 Tests für Feature-Flag-Defaults, Schema-Version-Drift, JSON-Parse-Validation.
+
+### Notes & Disclaimer
+
+- **Dies ist kein Crash-Fix-Release im strengen Sinn.** Wir haben echte Lecks in 6 Subprocess-Pfaden geschlossen und das Panel-Lifecycle gehärtet, aber ob die sporadischen HA-Crashes unter Last damit verschwinden, beweist erst die parallel laufende 24h-Production-Diagnose. Falls FD-Trend nach v1.18.0 weiterhin monoton steigt, geht es in v1.19 mit dem Aggregator-Pfad (F5) weiter.
+- **Backward-compatible**: keine Migrations-Schritte nötig, keine Config-Entry-Schema-Änderung, kein Entity-Bruch.
+- **F5 Aggregator** ist deaktiviert (Default-Off) — nur Skeleton-Code, raises `NotImplementedError` bei Aktivierung.
+
 ## [1.17.9] - 2026-04-29
 
 ### Security
