@@ -513,7 +513,8 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
   const uplinkMap = new Map<string, {
     uplinkTo: string;
     uplinkType: UplinkType;
-    backhaulSignal: number;
+    backhaulSignal: number | null;
+    backhaulSignalKnown: boolean;
     gatewayPort?: string;
     apPort?: string;
     vlanTags?: number[];
@@ -528,7 +529,12 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       edge.relationship === 'wifi_uplink' ? 'repeater' :
       edge.relationship === 'mesh_member' ? 'mesh' :
       'wired';
-    const backhaulSignal = (edge.attributes?.signal as number | undefined) ?? -60;
+    // Real signal value or null — never silently fall back to a sentinel that
+    // looks like a measurement (was -60, which masqueraded as "real signal" in
+    // the Wiring view). null lets the UI distinguish "no data" from "actual −60 dBm".
+    const sigRaw = edge.attributes?.signal;
+    const backhaulSignal: number | null =
+      typeof sigRaw === 'number' && sigRaw < 0 ? sigRaw : null;
     const gatewayPort = (edge.attributes?.gateway_port as string | undefined) || undefined;
     const apPortRaw = edge.attributes?.ap_port as string | null | undefined;
     const apPort = apPortRaw ?? undefined;
@@ -538,6 +544,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       uplinkTo: edge.from,
       uplinkType,
       backhaulSignal,
+      backhaulSignalKnown: backhaulSignal !== null,
       gatewayPort,
       apPort,
       vlanTags,
@@ -585,6 +592,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       uplinkTo: uplink?.uplinkTo ?? gwNode.id,
       clientCount: clientCountMap.get(n.id) ?? 0,
       backhaulSignal: uplink?.backhaulSignal ?? -60,
+      backhaulSignalKnown: uplink?.backhaulSignalKnown ?? false,
       status: (n.attributes?.node_status as NodeStatus | undefined) ?? 'online',
       firmwareVersion: (n.attributes?.firmware as string | undefined) || undefined,
       events: ((n.attributes?.events as RouterEvent[] | undefined) ?? []).slice(0, 30),

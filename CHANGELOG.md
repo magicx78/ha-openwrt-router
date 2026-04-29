@@ -2,6 +2,19 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.17.8] - 2026-04-29
+
+### Fixed
+
+- **Wiring-View: Medium-Mapping war semantisch invertiert.** In `WiringView.tsx` wurde `uplinkType='mesh'` (Backend `mesh_member`, unverifizierter Subnet-Fallback) als "WLAN" angezeigt und `uplinkType='repeater'` (Backend `wifi_uplink`, per STA-MAC verifiziert) als "Mesh?". Korrektes Mapping: `wired→Kabel`, `repeater→WLAN`, `mesh→Mesh?`.
+- **Wiring-View: "-60 dBm"-Default täuschte echtes Signal vor.** `api.ts` setzte `backhaulSignal: number` mit `?? -60` — `mesh_member`-Edges (kein Signal-Attribut) zeigten dadurch reproduzierbar "-60 dBm" als ob es ein Messwert wäre. Neues Flag `backhaulSignalKnown` markiert echte RSSI-Werte; Wiring-Status zeigt sonst `verbunden` (WLAN) oder `vermutet · <ip>` (Mesh?).
+- **Wiring-View: Default-Hostname "OpenWrt" → unkonfigurierter Router.** Frisch geflashte Router (Hostname `openwrt`/`lede`) werden jetzt als kursiv-gedimmtes "`<ip>` (unkonfiguriert)" angezeigt, statt als gleichwertige Wiring-Zeile.
+- **Wiring-View: STA-Port für WLAN-Repeater.** Backend setzt `ap_port=null` bei `wifi_uplink`-Edges (kein physischer Port). WiringView zeigt jetzt `STA` für Medium=WLAN, statt leerem `—`.
+
+### Tests
+
+- 441 Tests grün (unverändert — Bugs liegen ausschließlich im Frontend-Adapter und der View-Komponente; Backend-Edge-Schema ist korrekt).
+
 ## [1.17.7] - 2026-04-29
 
 ### Fixed

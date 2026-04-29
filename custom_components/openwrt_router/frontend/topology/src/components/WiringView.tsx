@@ -29,6 +29,7 @@ interface WiringRow {
   speedLabel: string;
   statusLabel: string;
   detail?: string;
+  isUnconfigured?: boolean;  // target uses default OpenWrt hostname (likely fresh device)
 }
 
 function formatSpeed(mbps: number | null | undefined): string {
@@ -43,6 +44,7 @@ function formatSpeed(mbps: number | null | undefined): string {
 function shortPort(name: string | undefined | null): string {
   if (!name) return '—';
   if (/^wan/i.test(name)) return 'WAN';
+  if (/^sta/i.test(name)) return 'STA';
   const m = name.match(/^lan(\d+)$/i);
   if (m) return `LAN${m[1]}`;
   return name.toUpperCase();
@@ -54,35 +56,73 @@ function mediumLabel(m: WiringRow['medium']): string {
   return 'Mesh?';
 }
 
+/** Default OpenWrt hostname → likely a freshly-flashed, unconfigured router. */
+function isDefaultHostname(name: string): boolean {
+  const n = (name || '').trim().toLowerCase();
+  return n === 'openwrt' || n === 'lede';
+}
+
 export function WiringView({ data, onSelectAP }: Props) {
   const rows = useMemo<WiringRow[]>(() => {
     return [...data.accessPoints]
       .map<WiringRow>((ap) => {
+        // Medium-Mapping (semantisch korrekt):
+        //   uplinkType='wired'    (Backend lan_uplink)   → 'wired' "Kabel"
+        //   uplinkType='repeater' (Backend wifi_uplink)  → 'wifi'  "WLAN" (verifiziert)
+        //   uplinkType='mesh'     (Backend mesh_member)  → 'mesh'  "Mesh?" (unverifiziert)
         const medium: WiringRow['medium'] =
-          ap.uplinkType === 'wired' ? 'wired'
-          : ap.uplinkType === 'mesh' ? 'wifi'
+          ap.uplinkType === 'wired'    ? 'wired'
+          : ap.uplinkType === 'repeater' ? 'wifi'
           : 'mesh';
 
         const speed = formatSpeed(ap.gatewayPortSpeed);
         const linkUp = ap.gatewayPortUp;
+        // backhaulSignalKnown=true heißt der Wert kommt vom Backend (wifi_uplink edge),
+        // nicht vom -60-Sentinel. mesh_member-Edges (Subnet-Fallback) haben kein Signal.
+        // Mock-/altes Backend ohne Flag: behandle in plausibler RSSI-Range als echt.
+        const hasRealSignal =
+          ap.backhaulSignalKnown === true
+          || (ap.backhaulSignalKnown === undefined
+              && typeof ap.backhaulSignal === 'number'
+              && ap.backhaulSignal < 0
+              && ap.backhaulSignal !== -60);
+
         const statusLabel =
           medium === 'wired'
             ? (speed ? `${speed} ${linkUp === false ? '✗' : '✓'}` : (linkUp === false ? 'down' : 'up'))
           : medium === 'wifi'
-            ? (ap.backhaulSignal ? `${ap.backhaulSignal} dBm` : 'WLAN')
-          : '—';
+            ? (hasRealSignal ? `${ap.backhaulSignal} dBm` : 'verbunden')
+          : (ap.ip ? `vermutet · ${ap.ip}` : 'vermutet');
+
+        const targetIsDefault = isDefaultHostname(ap.name);
+        const displayName = targetIsDefault
+          ? (ap.ip ? `${ap.ip} (unkonfiguriert)` : 'Unkonfiguriert')
+          : ap.name;
+
+        // Port-Anzeige:
+        //  - wired (Backend lan_uplink): apPort='wan' → "WAN"
+        //  - wifi  (Backend wifi_uplink, repeater_override): apPort=null  → "STA"
+        //  - mesh  (Backend mesh_member, subnet_fallback):   apPort=null  → "—" (kein STA-Beweis)
+        const toPortName =
+          ap.apPort
+          ?? (medium === 'wifi' ? 'sta' : null);
 
         return {
           ap,
           fromName: data.gateway.name,
           fromPort: shortPort(ap.gatewayPort),
-          toName: ap.name,
-          toPort: shortPort(ap.apPort ?? (medium === 'wifi' ? 'sta' : ap.apPort)),
+          toName: displayName,
+          toPort: shortPort(toPortName),
           medium,
           vlans: ap.vlanTags ?? [],
           speedLabel: speed,
           statusLabel,
-          detail: medium === 'mesh' ? 'unverifiziert (Subnet-Fallback)' : undefined,
+          detail: medium === 'mesh'
+            ? `Unverifiziert: nur über Subnet erkannt${ap.ip ? ` (${ap.ip})` : ''}`
+            : medium === 'wifi' && hasRealSignal
+              ? `WLAN-Backhaul · ${ap.backhaulSignal} dBm`
+              : undefined,
+          isUnconfigured: targetIsDefault,
         };
       })
       .sort((a, b) => {
@@ -126,7 +166,7 @@ export function WiringView({ data, onSelectAP }: Props) {
             <div
               key={r.ap.id}
               role="row"
-              className={`wiring-row wiring-row--${r.medium}`}
+              className={`wiring-row wiring-row--${r.medium}${r.isUnconfigured ? ' wiring-row--unconfigured' : ''}`}
               onClick={() => onSelectAP(r.ap)}
               title={r.detail ?? `${r.fromName} ${r.fromPort} → ${r.toName} ${r.toPort}`}
             >

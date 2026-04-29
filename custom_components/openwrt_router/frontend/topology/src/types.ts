@@ -113,7 +113,10 @@ export interface AccessPoint {
   uplinkType: UplinkType;
   uplinkTo: string; // gateway id or parent AP id
   clientCount: number;
-  backhaulSignal: number; // dBm
+  backhaulSignal: number; // dBm — falls back to -60 sentinel when no real measurement
+  /** True when backhaulSignal is a real RSSI from the backend (wifi_uplink edges).
+   *  False for mesh_member subnet-fallback edges where -60 is just a placeholder. */
+  backhaulSignalKnown?: boolean;
   status: NodeStatus;
   firmwareVersion?: string; // OpenWrt release version e.g. "23.05.2"
   events?: RouterEvent[]; // recent status-change events (newest first)
