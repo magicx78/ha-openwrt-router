@@ -67,6 +67,36 @@ def _detect_router_role(data: OpenWrtCoordinatorData, host_ip: str) -> str:
     return "ap"
 
 
+def _has_active_sta_interface(data: OpenWrtCoordinatorData) -> bool:
+    """Return True if the router has at least one *associated* STA interface.
+
+    A STA-mode wireless-iface entry from UCI alone (without iwinfo data) is
+    not enough — the interface might be disabled or never brought up.  Only
+    count entries that show an actual association, indicated by a non-empty
+    BSSID together with a numeric signal value.
+    """
+    for sta in (getattr(data, "sta_interfaces", None) or []):
+        bssid = (sta.get("bssid") or "").strip()
+        signal = sta.get("signal")
+        if bssid and signal is not None:
+            return True
+    return False
+
+
+def _has_wan_carrier(data: OpenWrtCoordinatorData) -> bool:
+    """Return True if any port whose name starts with 'wan' has link carrier.
+
+    Used to short-circuit the repeater override: if the WAN port shows
+    ``up=True`` the router is physically uplinked via Ethernet, even if a
+    STA-mode wireless interface is also configured.
+    """
+    for port in (getattr(data, "port_stats", None) or []):
+        name = (port.get("name") or "").lower()
+        if name.startswith("wan") and port.get("up") is True:
+            return True
+    return False
+
+
 def _detect_inter_router_edges(
     router_snapshots: list[dict[str, Any]],
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
@@ -251,15 +281,22 @@ def _detect_inter_router_edges(
                 })
                 seen_edges.add(edge_id)
 
-    # Repeater override: a router with at least one wireless STA-mode
-    # interface has no Ethernet uplink — even if Method 1 / 2.5 produced a
-    # `lan_uplink` edge (which can happen because the gateway's DHCP server
-    # also leases an IP via WiFi).  Promote those edges to `wifi_uplink` so
-    # the UI shows them as "WLAN Repeater" instead of "Kabel".
+    # Repeater override: a router with an *associated* wireless STA-mode
+    # interface AND no WAN-port carrier is acting as a WLAN repeater — even
+    # if Method 1 / 2.5 produced a `lan_uplink` edge (which can happen
+    # because the gateway's DHCP server also leases an IP via WiFi).
+    # Promote those edges to `wifi_uplink` so the UI shows "WLAN Repeater"
+    # instead of "Kabel".
+    #
+    # Guards (both must be true to override):
+    #   1. STA interface is actually associated (bssid + signal present) —
+    #      stale/disabled UCI entries are ignored.
+    #   2. WAN port has no link carrier — if the cable is plugged in,
+    #      respect the wired uplink even when a STA iface is also active.
     repeater_rids = {
         rid
         for rid, _hip, data in router_data
-        if (getattr(data, "sta_interfaces", None) or [])
+        if _has_active_sta_interface(data) and not _has_wan_carrier(data)
     }
     for edge in edges:
         if edge["relationship"] != "lan_uplink":

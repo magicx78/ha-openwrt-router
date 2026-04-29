@@ -223,3 +223,16 @@ export function IconCompare({ size = 20, className }: IconProps) {
     </svg>
   );
 }
+
+export function IconWiring({ size = 20, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <rect x="2" y="6" width="6" height="12" rx="1" />
+      <rect x="16" y="6" width="6" height="12" rx="1" />
+      <line x1="8" y1="9" x2="16" y2="9" />
+      <line x1="8" y1="15" x2="16" y2="15" />
+      <circle cx="5" cy="12" r="0.8" fill="currentColor" />
+      <circle cx="19" cy="12" r="0.8" fill="currentColor" />
+    </svg>
+  );
+}

@@ -1,14 +1,6 @@
 import React, { useState } from 'react';
 import type { PortStat } from '../types';
-
-const VLAN_COLORS = [
-  '#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6',
-  '#ef4444', '#eab308', '#14b8a6',
-];
-
-function vlanColor(vlanId: number): string {
-  return VLAN_COLORS[vlanId % VLAN_COLORS.length];
-}
+import { vlanColor } from '../utils/vlanColor';
 
 interface Props {
   ports: PortStat[];
@@ -79,7 +71,7 @@ function PortChip({ port: p, vlanMode }: { port: PortStat; vlanMode?: boolean })
 
   const cls = [
     'port-strip__port',
-    p.up ? 'port-strip__port--up' : '',
+    p.up ? 'port-strip__port--up' : 'port-strip__port--down',
     portTypeClass(p.name),
     hasVlanColor ? 'port-strip__port--vlan-colored' : '',
   ].filter(Boolean).join(' ');

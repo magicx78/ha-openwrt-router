@@ -25,6 +25,7 @@ import { Sidebar, SidebarTab } from './components/Sidebar';
 import { EdgeTooltip } from './components/EdgeTooltip';
 import { NodeTooltip } from './components/NodeTooltip';
 import { DevicesView } from './components/DevicesView';
+import { WiringView } from './components/WiringView';
 import { ClientsView } from './components/ClientsView';
 import { AlertsView } from './components/AlertsView';
 import { TrafficView } from './components/TrafficView';
@@ -500,6 +501,12 @@ export function TopologyView({ data }: Props) {
           <DevicesView
             data={data}
             onSelectGateway={selectGateway}
+            onSelectAP={ap => setSelectedEntity({ type: 'ap', data: ap, clients: data.clients.filter(c => c.apId === ap.id) })}
+          />
+        )}
+        {activeTab === 'wiring' && (
+          <WiringView
+            data={data}
             onSelectAP={ap => setSelectedEntity({ type: 'ap', data: ap, clients: data.clients.filter(c => c.apId === ap.id) })}
           />
         )}

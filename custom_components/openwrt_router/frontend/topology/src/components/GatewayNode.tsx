@@ -4,6 +4,7 @@ import { StatusDot } from './StatusDot';
 import { IconRouter } from './Icons';
 import { PortStrip } from './PortStrip';
 import { useStatusFlash } from '../useStatusFlash';
+import { vlanColor } from '../utils/vlanColor';
 
 interface Props {
   gateway: Gateway;
@@ -206,7 +207,9 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onCo
           {gateway.vlans.map((v) => (
             <span
               key={v.id}
-              className={`vlan-badge${v.status === 'up' ? ' vlan-badge--up' : v.status === 'down' ? ' vlan-badge--down' : ''}${gateway.vlansStale ? ' vlan-badge--stale' : ''}`}
+              data-vlan={v.id}
+              style={{ '--vlan-color': vlanColor(v.id) } as React.CSSProperties}
+              className={`vlan-badge vlan-badge--colored${v.status === 'up' ? ' vlan-badge--up' : v.status === 'down' ? ' vlan-badge--down' : ''}${gateway.vlansStale ? ' vlan-badge--stale' : ''}`}
               title={gateway.vlansStale
                 ? `VLAN ${v.id} · gecachte Daten (Router kurzzeitig offline)`
                 : `VLAN ${v.id} · ${v.status}`}

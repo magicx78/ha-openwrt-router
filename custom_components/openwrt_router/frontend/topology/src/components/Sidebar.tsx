@@ -9,9 +9,10 @@ import {
   IconChevronLeft,
   IconChevronRight,
   IconCompare,
+  IconWiring,
 } from './Icons';
 
-export type SidebarTab = 'topology' | 'devices' | 'clients' | 'traffic' | 'alerts' | 'compare' | 'settings';
+export type SidebarTab = 'topology' | 'devices' | 'clients' | 'traffic' | 'alerts' | 'compare' | 'wiring' | 'settings';
 
 interface NavItem {
   id: SidebarTab;
@@ -32,6 +33,7 @@ export function Sidebar({ open, activeTab, warningCount, onToggle, onTabChange }
   const items: NavItem[] = [
     { id: 'topology', label: 'Topologie',  Icon: IconTopology },
     { id: 'devices',  label: 'Geräte',     Icon: IconDevices },
+    { id: 'wiring',   label: 'Verkabelung', Icon: IconWiring },
     { id: 'clients',  label: 'Clients',    Icon: IconClients },
     { id: 'traffic',  label: 'Traffic',    Icon: IconTraffic },
     { id: 'alerts',   label: 'Alarme',     Icon: IconAlerts,  badge: warningCount > 0 ? warningCount : undefined },

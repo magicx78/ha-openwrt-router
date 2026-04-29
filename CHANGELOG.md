@@ -2,6 +2,31 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.17.7] - 2026-04-29
+
+### Fixed
+
+- **Topology: AP3 wurde fälschlich als "WLAN Repeater" angezeigt, obwohl er per Kabel angeschlossen war.** Der v1.17.5 Repeater-Override in `topology_mesh._detect_inter_router_edges()` löste sich bereits aus, sobald *irgendein* `sta_interfaces`-Eintrag für einen Router vorhanden war. UCI-Fallback in `api.get_sta_interface_details()` listet aber auch deaktivierte/abgemeldete Wireless-Sections — ohne `bssid` und ohne `signal`. Solche Stale-Einträge stempelten Kabel-APs zu Repeatern. Fix: zwei Helfer `_has_active_sta_interface(data)` (verlangt `bssid`+`signal`) und `_has_wan_carrier(data)` (prüft `port_stats[wan].up`); der Override greift jetzt nur, wenn die STA-Iface aktiv assoziiert ist *und* der WAN-Port keinen Link-Carrier hat. Echte WLAN-Repeater (z. B. OpenWrt) bleiben unverändert auf `wifi_uplink`.
+
+### Added
+
+- **Neue Sidebar-Ansicht "Verkabelung"** — strukturierte Tabelle aller Inter-Router-Verbindungen: Quelle/Port → Ziel/Port, Medium (Kabel/WLAN/Mesh?), VLAN-Tags und Status (Speed bzw. dBm). Sortiert nach Medium (Kabel zuerst). Klick auf eine Zeile öffnet das DetailPanel des Ziel-APs.
+- **Farbige VLAN-Badges in Gateway- und AP-Karten** — jede VLAN-ID hat jetzt eine konsistente Farbe (gleiche 7-Farb-Palette wie Port-Chips und Edge-Labels). VLAN 30 sieht überall identisch aus.
+- **Minimap-Header mit Titel "Übersicht"** — der Mini-Map-Container wirkte ohne Beschriftung wie ein orphanes Fragment am unteren rechten Rand. Jetzt klar als Übersichtsfenster erkennbar.
+
+### Changed
+
+- **Aktiv/inaktiv-Kontrast der LAN-Port-Chips deutlich erhöht.** Down-Ports erhalten gestrichelten Rahmen, opacity 0.45 und keinen LED-Glow. Die VLAN-Färbung greift nur noch auf Up-Ports — der Link-Status ist damit das dominante visuelle Signal, unabhängig vom konfigurierten VLAN.
+- **Shared VLAN-Color-Utility:** `VLAN_COLORS` + `vlanColor()` aus `PortStrip.tsx` extrahiert nach `utils/vlanColor.ts`. Wird jetzt von PortStrip, GatewayNode, APNode und WiringView gemeinsam genutzt — garantiert deterministische Konsistenz pro VLAN-ID.
+
+### Tests
+
+- `tests/test_topology_mesh.py` um 3 neue Cases ergänzt:
+  - `test_repeater_override_skipped_when_wan_carrier_up` — der eigentliche AP3-Fall
+  - `test_repeater_override_skipped_when_sta_inactive` — UCI-Stale-Eintrag wird ignoriert
+  - `test_repeater_override_active_when_sta_assoc_and_wan_down` — Regressionsschutz für echte Repeater
+- Total: 441 Tests grün (+3).
+
 ## [1.17.6] - 2026-04-29
 
 ### Fixed

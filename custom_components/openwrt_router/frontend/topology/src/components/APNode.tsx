@@ -6,6 +6,7 @@ import { SignalBar } from './SignalBar';
 import { computeHealth } from './GatewayNode';
 import { useStatusFlash } from '../useStatusFlash';
 import { PortStrip } from './PortStrip';
+import { vlanColor } from '../utils/vlanColor';
 
 function trendArrow(history: number[]): string {
   if (history.length < 3) return '→';
@@ -191,7 +192,9 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
           )}
           {ap.primaryVlanId != null && (
             <span
-              className="vlan-badge vlan-badge--up"
+              data-vlan={ap.primaryVlanId}
+              style={{ '--vlan-color': vlanColor(ap.primaryVlanId) } as React.CSSProperties}
+              className="vlan-badge vlan-badge--colored vlan-badge--up"
               title={`VLAN ${ap.primaryVlanId}`}
             >
               <span className="vlan-badge__id">VLAN {ap.primaryVlanId}</span>
