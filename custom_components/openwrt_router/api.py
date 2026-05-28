@@ -479,6 +479,13 @@ class OpenWrtAPI:
         # L-1: track consecutive login failures to suppress log spam
         self._login_failure_count: int = 0
 
+        # (object, method) pairs confirmed permanently ACL-blocked this session
+        # (authenticated OK but rpcd denies the method). Cached so we stop
+        # re-logging in for them on every poll — that login churn is what keeps
+        # spawning rpcd sessions on ACL-restricted routers. Cleared on reload
+        # (new instance) so a deployed/updated ACL is re-probed.
+        self._acl_blocked: set[tuple[str, str]] = set()
+
         # P-6: track consecutive auth failures for backoff (wrong credentials)
         self._auth_failure_count: int = 0
         self._auth_backoff_until: float = 0.0
@@ -3585,6 +3592,15 @@ class OpenWrtAPI:
             # Backoff expired: reset and try again
             self._auth_failure_count = 0
 
+        # Short-circuit methods already confirmed ACL-blocked this session.
+        # Re-trying them only fails again and (pre-cache) triggered a useless
+        # re-login each poll — the main driver of rpcd session churn on
+        # ACL-restricted routers. Treat as method-not-found without any call.
+        if (ubus_object, method) in self._acl_blocked:
+            raise OpenWrtMethodNotFoundError(
+                f"rpcd ACL blocks {ubus_object}/{method} (cached this session)"
+            )
+
         payload = self._build_call(ubus_object, method, params)
         try:
             result = await self._raw_call(payload)
@@ -3615,8 +3631,11 @@ class OpenWrtAPI:
                 except OpenWrtAuthError:
                     # Re-login succeeded but method STILL returns -32002
                     # → genuine ACL restriction, NOT a credential issue.
-                    # Convert to MethodNotFoundError so the coordinator
-                    # does not trigger ConfigEntryAuthFailed.
+                    # Remember it so future polls skip the call + re-login
+                    # entirely (see the short-circuit above), then convert to
+                    # MethodNotFoundError so the coordinator does not trigger
+                    # ConfigEntryAuthFailed.
+                    self._acl_blocked.add((ubus_object, method))
                     raise OpenWrtMethodNotFoundError(
                         f"rpcd ACL blocks {ubus_object}/{method} "
                         f"(authenticated OK, method not permitted)"

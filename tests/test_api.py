@@ -545,6 +545,54 @@ class TestAutoRelogin:
         mock_api.login.assert_not_awaited()
 
 
+class TestAclBlockCache:
+    """ACL-blocked methods are cached so they stop triggering re-logins.
+
+    On ACL-restricted routers a -32002 on every poll used to re-login each
+    time, spawning rpcd sessions endlessly. Once a method is confirmed blocked
+    (authenticated OK but still denied) it must be remembered and short-circuited.
+    """
+
+    @pytest.mark.asyncio
+    async def test_blocked_method_cached_and_skips_relogin(self, mock_api):
+        import time
+
+        mock_api._token_expires_at = time.monotonic() + 3600  # valid → no proactive refresh
+        mock_api._raw_call = AsyncMock(side_effect=OpenWrtAuthError("rpcd -32002"))
+        mock_api.login = AsyncMock()
+
+        # First call: one confirming re-login, still denied → cached + MethodNotFound
+        with pytest.raises(OpenWrtMethodNotFoundError):
+            await mock_api._call("hostapd.phy0-ap0", "get_clients", {})
+        assert ("hostapd.phy0-ap0", "get_clients") in mock_api._acl_blocked
+        assert mock_api.login.await_count == 1
+
+        # Second call: short-circuited, NO further re-login
+        with pytest.raises(OpenWrtMethodNotFoundError):
+            await mock_api._call("hostapd.phy0-ap0", "get_clients", {})
+        assert mock_api.login.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_transient_auth_error_is_not_cached(self, mock_api):
+        import time
+
+        mock_api._token_expires_at = time.monotonic() + 3600
+        calls = {"n": 0}
+
+        async def _raw(payload):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OpenWrtAuthError("expired session")
+            return {"ok": True}
+
+        mock_api._raw_call = AsyncMock(side_effect=_raw)
+        mock_api.login = AsyncMock()
+
+        result = await mock_api._call("system", "board", {})
+        assert result == {"ok": True}
+        assert ("system", "board") not in mock_api._acl_blocked
+
+
 class TestEnsureFreshToken:
     @pytest.mark.asyncio
     async def test_no_refresh_when_token_valid(self, mock_api):
