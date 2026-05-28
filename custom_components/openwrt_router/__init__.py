@@ -284,9 +284,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
 
     # Register the openwrt-topology-card Lovelace resource (idempotent).
     # Auto-served so users don't need a manual entry under Dashboards → Resources.
-    from .topology_card import async_setup_topology_card
+    # Optional: a release may ship without the (WIP) topology_card module — its
+    # absence must NOT break integration setup, so import defensively.
+    try:
+        from .topology_card import async_setup_topology_card
 
-    await async_setup_topology_card(hass)
+        await async_setup_topology_card(hass)
+    except ImportError:
+        _LOGGER.debug(
+            "topology_card module not present — skipping Lovelace card resource"
+        )
 
     # Ensure the rpcd ACL on the router is present AND current. Runs on first
     # install and on every startup/update: ensure_acl re-deploys when the file
