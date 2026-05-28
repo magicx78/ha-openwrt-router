@@ -29,6 +29,7 @@ from .const import (
     DEFAULT_TIMEOUT,
     PROTOCOL_HTTP,
     SESSION_LIFETIME_SECONDS,
+    SESSION_LOGIN_TIMEOUT_SECONDS,
     SESSION_REFRESH_MARGIN_SECONDS,
     PROTOCOL_HTTPS_INSECURE,
     DHCP_LEASES_PATH,
@@ -62,6 +63,7 @@ from .const import (
     UBUS_NETWORK_OBJECT,
     UBUS_NETWORK_RELOAD,
     UBUS_NETWORK_RELOAD_METHOD,
+    UBUS_SESSION_METHOD_DESTROY,
     UBUS_SESSION_METHOD_LOGIN,
     UBUS_SESSION_OBJECT_LOGIN,
     UBUS_SYSTEM_BOARD,
@@ -477,6 +479,13 @@ class OpenWrtAPI:
         # L-1: track consecutive login failures to suppress log spam
         self._login_failure_count: int = 0
 
+        # (object, method) pairs confirmed permanently ACL-blocked this session
+        # (authenticated OK but rpcd denies the method). Cached so we stop
+        # re-logging in for them on every poll — that login churn is what keeps
+        # spawning rpcd sessions on ACL-restricted routers. Cleared on reload
+        # (new instance) so a deployed/updated ACL is re-probed.
+        self._acl_blocked: set[tuple[str, str]] = set()
+
         # P-6: track consecutive auth failures for backoff (wrong credentials)
         self._auth_failure_count: int = 0
         self._auth_backoff_until: float = 0.0
@@ -500,22 +509,32 @@ class OpenWrtAPI:
         self._root_warning_logged = False
 
     async def async_close(self) -> None:
-        """Release client-side state on integration unload.
+        """Release state on integration unload and free the rpcd session.
 
-        Drops the cached rpcd session token so the on-router session times out
-        naturally (default 300s).  Does NOT close ``self._session`` — that is
-        the HA-shared aiohttp ClientSession from ``async_get_clientsession()``
-        and must stay alive for other integrations.
-
-        Intentionally synchronous (no network I/O): an explicit logout RPC
-        could block ``async_unload_entry`` if the router is unreachable.
+        Best-effort destroys the active server-side session so it does not
+        linger until its TTL after every reload.  The destroy is bounded by a
+        short timeout so an unreachable / hung router can never stall
+        ``async_unload_entry``.  Does NOT close ``self._session`` — that is the
+        HA-shared aiohttp ClientSession from ``async_get_clientsession()`` and
+        must stay alive for other integrations.
         """
+        active_token = self._token
+        if active_token and active_token != DEFAULT_SESSION_ID:
+            try:
+                await asyncio.wait_for(self._destroy_session(active_token), timeout=3.0)
+            except Exception:  # noqa: BLE001
+                # Never let cleanup block or break unload.
+                _LOGGER.debug(
+                    "session destroy on close timed out / failed", exc_info=True
+                )
         self._token = DEFAULT_SESSION_ID
         self._token_expires_at = 0.0
         self._wifi_method = None
         self._hostapd_ifaces = None
         self._luci_rpc_ssid_map = None
-        _LOGGER.debug("OpenWrtAPI(%s) closed — session state cleared", self._host)
+        _LOGGER.debug(
+            "OpenWrtAPI(%s) closed — session destroyed and state cleared", self._host
+        )
 
     # ------------------------------------------------------------------
     # Public auth API
@@ -542,13 +561,22 @@ class OpenWrtAPI:
             )
             self._root_warning_logged = True
 
+        # Remember the session we are about to replace so we can destroy it
+        # server-side once the new one is established.  Without this, every
+        # re-login (proactive refresh every ~240s AND every ACL "-32002" retry)
+        # orphans a long-lived rpcd session.  Those sessions accumulate and leak
+        # rpcd memory until the router OOM-kills processes (the original bug).
+        old_token = self._token
+
         payload = self._build_call(
             UBUS_SESSION_OBJECT_LOGIN,
             UBUS_SESSION_METHOD_LOGIN,
             {
                 "username": self._username,
                 "password": self._password,
-                "timeout": 86400,  # 24h — prevents frequent re-logins on devices with short default TTL
+                # Server-side TTL. Sessions are explicitly destroyed on re-login
+                # (see below), so this only bounds the lifetime of a rare orphan.
+                "timeout": SESSION_LOGIN_TIMEOUT_SECONDS,
             },
             use_default_session=True,
         )
@@ -579,8 +607,48 @@ class OpenWrtAPI:
         self._login_failure_count = 0
         self._token = token
         self._token_expires_at = time.monotonic() + SESSION_LIFETIME_SECONDS
+
+        # Destroy the session we just replaced (best-effort, authenticated with
+        # the new token).  This is what prevents the rpcd session/memory leak:
+        # without it, each re-login leaves a long-lived orphan behind.
+        if old_token and old_token != DEFAULT_SESSION_ID and old_token != token:
+            await self._destroy_session(old_token)
+
         _LOGGER.debug("Login successful, session established")
         return True
+
+    async def _destroy_session(self, token: str) -> None:
+        """Best-effort destroy of a server-side rpcd session.
+
+        Used to free the previous session on re-login and the active session on
+        unload so rpcd sessions never accumulate (the root cause of the rpcd
+        memory leak / OOM).  Authenticated with the *current* ``self._token``.
+
+        Never raises and never triggers a re-login: a failed destroy (router
+        unreachable, session already gone) must not break login or shutdown.
+        The orphaned session — if any — expires on its own after
+        ``SESSION_LOGIN_TIMEOUT_SECONDS``.
+        """
+        if not token or token == DEFAULT_SESSION_ID:
+            return
+        self._rpc_id += 1
+        payload = {
+            "jsonrpc": "2.0",
+            "id": self._rpc_id,
+            "method": "call",
+            "params": [
+                self._token,
+                UBUS_SESSION_OBJECT_LOGIN,
+                UBUS_SESSION_METHOD_DESTROY,
+                {"ubus_rpc_session": token},
+            ],
+        }
+        try:
+            await self._raw_call(payload)
+            _LOGGER.debug("Destroyed previous rpcd session")
+        except Exception:  # noqa: BLE001
+            # Best-effort only — a leftover session expires via its TTL.
+            _LOGGER.debug("session/destroy (best-effort) failed", exc_info=True)
 
     def _build_ssl_context(self) -> ssl.SSLContext | None:
         """Build SSL context for HTTPS connections.
@@ -3522,6 +3590,15 @@ class OpenWrtAPI:
             # Backoff expired: reset and try again
             self._auth_failure_count = 0
 
+        # Short-circuit methods already confirmed ACL-blocked this session.
+        # Re-trying them only fails again and (pre-cache) triggered a useless
+        # re-login each poll — the main driver of rpcd session churn on
+        # ACL-restricted routers. Treat as method-not-found without any call.
+        if (ubus_object, method) in self._acl_blocked:
+            raise OpenWrtMethodNotFoundError(
+                f"rpcd ACL blocks {ubus_object}/{method} (cached this session)"
+            )
+
         payload = self._build_call(ubus_object, method, params)
         try:
             result = await self._raw_call(payload)
@@ -3552,8 +3629,11 @@ class OpenWrtAPI:
                 except OpenWrtAuthError:
                     # Re-login succeeded but method STILL returns -32002
                     # → genuine ACL restriction, NOT a credential issue.
-                    # Convert to MethodNotFoundError so the coordinator
-                    # does not trigger ConfigEntryAuthFailed.
+                    # Remember it so future polls skip the call + re-login
+                    # entirely (see the short-circuit above), then convert to
+                    # MethodNotFoundError so the coordinator does not trigger
+                    # ConfigEntryAuthFailed.
+                    self._acl_blocked.add((ubus_object, method))
                     raise OpenWrtMethodNotFoundError(
                         f"rpcd ACL blocks {ubus_object}/{method} "
                         f"(authenticated OK, method not permitted)"

@@ -282,16 +282,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
 
     await async_setup_topology_panel(hass)
 
-    # Auto-provision rpcd ACL on router if missing (best-effort, non-blocking)
+    # Register the openwrt-topology-card Lovelace resource (idempotent).
+    # Auto-served so users don't need a manual entry under Dashboards → Resources.
+    # Optional: a release may ship without the (WIP) topology_card module — its
+    # absence must NOT break integration setup, so import defensively.
     try:
-        from .acl_provisioning import check_and_deploy_acl
+        from .topology_card import async_setup_topology_card
 
-        deployed = await check_and_deploy_acl(api)
-        if deployed:
-            _LOGGER.info("Deployed rpcd ACL to %s — refreshing data", host)
+        await async_setup_topology_card(hass)
+    except ImportError:
+        _LOGGER.debug(
+            "topology_card module not present — skipping Lovelace card resource"
+        )
+
+    # Ensure the rpcd ACL on the router is present AND current. Runs on first
+    # install and on every startup/update: ensure_acl re-deploys when the file
+    # is missing OR its content drifted from this version's expected ACL (e.g.
+    # after an update that widened the required ubus methods). Best-effort and
+    # non-blocking — a router that blocks file/write logs a manual-deploy hint
+    # and is retried on the next start (SSH fallbacks keep the integration
+    # working meanwhile).
+    try:
+        from .acl_provisioning import ensure_acl
+
+        if await ensure_acl(api):
+            _LOGGER.info("rpcd ACL on %s was deployed/updated — refreshing data", host)
             await coordinator.async_request_refresh()
     except Exception:  # noqa: BLE001
-        _LOGGER.debug("ACL provisioning skipped (SSH not available)")
+        _LOGGER.debug("rpcd ACL provisioning skipped", exc_info=True)
 
     _LOGGER.info(
         "OpenWrt Router '%s' set up successfully (model: %s, host: %s:%s)",
@@ -338,6 +356,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
         await async_teardown_topology_panel(hass)
     except Exception:  # noqa: BLE001
         _LOGGER.debug("Topology panel teardown raised", exc_info=True)
+
+    try:
+        from .topology_card import async_teardown_topology_card
+
+        await async_teardown_topology_card(hass)
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug("Topology card teardown raised", exc_info=True)
 
     runtime = getattr(entry, "runtime_data", None)
     api = getattr(runtime, "api", None) if runtime is not None else None

@@ -275,7 +275,7 @@ class TestDynamicInterfaceSensors:
         mock_config_entry.async_on_unload = MagicMock()
 
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             async_setup_entry(
                 hass=MagicMock(),
                 entry=mock_config_entry,
@@ -309,7 +309,7 @@ class TestDynamicInterfaceSensors:
         mock_config_entry.async_on_unload = MagicMock()
 
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             async_setup_entry(
                 hass=MagicMock(),
                 entry=mock_config_entry,
@@ -389,7 +389,7 @@ class TestDynamicRadioSensors:
         mock_config_entry.async_on_unload = MagicMock()
 
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             async_setup_entry(
                 hass=MagicMock(),
                 entry=mock_config_entry,
