@@ -521,9 +521,7 @@ class OpenWrtAPI:
         active_token = self._token
         if active_token and active_token != DEFAULT_SESSION_ID:
             try:
-                await asyncio.wait_for(
-                    self._destroy_session(active_token), timeout=3.0
-                )
+                await asyncio.wait_for(self._destroy_session(active_token), timeout=3.0)
             except Exception:  # noqa: BLE001
                 # Never let cleanup block or break unload.
                 _LOGGER.debug(

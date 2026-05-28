@@ -99,7 +99,10 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
         current = await api._call("file", "read", {"path": ACL_FILE_PATH})
         current_str = current.get("data") if isinstance(current, dict) else current
         try:
-            if isinstance(current_str, str) and json.loads(current_str) == RPCD_ACL_CONTENT:
+            if (
+                isinstance(current_str, str)
+                and json.loads(current_str) == RPCD_ACL_CONTENT
+            ):
                 _LOGGER.debug(
                     "rpcd ACL on %s is up to date (v%s) — nothing to do",
                     api._host,

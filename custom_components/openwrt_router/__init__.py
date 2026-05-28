@@ -306,9 +306,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         from .acl_provisioning import ensure_acl
 
         if await ensure_acl(api):
-            _LOGGER.info(
-                "rpcd ACL on %s was deployed/updated — refreshing data", host
-            )
+            _LOGGER.info("rpcd ACL on %s was deployed/updated — refreshing data", host)
             await coordinator.async_request_refresh()
     except Exception:  # noqa: BLE001
         _LOGGER.debug("rpcd ACL provisioning skipped", exc_info=True)
