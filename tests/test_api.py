@@ -438,6 +438,83 @@ class TestLogin:
         assert mock_api._login_failure_count == 0
 
 
+class TestSessionDestroyOnRelogin:
+    """Regression: re-login must destroy the previous rpcd session.
+
+    Without this, every re-login (proactive refresh + ACL -32002 retries) left a
+    long-lived orphan session behind. They accumulated and leaked rpcd memory
+    until the router OOM-killed processes — the root cause of the camera outage.
+    """
+
+    _OLD = "OLDSESSIONOLDSESSIONOLDSESSION01"
+
+    def _api_with_raw(self, recorded: list):
+        api = _make_api_with_response(json_data={})
+
+        async def _raw(payload):
+            recorded.append(payload["params"])
+            if payload["params"][2] == "login":
+                return {"ubus_rpc_session": MOCK_SESSION_TOKEN}
+            return {}
+
+        api._raw_call = AsyncMock(side_effect=_raw)
+        return api
+
+    @pytest.mark.asyncio
+    async def test_relogin_destroys_previous_session(self):
+        calls: list = []
+        api = self._api_with_raw(calls)
+        api._token = self._OLD  # a real, non-default session is active
+
+        assert await api.login() is True
+        assert api._token == MOCK_SESSION_TOKEN
+
+        destroys = [p for p in calls if p[2] == "destroy"]
+        assert len(destroys) == 1
+        params = destroys[0]
+        assert params[0] == MOCK_SESSION_TOKEN  # authed with the NEW session
+        assert params[1] == "session"
+        assert params[3] == {"ubus_rpc_session": self._OLD}
+
+    @pytest.mark.asyncio
+    async def test_first_login_does_not_destroy(self):
+        calls: list = []
+        api = self._api_with_raw(calls)
+        api._token = DEFAULT_SESSION_ID  # nothing to free yet
+
+        await api.login()
+        assert [p for p in calls if p[2] == "destroy"] == []
+
+    @pytest.mark.asyncio
+    async def test_destroy_failure_does_not_break_login(self):
+        api = _make_api_with_response(json_data={})
+
+        async def _raw(payload):
+            if payload["params"][2] == "login":
+                return {"ubus_rpc_session": MOCK_SESSION_TOKEN}
+            raise OpenWrtConnectionError("router briefly unreachable")
+
+        api._raw_call = AsyncMock(side_effect=_raw)
+        api._token = self._OLD
+
+        # destroy raises internally but must be swallowed
+        assert await api.login() is True
+        assert api._token == MOCK_SESSION_TOKEN
+
+    @pytest.mark.asyncio
+    async def test_async_close_destroys_active_session(self):
+        calls: list = []
+        api = self._api_with_raw(calls)
+        api._token = MOCK_SESSION_TOKEN
+
+        await api.async_close()
+
+        destroys = [p for p in calls if p[2] == "destroy"]
+        assert len(destroys) == 1
+        assert destroys[0][3] == {"ubus_rpc_session": MOCK_SESSION_TOKEN}
+        assert api._token == DEFAULT_SESSION_ID
+
+
 class TestAutoRelogin:
     @pytest.mark.asyncio
     async def test_relogin_on_auth_error(self, mock_api):

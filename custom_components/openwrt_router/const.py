@@ -42,6 +42,16 @@ DEFAULT_SESSION_ID = "00000000000000000000000000000000"
 SESSION_LIFETIME_SECONDS = 300
 SESSION_REFRESH_MARGIN_SECONDS = 60
 
+# Server-side rpcd session timeout requested at login.
+# Must be comfortably larger than the client refresh interval
+# (SESSION_LIFETIME_SECONDS) so a session never expires mid-poll, but small
+# enough that an orphaned session (one whose explicit destroy failed because
+# the router was briefly unreachable) self-heals quickly instead of lingering.
+# NOTE: every login destroys the previous session (see OpenWrtAPI.login), so
+# sessions do not accumulate; this value only bounds the lifetime of a rare
+# orphan. Keep > SESSION_LIFETIME_SECONDS.
+SESSION_LOGIN_TIMEOUT_SECONDS = 600
+
 # Update interval
 SCAN_INTERVAL_SECONDS = 60
 
@@ -64,6 +74,7 @@ DATA_API = "api"
 # ubus subsystems / methods
 UBUS_SESSION_LOGIN = "session"
 UBUS_SESSION_METHOD_LOGIN = "login"
+UBUS_SESSION_METHOD_DESTROY = "destroy"
 UBUS_SESSION_OBJECT_LOGIN = "session"
 
 UBUS_SYSTEM_OBJECT = "system"
