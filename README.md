@@ -153,7 +153,7 @@ The Inspector panel shows a per-device event timeline — status changes recorde
 - **Update Management**: Check for and perform system/package updates
 - **Buttons**: Reload WiFi, Check Updates, Perform Updates, Restart Service
 - **SSL/HTTPS**: Secure connections with self-signed certificate support
-- **Auto-ACL Provisioning**: Automatically deploys the rpcd ACL file via ubus (SSH fallback when the router blocks ubus file access) — on first add and re-validated on every startup
+- **Auto-ACL Provisioning**: Automatically deploys the rpcd ACL file via ubus (pure-Python asyncssh fallback when the router blocks ubus file access — no `sshpass` on the HA host required) — on first add and re-validated on every startup
 
 ### Resilience
 - **Session renewal**: rpcd sessions request a 24-hour TTL; auto re-login on expiry
@@ -293,7 +293,8 @@ Topology Panel (sidebar)
 
 | Version | Date | Key Features |
 |---------|------|---|
-| **1.20.0 – 1.20.1** | 2026-07 | HA-2026.8-Kompatibilität (`config_entry=` im Coordinator), de.json, CI-Modernisierung; Checklist-Deploy-Feedback + SSH-Fallback fürs ACL-Deploy — siehe [CHANGELOG.md](CHANGELOG.md) |
+| **1.22.0** | 2026-07 | SSH-Fallback pure-Python (asyncssh) statt `sshpass` — funktioniert jetzt auch auf HAOS/Containern — siehe [CHANGELOG.md](CHANGELOG.md) |
+| **1.20.0 – 1.21.0** | 2026-07 | HA-2026.8-Kompatibilität (`config_entry=` im Coordinator), de.json, CI-Modernisierung; Checklist-Deploy-Feedback + SSH-Fallback fürs ACL-Deploy; Topology-Port-Mapping — siehe [CHANGELOG.md](CHANGELOG.md) |
 | **1.16.0 – 1.19.0** | 2026-04 → 2026-05 | HTTPS support, error sensor + outage notifications, sshpass security fix, subprocess/panel lifecycle hardening, rpcd session-leak fix — see [CHANGELOG.md](CHANGELOG.md) |
 | **1.15.6** | 2026-04-22 | **rpcd Memory Leak Fix (CRITICAL)** — `file/exec` removed from ACL; Bridge FDB now via `file/read` on `/sys/class/net/br-lan/brforward` (136 MB → <5 MB) |
 | **1.15.5** | 2026-04-22 | **Topology Polling Fix** — stops on HTTP 401 (session expired); shows HA notification instead of continuous retries |

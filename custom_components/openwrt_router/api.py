@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import json
 import logging
-import os
 import re
 import shlex
 import ssl
@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 import aiohttp
+import asyncssh
 
 from .const import (
     CLIENT_KEY_CONNECTED_SINCE,
@@ -105,6 +106,9 @@ SUBPROCESS_RC_TIMEOUT = -1  # process killed because wait_for() timed out
 SUBPROCESS_RC_FAILED_TO_SPAWN = -2  # spawn raised before a Process existed
 SUBPROCESS_RC_CANCELLED = -3  # caller's task was cancelled mid-flight
 
+# SSH connect timeout (seconds) — parity with the old ``-o ConnectTimeout=8``.
+SSH_CONNECT_TIMEOUT = 8.0
+
 
 async def _safe_subprocess_exec(
     cmd: list[str],
@@ -114,6 +118,10 @@ async def _safe_subprocess_exec(
     binary: bool = False,
 ) -> tuple[int, bytes | str, bytes]:
     """Run a subprocess that NEVER leaks a process or FD on any exit path.
+
+    As of v1.22.0 the SSH fallback runs in-process via asyncssh, so this helper
+    has no production callers; it is retained (with its regression-tested
+    lifecycle semantics) for any future subprocess need.
 
     This is the single entry-point all subprocess.exec calls in this module
     should funnel through.  It guarantees on every termination — success,
@@ -126,7 +134,7 @@ async def _safe_subprocess_exec(
     even when the caller's task is cancelled.
 
     Args:
-        cmd: Argv list, e.g. ``["sshpass", "-e", "ssh", ...]``.
+        cmd: Argv list, e.g. ``["ping", "-c", "1", host]``.
         env: Optional environment overrides (e.g. ``SSHPASS``); ``None`` inherits.
         timeout: Hard timeout in seconds for ``communicate()``.
         binary: When True, stdout is returned as raw ``bytes``; when False (default)
@@ -156,7 +164,7 @@ async def _safe_subprocess_exec(
                 env=env,
             )
         except (OSError, ValueError) as err:
-            # OSError covers ENOENT (sshpass missing), permission, fork failure.
+            # OSError covers ENOENT (binary missing), permission, fork failure.
             # ValueError covers malformed argv.  Both leave us with no child.
             _LOGGER.debug("subprocess spawn failed: %s (cmd[0]=%s)", err, cmd[0])
             return (
@@ -1089,9 +1097,7 @@ class OpenWrtAPI:
         except Exception:
             pass
 
-        # SSH fallback if ubus file/read is ACL-blocked.
-        # Lifecycle (kill / wait / FD close on every exit path) handled by
-        # _run_ssh -> _safe_subprocess_exec.
+        # SSH fallback if ubus file/read is ACL-blocked (in-process asyncssh).
         if rx_bytes is None and self._password:
             out = await self._run_ssh(
                 f"cat /sys/class/net/{iface_name}/statistics/rx_bytes"
@@ -1798,64 +1804,97 @@ class OpenWrtAPI:
             f"Fix: add 'uci commit wireless' permission to the rpcd ACL for this user."
         ) from root_err
 
-    def _ssh_env(self) -> dict[str, str]:
-        """Return env dict for sshpass: passes the password via SSHPASS env-var.
+    async def _asyncssh_exec_once(
+        self, remote_cmd: str, password: str | None
+    ) -> asyncssh.SSHCompletedProcess:
+        """Open one asyncssh connection, run a command, close it.
 
-        Using ``sshpass -e`` instead of ``sshpass -p <pw>`` avoids leaking the
-        password into ``/proc/<pid>/cmdline`` where any local process can read
-        it via ``ps aux``.  Always returns a fresh dict so callers can mutate
-        without side-effects on subsequent calls.
+        ``password=None`` selects key-auth (asyncssh falls back to the default
+        ``~/.ssh`` client keys / agent). ``known_hosts=None`` reproduces the old
+        ``StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`` behaviour.
+        ``encoding=None`` returns stdout/stderr as raw bytes for both text and
+        binary callers; decoding happens centrally in :meth:`_asyncssh_run`.
+
+        NOTE: no ``port=`` — SSH is port 22; ``self._port`` is the ubus HTTP port.
         """
-        env = dict(os.environ)
-        env["SSHPASS"] = self._password
-        return env
+        conn = await asyncssh.connect(
+            self._host,
+            username=self._username,
+            password=password,
+            known_hosts=None,
+            connect_timeout=SSH_CONNECT_TIMEOUT,
+        )
+        try:
+            return await conn.run(remote_cmd, check=False, encoding=None)
+        finally:
+            conn.close()
+            with contextlib.suppress(Exception):
+                await conn.wait_closed()
 
-    def _build_ssh_cmd(self, remote_cmd: str) -> list[str]:
-        """Build SSH command list, preferring key-auth when password-auth fails.
+    async def _asyncssh_run(
+        self, remote_cmd: str, *, timeout: float, binary: bool = False
+    ) -> tuple[int, str | bytes, bytes]:
+        """Run a remote command over asyncssh; mirror ``_safe_subprocess_exec``.
 
-        For password-auth uses ``sshpass -e`` — the password is passed via the
-        SSHPASS env-var (see :meth:`_ssh_env`), NOT on the command line.
-        Callers MUST spawn the resulting cmd with ``env=self._ssh_env()``.
+        Returns the same ``(rc, stdout, stderr)`` tuple shape and reuses the
+        ``SUBPROCESS_RC_*`` sentinels, so every existing SSH call site keeps its
+        rc/stderr handling unchanged. Two attempts: password-auth first, then —
+        on ``PermissionDenied`` — key-auth (``self._ssh_use_key``).
+
+        The password is passed only as the asyncssh ``password=`` kwarg — never
+        in argv, an env-var or a log line, so it cannot leak into
+        ``/proc/<pid>/cmdline`` (which the previous subprocess-based transport
+        had to guard against explicitly).
         """
-        target = f"{self._username}@{self._host}"
-        ssh_opts = [
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "ConnectTimeout=8",
-        ]
-        if self._ssh_use_key:
-            return ["ssh", *ssh_opts, target, remote_cmd]
-        return ["sshpass", "-e", "ssh", *ssh_opts, target, remote_cmd]
+        for _attempt in range(2):
+            password = None if self._ssh_use_key else self._password
+            try:
+                result = await asyncio.wait_for(
+                    self._asyncssh_exec_once(remote_cmd, password), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                # MUST precede the OSError catch — TimeoutError subclasses OSError.
+                return (SUBPROCESS_RC_TIMEOUT, b"" if binary else "", b"timeout")
+            except asyncssh.PermissionDenied:
+                if not self._ssh_use_key:
+                    _LOGGER.debug("SSH password-auth denied, switching to key-auth")
+                    self._ssh_use_key = True
+                    continue
+                return (255, b"" if binary else "", b"Permission denied")
+            except (OSError, asyncssh.Error) as err:
+                _LOGGER.debug("SSH connection to %s failed: %s", self._host, err)
+                return (
+                    SUBPROCESS_RC_FAILED_TO_SPAWN,
+                    b"" if binary else "",
+                    str(err).encode(errors="replace"),
+                )
+            rc = result.exit_status if result.exit_status is not None else 0
+            stdout_b = result.stdout or b""
+            stderr_b = result.stderr or b""
+            return (
+                rc,
+                stdout_b if binary else stdout_b.decode(errors="replace"),
+                stderr_b,
+            )
+        return (SUBPROCESS_RC_FAILED_TO_SPAWN, b"" if binary else "", b"")
 
     async def _run_ssh(self, remote_cmd: str, timeout: float = 10.0) -> str | None:
         """Run a remote SSH command and return stdout. Auto-detects key vs. password auth.
 
-        All cleanup (kill, wait, FD close) is delegated to
-        :func:`_safe_subprocess_exec` — the helper is leak-free on every exit.
+        Transport is pure-Python asyncssh (:meth:`_asyncssh_run`) — no sshpass or
+        ssh binary on the HA host required.
         """
-        for _attempt in range(2):
-            cmd = self._build_ssh_cmd(remote_cmd)
-            # When password-auth is used, sshpass reads the password from
-            # the SSHPASS env-var (no command-line exposure). For key-auth
-            # the env-var is harmless and ignored.
-            env = self._ssh_env() if not self._ssh_use_key else None
-            rc, stdout, stderr = await _safe_subprocess_exec(
-                cmd, env=env, timeout=timeout, binary=False
-            )
-            if rc == 255 and b"Permission denied" in stderr and not self._ssh_use_key:
-                _LOGGER.debug("SSH password-auth denied, switching to key-auth")
-                self._ssh_use_key = True
-                continue
-            if rc < 0:
-                # timeout / spawn-failure / cancel — already logged inside helper
-                return None
-            # Return stdout even on non-zero exit (partial output is still useful)
-            out = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
-            return out if out.strip() else None
-        return None
+        rc, stdout, _stderr = await self._asyncssh_run(
+            remote_cmd, timeout=timeout, binary=False
+        )
+        if rc < 0:
+            # timeout / connection-failure — already logged inside the transport
+            return None
+        # Return stdout even on non-zero exit (partial output is still useful).
+        # None on empty output is a contract: acl_provisioning detects a
+        # successful SSH deploy via a stdout marker.
+        out = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+        return out if out.strip() else None
 
     async def _run_ssh_binary(
         self, remote_cmd: str, timeout: float = 10.0
@@ -1868,26 +1907,15 @@ class OpenWrtAPI:
         binary stream.
 
         Returns:
-            stdout bytes, or ``None`` on timeout / spawn-failure / non-zero
-            exit with empty output.
+            stdout bytes, or ``None`` on timeout / connection-failure / empty output.
         """
-        for _attempt in range(2):
-            cmd = self._build_ssh_cmd(remote_cmd)
-            env = self._ssh_env() if not self._ssh_use_key else None
-            rc, stdout, stderr = await _safe_subprocess_exec(
-                cmd, env=env, timeout=timeout, binary=True
-            )
-            if rc == 255 and b"Permission denied" in stderr and not self._ssh_use_key:
-                _LOGGER.debug(
-                    "SSH password-auth denied (binary), switching to key-auth"
-                )
-                self._ssh_use_key = True
-                continue
-            if rc < 0:
-                return None
-            assert isinstance(stdout, bytes)
-            return stdout if stdout else None
-        return None
+        rc, stdout, _stderr = await self._asyncssh_run(
+            remote_cmd, timeout=timeout, binary=True
+        )
+        if rc < 0:
+            return None
+        assert isinstance(stdout, bytes)
+        return stdout if stdout else None
 
     async def _run_ssh_detached(
         self, remote_cmd: str, timeout: float = 10.0
@@ -1922,10 +1950,8 @@ class OpenWrtAPI:
         # remote_cmd as exactly one argument to `sh -c`.
         quoted = shlex.quote(remote_cmd)
         wrapped = f"nohup sh -c {quoted} </dev/null >/dev/null 2>&1 &"
-        cmd = self._build_ssh_cmd(wrapped)
-        env = self._ssh_env() if not self._ssh_use_key else None
-        rc, stdout, stderr = await _safe_subprocess_exec(
-            cmd, env=env, timeout=timeout, binary=False
+        rc, stdout, stderr = await self._asyncssh_run(
+            wrapped, timeout=timeout, binary=False
         )
         out = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
         return rc, out, stderr
@@ -2045,10 +2071,8 @@ class OpenWrtAPI:
             OpenWrtTimeoutError: SSH command timed out.
             OpenWrtResponseError: SSH command failed or returned invalid JSON.
         """
-        cmd = self._build_ssh_cmd("/root/ha-system-metrics.sh")
-        env = self._ssh_env() if not self._ssh_use_key else None
-        rc, stdout, stderr = await _safe_subprocess_exec(
-            cmd, env=env, timeout=10.0, binary=False
+        rc, stdout, stderr = await self._asyncssh_run(
+            "/root/ha-system-metrics.sh", timeout=10.0, binary=False
         )
         if rc == SUBPROCESS_RC_TIMEOUT:
             _LOGGER.error("SSH system metrics timed out")
@@ -2099,10 +2123,8 @@ class OpenWrtAPI:
             OpenWrtTimeoutError: SSH command timed out.
             OpenWrtResponseError: SSH command failed or returned invalid JSON.
         """
-        cmd = self._build_ssh_cmd("/root/ha-wan-status.sh")
-        env = self._ssh_env() if not self._ssh_use_key else None
-        rc, stdout, stderr = await _safe_subprocess_exec(
-            cmd, env=env, timeout=10.0, binary=False
+        rc, stdout, stderr = await self._asyncssh_run(
+            "/root/ha-wan-status.sh", timeout=10.0, binary=False
         )
         if rc == SUBPROCESS_RC_TIMEOUT:
             _LOGGER.error("SSH WAN status timed out")
@@ -2161,10 +2183,8 @@ class OpenWrtAPI:
             "echo '}'; "
             "done; echo ']'"
         )
-        cmd = self._build_ssh_cmd(shell_cmd)
-        env = self._ssh_env() if not self._ssh_use_key else None
-        rc, stdout, _stderr = await _safe_subprocess_exec(
-            cmd, env=env, timeout=10.0, binary=False
+        rc, stdout, _stderr = await self._asyncssh_run(
+            shell_cmd, timeout=10.0, binary=False
         )
         if rc == SUBPROCESS_RC_TIMEOUT:
             _LOGGER.debug("SSH get_clients timed out")
@@ -2238,10 +2258,8 @@ class OpenWrtAPI:
         iface_cmds = "; ".join(
             f"echo '=== {i} ==='; iw dev {i} station dump 2>/dev/null" for i in ifnames
         )
-        cmd = self._build_ssh_cmd(iface_cmds)
-        env = self._ssh_env() if not self._ssh_use_key else None
-        rc, stdout, _stderr = await _safe_subprocess_exec(
-            cmd, env=env, timeout=10.0, binary=False
+        rc, stdout, _stderr = await self._asyncssh_run(
+            iface_cmds, timeout=10.0, binary=False
         )
         if rc == SUBPROCESS_RC_TIMEOUT:
             _LOGGER.debug("SSH iw station dump timed out")
@@ -2320,11 +2338,8 @@ class OpenWrtAPI:
             f"uci commit wireless && "
             f"wifi reload"
         )
-        cmd = self._build_ssh_cmd(uci_cmd)
-        env = self._ssh_env() if not self._ssh_use_key else None
-
-        rc, stdout, stderr = await _safe_subprocess_exec(
-            cmd, env=env, timeout=10.0, binary=False
+        rc, stdout, stderr = await self._asyncssh_run(
+            uci_cmd, timeout=10.0, binary=False
         )
 
         if rc == SUBPROCESS_RC_TIMEOUT:
@@ -2371,10 +2386,8 @@ class OpenWrtAPI:
             OpenWrtResponseError: If SSH command fails.
             OpenWrtTimeoutError: If SSH command times out.
         """
-        cmd = self._build_ssh_cmd("uci show wireless")
-        env = self._ssh_env() if not self._ssh_use_key else None
-        rc, stdout, stderr = await _safe_subprocess_exec(
-            cmd, env=env, timeout=10.0, binary=False
+        rc, stdout, stderr = await self._asyncssh_run(
+            "uci show wireless", timeout=10.0, binary=False
         )
 
         if rc == SUBPROCESS_RC_TIMEOUT:

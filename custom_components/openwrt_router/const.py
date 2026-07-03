@@ -326,10 +326,10 @@ FEATURE_HAS_SERVICES = "has_services"
 # ---------------------------------------------------------------------------
 # F5 Aggregator (v1.18.0 — skeleton only, NOT enabled by default)
 # ---------------------------------------------------------------------------
-# When the SSH-fallback path is active, each poll spawns 8–15 sshpass+ssh
-# subprocesses (one per ubus call replacement).  The aggregator collapses all
+# When the SSH-fallback path is active, each poll opens 8–15 asyncssh
+# connections (one per ubus call replacement).  The aggregator collapses all
 # of those into ONE remote shell invocation that returns a single JSON
-# document — reducing the per-poll subprocess count to 1 per router.
+# document — reducing the per-poll SSH connection count to 1 per router.
 #
 # Status v1.18.0: SKELETON ONLY.  The aggregator path is gated behind
 # `CONF_USE_AGGREGATOR` and disabled by default.  Production rollout is

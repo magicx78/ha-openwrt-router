@@ -35,7 +35,7 @@ jobs:
           # Exakt gegen die ermittelte neueste HA-Version testen — unpinned
           # würde unter einem zu alten Python still eine ältere HA auflösen.
           pip install "homeassistant==${{ steps.ha_version.outputs.version }}" \
-            pytest pytest-asyncio aiohttp ruff
+            pytest pytest-asyncio aiohttp ruff asyncssh
 
       - name: Lint-Check
         run: ruff check custom_components/
