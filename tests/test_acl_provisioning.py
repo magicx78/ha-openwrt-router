@@ -328,6 +328,24 @@ class TestAclContent:
         assert "system" in ubus
         assert "board" in ubus["system"]
 
+    def test_acl_grants_read_file_paths(self):
+        """read.file must grant the paths the integration reads via ubus file/read.
+
+        Without these, every file/read (firmware, bridge FDB, ARP, conntrack)
+        falls back to SSH. The nested /sys/class/net/* glob covers brforward,
+        statistics/* and brport/port_no (verified on real hardware).
+        """
+        files = RPCD_ACL_CONTENT["root"]["read"]["file"]
+        for path in (
+            "/etc/openwrt_release",
+            "/sys/class/net/*",
+            "/proc/net/arp",
+            "/proc/net/nf_conntrack",
+            "/proc/sys/net/netfilter/nf_conntrack_count",
+        ):
+            assert path in files, f"read.file missing {path}"
+            assert "read" in files[path]
+
     def test_acl_file_path(self):
         """ACL file path is correct."""
         assert ACL_FILE_PATH == "/usr/share/rpcd/acl.d/ha-openwrt-router.json"
