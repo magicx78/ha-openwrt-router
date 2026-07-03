@@ -20,9 +20,17 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import CONF_TOPOLOGY_PORT_DEBUG, DEFAULT_TOPOLOGY_PORT_DEBUG, DOMAIN
 from .coordinator import OpenWrtCoordinatorData
 from .topology_diagnostic import build_topology_snapshot
+from .topology_ports import (
+    CONFIDENCE_HIGH,
+    apply_devices_to_port,
+    collect_own_macs,
+    collect_wifi_client_macs,
+    normalize_mac,
+    safe_web_url,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -491,6 +499,109 @@ def _detect_switch_nodes(
     return switch_nodes, switch_edges
 
 
+def _enrich_gateway_ports(
+    attrs: dict[str, Any],
+    gw_data: OpenWrtCoordinatorData,
+    router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+    gw_rid: str,
+) -> None:
+    """Enrich the gateway's port_stats with mesh knowledge.
+
+    - Inserts each AP as a router-type device entry at the front of its
+      trunk port's connected_devices (legacy ``connected_device`` string
+      keeps showing the AP hostname — DetailPanel matches on it).
+    - Nearest-switch rule: MACs the AP itself observes on its own access
+      side (WiFi clients, own interfaces, access-port FDB entries) are
+      removed from the gateway trunk port — those devices belong to the
+      AP node; the gateway FDB only proves "somewhere behind this port".
+    """
+    trunk_map: dict[str, str] = getattr(gw_data, "trunk_port_map", {}) or {}
+    gw_fdb: dict[str, str] = getattr(gw_data, "port_fdb_map", {}) or {}
+    gw_mac = normalize_mac(gw_data.router_info.get("mac"))
+
+    port_to_aps: dict[str, list[dict[str, Any]]] = {}
+    foreign_macs: set[str] = set()
+
+    for ap_rid, ap_hip, ap_data in router_data:
+        if ap_rid == gw_rid:
+            continue
+        ap_name = ap_data.router_info.get("hostname") or ap_hip
+        ap_mac = normalize_mac(ap_data.router_info.get("mac"))
+        # Trunk port via ARP+FDB map (IP-based); FDB MAC lookup as fallback.
+        port = trunk_map.get(ap_hip) or (gw_fdb.get(ap_mac) if ap_mac else None)
+        if port:
+            port_to_aps.setdefault(port, []).append(
+                {
+                    "name": ap_name,
+                    "ip": ap_hip,
+                    "mac": ap_mac,
+                    "router_node_id": ap_rid,
+                }
+            )
+
+        # Everything the AP sees on its access side hangs behind the AP.
+        foreign_macs.update(collect_wifi_client_macs(ap_data.clients))
+        foreign_macs.update(
+            collect_own_macs(
+                ap_data.router_info,
+                ap_data.ap_interfaces,
+                getattr(ap_data, "sta_interfaces", None),
+            )
+        )
+        # AP FDB entries count as "behind the AP" only when we can tell
+        # which AP port faces the gateway (the port where the AP sees the
+        # gateway MAC). Without that anchor, skip — removing devices based
+        # on the towards-gateway port would wrongly hide direct gateway
+        # clients that the AP merely sees through its uplink.
+        ap_fdb: dict[str, str] = getattr(ap_data, "port_fdb_map", {}) or {}
+        uplink_port = ap_fdb.get(gw_mac) if gw_mac else None
+        if uplink_port:
+            for mac, ap_port in ap_fdb.items():
+                if ap_port != uplink_port:
+                    foreign_macs.add(normalize_mac(mac))
+
+    for port in attrs.get("port_stats") or []:
+        port_name = port.get("name", "")
+        aps = port_to_aps.get(port_name, [])
+        devices: list[dict[str, Any]] = list(port.get("connected_devices") or [])
+        if not aps and not devices:
+            continue
+
+        if foreign_macs:
+            devices = [
+                d for d in devices if normalize_mac(d.get("mac")) not in foreign_macs
+            ]
+        ap_macs = {ap["mac"] for ap in aps if ap["mac"]}
+        devices = [d for d in devices if normalize_mac(d.get("mac")) not in ap_macs]
+
+        ap_entries = [
+            {
+                "mac": ap["mac"],
+                "ip": ap["ip"],
+                "name": ap["name"],
+                "source": "trunk_map",
+                "confidence": CONFIDENCE_HIGH,
+                "web_url": safe_web_url(ap["ip"]),
+                "is_router": True,
+                "router_node_id": ap["router_node_id"],
+            }
+            for ap in aps
+        ]
+        merged = ap_entries + devices
+        apply_devices_to_port(port, merged)
+
+        # Legacy single-string field: AP hostname wins on trunk ports.
+        if ap_entries:
+            port["connected_device"] = ap_entries[0]["name"]
+        elif merged:
+            first = merged[0]
+            port["connected_device"] = (
+                first.get("name") or first.get("ip") or first.get("mac")
+            )
+        else:
+            port["connected_device"] = None
+
+
 def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     """Build a unified mesh topology from all loaded openwrt_router entries.
 
@@ -528,7 +639,14 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         is_online = getattr(coordinator, "last_update_success", True)
 
         # Build per-router snapshot with role and host_ip
-        snapshot = build_topology_snapshot(data, role=role, host_ip=host_ip)
+        snapshot = build_topology_snapshot(
+            data,
+            role=role,
+            host_ip=host_ip,
+            include_port_debug=entry.options.get(
+                CONF_TOPOLOGY_PORT_DEBUG, DEFAULT_TOPOLOGY_PORT_DEBUG
+            ),
+        )
 
         # Inject online/offline status into the router node attributes
         for node in snapshot.get("nodes", []):
@@ -663,20 +781,9 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                     getattr(data, "topology_snapshots", []) or []
                 )
 
-                # Enrich port_stats: replace raw MAC in connected_device with AP name
-                trunk_map: dict[str, str] = getattr(data, "trunk_port_map", {})
-                port_to_ap_name: dict[str, str] = {}
-                for ap_rid, ap_hip, ap_data in router_data:
-                    if ap_rid == rid:
-                        continue
-                    ap_name = ap_data.router_info.get("hostname") or ap_hip
-                    port = trunk_map.get(ap_hip)
-                    if port:
-                        port_to_ap_name[port] = ap_name
-                for port in attrs.get("port_stats") or []:
-                    ap_name = port_to_ap_name.get(port.get("name", ""))
-                    if ap_name:
-                        port["connected_device"] = ap_name
+                # Enrich port_stats with mesh knowledge: AP device entries on
+                # trunk ports, nearest-switch foreign-MAC removal.
+                _enrich_gateway_ports(attrs, data, router_data, rid)
                 break
         break  # only one gateway
 

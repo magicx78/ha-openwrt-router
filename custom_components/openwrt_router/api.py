@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import ssl
+import struct
 import time
 from typing import Any
 
@@ -393,6 +394,91 @@ def _parse_ip_addr_output(output: str) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+# struct __fdb_entry from include/uapi/linux/if_bridge.h — the record format
+# of /sys/class/net/<bridge>/brforward:
+#   __u8 mac_addr[6]; __u8 port_no; __u8 is_local;
+#   __u32 ageing_timer_value; __u8 port_hi; __u8 pad0; __u16 unused;
+_FDB_ENTRY_FORMAT = "<6sBBIBBH"
+_FDB_ENTRY_SIZE = struct.calcsize(_FDB_ENTRY_FORMAT)  # 16 bytes
+
+# Physical port names (DSA/swconfig), optionally with a VLAN sub-interface
+# suffix (lan1.10) that gets attributed to the physical port.
+_PHYS_PORT_RE = re.compile(r"^(lan\d+|wan\d*|eth\d+)(\.\d+)?$")
+
+
+def _parse_brforward(fdb_bytes: bytes, port_no_map: dict[int, str]) -> dict[str, str]:
+    """Parse the binary bridge forwarding table into {mac_lower: port_name}.
+
+    Skipped entries (never guessed):
+    - ``is_local`` set — the bridge's own port MACs, not connected devices
+    - multicast/broadcast MACs (bit 0 of first octet) and all-zero MACs
+    - port numbers missing from ``port_no_map`` or non-physical interfaces
+
+    VLAN sub-interface members (``lan1.10``) are attributed to their
+    physical port (``lan1``).
+
+    Returns {} when the buffer is not a whole number of 16-byte records.
+    """
+    if not fdb_bytes or len(fdb_bytes) % _FDB_ENTRY_SIZE != 0:
+        return {}
+    fdb: dict[str, str] = {}
+    for offset in range(0, len(fdb_bytes), _FDB_ENTRY_SIZE):
+        mac_raw, port_no, is_local, _ageing, port_hi, _pad, _unused = (
+            struct.unpack_from(_FDB_ENTRY_FORMAT, fdb_bytes, offset)
+        )
+        if is_local:
+            continue
+        if mac_raw[0] & 0x01 or not any(mac_raw):
+            continue
+        iface = port_no_map.get(port_no | (port_hi << 8))
+        if not iface:
+            continue
+        match = _PHYS_PORT_RE.match(iface)
+        if not match:
+            continue
+        mac = ":".join(f"{b:02x}" for b in mac_raw)
+        fdb[mac] = match.group(1)
+    return fdb
+
+
+def _parse_proc_net_arp(raw: str) -> dict[str, str]:
+    """Parse /proc/net/arp text into {mac_lower: ipv4}.
+
+    Only complete entries (flags & 0x2) with a valid IPv4 address are kept.
+    Duplicate MACs resolve deterministically: br-lan device rows win, then
+    the numerically smallest IP.
+    """
+    candidates: dict[str, tuple[int, tuple[int, ...], str]] = {}
+    for line in (raw or "").splitlines()[1:]:  # skip header
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        ip, _hw_type, flags, mac, _mask, device = parts[:6]
+        try:
+            if not (int(flags, 16) & 0x2):  # incomplete/stale entry
+                continue
+        except ValueError:
+            continue
+        mac = mac.lower()
+        if mac == "00:00:00:00:00:00":
+            continue
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if addr.version != 4:
+            continue
+        rank = (
+            0 if device == "br-lan" else 1,
+            tuple(int(octet) for octet in ip.split(".")),
+            ip,
+        )
+        prev = candidates.get(mac)
+        if prev is None or rank < prev:
+            candidates[mac] = rank
+    return {mac: rank[2] for mac, rank in candidates.items()}
 
 
 class OpenWrtAPI:
@@ -3108,18 +3194,10 @@ class OpenWrtAPI:
             import base64
 
             fdb_bytes = base64.b64decode(raw) if raw else b""
-            if fdb_bytes and len(fdb_bytes) % 8 == 0:
-                fdb: dict[str, str] = {}
-                for i in range(len(fdb_bytes) // 8):
-                    chunk = fdb_bytes[i * 8 : (i + 1) * 8]
-                    mac = ":".join(f"{b:02x}" for b in chunk[:6])
-                    port_no = chunk[6]
-                    iface = port_no_map.get(port_no)
-                    if iface and iface.startswith(("lan", "wan", "eth")):
-                        fdb[mac] = iface
-                if fdb:
-                    _LOGGER.debug("Bridge FDB via file/read: %d entries", len(fdb))
-                    return fdb
+            fdb = _parse_brforward(fdb_bytes, port_no_map)
+            if fdb:
+                _LOGGER.debug("Bridge FDB via file/read: %d entries", len(fdb))
+                return fdb
         except (
             OpenWrtResponseError,
             OpenWrtTimeoutError,
@@ -3155,56 +3233,76 @@ class OpenWrtAPI:
             fdb_bytes = await self._run_ssh_binary(
                 "cat /sys/class/net/br-lan/brforward", timeout=8.0
             )
-            if not fdb_bytes or len(fdb_bytes) % 8 != 0:
-                return {}
-
-            fdb = {}
-            for i in range(len(fdb_bytes) // 8):
-                chunk = fdb_bytes[i * 8 : (i + 1) * 8]
-                mac = ":".join(f"{b:02x}" for b in chunk[:6])
-                port_no = chunk[6]
-                iface = port_no_map.get(port_no)
-                if iface and iface.startswith(("lan", "wan", "eth")):
-                    fdb[mac] = iface
+            fdb = _parse_brforward(fdb_bytes or b"", port_no_map)
             _LOGGER.debug("Bridge FDB via brforward SSH: %d entries", len(fdb))
             return fdb
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Bridge FDB SSH fallback failed: %s", err)
             return {}
 
-    async def get_trunk_port_map(self) -> dict[str, str]:
+    async def get_arp_table(self) -> dict[str, str]:
+        """Return MAC-address → IPv4 mapping from the ARP/neighbour table.
+
+        Strategy (tries in order):
+        1. file/read on /proc/net/arp (text, no exec — see get_bridge_fdb note)
+        2. `cat /proc/net/arp` via SSH fallback
+
+        Only complete entries (flags & 0x2) are returned. Resolves devices
+        with static IPs that never appear in the DHCP lease table.
+
+        Returns:
+            {"aa:bb:cc:dd:ee:ff": "192.168.1.23", ...} — {} on total failure.
+        """
+        try:
+            result = await self._call(
+                UBUS_FILE_OBJECT,
+                "read",
+                {"path": "/proc/net/arp"},
+            )
+            arp = _parse_proc_net_arp(result.get("data", "") or "")
+            if arp:
+                _LOGGER.debug("ARP table via file/read: %d entries", len(arp))
+                return arp
+        except (
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+        ) as err:
+            _LOGGER.debug("ARP table via file/read unavailable: %s", err)
+
+        try:
+            arp_out = await self._run_ssh("cat /proc/net/arp")
+            arp = _parse_proc_net_arp(arp_out or "")
+            _LOGGER.debug("ARP table via SSH: %d entries", len(arp))
+            return arp
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("ARP table SSH fallback failed: %s", err)
+            return {}
+
+    async def get_trunk_port_map(
+        self,
+        fdb: dict[str, str] | None = None,
+        arp: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         """Return {host_ip → port_name} by combining ARP table + bridge FDB.
 
-        Strategy:
-        1. Read /proc/net/arp via SSH → IP → MAC mapping
-        2. Combine with get_bridge_fdb() (MAC → port)
-        → IP → port
+        Args:
+            fdb: Pre-fetched MAC → port map; fetched via get_bridge_fdb()
+                when None (avoids a duplicate FDB read per poll cycle).
+            arp: Pre-fetched MAC → IP map; fetched via get_arp_table()
+                when None.
 
         Returns empty dict on failure (graceful degradation).
         """
         try:
-            fdb = await self.get_bridge_fdb()
+            if fdb is None:
+                fdb = await self.get_bridge_fdb()
             if not fdb:
                 return {}
-
-            arp_out = await self._run_ssh("cat /proc/net/arp")
-            if not arp_out:
-                return {}
-
-            result: dict[str, str] = {}
-            for line in arp_out.splitlines()[1:]:  # skip header
-                parts = line.split()
-                if len(parts) < 4:
-                    continue
-                ip, _hw, flags, mac = parts[:4]
-                try:
-                    if not (int(flags, 16) & 0x2):  # only reachable entries
-                        continue
-                except ValueError:
-                    continue
-                port = fdb.get(mac.lower())
-                if port:
-                    result[ip] = port
+            if arp is None:
+                arp = await self.get_arp_table()
+            result = {ip: fdb[mac] for mac, ip in arp.items() if mac in fdb}
             _LOGGER.debug("Trunk port map (ARP+FDB): %s", result)
             return result
         except Exception as err:  # noqa: BLE001
