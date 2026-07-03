@@ -2,6 +2,45 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.22.0] - 2026-07-03
+
+> **Transport-Release.** Der SSH-Fallback läuft jetzt pure-Python über **asyncssh** —
+> kein `sshpass`/`ssh`-Binary auf dem HA-Host mehr nötig. Auf HAOS und typischen
+> Containern war der Fallback vorher faktisch tot (sshpass nicht installiert). Alle
+> Wrapper-Signaturen und Rückgabe-Verträge bleiben unverändert.
+
+### Fixed
+
+- **SSH-Fallback auf Hosts ohne `sshpass` tot:** Die gesamte SSH-Fallback-Schicht
+  (hostapd-Clients, WLAN-Status, Bridge-FDB, ARP, WAN-Statistiken, opkg-Update,
+  ACL-Deploy) schlug auf HAOS/Containern still fehl, weil `sshpass` dort nicht
+  existiert (Spawn-Fehler). Transport ist jetzt in-process asyncssh — das Passwort
+  landet nur noch als asyncssh-`password`-Argument, nie in argv/env/Log.
+  Am echten Cudy WR3000 verifiziert (6/6 Datenquellen inkl. SSH-Fallbacks).
+
+### Changed
+
+- `manifest.json`: `requirements: ["asyncssh>=2.22.0"]` (HA installiert die Abhängigkeit
+  automatisch beim Update), `loggers: ["asyncssh"]`.
+- Der Key-Auth-Retry (bei abgelehntem Passwort → `~/.ssh`-Keys/Agent) gilt jetzt auch
+  für die sechs Direkt-Callsites und detachte Kommandos, nicht nur die Wrapper.
+- `_safe_subprocess_exec` bleibt (regressionsgetestet), hat aber keine produktiven
+  Aufrufer mehr.
+
+### Tests
+
+- `test_sshpass_security_v1179.py` → `test_ssh_transport.py` (11 Tests, asyncssh gemockt);
+  die Detached-Wrapping-Tests aus `test_subprocess_lifecycle.py` dorthin portiert.
+
+### Docs / Security
+
+- README/SSH_SETUP: sshpass → asyncssh. **Klartext-Router-Passwort aus `SSH_SETUP.md`
+  entfernt** (stand dort in Zeile 73 — bleibt in der Git-Historie; Passwort-Rotation empfohlen).
+
+> **Router-Hinweis:** Der SSH-Fallback braucht `dropbear` mit aktivem `PasswordAuth`
+> (bei manchen Geräten zusätzlich `RootPasswordAuth`). Ist er aus, meldet der
+> Checklist-Schritt seit v1.20.1 einen klaren Fehler statt still zu scheitern.
+
 ## [1.21.0] - 2026-07-03
 
 > **Port-Zuordnungs-Release.** Die Topology zeigte Geräte an falschen physischen Ports —

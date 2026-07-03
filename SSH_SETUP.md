@@ -39,8 +39,8 @@ Das ist alles! Kein Passwort nötig.
 | Aspekt | Passwort | SSH Key |
 |--------|----------|---------|
 | Sicherheit | ⚠️ Text-basiert | ✅ Kryptografisch |
-| Automation | ❌ sshpass nötig | ✅ Direkt |
-| Passwort speichern | ❌ Sicherheitsrisiko | ✅ Nicht nötig |
+| Automation | ✅ via asyncssh | ✅ Direkt |
+| Passwort speichern | ⚠️ im HA-Config-Entry | ✅ Nicht nötig |
 | Mehrere Geräte | ⚠️ Copy-Paste | ✅ Verbreitung einfach |
 
 ---
@@ -70,7 +70,7 @@ scp ./config.yml openwrt:/tmp/
 Wiederherstellen mit Passwort:
 
 ```bash
-sshpass -p '16051979Cs$' ssh root@10.10.10.1
+ssh root@10.10.10.1   # Router-Passwort eingeben, wenn PasswordAuth aktiv ist
 ```
 
 Oder: Neuen Key generieren und wieder kopieren.
@@ -85,9 +85,10 @@ Die HA Integration nutzt **SSH Fallback** für:
 - WAN Status (RX/TX Bytes)
 - Disk/tmpfs Statistiken
 
-**Aktuell:** Integration nutzt sshpass + Passwort (funktioniert ✅)
-
-**Zukünftig:** Integration könnte SSH Key verwenden (sicherer, aber mehr Setup)
+**Aktuell (ab v1.22.0):** Integration nutzt **pure-Python asyncssh** — kein `sshpass`
+oder `ssh`-Binary auf dem HA-Host nötig. Auth automatisch: Passwort (aus dem Config-Entry)
+zuerst, bei Ablehnung Fallback auf einen hinterlegten SSH-Key. Voraussetzung auf dem Router:
+`dropbear` mit aktivem `PasswordAuth` (bei manchen Geräten zusätzlich `RootPasswordAuth`).
 
 ---
 
