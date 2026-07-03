@@ -86,13 +86,13 @@
         }
       },
       "checklist": {
-        "title": "Router-Konfiguration prüfen — {host}",
-        "description": "**Modell:** {model}\n\n**ubus-Berechtigungen:**\n\n{checklist}\n\n---\n\n{status}\n\nKlicke **Weiter** um fortzufahren (auch bei fehlenden Berechtigungen möglich).",
+        "title": "Check Router Configuration — {host}",
+        "description": "**Model:** {model}\n\n**ubus permissions:**\n\n{checklist}\n\n---\n\n{status}\n\nClick **Next** to continue (possible even with missing permissions).",
         "data": {
-          "deploy_acl": "Berechtigungen automatisch einrichten (ACL via ubus deployen + rpcd neu starten)"
+          "deploy_acl": "Set up permissions automatically (deploy ACL via ubus + restart rpcd)"
         },
         "data_description": {
-          "deploy_acl": "Schreibt die rpcd-ACL-Datei direkt auf den Router und startet rpcd neu — kein SSH nötig. Danach werden die Berechtigungen erneut geprüft."
+          "deploy_acl": "Writes the rpcd ACL file directly to the router and restarts rpcd — no SSH required. Permissions are re-checked afterwards."
         }
       },
       "reauth_rpcd_setup": {
@@ -127,10 +127,10 @@
   "entity": {
     "binary_sensor": {
       "connectivity": {
-        "name": "Verbindungsstatus"
+        "name": "Connectivity"
       },
       "wan_connectivity": {
-        "name": "WAN Verbindung"
+        "name": "WAN Connectivity"
       }
     },
     "sensor": {
@@ -139,9 +139,9 @@
         "state": {
           "online": "Online",
           "offline": "Offline",
-          "auth_error": "Authentifizierungsfehler",
+          "auth_error": "Authentication Error",
           "timeout": "Timeout",
-          "response_error": "Ungültige Antwort"
+          "response_error": "Invalid Response"
         }
       },
       "uptime": {
