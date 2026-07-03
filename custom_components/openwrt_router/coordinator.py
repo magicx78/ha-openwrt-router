@@ -9,6 +9,7 @@ from collections import deque
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -207,7 +208,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         hass: HomeAssistant,
         api: OpenWrtAPI,
         entry_title: str,
-        entry: Any | None = None,
+        entry: ConfigEntry | None = None,
         poll_offset_seconds: int = 0,
     ) -> None:
         """Initialise the coordinator.
@@ -216,13 +217,16 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             hass: Home Assistant instance.
             api: Authenticated OpenWrtAPI instance.
             entry_title: Human-readable config entry title for logging.
-            entry: Config entry (used to read Fritz!Box options).
+            entry: Config entry (used to read Fritz!Box options); forwarded to
+                the base class — explicit passing is required from HA 2026.8
+                (implicit ContextVar lookup is removed).
         """
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_{entry_title}",
             update_interval=timedelta(seconds=SCAN_INTERVAL_SECONDS),
+            config_entry=entry,
         )
         self.api = api
         self._entry = entry

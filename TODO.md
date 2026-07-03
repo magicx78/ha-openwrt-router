@@ -1,62 +1,70 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-04-19 · Version: v1.12.1
+Stand: 2026-07-03 · Version: v1.20.0
 
 ---
 
 ## Backlog
 
-### Backend / API
+### HA-Modernisierung (Folgearbeiten aus dem Kompatibilitäts-Review 2026-07)
 
-- [ ] `get_port_vlan_map()` — Tests schreiben (DSA + legacy swconfig Fixtures)
-- [ ] `get_bridge_fdb()` — Tests schreiben (SSH-Output-Fixture)
-- [ ] CPU-History in `coordinator.py` — Unit-Test für deque/rolling window
-- [ ] Persistente Event-History — `hass.data` oder JSON-Datei statt in-memory deque (überlebt HA-Restart nicht)
-- [ ] HTTPS-Support — TLS-Option in config_flow + api.py
-
-### Topology Frontend
-
-- [ ] Per-Client Traffic Chart — RX/TX Verlauf pro WLAN-Client
-- [ ] Shift+Click Multi-Device Compare — Zwei Geräte nebeneinander vergleichen
-- [ ] VLAN-Badge Klick → Filter: nur Ports mit dieser VLAN-ID hervorheben
-- [ ] Bridge FDB Visualisierung im PortStrip (welcher Port hat welche MACs)
-
-### Entities / Sensoren
-
-- [ ] Bandwidth Sensoren (RX/TX bytes pro Interface) — aus ROADMAP
-- [ ] Traffic Statistiken — aus ROADMAP
-- [ ] DHCP Lease Enrichment (Client-IPs in Device Tracker) — aus ROADMAP
-- [ ] Per-Client Online-Zeit — aus ROADMAP
-- [ ] Link Quality Metriken (Signal/Noise pro Radio) — aus ROADMAP
-- [ ] Parental Control Support — aus ROADMAP
+- [ ] **Repairs statt persistent_notification** — SSH-Fallback- und Outage-Meldungen
+      (coordinator.py, `async_create`/`async_dismiss`-Call-Sites) auf `issue_registry`
+      umstellen: `ir.async_create_issue()` mit `translation_key`; SSH-Fallback als
+      fixable Issue (RepairsFlow → `acl_provisioning.ensure_acl()` erneut ausführen),
+      Outage als non-fixable Issue mit `ir.async_delete_issue()` bei Recovery.
+      Benötigt `issues:`-Sektion in strings.json + en.json + de.json.
+- [ ] **Notification-/Event-i18n** — Hardcodierte deutsche Texte im Coordinator
+      (SSH-Fallback-Notification, Outage-Notification, Event-Timeline-Meldungen
+      „WAN verbunden/getrennt", „CPU-Last erhöht", …) übersetzbar machen.
+      Hängt sinnvoll mit der Repairs-Migration zusammen.
+- [ ] **`topology_card`-WIP-Modul** — Import ist seit v1.19.0 geguardet; Modul
+      fertigstellen oder Guard + Referenzen entfernen.
+- [ ] Optional: **pytest-homeassistant-custom-component** als zusätzliche
+      Smoke-Test-Ebene (echte `hass`-Fixture für Setup/Unload/Config-Flow) —
+      bestehende Mock-Suite bleibt die Basis.
 
 ### HACS / Release
 
-- [ ] HACS Default Store Submission vorbereiten
-  - [ ] `brand/icon.png` 256×256px erstellen
-  - [ ] `manifest.json` → `issue_tracker` Key prüfen
-  - [ ] GitHub Release publizieren (nicht nur Tag)
-  - [ ] `hassfest` + `hacs/action` CI Workflows prüfen/ergänzen
+- [ ] **HACS Default Store — Neuanlauf.** PR hacs/default#6421 wurde am 2026-03-21
+      ungemerged geschlossen. Vor Neu-Einreichung: aktuellen HACS-Submission-Prozess
+      prüfen (hacs.xyz/docs/publish), PR an `home-assistant/brands` stellen
+      (Voraussetzung fürs Default-Listing), dann neu einreichen.
+      Bis dahin: Installation als Custom Repository (siehe INSTALL.md).
 
-### Tests
+### Betrieb / Validierung
 
-- [ ] Fixtures für Router-Zustände anlegen (`tests/fixtures/`)
-  - [ ] `router_healthy.json`
-  - [ ] `router_wan_down.json`
-  - [ ] `router_minimal.json`
-  - [ ] `router_broken.json`
-- [ ] Topology Mesh Tests erweitern (port_vlan_map, port_fdb_map)
+- [ ] **Prod-Validierung v1.19/v1.20** — 24h-RSS/rpcd-Beobachtung auf dem
+      Produktiv-Gateway nach dem Session-Leak-Fix (Vergleich gegen
+      `diagnostics/prod-24h-baseline.jsonl`, Sampler: `scripts/_prod_24h_sample.sh`).
+- [ ] **Persistente Event-History** — `deque` ist in-memory; Events überleben
+      keinen HA-Restart (Store-Helper oder JSON-Datei).
+
+### Topology Frontend (Wunschliste, unverändert offen)
+
+- [ ] Per-Client Traffic Chart — RX/TX-Verlauf pro WLAN-Client
+- [ ] Shift+Click Multi-Device Compare
+- [ ] Bridge-FDB-Visualisierung im PortStrip (welcher Port sieht welche MACs)
+
+### Entities / Features (Roadmap)
+
+- [ ] Per-Client Online-Zeit
+- [ ] Link-Quality-Metriken (Signal/Noise pro Radio)
+- [ ] Parental Control Support
 
 ---
 
-## Erledigt (letzte Sessions)
+## Erledigt (Auszug — Details in CHANGELOG.md)
 
-- [x] v1.12.1 — `get_port_vlan_map()` (DSA + swconfig), `get_bridge_fdb()`, CPU-History (1h rolling), Topology UI Polish (VLAN-Badges, SpeedChart CPU, PortStrip VLAN-Overlay)
-- [x] v1.12.1 — SSH-Fallback in `get_network_interfaces()` — `OpenWrtAuthError` abgefangen
-- [x] v1.12.0 — Alle 12 UI/UX-Spec Features implementiert (Minimap, Kontextmenü, AP Client-Expansion, Health-Modus, Status-Flash, Layout-Transition, Gruppen-Modus, Doppelklick-Zoom, Firmware-Version, Mini Traffic/Ressourcen-Bars, Kontextaktionen Inspector, Event-Timeline)
-- [x] v1.11.2 — Canvas Dot-Grid, Edge-Glow bei Hover, Internet-Node Pulse
-- [x] v1.11.1 — 24h rpcd Session-Timeout, DDNS Log-Spam-Fix, IPv4-Parsing-Guard
-- [x] v1.11.0 — Client Detail Panel, DDNS-Status, SpeedChart 24h DSL/Ping
-- [x] v1.10.1 — Topology Panel 5 Views, Edge-Tooltip, Fritz!Box TR-064 Fix
-- [x] Auto-ACL Provisioning via SSH
-- [x] Multi-Router Mesh Topology (`topology_mesh.py`)
+- [x] v1.20.0 — HA-Kompatibilitäts-Review: `config_entry=` an DataUpdateCoordinator
+      (HA-2026.8-Deadline), toter `register_static_path`-Fallback entfernt,
+      `integration_type: hub`, HA-Floor 2026.2.0, deutsche Übersetzung (de.json),
+      Blueprint auf Plural-Syntax + source_url, Release-Workflow gegated,
+      CI-Matrix 3.13/3.14 (3.12 löste HA 2024.x auf), ha-compat pinnt echte Latest-HA
+- [x] v1.19.0 — rpcd-Session-Leak-Fix (destroy bei Re-Login), ACL-Re-Validierung,
+      Cache für ACL-geblockte Methoden
+- [x] v1.18.0 — Subprocess- + Panel-Lifecycle-Hardening, 24h-Prod-Sampler
+- [x] v1.17.x — Error-Sensor + Outage-Notifications, sshpass-Security-Fix (`-e` statt argv)
+- [x] v1.16.0 — HTTPS-Support (http / https / https-insecure)
+- [x] Fixtures `tests/fixtures/router_*.json`, brand/icon 256×256,
+      hassfest/HACS/tests/ha-compat/release CI-Workflows, GitHub Releases

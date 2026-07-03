@@ -13,7 +13,7 @@
         "data_description": {
           "fritzbox_host": "IP address of the Fritz!Box modem (e.g. 172.16.1.254)",
           "fritzbox_port": "TR-064 port, default 49000",
-          "fritzbox_user": "Fritz!Box username",
+          "fritzbox_user": "Fritz!Box username (usually 'admin' or custom)",
           "fritzbox_password": "Fritz!Box password"
         }
       }
@@ -86,10 +86,10 @@
         }
       },
       "checklist": {
-        "title": "Router Configuration Check — {host}",
-        "description": "**Model:** {model}\n\n**ubus Permissions:**\n\n{checklist}\n\n---\n\n{status}\n\nClick **Submit** to continue (you can proceed even if some permissions are missing).",
+        "title": "Check Router Configuration — {host}",
+        "description": "**Model:** {model}\n\n**ubus permissions:**\n\n{checklist}\n\n---\n\n{status}\n\nClick **Next** to continue (possible even with missing permissions).",
         "data": {
-          "deploy_acl": "Auto-fix missing permissions (deploy ACL via ubus + restart rpcd)"
+          "deploy_acl": "Set up permissions automatically (deploy ACL via ubus + restart rpcd)"
         },
         "data_description": {
           "deploy_acl": "Writes the rpcd ACL file directly to the router and restarts rpcd — no SSH required. Permissions are re-checked afterwards."

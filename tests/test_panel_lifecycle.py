@@ -41,8 +41,6 @@ def _make_hass() -> MagicMock:
     hass.http = MagicMock()
     hass.http.async_register_static_paths = AsyncMock()
     hass.http.register_view = MagicMock()
-    # Some HA versions use the deprecated sync variant — provide it too
-    hass.http.register_static_path = MagicMock()
     return hass
 
 
@@ -82,11 +80,7 @@ async def test_first_setup_registers_and_bumps_refcount(hass, patch_panel_apis):
     assert hass.data[_PANEL_VIEW_DISABLED_KEY] is False
     register_panel.assert_awaited_once()
     hass.http.register_view.assert_called_once()
-    # static path registered (either modern or legacy variant)
-    assert (
-        hass.http.async_register_static_paths.await_count == 1
-        or hass.http.register_static_path.call_count == 1
-    )
+    hass.http.async_register_static_paths.assert_awaited_once()
 
 
 async def test_second_setup_only_bumps_refcount(hass, patch_panel_apis):

@@ -57,7 +57,7 @@ ha-openwrt-router/
 │   ├── hacs.yaml               # HACS validation
 │   ├── tests.yaml              # ruff check + ruff format + pytest (3.12, 3.13)
 │   ├── ha-compat.yaml          # HA version compatibility matrix
-│   └── release.yaml            # Auto release on tag push
+│   └── release.yaml            # Auto release on main push (gated: tests + hassfest)
 ├── brand/                      # Repo-Root brand assets (Original)
 │   ├── icon.png                # 256x256px
 │   └── icon.svg
@@ -70,7 +70,7 @@ ha-openwrt-router/
 
 ```
 api.py          ← ALLE HTTP-Calls. Nie woanders.
-coordinator.py  ← Polling (30s), Fehlerbehandlung, Daten-Distribution
+coordinator.py  ← Polling (60s, adaptiv: 120s bei CPU-Last, 300s bei SSH-Fallback)
 sensor.py       ← Lesen aus coordinator.data — kein Netzwerk
 switch.py       ← Lesen + Schreiben über api.py — kein direktes HTTP
 config_flow.py  ← Ruft api.async_test_connection() auf
@@ -114,17 +114,13 @@ Wichtige ubus-Calls:
 - `@dataclass(frozen=True)` für EntityDescription
 - Defensive: `data.get("key")` statt `data["key"]` in Entity-Properties
 
-## Geplante Features (TODO aus README)
+## Geplante Features
 
-- [ ] Bandwidth Sensoren (RX/TX bytes pro Interface)
-- [ ] Traffic Statistiken
-- [ ] DHCP Lease Enrichment (Client-IPs in Device Tracker)
-- [ ] Per-Client Online-Zeit
-- [ ] Link Quality Metriken (Signal/Noise pro Radio)
-- [ ] HTTPS Support
-- [ ] Parental Control Support
+Siehe [TODO.md](TODO.md) — Bandwidth/Traffic, DHCP-Enrichment und HTTPS sind
+inzwischen ausgeliefert; offen sind u. a. Repairs-Migration, Notification-i18n,
+Per-Client-Online-Zeit, Link-Quality, Parental Control.
 
-## HACS Status (Stand v1.17.9 / fa0bd19)
+## HACS Status (Stand v1.20.0, 2026-07)
 
 ### Custom Repository — voll funktional ✅
 - [x] `hacs.json` vorhanden (cleaned: `category` + `iot_class` raus, gehören in manifest.json)
@@ -136,10 +132,11 @@ Wichtige ubus-Calls:
 - [x] `manifest.json` mit `issue_tracker` + alphabetisch sortiert (hassfest-konform)
 - [x] GitHub Topics gesetzt: home-assistant, hacs, openwrt, custom-component, ubus, rpcd, …
 
-### HACS Default Store — noch nicht eingereicht
+### HACS Default Store — erster Anlauf geschlossen
+- [x] PR an `hacs/default` eingereicht (#6421, 2026-03-20) — **2026-03-21 ungemerged
+      geschlossen**; Neuanlauf siehe HACS_REGISTRATION.md
 - [ ] PR an `home-assistant/brands` Repo (für Default-Store-Listing nötig)
-- [ ] PR an `hacs/default` Repo
-- [ ] HA Core Quality Scale ggf. auf Gold/Platinum erhöhen (aktuell silver)
+- [ ] Neu-Einreichung nach aktuellem HACS-Prozess (hacs.xyz/docs/publish)
 
 ## Commit-Konventionen
 

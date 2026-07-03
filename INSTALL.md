@@ -1,111 +1,70 @@
-# Claude Code Setup — ha-openwrt-router
+# Installation — OpenWrt Router Integration
 
-## Was ist hier drin
+## Voraussetzungen
 
+**Home Assistant:** Version **2026.2.0** oder neuer.
+
+**OpenWrt-Router** (19.07+, getestet bis 25.x) mit laufendem `rpcd` und `uhttpd`:
+
+```sh
+# OpenWrt 23.x und älter (opkg)
+opkg update && opkg install rpcd rpcd-mod-rpcsys
+# OpenWrt 24.10+/25.x (apk)
+apk update && apk add rpcd rpcd-mod-rpcsys
+
+uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock'
+uci set rpcd.@rpcd[0].timeout=30
+uci commit rpcd && service rpcd restart
 ```
-CLAUDE.md                      ← Projekt-Kontext (Repo-Root)
-.claude/agents/
-  ├── coordinator.md           ← Koordiniert komplexe Multi-Domain Aufgaben
-  ├── openwrt-api.md           ← Spezialist: api.py + coordinator.py
-  ├── ha-entities.md           ← Spezialist: sensor/switch/tracker/button
-  └── hacs-release.md          ← Spezialist: CI, Releases, HACS
-```
+
+Die benötigte rpcd-ACL (`/usr/share/rpcd/acl.d/ha-openwrt-router.json`) kann die
+Integration beim Setup **automatisch deployen** (Checkbox im Setup-Assistenten,
+kein SSH nötig) — Details und manuelle Alternative im [README](README.md).
+
+## Installation über HACS (empfohlen)
+
+Die Integration ist (noch) nicht im HACS Default Store — Installation als Custom Repository:
+
+1. HACS → rechts oben ⋮ → **Custom repositories**
+2. Repository: `https://github.com/magicx78/ha-openwrt-router` · Typ: **Integration** → Add
+3. HACS → „OpenWrt Router" suchen → **Download**
+4. Home Assistant neu starten
+
+Updates erscheinen danach automatisch in HACS, sobald ein neues Release getaggt ist.
+
+## Manuelle Installation
+
+1. Aktuelles Release laden: https://github.com/magicx78/ha-openwrt-router/releases/latest
+2. Ordner `custom_components/openwrt_router/` nach `<ha-config>/custom_components/` kopieren
+3. Home Assistant neu starten
+
+## Einrichtung
+
+**Einstellungen → Geräte & Dienste → Integration hinzufügen → „OpenWrt Router"**
+
+1. Host/IP, Port, Protokoll (HTTPS Self-Signed für die meisten Router), Benutzer
+   (üblicherweise `root`) und Passwort eingeben — die Verbindung wird vor dem
+   Speichern getestet.
+2. Optional: Fritz!Box-DSL-Modem und/oder Managed Switch einbinden.
+3. Capability-Checkliste prüfen; fehlende ubus-Berechtigungen auf Wunsch
+   automatisch einrichten lassen.
+
+Mehrere Router/APs: einfach weitere Einträge derselben Integration anlegen —
+das Topology-Panel (Seitenleiste „Network Topology") aggregiert alle automatisch.
+
+## Fehlersuche
+
+- **Debug-Logging:**
+  ```yaml
+  logger:
+    logs:
+      custom_components.openwrt_router: debug
+  ```
+- Router-seitige Diagnose: [ROUTER_DIAGNOSTICS.md](ROUTER_DIAGNOSTICS.md)
+- SSH-Fallback/Schlüssel: [SSH_SETUP.md](SSH_SETUP.md)
+- Bekannte Einschränkungen: [PROGRESS.md](PROGRESS.md) § Bekannte Einschränkungen
 
 ---
 
-## Installation (3 Schritte)
-
-### Schritt 1 — Dateien ins Repo kopieren
-
-```bash
-# Im Repo-Root von ha-openwrt-router:
-cp CLAUDE.md .                    # Projekt-Kontext
-cp -r .claude/ .                  # Agents-Ordner
-```
-
-Die finale Struktur im Repo:
-```
-ha-openwrt-router/
-├── CLAUDE.md                  ← NEU
-├── .claude/
-│   └── agents/
-│       ├── coordinator.md     ← NEU
-│       ├── openwrt-api.md     ← NEU
-│       ├── ha-entities.md     ← NEU
-│       └── hacs-release.md    ← NEU
-├── custom_components/
-│   └── openwrt_router/
-├── tests/
-└── ...
-```
-
-### Schritt 2 — Claude Code starten
-
-```bash
-cd ha-openwrt-router
-claude
-```
-
-Claude Code liest `CLAUDE.md` automatisch beim Start.
-
-### Schritt 3 — Skill einbinden (optional aber empfohlen)
-
-Den `home-automation.skill` in Claude Code als Skill hinterlegen
-damit Claude auch ESPHome + LVGL Wissen hat wenn du ein Display baust.
-
----
-
-## Wie die Agents funktionieren
-
-### Einfache Aufgabe → direkt zum Spezialisten
-
-```
-Du:    "füge einen Memory Usage Sensor hinzu"
-Claude: ruft ha-entities auf → schreibt sensor.py + translations
-```
-
-```
-Du:    "der hassfest workflow schlägt fehl"
-Claude: ruft hacs-release auf → analysiert + repariert
-```
-
-```
-Du:    "implementiere async_get_bandwidth() für eth0"
-Claude: ruft openwrt-api auf → schreibt api.py + Test
-```
-
-### Komplexe Aufgabe → Coordinator koordiniert
-
-```
-Du:    "baue den Bandwidth Sensor komplett von A bis Z"
-Claude: ruft coordinator auf
-        → koordiniert openwrt-api (api.py + coordinator.py)
-        → koordiniert ha-entities (sensor.py + translations)
-        → prüft Konsistenz zwischen beiden
-```
-
-```
-Du:    "bereite Release 0.2.0 vor"
-Claude: ruft coordinator auf
-        → prüft Code-Stand
-        → koordiniert hacs-release (CHANGELOG, manifest, Tag)
-```
-
-### Agents committen nichts
-
-Agents schreiben und ändern Dateien — aber `git commit` und `git push`
-machst du selbst. Claude zeigt dir was geändert wurde.
-
----
-
-## Beispiel-Prompts die gut funktionieren
-
-```
-"bandwidth sensoren für eth0 und wlan0 hinzufügen"
-"ci workflows für hassfest und hacs erstellen"
-"brand/icon.png generieren"
-"device tracker zeigt keine ip-adressen an, debug das"
-"release 0.2.0 vorbereiten mit changelog"
-"neuen switch für guest wifi hinzufügen"
-"was fehlt noch für den hacs default store"
-```
+*Hinweis: Die frühere Version dieser Datei beschrieb das Claude-Code-Entwicklungssetup —
+jetzt unter [docs/CLAUDE_CODE_SETUP.md](docs/CLAUDE_CODE_SETUP.md).*

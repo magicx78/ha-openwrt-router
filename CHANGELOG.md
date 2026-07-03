@@ -2,6 +2,81 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.20.0] - 2026-07-03
+
+> **HA-Kompatibilitäts-Release.** Review gegen HA-Core-Standards Stand Juli 2026
+> (aktuell HA 2026.7): eine harte Deadline behoben, CI ehrlich gemacht, Übersetzungen
+> vervollständigt. Keine Verhaltensänderung auf HA ≥ 2026.2.
+
+### Fixed
+
+- **HA-2026.8-Deadline:** `DataUpdateCoordinator` erhält `config_entry=` jetzt explizit —
+  die implizite ContextVar-Übergabe wird in HA 2026.8 entfernt; ohne den Fix bräche u. a.
+  der Reauth-Start aus dem Coordinator.
+- **Toter Code entfernt:** Sync-Fallback `hass.http.register_static_path` im Topology-Panel
+  (durch den Modul-Import von `StaticPathConfig` ohnehin unerreichbar; seit HA 2024.6 obsolet).
+
+### Changed
+
+- **Mindest-HA-Version ehrlich deklariert:** hacs.json-Floor von 2024.1.0 auf **2026.2.0**
+  (der Code benötigte real bereits ≥ 2024.11 — Options-/Reauth-Flow crashten auf älteren Cores).
+- `manifest.json`: `integration_type: "hub"` ergänzt.
+- README: dynamische Versions-/Test-Badges (Badge war bei 1.15.6 eingefroren),
+  explizite Mindest-HA-Angabe.
+
+### Added
+
+- **Deutsche Übersetzung** (`translations/de.json`, 109 Keys). Die EN-Quelle
+  (strings.json/en.json) ist jetzt durchgängig englisch — Checklist-Step und einige
+  Entity-Namen waren zuvor deutsch im EN-Master.
+- Blueprint „Router Ausfall-Benachrichtigung": moderne Plural-Syntax
+  (`triggers:`/`actions:`, `action:` statt `service:`), `source_url`, `min_version`.
+- CHANGELOG: fehlender [1.19.0]-Eintrag nachgetragen (Release war ohne Changelog erschienen).
+
+### CI
+
+- **Release-Gate:** `release.yaml` erstellt Releases nur noch nach grünen `test`- und
+  `hassfest`-Jobs.
+- **Test-Matrix 3.13/3.14** (vorher 3.12/3.13): Unter Python 3.12 löste pip nur HA 2024.x
+  auf, unter 3.13 maximal HA 2026.2 — HA 2026.3+ verlangt Python ≥ 3.14. Der wöchentliche
+  ha-compat-Check pinnt jetzt die tatsächlich neueste HA-Version statt still gegen eine
+  ältere zu testen.
+
+### Notes / Offen
+
+- Geplant (siehe TODO.md): Migration der SSH-Fallback-/Outage-Notifications auf das
+  Repairs-System (`issue_registry`) inkl. i18n der bisher hart deutschen Meldungstexte.
+- Nicht betroffen von aktuellen Deprecations (verifiziert): Device-Tracker-Änderungen
+  2026.6 (`battery_level`/`location_name`), `show_advanced_options`,
+  Update-Listener+Reload-Pattern.
+
+## [1.19.0] - 2026-05-28
+
+> **Stabilitäts-Release nach rpcd-OOM-Forensik.** Adressiert die in der 24h-Production-Diagnose
+> nachgewiesene Restursache: rpcd-Session-Leck auf dem Router durch Re-Login-Churn.
+
+### Fixed
+
+- **rpcd-Session-Leck:** Beim Re-Login wird die vorherige ubus-Session jetzt aktiv via
+  `session.destroy` zerstört, statt auf dem Router zu verwaisen (Ursache des rpcd-OOM auf
+  Produktiv-Hardware).
+- **Re-Login-Churn gestoppt:** ACL-geblockte ubus-Methoden werden pro Session gecacht und nicht
+  mehr bei jedem Poll erneut versucht — vorher provozierte jeder Poll neue Login-Zyklen.
+- **ACL-Re-Validierung:** Die rpcd-ACL wird bei jedem Start gegen den Soll-Inhalt geprüft und bei
+  Drift aktualisiert (vorher nur bei Erstinstallation deployed).
+- **Setup-Robustheit:** Optionaler `topology_card`-Import ist geguardet — Setup übersteht das
+  Fehlen des WIP-Moduls.
+
+### CI / Tests
+
+- `ruff format` über die Codebase (CI-Format-Check).
+- Sync-Sensor-Tests nutzen `asyncio.run` (Fix für CI auf Python 3.12+).
+
+### Docs / Diagnostics
+
+- v1.19-Scope-Dokument nach v1.17.9-Crash-Forensik (`docs/v1.19-scope.md`).
+- 24h-Production-Baseline als JSONL (`diagnostics/prod-24h-baseline.jsonl`).
+
 ## [1.18.0] - 2026-04-29
 
 > **Hardening-Release.** Kein garantierter Fix für die sporadischen HA-Crashes unter Last — der Beweis kommt aus der parallel laufenden 24h-Production-Diagnose. v1.18.0 schließt nachweisbare Lecks im Subprocess- und Panel-Lifecycle und liefert das Mess-Tooling, mit dem v1.19 die Restursache adressieren kann.

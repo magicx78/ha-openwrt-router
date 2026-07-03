@@ -6,6 +6,9 @@ blueprint:
     Nutzt den binary_sensor.XYZ_connectivity aus der OpenWrt Router Integration.
   domain: automation
   author: magicx78
+  source_url: https://github.com/magicx78/ha-openwrt-router/blob/main/blueprints/automation/openwrt_router_outage_notify.yaml
+  homeassistant:
+    min_version: 2024.10.0
   input:
     connectivity_sensor:
       name: Router Verbindungsstatus
@@ -58,8 +61,8 @@ blueprint:
       selector:
         boolean:
 
-trigger:
-  - platform: state
+triggers:
+  - trigger: state
     entity_id: !input connectivity_sensor
     to: "off"
     for:
@@ -72,14 +75,14 @@ variables:
   do_recovery: !input notify_on_recovery
   sensor: !input connectivity_sensor
 
-action:
-  - service: "{{ notify_svc }}"
+actions:
+  - action: "{{ notify_svc }}"
     data:
       message: "{{ msg_down }}"
       title: "OpenWrt Router Ausfall"
 
   - wait_for_trigger:
-      - platform: state
+      - trigger: state
         entity_id: !input connectivity_sensor
         to: "on"
     timeout:
@@ -88,7 +91,7 @@ action:
   - condition: template
     value_template: "{{ do_recovery and wait.trigger is not none }}"
 
-  - service: "{{ notify_svc }}"
+  - action: "{{ notify_svc }}"
     data:
       message: "{{ msg_up }}"
       title: "OpenWrt Router wieder online"
