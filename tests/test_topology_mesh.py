@@ -8,6 +8,7 @@ from custom_components.openwrt_router.topology_mesh import (
     _deduplicate_clients,
     _detect_inter_router_edges,
     _detect_router_role,
+    _has_active_sta_interface,
     _is_private_ip,
 )
 
@@ -445,6 +446,153 @@ class TestDetectInterRouterEdges:
         assert e["relationship"] == "wifi_uplink"
         assert "repeater_override" in e["attributes"]["detection_method"]
         assert e["attributes"]["ap_port"] is None
+
+    # ---- Mesh backhaul (802.11s) — the 10.10.30.50 case -----------------
+
+    def test_mesh_ap_promoted_to_wifi_uplink(self):
+        """A wirelessly-meshed AP (mode=mesh point, no client-style bssid/signal)
+        that got a lan_uplink via ARP/FDB must be promoted to wifi_uplink — not
+        left as 'Kabel'. Regression for the VLAN-30 mesh AP 10.10.30.50.
+        """
+        gw_data = _make_data(
+            router_info={"mac": "GW:00"},
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "185.1.1.1"},
+            wan_connected=True,
+            # AP reached via the gateway's ARP+FDB trunk map (static IP, no DHCP).
+            trunk_port_map={"10.10.30.50": "lan4"},
+            port_vlan_map={"lan4": [30]},
+        )
+        mesh_ap = _make_data(
+            router_info={"mac": "AP:MESH30"},
+            # 802.11s backhaul: mode present, but NO client bssid/signal.
+            sta_interfaces=[
+                {"ifname": "mesh0", "mode": "mesh point",
+                 "mac": "", "bssid": "", "ssid": "backhaul", "signal": None},
+            ],
+            # No 'wan'-named port with carrier → not a wired uplink.
+            port_stats=[{"name": "lan1", "up": True, "speed_mbps": 1000}],
+        )
+        router_data = [
+            ("GW:00", "10.10.10.1", gw_data),
+            ("AP:MESH30", "10.10.30.50", mesh_ap),
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert len(edges) == 1
+        e = edges[0]
+        assert e["relationship"] == "wifi_uplink"
+        assert "repeater_override" in e["attributes"]["detection_method"]
+        assert e["attributes"]["ap_port"] is None
+        assert e["attributes"]["vlan_tags"] == []
+
+    def test_mesh_ap_with_wan_carrier_stays_wired(self):
+        """A mesh-capable device that IS cabled (wan port carrier up) must stay
+        lan_uplink — a plugged cable still wins over a mesh iface."""
+        gw_data = _make_data(
+            router_info={"mac": "GW:00"},
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "185.1.1.1"},
+            wan_connected=True,
+            trunk_port_map={"10.10.30.51": "lan5"},
+            port_vlan_map={"lan5": [30]},
+        )
+        cabled = _make_data(
+            router_info={"mac": "AP:CABLED"},
+            sta_interfaces=[
+                {"ifname": "mesh0", "mode": "mesh point",
+                 "mac": "", "bssid": "", "ssid": "backhaul", "signal": None},
+            ],
+            port_stats=[{"name": "wan", "up": True, "speed_mbps": 1000}],
+        )
+        router_data = [
+            ("GW:00", "10.10.10.1", gw_data),
+            ("AP:CABLED", "10.10.30.51", cabled),
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert len(edges) == 1
+        assert edges[0]["relationship"] == "lan_uplink"
+
+    def test_cross_subnet_mesh_ap_gets_wifi_uplink_fallback(self):
+        """A mesh AP on a DIFFERENT subnet/VLAN (no DHCP/trunk/subnet match) but
+        with an active mesh iface must still get a wifi_uplink — not fall through
+        to the frontend's 'wired' default. Cross-subnet mesh backhaul case."""
+        gw_data = _make_data(
+            router_info={"mac": "GW:00"},
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "185.1.1.1"},
+            wan_connected=True,
+            # No DHCP lease, no trunk_port_map entry for the AP.
+        )
+        mesh_ap = _make_data(
+            router_info={"mac": "AP:MESH30"},
+            sta_interfaces=[
+                {"ifname": "mesh0", "mode": "mesh", "mac": "",
+                 "bssid": "", "ssid": "backhaul", "signal": None},
+            ],
+            port_stats=[{"name": "lan1", "up": True, "speed_mbps": 1000}],
+        )
+        router_data = [
+            ("GW:00", "10.10.10.1", gw_data),
+            ("AP:MESH30", "10.10.30.50", mesh_ap),  # different /24
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert len(edges) == 1
+        e = edges[0]
+        assert e["relationship"] == "wifi_uplink"
+        assert e["attributes"]["detection_method"] == "sta_iface_fallback"
+        assert e["inferred"] is True
+
+    def test_cross_subnet_router_without_sta_gets_no_edge(self):
+        """Regression guard: a plain router on a different subnet with NO wireless
+        uplink iface still gets no inferred edge (unchanged behaviour)."""
+        gw_data = _make_data(
+            router_info={"mac": "GW:00"},
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "185.1.1.1"},
+            wan_connected=True,
+        )
+        other = _make_data(router_info={"mac": "R:OTHER"})
+        router_data = [
+            ("GW:00", "10.10.10.1", gw_data),
+            ("R:OTHER", "10.99.99.2", other),  # different /24, no sta iface
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert edges == []
+
+
+class TestHasActiveStaInterface:
+    def test_mesh_point_counts_without_bssid_signal(self):
+        data = _make_data(
+            sta_interfaces=[
+                {"ifname": "mesh0", "mode": "mesh point",
+                 "mac": "", "bssid": "", "signal": None},
+            ]
+        )
+        assert _has_active_sta_interface(data) is True
+
+    def test_mesh_mode_variants_count(self):
+        for mode in ("mesh", "mesh point", "mesh_point"):
+            data = _make_data(
+                sta_interfaces=[{"ifname": "m", "mode": mode, "signal": None}]
+            )
+            assert _has_active_sta_interface(data) is True, mode
+
+    def test_associated_client_sta_counts(self):
+        data = _make_data(
+            sta_interfaces=[
+                {"ifname": "wlan0", "mode": "sta",
+                 "bssid": "AA:BB:CC:00:11:22", "signal": -60},
+            ]
+        )
+        assert _has_active_sta_interface(data) is True
+
+    def test_inactive_client_sta_does_not_count(self):
+        data = _make_data(
+            sta_interfaces=[
+                {"ifname": "wlan0", "mode": "sta",
+                 "bssid": "", "signal": None},
+            ]
+        )
+        assert _has_active_sta_interface(data) is False
+
+    def test_no_sta_interfaces(self):
+        assert _has_active_sta_interface(_make_data()) is False
 
     # ---- Edge enrichment: ap_port + vlan_tags ---------------------------
 

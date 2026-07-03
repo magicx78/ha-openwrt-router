@@ -177,6 +177,42 @@ class TestResetAclBlocked:
         assert api._acl_blocked == set()
 
 
+class TestStaInterfaceDetailsUciFallback:
+    """UCI fallback of get_sta_interface_details must skip disabled wifi-ifaces
+    so a leftover-disabled mesh/sta entry can't flip a wired AP to wireless."""
+
+    def _api(self):
+        return OpenWrtAPI(
+            host="10.0.0.1",
+            port=80,
+            username="root",
+            password="x",
+            session=MagicMock(),
+            protocol="http",
+        )
+
+    @pytest.mark.asyncio
+    async def test_uci_fallback_skips_disabled(self):
+        api = self._api()
+        # iwinfo/info returns no STA candidates -> forces the UCI fallback path.
+        api._call = AsyncMock(return_value={})
+        api.get_uci_wireless = AsyncMock(
+            return_value={
+                "m0": {".type": "wifi-iface", "mode": "mesh",
+                       "ssid": "bh", "disabled": "1"},   # disabled -> skipped
+                "m1": {".type": "wifi-iface", "mode": "mesh",
+                       "ssid": "bh2", "disabled": "0"},   # enabled -> kept
+                "s0": {".type": "wifi-iface", "mode": "sta",
+                       "ssid": "rep"},                    # no disabled key -> kept
+            }
+        )
+        result = await api.get_sta_interface_details()
+        ifnames = {r["ifname"] for r in result}
+        assert "m0" not in ifnames
+        assert "m1" in ifnames
+        assert "s0" in ifnames
+
+
 # =====================================================================
 # Parsing Tests (pure functions)
 # =====================================================================
