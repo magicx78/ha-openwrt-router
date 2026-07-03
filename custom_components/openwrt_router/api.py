@@ -602,6 +602,23 @@ class OpenWrtAPI:
         self._auth_backoff_until = 0.0
         self._root_warning_logged = False
 
+    def reset_acl_blocked(self) -> None:
+        """Forget cached ACL-blocked methods so they are re-probed.
+
+        The ``_acl_blocked`` set short-circuits ubus methods that rpcd denied
+        this session (see ``_call``). After the rpcd ACL is (re)deployed those
+        methods may now be permitted, so this must be called — together with a
+        fresh :meth:`login` — before re-polling, otherwise the newly granted
+        methods stay dead until the entry is reloaded.
+        """
+        if self._acl_blocked:
+            _LOGGER.debug(
+                "Clearing %d cached ACL-blocked method(s) on %s for re-probe",
+                len(self._acl_blocked),
+                self._host,
+            )
+        self._acl_blocked.clear()
+
     async def async_close(self) -> None:
         """Release state on integration unload and free the rpcd session.
 
@@ -815,20 +832,25 @@ class OpenWrtAPI:
         results["iwinfo"] = await _probe("iwinfo", "devices")
         results["uci_get"] = await _probe("uci", "get", {"config": "system"})
 
-        # Wireless status: netifd's network.wireless/status is the primary source,
-        # but some firmwares (e.g. Cudy stock) return ubus INVALID_ARGUMENT for it.
-        # iwinfo provides the same radio/SSID data, so treat the wireless
-        # capability as satisfied when either source works — the integration reads
-        # wireless state via iwinfo/hostapd anyway.
-        results["network_wireless"] = (
-            await _probe("network.wireless", "status") or results["iwinfo"]
-        )
-
         # hostapd: try first known interface name, accept any success
         hostapd_ok = await _probe("hostapd.phy0-ap0", "get_clients")
         if not hostapd_ok:
             hostapd_ok = await _probe("hostapd.phy1-ap0", "get_clients")
         results["hostapd_clients"] = hostapd_ok
+
+        # Wireless status: netifd's network.wireless/status is the primary source,
+        # but some firmwares (e.g. Cudy stock) return ubus INVALID_ARGUMENT (rc 2)
+        # for it. At runtime the integration reads wireless state via
+        # iwinfo/hostapd/UCI anyway (see get_wifi_status), so treat the wireless
+        # capability as satisfied when ANY of those sources works — otherwise a
+        # stock-Cudy router raises a false "critical permission missing" alarm in
+        # the checklist even though wireless data is fully available.
+        results["network_wireless"] = (
+            await _probe("network.wireless", "status")
+            or results["iwinfo"]
+            or hostapd_ok
+            or results["uci_get"]
+        )
 
         return results
 

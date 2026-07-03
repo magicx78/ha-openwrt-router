@@ -76,6 +76,133 @@ class TestValidateHost:
 
 
 # =====================================================================
+# _compute_unique_id (pure) — multi-router identity
+# =====================================================================
+
+
+class TestComputeUniqueId:
+    """The config-entry unique_id must be host-based so that different routers
+    (different static IPs) never collapse into one entry — even when identical
+    hardware reports the same or an empty MAC in `system board`. This is the
+    core regression for adding 10.10.10.1 / .2 / .4 in parallel.
+    """
+
+    def test_distinct_hosts_distinct_ids(self):
+        a = OpenWrtConfigFlow._compute_unique_id({}, "10.10.10.1", 80)
+        b = OpenWrtConfigFlow._compute_unique_id({}, "10.10.10.2", 80)
+        c = OpenWrtConfigFlow._compute_unique_id({}, "10.10.10.4", 80)
+        assert len({a, b, c}) == 3
+
+    def test_same_host_same_id(self):
+        assert OpenWrtConfigFlow._compute_unique_id(
+            {}, "10.10.10.1", 80
+        ) == OpenWrtConfigFlow._compute_unique_id({}, "10.10.10.1", 80)
+
+    def test_empty_mac_is_host_based(self):
+        assert (
+            OpenWrtConfigFlow._compute_unique_id({"mac": ""}, "10.10.10.1", 80)
+            == "10.10.10.1_80"
+        )
+
+    def test_shared_zero_mac_still_distinct(self):
+        # Identical Cudy units reporting the SAME all-zero MAC must NOT collide.
+        board = {"mac": "00:00:00:00:00:00"}
+        a = OpenWrtConfigFlow._compute_unique_id(board, "10.10.10.1", 80)
+        b = OpenWrtConfigFlow._compute_unique_id(board, "10.10.10.2", 80)
+        assert a != b
+
+    def test_shared_real_mac_still_distinct(self):
+        # Even a valid-looking but cloned MAC must not merge two hosts.
+        board = {"mac": "aa:bb:cc:dd:ee:ff"}
+        a = OpenWrtConfigFlow._compute_unique_id(board, "10.10.10.1", 80)
+        b = OpenWrtConfigFlow._compute_unique_id(board, "10.10.10.2", 80)
+        assert a != b
+
+    def test_host_case_normalized(self):
+        assert (
+            OpenWrtConfigFlow._compute_unique_id({}, "Router.LAN", 80)
+            == "router.lan_80"
+        )
+
+
+# =====================================================================
+# Multi-router smoke test — the decisive proof for 10.10.10.1/.2/.4
+# =====================================================================
+
+
+def _entry_stub(uid: str):
+    e = MagicMock()
+    e.unique_id = uid
+    e.source = "user"
+    return e
+
+
+def _flow_with_registry(registry: dict, my_uid: str):
+    """Build a flow whose real _abort_if_unique_id_configured() is backed by a
+    shared unique_id → entry registry (mirrors hass.config_entries)."""
+    flow = OpenWrtConfigFlow()
+    flow.hass = MagicMock()
+    flow.handler = DOMAIN
+    flow.context = {"source": "user", "unique_id": my_uid}
+    flow.hass.config_entries.async_entry_for_domain_unique_id = MagicMock(
+        side_effect=lambda handler, uid: registry.get(uid)
+    )
+    return flow
+
+
+class TestMultiRouterSmoke:
+    """Drive the REAL _abort_if_unique_id_configured() for three routers at
+    distinct IPs and prove they all get their own entry with no false
+    already_configured abort — while a genuine re-add of the same host is still
+    rejected. This is the end-to-end guard for the reported bug.
+    """
+
+    def test_three_routers_add_in_parallel_without_abort(self):
+        from homeassistant.data_entry_flow import AbortFlow
+
+        registry: dict = {}
+        hosts = ["10.10.10.1", "10.10.10.2", "10.10.10.4"]
+
+        # Add all three routers one after another into the same domain.
+        for host in hosts:
+            uid = OpenWrtConfigFlow._compute_unique_id({}, host, 80)
+            flow = _flow_with_registry(registry, uid)
+            # Must NOT raise for a distinct host.
+            flow._abort_if_unique_id_configured()
+            registry[uid] = _entry_stub(uid)
+
+        # All three now coexist as separate entries.
+        assert sorted(registry) == [
+            "10.10.10.1_80",
+            "10.10.10.2_80",
+            "10.10.10.4_80",
+        ]
+
+        # Re-adding an already-configured host is still correctly rejected.
+        dup_uid = OpenWrtConfigFlow._compute_unique_id({}, "10.10.10.1", 80)
+        dup_flow = _flow_with_registry(registry, dup_uid)
+        with pytest.raises(AbortFlow) as exc:
+            dup_flow._abort_if_unique_id_configured()
+        assert exc.value.reason == "already_configured"
+
+    def test_identical_hardware_same_mac_still_three_entries(self):
+        """Same shared MAC across all units must not merge them (the old bug)."""
+        from homeassistant.data_entry_flow import AbortFlow
+
+        board = {"mac": "00:00:00:00:00:00", "hostname": "OpenWrt"}
+        registry: dict = {}
+        for host in ["10.10.10.1", "10.10.10.2", "10.10.10.4"]:
+            uid = OpenWrtConfigFlow._compute_unique_id(board, host, 80)
+            flow = _flow_with_registry(registry, uid)
+            try:
+                flow._abort_if_unique_id_configured()
+            except AbortFlow:  # pragma: no cover - would be the regression
+                pytest.fail(f"router {host} wrongly aborted as already_configured")
+            registry[uid] = _entry_stub(uid)
+        assert len(registry) == 3
+
+
+# =====================================================================
 # Config Flow Steps
 # =====================================================================
 
@@ -210,6 +337,27 @@ class TestUserStep:
             "192.168.1.1", 443, "root", "test", PROTOCOL_HTTPS_INSECURE
         )
         assert flow._user_data[CONF_PROTOCOL] == PROTOCOL_HTTPS_INSECURE
+
+    @pytest.mark.asyncio
+    async def test_unique_id_is_host_based_not_mac(self):
+        """unique_id must be host:port, ignoring the (unreliable) board MAC —
+        so a second identical router isn't wrongly aborted as already_configured.
+        """
+        flow = _make_flow()
+        board_info = {
+            "hostname": "OpenWrt",
+            "model": "Cudy WR3000",
+            "mac": "aa:bb:cc:dd:ee:ff",
+        }
+        set_uid = AsyncMock()
+        with (
+            patch.object(flow, "_validate_input", return_value=board_info),
+            patch.object(flow, "async_set_unique_id", set_uid),
+            patch.object(flow, "_abort_if_unique_id_configured"),
+        ):
+            await flow.async_step_user(user_input=_VALID_USER_INPUT)
+
+        set_uid.assert_awaited_once_with("192.168.1.1_443")
 
 
 class TestDevicesStep:

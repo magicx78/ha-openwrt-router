@@ -141,8 +141,14 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     Steps:
         user → devices → [fritzbox] → [switch_dev] → checklist → create entry
 
-    The unique_id is set to the router MAC address retrieved during
-    validation so that the same physical router cannot be added twice.
+    The unique_id is derived from the router's host:port (see
+    :meth:`_compute_unique_id`). Host-based identity guarantees that routers at
+    different (static) IPs are always treated as separate entries — identical
+    hardware (e.g. multiple Cudy WR3000) that reports the same or an empty MAC
+    in ``system board`` can therefore no longer collide into a false
+    ``already_configured`` abort. Re-adding the same host is still rejected as a
+    duplicate; a router moved to a new IP counts as a new entry (acceptable for
+    the static-IP router setups this integration targets).
     """
 
     VERSION = 2
@@ -228,8 +234,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = ERROR_UNKNOWN
 
                 else:
-                    mac: str = board_info.get("mac", "").replace(":", "").lower()
-                    unique_id = mac if mac else f"{host}_{port}"
+                    unique_id = self._compute_unique_id(board_info, host, port)
 
                     await self.async_set_unique_id(unique_id)
                     self._abort_if_unique_id_configured(
@@ -241,9 +246,10 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
                     title = board_info.get("hostname") or host
                     _LOGGER.info(
-                        "Config flow: successfully connected to %s (model: %s)",
+                        "Config flow: connected to %s (model: %s, unique_id: %s)",
                         title,
                         board_info.get("model", "unknown"),
+                        unique_id,
                     )
 
                     self._board_info = board_info
@@ -681,6 +687,32 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_unique_id(board_info: dict[str, Any], host: str, port: int) -> str:
+        """Derive the config-entry unique_id for a router.
+
+        Host-based on purpose: the router MAC returned by ``system board`` is
+        unreliable as an identity key — OpenWrt's ``system board`` usually has
+        no top-level ``mac`` field (→ empty), and identical hardware can report
+        the same placeholder/board MAC. Keying on the MAC therefore risks
+        aborting a genuinely different router as ``already_configured``.
+
+        The host (a static IP for these setups) is unique per router, so
+        ``host:port`` is the stable, collision-free key. The MAC is kept only in
+        ``board_info`` for display/diagnostics, never as the identity.
+
+        Args:
+            board_info: Board info from :meth:`_validate_input` (unused for the
+                key; accepted so callers pass the full context and future logic
+                can incorporate a verified-unique MAC if ever needed).
+            host: Router host (already stripped).
+            port: Router ubus port.
+
+        Returns:
+            A stable per-router unique_id string, e.g. ``10.10.10.2_80``.
+        """
+        return f"{host.strip().lower()}_{port}"
 
     async def _validate_input(
         self,

@@ -112,11 +112,34 @@ class TestCheckCapabilitiesWireless:
         assert caps["iwinfo"] is True
 
     @pytest.mark.asyncio
-    async def test_wireless_red_when_both_fail(self):
+    async def test_wireless_green_when_only_uci_works(self):
+        """Stock Cudy: no netifd/iwinfo/hostapd, but UCI is readable.
+
+        The runtime reads wireless via UCI in that case, so the capability
+        must be reported available (no false 'critical' alarm).
+        """
         api = self._api()
 
         async def _call(obj, method, params, *a, **k):
-            if obj in ("network.wireless", "iwinfo"):
+            if obj in ("network.wireless", "iwinfo") or obj.startswith("hostapd"):
+                raise OpenWrtResponseError("blocked")
+            return {}  # uci/get and system succeed
+
+        api._call = AsyncMock(side_effect=_call)
+        caps = await api.check_capabilities()
+        assert caps["network_wireless"] is True
+        assert caps["iwinfo"] is False
+
+    @pytest.mark.asyncio
+    async def test_wireless_red_when_all_sources_fail(self):
+        api = self._api()
+
+        async def _call(obj, method, params, *a, **k):
+            # No wireless source at all: netifd, iwinfo, hostapd AND uci fail.
+            if (
+                obj in ("network.wireless", "iwinfo", "uci")
+                or obj.startswith("hostapd")
+            ):
                 raise OpenWrtResponseError("blocked")
             return {}
 
@@ -124,6 +147,34 @@ class TestCheckCapabilitiesWireless:
         caps = await api.check_capabilities()
         assert caps["network_wireless"] is False
         assert caps["iwinfo"] is False
+
+
+class TestResetAclBlocked:
+    """reset_acl_blocked() must clear cached ACL-blocked methods so they are
+    re-probed after an ACL (re)deploy (setup path)."""
+
+    def _api(self):
+        return OpenWrtAPI(
+            host="10.0.0.1",
+            port=80,
+            username="root",
+            password="x",
+            session=MagicMock(),
+            protocol="http",
+        )
+
+    def test_clears_cached_blocks(self):
+        api = self._api()
+        api._acl_blocked.add(("file", "read"))
+        api._acl_blocked.add(("network.wireless", "status"))
+        assert api._acl_blocked
+        api.reset_acl_blocked()
+        assert api._acl_blocked == set()
+
+    def test_noop_when_empty(self):
+        api = self._api()
+        api.reset_acl_blocked()
+        assert api._acl_blocked == set()
 
 
 # =====================================================================

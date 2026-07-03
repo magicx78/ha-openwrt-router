@@ -17,6 +17,7 @@ Architecture:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -43,6 +44,10 @@ from .coordinator import OpenWrtCoordinator
 from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN as DOMAIN, PROTOCOL_HTTP
 
 _LOGGER = logging.getLogger(__name__)
+
+# Grace periods around the ACL-deploy rpcd restart (tests patch these to 0).
+_ACL_DEPLOY_GRACE_S: float = 2.0
+_ACL_LOGIN_RETRY_DELAY_S: float = 1.5
 
 # All platforms this integration provides entities on
 PLATFORMS: list[Platform] = [
@@ -243,6 +248,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
             f"Cannot reach OpenWrt router at {host}:{port}: {err}"
         ) from err
 
+    # Ensure the rpcd ACL is present AND current BEFORE the first data refresh.
+    # Running it afterwards (as in ≤v1.23) meant the first refresh cached every
+    # ACL-denied ubus method in the API client's _acl_blocked set; those stayed
+    # short-circuited even after the ACL was deployed, so the router came up
+    # degraded until the next reload/restart. Deploying first — then re-logging
+    # in and clearing the block cache — lets the very first poll use the freshly
+    # granted methods. Best-effort: a router that blocks the deploy still works
+    # via the SSH fallbacks, so failures here must never abort setup.
+    try:
+        from .acl_provisioning import ensure_acl
+
+        acl_deployed = await ensure_acl(api)
+    except Exception:  # noqa: BLE001
+        acl_deployed = False
+        _LOGGER.debug("rpcd ACL provisioning skipped for %s", host, exc_info=True)
+
+    if acl_deployed:
+        _LOGGER.info("rpcd ACL on %s was deployed/updated", host)
+        # rpcd restarts after a deploy — wait briefly, then re-login so the new
+        # session carries the freshly granted ACL grants.
+        await asyncio.sleep(_ACL_DEPLOY_GRACE_S)
+        try:
+            await api.login()
+        except (OpenWrtConnectionError, OpenWrtTimeoutError, OpenWrtAuthError):
+            await asyncio.sleep(_ACL_LOGIN_RETRY_DELAY_S)
+            try:
+                await api.login()
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Re-login after ACL deploy on %s failed (non-fatal)",
+                    host,
+                    exc_info=True,
+                )
+    # Drop any methods that ensure_acl's own probes cached as ACL-blocked so the
+    # first refresh re-probes them against the now-current ACL.
+    api.reset_acl_blocked()
+
     # Stagger polling: spread multiple coordinators evenly across the scan interval
     # so they never all poll simultaneously (e.g. 4 routers × 15s = 0/15/30/45s offsets).
     from .const import SCAN_INTERVAL_SECONDS
@@ -294,22 +336,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         _LOGGER.debug(
             "topology_card module not present — skipping Lovelace card resource"
         )
-
-    # Ensure the rpcd ACL on the router is present AND current. Runs on first
-    # install and on every startup/update: ensure_acl re-deploys when the file
-    # is missing OR its content drifted from this version's expected ACL (e.g.
-    # after an update that widened the required ubus methods). Best-effort and
-    # non-blocking — a router that blocks file/write logs a manual-deploy hint
-    # and is retried on the next start (SSH fallbacks keep the integration
-    # working meanwhile).
-    try:
-        from .acl_provisioning import ensure_acl
-
-        if await ensure_acl(api):
-            _LOGGER.info("rpcd ACL on %s was deployed/updated — refreshing data", host)
-            await coordinator.async_request_refresh()
-    except Exception:  # noqa: BLE001
-        _LOGGER.debug("rpcd ACL provisioning skipped", exc_info=True)
 
     _LOGGER.info(
         "OpenWrt Router '%s' set up successfully (model: %s, host: %s:%s)",
