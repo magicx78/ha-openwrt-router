@@ -1,8 +1,8 @@
 # OpenWrt Router – Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.15.6-blue.svg)](https://github.com/magicx78/ha-openwrt-router/releases/tag/v1.15.6)
-[![Tests](https://img.shields.io/badge/tests-396%20passing-brightgreen.svg)](https://github.com/magicx78/ha-openwrt-router/actions)
+[![Version](https://img.shields.io/github/v/release/magicx78/ha-openwrt-router?label=version&color=blue)](https://github.com/magicx78/ha-openwrt-router/releases/latest)
+[![Tests](https://img.shields.io/github/actions/workflow/status/magicx78/ha-openwrt-router/tests.yaml?branch=main&label=tests)](https://github.com/magicx78/ha-openwrt-router/actions/workflows/tests.yaml)
 
 A production-ready Home Assistant custom integration for [OpenWrt](https://openwrt.org/) routers, communicating via the built-in **ubus / rpcd JSON-RPC API**. Supports multi-AP mesh networks with a live topology panel.
 
@@ -166,6 +166,7 @@ Add via **Settings → Devices & Services → Add Integration → OpenWrt Router
 
 ## Requirements
 
+- Home Assistant **2026.2.0** or newer
 - OpenWrt **19.07** or newer (tested on 25.12.1)
 - `rpcd` with `rpcd-mod-rpcsys` installed on the router
 
@@ -261,6 +262,7 @@ Topology Panel (sidebar)
 
 | Version | Date | Key Features |
 |---------|------|---|
+| **1.16.0 – 1.19.0** | 2026-04 → 2026-05 | HTTPS support, error sensor + outage notifications, sshpass security fix, subprocess/panel lifecycle hardening, rpcd session-leak fix — see [CHANGELOG.md](CHANGELOG.md) |
 | **1.15.6** | 2026-04-22 | **rpcd Memory Leak Fix (CRITICAL)** — `file/exec` removed from ACL; Bridge FDB now via `file/read` on `/sys/class/net/br-lan/brforward` (136 MB → <5 MB) |
 | **1.15.5** | 2026-04-22 | **Topology Polling Fix** — stops on HTTP 401 (session expired); shows HA notification instead of continuous retries |
 | **1.15.4** | 2026-04-21 | **Config-Flow Capability Checklist** — verifies ubus permissions during setup; red warnings for critical caps missing |
