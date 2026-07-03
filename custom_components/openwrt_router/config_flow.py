@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import re
@@ -45,6 +46,9 @@ from .const import (
     DEFAULT_SWITCH_PORT,
     DEFAULT_USERNAME,
     DOMAIN,
+    ERROR_ACL_ALREADY_CURRENT,
+    ERROR_ACL_DEPLOY_FAILED,
+    ERROR_ACL_DEPLOY_NO_CHANGE,
     ERROR_CANNOT_CONNECT,
     ERROR_INVALID_AUTH,
     ERROR_INVALID_HOST,
@@ -57,6 +61,10 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Grace periods around the ACL-deploy rpcd restart (tests patch these to 0).
+_ACL_RECHECK_GRACE_S: float = 2.0
+_ACL_LOGIN_RETRY_DELAY_S: float = 1.5
 
 
 def _validate_host(host: str) -> str | None:
@@ -142,7 +150,6 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         "network_wireless": "WLAN-Status (Radios, SSIDs)",
         "network_dump": "Netzwerk-Interfaces (WAN/LAN)",
         "file_read": "Datei-Lesezugriff (Konfiguration, DHCP)",
-        "file_exec": "Datei-Ausführung (Bridge FDB, ARP)",
         "luci_rpc_dhcp": "DHCP-Leases (Client-IPs)",
         "iwinfo": "Signal-Stärke (iwinfo)",
         "uci_get": "UCI-Konfiguration",
@@ -363,10 +370,15 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Show capability checklist and let user proceed or retry."""
         host = self._user_data.get(CONF_HOST, "")
+        errors: dict[str, str] = {}
+        deployed = False
+        missing_before = {
+            cap for cap in self._CAPABILITY_LABELS if not self._capabilities.get(cap)
+        }
 
         if user_input is not None:
             if user_input.get("deploy_acl"):
-                from .acl_provisioning import check_and_deploy_acl
+                from .acl_provisioning import AclDeployError, check_and_deploy_acl
 
                 session = async_get_clientsession(self.hass)
                 deploy_api = OpenWrtAPI(
@@ -379,9 +391,22 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
                 try:
                     await deploy_api.login()
-                    await check_and_deploy_acl(deploy_api)
+                    deployed = await check_and_deploy_acl(deploy_api)
+                except AclDeployError:
+                    _LOGGER.warning("ACL deploy to %s failed", host, exc_info=True)
+                    errors["base"] = ERROR_ACL_DEPLOY_FAILED
                 except Exception:  # noqa: BLE001
-                    pass
+                    _LOGGER.exception("ACL deploy: unexpected error for %s", host)
+                    errors["base"] = ERROR_ACL_DEPLOY_FAILED
+                finally:
+                    await deploy_api.async_close()
+                if deployed:
+                    # rpcd restarts after a deploy — give it a moment before
+                    # logging in again for the re-check below.
+                    await asyncio.sleep(_ACL_RECHECK_GRACE_S)
+                elif not errors:
+                    # ensure_acl found the deployed ACL already up to date.
+                    errors["base"] = ERROR_ACL_ALREADY_CURRENT
                 # fall through → re-run capability check and re-show form
             elif user_input.get("action") != "retry":
                 title = self._board_info.get("hostname") or host
@@ -397,10 +422,16 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             protocol=self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL),
         )
         try:
-            await api.login()
+            try:
+                await api.login()
+            except Exception:  # noqa: BLE001 — rpcd may still be restarting
+                await asyncio.sleep(_ACL_LOGIN_RETRY_DELAY_S)
+                await api.login()
             self._capabilities = await api.check_capabilities()
         except Exception:  # noqa: BLE001
             self._capabilities = {}
+        finally:
+            await api.async_close()
 
         lines: list[str] = []
         missing_required: list[str] = []
@@ -417,6 +448,21 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                     missing_optional.append(label)
 
         checklist_text = "\n".join(lines)
+
+        deploy_note = ""
+        if deployed:
+            missing_after = {
+                cap
+                for cap in self._CAPABILITY_LABELS
+                if not self._capabilities.get(cap)
+            }
+            if not missing_after or missing_after < missing_before:
+                deploy_note = (
+                    "✅ **ACL erfolgreich deployt** — Berechtigungen wurden "
+                    "aktualisiert und erneut geprüft.\n\n"
+                )
+            else:
+                errors["base"] = ERROR_ACL_DEPLOY_NO_CHANGE
 
         install_hint = ""
         if missing_required or missing_optional:
@@ -457,11 +503,12 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="checklist",
             data_schema=schema,
+            errors=errors,
             description_placeholders={
                 "host": host,
                 "model": self._board_info.get("model", ""),
                 "checklist": checklist_text,
-                "status": status,
+                "status": deploy_note + status,
             },
         )
 

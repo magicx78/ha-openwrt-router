@@ -1,4 +1,5 @@
 """Tests for acl_provisioning.py — ensure/deploy rpcd ACL via ubus file API."""
+
 from __future__ import annotations
 
 import json
@@ -10,6 +11,7 @@ from custom_components.openwrt_router.acl_provisioning import (
     ACL_FILE_PATH,
     ACL_VERSION,
     RPCD_ACL_CONTENT,
+    AclDeployError,
     check_and_deploy_acl,
     ensure_acl,
 )
@@ -17,10 +19,12 @@ from custom_components.openwrt_router.api import OpenWrtMethodNotFoundError
 
 
 def _make_api(host="10.10.10.2"):
-    """Create a mock OpenWrtAPI with a controllable _call coroutine."""
+    """Create a mock OpenWrtAPI with controllable _call/_run_ssh coroutines."""
     api = MagicMock()
     api._host = host
     api._call = AsyncMock()
+    # Default: SSH fallback unavailable (empty stdout → None, see _run_ssh quirk)
+    api._run_ssh = AsyncMock(return_value=None)
     return api
 
 
@@ -120,20 +124,27 @@ class TestEnsureAcl:
         assert "exec" in methods
 
     @pytest.mark.asyncio
-    async def test_returns_false_when_write_fails(self):
-        """Blocked file/write → best-effort, returns False (setup not broken)."""
+    async def test_write_blocked_raises_acl_deploy_error(self):
+        """Blocked file/write + failed SSH fallback → AclDeployError(write_blocked)."""
         api = _make_api()
+
+        write_err = OpenWrtMethodNotFoundError("rpcd ACL blocks file/write")
 
         def _side_effect(obj, method, params):
             if method == "read":
                 raise OpenWrtMethodNotFoundError("NOT_FOUND")
             if method == "write":
-                raise RuntimeError("permission denied")
+                raise write_err
             return {}
 
         api._call.side_effect = _side_effect
 
-        assert await ensure_acl(api) is False
+        with pytest.raises(AclDeployError) as excinfo:
+            await ensure_acl(api)
+
+        assert excinfo.value.reason == "write_blocked"
+        assert excinfo.value.__cause__ is write_err
+        api._run_ssh.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_returns_true_even_if_rpcd_restart_fails(self):
@@ -209,6 +220,61 @@ class TestEnsureAcl:
 
         write_call = next(c for c in captured if c["method"] == "write")
         assert json.loads(write_call["params"]["data"]) == RPCD_ACL_CONTENT
+
+
+class TestSshFallbackDeploy:
+    """SSH fallback when ubus file/write is blocked (chicken-and-egg case)."""
+
+    @staticmethod
+    def _block_write(api):
+        def _side_effect(obj, method, params):
+            if method == "read":
+                raise OpenWrtMethodNotFoundError("NOT_FOUND")
+            if method == "write":
+                raise OpenWrtMethodNotFoundError("rpcd ACL blocks file/write")
+            return {}
+
+        api._call.side_effect = _side_effect
+
+    @pytest.mark.asyncio
+    async def test_ssh_fallback_deploys_when_ubus_write_blocked(self):
+        """Marker in stdout → deploy counts as successful, returns True."""
+        api = _make_api()
+        api._password = "s3cret-router-pw"
+        self._block_write(api)
+        api._run_ssh = AsyncMock(return_value="HA_ACL_DEPLOYED\n")
+
+        assert await ensure_acl(api) is True
+
+        api._run_ssh.assert_awaited_once()
+        remote_cmd = api._run_ssh.await_args.args[0]
+        assert ACL_FILE_PATH in remote_cmd
+        assert "printf" in remote_cmd
+        assert "/etc/init.d/rpcd restart" in remote_cmd
+        # sshpass -e contract: the password must never appear in the command
+        assert "s3cret-router-pw" not in remote_cmd
+
+    @pytest.mark.asyncio
+    async def test_ssh_fallback_empty_output_raises(self):
+        """_run_ssh returns None (spawn failure/empty stdout) → AclDeployError."""
+        api = _make_api()
+        self._block_write(api)
+
+        with pytest.raises(AclDeployError) as excinfo:
+            await ensure_acl(api)
+        assert excinfo.value.reason == "write_blocked"
+
+    @pytest.mark.asyncio
+    async def test_ssh_fallback_marker_missing_raises(self):
+        """stdout without the success marker (e.g. shell error) → AclDeployError."""
+        api = _make_api()
+        self._block_write(api)
+        api._run_ssh = AsyncMock(
+            return_value="ash: can't create /usr/share/...: Permission denied"
+        )
+
+        with pytest.raises(AclDeployError):
+            await ensure_acl(api)
 
 
 class TestCheckAndDeployAclAlias:

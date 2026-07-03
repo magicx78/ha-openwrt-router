@@ -123,7 +123,7 @@ The Inspector panel shows a per-device event timeline — status changes recorde
 - **Update Management**: Check for and perform system/package updates
 - **Buttons**: Reload WiFi, Check Updates, Perform Updates, Restart Service
 - **SSL/HTTPS**: Secure connections with self-signed certificate support
-- **Auto-ACL Provisioning**: Automatically deploys the rpcd ACL file via SSH when a router is first added
+- **Auto-ACL Provisioning**: Automatically deploys the rpcd ACL file via ubus (SSH fallback when the router blocks ubus file access) — on first add and re-validated on every startup
 
 ### Resilience
 - **Session renewal**: rpcd sessions request a 24-hour TTL; auto re-login on expiry
@@ -143,6 +143,7 @@ Works on **ACL-restricted routers** (e.g. Cudy WR3000 on OpenWrt 25) where stand
 | `file/read /tmp/dhcp.leases` | → `luci-rpc/getDHCPLeases` |
 | `hostapd.*/get_status` (SSID) | → `iwinfo/info` → `luci-rpc/getWirelessDevices` |
 | `network.wireless/status` | → `iwinfo/info` → UCI wireless config |
+| `file/write` (ACL deploy) | → SSH `printf > acl.d/…` + `rpcd restart` (setup checklist reports the outcome) |
 
 ---
 
@@ -262,6 +263,7 @@ Topology Panel (sidebar)
 
 | Version | Date | Key Features |
 |---------|------|---|
+| **1.20.0 – 1.20.1** | 2026-07 | HA-2026.8-Kompatibilität (`config_entry=` im Coordinator), de.json, CI-Modernisierung; Checklist-Deploy-Feedback + SSH-Fallback fürs ACL-Deploy — siehe [CHANGELOG.md](CHANGELOG.md) |
 | **1.16.0 – 1.19.0** | 2026-04 → 2026-05 | HTTPS support, error sensor + outage notifications, sshpass security fix, subprocess/panel lifecycle hardening, rpcd session-leak fix — see [CHANGELOG.md](CHANGELOG.md) |
 | **1.15.6** | 2026-04-22 | **rpcd Memory Leak Fix (CRITICAL)** — `file/exec` removed from ACL; Bridge FDB now via `file/read` on `/sys/class/net/br-lan/brforward` (136 MB → <5 MB) |
 | **1.15.5** | 2026-04-22 | **Topology Polling Fix** — stops on HTTP 401 (session expired); shows HA notification instead of continuous retries |

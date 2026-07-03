@@ -2,6 +2,40 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.20.1] - 2026-07-03
+
+> **Checklist-Fix-Release.** „Berechtigungen automatisch einrichten" im Setup zeigte bei
+> Fehlschlag kommentarlos dieselbe Form erneut — und konnte auf ACL-restriktiven Routern
+> (z. B. Cudy WR3000) prinzipbedingt nie funktionieren.
+
+### Fixed
+
+- **Feedback beim ACL-Deploy:** Der Checklist-Schritt zeigt jetzt das Ergebnis an —
+  `acl_deploy_failed` (ubus **und** SSH abgelehnt), `acl_already_current` (ACL war schon
+  aktuell — Ursache liegt woanders), `acl_deploy_no_change` (geschrieben, aber Rechte nach
+  Re-Check unverändert) sowie eine grüne Erfolgszeile. Vor dem Re-Check: 2 s Karenz +
+  ein Login-Retry (rpcd-Neustart-Race).
+- **Phantom-Zeile entfernt:** „Datei-Ausführung (Bridge FDB, ARP)" wurde nie geprobt und war
+  bei JEDEM Router dauerhaft rot — dadurch war der grüne Gesamtstatus unerreichbar und die
+  Deploy-Checkbox erschien immer. `file/exec` wird seit 1.15.6 zur Laufzeit nicht mehr genutzt.
+- **rpcd-Session-Leck im Checklist-Schritt:** Die Wegwerf-API-Instanzen (Deploy + Re-Check)
+  werden jetzt via `async_close()` geschlossen.
+
+### Added
+
+- **SSH-Fallback für das ACL-Deploy:** Blockiert der Router ubus `file/write` (Henne-Ei:
+  das Deploy braucht genau die file-Rechte, die die ACL erst gewähren würde), wird die ACL
+  per SSH mit denselben Zugangsdaten geschrieben und rpcd neu gestartet (sshpass -e —
+  Passwort nie in argv). *SemVer-Anmerkung: streng genommen ein Minor-Feature; als Patch
+  veröffentlicht, weil es das seit 1.15.4 beworbene Auto-Deploy erst flächendeckend
+  funktionsfähig macht.*
+
+### Changed
+
+- `ensure_acl`/`check_and_deploy_acl` werfen bei fehlgeschlagenem, aber nötigem Deploy jetzt
+  `AclDeployError` statt still `False` (Setup bleibt unberührt — `async_setup_entry` fängt
+  weiterhin alle Fehler best-effort ab).
+
 ## [1.20.0] - 2026-07-03
 
 > **HA-Kompatibilitäts-Release.** Review gegen HA-Core-Standards Stand Juli 2026
