@@ -24,7 +24,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install homeassistant pytest pytest-asyncio aiohttp ruff
+          pip install homeassistant pytest pytest-asyncio aiohttp ruff asyncssh
 
       - name: Lint (ruff)
         run: |
