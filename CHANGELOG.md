@@ -2,6 +2,40 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.24.1] - 2026-07-03
+
+> **Topology-Fix.** Ein per WLAN angebundener **Mesh-AP** (z. B. 10.10.30.50 in VLAN 30)
+> wurde in der Topologie fälschlich als **„Kabel"** angezeigt.
+
+### Fixed
+
+- **Mesh-AP als „Kabel" statt WLAN:** Die Repeater-/WLAN-Erkennung
+  (`topology_mesh._has_active_sta_interface`) verlangte eine Client-STA-Assoziation
+  (BSSID **und** Signal). Ein 802.11s-**Mesh-Point**-Backhaul liefert beides nicht wie ein
+  klassischer STA-Client — dadurch griff das „Repeater-Override" nicht und der über die
+  Gateway-Bridge-FDB gelernte AP blieb ein `lan_uplink` („Kabel"). Ein Mesh-Point-Interface
+  gilt jetzt allein durch seine (aktive) Präsenz als WLAN-Uplink.
+- **Cross-Subnet-Mesh ohne Kante:** Ein Mesh-AP in einem **anderen** Subnetz/VLAN (VLAN 30
+  unter einem VLAN-10-Gateway) wurde von keiner Erkennungsmethode erfasst (Subnetz-Fallback
+  greift nur im gleichen /24) und fiel auf den Frontend-Default „Kabel" zurück. Ein
+  unverbundener AP mit aktivem Mesh-/STA-Interface bekommt jetzt einen verifizierten
+  `wifi_uplink` zum Gateway — auch über VLAN-Grenzen hinweg.
+- **Härtung:** `get_sta_interface_details` (UCI-Fallback) überspringt jetzt **deaktivierte**
+  wifi-ifaces, damit ein deaktivierter Mesh-/STA-Eintrag keinen kabelgebundenen AP
+  fälschlich auf WLAN kippt.
+
+> Hinweis: Der Mesh-AP erscheint danach als **„WLAN-Repeater"** (die UI unterscheidet aktuell
+> `wired` / `mesh` / `repeater`; ein verifizierter WLAN-Uplink ist `repeater`). Wichtig ist:
+> nicht mehr „Kabel".
+
+### Tests
+
+- `test_topology_mesh.py`: Mesh-AP (mode=mesh point, ohne bssid/signal) → `wifi_uplink`;
+  gekabelter Mesh-fähiger AP (WAN-Carrier) bleibt `lan_uplink`; Cross-Subnet-Mesh-AP bekommt
+  `wifi_uplink`-Fallback; Router ohne STA/Mesh in fremdem Subnetz bekommt weiterhin keine
+  Kante. `_has_active_sta_interface`-Unit-Tests. `test_api.py`: UCI-Fallback überspringt
+  deaktivierte ifaces. Gesamtsuite: 597 grün.
+
 ## [1.24.0] - 2026-07-03
 
 > **Multi-Router-Release.** Mehrere OpenWrt-Router (z. B. 10.10.10.1, .2, .4 — baugleiche

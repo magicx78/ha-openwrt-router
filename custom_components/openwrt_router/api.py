@@ -1473,6 +1473,11 @@ class OpenWrtAPI:
             mode_uci = (section_data.get("mode") or "").lower()
             if mode_uci not in sta_modes:
                 continue
+            # Skip disabled wifi-ifaces — a leftover/disabled sta or mesh entry
+            # is not an active uplink and must not flip a wired AP to wireless
+            # in topology_mesh's repeater override.
+            if str(section_data.get("disabled", "0")).lower() in ("1", "true"):
+                continue
             result.append(
                 {
                     "ifname": section_name,

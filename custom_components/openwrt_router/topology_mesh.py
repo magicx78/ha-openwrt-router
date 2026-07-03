@@ -75,15 +75,31 @@ def _detect_router_role(data: OpenWrtCoordinatorData, host_ip: str) -> str:
     return "ap"
 
 
-def _has_active_sta_interface(data: OpenWrtCoordinatorData) -> bool:
-    """Return True if the router has at least one *associated* STA interface.
+# 802.11s mesh-backhaul modes. A mesh point is a wireless uplink even though
+# iwinfo/UCI expose neither a client-style BSSID nor a per-peer signal the way
+# mode=sta does — so its mere (enabled) presence counts as an active uplink.
+# get_sta_interface_details() already drops *disabled* wifi-ifaces, so a mesh
+# entry reaching here is a real, configured backhaul.
+_MESH_STA_MODES: frozenset[str] = frozenset({"mesh", "mesh point", "mesh_point"})
 
-    A STA-mode wireless-iface entry from UCI alone (without iwinfo data) is
-    not enough — the interface might be disabled or never brought up.  Only
-    count entries that show an actual association, indicated by a non-empty
-    BSSID together with a numeric signal value.
+
+def _has_active_sta_interface(data: OpenWrtCoordinatorData) -> bool:
+    """Return True if the router has at least one active wireless-uplink iface.
+
+    Two shapes count as an active wireless uplink:
+
+    * A **client STA-mode** interface that is actually associated — indicated by
+      a non-empty BSSID together with a numeric signal value.  A bare UCI
+      sta-mode entry without iwinfo data is not enough (it might be disabled or
+      never brought up), so those are ignored.
+    * A **mesh-point (802.11s)** backhaul interface.  A mesh link does not
+      report a client-style BSSID/signal, so requiring them would misclassify a
+      wirelessly-meshed AP as wired ("Kabel").  Its presence alone counts.
     """
     for sta in getattr(data, "sta_interfaces", None) or []:
+        mode = (sta.get("mode") or "").strip().lower()
+        if mode in _MESH_STA_MODES:
+            return True
         bssid = (sta.get("bssid") or "").strip()
         signal = sta.get("signal")
         if bssid and signal is not None:
@@ -339,7 +355,40 @@ def _detect_inter_router_edges(
         except (ValueError, TypeError):
             gw_subnet = None
 
-        for ap_rid, ap_hip, _ in unconnected:
+        for ap_rid, ap_hip, ap_data in unconnected:
+            edge_id = f"{gw_rid}--uplink--{ap_rid}"
+            if edge_id in seen_edges:
+                continue
+
+            # Wireless-backhaul fallback: an AP that no other method matched but
+            # that has an active mesh-point/STA uplink iface (and no WAN cable)
+            # is a wireless backhaul. Emit a verified wifi_uplink even across
+            # subnets/VLANs — a mesh link legitimately spans VLANs (e.g. a
+            # VLAN-30 mesh AP under a VLAN-10 gateway), so the same-/24 guard
+            # below must NOT apply here. The medium (wireless) is known; the
+            # gateway as the peer is inferred.
+            if _has_active_sta_interface(ap_data) and not _has_wan_carrier(ap_data):
+                edges.append(
+                    {
+                        "id": edge_id,
+                        "from": gw_rid,
+                        "to": ap_rid,
+                        "relationship": "wifi_uplink",
+                        "source": MESH_SOURCE,
+                        "inferred": True,
+                        "inference_reason": "wireless_backhaul_iface",
+                        "attributes": {
+                            "link_type": "wifi",
+                            "detection_method": "sta_iface_fallback",
+                            "ap_host_ip": ap_hip,
+                            "ap_port": None,
+                            "vlan_tags": [],
+                        },
+                    }
+                )
+                seen_edges.add(edge_id)
+                continue
+
             # Only infer an uplink if the AP is on the same /24 as the gateway.
             # Routers on different subnets (e.g. VPN, WireGuard) are excluded.
             if gw_subnet is not None:
