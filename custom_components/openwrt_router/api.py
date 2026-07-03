@@ -806,7 +806,6 @@ class OpenWrtAPI:
                 return False
 
         results["system_info"] = await _probe("system", "info")
-        results["network_wireless"] = await _probe("network.wireless", "status")
         results["network_dump"] = await _probe("network.interface", "dump")
         results["file_read"] = await _probe(
             "file", "read", {"path": "/etc/openwrt_release"}
@@ -815,6 +814,15 @@ class OpenWrtAPI:
         results["luci_rpc_dhcp"] = await _probe("luci-rpc", "getDHCPLeases")
         results["iwinfo"] = await _probe("iwinfo", "devices")
         results["uci_get"] = await _probe("uci", "get", {"config": "system"})
+
+        # Wireless status: netifd's network.wireless/status is the primary source,
+        # but some firmwares (e.g. Cudy stock) return ubus INVALID_ARGUMENT for it.
+        # iwinfo provides the same radio/SSID data, so treat the wireless
+        # capability as satisfied when either source works — the integration reads
+        # wireless state via iwinfo/hostapd anyway.
+        results["network_wireless"] = (
+            await _probe("network.wireless", "status") or results["iwinfo"]
+        )
 
         # hostapd: try first known interface name, accept any success
         hostapd_ok = await _probe("hostapd.phy0-ap0", "get_clients")
