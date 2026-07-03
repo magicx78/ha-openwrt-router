@@ -10,7 +10,7 @@
  */
 
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { TopologyData, FilterType, AccessPoint, Client, Gateway, EdgeLayout } from './types';
+import { TopologyData, FilterType, AccessPoint, Client, Gateway, EdgeLayout, PortStat } from './types';
 import { useAlerts } from './useAlerts';
 import { useGhostDevices, formatLastSeen } from './useGhostDevices';
 import { computeEdgesFromBounds, computeHoverContext, NodeBounds } from './layout';
@@ -40,6 +40,7 @@ type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
   | { type: 'ap'; data: AccessPoint; clients: Client[] }
   | { type: 'client'; data: Client; apName: string }
+  | { type: 'port'; data: PortStat; routerName: string }
   | null;
 
 export type GroupBy = 'none' | 'type' | 'vlan' | 'status';
@@ -398,6 +399,10 @@ export function TopologyView({ data }: Props) {
     const ap = data.accessPoints.find(a => a.id === client.apId);
     setSelectedEntity({ type: 'client', data: client, apName: ap?.name ?? client.apId });
   };
+  const selectGatewayPort = (port: PortStat) =>
+    setSelectedEntity({ type: 'port', data: port, routerName: data.gateway.name });
+  const selectAPPort = (ap: AccessPoint) => (port: PortStat) =>
+    setSelectedEntity({ type: 'port', data: port, routerName: ap.name });
 
   const totalNodes  = data.accessPoints.length + 1; // +1 for gateway
   const onlineNodes = [data.gateway, ...data.accessPoints].filter(n => n.status === 'online').length;
@@ -583,6 +588,7 @@ export function TopologyView({ data }: Props) {
                       clientCount={gwClients.length > 0 ? gwClients.length : undefined}
                       vlanMode={vlanMode}
                       healthMode={healthMode}
+                      onSelectPort={selectGatewayPort}
                     />
                   </div>
                   {clientsForAP(data.gateway.id).length > 0 && (
@@ -639,6 +645,7 @@ export function TopologyView({ data }: Props) {
                           heatmap={heatmapMode}
                           vlanMode={vlanMode}
                           healthMode={healthMode}
+                          onSelectPort={selectAPPort(ap)}
                         />
                       </div>
                       {expandedApId === ap.id ? (

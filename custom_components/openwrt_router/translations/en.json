@@ -2,19 +2,21 @@
   "options": {
     "step": {
       "init": {
-        "title": "Fritz!Box DSL Modem",
+        "title": "Router Options",
         "description": "Optional: Fritz!Box credentials for DSL statistics and 24h speed chart. Leave empty to disable.",
         "data": {
           "fritzbox_host": "Fritz!Box Host / IP",
           "fritzbox_port": "TR-064 Port",
           "fritzbox_user": "Username",
-          "fritzbox_password": "Password"
+          "fritzbox_password": "Password",
+          "topology_port_debug": "Port mapping debug data in topology snapshot"
         },
         "data_description": {
           "fritzbox_host": "IP address of the Fritz!Box modem (e.g. 172.16.1.254)",
           "fritzbox_port": "TR-064 port, default 49000",
           "fritzbox_user": "Fritz!Box username (usually 'admin' or custom)",
-          "fritzbox_password": "Fritz!Box password"
+          "fritzbox_password": "Fritz!Box password",
+          "topology_port_debug": "Include the raw per-port mapping trace (FDB/DHCP/ARP matches and assignment reasons) in the topology snapshot endpoint. HA diagnostics always stay redacted."
         }
       }
     }

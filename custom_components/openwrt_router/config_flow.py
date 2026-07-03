@@ -39,11 +39,13 @@ from .const import (
     CONF_SWITCH_PORT,
     CONF_SWITCH_PROTOCOL,
     CONF_SWITCH_USERNAME,
+    CONF_TOPOLOGY_PORT_DEBUG,
     DEFAULT_FRITZBOX_HOST,
     DEFAULT_FRITZBOX_PORT,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL,
     DEFAULT_SWITCH_PORT,
+    DEFAULT_TOPOLOGY_PORT_DEBUG,
     DEFAULT_USERNAME,
     DOMAIN,
     ERROR_ACL_ALREADY_CURRENT,
@@ -95,7 +97,7 @@ def _validate_host(host: str) -> str | None:
 
 
 class OpenWrtOptionsFlow(OptionsFlow):
-    """Options flow — configure Fritz!Box modem credentials per router entry."""
+    """Options flow — Fritz!Box modem credentials + topology debug flag."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -122,6 +124,12 @@ class OpenWrtOptionsFlow(OptionsFlow):
                     CONF_FRITZBOX_PASSWORD,
                     default=opts.get(CONF_FRITZBOX_PASSWORD, ""),
                 ): str,
+                vol.Optional(
+                    CONF_TOPOLOGY_PORT_DEBUG,
+                    default=opts.get(
+                        CONF_TOPOLOGY_PORT_DEBUG, DEFAULT_TOPOLOGY_PORT_DEBUG
+                    ),
+                ): bool,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

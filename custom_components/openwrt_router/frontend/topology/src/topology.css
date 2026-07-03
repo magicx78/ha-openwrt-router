@@ -1958,6 +1958,141 @@
   color: var(--text-secondary);
   margin-top: 2px;
 }
+.port-tooltip__device {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #93c5fd;
+}
+.port-tooltip__hint {
+  font-size: 9px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  border-top: 1px solid var(--border);
+  padding-top: 3px;
+}
+
+/* ── Port device badge + clickable chips (v1.21) ─────────────────────── */
+.port-strip__port--clickable {
+  cursor: pointer;
+}
+.port-strip__port--clickable:hover {
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.06);
+}
+.port-strip__device {
+  font-size: 9px;
+  line-height: 1.1;
+  color: var(--text-secondary);
+  max-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.port-strip__device--uncertain {
+  color: #f59e0b;
+}
+
+/* Confidence dots: high = green, medium = amber, low/none = muted */
+.confidence-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+.confidence-dot--high   { background: var(--green); }
+.confidence-dot--medium { background: #f59e0b; }
+.confidence-dot--low    { background: var(--text-muted); }
+.confidence-dot--none   { background: var(--text-muted); opacity: 0.5; }
+
+/* ── Port device strip — wired-device dots grouped per port (v1.21) ──── */
+.port-device-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+}
+.port-device-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.port-device-group__label {
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--text-muted);
+  margin-right: 1px;
+}
+.client-dot--port {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  cursor: pointer;
+}
+.client-dot--port.confidence--medium {
+  border-color: #f59e0b;
+}
+.client-dot--port.confidence--low {
+  border-style: dashed;
+}
+.client-dot-overflow--port {
+  font-size: 9px;
+  cursor: pointer;
+}
+
+/* ── Port detail panel section (v1.21) ───────────────────────────────── */
+.port-detail__note {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 4px 0;
+}
+.port-device-row {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+.port-device-row__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.port-device-row__name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.port-device-row__tag {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--green);
+  border: 1px solid var(--green);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.port-device-row__mac {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+}
+.port-device-row__link {
+  color: #93c5fd;
+  text-decoration: none;
+}
+.port-device-row__link:hover {
+  text-decoration: underline;
+}
 
 /* ── Node Hover Tooltip (#13) ────────────────────────────────────────── */
 .node-tooltip {

@@ -10,6 +10,44 @@ export const MOCK_DATA: TopologyData = {
     wanIp: '93.184.216.34',
     uptime: '12d 4h 32m',
     status: 'online',
+    // v1.21 port-device model — exercises every badge/tooltip/popup branch
+    portStats: [
+      {
+        name: 'wan', up: true, speed_mbps: 1000, duplex: 'full',
+        role: 'wan', connectedDevices: [], deviceCount: 0,
+        mappingConfidence: 'none',
+      },
+      {
+        // single device, full identity → high confidence + name badge
+        name: 'lan1', up: true, speed_mbps: 100, duplex: 'full', vlanIds: [10],
+        role: 'lan',
+        connectedDevices: [
+          { mac: 'de:ad:be:ef:00:01', ip: '10.10.10.23', name: 'reolink-cam', source: 'fdb+dhcp+arp', confidence: 'high', webUrl: 'http://10.10.10.23' },
+        ],
+        primaryDevice: { mac: 'de:ad:be:ef:00:01', ip: '10.10.10.23', name: 'reolink-cam', source: 'fdb+dhcp+arp', confidence: 'high', webUrl: 'http://10.10.10.23' },
+        deviceCount: 1, hasDownstreamSwitch: false,
+        webUrl: 'http://10.10.10.23', mappingConfidence: 'high',
+      },
+      {
+        // AP + extra device behind an unmanaged switch → "Switch/AP" badge
+        name: 'lan2', up: true, speed_mbps: 1000, duplex: 'full', vlanIds: [10, 20],
+        role: 'lan', connectedDevice: 'aPclient1',
+        connectedDevices: [
+          { mac: 'de:ad:be:ef:00:02', ip: '10.10.10.2', name: 'aPclient1', source: 'trunk_map', confidence: 'high', webUrl: 'http://10.10.10.2', isRouter: true, routerNodeId: 'ap1' },
+          { mac: 'de:ad:be:ef:00:03', ip: '10.10.10.40', name: undefined, source: 'fdb+arp', confidence: 'medium', webUrl: 'http://10.10.10.40' },
+          { mac: 'de:ad:be:ef:00:04', ip: undefined, name: undefined, source: 'fdb', confidence: 'medium' },
+        ],
+        primaryDevice: { mac: 'de:ad:be:ef:00:02', ip: '10.10.10.2', name: 'aPclient1', source: 'trunk_map', confidence: 'high', webUrl: 'http://10.10.10.2', isRouter: true, routerNodeId: 'ap1' },
+        deviceCount: 3, hasDownstreamSwitch: true,
+        webUrl: 'http://10.10.10.2', mappingConfidence: 'high',
+      },
+      {
+        // link up, no FDB entries → "Unbekannt"
+        name: 'lan3', up: true, speed_mbps: 1000, duplex: 'full',
+        role: 'lan', connectedDevices: [], deviceCount: 0,
+        mappingConfidence: 'none',
+      },
+    ],
   },
   accessPoints: [
     {
@@ -22,6 +60,13 @@ export const MOCK_DATA: TopologyData = {
       clientCount: 4,
       backhaulSignal: -45,
       status: 'online',
+      // LEGACY fixture on purpose: port_stats WITHOUT the v1.21 fields —
+      // proves old snapshots render exactly like before (no badges/dots).
+      portStats: [
+        { name: 'wan', up: true, speed_mbps: 1000, duplex: 'full' },
+        { name: 'lan1', up: true, speed_mbps: 100, duplex: 'full', connectedDevice: 'printer-og' },
+        { name: 'lan2', up: false, speed_mbps: null },
+      ],
     },
     {
       id: 'ap2',

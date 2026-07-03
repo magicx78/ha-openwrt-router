@@ -1,8 +1,9 @@
 import React from 'react';
-import { Gateway, VlanInfo } from '../types';
+import { Gateway, PortStat, VlanInfo } from '../types';
 import { StatusDot } from './StatusDot';
 import { IconRouter } from './Icons';
 import { PortStrip } from './PortStrip';
+import { PortDeviceStrip } from './PortDeviceStrip';
 import { useStatusFlash } from '../useStatusFlash';
 import { vlanColor } from '../utils/vlanColor';
 
@@ -17,6 +18,7 @@ interface Props {
   clientCount?: number;
   vlanMode?: boolean;
   healthMode?: boolean;
+  onSelectPort?: (port: PortStat) => void;
 }
 
 function trendArrow(history: number[]): string {
@@ -71,7 +73,7 @@ export function computeHealth(cpu?: number, mem?: number, signalDbm?: number): '
   return 'ok';
 }
 
-export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onContextMenu, onDoubleClick, clientCount, vlanMode, healthMode }: Props) {
+export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onContextMenu, onDoubleClick, clientCount, vlanMode, healthMode, onSelectPort }: Props) {
   const statusClass = gateway.status === 'online'
     ? 'status-online'
     : gateway.status === 'warning'
@@ -225,7 +227,10 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onCo
 
       {/* ── Port strip ── */}
       {gateway.portStats && gateway.portStats.length > 0 && (
-        <PortStrip ports={gateway.portStats} />
+        <>
+          <PortStrip ports={gateway.portStats} onSelectPort={onSelectPort} />
+          <PortDeviceStrip ports={gateway.portStats} onSelectPort={onSelectPort} />
+        </>
       )}
     </div>
   );

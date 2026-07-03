@@ -146,6 +146,8 @@ class OpenWrtCoordinatorData:
         self.port_vlan_map: dict[str, list[int]] = {}
         # Bridge FDB: MAC address → port name
         self.port_fdb_map: dict[str, str] = {}
+        # ARP/neighbour table: MAC address → IPv4 (resolves static-IP devices)
+        self.arp_table: dict[str, str] = {}
         # Topology snapshots: compact state history for before/after comparison
         self.topology_snapshots: list[dict[str, Any]] = []
         # trunk_port_map: {ap_host_ip → gateway_port_name} from ARP + bridge FDB
@@ -189,6 +191,7 @@ class OpenWrtCoordinatorData:
             KEY_DSL_HISTORY: self.dsl_history,
             KEY_DDNS_STATUS: self.ddns_status,
             KEY_CPU_HISTORY: self.cpu_history,
+            "arp_table": self.arp_table,
         }
 
 
@@ -509,7 +512,15 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 data.port_fdb_map = {}
 
             try:
-                data.trunk_port_map = await self.api.get_trunk_port_map()
+                data.arp_table = await self.api.get_arp_table()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching ARP table: %s", err)
+                data.arp_table = {}
+
+            try:
+                data.trunk_port_map = await self.api.get_trunk_port_map(
+                    fdb=data.port_fdb_map, arp=data.arp_table
+                )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching trunk port map: %s", err)
                 data.trunk_port_map = {}

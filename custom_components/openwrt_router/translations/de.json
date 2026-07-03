@@ -2,19 +2,21 @@
   "options": {
     "step": {
       "init": {
-        "title": "Fritz!Box DSL-Modem",
+        "title": "Router-Optionen",
         "description": "Optional: Fritz!Box-Zugangsdaten für DSL-Statistiken und das 24h-Geschwindigkeitsdiagramm. Leer lassen zum Deaktivieren.",
         "data": {
           "fritzbox_host": "Fritz!Box Host / IP",
           "fritzbox_port": "TR-064-Port",
           "fritzbox_user": "Benutzername",
-          "fritzbox_password": "Passwort"
+          "fritzbox_password": "Passwort",
+          "topology_port_debug": "Port-Zuordnungs-Debugdaten im Topology-Snapshot"
         },
         "data_description": {
           "fritzbox_host": "IP-Adresse des Fritz!Box-Modems (z. B. 172.16.1.254)",
           "fritzbox_port": "TR-064-Port, Standard 49000",
           "fritzbox_user": "Fritz!Box-Benutzername (meist 'admin' oder eigener)",
-          "fritzbox_password": "Fritz!Box-Passwort"
+          "fritzbox_password": "Fritz!Box-Passwort",
+          "topology_port_debug": "Rohe Port-Zuordnungsdaten (FDB/DHCP/ARP-Treffer und Zuordnungsgründe) im Topology-Snapshot-Endpoint mitliefern. HA-Diagnostics bleiben immer redacted."
         }
       }
     }

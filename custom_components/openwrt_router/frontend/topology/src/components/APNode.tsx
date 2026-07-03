@@ -1,11 +1,12 @@
 import React from 'react';
-import { AccessPoint, Client } from '../types';
+import { AccessPoint, Client, PortStat } from '../types';
 import { StatusDot } from './StatusDot';
 import { IconAP } from './Icons';
 import { SignalBar } from './SignalBar';
 import { computeHealth } from './GatewayNode';
 import { useStatusFlash } from '../useStatusFlash';
 import { PortStrip } from './PortStrip';
+import { PortDeviceStrip } from './PortDeviceStrip';
 import { vlanColor } from '../utils/vlanColor';
 
 function trendArrow(history: number[]): string {
@@ -57,6 +58,7 @@ interface Props {
   heatmap?: boolean;
   vlanMode?: boolean;
   healthMode?: boolean;
+  onSelectPort?: (port: PortStat) => void;
 }
 
 function avgSignalDbm(clients: Client[]): number | null {
@@ -90,7 +92,7 @@ function portSpeedLabel(mbps: number | null): string {
   return '10M';
 }
 
-export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHover, onContextMenu, onDoubleClick, onToggleExpand, heatmap, vlanMode, healthMode }: Props) {
+export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHover, onContextMenu, onDoubleClick, onToggleExpand, heatmap, vlanMode, healthMode, onSelectPort }: Props) {
   const statusClass = ap.status === 'online'
     ? 'status-online'
     : ap.status === 'warning'
@@ -225,7 +227,10 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
 
       {/* Port strip — physical ports (WAN, LAN1, ...) */}
       {ap.portStats && ap.portStats.length > 0 && (
-        <PortStrip ports={ap.portStats} />
+        <>
+          <PortStrip ports={ap.portStats} onSelectPort={onSelectPort} />
+          <PortDeviceStrip ports={ap.portStats} onSelectPort={onSelectPort} />
+        </>
       )}
     </div>
   );

@@ -143,6 +143,11 @@ if (!customElements.get('openwrt-topology-panel')) {
 
 const rootEl = document.getElementById('root');
 if (rootEl) {
+  // The stylesheet is only bundled as an inline string (?inline) — inject it
+  // for the dev mount too, matching what the HA custom element does.
+  const devStyle = document.createElement('style');
+  devStyle.textContent = topologyCSS;
+  document.head.appendChild(devStyle);
   createRoot(rootEl).render(
     <React.StrictMode>
       <TopologyView data={MOCK_DATA} />

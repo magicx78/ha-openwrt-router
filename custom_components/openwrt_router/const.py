@@ -299,6 +299,12 @@ TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES = 10
 TOPOLOGY_SNAPSHOT_MAX = 20
 KEY_TOPOLOGY_SNAPSHOTS = "topology_snapshots"
 
+# Options flag: include the raw per-port mapping trace (FDB/DHCP/ARP MACs and
+# assignment reasons) in the topology snapshot endpoint. Off by default —
+# payload guard; HA diagnostics only ever get the redacted summary.
+CONF_TOPOLOGY_PORT_DEBUG = "topology_port_debug"
+DEFAULT_TOPOLOGY_PORT_DEBUG = False
+
 # TODO: parental control - add UBUS_PARENTAL_OBJECT
 
 # DHCP lease data key (coordinator)

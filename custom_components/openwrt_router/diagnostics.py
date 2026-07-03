@@ -19,6 +19,7 @@ from .const import (
     DIAGNOSTICS_REDACTED,
     DOMAIN,
 )
+from .topology_ports import redacted_port_summary
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ async def async_get_config_entry_diagnostics(
     config_data = _redact(dict(entry.data))
 
     coordinator_data: dict[str, Any] = {}
+    port_mapping: dict[str, Any] = {}
     if coordinator.data:
         coordinator_data = _redact(coordinator.data.as_dict())
         # DHCP leases are personally identifiable (MAC → IP → hostname for every
@@ -58,6 +60,13 @@ async def async_get_config_entry_diagnostics(
         if "dhcp_leases" in coordinator_data:
             lease_count = len(coordinator.data.dhcp_leases)
             coordinator_data["dhcp_leases"] = f"<{lease_count} leases redacted>"
+        # The ARP table is the same PII class (MAC → IP) — count only.
+        if "arp_table" in coordinator_data:
+            arp_count = len(coordinator.data.arp_table)
+            coordinator_data["arp_table"] = f"<{arp_count} entries redacted>"
+        # PII-free per-port mapping summary (counts, confidence, sources) —
+        # the full raw mapping lives only in the auth-protected snapshot.
+        port_mapping = redacted_port_summary(coordinator.data)
 
     diagnostics: dict[str, Any] = {
         "integration": DOMAIN,
@@ -73,6 +82,7 @@ async def async_get_config_entry_diagnostics(
         },
         "features": _redact(coordinator.features),
         "router_info": _redact(coordinator.router_info),
+        "port_mapping": port_mapping,
         # TODO: include bandwidth statistics once the bandwidth sensor is implemented
         # TODO: include per-client online time once implemented
         # TODO: include traffic statistics once implemented

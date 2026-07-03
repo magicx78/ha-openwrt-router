@@ -47,6 +47,8 @@ A built-in network map panel is automatically registered when the integration is
 | **Right-click** node | Context menu: Focus, Zoom, Clients, VLAN-Overlay, Alerts |
 | **Hover** node | Quick-info tooltip — IP, uptime, CPU/RAM, firmware, SSIDs, VLANs |
 | **Hover** edge | Link type, signal strength, WAN traffic |
+| **Hover** port chip | Link speed, VLANs, and the devices mapped to that port (with confidence) |
+| **Click** port chip / port device dot | Port detail panel — devices with name, MAC, clickable `http://<ip>` link, mapping source + confidence |
 | **Click** AP client count | Inline client list with signal bars and band |
 | **Minimap** (bottom-right) | Click to pan canvas; shows all nodes as coloured dots |
 
@@ -67,6 +69,34 @@ Opens when a node is clicked. Shows:
 - **Gateway**: model, firmware, LAN/WAN IP, uptime, ping, CPU/RAM bars, WAN traffic bars, DSL stats + 24 h chart, SSIDs, ports, VLANs, DDNS status, event timeline
 - **Access Point**: model, firmware, IP, uplink type + backhaul signal, CPU/RAM bars, SSIDs, client list, event timeline
 - **Client**: hostname, IP, MAC, vendor, band, signal, connected since, DHCP expiry, session traffic, HA device-tracker link
+
+### Port-to-device mapping
+
+Every physical port tile (WAN, LAN1, …) shows what is plugged in: a badge with
+the device name (or IP), `n Geräte` when several devices sit behind the port,
+`Switch/AP` for mesh trunk ports, and `Unbekannt` when the link is up but no
+device could be identified. Wired devices additionally appear as grouped icon
+dots below the port strip.
+
+The mapping is derived from real router data — bridge FDB (`brforward`),
+DHCP leases and the ARP table — and carries an explicit confidence level:
+
+| Confidence | Meaning |
+|------------|---------|
+| `high` | MAC seen in the bridge FDB on that port **and** full identity (IP + hostname) from DHCP/ARP |
+| `medium` | FDB port match, but only partial identity (IP-only, hostname-only, bare MAC, or DHCP/ARP conflict) |
+| `low` | Identity known, but no reliable port — listed as *unassigned*, never pinned to a port |
+| `none` | Nothing known |
+
+WiFi clients are never attributed to LAN ports, router-own MACs are filtered,
+and the WAN port never claims devices (the FDB cannot see the WAN side).
+Devices behind a mesh AP belong to that AP, not to the gateway trunk port.
+
+For troubleshooting, enable **“Port mapping debug data in topology snapshot”**
+in the integration options: the auth-protected snapshot endpoint
+(`/api/openwrt_topology/snapshot`) then includes a per-port trace (FDB MACs,
+DHCP/ARP matches, filtered MACs, final assignment, reason). HA diagnostics
+always contain only a PII-free summary (counts, confidence, sources).
 
 ### Event timeline
 

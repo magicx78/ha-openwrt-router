@@ -28,6 +28,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .coordinator import OpenWrtCoordinatorData
+from .topology_ports import (
+    CONFIDENCE_NONE,
+    build_port_connections,
+    collect_own_macs,
+    collect_wifi_client_macs,
+)
 
 
 def _seconds_since(value: Any) -> int | None:
@@ -193,36 +199,50 @@ def _slim_port_stats(
     port_vlan_map: dict[str, list[int]] | None = None,
     bridge_fdb: dict[str, str] | None = None,
     dhcp_leases: dict[str, dict[str, str]] | None = None,
+    arp_table: dict[str, str] | None = None,
+    wifi_client_macs: set[str] | None = None,
+    own_macs: set[str] | None = None,
+    port_connections: dict[str, Any] | None = None,
 ) -> list[dict]:
     """Strip bulky byte counters and enrich with VLAN + device info.
+
+    Emits every legacy key unchanged (name/up/speed_mbps/duplex/vlan_ids/
+    connected_device/rx_bytes/tx_bytes) plus the v1.21 port-device model
+    (connected_devices, primary_device, device_count, confidence, …).
 
     Args:
         port_stats: Raw port stats from coordinator.
         port_vlan_map: port name → list of VLAN IDs (from UCI).
-        bridge_fdb: MAC address → port name (from bridge fdb show).
-        dhcp_leases: MAC → {ip, hostname} for resolving connected device names.
+        bridge_fdb: MAC address → port name (from the bridge FDB).
+        dhcp_leases: MAC → {ip, hostname} for resolving device names.
+        arp_table: MAC → IPv4 for devices without a DHCP lease.
+        wifi_client_macs: WiFi-client MACs to exclude from wired ports.
+        own_macs: Router-own MACs to exclude.
+        port_connections: Pre-built build_port_connections() result —
+            avoids recomputing when the caller already has one.
     """
-    # Build reverse FDB: port name → list of MACs
-    port_to_macs: dict[str, list[str]] = {}
-    for mac, port in (bridge_fdb or {}).items():
-        port_to_macs.setdefault(port, []).append(mac)
+    if port_connections is None:
+        port_connections = build_port_connections(
+            port_stats=port_stats,
+            fdb=bridge_fdb,
+            dhcp_leases=dhcp_leases,
+            arp_table=arp_table,
+            wifi_client_macs=wifi_client_macs,
+            own_macs=own_macs,
+        )
+    ports_map: dict[str, dict[str, Any]] = port_connections.get("ports", {})
 
     result = []
     for p in port_stats or []:
         name = p.get("name", "")
-        # Resolve connected device from FDB + DHCP leases
+        conn = ports_map.get(name, {})
+        primary: dict[str, Any] | None = conn.get("primary_device")
+        # Legacy single-string field: deterministic name > ip > mac
         connected_device: str | None = None
-        macs_on_port = port_to_macs.get(name, [])
-        if macs_on_port and dhcp_leases:
-            for mac in macs_on_port:
-                lease = dhcp_leases.get(mac)
-                if lease:
-                    hostname = lease.get("hostname") or lease.get("ip") or mac
-                    connected_device = hostname
-                    break
-            if connected_device is None:
-                # Fall back to raw MAC
-                connected_device = macs_on_port[0]
+        if primary:
+            connected_device = (
+                primary.get("name") or primary.get("ip") or primary.get("mac")
+            )
 
         result.append(
             {
@@ -234,6 +254,18 @@ def _slim_port_stats(
                 "connected_device": connected_device,
                 "rx_bytes": p.get("rx_bytes"),
                 "tx_bytes": p.get("tx_bytes"),
+                # v1.21 port-device model (additive, optional for old UIs)
+                "port_label": conn.get("port_label") or name.upper(),
+                "logical_name": name,
+                "role": conn.get("role")
+                or ("wan" if name.startswith("wan") else "lan"),
+                "link_up": bool(p.get("up", False)),
+                "connected_devices": conn.get("connected_devices", []),
+                "primary_device": primary,
+                "device_count": conn.get("device_count", 0),
+                "has_downstream_switch": conn.get("has_downstream_switch", False),
+                "web_url": conn.get("web_url"),
+                "mapping_confidence": conn.get("mapping_confidence", CONFIDENCE_NONE),
             }
         )
     return result
@@ -243,6 +275,7 @@ def build_topology_snapshot(
     data: OpenWrtCoordinatorData,
     role: str = "unknown",
     host_ip: str = "",
+    include_port_debug: bool = False,
 ) -> dict[str, Any]:
     """Build a topology snapshot from coordinator data.
 
@@ -271,6 +304,21 @@ def build_topology_snapshot(
     router_id: str = _mac or router_info.get("hostname") or "router"
     wan_ifname: str = data.wan_status.get("interface", "")
 
+    # ── Port → device mapping (FDB + DHCP + ARP, confidence model) ─
+    port_connections = build_port_connections(
+        port_stats=data.port_stats,
+        fdb=getattr(data, "port_fdb_map", None),
+        dhcp_leases=data.dhcp_leases,
+        arp_table=getattr(data, "arp_table", None),
+        wifi_client_macs=collect_wifi_client_macs(data.clients),
+        own_macs=collect_own_macs(
+            router_info,
+            data.ap_interfaces,
+            getattr(data, "sta_interfaces", None),
+        ),
+        include_debug=include_port_debug,
+    )
+
     # ── Router node ────────────────────────────────────────────────
     nodes.append(
         {
@@ -297,8 +345,13 @@ def build_topology_snapshot(
                 "port_stats": _slim_port_stats(
                     data.port_stats,
                     port_vlan_map=getattr(data, "port_vlan_map", None),
-                    bridge_fdb=getattr(data, "port_fdb_map", None),
-                    dhcp_leases=data.dhcp_leases,
+                    port_connections=port_connections,
+                ),
+                "unassigned_devices": port_connections["unassigned"],
+                **(
+                    {"port_mapping_debug": port_connections["debug"]}
+                    if include_port_debug
+                    else {}
                 ),
                 "vlans": _extract_vlans(data.network_interfaces),
                 "vlans_stale": getattr(data, "vlans_stale", False),
