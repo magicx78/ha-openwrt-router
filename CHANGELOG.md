@@ -2,6 +2,32 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.23.0] - 2026-07-03
+
+> **Checklist-Release.** Nach einem erfolgreichen ACL-Deploy blieben „Datei-Lesezugriff" und
+> „WLAN-Status" trotzdem rot (fälschlich als „Kritische Berechtigungen fehlen"), obwohl die
+> Integration funktioniert. Am echten Cudy WR3000 (10.10.10.1) verifiziert: jetzt alle 9 Punkte grün.
+
+### Fixed
+
+- **Datei-Lesezugriff blieb rot:** Das rpcd-`file`-Objekt prüft Lesezugriff PRO PFAD. Die ACL
+  gewährte unter `read.file` nur ddns-Pfade — `/etc/openwrt_release`, `/sys/class/net/*` (Bridge-FDB,
+  Interface-Statistiken, Port-Nummern), `/proc/net/arp` und conntrack waren blockiert und fielen auf
+  SSH zurück. Diese read-only System-Pfade sind jetzt in der ACL → file/read läuft direkt über ubus
+  (schneller, kein SSH nötig). `ACL_VERSION` 2→3 löst beim nächsten Start ein automatisches Redeploy aus.
+- **WLAN-Status blieb rot:** Manche Firmware (Cudy Stock) liefert für `network.wireless/status`
+  ubus INVALID_ARGUMENT. Die WLAN-Daten kommen ohnehin über iwinfo/hostapd — die Capability gilt
+  jetzt als erfüllt, wenn `network.wireless` ODER `iwinfo` funktioniert. Kein falscher „Kritisch"-Alarm mehr.
+- **Manuelle Anleitung repariert:** Der Checklist-Hinweis zeigte `scp ha-openwrt-router.json root@…`,
+  was auf eine Datei verweist, die der Nutzer nicht hat. Jetzt: Verweis auf die Auto-Deploy-Checkbox
+  (inkl. der dropbear-`PasswordAuth`-Befehle, die der SSH-Fallback braucht) plus ein funktionierender
+  manueller `cat > acl.d/… <<'EOF'`-Block, dynamisch aus dem echten ACL-Inhalt erzeugt.
+
+### Notes
+
+- Auto-Deploy der ACL (Checkbox) benötigt aktives SSH-Passwort-Login am Router
+  (dropbear `PasswordAuth on`, bei manchen Geräten zusätzlich `RootPasswordAuth on`).
+
 ## [1.22.0] - 2026-07-03
 
 > **Transport-Release.** Der SSH-Fallback läuft jetzt pure-Python über **asyncssh** —
