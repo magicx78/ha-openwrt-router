@@ -2,6 +2,64 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.21.0] - 2026-07-03
+
+> **Port-Zuordnungs-Release.** Die Topology zeigte Geräte an falschen physischen Ports —
+> Ursache war ein fehlerhaftes Binär-Parsing der Bridge-FDB (8 statt 16 Bytes pro Eintrag,
+> `is_local` ignoriert) plus ein Case-Mismatch beim DHCP-Lease-Lookup. Jetzt gibt es ein
+> echtes Port→Gerät-Datenmodell mit Confidence-Stufen — und die Port-Kacheln zeigen, was
+> dranhängt.
+
+### Fixed
+
+- **brforward-Parsing korrigiert:** `/sys/class/net/br-lan/brforward` besteht aus
+  16-Byte-`struct __fdb_entry`-Records — der alte 8-Byte-Parser las jeden zweiten
+  Eintrag als Müll und ignorierte `is_local`, wodurch **Router-eigene MACs als
+  angeschlossene Geräte an Ports erschienen**. Multicast/Broadcast/Null-MACs werden
+  gefiltert, `port_hi` wird berücksichtigt, VLAN-Subinterface-Member (`lan1.10`)
+  zählen zum physischen Port.
+- **Lease-Lookup case-normalisiert:** DHCP-Leases sind UPPERCASE-gekeyt, FDB-MACs
+  lowercase — der Hostname-Lookup lief dadurch immer ins Leere und Ports zeigten
+  rohe MACs statt Gerätenamen.
+- **Deterministische Gerätewahl:** `connected_device` folgte der zufälligen
+  FDB-Reihenfolge und konnte bei jedem Poll wechseln. Geräte werden jetzt nach
+  Confidence → Name → MAC sortiert.
+
+### Added
+
+- **Port→Gerät-Datenmodell** (`topology_ports.py`): pro Port `connected_devices[]`
+  mit Name/IP/MAC/Quelle (`fdb+dhcp+arp`) und Confidence (`high`/`medium`/`low`/
+  `none`), `primary_device`, `device_count`, `has_downstream_switch`, `web_url`.
+  Keine Fake-Zuordnungen: Identitäten ohne verlässlichen FDB-Port landen im
+  `unassigned`-Bucket (`unknown_port`), reine Lease-Geister werden verworfen,
+  WLAN-Clients erscheinen nie auf LAN-Ports, der WAN-Port bekommt nie FDB-Geräte.
+- **ARP-Tabelle als Datenquelle:** `get_arp_table()` (MAC→IPv4) via ubus
+  `file/read /proc/net/arp` mit SSH-Fallback — löst Geräte mit statischer IP ohne
+  DHCP-Lease auf; `get_trunk_port_map()` nutzt die vorgeholten Maps (kein doppelter
+  FDB-Read pro Zyklus mehr).
+- **Topology-UI — Port-Kacheln:** zweite Zeile mit Gerätename/IP, `n Geräte`,
+  `Switch/AP`, `Internet` (WAN) oder `Unbekannt`; Hover-Tooltip listet bis zu
+  6 Geräte mit Confidence-Punkt; **Klick öffnet ein Port-Detail-Panel** mit
+  Status/Speed/VLANs und allen Geräten inkl. klickbarem `http://<ip>`-Link
+  (neuer Tab, `rel="noopener noreferrer"`, IP wird client-seitig validiert).
+- **Geräte-Icons pro Port:** unter der Port-Leiste erscheinen die kabelgebundenen
+  Geräte als gruppierte Dots je LAN-Port (max. 4 + Overflow) — Mesh-APs am
+  Trunk-Port mit Router-Icon und „Zum Access Point"-Sprung.
+- **Mesh: Nearest-Switch-Regel:** Geräte, die ein AP selbst auf seiner
+  Access-Seite sieht, werden dem AP zugerechnet und nicht mehr flach auf den
+  Gateway-Trunk-Port gelegt; der AP selbst erscheint dort als primäres Gerät.
+- **Debug-Option** (`topology_port_debug`, Optionen-Dialog): liefert im
+  auth-geschützten Snapshot pro Port die Roh-Zuordnung (FDB-MACs, DHCP/ARP-Treffer,
+  gefilterte MACs, finaler Stand, Begründung). HA-Diagnostics enthalten stattdessen
+  eine **PII-freie `port_mapping`-Zusammenfassung** (Counts, Confidence, Quellen);
+  die neue `arp_table` wird dort wie die DHCP-Leases als Count redacted.
+
+### Changed
+
+- Alte Snapshots ohne die neuen Felder rendert das Panel unverändert wie bisher
+  (alle neuen Felder optional; Legacy-`connected_device`-String bleibt erhalten
+  und zeigt am Trunk-Port weiterhin den AP-Hostnamen).
+
 ## [1.20.1] - 2026-07-03
 
 > **Checklist-Fix-Release.** „Berechtigungen automatisch einrichten" im Setup zeigte bei
