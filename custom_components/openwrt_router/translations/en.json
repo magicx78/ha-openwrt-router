@@ -92,7 +92,7 @@
           "deploy_acl": "Set up permissions automatically (deploy ACL via ubus + restart rpcd)"
         },
         "data_description": {
-          "deploy_acl": "Writes the rpcd ACL file directly to the router and restarts rpcd — no SSH required. Permissions are re-checked afterwards."
+          "deploy_acl": "Writes the rpcd ACL file to the router via ubus and restarts rpcd. If the router blocks ubus file access, an SSH fallback with the same credentials is attempted. Permissions are re-checked afterwards."
         }
       },
       "reauth_rpcd_setup": {
@@ -117,7 +117,10 @@
       "invalid_host": "Invalid host address. Use a valid IP or hostname.",
       "timeout": "Connection timed out. The router may be unreachable or overloaded.",
       "unknown": "An unexpected error occurred. Check the Home Assistant logs for details.",
-      "rpcd_setup_required": "rpcd is not configured on this router. SSH into the router and run: opkg update && opkg install rpcd rpcd-mod-rpcsys && uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock' && uci set rpcd.@rpcd[0].timeout=30 && uci commit rpcd && service rpcd restart"
+      "rpcd_setup_required": "rpcd is not configured on this router. SSH into the router and run: opkg update && opkg install rpcd rpcd-mod-rpcsys && uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock' && uci set rpcd.@rpcd[0].timeout=30 && uci commit rpcd && service rpcd restart",
+      "acl_deploy_failed": "Automatic ACL deployment failed — the router rejected ubus file/write and the SSH fallback did not succeed. Deploy the ACL manually using the SSH commands shown above, then run the check again.",
+      "acl_deploy_no_change": "The ACL file was written, but the permissions did not change after re-checking. rpcd may not have finished restarting or required packages are missing — see the install commands above, then try again.",
+      "acl_already_current": "The ACL file on the router is already up to date — the missing permissions have another cause (missing packages or a pending rpcd restart). See the install commands above."
     },
     "abort": {
       "already_configured": "This router is already configured.",

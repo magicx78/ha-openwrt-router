@@ -92,7 +92,7 @@
           "deploy_acl": "Berechtigungen automatisch einrichten (ACL via ubus deployen + rpcd neu starten)"
         },
         "data_description": {
-          "deploy_acl": "Schreibt die rpcd-ACL-Datei direkt auf den Router und startet rpcd neu — kein SSH nötig. Danach werden die Berechtigungen erneut geprüft."
+          "deploy_acl": "Schreibt die rpcd-ACL-Datei via ubus auf den Router und startet rpcd neu. Blockiert der Router den ubus-Dateizugriff, wird ein SSH-Fallback mit denselben Zugangsdaten versucht. Danach werden die Berechtigungen erneut geprüft."
         }
       },
       "reauth_rpcd_setup": {
@@ -117,7 +117,10 @@
       "invalid_host": "Ungültige Host-Adresse. Verwende eine gültige IP-Adresse oder einen gültigen Hostnamen.",
       "timeout": "Zeitüberschreitung bei der Verbindung. Der Router ist möglicherweise nicht erreichbar oder überlastet.",
       "unknown": "Ein unerwarteter Fehler ist aufgetreten. Details stehen im Home-Assistant-Log.",
-      "rpcd_setup_required": "rpcd ist auf diesem Router nicht konfiguriert. Per SSH auf dem Router ausführen: opkg update && opkg install rpcd rpcd-mod-rpcsys && uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock' && uci set rpcd.@rpcd[0].timeout=30 && uci commit rpcd && service rpcd restart"
+      "rpcd_setup_required": "rpcd ist auf diesem Router nicht konfiguriert. Per SSH auf dem Router ausführen: opkg update && opkg install rpcd rpcd-mod-rpcsys && uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock' && uci set rpcd.@rpcd[0].timeout=30 && uci commit rpcd && service rpcd restart",
+      "acl_deploy_failed": "Automatisches ACL-Deployment fehlgeschlagen — der Router hat ubus file/write abgelehnt und auch der SSH-Fallback war nicht erfolgreich. Bitte die ACL manuell mit den oben gezeigten SSH-Befehlen einspielen und erneut prüfen.",
+      "acl_deploy_no_change": "Die ACL-Datei wurde geschrieben, aber die Berechtigungen haben sich nach erneuter Prüfung nicht geändert. Möglicherweise ist rpcd noch nicht fertig neu gestartet oder es fehlen Pakete — siehe Installationsbefehle oben, dann erneut versuchen.",
+      "acl_already_current": "Die ACL-Datei auf dem Router ist bereits aktuell — die fehlenden Berechtigungen haben eine andere Ursache (fehlende Pakete oder ausstehender rpcd-Neustart). Siehe Installationsbefehle oben."
     },
     "abort": {
       "already_configured": "Dieser Router ist bereits konfiguriert.",
