@@ -9,7 +9,9 @@ file descriptors on every termination path:
   * spawn failure           — OSError before a Process exists
   * cancel mid-flight       — outer task is cancelled, proc still gets killed
   * binary output           — NUL-bytes survive the round trip
-  * detached (nohup) helper — wrapping is correct, lifecycle still leak-free
+
+(The detached-SSH wrapping tests moved to test_ssh_transport.py in v1.22.0
+when the SSH transport switched from subprocess to asyncssh.)
 """
 
 from __future__ import annotations
@@ -22,7 +24,6 @@ import pytest
 from custom_components.openwrt_router.api import (  # noqa: E402
     SUBPROCESS_RC_FAILED_TO_SPAWN,
     SUBPROCESS_RC_TIMEOUT,
-    OpenWrtAPI,
     _safe_subprocess_exec,
 )
 
@@ -276,9 +277,7 @@ async def test_safe_subprocess_exec_cancel_during_cleanup_still_kills():
         AsyncMock(return_value=proc),
     ):
         with pytest.raises(asyncio.CancelledError):
-            await _safe_subprocess_exec(
-                ["sleep", "999"], timeout=0.01, binary=False
-            )
+            await _safe_subprocess_exec(["sleep", "999"], timeout=0.01, binary=False)
 
     # Even with a cancel mid-cleanup, the helper must have escalated past
     # terminate to SIGKILL and the final wait — proof that no zombie is left.
@@ -310,141 +309,3 @@ async def test_safe_subprocess_exec_binary_preserves_nul_bytes():
     assert rc == 0
     assert isinstance(stdout, bytes)
     assert stdout == payload  # exact round-trip, NUL bytes preserved
-
-
-# ---------------------------------------------------------------------------
-# 6. _run_ssh_detached — wrapping correctness + lifecycle
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_ssh_detached_wraps_with_nohup_devnull():
-    """Verify the detached helper wraps remote_cmd with nohup + </dev/null
-    so the SSH connection can close while the remote process keeps running."""
-    api = OpenWrtAPI(
-        host="192.168.1.1",
-        port=80,
-        username="root",
-        password="pw",
-        session=MagicMock(),
-        protocol="http",
-    )
-    proc = _make_proc(returncode=0, stdout=b"", stderr=b"")
-    seen_cmd: list[str] = []
-
-    async def _capture_spawn(*cmd, **kwargs):
-        seen_cmd.extend(cmd)
-        return proc
-
-    with patch(
-        "custom_components.openwrt_router.api.asyncio.create_subprocess_exec",
-        AsyncMock(side_effect=_capture_spawn),
-    ):
-        rc, _out, _err = await api._run_ssh_detached(
-            "opkg update > /tmp/opkg.log 2>&1", timeout=10.0
-        )
-
-    assert rc == 0
-    # The remote command (last argv element) must contain nohup + </dev/null
-    # AND the caller's command verbatim.
-    remote = seen_cmd[-1]
-    assert remote.startswith("nohup sh -c '")
-    assert "</dev/null" in remote
-    assert remote.endswith(" &")
-    assert "opkg update > /tmp/opkg.log 2>&1" in remote
-
-
-@pytest.mark.asyncio
-async def test_run_ssh_detached_timeout_cleans_up():
-    api = OpenWrtAPI(
-        host="192.168.1.1",
-        port=80,
-        username="root",
-        password="pw",
-        session=MagicMock(),
-        protocol="http",
-    )
-    proc = _make_proc(returncode=None, communicate_raises=asyncio.TimeoutError())
-    with patch(
-        "custom_components.openwrt_router.api.asyncio.create_subprocess_exec",
-        AsyncMock(return_value=proc),
-    ):
-        rc, _out, _err = await api._run_ssh_detached("sleep 999", timeout=0.01)
-    assert rc == SUBPROCESS_RC_TIMEOUT
-    proc.terminate.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_run_ssh_detached_handles_singlequotes_in_remote_cmd():
-    """A remote_cmd that contains single quotes (e.g. opkg's grep filter)
-    must be passed to the remote bash as ONE token to `sh -c`.
-
-    Regression for the v1.18.0 release-gate finding: the previous wrapper
-    naively concatenated f"nohup sh -c '{remote_cmd}' ..." which broke the
-    surrounding quoting whenever remote_cmd contained ' itself.
-
-    We verify by:
-      1. parsing the wrapper string with shlex to confirm `sh -c` receives
-         the original remote_cmd verbatim as a single argument,
-      2. asserting the wrapper still contains the required nohup / detach
-         decorations.
-    """
-    import shlex as _shlex
-
-    api = OpenWrtAPI(
-        host="192.168.1.1",
-        port=80,
-        username="root",
-        password="pw",
-        session=MagicMock(),
-        protocol="http",
-    )
-
-    # The exact opkg "system update" filter that broke the old wrapper.
-    nasty_remote_cmd = (
-        "opkg update && opkg upgrade $(opkg list-upgradable | "
-        "grep -v -E '^addon-|^luci-' | cut -d' ' -f1) "
-        "> /tmp/opkg_update.log 2>&1"
-    )
-
-    proc = _make_proc(returncode=0, stdout=b"", stderr=b"")
-    seen_cmd: list[str] = []
-
-    async def _capture_spawn(*cmd, **kwargs):
-        seen_cmd.extend(cmd)
-        return proc
-
-    with patch(
-        "custom_components.openwrt_router.api.asyncio.create_subprocess_exec",
-        AsyncMock(side_effect=_capture_spawn),
-    ):
-        rc, _out, _err = await api._run_ssh_detached(nasty_remote_cmd, timeout=10.0)
-
-    assert rc == 0
-
-    # Last argv element is what the remote bash will parse.
-    remote = seen_cmd[-1]
-
-    # Required decorations still in place
-    assert remote.startswith("nohup sh -c ")
-    assert "</dev/null" in remote
-    assert ">/dev/null 2>&1" in remote
-    assert remote.endswith(" &")
-
-    # Now the critical bit: parse the wrapper as a posix shell would.
-    # After splitting, the third token (sh, -c, <cmd>) must be exactly
-    # nasty_remote_cmd.  If the old wrapper were used, shlex would either
-    # raise ValueError (unterminated quote) or split the cmd into multiple
-    # tokens — both would fail this assertion.
-    tokens = _shlex.split(remote, posix=True)
-    assert tokens[0] == "nohup"
-    assert tokens[1] == "sh"
-    assert tokens[2] == "-c"
-    assert tokens[3] == nasty_remote_cmd, (
-        f"sh -c argument was mangled by quoting.\n"
-        f"  expected: {nasty_remote_cmd!r}\n"
-        f"  got:      {tokens[3]!r}"
-    )
-    # Trailing tokens after the cmd: redirect tokens + &
-    assert "</dev/null" in tokens
-    assert "&" in tokens

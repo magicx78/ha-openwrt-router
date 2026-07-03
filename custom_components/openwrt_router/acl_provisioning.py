@@ -2,7 +2,7 @@
 
 When a router is added to Home Assistant, this module checks if the
 rpcd ACL file exists on the router. If missing, it deploys it via the
-ubus file API (no SSH or sshpass required).
+ubus file API (no SSH required; asyncssh fallback when file/write is blocked).
 
 The ACL grants access to the ubus methods needed by the integration:
 hostapd, network.wireless, network.interface, luci-rpc, iwinfo, system.
@@ -233,8 +233,8 @@ async def _deploy_acl(api: OpenWrtAPI, reason: str) -> bool:
 async def _deploy_acl_ssh(api: OpenWrtAPI, reason: str) -> bool:
     """Write the ACL file via SSH when ubus file/write is blocked.
 
-    Uses the integration's existing SSH machinery (sshpass -e — the password
-    never appears in argv). One remote command writes the file, echoes a
+    Uses the integration's existing SSH machinery (asyncssh — the password
+    never leaves the process). One remote command writes the file, echoes a
     success marker and restarts rpcd; the marker is mandatory because
     ``_run_ssh`` returns None for empty stdout even on exit code 0.
 
