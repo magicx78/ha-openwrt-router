@@ -155,7 +155,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
     _CAPABILITY_LABELS: dict[str, str] = {
         "system_info": "System-Info (CPU, RAM, Uptime)",
-        "network_wireless": "WLAN-Status (Radios, SSIDs)",
+        "network_wireless": "WLAN-Status (Radios/SSIDs via netifd oder iwinfo)",
         "network_dump": "Netzwerk-Interfaces (WAN/LAN)",
         "file_read": "Datei-Lesezugriff (Konfiguration, DHCP)",
         "luci_rpc_dhcp": "DHCP-Leases (Client-IPs)",
@@ -474,11 +474,27 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
         install_hint = ""
         if missing_required or missing_optional:
+            # Build a self-contained, always-correct manual deploy command from
+            # the actual ACL content (no stale scp of a file the user doesn't have).
+            import json
+
+            from .acl_provisioning import ACL_FILE_PATH, RPCD_ACL_CONTENT
+
+            acl_json = json.dumps(RPCD_ACL_CONTENT, indent=2)
             install_hint = (
-                f"\n\n**Pakete installieren (SSH):**\n"
+                f"\n\n**Am einfachsten:** Häkchen unten setzen — die ACL wird "
+                f"automatisch via ubus (bzw. SSH-Fallback) auf den Router geschrieben. "
+                f"Der SSH-Fallback braucht aktives Passwort-Login (dropbear). Falls aus, "
+                f"einmalig auf dem Router:\n"
                 f"```\n"
-                f"opkg update && opkg install luci-mod-rpc luci-lib-jsonc rpcd-mod-rpcsys\n"
-                f"scp ha-openwrt-router.json root@{host}:/usr/share/rpcd/acl.d/ha-openwrt-router.json\n"
+                f"uci set dropbear.@dropbear[0].PasswordAuth='on'\n"
+                f"uci commit dropbear && /etc/init.d/dropbear restart\n"
+                f"```\n"
+                f"**Alternativ manuell** (per SSH direkt auf dem Router — kein scp nötig):\n"
+                f"```\n"
+                f"cat > {ACL_FILE_PATH} <<'EOF'\n"
+                f"{acl_json}\n"
+                f"EOF\n"
                 f"/etc/init.d/rpcd restart\n"
                 f"```"
             )
@@ -486,18 +502,14 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         if missing_required:
             status = (
                 f"⚠️ **Kritische Berechtigungen fehlen** — die Integration kann nicht "
-                f"vollständig arbeiten.\n\n"
-                f"Bitte die rpcd-ACL auf dem Router aktualisieren:\n"
-                f"```\nscp ha-openwrt-router.json root@{host}:"
-                f"/usr/share/rpcd/acl.d/ha-openwrt-router.json\n"
-                f"/etc/init.d/rpcd restart\n```"
+                f"vollständig arbeiten."
                 f"{install_hint}"
             )
         elif missing_optional:
             status = (
-                f"ℹ️ Optionale Funktionen nicht verfügbar — Grundfunktionen OK.\n"
-                f"SSH-Fallback wird für fehlende Calls verwendet (erhöht Router-Last).\n"
-                f"Empfehlung: rpcd-ACL aktualisieren."
+                f"ℹ️ Optionale Funktionen nicht via ubus verfügbar — Grundfunktionen OK.\n"
+                f"Für die fehlenden Calls wird der SSH-Fallback genutzt (etwas höhere "
+                f"Router-Last). Empfehlung: rpcd-ACL wie unten aktualisieren."
                 f"{install_hint}"
             )
         else:

@@ -25,7 +25,7 @@ ACL_FILE_PATH = "/usr/share/rpcd/acl.d/ha-openwrt-router.json"
 # Bump whenever RPCD_ACL_CONTENT below changes. Used only for log messages —
 # staleness is detected by comparing the deployed file's actual content to
 # RPCD_ACL_CONTENT, not by this number.
-ACL_VERSION = 2
+ACL_VERSION = 3
 
 # Marker echoed by the SSH deploy command — _run_ssh() returns None for empty
 # stdout even on exit code 0, so success must be detectable from stdout alone.
@@ -46,9 +46,19 @@ RPCD_ACL_CONTENT: dict = {
         "description": "Full access for Home Assistant openwrt_router integration",
         "read": {
             "file": {
+                # rpcd's file object enforces read access per PATH (stat/list are
+                # broad, read is not). These are exactly the read-only system
+                # paths the integration reads via ubus file/read — without them
+                # every read falls back to SSH. No secrets, no broad "/*".
+                "/etc/openwrt_release": ["read"],
                 "/etc/config/ddns": ["read"],
                 "/var/run/ddns": ["list"],
                 "/var/run/ddns/*": ["read"],
+                "/sys/class/net/*": ["read"],  # brforward, statistics/*, brport/port_no
+                "/proc/net/arp": ["read"],
+                "/proc/net/nf_conntrack": ["read"],
+                "/proc/sys/net/netfilter/nf_conntrack_count": ["read"],
+                "/tmp/opkg_list": ["read"],
             },
             "ubus": {
                 "file": ["read", "stat", "list"],
