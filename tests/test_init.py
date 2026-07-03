@@ -70,6 +70,7 @@ class TestSetupEntry:
 
         mock_api = AsyncMock()
         mock_api.login = AsyncMock()
+        mock_api.reset_acl_blocked = MagicMock()
 
         mock_coordinator = MagicMock()
         mock_coordinator.async_config_entry_first_refresh = AsyncMock()
@@ -84,11 +85,15 @@ class TestSetupEntry:
         ), patch(
             "custom_components.openwrt_router.OpenWrtCoordinator",
             return_value=mock_coordinator,
+        ), patch(
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            AsyncMock(return_value=False),
         ):
             result = await async_setup_entry(hass, entry)
 
         assert result is True
         mock_api.login.assert_awaited_once()
+        mock_api.reset_acl_blocked.assert_called_once()
         mock_coordinator.async_config_entry_first_refresh.assert_awaited_once()
         hass.config_entries.async_forward_entry_setups.assert_awaited_once_with(
             entry, PLATFORMS
@@ -159,6 +164,7 @@ class TestSetupEntry:
 
         mock_api = AsyncMock()
         mock_api.login = AsyncMock()
+        mock_api.reset_acl_blocked = MagicMock()
         mock_coordinator = MagicMock()
         mock_coordinator.async_config_entry_first_refresh = AsyncMock()
         mock_coordinator.router_info = {}
@@ -172,10 +178,64 @@ class TestSetupEntry:
         ) as api_cls, patch(
             "custom_components.openwrt_router.OpenWrtCoordinator",
             return_value=mock_coordinator,
+        ), patch(
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            AsyncMock(return_value=False),
         ):
             await async_setup_entry(hass, entry)
             # API should have been created with the default protocol
             api_cls.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_acl_deployed_before_first_refresh(self):
+        """ensure_acl must run BEFORE the first refresh; on a deploy the API is
+        re-logged-in and its ACL-block cache cleared, so the first poll sees the
+        freshly granted methods (no 'degraded until reload')."""
+        hass = _make_hass()
+        entry = _make_entry()
+
+        order: list[str] = []
+        mock_api = AsyncMock()
+        mock_api.login = AsyncMock(side_effect=lambda: order.append("login"))
+        mock_api.reset_acl_blocked = MagicMock(
+            side_effect=lambda: order.append("reset")
+        )
+
+        mock_coordinator = MagicMock()
+        mock_coordinator.async_config_entry_first_refresh = AsyncMock(
+            side_effect=lambda: order.append("first_refresh")
+        )
+        mock_coordinator.router_info = {}
+
+        async def _ensure(_api):
+            order.append("ensure_acl")
+            return True  # simulate a deploy happened
+
+        with patch(
+            "custom_components.openwrt_router.async_get_clientsession",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtAPI",
+            return_value=mock_api,
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtCoordinator",
+            return_value=mock_coordinator,
+        ), patch(
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            side_effect=_ensure,
+        ), patch(
+            "custom_components.openwrt_router._ACL_DEPLOY_GRACE_S", 0
+        ), patch(
+            "custom_components.openwrt_router._ACL_LOGIN_RETRY_DELAY_S", 0
+        ):
+            result = await async_setup_entry(hass, entry)
+
+        assert result is True
+        assert order.index("ensure_acl") < order.index("first_refresh")
+        assert order.index("reset") < order.index("first_refresh")
+        # login called twice: initial + after the deploy's rpcd restart
+        assert order.count("login") == 2
+        mock_api.reset_acl_blocked.assert_called_once()
 
 
 # =====================================================================
@@ -209,6 +269,7 @@ class TestReloadEntry:
 
         mock_api = AsyncMock()
         mock_api.login = AsyncMock()
+        mock_api.reset_acl_blocked = MagicMock()
         mock_coordinator = MagicMock()
         mock_coordinator.async_config_entry_first_refresh = AsyncMock()
         mock_coordinator.router_info = {}
@@ -222,6 +283,9 @@ class TestReloadEntry:
         ), patch(
             "custom_components.openwrt_router.OpenWrtCoordinator",
             return_value=mock_coordinator,
+        ), patch(
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            AsyncMock(return_value=False),
         ):
             await async_reload_entry(hass, entry)
 

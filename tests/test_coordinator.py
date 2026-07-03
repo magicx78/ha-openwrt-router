@@ -12,6 +12,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from custom_components.openwrt_router.api import (
     OpenWrtAuthError,
     OpenWrtConnectionError,
+    OpenWrtMethodNotFoundError,
     OpenWrtResponseError,
     OpenWrtTimeoutError,
 )
@@ -105,6 +106,46 @@ class TestFeatureDetection:
         data = await coord._async_update_data()
         assert data.features == {}
         assert coord._features_detected is True  # Still marked done
+
+
+# =====================================================================
+# First-poll hardening (setup must not hang on ACL-shaped errors)
+# =====================================================================
+
+
+class TestFirstPollHardening:
+    """On the very first refresh a router whose ACL was just deployed (or that
+    needs the SSH fallback) may still deny a core method. That must not abort
+    setup — but a genuine connection/auth error still must.
+    """
+
+    @pytest.mark.asyncio
+    async def test_first_poll_tolerates_acl_error(self):
+        coord, api = _make_coordinator()
+        api.get_wan_status = AsyncMock(
+            side_effect=OpenWrtMethodNotFoundError("blocked")
+        )
+        data = await coord._async_update_data()  # first poll
+        assert data.wan_status == {}
+        assert data.wan_connected is False
+
+    @pytest.mark.asyncio
+    async def test_first_poll_propagates_connection_error(self):
+        coord, api = _make_coordinator()
+        api.get_wan_status = AsyncMock(side_effect=OpenWrtConnectionError("down"))
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
+
+    @pytest.mark.asyncio
+    async def test_later_poll_reraises_acl_error(self):
+        coord, api = _make_coordinator()
+        data1 = await coord._async_update_data()
+        coord.data = data1
+        api.get_wan_status = AsyncMock(
+            side_effect=OpenWrtMethodNotFoundError("blocked")
+        )
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
 
 # =====================================================================

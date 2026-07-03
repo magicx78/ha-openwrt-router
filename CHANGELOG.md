@@ -2,6 +2,54 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.24.0] - 2026-07-03
+
+> **Multi-Router-Release.** Mehrere OpenWrt-Router (z. B. 10.10.10.1, .2, .4 — baugleiche
+> Cudy WR3000) ließen sich nicht zuverlässig parallel hinzufügen: Router 1 klappte, der
+> zweite/dritte brach ab oder kam nach grüner Checklist nicht sauber hoch. Ursache waren
+> die `unique_id`-Ableitung und die Reihenfolge des ACL-Deploys im Setup — beides ist jetzt
+> gefixt. Neuer Multi-Router-Smoke-Test beweist: .1/.2/.4 existieren danach als eigene
+> Einträge/Geräte, ohne falschen `already_configured`-Abbruch.
+
+### Fixed
+
+- **Zweiter/dritter Router wurde als „bereits konfiguriert" abgewiesen:** Die `unique_id`
+  wurde aus dem Router-MAC gebildet (`config_flow.py`). OpenWrts `system board` liefert aber
+  meist gar kein Top-Level-`mac`-Feld, und baugleiche Geräte können denselben Platzhalter-
+  bzw. leeren MAC melden — dann kollidierten alle Router auf eine `unique_id` und der zweite
+  brach mit `already_configured` ab. Die `unique_id` ist jetzt **host-basiert**
+  (`host:port`, siehe neue Helper `_compute_unique_id`): unterschiedliche (feste) IPs sind
+  immer getrennte Einträge, ein echtes erneutes Hinzufügen desselben Hosts wird weiterhin
+  korrekt verhindert.
+- **Router kam nach grüner Checklist nicht sauber hoch / erst nach Reload:** Der ACL-Deploy
+  lief in `async_setup_entry` **nach** dem ersten Datenabruf. Dabei cachte der API-Client die
+  vor dem Deploy noch ACL-geblockten ubus-Methoden dauerhaft (`_acl_blocked`) und schaltete
+  sie auch nach dem Deploy weiter kurz — der Router lief bis zum nächsten Reload degradiert.
+  Jetzt wird die ACL **vor** dem ersten Refresh deployt, danach neu eingeloggt und der
+  Block-Cache geleert (neue Methode `api.reset_acl_blocked()`), sodass der erste Poll bereits
+  die frisch freigegebenen Methoden nutzt.
+
+### Changed
+
+- **First-Refresh-Härtung:** Wird beim allerersten Poll (Setup) eine Kern-ubus-Methode noch
+  durch die gerade erst deployte ACL blockiert (`OpenWrtMethodNotFoundError`), fällt der
+  Coordinator auf leere Defaults zurück statt `ConfigEntryNotReady` zu werfen — der Router
+  kommt hoch statt in „Wird wiederholt" zu hängen. Echte Verbindungs-/Timeout-/Auth-/
+  Response-Fehler propagieren unverändert; im Dauerbetrieb bleibt das strikte Fail-Fast.
+- **`network_wireless`-Capability** gilt jetzt auch als erfüllt, wenn Wireless über
+  hostapd **oder** UCI erreichbar ist (nicht nur `network.wireless/status` oder `iwinfo`).
+  Kein falscher „Kritisch"-Alarm mehr auf Stock-Cudy-Firmware, die für
+  `network.wireless/status` rc 2 liefert und kein iwinfo hat.
+
+### Tests
+
+- Neuer Multi-Router-Smoke-Test (`test_config_flow.py`): fügt .1/.2/.4 nacheinander in
+  dieselbe Domain ein, treibt das echte `_abort_if_unique_id_configured()` und beweist drei
+  getrennte Einträge ohne Abbruch; erneutes Hinzufügen desselben Hosts bricht korrekt ab.
+- `_compute_unique_id`-Unit-Tests (distinct hosts, geteilte/leere/all-zero MAC → trotzdem
+  eindeutig), Setup-Reihenfolge-Test (ACL vor First-Refresh + `reset_acl_blocked`),
+  First-Poll-Härtungs-Tests, `network_wireless`-via-UCI-Test. Gesamtsuite: 587 grün.
+
 ## [1.23.0] - 2026-07-03
 
 > **Checklist-Release.** Nach einem erfolgreichen ACL-Deploy blieben „Datei-Lesezugriff" und

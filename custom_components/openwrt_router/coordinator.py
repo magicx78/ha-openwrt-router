@@ -18,6 +18,7 @@ from .api import (
     OpenWrtAPI,
     OpenWrtAuthError,
     OpenWrtConnectionError,
+    OpenWrtMethodNotFoundError,
     OpenWrtTimeoutError,
     OpenWrtResponseError,
 )
@@ -266,6 +267,32 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
     # DataUpdateCoordinator interface
     # ------------------------------------------------------------------
 
+    async def _first_poll_optional(self, coro_factory, default, label):
+        """Await a core call, tolerating an ACL block on the first poll only.
+
+        During the very first refresh (setup) a core ubus method may still be
+        denied by an rpcd ACL that was only just deployed — ``_call`` surfaces
+        that as :class:`OpenWrtMethodNotFoundError`. Letting it raise would turn
+        into ``UpdateFailed`` → ``ConfigEntryNotReady`` and leave the entry stuck
+        in "retrying" even though the router is reachable and mostly usable. So
+        on the first poll we fall back to ``default`` for that specific ACL-block
+        signal. Every other error — connection, timeout, auth, response, or an
+        unexpected exception — propagates unchanged, and steady-state polls keep
+        the strict fail-fast behaviour.
+
+        Args:
+            coro_factory: Zero-arg callable returning the awaitable to run.
+            default: Value to use when the call is skipped on the first poll.
+            label: Short name for debug logging.
+        """
+        try:
+            return await coro_factory()
+        except OpenWrtMethodNotFoundError as err:
+            if self._board_poll_count != 1:
+                raise
+            _LOGGER.debug("%s unavailable on first poll (ACL block): %s", label, err)
+            return default
+
     async def _async_update_data(self) -> OpenWrtCoordinatorData:
         """Fetch all data from the router.
 
@@ -310,7 +337,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
 
             # --- Priority 1: WiFi & Core Status (critical for switches) ---
             # Must run before optional monitoring calls
-            data.wan_status = await self.api.get_wan_status()
+            data.wan_status = await self._first_poll_optional(
+                self.api.get_wan_status, {}, "WAN status"
+            )
             data.wan_connected = data.wan_status.get(
                 "wan_connected", False
             ) or data.wan_status.get("connected", False)
@@ -321,10 +350,16 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 _LOGGER.debug("WiFi status unavailable (ACL?): %s", err)
                 data.wifi_radios = self.data.wifi_radios if self.data else []
 
-            data.dhcp_leases = await self.api.get_dhcp_leases()
-            data.clients = await self.api.get_connected_clients(
-                leases=data.dhcp_leases,
-                radios=data.wifi_radios,
+            data.dhcp_leases = await self._first_poll_optional(
+                self.api.get_dhcp_leases, {}, "DHCP leases"
+            )
+            data.clients = await self._first_poll_optional(
+                lambda: self.api.get_connected_clients(
+                    leases=data.dhcp_leases,
+                    radios=data.wifi_radios,
+                ),
+                [],
+                "connected clients",
             )
             data.client_count = len(data.clients)
 
@@ -460,7 +495,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             }
 
             # --- Priority 2: Dynamic system status ---
-            status = await self.api.get_router_status()
+            status = await self._first_poll_optional(
+                self.api.get_router_status, {}, "router status"
+            )
             data.uptime = status.get("uptime", 0)
             data.cpu_load = status.get("cpu_load", 0.0)
             data.cpu_load_5min = status.get("cpu_load_5min", 0.0)
