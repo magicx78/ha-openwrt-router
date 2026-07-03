@@ -6,18 +6,20 @@
  */
 
 import React, { useState } from 'react';
-import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat, VlanInfo, RouterEvent, CpuHistoryPoint } from '../types';
+import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat, PortDevice, VlanInfo, RouterEvent, CpuHistoryPoint } from '../types';
 import { IconX } from './Icons';
 import { StatusDot, statusLabel } from './StatusDot';
 import { SignalBar } from './SignalBar';
 import { SpeedChart } from './SpeedChart';
 import { signalQuality } from '../layout';
-import { formatConnectedSince, formatLeaseExpiry } from '../api';
+import { formatConnectedSince, formatLeaseExpiry, safeHttpUrl } from '../api';
+import { shortName, deviceLabel, CONFIDENCE_LABEL, isWanPort } from './PortStrip';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
   | { type: 'ap';      data: AccessPoint; clients: Client[] }
   | { type: 'client';  data: Client;      apName: string }
+  | { type: 'port';    data: PortStat;    routerName: string }
   | null;
 
 export interface DetailPanelActions {
@@ -43,6 +45,7 @@ export function DetailPanel({ entity, onClose, actions, accessPoints = [] }: Pro
           {entity?.type === 'gateway' && 'Gateway'}
           {entity?.type === 'ap'      && 'Access Point'}
           {entity?.type === 'client'  && 'Client'}
+          {entity?.type === 'port'    && `Port ${shortName(entity.data.name)}`}
           {!entity && 'Details'}
         </span>
         <button className="detail-panel__close" onClick={onClose}>
@@ -54,6 +57,7 @@ export function DetailPanel({ entity, onClose, actions, accessPoints = [] }: Pro
         {entity?.type === 'gateway' && <GatewayDetail data={entity.data} actions={actions} accessPoints={accessPoints} />}
         {entity?.type === 'ap'      && <APDetail data={entity.data} clients={entity.clients} actions={actions} />}
         {entity?.type === 'client'  && <ClientDetail data={entity.data} apName={entity.apName} actions={actions} />}
+        {entity?.type === 'port'    && <PortDetail data={entity.data} routerName={entity.routerName} actions={actions} />}
       </div>
     </div>
   );
@@ -662,6 +666,118 @@ function VlanList({ vlans }: { vlans: VlanInfo[] }) {
           </span>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ── Port detail (click on a port chip / port device dot) ─────────────────
+
+function ConfidenceBadge({ confidence }: { confidence: string }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      <span className={`confidence-dot confidence-dot--${confidence}`} />
+      {CONFIDENCE_LABEL[confidence] ?? confidence}
+    </span>
+  );
+}
+
+function PortDetail({ data: p, routerName, actions }: { data: PortStat; routerName: string; actions?: DetailPanelActions }) {
+  const devices = p.connectedDevices ?? [];
+  const total = p.deviceCount ?? devices.length;
+  const wan = isWanPort(p);
+  const legacyOnly = p.connectedDevices === undefined;
+
+  return (
+    <>
+      <div className="detail-section">
+        <div className="detail-section__heading">Allgemein</div>
+        <Row label="Port"   value={`${shortName(p.name)} (${p.name})`} />
+        <Row label="Router" value={routerName} />
+        <Row label="Status" value={p.up ? 'Link up' : 'Kein Link'} />
+        {p.up && p.speed_mbps != null && (
+          <Row label="Speed" value={`${p.speed_mbps} Mbps${p.duplex ? ` ${p.duplex}` : ''}`} />
+        )}
+        {(p.vlanIds ?? []).length > 0 && (
+          <Row label="VLANs" value={p.vlanIds!.join(', ')} />
+        )}
+        {!wan && !legacyOnly && (
+          <Row label="Zuordnung" value={<ConfidenceBadge confidence={p.mappingConfidence ?? 'none'} />} />
+        )}
+      </div>
+
+      {wan ? (
+        <div className="detail-section">
+          <div className="detail-section__heading">Verbindung</div>
+          <div className="port-detail__note">
+            Uplink zum Internet — auf der WAN-Seite ist keine Client-Zuordnung möglich.
+          </div>
+        </div>
+      ) : (
+        <div className="detail-section">
+          <div className="detail-section__heading">
+            Verbundene Geräte{!legacyOnly && ` (${total})`}
+          </div>
+          {legacyOnly && (
+            <div className="port-detail__note">
+              {p.connectedDevice
+                ? `→ ${p.connectedDevice}`
+                : 'Keine Gerätedaten in diesem Snapshot.'}
+            </div>
+          )}
+          {!legacyOnly && devices.length === 0 && (
+            <div className="port-detail__note">
+              {p.up
+                ? 'Kein Gerät sicher zugeordnet — FDB leer oder Gerät derzeit still.'
+                : 'Kein Link.'}
+            </div>
+          )}
+          {devices.map((d) => (
+            <PortDeviceRow key={d.mac || deviceLabel(d)} device={d} actions={actions} />
+          ))}
+          {total > devices.length && (
+            <div className="port-detail__note">… +{total - devices.length} weitere (Liste gekürzt)</div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+function PortDeviceRow({ device: d, actions }: { device: PortDevice; actions?: DetailPanelActions }) {
+  const url = safeHttpUrl(d.ip);
+  return (
+    <div className="port-device-row">
+      <div className="port-device-row__head">
+        <span className={`confidence-dot confidence-dot--${d.confidence}`} />
+        <span className="port-device-row__name">{d.name ?? d.ip ?? 'Unbekannt'}</span>
+        {d.isRouter && <span className="port-device-row__tag">AP</span>}
+      </div>
+      {d.ip && (
+        <Row
+          label="IP"
+          value={
+            url ? (
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="port-device-row__link"
+                title="Weboberfläche im Browser öffnen"
+              >
+                {d.ip} ↗
+              </a>
+            ) : (
+              d.ip
+            )
+          }
+        />
+      )}
+      {d.mac && <Row label="MAC" value={<span className="port-device-row__mac">{d.mac}</span>} />}
+      {d.source && <Row label="Quelle" value={d.source} />}
+      <Row label="Zuordnung" value={<ConfidenceBadge confidence={d.confidence} />} />
+      {d.isRouter && d.routerNodeId && actions && (
+        <ActionBtn icon="→" label="Zum Access Point" onClick={() => actions.onFocusNode(d.routerNodeId!)} />
+      )}
     </div>
   );
 }

@@ -20,6 +20,8 @@ import type {
   DdnsService,
   SsidInfo,
   PortStat,
+  PortDevice,
+  PortDeviceConfidence,
   VlanInfo,
   RouterEvent,
   TopologySnapshot,
@@ -433,6 +435,68 @@ function primaryVlan(vlanIds: (number | null | undefined)[]): number | undefined
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
 }
 
+// ── Port adapter helpers ─────────────────────────────────────────────────
+
+/** Strict IPv4 dotted-quad check → `http://<ip>` or undefined.
+ *  Defense in depth: the link URL is always rebuilt client-side from a
+ *  validated IP literal — never taken from a backend string. */
+export function safeHttpUrl(ip: string | null | undefined): string | undefined {
+  if (!ip) return undefined;
+  const m = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return undefined;
+  for (let i = 1; i <= 4; i++) {
+    const octet = parseInt(m[i], 10);
+    if (octet > 255) return undefined;
+  }
+  return `http://${ip}`;
+}
+
+const PORT_CONFIDENCES: PortDeviceConfidence[] = ['high', 'medium', 'low', 'none'];
+
+function adaptPortDevice(d: any): PortDevice {
+  const confidence: PortDeviceConfidence = PORT_CONFIDENCES.includes(d?.confidence)
+    ? d.confidence
+    : 'none';
+  return {
+    mac: typeof d?.mac === 'string' ? d.mac : '',
+    ip: typeof d?.ip === 'string' ? d.ip : undefined,
+    name: typeof d?.name === 'string' && d.name ? d.name : undefined,
+    source: typeof d?.source === 'string' ? d.source : undefined,
+    confidence,
+    webUrl: safeHttpUrl(d?.ip),
+    isRouter: d?.is_router === true,
+    routerNodeId:
+      typeof d?.router_node_id === 'string' ? d.router_node_id : undefined,
+  };
+}
+
+/** Map one backend port_stats entry → PortStat.
+ *  Every v1.21 field is optional; old snapshots yield undefined and the UI
+ *  renders exactly the legacy view. */
+function adaptPortStat(p: any): PortStat {
+  const devices = Array.isArray(p.connected_devices)
+    ? p.connected_devices.map(adaptPortDevice)
+    : undefined;
+  const primary = p.primary_device ? adaptPortDevice(p.primary_device) : undefined;
+  return {
+    name: p.name,
+    up: p.up,
+    speed_mbps: p.speed_mbps,
+    duplex: p.duplex,
+    vlanIds: p.vlan_ids ?? [],
+    connectedDevice: p.connected_device ?? undefined,
+    role: p.role === 'wan' || p.role === 'lan' ? p.role : undefined,
+    connectedDevices: devices,
+    primaryDevice: primary,
+    deviceCount: typeof p.device_count === 'number' ? p.device_count : undefined,
+    hasDownstreamSwitch: p.has_downstream_switch === true,
+    webUrl: safeHttpUrl(primary?.ip),
+    mappingConfidence: PORT_CONFIDENCES.includes(p.mapping_confidence)
+      ? p.mapping_confidence
+      : undefined,
+  };
+}
+
 // ── Core adapter ─────────────────────────────────────────────────────────
 
 export function adaptSnapshot(snap: Snapshot): TopologyData {
@@ -486,14 +550,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     dslHistory: (gwAttr.dsl_history as DslHistoryPoint[] | undefined) ?? [],
     ddnsServices: (gwAttr.ddns_status as DdnsService[] | undefined) ?? [],
     wanTraffic: gwAttr.wan_traffic as { downstream_bps?: number; upstream_bps?: number } | undefined,
-    portStats: ((gwAttr.port_stats as any[] | undefined) ?? []).map((p: any): PortStat => ({
-      name: p.name,
-      up: p.up,
-      speed_mbps: p.speed_mbps,
-      duplex: p.duplex,
-      vlanIds: p.vlan_ids ?? [],
-      connectedDevice: p.connected_device ?? undefined,
-    })),
+    portStats: ((gwAttr.port_stats as any[] | undefined) ?? []).map(adaptPortStat),
     cpuHistoryBackend: (gwAttr.cpu_history as CpuHistoryPoint[] | undefined) ?? [],
     vlans: ((gwAttr.vlans as any[] | undefined) ?? []).map((v: any): VlanInfo => ({
       id: v.id,
@@ -605,14 +662,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       gatewayPortUp: gwPortStat?.up ?? false,
       apPort: uplink?.apPort,
       vlanTags: uplink?.vlanTags,
-      portStats: ((n.attributes?.port_stats as any[] | undefined) ?? []).map((p: any): PortStat => ({
-        name: p.name,
-        up: p.up,
-        speed_mbps: p.speed_mbps,
-        duplex: p.duplex,
-        vlanIds: p.vlan_ids ?? [],
-        connectedDevice: p.connected_device ?? undefined,
-      })),
+      portStats: ((n.attributes?.port_stats as any[] | undefined) ?? []).map(adaptPortStat),
     };
   });
 

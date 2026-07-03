@@ -86,6 +86,20 @@ export interface SsidInfo {
   channel?: number; // WiFi channel (e.g. 6, 36, 100)
 }
 
+export type PortDeviceConfidence = 'high' | 'medium' | 'low' | 'none';
+
+/** A device observed on a physical switch port (bridge FDB + DHCP/ARP). */
+export interface PortDevice {
+  mac: string;
+  ip?: string;
+  name?: string;                    // DHCP hostname if known
+  source?: string;                  // e.g. "fdb+dhcp+arp" or "trunk_map"
+  confidence: PortDeviceConfidence;
+  webUrl?: string;                  // re-validated client-side before rendering
+  isRouter?: boolean;               // true for mesh APs on trunk ports
+  routerNodeId?: string;            // node id to focus when isRouter
+}
+
 export interface PortStat {
   name: string;        // "lan1", "wan", "eth0", etc.
   up: boolean;
@@ -95,6 +109,14 @@ export interface PortStat {
   connectedDevice?: string;   // hostname or MAC of device connected to this port
   rxBytes?: number | null;
   txBytes?: number | null;
+  // ── v1.21 port-device model — all optional so old snapshots keep working ──
+  role?: 'lan' | 'wan';
+  connectedDevices?: PortDevice[];  // devices mapped to this port (sorted, capped)
+  primaryDevice?: PortDevice;
+  deviceCount?: number;             // uncapped total
+  hasDownstreamSwitch?: boolean;
+  webUrl?: string;
+  mappingConfidence?: PortDeviceConfidence;
 }
 
 export interface VlanInfo {
