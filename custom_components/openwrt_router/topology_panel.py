@@ -135,14 +135,9 @@ async def async_setup_topology_panel(hass: HomeAssistant) -> None:
             # Stage 1: static path — append-only on aiohttp's router; once
             # bound, never re-bind.
             if not hass.data.get(_PANEL_STATIC_BOUND_KEY):
-                if hasattr(hass.http, "async_register_static_paths"):
-                    await hass.http.async_register_static_paths(
-                        [StaticPathConfig(_STATIC_URL, str(frontend_dir), False)]
-                    )
-                else:
-                    hass.http.register_static_path(
-                        _STATIC_URL, str(frontend_dir), cache_headers=False
-                    )
+                await hass.http.async_register_static_paths(
+                    [StaticPathConfig(_STATIC_URL, str(frontend_dir), False)]
+                )
                 hass.data[_PANEL_STATIC_BOUND_KEY] = True
 
             # Stage 2: HTTP view — also append-only on aiohttp's router.
