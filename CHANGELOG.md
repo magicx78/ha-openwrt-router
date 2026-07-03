@@ -2,6 +2,33 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.19.0] - 2026-05-28
+
+> **Stabilitäts-Release nach rpcd-OOM-Forensik.** Adressiert die in der 24h-Production-Diagnose
+> nachgewiesene Restursache: rpcd-Session-Leck auf dem Router durch Re-Login-Churn.
+
+### Fixed
+
+- **rpcd-Session-Leck:** Beim Re-Login wird die vorherige ubus-Session jetzt aktiv via
+  `session.destroy` zerstört, statt auf dem Router zu verwaisen (Ursache des rpcd-OOM auf
+  Produktiv-Hardware).
+- **Re-Login-Churn gestoppt:** ACL-geblockte ubus-Methoden werden pro Session gecacht und nicht
+  mehr bei jedem Poll erneut versucht — vorher provozierte jeder Poll neue Login-Zyklen.
+- **ACL-Re-Validierung:** Die rpcd-ACL wird bei jedem Start gegen den Soll-Inhalt geprüft und bei
+  Drift aktualisiert (vorher nur bei Erstinstallation deployed).
+- **Setup-Robustheit:** Optionaler `topology_card`-Import ist geguardet — Setup übersteht das
+  Fehlen des WIP-Moduls.
+
+### CI / Tests
+
+- `ruff format` über die Codebase (CI-Format-Check).
+- Sync-Sensor-Tests nutzen `asyncio.run` (Fix für CI auf Python 3.12+).
+
+### Docs / Diagnostics
+
+- v1.19-Scope-Dokument nach v1.17.9-Crash-Forensik (`docs/v1.19-scope.md`).
+- 24h-Production-Baseline als JSONL (`diagnostics/prod-24h-baseline.jsonl`).
+
 ## [1.18.0] - 2026-04-29
 
 > **Hardening-Release.** Kein garantierter Fix für die sporadischen HA-Crashes unter Last — der Beweis kommt aus der parallel laufenden 24h-Production-Diagnose. v1.18.0 schließt nachweisbare Lecks im Subprocess- und Panel-Lifecycle und liefert das Mess-Tooling, mit dem v1.19 die Restursache adressieren kann.
