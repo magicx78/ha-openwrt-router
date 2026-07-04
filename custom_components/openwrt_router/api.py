@@ -416,7 +416,7 @@ _LLDP_CHASSIS_DATA_KEYS = {"id", "descr", "mgmt-ip", "mgmt-iface", "capability"}
 
 
 def _parse_lldpcli_json(raw: str) -> list[dict[str, Any]]:
-    """Parse ``lldpcli show neighbors -f json`` output into neighbor dicts.
+    """Parse ``lldpcli -f json show neighbors`` output into neighbor dicts.
 
     Robust against both the ``json`` and ``json0`` shapes, missing management
     IP, chassis without a SysName, and invalid JSON (returns ``[]``, never

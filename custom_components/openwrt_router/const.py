@@ -297,11 +297,14 @@ SOURCE_OUI = "oui"
 # LLDP (link-layer discovery) — preferred source for router-to-router wiring
 # ---------------------------------------------------------------------------
 # lldpd does NOT expose a ubus object on stock OpenWrt, so LLDP is read via the
-# existing asyncssh transport (`lldpcli show neighbors -f json`). It is an
+# existing asyncssh transport (`lldpcli -f json show neighbors`). It is an
 # OPTIONAL capability: missing lldpd/SSH never fails setup, it only lowers
 # router-to-router detection confidence. Reading LLDP must NOT flip the
 # degraded/SSH-fallback state (use OpenWrtAPI._run_ssh, not the client path).
-LLDP_CLI_NEIGHBORS_CMD = "lldpcli show neighbors -f json"
+# NOTE: `-f json` is a GLOBAL option and MUST precede the command — lldpd 1.0.20
+# (OpenWrt 25.x) rejects the trailing form `show neighbors -f json` with
+# "unknown command from argument 3: -f". Verified on real hardware.
+LLDP_CLI_NEIGHBORS_CMD = "lldpcli -f json show neighbors"
 LLDP_CLI_CHECK_CMD = "command -v lldpcli"
 LLDP_INIT_ENABLED_CMD = "/etc/init.d/lldpd enabled"
 
