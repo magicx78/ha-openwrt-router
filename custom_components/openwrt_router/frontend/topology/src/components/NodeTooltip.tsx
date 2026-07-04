@@ -96,8 +96,19 @@ export function NodeTooltip({ nodeId, data, anchorRect }: Props) {
         {ap.model && <div className="node-tooltip__subtitle">{ap.model}</div>}
         <div className="node-tooltip__sep" />
         {ap.ip && <Row label="IP" value={ap.ip} />}
-        <Row label="Uplink" value={ap.uplinkType === 'mesh' ? 'Mesh' : 'Kabel'} />
-        {ap.uplinkType === 'mesh' && (
+        <Row
+          label="Uplink"
+          value={
+            ap.uplinkType === 'mesh'          ? 'Mesh'
+          : ap.uplinkType === 'repeater'      ? 'WLAN Repeater'
+          : ap.uplinkType === 'router_uplink' ? 'Router-Uplink (LLDP)'
+          :                                     'Kabel'
+          }
+        />
+        {ap.uplinkType === 'router_uplink' && ap.lldpUplink?.neighborName && (
+          <Row label="Nachbar" value={ap.lldpUplink.neighborName} />
+        )}
+        {(ap.uplinkType === 'mesh' || ap.uplinkType === 'repeater') && (
           <Row label="Backhaul" value={`${ap.backhaulSignal} dBm`} warn={ap.backhaulSignal < -75} />
         )}
         {ap.cpuLoad != null && (

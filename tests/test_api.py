@@ -107,6 +107,7 @@ class TestCheckCapabilitiesWireless:
             return {}  # everything else (incl. iwinfo/devices) succeeds
 
         api._call = AsyncMock(side_effect=_call)
+        api.probe_lldp = AsyncMock(return_value="unavailable")  # skip SSH lldpcli
         caps = await api.check_capabilities()
         assert caps["network_wireless"] is True
         assert caps["iwinfo"] is True
@@ -126,6 +127,7 @@ class TestCheckCapabilitiesWireless:
             return {}  # uci/get and system succeed
 
         api._call = AsyncMock(side_effect=_call)
+        api.probe_lldp = AsyncMock(return_value="unavailable")  # skip SSH lldpcli
         caps = await api.check_capabilities()
         assert caps["network_wireless"] is True
         assert caps["iwinfo"] is False
@@ -144,6 +146,7 @@ class TestCheckCapabilitiesWireless:
             return {}
 
         api._call = AsyncMock(side_effect=_call)
+        api.probe_lldp = AsyncMock(return_value="unavailable")  # skip SSH lldpcli
         caps = await api.check_capabilities()
         assert caps["network_wireless"] is False
         assert caps["iwinfo"] is False

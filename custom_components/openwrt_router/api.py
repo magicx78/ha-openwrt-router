@@ -17,15 +17,38 @@ from typing import Any
 import aiohttp
 import asyncssh
 
+from . import oui
 from .const import (
     CLIENT_KEY_CONNECTED_SINCE,
+    CLIENT_KEY_CONFIDENCE,
+    CLIENT_KEY_CONNECTION_TYPE,
     CLIENT_KEY_DHCP_EXPIRES,
     CLIENT_KEY_HOSTNAME,
     CLIENT_KEY_IP,
     CLIENT_KEY_MAC,
     CLIENT_KEY_RADIO,
     CLIENT_KEY_SIGNAL,
+    CLIENT_KEY_SOURCE,
     CLIENT_KEY_SSID,
+    CLIENT_KEY_VENDOR,
+    CLIENT_KEY_WEB_URL,
+    CONFIDENCE_HIGH,
+    CONFIDENCE_MEDIUM,
+    CONNECTION_TYPE_WIRELESS,
+    LLDP_CLI_NEIGHBORS_CMD,
+    LLDP_KEY_CAPABILITIES,
+    LLDP_KEY_CHASSIS_ID,
+    LLDP_KEY_CHASSIS_NAME,
+    LLDP_KEY_LOCAL_INTERFACE,
+    LLDP_KEY_MGMT_IP,
+    LLDP_KEY_PORT_DESCR,
+    LLDP_KEY_PORT_ID,
+    LLDP_STATUS_ERROR,
+    LLDP_STATUS_NO_NEIGHBORS,
+    LLDP_STATUS_OK,
+    LLDP_STATUS_UNAVAILABLE,
+    SOURCE_HOSTAPD,
+    SOURCE_IWINFO,
     DEFAULT_PROTOCOL,
     DEFAULT_SESSION_ID,
     DEFAULT_TIMEOUT,
@@ -358,6 +381,126 @@ def _parse_port_speed(raw: Any) -> tuple[int | None, str | None]:
         return None, None
 
 
+def _lldp_first(value: Any) -> Any:
+    """Return the first element if ``value`` is a list, else ``value`` itself.
+
+    lldpd's ``-f json`` emits single children as objects and multiple children
+    as arrays; ``-f json0`` always emits arrays. This collapses both shapes so
+    the parser is agnostic to lldpd's version-dependent list wrapping.
+    """
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _lldp_named_items(node: Any) -> list[tuple[str, Any]]:
+    """Yield (name, value) pairs from an lldpd container that may be a dict or list.
+
+    ``-f json`` gives ``{"eth0": {...}}``; ``-f json0`` gives ``[{"eth0": {...}}]``.
+    Both normalise to ``[("eth0", {...})]``.
+    """
+    items: list[tuple[str, Any]] = []
+    if isinstance(node, dict):
+        items.extend(node.items())
+    elif isinstance(node, list):
+        for element in node:
+            if isinstance(element, dict):
+                items.extend(element.items())
+    return items
+
+
+# Chassis object keys that mark a "direct" (un-named) chassis rather than a
+# SysName wrapper. If any of these appears as a top-level chassis key, the
+# chassis has no SysName and must not be iterated as name→value pairs.
+_LLDP_CHASSIS_DATA_KEYS = {"id", "descr", "mgmt-ip", "mgmt-iface", "capability"}
+
+
+def _parse_lldpcli_json(raw: str) -> list[dict[str, Any]]:
+    """Parse ``lldpcli -f json show neighbors`` output into neighbor dicts.
+
+    Robust against both the ``json`` and ``json0`` shapes, missing management
+    IP, chassis without a SysName, and invalid JSON (returns ``[]``, never
+    raises). Each returned neighbor uses the ``LLDP_KEY_*`` field names:
+    local_interface, chassis_id, chassis_name, management_ip, port_id,
+    port_descr, capabilities.
+    """
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        _LOGGER.debug("LLDP: invalid JSON from lldpcli (%d bytes)", len(raw or ""))
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    lldp = _lldp_first(data.get("lldp")) or {}
+    if not isinstance(lldp, dict):
+        return []
+
+    neighbors: list[dict[str, Any]] = []
+    for ifname, ifdata in _lldp_named_items(lldp.get("interface")):
+        ifdata = _lldp_first(ifdata)
+        if not isinstance(ifdata, dict):
+            continue
+
+        # --- chassis: may be {SysName: {...}} or a direct {id,...} object ---
+        chassis_node = _lldp_first(ifdata.get("chassis")) or {}
+        chassis_name: str | None = None
+        chassis_obj: dict[str, Any] = {}
+        if isinstance(chassis_node, dict):
+            if _LLDP_CHASSIS_DATA_KEYS & set(chassis_node.keys()):
+                chassis_obj = chassis_node  # un-named chassis
+            else:
+                named = _lldp_named_items(chassis_node)
+                if named:
+                    chassis_name, first = named[0]
+                    chassis_obj = _lldp_first(first) or {}
+
+        chassis_id = ""
+        cid = _lldp_first(chassis_obj.get("id"))
+        if isinstance(cid, dict):
+            chassis_id = str(cid.get("value") or "")
+
+        mgmt_ip: str | None = None
+        mgmt = chassis_obj.get("mgmt-ip")
+        mgmt_val = _lldp_first(mgmt)
+        if isinstance(mgmt_val, dict):
+            mgmt_val = mgmt_val.get("value")
+        if mgmt_val:
+            mgmt_ip = str(mgmt_val)
+
+        capabilities: list[str] = []
+        for cap in (
+            chassis_obj.get("capability")
+            if isinstance(chassis_obj.get("capability"), list)
+            else [chassis_obj.get("capability")]
+        ):
+            if isinstance(cap, dict) and cap.get("enabled") and cap.get("type"):
+                capabilities.append(str(cap["type"]))
+
+        # --- port ---
+        port_obj = _lldp_first(ifdata.get("port")) or {}
+        port_id = ""
+        port_descr = ""
+        if isinstance(port_obj, dict):
+            pid = _lldp_first(port_obj.get("id"))
+            if isinstance(pid, dict):
+                port_id = str(pid.get("value") or "")
+            port_descr = str(port_obj.get("descr") or "")
+
+        neighbors.append(
+            {
+                LLDP_KEY_LOCAL_INTERFACE: str(ifname),
+                LLDP_KEY_CHASSIS_ID: chassis_id,
+                LLDP_KEY_CHASSIS_NAME: chassis_name,
+                LLDP_KEY_MGMT_IP: mgmt_ip,
+                LLDP_KEY_PORT_ID: port_id,
+                LLDP_KEY_PORT_DESCR: port_descr,
+                LLDP_KEY_CAPABILITIES: capabilities,
+            }
+        )
+    return neighbors
+
+
 def _parse_ip_addr_output(output: str) -> list[dict[str, Any]]:
     """Parse combined 'ip -o addr show; ip link show' output into interface dicts."""
     up_ifaces: set[str] = set()
@@ -565,6 +708,17 @@ class OpenWrtAPI:
 
         # Set to True the first time any SSH fallback is actually used.
         self._ssh_fallback_used: bool = False
+
+        # LLDP: cache "no ubus lldp object" so we probe ubus only once per
+        # session, then read via SSH lldpcli.
+        self._lldp_ubus_unavailable: bool = False
+        # LLDP availability, decided on the first attempt and cached for the
+        # session: if lldpcli/lldpd/SSH is not available we must NOT retry an
+        # (up to 8 s) SSH connect on every single poll. Once available we keep
+        # fetching each poll because neighbors change. Reset on integration
+        # reload (a new OpenWrtAPI instance).
+        self._lldp_checked: bool = False
+        self._lldp_available: bool = False
 
         # Cached ifname→ssid map from luci-rpc/getWirelessDevices (populated once when
         # hostapd.*/get_status is also ACL-blocked; None = not yet fetched).
@@ -850,6 +1004,15 @@ class OpenWrtAPI:
             or results["iwinfo"]
             or hostapd_ok
             or results["uci_get"]
+        )
+
+        # LLDP is an OPTIONAL capability (never in the required set): True when
+        # lldpcli is usable (neighbors seen OR reachable-but-empty). Missing
+        # lldpd/SSH => False => checklist shows a non-blocking install hint.
+        lldp_status = await self.probe_lldp()
+        results["lldp_neighbors"] = lldp_status in (
+            LLDP_STATUS_OK,
+            LLDP_STATUS_NO_NEIGHBORS,
         )
 
         return results
@@ -1707,7 +1870,36 @@ class OpenWrtAPI:
         # Enrich with IP / hostname – use pre-fetched leases to avoid a second
         # file/read call when the coordinator has already fetched them.
         clients = await self._enrich_clients_with_ip(clients, leases=leases)
+        self._enrich_client_metadata(clients)
         return clients
+
+    def _enrich_client_metadata(self, clients: list[dict[str, Any]]) -> None:
+        """Attach vendor / connection-type / confidence / web_url to WiFi clients.
+
+        Every client here comes from hostapd or iwinfo association data, so its
+        connection type is unambiguously ``wireless`` — a MAC also appearing in
+        the bridge FDB must NOT flip it to ``wired``. The coordinator/topology
+        layer may later re-tag a client as ``router_uplink`` once cross-router
+        identity is known; that reclassification is intentionally NOT done here.
+        """
+        for client in clients:
+            client.setdefault(CLIENT_KEY_CONNECTION_TYPE, CONNECTION_TYPE_WIRELESS)
+            mac = client.get(CLIENT_KEY_MAC, "")
+            if CLIENT_KEY_VENDOR not in client:
+                client[CLIENT_KEY_VENDOR] = oui.lookup_vendor(mac)
+            # hostapd association is more authoritative than iwinfo assoclist.
+            radio = client.get(CLIENT_KEY_RADIO, "")
+            client.setdefault(
+                CLIENT_KEY_SOURCE,
+                SOURCE_HOSTAPD if radio else SOURCE_IWINFO,
+            )
+            client.setdefault(
+                CLIENT_KEY_CONFIDENCE,
+                CONFIDENCE_HIGH if radio else CONFIDENCE_MEDIUM,
+            )
+            ip = client.get(CLIENT_KEY_IP)
+            if ip and CLIENT_KEY_WEB_URL not in client:
+                client[CLIENT_KEY_WEB_URL] = f"http://{ip}"
 
     async def set_wifi_state(self, uci_section: str, enabled: bool) -> bool:
         """Enable or disable a WiFi interface via UCI or SSH fallback.
@@ -3182,6 +3374,97 @@ class OpenWrtAPI:
                         port_vlan[port_name].append(vid)
 
         return port_vlan
+
+    async def get_lldp_neighbors(
+        self, timeout: float = 10.0
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Return LLDP neighbors and a status string.
+
+        LLDP is the preferred, most authoritative source for router-to-router /
+        AP-to-router wiring: it gives real link-layer neighbors plus the local
+        and remote physical ports, which bridge-FDB/ARP/DHCP can only guess at.
+
+        It is OPTIONAL. lldpd does not expose a ubus object on stock OpenWrt, so
+        we probe ubus best-effort once, then read via SSH ``lldpcli show
+        neighbors -f json`` through :meth:`_run_ssh`. That helper deliberately
+        does NOT set ``self._ssh_fallback_used``, so reading LLDP never trips the
+        degraded/SSH-fallback notification — a missing lldpd only lowers
+        router-to-router confidence, it never fails setup or a poll.
+
+        Returns:
+            ``(neighbors, status)`` where status is one of the ``LLDP_STATUS_*``
+            constants: ``ok`` (usable, >=1 neighbor), ``no_neighbors`` (usable,
+            none seen), ``unavailable`` (lldpcli/lldpd/SSH not available),
+            ``error`` (unexpected exception — only real failures).
+        """
+        # Cached "unavailable": never retry an 8 s SSH connect every poll once
+        # we've established lldpcli/SSH is not usable this session.
+        if self._lldp_checked and not self._lldp_available:
+            return [], LLDP_STATUS_UNAVAILABLE
+
+        neighbors, status = await self._get_lldp_neighbors_uncached(timeout)
+        self._lldp_checked = True
+        # "unavailable" is the only terminal state that disables future polls;
+        # "no_neighbors"/"ok" mean lldpcli works, so keep polling for changes.
+        self._lldp_available = status != LLDP_STATUS_UNAVAILABLE
+        return neighbors, status
+
+    async def _get_lldp_neighbors_uncached(
+        self, timeout: float = 10.0
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Do the actual ubus-probe / SSH-lldpcli fetch (see get_lldp_neighbors)."""
+        # 1. Best-effort ubus probe (some builds ship a custom lldp ubus object).
+        #    Any not-found/permission error caches unavailability and we fall
+        #    through to SSH; this never adds rpcd churn on stock OpenWrt.
+        if not self._lldp_ubus_unavailable:
+            try:
+                res = await self._call("lldpd", "status", {})
+                neighbors = _parse_lldpcli_json(json.dumps(res)) if res else []
+                # Only trust the ubus path if it actually yielded a usable shape.
+                if neighbors:
+                    return neighbors, LLDP_STATUS_OK
+            except (
+                OpenWrtMethodNotFoundError,
+                OpenWrtResponseError,
+                OpenWrtAuthError,
+            ):
+                self._lldp_ubus_unavailable = True
+            except Exception:  # noqa: BLE001
+                self._lldp_ubus_unavailable = True
+
+        # 2. SSH lldpcli — the reliable path on stock OpenWrt.
+        try:
+            raw = await self._run_ssh(LLDP_CLI_NEIGHBORS_CMD, timeout=timeout)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("LLDP: lldpcli SSH call failed on %s: %s", self._host, err)
+            return [], LLDP_STATUS_ERROR
+
+        if raw is None:
+            # No SSH, or lldpcli missing/not running (empty stdout) — optional.
+            return [], LLDP_STATUS_UNAVAILABLE
+
+        neighbors = _parse_lldpcli_json(raw)
+        if not neighbors:
+            return [], LLDP_STATUS_NO_NEIGHBORS
+        _LOGGER.debug("LLDP: %d neighbor(s) on %s", len(neighbors), self._host)
+        return neighbors, LLDP_STATUS_OK
+
+    async def probe_lldp(self, timeout: float = 4.0) -> str:
+        """Return the LLDP capability status for the config-flow checklist.
+
+        Thin wrapper over :meth:`get_lldp_neighbors` that only surfaces the
+        status string and never raises — ``LLDP_STATUS_ERROR`` on any
+        unexpected failure so the checklist can render a non-blocking hint.
+
+        Uses a short SSH timeout by default so the add-flow checklist is not
+        blocked for the full poll timeout when SSH/lldpd is unavailable.
+        """
+        try:
+            _neighbors, status = await self.get_lldp_neighbors(timeout=timeout)
+            return status
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("LLDP capability probe failed on %s: %s", self._host, err)
+            return LLDP_STATUS_ERROR
 
     async def get_bridge_fdb(self) -> dict[str, str]:
         """Return MAC-address → port-name mapping from the bridge forwarding database.

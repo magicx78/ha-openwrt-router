@@ -262,6 +262,74 @@ ERROR_ACL_ALREADY_CURRENT = "acl_already_current"
 CLIENT_KEY_CONNECTED_SINCE = "connected_since"
 CLIENT_KEY_DHCP_EXPIRES = "dhcp_expires"
 
+# Enriched client data keys (v1.26.0 — device/topology detection improvements).
+# All optional; absent/empty keys keep the client shape backward compatible.
+CLIENT_KEY_VENDOR = "vendor"  # OUI-derived manufacturer, e.g. "Cudy" | None
+CLIENT_KEY_CONNECTION_TYPE = "connection_type"  # see CONNECTION_TYPE_*
+CLIENT_KEY_CONFIDENCE = "confidence"  # see CONFIDENCE_*
+CLIENT_KEY_SOURCE = "source"  # detection source, e.g. "iwinfo" | "fdb" | "dhcp"
+CLIENT_KEY_WEB_URL = "web_url"  # "http://<ip>" when an IP is known, else None
+CLIENT_KEY_LAST_SEEN = "last_seen"  # ISO timestamp of most recent observation
+CLIENT_KEY_VLAN_IDS = "vlan_ids"  # list[int] of VLAN memberships (may be empty)
+
+# Connection-type enum (how a device reaches the router)
+CONNECTION_TYPE_WIRED = "wired"
+CONNECTION_TYPE_WIRELESS = "wireless"
+CONNECTION_TYPE_ROUTER_UPLINK = "router_uplink"
+CONNECTION_TYPE_UNKNOWN = "unknown"
+
+# Confidence enum (how certain the detection is)
+CONFIDENCE_HIGH = "high"
+CONFIDENCE_MEDIUM = "medium"
+CONFIDENCE_LOW = "low"
+
+# Detection-source priority order (highest-trust first). Used to decide which
+# source "wins" when the same MAC is observed via several sources.
+SOURCE_LLDP = "lldp"
+SOURCE_HOSTAPD = "hostapd"
+SOURCE_IWINFO = "iwinfo"
+SOURCE_DHCP = "dhcp"
+SOURCE_ARP = "arp"
+SOURCE_FDB = "fdb"
+SOURCE_OUI = "oui"
+
+# ---------------------------------------------------------------------------
+# LLDP (link-layer discovery) — preferred source for router-to-router wiring
+# ---------------------------------------------------------------------------
+# lldpd does NOT expose a ubus object on stock OpenWrt, so LLDP is read via the
+# existing asyncssh transport (`lldpcli -f json show neighbors`). It is an
+# OPTIONAL capability: missing lldpd/SSH never fails setup, it only lowers
+# router-to-router detection confidence. Reading LLDP must NOT flip the
+# degraded/SSH-fallback state (use OpenWrtAPI._run_ssh, not the client path).
+# NOTE: `-f json` is a GLOBAL option and MUST precede the command — lldpd 1.0.20
+# (OpenWrt 25.x) rejects the trailing form `show neighbors -f json` with
+# "unknown command from argument 3: -f". Verified on real hardware.
+LLDP_CLI_NEIGHBORS_CMD = "lldpcli -f json show neighbors"
+LLDP_CLI_CHECK_CMD = "command -v lldpcli"
+LLDP_INIT_ENABLED_CMD = "/etc/init.d/lldpd enabled"
+
+# lldp_status values (coordinator + capability)
+LLDP_STATUS_OK = "ok"  # lldpcli usable, >=0 neighbors returned
+LLDP_STATUS_NO_NEIGHBORS = "no_neighbors"  # usable but no neighbors seen
+LLDP_STATUS_UNAVAILABLE = "unavailable"  # lldpcli/lldpd/SSH not available
+LLDP_STATUS_ERROR = "error"  # unexpected exception (only real failures)
+
+# Coordinator data keys
+KEY_LLDP_NEIGHBORS = "lldp_neighbors"
+KEY_LLDP_STATUS = "lldp_status"
+
+# LLDP neighbor dict keys (output of _parse_lldpcli_json)
+LLDP_KEY_LOCAL_INTERFACE = "local_interface"
+LLDP_KEY_CHASSIS_ID = "chassis_id"
+LLDP_KEY_CHASSIS_NAME = "chassis_name"
+LLDP_KEY_MGMT_IP = "management_ip"
+LLDP_KEY_PORT_ID = "port_id"
+LLDP_KEY_PORT_DESCR = "port_descr"
+LLDP_KEY_CAPABILITIES = "capabilities"  # list[str] e.g. ["Router", "Bridge"]
+
+# Optional capability id (config-flow checklist). NOT in the required set.
+CAP_LLDP_NEIGHBORS = "lldp_neighbors"
+
 # WAN throughput / connectivity coordinator data keys (native OpenWrt)
 KEY_WAN_TRAFFIC = "wan_traffic"
 KEY_PING_MS = "ping_ms"

@@ -64,6 +64,24 @@ async def async_get_config_entry_diagnostics(
         if "arp_table" in coordinator_data:
             arp_count = len(coordinator.data.arp_table)
             coordinator_data["arp_table"] = f"<{arp_count} entries redacted>"
+        # LLDP neighbors: keep the troubleshooting-relevant link facts (local
+        # interface, ports, name, capabilities) but redact the neighbor's
+        # management IP / chassis-ID (MAC) — same PII class as ARP/DHCP.
+        if "lldp_neighbors" in coordinator_data:
+            coordinator_data["lldp_neighbors"] = [
+                {
+                    "local_interface": n.get("local_interface"),
+                    "chassis_name": n.get("chassis_name"),
+                    "chassis_id": DIAGNOSTICS_REDACTED if n.get("chassis_id") else None,
+                    "management_ip": DIAGNOSTICS_REDACTED
+                    if n.get("management_ip")
+                    else None,
+                    "port_id": n.get("port_id"),
+                    "port_descr": n.get("port_descr"),
+                    "capabilities": n.get("capabilities"),
+                }
+                for n in coordinator.data.lldp_neighbors
+            ]
         # PII-free per-port mapping summary (counts, confidence, sources) —
         # the full raw mapping lives only in the auth-protected snapshot.
         port_mapping = redacted_port_summary(coordinator.data)

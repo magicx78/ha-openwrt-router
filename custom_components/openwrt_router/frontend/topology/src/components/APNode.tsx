@@ -153,9 +153,11 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
 
       <div className="ap-card__footer">
         <span className={`ap-card__badge ${ap.uplinkType}`}>
-          {ap.uplinkType === 'wired'    ? 'Kabel'
-         : ap.uplinkType === 'repeater' ? 'WLAN Repeater'
-         :                                'Mesh?'}
+          {ap.uplinkType === 'wired'         ? 'Kabel'
+         : ap.uplinkType === 'repeater'      ? 'WLAN Repeater'
+         : ap.uplinkType === 'router_uplink' ? 'Router-Uplink'
+         :                                     'Mesh?'}
+          {ap.uplinkType === 'router_uplink' && <span className="ap-card__lldp-tag">LLDP</span>}
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {ap.status !== 'offline' && <SignalBar dbm={ap.backhaulSignal} />}
@@ -170,11 +172,14 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
         </div>
       </div>
 
-      {/* Gateway port badge — only for wired APs with known port */}
-      {ap.gatewayPort && ap.uplinkType === 'wired' && (
+      {/* Gateway port badge — for wired / LLDP router-uplink APs with known port */}
+      {ap.gatewayPort && (ap.uplinkType === 'wired' || ap.uplinkType === 'router_uplink') && (
         <div className="ap-card__port-badge">
           <span className={`port-led port-led--${ap.gatewayPortUp ? 'up' : 'down'}`} />
           <span className="ap-card__port-name">{ap.gatewayPort.toUpperCase()}</span>
+          {ap.uplinkType === 'router_uplink' && ap.apPort && (
+            <span className="ap-card__port-name">↔ {ap.apPort.toUpperCase()}</span>
+          )}
           <span className="ap-card__port-speed">{portSpeedLabel(ap.gatewayPortSpeed ?? null)}</span>
         </div>
       )}
