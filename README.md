@@ -66,7 +66,7 @@ A built-in network map panel is automatically registered when the integration is
 ### Inspector panel (right sidebar)
 
 Opens when a node is clicked. Shows:
-- **Gateway**: model, firmware, LAN/WAN IP, uptime, ping, CPU/RAM bars, WAN traffic bars, DSL stats + 24 h chart, SSIDs, ports, VLANs, DDNS status, event timeline
+- **Gateway**: model, firmware, LAN/WAN IP, uptime, ping, CPU/RAM bars + 1 h chart, WAN traffic bars, SSIDs, ports, VLANs, DDNS status, event timeline
 - **Access Point**: model, firmware, IP, uplink type + backhaul signal, CPU/RAM bars, SSIDs, client list, event timeline
 - **Client**: hostname, IP, MAC, vendor, band, signal, connected since, DHCP expiry, session traffic, HA device-tracker link
 
@@ -132,12 +132,6 @@ The Inspector panel shows a per-device event timeline — status changes recorde
 - **WAN Statistics**: WAN download/upload bytes, WAN IP, WAN status
 - **Radio Signal/Noise**: dBm sensors per WiFi radio (iwinfo-capable routers)
 
-### Fritz!Box Integration (TR-064)
-- **DSL Stats**: Sync speed (down/up kbps), SNR, attenuation, uptime from the Fritz!Box TR-064 API
-- **DSL History**: 24-hour rolling chart (1440 data points, 1 per minute)
-- **WAN Traffic**: Real-time bytes/s downstream and upstream
-- Configured via Options Flow (⚙️ gear icon on the integration entry)
-
 ### DDNS / DynDNS
 - **DDNS Service Status**: Reads `/etc/config/ddns` — service name, domain, last update, current IP
 - **Status**: `ok` / `error` / `unknown` per configured DDNS service
@@ -191,8 +185,6 @@ Add via **Settings → Devices & Services → Add Integration → OpenWrt Router
 | SSH Username | – | Optional: for SSH fallback (client counting, WiFi toggle) |
 | SSH Password | – | Optional: SSH password |
 
-**Fritz!Box options**: configure via ⚙️ gear icon on the integration entry after setup.
-
 ---
 
 ## Requirements
@@ -238,8 +230,6 @@ service rpcd restart
 | `sensor.{name}_ping_ms` | TCP latency to 8.8.8.8:53 |
 | `sensor.{name}_update_status` | Update availability |
 | `sensor.{name}_active_network_connections` | nf_conntrack count |
-| `sensor.{name}_dsl_*` | DSL sync speed, SNR, attenuation (Fritz!Box) |
-| `sensor.{name}_wan_traffic_*` | WAN bytes/s down/up (Fritz!Box) |
 | `sensor.{name}_ddns_*` | DDNS service status and last IP |
 
 ### Sensors (Dynamic)

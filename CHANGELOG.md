@@ -2,6 +2,35 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.25.0] - 2026-07-04
+
+> **Fokussierung auf OpenWrt.** Die optionalen Zusatz-Features **Fritz!Box (TR-064/DSL)**
+> und **Managed Switch** wurden vollständig entfernt. Die Integration ist jetzt reine
+> OpenWrt-Router-Funktionalität.
+
+### Removed
+
+- **Fritz!Box (TR-064/DSL-Modem):** SOAP/TR-064-Client (`fritzbox.py`), Coordinator-Polling,
+  Config-/Options-Flow-Felder sowie die DSL-Kennzahlen (Sync-/Max-Rate, SNR-Marge,
+  Leitungsdämpfung) und der DSL-Verlaufsgraph. DSL-Werte stammen vom vorgelagerten
+  DSL-Modem und lassen sich nicht aus OpenWrt-Daten ableiten.
+- **Managed Switch (externes Gerät):** der `switch_dev`-Config-Flow-Step und die
+  `switch_*`-Konfigurationsfelder. Dieser Zweig war ein ungenutzter Setup-Stub (wurde nie
+  gepollt oder als Entität ausgewertet).
+
+### Changed
+
+- **WAN-Durchsatz jetzt immer nativ:** Download-/Upload-Rate (`wan_traffic`) wird
+  ausschließlich aus den OpenWrt-WAN-Interface-Zählern (rx/tx-Byte-Delta pro Poll)
+  berechnet. Der bisherige Fritz!Box-Pfad entfällt; Live-Werte in „WAN Aktivität",
+  Footer und Edge-Tooltip bleiben erhalten.
+- **Config-Flow verkürzt:** `user → checklist` (der Zwischen-Step „Zusätzliche Geräte"
+  entfällt). Optionen enthalten nur noch das Topology-Debug-Flag.
+
+> **Hinweis:** Nach dem Update ist ein **Neustart von Home Assistant** empfohlen (entfernte
+> Plattform-/Frontend-Assets). Bestehende Router-Einträge bleiben unverändert; verwaiste
+> `fritzbox_*`/`switch_*`-Schlüssel in den Optionen werden ignoriert.
+
 ## [1.24.1] - 2026-07-03
 
 > **Topology-Fix.** Ein per WLAN angebundener **Mesh-AP** (z. B. 10.10.30.50 in VLAN 30)

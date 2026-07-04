@@ -45,8 +45,7 @@ Updates erscheinen danach automatisch in HACS, sobald ein neues Release getaggt 
 1. Host/IP, Port, Protokoll (HTTPS Self-Signed für die meisten Router), Benutzer
    (üblicherweise `root`) und Passwort eingeben — die Verbindung wird vor dem
    Speichern getestet.
-2. Optional: Fritz!Box-DSL-Modem und/oder Managed Switch einbinden.
-3. Capability-Checkliste prüfen; fehlende ubus-Berechtigungen auf Wunsch
+2. Capability-Checkliste prüfen; fehlende ubus-Berechtigungen auf Wunsch
    automatisch einrichten lassen.
 
 Mehrere Router/APs: einfach weitere Einträge derselben Integration anlegen —

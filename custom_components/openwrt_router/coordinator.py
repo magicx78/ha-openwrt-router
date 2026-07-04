@@ -31,17 +31,9 @@ from .const import (
     ERROR_TYPE_RESPONSE,
     ERROR_TYPE_TIMEOUT,
     NOTIFICATION_FAILURE_THRESHOLD,
-    CONF_FRITZBOX_HOST,
-    CONF_FRITZBOX_PASSWORD,
-    CONF_FRITZBOX_PORT,
-    CONF_FRITZBOX_USER,
-    DEFAULT_FRITZBOX_HOST,
-    DEFAULT_FRITZBOX_PORT,
     DEFAULT_SERVICES,
     DOMAIN,
     CPU_HISTORY_MAX_POINTS,
-    DSL_HISTORY_INTERVAL_CYCLES,
-    DSL_HISTORY_MAX_POINTS,
     KEY_CPU_HISTORY,
     TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES,
     TOPOLOGY_SNAPSHOT_MAX,
@@ -58,8 +50,6 @@ from .const import (
     KEY_CPU_LOAD,
     KEY_DDNS_STATUS,
     KEY_DHCP_LEASES,
-    KEY_DSL_HISTORY,
-    KEY_DSL_STATS,
     KEY_FEATURES,
     KEY_MEMORY,
     KEY_PING_MS,
@@ -76,7 +66,6 @@ from .const import (
     RADIO_KEY_IS_GUEST,
     SCAN_INTERVAL_SECONDS,
 )
-from .fritzbox import get_dsl_stats, get_wan_traffic
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -130,13 +119,9 @@ class OpenWrtCoordinatorData:
         # own STA MAC.
         self.sta_interfaces: list[dict[str, Any]] = []
         self.features: dict[str, Any] = {}
-        # Fritz!Box DSL data (gateway only)
-        self.dsl_stats: dict[str, Any] = {}
+        # Native WAN throughput (rx/tx byte deltas) — gateway only
         self.wan_traffic: dict[str, Any] = {}
         self.ping_ms: float | None = None
-        self.dsl_history: list[
-            dict[str, Any]
-        ] = []  # filled by coordinator from _dsl_history
         # DuckDNS / DDNS status (gateway only)
         self.ddns_status: list[dict[str, Any]] = []
         # Per-router event history (status changes, spikes) — max 30 entries
@@ -186,10 +171,8 @@ class OpenWrtCoordinatorData:
             "ap_interfaces": self.ap_interfaces,
             "sta_interfaces": self.sta_interfaces,
             KEY_FEATURES: self.features,
-            KEY_DSL_STATS: self.dsl_stats,
             KEY_WAN_TRAFFIC: self.wan_traffic,
             KEY_PING_MS: self.ping_ms,
-            KEY_DSL_HISTORY: self.dsl_history,
             KEY_DDNS_STATUS: self.ddns_status,
             KEY_CPU_HISTORY: self.cpu_history,
             "arp_table": self.arp_table,
@@ -221,9 +204,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             hass: Home Assistant instance.
             api: Authenticated OpenWrtAPI instance.
             entry_title: Human-readable config entry title for logging.
-            entry: Config entry (used to read Fritz!Box options); forwarded to
-                the base class — explicit passing is required from HA 2026.8
-                (implicit ContextVar lookup is removed).
+            entry: Config entry; forwarded to the base class — explicit passing
+                is required from HA 2026.8 (implicit ContextVar lookup is removed).
         """
         super().__init__(
             hass,
@@ -244,9 +226,6 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._prev_interface_bytes: dict[str, dict[str, int]] = {}
         self._prev_poll_time: datetime | None = None
         self._consecutive_auth_failures: int = 0
-        # DSL history: deque of {ts, dsl_down, dsl_up, ping_ms} — 24 h at 60s resolution
-        self._dsl_history: deque[dict[str, Any]] = deque(maxlen=DSL_HISTORY_MAX_POINTS)
-        self._history_cycle_count: int = 0
         # CPU history: deque of {ts, cpu, mem} — 1h at 30s resolution
         self._cpu_history: deque[dict[str, Any]] = deque(maxlen=CPU_HISTORY_MAX_POINTS)
         # Event timeline tracking
@@ -379,51 +358,23 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 _LOGGER.debug("Error fetching STA interface details: %s", err)
                 data.sta_interfaces = []
 
-            # --- Fritz!Box DSL stats + ping + DuckDNS ---
+            # --- Native WAN throughput + ping + DuckDNS ---
             # Skipped on cycle 1 (first_refresh at startup) to avoid blocking
-            # HA bootstrap. All three have external timeouts that would push
-            # startup past HA's stage-2 deadline with multiple coordinators.
+            # HA bootstrap. The ping/DDNS calls have external timeouts that would
+            # push startup past HA's stage-2 deadline with multiple coordinators.
             if self._board_poll_count > 1:
-                opts = self._entry.options if self._entry else {}
-                fb_host: str = opts.get(CONF_FRITZBOX_HOST, DEFAULT_FRITZBOX_HOST)
-                fb_user: str = opts.get(CONF_FRITZBOX_USER, "")
-                fb_pass: str = opts.get(CONF_FRITZBOX_PASSWORD, "")
-                fb_port: int = opts.get(CONF_FRITZBOX_PORT, DEFAULT_FRITZBOX_PORT)
-
-                if fb_user:  # only poll Fritz!Box when credentials are configured
-                    try:
-                        from homeassistant.helpers.aiohttp_client import (
-                            async_get_clientsession,
-                        )
-
-                        session = async_get_clientsession(self.hass)
-                        dsl, traffic = await asyncio.gather(
-                            get_dsl_stats(session, fb_host, fb_user, fb_pass, fb_port),
-                            get_wan_traffic(
-                                session, fb_host, fb_user, fb_pass, fb_port
-                            ),
-                            return_exceptions=True,
-                        )
-                        data.dsl_stats = dsl if isinstance(dsl, dict) else {}
-                        data.wan_traffic = traffic if isinstance(traffic, dict) else {}
-                    except Exception as err:  # noqa: BLE001
-                        _LOGGER.warning("Fritz!Box poll failed: %s", err)
-                        data.dsl_stats = self.data.dsl_stats if self.data else {}
-                        data.wan_traffic = self.data.wan_traffic if self.data else {}
-                else:
-                    data.dsl_stats = {}
-                    # Native WAN throughput: delta of rx/tx bytes between polls
-                    prev = self.data.wan_status if self.data else {}
-                    rx_prev = prev.get("rx_bytes") or 0
-                    tx_prev = prev.get("tx_bytes") or 0
-                    rx_now = data.wan_status.get("rx_bytes") or 0
-                    tx_now = data.wan_status.get("tx_bytes") or 0
-                    rx_delta = rx_now - rx_prev if rx_now >= rx_prev else 0
-                    tx_delta = tx_now - tx_prev if tx_now >= tx_prev else 0
-                    data.wan_traffic = {
-                        "downstream_bps": rx_delta // SCAN_INTERVAL_SECONDS,
-                        "upstream_bps": tx_delta // SCAN_INTERVAL_SECONDS,
-                    }
+                # Native WAN throughput: delta of rx/tx bytes between polls
+                prev = self.data.wan_status if self.data else {}
+                rx_prev = prev.get("rx_bytes") or 0
+                tx_prev = prev.get("tx_bytes") or 0
+                rx_now = data.wan_status.get("rx_bytes") or 0
+                tx_now = data.wan_status.get("tx_bytes") or 0
+                rx_delta = rx_now - rx_prev if rx_now >= rx_prev else 0
+                tx_delta = tx_now - tx_prev if tx_now >= tx_prev else 0
+                data.wan_traffic = {
+                    "downstream_bps": rx_delta // SCAN_INTERVAL_SECONDS,
+                    "upstream_bps": tx_delta // SCAN_INTERVAL_SECONDS,
+                }
 
                 # Latency: TCP connect to 8.8.8.8:53
                 try:
@@ -452,27 +403,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                         data.ddns_status = self.data.ddns_status if self.data else []
                 else:
                     data.ddns_status = self.data.ddns_status if self.data else []
-
-                # DSL history: record every DSL_HISTORY_INTERVAL_CYCLES poll cycles
-                self._history_cycle_count += 1
-                if self._history_cycle_count >= DSL_HISTORY_INTERVAL_CYCLES:
-                    self._history_cycle_count = 0
-                    self._dsl_history.append(
-                        {
-                            "ts": int(time.time()),
-                            "dsl_down": data.dsl_stats.get("downstream_kbps", 0),
-                            "dsl_up": data.dsl_stats.get("upstream_kbps", 0),
-                            "ping_ms": data.ping_ms,
-                        }
-                    )
             else:
                 # First poll: carry forward empty defaults — no external calls
-                data.dsl_stats = {}
                 data.wan_traffic = {}
                 data.ping_ms = None
                 data.ddns_status = []
-
-            data.dsl_history = list(self._dsl_history)
 
             # --- Per-client online time tracking ---
             now = datetime.now(UTC)

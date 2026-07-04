@@ -42,11 +42,6 @@ export function EdgeTooltip({ edgeId, x, y, edges, data }: Props) {
     if (wt && (wt.downstream_bps || wt.upstream_bps)) {
       rows.push({ label: '↓', value: fmtBps(wt.downstream_bps ?? 0) });
       rows.push({ label: '↑', value: fmtBps(wt.upstream_bps   ?? 0) });
-    } else if (data.gateway.dslStats) {
-      const ds = data.gateway.dslStats;
-      rows.push({ label: '↓ Sync', value: `${(ds.downstream_kbps / 1000).toFixed(1)} Mbit/s` });
-      rows.push({ label: '↑ Sync', value: `${(ds.upstream_kbps   / 1000).toFixed(1)} Mbit/s` });
-      if (ds.snr_down_db) rows.push({ label: 'SNR ↓', value: `${ds.snr_down_db} dB` });
     }
     if (data.gateway.wanIp) rows.push({ label: 'WAN IP', value: data.gateway.wanIp });
 

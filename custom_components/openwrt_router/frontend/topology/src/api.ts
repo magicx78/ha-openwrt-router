@@ -14,8 +14,6 @@ import type {
   NodeStatus,
   DeviceCategory,
   UplinkType,
-  DslStats,
-  DslHistoryPoint,
   CpuHistoryPoint,
   DdnsService,
   SsidInfo,
@@ -47,11 +45,9 @@ interface SnapshotNodeAttributes {
   radio?: string;
   signal?: number | null;
   is_wifi_client?: boolean;
-  // gateway DSL attrs
-  dsl_stats?: DslStats;
+  // gateway WAN/connectivity attrs (native OpenWrt)
   wan_traffic?: { downstream_bps?: number; upstream_bps?: number };
   ping_ms?: number | null;
-  dsl_history?: DslHistoryPoint[];
   ddns_status?: DdnsService[];
   [key: string]: unknown;
 }
@@ -545,9 +541,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     events: ((gwAttr.events as RouterEvent[] | undefined) ?? []).slice(0, 30),
     cpuLoad: gwAttr.cpu_load as number | undefined,
     memUsage: gwAttr.mem_usage as number | undefined,
-    dslStats: gwAttr.dsl_stats as DslStats | undefined,
     pingMs: gwAttr.ping_ms as number | null | undefined,
-    dslHistory: (gwAttr.dsl_history as DslHistoryPoint[] | undefined) ?? [],
     ddnsServices: (gwAttr.ddns_status as DdnsService[] | undefined) ?? [],
     wanTraffic: gwAttr.wan_traffic as { downstream_bps?: number; upstream_bps?: number } | undefined,
     portStats: ((gwAttr.port_stats as any[] | undefined) ?? []).map(adaptPortStat),

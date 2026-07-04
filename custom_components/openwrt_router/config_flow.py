@@ -29,22 +29,10 @@ from .api import (
     OpenWrtResponseError,
 )
 from .const import (
-    CONF_FRITZBOX_HOST,
-    CONF_FRITZBOX_PASSWORD,
-    CONF_FRITZBOX_PORT,
-    CONF_FRITZBOX_USER,
     CONF_PROTOCOL,
-    CONF_SWITCH_HOST,
-    CONF_SWITCH_PASSWORD,
-    CONF_SWITCH_PORT,
-    CONF_SWITCH_PROTOCOL,
-    CONF_SWITCH_USERNAME,
     CONF_TOPOLOGY_PORT_DEBUG,
-    DEFAULT_FRITZBOX_HOST,
-    DEFAULT_FRITZBOX_PORT,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL,
-    DEFAULT_SWITCH_PORT,
     DEFAULT_TOPOLOGY_PORT_DEBUG,
     DEFAULT_USERNAME,
     DOMAIN,
@@ -97,7 +85,7 @@ def _validate_host(host: str) -> str | None:
 
 
 class OpenWrtOptionsFlow(OptionsFlow):
-    """Options flow — Fritz!Box modem credentials + topology debug flag."""
+    """Options flow — topology debug flag."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -108,22 +96,6 @@ class OpenWrtOptionsFlow(OptionsFlow):
         opts = self.config_entry.options
         schema = vol.Schema(
             {
-                vol.Optional(
-                    CONF_FRITZBOX_HOST,
-                    default=opts.get(CONF_FRITZBOX_HOST, DEFAULT_FRITZBOX_HOST),
-                ): str,
-                vol.Optional(
-                    CONF_FRITZBOX_PORT,
-                    default=opts.get(CONF_FRITZBOX_PORT, DEFAULT_FRITZBOX_PORT),
-                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
-                vol.Optional(
-                    CONF_FRITZBOX_USER,
-                    default=opts.get(CONF_FRITZBOX_USER, ""),
-                ): str,
-                vol.Optional(
-                    CONF_FRITZBOX_PASSWORD,
-                    default=opts.get(CONF_FRITZBOX_PASSWORD, ""),
-                ): str,
                 vol.Optional(
                     CONF_TOPOLOGY_PORT_DEBUG,
                     default=opts.get(
@@ -139,7 +111,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the config flow for OpenWrt Router.
 
     Steps:
-        user → devices → [fritzbox] → [switch_dev] → checklist → create entry
+        user → checklist → create entry
 
     The unique_id is derived from the router's host:port (see
     :meth:`_compute_unique_id`). Host-based identity guarantees that routers at
@@ -184,8 +156,6 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         self._board_info: dict[str, Any] = {}
         self._capabilities: dict[str, bool] = {}
         self._user_data: dict[str, Any] = {}
-        self._add_fritzbox: bool = False
-        self._add_switch: bool = False
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -260,123 +230,13 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_USERNAME: username,
                         CONF_PASSWORD: password,
                     }
-                    return await self.async_step_devices()
+                    return await self.async_step_checklist()
 
         schema = self._build_user_schema(user_input)
         return self.async_show_form(
             step_id="user",
             data_schema=schema,
             errors=errors,
-        )
-
-    async def async_step_devices(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Ask which additional devices to configure alongside this router."""
-        if user_input is not None:
-            self._add_fritzbox = bool(user_input.get("add_fritzbox", False))
-            self._add_switch = bool(user_input.get("add_switch", False))
-
-            if self._add_fritzbox:
-                return await self.async_step_fritzbox()
-            if self._add_switch:
-                return await self.async_step_switch_dev()
-            return await self.async_step_checklist()
-
-        schema = vol.Schema(
-            {
-                vol.Optional("add_fritzbox", default=False): bool,
-                vol.Optional("add_switch", default=False): bool,
-            }
-        )
-        return self.async_show_form(
-            step_id="devices",
-            data_schema=schema,
-            description_placeholders={
-                "host": self._user_data.get(CONF_HOST, ""),
-                "model": self._board_info.get("model", ""),
-            },
-        )
-
-    async def async_step_fritzbox(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Collect Fritz!Box DSL modem credentials during initial setup."""
-        if user_input is not None:
-            self._user_data[CONF_FRITZBOX_HOST] = user_input.get(CONF_FRITZBOX_HOST, "")
-            self._user_data[CONF_FRITZBOX_PORT] = user_input.get(
-                CONF_FRITZBOX_PORT, DEFAULT_FRITZBOX_PORT
-            )
-            self._user_data[CONF_FRITZBOX_USER] = user_input.get(CONF_FRITZBOX_USER, "")
-            self._user_data[CONF_FRITZBOX_PASSWORD] = user_input.get(
-                CONF_FRITZBOX_PASSWORD, ""
-            )
-
-            if self._add_switch:
-                return await self.async_step_switch_dev()
-            return await self.async_step_checklist()
-
-        schema = vol.Schema(
-            {
-                vol.Optional(CONF_FRITZBOX_HOST, default=DEFAULT_FRITZBOX_HOST): str,
-                vol.Optional(
-                    CONF_FRITZBOX_PORT, default=DEFAULT_FRITZBOX_PORT
-                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
-                vol.Optional(CONF_FRITZBOX_USER, default=""): str,
-                vol.Optional(CONF_FRITZBOX_PASSWORD, default=""): str,
-            }
-        )
-        return self.async_show_form(
-            step_id="fritzbox",
-            data_schema=schema,
-            description_placeholders={
-                "host": self._user_data.get(CONF_HOST, ""),
-            },
-        )
-
-    async def async_step_switch_dev(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Collect managed switch connection details during initial setup."""
-        if user_input is not None:
-            self._user_data[CONF_SWITCH_HOST] = user_input.get(CONF_SWITCH_HOST, "")
-            self._user_data[CONF_SWITCH_PORT] = user_input.get(
-                CONF_SWITCH_PORT, DEFAULT_SWITCH_PORT
-            )
-            self._user_data[CONF_SWITCH_PROTOCOL] = user_input.get(
-                CONF_SWITCH_PROTOCOL, DEFAULT_PROTOCOL
-            )
-            self._user_data[CONF_SWITCH_USERNAME] = user_input.get(
-                CONF_SWITCH_USERNAME, "root"
-            )
-            self._user_data[CONF_SWITCH_PASSWORD] = user_input.get(
-                CONF_SWITCH_PASSWORD, ""
-            )
-            return await self.async_step_checklist()
-
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_SWITCH_HOST, default=""): str,
-                vol.Required(CONF_SWITCH_PORT, default=DEFAULT_SWITCH_PORT): vol.All(
-                    vol.Coerce(int), vol.Range(min=1, max=65535)
-                ),
-                vol.Required(CONF_SWITCH_PROTOCOL, default=DEFAULT_PROTOCOL): vol.In(
-                    {
-                        PROTOCOL_HTTP: "HTTP (Port 80, unsicher)",
-                        PROTOCOL_HTTPS: "HTTPS (Port 443, Zertifikat prüfen)",
-                        PROTOCOL_HTTPS_INSECURE: "HTTPS Self-Signed (Port 443, Zertifikat ignorieren)",
-                    }
-                ),
-                vol.Required(CONF_SWITCH_USERNAME, default="root"): str,
-                vol.Required(CONF_SWITCH_PASSWORD, default=""): str,
-            }
-        )
-        return self.async_show_form(
-            step_id="switch_dev",
-            data_schema=schema,
-            description_placeholders={
-                "host": self._user_data.get(CONF_HOST, ""),
-            },
         )
 
     async def async_step_checklist(

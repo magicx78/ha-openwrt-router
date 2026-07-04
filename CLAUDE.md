@@ -25,7 +25,6 @@ ha-openwrt-router/
 │   ├── button.py               # WiFi Reload, Update, etc.
 │   ├── diagnostics.py           # Redacted diagnostics
 │   ├── acl_provisioning.py     # Auto-Setup rpcd ACL via SSH
-│   ├── fritzbox.py             # Optional DSL stats (TR-064)
 │   ├── topology.py             # Per-Router topology snapshot (legacy)
 │   ├── topology_diagnostic.py  # Snapshot builder per router
 │   ├── topology_mesh.py        # Multi-router mesh aggregator + edge detection

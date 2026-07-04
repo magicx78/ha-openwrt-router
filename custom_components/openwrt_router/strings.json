@@ -3,19 +3,10 @@
     "step": {
       "init": {
         "title": "Router Options",
-        "description": "Optional: Fritz!Box credentials for DSL statistics and 24h speed chart. Leave empty to disable.",
         "data": {
-          "fritzbox_host": "Fritz!Box Host / IP",
-          "fritzbox_port": "TR-064 Port",
-          "fritzbox_user": "Username",
-          "fritzbox_password": "Password",
           "topology_port_debug": "Port mapping debug data in topology snapshot"
         },
         "data_description": {
-          "fritzbox_host": "IP address of the Fritz!Box modem (e.g. 172.16.1.254)",
-          "fritzbox_port": "TR-064 port, default 49000",
-          "fritzbox_user": "Fritz!Box username (usually 'admin' or custom)",
-          "fritzbox_password": "Fritz!Box password",
           "topology_port_debug": "Include the raw per-port mapping trace (FDB/DHCP/ARP matches and assignment reasons) in the topology snapshot endpoint. HA diagnostics always stay redacted."
         }
       }
@@ -39,52 +30,6 @@
           "protocol": "Connection protocol (HTTPS Self-Signed recommended for most OpenWrt routers)",
           "username": "rpcd username, usually 'root'",
           "password": "Router password"
-        }
-      },
-      "devices": {
-        "title": "Additional Devices — {host}",
-        "description": "Do you want to integrate additional devices connected to this router?\n\n**Model:** {model}",
-        "data": {
-          "add_fritzbox": "Fritz!Box DSL Modem",
-          "add_switch": "Managed Switch (OpenWrt)"
-        },
-        "data_description": {
-          "add_fritzbox": "Adds DSL line statistics, 24h speed chart and ping monitoring",
-          "add_switch": "Adds port statistics from a separate OpenWrt-based managed switch"
-        }
-      },
-      "fritzbox": {
-        "title": "Fritz!Box DSL Modem — {host}",
-        "description": "Enter the connection details for your Fritz!Box DSL modem. Leave the password blank if not set.",
-        "data": {
-          "fritzbox_host": "Fritz!Box Host / IP",
-          "fritzbox_port": "TR-064 Port",
-          "fritzbox_user": "Username",
-          "fritzbox_password": "Password"
-        },
-        "data_description": {
-          "fritzbox_host": "IP address of the Fritz!Box modem (e.g. 172.16.1.254)",
-          "fritzbox_port": "TR-064 port, default 49000",
-          "fritzbox_user": "Fritz!Box username (usually 'admin' or custom)",
-          "fritzbox_password": "Fritz!Box password"
-        }
-      },
-      "switch_dev": {
-        "title": "Managed Switch — {host}",
-        "description": "Enter the connection details for the managed switch running OpenWrt/rpcd.",
-        "data": {
-          "switch_host": "Switch Host / IP",
-          "switch_port": "Port",
-          "switch_protocol": "Protocol",
-          "switch_username": "Username",
-          "switch_password": "Password"
-        },
-        "data_description": {
-          "switch_host": "IP address or hostname of the managed switch",
-          "switch_port": "Port — 443 for HTTPS, 80 for HTTP",
-          "switch_protocol": "Connection protocol",
-          "switch_username": "rpcd username, usually 'root'",
-          "switch_password": "Switch password"
         }
       },
       "checklist": {

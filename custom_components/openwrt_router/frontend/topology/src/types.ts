@@ -12,24 +12,6 @@ export type UplinkType = 'wired' | 'mesh' | 'repeater';
 export type DeviceCategory = 'smartphone' | 'laptop' | 'iot' | 'guest' | 'other';
 export type FilterType = 'all' | 'aps' | 'clients' | 'warnings';
 
-export interface DslStats {
-  downstream_kbps: number;
-  upstream_kbps: number;
-  downstream_max_kbps: number;
-  upstream_max_kbps: number;
-  snr_down_db: number;
-  snr_up_db: number;
-  attn_down_db: number;
-  attn_up_db: number;
-}
-
-export interface DslHistoryPoint {
-  ts: number;        // unix timestamp
-  dsl_down: number;  // kbps
-  dsl_up: number;    // kbps
-  ping_ms: number | null;
-}
-
 export interface CpuHistoryPoint {
   ts: number;   // unix timestamp
   cpu: number;  // 0-100 percent
@@ -61,10 +43,7 @@ export interface Gateway {
   cpuHistoryBackend?: CpuHistoryPoint[]; // 1h history from backend (preferred)
   events?: RouterEvent[]; // recent status-change events (newest first)
   ssids?: SsidInfo[];   // WiFi networks at gateway
-  // Fritz!Box / DSL data (optional — only present when Fritz!Box is configured)
-  dslStats?: DslStats;
   pingMs?: number | null;
-  dslHistory?: DslHistoryPoint[];
   ddnsServices?: DdnsService[];
   wanTraffic?: { downstream_bps?: number; upstream_bps?: number };
   portStats?: PortStat[];

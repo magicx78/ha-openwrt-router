@@ -4,7 +4,7 @@
  */
 
 import React, { useMemo } from 'react';
-import { TopologyData, Client, DslHistoryPoint } from '../types';
+import { TopologyData, Client } from '../types';
 import { IconSmartphone, IconLaptop, IconIoT, IconGuest, IconOther } from './Icons';
 
 interface Props {
@@ -12,74 +12,17 @@ interface Props {
   onHighlightClient: (clientId: string) => void;
 }
 
-// ── Sparkline ─────────────────────────────────────────────────────────────
-
 function formatBps(bps: number): string {
   if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbit/s`;
   if (bps >= 1_000)     return `${(bps / 1_000).toFixed(0)} kbit/s`;
   return `${bps} bit/s`;
 }
 
-interface SparklineProps {
-  points: number[];   // values (bps)
-  color: string;      // CSS color
-  height: number;
-  width: number;
-  flip?: boolean;     // mirror vertically (for upload)
-}
-
-function Sparkline({ points, color, height, width, flip }: SparklineProps) {
-  if (points.length < 2) {
-    return <svg width={width} height={height} />;
-  }
-  const max = Math.max(...points, 1);
-  const step = width / (points.length - 1);
-
-  const coords = points.map((v, i) => {
-    const x = i * step;
-    const y = flip
-      ? (v / max) * height
-      : height - (v / max) * height;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
-
-  const pathD = `M${coords.join(' L')}`;
-
-  // Area fill path
-  const firstY = flip ? 0 : height;
-  const lastY  = flip ? 0 : height;
-  const areaD  = `M0,${firstY} L${pathD.slice(1)} L${((points.length - 1) * step).toFixed(1)},${lastY} Z`;
-
-  return (
-    <svg width={width} height={height} style={{ display: 'block' }}>
-      <defs>
-        <linearGradient id={`sg-${color.replace('#', '')}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.3" />
-          <stop offset="100%" stopColor={color} stopOpacity="0.02" />
-        </linearGradient>
-      </defs>
-      <path d={areaD} fill={`url(#sg-${color.replace('#', '')})`} />
-      <path d={pathD} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 function WanTrafficPanel({ data }: { data: TopologyData }) {
-  const history = data.gateway.dslHistory ?? [];
   const currentDown = data.gateway.wanTraffic?.downstream_bps ?? 0;
   const currentUp   = data.gateway.wanTraffic?.upstream_bps   ?? 0;
 
-  const downPoints = history.length > 1
-    ? history.map((p: DslHistoryPoint) => p.dsl_down * 1000) // kbps → bps
-    : [currentDown];
-  const upPoints = history.length > 1
-    ? history.map((p: DslHistoryPoint) => p.dsl_up * 1000)
-    : [currentUp];
-
-  const peakDown = Math.max(...downPoints, 0);
-  const peakUp   = Math.max(...upPoints, 0);
-
-  if (!currentDown && !currentUp && !history.length) {
+  if (!currentDown && !currentUp) {
     return (
       <div className="traffic-section">
         <div className="traffic-section__title">WAN Traffic</div>
@@ -103,15 +46,6 @@ function WanTrafficPanel({ data }: { data: TopologyData }) {
           <span className="traffic-rate__label">Upload</span>
         </div>
       </div>
-
-      {downPoints.length > 1 && (
-        <div className="traffic-sparkline-wrap">
-          <Sparkline points={downPoints} color="var(--traffic-down-color, #3b82f6)" height={40} width={240} />
-          <div className="traffic-sparkline-peak">Peak ↓ {formatBps(peakDown)}</div>
-          <Sparkline points={upPoints}   color="var(--traffic-up-color, #f97316)"   height={30} width={240} flip />
-          <div className="traffic-sparkline-peak">Peak ↑ {formatBps(peakUp)}</div>
-        </div>
-      )}
     </div>
   );
 }
