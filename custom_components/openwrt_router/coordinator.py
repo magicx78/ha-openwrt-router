@@ -24,6 +24,7 @@ from .api import (
 )
 from .const import (
     CLIENT_KEY_CONNECTED_SINCE,
+    CLIENT_KEY_LAST_SEEN,
     CLIENT_KEY_MAC,
     BOARD_REFRESH_CYCLES,
     ERROR_TYPE_AUTH,
@@ -51,6 +52,9 @@ from .const import (
     KEY_DDNS_STATUS,
     KEY_DHCP_LEASES,
     KEY_FEATURES,
+    KEY_LLDP_NEIGHBORS,
+    KEY_LLDP_STATUS,
+    LLDP_STATUS_UNAVAILABLE,
     KEY_MEMORY,
     KEY_PING_MS,
     KEY_PORT_STATS,
@@ -138,6 +142,11 @@ class OpenWrtCoordinatorData:
         self.topology_snapshots: list[dict[str, Any]] = []
         # trunk_port_map: {ap_host_ip → gateway_port_name} from ARP + bridge FDB
         self.trunk_port_map: dict[str, str] = {}
+        # LLDP neighbors (list of neighbor dicts) + capability status.
+        # Preferred source for router-to-router wiring; empty when lldpd is
+        # absent. Never fails a poll — only lowers topology confidence.
+        self.lldp_neighbors: list[dict[str, Any]] = []
+        self.lldp_status: str = LLDP_STATUS_UNAVAILABLE
         # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
         self.vlans_stale: bool = False
         # Connectivity health tracking (used by binary_sensor / sensor platform)
@@ -176,6 +185,8 @@ class OpenWrtCoordinatorData:
             KEY_DDNS_STATUS: self.ddns_status,
             KEY_CPU_HISTORY: self.cpu_history,
             "arp_table": self.arp_table,
+            KEY_LLDP_NEIGHBORS: self.lldp_neighbors,
+            KEY_LLDP_STATUS: self.lldp_status,
         }
 
 
@@ -422,6 +433,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 client[CLIENT_KEY_CONNECTED_SINCE] = self._client_first_seen[
                     mac
                 ].isoformat()
+                # last_seen = this poll (client is currently associated)
+                client[CLIENT_KEY_LAST_SEEN] = now.isoformat()
             # Remove MACs that are no longer connected
             self._client_first_seen = {
                 mac: ts
@@ -496,6 +509,19 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching trunk port map: %s", err)
                 data.trunk_port_map = {}
+
+            # LLDP neighbors — preferred source for router-to-router wiring.
+            # Optional: a failure here NEVER fails the poll and does NOT flip the
+            # SSH-fallback/degraded state (get_lldp_neighbors uses _run_ssh).
+            try:
+                (
+                    data.lldp_neighbors,
+                    data.lldp_status,
+                ) = await self.api.get_lldp_neighbors()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching LLDP neighbors: %s", err)
+                data.lldp_neighbors = []
+                data.lldp_status = LLDP_STATUS_UNAVAILABLE
 
             # --- CPU history (30s resolution, 1h rolling window) ---
             import time as _time

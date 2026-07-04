@@ -96,9 +96,10 @@ export function MobileView({
               </div>
               <div className="mobile-card__footer">
                 <span className={`ap-card__badge ${ap.uplinkType}`}>
-                  {ap.uplinkType === 'wired'    ? 'Kabel'
-                 : ap.uplinkType === 'repeater' ? 'WLAN Repeater'
-                 :                                'Mesh?'}
+                  {ap.uplinkType === 'wired'         ? 'Kabel'
+                 : ap.uplinkType === 'repeater'      ? 'WLAN Repeater'
+                 : ap.uplinkType === 'router_uplink' ? 'Router-Uplink'
+                 :                                     'Mesh?'}
                 </span>
                 <span className="ap-card__clients">
                   <strong>{clients.length}</strong> Clients

@@ -140,7 +140,12 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         "iwinfo": "Signal-Stärke (iwinfo)",
         "uci_get": "UCI-Konfiguration",
         "hostapd_clients": "WLAN-Clients (hostapd)",
+        "lldp_neighbors": "LLDP-Nachbarn (Router-zu-Router-Verkabelung, optional)",
     }
+
+    # LLDP is optional and NOT ACL-related: a miss must not trigger the rpcd/ACL
+    # install hint. It gets its own recommendation and never blocks the add flow.
+    _LLDP_CAP: str = "lldp_neighbors"
 
     _REQUIRED_CAPS: frozenset[str] = frozenset(
         {
@@ -313,15 +318,34 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
         for cap, label in self._CAPABILITY_LABELS.items():
             ok = self._capabilities.get(cap, False)
-            icon = "✅" if ok else "❌"
+            icon = "✅" if ok else "ℹ️" if cap == self._LLDP_CAP else "❌"
             lines.append(f"{icon} {label}")
-            if not ok:
+            if not ok and cap != self._LLDP_CAP:
+                # LLDP is handled separately — it never counts as a missing
+                # ubus/ACL capability, so it can't degrade the checklist status.
                 if cap in self._REQUIRED_CAPS:
                     missing_required.append(label)
                 else:
                     missing_optional.append(label)
 
         checklist_text = "\n".join(lines)
+
+        # Dedicated, non-blocking LLDP recommendation (not an error).
+        lldp_hint = ""
+        if not self._capabilities.get(self._LLDP_CAP, False):
+            lldp_hint = (
+                "\n\nℹ️ **LLDP nicht erkannt** (optional). Für zuverlässige "
+                "Router-zu-Router-Verkabelungserkennung auf allen OpenWrt-Routern "
+                "lldpd installieren und starten:\n"
+                "```\n"
+                "opkg update\n"
+                "opkg install lldpd\n"
+                "/etc/init.d/lldpd enable\n"
+                "/etc/init.d/lldpd start\n"
+                "```\n"
+                "Ohne LLDP funktioniert alles weiter — nur die Router-zu-Router-"
+                "Erkennung ist dann weniger sicher."
+            )
 
         deploy_note = ""
         if deployed:
@@ -380,6 +404,8 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             )
         else:
             status = "✅ Alle Berechtigungen vorhanden — optimale Konfiguration."
+
+        status += lldp_hint
 
         has_missing = bool(missing_required or missing_optional)
         schema = vol.Schema(

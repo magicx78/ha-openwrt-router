@@ -3351,3 +3351,135 @@
   border-color: rgba(239,68,68,0.5) !important;
   opacity: 0.75;
 }
+
+/* ── LLDP Router-Uplink edges (relationship: router_uplink) ───────────────── */
+/* Distinct verified-green styling so LLDP links read as high-confidence.      */
+.edge-router-bg {
+  stroke: rgba(52, 211, 153, 0.20);
+  stroke-width: 5;
+  fill: none;
+  stroke-linecap: round;
+}
+.edge-router-flow {
+  stroke: #34d399;
+  stroke-width: 1.8;
+  fill: none;
+  stroke-dasharray: 10 5;
+  stroke-linecap: round;
+  animation: flow-down 2.0s linear infinite;
+}
+/* one-way (seen from a single side) → sparser, dimmer dashes */
+.edge-router-flow--oneway {
+  stroke: #6ee7b7;
+  stroke-dasharray: 4 9;
+  stroke-opacity: 0.75;
+}
+.edge-highlighted .edge-router-bg   { stroke: rgba(52, 211, 153, 0.30); stroke-width: 6; }
+.edge-highlighted .edge-router-flow { stroke: #6ee7b7; stroke-width: 2.6; }
+.edge-highlighted.edge-group--router-uplink {
+  filter: drop-shadow(0 0 6px rgba(52, 211, 153, 0.55));
+}
+.edge-warning .edge-router-flow { stroke: var(--amber); animation-name: flow-warning; }
+.vlan-mode .edge-group[data-vlan] .edge-router-flow { stroke: var(--vlan-color); }
+
+/* LLDP badge at the edge midpoint */
+.edge-lldp-badge-bg {
+  fill: rgba(6, 40, 30, 0.92);
+  stroke: rgba(52, 211, 153, 0.55);
+  stroke-width: 0.75;
+}
+.edge-lldp-badge {
+  fill: #6ee7b7;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+/* Physical port badges at each end of a router-uplink edge */
+.edge-port-badge {
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+.edge-port-badge--from { fill: rgba(96,165,250,0.92); }   /* blue — source (from) port */
+.edge-port-badge--to   { fill: rgba(52,211,153,0.95); }   /* green — target (to) port */
+
+/* one-way hint text below the midpoint */
+.edge-oneway-hint {
+  fill: #fbbf24;
+  font-size: 8.5px;
+  font-weight: 600;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+/* conflict warning marker (LLDP port ≠ bridge FDB) */
+.edge-conflict-dot {
+  fill: rgba(251, 146, 60, 0.95);
+  stroke: rgba(20, 12, 4, 0.6);
+  stroke-width: 0.75;
+}
+.edge-conflict-icon {
+  fill: #1a1006;
+  font-size: 9px;
+  font-weight: 800;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+/* edge tooltip badge for LLDP */
+.edge-tooltip__badge--lldp {
+  background: rgba(52,211,153,0.16);
+  color: #34d399;
+}
+.edge-tooltip--lldp { border-color: rgba(52,211,153,0.35); }
+
+/* AP card LLDP tag next to the "Router-Uplink" badge */
+.ap-card__badge.router_uplink {
+  background: rgba(52,211,153,0.14);
+  color: #34d399;
+}
+.ap-card__lldp-tag {
+  margin-left: 5px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: rgba(52,211,153,0.22);
+  color: #6ee7b7;
+  vertical-align: middle;
+}
+
+/* AP icon tint for router-uplink */
+.ap-card__icon.router_uplink { color: #34d399; }
+
+/* Detail panel — inline LLDP badge in the section heading */
+.lldp-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(52,211,153,0.16);
+  color: #34d399;
+  vertical-align: middle;
+}
+
+/* Detail panel — LLDP/FDB conflict note */
+.lldp-conflict-note {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #fcd34d;
+  background: rgba(251, 191, 36, 0.10);
+  border: 1px solid rgba(251, 191, 36, 0.30);
+}
+.lldp-conflict-note__detail {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-secondary);
+}

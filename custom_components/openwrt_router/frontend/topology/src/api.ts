@@ -24,6 +24,10 @@ import type {
   RouterEvent,
   TopologySnapshot,
   SwitchNode,
+  LldpUplink,
+  LldpConflict,
+  ConnectionType,
+  ConfidenceLevel,
 } from './types';
 
 // ── Raw snapshot types ───────────────────────────────────────────────────
@@ -45,6 +49,15 @@ interface SnapshotNodeAttributes {
   radio?: string;
   signal?: number | null;
   is_wifi_client?: boolean;
+  // richer client model (v1.22)
+  vendor?: string | null;
+  connection_type?: string;
+  confidence?: string;
+  source?: string;
+  web_url?: string | null;
+  last_seen?: string;
+  link_speed?: number | null;
+  interface?: string;
   // gateway WAN/connectivity attrs (native OpenWrt)
   wan_traffic?: { downstream_bps?: number; upstream_bps?: number };
   ping_ms?: number | null;
@@ -493,6 +506,65 @@ function adaptPortStat(p: any): PortStat {
   };
 }
 
+// ── LLDP router-uplink adapter ────────────────────────────────────────────
+
+const CONFIDENCE_LEVELS: ConfidenceLevel[] = ['high', 'medium', 'low'];
+
+function normConfidence(v: unknown): ConfidenceLevel | undefined {
+  return typeof v === 'string' && (CONFIDENCE_LEVELS as string[]).includes(v)
+    ? (v as ConfidenceLevel)
+    : undefined;
+}
+
+function normConnectionType(v: unknown): ConnectionType | undefined {
+  return v === 'wired' || v === 'wireless' || v === 'router_uplink' || v === 'unknown'
+    ? v
+    : undefined;
+}
+
+/** Map a router_uplink edge's attributes → LldpUplink. Every field is optional. */
+function adaptLldp(attr: SnapshotEdge['attributes']): LldpUplink {
+  const a = (attr ?? {}) as Record<string, unknown>;
+  const str = (k: string): string | undefined =>
+    typeof a[k] === 'string' && a[k] ? (a[k] as string) : undefined;
+  const vlanTags = Array.isArray(a.vlan_tags)
+    ? (a.vlan_tags as unknown[]).filter((n): n is number => typeof n === 'number')
+    : undefined;
+  const capabilities = Array.isArray(a.capabilities)
+    ? (a.capabilities as unknown[]).filter((c): c is string => typeof c === 'string')
+    : undefined;
+  const conflicts = Array.isArray(a.conflicts)
+    ? (a.conflicts as any[]).map((c): LldpConflict => ({
+        source: typeof c?.source === 'string' ? c.source : 'unknown',
+        fdb_port: typeof c?.fdb_port === 'string' ? c.fdb_port : undefined,
+        lldp_port: typeof c?.lldp_port === 'string' ? c.lldp_port : undefined,
+      }))
+    : undefined;
+  const direction = a.direction === 'one_way' ? 'one_way'
+    : a.direction === 'bidirectional' ? 'bidirectional'
+    : undefined;
+  return {
+    linkType: str('link_type'),
+    detectionMethod: str('detection_method'),
+    confidence: normConfidence(a.confidence),
+    direction,
+    fromPort: str('from_port') ?? str('from_interface'),
+    toPort: str('to_port') ?? str('to_interface'),
+    gatewayPort: str('gateway_port'),
+    apPort: str('ap_port'),
+    vlanTags: vlanTags && vlanTags.length ? vlanTags : undefined,
+    neighborName: str('neighbor_name'),
+    neighborHost: str('neighbor_host'),
+    neighborMac: str('neighbor_mac'),
+    neighborChassisId: str('neighbor_chassis_id'),
+    neighborPortId: str('neighbor_port_id'),
+    neighborPortDescription: str('neighbor_port_description'),
+    managementIp: str('management_ip'),
+    capabilities: capabilities && capabilities.length ? capabilities : undefined,
+    conflicts: conflicts && conflicts.length ? conflicts : undefined,
+  };
+}
+
 // ── Core adapter ─────────────────────────────────────────────────────────
 
 export function adaptSnapshot(snap: Snapshot): TopologyData {
@@ -504,7 +576,8 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     (e) =>
       e.relationship === 'lan_uplink' ||
       e.relationship === 'wifi_uplink' ||
-      e.relationship === 'mesh_member',
+      e.relationship === 'mesh_member' ||
+      e.relationship === 'router_uplink',
   );
 
   // Gateway = first router with role=gateway, fallback to first router
@@ -569,16 +642,20 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     gatewayPort?: string;
     apPort?: string;
     vlanTags?: number[];
+    lldp?: LldpUplink;
   }>();
   for (const edge of interRouterEdges) {
     const apId = edge.to;
     if (apId === gwNode.id) continue;
+    const isRouterUplink = edge.relationship === 'router_uplink';
     // wifi_uplink  = WiFi backhaul (verified via STA-MAC or repeater override) → "WLAN Repeater"
     // lan_uplink   = ethernet uplink (DHCP / ARP / FDB-confirmed)              → "Kabel"
     // mesh_member  = subnet-fallback (unverified)                              → "Mesh?"
+    // router_uplink = LLDP-verified router↔router link (high confidence)        → "Router-Uplink"
     const uplinkType: UplinkType =
       edge.relationship === 'wifi_uplink' ? 'repeater' :
       edge.relationship === 'mesh_member' ? 'mesh' :
+      isRouterUplink ? 'router_uplink' :
       'wired';
     // Real signal value or null — never silently fall back to a sentinel that
     // looks like a measurement (was -60, which masqueraded as "real signal" in
@@ -586,11 +663,20 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     const sigRaw = edge.attributes?.signal;
     const backhaulSignal: number | null =
       typeof sigRaw === 'number' && sigRaw < 0 ? sigRaw : null;
-    const gatewayPort = (edge.attributes?.gateway_port as string | undefined) || undefined;
+    const lldp = isRouterUplink ? adaptLldp(edge.attributes) : undefined;
+    // Physical ports: for LLDP links prefer from_port/to_port; the gateway-side
+    // port badge on the AP card comes from gateway_port (falls back to from_port).
+    const gatewayPort =
+      (edge.attributes?.gateway_port as string | undefined) ||
+      lldp?.gatewayPort ||
+      lldp?.fromPort ||
+      undefined;
     const apPortRaw = edge.attributes?.ap_port as string | null | undefined;
-    const apPort = apPortRaw ?? undefined;
+    const apPort = apPortRaw ?? lldp?.apPort ?? lldp?.toPort ?? undefined;
     const vlanTagsRaw = edge.attributes?.vlan_tags as number[] | undefined;
-    const vlanTags = Array.isArray(vlanTagsRaw) ? vlanTagsRaw : undefined;
+    const vlanTags = Array.isArray(vlanTagsRaw) && vlanTagsRaw.length
+      ? vlanTagsRaw
+      : lldp?.vlanTags;
     uplinkMap.set(apId, {
       uplinkTo: edge.from,
       uplinkType,
@@ -599,6 +685,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       gatewayPort,
       apPort,
       vlanTags,
+      lldp,
     });
   }
 
@@ -657,6 +744,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       apPort: uplink?.apPort,
       vlanTags: uplink?.vlanTags,
       portStats: ((n.attributes?.port_stats as any[] | undefined) ?? []).map(adaptPortStat),
+      lldpUplink: uplink?.lldp,
     };
   });
 
@@ -676,24 +764,48 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     const rawBand = (attr?.band as string) ?? '';
 
     const mac = (attr?.mac as string) ?? '';
+    const ip = (attr?.ip as string) ?? '';
+    // Prefer the server-side OUI vendor; fall back to the local OUI table only
+    // when the server did not resolve a vendor.
+    const serverVendor = (attr?.vendor as string | null | undefined) || undefined;
+    const vendor = serverVendor ?? lookupManufacturer(mac);
+    const connectionType = normConnectionType(attr?.connection_type);
+    const confidence = normConfidence(attr?.confidence);
+    const source = (attr?.source as string | undefined) || undefined;
+    // Defense in depth: only expose a web link when the server flagged the
+    // client reachable (web_url present), and always rebuild the URL from the
+    // validated IP literal — never trust the backend string directly.
+    const webUrl = attr?.web_url ? safeHttpUrl(ip) : undefined;
+    const lastSeen = (attr?.last_seen as string | undefined) || undefined;
+    const linkSpeedRaw = attr?.link_speed;
+    const linkSpeed = typeof linkSpeedRaw === 'number' && linkSpeedRaw > 0 ? linkSpeedRaw : undefined;
+    const iface = (attr?.interface as string | undefined) || undefined;
     return {
       id: n.id,
       name: hostname,
       hostname,
-      ip: (attr?.ip as string) ?? '',
+      ip,
       mac,
       apId,
       category: guessCategory(hostname, attr?.ssid as string | undefined),
       signal: signal ?? -65,
       band: rawBand ? formatBand(rawBand) : '',
       status: signalStatus(signal),
-      manufacturer: lookupManufacturer(mac),
+      manufacturer: vendor,
       connectedSince: connectedSince && connectedSince > 0 ? connectedSince : undefined,
       dhcpExpires: dhcpExpires && dhcpExpires > 0 ? dhcpExpires : undefined,
       rxBytes: attr?.rx_bytes as number | null | undefined,
       txBytes: attr?.tx_bytes as number | null | undefined,
-      vlanId: matchVlan((attr?.ip as string) ?? '', gateway.vlans ?? []) ?? undefined,
+      vlanId: matchVlan(ip, gateway.vlans ?? []) ?? undefined,
       isWifiClient: (attr?.is_wifi_client as boolean | undefined) ?? (signal != null),
+      vendor: serverVendor,
+      connectionType,
+      confidence,
+      source,
+      webUrl,
+      lastSeen,
+      linkSpeed,
+      iface,
     };
   });
 
