@@ -690,3 +690,46 @@ class TestRecordEvents:
         assert len(cpu_events) == 1
         assert cpu_events[0]["type"] == "info"
         assert coord._cpu_warn_active is False
+
+
+# =====================================================================
+# Native WAN throughput (migrated off Fritz!Box)
+# =====================================================================
+
+
+class TestNativeWanTraffic:
+    """After Fritz!Box removal, wan_traffic is derived natively from the WAN
+    interface rx/tx byte counters (delta between polls / SCAN_INTERVAL_SECONDS).
+    """
+
+    @pytest.mark.asyncio
+    async def test_wan_traffic_computed_from_rx_tx_delta(self):
+        coord, api = _make_coordinator()
+        api.get_wan_status = AsyncMock(
+            side_effect=[
+                {"connected": True, "interface": "wan",
+                 "rx_bytes": 1000, "tx_bytes": 500, "wan_connected": True},
+                {"connected": True, "interface": "wan",
+                 "rx_bytes": 7000, "tx_bytes": 1700, "wan_connected": True},
+            ]
+        )
+        with patch("asyncio.open_connection", side_effect=OSError("no net")):
+            d1 = await coord._async_update_data()  # first poll: block skipped
+            coord.data = d1  # base class normally stores the previous result
+            d2 = await coord._async_update_data()  # second poll: native compute
+
+        # First poll carries empty defaults (no external calls)
+        assert d1.wan_traffic == {}
+        # (7000-1000)//60 = 100 ; (1700-500)//60 = 20
+        assert d2.wan_traffic == {"downstream_bps": 100, "upstream_bps": 20}
+
+    @pytest.mark.asyncio
+    async def test_no_dsl_data_in_coordinator(self):
+        coord, api = _make_coordinator()
+        with patch("asyncio.open_connection", side_effect=OSError("no net")):
+            data = await coord._async_update_data()
+        assert not hasattr(data, "dsl_stats")
+        assert not hasattr(data, "dsl_history")
+        assert "dsl_stats" not in data.as_dict()
+        assert "dsl_history" not in data.as_dict()
+        assert "wan_traffic" in data.as_dict()

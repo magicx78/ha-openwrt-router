@@ -3,19 +3,10 @@
     "step": {
       "init": {
         "title": "Router-Optionen",
-        "description": "Optional: Fritz!Box-Zugangsdaten für DSL-Statistiken und das 24h-Geschwindigkeitsdiagramm. Leer lassen zum Deaktivieren.",
         "data": {
-          "fritzbox_host": "Fritz!Box Host / IP",
-          "fritzbox_port": "TR-064-Port",
-          "fritzbox_user": "Benutzername",
-          "fritzbox_password": "Passwort",
           "topology_port_debug": "Port-Zuordnungs-Debugdaten im Topology-Snapshot"
         },
         "data_description": {
-          "fritzbox_host": "IP-Adresse des Fritz!Box-Modems (z. B. 172.16.1.254)",
-          "fritzbox_port": "TR-064-Port, Standard 49000",
-          "fritzbox_user": "Fritz!Box-Benutzername (meist 'admin' oder eigener)",
-          "fritzbox_password": "Fritz!Box-Passwort",
           "topology_port_debug": "Rohe Port-Zuordnungsdaten (FDB/DHCP/ARP-Treffer und Zuordnungsgründe) im Topology-Snapshot-Endpoint mitliefern. HA-Diagnostics bleiben immer redacted."
         }
       }
@@ -39,52 +30,6 @@
           "protocol": "Verbindungsprotokoll (HTTPS Self-Signed wird für die meisten OpenWrt-Router empfohlen)",
           "username": "rpcd-Benutzername, üblicherweise 'root'",
           "password": "Router-Passwort"
-        }
-      },
-      "devices": {
-        "title": "Zusätzliche Geräte — {host}",
-        "description": "Möchtest du weitere Geräte einbinden, die mit diesem Router verbunden sind?\n\n**Modell:** {model}",
-        "data": {
-          "add_fritzbox": "Fritz!Box DSL-Modem",
-          "add_switch": "Managed Switch (OpenWrt)"
-        },
-        "data_description": {
-          "add_fritzbox": "Ergänzt DSL-Leitungsstatistiken, 24h-Geschwindigkeitsdiagramm und Ping-Überwachung",
-          "add_switch": "Ergänzt Port-Statistiken eines separaten OpenWrt-basierten Managed Switch"
-        }
-      },
-      "fritzbox": {
-        "title": "Fritz!Box DSL-Modem — {host}",
-        "description": "Gib die Verbindungsdaten deines Fritz!Box-DSL-Modems ein. Passwort leer lassen, falls keines gesetzt ist.",
-        "data": {
-          "fritzbox_host": "Fritz!Box Host / IP",
-          "fritzbox_port": "TR-064-Port",
-          "fritzbox_user": "Benutzername",
-          "fritzbox_password": "Passwort"
-        },
-        "data_description": {
-          "fritzbox_host": "IP-Adresse des Fritz!Box-Modems (z. B. 172.16.1.254)",
-          "fritzbox_port": "TR-064-Port, Standard 49000",
-          "fritzbox_user": "Fritz!Box-Benutzername (meist 'admin' oder eigener)",
-          "fritzbox_password": "Fritz!Box-Passwort"
-        }
-      },
-      "switch_dev": {
-        "title": "Managed Switch — {host}",
-        "description": "Gib die Verbindungsdaten des Managed Switch mit OpenWrt/rpcd ein.",
-        "data": {
-          "switch_host": "Switch Host / IP",
-          "switch_port": "Port",
-          "switch_protocol": "Protokoll",
-          "switch_username": "Benutzername",
-          "switch_password": "Passwort"
-        },
-        "data_description": {
-          "switch_host": "IP-Adresse oder Hostname des Managed Switch",
-          "switch_port": "Port — 443 für HTTPS, 80 für HTTP",
-          "switch_protocol": "Verbindungsprotokoll",
-          "switch_username": "rpcd-Benutzername, üblicherweise 'root'",
-          "switch_password": "Switch-Passwort"
         }
       },
       "checklist": {

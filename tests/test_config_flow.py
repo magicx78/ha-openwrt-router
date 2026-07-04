@@ -295,8 +295,8 @@ class TestUserStep:
         assert result["errors"]["base"] == ERROR_UNKNOWN
 
     @pytest.mark.asyncio
-    async def test_success_proceeds_to_devices(self):
-        """After successful connection the flow moves to the devices selection step."""
+    async def test_success_proceeds_to_checklist(self):
+        """After successful connection the flow moves straight to the checklist step."""
         flow = _make_flow()
         board_info = {
             "hostname": "OpenWrt-Dev",
@@ -308,11 +308,16 @@ class TestUserStep:
             patch.object(flow, "_validate_input", return_value=board_info),
             patch.object(flow, "async_set_unique_id", new_callable=AsyncMock),
             patch.object(flow, "_abort_if_unique_id_configured"),
+            patch.object(
+                flow,
+                "async_step_checklist",
+                return_value={"type": "form", "step_id": "checklist"},
+            ) as mock_checklist,
         ):
             result = await flow.async_step_user(user_input=_VALID_USER_INPUT)
 
-        assert result["type"] == "form"
-        assert result["step_id"] == "devices"
+        mock_checklist.assert_called_once()
+        assert result["step_id"] == "checklist"
 
     @pytest.mark.asyncio
     async def test_protocol_stored_in_user_data(self):
@@ -330,6 +335,11 @@ class TestUserStep:
             ) as mock_validate,
             patch.object(flow, "async_set_unique_id", new_callable=AsyncMock),
             patch.object(flow, "_abort_if_unique_id_configured"),
+            patch.object(
+                flow,
+                "async_step_checklist",
+                return_value={"type": "form", "step_id": "checklist"},
+            ),
         ):
             await flow.async_step_user(user_input=_VALID_USER_INPUT)
 
@@ -354,158 +364,44 @@ class TestUserStep:
             patch.object(flow, "_validate_input", return_value=board_info),
             patch.object(flow, "async_set_unique_id", set_uid),
             patch.object(flow, "_abort_if_unique_id_configured"),
+            patch.object(
+                flow,
+                "async_step_checklist",
+                return_value={"type": "form", "step_id": "checklist"},
+            ),
         ):
             await flow.async_step_user(user_input=_VALID_USER_INPUT)
 
         set_uid.assert_awaited_once_with("192.168.1.1_443")
 
 
-class TestDevicesStep:
-    @pytest.mark.asyncio
-    async def test_shows_form_on_first_call(self):
+class TestNoSwitchOrFritzboxSteps:
+    """Switch/Fritz!Box add-on features were removed — those steps must not exist."""
+
+    def test_flow_has_no_switch_or_fritzbox_steps(self):
         flow = _make_flow()
-        flow._user_data = {"host": "192.168.1.1", "port": 443}
-        flow._board_info = {"model": "Test Router"}
-        result = await flow.async_step_devices(user_input=None)
+        for step in ("async_step_devices", "async_step_fritzbox", "async_step_switch_dev"):
+            assert not hasattr(flow, step), f"{step} should have been removed"
+
+    @pytest.mark.asyncio
+    async def test_options_flow_only_exposes_topology_debug(self):
+        from unittest.mock import PropertyMock
+
+        from custom_components.openwrt_router.config_flow import OpenWrtOptionsFlow
+
+        options_flow = OpenWrtOptionsFlow()
+        entry = MagicMock()
+        entry.options = {}
+        with patch.object(
+            OpenWrtOptionsFlow, "config_entry", new_callable=PropertyMock
+        ) as mock_entry:
+            mock_entry.return_value = entry
+            result = await options_flow.async_step_init(user_input=None)
+
         assert result["type"] == "form"
-        assert result["step_id"] == "devices"
-
-    @pytest.mark.asyncio
-    async def test_no_extras_goes_to_checklist(self):
-        flow = _make_flow()
-        flow._user_data = {
-            "host": "192.168.1.1",
-            "port": 443,
-            "protocol": PROTOCOL_HTTPS_INSECURE,
-            "username": "root",
-            "password": "test",
-        }
-        flow._board_info = {"hostname": "Router", "model": "Test"}
-
-        with patch.object(
-            flow,
-            "async_step_checklist",
-            return_value={"type": "form", "step_id": "checklist"},
-        ) as mock_checklist:
-            result = await flow.async_step_devices(
-                user_input={"add_fritzbox": False, "add_switch": False}
-            )
-
-        mock_checklist.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_fritzbox_checked_goes_to_fritzbox_step(self):
-        flow = _make_flow()
-        flow._user_data = {"host": "192.168.1.1", "port": 443}
-        flow._board_info = {}
-
-        with patch.object(
-            flow,
-            "async_step_fritzbox",
-            return_value={"type": "form", "step_id": "fritzbox"},
-        ) as mock_fb:
-            await flow.async_step_devices(
-                user_input={"add_fritzbox": True, "add_switch": False}
-            )
-
-        mock_fb.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_switch_checked_goes_to_switch_step(self):
-        flow = _make_flow()
-        flow._user_data = {"host": "192.168.1.1", "port": 443}
-        flow._board_info = {}
-
-        with patch.object(
-            flow,
-            "async_step_switch_dev",
-            return_value={"type": "form", "step_id": "switch_dev"},
-        ) as mock_sw:
-            await flow.async_step_devices(
-                user_input={"add_fritzbox": False, "add_switch": True}
-            )
-
-        mock_sw.assert_called_once()
-
-
-class TestFritzboxStep:
-    @pytest.mark.asyncio
-    async def test_shows_form_on_first_call(self):
-        flow = _make_flow()
-        flow._user_data = {"host": "192.168.1.1"}
-        result = await flow.async_step_fritzbox(user_input=None)
-        assert result["type"] == "form"
-        assert result["step_id"] == "fritzbox"
-
-    @pytest.mark.asyncio
-    async def test_submit_stores_fritzbox_data(self):
-        flow = _make_flow()
-        flow._user_data = {
-            "host": "192.168.1.1",
-            "port": 443,
-            "protocol": PROTOCOL_HTTPS_INSECURE,
-            "username": "root",
-            "password": "test",
-        }
-        flow._board_info = {"hostname": "Router"}
-        flow._add_switch = False
-
-        with patch.object(
-            flow,
-            "async_step_checklist",
-            return_value={"type": "form", "step_id": "checklist"},
-        ):
-            await flow.async_step_fritzbox(
-                user_input={
-                    "fritzbox_host": "172.16.1.254",
-                    "fritzbox_port": 49000,
-                    "fritzbox_user": "admin",
-                    "fritzbox_password": "secret",
-                }
-            )
-
-        assert flow._user_data["fritzbox_host"] == "172.16.1.254"
-        assert flow._user_data["fritzbox_port"] == 49000
-
-
-class TestSwitchDevStep:
-    @pytest.mark.asyncio
-    async def test_shows_form_on_first_call(self):
-        flow = _make_flow()
-        flow._user_data = {"host": "192.168.1.1"}
-        result = await flow.async_step_switch_dev(user_input=None)
-        assert result["type"] == "form"
-        assert result["step_id"] == "switch_dev"
-
-    @pytest.mark.asyncio
-    async def test_submit_stores_switch_data(self):
-        flow = _make_flow()
-        flow._user_data = {
-            "host": "192.168.1.1",
-            "port": 443,
-            "protocol": PROTOCOL_HTTPS_INSECURE,
-            "username": "root",
-            "password": "test",
-        }
-        flow._board_info = {"hostname": "Router"}
-
-        with patch.object(
-            flow,
-            "async_step_checklist",
-            return_value={"type": "form", "step_id": "checklist"},
-        ):
-            await flow.async_step_switch_dev(
-                user_input={
-                    "switch_host": "192.168.1.2",
-                    "switch_port": 443,
-                    "switch_protocol": PROTOCOL_HTTPS_INSECURE,
-                    "switch_username": "root",
-                    "switch_password": "swpass",
-                }
-            )
-
-        assert flow._user_data["switch_host"] == "192.168.1.2"
-        assert flow._user_data["switch_protocol"] == PROTOCOL_HTTPS_INSECURE
+        keys = {str(k) for k in result["data_schema"].schema}
+        assert keys == {"topology_port_debug"}
+        assert not any("fritzbox" in k for k in keys)
 
 
 class TestUserStepRpcdSetup:

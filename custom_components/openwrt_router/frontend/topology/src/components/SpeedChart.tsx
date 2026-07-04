@@ -1,39 +1,27 @@
 /**
- * SpeedChart — Canvas-based 24h line chart for DSL speed and ping history.
+ * SpeedChart — Canvas-based line chart for the 1h CPU/RAM history.
  *
  * Props:
- *   history  — array of DslHistoryPoint (sorted by ts ascending)
+ *   history  — array of CpuHistoryPoint (sorted by ts ascending)
  *   width    — canvas width in px (default 320)
  *   height   — canvas height in px (default 120)
  */
 
 import React, { useEffect, useRef } from 'react';
-import type { DslHistoryPoint, CpuHistoryPoint } from '../types';
+import type { CpuHistoryPoint } from '../types';
 
 interface Props {
-  history: DslHistoryPoint[] | CpuHistoryPoint[];
+  history: CpuHistoryPoint[];
   width?: number;
   height?: number;
-  /** Which series to display — 'speed', 'ping', or 'cpu' */
-  mode?: 'speed' | 'ping' | 'cpu';
 }
 
-const COLOR_DOWN  = '#4ade80'; // green — downstream / CPU
-const COLOR_UP    = '#60a5fa'; // blue  — upstream / RAM
-const COLOR_PING  = '#fb923c'; // orange — ping
+const COLOR_CPU   = '#4ade80'; // green — CPU
+const COLOR_MEM   = '#60a5fa'; // blue  — RAM
 const COLOR_GRID  = 'rgba(255,255,255,0.06)';
 const COLOR_LABEL = 'rgba(255,255,255,0.45)';
 
-function kbpsLabel(kbps: number): string {
-  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
-  return `${kbps} kbps`;
-}
-
-function drawChart(
-  canvas: HTMLCanvasElement,
-  history: DslHistoryPoint[] | CpuHistoryPoint[],
-  mode: 'speed' | 'ping' | 'cpu',
-): void {
+function drawChart(canvas: HTMLCanvasElement, history: CpuHistoryPoint[]): void {
   const ctx = canvas.getContext('2d')!;
   if (!ctx) return;
   const W = canvas.width;
@@ -65,19 +53,8 @@ function drawChart(
     return PAD_L + ((ts - minTs) / tsRange) * plotW;
   }
 
-  // Determine value range
-  let maxVal: number;
-  let minVal = 0;
-
-  if (mode === 'cpu') {
-    maxVal = 100;
-  } else if (mode === 'ping') {
-    const pings = (pts as DslHistoryPoint[]).map(p => p.ping_ms ?? 0).filter(v => v > 0);
-    maxVal = pings.length ? Math.max(...pings) * 1.2 : 100;
-  } else {
-    const vals = (pts as DslHistoryPoint[]).flatMap(p => [p.dsl_down, p.dsl_up]);
-    maxVal = Math.max(...vals, 1) * 1.1;
-  }
+  const maxVal = 100;
+  const minVal = 0;
 
   function yOf(val: number): number {
     return PAD_T + plotH - ((val - minVal) / (maxVal - minVal)) * plotH;
@@ -98,12 +75,7 @@ function drawChart(
     ctx.fillStyle = COLOR_LABEL;
     ctx.font = '9px system-ui, sans-serif';
     ctx.textAlign = 'right';
-    const label = mode === 'cpu'
-      ? `${Math.round(val)}%`
-      : mode === 'ping'
-        ? (val > 0 ? `${Math.round(val)}ms` : '')
-        : kbpsLabel(Math.round(val));
-    ctx.fillText(label, PAD_L - 4, y + 3);
+    ctx.fillText(`${Math.round(val)}%`, PAD_L - 4, y + 3);
   }
 
   // X-axis time labels (show hours back)
@@ -111,7 +83,7 @@ function drawChart(
   ctx.fillStyle = COLOR_LABEL;
   ctx.font = '9px system-ui, sans-serif';
   ctx.textAlign = 'center';
-  const labelCount = Math.min(hours, 6);
+  const labelCount = Math.max(1, Math.min(hours, 6));
   for (let i = 0; i <= labelCount; i++) {
     const ts = minTs + (tsRange / labelCount) * i;
     const x = xOf(ts);
@@ -120,11 +92,7 @@ function drawChart(
     ctx.fillText(label, x, H - 4);
   }
 
-  function drawLine(
-    values: (number | null)[],
-    color: string,
-    filled = false,
-  ): void {
+  function drawLine(values: (number | null)[], color: string): void {
     const points = pts
       .map((p, i) => ({ x: xOf(p.ts), y: values[i] != null ? yOf(values[i]!) : null }))
       .filter(p => p.y !== null) as { x: number; y: number }[];
@@ -136,40 +104,27 @@ function drawChart(
     for (let i = 1; i < points.length; i++) {
       ctx.lineTo(points[i].x, points[i].y);
     }
+    ctx.lineTo(points[points.length - 1].x, PAD_T + plotH);
+    ctx.lineTo(points[0].x, PAD_T + plotH);
+    ctx.closePath();
+    ctx.fillStyle = color + '28';
+    ctx.fill();
 
-    if (filled) {
-      ctx.lineTo(points[points.length - 1].x, PAD_T + plotH);
-      ctx.lineTo(points[0].x, PAD_T + plotH);
-      ctx.closePath();
-      ctx.fillStyle = color + '28';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.moveTo(points[0].x, points[0].y);
-      for (let i = 1; i < points.length; i++) {
-        ctx.lineTo(points[i].x, points[i].y);
-      }
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x, points[i].y);
     }
-
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
     ctx.lineJoin = 'round';
     ctx.stroke();
   }
 
-  if (mode === 'cpu') {
-    const cpuPts = pts as CpuHistoryPoint[];
-    drawLine(cpuPts.map(p => p.cpu), COLOR_DOWN, true);
-    const hasMemData = cpuPts.some(p => p.mem != null);
-    if (hasMemData) {
-      drawLine(cpuPts.map(p => p.mem ?? null), COLOR_UP, true);
-    }
-  } else if (mode === 'speed') {
-    const dslPts = pts as DslHistoryPoint[];
-    drawLine(dslPts.map(p => p.dsl_down), COLOR_DOWN, true);
-    drawLine(dslPts.map(p => p.dsl_up),   COLOR_UP,   true);
-  } else {
-    const dslPts = pts as DslHistoryPoint[];
-    drawLine(dslPts.map(p => p.ping_ms),  COLOR_PING, true);
+  drawLine(pts.map(p => p.cpu), COLOR_CPU);
+  const hasMemData = pts.some(p => p.mem != null);
+  if (hasMemData) {
+    drawLine(pts.map(p => p.mem ?? null), COLOR_MEM);
   }
 
   // Border
@@ -178,25 +133,17 @@ function drawChart(
   ctx.strokeRect(PAD_L, PAD_T, plotW, plotH);
 }
 
-export function SpeedChart({ history, width = 320, height = 120, mode = 'speed' }: Props) {
+export function SpeedChart({ history, width = 320, height = 120 }: Props) {
   const ref = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
-    if (ref.current) drawChart(ref.current, history, mode);
-  }, [history, mode, width, height]);
+    if (ref.current) drawChart(ref.current, history);
+  }, [history, width, height]);
 
-  // Legend
-  const legend = mode === 'cpu'
-    ? [
-        { color: COLOR_DOWN, label: 'CPU %' },
-        { color: COLOR_UP,   label: 'RAM %' },
-      ]
-    : mode === 'speed'
-    ? [
-        { color: COLOR_DOWN, label: '↓ Download' },
-        { color: COLOR_UP,   label: '↑ Upload' },
-      ]
-    : [{ color: COLOR_PING, label: 'Ping' }];
+  const legend = [
+    { color: COLOR_CPU, label: 'CPU %' },
+    { color: COLOR_MEM, label: 'RAM %' },
+  ];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

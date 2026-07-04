@@ -807,24 +807,19 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         if not attrs.get("dhcp_expires") and lease.get("expires"):
             attrs["dhcp_expires"] = int(lease["expires"])
 
-    # Inject DSL history + ping + DuckDNS into the gateway router node.
+    # Inject native WAN throughput + ping + DuckDNS into the gateway router node.
     # Only the coordinator with role=gateway has this data (others return empty).
-    # ping_ms and ddns_status are always polled (independent of Fritz!Box).
-    # dsl_stats / wan_traffic are only present when Fritz!Box is configured and reachable.
+    # wan_traffic is derived natively from OpenWrt rx/tx byte deltas.
     for rid, hip, data in router_data:
         if _detect_router_role(data, hip) != "gateway":
             continue
         for node in deduped_nodes:
             if node.get("type") == "router" and node.get("id") == rid:
                 attrs = node.setdefault("attributes", {})
-                dsl_stats = getattr(data, "dsl_stats", {}) or {}
                 wan_traffic = getattr(data, "wan_traffic", {}) or {}
-                if dsl_stats:
-                    attrs["dsl_stats"] = dsl_stats
-                # Always include wan_traffic so frontend can show native OpenWrt throughput
+                # Native OpenWrt throughput (rx/tx byte deltas)
                 attrs["wan_traffic"] = wan_traffic
                 attrs["ping_ms"] = getattr(data, "ping_ms", None)
-                attrs["dsl_history"] = getattr(data, "dsl_history", []) or []
                 attrs["ddns_status"] = getattr(data, "ddns_status", []) or []
                 attrs["topology_snapshots"] = (
                     getattr(data, "topology_snapshots", []) or []

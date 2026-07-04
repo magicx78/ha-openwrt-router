@@ -5,7 +5,7 @@
  * All data is passed in via props; the panel has no data-fetching logic.
  */
 
-import React, { useState } from 'react';
+import React from 'react';
 import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat, PortDevice, VlanInfo, RouterEvent, CpuHistoryPoint } from '../types';
 import { IconX } from './Icons';
 import { StatusDot, statusLabel } from './StatusDot';
@@ -77,12 +77,8 @@ function ActionBtn({ icon, label, onClick }: { icon: string; label: string; onCl
 // ── Gateway detail ────────────────────────────────────────────────────────
 
 function GatewayDetail({ data, actions, accessPoints }: { data: Gateway; actions?: DetailPanelActions; accessPoints?: AccessPoint[] }) {
-  const [chartMode, setChartMode] = useState<'speed' | 'ping' | 'cpu'>('speed');
-  const history = data.dslHistory ?? [];
   const cpuHistory = data.cpuHistoryBackend ?? [];
   const hasCpuHistory = cpuHistory.length >= 2;
-  const dsl = data.dslStats;
-  const hasDsl = !!dsl && dsl.downstream_kbps > 0;
   const hasPing = data.pingMs != null;
 
   return (
@@ -112,47 +108,13 @@ function GatewayDetail({ data, actions, accessPoints }: { data: Gateway; actions
         </div>
       )}
 
-      {hasDsl && (
+      {hasCpuHistory && (
         <div className="detail-section">
-          <div className="detail-section__heading">DSL (Fritz!Box)</div>
-          <Row label="↓ Sync"        value={`${(dsl!.downstream_kbps / 1000).toFixed(1)} Mbps`} />
-          <Row label="↑ Sync"        value={`${(dsl!.upstream_kbps / 1000).toFixed(1)} Mbps`} />
-          <Row label="↓ Max"         value={`${(dsl!.downstream_max_kbps / 1000).toFixed(1)} Mbps`} />
-          <Row label="↑ Max"         value={`${(dsl!.upstream_max_kbps / 1000).toFixed(1)} Mbps`} />
-          {dsl!.snr_down_db > 0 && <Row label="SNR ↓"  value={`${dsl!.snr_down_db} dB`} />}
-          {dsl!.snr_up_db > 0   && <Row label="SNR ↑"  value={`${dsl!.snr_up_db} dB`} />}
-          {dsl!.attn_down_db > 0 && <Row label="Dämpfung ↓" value={`${dsl!.attn_down_db} dB`} />}
-          {dsl!.attn_up_db > 0   && <Row label="Dämpfung ↑" value={`${dsl!.attn_up_db} dB`} />}
-        </div>
-      )}
-
-      {(history.length >= 2 || hasCpuHistory) && (
-        <div className="detail-section">
-          <div className="detail-section__heading" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span>Verlauf</span>
-            <span style={{ display: 'flex', gap: 6 }}>
-              {history.length >= 2 && (
-                <ChartTabBtn active={chartMode === 'speed'} onClick={() => setChartMode('speed')}>
-                  DSL
-                </ChartTabBtn>
-              )}
-              {history.length >= 2 && (
-                <ChartTabBtn active={chartMode === 'ping'} onClick={() => setChartMode('ping')}>
-                  Ping
-                </ChartTabBtn>
-              )}
-              {hasCpuHistory && (
-                <ChartTabBtn active={chartMode === 'cpu'} onClick={() => setChartMode('cpu')}>
-                  CPU
-                </ChartTabBtn>
-              )}
-            </span>
-          </div>
+          <div className="detail-section__heading">CPU Verlauf (1h)</div>
           <SpeedChart
-            history={chartMode === 'cpu' ? cpuHistory : history}
+            history={cpuHistory}
             width={310}
             height={110}
-            mode={chartMode === 'cpu' ? 'cpu' : chartMode as 'speed' | 'ping'}
           />
         </div>
       )}
@@ -213,33 +175,6 @@ function GatewayDetail({ data, actions, accessPoints }: { data: Gateway; actions
   );
 }
 
-function ChartTabBtn({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        fontSize: 10,
-        padding: '1px 7px',
-        borderRadius: 4,
-        border: 'none',
-        cursor: 'pointer',
-        background: active ? 'var(--accent, #60a5fa)' : 'rgba(255,255,255,0.08)',
-        color: active ? '#fff' : 'var(--text-secondary, #8899aa)',
-        fontWeight: active ? 600 : 400,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
 
 function DdnsRow({ svc }: { svc: DdnsService }) {
   const statusColor = svc.status === 'ok'
@@ -357,7 +292,6 @@ function APDetail({ data, clients, actions }: { data: AccessPoint; clients: Clie
             history={data.cpuHistoryBackend!}
             width={290}
             height={80}
-            mode="cpu"
           />
         </div>
       )}
