@@ -39,7 +39,7 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-_PANEL_VERSION = "20260703-v1.21.0"
+_PANEL_VERSION = "20260815-v1.26.0"
 # Master flag: set ONLY after every registration step completed.  Until then,
 # a partial setup must still allow re-entry to register the missing pieces.
 _PANEL_REGISTERED_KEY = f"{DOMAIN}_panel_registered"
@@ -88,7 +88,7 @@ class OpenWrtMeshSnapshotView(HomeAssistantView):
             from .topology_mesh import build_mesh_snapshot
 
             snapshot = build_mesh_snapshot(hass)
-        except Exception:  # noqa: BLE001
+        except (RuntimeError, ValueError, KeyError, TypeError):
             _LOGGER.debug("Mesh snapshot build failed", exc_info=True)
             snapshot = _empty_snapshot()
         return self.json(snapshot)

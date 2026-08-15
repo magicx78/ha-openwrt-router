@@ -25,7 +25,7 @@ ACL_FILE_PATH = "/usr/share/rpcd/acl.d/ha-openwrt-router.json"
 # Bump whenever RPCD_ACL_CONTENT below changes. Used only for log messages —
 # staleness is detected by comparing the deployed file's actual content to
 # RPCD_ACL_CONTENT, not by this number.
-ACL_VERSION = 3
+ACL_VERSION = 4
 
 # Marker echoed by the SSH deploy command — _run_ssh() returns None for empty
 # stdout even on exit code 0, so success must be detectable from stdout alone.
@@ -61,7 +61,7 @@ RPCD_ACL_CONTENT: dict = {
                 "/tmp/opkg_list": ["read"],
             },
             "ubus": {
-                "file": ["read", "stat", "list"],
+                "file": ["read", "stat", "list", "exec"],
                 "hostapd.*": ["get_clients", "get_status"],
                 "network.wireless": ["status", "up", "down"],
                 "network.device": ["status"],
@@ -144,7 +144,7 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
             reason = "corrupted"  # present but not valid JSON
     except OpenWrtMethodNotFoundError:
         reason = "missing"  # file does not exist yet (first install)
-    except Exception as err:  # noqa: BLE001
+    except (OpenWrtAuthError, OpenWrtResponseError, OpenWrtConnectionError, OpenWrtTimeoutError) as err:
         # file/read blocked by ACL or file module unavailable. Fall back to a
         # cheap existence probe: if the file clearly exists we leave it alone
         # (we cannot verify content), otherwise we attempt an idempotent write.
@@ -162,7 +162,7 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
             return False
         except OpenWrtMethodNotFoundError:
             reason = "missing"
-        except Exception:  # noqa: BLE001
+        except (OpenWrtAuthError, OpenWrtResponseError, OpenWrtConnectionError, OpenWrtTimeoutError):
             reason = "unverifiable"
 
     return await _deploy_acl(api, reason)
@@ -201,7 +201,7 @@ async def _deploy_acl(api: OpenWrtAPI, reason: str) -> bool:
         raise AclDeployError(
             "unreachable", f"router unreachable during ACL deploy: {err}"
         ) from err
-    except Exception as err:  # noqa: BLE001
+    except (OpenWrtAuthError, OpenWrtResponseError) as err:
         # Permission-shaped rejection (ACL blocks file/write). Try SSH.
         _LOGGER.debug(
             "ubus file/write rejected on %s (%s) — trying SSH fallback", api._host, err
@@ -230,7 +230,7 @@ async def _deploy_acl(api: OpenWrtAPI, reason: str) -> bool:
             {"command": "/etc/init.d/rpcd", "params": ["restart"]},
         )
         _LOGGER.debug("Restarted rpcd on %s", api._host)
-    except Exception as err:  # noqa: BLE001
+    except (OpenWrtAuthError, OpenWrtResponseError, OpenWrtConnectionError, OpenWrtTimeoutError) as err:
         _LOGGER.debug(
             "Could not restart rpcd on %s (non-fatal, ACL active after next restart): %s",
             api._host,

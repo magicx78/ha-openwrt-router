@@ -224,7 +224,7 @@ class OpenWrtButtonEntity(ButtonEntity):
                 )
             else:
                 _LOGGER.info("No updates available on %s", self._entry.data.get("host"))
-        except Exception as err:
+        except (OpenWrtConnectionError, OpenWrtTimeoutError, OpenWrtResponseError, OpenWrtAuthError) as err:
             _LOGGER.error(
                 "Error checking for updates on %s: %s",
                 self._entry.data.get("host"),
@@ -259,7 +259,7 @@ class OpenWrtButtonEntity(ButtonEntity):
                     self._entry.data.get("host"),
                     result.get("message"),
                 )
-        except Exception as err:
+        except (OpenWrtConnectionError, OpenWrtTimeoutError, OpenWrtResponseError, OpenWrtAuthError) as err:
             _LOGGER.error(
                 "Error performing updates on %s: %s",
                 self._entry.data.get("host"),
