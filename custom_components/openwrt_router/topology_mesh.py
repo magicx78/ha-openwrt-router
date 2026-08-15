@@ -48,9 +48,10 @@ def _is_private_ip(ip_str: str) -> bool:
 def _detect_router_role(data: OpenWrtCoordinatorData, host_ip: str) -> str:
     """Classify a router as 'gateway' or 'ap' based on WAN status.
 
-    Gateway: WAN connected with a WAN-type protocol and a non-private IP,
-             or WAN IP differs from the host LAN IP.
-    AP:      Everything else.
+    Gateway: WAN connected with a recognised protocol (dhcp, pppoe, static).
+             The IP being private or public does NOT matter — many gateways
+             have private WAN IPs (e.g. behind ISP modem / cascaded router).
+    AP:      No WAN connection or unknown protocol.
     """
     wan = data.wan_status
     if not wan.get("connected"):
@@ -60,19 +61,9 @@ def _detect_router_role(data: OpenWrtCoordinatorData, host_ip: str) -> str:
     if proto not in ("dhcp", "pppoe", "static"):
         return "ap"
 
-    ipv4 = wan.get("ipv4", "")
-    if not ipv4:
-        return "ap"
-
-    # Public WAN IP → definitely a gateway
-    if not _is_private_ip(ipv4):
-        return "gateway"
-
-    # WAN IP exists and differs from host LAN IP → likely gateway
-    if ipv4 != host_ip:
-        return "gateway"
-
-    return "ap"
+    # Any router with a working WAN connection is a gateway.
+    # Repeater / mesh nodes don't have a WAN uplink.
+    return "gateway"
 
 
 # 802.11s mesh-backhaul modes. A mesh point is a wireless uplink even though
@@ -180,7 +171,16 @@ def _detect_inter_router_edges(
     # Method 2 (WiFi client cross-reference) runs FIRST — more precise than DHCP.
     # A router seen as a WiFi client on another router is definitively a wifi_uplink.
     # Running this first means Method 1 (DHCP) cannot overwrite it via seen_edges.
+    #
+    # Edge direction is ALWAYS gateway → ap.  If an AP sees the gateway in its
+    # client list (possible in mesh setups) we reverse the direction so the
+    # topology graph stays consistent.
+    router_roles = {
+        rid: _detect_router_role(data, hip) for rid, hip, data in router_data
+    }
+
     for src_rid, src_hip, src_data in router_data:
+        src_role = router_roles.get(src_rid, "ap")
         for client in src_data.clients or []:
             client_mac = (client.get("mac") or "").upper()
             client_ip = client.get("ip") or ""
@@ -189,14 +189,25 @@ def _detect_inter_router_edges(
             target_rid = router_macs.get(client_mac) or router_ips.get(client_ip)
             if not target_rid or target_rid == src_rid:
                 continue
-            edge_id = f"{src_rid}--uplink--{target_rid}"
+
+            # Determine correct edge direction: gateway is always the source
+            target_role = router_roles.get(target_rid, "ap")
+            if src_role == "gateway" and target_role == "ap":
+                from_rid, to_rid = src_rid, target_rid
+            elif src_role == "ap" and target_role == "gateway":
+                from_rid, to_rid = target_rid, src_rid
+            else:
+                # Same role (ap↔ap or gateway↔gateway) — default to src→target
+                from_rid, to_rid = src_rid, target_rid
+
+            edge_id = f"{from_rid}--uplink--{to_rid}"
             if edge_id in seen_edges:
                 continue
             edges.append(
                 {
                     "id": edge_id,
-                    "from": src_rid,
-                    "to": target_rid,
+                    "from": from_rid,
+                    "to": to_rid,
                     "relationship": "wifi_uplink",
                     "source": MESH_SOURCE,
                     "inferred": False,
@@ -457,17 +468,21 @@ def _deduplicate_clients(
 def _detect_switch_nodes(
     inter_router_edges: list[dict[str, Any]],
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
     """Detect implicit switch nodes between gateway and APs via Bridge FDB.
 
     If multiple APs are connected via the same gateway port, an unmanaged
     switch is likely sitting between them. We insert an inferred switch node
     and reroute the AP edges through it.
 
-    Returns: (switch_nodes, new_edges_replacing_direct_ap_edges)
+    Returns:
+        (switch_nodes, new_edges_replacing_direct_ap_edges, replaced_edge_ids)
+        replaced_edge_ids: set of edge IDs that should be removed from the
+        original edge list (the direct gateway→AP edges now routed through switch).
     """
     switch_nodes: list[dict[str, Any]] = []
     switch_edges: list[dict[str, Any]] = []
+    replaced_ids: set[str] = set()
 
     # Find gateway coordinator data for trunk_port_map
     gw_trunk_map: dict[str, str] = {}
@@ -479,7 +494,7 @@ def _detect_switch_nodes(
             break
 
     if not gw_trunk_map or not gw_rid:
-        return [], []
+        return [], [], set()
 
     # Group APs by gateway port
     port_to_aps: dict[str, list[str]] = {}
@@ -490,7 +505,7 @@ def _detect_switch_nodes(
             if gw_port and ap_id and edge.get("from") == gw_rid:
                 port_to_aps.setdefault(gw_port, []).append(ap_id)
 
-    # For each port with >1 AP: insert a switch node
+    # For each port with >1 AP: insert a switch node and collect replaced edge IDs
     for port, ap_ids in port_to_aps.items():
         if len(ap_ids) < 2:
             continue
@@ -527,6 +542,15 @@ def _detect_switch_nodes(
                 },
             }
         )
+        # Collect IDs of direct gateway→AP edges that are being replaced
+        for edge in inter_router_edges:
+            if (
+                edge.get("relationship") == "lan_uplink"
+                and edge.get("from") == gw_rid
+                and edge.get("to") in ap_ids
+                and (edge.get("attributes") or {}).get("gateway_port") == port
+            ):
+                replaced_ids.add(edge["id"])
         # Edges: switch → each AP (replace direct gateway→AP edges)
         for ap_id in ap_ids:
             switch_edges.append(
@@ -545,7 +569,7 @@ def _detect_switch_nodes(
                 }
             )
 
-    return switch_nodes, switch_edges
+    return switch_nodes, switch_edges, replaced_ids
 
 
 def _enrich_gateway_ports(
@@ -729,8 +753,13 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
 
     # Detect implicit switch nodes via Bridge FDB:
     # If multiple APs share the same gateway port → a switch sits between them.
-    switch_nodes, switch_edges = _detect_switch_nodes(inter_router_edges, router_data)
+    switch_nodes, switch_edges, replaced_ids = _detect_switch_nodes(
+        inter_router_edges, router_data
+    )
     all_nodes.extend(switch_nodes)
+    # Remove direct gateway→AP edges that are now routed through the switch
+    if replaced_ids:
+        all_edges = [e for e in all_edges if e.get("id") not in replaced_ids]
     all_edges.extend(switch_edges)
 
     # Deduplicate clients (same MAC on multiple APs during roaming)

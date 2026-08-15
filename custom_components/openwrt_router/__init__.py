@@ -41,7 +41,7 @@ from .api import (
     OpenWrtTimeoutError,
 )
 from .coordinator import OpenWrtCoordinator
-from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN as DOMAIN, PROTOCOL_HTTP
+from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN, PROTOCOL_HTTP
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -291,7 +291,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
 
     loaded_entries = hass.config_entries.async_entries(DOMAIN)
     stagger_index = sum(1 for e in loaded_entries if e.entry_id != entry.entry_id)
-    poll_offset = (stagger_index * SCAN_INTERVAL_SECONDS) // 4
+    total = max(len(loaded_entries), 1)
+    poll_offset = (stagger_index * SCAN_INTERVAL_SECONDS) // total
 
     # Create and populate the coordinator
     coordinator = OpenWrtCoordinator(

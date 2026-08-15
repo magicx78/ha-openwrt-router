@@ -388,7 +388,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                         await writer.wait_closed()
                     except Exception:  # noqa: BLE001
                         pass
-                except Exception:  # noqa: BLE001
+                except (OSError, asyncio.TimeoutError):
                     data.ping_ms = None
 
                 # DuckDNS status (only on gateway with WAN connected)
@@ -645,7 +645,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 f"Unexpected response from OpenWrt router: {err}"
             ) from err
 
-        except Exception as err:  # noqa: BLE001
+        except (RuntimeError, ValueError, TypeError, AttributeError, KeyError) as err:
             _LOGGER.exception("Unexpected error fetching OpenWrt data")
             if self.data:
                 self.data.error_type = ERROR_TYPE_CONNECTION

@@ -576,7 +576,7 @@ class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
             return None
         try:
             return self.entity_description.value_fn(self.coordinator.data)
-        except Exception:  # noqa: BLE001
+        except (AttributeError, KeyError, TypeError, ValueError):
             _LOGGER.debug(
                 "Failed to extract value for sensor %s", self.entity_description.key
             )
@@ -592,7 +592,7 @@ class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
             return {}
         try:
             return self.entity_description.extra_attrs_fn(self.coordinator.data)
-        except Exception:  # noqa: BLE001
+        except (AttributeError, KeyError, TypeError, ValueError):
             return {}
 
 

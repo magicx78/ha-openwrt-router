@@ -51,7 +51,9 @@ def _seconds_since(value: Any) -> int | None:
         return int(value)
     if isinstance(value, str):
         try:
-            dt = datetime.fromisoformat(value)
+            # Python < 3.11 doesn't parse trailing 'Z' — normalise first
+            v = value.replace("Z", "+00:00") if value.endswith("Z") else value
+            dt = datetime.fromisoformat(v)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             diff = (datetime.now(timezone.utc) - dt).total_seconds()
@@ -299,9 +301,9 @@ def build_topology_snapshot(
     clients: list[dict[str, Any]] = []
 
     router_info = data.router_info
-    # Use MAC if available; fall back to hostname then host IP as stable node ID
+    # Use MAC if available; fall back to hostname+host_ip for uniqueness
     _mac = router_info.get("mac", "")
-    router_id: str = _mac or router_info.get("hostname") or "router"
+    router_id: str = _mac or f"{router_info.get('hostname', 'router')}_{host_ip}"
     wan_ifname: str = data.wan_status.get("interface", "")
 
     # ── Port → device mapping (FDB + DHCP + ARP, confidence model) ─
