@@ -2,6 +2,93 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.26.0] - 2026-08-15
+
+> **Stabilitäts- und Bugfix-Release.** Über 30 Korrekturen in 12 Dateien —
+> Topology-Darstellung, API-Zuverlässigkeit, Exception-Handling und ACL-Deployment.
+
+### Fixed
+
+- **Topology: Doppelte Verbindungen bei Switch-Erkennung**
+  Wenn mehrere APs am gleichen Gateway-Port hingen, wurden die direkten
+  Gateway→AP Edges nicht entfernt, obwohl ein Switch-Node eingefügt wurde.
+  Die Topologie zeigte dann sowohl Gateway→AP als auch Gateway→Switch→AP.
+  `_detect_switch_nodes` gibt jetzt `replaced_edge_ids` zurück, die in
+  `build_mesh_snapshot` vor dem Hinzufügen der Switch-Edges entfernt werden.
+
+- **Topology: Falsche WiFi-Uplink-Richtung in Mesh-Setups**
+  Wenn ein AP den Gateway in seiner Client-Liste sah (möglich bei Mesh),
+  wurde die Edge fälschlicherweise als `AP → Gateway` statt `Gateway → AP`
+  erstellt. Die Richtung wird jetzt anhand der Router-Rolle (gateway/ap)
+  korrekt bestimmt.
+
+- **Topology: Gateways mit privater WAN-IP als AP klassifiziert**
+  Router hinter ISP-Modems/FritzBoxen haben oft private WAN-IPs (z. B.
+  192.168.178.2). `_detect_router_role` prüfte fälschlicherweise auf
+  „public IP" und markierte diese als "ap". Jetzt gilt jeder Router mit funktionierender
+  WAN-Verbindung (dhcp/pppoe/static) als Gateway.
+
+- **Topology: Crash bei fehlendem Gateway in `_detect_switch_nodes`**
+  Die Funktion gab bei fehlendem Gateway nur 2 statt 3 Werte zurueck,
+  was einen `ValueError` ausloeste. Der Return-Wert ist jetzt immer
+  `(switch_nodes, switch_edges, replaced_ids)`.
+
+- **Topology: FDB-Key-Normalisierung verhindert doppelte Devices**
+  `build_port_connections` mixte normalisierte und nicht-normalisierte
+  MAC-Adressen. Geraete mit Bindestrich-MACs (z. B. "AA-BB-CC-DD-EE-FF")
+  wurden als "unassigned" hinzugefuegt, obwohl sie bereits im FDB waren.
+  FDB-Keys werden jetzt einmalig normalisiert.
+
+- **Topology: Router-ID-Kollisionen bei identischem Hostname**
+  Wenn zwei Router keine MAC hatten und denselben Hostname (z. B. "OpenWrt")
+  verwendeten, kollidierten ihre IDs. Die ID enthaelt jetzt die Host-IP als
+  Fallback: `{hostname}_{host_ip}`.
+
+- **API: `_call_file_read_shell` war ein Stub**
+  Die Methode gab immer `{}` zurueck, wodurch `get_disk_space()` und
+  `get_tmpfs_stats()` nie echte Daten lieferten. Jetzt wird der SSH-Fallback
+  verwendet, um Shell-Kommandos auszufuehren.
+
+- **API: Race Condition bei `async_close`**
+  Waehrend des Shutdowns konnten parallele `_call()`-Tasks noch laufen,
+  was zu "Session expired"-Fehlern fuehrte. Ein `_closing`-Flag blockiert
+  jetzt neue Calls waehrend des Shutdowns.
+
+- **API: Doppelte UTF-8-Dekodierung in SSH-Fallbacks**
+  `_asyncssh_run` mit `binary=False` dekodiert bereits in `str`. Die
+  SSH-Fallback-Methoden dekodierten den Rueckgabewert ein zweites Mal.
+  Die redundante Dekodierung wurde entfernt.
+
+- **API: Falsche `enabled=True` bei procd Services**
+  `service/list` liefert keine `enabled`-Info, aber der Code setzte
+  hartcodiert `True`. Jetzt wird `None` verwendet (unbekannt).
+
+- **ACL: `file/exec` fehlte in der ACL**
+  Nach dem ACL-Deploy wird `file/exec` aufgerufen, um rpcd zu restarten —
+  aber `exec` war nicht in der ACL erlaubt. Der Restart schlug immer fehl.
+  `file` Permissions jetzt: `["read", "stat", "list", "exec"]`.
+
+- **Exception-Handler: `asyncio.CancelledError` wurde verschluckt**
+  In `coordinator.py`, `topology_panel.py` und `button.py` fingen
+  `except Exception`-Bloecke auch `asyncio.CancelledError` ab, was
+  HA-Shutdown blockieren konnte. Die Handler wurden auf spezifische
+  Exception-Typen eingeschraenkt.
+
+- **Sensor: 0 dBm als "unknown" klassifiziert**
+  `_signal_quality` behandelte `0 dBm` als "unknown". 0 dBm ist ein
+  extrem starkes Signal (direkt neben der Antenne) und wird jetzt
+  korrekt als "good" bewertet.
+
+- **Sensor: ISO-Zeitstempel mit `Z`-Suffix**
+  `_seconds_since` konnte `2026-08-15T18:00:00Z` nicht parsen
+  (Python < 3.11). Das `Z`-Suffix wird jetzt in `+00:00` umgewandelt.
+
+### Changed
+
+- `manifest.json`: Version 1.25.0 -> 1.26.0
+- `acl_provisioning.py`: ACL_VERSION 3 -> 4
+- `topology_panel.py`: Panel-Version auf 20260815-v1.26.0 aktualisiert
+
 ## [1.25.0] - 2026-07-04
 
 > **Fokussierung auf OpenWrt.** Die optionalen Zusatz-Features **Fritz!Box (TR-064/DSL)**
