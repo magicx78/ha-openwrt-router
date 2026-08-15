@@ -39,7 +39,7 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-_PANEL_VERSION = "20260815-v1.26.1"
+_PANEL_VERSION = "20260815-v1.26.2"
 # Master flag: set ONLY after every registration step completed.  Until then,
 # a partial setup must still allow re-entry to register the missing pieces.
 _PANEL_REGISTERED_KEY = f"{DOMAIN}_panel_registered"

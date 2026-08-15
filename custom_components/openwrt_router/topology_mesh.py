@@ -324,28 +324,40 @@ def _detect_inter_router_edges(
             )
             seen_edges.add(edge_id)
 
-    # Repeater override: a router with an *associated* wireless STA-mode
-    # interface AND no WAN-port carrier is acting as a WLAN repeater — even
-    # if Method 1 / 2.5 produced a `lan_uplink` edge (which can happen
-    # because the gateway's DHCP server also leases an IP via WiFi).
-    # Promote those edges to `wifi_uplink` so the UI shows "WLAN Repeater"
-    # instead of "Kabel".
+    # Repeater override: a router with an active wireless STA-mode interface
+    # is a WLAN repeater — even if Method 1 / 2.5 produced a `lan_uplink` edge
+    # (which can happen because the gateway's DHCP server also leases an IP
+    # via WiFi) or Method 3 produced a `mesh_member` edge.
     #
-    # Guards (both must be true to override):
-    #   1. STA interface is actually associated (bssid + signal present) —
-    #      stale/disabled UCI entries are ignored.
-    #   2. WAN port has no link carrier — if the cable is plugged in,
-    #      respect the wired uplink even when a STA iface is also active.
+    # We promote those edges to `wifi_uplink` so the UI shows "WLAN Repeater"
+    # instead of "Kabel" or "Mesh?".
+    #
+    # Exception: if the edge has a concrete gateway_port from FDB, it means
+    # the AP was physically observed on a specific switch port → real cable.
+    # In that case we keep the lan_uplink even when a STA iface is active.
     repeater_rids = {
         rid
         for rid, _hip, data in router_data
-        if _has_active_sta_interface(data) and not _has_wan_carrier(data)
+        if _has_active_sta_interface(data)
     }
     for edge in edges:
-        if edge["relationship"] != "lan_uplink":
+        if edge["relationship"] not in ("lan_uplink", "mesh_member"):
             continue
         if edge["to"] not in repeater_rids:
             continue
+
+        # If this is a concrete wired link (FDB observed the AP on a port),
+        # keep it as lan_uplink even when the router also has a STA iface.
+        # This handles routers that are cabled but also have WiFi enabled.
+        attrs = edge.get("attributes", {})
+        if (
+            edge["relationship"] == "lan_uplink"
+            and attrs.get("gateway_port")
+            and attrs.get("detection_method") != "dhcp_ip"
+            and attrs.get("detection_method") != "dhcp_mac"
+        ):
+            continue
+
         edge["relationship"] = "wifi_uplink"
         attrs = edge.setdefault("attributes", {})
         attrs["link_type"] = "wifi"
@@ -378,13 +390,12 @@ def _detect_inter_router_edges(
                 continue
 
             # Wireless-backhaul fallback: an AP that no other method matched but
-            # that has an active mesh-point/STA uplink iface (and no WAN cable)
-            # is a wireless backhaul. Emit a verified wifi_uplink even across
-            # subnets/VLANs — a mesh link legitimately spans VLANs (e.g. a
-            # VLAN-30 mesh AP under a VLAN-10 gateway), so the same-/24 guard
-            # below must NOT apply here. The medium (wireless) is known; the
-            # gateway as the peer is inferred.
-            if _has_active_sta_interface(ap_data) and not _has_wan_carrier(ap_data):
+            # that has an active mesh-point/STA uplink iface is a wireless
+            # backhaul. Emit a verified wifi_uplink even across subnets/VLANs —
+            # a mesh link legitimately spans VLANs (e.g. a VLAN-30 mesh AP under
+            # a VLAN-10 gateway), so the same-/24 guard below must NOT apply here.
+            # The medium (wireless) is known; the gateway as the peer is inferred.
+            if _has_active_sta_interface(ap_data):
                 edges.append(
                     {
                         "id": edge_id,
