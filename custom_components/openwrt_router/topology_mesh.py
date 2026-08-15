@@ -168,65 +168,15 @@ def _detect_inter_router_edges(
         if _detect_router_role(data, hip) == "gateway"
     ]
 
-    # Method 2 (WiFi client cross-reference) runs FIRST — more precise than DHCP.
-    # A router seen as a WiFi client on another router is definitively a wifi_uplink.
-    # Running this first means Method 1 (DHCP) cannot overwrite it via seen_edges.
+    # ========================================================================
+    # Detection order: LAN (physical) first, then WiFi (wireless).
     #
-    # Edge direction is ALWAYS gateway → ap.  If an AP sees the gateway in its
-    # client list (possible in mesh setups) we reverse the direction so the
-    # topology graph stays consistent.
-    router_roles = {
-        rid: _detect_router_role(data, hip) for rid, hip, data in router_data
-    }
+    # A router connected via cable ALWAYS takes precedence over WiFi.
+    # This fixes cases where a cabled AP also appears as a WiFi client
+    # on the gateway (e.g. dual-band router with active STA interface).
+    # ========================================================================
 
-    for src_rid, src_hip, src_data in router_data:
-        src_role = router_roles.get(src_rid, "ap")
-        for client in src_data.clients or []:
-            client_mac = (client.get("mac") or "").upper()
-            client_ip = client.get("ip") or ""
-            # Match by MAC first, fall back to host IP (covers cases where the AP
-            # registers with a different MAC than router_info.mac, e.g. wlan0 vs br-lan)
-            target_rid = router_macs.get(client_mac) or router_ips.get(client_ip)
-            if not target_rid or target_rid == src_rid:
-                continue
-
-            # Determine correct edge direction: gateway is always the source
-            target_role = router_roles.get(target_rid, "ap")
-            if src_role == "gateway" and target_role == "ap":
-                from_rid, to_rid = src_rid, target_rid
-            elif src_role == "ap" and target_role == "gateway":
-                from_rid, to_rid = target_rid, src_rid
-            else:
-                # Same role (ap↔ap or gateway↔gateway) — default to src→target
-                from_rid, to_rid = src_rid, target_rid
-
-            edge_id = f"{from_rid}--uplink--{to_rid}"
-            if edge_id in seen_edges:
-                continue
-            edges.append(
-                {
-                    "id": edge_id,
-                    "from": from_rid,
-                    "to": to_rid,
-                    "relationship": "wifi_uplink",
-                    "source": MESH_SOURCE,
-                    "inferred": False,
-                    "inference_reason": None,
-                    "attributes": {
-                        "link_type": "wifi",
-                        "detection_method": "wifi_client_mac",
-                        "client_mac": client_mac,
-                        "signal": client.get("signal"),
-                        "ap_port": None,  # wireless uplink → no physical AP port
-                        "vlan_tags": [],
-                    },
-                }
-            )
-            seen_edges.add(edge_id)
-
-    # Method 1: DHCP lease cross-reference (LAN connections).
-    # Runs after Method 2 so that WiFi uplinks already in seen_edges are not
-    # downgraded to lan_uplink just because the AP also has a DHCP lease.
+    # Method 1: DHCP lease cross-reference (LAN connections) — HIGHEST priority.
     for gw_rid, gw_hip, gw_data in gateways:
         dhcp = gw_data.dhcp_leases or {}
         for ap_rid, ap_hip, ap_data in router_data:
@@ -317,6 +267,62 @@ def _detect_inter_router_edges(
                     }
                 )
                 seen_edges.add(edge_id)
+
+    # Method 2: WiFi client cross-reference — ONLY for routers with no LAN edge.
+    # A router seen as a WiFi client on another router is a wifi_uplink,
+    # but ONLY if no physical (DHCP/ARP) connection was already detected.
+    #
+    # Edge direction is ALWAYS gateway → ap.  If an AP sees the gateway in its
+    # client list (possible in mesh setups) we reverse the direction so the
+    # topology graph stays consistent.
+    router_roles = {
+        rid: _detect_router_role(data, hip) for rid, hip, data in router_data
+    }
+
+    for src_rid, src_hip, src_data in router_data:
+        src_role = router_roles.get(src_rid, "ap")
+        for client in src_data.clients or []:
+            client_mac = (client.get("mac") or "").upper()
+            client_ip = client.get("ip") or ""
+            # Match by MAC first, fall back to host IP (covers cases where the AP
+            # registers with a different MAC than router_info.mac, e.g. wlan0 vs br-lan)
+            target_rid = router_macs.get(client_mac) or router_ips.get(client_ip)
+            if not target_rid or target_rid == src_rid:
+                continue
+
+            # Determine correct edge direction: gateway is always the source
+            target_role = router_roles.get(target_rid, "ap")
+            if src_role == "gateway" and target_role == "ap":
+                from_rid, to_rid = src_rid, target_rid
+            elif src_role == "ap" and target_role == "gateway":
+                from_rid, to_rid = target_rid, src_rid
+            else:
+                # Same role (ap↔ap or gateway↔gateway) — default to src→target
+                from_rid, to_rid = src_rid, target_rid
+
+            edge_id = f"{from_rid}--uplink--{to_rid}"
+            if edge_id in seen_edges:
+                continue
+            edges.append(
+                {
+                    "id": edge_id,
+                    "from": from_rid,
+                    "to": to_rid,
+                    "relationship": "wifi_uplink",
+                    "source": MESH_SOURCE,
+                    "inferred": False,
+                    "inference_reason": None,
+                    "attributes": {
+                        "link_type": "wifi",
+                        "detection_method": "wifi_client_mac",
+                        "client_mac": client_mac,
+                        "signal": client.get("signal"),
+                        "ap_port": None,  # wireless uplink → no physical AP port
+                        "vlan_tags": [],
+                    },
+                }
+            )
+            seen_edges.add(edge_id)
 
     # Repeater override: a router with an *associated* wireless STA-mode
     # interface AND no WAN-port carrier is acting as a WLAN repeater — even
