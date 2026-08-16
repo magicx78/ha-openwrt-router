@@ -202,7 +202,7 @@ async def async_teardown_topology_panel(hass: HomeAssistant) -> None:
     # Last entry — remove what we can, soft-disable the rest.
     try:
         async_remove_panel(hass, _PANEL_URL_PATH)
-    except Exception:  # noqa: BLE001
+    except Exception:
         _LOGGER.debug("async_remove_panel failed (already gone?)", exc_info=True)
 
     hass.data[_PANEL_VIEW_DISABLED_KEY] = True

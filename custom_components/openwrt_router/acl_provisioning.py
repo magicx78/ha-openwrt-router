@@ -15,6 +15,14 @@ import logging
 import shlex
 from typing import TYPE_CHECKING
 
+from .api import (
+    OpenWrtAuthError,
+    OpenWrtConnectionError,
+    OpenWrtMethodNotFoundError,
+    OpenWrtResponseError,
+    OpenWrtTimeoutError,
+)
+
 if TYPE_CHECKING:
     from .api import OpenWrtAPI
 
@@ -25,7 +33,7 @@ ACL_FILE_PATH = "/usr/share/rpcd/acl.d/ha-openwrt-router.json"
 # Bump whenever RPCD_ACL_CONTENT below changes. Used only for log messages —
 # staleness is detected by comparing the deployed file's actual content to
 # RPCD_ACL_CONTENT, not by this number.
-ACL_VERSION = 4
+ACL_VERSION = 5
 
 # Marker echoed by the SSH deploy command — _run_ssh() returns None for empty
 # stdout even on exit code 0, so success must be detectable from stdout alone.
@@ -54,11 +62,19 @@ RPCD_ACL_CONTENT: dict = {
                 "/etc/config/ddns": ["read"],
                 "/var/run/ddns": ["list"],
                 "/var/run/ddns/*": ["read"],
+                # file/list on the directory itself needs "list" on the exact
+                # path — the /sys/class/net/* glob below does not cover it.
+                "/sys/class/net": ["list"],
                 "/sys/class/net/*": ["read"],  # brforward, statistics/*, brport/port_no
                 "/proc/net/arp": ["read"],
                 "/proc/net/nf_conntrack": ["read"],
                 "/proc/sys/net/netfilter/nf_conntrack_count": ["read"],
                 "/tmp/opkg_list": ["read"],
+                # Let ensure_acl() verify the deployed ACL via ubus on every
+                # start — without this the staleness check needs SSH forever.
+                # Deliberately read-only: file/write on acl.d would let any
+                # rpcd HTTP session widen its own permissions.
+                ACL_FILE_PATH: ["read"],
             },
             "ubus": {
                 "file": ["read", "stat", "list", "exec"],
@@ -87,6 +103,11 @@ RPCD_ACL_CONTENT: dict = {
             },
         },
         "write": {
+            "file": {
+                # rpcd restart after an ACL (re)deploy — file/exec enforces
+                # per-command, so only exactly this init script is allowed.
+                "/etc/init.d/rpcd": ["exec"],
+            },
             "ubus": {
                 "network.wireless": ["up", "down"],
             },
@@ -120,11 +141,11 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
             ``async_setup_entry`` catches this (best-effort at startup); the
             config flow surfaces it to the user.
     """
-    from .api import OpenWrtMethodNotFoundError  # avoid circular at module level
-
     # Read the currently deployed ACL and decide whether a (re)deploy is needed.
     # file/read returns {"data": "<content>"} on success and raises
-    # OpenWrtMethodNotFoundError (ubus NOT_FOUND = 4) when the file is missing.
+    # OpenWrtMethodNotFoundError when the file is missing (ubus NOT_FOUND = 4)
+    # OR when the ACL blocks file/read on this path (converted in _call after
+    # the confirming re-login) — both cases proceed to a deploy attempt.
     try:
         current = await api._call("file", "read", {"path": ACL_FILE_PATH})
         current_str = current.get("data") if isinstance(current, dict) else current
@@ -144,7 +165,12 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
             reason = "corrupted"  # present but not valid JSON
     except OpenWrtMethodNotFoundError:
         reason = "missing"  # file does not exist yet (first install)
-    except (OpenWrtAuthError, OpenWrtResponseError, OpenWrtConnectionError, OpenWrtTimeoutError) as err:
+    except (
+        OpenWrtAuthError,
+        OpenWrtResponseError,
+        OpenWrtConnectionError,
+        OpenWrtTimeoutError,
+    ) as err:
         # file/read blocked by ACL or file module unavailable. Fall back to a
         # cheap existence probe: if the file clearly exists we leave it alone
         # (we cannot verify content), otherwise we attempt an idempotent write.
@@ -162,7 +188,12 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
             return False
         except OpenWrtMethodNotFoundError:
             reason = "missing"
-        except (OpenWrtAuthError, OpenWrtResponseError, OpenWrtConnectionError, OpenWrtTimeoutError):
+        except (
+            OpenWrtAuthError,
+            OpenWrtResponseError,
+            OpenWrtConnectionError,
+            OpenWrtTimeoutError,
+        ):
             reason = "unverifiable"
 
     return await _deploy_acl(api, reason)
@@ -185,8 +216,6 @@ async def _deploy_acl(api: OpenWrtAPI, reason: str) -> bool:
     Raises:
         AclDeployError: Neither ubus file/write nor the SSH fallback succeeded.
     """
-    from .api import OpenWrtConnectionError, OpenWrtTimeoutError
-
     acl_json = json.dumps(RPCD_ACL_CONTENT, indent=2)
     try:
         await api._call("file", "write", {"path": ACL_FILE_PATH, "data": acl_json})
@@ -201,8 +230,11 @@ async def _deploy_acl(api: OpenWrtAPI, reason: str) -> bool:
         raise AclDeployError(
             "unreachable", f"router unreachable during ACL deploy: {err}"
         ) from err
-    except (OpenWrtAuthError, OpenWrtResponseError) as err:
-        # Permission-shaped rejection (ACL blocks file/write). Try SSH.
+    except (OpenWrtAuthError, OpenWrtResponseError, OpenWrtMethodNotFoundError) as err:
+        # Permission-shaped rejection: an ACL-blocked file/write surfaces as
+        # OpenWrtMethodNotFoundError (converted in _call after the confirming
+        # re-login); a router without the rpcd file module looks the same.
+        # Either way the ubus path is unusable — try SSH.
         _LOGGER.debug(
             "ubus file/write rejected on %s (%s) — trying SSH fallback", api._host, err
         )
@@ -230,7 +262,13 @@ async def _deploy_acl(api: OpenWrtAPI, reason: str) -> bool:
             {"command": "/etc/init.d/rpcd", "params": ["restart"]},
         )
         _LOGGER.debug("Restarted rpcd on %s", api._host)
-    except (OpenWrtAuthError, OpenWrtResponseError, OpenWrtConnectionError, OpenWrtTimeoutError) as err:
+    except (
+        OpenWrtAuthError,
+        OpenWrtResponseError,
+        OpenWrtMethodNotFoundError,
+        OpenWrtConnectionError,
+        OpenWrtTimeoutError,
+    ) as err:
         _LOGGER.debug(
             "Could not restart rpcd on %s (non-fatal, ACL active after next restart): %s",
             api._host,

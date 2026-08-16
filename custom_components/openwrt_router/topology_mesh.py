@@ -61,6 +61,11 @@ def _detect_router_role(data: OpenWrtCoordinatorData, host_ip: str) -> str:
     if proto not in ("dhcp", "pppoe", "static"):
         return "ap"
 
+    # A "WAN" carrying the router's own LAN IP is a bridged port on a dumb
+    # AP (loopback-like), not a real upstream link.
+    if wan.get("ipv4") and wan.get("ipv4") == host_ip:
+        return "ap"
+
     # Any router with a working WAN connection is a gateway.
     # Repeater / mesh nodes don't have a WAN uplink.
     return "gateway"
@@ -332,30 +337,20 @@ def _detect_inter_router_edges(
     # We promote those edges to `wifi_uplink` so the UI shows "WLAN Repeater"
     # instead of "Kabel" or "Mesh?".
     #
-    # Exception: if the edge has a concrete gateway_port from FDB, it means
-    # the AP was physically observed on a specific switch port → real cable.
-    # In that case we keep the lan_uplink even when a STA iface is active.
+    # Exception: a WAN port with link carrier (up=True) is authoritative —
+    # physical Ethernet wins over a configured wireless backhaul. A concrete
+    # gateway_port from FDB is NOT proof of cable: wirelessly meshed APs show
+    # up behind the gateway's trunk ports in the FDB just the same.
     repeater_rids = {
-        rid
-        for rid, _hip, data in router_data
-        if _has_active_sta_interface(data)
+        rid for rid, _hip, data in router_data if _has_active_sta_interface(data)
     }
+    wired_rids = {rid for rid, _hip, data in router_data if _has_wan_carrier(data)}
     for edge in edges:
         if edge["relationship"] not in ("lan_uplink", "mesh_member"):
             continue
         if edge["to"] not in repeater_rids:
             continue
-
-        # If this is a concrete wired link (FDB observed the AP on a port),
-        # keep it as lan_uplink even when the router also has a STA iface.
-        # This handles routers that are cabled but also have WiFi enabled.
-        attrs = edge.get("attributes", {})
-        if (
-            edge["relationship"] == "lan_uplink"
-            and attrs.get("gateway_port")
-            and attrs.get("detection_method") != "dhcp_ip"
-            and attrs.get("detection_method") != "dhcp_mac"
-        ):
+        if edge["to"] in wired_rids:
             continue
 
         edge["relationship"] = "wifi_uplink"

@@ -19,24 +19,20 @@ from .api import (
     OpenWrtAuthError,
     OpenWrtConnectionError,
     OpenWrtMethodNotFoundError,
-    OpenWrtTimeoutError,
     OpenWrtResponseError,
+    OpenWrtTimeoutError,
 )
 from .const import (
+    BOARD_REFRESH_CYCLES,
     CLIENT_KEY_CONNECTED_SINCE,
     CLIENT_KEY_MAC,
-    BOARD_REFRESH_CYCLES,
+    CPU_HISTORY_MAX_POINTS,
+    DEFAULT_SERVICES,
+    DOMAIN,
     ERROR_TYPE_AUTH,
     ERROR_TYPE_CONNECTION,
     ERROR_TYPE_RESPONSE,
     ERROR_TYPE_TIMEOUT,
-    NOTIFICATION_FAILURE_THRESHOLD,
-    DEFAULT_SERVICES,
-    DOMAIN,
-    CPU_HISTORY_MAX_POINTS,
-    KEY_CPU_HISTORY,
-    TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES,
-    TOPOLOGY_SNAPSHOT_MAX,
     FEATURE_AVAILABLE_RADIOS,
     FEATURE_DHCP_LEASES,
     FEATURE_HAS_5GHZ,
@@ -47,6 +43,7 @@ from .const import (
     FEATURE_UCI_AVAILABLE,
     KEY_CLIENT_COUNT,
     KEY_CLIENTS,
+    KEY_CPU_HISTORY,
     KEY_CPU_LOAD,
     KEY_DDNS_STATUS,
     KEY_DHCP_LEASES,
@@ -62,9 +59,12 @@ from .const import (
     KEY_WAN_STATUS,
     KEY_WAN_TRAFFIC,
     KEY_WIFI_RADIOS,
+    NOTIFICATION_FAILURE_THRESHOLD,
     RADIO_KEY_BAND,
     RADIO_KEY_IS_GUEST,
     SCAN_INTERVAL_SECONDS,
+    TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES,
+    TOPOLOGY_SNAPSHOT_MAX,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -386,7 +386,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                     try:
                         writer.close()
                         await writer.wait_closed()
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001, S110
                         pass
                 except (OSError, asyncio.TimeoutError):
                     data.ping_ms = None
@@ -645,6 +645,20 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 f"Unexpected response from OpenWrt router: {err}"
             ) from err
 
+        except OpenWrtMethodNotFoundError as err:
+            # ACL block / missing ubus method past the first poll. The
+            # first-poll case is already tolerated in _first_poll_optional;
+            # afterwards it must surface as UpdateFailed (see its docstring),
+            # not as a raw exception HA logs as "unexpected error".
+            self._consecutive_auth_failures = 0
+            if self.data:
+                self.data.error_type = ERROR_TYPE_RESPONSE
+                self.data.consecutive_failures += 1
+                await self._maybe_send_outage_notification()
+            raise UpdateFailed(
+                f"ubus method blocked or missing on OpenWrt router: {err}"
+            ) from err
+
         except (RuntimeError, ValueError, TypeError, AttributeError, KeyError) as err:
             _LOGGER.exception("Unexpected error fetching OpenWrt data")
             if self.data:
@@ -670,11 +684,15 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 (
                     f"**{self.name}** verwendet SSH-Fallback für einige Datenabrufe, "
                     f"da ubus-Berechtigungen fehlen (z.B. `file/exec`, `file/stat`).\n\n"
-                    f"Das erhöht die Router-Last erheblich. "
-                    f"Bitte die rpcd-ACL auf dem Router aktualisieren:\n\n"
-                    f"```\nscp ha-openwrt-router.json root@{self.api._host}:"
+                    f"Das erhöht die Router-Last erheblich.\n\n"
+                    f"**Empfohlen:** Einstellungen → Geräte & Dienste → OpenWrt Router → "
+                    f"**Konfigurieren** — der Berechtigungs-Check kann die rpcd-ACL "
+                    f"automatisch auf den Router schreiben (ubus bzw. SSH-Fallback).\n\n"
+                    f"Alternativ manuell mit `scripts/ha-openwrt-router.json` aus dem "
+                    f"[Repository](https://github.com/magicx78/ha-openwrt-router):\n\n"
+                    f"```\nscp scripts/ha-openwrt-router.json root@{self.api._host}:"
                     f"/usr/share/rpcd/acl.d/ha-openwrt-router.json\n"
-                    f"/etc/init.d/rpcd restart\n```\n\n"
+                    f"ssh root@{self.api._host} /etc/init.d/rpcd restart\n```\n\n"
                     f"Poll-Intervall wurde auf 5 Minuten reduziert bis das Problem behoben ist."
                 ),
                 title=f"OpenWrt Router: SSH-Fallback aktiv ({self.api._host})",

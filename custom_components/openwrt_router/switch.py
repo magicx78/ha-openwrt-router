@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, ClassVar
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.core import HomeAssistant
@@ -29,7 +29,6 @@ from .const import (
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
     DEFAULT_SERVICES,
-    url_scheme_for,
     DOMAIN,
     RADIO_KEY_BAND,
     RADIO_KEY_ENABLED,
@@ -37,6 +36,7 @@ from .const import (
     RADIO_KEY_IS_GUEST,
     RADIO_KEY_SSID,
     RADIO_KEY_UCI_SECTION,
+    url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator
 
@@ -338,7 +338,7 @@ class OpenWrtServiceSwitch(CoordinatorEntity[OpenWrtCoordinator], SwitchEntity):
     _attr_entity_category = None  # visible by default
 
     # Icon map for well-known services
-    _SERVICE_ICONS: dict[str, str] = {
+    _SERVICE_ICONS: ClassVar[dict[str, str]] = {
         "dnsmasq": "mdi:dns",
         "dropbear": "mdi:console-network",
         "firewall": "mdi:wall-fire",

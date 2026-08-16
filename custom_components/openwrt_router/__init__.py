@@ -31,7 +31,8 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import (
@@ -40,8 +41,8 @@ from .api import (
     OpenWrtConnectionError,
     OpenWrtTimeoutError,
 )
-from .coordinator import OpenWrtCoordinator
 from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN, PROTOCOL_HTTP
+from .coordinator import OpenWrtCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -260,7 +261,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         from .acl_provisioning import ensure_acl
 
         acl_deployed = await ensure_acl(api)
-    except Exception:  # noqa: BLE001
+    except Exception:
         acl_deployed = False
         _LOGGER.debug("rpcd ACL provisioning skipped for %s", host, exc_info=True)
 
@@ -275,7 +276,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
             await asyncio.sleep(_ACL_LOGIN_RETRY_DELAY_S)
             try:
                 await api.login()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.debug(
                     "Re-login after ACL deploy on %s failed (non-fatal)",
                     host,
@@ -381,14 +382,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
         from .topology_panel import async_teardown_topology_panel
 
         await async_teardown_topology_panel(hass)
-    except Exception:  # noqa: BLE001
+    except Exception:
         _LOGGER.debug("Topology panel teardown raised", exc_info=True)
 
     try:
         from .topology_card import async_teardown_topology_card
 
         await async_teardown_topology_card(hass)
-    except Exception:  # noqa: BLE001
+    except Exception:
         _LOGGER.debug("Topology card teardown raised", exc_info=True)
 
     runtime = getattr(entry, "runtime_data", None)
@@ -396,7 +397,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
     if api is not None and hasattr(api, "async_close"):
         try:
             await api.async_close()
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.debug("API async_close raised", exc_info=True)
 
     return unload_ok
