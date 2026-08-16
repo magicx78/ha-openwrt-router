@@ -336,9 +336,7 @@ def _detect_inter_router_edges(
     # the AP was physically observed on a specific switch port → real cable.
     # In that case we keep the lan_uplink even when a STA iface is active.
     repeater_rids = {
-        rid
-        for rid, _hip, data in router_data
-        if _has_active_sta_interface(data)
+        rid for rid, _hip, data in router_data if _has_active_sta_interface(data)
     }
     for edge in edges:
         if edge["relationship"] not in ("lan_uplink", "mesh_member"):

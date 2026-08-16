@@ -57,6 +57,29 @@ All notable changes to the OpenWrt Router integration will be documented in this
   Berechtigungs-Check im Options-Flow (automatisches Deployment) und nennt den
   korrekten Repo-Pfad `scripts/ha-openwrt-router.json` für den manuellen Weg.
 
+### Fixed (CI / weitere durch den Lint-Gate aufgedeckte Bugs)
+
+- **Update-Buttons: `NameError` statt Fehlerbehandlung** — `button.py` fing in
+  den Check-/Perform-Updates-Handlern vier nie importierte Exception-Klassen
+  (gleiche Bug-Klasse wie im ACL-Deploy). Ein Button-Press darf nie in HA
+  hochschlagen: die Handler fangen jetzt breit und loggen mit Traceback.
+  Die zwei zugehörigen, vorher roten Tests laufen wieder grün.
+
+- **Coordinator: ACL-Block nach dem ersten Poll warf rohe Exception** —
+  `OpenWrtMethodNotFoundError` wurde entgegen der dokumentierten Absicht von
+  `_first_poll_optional` nicht in `UpdateFailed` gewrappt; HA loggte das als
+  „unexpected error". Eigener except-Zweig ergänzt (Test wieder grün).
+
+- **Topology: Router-ID mit trailing Underscore ohne MAC** — ohne MAC und ohne
+  `host_ip` wurde die Node-ID als `"<hostname>_"` gebaut; die vier
+  `TestRouterIdFallback`-Tests laufen wieder grün.
+
+- **CI-Lint-Gate repariert** — `ruff check` (aktuelles ruff 0.16) fand 57
+  Verstöße und brach den Test-Job vor dem Testlauf ab: Import-Sortierung,
+  veraltete `noqa`, `ClassVar`-Annotationen für Klassen-Dicts, `startswith`-
+  Tupel, `dict.values()`, gezielte `noqa` für bewusste best-effort-excepts.
+  `ruff check` und `ruff format --check` laufen jetzt sauber durch.
+
 ## [1.26.0] - 2026-08-15
 
 > **Stabilitäts- und Bugfix-Release.** Über 30 Korrekturen in 12 Dateien —

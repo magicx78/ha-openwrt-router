@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -21,11 +21,11 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import (
+    PERCENTAGE,
     EntityCategory,
     UnitOfDataRate,
     UnitOfFrequency,
     UnitOfInformation,
-    PERCENTAGE,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -33,9 +33,18 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import OpenWrtConfigEntry
-from .topology_entities import setup_topology_entities
 from .const import (
+    CLIENT_KEY_RADIO,
+    CONF_PROTOCOL,
+    DEFAULT_PROTOCOL,
     DOMAIN,
+    RADIO_KEY_BAND,
+    RADIO_KEY_BSSID,
+    RADIO_KEY_FREQUENCY,
+    RADIO_KEY_HTMODE,
+    RADIO_KEY_HWMODE,
+    RADIO_KEY_IFNAME,
+    RADIO_KEY_SSID,
     SUFFIX_ACTIVE_CONNECTIONS,
     SUFFIX_CLIENT_COUNT,
     SUFFIX_CPU_LOAD,
@@ -54,30 +63,21 @@ from .const import (
     SUFFIX_MEMORY_USAGE,
     SUFFIX_MEMORY_USED,
     SUFFIX_PLATFORM_ARCHITECTURE,
+    SUFFIX_ROUTER_STATUS,
     SUFFIX_TMPFS_FREE,
     SUFFIX_TMPFS_TOTAL,
     SUFFIX_TMPFS_USAGE,
     SUFFIX_TMPFS_USED,
-    SUFFIX_ROUTER_STATUS,
-    SUFFIX_UPTIME,
     SUFFIX_UPDATE_STATUS,
+    SUFFIX_UPTIME,
     SUFFIX_WAN_IP,
     SUFFIX_WAN_RX,
     SUFFIX_WAN_STATUS,
     SUFFIX_WAN_TX,
-    CONF_PROTOCOL,
-    DEFAULT_PROTOCOL,
     url_scheme_for,
-    RADIO_KEY_BAND,
-    RADIO_KEY_BSSID,
-    RADIO_KEY_FREQUENCY,
-    RADIO_KEY_HTMODE,
-    RADIO_KEY_HWMODE,
-    RADIO_KEY_IFNAME,
-    RADIO_KEY_SSID,
-    CLIENT_KEY_RADIO,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
+from .topology_entities import setup_topology_entities
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -826,7 +826,9 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
     _attr_entity_registry_enabled_default = False
 
     # metric → (icon, unit, device_class, state_class)
-    _METRIC_CONFIG: dict[str, tuple[str, str | None, str | None, str | None]] = {
+    _METRIC_CONFIG: ClassVar[
+        dict[str, tuple[str, str | None, str | None, str | None]]
+    ] = {
         "channel": ("mdi:wifi-marker", None, None, None),
         "frequency": (
             "mdi:sine-wave",
@@ -975,8 +977,8 @@ class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
     _attr_entity_registry_enabled_default = False
 
     # (icon, unit, device_class, state_class, entity_category)
-    _METRIC_CONFIG: dict[
-        str, tuple[str, str | None, str | None, str | None, EntityCategory | None]
+    _METRIC_CONFIG: ClassVar[
+        dict[str, tuple[str, str | None, str | None, str | None, EntityCategory | None]]
     ] = {
         "status": ("mdi:ethernet", None, None, None, None),
         "speed_mbps": (
@@ -1001,7 +1003,7 @@ class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
             EntityCategory.DIAGNOSTIC,
         ),
     }
-    _METRIC_LABELS = {
+    _METRIC_LABELS: ClassVar[dict[str, str]] = {
         "status": "Link",
         "speed_mbps": "Speed",
         "rx_bytes": "RX",
@@ -1152,7 +1154,13 @@ class OpenWrtRouterStatusSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnt
     _attr_has_entity_name = True
     _attr_translation_key = "router_status"
     _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = ["online", "offline", "auth_error", "timeout", "response_error"]
+    _attr_options: ClassVar[list[str]] = [
+        "online",
+        "offline",
+        "auth_error",
+        "timeout",
+        "response_error",
+    ]
     _attr_icon = "mdi:router-network"
 
     def __init__(

@@ -27,14 +27,14 @@ from . import OpenWrtConfigEntry
 from .const import (
     CLIENT_KEY_CONNECTED_SINCE,
     CLIENT_KEY_IP,
-    CONF_PROTOCOL,
-    DEFAULT_PROTOCOL,
-    url_scheme_for,
     CLIENT_KEY_MAC,
     CLIENT_KEY_RADIO,
     CLIENT_KEY_SIGNAL,
     CLIENT_KEY_SSID,
+    CONF_PROTOCOL,
+    DEFAULT_PROTOCOL,
     DOMAIN,
+    url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator
 

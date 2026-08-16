@@ -30,12 +30,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .const import (
+    CLIENT_KEY_HOSTNAME,
     CLIENT_KEY_IP,
     CLIENT_KEY_MAC,
-    CLIENT_KEY_HOSTNAME,
+    CLIENT_KEY_RADIO,
     CLIENT_KEY_SIGNAL,
     CLIENT_KEY_SSID,
-    CLIENT_KEY_RADIO,
     RADIO_KEY_BAND,
     RADIO_KEY_CHANNEL,
     RADIO_KEY_ENABLED,

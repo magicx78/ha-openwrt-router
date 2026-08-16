@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import ClassVar
 
 from homeassistant.components.button import (
     ButtonDeviceClass,
@@ -26,9 +27,9 @@ from .const import (
     DEFAULT_PROTOCOL,
     DEFAULT_SERVICES,
     DOMAIN,
-    SUFFIX_RELOAD_WIFI,
     SUFFIX_CHECK_UPDATES,
     SUFFIX_PERFORM_UPDATES,
+    SUFFIX_RELOAD_WIFI,
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator
@@ -224,11 +225,11 @@ class OpenWrtButtonEntity(ButtonEntity):
                 )
             else:
                 _LOGGER.info("No updates available on %s", self._entry.data.get("host"))
-        except (OpenWrtConnectionError, OpenWrtTimeoutError, OpenWrtResponseError, OpenWrtAuthError) as err:
-            _LOGGER.error(
-                "Error checking for updates on %s: %s",
-                self._entry.data.get("host"),
-                err,
+        except Exception:
+            # A press must never raise into HA — SSH helpers can throw
+            # more than the OpenWrt* API errors.
+            _LOGGER.exception(
+                "Error checking for updates on %s", self._entry.data.get("host")
             )
 
     async def _press_perform_updates(self) -> None:
@@ -259,11 +260,11 @@ class OpenWrtButtonEntity(ButtonEntity):
                     self._entry.data.get("host"),
                     result.get("message"),
                 )
-        except (OpenWrtConnectionError, OpenWrtTimeoutError, OpenWrtResponseError, OpenWrtAuthError) as err:
-            _LOGGER.error(
-                "Error performing updates on %s: %s",
-                self._entry.data.get("host"),
-                err,
+        except Exception:
+            # A press must never raise into HA — SSH helpers can throw
+            # more than the OpenWrt* API errors.
+            _LOGGER.exception(
+                "Error performing updates on %s", self._entry.data.get("host")
             )
 
 
@@ -273,7 +274,7 @@ class OpenWrtServiceRestartButton(ButtonEntity):
     _attr_has_entity_name = False
     _attr_device_class = ButtonDeviceClass.RESTART
 
-    _SERVICE_ICONS: dict[str, str] = {
+    _SERVICE_ICONS: ClassVar[dict[str, str]] = {
         "dnsmasq": "mdi:dns",
         "dropbear": "mdi:console-network",
         "firewall": "mdi:wall-fire",
