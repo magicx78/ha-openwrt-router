@@ -80,6 +80,19 @@ All notable changes to the OpenWrt Router integration will be documented in this
   Tupel, `dict.values()`, gezielte `noqa` für bewusste best-effort-excepts.
   `ruff check` und `ruff format --check` laufen jetzt sauber durch.
 
+- **Topology: Repeater-Override ignorierte den WAN-Carrier** — der von
+  v1.26.x angelegte Helper `_has_wan_carrier()` wurde nie aufgerufen; der
+  Override nutzte weiterhin die alte `gateway_port`-Ausnahme. Folgen: Ein
+  verkabelter AP mit konfiguriertem STA-Interface wurde als „WLAN Repeater"
+  gezeichnet, und ein 802.11s-Mesh-AP hinter einem Trunk-Port blieb als
+  „Kabel" stehen (FDB-Sichtbarkeit ist kein Kabel-Beweis — Mesh-APs stehen
+  genauso in der FDB). Jetzt entscheidet der Link-Carrier des WAN-Ports;
+  die drei zugehörigen, vorher roten Tests laufen wieder grün.
+
+- **Topology: Rolle „Gateway" trotz WAN-IP == eigener LAN-IP** — ein Dumb-AP,
+  dessen gebridgter „WAN" die eigene Host-IP meldet, wird jetzt als AP
+  klassifiziert statt als Gateway.
+
 ## [1.26.0] - 2026-08-15
 
 > **Stabilitäts- und Bugfix-Release.** Über 30 Korrekturen in 12 Dateien —
