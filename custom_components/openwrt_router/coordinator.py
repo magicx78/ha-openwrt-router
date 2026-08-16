@@ -670,11 +670,15 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 (
                     f"**{self.name}** verwendet SSH-Fallback für einige Datenabrufe, "
                     f"da ubus-Berechtigungen fehlen (z.B. `file/exec`, `file/stat`).\n\n"
-                    f"Das erhöht die Router-Last erheblich. "
-                    f"Bitte die rpcd-ACL auf dem Router aktualisieren:\n\n"
-                    f"```\nscp ha-openwrt-router.json root@{self.api._host}:"
+                    f"Das erhöht die Router-Last erheblich.\n\n"
+                    f"**Empfohlen:** Einstellungen → Geräte & Dienste → OpenWrt Router → "
+                    f"**Konfigurieren** — der Berechtigungs-Check kann die rpcd-ACL "
+                    f"automatisch auf den Router schreiben (ubus bzw. SSH-Fallback).\n\n"
+                    f"Alternativ manuell mit `scripts/ha-openwrt-router.json` aus dem "
+                    f"[Repository](https://github.com/magicx78/ha-openwrt-router):\n\n"
+                    f"```\nscp scripts/ha-openwrt-router.json root@{self.api._host}:"
                     f"/usr/share/rpcd/acl.d/ha-openwrt-router.json\n"
-                    f"/etc/init.d/rpcd restart\n```\n\n"
+                    f"ssh root@{self.api._host} /etc/init.d/rpcd restart\n```\n\n"
                     f"Poll-Intervall wurde auf 5 Minuten reduziert bis das Problem behoben ist."
                 ),
                 title=f"OpenWrt Router: SSH-Fallback aktiv ({self.api._host})",

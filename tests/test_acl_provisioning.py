@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,7 +16,11 @@ from custom_components.openwrt_router.acl_provisioning import (
     check_and_deploy_acl,
     ensure_acl,
 )
-from custom_components.openwrt_router.api import OpenWrtMethodNotFoundError
+from custom_components.openwrt_router.api import (
+    OpenWrtAuthError,
+    OpenWrtMethodNotFoundError,
+    OpenWrtResponseError,
+)
 
 
 def _make_api(host="10.10.10.2"):
@@ -155,7 +160,7 @@ class TestEnsureAcl:
             if method == "read":
                 raise OpenWrtMethodNotFoundError("NOT_FOUND")
             if method == "exec":
-                raise RuntimeError("rpcd restart failed")
+                raise OpenWrtResponseError("rpcd restart failed")
             return {}
 
         api._call.side_effect = _side_effect
@@ -169,7 +174,7 @@ class TestEnsureAcl:
 
         def _side_effect(obj, method, params):
             if method == "read":
-                raise RuntimeError("access denied")
+                raise OpenWrtResponseError("ubus error 6 for file/read")
             if method == "stat":
                 return {"type": "regular", "size": 512}
             raise AssertionError(f"unexpected call: file/{method}")
@@ -189,7 +194,7 @@ class TestEnsureAcl:
 
         def _side_effect(obj, method, params):
             if method == "read":
-                raise RuntimeError("access denied")
+                raise OpenWrtResponseError("ubus error 6 for file/read")
             if method == "stat":
                 raise OpenWrtMethodNotFoundError("NOT_FOUND")
             return {}
@@ -276,6 +281,79 @@ class TestSshFallbackDeploy:
         with pytest.raises(AclDeployError):
             await ensure_acl(api)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "write_err",
+        [
+            OpenWrtAuthError("rpcd access denied for file/write"),
+            OpenWrtResponseError("ubus error 6 for file/write"),
+            OpenWrtMethodNotFoundError("rpcd ACL blocks file/write"),
+        ],
+        ids=["auth", "response", "method_not_found"],
+    )
+    async def test_every_permission_shaped_write_error_triggers_ssh(self, write_err):
+        """All three permission-shaped write rejections must reach the SSH deploy.
+
+        Regression: the real exception classes were referenced in except
+        clauses without being imported (NameError killed every deploy), and
+        the _call conversion to OpenWrtMethodNotFoundError was not caught at
+        all — the SSH fallback was unreachable in production.
+        """
+        api = _make_api()
+
+        def _side_effect(obj, method, params):
+            if method == "read":
+                raise OpenWrtMethodNotFoundError("NOT_FOUND")
+            if method == "write":
+                raise write_err
+            return {}
+
+        api._call.side_effect = _side_effect
+        api._run_ssh = AsyncMock(return_value="HA_ACL_DEPLOYED\n")
+
+        assert await ensure_acl(api) is True
+        api._run_ssh.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_read_blocked_via_acl_conversion_still_deploys(self):
+        """An ACL-blocked file/read (surfaces as MethodNotFound) → deploy runs.
+
+        Regression: with the router's old ACL, reading ACL_FILE_PATH is denied
+        and _call converts that to OpenWrtMethodNotFoundError after the
+        confirming re-login. ensure_acl must treat this like a missing file
+        and proceed to the deploy instead of crashing.
+        """
+        api = _make_api()
+
+        def _side_effect(obj, method, params):
+            if method == "read":
+                raise OpenWrtMethodNotFoundError(
+                    "rpcd ACL blocks file/read (authenticated OK, method not permitted)"
+                )
+            return {}
+
+        api._call.side_effect = _side_effect
+
+        assert await ensure_acl(api) is True
+        methods = [c.args[1] for c in api._call.call_args_list]
+        assert "write" in methods
+
+    @pytest.mark.asyncio
+    async def test_blocked_rpcd_restart_via_exec_is_nonfatal(self):
+        """ACL-blocked file/exec (MethodNotFound) after a write must not fail."""
+        api = _make_api()
+
+        def _side_effect(obj, method, params):
+            if method == "read":
+                raise OpenWrtMethodNotFoundError("NOT_FOUND")
+            if method == "exec":
+                raise OpenWrtMethodNotFoundError("rpcd ACL blocks file/exec")
+            return {}
+
+        api._call.side_effect = _side_effect
+
+        assert await ensure_acl(api) is True
+
 
 class TestCheckAndDeployAclAlias:
     """check_and_deploy_acl must delegate to ensure_acl (backwards compat)."""
@@ -346,6 +424,33 @@ class TestAclContent:
             assert path in files, f"read.file missing {path}"
             assert "read" in files[path]
 
+    def test_acl_grants_sys_class_net_list(self):
+        """file/list on /sys/class/net needs "list" on the directory itself.
+
+        The capability check probes file/list on the bare directory path —
+        the /sys/class/net/* glob does not match it.
+        """
+        files = RPCD_ACL_CONTENT["root"]["read"]["file"]
+        assert "/sys/class/net" in files
+        assert "list" in files["/sys/class/net"]
+
+    def test_acl_grants_read_on_own_acl_file(self):
+        """ensure_acl verifies the deployed ACL via ubus — needs read, NOT write.
+
+        write on acl.d would let any rpcd HTTP session widen its own
+        permissions, so it must never be granted.
+        """
+        files = RPCD_ACL_CONTENT["root"]["read"]["file"]
+        assert ACL_FILE_PATH in files
+        assert files[ACL_FILE_PATH] == ["read"]
+        write_files = RPCD_ACL_CONTENT["root"].get("write", {}).get("file", {})
+        assert "write" not in write_files.get(ACL_FILE_PATH, [])
+
+    def test_acl_grants_rpcd_restart_exec(self):
+        """file/exec of /etc/init.d/rpcd (restart after deploy) must be granted."""
+        write_files = RPCD_ACL_CONTENT["root"]["write"]["file"]
+        assert write_files["/etc/init.d/rpcd"] == ["exec"]
+
     def test_acl_file_path(self):
         """ACL file path is correct."""
         assert ACL_FILE_PATH == "/usr/share/rpcd/acl.d/ha-openwrt-router.json"
@@ -354,3 +459,15 @@ class TestAclContent:
         """ACL_VERSION is a positive integer (used in deploy log messages)."""
         assert isinstance(ACL_VERSION, int)
         assert ACL_VERSION >= 1
+
+    def test_scripts_json_matches_rpcd_acl_content(self):
+        """scripts/ha-openwrt-router.json must equal RPCD_ACL_CONTENT.
+
+        That file is what the SSH-fallback notification tells users to scp to
+        the router — if it drifts behind the code, a manual deploy silently
+        fails to fix the SSH fallback (happened once already).
+        """
+        scripts_json = (
+            Path(__file__).resolve().parent.parent / "scripts" / "ha-openwrt-router.json"
+        )
+        assert json.loads(scripts_json.read_text()) == RPCD_ACL_CONTENT

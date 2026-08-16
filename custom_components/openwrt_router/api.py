@@ -576,7 +576,9 @@ class OpenWrtAPI:
         # re-logging in for them on every poll — that login churn is what keeps
         # spawning rpcd sessions on ACL-restricted routers. Cleared on reload
         # (new instance) so a deployed/updated ACL is re-probed.
-        self._acl_blocked: set[tuple[str, str]] = set()
+        # Keys come from _acl_cache_key(): (object, method) for most calls,
+        # (object, method, path) for the per-path enforced "file" object.
+        self._acl_blocked: set[tuple[str, ...]] = set()
 
         # P-6: track consecutive auth failures for backoff (wrong credentials)
         self._auth_failure_count: int = 0
@@ -3758,9 +3760,10 @@ class OpenWrtAPI:
         # Re-trying them only fails again and (pre-cache) triggered a useless
         # re-login each poll — the main driver of rpcd session churn on
         # ACL-restricted routers. Treat as method-not-found without any call.
-        if (ubus_object, method) in self._acl_blocked:
+        cache_key = self._acl_cache_key(ubus_object, method, params)
+        if cache_key in self._acl_blocked:
             raise OpenWrtMethodNotFoundError(
-                f"rpcd ACL blocks {ubus_object}/{method} (cached this session)"
+                f"rpcd ACL blocks {'/'.join(cache_key)} (cached this session)"
             )
 
         payload = self._build_call(ubus_object, method, params)
@@ -3797,12 +3800,30 @@ class OpenWrtAPI:
                     # entirely (see the short-circuit above), then convert to
                     # MethodNotFoundError so the coordinator does not trigger
                     # ConfigEntryAuthFailed.
-                    self._acl_blocked.add((ubus_object, method))
+                    self._acl_blocked.add(cache_key)
                     raise OpenWrtMethodNotFoundError(
-                        f"rpcd ACL blocks {ubus_object}/{method} "
+                        f"rpcd ACL blocks {'/'.join(cache_key)} "
                         f"(authenticated OK, method not permitted)"
                     ) from None
             raise
+
+    @staticmethod
+    def _acl_cache_key(
+        ubus_object: str, method: str, params: dict[str, Any]
+    ) -> tuple[str, ...]:
+        """Build the ``_acl_blocked`` cache key for a ubus call.
+
+        rpcd's ``file`` object enforces its ACL per PATH, not per method — a
+        denial for one path (e.g. an uncovered /proc entry) must not
+        short-circuit reads of other, permitted paths for the rest of the
+        session. Everything else is denied per object/method.
+        """
+        if ubus_object == "file":
+            # read/write/stat/list use "path"; exec names its target "command".
+            target = params.get("path") or params.get("command")
+            if isinstance(target, str):
+                return (ubus_object, method, target)
+        return (ubus_object, method)
 
     def _build_call(
         self,

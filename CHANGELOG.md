@@ -2,6 +2,61 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.26.3] - 2026-08-16
+
+> **ACL-Deployment repariert.** Das automatische rpcd-ACL-Deployment war auf
+> ACL-restriktierten Routern komplett wirkungslos — betroffene Router blieben
+> dauerhaft im SSH-Fallback mit reduziertem Poll-Intervall und erhöhter Last.
+
+### Fixed
+
+- **ACL-Auto-Deploy: `NameError` machte jeden Deploy-Versuch wirkungslos**
+  `acl_provisioning.py` verwendete `OpenWrtAuthError`/`OpenWrtResponseError` in
+  except-Klauseln, ohne sie zu importieren. Sobald der Router `file/read` oder
+  `file/write` per ACL blockierte (genau der Fall, den das Deployment lösen
+  soll), flog ein `NameError`, den `async_setup_entry` still als „provisioning
+  skipped" verschluckte. Die ACL wurde nie geschrieben, der SSH-Fallback blieb
+  dauerhaft aktiv. Die Exceptions werden jetzt auf Modulebene importiert;
+  7 bestehende Tests, die genau diese Pfade abdecken, laufen wieder grün.
+
+- **ACL-Deploy: SSH-Fallback wurde bei blockiertem `file/write` nie erreicht**
+  Ein ACL-blockiertes `file/write` kommt aus `_call` als
+  `OpenWrtMethodNotFoundError` an (Konvertierung nach bestätigtem Re-Login) —
+  `_deploy_acl` fing aber nur `OpenWrtAuthError`/`OpenWrtResponseError` ab.
+  Der Fehler propagierte, statt den SSH-Fallback-Deploy auszulösen. Gleiches
+  galt für den (nicht-fatalen) rpcd-Neustart via `file/exec`.
+
+- **ACL-Block-Cache blockierte alle `file`-Pfade statt nur den verbotenen**
+  Der `_acl_blocked`-Cache arbeitete pro `(Objekt, Methode)`. rpcd erzwingt
+  `file`-ACLs aber pro Pfad: Ein einziger nicht freigegebener Pfad (z.B.
+  `/proc/net/nf_conntrack` bei alter ACL) schickte damit **alle** `file/read`-
+  Aufrufe der Session in den SSH-Fallback — der Haupttreiber der erhöhten
+  Router-Last. Für das `file`-Objekt enthält der Cache-Key jetzt den Pfad
+  (bzw. das `command` bei `file/exec`).
+
+### Changed
+
+- **rpcd-ACL v5** (`RPCD_ACL_CONTENT`, wird beim nächsten Start automatisch
+  deployt):
+  - `/sys/class/net` → `list` — der Capability-Check probt `file/list` auf dem
+    Verzeichnis selbst; der bestehende Glob `/sys/class/net/*` deckt das nicht ab.
+  - `/usr/share/rpcd/acl.d/ha-openwrt-router.json` → `read` — `ensure_acl()`
+    kann die deployte ACL jetzt via ubus verifizieren statt bei jedem Start
+    per SSH neu zu schreiben. Bewusst nur `read`: `write` auf `acl.d` würde
+    jeder rpcd-HTTP-Session erlauben, die eigenen Rechte zu erweitern.
+  - `/etc/init.d/rpcd` → `exec` (write-Scope) — rpcd-Neustart nach einem
+    ACL-Deploy funktioniert damit auch über ubus.
+
+- **`scripts/ha-openwrt-router.json` mit `RPCD_ACL_CONTENT` synchronisiert**
+  Die Datei für das manuelle scp-Deployment war auf einem alten Stand (ohne
+  `file/stat`, `file/exec`, conntrack-/sysfs-Pfade) — ein manuelles Deployment
+  nach Anleitung hat das SSH-Fallback-Problem daher nicht behoben. Ein neuer
+  Test verhindert künftiges Auseinanderlaufen.
+
+- **SSH-Fallback-Notification präzisiert** — verweist jetzt auf den
+  Berechtigungs-Check im Options-Flow (automatisches Deployment) und nennt den
+  korrekten Repo-Pfad `scripts/ha-openwrt-router.json` für den manuellen Weg.
+
 ## [1.26.0] - 2026-08-15
 
 > **Stabilitäts- und Bugfix-Release.** Über 30 Korrekturen in 12 Dateien —

@@ -3,27 +3,109 @@
     "description": "Full access for Home Assistant openwrt_router integration",
     "read": {
       "file": {
-        "/etc/config/ddns": ["read"],
-        "/var/run/ddns": ["list"],
-        "/var/run/ddns/*": ["read"]
+        "/etc/openwrt_release": [
+          "read"
+        ],
+        "/etc/config/ddns": [
+          "read"
+        ],
+        "/var/run/ddns": [
+          "list"
+        ],
+        "/var/run/ddns/*": [
+          "read"
+        ],
+        "/sys/class/net": [
+          "list"
+        ],
+        "/sys/class/net/*": [
+          "read"
+        ],
+        "/proc/net/arp": [
+          "read"
+        ],
+        "/proc/net/nf_conntrack": [
+          "read"
+        ],
+        "/proc/sys/net/netfilter/nf_conntrack_count": [
+          "read"
+        ],
+        "/tmp/opkg_list": [
+          "read"
+        ],
+        "/usr/share/rpcd/acl.d/ha-openwrt-router.json": [
+          "read"
+        ]
       },
       "ubus": {
-        "file": ["read"],
-        "hostapd.*": ["get_clients", "get_status"],
-        "network.wireless": ["status", "up", "down"],
-        "network.interface": ["dump"],
-        "network.interface.*": ["status", "statistics"],
-        "network.interface.wan": ["status", "statistics"],
-        "network.device": ["status"],
-        "luci-rpc": ["getDHCPLeases", "getHostHints", "getWirelessDevices"],
-        "iwinfo": ["info", "assoclist", "devices", "scan", "freqlist"],
-        "system": ["board", "info"],
-        "uci": ["get"]
+        "file": [
+          "read",
+          "stat",
+          "list",
+          "exec"
+        ],
+        "hostapd.*": [
+          "get_clients",
+          "get_status"
+        ],
+        "network.wireless": [
+          "status",
+          "up",
+          "down"
+        ],
+        "network.device": [
+          "status"
+        ],
+        "network.interface": [
+          "dump"
+        ],
+        "network.interface.*": [
+          "status",
+          "statistics"
+        ],
+        "network.interface.wan": [
+          "status",
+          "statistics"
+        ],
+        "luci-rpc": [
+          "getDHCPLeases",
+          "getHostHints",
+          "getWirelessDevices"
+        ],
+        "iwinfo": [
+          "info",
+          "assoclist",
+          "devices",
+          "scan",
+          "freqlist"
+        ],
+        "system": [
+          "board",
+          "info"
+        ],
+        "uci": [
+          "get"
+        ],
+        "rc": [
+          "list"
+        ],
+        "service": [
+          "list",
+          "get_data"
+        ]
       }
     },
     "write": {
+      "file": {
+        "/etc/init.d/rpcd": [
+          "exec"
+        ]
+      },
       "ubus": {
-        "network.wireless": ["up", "down"]
+        "network.wireless": [
+          "up",
+          "down"
+        ]
       }
     }
   }

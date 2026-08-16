@@ -770,6 +770,44 @@ class TestAclBlockCache:
         assert mock_api.login.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_blocked_file_path_does_not_block_other_paths(self, mock_api):
+        """A denied file path must not short-circuit reads of permitted paths.
+
+        rpcd enforces file ACLs per PATH. Regression: the cache keyed on
+        (object, method) only, so ONE uncovered /proc entry sent every
+        file/read of the session into the SSH fallback — massively raising
+        router load on routers with an outdated ACL.
+        """
+        import time
+
+        mock_api._token_expires_at = time.monotonic() + 3600
+        mock_api.login = AsyncMock()
+
+        blocked_path = "/proc/net/nf_conntrack"
+
+        async def _raw(payload):
+            params = payload["params"][3]
+            if params.get("path") == blocked_path:
+                raise OpenWrtAuthError("rpcd -32002")
+            return {"data": "ok"}
+
+        mock_api._raw_call = AsyncMock(side_effect=_raw)
+
+        with pytest.raises(OpenWrtMethodNotFoundError):
+            await mock_api._call("file", "read", {"path": blocked_path})
+        assert ("file", "read", blocked_path) in mock_api._acl_blocked
+
+        # A different, permitted path must still go through.
+        result = await mock_api._call("file", "read", {"path": "/proc/net/arp"})
+        assert result == {"data": "ok"}
+
+        # The blocked path stays short-circuited (no new _raw_call).
+        raw_calls_before = mock_api._raw_call.await_count
+        with pytest.raises(OpenWrtMethodNotFoundError):
+            await mock_api._call("file", "read", {"path": blocked_path})
+        assert mock_api._raw_call.await_count == raw_calls_before
+
+    @pytest.mark.asyncio
     async def test_transient_auth_error_is_not_cached(self, mock_api):
         import time
 
