@@ -1,6 +1,6 @@
 # PROGRESS — OpenWrt HA Integration
 
-Entwicklungsprotokoll · Letzte Session: 2026-08-23 · Aktuell: **v1.26.4**
+Entwicklungsprotokoll · Letzte Session: 2026-08-23 · Aktuell: **v1.26.6**
 
 > Detaillierte Session-Protokolle bis v1.13.0 liegen in der Git-Historie dieser Datei;
 > vollständige Release-Details in [CHANGELOG.md](CHANGELOG.md).
@@ -22,10 +22,17 @@ Drei Prod-Dauerbrenner behoben:
 - Ewiger SSH-Fallback auf 10.10.30.50 („OpenWrt"-Entry): `ensure_acl` ließ
   eine existierende, aber unlesbare (= prä-v5) ACL „as-is" → jetzt Redeploy
   bei permission-blockiertem file/read (Timeouts weiterhin nicht).
+- **v1.26.5** (parallele Session): SSL-Kontext nicht mehr synchron im
+  Event-Loop — HA-Kontexte via `ssl_util.py` injiziert.
+- **v1.26.6 (Nachzügler)**: ACL-Redeploy allein reichte auf .50 nicht — der
+  `_acl_blocked`-Cache keyte uci nur auf `("uci","get")`; der verweigerte
+  ddns-Probe vergiftete den uci-wireless-Pfad → SSH-Fallback jeden Poll.
+  Cache-Key für uci jetzt per Config (wie file per Pfad seit 1.26.3).
+  Debug-Erkenntnis: .50 ist ein Mieter-Repeater (SSID Tenant-Klee, STA-Uplink)
+  ohne LuCI-superuser-ACL; network.wireless/iwinfo-info dort teils nicht verfügbar.
 
-Offen/Beobachtung: HA-Core-Warnung „blocking call ssl.create_default_context"
-(api.py `_build_ssl_context`) — separater Fix nötig; HA startete am 22./23.08.
-mehrfach neu (home-assistant.log.fault 05:03), Ursache unklar.
+Offen/Beobachtung: HA (Prod) startete am 22./23.08. mehrfach neu
+(home-assistant.log.fault 05:03), Ursache unklar.
 
 ---
 

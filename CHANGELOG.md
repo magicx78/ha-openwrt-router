@@ -2,6 +2,22 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.26.6] - 2026-08-23
+
+> **Nachzügler zum SSH-Fallback-Fix aus 1.26.4.** Auf der Prod-Instanz zeigte
+> sich nach dem ACL-Redeploy: 10.10.30.50 fiel trotz korrekter v5-ACL weiter
+> in den SSH-Fallback — Ursache war der ACL-Block-Cache, nicht die ACL.
+
+### Fixed
+
+- **ACL-Block-Cache: uci-Denial einer Config blockierte ALLE Configs**
+  rpcd erzwingt uci-ACLs pro Config-Datei, der `_acl_blocked`-Cache keyte
+  aber nur auf `("uci", "get")`. Der (verweigerte) ddns-Probe vergiftete
+  damit den uci-wireless-Fallback für den Rest der Session — jeder weitere
+  Poll lief in den SSH-Fallback samt „SSH-Fallback aktiv“-Notification und
+  300s-Intervall. Analog zum file-Pfad-Fix aus 1.26.3 enthält der Cache-Key
+  für `uci` jetzt den Config-Namen.
+
 ## [1.26.5] - 2026-08-23
 
 > **Blocking-Call-Warnung beim Setup behoben.** Der SSL-Kontext wird nicht
@@ -197,7 +213,7 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 - **Topology: Router-ID-Kollisionen bei identischem Hostname**
   Wenn zwei Router keine MAC hatten und denselben Hostname (z. B. "OpenWrt")
-  verwendeten, kollidierten ihre IDs. Die ID enthaelt jetzt die Host-IP als
+  verwendeten, kollidierten ihre IDs. Die ID enthält jetzt die Host-IP als
   Fallback: `{hostname}_{host_ip}`.
 
 - **API: `_call_file_read_shell` war ein Stub**
