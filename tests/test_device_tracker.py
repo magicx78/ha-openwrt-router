@@ -37,6 +37,14 @@ def _make_tracker(
     )
 
 
+def _make_hass() -> MagicMock:
+    """Mock hass with a real data dict (needed for the MAC claim registry)."""
+    hass = MagicMock()
+    hass.data = {}
+    hass.config_entries.async_loaded_entries.return_value = []
+    return hass
+
+
 # =====================================================================
 # async_setup_entry
 # =====================================================================
@@ -55,7 +63,7 @@ class TestAsyncSetupEntry:
         mock_config_entry.async_on_unload = MagicMock()
 
         await async_setup_entry(
-            hass=MagicMock(),
+            hass=_make_hass(),
             entry=mock_config_entry,
             async_add_entities=lambda entities: added.extend(entities),
         )
@@ -77,7 +85,7 @@ class TestAsyncSetupEntry:
         mock_config_entry.async_on_unload = MagicMock()
 
         await async_setup_entry(
-            hass=MagicMock(),
+            hass=_make_hass(),
             entry=mock_config_entry,
             async_add_entities=lambda entities: added.extend(entities),
         )
@@ -93,12 +101,13 @@ class TestAsyncSetupEntry:
         mock_config_entry.async_on_unload = MagicMock()
 
         await async_setup_entry(
-            hass=MagicMock(),
+            hass=_make_hass(),
             entry=mock_config_entry,
             async_add_entities=MagicMock(),
         )
         mock_coordinator.async_add_listener.assert_called_once()
-        mock_config_entry.async_on_unload.assert_called_once()
+        # one unload hook for the listener, one for the MAC claim release
+        assert mock_config_entry.async_on_unload.call_count == 2
 
 
 # =====================================================================
@@ -107,8 +116,13 @@ class TestAsyncSetupEntry:
 
 class TestTrackerCreation:
     def test_unique_id(self, mock_coordinator, mock_config_entry):
+        """Newer HA cores force unique_id = mac_address; older ones use ours."""
         tracker = _make_tracker(mock_coordinator, mock_config_entry)
         assert tracker._attr_unique_id == "test_entry_id_tracker_b827ebaabb01"
+        assert tracker.unique_id in {
+            "B8:27:EB:AA:BB:01",  # ScannerEntity.unique_id override (new cores)
+            "test_entry_id_tracker_b827ebaabb01",  # _attr_unique_id (old cores)
+        }
 
     def test_mac_address(self, mock_coordinator, mock_config_entry):
         tracker = _make_tracker(mock_coordinator, mock_config_entry)
@@ -310,3 +324,124 @@ class TestTrackerConnectedSince:
             datetime.fromisoformat(ts)
         except ValueError:
             pytest.fail(f"connected_since '{ts}' is not a valid ISO datetime")
+
+
+# =====================================================================
+# Cross-entry dedup + mesh-wide roaming (v1.26.4)
+# =====================================================================
+
+class TestCrossEntryDedup:
+    """Same client MAC visible on several routers → only ONE entity."""
+
+    def _entry(self, entry_id: str, mock_coordinator):
+        from custom_components.openwrt_router import OpenWrtRuntimeData
+        entry = MagicMock()
+        entry.entry_id = entry_id
+        entry.title = entry_id
+        entry.runtime_data = OpenWrtRuntimeData(
+            api=AsyncMock(), coordinator=mock_coordinator
+        )
+        entry.async_on_unload = MagicMock()
+        return entry
+
+    @pytest.mark.asyncio
+    async def test_second_entry_skips_claimed_macs(self, mock_coordinator):
+        """Entry B must not create entities for MACs already claimed by A."""
+        hass = _make_hass()
+        entry_a = self._entry("entry_a", mock_coordinator)
+        entry_b = self._entry("entry_b", mock_coordinator)
+
+        added_a: list = []
+        added_b: list = []
+        await async_setup_entry(hass, entry_a, lambda e: added_a.extend(e))
+        await async_setup_entry(hass, entry_b, lambda e: added_b.extend(e))
+
+        assert len(added_a) == 2
+        assert len(added_b) == 0
+
+    @pytest.mark.asyncio
+    async def test_claims_released_on_unload(self, mock_coordinator):
+        """After entry A unloads, entry B can claim the same MACs."""
+        hass = _make_hass()
+        entry_a = self._entry("entry_a", mock_coordinator)
+        entry_b = self._entry("entry_b", mock_coordinator)
+
+        added_a: list = []
+        await async_setup_entry(hass, entry_a, lambda e: added_a.extend(e))
+        assert len(added_a) == 2
+
+        # Simulate unload of A: run all registered unload callbacks
+        for call_args in entry_a.async_on_unload.call_args_list:
+            call_args.args[0]()
+
+        added_b: list = []
+        await async_setup_entry(hass, entry_b, lambda e: added_b.extend(e))
+        assert len(added_b) == 2
+
+
+class TestMeshRoaming:
+    """Tracker reports 'home' when ANY loaded router sees the client."""
+
+    def _roaming_setup(self, mock_coordinator, mock_config_entry, client: dict):
+        """Tracker owned by A; the client is only visible on router B."""
+        from custom_components.openwrt_router import OpenWrtRuntimeData
+
+        # Real runtime_data for the owning entry so the mesh lookup skips it
+        # via coordinator identity (a bare MagicMock would auto-create a
+        # truthy fake coordinator instead).
+        mock_config_entry.runtime_data = OpenWrtRuntimeData(
+            api=AsyncMock(), coordinator=mock_coordinator
+        )
+
+        coordinator_b = MagicMock()
+        coordinator_b.get_client_by_mac = MagicMock(
+            side_effect=lambda mac: client
+            if mac.upper() == client[CLIENT_KEY_MAC].upper()
+            else None
+        )
+        coordinator_b.router_info = {"hostname": "OpenWrt-AP4"}
+
+        entry_b = MagicMock()
+        entry_b.entry_id = "entry_b"
+        entry_b.runtime_data = OpenWrtRuntimeData(
+            api=AsyncMock(), coordinator=coordinator_b
+        )
+
+        hass = _make_hass()
+        hass.config_entries.async_loaded_entries.return_value = [
+            mock_config_entry, entry_b
+        ]
+
+        tracker = _make_tracker(
+            mock_coordinator, mock_config_entry, mac=client[CLIENT_KEY_MAC]
+        )
+        tracker.hass = hass
+        return tracker
+
+    def test_roaming_client_is_home(self, mock_coordinator, mock_config_entry):
+        client = {
+            CLIENT_KEY_MAC: "0A:0B:0C:0D:0E:0F",
+            CLIENT_KEY_IP: "192.168.1.199",
+            CLIENT_KEY_SSID: "OpenWrt-Home",
+            CLIENT_KEY_RADIO: "phy1-ap0",
+            CLIENT_KEY_SIGNAL: -61,
+            "hostname": "wanderer",
+        }
+        tracker = self._roaming_setup(mock_coordinator, mock_config_entry, client)
+
+        assert tracker.is_connected is True
+        assert tracker.ip_address == "192.168.1.199"
+        assert tracker.hostname == "wanderer"
+        attrs = tracker.extra_state_attributes
+        assert attrs["connected"] is True
+        assert attrs["connected_ap"] == "OpenWrt-AP4"
+
+    def test_client_gone_everywhere_is_not_home(
+        self, mock_coordinator, mock_config_entry
+    ):
+        client = {CLIENT_KEY_MAC: "0A:0B:0C:0D:0E:0F"}
+        tracker = self._roaming_setup(mock_coordinator, mock_config_entry, client)
+        tracker._mac = "FF:FF:FF:FF:FF:FF"  # a MAC no coordinator knows
+
+        assert tracker.is_connected is False
+        assert tracker.extra_state_attributes["connected"] is False
