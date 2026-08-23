@@ -20,6 +20,7 @@ from custom_components.openwrt_router.api import (
     OpenWrtAuthError,
     OpenWrtMethodNotFoundError,
     OpenWrtResponseError,
+    OpenWrtTimeoutError,
 )
 
 
@@ -168,13 +169,41 @@ class TestEnsureAcl:
         assert await ensure_acl(api) is True
 
     @pytest.mark.asyncio
-    async def test_read_blocked_but_file_exists_leaves_as_is(self):
-        """file/read blocked (ACL) but file/stat shows it exists → skip, no write."""
+    async def test_read_permission_blocked_but_file_exists_redeploys(self):
+        """file/read ACL-denied, file/stat shows it exists → pre-v5 ACL, redeploy.
+
+        Every shipped ACL since v5 grants file/read on its own path; an
+        unreadable deployed ACL is therefore outdated and must be rewritten
+        (≤v1.26.3 left it as-is and kept the router in the SSH fallback).
+        """
         api = _make_api()
 
         def _side_effect(obj, method, params):
             if method == "read":
                 raise OpenWrtResponseError("ubus error 6 for file/read")
+            if method == "stat":
+                return {"type": "regular", "size": 512}
+            return {}
+
+        api._call.side_effect = _side_effect
+
+        result = await ensure_acl(api)
+
+        assert result is True
+        methods = [c.args[1] for c in api._call.call_args_list]
+        assert "write" in methods
+
+    @pytest.mark.asyncio
+    async def test_read_transient_failure_file_exists_leaves_as_is(self):
+        """file/read fails transiently but the file exists → skip, no write.
+
+        A network blip must not rewrite the ACL and restart rpcd.
+        """
+        api = _make_api()
+
+        def _side_effect(obj, method, params):
+            if method == "read":
+                raise OpenWrtTimeoutError("timeout")
             if method == "stat":
                 return {"type": "regular", "size": 512}
             raise AssertionError(f"unexpected call: file/{method}")

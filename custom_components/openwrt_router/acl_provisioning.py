@@ -172,8 +172,8 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
         OpenWrtTimeoutError,
     ) as err:
         # file/read blocked by ACL or file module unavailable. Fall back to a
-        # cheap existence probe: if the file clearly exists we leave it alone
-        # (we cannot verify content), otherwise we attempt an idempotent write.
+        # cheap existence probe to distinguish "missing" from "present but
+        # unreadable".
         _LOGGER.debug(
             "Cannot read ACL on %s via file/read (%s) — probing existence",
             api._host,
@@ -181,11 +181,6 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
         )
         try:
             await api._call("file", "stat", {"path": ACL_FILE_PATH})
-            _LOGGER.debug(
-                "rpcd ACL exists on %s but content is unverifiable — leaving as-is",
-                api._host,
-            )
-            return False
         except OpenWrtMethodNotFoundError:
             reason = "missing"
         except (
@@ -195,6 +190,24 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
             OpenWrtTimeoutError,
         ):
             reason = "unverifiable"
+        else:
+            if isinstance(err, (OpenWrtConnectionError, OpenWrtTimeoutError)):
+                # Transient read failure while the file demonstrably exists —
+                # do not rewrite the ACL (and restart rpcd) on a network blip.
+                _LOGGER.debug(
+                    "rpcd ACL exists on %s, file/read failed transiently (%s) "
+                    "— leaving as-is",
+                    api._host,
+                    err,
+                )
+                return False
+            # The file exists but reading it is permission-denied. Every ACL
+            # shipped since v5 grants file/read on its own path, so a deployed
+            # ACL we cannot read back is by definition older than what this
+            # version ships. Leaving it "as-is" (as ≤v1.26.3 did) kept such
+            # routers in the SSH fallback — with its recurring HA notification
+            # and 300s polling — forever.
+            reason = "outdated"
 
     return await _deploy_acl(api, reason)
 
