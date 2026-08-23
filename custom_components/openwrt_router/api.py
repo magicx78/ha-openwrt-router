@@ -599,11 +599,15 @@ class OpenWrtAPI:
         return self._ssh_fallback_used
 
     def reset_ssh_fallback_flag(self) -> None:
-        """Reset SSH fallback flag at the start of each poll cycle."""
+        """Reset SSH fallback flag at the start of each poll cycle.
+
+        Must NOT reset ``_root_warning_logged``: this runs every poll, and
+        clearing the latch here made the root warning re-fire on every
+        re-login (~once a minute per router) instead of once per instance.
+        """
         self._ssh_fallback_used = False
         self._auth_failure_count = 0
         self._auth_backoff_until = 0.0
-        self._root_warning_logged = False
 
     def reset_acl_blocked(self) -> None:
         """Forget cached ACL-blocked methods so they are re-probed.
@@ -668,11 +672,13 @@ class OpenWrtAPI:
         """
         _LOGGER.debug("Logging in to %s as %s", self._ubus_url, self._username)
 
-        # M-4: warn once if using the privileged root account
+        # M-4: warn once per API instance if using the privileged root account
         if self._username == "root" and not self._root_warning_logged:
             _LOGGER.warning(
-                "OpenWrt Router: Using 'root' as rpcd user grants full router access. "
-                "Consider creating a dedicated restricted rpcd user for better security."
+                "OpenWrt Router (%s): Using 'root' as rpcd user grants full router "
+                "access. Consider creating a dedicated restricted rpcd user for "
+                "better security.",
+                self._host,
             )
             self._root_warning_logged = True
 
