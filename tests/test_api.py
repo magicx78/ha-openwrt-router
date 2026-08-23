@@ -841,6 +841,42 @@ class TestAclBlockCache:
         assert mock_api._raw_call.await_count == raw_calls_before
 
     @pytest.mark.asyncio
+    async def test_blocked_uci_config_does_not_block_other_configs(self, mock_api):
+        """A denied uci config must not short-circuit reads of permitted configs.
+
+        rpcd enforces uci ACLs per CONFIG file. Regression (v1.26.4): the
+        cache keyed on ("uci", "get") only, so the denied ddns probe killed
+        the uci wireless fallback for the rest of the session and pushed
+        every later poll into the SSH fallback.
+        """
+        import time
+
+        mock_api._token_expires_at = time.monotonic() + 3600
+        mock_api.login = AsyncMock()
+
+        async def _raw(payload):
+            params = payload["params"][3]
+            if params.get("config") == "ddns":
+                raise OpenWrtAuthError("rpcd -32002")
+            return {"values": {}}
+
+        mock_api._raw_call = AsyncMock(side_effect=_raw)
+
+        with pytest.raises(OpenWrtMethodNotFoundError):
+            await mock_api._call("uci", "get", {"config": "ddns"})
+        assert ("uci", "get", "ddns") in mock_api._acl_blocked
+
+        # A different, permitted config must still go through.
+        result = await mock_api._call("uci", "get", {"config": "wireless"})
+        assert result == {"values": {}}
+
+        # The blocked config stays short-circuited (no new _raw_call).
+        raw_calls_before = mock_api._raw_call.await_count
+        with pytest.raises(OpenWrtMethodNotFoundError):
+            await mock_api._call("uci", "get", {"config": "ddns"})
+        assert mock_api._raw_call.await_count == raw_calls_before
+
+    @pytest.mark.asyncio
     async def test_transient_auth_error_is_not_cached(self, mock_api):
         import time
 

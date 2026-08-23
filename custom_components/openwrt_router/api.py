@@ -3843,13 +3843,21 @@ class OpenWrtAPI:
         rpcd's ``file`` object enforces its ACL per PATH, not per method — a
         denial for one path (e.g. an uncovered /proc entry) must not
         short-circuit reads of other, permitted paths for the rest of the
-        session. Everything else is denied per object/method.
+        session. The ``uci`` object likewise enforces per CONFIG file — a
+        denied config (e.g. the ddns probe on a router without ddns grants)
+        must not kill uci access to wireless/system and push every later
+        poll into the SSH fallback. Everything else is denied per
+        object/method.
         """
         if ubus_object == "file":
             # read/write/stat/list use "path"; exec names its target "command".
             target = params.get("path") or params.get("command")
             if isinstance(target, str):
                 return (ubus_object, method, target)
+        if ubus_object == "uci":
+            config = params.get("config")
+            if isinstance(config, str):
+                return (ubus_object, method, config)
         return (ubus_object, method)
 
     def _build_call(
