@@ -393,6 +393,39 @@ class TestSSLContext:
         assert api._ssl_context.check_hostname is False
         assert api._ssl_context.verify_mode == ssl.CERT_NONE
 
+    def test_injected_context_is_used_verbatim(self):
+        """HA callers inject a pre-built context — no context is built here."""
+        import ssl
+
+        session = MagicMock()
+        injected = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        api = OpenWrtAPI(
+            host="192.168.1.1",
+            port=443,
+            username="root",
+            password="test",
+            session=session,
+            protocol="https",
+            ssl_context=injected,
+        )
+        assert api._ssl_context is injected
+
+    def test_injected_context_ignored_for_http(self):
+        import ssl
+
+        session = MagicMock()
+        injected = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        api = OpenWrtAPI(
+            host="192.168.1.1",
+            port=80,
+            username="root",
+            password="test",
+            session=session,
+            protocol="http",
+            ssl_context=injected,
+        )
+        assert api._ssl_context is None
+
 
 class TestURLConstruction:
     def test_ipv4(self):

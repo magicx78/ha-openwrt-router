@@ -43,6 +43,7 @@ from .api import (
 )
 from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN, PROTOCOL_HTTP
 from .coordinator import OpenWrtCoordinator
+from .ssl_util import ssl_context_for_protocol
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -237,6 +238,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         password=password,
         session=session,
         protocol=protocol,
+        ssl_context=ssl_context_for_protocol(protocol),
     )
 
     # Authenticate before creating the coordinator

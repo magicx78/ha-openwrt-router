@@ -2,6 +2,25 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.26.5] - 2026-08-23
+
+> **Blocking-Call-Warnung beim Setup behoben.** Der SSL-Kontext wird nicht
+> mehr synchron im Event-Loop gebaut — HA Core warnte bei jedem Setup mit
+> „Detected blocking call to set_default_verify_paths … inside the event loop".
+
+### Fixed
+
+- **`ssl.create_default_context()` blockierte den Event-Loop**
+  `OpenWrtAPI.__init__` baute den SSL-Kontext synchron (das CA-Bundle wird
+  dabei von der Platte geladen). Alle HA-Aufrufer — `async_setup_entry` und
+  die drei Config-Flow-Stellen — injizieren jetzt Home Assistants prozessweit
+  gecachte Kontexte (`homeassistant.util.ssl.client_context()` bzw.
+  `client_context_no_verify()`) über den neuen Konstruktor-Parameter
+  `ssl_context`. Die Protokoll-Auswahl kapselt das neue HA-seitige Modul
+  `ssl_util.py`; `api.py` bleibt bewusst HA-frei. Der synchrone Aufbau
+  existiert nur noch als Fallback für Standalone-/CLI-Nutzung außerhalb
+  eines Event-Loops.
+
 ## [1.26.4] - 2026-08-23
 
 > **Log-Hygiene auf Multi-Router-Setups.** Drei Dauerbrenner beseitigt: die

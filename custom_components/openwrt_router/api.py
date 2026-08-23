@@ -504,6 +504,7 @@ class OpenWrtAPI:
         session: aiohttp.ClientSession,
         timeout: int = DEFAULT_TIMEOUT,
         protocol: str = DEFAULT_PROTOCOL,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         """Initialise the API client.
 
@@ -515,6 +516,10 @@ class OpenWrtAPI:
             session: Shared aiohttp ClientSession.
             timeout: Request timeout in seconds.
             protocol: Connection protocol ("http", "https", "https-insecure").
+            ssl_context: Pre-built SSL context for HTTPS. Callers running
+                inside an event loop must pass one (building a context loads
+                the CA bundle from disk — a blocking call); when omitted, a
+                context is built synchronously as fallback for standalone use.
 
         Note:
             The password is stored in memory only and is never logged.
@@ -532,8 +537,13 @@ class OpenWrtAPI:
             sock_connect=min(5, timeout),
             sock_read=timeout,
         )
-        # Build SSL context for HTTPS connections
-        self._ssl_context = self._build_ssl_context()
+        # SSL context for HTTPS connections. Injected by HA callers (which
+        # hold process-wide cached contexts); the synchronous fallback exists
+        # only for standalone/CLI use outside an event loop.
+        if ssl_context is not None and protocol != PROTOCOL_HTTP:
+            self._ssl_context: ssl.SSLContext | None = ssl_context
+        else:
+            self._ssl_context = self._build_ssl_context()
 
         # L-2: IPv6-safe URL — bare IPv6 addresses require square brackets
         host_str = f"[{host}]" if ":" in host and not host.startswith("[") else host
@@ -772,7 +782,12 @@ class OpenWrtAPI:
             _LOGGER.debug("session/destroy (best-effort) failed", exc_info=True)
 
     def _build_ssl_context(self) -> ssl.SSLContext | None:
-        """Build SSL context for HTTPS connections.
+        """Build SSL context for HTTPS connections (synchronous fallback).
+
+        Loads the CA bundle from disk — a blocking call. Only used when no
+        ``ssl_context`` was injected into ``__init__``; callers inside an
+        event loop (Home Assistant) must inject a pre-built context instead
+        (see ``ssl_util.ssl_context_for_protocol``).
 
         Returns:
             SSLContext configured for the selected protocol, or None for HTTP.

@@ -48,6 +48,7 @@ from .const import (
     PROTOCOL_HTTPS,
     PROTOCOL_HTTPS_INSECURE,
 )
+from .ssl_util import ssl_context_for_protocol
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -254,13 +255,15 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 from .acl_provisioning import AclDeployError, check_and_deploy_acl
 
                 session = async_get_clientsession(self.hass)
+                protocol = self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)
                 deploy_api = OpenWrtAPI(
                     host=host,
                     port=self._user_data[CONF_PORT],
                     username=self._user_data[CONF_USERNAME],
                     password=self._user_data[CONF_PASSWORD],
                     session=session,
-                    protocol=self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL),
+                    protocol=protocol,
+                    ssl_context=ssl_context_for_protocol(protocol),
                 )
                 try:
                     await deploy_api.login()
@@ -286,13 +289,15 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(title=title, data=self._user_data)
 
         session = async_get_clientsession(self.hass)
+        protocol = self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)
         api = OpenWrtAPI(
             host=host,
             port=self._user_data[CONF_PORT],
             username=self._user_data[CONF_USERNAME],
             password=self._user_data[CONF_PASSWORD],
             session=session,
-            protocol=self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL),
+            protocol=protocol,
+            ssl_context=ssl_context_for_protocol(protocol),
         )
         try:
             try:
@@ -590,6 +595,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             password=password,
             session=session,
             protocol=protocol,
+            ssl_context=ssl_context_for_protocol(protocol),
         )
         return await api.test_connection()
 
