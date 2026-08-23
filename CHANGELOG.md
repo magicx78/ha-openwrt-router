@@ -2,6 +2,52 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.26.4] - 2026-08-23
+
+> **Log-Hygiene auf Multi-Router-Setups.** Drei Dauerbrenner beseitigt: die
+> minütliche root-Warnung, die unique_id-Kollision, wenn mehrere APs denselben
+> WLAN-Client sehen, und der ewige SSH-Fallback (samt wiederkehrender
+> HA-Notification) auf Routern mit einer prä-v5-ACL.
+
+### Fixed
+
+- **Router mit alter ACL blieben für immer im SSH-Fallback**
+  Konnte `ensure_acl()` die deployte ACL-Datei nicht lesen (von alten ACLs
+  blockiert), obwohl `file/stat` ihre Existenz zeigte, ließ es sie
+  „unverifiable — as-is" liegen — der Router blieb dauerhaft im SSH-Fallback
+  mit 300s-Polling, und die Notification „SSH-Fallback aktiv" kam nach jedem
+  HA-Neustart wieder. Da jede ACL seit v5 das Lesen ihres eigenen Pfads
+  erlaubt, ist eine unlesbare deployte ACL per Definition veraltet → sie wird
+  jetzt neu deployt (transiente Lesefehler wie Timeouts deployen weiterhin
+  NICHT, um rpcd-Restarts bei Netz-Blips zu vermeiden).
+
+- **root-Warnung spammte ~66×/Stunde statt einmal**
+  `reset_ssh_fallback_flag()` läuft am Anfang jedes Poll-Zyklus und setzte
+  dabei auch das `_root_warning_logged`-Latch zurück — die Warnung
+  „Using 'root' as rpcd user grants full router access" feuerte damit bei
+  jedem Re-Login (~1×/Minute pro Router) erneut. Das Latch bleibt jetzt für
+  die Lebensdauer der API-Instanz gesetzt (einmal pro Router und Start);
+  die Meldung nennt zusätzlich den Router-Host.
+
+- **„Platform openwrt_router does not generate unique IDs" bei Mesh-Clients**
+  HA-Core leitet die unique_id von `ScannerEntity` zwingend aus
+  `mac_address` ab (das bisherige entry-scoped `_attr_unique_id` wurde
+  dadurch ignoriert). Sehen mehrere Router/APs denselben Client, versuchte
+  jeder Eintrag eine Entity mit derselben MAC-unique_id anzulegen — HA
+  verwarf die Duplikate mit einem ERROR pro Client und Neustart. Clients
+  werden jetzt AP-übergreifend dedupliziert: Ein hass.data-Claim-Register
+  sorgt dafür, dass genau EIN Config-Entry die Entity pro MAC anlegt
+  (Claims werden beim Unload wieder freigegeben).
+
+### Changed
+
+- **Roaming-fähige Device-Tracker**: Die (eine) Tracker-Entity pro Client
+  sucht die MAC jetzt auf ALLEN geladenen Routern — ein Client, der zwischen
+  Mesh-APs roamt, bleibt `home` und meldet im neuen Attribut `connected_ap`
+  den Hostnamen des APs, mit dem er gerade verbunden ist. Vorher meldete der
+  Tracker `not_home`, sobald der Client den Router des besitzenden Entries
+  verließ.
+
 ## [1.26.3] - 2026-08-16
 
 > **ACL-Deployment repariert.** Das automatische rpcd-ACL-Deployment war auf
