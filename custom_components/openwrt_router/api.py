@@ -71,6 +71,7 @@ from .const import (
     UBUS_SYSTEM_BOARD,
     UBUS_SYSTEM_INFO,
     UBUS_SYSTEM_OBJECT,
+    UBUS_SYSTEM_REBOOT,
     UBUS_UCI_COMMIT,
     UBUS_UCI_GET,
     UBUS_UCI_OBJECT,
@@ -108,6 +109,7 @@ SUBPROCESS_RC_CANCELLED = -3  # caller's task was cancelled mid-flight
 
 # SSH connect timeout (seconds) — parity with the old ``-o ConnectTimeout=8``.
 SSH_CONNECT_TIMEOUT = 8.0
+REBOOT_SSH_TIMEOUT = 15.0  # dispatch of the detached reboot command
 
 
 async def _safe_subprocess_exec(
@@ -2523,6 +2525,60 @@ class OpenWrtAPI:
                 "network.reload not available – WiFi state may not apply immediately"
             )
             return False
+
+    async def reboot(self) -> bool:
+        """Reboot the whole router.
+
+        Tries ubus ``system/reboot`` first and falls back to a detached SSH
+        ``reboot`` when rpcd does not expose the method or its ACL blocks it.
+        The router tears the connection down while going away, so a timeout or
+        connection error on the ubus call is not conclusive on its own — the
+        SSH fallback decides in that case. Re-triggering a reboot that already
+        started is harmless.
+
+        Returns:
+            True when the router accepted the reboot.
+        """
+        _LOGGER.info("Rebooting router %s", self._host)
+        try:
+            await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_REBOOT, {})
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+            OpenWrtResponseError,
+            OpenWrtConnectionError,
+            OpenWrtTimeoutError,
+        ) as err:
+            _LOGGER.debug(
+                "ubus system/reboot not usable on %s (%s) – trying SSH fallback",
+                self._host,
+                err,
+            )
+            return await self._reboot_ssh()
+        return True
+
+    async def _reboot_ssh(self) -> bool:
+        """Reboot the router over SSH (fallback when ubus is unavailable).
+
+        The command is detached and delayed by two seconds so the reboot does
+        not tear down the SSH session before the command was acknowledged.
+
+        Returns:
+            True when the command was dispatched successfully.
+        """
+        rc, _stdout, stderr = await self._run_ssh_detached(
+            "sleep 2; reboot", timeout=REBOOT_SSH_TIMEOUT
+        )
+        if rc != 0:
+            _LOGGER.error(
+                "SSH reboot on %s failed (rc=%s): %s",
+                self._host,
+                rc,
+                stderr.decode(errors="replace").strip(),
+            )
+            return False
+        _LOGGER.info("Reboot dispatched via SSH on %s", self._host)
+        return True
 
     async def get_dhcp_leases(self) -> dict[str, dict[str, str]]:
         """Return a MAC → {ip, hostname} mapping from the DHCP lease table.

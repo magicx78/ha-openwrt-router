@@ -2,6 +2,7 @@
 
 Provides:
     - Reload WiFi button  (triggers network.reload on the router)
+    - Reboot button       (triggers system.reboot on the router)
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from .const import (
     DOMAIN,
     SUFFIX_CHECK_UPDATES,
     SUFFIX_PERFORM_UPDATES,
+    SUFFIX_REBOOT,
     SUFFIX_RELOAD_WIFI,
     url_scheme_for,
 )
@@ -63,6 +65,13 @@ BUTTON_DESCRIPTIONS: tuple[OpenWrtButtonEntityDescription, ...] = (
         device_class=ButtonDeviceClass.UPDATE,
         entity_category=EntityCategory.CONFIG,
         icon="mdi:package-up",
+    ),
+    OpenWrtButtonEntityDescription(
+        key=SUFFIX_REBOOT,
+        translation_key="reboot",
+        device_class=ButtonDeviceClass.RESTART,
+        entity_category=EntityCategory.CONFIG,
+        icon="mdi:restart",
     ),
 )
 
@@ -166,6 +175,7 @@ class OpenWrtButtonEntity(ButtonEntity):
         - reload_wifi: Reload WiFi configuration
         - check_updates: Check for available package updates
         - perform_updates: Trigger package updates
+        - reboot: Reboot the router
         """
         button_key = self.entity_description.key
         _LOGGER.debug(
@@ -180,6 +190,8 @@ class OpenWrtButtonEntity(ButtonEntity):
             await self._press_check_updates()
         elif button_key == SUFFIX_PERFORM_UPDATES:
             await self._press_perform_updates()
+        elif button_key == SUFFIX_REBOOT:
+            await self._press_reboot()
         else:
             _LOGGER.warning("Unknown button key: %s", button_key)
 
@@ -199,6 +211,32 @@ class OpenWrtButtonEntity(ButtonEntity):
 
         # Refresh coordinator data after reload (config may have changed)
         await self._coordinator.async_request_refresh()
+
+    async def _press_reboot(self) -> None:
+        """Handle reboot button press.
+
+        No coordinator refresh afterwards: the router is on its way down and
+        every poll would only time out. The next scheduled poll picks the
+        router back up once it is reachable again.
+        """
+        _LOGGER.info("Rebooting %s", self._entry.data.get("host"))
+
+        try:
+            success = await self._api.reboot()
+        except Exception:
+            # A press must never raise into HA — SSH helpers can throw
+            # more than the OpenWrt* API errors.
+            _LOGGER.exception("Error rebooting %s", self._entry.data.get("host"))
+            return
+
+        if success:
+            _LOGGER.info("Reboot triggered on %s", self._entry.data.get("host"))
+        else:
+            _LOGGER.warning(
+                "Reboot was not accepted by %s – neither ubus system/reboot nor "
+                "the SSH fallback succeeded",
+                self._entry.data.get("host"),
+            )
 
     async def _press_check_updates(self) -> None:
         """Handle check for updates button press."""

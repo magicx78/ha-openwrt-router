@@ -1003,6 +1003,56 @@ class TestReloadWifi:
         assert result is True
 
 
+class TestReboot:
+    @pytest.mark.asyncio
+    async def test_ubus_reboot(self, mock_api):
+        with patch.object(mock_api, "_call", AsyncMock(return_value={})) as call:
+            assert await mock_api.reboot() is True
+        call.assert_awaited_once_with("system", "reboot", {})
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_ssh_when_ubus_blocked(self, mock_api):
+        ssh = AsyncMock(return_value=(0, "", b""))
+        with (
+            patch.object(
+                mock_api,
+                "_call",
+                AsyncMock(side_effect=OpenWrtMethodNotFoundError("no system/reboot")),
+            ),
+            patch.object(mock_api, "_run_ssh_detached", ssh),
+        ):
+            assert await mock_api.reboot() is True
+        assert "reboot" in ssh.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_ssh_on_timeout(self, mock_api):
+        # The router can drop the connection while going down — inconclusive,
+        # so the SSH fallback still gets its turn.
+        ssh = AsyncMock(return_value=(0, "", b""))
+        with (
+            patch.object(
+                mock_api, "_call", AsyncMock(side_effect=OpenWrtTimeoutError("gone"))
+            ),
+            patch.object(mock_api, "_run_ssh_detached", ssh),
+        ):
+            assert await mock_api.reboot() is True
+        ssh.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_both_paths_fail(self, mock_api):
+        with (
+            patch.object(
+                mock_api, "_call", AsyncMock(side_effect=OpenWrtAuthError("acl"))
+            ),
+            patch.object(
+                mock_api,
+                "_run_ssh_detached",
+                AsyncMock(return_value=(255, "", b"Permission denied")),
+            ),
+        ):
+            assert await mock_api.reboot() is False
+
+
 class TestBuildCall:
     def test_payload_structure(self, mock_api):
         payload = mock_api._build_call("system", "board", {"foo": "bar"})
