@@ -192,6 +192,9 @@
       },
       "perform_updates": {
         "name": "Updates installieren"
+      },
+      "reboot": {
+        "name": "Router neu starten"
       }
     }
   }

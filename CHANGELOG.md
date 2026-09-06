@@ -2,6 +2,24 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.27.0] - 2026-09-06
+
+> **Router-Neustart aus Home Assistant.** Bisher ließen sich nur einzelne
+> Dienste neu starten — für einen vollständigen Geräteneustart musste man
+> auf LuCI oder SSH ausweichen.
+
+### Added
+
+- **Reboot-Button pro Router** (`button.<router>_router_neu_starten`)
+  Löst `system/reboot` über ubus aus. Blockiert die rpcd-ACL die Methode
+  (oder ist sie nicht vorhanden), fällt der Button auf einen abgesetzten
+  SSH-`reboot` zurück — dieselben Zugangsdaten wie der übrige SSH-Fallback.
+  Ein Timeout des ubus-Calls gilt nicht als Fehlschlag: der Router kappt die
+  Verbindung beim Herunterfahren, deshalb entscheidet in dem Fall der
+  SSH-Fallback. Nach dem Druck wird bewusst kein Coordinator-Refresh
+  ausgelöst — der nächste reguläre Poll holt den Router wieder ab.
+  Neu: `OpenWrtAPI.reboot()`.
+
 ## [1.26.6] - 2026-08-23
 
 > **Nachzügler zum SSH-Fallback-Fix aus 1.26.4.** Auf der Prod-Instanz zeigte
