@@ -2,6 +2,24 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.28.1] - 2026-09-09
+
+### Fixed
+
+- **Kanten-Orientierung in einer Kette.** Hängt ein AP hinter einem anderen AP
+  (Gateway → AP1 → AP2), zeigte die LLDP-Kante zwischen den beiden APs in die
+  falsche Richtung: ohne Gateway-Endpunkt entschied die alphabetische
+  Router-ID. Konsumenten indizieren Uplinks über das Kanten-Ziel, dadurch
+  überschrieb die verdrehte Kante den Uplink des oberen AP und der untere
+  bekam gar keinen — im Panel „Kabel" ohne Ports und ohne Status. Die
+  Orientierung folgt jetzt der Hop-Distanz zum Gateway
+  (`_lldp_hop_depths`); nur bei echtem Gleichstand bleibt die stabile
+  ID-Sortierung.
+- **Verkabelungsansicht zeigte immer das Gateway als Quelle.** `WiringView`
+  setzte `fromName` fest auf den Gateway-Namen und ignorierte `uplinkTo`. Eine
+  Kette wurde dadurch grundsätzlich als Stern dargestellt, egal wie korrekt
+  die LLDP-Daten waren. Frontend-Bundle neu gebaut.
+
 ## [1.28.0] - 2026-09-09
 
 > **Bessere Geräte- & Topology-Erkennung via LLDP.** Router-zu-Router-Verkabelung

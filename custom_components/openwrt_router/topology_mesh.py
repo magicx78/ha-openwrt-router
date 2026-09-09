@@ -265,18 +265,59 @@ def _match_lldp_neighbor(
     return None
 
 
+def _lldp_hop_depths(
+    pairs: set[frozenset[str]],
+    router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+) -> dict[str, int]:
+    """Hop distance of every router from the nearest gateway, over LLDP links.
+
+    Consumers point an uplink edge at exactly one downstream router, so the
+    orientation of a router↔router edge has to follow the actual cabling: in a
+    chain (gateway → A → B) the edge between A and B must run A→B, not the
+    other way round. Alphabetical order cannot know that; hop distance can.
+    """
+    adjacency: dict[str, set[str]] = {}
+    for pair in pairs:
+        a, b = tuple(pair)
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+
+    depths: dict[str, int] = {}
+    frontier = [
+        rid
+        for rid, hip, data in router_data
+        if _detect_router_role(data, hip) == "gateway"
+    ]
+    for rid in frontier:
+        depths[rid] = 0
+    depth = 0
+    while frontier:
+        depth += 1
+        nxt: list[str] = []
+        for rid in frontier:
+            for peer in adjacency.get(rid, ()):
+                if peer not in depths:
+                    depths[peer] = depth
+                    nxt.append(peer)
+        frontier = nxt
+    return depths
+
+
 def _orient_lldp_edge(
     rid_a: str,
     rid_b: str,
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+    depths: dict[str, int] | None = None,
 ) -> tuple[str, str]:
     """Choose a from/to orientation for a router-to-router LLDP edge.
 
     Orientation is presentation-only (both physical port sides are always
-    carried on the edge). If exactly one endpoint is a gateway it becomes
-    ``from``; otherwise a stable router_id sort is used as a tie-break. This is
-    deliberately NOT based on IP ordering — the cabling itself is what LLDP
-    reports, orientation only decides which way the arrow is drawn.
+    carried on the edge), but it decides which endpoint downstream consumers
+    treat as the *uplink target* — so it must point away from the gateway.
+    A gateway endpoint always becomes ``from``; otherwise the endpoint closer
+    to a gateway (in LLDP hops) wins, and only a genuine tie falls back to a
+    stable router_id sort. This is deliberately NOT based on IP ordering — the
+    cabling itself is what LLDP reports.
     """
     roles = {
         rid: _detect_router_role(data, hip)
@@ -289,6 +330,12 @@ def _orient_lldp_edge(
         return rid_a, rid_b
     if b_gw and not a_gw:
         return rid_b, rid_a
+    if depths:
+        unreachable = len(router_data) + 1
+        depth_a = depths.get(rid_a, unreachable)
+        depth_b = depths.get(rid_b, unreachable)
+        if depth_a != depth_b:
+            return (rid_a, rid_b) if depth_a < depth_b else (rid_b, rid_a)
     return (rid_a, rid_b) if rid_a <= rid_b else (rid_b, rid_a)
 
 
@@ -329,6 +376,9 @@ def _detect_lldp_edges(
     blocked_ids: set[str] = set()
     handled: set[frozenset[str]] = set()
 
+    # Orientation needs the whole graph, so hop distances are computed up front.
+    depths = _lldp_hop_depths({frozenset(pair) for pair in obs}, router_data)
+
     for (a_rid, b_rid), fwd in obs.items():
         pair = frozenset((a_rid, b_rid))
         if pair in handled:
@@ -337,7 +387,7 @@ def _detect_lldp_edges(
         rev = obs.get((b_rid, a_rid))
         bidirectional = rev is not None
 
-        from_rid, to_rid = _orient_lldp_edge(a_rid, b_rid, router_data)
+        from_rid, to_rid = _orient_lldp_edge(a_rid, b_rid, router_data, depths)
         # Map each router's OWN self-reported local port to the from/to side.
         if from_rid == a_rid:
             from_obs, to_obs = fwd, rev

@@ -474,3 +474,71 @@ class TestLldpFeedsSwitchInference:
         nodes, _switch_edges, replaced = _detect_switch_nodes(edges, router_data)
         assert nodes == []
         assert replaced == set()
+
+
+# =====================================================================
+# Edge orientation in a chain (gateway -> A -> B)
+#
+# Consumers key the uplink map on the edge's `to`, so a wrongly oriented
+# router<->router edge silently overwrites the upstream AP's uplink and leaves
+# the downstream AP with none at all.
+# =====================================================================
+
+
+class TestChainOrientation:
+    def _chain(self):
+        """gw --lan3--> ap2(wan); ap2 --lan3--> ap4(wan), as reported by LLDP."""
+        gw = _router(
+            mac="aa:bb:cc:00:00:01",
+            hostname="gw",
+            wan_status={"connected": True, "proto": "static", "ipv4": "172.16.1.71"},
+            lldp=[_neigh("lan3", mgmt_ip="10.10.10.2", port_id="wan")],
+        )
+        ap2 = _router(
+            mac="aa:bb:cc:00:00:02",
+            hostname="ap2",
+            lldp=[
+                _neigh("wan", mgmt_ip="10.10.10.1", port_id="lan3"),
+                _neigh("lan3", mgmt_ip="10.10.10.4", port_id="wan"),
+            ],
+        )
+        ap4 = _router(
+            mac="aa:bb:cc:00:00:04",
+            hostname="ap4",
+            lldp=[_neigh("wan", mgmt_ip="10.10.10.2", port_id="lan3")],
+        )
+        # Router ids deliberately sort ap4 BEFORE ap2, like the real fleet
+        # ("sECUREaP-aP4..." < "sECUREaP-aPclient1...").
+        return [
+            ("sECUREaP-gATEWAy", "10.10.10.1", gw),
+            ("sECUREaP-aP4", "10.10.10.4", ap4),
+            ("sECUREaP-aPclient1", "10.10.10.2", ap2),
+        ]
+
+    def test_edges_point_away_from_the_gateway(self):
+        edges = _router_uplinks(_detect_inter_router_edges([], self._chain()))
+        arrows = {(e["from"], e["to"]) for e in edges}
+        assert arrows == {("sECUREaP-gATEWAy", "sECUREaP-aPclient1"), ("sECUREaP-aPclient1", "sECUREaP-aP4")}
+
+    def test_every_downstream_router_is_a_target_exactly_once(self):
+        """What the panel relies on: one uplink per AP, keyed by `to`."""
+        edges = _router_uplinks(_detect_inter_router_edges([], self._chain()))
+        targets = [e["to"] for e in edges]
+        assert sorted(targets) == ["sECUREaP-aP4", "sECUREaP-aPclient1"]
+
+    def test_ports_follow_the_orientation(self):
+        edges = _router_uplinks(_detect_inter_router_edges([], self._chain()))
+        by_target = {e["to"]: e["attributes"] for e in edges}
+        assert by_target["sECUREaP-aPclient1"]["from_port"] == "lan3"
+        assert by_target["sECUREaP-aPclient1"]["to_port"] == "wan"
+        assert by_target["sECUREaP-aP4"]["from_port"] == "lan3"
+        assert by_target["sECUREaP-aP4"]["to_port"] == "wan"
+
+    def test_isolated_pair_still_falls_back_to_stable_sort(self):
+        """Two APs with no path to a gateway: deterministic, id-sorted."""
+        a = _router(mac="aa:bb:cc:00:00:07", lldp=[_neigh("lan1", mgmt_ip="10.10.10.8")])
+        b = _router(mac="aa:bb:cc:00:00:08")
+        rd = [("r-b", "10.10.10.8", b), ("r-a", "10.10.10.7", a)]
+        edges = _router_uplinks(_detect_inter_router_edges([], rd))
+        assert len(edges) == 1
+        assert (edges[0]["from"], edges[0]["to"]) == ("r-a", "r-b")
