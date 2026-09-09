@@ -2,6 +2,27 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.28.2] - 2026-09-09
+
+### Fixed
+
+- **VLAN-Zuordnung pro Port war immer leer.** `get_port_vlan_map()` las die
+  DSA-`bridge-vlan`-Sektionen falsch: `device` wurde als Portname
+  interpretiert (es ist die Bridge) und die VLAN-IDs in einem Feld `vids`
+  erwartet, das dieser Sektionstyp nicht hat. Die Map kam dadurch immer leer
+  zurück und die VLAN-Spalte im Panel blieb dauerhaft `—`. Jetzt korrekt aus
+  `vlan` + `ports` (`lan1:u*`, `lan3:t`) gelesen.
+- **Kabelgeräte hinter einem AP hießen „Unbekannt".** Die Port-Zuordnung löste
+  Namen und IPs nur aus den DHCP-Leases und der ARP-Tabelle *desselben*
+  Routers auf. Nur das Gateway betreibt einen DHCP-Server, also blieb auf
+  jedem Dumb-AP jedes Kabelgerät namenlos. `build_port_connections()` nimmt
+  jetzt optional eine flottenweite Identitätsquelle
+  (`identity_leases` / `identity_arp`), die der Mesh-Aggregator aus allen
+  Config-Entries zusammenstellt. Ausdrücklich **nur** zur Namensauflösung für
+  MACs, die der Router ohnehin in seiner eigenen FDB sieht — fremde Leases
+  erzeugen keine Geräte und keine Unassigned-Einträge. Geliehene Identität
+  ist als `fleet-dhcp` / `fleet-arp` in der Quelle erkennbar.
+
 ## [1.28.1] - 2026-09-09
 
 ### Fixed

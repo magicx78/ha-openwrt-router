@@ -3441,26 +3441,29 @@ class OpenWrtAPI:
                 continue
             stype = section.get(".type", "")
 
-            # DSA bridge-vlan: device = port name, vids = list of VLAN IDs
+            # DSA bridge-vlan — one section per VLAN:
+            #   option device 'br-lan'   → the BRIDGE, not a port
+            #   option vlan   '10'       → the VLAN id
+            #   list   ports  'lan1:u*'  → the member ports, flag after the colon
+            # Reading `device` as the port name (and expecting a `vids` list that
+            # this section type does not have) yielded an always-empty map.
             if stype == "bridge-vlan":
-                device = section.get("device", "")
-                vids = section.get("vids", [])
-                if not device:
+                vid_raw = section.get("vlan") or section.get("vid")
+                try:
+                    vid = int(str(vid_raw).strip())
+                except (ValueError, TypeError):
                     continue
-                if isinstance(vids, str):
-                    vids = [vids]
-                parsed: list[int] = []
-                for vid in vids:
-                    try:
-                        # VID may be "10" or "10:t" (tagged) — strip suffix
-                        parsed.append(int(str(vid).split(":")[0]))
-                    except (ValueError, TypeError):
-                        pass
-                if parsed:
-                    port_vlan.setdefault(device, [])
-                    port_vlan[device].extend(
-                        v for v in parsed if v not in port_vlan[device]
-                    )
+                ports = section.get("ports", [])
+                if isinstance(ports, str):
+                    ports = [ports]
+                for token in ports:
+                    # "lan1:u*" / "lan3:t" / "wan" → name before the flag suffix
+                    port_name = str(token).split(":")[0].strip()
+                    if not port_name:
+                        continue
+                    port_vlan.setdefault(port_name, [])
+                    if vid not in port_vlan[port_name]:
+                        port_vlan[port_name].append(vid)
 
             # Legacy swconfig switch_vlan: ports = "0 1 2t" style string
             elif stype == "switch_vlan":

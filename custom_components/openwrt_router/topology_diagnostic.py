@@ -278,6 +278,8 @@ def build_topology_snapshot(
     role: str = "unknown",
     host_ip: str = "",
     include_port_debug: bool = False,
+    identity_leases: dict[str, dict[str, str]] | None = None,
+    identity_arp: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a topology snapshot from coordinator data.
 
@@ -321,6 +323,8 @@ def build_topology_snapshot(
             data.ap_interfaces,
             getattr(data, "sta_interfaces", None),
         ),
+        identity_leases=identity_leases,
+        identity_arp=identity_arp,
         include_debug=include_port_debug,
     )
 

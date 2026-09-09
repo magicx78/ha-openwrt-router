@@ -1099,6 +1099,23 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     all_clients: list[dict[str, Any]] = []
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]] = []
 
+    # Fleet-wide identity, collected before the per-router snapshots are built:
+    # only the gateway runs a DHCP server, so a dumb AP has no way to put a name
+    # or IP on the devices its own ports see and rendered them all as
+    # "Unbekannt". Naming source only — never a device source.
+    fleet_leases: dict[str, dict[str, str]] = {}
+    fleet_arp: dict[str, str] = {}
+    for entry in entries:
+        runtime = getattr(entry, "runtime_data", None)
+        coordinator = getattr(runtime, "coordinator", None) if runtime else None
+        entry_data = getattr(coordinator, "data", None)
+        if entry_data is None:
+            continue
+        for mac, lease in (entry_data.dhcp_leases or {}).items():
+            fleet_leases.setdefault(mac, lease)
+        for mac, ip in (getattr(entry_data, "arp_table", None) or {}).items():
+            fleet_arp.setdefault(mac, ip)
+
     for entry in entries:
         runtime = getattr(entry, "runtime_data", None)
         if runtime is None:
@@ -1122,6 +1139,8 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
             include_port_debug=entry.options.get(
                 CONF_TOPOLOGY_PORT_DEBUG, DEFAULT_TOPOLOGY_PORT_DEBUG
             ),
+            identity_leases=fleet_leases,
+            identity_arp=fleet_arp,
         )
 
         # Inject online/offline status into the router node attributes
