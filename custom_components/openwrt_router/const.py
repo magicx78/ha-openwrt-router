@@ -316,6 +316,13 @@ LLDP_STATUS_NO_NEIGHBORS = "no_neighbors"  # usable but no neighbors seen
 LLDP_STATUS_UNAVAILABLE = "unavailable"  # lldpcli/lldpd/SSH not available
 LLDP_STATUS_ERROR = "error"  # unexpected exception (only real failures)
 
+# LLDP is read over SSH, so it is NOT fetched on every poll: neighbors change
+# when someone re-cables, not every 60 s. An "unavailable" verdict is retried
+# on a slower cadence so installing lldpd later takes effect without reloading
+# the config entry (both in seconds).
+LLDP_REFRESH_INTERVAL = 600.0
+LLDP_UNAVAILABLE_RETRY_INTERVAL = 1800.0
+
 # Coordinator data keys
 KEY_LLDP_NEIGHBORS = "lldp_neighbors"
 KEY_LLDP_STATUS = "lldp_status"

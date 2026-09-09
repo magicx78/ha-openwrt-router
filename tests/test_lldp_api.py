@@ -7,6 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from custom_components.openwrt_router.const import (
+    LLDP_REFRESH_INTERVAL,
+    LLDP_UNAVAILABLE_RETRY_INTERVAL,
+)
 from custom_components.openwrt_router.api import (
     OpenWrtMethodNotFoundError,
     OpenWrtAPI,
@@ -193,3 +197,68 @@ class TestClientEnrichment:
         assert c["source"] == "iwinfo"
         assert c["confidence"] == "medium"
         assert "web_url" not in c  # no IP → no link
+
+
+class TestLldpFetchThrottling:
+    """LLDP runs over SSH, so it must not open a connection on every poll —
+    and an 'unavailable' verdict must not stay frozen for the whole session.
+    """
+
+    @pytest.mark.asyncio
+    async def test_available_result_is_served_from_cache_within_interval(self):
+        api = _api()
+        api._lldp_ubus_unavailable = True
+        ctx, mock = _patch_connect(_fake_conn(stdout=_LLDP_JSON.encode()))
+        with ctx:
+            first, status = await api.get_lldp_neighbors()
+            after_first = mock.await_count
+            second, status2 = await api.get_lldp_neighbors()
+        assert status == status2 == "ok"
+        assert second == first
+        # Second poll inside the refresh window → no new SSH connection.
+        assert mock.await_count == after_first
+
+    @pytest.mark.asyncio
+    async def test_neighbors_are_refetched_after_the_refresh_interval(self):
+        api = _api()
+        api._lldp_ubus_unavailable = True
+        ctx, mock = _patch_connect(_fake_conn(stdout=_LLDP_JSON.encode()))
+        with ctx:
+            await api.get_lldp_neighbors()
+            after_first = mock.await_count
+            api._lldp_last_fetch -= LLDP_REFRESH_INTERVAL + 1
+            _neighbors, status = await api.get_lldp_neighbors()
+        assert status == "ok"
+        assert mock.await_count > after_first
+
+    @pytest.mark.asyncio
+    async def test_unavailable_is_retried_after_the_retry_interval(self):
+        """Installing lldpd later must take effect without an entry reload."""
+        api = _api()
+        api._lldp_ubus_unavailable = True
+        ctx, _ = _patch_connect(_fake_conn(exit_status=127, stdout=b""))
+        with ctx:
+            _neighbors, status = await api.get_lldp_neighbors()
+        assert status == "unavailable"
+
+        api._lldp_last_fetch -= LLDP_UNAVAILABLE_RETRY_INTERVAL + 1
+        ctx2, mock2 = _patch_connect(_fake_conn(stdout=_LLDP_JSON.encode()))
+        with ctx2:
+            neighbors, status = await api.get_lldp_neighbors()
+        assert status == "ok"
+        assert len(neighbors) == 1
+        assert mock2.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_reset_acl_blocked_reopens_lldp_probing(self):
+        """A repaired ACL means the router was touched — re-probe immediately."""
+        api = _api()
+        api._lldp_ubus_unavailable = True
+        ctx, _ = _patch_connect(_fake_conn(exit_status=127, stdout=b""))
+        with ctx:
+            await api.get_lldp_neighbors()
+        assert api._lldp_checked is True
+
+        api.reset_acl_blocked()
+        assert api._lldp_checked is False
+        assert api._lldp_ubus_unavailable is False

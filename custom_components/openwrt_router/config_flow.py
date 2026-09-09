@@ -251,8 +251,13 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         host = self._user_data.get(CONF_HOST, "")
         errors: dict[str, str] = {}
         deployed = False
+        # LLDP is optional and is NOT provisioned by the ACL deploy, so it must
+        # stay out of the before/after comparison below — otherwise a router
+        # without lldpd makes every successful deploy look like a no-op.
         missing_before = {
-            cap for cap in self._CAPABILITY_LABELS if not self._capabilities.get(cap)
+            cap
+            for cap in self._CAPABILITY_LABELS
+            if cap != self._LLDP_CAP and not self._capabilities.get(cap)
         }
 
         if user_input is not None:
@@ -356,7 +361,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             missing_after = {
                 cap
                 for cap in self._CAPABILITY_LABELS
-                if not self._capabilities.get(cap)
+                if cap != self._LLDP_CAP and not self._capabilities.get(cap)
             }
             if not missing_after or missing_after < missing_before:
                 deploy_note = (

@@ -43,10 +43,12 @@ from .const import (
     LLDP_KEY_MGMT_IP,
     LLDP_KEY_PORT_DESCR,
     LLDP_KEY_PORT_ID,
+    LLDP_REFRESH_INTERVAL,
     LLDP_STATUS_ERROR,
     LLDP_STATUS_NO_NEIGHBORS,
     LLDP_STATUS_OK,
     LLDP_STATUS_UNAVAILABLE,
+    LLDP_UNAVAILABLE_RETRY_INTERVAL,
     SOURCE_HOSTAPD,
     SOURCE_IWINFO,
     DEFAULT_PROTOCOL,
@@ -722,13 +724,18 @@ class OpenWrtAPI:
         # LLDP: cache "no ubus lldp object" so we probe ubus only once per
         # session, then read via SSH lldpcli.
         self._lldp_ubus_unavailable: bool = False
-        # LLDP availability, decided on the first attempt and cached for the
-        # session: if lldpcli/lldpd/SSH is not available we must NOT retry an
-        # (up to 8 s) SSH connect on every single poll. Once available we keep
-        # fetching each poll because neighbors change. Reset on integration
-        # reload (a new OpenWrtAPI instance).
+        # LLDP availability plus a time-based cache of the neighbor table.
+        # LLDP is read over SSH, so fetching it on every poll would open one
+        # connection per router per cycle even on instances that otherwise run
+        # purely over rpcd. Neighbors are refreshed every
+        # LLDP_REFRESH_INTERVAL seconds; an "unavailable" verdict is retried
+        # every LLDP_UNAVAILABLE_RETRY_INTERVAL seconds so a later
+        # `opkg install lldpd` takes effect without an entry reload.
         self._lldp_checked: bool = False
         self._lldp_available: bool = False
+        self._lldp_last_fetch: float = 0.0
+        self._lldp_cache: list[dict[str, Any]] = []
+        self._lldp_cache_status: str = LLDP_STATUS_UNAVAILABLE
 
         # Cached ifname→ssid map from luci-rpc/getWirelessDevices (populated once when
         # hostapd.*/get_status is also ACL-blocked; None = not yet fetched).
@@ -791,6 +798,11 @@ class OpenWrtAPI:
                 self._host,
             )
         self._acl_blocked.clear()
+        # A repaired ACL can also restore the best-effort ubus LLDP object, and
+        # the router was very likely touched by hand in between — give LLDP a
+        # fresh attempt instead of waiting out the retry interval.
+        self._lldp_ubus_unavailable = False
+        self._lldp_checked = False
 
     async def async_close(self) -> None:
         """Release state on integration unload and free the rpcd session.
@@ -3498,16 +3510,30 @@ class OpenWrtAPI:
             none seen), ``unavailable`` (lldpcli/lldpd/SSH not available),
             ``error`` (unexpected exception — only real failures).
         """
-        # Cached "unavailable": never retry an 8 s SSH connect every poll once
-        # we've established lldpcli/SSH is not usable this session.
-        if self._lldp_checked and not self._lldp_available:
-            return [], LLDP_STATUS_UNAVAILABLE
+        now = time.monotonic()
+        if self._lldp_checked:
+            age = now - self._lldp_last_fetch
+            if not self._lldp_available:
+                # Cached "unavailable": do not retry an 8 s SSH connect every
+                # poll. Retry occasionally though — the config-flow checklist
+                # tells users to install lldpd, and that must take effect
+                # without reloading the config entry.
+                if age < LLDP_UNAVAILABLE_RETRY_INTERVAL:
+                    return [], LLDP_STATUS_UNAVAILABLE
+            elif age < LLDP_REFRESH_INTERVAL:
+                # Neighbors change on the timescale of re-cabling, not of a
+                # 60 s poll. Serve the cached table instead of opening an SSH
+                # connection per router per poll.
+                return list(self._lldp_cache), self._lldp_cache_status
 
         neighbors, status = await self._get_lldp_neighbors_uncached(timeout)
         self._lldp_checked = True
-        # "unavailable" is the only terminal state that disables future polls;
+        self._lldp_last_fetch = now
+        # "unavailable" is the only terminal state that throttles future polls;
         # "no_neighbors"/"ok" mean lldpcli works, so keep polling for changes.
         self._lldp_available = status != LLDP_STATUS_UNAVAILABLE
+        self._lldp_cache = neighbors if self._lldp_available else []
+        self._lldp_cache_status = status
         return neighbors, status
 
     async def _get_lldp_neighbors_uncached(

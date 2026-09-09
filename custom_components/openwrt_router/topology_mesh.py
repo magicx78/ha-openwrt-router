@@ -131,6 +131,41 @@ def _has_wan_carrier(data: OpenWrtCoordinatorData) -> bool:
     return False
 
 
+# Interface-name prefixes that identify a wireless netdev on OpenWrt. lldpd
+# reports the bridge member it received the frame on, so a WDS/4addr or mesh
+# backhaul shows up as e.g. "wlan0-1" / "mesh0" while a cabled link shows up as
+# "lan1" / "eth0.20".
+_WIRELESS_IFACE_PREFIXES = ("wlan", "wl", "wds", "mesh", "ath", "phy", "sta", "radio")
+
+
+def _lldp_link_is_wireless(*ifaces: str) -> bool:
+    """Return True if any of the given LLDP interface names is a wireless netdev.
+
+    LLDP knows the medium first-hand, which is stronger evidence than the
+    STA-interface heuristic used by the repeater override further down.
+    """
+    for iface in ifaces:
+        name = (iface or "").strip().lower()
+        if name.startswith(_WIRELESS_IFACE_PREFIXES):
+            return True
+    return False
+
+
+def _is_wired_uplink_edge(edge: dict[str, Any]) -> bool:
+    """Return True for edges that represent a physical Ethernet uplink.
+
+    Covers plain ``lan_uplink`` edges and LLDP-verified ``router_uplink`` edges
+    over copper — both carry a real gateway port and therefore both are valid
+    input for the unmanaged-switch inference.
+    """
+    relationship = edge.get("relationship")
+    if relationship == "lan_uplink":
+        return True
+    if relationship != CONNECTION_TYPE_ROUTER_UPLINK:
+        return False
+    return ((edge.get("attributes") or {}).get("link_type")) != "wifi"
+
+
 # ---------------------------------------------------------------------------
 # LLDP: preferred, authoritative source for router-to-router wiring
 # ---------------------------------------------------------------------------
@@ -343,6 +378,11 @@ def _detect_lldp_edges(
         # Preserve the actual neighbor-observed values regardless of orientation.
         observed = fwd if from_rid == a_rid else (rev or fwd)
 
+        # The medium comes from the LLDP interface names, not from a heuristic:
+        # a wireless backhaul has no physical port, so the port/VLAN compat keys
+        # stay empty and the repeater override below may promote the edge.
+        wireless = _lldp_link_is_wireless(from_iface, to_iface)
+
         edge_id = f"{from_rid}--uplink--{to_rid}"
         edges.append(
             {
@@ -354,7 +394,7 @@ def _detect_lldp_edges(
                 "inferred": False,
                 "inference_reason": None,
                 "attributes": {
-                    "link_type": SOURCE_LLDP,
+                    "link_type": "wifi" if wireless else "lan",
                     "detection_method": SOURCE_LLDP,
                     "confidence": CONF_HIGH,
                     "direction": "bidirectional" if bidirectional else "one_way",
@@ -363,9 +403,9 @@ def _detect_lldp_edges(
                     "to_port": to_port,
                     "to_interface": to_iface,
                     # Compat keys so gateway-port rendering keeps working:
-                    "gateway_port": from_port or None,
-                    "ap_port": to_port or None,
-                    "vlan_tags": vlan_tags,
+                    "gateway_port": None if wireless else (from_port or None),
+                    "ap_port": None if wireless else (to_port or None),
+                    "vlan_tags": [] if wireless else vlan_tags,
                     # Rich LLDP neighbor detail (from the from-side observation):
                     "neighbor_name": observed.get("neighbor_name", ""),
                     "neighbor_host": neighbor_meta.get("host_ip", ""),
@@ -624,16 +664,32 @@ def _detect_inter_router_edges(
     # physical Ethernet wins over a configured wireless backhaul. A concrete
     # gateway_port from FDB is NOT proof of cable: wirelessly meshed APs show
     # up behind the gateway's trunk ports in the FDB just the same.
+    #
+    # LLDP edges take part as well: an LLDP link over a wireless netdev is a
+    # repeater link and must be promoted, while an LLDP link over copper is
+    # first-hand proof of cable and outranks the STA heuristic — same as a WAN
+    # carrier. Without this, a repeater running lldpd stayed `router_uplink`
+    # and the UI rendered it as "Kabel".
     repeater_rids = {
         rid for rid, _hip, data in router_data if _has_active_sta_interface(data)
     }
     wired_rids = {rid for rid, _hip, data in router_data if _has_wan_carrier(data)}
     for edge in edges:
-        if edge["relationship"] not in ("lan_uplink", "mesh_member"):
+        if edge["relationship"] not in (
+            "lan_uplink",
+            "mesh_member",
+            CONNECTION_TYPE_ROUTER_UPLINK,
+        ):
             continue
         if edge["to"] not in repeater_rids:
             continue
         if edge["to"] in wired_rids:
+            continue
+        edge_attrs = edge.get("attributes") or {}
+        if (
+            edge_attrs.get("detection_method") == SOURCE_LLDP
+            and edge_attrs.get("link_type") != "wifi"
+        ):
             continue
 
         edge["relationship"] = "wifi_uplink"
@@ -794,7 +850,7 @@ def _detect_switch_nodes(
     # Group APs by gateway port
     port_to_aps: dict[str, list[str]] = {}
     for edge in inter_router_edges:
-        if edge.get("relationship") == "lan_uplink":
+        if _is_wired_uplink_edge(edge):
             gw_port = (edge.get("attributes") or {}).get("gateway_port")
             ap_id = edge.get("to")
             if gw_port and ap_id and edge.get("from") == gw_rid:
@@ -840,7 +896,7 @@ def _detect_switch_nodes(
         # Collect IDs of direct gateway→AP edges that are being replaced
         for edge in inter_router_edges:
             if (
-                edge.get("relationship") == "lan_uplink"
+                _is_wired_uplink_edge(edge)
                 and edge.get("from") == gw_rid
                 and edge.get("to") in ap_ids
                 and (edge.get("attributes") or {}).get("gateway_port") == port

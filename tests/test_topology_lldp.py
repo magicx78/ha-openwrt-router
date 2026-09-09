@@ -15,6 +15,7 @@ from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
 from custom_components.openwrt_router.topology_mesh import (
     _build_known_router_index,
     _detect_inter_router_edges,
+    _detect_switch_nodes,
     _match_lldp_neighbor,
     build_mesh_snapshot,
 )
@@ -50,6 +51,9 @@ def _router(
     port_fdb_map: dict | None = None,
     port_vlan_map: dict | None = None,
     clients: list | None = None,
+    sta_interfaces: list | None = None,
+    port_stats: list | None = None,
+    trunk_port_map: dict | None = None,
 ) -> OpenWrtCoordinatorData:
     data = OpenWrtCoordinatorData()
     data.router_info = {"mac": mac, "hostname": hostname}
@@ -58,7 +62,22 @@ def _router(
     data.port_fdb_map = port_fdb_map or {}
     data.port_vlan_map = port_vlan_map or {}
     data.clients = clients or []
+    data.sta_interfaces = sta_interfaces or []
+    data.port_stats = port_stats or []
+    data.trunk_port_map = trunk_port_map or {}
     return data
+
+
+def _associated_sta(ifname: str = "wlan1-sta") -> dict:
+    """An STA interface that iwinfo reports as actually associated."""
+    return {
+        "ifname": ifname,
+        "mode": "sta",
+        "mac": "RP:STA:00",
+        "bssid": "GW:AP:00",
+        "ssid": "sECUREaP",
+        "signal": -58,
+    }
 
 
 def _router_uplinks(edges: list[dict]) -> list[dict]:
@@ -322,3 +341,136 @@ class TestKnownRouterNotClient:
                     node.get("attributes", {}).get("mac", "").lower()
                     != "aa:bb:cc:00:00:02"
                 )
+
+
+# =====================================================================
+# LLDP vs. the repeater override and the unmanaged-switch inference
+#
+# Regression cover for the two ways a `router_uplink` edge used to slip past
+# rules that only ever looked at `lan_uplink` / `mesh_member`.
+# =====================================================================
+
+
+class TestLldpAndRepeaterOverride:
+    def test_wireless_lldp_link_is_promoted_to_wifi_uplink(self):
+        """A repeater running lldpd must not be rendered as "Kabel".
+
+        LLDP also travels over a WDS/4addr backhaul. Before the fix the edge
+        kept `relationship=router_uplink`, which the repeater override skipped
+        and the panel maps to 'wired'.
+        """
+        gw = _router(
+            mac="aa:bb:cc:00:00:01",
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "1.2.3.4"},
+            lldp=[_neigh("wlan0-1", mgmt_ip="10.10.10.5", port_id="wlan1-sta")],
+        )
+        rp = _router(
+            mac="aa:bb:cc:00:00:05",
+            sta_interfaces=[_associated_sta()],
+            # WAN port without carrier → no physical uplink
+            port_stats=[{"name": "wan", "up": False, "speed_mbps": None}],
+        )
+        router_data = [
+            ("r1", "10.10.10.1", gw),
+            ("r5", "10.10.10.5", rp),
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert len(edges) == 1
+        e = edges[0]
+        assert e["relationship"] == "wifi_uplink"
+        assert e["attributes"]["link_type"] == "wifi"
+        assert e["attributes"]["ap_port"] is None
+        assert e["attributes"]["vlan_tags"] == []
+        assert "repeater_override" in e["attributes"]["detection_method"]
+        assert "gateway_port" not in e["attributes"]
+
+    def test_wired_lldp_link_outranks_the_sta_heuristic(self):
+        """LLDP over copper is first-hand proof of cable.
+
+        The AP has an associated STA interface and no WAN carrier, so the
+        heuristic alone would demote it to a WLAN repeater — LLDP says
+        otherwise and must win, exactly like a WAN port with carrier.
+        """
+        gw = _router(
+            mac="aa:bb:cc:00:00:01",
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "1.2.3.4"},
+            port_vlan_map={"lan3": [10, 20]},
+            lldp=[_neigh("lan3", mgmt_ip="10.10.10.4", port_id="lan1")],
+        )
+        ap = _router(
+            mac="aa:bb:cc:00:00:04",
+            sta_interfaces=[_associated_sta()],
+            port_stats=[{"name": "wan", "up": False, "speed_mbps": None}],
+        )
+        router_data = [
+            ("r1", "10.10.10.1", gw),
+            ("r4", "10.10.10.4", ap),
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert len(edges) == 1
+        e = edges[0]
+        assert e["relationship"] == "router_uplink"
+        assert e["attributes"]["link_type"] == "lan"
+        assert e["attributes"]["gateway_port"] == "lan3"
+        assert e["attributes"]["vlan_tags"] == [10, 20]
+        assert e["attributes"]["detection_method"] == "lldp"
+
+
+class TestLldpFeedsSwitchInference:
+    def test_two_lldp_aps_on_one_port_still_infer_a_switch(self):
+        """Two APs behind an unmanaged switch, all speaking LLDP.
+
+        The switch itself has no LLDP, so both APs report the gateway directly
+        and both edges carry the same gateway port. Before the fix the switch
+        node disappeared as soon as lldpd was installed.
+        """
+        gw = _router(
+            mac="aa:bb:cc:00:00:01",
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "1.2.3.4"},
+            trunk_port_map={"lan3": "trunk"},
+            lldp=[
+                _neigh("lan3", mgmt_ip="10.10.10.2", port_id="lan1"),
+                _neigh("lan3", mgmt_ip="10.10.10.4", port_id="lan1"),
+            ],
+        )
+        ap2 = _router(mac="aa:bb:cc:00:00:02")
+        ap4 = _router(mac="aa:bb:cc:00:00:04")
+        router_data = [
+            ("r1", "10.10.10.1", gw),
+            ("r2", "10.10.10.2", ap2),
+            ("r4", "10.10.10.4", ap4),
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        assert len(_router_uplinks(edges)) == 2
+
+        nodes, switch_edges, replaced = _detect_switch_nodes(edges, router_data)
+        assert [n["type"] for n in nodes] == ["switch"]
+        assert nodes[0]["attributes"]["gateway_port"] == "lan3"
+        assert nodes[0]["attributes"]["ap_count"] == 2
+        # Both direct gateway→AP edges are rerouted through the switch.
+        assert len(replaced) == 2
+        assert {e["to"] for e in switch_edges if e["from"].startswith("switch:")} == {
+            "r2",
+            "r4",
+        }
+
+    def test_wireless_lldp_link_is_no_switch_candidate(self):
+        """A wireless LLDP link carries no gateway port and must be ignored."""
+        gw = _router(
+            mac="aa:bb:cc:00:00:01",
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "1.2.3.4"},
+            trunk_port_map={"lan3": "trunk"},
+            lldp=[
+                _neigh("wlan0-1", mgmt_ip="10.10.10.2", port_id="wlan1-sta"),
+                _neigh("wlan0-1", mgmt_ip="10.10.10.4", port_id="wlan1-sta"),
+            ],
+        )
+        router_data = [
+            ("r1", "10.10.10.1", gw),
+            ("r2", "10.10.10.2", _router(mac="aa:bb:cc:00:00:02")),
+            ("r4", "10.10.10.4", _router(mac="aa:bb:cc:00:00:04")),
+        ]
+        edges = _detect_inter_router_edges([], router_data)
+        nodes, _switch_edges, replaced = _detect_switch_nodes(edges, router_data)
+        assert nodes == []
+        assert replaced == set()

@@ -213,3 +213,65 @@ class TestAPInterfaceNodes:
         assert len(client_nodes) == 1
         # Client node id is "client:{mac_lowercase}"
         assert client_nodes[0]["id"] == "client:11:22:33:44:55:66"
+
+
+# =====================================================================
+# Server-side client enrichment must survive into the panel payload
+# =====================================================================
+
+
+class TestClientEnrichmentReachesPanel:
+    """api._enrich_client_metadata sets vendor/connection_type/confidence/…
+
+    The panel reads those from the client node's ``attributes``. While the
+    whitelist here dropped them, the frontend silently fell back to its own
+    OUI table and the server-side lookup was dead code.
+    """
+
+    def _snapshot_client_attrs(self, extra: dict) -> dict:
+        data = _make_data(
+            router_info={"hostname": "test-router"},
+            clients=[
+                {
+                    "mac": "11:22:33:44:55:66",
+                    "ip": "192.168.1.50",
+                    "signal": -60,
+                    "radio": "phy0-ap0",
+                    **extra,
+                }
+            ],
+        )
+        snapshot = build_topology_snapshot(data)
+        nodes = [n for n in snapshot["nodes"] if n.get("type") == "client"]
+        assert len(nodes) == 1
+        return nodes[0]["attributes"]
+
+    def test_enriched_fields_are_forwarded(self):
+        attrs = self._snapshot_client_attrs(
+            {
+                "vendor": "Cudy",
+                "connection_type": "wireless",
+                "confidence": "high",
+                "source": "hostapd",
+                "web_url": "http://192.168.1.50",
+                "last_seen": "2026-09-09T10:00:00+00:00",
+            }
+        )
+        assert attrs["vendor"] == "Cudy"
+        assert attrs["connection_type"] == "wireless"
+        assert attrs["confidence"] == "high"
+        assert attrs["source"] == "hostapd"
+        assert attrs["web_url"] == "http://192.168.1.50"
+        assert attrs["last_seen"] == "2026-09-09T10:00:00+00:00"
+
+    def test_missing_enrichment_stays_none(self):
+        attrs = self._snapshot_client_attrs({})
+        for key in (
+            "vendor",
+            "connection_type",
+            "confidence",
+            "source",
+            "web_url",
+            "last_seen",
+        ):
+            assert attrs[key] is None
