@@ -22,7 +22,6 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     CONF_TOPOLOGY_PORT_DEBUG,
-    CONFIDENCE_HIGH as CONF_HIGH,
     CONNECTION_TYPE_ROUTER_UPLINK,
     DEFAULT_TOPOLOGY_PORT_DEBUG,
     DOMAIN,
@@ -35,6 +34,9 @@ from .const import (
     LLDP_KEY_PORT_ID,
     SOURCE_LLDP,
 )
+
+# Aliased: topology_ports exports a CONFIDENCE_HIGH of its own.
+from .const import CONFIDENCE_HIGH as CONF_HIGH
 from .coordinator import OpenWrtCoordinatorData
 from .topology_diagnostic import build_topology_snapshot
 from .topology_ports import (
@@ -1119,7 +1121,7 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     # of known-router MACs from the live config entries and filter clients by it.
     _known_tokens, _known_meta = _build_known_router_index(router_data)
     known_router_macs: set[str] = set()
-    for _rid, _m in _known_meta.items():
+    for _m in _known_meta.values():
         known_router_macs |= {m.lower() for m in _m.get("macs", set())}
 
     def _is_known_router_mac(mac: str) -> bool:
