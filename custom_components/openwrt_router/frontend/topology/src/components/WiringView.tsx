@@ -64,6 +64,12 @@ function isDefaultHostname(name: string): boolean {
 
 export function WiringView({ data, onSelectAP }: Props) {
   const rows = useMemo<WiringRow[]>(() => {
+    // Uplinks are not all rooted at the gateway: an AP cabled behind another AP
+    // (a chain, which LLDP reports accurately) has that AP as its source. Resolve
+    // the real upstream node instead of labelling every row with the gateway.
+    const nameById = new Map<string, string>([[data.gateway.id, data.gateway.name]]);
+    for (const peer of data.accessPoints) nameById.set(peer.id, peer.name);
+
     return [...data.accessPoints]
       .map<WiringRow>((ap) => {
         // Medium-Mapping (semantisch korrekt):
@@ -111,7 +117,7 @@ export function WiringView({ data, onSelectAP }: Props) {
 
         return {
           ap,
-          fromName: data.gateway.name,
+          fromName: nameById.get(ap.uplinkTo) ?? data.gateway.name,
           fromPort: shortPort(ap.gatewayPort),
           toName: displayName,
           toPort: shortPort(toPortName),
