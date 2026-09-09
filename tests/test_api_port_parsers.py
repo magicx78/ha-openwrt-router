@@ -13,11 +13,25 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from unittest.mock import MagicMock
+
 from custom_components.openwrt_router.api import (
+    OpenWrtAPI,
     OpenWrtMethodNotFoundError,
     _parse_brforward,
     _parse_proc_net_arp,
 )
+
+
+def _api() -> OpenWrtAPI:
+    return OpenWrtAPI(
+        host="192.168.1.1",
+        port=80,
+        username="root",
+        password="pw",
+        session=MagicMock(),
+        protocol="http",
+    )
 
 
 def _fdb_entry(
@@ -224,3 +238,77 @@ class TestGetBridgeFdbParsing:
         mock_api._call = AsyncMock(side_effect=call_side_effect)
         fdb = await mock_api.get_bridge_fdb()
         assert fdb == {"aa:bb:cc:dd:ee:01": "lan1"}
+
+
+class TestPortVlanMapDsa:
+    """get_port_vlan_map() against the real OpenWrt DSA schema.
+
+    A `bridge-vlan` section names the BRIDGE in `device`, the VLAN id in
+    `vlan` and the member ports in `ports` ("lan1:u*", "lan3:t"). Reading
+    `device` as the port name and expecting a `vids` list — which this section
+    type does not have — produced an always-empty map, so the topology panel
+    never showed a single VLAN tag.
+    """
+
+    def _uci_values(self):
+        return {
+            "values": {
+                "vlan10": {
+                    ".type": "bridge-vlan",
+                    ".name": "vlan10",
+                    "device": "br-lan",
+                    "vlan": "10",
+                    "ports": ["lan1:u*", "lan2:u*", "lan3:t"],
+                },
+                "vlan20": {
+                    ".type": "bridge-vlan",
+                    ".name": "vlan20",
+                    "device": "br-lan",
+                    "vlan": "20",
+                    "ports": ["lan3:t"],
+                },
+                "lan_dev": {".type": "device", ".name": "lan_dev", "name": "lan1"},
+                "lan": {".type": "interface", "proto": "static"},
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_ports_are_mapped_to_their_vlans(self):
+        api = _api()
+        api._call = AsyncMock(return_value=self._uci_values())
+        result = await api.get_port_vlan_map()
+        assert result == {"lan1": [10], "lan2": [10], "lan3": [10, 20]}
+
+    @pytest.mark.asyncio
+    async def test_single_port_string_is_accepted(self):
+        """uci returns a bare string when the list has exactly one entry."""
+        api = _api()
+        api._call = AsyncMock(
+            return_value={
+                "values": {
+                    "v": {
+                        ".type": "bridge-vlan",
+                        "device": "br-lan",
+                        "vlan": "30",
+                        "ports": "lan3:t",
+                    }
+                }
+            }
+        )
+        assert await api.get_port_vlan_map() == {"lan3": [30]}
+
+    @pytest.mark.asyncio
+    async def test_section_without_a_vlan_id_is_skipped(self):
+        api = _api()
+        api._call = AsyncMock(
+            return_value={
+                "values": {
+                    "broken": {
+                        ".type": "bridge-vlan",
+                        "device": "br-lan",
+                        "ports": ["lan1:u*"],
+                    }
+                }
+            }
+        )
+        assert await api.get_port_vlan_map() == {}

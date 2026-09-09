@@ -160,6 +160,8 @@ def build_port_connections(
     arp_table: dict[str, str] | None,
     wifi_client_macs: set[str] | None = None,
     own_macs: set[str] | None = None,
+    identity_leases: dict[str, dict[str, str]] | None = None,
+    identity_arp: dict[str, str] | None = None,
     include_debug: bool = False,
 ) -> dict[str, Any]:
     """Build the per-port device mapping from FDB + DHCP + ARP.
@@ -171,6 +173,12 @@ def build_port_connections(
         arp_table: MAC → IPv4 (complete ARP entries only).
         wifi_client_macs: MACs of associated WiFi clients to exclude.
         own_macs: Router-own MACs to exclude.
+        identity_leases: Fleet-wide DHCP leases used ONLY to put a name and IP
+            on a MAC this router already sees in its own FDB. A dumb AP runs no
+            DHCP server, so without this every wired device behind it stays
+            "Unbekannt". Deliberately not a device source: these entries never
+            create ports entries or unassigned devices of their own.
+        identity_arp: Fleet-wide ARP table, same rules as identity_leases.
         include_debug: Attach a per-port debug trace explaining the mapping.
 
     Returns:
@@ -181,6 +189,11 @@ def build_port_connections(
         normalize_mac(mac): lease for mac, lease in (dhcp_leases or {}).items()
     }
     arp_by_mac = {normalize_mac(mac): ip for mac, ip in (arp_table or {}).items()}
+    # Fleet-wide identity: naming only, never a device source (see docstring).
+    shared_leases = {
+        normalize_mac(mac): lease for mac, lease in (identity_leases or {}).items()
+    }
+    shared_arp = {normalize_mac(mac): ip for mac, ip in (identity_arp or {}).items()}
     # Normalise FDB keys once so all lookups are consistent
     fdb_norm = {normalize_mac(mac): port for mac, port in (fdb or {}).items()}
     wifi_macs = {normalize_mac(mac) for mac in (wifi_client_macs or set())}
@@ -232,14 +245,22 @@ def build_port_connections(
     def _identity(mac: str) -> tuple[str | None, str | None, list[str], str | None]:
         """Resolve (ip, name, extra_sources, conflict_reason) for a MAC."""
         lease = leases_by_mac.get(mac) or {}
+        from_fleet_lease = False
+        if not lease:
+            lease = shared_leases.get(mac) or {}
+            from_fleet_lease = bool(lease)
         lease_ip = lease.get("ip") or None
         hostname = lease.get("hostname") or lease.get("name") or None
         arp_ip = arp_by_mac.get(mac)
+        from_fleet_arp = False
+        if not arp_ip:
+            arp_ip = shared_arp.get(mac)
+            from_fleet_arp = bool(arp_ip)
         sources: list[str] = []
         if lease:
-            sources.append("dhcp")
+            sources.append("fleet-dhcp" if from_fleet_lease else "dhcp")
         if arp_ip:
-            sources.append("arp")
+            sources.append("fleet-arp" if from_fleet_arp else "arp")
         conflict: str | None = None
         ip = lease_ip or arp_ip
         if lease_ip and arp_ip and lease_ip != arp_ip:

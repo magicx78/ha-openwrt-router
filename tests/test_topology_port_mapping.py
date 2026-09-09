@@ -335,3 +335,80 @@ class TestDiagnosticsPortMapping:
         assert not _IP_RE.search(serialized)
         lan1 = next(p for p in port_mapping["ports"] if p["name"] == "lan1")
         assert lan1["device_count"] == 1
+
+
+class TestFleetWideIdentity:
+    """A dumb AP runs no DHCP server, so it cannot name its own wired devices.
+
+    Before the fleet-identity fallback every device behind an AP port rendered
+    as "Unbekannt" even though the gateway held the lease all along.
+    """
+
+    _PORTS = [{"name": "lan1", "up": True, "speed_mbps": 1000, "duplex": "full"}]
+    _FDB = {"aa:bb:cc:dd:ee:01": "lan1"}
+    _GW_LEASES = {
+        "AA:BB:CC:DD:EE:01": {"ip": "10.10.10.50", "hostname": "drucker"},
+        # A lease for a device this AP does NOT see — must not leak in.
+        "AA:BB:CC:DD:EE:99": {"ip": "10.10.10.99", "hostname": "woanders"},
+    }
+    _GW_ARP = {"AA:BB:CC:DD:EE:01": "10.10.10.50"}
+
+    def _build(self, **kwargs):
+        from custom_components.openwrt_router.topology_ports import (
+            build_port_connections,
+        )
+
+        return build_port_connections(
+            port_stats=self._PORTS,
+            fdb=self._FDB,
+            dhcp_leases={},  # dumb AP: no DHCP server of its own
+            arp_table={},
+            **kwargs,
+        )
+
+    def test_without_fleet_identity_the_device_stays_nameless(self):
+        result = self._build()
+        device = result["ports"]["lan1"]["connected_devices"][0]
+        assert device["mac"] == "aa:bb:cc:dd:ee:01"
+        assert device["name"] is None
+        assert device["ip"] is None
+
+    def test_fleet_identity_names_a_device_the_ap_already_sees(self):
+        result = self._build(
+            identity_leases=self._GW_LEASES, identity_arp=self._GW_ARP
+        )
+        device = result["ports"]["lan1"]["connected_devices"][0]
+        assert device["name"] == "drucker"
+        assert device["ip"] == "10.10.10.50"
+        # Provenance stays honest: the identity is borrowed, not observed here.
+        assert "fleet-dhcp" in device["source"]
+
+    def test_fleet_identity_never_invents_devices(self):
+        """Naming source only — a foreign lease must not become a device."""
+        result = self._build(
+            identity_leases=self._GW_LEASES, identity_arp=self._GW_ARP
+        )
+        macs = {
+            d["mac"]
+            for port in result["ports"].values()
+            for d in port["connected_devices"]
+        } | {d["mac"] for d in result["unassigned"]}
+        assert macs == {"aa:bb:cc:dd:ee:01"}
+
+    def test_own_lease_wins_over_the_fleet_entry(self):
+        own = {"AA:BB:CC:DD:EE:01": {"ip": "10.10.10.51", "hostname": "lokal"}}
+        from custom_components.openwrt_router.topology_ports import (
+            build_port_connections,
+        )
+
+        result = build_port_connections(
+            port_stats=self._PORTS,
+            fdb=self._FDB,
+            dhcp_leases=own,
+            arp_table={},
+            identity_leases=self._GW_LEASES,
+            identity_arp=self._GW_ARP,
+        )
+        device = result["ports"]["lan1"]["connected_devices"][0]
+        assert device["name"] == "lokal"
+        assert "dhcp" in device["source"] and "fleet-dhcp" not in device["source"]
