@@ -322,6 +322,9 @@ Topology Panel (sidebar)
 
 | Version | Date | Key Features |
 |---------|------|---|
+| **1.28.0** | 2026-09 | LLDP-basierte Router-zu-Router-Verkabelung inkl. physischer Ports, reicheres Client-Datenmodell (Vendor/Quelle/Confidence) — siehe [CHANGELOG.md](CHANGELOG.md) |
+| **1.27.0** | 2026-09 | Reboot-Button pro Router (ubus `system/reboot` mit SSH-Fallback) — siehe [CHANGELOG.md](CHANGELOG.md) |
+| **1.24.0 – 1.26.6** | 2026-08 | Log-Hygiene im Multi-Router-Betrieb, ScannerEntity-Dedup über APs hinweg, rpcd-ACL v5 mit Redeploy, SSL-Kontext ausserhalb des Event-Loops — siehe [CHANGELOG.md](CHANGELOG.md) |
 | **1.23.0** | 2026-07 | Setup-Checklist: Datei-Lesezugriff via ubus (erweiterte rpcd-ACL), WLAN-Status via iwinfo, reparierte manuelle Deploy-Anleitung — siehe [CHANGELOG.md](CHANGELOG.md) |
 | **1.22.0** | 2026-07 | SSH-Fallback pure-Python (asyncssh) statt `sshpass` — funktioniert jetzt auch auf HAOS/Containern — siehe [CHANGELOG.md](CHANGELOG.md) |
 | **1.20.0 – 1.21.0** | 2026-07 | HA-2026.8-Kompatibilität (`config_entry=` im Coordinator), de.json, CI-Modernisierung; Checklist-Deploy-Feedback + SSH-Fallback fürs ACL-Deploy; Topology-Port-Mapping — siehe [CHANGELOG.md](CHANGELOG.md) |
