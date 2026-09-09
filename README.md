@@ -70,6 +70,42 @@ Opens when a node is clicked. Shows:
 - **Access Point**: model, firmware, IP, uplink type + backhaul signal, CPU/RAM bars, SSIDs, client list, event timeline
 - **Client**: hostname, IP, MAC, vendor, band, signal, connected since, DHCP expiry, session traffic, HA device-tracker link
 
+### Router-to-router wiring (LLDP)
+
+Which AP hangs on which router — and on which physical port — is read from
+**LLDP** when the routers run `lldpd`. LLDP reports real link-layer neighbours
+plus the local and remote port, so the panel no longer has to infer the
+backbone from DHCP leases, ARP and bridge FDB. LLDP runs as the first detection
+pass and wins over all heuristics for the same router pair; a conflicting
+FDB port is recorded in diagnostics rather than silently preferred.
+
+LLDP is **optional**. Without `lldpd` everything keeps working exactly as
+before, only with lower confidence and a corresponding marker in the UI. It is
+read over SSH (`lldpcli -f json show neighbors`) because stock OpenWrt exposes
+no ubus object for it — that read deliberately does **not** trip the
+“SSH fallback / degraded” warning, and it is refreshed every 10 minutes rather
+than on every poll.
+
+Install it on **all** routers for reliable detection:
+
+```sh
+# OpenWrt 25.x (apk)
+apk add lldpd
+
+# OpenWrt 24.x and older (opkg)
+opkg update && opkg install lldpd
+
+/etc/init.d/lldpd enable && /etc/init.d/lldpd start
+```
+
+The medium is taken from the LLDP interface names, so a WLAN repeater running
+`lldpd` is still shown as *WLAN Repeater* while an LLDP-verified copper link
+outranks the STA-interface heuristic. Two APs reported on the same gateway port
+still produce an inferred unmanaged-switch node.
+
+Installing `lldpd` later takes effect on its own — no reload of the config
+entry required.
+
 ### Port-to-device mapping
 
 Every physical port tile (WAN, LAN1, …) shows what is plugged in: a badge with
@@ -131,6 +167,7 @@ The Inspector panel shows a per-device event timeline — status changes recorde
 - **Per-Port Sensors**: Link state, speed, RX/TX bytes per physical Ethernet port
 - **WAN Statistics**: WAN download/upload bytes, WAN IP, WAN status
 - **Radio Signal/Noise**: dBm sensors per WiFi radio (iwinfo-capable routers)
+- **LLDP Neighbours**: router-to-router wiring incl. physical ports read from `lldpd` when installed — optional, falls back to the DHCP/ARP/FDB heuristics
 
 ### DDNS / DynDNS
 - **DDNS Service Status**: Reads `/etc/config/ddns` — service name, domain, last update, current IP
@@ -192,6 +229,8 @@ Add via **Settings → Devices & Services → Add Integration → OpenWrt Router
 - Home Assistant **2026.2.0** or newer
 - OpenWrt **19.07** or newer (tested on 25.12.1)
 - `rpcd` with `rpcd-mod-rpcsys` installed on the router
+- *Optional:* `lldpd` on every router for exact router-to-router wiring
+  (see [Router-to-router wiring (LLDP)](#router-to-router-wiring-lldp))
 
 ### Enable rpcd on OpenWrt
 

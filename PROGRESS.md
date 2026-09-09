@@ -1,9 +1,44 @@
 # PROGRESS — OpenWrt HA Integration
 
-Entwicklungsprotokoll · Letzte Session: 2026-08-23 · Aktuell: **v1.26.6**
+Entwicklungsprotokoll · Letzte Session: 2026-09-09 · Aktuell: **v1.28.0**
 
 > Detaillierte Session-Protokolle bis v1.13.0 liegen in der Git-Historie dieser Datei;
 > vollständige Release-Details in [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## Status: v1.28.0 — LLDP-Topologie (2026-09-09)
+
+Der zwei Monate alte Feature-Branch `feature/lldp-topology` (PR #14) wurde auf
+`main` nachgezogen und gemergt. Router-zu-Router-Verkabelung kommt jetzt
+bevorzugt aus **LLDP** (echte Nachbarn + physische Ports) statt aus
+DHCP/ARP/FDB-Heuristik; ohne `lldpd` bleibt alles wie bisher, nur mit
+geringerer Confidence.
+
+Beim Merge-Review gefundene und behobene Punkte:
+
+- LLDP-Kanten leiten ihr Medium aus den LLDP-Interface-Namen ab
+  (`link_type: lan|wifi`). Vorher stand dort `"lldp"`, wodurch der
+  Repeater-Override (`lan_uplink`/`mesh_member`) LLDP-Kanten übersprang — ein
+  Repeater mit `lldpd` wurde als „Kabel“ gerendert. Umgekehrt schlägt eine
+  LLDP-verifizierte Kupferstrecke jetzt die STA-Heuristik, wie ein WAN-Carrier.
+- Die Switch-Inferenz gruppierte nur `lan_uplink`; LLDP unterdrückt genau die.
+  Zwei APs hinter einem unmanaged Switch verloren dadurch ihren Switch-Knoten,
+  sobald `lldpd` lief. Gruppierung läuft jetzt über `_is_wired_uplink_edge()`.
+- `topology_diagnostic.py` verwarf `vendor`/`connection_type`/`confidence`/
+  `source`/`web_url`/`last_seen` aus seiner Attribut-Whitelist — das Frontend
+  fiel still auf seine eigene OUI-Tabelle zurück, `oui.py` war toter Code.
+- `missing_before`/`missing_after` im Config-Flow zählten die optionale
+  `lldp_neighbors`-Capability mit → erfolgreicher ACL-Deploy meldete
+  „keine Änderung“.
+- LLDP hängte an jedem Poll an einem SSH-Connect und cachte ein
+  „unavailable“ für die ganze Session. Jetzt Refresh alle 600 s, Retry alle
+  1800 s und nach jedem `reset_acl_blocked()` — ein nachträglich installiertes
+  `lldpd` wirkt ohne Entry-Reload.
+
+Nebenbei: die CI zieht `ruff` unpinned und ist bei 0.16.6 angekommen, das I001
+und PERF102 im Default-Regelsatz hat. Die betroffenen Import-Blöcke wurden
+sortiert.
 
 ---
 
@@ -61,6 +96,9 @@ Nicht betroffen (verifiziert): Device-Tracker-Deprecations 2026.6
 
 | Version | Zeitraum | Inhalt |
 |---------|----------|--------|
+| **v1.28.0** | 2026-09 | LLDP-Topologie (Router-zu-Router + Ports), reicheres Client-Modell |
+| **v1.27.0** | 2026-09 | Reboot-Button pro Router (ubus mit SSH-Fallback) |
+| **v1.26.x** | 2026-08 | Log-Hygiene Multi-Router, ScannerEntity-Dedup, ACL v5, SSL-Kontext |
 | **v1.20.0** | 2026-07 | HA-Kompatibilität 2026.8, de.json, CI-Modernisierung |
 | **v1.19.0** | 2026-05 | rpcd-Session-Leak-Fix (Ursache des Router-OOM), ACL-Re-Validierung |
 | **v1.18.0** | 2026-04 | Subprocess- + Panel-Lifecycle-Hardening, 24h-Prod-Sampler |
@@ -76,9 +114,13 @@ Nicht betroffen (verifiziert): Device-Tracker-Deprecations 2026.6
 ## Architektur-Kurzreferenz
 
 - `api.py` — alle HTTP/SSH-Calls (ubus JSON-RPC, `_safe_subprocess_exec` für SSH-Fallback)
+  · LLDP via `lldpcli` über `_run_ssh` (kippt bewusst **nicht** den Degraded-Status),
+  zeitbasiert gecacht (`LLDP_REFRESH_INTERVAL` / `LLDP_UNAVAILABLE_RETRY_INTERVAL`)
 - `coordinator.py` — 60s-Poll (adaptiv: 120s bei CPU >100%, 300s bei SSH-Fallback),
   Event-/DSL-/CPU-History, Feature-Detection beim ersten Refresh
 - `topology_mesh.py` / `topology_panel.py` — Multi-Router-Aggregation + Sidebar-Panel
+  · Kanten-Prioritaet: Method 0 LLDP → DHCP → ARP/Trunk → WiFi → Subnet-Fallback,
+  danach Repeater-Override und Switch-Inferenz
 - Entities lesen ausschließlich aus `coordinator.data`; runtime_data (typisiert) am Entry
 
 ## Bekannte Einschränkungen
