@@ -557,6 +557,15 @@ def build_topology_snapshot(
                     "dhcp_expires": client.get("dhcp_expires"),
                     "rx_bytes": c_rx_bytes,
                     "tx_bytes": c_tx_bytes,
+                    # Server-side client enrichment (api._enrich_client_metadata).
+                    # Without these keys the panel silently falls back to its own
+                    # OUI table and shows no connection type / confidence at all.
+                    "vendor": client.get("vendor"),
+                    "connection_type": client.get("connection_type"),
+                    "confidence": client.get("confidence"),
+                    "source": client.get("source"),
+                    "web_url": client.get("web_url"),
+                    "last_seen": client.get("last_seen"),
                     # True when the client originates from hostapd (WiFi client).
                     # Frontend uses this to render a WiFi vs cable indicator and
                     # avoid mis-classifying repeaters/clients that also have a

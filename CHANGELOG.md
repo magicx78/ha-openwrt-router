@@ -2,6 +2,66 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.28.0] - 2026-09-09
+
+> **Bessere Geräte- & Topology-Erkennung via LLDP.** Router-zu-Router-Verkabelung
+> wird jetzt bevorzugt über **LLDP** erkannt (echte Nachbarn + physische Ports),
+> statt sie nur aus DHCP/ARP/FDB zu erraten. Optional — ohne lldpd funktioniert
+> alles wie bisher, nur mit geringerer Sicherheit und klarer Kennzeichnung.
+
+### Added
+
+- **LLDP als bevorzugte Quelle für Router-/AP-Nachbarschaften.** Neue Erfassung via
+  `lldpcli show neighbors -f json` über den bestehenden asyncssh-Transport (ubus wird
+  zuerst best-effort geprüft). Liefert lokalen/entfernten physischen Port, Chassis-ID,
+  Management-IP und Capabilities. Läuft als **Method 0** (höchste Priorität) im
+  Topology-Merge und überschreibt heuristische Kanten für dasselbe Router-Paar.
+- **Bidirektionale Erkennung & Konflikt-Handling.** Sehen sich zwei Router gegenseitig
+  → `confidence: high`, beide Portseiten. Einseitig → als solches markiert. Weicht der
+  LLDP-Port vom Bridge-FDB-Port ab, **gewinnt LLDP**; der Konflikt ist in Diagnostics
+  sichtbar.
+- **Dynamische Router-Erkennung aus ConfigEntries.** Bekannte Router werden aus den
+  vorhandenen `openwrt_router`-Einträgen ermittelt (IP/MAC/Hostname/Chassis-ID). Ein
+  bekannter Router wird nie mehr als normaler Client dargestellt. Keine Annahme über
+  IP-Reihenfolge, keine feste Routerzahl (1/2/3/N).
+- **Reicheres Geräte-Datenmodell.** Clients tragen jetzt `vendor` (server-seitiges OUI),
+  `connection_type` (wired/wireless/router_uplink/unknown), `confidence`, `source`,
+  `web_url` (`http://<ip>`) und `last_seen`.
+- **Optionale Capability `lldp_neighbors`** im Config-Flow-Checklist (grün/gelb), inkl.
+  Installations-Empfehlung für `lldpd`. **Kein** Abbruch des Add-Flows ohne LLDP.
+- **Panel-Erweiterung.** Router-Uplinks werden als eigener, verifizierter LLDP-Link mit
+  Port-Badges an beiden Enden dargestellt; Detail-/Hover-Ansichten zeigen Nachbar,
+  Management-IP (Weblink), Ports, VLAN, Quelle, Confidence, RX/TX u. a.
+
+### Fixed
+
+- **Medium kommt aus LLDP, nicht aus der Heuristik.** LLDP-Kanten tragen jetzt
+  `link_type: lan|wifi`, abgeleitet aus den LLDP-Interface-Namen. Ein Repeater, der
+  lldpd betreibt, wird dadurch wieder als **WLAN Repeater** dargestellt statt als
+  „Kabel"; umgekehrt gewinnt eine LLDP-verifizierte Kupferstrecke gegen die
+  STA-Interface-Heuristik — genauso wie ein WAN-Port mit Carrier.
+- **Switch-Erkennung berücksichtigt LLDP.** Zwei APs hinter einem unmanaged Switch
+  wurden nicht mehr als Switch-Knoten erkannt, sobald lldpd lief, weil die Inferenz
+  nur `lan_uplink`-Kanten gruppiert hat.
+- **Client-Anreicherung erreicht das Panel.** `vendor`, `connection_type`,
+  `confidence`, `source`, `web_url` und `last_seen` werden in die Client-Knoten
+  übernommen; vorher hat das Frontend still auf seine eigene OUI-Tabelle
+  zurückgegriffen und der server-seitige Lookup war wirkungslos.
+- **Optionales LLDP verfälscht das ACL-Deploy-Ergebnis nicht mehr.** Fehlte nur
+  `lldp_neighbors`, meldete ein erfolgreicher Deploy fälschlich „keine Änderung".
+- **LLDP wird nicht mehr pro Poll über SSH abgefragt.** Nachbarn werden alle
+  10 Minuten aufgefrischt; ein „unavailable" wird alle 30 Minuten (und nach jedem
+  ACL-Redeploy) erneut geprüft, damit ein nachträglich installiertes `lldpd` ohne
+  Reload des Config-Entry wirksam wird.
+
+### Notes
+
+- LLDP ist **optional** und ändert keine bestehenden ACL-Rechte (`ACL_VERSION` bleibt unverändert bei 5).
+  Die LLDP-Abfrage löst **nicht** die „SSH-Fallback/degraded"-Warnung aus.
+- **Empfehlung** für zuverlässige Router-zu-Router-Erkennung auf **allen** OpenWrt-Routern:
+  `opkg update && opkg install lldpd && /etc/init.d/lldpd enable && /etc/init.d/lldpd start`
+- Nach dem Update **Home Assistant neu starten** (neue Coordinator-Felder + Frontend-Bundle).
+
 ## [1.27.0] - 2026-09-06
 
 > **Router-Neustart aus Home Assistant.** Bisher ließen sich nur einzelne

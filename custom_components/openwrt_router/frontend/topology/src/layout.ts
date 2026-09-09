@@ -65,6 +65,11 @@ export function computeEdgesFromBounds(
     const apB = bounds.get(ap.id);
     if (!apB) return;
 
+    // LLDP-verified router↔router links get a distinct edge kind but reuse the
+    // same geometry (gateway→AP cubic, or peer AP↔AP arc). The stable edge-id
+    // scheme is preserved so hover-path highlighting keeps working unchanged.
+    const isLldp = ap.uplinkType === 'router_uplink';
+
     if (ap.uplinkTo === data.gateway.id && gateway) {
       // Cubic S-curve: gateway bottom → AP top
       const sx = gateway.cx, sy = gateway.cy + gateway.h / 2;
@@ -74,7 +79,7 @@ export function computeEdgesFromBounds(
         id:              `edge-gw-${ap.id}`,
         sourceId:        data.gateway.id,
         targetId:        ap.id,
-        kind:            'gateway-wired' as EdgeKind,
+        kind:            (isLldp ? 'router-uplink' : 'gateway-wired') as EdgeKind,
         path:            `M ${sx} ${sy} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${ey}`,
         status:          ap.status,
         vlanId:          ap.primaryVlanId,
@@ -82,9 +87,12 @@ export function computeEdgesFromBounds(
         gatewayPortSpeed: ap.gatewayPortSpeed,
         apPort:          ap.apPort ?? (ap.uplinkType === 'wired' ? 'wan' : undefined),
         vlanTags:        ap.vlanTags,
+        fromPort:        isLldp ? (ap.lldpUplink?.fromPort ?? ap.gatewayPort) : undefined,
+        toPort:          isLldp ? (ap.lldpUplink?.toPort ?? ap.apPort) : undefined,
+        lldp:            isLldp ? ap.lldpUplink : undefined,
       });
     } else {
-      // Mesh: quadratic arc between AP tops
+      // Peer / mesh: quadratic arc between AP tops (also used for AP↔AP LLDP links)
       const parentB = bounds.get(ap.uplinkTo);
       if (parentB) {
         const sx = parentB.cx, sy = parentB.cy - parentB.h / 2;
@@ -95,10 +103,13 @@ export function computeEdgesFromBounds(
           id:       `edge-${ap.uplinkTo}-${ap.id}`,
           sourceId: ap.uplinkTo,
           targetId: ap.id,
-          kind:     'ap-mesh' as EdgeKind,
+          kind:     (isLldp ? 'router-uplink' : 'ap-mesh') as EdgeKind,
           path:     `M ${sx} ${sy} Q ${midX} ${arcPeakY} ${ex} ${ey}`,
           status:   ap.status,
           vlanId:   ap.primaryVlanId,
+          fromPort: isLldp ? ap.lldpUplink?.fromPort : undefined,
+          toPort:   isLldp ? ap.lldpUplink?.toPort : undefined,
+          lldp:     isLldp ? ap.lldpUplink : undefined,
         });
       }
     }

@@ -20,7 +20,23 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_TOPOLOGY_PORT_DEBUG, DEFAULT_TOPOLOGY_PORT_DEBUG, DOMAIN
+from .const import (
+    CONF_TOPOLOGY_PORT_DEBUG,
+    CONNECTION_TYPE_ROUTER_UPLINK,
+    DEFAULT_TOPOLOGY_PORT_DEBUG,
+    DOMAIN,
+    LLDP_KEY_CAPABILITIES,
+    LLDP_KEY_CHASSIS_ID,
+    LLDP_KEY_CHASSIS_NAME,
+    LLDP_KEY_LOCAL_INTERFACE,
+    LLDP_KEY_MGMT_IP,
+    LLDP_KEY_PORT_DESCR,
+    LLDP_KEY_PORT_ID,
+    SOURCE_LLDP,
+)
+
+# Aliased: topology_ports exports a CONFIDENCE_HIGH of its own.
+from .const import CONFIDENCE_HIGH as CONF_HIGH
 from .coordinator import OpenWrtCoordinatorData
 from .topology_diagnostic import build_topology_snapshot
 from .topology_ports import (
@@ -117,6 +133,305 @@ def _has_wan_carrier(data: OpenWrtCoordinatorData) -> bool:
     return False
 
 
+# Interface-name prefixes that identify a wireless netdev on OpenWrt. lldpd
+# reports the bridge member it received the frame on, so a WDS/4addr or mesh
+# backhaul shows up as e.g. "wlan0-1" / "mesh0" while a cabled link shows up as
+# "lan1" / "eth0.20".
+_WIRELESS_IFACE_PREFIXES = ("wlan", "wl", "wds", "mesh", "ath", "phy", "sta", "radio")
+
+
+def _lldp_link_is_wireless(*ifaces: str) -> bool:
+    """Return True if any of the given LLDP interface names is a wireless netdev.
+
+    LLDP knows the medium first-hand, which is stronger evidence than the
+    STA-interface heuristic used by the repeater override further down.
+    """
+    for iface in ifaces:
+        name = (iface or "").strip().lower()
+        if name.startswith(_WIRELESS_IFACE_PREFIXES):
+            return True
+    return False
+
+
+def _is_wired_uplink_edge(edge: dict[str, Any]) -> bool:
+    """Return True for edges that represent a physical Ethernet uplink.
+
+    Covers plain ``lan_uplink`` edges and LLDP-verified ``router_uplink`` edges
+    over copper — both carry a real gateway port and therefore both are valid
+    input for the unmanaged-switch inference.
+    """
+    relationship = edge.get("relationship")
+    if relationship == "lan_uplink":
+        return True
+    if relationship != CONNECTION_TYPE_ROUTER_UPLINK:
+        return False
+    return ((edge.get("attributes") or {}).get("link_type")) != "wifi"
+
+
+# ---------------------------------------------------------------------------
+# LLDP: preferred, authoritative source for router-to-router wiring
+# ---------------------------------------------------------------------------
+# LLDP gives real link-layer neighbors plus the local and remote physical
+# ports. Crucially, a router-to-router link is only ever created when a real
+# data source shows one router actually seeing another — never merely because
+# two routers are configured, and never from IP ordering. Router count is
+# whatever the config entries yield (router_data), so 1/2/3/N all work.
+
+
+def _normalize_lldp_port(iface: str) -> str:
+    """Reduce an LLDP local interface to a physical port name (strip VLAN)."""
+    return (iface or "").split(".")[0].strip().lower()
+
+
+def _mac_norm(value: str | None) -> str:
+    """Normalise a MAC-like token to ``aa:bb:...`` lower-case, else ''."""
+    if not value:
+        return ""
+    hexonly = "".join(c for c in str(value).lower() if c in "0123456789abcdef")
+    if len(hexonly) != 12:
+        return ""
+    return ":".join(hexonly[i : i + 2] for i in range(0, 12, 2))
+
+
+def _build_known_router_index(
+    router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+    """Build identity lookup maps for the configured (known) routers.
+
+    Returns ``(token_to_rid, meta)`` where ``token_to_rid`` maps every known
+    identity token (management IP, LAN/bridge/interface MAC, hostname) to its
+    router_id, and ``meta[rid]`` holds ``{host_ip, hostname, macs}``. This is
+    the basis for classifying an LLDP neighbor (or an FDB/ARP hit) as a *known
+    router* rather than an ordinary client. Derived entirely from the live
+    config entries — no hard-coded router list, no IP-order assumptions.
+    """
+    token_to_rid: dict[str, str] = {}
+    meta: dict[str, dict[str, Any]] = {}
+
+    def _add(token: str | None, rid: str) -> None:
+        if token:
+            token_to_rid.setdefault(str(token).lower(), rid)
+
+    for rid, hip, data in router_data:
+        info = data.router_info or {}
+        entry_meta = meta.setdefault(
+            rid,
+            {"host_ip": hip, "hostname": info.get("hostname", ""), "macs": set()},
+        )
+        _add(hip, rid)
+        mac = _mac_norm(info.get("mac"))
+        if mac:
+            _add(mac, rid)
+            entry_meta["macs"].add(mac)
+        _add(info.get("hostname"), rid)
+        for iface in data.network_interfaces or []:
+            _add(iface.get("ipv4_addr"), rid)
+            imac = _mac_norm(iface.get("mac"))
+            if imac:
+                _add(imac, rid)
+                entry_meta["macs"].add(imac)
+        for ap_iface in data.ap_interfaces or []:
+            bssid = _mac_norm(ap_iface.get("bssid"))
+            if bssid:
+                _add(bssid, rid)
+                entry_meta["macs"].add(bssid)
+        for sta in getattr(data, "sta_interfaces", None) or []:
+            smac = _mac_norm(sta.get("mac"))
+            if smac:
+                _add(smac, rid)
+                entry_meta["macs"].add(smac)
+    return token_to_rid, meta
+
+
+def _match_lldp_neighbor(
+    neigh: dict[str, Any], token_to_rid: dict[str, str]
+) -> str | None:
+    """Return the router_id a neighbor matches, or None if it is not a known router."""
+    # Management IP / hostname are the strongest signals.
+    for key in (LLDP_KEY_MGMT_IP, LLDP_KEY_CHASSIS_NAME):
+        tok = neigh.get(key)
+        if tok and str(tok).lower() in token_to_rid:
+            return token_to_rid[str(tok).lower()]
+    # chassis_id / port_id are frequently MACs — match raw and normalised.
+    for key in (LLDP_KEY_CHASSIS_ID, LLDP_KEY_PORT_ID):
+        tok = neigh.get(key)
+        if not tok:
+            continue
+        if str(tok).lower() in token_to_rid:
+            return token_to_rid[str(tok).lower()]
+        norm = _mac_norm(tok)
+        if norm and norm in token_to_rid:
+            return token_to_rid[norm]
+    return None
+
+
+def _orient_lldp_edge(
+    rid_a: str,
+    rid_b: str,
+    router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+) -> tuple[str, str]:
+    """Choose a from/to orientation for a router-to-router LLDP edge.
+
+    Orientation is presentation-only (both physical port sides are always
+    carried on the edge). If exactly one endpoint is a gateway it becomes
+    ``from``; otherwise a stable router_id sort is used as a tie-break. This is
+    deliberately NOT based on IP ordering — the cabling itself is what LLDP
+    reports, orientation only decides which way the arrow is drawn.
+    """
+    roles = {
+        rid: _detect_router_role(data, hip)
+        for rid, hip, data in router_data
+        if rid in (rid_a, rid_b)
+    }
+    a_gw = roles.get(rid_a) == "gateway"
+    b_gw = roles.get(rid_b) == "gateway"
+    if a_gw and not b_gw:
+        return rid_a, rid_b
+    if b_gw and not a_gw:
+        return rid_b, rid_a
+    return (rid_a, rid_b) if rid_a <= rid_b else (rid_b, rid_a)
+
+
+def _detect_lldp_edges(
+    router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+    token_to_rid: dict[str, str],
+    meta: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Detect router-to-router edges from LLDP neighbor tables.
+
+    Runs before every heuristic. Returns ``(edges, blocked_ids)`` where
+    ``blocked_ids`` contains BOTH orientations of every detected pair so the
+    downstream heuristics (DHCP / WiFi / ARP / subnet) cannot add a competing —
+    and possibly wrong-port — edge for the same pair. LLDP always wins.
+    """
+    # Collect directed observations a→b (a saw b as an LLDP neighbor).
+    obs: dict[tuple[str, str], dict[str, Any]] = {}
+    for a_rid, _a_hip, a_data in router_data:
+        for neigh in getattr(a_data, "lldp_neighbors", None) or []:
+            b_rid = _match_lldp_neighbor(neigh, token_to_rid)
+            if not b_rid or b_rid == a_rid:
+                continue
+            obs[(a_rid, b_rid)] = {
+                "local_interface": neigh.get(LLDP_KEY_LOCAL_INTERFACE, ""),
+                "local_port": _normalize_lldp_port(
+                    neigh.get(LLDP_KEY_LOCAL_INTERFACE, "")
+                ),
+                "neighbor_port_id": neigh.get(LLDP_KEY_PORT_ID, ""),
+                "neighbor_port_descr": neigh.get(LLDP_KEY_PORT_DESCR, ""),
+                "neighbor_chassis_id": neigh.get(LLDP_KEY_CHASSIS_ID, ""),
+                "neighbor_name": neigh.get(LLDP_KEY_CHASSIS_NAME)
+                or meta.get(b_rid, {}).get("hostname", ""),
+                "management_ip": neigh.get(LLDP_KEY_MGMT_IP),
+                "capabilities": neigh.get(LLDP_KEY_CAPABILITIES, []),
+            }
+
+    edges: list[dict[str, Any]] = []
+    blocked_ids: set[str] = set()
+    handled: set[frozenset[str]] = set()
+
+    for (a_rid, b_rid), fwd in obs.items():
+        pair = frozenset((a_rid, b_rid))
+        if pair in handled:
+            continue
+        handled.add(pair)
+        rev = obs.get((b_rid, a_rid))
+        bidirectional = rev is not None
+
+        from_rid, to_rid = _orient_lldp_edge(a_rid, b_rid, router_data)
+        # Map each router's OWN self-reported local port to the from/to side.
+        if from_rid == a_rid:
+            from_obs, to_obs = fwd, rev
+        else:
+            from_obs, to_obs = rev, fwd
+
+        from_port = (from_obs or {}).get("local_port") or ""
+        from_iface = (from_obs or {}).get("local_interface") or ""
+        # Prefer the peer's OWN self-report for the to-side port; otherwise fall
+        # back to what the from-side saw as the neighbor's port.
+        if to_obs:
+            to_port = to_obs.get("local_port") or ""
+            to_iface = to_obs.get("local_interface") or ""
+        else:
+            to_port = (from_obs or {}).get("neighbor_port_id") or ""
+            to_iface = to_port
+
+        # Conflict check: does the from-router's bridge FDB place the peer on a
+        # different port than LLDP reports? LLDP wins; record for diagnostics.
+        conflicts: list[dict[str, Any]] = []
+        from_data = next((d for r, _h, d in router_data if r == from_rid), None)
+        if from_data is not None and from_port:
+            fdb = getattr(from_data, "port_fdb_map", {}) or {}
+            for peer_mac in meta.get(to_rid, {}).get("macs", set()):
+                fdb_port = fdb.get(peer_mac)
+                if fdb_port and fdb_port.lower() != from_port.lower():
+                    conflicts.append(
+                        {"source": "fdb", "fdb_port": fdb_port, "lldp_port": from_port}
+                    )
+                    break
+
+        # VLAN tags on the from-side port, if known.
+        from_vlan_map = (
+            getattr(from_data, "port_vlan_map", {}) if from_data is not None else {}
+        )
+        vlan_tags = list(from_vlan_map.get(from_port, [])) if from_port else []
+
+        neighbor_meta = meta.get(to_rid, {})
+        neighbor_mac = next(iter(neighbor_meta.get("macs", set())), "")
+        # Preserve the actual neighbor-observed values regardless of orientation.
+        observed = fwd if from_rid == a_rid else (rev or fwd)
+
+        # The medium comes from the LLDP interface names, not from a heuristic:
+        # a wireless backhaul has no physical port, so the port/VLAN compat keys
+        # stay empty and the repeater override below may promote the edge.
+        wireless = _lldp_link_is_wireless(from_iface, to_iface)
+
+        edge_id = f"{from_rid}--uplink--{to_rid}"
+        edges.append(
+            {
+                "id": edge_id,
+                "from": from_rid,
+                "to": to_rid,
+                "relationship": CONNECTION_TYPE_ROUTER_UPLINK,
+                "source": MESH_SOURCE,
+                "inferred": False,
+                "inference_reason": None,
+                "attributes": {
+                    "link_type": "wifi" if wireless else "lan",
+                    "detection_method": SOURCE_LLDP,
+                    "confidence": CONF_HIGH,
+                    "direction": "bidirectional" if bidirectional else "one_way",
+                    "from_port": from_port,
+                    "from_interface": from_iface,
+                    "to_port": to_port,
+                    "to_interface": to_iface,
+                    # Compat keys so gateway-port rendering keeps working:
+                    "gateway_port": None if wireless else (from_port or None),
+                    "ap_port": None if wireless else (to_port or None),
+                    "vlan_tags": [] if wireless else vlan_tags,
+                    # Rich LLDP neighbor detail (from the from-side observation):
+                    "neighbor_name": observed.get("neighbor_name", ""),
+                    "neighbor_host": neighbor_meta.get("host_ip", ""),
+                    "neighbor_mac": neighbor_mac,
+                    "neighbor_chassis_id": observed.get("neighbor_chassis_id", ""),
+                    "neighbor_port_id": observed.get("neighbor_port_id", ""),
+                    "neighbor_port_description": observed.get(
+                        "neighbor_port_descr", ""
+                    ),
+                    "management_ip": observed.get("management_ip"),
+                    "capabilities": observed.get("capabilities", []),
+                    "conflicts": conflicts,
+                },
+            }
+        )
+        # Block BOTH orientations so no heuristic can add a competing edge.
+        blocked_ids.add(f"{a_rid}--uplink--{b_rid}")
+        blocked_ids.add(f"{b_rid}--uplink--{a_rid}")
+
+    if edges:
+        _LOGGER.debug("LLDP: detected %d router-to-router edge(s)", len(edges))
+    return edges, blocked_ids
+
+
 def _detect_inter_router_edges(
     router_snapshots: list[dict[str, Any]],
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
@@ -127,13 +442,23 @@ def _detect_inter_router_edges(
         router_snapshots: Per-router topology snapshots.
         router_data: List of (router_id, host_ip, coordinator_data) tuples.
 
-    Strategy:
+    Strategy (priority order):
+        0. LLDP neighbors: authoritative router-to-router links + physical ports
+           (runs first; blocks both orientations so heuristics cannot override).
         1. DHCP lease cross-reference: AP's host IP in gateway's DHCP leases → LAN uplink
         2. WiFi client cross-reference: AP's MAC in another router's client list → WiFi uplink
         3. Subnet fallback: Same /24 subnet → mesh_member (inferred)
     """
     edges: list[dict[str, Any]] = []
     seen_edges: set[str] = set()
+
+    # Method 0: LLDP — the preferred, authoritative source. It runs first and
+    # seeds seen_edges with BOTH orientations of every detected pair so the
+    # heuristics below cannot add a competing (possibly wrong-port) edge.
+    token_to_rid, known_meta = _build_known_router_index(router_data)
+    lldp_edges, lldp_blocked = _detect_lldp_edges(router_data, token_to_rid, known_meta)
+    edges.extend(lldp_edges)
+    seen_edges.update(lldp_blocked)
 
     # Build lookup maps
     # Includes router_info.mac + ALL interface IPs/MACs so an AP that connects
@@ -341,16 +666,32 @@ def _detect_inter_router_edges(
     # physical Ethernet wins over a configured wireless backhaul. A concrete
     # gateway_port from FDB is NOT proof of cable: wirelessly meshed APs show
     # up behind the gateway's trunk ports in the FDB just the same.
+    #
+    # LLDP edges take part as well: an LLDP link over a wireless netdev is a
+    # repeater link and must be promoted, while an LLDP link over copper is
+    # first-hand proof of cable and outranks the STA heuristic — same as a WAN
+    # carrier. Without this, a repeater running lldpd stayed `router_uplink`
+    # and the UI rendered it as "Kabel".
     repeater_rids = {
         rid for rid, _hip, data in router_data if _has_active_sta_interface(data)
     }
     wired_rids = {rid for rid, _hip, data in router_data if _has_wan_carrier(data)}
     for edge in edges:
-        if edge["relationship"] not in ("lan_uplink", "mesh_member"):
+        if edge["relationship"] not in (
+            "lan_uplink",
+            "mesh_member",
+            CONNECTION_TYPE_ROUTER_UPLINK,
+        ):
             continue
         if edge["to"] not in repeater_rids:
             continue
         if edge["to"] in wired_rids:
+            continue
+        edge_attrs = edge.get("attributes") or {}
+        if (
+            edge_attrs.get("detection_method") == SOURCE_LLDP
+            and edge_attrs.get("link_type") != "wifi"
+        ):
             continue
 
         edge["relationship"] = "wifi_uplink"
@@ -511,7 +852,7 @@ def _detect_switch_nodes(
     # Group APs by gateway port
     port_to_aps: dict[str, list[str]] = {}
     for edge in inter_router_edges:
-        if edge.get("relationship") == "lan_uplink":
+        if _is_wired_uplink_edge(edge):
             gw_port = (edge.get("attributes") or {}).get("gateway_port")
             ap_id = edge.get("to")
             if gw_port and ap_id and edge.get("from") == gw_rid:
@@ -557,7 +898,7 @@ def _detect_switch_nodes(
         # Collect IDs of direct gateway→AP edges that are being replaced
         for edge in inter_router_edges:
             if (
-                edge.get("relationship") == "lan_uplink"
+                _is_wired_uplink_edge(edge)
                 and edge.get("from") == gw_rid
                 and edge.get("to") in ap_ids
                 and (edge.get("attributes") or {}).get("gateway_port") == port
@@ -774,8 +1115,25 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         all_edges = [e for e in all_edges if e.get("id") not in replaced_ids]
     all_edges.extend(switch_edges)
 
+    # A configured (known) router must never be shown as an ordinary client,
+    # even when its MAC/STA-MAC appears in a peer's association/FDB table — it
+    # is rendered as a router/AP node from its own entry instead. Build the set
+    # of known-router MACs from the live config entries and filter clients by it.
+    _known_tokens, _known_meta = _build_known_router_index(router_data)
+    known_router_macs: set[str] = set()
+    for _m in _known_meta.values():
+        known_router_macs |= {m.lower() for m in _m.get("macs", set())}
+
+    def _is_known_router_mac(mac: str) -> bool:
+        norm = _mac_norm(mac)
+        return bool(norm and norm in known_router_macs)
+
     # Deduplicate clients (same MAC on multiple APs during roaming)
-    deduped_clients = _deduplicate_clients(all_clients)
+    deduped_clients = [
+        c
+        for c in _deduplicate_clients(all_clients)
+        if not _is_known_router_mac(c.get("mac", ""))
+    ]
 
     # Build MAC → winning ap_mac map from the deduplicated client list.
     # _deduplicate_clients() picks the router with the strongest signal.
@@ -794,6 +1152,10 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         if node.get("type") == "client":
             node_id = node["id"]
             mac = (node.get("attributes", {}).get("mac") or "").lower()
+
+            # Never render a known router as a client node.
+            if mac and _is_known_router_mac(mac):
+                continue
 
             if node_id in seen_client_ids:
                 # Replace the stored node if this one has the winning ap_mac

@@ -29,6 +29,32 @@ function cubicMid(path: string): { x: number; y: number } | null {
   };
 }
 
+// Start / end endpoints of any path (works for cubic and quadratic).
+function pathEnds(path: string): { start: { x: number; y: number }; end: { x: number; y: number } } | null {
+  const nums = path.match(/-?[\d.]+/g)?.map(Number);
+  if (!nums || nums.length < 4) return null;
+  return {
+    start: { x: nums[0], y: nums[1] },
+    end:   { x: nums[nums.length - 2], y: nums[nums.length - 1] },
+  };
+}
+
+// Linear interpolation between two points.
+function lerp(a: { x: number; y: number }, b: { x: number; y: number }, t: number) {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+/** A small port badge (rect + label) drawn at an SVG point. */
+function PortBadge({ x, y, text, side }: { x: number; y: number; text: string; side: 'from' | 'to' }) {
+  const w = Math.max(30, text.length * 7 + 8);
+  return (
+    <>
+      <rect x={x - w / 2} y={y - 7} width={w} height={14} rx={3} className="edge-label-bg edge-port-badge-bg" />
+      <text x={x} y={y + 3} className={`edge-label edge-port-badge edge-port-badge--${side}`}>{text}</text>
+    </>
+  );
+}
+
 interface Props {
   edges: EdgeLayout[];
   highlightedEdges: Set<string>;
@@ -153,6 +179,54 @@ function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover, vlanMode
               </>
             )}
           </>
+        )}
+        {hitPath}
+      </g>
+    );
+  }
+
+  if (edge.kind === 'router-uplink') {
+    const ends = pathEnds(edge.path);
+    const mid = cubicMid(edge.path) ?? (ends ? lerp(ends.start, ends.end, 0.5) : null);
+    const oneWay = edge.lldp?.direction === 'one_way';
+    const hasConflict = (edge.lldp?.conflicts?.length ?? 0) > 0;
+    // from-port badge near the source end, to-port badge near the target end.
+    const fromPos = ends ? lerp(ends.start, ends.end, 0.16) : null;
+    const toPos   = ends ? lerp(ends.start, ends.end, 0.84) : null;
+    const flowCls = `edge-router-flow${oneWay ? ' edge-router-flow--oneway' : ''}`;
+
+    return (
+      <g className={`${cls}${oneWay ? ' edge-oneway' : ''}`} style={style} data-vlan={vlanAttr}>
+        <path className="edge-router-bg"   d={edge.path} />
+        <path className={flowCls} d={edge.path} />
+        {mid && (
+          <>
+            <rect
+              x={mid.x - 20} y={mid.y - 24}
+              width={40} height={14} rx={7}
+              className="edge-lldp-badge-bg"
+            />
+            <text x={mid.x} y={mid.y - 14} className="edge-lldp-badge">LLDP</text>
+          </>
+        )}
+        {fromPos && edge.fromPort && (
+          <PortBadge x={fromPos.x} y={fromPos.y} text={edge.fromPort.toUpperCase()} side="from" />
+        )}
+        {toPos && edge.toPort && (
+          <PortBadge x={toPos.x} y={toPos.y} text={edge.toPort.toUpperCase()} side="to" />
+        )}
+        {mid && oneWay && (
+          <text x={mid.x} y={mid.y + 20} className="edge-oneway-hint">
+            <title>Nur von einer Seite gesehen (one-way)</title>
+            ◃ einseitig
+          </text>
+        )}
+        {mid && hasConflict && (
+          <g className="edge-conflict-marker">
+            <circle cx={mid.x + 26} cy={mid.y - 17} r={7} className="edge-conflict-dot" />
+            <text x={mid.x + 26} y={mid.y - 13} className="edge-conflict-icon">!</text>
+            <title>LLDP-Port weicht von Bridge-FDB ab</title>
+          </g>
         )}
         {hitPath}
       </g>

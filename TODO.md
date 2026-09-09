@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-07-03 · Version: v1.20.0
+Stand: 2026-09-09 · Version: v1.28.0
 
 ---
 
@@ -39,6 +39,24 @@ Stand: 2026-07-03 · Version: v1.20.0
       `diagnostics/prod-24h-baseline.jsonl`, Sampler: `scripts/_prod_24h_sample.sh`).
 - [ ] **Persistente Event-History** — `deque` ist in-memory; Events überleben
       keinen HA-Restart (Store-Helper oder JSON-Datei).
+
+### LLDP-Nachlese (aus dem Merge-Review von PR #14, 2026-09-09)
+
+- [ ] **OUI-Tabelle existiert doppelt** — `custom_components/openwrt_router/oui.py`
+      (~669 Einträge) ist eine Handkopie von `OUI_TABLE` in
+      `frontend/topology/src/api.ts`. Eine Quelle festlegen und die andere
+      generieren, sonst driften die beiden auseinander.
+- [ ] **Ungenutzte LLDP-Konstanten** in `const.py` aufräumen:
+      `LLDP_CLI_CHECK_CMD`, `LLDP_INIT_ENABLED_CMD`, `CAP_LLDP_NEIGHBORS`
+      (dupliziert als String-Literal in `config_flow._LLDP_CAP`), dazu
+      `SOURCE_ARP/FDB/DHCP/OUI`, `CLIENT_KEY_VLAN_IDS`, `CONNECTION_TYPE_WIRED`.
+- [ ] **Checklist-Hinweis präzisieren** — LLDP braucht nicht nur `lldpd`,
+      sondern auch SSH-Zugang. Auf einem Router mit sauberer ACL v5 **ohne**
+      Dropbear-Login bleibt LLDP dauerhaft `unavailable`, der Hinweistext nennt
+      aber nur die lldpd-Installation.
+- [ ] **`ruff` in der CI pinnen** — `pip install ruff` ist unpinned; der Sprung
+      auf 0.16 hat I001/PERF102 in den Default-Regelsatz geholt und die Pipeline
+      ohne Codeaenderung rot gemacht.
 
 ### Topology Frontend (Wunschliste, unverändert offen)
 

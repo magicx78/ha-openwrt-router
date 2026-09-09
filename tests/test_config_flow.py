@@ -825,6 +825,33 @@ class TestChecklistStep:
         assert result["errors"]["base"] == ERROR_ACL_DEPLOY_NO_CHANGE
 
     @pytest.mark.asyncio
+    async def test_missing_lldp_alone_is_not_a_failed_deploy(self, monkeypatch):
+        """LLDP is optional and not provisioned by the ACL.
+
+        A router where every ACL capability is green and only lldpd is absent
+        used to make a perfectly successful deploy look like a no-op, because
+        the before/after comparison counted the optional LLDP row.
+        """
+        self._no_grace(monkeypatch)
+        only_lldp_missing = dict(_ALL_CAPS_OK, lldp_neighbors=False)
+        flow = _make_checklist_flow(capabilities=only_lldp_missing)
+        factory = _ApiFactory(capabilities=dict(only_lldp_missing))
+        with (
+            patch.object(cf_module, "async_get_clientsession", MagicMock()),
+            patch.object(cf_module, "OpenWrtAPI", factory),
+            patch(
+                "custom_components.openwrt_router.acl_provisioning.check_and_deploy_acl",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            result = await flow.async_step_checklist({"deploy_acl": True})
+
+        assert result["errors"] == {}
+        assert result["description_placeholders"]["status"].startswith(
+            "✅ **ACL erfolgreich deployt**"
+        )
+
+    @pytest.mark.asyncio
     async def test_submit_without_deploy_creates_entry(self):
         """Unticked checkbox → entry is created (unchanged behaviour)."""
         flow = _make_checklist_flow()

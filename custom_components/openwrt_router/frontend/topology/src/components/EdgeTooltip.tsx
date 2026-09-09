@@ -85,6 +85,40 @@ export function EdgeTooltip({ edgeId, x, y, edges, data }: Props) {
     if (ap?.ip)     rows.push({ label: 'IP',     value: ap.ip });
     if (ap?.status) rows.push({ label: 'Status', value: ap.status });
 
+  } else if (edge.kind === 'router-uplink') {
+    const ap = data.accessPoints.find(a => a.id === edge.targetId);
+    const lldp = edge.lldp;
+    title    = lldp?.neighborName || ap?.name || 'Router-Uplink';
+    badge    = 'LLDP';
+    badgeMod = 'lldp';
+
+    if (lldp?.neighborName)   rows.push({ label: 'Nachbar', value: lldp.neighborName });
+    if (lldp?.managementIp)   rows.push({ label: 'Management-IP', value: lldp.managementIp });
+    const localPort = edge.fromPort ?? lldp?.fromPort;
+    const remotePort = edge.toPort ?? lldp?.toPort;
+    if (localPort || remotePort) {
+      rows.push({
+        label: 'Port',
+        value: `${(localPort ?? '?').toUpperCase()} ↔ ${(remotePort ?? '?').toUpperCase()}`,
+      });
+    }
+    if (lldp?.neighborMac)        rows.push({ label: 'Nachbar-MAC', value: lldp.neighborMac });
+    else if (lldp?.neighborChassisId) rows.push({ label: 'Chassis-ID', value: lldp.neighborChassisId });
+    const vlans = lldp?.vlanTags ?? edge.vlanTags;
+    if (vlans && vlans.length > 0) {
+      rows.push({ label: 'VLAN', value: vlans.length > 1 ? `Trunk ${vlans.join(', ')}` : `${vlans[0]}` });
+    }
+    rows.push({ label: 'Verbindung', value: (lldp?.linkType ?? 'lldp').toUpperCase() });
+    if (lldp?.confidence) rows.push({ label: 'Vertrauen', value: lldp.confidence });
+    if (lldp?.direction)  rows.push({ label: 'Richtung', value: lldp.direction === 'one_way' ? 'einseitig' : 'beidseitig' });
+    if (lldp?.capabilities && lldp.capabilities.length > 0) {
+      rows.push({ label: 'Rolle', value: lldp.capabilities.join(', ') });
+    }
+    if ((lldp?.conflicts?.length ?? 0) > 0) {
+      rows.push({ label: '⚠ Konflikt', value: 'LLDP-Port weicht von Bridge-FDB ab' });
+    }
+    if (ap?.clientCount != null) rows.push({ label: 'Clients', value: String(ap.clientCount) });
+
   } else {
     // ap-mesh (parent-AP → child-AP edge)
     const ap = data.accessPoints.find(a => a.id === edge.targetId);

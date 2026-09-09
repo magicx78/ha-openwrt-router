@@ -8,9 +8,43 @@ export interface RouterEvent {
 }
 
 export type NodeStatus = 'online' | 'offline' | 'warning';
-export type UplinkType = 'wired' | 'mesh' | 'repeater';
+// 'router_uplink' = LLDP-verified router-to-router ethernet link (high confidence).
+export type UplinkType = 'wired' | 'mesh' | 'repeater' | 'router_uplink';
 export type DeviceCategory = 'smartphone' | 'laptop' | 'iot' | 'guest' | 'other';
 export type FilterType = 'all' | 'aps' | 'clients' | 'warnings';
+
+// ── Client / link metadata (v1.22 richer model) ───────────────────────────
+export type ConnectionType = 'wired' | 'wireless' | 'router_uplink' | 'unknown';
+export type ConfidenceLevel = 'high' | 'medium' | 'low';
+
+/** A discrepancy between the LLDP-reported port and the bridge-FDB port. */
+export interface LldpConflict {
+  source: string;        // e.g. "fdb"
+  fdb_port?: string;
+  lldp_port?: string;
+}
+
+/** LLDP-derived router-to-router uplink details (relationship: router_uplink). */
+export interface LldpUplink {
+  linkType?: string;                 // "lldp"
+  detectionMethod?: string;          // "lldp"
+  confidence?: ConfidenceLevel;      // "high" | "medium" | "low"
+  direction?: 'bidirectional' | 'one_way';
+  fromPort?: string;                 // physical port on the "from" router (e.g. lan3)
+  toPort?: string;                   // physical port on the "to" router (e.g. wan)
+  gatewayPort?: string;
+  apPort?: string;
+  vlanTags?: number[];
+  neighborName?: string;
+  neighborHost?: string;
+  neighborMac?: string;
+  neighborChassisId?: string;
+  neighborPortId?: string;
+  neighborPortDescription?: string;
+  managementIp?: string;
+  capabilities?: string[];
+  conflicts?: LldpConflict[];
+}
 
 export interface CpuHistoryPoint {
   ts: number;   // unix timestamp
@@ -132,6 +166,8 @@ export interface AccessPoint {
   apPort?: string;             // physical port on AP side (e.g. "wan") — null for WLAN-Repeater
   vlanTags?: number[];         // VLAN IDs carried on the gateway port (Trunk = >1)
   portStats?: PortStat[];      // physical ports on this AP (WAN, LAN1, ...)
+  /** Present when this AP's uplink was verified via LLDP (uplinkType === 'router_uplink'). */
+  lldpUplink?: LldpUplink;
 }
 
 export interface Client {
@@ -154,6 +190,15 @@ export interface Client {
   // True when the backend reported the client via hostapd (WiFi). False/undefined
   // means the client was learned only from DHCP/ARP and is most likely wired.
   isWifiClient?: boolean;
+  // ── v1.22 richer client model — all optional so old snapshots keep working ──
+  vendor?: string;              // server-side OUI vendor (preferred over local lookup)
+  connectionType?: ConnectionType; // "wired" | "wireless" | "router_uplink" | "unknown"
+  confidence?: ConfidenceLevel;    // detection confidence
+  source?: string;                 // "hostapd" | "iwinfo" | "dhcp" | "fdb" | ...
+  webUrl?: string;                 // http://<ip> — validated client-side; only set when reachable
+  lastSeen?: string;               // ISO timestamp
+  linkSpeed?: number;              // negotiated link speed in Mbps (if reported)
+  iface?: string;                  // interface / port the client is on (if reported)
 }
 
 export interface SwitchNode {
@@ -181,7 +226,7 @@ export interface NodeLayout {
   height: number;
 }
 
-export type EdgeKind = 'internet' | 'gateway-wired' | 'ap-mesh';
+export type EdgeKind = 'internet' | 'gateway-wired' | 'ap-mesh' | 'router-uplink';
 
 export interface EdgeLayout {
   id: string;
@@ -195,6 +240,10 @@ export interface EdgeLayout {
   gatewayPortSpeed?: number | null; // Mbps
   apPort?: string;            // e.g. "wan" — port on AP side (always WAN for wired uplinks)
   vlanTags?: number[];        // VLANs carried on the gateway port (length>1 ⇒ trunk)
+  // ── router-uplink (LLDP) extras ──
+  fromPort?: string;          // physical port on the source (from) router
+  toPort?: string;            // physical port on the target (to) router
+  lldp?: LldpUplink;          // full LLDP neighbor detail for router-uplink edges
 }
 
 export interface TopologyLayout {

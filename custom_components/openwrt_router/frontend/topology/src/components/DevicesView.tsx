@@ -91,7 +91,12 @@ export function DevicesView({ data, onSelectGateway, onSelectAP }: Props) {
                 model={ap.model}
                 ip={ap.ip}
                 status={ap.status}
-                badge={ap.uplinkType === 'wired' ? 'LAN-Kabel' : 'WiFi Mesh'}
+                badge={
+                  ap.uplinkType === 'wired'         ? 'LAN-Kabel'
+                : ap.uplinkType === 'repeater'      ? 'WLAN Repeater'
+                : ap.uplinkType === 'router_uplink' ? 'Router-Uplink'
+                :                                     'WiFi Mesh'
+                }
                 badgeMod={ap.uplinkType}
                 signal={ap.status !== 'offline' ? ap.backhaulSignal : undefined}
                 detail={`${ap.clientCount} Clients`}

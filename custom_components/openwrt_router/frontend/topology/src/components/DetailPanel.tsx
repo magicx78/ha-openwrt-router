@@ -6,7 +6,7 @@
  */
 
 import React from 'react';
-import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat, PortDevice, VlanInfo, RouterEvent, CpuHistoryPoint } from '../types';
+import { Gateway, AccessPoint, Client, NodeStatus, DdnsService, SsidInfo, PortStat, PortDevice, VlanInfo, RouterEvent, CpuHistoryPoint, LldpUplink, UplinkType, ConnectionType } from '../types';
 import { IconX } from './Icons';
 import { StatusDot, statusLabel } from './StatusDot';
 import { SignalBar } from './SignalBar';
@@ -253,8 +253,18 @@ function EventTimeline({ events }: { events: RouterEvent[] }) {
 
 // ── AP detail ─────────────────────────────────────────────────────────────
 
+function uplinkTypeLabel(t: UplinkType): string {
+  switch (t) {
+    case 'wired':         return 'Kabelgebunden';
+    case 'repeater':      return 'WLAN Repeater';
+    case 'router_uplink': return 'Router-Uplink (LLDP)';
+    default:              return 'Mesh';
+  }
+}
+
 function APDetail({ data, clients, actions }: { data: AccessPoint; clients: Client[]; actions?: DetailPanelActions }) {
   const q = signalQuality(data.backhaulSignal);
+  const isWirelessUplink = data.uplinkType === 'mesh' || data.uplinkType === 'repeater';
   return (
     <>
       <div className="detail-section">
@@ -267,10 +277,24 @@ function APDetail({ data, clients, actions }: { data: AccessPoint; clients: Clie
       </div>
       <div className="detail-section">
         <div className="detail-section__heading">Uplink</div>
-        <Row label="Typ"     value={data.uplinkType === 'wired' ? 'Kabelgebunden' : 'Mesh'} />
-        <Row label="Signal"  value={<><SignalBar dbm={data.backhaulSignal} /> {data.backhaulSignal} dBm</>} />
-        <Row label="Qualität" value={q} />
+        <Row label="Typ"     value={uplinkTypeLabel(data.uplinkType)} />
+        {isWirelessUplink && (
+          <>
+            <Row label="Signal"  value={<><SignalBar dbm={data.backhaulSignal} /> {data.backhaulSignal} dBm</>} />
+            <Row label="Qualität" value={q} />
+          </>
+        )}
+        {data.uplinkType === 'router_uplink' && (data.gatewayPort || data.apPort) && (
+          <Row
+            label="Port"
+            value={`${(data.gatewayPort ?? data.lldpUplink?.fromPort ?? '?').toUpperCase()} ↔ ${(data.apPort ?? data.lldpUplink?.toPort ?? '?').toUpperCase()}`}
+          />
+        )}
       </div>
+
+      {data.lldpUplink && (
+        <LldpSection lldp={data.lldpUplink} />
+      )}
       {(data.ssids ?? []).length > 0 && (
         <div className="detail-section">
           <div className="detail-section__heading">WLAN-Netze</div>
@@ -327,6 +351,75 @@ function APDetail({ data, clients, actions }: { data: AccessPoint; clients: Clie
   );
 }
 
+// ── LLDP router-uplink detail block ───────────────────────────────────────
+
+function LldpSection({ lldp }: { lldp: LldpUplink }) {
+  const mgmtUrl = safeHttpUrl(lldp.managementIp);
+  const vlans = lldp.vlanTags ?? [];
+  const hasConflict = (lldp.conflicts?.length ?? 0) > 0;
+  return (
+    <div className="detail-section">
+      <div className="detail-section__heading">
+        Router-Uplink
+        <span className="lldp-badge" style={{ marginLeft: 6 }}>LLDP</span>
+      </div>
+      {lldp.neighborName && <Row label="Nachbar" value={lldp.neighborName} />}
+      {lldp.managementIp && (
+        <Row
+          label="Management-IP"
+          value={
+            mgmtUrl ? (
+              <a
+                href={mgmtUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="port-device-row__link"
+                title="Weboberfläche des Nachbarn öffnen"
+              >
+                {lldp.managementIp} ↗
+              </a>
+            ) : (
+              lldp.managementIp
+            )
+          }
+        />
+      )}
+      {(lldp.fromPort || lldp.toPort) && (
+        <Row
+          label="Port (lokal ↔ remote)"
+          value={`${(lldp.fromPort ?? '?').toUpperCase()} ↔ ${(lldp.toPort ?? '?').toUpperCase()}`}
+        />
+      )}
+      {lldp.neighborMac && <Row label="Nachbar-MAC" value={<span className="port-device-row__mac">{lldp.neighborMac}</span>} />}
+      {lldp.neighborChassisId && lldp.neighborChassisId !== lldp.neighborMac && (
+        <Row label="Chassis-ID" value={<span className="port-device-row__mac">{lldp.neighborChassisId}</span>} />
+      )}
+      {lldp.neighborPortId && <Row label="Remote Port-ID" value={lldp.neighborPortId} />}
+      {vlans.length > 0 && (
+        <Row label="VLANs" value={vlans.length > 1 ? `Trunk ${vlans.join(', ')}` : `${vlans[0]}`} />
+      )}
+      <Row label="Verbindung" value={(lldp.linkType ?? 'lldp').toUpperCase()} />
+      {lldp.confidence && <Row label="Vertrauen" value={lldp.confidence} />}
+      {lldp.direction && (
+        <Row label="Richtung" value={lldp.direction === 'one_way' ? 'einseitig (nur eine Seite)' : 'beidseitig'} />
+      )}
+      {lldp.capabilities && lldp.capabilities.length > 0 && (
+        <Row label="Rolle" value={lldp.capabilities.join(', ')} />
+      )}
+      {hasConflict && (
+        <div className="lldp-conflict-note">
+          ⚠ LLDP-Port weicht von Bridge-FDB ab
+          {lldp.conflicts!.map((c, i) => (
+            <div key={i} className="lldp-conflict-note__detail">
+              {c.source}: FDB {c.fdb_port ?? '?'} ≠ LLDP {c.lldp_port ?? '?'}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Client detail ─────────────────────────────────────────────────────────
 
 /** Construct the HA entity_id for this client's device_tracker entity.
@@ -339,35 +432,75 @@ function haEntityId(mac: string, hostname: string): string {
   return `device_tracker.${slug}`;
 }
 
+const CONNECTION_TYPE_LABEL: Record<ConnectionType, string> = {
+  wired:         'Kabel (LAN)',
+  wireless:      'WLAN',
+  router_uplink: 'Router-Uplink',
+  unknown:       'Unbekannt',
+};
+
+function formatLastSeenIso(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString('de-DE', {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+  });
+}
+
 function ClientDetail({ data, apName, actions }: { data: Client; apName: string; actions?: DetailPanelActions }) {
   const q = signalQuality(data.signal);
   const entityId = haEntityId(data.mac, data.hostname);
   const connectedStr = data.connectedSince ? formatConnectedSince(data.connectedSince) : '';
   const leaseStr = data.dhcpExpires ? formatLeaseExpiry(data.dhcpExpires) : '';
+  const webUrl = data.webUrl;
+  const isWireless = data.connectionType === 'wireless' || (data.connectionType == null && data.isWifiClient);
+
+  const nameNode = webUrl ? (
+    <a href={webUrl} target="_blank" rel="noopener noreferrer" className="port-device-row__link" title="Weboberfläche öffnen">
+      {data.name || data.mac} ↗
+    </a>
+  ) : (data.name || data.mac);
+
+  const ipNode = data.ip
+    ? (webUrl
+        ? <a href={webUrl} target="_blank" rel="noopener noreferrer" className="port-device-row__link" title="Weboberfläche öffnen">{data.ip} ↗</a>
+        : data.ip)
+    : '—';
 
   return (
     <>
       <div className="detail-section">
         <div className="detail-section__heading">Gerät</div>
-        <Row label="Name"       value={data.name || data.mac} />
-        <Row label="IP"         value={data.ip || '—'} />
+        <Row label="Name"       value={nameNode} />
+        <Row label="IP"         value={ipNode} />
         <Row label="Hostname"   value={data.hostname !== data.mac ? data.hostname : '—'} />
-        <Row label="Hersteller" value={data.manufacturer ?? '—'} />
+        <Row label="Hersteller" value={data.manufacturer ?? data.vendor ?? '—'} />
         <Row label="Status"     value={<StatusBadge status={data.status} />} />
       </div>
       <div className="detail-section">
         <div className="detail-section__heading">Netzwerk</div>
         <Row label="MAC"    value={data.mac} />
+        {data.connectionType && (
+          <Row label="Verbindungstyp" value={CONNECTION_TYPE_LABEL[data.connectionType]} />
+        )}
         <Row label="Band"   value={data.band || '—'} />
         <Row label="AP"     value={apName} />
+        {data.iface     && <Row label="Port/Interface" value={data.iface} />}
+        {data.vlanId != null && <Row label="VLAN" value={`VLAN ${data.vlanId}`} />}
+        {data.linkSpeed != null && <Row label="Link-Speed" value={data.linkSpeed >= 1000 ? `${data.linkSpeed / 1000} Gbit/s` : `${data.linkSpeed} Mbit/s`} />}
+        {data.source     && <Row label="Quelle" value={data.source} />}
+        {data.confidence && <Row label="Vertrauen" value={<ConfidenceBadge confidence={data.confidence} />} />}
         {connectedStr && <Row label="Verbunden seit" value={connectedStr} />}
         {leaseStr     && <Row label="Lease bis"      value={leaseStr} />}
+        {data.lastSeen && <Row label="Zuletzt gesehen" value={formatLastSeenIso(data.lastSeen)} />}
       </div>
-      <div className="detail-section">
-        <div className="detail-section__heading">Signal</div>
-        <Row label="Signal"   value={<><SignalBar dbm={data.signal} /> {data.signal} dBm</>} />
-        <Row label="Qualität" value={q} />
-      </div>
+      {isWireless && (
+        <div className="detail-section">
+          <div className="detail-section__heading">Signal</div>
+          <Row label="Signal"   value={<><SignalBar dbm={data.signal} /> {data.signal} dBm</>} />
+          <Row label="Qualität" value={q} />
+        </div>
+      )}
 
       {(data.rxBytes != null || data.txBytes != null) && (
         <div className="detail-section">

@@ -70,9 +70,11 @@ export function WiringView({ data, onSelectAP }: Props) {
         //   uplinkType='wired'    (Backend lan_uplink)   → 'wired' "Kabel"
         //   uplinkType='repeater' (Backend wifi_uplink)  → 'wifi'  "WLAN" (verifiziert)
         //   uplinkType='mesh'     (Backend mesh_member)  → 'mesh'  "Mesh?" (unverifiziert)
+        //   uplinkType='router_uplink' (Backend router_uplink/LLDP) → 'wired' (Ethernet, verifiziert)
         const medium: WiringRow['medium'] =
-          ap.uplinkType === 'wired'    ? 'wired'
-          : ap.uplinkType === 'repeater' ? 'wifi'
+          ap.uplinkType === 'wired'         ? 'wired'
+          : ap.uplinkType === 'router_uplink' ? 'wired'
+          : ap.uplinkType === 'repeater'      ? 'wifi'
           : 'mesh';
 
         const speed = formatSpeed(ap.gatewayPortSpeed);
