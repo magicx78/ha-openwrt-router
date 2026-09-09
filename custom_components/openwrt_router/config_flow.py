@@ -6,10 +6,9 @@ import asyncio
 import ipaddress
 import logging
 import re
-from typing import Any
+from typing import Any, ClassVar
 
 import voluptuous as vol
-
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
@@ -24,9 +23,9 @@ from .api import (
     OpenWrtAPI,
     OpenWrtAuthError,
     OpenWrtConnectionError,
+    OpenWrtResponseError,
     OpenWrtRpcdSetupError,
     OpenWrtTimeoutError,
-    OpenWrtResponseError,
 )
 from .const import (
     CONF_PROTOCOL,
@@ -49,6 +48,7 @@ from .const import (
     PROTOCOL_HTTPS,
     PROTOCOL_HTTPS_INSECURE,
 )
+from .ssl_util import ssl_context_for_protocol
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -131,7 +131,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         """Return the options flow handler."""
         return OpenWrtOptionsFlow()
 
-    _CAPABILITY_LABELS: dict[str, str] = {
+    _CAPABILITY_LABELS: ClassVar[dict[str, str]] = {
         "system_info": "System-Info (CPU, RAM, Uptime)",
         "network_wireless": "WLAN-Status (Radios/SSIDs via netifd oder iwinfo)",
         "network_dump": "Netzwerk-Interfaces (WAN/LAN)",
@@ -204,7 +204,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                     _LOGGER.debug("Config flow: unexpected response from %s", host)
                     errors["base"] = ERROR_CANNOT_CONNECT
 
-                except Exception:  # noqa: BLE001
+                except Exception:
                     _LOGGER.exception("Config flow: unexpected error for %s", host)
                     errors["base"] = ERROR_UNKNOWN
 
@@ -260,13 +260,15 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 from .acl_provisioning import AclDeployError, check_and_deploy_acl
 
                 session = async_get_clientsession(self.hass)
+                protocol = self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)
                 deploy_api = OpenWrtAPI(
                     host=host,
                     port=self._user_data[CONF_PORT],
                     username=self._user_data[CONF_USERNAME],
                     password=self._user_data[CONF_PASSWORD],
                     session=session,
-                    protocol=self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL),
+                    protocol=protocol,
+                    ssl_context=ssl_context_for_protocol(protocol),
                 )
                 try:
                     await deploy_api.login()
@@ -274,7 +276,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 except AclDeployError:
                     _LOGGER.warning("ACL deploy to %s failed", host, exc_info=True)
                     errors["base"] = ERROR_ACL_DEPLOY_FAILED
-                except Exception:  # noqa: BLE001
+                except Exception:
                     _LOGGER.exception("ACL deploy: unexpected error for %s", host)
                     errors["base"] = ERROR_ACL_DEPLOY_FAILED
                 finally:
@@ -292,13 +294,15 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(title=title, data=self._user_data)
 
         session = async_get_clientsession(self.hass)
+        protocol = self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)
         api = OpenWrtAPI(
             host=host,
             port=self._user_data[CONF_PORT],
             username=self._user_data[CONF_USERNAME],
             password=self._user_data[CONF_PASSWORD],
             session=session,
-            protocol=self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL),
+            protocol=protocol,
+            ssl_context=ssl_context_for_protocol(protocol),
         )
         try:
             try:
@@ -441,7 +445,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self.async_step_reauth_cannot_connect()
         except OpenWrtAuthError:
             return await self.async_step_reauth_confirm()
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.exception("Re-auth: unexpected error during diagnosis for %s", host)
             return await self.async_step_reauth_confirm()
         else:
@@ -472,7 +476,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 return await self.async_step_reauth_cannot_connect()
             except OpenWrtAuthError:
                 return await self.async_step_reauth_confirm()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Re-auth rpcd setup: unexpected error")
                 errors["base"] = ERROR_UNKNOWN
             else:
@@ -509,7 +513,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = ERROR_CANNOT_CONNECT
             except OpenWrtAuthError:
                 return await self.async_step_reauth_confirm()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Re-auth cannot connect: unexpected error")
                 errors["base"] = ERROR_UNKNOWN
             else:
@@ -547,7 +551,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = ERROR_INVALID_AUTH
             except (OpenWrtConnectionError, OpenWrtTimeoutError):
                 errors["base"] = ERROR_CANNOT_CONNECT
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Re-auth: unexpected error")
                 errors["base"] = ERROR_UNKNOWN
             else:
@@ -617,6 +621,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             password=password,
             session=session,
             protocol=protocol,
+            ssl_context=ssl_context_for_protocol(protocol),
         )
         return await api.test_connection()
 

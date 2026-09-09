@@ -39,7 +39,7 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-_PANEL_VERSION = "20260703-v1.21.0"
+_PANEL_VERSION = "20260815-v1.26.2"
 # Master flag: set ONLY after every registration step completed.  Until then,
 # a partial setup must still allow re-entry to register the missing pieces.
 _PANEL_REGISTERED_KEY = f"{DOMAIN}_panel_registered"
@@ -88,7 +88,7 @@ class OpenWrtMeshSnapshotView(HomeAssistantView):
             from .topology_mesh import build_mesh_snapshot
 
             snapshot = build_mesh_snapshot(hass)
-        except Exception:  # noqa: BLE001
+        except (RuntimeError, ValueError, KeyError, TypeError):
             _LOGGER.debug("Mesh snapshot build failed", exc_info=True)
             snapshot = _empty_snapshot()
         return self.json(snapshot)
@@ -202,7 +202,7 @@ async def async_teardown_topology_panel(hass: HomeAssistant) -> None:
     # Last entry — remove what we can, soft-disable the rest.
     try:
         async_remove_panel(hass, _PANEL_URL_PATH)
-    except Exception:  # noqa: BLE001
+    except Exception:
         _LOGGER.debug("async_remove_panel failed (already gone?)", exc_info=True)
 
     hass.data[_PANEL_VIEW_DISABLED_KEY] = True

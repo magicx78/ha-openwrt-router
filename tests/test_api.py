@@ -396,6 +396,39 @@ class TestSSLContext:
         assert api._ssl_context.check_hostname is False
         assert api._ssl_context.verify_mode == ssl.CERT_NONE
 
+    def test_injected_context_is_used_verbatim(self):
+        """HA callers inject a pre-built context — no context is built here."""
+        import ssl
+
+        session = MagicMock()
+        injected = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        api = OpenWrtAPI(
+            host="192.168.1.1",
+            port=443,
+            username="root",
+            password="test",
+            session=session,
+            protocol="https",
+            ssl_context=injected,
+        )
+        assert api._ssl_context is injected
+
+    def test_injected_context_ignored_for_http(self):
+        import ssl
+
+        session = MagicMock()
+        injected = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        api = OpenWrtAPI(
+            host="192.168.1.1",
+            port=80,
+            username="root",
+            password="test",
+            session=session,
+            protocol="http",
+            ssl_context=injected,
+        )
+        assert api._ssl_context is None
+
 
 class TestURLConstruction:
     def test_ipv4(self):
@@ -773,6 +806,80 @@ class TestAclBlockCache:
         assert mock_api.login.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_blocked_file_path_does_not_block_other_paths(self, mock_api):
+        """A denied file path must not short-circuit reads of permitted paths.
+
+        rpcd enforces file ACLs per PATH. Regression: the cache keyed on
+        (object, method) only, so ONE uncovered /proc entry sent every
+        file/read of the session into the SSH fallback — massively raising
+        router load on routers with an outdated ACL.
+        """
+        import time
+
+        mock_api._token_expires_at = time.monotonic() + 3600
+        mock_api.login = AsyncMock()
+
+        blocked_path = "/proc/net/nf_conntrack"
+
+        async def _raw(payload):
+            params = payload["params"][3]
+            if params.get("path") == blocked_path:
+                raise OpenWrtAuthError("rpcd -32002")
+            return {"data": "ok"}
+
+        mock_api._raw_call = AsyncMock(side_effect=_raw)
+
+        with pytest.raises(OpenWrtMethodNotFoundError):
+            await mock_api._call("file", "read", {"path": blocked_path})
+        assert ("file", "read", blocked_path) in mock_api._acl_blocked
+
+        # A different, permitted path must still go through.
+        result = await mock_api._call("file", "read", {"path": "/proc/net/arp"})
+        assert result == {"data": "ok"}
+
+        # The blocked path stays short-circuited (no new _raw_call).
+        raw_calls_before = mock_api._raw_call.await_count
+        with pytest.raises(OpenWrtMethodNotFoundError):
+            await mock_api._call("file", "read", {"path": blocked_path})
+        assert mock_api._raw_call.await_count == raw_calls_before
+
+    @pytest.mark.asyncio
+    async def test_blocked_uci_config_does_not_block_other_configs(self, mock_api):
+        """A denied uci config must not short-circuit reads of permitted configs.
+
+        rpcd enforces uci ACLs per CONFIG file. Regression (v1.26.4): the
+        cache keyed on ("uci", "get") only, so the denied ddns probe killed
+        the uci wireless fallback for the rest of the session and pushed
+        every later poll into the SSH fallback.
+        """
+        import time
+
+        mock_api._token_expires_at = time.monotonic() + 3600
+        mock_api.login = AsyncMock()
+
+        async def _raw(payload):
+            params = payload["params"][3]
+            if params.get("config") == "ddns":
+                raise OpenWrtAuthError("rpcd -32002")
+            return {"values": {}}
+
+        mock_api._raw_call = AsyncMock(side_effect=_raw)
+
+        with pytest.raises(OpenWrtMethodNotFoundError):
+            await mock_api._call("uci", "get", {"config": "ddns"})
+        assert ("uci", "get", "ddns") in mock_api._acl_blocked
+
+        # A different, permitted config must still go through.
+        result = await mock_api._call("uci", "get", {"config": "wireless"})
+        assert result == {"values": {}}
+
+        # The blocked config stays short-circuited (no new _raw_call).
+        raw_calls_before = mock_api._raw_call.await_count
+        with pytest.raises(OpenWrtMethodNotFoundError):
+            await mock_api._call("uci", "get", {"config": "ddns"})
+        assert mock_api._raw_call.await_count == raw_calls_before
+
+    @pytest.mark.asyncio
     async def test_transient_auth_error_is_not_cached(self, mock_api):
         import time
 
@@ -897,6 +1004,56 @@ class TestReloadWifi:
     async def test_success(self, mock_api):
         result = await mock_api.reload_wifi()
         assert result is True
+
+
+class TestReboot:
+    @pytest.mark.asyncio
+    async def test_ubus_reboot(self, mock_api):
+        with patch.object(mock_api, "_call", AsyncMock(return_value={})) as call:
+            assert await mock_api.reboot() is True
+        call.assert_awaited_once_with("system", "reboot", {})
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_ssh_when_ubus_blocked(self, mock_api):
+        ssh = AsyncMock(return_value=(0, "", b""))
+        with (
+            patch.object(
+                mock_api,
+                "_call",
+                AsyncMock(side_effect=OpenWrtMethodNotFoundError("no system/reboot")),
+            ),
+            patch.object(mock_api, "_run_ssh_detached", ssh),
+        ):
+            assert await mock_api.reboot() is True
+        assert "reboot" in ssh.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_ssh_on_timeout(self, mock_api):
+        # The router can drop the connection while going down — inconclusive,
+        # so the SSH fallback still gets its turn.
+        ssh = AsyncMock(return_value=(0, "", b""))
+        with (
+            patch.object(
+                mock_api, "_call", AsyncMock(side_effect=OpenWrtTimeoutError("gone"))
+            ),
+            patch.object(mock_api, "_run_ssh_detached", ssh),
+        ):
+            assert await mock_api.reboot() is True
+        ssh.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_both_paths_fail(self, mock_api):
+        with (
+            patch.object(
+                mock_api, "_call", AsyncMock(side_effect=OpenWrtAuthError("acl"))
+            ),
+            patch.object(
+                mock_api,
+                "_run_ssh_detached",
+                AsyncMock(return_value=(255, "", b"Permission denied")),
+            ),
+        ):
+            assert await mock_api.reboot() is False
 
 
 class TestBuildCall:

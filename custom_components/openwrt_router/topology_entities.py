@@ -34,7 +34,7 @@ import logging
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
-from homeassistant.const import EntityCategory, MATCH_ALL
+from homeassistant.const import MATCH_ALL, EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -115,7 +115,7 @@ class _TopologyEntityBase(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
             return {}
         try:
             return build_topology_snapshot(self.coordinator.data)
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.debug(
                 "topology_diagnostic: snapshot build failed for %s",
                 self._attr_unique_id,

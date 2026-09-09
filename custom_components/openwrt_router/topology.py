@@ -30,12 +30,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .const import (
+    CLIENT_KEY_HOSTNAME,
     CLIENT_KEY_IP,
     CLIENT_KEY_MAC,
-    CLIENT_KEY_HOSTNAME,
+    CLIENT_KEY_RADIO,
     CLIENT_KEY_SIGNAL,
     CLIENT_KEY_SSID,
-    CLIENT_KEY_RADIO,
     RADIO_KEY_BAND,
     RADIO_KEY_CHANNEL,
     RADIO_KEY_ENABLED,
@@ -54,7 +54,7 @@ _SIGNAL_FAIR = -75
 
 def _signal_quality(signal_dbm: int | None) -> str:
     """Return 'good', 'fair', or 'poor' based on dBm value."""
-    if signal_dbm is None or signal_dbm == 0:
+    if signal_dbm is None:
         return "unknown"
     if signal_dbm >= _SIGNAL_GOOD:
         return "good"

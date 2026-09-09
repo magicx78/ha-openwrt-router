@@ -2,7 +2,7 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
-## [1.26.0] - 2026-07-04
+## [1.28.0] - 2026-09-09
 
 > **Bessere Geräte- & Topology-Erkennung via LLDP.** Router-zu-Router-Verkabelung
 > wird jetzt bevorzugt über **LLDP** erkannt (echte Nachbarn + physische Ports),
@@ -35,11 +35,288 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ### Notes
 
-- LLDP ist **optional** und ändert keine bestehenden ACL-Rechte (`ACL_VERSION` bleibt 3).
+- LLDP ist **optional** und ändert keine bestehenden ACL-Rechte (`ACL_VERSION` bleibt unverändert bei 5).
   Die LLDP-Abfrage löst **nicht** die „SSH-Fallback/degraded"-Warnung aus.
 - **Empfehlung** für zuverlässige Router-zu-Router-Erkennung auf **allen** OpenWrt-Routern:
   `opkg update && opkg install lldpd && /etc/init.d/lldpd enable && /etc/init.d/lldpd start`
 - Nach dem Update **Home Assistant neu starten** (neue Coordinator-Felder + Frontend-Bundle).
+
+## [1.27.0] - 2026-09-06
+
+> **Router-Neustart aus Home Assistant.** Bisher ließen sich nur einzelne
+> Dienste neu starten — für einen vollständigen Geräteneustart musste man
+> auf LuCI oder SSH ausweichen.
+
+### Added
+
+- **Reboot-Button pro Router** (`button.<router>_router_neu_starten`)
+  Löst `system/reboot` über ubus aus. Blockiert die rpcd-ACL die Methode
+  (oder ist sie nicht vorhanden), fällt der Button auf einen abgesetzten
+  SSH-`reboot` zurück — dieselben Zugangsdaten wie der übrige SSH-Fallback.
+  Ein Timeout des ubus-Calls gilt nicht als Fehlschlag: der Router kappt die
+  Verbindung beim Herunterfahren, deshalb entscheidet in dem Fall der
+  SSH-Fallback. Nach dem Druck wird bewusst kein Coordinator-Refresh
+  ausgelöst — der nächste reguläre Poll holt den Router wieder ab.
+  Neu: `OpenWrtAPI.reboot()`.
+
+## [1.26.6] - 2026-08-23
+
+> **Nachzügler zum SSH-Fallback-Fix aus 1.26.4.** Auf der Prod-Instanz zeigte
+> sich nach dem ACL-Redeploy: 10.10.30.50 fiel trotz korrekter v5-ACL weiter
+> in den SSH-Fallback — Ursache war der ACL-Block-Cache, nicht die ACL.
+
+### Fixed
+
+- **ACL-Block-Cache: uci-Denial einer Config blockierte ALLE Configs**
+  rpcd erzwingt uci-ACLs pro Config-Datei, der `_acl_blocked`-Cache keyte
+  aber nur auf `("uci", "get")`. Der (verweigerte) ddns-Probe vergiftete
+  damit den uci-wireless-Fallback für den Rest der Session — jeder weitere
+  Poll lief in den SSH-Fallback samt „SSH-Fallback aktiv“-Notification und
+  300s-Intervall. Analog zum file-Pfad-Fix aus 1.26.3 enthält der Cache-Key
+  für `uci` jetzt den Config-Namen.
+
+## [1.26.5] - 2026-08-23
+
+> **Blocking-Call-Warnung beim Setup behoben.** Der SSL-Kontext wird nicht
+> mehr synchron im Event-Loop gebaut — HA Core warnte bei jedem Setup mit
+> „Detected blocking call to set_default_verify_paths … inside the event loop".
+
+### Fixed
+
+- **`ssl.create_default_context()` blockierte den Event-Loop**
+  `OpenWrtAPI.__init__` baute den SSL-Kontext synchron (das CA-Bundle wird
+  dabei von der Platte geladen). Alle HA-Aufrufer — `async_setup_entry` und
+  die drei Config-Flow-Stellen — injizieren jetzt Home Assistants prozessweit
+  gecachte Kontexte (`homeassistant.util.ssl.client_context()` bzw.
+  `client_context_no_verify()`) über den neuen Konstruktor-Parameter
+  `ssl_context`. Die Protokoll-Auswahl kapselt das neue HA-seitige Modul
+  `ssl_util.py`; `api.py` bleibt bewusst HA-frei. Der synchrone Aufbau
+  existiert nur noch als Fallback für Standalone-/CLI-Nutzung außerhalb
+  eines Event-Loops.
+
+## [1.26.4] - 2026-08-23
+
+> **Log-Hygiene auf Multi-Router-Setups.** Drei Dauerbrenner beseitigt: die
+> minütliche root-Warnung, die unique_id-Kollision, wenn mehrere APs denselben
+> WLAN-Client sehen, und der ewige SSH-Fallback (samt wiederkehrender
+> HA-Notification) auf Routern mit einer prä-v5-ACL.
+
+### Fixed
+
+- **Router mit alter ACL blieben für immer im SSH-Fallback**
+  Konnte `ensure_acl()` die deployte ACL-Datei nicht lesen (von alten ACLs
+  blockiert), obwohl `file/stat` ihre Existenz zeigte, ließ es sie
+  „unverifiable — as-is" liegen — der Router blieb dauerhaft im SSH-Fallback
+  mit 300s-Polling, und die Notification „SSH-Fallback aktiv" kam nach jedem
+  HA-Neustart wieder. Da jede ACL seit v5 das Lesen ihres eigenen Pfads
+  erlaubt, ist eine unlesbare deployte ACL per Definition veraltet → sie wird
+  jetzt neu deployt (transiente Lesefehler wie Timeouts deployen weiterhin
+  NICHT, um rpcd-Restarts bei Netz-Blips zu vermeiden).
+
+- **root-Warnung spammte ~66×/Stunde statt einmal**
+  `reset_ssh_fallback_flag()` läuft am Anfang jedes Poll-Zyklus und setzte
+  dabei auch das `_root_warning_logged`-Latch zurück — die Warnung
+  „Using 'root' as rpcd user grants full router access" feuerte damit bei
+  jedem Re-Login (~1×/Minute pro Router) erneut. Das Latch bleibt jetzt für
+  die Lebensdauer der API-Instanz gesetzt (einmal pro Router und Start);
+  die Meldung nennt zusätzlich den Router-Host.
+
+- **„Platform openwrt_router does not generate unique IDs" bei Mesh-Clients**
+  HA-Core leitet die unique_id von `ScannerEntity` zwingend aus
+  `mac_address` ab (das bisherige entry-scoped `_attr_unique_id` wurde
+  dadurch ignoriert). Sehen mehrere Router/APs denselben Client, versuchte
+  jeder Eintrag eine Entity mit derselben MAC-unique_id anzulegen — HA
+  verwarf die Duplikate mit einem ERROR pro Client und Neustart. Clients
+  werden jetzt AP-übergreifend dedupliziert: Ein hass.data-Claim-Register
+  sorgt dafür, dass genau EIN Config-Entry die Entity pro MAC anlegt
+  (Claims werden beim Unload wieder freigegeben).
+
+### Changed
+
+- **Roaming-fähige Device-Tracker**: Die (eine) Tracker-Entity pro Client
+  sucht die MAC jetzt auf ALLEN geladenen Routern — ein Client, der zwischen
+  Mesh-APs roamt, bleibt `home` und meldet im neuen Attribut `connected_ap`
+  den Hostnamen des APs, mit dem er gerade verbunden ist. Vorher meldete der
+  Tracker `not_home`, sobald der Client den Router des besitzenden Entries
+  verließ.
+
+## [1.26.3] - 2026-08-16
+
+> **ACL-Deployment repariert.** Das automatische rpcd-ACL-Deployment war auf
+> ACL-restriktierten Routern komplett wirkungslos — betroffene Router blieben
+> dauerhaft im SSH-Fallback mit reduziertem Poll-Intervall und erhöhter Last.
+
+### Fixed
+
+- **ACL-Auto-Deploy: `NameError` machte jeden Deploy-Versuch wirkungslos**
+  `acl_provisioning.py` verwendete `OpenWrtAuthError`/`OpenWrtResponseError` in
+  except-Klauseln, ohne sie zu importieren. Sobald der Router `file/read` oder
+  `file/write` per ACL blockierte (genau der Fall, den das Deployment lösen
+  soll), flog ein `NameError`, den `async_setup_entry` still als „provisioning
+  skipped" verschluckte. Die ACL wurde nie geschrieben, der SSH-Fallback blieb
+  dauerhaft aktiv. Die Exceptions werden jetzt auf Modulebene importiert;
+  7 bestehende Tests, die genau diese Pfade abdecken, laufen wieder grün.
+
+- **ACL-Deploy: SSH-Fallback wurde bei blockiertem `file/write` nie erreicht**
+  Ein ACL-blockiertes `file/write` kommt aus `_call` als
+  `OpenWrtMethodNotFoundError` an (Konvertierung nach bestätigtem Re-Login) —
+  `_deploy_acl` fing aber nur `OpenWrtAuthError`/`OpenWrtResponseError` ab.
+  Der Fehler propagierte, statt den SSH-Fallback-Deploy auszulösen. Gleiches
+  galt für den (nicht-fatalen) rpcd-Neustart via `file/exec`.
+
+- **ACL-Block-Cache blockierte alle `file`-Pfade statt nur den verbotenen**
+  Der `_acl_blocked`-Cache arbeitete pro `(Objekt, Methode)`. rpcd erzwingt
+  `file`-ACLs aber pro Pfad: Ein einziger nicht freigegebener Pfad (z.B.
+  `/proc/net/nf_conntrack` bei alter ACL) schickte damit **alle** `file/read`-
+  Aufrufe der Session in den SSH-Fallback — der Haupttreiber der erhöhten
+  Router-Last. Für das `file`-Objekt enthält der Cache-Key jetzt den Pfad
+  (bzw. das `command` bei `file/exec`).
+
+### Changed
+
+- **rpcd-ACL v5** (`RPCD_ACL_CONTENT`, wird beim nächsten Start automatisch
+  deployt):
+  - `/sys/class/net` → `list` — der Capability-Check probt `file/list` auf dem
+    Verzeichnis selbst; der bestehende Glob `/sys/class/net/*` deckt das nicht ab.
+  - `/usr/share/rpcd/acl.d/ha-openwrt-router.json` → `read` — `ensure_acl()`
+    kann die deployte ACL jetzt via ubus verifizieren statt bei jedem Start
+    per SSH neu zu schreiben. Bewusst nur `read`: `write` auf `acl.d` würde
+    jeder rpcd-HTTP-Session erlauben, die eigenen Rechte zu erweitern.
+  - `/etc/init.d/rpcd` → `exec` (write-Scope) — rpcd-Neustart nach einem
+    ACL-Deploy funktioniert damit auch über ubus.
+
+- **`scripts/ha-openwrt-router.json` mit `RPCD_ACL_CONTENT` synchronisiert**
+  Die Datei für das manuelle scp-Deployment war auf einem alten Stand (ohne
+  `file/stat`, `file/exec`, conntrack-/sysfs-Pfade) — ein manuelles Deployment
+  nach Anleitung hat das SSH-Fallback-Problem daher nicht behoben. Ein neuer
+  Test verhindert künftiges Auseinanderlaufen.
+
+- **SSH-Fallback-Notification präzisiert** — verweist jetzt auf den
+  Berechtigungs-Check im Options-Flow (automatisches Deployment) und nennt den
+  korrekten Repo-Pfad `scripts/ha-openwrt-router.json` für den manuellen Weg.
+
+### Fixed (CI / weitere durch den Lint-Gate aufgedeckte Bugs)
+
+- **Update-Buttons: `NameError` statt Fehlerbehandlung** — `button.py` fing in
+  den Check-/Perform-Updates-Handlern vier nie importierte Exception-Klassen
+  (gleiche Bug-Klasse wie im ACL-Deploy). Ein Button-Press darf nie in HA
+  hochschlagen: die Handler fangen jetzt breit und loggen mit Traceback.
+  Die zwei zugehörigen, vorher roten Tests laufen wieder grün.
+
+- **Coordinator: ACL-Block nach dem ersten Poll warf rohe Exception** —
+  `OpenWrtMethodNotFoundError` wurde entgegen der dokumentierten Absicht von
+  `_first_poll_optional` nicht in `UpdateFailed` gewrappt; HA loggte das als
+  „unexpected error". Eigener except-Zweig ergänzt (Test wieder grün).
+
+- **Topology: Router-ID mit trailing Underscore ohne MAC** — ohne MAC und ohne
+  `host_ip` wurde die Node-ID als `"<hostname>_"` gebaut; die vier
+  `TestRouterIdFallback`-Tests laufen wieder grün.
+
+- **CI-Lint-Gate repariert** — `ruff check` (aktuelles ruff 0.16) fand 57
+  Verstöße und brach den Test-Job vor dem Testlauf ab: Import-Sortierung,
+  veraltete `noqa`, `ClassVar`-Annotationen für Klassen-Dicts, `startswith`-
+  Tupel, `dict.values()`, gezielte `noqa` für bewusste best-effort-excepts.
+  `ruff check` und `ruff format --check` laufen jetzt sauber durch.
+
+- **Topology: Repeater-Override ignorierte den WAN-Carrier** — der von
+  v1.26.x angelegte Helper `_has_wan_carrier()` wurde nie aufgerufen; der
+  Override nutzte weiterhin die alte `gateway_port`-Ausnahme. Folgen: Ein
+  verkabelter AP mit konfiguriertem STA-Interface wurde als „WLAN Repeater"
+  gezeichnet, und ein 802.11s-Mesh-AP hinter einem Trunk-Port blieb als
+  „Kabel" stehen (FDB-Sichtbarkeit ist kein Kabel-Beweis — Mesh-APs stehen
+  genauso in der FDB). Jetzt entscheidet der Link-Carrier des WAN-Ports;
+  die drei zugehörigen, vorher roten Tests laufen wieder grün.
+
+- **Topology: Rolle „Gateway" trotz WAN-IP == eigener LAN-IP** — ein Dumb-AP,
+  dessen gebridgter „WAN" die eigene Host-IP meldet, wird jetzt als AP
+  klassifiziert statt als Gateway.
+
+## [1.26.0] - 2026-08-15
+
+> **Stabilitäts- und Bugfix-Release.** Über 30 Korrekturen in 12 Dateien —
+> Topology-Darstellung, API-Zuverlässigkeit, Exception-Handling und ACL-Deployment.
+
+### Fixed
+
+- **Topology: Doppelte Verbindungen bei Switch-Erkennung**
+  Wenn mehrere APs am gleichen Gateway-Port hingen, wurden die direkten
+  Gateway→AP Edges nicht entfernt, obwohl ein Switch-Node eingefügt wurde.
+  Die Topologie zeigte dann sowohl Gateway→AP als auch Gateway→Switch→AP.
+  `_detect_switch_nodes` gibt jetzt `replaced_edge_ids` zurück, die in
+  `build_mesh_snapshot` vor dem Hinzufügen der Switch-Edges entfernt werden.
+
+- **Topology: Falsche WiFi-Uplink-Richtung in Mesh-Setups**
+  Wenn ein AP den Gateway in seiner Client-Liste sah (möglich bei Mesh),
+  wurde die Edge fälschlicherweise als `AP → Gateway` statt `Gateway → AP`
+  erstellt. Die Richtung wird jetzt anhand der Router-Rolle (gateway/ap)
+  korrekt bestimmt.
+
+- **Topology: Gateways mit privater WAN-IP als AP klassifiziert**
+  Router hinter ISP-Modems/FritzBoxen haben oft private WAN-IPs (z. B.
+  192.168.178.2). `_detect_router_role` prüfte fälschlicherweise auf
+  „public IP" und markierte diese als "ap". Jetzt gilt jeder Router mit funktionierender
+  WAN-Verbindung (dhcp/pppoe/static) als Gateway.
+
+- **Topology: Crash bei fehlendem Gateway in `_detect_switch_nodes`**
+  Die Funktion gab bei fehlendem Gateway nur 2 statt 3 Werte zurueck,
+  was einen `ValueError` ausloeste. Der Return-Wert ist jetzt immer
+  `(switch_nodes, switch_edges, replaced_ids)`.
+
+- **Topology: FDB-Key-Normalisierung verhindert doppelte Devices**
+  `build_port_connections` mixte normalisierte und nicht-normalisierte
+  MAC-Adressen. Geraete mit Bindestrich-MACs (z. B. "AA-BB-CC-DD-EE-FF")
+  wurden als "unassigned" hinzugefuegt, obwohl sie bereits im FDB waren.
+  FDB-Keys werden jetzt einmalig normalisiert.
+
+- **Topology: Router-ID-Kollisionen bei identischem Hostname**
+  Wenn zwei Router keine MAC hatten und denselben Hostname (z. B. "OpenWrt")
+  verwendeten, kollidierten ihre IDs. Die ID enthält jetzt die Host-IP als
+  Fallback: `{hostname}_{host_ip}`.
+
+- **API: `_call_file_read_shell` war ein Stub**
+  Die Methode gab immer `{}` zurueck, wodurch `get_disk_space()` und
+  `get_tmpfs_stats()` nie echte Daten lieferten. Jetzt wird der SSH-Fallback
+  verwendet, um Shell-Kommandos auszufuehren.
+
+- **API: Race Condition bei `async_close`**
+  Waehrend des Shutdowns konnten parallele `_call()`-Tasks noch laufen,
+  was zu "Session expired"-Fehlern fuehrte. Ein `_closing`-Flag blockiert
+  jetzt neue Calls waehrend des Shutdowns.
+
+- **API: Doppelte UTF-8-Dekodierung in SSH-Fallbacks**
+  `_asyncssh_run` mit `binary=False` dekodiert bereits in `str`. Die
+  SSH-Fallback-Methoden dekodierten den Rueckgabewert ein zweites Mal.
+  Die redundante Dekodierung wurde entfernt.
+
+- **API: Falsche `enabled=True` bei procd Services**
+  `service/list` liefert keine `enabled`-Info, aber der Code setzte
+  hartcodiert `True`. Jetzt wird `None` verwendet (unbekannt).
+
+- **ACL: `file/exec` fehlte in der ACL**
+  Nach dem ACL-Deploy wird `file/exec` aufgerufen, um rpcd zu restarten —
+  aber `exec` war nicht in der ACL erlaubt. Der Restart schlug immer fehl.
+  `file` Permissions jetzt: `["read", "stat", "list", "exec"]`.
+
+- **Exception-Handler: `asyncio.CancelledError` wurde verschluckt**
+  In `coordinator.py`, `topology_panel.py` und `button.py` fingen
+  `except Exception`-Bloecke auch `asyncio.CancelledError` ab, was
+  HA-Shutdown blockieren konnte. Die Handler wurden auf spezifische
+  Exception-Typen eingeschraenkt.
+
+- **Sensor: 0 dBm als "unknown" klassifiziert**
+  `_signal_quality` behandelte `0 dBm` als "unknown". 0 dBm ist ein
+  extrem starkes Signal (direkt neben der Antenne) und wird jetzt
+  korrekt als "good" bewertet.
+
+- **Sensor: ISO-Zeitstempel mit `Z`-Suffix**
+  `_seconds_since` konnte `2026-08-15T18:00:00Z` nicht parsen
+  (Python < 3.11). Das `Z`-Suffix wird jetzt in `+00:00` umgewandelt.
+
+### Changed
+
+- `manifest.json`: Version 1.25.0 -> 1.26.0
+- `acl_provisioning.py`: ACL_VERSION 3 -> 4
+- `topology_panel.py`: Panel-Version auf 20260815-v1.26.0 aktualisiert
 
 ## [1.25.0] - 2026-07-04
 

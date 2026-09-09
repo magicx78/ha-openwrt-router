@@ -52,16 +52,13 @@ from .const import (
     DEFAULT_PROTOCOL,
     DEFAULT_SESSION_ID,
     DEFAULT_TIMEOUT,
-    PROTOCOL_HTTP,
-    SESSION_LIFETIME_SECONDS,
-    SESSION_LOGIN_TIMEOUT_SECONDS,
-    SESSION_REFRESH_MARGIN_SECONDS,
-    PROTOCOL_HTTPS_INSECURE,
     DHCP_LEASES_PATH,
     GUEST_SSID_KEYWORDS,
-    RADIO_BAND_24GHZ_KEYWORDS,
+    PROTOCOL_HTTP,
+    PROTOCOL_HTTPS_INSECURE,
     RADIO_BAND_5GHZ_KEYWORDS,
     RADIO_BAND_6GHZ_KEYWORDS,
+    RADIO_BAND_24GHZ_KEYWORDS,
     RADIO_KEY_BAND,
     RADIO_KEY_BITRATE,
     RADIO_KEY_BSSID,
@@ -77,13 +74,16 @@ from .const import (
     RADIO_KEY_SSID,
     RADIO_KEY_TXPOWER,
     RADIO_KEY_UCI_SECTION,
+    SESSION_LIFETIME_SECONDS,
+    SESSION_LOGIN_TIMEOUT_SECONDS,
+    SESSION_REFRESH_MARGIN_SECONDS,
+    UBUS_DEVICE_OBJECT,
+    UBUS_DEVICE_STATUS,
     UBUS_FILE_OBJECT,
     UBUS_FILE_READ,
     UBUS_IWINFO_ASSOCLIST,
     UBUS_IWINFO_INFO,
     UBUS_IWINFO_OBJECT,
-    UBUS_DEVICE_OBJECT,
-    UBUS_DEVICE_STATUS,
     UBUS_NETWORK_DUMP,
     UBUS_NETWORK_OBJECT,
     UBUS_NETWORK_RELOAD,
@@ -94,6 +94,7 @@ from .const import (
     UBUS_SYSTEM_BOARD,
     UBUS_SYSTEM_INFO,
     UBUS_SYSTEM_OBJECT,
+    UBUS_SYSTEM_REBOOT,
     UBUS_UCI_COMMIT,
     UBUS_UCI_GET,
     UBUS_UCI_OBJECT,
@@ -131,6 +132,7 @@ SUBPROCESS_RC_CANCELLED = -3  # caller's task was cancelled mid-flight
 
 # SSH connect timeout (seconds) — parity with the old ``-o ConnectTimeout=8``.
 SSH_CONNECT_TIMEOUT = 8.0
+REBOOT_SSH_TIMEOUT = 15.0  # dispatch of the detached reboot command
 
 
 async def _safe_subprocess_exec(
@@ -224,7 +226,7 @@ async def _safe_subprocess_exec(
                 proc.terminate()
             except ProcessLookupError:
                 pass  # already exited between the check and the call
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.debug("subprocess terminate raised", exc_info=True)
 
             # Shielded wait for graceful exit
@@ -234,7 +236,7 @@ async def _safe_subprocess_exec(
                 cleanup_cancelled = True
             except asyncio.TimeoutError:
                 pass  # still alive — escalate to SIGKILL
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.debug("subprocess wait after terminate raised", exc_info=True)
 
             # If still alive after the graceful wait, SIGKILL + final reap.
@@ -245,7 +247,7 @@ async def _safe_subprocess_exec(
                     proc.kill()
                 except ProcessLookupError:
                     pass
-                except Exception:  # noqa: BLE001
+                except Exception:
                     _LOGGER.debug("subprocess kill raised", exc_info=True)
                 try:
                     await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=2.0))
@@ -306,8 +308,6 @@ def _parse_uci_config(raw: str) -> dict[str, dict[str, Any]]:
             option service_name 'duckdns.org'
             option lookup_host 'myhome.duckdns.org'
     """
-    import re as _re
-
     sections: dict[str, dict[str, Any]] = {}
     current_name: str | None = None
     current_type: str | None = None
@@ -319,7 +319,7 @@ def _parse_uci_config(raw: str) -> dict[str, dict[str, Any]]:
             continue
 
         # config <type> '<name>'  OR  config <type>
-        m = _re.match(r"^config\s+(\S+)(?:\s+'([^']*)')?", line)
+        m = re.match(r"^config\s+(\S+)(?:\s+'([^']*)')?", line)
         if m:
             # Save previous section
             if current_name and current_type == "service":
@@ -330,13 +330,13 @@ def _parse_uci_config(raw: str) -> dict[str, dict[str, Any]]:
             continue
 
         # option <key> '<value>'
-        m = _re.match(r"^option\s+(\S+)\s+'([^']*)'", line)
+        m = re.match(r"^option\s+(\S+)\s+'([^']*)'", line)
         if m and current_name:
             current_data[m.group(1)] = m.group(2)
             continue
 
         # list <key> '<value>'  (multi-value, rare in ddns)
-        m = _re.match(r"^list\s+(\S+)\s+'([^']*)'", line)
+        m = re.match(r"^list\s+(\S+)\s+'([^']*)'", line)
         if m and current_name:
             key = m.group(1)
             current_data.setdefault(key, [])
@@ -649,6 +649,7 @@ class OpenWrtAPI:
         session: aiohttp.ClientSession,
         timeout: int = DEFAULT_TIMEOUT,
         protocol: str = DEFAULT_PROTOCOL,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         """Initialise the API client.
 
@@ -660,6 +661,10 @@ class OpenWrtAPI:
             session: Shared aiohttp ClientSession.
             timeout: Request timeout in seconds.
             protocol: Connection protocol ("http", "https", "https-insecure").
+            ssl_context: Pre-built SSL context for HTTPS. Callers running
+                inside an event loop must pass one (building a context loads
+                the CA bundle from disk — a blocking call); when omitted, a
+                context is built synchronously as fallback for standalone use.
 
         Note:
             The password is stored in memory only and is never logged.
@@ -677,8 +682,13 @@ class OpenWrtAPI:
             sock_connect=min(5, timeout),
             sock_read=timeout,
         )
-        # Build SSL context for HTTPS connections
-        self._ssl_context = self._build_ssl_context()
+        # SSL context for HTTPS connections. Injected by HA callers (which
+        # hold process-wide cached contexts); the synchronous fallback exists
+        # only for standalone/CLI use outside an event loop.
+        if ssl_context is not None and protocol != PROTOCOL_HTTP:
+            self._ssl_context: ssl.SSLContext | None = ssl_context
+        else:
+            self._ssl_context = self._build_ssl_context()
 
         # L-2: IPv6-safe URL — bare IPv6 addresses require square brackets
         host_str = f"[{host}]" if ":" in host and not host.startswith("[") else host
@@ -732,7 +742,9 @@ class OpenWrtAPI:
         # re-logging in for them on every poll — that login churn is what keeps
         # spawning rpcd sessions on ACL-restricted routers. Cleared on reload
         # (new instance) so a deployed/updated ACL is re-probed.
-        self._acl_blocked: set[tuple[str, str]] = set()
+        # Keys come from _acl_cache_key(): (object, method) for most calls,
+        # (object, method, path) for the per-path enforced "file" object.
+        self._acl_blocked: set[tuple[str, ...]] = set()
 
         # P-6: track consecutive auth failures for backoff (wrong credentials)
         self._auth_failure_count: int = 0
@@ -744,17 +756,24 @@ class OpenWrtAPI:
         # Track DDNS availability — None=unknown, False=not available (skip future polls)
         self._ddns_available: bool | None = None
 
+        # C-1: closing flag to prevent new calls during shutdown
+        self._closing: bool = False
+
     @property
     def uses_ssh_fallback(self) -> bool:
         """True if any API call fell back to SSH in the last poll cycle."""
         return self._ssh_fallback_used
 
     def reset_ssh_fallback_flag(self) -> None:
-        """Reset SSH fallback flag at the start of each poll cycle."""
+        """Reset SSH fallback flag at the start of each poll cycle.
+
+        Must NOT reset ``_root_warning_logged``: this runs every poll, and
+        clearing the latch here made the root warning re-fire on every
+        re-login (~once a minute per router) instead of once per instance.
+        """
         self._ssh_fallback_used = False
         self._auth_failure_count = 0
         self._auth_backoff_until = 0.0
-        self._root_warning_logged = False
 
     def reset_acl_blocked(self) -> None:
         """Forget cached ACL-blocked methods so they are re-probed.
@@ -783,11 +802,12 @@ class OpenWrtAPI:
         HA-shared aiohttp ClientSession from ``async_get_clientsession()`` and
         must stay alive for other integrations.
         """
+        self._closing = True  # C-1: block new calls immediately
         active_token = self._token
         if active_token and active_token != DEFAULT_SESSION_ID:
             try:
                 await asyncio.wait_for(self._destroy_session(active_token), timeout=3.0)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # Never let cleanup block or break unload.
                 _LOGGER.debug(
                     "session destroy on close timed out / failed", exc_info=True
@@ -818,11 +838,13 @@ class OpenWrtAPI:
         """
         _LOGGER.debug("Logging in to %s as %s", self._ubus_url, self._username)
 
-        # M-4: warn once if using the privileged root account
+        # M-4: warn once per API instance if using the privileged root account
         if self._username == "root" and not self._root_warning_logged:
             _LOGGER.warning(
-                "OpenWrt Router: Using 'root' as rpcd user grants full router access. "
-                "Consider creating a dedicated restricted rpcd user for better security."
+                "OpenWrt Router (%s): Using 'root' as rpcd user grants full router "
+                "access. Consider creating a dedicated restricted rpcd user for "
+                "better security.",
+                self._host,
             )
             self._root_warning_logged = True
 
@@ -911,12 +933,17 @@ class OpenWrtAPI:
         try:
             await self._raw_call(payload)
             _LOGGER.debug("Destroyed previous rpcd session")
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Best-effort only — a leftover session expires via its TTL.
             _LOGGER.debug("session/destroy (best-effort) failed", exc_info=True)
 
     def _build_ssl_context(self) -> ssl.SSLContext | None:
-        """Build SSL context for HTTPS connections.
+        """Build SSL context for HTTPS connections (synchronous fallback).
+
+        Loads the CA bundle from disk — a blocking call. Only used when no
+        ``ssl_context`` was injected into ``__init__``; callers inside an
+        event loop (Home Assistant) must inject a pre-built context instead
+        (see ``ssl_util.ssl_context_for_protocol``).
 
         Returns:
             SSLContext configured for the selected protocol, or None for HTTP.
@@ -973,7 +1000,13 @@ class OpenWrtAPI:
             try:
                 await self._call(namespace, method, params or {})
                 return True
-            except Exception:  # noqa: BLE001
+            except (
+                OpenWrtConnectionError,
+                OpenWrtTimeoutError,
+                OpenWrtAuthError,
+                OpenWrtMethodNotFoundError,
+                OpenWrtResponseError,
+            ):
                 return False
 
         results["system_info"] = await _probe("system", "info")
@@ -1096,7 +1129,7 @@ class OpenWrtAPI:
             result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_BOARD, {})
         except (OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
             # Access denied – router has restrictive ACL, return safe defaults
-            if "access denied" in str(err).lower() or "permission" in str(err).lower():
+            if isinstance(err, OpenWrtAuthError):
                 _LOGGER.warning(
                     "Cannot access system/board (rpcd ACL restricted). "
                     "Using fallback router info."
@@ -1145,8 +1178,7 @@ class OpenWrtAPI:
             OpenWrtResponseError,
         ) as err:
             # Access denied – try SSH fallback
-            err_str = str(err).lower()
-            if "access denied" in err_str or "permission" in err_str:
+            if isinstance(err, OpenWrtAuthError):
                 _LOGGER.warning(
                     "Cannot access system/info via ubus (rpcd ACL restricted), "
                     "attempting SSH fallback"
@@ -1154,7 +1186,7 @@ class OpenWrtAPI:
                 self._ssh_fallback_used = True
                 try:
                     return await self._get_router_status_ssh()
-                except Exception as ssh_err:
+                except Exception as ssh_err:  # noqa: BLE001
                     _LOGGER.warning(
                         "SSH fallback also failed, returning empty metrics: %s", ssh_err
                     )
@@ -1213,8 +1245,7 @@ class OpenWrtAPI:
             OpenWrtResponseError,
         ) as err:
             # ubus blocked – try SSH fallback
-            err_str = str(err).lower()
-            if "access denied" in err_str or "permission" in err_str:
+            if isinstance(err, OpenWrtAuthError):
                 _LOGGER.warning(
                     "Cannot access network dump via ubus (rpcd ACL restricted), "
                     "attempting SSH fallback for WAN status"
@@ -1222,7 +1253,7 @@ class OpenWrtAPI:
                 self._ssh_fallback_used = True
                 try:
                     return await self._get_wan_status_ssh()
-                except Exception as ssh_err:
+                except Exception as ssh_err:  # noqa: BLE001
                     _LOGGER.warning(
                         "SSH fallback also failed, returning minimal WAN status: %s",
                         ssh_err,
@@ -1287,7 +1318,7 @@ class OpenWrtAPI:
                 tx_bytes = (
                     int(tx_result.strip()) if isinstance(tx_result, str) else None
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
 
         # SSH fallback if ubus file/read is ACL-blocked (in-process asyncssh).
@@ -1406,7 +1437,7 @@ class OpenWrtAPI:
                 self._wifi_method = "ssh"
                 _LOGGER.debug("WiFi method: SSH fallback")
                 return result
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             _LOGGER.debug("SSH WiFi fallback failed: %s", e)
 
         self._wifi_method = "none"
@@ -1800,7 +1831,7 @@ class OpenWrtAPI:
                 )
                 if ssh_clients is not None:
                     return ssh_clients
-            except Exception as ssh_err:
+            except Exception as ssh_err:  # noqa: BLE001
                 _LOGGER.debug("SSH client fallback failed: %s", ssh_err)
 
         # Primary: hostapd.*/get_clients — returns {clients: {mac: {signal, ...}}}
@@ -2006,7 +2037,7 @@ class OpenWrtAPI:
                             UBUS_UCI_OBJECT, "revert", {"config": "wireless"}
                         )
                         _LOGGER.debug("Reverted staged UCI change for wireless")
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110
                         pass
 
                     set_err = commit_err  # surface commit error in final message
@@ -2021,7 +2052,7 @@ class OpenWrtAPI:
         # Fallback 2: SSH (works even when rpcd ACL blocks uci/commit)
         try:
             return await self._set_wifi_state_ssh(uci_section, enabled)
-        except Exception as ssh_err:
+        except Exception as ssh_err:  # noqa: BLE001
             _LOGGER.debug("SSH fallback failed: %s", ssh_err)
 
         root_err = set_err or Exception("uci/set and uci/commit both blocked")
@@ -2120,7 +2151,7 @@ class OpenWrtAPI:
         # Return stdout even on non-zero exit (partial output is still useful).
         # None on empty output is a contract: acl_provisioning detects a
         # successful SSH deploy via a stdout marker.
-        out = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+        out = stdout
         return out if out.strip() else None
 
     async def _run_ssh_binary(
@@ -2180,7 +2211,7 @@ class OpenWrtAPI:
         rc, stdout, stderr = await self._asyncssh_run(
             wrapped, timeout=timeout, binary=False
         )
-        out = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+        out = stdout
         return rc, out, stderr
 
     # ------------------------------------------------------------------
@@ -2316,7 +2347,7 @@ class OpenWrtAPI:
             _LOGGER.error("SSH system metrics failed: %s", error_msg)
             raise OpenWrtResponseError(f"SSH metrics failed: {error_msg}")
 
-        text = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+        text = stdout
         try:
             data = json.loads(text)
         except ValueError as parse_err:
@@ -2368,7 +2399,7 @@ class OpenWrtAPI:
             _LOGGER.error("SSH WAN status failed: %s", error_msg)
             raise OpenWrtResponseError(f"SSH WAN status failed: {error_msg}")
 
-        text = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+        text = stdout
         try:
             data = json.loads(text)
         except ValueError as parse_err:
@@ -2425,7 +2456,7 @@ class OpenWrtAPI:
             )
             return await self._get_clients_via_iw_ssh(ifnames, ifname_to_ssid, leases)
 
-        text = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+        text = stdout
         try:
             entries: list[dict[str, Any]] = json.loads(text)
         except ValueError:
@@ -2495,7 +2526,7 @@ class OpenWrtAPI:
             _LOGGER.debug("SSH iw station dump subprocess error rc=%d", rc)
             return None
 
-        output = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
+        output = stdout
         clients: list[dict[str, Any]] = []
         seen_macs: set[str] = set()
         current_iface = ifnames[0] if ifnames else ""
@@ -2584,11 +2615,7 @@ class OpenWrtAPI:
                 f"SSH {action_desc} failed for {uci_section}: subprocess error"
             )
         if rc == 0:
-            output = (
-                stdout.strip()
-                if isinstance(stdout, str)
-                else stdout.decode(errors="replace").strip()
-            )
+            output = stdout.strip()
             _LOGGER.info(
                 "SSH WiFi control successful: %s (output: %s)",
                 uci_section,
@@ -2691,6 +2718,60 @@ class OpenWrtAPI:
             )
             return False
 
+    async def reboot(self) -> bool:
+        """Reboot the whole router.
+
+        Tries ubus ``system/reboot`` first and falls back to a detached SSH
+        ``reboot`` when rpcd does not expose the method or its ACL blocks it.
+        The router tears the connection down while going away, so a timeout or
+        connection error on the ubus call is not conclusive on its own — the
+        SSH fallback decides in that case. Re-triggering a reboot that already
+        started is harmless.
+
+        Returns:
+            True when the router accepted the reboot.
+        """
+        _LOGGER.info("Rebooting router %s", self._host)
+        try:
+            await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_REBOOT, {})
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+            OpenWrtResponseError,
+            OpenWrtConnectionError,
+            OpenWrtTimeoutError,
+        ) as err:
+            _LOGGER.debug(
+                "ubus system/reboot not usable on %s (%s) – trying SSH fallback",
+                self._host,
+                err,
+            )
+            return await self._reboot_ssh()
+        return True
+
+    async def _reboot_ssh(self) -> bool:
+        """Reboot the router over SSH (fallback when ubus is unavailable).
+
+        The command is detached and delayed by two seconds so the reboot does
+        not tear down the SSH session before the command was acknowledged.
+
+        Returns:
+            True when the command was dispatched successfully.
+        """
+        rc, _stdout, stderr = await self._run_ssh_detached(
+            "sleep 2; reboot", timeout=REBOOT_SSH_TIMEOUT
+        )
+        if rc != 0:
+            _LOGGER.error(
+                "SSH reboot on %s failed (rc=%s): %s",
+                self._host,
+                rc,
+                stderr.decode(errors="replace").strip(),
+            )
+            return False
+        _LOGGER.info("Reboot dispatched via SSH on %s", self._host)
+        return True
+
     async def get_dhcp_leases(self) -> dict[str, dict[str, str]]:
         """Return a MAC → {ip, hostname} mapping from the DHCP lease table.
 
@@ -2788,7 +2869,7 @@ class OpenWrtAPI:
             try:
                 result = await self._call("luci-rpc", "getWirelessDevices", {})
                 # Response: {radio0: {interfaces: [{ifname: "phy0-ap0", config: {ssid: ...}}]}}
-                for _radio, radio_data in result.items():
+                for radio_data in result.values():
                     if not isinstance(radio_data, dict):
                         continue
                     for iface in radio_data.get("interfaces", []):
@@ -3147,23 +3228,43 @@ class OpenWrtAPI:
     async def _call_file_read_shell(
         self, command: str, cache_key: str
     ) -> dict[str, Any]:
-        """Execute shell command via rpcd and return stdout/stderr.
+        """Execute a shell command and return stdout/stderr.
 
-        For now, this is a placeholder that attempts to read from /tmp cache files
-        or executes via uci shell interface. In production, rpcd-mod-file would handle this.
+        Tries SSH fallback directly — rpcd-mod-exec is rare and the SSH
+        transport is already established for ACL-restricted routers.
+        The result is NOT cached — cache_key is reserved for future use.
 
         Args:
-            command: Shell command to execute (e.g., "df -h").
-            cache_key: Cache key for storing output.
+            command: Shell command to execute (e.g., "df -B 1048576").
+            cache_key: Cache key for future use (currently unused).
 
         Returns:
-            {"stdout": str, "stderr": str, "code": int}
+            {"stdout": str, "stderr": str, "code": int} or {} on failure.
 
         Raises:
-            OpenWrtMethodNotFoundError: If shell execution not supported.
+            OpenWrtMethodNotFoundError: If no execution path is available.
         """
-        # TODO: Implement via rpcd-mod-exec or similar when available
-        # For now, return empty result to trigger fallback
+        # Try SSH fallback directly — rpcd-mod-exec is rare and the SSH
+        # transport is already established for ACL-restricted routers.
+        if self._password or self._ssh_use_key:
+            rc, stdout, stderr = await self._asyncssh_run(
+                command, timeout=10.0, binary=False
+            )
+            if rc >= 0:
+                return {
+                    "stdout": stdout if isinstance(stdout, str) else "",
+                    "stderr": stderr.decode(errors="replace")
+                    if isinstance(stderr, bytes)
+                    else str(stderr),
+                    "code": rc,
+                }
+
+        # No execution path available
+        _LOGGER.debug(
+            "No shell execution path available for command %r (cache_key=%s)",
+            command,
+            cache_key,
+        )
         return {}
 
     async def get_network_interfaces(self) -> list[dict[str, Any]]:
@@ -3508,7 +3609,7 @@ class OpenWrtAPI:
                     pno_str = (pno_result.get("data") or "").strip()
                     if pno_str:
                         port_map[int(pno_str, 16)] = iface
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001, S110
                     pass
             return port_map
 
@@ -3760,9 +3861,7 @@ class OpenWrtAPI:
                 }
 
                 # Categorize: addon packages typically start with "addon-" or "luci-"
-                if package_name.startswith("addon-") or package_name.startswith(
-                    "luci-"
-                ):
+                if package_name.startswith(("addon-", "luci-")):
                     update_info["category"] = "addon"
                     addon_updates.append(update_info)
                 else:
@@ -3941,7 +4040,7 @@ class OpenWrtAPI:
                         {
                             "name": svc_name,
                             "running": running,
-                            "enabled": True,  # procd-managed services are enabled
+                            "enabled": None,  # Unknown via procd service/list
                         }
                     )
                 _LOGGER.debug("Fetched %d services via service/list", len(services))
@@ -4007,6 +4106,10 @@ class OpenWrtAPI:
         """
         await self._ensure_fresh_token()
 
+        # C-1: reject new calls when API is shutting down
+        if self._closing:
+            raise OpenWrtConnectionError("OpenWrtAPI is closing – call rejected")
+
         # P-6: if repeated auth failures suggest wrong credentials, stop hammering
         _MAX_AUTH_FAILURES = 3
         if self._auth_failure_count >= _MAX_AUTH_FAILURES:
@@ -4023,9 +4126,10 @@ class OpenWrtAPI:
         # Re-trying them only fails again and (pre-cache) triggered a useless
         # re-login each poll — the main driver of rpcd session churn on
         # ACL-restricted routers. Treat as method-not-found without any call.
-        if (ubus_object, method) in self._acl_blocked:
+        cache_key = self._acl_cache_key(ubus_object, method, params)
+        if cache_key in self._acl_blocked:
             raise OpenWrtMethodNotFoundError(
-                f"rpcd ACL blocks {ubus_object}/{method} (cached this session)"
+                f"rpcd ACL blocks {'/'.join(cache_key)} (cached this session)"
             )
 
         payload = self._build_call(ubus_object, method, params)
@@ -4062,12 +4166,38 @@ class OpenWrtAPI:
                     # entirely (see the short-circuit above), then convert to
                     # MethodNotFoundError so the coordinator does not trigger
                     # ConfigEntryAuthFailed.
-                    self._acl_blocked.add((ubus_object, method))
+                    self._acl_blocked.add(cache_key)
                     raise OpenWrtMethodNotFoundError(
-                        f"rpcd ACL blocks {ubus_object}/{method} "
+                        f"rpcd ACL blocks {'/'.join(cache_key)} "
                         f"(authenticated OK, method not permitted)"
                     ) from None
             raise
+
+    @staticmethod
+    def _acl_cache_key(
+        ubus_object: str, method: str, params: dict[str, Any]
+    ) -> tuple[str, ...]:
+        """Build the ``_acl_blocked`` cache key for a ubus call.
+
+        rpcd's ``file`` object enforces its ACL per PATH, not per method — a
+        denial for one path (e.g. an uncovered /proc entry) must not
+        short-circuit reads of other, permitted paths for the rest of the
+        session. The ``uci`` object likewise enforces per CONFIG file — a
+        denied config (e.g. the ddns probe on a router without ddns grants)
+        must not kill uci access to wireless/system and push every later
+        poll into the SSH fallback. Everything else is denied per
+        object/method.
+        """
+        if ubus_object == "file":
+            # read/write/stat/list use "path"; exec names its target "command".
+            target = params.get("path") or params.get("command")
+            if isinstance(target, str):
+                return (ubus_object, method, target)
+        if ubus_object == "uci":
+            config = params.get("config")
+            if isinstance(config, str):
+                return (ubus_object, method, config)
+        return (ubus_object, method)
 
     def _build_call(
         self,
@@ -4521,7 +4651,7 @@ class OpenWrtAPI:
             raw = file_result.get("data", "")
             if raw:
                 sections = _parse_uci_config(raw)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
 
         # --- Fallback: uci/get (may be ACL-blocked on secondary APs) ---

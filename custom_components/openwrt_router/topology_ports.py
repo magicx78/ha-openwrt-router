@@ -181,6 +181,8 @@ def build_port_connections(
         normalize_mac(mac): lease for mac, lease in (dhcp_leases or {}).items()
     }
     arp_by_mac = {normalize_mac(mac): ip for mac, ip in (arp_table or {}).items()}
+    # Normalise FDB keys once so all lookups are consistent
+    fdb_norm = {normalize_mac(mac): port for mac, port in (fdb or {}).items()}
     wifi_macs = {normalize_mac(mac) for mac in (wifi_client_macs or set())}
     own = {normalize_mac(mac) for mac in (own_macs or set())}
 
@@ -247,7 +249,7 @@ def build_port_connections(
         return ip, hostname, sources, conflict
 
     # ── Pass 1: FDB-observed MACs → port assignment ────────────────
-    for mac, port_name in sorted((fdb or {}).items()):
+    for mac, port_name in sorted(fdb_norm.items()):
         mac = normalize_mac(mac)
         if not mac:
             continue
@@ -328,7 +330,7 @@ def build_port_connections(
             or mac in assigned_macs
             or mac in own
             or mac in wifi_macs
-            or mac in (fdb or {})
+            or mac in fdb_norm
             or _is_multicast_or_broadcast(mac)
         ):
             continue

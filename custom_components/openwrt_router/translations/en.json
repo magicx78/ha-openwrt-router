@@ -192,6 +192,9 @@
       },
       "perform_updates": {
         "name": "Perform Updates"
+      },
+      "reboot": {
+        "name": "Reboot"
       }
     }
   }
