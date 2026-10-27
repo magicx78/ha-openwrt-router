@@ -28,7 +28,7 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 - [ ] AK4 Die CPU-Last ist auf die Kernzahl normiert (Lastmittel 1,22 auf 2 Kernen = 61 %), und die Poll-Drosselung greift erst bei echter Überlast (je nach E2).
 - [ ] AK5 `_parse_wireless_status` liefert den Kanal aus dem `config`-Block, Tests decken beide Formen ab.
 - [ ] AK6 Router ohne WAN (Dumb-AP) haben keine dauerhaft `unknown` WAN-Sensoren mehr (je nach E3).
-- [ ] AK7 SSH-Fallback-Router erscheinen in Kanalplan und Sticky-Prüfung; anonyme UCI-Sektionen und SSIDs mit `'` werden richtig gelesen.
+- [ ] AK7 SSH-Fallback-Router erscheinen im Kanalplan (Sticky-Prüfung unverändert, usteer-Knoten bleiben ohne `ifname`-Option unbekannt); anonyme UCI-Sektionen und SSIDs mit `'` werden richtig gelesen.
 - [ ] AK8 Das Panel zeigt bei zufälligen MACs keinen OUI-Hersteller.
 - [ ] AK9 `scripts/checks.py --ruff-ci` grün, CI grün, unabhängiges Review ohne offene P0/P1 je PR.
 
@@ -94,4 +94,5 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 - 2026-10-27 `fix/acl-v7-cpu-per-core` (PR B) – lokal: ruff 0.17.3 sauber, 1214 Tests grün (35 neue, 32 davon vor der Änderung rot) · Hardware: ACL v7 nicht verteilt (Lücke: Sensor = loadavg/nproc, Schalter konfiguriert das Radio nur einmal, rpcd-Neustart je Router) · Review: folgt.
 - 2026-10-27 PR #34 Review (unabhängig): keine P0–P2; P3 behoben (`6d9aa96`: Retry trotz gecachter ACL-Sperre, 5xx kurzfristig, 4-KiB-Hinweis, CHANGELOG), 1216 Tests grün.
 - 2026-10-27 `fix/wireless-channel-ssh-fallback` (PR C) – lokal: 23 neue Tests (13 vor der Änderung rot), nach Merge von #34 grün · Hardware: SSH-Fallback nicht vorhanden (Lücke) · Review: folgt.
+- 2026-10-27 PR #35 Review (unabhängig): keine P0/P1; P2 (Sticky-Behauptung, abgeschaltete Radios im Kanalplan) und P3 (Quoting, keine WLAN-Secrets im Speicher, CHANGELOG-Hinweise) behoben; `option ifname` nur im SSH-Pfad, damit bestehende AP-Sensoren ihre ID behalten; 1263 Tests grün.
 - 2026-10-27 B1 – drei Config-Entries entfernt; danach 3 Einträge, alle `loaded`. Sicherung vorher: HA-Backup vom selben Tag, 13:46.

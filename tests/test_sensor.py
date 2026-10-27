@@ -733,6 +733,35 @@ class TestOpenWrtAPInterfaceSensor:
         s = _make_ap_sensor("ap_clients", ifname="phy0-ap0", clients=[])
         assert s.native_value == 0
 
+    def test_ap_clients_unknown_for_uci_section_name(self):
+        """UCI fallback without `ifname`: the section name never matches the
+        kernel interface name the clients report, so the count is unknown."""
+        clients = [{CLIENT_KEY_RADIO: "phy0-ap0"}]
+        s = _make_ap_sensor(
+            "ap_clients",
+            ifname="@wifi-iface[0]",
+            radio_data={"ifname_is_section": True},
+            clients=clients,
+        )
+        assert s.native_value is None
+
+    def test_ap_clients_counted_with_uci_ifname_option(self):
+        """UCI `ifname` option: the entry carries the kernel name, counts work."""
+        clients = [{CLIENT_KEY_RADIO: "wlan0"}, {CLIENT_KEY_RADIO: "wlan1"}]
+        s = _make_ap_sensor(
+            "ap_clients",
+            ifname="wlan0",
+            radio_data={"ifname_is_section": False},
+            clients=clients,
+        )
+        assert s.native_value == 1
+
+    def test_other_metrics_of_uci_section_entries_unchanged(self):
+        s = _make_ap_sensor(
+            "channel", ifname="@wifi-iface[0]", radio_data={"ifname_is_section": True}
+        )
+        assert s.native_value == 6
+
     def test_unique_id_format(self):
         """T-AP11: unique_id follows stable ifname_metric pattern."""
         s = _make_ap_sensor("channel", ifname="phy0-ap0")

@@ -175,6 +175,20 @@ class TestRadiosFromApInterfaces:
         ]
         assert [(r.phy, r.channel) for r in _radios("gw", ifaces)] == [("phy1", 40)]
 
+    def test_disabled_interfaces_are_skipped(self):
+        """UCI fallback: switched-off SSIDs/radios are not on air. iwinfo
+        entries carry no flag (iwinfo lists running interfaces only)."""
+        ifaces = [
+            dict(_iface("default_radio0", 6, phy="radio0"), enabled=False),
+            dict(_iface("off_5g", 100, phy="radio1"), enabled=False),
+            dict(_iface("on_5g", 36, phy="radio1"), enabled=True),
+            _iface("phy2-ap0", 1),
+        ]
+        assert sorted((r.phy, r.channel) for r in _radios("gw", ifaces)) == [
+            ("phy2", 1),
+            ("radio1", 36),
+        ]
+
     def test_multi_band_wiphy_keeps_one_radio_per_band(self):
         ifaces = [
             _iface("phy0.0-ap0", 1, phy="phy0"),

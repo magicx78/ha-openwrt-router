@@ -70,6 +70,7 @@ from .const import (
     RADIO_KEY_HTMODE,
     RADIO_KEY_HWMODE,
     RADIO_KEY_IFNAME,
+    RADIO_KEY_IFNAME_IS_SECTION,
     RADIO_KEY_IS_GUEST,
     RADIO_KEY_MODE,
     RADIO_KEY_NAME,
@@ -431,6 +432,17 @@ def _parse_uci_show(text: str, config: str) -> dict[str, dict[str, Any]]:
         else:
             section[option] = value
     return sections
+
+
+# Spellings uci accepts for a true boolean option (e.g. disabled '1').
+_UCI_TRUE = frozenset({"1", "yes", "on", "true", "enabled"})
+
+
+def _uci_bool(value: Any) -> bool:
+    """Return a UCI boolean option ("1", "yes", "on", "true", "enabled")."""
+    if isinstance(value, bool):
+        return value
+    return isinstance(value, str | int) and str(value).strip().lower() in _UCI_TRUE
 
 
 def _channel_number(value: Any) -> int | None:
@@ -815,10 +827,12 @@ class OpenWrtAPI:
         # avoid retrying known-unavailable APIs on every poll cycle.
         self._wifi_method: str | None = None
 
-        # Parsed `uci show wireless` of the last SSH Wi-Fi fallback (same shape
-        # as ubus "uci get"). get_ap_interface_details() reuses it within the
-        # poll instead of opening another SSH connection. None = no SSH data.
-        self._ssh_uci_wireless: dict[str, dict[str, Any]] | None = None
+        # AP interfaces derived from the `uci show wireless` of the current
+        # SSH Wi-Fi fallback poll; get_ap_interface_details() returns them
+        # instead of opening another SSH connection. Only this derived list is
+        # kept: the raw config holds key / sae_password / RADIUS secrets.
+        # Reset by every get_wifi_status(). None = no SSH data.
+        self._ssh_ap_interfaces: list[dict[str, Any]] | None = None
 
         # Cached hostapd interface names (e.g. ["phy0-ap0"]).
         # Populated on first get_connected_clients() call via discovery.
@@ -955,7 +969,7 @@ class OpenWrtAPI:
         self._token = DEFAULT_SESSION_ID
         self._token_expires_at = 0.0
         self._wifi_method = None
-        self._ssh_uci_wireless = None
+        self._ssh_ap_interfaces = None
         self._hostapd_ifaces = None
         self._luci_rpc_ssid_map = None
         _LOGGER.debug(
@@ -1630,6 +1644,11 @@ class OpenWrtAPI:
         Returns:
             List of radio dicts with keys defined by RADIO_KEY_* constants.
         """
+        # AP interfaces of an earlier SSH poll must not outlive it, also when
+        # this poll ends on another method (e.g. ubus after an ACL deploy).
+        # The SSH branch below builds them anew.
+        self._ssh_ap_interfaces = None
+
         # Fast path: use cached method from previous call
         if self._wifi_method == "uci":
             try:
@@ -1783,9 +1802,9 @@ class OpenWrtAPI:
             return result
 
         # Fallback: UCI wireless config for routers without iwinfo via rpcd,
-        # read over ubus ("uci" method) or, on the SSH fallback, the
-        # `uci show wireless` that get_wifi_status() already fetched in this
-        # poll, so no extra SSH round-trip.
+        # read over ubus ("uci" method) or, on the SSH fallback, built by
+        # get_wifi_status() from the `uci show wireless` of this poll, so no
+        # extra SSH round-trip.
         if self._wifi_method == "uci":
             try:
                 values = await self.get_uci_wireless()
@@ -1794,20 +1813,29 @@ class OpenWrtAPI:
                     "UCI wireless config unavailable for AP interface details"
                 )
                 return []
-        elif self._wifi_method == "ssh" and self._ssh_uci_wireless:
-            values = self._ssh_uci_wireless
-        else:
-            return result
+            # ubus UCI path: keep section names as interface names (existing
+            # AP sensor unique_ids); only the SSH path honours `option ifname`.
+            return self._ap_interfaces_from_uci(values, use_ifname_option=False)
+        if self._wifi_method == "ssh" and self._ssh_ap_interfaces:
+            return list(self._ssh_ap_interfaces)
+        return result
 
-        return self._ap_interfaces_from_uci(values)
-
-    def _ap_interfaces_from_uci(self, values: dict[str, Any]) -> list[dict[str, Any]]:
+    def _ap_interfaces_from_uci(
+        self, values: dict[str, Any], *, use_ifname_option: bool = True
+    ) -> list[dict[str, Any]]:
         """Build AP interface entries from a UCI wireless config.
 
         ``values`` has the shape of ubus ``uci get`` (also produced by
-        :func:`_parse_uci_show`). The UCI section name (e.g. "default_radio0"
-        or "@wifi-iface[0]") is the stable RADIO_KEY_IFNAME, as in
-        wifi_radios of the UCI and SSH paths; the wifi-device name is the phy.
+        :func:`_parse_uci_show`). RADIO_KEY_IFNAME is the wifi-iface's
+        ``ifname`` option when set and ``use_ifname_option`` is True (SSH path;
+        the ubus UCI path keeps section names so existing AP sensor unique_ids
+        stay): the kernel interface name that clients
+        (``radio``) and usteer (``hostapd.<ifname>``) report. Otherwise it is
+        the UCI section name (e.g. "default_radio0" or "@wifi-iface[0]"),
+        flagged by RADIO_KEY_IFNAME_IS_SECTION, because the kernel name
+        (phy0-ap0) is not in the config. RADIO_KEY_UCI_SECTION always holds
+        the section, the wifi-device name is the phy. RADIO_KEY_ENABLED is
+        False when the wifi-iface or its wifi-device is disabled.
         """
         result: list[dict[str, Any]] = []
         devices: dict[str, dict[str, Any]] = {}
@@ -1829,9 +1857,22 @@ class OpenWrtAPI:
             mode_uci: str = section_data.get("mode", "ap")
             channel_val = _channel_number(device_data.get("channel"))
             band_uci = self._detect_band(device_name, device_data)
+            ifname_opt = section_data.get("ifname")
+            ifname = (
+                ifname_opt.strip()
+                if use_ifname_option and isinstance(ifname_opt, str)
+                else ""
+            )
+            enabled = not (
+                _uci_bool(section_data.get("disabled"))
+                or _uci_bool(device_data.get("disabled"))
+            )
             result.append(
                 {
-                    RADIO_KEY_IFNAME: section_name,
+                    RADIO_KEY_IFNAME: ifname or section_name,
+                    RADIO_KEY_IFNAME_IS_SECTION: not ifname,
+                    RADIO_KEY_UCI_SECTION: section_name,
+                    RADIO_KEY_ENABLED: enabled,
                     RADIO_KEY_SSID: ssid_uci,
                     RADIO_KEY_BAND: band_uci,
                     RADIO_KEY_IS_GUEST: self._is_guest_ssid(ssid_uci),
@@ -1853,12 +1894,15 @@ class OpenWrtAPI:
                 }
             )
             _LOGGER.debug(
-                "AP UCI interface %s: mode=%s ch=%s htmode=%s band=%s",
+                "AP UCI interface %s (ifname=%s): mode=%s ch=%s htmode=%s "
+                "band=%s enabled=%s",
                 section_name,
+                ifname or "-",
                 mode_uci,
                 channel_val,
                 device_data.get("htmode"),
                 band_uci,
+                enabled,
             )
 
         return result
@@ -2899,12 +2943,11 @@ class OpenWrtAPI:
         action_desc = "enable" if enabled else "disable"
         disabled_val = "0" if enabled else "1"
 
-        # Use direct UCI commands — no helper script required on the router
-        uci_cmd = (
-            f"uci set wireless.{uci_section}.disabled='{disabled_val}' && "
-            f"uci commit wireless && "
-            f"wifi reload"
-        )
+        # Use direct UCI commands — no helper script required on the router.
+        # The option path is one shell word: "[0]" of an anonymous section
+        # (@wifi-iface[0]) is a glob pattern for the remote shell.
+        option = shlex.quote(f"wireless.{uci_section}.disabled={disabled_val}")
+        uci_cmd = f"uci set {option} && uci commit wireless && wifi reload"
         rc, stdout, stderr = await self._asyncssh_run(
             uci_cmd, timeout=10.0, binary=False
         )
@@ -2941,9 +2984,9 @@ class OpenWrtAPI:
         """Get WiFi status via direct UCI commands over SSH.
 
         Uses `uci show wireless` — no helper script required on the router.
-        The parsed config is kept in ``_ssh_uci_wireless`` so that
-        get_ap_interface_details() can build the AP interfaces of this poll
-        without another SSH connection.
+        The AP interfaces derived from it are kept in ``_ssh_ap_interfaces``
+        so that get_ap_interface_details() needs no other SSH connection in
+        this poll; the parsed config itself (with its secrets) is not kept.
 
         Returns:
             List of radio dicts compatible with get_wifi_status() output.
@@ -2953,7 +2996,7 @@ class OpenWrtAPI:
             OpenWrtTimeoutError: If SSH command times out.
         """
         # Never leave the data of an earlier poll behind a failed one
-        self._ssh_uci_wireless = None
+        self._ssh_ap_interfaces = None
         rc, stdout, stderr = await self._asyncssh_run(
             "uci show wireless", timeout=10.0, binary=False
         )
@@ -2978,7 +3021,9 @@ class OpenWrtAPI:
         # wireless.<section>.<key>='<value>', anonymous sections as
         # wireless.@wifi-iface[0].<key>, a ' in a value written as '\''
         uci = _parse_uci_show(text, "wireless")
-        self._ssh_uci_wireless = uci
+        # Only the derived AP interfaces outlive this call: the config holds
+        # key / sae_password / RADIUS secrets.
+        self._ssh_ap_interfaces = self._ap_interfaces_from_uci(uci)
 
         # Group wifi-iface sections by their parent radio device
         radio_ifaces: dict[str, list[tuple[str, dict[str, Any]]]] = {}
