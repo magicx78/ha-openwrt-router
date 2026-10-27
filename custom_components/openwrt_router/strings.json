@@ -81,6 +81,9 @@
       "connectivity": {
         "name": "Connectivity"
       },
+      "sticky_clients": {
+        "name": "Sticky Wi-Fi clients"
+      },
       "wan_connectivity": {
         "name": "WAN Connectivity"
       }
@@ -113,6 +116,9 @@
           "timeout": "Timeout",
           "response_error": "Invalid Response"
         }
+      },
+      "unstable_clients": {
+        "name": "Unstable Wi-Fi clients"
       },
       "uptime": {
         "name": "Uptime"

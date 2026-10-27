@@ -39,6 +39,7 @@ from .channel_plan import (
     format_finding,
     radios_from_ap_interfaces,
 )
+from .client_stability import iface_band
 from .const import DOMAIN, ERROR_TYPE_AUTH, EVENT_OUTAGE
 from .issues import (
     ISSUE_CHANNEL_PLAN_CONFLICT,
@@ -387,6 +388,48 @@ def dhcp_context(
     if not leases:
         return None
     return frozenset(leases), frozenset(arp), frozenset(static)
+
+
+@callback
+def usteer_node_info(hass: HomeAssistant) -> dict[str, tuple[str | None, str | None]]:
+    """Map usteer remote node names (``<host>#hostapd.<ifname>``) to (band, ssid).
+
+    Built from the configured host and AP interfaces of every loaded router;
+    a router configured by hostname instead of IP simply stays unknown.
+    """
+    info: dict[str, tuple[str | None, str | None]] = {}
+    for entry in hass.config_entries.async_loaded_entries(DOMAIN):
+        host = (getattr(entry, "data", None) or {}).get("host")
+        runtime = getattr(entry, "runtime_data", None)
+        data = getattr(getattr(runtime, "coordinator", None), "data", None)
+        if not host or data is None:
+            continue
+        for iface in getattr(data, "ap_interfaces", None) or []:
+            if isinstance(iface, dict) and iface.get("ifname"):
+                info[f"{host}#hostapd.{iface['ifname']}"] = (
+                    iface_band(iface),
+                    iface.get("ssid") or None,
+                )
+    return info
+
+
+@callback
+def client_counts(hass: HomeAssistant, mac: str) -> dict[str, int] | None:
+    """Sum a client's 24 h associations/reconnects over all routers."""
+    mac = mac.upper()
+    total: dict[str, int] | None = None
+    for entry in hass.config_entries.async_loaded_entries(DOMAIN):
+        runtime = getattr(entry, "runtime_data", None)
+        data = getattr(getattr(runtime, "coordinator", None), "data", None)
+        stability = getattr(data, "client_stability", None) or {}
+        counts = (stability.get("clients") or {}).get(mac)
+        if not counts:
+            continue
+        if total is None:
+            total = {"associations_24h": 0, "reconnects_24h": 0}
+        for key in total:
+            total[key] += int(counts.get(key, 0))
+    return total
 
 
 @callback

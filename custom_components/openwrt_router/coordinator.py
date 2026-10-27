@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -27,6 +28,17 @@ from .api import (
     OpenWrtTimeoutError,
 )
 from .channel_plan import Radio, phy_of, radios_from_ap_interfaces
+from .client_stability import (
+    STICKY_HOLD_SECONDS,
+    UNSTABLE_RECONNECTS,
+    WEAK_SIGNAL_DBM,
+    AssociationTracker,
+    HoldTimer,
+    iface_band,
+    parse_usteer_clients,
+    sticky_candidates,
+    unstable_top,
+)
 from .const import (
     BOARD_REFRESH_CYCLES,
     CLIENT_KEY_CONNECTED_SINCE,
@@ -94,6 +106,10 @@ from .const import (
     SCAN_INTERVAL_SECONDS,
     TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES,
     TOPOLOGY_SNAPSHOT_MAX,
+    USTEER_RETRY_CYCLES,
+    USTEER_STATUS_OK,
+    USTEER_STATUS_PENDING,
+    USTEER_STATUS_UNAVAILABLE,
 )
 from .dhcp_health import Pool, parse_dhcp_config, pool_usage
 from .issues import (
@@ -105,8 +121,11 @@ from .issues import (
 from .log_parser import (
     CATEGORY_DFS,
     CATEGORY_DHCP,
+    CATEGORY_WIFI,
     DFS_CHANNEL_CHANGE,
     DFS_EVIDENCE_KINDS,
+    WIFI_CONNECTED,
+    WIFI_DISCONNECTED,
     EventLimiter,
     LogCursor,
     LogEvent,
@@ -263,6 +282,8 @@ class OpenWrtCoordinatorData:
         # (static MACs are not part of as_dict / diagnostics)
         self.dhcp_pools: list[dict[str, Any]] = []
         self.dhcp_static_macs: frozenset[str] = frozenset()
+        # Client stability (F4), see _client_stability_snapshot()
+        self.client_stability: dict[str, Any] = {}
         # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
         self.vlans_stale: bool = False
         # Connectivity health tracking (used by binary_sensor / sensor platform)
@@ -307,6 +328,10 @@ class OpenWrtCoordinatorData:
             "log_stats": self.log_stats,
             "dfs": self.dfs,
             "dhcp_pools": self.dhcp_pools,
+            # Per-client counters (MACs) stay out of diagnostics
+            "client_stability": {
+                k: v for k, v in self.client_stability.items() if k != "clients"
+            },
         }
 
 
@@ -405,6 +430,16 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._dhcp_config_fetched = False
         self._dhcp_pools: list[Pool] = []
         self._dhcp_static_macs: frozenset[str] = frozenset()
+        # Client stability (F4): associations/reconnects from the log,
+        # sticky (usteer) and weak-signal timers.
+        self._assoc = AssociationTracker()
+        self._sticky_timer = HoldTimer()
+        self._weak_timer = HoldTimer()
+        self._sticky_now: dict[str, dict[str, Any]] = {}
+        self._usteer_status: str = USTEER_STATUS_PENDING
+        self._last_usteer_poll: int | None = None
+        # Fleet lookup usteer node -> (band, ssid), wired in __init__
+        self._node_resolver: Callable[[], dict[str, Any]] | None = None
         self._channel_changes = RollingCounter(24 * 3600 * 1000, max_items=500)
         # Poll number of the last log fetch: a fetch pulled forward by a
         # channel change restarts the LOG_READ_INTERVAL_CYCLES rhythm, so the
@@ -745,6 +780,27 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             )
             data.dhcp_static_macs = self._dhcp_static_macs
 
+            # Client stability (F4): usteer every LOG_READ_INTERVAL_CYCLES
+            # polls but never in the same poll as the log (spreads the two
+            # ~40 KB answers). Never fails the poll.
+            usteer_interval = (
+                USTEER_RETRY_CYCLES
+                if self._usteer_status == USTEER_STATUS_UNAVAILABLE
+                else LOG_READ_INTERVAL_CYCLES
+            )
+            if (
+                self._board_poll_count > 1
+                and self._last_log_poll != self._board_poll_count
+                and (
+                    self._last_usteer_poll is None
+                    or self._board_poll_count - self._last_usteer_poll
+                    >= usteer_interval
+                )
+            ):
+                self._last_usteer_poll = self._board_poll_count
+                await self._fetch_usteer(data, now_ms)
+            data.client_stability = self._client_stability_snapshot(data, now_ms)
+
             # --- CPU history (30s resolution, 1h rolling window) ---
             import time as _time
 
@@ -1035,9 +1091,21 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # Router time only when plausible: a dumb AP without NTP sync
             # would otherwise put lines outside the 24 h window.
             ts = event.time_ms
-            if not now_ms - 24 * 3600 * 1000 <= ts <= now_ms + 300_000:
+            plausible = now_ms - 24 * 3600 * 1000 <= ts <= now_ms + 300_000
+            if not plausible:
                 ts = now_ms
             self._log_counter.add(ts, event.key)
+            # Old baseline lines with an unusable time would land at "now"
+            # and pair up as reconnects: leave them out of the client stats.
+            if (
+                event.category == CATEGORY_WIFI
+                and event.mac
+                and (plausible or not result.baseline)
+            ):
+                if event.kind == WIFI_CONNECTED:
+                    self._assoc.connected(event.mac, ts, event.interface)
+                elif event.kind == WIFI_DISCONNECTED:
+                    self._assoc.disconnected(event.mac, ts, event.interface)
             if (
                 event.category == CATEGORY_DFS
                 and event.interface
@@ -1138,6 +1206,110 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             self.hass.bus.async_fire(EVENT_DHCP, payload)
         else:
             self.hass.bus.async_fire(EVENT_WIFI, payload)
+
+    def attach_node_resolver(self, resolver: Callable[[], dict[str, Any]]) -> None:
+        """Fleet lookup for usteer remote nodes (wired in __init__)."""
+        self._node_resolver = resolver
+
+    async def _fetch_usteer(self, data: OpenWrtCoordinatorData, now_ms: int) -> None:
+        """Refresh sticky-client candidates from usteer.
+
+        Not permitted or no usteer object (uhttpd answers "object not found"
+        as response error) → ``not_available`` and the signal fallback; any
+        other error drops the candidates so nothing stale stays sticky.
+        """
+        try:
+            raw = await self.api.get_usteer_clients()
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError) as err:
+            if self._usteer_status != USTEER_STATUS_UNAVAILABLE:
+                _LOGGER.debug("%s: usteer not available: %s", self.name, err)
+            self._usteer_status = USTEER_STATUS_UNAVAILABLE
+            self._sticky_now = {}
+            self._sticky_timer.update(set(), now_ms)
+            return
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("%s: usteer fetch failed: %s", self.name, err)
+            self._sticky_now = {}
+            self._sticky_timer.update(set(), now_ms)
+            return
+        node_info: dict[str, Any] = {
+            f"hostapd.{iface.get('ifname')}": (
+                iface_band(iface),
+                iface.get("ssid") or None,
+            )
+            for iface in data.ap_interfaces
+            if iface.get("ifname")
+        }
+        if self._node_resolver is not None:
+            try:
+                node_info.update(self._node_resolver())
+            except Exception:
+                _LOGGER.debug("%s: usteer node lookup failed", self.name, exc_info=True)
+        self._usteer_status = USTEER_STATUS_OK
+        self._sticky_now = sticky_candidates(parse_usteer_clients(raw), node_info)
+        self._sticky_timer.update(self._sticky_now, now_ms)
+
+    def _client_stability_snapshot(
+        self, data: OpenWrtCoordinatorData, now_ms: int
+    ) -> dict[str, Any]:
+        """Sticky/weak clients held >= STICKY_HOLD_SECONDS, 24 h counters."""
+        names = {
+            str(mac).upper(): (lease or {}).get("hostname")
+            for mac, lease in data.dhcp_leases.items()
+        }
+        connected: dict[str, dict[str, Any]] = {}
+        for client in data.clients:
+            mac = str(client.get(CLIENT_KEY_MAC, "")).upper()
+            if mac:
+                connected[mac] = client
+                names.setdefault(mac, client.get("hostname"))
+        band_by_iface = {
+            iface.get("ifname"): iface.get("band") for iface in data.ap_interfaces
+        }
+
+        weak = {
+            mac: client
+            for mac, client in connected.items()
+            if isinstance(client.get("signal"), int)
+            and client["signal"] != 0
+            and client["signal"] <= WEAK_SIGNAL_DBM
+        }
+        self._weak_timer.update(weak, now_ms)
+        held_weak = self._weak_timer.held(now_ms, STICKY_HOLD_SECONDS)
+        held_sticky = self._sticky_timer.held(now_ms, STICKY_HOLD_SECONDS)
+        counts = self._assoc.counts(now_ms)
+        unstable = unstable_top(counts)
+        for item in unstable:
+            item["hostname"] = names.get(item["mac"]) or None
+        return {
+            "usteer": self._usteer_status,
+            "sticky": [
+                {
+                    "mac": mac,
+                    "hostname": names.get(mac) or None,
+                    **self._sticky_now[mac],
+                    "since": _iso_ms(since),
+                }
+                for mac, since in sorted(held_sticky.items())
+                if mac in self._sticky_now and mac in connected
+            ],
+            "weak": [
+                {
+                    "mac": mac,
+                    "hostname": names.get(mac) or None,
+                    "signal": weak[mac]["signal"],
+                    "band": band_by_iface.get(weak[mac].get("radio")),
+                    "since": _iso_ms(since),
+                }
+                for mac, since in sorted(held_weak.items())
+                if mac in weak
+            ],
+            "clients": counts,
+            "unstable": unstable,
+            "unstable_count": sum(
+                1 for c in counts.values() if c["reconnects_24h"] >= UNSTABLE_RECONNECTS
+            ),
+        }
 
     async def _fetch_dhcp_config(self) -> None:
         """Refresh pools and static hosts; keep the old ones on errors."""

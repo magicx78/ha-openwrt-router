@@ -17,14 +17,22 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import OpenWrtConfigEntry
-from .const import DOMAIN, SUFFIX_CONNECTIVITY, SUFFIX_WAN_CONNECTIVITY
+from .const import (
+    DOMAIN,
+    SUFFIX_CONNECTIVITY,
+    SUFFIX_STICKY_CLIENTS,
+    SUFFIX_WAN_CONNECTIVITY,
+    USTEER_STATUS_OK,
+)
 from .coordinator import OpenWrtCoordinator
+from .fleet import collect_radios
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,10 +92,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up binary sensors from a config entry."""
     coordinator = entry.runtime_data.coordinator
-    async_add_entities(
+    entities: list[BinarySensorEntity] = [
         OpenWrtBinarySensorEntity(coordinator, entry, description)
         for description in BINARY_SENSOR_DESCRIPTIONS
-    )
+    ]
+    entities.append(OpenWrtStickyClientsBinarySensor(coordinator, entry))
+    async_add_entities(entities)
 
 
 class OpenWrtBinarySensorEntity(
@@ -124,3 +134,52 @@ class OpenWrtBinarySensorEntity(
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return self.entity_description.attr_fn(self.coordinator)
+
+
+class OpenWrtStickyClientsBinarySensor(
+    CoordinatorEntity[OpenWrtCoordinator], BinarySensorEntity
+):
+    """ON while Wi-Fi clients cling to this router although better APs exist (F4).
+
+    With usteer: another router hears the client at least 8 dB stronger, for
+    10 min. Without usteer: the client's signal is weak (<= -75 dBm) for
+    10 min and another router offers a radio in the same band.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "sticky_clients"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:wifi-arrow-left-right"
+
+    def __init__(
+        self, coordinator: OpenWrtCoordinator, entry: OpenWrtConfigEntry
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry_id = entry.entry_id
+        self._attr_unique_id = f"{entry.entry_id}_{SUFFIX_STICKY_CLIENTS}"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)})
+
+    def _sticky(self) -> tuple[str, list[dict[str, Any]]]:
+        data = self.coordinator.data
+        stability = (data.client_stability if data else None) or {}
+        if stability.get("usteer") == USTEER_STATUS_OK:
+            return "usteer", list(stability.get("sticky", []))
+        weak = stability.get("weak", [])
+        hass = getattr(self, "hass", None)
+        if not weak or hass is None:
+            return "signal", []
+        bands = {
+            r.band
+            for r in collect_radios(hass)
+            if r.entry_id != self._entry_id and not r.backhaul
+        }
+        return "signal", [c for c in weak if c.get("band") in bands]
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self._sticky()[1])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        method, clients = self._sticky()
+        return {"method": method, "clients": clients}

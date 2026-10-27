@@ -11,13 +11,14 @@
   - P1 `feature/ram-pressure-repairs` · 1.31.0 · PR #23
   - P2 `feature/channel-plan` · 1.32.0 · PR #24
   - P3 `feature/log-ingest` · 1.33.0 · PR #25
-  - P4 `feature/dfs-events` · 1.34.0 · PR folgt
-  - P5 `feature/dhcp-health` · 1.35.0 · PR folgt
+  - P4 `feature/dfs-events` · 1.34.0 · PR #26
+  - P5 `feature/dhcp-health` · 1.35.0 · PR #27
+  - P6 `feature/client-stability` · 1.36.0 · PR folgt
 - **Erledigt (außerhalb dieses Plans):** Feature 1 (#19), Feature 7 (#20), Feature 10 (#22), rpcd-Leck (#21)
-- **Erledigt:** P1 (F9, PR #23), P2 (F2, PR #24), P3 (F6 + ACL v6, PR #25), P4 (F3, lokal grün), P5 (F5, lokal grün)
-- **Offen:** P6–P7
+- **Erledigt:** P1 (F9, PR #23), P2 (F2, PR #24), P3 (F6 + ACL v6, PR #25), P4 (F3, PR #26), P5 (F5, PR #27), P6 (F4, lokal grün)
+- **Offen:** P7
 - **Blocker:** —
-- **Nächster Schritt:** P6 (Feature 4, Client-Stabilität) auf `feature/client-stability`
+- **Nächster Schritt:** P7 (Feature 8 Stufe 1, zufällige MACs) auf `feature/random-mac`
 
 ## Problem und Zielverhalten
 
@@ -51,7 +52,7 @@ Ziel: Solche Zustände erscheinen künftig in HA als Sensor, Event oder Reparatu
   - (a) `dhcp_missing` nur, wenn alles zutrifft: seit mindestens 180 s assoziiert, keine Lease bei irgendeinem Router, nicht in der ARP-Tabelle irgendeines Routers. Ein statischer `host` ohne Lease ergibt `static_no_lease`.
   - (b) Sensor für die Pool-Auslastung in % pro aktivem Pool.
   - (c) dnsmasq NAK/DECLINE/„no address available“ lösen ein Event aus.
-- [ ] AK6 (F4)
+- [x] AK6 (F4)
   - Tracker-Attribute `associations_24h` und `reconnects_24h`, Sensor `unstable_clients` (Top 10).
   - Binary-Sensor `sticky_clients` pro Router: Mit usteer heißt das „anderer AP hört ihn mindestens 8 dB stärker, und das seit N min“, ohne usteer „Alternative im selben Band vorhanden“.
 - [ ] AK7 (F8 Stufe 1) Lokal administrierte MACs bekommen das Attribut `random_mac` und keinen OUI-Hersteller.
@@ -148,6 +149,7 @@ Pro Paket: eigener Branch auf dem vorherigen, eigener PR, CHANGELOG-Eintrag, Min
 - 2026-10-27 – Gestapelte PRs, ein Feature pro PR – wie #19–#22 – vom Nutzer freigegeben (2026-10-27)
 - 2026-10-27 – P1: Das Issue verschwindet erst, wenn der Druck unter 80 % liegt **und** wieder mindestens 16 MB verfügbar sind – sonst würde ein kleiner Router (z. B. 64 MB, 79 %, 13 MB frei) im 15-min-Takt flattern; betrifft nur Router unter 80 MB RAM – Abweichung vom Wortlaut von AK1, vom Coordinator entschieden, im PR zur Bestätigung durch den Nutzer genannt
 - 2026-10-27 – P2: Das Issue `channel_plan_conflict` ist flottenweit (eins für alle Router). „Zwei Auswertungen in Folge“ = zwei aufeinanderfolgende Polls desselben Routers, in denen er an einem Konflikt beteiligt ist; ausgewertet wird nach jedem Poll über einen Coordinator-Listener. Konflikt = alle Befundtypen außer `dfs`, also auch `non_standard_24` (wörtlich nach AK2) – Umsetzungsdetail
+- 2026-10-27 – P6: Konstanten N = 10 min Haltezeit (AK: „seit N min“), schwaches Signal ohne usteer ≤ −75 dBm, Reconnect = Anmeldung ≤ 5 min nach Abmeldung am selben Router (Roaming zählt nicht), instabil ab 3 Reconnects/24 h; „anderer AP“ = Knoten eines anderen Routers (usteer `<ip>#…`), nicht ein anderes Funkmodul desselben Routers. `usteer get_clients` liefert auf jedem Knoten die Flottensicht (~38 KB); jeder Router wertet nur Clients an seinen eigenen Knoten aus, Abfrage nie im selben Poll wie der Log-Abruf; ein entfernter Knoten zählt nur mit gleichem Band und gleicher SSID (unbekannt → wird verglichen); Reconnect nur am selben Interface – Umsetzungsdetail
 - 2026-10-27 – P5: `dhcp_status` als Tracker-Attribut (`ok`/`pending`/`dhcp_missing`/`static_no_lease`), berechnet beim Lesen über alle Router (Leases, ARP, statische Hosts); ohne sichtbare Lease bei irgendeinem Router bleibt es leer, damit ein Netz ohne lesbare Leases nicht nur `dhcp_missing` zeigt. Pool-Sensor pro aktivem Pool, unique_id `<entry>_dhcp_pool-<pool>` (Bindestrich, damit Pool-Namen nie die Legacy-Teilstrings bilden). `uci get dhcp` beim 2. Poll auf jedem Router, danach alle 10 Polls nur bei aktivem Pool (Plan: „nur Gateway“) – Umsetzungsdetail
 - 2026-10-27 – P4: Kanalwechsel = Kanal **oder** Kanalbreite eines Funkmoduls (phy, Band) ändert sich zwischen zwei Polls (Radar im Nebenkanal verkleinert oft nur die Breite); Beleg = DFS-Logzeile desselben Funkmoduls in den letzten 15 min; ein Kanalwechsel zieht den Log-Abruf vor und startet dessen Takt neu; `dfs_events_24h` zählt alle DFS-Logzeilen und Kanalwechsel; als Beleg zählen nur `radar_detected`, `new_channel`, `cac_failed` (ein manueller Wechsel auf einen DFS-Kanal startet auch einen CAC) – Umsetzungsdetail
 - 2026-10-27 – P3 (nach Review): Status `not_permitted` statt `unavailable` – `unavailable` ist in HA reserviert (Frontend/Automationen zeigen ihn als Ausfall); Abweichung vom Wortlaut von AK3, vom Coordinator entschieden, im PR genannt
@@ -170,3 +172,4 @@ Pro Paket: eigener Branch auf dem vorherigen, eigener PR, CHANGELOG-Eintrag, Min
 - 2026-10-27 `feature/log-ingest` (P3) – Live-Probe lesend `log read` auf `openwrt`/`ap2`/`ap4`: Antwort `{"log":[{msg,id,priority,source,time}]}`, `id` fortlaufend, `time` in ms; Puffer ~620–640 Zeilen, ~166 B/Zeile (200 Zeilen ≈ 32–34 KB); Zeitspanne des Puffers Gateway ~5,5 min (DHCP-DISCOVER/OFFER-Schleife eines Clients + SSH-Logins der Messung), APs 15–36 min. Zeilenformate hostapd/dnsmasq-dhcp/usteer als Tests abgebildet (ohne echte MACs) · lokal: ruff 0.17.3 ✓ · pytest grün · rpcd-RSS bei `log read` über HTTP nicht gemessen (braucht eine Session mit ACL v6, also Deploy) – Lücke · Review: unabhängig (Pflicht) – keine P0/P1; P2 (`unavailable` reserviert, 250 Zeilen auf dem Gateway zu wenig) und P3 (Fehler nach dem Abruf, logd-Neustart, Router-Zeit, Priorität, `--log-dhcp`/DUID, Logbuch-Name/`device_id`) behoben; offen P3: Standard-Timeout 10 s für `log read`
 - 2026-10-27 `feature/dfs-events` (P4) – Live-Probe lesend `logread | grep DFS/radar/CAC` auf `openwrt`/`ap2`/`ap4`: keine DFS-Zeilen (aktuell kein DFS-Kanal in Benutzung); Zeilenformate daher aus hostapd übernommen (`DFS-RADAR-DETECTED freq=…`, `DFS-CAC-START freq=… chan=…`, `DFS-NEW-CHANNEL …`) – Lücke: nicht live gesehen · lokal: ruff 0.17.3 ✓ · pytest 935 passed · Review: unabhängig – keine P0/P1; P2 (Takt nach vorgezogenem Log-Abruf, Beleg-Zuordnung über iwinfo-`phy` und nur 5 GHz, Limiter-Schlüssel mit Frequenz) und P3 (vergessene Funkmodule, fehlendes `htmode`, Zeitbasis der Belege, Logbuch-Breite, eigener Zähler für Kanalwechsel, README, Beleg nur `radar_detected`/`new_channel`/`cac_failed`) behoben
 - 2026-10-27 `feature/dhcp-health` (P5) – Live-Probe lesend auf `openwrt`: rpcd-Login `root` hat `read '*'`, `uci get dhcp` damit über luci-mod-network erlaubt; 4 aktive Pools (/24, start 100, limit 150) plus `wan` mit `ignore`, 40 statische Hosts, 40 Leases. Auf dem Gateway hängt ein Client in einer DHCP-DISCOVER/OFFER-Schleife (Fall für `dhcp_missing`) · lokal: ruff 0.17.3 ✓ · pytest grün · Review: unabhängig – keine P0/P1; P2 (veraltete Leases eines ausgefallenen DHCP-Servers, Namen anonymer Pools) und P3 (gestoppter dnsmasq, seltenes Nachfragen, statischer Host mit ARP, Doku) behoben; offen P3: Grenzfälle `start` ≥ Subnetzgröße/doppelte MAC in zwei Pools; Pool-Sensor bewusst standardmäßig aktiv (ein Sensor pro Pool, wenige)
+- 2026-10-27 `feature/client-stability` (P6) – Live-Probe lesend `ubus -v list usteer` und `usteer get_clients` auf `openwrt`/`ap2`: Methode vorhanden, Antwort {Client-MAC: {Knoten: {connected, signal}}}, lokale Knoten `hostapd.<if>`, entfernte `<ip>#hostapd.<if>`, auf jedem Knoten die Flottensicht, ~38 KB; `remote_info`/`local_info` hätten `freq`/`ssid` je Knoten, sind aber nicht in ACL v6 (Freigabe: nur `get_clients`) – Band/SSID entfernter Knoten daher über Router-Host + AP-Interfaces der Flotte · lokal: ruff 0.17.3 ✓ · pytest grün · Review: unabhängig – **2 × P1** (usteer-Ausfall ließ alte Sticky-Kandidaten stehen, alte Baseline-Zeilen zählten als Reconnects) und P2 (gleicher Poll wie Log-Abruf, Vergleich über Bänder, Band-Steering als Reconnect, `unstable_clients` 0 statt unbekannt) behoben; offen P3: eine usteer-Abfrage pro Router statt pro Flotte, Standard-Timeout 10 s, `connected`-Zustand 2 von usteer, Mesh-Repeater mit einem Funkmodul im Fallback

@@ -79,6 +79,7 @@ from .const import (
     SUFFIX_TMPFS_TOTAL,
     SUFFIX_TMPFS_USAGE,
     SUFFIX_TMPFS_USED,
+    SUFFIX_UNSTABLE_CLIENTS,
     SUFFIX_UPDATE_STATUS,
     SUFFIX_UPTIME,
     SUFFIX_WAN_IP,
@@ -424,6 +425,22 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         extra_attrs_fn=lambda data: {
             "by_type": data.dfs.get("by_type", {}),
             "last_event": data.dfs.get("last_event"),
+        },
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_UNSTABLE_CLIENTS,
+        translation_key="unstable_clients",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:wifi-alert",
+        # Unknown while the router log cannot be read (no reconnect data)
+        value_fn=lambda data: (
+            data.client_stability.get("unstable_count", 0)
+            if data.log_status not in (LOG_STATUS_PENDING, LOG_STATUS_NOT_PERMITTED)
+            else None
+        ),
+        extra_attrs_fn=lambda data: {
+            "top": data.client_stability.get("unstable", []),
         },
     ),
 )

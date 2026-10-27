@@ -44,7 +44,11 @@ from .api import (
 )
 from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN, PROTOCOL_HTTP
 from .coordinator import OpenWrtCoordinator
-from .fleet import async_get_channel_plan_monitor, async_get_outage_tracker
+from .fleet import (
+    async_get_channel_plan_monitor,
+    async_get_outage_tracker,
+    usteer_node_info,
+)
 from .issues import async_clear_issue, ram_high_issue_id
 from .ssl_util import ssl_context_for_protocol
 
@@ -343,6 +347,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         entry.entry_id, entry.title, lambda: coordinator.update_interval
     )
     coordinator.attach_outage_tracker(outage_tracker)
+    coordinator.attach_node_resolver(partial(usteer_node_info, hass))
     entry.async_on_unload(partial(outage_tracker.unregister, entry.entry_id))
     # The RAM pressure issue lives as long as the entry is loaded.
     entry.async_on_unload(

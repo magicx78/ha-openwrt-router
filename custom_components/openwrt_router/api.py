@@ -105,6 +105,8 @@ from .const import (
     UBUS_UCI_GET,
     UBUS_UCI_OBJECT,
     UBUS_UCI_SET,
+    UBUS_USTEER_GET_CLIENTS,
+    UBUS_USTEER_OBJECT,
     UBUS_WIRELESS_OBJECT,
     UBUS_WIRELESS_STATUS,
     WAN_INTERFACE_NAMES,
@@ -1258,6 +1260,18 @@ class OpenWrtAPI:
         if not isinstance(entries, list):
             raise OpenWrtResponseError("log read: unexpected response shape")
         return entries
+
+    async def get_usteer_clients(self) -> dict[str, Any]:
+        """Return usteer's client map (all usteer nodes, see client_stability).
+
+        Calls:
+            usteer get_clients (ACL v6). ~40 KB with a few dozen clients.
+
+        Raises:
+            OpenWrtMethodNotFoundError: usteer not running or not permitted.
+        """
+        result = await self._call(UBUS_USTEER_OBJECT, UBUS_USTEER_GET_CLIENTS, {})
+        return result if isinstance(result, dict) else {}
 
     async def get_wan_status(self) -> dict[str, Any]:
         """Return WAN interface connection status + RX/TX bytes from /sys/class/net.
