@@ -17,7 +17,8 @@ All notable changes to the OpenWrt Router integration will be documented in this
   Entities bleiben unverändert; wer sie auf einem AP nicht braucht,
   deaktiviert sie in den Entity-Einstellungen. Ein Gateway mit gezogenem
   WAN-Kabel behält seine WAN-Sensoren, das Interface `wan` gibt es dann
-  trotzdem. Ist beim Einrichten unklar, ob es ein WAN gibt (WAN-Abfrage
+  trotzdem. Ebenso behält ein Dumb-AP, auf dem die Standard-Interfaces
+  `wan`/`wan6` noch konfiguriert sind, seine WAN-Sensoren. Ist beim Einrichten unklar, ob es ein WAN gibt (WAN-Abfrage
   gesperrt, SSH-Fallback), bleiben sie aktiv. Ein Gateway, dessen WAN
   anders heißt (z. B. `lte`), bekommt sie ebenfalls deaktiviert; dort
   zeigten sie bisher das erste aktive Interface statt des WAN.

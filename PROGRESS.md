@@ -26,7 +26,7 @@ Umgesetzt als gestapelte PRs, jeder Merge ein Release:
 - **v1.38.1 (PR C):** Kanal, `htmode` und `hwmode` aus dem `config`-Block von
   `network.wireless status`; SSH-Fallback füllt die AP-Interfaces (Kanalplan,
   Sticky-Prüfung); `uci show` mit anonymen Sektionen und `'\''` in SSIDs.
-- **v1.38.2 (PR D):** WAN-Sensoren (Status, IP, Download, Upload,
+- **v1.38.2 (#36):** WAN-Sensoren (Status, IP, Download, Upload,
   Binärsensor WAN-Verbindung) werden auf Routern ohne WAN-Interface
   deaktiviert angelegt – nur neue Entities, kein Registry-Eingriff
   (Entscheidung E3). Das Panel verwirft für private MACs auch den
@@ -38,7 +38,7 @@ Umgesetzt als gestapelte PRs, jeder Merge ein Release:
 
 Offen: Auswertung der rpcd-Speichermessung mit ACL v6 (B3), Hardware-Prüfung
 von ACL v7 und Kanal-Fix, Panel-Sichtprüfung, Befunde 13 und 14 (siehe
-[TODO.md](TODO.md)). Lokal 1273 Tests grün, ruff 0.17.3 sauber.
+[TODO.md](TODO.md)). Lokal 1297 Tests grün, ruff 0.17.3 sauber.
 
 ---
 

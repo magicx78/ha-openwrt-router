@@ -24,7 +24,7 @@ Stand: 2026-10-27 · Version: v1.38.2
 - [ ] **WAN-Entities auf `ap2`/`ap4`** stehen weiter auf `unknown` (E3: kein
       Registry-Eingriff, `enabled_default` wirkt nur bei neuen Entities) –
       bei Bedarf in HA von Hand deaktivieren.
-- [ ] **Befund 13:** wiederhergestellte `device_tracker.secureap_ap3_*`
+- [ ] **Befund 13:** zwei wiederhergestellte Device-Tracker mit altem AP-Namen in der Entity-ID
       (`unavailable`, `restored: true`) – Ursache klären, Registry-Eingriff
       nur mit OK.
 - [ ] **Befund 14:** `uci_section` im Pfad `network.wireless status` (netifd
