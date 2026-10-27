@@ -360,18 +360,25 @@ def dhcp_context(
 ) -> tuple[frozenset[str], frozenset[str], frozenset[str]] | None:
     """Return upper-case MACs (with lease, in an ARP table, static host).
 
-    Over all loaded routers, including the last known data of unreachable
-    ones. None when no router reports any lease: then no DHCP server is
-    visible and a missing lease means nothing.
+    Over all loaded routers. None (status unknown) when no router reports
+    any lease, or when a router serving a DHCP pool is unreachable or reports
+    no leases: its lease table is then stale or unreadable, and a missing
+    lease would be a false alarm.
     """
     leases: set[str] = set()
     arp: set[str] = set()
     static: set[str] = set()
     for entry in hass.config_entries.async_loaded_entries(DOMAIN):
         runtime = getattr(entry, "runtime_data", None)
-        data = getattr(getattr(runtime, "coordinator", None), "data", None)
+        coordinator = getattr(runtime, "coordinator", None)
+        data = getattr(coordinator, "data", None)
         if data is None:
             continue
+        if getattr(data, "dhcp_pools", None) and (
+            not coordinator.last_update_success
+            or not getattr(data, "dhcp_leases", None)
+        ):
+            return None
         leases.update(
             str(m).upper() for m in (getattr(data, "dhcp_leases", None) or {})
         )

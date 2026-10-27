@@ -19,10 +19,15 @@ All notable changes to the OpenWrt Router integration will be documented in this
     eine Lease und in keiner ARP-Tabelle (Client hängt z. B. in einer
     DHCP-DISCOVER-Schleife),
   - `static_no_lease`: als statischer Host eingetragen, hat aber keine Lease.
-  Kennt kein Router eine Lease (kein DHCP-Server sichtbar), bleibt das
-  Attribut leer.
-- DHCP-Probleme aus dem Router-Log (`nak`, `decline`, `no_address`) kommen
-  seit 1.33.0 als `openwrt_router_dhcp_event`.
+  Kennt kein Router eine Lease (kein DHCP-Server sichtbar) oder ist ein
+  Router mit DHCP-Pool gerade nicht erreichbar, bleibt das Attribut leer.
+
+Hinweise: DHCP-Probleme aus dem Router-Log (`nak`, `decline`, `no_address`)
+kommen seit 1.33.0 als `openwrt_router_dhcp_event`. Pool-Sensoren und
+statische Hosts brauchen Leserechte auf die uci-Config `dhcp`; der Login
+`root` hat sie über die LuCI-ACLs, ohne LuCI gibt es keinen Pool-Sensor.
+Ein gestoppter dnsmasq blendet die Pools aus, ein anonymer Pool-Abschnitt
+heißt nach seinem Interface.
 
 ## [1.34.0] - 2026-10-27
 
@@ -36,9 +41,12 @@ All notable changes to the OpenWrt Router integration will be documented in this
     zwischen zwei Abfragen ändert (`old_channel`/`new_channel`,
     `old_width_mhz`/`new_width_mhz`). Ein Kanalwechsel holt das Router-Log
     sofort, damit die passende DFS-Zeile schon bekannt ist.
-  - `dfs_related` ist nur wahr, wenn eine DFS-Zeile desselben Funkmoduls aus
-    den letzten 15 Minuten vorliegt (`evidence` nennt sie). Ein Kanalwechsel
-    ohne solche Zeile (manuell, ACS) ist `dfs_related: false`.
+  - `dfs_related` ist nur wahr, wenn eine passende DFS-Zeile
+    (`radar_detected`, `new_channel`, `cac_failed`) desselben 5-GHz-Funkmoduls
+    aus den letzten 15 Minuten vorliegt (`evidence` nennt sie). Ein
+    Kanalwechsel ohne solche Zeile (manuell, ACS) ist `dfs_related: false`.
+    `backhaul: true` kennzeichnet Funkmodule mit WLAN-Uplink, die dem Kanal
+    des Partners folgen.
   - Radar-Meldungen haben im Event-Budget Vorrang; die Events stehen im
     Logbuch des Routers.
 - **Diagnosesensor „DFS-Ereignisse (24 h)“** (`dfs_events_24h`): Anzahl

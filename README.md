@@ -283,7 +283,7 @@ service rpcd restart
 | `sensor.{name}_{iface}_channel` | WiFi channel |
 | `sensor.{name}_{iface}_ap_clients` | Clients per radio |
 | `sensor.{name}_{port}_link/speed/rx/tx` | Per-port Ethernet stats |
-| `sensor.{name}_dhcp_pool_{pool}` | Share of an active DHCP pool's range covered by leases (%), attributes `interface`, `leases`, `size` |
+| `sensor.{name}_dhcp_pool_{pool}` | Share of an active DHCP pool's range covered by leases (%), attributes `interface`, `leases`, `size`. Needs read access to the uci config `dhcp` (granted to `root` through the LuCI ACLs) |
 
 > **Traffic Charts**: RX/TX byte sensors use `state_class: total_increasing` — add to a **Statistics card** or **Energy Dashboard** for traffic history graphs.
 
@@ -305,12 +305,12 @@ service rpcd restart
 | `openwrt_router_outage_event` | A router (or all routers at once) became unreachable / reachable again |
 | `openwrt_router_wifi_event` | Router log: `psk_mismatch`, `handshake_failed`, `inactivity_timeout` (fields `mac`, `hostname`, `interface`, `router`, `time`) |
 | `openwrt_router_dhcp_event` | Router log: dnsmasq `nak`, `decline`, `no_address` (pool exhausted), with `ip` |
-| `openwrt_router_dfs_event` | Router log: hostapd `radar_detected`, `cac_*`, `nop_finished`, `new_channel`; or `channel_change` of a radio between two polls. `dfs_related` is only true with a DFS log line of the same radio within 15 min |
+| `openwrt_router_dfs_event` | Router log: hostapd `radar_detected`, `cac_*`, `nop_finished`, `new_channel`; or `channel_change` of a radio between two polls. `dfs_related` is only true with a DFS log line (`radar_detected`, `new_channel`, `cac_failed`) of the same 5 GHz radio within 15 min |
 
-Log events are limited to 10 per fetch and one per type and client in 5 minutes. They need rpcd ACL v6 (`log read`), which the integration deploys on start.
+Log events are limited to 10 per fetch and one per type and client (DFS lines: per interface and frequency) in 5 minutes; channel changes are not limited. They need rpcd ACL v6 (`log read`), which the integration deploys on start.
 
 ### Device Tracker
-One entity per WiFi client — `home` / `not_home` with attributes: `mac`, `ip_address`, `hostname`, `ssid`, `radio`, `signal`, `connected_since`, `dhcp_status` (`ok`, `pending`, `dhcp_missing` = associated for 180 s without lease or ARP entry on any router, `static_no_lease`).
+One entity per WiFi client — `home` / `not_home` with attributes: `mac`, `ip_address`, `hostname`, `ssid`, `radio`, `signal`, `connected_since`, `dhcp_status` (`ok`, `pending`, `dhcp_missing` = associated for 180 s without lease or ARP entry on any router, `static_no_lease`; empty while no router reports leases or a DHCP server is unreachable). Note: a device with a manually set IP that only talks locally, or clients right after a gateway reboot (empty lease file until they renew), can show `dhcp_missing`.
 
 ---
 

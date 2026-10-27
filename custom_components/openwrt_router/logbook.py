@@ -54,8 +54,9 @@ def async_describe_events(
         if data.get("type") == "channel_change":
             dfs = " (DFS)" if data.get("dfs_related") else ""
             message = (
-                f"channel change on {radio}: {data.get('old_channel')} → "
-                f"{data.get('new_channel')}{dfs}"
+                f"channel change on {radio}: {data.get('old_channel')}/"
+                f"{data.get('old_width_mhz')} MHz → {data.get('new_channel')}/"
+                f"{data.get('new_width_mhz')} MHz{dfs}"
             )
         else:
             channel = f" (channel {data['channel']})" if data.get("channel") else ""

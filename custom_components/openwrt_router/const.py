@@ -440,6 +440,9 @@ USTEER_RETRY_CYCLES = 30
 USTEER_STATUS_PENDING = "pending"
 USTEER_STATUS_OK = "ok"
 USTEER_STATUS_UNAVAILABLE = "not_available"
+# Routers without an active pool (or without uci access) are asked again
+# this rarely, so a pool enabled later shows up without a reload.
+DHCP_CONFIG_RETRY_CYCLES = 60
 LOG_STATUS_PENDING = "pending"
 LOG_STATUS_OK = "ok"
 # Not "unavailable": that state is reserved by HA for unreachable entities.
