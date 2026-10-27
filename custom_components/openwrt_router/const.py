@@ -136,6 +136,7 @@ FEATURE_DHCP_LEASES = "dhcp_leases"
 SUFFIX_CONNECTIVITY = "connectivity"
 SUFFIX_WAN_CONNECTIVITY = "wan_connectivity"
 SUFFIX_ROUTER_STATUS = "router_status"
+SUFFIX_CHANNEL_PLAN = "channel_plan"
 
 # Error type values stored in coordinator.data.error_type
 ERROR_TYPE_CONNECTION = "connection"
@@ -254,6 +255,10 @@ RADIO_KEY_HWMODE = "hwmode"
 RADIO_KEY_HTMODE = "htmode"
 RADIO_KEY_MODE = "mode"  # "Master" | "Client" | "Monitor" | None
 RADIO_KEY_BSSID = "bssid"
+# Physical radio of an AP interface and center channel of its bonded block
+# (iwinfo info; used by channel_plan.py)
+RADIO_KEY_PHY = "phy"
+RADIO_KEY_CENTER_CHAN1 = "center_chan1"
 
 # Client data keys
 CLIENT_KEY_MAC = "mac"

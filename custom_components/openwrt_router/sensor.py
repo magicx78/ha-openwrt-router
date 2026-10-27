@@ -33,6 +33,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import OpenWrtConfigEntry
+from .channel_plan import analyze
 from .const import (
     CLIENT_KEY_RADIO,
     CONF_EXTENDED_WIFI_SENSORS,
@@ -48,6 +49,7 @@ from .const import (
     RADIO_KEY_IFNAME,
     RADIO_KEY_SSID,
     SUFFIX_ACTIVE_CONNECTIONS,
+    SUFFIX_CHANNEL_PLAN,
     SUFFIX_CLIENT_COUNT,
     SUFFIX_CPU_LOAD,
     SUFFIX_CPU_LOAD_5MIN,
@@ -79,6 +81,7 @@ from .const import (
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
+from .fleet import collect_radios
 from .topology_entities import setup_topology_entities
 
 _LOGGER = logging.getLogger(__name__)
@@ -417,6 +420,7 @@ async def async_setup_entry(
         for description in SENSOR_DESCRIPTIONS
     ]
     static_entities.append(OpenWrtRouterStatusSensor(coordinator, entry))
+    static_entities.append(OpenWrtChannelPlanSensor(coordinator, entry))
     async_add_entities(static_entities)
 
     # Track which dynamic entities have already been created
@@ -1212,6 +1216,68 @@ class OpenWrtRouterStatusSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnt
             "consecutive_failures": data.consecutive_failures if data else 0,
             "error_type": data.error_type if data else None,
         }
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        router_info = self.coordinator.router_info
+        release = router_info.get("release", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=router_info.get("hostname") or self._entry.title,
+            manufacturer="OpenWrt",
+            model=router_info.get("model", "OpenWrt Router"),
+            sw_version=release.get("version", ""),
+            configuration_url=(
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
+            ),
+        )
+
+
+class OpenWrtChannelPlanSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
+    """Diagnostic sensor: Wi-Fi channel plan findings involving this router.
+
+    State = number of findings (same_channel, overlap, non_standard_24, dfs)
+    in which a radio of this router takes part. Computed on read across all
+    reachable routers (fleet.collect_radios), not in the poll; the
+    ``findings`` attribute lists them, ``radios`` shows this router's radios.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "channel_plan"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:wifi-cog"
+
+    def __init__(
+        self, coordinator: OpenWrtCoordinator, entry: OpenWrtConfigEntry
+    ) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_{SUFFIX_CHANNEL_PLAN}"
+        self._entry = entry
+
+    def _evaluate(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return (own findings without entry_ids, own radios)."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return [], []
+        entry_id = self._entry.entry_id
+        radios = collect_radios(hass)
+        findings = [
+            {key: value for key, value in finding.items() if key != "entry_ids"}
+            for finding in analyze(radios)
+            if entry_id in finding["entry_ids"]
+        ]
+        own = [r.as_attr() for r in radios if r.entry_id == entry_id]
+        return findings, own
+
+    @property
+    def native_value(self) -> int:
+        return len(self._evaluate()[0])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        findings, radios = self._evaluate()
+        return {"findings": findings, "radios": radios}
 
     @property
     def device_info(self) -> DeviceInfo:

@@ -664,3 +664,49 @@ class TestOutageTrackerWiring:
         mock_ir.async_delete_issue.assert_called_once_with(
             hass, "openwrt_router", "ram_high_test_entry_id"
         )
+
+
+class TestChannelPlanWiring:
+    @pytest.mark.asyncio
+    async def test_listener_evaluates_and_unload_unregisters(self):
+        hass = _make_hass()
+        entry = _make_entry()
+        mock_api = AsyncMock()
+        mock_api.reset_acl_blocked = MagicMock()
+        mock_coordinator = MagicMock()
+        mock_coordinator.async_config_entry_first_refresh = AsyncMock()
+        remove_listener = MagicMock()
+        mock_coordinator.async_add_listener = MagicMock(return_value=remove_listener)
+        monitor = MagicMock()
+
+        with patch(
+            "custom_components.openwrt_router.async_get_clientsession",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtAPI",
+            return_value=mock_api,
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtCoordinator",
+            return_value=mock_coordinator,
+        ), patch(
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            AsyncMock(return_value=False),
+        ), patch(
+            "custom_components.openwrt_router.async_get_outage_tracker",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.openwrt_router.async_get_channel_plan_monitor",
+            return_value=monitor,
+        ):
+            assert await async_setup_entry(hass, entry) is True
+
+        listener = mock_coordinator.async_add_listener.call_args.args[0]
+        listener()
+        monitor.evaluate.assert_called_once_with("test_entry_id")
+
+        callbacks = [c.args[0] for c in entry.async_on_unload.call_args_list]
+        assert remove_listener in callbacks
+        with patch("custom_components.openwrt_router.issues.ir"):
+            for cb in callbacks:
+                cb()
+        monitor.unregister.assert_called_once_with("test_entry_id")

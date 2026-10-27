@@ -13,6 +13,7 @@ from homeassistant.helpers import issue_registry as ir
 
 from .const import DOMAIN
 
+ISSUE_CHANNEL_PLAN_CONFLICT = "channel_plan_conflict"
 ISSUE_LAN_UNREACHABLE = "lan_unreachable"
 ISSUE_RAM_HIGH = "ram_high"
 ISSUE_ROUTER_UNREACHABLE = "router_unreachable"

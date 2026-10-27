@@ -270,6 +270,7 @@ service rpcd restart
 | `sensor.{name}_update_status` | Update availability |
 | `sensor.{name}_active_network_connections` | nf_conntrack count |
 | `sensor.{name}_ddns_*` | DDNS service status and last IP |
+| `sensor.{name}_channel_plan_findings` | Diagnostic: Wi-Fi channel plan findings of this router across all routers (`same_channel`, `overlap`, `non_standard_24`, `dfs`); attributes `findings`, `radios` |
 
 ### Sensors (Dynamic)
 | Entity | Description |

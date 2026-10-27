@@ -86,6 +86,9 @@
       }
     },
     "sensor": {
+      "channel_plan": {
+        "name": "Kanalplan-Befunde"
+      },
       "router_status": {
         "name": "Router-Status",
         "state": {
@@ -201,6 +204,10 @@
     }
   },
   "issues": {
+    "channel_plan_conflict": {
+      "title": "WLAN-Kanalkonflikte zwischen OpenWrt-Routern",
+      "description": "Zwischen deinen OpenWrt-Routern gibt es {count} Kanalkonflikt(e):\n\n{findings}\n\n- `same_channel`: Zwei Funkmodule nutzen denselben Hauptkanal und müssen sich die Sendezeit teilen.\n- `overlap`: Die Kanalbreiten überlappen, z. B. 40 MHz auf 44 und 48 oder 160 MHz auf 36, das 36–64 belegt.\n- `non_standard_24`: Ein 2,4-GHz-Funkmodul liegt nicht auf Kanal 1, 6 oder 11 und überlappt mit den Nachbarn.\n\nStelle benachbarte Access Points in den WLAN-Einstellungen auf unterschiedliche, nicht überlappende Kanäle oder schmalere Kanalbreiten. DFS-Kanäle sind kein Konflikt; sie stehen im Diagnosesensor „Kanalplan-Befunde“ des jeweiligen Routers.\n\nDieser Hinweis verschwindet automatisch, sobald die Konflikte behoben sind."
+    },
     "lan_unreachable": {
       "title": "Kein OpenWrt-Router erreichbar",
       "description": "Alle {count} OpenWrt-Router ({routers}) sind seit {since} von Home Assistant aus nicht erreichbar.\n\nWenn alle Router im selben Moment ausfallen, liegt die Ursache fast immer zwischen Home Assistant und dem LAN (Netzwerk des HA-Hosts, Switch, Verkabelung, VLAN) und nicht in den Routern selbst.\n\nDieser Hinweis verschwindet automatisch, sobald wieder ein Router antwortet."
