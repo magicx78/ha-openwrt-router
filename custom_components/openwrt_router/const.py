@@ -292,6 +292,8 @@ CLIENT_KEY_DHCP_EXPIRES = "dhcp_expires"
 # Enriched client data keys (v1.26.0 — device/topology detection improvements).
 # All optional; absent/empty keys keep the client shape backward compatible.
 CLIENT_KEY_VENDOR = "vendor"  # OUI-derived manufacturer, e.g. "Cudy" | None
+# True for a locally administered (randomised, "private") MAC: no vendor
+CLIENT_KEY_RANDOM_MAC = "random_mac"
 CLIENT_KEY_CONNECTION_TYPE = "connection_type"  # see CONNECTION_TYPE_*
 CLIENT_KEY_CONFIDENCE = "confidence"  # see CONFIDENCE_*
 CLIENT_KEY_SOURCE = "source"  # detection source, e.g. "iwinfo" | "fdb" | "dhcp"

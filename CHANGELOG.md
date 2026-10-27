@@ -2,6 +2,20 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.37.0] - 2026-10-27
+
+### Added
+
+- **Attribut `random_mac` an WLAN-Clients** (Device-Tracker und
+  Client-Daten des Topologie-Snapshots): wahr bei einer lokal verwalteten,
+  zufälligen MAC („private WLAN-Adresse“ von Handys, Tablets, Laptops).
+
+### Fixed
+
+- **Falsche Hersteller bei zufälligen MACs.** Eine lokal verwaltete MAC hat
+  keinen Hersteller; der OUI-Abgleich wird für sie übersprungen (`vendor`
+  bleibt leer), statt zufällig einen Hersteller zu treffen.
+
 ## [1.36.0] - 2026-10-27
 
 ### Added

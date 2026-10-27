@@ -6,7 +6,7 @@
 
 ## Status
 
-- **Stand:** 2026-10-27 · **Phase:** freigegeben, in Umsetzung
+- **Stand:** 2026-10-27 · **Phase:** umgesetzt, PRs offen
 - **Branch/PR:** gestapelt auf v1.30.0 (PR #22, enthält #19 und #20)
   - P1 `feature/ram-pressure-repairs` · 1.31.0 · PR #23
   - P2 `feature/channel-plan` · 1.32.0 · PR #24
@@ -14,11 +14,12 @@
   - P4 `feature/dfs-events` · 1.34.0 · PR #26
   - P5 `feature/dhcp-health` · 1.35.0 · PR #27
   - P6 `feature/client-stability` · 1.36.0 · PR folgt
+  - P7 `feature/random-mac` · 1.37.0 · PR folgt
 - **Erledigt (außerhalb dieses Plans):** Feature 1 (#19), Feature 7 (#20), Feature 10 (#22), rpcd-Leck (#21)
-- **Erledigt:** P1 (F9, PR #23), P2 (F2, PR #24), P3 (F6 + ACL v6, PR #25), P4 (F3, PR #26), P5 (F5, PR #27), P6 (F4, lokal grün)
-- **Offen:** P7
+- **Erledigt:** P1 (F9, PR #23), P2 (F2, PR #24), P3 (F6 + ACL v6, PR #25), P4 (F3, PR #26), P5 (F5, PR #27), P6 (F4, lokal grün), P7 (F8 Stufe 1, lokal grün)
+- **Offen:** – (alle Pakete als PR; Merge in Stapel-Reihenfolge durch den Nutzer)
 - **Blocker:** —
-- **Nächster Schritt:** P7 (Feature 8 Stufe 1, zufällige MACs) auf `feature/random-mac`
+- **Nächster Schritt:** Nutzer: PRs in Reihenfolge #19 → #20 → #22 → #23 … mergen (jeder Merge erzeugt ein Release) oder über `release/<x.y.z>` bündeln
 
 ## Problem und Zielverhalten
 
@@ -55,8 +56,8 @@ Ziel: Solche Zustände erscheinen künftig in HA als Sensor, Event oder Reparatu
 - [x] AK6 (F4)
   - Tracker-Attribute `associations_24h` und `reconnects_24h`, Sensor `unstable_clients` (Top 10).
   - Binary-Sensor `sticky_clients` pro Router: Mit usteer heißt das „anderer AP hört ihn mindestens 8 dB stärker, und das seit N min“, ohne usteer „Alternative im selben Band vorhanden“.
-- [ ] AK7 (F8 Stufe 1) Lokal administrierte MACs bekommen das Attribut `random_mac` und keinen OUI-Hersteller.
-- [ ] AK8 (alle) Neue unique_ids enthalten nicht `_rate`, `_ap_`, `_port_`, `_radio_`, `_iface_`, wegen des Teilstring-Musters der Legacy-Migration.
+- [x] AK7 (F8 Stufe 1) Lokal administrierte MACs bekommen das Attribut `random_mac` und keinen OUI-Hersteller.
+- [x] AK8 (alle) Neue unique_ids enthalten nicht `_rate`, `_ap_`, `_port_`, `_radio_`, `_iface_`, wegen des Teilstring-Musters der Legacy-Migration.
 
 ## Befunde im Code (verifiziert, Stand #22 @ 83533be)
 
@@ -173,3 +174,4 @@ Pro Paket: eigener Branch auf dem vorherigen, eigener PR, CHANGELOG-Eintrag, Min
 - 2026-10-27 `feature/dfs-events` (P4) – Live-Probe lesend `logread | grep DFS/radar/CAC` auf `openwrt`/`ap2`/`ap4`: keine DFS-Zeilen (aktuell kein DFS-Kanal in Benutzung); Zeilenformate daher aus hostapd übernommen (`DFS-RADAR-DETECTED freq=…`, `DFS-CAC-START freq=… chan=…`, `DFS-NEW-CHANNEL …`) – Lücke: nicht live gesehen · lokal: ruff 0.17.3 ✓ · pytest 935 passed · Review: unabhängig – keine P0/P1; P2 (Takt nach vorgezogenem Log-Abruf, Beleg-Zuordnung über iwinfo-`phy` und nur 5 GHz, Limiter-Schlüssel mit Frequenz) und P3 (vergessene Funkmodule, fehlendes `htmode`, Zeitbasis der Belege, Logbuch-Breite, eigener Zähler für Kanalwechsel, README, Beleg nur `radar_detected`/`new_channel`/`cac_failed`) behoben
 - 2026-10-27 `feature/dhcp-health` (P5) – Live-Probe lesend auf `openwrt`: rpcd-Login `root` hat `read '*'`, `uci get dhcp` damit über luci-mod-network erlaubt; 4 aktive Pools (/24, start 100, limit 150) plus `wan` mit `ignore`, 40 statische Hosts, 40 Leases. Auf dem Gateway hängt ein Client in einer DHCP-DISCOVER/OFFER-Schleife (Fall für `dhcp_missing`) · lokal: ruff 0.17.3 ✓ · pytest grün · Review: unabhängig – keine P0/P1; P2 (veraltete Leases eines ausgefallenen DHCP-Servers, Namen anonymer Pools) und P3 (gestoppter dnsmasq, seltenes Nachfragen, statischer Host mit ARP, Doku) behoben; offen P3: Grenzfälle `start` ≥ Subnetzgröße/doppelte MAC in zwei Pools; Pool-Sensor bewusst standardmäßig aktiv (ein Sensor pro Pool, wenige)
 - 2026-10-27 `feature/client-stability` (P6) – Live-Probe lesend `ubus -v list usteer` und `usteer get_clients` auf `openwrt`/`ap2`: Methode vorhanden, Antwort {Client-MAC: {Knoten: {connected, signal}}}, lokale Knoten `hostapd.<if>`, entfernte `<ip>#hostapd.<if>`, auf jedem Knoten die Flottensicht, ~38 KB · lokal: ruff 0.17.3 ✓ · pytest grün · Review: s. PR
+- 2026-10-27 `feature/random-mac` (P7) – kein Router-Aufruf nötig (Bit 0x02 des ersten Oktetts) · lokal: ruff 0.17.3 ✓ · pytest grün · Review: s. PR · Lücke: das Panel (`frontend/topology/src/api.ts`, eigene OUI-Tabelle) prüft `random_mac` noch nicht
