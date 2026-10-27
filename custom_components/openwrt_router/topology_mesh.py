@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -1087,7 +1087,7 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     Returns:
         Unified snapshot dict compatible with the topology panel schema.
     """
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     entries = hass.config_entries.async_entries(DOMAIN)
     if not entries:
