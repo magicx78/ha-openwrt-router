@@ -94,7 +94,7 @@
         "state": {
           "pending": "Ausstehend",
           "ok": "OK",
-          "unavailable": "Nicht verfügbar (rpcd-ACL)",
+          "not_permitted": "Nicht lesbar (rpcd-ACL oder kein logd)",
           "error": "Fehler"
         }
       },
