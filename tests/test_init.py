@@ -263,37 +263,28 @@ class TestUnloadEntry:
 
 class TestReloadEntry:
     @pytest.mark.asyncio
-    async def test_reload_calls_unload_then_setup(self):
-        """Reload should call unload then setup."""
+    async def test_reload_delegates_to_config_entries(self):
+        """Reload goes through HA so the entry's on_unload callbacks run.
+
+        Calling unload/setup directly skipped them: the outage tracker and the
+        channel-plan listener of the old coordinator stayed registered.
+        """
         hass = _make_hass()
+        hass.config_entries.async_reload = AsyncMock(return_value=True)
         entry = _make_entry()
 
-        mock_api = AsyncMock()
-        mock_api.login = AsyncMock()
-        mock_api.reset_acl_blocked = MagicMock()
-        mock_coordinator = MagicMock()
-        mock_coordinator.async_config_entry_first_refresh = AsyncMock()
-        mock_coordinator.router_info = {}
-
         with patch(
-            "custom_components.openwrt_router.async_get_clientsession",
-            return_value=MagicMock(),
-        ), patch(
-            "custom_components.openwrt_router.OpenWrtAPI",
-            return_value=mock_api,
-        ), patch(
-            "custom_components.openwrt_router.OpenWrtCoordinator",
-            return_value=mock_coordinator,
-        ), patch(
-            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
-            AsyncMock(return_value=False),
-        ):
+            "custom_components.openwrt_router.async_unload_entry", AsyncMock()
+        ) as unload, patch(
+            "custom_components.openwrt_router.async_setup_entry", AsyncMock()
+        ) as setup:
             await async_reload_entry(hass, entry)
 
-        # unload was called
-        hass.config_entries.async_unload_platforms.assert_awaited_once()
-        # setup was called (forward_entry_setups)
-        hass.config_entries.async_forward_entry_setups.assert_awaited_once()
+        hass.config_entries.async_reload.assert_awaited_once_with(entry.entry_id)
+        unload.assert_not_awaited()
+        setup.assert_not_awaited()
+        hass.config_entries.async_unload_platforms.assert_not_awaited()
+        hass.config_entries.async_forward_entry_setups.assert_not_awaited()
 
 
 # =====================================================================
