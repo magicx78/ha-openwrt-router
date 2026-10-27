@@ -2,7 +2,7 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
-## [1.37.2] - 2026-10-27
+## [1.37.3] - 2026-10-27
 
 ### Fixed
 
@@ -23,7 +23,7 @@ All notable changes to the OpenWrt Router integration will be documented in this
   6 GHz. Eine als Text gemeldete Frequenz wird bei klebenden Clients jetzt
   ebenfalls ausgewertet.
 
-## [1.37.1] - 2026-10-27
+## [1.37.2] - 2026-10-27
 
 ### Fixed
 
@@ -46,6 +46,34 @@ All notable changes to the OpenWrt Router integration will be documented in this
   nirgends aufgerufen). Die Funktion rief Unload und Setup direkt auf, sodass
   die `on_unload`-Rückrufe (Ausfall-Tracker, Kanalplan, RAM-Hinweis) nicht
   liefen. Sie lädt den Eintrag jetzt über Home Assistant neu.
+
+## [1.37.1] - 2026-10-27
+
+### Fixed
+
+- **rpcd wuchs auf den Routern um rund 6 MB pro Tag (110 MB nach 17 Tagen).**
+  Der Dienst-Status (`dnsmasq`, `firewall` …) wurde bei jedem Poll über rpcd
+  `rc/list` geholt. rpcd vor dem 31.05.2026 gibt bei diesem Aufruf seinen
+  Request-Kontext nie frei (Upstream-Fix `d06d2a8`, „rc: fix memory leak of
+  list request context“). Betroffen ist u. a. OpenWrt 25.12.1 mit rpcd
+  2025.12.03. Gemessen auf einem Cudy WR3000: 500 Aufrufe von `rc/list`
+  ergaben +2320 kB RSS, also rund 4,7 KB pro Aufruf. Andere Poll-Aufrufe
+  (`file/read`, `iwinfo`, `luci-rpc`, `uci`, `session`) kamen auf 0 kB. Ein
+  frisch geflashtes Gateway mit rpcd 2026.10.04 leakt nicht.
+  - Ob ein Dienst läuft, kommt jetzt bei jedem Poll aus procd
+    `service/list`. Das Objekt gehört procd, nicht rpcd, und leakt nicht
+    (300 Aufrufe: 0 kB bei rpcd und procd).
+  - `rc/list` liefert nur noch das Attribut `enabled`. Es läuft höchstens alle
+    6 Stunden (`RC_LIST_REFRESH_INTERVAL`) und nach `enable`/`disable`.
+  - `rc/list` läuft jetzt mit `skip_running_check`. Bisher startete jeder
+    Aufruf pro Init-Skript einen eigenen „running“-Check (~40 Prozesse,
+    ~1,3 s pro Poll).
+  - Fehlt `service/list` (ACL), wird wie bisher bei jedem Poll ein volles
+    `rc/list` gemacht.
+
+  Ein schon aufgeblähter rpcd gibt den Speicher erst bei einem Neustart frei
+  (`/etc/init.d/rpcd restart`). Dauerhaft behebt den Leak ein rpcd-Update
+  auf einen Stand ab 2026-05-31.
 
 ## [1.37.0] - 2026-10-27
 
