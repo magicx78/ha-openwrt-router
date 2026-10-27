@@ -313,6 +313,145 @@ class TestDetectBand:
         # Use a name that doesn't match any keywords
         assert mock_api._detect_band("eth0", {}) == "unknown"
 
+    @pytest.mark.parametrize("frequency", [5935, 5955, 5975, 5995, 6015, 7115])
+    def test_frequency_lower_6ghz_channels(self, mock_api, frequency):
+        """6 GHz starts at 5925 MHz; 5935-5995 (ch 2, 1, 5, 9) used to read as 5g."""
+        assert mock_api._detect_band("wlan2", {"frequency": frequency}) == "6g"
+
+    @pytest.mark.parametrize("frequency", [4920, 5180, 5825, 5885])
+    def test_frequency_5ghz_edges(self, mock_api, frequency):
+        assert mock_api._detect_band("wlan1", {"frequency": frequency}) == "5g"
+
+    def test_frequency_60ghz_is_not_6ghz(self, mock_api):
+        assert mock_api._detect_band("wlan3", {"frequency": 58320}) == "unknown"
+
+    @pytest.mark.parametrize(
+        ("uci_band", "expected"),
+        [("2g", "2.4g"), ("5g", "5g"), ("6g", "6g"), ("60g", "unknown")],
+    )
+    def test_band_option_beats_name(self, mock_api, uci_band, expected):
+        """UCI band option wins over the radio0 = 2.4 GHz name heuristic."""
+        data = {".type": "wifi-device", "band": uci_band, "channel": "auto"}
+        assert mock_api._detect_band("radio0", data) == expected
+
+    @pytest.mark.parametrize("channel", ["1", "2", "5", "13", "37", "149"])
+    def test_band_option_beats_ambiguous_channel(self, mock_api, channel):
+        data = {"band": "6g", "channel": channel}
+        assert mock_api._detect_band("radio1", data) == "6g"
+
+    def test_wireless_status_config_block(self, mock_api):
+        """network.wireless/status keeps band and channel in the config block."""
+        data = {"up": True, "config": {"band": "6g", "channel": "5"}, "interfaces": []}
+        assert mock_api._detect_band("radio0", data) == "6g"
+
+    def test_frequency_beats_hwmode(self, mock_api):
+        data = {"frequency": 5955, "hwmode": "ac"}
+        assert mock_api._detect_band("phy2-ap0", data) == "6g"
+
+    @pytest.mark.parametrize("hwmode", ["11n", "11ax", "11be", "ax"])
+    def test_multiband_hwmode_defers_to_channel(self, mock_api, hwmode):
+        """11n/ax/be exist on several bands: the channel decides, not the mode."""
+        assert mock_api._detect_band("radio9", {"hwmode": hwmode, "channel": 36}) == "5g"
+        assert mock_api._detect_band("radio9", {"hwmode": hwmode, "channel": 6}) == "2.4g"
+
+    @pytest.mark.parametrize(
+        ("channel", "expected"),
+        [
+            # 2.4 GHz; 1, 2, 5, 9 and 13 also exist on 6 GHz but stay 2.4 GHz
+            (1, "2.4g"),
+            (2, "2.4g"),
+            (6, "2.4g"),
+            (13, "2.4g"),
+            ("11", "2.4g"),
+            # 5 GHz; 149-177 also exist on 6 GHz but stay 5 GHz
+            (36, "5g"),
+            ("100", "5g"),
+            (144, "5g"),
+            (149, "5g"),
+            (177, "5g"),
+            # numbers that only exist on 6 GHz
+            (17, "6g"),
+            (33, "6g"),
+            ("37", "6g"),
+            (145, "6g"),
+            (181, "6g"),
+            (233, "6g"),
+        ],
+    )
+    def test_channel_only(self, mock_api, channel, expected):
+        assert mock_api._detect_band("radio9", {"channel": channel}) == expected
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {},
+            {"channel": "auto"},
+            {"channel": None, "frequency": None, "hwmode": None, "band": None},
+            {"channel": 0, "frequency": 0},
+            {"channel": -3},
+            {"channel": 15},
+            {"channel": 237},
+            {"frequency": "n/a"},
+            {"band": ""},
+            {"hardware": "not a dict"},
+        ],
+    )
+    def test_missing_or_invalid_data_is_unknown(self, mock_api, data):
+        assert mock_api._detect_band("eth0", data) == "unknown"
+
+    def test_missing_data_keeps_name_fallback(self, mock_api):
+        assert mock_api._detect_band("radio1", {"channel": "auto"}) == "5g"
+
+
+class TestBandInParsers:
+    """Band detection through the three Wi-Fi parsers with tri-band data."""
+
+    def test_wireless_status_reads_config_band(self, mock_api):
+        status = {
+            name: {
+                "up": True,
+                "config": {"band": band, "channel": channel},
+                "interfaces": [{"ifname": f"phy{i}-ap0", "config": {"ssid": f"Net-{i}"}}],
+            }
+            for i, (name, band, channel) in enumerate(
+                [("radio0", "5g", "36"), ("radio1", "2g", "1"), ("radio2", "6g", "5")]
+            )
+        }
+        bands = {r["name"]: r["band"] for r in mock_api._parse_wireless_status(status)}
+        assert bands == {"radio0": "5g", "radio1": "2.4g", "radio2": "6g"}
+
+    def test_iwinfo_low_6ghz_channel(self, mock_api):
+        info = {
+            "phy0-ap0": {"ssid": "Net-24", "channel": 1, "frequency": 2412},
+            "phy1-ap0": {"ssid": "Net-5", "channel": 149, "frequency": 5745},
+            "phy2-ap0": {"ssid": "Net-6", "channel": 1, "frequency": 5955},
+        }
+        bands = {r["ssid"]: r["band"] for r in mock_api._parse_iwinfo_info(info)}
+        assert bands == {"Net-24": "2.4g", "Net-5": "5g", "Net-6": "6g"}
+
+    def test_uci_wireless_band_option(self, mock_api):
+        values = {
+            "radio0": {".type": "wifi-device", "band": "5g", "channel": "36"},
+            "radio1": {".type": "wifi-device", "band": "2g", "channel": "1"},
+            "radio2": {".type": "wifi-device", "band": "6g", "channel": "1"},
+            "radio3": {".type": "wifi-device", "channel": "auto"},
+        }
+        for i in range(4):
+            values[f"default_radio{i}"] = {
+                ".type": "wifi-iface",
+                ".index": i + 4,
+                "device": f"radio{i}",
+                "ssid": f"Net-{i}",
+            }
+        bands = {r["name"]: r["band"] for r in mock_api._parse_uci_wireless(values)}
+        # radio3 has no band data at all: unchanged name fallback ("radio" + "3")
+        assert bands == {
+            "radio0": "5g",
+            "radio1": "2.4g",
+            "radio2": "6g",
+            "radio3": "unknown",
+        }
+
 
 class TestIsGuestSsid:
     def test_guest(self, mock_api):
