@@ -751,9 +751,11 @@ class TestNativeWanTraffic:
         # The first poll skips the ping: "not measured yet", not "offline"
         assert d1.ping_checked is False
         assert d2.ping_checked is True
-        # (7000-1000)*8/60 = 800 bit/s ; (1700-500)*8/60 = 160 bit/s
-        assert d2.wan_traffic["downstream_bps"] == 800
-        assert d2.wan_traffic["upstream_bps"] == 160
+        # (7000-1000)*8/60 = 800 bit/s ; (1700-500)*8/60 = 160 bit/s. The
+        # divisor is the measured wall-clock gap (60 s plus the real time the
+        # second poll took), so allow 1 % for a slow machine.
+        assert d2.wan_traffic["downstream_bps"] == pytest.approx(800, rel=0.01)
+        assert d2.wan_traffic["upstream_bps"] == pytest.approx(160, rel=0.01)
         assert d2.wan_traffic["interval_s"] == 60
         assert d2.wan_traffic["sampled_at"]
 
