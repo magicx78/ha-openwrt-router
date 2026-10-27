@@ -460,6 +460,41 @@ class TestBandInParsers:
             "radio3": "unknown",
         }
 
+    async def test_ssh_uci_show_band_option(self, mock_api):
+        """The SSH fallback normalises the band like every other Wi-Fi path."""
+        lines = []
+        radios = [
+            ("radio0", ["band='5g'", "channel='36'"]),
+            ("radio1", ["band='2g'", "channel='1'"]),
+            ("radio2", ["band='6g'", "channel='1'"]),
+            ("radio3", ["channel='auto'"]),
+            ("radio4", ["hwmode='11a'", "channel='auto'"]),
+            ("radio5", ["band='60g'", "channel='2'"]),
+            ("radio7", ["channel='100'"]),
+        ]
+        for i, (name, options) in enumerate(radios):
+            lines.append(f"wireless.{name}=wifi-device")
+            lines += [f"wireless.{name}.{opt}" for opt in options]
+            lines += [
+                f"wireless.default_{name}=wifi-iface",
+                f"wireless.default_{name}.device='{name}'",
+                f"wireless.default_{name}.ssid='Net-{i}'",
+            ]
+        ssh = AsyncMock(return_value=(0, "\n".join(lines), b""))
+        with patch.object(mock_api, "_asyncssh_run", ssh):
+            result = await mock_api._get_wifi_status_ssh()
+        bands = {r["name"]: r["band"] for r in result}
+        # radio3: no band data at all, name fallback ("radio" + "3") stays unknown
+        assert bands == {
+            "radio0": "5g",
+            "radio1": "2.4g",
+            "radio2": "6g",
+            "radio3": "unknown",
+            "radio4": "5g",
+            "radio5": "unknown",  # 60 GHz, the band option beats the name
+            "radio7": "5g",
+        }
+
 
 class TestIsGuestSsid:
     def test_guest(self, mock_api):
