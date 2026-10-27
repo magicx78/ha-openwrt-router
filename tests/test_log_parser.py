@@ -16,7 +16,7 @@ from custom_components.openwrt_router.const import (
     LOG_STATUS_ERROR,
     LOG_STATUS_OK,
     LOG_STATUS_PENDING,
-    LOG_STATUS_UNAVAILABLE,
+    LOG_STATUS_NOT_PERMITTED,
 )
 from custom_components.openwrt_router.log_parser import (
     CATEGORY_DHCP,
@@ -340,7 +340,7 @@ class TestCoordinatorIngest:
         api.get_log_entries = AsyncMock(side_effect=OpenWrtMethodNotFoundError("acl"))
         await coord._ingest_log(data)
         await coord._ingest_log(data)
-        assert coord._log_status == LOG_STATUS_UNAVAILABLE
+        assert coord._log_status == LOG_STATUS_NOT_PERMITTED
 
     @pytest.mark.asyncio
     async def test_other_errors_set_error(self):
@@ -376,10 +376,10 @@ class TestCoordinatorIngest:
         assert api.get_log_entries.await_count == 2
         assert statuses == [
             LOG_STATUS_PENDING,
-            LOG_STATUS_UNAVAILABLE,
-            LOG_STATUS_UNAVAILABLE,
-            LOG_STATUS_UNAVAILABLE,
-            LOG_STATUS_UNAVAILABLE,
+            LOG_STATUS_NOT_PERMITTED,
+            LOG_STATUS_NOT_PERMITTED,
+            LOG_STATUS_NOT_PERMITTED,
+            LOG_STATUS_NOT_PERMITTED,
         ]
         assert set(coord.data.log_stats) >= {
             "counts_24h",
@@ -389,7 +389,7 @@ class TestCoordinatorIngest:
             "events_fired",
             "events_suppressed",
         }
-        assert coord.data.as_dict()["log_status"] == LOG_STATUS_UNAVAILABLE
+        assert coord.data.as_dict()["log_status"] == LOG_STATUS_NOT_PERMITTED
 
 
 # =====================================================================
@@ -469,7 +469,7 @@ class TestLogbook:
             )
         )
         assert wifi == {
-            "name": "OpenWrt Router A",
+            "name": "Router A",
             "message": "Wi-Fi psk mismatch: laptop on phy0-ap1",
         }
         dhcp = registered[EVENT_DHCP](
@@ -479,3 +479,122 @@ class TestLogbook:
             "name": "OpenWrt Router",
             "message": f"DHCP no address: {MAC}",
         }
+
+
+# =====================================================================
+# Review follow-ups (P3)
+# =====================================================================
+
+
+class TestReviewFollowUps:
+    def test_log_dhcp_transaction_id_prefix(self):
+        event = parse_entry(_e(f"dnsmasq-dhcp[1]: 1234567 DHCPNAK(br-lan) 192.0.2.10 {MAC} wrong"))
+        assert (event.kind, event.ip, event.mac) == (DHCP_NAK, "192.0.2.10", MAC)
+
+    def test_dhcpv6_duid_is_not_a_mac(self):
+        msg = "dnsmasq-dhcp[1]: DHCPSOLICIT(br-lan) 00:01:00:01:2a:3b:4c:5d:6e:7f no address available"
+        assert parse_entry(_e(msg)) is None
+
+    @pytest.mark.parametrize("bad_time", [-1, 5, 10**15, 253_402_300_800_000])
+    def test_implausible_time_becomes_zero(self, bad_time):
+        event = parse_entry(_e(f"hostapd: x: AP-STA-CONNECTED {MAC}", time_ms=bad_time))
+        assert event.time_ms == 0
+
+    def test_restart_detected_when_anchor_line_changed(self):
+        cursor = LogCursor()
+        cursor.ingest([_e("a", i, T + i) for i in range(100, 105)])
+        # logd restarted and has since written more lines than before: id 104
+        # exists again, but it is a different line (other time)
+        result = cursor.ingest([_e("b", i, T + 10_000 + i) for i in range(50, 120)])
+        assert result.baseline is True
+        assert result.new_lines == 70
+
+    def test_restart_detected_when_anchor_vanished(self):
+        cursor = LogCursor()
+        cursor.ingest([_e("a", i, T + i) for i in range(100, 105)])
+        entries = [_e("b", i, T + i) for i in range(90, 120) if i != 104]
+        assert cursor.ingest(entries).baseline is True
+
+    def test_same_anchor_is_no_restart(self):
+        cursor = LogCursor()
+        cursor.ingest([_e("a", i, T + i) for i in range(100, 105)])
+        result = cursor.ingest([_e("a", i, T + i) for i in range(100, 110)])
+        assert result.baseline is False
+        assert result.new_lines == 5
+
+    def test_priority_keeps_psk_mismatch_in_budget(self):
+        limiter = EventLimiter(10, 300_000)
+        events = [
+            LogEvent(CATEGORY_WIFI, WIFI_INACTIVITY, i, T, mac=f"02:00:00:00:01:{i:02X}")
+            for i in range(12)
+        ] + [LogEvent(CATEGORY_WIFI, WIFI_PSK_MISMATCH, 99, T, mac=MAC)]
+        fire, suppressed = limiter.select(events, T)
+        assert len(fire) == 10
+        assert suppressed == 3
+        assert fire[-1].kind == WIFI_PSK_MISMATCH  # fired in log order
+        assert [e.log_id for e in fire] == sorted(e.log_id for e in fire)
+
+
+class TestCoordinatorReviewFollowUps:
+    @pytest.mark.asyncio
+    async def test_line_count_adapts(self):
+        from custom_components.openwrt_router.const import (
+            LOG_READ_LINES_MAX,
+            LOG_READ_LINES_MIN,
+        )
+
+        coord, api, data = _coordinator()
+        api.get_log_entries = AsyncMock(return_value=_batch(1, 600))
+        await coord._ingest_log(data)  # baseline: keep the default
+        assert coord._log_lines == LOG_READ_LINES
+        api.get_log_entries = AsyncMock(return_value=_batch(401, 640))
+        await coord._ingest_log(data)  # 40 new lines
+        assert coord._log_lines == LOG_READ_LINES_MIN
+        api.get_log_entries = AsyncMock(return_value=_batch(641, 940))
+        await coord._ingest_log(data)  # 300 new lines, no gap
+        assert coord._log_lines == 470
+        api.get_log_entries.assert_awaited_once_with(LOG_READ_LINES_MIN)
+        api.get_log_entries = AsyncMock(return_value=_batch(1500, 1600))
+        await coord._ingest_log(data)  # gap → whole buffer next time
+        assert coord._log_lines == LOG_READ_LINES_MAX
+        assert coord._log_totals["missed_lines"] == 559
+
+    @pytest.mark.asyncio
+    async def test_processing_error_never_fails(self):
+        coord, api, data = _coordinator()
+        api.get_log_entries = AsyncMock(return_value=_batch(1, 3))
+        with patch.object(coord, "_process_log", side_effect=ValueError("boom")):
+            await coord._ingest_log(data)
+        assert coord._log_status == LOG_STATUS_ERROR
+
+    @pytest.mark.asyncio
+    async def test_implausible_router_time_counts_now(self):
+        coord, api, data = _coordinator()
+        old = _e(f"hostapd: phy0-ap1: AP-STA-POSSIBLE-PSK-MISMATCH {MAC}", 1, 1_000)
+        api.get_log_entries = AsyncMock(return_value=[old])
+        await coord._ingest_log(data)
+        now_ms = int(__import__("time").time() * 1000)
+        assert coord._log_counter.counts(now_ms) == {"wifi.psk_mismatch": 1}
+
+    @pytest.mark.asyncio
+    async def test_payload_carries_device_id(self):
+        coord, api, data = _coordinator()
+        device = MagicMock(id="dev-1")
+        with patch(
+            "custom_components.openwrt_router.coordinator.dr.async_get"
+        ) as get_reg:
+            get_reg.return_value.async_get_device.return_value = device
+            api.get_log_entries = AsyncMock(return_value=_batch(1, 1))
+            await coord._ingest_log(data)
+            api.get_log_entries = AsyncMock(return_value=_batch(1, 2))
+            await coord._ingest_log(data)
+            api.get_log_entries = AsyncMock(return_value=_batch(1, 3))
+            await coord._ingest_log(data)
+        (first,) = _fired(coord, EVENT_WIFI)  # 2nd is in the 5 min cooldown
+        assert first["device_id"] == "dev-1"
+        get_reg.return_value.async_get_device.assert_called_once_with(
+            identifiers={("openwrt_router", "e1")}
+        )
+
+    def test_not_permitted_is_not_ha_reserved(self):
+        assert LOG_STATUS_NOT_PERMITTED == "not_permitted"

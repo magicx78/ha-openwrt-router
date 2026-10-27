@@ -305,7 +305,7 @@ class TestDfsLogbook:
             )
         )
         assert change == {
-            "name": "OpenWrt Router A",
+            "name": "Router A",
             "message": "channel change on phy1: 52 → 36 (DFS)",
         }
         radar = describe(MagicMock(data={"type": "radar_detected", "radio": "phy1", "channel": 52}))

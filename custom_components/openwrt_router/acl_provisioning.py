@@ -100,7 +100,7 @@ RPCD_ACL_CONTENT: dict = {
                 "uci": ["get"],
                 "rc": ["list"],
                 "service": ["list", "get_data"],
-                # logd ring buffer, polled every 2nd cycle for Wi-Fi/DHCP/DFS
+                # logd ring buffer, polled every 2nd cycle for Wi-Fi/DHCP
                 # events (log_parser.py). Read only, no stream.
                 "log": ["read"],
                 # usteer's per-client signal map across APs (sticky clients).

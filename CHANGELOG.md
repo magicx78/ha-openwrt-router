@@ -6,10 +6,12 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ### Added
 
-- **Router-Log wird ausgewertet** (alle 2 Abfragen, die neuesten 250 Zeilen
-  über `ubus call log read`). Neue Zeilen werden über ihre fortlaufende `id`
-  erkannt. Was beim ersten Abruf (und nach einem Neustart von logd) schon im
-  Puffer steht, wird nur gezählt.
+- **Router-Log wird ausgewertet** (alle 2 Abfragen über `ubus call log read`).
+  Neue Zeilen werden über ihre fortlaufende `id` erkannt. Was beim ersten
+  Abruf (und nach einem Neustart von logd) schon im Puffer steht, wird nur
+  gezählt. Die Zahl der abgerufenen Zeilen richtet sich nach dem Aufkommen
+  (100–700, zuerst 250); fehlten beim letzten Mal Zeilen, holt der nächste
+  Abruf den ganzen Puffer.
 - **Events für eigene Automationen:**
   - `openwrt_router_wifi_event` mit `type` `psk_mismatch` (falsches
     WLAN-Passwort), `inactivity_timeout` (Client wegen Inaktivität getrennt)
@@ -19,10 +21,14 @@ All notable changes to the OpenWrt Router integration will be documented in this
   - Felder: `entry_id`, `router`, `type`, `mac`, `hostname`, `interface`,
     `time`, `message`, bei DHCP zusätzlich `ip`.
   - Höchstens 10 Events pro Abruf und eines je Typ und MAC in 5 Minuten.
-    Normale An-/Abmeldungen und DHCPACK werden nur gezählt.
-  - Die Events erscheinen lesbar im Logbuch.
+    Falsches Passwort und DHCP-Probleme haben dabei Vorrang vor
+    Inaktivitäts-Trennungen. Normale An-/Abmeldungen und DHCPACK werden nur
+    gezählt.
+  - Die Events erscheinen lesbar im Logbuch, auch auf der Geräteseite des
+    Routers (`device_id`).
 - **Diagnosesensor „Router-Log“** (`log_status`): `ok`, `pending`,
-  `unavailable` (rpcd-ACL erlaubt `log read` noch nicht) oder `error`.
+  `not_permitted` (rpcd-ACL erlaubt `log read` noch nicht oder kein logd)
+  oder `error`.
   Attribute: Zähler der letzten 24 h je Art (`counts_24h`), verarbeitete,
   verpasste und Baseline-Zeilen, ausgelöste und unterdrückte Events. Ein
   fehlender Zugriff lässt die Abfrage nie scheitern.

@@ -270,6 +270,7 @@ service rpcd restart
 | `sensor.{name}_update_status` | Update availability |
 | `sensor.{name}_active_network_connections` | nf_conntrack count |
 | `sensor.{name}_ddns_*` | DDNS service status and last IP |
+| `sensor.{name}_router_log` | Diagnostic: log ingest status (`ok`, `pending`, `not_permitted`, `error`); attributes `counts_24h` per event type, processed/missed lines |
 | `sensor.{name}_channel_plan_findings` | Diagnostic: Wi-Fi channel plan findings of this router across all routers (`same_channel`, `overlap`, `non_standard_24`, `dfs`); attributes `findings`, `radios` |
 
 ### Sensors (Dynamic)
@@ -295,6 +296,15 @@ service rpcd restart
 | `button.{name}_check_for_updates` | Scan for available updates |
 | `button.{name}_perform_updates` | Trigger update process |
 | `button.restart_{service}` | Restart system service |
+
+### Events
+| Event | When |
+|-------|------|
+| `openwrt_router_outage_event` | A router (or all routers at once) became unreachable / reachable again |
+| `openwrt_router_wifi_event` | Router log: `psk_mismatch`, `handshake_failed`, `inactivity_timeout` (fields `mac`, `hostname`, `interface`, `router`, `time`) |
+| `openwrt_router_dhcp_event` | Router log: dnsmasq `nak`, `decline`, `no_address` (pool exhausted), with `ip` |
+
+Log events are limited to 10 per fetch and one per type and client in 5 minutes. They need rpcd ACL v6 (`log read`), which the integration deploys on start.
 
 ### Device Tracker
 One entity per WiFi client — `home` / `not_home` with attributes: `mac`, `ip_address`, `hostname`, `ssid`, `radio`, `signal`, `connected_since`.
