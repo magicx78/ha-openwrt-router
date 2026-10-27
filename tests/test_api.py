@@ -3045,7 +3045,11 @@ class TestHostapdCacheRefresh:
         mock_api._call = _hostapd_router(
             {"phy0-ap0": [], "phy1-ap0": ["aa:bb:cc:dd:ee:02"]}
         )
-        radios = [{RADIO_KEY_IFNAME: "phy0-ap0"}, {RADIO_KEY_IFNAME: "phy1-ap0"}]
+        # Parser-real shapes: network.wireless status ("Master") and netifd ("ap")
+        radios = [
+            {RADIO_KEY_IFNAME: "phy0-ap0", RADIO_KEY_MODE: "Master"},
+            {RADIO_KEY_IFNAME: "phy1-ap0", RADIO_KEY_MODE: "ap"},
+        ]
         clients = await mock_api.get_connected_clients(leases={}, radios=radios)
         assert [c["mac"] for c in clients] == ["AA:BB:CC:DD:EE:02"]
         assert mock_api._hostapd_ifaces == ["phy0-ap0", "phy1-ap0"]
@@ -3056,19 +3060,22 @@ class TestHostapdCacheRefresh:
         mock_api._hostapd_ifaces_at = _time.monotonic()
         mock_api._call = _hostapd_router({"phy0-ap0": []})
         radios = [
-            {RADIO_KEY_IFNAME: "phy0-ap0"},
-            {RADIO_KEY_IFNAME: "phy0-sta0", RADIO_KEY_MODE: "sta"},
+            {RADIO_KEY_IFNAME: "phy0-ap0", RADIO_KEY_MODE: "Master"},
+            {RADIO_KEY_IFNAME: "phy0-sta0", RADIO_KEY_MODE: "sta"},  # netifd
+            {RADIO_KEY_IFNAME: "phy1-sta0", RADIO_KEY_MODE: "Client"},  # iwinfo
+            {RADIO_KEY_IFNAME: "phy1-mesh0", RADIO_KEY_MODE: "Mesh Point"},
             {RADIO_KEY_IFNAME: "default_radio1", RADIO_KEY_IFNAME_IS_SECTION: True},
         ]
         await mock_api.get_connected_clients(leases={}, radios=radios)
         assert _devices_calls(mock_api._call) == []
 
     @pytest.mark.asyncio
-    async def test_empty_rediscovery_keeps_previous_list(self, mock_api):
+    async def test_failed_rediscovery_keeps_previous_list(self, mock_api):
         mock_api._hostapd_ifaces = ["phy0-ap0"]
         mock_api._hostapd_ifaces_at = _time.monotonic() - HOSTAPD_REDISCOVER_INTERVAL - 1
         mock_api._call = AsyncMock(side_effect=OpenWrtResponseError("HTTP 500"))
         assert await mock_api.get_connected_clients(leases={}, radios=[]) == []
+        assert len(_devices_calls(mock_api._call)) == 1  # it did re-discover
         assert mock_api._hostapd_ifaces == ["phy0-ap0"]
 
     @pytest.mark.asyncio
@@ -3095,3 +3102,91 @@ class TestBoardFallbackWarningOnce:
             if r.levelno == logging.WARNING and "system/board" in r.getMessage()
         ]
         assert len(warnings) == 1
+
+
+class TestHostapdCacheReviewFindings:
+    """Review of A2: parser-real radio shapes, SSH/apply paths, ACL reset."""
+
+    @pytest.mark.asyncio
+    async def test_never_discoverable_ifname_triggers_only_once(self, mock_api):
+        """A custom ifname that iwinfo never lists costs one re-discovery, not one per poll."""
+        mock_api._hostapd_ifaces = ["phy0-ap0"]
+        mock_api._hostapd_ifaces_at = _time.monotonic()
+        mock_api._call = _hostapd_router({"phy0-ap0": []})
+        radios = [
+            {RADIO_KEY_IFNAME: "phy0-ap0", RADIO_KEY_MODE: "Master"},
+            {RADIO_KEY_IFNAME: "phy9-ap0", RADIO_KEY_MODE: "Master"},
+        ]
+        await mock_api.get_connected_clients(leases={}, radios=radios)
+        await mock_api.get_connected_clients(leases={}, radios=radios)
+        await mock_api.get_connected_clients(leases={}, radios=radios)
+        assert len(_devices_calls(mock_api._call)) == 1
+
+    @pytest.mark.asyncio
+    async def test_legitimately_empty_rediscovery_clears_list(self, mock_api):
+        """All SSIDs switched off: iwinfo lists nothing, the list becomes empty."""
+        mock_api._hostapd_ifaces = ["phy0-ap0"]
+        mock_api._hostapd_ifaces_at = _time.monotonic() - HOSTAPD_REDISCOVER_INTERVAL - 1
+        mock_api._call = _hostapd_router({})
+        assert await mock_api.get_connected_clients(leases={}, radios=[]) == []
+        assert mock_api._hostapd_ifaces == []
+
+    @pytest.mark.asyncio
+    async def test_ssh_set_wifi_state_invalidates_cache(self, mock_api):
+        mock_api._hostapd_ifaces = ["phy0-ap0"]
+        mock_api._call = AsyncMock(side_effect=OpenWrtMethodNotFoundError("uci blocked"))
+        mock_api._set_wifi_state_ssh = AsyncMock(return_value=True)
+        assert await mock_api.set_wifi_state("default_radio0", enabled=True) is True
+        assert mock_api._hostapd_ifaces is None
+
+    @pytest.mark.asyncio
+    async def test_failed_ssh_set_wifi_state_keeps_cache(self, mock_api):
+        mock_api._hostapd_ifaces = ["phy0-ap0"]
+        mock_api._call = AsyncMock(side_effect=OpenWrtMethodNotFoundError("uci blocked"))
+        mock_api._set_wifi_state_ssh = AsyncMock(return_value=False)
+        assert await mock_api.set_wifi_state("default_radio0", enabled=True) is False
+        assert mock_api._hostapd_ifaces == ["phy0-ap0"]
+
+    @pytest.mark.asyncio
+    async def test_uci_apply_path_invalidates_cache(self, mock_api):
+        mock_api._hostapd_ifaces = ["phy0-ap0"]
+
+        async def _call(obj, method, params=None, **kwargs):
+            if (obj, method) == ("uci", "commit"):
+                raise OpenWrtAuthError("rpcd access denied for uci/commit")
+            return {}
+
+        mock_api._call = AsyncMock(side_effect=_call)
+        assert await mock_api.set_wifi_state("default_radio0", enabled=False) is True
+        assert ("uci", "apply") in [c.args[:2] for c in mock_api._call.await_args_list]
+        assert mock_api._hostapd_ifaces is None
+
+    def test_reset_acl_blocked_invalidates_cache(self, mock_api):
+        mock_api._hostapd_ifaces = ["phy0-ap0"]
+        mock_api._hostapd_acl_blocked = True
+        mock_api.reset_acl_blocked()
+        assert mock_api._hostapd_ifaces is None
+        assert mock_api._hostapd_acl_blocked is False
+
+    @pytest.mark.asyncio
+    async def test_ssh_wifi_status_marks_ifname_as_section(self):
+        api, _ssh = _ssh_only_api()
+        radios = await api._get_wifi_status_ssh()
+        assert radios
+        assert all(r[RADIO_KEY_IFNAME_IS_SECTION] is True for r in radios)
+
+    def test_parse_wireless_status_reports_netifd_mode(self, mock_api):
+        status = {
+            "radio0": {
+                "up": True,
+                "config": {"channel": 1},
+                "interfaces": [
+                    {"ifname": "phy0-sta0", "config": {"mode": "sta", "ssid": "Up"}},
+                    {"ifname": "phy0-ap0", "config": {"ssid": "Home"}},
+                ],
+            }
+        }
+        radios = mock_api._parse_wireless_status(status)
+        by_ifname = {r[RADIO_KEY_IFNAME]: r for r in radios}
+        assert by_ifname["phy0-sta0"][RADIO_KEY_MODE] == "sta"
+        assert by_ifname["phy0-ap0"][RADIO_KEY_MODE] == "Master"

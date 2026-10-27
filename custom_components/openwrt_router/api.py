@@ -144,6 +144,24 @@ CPU_CORES_TRANSIENT_RETRY_INTERVAL = 300.0  # timeout / connection error
 # system/info encodes load averages as fixed point (load * 65536)
 _LOAD_SCALE = 65536
 
+# Radio modes that are NOT an access point, in the vocabularies of netifd
+# ("sta", "mesh", "adhoc", "monitor") and iwinfo ("Client", "Mesh Point",
+# "Ad-Hoc", "Monitor"); compared lower-cased. Everything else ("ap",
+# "Master", unknown or missing) counts as an AP interface.
+_NON_AP_MODES = frozenset(
+    {
+        "sta",
+        "client",
+        "managed",
+        "mesh",
+        "mesh point",
+        "adhoc",
+        "ad-hoc",
+        "ibss",
+        "monitor",
+    }
+)
+
 # ubus RPC error codes
 UBUS_STATUS_OK = 0
 UBUS_STATUS_INVALID_COMMAND = 1
@@ -913,6 +931,10 @@ class OpenWrtAPI:
         # after a Wi-Fi change made through this integration.
         self._hostapd_ifaces: list[str] | None = None
         self._hostapd_ifaces_at: float = 0.0
+        # Kernel AP ifnames the radios reported on the previous call; an
+        # ifname that newly appears and is not in the cache triggers one
+        # re-discovery (not one per poll when it is never discoverable).
+        self._hostapd_radio_ifnames_last: set[str] = set()
 
         # True when rpcd ACL blocks hostapd.*/get_clients — SSH fallback is used instead.
         self._hostapd_acl_blocked: bool = False
@@ -1044,6 +1066,10 @@ class OpenWrtAPI:
         # on the next poll instead of waiting out the retry interval. A known
         # count is kept — it cannot change while the router runs.
         self._cpu_cores_retry_at = 0.0
+        # A (re)deployed ACL may permit hostapd.* / iwinfo now: discover the
+        # interface list again instead of serving the probing/UCI result.
+        self._invalidate_hostapd_cache()
+        self._hostapd_acl_blocked = False
 
     async def async_close(self) -> None:
         """Release state on integration unload and free the rpcd session.
@@ -2242,17 +2268,24 @@ class OpenWrtAPI:
         hostapd_ifnames: list[str] = []
         now = time.monotonic()
         cached = self._hostapd_ifaces
+        discovery_failed = False
+        # Kernel AP ifnames from the radios. The parsers speak different
+        # vocabularies (netifd "ap"/"sta"/"mesh", iwinfo "Master"/"Client"/
+        # "Mesh Point"), so known non-AP modes are excluded rather than "ap"
+        # required; UCI section names (flagged) are no kernel ifnames.
         radio_ap_ifnames = {
             r.get(RADIO_KEY_IFNAME)
             for r in radios
             if r.get(RADIO_KEY_IFNAME)
             and not r.get(RADIO_KEY_IFNAME_IS_SECTION)
-            and (r.get(RADIO_KEY_MODE) or "ap") == "ap"
+            and str(r.get(RADIO_KEY_MODE) or "").lower() not in _NON_AP_MODES
         }
+        newly_reported = radio_ap_ifnames - self._hostapd_radio_ifnames_last
+        self._hostapd_radio_ifnames_last = set(radio_ap_ifnames)
         use_cache = (
             cached is not None
             and now - self._hostapd_ifaces_at < HOSTAPD_REDISCOVER_INTERVAL
-            and radio_ap_ifnames <= set(cached)
+            and not (newly_reported - set(cached))
         )
 
         if use_cache:
@@ -2265,8 +2298,11 @@ class OpenWrtAPI:
                 hostapd_ifnames = devices_result.get("devices", [])
                 if hostapd_ifnames:
                     _LOGGER.debug("iwinfo/devices: %s", hostapd_ifnames)
-            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-                _LOGGER.debug("iwinfo/devices not available")
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError) as err:
+                # MethodNotFound = no iwinfo (legitimate); a response error is
+                # a failed discovery, not an empty router.
+                discovery_failed = isinstance(err, OpenWrtResponseError)
+                _LOGGER.debug("iwinfo/devices not available: %s", err)
 
             # Method 2: probe known naming patterns (OpenWrt 23+/25 uses phy<N>-ap<M>)
             # Only runs once — result cached immediately after.
@@ -2294,6 +2330,8 @@ class OpenWrtAPI:
                         OpenWrtMethodNotFoundError,
                         OpenWrtResponseError,
                     ) as probe_err:
+                        if isinstance(probe_err, OpenWrtResponseError):
+                            discovery_failed = True
                         # Distinguish ACL-blocked (object exists) from not-found
                         if "access denied" in str(probe_err).lower():
                             acl_blocked_candidates.append(candidate)
@@ -2324,11 +2362,13 @@ class OpenWrtAPI:
                     )
 
             # Cache the result (even if empty) to avoid re-probing every poll.
-            # An empty re-discovery (transient failure) keeps the previous
-            # list; both are tried again after HOSTAPD_REDISCOVER_INTERVAL.
-            if not hostapd_ifnames and cached:
+            # A re-discovery that FAILED (rpcd answered with an error) keeps
+            # the previous list; a legitimately empty one (all SSIDs off,
+            # `wifi down`) replaces it. Both are tried again after
+            # HOSTAPD_REDISCOVER_INTERVAL.
+            if not hostapd_ifnames and cached and discovery_failed:
                 _LOGGER.debug(
-                    "hostapd re-discovery on %s found nothing, keeping %s",
+                    "hostapd re-discovery on %s failed, keeping %s",
                     self._host,
                     cached,
                 )
@@ -2486,6 +2526,7 @@ class OpenWrtAPI:
         """
         self._hostapd_ifaces = None
         self._hostapd_ifaces_at = 0.0
+        self._hostapd_radio_ifnames_last = set()
 
     async def set_wifi_state(self, uci_section: str, enabled: bool) -> bool:
         """Enable or disable a WiFi interface via UCI or SSH fallback.
@@ -3346,6 +3387,9 @@ class OpenWrtAPI:
                         RADIO_KEY_ENABLED: not is_disabled,
                         RADIO_KEY_SSID: ssid,
                         RADIO_KEY_IFNAME: uci_section,
+                        # The UCI section name stands in for the kernel ifname
+                        # here; consumers must not treat it as one.
+                        RADIO_KEY_IFNAME_IS_SECTION: True,
                         RADIO_KEY_UCI_SECTION: uci_section,
                         RADIO_KEY_IS_GUEST: is_guest,
                     }
@@ -5037,7 +5081,9 @@ class OpenWrtAPI:
                         RADIO_KEY_CHANNEL: channel,
                         RADIO_KEY_FREQUENCY: radio_data.get("frequency"),
                         RADIO_KEY_HWMODE: hwmode,
-                        RADIO_KEY_MODE: "Master",  # wireless/status only shows AP interfaces
+                        # netifd reports the configured mode ("ap", "sta",
+                        # "mesh", ...); older builds without it are AP-only.
+                        RADIO_KEY_MODE: config.get("mode") or "Master",
                         RADIO_KEY_BSSID: None,
                         RADIO_KEY_TXPOWER: None,
                         RADIO_KEY_BITRATE: None,
