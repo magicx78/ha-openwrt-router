@@ -12,11 +12,12 @@
   - P2 `feature/channel-plan` · 1.32.0 · PR #24
   - P3 `feature/log-ingest` · 1.33.0 · PR #25
   - P4 `feature/dfs-events` · 1.34.0 · PR folgt
+  - P5 `feature/dhcp-health` · 1.35.0 · PR folgt
 - **Erledigt (außerhalb dieses Plans):** Feature 1 (#19), Feature 7 (#20), Feature 10 (#22), rpcd-Leck (#21)
-- **Erledigt:** P1 (F9, PR #23), P2 (F2, PR #24), P3 (F6 + ACL v6, PR #25), P4 (F3, lokal grün)
-- **Offen:** P5–P7
+- **Erledigt:** P1 (F9, PR #23), P2 (F2, PR #24), P3 (F6 + ACL v6, PR #25), P4 (F3, lokal grün), P5 (F5, lokal grün)
+- **Offen:** P6–P7
 - **Blocker:** —
-- **Nächster Schritt:** P5 (Feature 5, DHCP-Health) auf `feature/dhcp-health`
+- **Nächster Schritt:** P6 (Feature 4, Client-Stabilität) auf `feature/client-stability`
 
 ## Problem und Zielverhalten
 
@@ -46,7 +47,7 @@ Ziel: Solche Zustände erscheinen künftig in HA als Sensor, Event oder Reparatu
   - Events `openwrt_router_wifi_event` / `openwrt_router_dhcp_event`, begrenzt auf höchstens 10 pro Abruf und 5 min Sperre je Typ und MAC.
   - Ist die Methode nicht freigegeben, steht `log_status` auf `unavailable` und der Poll schlägt nicht fehl.
 - [x] AK4 (F3) Kanalwechsel pro Funkmodul zwischen zwei Polls oder eine DFS-Logzeile löst `openwrt_router_dfs_event` aus. `dfs_related` ist nur mit Beleg wahr. Dazu kommt der Sensor `dfs_events_24h`.
-- [ ] AK5 (F5)
+- [x] AK5 (F5)
   - (a) `dhcp_missing` nur, wenn alles zutrifft: seit mindestens 180 s assoziiert, keine Lease bei irgendeinem Router, nicht in der ARP-Tabelle irgendeines Routers. Ein statischer `host` ohne Lease ergibt `static_no_lease`.
   - (b) Sensor für die Pool-Auslastung in % pro aktivem Pool.
   - (c) dnsmasq NAK/DECLINE/„no address available“ lösen ein Event aus.
@@ -147,6 +148,7 @@ Pro Paket: eigener Branch auf dem vorherigen, eigener PR, CHANGELOG-Eintrag, Min
 - 2026-10-27 – Gestapelte PRs, ein Feature pro PR – wie #19–#22 – vom Nutzer freigegeben (2026-10-27)
 - 2026-10-27 – P1: Das Issue verschwindet erst, wenn der Druck unter 80 % liegt **und** wieder mindestens 16 MB verfügbar sind – sonst würde ein kleiner Router (z. B. 64 MB, 79 %, 13 MB frei) im 15-min-Takt flattern; betrifft nur Router unter 80 MB RAM – Abweichung vom Wortlaut von AK1, vom Coordinator entschieden, im PR zur Bestätigung durch den Nutzer genannt
 - 2026-10-27 – P2: Das Issue `channel_plan_conflict` ist flottenweit (eins für alle Router). „Zwei Auswertungen in Folge“ = zwei aufeinanderfolgende Polls desselben Routers, in denen er an einem Konflikt beteiligt ist; ausgewertet wird nach jedem Poll über einen Coordinator-Listener. Konflikt = alle Befundtypen außer `dfs`, also auch `non_standard_24` (wörtlich nach AK2) – Umsetzungsdetail
+- 2026-10-27 – P5: `dhcp_status` als Tracker-Attribut (`ok`/`pending`/`dhcp_missing`/`static_no_lease`), berechnet beim Lesen über alle Router (Leases, ARP, statische Hosts); ohne sichtbare Lease bei irgendeinem Router bleibt es leer, damit ein Netz ohne lesbare Leases nicht nur `dhcp_missing` zeigt. Pool-Sensor pro aktivem Pool, unique_id `<entry>_dhcp_pool-<pool>` (Bindestrich, damit Pool-Namen nie die Legacy-Teilstrings bilden). `uci get dhcp` beim 2. Poll auf jedem Router, danach alle 10 Polls nur bei aktivem Pool (Plan: „nur Gateway“) – Umsetzungsdetail
 - 2026-10-27 – P4: Kanalwechsel = Kanal **oder** Kanalbreite eines Funkmoduls (phy, Band) ändert sich zwischen zwei Polls (Radar im Nebenkanal verkleinert oft nur die Breite); Beleg = DFS-Logzeile desselben Funkmoduls in den letzten 15 min; ein Kanalwechsel zieht den Log-Abruf vor; `dfs_events_24h` zählt alle DFS-Logzeilen und Kanalwechsel – Umsetzungsdetail
 - 2026-10-27 – P3 (nach Review): Status `not_permitted` statt `unavailable` – `unavailable` ist in HA reserviert (Frontend/Automationen zeigen ihn als Ausfall); Abweichung vom Wortlaut von AK3, vom Coordinator entschieden, im PR genannt
 - 2026-10-27 – P3 (nach Review): Zeilenzahl adaptiv (zuerst 250, dann 1,5 × zuletzt gesehene Zeilen + 20, 100–700; nach Lücke 700); Events nach Priorität (PSK/Handshake/DHCP vor Inaktivität); logd-Neustart auch über die Zeit der letzten Zeile erkannt; unplausible Router-Zeit → Empfangszeit; `device_id` im Event fürs Geräte-Logbuch – Umsetzungsdetail
@@ -167,3 +169,4 @@ Pro Paket: eigener Branch auf dem vorherigen, eigener PR, CHANGELOG-Eintrag, Min
 - 2026-10-27 `feature/channel-plan` (P2) – Live-Probe lesend `iwinfo info` aller AP-Interfaces auf `openwrt`/`ap2`/`ap4`: `phy`, `channel`, `center_chan1`, `htmode`, `frequency` vorhanden (20 MHz: `center_chan1` = Kanal; HE40 auf 36: 38). Aktueller Plan 1/6/11 und 36@40, 44, 48 → keine Befunde (als Test abgebildet) · lokal: ruff 0.17.3 ✓ · pytest 830 passed · Review: unabhängig – keine P0/P1; P2 (Issue-Flattern bei Fehl-Poll, Mesh/Repeater-Fehlalarm, Band/phy-Zuordnung) und P3 (eigene Funkmodule beim Setup, `band` im Attribut, Zähler beim Unload, Tests 1/5 und 144/149) behoben; offen P3: Sensor rechnet pro Zustandsschreiben zweimal (gering), UCI-Fallback kennt deaktivierte Funkmodule nicht
 - 2026-10-27 `feature/log-ingest` (P3) – Live-Probe lesend `log read` auf `openwrt`/`ap2`/`ap4`: Antwort `{"log":[{msg,id,priority,source,time}]}`, `id` fortlaufend, `time` in ms; Puffer ~620–640 Zeilen, ~166 B/Zeile (200 Zeilen ≈ 32–34 KB); Zeitspanne des Puffers Gateway ~5,5 min (DHCP-DISCOVER/OFFER-Schleife eines Clients + SSH-Logins der Messung), APs 15–36 min. Zeilenformate hostapd/dnsmasq-dhcp/usteer als Tests abgebildet (ohne echte MACs) · lokal: ruff 0.17.3 ✓ · pytest grün · rpcd-RSS bei `log read` über HTTP nicht gemessen (braucht eine Session mit ACL v6, also Deploy) – Lücke · Review: unabhängig (Pflicht) – keine P0/P1; P2 (`unavailable` reserviert, 250 Zeilen auf dem Gateway zu wenig) und P3 (Fehler nach dem Abruf, logd-Neustart, Router-Zeit, Priorität, `--log-dhcp`/DUID, Logbuch-Name/`device_id`) behoben; offen P3: Standard-Timeout 10 s für `log read`
 - 2026-10-27 `feature/dfs-events` (P4) – Live-Probe lesend `logread | grep DFS/radar/CAC` auf `openwrt`/`ap2`/`ap4`: keine DFS-Zeilen (aktuell kein DFS-Kanal in Benutzung); Zeilenformate daher aus hostapd übernommen (`DFS-RADAR-DETECTED freq=…`, `DFS-CAC-START freq=… chan=…`, `DFS-NEW-CHANNEL …`) – Lücke: nicht live gesehen · lokal: ruff 0.17.3 ✓ · pytest grün · Review: s. PR
+- 2026-10-27 `feature/dhcp-health` (P5) – Live-Probe lesend auf `openwrt`: rpcd-Login `root` hat `read '*'`, `uci get dhcp` damit über luci-mod-network erlaubt; 4 aktive Pools (/24, start 100, limit 150) plus `wan` mit `ignore`, 40 statische Hosts, 40 Leases. Auf dem Gateway hängt ein Client in einer DHCP-DISCOVER/OFFER-Schleife (Fall für `dhcp_missing`) · lokal: ruff 0.17.3 ✓ · pytest grün · Review: s. PR
