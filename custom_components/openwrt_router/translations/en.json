@@ -197,5 +197,15 @@
         "name": "Reboot"
       }
     }
+  },
+  "issues": {
+    "lan_unreachable": {
+      "title": "No OpenWrt router reachable",
+      "description": "All {count} OpenWrt routers ({routers}) have been unreachable from Home Assistant since {since}.\n\nWhen every router fails at the same moment, the cause is almost always between Home Assistant and the LAN (network of the HA host, switch, cabling, VLAN), not in the routers themselves.\n\nThis message disappears automatically as soon as a router answers again."
+    },
+    "router_unreachable": {
+      "title": "OpenWrt router {router} unreachable",
+      "description": "The router {router} has not answered since {since} (error type: {error_type}).\n\nCheck power, cabling and the rpcd/uhttpd services on the router.\n\nThis message disappears automatically as soon as the router answers again."
+    }
   }
 }

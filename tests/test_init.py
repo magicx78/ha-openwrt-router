@@ -622,3 +622,40 @@ class TestLegacySensorDisableRunsOnce:
 
         assert OpenWrtConfigFlow.VERSION == 2
         assert OpenWrtConfigFlow.MINOR_VERSION == 2
+
+
+class TestOutageTrackerWiring:
+    @pytest.mark.asyncio
+    async def test_setup_registers_router_and_unload_unregisters(self):
+        hass = _make_hass()
+        entry = _make_entry()
+        mock_api = AsyncMock()
+        mock_api.reset_acl_blocked = MagicMock()
+        mock_coordinator = MagicMock()
+        mock_coordinator.async_config_entry_first_refresh = AsyncMock()
+        tracker = MagicMock()
+
+        with patch(
+            "custom_components.openwrt_router.async_get_clientsession",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtAPI",
+            return_value=mock_api,
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtCoordinator",
+            return_value=mock_coordinator,
+        ), patch(
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            AsyncMock(return_value=False),
+        ), patch(
+            "custom_components.openwrt_router.async_get_outage_tracker",
+            return_value=tracker,
+        ):
+            assert await async_setup_entry(hass, entry) is True
+
+        assert tracker.register.call_args.args[:2] == ("test_entry_id", "OpenWrt-Test")
+        mock_coordinator.attach_outage_tracker.assert_called_once_with(tracker)
+        # The unload callback unregisters exactly this entry.
+        unload_cb = entry.async_on_unload.call_args.args[0]
+        unload_cb()
+        tracker.unregister.assert_called_once_with("test_entry_id")
