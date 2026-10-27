@@ -1079,7 +1079,10 @@ class OpenWrtAPI:
             True on success.
 
         Raises:
-            OpenWrtAuthError: If credentials are rejected.
+            OpenWrtAuthError: If credentials are rejected (ubus status 6,
+                rpcd -32002, HTTP 403, or no usable session token).
+            OpenWrtResponseError: If the endpoint answers but not as a healthy
+                rpcd (HTTP error, unparsable JSON, unexpected ubus status).
             OpenWrtConnectionError: If the router is unreachable.
             OpenWrtTimeoutError: If the request times out.
         """
@@ -1107,8 +1110,12 @@ class OpenWrtAPI:
 
         try:
             result = await self._raw_call(payload)
-        except OpenWrtResponseError as err:
-            # L-1: count failures; suppress repeated ERROR spam after threshold
+        except OpenWrtResponseError:
+            # HTTP != 200, unparsable reply, unexpected ubus status: the
+            # router (or rpcd) is unhealthy, the credentials were not judged.
+            # Propagate as a response error — turning it into an auth error
+            # sent users through the reauth dialog for a rebooting router.
+            # L-1: count failures; suppress repeated ERROR spam after threshold.
             self._login_failure_count += 1
             if self._login_failure_count >= 5:
                 _LOGGER.warning(
@@ -1117,7 +1124,7 @@ class OpenWrtAPI:
                     self._ubus_url,
                     self._login_failure_count,
                 )
-            raise OpenWrtAuthError(f"Login failed: {err}") from err
+            raise
 
         token = (result or {}).get("ubus_rpc_session")
         if not token or token == DEFAULT_SESSION_ID:
@@ -1218,21 +1225,17 @@ class OpenWrtAPI:
 
         Raises:
             OpenWrtAuthError: Wrong credentials.
+            OpenWrtResponseError: Endpoint answers, but not as a healthy rpcd.
             OpenWrtConnectionError: Router unreachable.
             OpenWrtTimeoutError: Request timed out.
-        """
-        # Try to login; if it fails due to ACL, continue with default session.
-        try:
-            await self.login()
-            _LOGGER.debug("Successfully authenticated with router")
-        except OpenWrtAuthError as err:
-            _LOGGER.warning(
-                "Could not authenticate (rpcd may have restricted ACL): %s. "
-                "Will attempt to use default session. Some features may be unavailable.",
-                err,
-            )
-            # Continue anyway – some routers have public read-only APIs
 
+        A failed login is a failed validation. Until v1.38.4 it was swallowed
+        ("continue with the default session"), which let a wrong password
+        through setup and reauth; the entry then failed with
+        ``ConfigEntryAuthFailed`` and opened the next reauth — a loop.
+        """
+        await self.login()
+        _LOGGER.debug("Successfully authenticated with router")
         return await self.get_router_info()
 
     async def check_capabilities(self) -> dict[str, bool]:
@@ -1371,21 +1374,21 @@ class OpenWrtAPI:
             }
 
         Note:
-            If access is denied (unauthenticated router with restrictive ACL),
-            returns minimal safe defaults.
+            Authenticated, but ``system/board`` missing or not in the rpcd ACL
+            (``OpenWrtMethodNotFoundError``) → minimal safe defaults, the
+            router is still usable. An ``OpenWrtAuthError`` means the
+            credentials themselves failed (``_call`` already re-logged in
+            once) and propagates, so setup and reauth can reject them.
         """
         try:
             result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_BOARD, {})
-        except (OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
-            # Access denied – router has restrictive ACL, return safe defaults
-            if isinstance(err, OpenWrtAuthError):
-                _LOGGER.warning(
-                    "Cannot access system/board (rpcd ACL restricted). "
-                    "Using fallback router info."
-                )
-                result = {}
-            else:
-                raise
+        except OpenWrtMethodNotFoundError as err:
+            _LOGGER.warning(
+                "Cannot read system/board on %s (%s). Using fallback router info.",
+                self._host,
+                err,
+            )
+            result = {}
 
         # Extract platform architecture from various sources
         platform_arch = self._extract_platform_architecture(result)

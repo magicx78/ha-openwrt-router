@@ -1435,9 +1435,10 @@ class TestLogin:
         assert api._login_failure_count == 1
 
     @pytest.mark.asyncio
-    async def test_login_response_error_becomes_auth_error(self):
+    async def test_login_response_error_propagates(self):
+        """HTTP/JSON failures are not credential failures (no reauth from them)."""
         api = _make_api_with_response(status_code=500)
-        with pytest.raises(OpenWrtAuthError, match="Login failed"):
+        with pytest.raises(OpenWrtResponseError):
             await api.login()
         assert api._login_failure_count == 1
 
@@ -1519,9 +1520,12 @@ class TestRootAccountWarning:
 
     @pytest.mark.asyncio
     async def test_rejected_login_never_warns(self, caplog):
-        api = _login_api(login_result=OpenWrtResponseError("ubus error 6"))
+        api = _login_api(login_result=OpenWrtAuthError("ubus permission denied (status=6)"))
         with pytest.raises(OpenWrtAuthError):
             await api.login()
+        unhealthy = _login_api(login_result=OpenWrtResponseError("HTTP 500"))
+        with pytest.raises(OpenWrtResponseError):
+            await unhealthy.login()
         bad_token = _login_api(login_result=[{"ubus_rpc_session": DEFAULT_SESSION_ID}])
         with pytest.raises(OpenWrtAuthError):
             await bad_token.login()
@@ -1835,8 +1839,13 @@ class TestGetRouterInfo:
         assert result["platform_architecture"] == "mediatek/filogic"
 
     @pytest.mark.asyncio
-    async def test_access_denied_fallback(self, mock_api):
-        mock_api._call = AsyncMock(side_effect=OpenWrtAuthError("access denied"))
+    async def test_board_not_permitted_fallback(self, mock_api):
+        """Authenticated, but system/board not in the ACL → safe defaults.
+
+        An OpenWrtAuthError propagates instead (see TestAuthErrorsSurface):
+        treating it as "defaults" let a wrong password pass setup (1.38.4).
+        """
+        mock_api._call = AsyncMock(side_effect=OpenWrtMethodNotFoundError("acl"))
         result = await mock_api.get_router_info()
         assert result["model"] == "OpenWrt Router"
 
@@ -2905,3 +2914,57 @@ class TestDfSshCacheTransientFailures:
         await mock_api.get_disk_space()
         await mock_api.get_disk_space()
         assert mock_api._asyncssh_run.await_count == 1
+
+
+# =====================================================================
+# A1 (1.38.4): wrong credentials must surface instead of becoming defaults
+# =====================================================================
+
+
+class TestAuthErrorsSurface:
+    """Audit finding N1: ``test_connection()`` swallowed the login failure and
+    ``get_router_info()`` turned the denied board query into defaults, so a
+    wrong password passed setup and reauth, and setup then raised
+    ``ConfigEntryAuthFailed`` → endless reauth loop."""
+
+    @pytest.mark.asyncio
+    async def test_test_connection_raises_on_wrong_password(self):
+        # rpcd answers session/login with ubus status 6 (PERMISSION_DENIED)
+        api = _make_api_with_response(
+            json_data={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [UBUS_STATUS_PERMISSION_DENIED],
+            }
+        )
+        with pytest.raises(OpenWrtAuthError):
+            await api.test_connection()
+
+    @pytest.mark.asyncio
+    async def test_test_connection_raises_response_error_on_http_500(self):
+        api = _make_api_with_response(status_code=500)
+        with pytest.raises(OpenWrtResponseError):
+            await api.test_connection()
+
+    @pytest.mark.asyncio
+    async def test_test_connection_success_unchanged(self, mock_api):
+        mock_api._token = DEFAULT_SESSION_ID  # force a real login via the mock
+        mock_api._token_expires_at = 0.0
+        result = await mock_api.test_connection()
+        assert result["model"] == "GL.iNet GL-MT3000"
+
+    @pytest.mark.asyncio
+    async def test_router_info_defaults_when_board_not_permitted(self, mock_api):
+        """Authenticated, but ``system/board`` not in the ACL → safe defaults."""
+        mock_api._call = AsyncMock(
+            side_effect=OpenWrtMethodNotFoundError("rpcd ACL blocks system/board")
+        )
+        info = await mock_api.get_router_info()
+        assert info["model"] == "OpenWrt Router"
+        assert info["hostname"] == "192.168.1.1"
+
+    @pytest.mark.asyncio
+    async def test_router_info_auth_error_propagates(self, mock_api):
+        mock_api._call = AsyncMock(side_effect=OpenWrtAuthError("denied"))
+        with pytest.raises(OpenWrtAuthError):
+            await mock_api.get_router_info()

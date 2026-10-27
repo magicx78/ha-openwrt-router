@@ -701,3 +701,27 @@ class TestChannelPlanWiring:
             for cb in callbacks:
                 cb()
         monitor.unregister.assert_called_once_with("test_entry_id")
+
+
+
+class TestSetupEntryLoginResponseError:
+    """A1 (1.38.4): HTTP/rpcd failures at login retry; they are no credential error."""
+
+    @pytest.mark.asyncio
+    async def test_login_response_error_raises_not_ready(self):
+        from custom_components.openwrt_router.api import OpenWrtResponseError
+
+        hass = _make_hass()
+        entry = _make_entry()
+        mock_api = AsyncMock()
+        mock_api.login = AsyncMock(
+            side_effect=OpenWrtResponseError("Router returned HTTP 500 for session/login")
+        )
+        with patch(
+            "custom_components.openwrt_router.async_get_clientsession",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtAPI",
+            return_value=mock_api,
+        ), pytest.raises(ConfigEntryNotReady):
+            await async_setup_entry(hass, entry)

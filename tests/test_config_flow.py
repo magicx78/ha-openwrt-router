@@ -868,3 +868,94 @@ class TestChecklistStep:
     def test_has_no_file_exec_row(self):
         """The never-probed phantom row must stay gone (was always red)."""
         assert "file_exec" not in OpenWrtConfigFlow._CAPABILITY_LABELS
+
+
+# =====================================================================
+# A1 (1.38.4): wrong password rejected end-to-end; temporary API closed
+# =====================================================================
+
+from custom_components.openwrt_router.api import OpenWrtAPI  # noqa: E402
+
+_CLIENTSESSION = "custom_components.openwrt_router.config_flow.async_get_clientsession"
+
+
+class TestValidateInputClosesApi:
+    """Every validation created an API and left its rpcd session alive (TTL 600 s)."""
+
+    @pytest.mark.asyncio
+    async def test_api_closed_after_success(self):
+        flow = _make_flow()
+        with (
+            patch(_CLIENTSESSION, return_value=MagicMock()),
+            patch("custom_components.openwrt_router.config_flow.OpenWrtAPI") as api_cls,
+        ):
+            api = api_cls.return_value
+            api.test_connection = AsyncMock(return_value={"hostname": "AP4"})
+            api.async_close = AsyncMock()
+            result = await flow._validate_input(
+                "192.168.1.1", 80, "root", "pw", PROTOCOL_HTTP
+            )
+        assert result == {"hostname": "AP4"}
+        api.async_close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_api_closed_after_failure(self):
+        flow = _make_flow()
+        with (
+            patch(_CLIENTSESSION, return_value=MagicMock()),
+            patch("custom_components.openwrt_router.config_flow.OpenWrtAPI") as api_cls,
+        ):
+            api = api_cls.return_value
+            api.test_connection = AsyncMock(side_effect=OpenWrtAuthError("bad"))
+            api.async_close = AsyncMock()
+            with pytest.raises(OpenWrtAuthError):
+                await flow._validate_input("192.168.1.1", 80, "root", "pw", PROTOCOL_HTTP)
+        api.async_close.assert_awaited_once()
+
+
+class TestWrongPasswordEndToEnd:
+    """The real OpenWrtAPI against a router that rejects the login (ubus 6).
+
+    These patch ``_raw_call`` instead of ``_validate_input`` so the
+    ``test_connection()`` → ``get_router_info()`` chain is exercised.
+    """
+
+    @staticmethod
+    def _rejecting_login():
+        return patch.object(
+            OpenWrtAPI,
+            "_raw_call",
+            AsyncMock(
+                side_effect=OpenWrtAuthError(
+                    "ubus permission denied for session/login (status=6)"
+                )
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_user_step_shows_invalid_auth(self):
+        flow = _make_flow()
+        with patch(_CLIENTSESSION, return_value=MagicMock()), self._rejecting_login():
+            result = await flow.async_step_user(user_input=_VALID_USER_INPUT)
+        assert result["type"] == "form"
+        assert result["errors"]["base"] == ERROR_INVALID_AUTH
+
+    @pytest.mark.asyncio
+    async def test_reauth_asks_for_a_new_password(self):
+        flow, _entry = _make_reauth_flow(_REAUTH_DATA)
+        with patch(_CLIENTSESSION, return_value=MagicMock()), self._rejecting_login():
+            result = await flow.async_step_reauth({})
+        assert result["type"] == "form"
+        assert result["step_id"] == "reauth_confirm"
+
+
+class TestReauthRpcdSetupRouting:
+    @pytest.mark.asyncio
+    async def test_rpcd_setup_error_routes_to_rpcd_step(self):
+        flow, _entry = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(
+            flow, "_validate_input", side_effect=OpenWrtRpcdSetupError("rpcd")
+        ):
+            result = await flow.async_step_reauth({})
+        assert result["type"] == "form"
+        assert result["step_id"] == "reauth_rpcd_setup"

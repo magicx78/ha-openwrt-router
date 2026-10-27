@@ -473,7 +473,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
         try:
             await self._validate_input(host, port, username, password, protocol)
-        except OpenWrtResponseError:
+        except (OpenWrtResponseError, OpenWrtRpcdSetupError):
             return await self.async_step_reauth_rpcd_setup()
         except (OpenWrtConnectionError, OpenWrtTimeoutError):
             return await self.async_step_reauth_cannot_connect()
@@ -646,7 +646,12 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
         password: str,
         protocol: str = DEFAULT_PROTOCOL,
     ) -> dict[str, Any]:
-        """Create a temporary API client and test the connection."""
+        """Create a temporary API client, test the connection, release it.
+
+        ``async_close`` destroys the rpcd session the test created; without
+        it every validation (user step, reauth, each retry click) left a
+        session on the router until its TTL expired.
+        """
         session = async_get_clientsession(self.hass)
         api = OpenWrtAPI(
             host=host,
@@ -657,7 +662,10 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
             protocol=protocol,
             ssl_context=ssl_context_for_protocol(protocol),
         )
-        return await api.test_connection()
+        try:
+            return await api.test_connection()
+        finally:
+            await api.async_close()
 
     @staticmethod
     def _build_user_schema(

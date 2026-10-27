@@ -40,6 +40,7 @@ from .api import (
     OpenWrtAPI,
     OpenWrtAuthError,
     OpenWrtConnectionError,
+    OpenWrtResponseError,
     OpenWrtTimeoutError,
 )
 from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN, PROTOCOL_HTTP
@@ -277,6 +278,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     except (OpenWrtConnectionError, OpenWrtTimeoutError) as err:
         raise ConfigEntryNotReady(
             f"Cannot reach OpenWrt router at {host}:{port}: {err}"
+        ) from err
+    except OpenWrtResponseError as err:
+        # rpcd restarting, uhttpd answering 5xx, HTML instead of JSON: not a
+        # credential problem — retry instead of opening the reauth dialog.
+        raise ConfigEntryNotReady(
+            f"OpenWrt router at {host}:{port} did not answer as rpcd: {err}"
         ) from err
 
     # Ensure the rpcd ACL is present AND current BEFORE the first data refresh.
