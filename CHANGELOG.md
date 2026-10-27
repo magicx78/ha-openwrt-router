@@ -2,6 +2,19 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.5] - 2026-10-27
+
+### Fixed
+
+- **Später eingeschaltete WLANs tauchen jetzt auf.** Die Liste der
+  hostapd-Interfaces wurde beim ersten Poll ermittelt und bis zum Neuladen des
+  Eintrags festgehalten, auch wenn sie leer war. Ein danach eingeschaltetes
+  WLAN (etwa das Gast-WLAN über den Schalter) lieferte keine Clients, keine
+  AP-Sensoren und fehlte im Kanalplan. Die Liste wird jetzt neu ermittelt,
+  wenn ein Radio ein unbekanntes Interface meldet, nach jedem WLAN-Schalter
+  oder Reload über die Integration und sonst alle 10 Minuten; eine leere
+  Neuermittlung (vorübergehender Fehler) behält die bisherige Liste.
+
 ## [1.38.4] - 2026-10-27
 
 ### Fixed

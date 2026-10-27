@@ -2968,3 +2968,108 @@ class TestAuthErrorsSurface:
         mock_api._call = AsyncMock(side_effect=OpenWrtAuthError("denied"))
         with pytest.raises(OpenWrtAuthError):
             await mock_api.get_router_info()
+
+
+# =====================================================================
+# A2 (1.38.5): the hostapd interface cache is refreshed, not frozen
+# =====================================================================
+
+import time as _time  # noqa: E402
+
+from custom_components.openwrt_router.const import (  # noqa: E402
+    HOSTAPD_REDISCOVER_INTERVAL,
+    RADIO_KEY_IFNAME,
+    RADIO_KEY_IFNAME_IS_SECTION,
+    RADIO_KEY_MODE,
+)
+
+
+def _hostapd_router(ifaces: dict[str, list[str]]) -> AsyncMock:
+    """``_call`` side effect: iwinfo/devices plus hostapd get_clients/get_status."""
+
+    async def _call(obj, method, params=None, **kwargs):
+        if (obj, method) == ("iwinfo", "devices"):
+            return {"devices": list(ifaces)}
+        if obj.startswith("hostapd.") and method == "get_clients":
+            name = obj.split(".", 1)[1]
+            if name not in ifaces:
+                raise OpenWrtMethodNotFoundError(obj)
+            return {"clients": {mac: {"signal": -50} for mac in ifaces[name]}}
+        if obj.startswith("hostapd.") and method == "get_status":
+            return {"ssid": f"SSID-{obj.split('.', 1)[1]}"}
+        raise OpenWrtMethodNotFoundError(f"{obj}/{method}")
+
+    return AsyncMock(side_effect=_call)
+
+
+def _devices_calls(mock: AsyncMock) -> list:
+    return [c for c in mock.await_args_list if c.args[:2] == ("iwinfo", "devices")]
+
+
+class TestHostapdCacheRefresh:
+    """Audit finding N3: the list was discovered once and kept until reload —
+    even when empty — so an SSID switched on later had no clients, no AP
+    sensors and no entry in the channel plan."""
+
+    @pytest.mark.asyncio
+    async def test_empty_cache_is_rediscovered_after_interval(self, mock_api):
+        mock_api._hostapd_ifaces = []
+        mock_api._hostapd_ifaces_at = _time.monotonic() - HOSTAPD_REDISCOVER_INTERVAL - 1
+        mock_api._call = _hostapd_router({"phy0-ap0": ["aa:bb:cc:dd:ee:01"]})
+        clients = await mock_api.get_connected_clients(leases={}, radios=[])
+        assert [c["mac"] for c in clients] == ["AA:BB:CC:DD:EE:01"]
+        assert mock_api._hostapd_ifaces == ["phy0-ap0"]
+
+    @pytest.mark.asyncio
+    async def test_fresh_empty_cache_is_not_reprobed_every_poll(self, mock_api):
+        mock_api._hostapd_ifaces = []
+        mock_api._hostapd_ifaces_at = _time.monotonic()
+        mock_api._call = _hostapd_router({"phy0-ap0": []})
+        assert await mock_api.get_connected_clients(leases={}, radios=[]) == []
+        assert _devices_calls(mock_api._call) == []
+
+    @pytest.mark.asyncio
+    async def test_new_radio_ifname_triggers_rediscovery(self, mock_api):
+        """Guest SSID switched on: its kernel ifname shows up in the radios."""
+        mock_api._hostapd_ifaces = ["phy0-ap0"]
+        mock_api._hostapd_ifaces_at = _time.monotonic()
+        mock_api._call = _hostapd_router(
+            {"phy0-ap0": [], "phy1-ap0": ["aa:bb:cc:dd:ee:02"]}
+        )
+        radios = [{RADIO_KEY_IFNAME: "phy0-ap0"}, {RADIO_KEY_IFNAME: "phy1-ap0"}]
+        clients = await mock_api.get_connected_clients(leases={}, radios=radios)
+        assert [c["mac"] for c in clients] == ["AA:BB:CC:DD:EE:02"]
+        assert mock_api._hostapd_ifaces == ["phy0-ap0", "phy1-ap0"]
+
+    @pytest.mark.asyncio
+    async def test_sta_or_section_radios_do_not_force_rediscovery(self, mock_api):
+        mock_api._hostapd_ifaces = ["phy0-ap0"]
+        mock_api._hostapd_ifaces_at = _time.monotonic()
+        mock_api._call = _hostapd_router({"phy0-ap0": []})
+        radios = [
+            {RADIO_KEY_IFNAME: "phy0-ap0"},
+            {RADIO_KEY_IFNAME: "phy0-sta0", RADIO_KEY_MODE: "sta"},
+            {RADIO_KEY_IFNAME: "default_radio1", RADIO_KEY_IFNAME_IS_SECTION: True},
+        ]
+        await mock_api.get_connected_clients(leases={}, radios=radios)
+        assert _devices_calls(mock_api._call) == []
+
+    @pytest.mark.asyncio
+    async def test_empty_rediscovery_keeps_previous_list(self, mock_api):
+        mock_api._hostapd_ifaces = ["phy0-ap0"]
+        mock_api._hostapd_ifaces_at = _time.monotonic() - HOSTAPD_REDISCOVER_INTERVAL - 1
+        mock_api._call = AsyncMock(side_effect=OpenWrtResponseError("HTTP 500"))
+        assert await mock_api.get_connected_clients(leases={}, radios=[]) == []
+        assert mock_api._hostapd_ifaces == ["phy0-ap0"]
+
+    @pytest.mark.asyncio
+    async def test_set_wifi_state_invalidates_cache(self, mock_api):
+        mock_api._hostapd_ifaces = ["phy0-ap0"]
+        assert await mock_api.set_wifi_state("default_radio0", enabled=True) is True
+        assert mock_api._hostapd_ifaces is None
+
+    @pytest.mark.asyncio
+    async def test_reload_wifi_invalidates_cache(self, mock_api):
+        mock_api._hostapd_ifaces = ["phy0-ap0"]
+        assert await mock_api.reload_wifi() is True
+        assert mock_api._hostapd_ifaces is None

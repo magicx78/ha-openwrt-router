@@ -43,6 +43,7 @@ from .const import (
     DEFAULT_TIMEOUT,
     DHCP_LEASES_PATH,
     GUEST_SSID_KEYWORDS,
+    HOSTAPD_REDISCOVER_INTERVAL,
     LLDP_CLI_NEIGHBORS_CMD,
     LLDP_KEY_CAPABILITIES,
     LLDP_KEY_CHASSIS_ID,
@@ -906,8 +907,12 @@ class OpenWrtAPI:
 
         # Cached hostapd interface names (e.g. ["phy0-ap0"]).
         # Populated on first get_connected_clients() call via discovery.
-        # None = not yet discovered; [] = no interfaces found.
+        # None = not yet discovered; [] = no interfaces found. Re-discovered
+        # after HOSTAPD_REDISCOVER_INTERVAL (time.monotonic() of the last
+        # discovery below), when a radio reports an unknown kernel ifname, and
+        # after a Wi-Fi change made through this integration.
         self._hostapd_ifaces: list[str] | None = None
+        self._hostapd_ifaces_at: float = 0.0
 
         # True when rpcd ACL blocks hostapd.*/get_clients — SSH fallback is used instead.
         self._hostapd_acl_blocked: bool = False
@@ -2221,12 +2226,31 @@ class OpenWrtAPI:
         }
 
         # Discover hostapd interfaces — try methods in order of reliability.
-        # Results are cached in self._hostapd_ifaces after first successful discovery.
+        # The result is cached in self._hostapd_ifaces and re-discovered when a
+        # radio reports a kernel AP ifname the cache does not know (an SSID was
+        # switched on), after a Wi-Fi change through this integration (cache
+        # invalidated) and otherwise every HOSTAPD_REDISCOVER_INTERVAL, so a
+        # list that was empty or incomplete at setup does not stick until the
+        # next reload (it did before v1.38.5).
         hostapd_ifnames: list[str] = []
+        now = time.monotonic()
+        cached = self._hostapd_ifaces
+        radio_ap_ifnames = {
+            r.get(RADIO_KEY_IFNAME)
+            for r in radios
+            if r.get(RADIO_KEY_IFNAME)
+            and not r.get(RADIO_KEY_IFNAME_IS_SECTION)
+            and (r.get(RADIO_KEY_MODE) or "ap") == "ap"
+        }
+        use_cache = (
+            cached is not None
+            and now - self._hostapd_ifaces_at < HOSTAPD_REDISCOVER_INTERVAL
+            and radio_ap_ifnames <= set(cached)
+        )
 
-        if self._hostapd_ifaces is not None:
+        if use_cache:
             # Use cached result from previous poll
-            hostapd_ifnames = self._hostapd_ifaces
+            hostapd_ifnames = list(cached)
         else:
             # Method 1: iwinfo/devices (OpenWrt 21+/25) — physical ifnames like phy0-ap0
             try:
@@ -2292,8 +2316,18 @@ class OpenWrtAPI:
                         hostapd_ifnames,
                     )
 
-            # Cache the result (even if empty) to avoid re-probing every poll
+            # Cache the result (even if empty) to avoid re-probing every poll.
+            # An empty re-discovery (transient failure) keeps the previous
+            # list; both are tried again after HOSTAPD_REDISCOVER_INTERVAL.
+            if not hostapd_ifnames and cached:
+                _LOGGER.debug(
+                    "hostapd re-discovery on %s found nothing, keeping %s",
+                    self._host,
+                    cached,
+                )
+                hostapd_ifnames = list(cached)
             self._hostapd_ifaces = hostapd_ifnames
+            self._hostapd_ifaces_at = now
 
         # Build ifname→ssid map for any hostapd interfaces not yet known
         # Try hostapd.*/get_status first (works even without iwinfo ACL), then iwinfo/info
@@ -2436,6 +2470,16 @@ class OpenWrtAPI:
             if ip and CLIENT_KEY_WEB_URL not in client:
                 client[CLIENT_KEY_WEB_URL] = f"http://{ip}"
 
+    def _invalidate_hostapd_cache(self) -> None:
+        """Forget the hostapd interface list after a Wi-Fi change.
+
+        Switching an SSID on or off (or a reload) changes which hostapd
+        objects exist; the next poll re-discovers them instead of serving the
+        pre-change list for up to HOSTAPD_REDISCOVER_INTERVAL.
+        """
+        self._hostapd_ifaces = None
+        self._hostapd_ifaces_at = 0.0
+
     async def set_wifi_state(self, uci_section: str, enabled: bool) -> bool:
         """Enable or disable a WiFi interface via UCI or SSH fallback.
 
@@ -2523,6 +2567,7 @@ class OpenWrtAPI:
                         _LOGGER.info(
                             "WiFi section %s %s via uci/apply", uci_section, action
                         )
+                        self._invalidate_hostapd_cache()
                         return True
                     except (
                         OpenWrtMethodNotFoundError,
@@ -2567,11 +2612,15 @@ class OpenWrtAPI:
                         reload_err,
                     )
                 _LOGGER.info("WiFi section %s %s successfully", uci_section, action)
+                self._invalidate_hostapd_cache()
                 return True
 
         # Fallback 2: SSH (works even when rpcd ACL blocks uci/commit)
         try:
-            return await self._set_wifi_state_ssh(uci_section, enabled)
+            applied = await self._set_wifi_state_ssh(uci_section, enabled)
+            if applied:
+                self._invalidate_hostapd_cache()
+            return applied
         except Exception as ssh_err:  # noqa: BLE001
             _LOGGER.debug("SSH fallback failed: %s", ssh_err)
 
@@ -3316,6 +3365,7 @@ class OpenWrtAPI:
         _LOGGER.debug("Reloading network configuration")
         try:
             await self._call(UBUS_NETWORK_RELOAD, UBUS_NETWORK_RELOAD_METHOD, {})
+            self._invalidate_hostapd_cache()
             return True
         except OpenWrtMethodNotFoundError:
             if applied_by_commit:
