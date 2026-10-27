@@ -8,7 +8,7 @@
 
 - **Stand:** 2026-10-27 (abends) · **Phase:** freigegeben, in Umsetzung
 - **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6), alle am 2026-10-27 — **offen:** A16 ACL v8 `fix/acl-v8` · PR #41 (1.38.7) auf `main` (Worktree `../ha-openwrt-router-acl-v8`)
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1, A2 und A11 inkl. Fixes abgeschlossen · **Offen:** PR #41 (ACL v8) Review, Merge-Freigabe, Installation 1.38.7 und AK6 am Gateway; rpcd-RSS-Auswertung; A3–A10, A12–A14
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1, A2 und A11 inkl. Fixes abgeschlossen · **Offen:** PR #41 (ACL v8) Merge-Freigabe, Installation 1.38.7 und AK6 am Gateway; A3–A10, A12–A14
 - **Blocker:** –
 - **Nächster Schritt:** Review-Befunde zu #41 beheben, CI, Merge-Freigabe durch den Nutzer; danach 1.38.7 installieren, HA neu starten (rpcd-Neustart je Router durch v8), AK6 am Gateway abschließend messen; dann A4 (WAN-Erkennung, E5)
 
@@ -499,3 +499,9 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   Migrationstest v7-Datei → Redeploy mit rpcd-Neustart, Versionsangabe präzisiert (2026.10.04
   bestätigt), Nicht-Ziel „ACL v8“ im Plan aufgehoben. Offen (P3, vorbestehend): `list` auf
   `/var/run/ddns` wird nirgends genutzt.
+- 2026-10-27 **AK6 (Teil 2) rpcd-Speicher mit 1.38.3 / ACL v7**, 14 Proben 21:08–22:13 (alle 5 min,
+  lesend aus `/proc/<pid>/status`), kein rpcd-Neustart: `openwrt` 2484→2496 kB (max 2968 kB während
+  des HA-Neustarts mit bis zu 17 Sessions, danach 4), HWM 2992 unverändert, zweite Hälfte +22 kB/h;
+  `ap2` 2968→2988 kB (zweite Hälfte +9 kB/h); `ap4` 3000→3032 kB (zweite Hälfte +22 kB/h).
+  **Kein Leck**, Werte wie bei B3. AK6 für die APs erfüllt (0 SSH-Anmeldungen je Poll); Gateway offen
+  bis ACL v8 (PR #41) installiert ist.
