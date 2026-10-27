@@ -14,12 +14,18 @@ from homeassistant.helpers import issue_registry as ir
 from .const import DOMAIN
 
 ISSUE_LAN_UNREACHABLE = "lan_unreachable"
+ISSUE_RAM_HIGH = "ram_high"
 ISSUE_ROUTER_UNREACHABLE = "router_unreachable"
 
 
 def router_unreachable_issue_id(entry_id: str) -> str:
     """Return the issue id of the per-router outage issue."""
     return f"{ISSUE_ROUTER_UNREACHABLE}_{entry_id}"
+
+
+def ram_high_issue_id(entry_id: str) -> str:
+    """Return the issue id of the per-router RAM pressure issue."""
+    return f"{ISSUE_RAM_HIGH}_{entry_id}"
 
 
 @callback

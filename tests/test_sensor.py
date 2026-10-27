@@ -137,6 +137,29 @@ class TestSensorEntity:
         sensor = _make_sensor(mock_coordinator, mock_config_entry, "memory_usage")
         assert sensor.native_value == 50.0  # (256-128)/256 * 100
 
+    def test_memory_usage_pressure_attributes(
+        self, mock_coordinator, mock_config_entry
+    ):
+        from custom_components.openwrt_router.coordinator import calc_memory_pressure
+
+        data = mock_coordinator.data
+        data.memory_pressure = calc_memory_pressure(data.memory)
+        sensor = _make_sensor(mock_coordinator, mock_config_entry, "memory_usage")
+        attrs = sensor.extra_state_attributes
+        # available 136 MB of 256 MB → 46.9 % pressure; state formula unchanged
+        assert attrs["available_mb"] == 136.0
+        assert attrs["pressure_pct"] == 46.9
+        assert sensor.native_value == 50.0
+
+    def test_memory_usage_pressure_attributes_without_data(
+        self, mock_coordinator, mock_config_entry
+    ):
+        mock_coordinator.data.memory_pressure = {}
+        sensor = _make_sensor(mock_coordinator, mock_config_entry, "memory_usage")
+        attrs = sensor.extra_state_attributes
+        assert attrs["available_mb"] is None
+        assert attrs["pressure_pct"] is None
+
     def test_memory_free_value(self, mock_coordinator, mock_config_entry):
         sensor = _make_sensor(mock_coordinator, mock_config_entry, "memory_free")
         assert sensor.native_value == 128.0  # 134217728 / 1024 / 1024

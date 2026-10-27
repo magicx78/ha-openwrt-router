@@ -205,6 +205,10 @@
       "title": "No OpenWrt router reachable",
       "description": "All {count} OpenWrt routers ({routers}) have been unreachable from Home Assistant since {since}.\n\nWhen every router fails at the same moment, the cause is almost always between Home Assistant and the LAN (network of the HA host, switch, cabling, VLAN), not in the routers themselves.\n\nThis message disappears automatically as soon as a router answers again."
     },
+    "ram_high": {
+      "title": "High memory usage on OpenWrt router {router}",
+      "description": "The router {router} has been running low on memory since {since}: {pressure} % of its RAM is in use and only {available_mb} MB is still available.\n\nThis message appears when more than 85 % of the RAM is in use or less than 16 MB is available for 15 minutes. If it stays like this, the router starts killing processes or reboots. A typical cause is a process that keeps growing (for example rpcd on older firmware). Check `top` or `ps w` on the router and restart the affected service or the router.\n\nThis message disappears automatically once usage drops below 80 %."
+    },
     "router_unreachable": {
       "title": "OpenWrt router {router} unreachable",
       "description": "The router {router} has not answered since {since} (error type: {error_type}).\n\nCheck power, cabling and the rpcd/uhttpd services on the router.\n\nThis message disappears automatically as soon as the router answers again."
