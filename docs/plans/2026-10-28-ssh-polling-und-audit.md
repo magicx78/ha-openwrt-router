@@ -8,9 +8,9 @@
 
 - **Stand:** 2026-10-27 (abends) · **Phase:** freigegeben, in Umsetzung
 - **Branch/PR:** Teil 1 `fix/ssh-polling` · PR #37 (1.38.3) · Basis: v1.38.2 (`7d77f0f`) — Teil 2 gestapelt: A1 `fix/auth-errors` · PR #38 (1.38.4) auf #37; A2 `fix/hostapd-iface-cache` · PR #39 (1.38.5) auf #38; A11 `fix/topology-lldp-chain` · PR #40 (1.38.6) auf #39
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1 und A2 inkl. Fixes abgeschlossen · **Offen:** Review A11 läuft, Merge und Release #37 → #38 → #39 → #40 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A3–A10, A12–A14
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1, A2 und A11 inkl. Fixes abgeschlossen · **Offen:** Merge und Release #37 → #38 → #39 → #40 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A3–A10, A12–A14
 - **Blocker:** –
-- **Nächster Schritt:** Review A11 abwarten und Befunde beheben; danach Merge-Freigabe #37 → #40 durch den Nutzer, Installation 1.38.x, AK6 messen; dann A4 (WAN-Erkennung, E5)
+- **Nächster Schritt:** Merge-Freigabe #37 → #38 → #39 → #40 durch den Nutzer (jeder Merge ein Release), Installation 1.38.6, AK6 messen (SSH-Logins, rpcd-RSS ≥ 1 h); dann A4 (WAN-Erkennung, E5) auf aktuellem `origin/main`
 
 ## Problem und Zielverhalten
 
@@ -459,3 +459,10 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   bestehende auf Parser-echte Radio-Formen umgestellt; lokal 1365 grün; nach `fix/topology-lldp-chain`
   gemergt. Offen (vorbestehend, A10): `_hostapd_acl_blocked` erkennt die ACL-Sperre nicht
   („access denied“ vs. „rpcd ACL blocks“).
+- 2026-10-27 Review A11 (unabhängig): keine P0. P1: ohne Gateway-LLDP entschied die ID-Sortierung
+  über die Kantenrichtung und damit, welcher AP seine Gateway-Kante verlor → WAN-Port auf genau
+  einer Seite als Richtungshinweis, Unterdrückung nur bei belegter Richtung. P2: Port mit
+  LLDP- und Heuristik-AP → kein Phantom-Switch; zweite Strecke ohne `gateway_port`; `chained_aps`
+  gegen alle Gateways. P3: Docstrings, Testkosmetik, CHANGELOG-Einschränkungen. 5 neue Tests
+  (vorher rot), lokal 1375 grün; PR #40 aktualisiert. Nicht geändert (vorbestehend): Doppel-
+  beobachtung desselben Paars (LAG) kollabiert auf eine Kante.
