@@ -2,6 +2,22 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.28.3] - 2026-10-27
+
+### Fixed
+
+- **Selbst aktivierte Funk-, AP-, Port- und Interface-Sensoren wurden bei
+  jedem Laden wieder deaktiviert.** `_disable_legacy_dynamic_sensors()` war
+  als einmalige Aufräumaktion für v1.17.4 gedacht, lief aber in jedem
+  `async_setup_entry`. Jede aktive Entität mit `_ap_`/`_radio_`/`_iface_`/
+  `_port_`/`_rate` in der Unique-ID stand nach Neustart oder Reload wieder
+  auf `disabled_by: integration` (beobachtet: 41 Sensoren). Die Aufräumaktion
+  ist jetzt eine einmalige Config-Entry-Migration (Minor-Version 1 → 2). Neue
+  Einträge starten direkt bei Minor-Version 2. Ein Eintrag, der schon einmal
+  mit ≥ v1.17.4 lief, erkennt man an mindestens einem von der Integration
+  deaktivierten dynamischen Sensor. Für ihn wird bei der Migration nichts mehr
+  deaktiviert, selbst eingeschaltete Sensoren bleiben also auch beim Update an.
+
 ## [1.28.2] - 2026-09-09
 
 ### Fixed
