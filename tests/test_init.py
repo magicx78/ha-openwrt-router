@@ -701,3 +701,68 @@ class TestChannelPlanWiring:
             for cb in callbacks:
                 cb()
         monitor.unregister.assert_called_once_with("test_entry_id")
+
+
+
+class TestSetupEntryLoginResponseError:
+    """A1 (1.38.4): HTTP/rpcd failures at login retry; they are no credential error."""
+
+    @pytest.mark.asyncio
+    async def test_login_response_error_raises_not_ready(self):
+        from custom_components.openwrt_router.api import OpenWrtResponseError
+
+        hass = _make_hass()
+        entry = _make_entry()
+        mock_api = AsyncMock()
+        mock_api.login = AsyncMock(
+            side_effect=OpenWrtResponseError("Router returned HTTP 500 for session/login")
+        )
+        with patch(
+            "custom_components.openwrt_router.async_get_clientsession",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtAPI",
+            return_value=mock_api,
+        ), pytest.raises(ConfigEntryNotReady):
+            await async_setup_entry(hass, entry)
+
+
+class TestResponseErrorsAfterReview:
+    """Review of A1: OpenWrtResponseError now reaches places that only knew
+    OpenWrtAuthError before."""
+
+    @pytest.mark.asyncio
+    async def test_response_error_during_post_deploy_relogin_is_retried(self):
+        """rpcd restarts after an ACL deploy; uhttpd may answer 5xx meanwhile."""
+        from custom_components.openwrt_router.api import OpenWrtResponseError
+
+        hass = _make_hass()
+        entry = _make_entry()
+        mock_api = AsyncMock()
+        mock_api.login = AsyncMock(
+            side_effect=[None, OpenWrtResponseError("Router returned HTTP 502"), None]
+        )
+        mock_api.reset_acl_blocked = MagicMock()
+        mock_coordinator = MagicMock()
+        mock_coordinator.async_config_entry_first_refresh = AsyncMock()
+        mock_coordinator.router_info = {}
+
+        with patch(
+            "custom_components.openwrt_router.async_get_clientsession",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtAPI",
+            return_value=mock_api,
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtCoordinator",
+            return_value=mock_coordinator,
+        ), patch(
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            AsyncMock(return_value=True),
+        ), patch(
+            "custom_components.openwrt_router._ACL_DEPLOY_GRACE_S", 0
+        ), patch(
+            "custom_components.openwrt_router._ACL_LOGIN_RETRY_DELAY_S", 0
+        ):
+            assert await async_setup_entry(hass, entry) is True
+        assert mock_api.login.await_count == 3

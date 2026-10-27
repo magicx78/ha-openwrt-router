@@ -40,6 +40,7 @@ from .api import (
     OpenWrtAPI,
     OpenWrtAuthError,
     OpenWrtConnectionError,
+    OpenWrtResponseError,
     OpenWrtTimeoutError,
 )
 from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN, PROTOCOL_HTTP
@@ -278,6 +279,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         raise ConfigEntryNotReady(
             f"Cannot reach OpenWrt router at {host}:{port}: {err}"
         ) from err
+    except OpenWrtResponseError as err:
+        # rpcd restarting, uhttpd answering 5xx, HTML instead of JSON: not a
+        # credential problem — retry instead of opening the reauth dialog.
+        raise ConfigEntryNotReady(
+            f"OpenWrt router at {host}:{port} did not answer as rpcd: {err}"
+        ) from err
 
     # Ensure the rpcd ACL is present AND current BEFORE the first data refresh.
     # Running it afterwards (as in ≤v1.23) meant the first refresh cached every
@@ -302,7 +309,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         await asyncio.sleep(_ACL_DEPLOY_GRACE_S)
         try:
             await api.login()
-        except (OpenWrtConnectionError, OpenWrtTimeoutError, OpenWrtAuthError):
+        except (
+            OpenWrtConnectionError,
+            OpenWrtTimeoutError,
+            OpenWrtAuthError,
+            OpenWrtResponseError,  # uhttpd answers 5xx while rpcd restarts
+        ):
             await asyncio.sleep(_ACL_LOGIN_RETRY_DELAY_S)
             try:
                 await api.login()
