@@ -99,6 +99,8 @@ class TestRadiosFromApInterfaces:
             {"ifname": "phy0-ap0", "channel": 0, "frequency": 2412},
             {"ifname": "phy0-ap0", "channel": 6},  # no band at all
             {"ifname": "phy0-ap0", "channel": 6, "band": "unknown"},
+            # 60 GHz (802.11ad) is no 6 GHz radio, even with a band key
+            {"ifname": "phy3-ap0", "channel": 2, "frequency": 60480, "band": "6g"},
             "not-a-dict",
         ],
     )
@@ -114,6 +116,11 @@ class TestRadiosFromApInterfaces:
             "gw", [{"ifname": "default_radio1", "channel": 36, "band": "5g", "phy": "radio1"}]
         )
         assert (radio.band, radio.channel, radio.width) == ("5g", 36, 20)
+
+    @pytest.mark.parametrize(("freq", "band"), [(5925, "6g"), ("5180", "5g")])
+    def test_frequency_edge_and_string(self, freq, band):
+        (radio,) = _radios("gw", [_iface("phy1-ap0", 36, freq=freq)])
+        assert radio.band == band
 
     def test_6ghz_detected_from_frequency(self):
         (radio,) = _radios("gw", [_iface("phy2-ap0", 5, freq=5975)])

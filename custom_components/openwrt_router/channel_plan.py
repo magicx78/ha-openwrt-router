@@ -24,6 +24,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .api import _band_from_frequency
 from .const import (
     RADIO_KEY_BAND,
     RADIO_KEY_CENTER_CHAN1,
@@ -136,11 +137,9 @@ def htmode_width(htmode: Any) -> int:
 
 
 def _band_of(iface: dict[str, Any], channel: int) -> str | None:
-    freq = _as_int(iface.get(RADIO_KEY_FREQUENCY))
-    if freq:
-        if freq < 3000:
-            return BAND_24
-        return BAND_6 if freq >= 5925 else BAND_5
+    band = _band_from_frequency(iface.get(RADIO_KEY_FREQUENCY))
+    if band is not None:
+        return band if band in _BAND_LABELS else None  # 60 GHz: no plan
     band = iface.get(RADIO_KEY_BAND)
     if band not in _BAND_LABELS:
         return None
