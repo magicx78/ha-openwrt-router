@@ -9,12 +9,13 @@
 - **Stand:** 2026-10-27 · **Phase:** freigegeben, in Umsetzung
 - **Branch/PR:** gestapelt auf v1.30.0 (PR #22, enthält #19 und #20)
   - P1 `feature/ram-pressure-repairs` · 1.31.0 · PR #23
-  - P2 `feature/channel-plan` · 1.32.0 · PR folgt
+  - P2 `feature/channel-plan` · 1.32.0 · PR #24
+  - P3 `feature/log-ingest` · 1.33.0 · PR folgt
 - **Erledigt (außerhalb dieses Plans):** Feature 1 (#19), Feature 7 (#20), Feature 10 (#22), rpcd-Leck (#21)
-- **Erledigt:** P1 (F9, PR #23), P2 (F2, lokal grün)
-- **Offen:** P3–P7
+- **Erledigt:** P1 (F9, PR #23), P2 (F2, PR #24), P3 (F6 + ACL v6, lokal grün)
+- **Offen:** P4–P7
 - **Blocker:** —
-- **Nächster Schritt:** P3 (Feature 6, Log-Ingest + ACL v6) auf `feature/log-ingest`
+- **Nächster Schritt:** P4 (Feature 3, DFS) auf `feature/dfs-events`
 
 ## Problem und Zielverhalten
 
@@ -39,7 +40,7 @@ Ziel: Solche Zustände erscheinen künftig in HA als Sensor, Event oder Reparatu
   - `same_channel`, `overlap` (auch 40 MHz: 44/48 sind ein Block; 160 MHz auf 36 umfasst 36–64), `non_standard_24` (außerhalb 1/6/11), `dfs` (Teilkanal in 52–144)
   - zwei SSIDs auf demselben Funkmodul ergeben kein Finding
   - Issue `channel_plan_conflict` erst nach zwei Auswertungen in Folge, ohne `dfs`
-- [ ] AK3 (F6) Log-Abruf alle 2 Polls über ubus `log read` mit Duplikat-Erkennung über die `id`.
+- [x] AK3 (F6) Log-Abruf alle 2 Polls über ubus `log read` mit Duplikat-Erkennung über die `id`.
   - Zeilen, die beim ersten Abruf schon im Puffer stehen, werden nur gezählt, ohne Events.
   - Events `openwrt_router_wifi_event` / `openwrt_router_dhcp_event`, begrenzt auf höchstens 10 pro Abruf und 5 min Sperre je Typ und MAC.
   - Ist die Methode nicht freigegeben, steht `log_status` auf `unavailable` und der Poll schlägt nicht fehl.
@@ -145,6 +146,11 @@ Pro Paket: eigener Branch auf dem vorherigen, eigener PR, CHANGELOG-Eintrag, Min
 - 2026-10-27 – Gestapelte PRs, ein Feature pro PR – wie #19–#22 – vom Nutzer freigegeben (2026-10-27)
 - 2026-10-27 – P1: Das Issue verschwindet erst, wenn der Druck unter 80 % liegt **und** wieder mindestens 16 MB verfügbar sind – sonst würde ein kleiner Router (z. B. 64 MB, 79 %, 13 MB frei) im 15-min-Takt flattern; betrifft nur Router unter 80 MB RAM – Abweichung vom Wortlaut von AK1, vom Coordinator entschieden, im PR zur Bestätigung durch den Nutzer genannt
 - 2026-10-27 – P2: Das Issue `channel_plan_conflict` ist flottenweit (eins für alle Router). „Zwei Auswertungen in Folge“ = zwei aufeinanderfolgende Polls desselben Routers, in denen er an einem Konflikt beteiligt ist; ausgewertet wird nach jedem Poll über einen Coordinator-Listener. Konflikt = alle Befundtypen außer `dfs`, also auch `non_standard_24` (wörtlich nach AK2) – Umsetzungsdetail
+- 2026-10-27 – P3 (nach Review): Status `not_permitted` statt `unavailable` – `unavailable` ist in HA reserviert (Frontend/Automationen zeigen ihn als Ausfall); Abweichung vom Wortlaut von AK3, vom Coordinator entschieden, im PR genannt
+- 2026-10-27 – P3 (nach Review): Zeilenzahl adaptiv (zuerst 250, dann 1,5 × zuletzt gesehene Zeilen + 20, 100–700; nach Lücke 700); Events nach Priorität (PSK/Handshake/DHCP vor Inaktivität); logd-Neustart auch über die Zeit der letzten Zeile erkannt; unplausible Router-Zeit → Empfangszeit; `device_id` im Event fürs Geräte-Logbuch – Umsetzungsdetail
+- 2026-10-27 – P3: Abruf mit `lines: 250` statt 200 – live füllt eine DHCP-DISCOVER-Schleife den Gateway-Puffer mit ~120 Zeilen/min, 250 Zeilen (~40 KB) decken 2 Polls ab; was trotzdem fehlt, zählt `missed_lines` – Umsetzungsdetail
+- 2026-10-27 – P3: Events nur für Problemfälle (`psk_mismatch`, `inactivity_timeout`, `handshake_failed`, DHCP `nak`/`decline`/`no_address`); An-/Abmeldungen und DHCPACK nur zählen (Grundlage für P6) – sonst verdrängen Routine-Events bei 10 pro Abruf die Fehler – Umsetzungsdetail
+- 2026-10-27 – P3: DHCP-Events aus AK5 (c) sind mit P3 umgesetzt, P5 nutzt sie – Umsetzungsdetail
 - 2026-10-27 – P2 (nach Review): Funkmodule mit STA-/Mesh-Uplink (Repeater, 802.11s) sind `backhaul` und bilden nie `same_channel`/`overlap` – sie müssen den Kanal des Partners teilen; Issue wird erst nach zwei konfliktfreien Auswertungen aufgehoben, ein fehlgeschlagener Poll ändert nichts; Funkmodule nach (phy, Band) zusammengefasst; Band aus dem Namen wird über die Kanalnummer korrigiert – Umsetzungsdetail
 - 2026-10-27 – P1 (nach Review): Grenzwerte gegen den ungerundeten Druck; nicht lesbares `available` (oder 0 bei freiem Speicher) → Ersatzformel statt 100 %; eine Lücke > 2 Poll-Intervalle ohne Messwert startet die Haltezeit neu – Umsetzungsdetail
 - 2026-10-27 – P1: Ersatzformel ohne `available` = frei + Puffer + max(Cache − Shared, 0) – tmpfs-Seiten liegen im Cache, sind aber nicht freigebbar – Umsetzungsdetail
@@ -157,3 +163,4 @@ Pro Paket: eigener Branch auf dem vorherigen, eigener PR, CHANGELOG-Eintrag, Min
 - 2026-10-27 `feature/ram-pressure-repairs` (P1) – lokal: ruff 0.17.3 check/format ✓ · pytest grün (Py 3.13, HA 2026.2.3) · Hardware: keine neue Abfrage (Felder aus `system info`, Live-Probe oben) · Review: unabhängig (frischer Agent) – keine P0/P1; P2 (kaputtes `available`, Text zur 16-MB-Bedingung) und P3 (Rundung, Poll-Lücke, Test mit zwei Einträgen) behoben; offen P3: Wanduhr statt monotoner Zeit
 - Doku geprüft: https://contributors.home-assistant.io/core/integrations/repairs/, 2026-10-27, `async_create_issue`/`async_delete_issue` unverändert, keine Deprecation
 - 2026-10-27 `feature/channel-plan` (P2) – Live-Probe lesend `iwinfo info` aller AP-Interfaces auf `openwrt`/`ap2`/`ap4`: `phy`, `channel`, `center_chan1`, `htmode`, `frequency` vorhanden (20 MHz: `center_chan1` = Kanal; HE40 auf 36: 38). Aktueller Plan 1/6/11 und 36@40, 44, 48 → keine Befunde (als Test abgebildet) · lokal: ruff 0.17.3 ✓ · pytest 830 passed · Review: unabhängig – keine P0/P1; P2 (Issue-Flattern bei Fehl-Poll, Mesh/Repeater-Fehlalarm, Band/phy-Zuordnung) und P3 (eigene Funkmodule beim Setup, `band` im Attribut, Zähler beim Unload, Tests 1/5 und 144/149) behoben; offen P3: Sensor rechnet pro Zustandsschreiben zweimal (gering), UCI-Fallback kennt deaktivierte Funkmodule nicht
+- 2026-10-27 `feature/log-ingest` (P3) – Live-Probe lesend `log read` auf `openwrt`/`ap2`/`ap4`: Antwort `{"log":[{msg,id,priority,source,time}]}`, `id` fortlaufend, `time` in ms; Puffer ~620–640 Zeilen, ~166 B/Zeile (200 Zeilen ≈ 32–34 KB); Zeitspanne des Puffers Gateway ~5,5 min (DHCP-DISCOVER/OFFER-Schleife eines Clients + SSH-Logins der Messung), APs 15–36 min. Zeilenformate hostapd/dnsmasq-dhcp/usteer als Tests abgebildet (ohne echte MACs) · lokal: ruff 0.17.3 ✓ · pytest grün · rpcd-RSS bei `log read` über HTTP nicht gemessen (braucht eine Session mit ACL v6, also Deploy) – Lücke · Review: unabhängig (Pflicht) – keine P0/P1; P2 (`unavailable` reserviert, 250 Zeilen auf dem Gateway zu wenig) und P3 (Fehler nach dem Abruf, logd-Neustart, Router-Zeit, Priorität, `--log-dhcp`/DUID, Logbuch-Name/`device_id`) behoben; offen P3: Standard-Timeout 10 s für `log read`

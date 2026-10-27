@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -36,6 +37,8 @@ from .const import (
     ERROR_TYPE_CONNECTION,
     ERROR_TYPE_RESPONSE,
     ERROR_TYPE_TIMEOUT,
+    EVENT_DHCP,
+    EVENT_WIFI,
     FEATURE_AVAILABLE_RADIOS,
     FEATURE_DHCP_LEASES,
     FEATURE_HAS_5GHZ,
@@ -65,6 +68,16 @@ from .const import (
     KEY_WAN_TRAFFIC,
     KEY_WIFI_RADIOS,
     LLDP_STATUS_UNAVAILABLE,
+    LOG_EVENT_COOLDOWN_SECONDS,
+    LOG_EVENTS_PER_FETCH,
+    LOG_READ_INTERVAL_CYCLES,
+    LOG_READ_LINES,
+    LOG_READ_LINES_MAX,
+    LOG_READ_LINES_MIN,
+    LOG_STATUS_ERROR,
+    LOG_STATUS_NOT_PERMITTED,
+    LOG_STATUS_OK,
+    LOG_STATUS_PENDING,
     NOTIFICATION_FAILURE_THRESHOLD,
     RADIO_KEY_BAND,
     RADIO_KEY_IS_GUEST,
@@ -81,6 +94,13 @@ from .issues import (
     async_clear_issue,
     async_raise_issue,
     ram_high_issue_id,
+)
+from .log_parser import (
+    CATEGORY_DHCP,
+    EventLimiter,
+    LogCursor,
+    LogEvent,
+    RollingCounter,
 )
 
 if TYPE_CHECKING:
@@ -217,6 +237,9 @@ class OpenWrtCoordinatorData:
         # absent. Never fails a poll — only lowers topology confidence.
         self.lldp_neighbors: list[dict[str, Any]] = []
         self.lldp_status: str = LLDP_STATUS_UNAVAILABLE
+        # Router log ingest (F6): status and counters, see _ingest_log()
+        self.log_status: str = LOG_STATUS_PENDING
+        self.log_stats: dict[str, Any] = {}
         # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
         self.vlans_stale: bool = False
         # Connectivity health tracking (used by binary_sensor / sensor platform)
@@ -257,6 +280,8 @@ class OpenWrtCoordinatorData:
             "arp_table": self.arp_table,
             KEY_LLDP_NEIGHBORS: self.lldp_neighbors,
             KEY_LLDP_STATUS: self.lldp_status,
+            "log_status": self.log_status,
+            "log_stats": self.log_stats,
         }
 
 
@@ -329,6 +354,23 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._mem_high_since: datetime | None = None
         self._mem_last_check: datetime | None = None
         self._ram_issue_active: bool = False
+        # Router log ingest (F6): position in the logd ring buffer, event
+        # rate limit and 24 h counters survive between polls.
+        self._log_cursor = LogCursor()
+        self._log_limiter = EventLimiter(
+            LOG_EVENTS_PER_FETCH, LOG_EVENT_COOLDOWN_SECONDS * 1000
+        )
+        self._log_counter = RollingCounter(24 * 3600 * 1000)
+        self._log_status: str = LOG_STATUS_PENDING
+        self._log_lines: int = LOG_READ_LINES
+        self._device_id: str | None = None
+        self._log_totals: dict[str, int] = {
+            "lines_processed": 0,
+            "baseline_lines": 0,
+            "missed_lines": 0,
+            "events_fired": 0,
+            "events_suppressed": 0,
+        }
         # Stale-data cache: letzte bekannte Werte für VLAN-Badges bei Offline-Router
         self._last_known_network_interfaces: list[dict[str, Any]] = []
         self._last_known_port_vlan_map: dict[str, list[int]] = {}
@@ -604,6 +646,19 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 data.lldp_neighbors = []
                 data.lldp_status = LLDP_STATUS_UNAVAILABLE
 
+            # Router log (F6): every LOG_READ_INTERVAL_CYCLES polls, skipped on
+            # the setup poll. Never fails the poll.
+            if (
+                self._board_poll_count > 1
+                and self._board_poll_count % LOG_READ_INTERVAL_CYCLES == 0
+            ):
+                await self._ingest_log(data)
+            data.log_status = self._log_status
+            data.log_stats = {
+                **self._log_totals,
+                "counts_24h": self._log_counter.counts(int(time.time() * 1000)),
+            }
+
             # --- CPU history (30s resolution, 1h rolling window) ---
             import time as _time
 
@@ -848,6 +903,120 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             self._outage_tracker.report_down(
                 self._entry.entry_id, error_type, self._failure_since
             )
+
+    # ------------------------------------------------------------------
+    # Router log
+    # ------------------------------------------------------------------
+
+    async def _ingest_log(self, data: OpenWrtCoordinatorData) -> None:
+        """Fetch new logd lines, count them and fire Wi-Fi/DHCP events.
+
+        Lines already in the buffer on the first fetch (or after a logd
+        restart) are only counted. Without ``log read`` permission the status
+        becomes ``not_permitted``; no error ever fails the poll.
+        """
+        try:
+            entries = await self.api.get_log_entries(self._log_lines)
+        except OpenWrtMethodNotFoundError as err:
+            if self._log_status != LOG_STATUS_NOT_PERMITTED:
+                _LOGGER.info(
+                    "%s: router log not readable (rpcd ACL older than v6 or no "
+                    "logd): %s",
+                    self.name,
+                    err,
+                )
+            self._log_status = LOG_STATUS_NOT_PERMITTED
+            return
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("%s: router log fetch failed: %s", self.name, err)
+            self._log_status = LOG_STATUS_ERROR
+            return
+
+        try:
+            self._process_log(entries, data)
+        except Exception:
+            _LOGGER.debug("%s: router log processing failed", self.name, exc_info=True)
+            self._log_status = LOG_STATUS_ERROR
+            return
+        self._log_status = LOG_STATUS_OK
+
+    def _process_log(
+        self, entries: list[dict[str, Any]], data: OpenWrtCoordinatorData
+    ) -> None:
+        result = self._log_cursor.ingest(entries)
+        now_ms = int(time.time() * 1000)
+        for event in result.events:
+            # Router time only when plausible: a dumb AP without NTP sync
+            # would otherwise put lines outside the 24 h window.
+            ts = event.time_ms
+            if not now_ms - 24 * 3600 * 1000 <= ts <= now_ms + 300_000:
+                ts = now_ms
+            self._log_counter.add(ts, event.key)
+        self._log_totals["lines_processed"] += result.new_lines
+        self._log_totals["missed_lines"] += result.missed
+        if result.missed:
+            self._log_lines = LOG_READ_LINES_MAX
+        elif not result.baseline:
+            self._log_lines = min(
+                max(int(result.new_lines * 1.5) + 20, LOG_READ_LINES_MIN),
+                LOG_READ_LINES_MAX,
+            )
+        if result.baseline:
+            self._log_totals["baseline_lines"] += result.new_lines
+            return
+        fire, suppressed = self._log_limiter.select(result.events, now_ms)
+        self._log_totals["events_suppressed"] += suppressed
+        for event in fire:
+            self._fire_log_event(event, data)
+        self._log_totals["events_fired"] += len(fire)
+
+    def _router_device_id(self) -> str | None:
+        """Device registry id of this router (logbook filters by device_id)."""
+        if self._device_id is None and self._entry is not None:
+            try:
+                device = dr.async_get(self.hass).async_get_device(
+                    identifiers={(DOMAIN, self._entry.entry_id)}
+                )
+            except Exception:  # noqa: BLE001
+                device = None
+            self._device_id = device.id if device is not None else None
+        return self._device_id
+
+    def _fire_log_event(self, event: LogEvent, data: OpenWrtCoordinatorData) -> None:
+        """Fire ``openwrt_router_wifi_event`` / ``openwrt_router_dhcp_event``."""
+        hostname = None
+        if event.mac:
+            hostname = (data.dhcp_leases.get(event.mac) or {}).get("hostname")
+            if not hostname:
+                client = next(
+                    (
+                        c
+                        for c in data.clients
+                        if str(c.get(CLIENT_KEY_MAC, "")).upper() == event.mac
+                    ),
+                    None,
+                )
+                hostname = (client or {}).get("hostname")
+        payload: dict[str, Any] = {
+            "entry_id": self._entry.entry_id if self._entry else None,
+            "device_id": self._router_device_id(),
+            "router": self._entry.title if self._entry else self.name,
+            "type": event.kind,
+            "mac": event.mac,
+            "hostname": hostname or None,
+            "interface": event.interface,
+            "time": (
+                datetime.fromtimestamp(event.time_ms / 1000, UTC).isoformat()
+                if event.time_ms
+                else None
+            ),
+            "message": event.message,
+        }
+        if event.category == CATEGORY_DHCP:
+            payload["ip"] = event.ip
+            self.hass.bus.async_fire(EVENT_DHCP, payload)
+        else:
+            self.hass.bus.async_fire(EVENT_WIFI, payload)
 
     # ------------------------------------------------------------------
     # RAM pressure
