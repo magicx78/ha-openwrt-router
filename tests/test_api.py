@@ -899,9 +899,8 @@ class TestRootAccountWarning:
     """
 
     @pytest.fixture(autouse=True)
-    def _fresh_process(self, monkeypatch, caplog):
-        # The latch lives for the whole process; start without warned hosts.
-        monkeypatch.setattr(api_module, "_ROOT_WARNED_HOSTS", set(), raising=False)
+    def _fresh_process(self, caplog):
+        # tests/conftest.py resets the process-wide latch before every test.
         caplog.set_level(logging.DEBUG, logger=api_module.__name__)
 
     @pytest.mark.asyncio
@@ -1334,6 +1333,29 @@ class TestNetworkReloadWarning:
             r.levelno == logging.DEBUG and "network.reload" in r.getMessage()
             for r in caplog.records
         )
+
+    @pytest.mark.parametrize(
+        "reload_error",
+        [
+            OpenWrtTimeoutError("network/reload timed out"),
+            OpenWrtConnectionError("connection dropped"),
+            OpenWrtAuthError("auth backoff"),
+            OpenWrtResponseError("bad response"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_reload_failure_after_commit_is_not_a_commit_failure(
+        self, mock_api, caplog, reload_error
+    ):
+        """The commit applied the change; a failing reload must not undo success."""
+        caplog.set_level(logging.DEBUG, logger=api_module.__name__)
+        mock_api._call = self._ubus(reload_error)
+
+        assert await mock_api.set_wifi_state("guest_radio0", enabled=True) is True
+
+        calls = [c.args[:2] for c in mock_api._call.await_args_list]
+        assert calls == [("uci", "set"), ("uci", "commit"), ("network", "reload")]
+        assert self._warnings(caplog) == []
 
     @pytest.mark.asyncio
     async def test_reload_button_still_warns(self, mock_api, caplog):

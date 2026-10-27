@@ -1232,7 +1232,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
 
         Looked up in this entry's own devices via
         ``async_get_device_by_identifier`` (HA 2026.8+). Older cores (floor
-        2026.2) only have ``async_get_device``, deprecated since 2026.10 and
+        2026.2) only have ``async_get_device``, deprecated since 2026.9 and
         removed in 2027.8.
         """
         if self._device_id is None and self._entry is not None:
@@ -1246,7 +1246,10 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                     device = get_by_identifier(identifier, self._entry.entry_id)
                 else:
                     device = dev_reg.async_get_device(identifiers={identifier})
-            except Exception:  # noqa: BLE001
+            except Exception:
+                _LOGGER.debug(
+                    "%s: router device lookup failed", self.name, exc_info=True
+                )
                 device = None
             self._device_id = device.id if device is not None else None
         return self._device_id
