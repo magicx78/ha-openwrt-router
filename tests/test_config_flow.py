@@ -959,3 +959,28 @@ class TestReauthRpcdSetupRouting:
             result = await flow.async_step_reauth({})
         assert result["type"] == "form"
         assert result["step_id"] == "reauth_rpcd_setup"
+
+
+class TestReauthStepsWithResponseError:
+    """Review of A1: a router that answers but not as rpcd (HTTP 5xx while rpcd
+    restarts) must not end in "unknown error" with a traceback."""
+
+    @pytest.mark.asyncio
+    async def test_confirm_step_shows_cannot_connect(self):
+        flow, _entry = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(
+            flow, "_validate_input", side_effect=OpenWrtResponseError("HTTP 502")
+        ):
+            result = await flow.async_step_reauth_confirm(user_input={"password": "new"})
+        assert result["type"] == "form"
+        assert result["errors"]["base"] == ERROR_CANNOT_CONNECT
+
+    @pytest.mark.asyncio
+    async def test_cannot_connect_retry_routes_to_rpcd_setup(self):
+        flow, _entry = _make_reauth_flow(_REAUTH_DATA)
+        with patch.object(
+            flow, "_validate_input", side_effect=OpenWrtResponseError("HTTP 502")
+        ):
+            result = await flow.async_step_reauth_cannot_connect(user_input={})
+        assert result["type"] == "form"
+        assert result["step_id"] == "reauth_rpcd_setup"

@@ -37,6 +37,12 @@ All notable changes to the OpenWrt Router integration will be documented in this
 - **Verbindungsprüfung hinterlässt keine rpcd-Session mehr.** Jede Prüfung
   (Einrichtung, Reauth, jeder „Erneut versuchen“-Klick) ließ eine Session mit
   600 s Laufzeit auf dem Router zurück; sie wird jetzt sofort beendet.
+- Dazu passend: Der Re-Login nach einem ACL-Deploy wiederholt auch bei einer
+  HTTP-Fehlerantwort (rpcd startet gerade neu) statt die Einrichtung
+  abzubrechen; im Reauth-Dialog führt eine solche Antwort beim neuen Passwort
+  zu „Keine Verbindung“ bzw. zur rpcd-Einrichtungshilfe statt zu „Unbekannter
+  Fehler“. Der Hinweis, dass `system/board` nicht lesbar ist, erscheint nur
+  noch einmal je Router.
 
 ## [1.38.3] - 2026-10-27
 
