@@ -2,11 +2,11 @@
 
 ## Status
 
-- **Stand:** 2026-10-27 · **Phase:** zur Freigabe
+- **Stand:** 2026-10-27 · **Phase:** freigegeben, in Umsetzung
 - **Branch/PR:** `fix/post-1.37-findings` · PR #— · Basis: v1.37.4 (`c5a25f9`)
-- **Erledigt:** – · **Offen:** P1–P6, B1–B3
-- **Blocker:** Entscheidungen E1–E3 (siehe unten)
-- **Nächster Schritt:** Freigabe des Plans und der Entscheidungen E1–E3
+- **Erledigt:** B1 · **Offen:** P1–P6, B2, B3
+- **Blocker:** –
+- **Nächster Schritt:** P1+P2+P6 als PR A (1.37.5)
 
 ## Problem und Zielverhalten
 
@@ -46,12 +46,13 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 10. **Aufräumen:** `switch._format_band` mit toten Einträgen `2g`/`60g`; `channel_plan`/`client_stability` importieren den privaten Helfer `api._band_from_frequency`. **Verifiziert im Code**.
 11. **Release/Doku:** Release-Texte enthalten nur „siehe CHANGELOG.md“; `PROGRESS.md`/`TODO.md` stehen auf 1.28.0; die GitHub-Repo-Beschreibung (von HACS angezeigt) nennt „v1.4.0“. **Verifiziert**.
 12. **rpcd-Speicher mit ACL v6:** Messung läuft bis etwa 17:15. Bisher APs flach (`ap2` 2972→3000 kB in 15 min), Gateway schwankt 2400–2860 kB. **Annahme:** kein neues Leck; Auswertung nach Messende.
+13. **Wiederhergestellte Device-Tracker mit altem AP-Namen:** zwei `device_tracker.secureap_ap3_*` gehören inzwischen zu den Einträgen von Gateway bzw. `ap4`, stehen auf `unavailable` (`restored: true`). Kosmetisch, Ursache vermutlich der Claim-Wechsel im Device-Tracker. **Verifiziert** (Template), niedrige Priorität.
 
-## Entscheidungen (offen, vor der Umsetzung)
+## Entscheidungen
 
-- **E1 – Die drei Config-Entries ohne Router:** entfernen (Empfehlung, falls die Geräte nicht zurückkommen) · deaktivieren · lassen. Das ist eine HA-Änderung, kein Code.
-- **E2 – Quelle der Kernzahl für AK4:** (A) ACL v7 mit Lesezugriff auf `/proc/cpuinfo` (einmal je Setup, rpcd-Neustart pro Router beim Deploy) · (B) SSH `nproc` einmal je Setup, ohne SSH Rückfall auf 1 Kern · (C) nur die Drosselschwelle anheben, Sensor unverändert. **Empfehlung A**, gebündelt mit `network: reload` in derselben ACL v7 (behebt Befund 5 an der Wurzel). Folge: Die Sensorwerte halbieren sich auf 2-Kern-Routern (Bruch in der Historie).
-- **E3 – WAN-Sensoren auf Dumb-APs:** nicht mehr anlegen und vorhandene aus der Registry entfernen · nur standardmäßig deaktivieren (Empfehlung, kein Registry-Eingriff in bestehende Entities).
+- 2026-10-27 – **E1:** Die drei Config-Entries ohne Router werden entfernt – die Geräte sind nicht im Netz und erzeugen nur Retries und Log-Lärm – Nutzer. Umgesetzt (B1), keine Automation, kein Skript, keine Szene und kein Helfer verwies darauf.
+- 2026-10-27 – **E2:** Kernzahl über ACL v7 (`/proc/cpuinfo` lesen, einmal je Setup), gebündelt mit `network: reload` – behebt Befund 4 und 5 an der Wurzel; rpcd startet beim Deploy einmal pro Router neu, CPU-Werte halbieren sich auf 2-Kern-Routern – Nutzer.
+- 2026-10-27 – **E3:** WAN-Sensoren auf Routern ohne WAN standardmäßig deaktiviert anlegen, bestehende Entities bleiben (kein Registry-Eingriff) – Nutzer.
 
 ## Arbeitspakete
 
@@ -62,7 +63,7 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 | P3 | OpenWrt/HA | CPU-Last pro Kern + Drosselschwelle; bei E2=A ACL v7 (`/proc/cpuinfo`, `network: reload`) | `api.py`, `coordinator.py`, `acl_provisioning.py`, `scripts/ha-openwrt-router.json`, Tests | E2 | M | AK4 (+AK2 an der Wurzel); Risikoauslöser ACL → Review Pflicht |
 | P4 | OpenWrt | Kanal aus `config`-Block; SSH-Fallback füllt `ap_interfaces`; UCI-Regex für anonyme Sektionen und `'\''` | `api.py`, `tests/test_api.py` | – | M | AK5, AK7; SSH-Teil nur mit Testdaten (Lücke benannt) |
 | P5 | HA/Frontend | WAN-Sensoren nur bei Routern mit WAN (je E3); Panel blendet Hersteller bei `random_mac` aus; Bundle neu bauen | `sensor.py`, `frontend/topology/src/api.ts`, `frontend/dist/*` | E3 | M | AK6, AK8; Panel visuell geprüft |
-| P6 | Aufräumen | `switch._format_band` bereinigen; Bandhelfer in eigenes Modul `wifi_band.py` | `switch.py`, `wifi_band.py`, `api.py`, `channel_plan.py`, `client_stability.py` | P4 | S | keine Verhaltensänderung, Tests grün |
+| P6 | Aufräumen | `switch._format_band` bereinigen; Bandhelfer in eigenes Modul `wifi_band.py`; Ursache von Befund 13 klären (nur Analyse, Registry-Eingriff nur mit OK) | `switch.py`, `wifi_band.py`, `api.py`, `channel_plan.py`, `client_stability.py` | P4 | S | keine Verhaltensänderung, Tests grün |
 | B1 | Betrieb | E1 umsetzen (Config-Entries entfernen oder deaktivieren) | HA | E1 | S | keine `setup_retry`-Einträge mehr |
 | B2 | Doku/Release | Release-Workflow übernimmt den CHANGELOG-Abschnitt; `PROGRESS.md`/`TODO.md` nachziehen; Repo-Beschreibung ohne Versionsnummer (nur mit OK) | `.github/workflows/release.yaml`, `PROGRESS.md`, `TODO.md` | – | S | nächstes Release zeigt die Änderungen in HACS |
 | B3 | Validierung | rpcd-Messung nach 17:15 auswerten | – | – | S | Ergebnis im Prüfprotokoll |
@@ -86,4 +87,5 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 
 ## Prüfprotokoll
 
-- 2026-10-27 v1.37.4 in HA – Integration geladen (3/3 erreichbare Router), 238 Entities, 0 `unavailable`, keine Repairs der Integration; ACL v6 auf `openwrt`/`ap2`/`ap4` aktiv; Befunde 1–12 wie oben.
+- 2026-10-27 v1.37.4 in HA – Integration geladen (3/3 erreichbare Router), 238 Entities, 0 `unavailable`, keine Repairs der Integration; ACL v6 auf `openwrt`/`ap2`/`ap4` aktiv; Befunde 1–13 wie oben.
+- 2026-10-27 B1 – drei Config-Entries entfernt; danach 3 Einträge, alle `loaded`. Sicherung vorher: HA-Backup vom selben Tag, 13:46.
