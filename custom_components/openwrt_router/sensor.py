@@ -33,11 +33,18 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import OpenWrtConfigEntry
+from .channel_plan import analyze
 from .const import (
     CLIENT_KEY_RADIO,
+    CONF_EXTENDED_WIFI_SENSORS,
     CONF_PROTOCOL,
+    DEFAULT_EXTENDED_WIFI_SENSORS,
     DEFAULT_PROTOCOL,
     DOMAIN,
+    LOG_STATUS_ERROR,
+    LOG_STATUS_NOT_PERMITTED,
+    LOG_STATUS_OK,
+    LOG_STATUS_PENDING,
     RADIO_KEY_BAND,
     RADIO_KEY_BSSID,
     RADIO_KEY_FREQUENCY,
@@ -46,15 +53,19 @@ from .const import (
     RADIO_KEY_IFNAME,
     RADIO_KEY_SSID,
     SUFFIX_ACTIVE_CONNECTIONS,
+    SUFFIX_CHANNEL_PLAN,
     SUFFIX_CLIENT_COUNT,
     SUFFIX_CPU_LOAD,
     SUFFIX_CPU_LOAD_5MIN,
     SUFFIX_CPU_LOAD_15MIN,
+    SUFFIX_DFS_EVENTS_24H,
+    SUFFIX_DHCP_POOL,
     SUFFIX_DISK_FREE,
     SUFFIX_DISK_TOTAL,
     SUFFIX_DISK_USAGE,
     SUFFIX_DISK_USED,
     SUFFIX_FIRMWARE,
+    SUFFIX_LOG_STATUS,
     SUFFIX_MEMORY_BUFFERED,
     SUFFIX_MEMORY_CACHED,
     SUFFIX_MEMORY_FREE,
@@ -68,6 +79,7 @@ from .const import (
     SUFFIX_TMPFS_TOTAL,
     SUFFIX_TMPFS_USAGE,
     SUFFIX_TMPFS_USED,
+    SUFFIX_UNSTABLE_CLIENTS,
     SUFFIX_UPDATE_STATUS,
     SUFFIX_UPTIME,
     SUFFIX_WAN_IP,
@@ -77,6 +89,7 @@ from .const import (
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
+from .fleet import collect_radios, radios_of
 from .topology_entities import setup_topology_entities
 
 _LOGGER = logging.getLogger(__name__)
@@ -166,6 +179,10 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
                 / 1024,
                 1,
             ),
+            # Pressure = 1 - available/total (basis of the ram_high issue);
+            # the state above keeps its historic (total - free) formula.
+            "available_mb": data.memory_pressure.get("available_mb"),
+            "pressure_pct": data.memory_pressure.get("pressure_pct"),
         },
     ),
     OpenWrtSensorEntityDescription(
@@ -383,6 +400,49 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         icon="mdi:lan-connect",
         value_fn=lambda data: data.active_connections,
     ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_LOG_STATUS,
+        translation_key="log_status",
+        device_class=SensorDeviceClass.ENUM,
+        options=[
+            LOG_STATUS_PENDING,
+            LOG_STATUS_OK,
+            LOG_STATUS_NOT_PERMITTED,
+            LOG_STATUS_ERROR,
+        ],
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:text-box-search-outline",
+        value_fn=lambda data: data.log_status,
+        extra_attrs_fn=lambda data: data.log_stats,
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_DFS_EVENTS_24H,
+        translation_key="dfs_events_24h",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:radar",
+        value_fn=lambda data: data.dfs.get("events_24h", 0),
+        extra_attrs_fn=lambda data: {
+            "by_type": data.dfs.get("by_type", {}),
+            "last_event": data.dfs.get("last_event"),
+        },
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_UNSTABLE_CLIENTS,
+        translation_key="unstable_clients",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:wifi-alert",
+        # Unknown while the router log cannot be read (no reconnect data)
+        value_fn=lambda data: (
+            data.client_stability.get("unstable_count", 0)
+            if data.log_status not in (LOG_STATUS_PENDING, LOG_STATUS_NOT_PERMITTED)
+            else None
+        ),
+        extra_attrs_fn=lambda data: {
+            "top": data.client_stability.get("unstable", []),
+        },
+    ),
 )
 
 
@@ -411,6 +471,7 @@ async def async_setup_entry(
         for description in SENSOR_DESCRIPTIONS
     ]
     static_entities.append(OpenWrtRouterStatusSensor(coordinator, entry))
+    static_entities.append(OpenWrtChannelPlanSensor(coordinator, entry))
     async_add_entities(static_entities)
 
     # Track which dynamic entities have already been created
@@ -418,6 +479,7 @@ async def async_setup_entry(
     tracked_ports: set[str] = set()
     tracked_radios: set[str] = set()
     tracked_ap_metrics: set[str] = set()  # "ifname_metric"
+    tracked_pools: set[str] = set()
 
     # AP metrics always created when available; optional ones only if value non-None
     _AP_METRICS_ALWAYS = ("channel", "mode", "quality", "ap_clients")
@@ -511,6 +573,14 @@ async def async_setup_entry(
                     OpenWrtAPInterfaceSensor(coordinator, entry, ifname, metric)
                 )
                 _LOGGER.debug("Adding AP interface sensor %s for %s", metric, ifname)
+
+        for pool in coordinator.data.dhcp_pools:
+            name = pool.get("name")
+            if not name or name in tracked_pools:
+                continue
+            tracked_pools.add(name)
+            new_entities.append(OpenWrtDhcpPoolSensor(coordinator, entry, name))
+            _LOGGER.debug("Adding DHCP pool sensor for %s", name)
 
         if new_entities:
             async_add_entities(new_entities)
@@ -772,6 +842,9 @@ class OpenWrtRadioSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
         self._metric = metric
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_radio_{ifname}_{metric}"
+        self._attr_entity_registry_enabled_default = bool(
+            entry.options.get(CONF_EXTENDED_WIFI_SENSORS, DEFAULT_EXTENDED_WIFI_SENSORS)
+        )
         self._attr_translation_key = f"radio_{metric}"
         self._attr_icon = (
             "mdi:wifi-strength-2" if metric == "signal" else "mdi:sine-wave"
@@ -867,6 +940,9 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
         self._metric = metric
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_ap_{ifname}_{metric}"
+        self._attr_entity_registry_enabled_default = bool(
+            entry.options.get(CONF_EXTENDED_WIFI_SENSORS, DEFAULT_EXTENDED_WIFI_SENSORS)
+        )
 
         cfg = self._METRIC_CONFIG.get(metric, ("mdi:wifi", None, None, None))
         self._attr_icon = cfg[0]
@@ -1022,6 +1098,9 @@ class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
         self._metric = metric
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_port_{port_name}_{metric}"
+        self._attr_entity_registry_enabled_default = bool(
+            entry.options.get(CONF_EXTENDED_WIFI_SENSORS, DEFAULT_EXTENDED_WIFI_SENSORS)
+        )
 
         cfg = self._METRIC_CONFIG.get(metric, ("mdi:ethernet", None, None, None, None))
         self._attr_icon = cfg[0]
@@ -1196,6 +1275,136 @@ class OpenWrtRouterStatusSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnt
             else None,
             "consecutive_failures": data.consecutive_failures if data else 0,
             "error_type": data.error_type if data else None,
+        }
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        router_info = self.coordinator.router_info
+        release = router_info.get("release", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=router_info.get("hostname") or self._entry.title,
+            manufacturer="OpenWrt",
+            model=router_info.get("model", "OpenWrt Router"),
+            sw_version=release.get("version", ""),
+            configuration_url=(
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
+            ),
+        )
+
+
+class OpenWrtChannelPlanSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
+    """Diagnostic sensor: Wi-Fi channel plan findings involving this router.
+
+    State = number of findings (same_channel, overlap, non_standard_24, dfs)
+    in which a radio of this router takes part. Computed on read across all
+    reachable routers (fleet.collect_radios), not in the poll; the
+    ``findings`` attribute lists them, ``radios`` shows this router's radios.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "channel_plan"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:wifi-cog"
+
+    def __init__(
+        self, coordinator: OpenWrtCoordinator, entry: OpenWrtConfigEntry
+    ) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_{SUFFIX_CHANNEL_PLAN}"
+        self._entry = entry
+
+    def _evaluate(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return (own findings without entry_ids, own radios)."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return [], []
+        entry_id = self._entry.entry_id
+        # Own radios straight from this coordinator: during setup the entry
+        # is not LOADED yet and collect_radios would miss it.
+        radios = [r for r in collect_radios(hass) if r.entry_id != entry_id]
+        radios += radios_of(entry_id, self._entry.title, self.coordinator)
+        findings = [
+            {key: value for key, value in finding.items() if key != "entry_ids"}
+            for finding in analyze(radios)
+            if entry_id in finding["entry_ids"]
+        ]
+        own = [r.as_attr() for r in radios if r.entry_id == entry_id]
+        return findings, own
+
+    @property
+    def native_value(self) -> int:
+        return len(self._evaluate()[0])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        findings, radios = self._evaluate()
+        return {"findings": findings, "radios": radios}
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        router_info = self.coordinator.router_info
+        release = router_info.get("release", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=router_info.get("hostname") or self._entry.title,
+            manufacturer="OpenWrt",
+            model=router_info.get("model", "OpenWrt Router"),
+            sw_version=release.get("version", ""),
+            configuration_url=(
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
+            ),
+        )
+
+
+class OpenWrtDhcpPoolSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
+    """Share of a DHCP pool's address range covered by leases (F5).
+
+    One per active pool (uci ``config dhcp``); unavailable while the pool is
+    not reported (pool removed, interface without IPv4).
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "dhcp_pool"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:ip-network"
+
+    def __init__(
+        self, coordinator: OpenWrtCoordinator, entry: OpenWrtConfigEntry, pool: str
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._pool = pool
+        self._attr_unique_id = (
+            f"{entry.entry_id}_{SUFFIX_DHCP_POOL}-{pool.replace('_', '-')}"
+        )
+        self._attr_translation_placeholders = {"pool": pool}
+
+    def _usage(self) -> dict[str, Any] | None:
+        data = self.coordinator.data
+        if data is None:
+            return None
+        return next((p for p in data.dhcp_pools if p.get("name") == self._pool), None)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._usage() is not None
+
+    @property
+    def native_value(self) -> float | None:
+        usage = self._usage()
+        return usage["usage_pct"] if usage else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        usage = self._usage() or {}
+        return {
+            "interface": usage.get("interface"),
+            "leases": usage.get("leases"),
+            "size": usage.get("size"),
         }
 
     @property

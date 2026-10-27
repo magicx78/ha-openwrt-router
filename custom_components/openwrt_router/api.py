@@ -27,6 +27,7 @@ from .const import (
     CLIENT_KEY_IP,
     CLIENT_KEY_MAC,
     CLIENT_KEY_RADIO,
+    CLIENT_KEY_RANDOM_MAC,
     CLIENT_KEY_SIGNAL,
     CLIENT_KEY_SOURCE,
     CLIENT_KEY_SSID,
@@ -62,6 +63,7 @@ from .const import (
     RADIO_KEY_BAND,
     RADIO_KEY_BITRATE,
     RADIO_KEY_BSSID,
+    RADIO_KEY_CENTER_CHAN1,
     RADIO_KEY_CHANNEL,
     RADIO_KEY_ENABLED,
     RADIO_KEY_FREQUENCY,
@@ -71,6 +73,7 @@ from .const import (
     RADIO_KEY_IS_GUEST,
     RADIO_KEY_MODE,
     RADIO_KEY_NAME,
+    RADIO_KEY_PHY,
     RADIO_KEY_SSID,
     RADIO_KEY_TXPOWER,
     RADIO_KEY_UCI_SECTION,
@@ -87,6 +90,8 @@ from .const import (
     UBUS_IWINFO_ASSOCLIST,
     UBUS_IWINFO_INFO,
     UBUS_IWINFO_OBJECT,
+    UBUS_LOG_OBJECT,
+    UBUS_LOG_READ,
     UBUS_NETWORK_DUMP,
     UBUS_NETWORK_OBJECT,
     UBUS_NETWORK_RELOAD,
@@ -102,10 +107,13 @@ from .const import (
     UBUS_UCI_GET,
     UBUS_UCI_OBJECT,
     UBUS_UCI_SET,
+    UBUS_USTEER_GET_CLIENTS,
+    UBUS_USTEER_OBJECT,
     UBUS_WIRELESS_OBJECT,
     UBUS_WIRELESS_STATUS,
     WAN_INTERFACE_NAMES,
 )
+from .mac_utils import is_locally_administered
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1239,6 +1247,42 @@ class OpenWrtAPI:
             "memory": result.get("memory", {}),
         }
 
+    async def get_log_entries(self, lines: int) -> list[dict[str, Any]]:
+        """Return the newest ``lines`` entries of the logd ring buffer.
+
+        Calls:
+            log read {"lines": N, "stream": false} (ACL v6). Over HTTP only
+            ``stream: false`` returns a response.
+
+        Returns:
+            List of ``{msg, id, priority, source, time}`` dicts (unvalidated
+            router output; see log_parser.py).
+
+        Raises:
+            OpenWrtMethodNotFoundError: ``log read`` not permitted (ACL < v6)
+                or logd missing. No SSH fallback: the log is optional.
+            OpenWrtResponseError: The answer is not a ``{"log": [...]}`` dict.
+        """
+        result = await self._call(
+            UBUS_LOG_OBJECT, UBUS_LOG_READ, {"lines": lines, "stream": False}
+        )
+        entries = result.get("log") if isinstance(result, dict) else None
+        if not isinstance(entries, list):
+            raise OpenWrtResponseError("log read: unexpected response shape")
+        return entries
+
+    async def get_usteer_clients(self) -> dict[str, Any]:
+        """Return usteer's client map (all usteer nodes, see client_stability).
+
+        Calls:
+            usteer get_clients (ACL v6). ~40 KB with a few dozen clients.
+
+        Raises:
+            OpenWrtMethodNotFoundError: usteer not running or not permitted.
+        """
+        result = await self._call(UBUS_USTEER_OBJECT, UBUS_USTEER_GET_CLIENTS, {})
+        return result if isinstance(result, dict) else {}
+
     async def get_wan_status(self) -> dict[str, Any]:
         """Return WAN interface connection status + RX/TX bytes from /sys/class/net.
 
@@ -1508,6 +1552,8 @@ class OpenWrtAPI:
                     RADIO_KEY_BITRATE: info.get("bitrate"),
                     RADIO_KEY_HWMODE: info.get("hwmode"),
                     RADIO_KEY_HTMODE: info.get("htmode"),
+                    RADIO_KEY_PHY: info.get("phy"),
+                    RADIO_KEY_CENTER_CHAN1: info.get("center_chan1"),
                     "signal": info.get("signal"),
                     "noise": info.get("noise"),
                     "quality": info.get("quality"),
@@ -1579,6 +1625,8 @@ class OpenWrtAPI:
                         RADIO_KEY_HWMODE: device_data.get("hwmode")
                         or device_data.get("type"),
                         RADIO_KEY_HTMODE: device_data.get("htmode"),
+                        RADIO_KEY_PHY: device_name or None,
+                        RADIO_KEY_CENTER_CHAN1: None,
                         "signal": None,
                         "noise": None,
                         "quality": None,
@@ -1850,6 +1898,7 @@ class OpenWrtAPI:
                     hostapd_ifnames, ifname_to_ssid, leases
                 )
                 if ssh_clients is not None:
+                    self._enrich_client_metadata(ssh_clients)
                     return ssh_clients
             except Exception as ssh_err:  # noqa: BLE001
                 _LOGGER.debug("SSH client fallback failed: %s", ssh_err)
@@ -1936,7 +1985,12 @@ class OpenWrtAPI:
         for client in clients:
             client.setdefault(CLIENT_KEY_CONNECTION_TYPE, CONNECTION_TYPE_WIRELESS)
             mac = client.get(CLIENT_KEY_MAC, "")
-            if CLIENT_KEY_VENDOR not in client:
+            random_mac = is_locally_administered(mac)
+            client[CLIENT_KEY_RANDOM_MAC] = random_mac
+            if random_mac:
+                # A randomised MAC has no manufacturer; any OUI hit is wrong.
+                client[CLIENT_KEY_VENDOR] = None
+            elif CLIENT_KEY_VENDOR not in client:
                 client[CLIENT_KEY_VENDOR] = oui.lookup_vendor(mac)
             # hostapd association is more authoritative than iwinfo assoclist.
             radio = client.get(CLIENT_KEY_RADIO, "")
@@ -2910,6 +2964,20 @@ class OpenWrtAPI:
             self._luci_rpc_ssid_map = ssid_map
 
         return self._luci_rpc_ssid_map.get(ifname, "")
+
+    async def get_dhcp_config(self) -> dict[str, Any]:
+        """Return the raw UCI dhcp configuration (pools and static hosts).
+
+        Calls:
+            uci get {"config": "dhcp"}. Permitted for the root login through
+            the LuCI ACLs (``read '*'``); otherwise blocked per config.
+
+        Raises:
+            OpenWrtMethodNotFoundError: uci access to ``dhcp`` not permitted.
+        """
+        result = await self._call(UBUS_UCI_OBJECT, UBUS_UCI_GET, {"config": "dhcp"})
+        values = result.get("values") if isinstance(result, dict) else None
+        return values if isinstance(values, dict) else {}
 
     async def get_uci_wireless(self) -> dict[str, Any]:
         """Fetch the full UCI wireless configuration.

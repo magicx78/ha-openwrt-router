@@ -33,7 +33,7 @@ ACL_FILE_PATH = "/usr/share/rpcd/acl.d/ha-openwrt-router.json"
 # Bump whenever RPCD_ACL_CONTENT below changes. Used only for log messages —
 # staleness is detected by comparing the deployed file's actual content to
 # RPCD_ACL_CONTENT, not by this number.
-ACL_VERSION = 5
+ACL_VERSION = 6
 
 # Marker echoed by the SSH deploy command — _run_ssh() returns None for empty
 # stdout even on exit code 0, so success must be detectable from stdout alone.
@@ -100,6 +100,11 @@ RPCD_ACL_CONTENT: dict = {
                 "uci": ["get"],
                 "rc": ["list"],
                 "service": ["list", "get_data"],
+                # logd ring buffer, polled every 2nd cycle for Wi-Fi/DHCP
+                # events (log_parser.py). Read only, no stream.
+                "log": ["read"],
+                # usteer's per-client signal map across APs (sticky clients).
+                "usteer": ["get_clients"],
             },
         },
         "write": {

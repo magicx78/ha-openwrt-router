@@ -4,9 +4,11 @@
       "init": {
         "title": "Router Options",
         "data": {
+          "extended_wifi_sensors": "Extended Wi-Fi sensors (radio, AP, port)",
           "topology_port_debug": "Port mapping debug data in topology snapshot"
         },
         "data_description": {
+          "extended_wifi_sensors": "Enables all per-radio, per-SSID (AP) and per-port sensors of this router at once instead of one by one. Turning it off disables only the sensors this switch enabled; sensors you disabled yourself are never touched. Takes effect after about 30 seconds.",
           "topology_port_debug": "Include the raw per-port mapping trace (FDB/DHCP/ARP matches and assignment reasons) in the topology snapshot endpoint. HA diagnostics always stay redacted."
         }
       }
@@ -79,11 +81,32 @@
       "connectivity": {
         "name": "Connectivity"
       },
+      "sticky_clients": {
+        "name": "Sticky Wi-Fi clients"
+      },
       "wan_connectivity": {
         "name": "WAN Connectivity"
       }
     },
     "sensor": {
+      "channel_plan": {
+        "name": "Channel plan findings"
+      },
+      "dfs_events_24h": {
+        "name": "DFS events (24 h)"
+      },
+      "dhcp_pool": {
+        "name": "DHCP pool {pool}"
+      },
+      "log_status": {
+        "name": "Router log",
+        "state": {
+          "pending": "Pending",
+          "ok": "OK",
+          "not_permitted": "Not readable (rpcd ACL or no logd)",
+          "error": "Error"
+        }
+      },
       "router_status": {
         "name": "Router Status",
         "state": {
@@ -93,6 +116,9 @@
           "timeout": "Timeout",
           "response_error": "Invalid Response"
         }
+      },
+      "unstable_clients": {
+        "name": "Unstable Wi-Fi clients"
       },
       "uptime": {
         "name": "Uptime"
@@ -196,6 +222,24 @@
       "reboot": {
         "name": "Reboot"
       }
+    }
+  },
+  "issues": {
+    "channel_plan_conflict": {
+      "title": "Wi-Fi channel conflicts between OpenWrt routers",
+      "description": "{count} channel conflict(s) were found across your OpenWrt routers:\n\n{findings}\n\n- `same_channel`: two radios use the same primary channel and have to share airtime.\n- `overlap`: the channel widths overlap, for example 40 MHz on 44 and 48, or 160 MHz on 36, which covers 36–64.\n- `non_standard_24`: a 2.4 GHz radio is not on channel 1, 6 or 11 and overlaps with its neighbours.\n\nGive neighbouring access points different, non-overlapping channels or narrower channel widths in their wireless settings. DFS channels are not a conflict; they are listed in the diagnostic sensor \"Channel plan findings\" of each router.\n\nThis message disappears automatically once the conflicts are gone."
+    },
+    "lan_unreachable": {
+      "title": "No OpenWrt router reachable",
+      "description": "All {count} OpenWrt routers ({routers}) have been unreachable from Home Assistant since {since}.\n\nWhen every router fails at the same moment, the cause is almost always between Home Assistant and the LAN (network of the HA host, switch, cabling, VLAN), not in the routers themselves.\n\nThis message disappears automatically as soon as a router answers again."
+    },
+    "ram_high": {
+      "title": "High memory usage on OpenWrt router {router}",
+      "description": "The router {router} has been running low on memory since {since}: {pressure} % of its RAM cannot be made available any more, only {available_mb} MB is left (attribute `pressure_pct` of the memory usage sensor).\n\nThis message appears when more than 85 % of the RAM is unavailable or less than 16 MB is available for 15 minutes. If it stays like this, the router starts killing processes or reboots. A typical cause is a process that keeps growing (for example rpcd on older firmware). Check `top` or `ps w` on the router and restart the affected service or the router.\n\nThis message disappears automatically once less than 80 % of the RAM is unavailable and at least 16 MB is available again."
+    },
+    "router_unreachable": {
+      "title": "OpenWrt router {router} unreachable",
+      "description": "The router {router} has not answered since {since} (error type: {error_type}).\n\nCheck power, cabling and the rpcd/uhttpd services on the router.\n\nThis message disappears automatically as soon as the router answers again."
     }
   }
 }

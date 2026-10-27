@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from functools import partial
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -43,6 +44,12 @@ from .api import (
 )
 from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN, PROTOCOL_HTTP
 from .coordinator import OpenWrtCoordinator
+from .fleet import (
+    async_get_channel_plan_monitor,
+    async_get_outage_tracker,
+    usteer_node_info,
+)
+from .issues import async_clear_issue, ram_high_issue_id
 from .ssl_util import ssl_context_for_protocol
 
 _LOGGER = logging.getLogger(__name__)
@@ -85,6 +92,11 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
     v1 → v2: CONF_PROTOCOL was added in v1.16.0.  Entries created before that
     have no protocol key and must fall back to HTTP (the old hard-coded default).
+
+    v2.1 → v2.2: the legacy dynamic-sensor mass-disable used to run on every
+    setup, so sensors the user re-enabled were disabled again on each reload.
+    It now runs exactly once per entry; entries created by the config flow
+    start at minor version 2 and never run it.
     """
     if config_entry.version == 1:
         new_data = {**config_entry.data}
@@ -95,6 +107,13 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             "Migrated OpenWrt entry %s to v2 (protocol=%s)",
             config_entry.entry_id,
             new_data[CONF_PROTOCOL],
+        )
+    if config_entry.version == 2 and config_entry.minor_version < 2:
+        _disable_legacy_dynamic_sensors(hass, config_entry)
+        hass.config_entries.async_update_entry(config_entry, minor_version=2)
+        _LOGGER.info(
+            "Migrated OpenWrt entry %s to v2.2 (legacy sensor disable done)",
+            config_entry.entry_id,
         )
     return True
 
@@ -157,8 +176,8 @@ def _merge_orphan_mac_devices(hass: HomeAssistant, entry: ConfigEntry) -> None:
 # entity_registry_enabled_default = False, which only affects NEW entities.
 # Existing installs (e.g. the user reporting the entity explosion in
 # v1.17.3) already have these registered as enabled, so we additionally
-# disable them once on next setup.  The user can re-enable individually
-# via the HA entity settings.
+# disable them once, via the config-entry migration to minor version 2.
+# The user can re-enable individually via the HA entity settings.
 _LEGACY_DYNAMIC_PATTERNS = (
     "_iface_",  # OpenWrtInterfaceSensor   (entry_id_iface_<name>_rx/tx)
     "_rate",  # OpenWrtInterfaceRateSensor  (entry_id_<name>_rx_rate)
@@ -171,15 +190,24 @@ _LEGACY_DYNAMIC_PATTERNS = (
 def _disable_legacy_dynamic_sensors(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Disable dynamic sensors that were registered as enabled by older versions.
 
-    Idempotent — entities the user has explicitly re-enabled stay enabled.
+    Called once per entry from :func:`async_migrate_entry`. Until v1.28.2 it
+    ran on every setup, so any entry that has already been set up with
+    v1.17.4 or later carries at least one dynamic sensor disabled by the
+    integration. Such an entry has had the cleanup already; its enabled
+    dynamic sensors were turned on by the user and are left alone.
     """
     ent_reg = er.async_get(hass)
     entities = er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+    dynamic = [
+        ent
+        for ent in entities
+        if any(pat in ent.unique_id for pat in _LEGACY_DYNAMIC_PATTERNS)
+    ]
+    if any(ent.disabled_by == er.RegistryEntryDisabler.INTEGRATION for ent in dynamic):
+        return
     disabled_count = 0
-    for ent in entities:
+    for ent in dynamic:
         if ent.disabled_by is not None:
-            continue
-        if not any(pat in ent.unique_id for pat in _LEGACY_DYNAMIC_PATTERNS):
             continue
         ent_reg.async_update_entity(
             ent.entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
@@ -312,16 +340,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # Store runtime data on the entry (accessed by platforms via entry.runtime_data)
     entry.runtime_data = OpenWrtRuntimeData(api=api, coordinator=coordinator)
 
+    # Outages are reported fleet-wide so that all routers failing at once
+    # (HA host / LAN problem) raise one Repairs issue instead of N.
+    outage_tracker = async_get_outage_tracker(hass)
+    outage_tracker.register(
+        entry.entry_id, entry.title, lambda: coordinator.update_interval
+    )
+    coordinator.attach_outage_tracker(outage_tracker)
+    coordinator.attach_node_resolver(partial(usteer_node_info, hass))
+    entry.async_on_unload(partial(outage_tracker.unregister, entry.entry_id))
+    # The RAM pressure issue lives as long as the entry is loaded.
+    entry.async_on_unload(
+        partial(async_clear_issue, hass, ram_high_issue_id(entry.entry_id))
+    )
+
+    # Channel conflicts are judged across all routers after every poll.
+    channel_plan = async_get_channel_plan_monitor(hass)
+    entry.async_on_unload(
+        coordinator.async_add_listener(
+            partial(channel_plan.evaluate, entry.entry_id, coordinator)
+        )
+    )
+    entry.async_on_unload(partial(channel_plan.unregister, entry.entry_id))
+
     # Forward setup to all platforms (sensor, switch, device_tracker, button)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # One-shot cleanup of legacy MAC-identified devices left over from v1.17.0
     _merge_orphan_mac_devices(hass, entry)
-
-    # One-shot mass-disable of dynamic sensors that older versions registered
-    # as enabled. Idempotent — only touches entries that are still enabled
-    # AND match the dynamic-sensor unique-id patterns.
-    _disable_legacy_dynamic_sensors(hass, entry)
 
     # Register topology panel (idempotent — only registers once per HA session)
     from .topology_panel import async_setup_topology_panel

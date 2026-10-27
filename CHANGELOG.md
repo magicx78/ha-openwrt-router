@@ -2,7 +2,7 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
-## [1.28.4] - 2026-10-27
+## [1.37.1] - 2026-10-27
 
 ### Fixed
 
@@ -29,6 +29,257 @@ All notable changes to the OpenWrt Router integration will be documented in this
   Ein schon aufgeblähter rpcd gibt den Speicher erst bei einem Neustart frei
   (`/etc/init.d/rpcd restart`). Dauerhaft behebt den Leak ein rpcd-Update
   auf einen Stand ab 2026-05-31.
+
+## [1.37.0] - 2026-10-27
+
+### Added
+
+- **Attribut `random_mac` an WLAN-Clients** (Device-Tracker und
+  Client-Daten des Topologie-Snapshots): wahr bei einer lokal verwalteten,
+  zufälligen MAC („private WLAN-Adresse“ von Handys, Tablets, Laptops).
+  Das Topologie-Panel wertet das Attribut noch nicht aus.
+
+### Fixed
+
+- **Falsche Hersteller bei zufälligen MACs.** Eine lokal verwaltete MAC hat
+  keinen Hersteller; der OUI-Abgleich wird für sie übersprungen (`vendor`
+  bleibt leer), statt zufällig einen Hersteller zu treffen. Der Eintrag
+  `d2:4e:4f` (lokal verwalteter Bereich, kann kein Hersteller sein) ist aus
+  der OUI-Tabelle entfernt. Auch Clients aus dem SSH-Fallback bekommen jetzt
+  `vendor`, `random_mac` und die übrigen Client-Metadaten.
+
+## [1.36.0] - 2026-10-27
+
+### Added
+
+- **Binärsensor „Klebende WLAN-Clients“** (`sticky_clients`) pro Router:
+  ein, solange Clients an diesem Router hängen, obwohl ein besserer AP da
+  ist.
+  - Mit usteer (pro Router erkannt; Abfrage `usteer get_clients` alle
+    2 Polls, nie im selben Poll wie der Log-Abruf): ein anderer Router hört
+    den Client seit mindestens 10 Minuten um mindestens 8 dB stärker, im
+    selben Band und mit derselben SSID (soweit über die Router-Adresse
+    zuordenbar). Andere Funkmodule desselben Routers zählen nicht.
+  - Ohne usteer: Signal seit 10 Minuten bei −75 dBm oder schwächer, und ein
+    anderer Router bietet ein Funkmodul im selben Band.
+  - Attribute `method` (`usteer`/`signal`) und `clients` (MAC, Hostname,
+    Signal, seit; mit usteer zusätzlich besserer Knoten und Abstand in dB,
+    ohne usteer das Band).
+- **Sensor „Instabile WLAN-Clients“** (`unstable_clients`) pro Router:
+  Clients mit mindestens 3 Reconnects in 24 h (Anmeldung innerhalb von
+  5 Minuten nach einer Abmeldung am selben Interface; Roaming und
+  Band-Steering zählen nicht). Attribut `top` mit den 10 auffälligsten
+  Clients. Unbekannt, solange das Router-Log nicht lesbar ist.
+- **Tracker-Attribute `associations_24h` und `reconnects_24h`**, summiert
+  über alle Router, aus dem Router-Log.
+
+## [1.35.0] - 2026-10-27
+
+### Added
+
+- **Sensor „DHCP-Pool …“ pro aktivem DHCP-Pool** (z. B. `lan`, `guest`):
+  Anteil des Adressbereichs (Netz + `start` … `start + limit − 1`), der
+  durch Leases belegt ist, in %. Attribute `interface`, `leases`, `size`.
+  Die Pools stammen aus `uci get dhcp` (beim zweiten Poll, danach alle
+  10 Polls, nur solange der Router einen Pool bedient; Dumb-APs mit
+  `ignore` werden einmal gefragt).
+- **Attribut `dhcp_status` an WLAN-Clients** (Device-Tracker):
+  - `ok`: Lease oder ARP-Eintrag bei irgendeinem Router,
+  - `pending`: noch keine 180 s verbunden,
+  - `dhcp_missing`: seit mindestens 180 s verbunden, aber bei keinem Router
+    eine Lease und in keiner ARP-Tabelle (Client hängt z. B. in einer
+    DHCP-DISCOVER-Schleife),
+  - `static_no_lease`: als statischer Host eingetragen, hat aber keine Lease.
+  Kennt kein Router eine Lease (kein DHCP-Server sichtbar) oder ist ein
+  Router mit DHCP-Pool gerade nicht erreichbar, bleibt das Attribut leer.
+
+Hinweise: DHCP-Probleme aus dem Router-Log (`nak`, `decline`, `no_address`)
+kommen seit 1.33.0 als `openwrt_router_dhcp_event`. Pool-Sensoren und
+statische Hosts brauchen Leserechte auf die uci-Config `dhcp`; der Login
+`root` hat sie über die LuCI-ACLs, ohne LuCI gibt es keinen Pool-Sensor.
+Ein gestoppter dnsmasq blendet die Pools aus, ein anonymer Pool-Abschnitt
+heißt nach seinem Interface.
+
+## [1.34.0] - 2026-10-27
+
+### Added
+
+- **DFS-Ereignisse und Kanalwechsel.** Event `openwrt_router_dfs_event`:
+  - aus dem Router-Log (hostapd): `radar_detected`, `cac_start`,
+    `cac_completed`, `cac_failed`, `nop_finished`, `new_channel`,
+    `pre_cac_expired` mit `radio`, `interface`, `frequency`, `channel`;
+  - `channel_change`, wenn sich Kanal oder Kanalbreite eines Funkmoduls
+    zwischen zwei Abfragen ändert (`old_channel`/`new_channel`,
+    `old_width_mhz`/`new_width_mhz`). Ein Kanalwechsel holt das Router-Log
+    sofort, damit die passende DFS-Zeile schon bekannt ist.
+  - `dfs_related` ist nur wahr, wenn eine passende DFS-Zeile
+    (`radar_detected`, `new_channel`, `cac_failed`) desselben 5-GHz-Funkmoduls
+    aus den letzten 15 Minuten vorliegt (`evidence` nennt sie). Ein
+    Kanalwechsel ohne solche Zeile (manuell, ACS) ist `dfs_related: false`.
+    `backhaul: true` kennzeichnet Funkmodule mit WLAN-Uplink, die dem Kanal
+    des Partners folgen.
+  - Radar-Meldungen haben im Event-Budget Vorrang; die Events stehen im
+    Logbuch des Routers.
+- **Diagnosesensor „DFS-Ereignisse (24 h)“** (`dfs_events_24h`): Anzahl
+  dieser Ereignisse in den letzten 24 Stunden, Attribute `by_type` und
+  `last_event`.
+
+## [1.33.0] - 2026-10-27
+
+### Added
+
+- **Router-Log wird ausgewertet** (alle 2 Abfragen über `ubus call log read`).
+  Neue Zeilen werden über ihre fortlaufende `id` erkannt. Was beim ersten
+  Abruf (und nach einem Neustart von logd) schon im Puffer steht, wird nur
+  gezählt. Die Zahl der abgerufenen Zeilen richtet sich nach dem Aufkommen
+  (100–700, zuerst 250); fehlten beim letzten Mal Zeilen, holt der nächste
+  Abruf den ganzen Puffer.
+- **Events für eigene Automationen:**
+  - `openwrt_router_wifi_event` mit `type` `psk_mismatch` (falsches
+    WLAN-Passwort), `inactivity_timeout` (Client wegen Inaktivität getrennt)
+    oder `handshake_failed`,
+  - `openwrt_router_dhcp_event` mit `type` `nak`, `decline` oder
+    `no_address` (Pool erschöpft).
+  - Felder: `entry_id`, `router`, `type`, `mac`, `hostname`, `interface`,
+    `time`, `message`, bei DHCP zusätzlich `ip`.
+  - Höchstens 10 Events pro Abruf und eines je Typ und MAC in 5 Minuten.
+    Falsches Passwort und DHCP-Probleme haben dabei Vorrang vor
+    Inaktivitäts-Trennungen. Normale An-/Abmeldungen und DHCPACK werden nur
+    gezählt.
+  - Die Events erscheinen lesbar im Logbuch, auch auf der Geräteseite des
+    Routers (`device_id`).
+- **Diagnosesensor „Router-Log“** (`log_status`): `ok`, `pending`,
+  `not_permitted` (rpcd-ACL erlaubt `log read` noch nicht oder kein logd)
+  oder `error`.
+  Attribute: Zähler der letzten 24 h je Art (`counts_24h`), verarbeitete,
+  verpasste und Baseline-Zeilen, ausgelöste und unterdrückte Events. Ein
+  fehlender Zugriff lässt die Abfrage nie scheitern.
+
+### Changed
+
+- **rpcd-ACL Version 6:** zusätzlich lesend `log read` und
+  `usteer get_clients` (für die Client-Stabilität in einem späteren
+  Release). Beim ersten Start nach dem Update schreibt die Integration die
+  ACL neu und startet rpcd **einmal pro Router** neu (wenige Sekunden ohne
+  Antwort). `scripts/ha-openwrt-router.json` ist angepasst.
+
+## [1.32.0] - 2026-10-27
+
+### Added
+
+- **Diagnosesensor „Kanalplan-Befunde“** (`channel_plan`) pro Router. Er
+  vergleicht die Funkmodule aller erreichbaren Router miteinander und zählt
+  die Befunde, an denen ein Funkmodul dieses Routers beteiligt ist. Das
+  Attribut `findings` listet sie auf, `radios` zeigt die eigenen Funkmodule
+  (Kanal, Breite):
+  - `same_channel`: zwei Funkmodule im selben Band auf demselben Hauptkanal,
+  - `overlap`: belegte Kanalbreiten überlappen, z. B. 40 MHz auf 44 und 48
+    oder 160 MHz auf 36 (belegt 36–64),
+  - `non_standard_24`: 2,4 GHz außerhalb der Kanäle 1, 6 und 11,
+  - `dfs`: 5-GHz-Funkmodul mit mindestens einem Teilkanal in 52–144.
+  Mehrere SSIDs auf demselben Funkmodul zählen als ein Funkmodul. Router,
+  deren letzte Abfrage fehlschlug, bleiben außen vor. Ein Funkmodul mit
+  WLAN-Uplink (Repeater, Mesh) muss den Kanal seines Partners nutzen und
+  ergibt deshalb nie `same_channel`/`overlap` (Attribut `backhaul`).
+- **Reparatur-Hinweis „WLAN-Kanalkonflikte zwischen OpenWrt-Routern“**
+  (`channel_plan_conflict`), sobald ein Router in zwei Abfragen in Folge an
+  einem Konflikt beteiligt ist. DFS allein löst ihn nicht aus. Er
+  verschwindet nach zwei konfliktfreien Auswertungen in Folge; ein
+  fehlgeschlagener Poll ändert nichts. Anlass: Bei der
+  Live-Diagnose waren ein DFS-Kanal doppelt belegt und überall 160 MHz
+  eingestellt, ohne dass Home Assistant das zeigte.
+- Kein zusätzlicher Router-Aufruf: `phy` und `center_chan1` kommen aus der
+  schon abgefragten `iwinfo info`-Antwort.
+
+## [1.31.0] - 2026-10-27
+
+### Added
+
+- **Reparatur-Hinweis bei Speicherdruck auf einem Router** (`ram_high_<entry_id>`).
+  Speicherdruck = 1 − verfügbar/gesamt (`available` aus `system info`). Liegt er
+  15 Minuten lang über 85 % oder sind weniger als 16 MB verfügbar, erscheint
+  „Hohe RAM-Auslastung auf OpenWrt-Router …“. Er verschwindet von selbst, sobald
+  der Druck unter 80 % fällt und wieder mindestens 16 MB frei sind, und beim
+  Entladen des Eintrags. Ein einzelner normaler Messwert setzt die Haltezeit
+  zurück, Abfragen ohne Speicherwerte ändern nichts. Anlass: Das rpcd-Leck auf
+  einem Dumb-AP (110 MB, ca. 93 % Druck) blieb in Home Assistant unsichtbar.
+  Fehlt `available` (ältere Firmware, SSH-Fallback), wird er aus
+  frei + Puffer + Cache − Shared geschätzt.
+- **Attribute `available_mb` und `pressure_pct`** am Sensor „Speichernutzung“
+  (`memory_usage`). Der Zustand des Sensors rechnet unverändert
+  (gesamt − frei)/gesamt, damit bestehende Verläufe und Automationen gleich
+  bleiben.
+
+## [1.30.0] - 2026-10-27
+
+### Added
+
+- **Schalter „Erweiterte WLAN-Sensoren (Funk, AP, Port)“** in den Optionen
+  (Einstellungen → Geräte & Dienste → OpenWrt Router → Konfigurieren). Die
+  Sensoren pro Funkmodul, pro SSID (AP) und pro Port sind standardmäßig aus,
+  weil sie sich mit jedem Radio, jeder SSID und jedem Port vervielfachen.
+  Statt rund 40 Einzelklicks schaltet der Schalter sie jetzt gesammelt:
+  - **Ein:** aktiviert alle diese Sensoren, die von der Integration
+    deaktiviert sind. Später neu hinzukommende Sensoren (neue SSID, neuer
+    Port) sind dann ebenfalls aktiv.
+  - **Aus:** deaktiviert nur, was der Schalter eingeschaltet hat. Sensoren,
+    die vorher schon an waren, bleiben an.
+  - Selbst deaktivierte Sensoren (`disabled_by: user`) werden nie angefasst.
+  - Die Registry wird nur beim Umschalten geändert, nie beim Setup. Neue
+    Sensoren erscheinen nach dem automatischen Neuladen (ca. 30 s).
+
+### Fixed
+
+- **Speichern der Optionen löschte andere Optionen.** Der Options-Flow
+  ersetzte alle Optionen durch die Eingaben des Formulars. Jetzt werden sie
+  zusammengeführt.
+
+## [1.29.0] - 2026-10-27
+
+### Added
+
+- **Ausfälle als Reparatur-Hinweis, gleichzeitige Ausfälle gebündelt.** Ein
+  Router gilt nach 3 fehlgeschlagenen Abfragen als ausgefallen. Statt einer
+  `persistent_notification` pro Router gibt es jetzt Repairs-Issues:
+  - Sind alle geladenen Router (mindestens zwei) gleichzeitig nicht erreichbar,
+    erscheint **ein** Hinweis „Kein OpenWrt-Router erreichbar“
+    (`lan_unreachable`). Die Ursache liegt dann fast immer zwischen Home
+    Assistant und dem LAN, nicht in den Routern (Beispiel: 20.10., 10:05–10:31,
+    alle Router gleichzeitig weg).
+  - Sonst ein Hinweis pro Router (`router_unreachable_<entry_id>`).
+  - Vor der Einordnung wartet die Integration das längste Poll-Intervall plus
+    30 s ab, damit die versetzt pollenden Router alle melden können. Erholen
+    sich die Router nach einem LAN-Ausfall versetzt, entstehen keine
+    Einzel-Hinweise. Auth-Fehler werden nie gebündelt.
+  - Hinweise verschwinden von selbst, sobald der Router wieder antwortet.
+- **Event `openwrt_router_outage_event`** bei Beginn und Ende eines Ausfalls,
+  mit `scope` (`fleet`/`router`), `state` (`down`/`up`), `entry_ids`,
+  `routers`, `since`, `duration_s` und `error_type`. Für eigene
+  Automationen, z. B. Push-Nachricht nur beim LAN-weiten Ausfall.
+
+### Fixed
+
+- **Die Ausfall-Meldung verschwand nach der Wiederherstellung nie.** Das Flag
+  „Meldung gesendet“ lag auf `coordinator.data`, das jede erfolgreiche Abfrage
+  durch ein neues Objekt ersetzt. Beim Erholen war es daher immer `False`. Der
+  Fehlerzähler liegt jetzt am Coordinator selbst und zählt auch dann, wenn
+  noch keine Daten vorliegen.
+
+## [1.28.3] - 2026-10-27
+
+### Fixed
+
+- **Selbst aktivierte Funk-, AP-, Port- und Interface-Sensoren wurden bei
+  jedem Laden wieder deaktiviert.** `_disable_legacy_dynamic_sensors()` war
+  als einmalige Aufräumaktion für v1.17.4 gedacht, lief aber in jedem
+  `async_setup_entry`. Jede aktive Entität mit `_ap_`/`_radio_`/`_iface_`/
+  `_port_`/`_rate` in der Unique-ID stand nach Neustart oder Reload wieder
+  auf `disabled_by: integration` (beobachtet: 41 Sensoren). Die Aufräumaktion
+  ist jetzt eine einmalige Config-Entry-Migration (Minor-Version 1 → 2). Neue
+  Einträge starten direkt bei Minor-Version 2. Ein Eintrag, der schon einmal
+  mit ≥ v1.17.4 lief, erkennt man an mindestens einem von der Integration
+  deaktivierten dynamischen Sensor. Für ihn wird bei der Migration nichts mehr
+  deaktiviert, selbst eingeschaltete Sensoren bleiben also auch beim Update an.
 
 ## [1.28.2] - 2026-09-09
 

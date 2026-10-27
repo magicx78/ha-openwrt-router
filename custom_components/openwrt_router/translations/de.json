@@ -4,9 +4,11 @@
       "init": {
         "title": "Router-Optionen",
         "data": {
+          "extended_wifi_sensors": "Erweiterte WLAN-Sensoren (Funk, AP, Port)",
           "topology_port_debug": "Port-Zuordnungs-Debugdaten im Topology-Snapshot"
         },
         "data_description": {
+          "extended_wifi_sensors": "Schaltet alle Sensoren pro Funkmodul, pro SSID (AP) und pro Port dieses Routers auf einmal ein statt einzeln. Ausschalten deaktiviert nur die Sensoren, die dieser Schalter eingeschaltet hat; selbst deaktivierte Sensoren bleiben unberührt. Wirksam nach etwa 30 Sekunden.",
           "topology_port_debug": "Rohe Port-Zuordnungsdaten (FDB/DHCP/ARP-Treffer und Zuordnungsgründe) im Topology-Snapshot-Endpoint mitliefern. HA-Diagnostics bleiben immer redacted."
         }
       }
@@ -79,11 +81,32 @@
       "connectivity": {
         "name": "Verbindungsstatus"
       },
+      "sticky_clients": {
+        "name": "Klebende WLAN-Clients"
+      },
       "wan_connectivity": {
         "name": "WAN-Verbindung"
       }
     },
     "sensor": {
+      "channel_plan": {
+        "name": "Kanalplan-Befunde"
+      },
+      "dfs_events_24h": {
+        "name": "DFS-Ereignisse (24 h)"
+      },
+      "dhcp_pool": {
+        "name": "DHCP-Pool {pool}"
+      },
+      "log_status": {
+        "name": "Router-Log",
+        "state": {
+          "pending": "Ausstehend",
+          "ok": "OK",
+          "not_permitted": "Nicht lesbar (rpcd-ACL oder kein logd)",
+          "error": "Fehler"
+        }
+      },
       "router_status": {
         "name": "Router-Status",
         "state": {
@@ -93,6 +116,9 @@
           "timeout": "Zeitüberschreitung",
           "response_error": "Ungültige Antwort"
         }
+      },
+      "unstable_clients": {
+        "name": "Instabile WLAN-Clients"
       },
       "uptime": {
         "name": "Laufzeit"
@@ -196,6 +222,24 @@
       "reboot": {
         "name": "Router neu starten"
       }
+    }
+  },
+  "issues": {
+    "channel_plan_conflict": {
+      "title": "WLAN-Kanalkonflikte zwischen OpenWrt-Routern",
+      "description": "Zwischen deinen OpenWrt-Routern gibt es {count} Kanalkonflikt(e):\n\n{findings}\n\n- `same_channel`: Zwei Funkmodule nutzen denselben Hauptkanal und müssen sich die Sendezeit teilen.\n- `overlap`: Die Kanalbreiten überlappen, z. B. 40 MHz auf 44 und 48 oder 160 MHz auf 36, das 36–64 belegt.\n- `non_standard_24`: Ein 2,4-GHz-Funkmodul liegt nicht auf Kanal 1, 6 oder 11 und überlappt mit den Nachbarn.\n\nStelle benachbarte Access Points in den WLAN-Einstellungen auf unterschiedliche, nicht überlappende Kanäle oder schmalere Kanalbreiten. DFS-Kanäle sind kein Konflikt; sie stehen im Diagnosesensor „Kanalplan-Befunde“ des jeweiligen Routers.\n\nDieser Hinweis verschwindet automatisch, sobald die Konflikte behoben sind."
+    },
+    "lan_unreachable": {
+      "title": "Kein OpenWrt-Router erreichbar",
+      "description": "Alle {count} OpenWrt-Router ({routers}) sind seit {since} von Home Assistant aus nicht erreichbar.\n\nWenn alle Router im selben Moment ausfallen, liegt die Ursache fast immer zwischen Home Assistant und dem LAN (Netzwerk des HA-Hosts, Switch, Verkabelung, VLAN) und nicht in den Routern selbst.\n\nDieser Hinweis verschwindet automatisch, sobald wieder ein Router antwortet."
+    },
+    "ram_high": {
+      "title": "Hohe RAM-Auslastung auf OpenWrt-Router {router}",
+      "description": "Auf dem Router {router} wird seit {since} der Arbeitsspeicher knapp: {pressure} % des RAM lassen sich nicht mehr freigeben, nur noch {available_mb} MB sind verfügbar (Attribut `pressure_pct` des Sensors Speichernutzung).\n\nDieser Hinweis erscheint, wenn 15 Minuten lang mehr als 85 % des RAM nicht verfügbar oder weniger als 16 MB verfügbar sind. Bleibt es so, beendet der Router Prozesse oder startet neu. Typische Ursache ist ein Prozess, der immer weiter wächst (z. B. rpcd auf älterer Firmware). Prüfe auf dem Router mit `top` oder `ps w` und starte den betroffenen Dienst oder den Router neu.\n\nDieser Hinweis verschwindet automatisch, sobald weniger als 80 % des RAM nicht verfügbar und wieder mindestens 16 MB verfügbar sind."
+    },
+    "router_unreachable": {
+      "title": "OpenWrt-Router {router} nicht erreichbar",
+      "description": "Der Router {router} antwortet seit {since} nicht mehr (Fehlertyp: {error_type}).\n\nPrüfe Stromversorgung, Verkabelung und die Dienste rpcd/uhttpd auf dem Router.\n\nDieser Hinweis verschwindet automatisch, sobald der Router wieder antwortet."
     }
   }
 }

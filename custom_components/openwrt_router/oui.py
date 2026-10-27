@@ -601,7 +601,6 @@ _OUI_TABLE: dict[str, str] = {
     "c44f33": "Espressif",
     "c8c9a3": "Espressif",
     "ccba97": "Espressif",
-    "d24e4f": "Espressif",
     "d8bfc0": "Espressif",
     "e007f4": "Espressif",
     "e89f6d": "Espressif",

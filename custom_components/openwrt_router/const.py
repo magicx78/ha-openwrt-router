@@ -136,6 +136,14 @@ FEATURE_DHCP_LEASES = "dhcp_leases"
 SUFFIX_CONNECTIVITY = "connectivity"
 SUFFIX_WAN_CONNECTIVITY = "wan_connectivity"
 SUFFIX_ROUTER_STATUS = "router_status"
+SUFFIX_CHANNEL_PLAN = "channel_plan"
+SUFFIX_LOG_STATUS = "log_status"
+SUFFIX_DFS_EVENTS_24H = "dfs_events_24h"
+# Per DHCP pool: f"{entry_id}_{SUFFIX_DHCP_POOL}-{pool}" (hyphen keeps the
+# legacy-migration substrings like "_rate"/"_ap_" out of user pool names)
+SUFFIX_DHCP_POOL = "dhcp_pool"
+SUFFIX_STICKY_CLIENTS = "sticky_clients"
+SUFFIX_UNSTABLE_CLIENTS = "unstable_clients"
 
 # Error type values stored in coordinator.data.error_type
 ERROR_TYPE_CONNECTION = "connection"
@@ -143,8 +151,21 @@ ERROR_TYPE_AUTH = "auth"
 ERROR_TYPE_TIMEOUT = "timeout"
 ERROR_TYPE_RESPONSE = "response"
 
-# Persistent notification fires after this many consecutive poll failures
+# A router counts as down (Repairs issue / outage event) after this many
+# consecutive poll failures
 NOTIFICATION_FAILURE_THRESHOLD = 3
+
+# Fired on outage start/end, payload see fleet.FleetOutageTracker
+EVENT_OUTAGE = f"{DOMAIN}_outage_event"
+
+# RAM pressure Repairs issue (coordinator._check_memory_pressure).
+# Pressure = 1 - available/total. The issue is raised once the pressure stays
+# above RAM_PRESSURE_HIGH_PCT (or available below RAM_AVAILABLE_MIN_BYTES) for
+# RAM_PRESSURE_HOLD_SECONDS and cleared below RAM_PRESSURE_CLEAR_PCT.
+RAM_PRESSURE_HIGH_PCT = 85.0
+RAM_PRESSURE_CLEAR_PCT = 80.0
+RAM_PRESSURE_HOLD_SECONDS = 15 * 60
+RAM_AVAILABLE_MIN_BYTES = 16 * 1024 * 1024
 
 # Entity unique ID suffixes
 SUFFIX_UPTIME = "uptime"
@@ -241,6 +262,10 @@ RADIO_KEY_HWMODE = "hwmode"
 RADIO_KEY_HTMODE = "htmode"
 RADIO_KEY_MODE = "mode"  # "Master" | "Client" | "Monitor" | None
 RADIO_KEY_BSSID = "bssid"
+# Physical radio of an AP interface and center channel of its bonded block
+# (iwinfo info; used by channel_plan.py)
+RADIO_KEY_PHY = "phy"
+RADIO_KEY_CENTER_CHAN1 = "center_chan1"
 
 # Client data keys
 CLIENT_KEY_MAC = "mac"
@@ -267,6 +292,8 @@ CLIENT_KEY_DHCP_EXPIRES = "dhcp_expires"
 # Enriched client data keys (v1.26.0 — device/topology detection improvements).
 # All optional; absent/empty keys keep the client shape backward compatible.
 CLIENT_KEY_VENDOR = "vendor"  # OUI-derived manufacturer, e.g. "Cudy" | None
+# True for a locally administered (randomised, "private") MAC: no vendor
+CLIENT_KEY_RANDOM_MAC = "random_mac"
 CLIENT_KEY_CONNECTION_TYPE = "connection_type"  # see CONNECTION_TYPE_*
 CLIENT_KEY_CONFIDENCE = "confidence"  # see CONFIDENCE_*
 CLIENT_KEY_SOURCE = "source"  # detection source, e.g. "iwinfo" | "fdb" | "dhcp"
@@ -365,6 +392,14 @@ KEY_TOPOLOGY_SNAPSHOTS = "topology_snapshots"
 CONF_TOPOLOGY_PORT_DEBUG = "topology_port_debug"
 DEFAULT_TOPOLOGY_PORT_DEBUG = False
 
+# Options flag: enable the per-radio / per-AP / per-port sensors in one go
+# instead of one click per entity (disabled by default, see extended_sensors.py).
+CONF_EXTENDED_WIFI_SENSORS = "extended_wifi_sensors"
+DEFAULT_EXTENDED_WIFI_SENSORS = False
+# Internal option: unique_ids that were already enabled when the switch went
+# on, so switching it off restores exactly the previous state.
+OPT_EXTENDED_WIFI_PREEXISTING = "_extended_wifi_preexisting"
+
 # TODO: parental control - add UBUS_PARENTAL_OBJECT
 
 # DHCP lease data key (coordinator)
@@ -376,6 +411,51 @@ UBUS_RC_LIST = "list"
 UBUS_RC_INIT = "init"
 UBUS_SERVICE_OBJECT = "service"
 UBUS_SERVICE_LIST = "list"
+
+# logd ring buffer (F6 log ingest, ACL v6)
+UBUS_LOG_OBJECT = "log"
+UBUS_LOG_READ = "read"
+# Fetched every LOG_READ_INTERVAL_CYCLES polls (~165 B per line). The first
+# fetch asks for LOG_READ_LINES; later fetches size themselves to 1.5x the
+# lines seen last time (LOG_READ_LINES_MIN..MAX), and after a gap ("missed"
+# lines) the next fetch takes LOG_READ_LINES_MAX (about the whole buffer).
+LOG_READ_INTERVAL_CYCLES = 2
+LOG_READ_LINES = 250
+LOG_READ_LINES_MIN = 100
+LOG_READ_LINES_MAX = 700
+# HA events from log lines: at most LOG_EVENTS_PER_FETCH per fetch and one per
+# type and MAC within LOG_EVENT_COOLDOWN_SECONDS.
+LOG_EVENTS_PER_FETCH = 10
+LOG_EVENT_COOLDOWN_SECONDS = 300
+EVENT_WIFI = f"{DOMAIN}_wifi_event"
+EVENT_DHCP = f"{DOMAIN}_dhcp_event"
+# DFS log lines and per-radio channel/width changes between two polls (F3).
+# A change counts as DFS-related only with a DFS log line of the same radio
+# within DFS_EVIDENCE_SECONDS.
+EVENT_DFS = f"{DOMAIN}_dfs_event"
+DFS_EVIDENCE_SECONDS = 15 * 60
+
+# DHCP health (F5): pools and static hosts from `uci get dhcp`, refreshed
+# every DHCP_CONFIG_REFRESH_CYCLES polls on routers with an active pool.
+DHCP_CONFIG_REFRESH_CYCLES = 10
+# Routers without an active pool (or without uci access) are asked again
+# this rarely, so a pool enabled later shows up without a reload.
+DHCP_CONFIG_RETRY_CYCLES = 60
+
+# Client stability (F4): usteer's fleet-wide client view (ACL v6), fetched
+# every LOG_READ_INTERVAL_CYCLES polls on the polls between the log fetches;
+# a router without usteer is asked again every USTEER_RETRY_CYCLES polls.
+UBUS_USTEER_OBJECT = "usteer"
+UBUS_USTEER_GET_CLIENTS = "get_clients"
+USTEER_RETRY_CYCLES = 30
+USTEER_STATUS_PENDING = "pending"
+USTEER_STATUS_OK = "ok"
+USTEER_STATUS_UNAVAILABLE = "not_available"
+LOG_STATUS_PENDING = "pending"
+LOG_STATUS_OK = "ok"
+# Not "unavailable": that state is reserved by HA for unreachable entities.
+LOG_STATUS_NOT_PERMITTED = "not_permitted"
+LOG_STATUS_ERROR = "error"
 
 # Services to monitor/control by default (OpenWrt critical services)
 DEFAULT_SERVICES = ["dnsmasq", "dropbear", "firewall", "network", "uhttpd", "wpad"]

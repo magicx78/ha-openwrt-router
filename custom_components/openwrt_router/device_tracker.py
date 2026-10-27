@@ -30,6 +30,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from . import OpenWrtConfigEntry
 from .const import (
@@ -37,6 +38,7 @@ from .const import (
     CLIENT_KEY_IP,
     CLIENT_KEY_MAC,
     CLIENT_KEY_RADIO,
+    CLIENT_KEY_RANDOM_MAC,
     CLIENT_KEY_SIGNAL,
     CLIENT_KEY_SSID,
     CONF_PROTOCOL,
@@ -45,6 +47,9 @@ from .const import (
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator
+from .dhcp_health import client_dhcp_status
+from .fleet import client_counts, dhcp_context
+from .mac_utils import is_locally_administered
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -233,13 +238,23 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional attributes for the tracked device."""
         client, coordinator = self._find_client()
+        counts = self._client_counts()
+        random_mac = is_locally_administered(self._mac)
         if not client:
             # Client is currently away; return last known SSID / radio if stored
-            return {"mac": self._mac, "connected": False}
+            return {
+                "mac": self._mac,
+                "connected": False,
+                CLIENT_KEY_RANDOM_MAC: random_mac,
+                **counts,
+            }
 
         return {
+            **counts,
+            CLIENT_KEY_RANDOM_MAC: random_mac,
             "mac": self._mac,
             "connected": True,
+            "dhcp_status": self._dhcp_status(client),
             "ssid": client.get(CLIENT_KEY_SSID, ""),
             "radio": client.get(CLIENT_KEY_RADIO, ""),
             "signal": client.get(CLIENT_KEY_SIGNAL, 0),
@@ -249,6 +264,31 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
                 coordinator.router_info.get("hostname", "") if coordinator else ""
             ),
         }
+
+    def _client_counts(self) -> dict[str, int]:
+        """associations_24h / reconnects_24h over all routers (router log)."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return {}
+        return client_counts(hass, self._mac) or {}
+
+    def _dhcp_status(self, client: dict[str, Any]) -> str | None:
+        """ok / pending / dhcp_missing / static_no_lease, None if unknown."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return None
+        context = dhcp_context(hass)
+        if context is None:
+            return None
+        leases, arp, static = context
+        return client_dhcp_status(
+            self._mac,
+            client.get(CLIENT_KEY_CONNECTED_SINCE),
+            dt_util.utcnow(),
+            leases,
+            arp,
+            static,
+        )
 
     @property
     def device_info(self) -> DeviceInfo:

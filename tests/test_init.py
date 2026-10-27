@@ -27,6 +27,7 @@ from custom_components.openwrt_router.const import (
 )
 
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import entity_registry as er
 
 
 # ---------------------------------------------------------------------------
@@ -480,3 +481,232 @@ class TestMergeOrphanMacDevices:
 
             merge(MagicMock(), _make_entry())
             dev_reg.async_remove_device.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# v1.28.3 — legacy dynamic-sensor disable runs once per entry
+# ---------------------------------------------------------------------------
+
+class TestLegacySensorDisableRunsOnce:
+    """Regression: re-enabled radio/AP/port sensors were disabled on every reload.
+
+    Up to v1.28.2 ``_disable_legacy_dynamic_sensors`` ran in every
+    ``async_setup_entry``. It is now a one-time config-entry migration
+    (minor version 1 → 2).
+    """
+
+    @staticmethod
+    def _ent(entity_id, unique_id, disabled_by=None):
+        return MagicMock(
+            entity_id=entity_id, unique_id=unique_id, disabled_by=disabled_by
+        )
+
+    def _run_disable(self, entities):
+        from custom_components.openwrt_router import _disable_legacy_dynamic_sensors
+
+        with patch(
+            "custom_components.openwrt_router.er.async_get"
+        ) as mock_er_get, patch(
+            "custom_components.openwrt_router.er.async_entries_for_config_entry",
+            return_value=entities,
+        ):
+            ent_reg = MagicMock()
+            mock_er_get.return_value = ent_reg
+            _disable_legacy_dynamic_sensors(MagicMock(), _make_entry())
+        return ent_reg
+
+    @pytest.mark.asyncio
+    async def test_setup_no_longer_disables_dynamic_sensors(self):
+        """A reload must not touch sensors the user re-enabled."""
+        hass = _make_hass()
+        entry = _make_entry()
+
+        mock_api = AsyncMock()
+        mock_api.reset_acl_blocked = MagicMock()
+        mock_coordinator = MagicMock()
+        mock_coordinator.async_config_entry_first_refresh = AsyncMock()
+
+        with patch(
+            "custom_components.openwrt_router.async_get_clientsession",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtAPI",
+            return_value=mock_api,
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtCoordinator",
+            return_value=mock_coordinator,
+        ), patch(
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            AsyncMock(return_value=False),
+        ), patch(
+            "custom_components.openwrt_router._merge_orphan_mac_devices"
+        ), patch(
+            "custom_components.openwrt_router._disable_legacy_dynamic_sensors"
+        ) as mock_disable:
+            assert await async_setup_entry(hass, entry) is True
+            assert await async_setup_entry(hass, entry) is True
+
+        mock_disable.assert_not_called()
+
+    def test_user_reenabled_sensors_survive_migration(self):
+        """Entry already cleaned by an earlier version: leave enabled ones alone."""
+        ent_reg = self._run_disable(
+            [
+                self._ent("sensor.x_phy1_ap0_channel", "entry_ap_phy1-ap0_channel"),
+                self._ent("sensor.x_phy0_signal", "entry_radio_phy0_signal"),
+                self._ent(
+                    "sensor.x_lan1_link",
+                    "entry_port_lan1_status",
+                    disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+                ),
+            ]
+        )
+        ent_reg.async_update_entity.assert_not_called()
+
+    def test_pre_v1174_entry_still_cleaned(self):
+        """No integration-disabled dynamic sensor yet: the cleanup still runs."""
+        ent_reg = self._run_disable(
+            [
+                self._ent("sensor.x_phy1_ap0_channel", "entry_ap_phy1-ap0_channel"),
+                self._ent(
+                    "sensor.x_eth0_rx",
+                    "entry_iface_eth0_rx",
+                    disabled_by=er.RegistryEntryDisabler.USER,
+                ),
+                self._ent("sensor.x_uptime", "entry_uptime"),
+            ]
+        )
+        ent_reg.async_update_entity.assert_called_once_with(
+            "sensor.x_phy1_ap0_channel",
+            disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+        )
+
+    @pytest.mark.asyncio
+    async def test_migration_minor1_runs_disable_and_bumps(self):
+        from custom_components.openwrt_router import async_migrate_entry
+
+        entry = _make_entry()
+        entry.version = 2
+        entry.minor_version = 1
+        hass = MagicMock()
+
+        with patch(
+            "custom_components.openwrt_router._disable_legacy_dynamic_sensors"
+        ) as mock_disable:
+            assert await async_migrate_entry(hass, entry) is True
+
+        mock_disable.assert_called_once_with(hass, entry)
+        hass.config_entries.async_update_entry.assert_called_once_with(
+            entry, minor_version=2
+        )
+
+    @pytest.mark.asyncio
+    async def test_migration_minor2_is_noop(self):
+        from custom_components.openwrt_router import async_migrate_entry
+
+        entry = _make_entry()
+        entry.version = 2
+        entry.minor_version = 2
+        hass = MagicMock()
+
+        with patch(
+            "custom_components.openwrt_router._disable_legacy_dynamic_sensors"
+        ) as mock_disable:
+            assert await async_migrate_entry(hass, entry) is True
+
+        mock_disable.assert_not_called()
+        hass.config_entries.async_update_entry.assert_not_called()
+
+    def test_new_entries_start_at_minor_version_2(self):
+        from custom_components.openwrt_router.config_flow import OpenWrtConfigFlow
+
+        assert OpenWrtConfigFlow.VERSION == 2
+        assert OpenWrtConfigFlow.MINOR_VERSION == 2
+
+
+class TestOutageTrackerWiring:
+    @pytest.mark.asyncio
+    async def test_setup_registers_router_and_unload_unregisters(self):
+        hass = _make_hass()
+        entry = _make_entry()
+        mock_api = AsyncMock()
+        mock_api.reset_acl_blocked = MagicMock()
+        mock_coordinator = MagicMock()
+        mock_coordinator.async_config_entry_first_refresh = AsyncMock()
+        tracker = MagicMock()
+
+        with patch(
+            "custom_components.openwrt_router.async_get_clientsession",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtAPI",
+            return_value=mock_api,
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtCoordinator",
+            return_value=mock_coordinator,
+        ), patch(
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            AsyncMock(return_value=False),
+        ), patch(
+            "custom_components.openwrt_router.async_get_outage_tracker",
+            return_value=tracker,
+        ):
+            assert await async_setup_entry(hass, entry) is True
+
+        assert tracker.register.call_args.args[:2] == ("test_entry_id", "OpenWrt-Test")
+        mock_coordinator.attach_outage_tracker.assert_called_once_with(tracker)
+        # The unload callbacks unregister exactly this entry and drop its
+        # RAM pressure issue.
+        with patch("custom_components.openwrt_router.issues.ir") as mock_ir:
+            for call in entry.async_on_unload.call_args_list:
+                call.args[0]()
+        tracker.unregister.assert_called_once_with("test_entry_id")
+        mock_ir.async_delete_issue.assert_called_once_with(
+            hass, "openwrt_router", "ram_high_test_entry_id"
+        )
+
+
+class TestChannelPlanWiring:
+    @pytest.mark.asyncio
+    async def test_listener_evaluates_and_unload_unregisters(self):
+        hass = _make_hass()
+        entry = _make_entry()
+        mock_api = AsyncMock()
+        mock_api.reset_acl_blocked = MagicMock()
+        mock_coordinator = MagicMock()
+        mock_coordinator.async_config_entry_first_refresh = AsyncMock()
+        remove_listener = MagicMock()
+        mock_coordinator.async_add_listener = MagicMock(return_value=remove_listener)
+        monitor = MagicMock()
+
+        with patch(
+            "custom_components.openwrt_router.async_get_clientsession",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtAPI",
+            return_value=mock_api,
+        ), patch(
+            "custom_components.openwrt_router.OpenWrtCoordinator",
+            return_value=mock_coordinator,
+        ), patch(
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            AsyncMock(return_value=False),
+        ), patch(
+            "custom_components.openwrt_router.async_get_outage_tracker",
+            return_value=MagicMock(),
+        ), patch(
+            "custom_components.openwrt_router.async_get_channel_plan_monitor",
+            return_value=monitor,
+        ):
+            assert await async_setup_entry(hass, entry) is True
+
+        listener = mock_coordinator.async_add_listener.call_args.args[0]
+        listener()
+        monitor.evaluate.assert_called_once_with("test_entry_id", mock_coordinator)
+
+        callbacks = [c.args[0] for c in entry.async_on_unload.call_args_list]
+        assert remove_listener in callbacks
+        with patch("custom_components.openwrt_router.issues.ir"):
+            for cb in callbacks:
+                cb()
+        monitor.unregister.assert_called_once_with("test_entry_id")
