@@ -428,6 +428,9 @@ DFS_EVIDENCE_SECONDS = 15 * 60
 # DHCP health (F5): pools and static hosts from `uci get dhcp`, refreshed
 # every DHCP_CONFIG_REFRESH_CYCLES polls on routers with an active pool.
 DHCP_CONFIG_REFRESH_CYCLES = 10
+# Routers without an active pool (or without uci access) are asked again
+# this rarely, so a pool enabled later shows up without a reload.
+DHCP_CONFIG_RETRY_CYCLES = 60
 LOG_STATUS_PENDING = "pending"
 LOG_STATUS_OK = "ok"
 # Not "unavailable": that state is reserved by HA for unreachable entities.

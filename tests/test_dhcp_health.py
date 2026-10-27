@@ -246,7 +246,9 @@ def _entry_with(leases=None, arp=None, static=frozenset(), data=True):
     if not data:
         entry.runtime_data.coordinator.data = None
         return entry
+    entry.runtime_data.coordinator.last_update_success = True
     d = entry.runtime_data.coordinator.data
+    d.dhcp_pools = []
     d.dhcp_leases = leases or {}
     d.arp_table = arp or {}
     d.dhcp_static_macs = static
@@ -340,3 +342,49 @@ class TestPoolSensor:
         sensor = OpenWrtDhcpPoolSensor(mock_coordinator, mock_config_entry, "lan")
         assert sensor.available is False
         assert sensor.native_value is None
+
+
+# =====================================================================
+# Review follow-ups (P5)
+# =====================================================================
+
+
+class TestReviewFollowUps:
+    def test_anonymous_pool_named_after_interface(self):
+        pools, _ = parse_dhcp_config(
+            {"cfg01411c": {".type": "dhcp", ".anonymous": True, ".name": "cfg01411c", "interface": "lan"}}
+        )
+        assert pools == [Pool("lan", "lan", 100, 150)]
+
+    def test_unknown_while_dhcp_server_is_stale(self):
+        from custom_components.openwrt_router.fleet import dhcp_context
+
+        server = _entry_with(leases={"02:00:00:00:00:0a": {}})
+        server.runtime_data.coordinator.data.dhcp_pools = [{"name": "lan"}]
+        hass = MagicMock()
+        hass.config_entries.async_loaded_entries.return_value = [server]
+        assert dhcp_context(hass) is not None
+        server.runtime_data.coordinator.last_update_success = False
+        assert dhcp_context(hass) is None
+        server.runtime_data.coordinator.last_update_success = True
+        server.runtime_data.coordinator.data.dhcp_leases = {}
+        assert dhcp_context(hass) is None
+
+    def test_static_host_with_arp_is_pending_first(self):
+        since = (NOW - timedelta(seconds=30)).isoformat()
+        assert client_dhcp_status(MAC, since, NOW, set(), {MAC}, {MAC}) == DHCP_PENDING
+
+    @pytest.mark.asyncio
+    async def test_dnsmasq_stopped_hides_pools(self):
+        coord, api = _coordinator()
+        api.get_services = AsyncMock(return_value=[{"name": "dnsmasq", "running": False}])
+        data = await _polls(coord, 3)
+        assert api.get_dhcp_config.await_count >= 1
+        assert data.dhcp_pools == []
+
+    @pytest.mark.asyncio
+    async def test_rare_retry_without_pool(self):
+        coord, api = _coordinator()
+        api.get_dhcp_config = AsyncMock(return_value={})
+        await _polls(coord, 60)
+        assert api.get_dhcp_config.await_count == 2  # poll 2 and poll 60

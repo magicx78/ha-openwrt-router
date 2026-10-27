@@ -62,9 +62,14 @@ def parse_dhcp_config(values: Any) -> tuple[list[Pool], frozenset[str]]:
                 or start < 0
             ):
                 continue
-            pools.append(
-                Pool(str(section.get(".name") or name), interface, start, limit)
+            # Anonymous sections get a hash name (cfgXXXXXX) that changes
+            # with their options: name them after the interface instead.
+            pool_name = (
+                interface
+                if _truthy(section.get(".anonymous"))
+                else str(section.get(".name") or name)
             )
+            pools.append(Pool(pool_name, interface, start, limit))
         elif kind == "host":
             macs = section.get("mac")
             if isinstance(macs, str):
@@ -152,8 +157,8 @@ def client_dhcp_status(
         since is not None
         and (now - since).total_seconds() >= DHCP_MISSING_AFTER_SECONDS
     )
-    if settled and mac in static_macs:
-        return DHCP_STATIC_NO_LEASE
+    if mac in static_macs:
+        return DHCP_STATIC_NO_LEASE if settled else DHCP_PENDING
     if mac in arp_macs:
         return DHCP_OK  # address configured on the device itself
     return DHCP_MISSING if settled else DHCP_PENDING

@@ -36,6 +36,7 @@ from .const import (
     DEFAULT_SERVICES,
     DFS_EVIDENCE_SECONDS,
     DHCP_CONFIG_REFRESH_CYCLES,
+    DHCP_CONFIG_RETRY_CYCLES,
     DOMAIN,
     ERROR_TYPE_AUTH,
     ERROR_TYPE_CONNECTION,
@@ -724,10 +725,23 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                     self._dhcp_pools
                     and self._board_poll_count % DHCP_CONFIG_REFRESH_CYCLES == 0
                 )
+                or self._board_poll_count % DHCP_CONFIG_RETRY_CYCLES == 0
             ):
                 await self._fetch_dhcp_config()
-            data.dhcp_pools = pool_usage(
-                self._dhcp_pools, data.network_interfaces, data.dhcp_leases
+            # A pool counts only while dnsmasq runs (dumb AP with the service
+            # disabled but no "ignore" in its config). Services are fetched
+            # later in the poll, so the previous poll's state is used.
+            dnsmasq_stopped = any(
+                s.get("name") == "dnsmasq" and s.get("running") is False
+                for s in (self.data.services if self.data else [])
+                if isinstance(s, dict)
+            )
+            data.dhcp_pools = (
+                []
+                if dnsmasq_stopped
+                else pool_usage(
+                    self._dhcp_pools, data.network_interfaces, data.dhcp_leases
+                )
             )
             data.dhcp_static_macs = self._dhcp_static_macs
 
