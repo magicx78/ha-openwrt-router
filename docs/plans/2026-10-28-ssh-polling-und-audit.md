@@ -7,10 +7,10 @@
 ## Status
 
 - **Stand:** 2026-10-27 (abends) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** Teil 1 `fix/ssh-polling` · PR #37 (1.38.3) · Basis: v1.38.2 (`7d77f0f`) — Teil 2 gestapelt: A1 `fix/auth-errors` · PR #38 (1.38.4) auf #37; A2 `fix/hostapd-iface-cache` · PR #39 (1.38.5) auf #38; A11 `fix/topology-lldp-chain` · PR #40 (1.38.6) auf #39
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1, A2 und A11 inkl. Fixes abgeschlossen · **Offen:** Merge und Release #37 → #38 → #39 → #40 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A3–A10, A12–A14
+- **Branch/PR:** Teil 1 `fix/ssh-polling` · PR #37 **gemergt** (`5372d12`, Release v1.38.3 am 2026-10-27 20:05) — Teil 2 gestapelt: A1 `fix/auth-errors` · PR #38 (1.38.4) jetzt auf `main`; A2 `fix/hostapd-iface-cache` · PR #39 (1.38.5) auf #38; A11 `fix/topology-lldp-chain` · PR #40 (1.38.6) auf #39
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1, A2 und A11 inkl. Fixes abgeschlossen · **Offen:** Merge und Release #38 → #39 → #40 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A3–A10, A12–A14
 - **Blocker:** –
-- **Nächster Schritt:** Merge-Freigabe #37 → #38 → #39 → #40 durch den Nutzer (jeder Merge ein Release), Installation 1.38.6, AK6 messen (SSH-Logins, rpcd-RSS ≥ 1 h); dann A4 (WAN-Erkennung, E5) auf aktuellem `origin/main`
+- **Nächster Schritt:** Merge-Freigabe #38 → #39 → #40 durch den Nutzer (jeder Merge ein Release); Installation von 1.38.3 (oder später 1.38.6) durch den Nutzer, dann AK6 messen (SSH-Logins je Minute auf `openwrt`, `ap2`, `ap4`; rpcd-RSS ≥ 1 h); danach A4 (WAN-Erkennung, E5)
 
 ## Problem und Zielverhalten
 
@@ -466,3 +466,6 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   gegen alle Gateways. P3: Docstrings, Testkosmetik, CHANGELOG-Einschränkungen. 5 neue Tests
   (vorher rot), lokal 1375 grün; PR #40 aktualisiert. Nicht geändert (vorbestehend): Doppel-
   beobachtung desselben Paars (LAG) kollabiert auf eine Kante.
+- 2026-10-27 PR #37 gemergt (`5372d12`) nach Freigabe des Nutzers, CI grün (tests 3.13/3.14, hassfest,
+  hacs); Release-Workflow erfolgreich, **v1.38.3** veröffentlicht (20:05, Release-Text aus dem
+  CHANGELOG); HACS per `update_information` aufgefrischt; PR #38 auf `main` umgehängt (mergebar).
