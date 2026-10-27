@@ -2,6 +2,27 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.34.0] - 2026-10-27
+
+### Added
+
+- **DFS-Ereignisse und Kanalwechsel.** Event `openwrt_router_dfs_event`:
+  - aus dem Router-Log (hostapd): `radar_detected`, `cac_start`,
+    `cac_completed`, `cac_failed`, `nop_finished`, `new_channel`,
+    `pre_cac_expired` mit `radio`, `interface`, `frequency`, `channel`;
+  - `channel_change`, wenn sich Kanal oder Kanalbreite eines Funkmoduls
+    zwischen zwei Abfragen ändert (`old_channel`/`new_channel`,
+    `old_width_mhz`/`new_width_mhz`). Ein Kanalwechsel holt das Router-Log
+    sofort, damit die passende DFS-Zeile schon bekannt ist.
+  - `dfs_related` ist nur wahr, wenn eine DFS-Zeile desselben Funkmoduls aus
+    den letzten 15 Minuten vorliegt (`evidence` nennt sie). Ein Kanalwechsel
+    ohne solche Zeile (manuell, ACS) ist `dfs_related: false`.
+  - Radar-Meldungen haben im Event-Budget Vorrang; die Events stehen im
+    Logbuch des Routers.
+- **Diagnosesensor „DFS-Ereignisse (24 h)“** (`dfs_events_24h`): Anzahl
+  dieser Ereignisse in den letzten 24 Stunden, Attribute `by_type` und
+  `last_event`.
+
 ## [1.33.0] - 2026-10-27
 
 ### Added
