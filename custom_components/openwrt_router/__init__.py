@@ -352,7 +352,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # Channel conflicts are judged across all routers after every poll.
     channel_plan = async_get_channel_plan_monitor(hass)
     entry.async_on_unload(
-        coordinator.async_add_listener(partial(channel_plan.evaluate, entry.entry_id))
+        coordinator.async_add_listener(
+            partial(channel_plan.evaluate, entry.entry_id, coordinator)
+        )
     )
     entry.async_on_unload(partial(channel_plan.unregister, entry.entry_id))
 

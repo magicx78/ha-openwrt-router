@@ -322,6 +322,21 @@ def _fmt(ts: datetime) -> str:
 # ----------------------------------------------------------------------
 
 
+def radios_of(entry_id: str, title: str, coordinator: Any) -> list[Radio]:
+    """Return the radios of one router; [] if its last poll failed."""
+    if coordinator is None or not coordinator.last_update_success:
+        return []
+    data = coordinator.data
+    if data is None:
+        return []
+    return radios_from_ap_interfaces(
+        entry_id,
+        title,
+        getattr(data, "ap_interfaces", []),
+        getattr(data, "sta_interfaces", []),
+    )
+
+
 @callback
 def collect_radios(hass: HomeAssistant) -> list[Radio]:
     """Return one Radio per physical radio of every reachable loaded router.
@@ -331,15 +346,9 @@ def collect_radios(hass: HomeAssistant) -> list[Radio]:
     radios: list[Radio] = []
     for entry in hass.config_entries.async_loaded_entries(DOMAIN):
         runtime = getattr(entry, "runtime_data", None)
-        coordinator = getattr(runtime, "coordinator", None)
-        if coordinator is None or not coordinator.last_update_success:
-            continue
-        data = coordinator.data
-        if data is None:
-            continue
         radios.extend(
-            radios_from_ap_interfaces(
-                entry.entry_id, entry.title, getattr(data, "ap_interfaces", [])
+            radios_of(
+                entry.entry_id, entry.title, getattr(runtime, "coordinator", None)
             )
         )
     return radios
@@ -358,22 +367,31 @@ class ChannelPlanMonitor:
     """Raise one Repairs issue for channel conflicts across all routers.
 
     ``evaluate`` runs after every coordinator update of a router (listener
-    wired in __init__). DFS findings never count as a conflict.
+    wired in __init__). DFS findings never count as a conflict. A failed poll
+    changes nothing; a raised issue is only cleared after
+    CHANNEL_CONFLICT_POLLS conflict-free evaluations in a row, so one partial
+    poll without radio data does not drop (and re-raise) it.
     """
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self._streak: dict[str, int] = {}
+        self._clean_streak = 0
         self._summary: str | None = None  # findings text of the raised issue
 
     @callback
-    def evaluate(self, entry_id: str) -> None:
+    def evaluate(self, entry_id: str, coordinator: Any = None) -> None:
         """Re-check the fleet after ``entry_id`` finished a poll."""
+        if coordinator is not None and not coordinator.last_update_success:
+            return
         conflicts = self._conflicts()
         if not conflicts:
             self._streak.clear()
-            self._clear()
+            self._clean_streak += 1
+            if self._clean_streak >= CHANNEL_CONFLICT_POLLS:
+                self._clear()
             return
+        self._clean_streak = 0
         involved = any(entry_id in f["entry_ids"] for f in conflicts)
         self._streak[entry_id] = self._streak.get(entry_id, 0) + 1 if involved else 0
         if self._summary is None and (
@@ -385,7 +403,8 @@ class ChannelPlanMonitor:
     @callback
     def unregister(self, entry_id: str) -> None:
         """Forget a router (entry unloaded) and re-check a raised issue."""
-        self._streak.pop(entry_id, None)
+        self._streak.clear()
+        self._clean_streak = 0
         if self._summary is None:
             return
         conflicts = [f for f in self._conflicts() if entry_id not in f["entry_ids"]]

@@ -151,6 +151,30 @@ class TestRadiosFromApInterfaces:
         assert minus.center == 9
         assert plus.center == 3
 
+    def test_band_key_corrected_by_channel(self):
+        """UCI fallback: radio0 may be the 5 GHz radio (name heuristic)."""
+        (radio,) = _radios(
+            "gw", [{"ifname": "default_radio0", "channel": 36, "band": "2.4g", "phy": "radio0"}]
+        )
+        assert radio.band == "5g"
+        assert analyze([radio]) == []
+
+    def test_non_ap_modes_are_skipped(self):
+        ifaces = [
+            dict(_iface("phy1-sta0", 36), mode="Client"),
+            dict(_iface("phy1-mesh0", 36), mode="Mesh Point"),
+            dict(_iface("default_radio1", 36), mode="sta"),
+            dict(_iface("phy1-ap0", 40), mode="Master"),
+        ]
+        assert [(r.phy, r.channel) for r in _radios("gw", ifaces)] == [("phy1", 40)]
+
+    def test_multi_band_wiphy_keeps_one_radio_per_band(self):
+        ifaces = [
+            _iface("phy0.0-ap0", 1, phy="phy0"),
+            _iface("phy0.1-ap0", 36, phy="phy0"),
+        ]
+        assert sorted(r.band for r in _radios("gw", ifaces)) == ["2.4g", "5g"]
+
     def test_24ghz_width_capped_at_40(self):
         (radio,) = _radios("gw", [_iface("phy0-ap0", 6, "HE80")])
         assert radio.width == 40
@@ -246,7 +270,7 @@ class TestAnalyze:
         )
         assert _types(analyze(radios)) == [FINDING_NON_STANDARD_24, FINDING_OVERLAP]
 
-    def test_24ghz_1_6_11_and_1_5_touching_do_not_overlap(self):
+    def test_24ghz_1_6_11_do_not_overlap(self):
         radios = (
             _radios("gw", [_iface("phy0-ap0", 1)])
             + _radios("ap2", [_iface("phy0-ap0", 6)])
@@ -254,11 +278,48 @@ class TestAnalyze:
         )
         assert analyze(radios) == []
 
+    def test_24ghz_1_and_5_only_touch(self):
+        """20 MHz on 1 (2402–2422) and 5 (2422–2442): no overlap, 5 is non-standard."""
+        radios = _radios("gw", [_iface("phy0-ap0", 1)]) + _radios(
+            "ap2", [_iface("phy0-ap0", 5)]
+        )
+        assert _types(analyze(radios)) == [FINDING_NON_STANDARD_24]
+
+    @pytest.mark.parametrize("htmode", ["HE20", "HE40", "HE80"])
+    def test_144_and_149_never_overlap(self, htmode):
+        radios = _radios("gw", [_iface("phy1-ap0", 144, htmode)]) + _radios(
+            "ap2", [_iface("phy1-ap0", 149, htmode)]
+        )
+        types = _types(analyze(radios))
+        assert FINDING_OVERLAP not in types
+        assert types.count(FINDING_DFS) == 1  # only 144 (… 132–144 block)
+
     def test_24ghz_40mhz_on_1_overlaps_6(self):
         radios = _radios("gw", [_iface("phy0-ap0", 1, "HT40+")]) + _radios(
             "ap2", [_iface("phy0-ap0", 6)]
         )
         assert _types(analyze(radios)) == [FINDING_OVERLAP]
+
+    def test_repeater_backhaul_is_not_a_conflict(self):
+        """A repeater's AP shares the channel of the uplink it connects to."""
+        upstream = _radios("gw", [_iface("phy1-ap0", 36)])
+        repeater = radios_from_ap_interfaces(
+            "rep",
+            "Router rep",
+            [_iface("phy1-ap0", 36), _iface("phy0-ap0", 6)],
+            [{"ifname": "phy1-sta0", "mode": "Client"}],
+        )
+        assert [r.backhaul for r in repeater if r.phy == "phy1"] == [True]
+        assert analyze(upstream + repeater) == []
+        attrs = next(r for r in repeater if r.phy == "phy1").as_attr()
+        assert attrs["backhaul"] is True
+        assert attrs["band"] == "5g"
+
+    def test_backhaul_radio_still_reports_dfs(self):
+        repeater = radios_from_ap_interfaces(
+            "rep", "Router rep", [_iface("phy1-ap0", 100)], [{"ifname": "phy1-mesh0"}]
+        )
+        assert _types(analyze(repeater)) == [FINDING_DFS]
 
     def test_bands_are_never_compared(self):
         radios = _radios("gw", [_iface("phy0-ap0", 1)]) + _radios(
@@ -401,15 +462,43 @@ class TestChannelPlanMonitor:
         fleet.monitor.evaluate("gw")
         assert len(fleet.created) == 1
 
-    def test_cleared_once_conflicts_are_gone(self, fleet):
+    def test_cleared_after_two_clean_evaluations(self, fleet):
         fleet.set(**CONFLICT)
         for _ in range(2):
             fleet.monitor.evaluate("gw")
         fleet.set(gw=[_iface("phy1-ap0", 36)], ap2=[_iface("phy1-ap0", 44)])
         fleet.monitor.evaluate("ap2")
+        assert fleet.deleted == []
+        fleet.monitor.evaluate("gw")
         assert fleet.deleted == ["channel_plan_conflict"]
         fleet.monitor.evaluate("ap2")
         assert fleet.deleted == ["channel_plan_conflict"]  # only once
+
+    def test_one_poll_without_radio_data_keeps_the_issue(self, fleet):
+        """Partial poll: ap_interfaces empty once → no clear + re-raise."""
+        fleet.set(**CONFLICT)
+        for _ in range(2):
+            fleet.monitor.evaluate("gw")
+        fleet.set(gw=CONFLICT["gw"], ap2=[])
+        fleet.monitor.evaluate("ap2")
+        fleet.set(**CONFLICT)
+        fleet.monitor.evaluate("ap2")
+        assert fleet.deleted == []
+        assert len(fleet.created) == 1
+
+    def test_failed_poll_of_the_router_changes_nothing(self, fleet):
+        fleet.set(**CONFLICT)
+        for _ in range(2):
+            fleet.monitor.evaluate("gw")
+        failed = MagicMock(last_update_success=False)
+        fleet.set(gw=CONFLICT["gw"])  # ap2 dropped out of collect_radios
+        for _ in range(3):
+            fleet.monitor.evaluate("ap2", failed)
+        assert fleet.deleted == []
+        ok = MagicMock(last_update_success=True)
+        fleet.monitor.evaluate("gw", ok)
+        fleet.monitor.evaluate("gw", ok)
+        assert fleet.deleted == ["channel_plan_conflict"]
 
     def test_issue_updated_only_when_findings_change(self, fleet):
         fleet.set(**CONFLICT)
@@ -429,6 +518,15 @@ class TestChannelPlanMonitor:
         fleet.set(gw=CONFLICT["gw"])
         fleet.monitor.unregister("ap2")
         assert fleet.deleted == ["channel_plan_conflict"]
+
+    def test_unregister_resets_running_streaks(self, fleet):
+        fleet.set(**CONFLICT)
+        fleet.monitor.evaluate("gw")  # gw streak 1
+        fleet.monitor.unregister("ap2")  # ap2 reloads
+        fleet.monitor.evaluate("gw")
+        assert not fleet.created
+        fleet.monitor.evaluate("gw")
+        assert len(fleet.created) == 1
 
     def test_unregister_without_issue_is_quiet(self, fleet):
         fleet.set(**CONFLICT)
@@ -483,6 +581,14 @@ class TestChannelPlanSensor:
         assert all("entry_ids" not in f for f in attrs["findings"])
         assert {r["radio"] for r in attrs["radios"]} == {"phy0", "phy1"}
         assert self._sensor(fleet, "ap4").native_value == 2
+
+    def test_own_radios_while_entry_is_not_loaded_yet(self, fleet):
+        """During setup the own entry is missing from async_loaded_entries."""
+        fleet.set(**CONFLICT)
+        sensor = self._sensor(fleet, "gw")
+        fleet.entries = [e for e in fleet.entries if e.entry_id != "gw"]
+        assert sensor.native_value == 1
+        assert [r["radio"] for r in sensor.extra_state_attributes["radios"]] == ["phy1"]
 
     def test_without_hass_returns_zero(self, fleet):
         fleet.set(**CONFLICT)
