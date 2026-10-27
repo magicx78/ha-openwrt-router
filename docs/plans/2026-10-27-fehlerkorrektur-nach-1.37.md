@@ -3,10 +3,10 @@
 ## Status
 
 - **Stand:** 2026-10-27 · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** `fix/post-1.37-findings` · PR #33 (A) · `fix/acl-v7-cpu-per-core` · PR B · Basis: v1.37.4 (`c5a25f9`)
-- **Erledigt:** B1, P1, P2, P6 (PR #33, 1.37.5), P3 (PR B, 1.38.0) · **Offen:** P4, P5, B2, B3
+- **Branch/PR:** `fix/post-1.37-findings` · PR #33 (A) · `fix/acl-v7-cpu-per-core` · PR #34 (B) · `fix/wireless-channel-ssh-fallback` · PR C · Basis: v1.37.4 (`c5a25f9`)
+- **Erledigt:** B1, P1, P2, P6 (PR #33, 1.37.5), P3 (PR #34, 1.38.0), P4 (PR C, 1.38.1) · **Offen:** P5, B2, B3
 - **Blocker:** –
-- **Nächster Schritt:** P4 als PR C (1.38.1), gestapelt auf PR B
+- **Nächster Schritt:** P5 + B2 als PR D (1.38.2), gestapelt auf PR C
 
 ## Problem und Zielverhalten
 
@@ -46,6 +46,7 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 10. **Aufräumen:** `switch._format_band` mit toten Einträgen `2g`/`60g`; `channel_plan`/`client_stability` importieren den privaten Helfer `api._band_from_frequency`. **Verifiziert im Code**.
 11. **Release/Doku:** Release-Texte enthalten nur „siehe CHANGELOG.md“; `PROGRESS.md`/`TODO.md` stehen auf 1.28.0; die GitHub-Repo-Beschreibung (von HACS angezeigt) nennt „v1.4.0“. **Verifiziert**.
 12. **rpcd-Speicher mit ACL v6:** Messung läuft bis etwa 17:15. Bisher APs flach (`ap2` 2972→3000 kB in 15 min), Gateway schwankt 2400–2860 kB. **Annahme:** kein neues Leck; Auswertung nach Messende.
+14. **`uci_section` im Pfad `network.wireless status`:** `_parse_wireless_status` liest `section` aus `config`, netifd liefert es neben `ifname`; deaktivierte Interfaces fehlen dort ganz. Betrifft nur Router mit WLAN-Methode `network.wireless` – die drei Router hier nutzen den UCI-Pfad (live: `uci_section` gesetzt, `ifname` leer). Ein Fix ändert die `unique_id` der WLAN-Schalter solcher Router (Registry) und braucht eine eigene Entscheidung. **Verifiziert im Code und an Live-Attributen**, nicht geändert.
 13. **Wiederhergestellte Device-Tracker mit altem AP-Namen:** zwei `device_tracker.secureap_ap3_*` gehören inzwischen zu den Einträgen von Gateway bzw. `ap4`, stehen auf `unavailable` (`restored: true`). Kosmetisch, Ursache vermutlich der Claim-Wechsel im Device-Tracker. **Verifiziert** (Template), niedrige Priorität.
 
 ## Entscheidungen
@@ -91,4 +92,6 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 - 2026-10-27 `fix/post-1.37-findings` (PR A) – lokal: ruff 0.17.3 sauber, 1174 Tests grün (vorher 1136; neue Tests für P1/P2 vor dem Fix rot) · Hardware: nicht nötig · Review: folgt.
 - 2026-10-27 PR #33 Review (unabhängig): keine P0/P1; P2 (fehlschlagendes `network.reload` nach Commit galt als Commit-Fehler) und P3-Punkte behoben (`0f8985f`), 1179 Tests grün.
 - 2026-10-27 `fix/acl-v7-cpu-per-core` (PR B) – lokal: ruff 0.17.3 sauber, 1214 Tests grün (35 neue, 32 davon vor der Änderung rot) · Hardware: ACL v7 nicht verteilt (Lücke: Sensor = loadavg/nproc, Schalter konfiguriert das Radio nur einmal, rpcd-Neustart je Router) · Review: folgt.
+- 2026-10-27 PR #34 Review (unabhängig): keine P0–P2; P3 behoben (`6d9aa96`: Retry trotz gecachter ACL-Sperre, 5xx kurzfristig, 4-KiB-Hinweis, CHANGELOG), 1216 Tests grün.
+- 2026-10-27 `fix/wireless-channel-ssh-fallback` (PR C) – lokal: 23 neue Tests (13 vor der Änderung rot), nach Merge von #34 grün · Hardware: SSH-Fallback nicht vorhanden (Lücke) · Review: folgt.
 - 2026-10-27 B1 – drei Config-Entries entfernt; danach 3 Einträge, alle `loaded`. Sicherung vorher: HA-Backup vom selben Tag, 13:46.
