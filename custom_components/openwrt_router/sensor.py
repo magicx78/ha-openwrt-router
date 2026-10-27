@@ -433,7 +433,12 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
         icon="mdi:wifi-alert",
-        value_fn=lambda data: data.client_stability.get("unstable_count", 0),
+        # Unknown while the router log cannot be read (no reconnect data)
+        value_fn=lambda data: (
+            data.client_stability.get("unstable_count", 0)
+            if data.log_status not in (LOG_STATUS_PENDING, LOG_STATUS_NOT_PERMITTED)
+            else None
+        ),
         extra_attrs_fn=lambda data: {
             "top": data.client_stability.get("unstable", []),
         },

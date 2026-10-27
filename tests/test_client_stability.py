@@ -212,9 +212,9 @@ class TestCoordinatorStability:
         assert api.get_usteer_clients.await_count == 1  # retried only every 30 polls
         (weak,) = data.client_stability["weak"]
         assert (weak["mac"], weak["signal"], weak["band"]) == (A.upper(), -78, "2.4g")
-        for i in range(14, 32):
+        for i in range(14, 34):
             await _poll(coord, t0 + 60 * i)
-        assert api.get_usteer_clients.await_count == 2  # poll 31
+        assert api.get_usteer_clients.await_count == 2  # poll 33 (3 + 30)
 
     @pytest.mark.asyncio
     async def test_counts_from_log_lines(self):
@@ -332,11 +332,110 @@ class TestUnstableSensor:
 
         desc = next(d for d in SENSOR_DESCRIPTIONS if d.key == "unstable_clients")
         mock_coordinator.data.client_stability = {"unstable_count": 2, "unstable": [{"mac": A}]}
+        mock_coordinator.data.log_status = "ok"
         sensor = OpenWrtSensorEntity(coordinator=mock_coordinator, entry=mock_config_entry, description=desc)
         assert sensor.native_value == 2
+        mock_coordinator.data.log_status = "not_permitted"
+        assert sensor.native_value is None
         assert sensor.extra_state_attributes == {"top": [{"mac": A}]}
         for legacy in ("_rate", "_ap_", "_port_", "_radio_", "_iface_"):
             assert legacy not in sensor.unique_id
 
     def test_hold_constant(self):
         assert STICKY_HOLD_SECONDS == 600
+
+
+# =====================================================================
+# Review follow-ups (P6)
+# =====================================================================
+
+
+class TestReviewFollowUps:
+    @pytest.mark.asyncio
+    async def test_object_not_found_switches_to_fallback(self):
+        from custom_components.openwrt_router.api import OpenWrtResponseError
+
+        coord, api = _coordinator()
+        t0 = T / 1000
+        for i in range(0, 14):
+            data = await _poll(coord, t0 + 60 * i)
+        assert data.client_stability["sticky"]
+        api.get_usteer_clients = AsyncMock(side_effect=OpenWrtResponseError("Object not found"))
+        for i in range(14, 17):
+            data = await _poll(coord, t0 + 60 * i)
+        assert data.client_stability["usteer"] == USTEER_STATUS_UNAVAILABLE
+        assert data.client_stability["sticky"] == []
+
+    @pytest.mark.asyncio
+    async def test_transient_error_drops_stale_candidates(self):
+        from custom_components.openwrt_router.api import OpenWrtTimeoutError
+
+        coord, api = _coordinator()
+        t0 = T / 1000
+        for i in range(0, 14):
+            await _poll(coord, t0 + 60 * i)
+        api.get_usteer_clients = AsyncMock(side_effect=OpenWrtTimeoutError("slow"))
+        for i in range(14, 17):
+            data = await _poll(coord, t0 + 60 * i)
+        assert data.client_stability["usteer"] == USTEER_STATUS_OK
+        assert data.client_stability["sticky"] == []
+
+    @pytest.mark.asyncio
+    async def test_old_baseline_lines_are_not_reconnects(self):
+        coord, api = _coordinator()
+        old = T - 30 * 3600 * 1000
+        lines = []
+        for k in range(3):
+            base = old + k * 3_600_000
+            lines.append({"msg": f"hostapd: phy0-ap1: AP-STA-DISCONNECTED {A}", "id": 2 * k + 1, "time": base})
+            lines.append({"msg": f"hostapd: phy0-ap1: AP-STA-CONNECTED {A} auth_alg=open", "id": 2 * k + 2, "time": base + 60_000})
+        api.get_log_entries = AsyncMock(return_value=lines)
+        await _poll(coord, T / 1000)
+        data = await _poll(coord, T / 1000)
+        assert A.upper() not in data.client_stability["clients"]
+        assert data.client_stability["unstable_count"] == 0
+
+    def test_band_steering_is_no_reconnect(self):
+        tr = AssociationTracker()
+        tr.disconnected(A, T, "phy0-ap1")
+        tr.connected(A, T + 5_000, "phy1-ap1")
+        tr.disconnected(A, T + 10_000, "phy1-ap1")
+        tr.connected(A, T + 20_000, "phy1-ap1")
+        assert tr.counts(T + 30_000)[A] == {"associations_24h": 2, "reconnects_24h": 1}
+
+    def test_only_same_band_and_ssid_count(self):
+        raw = {
+            A: {
+                "hostapd.phy0-ap1": {"connected": True, "signal": -78},
+                "192.0.2.2#hostapd.phy1-ap1": {"signal": -55},  # 5 GHz elsewhere
+                "192.0.2.2#hostapd.phy0-ap0": {"signal": -60},  # other SSID
+                "192.0.2.4#hostapd.phy0-ap1": {"signal": -69},  # same band + SSID
+            }
+        }
+        info = {
+            "hostapd.phy0-ap1": ("2.4g", "iot"),
+            "192.0.2.2#hostapd.phy1-ap1": ("5g", "iot"),
+            "192.0.2.2#hostapd.phy0-ap0": ("2.4g", "home"),
+            "192.0.2.4#hostapd.phy0-ap1": ("2.4g", "iot"),
+        }
+        (cand,) = sticky_candidates(parse_usteer_clients(raw), info).values()
+        assert cand["better_node"] == "192.0.2.4#hostapd.phy0-ap1"
+        assert cand["delta_db"] == 9
+        info["192.0.2.4#hostapd.phy0-ap1"] = ("2.4g", "home")
+        assert sticky_candidates(parse_usteer_clients(raw), info) == {}
+
+    def test_fleet_node_info(self):
+        from custom_components.openwrt_router.fleet import usteer_node_info
+
+        entry = _entry("ap2", {}, ap=[{"ifname": "phy0-ap1", "frequency": 2437, "ssid": "iot"}])
+        entry.data = {"host": "192.0.2.2"}
+        hass = MagicMock()
+        hass.config_entries.async_loaded_entries.return_value = [entry]
+        assert usteer_node_info(hass) == {"192.0.2.2#hostapd.phy0-ap1": ("2.4g", "iot")}
+
+    @pytest.mark.asyncio
+    async def test_diagnostics_without_client_macs(self):
+        coord, api = _coordinator()
+        data = await _poll(coord, T / 1000)
+        assert "clients" in data.client_stability
+        assert "clients" not in data.as_dict()["client_stability"]
