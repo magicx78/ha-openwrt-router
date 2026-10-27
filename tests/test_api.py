@@ -2968,3 +2968,18 @@ class TestAuthErrorsSurface:
         mock_api._call = AsyncMock(side_effect=OpenWrtAuthError("denied"))
         with pytest.raises(OpenWrtAuthError):
             await mock_api.get_router_info()
+
+
+class TestBoardFallbackWarningOnce:
+    @pytest.mark.asyncio
+    async def test_board_not_permitted_warns_once_per_instance(self, mock_api, caplog):
+        caplog.set_level(logging.DEBUG, logger=api_module.__name__)
+        mock_api._call = AsyncMock(side_effect=OpenWrtMethodNotFoundError("acl"))
+        await mock_api.get_router_info()
+        await mock_api.get_router_info()
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "system/board" in r.getMessage()
+        ]
+        assert len(warnings) == 1

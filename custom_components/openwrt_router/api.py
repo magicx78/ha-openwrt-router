@@ -974,6 +974,9 @@ class OpenWrtAPI:
         # C-1: closing flag to prevent new calls during shutdown
         self._closing: bool = False
 
+        # get_router_info() warned once that system/board is not readable.
+        self._board_fallback_warned: bool = False
+
         # One asyncssh connection per instance, reused by every SSH command
         # of a poll and released by the coordinator at the end of the poll
         # (async_release_ssh) or on unload (async_close). The lock serialises
@@ -1383,11 +1386,15 @@ class OpenWrtAPI:
         try:
             result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_BOARD, {})
         except OpenWrtMethodNotFoundError as err:
-            _LOGGER.warning(
+            # Once per instance at WARNING (the coordinator asks again every
+            # BOARD_REFRESH_CYCLES polls), afterwards DEBUG.
+            _LOGGER.log(
+                logging.DEBUG if self._board_fallback_warned else logging.WARNING,
                 "Cannot read system/board on %s (%s). Using fallback router info.",
                 self._host,
                 err,
             )
+            self._board_fallback_warned = True
             result = {}
 
         # Extract platform architecture from various sources
