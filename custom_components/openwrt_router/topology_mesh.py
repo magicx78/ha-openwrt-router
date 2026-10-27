@@ -1086,6 +1086,30 @@ def _is_mac_like(value: str) -> bool:
     return len(hexonly) == 12 and all(c in "0123456789abcdef" for c in hexonly)
 
 
+def _device_for_mac(dev_reg: dr.DeviceRegistry, mac: str) -> dr.DeviceEntry | None:
+    """Return the device any integration registered for a client MAC, or None.
+
+    Since HA 2026.8 a device belongs to one config entry, so several
+    integrations can register the same MAC; ``async_get_devices`` returns all
+    of them; the one the user renamed wins, then one with a real (non-MAC)
+    name, otherwise the first. Cores
+    before 2026.8 (floor 2026.2) only have ``async_get_device``, which is
+    deprecated since 2026.9 and ends in 2027.8.
+    """
+    connections = {(dr.CONNECTION_NETWORK_MAC, mac)}
+    get_devices = getattr(dev_reg, "async_get_devices", None)
+    if get_devices is None:
+        return dev_reg.async_get_device(connections=connections)
+    devices = get_devices(connections=connections)
+    if not devices:
+        return None
+    return (
+        next((device for device in devices if device.name_by_user), None)
+        or next((d for d in devices if d.name and not _is_mac_like(d.name)), None)
+        or devices[0]
+    )
+
+
 def _apply_ha_names(
     hass: HomeAssistant, nodes: list[dict[str, Any]], entries: list[Any]
 ) -> None:
@@ -1127,9 +1151,7 @@ def _apply_ha_names(
         mac = _mac_norm(attrs.get("mac"))
         if not mac:
             continue
-        device = dev_reg.async_get_device(
-            connections={(dr.CONNECTION_NETWORK_MAC, mac)}
-        )
+        device = _device_for_mac(dev_reg, mac)
         if device is not None and device.name_by_user:
             attrs["ha_name"], attrs["ha_name_source"] = device.name_by_user, "user"
         elif mac in tracker_names:

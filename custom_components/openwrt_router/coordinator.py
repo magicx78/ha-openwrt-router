@@ -1228,13 +1228,28 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         return phy_of(ifname)
 
     def _router_device_id(self) -> str | None:
-        """Device registry id of this router (logbook filters by device_id)."""
+        """Device registry id of this router (logbook filters by device_id).
+
+        Looked up in this entry's own devices via
+        ``async_get_device_by_identifier`` (HA 2026.8+). Older cores (floor
+        2026.2) only have ``async_get_device``, deprecated since 2026.9 and
+        removed in 2027.8.
+        """
         if self._device_id is None and self._entry is not None:
+            identifier = (DOMAIN, self._entry.entry_id)
             try:
-                device = dr.async_get(self.hass).async_get_device(
-                    identifiers={(DOMAIN, self._entry.entry_id)}
+                dev_reg = dr.async_get(self.hass)
+                get_by_identifier = getattr(
+                    dev_reg, "async_get_device_by_identifier", None
                 )
-            except Exception:  # noqa: BLE001
+                if get_by_identifier is not None:
+                    device = get_by_identifier(identifier, self._entry.entry_id)
+                else:
+                    device = dev_reg.async_get_device(identifiers={identifier})
+            except Exception:
+                _LOGGER.debug(
+                    "%s: router device lookup failed", self.name, exc_info=True
+                )
                 device = None
             self._device_id = device.id if device is not None else None
         return self._device_id

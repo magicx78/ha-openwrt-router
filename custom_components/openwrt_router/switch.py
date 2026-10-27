@@ -253,17 +253,16 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
         """Format band code to human-readable string.
 
         Args:
-            band: Band code (e.g. "2g", "5g", "6g", "60g").
+            band: Band code from ``OpenWrtAPI._detect_band`` ("2.4g", "5g",
+                "6g" or "unknown"; UCI "2g"/"60g" are already normalised).
 
         Returns:
             Formatted band string (e.g. "2.4 GHz", "5 GHz") or empty string if unknown.
         """
         band_map = {
-            "2g": "2.4 GHz",
-            "2.4g": "2.4 GHz",  # _detect_band() returns "2.4g" for 2.4 GHz radios
+            "2.4g": "2.4 GHz",
             "5g": "5 GHz",
             "6g": "6 GHz",
-            "60g": "60 GHz",
         }
         return band_map.get(band, "")
 

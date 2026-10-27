@@ -114,8 +114,19 @@ from .const import (
     WAN_INTERFACE_NAMES,
 )
 from .mac_utils import is_locally_administered
+from .wifi_band import (
+    UCI_BAND_MAP,
+    band_from_channel,
+    band_from_frequency,
+    band_from_hwmode,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# M-4: hosts whose root-account warning was already logged in this process.
+# Module level on purpose: every config-entry setup retry builds a new
+# OpenWrtAPI, so a per-instance latch warned again on each retry.
+_ROOT_WARNED_HOSTS: set[str] = set()
 
 # ubus RPC error codes
 UBUS_STATUS_OK = 0
@@ -643,67 +654,6 @@ def _parse_proc_net_arp(raw: str) -> dict[str, str]:
     return {mac: rank[2] for mac, rank in candidates.items()}
 
 
-# UCI wifi-device "band" option (replaces hwmode in newer OpenWrt) → normalised band
-_UCI_BAND_MAP = {"2g": "2.4g", "5g": "5g", "6g": "6g", "60g": "unknown"}
-
-
-def _as_band_int(value: Any) -> int | None:
-    """Return a frequency or channel as int, None for missing/non-numeric values."""
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _band_from_frequency(value: Any) -> str | None:
-    """Map a frequency in MHz to a band; 6 GHz starts at 5925 MHz."""
-    freq = _as_band_int(value)
-    if freq is None or freq <= 0:
-        return None
-    if freq < 3000:
-        return "2.4g"
-    if freq < 5925:
-        return "5g"
-    if freq <= 7125:
-        return "6g"
-    return "unknown"  # 60 GHz (802.11ad)
-
-
-def _band_from_hwmode(hwmode: str) -> str | None:
-    """Map a legacy hwmode (11a, 11g, bgn …) to a band; None if it is ambiguous."""
-    mode = hwmode.lower()
-    if "ad" in mode:
-        return "unknown"  # 60 GHz (802.11ad)
-    # 11n, 11ax, 11be and "auto" run on several bands and say nothing on their own.
-    mode = mode.replace("auto", "").replace("ax", "").replace("be", "")
-    if "a" in mode:
-        return "5g"
-    if "b" in mode or "g" in mode:
-        return "2.4g"
-    return None
-
-
-def _band_from_channel(value: Any) -> str | None:
-    """Map a channel number to a band; ambiguous numbers resolve to 2.4/5 GHz.
-
-    6 GHz uses channel 2 and 1, 5, 9 … 233. Of those, 1-13 also exist on
-    2.4 GHz and 149-177 on 5 GHz. A 6 GHz radio reports its frequency or band
-    option, so the channel only decides when neither is known.
-    """
-    chan = _as_band_int(value)
-    if chan is None or chan < 1:
-        return None
-    if chan <= 14:
-        return "2.4g"
-    if 32 <= chan <= 177 and (chan % 2 == 0 or chan >= 149):
-        return "5g"
-    if chan <= 233 and chan % 4 == 1:
-        return "6g"
-    return None
-
-
 class OpenWrtAPI:
     """Async client for OpenWrt ubus / rpcd JSON-RPC.
 
@@ -834,9 +784,6 @@ class OpenWrtAPI:
         self._auth_failure_count: int = 0
         self._auth_backoff_until: float = 0.0
 
-        # M-4: warn once when using the root account
-        self._root_warning_logged: bool = False
-
         # Track DDNS availability — None=unknown, False=not available (skip future polls)
         self._ddns_available: bool | None = None
 
@@ -851,9 +798,9 @@ class OpenWrtAPI:
     def reset_ssh_fallback_flag(self) -> None:
         """Reset SSH fallback flag at the start of each poll cycle.
 
-        Must NOT reset ``_root_warning_logged``: this runs every poll, and
-        clearing the latch here made the root warning re-fire on every
-        re-login (~once a minute per router) instead of once per instance.
+        The root-account warning latch (``_ROOT_WARNED_HOSTS``) is module
+        level and deliberately not touched here: clearing it every poll made
+        the warning re-fire on every re-login.
         """
         self._ssh_fallback_used = False
         self._auth_failure_count = 0
@@ -927,16 +874,6 @@ class OpenWrtAPI:
         """
         _LOGGER.debug("Logging in to %s as %s", self._ubus_url, self._username)
 
-        # M-4: warn once per API instance if using the privileged root account
-        if self._username == "root" and not self._root_warning_logged:
-            _LOGGER.warning(
-                "OpenWrt Router (%s): Using 'root' as rpcd user grants full router "
-                "access. Consider creating a dedicated restricted rpcd user for "
-                "better security.",
-                self._host,
-            )
-            self._root_warning_logged = True
-
         # Remember the session we are about to replace so we can destroy it
         # server-side once the new one is established.  Without this, every
         # re-login (proactive refresh every ~240s AND every ACL "-32002" retry)
@@ -989,6 +926,18 @@ class OpenWrtAPI:
         # without it, each re-login leaves a long-lived orphan behind.
         if old_token and old_token != DEFAULT_SESSION_ID and old_token != token:
             await self._destroy_session(old_token)
+
+        # M-4: warn about the privileged root account once per host and
+        # process, and only for a router that actually accepted the login —
+        # unreachable routers in setup retry must not repeat it.
+        if self._username == "root" and self._host not in _ROOT_WARNED_HOSTS:
+            _ROOT_WARNED_HOSTS.add(self._host)
+            _LOGGER.warning(
+                "OpenWrt Router (%s): Using 'root' as rpcd user grants full router "
+                "access. Consider creating a dedicated restricted rpcd user for "
+                "better security.",
+                self._host,
+            )
 
         _LOGGER.debug("Login successful, session established")
         return True
@@ -2126,9 +2075,6 @@ class OpenWrtAPI:
                     UBUS_UCI_OBJECT, UBUS_UCI_COMMIT, {"config": "wireless"}
                 )
                 _LOGGER.debug("UCI commit successful")
-                await self.reload_wifi()
-                _LOGGER.info("WiFi section %s %s successfully", uci_section, action)
-                return True
             except (
                 OpenWrtMethodNotFoundError,
                 OpenWrtAuthError,
@@ -2183,6 +2129,25 @@ class OpenWrtAPI:
                     raise OpenWrtResponseError(
                         f"Failed to {action} WiFi section {uci_section}: {commit_err}"
                     ) from commit_err
+            else:
+                # The commit already applies the change: rpcd emits config.change
+                # and procd re-applies wireless. network.reload is best effort, so
+                # its failure must not turn a successful switch into an error.
+                try:
+                    await self.reload_wifi(applied_by_commit=True)
+                except (
+                    OpenWrtAuthError,
+                    OpenWrtResponseError,
+                    OpenWrtTimeoutError,
+                    OpenWrtConnectionError,
+                ) as reload_err:
+                    _LOGGER.debug(
+                        "network.reload after commit on %s failed (non-fatal): %s",
+                        self._host,
+                        reload_err,
+                    )
+                _LOGGER.info("WiFi section %s %s successfully", uci_section, action)
+                return True
 
         # Fallback 2: SSH (works even when rpcd ACL blocks uci/commit)
         try:
@@ -2834,22 +2799,37 @@ class OpenWrtAPI:
         _LOGGER.debug("SSH WiFi status via uci: %d SSIDs found", len(radios))
         return radios
 
-    async def reload_wifi(self) -> bool:
-        """Reload network / WiFi configuration on the router.
+    async def reload_wifi(self, *, applied_by_commit: bool = False) -> bool:
+        """Reload network / WiFi configuration on the router via network.reload.
 
-        Tries network.reload first; falls back to a best-effort approach.
+        Args:
+            applied_by_commit: The caller has just committed the wireless
+                config via ubus uci/commit. rpcd then emits a
+                ``config.change`` event and procd's reload trigger for
+                ``wireless`` re-applies the radios by itself, so a missing
+                network.reload (not granted by the rpcd ACL) is expected and
+                only logged at debug level.
 
         Returns:
-            True on success.
+            True when network.reload was accepted, False when it is not
+            available.
         """
         _LOGGER.debug("Reloading network configuration")
         try:
             await self._call(UBUS_NETWORK_RELOAD, UBUS_NETWORK_RELOAD_METHOD, {})
             return True
         except OpenWrtMethodNotFoundError:
-            _LOGGER.warning(
-                "network.reload not available – WiFi state may not apply immediately"
-            )
+            if applied_by_commit:
+                _LOGGER.debug(
+                    "network.reload not available on %s – the committed wireless "
+                    "change is applied by procd's config.change reload trigger",
+                    self._host,
+                )
+            else:
+                _LOGGER.warning(
+                    "network.reload not available – WiFi state may not apply "
+                    "immediately"
+                )
             return False
 
     async def reboot(self) -> bool:
@@ -4733,17 +4713,17 @@ class OpenWrtAPI:
             # network.wireless/status keeps band and channel in the config block
             data = {**config, **data}
 
-        band = _band_from_frequency(data.get("frequency"))
+        band = band_from_frequency(data.get("frequency"))
         if band is None:
-            band = _UCI_BAND_MAP.get(str(data.get("band") or "").lower())
+            band = UCI_BAND_MAP.get(str(data.get("band") or "").lower())
         if band is None:
             hardware = data.get("hardware")
             hwmode = data.get("hwmode") or (
                 hardware.get("mode") if isinstance(hardware, dict) else None
             )
-            band = _band_from_hwmode(str(hwmode or ""))
+            band = band_from_hwmode(str(hwmode or ""))
         if band is None:
-            band = _band_from_channel(data.get("channel"))
+            band = band_from_channel(data.get("channel"))
         if band is not None:
             return band
 

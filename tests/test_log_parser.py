@@ -583,7 +583,7 @@ class TestCoordinatorReviewFollowUps:
         with patch(
             "custom_components.openwrt_router.coordinator.dr.async_get"
         ) as get_reg:
-            get_reg.return_value.async_get_device.return_value = device
+            get_reg.return_value.async_get_device_by_identifier.return_value = device
             api.get_log_entries = AsyncMock(return_value=_batch(1, 1))
             await coord._ingest_log(data)
             api.get_log_entries = AsyncMock(return_value=_batch(1, 2))
@@ -592,9 +592,34 @@ class TestCoordinatorReviewFollowUps:
             await coord._ingest_log(data)
         (first,) = _fired(coord, EVENT_WIFI)  # 2nd is in the 5 min cooldown
         assert first["device_id"] == "dev-1"
-        get_reg.return_value.async_get_device.assert_called_once_with(
+        # HA 2026.8+: scoped lookup, never the deprecated async_get_device
+        get_reg.return_value.async_get_device_by_identifier.assert_called_once_with(
+            ("openwrt_router", "e1"), "e1"
+        )
+        get_reg.return_value.async_get_device.assert_not_called()
+
+    def test_router_device_id_falls_back_on_older_cores(self):
+        """HA < 2026.8 (floor 2026.2) only has async_get_device."""
+        coord, _api, _data = _coordinator()
+        legacy_reg = MagicMock(spec=["async_get_device"])
+        legacy_reg.async_get_device.return_value = MagicMock(id="dev-legacy")
+        with patch(
+            "custom_components.openwrt_router.coordinator.dr.async_get",
+            return_value=legacy_reg,
+        ):
+            assert coord._router_device_id() == "dev-legacy"
+            assert coord._router_device_id() == "dev-legacy"  # cached
+        legacy_reg.async_get_device.assert_called_once_with(
             identifiers={("openwrt_router", "e1")}
         )
+
+    def test_router_device_id_none_when_device_missing(self):
+        coord, _api, _data = _coordinator()
+        with patch(
+            "custom_components.openwrt_router.coordinator.dr.async_get"
+        ) as get_reg:
+            get_reg.return_value.async_get_device_by_identifier.return_value = None
+            assert coord._router_device_id() is None
 
     def test_not_permitted_is_not_ha_reserved(self):
         assert LOG_STATUS_NOT_PERMITTED == "not_permitted"

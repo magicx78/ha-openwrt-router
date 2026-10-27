@@ -203,9 +203,9 @@ class TestSwitchAttributes:
 # =====================================================================
 
 class TestFormatBand:
-    def test_2g(self, mock_coordinator, mock_config_entry):
+    def test_24g(self, mock_coordinator, mock_config_entry):
         switch = _make_switch(mock_coordinator, mock_config_entry)
-        assert switch._format_band("2g") == "2.4 GHz"
+        assert switch._format_band("2.4g") == "2.4 GHz"
 
     def test_5g(self, mock_coordinator, mock_config_entry):
         switch = _make_switch(mock_coordinator, mock_config_entry)
@@ -215,9 +215,10 @@ class TestFormatBand:
         switch = _make_switch(mock_coordinator, mock_config_entry)
         assert switch._format_band("6g") == "6 GHz"
 
-    def test_60g(self, mock_coordinator, mock_config_entry):
+    def test_unknown_band_has_no_label(self, mock_coordinator, mock_config_entry):
+        """60 GHz radios arrive as "unknown" (_detect_band), no label."""
         switch = _make_switch(mock_coordinator, mock_config_entry)
-        assert switch._format_band("60g") == "60 GHz"
+        assert switch._format_band("unknown") == ""
 
     def test_unknown(self, mock_coordinator, mock_config_entry):
         switch = _make_switch(mock_coordinator, mock_config_entry)

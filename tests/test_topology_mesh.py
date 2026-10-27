@@ -712,7 +712,7 @@ class TestDeduplicateClients:
 # =====================================================================
 
 from types import SimpleNamespace  # noqa: E402
-from unittest.mock import patch  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
 
 from custom_components.openwrt_router.topology_mesh import _apply_ha_names  # noqa: E402
 
@@ -840,3 +840,87 @@ class TestApplyHaNames:
             _apply_ha_names(SimpleNamespace(data={}), [node], [])
         get_dr.assert_not_called()
         assert "ha_name" not in node["attributes"]
+
+
+class TestApplyHaNamesRegistryApi:
+    """HA 2026.8+ keeps one device per config entry: several integrations can
+    register the same MAC. async_get_device is deprecated since 2026.10
+    (ends 2027.8); async_get_devices returns every match. Cores below 2026.8
+    (floor 2026.2) only have async_get_device.
+    """
+
+    MAC = "aa:bb:cc:dd:ee:ff"
+
+    def _run(self, dev_reg, node):
+        with (
+            patch(f"{_MESH}.dr.async_get", return_value=dev_reg),
+            patch(f"{_MESH}.er.async_get", return_value=object()),
+            patch(f"{_MESH}.er.async_entries_for_config_entry", return_value=[]),
+        ):
+            _apply_ha_names(
+                SimpleNamespace(data=_REGISTRIES_LOADED),
+                [node],
+                [SimpleNamespace(entry_id="01ENTRY")],
+            )
+        return node["attributes"]
+
+    def _new_registry(self, devices):
+        dev_reg = MagicMock(spec=["async_get_devices", "async_get_device"])
+        dev_reg.async_get_devices.return_value = devices
+        return dev_reg
+
+    def test_new_api_is_used_instead_of_deprecated_lookup(self):
+        dev_reg = self._new_registry([_device("Shelly Plus 1", manufacturer="Shelly")])
+        attrs = self._run(dev_reg, _client_node(self.MAC.upper()))
+        assert attrs["ha_name"] == "Shelly Plus 1"
+        assert attrs["ha_name_source"] == "device"
+        assert attrs["ha_manufacturer"] == "Shelly"
+        dev_reg.async_get_devices.assert_called_once_with(
+            connections={("mac", self.MAC)}
+        )
+        dev_reg.async_get_device.assert_not_called()
+
+    def test_several_devices_prefer_the_user_name(self):
+        dev_reg = self._new_registry(
+            [
+                _device("ESP Node", manufacturer="Espressif"),
+                _device("Plug", name_by_user="Kitchen Plug", manufacturer="Shelly"),
+            ]
+        )
+        attrs = self._run(dev_reg, _client_node(self.MAC))
+        assert attrs["ha_name"] == "Kitchen Plug"
+        assert attrs["ha_name_source"] == "user"
+        assert attrs["ha_manufacturer"] == "Shelly"
+
+    def test_several_devices_without_user_name_keep_the_first(self):
+        dev_reg = self._new_registry(
+            [_device("ESP Node", manufacturer="Espressif"), _device("Plug")]
+        )
+        attrs = self._run(dev_reg, _client_node(self.MAC))
+        assert attrs["ha_name"] == "ESP Node"
+        assert attrs["ha_manufacturer"] == "Espressif"
+
+    def test_several_devices_prefer_a_real_name_over_a_mac_name(self):
+        dev_reg = self._new_registry(
+            [
+                _device("AA:BB:CC:DD:EE:01", manufacturer="Generic"),
+                _device("Plug", manufacturer="Shelly"),
+            ]
+        )
+        attrs = self._run(dev_reg, _client_node(self.MAC))
+        assert attrs["ha_name"] == "Plug"
+        assert attrs["ha_manufacturer"] == "Shelly"
+
+    def test_no_device_registered(self):
+        attrs = self._run(self._new_registry([]), _client_node(self.MAC, "tab"))
+        assert set(attrs) == {"mac", "hostname"}
+
+    def test_falls_back_on_cores_without_async_get_devices(self):
+        dev_reg = MagicMock(spec=["async_get_device"])
+        dev_reg.async_get_device.return_value = _device("Nest", "Living Room Hub")
+        attrs = self._run(dev_reg, _client_node(self.MAC))
+        assert attrs["ha_name"] == "Living Room Hub"
+        assert attrs["ha_name_source"] == "user"
+        dev_reg.async_get_device.assert_called_once_with(
+            connections={("mac", self.MAC)}
+        )
