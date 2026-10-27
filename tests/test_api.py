@@ -1262,6 +1262,290 @@ class TestGetRouterStatus:
         assert result["memory"]["total"] == 268435456
 
 
+# /proc/cpuinfo samples (synthetic, real layouts). aarch64 has no "model name"
+# line, only one "processor\t: N" block per core.
+CPUINFO_AARCH64_DUAL = (
+    "processor\t: 0\n"
+    "BogoMIPS\t: 26.00\n"
+    "Features\t: fp asimd evtstrm crc32 cpuid\n"
+    "CPU implementer\t: 0x41\n"
+    "CPU architecture: 8\n"
+    "CPU part\t: 0xd03\n"
+    "CPU revision\t: 4\n"
+    "\n"
+    "processor\t: 1\n"
+    "BogoMIPS\t: 26.00\n"
+    "Features\t: fp asimd evtstrm crc32 cpuid\n"
+    "CPU implementer\t: 0x41\n"
+    "CPU architecture: 8\n"
+    "CPU part\t: 0xd03\n"
+    "CPU revision\t: 4\n"
+    "\n"
+)
+CPUINFO_MIPS_SINGLE = (
+    "system type\t\t: Generic MIPS SoC\n"
+    "machine\t\t\t: Generic\n"
+    "processor\t\t: 0\n"
+    "cpu model\t\t: MIPS 24Kc V7.4\n"
+    "BogoMIPS\t\t: 265.42\n"
+)
+# Older 32-bit ARM kernels add a capitalised "Processor" model line.
+CPUINFO_ARMV7_DUAL = (
+    "Processor\t: ARMv7 Processor rev 5 (v7l)\n"
+    "processor\t: 0\n"
+    "BogoMIPS\t: 38.40\n"
+    "\n"
+    "processor\t: 1\n"
+    "BogoMIPS\t: 38.40\n"
+    "\n"
+    "Hardware\t: Generic DT based system\n"
+)
+
+# Load average 1.22 / 1.00 / 0.50 as system/info reports it (* 65536)
+LOAD_1_22 = [79954, 65536, 32768]
+
+
+def _status_ubus(cpuinfo, load=None) -> AsyncMock:
+    """_call stub for get_router_status.
+
+    ``cpuinfo`` is the /proc/cpuinfo text, or an exception instance to raise
+    for file/read on that path.
+    """
+
+    async def _call(obj, method, params, *args, **kwargs):
+        if (obj, method) == ("system", "info"):
+            return {"uptime": 100, "load": list(load or LOAD_1_22), "memory": {}}
+        if (obj, method) == ("file", "read") and params == {"path": "/proc/cpuinfo"}:
+            if isinstance(cpuinfo, Exception):
+                raise cpuinfo
+            return {"data": cpuinfo}
+        raise AssertionError(f"unexpected ubus call {obj}/{method} {params}")
+
+    return AsyncMock(side_effect=_call)
+
+
+def _cpuinfo_reads(call_mock: AsyncMock) -> int:
+    return sum(
+        1
+        for c in call_mock.await_args_list
+        if c.args[:3] == ("file", "read", {"path": "/proc/cpuinfo"})
+    )
+
+
+class TestParseCpuinfoCores:
+    """One "processor : N" line per logical CPU; anything else counts 0."""
+
+    @pytest.mark.parametrize(
+        ("text", "cores"),
+        [
+            (CPUINFO_AARCH64_DUAL, 2),
+            (CPUINFO_MIPS_SINGLE, 1),
+            (CPUINFO_ARMV7_DUAL, 2),  # "Processor : ARMv7 ..." is not a core
+            ("", 0),
+            ("garbage\nno cpu here\n", 0),
+            ("processor\t: \nprocessors\t: 4\n", 0),  # malformed lines
+        ],
+        ids=["aarch64-2", "mips-1", "armv7-model-line", "empty", "garbage", "malformed"],
+    )
+    def test_counts_processor_lines(self, text, cores):
+        assert api_module._parse_cpuinfo_cores(text) == cores
+
+
+class TestCpuLoadPerCore:
+    """Befund 4: system/info load is the run-queue average, not % of the CPU.
+
+    A load average of 1.22 on a dual-core router is 61 % of its capacity, not
+    122 %. The core count comes from /proc/cpuinfo (ACL v7), read once per API
+    instance; without it the old un-normalised value is kept (1 core).
+    """
+
+    @pytest.mark.asyncio
+    async def test_dual_core_halves_the_percentage(self, mock_api):
+        mock_api._call = _status_ubus(CPUINFO_AARCH64_DUAL)
+
+        result = await mock_api.get_router_status()
+
+        assert result["cpu_cores"] == 2
+        assert result["cpu_load"] == 61.0
+        assert result["cpu_load_5min"] == 50.0
+        assert result["cpu_load_15min"] == 25.0
+        assert result["load_average"] == [1.22, 1.0, 0.5]
+        assert result["load"] == LOAD_1_22  # raw values unchanged
+
+    @pytest.mark.asyncio
+    async def test_single_core_keeps_the_percentage(self, mock_api):
+        mock_api._call = _status_ubus(CPUINFO_MIPS_SINGLE)
+
+        result = await mock_api.get_router_status()
+
+        assert result["cpu_cores"] == 1
+        assert result["cpu_load"] == 122.0
+        assert result["load_average"] == [1.22, 1.0, 0.5]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "cpuinfo",
+        [
+            "",
+            "garbage\n",
+            OpenWrtMethodNotFoundError("rpcd ACL blocks file/read//proc/cpuinfo"),
+            OpenWrtAuthError("access denied"),
+            OpenWrtResponseError("malformed"),
+            OpenWrtTimeoutError("timeout"),
+            OpenWrtConnectionError("refused"),
+        ],
+        ids=[
+            "empty",
+            "malformed",
+            "not-permitted",
+            "auth",
+            "response",
+            "timeout",
+            "connection",
+        ],
+    )
+    async def test_unknown_core_count_falls_back_to_one(self, mock_api, cpuinfo):
+        mock_api._call = _status_ubus(cpuinfo)
+
+        result = await mock_api.get_router_status()
+
+        assert result["cpu_cores"] is None
+        assert result["cpu_load"] == 122.0
+        assert result["cpu_load_5min"] == 100.0
+        assert result["load_average"] == [1.22, 1.0, 0.5]
+
+    @pytest.mark.asyncio
+    async def test_core_count_is_read_once(self, mock_api):
+        mock_api._call = _status_ubus(CPUINFO_AARCH64_DUAL)
+
+        for _ in range(3):
+            result = await mock_api.get_router_status()
+
+        assert result["cpu_load"] == 61.0
+        assert _cpuinfo_reads(mock_api._call) == 1
+
+    @pytest.mark.asyncio
+    async def test_failure_is_not_retried_every_poll(self, mock_api):
+        mock_api._call = _status_ubus(OpenWrtMethodNotFoundError("blocked"))
+
+        for _ in range(3):
+            result = await mock_api.get_router_status()
+
+        assert result["cpu_cores"] is None
+        assert _cpuinfo_reads(mock_api._call) == 1
+
+    @pytest.mark.asyncio
+    async def test_permanent_failure_is_retried_after_the_interval(self, mock_api):
+        mock_api._call = _status_ubus(OpenWrtMethodNotFoundError("blocked"))
+        await mock_api.get_router_status()
+        assert mock_api._cpu_cores_retry_at - api_module.time.monotonic() > (
+            api_module.CPU_CORES_RETRY_INTERVAL - 60
+        )
+
+        # Interval elapsed and the ACL was meanwhile fixed by hand
+        mock_api._cpu_cores_retry_at -= api_module.CPU_CORES_RETRY_INTERVAL + 1
+        mock_api._call = _status_ubus(CPUINFO_AARCH64_DUAL)
+        result = await mock_api.get_router_status()
+
+        assert result["cpu_cores"] == 2
+        assert result["cpu_load"] == 61.0
+        assert _cpuinfo_reads(mock_api._call) == 1
+
+    @pytest.mark.asyncio
+    async def test_due_retry_bypasses_the_cached_acl_denial(self, mock_api):
+        """A cached ACL denial must not swallow the hourly retry."""
+        key = mock_api._acl_cache_key(
+            "file", "read", {"path": api_module.PROC_CPUINFO_PATH}
+        )
+        mock_api._acl_blocked.add(key)
+        status = _status_ubus(CPUINFO_AARCH64_DUAL)
+
+        async def _call(obj, method, params, *args, **kwargs):
+            if (obj, method) == ("file", "read"):
+                assert key not in mock_api._acl_blocked
+            return await status(obj, method, params, *args, **kwargs)
+
+        mock_api._call = AsyncMock(side_effect=_call)
+        result = await mock_api.get_router_status()
+
+        assert result["cpu_cores"] == 2
+
+    @pytest.mark.asyncio
+    async def test_response_error_is_retried_sooner(self, mock_api):
+        mock_api._call = _status_ubus(OpenWrtResponseError("HTTP 502"))
+        await mock_api.get_router_status()
+
+        remaining = mock_api._cpu_cores_retry_at - api_module.time.monotonic()
+        assert 0 < remaining <= api_module.CPU_CORES_TRANSIENT_RETRY_INTERVAL
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_is_retried_sooner(self, mock_api):
+        mock_api._call = _status_ubus(OpenWrtTimeoutError("timeout"))
+        await mock_api.get_router_status()
+
+        remaining = mock_api._cpu_cores_retry_at - api_module.time.monotonic()
+        assert 0 < remaining <= api_module.CPU_CORES_TRANSIENT_RETRY_INTERVAL
+        assert (
+            api_module.CPU_CORES_TRANSIENT_RETRY_INTERVAL
+            < api_module.CPU_CORES_RETRY_INTERVAL
+        )
+
+    @pytest.mark.asyncio
+    async def test_reset_acl_blocked_rearms_the_probe(self, mock_api):
+        """After an ACL (re)deploy the core count is probed again at once."""
+        mock_api._call = _status_ubus(OpenWrtMethodNotFoundError("blocked"))
+        await mock_api.get_router_status()
+
+        mock_api.reset_acl_blocked()
+        mock_api._call = _status_ubus(CPUINFO_AARCH64_DUAL)
+        result = await mock_api.get_router_status()
+
+        assert result["cpu_cores"] == 2
+        assert _cpuinfo_reads(mock_api._call) == 1
+
+    @pytest.mark.asyncio
+    async def test_known_core_count_survives_reset_acl_blocked(self, mock_api):
+        mock_api._call = _status_ubus(CPUINFO_AARCH64_DUAL)
+        await mock_api.get_router_status()
+
+        mock_api.reset_acl_blocked()
+        await mock_api.get_router_status()
+
+        assert _cpuinfo_reads(mock_api._call) == 1
+
+    @pytest.mark.asyncio
+    async def test_not_probed_when_system_info_fails(self, mock_api):
+        call = AsyncMock(side_effect=OpenWrtMethodNotFoundError("no system/info"))
+        mock_api._call = call
+
+        with pytest.raises(OpenWrtMethodNotFoundError):
+            await mock_api.get_router_status()
+
+        assert _cpuinfo_reads(call) == 0
+
+    @pytest.mark.asyncio
+    async def test_ssh_fallback_is_not_normalised(self, mock_api):
+        """The SSH script computes its own percentage — passed through as-is."""
+        call = AsyncMock(side_effect=OpenWrtAuthError("system/info denied"))
+        mock_api._call = call
+        ssh_status = {
+            "uptime": 5,
+            "load": [0, 0, 0],
+            "cpu_load": 80.0,
+            "cpu_load_5min": 70.0,
+            "cpu_load_15min": 60.0,
+            "memory": {},
+        }
+        with patch.object(
+            mock_api, "_get_router_status_ssh", AsyncMock(return_value=ssh_status)
+        ):
+            result = await mock_api.get_router_status()
+
+        assert result["cpu_load"] == 80.0
+        assert result.get("cpu_cores") is None
+        assert _cpuinfo_reads(call) == 0
+
+
 class TestGetDhcpLeases:
     @pytest.mark.asyncio
     async def test_success(self, mock_api):
@@ -1297,7 +1581,7 @@ class TestReloadWifi:
 
 
 class TestNetworkReloadWarning:
-    """Befund 5: rpcd ACL v6 has no network/reload.
+    """Befund 5: rpcd ACLs before v7 have no network/reload.
 
     The Wi-Fi switch still works: uci/commit makes rpcd emit ``config.change``
     and procd's reload trigger for ``wireless`` re-applies the radios. The

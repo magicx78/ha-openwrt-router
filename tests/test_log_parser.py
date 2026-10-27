@@ -441,7 +441,7 @@ class TestAclV6:
             RPCD_ACL_CONTENT,
         )
 
-        assert ACL_VERSION == 6
+        assert ACL_VERSION >= 6  # granted since v6
         read = RPCD_ACL_CONTENT["root"]["read"]["ubus"]
         write = RPCD_ACL_CONTENT["root"]["write"]["ubus"]
         assert read["log"] == ["read"]

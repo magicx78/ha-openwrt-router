@@ -21,6 +21,9 @@
         "/sys/class/net/*": [
           "read"
         ],
+        "/proc/cpuinfo": [
+          "read"
+        ],
         "/proc/net/arp": [
           "read"
         ],
@@ -111,6 +114,9 @@
         "network.wireless": [
           "up",
           "down"
+        ],
+        "network": [
+          "reload"
         ]
       }
     }

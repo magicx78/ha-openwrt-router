@@ -489,6 +489,48 @@ class TestAclContent:
         assert isinstance(ACL_VERSION, int)
         assert ACL_VERSION >= 1
 
+    def test_acl_version_is_7(self):
+        """v7 adds /proc/cpuinfo (core count) and network/reload."""
+        assert ACL_VERSION == 7
+
+    def test_acl_grants_proc_cpuinfo_read_only(self):
+        """The CPU load is normalised per core; the core count comes from
+        /proc/cpuinfo via ubus file/read (once per setup)."""
+        files = RPCD_ACL_CONTENT["root"]["read"]["file"]
+        assert files["/proc/cpuinfo"] == ["read"]
+        write_files = RPCD_ACL_CONTENT["root"]["write"]["file"]
+        assert "/proc/cpuinfo" not in write_files
+
+    def test_acl_grants_network_reload_only(self):
+        """network/reload backs the "reload Wi-Fi" button and the Wi-Fi
+        switches. Only reload — not restart or the other network methods."""
+        write_ubus = RPCD_ACL_CONTENT["root"]["write"]["ubus"]
+        assert write_ubus["network"] == ["reload"]
+        assert "network" not in RPCD_ACL_CONTENT["root"]["read"]["ubus"]
+
+    def test_acl_v7_keeps_v6_grants(self):
+        """v7 only adds grants; nothing granted by v6 is dropped."""
+        read = RPCD_ACL_CONTENT["root"]["read"]
+        write = RPCD_ACL_CONTENT["root"]["write"]
+        assert read["ubus"]["log"] == ["read"]
+        assert read["ubus"]["usteer"] == ["get_clients"]
+        assert read["ubus"]["network.wireless"] == ["status", "up", "down"]
+        assert read["ubus"]["file"] == ["read", "stat", "list", "exec"]
+        assert write["ubus"]["network.wireless"] == ["up", "down"]
+        assert write["file"]["/etc/init.d/rpcd"] == ["exec"]
+        for path in (
+            "/etc/openwrt_release",
+            "/etc/config/ddns",
+            "/var/run/ddns/*",
+            "/sys/class/net/*",
+            "/proc/net/arp",
+            "/proc/net/nf_conntrack",
+            "/proc/sys/net/netfilter/nf_conntrack_count",
+            "/tmp/opkg_list",
+            ACL_FILE_PATH,
+        ):
+            assert read["file"][path] == ["read"], path
+
     def test_scripts_json_matches_rpcd_acl_content(self):
         """scripts/ha-openwrt-router.json must equal RPCD_ACL_CONTENT.
 

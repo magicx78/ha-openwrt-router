@@ -306,6 +306,32 @@ class TestDataPopulation:
         assert data.active_connections == 10
 
     @pytest.mark.asyncio
+    async def test_cpu_cores_and_load_average_populated(self):
+        coord, api = _make_coordinator()
+        api.reset_ssh_fallback_flag = MagicMock()
+        api.get_router_status = AsyncMock(return_value={
+            "uptime": 1, "cpu_load": 61.0, "cpu_load_5min": 50.0,
+            "cpu_load_15min": 25.0, "cpu_cores": 2,
+            "load_average": [1.22, 1.0, 0.5], "memory": {},
+        })
+        data = await coord._async_update_data()
+        assert data.cpu_load == 61.0
+        assert data.cpu_cores == 2
+        assert data.load_average == [1.22, 1.0, 0.5]
+        as_dict = data.as_dict()
+        assert as_dict["cpu_cores"] == 2
+        assert as_dict["load_average"] == [1.22, 1.0, 0.5]
+
+    @pytest.mark.asyncio
+    async def test_cpu_core_info_defaults_without_it(self):
+        """SSH fallback / older shape: no core count, no load averages."""
+        coord, api = _make_coordinator()
+        api.reset_ssh_fallback_flag = MagicMock()
+        data = await coord._async_update_data()
+        assert data.cpu_cores is None
+        assert data.load_average == []
+
+    @pytest.mark.asyncio
     async def test_features_carried_forward(self):
         coord, api = _make_coordinator()
         data1 = await coord._async_update_data()
@@ -878,3 +904,128 @@ class TestOutageReporting:
             with pytest.raises(UpdateFailed):
                 await coord._async_update_data()
         assert coord._failure_count == 3
+
+
+# =====================================================================
+# Poll throttle on the per-core CPU load (Befund 4)
+# =====================================================================
+
+_CPUINFO_DUAL = "processor\t: 0\nBogoMIPS\t: 26.00\n\nprocessor\t: 1\nBogoMIPS\t: 26.00\n"
+
+
+def _load_raw(avg: float) -> int:
+    """system/info encodes load averages as integer * 65536."""
+    return round(avg * 65536)
+
+
+class TestCpuThrottlePerCore:
+    """The throttle keeps its thresholds (> 100 % doubles the interval, < 80 %
+    restores it) but acts on the per-core value. Before, a load average of
+    1.22 on a dual-core router read as 122 % and throttled at 61 % real use.
+    """
+
+    @staticmethod
+    def _real_status(load_avgs: list[float]):
+        """get_router_status of a real OpenWrtAPI on a dual-core router.
+
+        ``load_avgs`` holds one 1-minute load average per poll.
+        """
+        from custom_components.openwrt_router.api import OpenWrtAPI
+
+        real = OpenWrtAPI(
+            host="192.0.2.1",
+            port=80,
+            username="root",
+            password="x",
+            session=MagicMock(),
+            protocol="http",
+        )
+        polls = iter(load_avgs)
+
+        async def _call(obj, method, params, *args, **kwargs):
+            if (obj, method) == ("system", "info"):
+                raw = _load_raw(next(polls))
+                return {"uptime": 1, "load": [raw, raw, raw], "memory": {}}
+            if (obj, method, params) == ("file", "read", {"path": "/proc/cpuinfo"}):
+                return {"data": _CPUINFO_DUAL}
+            raise AssertionError(f"unexpected ubus call {obj}/{method}")
+
+        real._call = AsyncMock(side_effect=_call)
+        return real.get_router_status
+
+    def _coord(self, load_avgs: list[float]):
+        coord, api = _make_coordinator()
+        api.uses_ssh_fallback = False
+        api.reset_ssh_fallback_flag = MagicMock()
+        api.get_router_status = self._real_status(load_avgs)
+        return coord
+
+    @pytest.mark.asyncio
+    async def test_dual_core_moderate_load_does_not_throttle(self):
+        from custom_components.openwrt_router.const import SCAN_INTERVAL_SECONDS
+
+        coord = self._coord([1.22])
+
+        data = await coord._async_update_data()
+
+        assert data.cpu_cores == 2
+        assert data.cpu_load == 61.0
+        assert coord._throttled is False
+        assert coord.update_interval == timedelta(seconds=SCAN_INTERVAL_SECONDS)
+
+    @pytest.mark.asyncio
+    async def test_real_overload_throttles_and_names_the_cores(self, caplog):
+        from custom_components.openwrt_router.const import SCAN_INTERVAL_SECONDS
+
+        coord = self._coord([2.44])  # 122 % of two cores
+
+        with caplog.at_level("WARNING"):
+            data = await coord._async_update_data()
+
+        assert data.cpu_load == 122.0
+        assert coord._throttled is True
+        assert coord.update_interval == timedelta(seconds=SCAN_INTERVAL_SECONDS * 2)
+        message = next(
+            r.getMessage() for r in caplog.records if "poll frequency" in r.getMessage()
+        )
+        assert "122%" in message
+        assert "2 core" in message
+        assert "2.44" in message  # raw load average for context
+
+    @pytest.mark.asyncio
+    async def test_hysteresis_on_per_core_values(self):
+        from custom_components.openwrt_router.const import SCAN_INTERVAL_SECONDS
+
+        # 122 % → throttle; 90 % → stay throttled; 75 % → restore
+        coord = self._coord([2.44, 1.8, 1.5])
+
+        await coord._async_update_data()
+        assert coord._throttled is True
+
+        data = await coord._async_update_data()
+        assert data.cpu_load == 90.0
+        assert coord._throttled is True
+
+        data = await coord._async_update_data()
+        assert data.cpu_load == 75.0
+        assert coord._throttled is False
+        assert coord.update_interval == timedelta(seconds=SCAN_INTERVAL_SECONDS)
+
+    @pytest.mark.asyncio
+    async def test_unknown_core_count_is_named_in_the_log(self, caplog):
+        coord, api = _make_coordinator()
+        api.uses_ssh_fallback = False
+        api.reset_ssh_fallback_flag = MagicMock()
+        api.get_router_status = AsyncMock(return_value={
+            "uptime": 1, "cpu_load": 130.0, "cpu_load_5min": 0.0,
+            "cpu_load_15min": 0.0, "memory": {},
+        })
+
+        with caplog.at_level("WARNING"):
+            await coord._async_update_data()
+
+        assert coord._throttled is True
+        message = next(
+            r.getMessage() for r in caplog.records if "poll frequency" in r.getMessage()
+        )
+        assert "core count unknown" in message
