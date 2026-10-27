@@ -309,7 +309,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         await asyncio.sleep(_ACL_DEPLOY_GRACE_S)
         try:
             await api.login()
-        except (OpenWrtConnectionError, OpenWrtTimeoutError, OpenWrtAuthError):
+        except (
+            OpenWrtConnectionError,
+            OpenWrtTimeoutError,
+            OpenWrtAuthError,
+            OpenWrtResponseError,  # uhttpd answers 5xx while rpcd restarts
+        ):
             await asyncio.sleep(_ACL_LOGIN_RETRY_DELAY_S)
             try:
                 await api.login()

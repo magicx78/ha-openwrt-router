@@ -541,7 +541,7 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
             try:
                 await self._validate_input(host, port, username, password, protocol)
-            except OpenWrtRpcdSetupError:
+            except (OpenWrtRpcdSetupError, OpenWrtResponseError):
                 return await self.async_step_reauth_rpcd_setup()
             except (OpenWrtConnectionError, OpenWrtTimeoutError):
                 errors["base"] = ERROR_CANNOT_CONNECT
@@ -583,7 +583,11 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 return await self.async_step_reauth_rpcd_setup()
             except OpenWrtAuthError:
                 errors["base"] = ERROR_INVALID_AUTH
-            except (OpenWrtConnectionError, OpenWrtTimeoutError):
+            except (
+                OpenWrtConnectionError,
+                OpenWrtTimeoutError,
+                OpenWrtResponseError,  # router answers, but not as rpcd (yet)
+            ):
                 errors["base"] = ERROR_CANNOT_CONNECT
             except Exception:
                 _LOGGER.exception("Re-auth: unexpected error")
