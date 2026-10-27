@@ -128,6 +128,17 @@ _LOGGER = logging.getLogger(__name__)
 # OpenWrtAPI, so a per-instance latch warned again on each retry.
 _ROOT_WARNED_HOSTS: set[str] = set()
 
+# Per-core CPU load: system/info reports the run-queue average, so 1.0 on a
+# dual-core router is half its capacity. The core count comes from
+# /proc/cpuinfo via ubus file/read (rpcd ACL v7), read once per API instance.
+# A failed read is retried only after these intervals (seconds), so a router
+# whose ACL predates v7 costs no extra call per poll.
+PROC_CPUINFO_PATH = "/proc/cpuinfo"
+CPU_CORES_RETRY_INTERVAL = 3600.0  # not permitted / no processor lines
+CPU_CORES_TRANSIENT_RETRY_INTERVAL = 300.0  # timeout / connection error
+# system/info encodes load averages as fixed point (load * 65536)
+_LOAD_SCALE = 65536
+
 # ubus RPC error codes
 UBUS_STATUS_OK = 0
 UBUS_STATUS_INVALID_COMMAND = 1
@@ -616,6 +627,17 @@ def _parse_brforward(fdb_bytes: bytes, port_no_map: dict[int, str]) -> dict[str,
     return fdb
 
 
+# One "processor\t: N" line per logical CPU on every architecture OpenWrt runs
+# on (aarch64 has no "model name" line). Lower-case and numeric on purpose:
+# older 32-bit ARM kernels add a "Processor\t: ARMv7 ..." model line.
+_CPUINFO_PROCESSOR_RE = re.compile(r"^processor\s*:\s*\d+\s*$", re.MULTILINE)
+
+
+def _parse_cpuinfo_cores(raw: str) -> int:
+    """Count the logical CPUs listed in /proc/cpuinfo text (0 = none found)."""
+    return len(_CPUINFO_PROCESSOR_RE.findall(raw or ""))
+
+
 def _parse_proc_net_arp(raw: str) -> dict[str, str]:
     """Parse /proc/net/arp text into {mac_lower: ipv4}.
 
@@ -787,6 +809,13 @@ class OpenWrtAPI:
         # Track DDNS availability — None=unknown, False=not available (skip future polls)
         self._ddns_available: bool | None = None
 
+        # Logical CPU count for the per-core load, see _get_cpu_cores().
+        # None = not known (yet). Once known it is kept for this instance.
+        self._cpu_cores: int | None = None
+        # time.monotonic() deadline before which a failed /proc/cpuinfo read is
+        # not retried; cleared by reset_acl_blocked() after an ACL deploy.
+        self._cpu_cores_retry_at: float = 0.0
+
         # C-1: closing flag to prevent new calls during shutdown
         self._closing: bool = False
 
@@ -827,6 +856,10 @@ class OpenWrtAPI:
         # fresh attempt instead of waiting out the retry interval.
         self._lldp_ubus_unavailable = False
         self._lldp_checked = False
+        # /proc/cpuinfo is readable from ACL v7 on: probe the core count again
+        # on the next poll instead of waiting out the retry interval. A known
+        # count is kept — it cannot change while the router runs.
+        self._cpu_cores_retry_at = 0.0
 
     async def async_close(self) -> None:
         """Release state on integration unload and free the rpcd session.
@@ -1199,14 +1232,22 @@ class OpenWrtAPI:
             {
                 "uptime": int,        # seconds since boot
                 "load": list[int],    # raw load values (* 65536) [1min, 5min, 15min]
-                "cpu_load": float,    # 1-min load average as percentage (0-100)
-                "cpu_load_5min": float,  # 5-min load average as percentage (0-100)
-                "cpu_load_15min": float, # 15-min load average as percentage (0-100)
+                "load_average": list[float],  # raw load averages, e.g. [1.22, 0.9, 0.7]
+                "cpu_cores": int | None,  # logical CPUs, None = unknown
+                "cpu_load": float,    # 1-min load as % of total CPU capacity
+                "cpu_load_5min": float,  # 5-min load as % of total CPU capacity
+                "cpu_load_15min": float, # 15-min load as % of total CPU capacity
                 "memory": dict,       # total, free, shared, buffered, available (bytes)
             }
 
+            The percentages are divided by the core count (load average 1.22
+            on two cores = 61.0); with an unknown core count they are not
+            (1 core assumed). Above 100 the run queue exceeds the cores.
+
         Note:
             If ubus is blocked (ACL-restricted router), falls back to SSH script.
+            That path returns the script's own percentages unchanged and has
+            no ``cpu_cores`` / ``load_average``.
         """
         try:
             result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_INFO, {})
@@ -1238,24 +1279,92 @@ class OpenWrtAPI:
                     }
             raise
 
-        raw_load: list[int] = result.get("load", [0, 0, 0])
-        # OpenWrt encodes load averages as integer * 65536
-        cpu_load = round(raw_load[0] / 65536 * 100, 1) if raw_load else 0.0
-        cpu_load_5min = (
-            round(raw_load[1] / 65536 * 100, 1) if len(raw_load) > 1 else 0.0
-        )
-        cpu_load_15min = (
-            round(raw_load[2] / 65536 * 100, 1) if len(raw_load) > 2 else 0.0
-        )
+        raw_load = result.get("load")
+        if not isinstance(raw_load, list):
+            raw_load = [0, 0, 0]
+        # The load average counts runnable tasks, so it is divided by the core
+        # count to get % of total CPU capacity. Unknown core count: divide by 1
+        # (the value before v1.38.0).
+        cores = await self._get_cpu_cores()
+        divisor = cores or 1
+        percents = [round(v / _LOAD_SCALE * 100 / divisor, 1) for v in raw_load[:3]]
+        percents += [0.0] * (3 - len(percents))
 
         return {
             "uptime": result.get("uptime", 0),
             "load": raw_load,
-            "cpu_load": cpu_load,
-            "cpu_load_5min": cpu_load_5min,
-            "cpu_load_15min": cpu_load_15min,
+            "load_average": [round(v / _LOAD_SCALE, 2) for v in raw_load[:3]],
+            "cpu_cores": cores,
+            "cpu_load": percents[0],
+            "cpu_load_5min": percents[1],
+            "cpu_load_15min": percents[2],
             "memory": result.get("memory", {}),
         }
+
+    async def _get_cpu_cores(self) -> int | None:
+        """Return the router's logical CPU count from /proc/cpuinfo, or None.
+
+        Read once via ubus file/read (rpcd ACL v7) and kept for the lifetime
+        of this instance, so a poll costs no extra call once it is known.
+
+        Returns None — the caller then keeps the un-normalised value — when
+        the path is not permitted (ACL older than v7), the file is empty or
+        has no ``processor`` lines, or the read fails. Such a failure is not
+        retried before ``CPU_CORES_RETRY_INTERVAL``
+        (``CPU_CORES_TRANSIENT_RETRY_INTERVAL`` after a timeout or connection
+        error) or the next :meth:`reset_acl_blocked`, which follows every ACL
+        (re)deploy. Never raises.
+        """
+        if self._cpu_cores is not None:
+            return self._cpu_cores
+        now = time.monotonic()
+        if now < self._cpu_cores_retry_at:
+            return None
+        try:
+            result = await self._call(
+                UBUS_FILE_OBJECT, UBUS_FILE_READ, {"path": PROC_CPUINFO_PATH}
+            )
+        except (OpenWrtConnectionError, OpenWrtTimeoutError) as err:
+            self._cpu_cores_retry_at = now + CPU_CORES_TRANSIENT_RETRY_INTERVAL
+            _LOGGER.debug(
+                "%s: reading %s failed (%s) — CPU load not normalised per core, "
+                "retry in %ds",
+                self._host,
+                PROC_CPUINFO_PATH,
+                err,
+                CPU_CORES_TRANSIENT_RETRY_INTERVAL,
+            )
+            return None
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+            OpenWrtResponseError,
+        ) as err:
+            self._cpu_cores_retry_at = now + CPU_CORES_RETRY_INTERVAL
+            _LOGGER.debug(
+                "%s: %s not readable via ubus file/read (%s; rpcd ACL older "
+                "than v7?) — CPU load not normalised per core",
+                self._host,
+                PROC_CPUINFO_PATH,
+                err,
+            )
+            return None
+
+        data = result.get("data") if isinstance(result, dict) else None
+        cores = _parse_cpuinfo_cores(data) if isinstance(data, str) else 0
+        if cores < 1:
+            self._cpu_cores_retry_at = now + CPU_CORES_RETRY_INTERVAL
+            _LOGGER.debug(
+                "%s: no processor lines in %s — CPU load not normalised per core",
+                self._host,
+                PROC_CPUINFO_PATH,
+            )
+            return None
+        self._cpu_cores = cores
+        _LOGGER.debug(
+            "%s: %d CPU core(s) — load average normalised per core", self._host, cores
+        )
+        return cores
 
     async def get_log_entries(self, lines: int) -> list[dict[str, Any]]:
         """Return the newest ``lines`` entries of the logd ring buffer.
@@ -2791,8 +2900,8 @@ class OpenWrtAPI:
                 config via ubus uci/commit. rpcd then emits a
                 ``config.change`` event and procd's reload trigger for
                 ``wireless`` re-applies the radios by itself, so a missing
-                network.reload (not granted by the rpcd ACL) is expected and
-                only logged at debug level.
+                network.reload (granted only from rpcd ACL v7 on) is
+                expected and only logged at debug level.
 
         Returns:
             True when network.reload was accepted, False when it is not

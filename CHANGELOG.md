@@ -2,6 +2,46 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.0] - 2026-10-27
+
+### Changed
+
+- **CPU-Last jetzt pro Kern.** `system info` liefert das Lastmittel (Zahl
+  der laufbereiten Prozesse), nicht die Auslastung. Bisher wurde es nur mit
+  100 multipliziert: Ein Lastmittel von 1,22 zeigte auf einem 2-Kern-Router
+  122 %, obwohl die Kerne zu 61 % belegt waren. Die drei Sensoren
+  „CPU-Last“ (1, 5 und 15 Minuten) teilen jetzt durch die Kernzahl und
+  zeigen den Anteil an der gesamten CPU-Leistung. **Auf 2-Kern-Routern
+  halbieren sich die Werte, die Langzeitstatistik springt einmalig.** Das
+  gilt auch für das Panel und dessen Ereignis „CPU-Last erhöht“ (ab 80 %).
+  Die Kernzahl liest die Integration einmal je Setup aus `/proc/cpuinfo`.
+  Der Sensor „CPU-Last“ hat die neuen Attribute `cpu_cores` sowie
+  `load_average_1min`, `load_average_5min` und `load_average_15min` (die
+  rohen Lastmittel). Ohne lesbares `/proc/cpuinfo` (ältere ACL) und im
+  SSH-Fallback bleibt der bisherige Wert, `cpu_cores` ist dann leer; ein
+  fehlgeschlagener Versuch wird höchstens stündlich wiederholt (nach einem
+  Timeout nach 5 Minuten, nach einem ACL-Deploy sofort).
+- **rpcd-ACL Version 7:** zusätzlich lesend `/proc/cpuinfo` (Kernzahl) und
+  schreibend `network reload`. Beim ersten Start nach dem Update schreibt die
+  Integration die ACL neu und startet rpcd **einmal pro Router** neu
+  (wenige Sekunden ohne Antwort). `scripts/ha-openwrt-router.json` ist
+  angepasst.
+
+### Fixed
+
+- **Poll-Drosselung schon bei mäßiger Last.** Die Drosselung verdoppelt das
+  Abfrageintervall ab über 100 % CPU-Last und nimmt es unter 80 % zurück.
+  Sie rechnete mit dem ungeteilten Wert und griff deshalb auf 2-Kern-Routern
+  schon bei einem Lastmittel über 1,0. Die Schwellen bleiben, gelten aber
+  jetzt pro Kern: gedrosselt wird erst, wenn mehr Prozesse laufen wollen,
+  als Kerne da sind. Die Logzeile nennt Kernzahl und Lastmittel.
+- **Button „WLAN neu laden“ löst jetzt wirklich `network reload` aus.** Die
+  ACL v6 erlaubte die Methode nicht, der Button meldete nur
+  „network.reload not available“ und wendete nichts an. Mit ACL v7 lädt er
+  die Netzwerk- und WLAN-Konfiguration neu. Auch nach einem WLAN-Schalter
+  läuft `network reload` jetzt durch (bisher griff dort nur der
+  Reload-Trigger von procd).
+
 ## [1.37.5] - 2026-10-27
 
 ### Fixed

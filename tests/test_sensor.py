@@ -133,6 +133,40 @@ class TestSensorEntity:
         sensor = _make_sensor(mock_coordinator, mock_config_entry, "cpu_load")
         assert sensor.native_value == 100.0
 
+    def test_cpu_load_attributes_core_count_and_load_average(
+        self, mock_coordinator, mock_config_entry
+    ):
+        data = mock_coordinator.data
+        data.cpu_load = 61.0
+        data.cpu_cores = 2
+        data.load_average = [1.22, 1.0, 0.5]
+        sensor = _make_sensor(mock_coordinator, mock_config_entry, "cpu_load")
+
+        attrs = sensor.extra_state_attributes
+
+        assert sensor.native_value == 61.0
+        assert attrs["load_1min"] == 61.0
+        assert attrs["cpu_cores"] == 2
+        assert attrs["load_average_1min"] == 1.22
+        assert attrs["load_average_5min"] == 1.0
+        assert attrs["load_average_15min"] == 0.5
+
+    def test_cpu_load_attributes_when_unknown(
+        self, mock_coordinator, mock_config_entry
+    ):
+        """No core count (ACL < v7, SSH fallback) and no raw load averages."""
+        data = mock_coordinator.data
+        data.cpu_cores = None
+        data.load_average = []
+        sensor = _make_sensor(mock_coordinator, mock_config_entry, "cpu_load")
+
+        attrs = sensor.extra_state_attributes
+
+        assert attrs["cpu_cores"] is None
+        assert attrs["load_average_1min"] is None
+        assert attrs["load_average_5min"] is None
+        assert attrs["load_average_15min"] is None
+
     def test_memory_usage_value(self, mock_coordinator, mock_config_entry):
         sensor = _make_sensor(mock_coordinator, mock_config_entry, "memory_usage")
         assert sensor.native_value == 50.0  # (256-128)/256 * 100

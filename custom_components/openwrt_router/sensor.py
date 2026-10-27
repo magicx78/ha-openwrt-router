@@ -161,6 +161,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         value_fn=lambda data: data.cpu_load,
         extra_attrs_fn=lambda data: {
             "load_1min": round(data.cpu_load, 1),
+            **_cpu_load_attrs(data),
         },
     ),
     OpenWrtSensorEntityDescription(
@@ -1175,6 +1176,23 @@ class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
 # ------------------------------------------------------------------
 # Utility functions
 # ------------------------------------------------------------------
+
+
+def _cpu_load_attrs(data: OpenWrtCoordinatorData) -> dict[str, Any]:
+    """Core count and raw load averages behind the per-core CPU load.
+
+    ``cpu_cores`` is None when the core count is unknown (rpcd ACL older than
+    v7, SSH fallback) — the state is then not divided by the cores. The load
+    averages are None when the router did not report them.
+    """
+    loads = list(data.load_average[:3])
+    loads += [None] * (3 - len(loads))
+    return {
+        "cpu_cores": data.cpu_cores,
+        "load_average_1min": loads[0],
+        "load_average_5min": loads[1],
+        "load_average_15min": loads[2],
+    }
 
 
 def _calc_memory_pct(memory: dict) -> float | None:

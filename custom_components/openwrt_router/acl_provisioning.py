@@ -5,7 +5,8 @@ rpcd ACL file exists on the router. If missing, it deploys it via the
 ubus file API (no SSH required; asyncssh fallback when file/write is blocked).
 
 The ACL grants access to the ubus methods needed by the integration:
-hostapd, network.wireless, network.interface, luci-rpc, iwinfo, system.
+hostapd, network.wireless, network.interface, network (reload), luci-rpc,
+iwinfo, system, log, usteer — plus read access to a fixed set of files.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ ACL_FILE_PATH = "/usr/share/rpcd/acl.d/ha-openwrt-router.json"
 # Bump whenever RPCD_ACL_CONTENT below changes. Used only for log messages —
 # staleness is detected by comparing the deployed file's actual content to
 # RPCD_ACL_CONTENT, not by this number.
-ACL_VERSION = 6
+ACL_VERSION = 7
 
 # Marker echoed by the SSH deploy command — _run_ssh() returns None for empty
 # stdout even on exit code 0, so success must be detectable from stdout alone.
@@ -66,6 +67,9 @@ RPCD_ACL_CONTENT: dict = {
                 # path — the /sys/class/net/* glob below does not cover it.
                 "/sys/class/net": ["list"],
                 "/sys/class/net/*": ["read"],  # brforward, statistics/*, brport/port_no
+                # Core count to normalise the load average per core (v7),
+                # read once per setup — see OpenWrtAPI._get_cpu_cores.
+                "/proc/cpuinfo": ["read"],
                 "/proc/net/arp": ["read"],
                 "/proc/net/nf_conntrack": ["read"],
                 "/proc/sys/net/netfilter/nf_conntrack_count": ["read"],
@@ -115,6 +119,9 @@ RPCD_ACL_CONTENT: dict = {
             },
             "ubus": {
                 "network.wireless": ["up", "down"],
+                # "Reload Wi-Fi" button and the Wi-Fi switches (v7): netifd
+                # re-applies network/wireless config. Only reload, no restart.
+                "network": ["reload"],
             },
         },
     }

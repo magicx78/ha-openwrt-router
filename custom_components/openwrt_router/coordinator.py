@@ -221,13 +221,29 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+def _cpu_load_basis(data: OpenWrtCoordinatorData) -> str:
+    """Describe what a cpu_load percentage refers to (throttle log lines)."""
+    if data.cpu_cores:
+        basis = f"{data.cpu_cores} core(s)"
+    else:
+        basis = "core count unknown, not normalised"
+    if data.load_average:
+        basis += f", load average {data.load_average[0]:.2f}"
+    return basis
+
+
 class OpenWrtCoordinatorData:
     """Typed container for data fetched by the coordinator each poll cycle.
 
     Attributes:
         router_info: Static board information (model, hostname, release).
         uptime: System uptime in seconds.
-        cpu_load: 1-minute CPU load average as percentage (0-100).
+        cpu_load: 1-minute load as % of total CPU capacity (load average
+            divided by cpu_cores; above 100 the run queue exceeds the cores).
+        cpu_cores: Logical CPU count used for cpu_load, None = unknown (then
+            cpu_load is not divided, i.e. 1 core is assumed).
+        load_average: Raw 1/5/15-minute load averages, e.g. [1.22, 0.9, 0.7];
+            empty when unknown (SSH fallback).
         memory: Memory stats dict (total, free, shared, buffered bytes).
         wan_status: WAN interface status dict.
         wan_connected: Convenience bool derived from wan_status.
@@ -246,6 +262,8 @@ class OpenWrtCoordinatorData:
         self.cpu_load: float = 0.0
         self.cpu_load_5min: float = 0.0
         self.cpu_load_15min: float = 0.0
+        self.cpu_cores: int | None = None
+        self.load_average: list[float] = []
         self.memory: dict[str, Any] = {}
         # Derived from memory, see calc_memory_pressure()
         self.memory_pressure: dict[str, Any] = {}
@@ -325,6 +343,8 @@ class OpenWrtCoordinatorData:
             KEY_CPU_LOAD: self.cpu_load,
             "cpu_load_5min": self.cpu_load_5min,
             "cpu_load_15min": self.cpu_load_15min,
+            "cpu_cores": self.cpu_cores,
+            "load_average": self.load_average,
             KEY_MEMORY: self.memory,
             "memory_pressure": self.memory_pressure,
             KEY_WAN_STATUS: self.wan_status,
@@ -671,6 +691,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             data.cpu_load = status.get("cpu_load", 0.0)
             data.cpu_load_5min = status.get("cpu_load_5min", 0.0)
             data.cpu_load_15min = status.get("cpu_load_15min", 0.0)
+            data.cpu_cores = status.get("cpu_cores")
+            data.load_average = status.get("load_average") or []
             data.memory = status.get("memory", {})
             data.memory_pressure = calc_memory_pressure(data.memory)
 
@@ -1021,7 +1043,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             )
 
         # Adaptive polling: double interval when router is overloaded (load > 100%),
-        # restore normal interval once load drops back below 80%.
+        # restore normal interval once load drops back below 80%. cpu_load is
+        # per core (% of total CPU capacity), so > 100% means the run queue
+        # really exceeds the cores — not just a load average above 1.0.
         cpu = data.cpu_load
         normal_interval = timedelta(seconds=SCAN_INTERVAL_SECONDS)
         throttled_interval = timedelta(seconds=SCAN_INTERVAL_SECONDS * 2)
@@ -1029,18 +1053,20 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             self._throttled = True
             self.update_interval = throttled_interval
             _LOGGER.warning(
-                "%s: CPU load %.0f%% — reducing poll frequency to %ds",
+                "%s: CPU load %.0f%% (%s) — reducing poll frequency to %ds",
                 self.name,
                 cpu,
+                _cpu_load_basis(data),
                 SCAN_INTERVAL_SECONDS * 2,
             )
         elif self._throttled and cpu < 80:
             self._throttled = False
             self.update_interval = normal_interval
             _LOGGER.info(
-                "%s: CPU load %.0f%% — restoring normal poll frequency (%ds)",
+                "%s: CPU load %.0f%% (%s) — restoring normal poll frequency (%ds)",
                 self.name,
                 cpu,
+                _cpu_load_basis(data),
                 SCAN_INTERVAL_SECONDS,
             )
 
