@@ -2,6 +2,25 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.31.0] - 2026-10-27
+
+### Added
+
+- **Reparatur-Hinweis bei Speicherdruck auf einem Router** (`ram_high_<entry_id>`).
+  Speicherdruck = 1 − verfügbar/gesamt (`available` aus `system info`). Liegt er
+  15 Minuten lang über 85 % oder sind weniger als 16 MB verfügbar, erscheint
+  „Hohe RAM-Auslastung auf OpenWrt-Router …“. Er verschwindet von selbst, sobald
+  der Druck unter 80 % fällt und wieder mindestens 16 MB frei sind, und beim
+  Entladen des Eintrags. Ein einzelner normaler Messwert setzt die Haltezeit
+  zurück, Abfragen ohne Speicherwerte ändern nichts. Anlass: Das rpcd-Leck auf
+  einem Dumb-AP (110 MB, ca. 93 % Druck) blieb in Home Assistant unsichtbar.
+  Fehlt `available` (ältere Firmware, SSH-Fallback), wird er aus
+  frei + Puffer + Cache − Shared geschätzt.
+- **Attribute `available_mb` und `pressure_pct`** am Sensor „Speichernutzung“
+  (`memory_usage`). Der Zustand des Sensors rechnet unverändert
+  (gesamt − frei)/gesamt, damit bestehende Verläufe und Automationen gleich
+  bleiben.
+
 ## [1.30.0] - 2026-10-27
 
 ### Added

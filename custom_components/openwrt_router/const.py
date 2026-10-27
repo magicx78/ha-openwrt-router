@@ -150,6 +150,15 @@ NOTIFICATION_FAILURE_THRESHOLD = 3
 # Fired on outage start/end, payload see fleet.FleetOutageTracker
 EVENT_OUTAGE = f"{DOMAIN}_outage_event"
 
+# RAM pressure Repairs issue (coordinator._check_memory_pressure).
+# Pressure = 1 - available/total. The issue is raised once the pressure stays
+# above RAM_PRESSURE_HIGH_PCT (or available below RAM_AVAILABLE_MIN_BYTES) for
+# RAM_PRESSURE_HOLD_SECONDS and cleared below RAM_PRESSURE_CLEAR_PCT.
+RAM_PRESSURE_HIGH_PCT = 85.0
+RAM_PRESSURE_CLEAR_PCT = 80.0
+RAM_PRESSURE_HOLD_SECONDS = 15 * 60
+RAM_AVAILABLE_MIN_BYTES = 16 * 1024 * 1024
+
 # Entity unique ID suffixes
 SUFFIX_UPTIME = "uptime"
 SUFFIX_WAN_STATUS = "wan_status"

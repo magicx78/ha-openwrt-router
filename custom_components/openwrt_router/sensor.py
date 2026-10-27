@@ -168,6 +168,10 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
                 / 1024,
                 1,
             ),
+            # Pressure = 1 - available/total (basis of the ram_high issue);
+            # the state above keeps its historic (total - free) formula.
+            "available_mb": data.memory_pressure.get("available_mb"),
+            "pressure_pct": data.memory_pressure.get("pressure_pct"),
         },
     ),
     OpenWrtSensorEntityDescription(

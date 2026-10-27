@@ -12,7 +12,9 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import (
     OpenWrtAPI,
@@ -66,15 +68,78 @@ from .const import (
     NOTIFICATION_FAILURE_THRESHOLD,
     RADIO_KEY_BAND,
     RADIO_KEY_IS_GUEST,
+    RAM_AVAILABLE_MIN_BYTES,
+    RAM_PRESSURE_CLEAR_PCT,
+    RAM_PRESSURE_HIGH_PCT,
+    RAM_PRESSURE_HOLD_SECONDS,
     SCAN_INTERVAL_SECONDS,
     TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES,
     TOPOLOGY_SNAPSHOT_MAX,
+)
+from .issues import (
+    ISSUE_RAM_HIGH,
+    async_clear_issue,
+    async_raise_issue,
+    ram_high_issue_id,
 )
 
 if TYPE_CHECKING:
     from .fleet import FleetOutageTracker
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def calc_memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
+    """Return RAM pressure derived from ubus ``system info`` memory stats.
+
+    Pressure is ``1 - available/total``: the share of RAM the kernel could not
+    hand out without swapping or OOM-killing. ``available`` (MemAvailable) is
+    reported by procd on current firmware. Without it (older procd, SSH
+    fallback) it is estimated as free + buffers + page cache minus shmem,
+    because tmpfs pages sit in the page cache but cannot be reclaimed.
+
+    An ``available`` that is not a number, or 0 while ``free`` is not, is
+    treated as missing (estimate) rather than as 100 % pressure.
+
+    Returns:
+        ``{"pressure_pct", "pressure_ratio", "available_mb", "available_bytes",
+        "estimated"}`` or ``{}`` when the stats are missing or unusable.
+        ``pressure_ratio`` is unrounded and used for the thresholds.
+    """
+    if not isinstance(memory, dict):
+        return {}
+    total = _as_int(memory.get("total"))
+    if total is None or total <= 0:
+        return {}
+    free = _as_int(memory.get("free")) or 0
+    available = _as_int(memory.get("available"))
+    estimated = available is None or (available == 0 and free > 0)
+    if estimated:
+        buffered = _as_int(memory.get("buffered", memory.get("buffers"))) or 0
+        reclaimable_cache = max(
+            (_as_int(memory.get("cached")) or 0) - (_as_int(memory.get("shared")) or 0),
+            0,
+        )
+        available = free + buffered + reclaimable_cache
+    available = min(max(available, 0), total)
+    ratio = 1.0 - available / total
+    return {
+        "pressure_pct": round(ratio * 100.0, 1),
+        "pressure_ratio": ratio,
+        "available_mb": round(available / 1024 / 1024, 1),
+        "available_bytes": available,
+        "estimated": estimated,
+    }
+
+
+def _as_int(value: Any) -> int | None:
+    """Return value as int, None if missing or not a number."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class OpenWrtCoordinatorData:
@@ -103,6 +168,8 @@ class OpenWrtCoordinatorData:
         self.cpu_load_5min: float = 0.0
         self.cpu_load_15min: float = 0.0
         self.memory: dict[str, Any] = {}
+        # Derived from memory, see calc_memory_pressure()
+        self.memory_pressure: dict[str, Any] = {}
         self.wan_status: dict[str, Any] = {}
         self.wan_connected: bool = False
         self.wifi_radios: list[dict[str, Any]] = []
@@ -166,6 +233,7 @@ class OpenWrtCoordinatorData:
             "cpu_load_5min": self.cpu_load_5min,
             "cpu_load_15min": self.cpu_load_15min,
             KEY_MEMORY: self.memory,
+            "memory_pressure": self.memory_pressure,
             KEY_WAN_STATUS: self.wan_status,
             KEY_WAN_CONNECTED: self.wan_connected,
             KEY_WIFI_RADIOS: self.wifi_radios,
@@ -256,6 +324,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._prev_wan_connected: bool | None = None
         self._cpu_warn_active: bool = False
         self._mem_warn_active: bool = False
+        # RAM pressure Repairs issue: start of the current high-pressure phase
+        # and whether the issue is currently raised.
+        self._mem_high_since: datetime | None = None
+        self._mem_last_check: datetime | None = None
+        self._ram_issue_active: bool = False
         # Stale-data cache: letzte bekannte Werte für VLAN-Badges bei Offline-Router
         self._last_known_network_interfaces: list[dict[str, Any]] = []
         self._last_known_port_vlan_map: dict[str, list[int]] = {}
@@ -458,6 +531,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             data.cpu_load_5min = status.get("cpu_load_5min", 0.0)
             data.cpu_load_15min = status.get("cpu_load_15min", 0.0)
             data.memory = status.get("memory", {})
+            data.memory_pressure = calc_memory_pressure(data.memory)
 
             # --- Priority 3: Extended Monitoring (optional, graceful fallback) ---
             # These are non-critical; failures don't affect core functionality
@@ -691,6 +765,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         if self._outage_tracker is not None and self._entry is not None:
             self._outage_tracker.report_up(self._entry.entry_id)
         self._record_events(data)
+        self._check_memory_pressure(data, data.last_seen)
 
         # SSH-Fallback-Erkennung: HA-Warnung + Poll auf 5 min reduzieren
         if self.api.uses_ssh_fallback and not self._ssh_fallback_notified:
@@ -774,6 +849,78 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 self._entry.entry_id, error_type, self._failure_since
             )
 
+    # ------------------------------------------------------------------
+    # RAM pressure
+    # ------------------------------------------------------------------
+
+    def _check_memory_pressure(
+        self, data: OpenWrtCoordinatorData, now: datetime
+    ) -> None:
+        """Raise/clear the ``ram_high_<entry_id>`` Repairs issue.
+
+        High = pressure above RAM_PRESSURE_HIGH_PCT or available RAM below
+        RAM_AVAILABLE_MIN_BYTES. The issue appears after the router stayed
+        high for RAM_PRESSURE_HOLD_SECONDS without a single normal reading in
+        between, and disappears once the pressure is below
+        RAM_PRESSURE_CLEAR_PCT with enough RAM available (hysteresis). Polls
+        without usable memory stats change nothing; a gap of more than two
+        poll intervals since the last usable reading (router unreachable)
+        restarts the hold time.
+        """
+        pressure = data.memory_pressure
+        if not pressure:
+            return
+        last_check, self._mem_last_check = self._mem_last_check, now
+        interval = self.update_interval or timedelta(seconds=SCAN_INTERVAL_SECONDS)
+        if last_check is not None and now - last_check > 2 * interval:
+            self._mem_high_since = None
+        pct = pressure["pressure_ratio"] * 100.0
+        low_available = pressure["available_bytes"] < RAM_AVAILABLE_MIN_BYTES
+        high = pct > RAM_PRESSURE_HIGH_PCT or low_available
+
+        if self._ram_issue_active:
+            if pct < RAM_PRESSURE_CLEAR_PCT and not low_available:
+                self._ram_issue_active = False
+                self._mem_high_since = None
+                if self._entry is not None:
+                    async_clear_issue(
+                        self.hass, ram_high_issue_id(self._entry.entry_id)
+                    )
+                _LOGGER.info("%s: RAM pressure back to normal (%.1f%%)", self.name, pct)
+            return
+
+        if not high:
+            self._mem_high_since = None
+            return
+        if self._mem_high_since is None:
+            self._mem_high_since = now
+        if (now - self._mem_high_since).total_seconds() < RAM_PRESSURE_HOLD_SECONDS:
+            return
+
+        self._ram_issue_active = True
+        since = dt_util.as_local(self._mem_high_since).strftime("%Y-%m-%d %H:%M")
+        if self._entry is not None:
+            async_raise_issue(
+                self.hass,
+                ram_high_issue_id(self._entry.entry_id),
+                ISSUE_RAM_HIGH,
+                ir.IssueSeverity.WARNING,
+                {
+                    "router": self._entry.title,
+                    "pressure": f"{pressure['pressure_pct']:.0f}",
+                    "available_mb": f"{pressure['available_mb']:.0f}",
+                    "since": since,
+                },
+            )
+        _LOGGER.warning(
+            "%s: RAM pressure %.1f%% (%.1f MB available) since %s",
+            self.name,
+            pct,
+            pressure["available_mb"],
+            since,
+        )
+
+    # ------------------------------------------------------------------
     # Event timeline
     # ------------------------------------------------------------------
 

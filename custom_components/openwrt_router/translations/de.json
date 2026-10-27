@@ -205,6 +205,10 @@
       "title": "Kein OpenWrt-Router erreichbar",
       "description": "Alle {count} OpenWrt-Router ({routers}) sind seit {since} von Home Assistant aus nicht erreichbar.\n\nWenn alle Router im selben Moment ausfallen, liegt die Ursache fast immer zwischen Home Assistant und dem LAN (Netzwerk des HA-Hosts, Switch, Verkabelung, VLAN) und nicht in den Routern selbst.\n\nDieser Hinweis verschwindet automatisch, sobald wieder ein Router antwortet."
     },
+    "ram_high": {
+      "title": "Hohe RAM-Auslastung auf OpenWrt-Router {router}",
+      "description": "Auf dem Router {router} wird seit {since} der Arbeitsspeicher knapp: {pressure} % des RAM lassen sich nicht mehr freigeben, nur noch {available_mb} MB sind verfügbar (Attribut `pressure_pct` des Sensors Speichernutzung).\n\nDieser Hinweis erscheint, wenn 15 Minuten lang mehr als 85 % des RAM nicht verfügbar oder weniger als 16 MB verfügbar sind. Bleibt es so, beendet der Router Prozesse oder startet neu. Typische Ursache ist ein Prozess, der immer weiter wächst (z. B. rpcd auf älterer Firmware). Prüfe auf dem Router mit `top` oder `ps w` und starte den betroffenen Dienst oder den Router neu.\n\nDieser Hinweis verschwindet automatisch, sobald weniger als 80 % des RAM nicht verfügbar und wieder mindestens 16 MB verfügbar sind."
+    },
     "router_unreachable": {
       "title": "OpenWrt-Router {router} nicht erreichbar",
       "description": "Der Router {router} antwortet seit {since} nicht mehr (Fehlertyp: {error_type}).\n\nPrüfe Stromversorgung, Verkabelung und die Dienste rpcd/uhttpd auf dem Router.\n\nDieser Hinweis verschwindet automatisch, sobald der Router wieder antwortet."
