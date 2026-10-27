@@ -24,7 +24,7 @@ Known limitations (transparent, not hidden):
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .coordinator import OpenWrtCoordinatorData
@@ -55,8 +55,8 @@ def _seconds_since(value: Any) -> int | None:
             v = value.replace("Z", "+00:00") if value.endswith("Z") else value
             dt = datetime.fromisoformat(v)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            diff = (datetime.now(timezone.utc) - dt).total_seconds()
+                dt = dt.replace(tzinfo=UTC)
+            diff = (datetime.now(UTC) - dt).total_seconds()
             return max(0, int(diff))
         except (ValueError, TypeError):
             pass
@@ -295,7 +295,7 @@ def build_topology_snapshot(
         signal=None  → preserved as None
         bitrate=None → preserved as None
     """
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []

@@ -205,7 +205,7 @@ async def _safe_subprocess_exec(
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return (SUBPROCESS_RC_TIMEOUT, b"" if binary else "", b"timeout")
 
         rc = proc.returncode if proc.returncode is not None else 0
@@ -237,7 +237,7 @@ async def _safe_subprocess_exec(
                 await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=2.0))
             except asyncio.CancelledError:
                 cleanup_cancelled = True
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass  # still alive — escalate to SIGKILL
             except Exception:
                 _LOGGER.debug("subprocess wait after terminate raised", exc_info=True)
@@ -256,7 +256,7 @@ async def _safe_subprocess_exec(
                     await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=2.0))
                 except asyncio.CancelledError:
                     cleanup_cancelled = True
-                except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                except (TimeoutError, Exception):  # noqa: BLE001
                     _LOGGER.debug(
                         "subprocess refused to die after SIGKILL — "
                         "kernel will reap on parent exit"
@@ -2130,7 +2130,7 @@ class OpenWrtAPI:
                 result = await asyncio.wait_for(
                     self._asyncssh_exec_once(remote_cmd, password), timeout=timeout
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # MUST precede the OSError catch — TimeoutError subclasses OSError.
                 return (SUBPROCESS_RC_TIMEOUT, b"" if binary else "", b"timeout")
             except asyncssh.PermissionDenied:
@@ -4373,7 +4373,7 @@ class OpenWrtAPI:
             raise OpenWrtConnectionError(
                 f"Cannot connect to {self._ubus_url}: {err}"
             ) from err
-        except asyncio.TimeoutError as err:
+        except TimeoutError as err:
             raise OpenWrtTimeoutError(
                 f"Request to {self._ubus_url} timed out after {self._timeout.total}s"
             ) from err
