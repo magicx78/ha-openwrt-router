@@ -3,10 +3,10 @@
 ## Status
 
 - **Stand:** 2026-10-27 · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** `fix/post-1.37-findings` · PR #— · Basis: v1.37.4 (`c5a25f9`)
-- **Erledigt:** B1, P1, P2, P6 (PR A, 1.37.5) · **Offen:** P3, P4, P5, B2, B3
+- **Branch/PR:** `fix/post-1.37-findings` · PR #33 (A) · `fix/acl-v7-cpu-per-core` · PR B · Basis: v1.37.4 (`c5a25f9`)
+- **Erledigt:** B1, P1, P2, P6 (PR #33, 1.37.5), P3 (PR B, 1.38.0) · **Offen:** P4, P5, B2, B3
 - **Blocker:** –
-- **Nächster Schritt:** P3 als PR B (ACL v7, 1.38.0), gestapelt auf PR A
+- **Nächster Schritt:** P4 als PR C (1.38.1), gestapelt auf PR B
 
 ## Problem und Zielverhalten
 
@@ -89,4 +89,6 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 
 - 2026-10-27 v1.37.4 in HA – Integration geladen (3/3 erreichbare Router), 238 Entities, 0 `unavailable`, keine Repairs der Integration; ACL v6 auf `openwrt`/`ap2`/`ap4` aktiv; Befunde 1–13 wie oben.
 - 2026-10-27 `fix/post-1.37-findings` (PR A) – lokal: ruff 0.17.3 sauber, 1174 Tests grün (vorher 1136; neue Tests für P1/P2 vor dem Fix rot) · Hardware: nicht nötig · Review: folgt.
+- 2026-10-27 PR #33 Review (unabhängig): keine P0/P1; P2 (fehlschlagendes `network.reload` nach Commit galt als Commit-Fehler) und P3-Punkte behoben (`0f8985f`), 1179 Tests grün.
+- 2026-10-27 `fix/acl-v7-cpu-per-core` (PR B) – lokal: ruff 0.17.3 sauber, 1214 Tests grün (35 neue, 32 davon vor der Änderung rot) · Hardware: ACL v7 nicht verteilt (Lücke: Sensor = loadavg/nproc, Schalter konfiguriert das Radio nur einmal, rpcd-Neustart je Router) · Review: folgt.
 - 2026-10-27 B1 – drei Config-Entries entfernt; danach 3 Einträge, alle `loaded`. Sicherung vorher: HA-Backup vom selben Tag, 13:46.
