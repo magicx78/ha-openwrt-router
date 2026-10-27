@@ -35,7 +35,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import OpenWrtConfigEntry
 from .const import (
     CLIENT_KEY_RADIO,
+    CONF_EXTENDED_WIFI_SENSORS,
     CONF_PROTOCOL,
+    DEFAULT_EXTENDED_WIFI_SENSORS,
     DEFAULT_PROTOCOL,
     DOMAIN,
     RADIO_KEY_BAND,
@@ -772,6 +774,9 @@ class OpenWrtRadioSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
         self._metric = metric
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_radio_{ifname}_{metric}"
+        self._attr_entity_registry_enabled_default = bool(
+            entry.options.get(CONF_EXTENDED_WIFI_SENSORS, DEFAULT_EXTENDED_WIFI_SENSORS)
+        )
         self._attr_translation_key = f"radio_{metric}"
         self._attr_icon = (
             "mdi:wifi-strength-2" if metric == "signal" else "mdi:sine-wave"
@@ -867,6 +872,9 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
         self._metric = metric
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_ap_{ifname}_{metric}"
+        self._attr_entity_registry_enabled_default = bool(
+            entry.options.get(CONF_EXTENDED_WIFI_SENSORS, DEFAULT_EXTENDED_WIFI_SENSORS)
+        )
 
         cfg = self._METRIC_CONFIG.get(metric, ("mdi:wifi", None, None, None))
         self._attr_icon = cfg[0]
@@ -1022,6 +1030,9 @@ class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
         self._metric = metric
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_port_{port_name}_{metric}"
+        self._attr_entity_registry_enabled_default = bool(
+            entry.options.get(CONF_EXTENDED_WIFI_SENSORS, DEFAULT_EXTENDED_WIFI_SENSORS)
+        )
 
         cfg = self._METRIC_CONFIG.get(metric, ("mdi:ethernet", None, None, None, None))
         self._attr_icon = cfg[0]

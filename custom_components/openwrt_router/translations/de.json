@@ -4,9 +4,11 @@
       "init": {
         "title": "Router-Optionen",
         "data": {
+          "extended_wifi_sensors": "Erweiterte WLAN-Sensoren (Funk, AP, Port)",
           "topology_port_debug": "Port-Zuordnungs-Debugdaten im Topology-Snapshot"
         },
         "data_description": {
+          "extended_wifi_sensors": "Schaltet alle Sensoren pro Funkmodul, pro SSID (AP) und pro Port dieses Routers auf einmal ein statt einzeln. Ausschalten deaktiviert nur die Sensoren, die dieser Schalter eingeschaltet hat; selbst deaktivierte Sensoren bleiben unberührt. Wirksam nach etwa 30 Sekunden.",
           "topology_port_debug": "Rohe Port-Zuordnungsdaten (FDB/DHCP/ARP-Treffer und Zuordnungsgründe) im Topology-Snapshot-Endpoint mitliefern. HA-Diagnostics bleiben immer redacted."
         }
       }

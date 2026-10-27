@@ -2,6 +2,30 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.30.0] - 2026-10-27
+
+### Added
+
+- **Schalter „Erweiterte WLAN-Sensoren (Funk, AP, Port)“** in den Optionen
+  (Einstellungen → Geräte & Dienste → OpenWrt Router → Konfigurieren). Die
+  Sensoren pro Funkmodul, pro SSID (AP) und pro Port sind standardmäßig aus,
+  weil sie sich mit jedem Radio, jeder SSID und jedem Port vervielfachen.
+  Statt rund 40 Einzelklicks schaltet der Schalter sie jetzt gesammelt:
+  - **Ein:** aktiviert alle diese Sensoren, die von der Integration
+    deaktiviert sind. Später neu hinzukommende Sensoren (neue SSID, neuer
+    Port) sind dann ebenfalls aktiv.
+  - **Aus:** deaktiviert nur, was der Schalter eingeschaltet hat. Sensoren,
+    die vorher schon an waren, bleiben an.
+  - Selbst deaktivierte Sensoren (`disabled_by: user`) werden nie angefasst.
+  - Die Registry wird nur beim Umschalten geändert, nie beim Setup. Neue
+    Sensoren erscheinen nach dem automatischen Neuladen (ca. 30 s).
+
+### Fixed
+
+- **Speichern der Optionen löschte andere Optionen.** Der Options-Flow
+  ersetzte alle Optionen durch die Eingaben des Formulars. Jetzt werden sie
+  zusammengeführt.
+
 ## [1.29.0] - 2026-10-27
 
 ### Added
