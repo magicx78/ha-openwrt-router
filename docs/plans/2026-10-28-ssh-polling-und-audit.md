@@ -7,10 +7,10 @@
 ## Status
 
 - **Stand:** 2026-10-27 (abends) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** `fix/ssh-polling` (Worktree `../ha-openwrt-router-ssh-polling`) · PR #— · Basis: v1.38.2 (`7d77f0f`)
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Tests vorher rot), Review ohne offene Befunde · **Offen:** PR-Merge und Release (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A1–A14 (Teil 2)
+- **Branch/PR:** Teil 1 `fix/ssh-polling` · PR #37 (1.38.3) · Basis: v1.38.2 (`7d77f0f`) — Teil 2 gestapelt: A1 `fix/auth-errors` · PR #38 (1.38.4) auf #37; A2 `fix/hostapd-iface-cache` (Worktree `../ha-openwrt-router-hostapd-cache`) auf #38
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38) · **Offen:** Merge und Release #37 → #38 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A2–A14
 - **Blocker:** –
-- **Nächster Schritt:** CI des PR abwarten, Merge-Freigabe; nach Installation durch den Nutzer AK6 messen
+- **Nächster Schritt:** A2 (hostapd-Interface-Cache) mit fehlschlagenden Tests; Review A1 läuft; nach Installation durch den Nutzer AK6 messen
 
 ## Problem und Zielverhalten
 
@@ -411,3 +411,11 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   -Formulierungen, Docstring-Verweise, Testkosmetik, fünf zusätzliche Transport-Tests und AK1 auch
   mit leeren FDB/ARP-Tabellen. Danach lokal 1335 Tests grün (38 neue), ruff 0.17.3 sauber;
   `70a924a` gepusht, PR #37 offen (CI läuft).
+- 2026-10-27 A1 `fix/auth-errors@93ea7f2` (gestapelt auf #37) – lokal: ruff 0.17.3 sauber, 1346 Tests
+  grün (11 neue/geänderte vorher rot: `test_connection` mit ubus-Status 6 und HTTP 500,
+  `get_router_info` nur bei MethodNotFound Defaults, Flow end-to-end mit echter API, `_validate_input`
+  schließt, Setup mit ResponseError → NotReady, Reauth-Routing für `OpenWrtRpcdSetupError`; zwei
+  Alt-Tests auf das neue Verhalten umgestellt) · CI: PR #38 · Hardware: nicht geprüft – Lücke:
+  Reauth mit falschem Passwort im echten HA (Dialog bleibt offen, richtiges Passwort lädt den
+  Eintrag), `ubus call session list` ohne zusätzliche Session nach einer Prüfung · Review:
+  unabhängig, läuft.
