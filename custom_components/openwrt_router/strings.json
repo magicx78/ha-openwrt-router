@@ -100,7 +100,7 @@
         "state": {
           "pending": "Pending",
           "ok": "OK",
-          "unavailable": "Unavailable (rpcd ACL)",
+          "not_permitted": "Not readable (rpcd ACL or no logd)",
           "error": "Error"
         }
       },

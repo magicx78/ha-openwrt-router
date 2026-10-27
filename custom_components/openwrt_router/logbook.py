@@ -15,8 +15,7 @@ def _client(data: dict[str, Any]) -> str:
 
 
 def _name(data: dict[str, Any]) -> str:
-    router = data.get("router")
-    return f"OpenWrt {router}" if router else "OpenWrt Router"
+    return str(data.get("router") or "OpenWrt Router")
 
 
 def _kind(data: dict[str, Any]) -> str:

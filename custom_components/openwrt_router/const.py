@@ -405,10 +405,14 @@ UBUS_SERVICE_LIST = "list"
 # logd ring buffer (F6 log ingest, ACL v6)
 UBUS_LOG_OBJECT = "log"
 UBUS_LOG_READ = "read"
-# Fetched every LOG_READ_INTERVAL_CYCLES polls; LOG_READ_LINES newest lines
-# (~165 B each). Lines beyond that since the last fetch count as "missed".
+# Fetched every LOG_READ_INTERVAL_CYCLES polls (~165 B per line). The first
+# fetch asks for LOG_READ_LINES; later fetches size themselves to 1.5x the
+# lines seen last time (LOG_READ_LINES_MIN..MAX), and after a gap ("missed"
+# lines) the next fetch takes LOG_READ_LINES_MAX (about the whole buffer).
 LOG_READ_INTERVAL_CYCLES = 2
 LOG_READ_LINES = 250
+LOG_READ_LINES_MIN = 100
+LOG_READ_LINES_MAX = 700
 # HA events from log lines: at most LOG_EVENTS_PER_FETCH per fetch and one per
 # type and MAC within LOG_EVENT_COOLDOWN_SECONDS.
 LOG_EVENTS_PER_FETCH = 10
@@ -426,7 +430,8 @@ DFS_EVIDENCE_SECONDS = 15 * 60
 DHCP_CONFIG_REFRESH_CYCLES = 10
 LOG_STATUS_PENDING = "pending"
 LOG_STATUS_OK = "ok"
-LOG_STATUS_UNAVAILABLE = "unavailable"
+# Not "unavailable": that state is reserved by HA for unreachable entities.
+LOG_STATUS_NOT_PERMITTED = "not_permitted"
 LOG_STATUS_ERROR = "error"
 
 # Services to monitor/control by default (OpenWrt critical services)

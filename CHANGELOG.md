@@ -2,14 +2,37 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.34.0] - 2026-10-27
+
+### Added
+
+- **DFS-Ereignisse und Kanalwechsel.** Event `openwrt_router_dfs_event`:
+  - aus dem Router-Log (hostapd): `radar_detected`, `cac_start`,
+    `cac_completed`, `cac_failed`, `nop_finished`, `new_channel`,
+    `pre_cac_expired` mit `radio`, `interface`, `frequency`, `channel`;
+  - `channel_change`, wenn sich Kanal oder Kanalbreite eines Funkmoduls
+    zwischen zwei Abfragen ändert (`old_channel`/`new_channel`,
+    `old_width_mhz`/`new_width_mhz`). Ein Kanalwechsel holt das Router-Log
+    sofort, damit die passende DFS-Zeile schon bekannt ist.
+  - `dfs_related` ist nur wahr, wenn eine DFS-Zeile desselben Funkmoduls aus
+    den letzten 15 Minuten vorliegt (`evidence` nennt sie). Ein Kanalwechsel
+    ohne solche Zeile (manuell, ACS) ist `dfs_related: false`.
+  - Radar-Meldungen haben im Event-Budget Vorrang; die Events stehen im
+    Logbuch des Routers.
+- **Diagnosesensor „DFS-Ereignisse (24 h)“** (`dfs_events_24h`): Anzahl
+  dieser Ereignisse in den letzten 24 Stunden, Attribute `by_type` und
+  `last_event`.
+
 ## [1.33.0] - 2026-10-27
 
 ### Added
 
-- **Router-Log wird ausgewertet** (alle 2 Abfragen, die neuesten 250 Zeilen
-  über `ubus call log read`). Neue Zeilen werden über ihre fortlaufende `id`
-  erkannt. Was beim ersten Abruf (und nach einem Neustart von logd) schon im
-  Puffer steht, wird nur gezählt.
+- **Router-Log wird ausgewertet** (alle 2 Abfragen über `ubus call log read`).
+  Neue Zeilen werden über ihre fortlaufende `id` erkannt. Was beim ersten
+  Abruf (und nach einem Neustart von logd) schon im Puffer steht, wird nur
+  gezählt. Die Zahl der abgerufenen Zeilen richtet sich nach dem Aufkommen
+  (100–700, zuerst 250); fehlten beim letzten Mal Zeilen, holt der nächste
+  Abruf den ganzen Puffer.
 - **Events für eigene Automationen:**
   - `openwrt_router_wifi_event` mit `type` `psk_mismatch` (falsches
     WLAN-Passwort), `inactivity_timeout` (Client wegen Inaktivität getrennt)
@@ -19,10 +42,14 @@ All notable changes to the OpenWrt Router integration will be documented in this
   - Felder: `entry_id`, `router`, `type`, `mac`, `hostname`, `interface`,
     `time`, `message`, bei DHCP zusätzlich `ip`.
   - Höchstens 10 Events pro Abruf und eines je Typ und MAC in 5 Minuten.
-    Normale An-/Abmeldungen und DHCPACK werden nur gezählt.
-  - Die Events erscheinen lesbar im Logbuch.
+    Falsches Passwort und DHCP-Probleme haben dabei Vorrang vor
+    Inaktivitäts-Trennungen. Normale An-/Abmeldungen und DHCPACK werden nur
+    gezählt.
+  - Die Events erscheinen lesbar im Logbuch, auch auf der Geräteseite des
+    Routers (`device_id`).
 - **Diagnosesensor „Router-Log“** (`log_status`): `ok`, `pending`,
-  `unavailable` (rpcd-ACL erlaubt `log read` noch nicht) oder `error`.
+  `not_permitted` (rpcd-ACL erlaubt `log read` noch nicht oder kein logd)
+  oder `error`.
   Attribute: Zähler der letzten 24 h je Art (`counts_24h`), verarbeitete,
   verpasste und Baseline-Zeilen, ausgelöste und unterdrückte Events. Ein
   fehlender Zugriff lässt die Abfrage nie scheitern.
