@@ -2184,9 +2184,6 @@ class OpenWrtAPI:
                     UBUS_UCI_OBJECT, UBUS_UCI_COMMIT, {"config": "wireless"}
                 )
                 _LOGGER.debug("UCI commit successful")
-                await self.reload_wifi(applied_by_commit=True)
-                _LOGGER.info("WiFi section %s %s successfully", uci_section, action)
-                return True
             except (
                 OpenWrtMethodNotFoundError,
                 OpenWrtAuthError,
@@ -2241,6 +2238,25 @@ class OpenWrtAPI:
                     raise OpenWrtResponseError(
                         f"Failed to {action} WiFi section {uci_section}: {commit_err}"
                     ) from commit_err
+            else:
+                # The commit already applies the change: rpcd emits config.change
+                # and procd re-applies wireless. network.reload is best effort, so
+                # its failure must not turn a successful switch into an error.
+                try:
+                    await self.reload_wifi(applied_by_commit=True)
+                except (
+                    OpenWrtAuthError,
+                    OpenWrtResponseError,
+                    OpenWrtTimeoutError,
+                    OpenWrtConnectionError,
+                ) as reload_err:
+                    _LOGGER.debug(
+                        "network.reload after commit on %s failed (non-fatal): %s",
+                        self._host,
+                        reload_err,
+                    )
+                _LOGGER.info("WiFi section %s %s successfully", uci_section, action)
+                return True
 
         # Fallback 2: SSH (works even when rpcd ACL blocks uci/commit)
         try:

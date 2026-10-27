@@ -1091,9 +1091,10 @@ def _device_for_mac(dev_reg: dr.DeviceRegistry, mac: str) -> dr.DeviceEntry | No
 
     Since HA 2026.8 a device belongs to one config entry, so several
     integrations can register the same MAC; ``async_get_devices`` returns all
-    of them and the one the user renamed wins, otherwise the first. Cores
+    of them; the one the user renamed wins, then one with a real (non-MAC)
+    name, otherwise the first. Cores
     before 2026.8 (floor 2026.2) only have ``async_get_device``, which is
-    deprecated since 2026.10 and ends in 2027.8.
+    deprecated since 2026.9 and ends in 2027.8.
     """
     connections = {(dr.CONNECTION_NETWORK_MAC, mac)}
     get_devices = getattr(dev_reg, "async_get_devices", None)
@@ -1102,7 +1103,11 @@ def _device_for_mac(dev_reg: dr.DeviceRegistry, mac: str) -> dr.DeviceEntry | No
     devices = get_devices(connections=connections)
     if not devices:
         return None
-    return next((device for device in devices if device.name_by_user), devices[0])
+    return (
+        next((device for device in devices if device.name_by_user), None)
+        or next((d for d in devices if d.name and not _is_mac_like(d.name)), None)
+        or devices[0]
+    )
 
 
 def _apply_ha_names(

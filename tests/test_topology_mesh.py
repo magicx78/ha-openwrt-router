@@ -900,6 +900,17 @@ class TestApplyHaNamesRegistryApi:
         assert attrs["ha_name"] == "ESP Node"
         assert attrs["ha_manufacturer"] == "Espressif"
 
+    def test_several_devices_prefer_a_real_name_over_a_mac_name(self):
+        dev_reg = self._new_registry(
+            [
+                _device("AA:BB:CC:DD:EE:01", manufacturer="Generic"),
+                _device("Plug", manufacturer="Shelly"),
+            ]
+        )
+        attrs = self._run(dev_reg, _client_node(self.MAC))
+        assert attrs["ha_name"] == "Plug"
+        assert attrs["ha_manufacturer"] == "Shelly"
+
     def test_no_device_registered(self):
         attrs = self._run(self._new_registry([]), _client_node(self.MAC, "tab"))
         assert set(attrs) == {"mac", "hostname"}

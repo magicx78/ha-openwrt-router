@@ -545,3 +545,10 @@ def mock_config_entry_with_runtime(mock_config_entry, mock_api, mock_coordinator
         api=mock_api, coordinator=mock_coordinator
     )
     return mock_config_entry
+
+@pytest.fixture(autouse=True)
+def _reset_root_warning_latch(monkeypatch):
+    """Isolate tests from the process-wide root-account warning latch."""
+    from custom_components.openwrt_router import api as api_module
+
+    monkeypatch.setattr(api_module, "_ROOT_WARNED_HOSTS", set())

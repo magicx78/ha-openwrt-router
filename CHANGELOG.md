@@ -59,7 +59,9 @@ All notable changes to the OpenWrt Router integration will be documented in this
   WLAN-Konfiguration selbst neu. Nach einem erfolgreichen Commit steht die
   Meldung deshalb nur noch im Debug-Log. Der Button „WLAN neu laden“ warnt
   weiterhin, wenn `network reload` fehlt, weil dort sonst nichts angewendet
-  wird.
+  wird. Scheitert `network reload` nach einem erfolgreichen Commit
+  (Zeitüberschreitung, Verbindungsabbruch), meldet der Schalter keinen
+  Fehler mehr: Die Änderung ist zu diesem Zeitpunkt schon angewendet.
 - **HA-Deprecation `device_registry.async_get_device`.** Home Assistant 2026.10
   warnte bei WLAN-, DHCP- und DFS-Ereignissen (Geräte-ID des Routers) und
   beim Topologie-Snapshot (HA-Namen der Clients); die alte Methode entfällt
