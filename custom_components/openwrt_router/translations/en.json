@@ -207,7 +207,7 @@
     },
     "ram_high": {
       "title": "High memory usage on OpenWrt router {router}",
-      "description": "The router {router} has been running low on memory since {since}: {pressure} % of its RAM is in use and only {available_mb} MB is still available.\n\nThis message appears when more than 85 % of the RAM is in use or less than 16 MB is available for 15 minutes. If it stays like this, the router starts killing processes or reboots. A typical cause is a process that keeps growing (for example rpcd on older firmware). Check `top` or `ps w` on the router and restart the affected service or the router.\n\nThis message disappears automatically once usage drops below 80 %."
+      "description": "The router {router} has been running low on memory since {since}: {pressure} % of its RAM cannot be made available any more, only {available_mb} MB is left (attribute `pressure_pct` of the memory usage sensor).\n\nThis message appears when more than 85 % of the RAM is unavailable or less than 16 MB is available for 15 minutes. If it stays like this, the router starts killing processes or reboots. A typical cause is a process that keeps growing (for example rpcd on older firmware). Check `top` or `ps w` on the router and restart the affected service or the router.\n\nThis message disappears automatically once less than 80 % of the RAM is unavailable and at least 16 MB is available again."
     },
     "router_unreachable": {
       "title": "OpenWrt router {router} unreachable",

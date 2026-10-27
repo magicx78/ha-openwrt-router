@@ -98,37 +98,48 @@ def calc_memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
     fallback) it is estimated as free + buffers + page cache minus shmem,
     because tmpfs pages sit in the page cache but cannot be reclaimed.
 
+    An ``available`` that is not a number, or 0 while ``free`` is not, is
+    treated as missing (estimate) rather than as 100 % pressure.
+
     Returns:
-        ``{"pressure_pct", "available_mb", "available_bytes", "estimated"}`` or
-        ``{}`` when the stats are missing or unusable.
+        ``{"pressure_pct", "pressure_ratio", "available_mb", "available_bytes",
+        "estimated"}`` or ``{}`` when the stats are missing or unusable.
+        ``pressure_ratio`` is unrounded and used for the thresholds.
     """
-    total = _as_int(memory.get("total"))
-    if total <= 0:
+    if not isinstance(memory, dict):
         return {}
-    estimated = memory.get("available") is None
+    total = _as_int(memory.get("total"))
+    if total is None or total <= 0:
+        return {}
+    free = _as_int(memory.get("free")) or 0
+    available = _as_int(memory.get("available"))
+    estimated = available is None or (available == 0 and free > 0)
     if estimated:
-        free = _as_int(memory.get("free"))
-        buffered = _as_int(memory.get("buffered", memory.get("buffers")))
+        buffered = _as_int(memory.get("buffered", memory.get("buffers"))) or 0
         reclaimable_cache = max(
-            _as_int(memory.get("cached")) - _as_int(memory.get("shared")), 0
+            (_as_int(memory.get("cached")) or 0) - (_as_int(memory.get("shared")) or 0),
+            0,
         )
         available = free + buffered + reclaimable_cache
-    else:
-        available = _as_int(memory.get("available"))
     available = min(max(available, 0), total)
+    ratio = 1.0 - available / total
     return {
-        "pressure_pct": round((1.0 - available / total) * 100.0, 1),
+        "pressure_pct": round(ratio * 100.0, 1),
+        "pressure_ratio": ratio,
         "available_mb": round(available / 1024 / 1024, 1),
         "available_bytes": available,
         "estimated": estimated,
     }
 
 
-def _as_int(value: Any) -> int:
+def _as_int(value: Any) -> int | None:
+    """Return value as int, None if missing or not a number."""
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        return int(value or 0)
+        return int(value)
     except (TypeError, ValueError):
-        return 0
+        return None
 
 
 class OpenWrtCoordinatorData:
@@ -316,6 +327,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         # RAM pressure Repairs issue: start of the current high-pressure phase
         # and whether the issue is currently raised.
         self._mem_high_since: datetime | None = None
+        self._mem_last_check: datetime | None = None
         self._ram_issue_active: bool = False
         # Stale-data cache: letzte bekannte Werte für VLAN-Badges bei Offline-Router
         self._last_known_network_interfaces: list[dict[str, Any]] = []
@@ -851,12 +863,18 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         high for RAM_PRESSURE_HOLD_SECONDS without a single normal reading in
         between, and disappears once the pressure is below
         RAM_PRESSURE_CLEAR_PCT with enough RAM available (hysteresis). Polls
-        without usable memory stats change nothing.
+        without usable memory stats change nothing; a gap of more than two
+        poll intervals since the last usable reading (router unreachable)
+        restarts the hold time.
         """
         pressure = data.memory_pressure
         if not pressure:
             return
-        pct = pressure["pressure_pct"]
+        last_check, self._mem_last_check = self._mem_last_check, now
+        interval = self.update_interval or timedelta(seconds=SCAN_INTERVAL_SECONDS)
+        if last_check is not None and now - last_check > 2 * interval:
+            self._mem_high_since = None
+        pct = pressure["pressure_ratio"] * 100.0
         low_available = pressure["available_bytes"] < RAM_AVAILABLE_MIN_BYTES
         high = pct > RAM_PRESSURE_HIGH_PCT or low_available
 
@@ -889,7 +907,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 ir.IssueSeverity.WARNING,
                 {
                     "router": self._entry.title,
-                    "pressure": f"{pct:.0f}",
+                    "pressure": f"{pressure['pressure_pct']:.0f}",
                     "available_mb": f"{pressure['available_mb']:.0f}",
                     "since": since,
                 },

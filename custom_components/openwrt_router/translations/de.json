@@ -207,7 +207,7 @@
     },
     "ram_high": {
       "title": "Hohe RAM-Auslastung auf OpenWrt-Router {router}",
-      "description": "Auf dem Router {router} wird seit {since} der Arbeitsspeicher knapp: {pressure} % des RAM sind belegt, nur noch {available_mb} MB sind verfügbar.\n\nDieser Hinweis erscheint, wenn 15 Minuten lang mehr als 85 % des RAM belegt oder weniger als 16 MB verfügbar sind. Bleibt es so, beendet der Router Prozesse oder startet neu. Typische Ursache ist ein Prozess, der immer weiter wächst (z. B. rpcd auf älterer Firmware). Prüfe auf dem Router mit `top` oder `ps w` und starte den betroffenen Dienst oder den Router neu.\n\nDieser Hinweis verschwindet automatisch, sobald die Auslastung unter 80 % fällt."
+      "description": "Auf dem Router {router} wird seit {since} der Arbeitsspeicher knapp: {pressure} % des RAM lassen sich nicht mehr freigeben, nur noch {available_mb} MB sind verfügbar (Attribut `pressure_pct` des Sensors Speichernutzung).\n\nDieser Hinweis erscheint, wenn 15 Minuten lang mehr als 85 % des RAM nicht verfügbar oder weniger als 16 MB verfügbar sind. Bleibt es so, beendet der Router Prozesse oder startet neu. Typische Ursache ist ein Prozess, der immer weiter wächst (z. B. rpcd auf älterer Firmware). Prüfe auf dem Router mit `top` oder `ps w` und starte den betroffenen Dienst oder den Router neu.\n\nDieser Hinweis verschwindet automatisch, sobald weniger als 80 % des RAM nicht verfügbar und wieder mindestens 16 MB verfügbar sind."
     },
     "router_unreachable": {
       "title": "OpenWrt-Router {router} nicht erreichbar",

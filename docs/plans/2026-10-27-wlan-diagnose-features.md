@@ -142,7 +142,8 @@ Pro Paket: eigener Branch auf dem vorherigen, eigener PR, CHANGELOG-Eintrag, Min
 - 2026-10-27 – Nur ein ACL-Sprung (v6 in P3) mit `log read` und `usteer get_clients` – nur ein rpcd-Neustart pro Router – vom Nutzer freigegeben (2026-10-27)
 - 2026-10-27 – F8 nur Stufe 1 – Zusammenführen ist bei Familien-iPhones fehleranfällig – vom Nutzer freigegeben (2026-10-27)
 - 2026-10-27 – Gestapelte PRs, ein Feature pro PR – wie #19–#22 – vom Nutzer freigegeben (2026-10-27)
-- 2026-10-27 – P1: Das Issue verschwindet erst, wenn der Druck unter 80 % liegt **und** wieder mindestens 16 MB verfügbar sind – sonst würde ein kleiner Router (z. B. 64 MB, 79 %, 13 MB frei) im 15-min-Takt flattern – Umsetzungsdetail innerhalb AK1
+- 2026-10-27 – P1: Das Issue verschwindet erst, wenn der Druck unter 80 % liegt **und** wieder mindestens 16 MB verfügbar sind – sonst würde ein kleiner Router (z. B. 64 MB, 79 %, 13 MB frei) im 15-min-Takt flattern; betrifft nur Router unter 80 MB RAM – Abweichung vom Wortlaut von AK1, vom Coordinator entschieden, im PR zur Bestätigung durch den Nutzer genannt
+- 2026-10-27 – P1 (nach Review): Grenzwerte gegen den ungerundeten Druck; nicht lesbares `available` (oder 0 bei freiem Speicher) → Ersatzformel statt 100 %; eine Lücke > 2 Poll-Intervalle ohne Messwert startet die Haltezeit neu – Umsetzungsdetail
 - 2026-10-27 – P1: Ersatzformel ohne `available` = frei + Puffer + max(Cache − Shared, 0) – tmpfs-Seiten liegen im Cache, sind aber nicht freigebbar – Umsetzungsdetail
 
 ## Prüfprotokoll
@@ -150,4 +151,5 @@ Pro Paket: eigener Branch auf dem vorherigen, eigener PR, CHANGELOG-Eintrag, Min
 - 2026-10-27 – Plan P1–P7 vom Nutzer freigegeben (Gate G2)
 
 - 2026-10-27 `feature/extended-wifi-sensors-option@83533be` – Live-Probe lesend auf `openwrt`/`ap2`/`ap4` (s. Befunde) · CI #22: grün
-- 2026-10-27 `feature/ram-pressure-repairs` (P1) – lokal: ruff 0.17.3 check/format ✓ · pytest 745 passed (Py 3.13, HA 2026.2.3) · Hardware: keine neue Abfrage (Felder aus `system info`, Live-Probe oben) · Review: s. PR
+- 2026-10-27 `feature/ram-pressure-repairs` (P1) – lokal: ruff 0.17.3 check/format ✓ · pytest grün (Py 3.13, HA 2026.2.3) · Hardware: keine neue Abfrage (Felder aus `system info`, Live-Probe oben) · Review: unabhängig (frischer Agent) – keine P0/P1; P2 (kaputtes `available`, Text zur 16-MB-Bedingung) und P3 (Rundung, Poll-Lücke, Test mit zwei Einträgen) behoben; offen P3: Wanduhr statt monotoner Zeit
+- Doku geprüft: https://contributors.home-assistant.io/core/integrations/repairs/, 2026-10-27, `async_create_issue`/`async_delete_issue` unverändert, keine Deprecation

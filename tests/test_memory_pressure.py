@@ -87,17 +87,28 @@ class TestCalcMemoryPressure:
 
     @pytest.mark.parametrize(
         "memory",
-        [{}, {"total": 0}, {"total": None}, {"total": "abc"}, {"free": 1}],
+        [{}, {"total": 0}, {"total": None}, {"total": "abc"}, {"free": 1}, None, []],
     )
     def test_unusable_stats_return_empty(self, memory):
         assert calc_memory_pressure(memory) == {}
 
-    def test_string_numbers_and_garbage_are_tolerated(self):
+    def test_garbage_available_falls_back_to_estimate(self):
+        """A non-numeric MemAvailable must not read as 100 % pressure."""
         p = calc_memory_pressure(
-            {"total": str(100 * MB), "available": "x", "free": 1}
+            {"total": str(100 * MB), "available": "x", "free": 50 * MB}
         )
-        # "x" is present → not estimated, but unusable → treated as 0 available
-        assert p["pressure_pct"] == 100.0
+        assert p["pressure_pct"] == 50.0
+        assert p["estimated"] is True
+
+    def test_zero_available_with_free_memory_falls_back_to_estimate(self):
+        p = calc_memory_pressure({"total": 100 * MB, "available": 0, "free": 40 * MB})
+        assert p["pressure_pct"] == 60.0
+        assert p["estimated"] is True
+
+    def test_ratio_is_unrounded(self):
+        p = calc_memory_pressure({"total": 100_000, "available": 14_960})
+        assert p["pressure_pct"] == 85.0
+        assert p["pressure_ratio"] == pytest.approx(0.8504)
 
     def test_available_larger_than_total_is_clamped(self):
         p = calc_memory_pressure({"total": 100 * MB, "available": 200 * MB})
@@ -196,6 +207,25 @@ class TestRamIssueHoldTime:
         feed.poll(_mem(256, 25))
         assert len(feed.created) == 1
 
+    def test_threshold_uses_unrounded_ratio(self, feed):
+        """85.04 % displays as 85.0 but is above the threshold."""
+        memory = {"total": 1_000 * MB, "available": int(149.6 * MB)}
+        for _ in range(HOLD_POLLS + 1):
+            feed.poll(memory)
+        assert len(feed.created) == 1
+        assert feed.created[0].kwargs["translation_placeholders"]["pressure"] == "85"
+
+    def test_gap_in_readings_restarts_hold_time(self, feed):
+        """Router unreachable for 20 min between two high readings."""
+        for _ in range(5):
+            feed.poll(_mem(256, 25))
+        feed.now += timedelta(minutes=20)
+        feed.poll(_mem(256, 25))
+        assert not feed.created
+        for _ in range(HOLD_POLLS):
+            feed.poll(_mem(256, 25))
+        assert len(feed.created) == 1
+
     def test_exactly_85_percent_is_not_high(self, feed):
         for _ in range(HOLD_POLLS + 2):
             feed.poll(_mem(100, 15.0001))  # 85.0 % … but available < 16 MB
@@ -263,6 +293,28 @@ class TestRamIssueHysteresis:
         assert len(feed.created) == 1
         feed.poll(_mem(256, 25))
         assert len(feed.created) == 2
+
+
+class TestRamIssueMultipleEntries:
+    def test_each_router_has_its_own_issue_and_timer(self):
+        a = _make_coordinator()
+        b = _make_coordinator()
+        b._entry = MagicMock(entry_id="e2", title="Router B")
+        f = _Feed(a)
+        try:
+            for _ in range(HOLD_POLLS + 1):
+                a._check_memory_pressure(_data(_mem(256, 25)), f.now)
+                b._check_memory_pressure(_data(_mem(256, 128)), f.now)
+                f.now += timedelta(minutes=1)
+            assert [c.args[2] for c in f.created] == ["ram_high_e1"]
+            for _ in range(HOLD_POLLS + 1):
+                b._check_memory_pressure(_data(_mem(256, 25)), f.now)
+                f.now += timedelta(minutes=1)
+            assert [c.args[2] for c in f.created] == ["ram_high_e1", "ram_high_e2"]
+            a._check_memory_pressure(_data(_mem(256, 128)), f.now)
+            assert f.deleted == ["ram_high_e1"]
+        finally:
+            f.stop()
 
 
 class TestRamIssueWithoutEntry:
