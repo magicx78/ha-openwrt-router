@@ -2,6 +2,22 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.6] - 2026-10-27
+
+### Fixed
+
+- **Topologie: eine LLDP-Kette bleibt eine Kette.** Hängt ein AP hinter einem
+  anderen AP (Gateway → AP A → AP B, per LLDP belegt), fügte die
+  DHCP-/ARP-Heuristik trotzdem eine zweite Kante Gateway → AP B hinzu, weil
+  das Gateway auch für AP B der DHCP-Server ist und ihn in der Bridge-FDB
+  hinter demselben Port sieht wie AP A. Die Switch-Erkennung fasste beide
+  dann zu einem erfundenen Switch zusammen, die LLDP-Kante Gateway → AP A
+  verschwand und AP B hing im Panel am Switch statt an AP A. Jetzt bekommt
+  ein Router, dessen Uplink LLDP schon kennt, keine zweite Uplink-Kante von
+  einem anderen Router mehr, und die Switch-Erkennung lässt APs aus, die
+  hinter einem anderen Router hängen. Zwei APs, die beide direkt am selben
+  Gateway-Port hängen, ergeben weiterhin einen Switch.
+
 ## [1.38.5] - 2026-10-27
 
 ### Fixed

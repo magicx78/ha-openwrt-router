@@ -593,3 +593,129 @@ class TestChainOrientation:
         edges = _router_uplinks(_detect_inter_router_edges([], rd))
         assert len(edges) == 1
         assert (edges[0]["from"], edges[0]["to"]) == ("r-a", "r-b")
+
+
+# =====================================================================
+# A11 (1.38.6): an LLDP chain survives the gateway's DHCP/ARP heuristics
+# and the switch inference (audit finding C1)
+# =====================================================================
+
+
+class TestLldpChainBeatsGatewayHeuristics:
+    """gw --lan3--> ap2 --lan3--> ap4, all three speaking LLDP.
+
+    The gateway is the DHCP server for the whole LAN and sees both APs behind
+    its lan3 in the bridge FDB. Before the fix Method 1 added a second
+    ``lan_uplink gw→ap4 (dhcp_ip)`` next to the LLDP edge ``ap2→ap4`` (the
+    pair block only covered gw↔ap2 and ap2↔ap4), and the switch inference
+    then grouped gw→ap2 and gw→ap4 on lan3 into a phantom switch, dropping
+    the LLDP chain and the port details with it.
+    """
+
+    GW = "sECUREaP-gATEWAy"
+    AP2 = "sECUREaP-aPclient1"
+    AP4 = "sECUREaP-aP4"
+
+    def _chain_with_gateway_knowledge(self, *, dhcp: bool = True, arp: bool = True):
+        gw = _router(
+            mac="aa:bb:cc:00:00:01",
+            hostname="gw",
+            wan_status={"connected": True, "proto": "static", "ipv4": "172.16.1.71"},
+            lldp=[_neigh("lan3", mgmt_ip="10.10.10.2", port_id="wan")],
+            port_fdb_map={"aa:bb:cc:00:00:02": "lan3", "aa:bb:cc:00:00:04": "lan3"},
+            trunk_port_map=(
+                {"10.10.10.2": "lan3", "10.10.10.4": "lan3"} if arp else {"lan3": "trunk"}
+            ),
+        )
+        if dhcp:
+            gw.dhcp_leases = {
+                "aa:bb:cc:00:00:02": {"ip": "10.10.10.2", "hostname": "ap2"},
+                "aa:bb:cc:00:00:04": {"ip": "10.10.10.4", "hostname": "ap4"},
+            }
+        ap2 = _router(
+            mac="aa:bb:cc:00:00:02",
+            hostname="ap2",
+            lldp=[
+                _neigh("wan", mgmt_ip="10.10.10.1", port_id="lan3"),
+                _neigh("lan3", mgmt_ip="10.10.10.4", port_id="wan"),
+            ],
+        )
+        ap4 = _router(
+            mac="aa:bb:cc:00:00:04",
+            hostname="ap4",
+            lldp=[_neigh("wan", mgmt_ip="10.10.10.2", port_id="lan3")],
+        )
+        return [
+            (self.GW, "10.10.10.1", gw),
+            (self.AP4, "10.10.10.4", ap4),
+            (self.AP2, "10.10.10.2", ap2),
+        ]
+
+    def test_dhcp_lease_does_not_add_a_second_uplink_for_a_chained_ap(self):
+        rd = self._chain_with_gateway_knowledge(dhcp=True, arp=False)
+        edges = _detect_inter_router_edges([], rd)
+        arrows = {(e["from"], e["to"]) for e in edges}
+        assert arrows == {(self.GW, self.AP2), (self.AP2, self.AP4)}
+        assert all(e["relationship"] == "router_uplink" for e in edges)
+
+    def test_arp_port_map_does_not_add_a_second_uplink_for_a_chained_ap(self):
+        rd = self._chain_with_gateway_knowledge(dhcp=False, arp=True)
+        edges = _detect_inter_router_edges([], rd)
+        arrows = {(e["from"], e["to"]) for e in edges}
+        assert arrows == {(self.GW, self.AP2), (self.AP2, self.AP4)}
+
+    def test_no_phantom_switch_for_a_chain(self):
+        rd = self._chain_with_gateway_knowledge(dhcp=True, arp=True)
+        edges = _detect_inter_router_edges([], rd)
+        nodes, switch_edges, replaced = _detect_switch_nodes(edges, rd)
+        assert nodes == []
+        assert switch_edges == []
+        assert replaced == set()
+        # The LLDP port detail of the first hop survives.
+        first_hop = next(e for e in edges if e["to"] == self.AP2)
+        assert first_hop["attributes"]["from_port"] == "lan3"
+        assert first_hop["attributes"]["detection_method"] == "lldp"
+
+    def test_switch_inference_ignores_aps_chained_behind_another_router(self):
+        """Even if a stray gateway edge exists, a chained AP is no switch member."""
+        rd = self._chain_with_gateway_knowledge()
+        edges = _detect_inter_router_edges([], rd)
+        stray = {
+            "id": f"{self.GW}--uplink--{self.AP4}",
+            "from": self.GW,
+            "to": self.AP4,
+            "relationship": "lan_uplink",
+            "source": "mesh",
+            "inferred": False,
+            "inference_reason": None,
+            "attributes": {"link_type": "lan", "gateway_port": "lan3"},
+        }
+        nodes, _switch_edges, replaced = _detect_switch_nodes(edges + [stray], rd)
+        assert nodes == []
+        assert replaced == set()
+
+    def test_two_direct_lldp_aps_still_infer_a_switch(self):
+        """Regression guard: no chain, both APs report the gateway on lan3."""
+        gw = _router(
+            mac="aa:bb:cc:00:00:01",
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "1.2.3.4"},
+            trunk_port_map={"lan3": "trunk"},
+            lldp=[
+                _neigh("lan3", mgmt_ip="10.10.10.2", port_id="wan"),
+                _neigh("lan3", mgmt_ip="10.10.10.4", port_id="wan"),
+            ],
+        )
+        gw.dhcp_leases = {
+            "aa:bb:cc:00:00:02": {"ip": "10.10.10.2"},
+            "aa:bb:cc:00:00:04": {"ip": "10.10.10.4"},
+        }
+        rd = [
+            ("r1", "10.10.10.1", gw),
+            ("r2", "10.10.10.2", _router(mac="aa:bb:cc:00:00:02")),
+            ("r4", "10.10.10.4", _router(mac="aa:bb:cc:00:00:04")),
+        ]
+        edges = _detect_inter_router_edges([], rd)
+        assert {(e["from"], e["to"]) for e in edges} == {("r1", "r2"), ("r1", "r4")}
+        nodes, _switch_edges, replaced = _detect_switch_nodes(edges, rd)
+        assert [n["type"] for n in nodes] == ["switch"]
+        assert len(replaced) == 2

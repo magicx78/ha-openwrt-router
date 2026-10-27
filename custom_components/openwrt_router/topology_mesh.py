@@ -345,13 +345,20 @@ def _detect_lldp_edges(
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
     token_to_rid: dict[str, str],
     meta: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], set[str]]:
+) -> tuple[list[dict[str, Any]], set[str], set[str]]:
     """Detect router-to-router edges from LLDP neighbor tables.
 
-    Runs before every heuristic. Returns ``(edges, blocked_ids)`` where
+    Runs before every heuristic. Returns ``(edges, blocked_ids, uplinked)``:
     ``blocked_ids`` contains BOTH orientations of every detected pair so the
     downstream heuristics (DHCP / WiFi / ARP / subnet) cannot add a competing —
-    and possibly wrong-port — edge for the same pair. LLDP always wins.
+    and possibly wrong-port — edge for the same pair, and ``uplinked`` is the
+    set of routers that already have an LLDP uplink (the ``to`` side), so no
+    heuristic adds a *second* uplink to them from another router. The latter
+    matters in a chain gateway → AP-A → AP-B: the gateway is the DHCP server
+    for AP-B too and sees it behind the same port as AP-A in its FDB, which
+    used to produce a competing gateway → AP-B edge and, through the switch
+    inference, a phantom switch replacing the whole LLDP chain. LLDP always
+    wins.
     """
     # Collect directed observations a→b (a saw b as an LLDP neighbor).
     obs: dict[tuple[str, str], dict[str, Any]] = {}
@@ -479,9 +486,10 @@ def _detect_lldp_edges(
         blocked_ids.add(f"{a_rid}--uplink--{b_rid}")
         blocked_ids.add(f"{b_rid}--uplink--{a_rid}")
 
+    uplinked = {e["to"] for e in edges}
     if edges:
         _LOGGER.debug("LLDP: detected %d router-to-router edge(s)", len(edges))
-    return edges, blocked_ids
+    return edges, blocked_ids, uplinked
 
 
 def _detect_inter_router_edges(
@@ -508,9 +516,13 @@ def _detect_inter_router_edges(
     # seeds seen_edges with BOTH orientations of every detected pair so the
     # heuristics below cannot add a competing (possibly wrong-port) edge.
     token_to_rid, known_meta = _build_known_router_index(router_data)
-    lldp_edges, lldp_blocked = _detect_lldp_edges(router_data, token_to_rid, known_meta)
+    lldp_edges, lldp_blocked, lldp_uplinked = _detect_lldp_edges(
+        router_data, token_to_rid, known_meta
+    )
     edges.extend(lldp_edges)
     seen_edges.update(lldp_blocked)
+    # Routers whose uplink LLDP already established get no heuristic uplink
+    # from anyone else (chain gateway → AP-A → AP-B, see _detect_lldp_edges).
 
     # Build lookup maps
     # Includes router_info.mac + ALL interface IPs/MACs so an AP that connects
@@ -565,7 +577,7 @@ def _detect_inter_router_edges(
             if ap_rid == gw_rid:
                 continue
             edge_id = f"{gw_rid}--uplink--{ap_rid}"
-            if edge_id in seen_edges:
+            if edge_id in seen_edges or ap_rid in lldp_uplinked:
                 continue
 
             # Check if AP's host IP appears in gateway's DHCP leases
@@ -621,7 +633,7 @@ def _detect_inter_router_edges(
             if ap_rid == gw_rid:
                 continue
             edge_id = f"{gw_rid}--uplink--{ap_rid}"
-            if edge_id in seen_edges:
+            if edge_id in seen_edges or ap_rid in lldp_uplinked:
                 continue
             gateway_port = trunk_map.get(ap_hip)
             if gateway_port:
@@ -683,7 +695,7 @@ def _detect_inter_router_edges(
                 from_rid, to_rid = src_rid, target_rid
 
             edge_id = f"{from_rid}--uplink--{to_rid}"
-            if edge_id in seen_edges:
+            if edge_id in seen_edges or to_rid in lldp_uplinked:
                 continue
             edges.append(
                 {
@@ -774,7 +786,7 @@ def _detect_inter_router_edges(
 
         for ap_rid, ap_hip, ap_data in unconnected:
             edge_id = f"{gw_rid}--uplink--{ap_rid}"
-            if edge_id in seen_edges:
+            if edge_id in seen_edges or ap_rid in lldp_uplinked:
                 continue
 
             # Wireless-backhaul fallback: an AP that no other method matched but
@@ -901,13 +913,28 @@ def _detect_switch_nodes(
     if not gw_trunk_map or not gw_rid:
         return [], [], set()
 
+    # APs that hang behind ANOTHER router (LLDP-verified router_uplink from a
+    # non-gateway) are part of a chain, not members of a switch on a gateway
+    # port — even if a stray gateway → AP edge names the same port.
+    chained_aps = {
+        edge.get("to")
+        for edge in inter_router_edges
+        if edge.get("relationship") == CONNECTION_TYPE_ROUTER_UPLINK
+        and edge.get("from") != gw_rid
+    }
+
     # Group APs by gateway port
     port_to_aps: dict[str, list[str]] = {}
     for edge in inter_router_edges:
         if _is_wired_uplink_edge(edge):
             gw_port = (edge.get("attributes") or {}).get("gateway_port")
             ap_id = edge.get("to")
-            if gw_port and ap_id and edge.get("from") == gw_rid:
+            if (
+                gw_port
+                and ap_id
+                and edge.get("from") == gw_rid
+                and ap_id not in chained_aps
+            ):
                 port_to_aps.setdefault(gw_port, []).append(ap_id)
 
     # For each port with >1 AP: insert a switch node and collect replaced edge IDs
