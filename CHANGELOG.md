@@ -2,7 +2,7 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
-## [1.37.2] - 2026-10-27
+## [1.37.4] - 2026-10-27
 
 ### Fixed
 
@@ -54,6 +54,51 @@ All notable changes to the OpenWrt Router integration will be documented in this
   entfallen die Animationen. Nach einem Neustart zeigt der Knoten bis zur
   ersten Messung „noch keine Messung“ statt „offline“ (neues Snapshot-Feld
   `ping_pending`).
+
+## [1.37.3] - 2026-10-27
+
+### Fixed
+
+- **Rohes UCI-Band beim SSH-Fallback.** Lief der WLAN-Status über den
+  SSH-Fallback (`uci show wireless`, wenn weder `network.wireless`, iwinfo
+  noch UCI über rpcd antworten), stand im Band der rohe UCI-Wert (`2g`) bzw.
+  `unknown` ohne `band`-Option. Das Attribut `band` der SSID-Schalter und
+  die Funkmodule im Topologie-Snapshot trugen deshalb `2g` statt `2.4g`
+  (das Panel zeigte trotzdem 2.4 GHz). Das Band wird jetzt wie
+  bei allen anderen Wegen bestimmt: `band`-Option, eindeutiger `hwmode`,
+  Kanalnummer, Name. Funkmodule ohne `band`-Option bekommen dadurch oft ein
+  Band und zeigen es im Namen der SSID-Schalter. `band='60g'` gilt wie
+  überall als unbekannt, der Schaltername endet dann nicht mehr auf
+  „(60 GHz)“. Entity-IDs bleiben gleich.
+- **60 GHz im Kanalplan und bei klebenden Clients als 6 GHz gezählt.**
+  Kanalplan und Client-Stabilität nutzen jetzt dieselbe Frequenzgrenze wie
+  die Banderkennung: Frequenzen über 7125 MHz (802.11ad) zählen nicht als
+  6 GHz. Eine als Text gemeldete Frequenz wird bei klebenden Clients jetzt
+  ebenfalls ausgewertet.
+
+## [1.37.2] - 2026-10-27
+
+### Fixed
+
+- **Untere 6-GHz-Kanäle als 5 GHz erkannt.** Die Bandgrenze lag bei
+  6000 MHz statt bei 5925 MHz, deshalb galten 6-GHz-Funkmodule auf 5935 bis
+  5995 MHz (Kanäle 1, 2, 5 und 9) als 5 GHz. Frequenzen über 7125 MHz
+  (60 GHz) gelten nicht mehr als 6 GHz, sondern als unbekannt.
+- **Band nach Funkmodul-Namen statt nach Konfiguration.** Ohne Frequenz
+  (WLAN-Status über `network.wireless` oder UCI) wurde das Band aus dem
+  Namen geraten (`radio0` = 2.4 GHz, `radio1` = 5 GHz). Jetzt zählt die
+  UCI-Option `band` (ersetzt `hwmode` in neueren OpenWrt-Versionen), danach
+  ein eindeutiger alter `hwmode` (11a/11b/11g/11ac), danach die
+  Kanalnummer, und erst zuletzt der Name. 11n, 11ax, 11be und `auto` legen
+  kein Band mehr fest, 11ad (60 GHz) gilt als unbekannt. Mehrdeutige
+  Kanalnummern (1–13 und 149–177 gibt es auch bei 6 GHz) gelten als 2.4
+  bzw. 5 GHz. Bei Routern, deren `radio0` ein 5-GHz-Modul ist, ändert sich
+  dadurch das angezeigte Band: im Namen der SSID-Schalter, in Attributen,
+  in der Topologie und im Kanalplan. Entity-IDs bleiben gleich.
+- **`async_reload_entry` übersprang Aufräumschritte** (intern, wird derzeit
+  nirgends aufgerufen). Die Funktion rief Unload und Setup direkt auf, sodass
+  die `on_unload`-Rückrufe (Ausfall-Tracker, Kanalplan, RAM-Hinweis) nicht
+  liefen. Sie lädt den Eintrag jetzt über Home Assistant neu.
 
 ## [1.37.1] - 2026-10-27
 

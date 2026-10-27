@@ -21,6 +21,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
+from .api import _band_from_frequency
+
 STICKY_DELTA_DB = 8
 # A client must stay sticky (or weak, without usteer) this long to count.
 STICKY_HOLD_SECONDS = 10 * 60
@@ -81,12 +83,9 @@ def parse_usteer_clients(raw: Any) -> dict[str, list[NodeSignal]]:
 
 def iface_band(iface: dict[str, Any]) -> str | None:
     """Band of an AP interface: from the frequency, else its ``band`` key."""
-    freq = iface.get("frequency")
-    if isinstance(freq, int) and not isinstance(freq, bool) and freq > 0:
-        if freq < 3000:
-            return "2.4g"
-        return "6g" if freq >= 5925 else "5g"
-    band = iface.get("band")
+    band = _band_from_frequency(iface.get("frequency"))
+    if band is None:
+        band = iface.get("band")
     return band if band in ("2.4g", "5g", "6g") else None
 
 
