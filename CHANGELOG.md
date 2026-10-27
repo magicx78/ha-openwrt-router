@@ -2,6 +2,29 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.37.1] - 2026-10-27
+
+### Fixed
+
+- **Untere 6-GHz-Kanäle als 5 GHz erkannt.** Die Bandgrenze lag bei
+  6000 MHz statt bei 5925 MHz, deshalb galten 6-GHz-Funkmodule auf 5935 bis
+  5995 MHz (Kanäle 1, 2, 5 und 9) als 5 GHz. Frequenzen über 7125 MHz
+  (60 GHz) gelten nicht mehr als 6 GHz, sondern als unbekannt.
+- **Band nach Funkmodul-Namen statt nach Konfiguration.** Ohne Frequenz
+  (WLAN-Status über `network.wireless` oder UCI) wurde das Band aus dem
+  Namen geraten (`radio0` = 2.4 GHz, `radio1` = 5 GHz). Jetzt zählt die
+  UCI-Option `band` (OpenWrt 21.02+), danach ein eindeutiger alter
+  `hwmode` (11a/11b/11g/11ac), danach die Kanalnummer, und erst zuletzt der
+  Name. 11n, 11ax und 11be legen kein Band mehr fest. Mehrdeutige
+  Kanalnummern (1–13 und 149–177 gibt es auch bei 6 GHz) gelten als 2.4
+  bzw. 5 GHz. Bei Routern, deren `radio0` ein 5-GHz-Modul ist, ändert sich
+  dadurch der angezeigte Band-Zusatz im Namen der SSID-Schalter; Entity-IDs
+  bleiben gleich.
+- **`async_reload_entry` übersprang Aufräumschritte** (intern, wird derzeit
+  nirgends aufgerufen). Die Funktion rief Unload und Setup direkt auf, sodass
+  die `on_unload`-Rückrufe (Ausfall-Tracker, Kanalplan, RAM-Hinweis) nicht
+  liefen. Sie lädt den Eintrag jetzt über Home Assistant neu.
+
 ## [1.37.0] - 2026-10-27
 
 ### Added
