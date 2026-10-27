@@ -2813,8 +2813,7 @@ class OpenWrtAPI:
 
         radios: list[dict[str, Any]] = []
         for radio_name, iface_list in radio_ifaces.items():
-            radio_attrs = uci.get(radio_name, {})
-            band = radio_attrs.get("band", "unknown")
+            band = self._detect_band(radio_name, uci.get(radio_name, {}))
 
             for uci_section, attrs in iface_list:
                 is_disabled = attrs.get("disabled", "0") == "1"

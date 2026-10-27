@@ -10,6 +10,7 @@ from custom_components.openwrt_router.client_stability import (
     AssociationTracker,
     HoldTimer,
     NodeSignal,
+    iface_band,
     parse_usteer_clients,
     sticky_candidates,
     unstable_top,
@@ -394,6 +395,22 @@ class TestReviewFollowUps:
         data = await _poll(coord, T / 1000)
         assert A.upper() not in data.client_stability["clients"]
         assert data.client_stability["unstable_count"] == 0
+
+    @pytest.mark.parametrize(
+        ("iface", "band"),
+        [
+            ({"frequency": 2437}, "2.4g"),
+            ({"frequency": 5180}, "5g"),
+            ({"frequency": 5925}, "6g"),
+            ({"frequency": "5955"}, "6g"),
+            ({"frequency": 60480, "band": "6g"}, None),  # 60 GHz
+            ({"frequency": None, "band": "5g"}, "5g"),
+            ({"band": "2g"}, None),
+            ({}, None),
+        ],
+    )
+    def test_iface_band(self, iface, band):
+        assert iface_band(iface) == band
 
     def test_band_steering_is_no_reconnect(self):
         tr = AssociationTracker()
