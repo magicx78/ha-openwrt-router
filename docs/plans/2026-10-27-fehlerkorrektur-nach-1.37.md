@@ -4,9 +4,9 @@
 
 - **Stand:** 2026-10-27 · **Phase:** freigegeben, in Umsetzung
 - **Branch/PR:** `fix/post-1.37-findings` · PR #— · Basis: v1.37.4 (`c5a25f9`)
-- **Erledigt:** B1 · **Offen:** P1–P6, B2, B3
+- **Erledigt:** B1, P1, P2, P6 (PR A, 1.37.5) · **Offen:** P3, P4, P5, B2, B3
 - **Blocker:** –
-- **Nächster Schritt:** P1+P2+P6 als PR A (1.37.5)
+- **Nächster Schritt:** P3 als PR B (ACL v7, 1.38.0), gestapelt auf PR A
 
 ## Problem und Zielverhalten
 
@@ -88,4 +88,5 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 ## Prüfprotokoll
 
 - 2026-10-27 v1.37.4 in HA – Integration geladen (3/3 erreichbare Router), 238 Entities, 0 `unavailable`, keine Repairs der Integration; ACL v6 auf `openwrt`/`ap2`/`ap4` aktiv; Befunde 1–13 wie oben.
+- 2026-10-27 `fix/post-1.37-findings` (PR A) – lokal: ruff 0.17.3 sauber, 1174 Tests grün (vorher 1136; neue Tests für P1/P2 vor dem Fix rot) · Hardware: nicht nötig · Review: folgt.
 - 2026-10-27 B1 – drei Config-Entries entfernt; danach 3 Einträge, alle `loaded`. Sicherung vorher: HA-Backup vom selben Tag, 13:46.

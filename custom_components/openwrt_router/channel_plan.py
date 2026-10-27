@@ -24,7 +24,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .api import _band_from_frequency
 from .const import (
     RADIO_KEY_BAND,
     RADIO_KEY_CENTER_CHAN1,
@@ -35,6 +34,7 @@ from .const import (
     RADIO_KEY_MODE,
     RADIO_KEY_PHY,
 )
+from .wifi_band import band_from_frequency
 
 FINDING_SAME_CHANNEL = "same_channel"
 FINDING_OVERLAP = "overlap"
@@ -137,7 +137,7 @@ def htmode_width(htmode: Any) -> int:
 
 
 def _band_of(iface: dict[str, Any], channel: int) -> str | None:
-    band = _band_from_frequency(iface.get(RADIO_KEY_FREQUENCY))
+    band = band_from_frequency(iface.get(RADIO_KEY_FREQUENCY))
     if band is not None:
         return band if band in _BAND_LABELS else None  # 60 GHz: no plan
     band = iface.get(RADIO_KEY_BAND)

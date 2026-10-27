@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
 
+from custom_components.openwrt_router import api as api_module
 from custom_components.openwrt_router.api import (
     OpenWrtAPI,
     OpenWrtAuthError,
@@ -854,6 +856,110 @@ class TestLogin:
         assert mock_api._login_failure_count == 0
 
 
+# =====================================================================
+# Root-account warning: once per host and process, after login (v1.37.5)
+# =====================================================================
+
+_ROOT_WARNING = "Using 'root' as rpcd user"
+_LOGIN_OK = {"ubus_rpc_session": MOCK_SESSION_TOKEN}
+
+
+def _login_api(host="192.168.1.1", username="root", login_result=None):
+    """API whose login request returns/raises ``login_result`` (default: ok).
+
+    A list is consumed one item per login attempt (AsyncMock side_effect).
+    """
+    api = OpenWrtAPI(
+        host=host,
+        port=80,
+        username=username,
+        password="test",
+        session=MagicMock(),
+        protocol="http",
+    )
+    api._raw_call = AsyncMock(
+        side_effect=login_result if login_result is not None else [_LOGIN_OK]
+    )
+    return api
+
+
+def _root_warnings(caplog) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and _ROOT_WARNING in r.getMessage()
+    ]
+
+
+class TestRootAccountWarning:
+    """Befund 1: every config-entry setup retry builds a new OpenWrtAPI.
+
+    The per-instance latch warned again on every retry, and before the login
+    was even attempted - unreachable routers produced 15 warnings in ~60 s.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_process(self, monkeypatch, caplog):
+        # The latch lives for the whole process; start without warned hosts.
+        monkeypatch.setattr(api_module, "_ROOT_WARNED_HOSTS", set(), raising=False)
+        caplog.set_level(logging.DEBUG, logger=api_module.__name__)
+
+    @pytest.mark.asyncio
+    async def test_once_per_host_across_setup_retries(self, caplog):
+        for _ in range(3):  # each setup retry creates a fresh API instance
+            assert await _login_api().login() is True
+        assert len(_root_warnings(caplog)) == 1
+
+    @pytest.mark.asyncio
+    async def test_relogin_on_same_instance_does_not_repeat(self, caplog):
+        api = _login_api(login_result=[_LOGIN_OK, _LOGIN_OK])
+        await api.login()
+        await api.login()  # proactive token refresh
+        assert len(_root_warnings(caplog)) == 1
+
+    @pytest.mark.asyncio
+    async def test_unreachable_router_never_warns(self, caplog):
+        for _ in range(3):
+            api = _login_api(login_result=OpenWrtConnectionError("unreachable"))
+            with pytest.raises(OpenWrtConnectionError):
+                await api.login()
+        assert _root_warnings(caplog) == []
+
+    @pytest.mark.asyncio
+    async def test_rejected_login_never_warns(self, caplog):
+        api = _login_api(login_result=OpenWrtResponseError("ubus error 6"))
+        with pytest.raises(OpenWrtAuthError):
+            await api.login()
+        bad_token = _login_api(login_result=[{"ubus_rpc_session": DEFAULT_SESSION_ID}])
+        with pytest.raises(OpenWrtAuthError):
+            await bad_token.login()
+        assert _root_warnings(caplog) == []
+
+    @pytest.mark.asyncio
+    async def test_warns_only_once_the_router_answers(self, caplog):
+        down = _login_api(login_result=OpenWrtTimeoutError("timeout"))
+        with pytest.raises(OpenWrtTimeoutError):
+            await down.login()
+        assert _root_warnings(caplog) == []
+
+        assert await _login_api().login() is True
+        assert len(_root_warnings(caplog)) == 1
+
+    @pytest.mark.asyncio
+    async def test_each_host_warns_once(self, caplog):
+        for host in ("192.168.1.1", "192.168.1.2", "192.168.1.1"):
+            await _login_api(host=host).login()
+        warned = [r.getMessage() for r in _root_warnings(caplog)]
+        assert len(warned) == 2
+        assert "192.168.1.1" in warned[0]
+        assert "192.168.1.2" in warned[1]
+
+    @pytest.mark.asyncio
+    async def test_dedicated_user_never_warns(self, caplog):
+        assert await _login_api(username="hass").login() is True
+        assert _root_warnings(caplog) == []
+
+
 class TestSessionDestroyOnRelogin:
     """Regression: re-login must destroy the previous rpcd session.
 
@@ -1189,6 +1295,58 @@ class TestReloadWifi:
     async def test_success(self, mock_api):
         result = await mock_api.reload_wifi()
         assert result is True
+
+
+class TestNetworkReloadWarning:
+    """Befund 5: rpcd ACL v6 has no network/reload.
+
+    The Wi-Fi switch still works: uci/commit makes rpcd emit ``config.change``
+    and procd's reload trigger for ``wireless`` re-applies the radios. The
+    missing network/reload must not warn on every switch.
+    """
+
+    _BLOCKED = OpenWrtMethodNotFoundError("rpcd ACL blocks network/reload")
+
+    @staticmethod
+    def _ubus(reload_error: Exception) -> AsyncMock:
+        async def _call(obj, method, params, *args, **kwargs):
+            if (obj, method) == ("network", "reload"):
+                raise reload_error
+            return {}
+
+        return AsyncMock(side_effect=_call)
+
+    @staticmethod
+    def _warnings(caplog) -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    @pytest.mark.asyncio
+    async def test_switch_applied_by_commit_does_not_warn(self, mock_api, caplog):
+        caplog.set_level(logging.DEBUG, logger=api_module.__name__)
+        mock_api._call = self._ubus(self._BLOCKED)
+
+        assert await mock_api.set_wifi_state("guest_radio0", enabled=False) is True
+
+        calls = [c.args[:2] for c in mock_api._call.await_args_list]
+        assert calls == [("uci", "set"), ("uci", "commit"), ("network", "reload")]
+        assert self._warnings(caplog) == []
+        assert any(
+            r.levelno == logging.DEBUG and "network.reload" in r.getMessage()
+            for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_reload_button_still_warns(self, mock_api, caplog):
+        """A bare reload (button) applies nothing without network/reload."""
+        caplog.set_level(logging.DEBUG, logger=api_module.__name__)
+        mock_api._call = self._ubus(self._BLOCKED)
+
+        assert await mock_api.reload_wifi() is False
+
+        assert any(
+            "network.reload not available" in r.getMessage()
+            for r in self._warnings(caplog)
+        )
 
 
 class TestReboot:

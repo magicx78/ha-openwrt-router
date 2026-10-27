@@ -2,6 +2,41 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.37.5] - 2026-10-27
+
+### Fixed
+
+- **Warnung „Using 'root' as rpcd user“ als Dauerrauschen.** Sie kam einmal
+  pro API-Instanz und noch vor dem Login. Jeder Setup-Retry eines nicht
+  erreichbaren Routers baut eine neue Instanz und warnte erneut (bis zu
+  15 Meldungen in einer Minute, danach alle paar Minuten). Jetzt erscheint
+  die Warnung höchstens einmal pro Router und HA-Start und erst nach einem
+  erfolgreichen Login; nicht erreichbare Router und abgelehnte Logins
+  erzeugen sie nicht mehr.
+- **„network.reload not available“ bei jedem WLAN-Schalter.** Die rpcd-ACL
+  erlaubt `network reload` nicht, die Änderung greift trotzdem: Nach
+  `uci commit` meldet rpcd `config.change`, und procd lädt die
+  WLAN-Konfiguration selbst neu. Nach einem erfolgreichen Commit steht die
+  Meldung deshalb nur noch im Debug-Log. Der Button „WLAN neu laden“ warnt
+  weiterhin, wenn `network reload` fehlt, weil dort sonst nichts angewendet
+  wird.
+- **HA-Deprecation `device_registry.async_get_device`.** Home Assistant 2026.10
+  warnte bei WLAN-, DHCP- und DFS-Ereignissen (Geräte-ID des Routers) und
+  beim Topologie-Snapshot (HA-Namen der Clients); die alte Methode entfällt
+  mit HA 2027.8. Die Integration nutzt jetzt `async_get_device_by_identifier`
+  bzw. `async_get_devices` und fällt auf älteren HA-Versionen (ab 2026.2)
+  auf die bisherige Methode zurück. Haben mehrere Integrationen ein Gerät
+  mit derselben MAC registriert, gewinnt im Panel das vom Nutzer
+  umbenannte.
+
+### Changed
+
+- **Aufgeräumt, ohne Verhaltensänderung:** Die Band-Helfer (Frequenz,
+  UCI-`band`, `hwmode`, Kanal → Band) liegen im neuen Modul `wifi_band.py`;
+  Kanalplan und Client-Stabilität importieren keinen privaten Helfer aus
+  `api.py` mehr. Die WLAN-Schalter kennen die nie gelieferten Bandcodes
+  `2g`/`60g` nicht mehr.
+
 ## [1.37.4] - 2026-10-27
 
 ### Fixed
