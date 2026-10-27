@@ -77,6 +77,7 @@ from .const import (
     RADIO_KEY_SSID,
     RADIO_KEY_TXPOWER,
     RADIO_KEY_UCI_SECTION,
+    RC_LIST_REFRESH_INTERVAL,
     SESSION_LIFETIME_SECONDS,
     SESSION_LOGIN_TIMEOUT_SECONDS,
     SESSION_REFRESH_MARGIN_SECONDS,
@@ -805,6 +806,13 @@ class OpenWrtAPI:
         self._lldp_last_fetch: float = 0.0
         self._lldp_cache: list[dict[str, Any]] = []
         self._lldp_cache_status: str = LLDP_STATUS_UNAVAILABLE
+
+        # init.d script name -> enabled, from rpcd rc/list. Refreshed only every
+        # RC_LIST_REFRESH_INTERVAL seconds because rc/list leaks rpcd memory on
+        # every call before rpcd 2026-05-31 (see get_services). None = never
+        # fetched or rc/list unavailable.
+        self._rc_enabled: dict[str, bool] | None = None
+        self._rc_enabled_fetched_at: float | None = None
 
         # Cached ifname→ssid map from luci-rpc/getWirelessDevices (populated once when
         # hostapd.*/get_status is also ACL-blocked; None = not yet fetched).
@@ -4142,78 +4150,139 @@ class OpenWrtAPI:
     ) -> list[dict[str, Any]]:
         """Return status for OpenWrt system services.
 
-        Tries rc/list first (stable across versions), then falls back to
-        procd service/list (OpenWrt 21+/25).  Results are filtered to the
-        requested service names when *names* is provided.
+        ``running`` comes from procd ``service/list`` on every call. procd
+        hosts that object, so it costs rpcd nothing and forks nothing.
+
+        The init script list and the ``enabled`` flags come from rpcd
+        ``rc/list``, fetched only every ``RC_LIST_REFRESH_INTERVAL`` seconds
+        (see :meth:`_get_rc_enabled`). rpcd before 2026-05-31 (upstream
+        d06d2a8 "rc: fix memory leak of list request context") never frees the
+        request context of an ``rc/list`` call, ~4.7 KB each. Called once per
+        poll, that grew rpcd on OpenWrt 25.12.1 (rpcd 2025.12.03) to >100 MB
+        RSS within 17 days. Every call also forked one ``running`` check per
+        init script (~1.3 s on a Cudy WR3000).
+
+        If ``service/list`` is not available (ACL), falls back to a full
+        ``rc/list`` with running check on every call, as before.
 
         Args:
             names: Optional list of service names to include.
                    If None, all discovered services are returned.
 
         Returns:
-            List of dicts:  {"name": str, "running": bool, "enabled": bool}
+            List of dicts:  {"name": str, "running": bool, "enabled": bool | None}
         """
-        services: list[dict[str, Any]] = []
-
-        # Method 1: rc/list — returns {name: {running: 0|1, enabled: 0|1}}
         try:
-            result = await self._call("rc", "list", {})
-            if isinstance(result, dict):
-                for svc_name, info in result.items():
-                    if not isinstance(info, dict):
-                        continue
-                    services.append(
-                        {
-                            "name": svc_name,
-                            "running": bool(info.get("running", 0)),
-                            "enabled": bool(info.get("enabled", 0)),
-                        }
-                    )
-                if services:
-                    _LOGGER.debug("Fetched %d services via rc/list", len(services))
-                    if names is not None:
-                        services = [s for s in services if s["name"] in names]
-                    return services
+            result = await self._call("service", "list", {})
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtResponseError,
+            OpenWrtAuthError,
+        ) as err:
+            _LOGGER.debug("service/list not available: %s", err)
+            result = None
+
+        if not isinstance(result, dict):
+            return await self._get_services_rc_list(names)
+
+        enabled = await self._get_rc_enabled()
+        running: dict[str, bool] = {}
+        for svc_name, info in result.items():
+            if not isinstance(info, dict):
+                continue
+            instances = info.get("instances", {})
+            running[svc_name] = any(
+                inst.get("running", False)
+                for inst in instances.values()
+                if isinstance(inst, dict)
+            )
+
+        # Union: init scripts without a procd instance (e.g. firewall) are only
+        # known from rc/list; they are "not running", exactly as rc/list said.
+        services = [
+            {
+                "name": svc_name,
+                "running": running.get(svc_name, False),
+                "enabled": enabled.get(svc_name) if enabled is not None else None,
+            }
+            for svc_name in sorted(set(running) | set(enabled or {}))
+        ]
+        _LOGGER.debug(
+            "Fetched %d services via service/list (+ cached rc/list)", len(services)
+        )
+        if names is not None:
+            services = [s for s in services if s["name"] in names]
+        return services
+
+    async def _get_rc_enabled(self) -> dict[str, bool] | None:
+        """Return init.d script name -> enabled from rpcd rc/list, cached.
+
+        Called at most every ``RC_LIST_REFRESH_INTERVAL`` seconds, because
+        each rc/list call leaks memory in rpcd before 2026-05-31 (see
+        :meth:`get_services`). ``skip_running_check`` saves the per-script
+        fork; older rpcd ignores the unknown argument. A failed fetch keeps
+        the previous result and is throttled the same way.
+        """
+        now = time.monotonic()
+        if (
+            self._rc_enabled_fetched_at is not None
+            and now - self._rc_enabled_fetched_at < RC_LIST_REFRESH_INTERVAL
+        ):
+            return self._rc_enabled
+
+        try:
+            result = await self._call("rc", "list", {"skip_running_check": True})
         except (
             OpenWrtMethodNotFoundError,
             OpenWrtResponseError,
             OpenWrtAuthError,
         ) as err:
             _LOGGER.debug("rc/list not available: %s", err)
-
-        # Method 2: procd service/list (OpenWrt 21+/25)
-        try:
-            result = await self._call("service", "list", {})
+        else:
             if isinstance(result, dict):
-                for svc_name, info in result.items():
-                    if not isinstance(info, dict):
-                        continue
-                    instances = info.get("instances", {})
-                    running = any(
-                        inst.get("running", False)
-                        for inst in instances.values()
-                        if isinstance(inst, dict)
-                    )
-                    services.append(
-                        {
-                            "name": svc_name,
-                            "running": running,
-                            "enabled": None,  # Unknown via procd service/list
-                        }
-                    )
-                _LOGGER.debug("Fetched %d services via service/list", len(services))
-                if names is not None:
-                    services = [s for s in services if s["name"] in names]
-                return services
+                self._rc_enabled = {
+                    svc_name: bool(info.get("enabled", 0))
+                    for svc_name, info in result.items()
+                    if isinstance(info, dict)
+                }
+        self._rc_enabled_fetched_at = now
+        return self._rc_enabled
+
+    async def _get_services_rc_list(
+        self, names: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Fallback for get_services when procd service/list is not available.
+
+        Full rc/list with running check on every call. Leaks rpcd memory on
+        rpcd before 2026-05-31, so it is only used when the cheap path fails.
+        """
+        services: list[dict[str, Any]] = []
+        try:
+            result = await self._call("rc", "list", {})
         except (
             OpenWrtMethodNotFoundError,
             OpenWrtResponseError,
             OpenWrtAuthError,
         ) as err:
             _LOGGER.warning(
-                "Could not fetch service list (rc/list + service/list failed): %s", err
+                "Could not fetch service list (service/list + rc/list failed): %s",
+                err,
             )
-
+            return services
+        if isinstance(result, dict):
+            for svc_name, info in result.items():
+                if not isinstance(info, dict):
+                    continue
+                services.append(
+                    {
+                        "name": svc_name,
+                        "running": bool(info.get("running", 0)),
+                        "enabled": bool(info.get("enabled", 0)),
+                    }
+                )
+        _LOGGER.debug("Fetched %d services via rc/list", len(services))
+        if names is not None:
+            services = [s for s in services if s["name"] in names]
         return services
 
     async def control_service(self, name: str, action: str) -> bool:
@@ -4230,6 +4299,10 @@ class OpenWrtAPI:
         try:
             await self._call("rc", "init", {"name": name, "action": action})
             _LOGGER.debug("Service %s %s OK", name, action)
+            if action in ("enable", "disable"):
+                # Re-read the enabled flags on the next poll instead of
+                # waiting out RC_LIST_REFRESH_INTERVAL.
+                self._rc_enabled_fetched_at = None
             return True
         except (OpenWrtMethodNotFoundError, OpenWrtResponseError) as err:
             _LOGGER.error("Failed to %s service %s: %s", action, name, err)
