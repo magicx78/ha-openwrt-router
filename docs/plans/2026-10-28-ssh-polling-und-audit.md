@@ -8,9 +8,9 @@
 
 - **Stand:** 2026-10-27 (abends) · **Phase:** freigegeben, in Umsetzung
 - **Branch/PR:** Teil 1 `fix/ssh-polling` · PR #37 (1.38.3) · Basis: v1.38.2 (`7d77f0f`) — Teil 2 gestapelt: A1 `fix/auth-errors` · PR #38 (1.38.4) auf #37; A2 `fix/hostapd-iface-cache` · PR #39 (1.38.5) auf #38; A11 `fix/topology-lldp-chain` · PR #40 (1.38.6) auf #39
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Review A1 inkl. Fixes abgeschlossen · **Offen:** Review-Befunde A2 (P1/P2, siehe Prüfprotokoll) beheben, Review A11 ausstehend, Merge und Release #37 → #38 → #39 → #40 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A3–A10, A12–A14
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1 und A2 inkl. Fixes abgeschlossen · **Offen:** Review A11 läuft, Merge und Release #37 → #38 → #39 → #40 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A3–A10, A12–A14
 - **Blocker:** –
-- **Nächster Schritt:** A2-Review-Befunde auf `fix/hostapd-iface-cache` beheben (P1: Modus-Vokabular `Master`/`Client`/`Mesh Point` statt `ap`, Auslöser auf Änderung statt Teilmenge; P2: `RADIO_KEY_IFNAME_IS_SECTION` im SSH-WLAN-Pfad, leere Neuermittlung nur bei Fehler behalten; P3: Tests für `uci/apply`- und SSH-Pfad, `reset_acl_blocked` verwirft Cache), dann nach oben mergen; Review A11 starten; nach Installation AK6 messen
+- **Nächster Schritt:** Review A11 abwarten und Befunde beheben; danach Merge-Freigabe #37 → #40 durch den Nutzer, Installation 1.38.x, AK6 messen; dann A4 (WAN-Erkennung, E5)
 
 ## Problem und Zielverhalten
 
@@ -447,3 +447,15 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
 - 2026-10-27 Stapel nachgezogen: `fix/auth-errors@a48eee7` → `fix/hostapd-iface-cache` (`0d01014`,
   Konflikt in `tests/test_api.py` beide Seiten behalten; ein verbliebener Trenner `=======` in
   `bd956ac` entfernt, danach 1357 grün) → `fix/topology-lldp-chain` (`679a1df`, 1362 grün).
+- 2026-10-27 CI PR #37 rot (`test (3.13)/(3.14)`): der Test zum abgelaufenen df-Cache setzte den
+  Zeitstempel auf 0.0; auf einem frisch gestarteten Runner liegt `time.monotonic()` unter 600 s, der
+  Eintrag galt als frisch → Test relativ zu `monotonic()` (`cc5b378`), durch den Stapel gemergt.
+  Zusätzlich der vorbestehende WAN-Raten-Test mit 1 % Toleranz (echte Wanduhr als Divisor, einmal
+  lokal 799 statt 800), ebenfalls auf `fix/ssh-polling` und durch den Stapel gemergt.
+- 2026-10-27 A2-Review-Fixes `fix/hostapd-iface-cache@04f34fb`: P1 Modus-Vokabular (Nicht-AP-Modi
+  ausschließen, `config.mode` aus netifd durchreichen, Auslöser auf neu gemeldete ifnames), P2
+  Sektionsflag im SSH-WLAN-Pfad und „Liste behalten“ nur bei fehlgeschlagener Neuermittlung, P3
+  Tests für `uci/apply`- und SSH-Pfad, `reset_acl_blocked` verwirft den Cache; 8 neue Tests, 3
+  bestehende auf Parser-echte Radio-Formen umgestellt; lokal 1365 grün; nach `fix/topology-lldp-chain`
+  gemergt. Offen (vorbestehend, A10): `_hostapd_acl_blocked` erkennt die ACL-Sperre nicht
+  („access denied“ vs. „rpcd ACL blocks“).
