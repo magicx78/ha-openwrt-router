@@ -642,7 +642,7 @@ def _parse_proc_net_arp(raw: str) -> dict[str, str]:
     return {mac: rank[2] for mac, rank in candidates.items()}
 
 
-# UCI wifi-device "band" option (OpenWrt 21.02+) → normalised band
+# UCI wifi-device "band" option (replaces hwmode in newer OpenWrt) → normalised band
 _UCI_BAND_MAP = {"2g": "2.4g", "5g": "5g", "6g": "6g", "60g": "unknown"}
 
 
@@ -672,8 +672,11 @@ def _band_from_frequency(value: Any) -> str | None:
 
 def _band_from_hwmode(hwmode: str) -> str | None:
     """Map a legacy hwmode (11a, 11g, bgn …) to a band; None if it is ambiguous."""
-    # 11n, 11ax and 11be run on several bands and say nothing on their own.
-    mode = hwmode.lower().replace("ax", "").replace("be", "")
+    mode = hwmode.lower()
+    if "ad" in mode:
+        return "unknown"  # 60 GHz (802.11ad)
+    # 11n, 11ax, 11be and "auto" run on several bands and say nothing on their own.
+    mode = mode.replace("auto", "").replace("ax", "").replace("be", "")
     if "a" in mode:
         return "5g"
     if "b" in mode or "g" in mode:

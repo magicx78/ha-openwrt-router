@@ -313,17 +313,24 @@ class TestDetectBand:
         # Use a name that doesn't match any keywords
         assert mock_api._detect_band("eth0", {}) == "unknown"
 
-    @pytest.mark.parametrize("frequency", [5935, 5955, 5975, 5995, 6015, 7115])
+    @pytest.mark.parametrize(
+        "frequency", [5925, 5935, 5955, 5975, 5995, 6015, 7115, 7125]
+    )
     def test_frequency_lower_6ghz_channels(self, mock_api, frequency):
         """6 GHz starts at 5925 MHz; 5935-5995 (ch 2, 1, 5, 9) used to read as 5g."""
         assert mock_api._detect_band("wlan2", {"frequency": frequency}) == "6g"
 
-    @pytest.mark.parametrize("frequency", [4920, 5180, 5825, 5885])
+    @pytest.mark.parametrize("frequency", [4920, 5180, 5825, 5885, 5924])
     def test_frequency_5ghz_edges(self, mock_api, frequency):
         assert mock_api._detect_band("wlan1", {"frequency": frequency}) == "5g"
 
-    def test_frequency_60ghz_is_not_6ghz(self, mock_api):
-        assert mock_api._detect_band("wlan3", {"frequency": 58320}) == "unknown"
+    @pytest.mark.parametrize("frequency", [7126, 58320])
+    def test_frequency_60ghz_is_not_6ghz(self, mock_api, frequency):
+        assert mock_api._detect_band("wlan3", {"frequency": frequency}) == "unknown"
+
+    @pytest.mark.parametrize("hwmode", ["11ad", "ad"])
+    def test_hwmode_60ghz_is_unknown(self, mock_api, hwmode):
+        assert mock_api._detect_band("radio9", {"hwmode": hwmode, "channel": 2}) == "unknown"
 
     @pytest.mark.parametrize(
         ("uci_band", "expected"),
@@ -348,7 +355,7 @@ class TestDetectBand:
         data = {"frequency": 5955, "hwmode": "ac"}
         assert mock_api._detect_band("phy2-ap0", data) == "6g"
 
-    @pytest.mark.parametrize("hwmode", ["11n", "11ax", "11be", "ax"])
+    @pytest.mark.parametrize("hwmode", ["11n", "11ax", "11be", "ax", "auto"])
     def test_multiband_hwmode_defers_to_channel(self, mock_api, hwmode):
         """11n/ax/be exist on several bands: the channel decides, not the mode."""
         assert mock_api._detect_band("radio9", {"hwmode": hwmode, "channel": 36}) == "5g"
@@ -362,6 +369,7 @@ class TestDetectBand:
             (2, "2.4g"),
             (6, "2.4g"),
             (13, "2.4g"),
+            (14, "2.4g"),
             ("11", "2.4g"),
             # 5 GHz; 149-177 also exist on 6 GHz but stay 5 GHz
             (36, "5g"),
