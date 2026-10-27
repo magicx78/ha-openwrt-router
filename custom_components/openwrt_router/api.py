@@ -88,6 +88,8 @@ from .const import (
     UBUS_IWINFO_ASSOCLIST,
     UBUS_IWINFO_INFO,
     UBUS_IWINFO_OBJECT,
+    UBUS_LOG_OBJECT,
+    UBUS_LOG_READ,
     UBUS_NETWORK_DUMP,
     UBUS_NETWORK_OBJECT,
     UBUS_NETWORK_RELOAD,
@@ -1232,6 +1234,30 @@ class OpenWrtAPI:
             "cpu_load_15min": cpu_load_15min,
             "memory": result.get("memory", {}),
         }
+
+    async def get_log_entries(self, lines: int) -> list[dict[str, Any]]:
+        """Return the newest ``lines`` entries of the logd ring buffer.
+
+        Calls:
+            log read {"lines": N, "stream": false} (ACL v6). Over HTTP only
+            ``stream: false`` returns a response.
+
+        Returns:
+            List of ``{msg, id, priority, source, time}`` dicts (unvalidated
+            router output; see log_parser.py).
+
+        Raises:
+            OpenWrtMethodNotFoundError: ``log read`` not permitted (ACL < v6)
+                or logd missing. No SSH fallback: the log is optional.
+            OpenWrtResponseError: The answer is not a ``{"log": [...]}`` dict.
+        """
+        result = await self._call(
+            UBUS_LOG_OBJECT, UBUS_LOG_READ, {"lines": lines, "stream": False}
+        )
+        entries = result.get("log") if isinstance(result, dict) else None
+        if not isinstance(entries, list):
+            raise OpenWrtResponseError("log read: unexpected response shape")
+        return entries
 
     async def get_wan_status(self) -> dict[str, Any]:
         """Return WAN interface connection status + RX/TX bytes from /sys/class/net.

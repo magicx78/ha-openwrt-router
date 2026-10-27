@@ -89,6 +89,15 @@
       "channel_plan": {
         "name": "Kanalplan-Befunde"
       },
+      "log_status": {
+        "name": "Router-Log",
+        "state": {
+          "pending": "Ausstehend",
+          "ok": "OK",
+          "unavailable": "Nicht verfügbar (rpcd-ACL)",
+          "error": "Fehler"
+        }
+      },
       "router_status": {
         "name": "Router-Status",
         "state": {

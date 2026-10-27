@@ -137,6 +137,7 @@ SUFFIX_CONNECTIVITY = "connectivity"
 SUFFIX_WAN_CONNECTIVITY = "wan_connectivity"
 SUFFIX_ROUTER_STATUS = "router_status"
 SUFFIX_CHANNEL_PLAN = "channel_plan"
+SUFFIX_LOG_STATUS = "log_status"
 
 # Error type values stored in coordinator.data.error_type
 ERROR_TYPE_CONNECTION = "connection"
@@ -396,6 +397,24 @@ UBUS_RC_LIST = "list"
 UBUS_RC_INIT = "init"
 UBUS_SERVICE_OBJECT = "service"
 UBUS_SERVICE_LIST = "list"
+
+# logd ring buffer (F6 log ingest, ACL v6)
+UBUS_LOG_OBJECT = "log"
+UBUS_LOG_READ = "read"
+# Fetched every LOG_READ_INTERVAL_CYCLES polls; LOG_READ_LINES newest lines
+# (~165 B each). Lines beyond that since the last fetch count as "missed".
+LOG_READ_INTERVAL_CYCLES = 2
+LOG_READ_LINES = 250
+# HA events from log lines: at most LOG_EVENTS_PER_FETCH per fetch and one per
+# type and MAC within LOG_EVENT_COOLDOWN_SECONDS.
+LOG_EVENTS_PER_FETCH = 10
+LOG_EVENT_COOLDOWN_SECONDS = 300
+EVENT_WIFI = f"{DOMAIN}_wifi_event"
+EVENT_DHCP = f"{DOMAIN}_dhcp_event"
+LOG_STATUS_PENDING = "pending"
+LOG_STATUS_OK = "ok"
+LOG_STATUS_UNAVAILABLE = "unavailable"
+LOG_STATUS_ERROR = "error"
 
 # Services to monitor/control by default (OpenWrt critical services)
 DEFAULT_SERVICES = ["dnsmasq", "dropbear", "firewall", "network", "uhttpd", "wpad"]

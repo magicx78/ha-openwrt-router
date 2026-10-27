@@ -2,6 +2,39 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.33.0] - 2026-10-27
+
+### Added
+
+- **Router-Log wird ausgewertet** (alle 2 Abfragen, die neuesten 250 Zeilen
+  über `ubus call log read`). Neue Zeilen werden über ihre fortlaufende `id`
+  erkannt. Was beim ersten Abruf (und nach einem Neustart von logd) schon im
+  Puffer steht, wird nur gezählt.
+- **Events für eigene Automationen:**
+  - `openwrt_router_wifi_event` mit `type` `psk_mismatch` (falsches
+    WLAN-Passwort), `inactivity_timeout` (Client wegen Inaktivität getrennt)
+    oder `handshake_failed`,
+  - `openwrt_router_dhcp_event` mit `type` `nak`, `decline` oder
+    `no_address` (Pool erschöpft).
+  - Felder: `entry_id`, `router`, `type`, `mac`, `hostname`, `interface`,
+    `time`, `message`, bei DHCP zusätzlich `ip`.
+  - Höchstens 10 Events pro Abruf und eines je Typ und MAC in 5 Minuten.
+    Normale An-/Abmeldungen und DHCPACK werden nur gezählt.
+  - Die Events erscheinen lesbar im Logbuch.
+- **Diagnosesensor „Router-Log“** (`log_status`): `ok`, `pending`,
+  `unavailable` (rpcd-ACL erlaubt `log read` noch nicht) oder `error`.
+  Attribute: Zähler der letzten 24 h je Art (`counts_24h`), verarbeitete,
+  verpasste und Baseline-Zeilen, ausgelöste und unterdrückte Events. Ein
+  fehlender Zugriff lässt die Abfrage nie scheitern.
+
+### Changed
+
+- **rpcd-ACL Version 6:** zusätzlich lesend `log read` und
+  `usteer get_clients` (für die Client-Stabilität in einem späteren
+  Release). Beim ersten Start nach dem Update schreibt die Integration die
+  ACL neu und startet rpcd **einmal pro Router** neu (wenige Sekunden ohne
+  Antwort). `scripts/ha-openwrt-router.json` ist angepasst.
+
 ## [1.32.0] - 2026-10-27
 
 ### Added

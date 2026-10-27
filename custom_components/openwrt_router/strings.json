@@ -89,6 +89,15 @@
       "channel_plan": {
         "name": "Channel plan findings"
       },
+      "log_status": {
+        "name": "Router log",
+        "state": {
+          "pending": "Pending",
+          "ok": "OK",
+          "unavailable": "Unavailable (rpcd ACL)",
+          "error": "Error"
+        }
+      },
       "router_status": {
         "name": "Router Status",
         "state": {
