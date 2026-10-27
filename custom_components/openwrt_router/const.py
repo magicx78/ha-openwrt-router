@@ -323,6 +323,12 @@ LLDP_STATUS_ERROR = "error"  # unexpected exception (only real failures)
 LLDP_REFRESH_INTERVAL = 600.0
 LLDP_UNAVAILABLE_RETRY_INTERVAL = 1800.0
 
+# rpcd ``rc/list`` is NOT called on every poll: rpcd before 2026-05-31
+# (upstream d06d2a8, e.g. rpcd 2025.12.03 on OpenWrt 25.12.1) leaks ~4.7 KB
+# per call. Service running state comes from procd ``service/list`` instead;
+# rc/list only supplies the "enabled" flags, refreshed this rarely (seconds).
+RC_LIST_REFRESH_INTERVAL = 6 * 3600.0
+
 # Coordinator data keys
 KEY_LLDP_NEIGHBORS = "lldp_neighbors"
 KEY_LLDP_STATUS = "lldp_status"
