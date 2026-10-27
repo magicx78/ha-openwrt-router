@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .const import (
@@ -337,7 +337,7 @@ def build_topology(
     # 5. Metadata
     # ------------------------------------------------------------------
     meta = {
-        "updated": datetime.now(timezone.utc).isoformat(),
+        "updated": datetime.now(UTC).isoformat(),
         "client_count": len([n for n in nodes if n["type"] == "client"]),
         "radio_count": len([n for n in nodes if n["type"] == "radio"]),
         "wan_ip": wan_ip,

@@ -124,6 +124,9 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
     """
 
     VERSION = 2
+    # Minor 2: legacy dynamic-sensor disable is a one-time migration
+    # (see async_migrate_entry); new entries skip it.
+    MINOR_VERSION = 2
 
     @staticmethod
     @callback
