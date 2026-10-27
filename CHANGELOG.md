@@ -16,7 +16,15 @@ All notable changes to the OpenWrt Router integration will be documented in this
   ein Router, dessen Uplink LLDP schon kennt, keine zweite Uplink-Kante von
   einem anderen Router mehr, und die Switch-Erkennung lässt APs aus, die
   hinter einem anderen Router hängen. Zwei APs, die beide direkt am selben
-  Gateway-Port hängen, ergeben weiterhin einen Switch.
+  Gateway-Port hängen, ergeben weiterhin einen Switch. Einschränkungen: Das
+  gilt nur für Router mit belegter Richtung der LLDP-Kante (Gateway-Rolle,
+  LLDP-Abstand zum Gateway oder ein WAN-Port auf genau einer Seite, der neu
+  als Richtungshinweis zählt); ein Paar ohne solchen Beleg behält wie bisher
+  seine Gateway-Kanten. Ein Gateway-Port mit einem LLDP-belegten und einem
+  nur per DHCP/ARP gefundenen AP (etwa ohne lldpd) ergibt keinen Switch mehr,
+  beide Kanten bleiben direkt. Die zweite Strecke einer Kette trägt keinen
+  `gateway_port` mehr; das Panel zeigte dafür LED und Geschwindigkeit des
+  gleichnamigen Gateway-Ports.
 
 ## [1.38.5] - 2026-10-27
 

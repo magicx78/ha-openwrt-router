@@ -623,8 +623,12 @@ class TestLldpChainBeatsGatewayHeuristics:
             wan_status={"connected": True, "proto": "static", "ipv4": "172.16.1.71"},
             lldp=[_neigh("lan3", mgmt_ip="10.10.10.2", port_id="wan")],
             port_fdb_map={"aa:bb:cc:00:00:02": "lan3", "aa:bb:cc:00:00:04": "lan3"},
+            # Without the ARP entries an unrelated row keeps the switch
+            # inference active (it needs a non-empty trunk map).
             trunk_port_map=(
-                {"10.10.10.2": "lan3", "10.10.10.4": "lan3"} if arp else {"lan3": "trunk"}
+                {"10.10.10.2": "lan3", "10.10.10.4": "lan3"}
+                if arp
+                else {"192.0.2.99": "lan1"}
             ),
         )
         if dhcp:
@@ -677,7 +681,9 @@ class TestLldpChainBeatsGatewayHeuristics:
         assert first_hop["attributes"]["detection_method"] == "lldp"
 
     def test_switch_inference_ignores_aps_chained_behind_another_router(self):
-        """Even if a stray gateway edge exists, a chained AP is no switch member."""
+        """Synthetic/defensive: the heuristics no longer produce such a stray
+        gateway edge, but _detect_switch_nodes must ignore it should one appear
+        (e.g. from a second LLDP observation in a ring)."""
         rd = self._chain_with_gateway_knowledge()
         edges = _detect_inter_router_edges([], rd)
         stray = {
@@ -719,3 +725,129 @@ class TestLldpChainBeatsGatewayHeuristics:
         nodes, _switch_edges, replaced = _detect_switch_nodes(edges, rd)
         assert [n["type"] for n in nodes] == ["switch"]
         assert len(replaced) == 2
+
+
+# =====================================================================
+# Review of A11: LLDP pairs the gateway cannot see (gateway without lldpd,
+# managed switch in between) must not lose a correct gateway edge to the
+# router_id tie-break; mixed fleets; second-hop port attributes.
+# =====================================================================
+
+
+def _gateway_without_lldp(ap_ips: tuple[str, ...], ap_macs: tuple[str, ...]):
+    """Gateway that knows the APs only from DHCP/FDB/ARP (no lldpd)."""
+    gw = _router(
+        mac="aa:bb:cc:00:00:01",
+        hostname="gw",
+        wan_status={"connected": True, "proto": "dhcp", "ipv4": "1.2.3.4"},
+        port_fdb_map={mac: "lan3" for mac in ap_macs},
+        trunk_port_map={ip: "lan3" for ip in ap_ips},
+    )
+    gw.dhcp_leases = {mac: {"ip": ip} for mac, ip in zip(ap_macs, ap_ips, strict=True)}
+    return gw
+
+
+class TestUnanchoredLldpPairs:
+    GW = "gw"
+    A = "r-a"  # sorts first — the tie-break would make it the "from" side
+    B = "r-b"
+
+    def test_wan_port_orients_pair_without_gateway_lldp(self):
+        """Truth: gw → r-b → r-a. Only the APs speak LLDP; r-a reports its WAN port."""
+        gw = _gateway_without_lldp(("10.10.10.4", "10.10.10.2"), ("aa:bb:cc:00:00:04", "aa:bb:cc:00:00:02"))
+        r_a = _router(
+            mac="aa:bb:cc:00:00:04",
+            hostname="leaf",
+            lldp=[_neigh("wan", mgmt_ip="10.10.10.2", port_id="lan3")],
+        )
+        r_b = _router(
+            mac="aa:bb:cc:00:00:02",
+            hostname="middle",
+            lldp=[_neigh("lan3", mgmt_ip="10.10.10.4", port_id="wan")],
+        )
+        rd = [(self.GW, "10.10.10.1", gw), (self.A, "10.10.10.4", r_a), (self.B, "10.10.10.2", r_b)]
+        edges = _detect_inter_router_edges([], rd)
+        arrows = {(e["from"], e["to"]) for e in edges}
+        assert arrows == {(self.GW, self.B), (self.B, self.A)}
+        hop2 = next(e for e in edges if e["to"] == self.A)
+        assert hop2["relationship"] == "router_uplink"
+        assert hop2["attributes"]["from_port"] == "lan3"
+        assert hop2["attributes"]["to_port"] == "wan"
+
+    def test_pair_without_any_anchor_keeps_both_gateway_edges(self):
+        """No gateway LLDP, no WAN port on either side: the old behaviour stays."""
+        gw = _gateway_without_lldp(("10.10.10.4", "10.10.10.2"), ("aa:bb:cc:00:00:04", "aa:bb:cc:00:00:02"))
+        r_a = _router(mac="aa:bb:cc:00:00:04", lldp=[_neigh("lan2", mgmt_ip="10.10.10.2", port_id="lan2")])
+        r_b = _router(mac="aa:bb:cc:00:00:02", lldp=[_neigh("lan2", mgmt_ip="10.10.10.4", port_id="lan2")])
+        rd = [(self.GW, "10.10.10.1", gw), (self.A, "10.10.10.4", r_a), (self.B, "10.10.10.2", r_b)]
+        edges = _detect_inter_router_edges([], rd)
+        arrows = {(e["from"], e["to"]) for e in edges}
+        assert (self.GW, self.A) in arrows
+        assert (self.GW, self.B) in arrows
+        assert len(_router_uplinks(edges)) == 1  # the LLDP pair itself is still shown
+
+    def test_wireless_pair_without_gateway_lldp_keeps_gateway_edges(self):
+        gw = _gateway_without_lldp(("10.10.10.4", "10.10.10.2"), ("aa:bb:cc:00:00:04", "aa:bb:cc:00:00:02"))
+        r_a = _router(mac="aa:bb:cc:00:00:04", lldp=[_neigh("mesh0", mgmt_ip="10.10.10.2", port_id="mesh0")])
+        r_b = _router(mac="aa:bb:cc:00:00:02", lldp=[_neigh("mesh0", mgmt_ip="10.10.10.4", port_id="mesh0")])
+        rd = [(self.GW, "10.10.10.1", gw), (self.A, "10.10.10.4", r_a), (self.B, "10.10.10.2", r_b)]
+        edges = _detect_inter_router_edges([], rd)
+        arrows = {(e["from"], e["to"]) for e in edges}
+        assert (self.GW, self.A) in arrows
+        assert (self.GW, self.B) in arrows
+
+
+class TestMixedFleetSwitchInference:
+    def test_leaf_without_lldpd_does_not_replace_the_lldp_edge(self):
+        """gw + AP-A speak LLDP (gw sees A on lan3); AP-B has no lldpd and is only
+        known from DHCP/FDB on the same port. Whether B hangs behind A or behind
+        an unmanaged switch is unknown — the LLDP edge must survive either way."""
+        gw = _router(
+            mac="aa:bb:cc:00:00:01",
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "1.2.3.4"},
+            lldp=[_neigh("lan3", mgmt_ip="10.10.10.2", port_id="wan")],
+            port_fdb_map={"aa:bb:cc:00:00:02": "lan3", "aa:bb:cc:00:00:04": "lan3"},
+            trunk_port_map={"10.10.10.2": "lan3", "10.10.10.4": "lan3"},
+        )
+        gw.dhcp_leases = {
+            "aa:bb:cc:00:00:02": {"ip": "10.10.10.2"},
+            "aa:bb:cc:00:00:04": {"ip": "10.10.10.4"},
+        }
+        ap_a = _router(mac="aa:bb:cc:00:00:02", lldp=[_neigh("wan", mgmt_ip="10.10.10.1", port_id="lan3")])
+        ap_b = _router(mac="aa:bb:cc:00:00:04")
+        rd = [("gw", "10.10.10.1", gw), ("ap-a", "10.10.10.2", ap_a), ("ap-b", "10.10.10.4", ap_b)]
+        edges = _detect_inter_router_edges([], rd)
+        by_to = {e["to"]: e for e in edges}
+        assert by_to["ap-a"]["attributes"]["detection_method"] == "lldp"
+        assert by_to["ap-b"]["relationship"] == "lan_uplink"
+        nodes, switch_edges, replaced = _detect_switch_nodes(edges, rd)
+        assert nodes == []
+        assert switch_edges == []
+        assert replaced == set()
+
+
+class TestSecondHopPortAttributes:
+    def test_hop_behind_an_ap_carries_no_gateway_port(self):
+        """``gateway_port`` feeds the gateway's port LED/speed in the panel; a
+        hop whose ``from`` is an AP must not pretend to be a gateway port."""
+        gw = _router(
+            mac="aa:bb:cc:00:00:01",
+            wan_status={"connected": True, "proto": "static", "ipv4": "172.16.1.71"},
+            lldp=[_neigh("lan3", mgmt_ip="10.10.10.2", port_id="wan")],
+        )
+        ap2 = _router(
+            mac="aa:bb:cc:00:00:02",
+            lldp=[
+                _neigh("wan", mgmt_ip="10.10.10.1", port_id="lan3"),
+                _neigh("lan3", mgmt_ip="10.10.10.4", port_id="wan"),
+            ],
+        )
+        ap4 = _router(mac="aa:bb:cc:00:00:04", lldp=[_neigh("wan", mgmt_ip="10.10.10.2", port_id="lan3")])
+        rd = [("gw", "10.10.10.1", gw), ("ap4", "10.10.10.4", ap4), ("ap2", "10.10.10.2", ap2)]
+        edges = {e["to"]: e["attributes"] for e in _router_uplinks(_detect_inter_router_edges([], rd))}
+        assert edges["ap2"]["gateway_port"] == "lan3"
+        assert edges["ap2"]["ap_port"] == "wan"
+        assert edges["ap4"]["gateway_port"] is None
+        assert edges["ap4"]["ap_port"] is None
+        assert edges["ap4"]["from_port"] == "lan3"
+        assert edges["ap4"]["to_port"] == "wan"
