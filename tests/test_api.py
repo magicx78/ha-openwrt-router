@@ -2797,9 +2797,18 @@ class TestDiskAndTmpfsFromSystemInfo:
         second = await mock_api.get_disk_space()
         assert second == first
         assert mock_api._asyncssh_run.await_count == 1  # served from cache
-        # Expired cache entry → one more SSH run
+        # Expired cache entry → one more SSH run. Relative to monotonic time:
+        # on a freshly booted CI runner time.monotonic() can be below the
+        # refresh interval, so a 0.0 timestamp would still count as fresh.
+        import time as _time
+
+        from custom_components.openwrt_router.const import SSH_SLOW_REFRESH_INTERVAL
+
         key, (_ts, value) = next(iter(mock_api._ssh_slow_cache.items()))
-        mock_api._ssh_slow_cache[key] = (0.0, value)
+        mock_api._ssh_slow_cache[key] = (
+            _time.monotonic() - SSH_SLOW_REFRESH_INTERVAL - 1,
+            value,
+        )
         await mock_api.get_disk_space()
         assert mock_api._asyncssh_run.await_count == 2
 
