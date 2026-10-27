@@ -3073,7 +3073,6 @@ class TestHostapdCacheRefresh:
         mock_api._hostapd_ifaces = ["phy0-ap0"]
         assert await mock_api.reload_wifi() is True
         assert mock_api._hostapd_ifaces is None
-=======
 class TestBoardFallbackWarningOnce:
     @pytest.mark.asyncio
     async def test_board_not_permitted_warns_once_per_instance(self, mock_api, caplog):
