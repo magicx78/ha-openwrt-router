@@ -27,6 +27,7 @@ from .const import (
     CLIENT_KEY_IP,
     CLIENT_KEY_MAC,
     CLIENT_KEY_RADIO,
+    CLIENT_KEY_RANDOM_MAC,
     CLIENT_KEY_SIGNAL,
     CLIENT_KEY_SOURCE,
     CLIENT_KEY_SSID,
@@ -111,6 +112,7 @@ from .const import (
     UBUS_WIRELESS_STATUS,
     WAN_INTERFACE_NAMES,
 )
+from .mac_utils import is_locally_administered
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1888,6 +1890,7 @@ class OpenWrtAPI:
                     hostapd_ifnames, ifname_to_ssid, leases
                 )
                 if ssh_clients is not None:
+                    self._enrich_client_metadata(ssh_clients)
                     return ssh_clients
             except Exception as ssh_err:  # noqa: BLE001
                 _LOGGER.debug("SSH client fallback failed: %s", ssh_err)
@@ -1974,7 +1977,12 @@ class OpenWrtAPI:
         for client in clients:
             client.setdefault(CLIENT_KEY_CONNECTION_TYPE, CONNECTION_TYPE_WIRELESS)
             mac = client.get(CLIENT_KEY_MAC, "")
-            if CLIENT_KEY_VENDOR not in client:
+            random_mac = is_locally_administered(mac)
+            client[CLIENT_KEY_RANDOM_MAC] = random_mac
+            if random_mac:
+                # A randomised MAC has no manufacturer; any OUI hit is wrong.
+                client[CLIENT_KEY_VENDOR] = None
+            elif CLIENT_KEY_VENDOR not in client:
                 client[CLIENT_KEY_VENDOR] = oui.lookup_vendor(mac)
             # hostapd association is more authoritative than iwinfo assoclist.
             radio = client.get(CLIENT_KEY_RADIO, "")

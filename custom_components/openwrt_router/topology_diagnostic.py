@@ -565,6 +565,7 @@ def build_topology_snapshot(
                     # Without these keys the panel silently falls back to its own
                     # OUI table and shows no connection type / confidence at all.
                     "vendor": client.get("vendor"),
+                    "random_mac": client.get("random_mac"),
                     "connection_type": client.get("connection_type"),
                     "confidence": client.get("confidence"),
                     "source": client.get("source"),

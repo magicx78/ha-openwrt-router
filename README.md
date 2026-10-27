@@ -318,7 +318,7 @@ service rpcd restart
 Log events are limited to 10 per fetch and one per type and client (DFS lines: per interface and frequency) in 5 minutes; channel changes are not limited. They need rpcd ACL v6 (`log read`), which the integration deploys on start.
 
 ### Device Tracker
-One entity per WiFi client — `home` / `not_home` with attributes: `mac`, `ip_address`, `hostname`, `ssid`, `radio`, `signal`, `connected_since`, `associations_24h`, `reconnects_24h` (from the router logs of all routers), `dhcp_status` (`ok`, `pending`, `dhcp_missing` = associated for 180 s without lease or ARP entry on any router, `static_no_lease`; empty while no router reports leases or a DHCP server is unreachable). Note: a device with a manually set IP that only talks locally, or clients right after a gateway reboot (empty lease file until they renew), can show `dhcp_missing`.
+One entity per WiFi client — `home` / `not_home` with attributes: `mac`, `ip_address`, `hostname`, `ssid`, `radio`, `signal`, `connected_since`, `random_mac` (locally administered "private" MAC, no vendor lookup), `associations_24h`, `reconnects_24h` (from the router logs of all routers), `dhcp_status` (`ok`, `pending`, `dhcp_missing` = associated for 180 s without lease or ARP entry on any router, `static_no_lease`; empty while no router reports leases or a DHCP server is unreachable). Note: a device with a manually set IP that only talks locally, or clients right after a gateway reboot (empty lease file until they renew), can show `dhcp_missing`.
 
 ---
 

@@ -38,6 +38,7 @@ from .const import (
     CLIENT_KEY_IP,
     CLIENT_KEY_MAC,
     CLIENT_KEY_RADIO,
+    CLIENT_KEY_RANDOM_MAC,
     CLIENT_KEY_SIGNAL,
     CLIENT_KEY_SSID,
     CONF_PROTOCOL,
@@ -48,6 +49,7 @@ from .const import (
 from .coordinator import OpenWrtCoordinator
 from .dhcp_health import client_dhcp_status
 from .fleet import client_counts, dhcp_context
+from .mac_utils import is_locally_administered
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -237,12 +239,19 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
         """Return additional attributes for the tracked device."""
         client, coordinator = self._find_client()
         counts = self._client_counts()
+        random_mac = is_locally_administered(self._mac)
         if not client:
             # Client is currently away; return last known SSID / radio if stored
-            return {"mac": self._mac, "connected": False, **counts}
+            return {
+                "mac": self._mac,
+                "connected": False,
+                CLIENT_KEY_RANDOM_MAC: random_mac,
+                **counts,
+            }
 
         return {
             **counts,
+            CLIENT_KEY_RANDOM_MAC: random_mac,
             "mac": self._mac,
             "connected": True,
             "dhcp_status": self._dhcp_status(client),
