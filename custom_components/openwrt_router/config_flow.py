@@ -28,8 +28,10 @@ from .api import (
     OpenWrtTimeoutError,
 )
 from .const import (
+    CONF_EXTENDED_WIFI_SENSORS,
     CONF_PROTOCOL,
     CONF_TOPOLOGY_PORT_DEBUG,
+    DEFAULT_EXTENDED_WIFI_SENSORS,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL,
     DEFAULT_TOPOLOGY_PORT_DEBUG,
@@ -44,10 +46,12 @@ from .const import (
     ERROR_RPCD_SETUP,
     ERROR_TIMEOUT,
     ERROR_UNKNOWN,
+    OPT_EXTENDED_WIFI_PREEXISTING,
     PROTOCOL_HTTP,
     PROTOCOL_HTTPS,
     PROTOCOL_HTTPS_INSECURE,
 )
+from .extended_sensors import async_apply_extended_wifi_sensors
 from .ssl_util import ssl_context_for_protocol
 
 _LOGGER = logging.getLogger(__name__)
@@ -85,17 +89,39 @@ def _validate_host(host: str) -> str | None:
 
 
 class OpenWrtOptionsFlow(OptionsFlow):
-    """Options flow — topology debug flag."""
+    """Options flow — extended Wi-Fi sensors switch and topology debug flag."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
-
         opts = self.config_entry.options
+        if user_input is not None:
+            # Merge: async_create_entry replaces all options, internal keys too.
+            new_opts = {**opts, **user_input}
+            was_on = opts.get(CONF_EXTENDED_WIFI_SENSORS, DEFAULT_EXTENDED_WIFI_SENSORS)
+            is_on = new_opts.get(
+                CONF_EXTENDED_WIFI_SENSORS, DEFAULT_EXTENDED_WIFI_SENSORS
+            )
+            # Touch the entity registry only on an actual change.
+            if is_on != was_on:
+                new_opts[OPT_EXTENDED_WIFI_PREEXISTING] = (
+                    async_apply_extended_wifi_sensors(
+                        self.hass,
+                        self.config_entry,
+                        is_on,
+                        opts.get(OPT_EXTENDED_WIFI_PREEXISTING, []),
+                    )
+                )
+            return self.async_create_entry(title="", data=new_opts)
+
         schema = vol.Schema(
             {
+                vol.Optional(
+                    CONF_EXTENDED_WIFI_SENSORS,
+                    default=opts.get(
+                        CONF_EXTENDED_WIFI_SENSORS, DEFAULT_EXTENDED_WIFI_SENSORS
+                    ),
+                ): bool,
                 vol.Optional(
                     CONF_TOPOLOGY_PORT_DEBUG,
                     default=opts.get(

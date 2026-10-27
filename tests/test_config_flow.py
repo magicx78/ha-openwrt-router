@@ -384,7 +384,7 @@ class TestNoSwitchOrFritzboxSteps:
             assert not hasattr(flow, step), f"{step} should have been removed"
 
     @pytest.mark.asyncio
-    async def test_options_flow_only_exposes_topology_debug(self):
+    async def test_options_flow_exposes_no_removed_options(self):
         from unittest.mock import PropertyMock
 
         from custom_components.openwrt_router.config_flow import OpenWrtOptionsFlow
@@ -400,7 +400,7 @@ class TestNoSwitchOrFritzboxSteps:
 
         assert result["type"] == "form"
         keys = {str(k) for k in result["data_schema"].schema}
-        assert keys == {"topology_port_debug"}
+        assert keys == {"extended_wifi_sensors", "topology_port_debug"}
         assert not any("fritzbox" in k for k in keys)
 
 

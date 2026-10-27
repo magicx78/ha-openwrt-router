@@ -363,6 +363,14 @@ KEY_TOPOLOGY_SNAPSHOTS = "topology_snapshots"
 CONF_TOPOLOGY_PORT_DEBUG = "topology_port_debug"
 DEFAULT_TOPOLOGY_PORT_DEBUG = False
 
+# Options flag: enable the per-radio / per-AP / per-port sensors in one go
+# instead of one click per entity (disabled by default, see extended_sensors.py).
+CONF_EXTENDED_WIFI_SENSORS = "extended_wifi_sensors"
+DEFAULT_EXTENDED_WIFI_SENSORS = False
+# Internal option: unique_ids that were already enabled when the switch went
+# on, so switching it off restores exactly the previous state.
+OPT_EXTENDED_WIFI_PREEXISTING = "_extended_wifi_preexisting"
+
 # TODO: parental control - add UBUS_PARENTAL_OBJECT
 
 # DHCP lease data key (coordinator)

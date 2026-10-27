@@ -4,9 +4,11 @@
       "init": {
         "title": "Router Options",
         "data": {
+          "extended_wifi_sensors": "Extended Wi-Fi sensors (radio, AP, port)",
           "topology_port_debug": "Port mapping debug data in topology snapshot"
         },
         "data_description": {
+          "extended_wifi_sensors": "Enables all per-radio, per-SSID (AP) and per-port sensors of this router at once instead of one by one. Turning it off disables only the sensors this switch enabled; sensors you disabled yourself are never touched. Takes effect after about 30 seconds.",
           "topology_port_debug": "Include the raw per-port mapping trace (FDB/DHCP/ARP matches and assignment reasons) in the topology snapshot endpoint. HA diagnostics always stay redacted."
         }
       }
