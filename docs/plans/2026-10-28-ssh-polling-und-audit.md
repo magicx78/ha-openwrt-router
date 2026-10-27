@@ -29,7 +29,7 @@ ACL-Änderung). Daten, die es nur per SSH gibt (LLDP), werden wie heute höchste
 geholt. Fällt ubus aus, bleibt SSH der Fallback, dann aber mit einer Verbindung je Poll, die nach
 dem Poll geschlossen wird. Die Speicher-Sensoren zeigen die echten Werte.
 
-**Nicht-Ziele:** ACL v8 (keine neuen ACL-Pfade nötig), Host-Key-Prüfung für SSH (Produktentscheidung,
+**Nicht-Ziele:** ~~ACL v8 (keine neuen ACL-Pfade nötig)~~ (aufgehoben durch E7, siehe A16), Host-Key-Prüfung für SSH (Produktentscheidung,
 siehe E2, eigenes Paket später), Änderungen am Panel, neue Entities.
 
 ## Akzeptanzkriterien
@@ -491,3 +491,11 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   Umhängen auf `main`): #38 `abf9e86` → v1.38.4 (20:51 UTC), #39 `225ab22` → v1.38.5 (20:54 UTC),
   #40 `85d93b4` → v1.38.6 (20:56 UTC); Release-Workflow jeweils erfolgreich, HACS aufgefrischt.
   PR #41 (ACL v8) auf `main` umgehängt.
+- 2026-10-27 Review A16/PR #41 (unabhängig): keine P0/P1; AK-A16.1–3 verifiziert (alle ubus-Dateipfade
+  samt `realpath`-Ziel abgedeckt, keine neuen write/exec, Redeploy über Dict-Vergleich). P2: CHANGELOG
+  nannte „beides“ für drei Dinge und ließ WAN-Zähler-Fallback, Portnummern und DDNS-Status aus →
+  korrigiert. P3: `import fnmatch` nach oben, Negativliste um das `phy80211`-Symlink-Ziel ergänzt und
+  `/tmp/dhcp.leases` entfernt (vorbestehende, bewusst nicht gewährte Datei, luci-rpc-Fallback),
+  Migrationstest v7-Datei → Redeploy mit rpcd-Neustart, Versionsangabe präzisiert (2026.10.04
+  bestätigt), Nicht-Ziel „ACL v8“ im Plan aufgehoben. Offen (P3, vorbestehend): `list` auf
+  `/var/run/ddns` wird nirgends genutzt.

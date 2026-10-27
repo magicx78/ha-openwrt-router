@@ -35,7 +35,8 @@ ACL_FILE_PATH = "/usr/share/rpcd/acl.d/ha-openwrt-router.json"
 # staleness is detected by comparing the deployed file's actual content to
 # RPCD_ACL_CONTENT, not by this number.
 #
-# v8: rpcd from 2026 on (file.c: realpath() re-check) verifies a file ACL
+# v8: rpcd 2026.10.04 (file.c: realpath() re-check; verified on that build,
+# older 2026 builds not checked, 2025.12.03 unaffected) verifies a file ACL
 # against the requested path AND its resolved target. /proc/net/* resolves to
 # /proc/<pid>/net/*, /sys/class/net/<if>/... to /sys/devices/.../net/<if>/...
 # and /var/run to /tmp/run, so without the resolved patterns every such read
