@@ -3,10 +3,10 @@
 ## Status
 
 - **Stand:** 2026-10-27 · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** `fix/post-1.37-findings` · PR #33 (A) · `fix/acl-v7-cpu-per-core` · PR #34 (B) · `fix/wireless-channel-ssh-fallback` · PR C · Basis: v1.37.4 (`c5a25f9`)
-- **Erledigt:** B1, P1, P2, P6 (PR #33, 1.37.5), P3 (PR #34, 1.38.0), P4 (PR C, 1.38.1) · **Offen:** P5, B2, B3
+- **Branch/PR:** `fix/post-1.37-findings` · PR #33 (A) · `fix/acl-v7-cpu-per-core` · PR #34 (B) · `fix/wireless-channel-ssh-fallback` · PR #35 (C) · `fix/wan-sensors-panel-release` · PR D · Basis: v1.37.4 (`c5a25f9`)
+- **Erledigt:** B1, P1, P2, P6 (PR #33, 1.37.5), P3 (PR #34, 1.38.0), P4 (PR #35, 1.38.1), P5 + B2 (PR D, 1.38.2) · **Offen:** B3
 - **Blocker:** –
-- **Nächster Schritt:** P5 + B2 als PR D (1.38.2), gestapelt auf PR C
+- **Nächster Schritt:** Review von PR D, danach Merge-Freigabe #33 → #34 → #35 → PR D durch den Nutzer; nach Installation ACL-v7-Prüfung auf den Routern
 
 ## Problem und Zielverhalten
 
@@ -95,4 +95,5 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 - 2026-10-27 PR #34 Review (unabhängig): keine P0–P2; P3 behoben (`6d9aa96`: Retry trotz gecachter ACL-Sperre, 5xx kurzfristig, 4-KiB-Hinweis, CHANGELOG), 1216 Tests grün.
 - 2026-10-27 `fix/wireless-channel-ssh-fallback` (PR C) – lokal: 23 neue Tests (13 vor der Änderung rot), nach Merge von #34 grün · Hardware: SSH-Fallback nicht vorhanden (Lücke) · Review: folgt.
 - 2026-10-27 PR #35 Review (unabhängig): keine P0/P1; P2 (Sticky-Behauptung, abgeschaltete Radios im Kanalplan) und P3 (Quoting, keine WLAN-Secrets im Speicher, CHANGELOG-Hinweise) behoben; `option ifname` nur im SSH-Pfad, damit bestehende AP-Sensoren ihre ID behalten; 1263 Tests grün.
+- 2026-10-27 `fix/wan-sensors-panel-release` (PR D) – lokal: 34 neue Tests (20 vor der Änderung rot), `tsc` grün, Bundle neu gebaut; „Kein WAN“-Signal live geprüft (Gateway `wan`, APs `guest`) · Panel nicht visuell im echten HA geprüft (Lücke) · Review: folgt. Befund 9 war größtenteils schon mit 1.37.4 erledigt.
 - 2026-10-27 B1 – drei Config-Entries entfernt; danach 3 Einträge, alle `loaded`. Sicherung vorher: HA-Backup vom selben Tag, 13:46.
