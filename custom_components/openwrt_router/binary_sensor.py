@@ -33,6 +33,7 @@ from .const import (
 )
 from .coordinator import OpenWrtCoordinator
 from .fleet import collect_radios
+from .sensor import router_has_wan
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +49,8 @@ class OpenWrtBinarySensorEntityDescription(BinarySensorEntityDescription):
     )
     # If True the sensor is always available (even when router is down)
     always_available: bool = False
+    # If True the sensor is created disabled on a router without WAN (dumb AP)
+    requires_wan: bool = False
 
 
 BINARY_SENSOR_DESCRIPTIONS: tuple[OpenWrtBinarySensorEntityDescription, ...] = (
@@ -76,6 +79,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[OpenWrtBinarySensorEntityDescription, ...] = (
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
         icon="mdi:web",
         always_available=False,
+        requires_wan=True,
         value_fn=lambda coord: bool(coord.data and coord.data.wan_connected),
         attr_fn=lambda coord: {
             "ip_address": (coord.data.wan_status.get("ipv4", "") if coord.data else ""),
@@ -120,6 +124,10 @@ class OpenWrtBinarySensorEntity(
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
         )
+        # Only read when HA first registers the entity: existing registry
+        # entries keep their enabled state.
+        if description.requires_wan and not router_has_wan(coordinator.data):
+            self._attr_entity_registry_enabled_default = False
 
     @property
     def available(self) -> bool:

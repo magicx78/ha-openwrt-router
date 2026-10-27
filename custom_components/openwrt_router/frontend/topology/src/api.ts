@@ -30,7 +30,7 @@ import type {
   ConfidenceLevel,
   WanTraffic,
 } from './types';
-import { clientDisplayName, isLocallyAdministered } from './utils/clientName';
+import { clientDisplayName, clientVendor } from './utils/clientName';
 
 // ── Raw snapshot types ───────────────────────────────────────────────────
 
@@ -330,7 +330,7 @@ const OUI_TABLE: Record<string, string> = {
   'a4cf12': 'Espressif', 'a8032a': 'Espressif', 'ac67b2': 'Espressif',
   'b0a732': 'Espressif', 'b4e62d': 'Espressif', 'bc971e': 'Espressif',
   'bcddc2': 'Espressif', 'c44f33': 'Espressif', 'c8c9a3': 'Espressif',
-  'ccba97': 'Espressif', 'd24e4f': 'Espressif', 'd8bfc0': 'Espressif',
+  'ccba97': 'Espressif', 'd8bfc0': 'Espressif',
   'e007f4': 'Espressif', 'e89f6d': 'Espressif',
   'ec622c': 'Espressif', 'f0f5bd': 'Espressif', 'f4cfa2': 'Espressif',
   // Shelly
@@ -770,16 +770,17 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
 
     const mac = (attr?.mac as string) ?? '';
     const ip = (attr?.ip as string) ?? '';
-    // Private (randomised) MACs carry no vendor OUI — backend flag first,
-    // the locally-administered bit for snapshots without it.
-    const randomMac = typeof attr?.random_mac === 'boolean'
-      ? attr.random_mac
-      : isLocallyAdministered(mac);
     // Manufacturer: the HA device registry, then the server-side OUI vendor,
-    // then the local OUI table (never for a private MAC).
-    const serverVendor = (attr?.vendor as string | null | undefined) || undefined;
-    const haManufacturer = (attr?.ha_manufacturer as string | undefined) || undefined;
-    const vendor = haManufacturer ?? serverVendor ?? (randomMac ? undefined : lookupManufacturer(mac));
+    // then the local OUI table. Private (randomised) MACs get no OUI vendor
+    // from either table — backend flag first, the locally-administered bit
+    // for snapshots without it.
+    const { randomMac, manufacturer: vendor, vendor: serverVendor } = clientVendor({
+      mac,
+      randomMac: typeof attr?.random_mac === 'boolean' ? attr.random_mac : undefined,
+      haManufacturer: (attr?.ha_manufacturer as string | undefined) || undefined,
+      serverVendor: (attr?.vendor as string | null | undefined) || undefined,
+      localVendor: lookupManufacturer(mac),
+    });
     const haName = (attr?.ha_name as string | undefined) || undefined;
     const haNameSource = attr?.ha_name_source === 'user' || attr?.ha_name_source === 'device'
       ? attr.ha_name_source

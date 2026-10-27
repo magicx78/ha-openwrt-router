@@ -1,9 +1,59 @@
 # PROGRESS — OpenWrt HA Integration
 
-Entwicklungsprotokoll · Letzte Session: 2026-09-09 · Aktuell: **v1.28.0**
+Entwicklungsprotokoll · Letzte Session: 2026-10-27 · Aktuell: **v1.38.2**
 
 > Detaillierte Session-Protokolle bis v1.13.0 liegen in der Git-Historie dieser Datei;
 > vollständige Release-Details in [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## Status: v1.38.2 — Fehlerkorrektur nach 1.37 (2026-10-27)
+
+v1.37.4 lief ab dem 27.10. in HA (Gateway + zwei Dumb-APs). Die Prüfung zeigte
+Log-Lärm, eine HA-Deprecation mit Ablaufdatum, falsch skalierte CPU-Werte und
+kleinere Fehler. Plan, Befunde und Prüfprotokoll:
+[docs/plans/2026-10-27-fehlerkorrektur-nach-1.37.md](docs/plans/2026-10-27-fehlerkorrektur-nach-1.37.md).
+Umgesetzt als gestapelte PRs, jeder Merge ein Release:
+
+- **v1.37.5 (PR #33):** Root-rpcd-Warnung einmal je Router und erst nach
+  erfolgreichem Login; „network.reload not available“ nach erfolgreichem
+  Commit nur noch im Debug-Log; `device_registry.async_get_device` ersetzt
+  (Ende in HA 2027.8, Rückfall bis zum Floor 2026.2); Band-Helfer in
+  `wifi_band.py`.
+- **v1.38.0 (PR #34):** CPU-Last pro Kern (Kernzahl aus `/proc/cpuinfo`),
+  Poll-Drosselung pro Kern; **rpcd-ACL v7** (`/proc/cpuinfo`, `network reload`),
+  dadurch wendet „WLAN neu laden“ wirklich etwas an.
+- **v1.38.1 (PR C):** Kanal, `htmode` und `hwmode` aus dem `config`-Block von
+  `network.wireless status`; SSH-Fallback füllt die AP-Interfaces (Kanalplan,
+  Sticky-Prüfung); `uci show` mit anonymen Sektionen und `'\''` in SSIDs.
+- **v1.38.2 (PR D):** WAN-Sensoren (Status, IP, Download, Upload,
+  Binärsensor WAN-Verbindung) werden auf Routern ohne WAN-Interface
+  deaktiviert angelegt – nur neue Entities, kein Registry-Eingriff
+  (Entscheidung E3). Das Panel verwirft für private MACs auch den
+  OUI-Hersteller des Servers; die OUI-Tabelle des Panels ist wieder
+  synchron zu `oui.py`. Der Release-Workflow übernimmt den CHANGELOG-Abschnitt
+  als Release-Text.
+- **Betrieb:** Drei Config-Entries ohne erreichbaren Router entfernt
+  (Hauptquelle der Retry-Warnungen).
+
+Offen: Auswertung der rpcd-Speichermessung mit ACL v6 (B3), Hardware-Prüfung
+von ACL v7 und Kanal-Fix, Panel-Sichtprüfung, Befunde 13 und 14 (siehe
+[TODO.md](TODO.md)). Lokal 1273 Tests grün, ruff 0.17.3 sauber.
+
+---
+
+## Status: v1.29–v1.37 — WLAN-Diagnose (2026-10-27)
+
+Restprogramm aus dem Plan
+[docs/plans/2026-10-27-wlan-diagnose-features.md](docs/plans/2026-10-27-wlan-diagnose-features.md):
+Ausfälle als Repairs (gleichzeitige gebündelt), Optionsschalter für die
+erweiterten WLAN-Sensoren, RAM-Druck-Hinweis, Kanalplan mit Konflikt-Repair,
+Router-Log-Auswertung (ACL v6) mit WLAN-/DHCP-/DFS-Events, DHCP-Pool-Sensoren
+und `dhcp_status`, klebende und instabile WLAN-Clients, `random_mac`.
+Nebenbei gefunden und behoben: rpcd-Leck durch `rc/list` (v1.37.1, ca. 6 MB
+pro Tag), Bandgrenzen 6 GHz/60 GHz und Banderkennung über UCI `band`
+(v1.37.2/3), Panel-Footer, WAN-Rate in Bit/s und HA-Gerätenamen im Panel
+(v1.37.4).
 
 ---
 
@@ -96,7 +146,10 @@ Nicht betroffen (verifiziert): Device-Tracker-Deprecations 2026.6
 
 | Version | Zeitraum | Inhalt |
 |---------|----------|--------|
-| **v1.28.0** | 2026-09 | LLDP-Topologie (Router-zu-Router + Ports), reicheres Client-Modell |
+| **v1.38.x** | 2026-10 | CPU-Last pro Kern + ACL v7, Kanal aus dem `config`-Block, AP-Interfaces im SSH-Fallback, WAN-Sensoren auf APs standardmäßig aus, Release-Texte aus CHANGELOG |
+| **v1.37.x** | 2026-10 | `random_mac`, rpcd-`rc/list`-Leck umgangen, Banderkennung, Panel-Fixes, Log-Hygiene, Device-Registry-Deprecation |
+| **v1.29–v1.36** | 2026-10 | Repairs (Ausfall, RAM, Kanalkonflikt), Kanalplan, Router-Log + ACL v6, DFS-Events, DHCP-Pools, Client-Stabilität |
+| **v1.28.x** | 2026-09/10 | LLDP-Topologie (Router-zu-Router + Ports), reicheres Client-Modell |
 | **v1.27.0** | 2026-09 | Reboot-Button pro Router (ubus mit SSH-Fallback) |
 | **v1.26.x** | 2026-08 | Log-Hygiene Multi-Router, ScannerEntity-Dedup, ACL v5, SSL-Kontext |
 | **v1.20.0** | 2026-07 | HA-Kompatibilität 2026.8, de.json, CI-Modernisierung |
@@ -116,8 +169,11 @@ Nicht betroffen (verifiziert): Device-Tracker-Deprecations 2026.6
 - `api.py` — alle HTTP/SSH-Calls (ubus JSON-RPC, `_safe_subprocess_exec` für SSH-Fallback)
   · LLDP via `lldpcli` über `_run_ssh` (kippt bewusst **nicht** den Degraded-Status),
   zeitbasiert gecacht (`LLDP_REFRESH_INTERVAL` / `LLDP_UNAVAILABLE_RETRY_INTERVAL`)
-- `coordinator.py` — 60s-Poll (adaptiv: 120s bei CPU >100%, 300s bei SSH-Fallback),
-  Event-/DSL-/CPU-History, Feature-Detection beim ersten Refresh
+- `coordinator.py` — 60s-Poll (adaptiv: 120s bei CPU-Last >100 % pro Kern, 300s bei
+  SSH-Fallback), Event-/CPU-History, Feature-Detection beim ersten Refresh
+- `acl_provisioning.py` — rpcd-ACL **v7** per SSH (`scripts/ha-openwrt-router.json`
+  ist die Vorlage); ein Versionssprung schreibt die ACL neu und startet rpcd
+  einmal pro Router neu
 - `topology_mesh.py` / `topology_panel.py` — Multi-Router-Aggregation + Sidebar-Panel
   · Kanten-Prioritaet: Method 0 LLDP → DHCP → ARP/Trunk → WiFi → Subnet-Fallback,
   danach Repeater-Override und Switch-Inferenz
@@ -131,6 +187,9 @@ Nicht betroffen (verifiziert): Device-Tracker-Deprecations 2026.6
 | `signal=null` für manche Clients | `iw station dump` bracket-format | Signal-Wert fehlt, kein Fehler |
 | Ghost-Mode akkumuliert nicht über Restarts | keine Persistenz | frisch gestartete Instanz zeigt keine Ghost-Devices |
 | Panel-Static-Path bleibt bis HA-Restart gebunden | aiohttp-Router ist append-only | toter Endpoint nach letztem Unload (View antwortet 410) |
+| WAN-Sensoren bestehender AP-Einträge bleiben aktiv | `enabled_default` wirkt nur bei neuen Entities, kein Registry-Eingriff (E3) | auf alten Dumb-AP-Einträgen weiter `unknown`, bei Bedarf manuell deaktivieren |
+| Gateway mit WAN unter fremdem Namen (z. B. `lte`) | WAN-Erkennung über `WAN_INTERFACE_NAMES` | WAN-Sensoren neu angelegt deaktiviert, zeigen das erste aktive Interface |
+| SSH-Fallback-Pfade nur mit Testdaten geprüft | keine SSH-Fallback-Hardware im Testnetz | Abweichungen echter `uci show`-Ausgaben möglich |
 
 ---
 

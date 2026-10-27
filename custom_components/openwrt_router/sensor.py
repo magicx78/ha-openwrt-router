@@ -86,6 +86,7 @@ from .const import (
     SUFFIX_WAN_RX,
     SUFFIX_WAN_STATUS,
     SUFFIX_WAN_TX,
+    WAN_INTERFACE_NAMES,
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
@@ -93,6 +94,25 @@ from .fleet import collect_radios, radios_of
 from .topology_entities import setup_topology_entities
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def router_has_wan(data: OpenWrtCoordinatorData | None) -> bool:
+    """Return False only when the router is known to have no WAN interface.
+
+    ``get_wan_status`` takes the first interface named like a WAN
+    (``WAN_INTERFACE_NAMES``) from ``network.interface dump`` and otherwise
+    falls back to the first interface that is up (``lan``, ``guest``, … on a
+    dumb AP). A non-WAN name therefore means "no WAN". A WAN that is down is
+    still listed and counts. No name (no data yet, SSH fallback, empty dump)
+    is unknown and counts as WAN, so a failed read never hides the WAN
+    sensors of a gateway.
+    """
+    if data is None:
+        return True
+    name = str((data.wan_status or {}).get("interface") or "").lower()
+    if not name:
+        return True
+    return name.startswith(WAN_INTERFACE_NAMES)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -104,10 +124,13 @@ class OpenWrtSensorEntityDescription(SensorEntityDescription):
                   the sensor state value.
         extra_attrs_fn: Optional callable returning a dict of extra state
                         attributes.
+        requires_wan: Meaningless without a WAN; created disabled on a
+                      router without one (dumb AP), see router_has_wan().
     """
 
     value_fn: Callable[[OpenWrtCoordinatorData], Any]
     extra_attrs_fn: Callable[[OpenWrtCoordinatorData], dict[str, Any]] | None = None
+    requires_wan: bool = False
 
 
 SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
@@ -125,6 +148,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         key=SUFFIX_WAN_STATUS,
         translation_key="wan_status",
         icon="mdi:wan",
+        requires_wan=True,
         value_fn=lambda data: "connected" if data.wan_connected else "disconnected",
         extra_attrs_fn=lambda data: {
             "interface": data.wan_status.get("interface", ""),
@@ -218,6 +242,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         key=SUFFIX_WAN_IP,
         translation_key="wan_ip",
         icon="mdi:ip-network",
+        requires_wan=True,
         value_fn=lambda data: data.wan_status.get("ipv4") or None,
     ),
     OpenWrtSensorEntityDescription(
@@ -227,6 +252,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfInformation.BYTES,
         icon="mdi:download-network",
+        requires_wan=True,
         value_fn=lambda data: data.wan_status.get("rx_bytes") or None,
     ),
     OpenWrtSensorEntityDescription(
@@ -236,6 +262,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfInformation.BYTES,
         icon="mdi:upload-network",
+        requires_wan=True,
         value_fn=lambda data: data.wan_status.get("tx_bytes") or None,
     ),
     OpenWrtSensorEntityDescription(
@@ -622,6 +649,10 @@ class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._entry = entry
+        # Only read when HA first registers the entity: existing registry
+        # entries keep their enabled state.
+        if description.requires_wan and not router_has_wan(coordinator.data):
+            self._attr_entity_registry_enabled_default = False
 
     @property
     def device_info(self) -> DeviceInfo:

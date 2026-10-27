@@ -10,6 +10,32 @@ export function isLocallyAdministered(mac: string): boolean {
   return Number.isFinite(first) && (first & 0x02) !== 0;
 }
 
+export interface ClientVendorInput {
+  mac: string;
+  randomMac?: boolean;      // backend `random_mac`; absent → locally administered bit
+  haManufacturer?: string;  // HA device registry (reported by the device itself)
+  serverVendor?: string;    // server-side OUI vendor
+  localVendor?: string;     // the panel's own OUI table
+}
+
+export interface ClientVendor {
+  randomMac: boolean;
+  manufacturer?: string;    // shown in every view
+  vendor?: string;          // server-side OUI vendor, fallback in the detail panel
+}
+
+/**
+ * Manufacturer of a client: HA device registry → server OUI → local OUI.
+ * A private (randomised) MAC carries no OUI, so it never gets an OUI
+ * vendor; a manufacturer from the HA device registry stays.
+ */
+export function clientVendor(c: ClientVendorInput): ClientVendor {
+  const randomMac = c.randomMac ?? isLocallyAdministered(c.mac);
+  const vendor = randomMac ? undefined : c.serverVendor;
+  const oui = randomMac ? undefined : (c.serverVendor ?? c.localVendor);
+  return { randomMac, manufacturer: c.haManufacturer ?? oui, vendor };
+}
+
 /** Last two octets of a MAC for short labels: "…8d:9f". */
 export function macTail(mac: string): string {
   const hex = mac.replace(/[^0-9a-f]/gi, '').toLowerCase();

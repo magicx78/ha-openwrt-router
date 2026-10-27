@@ -1,10 +1,37 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-10-27 · Version: v1.29.0
+Stand: 2026-10-27 · Version: v1.38.2
 
 ---
 
 ## Backlog
+
+### Fehlerkorrektur nach 1.37 (Plan `docs/plans/2026-10-27-fehlerkorrektur-nach-1.37.md`)
+
+- [x] P1/P2/P6 (v1.37.5), P3 + ACL v7 (v1.38.0), P4 (v1.38.1), P5 + B2 (v1.38.2),
+      B1 (drei Config-Entries ohne Router entfernt).
+- [ ] **B3: rpcd-Speichermessung mit ACL v6 auswerten** und ins Prüfprotokoll
+      des Plans eintragen.
+- [ ] **Hardware-Prüfung nach dem Update** (lesend): ACL v7 auf Gateway und APs
+      verteilt, CPU-Sensor gegen `cat /proc/loadavg` + `nproc`, „WLAN neu laden“
+      wendet an, Kanal aus dem `config`-Block, HA-Log nach Neustart ohne
+      Root-Warnungs-Serie, ohne „network.reload“-Warnung und ohne
+      `device_registry`-Deprecation.
+- [ ] **Panel-Sichtprüfung** in HA: Clients mit privater MAC ohne Hersteller
+      (Liste, Name „Privat-MAC …“, Detailansicht).
+- [ ] **Release v1.38.2 prüfen:** Release-Text = CHANGELOG-Abschnitt, und ob
+      HACS ihn im Update-Dialog zeigt (in der HACS-Doku nicht beschrieben).
+- [ ] **WAN-Entities auf `ap2`/`ap4`** stehen weiter auf `unknown` (E3: kein
+      Registry-Eingriff, `enabled_default` wirkt nur bei neuen Entities) –
+      bei Bedarf in HA von Hand deaktivieren.
+- [ ] **Befund 13:** wiederhergestellte `device_tracker.secureap_ap3_*`
+      (`unavailable`, `restored: true`) – Ursache klären, Registry-Eingriff
+      nur mit OK.
+- [ ] **Befund 14:** `uci_section` im Pfad `network.wireless status` (netifd
+      liefert `section` neben `ifname`). Ein Fix ändert die `unique_id` der
+      WLAN-Schalter betroffener Router – braucht eine eigene Entscheidung.
+- [ ] **GitHub-Repo-Beschreibung** ohne Versionsnummer (HACS zeigt „v1.4.0“) –
+      nur mit OK.
 
 ### HA-Modernisierung (Folgearbeiten aus dem Kompatibilitäts-Review 2026-07)
 
@@ -43,9 +70,10 @@ Stand: 2026-10-27 · Version: v1.29.0
 ### LLDP-Nachlese (aus dem Merge-Review von PR #14, 2026-09-09)
 
 - [ ] **OUI-Tabelle existiert doppelt** — `custom_components/openwrt_router/oui.py`
-      (~669 Einträge) ist eine Handkopie von `OUI_TABLE` in
+      (~667 Einträge) ist eine Handkopie von `OUI_TABLE` in
       `frontend/topology/src/api.ts`. Eine Quelle festlegen und die andere
-      generieren, sonst driften die beiden auseinander.
+      generieren, sonst driften die beiden auseinander. Ist schon passiert:
+      `d2:4e:4f` fehlte ab v1.37.0 nur in `oui.py`, das Panel zog in v1.38.2 nach.
 - [ ] **Ungenutzte LLDP-Konstanten** in `const.py` aufräumen:
       `LLDP_CLI_CHECK_CMD`, `LLDP_INIT_ENABLED_CMD`, `CAP_LLDP_NEIGHBORS`
       (dupliziert als String-Literal in `config_flow._LLDP_CAP`), dazu
@@ -54,9 +82,8 @@ Stand: 2026-10-27 · Version: v1.29.0
       sondern auch SSH-Zugang. Auf einem Router mit sauberer ACL v5 **ohne**
       Dropbear-Login bleibt LLDP dauerhaft `unavailable`, der Hinweistext nennt
       aber nur die lldpd-Installation.
-- [ ] **`ruff` in der CI pinnen** — `pip install ruff` ist unpinned; der Sprung
-      auf 0.16 hat I001/PERF102 in den Default-Regelsatz geholt und die Pipeline
-      ohne Codeaenderung rot gemacht.
+- [x] **`ruff` in der CI pinnen** — `tests.yaml` und `release.yaml` installieren
+      `ruff==0.17.3`.
 
 ### Topology Frontend (Wunschliste, unverändert offen)
 
@@ -74,6 +101,16 @@ Stand: 2026-10-27 · Version: v1.29.0
 
 ## Erledigt (Auszug — Details in CHANGELOG.md)
 
+- [x] v1.38.x — CPU-Last pro Kern + rpcd-ACL v7, Kanal aus dem `config`-Block,
+      AP-Interfaces im SSH-Fallback, WAN-Sensoren auf Routern ohne WAN
+      standardmäßig aus, Panel ohne OUI-Hersteller bei privaten MACs,
+      Release-Texte aus CHANGELOG.md
+- [x] v1.37.x — `random_mac`, rpcd-`rc/list`-Leck umgangen, Banderkennung
+      (UCI `band`, 6/60 GHz), Panel-Footer/WAN-Rate/HA-Namen, Log-Hygiene,
+      `async_get_device`-Deprecation
+- [x] v1.29–v1.36 — Repairs (Ausfall, RAM-Druck, Kanalkonflikt), Schalter
+      erweiterte WLAN-Sensoren, Kanalplan, Router-Log + ACL v6, DFS-Events,
+      DHCP-Pools, klebende/instabile Clients
 - [x] v1.20.0 — HA-Kompatibilitäts-Review: `config_entry=` an DataUpdateCoordinator
       (HA-2026.8-Deadline), toter `register_static_path`-Fallback entfernt,
       `integration_type: hub`, HA-Floor 2026.2.0, deutsche Übersetzung (de.json),
