@@ -2,6 +2,39 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.1] - 2026-10-27
+
+### Fixed
+
+- **Kanal der WLAN-Radios war leer.** `network.wireless status` liefert den
+  Kanal nur im `config`-Block des Radios (als Text, z. B. `"36"`), nicht auf
+  oberster Ebene. Die Integration las die oberste Ebene und bekam immer
+  nichts. Jetzt kommt der Kanal aus dem `config`-Block und ist eine Zahl wie
+  bei iwinfo und UCI; `auto` und fehlende Werte bleiben leer. Damit ist das
+  Attribut `channel` der Radios gefüllt (Diagnose, Topologie und Panel, wenn
+  iwinfo keinen Wert hat). Aus demselben Block kommen jetzt auch `htmode`
+  (bisher immer leer) und das ältere `hwmode`.
+- **Router im SSH-Fallback fehlten in Kanalplan und Sticky-Prüfung.** Ohne
+  iwinfo über rpcd blieb die Liste der AP-Interfaces leer, sobald die
+  Integration das WLAN per SSH (`uci show wireless`) las. Jetzt baut sie die
+  AP-Interfaces aus dieser Ausgabe, genauso wie bei Routern, deren WLAN sie
+  über UCI liest (Kanal, Band, htmode und Radio je SSID). Diese Router
+  erscheinen damit im Kanalplan und zählen bei der Sticky-Prüfung anderer
+  Router als Alternative. Außerdem bekommen sie die AP-Sensoren je SSID
+  („Channel“, „Mode“, „HT Mode“, „HW Mode“, „AP Clients“), wie überall
+  standardmäßig deaktiviert, solange die erweiterten WLAN-Sensoren aus sind.
+  Es gibt keine zusätzliche SSH-Verbindung, die Ausgabe der laufenden
+  Abfrage wird wiederverwendet.
+- **SSIDs mit Apostroph und anonyme UCI-Sektionen im SSH-Fallback.** Eine
+  SSID wie `Peter's WLAN` wurde nach `Peter` abgeschnitten (`uci show`
+  schreibt sie als `'Peter'\''s WLAN'`). WLANs in anonymen Sektionen
+  (`wireless.@wifi-iface[0]`, z. B. nach manchen Erstinstallationen) wurden
+  gar nicht erkannt. Beides wird jetzt richtig gelesen; anonyme Sektionen
+  heißen wie in `uci show`, also `@wifi-iface[0]`. Hinweis: Diese Namen
+  hängen von der Reihenfolge in `/etc/config/wireless` ab. Wer dort eine
+  anonyme Sektion davor einfügt oder löscht, verschiebt die Zuordnung der
+  Entities.
+
 ## [1.38.0] - 2026-10-27
 
 ### Changed

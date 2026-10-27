@@ -383,6 +383,72 @@ def _parse_uci_config(raw: str) -> dict[str, dict[str, Any]]:
     return sections
 
 
+# One line of `uci show <config>`: "<config>.<section>=<type>" or
+# "<config>.<section>.<option>=<value>". uci prints anonymous sections in its
+# extended syntax, "@<type>[<index>]" (e.g. @wifi-iface[0]).
+_UCI_SHOW_LINE_RE = re.compile(
+    r"^(?P<config>\w+)\.(?P<section>@[\w-]+\[-?\d+\]|[\w-]+)"
+    r"(?:\.(?P<option>\w+))?=(?P<value>.*)$"
+)
+
+
+def _uci_show_value(raw: str) -> str | list[str]:
+    """Unquote one value as printed by `uci show`.
+
+    uci wraps values in single quotes and writes a ' inside a value as '\\''
+    (close, escaped quote, reopen), i.e. POSIX shell quoting, which shlex
+    undoes. A list option prints one quoted word per item and is returned as
+    a list.
+    """
+    try:
+        words = shlex.split(raw)
+    except ValueError:
+        # Unbalanced quote, e.g. a value continued on the next line
+        return raw.strip("'")
+    if not words:
+        return ""
+    return words[0] if len(words) == 1 else words
+
+
+def _parse_uci_show(text: str, config: str) -> dict[str, dict[str, Any]]:
+    """Parse `uci show <config>` output into the shape of ubus ``uci get``.
+
+    Returns ``{section: {".type": type, ".index": n, option: value}}``.
+    Anonymous sections keep uci's extended name (``@wifi-iface[0]``) as key;
+    `uci set` accepts that name as well. ``.index`` is the position of the
+    section in the output. Lines of other configs and other output are skipped.
+    """
+    sections: dict[str, dict[str, Any]] = {}
+    for line in text.splitlines():
+        match = _UCI_SHOW_LINE_RE.match(line)
+        if match is None or match.group("config") != config:
+            continue
+        section = sections.setdefault(match.group("section"), {".index": len(sections)})
+        value = _uci_show_value(match.group("value"))
+        option = match.group("option")
+        if option is None:
+            section[".type"] = value
+        else:
+            section[option] = value
+    return sections
+
+
+def _channel_number(value: Any) -> int | None:
+    """Return a Wi-Fi channel as int; None for "auto", 0, empty or missing.
+
+    UCI and netifd's ``network.wireless status`` report the channel as a
+    string ("36"), iwinfo as int; consumers (channel plan, panel) expect int.
+    Channel 0 is hostapd's automatic channel selection.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not (text.isascii() and text.isdigit()):
+        return None
+    channel = int(text)
+    return channel if channel > 0 else None
+
+
 def _parse_port_speed(raw: Any) -> tuple[int | None, str | None]:
     """Parse OpenWrt port speed string into (Mbps, duplex).
 
@@ -744,10 +810,15 @@ class OpenWrtAPI:
         self._token: str = DEFAULT_SESSION_ID
         self._token_expires_at: float = 0.0
 
-        # Cached WiFi API method: None=unknown, "wireless", "iwinfo", "none"
-        # Set on first get_wifi_status() call and reused to avoid retrying
-        # known-unavailable APIs on every poll cycle.
+        # Cached WiFi API method: None=unknown, "wireless", "iwinfo", "uci",
+        # "ssh", "none". Set on first get_wifi_status() call and reused to
+        # avoid retrying known-unavailable APIs on every poll cycle.
         self._wifi_method: str | None = None
+
+        # Parsed `uci show wireless` of the last SSH Wi-Fi fallback (same shape
+        # as ubus "uci get"). get_ap_interface_details() reuses it within the
+        # poll instead of opening another SSH connection. None = no SSH data.
+        self._ssh_uci_wireless: dict[str, dict[str, Any]] | None = None
 
         # Cached hostapd interface names (e.g. ["phy0-ap0"]).
         # Populated on first get_connected_clients() call via discovery.
@@ -884,6 +955,7 @@ class OpenWrtAPI:
         self._token = DEFAULT_SESSION_ID
         self._token_expires_at = 0.0
         self._wifi_method = None
+        self._ssh_uci_wireless = None
         self._hostapd_ifaces = None
         self._luci_rpc_ssid_map = None
         _LOGGER.debug(
@@ -1633,7 +1705,8 @@ class OpenWrtAPI:
         """Return per-interface AP details.
 
         Primary path: iwinfo/info per-device (routers with iwinfo via rpcd).
-        Fallback: UCI wireless config (routers without iwinfo, e.g. Cudy WR3000).
+        Fallback: UCI wireless config (routers without iwinfo, e.g. Cudy WR3000),
+        over ubus or from the SSH fallback's `uci show wireless`.
 
         Called after get_connected_clients() so that self._hostapd_ifaces is
         already populated.  Each entry mirrors the RADIO_KEY_* schema so that
@@ -1692,8 +1765,10 @@ class OpenWrtAPI:
         if result:
             return result
 
-        # Fallback: UCI wireless config for routers without iwinfo via rpcd.
-        # Uses UCI section name (e.g. "default_radio0") as stable RADIO_KEY_IFNAME.
+        # Fallback: UCI wireless config for routers without iwinfo via rpcd,
+        # read over ubus ("uci" method) or, on the SSH fallback, the
+        # `uci show wireless` that get_wifi_status() already fetched in this
+        # poll, so no extra SSH round-trip.
         if self._wifi_method == "uci":
             try:
                 values = await self.get_uci_wireless()
@@ -1702,64 +1777,72 @@ class OpenWrtAPI:
                     "UCI wireless config unavailable for AP interface details"
                 )
                 return []
+        elif self._wifi_method == "ssh" and self._ssh_uci_wireless:
+            values = self._ssh_uci_wireless
+        else:
+            return result
 
-            devices: dict[str, dict[str, Any]] = {}
-            ifaces: list[tuple[int, str, dict[str, Any]]] = []
-            for section_name, section_data in values.items():
-                if not isinstance(section_data, dict):
-                    continue
-                if section_data.get(".type") == "wifi-device":
-                    devices[section_name] = section_data
-                elif section_data.get(".type") == "wifi-iface":
-                    ifaces.append(
-                        (section_data.get(".index", 0), section_name, section_data)
-                    )
+        return self._ap_interfaces_from_uci(values)
 
-            for _index, section_name, section_data in sorted(
-                ifaces, key=lambda t: t[0]
-            ):
-                device_name: str = section_data.get("device", "")
-                device_data = devices.get(device_name, {})
-                ssid_uci: str = section_data.get("ssid", "")
-                mode_uci: str = section_data.get("mode", "ap")
-                channel_str = device_data.get("channel")
-                channel_val: int | None = (
-                    int(channel_str)
-                    if channel_str and str(channel_str).isdigit()
-                    else None
+    def _ap_interfaces_from_uci(self, values: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build AP interface entries from a UCI wireless config.
+
+        ``values`` has the shape of ubus ``uci get`` (also produced by
+        :func:`_parse_uci_show`). The UCI section name (e.g. "default_radio0"
+        or "@wifi-iface[0]") is the stable RADIO_KEY_IFNAME, as in
+        wifi_radios of the UCI and SSH paths; the wifi-device name is the phy.
+        """
+        result: list[dict[str, Any]] = []
+        devices: dict[str, dict[str, Any]] = {}
+        ifaces: list[tuple[int, str, dict[str, Any]]] = []
+        for section_name, section_data in values.items():
+            if not isinstance(section_data, dict):
+                continue
+            if section_data.get(".type") == "wifi-device":
+                devices[section_name] = section_data
+            elif section_data.get(".type") == "wifi-iface":
+                ifaces.append(
+                    (section_data.get(".index", 0), section_name, section_data)
                 )
-                band_uci = self._detect_band(device_name, device_data)
-                result.append(
-                    {
-                        RADIO_KEY_IFNAME: section_name,
-                        RADIO_KEY_SSID: ssid_uci,
-                        RADIO_KEY_BAND: band_uci,
-                        RADIO_KEY_IS_GUEST: self._is_guest_ssid(ssid_uci),
-                        RADIO_KEY_MODE: mode_uci,
-                        RADIO_KEY_BSSID: None,
-                        RADIO_KEY_CHANNEL: channel_val,
-                        RADIO_KEY_FREQUENCY: None,
-                        RADIO_KEY_TXPOWER: None,
-                        RADIO_KEY_BITRATE: None,
-                        RADIO_KEY_HWMODE: device_data.get("hwmode")
-                        or device_data.get("type"),
-                        RADIO_KEY_HTMODE: device_data.get("htmode"),
-                        RADIO_KEY_PHY: device_name or None,
-                        RADIO_KEY_CENTER_CHAN1: None,
-                        "signal": None,
-                        "noise": None,
-                        "quality": None,
-                        "quality_max": None,
-                    }
-                )
-                _LOGGER.debug(
-                    "AP UCI interface %s: mode=%s ch=%s htmode=%s band=%s",
-                    section_name,
-                    mode_uci,
-                    channel_val,
-                    device_data.get("htmode"),
-                    band_uci,
-                )
+
+        for _index, section_name, section_data in sorted(ifaces, key=lambda t: t[0]):
+            device_name: str = section_data.get("device", "")
+            device_data = devices.get(device_name, {})
+            ssid_uci: str = section_data.get("ssid", "")
+            mode_uci: str = section_data.get("mode", "ap")
+            channel_val = _channel_number(device_data.get("channel"))
+            band_uci = self._detect_band(device_name, device_data)
+            result.append(
+                {
+                    RADIO_KEY_IFNAME: section_name,
+                    RADIO_KEY_SSID: ssid_uci,
+                    RADIO_KEY_BAND: band_uci,
+                    RADIO_KEY_IS_GUEST: self._is_guest_ssid(ssid_uci),
+                    RADIO_KEY_MODE: mode_uci,
+                    RADIO_KEY_BSSID: None,
+                    RADIO_KEY_CHANNEL: channel_val,
+                    RADIO_KEY_FREQUENCY: None,
+                    RADIO_KEY_TXPOWER: None,
+                    RADIO_KEY_BITRATE: None,
+                    RADIO_KEY_HWMODE: device_data.get("hwmode")
+                    or device_data.get("type"),
+                    RADIO_KEY_HTMODE: device_data.get("htmode"),
+                    RADIO_KEY_PHY: device_name or None,
+                    RADIO_KEY_CENTER_CHAN1: None,
+                    "signal": None,
+                    "noise": None,
+                    "quality": None,
+                    "quality_max": None,
+                }
+            )
+            _LOGGER.debug(
+                "AP UCI interface %s: mode=%s ch=%s htmode=%s band=%s",
+                section_name,
+                mode_uci,
+                channel_val,
+                device_data.get("htmode"),
+                band_uci,
+            )
 
         return result
 
@@ -2841,6 +2924,9 @@ class OpenWrtAPI:
         """Get WiFi status via direct UCI commands over SSH.
 
         Uses `uci show wireless` — no helper script required on the router.
+        The parsed config is kept in ``_ssh_uci_wireless`` so that
+        get_ap_interface_details() can build the AP interfaces of this poll
+        without another SSH connection.
 
         Returns:
             List of radio dicts compatible with get_wifi_status() output.
@@ -2849,6 +2935,8 @@ class OpenWrtAPI:
             OpenWrtResponseError: If SSH command fails.
             OpenWrtTimeoutError: If SSH command times out.
         """
+        # Never leave the data of an earlier poll behind a failed one
+        self._ssh_uci_wireless = None
         rc, stdout, stderr = await self._asyncssh_run(
             "uci show wireless", timeout=10.0, binary=False
         )
@@ -2870,16 +2958,13 @@ class OpenWrtAPI:
 
         text = stdout if isinstance(stdout, str) else stdout.decode(errors="replace")
 
-        # Parse UCI output: wireless.<section>.<key>='<value>'
-        uci: dict[str, dict[str, str]] = {}
-        for line in text.splitlines():
-            m = re.match(r"wireless\.(\w+)\.(\w+)='?([^']*)'?", line)
-            if m:
-                section, key, val = m.group(1), m.group(2), m.group(3)
-                uci.setdefault(section, {})[key] = val
+        # wireless.<section>.<key>='<value>', anonymous sections as
+        # wireless.@wifi-iface[0].<key>, a ' in a value written as '\''
+        uci = _parse_uci_show(text, "wireless")
+        self._ssh_uci_wireless = uci
 
         # Group wifi-iface sections by their parent radio device
-        radio_ifaces: dict[str, list[tuple[str, dict[str, str]]]] = {}
+        radio_ifaces: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         for section, attrs in uci.items():
             device = attrs.get("device", "")
             if device and "ssid" in attrs:
@@ -4667,12 +4752,24 @@ class OpenWrtAPI:
 
         The wireless status object is keyed by physical radio name
         (e.g. 'radio0', 'radio1') and contains a list of interfaces.
+        netifd keeps the radio's UCI options (channel as string, htmode, band,
+        legacy hwmode) in the radio's ``config`` block; the top level is only
+        read as a fallback for older formats.
         """
         radios: list[dict[str, Any]] = []
 
         for radio_name, radio_data in status.items():
             if not isinstance(radio_data, dict):
                 continue
+
+            radio_config = radio_data.get("config")
+            if not isinstance(radio_config, dict):
+                radio_config = {}
+            channel = _channel_number(radio_config.get("channel"))
+            if channel is None:
+                channel = _channel_number(radio_data.get("channel"))
+            hwmode = radio_config.get("hwmode") or radio_data.get("hwmode")
+            htmode = radio_config.get("htmode") or radio_data.get("htmode")
 
             interfaces: list[dict[str, Any]] = radio_data.get("interfaces", [])
             for iface in interfaces:
@@ -4691,14 +4788,14 @@ class OpenWrtAPI:
                         RADIO_KEY_ENABLED: not disabled,
                         RADIO_KEY_IS_GUEST: self._is_guest_ssid(ssid),
                         RADIO_KEY_UCI_SECTION: config.get("section", ""),
-                        RADIO_KEY_CHANNEL: radio_data.get("channel"),
+                        RADIO_KEY_CHANNEL: channel,
                         RADIO_KEY_FREQUENCY: radio_data.get("frequency"),
-                        RADIO_KEY_HWMODE: radio_data.get("hwmode"),
+                        RADIO_KEY_HWMODE: hwmode,
                         RADIO_KEY_MODE: "Master",  # wireless/status only shows AP interfaces
                         RADIO_KEY_BSSID: None,
                         RADIO_KEY_TXPOWER: None,
                         RADIO_KEY_BITRATE: None,
-                        RADIO_KEY_HTMODE: None,
+                        RADIO_KEY_HTMODE: htmode,
                     }
                 )
 
