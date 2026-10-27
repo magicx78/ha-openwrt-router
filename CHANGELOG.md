@@ -2,6 +2,27 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.37.2] - 2026-10-27
+
+### Fixed
+
+- **Rohes UCI-Band beim SSH-Fallback.** Lief der WLAN-Status über den
+  SSH-Fallback (`uci show wireless`, wenn weder `network.wireless`, iwinfo
+  noch UCI über rpcd antworten), stand im Band der rohe UCI-Wert (`2g`) bzw.
+  `unknown` ohne `band`-Option. Das Attribut `band` der SSID-Schalter und
+  die Funkmodule im Topologie-Snapshot trugen deshalb `2g` statt `2.4g`
+  (das Panel zeigte trotzdem 2.4 GHz). Das Band wird jetzt wie
+  bei allen anderen Wegen bestimmt: `band`-Option, eindeutiger `hwmode`,
+  Kanalnummer, Name. Funkmodule ohne `band`-Option bekommen dadurch oft ein
+  Band und zeigen es im Namen der SSID-Schalter. `band='60g'` gilt wie
+  überall als unbekannt, der Schaltername endet dann nicht mehr auf
+  „(60 GHz)“. Entity-IDs bleiben gleich.
+- **60 GHz im Kanalplan und bei klebenden Clients als 6 GHz gezählt.**
+  Kanalplan und Client-Stabilität nutzen jetzt dieselbe Frequenzgrenze wie
+  die Banderkennung: Frequenzen über 7125 MHz (802.11ad) zählen nicht als
+  6 GHz. Eine als Text gemeldete Frequenz wird bei klebenden Clients jetzt
+  ebenfalls ausgewertet.
+
 ## [1.37.1] - 2026-10-27
 
 ### Fixed
