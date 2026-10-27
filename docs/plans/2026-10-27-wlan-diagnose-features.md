@@ -14,9 +14,9 @@
   - P4 `feature/dfs-events` · 1.34.0 · PR #26
   - P5 `feature/dhcp-health` · 1.35.0 · PR #27
   - P6 `feature/client-stability` · 1.36.0 · PR #28
-  - P7 `feature/random-mac` · 1.37.0 · PR folgt
+  - P7 `feature/random-mac` · 1.37.0 · PR #29
 - **Erledigt (außerhalb dieses Plans):** Feature 1 (#19), Feature 7 (#20), Feature 10 (#22), rpcd-Leck (#21)
-- **Erledigt:** P1 (F9, PR #23), P2 (F2, PR #24), P3 (F6 + ACL v6, PR #25), P4 (F3, PR #26), P5 (F5, PR #27), P6 (F4, PR #28), P7 (F8 Stufe 1, PR s. u.)
+- **Erledigt:** P1 (F9, PR #23), P2 (F2, PR #24), P3 (F6 + ACL v6, PR #25), P4 (F3, PR #26), P5 (F5, PR #27), P6 (F4, PR #28), P7 (F8 Stufe 1, PR #29) – alle mit unabhängigem Review ohne offene P0/P1
 - **Offen:** – (alle Pakete als PR; Merge in Stapel-Reihenfolge durch den Nutzer)
 - **Blocker:** —
 - **Nächster Schritt:** Nutzer: PRs in Reihenfolge #19 → #20 → #22 → #23 … mergen (jeder Merge erzeugt ein Release) oder über `release/<x.y.z>` bündeln
