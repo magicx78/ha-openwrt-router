@@ -36,9 +36,12 @@ All notable changes to the OpenWrt Router integration will be documented in this
     zwischen zwei Abfragen ändert (`old_channel`/`new_channel`,
     `old_width_mhz`/`new_width_mhz`). Ein Kanalwechsel holt das Router-Log
     sofort, damit die passende DFS-Zeile schon bekannt ist.
-  - `dfs_related` ist nur wahr, wenn eine DFS-Zeile desselben Funkmoduls aus
-    den letzten 15 Minuten vorliegt (`evidence` nennt sie). Ein Kanalwechsel
-    ohne solche Zeile (manuell, ACS) ist `dfs_related: false`.
+  - `dfs_related` ist nur wahr, wenn eine passende DFS-Zeile
+    (`radar_detected`, `new_channel`, `cac_failed`) desselben 5-GHz-Funkmoduls
+    aus den letzten 15 Minuten vorliegt (`evidence` nennt sie). Ein
+    Kanalwechsel ohne solche Zeile (manuell, ACS) ist `dfs_related: false`.
+    `backhaul: true` kennzeichnet Funkmodule mit WLAN-Uplink, die dem Kanal
+    des Partners folgen.
   - Radar-Meldungen haben im Event-Budget Vorrang; die Events stehen im
     Logbuch des Routers.
 - **Diagnosesensor „DFS-Ereignisse (24 h)“** (`dfs_events_24h`): Anzahl
