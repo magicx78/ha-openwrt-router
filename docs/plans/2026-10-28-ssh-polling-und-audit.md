@@ -7,10 +7,10 @@
 ## Status
 
 - **Stand:** 2026-10-27 (abends) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** Teil 1 `fix/ssh-polling` · PR #37 **gemergt** (`5372d12`, Release v1.38.3 am 2026-10-27 20:05) — Teil 2 gestapelt: A1 `fix/auth-errors` · PR #38 (1.38.4) jetzt auf `main`; A2 `fix/hostapd-iface-cache` · PR #39 (1.38.5) auf #38; A11 `fix/topology-lldp-chain` · PR #40 (1.38.6) auf #39; ACL v8 `fix/acl-v8` (Worktree `../ha-openwrt-router-acl-v8`, 1.38.7) auf #40
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1, A2 und A11 inkl. Fixes abgeschlossen · **Offen:** Merges #38 → #39 → #40 laufen (freigegeben), ACL v8 (E7) Review/PR, AK6-Rest (rpcd-RSS-Auswertung, Gateway nach v8); A3–A10, A12–A14
+- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6), alle am 2026-10-27 — **offen:** A16 ACL v8 `fix/acl-v8` · PR #41 (1.38.7) auf `main` (Worktree `../ha-openwrt-router-acl-v8`)
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1, A2 und A11 inkl. Fixes abgeschlossen · **Offen:** PR #41 (ACL v8) Review, Merge-Freigabe, Installation 1.38.7 und AK6 am Gateway; rpcd-RSS-Auswertung; A3–A10, A12–A14
 - **Blocker:** –
-- **Nächster Schritt:** ACL v8 reviewen und als PR stapeln; nach den Merges 1.38.7 installieren und am Gateway AK6 abschließend messen; dann A4 (WAN-Erkennung, E5)
+- **Nächster Schritt:** Review-Befunde zu #41 beheben, CI, Merge-Freigabe durch den Nutzer; danach 1.38.7 installieren, HA neu starten (rpcd-Neustart je Router durch v8), AK6 am Gateway abschließend messen; dann A4 (WAN-Erkennung, E5)
 
 ## Problem und Zielverhalten
 
@@ -487,3 +487,7 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   verweigert, `/proc/cpuinfo`, `nf_conntrack_count`, `/etc/openwrt_release` erlaubt; die Session-ACL
   enthält die Pfade. Ursache: Gateway rpcd 2026.10.04 prüft gegen `realpath()` (rpcd `file.c`), die APs
   mit rpcd 2025.12.03 nicht. → E7/A16 (ACL v8). rpcd-RSS-Messung läuft seit 21:08 (Auswertung folgt).
+- 2026-10-27 Merges nach Freigabe (jeweils nach grüner CI, ausgelöst per leerem Commit nach dem
+  Umhängen auf `main`): #38 `abf9e86` → v1.38.4 (20:51 UTC), #39 `225ab22` → v1.38.5 (20:54 UTC),
+  #40 `85d93b4` → v1.38.6 (20:56 UTC); Release-Workflow jeweils erfolgreich, HACS aufgefrischt.
+  PR #41 (ACL v8) auf `main` umgehängt.
