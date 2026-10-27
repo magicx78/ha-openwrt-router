@@ -2,6 +2,37 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.29.0] - 2026-10-27
+
+### Added
+
+- **Ausfälle als Reparatur-Hinweis, gleichzeitige Ausfälle gebündelt.** Ein
+  Router gilt nach 3 fehlgeschlagenen Abfragen als ausgefallen. Statt einer
+  `persistent_notification` pro Router gibt es jetzt Repairs-Issues:
+  - Sind alle geladenen Router (mindestens zwei) gleichzeitig nicht erreichbar,
+    erscheint **ein** Hinweis „Kein OpenWrt-Router erreichbar“
+    (`lan_unreachable`). Die Ursache liegt dann fast immer zwischen Home
+    Assistant und dem LAN, nicht in den Routern (Beispiel: 20.10., 10:05–10:31,
+    alle Router gleichzeitig weg).
+  - Sonst ein Hinweis pro Router (`router_unreachable_<entry_id>`).
+  - Vor der Einordnung wartet die Integration das längste Poll-Intervall plus
+    30 s ab, damit die versetzt pollenden Router alle melden können. Erholen
+    sich die Router nach einem LAN-Ausfall versetzt, entstehen keine
+    Einzel-Hinweise. Auth-Fehler werden nie gebündelt.
+  - Hinweise verschwinden von selbst, sobald der Router wieder antwortet.
+- **Event `openwrt_router_outage_event`** bei Beginn und Ende eines Ausfalls,
+  mit `scope` (`fleet`/`router`), `state` (`down`/`up`), `entry_ids`,
+  `routers`, `since`, `duration_s` und `error_type`. Für eigene
+  Automationen, z. B. Push-Nachricht nur beim LAN-weiten Ausfall.
+
+### Fixed
+
+- **Die Ausfall-Meldung verschwand nach der Wiederherstellung nie.** Das Flag
+  „Meldung gesendet“ lag auf `coordinator.data`, das jede erfolgreiche Abfrage
+  durch ein neues Objekt ersetzt. Beim Erholen war es daher immer `False`. Der
+  Fehlerzähler liegt jetzt am Coordinator selbst und zählt auch dann, wenn
+  noch keine Daten vorliegen.
+
 ## [1.28.3] - 2026-10-27
 
 ### Fixed

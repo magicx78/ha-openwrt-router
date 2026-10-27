@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from functools import partial
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -43,6 +44,7 @@ from .api import (
 )
 from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN, PROTOCOL_HTTP
 from .coordinator import OpenWrtCoordinator
+from .fleet import async_get_outage_tracker
 from .ssl_util import ssl_context_for_protocol
 
 _LOGGER = logging.getLogger(__name__)
@@ -332,6 +334,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
 
     # Store runtime data on the entry (accessed by platforms via entry.runtime_data)
     entry.runtime_data = OpenWrtRuntimeData(api=api, coordinator=coordinator)
+
+    # Outages are reported fleet-wide so that all routers failing at once
+    # (HA host / LAN problem) raise one Repairs issue instead of N.
+    outage_tracker = async_get_outage_tracker(hass)
+    outage_tracker.register(
+        entry.entry_id, entry.title, lambda: coordinator.update_interval
+    )
+    coordinator.attach_outage_tracker(outage_tracker)
+    entry.async_on_unload(partial(outage_tracker.unregister, entry.entry_id))
 
     # Forward setup to all platforms (sensor, switch, device_tracker, button)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

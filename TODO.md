@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-09-09 · Version: v1.28.0
+Stand: 2026-10-27 · Version: v1.29.0
 
 ---
 
@@ -8,12 +8,12 @@ Stand: 2026-09-09 · Version: v1.28.0
 
 ### HA-Modernisierung (Folgearbeiten aus dem Kompatibilitäts-Review 2026-07)
 
-- [ ] **Repairs statt persistent_notification** — SSH-Fallback- und Outage-Meldungen
-      (coordinator.py, `async_create`/`async_dismiss`-Call-Sites) auf `issue_registry`
-      umstellen: `ir.async_create_issue()` mit `translation_key`; SSH-Fallback als
-      fixable Issue (RepairsFlow → `acl_provisioning.ensure_acl()` erneut ausführen),
-      Outage als non-fixable Issue mit `ir.async_delete_issue()` bei Recovery.
-      Benötigt `issues:`-Sektion in strings.json + en.json + de.json.
+- [x] **Outage als Repairs-Issue** (v1.29.0) — `fleet.FleetOutageTracker` +
+      `issues.py`; gleichzeitige Ausfälle aller Router → ein `lan_unreachable`.
+- [ ] **SSH-Fallback als Repairs-Issue** — die SSH-Fallback-Meldung (coordinator.py,
+      `async_create`) auf `issue_registry` umstellen, als fixable Issue
+      (RepairsFlow → `acl_provisioning.ensure_acl()` erneut ausführen). `issues.py`
+      und die `issues:`-Sektion in strings.json/en.json/de.json gibt es seit v1.29.0.
 - [ ] **Notification-/Event-i18n** — Hardcodierte deutsche Texte im Coordinator
       (SSH-Fallback-Notification, Outage-Notification, Event-Timeline-Meldungen
       „WAN verbunden/getrennt", „CPU-Last erhöht", …) übersetzbar machen.

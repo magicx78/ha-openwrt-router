@@ -143,8 +143,12 @@ ERROR_TYPE_AUTH = "auth"
 ERROR_TYPE_TIMEOUT = "timeout"
 ERROR_TYPE_RESPONSE = "response"
 
-# Persistent notification fires after this many consecutive poll failures
+# A router counts as down (Repairs issue / outage event) after this many
+# consecutive poll failures
 NOTIFICATION_FAILURE_THRESHOLD = 3
+
+# Fired on outage start/end, payload see fleet.FleetOutageTracker
+EVENT_OUTAGE = f"{DOMAIN}_outage_event"
 
 # Entity unique ID suffixes
 SUFFIX_UPTIME = "uptime"

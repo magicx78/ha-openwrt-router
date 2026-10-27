@@ -197,5 +197,15 @@
         "name": "Router neu starten"
       }
     }
+  },
+  "issues": {
+    "lan_unreachable": {
+      "title": "Kein OpenWrt-Router erreichbar",
+      "description": "Alle {count} OpenWrt-Router ({routers}) sind seit {since} von Home Assistant aus nicht erreichbar.\n\nWenn alle Router im selben Moment ausfallen, liegt die Ursache fast immer zwischen Home Assistant und dem LAN (Netzwerk des HA-Hosts, Switch, Verkabelung, VLAN) und nicht in den Routern selbst.\n\nDieser Hinweis verschwindet automatisch, sobald wieder ein Router antwortet."
+    },
+    "router_unreachable": {
+      "title": "OpenWrt-Router {router} nicht erreichbar",
+      "description": "Der Router {router} antwortet seit {since} nicht mehr (Fehlertyp: {error_type}).\n\nPrüfe Stromversorgung, Verkabelung und die Dienste rpcd/uhttpd auf dem Router.\n\nDieser Hinweis verschwindet automatisch, sobald der Router wieder antwortet."
+    }
   }
 }

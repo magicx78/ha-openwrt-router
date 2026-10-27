@@ -7,7 +7,7 @@ import logging
 import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -70,6 +70,9 @@ from .const import (
     TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES,
     TOPOLOGY_SNAPSHOT_MAX,
 )
+
+if TYPE_CHECKING:
+    from .fleet import FleetOutageTracker
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -153,7 +156,6 @@ class OpenWrtCoordinatorData:
         self.error_type: str | None = None
         self.consecutive_failures: int = 0
         self.last_seen: datetime | None = None
-        self.notification_sent: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """Return data as a plain dict (used for diagnostics)."""
@@ -237,6 +239,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._prev_interface_bytes: dict[str, dict[str, int]] = {}
         self._prev_poll_time: datetime | None = None
         self._consecutive_auth_failures: int = 0
+        # Outage tracking — kept on the coordinator, not on self.data, because
+        # every successful poll replaces self.data with a fresh object.
+        self._failure_count: int = 0
+        self._failure_since: datetime | None = None
+        self._outage_tracker: FleetOutageTracker | None = None
         # CPU history: deque of {ts, cpu, mem} — 1h at 30s resolution
         self._cpu_history: deque[dict[str, Any]] = deque(maxlen=CPU_HISTORY_MAX_POINTS)
         # Event timeline tracking
@@ -637,36 +644,24 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 _MAX_CONSECUTIVE,
                 err,
             )
-            if self.data:
-                self.data.error_type = ERROR_TYPE_AUTH
-                self.data.consecutive_failures += 1
-                await self._maybe_send_outage_notification()
+            self._record_failure(ERROR_TYPE_AUTH)
             raise UpdateFailed(
                 f"Auth error (transient, attempt {self._consecutive_auth_failures}/{_MAX_CONSECUTIVE}): {err}"
             ) from err
 
         except OpenWrtConnectionError as err:
             self._consecutive_auth_failures = 0
-            if self.data:
-                self.data.error_type = ERROR_TYPE_CONNECTION
-                self.data.consecutive_failures += 1
-                await self._maybe_send_outage_notification()
+            self._record_failure(ERROR_TYPE_CONNECTION)
             raise UpdateFailed(f"Cannot connect to OpenWrt router: {err}") from err
 
         except OpenWrtTimeoutError as err:
             self._consecutive_auth_failures = 0
-            if self.data:
-                self.data.error_type = ERROR_TYPE_TIMEOUT
-                self.data.consecutive_failures += 1
-                await self._maybe_send_outage_notification()
+            self._record_failure(ERROR_TYPE_TIMEOUT)
             raise UpdateFailed(f"OpenWrt router request timed out: {err}") from err
 
         except OpenWrtResponseError as err:
             self._consecutive_auth_failures = 0
-            if self.data:
-                self.data.error_type = ERROR_TYPE_RESPONSE
-                self.data.consecutive_failures += 1
-                await self._maybe_send_outage_notification()
+            self._record_failure(ERROR_TYPE_RESPONSE)
             raise UpdateFailed(
                 f"Unexpected response from OpenWrt router: {err}"
             ) from err
@@ -677,27 +672,24 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # afterwards it must surface as UpdateFailed (see its docstring),
             # not as a raw exception HA logs as "unexpected error".
             self._consecutive_auth_failures = 0
-            if self.data:
-                self.data.error_type = ERROR_TYPE_RESPONSE
-                self.data.consecutive_failures += 1
-                await self._maybe_send_outage_notification()
+            self._record_failure(ERROR_TYPE_RESPONSE)
             raise UpdateFailed(
                 f"ubus method blocked or missing on OpenWrt router: {err}"
             ) from err
 
         except (RuntimeError, ValueError, TypeError, AttributeError, KeyError) as err:
             _LOGGER.exception("Unexpected error fetching OpenWrt data")
-            if self.data:
-                self.data.error_type = ERROR_TYPE_CONNECTION
-                self.data.consecutive_failures += 1
-                await self._maybe_send_outage_notification()
+            self._record_failure(ERROR_TYPE_CONNECTION)
             raise UpdateFailed(f"Unexpected error: {err}") from err
 
         self._consecutive_auth_failures = 0
+        self._failure_count = 0
+        self._failure_since = None
         data.last_seen = datetime.now(UTC)
         data.consecutive_failures = 0
         data.error_type = None
-        await self._maybe_clear_outage_notification(data)
+        if self._outage_tracker is not None and self._entry is not None:
+            self._outage_tracker.report_up(self._entry.entry_id)
         self._record_events(data)
 
         # SSH-Fallback-Erkennung: HA-Warnung + Poll auf 5 min reduzieren
@@ -758,59 +750,29 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         return data
 
     # ------------------------------------------------------------------
-    # Outage notifications
+    # Outage tracking
     # ------------------------------------------------------------------
 
-    async def _maybe_send_outage_notification(self) -> None:
-        """Create a persistent HA notification after NOTIFICATION_FAILURE_THRESHOLD failures."""
-        if not self.data:
-            return
-        if self.data.consecutive_failures < NOTIFICATION_FAILURE_THRESHOLD:
-            return
-        if self.data.notification_sent:
-            return
-        title = self._entry.title if self._entry else DOMAIN
-        error_label = {
-            ERROR_TYPE_AUTH: "Authentifizierungsfehler",
-            ERROR_TYPE_CONNECTION: "Verbindungsfehler",
-            ERROR_TYPE_TIMEOUT: "Timeout",
-            ERROR_TYPE_RESPONSE: "Ungültige Antwort",
-        }.get(self.data.error_type or "", "Unbekannter Fehler")
-        from homeassistant.components.persistent_notification import async_create
+    def attach_outage_tracker(self, tracker: FleetOutageTracker) -> None:
+        """Report outages of this router to the fleet-wide tracker (wired in __init__)."""
+        self._outage_tracker = tracker
 
-        async_create(
-            self.hass,
-            message=(
-                f"Router **{title}** ist nicht erreichbar.\n\n"
-                f"Fehlertyp: {error_label}\n"
-                f"Fehlgeschlagene Versuche: {self.data.consecutive_failures}"
-            ),
-            title=f"OpenWrt Router Ausfall: {title}",
-            notification_id=f"openwrt_router_outage_{self._entry.entry_id if self._entry else DOMAIN}",
-        )
-        self.data.notification_sent = True
-        _LOGGER.warning(
-            "Router %s unreachable after %d consecutive failures (%s)",
-            title,
-            self.data.consecutive_failures,
-            self.data.error_type,
-        )
-
-    async def _maybe_clear_outage_notification(
-        self, data: OpenWrtCoordinatorData
-    ) -> None:
-        """Dismiss the outage notification when the router comes back online."""
-        if not data.notification_sent:
-            return
-        from homeassistant.components.persistent_notification import async_dismiss
-
-        async_dismiss(
-            self.hass,
-            f"openwrt_router_outage_{self._entry.entry_id if self._entry else DOMAIN}",
-        )
-        data.notification_sent = False
-        title = self._entry.title if self._entry else DOMAIN
-        _LOGGER.info("Router %s is back online — outage notification cleared", title)
+    def _record_failure(self, error_type: str) -> None:
+        """Count a failed poll; report the router as down past the threshold."""
+        self._failure_count += 1
+        if self._failure_since is None:
+            self._failure_since = datetime.now(UTC)
+        if self.data:
+            self.data.error_type = error_type
+            self.data.consecutive_failures = self._failure_count
+        if (
+            self._failure_count >= NOTIFICATION_FAILURE_THRESHOLD
+            and self._outage_tracker is not None
+            and self._entry is not None
+        ):
+            self._outage_tracker.report_down(
+                self._entry.entry_id, error_type, self._failure_since
+            )
 
     # Event timeline
     # ------------------------------------------------------------------

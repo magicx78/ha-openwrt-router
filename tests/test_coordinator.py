@@ -733,3 +733,73 @@ class TestNativeWanTraffic:
         assert "dsl_stats" not in data.as_dict()
         assert "dsl_history" not in data.as_dict()
         assert "wan_traffic" in data.as_dict()
+
+
+# =====================================================================
+# Outage reporting (v1.29.0) — regression for the never-dismissed
+# outage notification: the "sent" flag lived on self.data, which every
+# successful poll replaces, so recovery never cleared it.
+# =====================================================================
+
+class TestOutageReporting:
+    def _coord_with_tracker(self):
+        coord, api = _make_coordinator()
+        coord._entry = MagicMock(entry_id="entry1", title="gw")
+        tracker = MagicMock()
+        coord.attach_outage_tracker(tracker)
+        return coord, api, tracker
+
+    @pytest.mark.asyncio
+    async def test_reports_down_only_from_threshold_on(self):
+        coord, api, tracker = self._coord_with_tracker()
+        api.get_wan_status = AsyncMock(side_effect=OpenWrtConnectionError("down"))
+        for _ in range(2):
+            with pytest.raises(UpdateFailed):
+                await coord._async_update_data()
+        tracker.report_down.assert_not_called()
+
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
+        tracker.report_down.assert_called_once()
+        entry_id, error_type, since = tracker.report_down.call_args.args
+        assert (entry_id, error_type) == ("entry1", "connection")
+        assert since is not None
+
+    @pytest.mark.asyncio
+    async def test_counts_failures_without_previous_data(self):
+        """HA started while the router was already flaky: self.data is None."""
+        coord, api, tracker = self._coord_with_tracker()
+        coord.data = None
+        api.get_wan_status = AsyncMock(side_effect=OpenWrtTimeoutError("slow"))
+        for _ in range(3):
+            with pytest.raises(UpdateFailed):
+                await coord._async_update_data()
+        assert tracker.report_down.call_args.args[1] == "timeout"
+
+    @pytest.mark.asyncio
+    async def test_recovery_reports_up_and_resets(self):
+        coord, api, tracker = self._coord_with_tracker()
+        coord.data = await coord._async_update_data()
+        api.get_wan_status = AsyncMock(side_effect=OpenWrtConnectionError("down"))
+        for _ in range(3):
+            with pytest.raises(UpdateFailed):
+                await coord._async_update_data()
+        assert coord.data.consecutive_failures == 3
+        assert coord.data.error_type == "connection"
+
+        api.get_wan_status = AsyncMock(return_value={"connected": True})
+        data = await coord._async_update_data()
+
+        tracker.report_up.assert_called_with("entry1")
+        assert data.consecutive_failures == 0
+        assert coord._failure_count == 0
+        assert coord._failure_since is None
+
+    @pytest.mark.asyncio
+    async def test_without_tracker_nothing_is_reported(self):
+        coord, api = _make_coordinator()
+        api.get_wan_status = AsyncMock(side_effect=OpenWrtConnectionError("down"))
+        for _ in range(3):
+            with pytest.raises(UpdateFailed):
+                await coord._async_update_data()
+        assert coord._failure_count == 3
