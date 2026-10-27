@@ -2,6 +2,28 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.36.0] - 2026-10-27
+
+### Added
+
+- **Binärsensor „Klebende WLAN-Clients“** (`sticky_clients`) pro Router:
+  ein, solange Clients an diesem Router hängen, obwohl ein besserer AP da
+  ist.
+  - Mit usteer (läuft auf allen Routern, Abfrage `usteer get_clients` alle
+    2 Polls, versetzt zum Log-Abruf): ein anderer Router hört den Client seit
+    mindestens 10 Minuten um mindestens 8 dB stärker. Andere Funkmodule
+    desselben Routers zählen nicht.
+  - Ohne usteer: Signal seit 10 Minuten bei −75 dBm oder schwächer, und ein
+    anderer Router bietet ein Funkmodul im selben Band.
+  - Attribute `method` (`usteer`/`signal`) und `clients` (MAC, Hostname,
+    Signal, besserer Knoten, Abstand in dB, seit).
+- **Sensor „Instabile WLAN-Clients“** (`unstable_clients`) pro Router:
+  Clients mit mindestens 3 Reconnects in 24 h (Anmeldung innerhalb von
+  5 Minuten nach einer Abmeldung am selben Router; Roaming zu einem anderen
+  Router zählt nicht). Attribut `top` mit den 10 auffälligsten Clients.
+- **Tracker-Attribute `associations_24h` und `reconnects_24h`**, summiert
+  über alle Router, aus dem Router-Log.
+
 ## [1.35.0] - 2026-10-27
 
 ### Added
