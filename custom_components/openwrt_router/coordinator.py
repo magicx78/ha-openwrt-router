@@ -406,7 +406,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                         await writer.wait_closed()
                     except Exception:  # noqa: BLE001, S110
                         pass
-                except (OSError, asyncio.TimeoutError):
+                except (TimeoutError, OSError):
                     data.ping_ms = None
 
                 # DuckDNS status (only on gateway with WAN connected)
