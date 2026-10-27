@@ -354,6 +354,12 @@ LLDP_STATUS_ERROR = "error"  # unexpected exception (only real failures)
 LLDP_REFRESH_INTERVAL = 600.0
 LLDP_UNAVAILABLE_RETRY_INTERVAL = 1800.0
 
+# Data that only the SSH fallback can supply on some routers (disk and tmpfs
+# usage when ``system info`` has no ``root``/``tmp`` fields, OpenWrt < 21.02)
+# is refreshed over SSH at most this often (seconds) and served from a cache
+# in between; it changes on the timescale of package installs, not polls.
+SSH_SLOW_REFRESH_INTERVAL = 600.0
+
 # rpcd ``rc/list`` is NOT called on every poll: rpcd before 2026-05-31
 # (upstream d06d2a8, e.g. rpcd 2025.12.03 on OpenWrt 25.12.1) leaks ~4.7 KB
 # per call. Service running state comes from procd ``service/list`` instead;

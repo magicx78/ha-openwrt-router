@@ -539,6 +539,22 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             ConfigEntryAuthFailed: Credentials are invalid (triggers re-auth flow).
             UpdateFailed: Any other error that prevents data retrieval.
         """
+        try:
+            return await self._async_poll()
+        finally:
+            # The API keeps one SSH connection open for the duration of a poll
+            # (fallback paths, LLDP). Release it when the poll is over — also
+            # after a failure — so the router does not hold an idle session
+            # until the next poll.
+            release = getattr(self.api, "async_release_ssh", None)
+            if release is not None:
+                try:
+                    await release()
+                except Exception:
+                    _LOGGER.debug("Releasing the SSH connection failed", exc_info=True)
+
+    async def _async_poll(self) -> OpenWrtCoordinatorData:
+        """Run one poll cycle (body of :meth:`_async_update_data`)."""
         self._poll_count += 1
         self.api.reset_ssh_fallback_flag()
         # Apply stagger offset once on the second poll (first regular poll after setup).

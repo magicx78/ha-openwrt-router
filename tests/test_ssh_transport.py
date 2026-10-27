@@ -229,3 +229,212 @@ def test_no_sshpass_left_in_source():
     assert "_build_ssh_cmd" not in src
     assert "_ssh_env" not in src
     assert '"sshpass"' not in src  # no argv literal like ["sshpass", "-e", ...]
+
+
+# =====================================================================
+# v1.38.3 — one asyncssh connection per poll instead of one per command
+# (plan 2026-10-28, AK5)
+# =====================================================================
+
+
+def _open_conn(**kwargs):
+    conn = _fake_conn(**kwargs)
+    conn.is_closed = MagicMock(return_value=False)
+    return conn
+
+
+@pytest.mark.asyncio
+async def test_connection_is_reused_across_commands():
+    api = _make_api()
+    conn = _open_conn(exit_status=0, stdout=b"ok")
+    ctx, mock = _patch_connect(conn)
+    with ctx:
+        assert await api._run_ssh("one") == "ok"
+        assert await api._run_ssh("two") == "ok"
+        assert await api._run_ssh_binary("three") == b"ok"
+    assert mock.await_count == 1
+    assert conn.run.await_count == 3
+    conn.close.assert_not_called()  # stays open until the poll releases it
+
+
+@pytest.mark.asyncio
+async def test_release_closes_connection_and_next_command_reconnects():
+    api = _make_api()
+    conn = _open_conn(exit_status=0, stdout=b"ok")
+    ctx, mock = _patch_connect(conn)
+    with ctx:
+        await api._run_ssh("one")
+        await api.async_release_ssh()
+        conn.close.assert_called_once()
+        conn.wait_closed.assert_awaited_once()
+        await api.async_release_ssh()  # idempotent
+        await api._run_ssh("two")
+    assert mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_closed_connection_is_rebuilt_once():
+    api = _make_api()
+    conn1 = _open_conn(exit_status=0, stdout=b"first")
+    conn2 = _open_conn(exit_status=0, stdout=b"second")
+    ctx, mock = _patch_connect(side_effect=[conn1, conn2])
+    with ctx:
+        assert await api._run_ssh("one") == "first"
+        conn1.is_closed.return_value = True  # dropbear closed it meanwhile
+        assert await api._run_ssh("two") == "second"
+        assert await api._run_ssh("three") == "second"
+    assert mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_failure_on_stale_connection_retries_with_fresh_one():
+    api = _make_api()
+    conn1 = _open_conn()
+    conn1.run = AsyncMock(side_effect=asyncssh.ConnectionLost("gone"))
+    conn2 = _open_conn(exit_status=0, stdout=b"fresh")
+    ctx, mock = _patch_connect(side_effect=[conn1, conn2])
+    with ctx:
+        assert await api._run_ssh("one") == "fresh"
+    assert mock.await_count == 2
+    conn1.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_async_close_closes_ssh_connection():
+    api = _make_api()
+    conn = _open_conn(exit_status=0, stdout=b"ok")
+    ctx, _ = _patch_connect(conn)
+    with ctx:
+        await api._run_ssh("one")
+        await api.async_close()
+    conn.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_timeout_drops_the_connection():
+    api = _make_api()
+    conn = _open_conn()
+
+    async def _hang(*a, **k):
+        await asyncio.sleep(30)
+
+    conn.run = AsyncMock(side_effect=_hang)
+    ctx, _ = _patch_connect(conn)
+    with ctx:
+        assert await api._run_ssh("sleep 999", timeout=0.01) is None
+    conn.close.assert_called_once()
+    assert api._ssh_conn is None
+
+
+@pytest.mark.asyncio
+async def test_password_still_only_in_connect_kwarg_with_reuse():
+    api = _make_api()
+    conn = _open_conn(exit_status=0, stdout=b"ok")
+    ctx, mock = _patch_connect(conn)
+    with ctx:
+        await api._run_ssh("one")
+        await api._run_ssh("two")
+    assert mock.await_args.kwargs["password"] == _PW
+    for call in conn.run.await_args_list:
+        assert _PW not in call.args[0]
+
+
+# ---------------------------------------------------------------------
+# Review findings (2026-10-27): release while a command is in flight,
+# channel closed without exit status, no reconnect after close
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_release_waits_for_in_flight_command():
+    """async_release_ssh() during a running command must not cut it off."""
+    api = _make_api()
+    conn = _open_conn()
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def _slow_run(*a, **k):
+        started.set()
+        await finish.wait()
+        return SimpleNamespace(exit_status=0, stdout=b"done", stderr=b"")
+
+    conn.run = AsyncMock(side_effect=_slow_run)
+    ctx, _ = _patch_connect(conn)
+    with ctx:
+        task = asyncio.create_task(api._run_ssh("uci commit wireless; wifi reload"))
+        await started.wait()
+        await api.async_release_ssh()  # poll ends while the switch command runs
+        conn.close.assert_not_called()
+        finish.set()
+        assert await task == "done"
+    # The deferred release is applied once the last command has finished.
+    conn.close.assert_called_once()
+    assert api._ssh_conn is None
+
+
+@pytest.mark.asyncio
+async def test_timeout_of_one_command_does_not_drop_a_busy_connection():
+    api = _make_api()
+    conn = _open_conn()
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def _run(cmd, *a, **k):
+        if cmd == "slow":
+            started.set()
+            await finish.wait()
+            return SimpleNamespace(exit_status=0, stdout=b"slow-done", stderr=b"")
+        await asyncio.sleep(30)  # the command that times out
+        return None
+
+    conn.run = AsyncMock(side_effect=_run)
+    ctx, _ = _patch_connect(conn)
+    with ctx:
+        slow = asyncio.create_task(api._run_ssh("slow"))
+        await started.wait()
+        assert await api._run_ssh("hang", timeout=0.01) is None  # timeout
+        conn.close.assert_not_called()  # "slow" still owns the connection
+        finish.set()
+        assert await slow == "slow-done"
+    conn.close.assert_called_once()  # dropped once nothing is in flight
+
+
+@pytest.mark.asyncio
+async def test_channel_closed_without_exit_status_is_not_success():
+    api = _make_api()
+    conn = _open_conn()
+    conn.run = AsyncMock(
+        return_value=SimpleNamespace(exit_status=None, stdout=b"partial", stderr=b"")
+    )
+    ctx, _ = _patch_connect(conn)
+    with ctx:
+        rc, _out, _err = await api._asyncssh_run("wifi reload", timeout=5.0)
+        assert rc == SUBPROCESS_RC_FAILED_TO_SPAWN
+        assert await api._run_ssh("wifi reload") is None
+
+
+@pytest.mark.asyncio
+async def test_no_reconnect_after_async_close():
+    api = _make_api()
+    conn = _open_conn(exit_status=0, stdout=b"ok")
+    ctx, mock = _patch_connect(conn)
+    with ctx:
+        await api._run_ssh("one")
+        await api.async_close()
+        rc, _out, _err = await api._asyncssh_run("two", timeout=5.0)
+    assert rc == SUBPROCESS_RC_FAILED_TO_SPAWN
+    assert mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_second_failure_after_reconnect_is_reported_not_retried_forever():
+    api = _make_api()
+    conn1 = _open_conn()
+    conn1.run = AsyncMock(side_effect=asyncssh.ConnectionLost("gone"))
+    conn2 = _open_conn()
+    conn2.run = AsyncMock(side_effect=asyncssh.ConnectionLost("gone again"))
+    ctx, mock = _patch_connect(side_effect=[conn1, conn2])
+    with ctx:
+        rc, _out, _err = await api._asyncssh_run("one", timeout=5.0)
+    assert rc == SUBPROCESS_RC_FAILED_TO_SPAWN
+    assert mock.await_count == 2
