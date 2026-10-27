@@ -266,6 +266,10 @@ RADIO_KEY_BSSID = "bssid"
 # (iwinfo info; used by channel_plan.py)
 RADIO_KEY_PHY = "phy"
 RADIO_KEY_CENTER_CHAN1 = "center_chan1"
+# True on an AP interface built from the UCI config without an `ifname`
+# option: RADIO_KEY_IFNAME then holds the UCI section name, not the kernel
+# interface name that clients and usteer report, so clients per AP are unknown.
+RADIO_KEY_IFNAME_IS_SECTION = "ifname_is_section"
 
 # Client data keys
 CLIENT_KEY_MAC = "mac"

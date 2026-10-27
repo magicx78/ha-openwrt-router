@@ -28,6 +28,7 @@ from .const import (
     RADIO_KEY_BAND,
     RADIO_KEY_CENTER_CHAN1,
     RADIO_KEY_CHANNEL,
+    RADIO_KEY_ENABLED,
     RADIO_KEY_FREQUENCY,
     RADIO_KEY_HTMODE,
     RADIO_KEY_IFNAME,
@@ -187,10 +188,13 @@ def radios_from_ap_interfaces(
 ) -> list[Radio]:
     """Reduce a router's AP interfaces to one Radio per physical radio.
 
-    Interfaces without a usable channel or band and non-AP modes are skipped.
-    The phy is taken from iwinfo (``phy``) or derived from the interface name
-    (``phy1-ap0``); radios are keyed by phy and band (multi-band wiphys).
-    ``sta_interfaces`` (repeater/mesh uplinks) mark their phy as backhaul.
+    Interfaces without a usable channel or band, non-AP modes and disabled
+    interfaces (UCI fallback: ``enabled`` False when the wifi-iface or its
+    wifi-device is disabled; iwinfo lists running interfaces only and sets no
+    flag) are skipped. The phy is taken from iwinfo (``phy``) or derived from
+    the interface name (``phy1-ap0``); radios are keyed by phy and band
+    (multi-band wiphys). ``sta_interfaces`` (repeater/mesh uplinks) mark
+    their phy as backhaul.
     """
     backhaul_phys = {
         phy_of(str(sta.get(RADIO_KEY_IFNAME) or ""))
@@ -199,7 +203,7 @@ def radios_from_ap_interfaces(
     }
     radios: dict[tuple[str, str], Radio] = {}
     for iface in ap_interfaces or []:
-        if not isinstance(iface, dict):
+        if not isinstance(iface, dict) or not iface.get(RADIO_KEY_ENABLED, True):
             continue
         if str(iface.get(RADIO_KEY_MODE) or "").lower() not in _AP_MODES:
             continue

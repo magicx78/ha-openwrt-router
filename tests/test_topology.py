@@ -177,6 +177,33 @@ def test_radio_no_ap_details_fallback():
         assert r["channel"] is None
 
 
+def test_ssh_radio_finds_ap_details_by_uci_section():
+    """SSH fallback: wifi_radios are keyed by the UCI section; with an
+    `ifname` option the AP interface carries the kernel name instead."""
+    radios = [
+        {
+            "ifname": "@wifi-iface[0]",
+            "uci_section": "@wifi-iface[0]",
+            "band": "5g",
+            "ssid": "Example-Net-5G",
+            "enabled": True,
+        }
+    ]
+    aps = [
+        {
+            "ifname": "wlan1",
+            "uci_section": "@wifi-iface[0]",
+            "ifname_is_section": False,
+            "band": "5g",
+            "ssid": "Example-Net-5G",
+            "channel": 36,
+        }
+    ]
+    topo = _build(wifi_radios=radios, ap_interfaces=aps, clients=[])
+    (radio,) = [n for n in topo["nodes"] if n["type"] == "radio"]
+    assert radio["channel"] == 36
+
+
 # ─── Tests: WiFi client nodes ────────────────────────────────────────────────
 
 def test_wifi_clients_count():
