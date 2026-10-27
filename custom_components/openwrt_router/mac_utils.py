@@ -8,7 +8,13 @@ wrong vendors.
 
 from __future__ import annotations
 
-_HEX = "0123456789abcdef"
+import re
+
+# aa:bb:cc:dd:ee:ff, aa-bb-cc-dd-ee-ff, aabb.ccdd.eeff (Cisco), aabbccddeeff
+_MAC_RE = re.compile(
+    r"^(?:[0-9a-f]{2}(?::[0-9a-f]{2}){5}|[0-9a-f]{2}(?:-[0-9a-f]{2}){5}"
+    r"|[0-9a-f]{4}(?:\.[0-9a-f]{4}){2}|[0-9a-f]{12})$"
+)
 
 
 def is_locally_administered(mac: str | None) -> bool:
@@ -20,8 +26,8 @@ def is_locally_administered(mac: str | None) -> bool:
     """
     if not isinstance(mac, str):
         return False
-    digits = "".join(c for c in mac.lower() if c in _HEX)
-    if len(digits) != 12 or len(mac.strip()) not in (12, 14, 17):
+    mac = mac.strip().lower()
+    if not _MAC_RE.fullmatch(mac):
         return False
-    first = int(digits[:2], 16)
+    first = int(mac[:2], 16)
     return bool(first & 0x02) and not first & 0x01

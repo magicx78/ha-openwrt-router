@@ -38,6 +38,7 @@ from .const import (
     CLIENT_KEY_IP,
     CLIENT_KEY_MAC,
     CLIENT_KEY_RADIO,
+    CLIENT_KEY_RANDOM_MAC,
     CLIENT_KEY_SIGNAL,
     CLIENT_KEY_SSID,
     CONF_PROTOCOL,
@@ -244,13 +245,13 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
             return {
                 "mac": self._mac,
                 "connected": False,
-                "random_mac": random_mac,
+                CLIENT_KEY_RANDOM_MAC: random_mac,
                 **counts,
             }
 
         return {
             **counts,
-            "random_mac": random_mac,
+            CLIENT_KEY_RANDOM_MAC: random_mac,
             "mac": self._mac,
             "connected": True,
             "dhcp_status": self._dhcp_status(client),

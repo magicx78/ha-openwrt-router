@@ -1890,6 +1890,7 @@ class OpenWrtAPI:
                     hostapd_ifnames, ifname_to_ssid, leases
                 )
                 if ssh_clients is not None:
+                    self._enrich_client_metadata(ssh_clients)
                     return ssh_clients
             except Exception as ssh_err:  # noqa: BLE001
                 _LOGGER.debug("SSH client fallback failed: %s", ssh_err)
