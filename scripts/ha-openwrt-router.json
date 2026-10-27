@@ -15,10 +15,19 @@
         "/var/run/ddns/*": [
           "read"
         ],
+        "/tmp/run/ddns": [
+          "list"
+        ],
+        "/tmp/run/ddns/*": [
+          "read"
+        ],
         "/sys/class/net": [
           "list"
         ],
         "/sys/class/net/*": [
+          "read"
+        ],
+        "/sys/devices/*/net/*": [
           "read"
         ],
         "/proc/cpuinfo": [
@@ -28,6 +37,12 @@
           "read"
         ],
         "/proc/net/nf_conntrack": [
+          "read"
+        ],
+        "/proc/*/net/arp": [
+          "read"
+        ],
+        "/proc/*/net/nf_conntrack": [
           "read"
         ],
         "/proc/sys/net/netfilter/nf_conntrack_count": [

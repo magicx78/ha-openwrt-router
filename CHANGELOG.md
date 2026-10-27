@@ -2,6 +2,24 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.7] - 2026-10-27
+
+### Fixed
+
+- **rpcd-ACL v8: aufgelöste Pfade für neueres rpcd.** rpcd ab Version 2026
+  (OpenWrt-Snapshots und aktualisierte 25.12-Installationen) prüft Datei-ACLs
+  zusätzlich gegen das Ziel der Symlinks: `/proc/net/arp` zeigt auf
+  `/proc/<pid>/net/arp`, `/sys/class/net/<if>/…` auf `/sys/devices/…/net/<if>/…`,
+  `/var/run` auf `/tmp/run`. Diese Ziele fehlten in ACL v7, deshalb lehnte rpcd
+  dort das Lesen der Bridge-FDB, der ARP-Tabelle und der `nf_conntrack`-Tabelle
+  ab und die Integration holte beides weiter per SSH (eine Anmeldung je Poll,
+  auf Hardware mit rpcd 2026.10.04 bestätigt; rpcd 2025.12.03 war nicht
+  betroffen). ACL v8 ergänzt nur Lesepfade (`/proc/*/net/arp`,
+  `/proc/*/net/nf_conntrack`, `/sys/devices/*/net/*`, `/tmp/run/ddns`), keine
+  neuen Rechte, kein `exec`. Beim nächsten Start der Integration wird die ACL
+  neu geschrieben und rpcd einmal je Router neu gestartet; die Datei
+  `scripts/ha-openwrt-router.json` für den manuellen Weg ist aktualisiert.
+
 ## [1.38.6] - 2026-10-27
 
 ### Fixed
