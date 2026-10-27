@@ -454,9 +454,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
 async def async_reload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> None:
     """Reload a config entry (e.g. after options change or re-auth).
 
+    Delegates to HA instead of calling unload/setup directly, so the entry's
+    on_unload callbacks (outage tracker, channel plan, RAM issue) run too.
+
     Args:
         hass: Home Assistant instance.
         entry: The config entry to reload.
     """
-    await async_unload_entry(hass, entry)
-    await async_setup_entry(hass, entry)
+    await hass.config_entries.async_reload(entry.entry_id)
