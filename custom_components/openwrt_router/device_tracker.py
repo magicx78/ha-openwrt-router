@@ -30,6 +30,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from . import OpenWrtConfigEntry
 from .const import (
@@ -45,6 +46,8 @@ from .const import (
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator
+from .dhcp_health import client_dhcp_status
+from .fleet import dhcp_context
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -240,6 +243,7 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
         return {
             "mac": self._mac,
             "connected": True,
+            "dhcp_status": self._dhcp_status(client),
             "ssid": client.get(CLIENT_KEY_SSID, ""),
             "radio": client.get(CLIENT_KEY_RADIO, ""),
             "signal": client.get(CLIENT_KEY_SIGNAL, 0),
@@ -249,6 +253,24 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
                 coordinator.router_info.get("hostname", "") if coordinator else ""
             ),
         }
+
+    def _dhcp_status(self, client: dict[str, Any]) -> str | None:
+        """ok / pending / dhcp_missing / static_no_lease, None if unknown."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return None
+        context = dhcp_context(hass)
+        if context is None:
+            return None
+        leases, arp, static = context
+        return client_dhcp_status(
+            self._mac,
+            client.get(CLIENT_KEY_CONNECTED_SINCE),
+            dt_util.utcnow(),
+            leases,
+            arp,
+            static,
+        )
 
     @property
     def device_info(self) -> DeviceInfo:

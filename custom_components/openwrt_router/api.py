@@ -2935,6 +2935,20 @@ class OpenWrtAPI:
 
         return self._luci_rpc_ssid_map.get(ifname, "")
 
+    async def get_dhcp_config(self) -> dict[str, Any]:
+        """Return the raw UCI dhcp configuration (pools and static hosts).
+
+        Calls:
+            uci get {"config": "dhcp"}. Permitted for the root login through
+            the LuCI ACLs (``read '*'``); otherwise blocked per config.
+
+        Raises:
+            OpenWrtMethodNotFoundError: uci access to ``dhcp`` not permitted.
+        """
+        result = await self._call(UBUS_UCI_OBJECT, UBUS_UCI_GET, {"config": "dhcp"})
+        values = result.get("values") if isinstance(result, dict) else None
+        return values if isinstance(values, dict) else {}
+
     async def get_uci_wireless(self) -> dict[str, Any]:
         """Fetch the full UCI wireless configuration.
 

@@ -355,6 +355,34 @@ def collect_radios(hass: HomeAssistant) -> list[Radio]:
 
 
 @callback
+def dhcp_context(
+    hass: HomeAssistant,
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]] | None:
+    """Return upper-case MACs (with lease, in an ARP table, static host).
+
+    Over all loaded routers, including the last known data of unreachable
+    ones. None when no router reports any lease: then no DHCP server is
+    visible and a missing lease means nothing.
+    """
+    leases: set[str] = set()
+    arp: set[str] = set()
+    static: set[str] = set()
+    for entry in hass.config_entries.async_loaded_entries(DOMAIN):
+        runtime = getattr(entry, "runtime_data", None)
+        data = getattr(getattr(runtime, "coordinator", None), "data", None)
+        if data is None:
+            continue
+        leases.update(
+            str(m).upper() for m in (getattr(data, "dhcp_leases", None) or {})
+        )
+        arp.update(str(m).upper() for m in (getattr(data, "arp_table", None) or {}))
+        static.update(getattr(data, "dhcp_static_macs", None) or ())
+    if not leases:
+        return None
+    return frozenset(leases), frozenset(arp), frozenset(static)
+
+
+@callback
 def async_get_channel_plan_monitor(hass: HomeAssistant) -> ChannelPlanMonitor:
     """Return the per-HA-instance channel plan monitor, creating it on first use."""
     monitor = hass.data.get(_CHANNEL_PLAN_KEY)

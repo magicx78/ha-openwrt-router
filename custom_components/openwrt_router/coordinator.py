@@ -33,6 +33,7 @@ from .const import (
     CPU_HISTORY_MAX_POINTS,
     DEFAULT_SERVICES,
     DFS_EVIDENCE_SECONDS,
+    DHCP_CONFIG_REFRESH_CYCLES,
     DOMAIN,
     ERROR_TYPE_AUTH,
     ERROR_TYPE_CONNECTION,
@@ -89,6 +90,7 @@ from .const import (
     TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES,
     TOPOLOGY_SNAPSHOT_MAX,
 )
+from .dhcp_health import Pool, parse_dhcp_config, pool_usage
 from .issues import (
     ISSUE_RAM_HIGH,
     async_clear_issue,
@@ -249,8 +251,12 @@ class OpenWrtCoordinatorData:
         # Router log ingest (F6): status and counters, see _ingest_log()
         self.log_status: str = LOG_STATUS_PENDING
         self.log_stats: dict[str, Any] = {}
-        # DFS (F3): {"events_24h", "by_type", "last_event"}, see _dfs_snapshot()
+        # DFS (F3): {"events_24h", "by_type", "last_event"}
         self.dfs: dict[str, Any] = {}
+        # DHCP health (F5): usage per active pool, MACs of static hosts
+        # (static MACs are not part of as_dict / diagnostics)
+        self.dhcp_pools: list[dict[str, Any]] = []
+        self.dhcp_static_macs: frozenset[str] = frozenset()
         # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
         self.vlans_stale: bool = False
         # Connectivity health tracking (used by binary_sensor / sensor platform)
@@ -294,6 +300,7 @@ class OpenWrtCoordinatorData:
             "log_status": self.log_status,
             "log_stats": self.log_stats,
             "dfs": self.dfs,
+            "dhcp_pools": self.dhcp_pools,
         }
 
 
@@ -386,6 +393,10 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._prev_radios: dict[tuple[str, str], Radio] | None = None
         self._recent_dfs: deque[tuple[int, str, str]] = deque(maxlen=64)
         self._last_dfs_event: dict[str, Any] | None = None
+        # DHCP health (F5): parsed `uci get dhcp`, see _fetch_dhcp_config()
+        self._dhcp_config_fetched = False
+        self._dhcp_pools: list[Pool] = []
+        self._dhcp_static_macs: frozenset[str] = frozenset()
         # Stale-data cache: letzte bekannte Werte für VLAN-Badges bei Offline-Router
         self._last_known_network_interfaces: list[dict[str, Any]] = []
         self._last_known_port_vlan_map: dict[str, list[int]] = {}
@@ -687,6 +698,22 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 "by_type": dfs_counts,
                 "last_event": self._last_dfs_event,
             }
+
+            # DHCP pools and static hosts (F5): first on poll 2, then every
+            # DHCP_CONFIG_REFRESH_CYCLES polls while the router serves a pool
+            # (dumb APs with ignored pools are asked once). Never fails the poll.
+            if self._board_poll_count > 1 and (
+                not self._dhcp_config_fetched
+                or (
+                    self._dhcp_pools
+                    and self._board_poll_count % DHCP_CONFIG_REFRESH_CYCLES == 0
+                )
+            ):
+                await self._fetch_dhcp_config()
+            data.dhcp_pools = pool_usage(
+                self._dhcp_pools, data.network_interfaces, data.dhcp_leases
+            )
+            data.dhcp_static_macs = self._dhcp_static_macs
 
             # --- CPU history (30s resolution, 1h rolling window) ---
             import time as _time
@@ -1026,6 +1053,20 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             self.hass.bus.async_fire(EVENT_DHCP, payload)
         else:
             self.hass.bus.async_fire(EVENT_WIFI, payload)
+
+    async def _fetch_dhcp_config(self) -> None:
+        """Refresh pools and static hosts; keep the old ones on errors."""
+        try:
+            values = await self.api.get_dhcp_config()
+        except OpenWrtMethodNotFoundError as err:
+            _LOGGER.debug("%s: uci dhcp not readable: %s", self.name, err)
+            self._dhcp_config_fetched = True
+            return
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("%s: uci dhcp fetch failed: %s", self.name, err)
+            return
+        self._dhcp_config_fetched = True
+        self._dhcp_pools, self._dhcp_static_macs = parse_dhcp_config(values)
 
     def _detect_channel_changes(
         self, data: OpenWrtCoordinatorData

@@ -92,6 +92,9 @@
       "dfs_events_24h": {
         "name": "DFS-Ereignisse (24 h)"
       },
+      "dhcp_pool": {
+        "name": "DHCP-Pool {pool}"
+      },
       "log_status": {
         "name": "Router-Log",
         "state": {
