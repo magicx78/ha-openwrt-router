@@ -81,7 +81,7 @@ from .const import (
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
-from .fleet import collect_radios
+from .fleet import collect_radios, radios_of
 from .topology_entities import setup_topology_entities
 
 _LOGGER = logging.getLogger(__name__)
@@ -1261,7 +1261,10 @@ class OpenWrtChannelPlanSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
         if hass is None:
             return [], []
         entry_id = self._entry.entry_id
-        radios = collect_radios(hass)
+        # Own radios straight from this coordinator: during setup the entry
+        # is not LOADED yet and collect_radios would miss it.
+        radios = [r for r in collect_radios(hass) if r.entry_id != entry_id]
+        radios += radios_of(entry_id, self._entry.title, self.coordinator)
         findings = [
             {key: value for key, value in finding.items() if key != "entry_ids"}
             for finding in analyze(radios)

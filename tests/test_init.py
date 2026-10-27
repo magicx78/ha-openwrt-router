@@ -702,7 +702,7 @@ class TestChannelPlanWiring:
 
         listener = mock_coordinator.async_add_listener.call_args.args[0]
         listener()
-        monitor.evaluate.assert_called_once_with("test_entry_id")
+        monitor.evaluate.assert_called_once_with("test_entry_id", mock_coordinator)
 
         callbacks = [c.args[0] for c in entry.async_on_unload.call_args_list]
         assert remove_listener in callbacks

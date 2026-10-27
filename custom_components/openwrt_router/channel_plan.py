@@ -13,6 +13,9 @@ reports:
 - ``dfs``: 5 GHz radio with at least one 20 MHz sub-channel in 52–144.
 
 The first three are conflicts (Repairs issue), ``dfs`` is informational.
+A radio that also carries a STA/mesh uplink (repeater, 802.11s) has to share
+its partner's channel, so pairs with such a backhaul radio are never
+reported as same_channel/overlap.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from .const import (
     RADIO_KEY_FREQUENCY,
     RADIO_KEY_HTMODE,
     RADIO_KEY_IFNAME,
+    RADIO_KEY_MODE,
     RADIO_KEY_PHY,
 )
 
@@ -65,6 +69,9 @@ _CENTERS_5G: dict[int, tuple[int, ...]] = {
 
 _WIDTH_RE = re.compile(r"(\d+)")
 
+# iwinfo reports "Master", UCI "ap"; anything else is not an AP interface.
+_AP_MODES = frozenset({"", "master", "ap"})
+
 
 @dataclass(frozen=True)
 class Radio:
@@ -77,6 +84,7 @@ class Radio:
     channel: int
     width: int
     center: int
+    backhaul: bool = False
 
     def center_mhz(self) -> float:
         """Return the center frequency of the occupied block."""
@@ -95,12 +103,16 @@ class Radio:
 
     def as_attr(self) -> dict[str, Any]:
         """Return the radio as a compact attribute dict."""
-        return {
+        attr: dict[str, Any] = {
             "router": self.router,
             "radio": self.phy,
+            "band": self.band,
             "channel": self.channel,
             "width_mhz": self.width,
         }
+        if self.backhaul:
+            attr["backhaul"] = True
+        return attr
 
 
 def channel_to_mhz(band: str, channel: float) -> float:
@@ -123,14 +135,27 @@ def htmode_width(htmode: Any) -> int:
     return width if width in (20, 40, 80, 160, 320) else 20
 
 
-def _band_of(iface: dict[str, Any]) -> str | None:
+def _band_of(iface: dict[str, Any], channel: int) -> str | None:
     freq = _as_int(iface.get(RADIO_KEY_FREQUENCY))
     if freq:
         if freq < 3000:
             return BAND_24
         return BAND_6 if freq >= 5925 else BAND_5
     band = iface.get(RADIO_KEY_BAND)
-    return band if band in _BAND_LABELS else None
+    if band not in _BAND_LABELS:
+        return None
+    # The band key may come from a name heuristic (radio0 = 2.4 GHz); the
+    # channel number is more reliable for 2.4 vs 5 GHz.
+    if band == BAND_24 and channel > 14:
+        return BAND_5
+    if band == BAND_5 and channel <= 14:
+        return BAND_24
+    return band
+
+
+def _phy_of(ifname: str) -> str:
+    """phy1-ap0 → phy1; other names (UCI sections) stay as they are."""
+    return ifname.split("-", 1)[0] or ifname
 
 
 def _derive_center(band: str, channel: int, width: int, htmode: Any) -> int:
@@ -156,24 +181,36 @@ def _derive_center(band: str, channel: int, width: int, htmode: Any) -> int:
 
 
 def radios_from_ap_interfaces(
-    entry_id: str, router: str, ap_interfaces: list[dict[str, Any]]
+    entry_id: str,
+    router: str,
+    ap_interfaces: list[dict[str, Any]],
+    sta_interfaces: list[dict[str, Any]] | None = None,
 ) -> list[Radio]:
     """Reduce a router's AP interfaces to one Radio per physical radio.
 
-    Interfaces without a usable channel or band are skipped. The phy is taken
-    from iwinfo (``phy``) or derived from the interface name (``phy1-ap0``).
+    Interfaces without a usable channel or band and non-AP modes are skipped.
+    The phy is taken from iwinfo (``phy``) or derived from the interface name
+    (``phy1-ap0``); radios are keyed by phy and band (multi-band wiphys).
+    ``sta_interfaces`` (repeater/mesh uplinks) mark their phy as backhaul.
     """
-    radios: dict[str, Radio] = {}
+    backhaul_phys = {
+        _phy_of(str(sta.get(RADIO_KEY_IFNAME) or ""))
+        for sta in sta_interfaces or []
+        if isinstance(sta, dict) and sta.get(RADIO_KEY_IFNAME)
+    }
+    radios: dict[tuple[str, str], Radio] = {}
     for iface in ap_interfaces or []:
         if not isinstance(iface, dict):
             continue
+        if str(iface.get(RADIO_KEY_MODE) or "").lower() not in _AP_MODES:
+            continue
         channel = _as_int(iface.get(RADIO_KEY_CHANNEL))
-        band = _band_of(iface)
+        band = _band_of(iface, channel)
         if channel <= 0 or band is None:
             continue
         ifname = str(iface.get(RADIO_KEY_IFNAME) or "")
-        phy = str(iface.get(RADIO_KEY_PHY) or ifname.split("-", 1)[0] or ifname)
-        if not phy or phy in radios:
+        phy = str(iface.get(RADIO_KEY_PHY) or _phy_of(ifname))
+        if not phy or (phy, band) in radios:
             continue
         htmode = iface.get(RADIO_KEY_HTMODE)
         width = htmode_width(htmode)
@@ -182,7 +219,7 @@ def radios_from_ap_interfaces(
         center = _as_int(iface.get(RADIO_KEY_CENTER_CHAN1))
         if width == 20 or center <= 0:
             center = _derive_center(band, channel, width, htmode)
-        radios[phy] = Radio(
+        radios[(phy, band)] = Radio(
             entry_id=entry_id,
             router=router,
             phy=phy,
@@ -190,6 +227,7 @@ def radios_from_ap_interfaces(
             channel=channel,
             width=width,
             center=center,
+            backhaul=phy in backhaul_phys or _phy_of(ifname) in backhaul_phys,
         )
     return list(radios.values())
 
@@ -213,6 +251,8 @@ def analyze(radios: list[Radio]) -> list[dict[str, Any]]:
     for i, a in enumerate(radios):
         for b in radios[i + 1 :]:
             if a.band != b.band or (a.entry_id, a.phy) == (b.entry_id, b.phy):
+                continue
+            if a.backhaul or b.backhaul:
                 continue
             if a.channel == b.channel:
                 findings.append(_finding(FINDING_SAME_CHANNEL, [a, b]))
