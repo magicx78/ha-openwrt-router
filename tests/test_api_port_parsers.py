@@ -312,3 +312,89 @@ class TestPortVlanMapDsa:
             }
         )
         assert await api.get_port_vlan_map() == {}
+
+
+# =====================================================================
+# v1.38.3 — bridge FDB and ARP stay on ubus; SSH only on a ubus error
+# (plan 2026-10-28, AK4)
+# =====================================================================
+
+
+class TestBridgeFdbStaysOnUbus:
+    def _mock_calls(self, mock_api, brforward_data):
+        seen: list[dict] = []
+        buf = _fdb_entry(b"\xaa\xbb\xcc\xdd\xee\x01", 1)
+
+        async def call_side_effect(obj, method, params=None, **kwargs):
+            params = params or {}
+            path = params.get("path", "")
+            if path == "/sys/class/net":
+                return {"entries": [{"name": "lan1", "type": "directory"}]}
+            if path.endswith("/brport/port_no"):
+                return {"data": "0x1\n"}
+            if path.endswith("/brforward"):
+                seen.append(dict(params))
+                if isinstance(brforward_data, Exception):
+                    raise brforward_data
+                return {"data": brforward_data if brforward_data is not None else base64.b64encode(buf).decode()}
+            raise OpenWrtMethodNotFoundError(path)
+
+        mock_api._call = AsyncMock(side_effect=call_side_effect)
+        mock_api._run_ssh = AsyncMock(return_value="0x1 lan1\n")
+        mock_api._run_ssh_binary = AsyncMock(return_value=buf)
+        return seen
+
+    @pytest.mark.asyncio
+    async def test_brforward_read_requests_base64(self, mock_api):
+        seen = self._mock_calls(mock_api, None)
+        fdb = await mock_api.get_bridge_fdb()
+        assert fdb == {"aa:bb:cc:dd:ee:01": "lan1"}
+        assert seen and seen[0].get("base64") is True
+        mock_api._run_ssh.assert_not_awaited()
+        mock_api._run_ssh_binary.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_fdb_from_ubus_does_not_fall_back_to_ssh(self, mock_api):
+        self._mock_calls(mock_api, "")
+        assert await mock_api.get_bridge_fdb() == {}
+        mock_api._run_ssh.assert_not_awaited()
+        mock_api._run_ssh_binary.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_undecodable_fdb_from_ubus_does_not_fall_back_to_ssh(self, mock_api):
+        self._mock_calls(mock_api, "not base64 !!")
+        assert await mock_api.get_bridge_fdb() == {}
+        mock_api._run_ssh.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ubus_error_on_brforward_falls_back_to_ssh(self, mock_api):
+        from custom_components.openwrt_router.api import OpenWrtAuthError
+
+        self._mock_calls(mock_api, OpenWrtAuthError("acl"))
+        assert await mock_api.get_bridge_fdb() == {"aa:bb:cc:dd:ee:01": "lan1"}
+        mock_api._run_ssh.assert_awaited_once()
+        mock_api._run_ssh_binary.assert_awaited_once()
+
+
+class TestArpStaysOnUbus:
+    @pytest.mark.asyncio
+    async def test_empty_arp_from_ubus_does_not_fall_back_to_ssh(self, mock_api):
+        header_only = (
+            "IP address       HW type     Flags       HW address            Mask     Device\n"
+        )
+        mock_api._call = AsyncMock(return_value={"data": header_only})
+        mock_api._run_ssh = AsyncMock(return_value=header_only)
+        assert await mock_api.get_arp_table() == {}
+        mock_api._run_ssh.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ubus_error_on_arp_falls_back_to_ssh(self, mock_api):
+        mock_api._call = AsyncMock(side_effect=OpenWrtMethodNotFoundError("acl"))
+        mock_api._run_ssh = AsyncMock(
+            return_value=(
+                "IP address       HW type     Flags       HW address            Mask     Device\n"
+                "192.0.2.10       0x1         0x2         aa:bb:cc:dd:ee:02     *        br-lan\n"
+            )
+        )
+        assert await mock_api.get_arp_table() == {"aa:bb:cc:dd:ee:02": "192.0.2.10"}
+        mock_api._run_ssh.assert_awaited_once()

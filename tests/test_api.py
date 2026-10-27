@@ -2579,3 +2579,247 @@ class TestGetServicesRcListLeak:
         assert await mock_api.control_service("odhcpd", "restart") is True
         assert mock_api._rc_enabled_fetched_at == 0.0
 
+
+
+# =====================================================================
+# v1.38.3 — WAN counters, disk and tmpfs come from ubus; SSH only as a
+# real fallback (plan 2026-10-28, N2 / AK2 / AK3)
+# =====================================================================
+
+
+def _wan_dump(l3_device: str = "wan") -> dict[str, Any]:
+    return {
+        "interface": [
+            {
+                "interface": "wan",
+                "up": True,
+                "uptime": 3600,
+                "proto": "dhcp",
+                "l3_device": l3_device,
+                "device": l3_device,
+                "ipv4-address": [{"address": "203.0.113.42", "mask": 24}],
+            },
+            {"interface": "lan", "up": True, "proto": "static", "l3_device": "br-lan"},
+        ]
+    }
+
+
+class TestWanCountersViaUbus:
+    """AK2: counters from network.device status, then file/read, SSH last."""
+
+    @pytest.mark.asyncio
+    async def test_counters_from_network_device_status(self, mock_api):
+        seen: list[tuple[str, str, dict]] = []
+
+        async def _call(obj, method, params=None, **kwargs):
+            seen.append((obj, method, dict(params or {})))
+            if (obj, method) == ("network.interface", "dump"):
+                return _wan_dump()
+            if (obj, method) == ("network.device", "status"):
+                return {"up": True, "statistics": {"rx_bytes": 1000, "tx_bytes": 500}}
+            raise OpenWrtMethodNotFoundError(f"{obj}/{method}")
+
+        mock_api._call = AsyncMock(side_effect=_call)
+        mock_api._asyncssh_run = AsyncMock()
+        res = await mock_api.get_wan_status()
+        assert res["rx_bytes"] == 1000
+        assert res["tx_bytes"] == 500
+        assert res["interface"] == "wan"
+        assert ("network.device", "status", {"name": "wan"}) in seen
+        # No file/read needed when device status works, and never SSH.
+        assert not [s for s in seen if s[:2] == ("file", "read")]
+        mock_api._asyncssh_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_counters_use_l3_device_not_logical_name(self, mock_api):
+        async def _call(obj, method, params=None, **kwargs):
+            if (obj, method) == ("network.interface", "dump"):
+                return _wan_dump("pppoe-wan")
+            if (obj, method) == ("network.device", "status"):
+                assert params == {"name": "pppoe-wan"}
+                return {"statistics": {"rx_bytes": 7, "tx_bytes": 8}}
+            raise OpenWrtMethodNotFoundError(f"{obj}/{method}")
+
+        mock_api._call = AsyncMock(side_effect=_call)
+        mock_api._asyncssh_run = AsyncMock()
+        res = await mock_api.get_wan_status()
+        assert (res["rx_bytes"], res["tx_bytes"]) == (7, 8)
+        # The logical name stays the interface key (rate baseline in coordinator).
+        assert res["interface"] == "wan"
+        mock_api._asyncssh_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_counters_from_file_read_when_device_status_denied(self, mock_api):
+        """Older ACL without network.device: file/read {"data": ...} is parsed."""
+
+        async def _call(obj, method, params=None, **kwargs):
+            if (obj, method) == ("network.interface", "dump"):
+                return _wan_dump()
+            if (obj, method) == ("network.device", "status"):
+                mock_api._acl_blocked.add(mock_api._acl_cache_key(obj, method, params))
+                raise OpenWrtMethodNotFoundError("acl")
+            if (obj, method) == ("file", "read"):
+                path = params["path"]
+                assert path.startswith("/sys/class/net/wan/statistics/")
+                return {"data": "1000\n" if path.endswith("rx_bytes") else "500\n"}
+            raise OpenWrtMethodNotFoundError(f"{obj}/{method}")
+
+        mock_api._call = AsyncMock(side_effect=_call)
+        mock_api._asyncssh_run = AsyncMock()
+        res = await mock_api.get_wan_status()
+        assert (res["rx_bytes"], res["tx_bytes"]) == (1000, 500)
+        mock_api._asyncssh_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unreadable_counters_without_acl_block_do_not_use_ssh(self, mock_api):
+        """Unknown device (NOT_FOUND, not an ACL denial): None, and no SSH login."""
+
+        async def _call(obj, method, params=None, **kwargs):
+            if (obj, method) == ("network.interface", "dump"):
+                return _wan_dump("wwan0")
+            raise OpenWrtMethodNotFoundError(f"{obj}/{method} not found")
+
+        mock_api._call = AsyncMock(side_effect=_call)
+        mock_api._asyncssh_run = AsyncMock()
+        res = await mock_api.get_wan_status()
+        assert res["rx_bytes"] is None
+        assert res["tx_bytes"] is None
+        assert res["connected"] is True
+        mock_api._asyncssh_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_garbage_counter_data_gives_none_without_ssh(self, mock_api):
+        async def _call(obj, method, params=None, **kwargs):
+            if (obj, method) == ("network.interface", "dump"):
+                return _wan_dump()
+            if (obj, method) == ("network.device", "status"):
+                return {"statistics": {"rx_bytes": "n/a", "tx_bytes": None}}
+            raise OpenWrtMethodNotFoundError(f"{obj}/{method}")
+
+        mock_api._call = AsyncMock(side_effect=_call)
+        mock_api._asyncssh_run = AsyncMock()
+        res = await mock_api.get_wan_status()
+        assert res["rx_bytes"] is None
+        assert res["tx_bytes"] is None
+        mock_api._asyncssh_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ssh_fallback_only_when_both_ubus_paths_acl_blocked(self, mock_api):
+        async def _call(obj, method, params=None, **kwargs):
+            if (obj, method) == ("network.interface", "dump"):
+                return _wan_dump()
+            if (obj, method) in (("network.device", "status"), ("file", "read")):
+                mock_api._acl_blocked.add(mock_api._acl_cache_key(obj, method, params))
+                raise OpenWrtMethodNotFoundError("acl")
+            raise OpenWrtMethodNotFoundError(f"{obj}/{method}")
+
+        mock_api._call = AsyncMock(side_effect=_call)
+        mock_api._run_ssh = AsyncMock(return_value="1000\n500\n")
+        res = await mock_api.get_wan_status()
+        assert (res["rx_bytes"], res["tx_bytes"]) == (1000, 500)
+        mock_api._run_ssh.assert_awaited_once()
+        assert "/sys/class/net/wan/statistics/rx_bytes" in mock_api._run_ssh.await_args.args[0]
+
+
+MOCK_SYSTEM_INFO_FS = {
+    **MOCK_SYSTEM_INFO,
+    # KiB, as procd reports them (values seen on real hardware)
+    "root": {"total": 3328, "free": 2996, "used": 332, "avail": 2996},
+    "tmp": {"total": 119784, "free": 119120, "used": 664, "avail": 119120},
+}
+
+_BUSYBOX_DF_PK = (
+    "Filesystem           1024-blocks    Used Available Capacity Mounted on\n"
+    "/dev/root                 7936    7936         0 100% /rom\n"
+    "tmpfs                   119784     664    119120   1% /tmp\n"
+    "/dev/mtdblock6            3328     332      2996  10% /overlay\n"
+    "overlayfs:/overlay        3328     332      2996  10% /\n"
+    "tmpfs                      512       0       512   0% /dev\n"
+)
+
+
+class TestDiskAndTmpfsFromSystemInfo:
+    """AK3: no extra call, no SSH, real values instead of 0.0."""
+
+    @pytest.mark.asyncio
+    async def test_disk_space_from_system_info(self, mock_api):
+        mock_api._call = AsyncMock(return_value=MOCK_SYSTEM_INFO_FS)
+        mock_api._asyncssh_run = AsyncMock()
+        await mock_api.get_router_status()
+        mock_api._call.reset_mock()
+        disk = await mock_api.get_disk_space()
+        primary = disk["primary"]
+        assert primary["mount"] == "/"
+        assert primary["total_mb"] == round(3328 / 1024, 1)
+        assert primary["used_mb"] == round(332 / 1024, 1)
+        assert primary["free_mb"] == round(2996 / 1024, 1)
+        assert primary["usage_percent"] == round(332 / 3328 * 100, 1)
+        assert disk["mounts"] == [primary]
+        mock_api._call.assert_not_awaited()  # no second system/info call
+        mock_api._asyncssh_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_tmpfs_from_system_info(self, mock_api):
+        mock_api._call = AsyncMock(return_value=MOCK_SYSTEM_INFO_FS)
+        mock_api._asyncssh_run = AsyncMock()
+        await mock_api.get_router_status()
+        mock_api._call.reset_mock()
+        tmp = await mock_api.get_tmpfs_stats()
+        assert tmp["total_mb"] == round(119784 / 1024, 1)
+        assert tmp["used_mb"] == round(664 / 1024, 1)
+        assert tmp["free_mb"] == round(119120 / 1024, 1)
+        assert tmp["usage_percent"] == round(664 / 119784 * 100, 1)
+        assert tmp["mounts"][0]["mount"] == "/tmp"
+        mock_api._call.assert_not_awaited()
+        mock_api._asyncssh_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_disk_ssh_fallback_uses_posix_df_and_is_cached(self, mock_api):
+        """Old OpenWrt without root/tmp in system/info: df -Pk via SSH, 600 s cache."""
+        mock_api._call = AsyncMock(return_value=MOCK_SYSTEM_INFO)
+        await mock_api.get_router_status()
+        mock_api._asyncssh_run = AsyncMock(return_value=(0, _BUSYBOX_DF_PK, b""))
+        first = await mock_api.get_disk_space()
+        assert first["primary"]["mount"] == "/"
+        assert first["primary"]["total_mb"] == round(3328 / 1024, 1)
+        assert {m["mount"] for m in first["mounts"]} == {"/rom", "/tmp", "/overlay", "/", "/dev"}
+        cmd = mock_api._asyncssh_run.await_args.args[0]
+        assert cmd.startswith("df -Pk")
+        assert "-B" not in cmd
+        second = await mock_api.get_disk_space()
+        assert second == first
+        assert mock_api._asyncssh_run.await_count == 1  # served from cache
+        # Expired cache entry → one more SSH run
+        key, (_ts, value) = next(iter(mock_api._ssh_slow_cache.items()))
+        mock_api._ssh_slow_cache[key] = (0.0, value)
+        await mock_api.get_disk_space()
+        assert mock_api._asyncssh_run.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_tmpfs_ssh_fallback_uses_posix_df(self, mock_api):
+        mock_api._call = AsyncMock(return_value=MOCK_SYSTEM_INFO)
+        await mock_api.get_router_status()
+        tmpfs_only = "".join(
+            line + "\n" for line in _BUSYBOX_DF_PK.splitlines() if "tmpfs" in line or "Filesystem" in line
+        )
+        mock_api._asyncssh_run = AsyncMock(return_value=(0, tmpfs_only, b""))
+        tmp = await mock_api.get_tmpfs_stats()
+        cmd = mock_api._asyncssh_run.await_args.args[0]
+        assert cmd.startswith("df -Pk")
+        assert "-t tmpfs" in cmd
+        assert tmp["total_mb"] == round((119784 + 512) / 1024, 1)
+        assert {m["mount"] for m in tmp["mounts"]} == {"/tmp", "/dev"}
+
+    @pytest.mark.asyncio
+    async def test_df_failure_returns_defaults_without_exception(self, mock_api):
+        mock_api._call = AsyncMock(return_value=MOCK_SYSTEM_INFO)
+        await mock_api.get_router_status()
+        mock_api._asyncssh_run = AsyncMock(return_value=(1, "", b"df: unrecognized option"))
+        assert (await mock_api.get_disk_space()) == {"primary": {}, "mounts": []}
+        assert (await mock_api.get_tmpfs_stats())["total_mb"] == 0.0
+
+    def test_no_gnu_df_block_size_flag_in_source(self):
+        from pathlib import Path
+
+        src = Path(api_module.__file__).read_text(encoding="utf-8")
+        assert "df -B" not in src  # BusyBox df has no -B; it broke the sensors (0.0)

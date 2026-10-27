@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import ipaddress
 import json
@@ -84,6 +86,7 @@ from .const import (
     SESSION_REFRESH_MARGIN_SECONDS,
     SOURCE_HOSTAPD,
     SOURCE_IWINFO,
+    SSH_SLOW_REFRESH_INTERVAL,
     UBUS_DEVICE_OBJECT,
     UBUS_DEVICE_STATUS,
     UBUS_FILE_OBJECT,
@@ -754,6 +757,73 @@ def _parse_proc_net_arp(raw: str) -> dict[str, str]:
     return {mac: rank[2] for mac, rank in candidates.items()}
 
 
+def _as_byte_counter(value: Any) -> int | None:
+    """Return a non-negative int from a counter value (int or digit string)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        return int(text) if text.isdigit() else None
+    return None
+
+
+def _parse_df_posix(raw: str) -> list[tuple[str, int, int, int]]:
+    """Parse ``df -Pk`` output into ``(mount, total_kib, used_kib, avail_kib)``.
+
+    POSIX format (``-P``) keeps every filesystem on one line and prints KiB
+    (``-k``) on BusyBox and GNU alike; BusyBox has no ``-B``. The header line
+    is skipped, mount points with spaces are re-joined.
+    """
+    rows: list[tuple[str, int, int, int]] = []
+    for line in (raw or "").splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        try:
+            total_kib, used_kib, avail_kib = (
+                int(parts[1]),
+                int(parts[2]),
+                int(parts[3]),
+            )
+        except ValueError:
+            continue
+        rows.append((" ".join(parts[5:]), total_kib, used_kib, avail_kib))
+    return rows
+
+
+def _fs_entry_from_kib(
+    mount: str, total_kib: int, used_kib: int, avail_kib: int
+) -> dict[str, Any]:
+    """Build one disk/tmpfs mount entry (MB, one decimal) from KiB figures."""
+    return {
+        "mount": mount,
+        "total_mb": round(total_kib / 1024, 1),
+        "used_mb": round(used_kib / 1024, 1),
+        "free_mb": round(avail_kib / 1024, 1),
+        "usage_percent": round(used_kib / total_kib * 100, 1) if total_kib > 0 else 0.0,
+    }
+
+
+def _fs_row_from_system_info(
+    mount: str, block: Any
+) -> tuple[str, int, int, int] | None:
+    """Turn a ``system info`` ``root``/``tmp`` block (KiB) into a df-style row."""
+    if not isinstance(block, dict):
+        return None
+    total = block.get("total")
+    used = block.get("used")
+    avail = block.get("avail", block.get("free"))
+    if not all(
+        isinstance(v, int) and not isinstance(v, bool) for v in (total, used, avail)
+    ):
+        return None
+    if total <= 0:
+        return None
+    return (mount, total, used, avail)
+
+
 class OpenWrtAPI:
     """Async client for OpenWrt ubus / rpcd JSON-RPC.
 
@@ -904,6 +974,22 @@ class OpenWrtAPI:
         # C-1: closing flag to prevent new calls during shutdown
         self._closing: bool = False
 
+        # One asyncssh connection per instance, reused by every SSH command
+        # of a poll and released by the coordinator at the end of the poll
+        # (async_release_ssh) or on unload (async_close). The lock serialises
+        # connection setup only; commands multiplex over the open connection.
+        self._ssh_conn: asyncssh.SSHClientConnection | None = None
+        self._ssh_conn_lock = asyncio.Lock()
+
+        # ``root``/``tmp`` filesystem block from the last ``system info``
+        # reply (KiB), so disk and tmpfs usage cost no extra call and no SSH.
+        # None = not seen (older OpenWrt or SSH-fallback status path).
+        self._system_info_fs: dict[str, Any] | None = None
+
+        # Results of SSH-only readers that are refreshed at most every
+        # SSH_SLOW_REFRESH_INTERVAL: key -> (time.monotonic() of fetch, value).
+        self._ssh_slow_cache: dict[str, tuple[float, Any]] = {}
+
     @property
     def uses_ssh_fallback(self) -> bool:
         """True if any API call fell back to SSH in the last poll cycle."""
@@ -968,6 +1054,7 @@ class OpenWrtAPI:
                 )
         self._token = DEFAULT_SESSION_ID
         self._token_expires_at = 0.0
+        await self._asyncssh_drop_connection()
         self._wifi_method = None
         self._ssh_ap_interfaces = None
         self._hostapd_ifaces = None
@@ -1335,6 +1422,7 @@ class OpenWrtAPI:
             That path returns the script's own percentages unchanged and has
             no ``cpu_cores`` / ``load_average``.
         """
+        self._system_info_fs = None
         try:
             result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_INFO, {})
         except (
@@ -1364,6 +1452,14 @@ class OpenWrtAPI:
                         "memory": {},
                     }
             raise
+
+        # procd (OpenWrt 21.02+) reports statvfs of "/" and "/tmp" here (KiB);
+        # get_disk_space()/get_tmpfs_stats() read it without another call.
+        self._system_info_fs = {
+            key: result[key]
+            for key in ("root", "tmp")
+            if isinstance(result.get(key), dict)
+        } or None
 
         raw_load = result.get("load")
         if not isinstance(raw_load, list):
@@ -1585,45 +1681,10 @@ class OpenWrtAPI:
         ipv4 = ipv4_entry.get("address", "") if isinstance(ipv4_entry, dict) else ""
         iface_name = wan_iface.get("interface", "").lower()
 
-        # Try to read RX/TX bytes from /sys/class/net/{iface}/statistics/
-        rx_bytes = None
-        tx_bytes = None
-
-        try:
-            rx_path = f"/sys/class/net/{iface_name}/statistics/rx_bytes"
-            tx_path = f"/sys/class/net/{iface_name}/statistics/tx_bytes"
-
-            rx_result = await self._call("file", "read", {"path": rx_path})
-            tx_result = await self._call("file", "read", {"path": tx_path})
-
-            if rx_result:
-                rx_bytes = (
-                    int(rx_result.strip()) if isinstance(rx_result, str) else None
-                )
-            if tx_result:
-                tx_bytes = (
-                    int(tx_result.strip()) if isinstance(tx_result, str) else None
-                )
-        except Exception:  # noqa: BLE001, S110
-            pass
-
-        # SSH fallback if ubus file/read is ACL-blocked (in-process asyncssh).
-        if rx_bytes is None and self._password:
-            out = await self._run_ssh(
-                f"cat /sys/class/net/{iface_name}/statistics/rx_bytes"
-                f" /sys/class/net/{iface_name}/statistics/tx_bytes",
-                timeout=5.0,
-            )
-            if out:
-                lines = out.strip().splitlines()
-                if len(lines) >= 2:
-                    try:
-                        rx_bytes = int(lines[0].strip())
-                        tx_bytes = int(lines[1].strip())
-                    except ValueError:
-                        _LOGGER.debug(
-                            "WAN rx/tx SSH fallback returned non-numeric output"
-                        )
+        # RX/TX byte counters of the WAN *device* (l3_device such as "wan",
+        # "pppoe-wan" or "wwan0"); the logical name is only the last resort.
+        wan_device = wan_iface.get("l3_device") or wan_iface.get("device") or iface_name
+        rx_bytes, tx_bytes = await self._read_wan_counters(str(wan_device))
 
         return {
             "connected": wan_iface.get("up", False),
@@ -1634,6 +1695,94 @@ class OpenWrtAPI:
             "rx_bytes": rx_bytes,
             "tx_bytes": tx_bytes,
         }
+
+    async def _read_wan_counters(self, device: str) -> tuple[int | None, int | None]:
+        """Return ``(rx_bytes, tx_bytes)`` of a network device, or ``(None, None)``.
+
+        Sources, in order:
+
+        1. ``network.device status {"name": device}`` — one call, allowed by
+           rpcd ACL v6 and later (the port sensors use the same object).
+        2. ``file read /sys/class/net/<device>/statistics/{rx,tx}_bytes`` —
+           for ACLs without ``network.device``; the reply is ``{"data": …}``.
+        3. SSH ``cat`` of the same files — only when BOTH ubus paths are
+           denied by the ACL (``_acl_blocked``) and SSH credentials exist.
+
+        A device that merely does not exist (NOT_FOUND) or unparsable counter
+        data yield ``None`` without an SSH login: before v1.38.3 the misparsed
+        ``file read`` reply sent every poll of every router through SSH (N2).
+        """
+        if not device:
+            return None, None
+
+        device_params = {"name": device}
+        try:
+            status = await self._call(
+                UBUS_DEVICE_OBJECT, UBUS_DEVICE_STATUS, device_params
+            )
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+        ) as err:
+            _LOGGER.debug("WAN counters via network.device unavailable: %s", err)
+        else:
+            stats = status.get("statistics") if isinstance(status, dict) else None
+            if isinstance(stats, dict):
+                rx = _as_byte_counter(stats.get("rx_bytes"))
+                tx = _as_byte_counter(stats.get("tx_bytes"))
+                if rx is not None and tx is not None:
+                    return rx, tx
+        device_denied = (
+            self._acl_cache_key(UBUS_DEVICE_OBJECT, UBUS_DEVICE_STATUS, device_params)
+            in self._acl_blocked
+        )
+
+        rx_path = f"/sys/class/net/{device}/statistics/rx_bytes"
+        tx_path = f"/sys/class/net/{device}/statistics/tx_bytes"
+        try:
+            rx_res = await self._call(
+                UBUS_FILE_OBJECT, UBUS_FILE_READ, {"path": rx_path}
+            )
+            tx_res = await self._call(
+                UBUS_FILE_OBJECT, UBUS_FILE_READ, {"path": tx_path}
+            )
+        except (
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+        ) as err:
+            _LOGGER.debug("WAN counters via file/read unavailable: %s", err)
+        else:
+            rx = _as_byte_counter(
+                rx_res.get("data") if isinstance(rx_res, dict) else None
+            )
+            tx = _as_byte_counter(
+                tx_res.get("data") if isinstance(tx_res, dict) else None
+            )
+            if rx is not None and tx is not None:
+                return rx, tx
+            return None, None
+        file_denied = (
+            self._acl_cache_key(UBUS_FILE_OBJECT, UBUS_FILE_READ, {"path": rx_path})
+            in self._acl_blocked
+        )
+
+        if not (device_denied and file_denied) or not self._password:
+            return None, None
+
+        # Both ubus paths are ACL-denied (older ACL): read over SSH as before.
+        out = await self._run_ssh(f"cat {rx_path} {tx_path}", timeout=5.0)
+        lines = out.strip().splitlines() if out else []
+        if len(lines) >= 2:
+            rx = _as_byte_counter(lines[0])
+            tx = _as_byte_counter(lines[1])
+            if rx is not None and tx is not None:
+                return rx, tx
+            _LOGGER.debug("WAN rx/tx SSH fallback returned non-numeric output")
+        return None, None
 
     async def get_wifi_status(self) -> list[dict[str, Any]]:
         """Return a list of WiFi radio / SSID descriptors.
@@ -2415,32 +2564,74 @@ class OpenWrtAPI:
             f"Fix: add 'uci commit wireless' permission to the rpcd ACL for this user."
         ) from root_err
 
-    async def _asyncssh_exec_once(
-        self, remote_cmd: str, password: str | None
-    ) -> asyncssh.SSHCompletedProcess:
-        """Open one asyncssh connection, run a command, close it.
+    async def _asyncssh_get_connection(
+        self, password: str | None
+    ) -> asyncssh.SSHClientConnection:
+        """Return the per-instance SSH connection, opening it when needed.
 
         ``password=None`` selects key-auth (asyncssh falls back to the default
-        ``~/.ssh`` client keys / agent). ``known_hosts=None`` reproduces the old
-        ``StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`` behaviour.
-        ``encoding=None`` returns stdout/stderr as raw bytes for both text and
-        binary callers; decoding happens centrally in :meth:`_asyncssh_run`.
+        ``~/.ssh`` client keys / agent). Host-key handling is unchanged from
+        earlier releases (see plan 2026-10-28, decision E2, for the follow-up).
 
         NOTE: no ``port=`` — SSH is port 22; ``self._port`` is the ubus HTTP port.
         """
-        conn = await asyncssh.connect(
-            self._host,
-            username=self._username,
-            password=password,
-            known_hosts=None,
-            connect_timeout=SSH_CONNECT_TIMEOUT,
-        )
+        async with self._ssh_conn_lock:
+            conn = self._ssh_conn
+            if conn is not None and not conn.is_closed():
+                return conn
+            self._ssh_conn = None
+            conn = await asyncssh.connect(
+                self._host,
+                username=self._username,
+                password=password,
+                known_hosts=None,
+                connect_timeout=SSH_CONNECT_TIMEOUT,
+            )
+            self._ssh_conn = conn
+            return conn
+
+    async def _asyncssh_drop_connection(self) -> None:
+        """Close and forget the per-instance SSH connection (best effort)."""
+        conn, self._ssh_conn = self._ssh_conn, None
+        if conn is None:
+            return
+        with contextlib.suppress(Exception):
+            conn.close()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(conn.wait_closed(), timeout=2.0)
+
+    async def async_release_ssh(self) -> None:
+        """Close the SSH connection kept open during a poll.
+
+        Called by the coordinator at the end of every poll (also after a
+        failed one), so the router only holds an SSH session while commands
+        actually run. Safe to call when no connection is open.
+        """
+        await self._asyncssh_drop_connection()
+
+    async def _asyncssh_exec_once(
+        self, remote_cmd: str, password: str | None
+    ) -> asyncssh.SSHCompletedProcess:
+        """Run one command on the shared connection.
+
+        Every command of a poll reuses one connection (one login per poll
+        instead of one per command, N2). When the server closed it meanwhile
+        the command is retried once on a fresh connection. ``encoding=None``
+        returns stdout/stderr as raw bytes for both text and binary callers;
+        decoding happens centrally in :meth:`_asyncssh_run`.
+        """
+        conn = await self._asyncssh_get_connection(password)
         try:
             return await conn.run(remote_cmd, check=False, encoding=None)
-        finally:
-            conn.close()
-            with contextlib.suppress(Exception):
-                await conn.wait_closed()
+        except (asyncssh.ChannelOpenError, asyncssh.ConnectionLost, OSError) as err:
+            _LOGGER.debug(
+                "SSH connection to %s unusable (%s) — reconnecting once",
+                self._host,
+                err,
+            )
+            await self._asyncssh_drop_connection()
+            conn = await self._asyncssh_get_connection(password)
+            return await conn.run(remote_cmd, check=False, encoding=None)
 
     async def _asyncssh_run(
         self, remote_cmd: str, *, timeout: float, binary: bool = False
@@ -2457,6 +2648,8 @@ class OpenWrtAPI:
         ``/proc/<pid>/cmdline`` (which the previous subprocess-based transport
         had to guard against explicitly).
         """
+        if self._closing:
+            return (SUBPROCESS_RC_FAILED_TO_SPAWN, b"" if binary else "", b"closing")
         for _attempt in range(2):
             password = None if self._ssh_use_key else self._password
             try:
@@ -2465,6 +2658,10 @@ class OpenWrtAPI:
                 )
             except TimeoutError:
                 # MUST precede the OSError catch — TimeoutError subclasses OSError.
+                # The remote command may still be running on a half-used
+                # channel: drop the shared connection so the next command
+                # starts clean.
+                await self._asyncssh_drop_connection()
                 return (SUBPROCESS_RC_TIMEOUT, b"" if binary else "", b"timeout")
             except asyncssh.PermissionDenied:
                 if not self._ssh_use_key:
@@ -3422,178 +3619,92 @@ class OpenWrtAPI:
     # ------------------------------------------------------------------
 
     async def get_disk_space(self) -> dict[str, Any]:
-        """Return disk space usage for all mounted filesystems.
+        """Return disk space usage (MB).
 
-        Executes 'df' command via rpcd to get total/used/free space for all mounts.
-        Falls back gracefully if unavailable.
+        Source: the ``root`` block of the last ``system info`` reply (statvfs
+        of "/", KiB; procd on OpenWrt 21.02+), which costs no extra call and
+        no SSH. Routers without it fall back to ``df -Pk`` over SSH, refreshed
+        at most every SSH_SLOW_REFRESH_INTERVAL. (Before v1.38.3 this always
+        ran ``df`` with the GNU-only block-size option over SSH; BusyBox
+        rejects it, so the sensors showed 0.0 and every poll cost an SSH
+        login, N2.)
 
         Returns:
             {
-                "primary": {
-                    "mount": str,           # "/" typically
-                    "total_mb": float,
-                    "used_mb": float,
-                    "free_mb": float,
-                    "usage_percent": float,
-                },
-                "mounts": [
-                    {
-                        "mount": str,
-                        "total_mb": float,
-                        "used_mb": float,
-                        "free_mb": float,
-                        "usage_percent": float,
-                    },
-                    ...
-                ]
+                "primary": {"mount", "total_mb", "used_mb", "free_mb", "usage_percent"},
+                "mounts": [same shape, ...],
             }
+            ``{"primary": {}, "mounts": []}`` when nothing is available.
         """
-        try:
-            # Execute 'df -B 1048576' to get output in MB units (easier parsing)
-            # 1048576 bytes = 1 MB
-            result = await self._call_file_read_shell("df -B 1048576", "disk_stats")
-
-            if not result or not result.get("stdout"):
-                return self._default_disk_space()
-
-            lines = result["stdout"].strip().split("\n")
-            mounts_data = []
-            primary_mount = None
-
-            for line in lines[1:]:  # Skip header
-                parts = line.split()
-                if len(parts) < 6:
-                    continue
-
-                try:
-                    mount = parts[5]
-                    total_mb = float(parts[1])
-                    used_mb = float(parts[2])
-                    free_mb = float(parts[3])
-                    usage_percent = (used_mb / total_mb * 100) if total_mb > 0 else 0.0
-
-                    mount_dict = {
-                        "mount": mount,
-                        "total_mb": round(total_mb, 1),
-                        "used_mb": round(used_mb, 1),
-                        "free_mb": round(free_mb, 1),
-                        "usage_percent": round(usage_percent, 1),
-                    }
-                    mounts_data.append(mount_dict)
-
-                    # Root mount is primary
-                    if mount == "/" or primary_mount is None:
-                        primary_mount = mount_dict
-
-                except (ValueError, IndexError):
-                    _LOGGER.debug("Could not parse df output line: %s", line)
-                    continue
-
-            if not mounts_data:
-                return self._default_disk_space()
-
-            return {
-                "primary": primary_mount or mounts_data[0],
-                "mounts": mounts_data,
-            }
-
-        except (
-            OpenWrtResponseError,
-            OpenWrtMethodNotFoundError,
-            OpenWrtTimeoutError,
-        ) as err:
-            _LOGGER.debug("Could not fetch disk space stats: %s", err)
+        row = _fs_row_from_system_info("/", (self._system_info_fs or {}).get("root"))
+        rows = (
+            [row]
+            if row is not None
+            else await self._df_rows_via_ssh("disk_space", "df -Pk")
+        )
+        if not rows:
             return self._default_disk_space()
+        mounts = [_fs_entry_from_kib(*r) for r in rows]
+        primary = next((m for m in mounts if m["mount"] == "/"), mounts[0])
+        return {"primary": primary, "mounts": mounts}
 
     async def get_tmpfs_stats(self) -> dict[str, Any]:
-        """Return temporary filesystem (tmpfs) usage.
+        """Return temporary filesystem (tmpfs) usage (MB).
 
-        Filters /proc/mounts for tmpfs entries to get stats for /tmp, /run, etc.
-        Falls back gracefully if unavailable.
+        Source: the ``tmp`` block of the last ``system info`` reply (statvfs
+        of "/tmp", KiB) without any extra call; otherwise ``df -Pk -t tmpfs``
+        over SSH, refreshed at most every SSH_SLOW_REFRESH_INTERVAL.
 
         Returns:
             {
-                "total_mb": float,
-                "used_mb": float,
-                "free_mb": float,
-                "usage_percent": float,
-                "mounts": [
-                    {
-                        "mount": str,
-                        "total_mb": float,
-                        "used_mb": float,
-                        "free_mb": float,
-                        "usage_percent": float,
-                    },
-                    ...
-                ]
+                "total_mb", "used_mb", "free_mb", "usage_percent": float,
+                "mounts": [{"mount", "total_mb", "used_mb", "free_mb", "usage_percent"}, ...],
             }
         """
-        try:
-            result = await self._call_file_read_shell(
-                "df -B 1048576 -t tmpfs", "tmpfs_stats"
-            )
-
-            if not result or not result.get("stdout"):
-                return self._default_tmpfs()
-
-            lines = result["stdout"].strip().split("\n")
-            tmpfs_mounts = []
-            total_mb = 0.0
-            total_used_mb = 0.0
-            total_free_mb = 0.0
-
-            for line in lines[1:]:  # Skip header
-                parts = line.split()
-                if len(parts) < 6:
-                    continue
-
-                try:
-                    mount = parts[5]
-                    size_mb = float(parts[1])
-                    used_mb = float(parts[2])
-                    free_mb = float(parts[3])
-
-                    tmpfs_mounts.append(
-                        {
-                            "mount": mount,
-                            "total_mb": round(size_mb, 1),
-                            "used_mb": round(used_mb, 1),
-                            "free_mb": round(free_mb, 1),
-                            "usage_percent": round(
-                                (used_mb / size_mb * 100) if size_mb > 0 else 0.0, 1
-                            ),
-                        }
-                    )
-
-                    total_mb += size_mb
-                    total_used_mb += used_mb
-                    total_free_mb += free_mb
-
-                except (ValueError, IndexError):
-                    _LOGGER.debug("Could not parse tmpfs line: %s", line)
-                    continue
-
-            if not tmpfs_mounts:
-                return self._default_tmpfs()
-
-            total_usage = (total_used_mb / total_mb * 100) if total_mb > 0 else 0.0
-
-            return {
-                "total_mb": round(total_mb, 1),
-                "used_mb": round(total_used_mb, 1),
-                "free_mb": round(total_free_mb, 1),
-                "usage_percent": round(total_usage, 1),
-                "mounts": tmpfs_mounts,
-            }
-
-        except (
-            OpenWrtResponseError,
-            OpenWrtMethodNotFoundError,
-            OpenWrtTimeoutError,
-        ) as err:
-            _LOGGER.debug("Could not fetch tmpfs stats: %s", err)
+        row = _fs_row_from_system_info("/tmp", (self._system_info_fs or {}).get("tmp"))
+        rows = (
+            [row]
+            if row is not None
+            else await self._df_rows_via_ssh("tmpfs", "df -Pk -t tmpfs")
+        )
+        if not rows:
             return self._default_tmpfs()
+        total_kib = sum(r[1] for r in rows)
+        used_kib = sum(r[2] for r in rows)
+        avail_kib = sum(r[3] for r in rows)
+        totals = _fs_entry_from_kib("", total_kib, used_kib, avail_kib)
+        return {
+            "total_mb": totals["total_mb"],
+            "used_mb": totals["used_mb"],
+            "free_mb": totals["free_mb"],
+            "usage_percent": totals["usage_percent"],
+            "mounts": [_fs_entry_from_kib(*r) for r in rows],
+        }
+
+    async def _df_rows_via_ssh(
+        self, cache_key: str, command: str
+    ) -> list[tuple[str, int, int, int]]:
+        """Run a ``df -Pk`` variant over SSH, at most every SSH_SLOW_REFRESH_INTERVAL.
+
+        The parsed rows (also an empty result, e.g. no SSH access) are cached
+        under ``cache_key`` so a router without the ``system info`` fields is
+        asked over SSH ten times an hour at most, not once per poll.
+        """
+        now = time.monotonic()
+        cached = self._ssh_slow_cache.get(cache_key)
+        if cached is not None and now - cached[0] < SSH_SLOW_REFRESH_INTERVAL:
+            return cached[1]
+        rows: list[tuple[str, int, int, int]] = []
+        if self._password or self._ssh_use_key:
+            rc, stdout, _stderr = await self._asyncssh_run(
+                command, timeout=10.0, binary=False
+            )
+            if rc == 0 and isinstance(stdout, str):
+                rows = _parse_df_posix(stdout)
+            else:
+                _LOGGER.debug("%r over SSH failed (rc=%s)", command, rc)
+        self._ssh_slow_cache[cache_key] = (now, rows)
+        return rows
 
     def _default_disk_space(self) -> dict[str, Any]:
         """Return default empty disk space dict."""
@@ -3608,48 +3719,6 @@ class OpenWrtAPI:
             "usage_percent": 0.0,
             "mounts": [],
         }
-
-    async def _call_file_read_shell(
-        self, command: str, cache_key: str
-    ) -> dict[str, Any]:
-        """Execute a shell command and return stdout/stderr.
-
-        Tries SSH fallback directly — rpcd-mod-exec is rare and the SSH
-        transport is already established for ACL-restricted routers.
-        The result is NOT cached — cache_key is reserved for future use.
-
-        Args:
-            command: Shell command to execute (e.g., "df -B 1048576").
-            cache_key: Cache key for future use (currently unused).
-
-        Returns:
-            {"stdout": str, "stderr": str, "code": int} or {} on failure.
-
-        Raises:
-            OpenWrtMethodNotFoundError: If no execution path is available.
-        """
-        # Try SSH fallback directly — rpcd-mod-exec is rare and the SSH
-        # transport is already established for ACL-restricted routers.
-        if self._password or self._ssh_use_key:
-            rc, stdout, stderr = await self._asyncssh_run(
-                command, timeout=10.0, binary=False
-            )
-            if rc >= 0:
-                return {
-                    "stdout": stdout if isinstance(stdout, str) else "",
-                    "stderr": stderr.decode(errors="replace")
-                    if isinstance(stderr, bytes)
-                    else str(stderr),
-                    "code": rc,
-                }
-
-        # No execution path available
-        _LOGGER.debug(
-            "No shell execution path available for command %r (cache_key=%s)",
-            command,
-            cache_key,
-        )
-        return {}
 
     async def get_network_interfaces(self) -> list[dict[str, Any]]:
         """Return network interface statistics from network.interface/dump.
@@ -4014,23 +4083,18 @@ class OpenWrtAPI:
                     pass
             return port_map
 
-        # Method 1: file/read on brforward binary (avoids file/exec memory leak)
+        # Method 1: file/read on brforward binary (avoids file/exec memory leak).
+        # ``base64`` is required: without it rpcd hands the binary file back
+        # as an (empty) C string, which made every poll fall through to SSH
+        # (N2). A successful read is final, even when the table is empty;
+        # SSH remains the fallback for a denied or failed ubus read only.
         try:
             port_no_map = await _get_port_map()
             result = await self._call(
                 UBUS_FILE_OBJECT,
                 "read",
-                {"path": "/sys/class/net/br-lan/brforward"},
+                {"path": "/sys/class/net/br-lan/brforward", "base64": True},
             )
-            raw = result.get("data", "") or ""
-            # brforward is base64-encoded when returned via file/read
-            import base64
-
-            fdb_bytes = base64.b64decode(raw) if raw else b""
-            fdb = _parse_brforward(fdb_bytes, port_no_map)
-            if fdb:
-                _LOGGER.debug("Bridge FDB via file/read: %d entries", len(fdb))
-                return fdb
         except (
             OpenWrtResponseError,
             OpenWrtTimeoutError,
@@ -4038,6 +4102,16 @@ class OpenWrtAPI:
             OpenWrtAuthError,
         ) as err:
             _LOGGER.debug("Bridge FDB via file/read unavailable: %s", err)
+        else:
+            raw = result.get("data", "") or ""
+            try:
+                fdb_bytes = base64.b64decode(raw, validate=True) if raw else b""
+            except (binascii.Error, ValueError):
+                _LOGGER.debug("Bridge FDB via file/read: reply is not base64")
+                fdb_bytes = b""
+            fdb = _parse_brforward(fdb_bytes, port_no_map)
+            _LOGGER.debug("Bridge FDB via file/read: %d entries", len(fdb))
+            return fdb
 
         # Method 2: /sys/class/net/br-lan/brforward binary via SSH (no bridge binary)
         try:
@@ -4092,10 +4166,6 @@ class OpenWrtAPI:
                 "read",
                 {"path": "/proc/net/arp"},
             )
-            arp = _parse_proc_net_arp(result.get("data", "") or "")
-            if arp:
-                _LOGGER.debug("ARP table via file/read: %d entries", len(arp))
-                return arp
         except (
             OpenWrtResponseError,
             OpenWrtTimeoutError,
@@ -4103,6 +4173,12 @@ class OpenWrtAPI:
             OpenWrtAuthError,
         ) as err:
             _LOGGER.debug("ARP table via file/read unavailable: %s", err)
+        else:
+            # A successful read is final, even without complete entries yet;
+            # falling through to SSH here would cost one login per poll (N2).
+            arp = _parse_proc_net_arp(result.get("data", "") or "")
+            _LOGGER.debug("ARP table via file/read: %d entries", len(arp))
+            return arp
 
         try:
             arp_out = await self._run_ssh("cat /proc/net/arp")

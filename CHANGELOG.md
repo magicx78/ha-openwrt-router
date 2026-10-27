@@ -2,6 +2,46 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.3] - 2026-10-28
+
+### Fixed
+
+- **Keine SSH-Anmeldungen mehr im normalen Poll.** Seit der Umstellung auf den
+  SSH-Fallback meldete sich die Integration bei jedem Poll fünf- bis sechsmal
+  per Passwort über SSH an jedem Router an, obwohl ubus und die rpcd-ACL alles
+  liefern. Die dropbear-Zeilen füllten den Log-Puffer der Router und
+  verdrängten das Router-Log, das der Sensor „Router-Log“ liest. Ursachen und
+  Abhilfe:
+  - **WAN-Download/-Upload:** Die Antwort von `file read` wurde falsch gelesen
+    (Dict statt Text), deshalb fiel jeder Poll auf SSH zurück. Die Zähler kommen
+    jetzt aus `network.device status` für das WAN-Gerät (`l3_device`, also z. B.
+    `wan`, `pppoe-wan` oder `wwan0`; bisher der logische Name), ersatzweise aus
+    `file read` mit richtig gelesener Antwort. SSH nur noch, wenn die ACL beide
+    Wege sperrt. Bei PPPoE zählt damit das PPP-Gerät statt des physischen Ports;
+    die Raten können sich dadurch geringfügig verschieben.
+  - **Speicherplatz und Temporärer Speicher:** Beide Sensoren standen seit
+    jeher auf 0.0, weil der SSH-Pfad `df` mit einer GNU-Option aufrief, die
+    BusyBox nicht kennt. Die Werte kommen jetzt aus `system info` (`root` und
+    `tmp`, OpenWrt 21.02 und neuer) ohne zusätzlichen Aufruf. Ältere Router
+    nutzen `df -Pk` über SSH, höchstens alle 10 Minuten. Die Sensoren springen
+    deshalb von 0.0 auf echte Werte; die Mount-Liste enthält auf neuen Routern
+    nur `/` bzw. `/tmp`.
+  - **Bridge-FDB (Port-Zuordnung der Topologie):** `file read` auf
+    `brforward` fragte die Binärdatei ohne `base64` ab und bekam nichts zurück,
+    danach folgten zwei SSH-Anmeldungen je Poll. Jetzt mit `base64`; eine leere,
+    aber gültige ubus-Antwort löst keinen SSH-Versuch mehr aus (ebenso bei der
+    ARP-Tabelle). SSH bleibt Fallback bei gesperrtem oder fehlgeschlagenem
+    ubus-Zugriff.
+  - **SSH-Verbindung je Poll:** Alle SSH-Kommandos eines Polls (Fallback, LLDP)
+    teilen sich eine asyncssh-Verbindung, die am Ende des Polls und beim
+    Entladen geschlossen wird; bisher baute jedes Kommando eine eigene auf. Im
+    SSH-Fallback (ubus gesperrt) ist das eine Anmeldung je Poll statt fünf bis
+    acht. LLDP bleibt der einzige regelmäßige SSH-Leser (alle 10 Minuten, nur
+    mit lldpd).
+  Keine ACL-Änderung, kein rpcd-Neustart: ACL v6 und v7 erlauben die
+  genutzten ubus-Aufrufe bereits. Ein Test prüft jetzt, dass zwei komplette
+  Polls mit funktionierendem ubus keine SSH-Verbindung öffnen.
+
 ## [1.38.2] - 2026-10-27
 
 ### Changed
