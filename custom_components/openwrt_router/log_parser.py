@@ -46,6 +46,9 @@ DFS_NEW_CHANNEL = "new_channel"
 DFS_PRE_CAC_EXPIRED = "pre_cac_expired"
 # Not a log line: a radio's channel/width differed between two polls
 DFS_CHANNEL_CHANGE = "channel_change"
+# DFS lines that explain a channel change. cac_start/nop_finished are not:
+# a manual switch onto a DFS channel also starts a CAC.
+DFS_EVIDENCE_KINDS = frozenset({DFS_RADAR_DETECTED, DFS_NEW_CHANNEL, DFS_CAC_FAILED})
 
 # Parsed for the counters (and client statistics) but never fired as event:
 # they are normal operation and would crowd out the problems.
@@ -313,7 +316,8 @@ class LogCursor:
 class EventLimiter:
     """At most ``per_fetch`` events per fetch, one per (kind, MAC) per window.
 
-    Lines without a MAC (DFS) are keyed by their interface instead.
+    Lines without a MAC (DFS) are keyed by interface and frequency, so a
+    radar on the new channel is not swallowed by the one on the old channel.
     """
 
     def __init__(self, per_fetch: int, window_ms: int) -> None:
@@ -337,7 +341,11 @@ class EventLimiter:
         for event in ranked:
             if (event.category, event.kind) in COUNT_ONLY_KINDS:
                 continue
-            key = (event.category, event.kind, event.mac or event.interface)
+            key = (
+                event.category,
+                event.kind,
+                event.mac or f"{event.interface}@{event.frequency}",
+            )
             if key in self._last or len(fire) >= self.per_fetch:
                 suppressed += 1
                 continue

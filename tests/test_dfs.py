@@ -76,8 +76,14 @@ class TestDfsParser:
         a = parse_entry(_e("hostapd: phy1-ap0: DFS-RADAR-DETECTED freq=5260", 1))
         b = parse_entry(_e("hostapd: phy2-ap0: DFS-RADAR-DETECTED freq=5500", 2))
         c = parse_entry(_e("hostapd: phy1-ap0: DFS-RADAR-DETECTED freq=5280", 3))
-        fire, suppressed = limiter.select([a, b, c], T)
-        assert [e.interface for e in fire] == ["phy1-ap0", "phy2-ap0"]
+        d = parse_entry(_e("hostapd: phy1-ap0: DFS-RADAR-DETECTED freq=5260", 4))
+        fire, suppressed = limiter.select([a, b, c, d], T)
+        # radar on the new channel (5280) is not swallowed by the old one
+        assert [(e.interface, e.frequency) for e in fire] == [
+            ("phy1-ap0", 5260),
+            ("phy2-ap0", 5500),
+            ("phy1-ap0", 5280),
+        ]
         assert suppressed == 1
 
 
@@ -306,7 +312,92 @@ class TestDfsLogbook:
         )
         assert change == {
             "name": "Router A",
-            "message": "channel change on phy1: 52 → 36 (DFS)",
+            "message": "channel change on phy1: 52/None MHz → 36/None MHz (DFS)",
         }
         radar = describe(MagicMock(data={"type": "radar_detected", "radio": "phy1", "channel": 52}))
         assert radar["message"] == "DFS radar detected on phy1 (channel 52)"
+
+
+# =====================================================================
+# Review follow-ups (P4)
+# =====================================================================
+
+
+class TestReviewFollowUps:
+    @pytest.mark.asyncio
+    async def test_forced_fetch_restarts_log_rhythm(self):
+        coord, api = _coordinator()
+        await _poll(coord, api, [_iface("phy1-ap0", 36)])  # 1
+        await _poll(coord, api, [_iface("phy1-ap0", 36)])  # 2: regular
+        await _poll(coord, api, [_iface("phy1-ap0", 40)])  # 3: forced by change
+        await _poll(coord, api, [_iface("phy1-ap0", 40)])  # 4: not due
+        await _poll(coord, api, [_iface("phy1-ap0", 40)])  # 5: due again
+        assert api.get_log_entries.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_evidence_via_iwinfo_phy_for_wlan_names(self):
+        """OpenWrt <= 22.03: interface wlan1, iwinfo phy phy1."""
+        coord, api = _coordinator()
+        iface = dict(_iface("wlan1", 52), phy="phy1")
+        with patch("custom_components.openwrt_router.coordinator.time.time", return_value=T / 1000):
+            await _poll(coord, api, [iface])
+            await _poll(coord, api, [iface], log=[_e("x: y", 1)])
+            log = [_e("x: y", 1), _e("hostapd: wlan1: DFS-RADAR-DETECTED freq=5260", 2, T)]
+            await _poll(coord, api, [dict(iface, channel=36, frequency=5180)], log=log)
+        events = _dfs_events(coord)
+        change = next(e for e in events if e["type"] == "channel_change")
+        assert change["radio"] == "phy1"
+        assert change["dfs_related"] is True
+        radar = next(e for e in events if e["type"] == "radar_detected")
+        assert radar["radio"] == "phy1"
+
+    @pytest.mark.asyncio
+    async def test_cac_start_is_no_evidence(self):
+        coord, api = _coordinator()
+        with patch("custom_components.openwrt_router.coordinator.time.time", return_value=T / 1000):
+            await _poll(coord, api, [_iface("phy1-ap0", 36)])
+            await _poll(coord, api, [_iface("phy1-ap0", 36)], log=[_e("x: y", 1)])
+            log = [_e("x: y", 1), _e("hostapd: phy1-ap0: DFS-CAC-START freq=5260 chan=52", 2, T)]
+            await _poll(coord, api, [_iface("phy1-ap0", 52)], log=log)
+        change = next(e for e in _dfs_events(coord) if e["type"] == "channel_change")
+        assert change["dfs_related"] is False
+
+    @pytest.mark.asyncio
+    async def test_evidence_only_for_5ghz(self):
+        coord, api = _coordinator()
+        radios = [_iface("phy0-ap0", 1, "HE20", 2412)]
+        with patch("custom_components.openwrt_router.coordinator.time.time", return_value=T / 1000):
+            await _poll(coord, api, radios)
+            await _poll(coord, api, radios, log=[_e("x: y", 1)])
+            log = [_e("x: y", 1), _e("hostapd: phy0-ap0: DFS-RADAR-DETECTED freq=5260", 2, T)]
+            await _poll(coord, api, [_iface("phy0-ap0", 6, "HE20", 2437)], log=log)
+        change = next(e for e in _dfs_events(coord) if e["type"] == "channel_change")
+        assert change["band"] == "2.4g"
+        assert change["dfs_related"] is False
+
+    @pytest.mark.asyncio
+    async def test_missing_htmode_keeps_width(self):
+        coord, api = _coordinator()
+        await _poll(coord, api, [_iface("phy1-ap0", 36, "HE80")])
+        await _poll(coord, api, [_iface("phy1-ap0", 36, None)])
+        await _poll(coord, api, [_iface("phy1-ap0", 36, "HE80")])
+        assert _dfs_events(coord) == []
+
+    @pytest.mark.asyncio
+    async def test_switched_off_radio_is_forgotten(self):
+        coord, api = _coordinator()
+        both = [_iface("phy1-ap0", 36), _iface("phy0-ap0", 6, "HE20", 2437)]
+        await _poll(coord, api, both)
+        await _poll(coord, api, [_iface("phy0-ap0", 6, "HE20", 2437)])  # phy1 off
+        await _poll(coord, api, [_iface("phy1-ap0", 100), _iface("phy0-ap0", 6, "HE20", 2437)])
+        assert _dfs_events(coord) == []
+
+    @pytest.mark.asyncio
+    async def test_channel_change_not_in_log_counts(self):
+        coord, api = _coordinator()
+        await _poll(coord, api, [_iface("phy1-ap0", 36)])
+        data = await _poll(coord, api, [_iface("phy1-ap0", 100)])
+        assert data.dfs["by_type"] == {"channel_change": 1}
+        assert "dfs.channel_change" not in data.log_stats["counts_24h"]
+        (event,) = _dfs_events(coord)
+        assert event["backhaul"] is False
