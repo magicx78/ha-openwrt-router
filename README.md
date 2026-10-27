@@ -68,7 +68,15 @@ A built-in network map panel is automatically registered when the integration is
 Opens when a node is clicked. Shows:
 - **Gateway**: model, firmware, LAN/WAN IP, uptime, ping, CPU/RAM bars + 1 h chart, WAN traffic bars, SSIDs, ports, VLANs, DDNS status, event timeline
 - **Access Point**: model, firmware, IP, uplink type + backhaul signal, CPU/RAM bars, SSIDs, client list, event timeline
-- **Client**: hostname, IP, MAC, vendor, band, signal, connected since, DHCP expiry, session traffic, HA device-tracker link
+- **Client**: name, hostname, IP, MAC, vendor, model, band, signal, connected since, DHCP expiry, session traffic, HA device-tracker link
+
+### Footer and client names
+
+The bar below the map (its layout follows the panel width, so it adapts when HA's sidebar is expanded) shows the network status, the **WAN traffic** of the gateway in bit/s (averaged between two router polls; the averaging window and the sample time are shown underneath), the **top talkers** by bytes since they joined their access point (click one to select it on the map) and the clients by band.
+
+Clients are named everywhere in the panel by the best source available: a name you gave the device or its tracker in Home Assistant, the name another integration registered for the MAC (ESPHome, Shelly, …), the DHCP hostname, the manufacturer plus the end of the MAC, or "Privat-MAC …" for a randomised address.
+
+The **Internet** node takes the colour of the Internet latency Home Assistant measures (a TCP connect to 8.8.8.8:53 from the HA host: green < 50 ms, amber < 100 ms, orange above, red when it fails) and pulses while the Internet is reachable; right after a restart it shows "not measured yet" until the second poll. With "reduce motion" enabled in the OS it stays still.
 
 ### Router-to-router wiring (LLDP)
 

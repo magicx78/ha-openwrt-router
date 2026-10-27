@@ -143,12 +143,17 @@ if (!customElements.get('openwrt-topology-panel')) {
 
 const rootEl = document.getElementById('root');
 if (rootEl) {
-  // The stylesheet is only bundled as an inline string (?inline) — inject it
-  // for the dev mount too, matching what the HA custom element does.
+  // Mount inside a shadow root like HA does, so CSS that only works in a
+  // plain document (e.g. variables on :root) fails here too instead of
+  // only in Home Assistant. The stylesheet is bundled as an inline string.
+  const shadow = rootEl.attachShadow({ mode: 'open' });
   const devStyle = document.createElement('style');
   devStyle.textContent = topologyCSS;
-  document.head.appendChild(devStyle);
-  createRoot(rootEl).render(
+  shadow.appendChild(devStyle);
+  const devContainer = document.createElement('div');
+  devContainer.style.cssText = 'height:100%;display:contents';
+  shadow.appendChild(devContainer);
+  createRoot(devContainer).render(
     <React.StrictMode>
       <TopologyView data={MOCK_DATA} />
     </React.StrictMode>,

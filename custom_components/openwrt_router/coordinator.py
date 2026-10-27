@@ -137,6 +137,29 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# WAN rate averaging window bounds (seconds between two counter samples).
+# Below the minimum (a manual refresh right after a poll) the average is too
+# noisy; above the maximum (long outage) it no longer describes "now".
+_WAN_RATE_MIN_INTERVAL_S = 5.0
+_WAN_RATE_MAX_INTERVAL_S = 900.0
+
+
+def _as_counter(value: Any) -> int | None:
+    """Return a byte counter as a non-negative int, else None.
+
+    The ubus path delivers ints; the SSH status script may deliver numeric
+    strings or floats. Booleans are never counters.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float) and value >= 0:
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
 
 def calc_memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
     """Return RAM pressure derived from ubus ``system info`` memory stats.
@@ -252,6 +275,9 @@ class OpenWrtCoordinatorData:
         # Native WAN throughput (rx/tx byte deltas) — gateway only
         self.wan_traffic: dict[str, Any] = {}
         self.ping_ms: float | None = None
+        # False on the first poll, which skips the ping: ping_ms None then
+        # means "not measured yet", not "no answer".
+        self.ping_checked: bool = False
         # DuckDNS / DDNS status (gateway only)
         self.ddns_status: list[dict[str, Any]] = []
         # Per-router event history (status changes, spikes) — max 30 entries
@@ -381,6 +407,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._client_first_seen: dict[str, datetime] = {}
         self._prev_interface_bytes: dict[str, dict[str, int]] = {}
         self._prev_poll_time: datetime | None = None
+        # Last valid WAN counter sample (monotonic time, rx, tx, interface)
+        self._wan_sample: tuple[float, int, int, str] | None = None
         self._consecutive_auth_failures: int = 0
         # Outage tracking — kept on the coordinator, not on self.data, because
         # every successful poll replaces self.data with a fresh object.
@@ -526,6 +554,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             data.wan_status = await self._first_poll_optional(
                 self.api.get_wan_status, {}, "WAN status"
             )
+            # Time of the counter read; the rate below is computed later in the
+            # poll, after calls whose duration varies from poll to poll.
+            wan_sampled_at = time.monotonic()
             data.wan_connected = data.wan_status.get(
                 "wan_connected", False
             ) or data.wan_status.get("connected", False)
@@ -565,24 +596,19 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 _LOGGER.debug("Error fetching STA interface details: %s", err)
                 data.sta_interfaces = []
 
-            # --- Native WAN throughput + ping + DuckDNS ---
+            # --- Native WAN throughput (bit/s) ---
+            # Pure arithmetic on the WAN byte counters already fetched above —
+            # no network call, so it is not gated by the first-poll skip below.
+            data.wan_traffic = self._compute_wan_traffic(
+                data.wan_status, wan_sampled_at
+            )
+
+            # --- Ping + DuckDNS ---
             # Skipped on cycle 1 (first_refresh at startup) to avoid blocking
             # HA bootstrap. The ping/DDNS calls have external timeouts that would
             # push startup past HA's stage-2 deadline with multiple coordinators.
             if self._board_poll_count > 1:
-                # Native WAN throughput: delta of rx/tx bytes between polls
-                prev = self.data.wan_status if self.data else {}
-                rx_prev = prev.get("rx_bytes") or 0
-                tx_prev = prev.get("tx_bytes") or 0
-                rx_now = data.wan_status.get("rx_bytes") or 0
-                tx_now = data.wan_status.get("tx_bytes") or 0
-                rx_delta = rx_now - rx_prev if rx_now >= rx_prev else 0
-                tx_delta = tx_now - tx_prev if tx_now >= tx_prev else 0
-                data.wan_traffic = {
-                    "downstream_bps": rx_delta // SCAN_INTERVAL_SECONDS,
-                    "upstream_bps": tx_delta // SCAN_INTERVAL_SECONDS,
-                }
-
+                data.ping_checked = True
                 # Latency: TCP connect to 8.8.8.8:53
                 try:
                     t0 = time.monotonic()
@@ -612,7 +638,6 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                     data.ddns_status = self.data.ddns_status if self.data else []
             else:
                 # First poll: carry forward empty defaults — no external calls
-                data.wan_traffic = {}
                 data.ping_ms = None
                 data.ddns_status = []
 
@@ -1020,6 +1045,60 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             )
 
         return data
+
+    # ------------------------------------------------------------------
+    # WAN throughput
+    # ------------------------------------------------------------------
+
+    def _compute_wan_traffic(
+        self, wan_status: dict[str, Any], now: float
+    ) -> dict[str, Any]:
+        """Return the WAN throughput in bit/s from two byte-counter samples.
+
+        The rate is the counter delta divided by the *measured* time between
+        the counter reads (``now`` = monotonic time of this read): the poll
+        interval is adaptive (60/120/300 s) and manual refreshes shorten it,
+        so a fixed divisor would be wrong.
+
+        A failed counter read keeps the last valid sample, so the next valid
+        read averages over the longer gap instead of producing a spike from
+        a zero baseline. A refresh right after a poll keeps the last rate.
+        Counters of a different interface (fallback to another "up"
+        interface) start a new baseline instead of being compared.
+
+        Returns:
+            ``{"downstream_bps", "upstream_bps", "interval_s", "sampled_at"}``
+            or ``{}`` when there is no usable previous sample, a counter went
+            backwards (interface restart, reboot) or the gap is too long.
+        """
+        rx = _as_counter(wan_status.get("rx_bytes"))
+        tx = _as_counter(wan_status.get("tx_bytes"))
+        if rx is None or tx is None:
+            return {}
+        iface = str(wan_status.get("interface") or "")
+
+        prev = self._wan_sample
+        if (
+            prev is not None
+            and prev[3] == iface
+            and now - prev[0] < _WAN_RATE_MIN_INTERVAL_S
+        ):
+            return self.data.wan_traffic if self.data else {}
+        self._wan_sample = (now, rx, tx, iface)
+        if prev is None or prev[3] != iface:
+            return {}
+
+        elapsed = now - prev[0]
+        rx_delta = rx - prev[1]
+        tx_delta = tx - prev[2]
+        if elapsed > _WAN_RATE_MAX_INTERVAL_S or rx_delta < 0 or tx_delta < 0:
+            return {}
+        return {
+            "downstream_bps": round(rx_delta * 8 / elapsed),
+            "upstream_bps": round(tx_delta * 8 / elapsed),
+            "interval_s": round(elapsed),
+            "sampled_at": datetime.now(UTC).isoformat(),
+        }
 
     # ------------------------------------------------------------------
     # Outage tracking

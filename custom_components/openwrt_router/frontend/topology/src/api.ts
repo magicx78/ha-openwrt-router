@@ -28,7 +28,9 @@ import type {
   LldpConflict,
   ConnectionType,
   ConfidenceLevel,
+  WanTraffic,
 } from './types';
+import { clientDisplayName, isLocallyAdministered } from './utils/clientName';
 
 // ── Raw snapshot types ───────────────────────────────────────────────────
 
@@ -59,7 +61,7 @@ interface SnapshotNodeAttributes {
   link_speed?: number | null;
   interface?: string;
   // gateway WAN/connectivity attrs (native OpenWrt)
-  wan_traffic?: { downstream_bps?: number; upstream_bps?: number };
+  wan_traffic?: WanTraffic;
   ping_ms?: number | null;
   ddns_status?: DdnsService[];
   [key: string]: unknown;
@@ -614,9 +616,12 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     events: ((gwAttr.events as RouterEvent[] | undefined) ?? []).slice(0, 30),
     cpuLoad: gwAttr.cpu_load as number | undefined,
     memUsage: gwAttr.mem_usage as number | undefined,
-    pingMs: gwAttr.ping_ms as number | null | undefined,
+    // ping_pending: first poll after start, no ping yet → "unknown", not offline
+    pingMs: gwAttr.ping_pending === true
+      ? undefined
+      : gwAttr.ping_ms as number | null | undefined,
     ddnsServices: (gwAttr.ddns_status as DdnsService[] | undefined) ?? [],
-    wanTraffic: gwAttr.wan_traffic as { downstream_bps?: number; upstream_bps?: number } | undefined,
+    wanTraffic: gwAttr.wan_traffic,
     portStats: ((gwAttr.port_stats as any[] | undefined) ?? []).map(adaptPortStat),
     cpuHistoryBackend: (gwAttr.cpu_history as CpuHistoryPoint[] | undefined) ?? [],
     vlans: ((gwAttr.vlans as any[] | undefined) ?? []).map((v: any): VlanInfo => ({
@@ -765,10 +770,21 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
 
     const mac = (attr?.mac as string) ?? '';
     const ip = (attr?.ip as string) ?? '';
-    // Prefer the server-side OUI vendor; fall back to the local OUI table only
-    // when the server did not resolve a vendor.
+    // Private (randomised) MACs carry no vendor OUI — backend flag first,
+    // the locally-administered bit for snapshots without it.
+    const randomMac = typeof attr?.random_mac === 'boolean'
+      ? attr.random_mac
+      : isLocallyAdministered(mac);
+    // Manufacturer: the HA device registry, then the server-side OUI vendor,
+    // then the local OUI table (never for a private MAC).
     const serverVendor = (attr?.vendor as string | null | undefined) || undefined;
-    const vendor = serverVendor ?? lookupManufacturer(mac);
+    const haManufacturer = (attr?.ha_manufacturer as string | undefined) || undefined;
+    const vendor = haManufacturer ?? serverVendor ?? (randomMac ? undefined : lookupManufacturer(mac));
+    const haName = (attr?.ha_name as string | undefined) || undefined;
+    const haNameSource = attr?.ha_name_source === 'user' || attr?.ha_name_source === 'device'
+      ? attr.ha_name_source
+      : undefined;
+    const haModel = (attr?.ha_model as string | undefined) || undefined;
     const connectionType = normConnectionType(attr?.connection_type);
     const confidence = normConfidence(attr?.confidence);
     const source = (attr?.source as string | undefined) || undefined;
@@ -782,7 +798,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     const iface = (attr?.interface as string | undefined) || undefined;
     return {
       id: n.id,
-      name: hostname,
+      name: clientDisplayName({ mac, haName, hostname, manufacturer: vendor, randomMac }),
       hostname,
       ip,
       mac,
@@ -806,6 +822,10 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       lastSeen,
       linkSpeed,
       iface,
+      haName,
+      haNameSource,
+      haModel,
+      randomMac,
     };
   });
 

@@ -52,8 +52,13 @@
   --statusbar-h:     48px;
 
   /* ── 3-zone layout ── */
+  /* Exactly one viewport tall: the canvas and secondary views scroll inside,
+     the footer stays on screen even when the host gives no definite height. */
   height: 100%;
   min-height: 100vh;
+  min-height: 100dvh;
+  max-height: 100vh;
+  max-height: 100dvh;
   display: flex;
   flex-direction: row;   /* sidebar | main */
   background: var(--bg);
@@ -439,12 +444,16 @@
   fill: none;
 }
 .edge-internet-flow {
-  stroke: rgba(255,255,255,0.28);
-  stroke-width: 1.5;
+  /* --inet-rgb comes from the inet-<state> class on .topo-app */
+  stroke: rgba(var(--inet-rgb, 255, 255, 255), 0.75);
+  stroke-width: 1.8;
   fill: none;
-  stroke-dasharray: 4 7;
-  animation: flow-down 3.5s linear infinite;
+  stroke-dasharray: 4 10;  /* period 14 divides the 28px keyframe offset → no jump */
+  filter: drop-shadow(0 0 3px rgba(var(--inet-rgb, 255, 255, 255), 0.6));
+  animation: flow-down 1.6s linear infinite;
 }
+.inet-offline .edge-internet-flow { stroke-dasharray: 3 6; animation: none; filter: none; }
+.inet-unknown .edge-internet-flow { stroke: rgba(255,255,255,0.28); filter: none; animation-duration: 3.5s; }
 
 /* Gateway → wired AP */
 .edge-wired-bg {
@@ -483,7 +492,7 @@
 .edge-highlighted .edge-wired-flow { stroke: #60a5fa; stroke-width: 2.5; }
 .edge-highlighted .edge-mesh-bg    { stroke: rgba(34, 211, 238, 0.20); stroke-width: 6; }
 .edge-highlighted .edge-mesh-flow  { stroke: #22d3ee; stroke-width: 2.5; }
-.edge-highlighted .edge-internet-flow { stroke: rgba(255,255,255,0.55); stroke-width: 2; }
+.edge-highlighted .edge-internet-flow { stroke: rgba(var(--inet-rgb, 255, 255, 255), 0.95); stroke-width: 2; }
 
 /* Glow per edge kind */
 .edge-highlighted.edge-group--gateway-wired {
@@ -531,6 +540,18 @@
 }
 
 /* ── Internet node ───────────────────────────────────────────────────── */
+/*
+ * Colour follows the gateway ping (InternetNode.internetState). The state
+ * class sits on the node AND on .topo-app, so the Internet → gateway edge
+ * uses the same colour. RGB triplets instead of color-mix() for older
+ * WebViews (HA companion app).
+ */
+.inet-unknown { --inet-rgb: 59, 130, 246; }
+.inet-ok      { --inet-rgb: 34, 197, 94; }
+.inet-fair    { --inet-rgb: 245, 158, 11; }
+.inet-slow    { --inet-rgb: 249, 115, 22; }
+.inet-offline { --inet-rgb: 239, 68, 68; }
+
 .internet-node {
   display: flex;
   flex-direction: column;
@@ -539,26 +560,59 @@
   cursor: default;
 }
 .internet-node__circle {
+  position: relative;
   width: 52px;
   height: 52px;
   border-radius: 50%;
-  background: rgba(255,255,255,0.03);
-  border: 1.5px solid rgba(255,255,255,0.10);
+  background: radial-gradient(circle at 35% 30%,
+    rgba(var(--inet-rgb), 0.38), rgba(var(--inet-rgb), 0.08) 72%);
+  border: 1.5px solid rgba(var(--inet-rgb), 0.8);
+  box-shadow: 0 0 12px rgba(var(--inet-rgb), 0.35), inset 0 0 10px rgba(var(--inet-rgb), 0.2);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-muted);
-  animation: internet-pulse 3.5s ease-in-out infinite;
+  color: rgb(var(--inet-rgb));
+  animation: internet-glow 2.4s ease-in-out infinite;
 }
-@keyframes internet-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
-  50%       { box-shadow: 0 0 0 4px rgba(255,255,255,0.06); }
+/* Two staggered rings radiating outwards */
+.internet-node__circle::before,
+.internet-node__circle::after {
+  content: '';
+  position: absolute;
+  inset: -1.5px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(var(--inet-rgb), 0.6);
+  pointer-events: none;
+  animation: internet-ring 2.4s ease-out infinite;
 }
+.internet-node__circle::after { animation-delay: 1.2s; }
+@keyframes internet-ring {
+  from { transform: scale(1);   opacity: 0.8; }
+  to   { transform: scale(1.9); opacity: 0; }
+}
+@keyframes internet-glow {
+  0%, 100% { box-shadow: 0 0 10px rgba(var(--inet-rgb), 0.30), inset 0 0 10px rgba(var(--inet-rgb), 0.2); }
+  50%      { box-shadow: 0 0 22px rgba(var(--inet-rgb), 0.55), inset 0 0 12px rgba(var(--inet-rgb), 0.3); }
+}
+/* Offline / not measured yet: steady, no pulse */
+.internet-node.inet-offline .internet-node__circle,
+.internet-node.inet-unknown .internet-node__circle { animation: none; }
+.internet-node.inet-offline .internet-node__circle::before,
+.internet-node.inet-offline .internet-node__circle::after,
+.internet-node.inet-unknown .internet-node__circle::before,
+.internet-node.inet-unknown .internet-node__circle::after { display: none; }
 .internet-node__label {
   font-size: 10.5px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--text-secondary);
+}
+/* Must come after the node and edge rules above (same specificity). */
+@media (prefers-reduced-motion: reduce) {
+  .internet-node__circle,
+  .edge-internet-flow { animation: none; }
+  .internet-node__circle::before,
+  .internet-node__circle::after { display: none; }
 }
 
 /* ── Node card base ──────────────────────────────────────────────────── */
@@ -1747,14 +1801,6 @@
 .ping-fair      { color: var(--amber); }
 .ping-poor      { color: var(--red); }
 
-@keyframes internet-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.4); }
-  50%       { box-shadow: 0 0 0 6px rgba(59,130,246,0); }
-}
-.internet-node__circle--pulse {
-  animation: internet-pulse 2.5s ease-in-out infinite;
-}
-
 /* ── GatewayNode 2-column layout ─────────────────────────────────────── */
 .gateway-card__body2 {
   display: flex; gap: 10px; padding: 6px 10px;
@@ -2850,23 +2896,26 @@
 }
 
 /* ── Global Footer ──────────────────────────────────────────────────────── */
-:root {
-  --footer-h: 130px;
-}
-
+/*
+ * Last flex child of .topo-main, below the canvas — never position: fixed.
+ * Fixed is relative to the browser window, so inside Home Assistant the bar
+ * covered HA's own sidebar, and its height variable on :root never applied
+ * (no :root inside HA's shadow DOM), so it also hid the topology cards.
+ */
 .global-footer {
-  position: fixed;
-  bottom: 0;
-  left: var(--sidebar-w, 52px);
-  right: 0;
-  height: var(--footer-h);
+  flex: 0 0 auto;
   background: rgba(6, 10, 20, 0.97);
   border-top: 1px solid rgba(255,255,255,0.10);
-  display: grid;
-  grid-template-columns: 200px 220px 1fr 220px;
-  z-index: 30;
-  backdrop-filter: blur(10px);
   box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+  /* Breakpoints follow the panel width, not the browser window: with HA's
+     sidebar expanded the panel is ~300 px narrower than the window. */
+  container-type: inline-size;
+}
+.global-footer__grid {
+  min-height: 112px;
+  display: grid;
+  grid-template-columns:
+    minmax(160px, 200px) minmax(170px, 220px) minmax(0, 1fr) minmax(190px, 220px);
 }
 
 .footer-section {
@@ -2954,28 +3003,41 @@
 }
 
 .footer-talkers__item {
-  display: flex;
+  display: grid;
+  grid-template-columns: 14px minmax(120px, 40%) minmax(40px, 1fr) auto;
   align-items: center;
-  gap: 6px;
-  font-size: 10px;
+  gap: 8px;
+  width: calc(100% + 8px);
+  padding: 1px 4px;
+  margin: 0 -4px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 10.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.footer-talkers__item:hover,
+.footer-talkers__item:focus-visible {
+  background: rgba(255,255,255,0.05);
+  outline: none;
 }
 
 .footer-talkers__rank {
   color: rgba(255,255,255,0.35);
-  width: 14px;
-  flex-shrink: 0;
 }
 
 .footer-talkers__name {
-  flex: 0 0 110px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: rgba(255,255,255,0.75);
+  color: rgba(255,255,255,0.8);
 }
 
 .footer-talkers__bar-wrap {
-  flex: 1;
+  display: block;
   height: 4px;
   background: rgba(255,255,255,0.08);
   border-radius: 2px;
@@ -2983,6 +3045,7 @@
 }
 
 .footer-talkers__bar {
+  display: block;
   height: 100%;
   background: linear-gradient(90deg, #3b82f6, #60a5fa);
   border-radius: 2px;
@@ -2990,11 +3053,10 @@
 }
 
 .footer-talkers__bytes {
-  flex-shrink: 0;
-  width: 52px;
+  min-width: 52px;
   text-align: right;
   color: rgba(255,255,255,0.5);
-  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Section 4: Clients nach Typ */
@@ -3045,11 +3107,35 @@
   font-size: 10px;
 }
 
-/* topo-scroll needs bottom padding so footer doesn't overlap content */
-.topo-scroll { padding-bottom: var(--footer-h); }
-
-/* Minimap sits above footer */
-.minimap { bottom: calc(var(--footer-h) + 12px) !important; }
+/* Narrow panels: drop the donut first, then the talker list (it stays
+   available in the Traffic tab). Container queries on the footer width;
+   browsers without them fall back to the window width. */
+@container (max-width: 860px) {
+  .global-footer__grid {
+    grid-template-columns: minmax(150px, 190px) minmax(160px, 200px) minmax(0, 1fr);
+  }
+  .footer-section--clients-wrap { display: none; }
+  .footer-section--talkers { border-right: none; }
+}
+@container (max-width: 560px) {
+  .global-footer__grid { grid-template-columns: 1fr 1fr; min-height: 0; }
+  .footer-section--talkers { display: none; }
+  .footer-section--traffic { border-right: none; }
+}
+@supports not (container-type: inline-size) {
+  @media (max-width: 900px) {
+    .global-footer__grid {
+      grid-template-columns: minmax(150px, 190px) minmax(160px, 200px) minmax(0, 1fr);
+    }
+    .footer-section--clients-wrap { display: none; }
+    .footer-section--talkers { border-right: none; }
+  }
+  @media (max-width: 640px) {
+    .global-footer__grid { grid-template-columns: 1fr 1fr; min-height: 0; }
+    .footer-section--talkers { display: none; }
+    .footer-section--traffic { border-right: none; }
+  }
+}
 
 /* Port LED + Badge on APNode */
 .ap-card__port-badge {
@@ -3152,6 +3238,10 @@
 
 /* ── CompareView ─────────────────────────────────────────────────────── */
 .compare-view {
+  /* Scroll inside the view: the app is exactly one viewport tall */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 24px;
   display: flex;
   flex-direction: column;

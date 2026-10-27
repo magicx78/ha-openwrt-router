@@ -79,11 +79,19 @@ export interface Gateway {
   ssids?: SsidInfo[];   // WiFi networks at gateway
   pingMs?: number | null;
   ddnsServices?: DdnsService[];
-  wanTraffic?: { downstream_bps?: number; upstream_bps?: number };
+  wanTraffic?: WanTraffic;
   portStats?: PortStat[];
   vlans?: VlanInfo[];
   vlansStale?: boolean;  // true = VLAN-Daten aus Cache (Router war kurzzeitig offline)
   topologySnapshots?: TopologySnapshot[];
+}
+
+/** WAN throughput averaged between two coordinator polls. */
+export interface WanTraffic {
+  downstream_bps?: number; // bit/s
+  upstream_bps?: number;   // bit/s
+  interval_s?: number;     // averaging window (seconds between the two samples)
+  sampled_at?: string;     // ISO timestamp of the newer sample
 }
 
 export interface TopologySnapshot {
@@ -199,6 +207,11 @@ export interface Client {
   lastSeen?: string;               // ISO timestamp
   linkSpeed?: number;              // negotiated link speed in Mbps (if reported)
   iface?: string;                  // interface / port the client is on (if reported)
+  // ── Names known to Home Assistant (read from the HA registries) ──
+  haName?: string;                 // user-set name or another integration's device name
+  haNameSource?: 'user' | 'device';
+  haModel?: string;
+  randomMac?: boolean;             // locally administered (private / randomised) MAC
 }
 
 export interface SwitchNode {

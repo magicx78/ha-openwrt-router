@@ -5,6 +5,7 @@
 
 import React from 'react';
 import { EdgeLayout, TopologyData } from '../types';
+import { formatBitRate } from '../utils/format';
 
 interface Props {
   edgeId: string;
@@ -12,14 +13,6 @@ interface Props {
   y: number;
   edges: EdgeLayout[];
   data: TopologyData;
-}
-
-/** Convert bytes/s to human-readable bit rate. */
-function fmtBps(bytesPerSec: number): string {
-  const bits = bytesPerSec * 8;
-  if (bits >= 1_000_000) return `${(bits / 1_000_000).toFixed(1)} Mbit/s`;
-  if (bits >= 1_000)     return `${(bits / 1_000).toFixed(0)} kbit/s`;
-  return `${bits} bit/s`;
 }
 
 export function EdgeTooltip({ edgeId, x, y, edges, data }: Props) {
@@ -39,9 +32,9 @@ export function EdgeTooltip({ edgeId, x, y, edges, data }: Props) {
     badgeMod = 'internet';
 
     const wt = data.gateway.wanTraffic;
-    if (wt && (wt.downstream_bps || wt.upstream_bps)) {
-      rows.push({ label: '↓', value: fmtBps(wt.downstream_bps ?? 0) });
-      rows.push({ label: '↑', value: fmtBps(wt.upstream_bps   ?? 0) });
+    if (wt && (wt.downstream_bps != null || wt.upstream_bps != null)) {
+      rows.push({ label: '↓', value: formatBitRate(wt.downstream_bps ?? 0) });
+      rows.push({ label: '↑', value: formatBitRate(wt.upstream_bps   ?? 0) });
     }
     if (data.gateway.wanIp) rows.push({ label: 'WAN IP', value: data.gateway.wanIp });
 

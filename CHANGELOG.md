@@ -2,6 +2,59 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.37.2] - 2026-10-27
+
+### Fixed
+
+- **Footer des Topologie-Panels überdeckte die HA-Seitenleiste und die
+  Karte.** Er war am Browserfenster fixiert und lag deshalb über der
+  Seitenleiste von Home Assistant; seine Höhenvariable stand auf `:root`,
+  das im Shadow-DOM von HA nicht greift, sodass Karten und Minimap hinter
+  dem Footer verschwanden. Der Footer sitzt jetzt im Layout unter der
+  Zeichenfläche, das Panel ist genau eine Fensterhöhe hoch (der
+  Vergleich-Tab scrollt jetzt in sich). Die Umbrüche richten sich nach der
+  Panel-Breite, nicht nach dem Fenster: unter 860 px entfällt das
+  Client-Diagramm, unter 560 px auch die Top-Talker-Liste (bleibt im
+  Traffic-Tab).
+- **WAN-Traffic war 8× zu niedrig und teils falsch.** Das Backend lieferte
+  Byte/s unter dem Namen `downstream_bps`, Footer, Traffic-Tab und
+  Inspector zeigten das als Mbit/s an; nur der Kanten-Tooltip rechnete um.
+  Außerdem wurde immer durch 60 s geteilt, auch bei 120-s-Poll (CPU-Last)
+  oder 300-s-Poll (SSH-Fallback), und nach einem fehlgeschlagenen
+  Zähler-Lesen entstand ein Ausreißer über den ganzen Zählerstand.
+  `wan_traffic` enthält jetzt echte Bit/s über die gemessene Zeit zwischen
+  zwei Zähler-Lesungen, dazu `interval_s` und `sampled_at`; ohne gültigen
+  Vorwert, nach einem Zählerrücksprung, nach einem Wechsel des
+  WAN-Interfaces oder nach mehr als 15 Minuten Lücke bleibt es leer. Der
+  Footer zeigt Mittelungsdauer und Messzeitpunkt. Folge der richtigen
+  Einheit: Die Panel-Warnung „Hoher WAN-Traffic“ (ab 900 Mbit/s) verglich
+  bisher gegen Byte/s und löste praktisch nie aus – bei Gigabit-Last
+  erscheint sie jetzt.
+- **Top Talker „(letzte 24 h)“ war falsch beschriftet.** Die Zähler stammen
+  vom WLAN-Treiber und laufen seit der letzten Anmeldung am AP; die
+  Überschrift lautet jetzt „seit Verbindung“.
+
+### Changed
+
+- **Gerätenamen aus Home Assistant im Panel.** Der Topologie-Snapshot liest
+  (nur lesend) Geräte- und Entity-Register: vom Nutzer vergebene Namen
+  (Gerät oder Tracker umbenannt) und Gerätenamen anderer Integrationen mit
+  derselben MAC (ESPHome, Shelly, …) samt Hersteller und Modell
+  (`ha_name`, `ha_name_source`, `ha_manufacturer`, `ha_model`). Das Panel
+  benennt Clients überall nach derselben Regel: HA-Name → DHCP-Hostname →
+  Hersteller + MAC-Ende → „Privat-MAC …“ → MAC. Das Panel wertet dafür jetzt
+  auch `random_mac` aus und nimmt für private MACs keinen Hersteller aus
+  seiner eigenen OUI-Tabelle. Top Talker sind anklickbar und wählen den
+  Client in der Karte aus.
+- **Internet-Knoten in Latenz-Farbe mit Puls.** Kugel und Kante zum Gateway
+  färben sich nach der Internet-Latenz, die Home Assistant misst
+  (TCP-Verbindung zu 8.8.8.8:53: grün/amber/orange, rot ohne Antwort), zwei
+  Pulsringe und ein Datenfluss auf der Kante zeigen eine aktive Verbindung;
+  offline steht beides still. Bei „Bewegung reduzieren“ im Betriebssystem
+  entfallen die Animationen. Nach einem Neustart zeigt der Knoten bis zur
+  ersten Messung „noch keine Messung“ statt „offline“ (neues Snapshot-Feld
+  `ping_pending`).
+
 ## [1.37.0] - 2026-10-27
 
 ### Added

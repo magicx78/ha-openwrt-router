@@ -14,6 +14,7 @@ import { SpeedChart } from './SpeedChart';
 import { signalQuality } from '../layout';
 import { formatConnectedSince, formatLeaseExpiry, safeHttpUrl } from '../api';
 import { shortName, deviceLabel, CONFIDENCE_LABEL, isWanPort } from './PortStrip';
+import { formatBitRate, formatBytes } from '../utils/format';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -475,11 +476,12 @@ function ClientDetail({ data, apName, actions }: { data: Client; apName: string;
         <Row label="IP"         value={ipNode} />
         <Row label="Hostname"   value={data.hostname !== data.mac ? data.hostname : '—'} />
         <Row label="Hersteller" value={data.manufacturer ?? data.vendor ?? '—'} />
+        {data.haModel && <Row label="Modell" value={data.haModel} />}
         <Row label="Status"     value={<StatusBadge status={data.status} />} />
       </div>
       <div className="detail-section">
         <div className="detail-section__heading">Netzwerk</div>
-        <Row label="MAC"    value={data.mac} />
+        <Row label="MAC"    value={data.randomMac ? `${data.mac} (privat)` : data.mac} />
         {data.connectionType && (
           <Row label="Verbindungstyp" value={CONNECTION_TYPE_LABEL[data.connectionType]} />
         )}
@@ -530,19 +532,6 @@ function ClientDetail({ data, apName, actions }: { data: Client; apName: string;
 
 // ── Mini traffic / resource bars ─────────────────────────────────────────
 
-function formatBps(bps: number): string {
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
-  if (bps >= 1_000)     return `${(bps / 1_000).toFixed(0)} kbps`;
-  return `${bps} bps`;
-}
-
-function formatBytes(b: number): string {
-  if (b >= 1_073_741_824) return `${(b / 1_073_741_824).toFixed(2)} GB`;
-  if (b >= 1_048_576)     return `${(b / 1_048_576).toFixed(1)} MB`;
-  if (b >= 1_024)         return `${(b / 1_024).toFixed(0)} KB`;
-  return `${b} B`;
-}
-
 function MiniBar({ label, pct, color, value }: {
   label: string; pct: number; color: string; value: string;
 }) {
@@ -561,8 +550,8 @@ function WanTrafficBars({ down, up }: { down: number; up: number }) {
   const max = Math.max(down, up, 1);
   return (
     <div className="mini-bar-group">
-      <MiniBar label="↓" pct={down / max * 100} color="var(--accent)"  value={formatBps(down)} />
-      <MiniBar label="↑" pct={up   / max * 100} color="var(--success)" value={formatBps(up)} />
+      <MiniBar label="↓" pct={down / max * 100} color="var(--accent)"  value={formatBitRate(down)} />
+      <MiniBar label="↑" pct={up   / max * 100} color="var(--success)" value={formatBitRate(up)} />
     </div>
   );
 }

@@ -705,3 +705,138 @@ class TestDeduplicateClients:
         ]
         result = _deduplicate_clients(clients)
         assert len(result) == 0  # Empty MAC is skipped
+
+
+# =====================================================================
+# Home Assistant registry names on client nodes
+# =====================================================================
+
+from types import SimpleNamespace  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
+from custom_components.openwrt_router.topology_mesh import _apply_ha_names  # noqa: E402
+
+_MESH = "custom_components.openwrt_router.topology_mesh"
+# hass.data with both registries present (the values are never read: the
+# getters are patched)
+_REGISTRIES_LOADED = {"device_registry": object(), "entity_registry": object()}
+
+
+def _client_node(mac: str, hostname: str | None = None) -> dict:
+    return {
+        "id": f"client:{mac.lower()}",
+        "type": "client",
+        "label": hostname or mac,
+        "attributes": {"mac": mac, "hostname": hostname},
+    }
+
+
+def _device(name=None, name_by_user=None, manufacturer=None, model=None):
+    return SimpleNamespace(
+        name=name, name_by_user=name_by_user, manufacturer=manufacturer, model=model
+    )
+
+
+def _tracker(unique_id: str, name: str | None):
+    return SimpleNamespace(domain="device_tracker", unique_id=unique_id, name=name)
+
+
+def _apply(nodes, devices=None, trackers=None):
+    """Run _apply_ha_names against fake registries.
+
+    devices: {normalised mac: device}, trackers: [registry entries].
+    """
+    devices = devices or {}
+
+    def _get_device(connections):
+        ((_kind, mac),) = connections
+        return devices.get(mac)
+
+    dev_reg = SimpleNamespace(async_get_device=_get_device)
+    entries = [SimpleNamespace(entry_id="01ENTRY")]
+    with (
+        patch(f"{_MESH}.dr.async_get", return_value=dev_reg),
+        patch(f"{_MESH}.er.async_get", return_value=object()),
+        patch(
+            f"{_MESH}.er.async_entries_for_config_entry",
+            return_value=trackers or [],
+        ),
+    ):
+        _apply_ha_names(SimpleNamespace(data=_REGISTRIES_LOADED), nodes, entries)
+    return nodes
+
+
+class TestApplyHaNames:
+    MAC = "dc:e5:5b:44:8d:9f"
+
+    def test_user_device_name_wins(self):
+        node = _client_node(self.MAC, hostname="nest-hub")
+        _apply(
+            [node],
+            devices={self.MAC: _device("Google Nest Hub", "Küche Display", "Google", "Nest Hub")},
+            trackers=[_tracker(self.MAC.upper(), "Tracker-Name")],
+        )
+        attrs = node["attributes"]
+        assert attrs["ha_name"] == "Küche Display"
+        assert attrs["ha_name_source"] == "user"
+        assert attrs["ha_manufacturer"] == "Google"
+        assert attrs["ha_model"] == "Nest Hub"
+        # Router data stays untouched
+        assert attrs["hostname"] == "nest-hub"
+        assert node["label"] == "nest-hub"
+
+    def test_renamed_tracker_before_device_name(self):
+        node = _client_node(self.MAC)
+        _apply(
+            [node],
+            devices={self.MAC: _device("Google Nest Hub")},
+            trackers=[_tracker("01ENTRY_tracker_dce55b448d9f", "Wohnzimmer Hub")],
+        )
+        assert node["attributes"]["ha_name"] == "Wohnzimmer Hub"
+        assert node["attributes"]["ha_name_source"] == "user"
+
+    def test_device_name_from_other_integration(self):
+        node = _client_node(self.MAC)
+        _apply([node], devices={self.MAC: _device("Shelly Plus 1", manufacturer="Shelly")})
+        assert node["attributes"]["ha_name"] == "Shelly Plus 1"
+        assert node["attributes"]["ha_name_source"] == "device"
+        assert node["attributes"]["ha_manufacturer"] == "Shelly"
+
+    def test_mac_spelling_is_normalised(self):
+        node = _client_node("DC-E5-5B-44-8D-9F")
+        _apply([node], devices={self.MAC: _device("Nest")})
+        assert node["attributes"]["ha_name"] == "Nest"
+
+    def test_tracker_without_user_name_is_ignored(self):
+        node = _client_node(self.MAC)
+        _apply([node], trackers=[_tracker(self.MAC, None)])
+        assert "ha_name" not in node["attributes"]
+
+    def test_no_match_adds_nothing(self):
+        node = _client_node(self.MAC, hostname="tab")
+        _apply([node])
+        assert set(node["attributes"]) == {"mac", "hostname"}
+
+    def test_router_nodes_are_skipped(self):
+        router = {"id": "r1", "type": "router", "attributes": {"mac": self.MAC}}
+        _apply([router], devices={self.MAC: _device("Gateway")})
+        assert "ha_name" not in router["attributes"]
+
+    def test_mac_like_device_name_does_not_win(self):
+        node = _client_node(self.MAC, hostname="nest-hub")
+        _apply([node], devices={self.MAC: _device("DC:E5:5B:44:8D:9F", manufacturer="Google")})
+        assert "ha_name" not in node["attributes"]
+        assert node["attributes"]["ha_manufacturer"] == "Google"
+
+    def test_bare_hass_without_registries_is_a_no_op(self):
+        node = _client_node(self.MAC)
+        _apply_ha_names(SimpleNamespace(), [node], [])
+        assert "ha_name" not in node["attributes"]
+
+    def test_registries_not_loaded_are_not_created(self):
+        """dr/er.async_get would create a registry — must not be called."""
+        node = _client_node(self.MAC)
+        with patch(f"{_MESH}.dr.async_get") as get_dr:
+            _apply_ha_names(SimpleNamespace(data={}), [node], [])
+        get_dr.assert_not_called()
+        assert "ha_name" not in node["attributes"]

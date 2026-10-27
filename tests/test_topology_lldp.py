@@ -343,6 +343,57 @@ class TestKnownRouterNotClient:
                 )
 
 
+class TestSnapshotHaNamesAndPing:
+    """HA registry names and the ping state reach the served snapshot."""
+
+    def _snapshot(self, gw):
+        from unittest.mock import patch
+
+        mac = "dc:e5:5b:44:8d:9f"
+        device = SimpleNamespace(
+            name="Google Nest Hub", name_by_user=None, manufacturer="Google", model="Nest Hub"
+        )
+        dev_reg = SimpleNamespace(
+            async_get_device=lambda connections: device
+            if next(iter(connections))[1] == mac
+            else None
+        )
+        hass = _fake_hass([_fake_entry("e1", "10.10.10.1", gw)])
+        hass.data = {"device_registry": object(), "entity_registry": object()}
+        mesh = "custom_components.openwrt_router.topology_mesh"
+        with (
+            patch(f"{mesh}.dr.async_get", return_value=dev_reg),
+            patch(f"{mesh}.er.async_get", return_value=object()),
+            patch(f"{mesh}.er.async_entries_for_config_entry", return_value=[]),
+        ):
+            return build_mesh_snapshot(hass)
+
+    def _gateway(self, **kwargs):
+        return _router(
+            mac="aa:bb:cc:00:00:01",
+            wan_status={"connected": True, "proto": "dhcp", "ipv4": "1.2.3.4"},
+            clients=[{"mac": "DC:E5:5B:44:8D:9F", "signal": -50, "radio": "phy0-ap0"}],
+            **kwargs,
+        )
+
+    def test_client_node_carries_ha_name(self):
+        snap = self._snapshot(self._gateway())
+        client = next(n for n in snap["nodes"] if n["type"] == "client")
+        assert client["attributes"]["ha_name"] == "Google Nest Hub"
+        assert client["attributes"]["ha_name_source"] == "device"
+        assert client["attributes"]["ha_model"] == "Nest Hub"
+
+    def test_ping_pending_until_first_ping(self):
+        gw = self._gateway()
+        gw.ping_checked = False
+        router = next(n for n in self._snapshot(gw)["nodes"] if n["type"] == "router")
+        assert router["attributes"]["ping_pending"] is True
+
+        gw.ping_checked = True
+        router = next(n for n in self._snapshot(gw)["nodes"] if n["type"] == "router")
+        assert "ping_pending" not in router["attributes"]
+
+
 # =====================================================================
 # LLDP vs. the repeater override and the unmanaged-switch inference
 #

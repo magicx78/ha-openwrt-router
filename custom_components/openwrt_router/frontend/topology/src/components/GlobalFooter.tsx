@@ -1,23 +1,30 @@
 import React, { useMemo } from 'react';
 import { TopologyData, Client } from '../types';
 import { useAlerts } from '../useAlerts';
+import { formatBitRate, formatBytes } from '../utils/format';
 
 interface Props {
   data: TopologyData;
+  onHighlightClient: (clientId: string) => void;
 }
 
-function formatBps(bps: number | undefined | null): string {
-  if (bps == null) return '—';
-  const mbps = bps / 1_000_000;
-  if (mbps >= 1000) return `${(mbps / 1000).toFixed(1)} Gbps`;
-  return `${mbps.toFixed(1)} Mbps`;
+function formatClock(iso: string | undefined): string | undefined {
+  if (!iso) return undefined;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function formatBytes(bytes: number | undefined | null): string {
-  if (bytes == null || bytes === 0) return '—';
-  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
-  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
-  return `${(bytes / 1_000).toFixed(0)} KB`;
+/** Tooltip lines for a top-talker row: where the name comes from and who it is. */
+function talkerTitle(c: Client, total: number): string {
+  const maker = [c.manufacturer, c.haModel].filter(Boolean).join(' ');
+  return [
+    c.name,
+    c.ip,
+    c.randomMac ? `${c.mac} (Privat-MAC)` : c.mac,
+    maker,
+    `${formatBytes(total)} seit Verbindung`,
+  ].filter(Boolean).join('\n');
 }
 
 function classifyClient(c: Client): 'wired' | 'wifi-5' | 'wifi-24' {
@@ -91,7 +98,7 @@ function DonutChart({ wired, wifi5, wifi24 }: DonutProps) {
   );
 }
 
-export function GlobalFooter({ data }: Props) {
+export function GlobalFooter({ data, onHighlightClient }: Props) {
   const alerts = useAlerts(data);
   const critCount = alerts.filter(a => a.severity === 'critical').length;
   const warnCount = alerts.filter(a => a.severity === 'warning').length;
@@ -104,8 +111,14 @@ export function GlobalFooter({ data }: Props) {
       : 'Alles in Ordnung';
   const statusDot = critCount > 0 ? 'critical' : warnCount > 0 ? 'warning' : 'ok';
 
-  const downBps = data.gateway.wanTraffic?.downstream_bps;
-  const upBps = data.gateway.wanTraffic?.upstream_bps;
+  const wan = data.gateway.wanTraffic;
+  const downBps = wan?.downstream_bps;
+  const upBps = wan?.upstream_bps;
+  const sampledAt = formatClock(wan?.sampled_at);
+  const trafficSub = downBps == null
+    ? 'Noch keine Messung'
+    : [wan?.interval_s ? `Ø ${wan.interval_s} s` : undefined, sampledAt ? `Stand ${sampledAt}` : undefined]
+        .filter(Boolean).join(' · ');
 
   const topTalkers = useMemo(() => {
     return [...data.clients]
@@ -135,66 +148,86 @@ export function GlobalFooter({ data }: Props) {
 
   return (
     <div className="global-footer">
-      {/* Sektion 1: Netzwerk Status */}
-      <div className="footer-section footer-section--status">
-        <div className="footer-section__title">NETZWERK STATUS</div>
-        <div className="footer-status">
-          <span className={`footer-status__dot footer-status__dot--${statusDot}`} />
-          <span className={`footer-status__text ${hasIssues ? 'footer-status__text--warn' : ''}`}>
-            {statusText}
-          </span>
+      <div className="global-footer__grid">
+        {/* Sektion 1: Netzwerk Status */}
+        <div className="footer-section footer-section--status">
+          <div className="footer-section__title">NETZWERK STATUS</div>
+          <div className="footer-status">
+            <span className={`footer-status__dot footer-status__dot--${statusDot}`} />
+            <span className={`footer-status__text ${hasIssues ? 'footer-status__text--warn' : ''}`}>
+              {statusText}
+            </span>
+          </div>
+          <div className="footer-status__sub">
+            Letzte Akt. {tsLabel}
+          </div>
+          <div className="footer-status__sub">
+            Alle Systeme {hasIssues ? 'mit Meldungen' : 'laufen normal'}
+          </div>
         </div>
-        <div className="footer-status__sub">
-          Letzte Akt. {tsLabel}
-        </div>
-        <div className="footer-status__sub">
-          Alle Systeme {hasIssues ? 'mit Meldungen' : 'laufen normal'}
-        </div>
-      </div>
 
-      {/* Sektion 2: Gesamt Traffic */}
-      <div className="footer-section footer-section--traffic">
-        <div className="footer-section__title">GESAMT TRAFFIC</div>
-        <div className="footer-traffic__values">
-          <span className="footer-traffic__down">↓ {formatBps(downBps)}</span>
-          <span className="footer-traffic__up">↑ {formatBps(upBps)}</span>
+        {/* Sektion 2: WAN-Traffic (Mittel zwischen zwei Router-Abfragen) */}
+        <div className="footer-section footer-section--traffic">
+          <div
+            className="footer-section__title"
+            title="WAN-Durchsatz des Gateways, gemittelt zwischen zwei Abfragen des Routers"
+          >
+            WAN-TRAFFIC
+          </div>
+          <div className="footer-traffic__values">
+            <span className="footer-traffic__down">↓ {formatBitRate(downBps)}</span>
+            <span className="footer-traffic__up">↑ {formatBitRate(upBps)}</span>
+          </div>
+          <div className="footer-status__sub">{trafficSub}</div>
         </div>
-      </div>
 
-      {/* Sektion 3: Top Talker */}
-      <div className="footer-section footer-section--talkers">
-        <div className="footer-section__title">TOP TALKER (LETZTE 24H)</div>
-        {topTalkers.length === 0 ? (
-          <div className="footer-talkers__empty">Keine Traffic-Daten</div>
-        ) : (
-          <ol className="footer-talkers__list">
-            {topTalkers.map((c, i) => {
-              const total = (c.rxBytes ?? 0) + (c.txBytes ?? 0);
-              const pct = Math.round((total / maxBytes) * 100);
-              return (
-                <li key={c.id} className="footer-talkers__item">
-                  <span className="footer-talkers__rank">{i + 1}.</span>
-                  <span className="footer-talkers__name" title={c.ip}>{c.name || c.hostname || c.mac}</span>
-                  <div className="footer-talkers__bar-wrap">
-                    <div className="footer-talkers__bar" style={{ width: `${pct}%` }} />
-                  </div>
-                  <span className="footer-talkers__bytes">{formatBytes(total)}</span>
-                </li>
-              );
-            })}
-          </ol>
-        )}
-      </div>
+        {/* Sektion 3: Top Talker */}
+        <div className="footer-section footer-section--talkers">
+          <div
+            className="footer-section__title"
+            title="Byte-Zähler des WLAN-Treibers seit der letzten Anmeldung am Access Point"
+          >
+            TOP TALKER (SEIT VERBINDUNG)
+          </div>
+          {topTalkers.length === 0 ? (
+            <div className="footer-talkers__empty">Keine Traffic-Daten</div>
+          ) : (
+            <ol className="footer-talkers__list">
+              {topTalkers.map((c, i) => {
+                const total = (c.rxBytes ?? 0) + (c.txBytes ?? 0);
+                const pct = Math.round((total / maxBytes) * 100);
+                return (
+                  <li key={c.id}>
+                    <button
+                      type="button"
+                      className="footer-talkers__item"
+                      title={talkerTitle(c, total)}
+                      onClick={() => onHighlightClient(c.id)}
+                    >
+                      <span className="footer-talkers__rank">{i + 1}.</span>
+                      <span className="footer-talkers__name">{c.name}</span>
+                      <span className="footer-talkers__bar-wrap">
+                        <span className="footer-talkers__bar" style={{ width: `${pct}%` }} />
+                      </span>
+                      <span className="footer-talkers__bytes">{formatBytes(total)}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
 
-      {/* Sektion 4: Clients nach Typ */}
-      <div className="footer-section footer-section--clients-wrap">
-        <div className="footer-section__title">CLIENTS NACH TYP</div>
-        <div className="footer-clients-body">
-          <DonutChart
-            wired={clientTypes.wired}
-            wifi5={clientTypes.wifi5}
-            wifi24={clientTypes.wifi24}
-          />
+        {/* Sektion 4: Clients nach Typ */}
+        <div className="footer-section footer-section--clients-wrap">
+          <div className="footer-section__title">CLIENTS NACH TYP</div>
+          <div className="footer-clients-body">
+            <DonutChart
+              wired={clientTypes.wired}
+              wifi5={clientTypes.wifi5}
+              wifi24={clientTypes.wifi24}
+            />
+          </div>
         </div>
       </div>
     </div>

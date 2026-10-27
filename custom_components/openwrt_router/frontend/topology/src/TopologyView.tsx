@@ -15,7 +15,7 @@ import { useAlerts } from './useAlerts';
 import { useGhostDevices, formatLastSeen } from './useGhostDevices';
 import { computeEdgesFromBounds, computeHoverContext, NodeBounds } from './layout';
 import { ConnectionLayer } from './components/ConnectionLayer';
-import { InternetNode } from './components/InternetNode';
+import { InternetNode, internetState } from './components/InternetNode';
 import { GatewayNode } from './components/GatewayNode';
 import { APNode } from './components/APNode';
 import { ClientStrip } from './components/ClientStrip';
@@ -460,6 +460,7 @@ export function TopologyView({ data }: Props) {
     trafficMode ? 'traffic-mode'  : '',
     vlanMode    ? 'vlan-mode'     : '',
     healthMode  ? 'health-mode'   : '',
+    `inet-${internetState(data.gateway.pingMs)}`,  // colours the Internet edge
   ].filter(Boolean).join(' ');
 
   return (
@@ -723,6 +724,10 @@ export function TopologyView({ data }: Props) {
           )}
         </div>{/* end .topo-scroll */}
 
+        {/* Footer — in the flex flow below the canvas, never position:fixed
+            (fixed is relative to the browser window and covered HA's sidebar) */}
+        <GlobalFooter data={data} onHighlightClient={highlightClient} />
+
         {/* Detail panel (slides in from right / up from bottom on mobile) */}
         <DetailPanel
           entity={selectedEntity}
@@ -736,8 +741,6 @@ export function TopologyView({ data }: Props) {
           } satisfies DetailPanelActions}
         />
       </div>{/* end .topo-main */}
-
-      <GlobalFooter data={data} />
 
       {/* Edge hover tooltip — fixed overlay, outside zoom transform */}
       {hoveredEdge && !dragging && (

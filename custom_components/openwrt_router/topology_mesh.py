@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     CONF_TOPOLOGY_PORT_DEBUG,
@@ -1078,6 +1080,71 @@ def _enrich_gateway_ports(
             port["connected_device"] = None
 
 
+def _is_mac_like(value: str) -> bool:
+    """True for a bare MAC address, with or without separators."""
+    hexonly = value.strip().lower().replace(":", "").replace("-", "").replace(".", "")
+    return len(hexonly) == 12 and all(c in "0123456789abcdef" for c in hexonly)
+
+
+def _apply_ha_names(
+    hass: HomeAssistant, nodes: list[dict[str, Any]], entries: list[Any]
+) -> None:
+    """Attach names known to Home Assistant to client nodes (read-only).
+
+    Sources, best first: a name the user set on the device (``name_by_user``)
+    or on this integration's tracker entity, then the name another
+    integration registered for the MAC (ESPHome, Shelly, Cast, …). Sets
+    ``ha_name``, ``ha_name_source`` (``user``/``device``), ``ha_manufacturer``
+    and ``ha_model``. ``hostname`` and ``label`` stay the router's own data.
+    """
+    # dr/er.async_get create a registry when none is loaded — only read the
+    # ones HA already has (bare hass stubs in unit tests have none).
+    hass_data = getattr(hass, "data", None)
+    if (
+        not isinstance(hass_data, dict)
+        or dr.DATA_REGISTRY not in hass_data
+        or er.DATA_REGISTRY not in hass_data
+    ):
+        return
+    dev_reg = dr.async_get(hass)
+    ent_reg = er.async_get(hass)
+
+    # Tracker unique_id is either the MAC (newer cores) or
+    # "<entry_id>_tracker_<mac hex>" (older cores).
+    tracker_names: dict[str, str] = {}
+    for entry in entries:
+        for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+            if ent.domain != "device_tracker" or not ent.name:
+                continue
+            mac = _mac_norm(ent.unique_id.rsplit("_tracker_", 1)[-1])
+            if mac:
+                tracker_names[mac] = ent.name
+
+    for node in nodes:
+        if node.get("type") != "client":
+            continue
+        attrs = node.setdefault("attributes", {})
+        mac = _mac_norm(attrs.get("mac"))
+        if not mac:
+            continue
+        device = dev_reg.async_get_device(
+            connections={(dr.CONNECTION_NETWORK_MAC, mac)}
+        )
+        if device is not None and device.name_by_user:
+            attrs["ha_name"], attrs["ha_name_source"] = device.name_by_user, "user"
+        elif mac in tracker_names:
+            attrs["ha_name"], attrs["ha_name_source"] = tracker_names[mac], "user"
+        elif device is not None and device.name and not _is_mac_like(device.name):
+            # Some integrations name a device after its MAC — that is no
+            # better than the DHCP hostname, so it does not win over it.
+            attrs["ha_name"], attrs["ha_name_source"] = device.name, "device"
+        if device is not None:
+            if device.manufacturer:
+                attrs["ha_manufacturer"] = device.manufacturer
+            if device.model:
+                attrs["ha_model"] = device.model
+
+
 def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     """Build a unified mesh topology from all loaded openwrt_router entries.
 
@@ -1279,6 +1346,9 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         if not attrs.get("dhcp_expires") and lease.get("expires"):
             attrs["dhcp_expires"] = int(lease["expires"])
 
+    # Display names the user already knows from Home Assistant.
+    _apply_ha_names(hass, deduped_nodes, entries)
+
     # Inject native WAN throughput + ping + DuckDNS into the gateway router node.
     # Only the coordinator with role=gateway has this data (others return empty).
     # wan_traffic is derived natively from OpenWrt rx/tx byte deltas.
@@ -1292,6 +1362,9 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                 # Native OpenWrt throughput (rx/tx byte deltas)
                 attrs["wan_traffic"] = wan_traffic
                 attrs["ping_ms"] = getattr(data, "ping_ms", None)
+                if not getattr(data, "ping_checked", True):
+                    # First poll after start skips the ping — not "offline"
+                    attrs["ping_pending"] = True
                 attrs["ddns_status"] = getattr(data, "ddns_status", []) or []
                 attrs["topology_snapshots"] = (
                     getattr(data, "topology_snapshots", []) or []
