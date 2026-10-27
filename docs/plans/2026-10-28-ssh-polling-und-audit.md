@@ -7,10 +7,10 @@
 ## Status
 
 - **Stand:** 2026-10-27 (abends) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** Teil 1 `fix/ssh-polling` · PR #37 (1.38.3) · Basis: v1.38.2 (`7d77f0f`) — Teil 2 gestapelt: A1 `fix/auth-errors` · PR #38 (1.38.4) auf #37; A2 `fix/hostapd-iface-cache` · PR #39 (1.38.5) auf #38; A11 `fix/topology-lldp-chain` (Worktree `../ha-openwrt-router-lldp-chain`) auf #39
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39) · **Offen:** Merge und Release #37 → #38 → #39 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A3–A14
+- **Branch/PR:** Teil 1 `fix/ssh-polling` · PR #37 **gemergt** (`5372d12`, Release v1.38.3 am 2026-10-27 20:05) — Teil 2 gestapelt: A1 `fix/auth-errors` · PR #38 (1.38.4) jetzt auf `main`; A2 `fix/hostapd-iface-cache` · PR #39 (1.38.5) auf #38; A11 `fix/topology-lldp-chain` · PR #40 (1.38.6) auf #39
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1, A2 und A11 inkl. Fixes abgeschlossen · **Offen:** Merge und Release #38 → #39 → #40 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A3–A10, A12–A14
 - **Blocker:** –
-- **Nächster Schritt:** A11 (LLDP-Kette in der Mesh-Topologie, P1) mit fehlschlagenden Tests; Reviews A1/A2 laufen; nach Installation durch den Nutzer AK6 messen
+- **Nächster Schritt:** Merge-Freigabe #38 → #39 → #40 durch den Nutzer (jeder Merge ein Release); Installation von 1.38.3 (oder später 1.38.6) durch den Nutzer, dann AK6 messen (SSH-Logins je Minute auf `openwrt`, `ap2`, `ap4`; rpcd-RSS ≥ 1 h); danach A4 (WAN-Erkennung, E5)
 
 ## Problem und Zielverhalten
 
@@ -423,4 +423,49 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   1353 Tests grün (7 neue, 4 vorher rot: leere Liste nach Ablauf neu ermittelt, neues Radio-Interface
   löst Neuermittlung aus, `set_wifi_state`/`reload_wifi` verwerfen den Cache) · CI: PR #39 ·
   Hardware: nicht geprüft – Lücke: Gast-WLAN per Schalter aus/ein, Clients und AP-Sensor des
-  Gast-Interfaces erscheinen ohne Neuladen · Review: unabhängig, läuft.
+  Gast-Interfaces erscheinen ohne Neuladen · Review: unabhängig, siehe unten.
+- 2026-10-27 Review A1 (unabhängig): keine P0. P1: Re-Login nach ACL-Deploy fing `OpenWrtResponseError`
+  nicht (Setup-Fehler statt Wiederholung) → behoben; P2: `reauth_confirm`/`reauth_cannot_connect`
+  zeigten bei Antwortfehler „unbekannt“ → „Keine Verbindung“ bzw. rpcd-Hilfe; P3: `system/board`-Hinweis
+  nur noch einmal je Instanz (`a48eee7`, 4 neue Tests vorher rot, 1350 grün). Offen (P3):
+  `OpenWrtRpcdSetupError` wird nirgends geworfen (toter Zweig), ggf. in A10 entfernen oder nutzen.
+- 2026-10-27 Review A2 (unabhängig) – **offen, noch nicht behoben:** P1 der Auslöser „neues
+  Radio-Interface“ greift auf den ubus-Pfaden nie, weil `_parse_wireless_status` hart `Master` und
+  `_parse_iwinfo_info` iwinfo-Vokabular liefert, der Filter aber `ap` erwartet; Abhilfe: bekannte
+  Nicht-AP-Modi ausschließen (`sta`, `client`, `mesh`, `mesh point`, `adhoc`, `monitor`), in
+  `_parse_wireless_status` `config.mode` übernehmen, und auf *neue* ifnames seit der letzten
+  Ermittlung triggern (`_hostapd_radio_ifnames_seen`), sonst Probing je Poll. P2: SSH-WLAN-Pfad setzt
+  `RADIO_KEY_IFNAME` auf den Sektionsnamen ohne `RADIO_KEY_IFNAME_IS_SECTION`; „leere Neuermittlung
+  behält Liste“ greift auch bei legitim leerem Ergebnis (alle SSIDs aus) → nur bei Fehler behalten.
+  P3: Tests für `uci/apply`- und SSH-Pfad der Invalidierung, `reset_acl_blocked()` soll den Cache
+  verwerfen. Neuer Befund (vorbestehend): `_hostapd_acl_blocked` ist tot, weil `_call` bei
+  ACL-Sperre „rpcd ACL blocks …“ wirft und der Code auf „access denied“ prüft (`api.py` ~2291).
+- 2026-10-27 A11 `fix/topology-lldp-chain@124a552` (gestapelt auf #39, PR #40) – lokal: ruff 0.17.3
+  sauber, 1358 Tests grün (5 neue, 4 vorher rot) · CI: PR #40 · Hardware: nicht geprüft – Lücke:
+  Panel zeigt die reale Verkabelung, Snapshot hat je verkettetem AP genau eine LLDP-Uplink-Kante ·
+  Review: **noch nicht gestartet** (Risikoauslöser Kantenpriorität, Pflicht vor Merge).
+- 2026-10-27 Stapel nachgezogen: `fix/auth-errors@a48eee7` → `fix/hostapd-iface-cache` (`0d01014`,
+  Konflikt in `tests/test_api.py` beide Seiten behalten; ein verbliebener Trenner `=======` in
+  `bd956ac` entfernt, danach 1357 grün) → `fix/topology-lldp-chain` (`679a1df`, 1362 grün).
+- 2026-10-27 CI PR #37 rot (`test (3.13)/(3.14)`): der Test zum abgelaufenen df-Cache setzte den
+  Zeitstempel auf 0.0; auf einem frisch gestarteten Runner liegt `time.monotonic()` unter 600 s, der
+  Eintrag galt als frisch → Test relativ zu `monotonic()` (`cc5b378`), durch den Stapel gemergt.
+  Zusätzlich der vorbestehende WAN-Raten-Test mit 1 % Toleranz (echte Wanduhr als Divisor, einmal
+  lokal 799 statt 800), ebenfalls auf `fix/ssh-polling` und durch den Stapel gemergt.
+- 2026-10-27 A2-Review-Fixes `fix/hostapd-iface-cache@04f34fb`: P1 Modus-Vokabular (Nicht-AP-Modi
+  ausschließen, `config.mode` aus netifd durchreichen, Auslöser auf neu gemeldete ifnames), P2
+  Sektionsflag im SSH-WLAN-Pfad und „Liste behalten“ nur bei fehlgeschlagener Neuermittlung, P3
+  Tests für `uci/apply`- und SSH-Pfad, `reset_acl_blocked` verwirft den Cache; 8 neue Tests, 3
+  bestehende auf Parser-echte Radio-Formen umgestellt; lokal 1365 grün; nach `fix/topology-lldp-chain`
+  gemergt. Offen (vorbestehend, A10): `_hostapd_acl_blocked` erkennt die ACL-Sperre nicht
+  („access denied“ vs. „rpcd ACL blocks“).
+- 2026-10-27 Review A11 (unabhängig): keine P0. P1: ohne Gateway-LLDP entschied die ID-Sortierung
+  über die Kantenrichtung und damit, welcher AP seine Gateway-Kante verlor → WAN-Port auf genau
+  einer Seite als Richtungshinweis, Unterdrückung nur bei belegter Richtung. P2: Port mit
+  LLDP- und Heuristik-AP → kein Phantom-Switch; zweite Strecke ohne `gateway_port`; `chained_aps`
+  gegen alle Gateways. P3: Docstrings, Testkosmetik, CHANGELOG-Einschränkungen. 5 neue Tests
+  (vorher rot), lokal 1375 grün; PR #40 aktualisiert. Nicht geändert (vorbestehend): Doppel-
+  beobachtung desselben Paars (LAG) kollabiert auf eine Kante.
+- 2026-10-27 PR #37 gemergt (`5372d12`) nach Freigabe des Nutzers, CI grün (tests 3.13/3.14, hassfest,
+  hacs); Release-Workflow erfolgreich, **v1.38.3** veröffentlicht (20:05, Release-Text aus dem
+  CHANGELOG); HACS per `update_information` aufgefrischt; PR #38 auf `main` umgehängt (mergebar).

@@ -305,21 +305,49 @@ def _lldp_hop_depths(
     return depths
 
 
-def _orient_lldp_edge(
+def _lldp_wan_side(a_iface: str, b_iface: str) -> int | None:
+    """Return which side (0 = a, 1 = b) faces the link through its WAN port.
+
+    On OpenWrt a downstream router is wired through its ``wan`` port, so a
+    link seen on ``wan`` on exactly one side points *to* that side. None when
+    neither or both sides report a WAN port (or the names are unknown).
+    """
+
+    def _is_wan(name: str) -> bool:
+        lowered = (name or "").strip().lower()
+        return lowered.startswith("wan") and not _lldp_link_is_wireless(lowered)
+
+    a_wan, b_wan = _is_wan(a_iface), _is_wan(b_iface)
+    if a_wan and not b_wan:
+        return 0
+    if b_wan and not a_wan:
+        return 1
+    return None
+
+
+def _orient_lldp_pair(
     rid_a: str,
     rid_b: str,
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
     depths: dict[str, int] | None = None,
-) -> tuple[str, str]:
+    a_iface: str = "",
+    b_iface: str = "",
+) -> tuple[str, str, bool]:
     """Choose a from/to orientation for a router-to-router LLDP edge.
 
     Orientation is presentation-only (both physical port sides are always
     carried on the edge), but it decides which endpoint downstream consumers
     treat as the *uplink target* — so it must point away from the gateway.
     A gateway endpoint always becomes ``from``; otherwise the endpoint closer
-    to a gateway (in LLDP hops) wins, and only a genuine tie falls back to a
-    stable router_id sort. This is deliberately NOT based on IP ordering — the
-    cabling itself is what LLDP reports.
+    to a gateway (in LLDP hops) wins; otherwise the side that reports its
+    WAN port on the link is the downstream one; only a genuine tie falls back
+    to a stable router_id sort. This is deliberately NOT based on IP ordering —
+    the cabling itself is what LLDP reports.
+
+    The third element says whether the orientation is *anchored* in evidence
+    (gateway role, hop depth or WAN port) or merely the sort fallback. Only an
+    anchored ``to`` side counts as "has its uplink" for the heuristics: a
+    guessed orientation must not cost a router its (correct) gateway edge.
     """
     roles = {
         rid: _detect_router_role(data, hip)
@@ -329,29 +357,52 @@ def _orient_lldp_edge(
     a_gw = roles.get(rid_a) == "gateway"
     b_gw = roles.get(rid_b) == "gateway"
     if a_gw and not b_gw:
-        return rid_a, rid_b
+        return rid_a, rid_b, True
     if b_gw and not a_gw:
-        return rid_b, rid_a
+        return rid_b, rid_a, True
     if depths:
         unreachable = len(router_data) + 1
         depth_a = depths.get(rid_a, unreachable)
         depth_b = depths.get(rid_b, unreachable)
         if depth_a != depth_b:
-            return (rid_a, rid_b) if depth_a < depth_b else (rid_b, rid_a)
-    return (rid_a, rid_b) if rid_a <= rid_b else (rid_b, rid_a)
+            return ((rid_a, rid_b) if depth_a < depth_b else (rid_b, rid_a)) + (True,)
+    wan_side = _lldp_wan_side(a_iface, b_iface)
+    if wan_side == 0:
+        return rid_b, rid_a, True  # a is wired through its WAN port → downstream
+    if wan_side == 1:
+        return rid_a, rid_b, True
+    return ((rid_a, rid_b) if rid_a <= rid_b else (rid_b, rid_a)) + (False,)
+
+
+def _orient_lldp_edge(
+    rid_a: str,
+    rid_b: str,
+    router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+    depths: dict[str, int] | None = None,
+) -> tuple[str, str]:
+    """Orientation only (see :func:`_orient_lldp_pair`), kept for callers/tests."""
+    from_rid, to_rid, _anchored = _orient_lldp_pair(rid_a, rid_b, router_data, depths)
+    return from_rid, to_rid
 
 
 def _detect_lldp_edges(
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
     token_to_rid: dict[str, str],
     meta: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], set[str]]:
+) -> tuple[list[dict[str, Any]], set[str], set[str]]:
     """Detect router-to-router edges from LLDP neighbor tables.
 
-    Runs before every heuristic. Returns ``(edges, blocked_ids)`` where
+    Runs before every heuristic. Returns ``(edges, blocked_ids, uplinked)``:
     ``blocked_ids`` contains BOTH orientations of every detected pair so the
     downstream heuristics (DHCP / WiFi / ARP / subnet) cannot add a competing —
-    and possibly wrong-port — edge for the same pair. LLDP always wins.
+    and possibly wrong-port — edge for the same pair, and ``uplinked`` is the
+    set of routers that already have an LLDP uplink (the ``to`` side), so no
+    heuristic adds a *second* uplink to them from another router. The latter
+    matters in a chain gateway → AP-A → AP-B: the gateway is the DHCP server
+    for AP-B too and sees it behind the same port as AP-A in its FDB, which
+    used to produce a competing gateway → AP-B edge and, through the switch
+    inference, a phantom switch replacing the whole LLDP chain. LLDP always
+    wins.
     """
     # Collect directed observations a→b (a saw b as an LLDP neighbor).
     obs: dict[tuple[str, str], dict[str, Any]] = {}
@@ -376,10 +427,12 @@ def _detect_lldp_edges(
 
     edges: list[dict[str, Any]] = []
     blocked_ids: set[str] = set()
+    uplinked: set[str] = set()
     handled: set[frozenset[str]] = set()
 
     # Orientation needs the whole graph, so hop distances are computed up front.
     depths = _lldp_hop_depths({frozenset(pair) for pair in obs}, router_data)
+    gateway_rids = {rid for rid, depth in depths.items() if depth == 0}
 
     for (a_rid, b_rid), fwd in obs.items():
         pair = frozenset((a_rid, b_rid))
@@ -389,7 +442,17 @@ def _detect_lldp_edges(
         rev = obs.get((b_rid, a_rid))
         bidirectional = rev is not None
 
-        from_rid, to_rid = _orient_lldp_edge(a_rid, b_rid, router_data, depths)
+        # Each side's own local interface on the link; when only one side
+        # reported, the observer's view of the peer port stands in.
+        a_iface = (
+            fwd.get("local_interface") or (rev or {}).get("neighbor_port_id") or ""
+        )
+        b_iface = (
+            (rev or {}).get("local_interface") or fwd.get("neighbor_port_id") or ""
+        )
+        from_rid, to_rid, anchored = _orient_lldp_pair(
+            a_rid, b_rid, router_data, depths, a_iface, b_iface
+        )
         # Map each router's OWN self-reported local port to the from/to side.
         if from_rid == a_rid:
             from_obs, to_obs = fwd, rev
@@ -456,9 +519,20 @@ def _detect_lldp_edges(
                     "from_interface": from_iface,
                     "to_port": to_port,
                     "to_interface": to_iface,
-                    # Compat keys so gateway-port rendering keeps working:
-                    "gateway_port": None if wireless else (from_port or None),
-                    "ap_port": None if wireless else (to_port or None),
+                    # Compat keys so gateway-port rendering keeps working. They
+                    # describe a GATEWAY port: the panel looks ``gateway_port``
+                    # up in the gateway's port stats, so a hop whose ``from`` is
+                    # an AP carries none (its ports stay in from_port/to_port).
+                    "gateway_port": (
+                        None
+                        if wireless or from_rid not in gateway_rids
+                        else (from_port or None)
+                    ),
+                    "ap_port": (
+                        None
+                        if wireless or from_rid not in gateway_rids
+                        else (to_port or None)
+                    ),
                     "vlan_tags": [] if wireless else vlan_tags,
                     # Rich LLDP neighbor detail (from the from-side observation):
                     "neighbor_name": observed.get("neighbor_name", ""),
@@ -478,10 +552,14 @@ def _detect_lldp_edges(
         # Block BOTH orientations so no heuristic can add a competing edge.
         blocked_ids.add(f"{a_rid}--uplink--{b_rid}")
         blocked_ids.add(f"{b_rid}--uplink--{a_rid}")
+        # Only an evidence-based orientation marks the to-side as "uplinked";
+        # a sort-fallback guess must not cost a router its gateway edge.
+        if anchored:
+            uplinked.add(to_rid)
 
     if edges:
         _LOGGER.debug("LLDP: detected %d router-to-router edge(s)", len(edges))
-    return edges, blocked_ids
+    return edges, blocked_ids, uplinked
 
 
 def _detect_inter_router_edges(
@@ -496,7 +574,8 @@ def _detect_inter_router_edges(
 
     Strategy (priority order):
         0. LLDP neighbors: authoritative router-to-router links + physical ports
-           (runs first; blocks both orientations so heuristics cannot override).
+           (runs first; blocks both orientations so heuristics cannot override,
+           and a router with an anchored LLDP uplink gets no further uplink).
         1. DHCP lease cross-reference: AP's host IP in gateway's DHCP leases → LAN uplink
         2. WiFi client cross-reference: AP's MAC in another router's client list → WiFi uplink
         3. Subnet fallback: Same /24 subnet → mesh_member (inferred)
@@ -508,9 +587,14 @@ def _detect_inter_router_edges(
     # seeds seen_edges with BOTH orientations of every detected pair so the
     # heuristics below cannot add a competing (possibly wrong-port) edge.
     token_to_rid, known_meta = _build_known_router_index(router_data)
-    lldp_edges, lldp_blocked = _detect_lldp_edges(router_data, token_to_rid, known_meta)
+    lldp_edges, lldp_blocked, lldp_uplinked = _detect_lldp_edges(
+        router_data, token_to_rid, known_meta
+    )
     edges.extend(lldp_edges)
     seen_edges.update(lldp_blocked)
+    # lldp_uplinked: routers whose uplink LLDP established with anchored
+    # orientation; methods 1, 2.5, 2 and 3 add no second uplink to them
+    # (chain gateway → AP-A → AP-B, see _detect_lldp_edges).
 
     # Build lookup maps
     # Includes router_info.mac + ALL interface IPs/MACs so an AP that connects
@@ -565,7 +649,7 @@ def _detect_inter_router_edges(
             if ap_rid == gw_rid:
                 continue
             edge_id = f"{gw_rid}--uplink--{ap_rid}"
-            if edge_id in seen_edges:
+            if edge_id in seen_edges or ap_rid in lldp_uplinked:
                 continue
 
             # Check if AP's host IP appears in gateway's DHCP leases
@@ -621,7 +705,7 @@ def _detect_inter_router_edges(
             if ap_rid == gw_rid:
                 continue
             edge_id = f"{gw_rid}--uplink--{ap_rid}"
-            if edge_id in seen_edges:
+            if edge_id in seen_edges or ap_rid in lldp_uplinked:
                 continue
             gateway_port = trunk_map.get(ap_hip)
             if gateway_port:
@@ -683,7 +767,7 @@ def _detect_inter_router_edges(
                 from_rid, to_rid = src_rid, target_rid
 
             edge_id = f"{from_rid}--uplink--{to_rid}"
-            if edge_id in seen_edges:
+            if edge_id in seen_edges or to_rid in lldp_uplinked:
                 continue
             edges.append(
                 {
@@ -774,7 +858,7 @@ def _detect_inter_router_edges(
 
         for ap_rid, ap_hip, ap_data in unconnected:
             edge_id = f"{gw_rid}--uplink--{ap_rid}"
-            if edge_id in seen_edges:
+            if edge_id in seen_edges or ap_rid in lldp_uplinked:
                 continue
 
             # Wireless-backhaul fallback: an AP that no other method matched but
@@ -878,7 +962,9 @@ def _detect_switch_nodes(
 
     If multiple APs are connected via the same gateway port, an unmanaged
     switch is likely sitting between them. We insert an inferred switch node
-    and reroute the AP edges through it.
+    and reroute the AP edges through it. APs that hang behind another router
+    (LLDP chain) and ports that mix LLDP-verified with heuristic uplinks are
+    left alone.
 
     Returns:
         (switch_nodes, new_edges_replacing_direct_ap_edges, replaced_edge_ids)
@@ -901,14 +987,53 @@ def _detect_switch_nodes(
     if not gw_trunk_map or not gw_rid:
         return [], [], set()
 
-    # Group APs by gateway port
-    port_to_aps: dict[str, list[str]] = {}
+    # APs that hang behind ANOTHER router (LLDP-verified router_uplink from a
+    # non-gateway) are part of a chain, not members of a switch on a gateway
+    # port — even if a stray gateway → AP edge names the same port.
+    gateway_rids = {
+        rid
+        for rid, hip, data in router_data
+        if _detect_router_role(data, hip) == "gateway"
+    }
+    chained_aps = {
+        edge.get("to")
+        for edge in inter_router_edges
+        if edge.get("relationship") == CONNECTION_TYPE_ROUTER_UPLINK
+        and edge.get("from") not in gateway_rids
+    }
+
+    # Group APs by gateway port, remembering whether each edge is LLDP-verified.
+    port_members: dict[str, list[tuple[str, bool]]] = {}
     for edge in inter_router_edges:
         if _is_wired_uplink_edge(edge):
-            gw_port = (edge.get("attributes") or {}).get("gateway_port")
+            attrs = edge.get("attributes") or {}
+            gw_port = attrs.get("gateway_port")
             ap_id = edge.get("to")
-            if gw_port and ap_id and edge.get("from") == gw_rid:
-                port_to_aps.setdefault(gw_port, []).append(ap_id)
+            if (
+                gw_port
+                and ap_id
+                and edge.get("from") == gw_rid
+                and ap_id not in chained_aps
+            ):
+                port_members.setdefault(gw_port, []).append(
+                    (ap_id, attrs.get("detection_method") == SOURCE_LLDP)
+                )
+
+    # A port with an LLDP-verified AP AND a heuristically found AP is
+    # ambiguous: the second AP may hang behind the first (no lldpd on it) or
+    # behind an unmanaged switch. Neither reading justifies dropping the LLDP
+    # edge, so no switch is inferred there. All-LLDP or all-heuristic ports
+    # keep the inference (two APs reporting the gateway on one port = switch).
+    port_to_aps: dict[str, list[str]] = {}
+    for port, members in port_members.items():
+        if len({is_lldp for _ap, is_lldp in members}) > 1:
+            _LOGGER.debug(
+                "Switch inference: port %s mixes LLDP and heuristic uplinks — "
+                "keeping the direct edges",
+                port,
+            )
+            continue
+        port_to_aps[port] = [ap for ap, _is_lldp in members]
 
     # For each port with >1 AP: insert a switch node and collect replaced edge IDs
     for port, ap_ids in port_to_aps.items():
