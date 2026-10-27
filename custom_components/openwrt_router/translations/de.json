@@ -81,6 +81,9 @@
       "connectivity": {
         "name": "Verbindungsstatus"
       },
+      "sticky_clients": {
+        "name": "Klebende WLAN-Clients"
+      },
       "wan_connectivity": {
         "name": "WAN-Verbindung"
       }
@@ -113,6 +116,9 @@
           "timeout": "Zeitüberschreitung",
           "response_error": "Ungültige Antwort"
         }
+      },
+      "unstable_clients": {
+        "name": "Instabile WLAN-Clients"
       },
       "uptime": {
         "name": "Laufzeit"

@@ -142,6 +142,8 @@ SUFFIX_DFS_EVENTS_24H = "dfs_events_24h"
 # Per DHCP pool: f"{entry_id}_{SUFFIX_DHCP_POOL}-{pool}" (hyphen keeps the
 # legacy-migration substrings like "_rate"/"_ap_" out of user pool names)
 SUFFIX_DHCP_POOL = "dhcp_pool"
+SUFFIX_STICKY_CLIENTS = "sticky_clients"
+SUFFIX_UNSTABLE_CLIENTS = "unstable_clients"
 
 # Error type values stored in coordinator.data.error_type
 ERROR_TYPE_CONNECTION = "connection"
@@ -428,6 +430,16 @@ DFS_EVIDENCE_SECONDS = 15 * 60
 # DHCP health (F5): pools and static hosts from `uci get dhcp`, refreshed
 # every DHCP_CONFIG_REFRESH_CYCLES polls on routers with an active pool.
 DHCP_CONFIG_REFRESH_CYCLES = 10
+
+# Client stability (F4): usteer's fleet-wide client view (ACL v6), fetched
+# every LOG_READ_INTERVAL_CYCLES polls on the polls between the log fetches;
+# a router without usteer is asked again every USTEER_RETRY_CYCLES polls.
+UBUS_USTEER_OBJECT = "usteer"
+UBUS_USTEER_GET_CLIENTS = "get_clients"
+USTEER_RETRY_CYCLES = 30
+USTEER_STATUS_PENDING = "pending"
+USTEER_STATUS_OK = "ok"
+USTEER_STATUS_UNAVAILABLE = "not_available"
 LOG_STATUS_PENDING = "pending"
 LOG_STATUS_OK = "ok"
 # Not "unavailable": that state is reserved by HA for unreachable entities.

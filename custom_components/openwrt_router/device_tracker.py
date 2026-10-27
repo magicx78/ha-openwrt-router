@@ -47,7 +47,7 @@ from .const import (
 )
 from .coordinator import OpenWrtCoordinator
 from .dhcp_health import client_dhcp_status
-from .fleet import dhcp_context
+from .fleet import client_counts, dhcp_context
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -236,11 +236,13 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional attributes for the tracked device."""
         client, coordinator = self._find_client()
+        counts = self._client_counts()
         if not client:
             # Client is currently away; return last known SSID / radio if stored
-            return {"mac": self._mac, "connected": False}
+            return {"mac": self._mac, "connected": False, **counts}
 
         return {
+            **counts,
             "mac": self._mac,
             "connected": True,
             "dhcp_status": self._dhcp_status(client),
@@ -253,6 +255,13 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
                 coordinator.router_info.get("hostname", "") if coordinator else ""
             ),
         }
+
+    def _client_counts(self) -> dict[str, int]:
+        """associations_24h / reconnects_24h over all routers (router log)."""
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return {}
+        return client_counts(hass, self._mac) or {}
 
     def _dhcp_status(self, client: dict[str, Any]) -> str | None:
         """ok / pending / dhcp_missing / static_no_lease, None if unknown."""

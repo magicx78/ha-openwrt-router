@@ -383,6 +383,25 @@ def dhcp_context(
 
 
 @callback
+def client_counts(hass: HomeAssistant, mac: str) -> dict[str, int] | None:
+    """Sum a client's 24 h associations/reconnects over all routers."""
+    mac = mac.upper()
+    total: dict[str, int] | None = None
+    for entry in hass.config_entries.async_loaded_entries(DOMAIN):
+        runtime = getattr(entry, "runtime_data", None)
+        data = getattr(getattr(runtime, "coordinator", None), "data", None)
+        stability = getattr(data, "client_stability", None) or {}
+        counts = (stability.get("clients") or {}).get(mac)
+        if not counts:
+            continue
+        if total is None:
+            total = {"associations_24h": 0, "reconnects_24h": 0}
+        for key in total:
+            total[key] += int(counts.get(key, 0))
+    return total
+
+
+@callback
 def async_get_channel_plan_monitor(hass: HomeAssistant) -> ChannelPlanMonitor:
     """Return the per-HA-instance channel plan monitor, creating it on first use."""
     monitor = hass.data.get(_CHANNEL_PLAN_KEY)
