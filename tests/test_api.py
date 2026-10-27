@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
+from collections.abc import Iterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -499,6 +502,596 @@ class TestBandInParsers:
             "radio5": "unknown",  # 60 GHz, the band option beats the name
             "radio7": "5g",
         }
+
+
+# =====================================================================
+# network.wireless status: channel/htmode live in the radio "config" block
+# =====================================================================
+
+# Shape of `ubus call network.wireless status` on OpenWrt 25.12 (netifd
+# ucode): no top-level channel, the channel is a string inside "config";
+# "section" sits next to "ifname", not inside the interface config.
+WIRELESS_STATUS_25_12 = {
+    "radio0": {
+        "up": True,
+        "pending": False,
+        "autostart": True,
+        "disabled": False,
+        "retry_setup_failed": False,
+        "config": {
+            "type": "mac80211",
+            "band": "2g",
+            "cell_density": 1,
+            "channel": "1",
+            "country": "DE",
+            "htmode": "HE20",
+            "path": "platform/soc/18000000.wifi",
+        },
+        "interfaces": [
+            {
+                "section": "default_radio0",
+                "ifname": "phy0-ap0",
+                "config": {"mode": "ap", "ssid": "Example-Net"},
+                "vlans": [],
+                "stations": [],
+            }
+        ],
+    },
+    "radio1": {
+        "up": True,
+        "pending": False,
+        "autostart": True,
+        "disabled": False,
+        "retry_setup_failed": False,
+        "config": {
+            "type": "mac80211",
+            "band": "5g",
+            "cell_density": 1,
+            "channel": "36",
+            "country": "DE",
+            "htmode": "HE40",
+            "path": "platform/soc/18000000.wifi+1",
+        },
+        "interfaces": [
+            {
+                "section": "lan_5g",
+                "ifname": "phy1-ap0",
+                "config": {"mode": "ap", "ssid": "Example-Net-5G"},
+                "vlans": [],
+                "stations": [],
+            }
+        ],
+    },
+}
+
+
+class TestWirelessStatusConfigBlock:
+    """AK5: channel (and htmode/hwmode) come from the radio config block."""
+
+    def test_channel_from_config_block(self, mock_api):
+        radios = mock_api._parse_wireless_status(WIRELESS_STATUS_25_12)
+        by_name = {r["name"]: r for r in radios}
+        # int like the iwinfo and UCI paths (channel_plan, panel expect numbers)
+        assert by_name["radio0"]["channel"] == 1
+        assert by_name["radio1"]["channel"] == 36
+        assert isinstance(by_name["radio1"]["channel"], int)
+
+    def test_htmode_from_config_block(self, mock_api):
+        radios = mock_api._parse_wireless_status(WIRELESS_STATUS_25_12)
+        by_name = {r["name"]: r for r in radios}
+        assert by_name["radio0"]["htmode"] == "HE20"
+        assert by_name["radio1"]["htmode"] == "HE40"
+
+    @pytest.mark.parametrize("channel", [36, "36"])
+    def test_top_level_channel_still_read(self, mock_api, channel):
+        """Older status formats with a top-level channel keep working."""
+        status = {
+            "radio1": {
+                "up": True,
+                "channel": channel,
+                "interfaces": [
+                    {"ifname": "phy1-ap0", "config": {"ssid": "Example-Net-5G"}}
+                ],
+            }
+        }
+        (radio,) = mock_api._parse_wireless_status(status)
+        assert radio["channel"] == 36
+
+    @pytest.mark.parametrize(
+        ("config", "top_level", "expected"),
+        [
+            ({"channel": "auto"}, {}, None),
+            ({}, {}, None),
+            ({"channel": ""}, {}, None),
+            ({"channel": "auto"}, {"channel": 44}, 44),
+            ({"channel": "40"}, {"channel": 44}, 40),
+        ],
+    )
+    def test_auto_or_missing_channel(self, mock_api, config, top_level, expected):
+        status = {
+            "radio1": {
+                "up": True,
+                **top_level,
+                "config": {"band": "5g", **config},
+                "interfaces": [
+                    {"ifname": "phy1-ap0", "config": {"ssid": "Example-Net-5G"}}
+                ],
+            }
+        }
+        (radio,) = mock_api._parse_wireless_status(status)
+        assert radio["channel"] == expected
+
+    def test_legacy_hwmode_from_config_block(self, mock_api):
+        """OpenWrt <= 22.03 keeps hwmode in the radio config as well."""
+        status = {
+            "radio0": {
+                "up": True,
+                "config": {"hwmode": "11a", "channel": "100", "htmode": "VHT80"},
+                "interfaces": [
+                    {"ifname": "wlan0", "config": {"ssid": "Example-Net-5G"}}
+                ],
+            }
+        }
+        (radio,) = mock_api._parse_wireless_status(status)
+        assert radio["hwmode"] == "11a"
+        assert radio["channel"] == 100
+        assert radio["htmode"] == "VHT80"
+
+
+# =====================================================================
+# SSH fallback: `uci show wireless` parsing and ap_interfaces
+# =====================================================================
+
+# `uci show wireless` of a router with one anonymous and one named wifi-iface
+# per radio. uci prints a ' inside a value as '\'' (close, escaped quote,
+# reopen). Placeholder SSIDs/keys only.
+UCI_SHOW_WIRELESS = "\n".join(
+    [
+        "wireless.radio0=wifi-device",
+        "wireless.radio0.type='mac80211'",
+        "wireless.radio0.path='platform/soc/18000000.wifi'",
+        "wireless.radio0.band='2g'",
+        "wireless.radio0.channel='6'",
+        "wireless.radio0.htmode='HE20'",
+        "wireless.radio0.country='DE'",
+        "wireless.radio0.cell_density='0'",
+        "wireless.radio1=wifi-device",
+        "wireless.radio1.type='mac80211'",
+        "wireless.radio1.path='platform/soc/18000000.wifi+1'",
+        "wireless.radio1.band='5g'",
+        "wireless.radio1.channel='36'",
+        "wireless.radio1.htmode='HE80'",
+        "wireless.radio1.country='DE'",
+        "wireless.@wifi-iface[0]=wifi-iface",
+        "wireless.@wifi-iface[0].device='radio0'",
+        "wireless.@wifi-iface[0].network='lan'",
+        "wireless.@wifi-iface[0].mode='ap'",
+        "wireless.@wifi-iface[0].ssid='Example-Net'",
+        "wireless.@wifi-iface[0].encryption='sae-mixed'",
+        "wireless.@wifi-iface[0].key='placeholder-key'",
+        "wireless.@wifi-iface[1]=wifi-iface",
+        "wireless.@wifi-iface[1].device='radio1'",
+        "wireless.@wifi-iface[1].network='lan'",
+        "wireless.@wifi-iface[1].mode='ap'",
+        "wireless.@wifi-iface[1].ssid='Example-Net-5G'",
+        "wireless.guest_5g=wifi-iface",
+        "wireless.guest_5g.device='radio1'",
+        "wireless.guest_5g.network='guest'",
+        "wireless.guest_5g.mode='ap'",
+        "wireless.guest_5g.ssid='Example'\\''s Guest'",
+        "wireless.guest_5g.disabled='1'",
+    ]
+)
+
+
+def _ssh_only_api(uci_text: str = UCI_SHOW_WIRELESS) -> tuple[OpenWrtAPI, AsyncMock]:
+    """API whose rpcd denies every Wi-Fi call, so only the SSH fallback works."""
+    api = OpenWrtAPI(
+        host="192.168.1.1",
+        port=80,
+        username="root",
+        password="test",
+        session=MagicMock(),
+        protocol="http",
+    )
+    api._call = AsyncMock(side_effect=OpenWrtMethodNotFoundError("ACL"))
+    ssh = AsyncMock(return_value=(0, uci_text, b""))
+    api._asyncssh_run = ssh
+    return api, ssh
+
+
+class TestSshUciShowParsing:
+    """AK7: anonymous sections and SSIDs with a single quote."""
+
+    @pytest.mark.asyncio
+    async def test_anonymous_sections_are_read(self):
+        api, _ssh = _ssh_only_api()
+        radios = await api._get_wifi_status_ssh()
+        sections = [r["uci_section"] for r in radios]
+        assert sections == ["@wifi-iface[0]", "@wifi-iface[1]", "guest_5g"]
+        by_section = {r["uci_section"]: r for r in radios}
+        anon = by_section["@wifi-iface[0]"]
+        assert anon["ifname"] == "@wifi-iface[0]"
+        assert anon["name"] == "radio0"
+        assert anon["ssid"] == "Example-Net"
+        assert anon["band"] == "2.4g"
+        assert anon["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_ssid_with_single_quote_round_trips(self):
+        api, _ssh = _ssh_only_api()
+        radios = await api._get_wifi_status_ssh()
+        guest = next(r for r in radios if r["uci_section"] == "guest_5g")
+        assert guest["ssid"] == "Example's Guest"
+        assert guest["enabled"] is False
+        assert guest["is_guest"] is True
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("'it'\\''s'", "it's"),
+            ("''\\'''", "'"),
+            ("'Net = 5 GHz'", "Net = 5 GHz"),
+            ("'a \"b\" c'", 'a "b" c'),
+            ("''", ""),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_quoted_values(self, raw, expected):
+        text = "\n".join(
+            [
+                "wireless.radio0=wifi-device",
+                "wireless.radio0.band='5g'",
+                "wireless.default_radio0=wifi-iface",
+                "wireless.default_radio0.device='radio0'",
+                f"wireless.default_radio0.ssid={raw}",
+            ]
+        )
+        api, _ssh = _ssh_only_api(text)
+        (radio,) = await api._get_wifi_status_ssh()
+        assert radio["ssid"] == expected
+
+
+class TestApInterfacesSshFallback:
+    """AK7: routers on the SSH fallback fill ap_interfaces from `uci show`."""
+
+    @pytest.mark.asyncio
+    async def test_ssh_fallback_fills_ap_interfaces(self):
+        api, ssh = _ssh_only_api()
+        radios = await api.get_wifi_status()
+        assert api._wifi_method == "ssh"
+        assert len(radios) == 3
+        api._hostapd_ifaces = []
+
+        ifaces = await api.get_ap_interface_details()
+
+        by_name = {i["ifname"]: i for i in ifaces}
+        assert list(by_name) == ["@wifi-iface[0]", "@wifi-iface[1]", "guest_5g"]
+        anon = by_name["@wifi-iface[0]"]
+        assert anon["ssid"] == "Example-Net"
+        assert anon["band"] == "2.4g"
+        assert anon["channel"] == 6
+        assert anon["htmode"] == "HE20"
+        assert anon["phy"] == "radio0"
+        assert anon["mode"] == "ap"
+        assert by_name["guest_5g"]["ssid"] == "Example's Guest"
+        assert by_name["guest_5g"]["channel"] == 36
+        assert by_name["guest_5g"]["htmode"] == "HE80"
+        assert by_name["guest_5g"]["is_guest"] is True
+        # Same key set as the UCI branch / iwinfo path
+        assert set(anon) >= {
+            "ifname", "ssid", "band", "is_guest", "mode", "bssid", "channel",
+            "frequency", "txpower", "bitrate", "hwmode", "htmode", "phy",
+            "center_chan1", "signal", "noise", "quality", "quality_max",
+        }
+        # Reuses the `uci show wireless` of this poll: no extra SSH round-trip
+        assert ssh.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_ssh_ap_interfaces_feed_the_channel_plan(self):
+        from custom_components.openwrt_router.channel_plan import (
+            Radio,
+            radios_from_ap_interfaces,
+        )
+
+        api, _ssh = _ssh_only_api()
+        await api.get_wifi_status()
+        api._hostapd_ifaces = []
+        ifaces = await api.get_ap_interface_details()
+
+        radios = radios_from_ap_interfaces("ap", "AP", ifaces)
+        assert sorted(radios, key=lambda r: r.phy) == [
+            Radio(entry_id="ap", router="AP", phy="radio0", band="2.4g",
+                  channel=6, width=20, center=6),
+            Radio(entry_id="ap", router="AP", phy="radio1", band="5g",
+                  channel=36, width=80, center=42),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ssh_fallback_after_failed_iwinfo_per_device(self):
+        """ACL-blocked hostapd candidates: iwinfo per device fails, SSH fills."""
+        api, ssh = _ssh_only_api()
+        await api.get_wifi_status()
+        api._hostapd_ifaces = ["phy0-ap0", "phy1-ap0"]
+
+        ifaces = await api.get_ap_interface_details()
+
+        assert [i["ifname"] for i in ifaces] == [
+            "@wifi-iface[0]", "@wifi-iface[1]", "guest_5g",
+        ]
+        assert ssh.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_ssh_poll_leaves_no_stale_interfaces(self):
+        api, ssh = _ssh_only_api()
+        await api.get_wifi_status()
+        api._hostapd_ifaces = []
+        assert await api.get_ap_interface_details()
+
+        # Next poll: SSH fails -> no Wi-Fi method, no leftover interfaces
+        ssh.return_value = (1, "", b"uci: Entry not found")
+        api._wifi_method = None
+        assert await api.get_wifi_status() == []
+        assert await api.get_ap_interface_details() == []
+
+    @pytest.mark.asyncio
+    async def test_no_ssh_data_without_ssh_method(self):
+        """Without the SSH fallback the cache is never consulted."""
+        api, ssh = _ssh_only_api()
+        api._hostapd_ifaces = []
+        api._wifi_method = None
+        assert await api.get_ap_interface_details() == []
+        assert ssh.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_uci_branch_unchanged(self):
+        """The ubus UCI branch still builds the same entries."""
+        api, _ssh = _ssh_only_api()
+        api._wifi_method = "uci"
+        api._hostapd_ifaces = []
+        api.get_uci_wireless = AsyncMock(
+            return_value={
+                "radio1": {".type": "wifi-device", "band": "5g",
+                           "channel": "auto", "htmode": "HE80"},
+                "default_radio1": {".type": "wifi-iface", ".index": 1,
+                                   "device": "radio1", "ssid": "Example-Net-5G"},
+            }
+        )
+        (iface,) = await api.get_ap_interface_details()
+        assert iface["ifname"] == "default_radio1"
+        assert iface["channel"] is None
+        assert iface["band"] == "5g"
+        assert iface["htmode"] == "HE80"
+        assert iface["mode"] == "ap"
+
+
+# `uci show wireless` with an `ifname` option, a switched-off radio (DFS
+# channel), a switched-off SSID and the secret options a wifi-iface can carry.
+# Placeholder SSIDs/secrets only.
+UCI_SHOW_WIRELESS_SECRETS = "\n".join(
+    [
+        "wireless.radio0=wifi-device",
+        "wireless.radio0.band='2g'",
+        "wireless.radio0.channel='1'",
+        "wireless.radio1=wifi-device",
+        "wireless.radio1.band='5g'",
+        "wireless.radio1.channel='36'",
+        "wireless.radio1.htmode='HE80'",
+        "wireless.radio2=wifi-device",
+        "wireless.radio2.band='5g'",
+        "wireless.radio2.channel='100'",
+        "wireless.radio2.disabled='1'",
+        "wireless.@wifi-iface[0]=wifi-iface",
+        "wireless.@wifi-iface[0].device='radio0'",
+        "wireless.@wifi-iface[0].mode='ap'",
+        "wireless.@wifi-iface[0].ssid='Example-Net'",
+        "wireless.@wifi-iface[0].ifname='wlan0'",
+        "wireless.@wifi-iface[0].encryption='sae-mixed'",
+        "wireless.@wifi-iface[0].key='placeholder-psk-0'",
+        "wireless.@wifi-iface[0].sae_password='placeholder-sae-0'",
+        "wireless.radius_5g=wifi-iface",
+        "wireless.radius_5g.device='radio1'",
+        "wireless.radius_5g.mode='ap'",
+        "wireless.radius_5g.ssid='Example-Corp'",
+        "wireless.radius_5g.encryption='wpa2'",
+        "wireless.radius_5g.auth_secret='placeholder-radius-auth'",
+        "wireless.radius_5g.acct_secret='placeholder-radius-acct'",
+        "wireless.off_5g=wifi-iface",
+        "wireless.off_5g.device='radio1'",
+        "wireless.off_5g.mode='ap'",
+        "wireless.off_5g.ssid='Example-Off'",
+        "wireless.off_5g.disabled='1'",
+        "wireless.dfs_5g=wifi-iface",
+        "wireless.dfs_5g.device='radio2'",
+        "wireless.dfs_5g.mode='ap'",
+        "wireless.dfs_5g.ssid='Example-DFS'",
+        "wireless.dfs_5g.key='placeholder-psk-2'",
+    ]
+)
+_UCI_SECRETS = (
+    "placeholder-psk-0",
+    "placeholder-sae-0",
+    "placeholder-radius-auth",
+    "placeholder-radius-acct",
+    "placeholder-psk-2",
+)
+
+
+def _strings_in(obj: Any) -> Iterator[str]:
+    """Yield every str held in plain containers; other objects are skipped."""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            yield from _strings_in(key)
+            yield from _strings_in(value)
+    elif isinstance(obj, (list, tuple, set, frozenset)):
+        for item in obj:
+            yield from _strings_in(item)
+
+
+async def _ssh_poll(uci_text: str) -> tuple[OpenWrtAPI, list[dict[str, Any]]]:
+    """One SSH-fallback poll: get_wifi_status(), then the AP interfaces."""
+    api, _ssh = _ssh_only_api(uci_text)
+    await api.get_wifi_status()
+    assert api._wifi_method == "ssh"
+    api._hostapd_ifaces = []
+    return api, await api.get_ap_interface_details()
+
+
+class TestUciApInterfaceNameAndState:
+    """UCI-derived AP interfaces: `ifname` option, disabled radios and SSIDs."""
+
+    @pytest.mark.asyncio
+    async def test_ifname_option_names_the_interface(self):
+        """Clients and usteer report the kernel name, so it is the ifname."""
+        _api, ifaces = await _ssh_poll(UCI_SHOW_WIRELESS_SECRETS)
+        by_ssid = {i["ssid"]: i for i in ifaces}
+        named = by_ssid["Example-Net"]
+        assert named["ifname"] == "wlan0"
+        assert named["uci_section"] == "@wifi-iface[0]"
+        assert named["ifname_is_section"] is False
+        section = by_ssid["Example-Corp"]
+        assert section["ifname"] == "radius_5g"
+        assert section["uci_section"] == "radius_5g"
+        assert section["ifname_is_section"] is True
+
+    @pytest.mark.asyncio
+    async def test_switches_keep_the_section_name(self):
+        """wifi_radios (switch unique_id, `uci set`) still use the section."""
+        api, _ssh = _ssh_only_api(UCI_SHOW_WIRELESS_SECRETS)
+        radios = await api.get_wifi_status()
+        named = next(r for r in radios if r["ssid"] == "Example-Net")
+        assert named["ifname"] == "@wifi-iface[0]"
+        assert named["uci_section"] == "@wifi-iface[0]"
+
+    @pytest.mark.asyncio
+    async def test_disabled_radio_and_ssid_are_flagged(self):
+        _api, ifaces = await _ssh_poll(UCI_SHOW_WIRELESS_SECRETS)
+        assert {i["ssid"]: i["enabled"] for i in ifaces} == {
+            "Example-Net": True,
+            "Example-Corp": True,
+            "Example-Off": False,  # wifi-iface disabled
+            "Example-DFS": False,  # wifi-device disabled
+        }
+
+    @pytest.mark.asyncio
+    async def test_disabled_radios_stay_out_of_the_channel_plan(self):
+        from custom_components.openwrt_router.channel_plan import (
+            analyze,
+            radios_from_ap_interfaces,
+        )
+
+        _api, ifaces = await _ssh_poll(UCI_SHOW_WIRELESS_SECRETS)
+        radios = radios_from_ap_interfaces("ap", "AP", ifaces)
+        # radio2 is off: no radio on channel 100, hence no DFS finding
+        assert sorted((r.phy, r.channel) for r in radios) == [
+            ("radio0", 1),
+            ("radio1", 36),
+        ]
+        assert analyze(radios) == []
+
+    @pytest.mark.parametrize(
+        ("iface_opt", "device_opt", "enabled"),
+        [
+            ({}, {}, True),
+            ({"disabled": "0"}, {"disabled": "0"}, True),
+            ({"disabled": "false"}, {}, True),
+            ({"disabled": "1"}, {}, False),
+            ({"disabled": "true"}, {}, False),
+            ({"disabled": "on"}, {}, False),
+            ({"disabled": "yes"}, {}, False),
+            ({}, {"disabled": "1"}, False),
+            ({}, {"disabled": "enabled"}, False),
+        ],
+    )
+    def test_uci_boolean_spellings(self, mock_api, iface_opt, device_opt, enabled):
+        """ubus `uci get` and `uci show` both give UCI's boolean strings."""
+        values = {
+            "radio1": {".type": "wifi-device", "band": "5g", "channel": "36",
+                       **device_opt},
+            "default_radio1": {".type": "wifi-iface", ".index": 1,
+                               "device": "radio1", "ssid": "Example-Net-5G",
+                               **iface_opt},
+        }
+        (iface,) = mock_api._ap_interfaces_from_uci(values)
+        assert iface["enabled"] is enabled
+
+    @pytest.mark.asyncio
+    async def test_ubus_uci_branch_keeps_section_names(self):
+        """Existing AP sensor unique_ids on the ubus UCI path must not change."""
+        api, _ssh = _ssh_only_api()
+        api._wifi_method = "uci"
+        api._hostapd_ifaces = []
+        api.get_uci_wireless = AsyncMock(
+            return_value={
+                "radio1": {".type": "wifi-device", "band": "5g",
+                           "channel": "36", "disabled": "1"},
+                "cfg033579": {".type": "wifi-iface", ".index": 1,
+                              "device": "radio1", "ssid": "Example-Net-5G",
+                              "ifname": "wlan1"},
+            }
+        )
+        (iface,) = await api.get_ap_interface_details()
+        assert iface["ifname"] == "cfg033579"
+        assert iface["uci_section"] == "cfg033579"
+        assert iface["ifname_is_section"] is True
+        assert iface["enabled"] is False
+
+
+class TestSshWirelessSecrets:
+    """Only the derived AP interfaces stay on the API between polls."""
+
+    @pytest.mark.asyncio
+    async def test_no_key_or_password_survives_on_the_instance(self):
+        api, ifaces = await _ssh_poll(UCI_SHOW_WIRELESS_SECRETS)
+        assert len(ifaces) == 4
+        held = list(_strings_in(vars(api)))
+        # The scan sees the poll's data (SSIDs of the AP interfaces) ...
+        assert any("Example-Corp" in s for s in held)
+        # ... but no key, SAE password or RADIUS secret
+        assert [x for x in _UCI_SECRETS if any(x in s for s in held)] == []
+        # Nor in what the poll hands to the coordinator
+        handed = list(_strings_in(ifaces))
+        assert [x for x in _UCI_SECRETS if any(x in s for s in handed)] == []
+
+    @pytest.mark.asyncio
+    async def test_ssh_data_dropped_when_the_method_leaves_ssh(self):
+        """E.g. after the ACL v7 deploy network.wireless status answers."""
+        api, _ifaces = await _ssh_poll(UCI_SHOW_WIRELESS_SECRETS)
+        api._call = AsyncMock(return_value=WIRELESS_STATUS_25_12)
+
+        await api.get_wifi_status()
+
+        assert api._wifi_method == "wireless"
+        held = list(_strings_in(vars(api)))
+        assert not any("Example-Corp" in s for s in held)
+
+
+class TestSshWifiWriteQuoting:
+    """`uci set` gets the section as one shell-quoted word."""
+
+    @pytest.mark.parametrize(
+        ("section", "enabled", "argument"),
+        [
+            # [0] is a glob pattern for the remote shell
+            ("@wifi-iface[0]", False, "wireless.@wifi-iface[0].disabled=1"),
+            ("default_radio0", True, "wireless.default_radio0.disabled=0"),
+            ("x;reboot", True, "wireless.x;reboot.disabled=0"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_uci_set_argument_is_quoted(self, section, enabled, argument):
+        api, ssh = _ssh_only_api()
+        ssh.return_value = (0, "", b"")
+
+        assert await api._set_wifi_state_ssh(section, enabled) is True
+
+        (command,) = ssh.await_args.args
+        assert command == (
+            f"uci set {shlex.quote(argument)} && uci commit wireless && wifi reload"
+        )
+        assert shlex.split(command)[:4] == ["uci", "set", argument, "&&"]
 
 
 class TestIsGuestSsid:

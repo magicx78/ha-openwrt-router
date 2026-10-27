@@ -51,6 +51,7 @@ from .const import (
     RADIO_KEY_HTMODE,
     RADIO_KEY_HWMODE,
     RADIO_KEY_IFNAME,
+    RADIO_KEY_IFNAME_IS_SECTION,
     RADIO_KEY_SSID,
     SUFFIX_ACTIVE_CONNECTIONS,
     SUFFIX_CHANNEL_PLAN,
@@ -973,13 +974,6 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
         if not self.coordinator.data:
             return None
 
-        if self._metric == "ap_clients":
-            return sum(
-                1
-                for c in self.coordinator.data.clients
-                if c.get(CLIENT_KEY_RADIO) == self._ifname
-            )
-
         ap_iface = next(
             (
                 a
@@ -988,6 +982,18 @@ class OpenWrtAPInterfaceSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
             ),
             None,
         )
+
+        if self._metric == "ap_clients":
+            if ap_iface is not None and ap_iface.get(RADIO_KEY_IFNAME_IS_SECTION):
+                # UCI section name: clients report the kernel interface name
+                # (phy0-ap0), so a count would always be a misleading 0.
+                return None
+            return sum(
+                1
+                for c in self.coordinator.data.clients
+                if c.get(CLIENT_KEY_RADIO) == self._ifname
+            )
+
         if ap_iface is None:
             return None
         if self._metric == "quality":

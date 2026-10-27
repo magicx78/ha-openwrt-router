@@ -2,6 +2,67 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.1] - 2026-10-27
+
+### Fixed
+
+- **Kanal der WLAN-Radios war leer.** `network.wireless status` liefert den
+  Kanal nur im `config`-Block des Radios (als Text, z. B. `"36"`), nicht auf
+  oberster Ebene. Die Integration las die oberste Ebene und bekam immer
+  nichts. Jetzt kommt der Kanal aus dem `config`-Block und ist eine Zahl wie
+  bei iwinfo und UCI; `auto`, `0` (ebenfalls automatische Wahl) und fehlende
+  Werte bleiben leer. Damit ist das Attribut `channel` der Radios gefüllt
+  (Diagnose, Topologie und Panel, wenn iwinfo keinen Wert hat). Aus demselben
+  Block kommen jetzt auch `htmode` (bisher immer leer) und das ältere
+  `hwmode`. Hinweis: Der AP-Sensor „Channel“ von Routern, deren WLAN über UCI
+  gelesen wird, zeigt bei `channel '0'` jetzt „unbekannt“ statt 0.
+- **Router im SSH-Fallback fehlten im Kanalplan.** Ohne iwinfo über rpcd
+  blieb die Liste der AP-Interfaces leer, sobald die Integration das WLAN per
+  SSH (`uci show wireless`) las. Jetzt baut sie die AP-Interfaces aus dieser
+  Ausgabe, genauso wie bei Routern, deren WLAN sie über UCI liest (Kanal,
+  Band, htmode und Radio je SSID). Diese Router erscheinen damit im
+  Kanalplan. Außerdem bekommen sie die AP-Sensoren je SSID („Channel“,
+  „Mode“, „HT Mode“, „HW Mode“, „AP Clients“), wie überall standardmäßig
+  deaktiviert, solange die erweiterten WLAN-Sensoren aus sind. Es gibt keine
+  zusätzliche SSH-Verbindung, die Ausgabe der laufenden Abfrage wird
+  wiederverwendet. Bis zur nächsten Abfrage behält die Integration davon nur
+  die AP-Interfaces, keine WLAN-Schlüssel, SAE-Passwörter oder
+  RADIUS-Secrets. Die Sticky-Prüfung ändert sich dadurch nicht: usteer nennt
+  die Knoten anderer Router `<host>#hostapd.<Interface>`, die AP-Interfaces
+  aus der UCI-Konfiguration heißen aber nach ihrer Sektion
+  (`default_radio0`, `@wifi-iface[0]`), weil der Kernel-Name (`phy0-ap0`)
+  dort nicht steht. Solche Knoten bleiben unbekannt und zählen wie bisher
+  ohne Abgleich von Band und SSID als Alternative.
+- **AP-Interfaces aus der UCI-Konfiguration** (WLAN über UCI per rpcd oder
+  im SSH-Fallback):
+  - Im SSH-Fallback heißt ein AP-Interface nach der Option `ifname` der
+    `wifi-iface`, wenn sie gesetzt ist. Dann passen Clients, usteer-Knoten
+    (die Sticky-Prüfung gleicht Band und SSID ab) und DFS-Ereignisse dazu,
+    und „AP Clients“ zählt richtig. Bei Routern, deren WLAN über UCI per
+    rpcd gelesen wird, bleibt der Sektionsname, damit bestehende
+    AP-Sensoren ihre ID behalten.
+  - Heißt das AP-Interface nach der Sektion, zeigt „AP Clients“ jetzt
+    „unbekannt“ statt immer 0: Die
+    Clients melden den Kernel-Namen, der Sektionsname passt nie dazu.
+  - Abgeschaltete Radios und SSIDs (`disabled '1'` an `wifi-device` oder
+    `wifi-iface`) zählen im Kanalplan nicht mehr mit. Ihre AP-Sensoren
+    bleiben.
+- **SSIDs mit Apostroph und anonyme UCI-Sektionen im SSH-Fallback.** Eine
+  SSID wie `Peter's WLAN` wurde nach `Peter` abgeschnitten (`uci show`
+  schreibt sie als `'Peter'\''s WLAN'`). WLANs in anonymen Sektionen
+  (`wireless.@wifi-iface[0]`, z. B. nach manchen Erstinstallationen) wurden
+  gar nicht erkannt. Beides wird jetzt richtig gelesen; anonyme Sektionen
+  heißen wie in `uci show`, also `@wifi-iface[0]`. Der WLAN-Schalter
+  übergibt den Optionspfad an `uci set` jetzt gequotet, sonst wäre `[0]` für
+  die Shell des Routers ein Suchmuster. Hinweise:
+  - Diese Namen hängen von der Reihenfolge in `/etc/config/wireless` ab. Wer
+    dort eine anonyme Sektion davor einfügt, löscht oder umsortiert,
+    verschiebt die Zuordnung der Entities (WLAN-Schalter und AP-Sensoren).
+  - Wechselt ein solcher Router später vom SSH-Fallback zu ubus (z. B. wenn
+    die ACL v7 ausgerollt ist), meldet rpcd anonyme Sektionen als
+    `cfgXXXXXX`. HA legt die WLAN-Schalter dieser SSIDs (und die AP-Sensoren)
+    dann unter neuer ID neu an; die alten bleiben als nicht verfügbar zurück.
+
 ## [1.38.0] - 2026-10-27
 
 ### Changed

@@ -43,6 +43,7 @@ from .const import (
     RADIO_KEY_IFNAME,
     RADIO_KEY_SSID,
     RADIO_KEY_TXPOWER,
+    RADIO_KEY_UCI_SECTION,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -138,6 +139,12 @@ def build_topology(
         ifname = ap.get(RADIO_KEY_IFNAME, "")
         if ifname:
             ap_detail[ifname] = ap
+    # SSH fallback: wifi_radios are keyed by UCI section, while an AP
+    # interface with a UCI `ifname` option carries the kernel name
+    for ap in ap_interfaces or []:
+        section = ap.get(RADIO_KEY_UCI_SECTION, "")
+        if section:
+            ap_detail.setdefault(section, ap)
 
     # ------------------------------------------------------------------
     # 3. Radio nodes (one per enabled radio / SSID entry)
