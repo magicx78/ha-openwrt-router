@@ -2,6 +2,44 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.2] - 2026-10-27
+
+### Changed
+
+- **WAN-Sensoren auf Routern ohne WAN standardmäßig deaktiviert.** Auf
+  Dumb-APs standen „WAN-IP-Adresse“, „WAN-Download“ und „WAN-Upload“
+  dauerhaft auf „unbekannt“, „WAN-Status“ und der Binärsensor
+  „WAN-Verbindung“ zeigten den Zustand irgendeines LAN-Interfaces. Hat ein
+  Router in `network.interface dump` kein Interface mit WAN-Namen (`wan`,
+  `wan6`, `pppoe-wan`, `wwan` oder ein Name, der so beginnt), legt die
+  Integration diese fünf Entities jetzt deaktiviert an. **Das gilt nur für
+  neu angelegte Entities** (neuer Router, neue Installation). Bestehende
+  Entities bleiben unverändert; wer sie auf einem AP nicht braucht,
+  deaktiviert sie in den Entity-Einstellungen. Ein Gateway mit gezogenem
+  WAN-Kabel behält seine WAN-Sensoren, das Interface `wan` gibt es dann
+  trotzdem. Ebenso behält ein Dumb-AP, auf dem die Standard-Interfaces
+  `wan`/`wan6` noch konfiguriert sind, seine WAN-Sensoren. Ist beim Einrichten unklar, ob es ein WAN gibt (WAN-Abfrage
+  gesperrt, SSH-Fallback), bleiben sie aktiv. Ein Gateway, dessen WAN
+  anders heißt (z. B. `lte`), bekommt sie ebenfalls deaktiviert; dort
+  zeigten sie bisher das erste aktive Interface statt des WAN.
+- **Release-Texte enthalten jetzt die Änderungen.** Der Release-Workflow
+  übernimmt den Abschnitt der Version aus `CHANGELOG.md` als Text des
+  GitHub-Release. Bisher stand dort nur „siehe CHANGELOG.md“. Fehlt der
+  Abschnitt, bleibt es beim bisherigen Text.
+
+### Fixed
+
+- **Panel: kein OUI-Hersteller bei zufälligen MACs, auch nicht vom Server.**
+  Seit 1.37.4 nimmt das Panel für private MACs keinen Hersteller aus seiner
+  eigenen OUI-Tabelle. Einen OUI-Hersteller, den der Server mitliefert
+  (`vendor`), zeigte es aber weiter an; es verließ sich darauf, dass der
+  Server ihn für solche MACs leer lässt (so ist es seit 1.37.0). Jetzt
+  verwirft das Panel ihn selbst, in Liste, Name und Detailansicht. Ein
+  Hersteller aus dem HA-Geräteregister (Gerät einer anderen Integration mit
+  derselben MAC) bleibt, weil er vom Gerät selbst stammt. Der Eintrag
+  `d2:4e:4f` (lokal verwalteter Bereich) war seit 1.37.0 nur aus der
+  OUI-Tabelle des Servers entfernt und fehlt jetzt auch in der des Panels.
+
 ## [1.38.1] - 2026-10-27
 
 ### Fixed

@@ -289,6 +289,112 @@ class TestAllSensorValueFns:
 
 
 # =====================================================================
+# WAN sensors on routers without WAN (P5, decision E3)
+# =====================================================================
+
+WAN_SENSOR_KEYS = ("wan_status", "wan_ip", "wan_rx", "wan_tx")
+
+# What get_wan_status() returns on a dumb AP: no interface named like a WAN
+# in network.interface dump, so it falls back to the first "up" interface.
+DUMB_AP_WAN_STATUS = {
+    "connected": True,
+    "interface": "lan",
+    "ipv4": "",
+    "uptime": 0,
+    "proto": "none",
+    "rx_bytes": None,
+    "tx_bytes": None,
+}
+
+
+def _has_wan(wan_status):
+    from custom_components.openwrt_router.sensor import router_has_wan
+
+    data = OpenWrtCoordinatorData()
+    data.wan_status = wan_status
+    return router_has_wan(data)
+
+
+class TestRouterHasWan:
+    @pytest.mark.parametrize(
+        "interface", ["wan", "wan6", "pppoe-wan", "wwan", "WAN", "wan_lte"]
+    )
+    def test_wan_named_interface(self, interface):
+        assert _has_wan({"connected": True, "interface": interface}) is True
+
+    def test_wan_interface_down_still_counts(self):
+        """A gateway with the WAN cable unplugged keeps its WAN sensors."""
+        assert _has_wan({"connected": False, "interface": "wan", "ipv4": ""}) is True
+
+    @pytest.mark.parametrize("interface", ["lan", "guest", "loopback", "iot"])
+    def test_fallback_to_non_wan_interface(self, interface):
+        assert _has_wan({**DUMB_AP_WAN_STATUS, "interface": interface}) is False
+
+    def test_unknown_when_no_interface_name(self):
+        """SSH fallback and an empty dump carry no name: unknown, not 'no WAN'."""
+        assert _has_wan({"connected": False, "interface": "", "ipv4": ""}) is True
+
+    def test_unknown_when_wan_status_empty(self):
+        """First poll with the WAN call blocked by the ACL: unknown."""
+        assert _has_wan({}) is True
+
+    def test_unknown_without_coordinator_data(self):
+        from custom_components.openwrt_router.sensor import router_has_wan
+
+        assert router_has_wan(None) is True
+
+
+class TestWanSensorsEnabledDefault:
+    @pytest.mark.parametrize("key", WAN_SENSOR_KEYS)
+    def test_enabled_on_gateway(self, mock_coordinator, mock_config_entry, key):
+        sensor = _make_sensor(mock_coordinator, mock_config_entry, key)
+        assert sensor.entity_registry_enabled_default is True
+
+    @pytest.mark.parametrize("key", WAN_SENSOR_KEYS)
+    def test_disabled_on_router_without_wan(
+        self, mock_coordinator, mock_config_entry, key
+    ):
+        mock_coordinator.data.wan_status = dict(DUMB_AP_WAN_STATUS)
+        sensor = _make_sensor(mock_coordinator, mock_config_entry, key)
+        assert sensor.entity_registry_enabled_default is False
+
+    @pytest.mark.parametrize("key", WAN_SENSOR_KEYS)
+    def test_enabled_when_wan_presence_unknown(
+        self, mock_coordinator, mock_config_entry, key
+    ):
+        mock_coordinator.data.wan_status = {}
+        sensor = _make_sensor(mock_coordinator, mock_config_entry, key)
+        assert sensor.entity_registry_enabled_default is True
+
+    def test_other_sensors_unaffected_on_router_without_wan(
+        self, mock_coordinator, mock_config_entry
+    ):
+        mock_coordinator.data.wan_status = dict(DUMB_AP_WAN_STATUS)
+        for desc in SENSOR_DESCRIPTIONS:
+            if desc.key in WAN_SENSOR_KEYS:
+                continue
+            sensor = OpenWrtSensorEntity(
+                coordinator=mock_coordinator,
+                entry=mock_config_entry,
+                description=desc,
+            )
+            assert sensor.entity_registry_enabled_default is True, desc.key
+
+    def test_only_the_wan_descriptions_require_wan(self):
+        assert {
+            d.key for d in SENSOR_DESCRIPTIONS if getattr(d, "requires_wan", False)
+        } == set(WAN_SENSOR_KEYS)
+
+    def test_values_unchanged_on_router_without_wan(
+        self, mock_coordinator, mock_config_entry
+    ):
+        """Only the registry default changes; an enabled entity reads as before."""
+        mock_coordinator.data.wan_status = dict(DUMB_AP_WAN_STATUS)
+        assert _make_sensor(mock_coordinator, mock_config_entry, "wan_ip").native_value is None
+        assert _make_sensor(mock_coordinator, mock_config_entry, "wan_rx").native_value is None
+
+
+# =====================================================================
 # T-S1 through T-S6: Dynamic interface and radio sensors
 # =====================================================================
 

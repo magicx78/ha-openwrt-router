@@ -3,10 +3,10 @@
 ## Status
 
 - **Stand:** 2026-10-27 · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** `fix/post-1.37-findings` · PR #33 (A) · `fix/acl-v7-cpu-per-core` · PR #34 (B) · `fix/wireless-channel-ssh-fallback` · PR C · Basis: v1.37.4 (`c5a25f9`)
-- **Erledigt:** B1, P1, P2, P6 (PR #33, 1.37.5), P3 (PR #34, 1.38.0), P4 (PR C, 1.38.1) · **Offen:** P5, B2, B3
+- **Branch/PR:** `fix/post-1.37-findings` · PR #33 (A) · `fix/acl-v7-cpu-per-core` · PR #34 (B) · `fix/wireless-channel-ssh-fallback` · PR #35 (C) · `fix/wan-sensors-panel-release` · PR #36 (D) · Basis: v1.37.4 (`c5a25f9`)
+- **Erledigt:** B1, P1, P2, P6 (PR #33, 1.37.5), P3 (PR #34, 1.38.0), P4 (PR #35, 1.38.1), P5 + B2 (PR #36, 1.38.2) · **Offen:** B3
 - **Blocker:** –
-- **Nächster Schritt:** P5 + B2 als PR D (1.38.2), gestapelt auf PR C
+- **Nächster Schritt:** Merge-Freigabe #33 → #34 → #35 → PR D durch den Nutzer; nach Installation ACL-v7-Prüfung auf den Routern
 
 ## Problem und Zielverhalten
 
@@ -48,6 +48,23 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 12. **rpcd-Speicher mit ACL v6:** Messung läuft bis etwa 17:15. Bisher APs flach (`ap2` 2972→3000 kB in 15 min), Gateway schwankt 2400–2860 kB. **Annahme:** kein neues Leck; Auswertung nach Messende.
 14. **`uci_section` im Pfad `network.wireless status`:** `_parse_wireless_status` liest `section` aus `config`, netifd liefert es neben `ifname`; deaktivierte Interfaces fehlen dort ganz. Betrifft nur Router mit WLAN-Methode `network.wireless` – die drei Router hier nutzen den UCI-Pfad (live: `uci_section` gesetzt, `ifname` leer). Ein Fix ändert die `unique_id` der WLAN-Schalter solcher Router (Registry) und braucht eine eigene Entscheidung. **Verifiziert im Code und an Live-Attributen**, nicht geändert.
 13. **Wiederhergestellte Device-Tracker mit altem AP-Namen:** zwei `device_tracker.secureap_ap3_*` gehören inzwischen zu den Einträgen von Gateway bzw. `ap4`, stehen auf `unavailable` (`restored: true`). Kosmetisch, Ursache vermutlich der Claim-Wechsel im Device-Tracker. **Verifiziert** (Template), niedrige Priorität.
+
+## Neuanalyse nach 1.38.2 (2026-10-27, unabhängiger Agent, Stand der PRs #33–#36)
+
+Nicht Teil dieses Plans; Grundlage für einen Folgeplan (Freigabe offen).
+
+- **N1 (P1) Reauth-Schleife bei falschem Passwort.** `test_connection()` ignoriert den fehlgeschlagenen Login (`api.py` ~1132–1144) und macht aus der verweigerten Board-Abfrage Standardwerte (~1285–1296); `config_flow.py` ~474–489 hält alte Zugangsdaten für gültig, Setup wirft `ConfigEntryAuthFailed`, neuer Reauth. Auch Ersteinrichtung mit falschem Passwort wird angenommen; temporäre API in `_validate_input` (~650) lässt eine rpcd-Session zurück. **Verifiziert** (Skript).
+- **N2 (P1) SSH-Logins in jedem Poll trotz funktionierendem ubus.** WAN-Zähler: `_call` liefert `{"data": …}`, der Code erwartet einen String (`api.py` ~1596–1606) → immer SSH; Disk/tmpfs (`~3454`, `~3533`, `~3633`) und Bridge-FDB (`~4018–4071`) ebenfalls per SSH. **Verifiziert auf Hardware (lesend):** HA meldet sich per Passwort rund 6×/min am Gateway und 5×/min an `ap2` an; dropbear-Zeilen belegen 269 von 605 bzw. 510 von 634 Zeilen im Log-Puffer und verdrängen das Router-Log, das P3 (Log-Ingest) liest. Host-Keys werden nicht geprüft (`known_hosts=None`).
+- **N3 (P1) hostapd-Interface-Liste dauerhaft gecacht, auch leer** (`api.py` ~2060, ~2129): später aktivierte SSIDs fehlen (Clients, AP-Sensoren, Kanalplan) bis zum Neuladen. **Verifiziert im Code.**
+- **N4 (P2)** Device-Tracker hängen an der Verfügbarkeit des besitzenden Routers (`device_tracker.py` ~134): AP-Neustart macht auch Clients anderer APs `unavailable`.
+- **N5 (P2)** Tracker werden nach HA-Neustart nicht aus der Registry wiederhergestellt (`device_tracker.py` ~83–131): abwesende Clients `unavailable`, Personen `unknown` (vgl. Befund 13).
+- **N6 (P2)** Update-Funktion wirkungslos: `updates_available` nie befüllt (`coordinator.py` ~281), Prüf-Button verwirft das Ergebnis (`button.py` ~248), „Updates installieren“ ruft `opkg` auf apk-basiertem 25.12 (`api.py` ~4317).
+- **N7 (P2)** Diagnostics exportieren Client-Daten (MAC, IP, Hostname, Sticky-/Schwach-/Instabil-Listen, WAN-IPv4, Ereignisdetails) unredigiert (`diagnostics.py` ~56–66).
+- **N8 (P3)** Interface-Byte-/Raten-Sensoren immer 0 (`network.interface dump` hat kein `statistics`, `api.py` ~3684); standardmäßig aus.
+- **N9 (P3)** Recorder schreibt jede Minute neue Attributzeilen (WLAN-Schalter `dhcp_expires`, Client-Liste am Client-Zähler) → ~10 KB/min, MACs/IPs in der Datenbank; Abhilfe `_unrecorded_attributes`.
+- **N10 (P3)** Poll-Versatz identisch für alle Einträge (`__init__.py` ~324): alle Router pollen gleichzeitig.
+- **N11 (P3)** 300-s-SSH-Fallback-Intervall geht nach einem CPU-Drosselzyklus verloren (`coordinator.py` ~1038 vs. ~1062).
+- Nach PR-#36-Review offen: Gateway mit WAN-Namen wie `lte`/`modem` gilt als „ohne WAN“ (`api.py` ~1570, `get_wan_status`).
 
 ## Entscheidungen
 
@@ -95,4 +112,6 @@ die LED-Wand (Funkreichweite, kein Code-Problem).
 - 2026-10-27 PR #34 Review (unabhängig): keine P0–P2; P3 behoben (`6d9aa96`: Retry trotz gecachter ACL-Sperre, 5xx kurzfristig, 4-KiB-Hinweis, CHANGELOG), 1216 Tests grün.
 - 2026-10-27 `fix/wireless-channel-ssh-fallback` (PR C) – lokal: 23 neue Tests (13 vor der Änderung rot), nach Merge von #34 grün · Hardware: SSH-Fallback nicht vorhanden (Lücke) · Review: folgt.
 - 2026-10-27 PR #35 Review (unabhängig): keine P0/P1; P2 (Sticky-Behauptung, abgeschaltete Radios im Kanalplan) und P3 (Quoting, keine WLAN-Secrets im Speicher, CHANGELOG-Hinweise) behoben; `option ifname` nur im SSH-Pfad, damit bestehende AP-Sensoren ihre ID behalten; 1263 Tests grün.
+- 2026-10-27 `fix/wan-sensors-panel-release` (PR #36) – lokal: 34 neue Tests (20 vor der Änderung rot), `tsc` grün, Bundle neu gebaut; „Kein WAN“-Signal live geprüft (Gateway `wan`, APs `guest`) · Panel nicht visuell im echten HA geprüft (Lücke) · Review (unabhängig): keine P0–P2, Doku-Punkte behoben; offen für später: Gateway mit WAN-Namen wie `lte` gilt als „ohne WAN“. Befund 9 war größtenteils schon mit 1.37.4 erledigt.
+- 2026-10-27 Neuanalyse (unabhängig) nach PR #36: 11 Befunde N1–N11, N2 auf Hardware bestätigt (SSH-Logins ~5–6/min je Router, dropbear dominiert den Log-Puffer). rpcd mit ACL v6 bis 15:52: APs zweite Hälfte +8/+1 kB/h, Gateway fallend – kein neues Leck (Endauswertung nach 17:15 offen).
 - 2026-10-27 B1 – drei Config-Entries entfernt; danach 3 Einträge, alle `loaded`. Sicherung vorher: HA-Backup vom selben Tag, 13:46.

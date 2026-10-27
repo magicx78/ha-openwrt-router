@@ -57,7 +57,23 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          # Release notes = the CHANGELOG.md section of this version: the lines
+          # after "## [x.y.z]" up to the next "## [" heading.
+          awk -v ver="${TAG#v}" '
+            { sub(/\r$/, "") }
+            index($0, "## [") == 1 {
+              if (found) exit
+              found = (index($0, "## [" ver "]") == 1)
+              next
+            }
+            found { print }
+          ' CHANGELOG.md > "$NOTES" || true
+          if ! grep -q '[^[:space:]]' "$NOTES"; then
+            echo "::warning::No CHANGELOG.md section for $TAG, using the default text"
+            echo "Version $TAG — siehe CHANGELOG.md" > "$NOTES"
+          fi
           gh release create "$TAG" \
             --title "$TAG" \
-            --notes "Version $TAG — siehe CHANGELOG.md" \
+            --notes-file "$NOTES" \
             --target main
