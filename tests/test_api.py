@@ -21,7 +21,10 @@ from custom_components.openwrt_router.api import (
     UBUS_STATUS_OK,
     UBUS_STATUS_PERMISSION_DENIED,
 )
-from custom_components.openwrt_router.const import DEFAULT_SESSION_ID
+from custom_components.openwrt_router.const import (
+    DEFAULT_SESSION_ID,
+    RC_LIST_REFRESH_INTERVAL,
+)
 
 from conftest import (
     MOCK_BOARD_INFO,
@@ -1178,3 +1181,162 @@ class TestGetDhcpLeasesLuciRpc:
         mock_api._call = AsyncMock(side_effect=OpenWrtAuthError("blocked"))
         leases = await mock_api._get_dhcp_leases_luci_rpc()
         assert leases == {}
+
+
+# =====================================================================
+# get_services — rpcd rc/list leak (v1.28.4)
+# =====================================================================
+
+# Shapes as returned by OpenWrt 25.12.1 (rpcd 2025.12.03, procd 2026.03.13).
+_RC_LIST_SKIP_RUNNING = {
+    "dnsmasq": {"start": 19, "enabled": True},
+    "dropbear": {"start": 19, "stop": 50, "enabled": True},
+    "firewall": {"start": 19, "enabled": True},
+    "odhcpd": {"start": 35, "stop": 85, "enabled": False},
+}
+_PROCD_SERVICE_LIST = {
+    "cron": {},
+    "dnsmasq": {"instances": {"cfg01411c": {"running": True, "pid": 3820}}},
+    "dropbear": {"instances": {"instance1": {"running": True, "pid": 1}}},
+    "firewall": {},  # fw4 runs no procd instance — rc/list said running=false
+}
+
+
+class TestGetServicesRcListLeak:
+    """rpcd < 2026-05-31 leaks ~4.7 KB per rc/list call (upstream d06d2a8).
+
+    Measured on aP4 (rpcd 2025.12.03): 500x rc/list -> +2320 kB rpcd RSS,
+    300x procd service/list -> +0 kB. Polling rc/list every cycle grew rpcd
+    to 110 MB within 17 days. rc/list must therefore not run per poll.
+    """
+
+    @staticmethod
+    def _calls(api, obj, method):
+        return [
+            c for c in api._call.await_args_list if c.args[:2] == (obj, method)
+        ]
+
+    @staticmethod
+    def _ubus(rc_list=None, service_list=None):
+        async def _call(obj, method, params, *args, **kwargs):
+            if (obj, method) == ("rc", "list"):
+                if isinstance(rc_list, Exception):
+                    raise rc_list
+                return rc_list
+            if (obj, method) == ("service", "list"):
+                if isinstance(service_list, Exception):
+                    raise service_list
+                return service_list
+            raise AssertionError(f"unexpected ubus call {obj}/{method}")
+
+        return AsyncMock(side_effect=_call)
+
+    @pytest.mark.asyncio
+    async def test_rc_list_not_called_every_poll(self, mock_api):
+        mock_api._call = self._ubus(_RC_LIST_SKIP_RUNNING, _PROCD_SERVICE_LIST)
+
+        for _ in range(10):
+            await mock_api.get_services(names=["dnsmasq", "firewall"])
+
+        rc_calls = self._calls(mock_api, "rc", "list")
+        assert len(rc_calls) == 1
+        # No per-script "running" fork either.
+        assert rc_calls[0].args[2] == {"skip_running_check": True}
+        assert len(self._calls(mock_api, "service", "list")) == 10
+
+    @pytest.mark.asyncio
+    async def test_running_from_procd_enabled_from_rc(self, mock_api):
+        mock_api._call = self._ubus(_RC_LIST_SKIP_RUNNING, _PROCD_SERVICE_LIST)
+
+        services = await mock_api.get_services()
+        by_name = {s["name"]: s for s in services}
+
+        assert by_name["dnsmasq"] == {
+            "name": "dnsmasq",
+            "running": True,
+            "enabled": True,
+        }
+        # Instance-less procd service and rc-only script both stay listed,
+        # so their switch entities do not vanish.
+        assert by_name["firewall"]["running"] is False
+        assert by_name["firewall"]["enabled"] is True
+        assert by_name["odhcpd"] == {
+            "name": "odhcpd",
+            "running": False,
+            "enabled": False,
+        }
+        assert by_name["cron"]["enabled"] is None  # procd only, no init script
+
+    @pytest.mark.asyncio
+    async def test_rc_list_refreshed_after_interval(self, mock_api):
+        mock_api._call = self._ubus(_RC_LIST_SKIP_RUNNING, _PROCD_SERVICE_LIST)
+        await mock_api.get_services()
+
+        mock_api._rc_enabled_fetched_at -= RC_LIST_REFRESH_INTERVAL + 1
+        await mock_api.get_services()
+
+        assert len(self._calls(mock_api, "rc", "list")) == 2
+
+    @pytest.mark.asyncio
+    async def test_rc_list_unavailable_is_throttled_too(self, mock_api):
+        mock_api._call = self._ubus(
+            OpenWrtMethodNotFoundError("rc not found"), _PROCD_SERVICE_LIST
+        )
+
+        for _ in range(5):
+            services = await mock_api.get_services(names=["dnsmasq"])
+
+        assert services == [{"name": "dnsmasq", "running": True, "enabled": None}]
+        assert len(self._calls(mock_api, "rc", "list")) == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_refresh_keeps_previous_enabled_flags(self, mock_api):
+        mock_api._call = self._ubus(_RC_LIST_SKIP_RUNNING, _PROCD_SERVICE_LIST)
+        await mock_api.get_services()
+
+        mock_api._call = self._ubus(
+            OpenWrtResponseError("rc/list failed"), _PROCD_SERVICE_LIST
+        )
+        mock_api._rc_enabled_fetched_at -= RC_LIST_REFRESH_INTERVAL + 1
+        services = await mock_api.get_services(names=["odhcpd"])
+
+        assert services[0]["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_full_rc_list_without_procd(self, mock_api):
+        full_rc = {
+            "dnsmasq": {"start": 19, "enabled": True, "running": True},
+            "firewall": {"start": 19, "enabled": True, "running": False},
+        }
+
+        async def _call(obj, method, params, *args, **kwargs):
+            if (obj, method) == ("service", "list"):
+                raise OpenWrtAuthError("service/list denied")
+            if (obj, method) == ("rc", "list"):
+                return full_rc
+            raise AssertionError(f"unexpected ubus call {obj}/{method}")
+
+        mock_api._call = AsyncMock(side_effect=_call)
+        services = await mock_api.get_services(names=["dnsmasq", "firewall"])
+
+        assert {s["name"]: s["running"] for s in services} == {
+            "dnsmasq": True,
+            "firewall": False,
+        }
+        # Only the full rc/list (with running check) can supply running state,
+        # and it is the only rc/list call.
+        assert [c.args[2] for c in self._calls(mock_api, "rc", "list")] == [{}]
+
+    @pytest.mark.asyncio
+    async def test_enable_disable_invalidates_rc_cache(self, mock_api):
+        mock_api._call = self._ubus(_RC_LIST_SKIP_RUNNING, _PROCD_SERVICE_LIST)
+        await mock_api.get_services()
+
+        mock_api._call = AsyncMock(return_value={})
+        assert await mock_api.control_service("odhcpd", "enable") is True
+        assert mock_api._rc_enabled_fetched_at is None
+
+        mock_api._rc_enabled_fetched_at = 0.0
+        assert await mock_api.control_service("odhcpd", "restart") is True
+        assert mock_api._rc_enabled_fetched_at == 0.0
+
