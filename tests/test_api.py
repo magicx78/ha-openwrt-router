@@ -1452,6 +1452,33 @@ class TestCpuLoadPerCore:
         assert _cpuinfo_reads(mock_api._call) == 1
 
     @pytest.mark.asyncio
+    async def test_due_retry_bypasses_the_cached_acl_denial(self, mock_api):
+        """A cached ACL denial must not swallow the hourly retry."""
+        key = mock_api._acl_cache_key(
+            "file", "read", {"path": api_module.PROC_CPUINFO_PATH}
+        )
+        mock_api._acl_blocked.add(key)
+        status = _status_ubus(CPUINFO_AARCH64_DUAL)
+
+        async def _call(obj, method, params, *args, **kwargs):
+            if (obj, method) == ("file", "read"):
+                assert key not in mock_api._acl_blocked
+            return await status(obj, method, params, *args, **kwargs)
+
+        mock_api._call = AsyncMock(side_effect=_call)
+        result = await mock_api.get_router_status()
+
+        assert result["cpu_cores"] == 2
+
+    @pytest.mark.asyncio
+    async def test_response_error_is_retried_sooner(self, mock_api):
+        mock_api._call = _status_ubus(OpenWrtResponseError("HTTP 502"))
+        await mock_api.get_router_status()
+
+        remaining = mock_api._cpu_cores_retry_at - api_module.time.monotonic()
+        assert 0 < remaining <= api_module.CPU_CORES_TRANSIENT_RETRY_INTERVAL
+
+    @pytest.mark.asyncio
     async def test_transient_failure_is_retried_sooner(self, mock_api):
         mock_api._call = _status_ubus(OpenWrtTimeoutError("timeout"))
         await mock_api.get_router_status()
