@@ -7,10 +7,10 @@
 ## Status
 
 - **Stand:** 2026-10-27 (abends) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** Teil 1 `fix/ssh-polling` · PR #37 (1.38.3) · Basis: v1.38.2 (`7d77f0f`) — Teil 2 gestapelt: A1 `fix/auth-errors` · PR #38 (1.38.4) auf #37; A2 `fix/hostapd-iface-cache` (Worktree `../ha-openwrt-router-hostapd-cache`) auf #38
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38) · **Offen:** Merge und Release #37 → #38 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A2–A14
+- **Branch/PR:** Teil 1 `fix/ssh-polling` · PR #37 (1.38.3) · Basis: v1.38.2 (`7d77f0f`) — Teil 2 gestapelt: A1 `fix/auth-errors` · PR #38 (1.38.4) auf #37; A2 `fix/hostapd-iface-cache` · PR #39 (1.38.5) auf #38; A11 `fix/topology-lldp-chain` (Worktree `../ha-openwrt-router-lldp-chain`) auf #39
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39) · **Offen:** Merge und Release #37 → #38 → #39 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A3–A14
 - **Blocker:** –
-- **Nächster Schritt:** A2 (hostapd-Interface-Cache) mit fehlschlagenden Tests; Review A1 läuft; nach Installation durch den Nutzer AK6 messen
+- **Nächster Schritt:** A11 (LLDP-Kette in der Mesh-Topologie, P1) mit fehlschlagenden Tests; Reviews A1/A2 laufen; nach Installation durch den Nutzer AK6 messen
 
 ## Problem und Zielverhalten
 
@@ -419,3 +419,8 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   Reauth mit falschem Passwort im echten HA (Dialog bleibt offen, richtiges Passwort lädt den
   Eintrag), `ubus call session list` ohne zusätzliche Session nach einer Prüfung · Review:
   unabhängig, läuft.
+- 2026-10-27 A2 `fix/hostapd-iface-cache@c05418c` (gestapelt auf #38) – lokal: ruff 0.17.3 sauber,
+  1353 Tests grün (7 neue, 4 vorher rot: leere Liste nach Ablauf neu ermittelt, neues Radio-Interface
+  löst Neuermittlung aus, `set_wifi_state`/`reload_wifi` verwerfen den Cache) · CI: PR #39 ·
+  Hardware: nicht geprüft – Lücke: Gast-WLAN per Schalter aus/ein, Clients und AP-Sensor des
+  Gast-Interfaces erscheinen ohne Neuladen · Review: unabhängig, läuft.

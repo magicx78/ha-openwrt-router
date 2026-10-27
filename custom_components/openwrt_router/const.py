@@ -360,6 +360,13 @@ LLDP_UNAVAILABLE_RETRY_INTERVAL = 1800.0
 # in between; it changes on the timescale of package installs, not polls.
 SSH_SLOW_REFRESH_INTERVAL = 600.0
 
+# The hostapd interface list (which SSIDs have an AP interface) is discovered
+# once and cached; it is re-discovered when a radio reports an unknown kernel
+# ifname, after a Wi-Fi change made through this integration, and otherwise
+# at most this often (seconds), so a list that was empty or incomplete at
+# setup does not stick until the next reload.
+HOSTAPD_REDISCOVER_INTERVAL = 600.0
+
 # rpcd ``rc/list`` is NOT called on every poll: rpcd before 2026-05-31
 # (upstream d06d2a8, e.g. rpcd 2025.12.03 on OpenWrt 25.12.1) leaks ~4.7 KB
 # per call. Service running state comes from procd ``service/list`` instead;
