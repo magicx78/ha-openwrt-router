@@ -28,8 +28,13 @@ All notable changes to the OpenWrt Router integration will be documented in this
   WLAN (etwa das Gast-WLAN über den Schalter) lieferte keine Clients, keine
   AP-Sensoren und fehlte im Kanalplan. Die Liste wird jetzt neu ermittelt,
   wenn ein Radio ein unbekanntes Interface meldet, nach jedem WLAN-Schalter
-  oder Reload über die Integration und sonst alle 10 Minuten; eine leere
-  Neuermittlung (vorübergehender Fehler) behält die bisherige Liste.
+  oder Reload über die Integration und sonst alle 10 Minuten. Der Auslöser
+  versteht die Modus-Bezeichnungen aller Quellen (netifd `ap`/`sta`/`mesh`,
+  iwinfo `Master`/`Client`/`Mesh Point`); ein Interface, das sich nie
+  ermitteln lässt, löst die Neuermittlung nur einmal aus. Eine Neuermittlung,
+  die mit einem Fehler endet, behält die bisherige Liste; eine zu Recht leere
+  (alle WLANs aus) ersetzt sie. Der SSH-WLAN-Pfad kennzeichnet seine
+  UCI-Sektionsnamen jetzt als solche, und ein ACL-Deploy verwirft die Liste.
 
 ## [1.38.4] - 2026-10-27
 
