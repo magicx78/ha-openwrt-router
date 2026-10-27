@@ -409,4 +409,5 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   einen Phantom-Peak erzeugt → keine Zähler, solange das Interface nicht aktiv ist. P3: Transportfehler
   im 600-s-Cache nicht mehr gecacht, Key-Auth-Gate angeglichen, AK4-Wortlaut, CHANGELOG-Datum und
   -Formulierungen, Docstring-Verweise, Testkosmetik, fünf zusätzliche Transport-Tests und AK1 auch
-  mit leeren FDB/ARP-Tabellen. Danach lokal 1334 Tests grün, ruff 0.17.3 sauber.
+  mit leeren FDB/ARP-Tabellen. Danach lokal 1335 Tests grün (38 neue), ruff 0.17.3 sauber;
+  `70a924a` gepusht, PR #37 offen (CI läuft).
