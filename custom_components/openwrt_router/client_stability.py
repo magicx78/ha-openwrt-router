@@ -9,7 +9,9 @@ Pure functions and small state holders, no HA imports.
 
 Nodes without ``#`` belong to the router that answered, ``<ip>#…`` to other
 usteer nodes. A client connected to a local node is *sticky* when another
-router's node hears it at least STICKY_DELTA_DB stronger.
+router's node with the same band and SSID hears it at least STICKY_DELTA_DB
+stronger (band/SSID per node from ``node_info``; unknown nodes are compared
+anyway).
 """
 
 from __future__ import annotations
@@ -77,14 +79,30 @@ def parse_usteer_clients(raw: Any) -> dict[str, list[NodeSignal]]:
     return out
 
 
+def iface_band(iface: dict[str, Any]) -> str | None:
+    """Band of an AP interface: from the frequency, else its ``band`` key."""
+    freq = iface.get("frequency")
+    if isinstance(freq, int) and not isinstance(freq, bool) and freq > 0:
+        if freq < 3000:
+            return "2.4g"
+        return "6g" if freq >= 5925 else "5g"
+    band = iface.get("band")
+    return band if band in ("2.4g", "5g", "6g") else None
+
+
 def sticky_candidates(
-    parsed: dict[str, list[NodeSignal]], min_delta: int = STICKY_DELTA_DB
+    parsed: dict[str, list[NodeSignal]],
+    node_info: dict[str, tuple[str | None, str | None]] | None = None,
+    min_delta: int = STICKY_DELTA_DB,
 ) -> dict[str, dict[str, Any]]:
     """Clients on a local node that another router hears >= min_delta stronger.
 
     Other SSIDs/radios of the same router are not an alternative: the client
-    would stay on the same access point.
+    would stay on the same access point. ``node_info`` maps usteer node names
+    to (band, ssid); a remote node only counts with the same band and SSID
+    as the client's node, unless one of them is unknown.
     """
+    info = node_info or {}
     result: dict[str, dict[str, Any]] = {}
     for mac, seen in parsed.items():
         current = next(
@@ -92,7 +110,14 @@ def sticky_candidates(
         )
         if current is None:
             continue
-        remote = [s for s in seen if not s.local and s.signal is not None]
+        own = info.get(current.node)
+        remote = [
+            s
+            for s in seen
+            if not s.local
+            and s.signal is not None
+            and _comparable(own, info.get(s.node))
+        ]
         if not remote:
             continue
         best = max(remote, key=lambda s: s.signal or -999)
@@ -106,6 +131,17 @@ def sticky_candidates(
                 "delta_db": delta,
             }
     return result
+
+
+def _comparable(
+    own: tuple[str | None, str | None] | None,
+    other: tuple[str | None, str | None] | None,
+) -> bool:
+    if own is None or other is None:
+        return True
+    return all(
+        a is None or b is None or a == b for a, b in zip(own, other, strict=True)
+    )
 
 
 class HoldTimer:
@@ -137,15 +173,23 @@ class AssociationTracker:
         self.window_ms = window_ms
         self.reconnect_ms = reconnect_ms
         self._items: deque[tuple[int, str, bool]] = deque(maxlen=max_items)
-        self._last_disconnect: dict[str, int] = {}
+        self._last_disconnect: dict[str, tuple[int, str | None]] = {}
 
-    def connected(self, mac: str, time_ms: int) -> None:
+    def connected(self, mac: str, time_ms: int, interface: str | None = None) -> None:
+        """A reconnect is a connect to the same interface shortly after a
+        disconnect from it; band steering to another radio is not."""
         last = self._last_disconnect.pop(mac, None)
-        reconnect = last is not None and 0 <= time_ms - last <= self.reconnect_ms
+        reconnect = (
+            last is not None
+            and 0 <= time_ms - last[0] <= self.reconnect_ms
+            and (interface is None or last[1] is None or interface == last[1])
+        )
         self._items.append((time_ms, mac, reconnect))
 
-    def disconnected(self, mac: str, time_ms: int) -> None:
-        self._last_disconnect[mac] = time_ms
+    def disconnected(
+        self, mac: str, time_ms: int, interface: str | None = None
+    ) -> None:
+        self._last_disconnect[mac] = (time_ms, interface)
 
     def counts(self, now_ms: int) -> dict[str, dict[str, int]]:
         """Return {mac: {"associations_24h", "reconnects_24h"}}."""
@@ -153,7 +197,7 @@ class AssociationTracker:
         while self._items and self._items[0][0] < cutoff:
             self._items.popleft()
         self._last_disconnect = {
-            m: t for m, t in self._last_disconnect.items() if t >= cutoff
+            m: t for m, t in self._last_disconnect.items() if t[0] >= cutoff
         }
         out: dict[str, dict[str, int]] = {}
         for time_ms, mac, reconnect in self._items:

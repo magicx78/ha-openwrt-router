@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,7 @@ from .client_stability import (
     WEAK_SIGNAL_DBM,
     AssociationTracker,
     HoldTimer,
+    iface_band,
     parse_usteer_clients,
     sticky_candidates,
     unstable_top,
@@ -326,7 +328,10 @@ class OpenWrtCoordinatorData:
             "log_stats": self.log_stats,
             "dfs": self.dfs,
             "dhcp_pools": self.dhcp_pools,
-            "client_stability": self.client_stability,
+            # Per-client counters (MACs) stay out of diagnostics
+            "client_stability": {
+                k: v for k, v in self.client_stability.items() if k != "clients"
+            },
         }
 
 
@@ -432,6 +437,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._weak_timer = HoldTimer()
         self._sticky_now: dict[str, dict[str, Any]] = {}
         self._usteer_status: str = USTEER_STATUS_PENDING
+        self._last_usteer_poll: int | None = None
+        # Fleet lookup usteer node -> (band, ssid), wired in __init__
+        self._node_resolver: Callable[[], dict[str, Any]] | None = None
         self._channel_changes = RollingCounter(24 * 3600 * 1000, max_items=500)
         # Poll number of the last log fetch: a fetch pulled forward by a
         # channel change restarts the LOG_READ_INTERVAL_CYCLES rhythm, so the
@@ -772,17 +780,25 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             )
             data.dhcp_static_macs = self._dhcp_static_macs
 
-            # Client stability (F4): usteer on the polls between the log
-            # fetches (spreads the two ~40 KB answers). Never fails the poll.
+            # Client stability (F4): usteer every LOG_READ_INTERVAL_CYCLES
+            # polls but never in the same poll as the log (spreads the two
+            # ~40 KB answers). Never fails the poll.
+            usteer_interval = (
+                USTEER_RETRY_CYCLES
+                if self._usteer_status == USTEER_STATUS_UNAVAILABLE
+                else LOG_READ_INTERVAL_CYCLES
+            )
             if (
                 self._board_poll_count > 1
-                and self._board_poll_count % LOG_READ_INTERVAL_CYCLES == 1
+                and self._last_log_poll != self._board_poll_count
                 and (
-                    self._usteer_status != USTEER_STATUS_UNAVAILABLE
-                    or self._board_poll_count % USTEER_RETRY_CYCLES == 1
+                    self._last_usteer_poll is None
+                    or self._board_poll_count - self._last_usteer_poll
+                    >= usteer_interval
                 )
             ):
-                await self._fetch_usteer(now_ms)
+                self._last_usteer_poll = self._board_poll_count
+                await self._fetch_usteer(data, now_ms)
             data.client_stability = self._client_stability_snapshot(data, now_ms)
 
             # --- CPU history (30s resolution, 1h rolling window) ---
@@ -1075,14 +1091,21 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # Router time only when plausible: a dumb AP without NTP sync
             # would otherwise put lines outside the 24 h window.
             ts = event.time_ms
-            if not now_ms - 24 * 3600 * 1000 <= ts <= now_ms + 300_000:
+            plausible = now_ms - 24 * 3600 * 1000 <= ts <= now_ms + 300_000
+            if not plausible:
                 ts = now_ms
             self._log_counter.add(ts, event.key)
-            if event.category == CATEGORY_WIFI and event.mac:
+            # Old baseline lines with an unusable time would land at "now"
+            # and pair up as reconnects: leave them out of the client stats.
+            if (
+                event.category == CATEGORY_WIFI
+                and event.mac
+                and (plausible or not result.baseline)
+            ):
                 if event.kind == WIFI_CONNECTED:
-                    self._assoc.connected(event.mac, ts)
+                    self._assoc.connected(event.mac, ts, event.interface)
                 elif event.kind == WIFI_DISCONNECTED:
-                    self._assoc.disconnected(event.mac, ts)
+                    self._assoc.disconnected(event.mac, ts, event.interface)
             if (
                 event.category == CATEGORY_DFS
                 and event.interface
@@ -1184,11 +1207,20 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         else:
             self.hass.bus.async_fire(EVENT_WIFI, payload)
 
-    async def _fetch_usteer(self, now_ms: int) -> None:
-        """Refresh sticky-client candidates from usteer."""
+    def attach_node_resolver(self, resolver: Callable[[], dict[str, Any]]) -> None:
+        """Fleet lookup for usteer remote nodes (wired in __init__)."""
+        self._node_resolver = resolver
+
+    async def _fetch_usteer(self, data: OpenWrtCoordinatorData, now_ms: int) -> None:
+        """Refresh sticky-client candidates from usteer.
+
+        Not permitted or no usteer object (uhttpd answers "object not found"
+        as response error) → ``not_available`` and the signal fallback; any
+        other error drops the candidates so nothing stale stays sticky.
+        """
         try:
             raw = await self.api.get_usteer_clients()
-        except OpenWrtMethodNotFoundError as err:
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError) as err:
             if self._usteer_status != USTEER_STATUS_UNAVAILABLE:
                 _LOGGER.debug("%s: usteer not available: %s", self.name, err)
             self._usteer_status = USTEER_STATUS_UNAVAILABLE
@@ -1197,9 +1229,24 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             return
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("%s: usteer fetch failed: %s", self.name, err)
+            self._sticky_now = {}
+            self._sticky_timer.update(set(), now_ms)
             return
+        node_info: dict[str, Any] = {
+            f"hostapd.{iface.get('ifname')}": (
+                iface_band(iface),
+                iface.get("ssid") or None,
+            )
+            for iface in data.ap_interfaces
+            if iface.get("ifname")
+        }
+        if self._node_resolver is not None:
+            try:
+                node_info.update(self._node_resolver())
+            except Exception:
+                _LOGGER.debug("%s: usteer node lookup failed", self.name, exc_info=True)
         self._usteer_status = USTEER_STATUS_OK
-        self._sticky_now = sticky_candidates(parse_usteer_clients(raw))
+        self._sticky_now = sticky_candidates(parse_usteer_clients(raw), node_info)
         self._sticky_timer.update(self._sticky_now, now_ms)
 
     def _client_stability_snapshot(
