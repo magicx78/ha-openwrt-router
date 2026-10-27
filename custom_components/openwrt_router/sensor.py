@@ -58,6 +58,7 @@ from .const import (
     SUFFIX_CPU_LOAD,
     SUFFIX_CPU_LOAD_5MIN,
     SUFFIX_CPU_LOAD_15MIN,
+    SUFFIX_DFS_EVENTS_24H,
     SUFFIX_DISK_FREE,
     SUFFIX_DISK_TOTAL,
     SUFFIX_DISK_USAGE,
@@ -411,6 +412,18 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         icon="mdi:text-box-search-outline",
         value_fn=lambda data: data.log_status,
         extra_attrs_fn=lambda data: data.log_stats,
+    ),
+    OpenWrtSensorEntityDescription(
+        key=SUFFIX_DFS_EVENTS_24H,
+        translation_key="dfs_events_24h",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:radar",
+        value_fn=lambda data: data.dfs.get("events_24h", 0),
+        extra_attrs_fn=lambda data: {
+            "by_type": data.dfs.get("by_type", {}),
+            "last_event": data.dfs.get("last_event"),
+        },
     ),
 )
 

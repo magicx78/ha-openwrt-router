@@ -7,7 +7,7 @@ from typing import Any
 
 from homeassistant.core import Event, HomeAssistant, callback
 
-from .const import DOMAIN, EVENT_DHCP, EVENT_WIFI
+from .const import DOMAIN, EVENT_DFS, EVENT_DHCP, EVENT_WIFI
 
 
 def _client(data: dict[str, Any]) -> str:
@@ -47,5 +47,22 @@ def async_describe_events(
             "message": f"DHCP {_kind(data)}: {_client(data)}{ip}",
         }
 
+    @callback
+    def describe_dfs(event: Event) -> dict[str, str]:
+        data = event.data
+        radio = data.get("radio") or data.get("interface") or "radio"
+        if data.get("type") == "channel_change":
+            dfs = " (DFS)" if data.get("dfs_related") else ""
+            message = (
+                f"channel change on {radio}: {data.get('old_channel')}/"
+                f"{data.get('old_width_mhz')} MHz → {data.get('new_channel')}/"
+                f"{data.get('new_width_mhz')} MHz{dfs}"
+            )
+        else:
+            channel = f" (channel {data['channel']})" if data.get("channel") else ""
+            message = f"DFS {_kind(data)} on {radio}{channel}"
+        return {"name": _name(data), "message": message}
+
     async_describe_event(DOMAIN, EVENT_WIFI, describe_wifi)
+    async_describe_event(DOMAIN, EVENT_DFS, describe_dfs)
     async_describe_event(DOMAIN, EVENT_DHCP, describe_dhcp)

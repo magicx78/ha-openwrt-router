@@ -153,7 +153,7 @@ def _band_of(iface: dict[str, Any], channel: int) -> str | None:
     return band
 
 
-def _phy_of(ifname: str) -> str:
+def phy_of(ifname: str) -> str:
     """phy1-ap0 → phy1; other names (UCI sections) stay as they are."""
     return ifname.split("-", 1)[0] or ifname
 
@@ -194,7 +194,7 @@ def radios_from_ap_interfaces(
     ``sta_interfaces`` (repeater/mesh uplinks) mark their phy as backhaul.
     """
     backhaul_phys = {
-        _phy_of(str(sta.get(RADIO_KEY_IFNAME) or ""))
+        phy_of(str(sta.get(RADIO_KEY_IFNAME) or ""))
         for sta in sta_interfaces or []
         if isinstance(sta, dict) and sta.get(RADIO_KEY_IFNAME)
     }
@@ -209,7 +209,7 @@ def radios_from_ap_interfaces(
         if channel <= 0 or band is None:
             continue
         ifname = str(iface.get(RADIO_KEY_IFNAME) or "")
-        phy = str(iface.get(RADIO_KEY_PHY) or _phy_of(ifname))
+        phy = str(iface.get(RADIO_KEY_PHY) or phy_of(ifname))
         if not phy or (phy, band) in radios:
             continue
         htmode = iface.get(RADIO_KEY_HTMODE)
@@ -227,7 +227,7 @@ def radios_from_ap_interfaces(
             channel=channel,
             width=width,
             center=center,
-            backhaul=phy in backhaul_phys or _phy_of(ifname) in backhaul_phys,
+            backhaul=phy in backhaul_phys or phy_of(ifname) in backhaul_phys,
         )
     return list(radios.values())
 
