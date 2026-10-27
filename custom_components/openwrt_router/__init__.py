@@ -44,7 +44,7 @@ from .api import (
 )
 from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN, PROTOCOL_HTTP
 from .coordinator import OpenWrtCoordinator
-from .fleet import async_get_outage_tracker
+from .fleet import async_get_channel_plan_monitor, async_get_outage_tracker
 from .issues import async_clear_issue, ram_high_issue_id
 from .ssl_util import ssl_context_for_protocol
 
@@ -348,6 +348,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     entry.async_on_unload(
         partial(async_clear_issue, hass, ram_high_issue_id(entry.entry_id))
     )
+
+    # Channel conflicts are judged across all routers after every poll.
+    channel_plan = async_get_channel_plan_monitor(hass)
+    entry.async_on_unload(
+        coordinator.async_add_listener(
+            partial(channel_plan.evaluate, entry.entry_id, coordinator)
+        )
+    )
+    entry.async_on_unload(partial(channel_plan.unregister, entry.entry_id))
 
     # Forward setup to all platforms (sensor, switch, device_tracker, button)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

@@ -86,6 +86,9 @@
       }
     },
     "sensor": {
+      "channel_plan": {
+        "name": "Channel plan findings"
+      },
       "router_status": {
         "name": "Router Status",
         "state": {
@@ -201,6 +204,10 @@
     }
   },
   "issues": {
+    "channel_plan_conflict": {
+      "title": "Wi-Fi channel conflicts between OpenWrt routers",
+      "description": "{count} channel conflict(s) were found across your OpenWrt routers:\n\n{findings}\n\n- `same_channel`: two radios use the same primary channel and have to share airtime.\n- `overlap`: the channel widths overlap, for example 40 MHz on 44 and 48, or 160 MHz on 36, which covers 36–64.\n- `non_standard_24`: a 2.4 GHz radio is not on channel 1, 6 or 11 and overlaps with its neighbours.\n\nGive neighbouring access points different, non-overlapping channels or narrower channel widths in their wireless settings. DFS channels are not a conflict; they are listed in the diagnostic sensor \"Channel plan findings\" of each router.\n\nThis message disappears automatically once the conflicts are gone."
+    },
     "lan_unreachable": {
       "title": "No OpenWrt router reachable",
       "description": "All {count} OpenWrt routers ({routers}) have been unreachable from Home Assistant since {since}.\n\nWhen every router fails at the same moment, the cause is almost always between Home Assistant and the LAN (network of the HA host, switch, cabling, VLAN), not in the routers themselves.\n\nThis message disappears automatically as soon as a router answers again."

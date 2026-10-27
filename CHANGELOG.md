@@ -2,6 +2,34 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.32.0] - 2026-10-27
+
+### Added
+
+- **Diagnosesensor „Kanalplan-Befunde“** (`channel_plan`) pro Router. Er
+  vergleicht die Funkmodule aller erreichbaren Router miteinander und zählt
+  die Befunde, an denen ein Funkmodul dieses Routers beteiligt ist. Das
+  Attribut `findings` listet sie auf, `radios` zeigt die eigenen Funkmodule
+  (Kanal, Breite):
+  - `same_channel`: zwei Funkmodule im selben Band auf demselben Hauptkanal,
+  - `overlap`: belegte Kanalbreiten überlappen, z. B. 40 MHz auf 44 und 48
+    oder 160 MHz auf 36 (belegt 36–64),
+  - `non_standard_24`: 2,4 GHz außerhalb der Kanäle 1, 6 und 11,
+  - `dfs`: 5-GHz-Funkmodul mit mindestens einem Teilkanal in 52–144.
+  Mehrere SSIDs auf demselben Funkmodul zählen als ein Funkmodul. Router,
+  deren letzte Abfrage fehlschlug, bleiben außen vor. Ein Funkmodul mit
+  WLAN-Uplink (Repeater, Mesh) muss den Kanal seines Partners nutzen und
+  ergibt deshalb nie `same_channel`/`overlap` (Attribut `backhaul`).
+- **Reparatur-Hinweis „WLAN-Kanalkonflikte zwischen OpenWrt-Routern“**
+  (`channel_plan_conflict`), sobald ein Router in zwei Abfragen in Folge an
+  einem Konflikt beteiligt ist. DFS allein löst ihn nicht aus. Er
+  verschwindet nach zwei konfliktfreien Auswertungen in Folge; ein
+  fehlgeschlagener Poll ändert nichts. Anlass: Bei der
+  Live-Diagnose waren ein DFS-Kanal doppelt belegt und überall 160 MHz
+  eingestellt, ohne dass Home Assistant das zeigte.
+- Kein zusätzlicher Router-Aufruf: `phy` und `center_chan1` kommen aus der
+  schon abgefragten `iwinfo info`-Antwort.
+
 ## [1.31.0] - 2026-10-27
 
 ### Added

@@ -8,12 +8,13 @@
 
 - **Stand:** 2026-10-27 · **Phase:** freigegeben, in Umsetzung
 - **Branch/PR:** gestapelt auf v1.30.0 (PR #22, enthält #19 und #20)
-  - P1 `feature/ram-pressure-repairs` · 1.31.0 · PR folgt
+  - P1 `feature/ram-pressure-repairs` · 1.31.0 · PR #23
+  - P2 `feature/channel-plan` · 1.32.0 · PR folgt
 - **Erledigt (außerhalb dieses Plans):** Feature 1 (#19), Feature 7 (#20), Feature 10 (#22), rpcd-Leck (#21)
-- **Erledigt:** P1 (F9, lokal grün, Review s. Prüfprotokoll)
-- **Offen:** P2–P7
+- **Erledigt:** P1 (F9, PR #23), P2 (F2, lokal grün)
+- **Offen:** P3–P7
 - **Blocker:** —
-- **Nächster Schritt:** P2 (Feature 2, Kanalplan) auf `feature/channel-plan`
+- **Nächster Schritt:** P3 (Feature 6, Log-Ingest + ACL v6) auf `feature/log-ingest`
 
 ## Problem und Zielverhalten
 
@@ -34,7 +35,7 @@ Ziel: Solche Zustände erscheinen künftig in HA als Sensor, Event oder Reparatu
 ## Akzeptanzkriterien
 
 - [x] AK1 (F9) Speicherdruck = 1 − available/total. Liegt er länger als 15 min über 85 % oder `available` unter 16 MB, erscheint das Issue `ram_high_<entry_id>`. Es verschwindet unter 80 % und beim Entladen des Eintrags. Die Formel des bestehenden Sensors `memory_usage` bleibt unverändert, er bekommt die Attribute `available_mb` und `pressure_pct`.
-- [ ] AK2 (F2) Diagnosesensor `<entry_id>_channel_plan` pro Router, Attribut `findings[]`:
+- [x] AK2 (F2) Diagnosesensor `<entry_id>_channel_plan` pro Router, Attribut `findings[]`:
   - `same_channel`, `overlap` (auch 40 MHz: 44/48 sind ein Block; 160 MHz auf 36 umfasst 36–64), `non_standard_24` (außerhalb 1/6/11), `dfs` (Teilkanal in 52–144)
   - zwei SSIDs auf demselben Funkmodul ergeben kein Finding
   - Issue `channel_plan_conflict` erst nach zwei Auswertungen in Folge, ohne `dfs`
@@ -143,6 +144,8 @@ Pro Paket: eigener Branch auf dem vorherigen, eigener PR, CHANGELOG-Eintrag, Min
 - 2026-10-27 – F8 nur Stufe 1 – Zusammenführen ist bei Familien-iPhones fehleranfällig – vom Nutzer freigegeben (2026-10-27)
 - 2026-10-27 – Gestapelte PRs, ein Feature pro PR – wie #19–#22 – vom Nutzer freigegeben (2026-10-27)
 - 2026-10-27 – P1: Das Issue verschwindet erst, wenn der Druck unter 80 % liegt **und** wieder mindestens 16 MB verfügbar sind – sonst würde ein kleiner Router (z. B. 64 MB, 79 %, 13 MB frei) im 15-min-Takt flattern; betrifft nur Router unter 80 MB RAM – Abweichung vom Wortlaut von AK1, vom Coordinator entschieden, im PR zur Bestätigung durch den Nutzer genannt
+- 2026-10-27 – P2: Das Issue `channel_plan_conflict` ist flottenweit (eins für alle Router). „Zwei Auswertungen in Folge“ = zwei aufeinanderfolgende Polls desselben Routers, in denen er an einem Konflikt beteiligt ist; ausgewertet wird nach jedem Poll über einen Coordinator-Listener. Konflikt = alle Befundtypen außer `dfs`, also auch `non_standard_24` (wörtlich nach AK2) – Umsetzungsdetail
+- 2026-10-27 – P2 (nach Review): Funkmodule mit STA-/Mesh-Uplink (Repeater, 802.11s) sind `backhaul` und bilden nie `same_channel`/`overlap` – sie müssen den Kanal des Partners teilen; Issue wird erst nach zwei konfliktfreien Auswertungen aufgehoben, ein fehlgeschlagener Poll ändert nichts; Funkmodule nach (phy, Band) zusammengefasst; Band aus dem Namen wird über die Kanalnummer korrigiert – Umsetzungsdetail
 - 2026-10-27 – P1 (nach Review): Grenzwerte gegen den ungerundeten Druck; nicht lesbares `available` (oder 0 bei freiem Speicher) → Ersatzformel statt 100 %; eine Lücke > 2 Poll-Intervalle ohne Messwert startet die Haltezeit neu – Umsetzungsdetail
 - 2026-10-27 – P1: Ersatzformel ohne `available` = frei + Puffer + max(Cache − Shared, 0) – tmpfs-Seiten liegen im Cache, sind aber nicht freigebbar – Umsetzungsdetail
 
@@ -153,3 +156,4 @@ Pro Paket: eigener Branch auf dem vorherigen, eigener PR, CHANGELOG-Eintrag, Min
 - 2026-10-27 `feature/extended-wifi-sensors-option@83533be` – Live-Probe lesend auf `openwrt`/`ap2`/`ap4` (s. Befunde) · CI #22: grün
 - 2026-10-27 `feature/ram-pressure-repairs` (P1) – lokal: ruff 0.17.3 check/format ✓ · pytest grün (Py 3.13, HA 2026.2.3) · Hardware: keine neue Abfrage (Felder aus `system info`, Live-Probe oben) · Review: unabhängig (frischer Agent) – keine P0/P1; P2 (kaputtes `available`, Text zur 16-MB-Bedingung) und P3 (Rundung, Poll-Lücke, Test mit zwei Einträgen) behoben; offen P3: Wanduhr statt monotoner Zeit
 - Doku geprüft: https://contributors.home-assistant.io/core/integrations/repairs/, 2026-10-27, `async_create_issue`/`async_delete_issue` unverändert, keine Deprecation
+- 2026-10-27 `feature/channel-plan` (P2) – Live-Probe lesend `iwinfo info` aller AP-Interfaces auf `openwrt`/`ap2`/`ap4`: `phy`, `channel`, `center_chan1`, `htmode`, `frequency` vorhanden (20 MHz: `center_chan1` = Kanal; HE40 auf 36: 38). Aktueller Plan 1/6/11 und 36@40, 44, 48 → keine Befunde (als Test abgebildet) · lokal: ruff 0.17.3 ✓ · pytest 830 passed · Review: unabhängig – keine P0/P1; P2 (Issue-Flattern bei Fehl-Poll, Mesh/Repeater-Fehlalarm, Band/phy-Zuordnung) und P3 (eigene Funkmodule beim Setup, `band` im Attribut, Zähler beim Unload, Tests 1/5 und 144/149) behoben; offen P3: Sensor rechnet pro Zustandsschreiben zweimal (gering), UCI-Fallback kennt deaktivierte Funkmodule nicht
