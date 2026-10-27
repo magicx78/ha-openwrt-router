@@ -138,6 +138,7 @@ SUFFIX_WAN_CONNECTIVITY = "wan_connectivity"
 SUFFIX_ROUTER_STATUS = "router_status"
 SUFFIX_CHANNEL_PLAN = "channel_plan"
 SUFFIX_LOG_STATUS = "log_status"
+SUFFIX_DFS_EVENTS_24H = "dfs_events_24h"
 
 # Error type values stored in coordinator.data.error_type
 ERROR_TYPE_CONNECTION = "connection"
@@ -411,6 +412,11 @@ LOG_EVENTS_PER_FETCH = 10
 LOG_EVENT_COOLDOWN_SECONDS = 300
 EVENT_WIFI = f"{DOMAIN}_wifi_event"
 EVENT_DHCP = f"{DOMAIN}_dhcp_event"
+# DFS log lines and per-radio channel/width changes between two polls (F3).
+# A change counts as DFS-related only with a DFS log line of the same radio
+# within DFS_EVIDENCE_SECONDS.
+EVENT_DFS = f"{DOMAIN}_dfs_event"
+DFS_EVIDENCE_SECONDS = 15 * 60
 LOG_STATUS_PENDING = "pending"
 LOG_STATUS_OK = "ok"
 LOG_STATUS_UNAVAILABLE = "unavailable"

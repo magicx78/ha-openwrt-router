@@ -23,6 +23,7 @@ from typing import Any
 
 CATEGORY_WIFI = "wifi"
 CATEGORY_DHCP = "dhcp"
+CATEGORY_DFS = "dfs"
 
 WIFI_CONNECTED = "connected"
 WIFI_DISCONNECTED = "disconnected"
@@ -34,6 +35,17 @@ DHCP_ACK = "ack"
 DHCP_NAK = "nak"
 DHCP_DECLINE = "decline"
 DHCP_NO_ADDRESS = "no_address"
+
+# hostapd DFS-* lines (radar detection, channel availability check)
+DFS_RADAR_DETECTED = "radar_detected"
+DFS_CAC_START = "cac_start"
+DFS_CAC_COMPLETED = "cac_completed"
+DFS_CAC_FAILED = "cac_failed"
+DFS_NOP_FINISHED = "nop_finished"
+DFS_NEW_CHANNEL = "new_channel"
+DFS_PRE_CAC_EXPIRED = "pre_cac_expired"
+# Not a log line: a radio's channel/width differed between two polls
+DFS_CHANNEL_CHANGE = "channel_change"
 
 # Parsed for the counters (and client statistics) but never fired as event:
 # they are normal operation and would crowd out the problems.
@@ -75,6 +87,19 @@ _DHCP_RE = re.compile(
 _DHCP_REST_RE = re.compile(rf"^(?:{_IP} )?{_MAC}(?P<tail>.*)$", re.DOTALL)
 _DHCP_TYPES = {"ACK": DHCP_ACK, "NAK": DHCP_NAK, "DECLINE": DHCP_DECLINE}
 
+_DFS_RE = re.compile(r"^DFS-(?P<what>[A-Z-]+)(?P<args>(?: .*)?)$", re.DOTALL)
+_DFS_KINDS = {
+    "RADAR-DETECTED": DFS_RADAR_DETECTED,
+    "CAC-START": DFS_CAC_START,
+    "CAC-COMPLETED": DFS_CAC_COMPLETED,
+    "NOP-FINISHED": DFS_NOP_FINISHED,
+    "NEW-CHANNEL": DFS_NEW_CHANNEL,
+    "PRE-CAC-EXPIRED": DFS_PRE_CAC_EXPIRED,
+}
+_DFS_FREQ_RE = re.compile(r"\bfreq=(?P<v>\d{4,5})\b")
+_DFS_CHAN_RE = re.compile(r"\bchan=(?P<v>\d{1,3})\b")
+_DFS_SUCCESS_RE = re.compile(r"\bsuccess=(?P<v>\d)\b")
+
 
 @dataclass(frozen=True)
 class LogEvent:
@@ -88,6 +113,8 @@ class LogEvent:
     interface: str | None = None
     ip: str | None = None
     message: str = ""
+    frequency: int | None = None
+    channel: int | None = None
 
     @property
     def key(self) -> str:
@@ -129,6 +156,9 @@ def _parse_hostapd(
     if not match:
         return None
     rest = match.group("rest")
+    dfs = _DFS_RE.match(rest)
+    if dfs:
+        return _parse_dfs(dfs, match.group("iface"), log_id, time_ms, message)
     for kind, pattern in _HOSTAPD_PATTERNS:
         hit = pattern.match(rest)
         if hit:
@@ -142,6 +172,35 @@ def _parse_hostapd(
                 message=message,
             )
     return None
+
+
+def _parse_dfs(
+    match: re.Match[str], iface: str, log_id: int, time_ms: int, message: str
+) -> LogEvent | None:
+    kind = _DFS_KINDS.get(match.group("what"))
+    if kind is None:
+        return None
+    args = match.group("args")
+    if kind == DFS_CAC_COMPLETED:
+        success = _DFS_SUCCESS_RE.search(args)
+        if success and success.group("v") == "0":
+            kind = DFS_CAC_FAILED
+    freq_hit = _DFS_FREQ_RE.search(args)
+    chan_hit = _DFS_CHAN_RE.search(args)
+    frequency = int(freq_hit.group("v")) if freq_hit else None
+    channel = int(chan_hit.group("v")) if chan_hit else None
+    if channel is None and frequency is not None and 5000 < frequency < 5900:
+        channel = (frequency - 5000) // 5
+    return LogEvent(
+        category=CATEGORY_DFS,
+        kind=kind,
+        log_id=log_id,
+        time_ms=time_ms,
+        interface=iface,
+        message=message,
+        frequency=frequency,
+        channel=channel,
+    )
 
 
 def _parse_dhcp(body: str, log_id: int, time_ms: int, message: str) -> LogEvent | None:
@@ -217,7 +276,10 @@ class LogCursor:
 
 
 class EventLimiter:
-    """At most ``per_fetch`` events per fetch, one per (kind, MAC) per window."""
+    """At most ``per_fetch`` events per fetch, one per (kind, MAC) per window.
+
+    Lines without a MAC (DFS) are keyed by their interface instead.
+    """
 
     def __init__(self, per_fetch: int, window_ms: int) -> None:
         self.per_fetch = per_fetch
@@ -236,7 +298,7 @@ class EventLimiter:
         for event in events:
             if (event.category, event.kind) in COUNT_ONLY_KINDS:
                 continue
-            key = (event.category, event.kind, event.mac)
+            key = (event.category, event.kind, event.mac or event.interface)
             if key in self._last or len(fire) >= self.per_fetch:
                 suppressed += 1
                 continue

@@ -24,6 +24,7 @@ from .api import (
     OpenWrtResponseError,
     OpenWrtTimeoutError,
 )
+from .channel_plan import Radio, phy_of, radios_from_ap_interfaces
 from .const import (
     BOARD_REFRESH_CYCLES,
     CLIENT_KEY_CONNECTED_SINCE,
@@ -31,11 +32,13 @@ from .const import (
     CLIENT_KEY_MAC,
     CPU_HISTORY_MAX_POINTS,
     DEFAULT_SERVICES,
+    DFS_EVIDENCE_SECONDS,
     DOMAIN,
     ERROR_TYPE_AUTH,
     ERROR_TYPE_CONNECTION,
     ERROR_TYPE_RESPONSE,
     ERROR_TYPE_TIMEOUT,
+    EVENT_DFS,
     EVENT_DHCP,
     EVENT_WIFI,
     FEATURE_AVAILABLE_RADIOS,
@@ -93,7 +96,9 @@ from .issues import (
     ram_high_issue_id,
 )
 from .log_parser import (
+    CATEGORY_DFS,
     CATEGORY_DHCP,
+    DFS_CHANNEL_CHANGE,
     EventLimiter,
     LogCursor,
     LogEvent,
@@ -147,6 +152,13 @@ def calc_memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
         "available_bytes": available,
         "estimated": estimated,
     }
+
+
+def _iso_ms(time_ms: int) -> str | None:
+    """Epoch milliseconds → ISO 8601 (UTC); None for 0/missing."""
+    if not time_ms:
+        return None
+    return datetime.fromtimestamp(time_ms / 1000, UTC).isoformat()
 
 
 def _as_int(value: Any) -> int | None:
@@ -237,6 +249,8 @@ class OpenWrtCoordinatorData:
         # Router log ingest (F6): status and counters, see _ingest_log()
         self.log_status: str = LOG_STATUS_PENDING
         self.log_stats: dict[str, Any] = {}
+        # DFS (F3): {"events_24h", "by_type", "last_event"}, see _dfs_snapshot()
+        self.dfs: dict[str, Any] = {}
         # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
         self.vlans_stale: bool = False
         # Connectivity health tracking (used by binary_sensor / sensor platform)
@@ -279,6 +293,7 @@ class OpenWrtCoordinatorData:
             KEY_LLDP_STATUS: self.lldp_status,
             "log_status": self.log_status,
             "log_stats": self.log_stats,
+            "dfs": self.dfs,
         }
 
 
@@ -366,6 +381,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             "events_fired": 0,
             "events_suppressed": 0,
         }
+        # DFS (F3): radios of the previous poll keyed by (phy, band), recent
+        # DFS log lines as evidence (time_ms, phy, kind), last DFS event.
+        self._prev_radios: dict[tuple[str, str], Radio] | None = None
+        self._recent_dfs: deque[tuple[int, str, str]] = deque(maxlen=64)
+        self._last_dfs_event: dict[str, Any] | None = None
         # Stale-data cache: letzte bekannte Werte für VLAN-Badges bei Offline-Router
         self._last_known_network_interfaces: list[dict[str, Any]] = []
         self._last_known_port_vlan_map: dict[str, list[int]] = {}
@@ -642,16 +662,30 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 data.lldp_status = LLDP_STATUS_UNAVAILABLE
 
             # Router log (F6): every LOG_READ_INTERVAL_CYCLES polls, skipped on
-            # the setup poll. Never fails the poll.
-            if (
-                self._board_poll_count > 1
-                and self._board_poll_count % LOG_READ_INTERVAL_CYCLES == 0
+            # the setup poll. A channel change (F3) fetches it right away so
+            # that DFS lines explaining the change are already known.
+            # Never fails the poll.
+            channel_changes = self._detect_channel_changes(data)
+            if self._board_poll_count > 1 and (
+                channel_changes
+                or self._board_poll_count % LOG_READ_INTERVAL_CYCLES == 0
             ):
                 await self._ingest_log(data)
+            for change in channel_changes:
+                self._fire_channel_change(change)
+            now_ms = int(time.time() * 1000)
             data.log_status = self._log_status
-            data.log_stats = {
-                **self._log_totals,
-                "counts_24h": self._log_counter.counts(int(time.time() * 1000)),
+            counts = self._log_counter.counts(now_ms)
+            data.log_stats = {**self._log_totals, "counts_24h": counts}
+            dfs_counts = {
+                key.split(".", 1)[1]: n
+                for key, n in counts.items()
+                if key.startswith(f"{CATEGORY_DFS}.")
+            }
+            data.dfs = {
+                "events_24h": sum(dfs_counts.values()),
+                "by_type": dfs_counts,
+                "last_event": self._last_dfs_event,
             }
 
             # --- CPU history (30s resolution, 1h rolling window) ---
@@ -932,6 +966,10 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         now_ms = int(time.time() * 1000)
         for event in result.events:
             self._log_counter.add(event.time_ms or now_ms, event.key)
+            if event.category == CATEGORY_DFS and event.interface:
+                self._recent_dfs.append(
+                    (event.time_ms or now_ms, phy_of(event.interface), event.kind)
+                )
         self._log_totals["lines_processed"] += result.new_lines
         self._log_totals["missed_lines"] += result.missed
         if result.baseline:
@@ -944,7 +982,22 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._log_totals["events_fired"] += len(fire)
 
     def _fire_log_event(self, event: LogEvent, data: OpenWrtCoordinatorData) -> None:
-        """Fire ``openwrt_router_wifi_event`` / ``openwrt_router_dhcp_event``."""
+        """Fire the wifi/dhcp/dfs event for one log line."""
+        if event.category == CATEGORY_DFS:
+            self._fire_dfs_event(
+                {
+                    "type": event.kind,
+                    "radio": phy_of(event.interface or ""),
+                    "interface": event.interface,
+                    "frequency": event.frequency,
+                    "channel": event.channel,
+                    "dfs_related": True,
+                    "evidence": [event.kind],
+                    "time": _iso_ms(event.time_ms),
+                    "message": event.message,
+                }
+            )
+            return
         hostname = None
         if event.mac:
             hostname = (data.dhcp_leases.get(event.mac) or {}).get("hostname")
@@ -965,11 +1018,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             "mac": event.mac,
             "hostname": hostname or None,
             "interface": event.interface,
-            "time": (
-                datetime.fromtimestamp(event.time_ms / 1000, UTC).isoformat()
-                if event.time_ms
-                else None
-            ),
+            "time": _iso_ms(event.time_ms),
             "message": event.message,
         }
         if event.category == CATEGORY_DHCP:
@@ -977,6 +1026,85 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             self.hass.bus.async_fire(EVENT_DHCP, payload)
         else:
             self.hass.bus.async_fire(EVENT_WIFI, payload)
+
+    def _detect_channel_changes(
+        self, data: OpenWrtCoordinatorData
+    ) -> list[tuple[Radio, Radio]]:
+        """Return (before, after) per radio whose channel or width changed.
+
+        Radios missing in this poll (failed iwinfo, radio off) are neither a
+        change nor forgotten; an empty poll keeps the previous state.
+        """
+        current = {
+            (r.phy, r.band): r
+            for r in radios_from_ap_interfaces(
+                "", "", data.ap_interfaces, data.sta_interfaces
+            )
+        }
+        if not current:
+            return []
+        previous, self._prev_radios = (
+            self._prev_radios,
+            {
+                **(self._prev_radios or {}),
+                **current,
+            },
+        )
+        if previous is None:
+            return []
+        return [
+            (before, after)
+            for key, after in current.items()
+            if (before := previous.get(key)) is not None
+            and (before.channel, before.width) != (after.channel, after.width)
+        ]
+
+    def _fire_channel_change(self, change: tuple[Radio, Radio]) -> None:
+        """Fire a channel_change DFS event; DFS-related only with log evidence."""
+        before, after = change
+        now_ms = int(time.time() * 1000)
+        cutoff = now_ms - DFS_EVIDENCE_SECONDS * 1000
+        evidence = sorted(
+            {
+                kind
+                for ts, phy, kind in self._recent_dfs
+                if phy == after.phy and ts >= cutoff
+            }
+        )
+        self._log_counter.add(now_ms, f"{CATEGORY_DFS}.{DFS_CHANNEL_CHANGE}")
+        self._fire_dfs_event(
+            {
+                "type": DFS_CHANNEL_CHANGE,
+                "radio": after.phy,
+                "band": after.band,
+                "old_channel": before.channel,
+                "new_channel": after.channel,
+                "old_width_mhz": before.width,
+                "new_width_mhz": after.width,
+                "dfs_related": bool(evidence),
+                "evidence": evidence,
+                "time": _iso_ms(now_ms),
+            }
+        )
+        _LOGGER.info(
+            "%s: %s channel %s/%s MHz → %s/%s MHz%s",
+            self.name,
+            after.phy,
+            before.channel,
+            before.width,
+            after.channel,
+            after.width,
+            f" (DFS: {', '.join(evidence)})" if evidence else "",
+        )
+
+    def _fire_dfs_event(self, fields: dict[str, Any]) -> None:
+        payload: dict[str, Any] = {
+            "entry_id": self._entry.entry_id if self._entry else None,
+            "router": self._entry.title if self._entry else self.name,
+            **fields,
+        }
+        self._last_dfs_event = payload
+        self.hass.bus.async_fire(EVENT_DFS, payload)
 
     # ------------------------------------------------------------------
     # RAM pressure

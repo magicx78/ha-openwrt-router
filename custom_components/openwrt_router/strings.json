@@ -89,6 +89,9 @@
       "channel_plan": {
         "name": "Channel plan findings"
       },
+      "dfs_events_24h": {
+        "name": "DFS events (24 h)"
+      },
       "log_status": {
         "name": "Router log",
         "state": {
