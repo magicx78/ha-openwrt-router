@@ -6,23 +6,20 @@
 import React, { useMemo } from 'react';
 import { TopologyData, Client } from '../types';
 import { IconSmartphone, IconLaptop, IconIoT, IconGuest, IconOther } from './Icons';
+import { formatBitRate, formatBytes } from '../utils/format';
 
 interface Props {
   data: TopologyData;
   onHighlightClient: (clientId: string) => void;
 }
 
-function formatBps(bps: number): string {
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbit/s`;
-  if (bps >= 1_000)     return `${(bps / 1_000).toFixed(0)} kbit/s`;
-  return `${bps} bit/s`;
-}
-
 function WanTrafficPanel({ data }: { data: TopologyData }) {
-  const currentDown = data.gateway.wanTraffic?.downstream_bps ?? 0;
-  const currentUp   = data.gateway.wanTraffic?.upstream_bps   ?? 0;
+  const wan = data.gateway.wanTraffic;
+  const currentDown = wan?.downstream_bps ?? 0;
+  const currentUp   = wan?.upstream_bps   ?? 0;
 
-  if (!currentDown && !currentUp) {
+  // A measured 0 bit/s is data; only a missing measurement is "no data"
+  if (wan?.downstream_bps == null && wan?.upstream_bps == null) {
     return (
       <div className="traffic-section">
         <div className="traffic-section__title">WAN Traffic</div>
@@ -37,12 +34,12 @@ function WanTrafficPanel({ data }: { data: TopologyData }) {
       <div className="traffic-rates">
         <div className="traffic-rate traffic-rate--down">
           <span className="traffic-rate__arrow">↓</span>
-          <span className="traffic-rate__value">{formatBps(currentDown)}</span>
+          <span className="traffic-rate__value">{formatBitRate(currentDown)}</span>
           <span className="traffic-rate__label">Download</span>
         </div>
         <div className="traffic-rate traffic-rate--up">
           <span className="traffic-rate__arrow">↑</span>
-          <span className="traffic-rate__value">{formatBps(currentUp)}</span>
+          <span className="traffic-rate__value">{formatBitRate(currentUp)}</span>
           <span className="traffic-rate__label">Upload</span>
         </div>
       </div>
@@ -51,19 +48,6 @@ function WanTrafficPanel({ data }: { data: TopologyData }) {
 }
 
 // ── Top Talker ────────────────────────────────────────────────────────────
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
-  if (bytes >= 1_048_576)     return `${(bytes / 1_048_576).toFixed(1)} MB`;
-  if (bytes >= 1_024)         return `${(bytes / 1_024).toFixed(0)} KB`;
-  return `${bytes} B`;
-}
-
-function smartName(client: Client): string {
-  if (client.hostname && client.hostname !== client.mac) return client.hostname;
-  if (client.manufacturer) return `${client.manufacturer} …${client.mac.slice(-5)}`;
-  return client.mac;
-}
 
 function ClientCategoryIcon({ category }: { category: Client['category'] }) {
   const s = 13;
@@ -115,7 +99,7 @@ function TopTalkerPanel({ data, onHighlightClient }: { data: TopologyData; onHig
                 <ClientCategoryIcon category={client.category} />
               </div>
               <div className="talker-row__info">
-                <div className="talker-row__name">{smartName(client)}</div>
+                <div className="talker-row__name">{client.name}</div>
                 <div className="talker-row__bar-wrap">
                   <div className="talker-bar">
                     <div className="talker-bar__fill" style={{ width: `${pct}%` }} />

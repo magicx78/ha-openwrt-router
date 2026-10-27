@@ -1,4 +1,5 @@
 import { TopologyData } from './types';
+import { clientDisplayName } from './utils/clientName';
 
 export const MOCK_DATA: TopologyData = {
   timestamp: new Date().toISOString(),
@@ -10,6 +11,9 @@ export const MOCK_DATA: TopologyData = {
     wanIp: '93.184.216.34',
     uptime: '12d 4h 32m',
     status: 'online',
+    pingMs: 87.2,
+    // bit/s, averaged between two polls (backend wan_traffic)
+    wanTraffic: { downstream_bps: 28_000_000, upstream_bps: 900_000, interval_s: 60, sampled_at: new Date().toISOString() },
     // v1.21 port-device model — exercises every badge/tooltip/popup branch
     portStats: [
       {
@@ -93,7 +97,7 @@ export const MOCK_DATA: TopologyData = {
   ],
   clients: [
     // ap1
-    { id: 'c1', name: "Sarah's iPhone", hostname: 'iphone-sarah', ip: '10.10.10.101', mac: 'AA:BB:CC:01', apId: 'ap1', category: 'smartphone', signal: -55, band: '5 GHz', status: 'online', manufacturer: 'Apple' },
+    { id: 'c1', name: "Sarah's iPhone", hostname: 'iphone-sarah', ip: '10.10.10.101', mac: 'AA:BB:CC:01', apId: 'ap1', category: 'smartphone', signal: -55, band: '5 GHz', status: 'online', manufacturer: 'Apple', rxBytes: 2100000000, txBytes: 800000000 },
     { id: 'c2', name: "Tom's MacBook", hostname: 'macbook-tom', ip: '10.10.10.102', mac: 'AA:BB:CC:02', apId: 'ap1', category: 'laptop', signal: -48, band: '5 GHz', status: 'online', manufacturer: 'Apple' },
     { id: 'c3', name: 'Smart TV', hostname: 'samsung-tv', ip: '10.10.10.103', mac: 'AA:BB:CC:03', apId: 'ap1', category: 'iot', signal: -62, band: '2.4 GHz', status: 'online', manufacturer: 'Samsung' },
     { id: 'c4', name: 'Nest Thermostat', hostname: 'nest-therm', ip: '10.10.10.104', mac: 'AA:BB:CC:04', apId: 'ap1', category: 'iot', signal: -71, band: '2.4 GHz', status: 'warning', manufacturer: 'Google' },
@@ -104,10 +108,14 @@ export const MOCK_DATA: TopologyData = {
     // ap3
     { id: 'c8', name: 'Guest Phone', hostname: 'guest-1', ip: '10.10.20.10', mac: 'AA:BB:CC:08', apId: 'ap3', category: 'guest', signal: -61, band: '2.4 GHz', status: 'online' },
     { id: 'c9', name: 'Ring Doorbell', hostname: 'ring-door', ip: '10.10.10.109', mac: 'AA:BB:CC:09', apId: 'ap3', category: 'iot', signal: -54, band: '2.4 GHz', status: 'online', manufacturer: 'Ring' },
-    { id: 'c10', name: "Lisa's iPad", hostname: 'ipad-lisa', ip: '10.10.10.110', mac: 'AA:BB:CC:0A', apId: 'ap3', category: 'smartphone', signal: -49, band: '5 GHz', status: 'online', manufacturer: 'Apple' },
+    { id: 'c10', name: "Lisa's iPad", hostname: 'ipad-lisa', ip: '10.10.10.110', mac: 'AA:BB:CC:0A', apId: 'ap3', category: 'smartphone', signal: -49, band: '5 GHz', status: 'online', manufacturer: 'Apple', rxBytes: 600000000, txBytes: 168300000 },
     { id: 'c11', name: 'Chromecast 4K', hostname: 'chromecast', ip: '10.10.10.111', mac: 'AA:BB:CC:0B', apId: 'ap3', category: 'iot', signal: -67, band: '5 GHz', status: 'online', manufacturer: 'Google' },
-    { id: 'c12', name: 'Synology NAS', hostname: 'synology', ip: '10.10.10.112', mac: 'AA:BB:CC:0C', apId: 'ap3', category: 'other', signal: -44, band: '5 GHz', status: 'online', manufacturer: 'Synology' },
+    { id: 'c12', name: 'Synology NAS', hostname: 'synology', ip: '10.10.10.112', mac: 'AA:BB:CC:0C', apId: 'ap3', category: 'other', signal: -44, band: '5 GHz', status: 'online', manufacturer: 'Synology', rxBytes: 50000000, txBytes: 22100000 },
     { id: 'c13', name: "Alex's MacBook", hostname: 'mbp-alex', ip: '10.10.10.113', mac: 'AA:BB:CC:0D', apId: 'ap3', category: 'laptop', signal: -52, band: '5 GHz', status: 'online', manufacturer: 'Apple' },
+    // Name resolution fixtures: HA name, vendor + MAC tail, private MAC
+    { id: 'c14', name: clientDisplayName({ mac: 'dc:e5:5b:44:8d:9f', haName: 'Küche Display', hostname: 'fuchsia-7f3a' }), hostname: 'fuchsia-7f3a', haName: 'Küche Display', haNameSource: 'user', haModel: 'Nest Hub', ip: '10.10.10.114', mac: 'dc:e5:5b:44:8d:9f', apId: 'ap3', category: 'iot', signal: -58, band: '5 GHz', status: 'online', manufacturer: 'Google', rxBytes: 70_000_000, txBytes: 2_100_000 },
+    { id: 'c15', name: clientDisplayName({ mac: 'dc:e5:5b:6c:8c:fc', hostname: 'dc:e5:5b:6c:8c:fc', manufacturer: 'Google' }), hostname: 'dc:e5:5b:6c:8c:fc', ip: '10.10.10.115', mac: 'dc:e5:5b:6c:8c:fc', apId: 'ap1', category: 'other', signal: -63, band: '2.4 GHz', status: 'online', manufacturer: 'Google', rxBytes: 60_000_000, txBytes: 3_200_000 },
+    { id: 'c16', name: clientDisplayName({ mac: '26:a9:9e:ef:f6:34', hostname: '26:a9:9e:ef:f6:34', randomMac: true }), hostname: '26:a9:9e:ef:f6:34', randomMac: true, ip: '10.10.10.116', mac: '26:a9:9e:ef:f6:34', apId: 'ap1', category: 'other', signal: -60, band: '5 GHz', status: 'online', rxBytes: 230_000_000, txBytes: 25_900_000 },
   ],
   switchNodes: [],
 };

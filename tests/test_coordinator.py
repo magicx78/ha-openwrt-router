@@ -698,8 +698,8 @@ class TestRecordEvents:
 
 
 class TestNativeWanTraffic:
-    """After Fritz!Box removal, wan_traffic is derived natively from the WAN
-    interface rx/tx byte counters (delta between polls / SCAN_INTERVAL_SECONDS).
+    """wan_traffic is derived natively from the WAN interface rx/tx byte
+    counters: delta between two samples * 8 / measured seconds = bit/s.
     """
 
     @pytest.mark.asyncio
@@ -714,14 +714,23 @@ class TestNativeWanTraffic:
             ]
         )
         with patch("asyncio.open_connection", side_effect=OSError("no net")):
-            d1 = await coord._async_update_data()  # first poll: block skipped
+            d1 = await coord._async_update_data()  # first poll: no baseline yet
             coord.data = d1  # base class normally stores the previous result
-            d2 = await coord._async_update_data()  # second poll: native compute
+            # Pretend the first sample was taken 60 s ago
+            t, *rest = coord._wan_sample
+            coord._wan_sample = (t - 60.0, *rest)
+            d2 = await coord._async_update_data()
 
-        # First poll carries empty defaults (no external calls)
         assert d1.wan_traffic == {}
-        # (7000-1000)//60 = 100 ; (1700-500)//60 = 20
-        assert d2.wan_traffic == {"downstream_bps": 100, "upstream_bps": 20}
+        # The first poll skips the ping: "not measured yet", not "offline"
+        assert d1.ping_checked is False
+        assert d2.ping_checked is True
+        # (7000-1000)*8/60 = 800 bit/s ; (1700-500)*8/60 = 160 bit/s
+        assert d2.wan_traffic["downstream_bps"] == 800
+        assert d2.wan_traffic["upstream_bps"] == 160
+        assert d2.wan_traffic["interval_s"] == 60
+        assert d2.wan_traffic["sampled_at"]
+
 
     @pytest.mark.asyncio
     async def test_no_dsl_data_in_coordinator(self):
@@ -733,6 +742,72 @@ class TestNativeWanTraffic:
         assert "dsl_stats" not in data.as_dict()
         assert "dsl_history" not in data.as_dict()
         assert "wan_traffic" in data.as_dict()
+
+
+class TestComputeWanTraffic:
+    """Edge cases of the WAN rate: real interval, failed reads, resets."""
+
+    def _rate(self, coord, rx, tx, at, iface="wan"):
+        return coord._compute_wan_traffic(
+            {"rx_bytes": rx, "tx_bytes": tx, "interface": iface}, at
+        )
+
+    def test_uses_measured_interval_not_scan_interval(self):
+        """A throttled 120 s poll must not double the rate."""
+        coord, _ = _make_coordinator()
+        assert self._rate(coord, 0, 0, at=1000.0) == {}
+        rate = self._rate(coord, 15_000_000, 1_500_000, at=1120.0)
+        assert rate["downstream_bps"] == 1_000_000  # 15 MB in 120 s = 1 Mbit/s
+        assert rate["upstream_bps"] == 100_000
+        assert rate["interval_s"] == 120
+
+    def test_failed_read_does_not_spike(self):
+        """A missing counter keeps the last valid sample (no zero baseline)."""
+        coord, _ = _make_coordinator()
+        self._rate(coord, 5_000_000_000, 1_000_000_000, at=1000.0)
+        assert coord._compute_wan_traffic({"rx_bytes": None}, 1060.0) == {}
+        rate = self._rate(coord, 5_000_000_000 + 1_200_000, 1_000_000_000, at=1120.0)
+        assert rate["downstream_bps"] == 80_000  # 1.2 MB over 120 s
+        assert rate["upstream_bps"] == 0
+
+    def test_counter_reset_yields_no_rate(self):
+        coord, _ = _make_coordinator()
+        self._rate(coord, 9_000_000, 9_000_000, at=1000.0)
+        assert self._rate(coord, 1_000, 1_000, at=1060.0) == {}
+        # The reset sample becomes the new baseline
+        rate = self._rate(coord, 1_000 + 7_500, 1_000, at=1120.0)
+        assert rate["downstream_bps"] == 1_000
+
+    def test_long_gap_yields_no_rate(self):
+        coord, _ = _make_coordinator()
+        self._rate(coord, 0, 0, at=1000.0)
+        assert self._rate(coord, 1_000_000, 1_000_000, at=1000.0 + 901) == {}
+
+    def test_refresh_right_after_poll_keeps_last_rate(self):
+        coord, _ = _make_coordinator()
+        self._rate(coord, 0, 0, at=1000.0)
+        last = self._rate(coord, 600_000, 60_000, at=1060.0)
+        coord.data = MagicMock(wan_traffic=last)
+        assert self._rate(coord, 600_500, 60_050, at=1062.0) == last
+        # The 1060 s sample stays the baseline for the next regular poll
+        rate = self._rate(coord, 600_000 + 750_000, 60_000, at=1120.0)
+        assert rate["downstream_bps"] == 100_000
+
+    def test_interface_switch_starts_new_baseline(self):
+        """Counters of another interface are not comparable (no spike)."""
+        coord, _ = _make_coordinator()
+        self._rate(coord, 1_000, 1_000, at=1000.0, iface="wan")
+        assert self._rate(coord, 9_000_000_000, 1_000, at=1060.0, iface="wwan") == {}
+        rate = self._rate(coord, 9_000_000_000 + 7_500, 1_000, at=1120.0, iface="wwan")
+        assert rate["downstream_bps"] == 1_000
+
+    def test_numeric_strings_count_booleans_do_not(self):
+        """The SSH status script may deliver strings; True is no counter."""
+        coord, _ = _make_coordinator()
+        self._rate(coord, "1000", "0", at=1000.0)
+        rate = self._rate(coord, "8500", "0", at=1060.0)
+        assert rate["downstream_bps"] == 1_000
+        assert self._rate(coord, True, 0, at=1120.0) == {}
 
 
 # =====================================================================
