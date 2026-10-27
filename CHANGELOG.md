@@ -52,8 +52,11 @@ All notable changes to the OpenWrt Router integration will be documented in this
   `load_average_1min`, `load_average_5min` und `load_average_15min` (die
   rohen Lastmittel). Ohne lesbares `/proc/cpuinfo` (ältere ACL) und im
   SSH-Fallback bleibt der bisherige Wert, `cpu_cores` ist dann leer; ein
-  fehlgeschlagener Versuch wird höchstens stündlich wiederholt (nach einem
-  Timeout nach 5 Minuten, nach einem ACL-Deploy sofort).
+  fehlgeschlagener Versuch wird höchstens stündlich wiederholt (nach einer
+  Zeitüberschreitung oder Serverantwort-Fehler nach 5 Minuten, nach einem
+  ACL-Deploy sofort). Auch das bisherige Attribut `load_1min` halbiert sich;
+  Automationen mit festen Schwellen auf diese Sensoren bitte anpassen. Die
+  alte Historie wird nicht umgerechnet.
 - **rpcd-ACL Version 7:** zusätzlich lesend `/proc/cpuinfo` (Kernzahl) und
   schreibend `network reload`. Beim ersten Start nach dem Update schreibt die
   Integration die ACL neu und startet rpcd **einmal pro Router** neu

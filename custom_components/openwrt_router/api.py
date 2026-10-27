@@ -1392,11 +1392,23 @@ class OpenWrtAPI:
         now = time.monotonic()
         if now < self._cpu_cores_retry_at:
             return None
+        # A due retry must reach the router: drop a cached ACL denial of this
+        # path (older ACL), otherwise _call answers from the cache and an ACL
+        # fixed meanwhile only takes effect after a reload.
+        self._acl_blocked.discard(
+            self._acl_cache_key(
+                UBUS_FILE_OBJECT, UBUS_FILE_READ, {"path": PROC_CPUINFO_PATH}
+            )
+        )
         try:
             result = await self._call(
                 UBUS_FILE_OBJECT, UBUS_FILE_READ, {"path": PROC_CPUINFO_PATH}
             )
-        except (OpenWrtConnectionError, OpenWrtTimeoutError) as err:
+        except (
+            OpenWrtConnectionError,
+            OpenWrtTimeoutError,
+            OpenWrtResponseError,  # HTTP 5xx / unparsable reply: transient
+        ) as err:
             self._cpu_cores_retry_at = now + CPU_CORES_TRANSIENT_RETRY_INTERVAL
             _LOGGER.debug(
                 "%s: reading %s failed (%s) — CPU load not normalised per core, "
@@ -1407,11 +1419,7 @@ class OpenWrtAPI:
                 CPU_CORES_TRANSIENT_RETRY_INTERVAL,
             )
             return None
-        except (
-            OpenWrtMethodNotFoundError,
-            OpenWrtAuthError,
-            OpenWrtResponseError,
-        ) as err:
+        except (OpenWrtMethodNotFoundError, OpenWrtAuthError) as err:
             self._cpu_cores_retry_at = now + CPU_CORES_RETRY_INTERVAL
             _LOGGER.debug(
                 "%s: %s not readable via ubus file/read (%s; rpcd ACL older "
@@ -1424,6 +1432,15 @@ class OpenWrtAPI:
 
         data = result.get("data") if isinstance(result, dict) else None
         cores = _parse_cpuinfo_cores(data) if isinstance(data, str) else 0
+        if isinstance(data, str) and len(data) >= 4095:
+            # rpcd reads size-0 files such as /proc/cpuinfo with one 4 KiB
+            # read(); on many-core x86 the core count can come out too low.
+            _LOGGER.debug(
+                "%s: %s may be truncated at 4 KiB — counted %d core(s)",
+                self._host,
+                PROC_CPUINFO_PATH,
+                cores,
+            )
         if cores < 1:
             self._cpu_cores_retry_at = now + CPU_CORES_RETRY_INTERVAL
             _LOGGER.debug(
