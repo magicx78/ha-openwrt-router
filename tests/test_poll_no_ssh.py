@@ -105,17 +105,25 @@ _DEVICES = {
 }
 
 
+# Toggled by the parametrised poll test: "empty but valid" FDB/ARP replies
+# must be final too (a quiet network is not a reason to log in over SSH).
+_MODE = {"empty_tables": False}
+
+
 def _file_read(params: dict[str, Any]) -> Any:
     path = params.get("path", "")
     if path == "/proc/cpuinfo":
         return {"data": "processor\t: 0\nprocessor\t: 1\n"}
     if path == "/proc/net/arp":
-        return {"data": _PROC_NET_ARP}
+        header_only = _PROC_NET_ARP.splitlines()[0] + "\n"
+        return {"data": header_only if _MODE["empty_tables"] else _PROC_NET_ARP}
     if path == "/proc/sys/net/netfilter/nf_conntrack_count":
         return {"data": "12\n"}
     if path == "/sys/class/net/br-lan/brforward":
         # rpcd returns binary files base64-encoded only when asked to
-        return {"data": _BRFORWARD_B64 if params.get("base64") else ""}
+        if not params.get("base64") or _MODE["empty_tables"]:
+            return {"data": ""}
+        return {"data": _BRFORWARD_B64}
     if path == "/sys/class/net/lan1/brport/port_no":
         return {"data": "0x1\n"}
     if path.startswith("/sys/class/net/wan/statistics/"):
@@ -215,7 +223,9 @@ def _make_coordinator(api) -> OpenWrtCoordinator:
 
 
 @pytest.mark.asyncio
-async def test_two_full_polls_open_no_ssh_connection():
+@pytest.mark.parametrize("empty_tables", [False, True])
+async def test_two_full_polls_open_no_ssh_connection(empty_tables: bool):
+    _MODE["empty_tables"] = empty_tables
     api = OpenWrtAPI(
         host="192.168.1.1",
         port=80,
@@ -249,8 +259,12 @@ async def test_two_full_polls_open_no_ssh_connection():
     assert second.disk_space["primary"]["total_mb"] > 0
     assert second.tmpfs["total_mb"] > 0
     assert second.tmpfs["mounts"][0]["mount"] == "/tmp"
-    assert second.port_fdb_map == {"aa:bb:cc:dd:ee:01": "lan1"}
-    assert second.arp_table == {"b8:27:eb:aa:bb:01": "192.168.1.101"}
+    if empty_tables:
+        assert second.port_fdb_map == {}
+        assert second.arp_table == {}
+    else:
+        assert second.port_fdb_map == {"aa:bb:cc:dd:ee:01": "lan1"}
+        assert second.arp_table == {"b8:27:eb:aa:bb:01": "192.168.1.101"}
     assert second.cpu_cores == 2
 
 

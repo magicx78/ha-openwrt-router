@@ -8,9 +8,9 @@
 
 - **Stand:** 2026-10-27 (abends) · **Phase:** freigegeben, in Umsetzung
 - **Branch/PR:** `fix/ssh-polling` (Worktree `../ha-openwrt-router-ssh-polling`) · PR #— · Basis: v1.38.2 (`7d77f0f`)
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Tests vorher rot) · **Offen:** Review, PR, Hardware-Nachweis AK6 nach Installation; A1–A14 (Teil 2)
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Tests vorher rot), Review ohne offene Befunde · **Offen:** PR-Merge und Release (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A1–A14 (Teil 2)
 - **Blocker:** –
-- **Nächster Schritt:** unabhängiges Review des Diffs, dann PR; nach Installation durch den Nutzer AK6 messen
+- **Nächster Schritt:** CI des PR abwarten, Merge-Freigabe; nach Installation durch den Nutzer AK6 messen
 
 ## Problem und Zielverhalten
 
@@ -46,8 +46,8 @@ siehe E2, eigenes Paket später), Änderungen am Panel, neue Entities.
       Fehlen die Felder (altes OpenWrt), läuft der SSH-Weg mit `df -Pk` (BusyBox-tauglich), höchstens
       alle 600 s, dazwischen aus dem Cache.
 - [ ] AK4 `get_bridge_fdb` liest `brforward` per `file read` mit `base64: true`; eine leere, aber
-      gültige ubus-Antwort löst keinen SSH-Versuch aus; SSH nur bei Fehler (ACL/Methode) des ubus-Wegs.
-      ARP analog.
+      gültige ubus-Antwort löst keinen SSH-Versuch aus; SSH nur, wenn der ubus-Zugriff gesperrt ist
+      oder fehlschlägt (ACL, Methode, Timeout, kaputte Antwort). ARP analog.
 - [ ] AK5 Innerhalb eines Polls benutzen alle SSH-Kommandos dieselbe asyncssh-Verbindung
       (`connect` einmal je Poll); am Ende des Polls und beim Entladen wird sie geschlossen; eine
       serverseitig geschlossene Verbindung wird beim nächsten Kommando einmal neu aufgebaut.
@@ -396,3 +396,17 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   10-10 bzw. 07:44): flach, Ausnahme `ap4` 08:42–09:02 von 3316 auf 7132 kB, dann Neustart 09:07
   (Prozess vom 10-10, Ursache nicht geklärt; danach unauffällig). Die ACL-v7-Messung folgt nach
   Installation von 1.38.3 (AK6).
+- 2026-10-27 `fix/ssh-polling@dcd6476` – lokal: ruff 0.17.3 check/format sauber, 1325 Tests grün
+  (28 neue, 22 davon vor dem Fix rot: WAN-Zähler, Disk/tmpfs, FDB/ARP, Verbindungs-Wiederverwendung,
+  Coordinator-Hook, AK1-Poll ohne `asyncssh.connect`) · CI: noch nicht gelaufen (kein PR) ·
+  Hardware: nicht geprüft – Lücke: AK6 erst nach Installation (Befehle siehe Validierungsplan)
+  · Review: unabhängig, siehe nächster Eintrag.
+- 2026-10-27 Review `dcd6476` (unabhängig, frischer Agent mit Diff und AK1–AK5): keine P0/P1.
+  P2-1: Freigabe der geteilten Verbindung unter einem laufenden Kommando (Schalter/Button/ACL-Deploy
+  parallel zum Poll-Ende) hätte das Kommando abgerissen und als rc 0 gewertet → behoben
+  (In-Flight-Zähler, aufgeschobene Freigabe, Kanal ohne Exit-Status = Fehler). P2-2: bei
+  PPPoE/LTE-Reconnect fehlt `l3_device`, der physische Port hätte unter demselben Interface-Key
+  einen Phantom-Peak erzeugt → keine Zähler, solange das Interface nicht aktiv ist. P3: Transportfehler
+  im 600-s-Cache nicht mehr gecacht, Key-Auth-Gate angeglichen, AK4-Wortlaut, CHANGELOG-Datum und
+  -Formulierungen, Docstring-Verweise, Testkosmetik, fünf zusätzliche Transport-Tests und AK1 auch
+  mit leeren FDB/ARP-Tabellen. Danach lokal 1334 Tests grün, ruff 0.17.3 sauber.

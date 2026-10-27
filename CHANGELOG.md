@@ -2,7 +2,7 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
-## [1.38.3] - 2026-10-28
+## [1.38.3] - 2026-10-27
 
 ### Fixed
 
@@ -18,14 +18,17 @@ All notable changes to the OpenWrt Router integration will be documented in this
     `wan`, `pppoe-wan` oder `wwan0`; bisher der logische Name), ersatzweise aus
     `file read` mit richtig gelesener Antwort. SSH nur noch, wenn die ACL beide
     Wege sperrt. Bei PPPoE zählt damit das PPP-Gerät statt des physischen Ports;
-    die Raten können sich dadurch geringfügig verschieben.
-  - **Speicherplatz und Temporärer Speicher:** Beide Sensoren standen seit
-    jeher auf 0.0, weil der SSH-Pfad `df` mit einer GNU-Option aufrief, die
-    BusyBox nicht kennt. Die Werte kommen jetzt aus `system info` (`root` und
-    `tmp`, OpenWrt 21.02 und neuer) ohne zusätzlichen Aufruf. Ältere Router
-    nutzen `df -Pk` über SSH, höchstens alle 10 Minuten. Die Sensoren springen
-    deshalb von 0.0 auf echte Werte; die Mount-Liste enthält auf neuen Routern
-    nur `/` bzw. `/tmp`.
+    die Raten können sich dadurch geringfügig verschieben. Solange das
+    WAN-Interface nicht aktiv ist (Zwangstrennung, Kabel gezogen), werden
+    keine Zähler gelesen, damit kein Phantom-Peak aus dem Gerätewechsel
+    entsteht; die Durchsatz-Sensoren sind dann „unbekannt“.
+  - **Speicherplatz und Temporärer Speicher:** Beide Sensoren standen mit dem
+    BusyBox-`df` (Standard auf OpenWrt) auf 0.0, weil der SSH-Pfad `df` mit
+    einer GNU-Option aufrief, die BusyBox nicht kennt. Die Werte kommen jetzt
+    aus `system info` (`root` und `tmp`, auf OpenWrt 24.10 und 25.x geprüft)
+    ohne zusätzlichen Aufruf. Router ohne diese Felder nutzen `df -Pk` über
+    SSH, höchstens alle 10 Minuten. Die Sensoren springen deshalb von 0.0 auf
+    echte Werte; die Mount-Liste enthält auf neuen Routern nur `/` bzw. `/tmp`.
   - **Bridge-FDB (Port-Zuordnung der Topologie):** `file read` auf
     `brforward` fragte die Binärdatei ohne `base64` ab und bekam nichts zurück,
     danach folgten zwei SSH-Anmeldungen je Poll. Jetzt mit `base64`; eine leere,

@@ -980,6 +980,11 @@ class OpenWrtAPI:
         # connection setup only; commands multiplex over the open connection.
         self._ssh_conn: asyncssh.SSHClientConnection | None = None
         self._ssh_conn_lock = asyncio.Lock()
+        # Commands currently running on the connection (poll, switch, button,
+        # ACL deploy may overlap). A release requested while a command runs
+        # is deferred until the last command has finished.
+        self._ssh_inflight: int = 0
+        self._ssh_release_pending: bool = False
 
         # ``root``/``tmp`` filesystem block from the last ``system info``
         # reply (KiB), so disk and tmpfs usage cost no extra call and no SSH.
@@ -1683,8 +1688,16 @@ class OpenWrtAPI:
 
         # RX/TX byte counters of the WAN *device* (l3_device such as "wan",
         # "pppoe-wan" or "wwan0"); the logical name is only the last resort.
-        wan_device = wan_iface.get("l3_device") or wan_iface.get("device") or iface_name
-        rx_bytes, tx_bytes = await self._read_wan_counters(str(wan_device))
+        # No counters while the interface is down: during a PPPoE/LTE
+        # reconnect ``l3_device`` is missing and the physical port's counters
+        # would be compared with the last PPP sample (phantom peak).
+        rx_bytes: int | None = None
+        tx_bytes: int | None = None
+        if wan_iface.get("up"):
+            wan_device = (
+                wan_iface.get("l3_device") or wan_iface.get("device") or iface_name
+            )
+            rx_bytes, tx_bytes = await self._read_wan_counters(str(wan_device))
 
         return {
             "connected": wan_iface.get("up", False),
@@ -1710,7 +1723,7 @@ class OpenWrtAPI:
 
         A device that merely does not exist (NOT_FOUND) or unparsable counter
         data yield ``None`` without an SSH login: before v1.38.3 the misparsed
-        ``file read`` reply sent every poll of every router through SSH (N2).
+        ``file read`` reply sent every poll of every router through SSH.
         """
         if not device:
             return None, None
@@ -1770,7 +1783,9 @@ class OpenWrtAPI:
             in self._acl_blocked
         )
 
-        if not (device_denied and file_denied) or not self._password:
+        if not (device_denied and file_denied) or not (
+            self._password or self._ssh_use_key
+        ):
             return None, None
 
         # Both ubus paths are ACL-denied (older ACL): read over SSH as before.
@@ -2571,7 +2586,7 @@ class OpenWrtAPI:
 
         ``password=None`` selects key-auth (asyncssh falls back to the default
         ``~/.ssh`` client keys / agent). Host-key handling is unchanged from
-        earlier releases (see plan 2026-10-28, decision E2, for the follow-up).
+        earlier releases.
 
         NOTE: no ``port=`` — SSH is port 22; ``self._port`` is the ubus HTTP port.
         """
@@ -2600,14 +2615,28 @@ class OpenWrtAPI:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(conn.wait_closed(), timeout=2.0)
 
+    async def _asyncssh_request_release(self) -> None:
+        """Drop the connection now, or once the last running command is done.
+
+        Closing under a running command would end it without an exit status
+        (dropbear sends the remote shell SIGHUP), so a release while a
+        switch/button/ACL command shares the connection is deferred.
+        """
+        if self._ssh_inflight > 0:
+            self._ssh_release_pending = True
+            return
+        self._ssh_release_pending = False
+        await self._asyncssh_drop_connection()
+
     async def async_release_ssh(self) -> None:
         """Close the SSH connection kept open during a poll.
 
         Called by the coordinator at the end of every poll (also after a
         failed one), so the router only holds an SSH session while commands
-        actually run. Safe to call when no connection is open.
+        actually run. Safe to call when no connection is open; a command
+        still running keeps the connection until it has finished.
         """
-        await self._asyncssh_drop_connection()
+        await self._asyncssh_request_release()
 
     async def _asyncssh_exec_once(
         self, remote_cmd: str, password: str | None
@@ -2615,23 +2644,30 @@ class OpenWrtAPI:
         """Run one command on the shared connection.
 
         Every command of a poll reuses one connection (one login per poll
-        instead of one per command, N2). When the server closed it meanwhile
-        the command is retried once on a fresh connection. ``encoding=None``
+        instead of one per command). When the server closed it meanwhile the
+        command is retried once on a fresh connection. ``encoding=None``
         returns stdout/stderr as raw bytes for both text and binary callers;
         decoding happens centrally in :meth:`_asyncssh_run`.
         """
-        conn = await self._asyncssh_get_connection(password)
+        self._ssh_inflight += 1
         try:
-            return await conn.run(remote_cmd, check=False, encoding=None)
-        except (asyncssh.ChannelOpenError, asyncssh.ConnectionLost, OSError) as err:
-            _LOGGER.debug(
-                "SSH connection to %s unusable (%s) — reconnecting once",
-                self._host,
-                err,
-            )
-            await self._asyncssh_drop_connection()
             conn = await self._asyncssh_get_connection(password)
-            return await conn.run(remote_cmd, check=False, encoding=None)
+            try:
+                return await conn.run(remote_cmd, check=False, encoding=None)
+            except (asyncssh.ChannelOpenError, asyncssh.ConnectionLost, OSError) as err:
+                _LOGGER.debug(
+                    "SSH connection to %s unusable (%s) — reconnecting once",
+                    self._host,
+                    err,
+                )
+                await self._asyncssh_drop_connection()
+                conn = await self._asyncssh_get_connection(password)
+                return await conn.run(remote_cmd, check=False, encoding=None)
+        finally:
+            self._ssh_inflight -= 1
+            if self._ssh_inflight == 0 and self._ssh_release_pending:
+                self._ssh_release_pending = False
+                await self._asyncssh_drop_connection()
 
     async def _asyncssh_run(
         self, remote_cmd: str, *, timeout: float, binary: bool = False
@@ -2659,9 +2695,9 @@ class OpenWrtAPI:
             except TimeoutError:
                 # MUST precede the OSError catch — TimeoutError subclasses OSError.
                 # The remote command may still be running on a half-used
-                # channel: drop the shared connection so the next command
-                # starts clean.
-                await self._asyncssh_drop_connection()
+                # channel: drop the shared connection (once no other command
+                # is using it) so the next command starts clean.
+                await self._asyncssh_request_release()
                 return (SUBPROCESS_RC_TIMEOUT, b"" if binary else "", b"timeout")
             except asyncssh.PermissionDenied:
                 if not self._ssh_use_key:
@@ -2676,7 +2712,14 @@ class OpenWrtAPI:
                     b"" if binary else "",
                     str(err).encode(errors="replace"),
                 )
-            rc = result.exit_status if result.exit_status is not None else 0
+            # No exit status = the channel was closed under the command
+            # (connection dropped, remote killed by a signal): never report
+            # that as success, the output may be truncated.
+            rc = (
+                result.exit_status
+                if result.exit_status is not None
+                else SUBPROCESS_RC_FAILED_TO_SPAWN
+            )
             stdout_b = result.stdout or b""
             stderr_b = result.stderr or b""
             return (
@@ -3627,7 +3670,7 @@ class OpenWrtAPI:
         at most every SSH_SLOW_REFRESH_INTERVAL. (Before v1.38.3 this always
         ran ``df`` with the GNU-only block-size option over SSH; BusyBox
         rejects it, so the sensors showed 0.0 and every poll cost an SSH
-        login, N2.)
+        login.)
 
         Returns:
             {
@@ -3686,15 +3729,18 @@ class OpenWrtAPI:
     ) -> list[tuple[str, int, int, int]]:
         """Run a ``df -Pk`` variant over SSH, at most every SSH_SLOW_REFRESH_INTERVAL.
 
-        The parsed rows (also an empty result, e.g. no SSH access) are cached
-        under ``cache_key`` so a router without the ``system info`` fields is
-        asked over SSH ten times an hour at most, not once per poll.
+        The parsed rows (also an empty result: no SSH credentials, or the
+        command failed on the router) are cached under ``cache_key`` so a
+        router without the ``system info`` fields is asked over SSH ten times
+        an hour at most, not once per poll. A transport failure (timeout,
+        connection error) is not cached and is retried on the next poll.
         """
         now = time.monotonic()
         cached = self._ssh_slow_cache.get(cache_key)
         if cached is not None and now - cached[0] < SSH_SLOW_REFRESH_INTERVAL:
             return cached[1]
         rows: list[tuple[str, int, int, int]] = []
+        cache_result = True
         if self._password or self._ssh_use_key:
             rc, stdout, _stderr = await self._asyncssh_run(
                 command, timeout=10.0, binary=False
@@ -3703,7 +3749,9 @@ class OpenWrtAPI:
                 rows = _parse_df_posix(stdout)
             else:
                 _LOGGER.debug("%r over SSH failed (rc=%s)", command, rc)
-        self._ssh_slow_cache[cache_key] = (now, rows)
+                cache_result = rc >= 0
+        if cache_result:
+            self._ssh_slow_cache[cache_key] = (now, rows)
         return rows
 
     def _default_disk_space(self) -> dict[str, Any]:
@@ -4086,7 +4134,7 @@ class OpenWrtAPI:
         # Method 1: file/read on brforward binary (avoids file/exec memory leak).
         # ``base64`` is required: without it rpcd hands the binary file back
         # as an (empty) C string, which made every poll fall through to SSH
-        # (N2). A successful read is final, even when the table is empty;
+        # before v1.38.3. A successful read is final, even when the table is empty;
         # SSH remains the fallback for a denied or failed ubus read only.
         try:
             port_no_map = await _get_port_map()
@@ -4175,7 +4223,7 @@ class OpenWrtAPI:
             _LOGGER.debug("ARP table via file/read unavailable: %s", err)
         else:
             # A successful read is final, even without complete entries yet;
-            # falling through to SSH here would cost one login per poll (N2).
+            # falling through to SSH here would cost one login per poll.
             arp = _parse_proc_net_arp(result.get("data", "") or "")
             _LOGGER.debug("ARP table via file/read: %d entries", len(arp))
             return arp

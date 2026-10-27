@@ -336,7 +336,9 @@ class TestBridgeFdbStaysOnUbus:
                 seen.append(dict(params))
                 if isinstance(brforward_data, Exception):
                     raise brforward_data
-                return {"data": brforward_data if brforward_data is not None else base64.b64encode(buf).decode()}
+                if brforward_data is None:
+                    return {"data": base64.b64encode(buf).decode()}
+                return {"data": brforward_data}
             raise OpenWrtMethodNotFoundError(path)
 
         mock_api._call = AsyncMock(side_effect=call_side_effect)
