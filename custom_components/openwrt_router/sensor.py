@@ -59,6 +59,7 @@ from .const import (
     SUFFIX_CPU_LOAD_5MIN,
     SUFFIX_CPU_LOAD_15MIN,
     SUFFIX_DFS_EVENTS_24H,
+    SUFFIX_DHCP_POOL,
     SUFFIX_DISK_FREE,
     SUFFIX_DISK_TOTAL,
     SUFFIX_DISK_USAGE,
@@ -461,6 +462,7 @@ async def async_setup_entry(
     tracked_ports: set[str] = set()
     tracked_radios: set[str] = set()
     tracked_ap_metrics: set[str] = set()  # "ifname_metric"
+    tracked_pools: set[str] = set()
 
     # AP metrics always created when available; optional ones only if value non-None
     _AP_METRICS_ALWAYS = ("channel", "mode", "quality", "ap_clients")
@@ -554,6 +556,14 @@ async def async_setup_entry(
                     OpenWrtAPInterfaceSensor(coordinator, entry, ifname, metric)
                 )
                 _LOGGER.debug("Adding AP interface sensor %s for %s", metric, ifname)
+
+        for pool in coordinator.data.dhcp_pools:
+            name = pool.get("name")
+            if not name or name in tracked_pools:
+                continue
+            tracked_pools.add(name)
+            new_entities.append(OpenWrtDhcpPoolSensor(coordinator, entry, name))
+            _LOGGER.debug("Adding DHCP pool sensor for %s", name)
 
         if new_entities:
             async_add_entities(new_entities)
@@ -1314,6 +1324,71 @@ class OpenWrtChannelPlanSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
     def extra_state_attributes(self) -> dict[str, Any]:
         findings, radios = self._evaluate()
         return {"findings": findings, "radios": radios}
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        router_info = self.coordinator.router_info
+        release = router_info.get("release", {})
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=router_info.get("hostname") or self._entry.title,
+            manufacturer="OpenWrt",
+            model=router_info.get("model", "OpenWrt Router"),
+            sw_version=release.get("version", ""),
+            configuration_url=(
+                f"{url_scheme_for(self._entry.data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL))}://"
+                f"{self._entry.data['host']}:{self._entry.data['port']}"
+            ),
+        )
+
+
+class OpenWrtDhcpPoolSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
+    """Share of a DHCP pool's address range covered by leases (F5).
+
+    One per active pool (uci ``config dhcp``); unavailable while the pool is
+    not reported (pool removed, interface without IPv4).
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "dhcp_pool"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:ip-network"
+
+    def __init__(
+        self, coordinator: OpenWrtCoordinator, entry: OpenWrtConfigEntry, pool: str
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._pool = pool
+        self._attr_unique_id = (
+            f"{entry.entry_id}_{SUFFIX_DHCP_POOL}-{pool.replace('_', '-')}"
+        )
+        self._attr_translation_placeholders = {"pool": pool}
+
+    def _usage(self) -> dict[str, Any] | None:
+        data = self.coordinator.data
+        if data is None:
+            return None
+        return next((p for p in data.dhcp_pools if p.get("name") == self._pool), None)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._usage() is not None
+
+    @property
+    def native_value(self) -> float | None:
+        usage = self._usage()
+        return usage["usage_pct"] if usage else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        usage = self._usage() or {}
+        return {
+            "interface": usage.get("interface"),
+            "leases": usage.get("leases"),
+            "size": usage.get("size"),
+        }
 
     @property
     def device_info(self) -> DeviceInfo:

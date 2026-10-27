@@ -2,6 +2,33 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.35.0] - 2026-10-27
+
+### Added
+
+- **Sensor „DHCP-Pool …“ pro aktivem DHCP-Pool** (z. B. `lan`, `guest`):
+  Anteil des Adressbereichs (Netz + `start` … `start + limit − 1`), der
+  durch Leases belegt ist, in %. Attribute `interface`, `leases`, `size`.
+  Die Pools stammen aus `uci get dhcp` (beim zweiten Poll, danach alle
+  10 Polls, nur solange der Router einen Pool bedient; Dumb-APs mit
+  `ignore` werden einmal gefragt).
+- **Attribut `dhcp_status` an WLAN-Clients** (Device-Tracker):
+  - `ok`: Lease oder ARP-Eintrag bei irgendeinem Router,
+  - `pending`: noch keine 180 s verbunden,
+  - `dhcp_missing`: seit mindestens 180 s verbunden, aber bei keinem Router
+    eine Lease und in keiner ARP-Tabelle (Client hängt z. B. in einer
+    DHCP-DISCOVER-Schleife),
+  - `static_no_lease`: als statischer Host eingetragen, hat aber keine Lease.
+  Kennt kein Router eine Lease (kein DHCP-Server sichtbar) oder ist ein
+  Router mit DHCP-Pool gerade nicht erreichbar, bleibt das Attribut leer.
+
+Hinweise: DHCP-Probleme aus dem Router-Log (`nak`, `decline`, `no_address`)
+kommen seit 1.33.0 als `openwrt_router_dhcp_event`. Pool-Sensoren und
+statische Hosts brauchen Leserechte auf die uci-Config `dhcp`; der Login
+`root` hat sie über die LuCI-ACLs, ohne LuCI gibt es keinen Pool-Sensor.
+Ein gestoppter dnsmasq blendet die Pools aus, ein anonymer Pool-Abschnitt
+heißt nach seinem Interface.
+
 ## [1.34.0] - 2026-10-27
 
 ### Added

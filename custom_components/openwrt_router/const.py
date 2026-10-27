@@ -139,6 +139,9 @@ SUFFIX_ROUTER_STATUS = "router_status"
 SUFFIX_CHANNEL_PLAN = "channel_plan"
 SUFFIX_LOG_STATUS = "log_status"
 SUFFIX_DFS_EVENTS_24H = "dfs_events_24h"
+# Per DHCP pool: f"{entry_id}_{SUFFIX_DHCP_POOL}-{pool}" (hyphen keeps the
+# legacy-migration substrings like "_rate"/"_ap_" out of user pool names)
+SUFFIX_DHCP_POOL = "dhcp_pool"
 
 # Error type values stored in coordinator.data.error_type
 ERROR_TYPE_CONNECTION = "connection"
@@ -421,6 +424,13 @@ EVENT_DHCP = f"{DOMAIN}_dhcp_event"
 # within DFS_EVIDENCE_SECONDS.
 EVENT_DFS = f"{DOMAIN}_dfs_event"
 DFS_EVIDENCE_SECONDS = 15 * 60
+
+# DHCP health (F5): pools and static hosts from `uci get dhcp`, refreshed
+# every DHCP_CONFIG_REFRESH_CYCLES polls on routers with an active pool.
+DHCP_CONFIG_REFRESH_CYCLES = 10
+# Routers without an active pool (or without uci access) are asked again
+# this rarely, so a pool enabled later shows up without a reload.
+DHCP_CONFIG_RETRY_CYCLES = 60
 LOG_STATUS_PENDING = "pending"
 LOG_STATUS_OK = "ok"
 # Not "unavailable": that state is reserved by HA for unreachable entities.
