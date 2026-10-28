@@ -174,6 +174,7 @@ The Inspector panel shows a per-device event timeline — status changes recorde
 - **Bandwidth Rate**: RX/TX in bytes/s for real-time monitoring
 - **Per-Port Sensors**: Link state, speed, RX/TX bytes per physical Ethernet port
 - **WAN Statistics**: WAN download/upload bytes, WAN IP, WAN status
+- **WAN detection**: the WAN is the interface named `wan*`, `wwan*` or `pppoe-wan`, else one with an upstream-only protocol (PPPoE/PPPoA, cellular `qmi`, `mbim`, `ncm`, `modemmanager`, `3g`, `wwan`), else a cellular name (`lte*`, `modem*`, `umts*`, `3g`/`4g`/`5g`); an interface that is up wins over one that is down. A router without any of these (dumb AP) reports no WAN: its WAN entities are created disabled and DDNS is not polled. Uplinks named differently (`tethering`, `sta`, `repeater`) are not detected yet
 - **Radio Signal/Noise**: dBm sensors per WiFi radio (iwinfo-capable routers)
 - **LLDP Neighbours**: router-to-router wiring incl. physical ports read from `lldpd` when installed — optional, falls back to the DHCP/ARP/FDB heuristics
 

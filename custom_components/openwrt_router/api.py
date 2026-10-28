@@ -778,22 +778,41 @@ def _sysfs_net_names(listing: dict[str, Any]) -> list[str]:
     return names
 
 
-def is_wan_interface(name: str, proto: str = "") -> bool:
-    """True when a netifd interface is an upstream (WAN) link.
+def wan_interface_tier(name: str, proto: str = "") -> int | None:
+    """Rank a netifd interface as a WAN candidate; None means "not a WAN".
 
-    By name — exact (``wan``, ``pppoe-wan``, ``3g`` …) or with a suffix on
-    the usual stems (``wan6``, ``wwan0``, ``wan_lte``, ``lte1``) — or by a
-    protocol that only exists on an upstream link (PPPoE/PPPoA, the cellular
-    protocols). A dumb AP has neither: its ``lan``/``guest`` interfaces run
-    ``static``, ``dhcp`` or ``none``. The default route is deliberately not a
-    criterion, an AP has one through ``lan``.
+    0  named WAN: ``wan*``, ``wwan*``, ``pppoe-wan`` (``wan6``, ``wanb``,
+       ``wwan0`` included).
+    1  upstream-only protocol on any name: PPPoE/PPPoA, the cellular
+       protocols (``WAN_PROTOS``).
+    2  cellular name without an upstream protocol: ``lte*``, ``modem*``,
+       ``umts*``, ``3g``, ``4g``, ``5g`` — e.g. a bridged modem on ``dhcp``.
+       Considered only when no tier-0/1 interface exists: the OpenWrt wiki's
+       static ``modem`` alias for the modem's web UI sits on the WAN port,
+       is always up and must never outrank the real WAN (see
+       :meth:`OpenWrtAPI.get_wan_status`).
+
+    ``proto none`` is never a WAN (no L3 protocol, cannot be an uplink), a
+    dumb AP's ``lan``/``guest`` run ``static``, ``dhcp`` or ``none``. The
+    default route is deliberately not a criterion, an AP has one via ``lan``.
     """
     iface = (name or "").strip().lower()
-    if not iface:
-        return False
+    protocol = (proto or "").strip().lower()
+    if not iface or protocol == "none":
+        return None
+    if iface == "pppoe-wan" or iface.startswith(("wan", "wwan")):
+        return 0
+    if protocol in WAN_PROTOS:
+        return 1
     if iface in WAN_INTERFACE_NAMES or iface.startswith(WAN_INTERFACE_PREFIXES):
-        return True
-    return (proto or "").strip().lower() in WAN_PROTOS
+        return 2
+    return None
+
+
+def is_wan_interface(name: str, proto: str = "") -> bool:
+    """True when a netifd interface is an upstream (WAN) link, see
+    :func:`wan_interface_tier`."""
+    return wan_interface_tier(name, proto) is not None
 
 
 # One "processor\t: N" line per logical CPU on every architecture OpenWrt runs
@@ -1777,29 +1796,33 @@ class OpenWrtAPI:
                         "interface": "",
                         "ipv4": "",
                         "uptime": 0,
+                        "proto": "",
                         "rx_bytes": None,
                         "tx_bytes": None,
                     }
             raise
         interfaces: list[dict[str, Any]] = result.get("interface", [])
 
-        # The WAN is the first interface (dump order) that is one by name or
-        # by an upstream-only protocol, see is_wan_interface(). There is no
-        # fallback to "the first interface that is up" any more: on a dumb AP
-        # that was lan or guest, which made the AP report a connected WAN with
-        # the guest traffic as WAN counters and poll DDNS every cycle.
-        # ``wan_found`` tells the entities apart: False = this router has no
-        # WAN; absent = unknown (empty dump, SSH fallback).
-        wan_iface = next(
-            (
-                iface
-                for iface in interfaces
-                if is_wan_interface(
-                    str(iface.get("interface") or ""), str(iface.get("proto") or "")
-                )
-            ),
-            None,
-        )
+        # Candidates are the interfaces wan_interface_tier() accepts. netifd
+        # lists them alphabetically, so "lte"/"modem" sort before "wan"; the
+        # pick is therefore ranked: a cellular name without an upstream
+        # protocol (tier 2) only when nothing else qualifies, otherwise an
+        # interface that is up before one that is down (travel router: wan
+        # cable out, wwan client uplink up; mwan3: wan down, lte failover
+        # up), then the lower tier, then dump order. There is no fallback to
+        # "the first interface that is up" any more: on a dumb AP that was lan
+        # or guest, which made the AP report a connected WAN with the guest
+        # traffic as WAN counters and poll DDNS every cycle. ``wan_found``
+        # tells the entities apart: False = this router has no WAN; absent =
+        # unknown (empty dump, SSH fallback).
+        candidates: list[tuple[bool, bool, int, int]] = []
+        for index, iface in enumerate(interfaces):
+            tier = wan_interface_tier(
+                str(iface.get("interface") or ""), str(iface.get("proto") or "")
+            )
+            if tier is not None:
+                candidates.append((tier == 2, not iface.get("up"), tier, index))
+        wan_iface = interfaces[min(candidates)[3]] if candidates else None
 
         if not wan_iface:
             status: dict[str, Any] = {
@@ -3200,6 +3223,7 @@ class OpenWrtAPI:
             "interface": "",  # Not available via SSH script
             "ipv4": "",  # Not available via SSH script
             "uptime": 0,  # Not available via SSH script
+            "proto": "",  # Not available via SSH script
             "rx_bytes": data.get("rx_bytes"),
             "tx_bytes": data.get("tx_bytes"),
         }
