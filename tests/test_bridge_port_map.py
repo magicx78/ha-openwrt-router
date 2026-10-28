@@ -147,7 +147,7 @@ class TestBridgePortMapFromFileList:
         calls = _mock_ubus(mock_api, port_nos={"lan1": "0x1"})
         for _ in range(3):
             assert await mock_api.get_bridge_fdb() == {_mac(1): "lan1"}
-        assert calls["list"] == 2  # initial build + one rebuild, then quiet
+        assert calls["list"] == 1  # built once; its unknown numbers are remembered
 
     @pytest.mark.asyncio
     async def test_list_failure_falls_back_to_the_static_port_names(self, mock_api):
@@ -193,3 +193,134 @@ class TestSysfsNetNames:
         }
         assert _sysfs_net_names(listing) == []
         assert _sysfs_net_names({}) == []
+
+
+# ---------------------------------------------------------------------
+# Review findings on 4b2c506 (2026-10-28): remembered unknown numbers must
+# accumulate (F1), the interval refresh must not add a second rebuild (F2),
+# a rebuild that resolves nothing must not evict the good map (F3), an ACL
+# reset during a rebuild must win (F5), one record walker for both parsers
+# (F6).
+# ---------------------------------------------------------------------
+
+
+class TestBridgePortMapReviewFindings:
+    @pytest.mark.asyncio
+    async def test_unknown_numbers_accumulate_across_polls(self, mock_api):
+        """F1: a second unknown number must not make the first one forgotten."""
+        fdb_ports = [1, 4]
+        calls = _mock_ubus(mock_api, port_nos={"lan1": "0x1"}, fdb_ports=fdb_ports)
+        assert await mock_api.get_bridge_fdb() == {_mac(1): "lan1"}
+        assert calls["list"] == 1  # a map built in this poll is not rebuilt again
+        assert mock_api._bridge_port_map_unknown == {4}
+        fdb_ports.append(5)  # another member nobody resolves
+        assert await mock_api.get_bridge_fdb() == {_mac(1): "lan1"}
+        assert calls["list"] == 2  # one rebuild for the new number
+        assert mock_api._bridge_port_map_unknown == {4, 5}
+        for _ in range(3):
+            assert await mock_api.get_bridge_fdb() == {_mac(1): "lan1"}
+        assert calls["list"] == 2
+
+    @pytest.mark.asyncio
+    async def test_interval_refresh_does_not_add_a_second_rebuild(self, mock_api):
+        """F2: with a persistently unknown number the interval poll rebuilds once."""
+        from custom_components.openwrt_router.const import (
+            BRIDGE_PORT_MAP_REFRESH_INTERVAL,
+        )
+
+        calls = _mock_ubus(mock_api, port_nos={"lan1": "0x1"}, fdb_ports=[1, 4])
+        await mock_api.get_bridge_fdb()
+        assert calls["list"] == 1
+        mock_api._bridge_port_map_at -= BRIDGE_PORT_MAP_REFRESH_INTERVAL + 1
+        await mock_api.get_bridge_fdb()
+        assert calls["list"] == 2
+        assert mock_api._bridge_port_map_unknown == {4}
+
+    @pytest.mark.asyncio
+    async def test_interval_refresh_forgets_numbers_it_resolves(self, mock_api):
+        """A port that joined is picked up by the interval refresh at the latest."""
+        from custom_components.openwrt_router.const import (
+            BRIDGE_PORT_MAP_REFRESH_INTERVAL,
+        )
+
+        port_nos = {"lan1": "0x1"}
+        calls = _mock_ubus(mock_api, port_nos=port_nos, fdb_ports=[1, 3])
+        assert await mock_api.get_bridge_fdb() == {_mac(1): "lan1"}
+        assert mock_api._bridge_port_map_unknown == {3}
+        port_nos["lan3"] = "0x3"
+        mock_api._bridge_port_map_at -= BRIDGE_PORT_MAP_REFRESH_INTERVAL + 1
+        assert await mock_api.get_bridge_fdb() == {_mac(1): "lan1", _mac(3): "lan3"}
+        assert mock_api._bridge_port_map_unknown == set()
+        assert calls["list"] == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_rebuild_keeps_the_last_good_map(self, mock_api):
+        """F3: a poll in which no port_no read succeeds must not blank the map."""
+        from custom_components.openwrt_router.const import (
+            BRIDGE_PORT_MAP_REFRESH_INTERVAL,
+        )
+
+        port_nos = dict(PORT_NOS)
+        calls = _mock_ubus(mock_api, port_nos=port_nos)
+        good = await mock_api.get_bridge_fdb()
+        assert good == {_mac(1): "lan1", _mac(3): "lan3"}
+        saved = dict(port_nos)
+        port_nos.clear()  # every port_no read fails (timeouts, denied)
+        mock_api._bridge_port_map_at -= BRIDGE_PORT_MAP_REFRESH_INTERVAL + 1
+        assert await mock_api.get_bridge_fdb() == good
+        assert calls["list"] == 2
+        assert mock_api._bridge_port_map_unknown == set()
+        port_nos.update(saved)  # router healthy again: retried on the next poll
+        assert await mock_api.get_bridge_fdb() == good
+        assert calls["list"] == 3
+        assert await mock_api.get_bridge_fdb() == good  # and cached again
+        assert calls["list"] == 3
+
+    @pytest.mark.asyncio
+    async def test_first_build_failure_is_retried_next_poll(self, mock_api):
+        port_nos: dict = {}
+        calls = _mock_ubus(mock_api, port_nos=port_nos)
+        assert await mock_api.get_bridge_fdb() == {}
+        assert calls["list"] == 1  # one attempt per poll, nothing remembered
+        assert mock_api._bridge_port_map_unknown == set()
+        port_nos.update(PORT_NOS)
+        assert await mock_api.get_bridge_fdb() == {_mac(1): "lan1", _mac(3): "lan3"}
+        assert calls["list"] == 2
+
+    @pytest.mark.asyncio
+    async def test_acl_reset_during_a_rebuild_wins(self, mock_api):
+        """F5: reset_acl_blocked() while the map is being built → rebuild next poll."""
+        calls = _mock_ubus(mock_api)
+        inner = mock_api._call
+
+        async def reset_during_listing(obj, method, params=None, **kwargs):
+            result = await inner(obj, method, params, **kwargs)
+            if method == "list":
+                mock_api.reset_acl_blocked()  # the ACL deploy finished meanwhile
+            return result
+
+        mock_api._call = AsyncMock(side_effect=reset_during_listing)
+        assert await mock_api.get_bridge_fdb() == {_mac(1): "lan1", _mac(3): "lan3"}
+        assert calls["list"] == 1
+        mock_api._call = inner
+        await mock_api.get_bridge_fdb()
+        assert calls["list"] == 2
+        await mock_api.get_bridge_fdb()
+        assert calls["list"] == 2
+
+
+class TestBrforwardPortNumbers:
+    def test_port_hi_and_record_filters(self):
+        """F6: the number walker applies the parser's filters and port_hi."""
+        from custom_components.openwrt_router.api import _brforward_port_numbers
+
+        buf = (
+            struct.pack("<6sBBIBBH", b"\xaa\xbb\xcc\xdd\xee\x01", 1, 0, 1, 1, 0, 0)  # 257
+            + struct.pack("<6sBBIBBH", b"\xaa\xbb\xcc\xdd\xee\x02", 2, 1, 1, 0, 0, 0)  # local
+            + struct.pack("<6sBBIBBH", b"\x01\x00\x5e\x00\x00\x01", 3, 0, 1, 0, 0, 0)  # mcast
+            + struct.pack("<6sBBIBBH", b"\x00" * 6, 4, 0, 1, 0, 0, 0)  # all-zero
+            + _fdb_record(5)
+        )
+        assert _brforward_port_numbers(buf) == {257, 5}
+        assert _brforward_port_numbers(buf[:-1]) == set()
+        assert _brforward_port_numbers(b"") == set()

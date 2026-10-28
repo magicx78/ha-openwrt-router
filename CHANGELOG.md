@@ -22,7 +22,9 @@ All notable changes to the OpenWrt Router integration will be documented in this
   `port_no`-Lesen je Schnittstelle), sondern höchstens alle 10 Minuten –
   sofort neu, wenn die FDB eine unbekannte Portnummer enthält (ein Port kam
   zur Bridge dazu) oder nach einem ACL-Deploy. Portnummern, die auch danach
-  kein Mitglied auflöst, erzwingen keinen weiteren Neuaufbau je Poll.
+  kein Mitglied auflöst, erzwingen keinen weiteren Neuaufbau je Poll, und
+  ein Neuaufbau, der kein Mitglied auflöst (etwa bei Zeitüberschreitungen),
+  behält die letzte gute Zuordnung und wird beim nächsten Poll wiederholt.
 
 ## [1.38.7] - 2026-10-27
 
