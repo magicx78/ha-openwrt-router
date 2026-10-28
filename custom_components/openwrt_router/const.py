@@ -42,6 +42,11 @@ DEFAULT_SESSION_ID = "00000000000000000000000000000000"
 SESSION_LIFETIME_SECONDS = 300
 SESSION_REFRESH_MARGIN_SECONDS = 60
 
+# rpcd's `file read` returns at most 4 KiB of a procfs file. An ARP read of
+# this size (or with an incomplete last line) is treated as truncated and
+# supplemented by luci-rpc getHostHints.
+ARP_READ_TRUNCATION_BYTES = 4000
+
 # Server-side rpcd session timeout requested at login.
 # Must be comfortably larger than the client refresh interval
 # (SESSION_LIFETIME_SECONDS) so a session never expires mid-poll, but small

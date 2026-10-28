@@ -22,6 +22,7 @@ import asyncssh
 
 from . import oui
 from .const import (
+    ARP_READ_TRUNCATION_BYTES,
     BRIDGE_PORT_MAP_REFRESH_INTERVAL,
     CLIENT_KEY_CONFIDENCE,
     CLIENT_KEY_CONNECTED_SINCE,
@@ -136,6 +137,10 @@ _LOGGER = logging.getLogger(__name__)
 # Module level on purpose: every config-entry setup retry builds a new
 # OpenWrtAPI, so a per-instance latch warned again on each retry.
 _ROOT_WARNED_HOSTS: set[str] = set()
+
+# P-6: rejected logins in a row before the exponential auth backoff blocks
+# further logins (see OpenWrtAPI._call).
+_MAX_AUTH_FAILURES = 3
 
 # Per-core CPU load: system/info reports the run-queue average, so 1.0 on a
 # dual-core router is half its capacity. The core count comes from
@@ -952,6 +957,49 @@ def _parse_proc_net_arp(raw: str) -> dict[str, str]:
     return {mac: rank[2] for mac, rank in candidates.items()}
 
 
+def _arp_read_truncated(raw: str) -> bool:
+    """Return True if an rpcd ``file read`` of /proc/net/arp looks cut off.
+
+    rpcd returns at most 4 KiB of a procfs file; a reply near that size or
+    one whose last line is incomplete has lost entries.
+    """
+    if not raw:
+        return False
+    return len(raw.encode()) >= ARP_READ_TRUNCATION_BYTES or not raw.endswith("\n")
+
+
+def _parse_host_hints(hints: Any) -> dict[str, str]:
+    """Parse ``luci-rpc getHostHints`` into {mac_lower: ipv4}.
+
+    Shape: ``{MAC: {"ipaddrs": [...], "ip6addrs": [...], "name": ...}}``;
+    older LuCI used ``"ipv4": str``. Several IPv4 addresses resolve to the
+    numerically smallest one, like :func:`_parse_proc_net_arp`.
+    """
+    out: dict[str, str] = {}
+    if not isinstance(hints, dict):
+        return out
+    for mac, info in hints.items():
+        if not isinstance(mac, str) or not isinstance(info, dict):
+            continue
+        raw_ips = info.get("ipaddrs")
+        if not isinstance(raw_ips, list):
+            raw_ips = [info.get("ipv4")]
+        addrs: list[ipaddress.IPv4Address] = []
+        for ip in raw_ips:
+            if not isinstance(ip, str):
+                continue
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            if addr.version == 4:
+                addrs.append(addr)
+        mac = mac.lower()
+        if addrs and mac != "00:00:00:00:00:00":
+            out[mac] = str(min(addrs))
+    return out
+
+
 def _as_byte_counter(value: Any) -> int | None:
     """Return a non-negative int from a counter value (int or digit string)."""
     if isinstance(value, bool):
@@ -1225,8 +1273,9 @@ class OpenWrtAPI:
         the warning re-fire on every re-login.
         """
         self._ssh_fallback_used = False
-        self._auth_failure_count = 0
-        self._auth_backoff_until = 0.0
+        # The auth backoff (_auth_failure_count / _auth_backoff_until) is
+        # deliberately kept: clearing it here let every poll log in again
+        # with rejected credentials. It ends by expiry or a successful call.
 
     def reset_acl_blocked(self) -> None:
         """Forget cached ACL-blocked methods so they are re-probed.
@@ -4630,8 +4679,11 @@ class OpenWrtAPI:
         else:
             # A successful read is final, even without complete entries yet;
             # falling through to SSH here would cost one login per poll.
-            arp = _parse_proc_net_arp(result.get("data", "") or "")
+            raw = result.get("data", "") or ""
+            arp = _parse_proc_net_arp(raw)
             _LOGGER.debug("ARP table via file/read: %d entries", len(arp))
+            if _arp_read_truncated(raw):
+                await self._merge_host_hints(arp)
             return arp
 
         try:
@@ -4642,6 +4694,30 @@ class OpenWrtAPI:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("ARP table SSH fallback failed: %s", err)
             return {}
+
+    async def _merge_host_hints(self, arp: dict[str, str]) -> None:
+        """Add MAC → IPv4 pairs from ``luci-rpc getHostHints`` missing in ``arp``.
+
+        Only called when rpcd truncated the /proc/net/arp read (4 KiB).
+        Rows from the ARP table win; hints only fill MACs that the
+        truncation dropped. No SSH fallback — a blocked call keeps ``arp``.
+        """
+        try:
+            hints = await self._call("luci-rpc", "getHostHints", {})
+        except (
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+        ) as err:
+            _LOGGER.debug("ARP read truncated, getHostHints unavailable: %s", err)
+            return
+        added = 0
+        for mac, ip in _parse_host_hints(hints).items():
+            if mac not in arp:
+                arp[mac] = ip
+                added += 1
+        _LOGGER.debug("ARP read truncated, %d entries added from host hints", added)
 
     async def get_trunk_port_map(
         self,
@@ -5004,14 +5080,13 @@ class OpenWrtAPI:
             OpenWrtAuthError: Auth failed even after re-login attempt.
             OpenWrtResponseError: Unexpected or malformed response.
         """
-        await self._ensure_fresh_token()
-
         # C-1: reject new calls when API is shutting down
         if self._closing:
             raise OpenWrtConnectionError("OpenWrtAPI is closing – call rejected")
 
-        # P-6: if repeated auth failures suggest wrong credentials, stop hammering
-        _MAX_AUTH_FAILURES = 3
+        # P-6: if repeated auth failures suggest wrong credentials, stop
+        # hammering. Checked before ANY login — including the proactive token
+        # refresh below — so no login happens while the backoff is active.
         if self._auth_failure_count >= _MAX_AUTH_FAILURES:
             now = time.monotonic()
             if now < self._auth_backoff_until:
@@ -5021,6 +5096,12 @@ class OpenWrtAPI:
                 )
             # Backoff expired: reset and try again
             self._auth_failure_count = 0
+
+        try:
+            await self._ensure_fresh_token()
+        except OpenWrtAuthError:
+            self._note_login_failure()
+            raise
 
         # Short-circuit methods already confirmed ACL-blocked this session.
         # Re-trying them only fails again and (pre-cache) triggered a useless
@@ -5045,16 +5126,7 @@ class OpenWrtAPI:
                     await self.login()
                     self._auth_failure_count = 0
                 except OpenWrtAuthError:
-                    self._auth_failure_count += 1
-                    # Exponential backoff: 30s, 60s, 120s … capped at 300s
-                    backoff = min(30 * (2 ** (self._auth_failure_count - 1)), 300)
-                    self._auth_backoff_until = time.monotonic() + backoff
-                    _LOGGER.warning(
-                        "Auth failure %d/%d — next retry in %ds",
-                        self._auth_failure_count,
-                        _MAX_AUTH_FAILURES,
-                        backoff,
-                    )
+                    self._note_login_failure()
                     raise
                 payload = self._build_call(ubus_object, method, params)
                 try:
@@ -5072,6 +5144,19 @@ class OpenWrtAPI:
                         f"(authenticated OK, method not permitted)"
                     ) from None
             raise
+
+    def _note_login_failure(self) -> None:
+        """Count a rejected login and arm the exponential auth backoff."""
+        self._auth_failure_count += 1
+        # Exponential backoff: 30s, 60s, 120s … capped at 300s
+        backoff = min(30 * (2 ** (self._auth_failure_count - 1)), 300)
+        self._auth_backoff_until = time.monotonic() + backoff
+        _LOGGER.warning(
+            "Auth failure %d/%d — next retry in %ds",
+            self._auth_failure_count,
+            _MAX_AUTH_FAILURES,
+            backoff,
+        )
 
     @staticmethod
     def _acl_cache_key(
