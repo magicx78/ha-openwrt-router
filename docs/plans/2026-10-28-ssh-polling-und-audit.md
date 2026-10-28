@@ -7,10 +7,10 @@
 ## Status
 
 - **Stand:** 2026-10-28 (nachts) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7) und #42 A17 (`50bf5ae`, v1.38.8) am 2026-10-28 — **offen:** A4 `fix/wan-detect` · PR #43 (1.38.9) auf `main` (Worktree `../ha-openwrt-router-wan-detect`)
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt (1.38.9, PR #43) · **Offen:** A4 Review und Merge-Freigabe, Hardware-Nachweis nach 1.38.9; A3, A5–A10, A12–A14
+- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7), #42 A17 (`50bf5ae`, v1.38.8) und #43 A4 (`917cbb4`, v1.38.9) am 2026-10-28 — **offen:** A5 `fix/diagnostics-redaction` (Worktree `../ha-openwrt-router-diag-redact`, noch kein PR)
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt und gemergt (1.38.9, PR #43, Review-Befunde behoben, Hardware-Nachweis erbracht) · **Offen:** A3, A5–A10, A12–A14
 - **Blocker:** –
-- **Nächster Schritt:** Review zu PR #43 (A4) abschließen, CI, Merge-Freigabe durch den Nutzer; nach Installation von 1.38.9 Diagnose der APs prüfen (`wan_found` False, `wan_connected` False, kein DDNS) und Topologie-Rollen unverändert; dann A5 (Diagnostics-Redaktion, E4)
+- **Nächster Schritt:** A5 (Diagnostics-Redaktion nach HA-Konvention, E4) auf `fix/diagnostics-redaction`: fehlschlagende Tests für `async_redact_data` über Host, Benutzername, Hostname/MAC des Routers, WAN-IP, Clients, BSSIDs, Interface-IPs, DDNS-Domains und die Client-Listen, dann Fix, Version 1.38.10
 
 ## Problem und Zielverhalten
 
@@ -596,3 +596,18 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   eingeschlossen), lokal 1492 grün, ruff sauber. F8 nicht umgesetzt: der Import einer reinen
   Funktion verletzt die Regel „Entities ohne Netzwerk“ nicht, ein eigenes Modul nur dafür lohnt
   nicht. Offen: Hardware-Nachweis nach Installation von 1.38.9.
+- 2026-10-28 PR #43 gemergt (`917cbb4`, 03:13 UTC) nach Freigabe des Nutzers, CI grün auf `6a2c1d6`
+  (hacs, hassfest, test 3.13/3.14); Release-Workflow erfolgreich, **v1.38.9** veröffentlicht (03:14 UTC);
+  HACS per `update_information` aufgefrischt; lokaler `main` auf `917cbb4`.
+- 2026-10-28 **1.38.9 installiert** (HACS 04:13, HA-Neustart 04:14 nach Freigabe, wieder da 04:16): kein
+  rpcd-Neustart (PIDs unverändert), je Router genau eine SSH-Anmeldung beim Start (LLDP), HA-Log nur die
+  Root-Warnung, geladenes Manifest 1.38.9. **Hardware-Nachweis A4 erbracht:** Diagnose `wan_status` der
+  beiden APs `{connected: false, interface: "", proto: "", wan_found: false}`, `wan_connected` False,
+  `ddns_status` leer (vorher `interface: guest`, `connected: true` mit Gast-Verkehr als WAN-Zähler);
+  Gateway unverändert `interface: wan`, `proto: static`, `wan_found: true`, Zähler vorhanden. Der
+  Snapshot-Sensor des Gateways zeigt `wan_connected: true`, `wan_proto: static`. DDNS am Gateway weiter abgefragt: `ddns_status` mit 5 Diensten, Status `ok` (erst ab dem zweiten Poll, der erste überspringt Ping und DDNS). Nebenbefund: README nennt `sensor.{name}_ddns_*`, solche Sensoren gibt es nicht (DDNS nur im Panel-Inspector) → Doku-Paket.
+  Topologie-Rollen: nicht direkt am Panel geprüft (Snapshot-Endpoint nur mit HA-Login erreichbar); aus
+  denselben Diagnosedaten ergibt `_detect_router_role` Gateway (connected, static, WAN-IP ≠ Host-IP)
+  und zweimal AP (connected False) – Lücke: Panel einmal ansehen. Kein LTE-Gateway im Testnetz.
+- 2026-10-28 A5 startet auf `fix/diagnostics-redaction` (Worktree `../ha-openwrt-router-diag-redact`,
+  von `main@917cbb4`).
