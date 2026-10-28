@@ -6,11 +6,11 @@
 
 ## Status
 
-- **Stand:** 2026-10-28 (nachts) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7) und #42 A17 (`50bf5ae`, v1.38.8) am 2026-10-28 — **offen:** A4 `fix/wan-detect` · PR #43 (1.38.9) auf `main` (Worktree `../ha-openwrt-router-wan-detect`)
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt (1.38.9, PR #43) · **Offen:** A4 Review und Merge-Freigabe, Hardware-Nachweis nach 1.38.9; A3, A5–A10, A12–A14
+- **Stand:** 2026-10-28 · **Phase:** alle Pakete umgesetzt, Sammel-Release 1.39.0 wartet auf Merge-Freigabe
+- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7), #42 A17 (`50bf5ae`, v1.38.8) und #43 A4 (`917cbb4`, v1.38.9) am 2026-10-28 — **offen:** Sammel-Release `release/1.39.0` als PR #45 (Worktree `../ha-openwrt-router-release-1.39.0`) mit A5 (enthält PR #44), A13, A14, A3, A12, A6, A7, A9, A10, A8
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt und gemergt (1.38.9, PR #43, Review-Befunde behoben, Hardware-Nachweis erbracht), A3, A5–A10, A12–A14 umgesetzt auf `release/1.39.0` (Reviews A3, A5, A12, A13 und Stapel A6/A7/A9/A10 inkl. Fixes abgeschlossen) · **Offen:** Merge und Release 1.39.0 (Freigabe), Installation und Hardware-Prüfungen (Liste in `TODO.md`)
 - **Blocker:** –
-- **Nächster Schritt:** Review zu PR #43 (A4) abschließen, CI, Merge-Freigabe durch den Nutzer; nach Installation von 1.38.9 Diagnose der APs prüfen (`wan_found` False, `wan_connected` False, kein DDNS) und Topologie-Rollen unverändert; dann A5 (Diagnostics-Redaktion, E4)
+- **Nächster Schritt:** CI auf PR #45 grün → Merge-Freigabe des Nutzers für 1.39.0 → nach OK Installation per HACS und HA-Neustart → Hardware-Prüfungen laut `TODO.md`
 
 ## Problem und Zielverhalten
 
@@ -362,6 +362,9 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   Snapshot nur für Admins mit Option „für alle Benutzer“ (Standard aus) – Nutzer.
 - 2026-10-27 – **E5 entschieden:** WAN-Erkennung über erweiterte Namen und `proto`, kein
   „erstes up-Interface“ mehr – Nutzer.
+- 2026-10-28 – **Restpakete als Sammel-Release 1.39.0:** A5, A13, A3, A12, A14, A6, A7–A10 auf
+  `release/1.39.0`, ein PR gegen `main`, ein Merge und ein Release am Ende nach Freigabe;
+  HA-Installation, Neustart und Hardware-Prüfungen gesammelt nach dem letzten Paket – Nutzer.
 - 2026-10-27 – **E7 entschieden:** ACL v8 ergänzt die aufgelösten Symlink-Pfade (`/proc/*/net/arp`,
   `/proc/*/net/nf_conntrack`, `/sys/devices/*/net/*`, `/tmp/run/ddns`), nur lesend, kein exec; rpcd ab
   2026 prüft Datei-ACLs zusätzlich gegen `realpath()`; beim nächsten HA-Start deployt die Integration v8
@@ -596,3 +599,72 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   eingeschlossen), lokal 1492 grün, ruff sauber. F8 nicht umgesetzt: der Import einer reinen
   Funktion verletzt die Regel „Entities ohne Netzwerk“ nicht, ein eigenes Modul nur dafür lohnt
   nicht. Offen: Hardware-Nachweis nach Installation von 1.38.9.
+- 2026-10-28 PR #43 gemergt (`917cbb4`, 03:13 UTC) nach Freigabe des Nutzers, CI grün auf `6a2c1d6`
+  (hacs, hassfest, test 3.13/3.14); Release-Workflow erfolgreich, **v1.38.9** veröffentlicht (03:14 UTC);
+  HACS per `update_information` aufgefrischt; lokaler `main` auf `917cbb4`.
+- 2026-10-28 **1.38.9 installiert** (HACS 04:13, HA-Neustart 04:14 nach Freigabe, wieder da 04:16): kein
+  rpcd-Neustart (PIDs unverändert), je Router genau eine SSH-Anmeldung beim Start (LLDP), HA-Log nur die
+  Root-Warnung, geladenes Manifest 1.38.9. **Hardware-Nachweis A4 erbracht:** Diagnose `wan_status` der
+  beiden APs `{connected: false, interface: "", proto: "", wan_found: false}`, `wan_connected` False,
+  `ddns_status` leer (vorher `interface: guest`, `connected: true` mit Gast-Verkehr als WAN-Zähler);
+  Gateway unverändert `interface: wan`, `proto: static`, `wan_found: true`, Zähler vorhanden. Der
+  Snapshot-Sensor des Gateways zeigt `wan_connected: true`, `wan_proto: static`. DDNS am Gateway weiter abgefragt: `ddns_status` mit 5 Diensten, Status `ok` (erst ab dem zweiten Poll, der erste überspringt Ping und DDNS). Nebenbefund: README nennt `sensor.{name}_ddns_*`, solche Sensoren gibt es nicht (DDNS nur im Panel-Inspector) → Doku-Paket.
+  Topologie-Rollen: nicht direkt am Panel geprüft (Snapshot-Endpoint nur mit HA-Login erreichbar); aus
+  denselben Diagnosedaten ergibt `_detect_router_role` Gateway (connected, static, WAN-IP ≠ Host-IP)
+  und zweimal AP (connected False) – Lücke: Panel einmal ansehen. Kein LTE-Gateway im Testnetz.
+- 2026-10-28 A5 startet auf `fix/diagnostics-redaction` (Worktree `../ha-openwrt-router-diag-redact`,
+  von `main@917cbb4`).
+- 2026-10-28 **A5 umgesetzt** (1.38.10): `diagnostics._redact` ruft zuerst `async_redact_data` mit
+  `DIAGNOSTICS_TO_REDACT` (exakte Schlüssel: `address`, `bssid`, `chassis_id`, `domain`, `host`,
+  `hostname`, `ip`, `ipv4`, `ipv4_addr`, `ipv4_address`, `mac`, `management_ip`, `ssid`, `ssids`,
+  `username`, `web_url`), danach den bisherigen Teilstring-Filter für Geheimnisse. `clients` wird
+  zu Anzahl, Anzahl je `connection_type` und Signal min/max/Mittel; `client_stability.sticky/weak/
+  unstable` zu `"<n clients redacted>"`. Tests: ein Fixture voller Personendaten, je Wert ein Test,
+  dass er im JSON-Export (auch klein geschrieben) nicht mehr vorkommt; 26 Tests vorher rot. Der
+  alte Test, der `hostname` als lesbar festschrieb, folgt jetzt E4. Lokal 1521 grün, ruff 0.17.3
+  sauber. Hardware: nicht nötig für den Nachweis (reine Umformung der Coordinator-Daten); nach
+  Installation einmal echte Diagnose herunterladen und auf MAC/IP-Muster durchsuchen.
+- 2026-10-28 **A5-Review** (frischer Agent, nur Diff und Kriterien): kein P0. **P1 behoben:** Der
+  Titel des Eintrags ist standardmäßig Router-Hostname oder Host (`config_flow.py:327`) und stand in
+  `entry_title` und `dfs.last_event.router` (`coordinator.py:1549`). Jetzt ist `entry_title`
+  redigiert und `router` in der Schlüsselmenge; das Fixture nutzt den Hostnamen als Titel. **P2
+  behoben:** LLDP `chassis_name` redigiert, `port_id` nur, wenn sie eine MAC ist (neu
+  `mac_utils.is_mac`); Fixture um STA-MAC/SSID, DFS und LLDP erweitert. **P3 behoben:** Bool-Signal
+  zählt nicht (`type() is int`), Nicht-Dicts in `clients` werden übergangen. **Nicht umgesetzt:**
+  Stabilitätslisten als Text „<n clients redacted>“ statt Zahl (gleicher Stil wie `dhcp_leases`);
+  WAN-Adressklasse (privat/CGNAT/öffentlich) als Ersatz für die redigierte WAN-IP – neue Funktion,
+  eigener Vorschlag. Die neuen Fixture-Werte wurden nach dem Fix ergänzt, nicht vorher rot gesehen.
+  Lokal 1536 grün, ruff 0.17.3 sauber.
+- 2026-10-28 **Sammel-Release 1.39.0** auf `release/1.39.0` (PR #45, Entwurf). Je Paket ein Branch
+  von `release/1.39.0` in eigenem Worktree, umgesetzt von Spezialisten-Agenten, Tests je Paket vor
+  dem Fix rot, danach Merge in den Release-Branch; `checks.py --ruff-ci` nach jedem Merge grün.
+  - **A13** (`515c283`): Panel und Snapshot-API nur für Admins, Option „allen Benutzern“ über alle
+    geladenen Einträge ODER-verknüpft, ohne Update-Listener (deprecated seit HA 2026.6) direkt aus
+    dem Options-Flow angewendet; 500 mit `meta.error`; `KEY_HASS`; Panel-Setup abgesichert; Frontend
+    ohne 401-Schleife, Token-Refresh, ein Retry; Bundle neu gebaut (`npm ci --legacy-peer-deps`, der
+    Lockfile-Konflikt existiert schon vorher). Review: kein P0; P1 (Entity-Attribute zeigen dieselben
+    Daten) über A14 und ehrliche Doku gelöst, P2/P3 behoben. Lücke: C11 nie im Browser geprüft.
+  - **A14** (`1d7ad86`): Snapshot einmal je Update (`TopologySnapshotCache`), Rohlisten und
+    `generated_at` aus den Attributen entfernt; Panel/Mesh lesen keine Entity-Attribute (geprüft).
+  - **A3** (`42fc014`): Verfügbarkeit über alle Router, Wiederherstellung aus der Registry (MAC
+    und Legacy-Form, deaktivierte ausgenommen), letzter Hostname. Review: P1 (ausgefallener Router
+    hielt Clients dauerhaft „home“) behoben über `coordinator.stale_for_presence` (3 Polls oder 300 s).
+  - **A12** (`ab19efd`, `b76eecd`, `d5d0109`): drei Review-Runden. Die DHCP-Heuristik für die
+    Gateway-Rolle war mit OpenWrt-Standards nicht sicher (Dumb-AP mit Rest-`wan` und nicht
+    abgeschaltetem LAN-DHCP; netifd `up` ist kein Carrier). Endgültig: verbundenes ubus-WAN →
+    Gateway und Rollen-Gedächtnis; ohne solches bleibt das gemerkte Gateway; danach SSH-Fallback mit
+    `connected` (Semantik von `/root/ha-wan-status.sh` unbekannt, Skript nicht im Repo) nur als
+    niedrigste Stufe; Kaltstart im Ausfall: ein Router, Handprotokoll vor `dhcp`, dann kleinste ID.
+    Dazu `stale`, Dedupe, eindeutige Hostnamen, `chassis_id` vor Name, `lldp_duplicates`.
+  - **A6** (`2ab570a`, `11c5d22`): apk/opkg per SSH nur auf Knopfdruck (ACL erlaubt `file exec` nur
+    für `/etc/init.d/rpcd`, unverändert), Ergebnis im Coordinator, Install-Button nicht mehr angelegt
+    (E3, Registry-Eintrag bleibt), zweite Prüfung während einer laufenden abgelehnt.
+  - **A7/A9/A10** (`6970d6e`, `af14e22`, `fa0c0b2`, Fixes `bba3ecf`, `5226d8a`): Review fand **P0**
+    in A7 (versetzte Einträge pollten nach dem ersten Poll nie wieder, weil `_unsub_refresh` noch den
+    abgelaufenen Timer hielt; per Skript nachgestellt: 0 Polls in 6 s) → behoben, Test mit echtem
+    Timer, nachgestellt 5 Polls in 6 s. P2 in A10 (gesperrte Polls zählten Richtung Reauth) →
+    `OpenWrtAuthBackoffError`. A9 ohne zusätzlichen ubus-Aufruf je Poll (geprüft).
+  - **A8** (`a7047fc`): `_unrecorded_attributes` je Klasse (HA 2026.2 kombiniert sie nicht über
+    Elternklassen).
+  - Stand nach allen Merges: lokal ruff 0.17.3 sauber, pytest grün (Zahl siehe PR #45). Hardware:
+    nichts geprüft – gesammelte Prüfliste in `TODO.md`.

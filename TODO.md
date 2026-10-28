@@ -1,10 +1,36 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-10-27 · Version: v1.38.2
+Stand: 2026-10-28 · Version: v1.39.0
 
 ---
 
 ## Backlog
+
+### Nach Installation von 1.39.0 (Plan `docs/plans/2026-10-28-ssh-polling-und-audit.md`)
+
+Alles lesend, Installation und HA-Neustart nur nach OK.
+
+- [ ] **Diagnose** eines Routers herunterladen und nach MAC-/IP-Mustern,
+      Hostnamen und SSIDs durchsuchen (A5).
+- [ ] **Panel als Nicht-Admin** öffnen (403-Hinweis, kein Sidebar-Eintrag),
+      Option „allen Benutzern anzeigen“ an/aus ohne Neustart; Sitzungsablauf
+      ohne Request-Schleife (A13, C11 nie im Browser geprüft).
+- [ ] **Rollen im Panel:** Gateway + zwei APs; Kanten vorhanden (A12).
+- [ ] **Poll-Versatz:** im Debug-Log pollt jeder Router weiter, mit
+      unterschiedlichen Zeitpunkten (A7).
+- [ ] **Schnittstellen-Zähler:** `network.device status {}` liefert
+      `statistics` für `br-lan`/`wan`; Raten-Sensoren nicht mehr 0 (A9).
+- [ ] **ARP:** Größe von `/proc/net/arp` am Gateway, `getHostHints`-Antwort (A10).
+- [ ] **„Nach Updates suchen“** auf Gateway und AP: Dauer, Ausgabe von
+      `apk list -u` bzw. `opkg list-upgradable`, Fehlermeldung ohne SSH (A6).
+- [ ] **Tracker:** nach HA-Neustart melden abwesende Clients `not_home` (A3).
+- [ ] **Recorder:** Datenbankwachstum über einen Tag vergleichen (A8).
+- [ ] **Dev-Skript `scripts/_add_topology_card.py`** liest das entfernte
+      Attribut `topology_snapshot` – löschen oder auf das Panel umstellen.
+- [ ] **Frontend-Folgen aus A12:** veraltete (`stale`) Clients/Kanten
+      ausgrauen, `lldp_duplicates` als Parallel-Link zeigen, bei mehreren
+      Gateways bewusst wählen statt `routerNodes[0]`.
+- [ ] Optional: Button „Veraltete Tracker entfernen“ (wie `fritz`).
 
 ### Fehlerkorrektur nach 1.37 (Plan `docs/plans/2026-10-27-fehlerkorrektur-nach-1.37.md`)
 

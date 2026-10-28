@@ -128,18 +128,33 @@ MOCK_NETWORK_DUMP = {
             "up": True,
             "uptime": 3600,
             "proto": "dhcp",
+            "l3_device": "wan",
             "ipv4-address": [{"address": "203.0.113.42", "mask": 24}],
-            "statistics": {"rx_bytes": 1048576, "tx_bytes": 524288},
         },
         {
             "interface": "lan",
             "up": True,
             "uptime": 86000,
             "proto": "static",
+            "l3_device": "br-lan",
             "ipv4-address": [{"address": "192.168.1.1", "mask": 24}],
-            "statistics": {"rx_bytes": 5242880, "tx_bytes": 2097152},
         },
     ]
+}
+
+# network.device status {} — counters live here, not in network.interface dump
+MOCK_DEVICE_STATUS = {
+    "wan": {
+        "up": True,
+        "devtype": "dsa",
+        "speed": "1000F",
+        "statistics": {"rx_bytes": 1048576, "tx_bytes": 524288},
+    },
+    "br-lan": {
+        "up": True,
+        "devtype": "bridge",
+        "statistics": {"rx_bytes": 5242880, "tx_bytes": 2097152},
+    },
 }
 
 MOCK_WIRELESS_STATUS = {
@@ -249,6 +264,7 @@ MOCK_UBUS_RESPONSES: dict[tuple[str, str], Any] = {
     ("system", "board"): MOCK_BOARD_INFO,
     ("system", "info"): MOCK_SYSTEM_INFO,
     ("network.interface", "dump"): MOCK_NETWORK_DUMP,
+    ("network.device", "status"): MOCK_DEVICE_STATUS,
     ("network.wireless", "status"): MOCK_WIRELESS_STATUS,
     ("iwinfo", "info"): MOCK_IWINFO_INFO,
     ("iwinfo", "assoclist"): MOCK_ASSOCLIST,
@@ -552,3 +568,11 @@ def _reset_root_warning_latch(monkeypatch):
     from custom_components.openwrt_router import api as api_module
 
     monkeypatch.setattr(api_module, "_ROOT_WARNED_HOSTS", set())
+
+
+@pytest.fixture(autouse=True)
+def _reset_gateway_memory(monkeypatch):
+    """Isolate tests from the process-wide topology gateway-role memory."""
+    from custom_components.openwrt_router import topology_mesh
+
+    monkeypatch.setattr(topology_mesh, "_GATEWAY_MEMORY", {})

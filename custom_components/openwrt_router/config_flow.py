@@ -30,10 +30,12 @@ from .api import (
 from .const import (
     CONF_EXTENDED_WIFI_SENSORS,
     CONF_PROTOCOL,
+    CONF_TOPOLOGY_PANEL_ALL_USERS,
     CONF_TOPOLOGY_PORT_DEBUG,
     DEFAULT_EXTENDED_WIFI_SENSORS,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL,
+    DEFAULT_TOPOLOGY_PANEL_ALL_USERS,
     DEFAULT_TOPOLOGY_PORT_DEBUG,
     DEFAULT_USERNAME,
     DOMAIN,
@@ -53,6 +55,7 @@ from .const import (
 )
 from .extended_sensors import async_apply_extended_wifi_sensors
 from .ssl_util import ssl_context_for_protocol
+from .topology_panel import async_update_topology_panel_access
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,7 +92,7 @@ def _validate_host(host: str) -> str | None:
 
 
 class OpenWrtOptionsFlow(OptionsFlow):
-    """Options flow — extended Wi-Fi sensors switch and topology debug flag."""
+    """Options flow — extended Wi-Fi sensors, topology debug and panel audience."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -112,6 +115,24 @@ class OpenWrtOptionsFlow(OptionsFlow):
                         opts.get(OPT_EXTENDED_WIFI_PREEXISTING, []),
                     )
                 )
+            # Apply the panel audience directly: an update listener would
+            # clash with async_update_reload_and_abort in the reauth steps
+            # (deprecated since HA 2026.6, an error from 2026.12).
+            all_users = bool(
+                new_opts.get(
+                    CONF_TOPOLOGY_PANEL_ALL_USERS, DEFAULT_TOPOLOGY_PANEL_ALL_USERS
+                )
+            )
+            try:
+                await async_update_topology_panel_access(
+                    self.hass, self.config_entry, all_users
+                )
+            except Exception:
+                # Options are still saved; the next entry setup applies them.
+                _LOGGER.warning(
+                    "Could not apply the topology panel access option",
+                    exc_info=True,
+                )
             return self.async_create_entry(title="", data=new_opts)
 
         schema = vol.Schema(
@@ -126,6 +147,12 @@ class OpenWrtOptionsFlow(OptionsFlow):
                     CONF_TOPOLOGY_PORT_DEBUG,
                     default=opts.get(
                         CONF_TOPOLOGY_PORT_DEBUG, DEFAULT_TOPOLOGY_PORT_DEBUG
+                    ),
+                ): bool,
+                vol.Optional(
+                    CONF_TOPOLOGY_PANEL_ALL_USERS,
+                    default=opts.get(
+                        CONF_TOPOLOGY_PANEL_ALL_USERS, DEFAULT_TOPOLOGY_PANEL_ALL_USERS
                     ),
                 ): bool,
             }

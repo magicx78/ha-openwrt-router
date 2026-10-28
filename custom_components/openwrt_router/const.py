@@ -42,6 +42,11 @@ DEFAULT_SESSION_ID = "00000000000000000000000000000000"
 SESSION_LIFETIME_SECONDS = 300
 SESSION_REFRESH_MARGIN_SECONDS = 60
 
+# rpcd's `file read` returns at most 4 KiB of a procfs file. An ARP read of
+# this size (or with an incomplete last line) is treated as truncated and
+# supplemented by luci-rpc getHostHints.
+ARP_READ_TRUNCATION_BYTES = 4000
+
 # Server-side rpcd session timeout requested at login.
 # Must be comfortably larger than the client refresh interval
 # (SESSION_LIFETIME_SECONDS) so a session never expires mid-poll, but small
@@ -54,6 +59,11 @@ SESSION_LOGIN_TIMEOUT_SECONDS = 600
 
 # Update interval
 SCAN_INTERVAL_SECONDS = 60
+# Interval while the router is overloaded (CPU load > 100 % per core)
+THROTTLED_INTERVAL_SECONDS = SCAN_INTERVAL_SECONDS * 2
+# Interval while the last poll needed the SSH fallback (rpcd ACL incomplete);
+# takes precedence over throttling. Derived anew on every poll.
+SSH_FALLBACK_INTERVAL_SECONDS = 300
 
 # How many poll cycles between re-fetching static board info (model, hostname, release).
 # 10 cycles × 60 s = ~10 minutes.  Hostname changes are rare; this avoids a
@@ -175,6 +185,11 @@ ERROR_TYPE_RESPONSE = "response"
 # consecutive poll failures
 NOTIFICATION_FAILURE_THRESHOLD = 3
 
+# A failing router's last client list stops counting for presence after
+# NOTIFICATION_FAILURE_THRESHOLD failed polls or this many seconds of failure
+# (whichever comes first; polls can slow down to 120/300 s)
+PRESENCE_STALE_AFTER_S = 300
+
 # Fired on outage start/end, payload see fleet.FleetOutageTracker
 EVENT_OUTAGE = f"{DOMAIN}_outage_event"
 
@@ -198,6 +213,8 @@ SUFFIX_GUEST_WIFI = "guest_wifi"
 SUFFIX_RELOAD_WIFI = "reload_wifi"
 SUFFIX_REBOOT = "reboot"
 SUFFIX_CHECK_UPDATES = "check_updates"
+# Retired "install updates" button: no longer created; kept so the orphaned
+# registry entry's unique_id stays documented.
 SUFFIX_PERFORM_UPDATES = "perform_updates"
 SUFFIX_NETWORK_TOPOLOGY = "network_topology"
 SUFFIX_CPU_LOAD = "cpu_load"
@@ -242,6 +259,31 @@ DIAGNOSTICS_REDACT_KEYS = {
     "key",
     "auth",
 }
+# Exact key names that identify a person, a device or the network (HA
+# convention, async_redact_data).  Matched by equality, not substring, so
+# "interface" or "logical_name" stay readable.
+DIAGNOSTICS_TO_REDACT = {
+    "address",
+    "bssid",
+    "chassis_id",
+    "domain",
+    "host",
+    "hostname",
+    "ip",
+    "ipv4",
+    "ipv4_addr",
+    "ipv4_address",
+    "mac",
+    "management_ip",
+    # Entry title (defaults to the router hostname or host) in DFS event payloads
+    "router",
+    "ssid",
+    "ssids",
+    "username",
+    "web_url",
+}
+# client_stability lists of individual clients (MAC + hostname each).
+DIAGNOSTICS_CLIENT_LISTS = ("sticky", "weak", "unstable")
 
 # OpenWrt version compatibility
 # Minimum supported: OpenWrt 19.07 (ubus/rpcd baseline)
@@ -421,7 +463,11 @@ KEY_WAN_TRAFFIC = "wan_traffic"
 KEY_PING_MS = "ping_ms"
 KEY_DDNS_STATUS = "ddns_status"
 
-# CPU history: one point per poll (30s resolution), 120 points = 1h rolling window
+# CPU history: one point per poll over a time-based 1 h rolling window. Points
+# older than the window are dropped, so the span no longer depends on the poll
+# interval (60/120/300 s). MAX_POINTS only caps memory: it covers the window at
+# 30 s spacing, leaving headroom for refreshes requested between polls.
+CPU_HISTORY_WINDOW_SECONDS = 3600
 CPU_HISTORY_MAX_POINTS = 120
 KEY_CPU_HISTORY = "cpu_history"
 
@@ -435,6 +481,12 @@ KEY_TOPOLOGY_SNAPSHOTS = "topology_snapshots"
 # payload guard; HA diagnostics only ever get the redacted summary.
 CONF_TOPOLOGY_PORT_DEBUG = "topology_port_debug"
 DEFAULT_TOPOLOGY_PORT_DEBUG = False
+
+# Options flag: open the topology sidebar panel and its snapshot API (DHCP
+# leases, ARP, FDB, WAN IP, …) to non-admin users. Off by default — admins only.
+# The panel is shared by all entries: it is public if ANY loaded entry has it on.
+CONF_TOPOLOGY_PANEL_ALL_USERS = "topology_panel_all_users"
+DEFAULT_TOPOLOGY_PANEL_ALL_USERS = False
 
 # Options flag: enable the per-radio / per-AP / per-port sensors in one go
 # instead of one click per entity (disabled by default, see extended_sensors.py).

@@ -2,6 +2,166 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.39.0] - 2026-10-28
+
+### Security
+
+- **Diagnostics redigieren persönliche und Netzwerkdaten nach HA-Konvention.**
+  Bisher entfernte der Diagnose-Download nur Schlüssel, die nach Geheimnis
+  klangen (`password`, `token`, `key` …). Host und Benutzername des Routers,
+  sein Hostname und seine MAC, die WAN-IP, alle SSIDs und BSSIDs, die
+  Interface-IPs, DDNS-Domains und -IPs sowie die komplette Client-Liste mit
+  MAC, IP, Hostname und Web-URL jedes Geräts landeten im Klartext in einer
+  Datei, die für Bug-Reports gedacht ist. Jetzt läuft zuerst
+  `async_redact_data` über eine feste Liste exakter Schlüssel (`host`,
+  `username`, `hostname`, `mac`, `bssid`, `ssid`, `ssids`, `ip`, `ipv4`,
+  `ipv4_addr`, `ipv4_address`, `address`, `domain`, `web_url`, `chassis_id`,
+  `management_ip`, `router`), danach wie bisher der Teilstring-Filter für
+  Geheimnisse. Der Titel des Eintrags, standardmäßig der Router-Hostname
+  oder der Host, wird ebenfalls redigiert, auch im letzten DFS-Ereignis.
+  Bei LLDP-Nachbarn werden der Name und eine Port-ID, die eine MAC ist,
+  redigiert. Die Client-Liste wird zu Anzahl, Anzahl je Verbindungsart und
+  Minimum/Maximum/Mittel des Signals; die Listen `sticky`, `weak` und
+  `unstable` der Client-Stabilität werden zu Zählern. Werte, die zur
+  Fehlersuche gebraucht werden (Interface-Namen, Protokoll, Verbindungsstatus,
+  Modell, Feature-Flags, Ports), bleiben lesbar.
+- **Topologie-Panel und Snapshot-API standardmäßig nur für Administratoren.**
+  Bisher sah jeder HA-Benutzer das Panel „Network Topology“, und die API
+  `/api/openwrt_topology/snapshot` lieferte jedem angemeldeten Benutzer
+  DHCP-Leases, ARP- und FDB-Tabellen pro Port, WAN-IP, DDNS-Angaben und
+  Web-URLs der Geräte. Jetzt ist das Panel nur für Administratoren
+  registriert, und die API antwortet Nicht-Administratoren mit HTTP 403. Die
+  neue Option **„Topologie-Panel allen Benutzern anzeigen“** (Integration →
+  Konfigurieren, Standard aus) gibt beides wieder für alle frei. Es gibt nur
+  ein Panel für alle Router: Es ist für alle offen, sobald ein geladener
+  Router-Eintrag die Option aktiviert hat. Die Freigabe wird beim Laden und
+  Entladen eines Eintrags und bei jeder Options-Änderung neu bewertet, ohne
+  Neustart; das Panel wird nur neu registriert, wenn sich der Kreis
+  tatsächlich ändert. Die Einschränkung gilt nur für das Topologie-Panel und
+  die Snapshot-API: Entitätszustände (z. B. Device Tracker mit IP und
+  Hostname, Sensoren) bleiben wie in HA üblich für alle Benutzer sichtbar.
+
+### Fixed
+
+- **Fehler beim Aufbau des Topologie-Snapshots werden nicht mehr als leere
+  Topologie getarnt.** Die API lieferte bei einem Fehler HTTP 200 mit einer
+  leeren Topologie, die wie „alle Router weg“ aussah. Jetzt kommt HTTP 500
+  mit einer kurzen Meldung in `meta.error` (nur der Fehlertyp, kein
+  Stacktrace, keine Router-Daten). Das Panel meldet bei 0 Routern oder einem
+  Fehler keinen kritischen Alarm „WAN offline“ mehr und zeigt statt „No
+  routers online“ den Fehler an.
+- **Panel lädt nach abgelaufener Sitzung nicht mehr in einer Schleife neu.**
+  Nach einem 401 setzte jeder `hass`-Update die Sperre zurück und löste sofort
+  die nächste Anfrage aus. Jetzt erneuert das Panel ein abgelaufenes Token
+  vor der Anfrage und versucht es nach einem 401 genau einmal erneut (neues
+  Token bzw. über `callApi`); erst danach ruht es, bis HA ein neues Token
+  liefert oder der Tab wieder sichtbar wird. 401 und 403 werden auch im `callApi`-Fallback erkannt; bei 403
+  erklärt das Panel, dass die Topologie Administratoren vorbehalten ist. Ein
+  vorübergehender Fehler ersetzt nicht mehr die zuletzt geladene Ansicht —
+  sie bleibt stehen, ein kleiner Hinweis oben rechts zeigt den Fehler.
+- **Ein Fehler bei der Panel-Registrierung lässt den Eintrag nicht mehr im
+  Zustand „Setup-Fehler“ mit geladenen Plattformen zurück.** Panel und
+  Lovelace-Karten-Ressource werden nach den Plattformen eingerichtet; ein
+  Fehler dort wird jetzt als Warnung geloggt, der Router-Eintrag lädt
+  trotzdem. Entlädt sich ein solcher Eintrag, zählt er den Panel-Referenzzähler
+  nicht mehr herunter (vorher konnte das das Panel der anderen Router
+  entfernen).
+- **Geräte-Tracker bleiben bei Ausfall eines einzelnen Routers und nach einem
+  Neustart verlässlich.** Bisher wurden WLAN-Clients „nicht verfügbar“, sobald
+  der Router, dem ihr Tracker gehört (etwa ein neu startender AP), nicht
+  antwortete, auch wenn sie an einem anderen AP hingen; Personen standen dann
+  auf „unbekannt“. Nach einem HA-Neustart blieben abwesende Clients „nicht
+  verfügbar“ statt „abwesend“, und der Name sprang auf die MAC-Adresse. Jetzt
+  bleibt ein Tracker verfügbar, solange irgendein Router antwortet. Ein
+  einzelner Poll-Fehler ändert nichts; fällt ein Router länger aus (3 Polls
+  oder 5 Minuten), zählen seine alten Client-Daten nicht mehr. Bekannte
+  Clients werden beim Start aus der Entitäten-Registry angelegt und melden
+  „abwesend“, deaktivierte Tracker ausgenommen; der letzte bekannte Hostname
+  bleibt als Name erhalten. Einen veralteten Tracker entfernt man, indem man
+  ihn erst deaktiviert und dann löscht.
+- **Topologie bei WAN-Ausfall, Offline-Routern und gleichnamigen Routern
+  richtig.** Bisher wurde das Gateway bei einem WAN-Ausfall zum AP: Das Panel
+  zeigte keine Verbindungen und keine WAN-, Ping- oder DDNS-Daten, genau
+  während der Störung. Jetzt behält das zuletzt verbundene Gateway seine Rolle
+  während des Ausfalls; startet HA mitten im Ausfall, gewinnt genau ein Router
+  mit eingerichtetem Uplink (ein von Hand gesetztes Protokoll wie PPPoE,
+  statisch oder Mobilfunk vor dem OpenWrt-Standard `dhcp`). Ein Dumb-AP mit
+  übrig gebliebenem WAN-Eintrag wird nicht zum Gateway, und ein Router im
+  SSH-Fallback zählt nur, wenn kein anderer Router ein verbundenes WAN meldet.
+  Clients und Kanten eines nicht erreichbaren Routers sind als veraltet
+  (`stale`) markiert und landen nicht mehr wegen eines alten, besseren Signals
+  bei ihm. Router mit gleichem Hostnamen (etwa dreimal „OpenWrt“) erkennt LLDP
+  jetzt über die MAC; doppelte LLDP-Beobachtungen desselben Paars bleiben
+  stabil und stehen in `lldp_duplicates`. Bei mehreren Gateways bekommt jedes
+  seine WAN-Daten, und ein AP hängt nur noch an einem davon.
+- **„Nach Updates suchen“ funktioniert jetzt, mit apk und opkg.** Bisher
+  meldete der Button nur scheinbar Erfolg, und der Sensor „Update-Status“
+  stand immer auf „aktuell“, weil nie eine Paketliste geholt wurde. Jetzt
+  fragt der Button per SSH den Paketmanager des Routers ab (apk ab OpenWrt 25,
+  sonst opkg), und zwar nur beim Drücken, nie im Poll. Der Sensor zeigt danach
+  Anzahl, Paketliste mit installierter und verfügbarer Version und den
+  Zeitpunkt der Prüfung; vor der ersten Prüfung steht er auf „unbekannt“.
+  Zeitüberschreitung, verweigerter SSH-Login, fehlender Paketmanager oder eine
+  noch laufende Prüfung erscheinen als Fehlermeldung in HA. Die rpcd-ACL
+  bleibt unverändert.
+- **Poll-Versatz und Intervall korrigiert.** Mehrere Router pollten trotz
+  Versatz zur selben Zeit, weil jeder Eintrag denselben Versatz bekam; ein
+  Schalter konnte kurz nach dem Start bis zu 45 s auf seine Aktualisierung
+  warten; und nach einer ACL-Reparatur blieb das 5-Minuten-Intervall des
+  SSH-Fallbacks bis zum Neuladen stehen. Jetzt hat jeder Router einen eigenen
+  Zeitpunkt, angeforderte Aktualisierungen laufen sofort, und das Intervall
+  (60 s, 120 s bei hoher CPU-Last, 300 s im SSH-Fallback) wird bei jedem Poll
+  neu bestimmt. Unerwartete Fehler zählen jetzt für die Ausfallmeldung.
+- **Schnittstellen-Traffic zeigt echte Werte.** RX/TX-Bytes und -Raten der
+  Schnittstellen standen immer auf 0, weil die Abfrage keine Zähler liefert.
+  Sie kommen jetzt aus `network.device status`, demselben Aufruf, den die
+  Port-Sensoren schon nutzen, also ohne zusätzliche Router-Abfrage. Raten ohne
+  gültigen Vorwert (erster Poll, Zähler-Reset, veraltete Daten) zeigen
+  „unbekannt“ statt 0. Dazu: Statistik-Klasse für freien und temporären
+  Speicher, Signal- und Rauschsensoren als Signalstärke, der CPU-Verlauf deckt
+  unabhängig vom Intervall eine Stunde ab, und das Ereignis „WAN verbunden“
+  zeigt wieder die IP-Adresse.
+- **Keine Login-Versuche mehr während der Sperrzeit; vollständige
+  ARP-Tabelle.** Bei falschem Passwort versuchte die Integration trotz Sperre
+  in jedem Poll einen Login. Jetzt ruht sie bis zum Ablauf der Sperre, und
+  gesperrte Polls zählen nicht als Anmeldefehler, öffnen also nicht vorschnell
+  den Dialog zur erneuten Anmeldung. Auf Routern mit vielen Geräten fehlten Einträge, weil rpcd
+  `/proc/net/arp` bei 4 KiB abschneidet; sie werden jetzt über die
+  Host-Hinweise von LuCI (`luci-rpc getHostHints`) ergänzt, ohne
+  ACL-Änderung und ohne SSH.
+
+### Changed
+
+- **Topologie-Sensoren schreiben ihren Zustand nicht mehr bei jedem Poll neu.**
+  Bisher baute die Integration den Topologie-Snapshot bei jedem Attributzugriff
+  neu, etwa viermal je Poll und Router, und legte ihn samt Zeitstempel
+  komplett in die Attribute. Jeder Poll löste damit einen State-Write und
+  einen Websocket-Push von bis zu ~80 KB je Router aus. Jetzt entsteht der
+  Snapshot einmal je Update, und `sensor.*_network_topology` trägt nur noch
+  kleine Zähler (`node_count`, `edge_count`, `interface_count`,
+  `client_count`, `inference_used`, `source`, `schema_version`). **Entfernte
+  Attribute:** `topology_snapshot`, `interfaces`, `clients` und
+  `topology_debug` (mit `generated_at`). Templates, die diese Attribute
+  lesen, müssen angepasst werden; die vollständige Topologie liefert
+  weiterhin das Topologie-Panel.
+- **Flüchtige Attribute landen nicht mehr in der Recorder-Datenbank.**
+  Client-Listen, Signalwerte, Uptime- und Restlaufzeiten, `last_seen`, Last-
+  und Speicherwerte, Log-Zähler, Paketzähler der Ports und die Paketliste der
+  Update-Prüfung erzeugten bei fast jedem Poll einen neuen Datenbankeintrag,
+  und die Recorder-Datenbank wuchs entsprechend. Die Attribute sind live
+  weiterhin sichtbar, erscheinen aber nicht mehr im Verlauf.
+- Die Snapshot-API liest die HA-Instanz über `KEY_HASS` aus
+  `homeassistant.helpers.http` statt über `request.app["hass"]`.
+- Nicht verwendete Panel-Komponente `MobileView.tsx` und die nie gelesene
+  Panel-Konfiguration `apiBase` entfernt.
+
+### Removed
+
+- **Button „Updates installieren“.** Er rief nur opkg auf und meldete immer
+  Erfolg; OpenWrt rät von pauschalen Paket-Upgrades ab (Flash,
+  Abhängigkeiten). Eine vorhandene Entität bleibt als „nicht verfügbar“
+  stehen und kann gelöscht werden.
+
 ## [1.38.9] - 2026-10-28
 
 ### Fixed

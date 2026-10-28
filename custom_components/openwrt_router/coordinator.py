@@ -21,11 +21,13 @@ from homeassistant.util import dt as dt_util
 
 from .api import (
     OpenWrtAPI,
+    OpenWrtAuthBackoffError,
     OpenWrtAuthError,
     OpenWrtConnectionError,
     OpenWrtMethodNotFoundError,
     OpenWrtResponseError,
     OpenWrtTimeoutError,
+    OpenWrtUpdateCheckRunningError,
 )
 from .channel_plan import Radio, phy_of, radios_from_ap_interfaces
 from .client_stability import (
@@ -45,6 +47,7 @@ from .const import (
     CLIENT_KEY_LAST_SEEN,
     CLIENT_KEY_MAC,
     CPU_HISTORY_MAX_POINTS,
+    CPU_HISTORY_WINDOW_SECONDS,
     DEFAULT_SERVICES,
     DFS_EVIDENCE_SECONDS,
     DHCP_CONFIG_REFRESH_CYCLES,
@@ -97,6 +100,7 @@ from .const import (
     LOG_STATUS_OK,
     LOG_STATUS_PENDING,
     NOTIFICATION_FAILURE_THRESHOLD,
+    PRESENCE_STALE_AFTER_S,
     RADIO_KEY_BAND,
     RADIO_KEY_IS_GUEST,
     RAM_AVAILABLE_MIN_BYTES,
@@ -104,6 +108,8 @@ from .const import (
     RAM_PRESSURE_HIGH_PCT,
     RAM_PRESSURE_HOLD_SECONDS,
     SCAN_INTERVAL_SECONDS,
+    SSH_FALLBACK_INTERVAL_SECONDS,
+    THROTTLED_INTERVAL_SECONDS,
     TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES,
     TOPOLOGY_SNAPSHOT_MAX,
     USTEER_RETRY_CYCLES,
@@ -251,7 +257,9 @@ class OpenWrtCoordinatorData:
         clients: List of currently associated WiFi clients (ip/hostname enriched).
         client_count: Number of connected clients.
         dhcp_leases: MAC → {ip, hostname} mapping from the DHCP lease table.
-        updates_available: Update status and list of available packages.
+        updates_available: Result of the last "check for updates" (count,
+            package list, package manager, last_check); last_check is None
+            until the first check. Carried across polls, never polled.
         features: Feature detection map (populated on first refresh).
     """
 
@@ -280,8 +288,13 @@ class OpenWrtCoordinatorData:
         self.active_connections: int = 0
         self.updates_available: dict[str, Any] = {
             "available": False,
+            "count": 0,
+            "packages": [],
             "system": [],
             "addons": [],
+            "package_manager": None,
+            "index_refreshed": None,
+            "last_check": None,
         }
         self.services: list[dict[str, Any]] = []
         self.ap_interfaces: list[dict[str, Any]] = []
@@ -421,11 +434,16 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._features_detected = False
         self._board_poll_count = 0
         self._poll_offset_seconds = poll_offset_seconds
+        # The stagger offset delays only the first *scheduled* poll; refreshes
+        # requested by switches/buttons are never delayed.
+        self._stagger_pending = poll_offset_seconds > 0
         self._poll_count = 0
+        # One warning with traceback per streak of unexpected poll errors
+        self._unexpected_error_logged = False
         self._throttled = False  # True when interval is doubled due to high CPU load
         self._ssh_fallback_notified = False  # True after HA notification was fired
         self._client_first_seen: dict[str, datetime] = {}
-        self._prev_interface_bytes: dict[str, dict[str, int]] = {}
+        self._prev_interface_bytes: dict[str, dict[str, int | None]] = {}
         self._prev_poll_time: datetime | None = None
         # Last valid WAN counter sample (monotonic time, rx, tx, interface)
         self._wan_sample: tuple[float, int, int, str] | None = None
@@ -496,10 +514,37 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         # Stale-data cache: letzte bekannte Werte für VLAN-Badges bei Offline-Router
         self._last_known_network_interfaces: list[dict[str, Any]] = []
         self._last_known_port_vlan_map: dict[str, list[int]] = {}
+        # Result of the last package update check (button press only — polls
+        # never run the package manager) and a lock against parallel checks.
+        self._package_updates: dict[str, Any] | None = None
+        self._package_check_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator interface
     # ------------------------------------------------------------------
+
+    async def _handle_refresh_interval(self, _now: datetime | None = None) -> None:
+        """Run a scheduled poll; delay the first one by the stagger offset.
+
+        Spreads multiple coordinators evenly across the scan interval. Only
+        the timer path comes through here — ``async_request_refresh`` (switch,
+        button) never waits for the offset. If a requested refresh ran during
+        the wait it already scheduled the next poll, so this one is dropped.
+        """
+        if self._stagger_pending:
+            self._stagger_pending = False
+            _LOGGER.debug(
+                "Stagger offset: delaying first scheduled poll by %ds",
+                self._poll_offset_seconds,
+            )
+            # The handle of the timer that fired is still stored here (the
+            # base method clears it). Clear it now so that a non-None value
+            # after the wait means a requested refresh rescheduled meanwhile.
+            self._unsub_refresh = None
+            await asyncio.sleep(self._poll_offset_seconds)
+            if self._unsub_refresh is not None:
+                return
+        await super()._handle_refresh_interval(_now)
 
     async def _first_poll_optional(self, coro_factory, default, label):
         """Await a core call, tolerating an ACL block on the first poll only.
@@ -557,16 +602,10 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         """Run one poll cycle (body of :meth:`_async_update_data`)."""
         self._poll_count += 1
         self.api.reset_ssh_fallback_flag()
-        # Apply stagger offset once on the second poll (first regular poll after setup).
-        # Spreads multiple coordinators evenly across the scan interval.
-        if self._poll_count == 2 and self._poll_offset_seconds > 0:
-            _LOGGER.debug(
-                "Stagger offset: delaying first regular poll by %ds",
-                self._poll_offset_seconds,
-            )
-            await asyncio.sleep(self._poll_offset_seconds)
 
         data = OpenWrtCoordinatorData()
+        if self._package_updates is not None:
+            data.updates_available = self._package_updates
 
         try:
             # --- Feature detection (runs once after first successful login) ---
@@ -726,18 +765,34 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 _LOGGER.debug("Error fetching tmpfs stats: %s", err)
                 data.tmpfs = {}
 
+            # One `network.device status {}` per poll feeds both the interface
+            # byte counters and the port stats.
             try:
-                data.network_interfaces = await self.api.get_network_interfaces()
+                device_status = await self.api.get_device_status()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching device status: %s", err)
+                device_status = {}
+
+            try:
+                data.network_interfaces = await self.api.get_network_interfaces(
+                    device_status=device_status
+                )
                 if data.network_interfaces:
                     self._last_known_network_interfaces = data.network_interfaces
                 data.vlans_stale = False
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching network interfaces: %s", err)
-                data.network_interfaces = self._last_known_network_interfaces
+                # Copies without rates: stale counters must not read as 0 B/s.
+                data.network_interfaces = [
+                    {**iface, "rx_rate": None, "tx_rate": None}
+                    for iface in self._last_known_network_interfaces
+                ]
                 data.vlans_stale = bool(self._last_known_network_interfaces)
 
             try:
-                data.port_stats = await self.api.get_port_stats()
+                data.port_stats = await self.api.get_port_stats(
+                    device_status=device_status
+                )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching port stats: %s", err)
                 data.port_stats = []
@@ -864,7 +919,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 await self._fetch_usteer(data, now_ms)
             data.client_stability = self._client_stability_snapshot(data, now_ms)
 
-            # --- CPU history (30s resolution, 1h rolling window) ---
+            # --- CPU history (one point per poll, time-based 1h window) ---
             import time as _time
 
             mem = data.memory
@@ -880,6 +935,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                     "mem": mem_pct,
                 }
             )
+            cutoff = int(_time.time()) - CPU_HISTORY_WINDOW_SECONDS
+            while self._cpu_history and self._cpu_history[0]["ts"] < cutoff:
+                self._cpu_history.popleft()
             data.cpu_history = list(self._cpu_history)
 
             # --- Topology snapshots (every TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES polls) ---
@@ -905,34 +963,45 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             data.topology_snapshots = list(self._topology_snapshots)
 
             # --- Bandwidth rate calculation (bytes/s) ---
-            poll_now = datetime.now(UTC)
-            if self._prev_poll_time is not None:
-                elapsed = (poll_now - self._prev_poll_time).total_seconds()
-                if elapsed > 0:
-                    for iface in data.network_interfaces:
-                        ifname = iface.get("interface", "")
-                        prev = self._prev_interface_bytes.get(ifname, {})
-                        for key, rate_key in (
-                            ("rx_bytes", "rx_rate"),
-                            ("tx_bytes", "tx_rate"),
+            # A rate needs two valid samples of the same interface. Without
+            # one (first sample, new interface, unknown counter, counter
+            # reset) the rate is None — unknown, not 0 B/s. A stale cache
+            # (interface fetch failed) keeps the previous baseline.
+            if not data.vlans_stale:
+                poll_now = datetime.now(UTC)
+                elapsed = (
+                    (poll_now - self._prev_poll_time).total_seconds()
+                    if self._prev_poll_time is not None
+                    else 0.0
+                )
+                for iface in data.network_interfaces:
+                    prev = self._prev_interface_bytes.get(iface.get("interface", ""))
+                    for key, rate_key in (
+                        ("rx_bytes", "rx_rate"),
+                        ("tx_bytes", "tx_rate"),
+                    ):
+                        curr = iface.get(key)
+                        prev_val = prev.get(key) if prev else None
+                        if (
+                            elapsed > 0
+                            and isinstance(curr, int)
+                            and isinstance(prev_val, int)
+                            and curr >= prev_val
                         ):
-                            curr = iface.get(key) or 0
-                            prev_val = prev.get(key, 0) or 0
-                            delta = curr - prev_val
-                            iface[rate_key] = (
-                                round(max(0, delta) / elapsed, 2) if delta >= 0 else 0
-                            )
-            self._prev_poll_time = poll_now
-            # Rebuild from current interfaces only — removes stale entries for
-            # interfaces that no longer exist (tunnels, temporary VLANs, etc.)
-            self._prev_interface_bytes = {
-                iface.get("interface", ""): {
-                    "rx_bytes": iface.get("rx_bytes") or 0,
-                    "tx_bytes": iface.get("tx_bytes") or 0,
+                            iface[rate_key] = round((curr - prev_val) / elapsed, 2)
+                        else:
+                            iface[rate_key] = None
+                self._prev_poll_time = poll_now
+                # Rebuild from current interfaces only — removes stale entries
+                # for interfaces that no longer exist (tunnels, temporary VLANs)
+                self._prev_interface_bytes = {
+                    iface.get("interface", ""): {
+                        "rx_bytes": iface.get("rx_bytes"),
+                        "tx_bytes": iface.get("tx_bytes"),
+                    }
+                    for iface in data.network_interfaces
+                    if iface.get("interface")
                 }
-                for iface in data.network_interfaces
-                if iface.get("interface")
-            }
 
             try:
                 data.active_connections = await self.api.get_active_connections()
@@ -963,6 +1032,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # and must not be overwritten (self.data is still None then).
             if self._features_detected and not data.features:
                 data.features = self.data.features if self.data else {}
+
+        except OpenWrtAuthBackoffError as err:
+            # Blocked by the API's auth backoff without a login attempt: a
+            # failed poll, but no new evidence against the credentials, so it
+            # does not count towards the reauth threshold.
+            self._record_failure(ERROR_TYPE_AUTH)
+            raise UpdateFailed(f"Authentication backoff active: {err}") from err
 
         except OpenWrtAuthError as err:
             self._consecutive_auth_failures += 1
@@ -1011,11 +1087,29 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 f"ubus method blocked or missing on OpenWrt router: {err}"
             ) from err
 
-        except (RuntimeError, ValueError, TypeError, AttributeError, KeyError) as err:
-            _LOGGER.exception("Unexpected error fetching OpenWrt data")
-            self._record_failure(ERROR_TYPE_CONNECTION)
-            raise UpdateFailed(f"Unexpected error: {err}") from err
+        except (ConfigEntryAuthFailed, UpdateFailed):
+            raise
 
+        except Exception as err:
+            # Anything else (OSError, IndexError, a parser bug, ...) must still
+            # count as a failed poll, otherwise the outage counter and the
+            # fleet Repairs issue stay silent. CancelledError is a
+            # BaseException and passes through untouched.
+            self._record_failure(ERROR_TYPE_CONNECTION)
+            if not self._unexpected_error_logged:
+                self._unexpected_error_logged = True
+                _LOGGER.warning(
+                    "%s: Unexpected error fetching OpenWrt data",
+                    self.name,
+                    exc_info=True,
+                )
+            else:
+                _LOGGER.debug(
+                    "%s: Unexpected error fetching OpenWrt data: %r", self.name, err
+                )
+            raise UpdateFailed(f"Unexpected error: {err!r}") from err
+
+        self._unexpected_error_logged = False
         self._consecutive_auth_failures = 0
         self._failure_count = 0
         self._failure_since = None
@@ -1051,11 +1145,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 title=f"OpenWrt Router: SSH-Fallback aktiv ({self.api._host})",
                 notification_id=f"openwrt_ssh_fallback_{self.api._host}",
             )
-            self.update_interval = timedelta(seconds=300)
             _LOGGER.warning(
-                "%s: SSH-Fallback aktiv — Poll auf 300s reduziert. "
+                "%s: SSH-Fallback aktiv — Poll auf %ds reduziert. "
                 "ACL auf Router aktualisieren um ubus vollständig zu nutzen.",
                 self.name,
+                SSH_FALLBACK_INTERVAL_SECONDS,
             )
 
         # Adaptive polling: double interval when router is overloaded (load > 100%),
@@ -1063,21 +1157,17 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         # per core (% of total CPU capacity), so > 100% means the run queue
         # really exceeds the cores — not just a load average above 1.0.
         cpu = data.cpu_load
-        normal_interval = timedelta(seconds=SCAN_INTERVAL_SECONDS)
-        throttled_interval = timedelta(seconds=SCAN_INTERVAL_SECONDS * 2)
         if not self._throttled and cpu > 100:
             self._throttled = True
-            self.update_interval = throttled_interval
             _LOGGER.warning(
                 "%s: CPU load %.0f%% (%s) — reducing poll frequency to %ds",
                 self.name,
                 cpu,
                 _cpu_load_basis(data),
-                SCAN_INTERVAL_SECONDS * 2,
+                THROTTLED_INTERVAL_SECONDS,
             )
         elif self._throttled and cpu < 80:
             self._throttled = False
-            self.update_interval = normal_interval
             _LOGGER.info(
                 "%s: CPU load %.0f%% (%s) — restoring normal poll frequency (%ds)",
                 self.name,
@@ -1086,7 +1176,23 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 SCAN_INTERVAL_SECONDS,
             )
 
+        # Derived from the current state on every poll, so a repaired ACL or
+        # a recovered CPU takes effect without a reload.
+        self.update_interval = self._interval_for_state()
+
         return data
+
+    def _interval_for_state(self) -> timedelta:
+        """Return the poll interval for the state of the last poll.
+
+        SSH fallback (300 s) wins over CPU throttling (120 s); otherwise the
+        default scan interval applies.
+        """
+        if self.api.uses_ssh_fallback:
+            return timedelta(seconds=SSH_FALLBACK_INTERVAL_SECONDS)
+        if self._throttled:
+            return timedelta(seconds=THROTTLED_INTERVAL_SECONDS)
+        return timedelta(seconds=SCAN_INTERVAL_SECONDS)
 
     # ------------------------------------------------------------------
     # WAN throughput
@@ -1145,6 +1251,44 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
     # ------------------------------------------------------------------
     # Outage tracking
     # ------------------------------------------------------------------
+
+    async def async_check_package_updates(self) -> dict[str, Any]:
+        """Run the package update check and publish the result.
+
+        Called on user request (button) only. The result is kept on the
+        coordinator so every following poll carries it forward without
+        running the package manager again.
+
+        Raises:
+            OpenWrtUpdateCheckRunningError: A check is already running; a
+                second one is refused instead of queueing behind it.
+            OpenWrtUpdateCheckError: Propagated from the API.
+        """
+        if self._package_check_lock.locked():
+            raise OpenWrtUpdateCheckRunningError(
+                "An update check is already running on this router"
+            )
+        async with self._package_check_lock:
+            result = await self.api.check_package_updates()
+        packages: list[dict[str, str]] = result.get("packages", [])
+        # LuCI and add-on packages apart from the base system, as before.
+        addons = [p for p in packages if p["name"].startswith(("addon-", "luci-"))]
+        system = [p for p in packages if p not in addons]
+        updates: dict[str, Any] = {
+            "available": bool(packages),
+            "count": len(packages),
+            "packages": packages,
+            "system": system,
+            "addons": addons,
+            "package_manager": result.get("package_manager"),
+            "index_refreshed": result.get("index_refreshed"),
+            "last_check": dt_util.utcnow().isoformat(),
+        }
+        self._package_updates = updates
+        if self.data is not None:
+            self.data.updates_available = updates
+            self.async_update_listeners()
+        return updates
 
     def attach_outage_tracker(self, tracker: FleetOutageTracker) -> None:
         """Report outages of this router to the fleet-wide tracker (wired in __init__)."""
@@ -1642,9 +1786,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                         "ts": ts,
                         "type": "info",
                         "message": "WAN verbunden",
-                        "detail": data.wan_status.get("ipv4_address")
-                        or data.wan_status.get("address")
-                        or "",
+                        "detail": data.wan_status.get("ipv4") or "",
                     }
                 )
             else:
@@ -1779,6 +1921,22 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         if self.data:
             return self.data.features
         return {}
+
+    @property
+    def stale_for_presence(self) -> bool:
+        """True once polls have failed beyond the presence grace period.
+
+        ``data`` then still holds the client list of the last successful
+        poll, which must no longer count as "connected". A single failed
+        poll stays within the grace period.
+        """
+        if self._failure_count >= NOTIFICATION_FAILURE_THRESHOLD:
+            return True
+        since = self._failure_since
+        return (
+            since is not None
+            and (datetime.now(UTC) - since).total_seconds() >= PRESENCE_STALE_AFTER_S
+        )
 
     def get_radio_by_band(self, band: str) -> dict[str, Any] | None:
         """Return the first radio matching the given band string.

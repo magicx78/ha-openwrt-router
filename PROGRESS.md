@@ -1,9 +1,33 @@
 # PROGRESS — OpenWrt HA Integration
 
-Entwicklungsprotokoll · Letzte Session: 2026-10-27 · Aktuell: **v1.38.2**
+Entwicklungsprotokoll · Letzte Session: 2026-10-28 · Aktuell: **v1.39.0**
 
 > Detaillierte Session-Protokolle bis v1.13.0 liegen in der Git-Historie dieser Datei;
 > vollständige Release-Details in [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## Status: v1.38.3 – v1.39.0 — SSH im Poll abgestellt und Audit (2026-10-27/28)
+
+Plan, Befunde, Reviews und Prüfprotokoll:
+[docs/plans/2026-10-28-ssh-polling-und-audit.md](docs/plans/2026-10-28-ssh-polling-und-audit.md).
+
+- **v1.38.3 – v1.38.9 (PRs #37–#43, einzeln released):** keine SSH-Anmeldung
+  mehr je Poll (N2), Login-Fehler und hostapd-Cache (A1, A2), LLDP-Kanten (A11),
+  rpcd-ACL v8 mit aufgelösten Symlink-Pfaden (A16), Port-Zuordnung (A17),
+  WAN-Erkennung ohne „erstes up-Interface“ (A4). Hardware-Nachweise im Plan.
+- **v1.39.0 (Sammel-Release, PR #45):** Diagnostics nach HA-Konvention
+  redigiert (A5), Topologie-Panel und Snapshot-API nur für Admins mit Option
+  (A13), Device-Tracker über Router hinweg verfügbar und aus der Registry
+  wiederhergestellt (A3), Gateway-Rolle bei WAN-Ausfall, `stale`-Daten und
+  LLDP-Fixes (A12), Topologie-Snapshot einmal je Update (A14), „Nach Updates
+  suchen“ mit apk/opkg, Install-Button entfernt (A6), Poll-Versatz/Intervall/
+  Catch-all (A7), Recorder-Attribute (A8), Schnittstellen-Zähler und
+  Sensor-Metadaten (A9), Login-Sperre und ARP über `getHostHints` (A10).
+  Jedes Paket mit Tests vor dem Fix, Risikopakete mit unabhängigem Review.
+
+Offen: Installation von 1.39.0 und die gesammelten Hardware-Prüfungen (siehe
+TODO), Panel-Sichtprüfung im Browser.
 
 ---
 

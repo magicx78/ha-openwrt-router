@@ -35,7 +35,8 @@ export function AlertsView({ data, onSelectGateway, onSelectAP, onSelectClient }
   const warningNodes   = data.accessPoints.filter(a => a.status === 'warning');
   const offlineClients = data.clients.filter(c => c.status === 'offline');
   const warningClients = data.clients.filter(c => c.status === 'warning');
-  const gwOffline      = data.gateway.status !== 'online';
+  // A placeholder gateway (no routers in the snapshot) is not "offline".
+  const gwOffline      = !data.noRouters && data.gateway.status !== 'online';
 
   const statusTotal = offlineNodes.length + warningNodes.length + offlineClients.length + warningClients.length + (gwOffline ? 1 : 0);
   const total = anomalyAlerts.length + statusTotal;

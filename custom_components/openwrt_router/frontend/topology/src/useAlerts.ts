@@ -25,6 +25,10 @@ export function useAlerts(data: TopologyData): Alert[] {
     const alerts: Alert[] = [];
     const gw = data.gateway;
 
+    // No router in the snapshot (none loaded / build error): the gateway is
+    // only a placeholder — "WAN offline" or ping alerts would be false alarms.
+    if (data.noRouters) return alerts;
+
     // Rule 9: WAN offline
     if (gw.status === 'offline') {
       alerts.push({

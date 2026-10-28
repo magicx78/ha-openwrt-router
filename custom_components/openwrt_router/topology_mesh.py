@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any
 
@@ -41,7 +42,7 @@ from .const import (
 # Aliased: topology_ports exports a CONFIDENCE_HIGH of its own.
 from .const import CONFIDENCE_HIGH as CONF_HIGH
 from .coordinator import OpenWrtCoordinatorData
-from .topology_diagnostic import build_topology_snapshot
+from .topology_diagnostic import build_topology_snapshot, router_node_id
 from .topology_ports import (
     CONFIDENCE_HIGH,
     apply_devices_to_port,
@@ -75,35 +76,156 @@ _GATEWAY_PROTOS: frozenset[str] = (
 )
 
 
-def _detect_router_role(data: OpenWrtCoordinatorData, host_ip: str) -> str:
-    """Classify a router as 'gateway' or 'ap' based on WAN status.
+# Role memory: router id → ISO time of the last snapshot in which it was a
+# gateway with a connected WAN. Process-wide (one mesh per HA instance), not
+# persisted across restarts. See _resolve_router_roles / _remember_gateways.
+_GATEWAY_MEMORY: dict[str, str] = {}
 
-    Gateway: WAN connected with an ISP-uplink protocol: dhcp, static, pppoe,
-             the IPv6-only and transition protocols (dhcpv6, dslite, map,
-             6in4, 6rd, 6to4) or one of the upstream-only protocols in
-             WAN_PROTOS (cellular qmi/mbim/ncm/modemmanager/3g/wwan, pppoa).
-             The IP being private or public does NOT matter — many gateways
-             have private WAN IPs (e.g. behind ISP modem / cascaded router).
-    AP:      No WAN connection (since 1.38.9 a router without a WAN interface
-             reports ``connected: False``) or a protocol that is not an ISP
-             uplink (VPN tunnels, none).
+# Role evidence levels (see _gateway_evidence).
+_EVIDENCE_STRONG = 3
+_EVIDENCE_SSH = 2
+_EVIDENCE_WEAK = 1
+_EVIDENCE_NONE = 0
+
+# OpenWrt's default wan/wan6 protocols. A dumb AP that keeps its unplugged
+# default sections reports these; pppoe/static/cellular are set up by hand.
+_DEFAULT_WAN_PROTOS: frozenset[str] = frozenset({"dhcp", "dhcpv6"})
+
+
+def _gateway_evidence(data: OpenWrtCoordinatorData, host_ip: str) -> int:
+    """Return how strongly the router's own WAN status marks it as a gateway.
+
+    Strong: a connected WAN with an ISP-uplink protocol (dhcp, static, pppoe,
+            the IPv6-only and transition protocols dhcpv6, dslite, map, 6in4,
+            6rd, 6to4, or one of the upstream-only protocols in WAN_PROTOS:
+            cellular qmi/mbim/ncm/modemmanager/3g/wwan, pppoa). Private vs.
+            public WAN IP does NOT matter — many gateways sit behind an ISP
+            modem.
+    SSH:    the SSH fallback shape (no ``wan_found``, no interface, no proto)
+            with ``connected`` True. That flag comes from the router-side
+            script ``/root/ha-wan-status.sh`` (not part of this repository);
+            it may only mean "internet reachable", which a dumb AP is too, so
+            it never competes with a ubus-shaped gateway or the role memory.
+    Weak:   a *configured* WAN (``wan_found`` True, or — data without
+            ``wan_found`` — a named WAN interface) with an ISP-uplink protocol
+            whose link is down: the gateway during an outage, but just as
+            well a dumb AP with OpenWrt's default, unplugged ``wan`` section.
+    None:   no WAN (``wan_found`` False), a protocol that is not an ISP uplink
+            (VPN tunnels, none, a ubus-found WAN without proto), or a "WAN"
+            carrying the router's own host IP (bridged port on a dumb AP).
+
+    DHCP pools are deliberately NOT evidence: OpenWrt's defaults leave the
+    lan pool active on a dumb AP (dnsmasq defers to the real server), and an
+    SSH-fallback gateway cannot read its pools at all.
     """
-    wan = data.wan_status
-    if not wan.get("connected"):
-        return "ap"
-
-    proto = wan.get("proto", "")
+    wan = data.wan_status or {}
+    if wan.get("wan_found") is False:
+        return _EVIDENCE_NONE
+    proto = wan.get("proto") or ""
+    if not proto:
+        ssh_shape = "wan_found" not in wan and not wan.get("interface")
+        return _EVIDENCE_SSH if ssh_shape and wan.get("connected") else _EVIDENCE_NONE
     if proto not in _GATEWAY_PROTOS:
-        return "ap"
-
-    # A "WAN" carrying the router's own LAN IP is a bridged port on a dumb
-    # AP (loopback-like), not a real upstream link.
+        return _EVIDENCE_NONE
     if wan.get("ipv4") and wan.get("ipv4") == host_ip:
-        return "ap"
+        return _EVIDENCE_NONE
+    if wan.get("connected"):
+        return _EVIDENCE_STRONG
+    if wan.get("wan_found") is True or wan.get("interface"):
+        return _EVIDENCE_WEAK
+    return _EVIDENCE_NONE
 
-    # Any router with a working WAN connection is a gateway.
-    # Repeater / mesh nodes don't have a WAN uplink.
-    return "gateway"
+
+def _resolve_router_roles(
+    router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+    remembered: Collection[str] = (),
+) -> dict[str, str]:
+    """Classify every router of the fleet as 'gateway' or 'ap'.
+
+    1. Every router with strong evidence (connected ubus WAN) is a gateway —
+       several sites or dual gateways are possible.
+    2. Without any strong router (WAN outage), every ``remembered`` gateway
+       (gateway of the last snapshot) that is still in the fleet and still
+       has a configured WAN (``wan_found`` not False) stays gateway; nothing
+       else is promoted.
+    3. Otherwise exactly ONE SSH-fallback router reporting ``connected``
+       becomes gateway: the lowest router id.
+    4. Otherwise (fresh start during an outage) exactly ONE weak candidate
+       becomes gateway: a non-default protocol before OpenWrt's default
+       dhcp/dhcpv6, then the lowest router id.
+    """
+    evidence = {rid: _gateway_evidence(data, hip) for rid, hip, data in router_data}
+    roles = dict.fromkeys(evidence, "ap")
+    strong = [rid for rid, level in evidence.items() if level == _EVIDENCE_STRONG]
+    if strong:
+        roles.update(dict.fromkeys(strong, "gateway"))
+        return roles
+    kept = [
+        rid
+        for rid, _hip, data in router_data
+        if rid in remembered and (data.wan_status or {}).get("wan_found") is not False
+    ]
+    if kept:
+        roles.update(dict.fromkeys(kept, "gateway"))
+        return roles
+    ssh = [rid for rid, level in evidence.items() if level == _EVIDENCE_SSH]
+    if ssh:
+        roles[min(ssh)] = "gateway"
+        return roles
+    candidates = [
+        (
+            (data.wan_status or {}).get("proto") in _DEFAULT_WAN_PROTOS,
+            rid,
+        )
+        for rid, _hip, data in router_data
+        if evidence[rid] == _EVIDENCE_WEAK
+    ]
+    if candidates:
+        roles[min(candidates)[1]] = "gateway"
+    return roles
+
+
+def _remember_gateways(
+    router_data: list[tuple[str, str, OpenWrtCoordinatorData]], now: str
+) -> None:
+    """Replace the role memory by the strong gateways of this snapshot.
+
+    Left untouched when no router is strong, so the gateway of the last
+    connected snapshot keeps its role for the whole outage. An SSH-tier
+    gateway is never remembered.
+    """
+    strong = [
+        rid
+        for rid, hip, data in router_data
+        if _gateway_evidence(data, hip) == _EVIDENCE_STRONG
+    ]
+    if strong:
+        _GATEWAY_MEMORY.clear()
+        _GATEWAY_MEMORY.update(dict.fromkeys(strong, now))
+
+
+def _detect_router_role(data: OpenWrtCoordinatorData, host_ip: str) -> str:
+    """Classify a single router as 'gateway' or 'ap' (fleet of one, no memory).
+
+    See :func:`_gateway_evidence`; mesh code uses :func:`_resolve_router_roles`
+    so a candidate is weighed against the rest of the fleet and the memory.
+    """
+    return _resolve_router_roles([("", host_ip, data)])[""]
+
+
+def _ordered_gateways(
+    router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+    roles: dict[str, str],
+) -> list[tuple[str, str, OpenWrtCoordinatorData]]:
+    """Gateways in a stable order: connected WAN before outage, then router id.
+
+    Wherever a single gateway is used (subnet fallback, switch inference) or
+    the first gateway claims an AP, the connected one wins deterministically.
+    """
+    return sorted(
+        (item for item in router_data if roles.get(item[0]) == "gateway"),
+        key=lambda item: (not (item[2].wan_status or {}).get("connected"), item[0]),
+    )
 
 
 # 802.11s mesh-backhaul modes. A mesh point is a wireless uplink even though
@@ -202,6 +324,20 @@ def _normalize_lldp_port(iface: str) -> str:
     return (iface or "").split(".")[0].strip().lower()
 
 
+def _lldp_neighbor_sort_key(neigh: dict[str, Any]) -> tuple[str, ...]:
+    """Stable order for one router's LLDP neighbor table (local port first)."""
+    return tuple(
+        str(neigh.get(key) or "").lower()
+        for key in (
+            LLDP_KEY_LOCAL_INTERFACE,
+            LLDP_KEY_PORT_ID,
+            LLDP_KEY_CHASSIS_ID,
+            LLDP_KEY_MGMT_IP,
+            LLDP_KEY_CHASSIS_NAME,
+        )
+    )
+
+
 def _mac_norm(value: str | None) -> str:
     """Normalise a MAC-like token to ``aa:bb:...`` lower-case, else ''."""
     if not value:
@@ -231,6 +367,15 @@ def _build_known_router_index(
         if token:
             token_to_rid.setdefault(str(token).lower(), rid)
 
+    # A hostname identifies a router only when no other router of the fleet
+    # carries it: three factory-named "OpenWrt" routers would otherwise all
+    # resolve to the first one and break LLDP matching.
+    hostname_owners: dict[str, set[str]] = {}
+    for rid, _hip, data in router_data:
+        name = str((data.router_info or {}).get("hostname") or "").lower()
+        if name:
+            hostname_owners.setdefault(name, set()).add(rid)
+
     for rid, hip, data in router_data:
         info = data.router_info or {}
         entry_meta = meta.setdefault(
@@ -242,7 +387,9 @@ def _build_known_router_index(
         if mac:
             _add(mac, rid)
             entry_meta["macs"].add(mac)
-        _add(info.get("hostname"), rid)
+        hostname = str(info.get("hostname") or "").lower()
+        if len(hostname_owners.get(hostname, ())) == 1:
+            _add(hostname, rid)
         for iface in data.network_interfaces or []:
             _add(iface.get("ipv4_addr"), rid)
             imac = _mac_norm(iface.get("mac"))
@@ -265,28 +412,38 @@ def _build_known_router_index(
 def _match_lldp_neighbor(
     neigh: dict[str, Any], token_to_rid: dict[str, str]
 ) -> str | None:
-    """Return the router_id a neighbor matches, or None if it is not a known router."""
-    # Management IP / hostname are the strongest signals.
-    for key in (LLDP_KEY_MGMT_IP, LLDP_KEY_CHASSIS_NAME):
-        tok = neigh.get(key)
-        if tok and str(tok).lower() in token_to_rid:
-            return token_to_rid[str(tok).lower()]
-    # chassis_id / port_id are frequently MACs — match raw and normalised.
-    for key in (LLDP_KEY_CHASSIS_ID, LLDP_KEY_PORT_ID):
+    """Return the router_id a neighbor matches, or None if it is not a known router.
+
+    Order: management IP, chassis ID (usually the MAC), chassis name (only
+    indexed when unique across the fleet), port ID. The chassis ID comes
+    before the name because hostnames are often left at "OpenWrt".
+    """
+
+    def _lookup(key: str, *, as_mac: bool) -> str | None:
         tok = neigh.get(key)
         if not tok:
-            continue
-        if str(tok).lower() in token_to_rid:
-            return token_to_rid[str(tok).lower()]
-        norm = _mac_norm(tok)
-        if norm and norm in token_to_rid:
-            return token_to_rid[norm]
-    return None
+            return None
+        raw = str(tok).lower()
+        if raw in token_to_rid:
+            return token_to_rid[raw]
+        if as_mac:
+            norm = _mac_norm(tok)
+            if norm and norm in token_to_rid:
+                return token_to_rid[norm]
+        return None
+
+    return (
+        _lookup(LLDP_KEY_MGMT_IP, as_mac=False)
+        or _lookup(LLDP_KEY_CHASSIS_ID, as_mac=True)
+        or _lookup(LLDP_KEY_CHASSIS_NAME, as_mac=False)
+        or _lookup(LLDP_KEY_PORT_ID, as_mac=True)
+    )
 
 
 def _lldp_hop_depths(
     pairs: set[frozenset[str]],
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+    roles: dict[str, str] | None = None,
 ) -> dict[str, int]:
     """Hop distance of every router from the nearest gateway, over LLDP links.
 
@@ -302,11 +459,9 @@ def _lldp_hop_depths(
         adjacency.setdefault(b, set()).add(a)
 
     depths: dict[str, int] = {}
-    frontier = [
-        rid
-        for rid, hip, data in router_data
-        if _detect_router_role(data, hip) == "gateway"
-    ]
+    if roles is None:
+        roles = _resolve_router_roles(router_data)
+    frontier = [rid for rid, _hip, _data in router_data if roles[rid] == "gateway"]
     for rid in frontier:
         depths[rid] = 0
     depth = 0
@@ -349,6 +504,7 @@ def _orient_lldp_pair(
     depths: dict[str, int] | None = None,
     a_iface: str = "",
     b_iface: str = "",
+    roles: dict[str, str] | None = None,
 ) -> tuple[str, str, bool]:
     """Choose a from/to orientation for a router-to-router LLDP edge.
 
@@ -366,11 +522,8 @@ def _orient_lldp_pair(
     anchored ``to`` side counts as "has its uplink" for the heuristics: a
     guessed orientation must not cost a router its (correct) gateway edge.
     """
-    roles = {
-        rid: _detect_router_role(data, hip)
-        for rid, hip, data in router_data
-        if rid in (rid_a, rid_b)
-    }
+    if roles is None:
+        roles = _resolve_router_roles(router_data)
     a_gw = roles.get(rid_a) == "gateway"
     b_gw = roles.get(rid_b) == "gateway"
     if a_gw and not b_gw:
@@ -406,6 +559,7 @@ def _detect_lldp_edges(
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
     token_to_rid: dict[str, str],
     meta: dict[str, dict[str, Any]],
+    roles: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], set[str], set[str]]:
     """Detect router-to-router edges from LLDP neighbor tables.
 
@@ -421,12 +575,35 @@ def _detect_lldp_edges(
     inference, a phantom switch replacing the whole LLDP chain. LLDP always
     wins.
     """
-    # Collect directed observations a→b (a saw b as an LLDP neighbor).
+    # Collect directed observations a→b (a saw b as an LLDP neighbor). The
+    # neighbor table is walked in a stable order (local port first), so with
+    # parallel links (LAG / redundancy) the same one wins on every poll; the
+    # other observations of the pair are recorded on the edge instead of
+    # silently overwriting it.
     obs: dict[tuple[str, str], dict[str, Any]] = {}
+    duplicates: dict[frozenset[str], list[dict[str, Any]]] = {}
     for a_rid, _a_hip, a_data in router_data:
-        for neigh in getattr(a_data, "lldp_neighbors", None) or []:
+        neighbors = [
+            n
+            for n in getattr(a_data, "lldp_neighbors", None) or []
+            if isinstance(n, dict)
+        ]
+        neighbors.sort(key=_lldp_neighbor_sort_key)
+        for neigh in neighbors:
             b_rid = _match_lldp_neighbor(neigh, token_to_rid)
             if not b_rid or b_rid == a_rid:
+                continue
+            if (a_rid, b_rid) in obs:
+                duplicates.setdefault(frozenset((a_rid, b_rid)), []).append(
+                    {
+                        "observer": a_rid,
+                        "local_interface": neigh.get(LLDP_KEY_LOCAL_INTERFACE, ""),
+                        "local_port": _normalize_lldp_port(
+                            neigh.get(LLDP_KEY_LOCAL_INTERFACE, "")
+                        ),
+                        "neighbor_port_id": neigh.get(LLDP_KEY_PORT_ID, ""),
+                    }
+                )
                 continue
             obs[(a_rid, b_rid)] = {
                 "local_interface": neigh.get(LLDP_KEY_LOCAL_INTERFACE, ""),
@@ -448,7 +625,9 @@ def _detect_lldp_edges(
     handled: set[frozenset[str]] = set()
 
     # Orientation needs the whole graph, so hop distances are computed up front.
-    depths = _lldp_hop_depths({frozenset(pair) for pair in obs}, router_data)
+    if roles is None:
+        roles = _resolve_router_roles(router_data)
+    depths = _lldp_hop_depths({frozenset(pair) for pair in obs}, router_data, roles)
     gateway_rids = {rid for rid, depth in depths.items() if depth == 0}
 
     for (a_rid, b_rid), fwd in obs.items():
@@ -468,7 +647,7 @@ def _detect_lldp_edges(
             (rev or {}).get("local_interface") or fwd.get("neighbor_port_id") or ""
         )
         from_rid, to_rid, anchored = _orient_lldp_pair(
-            a_rid, b_rid, router_data, depths, a_iface, b_iface
+            a_rid, b_rid, router_data, depths, a_iface, b_iface, roles
         )
         # Map each router's OWN self-reported local port to the from/to side.
         if from_rid == a_rid:
@@ -508,7 +687,7 @@ def _detect_lldp_edges(
         vlan_tags = list(from_vlan_map.get(from_port, [])) if from_port else []
 
         neighbor_meta = meta.get(to_rid, {})
-        neighbor_mac = next(iter(neighbor_meta.get("macs", set())), "")
+        neighbor_mac = min(neighbor_meta.get("macs", set()), default="")
         # Preserve the actual neighbor-observed values regardless of orientation.
         observed = fwd if from_rid == a_rid else (rev or fwd)
 
@@ -563,9 +742,23 @@ def _detect_lldp_edges(
                     "management_ip": observed.get("management_ip"),
                     "capabilities": observed.get("capabilities", []),
                     "conflicts": conflicts,
+                    # Optional: further observations of the same router pair
+                    # (parallel links); only present when there are any.
+                    **(
+                        {"lldp_duplicates": duplicates[pair]}
+                        if pair in duplicates
+                        else {}
+                    ),
                 },
             }
         )
+        if pair in duplicates:
+            _LOGGER.debug(
+                "LLDP: %d extra observation(s) of %s <-> %s ignored (parallel links)",
+                len(duplicates[pair]),
+                from_rid,
+                to_rid,
+            )
         # Block BOTH orientations so no heuristic can add a competing edge.
         blocked_ids.add(f"{a_rid}--uplink--{b_rid}")
         blocked_ids.add(f"{b_rid}--uplink--{a_rid}")
@@ -582,6 +775,7 @@ def _detect_lldp_edges(
 def _detect_inter_router_edges(
     router_snapshots: list[dict[str, Any]],
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+    roles: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Detect connections between routers.
 
@@ -603,9 +797,10 @@ def _detect_inter_router_edges(
     # Method 0: LLDP — the preferred, authoritative source. It runs first and
     # seeds seen_edges with BOTH orientations of every detected pair so the
     # heuristics below cannot add a competing (possibly wrong-port) edge.
+    router_roles = roles if roles is not None else _resolve_router_roles(router_data)
     token_to_rid, known_meta = _build_known_router_index(router_data)
     lldp_edges, lldp_blocked, lldp_uplinked = _detect_lldp_edges(
-        router_data, token_to_rid, known_meta
+        router_data, token_to_rid, known_meta, router_roles
     )
     edges.extend(lldp_edges)
     seen_edges.update(lldp_blocked)
@@ -644,12 +839,9 @@ def _detect_inter_router_edges(
             if sta_mac and sta_mac not in router_macs:
                 router_macs[sta_mac] = rid
 
-    # Find gateway(s) for directed edges
-    gateways = [
-        (rid, hip, data)
-        for rid, hip, data in router_data
-        if _detect_router_role(data, hip) == "gateway"
-    ]
+    # Find gateway(s) for directed edges, connected before outage, then by
+    # id: with several gateways the first one that sees an AP claims it.
+    gateways = _ordered_gateways(router_data, router_roles)
 
     # ========================================================================
     # Detection order: LAN (physical) first, then WiFi (wireless).
@@ -660,6 +852,7 @@ def _detect_inter_router_edges(
     # ========================================================================
 
     # Method 1: DHCP lease cross-reference (LAN connections) — HIGHEST priority.
+    claimed_aps: set[str] = set()
     for gw_rid, gw_hip, gw_data in gateways:
         dhcp = gw_data.dhcp_leases or {}
         for ap_rid, ap_hip, ap_data in router_data:
@@ -667,6 +860,10 @@ def _detect_inter_router_edges(
                 continue
             edge_id = f"{gw_rid}--uplink--{ap_rid}"
             if edge_id in seen_edges or ap_rid in lldp_uplinked:
+                continue
+            # Another gateway is not an AP of this one, and an AP already
+            # claimed by an earlier gateway gets no second uplink.
+            if router_roles.get(ap_rid) == "gateway" or ap_rid in claimed_aps:
                 continue
 
             # Check if AP's host IP appears in gateway's DHCP leases
@@ -710,6 +907,7 @@ def _detect_inter_router_edges(
                     }
                 )
                 seen_edges.add(edge_id)
+                claimed_aps.add(ap_rid)
 
     # Method 2.5: ARP/trunk_port_map — IP-based port lookup (no DHCP needed)
     # Matches AP host_ip directly against gateway's trunk_port_map {ip → port}.
@@ -723,6 +921,8 @@ def _detect_inter_router_edges(
                 continue
             edge_id = f"{gw_rid}--uplink--{ap_rid}"
             if edge_id in seen_edges or ap_rid in lldp_uplinked:
+                continue
+            if router_roles.get(ap_rid) == "gateway" or ap_rid in claimed_aps:
                 continue
             gateway_port = trunk_map.get(ap_hip)
             if gateway_port:
@@ -750,6 +950,7 @@ def _detect_inter_router_edges(
                     }
                 )
                 seen_edges.add(edge_id)
+                claimed_aps.add(ap_rid)
 
     # Method 2: WiFi client cross-reference — ONLY for routers with no LAN edge.
     # A router seen as a WiFi client on another router is a wifi_uplink,
@@ -758,10 +959,6 @@ def _detect_inter_router_edges(
     # Edge direction is ALWAYS gateway → ap.  If an AP sees the gateway in its
     # client list (possible in mesh setups) we reverse the direction so the
     # topology graph stays consistent.
-    router_roles = {
-        rid: _detect_router_role(data, hip) for rid, hip, data in router_data
-    }
-
     for src_rid, src_hip, src_data in router_data:
         src_role = router_roles.get(src_rid, "ap")
         for client in src_data.clients or []:
@@ -863,7 +1060,7 @@ def _detect_inter_router_edges(
     unconnected = [
         (rid, hip, data)
         for rid, hip, data in router_data
-        if rid not in connected_aps and _detect_router_role(data, hip) != "gateway"
+        if rid not in connected_aps and router_roles[rid] != "gateway"
     ]
 
     if unconnected and gateways:
@@ -950,9 +1147,13 @@ def _detect_inter_router_edges(
 def _deduplicate_clients(
     all_clients: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Deduplicate clients by MAC — keep the entry with the strongest signal.
+    """Deduplicate clients by MAC — keep the best observation.
 
-    A roaming client may briefly appear on two APs. Keep one occurrence.
+    A roaming client may briefly appear on two APs. Keep one occurrence: a
+    fresh observation always beats a ``stale`` one (from a router whose last
+    update failed — its client list is old); among equally fresh ones the
+    stronger signal wins. A stale observation therefore only survives when no
+    router currently reports the client.
     """
     best: dict[str, dict[str, Any]] = {}
     for client in all_clients:
@@ -962,6 +1163,12 @@ def _deduplicate_clients(
         existing = best.get(mac)
         if existing is None:
             best[mac] = client
+            continue
+        new_stale = bool(client.get("stale"))
+        old_stale = bool(existing.get("stale"))
+        if new_stale != old_stale:
+            if old_stale:
+                best[mac] = client
             continue
         # Keep stronger signal (less negative = better)
         new_sig = client.get("signal")
@@ -974,6 +1181,7 @@ def _deduplicate_clients(
 def _detect_switch_nodes(
     inter_router_edges: list[dict[str, Any]],
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+    roles: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
     """Detect implicit switch nodes between gateway and APs via Bridge FDB.
 
@@ -993,13 +1201,14 @@ def _detect_switch_nodes(
     replaced_ids: set[str] = set()
 
     # Find gateway coordinator data for trunk_port_map
+    if roles is None:
+        roles = _resolve_router_roles(router_data)
     gw_trunk_map: dict[str, str] = {}
     gw_rid = ""
-    for rid, hip, data in router_data:
-        if _detect_router_role(data, hip) == "gateway":
-            gw_trunk_map = getattr(data, "trunk_port_map", {})
-            gw_rid = rid
-            break
+    for rid, _hip, data in _ordered_gateways(router_data, roles):
+        gw_trunk_map = getattr(data, "trunk_port_map", {})
+        gw_rid = rid
+        break
 
     if not gw_trunk_map or not gw_rid:
         return [], [], set()
@@ -1007,11 +1216,7 @@ def _detect_switch_nodes(
     # APs that hang behind ANOTHER router (LLDP-verified router_uplink from a
     # non-gateway) are part of a chain, not members of a switch on a gateway
     # port — even if a stray gateway → AP edge names the same port.
-    gateway_rids = {
-        rid
-        for rid, hip, data in router_data
-        if _detect_router_role(data, hip) == "gateway"
-    }
+    gateway_rids = {rid for rid, role in roles.items() if role == "gateway"}
     chained_aps = {
         edge.get("to")
         for edge in inter_router_edges
@@ -1309,6 +1514,22 @@ def _apply_ha_names(
                 attrs["ha_model"] = device.model
 
 
+def _mark_snapshot_stale(snapshot: dict[str, Any]) -> None:
+    """Mark the clients, client nodes and edges of an offline router's snapshot.
+
+    Adds ``stale: True`` to every client entry and edge, and
+    ``attributes.stale: True`` to every client node. The router node itself
+    already carries ``node_status: offline``.
+    """
+    for client in snapshot.get("clients", []):
+        client["stale"] = True
+    for edge in snapshot.get("edges", []):
+        edge["stale"] = True
+    for node in snapshot.get("nodes", []):
+        if node.get("type") == "client":
+            node.setdefault("attributes", {})["stale"] = True
+
+
 def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     """Build a unified mesh topology from all loaded openwrt_router entries.
 
@@ -1347,6 +1568,9 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         for mac, ip in (getattr(entry_data, "arp_table", None) or {}).items():
             fleet_arp.setdefault(mac, ip)
 
+    # Roles are a fleet decision (see _resolve_router_roles): resolved ONCE,
+    # before the per-router snapshots, and passed down to every consumer.
+    loaded: list[tuple[Any, Any, OpenWrtCoordinatorData, str, str]] = []
     for entry in entries:
         runtime = getattr(entry, "runtime_data", None)
         if runtime is None:
@@ -1354,10 +1578,24 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         coordinator = getattr(runtime, "coordinator", None)
         if coordinator is None or coordinator.data is None:
             continue
-
-        data: OpenWrtCoordinatorData = coordinator.data
         host_ip = str(entry.data.get("host", ""))
-        role = _detect_router_role(data, host_ip)
+        data = coordinator.data
+        loaded.append(
+            (
+                entry,
+                coordinator,
+                data,
+                host_ip,
+                router_node_id(data.router_info or {}, host_ip),
+            )
+        )
+    fleet = [(rid, hip, data) for _e, _c, data, hip, rid in loaded]
+    roles = _resolve_router_roles(fleet, _GATEWAY_MEMORY)
+    _remember_gateways(fleet, now)
+    offline_rids: set[str] = set()
+
+    for entry, coordinator, data, host_ip, router_id in loaded:
+        role = roles[router_id]
 
         # Determine online/offline from last coordinator update success
         is_online = getattr(coordinator, "last_update_success", True)
@@ -1381,12 +1619,13 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                     "online" if is_online else "offline"
                 )
 
-        # Extract router_id from the first router node
-        router_node = next(
-            (n for n in snapshot.get("nodes", []) if n.get("type") == "router"),
-            None,
-        )
-        router_id = router_node["id"] if router_node else host_ip
+        # A router whose last update failed still serves its previous data.
+        # Its clients and edges are marked stale so they lose the client
+        # dedupe against any fresh observation (optional field, only set
+        # when True).
+        if not is_online:
+            offline_rids.add(router_id)
+            _mark_snapshot_stale(snapshot)
 
         router_data.append((router_id, host_ip, data))
         all_nodes.extend(snapshot.get("nodes", []))
@@ -1401,13 +1640,19 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     inter_router_edges = _detect_inter_router_edges(
         [],  # snapshots not needed — router_data has the coordinator data
         router_data,
+        roles,
     )
+    # An inter-router edge is stale when one of its routers is offline: the
+    # link was derived (at least partly) from that router's old data.
+    for edge in inter_router_edges:
+        if edge.get("from") in offline_rids or edge.get("to") in offline_rids:
+            edge["stale"] = True
     all_edges.extend(inter_router_edges)
 
     # Detect implicit switch nodes via Bridge FDB:
     # If multiple APs share the same gateway port → a switch sits between them.
     switch_nodes, switch_edges, replaced_ids = _detect_switch_nodes(
-        inter_router_edges, router_data
+        inter_router_edges, router_data, roles
     )
     all_nodes.extend(switch_nodes)
     # Remove direct gateway→AP edges that are now routed through the switch
@@ -1472,10 +1717,36 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         else:
             deduped_nodes.append(node)
 
+    # Owner router of every edge source that can carry a has_client edge
+    # (the router node itself or one of its AP-interface nodes).
+    edge_owner: dict[str, str] = {rid: rid for rid, _hip, _data in router_data}
+    for node in all_nodes:
+        if node.get("type") == "interface":
+            owner = (node.get("attributes") or {}).get("ap_mac")
+            if owner:
+                edge_owner[node["id"]] = owner
+
+    def _is_losing_client_edge(edge: dict[str, Any]) -> bool:
+        """True for a has_client edge from a router that lost the dedupe.
+
+        A roamed client (or one still listed by an offline router) must hang
+        off the winning router only, not off every router that reported it.
+        """
+        if edge.get("relationship") != "has_client":
+            return False
+        target = str(edge.get("to") or "")
+        if not target.startswith("client:"):
+            return False
+        winner = winning_ap_mac.get(target.removeprefix("client:"))
+        owner = edge_owner.get(str(edge.get("from") or ""))
+        return bool(winner and owner and owner != winner)
+
     # Also deduplicate client edges
     seen_edge_ids: set[str] = set()
     deduped_edges: list[dict[str, Any]] = []
     for edge in all_edges:
+        if _is_losing_client_edge(edge):
+            continue
         if edge["id"] not in seen_edge_ids:
             seen_edge_ids.add(edge["id"])
             deduped_edges.append(edge)
@@ -1513,11 +1784,12 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     # Display names the user already knows from Home Assistant.
     _apply_ha_names(hass, deduped_nodes, entries)
 
-    # Inject native WAN throughput + ping + DuckDNS into the gateway router node.
-    # Only the coordinator with role=gateway has this data (others return empty).
+    # Inject native WAN throughput + ping + DuckDNS into every gateway router
+    # node (multi-site / dual-gateway fleets have more than one). Only
+    # coordinators with role=gateway have this data (others return empty).
     # wan_traffic is derived natively from OpenWrt rx/tx byte deltas.
-    for rid, hip, data in router_data:
-        if _detect_router_role(data, hip) != "gateway":
+    for rid, _hip, data in router_data:
+        if roles.get(rid) != "gateway":
             continue
         for node in deduped_nodes:
             if node.get("type") == "router" and node.get("id") == rid:
@@ -1538,7 +1810,6 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                 # trunk ports, nearest-switch foreign-MAC removal.
                 _enrich_gateway_ports(attrs, data, router_data, rid)
                 break
-        break  # only one gateway
 
     router_count = sum(1 for n in deduped_nodes if n.get("type") == "router")
     client_count = sum(1 for n in deduped_nodes if n.get("type") == "client")

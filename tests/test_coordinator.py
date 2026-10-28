@@ -573,8 +573,8 @@ class TestBandwidthRateCalculation:
         assert iface["tx_rate"] == pytest.approx(50.0, abs=2.0)
 
     @pytest.mark.asyncio
-    async def test_rate_zero_on_counter_wraparound(self):
-        """T-R3: Rate is 0 when counter decreases (wraparound protection)."""
+    async def test_rate_unknown_on_counter_wraparound(self):
+        """T-R3: Rate is None (unknown) when counter decreases (reset/wrap)."""
         coord, api = self._make_coordinator_with_interfaces([
             {"interface": "lan", "rx_bytes": 5000, "tx_bytes": 5000, "status": "up"},
         ])
@@ -591,8 +591,8 @@ class TestBandwidthRateCalculation:
         data = await coord._async_update_data()
 
         iface = next(i for i in data.network_interfaces if i["interface"] == "lan")
-        assert iface["rx_rate"] == 0
-        assert iface["tx_rate"] == 0
+        assert iface["rx_rate"] is None
+        assert iface["tx_rate"] is None
 
     @pytest.mark.asyncio
     async def test_rate_sensor_native_value_none_before_second_poll(self):
@@ -628,7 +628,7 @@ class TestRecordEvents:
         from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
         d = OpenWrtCoordinatorData()
         d.wan_connected = wan_connected
-        d.wan_status = {"ipv4_address": "1.2.3.4"} if wan_connected else {}
+        d.wan_status = {"ipv4": "1.2.3.4"} if wan_connected else {}
         d.cpu_load = cpu
         d.memory = {"total": total, "free": free, "buffered": buffered}
         return d
@@ -1031,3 +1031,44 @@ class TestCpuThrottlePerCore:
             r.getMessage() for r in caplog.records if "poll frequency" in r.getMessage()
         )
         assert "core count unknown" in message
+
+
+# =====================================================================
+# stale_for_presence (A3 review P1)
+# =====================================================================
+
+
+class TestStaleForPresence:
+    """Old client lists of a router failing for long must not count."""
+
+    def test_healthy_is_not_stale(self):
+        coord, _ = _make_coordinator()
+        assert coord.stale_for_presence is False
+
+    def test_single_failure_is_within_grace(self):
+        coord, _ = _make_coordinator()
+        coord._record_failure("timeout")
+        assert coord.stale_for_presence is False
+
+    def test_threshold_failures_are_stale(self):
+        coord, _ = _make_coordinator()
+        for _ in range(3):
+            coord._record_failure("timeout")
+        assert coord.stale_for_presence is True
+
+    def test_long_failure_is_stale_even_with_few_polls(self):
+        """Slow polls (120/300 s): the time bound applies before the count."""
+        from datetime import UTC, datetime
+
+        coord, _ = _make_coordinator()
+        coord._record_failure("timeout")
+        coord._failure_since = datetime.now(UTC) - timedelta(minutes=6)
+        assert coord.stale_for_presence is True
+
+    @pytest.mark.asyncio
+    async def test_success_clears_stale(self):
+        coord, _ = _make_coordinator()
+        for _ in range(3):
+            coord._record_failure("timeout")
+        await coord._async_update_data()
+        assert coord.stale_for_presence is False

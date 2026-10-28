@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass
 from functools import partial
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import SOURCE_IGNORE, ConfigEntry
 from homeassistant.const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -223,6 +223,17 @@ def _disable_legacy_dynamic_sensors(hass: HomeAssistant, entry: ConfigEntry) -> 
         )
 
 
+def _stagger_offset(entry_ids: list[str], entry_id: str, interval: int) -> int:
+    """Return the poll offset of ``entry_id`` within ``interval`` seconds.
+
+    The index is the position of the entry in the sorted list of entry ids
+    (the entry itself is always included), so every entry gets a stable,
+    distinct slot no matter in which order the entries are set up.
+    """
+    ids = sorted(set(entry_ids) | {entry_id})
+    return (ids.index(entry_id) * interval) // len(ids)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
     """Set up OpenWrt Router from a config entry.
 
@@ -332,10 +343,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # so they never all poll simultaneously (e.g. 4 routers × 15s = 0/15/30/45s offsets).
     from .const import SCAN_INTERVAL_SECONDS
 
-    loaded_entries = hass.config_entries.async_entries(DOMAIN)
-    stagger_index = sum(1 for e in loaded_entries if e.entry_id != entry.entry_id)
-    total = max(len(loaded_entries), 1)
-    poll_offset = (stagger_index * SCAN_INTERVAL_SECONDS) // total
+    poll_offset = _stagger_offset(
+        [
+            e.entry_id
+            for e in hass.config_entries.async_entries(DOMAIN)
+            if e.disabled_by is None and e.source != SOURCE_IGNORE
+        ],
+        entry.entry_id,
+        SCAN_INTERVAL_SECONDS,
+    )
 
     # Create and populate the coordinator
     coordinator = OpenWrtCoordinator(
@@ -381,10 +397,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # One-shot cleanup of legacy MAC-identified devices left over from v1.17.0
     _merge_orphan_mac_devices(hass, entry)
 
-    # Register topology panel (idempotent — only registers once per HA session)
-    from .topology_panel import async_setup_topology_panel
+    # Register topology panel (idempotent — only registers once per HA session).
+    # Platforms are already forwarded: a failure here must not leave the entry
+    # in SETUP_ERROR with loaded platforms — the panel is an add-on, the
+    # router entities work without it.
+    try:
+        from .topology_panel import async_setup_topology_panel
 
-    await async_setup_topology_panel(hass)
+        await async_setup_topology_panel(hass, entry)
+    except Exception:
+        _LOGGER.warning(
+            "Topology panel setup failed for '%s' — the router works, the "
+            "Network Topology panel may be unavailable",
+            entry.title,
+            exc_info=True,
+        )
 
     # Register the openwrt-topology-card Lovelace resource (idempotent).
     # Auto-served so users don't need a manual entry under Dashboards → Resources.
@@ -397,6 +424,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     except ImportError:
         _LOGGER.debug(
             "topology_card module not present — skipping Lovelace card resource"
+        )
+    except Exception:
+        _LOGGER.warning(
+            "Topology card resource setup failed for '%s'",
+            entry.title,
+            exc_info=True,
         )
 
     _LOGGER.info(
@@ -441,7 +474,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
     try:
         from .topology_panel import async_teardown_topology_panel
 
-        await async_teardown_topology_panel(hass)
+        await async_teardown_topology_panel(hass, entry)
     except Exception:
         _LOGGER.debug("Topology panel teardown raised", exc_info=True)
 

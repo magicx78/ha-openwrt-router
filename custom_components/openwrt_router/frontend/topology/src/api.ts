@@ -586,6 +586,8 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
   const gwNode = routerNodes.find((n) => n.role === 'gateway') ?? routerNodes[0];
 
   if (!gwNode) {
+    // A failed snapshot build arrives as HTTP 500 and is thrown by
+    // fetchTopologyData before it gets here, so this is really "0 routers".
     return {
       gateway: {
         id: 'gw',
@@ -600,6 +602,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       clients: [],
       switchNodes: [],
       timestamp: snap.generated_at,
+      noRouters: true,
     };
   }
 
@@ -862,7 +865,71 @@ export interface HassLike {
   callApi<T>(method: 'GET' | 'POST', path: string): Promise<T>;
   // The real HA Auth object (home-assistant-js-websocket) exposes the token
   // under auth.data.access_token — there is no auth.accessToken property.
-  auth?: { data?: { access_token?: string } };
+  auth?: {
+    data?: { access_token?: string };
+    expired?: boolean;
+    refreshAccessToken?: () => Promise<void>;
+  };
+}
+
+/** Ask HA for a new access token; false if not possible or it failed. */
+async function refreshToken(hass: HassLike): Promise<boolean> {
+  const refresh = hass.auth?.refreshAccessToken;
+  if (typeof refresh !== 'function') return false;
+  try {
+    await refresh.call(hass.auth);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Snapshot request failed with an HTTP status (401, 403, 410, 500, …). */
+export class TopologyFetchError extends Error {
+  readonly status: number | null;
+
+  constructor(message: string, status: number | null) {
+    super(message);
+    this.name = 'TopologyFetchError';
+    this.status = status;
+  }
+}
+
+/** Return the access token the panel would send (undefined = callApi path). */
+export function hassAccessToken(hass: HassLike | null): string | undefined {
+  return hass?.auth?.data?.access_token;
+}
+
+/** Pull a short error text out of a JSON error body (meta.error / message). */
+function errorDetail(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const b = body as { meta?: { error?: unknown }; message?: unknown };
+  if (typeof b.meta?.error === 'string') return b.meta.error;
+  if (typeof b.message === 'string') return b.message;
+  return undefined;
+}
+
+/**
+ * Normalise an error from either fetch path into a TopologyFetchError.
+ *
+ * hass.callApi() rejects with a plain object `{ error, status_code, body }`
+ * (not an Error), so the status has to be read from there; anything else
+ * (network failure, AbortError) is passed through unchanged.
+ */
+function toFetchError(err: unknown): unknown {
+  if (err instanceof TopologyFetchError) return err;
+  if (err && typeof err === 'object' && !(err instanceof Error)) {
+    const e = err as { status_code?: unknown; status?: unknown; body?: unknown; error?: unknown };
+    const status =
+      typeof e.status_code === 'number' ? e.status_code
+      : typeof e.status === 'number' ? e.status
+      : null;
+    if (status !== null) {
+      const detail = errorDetail(e.body) ?? (typeof e.error === 'string' ? e.error : undefined);
+      return new TopologyFetchError(detail ? `HTTP ${status}: ${detail}` : `HTTP ${status}`, status);
+    }
+  }
+  return err;
 }
 
 /**
@@ -873,25 +940,52 @@ export interface HassLike {
  * skipped" and cancels callApi calls during panel transitions).
  *
  * Fallback: hass.callApi() — used if no token is available.
+ *
+ * Both paths throw a TopologyFetchError carrying the HTTP status on a
+ * non-2xx answer, so the caller can tell 401 / 403 / 500 apart.
  */
 export async function fetchTopologyData(hass: HassLike): Promise<TopologyData> {
-  const token = (hass as any).auth?.data?.access_token as string | undefined;
-  console.debug('[openwrt-topology] fetchTopologyData — token?', !!token, 'auth keys:', Object.keys((hass as any).auth ?? {}));
+  // An access token that is known to be expired would only earn a 401.
+  if (hass.auth?.expired) await refreshToken(hass);
+  try {
+    return adaptSnapshot(await fetchSnapshot(hass));
+  } catch (err) {
+    if (!(err instanceof TopologyFetchError) || err.status !== 401) throw err;
+  }
+  // First 401: retry exactly once with a refreshed token. Without a token
+  // to refresh, use hass.callApi — it refreshes the token itself.
+  const refreshed = await refreshToken(hass);
+  return adaptSnapshot(await fetchSnapshot(hass, !refreshed));
+}
+
+async function fetchSnapshot(hass: HassLike, forceCallApi = false): Promise<Snapshot> {
+  const token = forceCallApi ? undefined : hassAccessToken(hass);
   let snap: Snapshot;
 
-  if (token) {
-    console.debug('[openwrt-topology] using window.fetch');
-    const response = await window.fetch('/api/openwrt_topology/snapshot', {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    console.debug('[openwrt-topology] fetch response status:', response.status);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    snap = (await response.json()) as Snapshot;
-    console.debug('[openwrt-topology] snapshot nodes:', snap.nodes?.length, 'clients:', snap.clients?.length);
-  } else {
-    console.debug('[openwrt-topology] no token — falling back to callApi');
-    snap = await hass.callApi<Snapshot>('GET', 'openwrt_topology/snapshot');
+  try {
+    if (token) {
+      const response = await window.fetch('/api/openwrt_topology/snapshot', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) {
+        let detail: string | undefined;
+        try {
+          detail = errorDetail(await response.json());
+        } catch {
+          detail = undefined; // non-JSON body (e.g. 410 text)
+        }
+        throw new TopologyFetchError(
+          detail ? `HTTP ${response.status}: ${detail}` : `HTTP ${response.status}`,
+          response.status,
+        );
+      }
+      snap = (await response.json()) as Snapshot;
+    } else {
+      snap = await hass.callApi<Snapshot>('GET', 'openwrt_topology/snapshot');
+    }
+  } catch (err) {
+    throw toFetchError(err);
   }
 
-  return adaptSnapshot(snap);
+  return snap;
 }

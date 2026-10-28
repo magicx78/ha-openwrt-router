@@ -1,7 +1,8 @@
 """Tests for the OpenWrt Device Tracker platform (device_tracker.py)."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, call
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -43,6 +44,48 @@ def _make_hass() -> MagicMock:
     hass.data = {}
     hass.config_entries.async_loaded_entries.return_value = []
     return hass
+
+
+# Entity registry entries seen by async_setup_entry (registry restore).
+_REGISTRY: list = []
+
+
+@pytest.fixture(autouse=True)
+def _fake_entity_registry(monkeypatch):
+    """Serve registry entries from _REGISTRY instead of a real registry."""
+    from custom_components.openwrt_router import device_tracker as dt_module
+
+    _REGISTRY.clear()
+    monkeypatch.setattr(dt_module.er, "async_get", lambda hass: MagicMock())
+    monkeypatch.setattr(
+        dt_module.er,
+        "async_entries_for_config_entry",
+        lambda registry, entry_id: [
+            e for e in _REGISTRY if e.config_entry_id == entry_id
+        ],
+    )
+    yield
+    _REGISTRY.clear()
+
+
+def _reg_entry(
+    entry_id: str,
+    unique_id: str,
+    original_name: str | None = None,
+    name: str | None = None,
+    domain: str = "device_tracker",
+    disabled_by: str | None = None,
+):
+    """A minimal stand-in for an entity registry entry."""
+    return SimpleNamespace(
+        config_entry_id=entry_id,
+        domain=domain,
+        platform=DOMAIN,
+        unique_id=unique_id,
+        original_name=original_name,
+        name=name,
+        disabled_by=disabled_by,
+    )
 
 
 # =====================================================================
@@ -445,3 +488,339 @@ class TestMeshRoaming:
 
         assert tracker.is_connected is False
         assert tracker.extra_state_attributes["connected"] is False
+
+
+# =====================================================================
+# A3: availability across routers, registry restore, last known name
+# =====================================================================
+
+_MAC_X = "02:00:00:00:0A:01"
+_MAC_Y = "02:00:00:00:0A:02"
+
+
+def _coordinator(
+    clients: list, ok: bool = True, ap: str = "OpenWrt-AP", stale: bool = False
+):
+    """Coordinator stub whose client list can be mutated by the test."""
+    coordinator = MagicMock()
+    coordinator.data = SimpleNamespace(clients=clients)
+    coordinator.last_update_success = ok
+    coordinator.stale_for_presence = stale
+    coordinator.router_info = {"hostname": ap, "release": {}}
+    coordinator.get_client_by_mac = MagicMock(
+        side_effect=lambda mac: next(
+            (c for c in clients if c[CLIENT_KEY_MAC].upper() == mac.upper()),
+            None,
+        )
+    )
+    coordinator.async_add_listener = MagicMock(return_value=lambda: None)
+    return coordinator
+
+
+def _entry(entry_id: str, coordinator):
+    from custom_components.openwrt_router import OpenWrtRuntimeData
+
+    entry = MagicMock()
+    entry.entry_id = entry_id
+    entry.title = entry_id
+    entry.data = {"host": "192.0.2.1", "port": 80}
+    entry.runtime_data = OpenWrtRuntimeData(api=AsyncMock(), coordinator=coordinator)
+    entry.async_on_unload = MagicMock()
+    return entry
+
+
+def _owned_tracker(owner_entry, other_entries: list, mac: str):
+    """Tracker owned by owner_entry; hass sees owner + other entries loaded."""
+    hass = _make_hass()
+    hass.config_entries.async_loaded_entries.return_value = [
+        owner_entry, *other_entries
+    ]
+    tracker = OpenWrtClientTrackerEntity(
+        coordinator=owner_entry.runtime_data.coordinator,
+        entry=owner_entry,
+        mac=mac,
+    )
+    tracker.hass = hass
+    return tracker
+
+
+async def _setup(hass, entry) -> list:
+    added: list = []
+    await async_setup_entry(hass, entry, lambda entities: added.extend(entities))
+    return added
+
+
+class TestAvailabilityAcrossRouters:
+    """N4: availability follows ANY answering router, not just the owner."""
+
+    def test_owner_failed_client_on_other_router_is_available_home(self):
+        entry_a = _entry("entry_a", _coordinator([], ok=False))
+        entry_b = _entry(
+            "entry_b",
+            _coordinator([{CLIENT_KEY_MAC: _MAC_X, "hostname": "laptop-test"}]),
+        )
+        tracker = _owned_tracker(entry_a, [entry_b], _MAC_X)
+
+        assert tracker.available is True
+        assert tracker.state == "home"
+
+    def test_owner_failed_client_nowhere_is_available_not_home(self):
+        entry_a = _entry("entry_a", _coordinator([], ok=False))
+        entry_b = _entry("entry_b", _coordinator([]))
+        tracker = _owned_tracker(entry_a, [entry_b], _MAC_X)
+
+        assert tracker.available is True
+        assert tracker.state == "not_home"
+
+    def test_all_routers_failed_is_unavailable(self):
+        entry_a = _entry("entry_a", _coordinator([], ok=False))
+        entry_b = _entry("entry_b", _coordinator([], ok=False))
+        tracker = _owned_tracker(entry_a, [entry_b], _MAC_X)
+
+        assert tracker.available is False
+
+    def test_owner_ok_is_available(self):
+        entry_a = _entry("entry_a", _coordinator([]))
+        tracker = _owned_tracker(entry_a, [], _MAC_X)
+
+        assert tracker.available is True
+
+    def test_other_router_poll_writes_state_only_while_owner_failed(self):
+        coordinator_a = _coordinator([], ok=False)
+        entry_a = _entry("entry_a", coordinator_a)
+        entry_b = _entry("entry_b", _coordinator([]))
+        tracker = _owned_tracker(entry_a, [entry_b], _MAC_X)
+        tracker.async_write_ha_state = MagicMock()
+
+        # The owner's own poll is already handled by CoordinatorEntity.
+        tracker._async_router_polled("entry_a")
+        tracker.async_write_ha_state.assert_not_called()
+
+        tracker._async_router_polled("entry_b")
+        tracker.async_write_ha_state.assert_called_once()
+
+        coordinator_a.last_update_success = True
+        tracker._async_router_polled("entry_b")
+        tracker.async_write_ha_state.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_coordinator_listener_signals_poll(self):
+        from custom_components.openwrt_router import device_tracker as dt_module
+
+        coordinator = _coordinator([])
+        entry = _entry("entry_a", coordinator)
+        hass = _make_hass()
+        await _setup(hass, entry)
+
+        listener = coordinator.async_add_listener.call_args.args[0]
+        with patch.object(dt_module, "async_dispatcher_send") as send:
+            listener()
+        send.assert_called_once_with(hass, dt_module._SIGNAL_ROUTER_POLLED, "entry_a")
+
+
+class TestRegistryRestore:
+    """N5: absent clients known to the registry get an entity at setup."""
+
+    @pytest.mark.asyncio
+    async def test_absent_registry_client_restored_as_not_home(self):
+        entry_a = _entry("entry_a", _coordinator([]))
+        _REGISTRY.append(_reg_entry("entry_a", _MAC_X, original_name="phone-test"))
+        hass = _make_hass()
+        hass.config_entries.async_loaded_entries.return_value = [entry_a]
+
+        added = await _setup(hass, entry_a)
+
+        assert [e.mac_address for e in added] == [_MAC_X]
+        tracker = added[0]
+        tracker.hass = hass
+        assert tracker.state == "not_home"
+        assert tracker.available is True
+        assert tracker.name == "phone-test"
+
+    @pytest.mark.asyncio
+    async def test_legacy_unique_id_restored(self):
+        entry_a = _entry("entry_a", _coordinator([]))
+        _REGISTRY.append(_reg_entry("entry_a", "entry_a_tracker_020000000a02"))
+
+        added = await _setup(_make_hass(), entry_a)
+
+        assert [e.mac_address for e in added] == [_MAC_Y]
+
+    @pytest.mark.asyncio
+    async def test_unrelated_registry_entries_ignored(self):
+        entry_a = _entry("entry_a", _coordinator([]))
+        _REGISTRY.extend(
+            [
+                _reg_entry("entry_a", "entry_a_uptime", domain="sensor"),
+                _reg_entry("entry_a", "not-a-mac"),
+                _reg_entry("entry_other", _MAC_X),
+            ]
+        )
+
+        assert await _setup(_make_hass(), entry_a) == []
+
+    @pytest.mark.asyncio
+    async def test_live_and_registry_same_mac_gives_one_entity(self):
+        entry_a = _entry(
+            "entry_a",
+            _coordinator([{CLIENT_KEY_MAC: _MAC_X, "hostname": "laptop-test"}]),
+        )
+        _REGISTRY.append(_reg_entry("entry_a", _MAC_X))
+
+        added = await _setup(_make_hass(), entry_a)
+
+        assert [e.mac_address for e in added] == [_MAC_X]
+
+    @pytest.mark.parametrize("order", [("a", "b"), ("b", "a")])
+    @pytest.mark.asyncio
+    async def test_same_mac_in_two_entries_gives_one_entity(self, order):
+        """A knows X from the registry, B from the registry (legacy) AND live."""
+        entries = {
+            "a": _entry("entry_a", _coordinator([])),
+            "b": _entry(
+                "entry_b", _coordinator([{CLIENT_KEY_MAC: _MAC_X, "hostname": ""}])
+            ),
+        }
+        _REGISTRY.extend(
+            [
+                _reg_entry("entry_a", _MAC_X),
+                _reg_entry("entry_b", "entry_b_tracker_020000000a01"),
+            ]
+        )
+        hass = _make_hass()
+
+        added: list = []
+        for key in order:
+            added.extend(await _setup(hass, entries[key]))
+
+        assert [e.mac_address for e in added] == [_MAC_X]
+        # The first entry to set up keeps the claim; nothing is stolen.
+        assert added[0]._entry is entries[order[0]]
+
+    @pytest.mark.asyncio
+    async def test_restored_claims_released_on_unload(self):
+        entry_a = _entry("entry_a", _coordinator([]))
+        entry_b = _entry("entry_b", _coordinator([]))
+        _REGISTRY.extend(
+            [_reg_entry("entry_a", _MAC_X), _reg_entry("entry_b", _MAC_X)]
+        )
+        hass = _make_hass()
+
+        assert len(await _setup(hass, entry_a)) == 1
+        for call_args in entry_a.async_on_unload.call_args_list:
+            call_args.args[0]()
+
+        assert [e.mac_address for e in await _setup(hass, entry_b)] == [_MAC_X]
+
+
+class TestLastKnownName:
+    """NEU-A5: an absent client keeps its last hostname as name."""
+
+    def test_absent_client_keeps_last_hostname(self):
+        clients = [{CLIENT_KEY_MAC: _MAC_X, "hostname": "laptop-test"}]
+        entry_a = _entry("entry_a", _coordinator(clients))
+        tracker = _owned_tracker(entry_a, [], _MAC_X)
+        assert tracker.name == "laptop-test"
+
+        clients.clear()
+
+        assert tracker.is_connected is False
+        assert tracker.name == "laptop-test"
+
+    def test_seeded_last_name_used_while_absent(self):
+        entry_a = _entry("entry_a", _coordinator([]))
+        tracker = OpenWrtClientTrackerEntity(
+            coordinator=entry_a.runtime_data.coordinator,
+            entry=entry_a,
+            mac=_MAC_X,
+            last_name="phone-test",
+        )
+        assert tracker.name == "phone-test"
+
+    @pytest.mark.asyncio
+    async def test_mac_like_registry_name_is_not_seeded(self):
+        entry_a = _entry("entry_a", _coordinator([]))
+        _REGISTRY.append(
+            _reg_entry("entry_a", _MAC_X, original_name="02-00-00-00-0a-01", name="")
+        )
+
+        added = await _setup(_make_hass(), entry_a)
+
+        assert added[0].name == _MAC_X
+
+    @pytest.mark.asyncio
+    async def test_registry_name_falls_back_to_user_name(self):
+        entry_a = _entry("entry_a", _coordinator([]))
+        _REGISTRY.append(_reg_entry("entry_a", _MAC_X, name="phone-test"))
+
+        added = await _setup(_make_hass(), entry_a)
+
+        assert added[0].name == "phone-test"
+
+
+class TestStaleRouterPresence:
+    """A3 review P1: a router failing beyond the grace period is ignored."""
+
+    _CLIENT = {CLIENT_KEY_MAC: _MAC_X, "hostname": "laptop-test"}
+
+    def test_owner_brief_failure_keeps_client_home(self):
+        entry_a = _entry("entry_a", _coordinator([dict(self._CLIENT)], ok=False))
+        entry_b = _entry("entry_b", _coordinator([]))
+        tracker = _owned_tracker(entry_a, [entry_b], _MAC_X)
+
+        assert tracker.available is True
+        assert tracker.state == "home"
+
+    def test_owner_stale_client_only_there_is_not_home(self):
+        entry_a = _entry(
+            "entry_a", _coordinator([dict(self._CLIENT)], ok=False, stale=True)
+        )
+        entry_b = _entry("entry_b", _coordinator([]))
+        tracker = _owned_tracker(entry_a, [entry_b], _MAC_X)
+
+        assert tracker.available is True
+        assert tracker.state == "not_home"
+        assert tracker.extra_state_attributes["connected"] is False
+
+    def test_owner_stale_client_on_other_router_is_home(self):
+        entry_a = _entry(
+            "entry_a", _coordinator([dict(self._CLIENT)], ok=False, stale=True)
+        )
+        entry_b = _entry("entry_b", _coordinator([dict(self._CLIENT)], ap="AP-B"))
+        tracker = _owned_tracker(entry_a, [entry_b], _MAC_X)
+
+        assert tracker.state == "home"
+        assert tracker.extra_state_attributes["connected_ap"] == "AP-B"
+
+    def test_other_router_stale_is_ignored(self):
+        entry_a = _entry("entry_a", _coordinator([]))
+        entry_b = _entry(
+            "entry_b", _coordinator([dict(self._CLIENT)], ok=False, stale=True)
+        )
+        tracker = _owned_tracker(entry_a, [entry_b], _MAC_X)
+
+        assert tracker.available is True
+        assert tracker.state == "not_home"
+
+    def test_all_routers_stale_is_unavailable(self):
+        entry_a = _entry("entry_a", _coordinator([], ok=False, stale=True))
+        entry_b = _entry("entry_b", _coordinator([], ok=False, stale=True))
+        tracker = _owned_tracker(entry_a, [entry_b], _MAC_X)
+
+        assert tracker.available is False
+
+
+class TestDisabledRegistryEntries:
+    """A3 review P2: disabled registry trackers must not take a claim."""
+
+    @pytest.mark.asyncio
+    async def test_disabled_entry_not_restored_and_claims_nothing(self):
+        entry_a = _entry("entry_a", _coordinator([]))
+        entry_b = _entry(
+            "entry_b", _coordinator([{CLIENT_KEY_MAC: _MAC_X, "hostname": ""}])
+        )
+        _REGISTRY.append(_reg_entry("entry_a", _MAC_X, disabled_by="user"))
+        hass = _make_hass()
+
+        assert await _setup(hass, entry_a) == []
+        assert [e.mac_address for e in await _setup(hass, entry_b)] == [_MAC_X]

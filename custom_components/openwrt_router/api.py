@@ -22,6 +22,7 @@ import asyncssh
 
 from . import oui
 from .const import (
+    ARP_READ_TRUNCATION_BYTES,
     BRIDGE_PORT_MAP_REFRESH_INTERVAL,
     CLIENT_KEY_CONFIDENCE,
     CLIENT_KEY_CONNECTED_SINCE,
@@ -137,6 +138,10 @@ _LOGGER = logging.getLogger(__name__)
 # OpenWrtAPI, so a per-instance latch warned again on each retry.
 _ROOT_WARNED_HOSTS: set[str] = set()
 
+# P-6: rejected logins in a row before the exponential auth backoff blocks
+# further logins (see OpenWrtAPI._call).
+_MAX_AUTH_FAILURES = 3
+
 # Per-core CPU load: system/info reports the run-queue average, so 1.0 on a
 # dual-core router is half its capacity. The core count comes from
 # /proc/cpuinfo via ubus file/read (rpcd ACL v7), read once per API instance.
@@ -193,6 +198,27 @@ SUBPROCESS_RC_CANCELLED = -3  # caller's task was cancelled mid-flight
 # SSH connect timeout (seconds) — parity with the old ``-o ConnectTimeout=8``.
 SSH_CONNECT_TIMEOUT = 8.0
 REBOOT_SSH_TIMEOUT = 15.0  # dispatch of the detached reboot command
+# "Check for updates": index download + list on slow flash/uplinks.
+UPDATE_CHECK_SSH_TIMEOUT = 180.0
+
+# Package update check, run over SSH on button press only (never from a poll:
+# it downloads the feed indexes and writes them to the router). The rpcd ACL
+# allows file/exec only for /etc/init.d/rpcd, so ubus cannot run apk/opkg.
+# apk (OpenWrt >= 25) is preferred; `apk version -l '<'` covers apk builds
+# whose `apk list` lacks -u. Markers (@@...) carry the exit codes.
+_UPDATE_CHECK_SCRIPT = (
+    "if command -v apk >/dev/null 2>&1; then "
+    "echo '@@pm=apk'; "
+    'apk update >/dev/null 2>&1; echo "@@update_rc=$?"; '
+    "apk list -u 2>/dev/null || apk version -l '<' 2>/dev/null; "
+    'echo "@@list_rc=$?"; '
+    "elif command -v opkg >/dev/null 2>&1; then "
+    "echo '@@pm=opkg'; "
+    'opkg update >/dev/null 2>&1; echo "@@update_rc=$?"; '
+    "opkg list-upgradable 2>/dev/null; "
+    'echo "@@list_rc=$?"; '
+    "else echo '@@pm=none'; fi"
+)
 
 
 async def _safe_subprocess_exec(
@@ -330,6 +356,15 @@ class OpenWrtAuthError(Exception):
     """Raised when authentication with the router fails."""
 
 
+class OpenWrtAuthBackoffError(OpenWrtAuthError):
+    """Raised for a call blocked by the auth backoff, without any login.
+
+    A subclass of OpenWrtAuthError so callers with an auth fallback keep
+    working; the coordinator must not count it as a credential failure
+    (it says nothing new about the credentials).
+    """
+
+
 class OpenWrtRpcdSetupError(OpenWrtAuthError):
     """Raised when rpcd is not properly configured on the router.
 
@@ -353,6 +388,77 @@ class OpenWrtMethodNotFoundError(Exception):
 
 class OpenWrtResponseError(Exception):
     """Raised when the router returns an unexpected response."""
+
+
+class OpenWrtUpdateCheckError(Exception):
+    """Raised when the package update check cannot produce a result."""
+
+
+class OpenWrtUpdateCheckRunningError(OpenWrtUpdateCheckError):
+    """Raised when an update check is requested while one is still running."""
+
+
+# apk package tokens are "<name>-<version>"; OpenWrt apk versions end in
+# "-r<release>" and names may contain "-<digit>" (libpcre2-8), so the version
+# is anchored at the end. Second pattern: versions without a release suffix.
+_APK_PKGVER_RE = (
+    re.compile(r"^(?P<name>.+)-(?P<version>[^-]+-r\d+)$"),
+    re.compile(r"^(?P<name>.+?)-(?P<version>\d.*)$"),
+)
+# `apk list -u`: "<name>-<new> <arch> {<origin>} (<license>) [upgradable from: <name>-<old>]"
+_APK_LIST_RE = re.compile(r"^(?P<new>\S+)\s.*\[upgradable from: (?P<old>\S+)\]")
+# `apk version -l '<'`: "<name>-<old>   < <new>"
+_APK_VERSION_RE = re.compile(r"^(?P<old>\S+)\s+<\s+(?P<new>\S+)$")
+
+
+def _split_apk_pkgver(token: str) -> tuple[str, str] | None:
+    """Split an apk "<name>-<version>" token, None when it has no version."""
+    for pattern in _APK_PKGVER_RE:
+        if match := pattern.match(token):
+            return match.group("name"), match.group("version")
+    return None
+
+
+def parse_apk_upgradable(text: str) -> list[dict[str, str]]:
+    """Parse `apk list -u` or `apk version -l '<'` output.
+
+    Returns:
+        One ``{"name", "current", "available"}`` dict per upgradable package;
+        headers, warnings and non-upgradable lines are skipped.
+    """
+    packages: list[dict[str, str]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if match := _APK_LIST_RE.match(line):
+            new = _split_apk_pkgver(match.group("new"))
+            old = _split_apk_pkgver(match.group("old"))
+            if new is None or old is None:
+                continue
+            packages.append({"name": old[0], "current": old[1], "available": new[1]})
+        elif match := _APK_VERSION_RE.match(line):
+            old = _split_apk_pkgver(match.group("old"))
+            if old is None:
+                continue
+            packages.append(
+                {"name": old[0], "current": old[1], "available": match.group("new")}
+            )
+    return packages
+
+
+def parse_opkg_upgradable(text: str) -> list[dict[str, str]]:
+    """Parse `opkg list-upgradable` output ("<name> - <current> - <available>").
+
+    Returns:
+        One ``{"name", "current", "available"}`` dict per upgradable package;
+        "Collected errors" and other non-package lines are skipped.
+    """
+    packages: list[dict[str, str]] = []
+    for raw in text.splitlines():
+        parts = [part.strip() for part in raw.strip().split(" - ")]
+        if len(parts) != 3 or not all(parts) or " " in parts[0]:
+            continue
+        packages.append({"name": parts[0], "current": parts[1], "available": parts[2]})
+    return packages
 
 
 def _parse_uci_config(raw: str) -> dict[str, dict[str, Any]]:
@@ -864,6 +970,49 @@ def _parse_proc_net_arp(raw: str) -> dict[str, str]:
     return {mac: rank[2] for mac, rank in candidates.items()}
 
 
+def _arp_read_truncated(raw: str) -> bool:
+    """Return True if an rpcd ``file read`` of /proc/net/arp looks cut off.
+
+    rpcd returns at most 4 KiB of a procfs file; a reply near that size or
+    one whose last line is incomplete has lost entries.
+    """
+    if not raw:
+        return False
+    return len(raw.encode()) >= ARP_READ_TRUNCATION_BYTES or not raw.endswith("\n")
+
+
+def _parse_host_hints(hints: Any) -> dict[str, str]:
+    """Parse ``luci-rpc getHostHints`` into {mac_lower: ipv4}.
+
+    Shape: ``{MAC: {"ipaddrs": [...], "ip6addrs": [...], "name": ...}}``;
+    older LuCI used ``"ipv4": str``. Several IPv4 addresses resolve to the
+    numerically smallest one, like :func:`_parse_proc_net_arp`.
+    """
+    out: dict[str, str] = {}
+    if not isinstance(hints, dict):
+        return out
+    for mac, info in hints.items():
+        if not isinstance(mac, str) or not isinstance(info, dict):
+            continue
+        raw_ips = info.get("ipaddrs")
+        if not isinstance(raw_ips, list):
+            raw_ips = [info.get("ipv4")]
+        addrs: list[ipaddress.IPv4Address] = []
+        for ip in raw_ips:
+            if not isinstance(ip, str):
+                continue
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            if addr.version == 4:
+                addrs.append(addr)
+        mac = mac.lower()
+        if addrs and mac != "00:00:00:00:00:00":
+            out[mac] = str(min(addrs))
+    return out
+
+
 def _as_byte_counter(value: Any) -> int | None:
     """Return a non-negative int from a counter value (int or digit string)."""
     if isinstance(value, bool):
@@ -1137,8 +1286,9 @@ class OpenWrtAPI:
         the warning re-fire on every re-login.
         """
         self._ssh_fallback_used = False
-        self._auth_failure_count = 0
-        self._auth_backoff_until = 0.0
+        # The auth backoff (_auth_failure_count / _auth_backoff_until) is
+        # deliberately kept: clearing it here let every poll log in again
+        # with rejected credentials. It ends by expiry or a successful call.
 
     def reset_acl_blocked(self) -> None:
         """Forget cached ACL-blocked methods so they are re-probed.
@@ -3991,20 +4141,60 @@ class OpenWrtAPI:
             "mounts": [],
         }
 
-    async def get_network_interfaces(self) -> list[dict[str, Any]]:
-        """Return network interface statistics from network.interface/dump.
+    async def get_device_status(self) -> dict[str, Any]:
+        """Return ``network.device status {}`` — all netifd devices by name.
+
+        One unnamed call per poll; the coordinator shares the result between
+        :meth:`get_network_interfaces` (byte counters) and
+        :meth:`get_port_stats`. Returns ``{}`` when the call is not allowed
+        or fails.
+        """
+        try:
+            result = await self._call(UBUS_DEVICE_OBJECT, UBUS_DEVICE_STATUS, {})
+        except (
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+            OpenWrtMethodNotFoundError,
+        ) as err:
+            _LOGGER.debug("network.device status unavailable: %s", err)
+            return {}
+        return result if isinstance(result, dict) else {}
+
+    async def get_network_interfaces(
+        self, device_status: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Return network interfaces from network.interface/dump.
+
+        ``network.interface dump`` carries no traffic counters; ``rx_bytes``
+        and ``tx_bytes`` come from ``device_status`` (the result of
+        :meth:`get_device_status`), looked up by the interface's l3 device.
+        Without a status entry for that device they are ``None`` (unknown),
+        never 0. No extra ubus call is made here.
 
         Returns:
             [
                 {
                     "interface": str,
-                    "rx_bytes": int,
-                    "tx_bytes": int,
+                    "rx_bytes": int | None,
+                    "tx_bytes": int | None,
                     "status": "up" | "down",
                 },
                 ...
             ]
         """
+        interfaces = await self._get_network_interfaces_raw()
+        devices = device_status or {}
+        for iface in interfaces:
+            dev = devices.get(iface.get("interface", ""))
+            stats = dev.get("statistics") if isinstance(dev, dict) else None
+            if not isinstance(stats, dict):
+                stats = {}
+            iface["rx_bytes"] = _as_byte_counter(stats.get("rx_bytes"))
+            iface["tx_bytes"] = _as_byte_counter(stats.get("tx_bytes"))
+        return interfaces
+
+    async def _get_network_interfaces_raw(self) -> list[dict[str, Any]]:
+        """Parse network.interface/dump (SSH ``ip addr`` as fallback)."""
         try:
             result = await self._call(UBUS_NETWORK_OBJECT, UBUS_NETWORK_DUMP, {})
             interfaces: list[dict[str, Any]] = result.get("interface", [])
@@ -4021,8 +4211,6 @@ class OpenWrtAPI:
                     {
                         "interface": l3_device,
                         "logical_name": iface.get("interface", ""),
-                        "rx_bytes": iface.get("statistics", {}).get("rx_bytes", 0),
-                        "tx_bytes": iface.get("statistics", {}).get("tx_bytes", 0),
                         "status": "up" if iface.get("up") else "down",
                         "ipv4_addr": first_ipv4.get("address"),
                         "prefix_len": first_ipv4.get("mask"),
@@ -4049,8 +4237,13 @@ class OpenWrtAPI:
             return []
         return _parse_ip_addr_output(out)
 
-    async def get_port_stats(self) -> list[dict[str, Any]]:
+    async def get_port_stats(
+        self, device_status: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
         """Return per-port link status and traffic counters from network.device/status.
+
+        ``device_status`` is a result of :meth:`get_device_status` fetched
+        earlier in the same poll; without it the status is queried here.
 
         Queries the network.device ubus object which reports physical switch ports
         (lan1, lan2, lan3, wan, etc.) with link speed and byte counters.
@@ -4080,15 +4273,11 @@ class OpenWrtAPI:
             ]
             Sorted by name. Returns [] if the ubus object is not accessible.
         """
-        try:
-            result = await self._call(UBUS_DEVICE_OBJECT, UBUS_DEVICE_STATUS, {})
-        except (
-            OpenWrtResponseError,
-            OpenWrtTimeoutError,
-            OpenWrtMethodNotFoundError,
-        ) as err:
-            _LOGGER.debug("Port stats unavailable (network.device ACL?): %s", err)
-            return []
+        result = (
+            device_status
+            if device_status is not None
+            else await self.get_device_status()
+        )
 
         ports: list[dict[str, Any]] = []
         for name, dev in result.items():
@@ -4503,8 +4692,11 @@ class OpenWrtAPI:
         else:
             # A successful read is final, even without complete entries yet;
             # falling through to SSH here would cost one login per poll.
-            arp = _parse_proc_net_arp(result.get("data", "") or "")
+            raw = result.get("data", "") or ""
+            arp = _parse_proc_net_arp(raw)
             _LOGGER.debug("ARP table via file/read: %d entries", len(arp))
+            if _arp_read_truncated(raw):
+                await self._merge_host_hints(arp)
             return arp
 
         try:
@@ -4515,6 +4707,30 @@ class OpenWrtAPI:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("ARP table SSH fallback failed: %s", err)
             return {}
+
+    async def _merge_host_hints(self, arp: dict[str, str]) -> None:
+        """Add MAC → IPv4 pairs from ``luci-rpc getHostHints`` missing in ``arp``.
+
+        Only called when rpcd truncated the /proc/net/arp read (4 KiB).
+        Rows from the ARP table win; hints only fill MACs that the
+        truncation dropped. No SSH fallback — a blocked call keeps ``arp``.
+        """
+        try:
+            hints = await self._call("luci-rpc", "getHostHints", {})
+        except (
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+            OpenWrtMethodNotFoundError,
+            OpenWrtAuthError,
+        ) as err:
+            _LOGGER.debug("ARP read truncated, getHostHints unavailable: %s", err)
+            return
+        added = 0
+        for mac, ip in _parse_host_hints(hints).items():
+            if mac not in arp:
+                arp[mac] = ip
+                added += 1
+        _LOGGER.debug("ARP read truncated, %d entries added from host hints", added)
 
     async def get_trunk_port_map(
         self,
@@ -4596,188 +4812,94 @@ class OpenWrtAPI:
     # Update management
     # ------------------------------------------------------------------
 
-    async def get_available_updates(self) -> dict[str, Any]:
-        """Check for available system and addon package updates.
+    async def check_package_updates(self) -> dict[str, Any]:
+        """Determine upgradable packages with the router's package manager.
 
-        Executes opkg list-upgradable to identify upgradable packages and
-        categorizes them as system packages or addons based on naming conventions.
+        Runs ``apk`` (OpenWrt >= 25) or ``opkg`` over SSH: refresh the feed
+        indexes, then list upgradable packages. Only for an explicit user
+        action — it downloads the indexes and writes them to the router, so
+        it must never run from the poll path. ubus cannot do this: the rpcd
+        ACL restricts file/exec to /etc/init.d/rpcd.
 
-        Returns:
-            {
-                "available": bool,
-                "system": [
-                    {
-                        "name": "package-name",
-                        "current_version": "1.0.0",
-                        "new_version": "1.0.1",
-                        "category": "system"
-                    },
-                    ...
-                ],
-                "addons": [
-                    {
-                        "name": "addon-name",
-                        "current_version": "2.0.0",
-                        "new_version": "2.0.1",
-                        "category": "addon"
-                    },
-                    ...
-                ]
-            }
-        """
-        try:
-            # Try to read cached opkg list-upgradable output
-            # This should have been populated by a prior update-check button press
-            result = await self._call(
-                UBUS_FILE_OBJECT,
-                UBUS_FILE_READ,
-                {"path": "/tmp/opkg_list"},
-            )
-            raw_content = result.get("data", "")
-            if not raw_content:
-                # No cached data; return empty list
-                _LOGGER.debug("No cached opkg update list found")
-                return {"available": False, "system": [], "addons": []}
-
-            # Parse the opkg list-upgradable output
-            system_updates: list[dict[str, str]] = []
-            addon_updates: list[dict[str, str]] = []
-
-            for line in raw_content.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-
-                # opkg list-upgradable format: "package-name - current-version - new-version"
-                parts = [p.strip() for p in line.split(" - ")]
-                if len(parts) < 2:
-                    _LOGGER.debug("Skipping malformed opkg line: %r", line)
-                    continue
-
-                package_name = parts[0]
-                # Versions may contain spaces/hyphens; rejoin all remaining parts
-                versions = " - ".join(parts[1:]) if len(parts) > 2 else parts[1]
-
-                update_info = {
-                    "name": package_name,
-                    "version": versions,
-                    "category": "system",
-                }
-
-                # Categorize: addon packages typically start with "addon-" or "luci-"
-                if package_name.startswith(("addon-", "luci-")):
-                    update_info["category"] = "addon"
-                    addon_updates.append(update_info)
-                else:
-                    system_updates.append(update_info)
-
-            has_updates = bool(system_updates or addon_updates)
-            return {
-                "available": has_updates,
-                "system": system_updates,
-                "addons": addon_updates,
-            }
-        except OpenWrtAuthError:
-            _LOGGER.debug("Update check failed: permission denied reading opkg data")
-            return {"available": False, "system": [], "addons": []}
-        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-            _LOGGER.debug("Update check failed: unable to read cached opkg list")
-            return {"available": False, "system": [], "addons": []}
-
-    async def perform_update(self, update_type: str = "system") -> dict[str, Any]:
-        """Trigger system or addon package updates.
-
-        Initiates opkg update and upgrade process. Note: This is a long-running
-        operation; actual execution happens on the router and may take several
-        minutes. The integration returns immediately with a status message.
-
-        Args:
-            update_type: Type of update to perform:
-                - "system": Update only core system packages
-                - "addons": Update only addon/LuCI packages
-                - "both": Update all packages
+        A failed index refresh (e.g. one unreachable feed) is not fatal; the
+        list then reflects the indexes that were fetched and
+        ``index_refreshed`` is False.
 
         Returns:
-            {
-                "status": "initiated" | "error",
-                "message": str,
-                "update_type": str,
-            }
+            {"package_manager": "apk" | "opkg", "index_refreshed": bool,
+             "packages": [{"name", "current", "available"}, ...]}
+
+        Raises:
+            OpenWrtUpdateCheckError: SSH unavailable, timeout, no package
+                manager, or the package list could not be read.
         """
-        if update_type not in ("system", "addons", "both"):
-            return {
-                "status": "error",
-                "message": f"Invalid update_type: {update_type}",
-                "update_type": update_type,
-            }
-
         try:
-            _LOGGER.info("Initiating %s package update", update_type)
-
-            # Build the update command based on type
-            if update_type == "system":
-                # Update system packages only (exclude addon-* and luci-*)
-                cmd = (
-                    "opkg update && "
-                    "opkg upgrade $(opkg list-upgradable | "
-                    "grep -v -E '^addon-|^luci-' | cut -d' ' -f1)"
-                )
-            elif update_type == "addons":
-                # Update addon packages only
-                cmd = (
-                    "opkg update && "
-                    "opkg upgrade $(opkg list-upgradable | "
-                    "grep -E '^addon-|^luci-' | cut -d' ' -f1)"
-                )
-            else:  # "both"
-                # Update all packages
-                cmd = (
-                    "opkg update && "
-                    "opkg upgrade $(opkg list-upgradable | cut -d' ' -f1)"
-                )
-
-            # Log the command (note: we never log credentials)
-            _LOGGER.debug("Update command: %s", cmd)
-
-            # Execute update via SSH (rpcd-mod-file does not support write).
-            # Caller-side log redirection so the user can tail it on the router.
-            # _run_ssh_detached wraps with nohup + </dev/null + & so opkg keeps
-            # running after the sshd channel closes — and the lifecycle helper
-            # guarantees no leaked subprocess locally on the HA host.
-            rc, _stdout, stderr = await self._run_ssh_detached(
-                f"{cmd} > /tmp/opkg_update.log 2>&1", timeout=30.0
+            rc, stdout, stderr = await self._asyncssh_run(
+                _UPDATE_CHECK_SCRIPT, timeout=UPDATE_CHECK_SSH_TIMEOUT, binary=False
             )
-            if rc == SUBPROCESS_RC_TIMEOUT:
-                _LOGGER.error("Update SSH command timed out")
-                return {
-                    "status": "error",
-                    "message": "Update SSH command timed out",
-                    "update_type": update_type,
-                }
-            if rc != 0:
-                error_msg = stderr.decode(errors="replace").strip()
-                _LOGGER.error("Update SSH command failed: %s", error_msg)
-                return {
-                    "status": "error",
-                    "message": f"Update SSH command failed: {error_msg}",
-                    "update_type": update_type,
-                }
+        finally:
+            # Button press outside a poll: do not keep the session open.
+            await self._asyncssh_request_release()
 
-            _LOGGER.info("Update initiated on router via SSH (%s)", update_type)
-            return {
-                "status": "initiated",
-                "message": f"Package update initiated ({update_type}). "
-                "Check /tmp/opkg_update.log on the router for progress.",
-                "update_type": update_type,
-            }
+        if rc == SUBPROCESS_RC_TIMEOUT:
+            raise OpenWrtUpdateCheckError(
+                f"Update check timed out after {UPDATE_CHECK_SSH_TIMEOUT:.0f} s — "
+                "the router may still be refreshing its package lists; "
+                "try again in a few minutes"
+            )
+        if rc == 255:
+            raise OpenWrtUpdateCheckError(
+                "SSH login denied — the update check needs SSH access with the "
+                "configured credentials or an SSH key"
+            )
+        if rc < 0:
+            reason = stderr.decode(errors="replace").strip() or "unknown error"
+            raise OpenWrtUpdateCheckError(f"SSH connection failed: {reason}")
 
-        except (OpenWrtAuthError, OpenWrtResponseError) as err:
-            _LOGGER.error("Update initiation failed: %s", err)
-            return {
-                "status": "error",
-                "message": f"Update initiation failed: {err}",
-                "update_type": update_type,
-            }
+        assert isinstance(stdout, str)
+        markers: dict[str, str] = {}
+        body: list[str] = []
+        for line in stdout.splitlines():
+            if line.startswith("@@") and "=" in line:
+                key, _, value = line[2:].partition("=")
+                markers[key] = value.strip()
+            else:
+                body.append(line)
+
+        manager = markers.get("pm")
+        if manager is None:
+            raise OpenWrtUpdateCheckError(
+                f"Update check returned unexpected output (exit code {rc})"
+            )
+        if manager not in ("apk", "opkg"):
+            raise OpenWrtUpdateCheckError(
+                "No supported package manager (apk or opkg) found on the router"
+            )
+
+        text = "\n".join(body)
+        packages = (
+            parse_apk_upgradable(text)
+            if manager == "apk"
+            else parse_opkg_upgradable(text)
+        )
+        if markers.get("list_rc") != "0" and not packages:
+            raise OpenWrtUpdateCheckError(
+                f"{manager} could not list the upgradable packages"
+            )
+
+        index_refreshed = markers.get("update_rc") == "0"
+        if not index_refreshed:
+            _LOGGER.warning(
+                "%s update did not refresh all package indexes on %s — "
+                "the update list may be incomplete",
+                manager,
+                self._host,
+            )
+        return {
+            "package_manager": manager,
+            "index_refreshed": index_refreshed,
+            "packages": packages,
+        }
 
     # ------------------------------------------------------------------
     # Service Management (procd / rc)
@@ -4973,23 +5095,28 @@ class OpenWrtAPI:
             OpenWrtAuthError: Auth failed even after re-login attempt.
             OpenWrtResponseError: Unexpected or malformed response.
         """
-        await self._ensure_fresh_token()
-
         # C-1: reject new calls when API is shutting down
         if self._closing:
             raise OpenWrtConnectionError("OpenWrtAPI is closing – call rejected")
 
-        # P-6: if repeated auth failures suggest wrong credentials, stop hammering
-        _MAX_AUTH_FAILURES = 3
+        # P-6: if repeated auth failures suggest wrong credentials, stop
+        # hammering. Checked before ANY login — including the proactive token
+        # refresh below — so no login happens while the backoff is active.
         if self._auth_failure_count >= _MAX_AUTH_FAILURES:
             now = time.monotonic()
             if now < self._auth_backoff_until:
-                raise OpenWrtAuthError(
+                raise OpenWrtAuthBackoffError(
                     "Authentication blocked after repeated failures — "
                     "check credentials (backoff active)"
                 )
             # Backoff expired: reset and try again
             self._auth_failure_count = 0
+
+        try:
+            await self._ensure_fresh_token()
+        except OpenWrtAuthError:
+            self._note_login_failure()
+            raise
 
         # Short-circuit methods already confirmed ACL-blocked this session.
         # Re-trying them only fails again and (pre-cache) triggered a useless
@@ -5014,16 +5141,7 @@ class OpenWrtAPI:
                     await self.login()
                     self._auth_failure_count = 0
                 except OpenWrtAuthError:
-                    self._auth_failure_count += 1
-                    # Exponential backoff: 30s, 60s, 120s … capped at 300s
-                    backoff = min(30 * (2 ** (self._auth_failure_count - 1)), 300)
-                    self._auth_backoff_until = time.monotonic() + backoff
-                    _LOGGER.warning(
-                        "Auth failure %d/%d — next retry in %ds",
-                        self._auth_failure_count,
-                        _MAX_AUTH_FAILURES,
-                        backoff,
-                    )
+                    self._note_login_failure()
                     raise
                 payload = self._build_call(ubus_object, method, params)
                 try:
@@ -5041,6 +5159,19 @@ class OpenWrtAPI:
                         f"(authenticated OK, method not permitted)"
                     ) from None
             raise
+
+    def _note_login_failure(self) -> None:
+        """Count a rejected login and arm the exponential auth backoff."""
+        self._auth_failure_count += 1
+        # Exponential backoff: 30s, 60s, 120s … capped at 300s
+        backoff = min(30 * (2 ** (self._auth_failure_count - 1)), 300)
+        self._auth_backoff_until = time.monotonic() + backoff
+        _LOGGER.warning(
+            "Auth failure %d/%d — next retry in %ds",
+            self._auth_failure_count,
+            _MAX_AUTH_FAILURES,
+            backoff,
+        )
 
     @staticmethod
     def _acl_cache_key(

@@ -227,6 +227,9 @@ export interface TopologyData {
   clients: Client[];
   switchNodes: SwitchNode[];  // inferred switch nodes between gateway and APs
   timestamp: string;
+  // true = the snapshot listed no router at all; `gateway` is then only a
+  // placeholder and must not raise "WAN offline" style alerts.
+  noRouters?: boolean;
 }
 
 // ── Layout types ──────────────────────────────────────────────────────────
