@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass
 from functools import partial
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import SOURCE_IGNORE, ConfigEntry
 from homeassistant.const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -223,6 +223,17 @@ def _disable_legacy_dynamic_sensors(hass: HomeAssistant, entry: ConfigEntry) -> 
         )
 
 
+def _stagger_offset(entry_ids: list[str], entry_id: str, interval: int) -> int:
+    """Return the poll offset of ``entry_id`` within ``interval`` seconds.
+
+    The index is the position of the entry in the sorted list of entry ids
+    (the entry itself is always included), so every entry gets a stable,
+    distinct slot no matter in which order the entries are set up.
+    """
+    ids = sorted(set(entry_ids) | {entry_id})
+    return (ids.index(entry_id) * interval) // len(ids)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
     """Set up OpenWrt Router from a config entry.
 
@@ -332,10 +343,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # so they never all poll simultaneously (e.g. 4 routers × 15s = 0/15/30/45s offsets).
     from .const import SCAN_INTERVAL_SECONDS
 
-    loaded_entries = hass.config_entries.async_entries(DOMAIN)
-    stagger_index = sum(1 for e in loaded_entries if e.entry_id != entry.entry_id)
-    total = max(len(loaded_entries), 1)
-    poll_offset = (stagger_index * SCAN_INTERVAL_SECONDS) // total
+    poll_offset = _stagger_offset(
+        [
+            e.entry_id
+            for e in hass.config_entries.async_entries(DOMAIN)
+            if e.disabled_by is None and e.source != SOURCE_IGNORE
+        ],
+        entry.entry_id,
+        SCAN_INTERVAL_SECONDS,
+    )
 
     # Create and populate the coordinator
     coordinator = OpenWrtCoordinator(

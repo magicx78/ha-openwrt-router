@@ -104,6 +104,8 @@ from .const import (
     RAM_PRESSURE_HIGH_PCT,
     RAM_PRESSURE_HOLD_SECONDS,
     SCAN_INTERVAL_SECONDS,
+    SSH_FALLBACK_INTERVAL_SECONDS,
+    THROTTLED_INTERVAL_SECONDS,
     TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES,
     TOPOLOGY_SNAPSHOT_MAX,
     USTEER_RETRY_CYCLES,
@@ -428,7 +430,12 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._features_detected = False
         self._board_poll_count = 0
         self._poll_offset_seconds = poll_offset_seconds
+        # The stagger offset delays only the first *scheduled* poll; refreshes
+        # requested by switches/buttons are never delayed.
+        self._stagger_pending = poll_offset_seconds > 0
         self._poll_count = 0
+        # One warning with traceback per streak of unexpected poll errors
+        self._unexpected_error_logged = False
         self._throttled = False  # True when interval is doubled due to high CPU load
         self._ssh_fallback_notified = False  # True after HA notification was fired
         self._client_first_seen: dict[str, datetime] = {}
@@ -512,6 +519,25 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
     # DataUpdateCoordinator interface
     # ------------------------------------------------------------------
 
+    async def _handle_refresh_interval(self, _now: datetime | None = None) -> None:
+        """Run a scheduled poll; delay the first one by the stagger offset.
+
+        Spreads multiple coordinators evenly across the scan interval. Only
+        the timer path comes through here — ``async_request_refresh`` (switch,
+        button) never waits for the offset. If a requested refresh ran during
+        the wait it already scheduled the next poll, so this one is dropped.
+        """
+        if self._stagger_pending:
+            self._stagger_pending = False
+            _LOGGER.debug(
+                "Stagger offset: delaying first scheduled poll by %ds",
+                self._poll_offset_seconds,
+            )
+            await asyncio.sleep(self._poll_offset_seconds)
+            if self._unsub_refresh is not None:
+                return
+        await super()._handle_refresh_interval(_now)
+
     async def _first_poll_optional(self, coro_factory, default, label):
         """Await a core call, tolerating an ACL block on the first poll only.
 
@@ -568,14 +594,6 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         """Run one poll cycle (body of :meth:`_async_update_data`)."""
         self._poll_count += 1
         self.api.reset_ssh_fallback_flag()
-        # Apply stagger offset once on the second poll (first regular poll after setup).
-        # Spreads multiple coordinators evenly across the scan interval.
-        if self._poll_count == 2 and self._poll_offset_seconds > 0:
-            _LOGGER.debug(
-                "Stagger offset: delaying first regular poll by %ds",
-                self._poll_offset_seconds,
-            )
-            await asyncio.sleep(self._poll_offset_seconds)
 
         data = OpenWrtCoordinatorData()
         if self._package_updates is not None:
@@ -1024,11 +1042,29 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 f"ubus method blocked or missing on OpenWrt router: {err}"
             ) from err
 
-        except (RuntimeError, ValueError, TypeError, AttributeError, KeyError) as err:
-            _LOGGER.exception("Unexpected error fetching OpenWrt data")
-            self._record_failure(ERROR_TYPE_CONNECTION)
-            raise UpdateFailed(f"Unexpected error: {err}") from err
+        except (ConfigEntryAuthFailed, UpdateFailed):
+            raise
 
+        except Exception as err:
+            # Anything else (OSError, IndexError, a parser bug, ...) must still
+            # count as a failed poll, otherwise the outage counter and the
+            # fleet Repairs issue stay silent. CancelledError is a
+            # BaseException and passes through untouched.
+            self._record_failure(ERROR_TYPE_CONNECTION)
+            if not self._unexpected_error_logged:
+                self._unexpected_error_logged = True
+                _LOGGER.warning(
+                    "%s: Unexpected error fetching OpenWrt data",
+                    self.name,
+                    exc_info=True,
+                )
+            else:
+                _LOGGER.debug(
+                    "%s: Unexpected error fetching OpenWrt data: %r", self.name, err
+                )
+            raise UpdateFailed(f"Unexpected error: {err!r}") from err
+
+        self._unexpected_error_logged = False
         self._consecutive_auth_failures = 0
         self._failure_count = 0
         self._failure_since = None
@@ -1064,11 +1100,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 title=f"OpenWrt Router: SSH-Fallback aktiv ({self.api._host})",
                 notification_id=f"openwrt_ssh_fallback_{self.api._host}",
             )
-            self.update_interval = timedelta(seconds=300)
             _LOGGER.warning(
-                "%s: SSH-Fallback aktiv — Poll auf 300s reduziert. "
+                "%s: SSH-Fallback aktiv — Poll auf %ds reduziert. "
                 "ACL auf Router aktualisieren um ubus vollständig zu nutzen.",
                 self.name,
+                SSH_FALLBACK_INTERVAL_SECONDS,
             )
 
         # Adaptive polling: double interval when router is overloaded (load > 100%),
@@ -1076,21 +1112,17 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         # per core (% of total CPU capacity), so > 100% means the run queue
         # really exceeds the cores — not just a load average above 1.0.
         cpu = data.cpu_load
-        normal_interval = timedelta(seconds=SCAN_INTERVAL_SECONDS)
-        throttled_interval = timedelta(seconds=SCAN_INTERVAL_SECONDS * 2)
         if not self._throttled and cpu > 100:
             self._throttled = True
-            self.update_interval = throttled_interval
             _LOGGER.warning(
                 "%s: CPU load %.0f%% (%s) — reducing poll frequency to %ds",
                 self.name,
                 cpu,
                 _cpu_load_basis(data),
-                SCAN_INTERVAL_SECONDS * 2,
+                THROTTLED_INTERVAL_SECONDS,
             )
         elif self._throttled and cpu < 80:
             self._throttled = False
-            self.update_interval = normal_interval
             _LOGGER.info(
                 "%s: CPU load %.0f%% (%s) — restoring normal poll frequency (%ds)",
                 self.name,
@@ -1099,7 +1131,23 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 SCAN_INTERVAL_SECONDS,
             )
 
+        # Derived from the current state on every poll, so a repaired ACL or
+        # a recovered CPU takes effect without a reload.
+        self.update_interval = self._interval_for_state()
+
         return data
+
+    def _interval_for_state(self) -> timedelta:
+        """Return the poll interval for the state of the last poll.
+
+        SSH fallback (300 s) wins over CPU throttling (120 s); otherwise the
+        default scan interval applies.
+        """
+        if self.api.uses_ssh_fallback:
+            return timedelta(seconds=SSH_FALLBACK_INTERVAL_SECONDS)
+        if self._throttled:
+            return timedelta(seconds=THROTTLED_INTERVAL_SECONDS)
+        return timedelta(seconds=SCAN_INTERVAL_SECONDS)
 
     # ------------------------------------------------------------------
     # WAN throughput

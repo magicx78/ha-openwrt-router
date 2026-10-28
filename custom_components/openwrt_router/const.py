@@ -54,6 +54,11 @@ SESSION_LOGIN_TIMEOUT_SECONDS = 600
 
 # Update interval
 SCAN_INTERVAL_SECONDS = 60
+# Interval while the router is overloaded (CPU load > 100 % per core)
+THROTTLED_INTERVAL_SECONDS = SCAN_INTERVAL_SECONDS * 2
+# Interval while the last poll needed the SSH fallback (rpcd ACL incomplete);
+# takes precedence over throttling. Derived anew on every poll.
+SSH_FALLBACK_INTERVAL_SECONDS = 300
 
 # How many poll cycles between re-fetching static board info (model, hostname, release).
 # 10 cycles × 60 s = ~10 minutes.  Hostname changes are rare; this avoids a
