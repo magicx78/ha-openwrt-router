@@ -45,6 +45,7 @@ from .const import (
     CLIENT_KEY_LAST_SEEN,
     CLIENT_KEY_MAC,
     CPU_HISTORY_MAX_POINTS,
+    CPU_HISTORY_WINDOW_SECONDS,
     DEFAULT_SERVICES,
     DFS_EVIDENCE_SECONDS,
     DHCP_CONFIG_REFRESH_CYCLES,
@@ -439,7 +440,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self._throttled = False  # True when interval is doubled due to high CPU load
         self._ssh_fallback_notified = False  # True after HA notification was fired
         self._client_first_seen: dict[str, datetime] = {}
-        self._prev_interface_bytes: dict[str, dict[str, int]] = {}
+        self._prev_interface_bytes: dict[str, dict[str, int | None]] = {}
         self._prev_poll_time: datetime | None = None
         # Last valid WAN counter sample (monotonic time, rx, tx, interface)
         self._wan_sample: tuple[float, int, int, str] | None = None
@@ -757,18 +758,34 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 _LOGGER.debug("Error fetching tmpfs stats: %s", err)
                 data.tmpfs = {}
 
+            # One `network.device status {}` per poll feeds both the interface
+            # byte counters and the port stats.
             try:
-                data.network_interfaces = await self.api.get_network_interfaces()
+                device_status = await self.api.get_device_status()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Error fetching device status: %s", err)
+                device_status = {}
+
+            try:
+                data.network_interfaces = await self.api.get_network_interfaces(
+                    device_status=device_status
+                )
                 if data.network_interfaces:
                     self._last_known_network_interfaces = data.network_interfaces
                 data.vlans_stale = False
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching network interfaces: %s", err)
-                data.network_interfaces = self._last_known_network_interfaces
+                # Copies without rates: stale counters must not read as 0 B/s.
+                data.network_interfaces = [
+                    {**iface, "rx_rate": None, "tx_rate": None}
+                    for iface in self._last_known_network_interfaces
+                ]
                 data.vlans_stale = bool(self._last_known_network_interfaces)
 
             try:
-                data.port_stats = await self.api.get_port_stats()
+                data.port_stats = await self.api.get_port_stats(
+                    device_status=device_status
+                )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching port stats: %s", err)
                 data.port_stats = []
@@ -895,7 +912,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 await self._fetch_usteer(data, now_ms)
             data.client_stability = self._client_stability_snapshot(data, now_ms)
 
-            # --- CPU history (30s resolution, 1h rolling window) ---
+            # --- CPU history (one point per poll, time-based 1h window) ---
             import time as _time
 
             mem = data.memory
@@ -911,6 +928,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                     "mem": mem_pct,
                 }
             )
+            cutoff = int(_time.time()) - CPU_HISTORY_WINDOW_SECONDS
+            while self._cpu_history and self._cpu_history[0]["ts"] < cutoff:
+                self._cpu_history.popleft()
             data.cpu_history = list(self._cpu_history)
 
             # --- Topology snapshots (every TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES polls) ---
@@ -936,34 +956,45 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             data.topology_snapshots = list(self._topology_snapshots)
 
             # --- Bandwidth rate calculation (bytes/s) ---
-            poll_now = datetime.now(UTC)
-            if self._prev_poll_time is not None:
-                elapsed = (poll_now - self._prev_poll_time).total_seconds()
-                if elapsed > 0:
-                    for iface in data.network_interfaces:
-                        ifname = iface.get("interface", "")
-                        prev = self._prev_interface_bytes.get(ifname, {})
-                        for key, rate_key in (
-                            ("rx_bytes", "rx_rate"),
-                            ("tx_bytes", "tx_rate"),
+            # A rate needs two valid samples of the same interface. Without
+            # one (first sample, new interface, unknown counter, counter
+            # reset) the rate is None — unknown, not 0 B/s. A stale cache
+            # (interface fetch failed) keeps the previous baseline.
+            if not data.vlans_stale:
+                poll_now = datetime.now(UTC)
+                elapsed = (
+                    (poll_now - self._prev_poll_time).total_seconds()
+                    if self._prev_poll_time is not None
+                    else 0.0
+                )
+                for iface in data.network_interfaces:
+                    prev = self._prev_interface_bytes.get(iface.get("interface", ""))
+                    for key, rate_key in (
+                        ("rx_bytes", "rx_rate"),
+                        ("tx_bytes", "tx_rate"),
+                    ):
+                        curr = iface.get(key)
+                        prev_val = prev.get(key) if prev else None
+                        if (
+                            elapsed > 0
+                            and isinstance(curr, int)
+                            and isinstance(prev_val, int)
+                            and curr >= prev_val
                         ):
-                            curr = iface.get(key) or 0
-                            prev_val = prev.get(key, 0) or 0
-                            delta = curr - prev_val
-                            iface[rate_key] = (
-                                round(max(0, delta) / elapsed, 2) if delta >= 0 else 0
-                            )
-            self._prev_poll_time = poll_now
-            # Rebuild from current interfaces only — removes stale entries for
-            # interfaces that no longer exist (tunnels, temporary VLANs, etc.)
-            self._prev_interface_bytes = {
-                iface.get("interface", ""): {
-                    "rx_bytes": iface.get("rx_bytes") or 0,
-                    "tx_bytes": iface.get("tx_bytes") or 0,
+                            iface[rate_key] = round((curr - prev_val) / elapsed, 2)
+                        else:
+                            iface[rate_key] = None
+                self._prev_poll_time = poll_now
+                # Rebuild from current interfaces only — removes stale entries
+                # for interfaces that no longer exist (tunnels, temporary VLANs)
+                self._prev_interface_bytes = {
+                    iface.get("interface", ""): {
+                        "rx_bytes": iface.get("rx_bytes"),
+                        "tx_bytes": iface.get("tx_bytes"),
+                    }
+                    for iface in data.network_interfaces
+                    if iface.get("interface")
                 }
-                for iface in data.network_interfaces
-                if iface.get("interface")
-            }
 
             try:
                 data.active_connections = await self.api.get_active_connections()
@@ -1735,9 +1766,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                         "ts": ts,
                         "type": "info",
                         "message": "WAN verbunden",
-                        "detail": data.wan_status.get("ipv4_address")
-                        or data.wan_status.get("address")
-                        or "",
+                        "detail": data.wan_status.get("ipv4") or "",
                     }
                 )
             else:

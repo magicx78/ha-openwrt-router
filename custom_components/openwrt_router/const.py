@@ -453,7 +453,11 @@ KEY_WAN_TRAFFIC = "wan_traffic"
 KEY_PING_MS = "ping_ms"
 KEY_DDNS_STATUS = "ddns_status"
 
-# CPU history: one point per poll (30s resolution), 120 points = 1h rolling window
+# CPU history: one point per poll over a time-based 1 h rolling window. Points
+# older than the window are dropped, so the span no longer depends on the poll
+# interval (60/120/300 s). MAX_POINTS only caps memory: it covers the window at
+# 30 s spacing, leaving headroom for refreshes requested between polls.
+CPU_HISTORY_WINDOW_SECONDS = 3600
 CPU_HISTORY_MAX_POINTS = 120
 KEY_CPU_HISTORY = "cpu_history"
 

@@ -22,6 +22,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import (
     PERCENTAGE,
+    SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
     EntityCategory,
     UnitOfDataRate,
     UnitOfFrequency,
@@ -386,6 +387,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         key=SUFFIX_DISK_FREE,
         translation_key="disk_free",
         device_class=SensorDeviceClass.DATA_SIZE,
+        state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfInformation.GIGABYTES,
         icon="mdi:harddisk-plus",
         value_fn=lambda data: round(
@@ -423,6 +425,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         key=SUFFIX_TMPFS_FREE,
         translation_key="tmpfs_free",
         device_class=SensorDeviceClass.DATA_SIZE,
+        state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfInformation.MEGABYTES,
         icon="mdi:memory-plus",
         value_fn=lambda data: round(data.tmpfs.get("free_mb", 0), 1),
@@ -872,8 +875,9 @@ class OpenWrtRadioSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
     """
 
     _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = "dBm"
+    _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
     _attr_entity_registry_enabled_default = False
 
     def __init__(

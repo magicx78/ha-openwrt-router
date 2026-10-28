@@ -573,8 +573,8 @@ class TestBandwidthRateCalculation:
         assert iface["tx_rate"] == pytest.approx(50.0, abs=2.0)
 
     @pytest.mark.asyncio
-    async def test_rate_zero_on_counter_wraparound(self):
-        """T-R3: Rate is 0 when counter decreases (wraparound protection)."""
+    async def test_rate_unknown_on_counter_wraparound(self):
+        """T-R3: Rate is None (unknown) when counter decreases (reset/wrap)."""
         coord, api = self._make_coordinator_with_interfaces([
             {"interface": "lan", "rx_bytes": 5000, "tx_bytes": 5000, "status": "up"},
         ])
@@ -591,8 +591,8 @@ class TestBandwidthRateCalculation:
         data = await coord._async_update_data()
 
         iface = next(i for i in data.network_interfaces if i["interface"] == "lan")
-        assert iface["rx_rate"] == 0
-        assert iface["tx_rate"] == 0
+        assert iface["rx_rate"] is None
+        assert iface["tx_rate"] is None
 
     @pytest.mark.asyncio
     async def test_rate_sensor_native_value_none_before_second_poll(self):
@@ -628,7 +628,7 @@ class TestRecordEvents:
         from custom_components.openwrt_router.coordinator import OpenWrtCoordinatorData
         d = OpenWrtCoordinatorData()
         d.wan_connected = wan_connected
-        d.wan_status = {"ipv4_address": "1.2.3.4"} if wan_connected else {}
+        d.wan_status = {"ipv4": "1.2.3.4"} if wan_connected else {}
         d.cpu_load = cpu
         d.memory = {"total": total, "free": free, "buffered": buffered}
         return d

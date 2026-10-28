@@ -4079,20 +4079,60 @@ class OpenWrtAPI:
             "mounts": [],
         }
 
-    async def get_network_interfaces(self) -> list[dict[str, Any]]:
-        """Return network interface statistics from network.interface/dump.
+    async def get_device_status(self) -> dict[str, Any]:
+        """Return ``network.device status {}`` — all netifd devices by name.
+
+        One unnamed call per poll; the coordinator shares the result between
+        :meth:`get_network_interfaces` (byte counters) and
+        :meth:`get_port_stats`. Returns ``{}`` when the call is not allowed
+        or fails.
+        """
+        try:
+            result = await self._call(UBUS_DEVICE_OBJECT, UBUS_DEVICE_STATUS, {})
+        except (
+            OpenWrtResponseError,
+            OpenWrtTimeoutError,
+            OpenWrtMethodNotFoundError,
+        ) as err:
+            _LOGGER.debug("network.device status unavailable: %s", err)
+            return {}
+        return result if isinstance(result, dict) else {}
+
+    async def get_network_interfaces(
+        self, device_status: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Return network interfaces from network.interface/dump.
+
+        ``network.interface dump`` carries no traffic counters; ``rx_bytes``
+        and ``tx_bytes`` come from ``device_status`` (the result of
+        :meth:`get_device_status`), looked up by the interface's l3 device.
+        Without a status entry for that device they are ``None`` (unknown),
+        never 0. No extra ubus call is made here.
 
         Returns:
             [
                 {
                     "interface": str,
-                    "rx_bytes": int,
-                    "tx_bytes": int,
+                    "rx_bytes": int | None,
+                    "tx_bytes": int | None,
                     "status": "up" | "down",
                 },
                 ...
             ]
         """
+        interfaces = await self._get_network_interfaces_raw()
+        devices = device_status or {}
+        for iface in interfaces:
+            dev = devices.get(iface.get("interface", ""))
+            stats = dev.get("statistics") if isinstance(dev, dict) else None
+            if not isinstance(stats, dict):
+                stats = {}
+            iface["rx_bytes"] = _as_byte_counter(stats.get("rx_bytes"))
+            iface["tx_bytes"] = _as_byte_counter(stats.get("tx_bytes"))
+        return interfaces
+
+    async def _get_network_interfaces_raw(self) -> list[dict[str, Any]]:
+        """Parse network.interface/dump (SSH ``ip addr`` as fallback)."""
         try:
             result = await self._call(UBUS_NETWORK_OBJECT, UBUS_NETWORK_DUMP, {})
             interfaces: list[dict[str, Any]] = result.get("interface", [])
@@ -4109,8 +4149,6 @@ class OpenWrtAPI:
                     {
                         "interface": l3_device,
                         "logical_name": iface.get("interface", ""),
-                        "rx_bytes": iface.get("statistics", {}).get("rx_bytes", 0),
-                        "tx_bytes": iface.get("statistics", {}).get("tx_bytes", 0),
                         "status": "up" if iface.get("up") else "down",
                         "ipv4_addr": first_ipv4.get("address"),
                         "prefix_len": first_ipv4.get("mask"),
@@ -4137,8 +4175,13 @@ class OpenWrtAPI:
             return []
         return _parse_ip_addr_output(out)
 
-    async def get_port_stats(self) -> list[dict[str, Any]]:
+    async def get_port_stats(
+        self, device_status: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
         """Return per-port link status and traffic counters from network.device/status.
+
+        ``device_status`` is a result of :meth:`get_device_status` fetched
+        earlier in the same poll; without it the status is queried here.
 
         Queries the network.device ubus object which reports physical switch ports
         (lan1, lan2, lan3, wan, etc.) with link speed and byte counters.
@@ -4168,15 +4211,11 @@ class OpenWrtAPI:
             ]
             Sorted by name. Returns [] if the ubus object is not accessible.
         """
-        try:
-            result = await self._call(UBUS_DEVICE_OBJECT, UBUS_DEVICE_STATUS, {})
-        except (
-            OpenWrtResponseError,
-            OpenWrtTimeoutError,
-            OpenWrtMethodNotFoundError,
-        ) as err:
-            _LOGGER.debug("Port stats unavailable (network.device ACL?): %s", err)
-            return []
+        result = (
+            device_status
+            if device_status is not None
+            else await self.get_device_status()
+        )
 
         ports: list[dict[str, Any]] = []
         for name, dev in result.items():
