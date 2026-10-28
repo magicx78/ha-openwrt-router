@@ -35,6 +35,7 @@ from .const import (
     LLDP_KEY_PORT_DESCR,
     LLDP_KEY_PORT_ID,
     SOURCE_LLDP,
+    WAN_PROTOS,
 )
 
 # Aliased: topology_ports exports a CONFIDENCE_HIGH of its own.
@@ -66,17 +67,20 @@ def _is_private_ip(ip_str: str) -> bool:
 def _detect_router_role(data: OpenWrtCoordinatorData, host_ip: str) -> str:
     """Classify a router as 'gateway' or 'ap' based on WAN status.
 
-    Gateway: WAN connected with a recognised protocol (dhcp, pppoe, static).
-             The IP being private or public does NOT matter — many gateways
-             have private WAN IPs (e.g. behind ISP modem / cascaded router).
-    AP:      No WAN connection or unknown protocol.
+    Gateway: WAN connected with a recognised protocol: dhcp, static, pppoe
+             or one of the upstream-only protocols in WAN_PROTOS (cellular
+             qmi/mbim/ncm/modemmanager/3g/wwan, pppoa). The IP being private
+             or public does NOT matter — many gateways have private WAN IPs
+             (e.g. behind ISP modem / cascaded router).
+    AP:      No WAN connection (since 1.38.9 a router without a WAN interface
+             reports ``connected: False``) or unknown protocol.
     """
     wan = data.wan_status
     if not wan.get("connected"):
         return "ap"
 
     proto = wan.get("proto", "")
-    if proto not in ("dhcp", "pppoe", "static"):
+    if proto not in ("dhcp", "pppoe", "static") and proto not in WAN_PROTOS:
         return "ap"
 
     # A "WAN" carrying the router's own LAN IP is a bridged port on a dumb

@@ -2,6 +2,31 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.9] - 2026-10-28
+
+### Fixed
+
+- **WAN-Erkennung: LTE-/Modem-Gateways erkannt, Dumb-APs ohne Schein-WAN.** Die
+  Integration suchte das WAN-Interface nur über die Namen `wan`, `wan6`,
+  `pppoe-wan` und `wwan*` und nahm sonst das erste aktive Interface aus
+  `network.interface dump`. Auf einem Dumb-AP war das `lan` oder `guest`: Der
+  AP meldete ein verbundenes WAN, zeigte den Gast-Verkehr als WAN-Download und
+  -Upload und fragte in jedem Poll den DDNS-Status ab. Ein Gateway mit einem
+  Mobilfunk-Interface namens `lte`, `modem` oder `umts` galt dagegen als Router
+  ohne WAN. Jetzt gilt ein Interface als WAN, wenn sein Name passt (`wan*`,
+  `wwan*`, `lte*`, `modem*`, `umts*`, `pppoe-wan`, `3g`, `4g`, `5g`) oder sein
+  Protokoll nur auf einem Uplink vorkommt (`pppoe`, `pppoa`, `qmi`, `mbim`,
+  `ncm`, `modemmanager`, `3g`, `wwan`); bei mehreren Treffern zählt der erste
+  in der Reihenfolge des Dumps. Den Rückfall auf das erste aktive Interface
+  gibt es nicht mehr: Ohne Treffer meldet der Router „kein WAN“ (`wan_found`
+  False), die WAN-Sensoren werden auf solchen Routern weiterhin deaktiviert
+  angelegt, `wan_connected` ist False und DDNS wird nicht abgefragt. Ein
+  leerer Dump und der SSH-Fallback gelten weiter als „unbekannt“, damit ein
+  Lesefehler die WAN-Sensoren eines Gateways nicht versteckt. In der Topologie
+  zählt ein Router mit verbundenem Mobilfunk-WAN jetzt als Gateway. Bereits
+  angelegte WAN-Entitäten eines APs bleiben bestehen und zeigen „disconnected“
+  bzw. keinen Wert.
+
 ## [1.38.8] - 2026-10-28
 
 ### Fixed

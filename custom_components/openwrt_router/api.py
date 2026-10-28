@@ -119,6 +119,8 @@ from .const import (
     UBUS_WIRELESS_OBJECT,
     UBUS_WIRELESS_STATUS,
     WAN_INTERFACE_NAMES,
+    WAN_INTERFACE_PREFIXES,
+    WAN_PROTOS,
 )
 from .mac_utils import is_locally_administered
 from .wifi_band import (
@@ -774,6 +776,24 @@ def _sysfs_net_names(listing: dict[str, Any]) -> list[str]:
         ):
             names.append(name)
     return names
+
+
+def is_wan_interface(name: str, proto: str = "") -> bool:
+    """True when a netifd interface is an upstream (WAN) link.
+
+    By name — exact (``wan``, ``pppoe-wan``, ``3g`` …) or with a suffix on
+    the usual stems (``wan6``, ``wwan0``, ``wan_lte``, ``lte1``) — or by a
+    protocol that only exists on an upstream link (PPPoE/PPPoA, the cellular
+    protocols). A dumb AP has neither: its ``lan``/``guest`` interfaces run
+    ``static``, ``dhcp`` or ``none``. The default route is deliberately not a
+    criterion, an AP has one through ``lan``.
+    """
+    iface = (name or "").strip().lower()
+    if not iface:
+        return False
+    if iface in WAN_INTERFACE_NAMES or iface.startswith(WAN_INTERFACE_PREFIXES):
+        return True
+    return (proto or "").strip().lower() in WAN_PROTOS
 
 
 # One "processor\t: N" line per logical CPU on every architecture OpenWrt runs
@@ -1724,8 +1744,10 @@ class OpenWrtAPI:
                 "interface": str,
                 "ipv4": str,
                 "uptime": int,
+                "proto": str,
                 "rx_bytes": int or None,
                 "tx_bytes": int or None,
+                "wan_found": bool,  # absent when unknown (empty dump, SSH)
             }
         """
         # Get basic network status
@@ -1761,29 +1783,37 @@ class OpenWrtAPI:
             raise
         interfaces: list[dict[str, Any]] = result.get("interface", [])
 
-        # Find WAN interface (try both name matching and highest traffic)
-        wan_iface = None
-        for iface in interfaces:
-            iface_name: str = iface.get("interface", "").lower()
-            if iface_name in WAN_INTERFACE_NAMES or any(
-                iface_name.startswith(w) for w in WAN_INTERFACE_NAMES
-            ):
-                wan_iface = iface
-                break
-
-        if not wan_iface and interfaces:
-            # Fallback: use first interface that's marked as up
-            wan_iface = next((i for i in interfaces if i.get("up")), interfaces[0])
+        # The WAN is the first interface (dump order) that is one by name or
+        # by an upstream-only protocol, see is_wan_interface(). There is no
+        # fallback to "the first interface that is up" any more: on a dumb AP
+        # that was lan or guest, which made the AP report a connected WAN with
+        # the guest traffic as WAN counters and poll DDNS every cycle.
+        # ``wan_found`` tells the entities apart: False = this router has no
+        # WAN; absent = unknown (empty dump, SSH fallback).
+        wan_iface = next(
+            (
+                iface
+                for iface in interfaces
+                if is_wan_interface(
+                    str(iface.get("interface") or ""), str(iface.get("proto") or "")
+                )
+            ),
+            None,
+        )
 
         if not wan_iface:
-            return {
+            status: dict[str, Any] = {
                 "connected": False,
                 "interface": "",
                 "ipv4": "",
                 "uptime": 0,
+                "proto": "",
                 "rx_bytes": None,
                 "tx_bytes": None,
             }
+            if interfaces:
+                status["wan_found"] = False
+            return status
 
         # Extract basic info
         ipv4_list = wan_iface.get("ipv4-address", [])
@@ -1810,6 +1840,7 @@ class OpenWrtAPI:
             "ipv4": ipv4,
             "uptime": wan_iface.get("uptime", 0),
             "proto": wan_iface.get("proto", ""),
+            "wan_found": True,
             "rx_bytes": rx_bytes,
             "tx_bytes": tx_bytes,
         }
