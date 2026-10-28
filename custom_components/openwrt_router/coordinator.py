@@ -97,6 +97,7 @@ from .const import (
     LOG_STATUS_OK,
     LOG_STATUS_PENDING,
     NOTIFICATION_FAILURE_THRESHOLD,
+    PRESENCE_STALE_AFTER_S,
     RADIO_KEY_BAND,
     RADIO_KEY_IS_GUEST,
     RAM_AVAILABLE_MIN_BYTES,
@@ -1779,6 +1780,22 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         if self.data:
             return self.data.features
         return {}
+
+    @property
+    def stale_for_presence(self) -> bool:
+        """True once polls have failed beyond the presence grace period.
+
+        ``data`` then still holds the client list of the last successful
+        poll, which must no longer count as "connected". A single failed
+        poll stays within the grace period.
+        """
+        if self._failure_count >= NOTIFICATION_FAILURE_THRESHOLD:
+            return True
+        since = self._failure_since
+        return (
+            since is not None
+            and (datetime.now(UTC) - since).total_seconds() >= PRESENCE_STALE_AFTER_S
+        )
 
     def get_radio_by_band(self, band: str) -> dict[str, Any] | None:
         """Return the first radio matching the given band string.

@@ -329,6 +329,8 @@ Log events are limited to 10 per fetch and one per type and client (DFS lines: p
 ### Device Tracker
 One entity per WiFi client — `home` / `not_home` with attributes: `mac`, `ip_address`, `hostname`, `ssid`, `radio`, `signal`, `connected_since`, `random_mac` (locally administered "private" MAC, no vendor lookup), `associations_24h`, `reconnects_24h` (from the router logs of all routers), `dhcp_status` (`ok`, `pending`, `dhcp_missing` = associated for 180 s without lease or ARP entry on any router, `static_no_lease`; empty while no router reports leases or a DHCP server is unreachable). Note: a device with a manually set IP that only talks locally, or clients right after a gateway reboot (empty lease file until they renew), can show `dhcp_missing`.
 
+Trackers are restored from the entity registry after a restart, so absent clients show `not_home`; to remove a stale tracker for good, disable it first, then delete it.
+
 ---
 
 ## Architecture
