@@ -111,6 +111,8 @@ class OpenWrtBinarySensorEntity(
 
     _attr_has_entity_name = True
     entity_description: OpenWrtBinarySensorEntityDescription
+    # last_seen is a new timestamp on every successful poll.
+    _unrecorded_attributes = frozenset({"last_seen"})
 
     def __init__(
         self,
@@ -158,6 +160,8 @@ class OpenWrtStickyClientsBinarySensor(
     _attr_translation_key = "sticky_clients"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:wifi-arrow-left-right"
+    # Client list carries per-poll signal values.
+    _unrecorded_attributes = frozenset({"clients"})
 
     def __init__(
         self, coordinator: OpenWrtCoordinator, entry: OpenWrtConfigEntry

@@ -104,6 +104,8 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
 
     _attr_has_entity_name = False
     _attr_device_class = SwitchDeviceClass.SWITCH
+    # Client list carries signal and DHCP remaining time, new on every poll.
+    _unrecorded_attributes = frozenset({"clients"})
 
     def __init__(
         self,

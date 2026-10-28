@@ -648,6 +648,35 @@ class OpenWrtSensorEntity(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
 
     entity_description: OpenWrtSensorEntityDescription
     _attr_has_entity_name = True
+    # One set for all descriptions (HA reads it per class): values that change
+    # on nearly every poll or are lists would add a recorder row each time.
+    _unrecorded_attributes = frozenset(
+        {
+            "uptime_seconds",
+            "uptime_raw",
+            "uptime_formatted",
+            "clients",
+            "load_1min",
+            "load_average_1min",
+            "load_average_5min",
+            "load_average_15min",
+            "free_mb",
+            "used_mb",
+            "available_mb",
+            "pressure_pct",
+            "packages",
+            "system_packages",
+            "addon_packages",
+            "last_check",
+            "lines_processed",
+            "baseline_lines",
+            "missed_lines",
+            "events_fired",
+            "events_suppressed",
+            "counts_24h",
+            "top",
+        }
+    )
 
     def __init__(
         self,
@@ -1106,6 +1135,8 @@ class OpenWrtPortSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
 
     _attr_has_entity_name = True
     _attr_entity_registry_enabled_default = False
+    # Packet counters grow on every poll; keep them out of the history.
+    _unrecorded_attributes = frozenset({"rx_packets", "tx_packets"})
 
     # (icon, unit, device_class, state_class, entity_category)
     _METRIC_CONFIG: ClassVar[
@@ -1313,6 +1344,8 @@ class OpenWrtRouterStatusSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnt
         "response_error",
     ]
     _attr_icon = "mdi:router-network"
+    # last_seen is a new timestamp on every successful poll.
+    _unrecorded_attributes = frozenset({"last_seen"})
 
     def __init__(
         self, coordinator: OpenWrtCoordinator, entry: OpenWrtConfigEntry

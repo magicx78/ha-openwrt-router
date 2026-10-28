@@ -245,6 +245,8 @@ class OpenWrtClientTrackerEntity(CoordinatorEntity[OpenWrtCoordinator], ScannerE
     """
 
     _attr_has_entity_name = False  # entity name IS the device name (MAC / hostname)
+    # Signal changes on nearly every poll; presence attributes stay recorded.
+    _unrecorded_attributes = frozenset({"signal"})
 
     def __init__(
         self,
