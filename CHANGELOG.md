@@ -2,6 +2,41 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.9] - 2026-10-28
+
+### Fixed
+
+- **WAN-Erkennung: LTE-/Modem-Gateways erkannt, Dumb-APs ohne Schein-WAN.** Die
+  Integration nahm bisher das erste Interface aus `network.interface dump`,
+  dessen Name mit `wan`, `wwan` oder `pppoe-wan` beginnt, und sonst das erste
+  aktive Interface. Auf einem Dumb-AP war das `lan` oder `guest`: Der AP
+  meldete ein verbundenes WAN, zeigte den Gast-Verkehr als WAN-Download und
+  -Upload und fragte in jedem Poll den DDNS-Status ab. Ein Gateway mit einem
+  Mobilfunk-Interface namens `lte`, `modem` oder `umts` galt dagegen als Router
+  ohne WAN, und die Topologie stufte es wegen des Protokolls als AP ein. Jetzt
+  gilt ein Interface als WAN, wenn sein Name mit `wan` oder `wwan` beginnt
+  oder `pppoe-wan` lautet, wenn sein Protokoll nur auf einem Uplink vorkommt
+  (`pppoe`, `pppoa`, `qmi`, `mbim`, `ncm`, `modemmanager`, `3g`, `wwan`) oder
+  wenn es einen Mobilfunk-Namen trägt (`lte*`, `modem*`, `umts*`, `3g`, `4g`,
+  `5g`); `proto none` zählt nie. Da netifd die Interfaces alphabetisch
+  auflistet, entscheidet bei mehreren Treffern eine Rangfolge statt der
+  Reihenfolge: Ein Mobilfunk-Name ohne Uplink-Protokoll (etwa das statische
+  `modem`-Alias aus dem OpenWrt-Wiki) kommt nur zum Zug, wenn es sonst keinen
+  Treffer gibt; ansonsten gewinnt ein aktives Interface vor einem inaktiven
+  (Reiserouter mit gezogenem WAN-Kabel und WLAN-Uplink `wwan`, mwan3 mit
+  ausgefallenem `wan` und LTE-Failover), dann der Name vor dem Protokoll,
+  dann die Reihenfolge des Dumps. Den Rückfall auf das erste aktive Interface
+  gibt es nicht mehr: Ohne Treffer meldet der Router „kein WAN“ (`wan_found`
+  False), die WAN-Sensoren werden auf solchen Routern deaktiviert angelegt,
+  `wan_connected` ist False und DDNS wird nicht abgefragt. Ein leerer Dump
+  und der SSH-Fallback gelten weiter als „unbekannt“, damit ein Lesefehler die
+  WAN-Sensoren eines Gateways nicht versteckt. In der Topologie zählt ein
+  Router mit verbundenem Mobilfunk-, IPv6-only- oder Tunnel-Uplink (`dhcpv6`,
+  `dslite`, `map`, `6in4`, `6rd`, `6to4`) jetzt als Gateway. Bereits angelegte
+  WAN-Entitäten eines APs bleiben bestehen und zeigen „disconnected“ bzw.
+  keinen Wert. Nicht erkannt werden weiterhin Uplinks mit anderen Namen ohne
+  Uplink-Protokoll (`tethering`, `sta`, `repeater`); siehe README.
+
 ## [1.38.8] - 2026-10-28
 
 ### Fixed

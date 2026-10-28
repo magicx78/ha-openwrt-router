@@ -33,6 +33,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import OpenWrtConfigEntry
+from .api import is_wan_interface
 from .channel_plan import analyze
 from .const import (
     CLIENT_KEY_RADIO,
@@ -87,7 +88,6 @@ from .const import (
     SUFFIX_WAN_RX,
     SUFFIX_WAN_STATUS,
     SUFFIX_WAN_TX,
-    WAN_INTERFACE_NAMES,
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
@@ -100,20 +100,23 @@ _LOGGER = logging.getLogger(__name__)
 def router_has_wan(data: OpenWrtCoordinatorData | None) -> bool:
     """Return False only when the router is known to have no WAN interface.
 
-    ``get_wan_status`` takes the first interface named like a WAN
-    (``WAN_INTERFACE_NAMES``) from ``network.interface dump`` and otherwise
-    falls back to the first interface that is up (``lan``, ``guest``, … on a
-    dumb AP). A non-WAN name therefore means "no WAN". A WAN that is down is
-    still listed and counts. No name (no data yet, SSH fallback, empty dump)
-    is unknown and counts as WAN, so a failed read never hides the WAN
-    sensors of a gateway.
+    ``get_wan_status`` reports ``wan_found`` (1.38.9): True when an interface
+    of ``network.interface dump`` is a WAN by name or upstream protocol (see
+    ``api.is_wan_interface``), False when none is (dumb AP). A WAN that is
+    down is still found and counts. A status without the flag is judged by
+    its interface name and protocol; no name and no flag (no data yet, SSH
+    fallback, empty dump) is unknown and counts as WAN, so a failed read
+    never hides the WAN sensors of a gateway.
     """
     if data is None:
         return True
-    name = str((data.wan_status or {}).get("interface") or "").lower()
+    status = data.wan_status or {}
+    if "wan_found" in status:
+        return bool(status["wan_found"])
+    name = str(status.get("interface") or "")
     if not name:
         return True
-    return name.startswith(WAN_INTERFACE_NAMES)
+    return is_wan_interface(name, str(status.get("proto") or ""))
 
 
 @dataclass(frozen=True, kw_only=True)

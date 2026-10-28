@@ -110,8 +110,28 @@ UBUS_FILE_OBJECT = "file"
 UBUS_FILE_READ = "read"
 DHCP_LEASES_PATH = "/tmp/dhcp.leases"
 
-# Known WAN interface names (OpenWrt conventions across versions)
-WAN_INTERFACE_NAMES = ("wan", "wan6", "pppoe-wan", "wwan")
+# Known WAN interface names (OpenWrt conventions across versions), matched
+# exactly; the stems in WAN_INTERFACE_PREFIXES also match with a suffix
+# ("wan6", "wwan0", "wan_lte", "lte1"). See api.is_wan_interface().
+WAN_INTERFACE_NAMES = (
+    "wan",
+    "wan6",
+    "pppoe-wan",
+    "wwan",
+    "lte",
+    "modem",
+    "umts",
+    "3g",
+    "4g",
+    "5g",
+)
+WAN_INTERFACE_PREFIXES = ("wan", "wwan", "lte", "modem", "umts")
+# netifd protocols that only exist on an upstream link: PPP over Ethernet or
+# ATM (DSL) and the cellular protocols. dhcp/static/none say nothing by
+# themselves (a dumb AP's lan is static or dhcp too).
+WAN_PROTOS = frozenset(
+    {"pppoe", "pppoa", "qmi", "mbim", "ncm", "modemmanager", "3g", "wwan"}
+)
 
 # Radio / WiFi band detection keywords
 RADIO_BAND_24GHZ_KEYWORDS = ("2.4", "2g", "bgn", "g_band", "radio0")
