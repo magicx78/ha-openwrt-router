@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any
 
@@ -75,105 +76,54 @@ _GATEWAY_PROTOS: frozenset[str] = (
 )
 
 
+# Role memory: router id → ISO time of the last snapshot in which it was a
+# gateway with a connected WAN. Process-wide (one mesh per HA instance), not
+# persisted across restarts. See _resolve_router_roles / _remember_gateways.
+_GATEWAY_MEMORY: dict[str, str] = {}
+
 # Role evidence levels (see _gateway_evidence).
-_EVIDENCE_STRONG = 3
-_EVIDENCE_WEAK = 2
-_EVIDENCE_HINT = 1
+_EVIDENCE_STRONG = 2
+_EVIDENCE_WEAK = 1
 _EVIDENCE_NONE = 0
 
-
-def _serves_lan_dhcp(data: OpenWrtCoordinatorData, host_ip: str) -> bool:
-    """Return True if the router runs a DHCP server for its management network.
-
-    ``dhcp_pools`` only lists active pools while dnsmasq runs (ignored pools
-    and a stopped service are already filtered by the coordinator). A pool
-    counts when its interface's subnet contains the router's host IP; when
-    that cannot be resolved (host configured by name, no interface data) a
-    pool on the logical ``lan`` interface counts. A dumb AP serving only its
-    guest network is therefore not a gateway.
-
-    Limitation: a gateway that Home Assistant reaches through a VPN, i.e. by
-    an address outside its lan subnet, gets no DHCP evidence here — only its
-    WAN status counts for it.
-    """
-    pools = getattr(data, "dhcp_pools", None) or []
-    if not pools:
-        return False
-    subnets: dict[str, ipaddress.IPv4Network] = {}
-    for iface in getattr(data, "network_interfaces", None) or []:
-        if not isinstance(iface, dict):
-            continue
-        name = iface.get("logical_name")
-        addr = iface.get("ipv4_addr")
-        if not isinstance(name, str) or not isinstance(addr, str):
-            continue
-        try:
-            subnets[name] = ipaddress.IPv4Network(
-                f"{addr}/{int(iface.get('prefix_len') or 24)}", strict=False
-            )
-        except (TypeError, ValueError):
-            continue
-    try:
-        host = ipaddress.IPv4Address(host_ip)
-    except (ipaddress.AddressValueError, ValueError):
-        host = None
-    for pool in pools:
-        if not isinstance(pool, dict):
-            continue
-        iface_name = pool.get("interface")
-        net = subnets.get(iface_name) if isinstance(iface_name, str) else None
-        if host is not None and net is not None:
-            if host in net:
-                return True
-            continue
-        if iface_name == "lan":
-            return True
-    return False
+# OpenWrt's default wan/wan6 protocols. A dumb AP that keeps its unplugged
+# default sections reports these; pppoe/static/cellular are set up by hand.
+_DEFAULT_WAN_PROTOS: frozenset[str] = frozenset({"dhcp", "dhcpv6"})
 
 
 def _gateway_evidence(data: OpenWrtCoordinatorData, host_ip: str) -> int:
-    """Return how strongly the router's own data marks it as a gateway.
+    """Return how strongly the router's own WAN status marks it as a gateway.
 
     Strong: a connected WAN with an ISP-uplink protocol (dhcp, static, pppoe,
             the IPv6-only and transition protocols dhcpv6, dslite, map, 6in4,
             6rd, 6to4, or one of the upstream-only protocols in WAN_PROTOS:
-            cellular qmi/mbim/ncm/modemmanager/3g/wwan, pppoa), or a DHCP
-            server for the management network on a router that has (or may
-            have) a WAN. Private vs. public WAN IP does NOT matter — many
-            gateways sit behind an ISP modem.
+            cellular qmi/mbim/ncm/modemmanager/3g/wwan, pppoa), or the SSH
+            fallback shape (no ``wan_found``, no interface, no proto) with
+            ``connected`` True. Private vs. public WAN IP does NOT matter —
+            many gateways sit behind an ISP modem.
     Weak:   a *configured* WAN (``wan_found`` True, or — data without
             ``wan_found`` — a named WAN interface) with an ISP-uplink protocol
-            whose link is down. That is the gateway during a WAN outage
-            (before its DHCP pools are known: they are fetched from poll 2
-            on), but also a dumb AP with a left-over, unplugged ``wan``
-            section.
-    Hint:   a DHCP server on a router without WAN (``wan_found`` False — a
-            dumb AP whose lan pool was never set to ignore; dnsmasq keeps
-            running and defers to the real server), or a connected WAN of
-            unknown protocol (the SSH fallback reports neither interface nor
-            proto).
-    None:   anything else: no WAN, a protocol that is not an ISP uplink (VPN
-            tunnels, none) and no DHCP server.
+            whose link is down: the gateway during an outage, but just as
+            well a dumb AP with OpenWrt's default, unplugged ``wan`` section.
+    None:   no WAN (``wan_found`` False), a protocol that is not an ISP uplink
+            (VPN tunnels, none, a ubus-found WAN without proto), or a "WAN"
+            carrying the router's own host IP (bridged port on a dumb AP).
 
-    ``connected`` is a link status, not the role. The fleet weighs the levels
-    against each other (see _resolve_router_roles).
+    DHCP pools are deliberately NOT evidence: OpenWrt's defaults leave the
+    lan pool active on a dumb AP (dnsmasq defers to the real server), and an
+    SSH-fallback gateway cannot read its pools at all.
     """
     wan = data.wan_status or {}
-    no_wan = wan.get("wan_found") is False
-    if _serves_lan_dhcp(data, host_ip):
-        return _EVIDENCE_HINT if no_wan else _EVIDENCE_STRONG
-    if no_wan:
+    if wan.get("wan_found") is False:
         return _EVIDENCE_NONE
     proto = wan.get("proto") or ""
     if not proto:
-        # SSH fallback shape (no wan_found, no interface): link state only.
-        # A ubus-found WAN without proto, "none" or a VPN is no hint.
         ssh_shape = "wan_found" not in wan and not wan.get("interface")
-        return _EVIDENCE_HINT if ssh_shape and wan.get("connected") else _EVIDENCE_NONE
+        return (
+            _EVIDENCE_STRONG if ssh_shape and wan.get("connected") else _EVIDENCE_NONE
+        )
     if proto not in _GATEWAY_PROTOS:
         return _EVIDENCE_NONE
-    # A "WAN" carrying the router's own LAN IP is a bridged port on a dumb
-    # AP (loopback-like), not a real upstream link.
     if wan.get("ipv4") and wan.get("ipv4") == host_ip:
         return _EVIDENCE_NONE
     if wan.get("connected"):
@@ -185,58 +135,70 @@ def _gateway_evidence(data: OpenWrtCoordinatorData, host_ip: str) -> int:
 
 def _resolve_router_roles(
     router_data: list[tuple[str, str, OpenWrtCoordinatorData]],
+    remembered: Collection[str] = (),
 ) -> dict[str, str]:
     """Classify every router of the fleet as 'gateway' or 'ap'.
 
-    Every router with strong evidence is a gateway (several sites or dual
-    gateways are possible). Without any strong router, exactly ONE candidate
-    of the highest weak/hint level present becomes the gateway, picked by
-    :func:`_candidate_rank`: a WAN outage on poll 1 (no DHCP pools yet) keeps
-    one gateway with its edges and WAN/ping enrichment, and a dumb AP with a
-    left-over WAN section or an un-ignored lan pool is not promoted next to it.
+    1. Every router with strong evidence (connected WAN) is a gateway —
+       several sites or dual gateways are possible.
+    2. Without any strong router (WAN outage), every ``remembered`` gateway
+       (gateway of the last snapshot) that is still in the fleet and still
+       has a configured WAN (``wan_found`` not False) stays gateway; nothing
+       else is promoted.
+    3. Without strong and remembered routers (fresh start during an outage),
+       exactly ONE weak candidate becomes gateway: a non-default protocol
+       before OpenWrt's default dhcp/dhcpv6, then the lowest router id.
     """
     evidence = {rid: _gateway_evidence(data, hip) for rid, hip, data in router_data}
     roles = dict.fromkeys(evidence, "ap")
-    if _EVIDENCE_STRONG in evidence.values():
-        for rid, level in evidence.items():
-            if level == _EVIDENCE_STRONG:
-                roles[rid] = "gateway"
+    strong = [rid for rid, level in evidence.items() if level == _EVIDENCE_STRONG]
+    if strong:
+        roles.update(dict.fromkeys(strong, "gateway"))
         return roles
-    best = max(evidence.values(), default=_EVIDENCE_NONE)
-    if best == _EVIDENCE_NONE:
+    kept = [
+        rid
+        for rid, _hip, data in router_data
+        if rid in remembered and (data.wan_status or {}).get("wan_found") is not False
+    ]
+    if kept:
+        roles.update(dict.fromkeys(kept, "gateway"))
         return roles
     candidates = [
-        (rid, data) for rid, _hip, data in router_data if evidence[rid] == best
+        (
+            (data.wan_status or {}).get("proto") in _DEFAULT_WAN_PROTOS,
+            rid,
+        )
+        for rid, _hip, data in router_data
+        if evidence[rid] == _EVIDENCE_WEAK
     ]
-    winner = min(candidates, key=lambda item: _candidate_rank(*item))[0]
-    roles[winner] = "gateway"
+    if candidates:
+        roles[min(candidates)[1]] = "gateway"
     return roles
 
 
-def _candidate_rank(rid: str, data: OpenWrtCoordinatorData) -> tuple[Any, ...]:
-    """Sort key among equal non-strong gateway candidates (lowest wins).
+def _remember_gateways(
+    router_data: list[tuple[str, str, OpenWrtCoordinatorData]], now: str
+) -> None:
+    """Replace the role memory by the strong gateways of this snapshot.
 
-    A connected link first (SSH fallback), then a WAN port with carrier (the
-    real gateway's modem stays plugged in during an ISP outage, a dumb AP's
-    left-over WAN port is usually empty), then a deliberately configured
-    protocol over OpenWrt's default ``dhcp`` (pppoe/static/cellular are set
-    up by hand, a forgotten default wan section is dhcp), then the stable
-    router id.
+    Left untouched when no router is strong, so the gateway of the last
+    connected snapshot keeps its role for the whole outage.
     """
-    wan = data.wan_status or {}
-    return (
-        not wan.get("connected"),
-        not _has_wan_carrier(data),
-        (wan.get("proto") or "dhcp") == "dhcp",
-        rid,
-    )
+    strong = [
+        rid
+        for rid, hip, data in router_data
+        if _gateway_evidence(data, hip) == _EVIDENCE_STRONG
+    ]
+    if strong:
+        _GATEWAY_MEMORY.clear()
+        _GATEWAY_MEMORY.update(dict.fromkeys(strong, now))
 
 
 def _detect_router_role(data: OpenWrtCoordinatorData, host_ip: str) -> str:
-    """Classify a single router as 'gateway' or 'ap' (fleet of one).
+    """Classify a single router as 'gateway' or 'ap' (fleet of one, no memory).
 
     See :func:`_gateway_evidence`; mesh code uses :func:`_resolve_router_roles`
-    so a candidate is weighed against the rest of the fleet.
+    so a candidate is weighed against the rest of the fleet and the memory.
     """
     return _resolve_router_roles([("", host_ip, data)])[""]
 
@@ -1617,9 +1579,9 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
                 router_node_id(data.router_info or {}, host_ip),
             )
         )
-    roles = _resolve_router_roles(
-        [(rid, hip, data) for _e, _c, data, hip, rid in loaded]
-    )
+    fleet = [(rid, hip, data) for _e, _c, data, hip, rid in loaded]
+    roles = _resolve_router_roles(fleet, _GATEWAY_MEMORY)
+    _remember_gateways(fleet, now)
     offline_rids: set[str] = set()
 
     for entry, coordinator, data, host_ip, router_id in loaded:

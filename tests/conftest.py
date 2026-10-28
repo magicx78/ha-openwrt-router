@@ -552,3 +552,11 @@ def _reset_root_warning_latch(monkeypatch):
     from custom_components.openwrt_router import api as api_module
 
     monkeypatch.setattr(api_module, "_ROOT_WARNED_HOSTS", set())
+
+
+@pytest.fixture(autouse=True)
+def _reset_gateway_memory(monkeypatch):
+    """Isolate tests from the process-wide topology gateway-role memory."""
+    from custom_components.openwrt_router import topology_mesh
+
+    monkeypatch.setattr(topology_mesh, "_GATEWAY_MEMORY", {})

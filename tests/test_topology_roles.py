@@ -1,7 +1,9 @@
 """Tests for mesh role detection, stale routers and LLDP identity (package A12).
 
-C2  The gateway role follows a *configured* WAN or an active DHCP server, not
-    the WAN link state — a WAN outage must not turn the gateway into an AP.
+C2  A connected WAN makes a gateway; during an outage the gateway of the
+    last snapshot keeps its role (role memory), and on a fresh start one
+    configured-WAN candidate is picked. DHCP pools are no role evidence:
+    OpenWrt's defaults leave them active on dumb APs.
 C3  Clients/edges of a router whose last update failed are marked ``stale``
     and lose the client dedupe against any fresh observation.
 C7  Hostnames identify an LLDP neighbor only when unique across the fleet;
@@ -133,14 +135,27 @@ class TestGatewayRoleSurvivesWanOutage:
         data = _router(GW_MAC, wan_status=_wan_down())
         assert _detect_router_role(data, GW_IP) == "gateway"
 
-    def test_dhcp_server_on_lan_makes_gateway_without_wan(self):
+    def test_lan_dhcp_pool_without_wan_is_not_gateway(self):
         data = _router(
             GW_MAC,
             wan_status=NO_WAN,
             dhcp_pools=[LAN_POOL],
             network_interfaces=[_lan_iface(GW_IP)],
         )
-        assert _detect_router_role(data, GW_IP) == "gateway"
+        assert _detect_router_role(data, GW_IP) == "ap"
+
+    def test_lan_dhcp_pool_does_not_beat_id_tie_break(self):
+        """Default dumb AP: leftover dhcp wan AND an un-ignored lan pool. The
+        pool adds nothing — the outage pick is the same as without it."""
+        ap = _router(
+            GW_MAC,
+            wan_status=_wan_down("dhcp"),
+            dhcp_pools=[LAN_POOL],
+            network_interfaces=[_lan_iface(GW_IP)],
+        )
+        gw = _router(AP2_MAC, wan_status=_wan_down("pppoe"))
+        roles = _resolve_router_roles([(GW_MAC, GW_IP, ap), (AP2_MAC, AP2_IP, gw)])
+        assert roles == {GW_MAC: "ap", AP2_MAC: "gateway"}
 
     def test_guest_only_dhcp_pool_does_not_make_gateway(self):
         """A dumb AP serving only its guest network stays an AP."""
@@ -160,9 +175,8 @@ class TestGatewayRoleSurvivesWanOutage:
         assert _detect_router_role(data, AP_IP) == "ap"
 
     def test_outage_gateway_keeps_edges_next_to_ap_with_leftover_wan(self):
-        """Outage: the gateway (WAN down, DHCP pool) stays gateway; a dumb AP
-        with a left-over, unplugged WAN config stays AP; the uplink edge is
-        still built."""
+        """Fresh start during an outage: the pppoe gateway is picked over a
+        dumb AP with a left-over dhcp WAN; the uplink edge is still built."""
         gw = _router(
             GW_MAC,
             wan_status=_wan_down(),
@@ -223,20 +237,32 @@ class TestLegacyWanStatusWithoutWanFound:
         data = _router(GW_MAC, wan_status=SSH_CONNECTED)
         assert _detect_router_role(data, GW_IP) == "gateway"
 
-    def test_ssh_fallback_connected_next_to_real_gateway_is_ap(self):
+    def test_ssh_fallback_connected_next_to_ubus_gateway_is_gateway_too(self):
+        """A connected SSH-fallback WAN is strong like a ubus one."""
         gw = _router(GW_MAC, wan_status=_wan_up())
         ssh = _router(AP_MAC, wan_status=SSH_CONNECTED)
         roles = _resolve_router_roles([(GW_MAC, GW_IP, gw), (AP_MAC, AP_IP, ssh)])
+        assert roles == {GW_MAC: "gateway", AP_MAC: "gateway"}
+
+    def test_ssh_fallback_disconnected_next_to_ubus_gateway_is_ap(self):
+        gw = _router(GW_MAC, wan_status=_wan_up())
+        ssh = _router(AP_MAC, wan_status={**SSH_CONNECTED, "connected": False})
+        roles = _resolve_router_roles([(GW_MAC, GW_IP, gw), (AP_MAC, AP_IP, ssh)])
         assert roles == {GW_MAC: "gateway", AP_MAC: "ap"}
 
-    def test_two_ssh_fallback_routers_promote_one(self):
+    def test_two_connected_ssh_fallback_routers_are_both_gateways(self):
         r1 = _router(GW_MAC, wan_status=SSH_CONNECTED)
         r2 = _router(AP_MAC, wan_status=SSH_CONNECTED)
-        for rd in (
-            [(GW_MAC, GW_IP, r1), (AP_MAC, AP_IP, r2)],
-            [(AP_MAC, AP_IP, r2), (GW_MAC, GW_IP, r1)],
-        ):
-            assert _resolve_router_roles(rd) == {GW_MAC: "gateway", AP_MAC: "ap"}
+        roles = _resolve_router_roles([(GW_MAC, GW_IP, r1), (AP_MAC, AP_IP, r2)])
+        assert roles == {GW_MAC: "gateway", AP_MAC: "gateway"}
+
+    def test_ssh_gateway_beats_dumb_ap_with_leftover_wan(self):
+        """SSH-fallback gateway (no pools, WAN up) vs. a dumb AP keeping the
+        default dhcp wan section unplugged — and having the lower id."""
+        ssh_gw = _router(AP2_MAC, wan_status=SSH_CONNECTED)
+        ap = _router(GW_MAC, wan_status=_wan_down("dhcp"))
+        roles = _resolve_router_roles([(GW_MAC, GW_IP, ap), (AP2_MAC, AP2_IP, ssh_gw)])
+        assert roles == {GW_MAC: "ap", AP2_MAC: "gateway"}
 
     def test_legacy_bridged_wan_with_host_ip_is_ap(self):
         data = _router(
@@ -444,13 +470,18 @@ class TestDumbApWithLanDhcpPool:
 class TestSingleWeakGateway:
     """P2.1: poll 1 of an outage — only weak candidates, at most one wins."""
 
-    def test_wan_carrier_wins_over_unplugged_leftover_wan(self):
-        # The real gateway has the HIGHER id, so the id tie-break alone would
-        # pick the wrong router.
+    def test_port_stats_up_flag_is_not_a_tie_break(self):
+        """``port_stats[].up`` is netifd's device-active flag, not carrier."""
         gw = _router(AP2_MAC, "gw", wan_status=_wan_down("dhcp"))
         gw.port_stats = _wan_port(True)
         ap = _router(GW_MAC, "ap", wan_status=_wan_down("dhcp"))
         ap.port_stats = _wan_port(False)
+        roles = _resolve_router_roles([(GW_MAC, GW_IP, ap), (AP2_MAC, AP2_IP, gw)])
+        assert roles == {GW_MAC: "gateway", AP2_MAC: "ap"}
+
+    def test_default_wan6_dhcpv6_counts_as_default_proto(self):
+        gw = _router(AP2_MAC, "gw", wan_status=_wan_down("static"))
+        ap = _router(GW_MAC, "ap", wan_status=_wan_down("dhcpv6"))
         roles = _resolve_router_roles([(GW_MAC, GW_IP, ap), (AP2_MAC, AP2_IP, gw)])
         assert roles == {GW_MAC: "ap", AP2_MAC: "gateway"}
 
@@ -498,9 +529,16 @@ class TestDualGatewayUplinks:
         assert not any(e["to"] == AP_MAC for e in edges)
 
     def test_connected_gateway_is_preferred_over_outage(self):
-        edges = _detect_inter_router_edges([], self._fleet(first_connected=False))
+        """Both are gateways (e.g. from role memory); the connected one
+        claims the AP."""
+        roles = {GW_MAC: "gateway", AP_MAC: "gateway", AP2_MAC: "ap"}
+        edges = _detect_inter_router_edges([], self._fleet(first_connected=False), roles)
         into_ap = [e for e in edges if e["to"] == AP2_MAC]
         assert [e["from"] for e in into_ap] == [AP_MAC]
+
+    def test_outage_gateway_is_ap_while_another_is_strong(self):
+        roles = _resolve_router_roles(self._fleet(first_connected=False))
+        assert roles == {GW_MAC: "ap", AP_MAC: "gateway", AP2_MAC: "ap"}
 
 
 class TestRolesResolvedOnce:
@@ -512,9 +550,9 @@ class TestRolesResolvedOnce:
         calls = []
         real = mesh._resolve_router_roles
 
-        def _counting(router_data):
+        def _counting(router_data, *args, **kwargs):
             calls.append(1)
-            return real(router_data)
+            return real(router_data, *args, **kwargs)
 
         monkeypatch.setattr(mesh, "_resolve_router_roles", _counting)
         gw = _router(
@@ -529,3 +567,83 @@ class TestRolesResolvedOnce:
             _fake_hass([_fake_entry("e1", GW_IP, gw), _fake_entry("e2", AP_IP, ap)])
         )
         assert len(calls) == 1
+
+
+class TestGatewayMemory:
+    """Round 3: the gateway of the last snapshot survives a WAN outage."""
+
+    def _snap(self, *routers) -> dict:
+        entries = [_fake_entry(f"e{i}", ip, data) for i, (ip, data) in enumerate(routers)]
+        return build_mesh_snapshot(_fake_hass(entries))
+
+    def _roles(self, snap: dict) -> dict:
+        return {n["id"]: n["role"] for n in snap["nodes"] if n.get("type") == "router"}
+
+    def test_gateway_keeps_role_when_its_wan_drops(self):
+        # The real gateway has the HIGHER id and the same default proto as
+        # the dumb AP, so without memory the tie-break would pick the AP.
+        gw = _router(AP2_MAC, "gw", wan_status=_wan_up())
+        ap = _router(GW_MAC, "ap", wan_status=_wan_down("dhcp"))
+        assert self._roles(self._snap((AP2_IP, gw), (GW_IP, ap))) == {
+            AP2_MAC: "gateway",
+            GW_MAC: "ap",
+        }
+        gw.wan_status = _wan_down("dhcp")
+        snap = self._snap((AP2_IP, gw), (GW_IP, ap))
+        assert self._roles(snap) == {AP2_MAC: "gateway", GW_MAC: "ap"}
+        assert "ping_ms" in _router_node(snap, AP2_MAC)["attributes"]
+
+    def test_memory_is_replaced_by_the_current_strong_set(self):
+        r1 = _router(GW_MAC, "r1", wan_status=_wan_up())
+        r2 = _router(AP_MAC, "r2", wan_status=_wan_down("pppoe"))
+        self._snap((GW_IP, r1), (AP_IP, r2))
+        # r2 comes up, r1 goes down: r2 is strong, r1 is forgotten ...
+        r1.wan_status = _wan_down("pppoe")
+        r2.wan_status = _wan_up("198.51.100.8")
+        assert self._roles(self._snap((GW_IP, r1), (AP_IP, r2))) == {
+            GW_MAC: "ap",
+            AP_MAC: "gateway",
+        }
+        # ... so when both are down, r2 (remembered) stays gateway.
+        r2.wan_status = _wan_down("pppoe")
+        assert self._roles(self._snap((GW_IP, r1), (AP_IP, r2))) == {
+            GW_MAC: "ap",
+            AP_MAC: "gateway",
+        }
+
+    def test_remembered_router_without_wan_is_not_kept(self):
+        r1 = _router(GW_MAC, "r1", wan_status=_wan_up())
+        r2 = _router(AP_MAC, "r2", wan_status=_wan_down("dhcp"))
+        self._snap((GW_IP, r1), (AP_IP, r2))
+        r1.wan_status = NO_WAN
+        assert self._roles(self._snap((GW_IP, r1), (AP_IP, r2))) == {
+            GW_MAC: "ap",
+            AP_MAC: "gateway",
+        }
+
+    def test_remembered_gateway_blocks_other_candidates(self):
+        roles = _resolve_router_roles(
+            [
+                (GW_MAC, GW_IP, _router(GW_MAC, wan_status=_wan_down("pppoe"))),
+                (AP_MAC, AP_IP, _router(AP_MAC, wan_status=_wan_down("dhcp"))),
+            ],
+            remembered={AP_MAC},
+        )
+        assert roles == {GW_MAC: "ap", AP_MAC: "gateway"}
+
+    def test_two_strong_gateways_are_both_remembered(self):
+        import custom_components.openwrt_router.topology_mesh as mesh
+
+        r1 = _router(GW_MAC, "r1", wan_status=_wan_up())
+        r2 = _router(AP_MAC, "r2", wan_status=_wan_up("198.51.100.8"))
+        assert self._roles(self._snap((GW_IP, r1), (AP_IP, r2))) == {
+            GW_MAC: "gateway",
+            AP_MAC: "gateway",
+        }
+        assert set(mesh._GATEWAY_MEMORY) == {GW_MAC, AP_MAC}
+        r1.wan_status = _wan_down("dhcp")
+        r2.wan_status = _wan_down("dhcp")
+        assert self._roles(self._snap((GW_IP, r1), (AP_IP, r2))) == {
+            GW_MAC: "gateway",
+            AP_MAC: "gateway",
+        }
