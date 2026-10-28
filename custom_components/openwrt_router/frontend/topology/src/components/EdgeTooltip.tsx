@@ -6,6 +6,7 @@
 import React from 'react';
 import { EdgeLayout, TopologyData } from '../types';
 import { formatBitRate } from '../utils/format';
+import { STALE_HINT, parallelLinkLabel } from '../utils/hints';
 
 interface Props {
   edgeId: string;
@@ -95,6 +96,9 @@ export function EdgeTooltip({ edgeId, x, y, edges, data }: Props) {
         value: `${(localPort ?? '?').toUpperCase()} ↔ ${(remotePort ?? '?').toUpperCase()}`,
       });
     }
+    for (const d of lldp?.duplicates ?? []) {
+      rows.push({ label: 'Parallel', value: parallelLinkLabel(d) });
+    }
     if (lldp?.neighborMac)        rows.push({ label: 'Nachbar-MAC', value: lldp.neighborMac });
     else if (lldp?.neighborChassisId) rows.push({ label: 'Chassis-ID', value: lldp.neighborChassisId });
     const vlans = lldp?.vlanTags ?? edge.vlanTags;
@@ -123,6 +127,8 @@ export function EdgeTooltip({ edgeId, x, y, edges, data }: Props) {
     rows.push({ label: 'Clients', value: String(ap?.clientCount ?? 0) });
     if (ap?.ip) rows.push({ label: 'IP', value: ap.ip });
   }
+
+  if (edge.stale) rows.unshift({ label: '⚠ Veraltet', value: STALE_HINT });
 
   // ── Position: offset so tooltip doesn't sit under the cursor ────────────
   // Nudge left if near right edge (rough estimate: 200px tooltip width)

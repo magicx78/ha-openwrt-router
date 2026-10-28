@@ -26,6 +26,7 @@ import type {
   SwitchNode,
   LldpUplink,
   LldpConflict,
+  LldpDuplicate,
   ConnectionType,
   ConfidenceLevel,
   WanTraffic,
@@ -83,6 +84,7 @@ interface SnapshotEdge {
   to: string;
   relationship: string; // 'lan_uplink' | 'wifi_uplink' | 'mesh_member' | 'has_interface' | 'has_client'
   inferred?: boolean;
+  stale?: boolean; // built from old data (an end router is offline); only present when true
   attributes?: {
     link_type?: string;
     signal?: number;
@@ -96,6 +98,7 @@ interface SnapshotClient {
   signal: number | null;
   connected: boolean;
   last_seen?: string;
+  stale?: boolean; // reporting router is offline; only present when true
 }
 
 interface Snapshot {
@@ -542,6 +545,18 @@ function adaptLldp(attr: SnapshotEdge['attributes']): LldpUplink {
         lldp_port: typeof c?.lldp_port === 'string' ? c.lldp_port : undefined,
       }))
     : undefined;
+  const duplicates = Array.isArray(a.lldp_duplicates)
+    ? (a.lldp_duplicates as any[])
+        .filter((d) => d && typeof d === 'object')
+        .map((d): LldpDuplicate => ({
+          observer: typeof d.observer === 'string' && d.observer ? d.observer : undefined,
+          localInterface:
+            typeof d.local_interface === 'string' && d.local_interface ? d.local_interface : undefined,
+          localPort: typeof d.local_port === 'string' && d.local_port ? d.local_port : undefined,
+          neighborPortId:
+            typeof d.neighbor_port_id === 'string' && d.neighbor_port_id ? d.neighbor_port_id : undefined,
+        }))
+    : undefined;
   const direction = a.direction === 'one_way' ? 'one_way'
     : a.direction === 'bidirectional' ? 'bidirectional'
     : undefined;
@@ -564,7 +579,42 @@ function adaptLldp(attr: SnapshotEdge['attributes']): LldpUplink {
     managementIp: str('management_ip'),
     capabilities: capabilities && capabilities.length ? capabilities : undefined,
     conflicts: conflicts && conflicts.length ? conflicts : undefined,
+    duplicates: duplicates && duplicates.length ? duplicates : undefined,
   };
+}
+
+// ── Gateway selection ─────────────────────────────────────────────────────
+
+/** Minimal router-node shape needed to pick the gateway. */
+export interface GatewayCandidate {
+  id: string;
+  role?: string;
+  attributes?: { node_status?: unknown; wan_connected?: unknown; [key: string]: unknown } | null;
+}
+
+/**
+ * Pick the router node to render as the gateway.
+ *
+ * Normally exactly one router has role=gateway. With zero or several the
+ * choice must not depend on snapshot order:
+ *   1. candidates = routers with role=gateway (all routers if there is none)
+ *   2. prefer online ones (node_status !== 'offline')
+ *   3. then the one with a connected WAN (wan_connected === true)
+ *   4. stable tiebreak: lexicographically smallest node id
+ * All other routers (including further gateways) are rendered as APs/peers.
+ */
+export function pickGatewayNode<T extends GatewayCandidate>(routerNodes: readonly T[]): T | undefined {
+  if (routerNodes.length === 0) return undefined;
+  const gateways = routerNodes.filter((n) => n.role === 'gateway');
+  const candidates = gateways.length > 0 ? gateways : routerNodes;
+  const rank = (n: T): number =>
+    (n.attributes?.node_status === 'offline' ? 2 : 0) +
+    (n.attributes?.wan_connected === true ? 0 : 1);
+  return [...candidates].sort((a, b) => {
+    const r = rank(a) - rank(b);
+    if (r !== 0) return r;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  })[0];
 }
 
 // ── Core adapter ─────────────────────────────────────────────────────────
@@ -582,8 +632,9 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       e.relationship === 'router_uplink',
   );
 
-  // Gateway = first router with role=gateway, fallback to first router
-  const gwNode = routerNodes.find((n) => n.role === 'gateway') ?? routerNodes[0];
+  // Gateway: deliberate choice when zero or several routers claim the role.
+  // Every other router (also a second "gateway") is rendered as an AP below.
+  const gwNode = pickGatewayNode(routerNodes);
 
   if (!gwNode) {
     // A failed snapshot build arrives as HTTP 500 and is thrown by
@@ -651,6 +702,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     apPort?: string;
     vlanTags?: number[];
     lldp?: LldpUplink;
+    stale: boolean;
   }>();
   for (const edge of interRouterEdges) {
     const apId = edge.to;
@@ -694,6 +746,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       apPort,
       vlanTags,
       lldp,
+      stale: edge.stale === true,
     });
   }
 
@@ -753,12 +806,19 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       vlanTags: uplink?.vlanTags,
       portStats: ((n.attributes?.port_stats as any[] | undefined) ?? []).map(adaptPortStat),
       lldpUplink: uplink?.lldp,
+      uplinkStale: uplink?.stale || undefined,
     };
   });
 
   // Also extract SSIDs for gateway
   const gatewaySsids = ssidsByRouter.get(gwNode.id) ?? [];
   gateway.ssids = gatewaySsids.length > 0 ? gatewaySsids : undefined;
+
+  // Stale client MACs from the clients array (fallback for client nodes
+  // without attributes.stale).
+  const staleClientMacs = new Set(
+    snap.clients.filter((c) => c.stale === true).map((c) => c.mac.toLowerCase()),
+  );
 
   // Build client list from client nodes
   const clients: Client[] = clientNodes.map((n) => {
@@ -830,6 +890,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       haNameSource,
       haModel,
       randomMac,
+      stale: attr?.stale === true || (mac !== '' && staleClientMacs.has(mac.toLowerCase())) || undefined,
     };
   });
 

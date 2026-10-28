@@ -1,5 +1,6 @@
 import React from 'react';
 import { TopologyData } from '../types';
+import { STALE_HINT, parallelLinkLabel } from '../utils/hints';
 
 interface Props {
   nodeId: string;
@@ -108,6 +109,10 @@ export function NodeTooltip({ nodeId, data, anchorRect }: Props) {
         {ap.uplinkType === 'router_uplink' && ap.lldpUplink?.neighborName && (
           <Row label="Nachbar" value={ap.lldpUplink.neighborName} />
         )}
+        {ap.uplinkType === 'router_uplink' && (ap.lldpUplink?.duplicates ?? []).map((d, i) => (
+          <Row key={`dup-${i}`} label="Parallele Verbindung" value={parallelLinkLabel(d)} />
+        ))}
+        {ap.uplinkStale && <Row label="Uplink" value={STALE_HINT} warn />}
         {(ap.uplinkType === 'mesh' || ap.uplinkType === 'repeater') && (
           <Row label="Backhaul" value={`${ap.backhaulSignal} dBm`} warn={ap.backhaulSignal < -75} />
         )}

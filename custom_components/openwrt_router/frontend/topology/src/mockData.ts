@@ -81,18 +81,36 @@ export const MOCK_DATA: TopologyData = {
       uplinkTo: 'ap1',
       clientCount: 3,
       backhaulSignal: -68,
-      status: 'warning',
+      // Last update failed: old data is still shown, uplink + clients are stale
+      status: 'offline',
+      uplinkStale: true,
     },
     {
       id: 'ap3',
       name: 'aP4',
       model: 'Cudy WR3000',
       ip: '10.10.10.4',
-      uplinkType: 'wired',
+      uplinkType: 'router_uplink',
       uplinkTo: 'gw',
       clientCount: 6,
       backhaulSignal: -42,
       status: 'online',
+      gatewayPort: 'lan3',
+      apPort: 'wan',
+      // LLDP uplink with one parallel link (second cable between the same pair)
+      lldpUplink: {
+        linkType: 'lan',
+        detectionMethod: 'lldp',
+        confidence: 'high',
+        direction: 'bidirectional',
+        fromPort: 'lan3',
+        toPort: 'wan',
+        neighborName: 'aP4',
+        neighborPortId: 'wan',
+        duplicates: [
+          { observer: 'gw', localInterface: 'lan4', localPort: 'lan4', neighborPortId: 'lan1' },
+        ],
+      },
     },
   ],
   clients: [
@@ -101,9 +119,9 @@ export const MOCK_DATA: TopologyData = {
     { id: 'c2', name: "Tom's MacBook", hostname: 'macbook-tom', ip: '10.10.10.102', mac: 'AA:BB:CC:02', apId: 'ap1', category: 'laptop', signal: -48, band: '5 GHz', status: 'online', manufacturer: 'Apple' },
     { id: 'c3', name: 'Smart TV', hostname: 'samsung-tv', ip: '10.10.10.103', mac: 'AA:BB:CC:03', apId: 'ap1', category: 'iot', signal: -62, band: '2.4 GHz', status: 'online', manufacturer: 'Samsung' },
     { id: 'c4', name: 'Nest Thermostat', hostname: 'nest-therm', ip: '10.10.10.104', mac: 'AA:BB:CC:04', apId: 'ap1', category: 'iot', signal: -71, band: '2.4 GHz', status: 'warning', manufacturer: 'Google' },
-    // ap2 (mesh AP — one client offline)
-    { id: 'c5', name: "Max's Android", hostname: 'pixel-max', ip: '10.10.10.105', mac: 'AA:BB:CC:05', apId: 'ap2', category: 'smartphone', signal: -58, band: '5 GHz', status: 'online', manufacturer: 'Google' },
-    { id: 'c6', name: 'Work Laptop', hostname: 'thinkpad', ip: '10.10.10.106', mac: 'AA:BB:CC:06', apId: 'ap2', category: 'laptop', signal: -65, band: '5 GHz', status: 'online', manufacturer: 'Lenovo' },
+    // ap2 (mesh AP, router offline — stale clients, one client offline)
+    { id: 'c5', name: "Max's Android", hostname: 'pixel-max', ip: '10.10.10.105', mac: 'AA:BB:CC:05', apId: 'ap2', category: 'smartphone', signal: -58, band: '5 GHz', status: 'online', manufacturer: 'Google', stale: true },
+    { id: 'c6', name: 'Work Laptop', hostname: 'thinkpad', ip: '10.10.10.106', mac: 'AA:BB:CC:06', apId: 'ap2', category: 'laptop', signal: -65, band: '5 GHz', status: 'online', manufacturer: 'Lenovo', stale: true },
     { id: 'c7', name: 'Hue Bridge', hostname: 'hue-bridge', ip: '10.10.10.107', mac: 'AA:BB:CC:07', apId: 'ap2', category: 'iot', signal: -73, band: '2.4 GHz', status: 'offline', manufacturer: 'Philips' },
     // ap3
     { id: 'c8', name: 'Guest Phone', hostname: 'guest-1', ip: '10.10.20.10', mac: 'AA:BB:CC:08', apId: 'ap3', category: 'guest', signal: -61, band: '2.4 GHz', status: 'online' },

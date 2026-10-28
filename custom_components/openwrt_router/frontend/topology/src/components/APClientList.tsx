@@ -1,6 +1,7 @@
 import React from 'react';
 import { Client } from '../types';
 import { StatusDot } from './StatusDot';
+import { STALE_HINT } from '../utils/hints';
 
 interface Props {
   clients: Client[];
@@ -31,7 +32,8 @@ export function APClientList({ clients, onSelectClient }: Props) {
       {clients.map(c => (
         <button
           key={c.id}
-          className="ap-client-list__row"
+          className={`ap-client-list__row${c.stale ? ' ap-client-list__row--stale' : ''}`}
+          title={c.stale ? STALE_HINT : undefined}
           onClick={e => { e.stopPropagation(); onSelectClient(c); }}
         >
           <StatusDot status={c.status} />

@@ -99,6 +99,7 @@ function EdgeGroup({ edge, highlighted, dimmed, animIndex, onEdgeHover, vlanMode
     dimmed && !highlighted ? 'edge-dimmed' : '',
     highlighted            ? 'edge-highlighted' : '',
     edge.status === 'warning' ? 'edge-warning' : '',
+    edge.stale             ? 'edge-stale' : '',
   ]
     .filter(Boolean)
     .join(' ');

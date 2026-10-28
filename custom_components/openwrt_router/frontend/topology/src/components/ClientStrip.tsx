@@ -16,6 +16,7 @@ import {
   IconOther,
 } from './Icons';
 import { signalQuality } from '../layout';
+import { STALE_HINT } from '../utils/hints';
 
 const MAX_VISIBLE = 8;
 
@@ -67,7 +68,7 @@ function ClientDot({ client, onSelect, vlanMode }: DotProps) {
 
   return (
     <div
-      className={`client-dot ${client.status}`}
+      className={`client-dot ${client.status}${client.stale ? ' client-dot--stale' : ''}`}
       data-vlan={vlanMode && client.vlanId != null ? client.vlanId : undefined}
       onClick={e => { e.stopPropagation(); onSelect(); }}
       onMouseEnter={() => setShowTooltip(true)}
@@ -80,6 +81,7 @@ function ClientDot({ client, onSelect, vlanMode }: DotProps) {
           <div className="client-tooltip__meta">
             {client.ip} · {client.band} · {client.signal} dBm ({q})
           </div>
+          {client.stale && <div className="client-tooltip__stale">⚠ {STALE_HINT}</div>}
         </div>
       )}
     </div>

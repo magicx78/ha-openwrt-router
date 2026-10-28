@@ -8,6 +8,7 @@ import { useStatusFlash } from '../useStatusFlash';
 import { PortStrip } from './PortStrip';
 import { PortDeviceStrip } from './PortDeviceStrip';
 import { vlanColor } from '../utils/vlanColor';
+import { parallelLinkLabel } from '../utils/hints';
 
 function trendArrow(history: number[]): string {
   if (history.length < 3) return '→';
@@ -118,6 +119,8 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
     flashing  ? 'status-flash' : '',
   ].filter(Boolean).join(' ');
 
+  const parallelLinks = ap.lldpUplink?.duplicates ?? [];
+
   const vlanAttr = vlanMode && ap.primaryVlanId != null ? ap.primaryVlanId : undefined;
   const health = healthMode ? computeHealth(ap.cpuLoad, ap.memUsage, ap.backhaulSignal) : undefined;
 
@@ -158,6 +161,14 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
          : ap.uplinkType === 'router_uplink' ? 'Router-Uplink'
          :                                     'Mesh?'}
           {ap.uplinkType === 'router_uplink' && <span className="ap-card__lldp-tag">LLDP</span>}
+          {ap.uplinkType === 'router_uplink' && parallelLinks.length > 0 && (
+            <span
+              className="ap-card__lldp-tag ap-card__lldp-tag--parallel"
+              title={parallelLinks.map((d) => `Parallele Verbindung: ${parallelLinkLabel(d)}`).join('\n')}
+            >
+              {parallelLinks.length + 1}×
+            </span>
+          )}
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {ap.status !== 'offline' && <SignalBar dbm={ap.backhaulSignal} />}
