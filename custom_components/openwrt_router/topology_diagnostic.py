@@ -273,6 +273,18 @@ def _slim_port_stats(
     return result
 
 
+def router_node_id(router_info: dict[str, Any], host_ip: str) -> str:
+    """Return the id of a router's node in the topology snapshot.
+
+    Use the MAC if available; fall back to the hostname (+host_ip for
+    uniqueness when known — without it the bare hostname must not grow a
+    trailing underscore, every edge references this ID verbatim).
+    """
+    mac = router_info.get("mac", "")
+    hostname = router_info.get("hostname") or "router"
+    return mac or (f"{hostname}_{host_ip}" if host_ip else hostname)
+
+
 def build_topology_snapshot(
     data: OpenWrtCoordinatorData,
     role: str = "unknown",
@@ -303,12 +315,7 @@ def build_topology_snapshot(
     clients: list[dict[str, Any]] = []
 
     router_info = data.router_info
-    # Use MAC if available; fall back to hostname (+host_ip for uniqueness when
-    # known — without it the bare hostname must not grow a trailing underscore,
-    # every edge references this ID verbatim).
-    _mac = router_info.get("mac", "")
-    _hostname = router_info.get("hostname") or "router"
-    router_id: str = _mac or (f"{_hostname}_{host_ip}" if host_ip else _hostname)
+    router_id: str = router_node_id(router_info, host_ip)
     wan_ifname: str = data.wan_status.get("interface", "")
 
     # ── Port → device mapping (FDB + DHCP + ARP, confidence model) ─
