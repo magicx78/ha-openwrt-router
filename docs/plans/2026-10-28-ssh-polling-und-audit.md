@@ -7,10 +7,10 @@
 ## Status
 
 - **Stand:** 2026-10-28 (nachts) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7), #42 A17 (`50bf5ae`, v1.38.8) und #43 A4 (`917cbb4`, v1.38.9) am 2026-10-28 — **offen:** A5 `fix/diagnostics-redaction` (Worktree `../ha-openwrt-router-diag-redact`, noch kein PR)
+- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7), #42 A17 (`50bf5ae`, v1.38.8) und #43 A4 (`917cbb4`, v1.38.9) am 2026-10-28 — **offen:** A5 `fix/diagnostics-redaction` als PR #44 (Worktree `../ha-openwrt-router-diag-redact`, v1.38.10)
 - **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt und gemergt (1.38.9, PR #43, Review-Befunde behoben, Hardware-Nachweis erbracht) · **Offen:** A3, A5–A10, A12–A14
 - **Blocker:** –
-- **Nächster Schritt:** A5 (1.38.10) umgesetzt, reviewt (P1 behoben) und lokal grün, committet; Push und PR nach Freigabe. Danach A13
+- **Nächster Schritt:** A5 (1.38.10) als PR #44 offen; nach grüner CI Merge-Freigabe einholen, nach Installation echte Diagnose auf MAC-/IP-Muster prüfen. Danach A13
 
 ## Problem und Zielverhalten
 
