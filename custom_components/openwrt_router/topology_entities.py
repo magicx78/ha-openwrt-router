@@ -6,11 +6,10 @@ Two sensors per router config entry:
       EntityCategory.DIAGNOSTIC
       native_value  = total node count in snapshot
       attributes:
-          topology_snapshot  — full snapshot dict (matches /api/topology/snapshot schema)
-          interfaces         — list of interface objects
-          clients            — list of client objects
-          inference_used     — bool: True when any node/edge is inferred
-          topology_debug     — meta + known_limitations
+          node_count / edge_count / interface_count / client_count — int
+          inference_used  — bool: True when any node/edge is inferred
+          source          — snapshot producer id
+          schema_version  — snapshot schema version
 
   sensor.<router>_topology_status
       EntityCategory.DIAGNOSTIC
@@ -24,8 +23,13 @@ Two sensors per router config entry:
           unknown_interface_types — int
           known_limitations      — list[str]
 
-The "network_topology" sensor is the primary cross-comparison point
-against the provisioning server's /api/topology/snapshot output.
+Attributes are deliberately small and free of timestamps, so the state only
+changes when a count changes. The raw snapshot (nodes, edges, interfaces,
+clients) is served exclusively by the authenticated panel API
+(``/api/openwrt_topology/snapshot``, see topology_panel.py).
+
+The snapshot is built at most once per coordinator update and shared by both
+sensors of a router (``TopologySnapshotCache``).
 """
 
 from __future__ import annotations
@@ -48,10 +52,62 @@ from .const import (
     SUFFIX_TOPOLOGY_STATUS,
     url_scheme_for,
 )
-from .coordinator import OpenWrtCoordinator
+from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
 from .topology_diagnostic import build_topology_snapshot, get_topology_status
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class TopologySnapshotCache:
+    """Per-router topology snapshot, built once per coordinator update.
+
+    The coordinator replaces ``coordinator.data`` with a fresh object on every
+    successful poll, so the identity of that object is the cache key: the
+    first property read after an update builds the snapshot, every further
+    read (from either sensor) reuses it. A failed build is cached as ``{}``
+    too, so a broken payload is not re-parsed on every attribute access.
+    """
+
+    def __init__(self, coordinator: OpenWrtCoordinator, label: str) -> None:
+        self._coordinator = coordinator
+        self._label = label
+        self._source: OpenWrtCoordinatorData | None = None
+        self._snapshot: dict[str, Any] = {}
+        self._status: dict[str, Any] = {}
+
+    def _refresh(self) -> None:
+        """Rebuild the cached snapshot if the coordinator data was replaced."""
+        data = self._coordinator.data
+        if data is self._source:
+            return
+        self._source = data
+        self._snapshot = {}
+        self._status = {}
+        if not data:
+            return
+        try:
+            self._snapshot = build_topology_snapshot(data)
+            self._status = get_topology_status(self._snapshot)
+        except Exception:
+            _LOGGER.debug(
+                "topology_diagnostic: snapshot build failed for %s",
+                self._label,
+                exc_info=True,
+            )
+            self._snapshot = {}
+            self._status = {}
+
+    @property
+    def snapshot(self) -> dict[str, Any]:
+        """Return the snapshot for the current coordinator data ({} if none)."""
+        self._refresh()
+        return self._snapshot
+
+    @property
+    def status(self) -> dict[str, Any]:
+        """Return the status counts for the current snapshot ({} if none)."""
+        self._refresh()
+        return self._status
 
 
 def setup_topology_entities(
@@ -63,9 +119,10 @@ def setup_topology_entities(
 
     Called from sensor.async_setup_entry — no new platform needed.
     """
+    cache = TopologySnapshotCache(coordinator, entry.entry_id)
     entities: list[SensorEntity] = [
-        OpenWrtTopologySnapshotSensor(coordinator, entry),
-        OpenWrtTopologyStatusSensor(coordinator, entry),
+        OpenWrtTopologySnapshotSensor(coordinator, entry, cache),
+        OpenWrtTopologyStatusSensor(coordinator, entry, cache),
     ]
     async_add_entities(entities)
     _LOGGER.debug("Added topology diagnostic sensors for entry %s", entry.entry_id)
@@ -76,10 +133,9 @@ class _TopologyEntityBase(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    # Topology snapshots exceed HA's 16 KB recorder limit (40+ nodes, 33+ clients).
-    # Exclude all attributes from the recorder — the sensor state (node count / active
-    # interface count) is still recorded. Attributes are available in-memory at any
-    # time and are read by the topology panel from the live state object.
+    # Diagnostic counts only — the sensor state (node count / active interface
+    # count) is recorded, the attributes are not. The full topology is
+    # available from the panel API, not from these entities.
     _unrecorded_attributes = frozenset({MATCH_ALL})
 
     def __init__(
@@ -87,9 +143,11 @@ class _TopologyEntityBase(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
         coordinator: OpenWrtCoordinator,
         entry: OpenWrtConfigEntry,
         suffix: str,
+        cache: TopologySnapshotCache,
     ) -> None:
         super().__init__(coordinator)
         self._entry = entry
+        self._cache = cache
         self._attr_unique_id = f"{entry.entry_id}_{suffix}"
 
     @property
@@ -109,28 +167,13 @@ class _TopologyEntityBase(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
             ),
         )
 
-    def _snapshot(self) -> dict[str, Any]:
-        """Build and return the current topology snapshot (cached per call)."""
-        if not self.coordinator.data:
-            return {}
-        try:
-            return build_topology_snapshot(self.coordinator.data)
-        except Exception:
-            _LOGGER.debug(
-                "topology_diagnostic: snapshot build failed for %s",
-                self._attr_unique_id,
-                exc_info=True,
-            )
-            return {}
-
 
 class OpenWrtTopologySnapshotSensor(_TopologyEntityBase):
     """Topology snapshot sensor.
 
     native_value = total node count.
-    Primary attribute 'topology_snapshot' mirrors the structure of
-    /api/topology/snapshot from the provisioning server for direct
-    side-by-side comparison.
+    Attributes are the snapshot's meta counts — the raw snapshot itself is
+    only available from the authenticated panel API.
     """
 
     _attr_icon = "mdi:graph-outline"
@@ -141,8 +184,9 @@ class OpenWrtTopologySnapshotSensor(_TopologyEntityBase):
         self,
         coordinator: OpenWrtCoordinator,
         entry: OpenWrtConfigEntry,
+        cache: TopologySnapshotCache,
     ) -> None:
-        super().__init__(coordinator, entry, SUFFIX_TOPOLOGY_SNAPSHOT)
+        super().__init__(coordinator, entry, SUFFIX_TOPOLOGY_SNAPSHOT, cache)
 
     @property
     def name(self) -> str:
@@ -152,37 +196,26 @@ class OpenWrtTopologySnapshotSensor(_TopologyEntityBase):
     @property
     def native_value(self) -> int | None:
         """Return total node count in the snapshot."""
-        snap = self._snapshot()
+        snap = self._cache.snapshot
         if not snap:
             return None
-        return snap["meta"].get("node_count", 0)
+        return snap.get("meta", {}).get("node_count", 0)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return topology snapshot and diagnostic attributes."""
-        snap = self._snapshot()
+        """Return small, stable snapshot counts (no timestamps, no raw lists)."""
+        snap = self._cache.snapshot
         if not snap:
             return {}
+        meta = snap.get("meta", {})
         return {
-            # Full snapshot — primary comparison target vs provisioning server
-            "topology_snapshot": snap,
-            # Convenience sub-lists (same data, easier to browse in HA UI)
-            "interfaces": snap.get("interfaces", []),
-            "clients": snap.get("clients", []),
-            "inference_used": snap.get("meta", {}).get("inference_used", False),
-            # Debug envelope
-            "topology_debug": {
-                "source": snap.get("meta", {}).get("source"),
-                "schema_version": snap.get("meta", {}).get("schema_version"),
-                "generated_at": snap.get("generated_at"),
-                "meta": snap.get("meta", {}),
-                "known_limitations": [
-                    "signal=null when iw station dump returns bracket-format signal",
-                    "inactive = strict 0/0 rx/tx only",
-                    "rx_bytes/tx_bytes per AP interface not available from HA coordinator",
-                    "wifi_iface_status={} when provisioning server has no SSH key",
-                ],
-            },
+            "node_count": meta.get("node_count", 0),
+            "edge_count": meta.get("edge_count", 0),
+            "interface_count": meta.get("interface_count", 0),
+            "client_count": meta.get("client_count", 0),
+            "inference_used": meta.get("inference_used", False),
+            "source": meta.get("source"),
+            "schema_version": meta.get("schema_version"),
         }
 
 
@@ -201,8 +234,9 @@ class OpenWrtTopologyStatusSensor(_TopologyEntityBase):
         self,
         coordinator: OpenWrtCoordinator,
         entry: OpenWrtConfigEntry,
+        cache: TopologySnapshotCache,
     ) -> None:
-        super().__init__(coordinator, entry, SUFFIX_TOPOLOGY_STATUS)
+        super().__init__(coordinator, entry, SUFFIX_TOPOLOGY_STATUS, cache)
 
     @property
     def name(self) -> str:
@@ -212,15 +246,12 @@ class OpenWrtTopologyStatusSensor(_TopologyEntityBase):
     @property
     def native_value(self) -> int | None:
         """Return active interface count."""
-        snap = self._snapshot()
-        if not snap:
+        status = self._cache.status
+        if not status:
             return None
-        return get_topology_status(snap).get("active_interfaces", 0)
+        return status.get("active_interfaces", 0)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return topology status counts."""
-        snap = self._snapshot()
-        if not snap:
-            return {}
-        return get_topology_status(snap)
+        return dict(self._cache.status)
