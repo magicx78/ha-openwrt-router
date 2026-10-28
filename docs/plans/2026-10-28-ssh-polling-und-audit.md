@@ -6,11 +6,11 @@
 
 ## Status
 
-- **Stand:** 2026-10-28 (nachts) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7), #42 A17 (`50bf5ae`, v1.38.8) und #43 A4 (`917cbb4`, v1.38.9) am 2026-10-28 — **offen:** Sammel-Release `release/1.39.0` (Worktree `../ha-openwrt-router-release-1.39.0`) mit A5 (PR #44, darin enthalten) und den restlichen Paketen
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt und gemergt (1.38.9, PR #43, Review-Befunde behoben, Hardware-Nachweis erbracht) · **Offen:** A3, A5–A10, A12–A14
+- **Stand:** 2026-10-28 · **Phase:** alle Pakete umgesetzt, Sammel-Release 1.39.0 wartet auf Merge-Freigabe
+- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7), #42 A17 (`50bf5ae`, v1.38.8) und #43 A4 (`917cbb4`, v1.38.9) am 2026-10-28 — **offen:** Sammel-Release `release/1.39.0` als PR #45 (Worktree `../ha-openwrt-router-release-1.39.0`) mit A5 (enthält PR #44), A13, A14, A3, A12, A6, A7, A9, A10, A8
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt und gemergt (1.38.9, PR #43, Review-Befunde behoben, Hardware-Nachweis erbracht), A3, A5–A10, A12–A14 umgesetzt auf `release/1.39.0` (Reviews A3, A5, A12, A13 und Stapel A6/A7/A9/A10 inkl. Fixes abgeschlossen) · **Offen:** Merge und Release 1.39.0 (Freigabe), Installation und Hardware-Prüfungen (Liste in `TODO.md`)
 - **Blocker:** –
-- **Nächster Schritt:** A13 auf `release/1.39.0`, danach A3 → A12 → A14 → A6 → A7–A10; am Ende Merge-Freigabe für 1.39.0, Installation und Hardware-Prüfungen gesammelt
+- **Nächster Schritt:** CI auf PR #45 grün → Merge-Freigabe des Nutzers für 1.39.0 → nach OK Installation per HACS und HA-Neustart → Hardware-Prüfungen laut `TODO.md`
 
 ## Problem und Zielverhalten
 
@@ -635,3 +635,36 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   WAN-Adressklasse (privat/CGNAT/öffentlich) als Ersatz für die redigierte WAN-IP – neue Funktion,
   eigener Vorschlag. Die neuen Fixture-Werte wurden nach dem Fix ergänzt, nicht vorher rot gesehen.
   Lokal 1536 grün, ruff 0.17.3 sauber.
+- 2026-10-28 **Sammel-Release 1.39.0** auf `release/1.39.0` (PR #45, Entwurf). Je Paket ein Branch
+  von `release/1.39.0` in eigenem Worktree, umgesetzt von Spezialisten-Agenten, Tests je Paket vor
+  dem Fix rot, danach Merge in den Release-Branch; `checks.py --ruff-ci` nach jedem Merge grün.
+  - **A13** (`515c283`): Panel und Snapshot-API nur für Admins, Option „allen Benutzern“ über alle
+    geladenen Einträge ODER-verknüpft, ohne Update-Listener (deprecated seit HA 2026.6) direkt aus
+    dem Options-Flow angewendet; 500 mit `meta.error`; `KEY_HASS`; Panel-Setup abgesichert; Frontend
+    ohne 401-Schleife, Token-Refresh, ein Retry; Bundle neu gebaut (`npm ci --legacy-peer-deps`, der
+    Lockfile-Konflikt existiert schon vorher). Review: kein P0; P1 (Entity-Attribute zeigen dieselben
+    Daten) über A14 und ehrliche Doku gelöst, P2/P3 behoben. Lücke: C11 nie im Browser geprüft.
+  - **A14** (`1d7ad86`): Snapshot einmal je Update (`TopologySnapshotCache`), Rohlisten und
+    `generated_at` aus den Attributen entfernt; Panel/Mesh lesen keine Entity-Attribute (geprüft).
+  - **A3** (`42fc014`): Verfügbarkeit über alle Router, Wiederherstellung aus der Registry (MAC
+    und Legacy-Form, deaktivierte ausgenommen), letzter Hostname. Review: P1 (ausgefallener Router
+    hielt Clients dauerhaft „home“) behoben über `coordinator.stale_for_presence` (3 Polls oder 300 s).
+  - **A12** (`ab19efd`, `b76eecd`, `d5d0109`): drei Review-Runden. Die DHCP-Heuristik für die
+    Gateway-Rolle war mit OpenWrt-Standards nicht sicher (Dumb-AP mit Rest-`wan` und nicht
+    abgeschaltetem LAN-DHCP; netifd `up` ist kein Carrier). Endgültig: verbundenes ubus-WAN →
+    Gateway und Rollen-Gedächtnis; ohne solches bleibt das gemerkte Gateway; danach SSH-Fallback mit
+    `connected` (Semantik von `/root/ha-wan-status.sh` unbekannt, Skript nicht im Repo) nur als
+    niedrigste Stufe; Kaltstart im Ausfall: ein Router, Handprotokoll vor `dhcp`, dann kleinste ID.
+    Dazu `stale`, Dedupe, eindeutige Hostnamen, `chassis_id` vor Name, `lldp_duplicates`.
+  - **A6** (`2ab570a`, `11c5d22`): apk/opkg per SSH nur auf Knopfdruck (ACL erlaubt `file exec` nur
+    für `/etc/init.d/rpcd`, unverändert), Ergebnis im Coordinator, Install-Button nicht mehr angelegt
+    (E3, Registry-Eintrag bleibt), zweite Prüfung während einer laufenden abgelehnt.
+  - **A7/A9/A10** (`6970d6e`, `af14e22`, `fa0c0b2`, Fixes `bba3ecf`, `5226d8a`): Review fand **P0**
+    in A7 (versetzte Einträge pollten nach dem ersten Poll nie wieder, weil `_unsub_refresh` noch den
+    abgelaufenen Timer hielt; per Skript nachgestellt: 0 Polls in 6 s) → behoben, Test mit echtem
+    Timer, nachgestellt 5 Polls in 6 s. P2 in A10 (gesperrte Polls zählten Richtung Reauth) →
+    `OpenWrtAuthBackoffError`. A9 ohne zusätzlichen ubus-Aufruf je Poll (geprüft).
+  - **A8** (`a7047fc`): `_unrecorded_attributes` je Klasse (HA 2026.2 kombiniert sie nicht über
+    Elternklassen).
+  - Stand nach allen Merges: lokal ruff 0.17.3 sauber, pytest grün (Zahl siehe PR #45). Hardware:
+    nichts geprüft – gesammelte Prüfliste in `TODO.md`.
