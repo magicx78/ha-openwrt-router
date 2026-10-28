@@ -356,6 +356,15 @@ class OpenWrtAuthError(Exception):
     """Raised when authentication with the router fails."""
 
 
+class OpenWrtAuthBackoffError(OpenWrtAuthError):
+    """Raised for a call blocked by the auth backoff, without any login.
+
+    A subclass of OpenWrtAuthError so callers with an auth fallback keep
+    working; the coordinator must not count it as a credential failure
+    (it says nothing new about the credentials).
+    """
+
+
 class OpenWrtRpcdSetupError(OpenWrtAuthError):
     """Raised when rpcd is not properly configured on the router.
 
@@ -5090,7 +5099,7 @@ class OpenWrtAPI:
         if self._auth_failure_count >= _MAX_AUTH_FAILURES:
             now = time.monotonic()
             if now < self._auth_backoff_until:
-                raise OpenWrtAuthError(
+                raise OpenWrtAuthBackoffError(
                     "Authentication blocked after repeated failures — "
                     "check credentials (backoff active)"
                 )

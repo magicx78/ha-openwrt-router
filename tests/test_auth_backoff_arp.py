@@ -156,3 +156,33 @@ class TestArpTruncation:
         arp = await mock_api.get_arp_table()
         assert arp["aa:bb:cc:dd:ee:02"] == "192.168.1.2"
         mock_api._run_ssh.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Backoff-blocked calls do not count towards reauth
+# ---------------------------------------------------------------------------
+
+
+class TestBackoffIsNotACredentialFailure:
+    @pytest.mark.asyncio
+    async def test_blocked_call_raises_backoff_error(self, mock_api):
+        from custom_components.openwrt_router.api import OpenWrtAuthBackoffError
+
+        _in_backoff(mock_api, token_expired=False)
+        with pytest.raises(OpenWrtAuthBackoffError):
+            await mock_api._call("system", "info", {})
+
+    @pytest.mark.asyncio
+    async def test_coordinator_never_opens_reauth_for_backoff(self):
+        from homeassistant.helpers.update_coordinator import UpdateFailed
+
+        from custom_components.openwrt_router.api import OpenWrtAuthBackoffError
+        from test_coordinator import _make_coordinator
+
+        coord, api = _make_coordinator()
+        api.get_wan_status = AsyncMock(side_effect=OpenWrtAuthBackoffError("wait"))
+        for _ in range(5):
+            with pytest.raises(UpdateFailed):
+                await coord._async_update_data()
+        assert coord._consecutive_auth_failures == 0
+        assert coord._failure_count == 5

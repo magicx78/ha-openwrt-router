@@ -21,6 +21,7 @@ from homeassistant.util import dt as dt_util
 
 from .api import (
     OpenWrtAPI,
+    OpenWrtAuthBackoffError,
     OpenWrtAuthError,
     OpenWrtConnectionError,
     OpenWrtMethodNotFoundError,
@@ -1029,6 +1030,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # and must not be overwritten (self.data is still None then).
             if self._features_detected and not data.features:
                 data.features = self.data.features if self.data else {}
+
+        except OpenWrtAuthBackoffError as err:
+            # Blocked by the API's auth backoff without a login attempt: a
+            # failed poll, but no new evidence against the credentials, so it
+            # does not count towards the reauth threshold.
+            self._record_failure(ERROR_TYPE_AUTH)
+            raise UpdateFailed(f"Authentication backoff active: {err}") from err
 
         except OpenWrtAuthError as err:
             self._consecutive_auth_failures += 1
