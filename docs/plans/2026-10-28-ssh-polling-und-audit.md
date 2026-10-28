@@ -8,9 +8,9 @@
 
 - **Stand:** 2026-10-28 · **Phase:** 1.39.0 veröffentlicht und installiert, Hardware-Prüfungen größtenteils erledigt
 - **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7), #42 A17 (`50bf5ae`, v1.38.8) und #43 A4 (`917cbb4`, v1.38.9) am 2026-10-28, Sammel-Release #45 (`df78515`, v1.39.0) mit A5 (enthält PR #44), A13, A14, A3, A12, A6, A7, A9, A10, A8 am 2026-10-28
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt und gemergt (1.38.9, PR #43, Review-Befunde behoben, Hardware-Nachweis erbracht), A3, A5–A10, A12–A14 umgesetzt auf `release/1.39.0` (Reviews A3, A5, A12, A13 und Stapel A6/A7/A9/A10 inkl. Fixes abgeschlossen) , 1.39.0 gemergt, veröffentlicht und per HACS installiert, Hardware-Prüfungen A3, A5, A7, A9 (Router-Seite), A10, A12, A14 · **Offen:** Panel als Nicht-Admin (A13), „Nach Updates suchen“ auf Hardware (A6, braucht OK), Recorder-Vergleich über einen Tag (A8), Raten-Sensoren in HA (A9), Folgepunkte in `TODO.md`
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt und gemergt (1.38.9, PR #43, Review-Befunde behoben, Hardware-Nachweis erbracht), A3, A5–A10, A12–A14 umgesetzt auf `release/1.39.0` (Reviews A3, A5, A12, A13 und Stapel A6/A7/A9/A10 inkl. Fixes abgeschlossen) , 1.39.0 gemergt, veröffentlicht und per HACS installiert, Hardware-Prüfungen A3, A5, A6, A7, A9 (Router-Seite), A10, A12, A14 · **Offen:** Panel als Nicht-Admin (A13), Recorder-Vergleich über einen Tag (A8), Raten-Sensoren in HA (A9), Folgepunkte in `TODO.md`
 - **Blocker:** –
-- **Nächster Schritt:** offene Prüfungen aus `TODO.md` („Nach Installation von 1.39.0“) – Panel als Nicht-Admin im Browser, Update-Prüfung nach OK
+- **Nächster Schritt:** offene Prüfungen aus `TODO.md` („Nach Installation von 1.39.0“) – Panel als Nicht-Admin im Browser
 
 ## Problem und Zielverhalten
 
@@ -688,8 +688,11 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
     `client_count`), keine Rohlisten.
   - **A3:** 121 Tracker: 52 `home`, 69 `not_home`, 0 `unavailable`, 0 `restored`. Damit sind auch
     die zwei wiederhergestellten Tracker aus Befund 13 nicht mehr `unavailable`.
-  - **A6:** alle drei Router nutzen `apk`; `apk list -u` ohne Index-Aktualisierung leer. Den Knopf
-    nicht gedrückt: das Skript führt `apk update` aus (schreibt Paketlisten nach `/tmp` des
-    Routers) – braucht ein eigenes OK.
+  - **A6:** alle drei Router nutzen `apk`. Knopf „Nach Updates suchen“ nach OK des Nutzers an
+    Gateway und `ap4` gedrückt (`apk update` schreibt Paketlisten nach `/tmp`): Gateway nach ~2,3 s
+    `current`, 0 Pakete, `index_refreshed: true`; `ap4` nach ~2,6 s `available`, 70 Pakete (56
+    System, 14 LuCI-Erweiterungen, u. a. `rpcd` und `ubus`). Gegengeprüft per SSH: Gateway hat die
+    neuen Stände schon installiert (`rpcd` 2026.10.04, `luci-base` 26.288), `ap4` die alten. Keine
+    Log-Einträge. Fehlermeldung ohne SSH nicht geprüft (alle Router haben SSH).
   - **Offen:** A13 Panel als Nicht-Admin (Browser mit Nicht-Admin-Konto), A8 Recorder über einen
-    Tag. Nebenbefund: Gateway-Laufzeit beim Prüfen 1 h 56 min, Neustart lag vor der Installation.
+    Tag. Die Registry-Einträge „Updates installieren“ stehen wie erwartet auf `unavailable` (E3). Nebenbefund: Gateway-Laufzeit beim Prüfen 1 h 56 min, Neustart lag vor der Installation.

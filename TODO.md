@@ -23,8 +23,10 @@ Alles lesend, Installation und HA-Neustart nur nach OK.
       `statistics` für `br-lan`/`wan` (A9).
 - [ ] **Raten-Sensoren** in HA aktivieren und prüfen, dass sie nicht mehr 0 zeigen (A9).
 - [x] **ARP:** Größe von `/proc/net/arp` am Gateway, `getHostHints`-Antwort (A10).
-- [ ] **„Nach Updates suchen“** auf Gateway und AP: Dauer, Ausgabe von
-      `apk list -u` bzw. `opkg list-upgradable`, Fehlermeldung ohne SSH (A6).
+- [x] **„Nach Updates suchen“** auf Gateway und AP: Dauer, Ausgabe von
+      `apk list -u` bzw. `opkg list-upgradable` (A6). Fehlermeldung ohne SSH
+      nicht geprüft (kein Router ohne SSH). `ap4` hat 70 Paket-Updates
+      offen (u. a. `rpcd`, `ubus`) – Installation nur nach eigener Entscheidung.
 - [x] **Tracker:** nach HA-Neustart melden abwesende Clients `not_home` (A3).
 - [ ] **Recorder:** Datenbankwachstum über einen Tag vergleichen (A8).
 - [ ] **Dev-Skript `scripts/_add_topology_card.py`** liest das entfernte
