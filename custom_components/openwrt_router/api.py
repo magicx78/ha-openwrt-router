@@ -14,6 +14,7 @@ import shlex
 import ssl
 import struct
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import aiohttp
@@ -21,6 +22,7 @@ import asyncssh
 
 from . import oui
 from .const import (
+    BRIDGE_PORT_MAP_REFRESH_INTERVAL,
     CLIENT_KEY_CONFIDENCE,
     CLIENT_KEY_CONNECTED_SINCE,
     CLIENT_KEY_CONNECTION_TYPE,
@@ -692,6 +694,25 @@ _FDB_ENTRY_SIZE = struct.calcsize(_FDB_ENTRY_FORMAT)  # 16 bytes
 _PHYS_PORT_RE = re.compile(r"^(lan\d+|wan\d*|eth\d+)(\.\d+)?$")
 
 
+def _iter_brforward(fdb_bytes: bytes) -> Iterator[tuple[bytes, int]]:
+    """Yield ``(raw MAC, bridge port number)`` of the usable brforward records.
+
+    Skips ``is_local`` records (the bridge's own port MACs), multicast,
+    broadcast and all-zero MACs, and yields nothing when the buffer is not a
+    whole number of 16-byte records. Shared by :func:`_parse_brforward` and
+    :func:`_brforward_port_numbers`, so both apply the same filter.
+    """
+    if not fdb_bytes or len(fdb_bytes) % _FDB_ENTRY_SIZE != 0:
+        return
+    for offset in range(0, len(fdb_bytes), _FDB_ENTRY_SIZE):
+        mac_raw, port_no, is_local, _ageing, port_hi, _pad, _unused = (
+            struct.unpack_from(_FDB_ENTRY_FORMAT, fdb_bytes, offset)
+        )
+        if is_local or mac_raw[0] & 0x01 or not any(mac_raw):
+            continue
+        yield mac_raw, port_no | (port_hi << 8)
+
+
 def _parse_brforward(fdb_bytes: bytes, port_no_map: dict[int, str]) -> dict[str, str]:
     """Parse the binary bridge forwarding table into {mac_lower: port_name}.
 
@@ -705,18 +726,9 @@ def _parse_brforward(fdb_bytes: bytes, port_no_map: dict[int, str]) -> dict[str,
 
     Returns {} when the buffer is not a whole number of 16-byte records.
     """
-    if not fdb_bytes or len(fdb_bytes) % _FDB_ENTRY_SIZE != 0:
-        return {}
     fdb: dict[str, str] = {}
-    for offset in range(0, len(fdb_bytes), _FDB_ENTRY_SIZE):
-        mac_raw, port_no, is_local, _ageing, port_hi, _pad, _unused = (
-            struct.unpack_from(_FDB_ENTRY_FORMAT, fdb_bytes, offset)
-        )
-        if is_local:
-            continue
-        if mac_raw[0] & 0x01 or not any(mac_raw):
-            continue
-        iface = port_no_map.get(port_no | (port_hi << 8))
+    for mac_raw, number in _iter_brforward(fdb_bytes):
+        iface = port_no_map.get(number)
         if not iface:
             continue
         match = _PHYS_PORT_RE.match(iface)
@@ -725,6 +737,43 @@ def _parse_brforward(fdb_bytes: bytes, port_no_map: dict[int, str]) -> dict[str,
         mac = ":".join(f"{b:02x}" for b in mac_raw)
         fdb[mac] = match.group(1)
     return fdb
+
+
+def _brforward_port_numbers(fdb_bytes: bytes) -> set[int]:
+    """Bridge port numbers referenced by the usable brforward records."""
+    return {number for _mac, number in _iter_brforward(fdb_bytes)}
+
+
+# Interfaces probed for ``brport/port_no`` when ``file list /sys/class/net``
+# is denied or empty (DSA switch ports and the common uplink names).
+_FALLBACK_BRIDGE_PORT_NAMES = ("lan1", "lan2", "lan3", "lan4", "wan", "eth0", "eth1")
+
+
+def _sysfs_net_names(listing: dict[str, Any]) -> list[str]:
+    """Interface names from a ``file list /sys/class/net`` reply.
+
+    rpcd returns every interface as a ``symlink`` entry named after the
+    interface and (2025.12.03 and 2026.10.04 verified) a second ``directory``
+    entry named after the link TARGET, ``../../devices/.../net/lan1``. Only a
+    plain name is an interface; a target path must never be probed as one —
+    doing so built a port map keyed by those paths and emptied the port
+    mapping on every router (1.38.3 – 1.38.7). The entry type is ignored on
+    purpose: older rpcd reports the links as ``directory``.
+    """
+    names: list[str] = []
+    for entry in listing.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if (
+            isinstance(name, str)
+            and name
+            and "/" not in name
+            and name not in (".", "..")
+            and name not in names
+        ):
+            names.append(name)
+    return names
 
 
 # One "processor\t: N" line per logical CPU on every architecture OpenWrt runs
@@ -1025,6 +1074,17 @@ class OpenWrtAPI:
         # SSH_SLOW_REFRESH_INTERVAL: key -> (time.monotonic() of fetch, value).
         self._ssh_slow_cache: dict[str, tuple[float, Any]] = {}
 
+        # {bridge port number: interface name} of the br-lan members, built
+        # over ubus (see _get_bridge_port_map) and kept for
+        # BRIDGE_PORT_MAP_REFRESH_INTERVAL; ``_unknown`` holds the numbers a
+        # rebuild could not resolve, so they do not force one every poll.
+        self._bridge_port_map: dict[int, str] = {}
+        self._bridge_port_map_at: float = 0.0
+        self._bridge_port_map_unknown: set[int] = set()
+        # Bumped by reset_acl_blocked(); a rebuild that started before the
+        # bump leaves the timestamp cleared, so the next poll rebuilds.
+        self._bridge_port_map_gen: int = 0
+
     @property
     def uses_ssh_fallback(self) -> bool:
         """True if any API call fell back to SSH in the last poll cycle."""
@@ -1057,6 +1117,10 @@ class OpenWrtAPI:
                 self._host,
             )
         self._acl_blocked.clear()
+        # A port_no read the old ACL denied may work now: rebuild the map.
+        self._bridge_port_map_at = 0.0
+        self._bridge_port_map_unknown = set()
+        self._bridge_port_map_gen += 1
         # A repaired ACL can also restore the best-effort ubus LLDP object, and
         # the router was very likely touched by hand in between — give LLDP a
         # fresh attempt instead of waiting out the retry interval.
@@ -4189,11 +4253,84 @@ class OpenWrtAPI:
             _LOGGER.debug("LLDP capability probe failed on %s: %s", self._host, err)
             return LLDP_STATUS_ERROR
 
+    async def _get_bridge_port_map(self) -> tuple[dict[int, str], str]:
+        """Return the br-lan port map and how it was obtained.
+
+        The second value is ``"cached"`` (younger than
+        BRIDGE_PORT_MAP_REFRESH_INTERVAL), ``"rebuilt"`` (built just now) or
+        ``"failed"`` (a rebuild was due but resolved no member: the previous
+        map is returned and the rebuild is retried on the next poll).
+        """
+        now = time.monotonic()
+        if (
+            self._bridge_port_map_at
+            and now - self._bridge_port_map_at < BRIDGE_PORT_MAP_REFRESH_INTERVAL
+        ):
+            return self._bridge_port_map, "cached"
+        rebuilt = await self._rebuild_bridge_port_map()
+        if rebuilt is None:
+            return self._bridge_port_map, "failed"
+        return rebuilt, "rebuilt"
+
+    async def _rebuild_bridge_port_map(self) -> dict[int, str] | None:
+        """Build {bridge port number: interface name} for the br-lan members.
+
+        One ``file list /sys/class/net`` (plain entry names only, see
+        :func:`_sysfs_net_names`; the static fallback names when the listing
+        is denied or empty) plus one ``brport/port_no`` read per interface;
+        interfaces without a ``brport`` directory are not bridge members and
+        are skipped. Returns None — keeping the previous map, its timestamp
+        and the remembered unknown numbers — when not a single member
+        resolved, so one poll of timeouts cannot blank the port mapping for a
+        whole refresh interval. A :meth:`reset_acl_blocked` that lands during
+        the rebuild leaves the timestamp cleared, so the next poll rebuilds
+        under the new ACL.
+        """
+        generation = self._bridge_port_map_gen
+        try:
+            listing = await self._call(
+                UBUS_FILE_OBJECT, "list", {"path": "/sys/class/net", "depth": 1}
+            )
+            ifaces = _sysfs_net_names(listing)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("file list /sys/class/net unavailable: %s", err)
+            ifaces = []
+        if not ifaces:
+            ifaces = list(_FALLBACK_BRIDGE_PORT_NAMES)
+        port_map: dict[int, str] = {}
+        for iface in ifaces:
+            try:
+                pno_result = await self._call(
+                    UBUS_FILE_OBJECT,
+                    "read",
+                    {"path": f"/sys/class/net/{iface}/brport/port_no"},
+                )
+                pno_str = (pno_result.get("data") or "").strip()
+                if pno_str:
+                    port_map[int(pno_str, 16)] = iface
+            except Exception:  # noqa: BLE001, S110
+                # Not a bridge member (no brport directory) or denied.
+                pass
+        if not port_map:
+            _LOGGER.debug(
+                "Bridge port map rebuild resolved no member; keeping %d",
+                len(self._bridge_port_map),
+            )
+            return None
+        self._bridge_port_map = port_map
+        # Numbers a member resolves now are known; the rest stay remembered.
+        self._bridge_port_map_unknown -= set(port_map)
+        if generation == self._bridge_port_map_gen:
+            self._bridge_port_map_at = time.monotonic()
+        _LOGGER.debug("Bridge port map rebuilt: %d members", len(port_map))
+        return port_map
+
     async def get_bridge_fdb(self) -> dict[str, str]:
         """Return MAC-address → port-name mapping from the bridge forwarding database.
 
         Strategy (tries in order):
-        1. file/read on /sys/class/net/br-lan/brforward binary (no exec needed)
+        1. file/read on /sys/class/net/br-lan/brforward binary (no exec needed),
+           port numbers from the cached :meth:`_get_bridge_port_map`
         2. /sys/class/net/br-lan/brforward binary via SSH fallback
 
         Note: file/exec is intentionally NOT used — rpcd leaks memory per exec call
@@ -4204,44 +4341,13 @@ class OpenWrtAPI:
             Returns {} on total failure.
         """
 
-        # Build port_no → interface name map from sysfs (via file/read, no exec)
-        async def _get_port_map() -> dict[int, str]:
-            port_map: dict[int, str] = {}
-            try:
-                # Read bridge members from sysfs — each brport has a port_no file
-                for_result = await self._call(
-                    UBUS_FILE_OBJECT,
-                    "list",
-                    {"path": "/sys/class/net", "depth": 1},
-                )
-                ifaces = [
-                    e.get("name", "")
-                    for e in for_result.get("entries", [])
-                    if e.get("type") == "directory"
-                ]
-            except Exception:  # noqa: BLE001
-                ifaces = ["lan1", "lan2", "lan3", "lan4", "wan", "eth0", "eth1"]
-            for iface in ifaces:
-                try:
-                    pno_result = await self._call(
-                        UBUS_FILE_OBJECT,
-                        "read",
-                        {"path": f"/sys/class/net/{iface}/brport/port_no"},
-                    )
-                    pno_str = (pno_result.get("data") or "").strip()
-                    if pno_str:
-                        port_map[int(pno_str, 16)] = iface
-                except Exception:  # noqa: BLE001, S110
-                    pass
-            return port_map
-
         # Method 1: file/read on brforward binary (avoids file/exec memory leak).
         # ``base64`` is required: without it rpcd hands the binary file back
         # as an (empty) C string, which made every poll fall through to SSH
         # before v1.38.3. A successful read is final, even when the table is empty;
         # SSH remains the fallback for a denied or failed ubus read only.
         try:
-            port_no_map = await _get_port_map()
+            port_no_map, map_state = await self._get_bridge_port_map()
             result = await self._call(
                 UBUS_FILE_OBJECT,
                 "read",
@@ -4261,6 +4367,20 @@ class OpenWrtAPI:
             except (binascii.Error, ValueError):
                 _LOGGER.debug("Bridge FDB via file/read: reply is not base64")
                 fdb_bytes = b""
+            numbers = _brforward_port_numbers(fdb_bytes)
+            missing = numbers - set(port_no_map) - self._bridge_port_map_unknown
+            if missing and map_state == "cached":
+                # A port joined the bridge since the map was built (or the
+                # map is stale): rebuild once now. A map built or attempted
+                # in this poll already is not rebuilt again.
+                rebuilt = await self._rebuild_bridge_port_map()
+                if rebuilt is not None:
+                    port_no_map, map_state = rebuilt, "rebuilt"
+            if missing and map_state == "rebuilt":
+                # Numbers no member resolves even in a fresh map are
+                # remembered (accumulating), so they cannot force a rebuild
+                # per poll; a failed rebuild remembers nothing.
+                self._bridge_port_map_unknown |= numbers - set(port_no_map)
             fdb = _parse_brforward(fdb_bytes, port_no_map)
             _LOGGER.debug("Bridge FDB via file/read: %d entries", len(fdb))
             return fdb

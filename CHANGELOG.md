@@ -2,6 +2,30 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.8] - 2026-10-28
+
+### Fixed
+
+- **Port-Zuordnung im Topologie-Panel war seit 1.38.3 leer.** Die Bridge-FDB
+  wird seit 1.38.3 per ubus gelesen; die Zuordnung Portnummer → Schnittstelle
+  dafür kam aus `file list /sys/class/net`, nahm dort aber nur die
+  `directory`-Einträge. rpcd (bestätigt mit 2025.12.03 und 2026.10.04) meldet
+  jede Schnittstelle zweimal: als `symlink` mit ihrem Namen und als
+  `directory` mit dem Linkziel (`../../devices/…/net/lan1`). Damit trug die
+  Zuordnung die Linkziele als Namen, jeder FDB-Eintrag fiel durch den Filter
+  für physische Ports, und das Panel zeigte an keinem Router Geräte an den
+  Ports (Diagnose: `device_count` 0, alle Geräte „nicht zugeordnet“). Vor
+  1.38.3 fiel die FDB immer auf SSH zurück, das seine Zuordnung selbst baute,
+  deshalb blieb der Fehler unsichtbar. Jetzt zählt nur ein einfacher Name als
+  Schnittstelle, unabhängig vom gemeldeten Typ. Die Zuordnung wird außerdem
+  nicht mehr bei jedem Poll neu gelesen (ein `file list` plus ein
+  `port_no`-Lesen je Schnittstelle), sondern höchstens alle 10 Minuten –
+  sofort neu, wenn die FDB eine unbekannte Portnummer enthält (ein Port kam
+  zur Bridge dazu) oder nach einem ACL-Deploy. Portnummern, die auch danach
+  kein Mitglied auflöst, erzwingen keinen weiteren Neuaufbau je Poll, und
+  ein Neuaufbau, der kein Mitglied auflöst (etwa bei Zeitüberschreitungen),
+  behält die letzte gute Zuordnung und wird beim nächsten Poll wiederholt.
+
 ## [1.38.7] - 2026-10-27
 
 ### Fixed
