@@ -237,12 +237,28 @@ class TestLegacyWanStatusWithoutWanFound:
         data = _router(GW_MAC, wan_status=SSH_CONNECTED)
         assert _detect_router_role(data, GW_IP) == "gateway"
 
-    def test_ssh_fallback_connected_next_to_ubus_gateway_is_gateway_too(self):
-        """A connected SSH-fallback WAN is strong like a ubus one."""
+    def test_ssh_fallback_connected_next_to_real_gateway_is_ap(self):
+        """The SSH script's ``connected`` may only mean "internet reachable",
+        which a dumb AP is too — it never competes with a ubus gateway."""
         gw = _router(GW_MAC, wan_status=_wan_up())
         ssh = _router(AP_MAC, wan_status=SSH_CONNECTED)
         roles = _resolve_router_roles([(GW_MAC, GW_IP, gw), (AP_MAC, AP_IP, ssh)])
-        assert roles == {GW_MAC: "gateway", AP_MAC: "gateway"}
+        assert roles == {GW_MAC: "gateway", AP_MAC: "ap"}
+
+    def test_remembered_ubus_gateway_beats_ssh_tier(self):
+        gw = _router(GW_MAC, wan_status=_wan_down("pppoe"))
+        ssh = _router(AP_MAC, wan_status=SSH_CONNECTED)
+        roles = _resolve_router_roles(
+            [(GW_MAC, GW_IP, gw), (AP_MAC, AP_IP, ssh)], remembered={GW_MAC}
+        )
+        assert roles == {GW_MAC: "gateway", AP_MAC: "ap"}
+
+    def test_ssh_tier_gateway_is_not_remembered(self):
+        import custom_components.openwrt_router.topology_mesh as mesh
+
+        ssh = _router(GW_MAC, "ssh", wan_status=SSH_CONNECTED)
+        build_mesh_snapshot(_fake_hass([_fake_entry("e1", GW_IP, ssh)]))
+        assert mesh._GATEWAY_MEMORY == {}
 
     def test_ssh_fallback_disconnected_next_to_ubus_gateway_is_ap(self):
         gw = _router(GW_MAC, wan_status=_wan_up())
@@ -250,11 +266,14 @@ class TestLegacyWanStatusWithoutWanFound:
         roles = _resolve_router_roles([(GW_MAC, GW_IP, gw), (AP_MAC, AP_IP, ssh)])
         assert roles == {GW_MAC: "gateway", AP_MAC: "ap"}
 
-    def test_two_connected_ssh_fallback_routers_are_both_gateways(self):
+    def test_two_connected_ssh_fallback_routers_promote_lowest_id(self):
         r1 = _router(GW_MAC, wan_status=SSH_CONNECTED)
         r2 = _router(AP_MAC, wan_status=SSH_CONNECTED)
-        roles = _resolve_router_roles([(GW_MAC, GW_IP, r1), (AP_MAC, AP_IP, r2)])
-        assert roles == {GW_MAC: "gateway", AP_MAC: "gateway"}
+        for rd in (
+            [(GW_MAC, GW_IP, r1), (AP_MAC, AP_IP, r2)],
+            [(AP_MAC, AP_IP, r2), (GW_MAC, GW_IP, r1)],
+        ):
+            assert _resolve_router_roles(rd) == {GW_MAC: "gateway", AP_MAC: "ap"}
 
     def test_ssh_gateway_beats_dumb_ap_with_leftover_wan(self):
         """SSH-fallback gateway (no pools, WAN up) vs. a dumb AP keeping the

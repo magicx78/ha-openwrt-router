@@ -82,7 +82,8 @@ _GATEWAY_PROTOS: frozenset[str] = (
 _GATEWAY_MEMORY: dict[str, str] = {}
 
 # Role evidence levels (see _gateway_evidence).
-_EVIDENCE_STRONG = 2
+_EVIDENCE_STRONG = 3
+_EVIDENCE_SSH = 2
 _EVIDENCE_WEAK = 1
 _EVIDENCE_NONE = 0
 
@@ -97,10 +98,14 @@ def _gateway_evidence(data: OpenWrtCoordinatorData, host_ip: str) -> int:
     Strong: a connected WAN with an ISP-uplink protocol (dhcp, static, pppoe,
             the IPv6-only and transition protocols dhcpv6, dslite, map, 6in4,
             6rd, 6to4, or one of the upstream-only protocols in WAN_PROTOS:
-            cellular qmi/mbim/ncm/modemmanager/3g/wwan, pppoa), or the SSH
-            fallback shape (no ``wan_found``, no interface, no proto) with
-            ``connected`` True. Private vs. public WAN IP does NOT matter —
-            many gateways sit behind an ISP modem.
+            cellular qmi/mbim/ncm/modemmanager/3g/wwan, pppoa). Private vs.
+            public WAN IP does NOT matter — many gateways sit behind an ISP
+            modem.
+    SSH:    the SSH fallback shape (no ``wan_found``, no interface, no proto)
+            with ``connected`` True. That flag comes from the router-side
+            script ``/root/ha-wan-status.sh`` (not part of this repository);
+            it may only mean "internet reachable", which a dumb AP is too, so
+            it never competes with a ubus-shaped gateway or the role memory.
     Weak:   a *configured* WAN (``wan_found`` True, or — data without
             ``wan_found`` — a named WAN interface) with an ISP-uplink protocol
             whose link is down: the gateway during an outage, but just as
@@ -119,9 +124,7 @@ def _gateway_evidence(data: OpenWrtCoordinatorData, host_ip: str) -> int:
     proto = wan.get("proto") or ""
     if not proto:
         ssh_shape = "wan_found" not in wan and not wan.get("interface")
-        return (
-            _EVIDENCE_STRONG if ssh_shape and wan.get("connected") else _EVIDENCE_NONE
-        )
+        return _EVIDENCE_SSH if ssh_shape and wan.get("connected") else _EVIDENCE_NONE
     if proto not in _GATEWAY_PROTOS:
         return _EVIDENCE_NONE
     if wan.get("ipv4") and wan.get("ipv4") == host_ip:
@@ -139,15 +142,17 @@ def _resolve_router_roles(
 ) -> dict[str, str]:
     """Classify every router of the fleet as 'gateway' or 'ap'.
 
-    1. Every router with strong evidence (connected WAN) is a gateway —
+    1. Every router with strong evidence (connected ubus WAN) is a gateway —
        several sites or dual gateways are possible.
     2. Without any strong router (WAN outage), every ``remembered`` gateway
        (gateway of the last snapshot) that is still in the fleet and still
        has a configured WAN (``wan_found`` not False) stays gateway; nothing
        else is promoted.
-    3. Without strong and remembered routers (fresh start during an outage),
-       exactly ONE weak candidate becomes gateway: a non-default protocol
-       before OpenWrt's default dhcp/dhcpv6, then the lowest router id.
+    3. Otherwise exactly ONE SSH-fallback router reporting ``connected``
+       becomes gateway: the lowest router id.
+    4. Otherwise (fresh start during an outage) exactly ONE weak candidate
+       becomes gateway: a non-default protocol before OpenWrt's default
+       dhcp/dhcpv6, then the lowest router id.
     """
     evidence = {rid: _gateway_evidence(data, hip) for rid, hip, data in router_data}
     roles = dict.fromkeys(evidence, "ap")
@@ -162,6 +167,10 @@ def _resolve_router_roles(
     ]
     if kept:
         roles.update(dict.fromkeys(kept, "gateway"))
+        return roles
+    ssh = [rid for rid, level in evidence.items() if level == _EVIDENCE_SSH]
+    if ssh:
+        roles[min(ssh)] = "gateway"
         return roles
     candidates = [
         (
@@ -182,7 +191,8 @@ def _remember_gateways(
     """Replace the role memory by the strong gateways of this snapshot.
 
     Left untouched when no router is strong, so the gateway of the last
-    connected snapshot keeps its role for the whole outage.
+    connected snapshot keeps its role for the whole outage. An SSH-tier
+    gateway is never remembered.
     """
     strong = [
         rid
