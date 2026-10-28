@@ -7,10 +7,10 @@
 ## Status
 
 - **Stand:** 2026-10-27 (abends) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** Teil 1 `fix/ssh-polling` · PR #37 **gemergt** (`5372d12`, Release v1.38.3 am 2026-10-27 20:05) — Teil 2 gestapelt: A1 `fix/auth-errors` · PR #38 (1.38.4) jetzt auf `main`; A2 `fix/hostapd-iface-cache` · PR #39 (1.38.5) auf #38; A11 `fix/topology-lldp-chain` · PR #40 (1.38.6) auf #39
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1, A2 und A11 inkl. Fixes abgeschlossen · **Offen:** Merge und Release #38 → #39 → #40 (Freigabe des Nutzers), Hardware-Nachweis AK6 nach Installation; A3–A10, A12–A14
+- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6), alle am 2026-10-27 — **offen:** A16 ACL v8 `fix/acl-v8` · PR #41 (1.38.7) auf `main` (Worktree `../ha-openwrt-router-acl-v8`)
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1, A2 und A11 inkl. Fixes abgeschlossen · **Offen:** PR #41 (ACL v8) Merge-Freigabe, Installation 1.38.7 und AK6 am Gateway; A3–A10, A12–A14
 - **Blocker:** –
-- **Nächster Schritt:** Merge-Freigabe #38 → #39 → #40 durch den Nutzer (jeder Merge ein Release); Installation von 1.38.3 (oder später 1.38.6) durch den Nutzer, dann AK6 messen (SSH-Logins je Minute auf `openwrt`, `ap2`, `ap4`; rpcd-RSS ≥ 1 h); danach A4 (WAN-Erkennung, E5)
+- **Nächster Schritt:** Review-Befunde zu #41 beheben, CI, Merge-Freigabe durch den Nutzer; danach 1.38.7 installieren, HA neu starten (rpcd-Neustart je Router durch v8), AK6 am Gateway abschließend messen; dann A4 (WAN-Erkennung, E5)
 
 ## Problem und Zielverhalten
 
@@ -29,7 +29,7 @@ ACL-Änderung). Daten, die es nur per SSH gibt (LLDP), werden wie heute höchste
 geholt. Fällt ubus aus, bleibt SSH der Fallback, dann aber mit einer Verbindung je Poll, die nach
 dem Poll geschlossen wird. Die Speicher-Sensoren zeigen die echten Werte.
 
-**Nicht-Ziele:** ACL v8 (keine neuen ACL-Pfade nötig), Host-Key-Prüfung für SSH (Produktentscheidung,
+**Nicht-Ziele:** ~~ACL v8 (keine neuen ACL-Pfade nötig)~~ (aufgehoben durch E7, siehe A16), Host-Key-Prüfung für SSH (Produktentscheidung,
 siehe E2, eigenes Paket später), Änderungen am Panel, neue Entities.
 
 ## Akzeptanzkriterien
@@ -328,6 +328,7 @@ dieselbe Funktion), jeder Merge mit Version ein Release. P1/P2 zuerst mit fehlsc
 | A12 | P2 | C2 + C3 + C7 + C12: Gateway-Rolle = WAN konfiguriert (`proto`) oder DHCP-Server aktiv, `wan_connected` nur Status; Clients/Kanten offline Router als `stale` und im Dedupe nachrangig; Hostnamen nur indexieren, wenn fleetweit eindeutig, `chassis_id` vor `chassis_name`; LLDP-Doppelbeobachtung als Konflikt. **Risikoauslöser** | `topology_mesh.py`, `topology_diagnostic.py`, Tests | – | M |
 | A13 | P2 | C5 + C8 + C9 + C10 + C11 (+C13): Panel/Snapshot nur für Admins (je E6, mit Option), Build-Fehler als 500 mit `meta.error` statt leerer Topologie, kein „WAN offline“-Alarm bei 0 Routern, `KEY_HASS`, Panel-Setup abgesichert, 401-Schleife im Frontend; Bundle neu bauen (`--frontend`) | `topology_panel.py`, `__init__.py`, `frontend/topology/src/*`, `frontend/dist/*`, Tests | E6 | M |
 | A14 | P2 | C6: Snapshot je Coordinator-Update einmal bauen und cachen, `generated_at` und Rohlisten aus den Entity-Attributen nehmen (Rohdaten nur über die API) | `topology_entities.py`, Tests | – | S |
+| A16 | P1 | E7: ACL v8 mit aufgelösten Symlink-Pfaden (rpcd ≥ 2026 `realpath`-Prüfung); Tests mit `fnmatch` gegen echte Zielpfade und Negativliste; `scripts/ha-openwrt-router.json` regeneriert. **Risikoauslöser ACL** → Review Pflicht | `acl_provisioning.py`, `scripts/ha-openwrt-router.json`, `tests/test_acl_provisioning.py` | E7 | S |
 
 Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 → A12 → A14 → A6 → A7–A10
 (klein, nur wenn risikolos). A4 ist auf `fix/ssh-polling` gestapelt, alle anderen auf `origin/main`.
@@ -358,6 +359,11 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   Snapshot nur für Admins mit Option „für alle Benutzer“ (Standard aus) – Nutzer.
 - 2026-10-27 – **E5 entschieden:** WAN-Erkennung über erweiterte Namen und `proto`, kein
   „erstes up-Interface“ mehr – Nutzer.
+- 2026-10-27 – **E7 entschieden:** ACL v8 ergänzt die aufgelösten Symlink-Pfade (`/proc/*/net/arp`,
+  `/proc/*/net/nf_conntrack`, `/sys/devices/*/net/*`, `/tmp/run/ddns`), nur lesend, kein exec; rpcd ab
+  2026 prüft Datei-ACLs zusätzlich gegen `realpath()`; beim nächsten HA-Start deployt die Integration v8
+  und rpcd startet einmal je Router neu – Nutzer. Ebenso freigegeben: Merges #38 → #39 → #40 trotz
+  des verbleibenden Gateway-Logins (kommt mit v8).
 - 2026-10-27 – **E2 (offen, Produktentscheidung):** SSH-Host-Key-Prüfung (`known_hosts=None`).
   Vorschlag: Trust-on-first-use – Fingerabdruck beim ersten SSH-Kontakt im Config-Entry speichern,
   bei Abweichung Repair-Issue statt stiller Verbindung. Braucht Config-Entry-Daten und eine
@@ -469,3 +475,33 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
 - 2026-10-27 PR #37 gemergt (`5372d12`) nach Freigabe des Nutzers, CI grün (tests 3.13/3.14, hassfest,
   hacs); Release-Workflow erfolgreich, **v1.38.3** veröffentlicht (20:05, Release-Text aus dem
   CHANGELOG); HACS per `update_information` aufgefrischt; PR #38 auf `main` umgehängt (mergebar).
+- 2026-10-27 **AK6 (Teil 1)** nach Installation 1.38.3 und HA-Neustart 21:07: alle drei Einträge geladen,
+  HA-Log nur die Root-Warnung je Router; tmpfs-Sensoren 117,0 MB gesamt / 0,4–0,6 MB belegt auf allen
+  Routern, Speicherplatz-Auslastung 20,8 % (`ap4`) und 21,5 % (`ap2`); „Speicherplatz gesamt/belegt/frei“
+  bleiben 0,0, weil die Sensoren in GB rechnen und das Overlay 3,5 MB groß ist (P3 → A9: Einheit MB).
+  dropbear-Anmeldungen: `ap2` und `ap4` je 1 um 21:09 (LLDP-Erstprüfung), danach **0 je Poll**
+  (vorher 5/min); `openwrt` **1 je Poll** (vorher 6/min). Debug-Log (zwei Polls, danach zurück auf
+  WARNING): FDB und ARP am Gateway per SSH, weil rpcd `file read` auf `/proc/net/arp` und `brforward`
+  für die HA-Session ablehnt („rpcd ACL blocks … cached this session“). Lesend bestätigt: mit der
+  HA-Session sind `/proc/net/arp`, `brforward`, `statistics/rx_bytes`, `nf_conntrack`, `brport/port_no`
+  verweigert, `/proc/cpuinfo`, `nf_conntrack_count`, `/etc/openwrt_release` erlaubt; die Session-ACL
+  enthält die Pfade. Ursache: Gateway rpcd 2026.10.04 prüft gegen `realpath()` (rpcd `file.c`), die APs
+  mit rpcd 2025.12.03 nicht. → E7/A16 (ACL v8). rpcd-RSS-Messung läuft seit 21:08 (Auswertung folgt).
+- 2026-10-27 Merges nach Freigabe (jeweils nach grüner CI, ausgelöst per leerem Commit nach dem
+  Umhängen auf `main`): #38 `abf9e86` → v1.38.4 (20:51 UTC), #39 `225ab22` → v1.38.5 (20:54 UTC),
+  #40 `85d93b4` → v1.38.6 (20:56 UTC); Release-Workflow jeweils erfolgreich, HACS aufgefrischt.
+  PR #41 (ACL v8) auf `main` umgehängt.
+- 2026-10-27 Review A16/PR #41 (unabhängig): keine P0/P1; AK-A16.1–3 verifiziert (alle ubus-Dateipfade
+  samt `realpath`-Ziel abgedeckt, keine neuen write/exec, Redeploy über Dict-Vergleich). P2: CHANGELOG
+  nannte „beides“ für drei Dinge und ließ WAN-Zähler-Fallback, Portnummern und DDNS-Status aus →
+  korrigiert. P3: `import fnmatch` nach oben, Negativliste um das `phy80211`-Symlink-Ziel ergänzt und
+  `/tmp/dhcp.leases` entfernt (vorbestehende, bewusst nicht gewährte Datei, luci-rpc-Fallback),
+  Migrationstest v7-Datei → Redeploy mit rpcd-Neustart, Versionsangabe präzisiert (2026.10.04
+  bestätigt), Nicht-Ziel „ACL v8“ im Plan aufgehoben. Offen (P3, vorbestehend): `list` auf
+  `/var/run/ddns` wird nirgends genutzt.
+- 2026-10-27 **AK6 (Teil 2) rpcd-Speicher mit 1.38.3 / ACL v7**, 14 Proben 21:08–22:13 (alle 5 min,
+  lesend aus `/proc/<pid>/status`), kein rpcd-Neustart: `openwrt` 2484→2496 kB (max 2968 kB während
+  des HA-Neustarts mit bis zu 17 Sessions, danach 4), HWM 2992 unverändert, zweite Hälfte +22 kB/h;
+  `ap2` 2968→2988 kB (zweite Hälfte +9 kB/h); `ap4` 3000→3032 kB (zweite Hälfte +22 kB/h).
+  **Kein Leck**, Werte wie bei B3. AK6 für die APs erfüllt (0 SSH-Anmeldungen je Poll); Gateway offen
+  bis ACL v8 (PR #41) installiert ist.

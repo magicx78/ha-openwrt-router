@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -489,9 +490,9 @@ class TestAclContent:
         assert isinstance(ACL_VERSION, int)
         assert ACL_VERSION >= 1
 
-    def test_acl_version_is_7(self):
+    def test_acl_version_is_at_least_7(self):
         """v7 adds /proc/cpuinfo (core count) and network/reload."""
-        assert ACL_VERSION == 7
+        assert ACL_VERSION >= 7
 
     def test_acl_grants_proc_cpuinfo_read_only(self):
         """The CPU load is normalised per core; the core count comes from
@@ -542,3 +543,100 @@ class TestAclContent:
             Path(__file__).resolve().parent.parent / "scripts" / "ha-openwrt-router.json"
         )
         assert json.loads(scripts_json.read_text()) == RPCD_ACL_CONTENT
+
+
+# =====================================================================
+# ACL v8 (1.38.7): rpcd >= 2026.x re-checks file ACLs against the realpath()
+# of the requested file. /proc/net/* resolves to /proc/<pid>/net/*,
+# /sys/class/net/<if>/... to /sys/devices/.../net/<if>/..., /var/run to
+# /tmp/run — so the resolved paths must be granted as well (read-only).
+# Verified on hardware: rpcd 2026.10.04 denied /proc/net/arp and brforward
+# for the integration's session while rpcd 2025.12.03 allowed them.
+# =====================================================================
+
+
+_RESOLVED_READ_PATHS = (
+    "/proc/7729/net/arp",
+    "/proc/7729/net/nf_conntrack",
+    "/sys/devices/virtual/net/br-lan/brforward",
+    "/sys/devices/platform/soc/15100000.ethernet/mdio_bus/mdio-bus/mdio-bus:1f/net/wan/statistics/rx_bytes",
+    "/sys/devices/platform/soc/15100000.ethernet/mdio_bus/mdio-bus/mdio-bus:1f/net/lan1/brport/port_no",
+    "/sys/devices/virtual/net/phy0-ap0/statistics/tx_bytes",
+    "/tmp/run/ddns/myddns.ip",
+)
+
+_MUST_NOT_MATCH = (
+    "/etc/shadow",
+    "/etc/config/wireless",
+    "/proc/1/environ",
+    "/proc/7729/cmdline",
+    "/sys/devices/platform/soc/18000000.spi/spi_master/spi0/spi0.0/mtd/mtd0/data",
+    # Target of /sys/class/net/wlan0/phy80211/macaddress: a symlink leading OUT
+    # of the netdev's directory must not be covered by /sys/devices/*/net/*.
+    "/sys/devices/platform/soc/18000000.wifi/ieee80211/phy0/macaddress",
+    "/tmp/run/hostapd/phy0-ap0",
+)
+
+
+def _read_granted(path: str) -> bool:
+    """fnmatch(3) without FNM_PATHNAME, as rpcd's session ACL uses it."""
+    files = RPCD_ACL_CONTENT["root"]["read"]["file"]
+    return any(
+        fnmatch.fnmatchcase(path, pattern) and "read" in perms
+        for pattern, perms in files.items()
+    )
+
+
+class TestAclV8ResolvedPaths:
+    def test_acl_version_is_8(self):
+        assert ACL_VERSION == 8
+
+    @pytest.mark.parametrize("path", _RESOLVED_READ_PATHS)
+    def test_resolved_symlink_targets_are_readable(self, path):
+        assert _read_granted(path), path
+
+    def test_resolved_ddns_run_dir_is_listable(self):
+        files = RPCD_ACL_CONTENT["root"]["read"]["file"]
+        assert "list" in files["/tmp/run/ddns"]
+        assert "list" in files["/var/run/ddns"]
+
+    @pytest.mark.parametrize("path", _MUST_NOT_MATCH)
+    def test_resolved_patterns_stay_narrow(self, path):
+        assert not _read_granted(path), path
+
+    def test_symlink_paths_still_granted_for_older_rpcd(self):
+        """rpcd before the realpath re-check only sees the requested path."""
+        for path in ("/proc/net/arp", "/proc/net/nf_conntrack", "/sys/class/net/*", "/var/run/ddns/*"):
+            assert RPCD_ACL_CONTENT["root"]["read"]["file"][path] == ["read"], path
+
+    @pytest.mark.asyncio
+    async def test_v7_deployment_is_upgraded_to_v8(self):
+        """The real upgrade path: a router carrying exactly the v7 file."""
+        v7 = json.loads(json.dumps(RPCD_ACL_CONTENT))
+        for key in (
+            "/proc/*/net/arp",
+            "/proc/*/net/nf_conntrack",
+            "/sys/devices/*/net/*",
+            "/tmp/run/ddns",
+            "/tmp/run/ddns/*",
+        ):
+            del v7["root"]["read"]["file"][key]
+        api = _make_api()
+
+        def _side_effect(obj, method, params):
+            if method == "read":
+                return {"data": json.dumps(v7, indent=2)}
+            return {}
+
+        api._call.side_effect = _side_effect
+        assert await ensure_acl(api) is True
+        methods = [c.args[1] for c in api._call.call_args_list]
+        assert "write" in methods
+        assert "exec" in methods  # rpcd restart
+
+    def test_v8_adds_no_write_or_exec(self):
+        write = RPCD_ACL_CONTENT["root"]["write"]
+        assert write["file"] == {"/etc/init.d/rpcd": ["exec"]}
+        assert write["ubus"] == {"network.wireless": ["up", "down"], "network": ["reload"]}
+        for perms in RPCD_ACL_CONTENT["root"]["read"]["file"].values():
+            assert set(perms) <= {"read", "list"}, perms

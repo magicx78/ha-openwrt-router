@@ -34,7 +34,15 @@ ACL_FILE_PATH = "/usr/share/rpcd/acl.d/ha-openwrt-router.json"
 # Bump whenever RPCD_ACL_CONTENT below changes. Used only for log messages —
 # staleness is detected by comparing the deployed file's actual content to
 # RPCD_ACL_CONTENT, not by this number.
-ACL_VERSION = 7
+#
+# v8: rpcd 2026.10.04 (file.c: realpath() re-check; verified on that build,
+# older 2026 builds not checked, 2025.12.03 unaffected) verifies a file ACL
+# against the requested path AND its resolved target. /proc/net/* resolves to
+# /proc/<pid>/net/*, /sys/class/net/<if>/... to /sys/devices/.../net/<if>/...
+# and /var/run to /tmp/run, so without the resolved patterns every such read
+# was denied (bridge FDB and ARP fell back to SSH on every poll). Older rpcd
+# only checks the requested path; both forms stay granted.
+ACL_VERSION = 8
 
 # Marker echoed by the SSH deploy command — _run_ssh() returns None for empty
 # stdout even on exit code 0, so success must be detectable from stdout alone.
@@ -63,15 +71,24 @@ RPCD_ACL_CONTENT: dict = {
                 "/etc/config/ddns": ["read"],
                 "/var/run/ddns": ["list"],
                 "/var/run/ddns/*": ["read"],
+                # /var -> /tmp on OpenWrt: the resolved path for rpcd >= 2026 (v8).
+                "/tmp/run/ddns": ["list"],
+                "/tmp/run/ddns/*": ["read"],
                 # file/list on the directory itself needs "list" on the exact
                 # path — the /sys/class/net/* glob below does not cover it.
                 "/sys/class/net": ["list"],
                 "/sys/class/net/*": ["read"],  # brforward, statistics/*, brport/port_no
+                # /sys/class/net/<if> is a symlink into /sys/devices/...; rpcd
+                # >= 2026 re-checks the resolved path (v8). Read-only sysfs.
+                "/sys/devices/*/net/*": ["read"],
                 # Core count to normalise the load average per core (v7),
                 # read once per setup — see OpenWrtAPI._get_cpu_cores.
                 "/proc/cpuinfo": ["read"],
                 "/proc/net/arp": ["read"],
                 "/proc/net/nf_conntrack": ["read"],
+                # /proc/net -> /proc/self/net -> /proc/<pid>/net (v8, see above).
+                "/proc/*/net/arp": ["read"],
+                "/proc/*/net/nf_conntrack": ["read"],
                 "/proc/sys/net/netfilter/nf_conntrack_count": ["read"],
                 "/tmp/opkg_list": ["read"],
                 # Let ensure_acl() verify the deployed ACL via ubus on every
