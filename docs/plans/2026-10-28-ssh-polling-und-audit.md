@@ -7,10 +7,10 @@
 ## Status
 
 - **Stand:** 2026-10-28 (nachts) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7) und #42 A17 (`50bf5ae`, v1.38.8) am 2026-10-28 — **offen:** A4 `fix/wan-detect` (Worktree `../ha-openwrt-router-wan-detect`, noch kein PR)
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht) · **Offen:** A3–A10, A12–A14
+- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7) und #42 A17 (`50bf5ae`, v1.38.8) am 2026-10-28 — **offen:** A4 `fix/wan-detect` · PR #43 (1.38.9) auf `main` (Worktree `../ha-openwrt-router-wan-detect`)
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt (1.38.9, PR #43) · **Offen:** A4 Review und Merge-Freigabe, Hardware-Nachweis nach 1.38.9; A3, A5–A10, A12–A14
 - **Blocker:** –
-- **Nächster Schritt:** A4 (WAN-Erkennung, E5) auf `fix/wan-detect`: fehlschlagende Tests für die Erkennung über Namen und `proto` und den Wegfall des „erstes up-Interface“-Fallbacks, dann Fix, Version 1.38.9
+- **Nächster Schritt:** Review zu PR #43 (A4) abschließen, CI, Merge-Freigabe durch den Nutzer; nach Installation von 1.38.9 Diagnose der APs prüfen (`wan_found` False, `wan_connected` False, kein DDNS) und Topologie-Rollen unverändert; dann A5 (Diagnostics-Redaktion, E4)
 
 ## Problem und Zielverhalten
 
@@ -565,3 +565,16 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   2492 kB, `ap2` 3020 kB, `ap4` 3072 kB. Validierungslücke geschlossen.
 - 2026-10-28 A4 startet auf `fix/wan-detect` (Worktree `../ha-openwrt-router-wan-detect`, von
   `main@50bf5ae`); `fix/wan-detection` bleibt unbenutzt, bis der Nutzer die Löschung freigibt.
+- 2026-10-28 A4 `fix/wan-detect@371060e` (PR #43, 1.38.9) – lokal: ruff 0.17.3 sauber, 1470 Tests grün
+  (59 neue in `tests/test_wan_detection.py`; vor dem Fix nicht importierbar, weil `is_wan_interface`
+  fehlte; die Kernfälle Dumb-AP-Dump → `wan_found` False ohne Zählerabfrage, `lte`/`qmi`-Gateway
+  gefunden, Treffer nur per Protokoll, `_detect_router_role` mit Mobilfunk-Protokollen sind neues
+  Verhalten). Umsetzung nach E5: `is_wan_interface(name, proto)` mit Namen `wan*`, `wwan*`, `lte*`,
+  `modem*`, `umts*`, `pppoe-wan`, `3g`, `4g`, `5g` und Protokollen `pppoe`, `pppoa`, `qmi`, `mbim`,
+  `ncm`, `modemmanager`, `3g`, `wwan` (`pppoa`/`wwan` über E5 hinaus, weil ebenfalls nur Uplink);
+  erster Treffer in Dump-Reihenfolge, kein Rückfall; `wan_found` im Status (fehlt bei leerem Dump
+  und SSH-Fallback = unbekannt); `router_has_wan` folgt dem Flag; Topologie-Rolle akzeptiert die
+  Uplink-Protokolle (Risikoauslöser Mehr-Router-Logik → Review). · CI: PR #43 · Hardware: nicht
+  geprüft – Lücke: nach Installation von 1.38.9 Diagnose der APs (`wan_found` False, `wan_connected`
+  False, `ddns_status` leer), Gateway unverändert, Rollen Gateway + 2 APs; kein LTE-Gateway im
+  Testnetz · Review: unabhängig, läuft.
