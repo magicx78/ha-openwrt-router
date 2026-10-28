@@ -6,11 +6,11 @@
 
 ## Status
 
-- **Stand:** 2026-10-28 · **Phase:** alle Pakete umgesetzt, Sammel-Release 1.39.0 wartet auf Merge-Freigabe
-- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7), #42 A17 (`50bf5ae`, v1.38.8) und #43 A4 (`917cbb4`, v1.38.9) am 2026-10-28 — **offen:** Sammel-Release `release/1.39.0` als PR #45 (Worktree `../ha-openwrt-router-release-1.39.0`) mit A5 (enthält PR #44), A13, A14, A3, A12, A6, A7, A9, A10, A8
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt und gemergt (1.38.9, PR #43, Review-Befunde behoben, Hardware-Nachweis erbracht), A3, A5–A10, A12–A14 umgesetzt auf `release/1.39.0` (Reviews A3, A5, A12, A13 und Stapel A6/A7/A9/A10 inkl. Fixes abgeschlossen) · **Offen:** Merge und Release 1.39.0 (Freigabe), Installation und Hardware-Prüfungen (Liste in `TODO.md`)
+- **Stand:** 2026-10-28 · **Phase:** 1.39.0 veröffentlicht und installiert, Hardware-Prüfungen größtenteils erledigt
+- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7), #42 A17 (`50bf5ae`, v1.38.8) und #43 A4 (`917cbb4`, v1.38.9) am 2026-10-28, Sammel-Release #45 (`df78515`, v1.39.0) mit A5 (enthält PR #44), A13, A14, A3, A12, A6, A7, A9, A10, A8 am 2026-10-28
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt und gemergt (1.38.9, PR #43, Review-Befunde behoben, Hardware-Nachweis erbracht), A3, A5–A10, A12–A14 umgesetzt auf `release/1.39.0` (Reviews A3, A5, A12, A13 und Stapel A6/A7/A9/A10 inkl. Fixes abgeschlossen) , 1.39.0 gemergt, veröffentlicht und per HACS installiert, Hardware-Prüfungen A3, A5, A6, A7, A9 (Router-Seite), A10, A12, A14 · **Offen:** Panel als Nicht-Admin (A13), Recorder-Vergleich über einen Tag (A8), Raten-Sensoren in HA (A9), Folgepunkte in `TODO.md`
 - **Blocker:** –
-- **Nächster Schritt:** CI auf PR #45 grün → Merge-Freigabe des Nutzers für 1.39.0 → nach OK Installation per HACS und HA-Neustart → Hardware-Prüfungen laut `TODO.md`
+- **Nächster Schritt:** offene Prüfungen aus `TODO.md` („Nach Installation von 1.39.0“) – Panel als Nicht-Admin im Browser
 
 ## Problem und Zielverhalten
 
@@ -668,3 +668,31 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
     Elternklassen).
   - Stand nach allen Merges: lokal ruff 0.17.3 sauber, pytest grün (Zahl siehe PR #45). Hardware:
     nichts geprüft – gesammelte Prüfliste in `TODO.md`.
+- **2026-10-28 – Merge, Release und Installation 1.39.0.** PR #45 nach grüner CI auf Freigabe des
+  Nutzers gemergt (`df78515`), Auto-Release v1.39.0 veröffentlicht (Tests, hassfest, HACS grün).
+  Per HACS installiert, HA neu gestartet: Manifest 1.39.0 geladen, alle drei Einträge `loaded`,
+  im Log je Router nur die bekannte Root-Warnung (einmal), kein rpcd-Neustart (keine ACL-Änderung).
+- **2026-10-28 – Hardware-Prüfungen 1.39.0 (lesend).**
+  - **A5:** Diagnose von Gateway und `ap2` über die HA-API geladen und durchsucht: 0 MAC-Muster,
+    0 IP-Muster; `ssid`, `ssids`, `bssid`, `hostname`, `chassis_name`, `username` redigiert; DDNS nur
+    mit Dienstname. Erfüllt.
+  - **A7:** Laufzeit-Sensoren aktualisieren sich weiter im 60-s-Takt mit Versatz (`ap2` :35,
+    `ap4` :57, Gateway :10 s der Minute) über mehrere Polls. P0 auf Hardware nicht mehr sichtbar.
+  - **A9:** `network.device status {}` liefert `statistics` für `br-lan` und `wan` auf allen drei
+    Routern. Die Raten-Sensoren sind in HA nicht aktiviert – HA-Seite ungeprüft.
+  - **A10:** `/proc/net/arp` am Gateway 82 Zeilen / 6,7 KB (über der 4-KiB-Lesegrenze von rpcd),
+    `getHostHints` antwortet mit ~10,6 KB; an den APs ~1,7 KB ARP.
+  - **A12:** Snapshot-API (`/api/openwrt_topology/snapshot`, 200): 3 Router, Rollen 1× `gateway`,
+    2× `ap`, 2 Kanten `router_uplink`, 53 Clients, keine `stale`-Router, keine LLDP-Duplikate.
+  - **A14:** Topologie-Sensor nur noch mit Zählern (`node_count`, `edge_count`, `interface_count`,
+    `client_count`), keine Rohlisten.
+  - **A3:** 121 Tracker: 52 `home`, 69 `not_home`, 0 `unavailable`, 0 `restored`. Damit sind auch
+    die zwei wiederhergestellten Tracker aus Befund 13 nicht mehr `unavailable`.
+  - **A6:** alle drei Router nutzen `apk`. Knopf „Nach Updates suchen“ nach OK des Nutzers an
+    Gateway und `ap4` gedrückt (`apk update` schreibt Paketlisten nach `/tmp`): Gateway nach ~2,3 s
+    `current`, 0 Pakete, `index_refreshed: true`; `ap4` nach ~2,6 s `available`, 70 Pakete (56
+    System, 14 LuCI-Erweiterungen, u. a. `rpcd` und `ubus`). Gegengeprüft per SSH: Gateway hat die
+    neuen Stände schon installiert (`rpcd` 2026.10.04, `luci-base` 26.288), `ap4` die alten. Keine
+    Log-Einträge. Fehlermeldung ohne SSH nicht geprüft (alle Router haben SSH).
+  - **Offen:** A13 Panel als Nicht-Admin (Browser mit Nicht-Admin-Konto), A8 Recorder über einen
+    Tag. Die Registry-Einträge „Updates installieren“ stehen wie erwartet auf `unavailable` (E3). Nebenbefund: Gateway-Laufzeit beim Prüfen 1 h 56 min, Neustart lag vor der Installation.
