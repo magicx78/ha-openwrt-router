@@ -10,7 +10,7 @@
 - **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7), #42 A17 (`50bf5ae`, v1.38.8) und #43 A4 (`917cbb4`, v1.38.9) am 2026-10-28 — **offen:** A5 `fix/diagnostics-redaction` (Worktree `../ha-openwrt-router-diag-redact`, noch kein PR)
 - **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt und gemergt (1.38.8, PR #42, Review-Befunde behoben, Hardware-Nachweis erbracht), A4 umgesetzt und gemergt (1.38.9, PR #43, Review-Befunde behoben, Hardware-Nachweis erbracht) · **Offen:** A3, A5–A10, A12–A14
 - **Blocker:** –
-- **Nächster Schritt:** A5 (Diagnostics-Redaktion nach HA-Konvention, E4) auf `fix/diagnostics-redaction`: fehlschlagende Tests für `async_redact_data` über Host, Benutzername, Hostname/MAC des Routers, WAN-IP, Clients, BSSIDs, Interface-IPs, DDNS-Domains und die Client-Listen, dann Fix, Version 1.38.10
+- **Nächster Schritt:** A5 (1.38.10) umgesetzt, reviewt (P1 behoben) und lokal grün, committet; Push und PR nach Freigabe. Danach A13
 
 ## Problem und Zielverhalten
 
@@ -611,3 +611,24 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   und zweimal AP (connected False) – Lücke: Panel einmal ansehen. Kein LTE-Gateway im Testnetz.
 - 2026-10-28 A5 startet auf `fix/diagnostics-redaction` (Worktree `../ha-openwrt-router-diag-redact`,
   von `main@917cbb4`).
+- 2026-10-28 **A5 umgesetzt** (1.38.10): `diagnostics._redact` ruft zuerst `async_redact_data` mit
+  `DIAGNOSTICS_TO_REDACT` (exakte Schlüssel: `address`, `bssid`, `chassis_id`, `domain`, `host`,
+  `hostname`, `ip`, `ipv4`, `ipv4_addr`, `ipv4_address`, `mac`, `management_ip`, `ssid`, `ssids`,
+  `username`, `web_url`), danach den bisherigen Teilstring-Filter für Geheimnisse. `clients` wird
+  zu Anzahl, Anzahl je `connection_type` und Signal min/max/Mittel; `client_stability.sticky/weak/
+  unstable` zu `"<n clients redacted>"`. Tests: ein Fixture voller Personendaten, je Wert ein Test,
+  dass er im JSON-Export (auch klein geschrieben) nicht mehr vorkommt; 26 Tests vorher rot. Der
+  alte Test, der `hostname` als lesbar festschrieb, folgt jetzt E4. Lokal 1521 grün, ruff 0.17.3
+  sauber. Hardware: nicht nötig für den Nachweis (reine Umformung der Coordinator-Daten); nach
+  Installation einmal echte Diagnose herunterladen und auf MAC/IP-Muster durchsuchen.
+- 2026-10-28 **A5-Review** (frischer Agent, nur Diff und Kriterien): kein P0. **P1 behoben:** Der
+  Titel des Eintrags ist standardmäßig Router-Hostname oder Host (`config_flow.py:327`) und stand in
+  `entry_title` und `dfs.last_event.router` (`coordinator.py:1549`). Jetzt ist `entry_title`
+  redigiert und `router` in der Schlüsselmenge; das Fixture nutzt den Hostnamen als Titel. **P2
+  behoben:** LLDP `chassis_name` redigiert, `port_id` nur, wenn sie eine MAC ist (neu
+  `mac_utils.is_mac`); Fixture um STA-MAC/SSID, DFS und LLDP erweitert. **P3 behoben:** Bool-Signal
+  zählt nicht (`type() is int`), Nicht-Dicts in `clients` werden übergangen. **Nicht umgesetzt:**
+  Stabilitätslisten als Text „<n clients redacted>“ statt Zahl (gleicher Stil wie `dhcp_leases`);
+  WAN-Adressklasse (privat/CGNAT/öffentlich) als Ersatz für die redigierte WAN-IP – neue Funktion,
+  eigener Vorschlag. Die neuen Fixture-Werte wurden nach dem Fix ergänzt, nicht vorher rot gesehen.
+  Lokal 1536 grün, ruff 0.17.3 sauber.

@@ -2,6 +2,30 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.38.10] - 2026-10-28
+
+### Security
+
+- **Diagnostics redigieren persönliche und Netzwerkdaten nach HA-Konvention.**
+  Bisher entfernte der Diagnose-Download nur Schlüssel, die nach Geheimnis
+  klangen (`password`, `token`, `key` …). Host und Benutzername des Routers,
+  sein Hostname und seine MAC, die WAN-IP, alle SSIDs und BSSIDs, die
+  Interface-IPs, DDNS-Domains und -IPs sowie die komplette Client-Liste mit
+  MAC, IP, Hostname und Web-URL jedes Geräts landeten im Klartext in einer
+  Datei, die für Bug-Reports gedacht ist. Jetzt läuft zuerst
+  `async_redact_data` über eine feste Liste exakter Schlüssel (`host`,
+  `username`, `hostname`, `mac`, `bssid`, `ssid`, `ssids`, `ip`, `ipv4`,
+  `ipv4_addr`, `ipv4_address`, `address`, `domain`, `web_url`, `chassis_id`,
+  `management_ip`, `router`), danach wie bisher der Teilstring-Filter für
+  Geheimnisse. Der Titel des Eintrags, standardmäßig der Router-Hostname
+  oder der Host, wird ebenfalls redigiert, auch im letzten DFS-Ereignis.
+  Bei LLDP-Nachbarn werden der Name und eine Port-ID, die eine MAC ist,
+  redigiert. Die Client-Liste wird zu Anzahl, Anzahl je Verbindungsart und
+  Minimum/Maximum/Mittel des Signals; die Listen `sticky`, `weak` und
+  `unstable` der Client-Stabilität werden zu Zählern. Werte, die zur
+  Fehlersuche gebraucht werden (Interface-Namen, Protokoll, Verbindungsstatus,
+  Modell, Feature-Flags, Ports), bleiben lesbar.
+
 ## [1.38.9] - 2026-10-28
 
 ### Fixed

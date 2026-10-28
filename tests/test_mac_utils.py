@@ -5,7 +5,22 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from custom_components.openwrt_router.mac_utils import is_locally_administered
+from custom_components.openwrt_router.mac_utils import is_locally_administered, is_mac
+
+
+class TestIsMac:
+    @pytest.mark.parametrize(
+        "value",
+        ["00:00:5e:00:53:01", "00-00-5E-00-53-02", "00005e005303", "0000.5e00.5304"],
+    )
+    def test_mac_forms(self, value):
+        assert is_mac(value) is True
+
+    @pytest.mark.parametrize(
+        "value", ["gi1/0/7", "eth0", "00:00:5e:00:53", "", None, 42, True]
+    )
+    def test_not_a_mac(self, value):
+        assert is_mac(value) is False
 
 
 class TestIsLocallyAdministered:

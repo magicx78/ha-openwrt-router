@@ -242,6 +242,31 @@ DIAGNOSTICS_REDACT_KEYS = {
     "key",
     "auth",
 }
+# Exact key names that identify a person, a device or the network (HA
+# convention, async_redact_data).  Matched by equality, not substring, so
+# "interface" or "logical_name" stay readable.
+DIAGNOSTICS_TO_REDACT = {
+    "address",
+    "bssid",
+    "chassis_id",
+    "domain",
+    "host",
+    "hostname",
+    "ip",
+    "ipv4",
+    "ipv4_addr",
+    "ipv4_address",
+    "mac",
+    "management_ip",
+    # Entry title (defaults to the router hostname or host) in DFS event payloads
+    "router",
+    "ssid",
+    "ssids",
+    "username",
+    "web_url",
+}
+# client_stability lists of individual clients (MAC + hostname each).
+DIAGNOSTICS_CLIENT_LISTS = ("sticky", "weak", "unstable")
 
 # OpenWrt version compatibility
 # Minimum supported: OpenWrt 19.07 (ubus/rpcd baseline)

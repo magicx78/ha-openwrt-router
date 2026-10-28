@@ -17,6 +17,11 @@ _MAC_RE = re.compile(
 )
 
 
+def is_mac(value: object) -> bool:
+    """Return True if ``value`` is a full 48-bit MAC in one of the forms above."""
+    return isinstance(value, str) and bool(_MAC_RE.fullmatch(value.strip().lower()))
+
+
 def is_locally_administered(mac: str | None) -> bool:
     """Return True for a locally administered (randomised) unicast MAC.
 
