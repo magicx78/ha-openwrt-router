@@ -2,7 +2,7 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
-## [1.38.10] - 2026-10-28
+## [1.39.0] - 2026-10-28
 
 ### Security
 
