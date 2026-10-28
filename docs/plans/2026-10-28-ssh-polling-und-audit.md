@@ -535,8 +535,21 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   (10 neue in `tests/test_bridge_port_map.py`, 8 vor dem Fix rot) · CI: PR · Hardware: Ursache und
   Parser mit echten Daten belegt, der Fix selbst noch nicht in HA gelaufen – Lücke: nach Installation
   von 1.38.8 Diagnose `port_mapping` mit `device_count` > 0 an den LAN-Ports des Gateways und
-  Debug-Zeile „Bridge FDB via file/read: N entries“ mit N > 0 · Review: unabhängig, läuft.
+  Debug-Zeile „Bridge FDB via file/read: N entries“ mit N > 0 · Review: unabhängig, siehe unten.
 - 2026-10-28 Hinweis: Der Worktree `../ha-openwrt-router-wan-detection` (Branch `fix/wan-detection`,
   ungepusht) enthält einen Buchführungs-Commit, der durch `core.autocrlf=false` beim `commit -a` die
   Zeilenenden von 171 Dateien umgestellt hat; er wird nicht verwendet (Löschung nur mit Freigabe des
   Nutzers), A4 startet auf einem frischen Branch von `main`. Die Buchführung steht in diesem PR.
+- 2026-10-28 Review A17/PR #42 (unabhängig, frischer Agent mit Diff und AK1–AK5): keine P0/P1,
+  AK1/AK2/AK4/AK5 bestätigt. P2 F1: gemerkte unbekannte Portnummern wurden beim nächsten erzwungenen
+  Neuaufbau überschrieben → ab zwei Unbekannten aus verschiedenen Polls doch wieder ein Neuaufbau je
+  Poll (AK3 verletzt); P2 F3: ein Neuaufbau ohne aufgelöstes Mitglied (Timeouts) verdrängte die gute
+  Karte und blendete die Port-Zuordnung bis zu 600 s aus. P3 F2: Intervall-Neuaufbau plus erzwungener
+  Neuaufbau im selben Poll; F5: `reset_acl_blocked()` während eines laufenden Neuaufbaus ging
+  verloren; F6: doppelter Datensatz-Filter in zwei Funktionen; F4: eine überlange Zeile in der
+  Testdatei (nicht behoben, `tests/` wird laut Regel nicht per ruff formatiert, CI prüft nur
+  `custom_components/`). Behoben in `2e71871`: Unbekannte akkumulieren und werden nur um aufgelöste
+  Nummern bereinigt, höchstens ein Neuaufbau-Versuch je Poll, ein fehlgeschlagener Neuaufbau
+  behält Karte und Zeitstempel und merkt nichts, Generationszähler für den Reset, ein gemeinsamer
+  Datensatz-Walker für Parser und Nummernliste; 7 Tests vorher rot (6 neue, 1 angepasst), lokal
+  1411 grün, ruff sauber. Offen: Hardware-Nachweis nach Installation von 1.38.8.
