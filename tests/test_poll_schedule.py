@@ -23,7 +23,10 @@ from homeassistant.helpers.update_coordinator import (
 
 from custom_components.openwrt_router import _stagger_offset
 from custom_components.openwrt_router.api import OpenWrtAuthError
-from custom_components.openwrt_router.coordinator import OpenWrtCoordinator
+from custom_components.openwrt_router.coordinator import (
+    OpenWrtCoordinator,
+    OpenWrtCoordinatorData,
+)
 from custom_components.openwrt_router.const import (
     NOTIFICATION_FAILURE_THRESHOLD,
     SCAN_INTERVAL_SECONDS,
@@ -240,3 +243,81 @@ class TestCatchAll:
         with pytest.raises(asyncio.CancelledError):
             await coord._async_update_data()
         assert coord._failure_count == 0
+
+
+class TestStaggerRealTimer:
+    """Drive the real HA scheduler (_schedule_refresh + loop timer)."""
+
+    @staticmethod
+    async def _polls_within(offset: float, seconds: float) -> int:
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        hass = MagicMock()
+        hass.loop = loop
+        hass.is_stopping = False
+        hass.async_create_background_task = (
+            lambda coro, name=None, eager_start=True: loop.create_task(coro)
+        )
+        _, api = _make_coordinator()
+        with patch("homeassistant.helpers.frame.report_usage"):
+            coord = OpenWrtCoordinator(
+                hass=hass, api=api, entry_title="t", poll_offset_seconds=1
+            )
+        coord._poll_offset_seconds = offset
+        polls: list[int] = []
+
+        async def _update():
+            polls.append(1)
+            return OpenWrtCoordinatorData()
+
+        coord._async_update_data = _update
+        coord.update_interval = timedelta(seconds=0.2)
+        coord._microsecond = 0
+        remove = coord.async_add_listener(lambda: None)  # schedules the timer
+        try:
+            await asyncio.sleep(seconds)
+        finally:
+            remove()
+            coord._async_unsub_refresh()
+        return len(polls)
+
+    @pytest.mark.asyncio
+    async def test_staggered_coordinator_keeps_polling(self):
+        # Before: the delayed poll saw the expired timer handle in
+        # _unsub_refresh, returned early and never rescheduled.
+        assert await self._polls_within(offset=0.1, seconds=2.0) >= 3
+
+    @pytest.mark.asyncio
+    async def test_refresh_during_wait_drops_delayed_poll(self):
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        hass = MagicMock()
+        hass.loop = loop
+        hass.is_stopping = False
+        hass.async_create_background_task = (
+            lambda coro, name=None, eager_start=True: loop.create_task(coro)
+        )
+        _, api = _make_coordinator()
+        with patch("homeassistant.helpers.frame.report_usage"):
+            coord = OpenWrtCoordinator(
+                hass=hass, api=api, entry_title="t", poll_offset_seconds=1
+            )
+        polls: list[int] = []
+
+        async def _update():
+            polls.append(1)
+            return OpenWrtCoordinatorData()
+
+        coord._async_update_data = _update
+        coord.update_interval = timedelta(seconds=30)
+        remove = coord.async_add_listener(lambda: None)
+        task = loop.create_task(coord._handle_refresh_interval())
+        await asyncio.sleep(0.1)  # delayed poll is now waiting
+        await coord.async_refresh()  # explicit refresh reschedules the timer
+        assert coord._unsub_refresh is not None
+        await task  # offset elapses
+        remove()
+        coord._async_unsub_refresh()
+        assert len(polls) == 1  # only the explicit refresh ran

@@ -534,6 +534,10 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 "Stagger offset: delaying first scheduled poll by %ds",
                 self._poll_offset_seconds,
             )
+            # The handle of the timer that fired is still stored here (the
+            # base method clears it). Clear it now so that a non-None value
+            # after the wait means a requested refresh rescheduled meanwhile.
+            self._unsub_refresh = None
             await asyncio.sleep(self._poll_offset_seconds)
             if self._unsub_refresh is not None:
                 return
