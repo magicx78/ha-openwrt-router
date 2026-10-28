@@ -15,6 +15,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.helpers.http import KEY_HASS
 
 from custom_components.openwrt_router.topology_panel import (  # noqa: E402
     OpenWrtMeshSnapshotView,
@@ -174,7 +175,7 @@ async def test_snapshot_view_returns_410_when_disabled(hass):
 
     view = OpenWrtMeshSnapshotView()
     request = MagicMock()
-    request.app = {"hass": hass}
+    request.app = {KEY_HASS: hass}
 
     response = await view.get(request)
 
@@ -187,7 +188,7 @@ async def test_snapshot_view_returns_data_when_enabled(hass):
 
     view = OpenWrtMeshSnapshotView()
     request = MagicMock()
-    request.app = {"hass": hass}
+    request.app = {KEY_HASS: hass}
 
     fake_snapshot = {"nodes": [], "edges": [], "meta": {"node_count": 0}}
     with patch(

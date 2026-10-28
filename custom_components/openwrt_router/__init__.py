@@ -381,10 +381,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # One-shot cleanup of legacy MAC-identified devices left over from v1.17.0
     _merge_orphan_mac_devices(hass, entry)
 
-    # Register topology panel (idempotent — only registers once per HA session)
-    from .topology_panel import async_setup_topology_panel
+    # Register topology panel (idempotent — only registers once per HA session).
+    # Platforms are already forwarded: a failure here must not leave the entry
+    # in SETUP_ERROR with loaded platforms — the panel is an add-on, the
+    # router entities work without it.
+    try:
+        from .topology_panel import async_setup_topology_panel
 
-    await async_setup_topology_panel(hass)
+        await async_setup_topology_panel(hass, entry)
+    except Exception:
+        _LOGGER.warning(
+            "Topology panel setup failed for '%s' — the router works, the "
+            "Network Topology panel may be unavailable",
+            entry.title,
+            exc_info=True,
+        )
 
     # Register the openwrt-topology-card Lovelace resource (idempotent).
     # Auto-served so users don't need a manual entry under Dashboards → Resources.
@@ -397,6 +408,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     except ImportError:
         _LOGGER.debug(
             "topology_card module not present — skipping Lovelace card resource"
+        )
+    except Exception:
+        _LOGGER.warning(
+            "Topology card resource setup failed for '%s'",
+            entry.title,
+            exc_info=True,
         )
 
     _LOGGER.info(
@@ -441,7 +458,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
     try:
         from .topology_panel import async_teardown_topology_panel
 
-        await async_teardown_topology_panel(hass)
+        await async_teardown_topology_panel(hass, entry)
     except Exception:
         _LOGGER.debug("Topology panel teardown raised", exc_info=True)
 

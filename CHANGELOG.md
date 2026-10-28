@@ -25,6 +25,54 @@ All notable changes to the OpenWrt Router integration will be documented in this
   `unstable` der Client-Stabilität werden zu Zählern. Werte, die zur
   Fehlersuche gebraucht werden (Interface-Namen, Protokoll, Verbindungsstatus,
   Modell, Feature-Flags, Ports), bleiben lesbar.
+- **Topologie-Panel und Snapshot-API standardmäßig nur für Administratoren.**
+  Bisher sah jeder HA-Benutzer das Panel „Network Topology“, und die API
+  `/api/openwrt_topology/snapshot` lieferte jedem angemeldeten Benutzer
+  DHCP-Leases, ARP- und FDB-Tabellen pro Port, WAN-IP, DDNS-Angaben und
+  Web-URLs der Geräte. Jetzt ist das Panel nur für Administratoren
+  registriert, und die API antwortet Nicht-Administratoren mit HTTP 403. Die
+  neue Option **„Topologie-Panel allen Benutzern anzeigen“** (Integration →
+  Konfigurieren, Standard aus) gibt beides wieder für alle frei. Es gibt nur
+  ein Panel für alle Router: Es ist für alle offen, sobald ein geladener
+  Router-Eintrag die Option aktiviert hat. Die Freigabe wird beim Laden und
+  Entladen eines Eintrags und bei jeder Options-Änderung neu bewertet, ohne
+  Neustart; das Panel wird nur neu registriert, wenn sich der Kreis
+  tatsächlich ändert. Die Einschränkung gilt nur für das Topologie-Panel und
+  die Snapshot-API: Entitätszustände (z. B. Device Tracker mit IP und
+  Hostname, Sensoren) bleiben wie in HA üblich für alle Benutzer sichtbar.
+
+### Fixed
+
+- **Fehler beim Aufbau des Topologie-Snapshots werden nicht mehr als leere
+  Topologie getarnt.** Die API lieferte bei einem Fehler HTTP 200 mit einer
+  leeren Topologie, die wie „alle Router weg“ aussah. Jetzt kommt HTTP 500
+  mit einer kurzen Meldung in `meta.error` (nur der Fehlertyp, kein
+  Stacktrace, keine Router-Daten). Das Panel meldet bei 0 Routern oder einem
+  Fehler keinen kritischen Alarm „WAN offline“ mehr und zeigt statt „No
+  routers online“ den Fehler an.
+- **Panel lädt nach abgelaufener Sitzung nicht mehr in einer Schleife neu.**
+  Nach einem 401 setzte jeder `hass`-Update die Sperre zurück und löste sofort
+  die nächste Anfrage aus. Jetzt erneuert das Panel ein abgelaufenes Token
+  vor der Anfrage und versucht es nach einem 401 genau einmal erneut (neues
+  Token bzw. über `callApi`); erst danach ruht es, bis HA ein neues Token
+  liefert oder der Tab wieder sichtbar wird. 401 und 403 werden auch im `callApi`-Fallback erkannt; bei 403
+  erklärt das Panel, dass die Topologie Administratoren vorbehalten ist. Ein
+  vorübergehender Fehler ersetzt nicht mehr die zuletzt geladene Ansicht —
+  sie bleibt stehen, ein kleiner Hinweis oben rechts zeigt den Fehler.
+- **Ein Fehler bei der Panel-Registrierung lässt den Eintrag nicht mehr im
+  Zustand „Setup-Fehler“ mit geladenen Plattformen zurück.** Panel und
+  Lovelace-Karten-Ressource werden nach den Plattformen eingerichtet; ein
+  Fehler dort wird jetzt als Warnung geloggt, der Router-Eintrag lädt
+  trotzdem. Entlädt sich ein solcher Eintrag, zählt er den Panel-Referenzzähler
+  nicht mehr herunter (vorher konnte das das Panel der anderen Router
+  entfernen).
+
+### Changed
+
+- Die Snapshot-API liest die HA-Instanz über `KEY_HASS` aus
+  `homeassistant.helpers.http` statt über `request.app["hass"]`.
+- Nicht verwendete Panel-Komponente `MobileView.tsx` und die nie gelesene
+  Panel-Konfiguration `apiBase` entfernt.
 
 ## [1.38.9] - 2026-10-28
 

@@ -28,6 +28,8 @@ A production-ready Home Assistant custom integration for [OpenWrt](https://openw
 
 A built-in network map panel is automatically registered when the integration is set up. It shows your entire mesh network — gateway, APs, wired uplinks, WiFi backhaul, and all connected clients — in a live, interactive view.
 
+The panel and its snapshot API contain DHCP leases, ARP/switch tables, the WAN IP and DDNS details, so they are **available to administrators only** by default (other users get HTTP 403 from the API). To show the panel to every Home Assistant user, enable **“Show topology panel to all users”** in the integration options (**Configure**). There is one panel for all routers: it is open to all users as soon as one loaded router entry has the option enabled. Changes apply immediately, without a restart. This restriction covers only the topology panel and its snapshot API: entity states (for example device trackers with IP and hostname, or sensors) stay visible to all Home Assistant users, as usual in Home Assistant.
+
 ### Sidebar views
 
 | Tab | Description |

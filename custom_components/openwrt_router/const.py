@@ -461,6 +461,12 @@ KEY_TOPOLOGY_SNAPSHOTS = "topology_snapshots"
 CONF_TOPOLOGY_PORT_DEBUG = "topology_port_debug"
 DEFAULT_TOPOLOGY_PORT_DEBUG = False
 
+# Options flag: open the topology sidebar panel and its snapshot API (DHCP
+# leases, ARP, FDB, WAN IP, …) to non-admin users. Off by default — admins only.
+# The panel is shared by all entries: it is public if ANY loaded entry has it on.
+CONF_TOPOLOGY_PANEL_ALL_USERS = "topology_panel_all_users"
+DEFAULT_TOPOLOGY_PANEL_ALL_USERS = False
+
 # Options flag: enable the per-radio / per-AP / per-port sensors in one go
 # instead of one click per entity (disabled by default, see extended_sensors.py).
 CONF_EXTENDED_WIFI_SENSORS = "extended_wifi_sensors"
