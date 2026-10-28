@@ -1031,3 +1031,44 @@ class TestCpuThrottlePerCore:
             r.getMessage() for r in caplog.records if "poll frequency" in r.getMessage()
         )
         assert "core count unknown" in message
+
+
+# =====================================================================
+# stale_for_presence (A3 review P1)
+# =====================================================================
+
+
+class TestStaleForPresence:
+    """Old client lists of a router failing for long must not count."""
+
+    def test_healthy_is_not_stale(self):
+        coord, _ = _make_coordinator()
+        assert coord.stale_for_presence is False
+
+    def test_single_failure_is_within_grace(self):
+        coord, _ = _make_coordinator()
+        coord._record_failure("timeout")
+        assert coord.stale_for_presence is False
+
+    def test_threshold_failures_are_stale(self):
+        coord, _ = _make_coordinator()
+        for _ in range(3):
+            coord._record_failure("timeout")
+        assert coord.stale_for_presence is True
+
+    def test_long_failure_is_stale_even_with_few_polls(self):
+        """Slow polls (120/300 s): the time bound applies before the count."""
+        from datetime import UTC, datetime
+
+        coord, _ = _make_coordinator()
+        coord._record_failure("timeout")
+        coord._failure_since = datetime.now(UTC) - timedelta(minutes=6)
+        assert coord.stale_for_presence is True
+
+    @pytest.mark.asyncio
+    async def test_success_clears_stale(self):
+        coord, _ = _make_coordinator()
+        for _ in range(3):
+            coord._record_failure("timeout")
+        await coord._async_update_data()
+        assert coord.stale_for_presence is False

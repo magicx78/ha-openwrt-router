@@ -175,6 +175,11 @@ ERROR_TYPE_RESPONSE = "response"
 # consecutive poll failures
 NOTIFICATION_FAILURE_THRESHOLD = 3
 
+# A failing router's last client list stops counting for presence after
+# NOTIFICATION_FAILURE_THRESHOLD failed polls or this many seconds of failure
+# (whichever comes first; polls can slow down to 120/300 s)
+PRESENCE_STALE_AFTER_S = 300
+
 # Fired on outage start/end, payload see fleet.FleetOutageTracker
 EVENT_OUTAGE = f"{DOMAIN}_outage_event"
 
