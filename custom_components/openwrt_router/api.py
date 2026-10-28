@@ -193,6 +193,27 @@ SUBPROCESS_RC_CANCELLED = -3  # caller's task was cancelled mid-flight
 # SSH connect timeout (seconds) — parity with the old ``-o ConnectTimeout=8``.
 SSH_CONNECT_TIMEOUT = 8.0
 REBOOT_SSH_TIMEOUT = 15.0  # dispatch of the detached reboot command
+# "Check for updates": index download + list on slow flash/uplinks.
+UPDATE_CHECK_SSH_TIMEOUT = 180.0
+
+# Package update check, run over SSH on button press only (never from a poll:
+# it downloads the feed indexes and writes them to the router). The rpcd ACL
+# allows file/exec only for /etc/init.d/rpcd, so ubus cannot run apk/opkg.
+# apk (OpenWrt >= 25) is preferred; `apk version -l '<'` covers apk builds
+# whose `apk list` lacks -u. Markers (@@...) carry the exit codes.
+_UPDATE_CHECK_SCRIPT = (
+    "if command -v apk >/dev/null 2>&1; then "
+    "echo '@@pm=apk'; "
+    'apk update >/dev/null 2>&1; echo "@@update_rc=$?"; '
+    "apk list -u 2>/dev/null || apk version -l '<' 2>/dev/null; "
+    'echo "@@list_rc=$?"; '
+    "elif command -v opkg >/dev/null 2>&1; then "
+    "echo '@@pm=opkg'; "
+    'opkg update >/dev/null 2>&1; echo "@@update_rc=$?"; '
+    "opkg list-upgradable 2>/dev/null; "
+    'echo "@@list_rc=$?"; '
+    "else echo '@@pm=none'; fi"
+)
 
 
 async def _safe_subprocess_exec(
@@ -353,6 +374,73 @@ class OpenWrtMethodNotFoundError(Exception):
 
 class OpenWrtResponseError(Exception):
     """Raised when the router returns an unexpected response."""
+
+
+class OpenWrtUpdateCheckError(Exception):
+    """Raised when the package update check cannot produce a result."""
+
+
+# apk package tokens are "<name>-<version>"; OpenWrt apk versions end in
+# "-r<release>" and names may contain "-<digit>" (libpcre2-8), so the version
+# is anchored at the end. Second pattern: versions without a release suffix.
+_APK_PKGVER_RE = (
+    re.compile(r"^(?P<name>.+)-(?P<version>[^-]+-r\d+)$"),
+    re.compile(r"^(?P<name>.+?)-(?P<version>\d.*)$"),
+)
+# `apk list -u`: "<name>-<new> <arch> {<origin>} (<license>) [upgradable from: <name>-<old>]"
+_APK_LIST_RE = re.compile(r"^(?P<new>\S+)\s.*\[upgradable from: (?P<old>\S+)\]")
+# `apk version -l '<'`: "<name>-<old>   < <new>"
+_APK_VERSION_RE = re.compile(r"^(?P<old>\S+)\s+<\s+(?P<new>\S+)$")
+
+
+def _split_apk_pkgver(token: str) -> tuple[str, str] | None:
+    """Split an apk "<name>-<version>" token, None when it has no version."""
+    for pattern in _APK_PKGVER_RE:
+        if match := pattern.match(token):
+            return match.group("name"), match.group("version")
+    return None
+
+
+def parse_apk_upgradable(text: str) -> list[dict[str, str]]:
+    """Parse `apk list -u` or `apk version -l '<'` output.
+
+    Returns:
+        One ``{"name", "current", "available"}`` dict per upgradable package;
+        headers, warnings and non-upgradable lines are skipped.
+    """
+    packages: list[dict[str, str]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if match := _APK_LIST_RE.match(line):
+            new = _split_apk_pkgver(match.group("new"))
+            old = _split_apk_pkgver(match.group("old"))
+            if new is None or old is None:
+                continue
+            packages.append({"name": old[0], "current": old[1], "available": new[1]})
+        elif match := _APK_VERSION_RE.match(line):
+            old = _split_apk_pkgver(match.group("old"))
+            if old is None:
+                continue
+            packages.append(
+                {"name": old[0], "current": old[1], "available": match.group("new")}
+            )
+    return packages
+
+
+def parse_opkg_upgradable(text: str) -> list[dict[str, str]]:
+    """Parse `opkg list-upgradable` output ("<name> - <current> - <available>").
+
+    Returns:
+        One ``{"name", "current", "available"}`` dict per upgradable package;
+        "Collected errors" and other non-package lines are skipped.
+    """
+    packages: list[dict[str, str]] = []
+    for raw in text.splitlines():
+        parts = [part.strip() for part in raw.strip().split(" - ")]
+        if len(parts) != 3 or not all(parts) or " " in parts[0]:
+            continue
+        packages.append({"name": parts[0], "current": parts[1], "available": parts[2]})
+    return packages
 
 
 def _parse_uci_config(raw: str) -> dict[str, dict[str, Any]]:
@@ -4596,188 +4684,92 @@ class OpenWrtAPI:
     # Update management
     # ------------------------------------------------------------------
 
-    async def get_available_updates(self) -> dict[str, Any]:
-        """Check for available system and addon package updates.
+    async def check_package_updates(self) -> dict[str, Any]:
+        """Determine upgradable packages with the router's package manager.
 
-        Executes opkg list-upgradable to identify upgradable packages and
-        categorizes them as system packages or addons based on naming conventions.
+        Runs ``apk`` (OpenWrt >= 25) or ``opkg`` over SSH: refresh the feed
+        indexes, then list upgradable packages. Only for an explicit user
+        action — it downloads the indexes and writes them to the router, so
+        it must never run from the poll path. ubus cannot do this: the rpcd
+        ACL restricts file/exec to /etc/init.d/rpcd.
 
-        Returns:
-            {
-                "available": bool,
-                "system": [
-                    {
-                        "name": "package-name",
-                        "current_version": "1.0.0",
-                        "new_version": "1.0.1",
-                        "category": "system"
-                    },
-                    ...
-                ],
-                "addons": [
-                    {
-                        "name": "addon-name",
-                        "current_version": "2.0.0",
-                        "new_version": "2.0.1",
-                        "category": "addon"
-                    },
-                    ...
-                ]
-            }
-        """
-        try:
-            # Try to read cached opkg list-upgradable output
-            # This should have been populated by a prior update-check button press
-            result = await self._call(
-                UBUS_FILE_OBJECT,
-                UBUS_FILE_READ,
-                {"path": "/tmp/opkg_list"},
-            )
-            raw_content = result.get("data", "")
-            if not raw_content:
-                # No cached data; return empty list
-                _LOGGER.debug("No cached opkg update list found")
-                return {"available": False, "system": [], "addons": []}
-
-            # Parse the opkg list-upgradable output
-            system_updates: list[dict[str, str]] = []
-            addon_updates: list[dict[str, str]] = []
-
-            for line in raw_content.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-
-                # opkg list-upgradable format: "package-name - current-version - new-version"
-                parts = [p.strip() for p in line.split(" - ")]
-                if len(parts) < 2:
-                    _LOGGER.debug("Skipping malformed opkg line: %r", line)
-                    continue
-
-                package_name = parts[0]
-                # Versions may contain spaces/hyphens; rejoin all remaining parts
-                versions = " - ".join(parts[1:]) if len(parts) > 2 else parts[1]
-
-                update_info = {
-                    "name": package_name,
-                    "version": versions,
-                    "category": "system",
-                }
-
-                # Categorize: addon packages typically start with "addon-" or "luci-"
-                if package_name.startswith(("addon-", "luci-")):
-                    update_info["category"] = "addon"
-                    addon_updates.append(update_info)
-                else:
-                    system_updates.append(update_info)
-
-            has_updates = bool(system_updates or addon_updates)
-            return {
-                "available": has_updates,
-                "system": system_updates,
-                "addons": addon_updates,
-            }
-        except OpenWrtAuthError:
-            _LOGGER.debug("Update check failed: permission denied reading opkg data")
-            return {"available": False, "system": [], "addons": []}
-        except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
-            _LOGGER.debug("Update check failed: unable to read cached opkg list")
-            return {"available": False, "system": [], "addons": []}
-
-    async def perform_update(self, update_type: str = "system") -> dict[str, Any]:
-        """Trigger system or addon package updates.
-
-        Initiates opkg update and upgrade process. Note: This is a long-running
-        operation; actual execution happens on the router and may take several
-        minutes. The integration returns immediately with a status message.
-
-        Args:
-            update_type: Type of update to perform:
-                - "system": Update only core system packages
-                - "addons": Update only addon/LuCI packages
-                - "both": Update all packages
+        A failed index refresh (e.g. one unreachable feed) is not fatal; the
+        list then reflects the indexes that were fetched and
+        ``index_refreshed`` is False.
 
         Returns:
-            {
-                "status": "initiated" | "error",
-                "message": str,
-                "update_type": str,
-            }
+            {"package_manager": "apk" | "opkg", "index_refreshed": bool,
+             "packages": [{"name", "current", "available"}, ...]}
+
+        Raises:
+            OpenWrtUpdateCheckError: SSH unavailable, timeout, no package
+                manager, or the package list could not be read.
         """
-        if update_type not in ("system", "addons", "both"):
-            return {
-                "status": "error",
-                "message": f"Invalid update_type: {update_type}",
-                "update_type": update_type,
-            }
-
         try:
-            _LOGGER.info("Initiating %s package update", update_type)
-
-            # Build the update command based on type
-            if update_type == "system":
-                # Update system packages only (exclude addon-* and luci-*)
-                cmd = (
-                    "opkg update && "
-                    "opkg upgrade $(opkg list-upgradable | "
-                    "grep -v -E '^addon-|^luci-' | cut -d' ' -f1)"
-                )
-            elif update_type == "addons":
-                # Update addon packages only
-                cmd = (
-                    "opkg update && "
-                    "opkg upgrade $(opkg list-upgradable | "
-                    "grep -E '^addon-|^luci-' | cut -d' ' -f1)"
-                )
-            else:  # "both"
-                # Update all packages
-                cmd = (
-                    "opkg update && "
-                    "opkg upgrade $(opkg list-upgradable | cut -d' ' -f1)"
-                )
-
-            # Log the command (note: we never log credentials)
-            _LOGGER.debug("Update command: %s", cmd)
-
-            # Execute update via SSH (rpcd-mod-file does not support write).
-            # Caller-side log redirection so the user can tail it on the router.
-            # _run_ssh_detached wraps with nohup + </dev/null + & so opkg keeps
-            # running after the sshd channel closes — and the lifecycle helper
-            # guarantees no leaked subprocess locally on the HA host.
-            rc, _stdout, stderr = await self._run_ssh_detached(
-                f"{cmd} > /tmp/opkg_update.log 2>&1", timeout=30.0
+            rc, stdout, stderr = await self._asyncssh_run(
+                _UPDATE_CHECK_SCRIPT, timeout=UPDATE_CHECK_SSH_TIMEOUT, binary=False
             )
-            if rc == SUBPROCESS_RC_TIMEOUT:
-                _LOGGER.error("Update SSH command timed out")
-                return {
-                    "status": "error",
-                    "message": "Update SSH command timed out",
-                    "update_type": update_type,
-                }
-            if rc != 0:
-                error_msg = stderr.decode(errors="replace").strip()
-                _LOGGER.error("Update SSH command failed: %s", error_msg)
-                return {
-                    "status": "error",
-                    "message": f"Update SSH command failed: {error_msg}",
-                    "update_type": update_type,
-                }
+        finally:
+            # Button press outside a poll: do not keep the session open.
+            await self._asyncssh_request_release()
 
-            _LOGGER.info("Update initiated on router via SSH (%s)", update_type)
-            return {
-                "status": "initiated",
-                "message": f"Package update initiated ({update_type}). "
-                "Check /tmp/opkg_update.log on the router for progress.",
-                "update_type": update_type,
-            }
+        if rc == SUBPROCESS_RC_TIMEOUT:
+            raise OpenWrtUpdateCheckError(
+                f"Update check timed out after {UPDATE_CHECK_SSH_TIMEOUT:.0f} s"
+            )
+        if rc == 255:
+            raise OpenWrtUpdateCheckError(
+                "SSH login denied — the update check needs SSH access with the "
+                "configured credentials or an SSH key"
+            )
+        if rc < 0:
+            reason = stderr.decode(errors="replace").strip() or "unknown error"
+            raise OpenWrtUpdateCheckError(f"SSH connection failed: {reason}")
 
-        except (OpenWrtAuthError, OpenWrtResponseError) as err:
-            _LOGGER.error("Update initiation failed: %s", err)
-            return {
-                "status": "error",
-                "message": f"Update initiation failed: {err}",
-                "update_type": update_type,
-            }
+        assert isinstance(stdout, str)
+        markers: dict[str, str] = {}
+        body: list[str] = []
+        for line in stdout.splitlines():
+            if line.startswith("@@") and "=" in line:
+                key, _, value = line[2:].partition("=")
+                markers[key] = value.strip()
+            else:
+                body.append(line)
+
+        manager = markers.get("pm")
+        if manager is None:
+            raise OpenWrtUpdateCheckError(
+                f"Update check returned unexpected output (exit code {rc})"
+            )
+        if manager not in ("apk", "opkg"):
+            raise OpenWrtUpdateCheckError(
+                "No supported package manager (apk or opkg) found on the router"
+            )
+
+        text = "\n".join(body)
+        packages = (
+            parse_apk_upgradable(text)
+            if manager == "apk"
+            else parse_opkg_upgradable(text)
+        )
+        if markers.get("list_rc") != "0" and not packages:
+            raise OpenWrtUpdateCheckError(
+                f"{manager} could not list the upgradable packages"
+            )
+
+        index_refreshed = markers.get("update_rc") == "0"
+        if not index_refreshed:
+            _LOGGER.warning(
+                "%s update did not refresh all package indexes on %s — "
+                "the update list may be incomplete",
+                manager,
+                self._host,
+            )
+        return {
+            "package_manager": manager,
+            "index_refreshed": index_refreshed,
+            "packages": packages,
+        }
 
     # ------------------------------------------------------------------
     # Service Management (procd / rc)

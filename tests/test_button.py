@@ -12,7 +12,6 @@ from custom_components.openwrt_router.button import (
 from custom_components.openwrt_router.const import (
     DOMAIN,
     SUFFIX_CHECK_UPDATES,
-    SUFFIX_PERFORM_UPDATES,
     SUFFIX_REBOOT,
     SUFFIX_RELOAD_WIFI,
 )
@@ -33,12 +32,6 @@ def _make_button(
     if api is None:
         api = AsyncMock()
         api.reload_wifi = AsyncMock(return_value=True)
-        api.get_available_updates = AsyncMock(return_value={
-            "available": False, "system": [], "addons": [],
-        })
-        api.perform_update = AsyncMock(return_value={
-            "status": "initiated", "message": "ok",
-        })
         api.reboot = AsyncMock(return_value=True)
     return OpenWrtButtonEntity(
         coordinator=mock_coordinator,
@@ -53,8 +46,9 @@ def _make_button(
 # =====================================================================
 
 class TestButtonCreation:
-    def test_four_buttons_defined(self):
-        assert len(BUTTON_DESCRIPTIONS) == 4
+    def test_three_buttons_defined(self):
+        # reload_wifi, check_updates, reboot — no "install updates" (E3)
+        assert len(BUTTON_DESCRIPTIONS) == 3
 
     def test_reload_wifi_unique_id(self, mock_coordinator, mock_config_entry):
         btn = _make_button(mock_coordinator, mock_config_entry, SUFFIX_RELOAD_WIFI)
@@ -63,10 +57,6 @@ class TestButtonCreation:
     def test_check_updates_unique_id(self, mock_coordinator, mock_config_entry):
         btn = _make_button(mock_coordinator, mock_config_entry, SUFFIX_CHECK_UPDATES)
         assert btn.unique_id == f"test_entry_id_{SUFFIX_CHECK_UPDATES}"
-
-    def test_perform_updates_unique_id(self, mock_coordinator, mock_config_entry):
-        btn = _make_button(mock_coordinator, mock_config_entry, SUFFIX_PERFORM_UPDATES)
-        assert btn.unique_id == f"test_entry_id_{SUFFIX_PERFORM_UPDATES}"
 
     def test_reboot_unique_id(self, mock_coordinator, mock_config_entry):
         btn = _make_button(mock_coordinator, mock_config_entry, SUFFIX_REBOOT)
@@ -103,44 +93,7 @@ class TestReloadWifiButton:
         mock_coordinator.async_request_refresh.assert_awaited_once()
 
 
-class TestCheckUpdatesButton:
-    @pytest.mark.asyncio
-    async def test_press_calls_get_updates(self, mock_coordinator, mock_config_entry):
-        api = AsyncMock()
-        api.get_available_updates = AsyncMock(return_value={
-            "available": True, "system": [{"name": "pkg1"}], "addons": [],
-        })
-        btn = _make_button(mock_coordinator, mock_config_entry, SUFFIX_CHECK_UPDATES, api=api)
-        await btn.async_press()
-        api.get_available_updates.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_press_error_caught(self, mock_coordinator, mock_config_entry):
-        api = AsyncMock()
-        api.get_available_updates = AsyncMock(side_effect=Exception("boom"))
-        btn = _make_button(mock_coordinator, mock_config_entry, SUFFIX_CHECK_UPDATES, api=api)
-        # Should not raise
-        await btn.async_press()
-
-
-class TestPerformUpdatesButton:
-    @pytest.mark.asyncio
-    async def test_press_calls_perform_update(self, mock_coordinator, mock_config_entry):
-        api = AsyncMock()
-        api.perform_update = AsyncMock(return_value={
-            "status": "initiated", "message": "ok",
-        })
-        btn = _make_button(mock_coordinator, mock_config_entry, SUFFIX_PERFORM_UPDATES, api=api)
-        await btn.async_press()
-        api.perform_update.assert_awaited_once_with(update_type="both")
-
-    @pytest.mark.asyncio
-    async def test_press_error_caught(self, mock_coordinator, mock_config_entry):
-        api = AsyncMock()
-        api.perform_update = AsyncMock(side_effect=Exception("fail"))
-        btn = _make_button(mock_coordinator, mock_config_entry, SUFFIX_PERFORM_UPDATES, api=api)
-        # Should not raise
-        await btn.async_press()
+# Check-for-updates press handling: see test_package_updates.py
 
 
 class TestRebootButton:

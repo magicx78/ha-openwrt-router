@@ -251,7 +251,9 @@ class OpenWrtCoordinatorData:
         clients: List of currently associated WiFi clients (ip/hostname enriched).
         client_count: Number of connected clients.
         dhcp_leases: MAC → {ip, hostname} mapping from the DHCP lease table.
-        updates_available: Update status and list of available packages.
+        updates_available: Result of the last "check for updates" (count,
+            package list, package manager, last_check); last_check is None
+            until the first check. Carried across polls, never polled.
         features: Feature detection map (populated on first refresh).
     """
 
@@ -280,8 +282,13 @@ class OpenWrtCoordinatorData:
         self.active_connections: int = 0
         self.updates_available: dict[str, Any] = {
             "available": False,
+            "count": 0,
+            "packages": [],
             "system": [],
             "addons": [],
+            "package_manager": None,
+            "index_refreshed": None,
+            "last_check": None,
         }
         self.services: list[dict[str, Any]] = []
         self.ap_interfaces: list[dict[str, Any]] = []
@@ -496,6 +503,10 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         # Stale-data cache: letzte bekannte Werte für VLAN-Badges bei Offline-Router
         self._last_known_network_interfaces: list[dict[str, Any]] = []
         self._last_known_port_vlan_map: dict[str, list[int]] = {}
+        # Result of the last package update check (button press only — polls
+        # never run the package manager) and a lock against parallel checks.
+        self._package_updates: dict[str, Any] | None = None
+        self._package_check_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator interface
@@ -567,6 +578,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             await asyncio.sleep(self._poll_offset_seconds)
 
         data = OpenWrtCoordinatorData()
+        if self._package_updates is not None:
+            data.updates_available = self._package_updates
 
         try:
             # --- Feature detection (runs once after first successful login) ---
@@ -1145,6 +1158,38 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
     # ------------------------------------------------------------------
     # Outage tracking
     # ------------------------------------------------------------------
+
+    async def async_check_package_updates(self) -> dict[str, Any]:
+        """Run the package update check and publish the result.
+
+        Called on user request (button) only. The result is kept on the
+        coordinator so every following poll carries it forward without
+        running the package manager again.
+
+        Raises:
+            OpenWrtUpdateCheckError: Propagated from the API.
+        """
+        async with self._package_check_lock:
+            result = await self.api.check_package_updates()
+        packages: list[dict[str, str]] = result.get("packages", [])
+        # LuCI and add-on packages apart from the base system, as before.
+        addons = [p for p in packages if p["name"].startswith(("addon-", "luci-"))]
+        system = [p for p in packages if p not in addons]
+        updates: dict[str, Any] = {
+            "available": bool(packages),
+            "count": len(packages),
+            "packages": packages,
+            "system": system,
+            "addons": addons,
+            "package_manager": result.get("package_manager"),
+            "index_refreshed": result.get("index_refreshed"),
+            "last_check": dt_util.utcnow().isoformat(),
+        }
+        self._package_updates = updates
+        if self.data is not None:
+            self.data.updates_available = updates
+            self.async_update_listeners()
+        return updates
 
     def attach_outage_tracker(self, tracker: FleetOutageTracker) -> None:
         """Report outages of this router to the fleet-wide tracker (wired in __init__)."""

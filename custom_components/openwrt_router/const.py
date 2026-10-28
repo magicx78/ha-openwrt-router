@@ -198,6 +198,8 @@ SUFFIX_GUEST_WIFI = "guest_wifi"
 SUFFIX_RELOAD_WIFI = "reload_wifi"
 SUFFIX_REBOOT = "reboot"
 SUFFIX_CHECK_UPDATES = "check_updates"
+# Retired "install updates" button: no longer created; kept so the orphaned
+# registry entry's unique_id stays documented.
 SUFFIX_PERFORM_UPDATES = "perform_updates"
 SUFFIX_NETWORK_TOPOLOGY = "network_topology"
 SUFFIX_CPU_LOAD = "cpu_load"

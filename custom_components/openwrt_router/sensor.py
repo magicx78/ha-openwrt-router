@@ -287,10 +287,20 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         key=SUFFIX_UPDATE_STATUS,
         translation_key="update_status",
         icon="mdi:package-search",
+        # Filled by the "check for updates" button only; unknown until then.
         value_fn=lambda data: (
-            "available" if data.updates_available.get("available") else "current"
+            None
+            if not data.updates_available.get("last_check")
+            else "available"
+            if data.updates_available.get("available")
+            else "current"
         ),
         extra_attrs_fn=lambda data: {
+            "updates_count": data.updates_available.get("count", 0),
+            "packages": data.updates_available.get("packages", []),
+            "package_manager": data.updates_available.get("package_manager"),
+            "index_refreshed": data.updates_available.get("index_refreshed"),
+            "last_check": data.updates_available.get("last_check"),
             "system_updates_count": len(data.updates_available.get("system", [])),
             "addon_updates_count": len(data.updates_available.get("addons", [])),
             "system_packages": [

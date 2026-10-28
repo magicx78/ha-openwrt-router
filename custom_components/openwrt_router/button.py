@@ -1,8 +1,12 @@
 """Button platform for the OpenWrt Router integration.
 
 Provides:
-    - Reload WiFi button  (triggers network.reload on the router)
-    - Reboot button       (triggers system.reboot on the router)
+    - Reload WiFi button       (triggers network.reload on the router)
+    - Check for updates button (lists upgradable apk/opkg packages)
+    - Reboot button            (triggers system.reboot on the router)
+
+There is deliberately no "install updates" button any more: OpenWrt advises
+against a blanket package upgrade (flash wear, broken dependencies).
 """
 
 from __future__ import annotations
@@ -18,18 +22,18 @@ from homeassistant.components.button import (
 )
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import OpenWrtConfigEntry
-from .api import OpenWrtAPI
+from .api import OpenWrtAPI, OpenWrtUpdateCheckError
 from .const import (
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
     DEFAULT_SERVICES,
     DOMAIN,
     SUFFIX_CHECK_UPDATES,
-    SUFFIX_PERFORM_UPDATES,
     SUFFIX_REBOOT,
     SUFFIX_RELOAD_WIFI,
     url_scheme_for,
@@ -58,13 +62,6 @@ BUTTON_DESCRIPTIONS: tuple[OpenWrtButtonEntityDescription, ...] = (
         device_class=ButtonDeviceClass.UPDATE,
         entity_category=EntityCategory.CONFIG,
         icon="mdi:package-search",
-    ),
-    OpenWrtButtonEntityDescription(
-        key=SUFFIX_PERFORM_UPDATES,
-        translation_key="perform_updates",
-        device_class=ButtonDeviceClass.UPDATE,
-        entity_category=EntityCategory.CONFIG,
-        icon="mdi:package-up",
     ),
     OpenWrtButtonEntityDescription(
         key=SUFFIX_REBOOT,
@@ -174,7 +171,6 @@ class OpenWrtButtonEntity(ButtonEntity):
         Routes to the appropriate action based on button type:
         - reload_wifi: Reload WiFi configuration
         - check_updates: Check for available package updates
-        - perform_updates: Trigger package updates
         - reboot: Reboot the router
         """
         button_key = self.entity_description.key
@@ -188,8 +184,6 @@ class OpenWrtButtonEntity(ButtonEntity):
             await self._press_reload_wifi()
         elif button_key == SUFFIX_CHECK_UPDATES:
             await self._press_check_updates()
-        elif button_key == SUFFIX_PERFORM_UPDATES:
-            await self._press_perform_updates()
         elif button_key == SUFFIX_REBOOT:
             await self._press_reboot()
         else:
@@ -239,71 +233,31 @@ class OpenWrtButtonEntity(ButtonEntity):
             )
 
     async def _press_check_updates(self) -> None:
-        """Handle check for updates button press."""
-        _LOGGER.info(
-            "Checking for available updates on %s", self._entry.data.get("host")
-        )
+        """Handle check for updates button press.
 
-        try:
-            await self._api.get_available_updates()
-            # Trigger coordinator refresh — it will fetch updates_available itself
-            await self._coordinator.async_request_refresh()
-            updates = self._coordinator.data.updates_available or {}
-
-            update_count = len(updates.get("system", [])) + len(
-                updates.get("addons", [])
-            )
-            if update_count > 0:
-                _LOGGER.info(
-                    "Found %d available updates on %s: %d system, %d addons",
-                    update_count,
-                    self._entry.data.get("host"),
-                    len(updates.get("system", [])),
-                    len(updates.get("addons", [])),
-                )
-            else:
-                _LOGGER.info("No updates available on %s", self._entry.data.get("host"))
-        except Exception:
-            # A press must never raise into HA — SSH helpers can throw
-            # more than the OpenWrt* API errors.
-            _LOGGER.exception(
-                "Error checking for updates on %s", self._entry.data.get("host")
-            )
-
-    async def _press_perform_updates(self) -> None:
-        """Handle perform updates button press.
-
-        Note: This button should ideally be paired with a service selector
-        to choose between 'system', 'addons', or 'both' updates.
-        For now, we perform 'both' by default.
+        The coordinator runs the package manager on the router and publishes
+        the result to the update status sensor. Failures are raised so the
+        user sees them instead of a silent no-op.
         """
-        update_type = "both"  # TODO: Allow user to select via service call
-        _LOGGER.info(
-            "Initiating %s package updates on %s",
-            update_type,
-            self._entry.data.get("host"),
-        )
+        host = self._entry.data.get("host")
+        _LOGGER.info("Checking for available package updates on %s", host)
 
         try:
-            result = await self._api.perform_update(update_type=update_type)
-            if result.get("status") == "initiated":
-                _LOGGER.info(
-                    "Update initiated on %s: %s",
-                    self._entry.data.get("host"),
-                    result.get("message"),
-                )
-            else:
-                _LOGGER.error(
-                    "Update failed on %s: %s",
-                    self._entry.data.get("host"),
-                    result.get("message"),
-                )
-        except Exception:
-            # A press must never raise into HA — SSH helpers can throw
-            # more than the OpenWrt* API errors.
-            _LOGGER.exception(
-                "Error performing updates on %s", self._entry.data.get("host")
-            )
+            updates = await self._coordinator.async_check_package_updates()
+        except OpenWrtUpdateCheckError as err:
+            _LOGGER.warning("Update check on %s failed: %s", host, err)
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="update_check_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+
+        _LOGGER.info(
+            "Update check on %s (%s): %d upgradable package(s)",
+            host,
+            updates.get("package_manager"),
+            updates.get("count", 0),
+        )
 
 
 class OpenWrtServiceRestartButton(ButtonEntity):

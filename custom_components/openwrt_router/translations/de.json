@@ -224,6 +224,11 @@
       }
     }
   },
+  "exceptions": {
+    "update_check_failed": {
+      "message": "Die Suche nach Paket-Updates ist fehlgeschlagen: {error}"
+    }
+  },
   "issues": {
     "channel_plan_conflict": {
       "title": "WLAN-Kanalkonflikte zwischen OpenWrt-Routern",
