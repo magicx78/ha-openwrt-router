@@ -394,6 +394,10 @@ class OpenWrtUpdateCheckError(Exception):
     """Raised when the package update check cannot produce a result."""
 
 
+class OpenWrtUpdateCheckRunningError(OpenWrtUpdateCheckError):
+    """Raised when an update check is requested while one is still running."""
+
+
 # apk package tokens are "<name>-<version>"; OpenWrt apk versions end in
 # "-r<release>" and names may contain "-<digit>" (libpcre2-8), so the version
 # is anchored at the end. Second pattern: versions without a release suffix.
@@ -4839,7 +4843,9 @@ class OpenWrtAPI:
 
         if rc == SUBPROCESS_RC_TIMEOUT:
             raise OpenWrtUpdateCheckError(
-                f"Update check timed out after {UPDATE_CHECK_SSH_TIMEOUT:.0f} s"
+                f"Update check timed out after {UPDATE_CHECK_SSH_TIMEOUT:.0f} s — "
+                "the router may still be refreshing its package lists; "
+                "try again in a few minutes"
             )
         if rc == 255:
             raise OpenWrtUpdateCheckError(

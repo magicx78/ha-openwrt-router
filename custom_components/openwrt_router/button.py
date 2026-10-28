@@ -27,7 +27,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import OpenWrtConfigEntry
-from .api import OpenWrtAPI, OpenWrtUpdateCheckError
+from .api import OpenWrtAPI, OpenWrtUpdateCheckError, OpenWrtUpdateCheckRunningError
 from .const import (
     CONF_PROTOCOL,
     DEFAULT_PROTOCOL,
@@ -244,6 +244,11 @@ class OpenWrtButtonEntity(ButtonEntity):
 
         try:
             updates = await self._coordinator.async_check_package_updates()
+        except OpenWrtUpdateCheckRunningError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="update_check_running",
+            ) from err
         except OpenWrtUpdateCheckError as err:
             _LOGGER.warning("Update check on %s failed: %s", host, err)
             raise HomeAssistantError(

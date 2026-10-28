@@ -27,6 +27,7 @@ from .api import (
     OpenWrtMethodNotFoundError,
     OpenWrtResponseError,
     OpenWrtTimeoutError,
+    OpenWrtUpdateCheckRunningError,
 )
 from .channel_plan import Radio, phy_of, radios_from_ap_interfaces
 from .client_stability import (
@@ -1258,8 +1259,14 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         running the package manager again.
 
         Raises:
+            OpenWrtUpdateCheckRunningError: A check is already running; a
+                second one is refused instead of queueing behind it.
             OpenWrtUpdateCheckError: Propagated from the API.
         """
+        if self._package_check_lock.locked():
+            raise OpenWrtUpdateCheckRunningError(
+                "An update check is already running on this router"
+            )
         async with self._package_check_lock:
             result = await self.api.check_package_updates()
         packages: list[dict[str, str]] = result.get("packages", [])
