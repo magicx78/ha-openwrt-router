@@ -367,6 +367,13 @@ SSH_SLOW_REFRESH_INTERVAL = 600.0
 # setup does not stick until the next reload.
 HOSTAPD_REDISCOVER_INTERVAL = 600.0
 
+# The bridge port map ({port number: interface}) behind the port-to-device
+# mapping costs one ``file list`` plus one ``brport/port_no`` read per
+# interface over ubus. Bridge membership changes when someone re-cables or
+# adds an SSID, so the map is rebuilt at most this often (seconds) — and at
+# once when the FDB names a port number the map does not know.
+BRIDGE_PORT_MAP_REFRESH_INTERVAL = 600.0
+
 # rpcd ``rc/list`` is NOT called on every poll: rpcd before 2026-05-31
 # (upstream d06d2a8, e.g. rpcd 2025.12.03 on OpenWrt 25.12.1) leaks ~4.7 KB
 # per call. Service running state comes from procd ``service/list`` instead;
