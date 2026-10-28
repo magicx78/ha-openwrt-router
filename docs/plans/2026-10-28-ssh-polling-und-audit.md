@@ -6,11 +6,11 @@
 
 ## Status
 
-- **Stand:** 2026-10-27 (abends) · **Phase:** freigegeben, in Umsetzung
-- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6), alle am 2026-10-27 — **offen:** A16 ACL v8 `fix/acl-v8` · PR #41 (1.38.7) auf `main` (Worktree `../ha-openwrt-router-acl-v8`)
-- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), Reviews A1, A2 und A11 inkl. Fixes abgeschlossen · **Offen:** PR #41 (ACL v8) Merge-Freigabe, Installation 1.38.7 und AK6 am Gateway; A3–A10, A12–A14
+- **Stand:** 2026-10-28 (nachts) · **Phase:** freigegeben, in Umsetzung
+- **Branch/PR:** **gemergt:** #37 (`5372d12`, v1.38.3), #38 A1 (`abf9e86`, v1.38.4), #39 A2 (`225ab22`, v1.38.5), #40 A11 (`85d93b4`, v1.38.6) am 2026-10-27, #41 A16 (`fadcca6`, v1.38.7) am 2026-10-28 — **offen:** A17 Hotfix `fix/fdb-port-map` · PR #42 (1.38.8) auf `main` (Worktree `../ha-openwrt-router-fdb-portmap`)
+- **Erledigt:** B3 (Auswertung rpcd-Messung ACL v6, siehe Prüfprotokoll), Audit (a)–(c), Freigabe und E1, E3–E6 (2026-10-27), P1–P6 umgesetzt (1.38.3, Review ohne offene Befunde, PR #37), A1 umgesetzt (1.38.4, PR #38), A2 umgesetzt (1.38.5, PR #39), A11 umgesetzt (1.38.6, PR #40), A16 umgesetzt (1.38.7, PR #41, installiert, AK6 am Gateway erfüllt), Reviews A1, A2, A11 und A16 inkl. Fixes abgeschlossen, AK1–AK7 erfüllt, A17 umgesetzt (1.38.8, PR #42) · **Offen:** A17 Review und Merge-Freigabe, Hardware-Nachweis der Port-Zuordnung nach 1.38.8; A3–A10, A12–A14
 - **Blocker:** –
-- **Nächster Schritt:** Review-Befunde zu #41 beheben, CI, Merge-Freigabe durch den Nutzer; danach 1.38.7 installieren, HA neu starten (rpcd-Neustart je Router durch v8), AK6 am Gateway abschließend messen; dann A4 (WAN-Erkennung, E5)
+- **Nächster Schritt:** Review zu PR #42 (A17) abschließen, CI, Merge-Freigabe durch den Nutzer, danach 1.38.8 installieren und die Port-Zuordnung in der Diagnose prüfen (`device_count` > 0 an den LAN-Ports des Gateways); dann A4 (WAN-Erkennung, E5) auf einem frischen Branch von `main`
 
 ## Problem und Zielverhalten
 
@@ -34,27 +34,29 @@ siehe E2, eigenes Paket später), Änderungen am Panel, neue Entities.
 
 ## Akzeptanzkriterien
 
-- [ ] AK1 Ein vollständiger Coordinator-Poll gegen eine `OpenWrtAPI` mit gemocktem ubus (alle Aufrufe
+- [x] AK1 Ein vollständiger Coordinator-Poll gegen eine `OpenWrtAPI` mit gemocktem ubus (alle Aufrufe
       erfolgreich, auch mit leeren, aber gültigen Antworten für FDB und ARP) ruft `asyncssh.connect`
       kein einziges Mal auf.
-- [ ] AK2 `get_wan_status` liefert `rx_bytes`/`tx_bytes` aus `network.device status` (Gerät =
+- [x] AK2 `get_wan_status` liefert `rx_bytes`/`tx_bytes` aus `network.device status` (Gerät =
       `l3_device` des WAN-Interfaces); schlägt das mit MethodNotFound fehl, aus `file read
       /sys/class/net/<dev>/statistics/*` (`data`-Feld richtig gelesen). SSH nur, wenn beide ubus-Wege
       nicht erlaubt sind.
-- [ ] AK3 `get_disk_space`/`get_tmpfs_stats` liefern die Werte aus `system info` (`root`/`tmp`, KiB)
+- [x] AK3 `get_disk_space`/`get_tmpfs_stats` liefern die Werte aus `system info` (`root`/`tmp`, KiB)
       ohne zusätzlichen Aufruf; Sensoren zeigen z. B. am Gateway Overlay ≈ 3,3 MB gesamt statt 0.0.
       Fehlen die Felder (altes OpenWrt), läuft der SSH-Weg mit `df -Pk` (BusyBox-tauglich), höchstens
       alle 600 s, dazwischen aus dem Cache.
-- [ ] AK4 `get_bridge_fdb` liest `brforward` per `file read` mit `base64: true`; eine leere, aber
+- [x] AK4 `get_bridge_fdb` liest `brforward` per `file read` mit `base64: true`; eine leere, aber
       gültige ubus-Antwort löst keinen SSH-Versuch aus; SSH nur, wenn der ubus-Zugriff gesperrt ist
       oder fehlschlägt (ACL, Methode, Timeout, kaputte Antwort). ARP analog.
-- [ ] AK5 Innerhalb eines Polls benutzen alle SSH-Kommandos dieselbe asyncssh-Verbindung
+- [x] AK5 Innerhalb eines Polls benutzen alle SSH-Kommandos dieselbe asyncssh-Verbindung
       (`connect` einmal je Poll); am Ende des Polls und beim Entladen wird sie geschlossen; eine
       serverseitig geschlossene Verbindung wird beim nächsten Kommando einmal neu aufgebaut.
-- [ ] AK6 Hardware nach Installation (lesend): je Router ≤ 1 dropbear-Anmeldung je 10 Minuten (LLDP
+- [x] AK6 Hardware nach Installation (lesend): je Router ≤ 1 dropbear-Anmeldung je 10 Minuten (LLDP
       am Gateway), keine im normalen Poll; das Router-Log zeigt wieder dnsmasq/hostapd-Zeilen statt
       dropbear; rpcd `VmRSS` über ≥ 1 h ohne Anstieg (Vergleich: B3-Werte unten).
-- [ ] AK7 `checks.py --ruff-ci` grün, CI grün, unabhängiges Review ohne offene P0/P1.
+      *Erfüllt 2026-10-28:* APs mit 1.38.3 (0 je Poll, Speicher flach über 65 min), Gateway mit
+      1.38.7/ACL v8 (0 je Poll, nur die LLDP-Abfrage alle 10 min; Protokoll unten).
+- [x] AK7 `checks.py --ruff-ci` grün, CI grün, unabhängiges Review ohne offene P0/P1.
 
 ## Befunde im Code (verifiziert 2026-10-27 an v1.38.2 und auf Hardware, lesend)
 
@@ -329,6 +331,7 @@ dieselbe Funktion), jeder Merge mit Version ein Release. P1/P2 zuerst mit fehlsc
 | A13 | P2 | C5 + C8 + C9 + C10 + C11 (+C13): Panel/Snapshot nur für Admins (je E6, mit Option), Build-Fehler als 500 mit `meta.error` statt leerer Topologie, kein „WAN offline“-Alarm bei 0 Routern, `KEY_HASS`, Panel-Setup abgesichert, 401-Schleife im Frontend; Bundle neu bauen (`--frontend`) | `topology_panel.py`, `__init__.py`, `frontend/topology/src/*`, `frontend/dist/*`, Tests | E6 | M |
 | A14 | P2 | C6: Snapshot je Coordinator-Update einmal bauen und cachen, `generated_at` und Rohlisten aus den Entity-Attributen nehmen (Rohdaten nur über die API) | `topology_entities.py`, Tests | – | S |
 | A16 | P1 | E7: ACL v8 mit aufgelösten Symlink-Pfaden (rpcd ≥ 2026 `realpath`-Prüfung); Tests mit `fnmatch` gegen echte Zielpfade und Negativliste; `scripts/ha-openwrt-router.json` regeneriert. **Risikoauslöser ACL** → Review Pflicht | `acl_provisioning.py`, `scripts/ha-openwrt-router.json`, `tests/test_acl_provisioning.py` | E7 | S |
+| A17 | P1 | Hotfix (Befund AK6 nach 1.38.7): Port-Zuordnung seit 1.38.3 leer, weil die Portnummern-Karte aus `file list /sys/class/net` nur `directory`-Einträge nahm, die bei rpcd die Linkziele (`../../devices/…/net/lan1`) heißen; jetzt einfache Namen unabhängig vom Typ, Karte 600 s gecacht (`BRIDGE_PORT_MAP_REFRESH_INTERVAL`), Neuaufbau bei unbekannter Portnummer und nach ACL-Reset, gemerkte Unbekannte ohne Dauer-Neuaufbau. Weniger ubus-Aufrufe je Poll. Review Pflicht (Poll-Pfad) | `api.py`, `const.py`, `tests/test_bridge_port_map.py` | – | S |
 
 Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 → A12 → A14 → A6 → A7–A10
 (klein, nur wenn risikolos). A4 ist auf `fix/ssh-polling` gestapelt, alle anderen auf `origin/main`.
@@ -505,3 +508,35 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   `ap2` 2968→2988 kB (zweite Hälfte +9 kB/h); `ap4` 3000→3032 kB (zweite Hälfte +22 kB/h).
   **Kein Leck**, Werte wie bei B3. AK6 für die APs erfüllt (0 SSH-Anmeldungen je Poll); Gateway offen
   bis ACL v8 (PR #41) installiert ist.
+- 2026-10-28 PR #41 gemergt (`fadcca6`, 00:36 UTC) nach Freigabe des Nutzers, CI grün (hacs, hassfest,
+  test 3.13/3.14, Review ohne offene P0/P1); Release-Workflow erfolgreich, **v1.38.7** veröffentlicht
+  (00:37 UTC); HACS per `update_information` aufgefrischt (HA lief zu dem Zeitpunkt mit 1.38.6).
+- 2026-10-28 **1.38.7 installiert** (HACS 01:51, HA-Neustart 01:52 nach Freigabe): alle drei rpcd um
+  01:52:47 neu gestartet, ACL-Datei auf allen Routern mit den v8-Mustern; drei Einträge geladen, HA-Log
+  nur die Root-Warnung je Router. Mit einer rpcd-Session am Gateway (rpcd 2026.10.04) lesend geprüft:
+  `/proc/net/arp`, `brforward` (base64), `nf_conntrack`, `wan/statistics/rx_bytes`, `lan1/brport/port_no`
+  liefern Daten; `/etc/shadow` und `/proc/1/environ` bleiben verweigert.
+- 2026-10-28 **AK6 (Teil 3, Gateway) erfüllt** mit 1.38.7/ACL v8, Fenster 01:53–02:14 (21 Polls, lesend per
+  `logread`): `openwrt` 2 Passwort-Anmeldungen (02:03:30, 02:13:30), `ap2` 2 (02:03:45, 02:13:55), `ap4` 2
+  (02:03:45, 02:13:55) – ausschließlich die LLDP-Abfrage alle 10 Minuten, **0 je Poll** auf allen drei
+  Routern (Gateway vorher 1 je Poll, mit 1.38.2 6 je Minute). Die weiteren dropbear-Zeilen sind die
+  Pubkey-Anmeldungen dieser Prüfung. Router-Log wieder von dnsmasq/hostapd dominiert (`openwrt` 458 von
+  530 Zeilen, dropbear 15). rpcd 21 min nach dem Neustart: `openwrt` 2448 kB (HWM 2448), `ap2` 3012 kB,
+  `ap4` 3056 kB (HWM 3084), je 5 Sessions.
+- 2026-10-28 **Befund A17** (Hardware, lesend): Diagnose `port_mapping` an allen Routern `device_count` 0,
+  Gateway 29 nicht zugeordnete Geräte trotz 74 Leases und 39 ARP-Einträgen. Debug-Log (API 2 min auf
+  DEBUG, danach zurück): „Bridge FDB via file/read: 0 entries“ auf allen drei Routern, ARP 38/14/15
+  Einträge, kein SSH. Rohes `brforward` des Gateways (1424 Byte, 89 Datensätze) ergibt mit dem Parser
+  der Integration 63 Einträge (lan1 17, lan2 35, lan3 11). `file list /sys/class/net` meldet jede
+  Schnittstelle als `symlink` (Name) und als `directory` (Linkziel `../../devices/…/net/lan1`), bei
+  rpcd 2025.12.03 und 2026.10.04; der Code nahm nur `directory` → Karte mit Linkzielen → Filter
+  verwarf alles. Seit 1.38.3 sichtbar, weil die FDB vorher immer per SSH kam.
+- 2026-10-28 A17 `fix/fdb-port-map@4b2c506` (PR #42) – lokal: ruff 0.17.3 sauber, 1404 Tests grün
+  (10 neue in `tests/test_bridge_port_map.py`, 8 vor dem Fix rot) · CI: PR · Hardware: Ursache und
+  Parser mit echten Daten belegt, der Fix selbst noch nicht in HA gelaufen – Lücke: nach Installation
+  von 1.38.8 Diagnose `port_mapping` mit `device_count` > 0 an den LAN-Ports des Gateways und
+  Debug-Zeile „Bridge FDB via file/read: N entries“ mit N > 0 · Review: unabhängig, läuft.
+- 2026-10-28 Hinweis: Der Worktree `../ha-openwrt-router-wan-detection` (Branch `fix/wan-detection`,
+  ungepusht) enthält einen Buchführungs-Commit, der durch `core.autocrlf=false` beim `commit -a` die
+  Zeilenenden von 171 Dateien umgestellt hat; er wird nicht verwendet (Löschung nur mit Freigabe des
+  Nutzers), A4 startet auf einem frischen Branch von `main`. Die Buchführung steht in diesem PR.
