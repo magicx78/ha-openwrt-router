@@ -577,4 +577,22 @@ Reihenfolge nach dem N2-Release: A1 → A2 → A11 → A4 → A5 → A13 → A3 
   Uplink-Protokolle (Risikoauslöser Mehr-Router-Logik → Review). · CI: PR #43 · Hardware: nicht
   geprüft – Lücke: nach Installation von 1.38.9 Diagnose der APs (`wan_found` False, `wan_connected`
   False, `ddns_status` leer), Gateway unverändert, Rollen Gateway + 2 APs; kein LTE-Gateway im
-  Testnetz · Review: unabhängig, läuft.
+  Testnetz · Review: unabhängig, siehe unten.
+- 2026-10-28 Review A4/PR #43 (unabhängig, frischer Agent mit Diff und AK1–AK5): keine P0/P1,
+  AK1–AK5 bestätigt. P2 F1: netifd listet die Interfaces alphabetisch, ein reiner „erster Treffer“
+  hätte bei Dual-WAN `lte`/`modem`/`umts` vor `wan` genommen (mwan3-Failover als WAN; das statische
+  `modem`-Alias aus dem OpenWrt-Wiki ist immer up und hätte den PPPoE-Ausfall verdeckt). P3 F2:
+  inaktives vor aktivem Interface (Reiserouter `wan` ohne Kabel, `wwan` up) – vorbestehend; F3:
+  WAN-Name mit `proto none` zählte als WAN (Dumb-AP mit Stock-`wan`); F4: Rolle verwarf IPv6-only-
+  und Tunnel-Uplinks (`dhcpv6`, `dslite`, `map`, `6in4`, `6rd`, `6to4`) – vorbestehend; F5:
+  Uplinks mit anderen Namen ohne Uplink-Protokoll (`tethering`, `sta`, `repeater`) werden nicht
+  erkannt (E5-Design, Option im Options-Flow als späteres Paket denkbar); F6: `proto` fehlte in zwei
+  Status-Pfaden; F7: CHANGELOG unterschlug das alte Präfix-Matching; F8: `sensor.py` importiert die
+  reine Klassifikation aus `api.py`; F9: Testlücken (lte vor wan, SSH-Minimalstatus, `proto none`).
+  Behoben in `ab4bb6c`: `wan_interface_tier()` mit Rangfolge (Mobilfunk-Name ohne Uplink-Protokoll
+  nur ohne andere Treffer; sonst aktiv vor inaktiv, dann Name vor Protokoll, dann Dump-Reihenfolge),
+  `proto none` nie WAN, `_GATEWAY_PROTOS` mit IPv6-/Tunnel-Protokollen, `proto` in beiden Pfaden,
+  CHANGELOG neu gefasst, README-Absatz zu Erkennung und Grenzen (F5); 16 Tests vorher rot (F9
+  eingeschlossen), lokal 1492 grün, ruff sauber. F8 nicht umgesetzt: der Import einer reinen
+  Funktion verletzt die Regel „Entities ohne Netzwerk“ nicht, ein eigenes Modul nur dafür lohnt
+  nicht. Offen: Hardware-Nachweis nach Installation von 1.38.9.
