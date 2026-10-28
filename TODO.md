@@ -21,19 +21,22 @@ Alles lesend, Installation und HA-Neustart nur nach OK.
       unterschiedlichen Zeitpunkten (A7).
 - [x] **Schnittstellen-Zähler:** `network.device status {}` liefert
       `statistics` für `br-lan`/`wan` (A9).
-- [ ] **Raten-Sensoren** in HA aktivieren und prüfen, dass sie nicht mehr 0 zeigen (A9).
+- [x] **Raten-Sensoren** in HA aktivieren und prüfen, dass sie nicht mehr 0 zeigen (A9) –
+      `wan` RX/TX am Gateway aktiviert, Werte im kB/s-Bereich.
 - [x] **ARP:** Größe von `/proc/net/arp` am Gateway, `getHostHints`-Antwort (A10).
 - [x] **„Nach Updates suchen“** auf Gateway und AP: Dauer, Ausgabe von
       `apk list -u` bzw. `opkg list-upgradable` (A6). Fehlermeldung ohne SSH
       nicht geprüft (kein Router ohne SSH). `ap4` hat 70 Paket-Updates
       offen (u. a. `rpcd`, `ubus`) – Installation nur nach eigener Entscheidung.
 - [x] **Tracker:** nach HA-Neustart melden abwesende Clients `not_home` (A3).
-- [ ] **Recorder:** Datenbankwachstum über einen Tag vergleichen (A8).
-- [ ] **Dev-Skript `scripts/_add_topology_card.py`** liest das entfernte
-      Attribut `topology_snapshot` – löschen oder auf das Panel umstellen.
-- [ ] **Frontend-Folgen aus A12:** veraltete (`stale`) Clients/Kanten
+- [x] **Recorder:** statt DB-Größe (MariaDB, viele andere Integrationen) direkt in der
+      Historie geprüft: `packages`, `system_packages`, `last_check` werden seit 1.39.0
+      nicht mehr gespeichert (A8).
+- [x] **Dev-Skript `scripts/_add_topology_card.py`** liest das entfernte
+      Attribut `topology_snapshot` – gelöscht (kein Dashboard nutzt das Attribut).
+- [x] **Frontend-Folgen aus A12:** veraltete (`stale`) Clients/Kanten
       ausgrauen, `lldp_duplicates` als Parallel-Link zeigen, bei mehreren
-      Gateways bewusst wählen statt `routerNodes[0]`.
+      Gateways bewusst wählen statt `routerNodes[0]`. Im Browser noch nicht angesehen.
 - [ ] Optional: Button „Veraltete Tracker entfernen“ (wie `fritz`).
 
 ### Fehlerkorrektur nach 1.37 (Plan `docs/plans/2026-10-27-fehlerkorrektur-nach-1.37.md`)

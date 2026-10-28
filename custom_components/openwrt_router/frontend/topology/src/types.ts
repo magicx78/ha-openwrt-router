@@ -44,6 +44,16 @@ export interface LldpUplink {
   managementIp?: string;
   capabilities?: string[];
   conflicts?: LldpConflict[];
+  /** Further LLDP observations of the same router pair (parallel links). */
+  duplicates?: LldpDuplicate[];
+}
+
+/** One extra LLDP observation of an already linked router pair (parallel link). */
+export interface LldpDuplicate {
+  observer?: string;          // router id that saw this neighbour entry
+  localInterface?: string;    // raw local interface on the observer (e.g. "lan2")
+  localPort?: string;         // normalised local port
+  neighborPortId?: string;    // port id the neighbour announced
 }
 
 export interface CpuHistoryPoint {
@@ -176,6 +186,8 @@ export interface AccessPoint {
   portStats?: PortStat[];      // physical ports on this AP (WAN, LAN1, ...)
   /** Present when this AP's uplink was verified via LLDP (uplinkType === 'router_uplink'). */
   lldpUplink?: LldpUplink;
+  /** True when the uplink edge is built from old data (one end router offline). */
+  uplinkStale?: boolean;
 }
 
 export interface Client {
@@ -212,6 +224,7 @@ export interface Client {
   haNameSource?: 'user' | 'device';
   haModel?: string;
   randomMac?: boolean;             // locally administered (private / randomised) MAC
+  stale?: boolean;                 // reported by a router whose last update failed (old data)
 }
 
 export interface SwitchNode {
@@ -260,6 +273,7 @@ export interface EdgeLayout {
   fromPort?: string;          // physical port on the source (from) router
   toPort?: string;            // physical port on the target (to) router
   lldp?: LldpUplink;          // full LLDP neighbor detail for router-uplink edges
+  stale?: boolean;            // built from old data (one end router offline)
 }
 
 export interface TopologyLayout {

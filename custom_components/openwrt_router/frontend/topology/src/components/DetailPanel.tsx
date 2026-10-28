@@ -15,6 +15,7 @@ import { signalQuality } from '../layout';
 import { formatConnectedSince, formatLeaseExpiry, safeHttpUrl } from '../api';
 import { shortName, deviceLabel, CONFIDENCE_LABEL, isWanPort } from './PortStrip';
 import { formatBitRate, formatBytes } from '../utils/format';
+import { STALE_HINT, parallelLinkLabel } from '../utils/hints';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -291,6 +292,7 @@ function APDetail({ data, clients, actions }: { data: AccessPoint; clients: Clie
             value={`${(data.gatewayPort ?? data.lldpUplink?.fromPort ?? '?').toUpperCase()} ↔ ${(data.apPort ?? data.lldpUplink?.toPort ?? '?').toUpperCase()}`}
           />
         )}
+        {data.uplinkStale && <div className="detail-stale-note">⚠ {STALE_HINT}</div>}
       </div>
 
       {data.lldpUplink && (
@@ -396,6 +398,9 @@ function LldpSection({ lldp }: { lldp: LldpUplink }) {
         <Row label="Chassis-ID" value={<span className="port-device-row__mac">{lldp.neighborChassisId}</span>} />
       )}
       {lldp.neighborPortId && <Row label="Remote Port-ID" value={lldp.neighborPortId} />}
+      {(lldp.duplicates ?? []).map((d, i) => (
+        <Row key={`dup-${i}`} label="Parallele Verbindung" value={parallelLinkLabel(d)} />
+      ))}
       {vlans.length > 0 && (
         <Row label="VLANs" value={vlans.length > 1 ? `Trunk ${vlans.join(', ')}` : `${vlans[0]}`} />
       )}
@@ -470,6 +475,7 @@ function ClientDetail({ data, apName, actions }: { data: Client; apName: string;
 
   return (
     <>
+      {data.stale && <div className="detail-stale-note">⚠ {STALE_HINT}</div>}
       <div className="detail-section">
         <div className="detail-section__heading">Gerät</div>
         <Row label="Name"       value={nameNode} />

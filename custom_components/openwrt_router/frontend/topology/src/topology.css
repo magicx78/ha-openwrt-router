@@ -3573,3 +3573,38 @@
   font-size: 10px;
   color: var(--text-secondary);
 }
+
+/* ── Stale data (router offline, old data still shown) ───────────────── */
+/* Fade the children, not the group: .edge-group's fade-in animation
+   (fill-mode both) would override an opacity set on the group itself. */
+.edge-stale > * { opacity: 0.5; }
+.edge-stale .edge-wired-flow,
+.edge-stale .edge-mesh-flow,
+.edge-stale .edge-router-flow {
+  stroke: var(--text-secondary);
+  animation: none;
+}
+.client-dot.client-dot--stale {
+  opacity: 0.4;
+  filter: grayscale(1);
+  border-style: dashed;
+}
+.ap-client-list__row--stale { opacity: 0.5; }
+.client-tooltip__stale {
+  margin-top: 2px;
+  font-size: 10px;
+  color: #fcd34d;
+}
+.detail-stale-note {
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #fcd34d;
+  background: rgba(251, 191, 36, 0.10);
+  border: 1px solid rgba(251, 191, 36, 0.30);
+}
+.ap-card__lldp-tag--parallel {
+  white-space: nowrap;
+  background: rgba(251, 191, 36, 0.18);
+  color: #fcd34d;
+}

@@ -2,6 +2,26 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **Topologie-Panel zeigt veraltete Daten an.** Clients und Verbindungen eines
+  Routers, der beim letzten Abruf nicht erreichbar war, erscheinen ausgegraut
+  mit dem Hinweis „Daten veraltet – Router nicht erreichbar“.
+- **Parallele LLDP-Verbindungen sichtbar.** Sieht LLDP zwischen zwei Routern
+  mehrere Links, zeigt die AP-Karte ein „N×“-Abzeichen; Detailansicht und
+  Tooltip nennen die weiteren Ports.
+- **Gateway-Wahl bei mehreren oder keinem Gateway.** Das Panel nimmt nicht mehr
+  den ersten Router der Liste, sondern bevorzugt erreichbare Gateways mit
+  verbundenem WAN, dann die kleinste Router-ID. Alle anderen Router bleiben als
+  AP sichtbar.
+
+### Removed
+
+- Dev-Skript `scripts/_add_topology_card.py` (las das in 1.39.0 entfernte
+  Attribut `topology_snapshot`).
+
 ## [1.39.0] - 2026-10-28
 
 ### Security

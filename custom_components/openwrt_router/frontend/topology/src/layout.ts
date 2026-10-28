@@ -90,6 +90,7 @@ export function computeEdgesFromBounds(
         fromPort:        isLldp ? (ap.lldpUplink?.fromPort ?? ap.gatewayPort) : undefined,
         toPort:          isLldp ? (ap.lldpUplink?.toPort ?? ap.apPort) : undefined,
         lldp:            isLldp ? ap.lldpUplink : undefined,
+        stale:           ap.uplinkStale,
       });
     } else {
       // Peer / mesh: quadratic arc between AP tops (also used for AP↔AP LLDP links)
@@ -110,6 +111,7 @@ export function computeEdgesFromBounds(
           fromPort: isLldp ? ap.lldpUplink?.fromPort : undefined,
           toPort:   isLldp ? ap.lldpUplink?.toPort : undefined,
           lldp:     isLldp ? ap.lldpUplink : undefined,
+          stale:    ap.uplinkStale,
         });
       }
     }
