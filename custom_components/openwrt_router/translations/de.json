@@ -226,6 +226,14 @@
       }
     }
   },
+  "exceptions": {
+    "update_check_failed": {
+      "message": "Die Suche nach Paket-Updates ist fehlgeschlagen: {error}"
+    },
+    "update_check_running": {
+      "message": "Auf diesem Router läuft bereits eine Update-Suche. Bitte warte auf ihr Ergebnis."
+    }
+  },
   "issues": {
     "channel_plan_conflict": {
       "title": "WLAN-Kanalkonflikte zwischen OpenWrt-Routern",

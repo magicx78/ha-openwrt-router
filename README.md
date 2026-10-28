@@ -314,8 +314,7 @@ service rpcd restart
 | Entity | Description |
 |--------|-------------|
 | `button.{name}_reload_wifi` | Reload WiFi configuration |
-| `button.{name}_check_for_updates` | Scan for available updates |
-| `button.{name}_perform_updates` | Trigger update process |
+| `button.{name}_check_for_updates` | List upgradable packages (apk or opkg, via SSH) in `sensor.{name}_update_status` |
 | `button.restart_{service}` | Restart system service |
 
 ### Events

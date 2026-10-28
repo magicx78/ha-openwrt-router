@@ -22,6 +22,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import (
     PERCENTAGE,
+    SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
     EntityCategory,
     UnitOfDataRate,
     UnitOfFrequency,
@@ -287,10 +288,20 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         key=SUFFIX_UPDATE_STATUS,
         translation_key="update_status",
         icon="mdi:package-search",
+        # Filled by the "check for updates" button only; unknown until then.
         value_fn=lambda data: (
-            "available" if data.updates_available.get("available") else "current"
+            None
+            if not data.updates_available.get("last_check")
+            else "available"
+            if data.updates_available.get("available")
+            else "current"
         ),
         extra_attrs_fn=lambda data: {
+            "updates_count": data.updates_available.get("count", 0),
+            "packages": data.updates_available.get("packages", []),
+            "package_manager": data.updates_available.get("package_manager"),
+            "index_refreshed": data.updates_available.get("index_refreshed"),
+            "last_check": data.updates_available.get("last_check"),
             "system_updates_count": len(data.updates_available.get("system", [])),
             "addon_updates_count": len(data.updates_available.get("addons", [])),
             "system_packages": [
@@ -376,6 +387,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         key=SUFFIX_DISK_FREE,
         translation_key="disk_free",
         device_class=SensorDeviceClass.DATA_SIZE,
+        state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfInformation.GIGABYTES,
         icon="mdi:harddisk-plus",
         value_fn=lambda data: round(
@@ -413,6 +425,7 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         key=SUFFIX_TMPFS_FREE,
         translation_key="tmpfs_free",
         device_class=SensorDeviceClass.DATA_SIZE,
+        state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfInformation.MEGABYTES,
         icon="mdi:memory-plus",
         value_fn=lambda data: round(data.tmpfs.get("free_mb", 0), 1),
@@ -862,8 +875,9 @@ class OpenWrtRadioSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity):
     """
 
     _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = "dBm"
+    _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
     _attr_entity_registry_enabled_default = False
 
     def __init__(

@@ -228,7 +228,7 @@ class TestSensorEntity:
 
     def test_update_status_value(self, mock_coordinator, mock_config_entry):
         sensor = _make_sensor(mock_coordinator, mock_config_entry, "update_status")
-        assert sensor.native_value == "current"  # available is False by default
+        assert sensor.native_value is None  # unknown until the first check
 
     def test_none_when_no_data(self, mock_coordinator, mock_config_entry):
         mock_coordinator.data = None

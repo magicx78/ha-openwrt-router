@@ -226,6 +226,14 @@
       }
     }
   },
+  "exceptions": {
+    "update_check_failed": {
+      "message": "Checking for package updates failed: {error}"
+    },
+    "update_check_running": {
+      "message": "An update check is already running on this router. Wait for its result."
+    }
+  },
   "issues": {
     "channel_plan_conflict": {
       "title": "Wi-Fi channel conflicts between OpenWrt routers",
