@@ -17,11 +17,10 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.helpers import entity_registry as er
 from test_net_correlation import T0, A, B, G, inc_of, level, observed_tree
 from test_net_engine import FakeDisk, FakeStore, make_hass
 from test_net_entities import G as EG
-from test_net_entities import engine, setup_all  # noqa: F401
+from test_net_entities import engine, loaded_registry, setup_all  # noqa: F401
 from test_net_p6 import (  # noqa: F401
     SETTLE,
     clock,
@@ -471,18 +470,6 @@ async def test_withdraw_of_the_last_router_moves_nothing(
     assert intel.fleet_anchor is None
 
 
-def fake_registry(hass: Any) -> er.EntityRegistry:
-    registry = er.EntityRegistry(hass)
-    try:  # HA >= 2026.11 takes hass, older releases take no argument
-        registry.entities = er.EntityRegistryItems(hass)
-    except TypeError:
-        registry.entities = er.EntityRegistryItems()
-    registry._entities_data = registry.entities.data
-    registry.deleted_entities = {}
-    registry.async_schedule_save = lambda: None
-    return registry
-
-
 def config_entry(entry_id: str) -> MagicMock:
     e = MagicMock()
     e.entry_id = entry_id
@@ -502,7 +489,7 @@ async def test_unload_start_rehomes_the_fleet_registry_entries(
         old.entry_id: old,
         new.entry_id: new,
     }.get
-    registry = fake_registry(hass)
+    registry = await loaded_registry(hass)
     ids = [
         registry.async_get_or_create(domain, DOMAIN, uid, config_entry=old).entity_id
         for domain, uid in (
