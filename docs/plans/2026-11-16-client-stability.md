@@ -45,6 +45,89 @@ Kennzeichnung wie im NI-Plan: **verifiziert** (mit `datei:zeile`, Stand `4cef6a8
 | Panel | `frontend/topology/src/components/Sidebar.tsx:15` (Tabs), `ClientsView.tsx`, `CompareView.tsx`, `SpeedChart.tsx` (eigenes SVG, keine Chart-Bibliothek) | Tab-Gerüst, Charts ohne Abhängigkeit | neuer Tab „Stabilität“, SVG-Charts ohne neue Bibliothek |
 | Panel-Routen | `topology_panel.py:119-165` (Zugriffsprüfung), NI-P7-Routen | Auth/Admin/410 | gleiche Prüfung, Unterpfad `/api/openwrt_topology/intelligence/clients/...` |
 
+### 1.3 Bestehendes Modul `client_stability.py` (seit v1.36.0) — Nachtrag nach Master-Hinweis
+
+**Verifiziert** (`client_stability.py`, 220 Zeilen, rein, ohne HA-Import):
+
+| Teil | Inhalt | Aufrufer |
+|---|---|---|
+| `parse_usteer_clients`, `NodeSignal`, `sticky_candidates`, `_comparable` | usteer-Flottenbild, „klebende“ Clients (≥ 8 dB besser, gleiches Band/SSID) | `coordinator.py` (Sticky-Timer), `api.py:1933` (Doku) |
+| `HoldTimer` | Haltezeit 10 min für sticky/weak | `coordinator.py` |
+| `iface_band` | Band eines AP-Interfaces | `fleet.py:45`, `net_rules.py:49` |
+| `AssociationTracker` | je **Router**, **nur im Speicher**, 24-h-Fenster: Associations = Connect-Zeilen; Reconnect = Connect höchstens **300 s** nach `AP-STA-DISCONNECTED` desselben Routers am **selben Interface** | gefüttert in `coordinator.py:1466-1474` aus den Logzeilen (`WIFI_CONNECTED`/`WIFI_DISCONNECTED`); gelesen in `_client_stability_snapshot` (`coordinator.py:1639-1700`) |
+| `unstable_top`, `UNSTABLE_RECONNECTS = 3`, `TOP_CLIENTS = 10` | Rangliste | `coordinator.py:1667-1698` |
+
+Ergebnis im Coordinator: `data.client_stability = {usteer, sticky, weak, clients{mac:{associations_24h,
+reconnects_24h}}, unstable, unstable_count}` (`coordinator.py:1009`). Leser:
+- `sensor.py:483-494` `unstable_clients` (unique_id `{entry_id}_unstable_clients`, Zustand
+  `unstable_count`, Attribut `top`);
+- `binary_sensor.py:168-184` `sticky_clients` (`{entry_id}_sticky_clients`);
+- `device_tracker.py:433-438` → `fleet.client_counts` (`fleet.py:470-488`): Tracker-Attribute
+  `associations_24h`/`reconnects_24h`, Summe über alle Router;
+- `diagnostics.py:102` (ohne `clients`), `net_engine.py:1930` (nur `usteer`-Status);
+- Tests `tests/test_client_stability.py`.
+
+**Drei Reconnect-Definitionen existieren heute nebeneinander:**
+
+| Quelle | Fenster Down→Up | Bereich | Ping-Pong A→B→A | Down-Arten | Persistenz |
+|---|---|---|---|---|---|
+| v1.36 `AssociationTracker` | ≤ 300 s | je Router, gleiches Interface | zählt als Reconnect an A | nur `AP-STA-DISCONNECTED` | keine (Neustart = 0) |
+| NI `wifi.reconnect` (R3, `net_rules.py` `_reconnects`) | ≤ 30 s (`max_gap`) | Flotte, gleiches Interface, Bandwechsel/`Prune` kein Reconnect | zählt **nicht** | `disconnected`, `deauth`, `disassoc`, `inactivity_timeout` (`_DOWN_KINDS`) | Event im Ring (NI-Store) |
+| CS-Plan (Abschnitt 3, R) | übernahm NI | – | – | – | Buckets |
+
+**Entscheidung [Vorschlag, vom Master zu bestätigen]: CS erweitert, löst nur den Zählteil ab.**
+- **Eine Quelle für Reconnects:** das NI-Event `wifi.reconnect` (R3). CS zählt diese Events je
+  Client und Stunde (aus `stored_events` des Hooks), sonst nichts. NI `wifi_reconnect_storm`
+  (5 in 600 s) benutzt dieselben Events → Sturm-Alarm, CS-Zähler, Sensor und Tracker-Attribut
+  sind deckungsgleich.
+- **Associations:** CS zählt die Connect-Zeilen (`COUNT_ONLY_KINDS`, die der Hook ohnehin sieht)
+  je Client und Stunde im Bucket-Feld `associations`.
+- **`AssociationTracker` und `unstable_top` werden abgelöst** (Bauphase B7a): Der Coordinator
+  füttert ihn nicht mehr; `data.client_stability["clients"]`, `["unstable"]`,
+  `["unstable_count"]` kommen aus einer CS-Leseschnittstelle (`cs.counts_24h(router)`), die
+  auf den Stundenbuckets plus laufender Stunde beruht. `client_stability.py` behält Sticky,
+  usteer-Parser, `HoldTimer`, `iface_band` (unverändert, weiter von `fleet.py`/`net_rules.py`
+  genutzt); `AssociationTracker` bleibt bis zum Ende der Deprecation nur für Tests im Modul,
+  danach entfernt (F10).
+- **Unveränderte Entities:** `{entry_id}_unstable_clients`, `{entry_id}_sticky_clients`,
+  Tracker-Attributnamen `associations_24h`/`reconnects_24h` bleiben gleich (Test). Der Sensor
+  zählt Clients mit ≥ `UNSTABLE_RECONNECTS` (3) Reconnects in 24 h **an diesem Router** (Router
+  des `wifi.reconnect`-Events), `top` wie bisher (10, mit Hostname).
+- **Bewusste Verhaltensänderung (CHANGELOG „Changed“):** Reconnect-Fenster 300 s → 30 s,
+  Ping-Pong-Roaming zählt nicht mehr, Deauth/Disassoc/Inaktivität zählen als Down, Werte
+  überstehen Neustarts. Die Zahlen sinken dadurch tendenziell (schlafende IoT-Clients, die nach
+  1–5 min zurückkommen, sind kein Reconnect mehr; NI R3 begründet das).
+- **„Unbekannt ohne Log“** bleibt: ohne lesbares Router-Log ist `unstable_clients` unbekannt,
+  die CS-Abdeckung für R/A ist 0.
+- **Schwaches Signal:** CS `weak_s` nutzt `WEAK_SIGNAL_DBM` (−75) aus `client_stability.py`
+  (eine Konstante). Sticky/weak-Erkennung bleibt im Coordinator unverändert (keine Doppelung:
+  CS speichert nur Zeitanteile, keine Sticky-Zustände).
+- **Gesamtschalter `enabled` (F8):** schaltet nur Historie, Analyse, Panel und Store aus; die
+  24-h-Zählung für die bestehenden Entities läuft immer (im Speicher, ohne Store), damit
+  v1.36-Funktionen nie verschwinden.
+
+**Namensprüfung (verifiziert):** Einziger Store-Key der Integration ist
+`openwrt_router.intelligence` (`const.py:581-582`); `openwrt_router.client_stability` ist frei.
+**[CS-Entscheidung]** Trotzdem Key `openwrt_router.client_history`, damit Datei und Modul
+`client_stability.py` (v1.36, ohne Store) nicht verwechselt werden. Neue Module heißen
+`client_history.py`, `client_analysis.py`, `client_engine.py`, `client_entities.py`,
+`client_views.py` (kein Treffer im Repo). Neue Übersetzungsschlüssel `stability_score`,
+`connection_quality`, `reconnects_24h`, `connection_uptime`, `last_disconnect`: kein Treffer
+in `strings.json`. Die neuen unique_ids beginnen mit `openwrt_router_client_`; bestehende
+Muster sind `{entry_id}_…` und die Tracker-Formen (`device_tracker.py:81-90`) → keine Kollision.
+
+### 1.4 Live-Prüfung TX/RX-Rate (F7, nur lesend, 2026-11-16)
+
+`ubus call hostapd.<if> get_clients` (`rate.rx/tx`) gegen `iwinfo <if> assoclist` und
+`ubus call iwinfo assoclist` auf dem Gateway und einem Dumb-AP mit usteer (2,4 GHz):
+- 5 200 000 ↔ 52,0 MBit/s (MCS 5, 20 MHz); 6 500 000 ↔ 65 000 kbit/s; 3 900 000 ↔ 39 000 kbit/s.
+- **Ergebnis:** Einheit von hostapd `rate` ist **10 bit/s**; MBit/s = Wert / 100 000. Es ist die
+  PHY-Rate des letzten Frames (Momentwert), keine Durchsatzmessung.
+- Folge: Raten werden als Stundenmittel/Min in MBit/s angezeigt. **Nicht im Score**: bei wenig
+  Verkehr meldet hostapd niedrige Basisraten (beobachtet 12 vs. 54 MBit/s beim selben Client
+  rx/tx), das wäre ein Fehlurteil über ruhende IoT-Geräte.
+- Nicht geprüft: 5/6 GHz (keine Clients auf diesen Interfaces zum Zeitpunkt), HE/EHT-Raten.
+
 ### 1.2 Fehlende Abhängigkeiten und Grenzen der Datenquelle (dokumentiert)
 
 - **`connected_time` fehlt** in `get_clients` → Verbindungsdauer nur aus eigener Beobachtung.
@@ -58,8 +141,8 @@ Kennzeichnung wie im NI-Plan: **verifiziert** (mit `datei:zeile`, Stand `4cef6a8
   „IP sichtbar“ (Lease und/oder ARP-Eintrag im selben Poll, abgeleitet).
 - **Numerische 802.11-Reason-Codes:** nur der Klartext aus dem Parser; Codes nur, wenn der
   Parser sie aus der Zeile liest (Annahme, Prüfweg: Live-Zeilen in `tests/test_net_wifi.py`).
-- **TX/RX-Raten:** Momentwerte alle 60 s, Einheit nicht live geprüft (NI W12) → nur Anzeige
-  (Stundenmittel), **nicht im Score** (Offene Frage F7).
+- **TX/RX-Raten:** Momentwerte alle 60 s, Einheit live geprüft (1.4: 10 bit/s) → nur Anzeige
+  (Stundenmittel in MBit/s), **nicht im Score** (F7).
 - **VLAN je Client:** nur indirekt über SSID → Netzwerk; ob `ap_interfaces` das Netzwerk trägt,
   ist offen (Annahme, Prüfweg in B6). Ohne verlässliche Zuordnung entfällt der VLAN-Filter.
 - **APs ohne usteer und Zufalls-MACs:** Grenzen K5/K6 aus NI gelten weiter (Roaming-Untererkennung,
@@ -80,7 +163,7 @@ flowchart LR
   F["FleetOutageTracker"] --> E
   CS --> M["client_history: Zustandsautomat je MAC → Stunden-/Tagesbuckets"]
   M --> A["client_analysis: Score, Muster, Trend, AP-Vergleich, Empfehlungen"]
-  CS --> S[("Store openwrt_router.client_stability")]
+  CS --> S[("Store openwrt_router.client_history")]
   CS -->|Dispatcher| N["client_entities (nur ausgewählte Clients)"]
   CS --> P["/api/openwrt_topology/intelligence/clients/*"]
 ```
@@ -145,7 +228,7 @@ blocked, `other`), `inactivity`, `leave` (`local_request`, STA verlässt), `unkn
 | Stundenbuckets | je (MAC, Stunde, AP) | 1 h | 7 Tage (168 h) | Store, beim Schließen gepackt |
 | Tagesbuckets | je (MAC, Tag, AP) + Disconnect-Stunden-Histogramm (dünn) | 1 d | `retention_days` (Std. 30, max. 90) | Store |
 
-Felder eines Buckets: `observed_s, online_s, gap_s, sessions, longest_stable_s,
+Felder eines Buckets: `observed_s, online_s, gap_s, sessions, associations, longest_stable_s,
 dc_error, dc_inactivity, dc_leave, dc_unknown, dc_infra, reconnects, roams_in, roams_out,
 roam_flaps, band_changes, auth_fail, assoc_fail, dhcp_fail, rssi_n, rssi_sum, rssi_min,
 rssi_max, weak_s (≤ −75 dBm), ip_visible_n, rate_rx_sum, rate_tx_sum, rate_n`.
@@ -180,7 +263,7 @@ Je Teilbereich k: Teilwert `s_k ∈ [0,100]`, Abdeckung `c_k ∈ [0,1]`, Gewicht
 | k | Gewicht | Kennzahl x (je 24 beobachtete Online-Stunden) | Teilwert | Abdeckung |
 |---|---|---|---|---|
 | D Abbrüche | 30 | `1,0·error + 0,75·unknown + 0,5·inactivity + 0,25·leave` (`infra` 0) | `100·e^(−x/4)` | `observed_s`-Anteil |
-| R Reconnects | 15 | Reconnects | `100·e^(−x/3)` | Log-Abdeckung des Orts-Routers (ohne Log `unknown`) |
+| R Reconnects | 15 | Reconnects (nur NI-Event `wifi.reconnect`, 1.3) | `100·e^(−x/3)` | Log-Abdeckung des Orts-Routers (ohne Log `unknown`) |
 | U Verbindungsdauer | 15 | Median stabile Session h | `100·min(1, ln(1+x)/ln(1+6))` | ≥ 1 Session ≥ 1 h beobachtet oder laufende |
 | S Signal | 20 | RSSI-Mittel m, Anteil schwach q | `100·clamp((m+85)/25)·(1−0,5·q)` | ≥ 10 RSSI-Werte |
 | A Auth-Fehler | 10 | Fehlversuche (W3: Versuche, nicht Zeilen) | `100·e^(−x/2)` | Log-Abdeckung |
@@ -201,7 +284,8 @@ Je Teilbereich k: Teilwert `s_k ∈ [0,100]`, Abdeckung `c_k ∈ [0,1]`, Gewicht
 
 ### 4.1 Eigener Store-Key [Vorschlag]
 
-`Store(hass, 1, "openwrt_router.client_stability", minor_version=1)`, eigene Datei. Gründe:
+`Store(hass, 1, "openwrt_router.client_history", minor_version=1)`, eigene Datei (Name siehe
+1.3; vom Master bestätigt: eigener Key, Kappe 3 MB, Speichern höchstens alle 300 s). Gründe:
 1. Der NI-Store ist mit 1,5 MB gedeckelt und in den Lasttests schon voll (P6-11: 1 499 794 B);
    Client-Historie würde NI-Events verdrängen.
 2. Anderer Rhythmus: Buckets schließen stündlich; NI schreibt alle 300 s.
@@ -229,7 +313,7 @@ Roaming-Clients erzeugen mehr Zeilen (je AP eine). Messung mit `prepare_save_jso
   Tagesbuckets aktiver Clients zuletzt. Warnung im Log bei Kürzung.
 - **Client-Grenze:** `max_clients` 1000. Gastclients (gesamt online < 1 h, seit 7 d weg) und
   private MACs ohne Wiederkehr nach 7 d fallen beim Bereinigen raus.
-- **Schreiben:** nur bei Änderung (`dirty`), `async_delay_save` 900 s mit `_save_pending`
+- **Schreiben:** nur bei Änderung (`dirty`), `async_delay_save` 300 s mit `_save_pending`
   (NI-Muster). Buckets werden beim Schließen sofort gepackt → `_data_to_save` baut nur
   Listen aus fertigen Strings (kein JSON-Aufbau im Event-Loop über ms). Letzter Unload: sofort
   schreiben und warten (NI-Muster). Kein Schreiben, wenn sich nichts geändert hat (Test).
@@ -319,6 +403,7 @@ Allgemein: jeder Commit mit `ruff check`/`ruff format --check` (`uvx ruff@0.17.3
 | **B5** API-Routen | 6 (Backend) | `topology_panel.py` (Routen registrieren), neu `client_views.py` (View-Klassen), neu `tests/test_client_routes.py` | 401/403/410 wie P7; Filter, Limits, Fenster; Settings-POST validiert |
 | **B6** Dashboard | 6 | `frontend/topology/src/components/StabilityView.tsx` (neu), `ClientStabilityDetail.tsx` (neu), `StabilityCharts.tsx` (neu), `Sidebar.tsx`, `api.ts`, `types.ts`, `topology.css`, `frontend/dist/*` | `--frontend`-Build grün; Bundle-Zuwachs ≤ 40 kB; Sichtprüfung Desktop/Handy (Screenshot an Master; Handy-Prüfung durch Nutzer offen) |
 | **B7** Entitäten | 7 | neu `client_entities.py`, `sensor.py` (Setup-Aufruf), `strings.json`, `translations/en.json`, `translations/de.json`, neu `tests/test_client_entities.py` | 0 Entities ohne Auswahl; 5 je Auswahl, Standard an/aus wie 8; Abwahl entfernt; Musterprüfung `unique_id`; Übersetzungsschlüssel-Test |
+| **B7a** Ablösung v1.36-Zählung | 7 | `coordinator.py` (`AssociationTracker` nicht mehr füttern, `_client_stability_snapshot` liest `cs.counts_24h`), `client_stability.py` (Deprecation-Hinweis), `fleet.py` (`client_counts` aus CS), `client_engine.py`, `tests/test_client_stability.py` (Erwartungen an 30-s-Definition), neu `tests/test_client_counts_migration.py` | unique_ids und Attributnamen unverändert (Test); `unstable_clients` unbekannt ohne Log; Ping-Pong und 60-s-Wiederkehr zählen nicht; Zählung übersteht Neustart; `enabled=false` lässt Zählung laufen; CHANGELOG-„Changed“-Text vorbereitet |
 | **B8** Persistenz-Härtung und Performance | 8 + 9 | `client_engine.py`, `client_history.py`, neu `tests/test_client_scale.py` | Messung `prepare_save_json` 150 und 1000 Clients × 30 d im Plan nachgetragen; Kürzreihenfolge, Aufbewahrung, Gäste, Identitätswechsel, Uhrsprung, HA-Neustart getestet; Ingest 1000 Clients < 20 ms (Test mit Budget); alle bestehenden Tests grün |
 | **B9** Doku | 10 | `README.md`, `CHANGELOG.md`, `TODO.md`, neu `docs/client-stability.md`, dieser Plan | Formel, Gewichte, Grenzen (1.2), Rückweg, Speicher; Abschlussbericht mit Testergebnis |
 
@@ -327,7 +412,7 @@ HA-Neustart → B1/B2; schwaches Signal, Score → B3; AP-Ausfall mehrere Client
 Aggregation, Aufbewahrung, Identitätswechsel, hohe Client-Anzahl → B1/B8.
 
 Rückweg: CS ist abschaltbar über Setting `enabled` (Standard an, F8); Entfernen der Datei
-`.storage/openwrt_router.client_stability` löscht die Historie; Revert der Commits B1–B9 lässt NI
+`.storage/openwrt_router.client_history` löscht die Historie; Revert der Commits B1–B9 lässt NI
 unberührt (Hook ist ohne Beobachter wirkungslos).
 
 ## 11. Abhängigkeiten zu NI (P5-Fix, P7, P8)
@@ -340,6 +425,7 @@ unberührt (Hook ist ohne Beobachter wirkungslos).
 | D4 | NI-Settings `exclusions` und Settings-POST-Muster (P7) | B2, B5 | lesend |
 | D5 | Flotten-Anker (P6-9), `sensor.py`-Setup | B7 | `sensor.py` ist P6, nicht P7; trotzdem nach P7 wegen Rebase |
 | D6 | P8 ändert `README.md`, `CHANGELOG.md`, `TODO.md`, `coordinator.py` (`_record_events`) | B9 | B9 erst nach P8 |
+| D8 | `coordinator.py` wird in NI P8 geändert (`_record_events`) | B7a | B7a erst nach P8 |
 | D7 | NI-Incident-Schnittstelle (Fenster der Wurzeln, `cause_status`) | B4 | lesend über eine kleine Accessor-Methode in `net_engine.py` (Teil des Hooks in B2) |
 
 B1 und B3 (reine Module, neue Dateien) berühren keine NI-Datei und könnten **vor** der Freigabe
@@ -349,6 +435,7 @@ gebaut werden, falls der Master das will (F9).
 
 | Abschnitt | Anforderung | Phase | Bemerkung |
 |---|---|---|---|
+| 1 | Keine doppelte Datenhaltung (v1.36-Zählung, NI-Reconnects) | B7a | eine Reconnect-Quelle (1.3) |
 | 2 | Online/Offline, letzte Verbindung/Trennung, Dauer | B1, B2 | Dauer nur beobachtet (kein `connected_time`) |
 | 2 | Disconnects/Reconnects, Reason-Codes | B1, B2 | Klartext-Gründe; numerische Codes teils **nicht machbar** (1.2) |
 | 2 | Auth-, Assoc-, Handshake-, DHCP-Fehler | B2 | aus NI-Events/Zeilen |
@@ -372,7 +459,7 @@ gebaut werden, falls der Master das will (F9).
 
 | Nr | Frage | Empfehlung |
 |---|---|---|
-| F1 | Eigener Store-Key oder NI-Store? | **Eigener Key** `openwrt_router.client_stability`, Kappe 3 MB (4.1) |
+| F1 | Eigener Store-Key oder NI-Store? | **Eigener Key** `openwrt_router.client_history`, Kappe 3 MB (4.1) |
 | F2 | Wie viele Clients dürfen Entities bekommen? | **25**, je 5 Sensoren, 2 an / 3 aus |
 | F3 | Kabelclients ganz ausblenden oder als „keine Daten“ listen? | **Ausblenden** in der Stabilitätstabelle, Hinweis im Tab |
 | F4 | `inactivity`-Abbrüche: Gewicht 0,5 und Schalter `sleepy` je Client? | **Ja** |
@@ -381,6 +468,12 @@ gebaut werden, falls der Master das will (F9).
 | F7 | TX/RX-Raten in den Score? | **Nein**, nur Anzeige, bis eine lesende Live-Prüfung (`get_clients` gegen `iwinfo assoclist` auf einem AP) die Einheit belegt; braucht Freigabe des Nutzers |
 | F8 | Gesamtschalter `enabled` für CS? | **Ja**, Standard an (Rückweg ohne Revert) |
 | F9 | B1 und B3 (reine neue Dateien) schon vor der Freigabe bauen? | **Ja**, spart Zeit, kein Konflikt mit NI-1 |
+| F10 | `AssociationTracker` nach B7a sofort löschen oder ein Release als ungenutzt behalten? | **Sofort löschen** samt Tests (rein intern, keine öffentliche Schnittstelle) |
+| F11 | Verhaltensänderung der Reconnect-Zahl (300 s → 30 s, Ping-Pong) annehmen? | **Ja**, eine Quelle; im CHANGELOG als „Changed“ |
+
+Antworten des Masters (2026-11-16): F1–F9 ja; F1 mit Kappe 3 MB und Speichern höchstens alle
+300 s; F7 Live-Prüfung erlaubt (nur lesend) → erledigt in 1.4. F10, F11 und die Entscheidung in
+1.3 sind offen.
 
 ## Prüfprotokoll
 
@@ -389,3 +482,8 @@ gebaut werden, falls der Master das will (F9).
   `log_parser.py` (Zählarten), `const.py`, `device_tracker.py`, Panel-Struktur gelesen.
   Nicht geprüft: Live-Daten (keine Router-Abfrage in Phase A), `ap_interfaces`-Feld `network`,
   Laufzeit des HA-Store-Schreibens bei 1,5 MB.
+- 2026-11-16 CS-1 (Nachtrag nach Master-Hinweis): `client_stability.py` (v1.36) und alle
+  Aufrufer analysiert (1.3), Reconnect-Definitionen verglichen, Store-Key/Modulnamen/
+  Übersetzungsschlüssel auf Kollision geprüft, Live-Prüfung der Raten auf Gateway und einem AP
+  (nur `ubus call … get_clients`, `iwinfo assoclist`; nichts geändert). Rückweg: entfällt
+  (nur Lesen).
