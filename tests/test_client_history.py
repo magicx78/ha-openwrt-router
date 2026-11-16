@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import itertools
 import json
 from pathlib import Path
 
@@ -57,6 +58,7 @@ R3 = "router_c"
 I = 60.0  # poll interval
 T0 = 1_800_000_000.0  # exact hour border (500000 * 3600)
 H0 = int(T0 // 3600)
+N = len(BUCKET_FIELDS)
 
 
 def obs(mac: str = M1, rssi: int | None = -55, **kw) -> ClientObs:
@@ -108,6 +110,7 @@ def test_module_imports_no_home_assistant() -> None:
     assert not [m for m in modules if m.startswith("homeassistant")]
     assert set(modules) <= {
         "__future__",
+        "itertools",
         "logging",
         "math",
         "re",
@@ -163,18 +166,40 @@ def test_bucket_fields_order() -> None:
         "associations",
         "longest_stable_s",
     )
-    assert BUCKET_FIELDS[-4:] == (
+    # the plan's 28 fields first, then the follow-up fields
+    assert BUCKET_FIELDS[24:28] == (
         "ip_visible_n",
         "rate_rx_sum",
         "rate_tx_sum",
         "rate_n",
     )
-    assert len(BUCKET_FIELDS) == 28 == len(Bucket._fields)
+    assert BUCKET_FIELDS[28:32] == (
+        "online_2g_s",
+        "online_5g_s",
+        "online_6g_s",
+        "session_s_sum",
+    )
+    assert BUCKET_FIELDS[32:] == tuple(
+        f"sess_{n}"
+        for n in (
+            "lt5m",
+            "lt15m",
+            "lt30m",
+            "lt1h",
+            "lt2h",
+            "lt4h",
+            "lt6h",
+            "lt12h",
+            "lt24h",
+            "ge24h",
+        )
+    )
+    assert len(BUCKET_FIELDS) == 42 == len(Bucket._fields)
     assert tuple(Bucket._fields) == BUCKET_FIELDS
 
 
 def test_pack_unpack_round_trip() -> None:
-    values = [0] * 28
+    values = [0] * N
     values[0] = 3600
     values[1] = 3600
     values[3] = 1
@@ -185,8 +210,8 @@ def test_pack_unpack_round_trip() -> None:
     packed = pack_bucket(values)
     assert packed == "3600,3600,,1,,,,,,,,,,,,,,,,60,-3300,-58,-52"
     assert unpack_bucket(packed) == values
-    assert pack_bucket([0] * 28) == ""
-    assert unpack_bucket("") == [0] * 28
+    assert pack_bucket([0] * N) == ""
+    assert unpack_bucket("") == [0] * N
     # open buckets keep exact floats
     values[0] = 12.25
     assert unpack_bucket(pack_bucket(values)) == values
@@ -194,7 +219,7 @@ def test_pack_unpack_round_trip() -> None:
 
 @pytest.mark.parametrize(
     "bad",
-    [None, 5, "a,b", ",".join(["1"] * 29), "-5", "nan", "inf", "1" * 500],
+    [None, 5, "a,b", ",".join(["1"] * 43), "-5", "nan", "inf", "1" * 700],
 )
 def test_unpack_rejects_damaged(bad) -> None:
     assert unpack_bucket(bad) is None
@@ -897,3 +922,120 @@ def test_gap_booking_stops_after_a_day() -> None:
     assert hist.live(M1).state == STATE_UNKNOWN
     assert total(hist).gap_s <= ch.GAP_TRACK_S
     assert total(hist).gap_s >= ch.GAP_TRACK_S - 3600
+
+
+# --- follow-up: band share and session durations -------------------------------
+
+
+def band_poll(now: float, band: str | None, router: str = R1) -> PollInput:
+    return PollInput(
+        router=router,
+        now=now,
+        interval=I,
+        fresh=True,
+        clients=(ClientObs(M1, band=band, rssi=-55),),
+    )
+
+
+def test_band_key_spellings() -> None:
+    assert [ch.band_key(b) for b in ("2.4g", "2g", "2.4 GHz", "5G", "6ghz")] == [
+        "2.4g",
+        "2.4g",
+        "2.4g",
+        "5g",
+        "6g",
+    ]
+    assert ch.band_key("60g") is None and ch.band_key(None) is None
+
+
+def test_online_time_is_booked_per_band() -> None:
+    hist = ClientHistory()
+    run(hist, [band_poll(T0 + k * I, "5g") for k in range(4)])  # 180 s on 5 GHz
+    run(hist, [band_poll(T0 + k * I, "2.4g") for k in range(4, 7)])
+    tot = total(hist)
+    # the interval before a sample is booked with the previous sample's band
+    assert ch.band_online(tot) == {"2.4g": 120, "5g": 240, "6g": 0}
+    assert tot.online_s == 360
+    # no band reported: online time without a band share
+    hist2 = ClientHistory()
+    run(hist2, [band_poll(T0 + k * I, None) for k in range(3)])
+    assert ch.band_online(total(hist2)) == {"2.4g": 0, "5g": 0, "6g": 0}
+    assert total(hist2).online_s == 120
+
+
+def test_new_session_uses_band_of_its_first_sample() -> None:
+    hist = ClientHistory()
+    run(hist, [band_poll(T0 + k * I, "2.4g") for k in range(2)])
+    run(hist, [poll(R1, T0 + k * I, []) for k in range(2, 6)])  # offline
+    hist.ingest(
+        PollInput(
+            router=R1,
+            now=T0 + 360,
+            interval=I,
+            fresh=True,
+            clients=(ClientObs(M1, band="6g"),),
+            events=(ClientEvent(M1, EV_CONNECT, T0 + 330, R1),),
+        )
+    )
+    assert ch.band_online(total(hist))["6g"] == 30
+
+
+def test_session_bins() -> None:
+    assert ch.session_bin(0) == 0
+    assert ch.session_bin(299) == 0
+    assert ch.session_bin(300) == 1
+    assert ch.session_bin(3599) == 3
+    assert ch.session_bin(3600) == 4
+    assert ch.session_bin(86400) == 9
+    assert ch.session_bin(10**7) == 9
+    assert len(ch.SESSION_BIN_HOURS) == ch.SESSION_BINS == 10
+    hours = ch.SESSION_BIN_HOURS
+    assert all(a < b for a, b in itertools.pairwise(hours))
+    assert hours[4] == pytest.approx(2**0.5)  # between 1 h and 2 h
+
+
+def test_session_end_books_duration_histogram() -> None:
+    hist = ClientHistory()
+    run(hist, [poll(R1, T0 + k * I, [M1]) for k in range(3)])  # until T0+120
+    down = (ClientEvent(M1, EV_DISCONNECT, T0 + 150, R1, reason="timeout"),)
+    hist.ingest(poll(R1, T0 + 180, [], events=down))
+    run(hist, [poll(R1, T0 + 180 + k * I, []) for k in range(1, 3)])
+    tot = total(hist)
+    assert tot.session_s_sum == 150
+    assert ch.session_histogram(tot) == (1, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    assert tot.longest_stable_s == 150
+
+
+def test_day_buckets_merge_new_fields() -> None:
+    hist = ClientHistory()
+    run(hist, [band_poll(T0 + k * I, "5g") for k in range(61)])  # closes hour H0
+    for k in range(1, 5):
+        hist.ingest(PollInput(router=R1, now=T0 + 3600 + k * I, interval=I, fresh=True))
+    hist.ingest(PollInput(router=R1, now=T0 + 3 * 3600, interval=I, fresh=True))
+    day = sum_buckets(d.bucket for d in hist.days(M1))
+    assert day.online_5g_s == day.online_s == 3600
+    assert day.session_s_sum == 3600
+    assert ch.session_histogram(day)[4] == 1  # 1 h .. 2 h
+
+
+def test_old_format_rows_load_with_new_fields_zero() -> None:
+    hist = ClientHistory()
+    run(hist, [band_poll(T0 + k * I, "5g") for k in range(70)])
+    data = json.loads(json.dumps(hist.to_dict()))
+    raw = data["clients"][M1]
+
+    def old(row: str) -> str:
+        index, ap, packed = row.split(":", 2)
+        fields = packed.split(",")[:28]
+        return f"{index}:{ap}:" + ",".join(fields).rstrip(",")
+
+    for key in ("h", "ho", "d"):
+        raw[key] = [old(r) for r in raw.get(key, [])]
+    loaded = ClientHistory.from_dict(data)
+    assert M1 in loaded
+    tot = total(loaded)
+    assert tot.online_s == total(hist).online_s
+    assert tot.online_5g_s == 0 and tot.session_s_sum == 0
+    # and it keeps working with the new fields from here on
+    run(loaded, [band_poll(T0 + k * I, "5g") for k in range(70, 72)])
+    assert total(loaded).online_5g_s == 120

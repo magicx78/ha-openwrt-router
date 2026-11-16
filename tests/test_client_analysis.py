@@ -28,6 +28,8 @@ from custom_components.openwrt_router.client_analysis import (
     PART_U,
     PART_W,
     REASON_AP_CHANGED,
+    REASON_BAND_CHANGED,
+    REASON_BAND_UNKNOWN,
     REASON_FEW_SAMPLES,
     REASON_LOW_COVERAGE,
     REASON_TOO_SHORT,
@@ -60,8 +62,10 @@ from custom_components.openwrt_router.client_analysis import (
     signal_trend_from_days,
     time_pattern,
     time_pattern_from_meta,
+    weighted_median,
 )
 from custom_components.openwrt_router.client_history import (
+    SESSION_BIN_HOURS,
     Bucket,
     ClientHistory,
     ClientObs,
@@ -412,8 +416,18 @@ def test_time_pattern_ignores_uncovered_hours() -> None:
 # --- signal trend -------------------------------------------------------------
 
 
-def day_bucket(mean: int, n: int = 1440, observed: int = 86400, online: int = 86400):
-    return Bucket(observed_s=observed, online_s=online, rssi_n=n, rssi_sum=mean * n)
+def day_bucket(
+    mean: int,
+    n: int = 1440,
+    observed: int = 86400,
+    online: int = 86400,
+    band: str | None = "5g",
+) -> Bucket:
+    fields = {"2.4g": "online_2g_s", "5g": "online_5g_s", "6g": "online_6g_s"}
+    extra = {fields[band]: online} if band else {}
+    return Bucket(
+        observed_s=observed, online_s=online, rssi_n=n, rssi_sum=mean * n, **extra
+    )
 
 
 def trend_days(n_days: int, old: int, new: int, **kw) -> dict[int, dict[str, Bucket]]:
@@ -561,8 +575,10 @@ def test_collect_window_sessions_from_transitions() -> None:
     now = T0 + 7500
     win = collect_window(hist, M1, now)
     assert win.ongoing_h is None
-    assert win.sessions_h == (pytest.approx(2.0),)
-    assert score_window(win).parts[PART_U].metric == pytest.approx(2.0)
+    assert win.sessions_h == ()
+    # a 2 h session lands in the 2 h .. 4 h bin (representative sqrt(8) h)
+    assert win.session_hist[5] == 1 and sum(win.session_hist) == 1
+    assert score_window(win).parts[PART_U].metric == pytest.approx(SESSION_BIN_HOURS[5])
 
 
 def test_collect_window_days_and_analysis_wrappers() -> None:
@@ -579,3 +595,96 @@ def test_collect_window_days_and_analysis_wrappers() -> None:
 def test_default_settings_object() -> None:
     s = ScoreSettings()
     assert dict(s.weights) == dict(DEFAULT_WEIGHTS) and not s.sleepy
+
+
+# --- follow-up: band rule and session histogram -------------------------------
+
+
+def test_signal_trend_same_ap_band_changed() -> None:
+    days = trend_days(14, -55, -65)
+    for i in range(7, 14):
+        days[D0 + i] = {AP1: day_bucket(-65, band="2.4g")}
+    res = signal_trend_from_days(days, D0 + 13)
+    assert res.status == STATUS_NOT_COMPARABLE and res.reason == REASON_BAND_CHANGED
+    assert res.ap == AP1
+
+
+def test_signal_trend_same_ap_same_band_is_comparable() -> None:
+    days = trend_days(14, -55, -65, band="2.4g")
+    res = signal_trend_from_days(days, D0 + 13)
+    assert res.status == STATUS_DEGRADED and res.ap == AP1
+
+
+def test_signal_trend_band_split_below_seventy_percent() -> None:
+    days: dict[int, dict[str, Bucket]] = {}
+    for i in range(14):
+        b = day_bucket(-55 if i < 7 else -65, band=None)
+        # same AP, 60 % on 5 GHz and 40 % on 2.4 GHz
+        days[D0 + i] = {AP1: b._replace(online_5g_s=51840, online_2g_s=34560)}
+    res = signal_trend_from_days(days, D0 + 13)
+    assert res.status == STATUS_NOT_COMPARABLE and res.reason == REASON_BAND_CHANGED
+
+
+def test_signal_trend_band_not_reported_is_not_comparable() -> None:
+    res = signal_trend_from_days(trend_days(14, -55, -65, band=None), D0 + 13)
+    assert res.status == STATUS_NOT_COMPARABLE and res.reason == REASON_BAND_UNKNOWN
+
+
+def test_weighted_median() -> None:
+    assert weighted_median([(1, 1), (2, 1), (3, 1)]) == 2
+    assert weighted_median([(1, 1), (2, 1), (3, 1), (4, 1)]) == 2.5
+    assert weighted_median([(5, 3), (1, 1)]) == 5
+    assert weighted_median([(1, 2), (9, 2)]) == 5
+    assert weighted_median([(1, 0)]) == 0
+    assert weighted_median([]) == 0
+
+
+def test_uptime_from_histogram_and_exact_lengths() -> None:
+    hist = [0] * 10
+    hist[0] = 3  # three short sessions
+    hist[7] = 2  # two of 6-12 h
+    part = score_window(stats(session_hist=tuple(hist), ongoing_h=None)).parts[PART_U]
+    assert part.included and part.metric == pytest.approx(SESSION_BIN_HOURS[0])
+    only_short = score_window(stats(session_hist=(4,), ongoing_h=None))
+    assert not only_short.parts[PART_U].included
+
+
+def _session_day(hist: ClientHistory, start: float, hours: int) -> None:
+    """One session of ``hours`` at AP1 starting at ``start``, then offline."""
+    for k in range(hours * 60 + 1):
+        hist.ingest(
+            PollInput(
+                router=AP1,
+                now=start + k * 60,
+                interval=60,
+                fresh=True,
+                clients=(ClientObs(M1, rssi=-60, band="5g"),),
+            )
+        )
+    end = start + hours * 3600
+    for k in range(1, 6):
+        hist.ingest(PollInput(router=AP1, now=end + k * 60, interval=60, fresh=True))
+
+
+def test_uptime_over_seven_days_sees_sessions_older_than_a_day() -> None:
+    hist = ClientHistory()
+    _session_day(hist, T0, 8)  # an 8 h session on day one
+    # keep the fleet fresh for three days without the client
+    t = T0 + 8 * 3600 + 300
+    end = T0 + 3 * DAY
+    while t < end:
+        t += 60
+        hist.ingest(PollInput(router=AP1, now=t, interval=60, fresh=True))
+    # the 24 h transitions no longer know the session ...
+    assert hist.transitions(M1) == ()
+    day = collect_window(hist, M1, t, hours=24)
+    week = collect_window(hist, M1, t, hours=168)
+    month = collect_window_days(hist, M1, t, days=30)
+    assert sum(day.session_hist) == 0
+    assert not score_window(day).parts[PART_U].included
+    # ... but the buckets do
+    for win in (week, month):
+        assert win.session_hist[7] == 1  # 6 h .. 12 h
+        part = score_window(win).parts[PART_U]
+        assert part.included and part.metric == pytest.approx(SESSION_BIN_HOURS[7])
+        assert part.value == 100

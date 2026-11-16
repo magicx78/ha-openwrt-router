@@ -31,15 +31,17 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, tzinfo
 from itertools import pairwise
-from statistics import median
 
 from .client_history import (
+    SESSION_BIN_HOURS,
     STATE_OFFLINE,
     TR_END,
     TR_START,
     Bucket,
     ClientHistory,
     DayMeta,
+    band_online,
+    session_histogram,
     sum_buckets,
 )
 
@@ -128,6 +130,10 @@ REASON_TOO_SHORT = "too_short"
 REASON_FEW_SAMPLES = "few_samples"
 REASON_LOW_COVERAGE = "low_coverage"
 REASON_AP_CHANGED = "ap_changed"
+# [CS-Entscheidung] Band problems get their own reasons: the panel can then
+# say "band changed" vs. "band not reported" instead of a generic AP change.
+REASON_BAND_CHANGED = "band_changed"
+REASON_BAND_UNKNOWN = "band_unknown"
 
 
 def cap_confidence(value: float) -> float:
@@ -252,8 +258,11 @@ class WindowStats:
     """Everything the score needs about one client and one time window.
 
     ``window_s`` is the window length, cut to the time since the client was
-    first seen. ``sessions_h`` are finished session lengths ending inside the
-    window, ``ongoing_h`` the running session (a lower bound) or None.
+    first seen. ``sessions_h`` are exact finished session lengths and
+    ``session_hist`` the counts per duration bin of the B1 buckets
+    (``client_history.SESSION_BIN_HOURS``); both describe sessions that ended
+    inside the window. ``ongoing_h`` is the running session (a lower bound)
+    or None.
     ``log_coverage`` is the log coverage of the client's router (0..1, None =
     no log, parts R/A/M unknown). ``patterns`` is the number of active
     recurring patterns, ``data_days`` the number of days with observed data.
@@ -263,6 +272,7 @@ class WindowStats:
     bucket: Bucket
     sessions_h: tuple[float, ...] = ()
     ongoing_h: float | None = None
+    session_hist: tuple[int, ...] = ()
     log_coverage: float | None = None
     patterns: int = 0
     data_days: int = 0
@@ -300,6 +310,23 @@ class ScoreResult:
     cls: str
     coverage: float
     parts: Mapping[str, PartResult]
+
+
+def weighted_median(items: Iterable[tuple[float, int]]) -> float:
+    """Median of ``(value, count)`` pairs; the mean of the two middle values
+    for an even total, like ``statistics.median``."""
+    pairs = sorted((float(v), int(n)) for v, n in items if n > 0)
+    total = sum(n for _v, n in pairs)
+    if total <= 0:
+        return 0.0
+    want = ((total - 1) // 2, total // 2)
+    picked: list[float] = []
+    seen = 0
+    for value, n in pairs:
+        while len(picked) < 2 and want[len(picked)] < seen + n:
+            picked.append(value)
+        seen += n
+    return (picked[0] + picked[1]) / 2
 
 
 def _per_day(count: float, online_s: float) -> float:
@@ -344,14 +371,22 @@ def score_window(
             raw[part] = (None, 0.0, None)
 
     # U: median stable session (finished plus running, lower bound)
-    lengths = [h for h in stats.sessions_h if h >= 0]
+    hist = [
+        (SESSION_BIN_HOURS[i], int(n))
+        for i, n in enumerate(stats.session_hist[: len(SESSION_BIN_HOURS)])
+        if n > 0
+    ]
+    lengths: list[tuple[float, int]] = [(h, 1) for h in stats.sessions_h if h >= 0]
+    lengths += hist
     if stats.ongoing_h is not None and stats.ongoing_h >= 0:
-        lengths.append(stats.ongoing_h)
-    long_enough = stats.ongoing_h is not None or any(
-        h * _HOUR >= UPTIME_MIN_SESSION_S for h in stats.sessions_h
+        lengths.append((stats.ongoing_h, 1))
+    long_enough = (
+        stats.ongoing_h is not None
+        or any(h * _HOUR >= UPTIME_MIN_SESSION_S for h in stats.sessions_h)
+        or any(h * _HOUR >= UPTIME_MIN_SESSION_S for h, _n in hist)
     )
     if lengths and long_enough:
-        med = float(median(lengths))
+        med = weighted_median(lengths)
         raw[PART_U] = (score_uptime(med), 1.0, med)
     else:
         raw[PART_U] = (None, 0.0, None)
@@ -417,9 +452,8 @@ def collect_window(
 
     The window ends at ``end`` (default ``now``) and covers the ``hours``
     hour buckets before it (the last one may be partial). [CS-Entscheidung]
-    Windows are aligned to whole hour buckets at the start. Sessions come from
-    the stored transitions (24 h), so part U of a 7-day window only sees the
-    last day plus the running session. None for an unknown MAC.
+    Windows are aligned to whole hour buckets at the start. Finished sessions
+    come from the bucket duration histograms. None for an unknown MAC.
     """
     live = history.live(mac)
     if live is None:
@@ -489,11 +523,14 @@ def _stats(
     # "Abdeckung = observed / Fensterlänge (seit erstem Sehen)"
     begin = max(start, live_first) if live_first is not None else start
     window_s = max(0.0, end - begin)
-    sessions, ongoing = session_lengths(history, mac, start, end, now)
+    # [CS-Entscheidung] Finished sessions come from the duration histogram of
+    # the buckets (any window, also beyond the 24 h of stored transitions);
+    # the exact lengths of ``session_lengths`` stay for the detail view.
+    _sessions, ongoing = session_lengths(history, mac, start, end, now)
     return WindowStats(
         window_s=window_s,
         bucket=bucket,
-        sessions_h=tuple(s / _HOUR for s in sessions),
+        session_hist=session_histogram(bucket),
         ongoing_h=ongoing / _HOUR if ongoing is not None else None,
         log_coverage=log_coverage,
         patterns=patterns,
@@ -670,10 +707,10 @@ def signal_trend_from_days(
 
     With at least 14 days of data span: 7 vs 7 days, else with at least 6
     days: 3 vs 3, else not comparable. Each window needs >= 100 RSSI values,
-    observed coverage >= 0.5 and >= 70 % of its online time at the same AP in
-    both windows. [CS-Entscheidung] The means are taken at that common AP
-    only. The band is not checked: B1 buckets are per router, not per band
-    (reported to the lead).
+    observed coverage >= 0.5 and >= 70 % of its online time at the same AP and
+    band in both windows (first the AP, then the band at that AP).
+    [CS-Entscheidung] The means are taken at that common AP only (B1 RSSI
+    sums are per AP, not per band).
     """
     days = sorted(
         d for d, aps in per_day.items() if any(b.observed_s for b in aps.values())
@@ -705,6 +742,9 @@ def signal_trend_from_days(
         or share_b < TREND_MIN_SAME_AP
     ):
         return SignalTrend(STATUS_NOT_COMPARABLE, REASON_AP_CHANGED, n, ap_a)
+    band_reason = _band_check(a, b, ap_a)
+    if band_reason is not None:
+        return SignalTrend(STATUS_NOT_COMPARABLE, band_reason, n, ap_a)
     ba, bb = a[ap_a], b[ap_a]
     if ba.rssi_n < TREND_MIN_SAMPLES or bb.rssi_n < TREND_MIN_SAMPLES:
         return SignalTrend(STATUS_NOT_COMPARABLE, REASON_FEW_SAMPLES, n, ap_a)
@@ -726,6 +766,30 @@ def _window_by_ap(
         for ap, bucket in per_day.get(day, {}).items():
             grouped.setdefault(ap, []).append(bucket)
     return {ap: sum_buckets(items) for ap, items in grouped.items()}
+
+
+def _dominant_band(win: Mapping[str, Bucket], ap: str) -> tuple[str | None, float]:
+    """Band with the most online time at ``ap`` and its share of all online
+    time of the window (all APs); None when no band was reported."""
+    total = sum(b.online_s for k, b in win.items() if k)
+    per_band = band_online(win[ap])
+    if total <= 0 or not any(per_band.values()):
+        return None, 0.0
+    band = max(sorted(per_band), key=lambda k: per_band[k])
+    return band, per_band[band] / total
+
+
+def _band_check(
+    a: Mapping[str, Bucket], b: Mapping[str, Bucket], ap: str
+) -> str | None:
+    """None when both windows spend >= 70 % at ``ap`` on the same band."""
+    band_a, share_a = _dominant_band(a, ap)
+    band_b, share_b = _dominant_band(b, ap)
+    if band_a is None or band_b is None:
+        return REASON_BAND_UNKNOWN
+    if band_a != band_b or min(share_a, share_b) < TREND_MIN_SAME_AP:
+        return REASON_BAND_CHANGED
+    return None
 
 
 def _dominant(win: Mapping[str, Bucket]) -> tuple[str | None, float]:

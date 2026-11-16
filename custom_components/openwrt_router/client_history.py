@@ -50,6 +50,7 @@ Excluded MACs (NI ``exclusions``) are filtered by B2 before the input is built;
 
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 import re
@@ -145,7 +146,7 @@ _ACCRUE_MAX_S = (HOURS_KEEP + 24) * 3600.0  # older time is pruned anyway
 _MAX_APS = 64
 _MAX_HOUR_ROWS = HOURS_KEEP * 16
 _MAX_DAY_ROWS = RETENTION_DAYS_MAX * 16
-_MAX_PACKED_LEN = 400
+_MAX_PACKED_LEN = 600
 _MAX_TEXT_LEN = 128
 
 _MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
@@ -181,6 +182,32 @@ BUCKET_FIELDS: tuple[str, ...] = (
     "rate_rx_sum",
     "rate_tx_sum",
     "rate_n",
+    # [CS-Entscheidung] Appended after the plan's 28 fields (follow-up to B1):
+    # online time per band (2.4/5/6 GHz; the rest of online_s is "band
+    # unknown") for the signal-trend rule "same AP and band", and the
+    # durations of sessions that ended in the bucket (sum plus a log-scale
+    # histogram) so part U can take a median over 7 and 30 days. Rows
+    # written before these fields simply lack the trailing fields and load
+    # as 0 (= unknown band, no session lengths).
+    "online_2g_s",
+    "online_5g_s",
+    "online_6g_s",
+    "session_s_sum",
+    *(
+        f"sess_{name}"
+        for name in (
+            "lt5m",
+            "lt15m",
+            "lt30m",
+            "lt1h",
+            "lt2h",
+            "lt4h",
+            "lt6h",
+            "lt12h",
+            "lt24h",
+            "ge24h",
+        )
+    ),
 )
 _N = len(BUCKET_FIELDS)
 _IX = {name: i for i, name in enumerate(BUCKET_FIELDS)}
@@ -204,6 +231,51 @@ I_IP = _IX["ip_visible_n"]
 I_RATE_RX = _IX["rate_rx_sum"]
 I_RATE_TX = _IX["rate_tx_sum"]
 I_RATE_N = _IX["rate_n"]
+I_SESSION_SUM = _IX["session_s_sum"]
+I_SESS_FIRST = _IX["sess_lt5m"]
+
+BAND_2G = "2.4g"
+BAND_5G = "5g"
+BAND_6G = "6g"
+BANDS: tuple[str, ...] = (BAND_2G, BAND_5G, BAND_6G)
+_BAND_INDEX = {
+    BAND_2G: _IX["online_2g_s"],
+    BAND_5G: _IX["online_5g_s"],
+    BAND_6G: _IX["online_6g_s"],
+}
+_BAND_ALIASES = {
+    "2.4g": BAND_2G,
+    "2g": BAND_2G,
+    "2.4": BAND_2G,
+    "2.4ghz": BAND_2G,
+    "5g": BAND_5G,
+    "5": BAND_5G,
+    "5ghz": BAND_5G,
+    "6g": BAND_6G,
+    "6": BAND_6G,
+    "6ghz": BAND_6G,
+}
+
+# Session duration histogram: upper edges in seconds (last bin open ended)
+# and the representative length of each bin in hours (geometric middle of
+# the edges; first bin 2.5 min, last bin 24 h as a lower bound).
+SESSION_EDGES_S: tuple[float, ...] = (
+    300.0,
+    900.0,
+    1800.0,
+    3600.0,
+    7200.0,
+    14400.0,
+    21600.0,
+    43200.0,
+    86400.0,
+)
+SESSION_BIN_HOURS: tuple[float, ...] = (
+    300.0 / 2 / 3600,
+    *((lo * hi) ** 0.5 / 3600 for lo, hi in itertools.pairwise(SESSION_EDGES_S)),
+    24.0,
+)
+SESSION_BINS = len(SESSION_BIN_HOURS)
 _DC_INDEX = {
     DC_ERROR: _IX["dc_error"],
     DC_INACTIVITY: _IX["dc_inactivity"],
@@ -256,6 +328,45 @@ class Bucket(NamedTuple):
     rate_rx_sum: int = 0
     rate_tx_sum: int = 0
     rate_n: int = 0
+    online_2g_s: int = 0
+    online_5g_s: int = 0
+    online_6g_s: int = 0
+    session_s_sum: int = 0
+    sess_lt5m: int = 0
+    sess_lt15m: int = 0
+    sess_lt30m: int = 0
+    sess_lt1h: int = 0
+    sess_lt2h: int = 0
+    sess_lt4h: int = 0
+    sess_lt6h: int = 0
+    sess_lt12h: int = 0
+    sess_lt24h: int = 0
+    sess_ge24h: int = 0
+
+
+def band_key(value: object) -> str | None:
+    """``2.4g`` / ``5g`` / ``6g`` for the usual band spellings, else None."""
+    if not isinstance(value, str):
+        return None
+    return _BAND_ALIASES.get(value.strip().lower().replace(" ", ""))
+
+
+def band_online(bucket: Bucket) -> dict[str, int]:
+    """Online seconds per band; the rest of ``online_s`` has no known band."""
+    return {band: bucket[i] for band, i in _BAND_INDEX.items()}
+
+
+def session_bin(seconds: float) -> int:
+    """Histogram bin of a session length."""
+    for i, edge in enumerate(SESSION_EDGES_S):
+        if seconds < edge:
+            return i
+    return SESSION_BINS - 1
+
+
+def session_histogram(bucket: Bucket) -> tuple[int, ...]:
+    """Counts of sessions that ended in the bucket, per duration bin."""
+    return tuple(bucket[I_SESS_FIRST : I_SESS_FIRST + SESSION_BINS])
 
 
 def _zeros() -> list[float]:
@@ -931,6 +1042,10 @@ class ClientHistory:
     ) -> None:
         pc = c.pend_connect
         connect_ts = pc.ts if pc is not None and pc.ts <= now else None
+        if (c.acc is None or c.state == STATE_OFFLINE) and obs.band is not None:
+            # A new session is booked with the band of its first sample; an
+            # ongoing one with the band of the previous sample (like RSSI).
+            c.band = _opt_text(obs.band)
         if c.acc is None:
             # First sighting: a connect line in this poll window dates the start.
             window = FRESH_FACTOR * float(poll.interval)
@@ -1075,7 +1190,10 @@ class ClientHistory:
         delta = _zeros()
         delta[_DC_INDEX[cls]] = 1
         if c.session_start is not None:
-            delta[I_LONGEST] = max(0.0, end - c.session_start)
+            length = max(0.0, end - c.session_start)
+            delta[I_LONGEST] = length
+            delta[I_SESSION_SUM] = length
+            delta[I_SESS_FIRST + session_bin(length)] = 1
         self._add(c, end, router, delta)
         self._transition(
             c,
@@ -1135,12 +1253,15 @@ class ClientHistory:
         if a is None:
             return
         weak = c.rssi is not None and c.rssi <= WEAK_SIGNAL_DBM
+        band_ix = _BAND_INDEX.get(band_key(c.band) or "")
         for hour_start, secs in _split(a, b):
             delta = _zeros()
             delta[I_OBSERVED] = secs
             delta[I_ONLINE] = secs
             if weak:
                 delta[I_WEAK] = secs
+            if band_ix is not None:
+                delta[band_ix] = secs
             self._add(c, hour_start, ap, delta)
 
     def _book_gap(self, c: _Client, now: float) -> None:
