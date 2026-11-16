@@ -31,7 +31,7 @@ Correlation (P5): the engine follows ``fleet.FleetOutageTracker`` (observer
 hook) and turns its state into ``router_unreachable`` / ``lan_unreachable``
 incidents. After every machine step (a poll of any router, an outage start
 or end) it builds the router tree from LLDP and ``trunk_port_map``
-(``net_rules.build_topology``, remembered per router while it is loaded)
+(``net_rules.build_topology``, an edge remembered up to a day while loaded)
 and links follow-up incidents and events to their root cause
 (``AlarmMachine.correlate``). The engine never talks to a router: it only reads
 data the coordinator already has, so a poll costs exactly the same router
@@ -559,7 +559,22 @@ class NetIntelligence:
 
     @callback
     def unregister(self, entry_id: str) -> None:
-        """A router's entry is unloaded; its stored data stays."""
+        """A router's entry is unloaded; its stored data stays. Its open
+        outage is resolved (``router_removed``): its state is unknown from
+        now on (P5 review E7)."""
+        resolved_at: float | None = None
+        if not self._closed and self._loaded:
+            try:
+                # at the last step: the machine clock is not moved here
+                now = self.machine.last_now
+                if now is not None and self.machine.resolve_router(entry_id, now):
+                    resolved_at = now
+            except Exception:
+                _LOGGER.warning(
+                    "Network intelligence could not resolve the outage of an "
+                    "unloaded router",
+                    exc_info=True,
+                )
         self._routers.discard(entry_id)
         self._last_data.pop(entry_id, None)
         self._infra.pop(entry_id, None)
@@ -573,6 +588,9 @@ class NetIntelligence:
             claims.pop(entry_id, None)
         if self._fleet_anchor == entry_id:
             self._hand_over_fleet()
+        if resolved_at is not None:
+            self._refresh(resolved_at)
+            self.schedule_save()
 
     def remove_router(self, entry_id: str) -> bool:
         """Forget all data of a router; True if anything was removed."""
@@ -705,7 +723,9 @@ class NetIntelligence:
             fresh,
             log_times=_log_times(batch, mark_before, accepted) if fresh else (),
             poll_interval=interval,
-            uplink_ports=self._topology.ports_of(entry_id),
+            # edges from fresh data only: a remembered port must not stay an
+            # uplink for ever (P5 review M3)
+            uplink_ports=self._topology.ports_of(entry_id, remembered=False),
         )
         findings = self._infra_findings(entry_id, snapshot, now)
         stored += self._store_findings(entry_id, findings, now, evidence)
@@ -758,9 +778,11 @@ class NetIntelligence:
             self.machine.set_routers(
                 "lan_unreachable", LAN_UNREACHABLE_KEY, self._lan_routers
             )
-        self._topology = self._build_topology()
+        self._topology = self._build_topology(now)
         result = self.machine.correlate(now, self._topology, self.ring)
         self.ring.set_parents(result.events)
+        if result:
+            self.schedule_save()  # new links and releases are state (L2)
         # Re-read after correlate: a root announced now may otherwise turn
         # out to be a child a moment later (P5 hand-over to P6).
         self._refresh(now)
@@ -901,7 +923,7 @@ class NetIntelligence:
             self.counters.add(router, kind, now)
         return event
 
-    def _build_topology(self) -> Topology:
+    def _build_topology(self, now: float) -> Topology:
         """Router tree from the last data of the loaded routers."""
         links: dict[str, RouterLinks] = {}
         for router in self._routers:
@@ -923,7 +945,7 @@ class NetIntelligence:
                 else {},
                 gateway=router in self._wan_gateways,
             )
-        topology = build_topology(links, self._uplinks)
+        topology = build_topology(links, self._uplinks, now)
         self._uplinks = dict(topology.uplinks)
         return topology
 

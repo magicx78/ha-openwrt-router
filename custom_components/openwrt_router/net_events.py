@@ -359,6 +359,9 @@ class Incident:
     reopen_count: int = 0
     occurrences: int = 0
     ignore_until: float | None = None
+    # P5 review E6: start of the current episode after a reopen (the
+    # correlation links a reopened incident by this time, not first_seen)
+    reopened_at: float | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -403,6 +406,7 @@ class Incident:
             "reopen_count": self.reopen_count,
             "occurrences": self.occurrences,
             "ignore_until": self.ignore_until,
+            "reopened_at": self.reopened_at,
         }
         if not compact:
             return full
@@ -474,6 +478,7 @@ class Incident:
             reopen_count=max(0, _opt(data, "reopen_count", _int, 0)),
             occurrences=max(0, _opt(data, "occurrences", _int, 0)),
             ignore_until=_num(data.get("ignore_until")),
+            reopened_at=_num(data.get("reopened_at")),
         )
 
 
@@ -496,6 +501,7 @@ _INCIDENT_DEFAULTS: dict[str, Any] = {
     "reopen_count": 0,
     "occurrences": 0,
     "ignore_until": None,
+    "reopened_at": None,
 }
 
 

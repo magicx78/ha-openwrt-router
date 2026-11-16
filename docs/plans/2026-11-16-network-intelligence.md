@@ -12,10 +12,10 @@ belegt), **Annahme** (plausibel, aber noch nicht belegt; Prüfweg steht dabei), 
 
 - **Stand:** 2026-11-16 · **Phase:** freigegeben (Nutzer, 2026-11-16), in Umsetzung
 - **Branch/PR:** `feature/network-intelligence` · Worktree `../ha-openwrt-router-net-intel` · PR #— · Basis: v1.39.0 (`main@f8a2ac7`)
-- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review, P5, P6 · **In Arbeit:** – · **Offen:** P5-Review-Fixes, P7, P8
-- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 in `1e8fb71`; P5 in `2ba7674`; P6 im Commit `feat(intel): health score, entities and events (P6)`
+- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review, P5, P6, P5-Review · **In Arbeit:** – · **Offen:** P7, P8
+- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 in `1e8fb71`; P5 in `2ba7674`; P6 in `4cef6a8`; Review-Fixes P5 im Commit `fix(intel): address P5 review`
 - **Blocker:** keine
-- **Nächster Schritt:** P6 erledigt; nächster Schritt P7 (davor eingeschoben: P5-Review-Fixes als eigener Commit, Auftrag des Masters).
+- **Nächster Schritt:** P6 und P5-Review erledigt; nächster Schritt P7.
 
 ### Entscheidungen (2026-11-16)
 
@@ -330,8 +330,10 @@ Entschieden in P5 (Umsetzer, 2026-11-16; Korrelation und Root-Cause):
   `lan_unreachable` (critical, Schlüssel `fleet:lan_unreachable`, Scope Flotte), solange der
   Tracker einen Flotten-Ausfall hat; `routers` = alle betroffenen Router. Beide sind
   Level-Regeln mit festem `stay_open`: Ohne Daten lösen sie sich nicht auf, nur über
-  `report_up` oder den nächsten erfolgreichen Poll. Auth-Fehler sind nie ein Ausfall. Ein
-  Router, dessen Entry nicht geladen ist, behält seinen offenen Incident (Zustand unbekannt).
+  `report_up` oder den nächsten erfolgreichen Poll. Auth-Fehler sind nie ein Ausfall.
+  Geändert im P5-Review (E7): Wird der Entry eines Routers entladen oder entfernt, wird sein
+  offener `router_unreachable` aufgelöst (Grund `router_removed`, Zeitpunkt = letzter Schritt
+  des Automaten). Er zählt danach nirgends mehr.
   Zustandswechsel werden als Events gespeichert (`system.router_unreachable` /
   `system.router_reachable`, die Flotte unter Router `fleet`), Quelle `fleet`.
 - **P5-3 Topologie (`build_topology`):** Ohne bekanntes Gateway gibt es keine Topologie.
@@ -339,7 +341,9 @@ Entschieden in P5 (Umsetzer, 2026-11-16; Korrelation und Root-Cause):
   aus den Trunk-Karten (ARP + FDB: `host_ip → Port`): Genommen wird der nächste Router, nur
   wenn er eindeutig ist, sonst keine Kante. Eine Identität, die zwei Router beanspruchen, wird
   ignoriert; Zyklen werden verworfen. Eine bekannte Kante bleibt gemerkt, solange beide Router
-  geladen sind (ein Router im Ausfall liefert keine Karte).
+  geladen sind (ein Router im Ausfall liefert keine Karte). Geändert im P5-Review (M3): Eine
+  gemerkte Kante ist nie `observed` und fällt 24 h nach der letzten Ableitung aus frischen
+  Daten weg (`Uplink.seen`). Sie liefert keinen Uplink-Port für den Detektor mehr.
 - **P5-4 Wurzelwahl:** Stufen wie c4: `lan_unreachable` 1, `router_unreachable` und
   `system_reboot` 2, `wan_down` 3, `wifi_radio_change` 4, `lan_uplink_down` 5,
   `wifi_mass_disconnect` 6, alles andere 7 (nur Kind). Ein Kind gehört zu einer Wurzel, wenn
@@ -354,10 +358,17 @@ Entschieden in P5 (Umsetzer, 2026-11-16; Korrelation und Root-Cause):
   bleibt bei späteren Belegen. Ein Kind mit eigener bestätigter Ursache behält sie gegen eine
   Hypothese. Ein Neustart unter dem Ausfall desselben Routers setzt beim Ausfall die bestätigte
   Ursache `router_reboot`.
-- **P5-6 Feste Verknüpfung:** Ein Kind bleibt Kind. Eine Wurzel kann später selbst Kind werden
-  (gestaffelte Polls, Settle); ihre Kinder behalten den direkten Elternteil und dessen Ursache
-  (keine Weitergabe; Grenze). `correlate` liefert nur neue Verknüpfungen. Events bekommen
-  `parent_id`, die Belege der Wurzel selbst nicht.
+- **P5-6 Verknüpfung (geändert im P5-Review, E6):** Ein Kind bleibt Kind, solange seine
+  Wurzel nicht länger als ihr Fenster + 1 h aufgelöst ist. Danach wird ein offenes Kind
+  freigegeben: `parent_id` weg, eine geerbte bestätigte Ursache wird Hypothese. Die
+  abgelaufene Wurzel ist kein Kandidat mehr. Ein aufgelöstes Kind behält seine Verknüpfung
+  (Verlauf). Beim erneuten Öffnen verliert ein Kind `parent_id` und die geerbte Ursache; es wird
+  nach dem Zeitpunkt des Wiederöffnens (`reopened_at`) neu verknüpft. Ein verwaistes
+  `parent_id` (Elternteil fehlt) wird beim Laden, nach dem Kappen und nach `remove_router`
+  gelöscht. Eine Wurzel kann später selbst Kind werden (gestaffelte Polls, Settle); ihre Kinder
+  behalten den direkten Elternteil und dessen Ursache (keine Weitergabe; Grenze).
+  `correlate` liefert neue Verknüpfungen und Freigaben. Events bekommen `parent_id`, die
+  Belege der Wurzel und Events ihrer eigenen Arten am selben Router nicht.
 - **P5-7 Regeln der Wurzeln:** `wan_down` erklärt `wan_unstable`/`wan_ip_changed` desselben
   Gateways, DNS-Events und WAN-Events außer `wan.down`. Ein Funkwechsel (`wifi_radio_change`,
   Info-Ereignis aus `dfs.radar_detected`, `dfs.new_channel`, `dfs.cac_failed` mit Interface)
@@ -478,6 +489,43 @@ Entschieden in P6 (Umsetzer, 2026-11-16; Score, Entities, Bus-Event, Wartungsmod
     Identitäten).
   - hassfest lokal nicht gelaufen (nur in CI); die Übersetzungsdateien sind
     JSON-geprüft und im Test gegen jede `translation_key` abgeglichen.
+
+Entschieden im P5-Review (Umsetzer, 2026-11-16; Masterentscheidungen E5–E7):
+
+- **E5 / K1 Router hinter einem Ausfall:** Ein `router_unreachable` übernimmt Incidents und
+  Events eines Routers hinter ihm nur, solange dieser Router zur selben Zeit (Fenster
+  eingeschlossen) einen eigenen `router_unreachable` hat. Ein erreichbarer Router dahinter
+  widerlegt die Verknüpfung (Fall: nur das Management des Gateways ist weg). `system_reboot`
+  nimmt die Router dahinter weiter mit (kurzes Fenster). `_GATEWAY_CHILDREN` bleibt Hypothese.
+- **E6 / K2 Freigabe:** siehe P5-6. Neues Feld `Incident.reopened_at` (kompakt nur gespeichert,
+  wenn gesetzt).
+- **E7 Entladene Router:** siehe P5-2. `AlarmMachine.resolve_router`.
+- **M1 Funkwechsel:** Ein Massen-Disconnect ist nur dann bestätigt Kind eines Funkwechsels,
+  wenn seine gespeicherten Events ein Interface dieses `phy` nennen; sonst Hypothese. Das
+  Fenster gilt ±60 s um jeden Beleg des Funkwechsels, nicht vom ersten bis zum letzten.
+- **M2 Eigene Incidents vor dem Ausfall:** Vor dem Beginn eines Ausfalls oder Neustarts sind
+  nur Client- und WLAN-Incidents (`wifi_*`) des Routers Kinder; bei Events nur die Kategorie
+  WLAN. Ab dem Beginn bleibt alles des Routers Kind. Die Kindtypen je Wurzel stehen in
+  `_incident_link` (c4).
+- **M3 Topologie-Gedächtnis:** siehe P5-3. Der Detektor bekommt nur Uplink-Ports aus frisch
+  abgeleiteten Kanten. Sein eigenes 24-h-Gedächtnis je Port bleibt (die FDB vergisst den
+  Router beim Link-down).
+- **M4 Laufzeit:** `correlate` betrachtet nur Wurzeln, die nicht abgelaufen sind, und nur Kinder
+  und Events im Zeitraum ihrer Fenster. Gemessen (Bestwert aus 5 × 10 Aufrufen,
+  `perf_counter`): 301 Wurzeln, 491 Incidents, 3000 Events: 0,6–1,1 ms je Aufruf, vorher
+  54,6 ms.
+- **L1 Eigene Events:** Eine Wurzel verknüpft keine Events ihrer eigenen Arten am selben
+  Router (feste Liste je Wurzeltyp plus die Arten ihrer Belege), auch wenn die Event-ID nicht
+  mehr in ihren Belegen steht.
+- **L2 Speichern:** Neue Verknüpfungen und Freigaben planen ein Speichern ein.
+- **Grenzen (P5-Review):**
+  - Ob eine Ursache geerbt ist, wird am Wert erkannt (eine der Wurzel-Ursachen oder die
+    Ursache des Elternteils). Eine eigene bestätigte Ursache mit demselben Namen würde
+    ebenfalls zur Hypothese.
+  - `prune_incidents` selbst bleibt eine reine Auswahl; die Verwaisten löst der Automat direkt
+    danach.
+  - Ein beim Start gespeicherter offener `router_unreachable` eines Routers, dessen Entry gar
+    nicht mehr lädt, bleibt offen, bis der Entry entfernt wird.
 
 Weiter offen und nur mit eigener Freigabe des Nutzers: Änderungen an Routern, Deploy nach
 Home Assistant, Merge nach `main`, Release.
@@ -1354,6 +1402,10 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 – Wartungsmodus markiert Belege nur ohne offenen Incident; Zustand in Engine + Store, Schalter stellt wieder her – offene Incidents lösen sich normal, keine Nachzügler (P6-6, AK9) – entschieden, Umsetzer
 - 2026-11-16 – Flotten-Anker: erster Anspruch, Übergabe an kleinste verbleibende `entry_id` – kein Verschieben beim Laden eines kleineren Entries; A9 per Registry-Test belegt (P6-9) – entschieden, Umsetzer
 - 2026-11-16 – `PARALLEL_UPDATES` 0 für sensor/binary_sensor, 1 für switch – Quality-Scale-Regel: Aktionen pro Gerät begrenzen (P6-10) – entschieden, Umsetzer
+- 2026-11-16 – Router-Ausfall übernimmt Router dahinter nur bei eigenem, zeitgleichem Ausfall; Neustart nimmt sie mit – ein erreichbarer Router widerlegt die Verknüpfung (E5, K1) – entschieden, Master
+- 2026-11-16 – Kind wird freigegeben, wenn die Wurzel länger als Fenster + 1 h aufgelöst ist; Wiederöffnen löst die Verknüpfung; verwaiste `parent_id` werden gelöscht – Kind blieb sonst wochenlang Kind (E6, K2) – entschieden, Master
+- 2026-11-16 – Offener `router_unreachable` eines entladenen oder entfernten Routers wird aufgelöst (`router_removed`) – Zustand unbekannt, darf nicht zählen (E7) – entschieden, Master
+- 2026-11-16 – Funkwechsel bestätigt Massen-Disconnect nur auf demselben `phy`, Fenster je Beleg; vor einem Ausfall nur Client-/WLAN-Kinder; gemerkte Kanten nie beobachtet, 24 h; eigene Event-Arten nie Kind – P5-Review M1–M3, L1 – entschieden, Umsetzer
 
 ## Prüfprotokoll
 
@@ -1366,3 +1418,4 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 `feature/network-intelligence` (P4-Review-Fixes M1–M6, K1–K4) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2128 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_wifi_review.py` (26 Tests), davon 25 gegen den Stand `4cc2935` rot (jedes M mindestens ein Fehlerfall-Test; der 26. sichert den beobachteten usteer-Fall ab); die 6 Review-Proben laufen gegen den neuen Stand nicht mehr durch (Fehlverhalten weg). Angepasst: `tests/test_net_wifi.py` (Auth-Welle zählt MACs, Roam ohne bestätigtes Signal, usteer mit Logzeilen, NAK nach 30 s, Massen-Cluster in 5 s, Poll-Rückfall über zwei Polls), `tests/test_net_engine.py` (Aufrufzähler: Reconnect-Ursache Hypothese, Fixture-Zeilen älter als ein Poll) · CI: – (kein Push) · Hardware: nicht geprüft (`AP-DISABLED`/`INTERFACE-DISABLED`, usteer „connected to“, DHCPNAK→ACK nicht live gesehen) · Review: –
 - 2026-11-16 `feature/network-intelligence` (P5) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2170 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_correlation.py` (40 Tests, 41 Fälle): Topologie (LLDP, Trunk-Karten mit nächstem Router, mehrdeutig, ohne Gateway, doppelte Identität, Gedächtnis, Zyklus), jede Wurzelregel mit Gegenfall (Fenster, anderer Router, Geschwister, anderer `phy`, Client am AP vor dem Port, WAN anderer Router), bestätigte Ursache bleibt, Kind bleibt Kind, Kappung 0,6 bleibt, Engine-Szenarien mit echtem `FleetOutageTracker`: AP-Ausfall mit 20 Clients (AK1: eine Wurzel `router_unreachable`, alle offenen Incidents und Events darunter), alle Router weg (AK2: `lan_unreachable` critical, Router-Incidents als Kinder, Erholung), WAN weg + DNS-Zeile (Kind) und WAN up + DNS (Hypothese ohne Eltern), abgeleitete Kante ≤ 0,6 + Hypothese (AK6), gestaffelte Polls (Settle), Auth-Fehler kein Ausfall, ungeladener Router, Beobachter-Fehler; Fleet-Hook; DFS → Funkwechsel; abgeleiteter Uplink-Port; kompaktes Format mit altem Vollformat; K2-Test; Store 500 offene Incidents + 3000 Events = 1 499 732 B (Worst Case 500 stürmende Clients 2 897 243 B, mit Warnung). Angepasst: `tests/test_net_rules_review.py` (Typ ohne Regel jetzt `something_new`, da `router_unreachable` eine Regel hat; neuer Test `stay_open`). AK1 nur für den Teil Korrelation: Kinder bleiben verknüpfte Incidents, ihre HA-Events unterdrückt erst P6 (AK11) · CI: – (kein Push) · Hardware: nicht geprüft (DFS-Zeilen, Trunk-Karten mit echtem Switch dazwischen, Ausfall eines APs mit Clients) · Review: –
 - 2026-11-16 `feature/network-intelligence` (P6) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2251 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_score.py` (22 Tests: Indikatoren je Bereich, nicht anwendbar, unbekannt bei fehlenden/alten Daten, Strafen nach Schwere und Konfidenz, bestätigt halb, ignoriert/aufgelöst/Kind nicht, Offline, Flotte gewichtet), `tests/test_net_p6.py` (37 Tests: Bus-Event nach Settle, später Router hält bis 900 s, vor Settle aufgelöst bleibt stumm, `reopened`, bestätigt/ignoriert, Kind stumm, kein zweites `opened` nach Neustart, Timer ohne Poll, AK1-Szenario mit einem Event, Wartungsmodus ohne Nachzügler und mit offenem Incident, Ausnahmen nach Typ/Router/SSID, Ansicht, Flotten-Anker und Übergabe), `tests/test_net_entities.py` (19 Tests, 22 Fälle: Unique-ID-Muster, Entities lesen nur die Ansicht, Übersetzungen je `translation_key`, ungespeicherte Attribute, Schalter mit Restore, A9 mit echter `EntityRegistry`, Logbook, `PARALLEL_UPDATES`). Angepasst: `tests/test_net_correlation.py` (kompakter Round-Trip vergleicht kompakt mit kompakt), `tests/test_net_engine.py` (Diagnose mit Score/Abdeckung/Wartungsmodus) · CI: – (kein Push; hassfest nicht lokal) · Hardware: nicht geprüft · Review: –
+- 2026-11-16 `feature/network-intelligence` (P5-Review-Fixes E5–E7, K1, K2, M1–M4, L1, L2) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2272 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_p5_review.py` (21 Tests): die 7 Review-Proben umgekehrt auf das richtige Verhalten (Probe 6 lief schon richtig), E5 mit zeitgleichem und ohne eigenen Ausfall, Neustart nimmt Router dahinter mit, Freigabe nach Fenster + 1 h, aufgelöstes Kind bleibt verknüpft, eigene bestätigte Ursache bleibt, verwaist beim Laden/Kappen/Entfernen, `resolve_router`, entfernter Router, Funkwechsel je `phy` und Fenster je Beleg, gemerkte Kante altert, alter Port öffnet kein `lan_uplink_down` (Engine), neue Verknüpfungen speichern, Laufzeit < 10 ms. Gegen den Stand `4cef6a8` sind 16 der 21 neuen Tests rot (die übrigen 5 sichern unverändertes Verhalten ab). Angepasst: `tests/test_net_correlation.py` (Gedächtnis-Kante `remembered`, eigene CPU-/Port-Incidents vor dem Ausfall keine Kinder, Funkwechsel mit Event des Massen-Disconnects, entladener Router löst seinen Ausfall auf) · CI: – (kein Push) · Hardware: nicht geprüft · Review: P5-Review umgesetzt
