@@ -4,6 +4,89 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+Geplant als **1.40.0** (noch nicht veröffentlicht, Manifest-Version unverändert).
+
+### Added
+
+- **Network Intelligence (Beta).** Aus den Daten, die die Integration ohnehin
+  abfragt, entstehen Ereignisse, Incidents mit Ursache und ein Health-Score je
+  Router und für die ganze Flotte. **Keine zusätzlichen Router-Aufrufe:** keine
+  neuen ubus-Abfragen, keine SSH-Kommandos, keine ACL-Änderung (ACL bleibt v8).
+  Ausführlich in `docs/network-intelligence.md`, Überblick im README.
+- **Ereignisse.** Neue Logzeilen (WLAN, DHCP, DFS, System) und Änderungen
+  zwischen zwei Polls (Port-Link, WAN, Neustart, CPU …) werden zu Ereignissen
+  mit Kategorie, Schweregrad und Herkunft (`observed` gemessen, `inferred`
+  abgeleitet). Je Router merkt sich die Engine die Log-Position: Zeilen aus der
+  Lücke nach einem Neustart werden nachgeholt, mögliche Verluste meldet ein
+  `system.log_gap`-Ereignis.
+- **Infrastruktur-Incidents:** `router_unreachable`, `lan_unreachable` (alle
+  Router zugleich weg), `system_reboot`, `system_cpu_high`, `system_ram_high`,
+  `system_service_restart` (dnsmasq, odhcpd, wpad, hostapd, network),
+  `system_clock_skew`, `system_conntrack_jump`, `lan_port_flap`,
+  `lan_port_speed_drop`, `lan_port_errors`, `lan_port_load`, `lan_uplink_down`,
+  `lan_lldp_change`, `wan_down`, `wan_unstable`, `wan_ip_changed` (WAN nur am
+  WAN-Gateway), `dhcp_pool_full`, `dhcp_conflict`.
+- **WLAN-Incidents:** `wifi_reconnect_storm`, `wifi_auth_failures`,
+  `wifi_auth_wave` (flottenweit, verschiedene Clients), `wifi_mass_disconnect`,
+  `wifi_no_ip`, `wifi_dhcp_after_connect`, `wifi_band_flapping`,
+  `wifi_roam_flapping`, `wifi_weak_clients`, `wifi_radio_change` (DFS, neuer
+  Kanal, CAC-Fehler).
+- **Alarmlogik je Incident-Typ:** Debounce, Hysterese, Cooldown mit
+  Wiederöffnen (`reopen_count`), Auto-Resolve nach 1800 s ohne neue Belege,
+  Status `active`, `resolved`, `acknowledged`, `ignored` (Standard 7 Tage).
+- **Root-Cause und Korrelation.** Aus LLDP und der Trunk-Port-Zuordnung
+  entsteht ein Router-Baum; Folgeprobleme werden ihrer Wurzel
+  (`lan_unreachable`, `router_unreachable`, `system_reboot`, `wan_down`,
+  `wifi_radio_change`, `lan_uplink_down`, `wifi_mass_disconnect`) als Kinder
+  zugeordnet. Jede Ursache trägt `cause_status`: `confirmed` nur bei
+  Messdaten, sonst `hypothesis`; eine Verknüpfung über eine abgeleitete
+  Topologie-Kante hat höchstens Konfidenz 0,6.
+- **Health-Score** 0–100 je Router über fünf Bereiche (WLAN 30, System 25,
+  LAN 15, WAN 20, DHCP/DNS 10) mit Abdeckung; unter 50 % Abdeckung
+  `unknown`, nie 100 bei fehlenden Daten. Flotten-Score nach Abdeckung
+  gewichtet.
+- **Neue Entities je Router:** *Network health* (`{entry_id}_net_health`),
+  *Active incidents* (`_incidents_active`), *Wi-Fi reconnects (1 h)*
+  (`_wifi_reconnects_1h`) und *Wi-Fi authentication errors (1 h)*
+  (`_wifi_auth_errors_1h`, beide nur mit AP-Interfaces), *WAN reconnects
+  (24 h)* (`_wan_stability`, ohne WAN standardmäßig aus), Binärsensor
+  *Critical incident* (`_incident_critical`), Schalter *Maintenance mode*
+  (`_maintenance_mode`). **Flotte** (ohne Gerät, einmal je HA-Instanz):
+  `openwrt_router_fleet_net_health`, `openwrt_router_fleet_incidents_active`,
+  `openwrt_router_fleet_incident_critical`.
+- **HA-Event `openwrt_router_incident_event`** genau einmal je Wurzel-Incident
+  und Zustand (`opened` nach 90 s Settle-Zeit, `reopened`, `resolved`), ab
+  `warning` (einstellbar), nie für Kinder. Felder `state`, `incident_id`,
+  `type`, `severity`, `confidence`, `cause`, `cause_status`, `scope`,
+  `routers`, `entry_ids`, `device_id`, bei Client-Incidents `mac`. Logbook-Text
+  für das Event.
+- **Wartungsmodus** je Router (Schalter) und für die Flotte (1/4/24 h im
+  Panel): Ereignisse werden markiert gespeichert, keine Incidents, keine
+  HA-Events, kein Score-Abzug, keine Nachzügler-Alarme.
+- **Tab „Diagnose“ im Topologie-Panel:** Übersicht, Incidents (mit
+  Folgeproblemen, Belegen, Ursachenstufe und Empfehlung), Timeline mit Filtern
+  (Router, Kategorie, Schweregrad, Zeitraum), WLAN, Infrastruktur,
+  Einstellungen. Warnsymbole an den Router-Knoten der Topologie öffnen die
+  Diagnose des Routers, auch am Handy. Bestätigen, Ignorieren und Reaktivieren
+  nur als Admin.
+- **API-Routen** unter `/api/openwrt_topology/intelligence/`: `summary`,
+  `events`, `incidents`, `incidents/{incident_id}` (GET, POST Status) und
+  `settings` (GET, POST). Lesen wie der Topologie-Snapshot, Schreiben nur
+  Admin.
+- **Einstellungen** (Schwellen, Gewichte, Strafpunkte, Ausnahmen für MACs,
+  SSIDs, Router und Incident-Typen, Aufbewahrung, Ereignis-Limit,
+  `notify_min_severity`): im Panel lesbar, ändern nur Admins; streng geprüft
+  (Listen höchstens 200 Einträge zu 64 Zeichen).
+- **Persistenz über HA-Neustarts:** eine Store-Datei für alle Router
+  (`.storage/openwrt_router.intelligence`), Schreiben höchstens alle 300 s,
+  Obergrenze 1,5 MB (älteste Ereignisse zuerst gekappt), Standard 30 Tage und
+  3000 Ereignisse. Eine unlesbare Datei wird vorher nach
+  `openwrt_router.intelligence.bak` kopiert. Beim Entfernen eines Routers
+  werden seine Daten gelöscht.
+- **Diagnose-Download** um einen Abschnitt `intelligence` ergänzt: nur
+  Zähler, Typen, Zeiten, Score, Abdeckung und Wartungsmodus, keine MAC, IP,
+  Hostnamen, SSIDs oder Routernamen.
+
 ### Changed
 
 - **Topologie-Panel zeigt veraltete Daten an.** Clients und Verbindungen eines
@@ -16,6 +99,50 @@ All notable changes to the OpenWrt Router integration will be documented in this
   den ersten Router der Liste, sondern bevorzugt erreichbare Gateways mit
   verbundenem WAN, dann die kleinste Router-ID. Alle anderen Router bleiben als
   AP sichtbar.
+- **Topologie-Snapshot:** Router-Knoten tragen `entry_id` und `incidents`
+  (gezählte Wurzel-Incidents nach Schweregrad), `meta.intelligence` den
+  Flotten-Score und die Abdeckung. Ohne laufende Engine bleibt der Snapshot
+  wie bisher.
+- **Entladen eines Router-Eintrags:** Die Flotten-Entities ziehen zu Beginn
+  des Entladens zum nächsten Router-Eintrag um und behalten ihre Entity-IDs.
+- Der Tab „Alarme“ bleibt vorerst neben „Diagnose“ bestehen.
+
+### Fixed
+
+Vor dem ersten Release in den Reviews der Network Intelligence gefunden und
+behoben:
+
+- Ein Router hinter einem ausgefallenen Router wird nur dann als dessen
+  Folgeproblem geführt, wenn er zur selben Zeit selbst ausfällt; ein
+  erreichbarer Router widerlegt die Verknüpfung.
+- Ein Folgeproblem, das nach dem Ende seiner Wurzel offen bleibt, zählt nach
+  deren Nachfenster wieder selbst (Score, Zähler, HA-Event) statt bis zu einer
+  Stunde unsichtbar zu bleiben; nach einer weiteren Stunde wird es von der
+  Wurzel gelöst.
+- Entladen oder Neuladen eines Routers löst seinen offenen Ausfall still auf
+  (kein `resolved`-Event, kein Logbook-Eintrag).
+- Flotten-Incidents (`lan_unreachable`, `wifi_auth_wave`) zählen nur in den
+  Flotten-Entities, nicht zusätzlich je Router.
+- Kein Health-Score 100 mehr bei unlesbarem Router-Log: der WLAN-Bereich
+  zählt nur mit lesbarem Log, eine leere Client-Liste oder leere
+  Speicherwerte gelten nicht als Messung.
+- Ein Router mit Anmeldefehler oder einem längst gemeldeten Ausfall hält
+  HA-Events nicht mehr bis zu 900 s zurück.
+- Der Wartungsschalter übernimmt nach einem Neustart nur `on`/`off`;
+  `unavailable` schaltet den Wartungsmodus nicht mehr aus.
+- `reopened` kommt nur nach einem vorherigen `opened`; sonst wird `opened`
+  gemeldet.
+- Eine eigene, gleichnamige Ursache eines Kindes geht beim Lösen von der
+  Wurzel nicht mehr verloren (geerbte Ursache ist jetzt ausdrücklich
+  markiert).
+- WLAN-Erkennung: Reconnect nur bei Down → Up innerhalb 30 s, ein DHCPNAK mit
+  folgendem ACK binnen 30 s ist kein Fehler, Massen-Disconnects nur aus einem
+  engen Zeitfenster, Auth-Welle zählt verschiedene Clients, MAC-Ausnahmen
+  gelten in allen WLAN-Detektoren.
+- Korrelation: Ein Funkwechsel erklärt einen Massen-Disconnect nur auf
+  demselben Radio als bestätigt (sonst Hypothese); vor einem Ausfall gelten nur
+  Client- und WLAN-Probleme des Routers als Folge; gemerkte Topologie-Kanten
+  verfallen nach 24 h; schnellere Berechnung bei vielen Incidents.
 
 ### Removed
 

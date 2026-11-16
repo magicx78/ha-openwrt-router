@@ -6,6 +6,31 @@ Stand: 2026-10-28 · Version: v1.39.0
 
 ## Backlog
 
+### Network Intelligence (Plan `docs/plans/2026-11-16-network-intelligence.md`, geplant 1.40.0)
+
+P1–P7, die Review-Fixes und die Doku (P8) liegen auf `feature/network-intelligence`,
+noch nicht gemergt und nicht released. Nutzerdoku: `docs/network-intelligence.md`.
+
+- [x] Ereignisse, Incidents mit Ursache, Health-Score, Entities, HA-Event
+      `openwrt_router_incident_event`, Wartungsmodus, Tab „Diagnose“,
+      Persistenz über HA-Neustarts (Store `openwrt_router.intelligence`).
+- [ ] **`async_unload_entry` soll `None` zurückgeben** (HA-Developer-Blog
+      „Config entry functions now return None“, 2026-10-23); heute `bool`.
+      Vorher prüfen, ab welcher HA-Version und was der Rückgabewert bei
+      fehlgeschlagenem Plattform-Unload bedeutet.
+- [ ] **Belege im Incident-Detail gruppieren:** viele gleiche Zeilen
+      „system cpu load“ untereinander; gleiche Belege zusammenfassen
+      (Anzahl, erster/letzter Zeitpunkt).
+- [ ] **Tests im echten HA-Frontend** (Diagnose-Tab, Warnsymbole, Einstellungen
+      als Admin und Nicht-Admin), **auf einem echten Handy** und **auf
+      Hardware** (AP-Ausfall mit Clients, Store-Größe, Score plausibel,
+      Flotten-Entities beim Neuladen eines Routers) – nur lesend und mit
+      Freigabe.
+- [ ] **Aufräumen aus P8 (Code, eigener Auftrag):** `_record_events` im
+      Coordinator entfernen, sobald das Panel umgestellt ist; Panel-Regeln aus
+      `useAlerts.ts` bis auf „möglicher Router/Repeater“ entfernen; Tab
+      „Alarme“ danach zusammenführen.
+
 ### Nach Installation von 1.39.0 (Plan `docs/plans/2026-10-28-ssh-polling-und-audit.md`)
 
 Alles lesend, Installation und HA-Neustart nur nach OK.
@@ -98,8 +123,9 @@ Alles lesend, Installation und HA-Neustart nur nach OK.
 - [ ] **Prod-Validierung v1.19/v1.20** — 24h-RSS/rpcd-Beobachtung auf dem
       Produktiv-Gateway nach dem Session-Leak-Fix (Vergleich gegen
       `diagnostics/prod-24h-baseline.jsonl`, Sampler: `scripts/_prod_24h_sample.sh`).
-- [ ] **Persistente Event-History** — `deque` ist in-memory; Events überleben
-      keinen HA-Restart (Store-Helper oder JSON-Datei).
+- [x] **Persistente Event-History** — mit Network Intelligence (Store
+      `openwrt_router.intelligence`, 30 Tage). Die alte In-Memory-Timeline im
+      Inspector (`_record_events`) bleibt bis zum Aufräumen.
 
 ### LLDP-Nachlese (aus dem Merge-Review von PR #14, 2026-09-09)
 
