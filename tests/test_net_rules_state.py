@@ -12,8 +12,8 @@ from typing import Any
 import pytest
 
 from custom_components.openwrt_router.net_events import (
-    CauseStatus,
     Category,
+    CauseStatus,
     IncidentStatus,
     NetEvent,
     Origin,
@@ -411,6 +411,18 @@ def lvl(value: float, type_: str = "system_cpu_high", key: str = "r1") -> Eviden
     )
 
 
+def weak(value: float) -> Evidence:
+    return lvl(value, "wifi_weak_clients", "ap1")
+
+
+def pool(value: float) -> Evidence:
+    return lvl(value, "dhcp_pool_full", "r1:lan")
+
+
+def restart(key: str = "r1:dnsmasq") -> Evidence:
+    return ev("system_service_restart", key, scope=Scope.ROUTER)
+
+
 def test_level_rule_debounces_over_consecutive_polls() -> None:
     m = AlarmMachine()
     assert feed(m, 0, lvl(85)) == []
@@ -475,7 +487,6 @@ def test_level_cooldown_reopens_then_new_incident() -> None:
 
 def test_level_hold_time_must_pass_before_opening() -> None:
     m = AlarmMachine()
-    weak = lambda v: lvl(v, "wifi_weak_clients", "ap1")  # noqa: E731
     assert feed(m, 0, weak(3)) == []
     assert feed(m, 300, weak(4)) == []
     assert feed(m, 599, weak(4)) == []
@@ -484,7 +495,6 @@ def test_level_hold_time_must_pass_before_opening() -> None:
 
 def test_level_hold_restarts_after_condition_drops() -> None:
     m = AlarmMachine()
-    weak = lambda v: lvl(v, "wifi_weak_clients", "ap1")  # noqa: E731
     feed(m, 0, weak(3))
     assert feed(m, 300, weak(1)) == []
     assert feed(m, 400, weak(3)) == []
@@ -513,7 +523,6 @@ def test_boolean_condition_rule_wan_down_opens_on_first_poll() -> None:
 
 def test_dhcp_pool_full_escalates_to_critical_at_98_percent() -> None:
     m = AlarmMachine()
-    pool = lambda v: lvl(v, "dhcp_pool_full", "r1:lan")  # noqa: E731
     feed(m, 0, pool(92))
     out = feed(m, 60, pool(93))
     assert states(out) == [OPENED]
@@ -529,7 +538,6 @@ def test_dhcp_pool_full_escalates_to_critical_at_98_percent() -> None:
 
 def test_dhcp_pool_full_can_open_directly_as_critical() -> None:
     m = AlarmMachine()
-    pool = lambda v: lvl(v, "dhcp_pool_full", "r1:lan")  # noqa: E731
     feed(m, 0, pool(99))
     out = feed(m, 60, pool(99))
     assert out[0].incident.severity is Severity.CRITICAL
@@ -537,7 +545,6 @@ def test_dhcp_pool_full_can_open_directly_as_critical() -> None:
 
 def test_service_restart_escalates_at_three_in_an_hour() -> None:
     m = AlarmMachine()
-    restart = lambda: ev("system_service_restart", "r1:dnsmasq", scope=Scope.ROUTER)  # noqa: E731
     first = feed(m, 0, restart())
     assert states(first) == [OPENED]
     assert first[0].incident.severity is Severity.WARNING
@@ -549,7 +556,6 @@ def test_service_restart_escalates_at_three_in_an_hour() -> None:
 
 def test_service_restarts_spread_over_more_than_an_hour_do_not_escalate() -> None:
     m = AlarmMachine()
-    restart = lambda: ev("system_service_restart", "r1:dnsmasq", scope=Scope.ROUTER)  # noqa: E731
     out = feed(m, 0, restart())
     out += feed(m, 600)  # 600 s stable: resolved
     out += feed(m, 700, restart())  # inside the cooldown: reopened, 2 in the hour
@@ -637,11 +643,10 @@ def test_acknowledged_stays_until_resolved_without_new_transitions() -> None:
 
 def test_acknowledged_incident_gets_no_updated_transition_on_escalation() -> None:
     m = AlarmMachine()
-    restart = lambda: ev("system_service_restart", "r1:x", scope=Scope.ROUTER)  # noqa: E731
-    inc_id = feed(m, 0, restart())[0].incident.id
+    inc_id = feed(m, 0, restart("r1:x"))[0].incident.id
     assert m.acknowledge(inc_id) is True
-    feed(m, 100, restart())
-    assert feed(m, 200, restart()) == []
+    feed(m, 100, restart("r1:x"))
+    assert feed(m, 200, restart("r1:x")) == []
     live = m.get(inc_id)
     assert live is not None and live.severity is Severity.CRITICAL
 
@@ -1029,7 +1034,6 @@ def test_clock_jump_forward_lets_partial_window_age_out() -> None:
 
 def test_clock_jump_forward_does_not_satisfy_level_hold_or_debounce() -> None:
     m = AlarmMachine()
-    weak = lambda v: lvl(v, "wifi_weak_clients", "ap1")  # noqa: E731
     assert feed(m, 0, weak(3)) == []  # hold starts
     assert feed(m, 86400, weak(3)) == []  # jump: hold restarts, does not open
     assert m.incidents() == []

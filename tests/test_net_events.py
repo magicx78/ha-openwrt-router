@@ -282,7 +282,10 @@ def test_ring_filter_by_each_criterion_and_limit() -> None:
         )
     )
     ring.add(make_event(3, ts=30, router="r1", severity=Severity.CRITICAL))
-    ids = lambda **kw: [e.id for e in ring.filter(**kw)]  # noqa: E731
+
+    def ids(**kw: Any) -> list[str]:
+        return [e.id for e in ring.filter(**kw)]
+
     assert ids(router="r2") == ["r1:2"]
     assert ids(category=Category.LAN) == ["r1:2"]
     assert ids(category="lan") == ["r1:2"]
