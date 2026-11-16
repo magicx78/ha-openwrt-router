@@ -71,7 +71,13 @@ Kennzeichnung in diesem Dokument:
      auf ap5 ≈ 8,5 h, auf ap6 ≈ 22 h **[live]**.
    - Fällt HA länger aus, entstehen Lücken. Die NI meldet sie bereits als `system.log_gap`.
 
-**Empfehlung:** Echtzeit per HTTP-SSE über die vorhandene ubus-Session.
+> **Stand 2026-11-16 nach Pilot P0: Diese Empfehlung ist überholt.** SSE ließ uhttpd 2025.10.03
+> abstürzen (9.4). Ursache ist ein bekannter, später behobener uhttpd-Fehler (9.5). **Entschieden
+> (Nutzer, über den Master): Weg D.** Echtzeit läuft über den Log-Ingest bei jedem Poll (9.6, Bauschritte
+> in 8). SSE kommt erst später, mit eigener Freigabe für eine Gegenprobe auf ap5 und gesonderter Freigabe
+> für ein uhttpd-Update. Die Punkte 1–7 unten bleiben als Messprotokoll stehen.
+
+**Ursprüngliche Empfehlung (Phase A, überholt):** Echtzeit per HTTP-SSE über die vorhandene ubus-Session.
 - Neue Pakete: keine.
 - Neue Prozesse auf dem Router: keine.
 - SSH: keines.
@@ -532,6 +538,43 @@ im RAM. Die Rekonstruktion nach Neustart geschieht aus dem Event-Store.
 
 ## 8. Bauphasen (Phase B, nach Freigabe)
 
+### 8.0 Umstellung auf Weg D (Stand 2026-11-16, gilt vor der Tabelle in 8.1)
+
+**Fertig (lokal committet, nicht gepusht):**
+- RT1 `50b3944` (`wifi_reasons.py`);
+- RT8 `39d4489` (`net_explain.py`, ohne Haken in der Engine);
+- RT2 `7e086fc` (SSE-Client und `ubus_stream.py`, **bleibt unverdrahtet**).
+
+**Gesperrt bis NI 1.40.0 gemergt ist.** Grund sind die gemeinsamen Dateien `net_engine.py`,
+`net_rules.py` und `coordinator.py`. Danach folgt ein Rebase, und der Master gibt frei.
+
+| Schritt | Inhalt unter Weg D | Dateien | Fertig, wenn |
+|---|---|---|---|
+| **RT3-D** (ersetzt RT3) | Log bei jedem Poll | `const.py`: `LOG_READ_INTERVAL_CYCLES = 2 → 1`, **neu** `USTEER_READ_INTERVAL_CYCLES = 2`; `coordinator.py` (usteer-Takt); Tests | Siehe Achtung unten. Log wird ab dem 2. Poll bei jedem Poll gelesen; usteer läuft weiter alle 2 Polls; Kanalwechsel löst den Log-Abruf weiterhin sofort aus; SSH-Fallback (300 s) und CPU-Drossel (120 s) bleiben unverändert. Volle Suite grün |
+| ~~RT4~~ | ACL `:subscribe` | – | **Entfällt unter Weg D** (keine ACL-Änderung). Kommt nur mit Weg B zurück |
+| **RT5-D** (ersetzt RT5) | Engine-Eingang aus dem Log | `log_parser.py` (Reason-Anreicherung über `wifi_reasons.from_log_reason`/`classify_text`), `net_events.py` (Kinds `wifi.disassoc`, `wifi.auth_failed` mit Kategorie), `net_rules.py` (`LOG_EVENT_META`), `net_engine.py`; Tests | Szenarien 1/2/3/9 aus Logzeilen mit Grund-Kategorie. Kein `ingest_stream`, kein `system.stream_gap`, keine zusätzlichen Router-Calls |
+| **RT6** | `cause_level` | wie 8.1 | wie 8.1 |
+| **RT7** | Korrelation B/C/D, Per-Client, Empfehlungen | wie 8.1 | wie 8.1 |
+| **RT8-Haken** | Explainer in der Engine aufrufen | `net_engine.py` (nach RT5-D) | Fake-Explainer im Engine-Test |
+| **RT9** | Panel auf P7 | wie 8.1, aber statt „Stream-Status je Router“: Alter des letzten Log-Abrufs je Router | wie 8.1 |
+| **RT10** | Szenarien, Doku | wie 8.1 | Szenario 10: fehlendes `log read`-Recht statt `:subscribe`. Szenario 11: Log-Lücke nach Router-Reboot. Szenario 12: Log-Abruf schlägt fehl und kommt zurück (`system.log_gap`). Szenario 4 ohne Stream-Abbruch. Doku nennt die Verzögerung bis 60 s offen |
+
+**Achtung RT3-D (im Code gefunden, `coordinator.py` Z. 988–1008):**
+- usteer läuft heute im Takt `LOG_READ_INTERVAL_CYCLES` und **nie im selben Poll wie das Log**
+  (`self._last_log_poll != self._board_poll_count`).
+- Wird nur die Konstante auf 1 gesetzt, liest jeder Poll das Log. Dann würde usteer **nie mehr**
+  abgefragt, und die Client-Stabilität (F4) wäre still kaputt.
+- RT3-D braucht deshalb einen eigenen usteer-Takt. Zusätzlich muss usteer im selben Poll wie das Log
+  laufen dürfen, oder es läuft in den Polls ohne Kanalwechsel nach dem Log-Abruf.
+- Dazu kommt ein Regressionstest: usteer wird bei `LOG_READ_INTERVAL_CYCLES = 1` weiter abgefragt.
+- Der Kommentar in `const.py` Z. 541–543 muss angepasst werden.
+
+**Weg B später** (nur nach Gegenprobe auf ap5 und uhttpd-Update, beides mit eigener Freigabe): RT3
+(Stream-Manager mit RT2) und RT4 (ACL v9) aus 8.1 gelten dann wieder. Szenarien 10–12 bekommen dann
+zusätzlich ihre Stream-Varianten.
+
+### 8.1 Ursprüngliche Bauschritte (Phase A, SSE-Weg)
+
 Reihenfolge wegen Dateikonflikten:
 - Ohne Konflikt mit NI-1/CS-1: **RT1, RT2, RT8** (neue Dateien bzw. `api.py`).
 - Erst nach NI-1 und Rebase: **RT3–RT7** (Engine-Dateien).
@@ -764,6 +807,10 @@ https://github.com/openwrt/uhttpd/blob/ebb92e6b339b88bbc6b76501b6603c52d4887ba1/
 - Verzögerung höchstens ≈ 60 s; bei Drosselung 120 s, beim SSH-Fallback 300 s.
 - Die Trennungsgründe stehen im Klartext im Log (3.6), die Event-Payloads werden nicht gebraucht.
 - Der logd-Ring (64 kB, ≈ 620 Zeilen) läuft bei 60 s praktisch nicht über.
+
+**Entscheidung (Nutzer, über den Master, 2026-11-16): Weg D ist bestätigt.** SSE (Weg B) kommt später
+mit eigener Freigabe: zuerst die Gegenprobe auf ap5, ein uhttpd-Update nur nach gesonderter Freigabe. Bis
+dahin passiert nichts auf den Routern. RT2 bleibt unverdrahtet im Code. Bauschritte siehe Abschnitt 8.
 
 **Empfehlung: D, also Log-Ingest bei jedem Poll, als Echtzeit-Weg für jetzt.**
 - Gründe:
