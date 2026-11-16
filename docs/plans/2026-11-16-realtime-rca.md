@@ -602,6 +602,69 @@ ab RT9 Frontend-Build. Kein Push, kein PR ohne Freigabe.
 - **Nicht nötig:** neue Pakete (alle sechs haben `uhttpd-mod-ubus` mit Subscribe), uhttpd-Konfiguration,
   hostapd-Loglevel, usteer, Dauerprozesse auf dem Router.
 
+### 9.3 Änderungsprotokoll Pilot P0 (2026-11-16, ap4 und ap6)
+
+Freigabe: Nutzer über den Master („Ja, ap4 + ap6 (Recommended)“) und direkt in RT-1 („Yes, do the
+pilot“). Nur ap4 (10.10.10.4) und ap6 (10.10.10.6). Keine Pakete, kein Reboot, kein WLAN-Reload.
+Abweichung von 9.1: Backup unter `/etc/` statt `/root/`, Messung mit `curl` statt Dev-Skript und eigener
+Pilot-Session statt HA-Passwort.
+
+| Zeit | Router | Befehl | Rückweg |
+|---|---|---|---|
+| 18:23 | ap4, ap6 | `cp /usr/share/rpcd/acl.d/ha-openwrt-router.json /etc/ha-openwrt-router.json.bak-rt-20261116T182300` (sha256 `c7740216…1df1`); dazu eine lokale Kopie im Scratchpad | `rm` der Kopie (bleibt vorerst liegen) |
+| 18:23:41 / 18:23:44 | ap4 / ap6 | ACL-Datei ersetzt: nur `"hostapd": [":subscribe"]` neu und `":subscribe"` an `"hostapd.*"` angehängt (sha256 `ec7864c4…0a40`), mit `jsonfilter` geprüft | Backup zurückkopieren und rpcd neu starten |
+| 18:23:41 / 18:23:44 | ap4 / ap6 | `/etc/init.d/rpcd restart`, vorher gewartet, bis keine HA-Verbindung offen war | — |
+| 18:25 | ap4, ap6 | `ubus call session create {"timeout":3600}` und `session grant` mit nur `hostapd`/`hostapd.*` `:subscribe` | `ubus call session destroy` |
+| 18:26:01 | PC | 17 × `curl -N -H "Authorization: Bearer <sid>" https://apX/ubus/subscribe/<obj>`: ap4 9 Objekte, ap6 8; ohne `hostapd-auth` | curl beenden |
+| 18:45:14 | ap4 | `session destroy`, Backup zurück, sha256 = `c7740216…1df1` geprüft, `rpcd restart` (eine HA-Verbindung war noch offen) | — |
+| 18:45:45 | ap6 | dasselbe, keine HA-Verbindung offen | — |
+
+**Stand nach dem Rückbau:** ACL auf beiden Routern bytegleich mit dem Original. Die Pilot-Sessions sind
+gelöscht, und die Streams sind beendet. HA pollt beide Router weiter im 61-s-Takt (CPU-Sensor-Historie bis
+18:47); beide bleiben `online`. Die Backups unter `/etc/` bleiben liegen, bis jemand sie freigibt.
+
+### 9.4 Ergebnis P0 – **Abbruch: uhttpd stürzt ab**
+
+- **Absturz:** Auf beiden Routern ist uhttpd während des Pilots abgestürzt, und procd hat es neu gestartet.
+  - ap6, 18:35:20, Kernel-Log: `do_page_fault(): sending SIGSEGV to uhttpd for invalid read access from 00000000`,
+    `epc … in libubus.so.20251202`, `ra … in libubox.so.20260213`.
+  - ap4 (aarch64, protokolliert keine Segfaults): Alle 9 Streams endeten um 18:26:59–18:27:01. Der neue
+    uhttpd-Prozess (PID 28042, vorher 2141) läuft laut `/proc/<pid>/stat` seit 18:27:03.
+  - Auf jedem Router endeten alle Streams in derselben Sekunde (curl: sauberes Ende, HTTP 200).
+  - Folge für HA: Laut CPU-Sensor-Historie fehlte auf ap6 ein Poll (≈18:35:40). Auf ap4 ist keine Lücke
+    zu sehen, die zum Absturz passt; die Lücke um 18:25:55 gehört zum rpcd-Neustart.
+- **Ursache:** nicht belegt. Vor dem Absturz kamen nur `probe`-Events, kein `assoc`, `disassoc` oder
+  `auth`. Die Abstürze kamen 1 bzw. 9 min nach dem Start. Vermutungen, alle ungeprüft:
+  - ein Fehler im Subscribe-Pfad von uhttpd-mod-ubus bei mehreren gleichzeitigen Subscribern;
+  - ein Zusammenspiel mit HA-Anfragen bzw. HAs `session destroy` beim Re-Login.
+  Bewusst nicht reproduziert, weil das eine neue Freigabe braucht.
+- **Gemessen, solange die Streams liefen:**
+  - Speicher ap6: MemAvailable 15,5–16,2 MB während der Streams und 16,1–16,5 MB danach, also etwa
+    0,3–0,6 MB weniger.
+  - uhttpd-RSS:
+    - ap6: 2,6–2,7 MB mit 8 Streams, 2,1–2,2 MB danach.
+    - ap4: 3,0 MB mit 9 Streams, 2,1–2,3 MB danach.
+    - Das sind grob 50–100 kB pro TLS-Stream.
+  - CPU: Load unter 0,4. Kein Unterschied zum Normalbetrieb erkennbar.
+  - Volumen: Jeder `probe` kommt auf **jedem** BSS des Funkmoduls einzeln an, also mehrfach. ap6 hatte
+    ≈134 Events bzw. 49 kB pro BSS-Stream in 9 min. Das Objekt `hostapd` selbst lieferte 0 Events.
+  - `network_timeout=30`: Ein Stream ohne Events wird **nicht** nach 30 s getrennt. Die ap6-Streams auf
+    `phy0-ap*` blieben von 18:26:01 bis 18:34:47 (8,7 min) ohne ein Event offen und lieferten danach
+    noch ein `probe`.
+- **Nicht geklärt:**
+  - die Payloads von `assoc`, `disassoc`, `auth` und `sta-authorized`, weil kein Client neu verbunden
+    hat, solange die Streams liefen;
+  - ob ein `session destroy` der Bearer-Session einen laufenden Stream beendet (offene RT2-Frage). Die
+    Streams waren beim Rückbau schon tot.
+- **Folge:** SSE über uhttpd ist in diesem Zustand **nicht betriebssicher**. HA pollt über denselben
+  uhttpd, also trifft ein Absturz auch das normale Polling. RT3 und RT4 bleiben gesperrt, bis die Ursache
+  belegt ist. RT2 (Client mit Backoff) bleibt gültig, denn er übersteht Stream-Abbrüche.
+- **Vorschlag nächster Schritt:**
+  1. Nur lesend den Quelltext von uhttpd-mod-ubus (Subscribe-Pfad, `uh_ubus_subscription_*`) und
+     libubus der installierten Version prüfen und nach bekannten Fixes suchen.
+  2. Erst danach, mit neuer Freigabe, einen Minimal-Repro auf ap4 mit **einem** Stream.
+  3. Bis dahin bleibt Echtzeit beim Log-Fallback.
+
 ---
 
 ## 10. Abhängigkeiten zu NI P7
