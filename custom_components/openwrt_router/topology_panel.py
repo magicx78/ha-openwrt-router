@@ -2,7 +2,10 @@
 
 Registers (idempotent, once per HA session):
   1. Static frontend path: /openwrt_router_topology → frontend/topology-panel.js
-  2. API endpoint:        GET /api/openwrt_topology/snapshot → mesh snapshot JSON
+  2. API endpoint:        GET /api/openwrt_topology/snapshot → mesh snapshot JSON,
+     plus (P7) the network intelligence routes under
+     /api/openwrt_topology/intelligence/ (summary, events, incidents,
+     incidents/{id}, settings)
   3. Sidebar panel:       "Network Topology" with mesh visualization
 
 Lifecycle (v1.18.0 — F3):
@@ -29,12 +32,19 @@ Access control (v1.39.0):
   re-evaluated on every entry setup, unload and options change; the sidebar
   panel is re-registered only when ``require_admin`` actually flips.  The API
   view checks the combined value on every request, so it follows immediately.
+
+  The intelligence routes (P7) check the same way.  Their writing requests
+  (POST incident status, POST settings) are for administrators only, also
+  when the panel is open to all users.  They read the engine's memory
+  (``net_query``); none of them talks to a router.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +70,7 @@ except ImportError:  # pragma: no cover - older HA cores keyed the app by str
 _LOGGER = logging.getLogger(__name__)
 
 # Cache-busting query for the bundle URL — bump on every frontend rebuild.
-_PANEL_VERSION = "20261028-v1.39.0"
+_PANEL_VERSION = "20261116-intel-p7"
 # Master flag: set ONLY after every registration step completed.  Until then,
 # a partial setup must still allow re-entry to register the missing pieces.
 _PANEL_REGISTERED_KEY = f"{DOMAIN}_panel_registered"
@@ -72,6 +82,9 @@ _PANEL_VIEW_DISABLED_KEY = f"{DOMAIN}_panel_view_disabled"
 # resources (HA aiohttp router does NOT permit re-registering a path/view).
 _PANEL_STATIC_BOUND_KEY = f"{DOMAIN}_panel_static_bound"
 _PANEL_VIEW_BOUND_KEY = f"{DOMAIN}_panel_view_bound"
+# Names of the views already bound (P7: several views; a retry after a
+# failure part-way binds only the missing ones).
+_PANEL_VIEWS_BOUND_KEY = f"{DOMAIN}_panel_views_bound"
 # asyncio.Lock that serialises concurrent setup attempts (4 entries spinning
 # up at HA boot would otherwise race the static/view registrations).
 _PANEL_SETUP_LOCK_KEY = f"{DOMAIN}_panel_setup_lock"
@@ -163,6 +176,291 @@ class OpenWrtMeshSnapshotView(HomeAssistantView):
             body["meta"]["error"] = f"snapshot build failed ({type(err).__name__})"
             return self.json(body, status_code=500)
         return self.json(snapshot)
+
+
+_INTEL_URL = "/api/openwrt_topology/intelligence"
+
+type _NameOf = Callable[[str], str]
+
+
+def _router_names(hass: HomeAssistant) -> _NameOf:
+    """Entry id -> config entry title (the id itself for a removed router)."""
+    cache: dict[str, str] = {}
+
+    def name_of(entry_id: str) -> str:
+        name = cache.get(entry_id)
+        if name is None:
+            entry = hass.config_entries.async_get_entry(entry_id)
+            title = getattr(entry, "title", None) if entry is not None else None
+            name = title if isinstance(title, str) and title else entry_id
+            cache[entry_id] = name
+        return name
+
+    return name_of
+
+
+class _IntelView(HomeAssistantView):
+    """Common access checks of the network intelligence routes (P7).
+
+    Reading: like the snapshot (admin, or every user while an entry opens
+    the panel to all; 410 after the last unload).  Writing: admin only.
+    503 while the engine is not running or has not read its store yet.
+    """
+
+    requires_auth = True
+
+    def _check(
+        self, request: web.Request, *, write: bool = False
+    ) -> web.Response | None:
+        hass: HomeAssistant = request.app[KEY_HASS]
+        is_admin = self._is_admin(request)
+        if write and not is_admin:
+            return self.json_message(
+                "Changes are available to administrators only", status_code=403
+            )
+        if not is_admin and not _panel_open_to_all(hass):
+            return self.json_message(
+                "The network topology is available to administrators only",
+                status_code=403,
+            )
+        if hass.data.get(_PANEL_VIEW_DISABLED_KEY):
+            return web.Response(
+                status=410, text="OpenWrt Router integration not loaded"
+            )
+        return None
+
+    @staticmethod
+    def _is_admin(request: web.Request) -> bool:
+        return bool(getattr(request.get(KEY_HASS_USER), "is_admin", False))
+
+    @staticmethod
+    def _engine(hass: HomeAssistant) -> Any:
+        """The running engine once it has read its store, else None."""
+        from .net_engine import async_get_engine
+
+        engine = async_get_engine(hass)
+        if engine is None or not engine.loaded:
+            return None
+        return engine
+
+    def _unavailable(self) -> web.Response:
+        return self.json_message(
+            "Network intelligence is not running yet", status_code=503
+        )
+
+    def _failed(self, err: Exception) -> web.Response:
+        # Only the exception type: the message may carry router data.
+        what = self.name.rsplit(":", 1)[-1]
+        return self.json_message(
+            f"{what} failed ({type(err).__name__})", status_code=500
+        )
+
+    async def _read(
+        self, request: web.Request, build: Callable[[Any, _NameOf, float], Any]
+    ) -> web.Response:
+        """Shared GET: checks, engine, ``build(engine, name_of, now)``;
+        ``None`` from ``build`` is an unknown incident (404)."""
+        from .net_query import QueryError, engine_now
+
+        if (blocked := self._check(request)) is not None:
+            return blocked
+        hass: HomeAssistant = request.app[KEY_HASS]
+        engine = self._engine(hass)
+        if engine is None:
+            return self._unavailable()
+        try:
+            body = build(engine, _router_names(hass), engine_now(engine, time.time()))
+        except QueryError as err:
+            return self.json_message(str(err), status_code=400)
+        except Exception as err:
+            # The trace stays in the debug log (it may carry router data).
+            _LOGGER.warning("Intelligence request failed: %s", type(err).__name__)
+            _LOGGER.debug("Intelligence request failed", exc_info=True)
+            return self._failed(err)
+        if body is None:
+            return self.json_message("Unknown incident", status_code=404)
+        return self.json(body)
+
+    @staticmethod
+    async def _body(request: web.Request) -> Any:
+        """JSON body; raises ``QueryError`` when it is not JSON."""
+        from .net_query import QueryError
+
+        try:
+            return await request.json()
+        except ValueError:
+            raise QueryError("body: JSON expected") from None
+
+
+class OpenWrtIntelSummaryView(_IntelView):
+    """Score and coverage per router and fleet, incidents by severity,
+    event counts of the last 24 h."""
+
+    url = f"{_INTEL_URL}/summary"
+    name = "api:openwrt_topology:intelligence:summary"
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return the summary."""
+        from .net_query import summary
+
+        return await self._read(request, summary)
+
+
+class OpenWrtIntelEventsView(_IntelView):
+    """Event timeline with filters; ``limit`` <= 500, cursor ``before``."""
+
+    url = f"{_INTEL_URL}/events"
+    name = "api:openwrt_topology:intelligence:events"
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return one page of events, newest first."""
+        from .net_query import events_page, parse_events_query
+
+        query = request.query
+
+        def build(engine: Any, name_of: _NameOf, _now: float) -> Any:
+            return events_page(engine, name_of, parse_events_query(query))
+
+        return await self._read(request, build)
+
+
+class OpenWrtIntelIncidentsView(_IntelView):
+    """Incident list; filters ``status``, ``router``, ``severity``; ``limit`` <= 200."""
+
+    url = f"{_INTEL_URL}/incidents"
+    name = "api:openwrt_topology:intelligence:incidents"
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return the incidents, open ones first."""
+        from .net_query import incidents_page, parse_incidents_query
+
+        query = request.query
+
+        def build(engine: Any, name_of: _NameOf, now: float) -> Any:
+            return incidents_page(engine, name_of, parse_incidents_query(query), now)
+
+        return await self._read(request, build)
+
+
+class OpenWrtIntelIncidentView(_IntelView):
+    """One incident: GET detail; POST a new status (admin only)."""
+
+    url = f"{_INTEL_URL}/incidents/{{incident_id}}"
+    name = "api:openwrt_topology:intelligence:incident"
+
+    async def get(self, request: web.Request, incident_id: str) -> web.Response:
+        """Return the incident with evidence, parent, children and chain."""
+        from .net_query import incident_detail
+
+        def build(engine: Any, name_of: _NameOf, now: float) -> Any:
+            return incident_detail(engine, incident_id, name_of, now)
+
+        return await self._read(request, build)
+
+    async def post(self, request: web.Request, incident_id: str) -> web.Response:
+        """Acknowledge, ignore (``ignore_days`` optional) or re-activate."""
+        from .net_query import QueryError, parse_status_body
+
+        if (blocked := self._check(request, write=True)) is not None:
+            return blocked
+        engine = self._engine(request.app[KEY_HASS])
+        if engine is None:
+            return self._unavailable()
+        try:
+            status, days = parse_status_body(await self._body(request))
+        except QueryError as err:
+            return self.json_message(str(err), status_code=400)
+        done = engine.set_incident_status(incident_id, status, ignore_days=days)
+        if done is None:
+            return self.json_message("Unknown incident", status_code=404)
+        if not done:
+            return self.json_message(
+                f"Incident cannot be set to {status} in its current status",
+                status_code=409,
+            )
+        return await self.get(request, incident_id)
+
+
+class OpenWrtIntelSettingsView(_IntelView):
+    """Thresholds, exclusions, maintenance: GET for readers, POST admin only."""
+
+    url = f"{_INTEL_URL}/settings"
+    name = "api:openwrt_topology:intelligence:settings"
+
+    def _answer(self, hass: HomeAssistant, engine: Any, is_admin: bool) -> web.Response:
+        from .net_rules import (
+            DEFAULT_SETTINGS,
+            SETTINGS_LIST_MAX,
+            SETTINGS_STRING_MAX,
+        )
+
+        name_of = _router_names(hass)
+        excluded = engine.settings.get("exclusions", {}).get("routers") or []
+        routers = sorted(
+            set(engine.routers) | {r for r in excluded if isinstance(r, str)}
+        )
+        return self.json(
+            {
+                "settings": engine.settings,
+                "defaults": DEFAULT_SETTINGS,
+                "can_edit": is_admin,
+                "routers": [
+                    {
+                        "id": router,
+                        "name": name_of(router),
+                        "maintenance": engine.router_maintenance(router),
+                    }
+                    for router in routers
+                ],
+                "limits": {
+                    "list_max": SETTINGS_LIST_MAX,
+                    "string_max": SETTINGS_STRING_MAX,
+                },
+            }
+        )
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return the settings with the defaults and the known routers."""
+        if (blocked := self._check(request)) is not None:
+            return blocked
+        hass: HomeAssistant = request.app[KEY_HASS]
+        engine = self._engine(hass)
+        if engine is None:
+            return self._unavailable()
+        return self._answer(hass, engine, self._is_admin(request))
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Apply a (partial) settings change; 400 with ``errors`` if invalid."""
+        from .net_query import QueryError
+
+        if (blocked := self._check(request, write=True)) is not None:
+            return blocked
+        hass: HomeAssistant = request.app[KEY_HASS]
+        engine = self._engine(hass)
+        if engine is None:
+            return self._unavailable()
+        try:
+            patch = await self._body(request)
+        except QueryError as err:
+            return self.json_message(str(err), status_code=400)
+        errors = engine.apply_settings(patch)
+        if errors:
+            return self.json(
+                {"message": "Invalid settings", "errors": errors}, status_code=400
+            )
+        return self._answer(hass, engine, True)
+
+
+def _api_views() -> tuple[HomeAssistantView, ...]:
+    """Every API view of the panel (bound once per HA session)."""
+    return (
+        OpenWrtMeshSnapshotView(),
+        OpenWrtIntelSummaryView(),
+        OpenWrtIntelEventsView(),
+        OpenWrtIntelIncidentsView(),
+        OpenWrtIntelIncidentView(),
+        OpenWrtIntelSettingsView(),
+    )
 
 
 async def _async_register_sidebar_panel(
@@ -268,9 +566,15 @@ async def _async_setup_locked(
             )
             hass.data[_PANEL_STATIC_BOUND_KEY] = True
 
-        # Stage 2: HTTP view — also append-only on aiohttp's router.
+        # Stage 2: HTTP views — also append-only on aiohttp's router.  Each
+        # view is remembered by name, so a retry after a failure part-way
+        # binds only the missing ones.
         if not hass.data.get(_PANEL_VIEW_BOUND_KEY):
-            hass.http.register_view(OpenWrtMeshSnapshotView())
+            bound: set[str] = hass.data.setdefault(_PANEL_VIEWS_BOUND_KEY, set())
+            for view in _api_views():
+                if view.name not in bound:
+                    hass.http.register_view(view)
+                    bound.add(view.name)
             hass.data[_PANEL_VIEW_BOUND_KEY] = True
 
         # Stage 3: sidebar panel — async_register_panel raises if the

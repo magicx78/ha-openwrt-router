@@ -37,6 +37,7 @@ from __future__ import annotations
 import copy
 import logging
 import math
+import re
 import statistics
 from collections import Counter, deque
 from collections.abc import Iterable, Mapping
@@ -301,6 +302,85 @@ def _in_bounds(key: str, value: float, mode: str | None) -> bool:
     if key in _FRACTION_KEYS:
         return 0 <= value <= 1
     return value >= 0
+
+
+# P7: limits of the lists the panel can write (store size), and the MAC
+# form ``exclusions.macs`` accepts.
+SETTINGS_LIST_MAX = 200
+SETTINGS_STRING_MAX = 64
+_SETTINGS_MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$")
+
+
+def settings_errors(patch: Any) -> list[str]:
+    """Check a settings change from the panel (P7); empty list = valid.
+
+    Strict where ``merge_settings`` is lenient: an unknown key, a value
+    ``merge_settings`` would discard, a changed fixed key (``schema``,
+    ``mode``, ``stay_open``) or an over-long list is an error instead of
+    silently falling back to the default. Same bounds as ``merge_settings``;
+    ``exclusions.macs`` must hold MAC addresses. ``patch`` may be partial.
+    """
+    if not isinstance(patch, dict):
+        return ["settings: object expected"]
+    return _check_settings(DEFAULT_SETTINGS, patch, "", None, "")
+
+
+def _check_settings(
+    default: Any, value: Any, key: str, mode: str | None, path: str
+) -> list[str]:
+    if isinstance(default, dict):
+        if not isinstance(value, dict):
+            return [f"{path}: object expected"]
+        sub_mode = default.get("mode", mode)
+        errors: list[str] = []
+        for sub_key, sub_value in value.items():
+            sub_path = f"{path}.{sub_key}" if path else str(sub_key)
+            if sub_key not in default:
+                errors.append(f"{sub_path}: unknown key")
+                continue
+            errors.extend(
+                _check_settings(
+                    default[sub_key], sub_value, sub_key, sub_mode, sub_path
+                )
+            )
+        return errors
+    if key in _FIXED_KEYS:
+        return [] if value == default else [f"{path}: cannot be changed"]
+    if isinstance(default, list):
+        if (
+            not isinstance(value, list)
+            or len(value) > SETTINGS_LIST_MAX
+            or not all(
+                isinstance(s, str) and 0 < len(s) <= SETTINGS_STRING_MAX for s in value
+            )
+        ):
+            return [
+                (
+                    f"{path}: list of at most {SETTINGS_LIST_MAX} non-empty "
+                    f"strings (each at most {SETTINGS_STRING_MAX} characters) "
+                    "expected"
+                )
+            ]
+        if path == "exclusions.macs":
+            bad = [s for s in value if not _SETTINGS_MAC_RE.match(s)]
+            if bad:
+                return [f"{path}: not a MAC address: {bad[0][:SETTINGS_STRING_MAX]}"]
+        return []
+    if not _valid_leaf(default, value, key, mode):
+        return [f"{path}: invalid value {str(value)[:SETTINGS_STRING_MAX]}"]
+    return []
+
+
+def deep_merge(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    """``base`` with ``patch`` laid over it: dicts merge, other values replace."""
+    out = copy.deepcopy(dict(base))
+    for key, value in patch.items():
+        current = out.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            out[key] = deep_merge(current, value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
 
 
 def _is_number(value: Any) -> bool:
@@ -936,6 +1016,31 @@ class AlarmMachine:
             return False
         inc.status = IncidentStatus.IGNORED
         inc.ignore_until = until if until is not None else now + self._ignore_seconds()
+        return True
+
+    def reactivate(self, incident_id: str, now: float) -> bool:
+        """Undo acknowledge or ignore (P7 panel); False if neither applies.
+
+        An acknowledged incident becomes active again. An ignored one ends
+        its ignore period like ``_expire_ignores``: active while its track
+        is still live, otherwise resolved at ``now``.
+        """
+        inc = self._incidents.get(incident_id)
+        if inc is None:
+            return False
+        if inc.status is IncidentStatus.ACKNOWLEDGED:
+            inc.status = IncidentStatus.ACTIVE
+            return True
+        if inc.status is not IncidentStatus.IGNORED:
+            return False
+        inc.ignore_until = None
+        track = self._tracks.get(inc.key)
+        if track is not None and track.live and track.incident_id == inc.id:
+            inc.status = IncidentStatus.ACTIVE
+        else:
+            inc.status = IncidentStatus.RESOLVED
+            if inc.resolved_at is None:
+                inc.resolved_at = now if _is_number(now) else inc.last_seen
         return True
 
     def remove_router(self, entry_id: str) -> int:

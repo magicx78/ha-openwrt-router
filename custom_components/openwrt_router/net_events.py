@@ -573,6 +573,18 @@ class EventRing:
             self._items = deque(keep, maxlen=self.max_count)
         return dropped
 
+    def resize(self, max_count: int, max_age: float) -> int:
+        """Apply new limits (P7 settings); return how many events were dropped.
+
+        A smaller ``max_count`` keeps the newest events; events beyond the
+        new ``max_age`` go with the next ``prune``.
+        """
+        before = len(self._items)
+        self.max_count = max_count
+        self.max_age = max_age
+        self._items = deque(self._items, maxlen=max_count)
+        return before - len(self._items)
+
     def shift(self, delta: float) -> None:
         """Move every event's ``ts`` by ``delta`` (large clock jump back).
 

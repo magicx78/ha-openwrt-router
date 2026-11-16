@@ -164,6 +164,7 @@ from .net_rules import (
     build_topology,
     counted_incidents,
     decline_cause,
+    deep_merge,
     detect_infrastructure,
     detect_wifi,
     finding_evidence,
@@ -171,6 +172,7 @@ from .net_rules import (
     log_event_evidence,
     merge_settings,
     router_score,
+    settings_errors,
     wifi_auth_evidence,
     wifi_context,
     wifi_log_meta,
@@ -1156,6 +1158,64 @@ class NetIntelligence:
         now = self.machine.last_now
         if now is not None and self._loaded:
             self._refresh(now)
+
+    # -- panel actions (P7) --------------------------------------------------------
+
+    @callback
+    def apply_settings(self, patch: Any) -> list[str]:
+        """Merge a settings change from the panel; return the errors (none = done).
+
+        ``patch`` is checked strictly (``settings_errors``) and laid over the
+        current settings. The automaton, the ring limits and the counter
+        retention take the new values at once; thresholds and exclusions act
+        on the next evidence (open incidents of a newly excluded type end by
+        ``auto_resolve``). Saved with the next delayed write.
+        """
+        errors = settings_errors(patch)
+        if errors:
+            return errors
+        self.settings = merge_settings(deep_merge(self.settings, patch))
+        self.machine.set_settings(self.settings)
+        self.ring.resize(
+            self.settings["max_events"], self.settings["retention_days"] * _DAY
+        )
+        self.counters.retention_days = self.settings["retention_days"]
+        self.schedule_save()
+        now = self.machine.last_now
+        if now is not None and self._loaded:
+            self._refresh(now)
+        return []
+
+    @callback
+    def set_incident_status(
+        self, incident_id: str, status: str, *, ignore_days: float | None = None
+    ) -> bool | None:
+        """Acknowledge, ignore or re-activate an incident (panel, admin only).
+
+        None: unknown incident. False: not possible in its current status
+        (or an unknown ``status``). ``ignore_days`` None ignores for the
+        settings duration. Uses the engine clock, so the ignore period fits
+        the incident times.
+        """
+        if self.machine.get(incident_id) is None:
+            return None
+        now = self.machine.last_now
+        if now is None:
+            now = time.time()
+        if status == IncidentStatus.ACKNOWLEDGED:
+            done = self.machine.acknowledge(incident_id)
+        elif status == IncidentStatus.IGNORED:
+            until = now + ignore_days * _DAY if ignore_days is not None else None
+            done = self.machine.ignore(incident_id, now, until)
+        elif status == IncidentStatus.ACTIVE:
+            done = self.machine.reactivate(incident_id, now)
+        else:
+            return False
+        if done:
+            self.schedule_save()
+            if self.machine.last_now is not None and self._loaded:
+                self._refresh(self.machine.last_now)
+        return done
 
     def _mark(self, event: NetEvent) -> NetEvent:
         """An event recorded during maintenance: marked; a reboot is info."""

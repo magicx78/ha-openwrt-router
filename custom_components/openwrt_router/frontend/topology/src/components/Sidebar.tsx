@@ -10,9 +10,10 @@ import {
   IconChevronRight,
   IconCompare,
   IconWiring,
+  IconDiagnose,
 } from './Icons';
 
-export type SidebarTab = 'topology' | 'devices' | 'clients' | 'traffic' | 'alerts' | 'compare' | 'wiring' | 'settings';
+export type SidebarTab = 'topology' | 'devices' | 'clients' | 'traffic' | 'alerts' | 'diagnose' | 'compare' | 'wiring' | 'settings';
 
 interface NavItem {
   id: SidebarTab;
@@ -25,11 +26,15 @@ interface Props {
   open: boolean;
   activeTab: SidebarTab;
   warningCount: number;
+  /** Open root incidents (critical + warning) from the snapshot (P7); undefined hides the tab badge. */
+  diagnoseCount?: number;
+  /** False hides the Diagnose tab (network intelligence not running). */
+  showDiagnose?: boolean;
   onToggle: () => void;
   onTabChange: (tab: SidebarTab) => void;
 }
 
-export function Sidebar({ open, activeTab, warningCount, onToggle, onTabChange }: Props) {
+export function Sidebar({ open, activeTab, warningCount, diagnoseCount, showDiagnose = true, onToggle, onTabChange }: Props) {
   const items: NavItem[] = [
     { id: 'topology', label: 'Topologie',  Icon: IconTopology },
     { id: 'devices',  label: 'Geräte',     Icon: IconDevices },
@@ -37,6 +42,9 @@ export function Sidebar({ open, activeTab, warningCount, onToggle, onTabChange }
     { id: 'clients',  label: 'Clients',    Icon: IconClients },
     { id: 'traffic',  label: 'Traffic',    Icon: IconTraffic },
     { id: 'alerts',   label: 'Alarme',     Icon: IconAlerts,  badge: warningCount > 0 ? warningCount : undefined },
+    ...(showDiagnose
+      ? [{ id: 'diagnose' as const, label: 'Diagnose', Icon: IconDiagnose, badge: diagnoseCount && diagnoseCount > 0 ? diagnoseCount : undefined }]
+      : []),
     { id: 'compare',  label: 'Vergleich',  Icon: IconCompare },
     { id: 'settings', label: 'Einst.',     Icon: IconSettings },
   ];
