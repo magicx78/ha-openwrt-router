@@ -473,7 +473,10 @@ async def test_withdraw_of_the_last_router_moves_nothing(
 
 def fake_registry(hass: Any) -> er.EntityRegistry:
     registry = er.EntityRegistry(hass)
-    registry.entities = er.EntityRegistryItems()
+    try:  # HA >= 2026.11 takes hass, older releases take no argument
+        registry.entities = er.EntityRegistryItems(hass)
+    except TypeError:
+        registry.entities = er.EntityRegistryItems()
     registry._entities_data = registry.entities.data
     registry.deleted_entities = {}
     registry.async_schedule_save = lambda: None

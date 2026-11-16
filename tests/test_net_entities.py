@@ -332,7 +332,10 @@ def test_fleet_entity_moves_to_the_new_anchor_entry() -> None:
     hass = MagicMock()
     hass.data = {}
     registry = er.EntityRegistry(hass)
-    registry.entities = er.EntityRegistryItems()
+    try:  # HA >= 2026.11 takes hass, older releases take no argument
+        registry.entities = er.EntityRegistryItems(hass)
+    except TypeError:
+        registry.entities = er.EntityRegistryItems()
     registry.deleted_entities = {}
     registry.async_schedule_save = lambda: None
 
