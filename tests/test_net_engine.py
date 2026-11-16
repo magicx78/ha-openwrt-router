@@ -12,6 +12,8 @@ import asyncio
 import copy
 import json
 import logging
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -86,15 +88,20 @@ class FakeDisk:
         self.saves: list[Any] = []
         self.delayed: list[tuple[Any, float]] = []
         self.save_gate: asyncio.Event | None = None
+        self.load_gate: asyncio.Event | None = None
         self.created: list[tuple[Any, ...]] = []
+        self.path = "/nonexistent/.storage/openwrt_router.intelligence"
 
 
 class FakeStore:
     def __init__(self, disk: FakeDisk, hass: Any, version: int, key: str, **kw: Any):
         self.disk = disk
+        self.path = disk.path
         disk.created.append((version, key, kw.get("minor_version")))
 
     async def async_load(self) -> Any:
+        if self.disk.load_gate is not None:
+            await self.disk.load_gate.wait()
         if self.disk.load_error is not None:
             raise self.disk.load_error
         return copy.deepcopy(self.disk.data)
@@ -116,9 +123,21 @@ def disk() -> Any:
         yield disk
 
 
+@pytest.fixture
+def store_dir() -> Any:
+    """A scratch directory (``tempfile``: pytest's own base dir may be locked)."""
+    with tempfile.TemporaryDirectory() as name:
+        yield Path(name)
+
+
+async def _run_in_executor(func: Any, *args: Any) -> Any:
+    return func(*args)
+
+
 def make_hass() -> MagicMock:
     hass = MagicMock()
     hass.data = {}
+    hass.async_add_executor_job = AsyncMock(side_effect=_run_in_executor)
     return hass
 
 
@@ -954,3 +973,465 @@ def test_machine_remove_router_keeps_incidents_shared_with_other_routers() -> No
     [left] = machine.incidents()
     assert left.type == "wifi_auth_failures" and left.routers == ["r2"]
     assert machine.remove_router("r1") == 0
+
+
+# --- P2 review (2026-11-16) -------------------------------------------------------------
+
+ULID1 = "01JD0000000000000000000001"  # config entry ids are 26-char ULIDs
+ULID2 = "01JD0000000000000000000002"
+
+
+def _ingest_series(
+    engine: NetIntelligence, step: float, polls: int, *, mono: bool
+) -> float:
+    """``polls`` polls ``step`` s apart, an event every sixth; returns the end time."""
+    now, clock = T0, 5_000.0
+    for i in range(1, polls + 1):
+        events = (wifi(WIFI_PSK_MISMATCH, i),) if i % 6 == 0 else ()
+        data = poll(events, last_id=i)
+        if mono:
+            engine.ingest("r1", data, now, clock)
+        else:
+            engine.ingest("r1", data, now)
+        now += step
+        clock += step
+    return now - step
+
+
+@pytest.mark.asyncio
+async def test_m1_slow_polls_keep_pruning_with_monotonic_time(disk: FakeDisk) -> None:
+    # SSH fallback: 300 s interval plus the poll duration, 35 days long
+    engine = await engine_for(make_hass(), "r1")
+    end = _ingest_series(engine, 305, 35 * 86_400 // 305, mono=True)
+    assert not engine.machine.prune_held
+    buckets = engine.counters._data["r1"]["wifi.psk_mismatch"]
+    assert len(buckets["h"]) <= 49  # hourly for 48 h only
+    assert len(buckets["d"]) <= 31  # then daily for 30 days
+    assert min(buckets["h"]) >= int(end // 3600) - 49
+
+
+@pytest.mark.asyncio
+async def test_m1_slow_polls_without_monotonic_time_hold_one_step_only(
+    disk: FakeDisk,
+) -> None:
+    engine = await engine_for(make_hass(), "r1")
+    _ingest_series(engine, 305, 5 * 86_400 // 305, mono=False)
+    buckets = engine.counters._data["r1"]["wifi.psk_mismatch"]
+    assert len(buckets["h"]) <= 50
+
+
+def test_m1_machine_clock_jump_detection() -> None:
+    from custom_components.openwrt_router.net_rules import AlarmMachine
+
+    machine = AlarmMachine()
+    machine.sync_clock(T0, 100.0)
+    machine.sync_clock(T0 + 305, 405.0)  # slow poll: wall and monotonic agree
+    assert not machine.prune_held
+    machine.sync_clock(T0 + 40 * 86_400, 465.0)  # wall clock jumped 40 days
+    assert machine.prune_held
+    machine.update(T0 + 40 * 86_400)  # the same instant again: still held
+    assert machine.prune_held
+    machine.sync_clock(T0 + 40 * 86_400 + 60, 525.0)
+    assert not machine.prune_held
+    # no monotonic reference (first step after a restart): one step only
+    restarted = AlarmMachine.from_dict(machine.to_dict())
+    restarted.sync_clock(T0 + 42 * 86_400, 10.0)
+    assert restarted.prune_held
+    restarted.sync_clock(T0 + 42 * 86_400 + 305, 315.0)
+    assert not restarted.prune_held
+    # callers without monotonic time: a hold never lasts two steps
+    legacy = AlarmMachine()
+    legacy.sync_clock(T0)
+    legacy.sync_clock(T0 + 305)
+    assert legacy.prune_held
+    legacy.sync_clock(T0 + 610)
+    assert not legacy.prune_held
+
+
+@pytest.mark.asyncio
+async def test_m1_listener_passes_monotonic_time(disk: FakeDisk) -> None:
+    engine = await engine_for(make_hass(), "r1")
+    coordinator = SimpleNamespace(data=poll((wifi(WIFI_PSK_MISMATCH, 1),)))
+    with (
+        patch.object(net_engine.time, "time", return_value=T0),
+        patch.object(net_engine.time, "monotonic", return_value=42.0),
+        patch.object(engine, "ingest") as ingest,
+    ):
+        engine.async_ingest_coordinator("r1", coordinator)
+    ingest.assert_called_once_with("r1", coordinator.data, T0, 42.0)
+
+
+def _incident_dict(incident_id: str) -> dict[str, Any]:
+    from custom_components.openwrt_router.net_rules import AlarmMachine
+
+    machine = AlarmMachine()
+    machine.update(
+        T0,
+        [Evidence("wan_down", "r1", Scope.ROUTER, value=1, router="r1", kind="poll")],
+    )
+    data = machine.to_dict()["incidents"][0]
+    data["id"] = incident_id
+    return data
+
+
+@pytest.mark.asyncio
+async def test_m2_huge_numbers_and_odd_digits_do_not_break_loading(
+    disk: FakeDisk,
+) -> None:
+    event = {"router": "r1", "category": "wifi", "kind": "wifi.psk_mismatch"}
+    disk.data = {
+        "seq": 2,
+        "events": [
+            {**event, "id": "r1:1", "ts": 10**400},
+            # superscript two: isdigit() is True, int() fails
+            {**event, "id": "r1:\u00b2", "ts": T0},
+            {**event, "id": "r1:3", "ts": T0, "src_ts": 10**400},
+        ],
+        "machine": {"incidents": [_incident_dict("inc-\u00b2")], "last_now": 10**400},
+        "counters": {"r1": {"k": {"h": {str(10**400): 1, "\u00b2": 1}}}},
+    }
+    engine = await engine_for(make_hass(), "r1")
+    assert engine.loaded and not engine.load_failed
+    assert [e.id for e in engine.ring] == ["r1:\u00b2", "r1:3"]
+    assert list(engine.ring)[-1].src_ts is None
+    assert len(engine.machine.incidents()) == 1
+    engine.ingest("r1", poll((wifi(WIFI_PSK_MISMATCH, 1),)), T0 + 60)
+    assert [e.id for e in engine.ring][-1] == "r1:4"
+
+
+@pytest.mark.asyncio
+async def test_m2_any_restore_error_starts_empty_and_marks_the_load_failed(
+    disk: FakeDisk, caplog: pytest.LogCaptureFixture
+) -> None:
+    disk.data = {
+        "events": [
+            {"id": "r1:1", "ts": T0, "router": "r1", "category": "wifi", "kind": "k"}
+        ],
+        "log_marks": {"r1": {"last_id": 1}},
+    }
+    with (
+        patch.object(
+            net_engine.EventCounters, "from_dict", side_effect=RuntimeError("bug")
+        ),
+        caplog.at_level(logging.WARNING, logger=net_engine.__name__),
+    ):
+        engine = await engine_for(make_hass(), "r1")
+    assert engine.loaded and engine.load_failed
+    assert len(engine.ring) == 0 and engine._log_marks == {}
+    assert "starting with an empty history" in caplog.text
+    assert engine.ingest("r1", poll((wifi(WIFI_PSK_MISMATCH, 1),)), T0) == 1
+
+
+@pytest.mark.asyncio
+async def test_m3_no_ingest_or_save_after_the_last_unload(disk: FakeDisk) -> None:
+    hass = make_hass()
+    engine = await engine_for(hass, "r1")
+    await async_unload_net_intelligence(hass, "r1")
+    assert len(disk.saves) == 1
+    # a poll that was already under way reaches the orphaned engine
+    assert engine.ingest("r1", poll((wifi(WIFI_PSK_MISMATCH, 1),)), T0) == 0
+    engine.schedule_save()
+    assert disk.delayed == []
+    assert len(engine.ring) == 0
+
+
+@pytest.mark.asyncio
+async def test_m3_unregistered_router_is_not_ingested(disk: FakeDisk) -> None:
+    hass = make_hass()
+    engine = await engine_for(hass, "r1", "r2")
+    await async_unload_net_intelligence(hass, "r1")
+    assert engine.ingest("r1", poll((wifi(WIFI_PSK_MISMATCH, 1),)), T0) == 0
+    assert engine.ingest("r2", poll((wifi(WIFI_PSK_MISMATCH, 1),)), T0) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("load_error", "stored"),
+    [
+        (OSError("busy"), None),
+        (NotImplementedError("newer major version"), None),
+        (None, ["unknown", "shape"]),
+    ],
+)
+async def test_m4_failed_load_backs_up_the_file_before_the_first_write(
+    disk: FakeDisk, store_dir: Path, load_error: BaseException | None, stored: Any
+) -> None:
+    path = store_dir / "openwrt_router.intelligence"
+    path.write_text('{"history": "precious"}', encoding="utf-8")
+    disk.path = str(path)
+    disk.load_error = load_error
+    disk.data = stored
+    hass = make_hass()
+    engine = await engine_for(hass, "r1")
+    assert engine.load_failed
+    backup = store_dir / "openwrt_router.intelligence.bak"
+    assert backup.read_text(encoding="utf-8") == '{"history": "precious"}'
+    assert hass.async_add_executor_job.await_count == 1  # off the event loop
+    # once: a later engine with a readable file does not copy again
+    disk.load_error, disk.data = None, None
+    backup.unlink()
+    await async_unload_net_intelligence(hass, "r1")
+    await engine_for(hass, "r1")
+    assert not backup.exists()
+
+
+@pytest.mark.asyncio
+async def test_m4_good_load_or_missing_file_makes_no_backup(
+    disk: FakeDisk, store_dir: Path
+) -> None:
+    path = store_dir / "openwrt_router.intelligence"
+    path.write_text("{}", encoding="utf-8")
+    disk.path = str(path)
+    await engine_for(make_hass(), "r1")
+    assert not (store_dir / "openwrt_router.intelligence.bak").exists()
+    path.unlink()
+    disk.load_error = OSError("gone")
+    engine = await engine_for(make_hass(), "r1")  # nothing to back up: no error
+    assert engine.load_failed
+    assert not (store_dir / "openwrt_router.intelligence.bak").exists()
+
+
+@pytest.mark.asyncio
+async def test_m4_backup_error_is_only_logged(
+    disk: FakeDisk, caplog: pytest.LogCaptureFixture
+) -> None:
+    disk.load_error = OSError("busy")
+    hass = make_hass()
+    hass.async_add_executor_job = AsyncMock(side_effect=OSError("disk full"))
+    with caplog.at_level(logging.WARNING, logger=net_engine.__name__):
+        engine = await engine_for(hass, "r1")
+    assert engine.loaded and engine.load_failed
+    assert "backup" in caplog.text
+
+
+def _realistic_event(n: int) -> NetEvent:
+    kinds = (
+        ("wifi.psk_mismatch", {"mac": MAC1, "iface": "phy1-ap0"}, {}),
+        ("wifi.inactivity_timeout", {"mac": MAC2, "iface": "phy0-ap0"}, {}),
+        ("dhcp.nak", {"mac": MAC2, "iface": "br-lan", "ip": IP1}, {}),
+        ("wifi.dfs_radar", {"iface": "phy1-ap0"}, {"frequency": 5500, "channel": 100}),
+    )
+    kind, subject, params = kinds[n % 4]
+    router = (ULID1, ULID2)[n % 2]
+    return NetEvent(
+        id=f"{router}:{n}",
+        ts=T0 + n * 37.123,
+        router=router,
+        category=Category.DHCP if kind.startswith("dhcp") else Category.WIFI,
+        kind=kind,
+        subject=subject,
+        msg_key=kind,
+        params=params,
+        src_ts=T0 + n * 37.123 - 0.4,
+    )
+
+
+def test_k1_compact_event_round_trip_and_old_format() -> None:
+    event = _realistic_event(0)
+    compact = event.to_dict(compact=True)
+    assert set(compact) == {
+        "id",
+        "ts",
+        "router",
+        "category",
+        "kind",
+        "subject",
+        "src_ts",
+    }
+    assert NetEvent.from_dict(compact) == event
+    assert NetEvent.from_dict(event.to_dict()) == event  # old, full records
+    odd = NetEvent(
+        id="x-1",
+        ts=T0,
+        router=ULID1,
+        category=Category.SYSTEM,
+        kind="system.log_gap",
+        msg_key="",
+        count=3,
+        clock_skew=True,
+    )
+    assert NetEvent.from_dict(odd.to_dict(compact=True)) == odd
+
+
+@pytest.mark.asyncio
+async def test_k1_3000_realistic_events_fit_without_trimming(disk: FakeDisk) -> None:
+    engine = await engine_for(make_hass(), ULID1, ULID2)
+    for n in range(3000):
+        engine.ring.add(_realistic_event(n))
+    end = T0 + 3000 * 37.123
+    engine.machine.sync_clock(end)
+    engine.machine.update(
+        end,
+        [
+            Evidence(
+                "wan_down", f"r{i}", Scope.ROUTER, value=1, router=ULID1, kind="poll"
+            )
+            for i in range(100)
+        ],
+    )
+    payload = engine._data_to_save()
+    assert len(payload["events"]) == 3000
+    assert engine.trimmed_events == 0
+    assert engine.last_save_bytes is not None
+    assert engine.last_save_bytes <= INTEL_MAX_STORE_BYTES
+    restarted = NetIntelligence(make_hass())
+    restarted._restore(as_json(payload))
+    assert list(restarted.ring) == list(engine.ring)
+
+
+@pytest.mark.asyncio
+async def test_k1_trim_serialises_the_rest_of_the_payload_once(
+    disk: FakeDisk,
+) -> None:
+    engine = await engine_for(make_hass(), "r1")
+    engine.machine.sync_clock(T0 + 3000)
+    for n in range(3000):
+        engine.ring.add(_big_event(n))
+    with (
+        patch.object(engine.machine, "to_dict", wraps=engine.machine.to_dict) as m,
+        patch.object(engine.counters, "to_dict", wraps=engine.counters.to_dict) as c,
+    ):
+        payload = engine._data_to_save()
+    assert engine.trimmed_events > 0
+    assert m.call_count == 1 and c.call_count == 1
+    assert _ha_file_bytes(payload) <= INTEL_MAX_STORE_BYTES
+
+
+@pytest.mark.asyncio
+async def test_k2_setup_failure_unregisters_the_router(disk: FakeDisk) -> None:
+    _hass, entry, engine = await _setup_entry_with_engine()
+    callbacks = [c.args[0] for c in entry.async_on_unload.call_args_list]
+    unregister = [
+        cb
+        for cb in callbacks
+        if getattr(cb, "func", None) == engine.unregister
+        and getattr(cb, "args", ()) == (entry.entry_id,)
+    ]
+    assert len(unregister) == 1
+    unregister[0]()
+    assert engine.routers == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_k3_gap_lines_are_not_marked_as_clock_skew(disk: FakeDisk) -> None:
+    disk.data = {"log_marks": {"r1": {"last_id": 5, "last_time_ms": MS0 + 5000}}}
+    engine = await engine_for(make_hass(), "r1")
+    ahead = LogEvent(
+        category=CATEGORY_WIFI,
+        kind=WIFI_PSK_MISMATCH,
+        log_id=9,
+        time_ms=MS0 + 2 * 3_600_000 + 1000,  # router clock ahead of HA
+        mac=MAC1,
+        interface="phy1-ap0",
+    )
+    lines = (wifi(WIFI_PSK_MISMATCH, 5), wifi(WIFI_PSK_MISMATCH, 6), ahead)
+    # HA was down for an hour: the gap line is old, but not skewed
+    engine.ingest("r1", poll(lines, baseline=True), T0 + 3600)
+    old, future = list(engine.ring)
+    assert old.ts == (MS0 + 6000) / 1000
+    assert old.clock_skew is False
+    assert future.clock_skew is True
+    # a normal line an hour off still counts as skewed
+    engine.ingest("r1", poll((wifi(WIFI_PSK_MISMATCH, 10),)), T0 + 3700)
+    assert list(engine.ring)[-1].clock_skew is True
+
+
+@pytest.mark.asyncio
+async def test_k4_setup_racing_the_removal_of_the_last_entry(
+    disk: FakeDisk,
+) -> None:
+    hass = make_hass()
+    engine = await engine_for(hass, "r1", "r2")
+    engine.ingest("r1", poll((wifi(WIFI_PSK_MISMATCH, 1),)), T0)
+    engine.ingest("r2", poll((wifi(WIFI_PSK_MISMATCH, 1, MAC2),)), T0)
+    await async_unload_net_intelligence(hass, "r1")
+    await async_unload_net_intelligence(hass, "r2")
+
+    disk.load_gate = asyncio.Event()
+    disk.save_gate = asyncio.Event()  # the removal's write takes a while
+    remove = asyncio.create_task(async_remove_router_data(hass, "r2"))
+    await asyncio.sleep(0)
+    setup = asyncio.create_task(engine_for(hass, "r1"))
+    await asyncio.sleep(0)
+    disk.load_gate.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    disk.save_gate.set()
+    await remove
+    fresh = await setup
+    assert [e.router for e in fresh.ring] == ["r1"]  # r2 does not come back
+    assert set(fresh._log_marks) == {"r1"}
+    assert [e["id"].split(":")[0] for e in disk.data["events"]] == ["r1"]
+
+
+@pytest.mark.asyncio
+async def test_k4_removal_waits_for_an_engine_that_is_still_loading(
+    disk: FakeDisk,
+) -> None:
+    disk.data = {
+        "events": [
+            {"id": "r1:1", "ts": T0, "router": "r1", "category": "wifi", "kind": "k"},
+            {"id": "r2:2", "ts": T0, "router": "r2", "category": "wifi", "kind": "k"},
+        ]
+    }
+    hass = make_hass()
+    disk.load_gate = asyncio.Event()
+    setup = asyncio.create_task(engine_for(hass, "r1"))
+    await asyncio.sleep(0)
+    remove = asyncio.create_task(async_remove_router_data(hass, "r2"))
+    await asyncio.sleep(0)
+    disk.load_gate.set()
+    engine = await setup
+    await remove
+    assert [e.router for e in engine.ring] == ["r1"]
+
+
+async def _setup_entry_with_engine() -> tuple[Any, Any, NetIntelligence]:
+    from test_init import _make_entry, _make_hass
+
+    hass = _make_hass()
+    hass.data = {}
+    hass.async_add_executor_job = AsyncMock(side_effect=_run_in_executor)
+    entry = _make_entry()
+    mock_api = AsyncMock()
+    mock_api.reset_acl_blocked = MagicMock()
+    coordinator = MagicMock()
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+    coordinator.data = OpenWrtCoordinatorData()
+    with (
+        patch(
+            "custom_components.openwrt_router.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+        patch("custom_components.openwrt_router.OpenWrtAPI", return_value=mock_api),
+        patch(
+            "custom_components.openwrt_router.OpenWrtCoordinator",
+            return_value=coordinator,
+        ),
+        patch(
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            AsyncMock(return_value=False),
+        ),
+        patch(
+            "custom_components.openwrt_router.async_get_outage_tracker",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.openwrt_router.async_get_channel_plan_monitor",
+            return_value=MagicMock(),
+        ),
+        patch("custom_components.openwrt_router.dr.async_get"),
+        patch("custom_components.openwrt_router.er.async_get"),
+        patch(
+            "custom_components.openwrt_router.dr.async_entries_for_config_entry",
+            return_value=[],
+        ),
+        patch(
+            "custom_components.openwrt_router.er.async_entries_for_config_entry",
+            return_value=[],
+        ),
+    ):
+        assert await async_setup_entry(hass, entry) is True
+    engine = async_get_engine(hass)
+    assert engine is not None
+    return hass, entry, engine

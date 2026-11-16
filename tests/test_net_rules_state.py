@@ -988,6 +988,7 @@ def test_resolved_incidents_beyond_retention_are_dropped() -> None:
     m = AlarmMachine()
     feed(m, 0, ev("system_reboot", "r1", scope=Scope.ROUTER))
     feed(m, 1800)  # resolved
+    feed(m, 1860)  # a normal poll (no monotonic time here: a hold lasts one step)
     assert len(m.incidents()) == 1
     feed(m, 1800 + 31 * 86400)  # forward jump: pruning waits one step
     assert len(m.incidents()) == 1

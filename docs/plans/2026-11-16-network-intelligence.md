@@ -13,7 +13,7 @@ belegt), **Annahme** (plausibel, aber noch nicht belegt; Prüfweg steht dabei), 
 - **Stand:** 2026-11-16 · **Phase:** freigegeben (Nutzer, 2026-11-16), in Umsetzung
 - **Branch/PR:** `feature/network-intelligence` · Worktree `../ha-openwrt-router-net-intel` · PR #— · Basis: v1.39.0 (`main@f8a2ac7`)
 - **Erledigt:** Live-Checks, P1, P2 · **In Arbeit:** – · **Offen:** P3–P8
-- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 im Commit `feat(intel): add fleet engine with persistent store (P2)`
+- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 im Commit `fix(intel): harden engine store and clock (P2 review)`
 - **Blocker:** keine
 - **Nächster Schritt:** P1, P2 erledigt; nächster Schritt P3 (setzt die Live-Checks L1/L4/L5/L6/L8 voraus).
 
@@ -37,8 +37,12 @@ Entschieden bei der Umsetzung von P1-Review und P2 (Coordinator bzw. Umsetzer, 2
 - Uhrmodell: Die Engine hat eine Uhr für die ganze Flotte, die nie rückwärts läuft
   (`AlarmMachine.sync_clock`). Ein Rücksprung bis 300 s zählt als „keine Zeit vergangen“;
   ein größerer verschiebt alle gespeicherten Zeiten im Automaten und im Ringpuffer um
-  denselben Betrag (Routerzeit `src_ts` bleibt). Nach einem Vorwärtssprung über 300 s wird
-  bis zum nächsten normalen Schritt nichts nach Alter gelöscht.
+  denselben Betrag (Routerzeit `src_ts` bleibt). Nach einem Vorwärtssprung wird für genau
+  einen Schritt nichts nach Alter gelöscht. Ein Sprung ist ein Schritt, der die vergangene
+  monotone Zeit (`time.monotonic()`, vom Listener übergeben) um mehr als 300 s übersteigt;
+  ohne monotone Referenz (erster Schritt nach einem Neustart) jeder Schritt über 300 s, aber
+  nie zwei Schritte nacheinander. Langsame Polls (SSH-Fallback, 300 s plus Pollzeit) halten
+  das Löschen damit nicht mehr an (P2-Review M1, bevorzugte Variante).
 - Pro Poll höchstens ein Level-Beleg je (Typ, Scope); ein Typ ohne Regel löst mit einer
   Rückfallregel automatisch auf. Eigene Regeln für `router_unreachable`/`lan_unreachable`
   kommen in P5.
@@ -46,6 +50,23 @@ Entschieden bei der Umsetzung von P1-Review und P2 (Coordinator bzw. Umsetzer, 2
   `retention_days` ≤ 365, `max_events` ≤ 10000); ungültige Werte fallen auf den Standard.
 - Store-Inhalt abweichend von c5: `{settings, seq, events, machine, counters, log_marks}`;
   `machine` ist der vollständige `AlarmMachine.to_dict()` (Incidents und Spuren).
+  Events werden kompakt gespeichert: Felder mit Standardwert fehlen, `msg_key` fehlt, wenn
+  er `kind` gleicht; das Laden liest auch die volle Form (P2-Review K1). Gemessen mit
+  realistischen Events (26-Zeichen-Entry-IDs): 681 B je Event vorher, 360 B nachher;
+  3000 Events ≈ 1,09 MB, passen ohne Kürzen. Erst mit sehr vielen offenen Incidents
+  (gemessen: 500) wird gekürzt; die Nutzdaten werden dafür nur einmal gebaut.
+- Ein Store, der nicht gelesen, nicht erkannt oder nicht wiederhergestellt werden kann
+  (auch eine neuere Hauptversion), wird einmal als `<store>.bak` kopiert, bevor die Engine
+  schreibt; die Kopie läuft im Executor. Schlägt sie fehl, gibt es nur eine Warnung
+  (Entscheidung Master, P2-Review M4). Jeder Fehler beim Wiederherstellen startet leer
+  mit `load_failed` (M2).
+- Nach dem letzten Unload ist die Engine geschlossen: späte Polls werden ignoriert, es wird
+  nichts mehr zum Schreiben vorgemerkt; nur registrierte Router werden eingelesen (M3).
+  Der Router wird auch bei einem fehlgeschlagenen Setup abgemeldet (`async_on_unload`, K2).
+- Wird der letzte Entry entfernt, beansprucht das Löschen den Store, bevor es ihn liest; ein
+  gleichzeitiges Setup lädt erst danach. Eine Engine, die noch lädt, wird abgewartet (K4).
+- Zeilen aus der Lücke nach einem Neustart gelten nur als `clock_skew`, wenn die Routerzeit
+  mehr als 300 s vor HA liegt (K3); sie sind per Definition neuer als die Marke.
 - `async_delay_save` verschiebt einen wartenden Schreibvorgang bei jedem Aufruf nach hinten.
   Die Engine ruft es deshalb nur einmal je 300-s-Fenster auf (`_save_pending`).
 - Statt auf einen Schreibvorgang von HA beim Beenden zu vertrauen, schreibt der letzte
@@ -890,8 +911,12 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 – Uhr der Engine läuft nie rückwärts; großer Rücksprung verschiebt Automat und Ringpuffer, Vorwärtssprung hält das Löschen nach Alter einen Schritt an – Review P1-1/P1-2 – entschieden, Umsetzer
 - 2026-11-16 – Store speichert den ganzen Automaten (`machine`), Schreiben einmal je 300 s, letzter Unload schreibt sofort und wartet – `async_delay_save` schiebt bei jedem Aufruf nach hinten; `async_on_unload`-Koroutinen werden nicht abgewartet – entschieden, Umsetzer
 - 2026-11-16 – `LogBatch` + `log_marks` mit Lückenfüllung und `system.log_gap` – c5, Neustart ohne Verlust und ohne doppelte Zeilen – entschieden, Umsetzer
+- 2026-11-16 – Sprungerkennung über `time.monotonic()`, Halt höchstens einen Schritt – langsame Polls hielten das Löschen dauerhaft an (P2-Review M1) – entschieden, Umsetzer (bevorzugte Variante des Reviews)
+- 2026-11-16 – Bei `load_failed` einmal `<store>.bak` vor dem ersten Schreiben, im Executor – sonst überschreibt der erste Save die Historie (P2-Review M4) – entschieden, Master
+- 2026-11-16 – Events kompakt speichern, 3000 Events / 1,5 MB bleiben – 681 → 360 B je Event (P2-Review K1) – entschieden, Master
 
 ## Prüfprotokoll
 
 - 2026-11-16 `main@f8a2ac7` – nur gelesen, kein Code geändert · lokal: – · CI: – · Hardware: nicht geprüft (L0–L12 offen) · Review: –
 - 2026-11-16 `feature/network-intelligence` (P1-Review-Fixes `4e62d7b`, P2) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 1884 passed (Python 3.13, HA 2026.2.3) · CI: – (kein Push) · Hardware: nicht geprüft · Review: P1-Review umgesetzt (P1-1, P1-2, P2-1…P2-8, billige P3-Eingabeprüfungen), übrige P3-Punkte offen
+- 2026-11-16 `feature/network-intelligence` (P2-Review-Fixes M1–M4, K1–K4) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 1904 passed (Python 3.13, HA 2026.2.3); jeder M-Punkt mit einem Test, der vor dem Fix fehlschlug · CI: – (kein Push) · Hardware: nicht geprüft · Review: P2-Review vollständig umgesetzt

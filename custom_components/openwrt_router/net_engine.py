@@ -34,8 +34,15 @@ gap), older ones are not. If the oldest line of that read is already newer
 than the mark, lines may have been lost: a ``system.log_gap`` event (info)
 records it.
 
-Failure handling: an unreadable or foreign store starts empty with a
-warning; an error while ingesting is logged and never reaches the poll.
+Clock jumps: the listener passes ``time.monotonic()`` along, so a slow
+poll (SSH fallback, 300 s plus the poll) is not mistaken for a forward jump
+of the wall clock (see ``AlarmMachine.sync_clock``).
+
+Failure handling: an unreadable, foreign or damaged store starts empty with
+a warning; the file is first copied to ``<store>.bak`` (in the executor) so
+the first write cannot destroy the history. An error while ingesting is
+logged and never reaches the poll. After the last unload the engine is
+closed: late polls are ignored and nothing is scheduled for writing.
 """
 
 from __future__ import annotations
@@ -43,6 +50,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
+import shutil
 import time
 from collections import Counter
 from collections.abc import Iterable
@@ -126,37 +135,77 @@ async def async_unload_net_intelligence(hass: HomeAssistant, entry_id: str) -> N
     if engine.routers:
         return
     # Remove first, then write: a setup racing this unload builds a new
-    # engine, and its load waits for the flush below.
+    # engine, and its load waits for the flush below. A closed engine
+    # ignores late polls and schedules no write of its own.
     hass.data.pop(_DATA_KEY, None)
-    flush: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-    hass.data[_FLUSH_KEY] = flush
+    engine.close()
+    flush = _claim_store(hass)
     try:
         await engine.async_flush()
     finally:
-        flush.set_result(None)
-        if hass.data.get(_FLUSH_KEY) is flush:
-            hass.data.pop(_FLUSH_KEY, None)
+        _release_store(hass, flush)
 
 
 async def async_remove_router_data(hass: HomeAssistant, entry_id: str) -> None:
     """Delete everything stored about a removed config entry."""
-    engine = async_get_engine(hass)
-    if engine is not None:
-        if engine.remove_router(entry_id):
-            engine.schedule_save()
-        return
+    while True:
+        await _async_wait_for_store(hass)
+        engine = async_get_engine(hass)
+        if engine is None:
+            break
+        await engine.async_load()  # a setup may still be loading it
+        if engine is async_get_engine(hass):
+            if engine.remove_router(entry_id):
+                engine.schedule_save()
+            return
     # Last entry removed: the engine is gone, edit the store directly.
-    engine = NetIntelligence(hass)
-    await engine.async_load()
-    if engine.remove_router(entry_id):
-        await engine.async_flush()
+    # Claim the store first, so a setup racing this removal loads only
+    # after the write (otherwise it would bring the router's data back).
+    claim = _claim_store(hass)
+    try:
+        engine = NetIntelligence(hass, claim=claim)
+        await engine.async_load()
+        if engine.remove_router(entry_id):
+            await engine.async_flush()
+    finally:
+        _release_store(hass, claim)
+
+
+def _claim_store(hass: HomeAssistant) -> asyncio.Future[None]:
+    """Mark the store as being written; a new engine's load waits for it."""
+    claim: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    hass.data[_FLUSH_KEY] = claim
+    return claim
+
+
+def _release_store(hass: HomeAssistant, claim: asyncio.Future[None]) -> None:
+    if not claim.done():
+        claim.set_result(None)
+    if hass.data.get(_FLUSH_KEY) is claim:
+        hass.data.pop(_FLUSH_KEY, None)
+
+
+async def _async_wait_for_store(
+    hass: HomeAssistant, own: asyncio.Future[None] | None = None
+) -> None:
+    """Wait until no other unload or removal is writing the store."""
+    while True:
+        pending = hass.data.get(_FLUSH_KEY)
+        if not isinstance(pending, asyncio.Future) or pending.done() or pending is own:
+            return
+        await pending
 
 
 class NetIntelligence:
     """Collects ``NetEvent``s of all routers and persists them in one store."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(
+        self, hass: HomeAssistant, *, claim: asyncio.Future[None] | None = None
+    ) -> None:
         self.hass = hass
+        # The store claim this engine holds itself (removal of the last
+        # entry); its load must not wait for it.
+        self._claim = claim
         self._store: Store[dict[str, Any]] = Store(
             hass,
             INTEL_STORE_VERSION,
@@ -180,6 +229,7 @@ class NetIntelligence:
         # True while a delayed write is scheduled: HA's async_delay_save
         # moves a pending write back on every call, so we call it once.
         self._save_pending = False
+        self._closed = False
         self.last_save_bytes: int | None = None
         self.trimmed_events = 0
 
@@ -196,13 +246,15 @@ class NetIntelligence:
         return self._loaded
 
     async def async_load(self) -> None:
-        """Read the store once; a damaged or foreign store starts empty."""
+        """Read the store once; a damaged or foreign store starts empty.
+
+        In that case the file is copied to ``<store>.bak`` first (once,
+        before anything is written), see the module doc.
+        """
         async with self._lock:
             if self._loaded:
                 return
-            pending = self.hass.data.get(_FLUSH_KEY)
-            if isinstance(pending, asyncio.Future) and not pending.done():
-                await pending
+            await _async_wait_for_store(self.hass, self._claim)
             try:
                 stored = await self._store.async_load()
             except Exception:
@@ -223,8 +275,47 @@ class NetIntelligence:
                 stored = None
                 self.load_failed = True
             if stored:
-                self._restore(stored)
+                try:
+                    self._restore(stored)
+                except Exception:
+                    _LOGGER.warning(
+                        "Network intelligence store %s could not be restored; "
+                        "starting with an empty history",
+                        INTEL_STORE_KEY,
+                        exc_info=True,
+                    )
+                    self._reset()
+                    self.load_failed = True
+            if self.load_failed:
+                await self._async_backup()
             self._loaded = True
+
+    async def _async_backup(self) -> None:
+        """Copy the unreadable store file to ``<store>.bak``; never raises."""
+        path = getattr(self._store, "path", None)
+        try:
+            copied = await self.hass.async_add_executor_job(_backup_file, path)
+        except Exception:
+            _LOGGER.warning(
+                "Network intelligence store backup failed; the next save "
+                "replaces the old history",
+                exc_info=True,
+            )
+            return
+        if copied:
+            _LOGGER.warning(
+                "Network intelligence kept a copy of the unreadable store at %s.bak",
+                path,
+            )
+
+    def _reset(self) -> None:
+        """Back to the empty state (a store that could not be restored)."""
+        self.settings = merge_settings(None)
+        self.ring = self._new_ring()
+        self.counters = EventCounters(self.settings["retention_days"])
+        self.machine = AlarmMachine(self.settings)
+        self._seq = 0
+        self._log_marks = {}
 
     @callback
     def register(self, entry_id: str) -> None:
@@ -232,6 +323,13 @@ class NetIntelligence:
         self._routers.add(entry_id)
         # A reload starts from a clean comparison state (no false alarms).
         self._last_data.pop(entry_id, None)
+
+    @callback
+    def close(self) -> None:
+        """The last router is gone: ignore late polls, schedule no writes."""
+        self._closed = True
+        self._routers.clear()
+        self._last_data.clear()
 
     @callback
     def unregister(self, entry_id: str) -> None:
@@ -252,7 +350,7 @@ class NetIntelligence:
     @callback
     def schedule_save(self) -> None:
         """Write the store at most ``INTEL_SAVE_DELAY_SECONDS`` from now."""
-        if self._save_pending:
+        if self._save_pending or self._closed:
             return
         self._save_pending = True
         self._store.async_delay_save(self._data_to_save, INTEL_SAVE_DELAY_SECONDS)
@@ -267,7 +365,7 @@ class NetIntelligence:
     def async_ingest_coordinator(self, entry_id: str, coordinator: Any) -> None:
         """Coordinator listener: ingest the latest poll; never raises."""
         try:
-            self.ingest(entry_id, coordinator.data, time.time())
+            self.ingest(entry_id, coordinator.data, time.time(), time.monotonic())
         except Exception:
             _LOGGER.warning(
                 "Network intelligence could not process a poll of %s",
@@ -275,17 +373,23 @@ class NetIntelligence:
                 exc_info=True,
             )
 
-    def ingest(self, entry_id: str, data: Any, now: float) -> int:
+    def ingest(
+        self, entry_id: str, data: Any, now: float, mono: float | None = None
+    ) -> int:
         """Ingest one poll's data; return the number of stored events.
 
-        The same data object is ingested only once: after a failed poll
-        the coordinator notifies its listeners with the previous data.
-        ``now`` goes through the machine clock first (see module doc).
+        Only registered routers are ingested (a poll can still arrive
+        after the unload). The same data object is ingested only once:
+        after a failed poll the coordinator notifies its listeners with the
+        previous data. ``now`` (wall time) and ``mono`` (monotonic time, if
+        known) go through the machine clock first (see module doc).
         """
+        if self._closed or entry_id not in self._routers:
+            return 0
         if data is None or self._last_data.get(entry_id) is data:
             return 0
         self._last_data[entry_id] = data
-        step = self.machine.sync_clock(now)
+        step = self.machine.sync_clock(now, mono)
         if step.shift:
             self.ring.shift(step.shift)
         now = step.now
@@ -326,7 +430,9 @@ class NetIntelligence:
             self.counters.add(entry_id, event.key, ts)
             if (event.category, event.kind) in COUNT_ONLY_KINDS:
                 continue
-            self.ring.add(self._net_event(entry_id, category, event, ts, src_ts, now))
+            self.ring.add(
+                self._net_event(entry_id, category, event, ts, src_ts, now, baseline)
+            )
             stored += 1
         if batch is not None and batch.last_id is not None:
             mark = {"last_id": batch.last_id}
@@ -384,9 +490,17 @@ class NetIntelligence:
         ts: float,
         src_ts: float | None,
         now: float,
+        in_gap: bool = False,
     ) -> NetEvent:
         self._seq += 1
-        skew = src_ts is not None and abs(src_ts - now) > CLOCK_SKEW_LIMIT
+        # A gap line (read after a restart) is old by nature and newer than
+        # the log mark; only a router time ahead of HA marks it as skewed.
+        if src_ts is None:
+            skew = False
+        elif in_gap:
+            skew = src_ts > now + CLOCK_SKEW_LIMIT
+        else:
+            skew = abs(src_ts - now) > CLOCK_SKEW_LIMIT
         subject = {
             key: value
             for key, value in (
@@ -503,7 +617,7 @@ class NetIntelligence:
         return {
             "settings": self.settings,
             "seq": self._seq,
-            "events": self.ring.to_list(),
+            "events": self.ring.to_list(compact=True),
             "machine": self.machine.to_dict(),
             "counters": self.counters.to_dict(),
             "log_marks": self._log_marks,
@@ -525,14 +639,23 @@ class NetIntelligence:
             self.counters.prune(now)
         payload = self._payload()
         size = _store_size(payload)
-        while size > INTEL_MAX_STORE_BYTES and payload["events"]:
-            events = payload["events"]
-            share = (size - INTEL_MAX_STORE_BYTES) / size
-            drop = min(len(events), max(1, math.ceil(len(events) * share)))
+        # Built once; each round only re-measures a shorter event list,
+        # dropping the excess divided by the average event size (usually
+        # one round, a second one if the oldest events were small).
+        events = payload["events"]
+        drop = 0
+        if size > INTEL_MAX_STORE_BYTES and events:
+            payload["events"] = []
+            base = _store_size(payload)
+            while size > INTEL_MAX_STORE_BYTES and drop < len(events):
+                per_event = max(1.0, (size - base) / (len(events) - drop))
+                more = max(1, math.ceil((size - INTEL_MAX_STORE_BYTES) / per_event))
+                drop = min(len(events), drop + more)
+                payload["events"] = events[drop:]
+                size = _store_size(payload)
+        if drop:
             self._drop_oldest(drop)
             self.trimmed_events += drop
-            payload = self._payload()
-            size = _store_size(payload)
         if size > INTEL_MAX_STORE_BYTES:
             _LOGGER.warning(
                 "Network intelligence store is %d bytes without any event (limit %d)",
@@ -566,9 +689,17 @@ def _highest_seq(ring: EventRing) -> int:
     best = 0
     for event in ring:
         tail = event.id.rpartition(":")[2]
-        if tail.isdigit():
+        if tail.isascii() and tail.isdigit():
             best = max(best, int(tail))
     return best
+
+
+def _backup_file(path: Any) -> bool:
+    """Copy ``path`` to ``<path>.bak`` (executor); False if there is no file."""
+    if not isinstance(path, str) or not os.path.isfile(path):
+        return False
+    shutil.copyfile(path, f"{path}.bak")
+    return True
 
 
 def _load_marks(raw: Any) -> dict[str, dict[str, int]]:

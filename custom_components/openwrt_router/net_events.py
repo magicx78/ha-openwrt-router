@@ -33,6 +33,7 @@ CLOCK_SKEW_LIMIT = 300.0
 
 _HOUR = 3600
 _DAY = 86400
+_MAX_BUCKET = 10**9  # hours since 1970 are about 490000; larger is damaged data
 
 
 class Category(StrEnum):
@@ -121,7 +122,10 @@ def _num(value: Any) -> float | None:
     """Finite number (not bool) as float, else None."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:  # an int beyond float range
+        return None
     return number if math.isfinite(number) else None
 
 
@@ -144,6 +148,14 @@ def _opt(data: Mapping[str, Any], key: str, reader: Any, default: Any) -> Any:
 def _opt_str(data: Mapping[str, Any], key: str) -> str | None:
     value = data.get(key)
     return value if isinstance(value, str) else None
+
+
+def _copy_json(value: dict[str, Any]) -> dict[str, Any]:
+    """Copy of a flat dict; only nested containers are deep-copied (fast path)."""
+    return {
+        key: copy.deepcopy(item) if isinstance(item, (dict, list)) else item
+        for key, item in value.items()
+    }
 
 
 def _opt_dict(data: Mapping[str, Any], key: str) -> dict[str, Any]:
@@ -201,9 +213,14 @@ class NetEvent:
     src_ts: float | None = None
     clock_skew: bool = False
 
-    def to_dict(self) -> dict[str, Any]:
-        """JSON-safe dict, enums as plain strings."""
-        return {
+    def to_dict(self, *, compact: bool = False) -> dict[str, Any]:
+        """JSON-safe dict, enums as plain strings.
+
+        ``compact`` (the store format) leaves out fields that hold their
+        default, and ``msg_key`` when it equals ``kind``; ``from_dict``
+        restores both, and still reads the full form.
+        """
+        full = {
             "id": self.id,
             "ts": self.ts,
             "router": self.router,
@@ -211,7 +228,7 @@ class NetEvent:
             "kind": self.kind,
             "origin": self.origin.value,
             "source": self.source.value,
-            "subject": copy.deepcopy(self.subject),
+            "subject": _copy_json(self.subject),
             "signal": self.signal,
             "count": self.count,
             "severity": self.severity.value,
@@ -219,11 +236,23 @@ class NetEvent:
             "cause_status": self.cause_status.value if self.cause_status else None,
             "confidence": self.confidence,
             "msg_key": self.msg_key,
-            "params": copy.deepcopy(self.params),
+            "params": _copy_json(self.params),
             "maintenance": self.maintenance,
             "src_ts": self.src_ts,
             "clock_skew": self.clock_skew,
         }
+        if not compact:
+            return full
+        out = {
+            key: value
+            for key, value in full.items()
+            if key in _EVENT_REQUIRED or value != _EVENT_DEFAULTS.get(key, _MISSING)
+        }
+        if self.msg_key == self.kind:
+            out.pop("msg_key", None)
+        else:
+            out["msg_key"] = self.msg_key  # also "" (differs from the default)
+        return out
 
     @classmethod
     def from_dict(cls, data: Any) -> NetEvent | None:
@@ -264,12 +293,33 @@ class NetEvent:
             cause=_opt_str(data, "cause"),
             cause_status=None if status is None else _enum(CauseStatus, status),
             confidence=_clamp01(_opt(data, "confidence", _num, 1.0)),
-            msg_key=_opt_str(data, "msg_key") or "",
+            # Missing: the compact form left it out because it equals kind.
+            msg_key=kind if "msg_key" not in data else _opt_str(data, "msg_key") or "",
             params=_opt_dict(data, "params"),
             maintenance=data.get("maintenance") is True,
             src_ts=_num(data.get("src_ts")),
             clock_skew=data.get("clock_skew") is True,
         )
+
+
+_MISSING = object()
+_EVENT_REQUIRED = frozenset({"id", "ts", "router", "category", "kind"})
+# Values ``NetEvent.to_dict(compact=True)`` leaves out (the field defaults).
+_EVENT_DEFAULTS: dict[str, Any] = {
+    "origin": Origin.OBSERVED.value,
+    "source": Source.LOG.value,
+    "subject": {},
+    "signal": None,
+    "count": 1,
+    "severity": Severity.INFO.value,
+    "cause": None,
+    "cause_status": None,
+    "confidence": 1.0,
+    "params": {},
+    "maintenance": False,
+    "src_ts": None,
+    "clock_skew": False,
+}
 
 
 # --- Incident ---------------------------------------------------------------
@@ -524,9 +574,9 @@ class EventRing:
             out = out[-limit:] if limit > 0 else []
         return out
 
-    def to_list(self) -> list[dict[str, Any]]:
-        """All events as JSON-safe dicts, oldest first."""
-        return [e.to_dict() for e in self._items]
+    def to_list(self, *, compact: bool = False) -> list[dict[str, Any]]:
+        """All events as JSON-safe dicts, oldest first (see ``NetEvent.to_dict``)."""
+        return [e.to_dict(compact=compact) for e in self._items]
 
     @classmethod
     def from_list(
@@ -659,6 +709,8 @@ def _load_buckets(raw: Any) -> dict[int, int]:
         try:
             index = int(key)
         except (TypeError, ValueError):
+            continue
+        if abs(index) > _MAX_BUCKET:  # beyond any real hour or day
             continue
         count = _int(value)
         if count is not None and count > 0:

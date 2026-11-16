@@ -263,11 +263,13 @@ def _in_bounds(key: str, value: float, mode: str | None) -> bool:
 
 
 def _is_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    """Finite int or float (not bool); an int beyond float range is not."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 # --- evidence in, transitions out -------------------------------------------------
@@ -486,8 +488,11 @@ class AlarmMachine:
     the condition cleared (last evidence + ``clear``), not the jumped clock;
     old window entries age out, and a level ``hold`` or debounce streak
     restarts after ``auto_resolve`` without polls, so a jump alone never
-    opens an incident. Retention pruning pauses after a forward jump of more
-    than ``CLOCK_SKEW_LIMIT`` until the clock moves on normally again.
+    opens an incident. Retention pruning pauses for one step after a
+    forward jump: a step of more than ``CLOCK_SKEW_LIMIT`` beyond the
+    elapsed monotonic time, or, without a monotonic reference, any step of
+    more than ``CLOCK_SKEW_LIMIT`` that does not follow a held step. So
+    slow polls (300 s plus the poll) never stop pruning.
     """
 
     def __init__(
@@ -502,13 +507,16 @@ class AlarmMachine:
         self._tracks: dict[tuple[str, str], _Track] = {}
         self._seq = 0
         self._last_now: float | None = None
+        # Monotonic time of the last step that passed one (in memory only:
+        # it has no meaning across a restart).
+        self._last_mono: float | None = None
         self._prune_held = False
 
     # -- public ---------------------------------------------------------------
 
     @property
     def prune_held(self) -> bool:
-        """True after a forward clock jump until time moves on normally."""
+        """True for the step right after a forward clock jump."""
         return self._prune_held
 
     @property
@@ -516,17 +524,20 @@ class AlarmMachine:
         """The effective time of the previous step, None before the first."""
         return self._last_now
 
-    def sync_clock(self, now: float) -> ClockStep:
+    def sync_clock(self, now: float, mono: float | None = None) -> ClockStep:
         """Advance the machine clock to ``now``; see the class doc on jumps.
 
         ``update`` calls this itself. A caller that stamps its own records
         (the engine) calls it first and uses ``ClockStep.now`` for them and
         for the following ``update``; ``ClockStep.shift`` tells it how far
-        to move its own stored times. Raises ``ValueError`` for a time that
-        is not a finite number.
+        to move its own stored times. ``mono`` (``time.monotonic()``, if
+        the caller has it) tells a forward jump of the wall clock from real
+        elapsed time. Raises ``ValueError`` for a time that is not a finite
+        number; an unusable ``mono`` is ignored.
         """
         if not _is_number(now):
             raise ValueError(f"invalid time: {now!r}")
+        mono = float(mono) if _is_number(mono) else None
         now = float(now)
         shift = 0.0
         last = self._last_now
@@ -538,12 +549,21 @@ class AlarmMachine:
                 else:
                     shift = step
                     self._shift(step)
-            elif step > CLOCK_SKEW_LIMIT:
-                self._prune_held = True
             elif step > 0:
-                self._prune_held = False
+                self._prune_held = self._is_jump(step, mono)
+        if mono is not None:
+            self._last_mono = mono
         self._last_now = now
         return ClockStep(now, shift)
+
+    def _is_jump(self, step: float, mono: float | None) -> bool:
+        """Is a forward ``step`` of the wall clock a jump (see class doc)?"""
+        if step <= CLOCK_SKEW_LIMIT:
+            return False
+        last_mono = self._last_mono
+        if mono is not None and last_mono is not None and mono >= last_mono:
+            return step - (mono - last_mono) > CLOCK_SKEW_LIMIT
+        return not self._prune_held  # no reference: hold one step at most
 
     def set_settings(self, settings: Mapping[str, Any] | None) -> None:
         """Replace the settings (merged over the defaults)."""
@@ -671,7 +691,7 @@ class AlarmMachine:
         best = 0
         for inc_id in self._incidents:
             tail = inc_id.rpartition("-")[2]
-            if tail.isdigit():
+            if tail.isascii() and tail.isdigit():
                 best = max(best, int(tail))
         return best
 

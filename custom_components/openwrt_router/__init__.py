@@ -394,6 +394,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     try:
         engine = await async_get_net_intelligence(hass)
         engine.register(entry.entry_id)
+        # Also runs when the setup fails further down (HA calls these then).
+        entry.async_on_unload(partial(engine.unregister, entry.entry_id))
         entry.async_on_unload(
             coordinator.async_add_listener(
                 partial(engine.async_ingest_coordinator, entry.entry_id, coordinator)
