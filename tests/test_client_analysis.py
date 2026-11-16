@@ -65,12 +65,18 @@ from custom_components.openwrt_router.client_analysis import (
     weighted_median,
 )
 from custom_components.openwrt_router.client_history import (
+    DC_INFRA,
     SESSION_BIN_HOURS,
+    TR_END,
+    TR_MOVE,
+    TR_START,
     Bucket,
+    ClientEvent,
     ClientHistory,
     ClientObs,
     DayMeta,
     PollInput,
+    Transition,
 )
 
 DAY = 86400.0
@@ -688,3 +694,562 @@ def test_uptime_over_seven_days_sees_sessions_older_than_a_day() -> None:
         part = score_window(win).parts[PART_U]
         assert part.included and part.metric == pytest.approx(SESSION_BIN_HOURS[7])
         assert part.value == 100
+
+
+# --- B4: AP-specific pattern (plan 5) ------------------------------------------
+
+H = 3600
+AP3 = "router_c"
+M2 = "AA:BB:CC:00:00:02"
+M3 = "AA:BB:CC:00:00:03"
+M4 = "AA:BB:CC:00:00:04"
+
+
+def online_bucket(hours: float, **kw: int) -> Bucket:
+    secs = int(hours * H)
+    return Bucket(observed_s=secs, online_s=secs, **kw)
+
+
+def test_ap_pattern_found() -> None:
+    res = ca.ap_pattern_from_buckets(
+        {AP1: online_bucket(48, dc_error=4), AP2: online_bucket(48)}
+    )
+    assert res.status == STATUS_FOUND
+    assert (res.worst_ap, res.best_ap) == (AP1, AP2)
+    assert res.worst_rate == pytest.approx(2.0)  # per 24 online hours
+    assert res.best_rate == 0
+    assert res.confidence == pytest.approx(0.42) and res.confidence <= 0.6
+    many = ca.ap_pattern_from_buckets(
+        {AP1: online_bucket(48, dc_error=40), AP2: online_bucket(48)}
+    )
+    assert many.confidence == 0.6
+
+
+def test_ap_pattern_too_few_hours_is_insufficient() -> None:
+    res = ca.ap_pattern_from_buckets(
+        {AP1: online_bucket(48, dc_error=10), AP2: online_bucket(20)}
+    )
+    assert res.status == STATUS_INSUFFICIENT
+    assert [r.ap for r in res.rates] == [AP1]
+    # the offline key "" never counts as an AP
+    res = ca.ap_pattern_from_buckets(
+        {AP1: online_bucket(48, dc_error=10), "": online_bucket(100)}
+    )
+    assert res.status == STATUS_INSUFFICIENT
+
+
+def test_ap_pattern_ratio_too_small() -> None:
+    res = ca.ap_pattern_from_buckets(
+        {AP1: online_bucket(48, dc_error=4), AP2: online_bucket(48, dc_error=2)}
+    )
+    assert res.status == STATUS_NOT_FOUND  # 2.0 vs 1.0: only 2x
+    assert res.worst_rate == pytest.approx(2.0) and res.best_rate == pytest.approx(1)
+    small = ca.ap_pattern_from_buckets(
+        {AP1: online_bucket(60, dc_error=1), AP2: online_bucket(48)}
+    )
+    assert small.status == STATUS_NOT_FOUND  # 0.4 vs 0: below 0.5 absolute
+    assert small.confidence == 0
+
+
+def test_ap_pattern_counts_only_error_disconnects() -> None:
+    res = ca.ap_pattern_from_buckets(
+        {
+            AP1: online_bucket(48, dc_unknown=10, dc_infra=10, dc_leave=10),
+            AP2: online_bucket(48),
+        }
+    )
+    assert res.status == STATUS_NOT_FOUND
+
+
+def test_ap_pattern_feeds_part_w() -> None:
+    found = ca.ap_pattern_from_buckets(
+        {AP1: online_bucket(48, dc_error=4), AP2: online_bucket(48)}
+    )
+    none_tp = TimePatternResult(STATUS_NOT_FOUND)
+    no_trend = SignalTrend(STATUS_NO_TREND)
+    assert active_patterns(none_tp, no_trend) == 0
+    assert active_patterns(none_tp, no_trend, found) == 1
+    n = active_patterns(TimePatternResult(STATUS_FOUND), no_trend, found)
+    assert n == 2
+    part = score_window(stats(patterns=n)).parts[PART_W]
+    assert part.included and part.value == 30
+    not_found = ca.ApPatternResult(STATUS_NOT_FOUND)
+    assert active_patterns(none_tp, no_trend, not_found) == 0
+
+
+def test_ap_pattern_from_history_wrapper() -> None:
+    hist = ClientHistory()
+    _feed(hist, 200)
+    now = T0 + 200 * 60
+    assert set(ca.ap_buckets(hist, M1, now)) == {AP1}
+    assert ca.ap_pattern(hist, M1, now).status == STATUS_INSUFFICIENT
+    assert ca.ap_pattern(hist, "AA:BB:CC:00:00:99", now).status == (STATUS_INSUFFICIENT)
+
+
+# --- B4: AP comparison (plan 6) --------------------------------------------------
+
+
+def test_ap_comparison_normalized_per_client_hour() -> None:
+    inputs = [
+        # big AP: 3 clients, 1000 client hours, 20 disconnects -> 2 / 100 h
+        ca.ApClientInput(M1, AP1, online_bucket(400, dc_error=10)),
+        ca.ApClientInput(M2, AP1, online_bucket(300, dc_unknown=5)),
+        ca.ApClientInput(M3, AP1, online_bucket(300, dc_inactivity=5)),
+        # small AP: 20 client hours, 2 disconnects -> 10 / 100 h
+        ca.ApClientInput(M4, AP2, online_bucket(20, dc_error=2)),
+    ]
+    cmp = ca.compare_aps(inputs, ca.WINDOW_7D)
+    big, small = cmp.aps[AP1], cmp.aps[AP2]
+    assert big.disconnects == 20 and small.disconnects == 2
+    assert big.disconnects_per_100h == pytest.approx(2.0)
+    assert small.disconnects_per_100h == pytest.approx(10.0)
+    # fewer disconnects in absolute numbers, but worse per client hour
+    assert cmp.ranking == (AP1, AP2)
+    assert (big.rank, small.rank) == (1, 2)
+    assert big.clients == 3 and big.client_hours == pytest.approx(1000)
+    assert small.low_basis and not big.low_basis
+    assert cmp.window == ca.WINDOW_7D
+
+
+def test_ap_under_minimum_client_hours_is_not_ranked() -> None:
+    inputs = [
+        ca.ApClientInput(M1, AP1, online_bucket(50, dc_error=1)),
+        ca.ApClientInput(M2, AP2, online_bucket(9, dc_error=0)),
+    ]
+    cmp = ca.compare_aps(inputs)
+    low = cmp.aps[AP2]
+    assert low.status == ca.AP_STATUS_INSUFFICIENT
+    assert low.disconnects_per_100h is None and low.reconnects_per_100h is None
+    assert low.rssi_mean is None and low.stability is None
+    assert low.rank is None and cmp.ranking == (AP1,)
+    assert cmp.aps[AP1].status == ca.AP_STATUS_OK
+
+
+def test_ap_with_only_infra_disconnects() -> None:
+    inputs = [
+        ca.ApClientInput(M1, AP1, online_bucket(30, dc_infra=4), None, ("inc-1",)),
+        ca.ApClientInput(M2, AP1, online_bucket(30, dc_infra=2), None, ("inc-1",)),
+        ca.ApClientInput(M3, AP2, online_bucket(60, dc_error=3)),
+    ]
+    cmp = ca.compare_aps(inputs)
+    infra = cmp.aps[AP1]
+    assert infra.disconnects == 0 and infra.disconnects_per_100h == 0
+    assert infra.infra_disconnects == 6 and infra.infra_clients == 2
+    assert infra.incidents == ("inc-1",)
+    assert cmp.ranking == (AP1, AP2)
+
+
+def test_ap_comparison_roams_and_leaves_do_not_count() -> None:
+    inputs = [
+        ca.ApClientInput(
+            M1,
+            AP1,
+            online_bucket(
+                50, roams_in=40, roams_out=40, roam_flaps=2, dc_leave=5, reconnects=1
+            ),
+        ),
+        ca.ApClientInput(M2, AP2, online_bucket(50, dc_error=1)),
+    ]
+    cmp = ca.compare_aps(inputs)
+    a = cmp.aps[AP1]
+    assert a.disconnects == 0 and a.disconnects_per_100h == 0
+    assert a.leaves == 5
+    assert a.roams_in_per_100h == pytest.approx(80)
+    assert a.roams_out_per_100h == pytest.approx(80)
+    assert a.flaps_per_100h == pytest.approx(4)
+    assert a.reconnects_per_100h == pytest.approx(2)
+    assert cmp.ranking == (AP1, AP2)
+
+
+def test_ap_comparison_weighted_stability_signal_and_bands() -> None:
+    b1 = online_bucket(
+        10, rssi_n=10, rssi_sum=-600, weak_s=0, online_5g_s=10 * H, auth_fail=1
+    )
+    b2 = online_bucket(30, rssi_n=30, rssi_sum=-2100, weak_s=15 * H, online_2g_s=30 * H)
+    inputs = [
+        ca.ApClientInput(M1, AP1, b1, 90.0),
+        ca.ApClientInput(M2, AP1, b2, 60.0),
+        ca.ApClientInput(M3, AP1, online_bucket(5), None),  # no score: ignored
+    ]
+    s = ca.compare_aps(inputs).aps[AP1]
+    assert s.stability == pytest.approx((90 * 10 + 60 * 30) / 40)
+    assert s.rssi_mean == pytest.approx(-2700 / 40)
+    assert s.weak_share == pytest.approx(15 / 45)
+    assert s.band_hours["5g"] == pytest.approx(10)
+    assert s.band_hours["2.4g"] == pytest.approx(30)
+    assert s.auth_fail_per_100h == pytest.approx(100 / 45)
+
+
+def test_ap_comparison_from_history() -> None:
+    hist = ClientHistory()
+    _feed(hist, 200)  # about 3.3 client hours at AP1
+    now = T0 + 200 * 60
+    for window in ca.WINDOWS:
+        cmp = ca.ap_comparison(hist, now, window, scores={M1: 80.0})
+        assert set(cmp.aps) == {AP1}
+        assert cmp.aps[AP1].status == ca.AP_STATUS_INSUFFICIENT
+        assert cmp.aps[AP1].client_hours == pytest.approx(199 / 60)
+        assert cmp.ranking == ()
+    inputs = ca.ap_inputs(hist, now, ca.WINDOW_24H)
+    assert [(i.mac, i.ap, i.score) for i in inputs] == [(M1, AP1, None)]
+
+
+# --- B4: correlation with NI roots ----------------------------------------------
+
+
+def end(cls: str, incident: str | None = None, ap: str = AP1) -> Transition:
+    return Transition(T0, TR_END, ap, None, cls, incident)
+
+
+def test_infra_disconnects_with_confirmed_root_are_confirmed() -> None:
+    refs = {"inc-1": ca.IncidentRef("inc-1", ca.CAUSE_CONFIRMED, "system_reboot")}
+    res = ca.attribute_disconnects(
+        [end(DC_INFRA, "inc-1"), end(DC_INFRA, "inc-1"), end("error")], refs
+    )
+    assert res.attribution == ca.ATTR_INFRASTRUCTURE
+    assert res.kind == ca.KIND_CONFIRMED and res.confidence == 1.0
+    assert (res.infra, res.client, res.client_errors) == (2, 1, 1)
+    assert res.incidents == ("inc-1",) and res.causes == ("system_reboot",)
+    assert res.total == 3
+
+
+def test_infra_disconnects_with_hypothesis_root_are_capped() -> None:
+    refs = {
+        "inc-1": ca.IncidentRef("inc-1", ca.CAUSE_HYPOTHESIS, "router_unreachable", 0.9)
+    }
+    res = ca.attribute_disconnects([end(DC_INFRA, "inc-1")], refs)
+    assert res.kind == ca.KIND_HYPOTHESIS and res.confidence == 0.6
+    refs = {"inc-1": ca.IncidentRef("inc-1", ca.CAUSE_HYPOTHESIS, None, 0.4)}
+    res = ca.attribute_disconnects([end(DC_INFRA, "inc-1")], refs)
+    assert res.confidence == pytest.approx(0.4)
+
+
+def test_one_unconfirmed_root_makes_the_whole_cause_a_hypothesis() -> None:
+    refs = {
+        "inc-1": ca.IncidentRef("inc-1", ca.CAUSE_CONFIRMED),
+        "inc-2": ca.IncidentRef("inc-2", None),
+    }
+    res = ca.attribute_disconnects(
+        [end(DC_INFRA, "inc-1"), end(DC_INFRA, "inc-2")], refs
+    )
+    assert res.kind == ca.KIND_HYPOTHESIS
+    assert res.confidence == ca.INFRA_UNKNOWN_CONFIDENCE
+
+
+def test_infra_tag_without_ni_data_is_never_confirmed() -> None:
+    res = ca.attribute_disconnects([end(DC_INFRA), end(DC_INFRA)], {})
+    assert res.attribution == ca.ATTR_INFRASTRUCTURE
+    assert res.kind == ca.KIND_HYPOTHESIS
+    assert res.confidence == pytest.approx(0.3)
+    assert res.incidents == ()
+
+
+def test_incident_known_to_ni_counts_as_infra_even_without_infra_class() -> None:
+    refs = {"inc-9": ca.IncidentRef("inc-9", ca.CAUSE_CONFIRMED)}
+    res = ca.attribute_disconnects([end("unknown", "inc-9")], refs)
+    assert res.attribution == ca.ATTR_INFRASTRUCTURE and res.infra == 1
+    assert res.client == 0 and res.client_errors == 0
+
+
+def test_mostly_client_disconnects_stay_with_the_client() -> None:
+    res = ca.attribute_disconnects(
+        [end(DC_INFRA), end("error"), end("error"), end("inactivity"), end("leave")],
+        {},
+    )
+    assert res.attribution == ca.ATTR_CLIENT
+    assert res.kind == ca.KIND_OBSERVATION and res.confidence is None
+    assert (res.infra, res.client, res.client_errors, res.leaves) == (1, 3, 2, 1)
+
+
+def test_no_problem_disconnects_is_no_attribution() -> None:
+    res = ca.attribute_disconnects([end("leave")], {})
+    assert res.attribution == ca.ATTR_NONE and res.kind is None
+    assert ca.attribute_disconnects([], {}).attribution == ca.ATTR_NONE
+    # other transition kinds are ignored
+    res = ca.attribute_disconnects([Transition(T0, TR_START, AP1)], {})
+    assert res.total == 0
+
+
+def test_disconnect_ends_from_history() -> None:
+    hist = ClientHistory()
+    _feed(hist, 121)
+    for k in range(1, 6):
+        hist.ingest(
+            PollInput(router=AP1, now=T0 + 7200 + k * 60, interval=60, fresh=True)
+        )
+    ends = ca.disconnect_ends(hist, M1, T0, T0 + DAY)
+    assert len(ends) == 1 and ends[0].kind == TR_END and ends[0].ap == AP1
+    assert ca.disconnect_ends(hist, M1, T0 + DAY, T0 + 2 * DAY) == ()
+
+
+# --- B4: roam bursts ----------------------------------------------------------------
+
+
+def alternating(n: int, step: float, start: float = T0) -> list:
+    out = []
+    for k in range(n):
+        a, b = (AP1, AP2) if k % 2 == 0 else (AP2, AP1)
+        out.append(ca.RoamStep(start + k * step, a, b))
+    return out
+
+
+def test_roam_burst_found_both_directions() -> None:
+    res = ca.roam_burst(alternating(8, 200))  # 8 roams in 1400 s
+    assert res.found and res.roams == 8
+    assert (res.ap_a, res.ap_b) == (AP1, AP2)
+    assert (res.start, res.end) == (T0, T0 + 1400)
+
+
+def test_roam_burst_not_found() -> None:
+    assert not ca.roam_burst(alternating(7, 200)).found
+    spread = ca.roam_burst(alternating(8, 300))  # 2100 s: never 8 in 30 min
+    assert not spread.found and spread.roams == 7
+    # roams between different pairs are not added up
+    mixed = alternating(4, 100) + [
+        ca.RoamStep(T0 + 500 + k * 100, AP2, AP3) for k in range(4)
+    ]
+    assert ca.roam_burst(mixed).roams == 4
+    assert ca.roam_burst([]) == ca.RoamBurst(False)
+
+
+def test_roam_steps_from_transitions() -> None:
+    trs = [
+        Transition(T0, TR_START, AP1),
+        Transition(T0 + 60, TR_MOVE, AP2),
+        Transition(T0 + 120, TR_MOVE, AP1),
+        Transition(T0 + 180, TR_END, AP1),
+        Transition(T0 + 240, TR_MOVE, AP2),  # no session: ignored
+    ]
+    steps = ca.roam_steps(trs)
+    assert steps == (
+        ca.RoamStep(T0 + 60, AP1, AP2),
+        ca.RoamStep(T0 + 120, AP2, AP1),
+    )
+
+
+# --- B4: recommendations (plan 7) ---------------------------------------------------
+
+ALL_KEYS = {
+    ca.REC_CHECK_COVERAGE,
+    ca.REC_CHECK_ROAMING,
+    ca.REC_INFRA_LIKELY,
+    ca.REC_CHECK_SCHEDULE,
+    ca.REC_CHECK_AP,
+    ca.REC_INFRA_CAUSE,
+    ca.REC_INFRA_OBSERVED,
+}
+
+
+def bad_day(**kw: int) -> WindowStats:
+    values = {
+        "observed_s": 86400,
+        "online_s": 86400,
+        "dc_error": 6,
+        "dc_unknown": 4,
+        "rssi_n": 100,
+        "rssi_sum": -78 * 100,
+        "weak_s": int(0.4 * 86400),
+    }
+    values.update(kw)
+    return stats(Bucket(**values))
+
+
+def assert_structured(rec: ca.Recommendation) -> None:
+    assert rec.key in ALL_KEYS
+    assert all(isinstance(v, (str, int, float)) for v in rec.params.values())
+    if rec.kind == ca.KIND_HYPOTHESIS:
+        assert rec.confidence is not None and 0 < rec.confidence <= 0.6
+    elif rec.kind == ca.KIND_OBSERVATION:
+        assert rec.confidence is None
+    else:
+        assert rec.kind == ca.KIND_CONFIRMED
+
+
+def test_rule_coverage_triggers() -> None:
+    rec = ca.rule_coverage(ca.ClientFindings(M1, stats_24h=bad_day()))
+    assert rec is not None and rec.key == ca.REC_CHECK_COVERAGE
+    assert rec.kind == ca.KIND_HYPOTHESIS and rec.confidence == 0.5
+    assert rec.params == {
+        "disconnects_24h": 10.0,
+        "weak_share": 0.4,
+        "rssi_mean": -78.0,
+    }
+    assert_structured(rec)
+
+
+def test_rule_coverage_does_not_trigger() -> None:
+    for s in (
+        bad_day(weak_s=int(0.2 * 86400)),  # signal fine
+        bad_day(dc_unknown=3),  # 9 disconnects
+        bad_day(dc_unknown=0, dc_infra=10),  # infra does not count
+        bad_day(rssi_n=5, rssi_sum=-390),  # too few RSSI values
+        stats(bad_day().bucket, window_s=3 * DAY),  # coverage below 0.5
+        None,
+    ):
+        assert ca.rule_coverage(ca.ClientFindings(M1, stats_24h=s)) is None
+
+
+def test_rule_roaming() -> None:
+    burst = ca.roam_burst(alternating(8, 200))
+    rec = ca.rule_roaming(ca.ClientFindings(M1, roam_burst=burst))
+    assert rec is not None and rec.key == ca.REC_CHECK_ROAMING
+    assert rec.params == {"roams": 8, "ap_a": AP1, "ap_b": AP2, "minutes": 30}
+    assert_structured(rec)
+    calm = ca.roam_burst(alternating(7, 200))
+    assert ca.rule_roaming(ca.ClientFindings(M1, roam_burst=calm)) is None
+    assert ca.rule_roaming(ca.ClientFindings(M1)) is None
+
+
+def test_rule_time_pattern() -> None:
+    meta = meta_days(10, {i: {3: 1} for i in (0, 2, 4, 6, 8)})
+    found = time_pattern_from_meta(meta, UTC)
+    rec = ca.rule_time_pattern(ca.ClientFindings(M1, time_pattern=found))
+    assert rec is not None and rec.key == ca.REC_CHECK_SCHEDULE
+    assert rec.params["hour"] == 3 and rec.params["hit_days"] == 5
+    assert rec.confidence == found.hours[0].confidence
+    assert_structured(rec)
+    for tp in (
+        TimePatternResult(STATUS_NOT_FOUND),
+        TimePatternResult(STATUS_INSUFFICIENT),
+        None,
+    ):
+        assert ca.rule_time_pattern(ca.ClientFindings(M1, time_pattern=tp)) is None
+
+
+def test_rule_ap_specific() -> None:
+    found = ca.ap_pattern_from_buckets(
+        {AP1: online_bucket(48, dc_error=4), AP2: online_bucket(48)}
+    )
+    rec = ca.rule_ap_specific(ca.ClientFindings(M1, ap_pattern=found))
+    assert rec is not None and rec.key == ca.REC_CHECK_AP
+    assert rec.params == {
+        "worst_ap": AP1,
+        "best_ap": AP2,
+        "worst_rate": 2.0,
+        "best_rate": 0.0,
+    }
+    assert rec.confidence == pytest.approx(0.42)
+    assert_structured(rec)
+    other = ca.ap_pattern_from_buckets(
+        {AP1: online_bucket(48, dc_error=4), AP2: online_bucket(20)}
+    )
+    assert ca.rule_ap_specific(ca.ClientFindings(M1, ap_pattern=other)) is None
+    assert ca.rule_ap_specific(ca.ClientFindings(M1)) is None
+
+
+def test_rule_infrastructure_cause_kinds() -> None:
+    confirmed = ca.attribute_disconnects(
+        [end(DC_INFRA, "inc-1")],
+        {"inc-1": ca.IncidentRef("inc-1", ca.CAUSE_CONFIRMED, "system_reboot")},
+    )
+    rec = ca.rule_infrastructure_cause(ca.ClientFindings(M1, attribution=confirmed))
+    assert rec.key == ca.REC_INFRA_CAUSE and rec.kind == ca.KIND_CONFIRMED
+    assert rec.params["cause"] == "system_reboot"
+    assert_structured(rec)
+
+    hyp = ca.attribute_disconnects(
+        [end(DC_INFRA, "inc-1")],
+        {"inc-1": ca.IncidentRef("inc-1", ca.CAUSE_HYPOTHESIS, None, 0.8)},
+    )
+    rec = ca.rule_infrastructure_cause(ca.ClientFindings(M1, attribution=hyp))
+    assert rec.kind == ca.KIND_HYPOTHESIS and rec.confidence == 0.6
+    assert_structured(rec)
+
+    # missing NI data: no cause is claimed, only the coincidence
+    blind = ca.attribute_disconnects([end(DC_INFRA)], {})
+    rec = ca.rule_infrastructure_cause(ca.ClientFindings(M1, attribution=blind))
+    assert rec.key == ca.REC_INFRA_OBSERVED and rec.kind == ca.KIND_OBSERVATION
+    assert_structured(rec)
+
+
+def test_rule_infrastructure_cause_does_not_trigger() -> None:
+    client = ca.attribute_disconnects([end("error"), end("error")], {})
+    none = ca.attribute_disconnects([], {})
+    for a in (client, none, None):
+        assert (
+            ca.rule_infrastructure_cause(ca.ClientFindings(M1, attribution=a)) is None
+        )
+
+
+def test_rule_infrastructure_likely() -> None:
+    group = ca.ApReconnects(AP1, {M1: 3, M2: 4, M3: 5, M4: 1}, root_open=False)
+    rec = ca.rule_infrastructure_likely(group)
+    assert rec is not None and rec.key == ca.REC_INFRA_LIKELY
+    assert rec.subject == AP1 and rec.params == {"clients": 3, "reconnects": 12}
+    assert_structured(rec)
+    assert ca.recommend_aps([group]) == (rec,)
+
+
+def test_rule_infrastructure_likely_does_not_trigger() -> None:
+    elevated = {M1: 3, M2: 4, M3: 5}
+    # NI already has a root: no double alarm
+    assert ca.rule_infrastructure_likely(ca.ApReconnects(AP1, elevated, True)) is None
+    # unknown whether NI had a root: no statement
+    assert ca.rule_infrastructure_likely(ca.ApReconnects(AP1, elevated, None)) is None
+    two = ca.ApReconnects(AP1, {M1: 3, M2: 4, M3: 2}, False)
+    assert ca.rule_infrastructure_likely(two) is None
+    assert ca.recommend_aps([]) == ()
+
+
+def test_ap_reconnects_from_history() -> None:
+    hist = ClientHistory()
+    events = tuple(ClientEvent(mac, "reconnect", T0 + 30, AP1) for mac in (M1, M1, M2))
+    hist.ingest(
+        PollInput(
+            router=AP1,
+            now=T0 + 60,
+            interval=60,
+            fresh=True,
+            clients=(ClientObs(M1), ClientObs(M2)),
+            events=events,
+        )
+    )
+    assert ca.ap_reconnects(hist, T0 + 120) == {AP1: {M1: 2, M2: 1}}
+    assert ca.ap_reconnects(hist, T0 + 3 * DAY) == {}
+
+
+def test_recommend_client_with_missing_data_says_nothing() -> None:
+    assert ca.recommend_client(ca.ClientFindings(M1)) == ()
+    unknown = ca.ClientFindings(
+        M1,
+        stats_24h=stats(Bucket()),
+        time_pattern=TimePatternResult(STATUS_INSUFFICIENT),
+        ap_pattern=ca.ApPatternResult(STATUS_INSUFFICIENT),
+        roam_burst=ca.RoamBurst(False),
+        attribution=ca.attribute_disconnects([], {}),
+    )
+    assert ca.recommend_client(unknown) == ()
+
+
+def test_recommend_client_collects_rules_and_kinds_stay_apart() -> None:
+    findings = ca.ClientFindings(
+        M1,
+        stats_24h=bad_day(),
+        time_pattern=time_pattern_from_meta(
+            meta_days(10, {i: {3: 1} for i in (0, 2, 4, 6, 8)}), UTC
+        ),
+        ap_pattern=ca.ap_pattern_from_buckets(
+            {AP1: online_bucket(48, dc_error=4), AP2: online_bucket(48)}
+        ),
+        roam_burst=ca.roam_burst(alternating(8, 200)),
+        attribution=ca.attribute_disconnects(
+            [end(DC_INFRA, "inc-1")],
+            {"inc-1": ca.IncidentRef("inc-1", ca.CAUSE_CONFIRMED)},
+        ),
+    )
+    recs = ca.recommend_client(findings)
+    assert [r.key for r in recs] == [
+        ca.REC_CHECK_COVERAGE,
+        ca.REC_CHECK_ROAMING,
+        ca.REC_CHECK_SCHEDULE,
+        ca.REC_CHECK_AP,
+        ca.REC_INFRA_CAUSE,
+    ]
+    for rec in recs:
+        assert_structured(rec)
+        assert rec.subject == M1
+    kinds = {r.key: r.kind for r in recs}
+    assert kinds[ca.REC_INFRA_CAUSE] == ca.KIND_CONFIRMED
+    assert all(
+        k == ca.KIND_HYPOTHESIS for key, k in kinds.items() if key != ca.REC_INFRA_CAUSE
+    )
