@@ -12,10 +12,10 @@ belegt), **Annahme** (plausibel, aber noch nicht belegt; Prüfweg steht dabei), 
 
 - **Stand:** 2026-11-16 · **Phase:** freigegeben (Nutzer, 2026-11-16), in Umsetzung
 - **Branch/PR:** `feature/network-intelligence` · Worktree `../ha-openwrt-router-net-intel` · PR #— · Basis: v1.39.0 (`main@f8a2ac7`)
-- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review · **In Arbeit:** – · **Offen:** P4–P8
-- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`
+- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4 · **In Arbeit:** – · **Offen:** P5–P8
+- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 im Commit `feat(intel): add wifi detectors (P4)`
 - **Blocker:** keine
-- **Nächster Schritt:** P3-Review umgesetzt; nächster Schritt P4.
+- **Nächster Schritt:** P4 erledigt; nächster Schritt P5.
 
 ### Entscheidungen (2026-11-16)
 
@@ -204,6 +204,62 @@ P3-Review (Entscheidungen des Masters, umgesetzt vom Umsetzer):
   `query limit`, `failed to send packet`), procd-Crash-Loop, SAE/MIC/PSK-Fehler, DFS und
   `reason=`-Codes. Kernel-, netifd- und procd-Zeilen von ap6 sind live gesehen und stehen als
   Parser-Tests in `tests/test_net_infra_review.py`.
+
+Entschieden bei der Umsetzung von P4 (Umsetzer, 2026-11-16; 0 neue Router-Aufrufe, Aufrufzähler-Test
+erweitert):
+
+- **W1 Parser:** neue Arten `wifi.deauth`, `wifi.disassoc` (auch `Prune association`),
+  `wifi.handshake_completed`, `wifi.usteer_connected`/`_disconnected` (nur Zähler, nie Bus-Event)
+  sowie `wifi.assoc_rejected`, `wifi.sae_failed`, `wifi.backhaul_auth_failed` (`ENGINE_ONLY_KINDS`:
+  die Engine speichert sie, `EventLimiter` feuert sie nicht). `LogEvent.reason` trägt den Grund im
+  Klartext (`inactivity`, `local_request`, `prune`, `timeout`, `invalid_mic`, `psk`, `max_sta`,
+  `blocked`, `other`). Das Bus-Verhalten bleibt gleich: `psk_mismatch`, `handshake_failed` und
+  `inactivity_timeout` feuern wie bisher.
+- **W2 Abweichung von 2.5:** Keine eigene Art `handshake_timeout`. Der Timeout bleibt
+  `wifi.handshake_failed` mit `reason=timeout` (sonst ändert sich das Bus-Event). Er zählt für
+  `wifi_auth_failures`; ein gemessenes Signal ≤ −75 dBm bestätigt dort `weak_signal`.
+- **W3 Versuch statt Zeile:** Zeilen eines Schlüssels (MAC oder Backhaul-Interface) innerhalb
+  von 5 s sind ein Versuch (PSK-MISMATCH + invalid MIC; doppelte Zeilen). Backhaul-Fehler
+  (`wpa_supplicant`) laufen unter `<entry>:backhaul:<iface>` mit Scope Router.
+- **W4 Reconnect:** Connect auf demselben Interface höchstens 300 s nach einer Down-Zeile
+  desselben Routers. Bandwechsel und `Prune` (Roaming) sind kein Reconnect. Ursachen als Liste je
+  Event (`params.causes`), oben die bestätigte; `weak_signal` bestätigt nur bei gemessenem
+  Signal ≤ −75 dBm.
+- **W5 Auth-Welle:** flottenweit (`fleet:wifi_auth_wave`), Evidenz nur, solange das Fenster
+  Fehler von mindestens 3 MACs enthält; dann wird alles noch nicht Gezählte auf einmal
+  nachgereicht, je Router eine Evidenz. Dazu merkt sich der Automat je Track-Eintrag den Router
+  (5. Feld, alte 4-Feld-Einträge laden weiter) und übernimmt beim Öffnen alle gezählten Router.
+- **W6 Massen-Disconnect:** aus Logzeilen (verschiedene MACs in 30 s Routerzeit, ≥ 5 oder
+  ≥ 3 und ≥ 50 % des Maximums der letzten 3 Client-Zahlen). Ohne lesbares Log Rückfall auf
+  den Poll-Unterschied (abgeleitet, ≤ 0,6), nicht nach einem Neustart. Kein Halten.
+- **W7 Ohne IP:** `client_dhcp_status` mit dem Flotten-DHCP-Bild (`fleet.dhcp_context`),
+  Level 1/0, Debounce 2. `pending` wird übersprungen, ohne DHCP-Bild nichts. Ab 3 Clients eines
+  Routers Warnung. Abgeleitet (0,6), Event nur beim ersten Übergang. `dhcp_missing_after` spiegelt
+  `DHCP_MISSING_AFTER_SECONDS` (die Formel aus `dhcp_health` wird direkt genutzt).
+- **W8 DHCP nach Connect:** flottenweite Paarung Connect-Zeile ↔ NAK/`no address` derselben MAC
+  innerhalb 60 s Routerzeit, in beiden Reihenfolgen (AP und Gateway pollen versetzt).
+- **W9 Band/AP:** Ort je MAC aus den Client-Listen. Steht ein Client bei einem anderen frischen
+  Router (≤ 300 s), ist er unentschieden (alte APs halten Stationen bis zum Inaktivitäts-Timeout).
+  Bandwechsel nur innerhalb eines Routers, AP-Wechsel nur zwischen Routern; beides abgeleitet
+  (≤ 0,6). usteer: genau ein `connected`-Knoten, `<ip>#`-Knoten über die Host-IP der Einträge;
+  diese Wechsel sind beobachtet (Quelle usteer). Poll-Roams entfallen, solange usteer die MAC in
+  den letzten 300 s sah.
+- **W10 Schwache Clients:** je Radio (`<entry>:radio:<phy>`), Hysterese −75/−70 dBm, Halten über
+  das `hold` (600 s) des Automaten statt eines eigenen `HoldTimer`; abgeleitet.
+- **W11 Fehlende Logdaten:** `wifi_coverage` in den Diagnosen (Clients, Log-Anteil, verpasste
+  Zeilen, usteer). Ohne lesbares Log ist der Log-Anteil 0. Log-basierte Incidents (Sturm,
+  Auth-Fehler, DHCP nach Connect) werden dann gehalten, nie als gesund gelöst. Verpasste Zeilen
+  (`LogBatch.new_lines`, `missed`) senken nur die Abdeckung.
+- **W12 Nicht gebaut:** `wifi_rate_unstable` (60-s-Momentwerte der PHY-Rate, Einheit live nicht
+  geprüft; `rate` wird nur als `rx_rate`/`tx_rate` am Client behalten). `wifi_channel_busy` /
+  `optional_sources.hostapd_status` zurückgestellt: braucht einen neuen Aufrufpfad, die
+  Einstellung bis in den Coordinator und L2. `wifi.assoc_rejected` nur als Event ohne Regel.
+- **W13 Zähler:** `counts_24h` des Log-Sensors bekommt die neuen Arten als Schlüssel.
+- **Nicht live gesehen (P4):** SAE-Fehler, invalid MIC, PSK-MISMATCH, EAPOL-Timeout,
+  `AP-REJECTED-*`/Assoc-Reject, die `wpa_supplicant`-Backhaul-Zeile und usteer
+  „connected to node“. Diese Tests sind synthetisch; die Live-Formen (Connect/Disconnect,
+  Deauth/Disassoc mit Grund, Prune, EAPOL-4WAY-HS-COMPLETED, usteer disconnected, Rauschen)
+  stehen anonymisiert in `tests/test_net_wifi.py`.
 
 Weiter offen und nur mit eigener Freigabe des Nutzers: Änderungen an Routern, Deploy nach
 Home Assistant, Merge nach `main`, Release.
@@ -1049,6 +1105,13 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 – Eigene Dienstaktionen 120 s bzw. bis zum nächsten Lesen ignoriert; LuCI-Apply nicht erkennbar – HA-Button erzeugte Neustart-Events (P3-Review M5) – entschieden, Master; Fenster für langsame Polls ergänzt vom Umsetzer
 - 2026-11-16 – Port-Flap-Regel nur an Infrastruktur-/WAN-Ports, Client-Ports nur Zähler – ein neu startender PC ist kein Netzproblem (P3-Review M6) – entschieden, Master
 - 2026-11-16 – K1 Übertrag späterer WAN-Up-Zeilen, K2 Neustart über Boot-Zeitpunkt, K3 Halte-Evidenz ohne Eskalation, K4 `dns.no_servers` Info, K6 `send_failed` ohne Ursache (`send_from()` in `src/forward.c`) – P3-Review – entschieden, Master
+- 2026-11-16 – Handshake-Timeout bleibt `wifi.handshake_failed` mit `reason=timeout` (keine Art `handshake_timeout`, Abweichung von 2.5) – Bus-Event bleibt unverändert – entschieden, Umsetzer (W2)
+- 2026-11-16 – Neue WLAN-Logarten nur Zähler bzw. nur Engine (`ENGINE_ONLY_KINDS`), nie Bus-Event – Bus-Verhalten unverändert – entschieden, Umsetzer (W1)
+- 2026-11-16 – `wifi_rate_unstable` nicht gebaut – 60-s-Momentwerte, Einheit nicht live geprüft – entschieden, Umsetzer (W12)
+- 2026-11-16 – `wifi_channel_busy`/`hostapd_status` zurückgestellt – neuer Aufrufpfad, Einstellung bis Coordinator, L2 offen – entschieden, Umsetzer (W12)
+- 2026-11-16 – Poll-Wechsel (Band, AP, ohne IP, schwache Clients, Massen-Disconnect ohne Log) nur abgeleitet ≤ 0,6; usteer-Wechsel beobachtet – keine Messung des Wechsels im Poll – entschieden, Umsetzer (W6–W10)
+- 2026-11-16 – Log-basierte WLAN-Incidents ohne lesbares Log halten, verpasste Zeilen senken nur die Abdeckung – keine Zeilen sind kein Beweis für Ruhe – entschieden, Umsetzer (W11)
+- 2026-11-16 – Track-Einträge des Automaten tragen den Router; beim Öffnen alle gezählten Router – Auth-Welle über mehrere Router listete nur den letzten – entschieden, Umsetzer (W5)
 
 ## Prüfprotokoll
 
@@ -1057,3 +1120,4 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 `feature/network-intelligence` (P2-Review-Fixes M1–M4, K1–K4) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 1904 passed (Python 3.13, HA 2026.2.3); jeder M-Punkt mit einem Test, der vor dem Fix fehlschlug · CI: – (kein Push) · Hardware: nicht geprüft · Review: P2-Review vollständig umgesetzt
 - 2026-11-16 `feature/network-intelligence` (P3) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 1991 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_infra.py` (Parser, api-Felder, Detektoren je Regel, Szenarien). Der Aufrufzähler-Test erzeugt Infrastruktur-Events bei gleicher Zahl an Router-Aufrufen · CI: – (kein Push) · Hardware: nicht geprüft (Kernel-, netifd-, procd-, odhcpd- und dnsmasq-Resolver-Zeilen nicht live gesehen, A6) · Review: –
 - 2026-11-16 `feature/network-intelligence` (P3-Review-Fixes H1, M1–M6, K1–K6) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 2041 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_infra_review.py` (51 Tests), davon 37 gegen den Stand `e851ac0` rot (jeder Review-Punkt mindestens ein Fehlerfall-Test); die übrigen 14 sichern Live-Formen (lldpcli-Formen, ap6-Kernel-/netifd-/procd-Zeilen) und Gegenfälle ab. Angepasst: `tests/test_net_infra.py` (LLDP-Nachbarn mit Bridge, ARP-Test entfernt, DNS Info, DECLINE mit zweiter MAC), `tests/test_net_engine.py` (Aufrufzähler: Carrier-Verlust an `wan` als Event, an `lan1` nur gezählt; `fetched_at`; Listener mit `host`/`interval`) · CI: – (kein Push) · Hardware: nicht geprüft (Live-Report 2026-11-16 nur als Daten genutzt; DHCPDECLINE, DNS-Fehler, Crash-Loop, mwan3-Failover, Default-Route am Dumb-AP nicht live gesehen) · Review: P3-Review vollständig umgesetzt
+- 2026-11-16 `feature/network-intelligence` (P4) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 2102 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_wifi.py` (63 Tests: Parser mit Live- und synthetischen Formen, Bus unverändert, `rate` behalten, Sturm 8/10 min bei −78 dBm, PSK-/SAE-Serie, Backhaul, Auth-Welle über Router, Band-/Roaming-Flapping mit und ohne usteer, schwache Clients mit Halten und Hysterese, ohne IP, DHCP nach Connect, Massen-Disconnect, einzelner kurzer Abbruch, doppelte Zeilen, fehlendes Log, alte Track-Einträge). Angepasst: `tests/test_net_engine.py` (Aufrufzähler mit Live-WLAN-Zeilen und `get_clients` mit `rate`, gleiche Aufrufzahl; Restore-Test mit zweiter MAC; `LogBatch.new_lines`), `tests/test_log_parser.py` (EAPOL-4WAY-HS-COMPLETED und usteer nicht mehr ignoriert) · CI: – (kein Push) · Hardware: nicht geprüft (SAE, MIC, PSK, Assoc-Reject, Backhaul-Zeile, usteer „connected“ nicht live gesehen; `rate`-Einheit offen) · Review: –

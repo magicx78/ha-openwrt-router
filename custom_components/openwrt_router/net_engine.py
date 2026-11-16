@@ -80,6 +80,7 @@ from .const import (
     LLDP_STATUS_OK,
 )
 from .coordinator import LogBatch
+from .fleet import dhcp_context
 from .log_parser import (
     CATEGORY_DFS,
     CATEGORY_DHCP,
@@ -105,16 +106,24 @@ from .net_events import (
 from .net_rules import (
     DECLINE_KIND,
     LOG_EVENT_META,
+    WIFI_LOG_RULES,
     AlarmMachine,
     Evidence,
     Finding,
     InfraSnapshot,
     InfraState,
+    WifiContext,
+    WifiSnapshot,
+    WifiState,
     decline_cause,
     detect_infrastructure,
+    detect_wifi,
     finding_evidence,
     log_event_evidence,
     merge_settings,
+    wifi_auth_evidence,
+    wifi_context,
+    wifi_log_meta,
 )
 from .topology_ports import collect_own_macs
 
@@ -126,6 +135,7 @@ _FLUSH_KEY = f"{DOMAIN}_net_intelligence_flush"
 _DAY = 86400
 _OPEN_STATES = (IncidentStatus.ACTIVE, IncidentStatus.ACKNOWLEDGED)
 LOG_GAP_KIND = "system.log_gap"
+_REBOOT_KIND = "system.reboot"
 
 # Log event category -> NetEvent category. DFS radar/CAC lines are radio
 # events, so they count as Wi-Fi.
@@ -267,6 +277,12 @@ class NetIntelligence:
         self._wan_gateways: set[str] = set()
         # In memory: own MACs and host IP per router, for LLDP fleet matches.
         self._identity: dict[str, frozenset[str]] = {}
+        # In memory (P4): fleet-wide WLAN state, the configured host per
+        # router (usteer node names) and, during one ingest, the stored
+        # failed-auth lines that start an attempt (event id -> attempt key).
+        self._wifi = WifiState()
+        self._hosts: dict[str, str] = {}
+        self._wifi_attempts: dict[str, str] = {}
         self._last_prune: float | None = None
         # True while a delayed write is scheduled: HA's async_delay_save
         # moves a pending write back on every call, so we call it once.
@@ -367,6 +383,7 @@ class NetIntelligence:
         # A reload starts from a clean comparison state (no false alarms).
         self._last_data.pop(entry_id, None)
         self._infra.pop(entry_id, None)
+        self._wifi.forget(entry_id)
 
     @callback
     def close(self) -> None:
@@ -376,6 +393,8 @@ class NetIntelligence:
         self._last_data.clear()
         self._infra.clear()
         self._identity.clear()
+        self._wifi = WifiState()
+        self._hosts.clear()
 
     @callback
     def unregister(self, entry_id: str) -> None:
@@ -384,6 +403,8 @@ class NetIntelligence:
         self._last_data.pop(entry_id, None)
         self._infra.pop(entry_id, None)
         self._identity.pop(entry_id, None)
+        self._wifi.forget(entry_id)
+        self._hosts.pop(entry_id, None)
 
     def remove_router(self, entry_id: str) -> bool:
         """Forget all data of a router; True if anything was removed."""
@@ -467,6 +488,7 @@ class NetIntelligence:
             self.ring.shift(step.shift)
             for state in self._infra.values():
                 state.shift(step.shift)
+            self._wifi.shift(step.shift)
         if self.machine.prune_held:
             for state in self._infra.values():
                 state.clock_jumped()
@@ -478,16 +500,36 @@ class NetIntelligence:
         if not isinstance(batch, LogBatch):
             batch = None
         mark_before = self._log_marks.get(entry_id)
+        context = wifi_context(
+            getattr(data, "ap_interfaces", None), getattr(data, "clients", None)
+        )
+        self._wifi_attempts = {}
         stored, log_stored, accepted = self._ingest_log(
-            entry_id, log_events, batch, now, getattr(data, "arp_table", None)
+            entry_id,
+            log_events,
+            batch,
+            now,
+            getattr(data, "arp_table", None),
+            context,
         )
         fresh = batch is not None and not batch.baseline
+        thresholds = self.settings["thresholds"]
         evidence: list[Evidence] = []
         if fresh:
             evidence.extend(
                 item
                 for event in log_stored
                 if (item := log_event_evidence(event)) is not None
+            )
+            evidence.extend(
+                wifi_auth_evidence(
+                    self._wifi,
+                    log_stored,
+                    self._wifi_attempts,
+                    now,
+                    entry_id,
+                    thresholds,
+                )
             )
         snapshot = infra_snapshot(
             data,
@@ -496,7 +538,25 @@ class NetIntelligence:
             log_times=_log_times(batch, mark_before, accepted) if fresh else (),
             poll_interval=interval,
         )
-        stored += self._ingest_findings(entry_id, snapshot, now, evidence)
+        findings = self._infra_findings(entry_id, snapshot, now)
+        stored += self._store_findings(entry_id, findings, now, evidence)
+        wifi = wifi_snapshot(
+            data,
+            context,
+            tuple(accepted) if fresh else (),
+            batch,
+            dhcp=self._dhcp_context(),
+            hosts={host: router for router, host in self._hosts.items()},
+            rebooted=any(f.kind == _REBOOT_KIND for f in findings),
+            poll_interval=interval,
+        )
+        stored += self._store_findings(
+            entry_id,
+            detect_wifi(self._wifi, wifi, now, entry_id, thresholds),
+            now,
+            evidence,
+        )
+        evidence.extend(self._wifi_holds(entry_id))
         self.machine.update(now, evidence)
         self._prune(now)
         if stored or self._log_marks.get(entry_id) != mark_before:
@@ -510,12 +570,15 @@ class NetIntelligence:
         batch: LogBatch | None,
         now: float,
         arp: Any = None,
+        wifi: WifiContext | None = None,
     ) -> tuple[int, list[NetEvent], list[LogEvent]]:
         """Count and store the log events of one poll.
 
         Returns the number of stored events (a log gap included), the
         stored log events, and the log events taken in (for the detectors).
-        ``arp`` (MAC -> IPv4 of this poll) confirms a DHCPDECLINE.
+        ``arp`` (MAC -> IPv4 of this poll) confirms a DHCPDECLINE, ``wifi``
+        (this poll's AP interfaces and clients) adds SSID, band and signal
+        to Wi-Fi lines.
         """
         stored = 0
         baseline = batch is not None and batch.baseline
@@ -542,7 +605,15 @@ class NetIntelligence:
                 continue
             kept.append(
                 self._net_event(
-                    entry_id, category, event, ts, src_ts, now, baseline, arp=arp
+                    entry_id,
+                    category,
+                    event,
+                    ts,
+                    src_ts,
+                    now,
+                    baseline,
+                    arp=arp,
+                    wifi=wifi,
                 )
             )
         for group in groups.values():
@@ -571,19 +642,10 @@ class NetIntelligence:
             self._log_marks[entry_id] = mark
         return stored, kept, accepted
 
-    def _ingest_findings(
-        self,
-        entry_id: str,
-        snapshot: InfraSnapshot,
-        now: float,
-        evidence: list[Evidence],
-    ) -> int:
-        """Run the infrastructure detectors; return the number of stored events.
-
-        Findings marked ``event`` are stored and counted, findings with a
-        rule become evidence (appended to ``evidence``), the rest is only
-        counted.
-        """
+    def _infra_findings(
+        self, entry_id: str, snapshot: InfraSnapshot, now: float
+    ) -> list[Finding]:
+        """Run the infrastructure detectors for one poll."""
         state = self._infra.get(entry_id)
         if state is None:
             state = InfraState(wan_gateway=entry_id in self._wan_gateways)
@@ -603,6 +665,21 @@ class NetIntelligence:
         if state.wan_gateway and entry_id not in self._wan_gateways:
             self._wan_gateways.add(entry_id)
             self.schedule_save()
+        return findings
+
+    def _store_findings(
+        self,
+        entry_id: str,
+        findings: Iterable[Finding],
+        now: float,
+        evidence: list[Evidence],
+    ) -> int:
+        """Store and count findings; return the number of stored events.
+
+        Findings marked ``event`` are stored and counted, findings with a
+        rule become evidence (appended to ``evidence``), the rest is only
+        counted.
+        """
         stored = 0
         for finding in findings:
             event: NetEvent | None = None
@@ -616,6 +693,35 @@ class NetIntelligence:
             if item is not None:
                 evidence.append(item)
         return stored
+
+    def _dhcp_context(
+        self,
+    ) -> tuple[frozenset[str], frozenset[str], frozenset[str]] | None:
+        """``fleet.dhcp_context`` (None = unknown, also on any error)."""
+        try:
+            return dhcp_context(self.hass)
+        except Exception:
+            _LOGGER.debug("DHCP context unavailable", exc_info=True)
+            return None
+
+    def _wifi_holds(self, entry_id: str) -> list[Evidence]:
+        """Keep the router's open log-based Wi-Fi incidents open while its
+        log cannot be read: no lines is no proof of a healthy WLAN."""
+        if self._wifi.log_readable(entry_id):
+            return []
+        return [
+            Evidence(
+                type=inc.type,
+                scope_key=inc.scope_key,
+                scope=inc.scope,
+                router=entry_id,
+                hold=True,
+            )
+            for inc in self.machine.incidents()
+            if inc.status in _OPEN_STATES
+            and inc.type in WIFI_LOG_RULES
+            and entry_id in inc.routers
+        ]
 
     def _update_identity(self, entry_id: str, data: Any, host: str | None) -> None:
         """Own MACs and host address of a router (LLDP fleet matches)."""
@@ -637,6 +743,7 @@ class NetIntelligence:
         ids = set(macs) if macs else set(self._identity.get(entry_id, ()))
         if host:
             ids.add(host.strip().lower())
+            self._hosts[entry_id] = host.strip().lower()
         if ids:
             self._identity[entry_id] = frozenset(ids)
 
@@ -658,6 +765,7 @@ class NetIntelligence:
             confidence=finding.confidence,
             msg_key=finding.kind,
             params=dict(finding.params),
+            signal=finding.signal,
         )
 
     def _gap_events(
@@ -712,6 +820,7 @@ class NetIntelligence:
         in_gap: bool = False,
         count: int = 1,
         arp: Any = None,
+        wifi: WifiContext | None = None,
     ) -> NetEvent:
         self._seq += 1
         # A gap line (read after a restart) is old by nature and newer than
@@ -745,6 +854,18 @@ class NetIntelligence:
             )
             if value is not None
         }
+        signal: int | None = None
+        if category is Category.WIFI and wifi is not None:
+            meta = wifi_log_meta(
+                self._wifi, wifi, event, entry_id, now, self.settings["thresholds"]
+            )
+            subject.update(meta.subject)
+            signal = meta.signal
+            params.update(meta.params)
+            if meta.cause is not None:
+                cause, cause_status = meta.cause, meta.cause_status
+            if meta.attempt and meta.attempt_key is not None:
+                self._wifi_attempts[f"{entry_id}:{self._seq}"] = meta.attempt_key
         return NetEvent(
             id=f"{entry_id}:{self._seq}",
             ts=ts,
@@ -763,6 +884,7 @@ class NetIntelligence:
             params=params,
             src_ts=src_ts,
             clock_skew=skew,
+            signal=signal,
         )
 
     # -- read access (diagnostics, later the panel) -----------------------------------
@@ -802,9 +924,11 @@ class NetIntelligence:
             "log_mark_stored": entry_id in self._log_marks,
             "store_bytes_last_save": self.last_save_bytes,
             "events_trimmed_for_size": self.trimmed_events,
-            # Health score and coverage arrive with P6.
+            # Health score and coverage arrive with P6; P4 reports the
+            # WLAN data coverage (no identities).
             "score": None,
             "coverage": None,
+            "wifi_coverage": self._wifi.coverage(entry_id),
         }
 
     # -- persistence --------------------------------------------------------------
@@ -992,6 +1116,41 @@ def infra_snapshot(
         log_fetched_at=float(fetched) if _finite(fetched) else None,
         log_times=log_times,
         poll_interval=float(poll_interval) if _positive(poll_interval) else None,
+    )
+
+
+def wifi_snapshot(
+    data: Any,
+    context: WifiContext,
+    log_events: tuple[Any, ...],
+    batch: LogBatch | None,
+    *,
+    dhcp: tuple[frozenset[str], frozenset[str], frozenset[str]] | None = None,
+    hosts: dict[str, str] | None = None,
+    rebooted: bool = False,
+    poll_interval: float | None = None,
+) -> WifiSnapshot:
+    """Build the WLAN detector input from coordinator data (P4).
+
+    ``log_events`` are the new lines of a fresh log read (empty otherwise).
+    """
+    status = getattr(data, "log_status", None)
+    stability = getattr(data, "client_stability", None)
+    usteer_status = stability.get("usteer") if isinstance(stability, dict) else None
+    usteer = getattr(data, "usteer_connected", None)
+    return WifiSnapshot(
+        context=context,
+        has_aps=bool(context.ifaces),
+        log_events=log_events,
+        log_status=status if isinstance(status, str) else None,
+        log_lines=batch.new_lines if batch is not None else None,
+        log_missed=batch.missed if batch is not None else 0,
+        dhcp=dhcp,
+        usteer=usteer if isinstance(usteer, dict) else None,
+        usteer_status=usteer_status if isinstance(usteer_status, str) else None,
+        hosts=hosts or {},
+        rebooted=rebooted,
+        poll_interval=poll_interval,
     )
 
 

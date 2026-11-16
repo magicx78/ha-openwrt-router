@@ -93,7 +93,8 @@ class TestParseEntry:
     @pytest.mark.parametrize(
         "msg",
         [
-            f"hostapd: phy0-ap1: EAPOL-4WAY-HS-COMPLETED {MAC}",
+            # EAPOL-4WAY-HS-COMPLETED and the usteer station lines are parsed
+            # since P4 (count only, tests/test_net_wifi.py).
             f"hostapd: phy0-ap1: STA {MAC} WPA: pairwise key handshake completed (RSN)",
             f"hostapd: phy0-ap1: STA {MAC} IEEE 802.11: associated (aid 17)",
             f"hostapd: phy1-ap0: BEACON-RESP-RX {MAC} 3 04",
@@ -101,7 +102,6 @@ class TestParseEntry:
             f"dnsmasq-dhcp[1]: DHCPDISCOVER(br-lan.10) {MAC}",
             f"dnsmasq-dhcp[1]: DHCPOFFER(br-lan.10) 192.0.2.10 {MAC}",
             f"dnsmasq-dhcp[1]: DHCPREQUEST(br-lan) 192.0.2.10 {MAC}",
-            f"usteer: station {MAC} disconnected from node hostapd.phy0-ap2",
             "dropbear[2565]: Password auth succeeded for 'root' from 192.0.2.5:64008",
             "kernel: [12345.678] some driver line",
             "no process prefix at all",

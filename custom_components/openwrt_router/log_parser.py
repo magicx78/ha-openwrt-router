@@ -44,6 +44,31 @@ WIFI_DISCONNECTED = "disconnected"
 WIFI_PSK_MISMATCH = "psk_mismatch"
 WIFI_INACTIVITY = "inactivity_timeout"
 WIFI_HANDSHAKE_FAILED = "handshake_failed"
+# Network intelligence (P4). Normal operation, counted only:
+WIFI_DEAUTH = "deauth"
+WIFI_DISASSOC = "disassoc"
+WIFI_HANDSHAKE_COMPLETED = "handshake_completed"
+WIFI_STEER_CONNECTED = "usteer_connected"
+WIFI_STEER_DISCONNECTED = "usteer_disconnected"
+# Problems, stored by the engine but never fired as HA events (the bus
+# keeps its P1 kinds). None of these was seen live (plan, P4).
+WIFI_ASSOC_REJECTED = "assoc_rejected"
+WIFI_SAE_FAILED = "sae_failed"
+# wpa_supplicant of the router's own uplink (sta interface), no client MAC
+WIFI_BACKHAUL_AUTH_FAILED = "backhaul_auth_failed"
+
+# ``LogEvent.reason``: the plain-text reason of a hostapd line, normalised.
+# hostapd at the default log level writes no ``reason=`` codes (live check).
+REASON_INACTIVITY = "inactivity"
+REASON_LOCAL_REQUEST = "local_request"
+REASON_PRUNE = "prune"
+REASON_OTHER = "other"
+REASON_TIMEOUT = "timeout"
+REASON_INVALID_MIC = "invalid_mic"
+REASON_FAILED = "failed"
+REASON_PSK = "psk"
+REASON_MAX_STA = "max_sta"
+REASON_BLOCKED = "blocked"
 
 DHCP_ACK = "ack"
 DHCP_NAK = "nak"
@@ -92,6 +117,22 @@ COUNT_ONLY_KINDS = frozenset(
         (CATEGORY_IFACE, IFACE_LINK_LOST),
         # odhcpd repeats its errors on every RA/DHCPv6 round: count only.
         (CATEGORY_DHCP, DHCP_ODHCPD_ERROR),
+        # P4: the WLAN detectors read these, they are no events of their own.
+        (CATEGORY_WIFI, WIFI_DEAUTH),
+        (CATEGORY_WIFI, WIFI_DISASSOC),
+        (CATEGORY_WIFI, WIFI_HANDSHAKE_COMPLETED),
+        (CATEGORY_WIFI, WIFI_STEER_CONNECTED),
+        (CATEGORY_WIFI, WIFI_STEER_DISCONNECTED),
+    }
+)
+
+# Stored by the network intelligence engine but never fired on the HA bus:
+# the bus keeps exactly the kinds it had before P4.
+ENGINE_ONLY_KINDS = frozenset(
+    {
+        (CATEGORY_WIFI, WIFI_ASSOC_REJECTED),
+        (CATEGORY_WIFI, WIFI_SAE_FAILED),
+        (CATEGORY_WIFI, WIFI_BACKHAUL_AUTH_FAILED),
     }
 )
 
@@ -134,6 +175,57 @@ _HOSTAPD_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.IGNORECASE,
         ),
     ),
+    # P4. Live: "deauthenticated due to local deauth request",
+    # "disassociated due to inactivity", "disassociated" (no reason).
+    (
+        WIFI_DEAUTH,
+        re.compile(
+            rf"^STA {_MAC} IEEE 802\.11: deauthenticated(?: due to (?P<why>.+))?$"
+        ),
+    ),
+    (
+        WIFI_DISASSOC,
+        re.compile(
+            rf"^STA {_MAC} IEEE 802\.11: disassociated(?: due to (?P<why>.+))?$"
+        ),
+    ),
+    # Live (ap5): the station associated with another BSS of this hostapd.
+    (WIFI_DISASSOC, re.compile(rf"^Prune association for {_MAC}(?P<prune>)")),
+    (WIFI_HANDSHAKE_COMPLETED, re.compile(rf"^EAPOL-4WAY-HS-COMPLETED {_MAC}\b")),
+    # Not seen live: hostapd control events and IEEE 802.11 logger lines.
+    (
+        WIFI_ASSOC_REJECTED,
+        re.compile(rf"^AP-REJECTED-(?P<why>MAX-STA|BLOCKED-STA) {_MAC}\b"),
+    ),
+    (
+        WIFI_ASSOC_REJECTED,
+        re.compile(
+            rf"^STA {_MAC} IEEE 802\.11: .*\bassoc\w* .*(?:reject|denied)",
+            re.IGNORECASE,
+        ),
+    ),
+    (WIFI_SAE_FAILED, re.compile(rf"^SAE-UNKNOWN-PASSWORD-IDENTIFIER {_MAC}\b")),
+    (
+        WIFI_SAE_FAILED,
+        re.compile(
+            rf"^STA {_MAC} IEEE 802\.11: .*\bSAE\b.*(?:fail|mismatch|reject|invalid)",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_REASONS = (
+    ("inactivity", REASON_INACTIVITY),
+    ("local deauth request", REASON_LOCAL_REQUEST),
+)
+_REJECT_REASONS = {"MAX-STA": REASON_MAX_STA, "BLOCKED-STA": REASON_BLOCKED}
+# wpa_supplicant (router uplink), not seen live
+_SUPPLICANT_RE = re.compile(
+    r"^(?P<iface>[\w.-]+): WPA: 4-Way Handshake failed - "
+    r"pre-shared key may be incorrect"
+)
+# usteer (Prio 14), live: "station <mac> disconnected from node hostapd.phy1-ap1"
+_USTEER_RE = re.compile(
+    rf"^station {_MAC} (?P<dir>connected to|disconnected from) node (?P<node>\S{{1,64}})$"
 )
 
 # dnsmasq with --log-dhcp prefixes the transaction id ("1234567 DHCPACK(…)").
@@ -205,6 +297,8 @@ class LogEvent:
     # netifd, procd, odhcpd, dnsmasq) and the service/process it is about.
     process: str | None = None
     name: str | None = None
+    # Wi-Fi lines (P4): normalised plain-text reason (``REASON_*``).
+    reason: str | None = None
 
     @property
     def key(self) -> str:
@@ -253,7 +347,75 @@ def parse_entry(entry: Any) -> LogEvent | None:
         return _parse_procd(body, log_id, time_ms, message)
     if proc == "odhcpd":
         return _parse_odhcpd(body, log_id, time_ms, message)
+    if proc == "usteer":
+        return _parse_usteer(body, log_id, time_ms, message)
+    if proc == "wpa_supplicant":
+        return _parse_supplicant(body, log_id, time_ms, message)
     return None
+
+
+def _parse_usteer(
+    body: str, log_id: int, time_ms: int, message: str
+) -> LogEvent | None:
+    match = _USTEER_RE.match(body)
+    if not match:
+        return None
+    node = match.group("node")
+    return LogEvent(
+        category=CATEGORY_WIFI,
+        kind=WIFI_STEER_CONNECTED
+        if match.group("dir") == "connected to"
+        else WIFI_STEER_DISCONNECTED,
+        log_id=log_id,
+        time_ms=time_ms,
+        mac=match.group("mac").upper(),
+        interface=node.removeprefix("hostapd."),
+        message=message,
+        process="usteer",
+    )
+
+
+def _parse_supplicant(
+    body: str, log_id: int, time_ms: int, message: str
+) -> LogEvent | None:
+    match = _SUPPLICANT_RE.match(body)
+    if not match:
+        return None
+    return LogEvent(
+        category=CATEGORY_WIFI,
+        kind=WIFI_BACKHAUL_AUTH_FAILED,
+        log_id=log_id,
+        time_ms=time_ms,
+        interface=match.group("iface"),
+        message=message,
+        process="wpa_supplicant",
+        reason=REASON_PSK,
+    )
+
+
+def _wifi_reason(kind: str, hit: re.Match[str]) -> str | None:
+    """Normalised reason of a hostapd Wi-Fi line (None = none given)."""
+    groups = hit.groupdict()
+    if kind == WIFI_INACTIVITY:
+        return REASON_INACTIVITY
+    if kind == WIFI_HANDSHAKE_FAILED:
+        text = hit.string.lower()
+        if "timeout" in text:
+            return REASON_TIMEOUT
+        if "invalid mic" in text:
+            return REASON_INVALID_MIC
+        return REASON_FAILED
+    if "prune" in groups:
+        return REASON_PRUNE
+    why = groups.get("why")
+    if not why:
+        return None
+    if kind == WIFI_ASSOC_REJECTED:
+        return _REJECT_REASONS.get(why, REASON_OTHER)
+    for text, reason in _REASONS:
+        if why.startswith(text):
+            return reason
+    return REASON_OTHER
 
 
 def _parse_kernel(msg: str, log_id: int, time_ms: int, message: str) -> LogEvent | None:
@@ -381,6 +543,7 @@ def _parse_hostapd(
                 mac=hit.group("mac").upper(),
                 interface=match.group("iface"),
                 message=message,
+                reason=_wifi_reason(kind, hit),
             )
     return None
 
@@ -525,6 +688,7 @@ class EventLimiter:
             if (
                 event.category not in FIRE_CATEGORIES
                 or (event.category, event.kind) in COUNT_ONLY_KINDS
+                or (event.category, event.kind) in ENGINE_ONLY_KINDS
             ):
                 continue
             key = (

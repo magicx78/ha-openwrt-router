@@ -244,6 +244,8 @@ class LogBatch:
     last_id: int | None
     last_time_ms: int | None
     fetched_at: float | None = None
+    # Lines new to the cursor (P4: share of read vs. missed lines)
+    new_lines: int = 0
 
 
 def _log_time_ms(value: Any) -> int | None:
@@ -259,6 +261,7 @@ def _log_batch(
     missed: int,
     cursor: LogCursor,
     fetched_at: float | None = None,
+    new_lines: int = 0,
 ) -> LogBatch:
     """Summarise one fetch for the engine (oldest line by id, cursor state)."""
     ids = [
@@ -276,6 +279,7 @@ def _log_batch(
         last_id=cursor.last_id,
         last_time_ms=_log_time_ms(cursor.last_time),
         fetched_at=fetched_at,
+        new_lines=new_lines,
     )
 
 
@@ -411,6 +415,10 @@ class OpenWrtCoordinatorData:
         self.dhcp_static_macs: frozenset[str] = frozenset()
         # Client stability (F4), see _client_stability_snapshot()
         self.client_stability: dict[str, Any] = {}
+        # usteer's fleet view of this poll's usteer fetch for the network
+        # intelligence (P4): client MAC -> nodes reporting it connected.
+        # None when usteer was not read in this poll. Never in as_dict.
+        self.usteer_connected: dict[str, tuple[str, ...]] | None = None
         # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
         self.vlans_stale: bool = False
         # Connectivity health tracking (used by binary_sensor / sensor platform)
@@ -1431,7 +1439,12 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         data.new_log_events = tuple(result.events)
         fetched_at = time.time()
         data.new_log_batch = _log_batch(
-            entries, result.baseline, result.missed, self._log_cursor, fetched_at
+            entries,
+            result.baseline,
+            result.missed,
+            self._log_cursor,
+            fetched_at,
+            result.new_lines,
         )
         now_ms = int(fetched_at * 1000)
         for event in result.events:
@@ -1608,7 +1621,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             except Exception:
                 _LOGGER.debug("%s: usteer node lookup failed", self.name, exc_info=True)
         self._usteer_status = USTEER_STATUS_OK
-        self._sticky_now = sticky_candidates(parse_usteer_clients(raw), node_info)
+        parsed = parse_usteer_clients(raw)
+        self._sticky_now = sticky_candidates(parsed, node_info)
+        data.usteer_connected = {
+            mac: nodes
+            for mac, seen in parsed.items()
+            if (nodes := tuple(s.node for s in seen if s.connected))
+        }
         self._sticky_timer.update(self._sticky_now, now_ms)
 
     def _client_stability_snapshot(

@@ -2748,6 +2748,11 @@ class OpenWrtAPI:
                     sta = sta_data if isinstance(sta_data, dict) else {}
                     signal = sta.get("signal", 0)
                     connected_time = sta.get("connected_time", 0) or 0
+                    # Current link rate (P4, kept for the network
+                    # intelligence; unit as hostapd reports it, not checked
+                    # live). Momentary values only, see plan 2.12.
+                    rate = sta.get("rate")
+                    rate = rate if isinstance(rate, dict) else {}
                     clients.append(
                         {
                             CLIENT_KEY_MAC: mac,
@@ -2761,6 +2766,8 @@ class OpenWrtAPI:
                             or sta.get("rx_bytes"),
                             "tx_bytes": (sta.get("bytes") or {}).get("tx")
                             or sta.get("tx_bytes"),
+                            "rx_rate": rate.get("rx"),
+                            "tx_rate": rate.get("tx"),
                         }
                     )
                 _LOGGER.debug(

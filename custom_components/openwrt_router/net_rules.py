@@ -8,7 +8,10 @@ it holds
 * ``DEFAULT_SETTINGS`` / ``merge_settings`` (plan c7 and c8),
 * ``AlarmMachine``: turns evidence into ``Incident`` life cycles, and
 * the infrastructure detectors (P3, system/LAN/WAN/DHCP):
-  ``detect_infrastructure`` turns one poll into ``Finding``s.
+  ``detect_infrastructure`` turns one poll into ``Finding``s, and
+* the WLAN detectors (P4): ``detect_wifi`` (one router's poll against the
+  fleet-wide ``WifiState``), ``wifi_log_meta`` and ``wifi_auth_evidence``
+  for the stored Wi-Fi log lines.
 
 Rule modes (key ``mode`` of each ``thresholds`` entry, not user-editable)::
 
@@ -35,12 +38,16 @@ import copy
 import logging
 import math
 import statistics
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+from .channel_plan import phy_of
+from .client_stability import RECONNECT_WINDOW_SECONDS, iface_band
+from .dhcp_health import DHCP_MISSING, DHCP_PENDING, client_dhcp_status
 from .net_events import (
     CLOCK_SKEW_LIMIT,
     MAX_EVIDENCE,
@@ -133,7 +140,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "wifi_reconnect_storm": _window(5, 600, 1800, 3600),
         "wifi_auth_failures": _window(3, 600, 1800, 3600),
         "wifi_auth_wave": _window(10, 600, 1800, 3600, clear_below=2, min_sources=3),
-        "wifi_mass_disconnect": _event(600, window=30, min_clients=5, min_ratio=0.5),
+        # min_ratio only with ratio_min_clients leaving (P4: 1 of 2 is no mass)
+        "wifi_mass_disconnect": _event(
+            600, window=30, min_clients=5, min_ratio=0.5, ratio_min_clients=3
+        ),
         # value 1 = no IP although connected (dhcp_missing), 0 = has a lease
         "wifi_no_ip": _level(
             1, 1, 2, 3600, "info", dhcp_missing_after=180, warn_clients_per_ap=3
@@ -392,7 +402,8 @@ class _Track:
     scope_key: str
     incident_id: str | None = None
     live: bool = False
-    # window rules: [ts, count, event_id, kind]; level rules: the raising streak
+    # window rules: [ts, count, event_id, kind, router]; level rules: the
+    # raising streak (router since P4; older stored entries lack it)
     entries: list[list[Any]] | None = None
     last_evidence: float | None = None
     last_obs: float | None = None
@@ -429,7 +440,13 @@ class _Track:
             return None
         raw = data.get("entries")
         entries = [
-            [float(e[0]), int(e[1]), e[2] if isinstance(e[2], str) else None, str(e[3])]
+            [
+                float(e[0]),
+                int(e[1]),
+                e[2] if isinstance(e[2], str) else None,
+                str(e[3]),
+                e[4] if len(e) > 4 and isinstance(e[4], str) else "",
+            ]
             for e in (raw if isinstance(raw, list) else [])
             if _valid_entry(e)
         ][-MAX_TRACK_ENTRIES:]
@@ -457,7 +474,7 @@ def _opt_num(value: Any) -> float | None:
 def _valid_entry(entry: Any) -> bool:
     return (
         isinstance(entry, list)
-        and len(entry) == 4
+        and len(entry) in (4, 5)
         and _is_number(entry[0])
         and isinstance(entry[1], int)
         and not isinstance(entry[1], bool)
@@ -913,7 +930,7 @@ class AlarmMachine:
             e[2] == item.event_id for e in track.entries
         ):
             return  # the same event fed twice (re-read log line, double ingest)
-        track.entries.append([now, n, item.event_id, item.kind])
+        track.entries.append([now, n, item.event_id, item.kind, item.router or ""])
         track.last_evidence = now
         self._trim(track, rule, now)
         inc = self._live_incident(track)
@@ -955,7 +972,7 @@ class AlarmMachine:
                 self._finish_update(inc, changed, out)
                 return
             assert track.entries is not None
-            track.entries.append([now, 1, item.event_id, item.kind])
+            track.entries.append([now, 1, item.event_id, item.kind, item.router or ""])
             del track.entries[:-MAX_EVIDENCE]
             if track.streak < int(rule.get("debounce", 1)):
                 return
@@ -1055,6 +1072,11 @@ class AlarmMachine:
             self._incidents[inc.id] = inc
         track.incident_id = inc.id
         track.live = True
+        # every router whose evidence counted, not just the last one (P4:
+        # fleet rules such as the auth wave collect over several routers)
+        counted = {e[4] for e in entries if len(e) > 4 and e[4]}
+        if not counted <= set(inc.routers):
+            inc.routers = sorted(counted | set(inc.routers))
         self._merge_meta(inc, item)
         self._escalate(inc, rule, track, now, value)
         if inc.status is not IncidentStatus.IGNORED:
@@ -1352,6 +1374,11 @@ class Finding:
     subject: dict[str, Any] = field(default_factory=dict)
     params: dict[str, Any] = field(default_factory=dict)
     hold: bool = False
+    # P4: measured client signal (dBm) of the event, clients affected, and a
+    # severity the evidence raises the incident to (``Evidence.severity``).
+    signal: int | None = None
+    affected: int = 0
+    escalate: Severity | None = None
 
 
 @dataclass
@@ -2513,8 +2540,13 @@ def finding_evidence(
     if not finding.rule:
         return None
     if event is not None:
-        return Evidence.from_event(
-            event, finding.rule, finding.scope, finding.scope_key, finding.value
+        return replace(
+            Evidence.from_event(
+                event, finding.rule, finding.scope, finding.scope_key, finding.value
+            ),
+            affected=finding.affected,
+            severity=finding.escalate,
+            hold=finding.hold,
         )
     return Evidence(
         type=finding.rule,
@@ -2529,6 +2561,8 @@ def finding_evidence(
         cause=finding.cause,
         cause_status=finding.cause_status,
         hold=finding.hold,
+        affected=finding.affected,
+        severity=finding.escalate,
     )
 
 
@@ -2546,3 +2580,1236 @@ def log_event_evidence(event: NetEvent) -> Evidence | None:
                 service_key(event.router, service),
             )
     return None
+
+
+# --- WLAN detectors (P4) ------------------------------------------------------------
+#
+# Deterministic like the infrastructure detectors. ``WifiState`` is one per
+# engine and fleet-wide (roaming, DHCP after connect and the auth wave span
+# routers), with a ``_WifiRouter`` part per router; ``WifiSnapshot`` is one
+# router's poll. Log lines are ``observed``. Facts that only come from poll
+# snapshots (band/AP change from client lists, no IP, weak clients, a client
+# list that shrank) are ``inferred`` and capped at INFERRED_CONFIDENCE_CAP.
+# Cause hypotheses go to ``params["causes"]`` as a list of {cause, status}
+# (confirmed first); ``cause``/``cause_status`` carry the first one. A weak
+# signal is ``confirmed`` only by a measured signal at or below ``weak_dbm``.
+# Router log times (``time_ms``) pair lines; HA time (``now``) feeds the
+# machine and the window counts.
+
+WIFI_RECONNECT_KIND = "wifi.reconnect"
+WIFI_MASS_DISCONNECT_KIND = "wifi.mass_disconnect"
+WIFI_NO_IP_KIND = "wifi.no_ip"
+WIFI_DHCP_AFTER_CONNECT_KIND = "wifi.dhcp_after_connect"
+WIFI_BAND_CHANGE_KIND = "wifi.band_change"
+WIFI_ROAM_KIND = "wifi.roam"
+WIFI_WEAK_KIND = "wifi.weak_clients"
+WIFI_ASSOC_REJECTED_KIND = "wifi.assoc_rejected"
+WIFI_BACKHAUL_AUTH_KIND = "wifi.backhaul_auth_failed"
+# Stored log lines that count as a failed authentication attempt.
+WIFI_AUTH_KINDS = frozenset(
+    {
+        "wifi.psk_mismatch",
+        "wifi.handshake_failed",
+        "wifi.sae_failed",
+        WIFI_BACKHAUL_AUTH_KIND,
+    }
+)
+# Rules fed by log lines only: held open while the router's log cannot be
+# read, so missing data never reads as "healthy". (The mass disconnect has
+# a poll fallback without log, the auth wave resolves by count.)
+WIFI_LOG_RULES = frozenset(
+    {"wifi_reconnect_storm", "wifi_auth_failures", "wifi_dhcp_after_connect"}
+)
+WIFI_AUTH_WAVE_KEY = "fleet:wifi_auth_wave"
+
+_DOWN_KINDS = frozenset({"disconnected", "deauth", "disassoc", "inactivity_timeout"})
+_DHCP_FAIL_KINDS = frozenset({"nak", "no_address"})
+# Lines of one failed attempt arrive together (hostapd writes the invalid
+# MIC line and AP-STA-POSSIBLE-PSK-MISMATCH for the same 4-way handshake).
+_AUTH_ATTEMPT_GAP_MS = 5000
+# A deauth/disassoc line gives its reason to the AP-STA-DISCONNECTED line
+# of the same station within this time.
+_REASON_PAIR_MS = 5000
+_WIFI_MEMORY = 3600.0
+_DHCP_PAIR_KEEP_MS = 600_000
+# A router's client list older than this is ignored for roaming decisions.
+_PRESENT_MAX_AGE = 300.0
+# usteer saw the client this recently: its fleet view decides AP changes.
+_STEER_COVER = 300.0
+_MAX_WIFI_KEYS = 4096
+_LOG_QUALITY_BATCHES = 5
+_MASS_PEAK_POLLS = 3
+_SIGNAL_MIN = -120
+_LOG_STATUS_OK = "ok"
+_USTEER_OK = "ok"
+_USTEER_UNAVAILABLE = "not_available"
+
+# cause keys (translation keys later, P6)
+CAUSE_WEAK_SIGNAL = "weak_signal"
+
+
+def _hyp(cause: str) -> tuple[str, CauseStatus]:
+    return (cause, CauseStatus.HYPOTHESIS)
+
+
+def _measured_signal(value: Any) -> int | None:
+    """A plausible dBm value; hostapd's 0 means "unknown"."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if _SIGNAL_MIN <= value < 0 else None
+
+
+def _weak_cause(signal: int | None, weak_dbm: float) -> tuple[str, CauseStatus]:
+    if signal is not None and signal <= weak_dbm:
+        return (CAUSE_WEAK_SIGNAL, CauseStatus.CONFIRMED)
+    return _hyp(CAUSE_WEAK_SIGNAL)
+
+
+def cause_list(
+    items: Iterable[tuple[str, CauseStatus]],
+) -> tuple[str | None, CauseStatus | None, list[dict[str, str]]]:
+    """Top cause, its status and the ordered list (confirmed first, no repeats)."""
+    seen: dict[str, CauseStatus] = {}
+    for cause, status in items:
+        if cause not in seen or status is CauseStatus.CONFIRMED:
+            seen[cause] = status
+    ordered = sorted(seen.items(), key=lambda kv: kv[1] is not CauseStatus.CONFIRMED)
+    if not ordered:
+        return None, None, []
+    listed = [{"cause": c, "status": s.value} for c, s in ordered]
+    return ordered[0][0], ordered[0][1], listed
+
+
+@dataclass(frozen=True)
+class WifiContext:
+    """One router's poll as lookup tables for the WLAN detectors.
+
+    ``ifaces``: AP interface -> (band, ssid, phy). ``clients``: MAC (upper)
+    -> client dict of this poll, None when no client list was read.
+    """
+
+    ifaces: Mapping[str, tuple[str | None, str | None, str]] = field(
+        default_factory=dict
+    )
+    clients: Mapping[str, Mapping[str, Any]] | None = None
+
+    def iface(self, name: str | None) -> tuple[str | None, str | None, str | None]:
+        if not name:
+            return None, None, None
+        band, ssid, phy = self.ifaces.get(name, (None, None, phy_of(name)))
+        return band, ssid, phy
+
+    def describe(
+        self, mac: str | None, iface: str | None = None
+    ) -> tuple[dict[str, Any], int | None]:
+        """Subject (mac, iface, ssid, band) and the client's measured signal."""
+        client = (self.clients or {}).get(mac or "")
+        if not iface and client is not None:
+            radio = client.get("radio")
+            iface = radio if isinstance(radio, str) else None
+        band, ssid, _phy = self.iface(iface)
+        subject = {
+            key: value
+            for key, value in (
+                ("mac", mac),
+                ("iface", iface),
+                ("ssid", ssid),
+                ("band", band),
+            )
+            if value
+        }
+        signal = _measured_signal(client.get("signal")) if client else None
+        return subject, signal
+
+
+def wifi_context(ap_interfaces: Any, clients: Any) -> WifiContext:
+    """Build the lookup tables from coordinator data (broken entries skipped)."""
+    ifaces: dict[str, tuple[str | None, str | None, str]] = {}
+    for item in ap_interfaces if isinstance(ap_interfaces, list) else ():
+        if not isinstance(item, dict):
+            continue
+        name = item.get("ifname")
+        if not isinstance(name, str) or not name:
+            continue
+        ssid = item.get("ssid")
+        phy = item.get("phy")
+        ifaces[name] = (
+            iface_band(item),
+            ssid if isinstance(ssid, str) and ssid else None,
+            phy if isinstance(phy, str) and phy else phy_of(name),
+        )
+    by_mac: dict[str, Mapping[str, Any]] | None = None
+    if isinstance(clients, list):
+        by_mac = {}
+        for client in clients:
+            if not isinstance(client, dict):
+                continue
+            mac = client.get("mac")
+            if isinstance(mac, str) and mac:
+                by_mac.setdefault(mac.upper(), client)
+    return WifiContext(ifaces=ifaces, clients=by_mac)
+
+
+@dataclass(frozen=True)
+class WifiSnapshot:
+    """The facts of one poll the WLAN detectors read.
+
+    ``log_events`` are the new log lines of a fresh (non-baseline) fetch,
+    ``log_lines``/``log_missed`` the cursor facts of a fetch in this poll
+    (None: no fetch). ``dhcp`` is ``fleet.dhcp_context`` (lease, ARP and
+    static MACs over the fleet; None = unknown). ``usteer`` maps a client
+    MAC to the usteer nodes reporting it connected (this poll's usteer
+    read, None if none). ``hosts`` maps a router address (lower case) to
+    its entry id, for usteer's ``<ip>#hostapd.<if>`` node names.
+    """
+
+    context: WifiContext = field(default_factory=WifiContext)
+    has_aps: bool = False
+    log_events: tuple[Any, ...] = ()
+    log_status: str | None = None
+    log_lines: int | None = None
+    log_missed: int = 0
+    dhcp: tuple[frozenset[str], frozenset[str], frozenset[str]] | None = None
+    usteer: Mapping[str, tuple[str, ...]] | None = None
+    usteer_status: str | None = None
+    hosts: Mapping[str, str] = field(default_factory=dict)
+    rebooted: bool = False
+    poll_interval: float | None = None
+
+
+@dataclass
+class _Loc:
+    router: str
+    band: str | None
+    iface: str | None
+
+
+@dataclass
+class _WifiRouter:
+    """Per-router WLAN comparison state (memory only)."""
+
+    # MAC -> (router time ms, iface, reason) of the last disconnect line
+    last_down: dict[str, tuple[int, str | None, str | None]] = field(
+        default_factory=dict
+    )
+    clients: frozenset[str] | None = None
+    client_counts: deque[int] = field(
+        default_factory=lambda: deque(maxlen=_MASS_PEAK_POLLS)
+    )
+    weak: set[str] = field(default_factory=set)
+    no_ip: set[str] = field(default_factory=set)
+    # AP-STA-DISCONNECTED lines not yet part of a mass disconnect
+    downs: list[tuple[int, str, str | None]] = field(default_factory=list)
+    mass_after_ms: int = 0
+    log_quality: deque[tuple[int, int]] = field(
+        default_factory=lambda: deque(maxlen=_LOG_QUALITY_BATCHES)
+    )
+    log_status: str | None = None
+    has_aps: bool = False
+    clients_read: bool = False
+    usteer: bool | None = None
+
+
+@dataclass
+class WifiState:
+    """Fleet-wide WLAN state of the engine (memory only)."""
+
+    routers: dict[str, _WifiRouter] = field(default_factory=dict)
+    # router -> (HA time, MACs of its last client list)
+    present: dict[str, tuple[float, frozenset[str]]] = field(default_factory=dict)
+    loc: dict[str, _Loc] = field(default_factory=dict)
+    steer_loc: dict[str, str] = field(default_factory=dict)
+    steer_seen: dict[str, float] = field(default_factory=dict)
+    # MAC -> recent connect lines (router time ms, router) over the fleet
+    connects: dict[str, deque[tuple[int, str]]] = field(default_factory=dict)
+    # MAC -> DHCP failures not yet paired (router time ms, router, kind)
+    dhcp_fail: dict[str, list[tuple[int, str, str]]] = field(default_factory=dict)
+    # attempt key -> router time ms of its last failure line
+    auth_last: dict[str, int] = field(default_factory=dict)
+    # [HA time, MAC, fed to the machine, router] of failed attempts over
+    # the fleet
+    wave: list[list[Any]] = field(default_factory=list)
+    # (rule, key) -> HA times of evidence, for the window count of events
+    history: dict[tuple[str, str], deque[tuple[float, int]]] = field(
+        default_factory=dict
+    )
+
+    def router(self, router: str) -> _WifiRouter:
+        state = self.routers.get(router)
+        if state is None:
+            state = self.routers[router] = _WifiRouter()
+        return state
+
+    def forget(self, router: str) -> None:
+        """Drop a router (unloaded or removed)."""
+        self.routers.pop(router, None)
+        self.present.pop(router, None)
+        self.loc = {m: loc for m, loc in self.loc.items() if loc.router != router}
+        self.steer_loc = {m: r for m, r in self.steer_loc.items() if r != router}
+
+    def window_count(
+        self, rule: str, key: str, now: float, n: int, window: float
+    ) -> int:
+        """Add ``n`` at ``now`` and return the sum within ``window`` s."""
+        items = self.history.setdefault((rule, key), deque(maxlen=256))
+        if n > 0:
+            items.append((now, n))
+        while items and items[0][0] <= now - max(window, _WIFI_MEMORY):
+            items.popleft()
+        return sum(c for ts, c in items if ts > now - window)
+
+    def shift(self, delta: float) -> None:
+        """Move stored HA times by ``delta`` (large backward clock jump)."""
+        self.present = {r: (ts + delta, m) for r, (ts, m) in self.present.items()}
+        self.steer_seen = {m: ts + delta for m, ts in self.steer_seen.items()}
+        for entry in self.wave:
+            entry[0] += delta
+        self.history = {
+            k: deque(((ts + delta, n) for ts, n in v), maxlen=256)
+            for k, v in self.history.items()
+        }
+
+    def prune(self, now: float) -> None:
+        """Forget old entries and keep every table bounded."""
+        cutoff = now - _WIFI_MEMORY
+        self.steer_seen = {m: t for m, t in self.steer_seen.items() if t > cutoff}
+        self.steer_loc = {
+            m: r for m, r in self.steer_loc.items() if m in self.steer_seen
+        }
+        self.wave = [e for e in self.wave if e[0] > cutoff][-_MAX_WIFI_KEYS:]
+        self.history = {
+            k: v for k, v in self.history.items() if v and v[-1][0] > cutoff
+        }
+        for table in (
+            self.loc,
+            self.steer_loc,
+            self.connects,
+            self.dhcp_fail,
+            self.auth_last,
+            self.history,
+        ):
+            _cap(table)
+        for state in self.routers.values():
+            _cap(state.last_down)
+
+    def log_readable(self, router: str) -> bool:
+        """True when the router's log could be read (lost lines only lower
+        the coverage)."""
+        state = self.routers.get(router)
+        return state is not None and state.log_status == _LOG_STATUS_OK
+
+    def coverage(self, router: str) -> dict[str, Any]:
+        """WLAN data coverage of a router (diagnostics; the score is P6).
+
+        ``log`` is the share of log lines read over the last fetches (0
+        when the log is not readable), ``clients`` whether a client list
+        was read. ``value`` averages both; missing data lowers it, it never
+        reports a healthy WLAN on its own.
+        """
+        state = self.routers.get(router)
+        if state is None or not state.has_aps:
+            return {"applicable": state is not None and state.has_aps}
+        log: float | None
+        if state.log_status != _LOG_STATUS_OK:
+            log = 0.0 if state.log_status is not None else None
+        else:
+            read = sum(lines for lines, _missed in state.log_quality)
+            missed = sum(m for _lines, m in state.log_quality)
+            log = read / (read + missed) if read + missed else 1.0
+        clients = 1.0 if state.clients_read else 0.0
+        parts = [clients, log if log is not None else 0.0]
+        return {
+            "applicable": True,
+            "clients": state.clients_read,
+            "log": None if log is None else round(log, 2),
+            "log_missed_lines": sum(m for _lines, m in state.log_quality),
+            "usteer": state.usteer,
+            "value": round(sum(parts) / len(parts), 2),
+        }
+
+
+def _cap(table: dict[Any, Any]) -> None:
+    """Keep the newest _MAX_WIFI_KEYS entries (dicts keep insertion order)."""
+    excess = len(table) - _MAX_WIFI_KEYS
+    for key in list(table)[: max(0, excess)]:
+        del table[key]
+
+
+def detect_wifi(
+    state: WifiState,
+    snap: WifiSnapshot,
+    now: float,
+    router: str,
+    thresholds: Mapping[str, Any],
+) -> list[Finding]:
+    """Run the WLAN detectors for one poll of a router."""
+    out: list[Finding] = []
+    rules = _RuleSet(thresholds)
+    state.prune(now)
+    rstate = state.router(router)
+    _wifi_bookkeeping(rstate, snap)
+    lines = _unique_lines(snap.log_events)
+    weak_dbm = _rule_num(rules.get("wifi_weak_clients"), "weak_dbm", -75)
+    _reconnects(
+        state,
+        rstate,
+        snap,
+        lines,
+        now,
+        router,
+        rules.get("wifi_reconnect_storm"),
+        weak_dbm,
+        out,
+    )
+    _mass_disconnect_log(
+        rstate, snap, lines, router, rules.get("wifi_mass_disconnect"), out
+    )
+    _dhcp_after_connect(
+        state, snap, lines, now, router, rules.get("wifi_dhcp_after_connect"), out
+    )
+    clients = snap.context.clients
+    if clients is not None:
+        _mass_disconnect_poll(
+            state, rstate, snap, now, router, rules.get("wifi_mass_disconnect"), out
+        )
+        _no_ip(rstate, snap, now, router, rules.get("wifi_no_ip"), out)
+        _moves(state, snap, now, router, rules, weak_dbm, out)
+        _weak_clients(rstate, snap, router, rules.get("wifi_weak_clients"), out)
+        rstate.clients = frozenset(clients)
+        rstate.client_counts.append(len(clients))
+    _steer_moves(
+        state, snap, now, router, rules.get("wifi_roam_flapping"), weak_dbm, out
+    )
+    return out
+
+
+def _wifi_bookkeeping(rstate: _WifiRouter, snap: WifiSnapshot) -> None:
+    rstate.has_aps = snap.has_aps
+    rstate.clients_read = snap.context.clients is not None
+    rstate.log_status = snap.log_status
+    if snap.log_lines is not None:
+        rstate.log_quality.append((max(0, snap.log_lines), max(0, snap.log_missed)))
+    if snap.usteer_status == _USTEER_OK:
+        rstate.usteer = True
+    elif snap.usteer_status == _USTEER_UNAVAILABLE:
+        rstate.usteer = False
+
+
+def _unique_lines(events: Iterable[Any]) -> list[Any]:
+    """Wi-Fi and DHCP lines in router time order, exact duplicates dropped."""
+    seen: set[tuple[Any, ...]] = set()
+    out: list[Any] = []
+    for event in events:
+        if getattr(event, "category", None) not in ("wifi", "dhcp"):
+            continue
+        time_ms = getattr(event, "time_ms", 0)
+        key = (
+            event.category,
+            event.kind,
+            event.mac,
+            event.interface,
+            time_ms,
+            getattr(event, "reason", None),
+            event.log_id if not time_ms else None,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(event)
+    out.sort(key=lambda e: (e.time_ms, e.log_id))
+    return out
+
+
+def _reconnects(
+    state: WifiState,
+    rstate: _WifiRouter,
+    snap: WifiSnapshot,
+    lines: list[Any],
+    now: float,
+    router: str,
+    rule: Mapping[str, Any],
+    weak_dbm: float,
+    out: list[Finding],
+) -> None:
+    """A connect to the same interface within RECONNECT_WINDOW_SECONDS of a
+    disconnect of the same client on this router (``AssociationTracker``'s
+    definition; another radio is band steering, another router roaming)."""
+    found: dict[str, list[str | None]] = {}
+    ifaces: dict[str, str | None] = {}
+    limit = RECONNECT_WINDOW_SECONDS * 1000
+    for ev in lines:
+        if ev.category != "wifi" or not ev.mac or ev.time_ms <= 0:
+            continue
+        if ev.kind in _DOWN_KINDS:
+            if ev.reason == "prune":
+                continue  # the station moved to another BSS of this hostapd
+            prev = rstate.last_down.get(ev.mac)
+            reason = ev.reason
+            if (
+                reason is None
+                and prev is not None
+                and abs(ev.time_ms - prev[0]) <= _REASON_PAIR_MS
+            ):
+                reason = prev[2]
+            rstate.last_down.pop(ev.mac, None)
+            rstate.last_down[ev.mac] = (ev.time_ms, ev.interface, reason)
+        elif ev.kind == "connected":
+            prev = rstate.last_down.pop(ev.mac, None)
+            if (
+                prev is not None
+                and 0 <= ev.time_ms - prev[0] <= limit
+                and (prev[1] is None or ev.interface is None or prev[1] == ev.interface)
+            ):
+                found.setdefault(ev.mac, []).append(prev[2])
+                ifaces[ev.mac] = ev.interface
+    window = _rule_num(rule, "window", 600)
+    for mac, reasons in found.items():
+        subject, signal = snap.context.describe(mac, ifaces.get(mac))
+        hyps = [_weak_cause(signal, weak_dbm)]
+        if "local_request" in reasons:
+            hyps.append(_hyp("steering"))
+        if "inactivity" in reasons:
+            hyps.append(_hyp("client_power_save"))
+        hyps += [_hyp(c) for c in ("interference", "power_supply", "roaming", "auth")]
+        cause, status, causes = cause_list(hyps)
+        n = len(reasons)
+        out.append(
+            Finding(
+                kind=WIFI_RECONNECT_KIND,
+                category=Category.WIFI,
+                source=Source.HOSTAPD,
+                rule="wifi_reconnect_storm",
+                scope=Scope.CLIENT,
+                scope_key=mac,
+                event=True,
+                count=n,
+                cause=cause,
+                cause_status=status,
+                subject=subject,
+                signal=signal,
+                params={
+                    "window_count": state.window_count(
+                        "wifi_reconnect_storm", mac, now, n, window
+                    ),
+                    "window_s": round(window),
+                    "reasons": sorted({r or "none" for r in reasons}),
+                    "causes": causes,
+                },
+            )
+        )
+
+
+def _mass_trigger(
+    rule: Mapping[str, Any], clients: int, base: int
+) -> tuple[bool, float]:
+    """(trigger, ratio). The ratio path needs ``ratio_min_clients`` too, so
+    one client of two leaving is no mass disconnect."""
+    ratio = clients / max(base, clients) if clients else 0.0
+    if clients >= _rule_num(rule, "min_clients", 5):
+        return True, ratio
+    return (
+        clients >= _rule_num(rule, "ratio_min_clients", 3)
+        and ratio >= _rule_num(rule, "min_ratio", 0.5)
+    ), ratio
+
+
+def _mass_disconnect_log(
+    rstate: _WifiRouter,
+    snap: WifiSnapshot,
+    lines: list[Any],
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    """At least ``min_clients`` (or ``min_ratio`` of the clients) leaving
+    within ``window`` s of router time, from AP-STA-DISCONNECTED lines."""
+    window_ms = int(_rule_num(rule, "window", 30) * 1000)
+    for ev in lines:
+        if (
+            ev.category == "wifi"
+            and ev.kind == "disconnected"
+            and ev.mac
+            and ev.time_ms > rstate.mass_after_ms
+        ):
+            rstate.downs.append((ev.time_ms, ev.mac, ev.interface))
+    if not rstate.downs:
+        return
+    rstate.downs.sort()
+    newest = rstate.downs[-1][0]
+    # keep what can still join a cluster with lines of the next read
+    best: tuple[int, int, int] | None = None  # (clients, start, end)
+    start = 0
+    for end in range(len(rstate.downs)):
+        while rstate.downs[end][0] - rstate.downs[start][0] > window_ms:
+            start += 1
+        macs = {m for _t, m, _i in rstate.downs[start : end + 1]}
+        if best is None or len(macs) > best[0]:
+            best = (len(macs), start, end)
+    assert best is not None
+    clients, first, last = best
+    base = max(rstate.client_counts, default=0)
+    hit, ratio = _mass_trigger(rule, clients, base)
+    if not hit:
+        rstate.downs = [d for d in rstate.downs if d[0] > newest - window_ms]
+        return
+    cluster = rstate.downs[first : last + 1]
+    end_ms = cluster[-1][0]
+    rstate.mass_after_ms = end_ms
+    rstate.downs = [d for d in rstate.downs if d[0] > end_ms]
+    reasons: Counter[str] = Counter()
+    for _t, mac, _i in cluster:
+        down = rstate.last_down.get(mac)
+        reasons[(down[2] if down else None) or "none"] += 1
+    ifaces = sorted({i for _t, _m, i in cluster if i})
+    bands = sorted({b for i in ifaces if (b := snap.context.iface(i)[0])})
+    hyps = [_hyp("radio_restart"), _hyp("interference"), _hyp("power_supply")]
+    if reasons.get("local_request", 0) * 2 >= clients:
+        hyps.insert(0, _hyp("steering"))
+    cause, status, causes = cause_list(hyps)
+    out.append(
+        Finding(
+            kind=WIFI_MASS_DISCONNECT_KIND,
+            category=Category.WIFI,
+            source=Source.HOSTAPD,
+            rule="wifi_mass_disconnect",
+            scope=Scope.ROUTER,
+            scope_key=router,
+            event=True,
+            count=clients,
+            affected=clients,
+            severity=Severity.WARNING,
+            cause=cause,
+            cause_status=status,
+            subject={"ifaces": ifaces, "bands": bands} if ifaces else {},
+            params={
+                "window_count": clients,
+                "window_s": round(window_ms / 1000),
+                "ratio": round(ratio, 2),
+                "reasons": dict(sorted(reasons.items())),
+                "causes": causes,
+            },
+        )
+    )
+
+
+def _fresh_elsewhere(state: WifiState, router: str, now: float) -> frozenset[str]:
+    """MACs in the recent client lists of the other routers."""
+    macs: set[str] = set()
+    for other, (ts, listed) in state.present.items():
+        if other != router and now - ts <= _PRESENT_MAX_AGE:
+            macs |= listed
+    return frozenset(macs)
+
+
+def _mass_disconnect_poll(
+    state: WifiState,
+    rstate: _WifiRouter,
+    snap: WifiSnapshot,
+    now: float,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    """Without a readable log: the client list shrank between two polls
+    (clients now on another router excluded). ``inferred``; a reboot poll
+    is left to the correlation (P5)."""
+    if (
+        snap.log_status == _LOG_STATUS_OK
+        or snap.rebooted
+        or rstate.clients is None
+        or snap.context.clients is None
+    ):
+        return
+    lost = (
+        rstate.clients
+        - set(snap.context.clients)
+        - _fresh_elsewhere(state, router, now)
+    )
+    hit, ratio = _mass_trigger(rule, len(lost), len(rstate.clients))
+    if not hit:
+        return
+    cause, status, causes = cause_list(
+        [_hyp("radio_restart"), _hyp("interference"), _hyp("power_supply")]
+    )
+    interval = snap.poll_interval or _DEFAULT_POLL_INTERVAL
+    out.append(
+        Finding(
+            kind=WIFI_MASS_DISCONNECT_KIND,
+            category=Category.WIFI,
+            source=Source.POLL,
+            rule="wifi_mass_disconnect",
+            scope=Scope.ROUTER,
+            scope_key=router,
+            event=True,
+            count=len(lost),
+            affected=len(lost),
+            severity=Severity.WARNING,
+            origin=Origin.INFERRED,
+            confidence=INFERRED_CONFIDENCE_CAP,
+            cause=cause,
+            cause_status=status,
+            params={
+                "window_count": len(lost),
+                "window_s": round(interval),
+                "ratio": round(ratio, 2),
+                "causes": causes,
+            },
+        )
+    )
+
+
+def _dhcp_after_connect(
+    state: WifiState,
+    snap: WifiSnapshot,
+    lines: list[Any],
+    now: float,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    """DHCPNAK / "no address available" within ``window`` s (router time)
+    after a connect of the same MAC anywhere in the fleet. Either side may
+    be read first (staggered log reads), so both are kept for a while."""
+    window_ms = int(_rule_num(rule, "window", 60) * 1000)
+    for ev in lines:
+        if not ev.mac or ev.time_ms <= 0:
+            continue
+        if ev.category == "wifi" and ev.kind == "connected":
+            conns = state.connects.setdefault(ev.mac, deque(maxlen=4))
+            conns.append((ev.time_ms, router))
+            fails = state.dhcp_fail.get(ev.mac, [])
+            for fail in list(fails):
+                if 0 <= fail[0] - ev.time_ms <= window_ms:
+                    fails.remove(fail)
+                    out.append(
+                        _dhcp_finding(
+                            state, snap, now, rule, ev.mac, ev.time_ms, router, fail
+                        )
+                    )
+            if not fails:
+                state.dhcp_fail.pop(ev.mac, None)
+        elif ev.category == "dhcp" and ev.kind in _DHCP_FAIL_KINDS:
+            fail = (ev.time_ms, router, ev.kind)
+            conn = next(
+                (
+                    c
+                    for c in reversed(state.connects.get(ev.mac, ()))
+                    if 0 <= ev.time_ms - c[0] <= window_ms
+                ),
+                None,
+            )
+            if conn is not None:
+                out.append(
+                    _dhcp_finding(
+                        state, snap, now, rule, ev.mac, conn[0], conn[1], fail
+                    )
+                )
+            else:
+                kept = state.dhcp_fail.setdefault(ev.mac, [])
+                kept.append(fail)
+                del kept[:-8]
+    for mac in list(state.dhcp_fail):
+        state.dhcp_fail[mac] = [
+            f
+            for f in state.dhcp_fail[mac]
+            if f[0] > _newest_ms(lines) - _DHCP_PAIR_KEEP_MS
+        ]
+        if not state.dhcp_fail[mac]:
+            del state.dhcp_fail[mac]
+
+
+def _newest_ms(lines: list[Any]) -> int:
+    return max((ev.time_ms for ev in lines), default=0)
+
+
+def _dhcp_finding(
+    state: WifiState,
+    snap: WifiSnapshot,
+    now: float,
+    rule: Mapping[str, Any],
+    mac: str,
+    connect_ms: int,
+    ap_router: str,
+    fail: tuple[int, str, str],
+) -> Finding:
+    subject, signal = snap.context.describe(mac)
+    if fail[2] == "no_address":
+        hyps = [_hyp("pool_exhausted"), _hyp("dhcp_server")]
+    else:
+        hyps = [_hyp("wrong_network"), _hyp("vlan")]
+    cause, status, causes = cause_list(hyps)
+    window = _rule_num(rule, "window", 60)
+    return Finding(
+        kind=WIFI_DHCP_AFTER_CONNECT_KIND,
+        category=Category.WIFI,
+        source=Source.LOG,
+        rule="wifi_dhcp_after_connect",
+        scope=Scope.CLIENT,
+        scope_key=mac,
+        event=True,
+        severity=Severity.WARNING,
+        cause=cause,
+        cause_status=status,
+        subject=subject,
+        signal=signal,
+        params={
+            "dhcp": fail[2],
+            "delay_s": round((fail[0] - connect_ms) / 1000),
+            "ap_router": ap_router,
+            "dhcp_router": fail[1],
+            "window_count": state.window_count(
+                "wifi_dhcp_after_connect", mac, now, 1, window
+            ),
+            "window_s": round(window),
+            "causes": causes,
+        },
+    )
+
+
+def _no_ip(
+    rstate: _WifiRouter,
+    snap: WifiSnapshot,
+    now: float,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    """``dhcp_health.client_dhcp_status`` per client (level 1 = no lease, no
+    ARP entry, no static host after DHCP_MISSING_AFTER_SECONDS). Unknown
+    without a usable fleet DHCP view (``fleet.dhcp_context`` None)."""
+    clients = snap.context.clients or {}
+    rstate.no_ip &= set(clients)
+    if snap.dhcp is None:
+        return
+    leases, arp, static = snap.dhcp
+    now_dt = datetime.fromtimestamp(now, UTC)
+    status = {
+        mac: client_dhcp_status(
+            mac, client.get("connected_since"), now_dt, leases, arp, static
+        )
+        for mac, client in clients.items()
+    }
+    missing = [mac for mac, s in status.items() if s == DHCP_MISSING]
+    warn = len(missing) >= _rule_num(rule, "warn_clients_per_ap", 3)
+    cause, cause_status, causes = cause_list(
+        [_hyp("dhcp_server"), _hyp("vlan"), _hyp("static_ip")]
+    )
+    for mac, value in status.items():
+        if value == DHCP_PENDING:
+            continue
+        no_ip = value == DHCP_MISSING
+        first = no_ip and mac not in rstate.no_ip
+        if no_ip:
+            rstate.no_ip.add(mac)
+        else:
+            rstate.no_ip.discard(mac)
+        subject, signal = snap.context.describe(mac)
+        out.append(
+            Finding(
+                kind=WIFI_NO_IP_KIND,
+                category=Category.WIFI,
+                source=Source.POLL,
+                rule="wifi_no_ip",
+                scope=Scope.CLIENT,
+                scope_key=mac,
+                value=1.0 if no_ip else 0.0,
+                event=first,
+                origin=Origin.INFERRED,
+                confidence=INFERRED_CONFIDENCE_CAP,
+                cause=cause if no_ip else None,
+                cause_status=cause_status if no_ip else None,
+                escalate=Severity.WARNING if no_ip and warn else None,
+                subject=subject,
+                signal=signal,
+                params={"clients_without_ip": len(missing), "causes": causes}
+                if first
+                else {},
+            )
+        )
+
+
+def _moves(
+    state: WifiState,
+    snap: WifiSnapshot,
+    now: float,
+    router: str,
+    rules: _RuleSet,
+    weak_dbm: float,
+    out: list[Finding],
+) -> None:
+    """Band change (same router) and AP change (other router) of a client
+    between two client lists. A client listed by two routers at once (the
+    old AP keeps a station until its inactivity timeout) is undecided until
+    one list drops it; then the change counts once. ``inferred``."""
+    clients = snap.context.clients or {}
+    state.present[router] = (now, frozenset(clients))
+    elsewhere = _fresh_elsewhere(state, router, now)
+    for mac, client in clients.items():
+        if mac in elsewhere:
+            continue
+        radio = client.get("radio")
+        iface = radio if isinstance(radio, str) and radio else None
+        band = snap.context.iface(iface)[0]
+        prev = state.loc.get(mac)
+        if prev is not None and prev.router == router and band is None:
+            band = prev.band
+        state.loc.pop(mac, None)
+        state.loc[mac] = _Loc(router, band, iface)
+        if prev is None:
+            continue
+        if prev.router != router:
+            seen = state.steer_seen.get(mac)
+            if seen is not None and now - seen <= _STEER_COVER:
+                continue  # usteer's view decides (observed)
+            out.append(
+                _roam_finding(
+                    state,
+                    snap,
+                    now,
+                    rules.get("wifi_roam_flapping"),
+                    weak_dbm,
+                    mac,
+                    prev.router,
+                    router,
+                    Source.POLL,
+                )
+            )
+        elif prev.band and band and prev.band != band:
+            out.append(
+                _band_finding(
+                    state,
+                    snap,
+                    now,
+                    rules.get("wifi_band_flapping"),
+                    weak_dbm,
+                    mac,
+                    prev.band,
+                    band,
+                )
+            )
+
+
+def _band_finding(
+    state: WifiState,
+    snap: WifiSnapshot,
+    now: float,
+    rule: Mapping[str, Any],
+    weak_dbm: float,
+    mac: str,
+    before: str,
+    after: str,
+) -> Finding:
+    subject, signal = snap.context.describe(mac)
+    cause, status, causes = cause_list(
+        [_hyp("band_steering"), _weak_cause(signal, weak_dbm), _hyp("client_driver")]
+    )
+    window = _rule_num(rule, "window", 600)
+    return Finding(
+        kind=WIFI_BAND_CHANGE_KIND,
+        category=Category.WIFI,
+        source=Source.POLL,
+        rule="wifi_band_flapping",
+        scope=Scope.CLIENT,
+        scope_key=mac,
+        event=True,
+        origin=Origin.INFERRED,
+        confidence=INFERRED_CONFIDENCE_CAP,
+        cause=cause,
+        cause_status=status,
+        subject=subject,
+        signal=signal,
+        params={
+            "from_band": before,
+            "to_band": after,
+            "window_count": state.window_count(
+                "wifi_band_flapping", mac, now, 1, window
+            ),
+            "window_s": round(window),
+            "causes": causes,
+        },
+    )
+
+
+def _roam_finding(
+    state: WifiState,
+    snap: WifiSnapshot,
+    now: float,
+    rule: Mapping[str, Any],
+    weak_dbm: float,
+    mac: str,
+    before: str,
+    after: str,
+    source: Source,
+) -> Finding:
+    subject, signal = snap.context.describe(mac)
+    cause, status, causes = cause_list(
+        [
+            _weak_cause(signal, weak_dbm),
+            _hyp("overlapping_coverage"),
+            _hyp("steering"),
+        ]
+    )
+    window = _rule_num(rule, "window", 600)
+    observed = source is Source.USTEER
+    return Finding(
+        kind=WIFI_ROAM_KIND,
+        category=Category.WIFI,
+        source=source,
+        rule="wifi_roam_flapping",
+        scope=Scope.CLIENT,
+        scope_key=mac,
+        event=True,
+        origin=Origin.OBSERVED if observed else Origin.INFERRED,
+        confidence=1.0 if observed else INFERRED_CONFIDENCE_CAP,
+        cause=cause,
+        cause_status=status,
+        subject=subject,
+        signal=signal,
+        params={
+            "from_router": before,
+            "to_router": after,
+            "window_count": state.window_count(
+                "wifi_roam_flapping", mac, now, 1, window
+            ),
+            "window_s": round(window),
+            "causes": causes,
+        },
+    )
+
+
+def _steer_node_router(node: str, router: str, hosts: Mapping[str, str]) -> str | None:
+    """Entry id of a usteer node: local nodes belong to the answering router,
+    ``<ip>#hostapd.<if>`` to the router configured with that address."""
+    if "#" not in node:
+        return router
+    return hosts.get(node.split("#", 1)[0].strip().lower())
+
+
+def _steer_moves(
+    state: WifiState,
+    snap: WifiSnapshot,
+    now: float,
+    router: str,
+    rule: Mapping[str, Any],
+    weak_dbm: float,
+    out: list[Finding],
+) -> None:
+    """AP changes from usteer's fleet view (``observed``). Only clients with
+    exactly one connected node whose router is known take part; the views of
+    several usteer routers share one location, so a change counts once."""
+    for mac, nodes in (snap.usteer or {}).items():
+        if not isinstance(mac, str) or len(nodes) != 1:
+            continue
+        ap = _steer_node_router(nodes[0], router, snap.hosts)
+        if ap is None:
+            continue
+        mac = mac.upper()
+        state.steer_seen[mac] = now
+        prev = state.steer_loc.get(mac)
+        state.steer_loc[mac] = ap
+        if prev is not None and prev != ap:
+            out.append(
+                _roam_finding(
+                    state, snap, now, rule, weak_dbm, mac, prev, ap, Source.USTEER
+                )
+            )
+
+
+def _weak_clients(
+    rstate: _WifiRouter,
+    snap: WifiSnapshot,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    """Level per radio: clients at or below ``weak_dbm``; a weak client
+    counts until it is above ``clear_dbm`` again (hysteresis). The rule's
+    ``hold`` keeps the count up for 600 s before an incident opens."""
+    weak_dbm = _rule_num(rule, "weak_dbm", -75)
+    clear_dbm = _rule_num(rule, "clear_dbm", -70)
+    counts: dict[str, int] = {
+        phy: 0 for _band, _ssid, phy in snap.context.ifaces.values()
+    }
+    bands: dict[str, set[str]] = {}
+    weak: set[str] = set()
+    for mac, client in (snap.context.clients or {}).items():
+        signal = _measured_signal(client.get("signal"))
+        radio = client.get("radio")
+        band, _ssid, phy = snap.context.iface(radio if isinstance(radio, str) else None)
+        if phy is None:
+            continue
+        counts.setdefault(phy, 0)
+        if band:
+            bands.setdefault(phy, set()).add(band)
+        if signal is None:
+            continue
+        if signal <= weak_dbm or (mac in rstate.weak and signal <= clear_dbm):
+            weak.add(mac)
+            counts[phy] += 1
+    rstate.weak = weak
+    cause, status, _causes = cause_list([_hyp("coverage")])
+    for phy, n in sorted(counts.items()):
+        subject: dict[str, Any] = {"radio": phy}
+        if bands.get(phy):
+            subject["bands"] = sorted(bands[phy])
+        out.append(
+            Finding(
+                kind=WIFI_WEAK_KIND,
+                category=Category.WIFI,
+                source=Source.POLL,
+                rule="wifi_weak_clients",
+                scope=Scope.RADIO,
+                scope_key=f"{router}:radio:{phy}",
+                value=float(n),
+                origin=Origin.INFERRED,
+                confidence=INFERRED_CONFIDENCE_CAP,
+                cause=cause if n else None,
+                cause_status=status if n else None,
+                subject=subject,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class WifiLogMeta:
+    """Enrichment of a stored Wi-Fi log line (``NetEvent`` fields)."""
+
+    subject: dict[str, Any]
+    signal: int | None = None
+    cause: str | None = None
+    cause_status: CauseStatus | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+    # failed authentication: a new attempt (not a second line of one)
+    attempt: bool = False
+    attempt_key: str | None = None
+
+
+def wifi_log_meta(
+    state: WifiState,
+    context: WifiContext,
+    event: Any,
+    router: str,
+    now: float,
+    thresholds: Mapping[str, Any],
+) -> WifiLogMeta:
+    """SSID, band, signal, causes and window count of a stored Wi-Fi line."""
+    rules = _RuleSet(thresholds)
+    weak_dbm = _rule_num(rules.get("wifi_weak_clients"), "weak_dbm", -75)
+    subject, signal = context.describe(event.mac, event.interface)
+    params: dict[str, Any] = {}
+    if getattr(event, "reason", None):
+        params["reason"] = event.reason
+    key = f"{event.category}.{event.kind}"
+    hyps: list[tuple[str, CauseStatus]] = []
+    attempt = False
+    attempt_key: str | None = None
+    if key in WIFI_AUTH_KINDS:
+        attempt_key = event.mac or f"{router}:backhaul:{event.interface or '?'}"
+        last = state.auth_last.get(attempt_key)
+        attempt = (
+            event.time_ms <= 0
+            or last is None
+            or abs(event.time_ms - last) > _AUTH_ATTEMPT_GAP_MS
+        )
+        if event.time_ms > 0:
+            state.auth_last.pop(attempt_key, None)
+            state.auth_last[attempt_key] = event.time_ms
+        window = _rule_num(rules.get("wifi_auth_failures"), "window", 600)
+        params["window_count"] = state.window_count(
+            "wifi_auth_failures", attempt_key, now, 1 if attempt else 0, window
+        )
+        params["window_s"] = round(window)
+        hyps = _auth_hypotheses(key, event.reason, signal, weak_dbm)
+    elif key == WIFI_ASSOC_REJECTED_KIND:
+        if event.reason == "max_sta":
+            hyps = [("ap_full", CauseStatus.CONFIRMED)]
+        elif event.reason == "blocked":
+            hyps = [("mac_filter", CauseStatus.CONFIRMED)]
+        else:
+            hyps = [_hyp("ap_full"), _weak_cause(signal, weak_dbm)]
+    cause, status, causes = cause_list(hyps)
+    if causes:
+        params["causes"] = causes
+    return WifiLogMeta(
+        subject=subject,
+        signal=signal,
+        cause=cause,
+        cause_status=status,
+        params=params,
+        attempt=attempt,
+        attempt_key=attempt_key,
+    )
+
+
+def _auth_hypotheses(
+    key: str, reason: str | None, signal: int | None, weak_dbm: float
+) -> list[tuple[str, CauseStatus]]:
+    if key == WIFI_BACKHAUL_AUTH_KIND:
+        return [_hyp("psk_wrong"), _hyp("uplink_config")]
+    if key == "wifi.sae_failed":
+        return [_hyp("psk_wrong"), _hyp("sae_mismatch"), _hyp("client_driver")]
+    if reason == "timeout":
+        return [
+            _weak_cause(signal, weak_dbm),
+            _hyp("client_power_save"),
+            _hyp("client_driver"),
+        ]
+    return [_hyp("psk_wrong"), _hyp("client_driver"), _weak_cause(signal, weak_dbm)]
+
+
+def wifi_auth_evidence(
+    state: WifiState,
+    events: Iterable[NetEvent],
+    attempts: Mapping[str, str],
+    now: float,
+    router: str,
+    thresholds: Mapping[str, Any],
+) -> list[Evidence]:
+    """Evidence for ``wifi_auth_failures`` (per client, per uplink) and the
+    fleet-wide ``wifi_auth_wave`` from the stored failure lines of a fresh
+    log read. ``attempts`` maps the ids of events that start an attempt to
+    their attempt key. The wave only feeds the machine while its window
+    holds failures of at least ``min_sources`` clients; the failures of the
+    window not fed yet are fed then at once."""
+    out: list[Evidence] = []
+    for event in events:
+        key = attempts.get(event.id)
+        if key is None or event.kind not in WIFI_AUTH_KINDS:
+            continue
+        mac = event.subject.get("mac")
+        out.append(
+            Evidence.from_event(
+                event,
+                "wifi_auth_failures",
+                Scope.CLIENT if mac else Scope.ROUTER,
+                key,
+            )
+        )
+        if isinstance(mac, str) and mac:
+            state.wave.append([now, mac, False, router])
+    rule = _RuleSet(thresholds).get("wifi_auth_wave")
+    window = _rule_num(rule, "window", 600)
+    recent = [e for e in state.wave if e[0] > now - window]
+    sources = {e[1] for e in recent}
+    unfed = [e for e in recent if not e[2]]
+    if unfed and len(sources) >= _rule_num(rule, "min_sources", 3):
+        for entry in unfed:
+            entry[2] = True
+        cause, status, _causes = cause_list([_hyp("psk_changed"), _hyp("attack")])
+        # one evidence per router, so the incident lists every router
+        per_router = Counter(e[3] for e in unfed)
+        for source, count in per_router.items():
+            out.append(
+                Evidence(
+                    type="wifi_auth_wave",
+                    scope_key=WIFI_AUTH_WAVE_KEY,
+                    scope=Scope.FLEET,
+                    kind="wifi.auth_wave",
+                    count=count,
+                    router=source,
+                    affected=len(sources),
+                    cause=cause,
+                    cause_status=status,
+                )
+            )
+    return out

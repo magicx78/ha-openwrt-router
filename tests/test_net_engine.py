@@ -64,6 +64,7 @@ from custom_components.openwrt_router.net_engine import (
 )
 from custom_components.openwrt_router.net_events import (
     Category,
+    CauseStatus,
     IncidentStatus,
     NetEvent,
     Scope,
@@ -229,7 +230,8 @@ async def test_save_and_restart_restore_everything(disk: FakeDisk) -> None:
             (
                 wifi(WIFI_PSK_MISMATCH, 1),
                 wifi(WIFI_INACTIVITY, 2),
-                wifi(WIFI_CONNECTED, 3),
+                # another client: MAC1 back on phy1-ap0 would be a reconnect (P4)
+                wifi(WIFI_CONNECTED, 3, MAC2),
             )
         ),
         T0,
@@ -787,7 +789,8 @@ async def test_diagnostics_show_counts_only(
                     router=entry.entry_id,
                     count=3,
                     kind="wifi.psk_mismatch",
-                    event_id=f"{entry.entry_id}:1",
+                    # not ":1": the engine already fed that line itself (P4)
+                    event_id=f"{entry.entry_id}:99",
                 )
             ],
         )
@@ -865,6 +868,7 @@ def test_coordinator_hands_over_log_events_and_cursor_facts() -> None:
         first_time_ms=MS0 + 1000,
         last_id=3,
         last_time_ms=MS0 + 3000,
+        new_lines=3,
     )
 
     data = OpenWrtCoordinatorData()
@@ -899,8 +903,44 @@ async def test_engine_adds_no_router_calls() -> None:
             _log_line(3, _PSK),
             _log_line(4, _INACTIVE),
         ],
-        [_log_line(i, _CROND) for i in range(1, 6)],
+        # P4: live line shapes (anonymised) on the third read; MAC1 comes
+        # back on phy1-ap0 (a reconnect), the rest is count-only or noise.
+        [
+            *(_log_line(i, _CROND) for i in range(1, 5)),
+            _log_line(
+                5,
+                f"hostapd: phy1-ap0: STA {MAC1} IEEE 802.11: deauthenticated "
+                "due to local deauth request",
+            ),
+            _log_line(6, f"hostapd: phy1-ap0: AP-STA-DISCONNECTED {MAC1}"),
+            _log_line(7, _CONNECTED),
+            _log_line(8, f"hostapd: phy1-ap0: EAPOL-4WAY-HS-COMPLETED {MAC1}"),
+            _log_line(9, f"hostapd: phy0-ap0: STA {MAC2} IEEE 802.11: disassociated"),
+            _log_line(10, f"hostapd: phy0-ap0: Prune association for {MAC2}"),
+            _log_line(
+                11,
+                f"usteer: station {MAC2} disconnected from node hostapd.phy0-ap0",
+            ),
+            _log_line(12, "hostapd: Unexpected Link measurement report, token 7"),
+        ],
     ]
+    # P4: hostapd get_clients in the live form (rate kept, no connected_time)
+    clients = {
+        "freq": 5180,
+        "clients": {
+            MAC1: {
+                "auth": True,
+                "assoc": True,
+                "authorized": True,
+                "aid": 1,
+                "bytes": {"rx": 1000, "tx": 2000},
+                "packets": {"rx": 10, "tx": 20},
+                "airtime": {"rx": 5, "tx": 6},
+                "rate": {"rx": 433300, "tx": 866700},
+                "signal": -80,
+            }
+        },
+    }
 
     # P3: the same replies also carry what the infrastructure detectors read
     # (localtime/uptime, service PIDs, carrier and error counters). Poll 2
@@ -968,6 +1008,7 @@ async def test_engine_adds_no_router_calls() -> None:
                     ("system", "info"): system_info,
                     ("service", "list"): service_list,
                     ("network.device", "status"): device_status,
+                    ("hostapd.phy1-ap0", "get_clients"): clients,
                 },
             ),
             patch(
@@ -994,10 +1035,22 @@ async def test_engine_adds_no_router_calls() -> None:
         "system.service_restart",
         "wifi.inactivity_timeout",
         "wifi.psk_mismatch",
+        "wifi.reconnect",
     ]
     [down] = [e for e in engine.ring if e.kind == "lan.port_down"]
     assert down.subject == {"port": "wan"}
     assert engine.counters.hourly("r1", "lan.port_down", time.time(), 1) == 2
+    # P4: the reconnect carries the measured signal (rate kept by the API)
+    [reconnect] = [e for e in engine.ring if e.kind == "wifi.reconnect"]
+    assert reconnect.subject["mac"] == MAC1.upper()
+    assert reconnect.signal == -80
+    assert reconnect.cause == "weak_signal"
+    assert reconnect.cause_status is CauseStatus.CONFIRMED
+    assert reconnect.params["reasons"] == ["local_request"]
+    now = time.time()
+    for kind in ("wifi.deauth", "wifi.disassoc", "wifi.handshake_completed"):
+        assert engine.counters.hourly("r1", kind, now, 1) >= 1
+    assert engine.counters.hourly("r1", "wifi.usteer_disconnected", now, 1) == 1
 
 
 def test_machine_remove_router_keeps_incidents_shared_with_other_routers() -> None:
