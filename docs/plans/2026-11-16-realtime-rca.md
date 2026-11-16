@@ -621,7 +621,15 @@ Pilot-Session statt HA-Passwort.
 
 **Stand nach dem Rückbau:** ACL auf beiden Routern bytegleich mit dem Original. Die Pilot-Sessions sind
 gelöscht, und die Streams sind beendet. HA pollt beide Router weiter im 61-s-Takt (CPU-Sensor-Historie bis
-18:47); beide bleiben `online`. Die Backups unter `/etc/` bleiben liegen, bis jemand sie freigibt.
+18:47); beide bleiben `online`.
+
+**Backups gelöscht** (Freigabe des Nutzers, direkt in RT-1 bestätigt): 18:51:18 auf ap4 und ap6
+`rm /etc/ha-openwrt-router.json.bak-rt-20261116T182300`. Vorher geprüft: Die Backups und die lokalen
+Kopien `ap4.acl.orig.json` und `ap6.acl.orig.json` im Scratchpad haben denselben sha256 `c7740216…1df1`.
+Die aktive ACL ist danach unverändert `c7740216…`.
+**Rückweg:** `ssh apX 'cat > /etc/ha-openwrt-router.json.bak-rt-20261116T182300' < apX.acl.orig.json`.
+Die Kopien im Scratchpad gehen mit dem Ende der Sitzung verloren. Sie sind aber bytegleich mit der
+aktiven ACL und mit `RPCD_ACL_CONTENT` v8.
 
 ### 9.4 Ergebnis P0 – **Abbruch: uhttpd stürzt ab**
 
