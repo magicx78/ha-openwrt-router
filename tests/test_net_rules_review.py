@@ -420,7 +420,8 @@ def _stored_incident(type_: str, last_seen: float) -> dict[str, Any]:
 
 
 def test_p2_8_loaded_incident_without_rule_auto_resolves() -> None:
-    for type_ in ("router_unreachable", "lan_unreachable", "something_new"):
+    # router_unreachable / lan_unreachable have rules since P5 (stay_open)
+    for type_ in ("something_new", "removed_rule"):
         m = AlarmMachine.from_dict(_stored_incident(type_, 100))
         assert feed(m, 100 + 1799) == [], type_
         out = feed(m, 100 + 1800)
@@ -428,9 +429,17 @@ def test_p2_8_loaded_incident_without_rule_auto_resolves() -> None:
         assert out[0].reason == "quiet"
 
 
+def test_p5_outage_incidents_stay_open_without_data() -> None:
+    # A router that is away sends no data: no auto-resolve (stay_open).
+    for type_ in ("router_unreachable", "lan_unreachable"):
+        m = AlarmMachine.from_dict(_stored_incident(type_, 100))
+        assert feed(m, 100 + 7 * 86400) == [], type_
+        assert m.incidents()[0].status is IncidentStatus.ACTIVE
+
+
 def test_p2_8_evidence_for_a_type_without_rule_is_still_ignored() -> None:
     m = AlarmMachine()
-    assert feed(m, 0, ev("router_unreachable", "r1")) == []
+    assert feed(m, 0, ev("something_new", "r1")) == []
     assert m.incidents() == []
 
 

@@ -11,8 +11,16 @@ whole fleet.
 Scope of this module (plan 2026-11-16, P2/P3): collecting and persisting,
 and running the infrastructure detectors (``net_rules.detect_infrastructure``)
 on every poll; their findings become events and evidence for the alarm
-machine. The WLAN detectors (P4), correlation (P5), score, entities and bus
-events (P6) build on it. The engine never talks to a router: it only reads
+machine. The WLAN detectors (P4) and the correlation (P5) run here too;
+score, entities and bus events (P6) build on it.
+
+Correlation (P5): the engine follows ``fleet.FleetOutageTracker`` (observer
+hook) and turns its state into ``router_unreachable`` / ``lan_unreachable``
+incidents. After every machine step (a poll of any router, an outage start
+or end) it builds the router tree from LLDP and ``trunk_port_map``
+(``net_rules.build_topology``, remembered per router while it is loaded)
+and links follow-up incidents and events to their root cause
+(``AlarmMachine.correlate``). The engine never talks to a router: it only reads
 data the coordinator already has, so a poll costs exactly the same router
 calls. The detectors' comparison state per router lives in memory only; a
 reload or HA restart starts it fresh (first poll = baseline, no events).
@@ -58,7 +66,7 @@ import os
 import shutil
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import timedelta
 from typing import Any
 
@@ -69,6 +77,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import (
     DOMAIN,
+    ERROR_TYPE_AUTH,
     INTEL_MAX_STORE_BYTES,
     INTEL_PRUNE_INTERVAL_SECONDS,
     INTEL_SAVE_DELAY_SECONDS,
@@ -80,7 +89,7 @@ from .const import (
     LLDP_STATUS_OK,
 )
 from .coordinator import LogBatch
-from .fleet import dhcp_context
+from .fleet import async_get_outage_tracker, dhcp_context
 from .log_parser import (
     CATEGORY_DFS,
     CATEGORY_DHCP,
@@ -95,6 +104,7 @@ from .log_parser import (
 from .net_events import (
     CLOCK_SKEW_LIMIT,
     Category,
+    CauseStatus,
     EventCounters,
     EventRing,
     IncidentStatus,
@@ -106,16 +116,25 @@ from .net_events import (
 )
 from .net_rules import (
     DECLINE_KIND,
+    LAN_REACHABLE_KIND,
+    LAN_UNREACHABLE_KEY,
+    LAN_UNREACHABLE_KIND,
     LOG_EVENT_META,
+    ROUTER_REACHABLE_KIND,
+    ROUTER_UNREACHABLE_KIND,
     WIFI_LOG_RULES,
     AlarmMachine,
     Evidence,
     Finding,
     InfraSnapshot,
     InfraState,
+    RouterLinks,
+    Topology,
+    Uplink,
     WifiContext,
     WifiSnapshot,
     WifiState,
+    build_topology,
     decline_cause,
     detect_infrastructure,
     detect_wifi,
@@ -137,6 +156,8 @@ _DAY = 86400
 _OPEN_STATES = (IncidentStatus.ACTIVE, IncidentStatus.ACKNOWLEDGED)
 LOG_GAP_KIND = "system.log_gap"
 _REBOOT_KIND = "system.reboot"
+# ``NetEvent.router`` of the fleet-wide outage events (no single router).
+FLEET_ROUTER = "fleet"
 
 # Log event category -> NetEvent category. DFS radar/CAC lines are radio
 # events, so they count as Wi-Fi.
@@ -168,6 +189,7 @@ async def async_get_net_intelligence(hass: HomeAssistant) -> NetIntelligence:
     if engine is None:
         engine = NetIntelligence(hass)
         hass.data[_DATA_KEY] = engine
+        engine.attach_outages(async_get_outage_tracker(hass))
     await engine.async_load()
     return engine
 
@@ -285,6 +307,16 @@ class NetIntelligence:
         self._hosts: dict[str, str] = {}
         self._wifi_attempts: dict[str, str] = {}
         self._last_prune: float | None = None
+        # P5 (in memory): the outage tracker followed, the routers and the
+        # fleet outage last seen down (state change -> event), the routers
+        # of the fleet outage, the last uplink per router and the topology.
+        self._outages: Any = None
+        self._unsub_outages: Callable[[], None] | None = None
+        self._down: set[str] = set()
+        self._lan_down = False
+        self._lan_routers: list[str] = []
+        self._uplinks: dict[str, Uplink] = {}
+        self._topology = Topology()
         # True while a delayed write is scheduled: HA's async_delay_save
         # moves a pending write back on every call, so we call it once.
         self._save_pending = False
@@ -390,12 +422,45 @@ class NetIntelligence:
     def close(self) -> None:
         """The last router is gone: ignore late polls, schedule no writes."""
         self._closed = True
+        if self._unsub_outages is not None:
+            self._unsub_outages()
+            self._unsub_outages = None
+        self._outages = None
         self._routers.clear()
         self._last_data.clear()
         self._infra.clear()
         self._identity.clear()
         self._wifi = WifiState()
         self._hosts.clear()
+        self._down.clear()
+        self._lan_down = False
+        self._lan_routers = []
+        self._uplinks.clear()
+        self._topology = Topology()
+
+    @callback
+    def attach_outages(self, tracker: Any) -> None:
+        """Follow the fleet outage tracker: every outage start and end
+        runs the alarm machine and the correlation (P5)."""
+        if self._unsub_outages is not None:
+            self._unsub_outages()
+        self._outages = tracker
+        self._unsub_outages = tracker.add_listener(self._async_outage_changed)
+
+    @callback
+    def _async_outage_changed(self) -> None:
+        """Outage observer; never raises into the tracker."""
+        if self._closed or not self._loaded:
+            return
+        try:
+            now = self._sync(time.time(), time.monotonic())
+            self._run_machine(now, [])
+            self.schedule_save()
+        except Exception:
+            _LOGGER.warning(
+                "Network intelligence could not process an outage change",
+                exc_info=True,
+            )
 
     @callback
     def unregister(self, entry_id: str) -> None:
@@ -406,6 +471,8 @@ class NetIntelligence:
         self._identity.pop(entry_id, None)
         self._wifi.forget(entry_id)
         self._hosts.pop(entry_id, None)
+        self._down.discard(entry_id)
+        self._uplinks.pop(entry_id, None)
 
     def remove_router(self, entry_id: str) -> bool:
         """Forget all data of a router; True if anything was removed."""
@@ -484,16 +551,7 @@ class NetIntelligence:
             return 0
         self._last_data[entry_id] = data
         self._update_identity(entry_id, data, host)
-        step = self.machine.sync_clock(now, mono)
-        if step.shift:
-            self.ring.shift(step.shift)
-            for state in self._infra.values():
-                state.shift(step.shift)
-            self._wifi.shift(step.shift)
-        if self.machine.prune_held:
-            for state in self._infra.values():
-                state.clock_jumped()
-        now = step.now
+        now = self._sync(now, mono)
         log_events = getattr(data, "new_log_events", ())
         if not isinstance(log_events, (tuple, list)):
             log_events = ()
@@ -541,6 +599,7 @@ class NetIntelligence:
             fresh,
             log_times=_log_times(batch, mark_before, accepted) if fresh else (),
             poll_interval=interval,
+            uplink_ports=self._topology.ports_of(entry_id),
         )
         findings = self._infra_findings(entry_id, snapshot, now)
         stored += self._store_findings(entry_id, findings, now, evidence)
@@ -562,11 +621,199 @@ class NetIntelligence:
             evidence,
         )
         evidence.extend(self._wifi_holds(entry_id, now, context))
-        self.machine.update(now, evidence)
+        stored += self._run_machine(now, evidence)
         self._prune(now)
         if stored or self._log_marks.get(entry_id) != mark_before:
             self.schedule_save()
         return stored
+
+    def _sync(self, now: float, mono: float | None) -> float:
+        """Advance the machine clock; move or reset the detector state on a
+        clock jump; return the time to use for this step."""
+        step = self.machine.sync_clock(now, mono)
+        if step.shift:
+            self.ring.shift(step.shift)
+            for state in self._infra.values():
+                state.shift(step.shift)
+            self._wifi.shift(step.shift)
+        if self.machine.prune_held:
+            for state in self._infra.values():
+                state.clock_jumped()
+        return step.now
+
+    def _run_machine(self, now: float, evidence: list[Evidence]) -> int:
+        """Outage evidence, machine step, topology, correlation; return the
+        number of stored (outage) events."""
+        stored, outage = self._outage_evidence(now)
+        self.machine.update(now, [*evidence, *outage])
+        if self._lan_down:
+            self.machine.set_routers(
+                "lan_unreachable", LAN_UNREACHABLE_KEY, self._lan_routers
+            )
+        self._topology = self._build_topology()
+        result = self.machine.correlate(now, self._topology, self.ring)
+        self.ring.set_parents(result.events)
+        return stored
+
+    def _outage_evidence(self, now: float) -> tuple[int, list[Evidence]]:
+        """Evidence for ``router_unreachable`` / ``lan_unreachable`` from
+        the outage tracker; stores an event on every change.
+
+        A loaded router is down while the tracker lists it past the failure
+        threshold and it is reported, part of the fleet outage, or its
+        incident is already open (after a fleet outage ends the routers
+        still away get a new settle window: their incident stays). Auth
+        errors are no outage. A router without a loaded entry keeps its
+        open incident unchanged (unknown).
+        """
+        tracker = self._outages
+        if tracker is None:
+            return 0, []
+        view = tracker.snapshot()
+        fleet_since = view.fleet_since
+        open_routers = {
+            key for _t, _s, key in self.machine.open_keys(("router_unreachable",))
+        }
+        down: dict[str, Any] = {}
+        for router in self._routers:
+            outage = view.down.get(router)
+            if outage is None or outage.error_type == ERROR_TYPE_AUTH:
+                continue
+            if outage.reported or fleet_since is not None or router in open_routers:
+                down[router] = outage
+        stored = 0
+        evidence: list[Evidence] = []
+        for router in sorted(self._routers):
+            outage = down.get(router)
+            event: NetEvent | None = None
+            if (outage is not None) != (router in self._down):
+                event = self._outage_event(
+                    router,
+                    ROUTER_UNREACHABLE_KIND if outage else ROUTER_REACHABLE_KIND,
+                    now,
+                    Severity.WARNING if outage else Severity.INFO,
+                    {"error_type": outage.error_type} if outage else {},
+                )
+                stored += 1
+            if outage is not None:
+                self._down.add(router)
+                evidence.append(
+                    Evidence(
+                        type="router_unreachable",
+                        scope_key=router,
+                        scope=Scope.ROUTER,
+                        kind=ROUTER_UNREACHABLE_KIND,
+                        event_id=event.id if event else None,
+                        value=1.0,
+                        router=router,
+                        cause="router_unreachable",
+                        cause_status=CauseStatus.CONFIRMED,
+                        since=outage.since.timestamp(),
+                    )
+                )
+            else:
+                self._down.discard(router)
+                if router in open_routers:
+                    evidence.append(
+                        Evidence(
+                            type="router_unreachable",
+                            scope_key=router,
+                            kind=ROUTER_REACHABLE_KIND,
+                            value=0.0,
+                            router=router,
+                        )
+                    )
+        lan = fleet_since is not None
+        lan_open = bool(self.machine.open_keys(("lan_unreachable",)))
+        event = None
+        if lan != self._lan_down:
+            event = self._outage_event(
+                FLEET_ROUTER,
+                LAN_UNREACHABLE_KIND if lan else LAN_REACHABLE_KIND,
+                now,
+                Severity.CRITICAL if lan else Severity.INFO,
+                {"routers": len(down)} if lan else {},
+            )
+            stored += 1
+        self._lan_down = lan
+        self._lan_routers = sorted(down) if lan else []
+        if lan:
+            evidence.append(
+                Evidence(
+                    type="lan_unreachable",
+                    scope_key=LAN_UNREACHABLE_KEY,
+                    scope=Scope.FLEET,
+                    kind=LAN_UNREACHABLE_KIND,
+                    event_id=event.id if event else None,
+                    value=1.0,
+                    cause="lan_unreachable",
+                    cause_status=CauseStatus.CONFIRMED,
+                    since=fleet_since.timestamp(),  # type: ignore[union-attr]
+                )
+            )
+        elif lan_open:
+            evidence.append(
+                Evidence(
+                    type="lan_unreachable",
+                    scope_key=LAN_UNREACHABLE_KEY,
+                    scope=Scope.FLEET,
+                    kind=LAN_REACHABLE_KIND,
+                    value=0.0,
+                )
+            )
+        return stored, evidence
+
+    def _outage_event(
+        self,
+        router: str,
+        kind: str,
+        now: float,
+        severity: Severity,
+        params: dict[str, Any],
+    ) -> NetEvent:
+        self._seq += 1
+        event = NetEvent(
+            id=f"{router}:{self._seq}",
+            ts=now,
+            router=router,
+            category=Category.SYSTEM,
+            kind=kind,
+            origin=Origin.OBSERVED,
+            source=Source.FLEET,
+            severity=severity,
+            msg_key=kind,
+            params=params,
+        )
+        self.ring.add(event)
+        if router != FLEET_ROUTER:
+            self.counters.add(router, kind, now)
+        return event
+
+    def _build_topology(self) -> Topology:
+        """Router tree from the last data of the loaded routers."""
+        links: dict[str, RouterLinks] = {}
+        for router in self._routers:
+            data = self._last_data.get(router)
+            lldp = getattr(data, "lldp_neighbors", None)
+            trunk = getattr(data, "trunk_port_map", None)
+            links[router] = RouterLinks(
+                ids=self._identity.get(router, frozenset()),
+                host=self._hosts.get(router),
+                lldp=tuple(n for n in lldp if isinstance(n, dict))
+                if isinstance(lldp, list)
+                else (),
+                trunk={
+                    ip: port
+                    for ip, port in trunk.items()
+                    if isinstance(ip, str) and isinstance(port, str)
+                }
+                if isinstance(trunk, dict)
+                else {},
+                gateway=router in self._wan_gateways,
+            )
+        topology = build_topology(links, self._uplinks)
+        self._uplinks = dict(topology.uplinks)
+        return topology
 
     def _ingest_log(
         self,
@@ -1002,7 +1249,7 @@ class NetIntelligence:
             "settings": self.settings,
             "seq": self._seq,
             "events": self.ring.to_list(compact=True),
-            "machine": self.machine.to_dict(),
+            "machine": self.machine.to_dict(compact=True),
             "counters": self.counters.to_dict(),
             "log_marks": self._log_marks,
             "wan_gateways": sorted(self._wan_gateways),
@@ -1085,6 +1332,7 @@ def infra_snapshot(
     *,
     log_times: tuple[float, ...] = (),
     poll_interval: float | None = None,
+    uplink_ports: frozenset[str] = frozenset(),
 ) -> InfraSnapshot:
     """Read the detector inputs from coordinator data; never raises.
 
@@ -1139,6 +1387,7 @@ def infra_snapshot(
         log_fetched_at=float(fetched) if _finite(fetched) else None,
         log_times=log_times,
         poll_interval=float(poll_interval) if _positive(poll_interval) else None,
+        uplink_ports=uplink_ports,
     )
 
 

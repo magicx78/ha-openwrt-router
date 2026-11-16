@@ -12,6 +12,9 @@ settle window and then classifies the outage:
 
 Both start and end are also fired as ``openwrt_router_outage_event``.
 Auth errors are never bundled — they are a per-router credential problem.
+Observers (the network intelligence engine) follow every start and end via
+``add_listener`` and read the state with ``snapshot``; neither changes the
+tracker's behaviour.
 
 Channel plan: ``collect_radios`` gathers the radios of all reachable routers
 for ``channel_plan.analyze``; ``ChannelPlanMonitor`` raises one
@@ -22,7 +25,7 @@ polls in a row.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -80,6 +83,24 @@ class _Outage:
     reported: bool = False  # per-router issue + "down" event already emitted
 
 
+@dataclass(frozen=True)
+class RouterOutage:
+    """Read-only copy of one router's outage (``FleetOutageTracker.snapshot``)."""
+
+    since: datetime
+    error_type: str | None
+    reported: bool
+
+
+@dataclass(frozen=True)
+class OutageView:
+    """Read-only state of the tracker: the fleet outage start (None when
+    there is none) and the routers past the failure threshold."""
+
+    fleet_since: datetime | None
+    down: Mapping[str, RouterOutage]
+
+
 @callback
 def async_get_outage_tracker(hass: HomeAssistant) -> FleetOutageTracker:
     """Return the per-HA-instance tracker, creating it on first use."""
@@ -98,6 +119,7 @@ class FleetOutageTracker:
         self._down: dict[str, _Outage] = {}
         self._fleet_since: datetime | None = None
         self._cancel_eval: CALLBACK_TYPE | None = None
+        self._listeners: list[Callable[[], None]] = []
 
     # ------------------------------------------------------------------
     # Coordinator / setup interface
@@ -168,6 +190,34 @@ class FleetOutageTracker:
             _LOGGER.info("%s is reachable again", self._title(entry_id))
         if not self._down:
             self._cancel_pending()
+
+    # ------------------------------------------------------------------
+    # Observers (read-only; no behaviour change)
+    # ------------------------------------------------------------------
+
+    @callback
+    def add_listener(self, listener: Callable[[], None]) -> CALLBACK_TYPE:
+        """Call ``listener`` after every outage start and end (each
+        ``openwrt_router_outage_event``); return the function that removes
+        it. A failing listener is logged and never reaches the tracker."""
+        self._listeners.append(listener)
+
+        @callback
+        def remove() -> None:
+            if listener in self._listeners:
+                self._listeners.remove(listener)
+
+        return remove
+
+    def snapshot(self) -> OutageView:
+        """Copy of the current outage state."""
+        return OutageView(
+            fleet_since=self._fleet_since,
+            down={
+                entry_id: RouterOutage(o.since, o.error_type, o.reported)
+                for entry_id, o in self._down.items()
+            },
+        )
 
     # ------------------------------------------------------------------
     # Classification
@@ -312,6 +362,11 @@ class FleetOutageTracker:
             "error_type": error_type,
         }
         self.hass.bus.async_fire(EVENT_OUTAGE, payload)
+        for listener in list(self._listeners):
+            try:
+                listener()
+            except Exception:
+                _LOGGER.exception("Outage observer failed")
 
 
 def _fmt(ts: datetime) -> str:

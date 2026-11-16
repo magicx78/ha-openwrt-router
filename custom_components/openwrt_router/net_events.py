@@ -28,6 +28,10 @@ RETENTION_DAYS = 30
 MAX_EVENTS = 3000
 MAX_INCIDENTS = 500
 MAX_EVIDENCE = 20
+# Evidence entries per incident in the store file (compact form, P5): 500
+# open incidents with 20 entries each alone need about 1.5 MB as HA writes
+# it; with 5 they need about 0.54 MB and leave the rest for events.
+STORE_EVIDENCE = 5
 HOURLY_KEEP_HOURS = 48
 CLOCK_SKEW_LIMIT = 300.0
 
@@ -212,6 +216,8 @@ class NetEvent:
     maintenance: bool = False
     src_ts: float | None = None
     clock_skew: bool = False
+    # P5: the incident this event is a follow-up of (correlation), or None
+    parent_id: str | None = None
 
     def to_dict(self, *, compact: bool = False) -> dict[str, Any]:
         """JSON-safe dict, enums as plain strings.
@@ -240,6 +246,7 @@ class NetEvent:
             "maintenance": self.maintenance,
             "src_ts": self.src_ts,
             "clock_skew": self.clock_skew,
+            "parent_id": self.parent_id,
         }
         if not compact:
             return full
@@ -299,6 +306,7 @@ class NetEvent:
             maintenance=data.get("maintenance") is True,
             src_ts=_num(data.get("src_ts")),
             clock_skew=data.get("clock_skew") is True,
+            parent_id=_opt_str(data, "parent_id"),
         )
 
 
@@ -319,6 +327,7 @@ _EVENT_DEFAULTS: dict[str, Any] = {
     "maintenance": False,
     "src_ts": None,
     "clock_skew": False,
+    "parent_id": None,
 }
 
 
@@ -364,9 +373,15 @@ class Incident:
             routers=list(self.routers),
         )
 
-    def to_dict(self) -> dict[str, Any]:
-        """JSON-safe dict, enums as plain strings."""
-        return {
+    def to_dict(self, *, compact: bool = False) -> dict[str, Any]:
+        """JSON-safe dict, enums as plain strings.
+
+        ``compact`` (the store format, P5) leaves out optional fields that
+        hold their default, and ``last_seen`` when it equals ``first_seen``,
+        and keeps only the newest ``STORE_EVIDENCE`` evidence entries;
+        ``from_dict`` restores the fields and still reads the full form.
+        """
+        full = {
             "id": self.id,
             "type": self.type,
             "scope": self.scope.value,
@@ -389,6 +404,19 @@ class Incident:
             "occurrences": self.occurrences,
             "ignore_until": self.ignore_until,
         }
+        if not compact:
+            return full
+        out = {
+            key: value
+            for key, value in full.items()
+            if key in _INCIDENT_REQUIRED
+            or value != _INCIDENT_DEFAULTS.get(key, _MISSING)
+        }
+        if self.last_seen == self.first_seen:
+            out.pop("last_seen", None)
+        if len(self.evidence) > STORE_EVIDENCE:
+            out["evidence"] = out["evidence"][-STORE_EVIDENCE:]
+        return out
 
     @classmethod
     def from_dict(cls, data: Any) -> Incident | None:
@@ -447,6 +475,28 @@ class Incident:
             occurrences=max(0, _opt(data, "occurrences", _int, 0)),
             ignore_until=_num(data.get("ignore_until")),
         )
+
+
+_INCIDENT_REQUIRED = frozenset(
+    {"id", "type", "scope", "scope_key", "status", "first_seen"}
+)
+# Values ``Incident.to_dict(compact=True)`` leaves out (the field defaults).
+_INCIDENT_DEFAULTS: dict[str, Any] = {
+    "severity": Severity.INFO.value,
+    "confidence": 1.0,
+    "origin": Origin.OBSERVED.value,
+    "cause": None,
+    "cause_status": None,
+    "evidence": [],
+    "parent_id": None,
+    "children": 0,
+    "routers": [],
+    "affected": 0,
+    "resolved_at": None,
+    "reopen_count": 0,
+    "occurrences": 0,
+    "ignore_until": None,
+}
 
 
 def prune_incidents(
@@ -527,6 +577,23 @@ class EventRing:
                 (replace(e, ts=e.ts + delta) for e in self._items),
                 maxlen=self.max_count,
             )
+
+    def set_parents(self, links: Mapping[str, str]) -> int:
+        """Set ``parent_id`` of the events in ``links`` (event id -> incident
+        id); return how many changed. Events that have a parent keep it."""
+        if not links:
+            return 0
+        changed = 0
+        items: list[NetEvent] = []
+        for event in self._items:
+            parent = links.get(event.id)
+            if parent is not None and event.parent_id is None:
+                event = replace(event, parent_id=parent)
+                changed += 1
+            items.append(event)
+        if changed:
+            self._items = deque(items, maxlen=self.max_count)
+        return changed
 
     def remove_router(self, entry_id: str) -> int:
         """Drop all events of one router; return how many were removed."""

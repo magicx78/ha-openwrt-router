@@ -12,10 +12,10 @@ belegt), **Annahme** (plausibel, aber noch nicht belegt; Prüfweg steht dabei), 
 
 - **Stand:** 2026-11-16 · **Phase:** freigegeben (Nutzer, 2026-11-16), in Umsetzung
 - **Branch/PR:** `feature/network-intelligence` · Worktree `../ha-openwrt-router-net-intel` · PR #— · Basis: v1.39.0 (`main@f8a2ac7`)
-- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review · **In Arbeit:** – · **Offen:** P5–P8
-- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 im Commit `fix(intel): address P4 review`
+- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review, P5 · **In Arbeit:** – · **Offen:** P6–P8
+- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 in `1e8fb71`; P5 im Commit `feat(intel): correlation and root cause (P5)`
 - **Blocker:** keine
-- **Nächster Schritt:** P4-Review umgesetzt; nächster Schritt P5.
+- **Nächster Schritt:** P5 erledigt; nächster Schritt P6.
 
 ### Entscheidungen (2026-11-16)
 
@@ -306,6 +306,88 @@ Entschieden beim P4-Review (Master E1–E4, Umsetzer; ersetzt die genannten W-Pu
   - `AP-DISABLED`/`INTERFACE-DISABLED` sind nicht live gesehen.
   - Ein Apply in LuCI ist keine eigene Aktion und wird gemeldet, wenn die Schwelle erreicht ist.
 - K5 und K6 (P3-Review) bleiben als bekannte Grenzen unverändert.
+- R7 vom Master bestätigt (vor P5): Auth-Welle 5 verschiedene Clients in 600 s, `min_sources`
+  entfällt.
+- **Grenzen nach P4, vom Master übernommen (vor P5):**
+  - **K5 Roam an APs ohne usteer:** War usteer in den letzten 300 s aktiv, wird ein Wechsel zu
+    oder von einem AP ohne usteer (ap3, ap6) nicht gemeldet. Das ist eine Untererkennung, kein
+    Fehlalarm.
+  - **K6 Zufalls-MACs:** Private MACs, die je Verbindung wechseln, machen Sturm- und
+    Roaming-Erkennung zu selten. Der Speicher bleibt über `_cap` begrenzt.
+  - Die vier Grenzen oben (Ping-Pong-Reihenfolge, späte usteer-Zeilen, Uhrabweichung bei
+    `weak_signal`, LuCI-Apply) gelten unverändert weiter.
+  - K2 (`wifi_log_meta` nur für frische Zeilen) hat jetzt einen eigenen Test
+    (`test_k2_gap_lines_get_no_wifi_context`).
+
+Entschieden in P5 (Umsetzer, 2026-11-16; Korrelation und Root-Cause):
+
+- **P5-1 Ausfall-Quelle:** `FleetOutageTracker` bekommt nur Beobachter (`add_listener`,
+  `snapshot`, `RouterOutage`, `OutageView`); sein Verhalten, Bus-Event und Repairs bleiben
+  gleich. Ein fehlerhafter Beobachter wird geloggt und erreicht den Tracker nicht. Die Engine
+  meldet sich beim Anlegen an und beim `close` ab.
+- **P5-2 Ausfall-Incidents:** `router_unreachable` (warning) je Router, sobald der Tracker ihn
+  gemeldet hat (3 Fehlpolls, `since` = erster Fehlpoll) oder solange die Flotte aus ist;
+  `lan_unreachable` (critical, Schlüssel `fleet:lan_unreachable`, Scope Flotte), solange der
+  Tracker einen Flotten-Ausfall hat; `routers` = alle betroffenen Router. Beide sind
+  Level-Regeln mit festem `stay_open`: Ohne Daten lösen sie sich nicht auf, nur über
+  `report_up` oder den nächsten erfolgreichen Poll. Auth-Fehler sind nie ein Ausfall. Ein
+  Router, dessen Entry nicht geladen ist, behält seinen offenen Incident (Zustand unbekannt).
+  Zustandswechsel werden als Events gespeichert (`system.router_unreachable` /
+  `system.router_reachable`, die Flotte unter Router `fleet`), Quelle `fleet`.
+- **P5-3 Topologie (`build_topology`):** Ohne bekanntes Gateway gibt es keine Topologie.
+  Beobachtete Kanten kommen aus LLDP (Breitensuche ab den Gateways). Abgeleitete Kanten kommen
+  aus den Trunk-Karten (ARP + FDB: `host_ip → Port`): Genommen wird der nächste Router, nur
+  wenn er eindeutig ist, sonst keine Kante. Eine Identität, die zwei Router beanspruchen, wird
+  ignoriert; Zyklen werden verworfen. Eine bekannte Kante bleibt gemerkt, solange beide Router
+  geladen sind (ein Router im Ausfall liefert keine Karte).
+- **P5-4 Wurzelwahl:** Stufen wie c4: `lan_unreachable` 1, `router_unreachable` und
+  `system_reboot` 2, `wan_down` 3, `wifi_radio_change` 4, `lan_uplink_down` 5,
+  `wifi_mass_disconnect` 6, alles andere 7 (nur Kind). Ein Kind gehört zu einer Wurzel, wenn
+  sein `first_seen` im Fenster der Wurzel liegt (c4; Level-Wurzeln bis zur Auflösung,
+  Ereignis-Wurzeln bis `last_seen`) und die Regel der Wurzel es erklärt. Passen mehrere:
+  `lan_unreachable` zuerst (AK2), dann bestätigte Verknüpfung, dann die genaueste Wurzel
+  (höhere Stufe, tieferer Router), dann die frühere. Die Kette ist zyklenfrei.
+- **P5-5 Ursache am Kind:** `cause` der Wurzel (`lan_unreachable`, `router_unreachable`,
+  `router_reboot`, `wan_down`, `radio_change`, `uplink_down`, `mass_disconnect`). Bestätigt nur
+  bei Messdaten: eigener Router, LLDP-Kante oder beobachteter Pfad. Über eine abgeleitete Kante
+  oder eine Hypothesen-Wurzel ist sie Hypothese, Konfidenz höchstens 0,6 (AK6); die Kappung
+  bleibt bei späteren Belegen. Ein Kind mit eigener bestätigter Ursache behält sie gegen eine
+  Hypothese. Ein Neustart unter dem Ausfall desselben Routers setzt beim Ausfall die bestätigte
+  Ursache `router_reboot`.
+- **P5-6 Feste Verknüpfung:** Ein Kind bleibt Kind. Eine Wurzel kann später selbst Kind werden
+  (gestaffelte Polls, Settle); ihre Kinder behalten den direkten Elternteil und dessen Ursache
+  (keine Weitergabe; Grenze). `correlate` liefert nur neue Verknüpfungen. Events bekommen
+  `parent_id`, die Belege der Wurzel selbst nicht.
+- **P5-7 Regeln der Wurzeln:** `wan_down` erklärt `wan_unstable`/`wan_ip_changed` desselben
+  Gateways, DNS-Events und WAN-Events außer `wan.down`. Ein Funkwechsel (`wifi_radio_change`,
+  Info-Ereignis aus `dfs.radar_detected`, `dfs.new_channel`, `dfs.cac_failed` mit Interface)
+  erklärt den Massen-Disconnect desselben Routers und WLAN-Events auf demselben `phy`. Ein
+  Ausfall des Gateways erklärt `wifi_no_ip`/`wifi_dhcp_after_connect` aller Router als
+  Hypothese. Ein Massen-Disconnect erklärt Client-Incidents desselben Routers als Hypothese.
+- **P5-8 Abgeleiteter Uplink:** `lan_uplink_down` auch ohne LLDP, wenn der Port in der
+  abgeleiteten Topologie Uplink ist (Gedächtnis 24 h, weil die FDB den Router beim Link-down
+  vergisst): Quelle `topology`, `inferred`, warning, Konfidenz ≤ 0,6, Ursache `uplink_lost` als
+  Hypothese. Mit LLDP-Nachbar bleibt er beobachtet.
+- **P5-9 Kleinkram:** `system_reboot` beginnt beim Boot-Zeitpunkt (`Evidence.since` setzt
+  `first_seen` früher). Abgeleitete Evidenz eröffnet mit `inferred_severity`; spätere
+  beobachtete Evidenz hebt die Schwere auf die der Regel.
+- **P5-10 Store kompakt:** Automat (Incidents, Tracks) wie die Events ohne Standardwerte; ein
+  Incident speichert nur seine 5 neuesten Belege (`STORE_EVIDENCE`, im Speicher bleiben 20).
+  Der alte volle Stand wird weiter gelesen (Test). Gemessen mit `prepare_save_json`: 500 offene
+  Level-Incidents mit je 20 Belegen + 3000 Events → 1 499 732 B; der Automat allein 803 243 B
+  (voll gespeichert 2 126 743 B); 1931 Events bleiben, 1069 fallen.
+- **Übergabe an P6:** Bus-Events für Kinder unterdrücken. Eine Wurzel kann vor ihrem
+  Elternteil entstehen (Settle 90 s und mehr). P6 muss deshalb die Incidents nach `correlate`
+  neu lesen und den Settle abwarten, bevor es eine Wurzel meldet.
+- **Grenzen (P5):**
+  - Kinder einer später verknüpften Wurzel behalten deren alte Ursache (P5-6).
+  - 500 gleichzeitig stürmende Clients: Die Tracks halten ihre Einträge 1800 s (`clear`), der
+    Automat allein braucht dann 2 897 243 B. Die Datei wird ohne Events und mit Warnung
+    geschrieben (Verhalten seit P2: Incidents werden nie gekappt). Folgearbeit, falls nötig:
+    Track-Einträge offener Incidents kürzer speichern.
+  - Die Topologie kennt nur Router der Flotte. Ein Switch dazwischen ist unsichtbar; sein
+    Ausfall zeigt sich als Ausfall der Router dahinter.
+  - DFS-Zeilen sind nicht live gesehen.
 
 Weiter offen und nur mit eigener Freigabe des Nutzers: Änderungen an Routern, Deploy nach
 Home Assistant, Merge nach `main`, Release.
@@ -701,6 +783,8 @@ Entscheidung lokal / DNS / WAN / einzelner Client (Vorschlag):
   - Incidents: höchstens 500. Gelöscht werden zuerst `resolved`/`ignored`, die älter als die Retention sind; `active` wird nie gekappt.
   - `msg` höchstens 120 Zeichen.
 - Größenschätzung (Annahme): Event etwa 350 B JSON → 3000 ≈ 1,05 MB; Incidents 500 × 600 B ≈ 0,3 MB; Zähler < 0,1 MB.
+  Gemessen in P5 (P5-10): 500 offene Incidents mit je 5 gespeicherten Belegen samt Tracks
+  ≈ 0,8 MB; mit 20 Belegen ≈ 2,1 MB.
 - Harte Grenze 1,5 MB: Vor dem Speichern wird die Länge geprüft, älteste Events fallen zuerst.
 - Speichern mit `async_delay_save` (300 s); der Store sichert beim Beenden selbst (Annahme: HA-Final-Write für verzögerte Saves).
 - Laden in der ersten `async_setup_entry` vor dem ersten Ingest. Bei einem kaputten oder fremden Schema wird leer gestartet, mit einer Warnung im Log. Die Integration läuft weiter.
@@ -736,15 +820,18 @@ Teilbereiche `i` mit Gewicht `w_i` (Standard):
 |---|---|---|---|---|---|
 | `wifi_reconnect_storm` (Client) | ≥ 5 Reconnects (Lücke ≤ 30 s) / 600 | 0 in 1800 | – | 3600 | warning |
 | `wifi_auth_failures` (Client) | ≥ 3 PSK/Handshake/SAE / 600 | 0 in 1800 | – | 3600 | warning |
-| `wifi_auth_wave` (Flotte) | ≥ 5 verschiedene Client-MACs mit Fehlversuch / 600 (ohne Timeouts; P4-Review M6) | < 2 in 1800 | – | 3600 | warning (Hypothese „PSK geändert/Angriff“) |
+| `wifi_auth_wave` (Flotte) | ≥ 5 verschiedene Client-MACs mit Fehlversuch / 600 (ohne Timeouts; P4-Review M6; vom Master bestätigt, ohne `min_sources`) | < 2 in 1800 | – | 3600 | warning (Hypothese „PSK geändert/Angriff“) |
 | `wifi_mass_disconnect` (AP) | ≥ 5 Clients oder ≥ 3 und ≥ 50 % in 5 (ohne Inaktivität; P4-Review M5) | – (Ereignis) | – | 600 | warning |
 | `wifi_no_ip` (Client) | `dhcp_missing` (180, `dhcp_health.py:137`) | Lease da | 2 Polls | 3600 | info, ab 3 Clients/AP warning |
 | `wifi_dhcp_after_connect` | NAK (ohne ACK in 30) / NoAddr ≤ 60 nach Connect | 0 in 1800 | – | 3600 | warning |
 | `wifi_band_flapping` (Client) | ≥ 4 Bandwechsel / 600 | 0 in 1800 | – | 3600 | info |
 | `wifi_roam_flapping` (Client) | ≥ 4 AP-Wechsel / 600 | 0 in 1800 | – | 3600 | info |
 | `wifi_weak_clients` (AP) | ≥ 3 Clients ≤ −75 dBm für 600 (HoldTimer) | > −70 dBm | Hold 600 | 3600 | info |
+| `wifi_radio_change` (Radio, P5) | DFS-Radar, neuer Kanal, CAC fehlgeschlagen (Logzeile mit Interface) | – (Ereignis) | – | 600 | info (Wurzel für Disconnects auf diesem Radio) |
 | `wifi_channel_busy` (Radio, optional) | Auslastung ≥ 70 % in 3 von 5 Messungen | < 55 % | 3 Messungen | 3600 | info |
 | `system_cpu_high` | Last/Kern ≥ 80 % | < 65 % | 3 Polls | 900 | warning |
+| `router_unreachable` (P5) | Tracker meldet den Router (3 Fehlpolls, ohne Auth) | wieder erreichbar | 1 | 600 | warning; bleibt ohne Daten offen |
+| `lan_unreachable` (P5, Flotte) | Flotten-Ausfall des Trackers | ein Router wieder da | 1 | 600 | critical; bleibt ohne Daten offen |
 | `system_ram_high` | wie `ram_high` (85 %/80 %, 900 Hold) | – | – | – | warning (gespiegelt) |
 | `system_reboot` | Uptime gesunken (beide Werte > 0) | – (Ereignis) | – | – | warning (info im Wartungsmodus) |
 | `system_service_restart` | PID-Wechsel / `running` false | läuft 600 stabil | – | 900 | warning; ≥ 3/3600 critical |
@@ -1165,6 +1252,12 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 – Massen-Disconnect: Fenster 5 s, ohne Inaktivität, unterdrückt bei Neustart, `AP-DISABLED` und eigener WLAN-Aktion (`api.wifi_actions`); Poll-Rückfall über zwei Polls – Leerlauf-Abmeldungen und eigene Reloads waren Massen-Events (P4-Review M5, K4) – entschieden, Master; 5 s gewählt vom Umsetzer
 - 2026-11-16 – Auth-Welle zählt verschiedene MACs (5 in 600 s), ohne Timeouts – ein Gerät mit altem PSK war eine Welle (P4-Review M6) – entschieden, Master; Schwelle 5 gewählt vom Umsetzer
 - 2026-11-16 – Halten log-basierter WLAN-Incidents höchstens 3600 s, Client-Incidents nur solange der Client gelistet ist – sonst offen ohne Ende (P4-Review K3) – entschieden, Umsetzer
+- 2026-11-16 – Auth-Welle 5 verschiedene Clients in 600 s, ohne `min_sources`; K5 (Roam an APs ohne usteer) und K6 (Zufalls-MACs) als Grenzen – Abnahme P4 – entschieden, Master
+- 2026-11-16 – Ausfälle aus dem `FleetOutageTracker` über Beobachter ohne Verhaltensänderung; `router_unreachable` warning, `lan_unreachable` critical, beide bleiben ohne Daten offen; Auth-Fehler kein Ausfall – c4 Stufe 1/2 aus vorhandenen Daten (P5-1, P5-2) – entschieden, Umsetzer
+- 2026-11-16 – Topologie aus LLDP (beobachtet) und Trunk-Karten (abgeleitet, nur eindeutig), ohne Gateway keine – keine neuen Aufrufe, kein Raten (P5-3) – entschieden, Umsetzer
+- 2026-11-16 – Wurzelwahl: `lan_unreachable` vor bestätigter Verknüpfung vor genauester Wurzel; Kind bleibt Kind; abgeleitete Verknüpfung Hypothese ≤ 0,6 – AK1, AK2, AK6 (P5-4 bis P5-6) – entschieden, Umsetzer
+- 2026-11-16 – `wifi_radio_change` aus DFS-Zeilen als Info-Ereignis; abgeleiteter `lan_uplink_down` über Topologie-Port mit 24-h-Gedächtnis – c4 Stufe 4/5 ohne neue Aufrufe (P5-7, P5-8) – entschieden, Umsetzer
+- 2026-11-16 – Automat kompakt speichern, je Incident 5 Belege im Store – 500 Incidents mit 20 Belegen brauchten allein ≈ 2,1 MB (P5-10) – entschieden, Umsetzer
 
 ## Prüfprotokoll
 
@@ -1175,3 +1268,4 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 `feature/network-intelligence` (P3-Review-Fixes H1, M1–M6, K1–K6) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 2041 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_infra_review.py` (51 Tests), davon 37 gegen den Stand `e851ac0` rot (jeder Review-Punkt mindestens ein Fehlerfall-Test); die übrigen 14 sichern Live-Formen (lldpcli-Formen, ap6-Kernel-/netifd-/procd-Zeilen) und Gegenfälle ab. Angepasst: `tests/test_net_infra.py` (LLDP-Nachbarn mit Bridge, ARP-Test entfernt, DNS Info, DECLINE mit zweiter MAC), `tests/test_net_engine.py` (Aufrufzähler: Carrier-Verlust an `wan` als Event, an `lan1` nur gezählt; `fetched_at`; Listener mit `host`/`interval`) · CI: – (kein Push) · Hardware: nicht geprüft (Live-Report 2026-11-16 nur als Daten genutzt; DHCPDECLINE, DNS-Fehler, Crash-Loop, mwan3-Failover, Default-Route am Dumb-AP nicht live gesehen) · Review: P3-Review vollständig umgesetzt
 - 2026-11-16 `feature/network-intelligence` (P4) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 2102 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_wifi.py` (63 Tests: Parser mit Live- und synthetischen Formen, Bus unverändert, `rate` behalten, Sturm 8/10 min bei −78 dBm, PSK-/SAE-Serie, Backhaul, Auth-Welle über Router, Band-/Roaming-Flapping mit und ohne usteer, schwache Clients mit Halten und Hysterese, ohne IP, DHCP nach Connect, Massen-Disconnect, einzelner kurzer Abbruch, doppelte Zeilen, fehlendes Log, alte Track-Einträge). Angepasst: `tests/test_net_engine.py` (Aufrufzähler mit Live-WLAN-Zeilen und `get_clients` mit `rate`, gleiche Aufrufzahl; Restore-Test mit zweiter MAC; `LogBatch.new_lines`), `tests/test_log_parser.py` (EAPOL-4WAY-HS-COMPLETED und usteer nicht mehr ignoriert) · CI: – (kein Push) · Hardware: nicht geprüft (SAE, MIC, PSK, Assoc-Reject, Backhaul-Zeile, usteer „connected“ nicht live gesehen; `rate`-Einheit offen) · Review: P4-Review umgesetzt (Commit `fix(intel): address P4 review`)
 - 2026-11-16 `feature/network-intelligence` (P4-Review-Fixes M1–M6, K1–K4) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2128 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_wifi_review.py` (26 Tests), davon 25 gegen den Stand `4cc2935` rot (jedes M mindestens ein Fehlerfall-Test; der 26. sichert den beobachteten usteer-Fall ab); die 6 Review-Proben laufen gegen den neuen Stand nicht mehr durch (Fehlverhalten weg). Angepasst: `tests/test_net_wifi.py` (Auth-Welle zählt MACs, Roam ohne bestätigtes Signal, usteer mit Logzeilen, NAK nach 30 s, Massen-Cluster in 5 s, Poll-Rückfall über zwei Polls), `tests/test_net_engine.py` (Aufrufzähler: Reconnect-Ursache Hypothese, Fixture-Zeilen älter als ein Poll) · CI: – (kein Push) · Hardware: nicht geprüft (`AP-DISABLED`/`INTERFACE-DISABLED`, usteer „connected to“, DHCPNAK→ACK nicht live gesehen) · Review: –
+- 2026-11-16 `feature/network-intelligence` (P5) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2170 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_correlation.py` (40 Tests, 41 Fälle): Topologie (LLDP, Trunk-Karten mit nächstem Router, mehrdeutig, ohne Gateway, doppelte Identität, Gedächtnis, Zyklus), jede Wurzelregel mit Gegenfall (Fenster, anderer Router, Geschwister, anderer `phy`, Client am AP vor dem Port, WAN anderer Router), bestätigte Ursache bleibt, Kind bleibt Kind, Kappung 0,6 bleibt, Engine-Szenarien mit echtem `FleetOutageTracker`: AP-Ausfall mit 20 Clients (AK1: eine Wurzel `router_unreachable`, alle offenen Incidents und Events darunter), alle Router weg (AK2: `lan_unreachable` critical, Router-Incidents als Kinder, Erholung), WAN weg + DNS-Zeile (Kind) und WAN up + DNS (Hypothese ohne Eltern), abgeleitete Kante ≤ 0,6 + Hypothese (AK6), gestaffelte Polls (Settle), Auth-Fehler kein Ausfall, ungeladener Router, Beobachter-Fehler; Fleet-Hook; DFS → Funkwechsel; abgeleiteter Uplink-Port; kompaktes Format mit altem Vollformat; K2-Test; Store 500 offene Incidents + 3000 Events = 1 499 732 B (Worst Case 500 stürmende Clients 2 897 243 B, mit Warnung). Angepasst: `tests/test_net_rules_review.py` (Typ ohne Regel jetzt `something_new`, da `router_unreachable` eine Regel hat; neuer Test `stay_open`). AK1 nur für den Teil Korrelation: Kinder bleiben verknüpfte Incidents, ihre HA-Events unterdrückt erst P6 (AK11) · CI: – (kein Push) · Hardware: nicht geprüft (DFS-Zeilen, Trunk-Karten mit echtem Switch dazwischen, Ausfall eines APs mit Clients) · Review: –

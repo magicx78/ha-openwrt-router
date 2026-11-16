@@ -166,11 +166,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         ),
         # "3 of 5 measurements" is simplified to consecutive measurements
         "wifi_channel_busy": _level(70, 55, 3, 3600, "info"),
+        # P5: a radio left its channel (DFS radar, new channel, failed CAC);
+        # a correlation root for the disconnects on that radio
+        "wifi_radio_change": _event(600, "info"),
         # System
         "system_cpu_high": _level(80, 65, 3, 900),
         # mirrors ram_high: RAM_PRESSURE_*_PCT, _HOLD_SECONDS, RAM_AVAILABLE_MIN_BYTES
         "system_ram_high": _level(85, 80, 1, 0, hold=900, min_available_mb=16),
         "system_reboot": _event(0),
+        # P5: from the fleet outage tracker, value 1 = down. stay_open: no
+        # auto-resolve without data (a router that is away sends none)
+        "router_unreachable": _level(1, 1, 1, 600, stay_open=True),
+        "lan_unreachable": _level(1, 1, 1, 600, "critical", stay_open=True),
         # services: the engine's own list (DEFAULT_SERVICES stays unchanged);
         # rpcd is left out on purpose, every ACL deployment restarts it
         "system_service_restart": _window(
@@ -222,7 +229,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 _SEVERITY_KEYS = frozenset({"severity", "notify_min_severity", "inferred_severity"})
-_FIXED_KEYS = frozenset({"schema", "mode"})
+_FIXED_KEYS = frozenset({"schema", "mode", "stay_open"})
 # Whole numbers >= 1 (a float like 3000.0 is accepted and stored as int).
 _INT_KEYS = frozenset(
     {"count", "debounce", "clear_below", "retention_days", "max_events"}
@@ -326,7 +333,10 @@ class Evidence:
     evidence ``count`` times. Evidence marked ``maintenance`` is ignored.
     Evidence marked ``hold`` only keeps an open incident alive (a state
     that lasts, e.g. a crashed service still down): it never counts toward
-    the threshold, the occurrences or an escalation.
+    the threshold, the occurrences or an escalation. ``since`` (P5) is
+    when the condition began if that lies before the evidence (a reboot's
+    boot time, the first failed poll of an outage): a new incident starts
+    there.
     """
 
     type: str
@@ -345,6 +355,7 @@ class Evidence:
     cause_status: CauseStatus | None = None
     maintenance: bool = False
     hold: bool = False
+    since: float | None = None
 
     @classmethod
     def from_event(
@@ -427,8 +438,8 @@ class _Track:
         self.streak = 0
         self.pending_since = None
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, *, compact: bool = False) -> dict[str, Any]:
+        full = {
             "type": self.type,
             "scope_key": self.scope_key,
             "incident_id": self.incident_id,
@@ -438,6 +449,13 @@ class _Track:
             "last_obs": self.last_obs,
             "streak": self.streak,
             "pending_since": self.pending_since,
+        }
+        if not compact:
+            return full
+        return {
+            key: value
+            for key, value in full.items()
+            if key not in _TRACK_DEFAULTS or value != _TRACK_DEFAULTS[key]
         }
 
     @classmethod
@@ -474,6 +492,19 @@ class _Track:
             else 0,
             pending_since=_opt_num(data.get("pending_since")),
         )
+
+
+# Values ``_Track.to_dict(compact=True)`` leaves out; ``from_dict`` reads
+# a missing key as this default.
+_TRACK_DEFAULTS: dict[str, Any] = {
+    "incident_id": None,
+    "live": False,
+    "entries": [],
+    "last_evidence": None,
+    "last_obs": None,
+    "streak": 0,
+    "pending_since": None,
+}
 
 
 def _opt_num(value: Any) -> float | None:
@@ -619,16 +650,109 @@ class AlarmMachine:
         return [i.copy() for i in self._incidents.values()]
 
     def open_keys(
-        self, types: Iterable[str], router: str
+        self, types: Iterable[str], router: str | None = None
     ) -> list[tuple[str, Scope, str]]:
         """(type, scope, scope_key) of the open incidents of ``types`` that
-        list ``router``, without copying the incidents."""
+        list ``router`` (any router for None), without copying them."""
         wanted = frozenset(types)
         return [
             (inc.type, inc.scope, inc.scope_key)
             for inc in self._incidents.values()
-            if inc.type in wanted and router in inc.routers and _is_open(inc)
+            if inc.type in wanted
+            and (router is None or router in inc.routers)
+            and _is_open(inc)
         ]
+
+    def set_routers(self, type_: str, scope_key: str, routers: Iterable[str]) -> bool:
+        """Add ``routers`` to the open incident of (``type_``, ``scope_key``);
+        True if its list changed (the fleet outage names all its routers)."""
+        track = self._tracks.get((type_, scope_key))
+        inc = self._live_incident(track) if track is not None else None
+        if inc is None:
+            return False
+        merged = sorted(set(inc.routers) | {r for r in routers if r})
+        if merged == inc.routers:
+            return False
+        inc.routers = merged
+        return True
+
+    def correlate(
+        self, now: float, topology: Topology, events: Iterable[NetEvent] = ()
+    ) -> Correlation:
+        """Link follow-up incidents and events to their root cause (plan c4).
+
+        Roots are the types in ``ROOT_TIERS``; a root takes children of a
+        higher tier (same tier 2 only for a reboot under the outage of the
+        same router, or for a router downstream) inside its time window
+        (``_ROOT_WINDOWS``). A child gets ``parent_id``, the root's cause
+        and ``cause_status``: confirmed only when the link rests on
+        measured data (own router, observed LLDP path), else hypothesis,
+        and then its confidence is capped at INFERRED_CONFIDENCE_CAP. A
+        child keeps a confirmed cause of its own against a hypothesis. Of
+        several roots ``lan_unreachable`` wins, then a confirmed link, then
+        the most specific root (higher tier, router further down). A child
+        stays linked; a root may itself become a child later (a fleet
+        outage settles after the single router outages). Events get only
+        ``parent_id`` (returned, the ring is the caller's).
+        """
+        roots = [inc for inc in self._incidents.values() if inc.type in ROOT_TIERS]
+        if not roots:
+            return Correlation({}, {})
+        spans = {root.id: _root_span(root, now) for root in roots}
+        views = {root.id: _RootView.of(root, topology) for root in roots}
+        linked: dict[str, str] = {}
+        for child in sorted(
+            self._incidents.values(),
+            key=lambda i: (_tier(i.type), i.first_seen, i.id),
+        ):
+            if child.parent_id is not None:
+                continue
+            best: tuple[tuple[Any, ...], Incident, bool] | None = None
+            for root in roots:
+                start, end = spans[root.id]
+                if root is child or not start <= child.first_seen <= end:
+                    continue
+                confirmed = _incident_link(views[root.id], child, topology)
+                if confirmed is None or self._in_chain(root, child.id):
+                    continue
+                rank = views[root.id].rank(confirmed)
+                if best is None or rank < best[0]:
+                    best = (rank, root, confirmed)
+            if best is not None:
+                _link(child, best[1], best[2])
+                linked[child.id] = best[1].id
+        start_min = min(start for start, _end in spans.values())
+        # a root's own evidence is no follow-up of it
+        own = {root.id: {item.get("id") for item in root.evidence} for root in roots}
+        event_links: dict[str, str] = {}
+        for event in events:
+            if event.parent_id is not None or event.ts < start_min:
+                continue
+            best_event: tuple[tuple[Any, ...], str] | None = None
+            for root in roots:
+                start, end = spans[root.id]
+                if not start <= event.ts <= end or event.id in own[root.id]:
+                    continue
+                confirmed = _event_link(views[root.id], event, topology)
+                if confirmed is None:
+                    continue
+                rank = views[root.id].rank(confirmed)
+                if best_event is None or rank < best_event[0]:
+                    best_event = (rank, root.id)
+            if best_event is not None:
+                event_links[event.id] = best_event[1]
+        return Correlation(linked, event_links)
+
+    def _in_chain(self, inc: Incident, target: str) -> bool:
+        """Is ``target`` ``inc`` or one of its parents (no cycles)?"""
+        seen: set[str] = set()
+        cur: Incident | None = inc
+        while cur is not None and cur.id not in seen:
+            if cur.id == target:
+                return True
+            seen.add(cur.id)
+            cur = self._incidents.get(cur.parent_id or "")
+        return False
 
     def get(self, incident_id: str) -> Incident | None:
         """Copy of one incident, or None."""
@@ -708,13 +832,15 @@ class AlarmMachine:
 
     # -- persistence ---------------------------------------------------------------
 
-    def to_dict(self) -> dict[str, Any]:
-        """JSON-safe state (settings are not included)."""
+    def to_dict(self, *, compact: bool = False) -> dict[str, Any]:
+        """JSON-safe state (settings are not included). ``compact`` (the
+        store format, P5) leaves out default values; ``from_dict`` reads
+        both forms."""
         return {
             "seq": self._seq,
             "last_now": self._last_now,
-            "incidents": [i.to_dict() for i in self._incidents.values()],
-            "tracks": [t.to_dict() for t in self._tracks.values()],
+            "incidents": [i.to_dict(compact=compact) for i in self._incidents.values()],
+            "tracks": [t.to_dict(compact=compact) for t in self._tracks.values()],
         }
 
     @classmethod
@@ -831,7 +957,8 @@ class AlarmMachine:
                     continue
                 rule = _FALLBACK_RULE
             if rule["mode"] == "level":
-                self._stale_level(track, now, out)
+                if not rule.get("stay_open"):
+                    self._stale_level(track, now, out)
             else:
                 self._stale_window(track, rule, now, out)
 
@@ -956,7 +1083,7 @@ class AlarmMachine:
         self._trim(track, rule, now)
         inc = self._live_incident(track)
         if inc is not None:
-            changed = self._absorb(inc, item, now, n)
+            changed = self._absorb(inc, item, now, n, rule)
             changed = self._escalate(inc, rule, track, now, None) or changed
             self._finish_update(inc, changed, out)
             return
@@ -988,7 +1115,7 @@ class AlarmMachine:
             if track.pending_since is None:
                 track.pending_since = now
             if inc is not None:
-                changed = self._absorb(inc, item, now, 1)
+                changed = self._absorb(inc, item, now, 1, rule)
                 changed = self._escalate(inc, rule, track, now, value) or changed
                 self._finish_update(inc, changed, out)
                 return
@@ -1054,6 +1181,12 @@ class AlarmMachine:
     ) -> None:
         prev = self._incidents.get(track.incident_id or "")
         base = _severity(rule.get("severity"))
+        if item.origin is Origin.INFERRED and (
+            rule.get("inferred_severity") in Severity._value2member_map_
+        ):
+            base = Severity(rule["inferred_severity"])
+        if _is_number(item.since) and item.since < first_seen:
+            first_seen = float(item.since)  # type: ignore[arg-type]
         if prev is not None and self._reopens(prev, rule, now):
             assert prev.resolved_at is not None
             if rule["mode"] != "level":
@@ -1083,7 +1216,7 @@ class AlarmMachine:
                 scope=item.scope,
                 scope_key=item.scope_key,
                 severity=base,
-                confidence=_confidence(item),
+                confidence=_confidence(item, rule),
                 origin=item.origin,
                 evidence=[_short(e) for e in entries][-MAX_EVIDENCE:],
                 first_seen=first_seen,
@@ -1098,7 +1231,7 @@ class AlarmMachine:
         counted = {e[4] for e in entries if len(e) > 4 and e[4]}
         if not counted <= set(inc.routers):
             inc.routers = sorted(counted | set(inc.routers))
-        self._merge_meta(inc, item)
+        self._merge_meta(inc, item, rule)
         self._escalate(inc, rule, track, now, value)
         if inc.status is not IncidentStatus.IGNORED:
             out.append(Transition(state, inc.copy()))
@@ -1121,22 +1254,39 @@ class AlarmMachine:
         cooldown = float(rule.get("cooldown", 0))
         return cooldown > 0 and now - prev.resolved_at < cooldown
 
-    def _absorb(self, inc: Incident, item: Evidence, now: float, n: int) -> bool:
+    def _absorb(
+        self,
+        inc: Incident,
+        item: Evidence,
+        now: float,
+        n: int,
+        rule: Mapping[str, Any] | None = None,
+    ) -> bool:
         """Add one evidence to an open incident; True if the severity rose."""
         inc.occurrences += n
         inc.last_seen = now
         if item.event_id is not None or item.kind:
             inc.evidence.append(_short([now, n, item.event_id, item.kind]))
             del inc.evidence[:-MAX_EVIDENCE]
-        return self._merge_meta(inc, item)
+        return self._merge_meta(inc, item, rule)
 
-    def _merge_meta(self, inc: Incident, item: Evidence) -> bool:
-        """Merge routers, confidence, cause; True if the severity rose."""
+    def _merge_meta(
+        self, inc: Incident, item: Evidence, rule: Mapping[str, Any] | None = None
+    ) -> bool:
+        """Merge routers, confidence, cause; True if the severity rose.
+
+        Observed evidence for an inferred incident lifts it to the rule
+        severity (an ``inferred_severity`` no longer applies). A child linked
+        by a hypothesis (P5) keeps its confidence capped.
+        """
+        raised = False
         if item.router and item.router not in inc.routers:
             inc.routers = sorted([*inc.routers, item.router])
         inc.affected = max(inc.affected, item.affected)
-        inc.confidence = max(inc.confidence, _confidence(item))
+        inc.confidence = max(inc.confidence, _confidence(item, rule))
         if item.origin is Origin.OBSERVED:
+            if inc.origin is not Origin.OBSERVED and rule is not None:
+                raised = _raise_severity(inc, _severity(rule.get("severity")))
             inc.origin = Origin.OBSERVED
         if item.cause and (
             inc.cause is None
@@ -1147,9 +1297,11 @@ class AlarmMachine:
         ):
             inc.cause = item.cause
             inc.cause_status = item.cause_status
+        if inc.parent_id is not None and inc.cause_status is CauseStatus.HYPOTHESIS:
+            inc.confidence = min(inc.confidence, INFERRED_CONFIDENCE_CAP)
         if item.severity is not None:
-            return _raise_severity(inc, item.severity)
-        return False
+            raised = _raise_severity(inc, item.severity) or raised
+        return raised
 
     def _escalate(
         self,
@@ -1234,10 +1386,15 @@ def _severity(value: Any) -> Severity:
     return Severity(value) if value in Severity._value2member_map_ else Severity.WARNING
 
 
-def _confidence(item: Evidence) -> float:
+def _confidence(item: Evidence, rule: Mapping[str, Any] | None = None) -> float:
+    """Evidence confidence; inferred evidence is capped (at the rule's
+    ``inferred_confidence`` if it is lower than the general cap)."""
     conf = min(1.0, max(0.0, item.confidence))
     if item.origin is Origin.INFERRED:
-        conf = min(conf, INFERRED_CONFIDENCE_CAP)
+        cap = INFERRED_CONFIDENCE_CAP
+        if rule is not None and _is_number(rule.get("inferred_confidence")):
+            cap = min(cap, float(rule["inferred_confidence"]))
+        conf = min(conf, cap)
     return conf
 
 
@@ -1366,6 +1523,9 @@ class InfraSnapshot:
     log_fetched_at: float | None = None
     log_times: tuple[float, ...] = ()
     poll_interval: float | None = None
+    # P5: ports through which the topology (``Topology.ports_of``) reaches
+    # another fleet router; feeds the inferred ``lan_uplink_down``
+    uplink_ports: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -1400,6 +1560,8 @@ class Finding:
     signal: int | None = None
     affected: int = 0
     escalate: Severity | None = None
+    # P5: when the condition began, if before this poll (``Evidence.since``)
+    since: float | None = None
 
 
 @dataclass
@@ -1413,6 +1575,7 @@ class _PortState:
     bytes_base: tuple[float, int, int] | None = None  # ts, rx, tx
     infra_seen: float | None = None  # last LLDP neighbour on this port
     last_seen: float | None = None
+    uplink_seen: float | None = None  # last time the topology used it (P5)
 
 
 @dataclass
@@ -1476,6 +1639,7 @@ class InfraState:
                 port.bytes_base = (port.bytes_base[0] + delta, *port.bytes_base[1:])
             port.infra_seen = _shifted(port.infra_seen, delta)
             port.last_seen = _shifted(port.last_seen, delta)
+            port.uplink_seen = _shifted(port.uplink_seen, delta)
             port.speeds = {
                 int((b * _SPEED_BUCKET + delta) // _SPEED_BUCKET): s
                 for b, s in port.speeds.items()
@@ -1499,6 +1663,11 @@ def service_key(router: str, service: str) -> str:
 def pool_key(router: str, pool: str) -> str:
     """``scope_key`` of a DHCP pool incident."""
     return f"{router}:pool:{pool}"
+
+
+def radio_key(router: str, phy: str) -> str:
+    """``scope_key`` of a radio incident."""
+    return f"{router}:radio:{phy}"
 
 
 def detect_infrastructure(
@@ -1613,6 +1782,8 @@ def detect_reboot(
             event=True,
             severity=_severity(rule.get("severity")),
             params=params,
+            # the incident starts at the boot (correlation window, P5)
+            since=boot,
         )
     )
     return True
@@ -2025,6 +2196,8 @@ def detect_ports(
         if port is None:
             continue
         port.last_seen = now
+        if name in snap.uplink_ports:
+            port.uplink_seen = now
         carrier, up = raw.get("carrier"), raw.get("up")
         link = carrier if isinstance(carrier, bool) else up
         link = link if isinstance(link, bool) else None
@@ -2165,23 +2338,42 @@ def _port_uplink(
     rule: Mapping[str, Any],
     out: list[Finding],
 ) -> None:
-    """Down state of a port LLDP showed a neighbour on (observed link)."""
-    if (
-        link is None
-        or port.infra_seen is None
-        or now - port.infra_seen > INFRA_PORT_MEMORY
-    ):
+    """Down state of an uplink port: observed when LLDP showed an
+    infrastructure neighbour on it, inferred (P5) when only the topology
+    from ARP + FDB (``trunk_port_map``) leads to another router through it:
+    then ``inferred_severity``, confidence <= 0.6 and the cause a hypothesis.
+    Both are remembered for INFRA_PORT_MEMORY (a down link loses both)."""
+    if link is None:
+        return
+    observed = (
+        port.infra_seen is not None and now - port.infra_seen <= INFRA_PORT_MEMORY
+    )
+    inferred = (
+        not observed
+        and port.uplink_seen is not None
+        and now - port.uplink_seen <= INFRA_PORT_MEMORY
+    )
+    if not observed and not inferred:
         return
     out.append(
         Finding(
             kind="lan.uplink",
             category=Category.LAN,
-            source=Source.POLL,
+            source=Source.POLL if observed else Source.TOPOLOGY,
             rule="lan_uplink_down",
             scope=Scope.PORT,
             scope_key=port_key(router, name),
             value=0.0 if link else 1.0,
             subject={"port": name},
+            origin=Origin.OBSERVED if observed else Origin.INFERRED,
+            confidence=1.0
+            if observed
+            else min(
+                INFERRED_CONFIDENCE_CAP,
+                _rule_num(rule, "inferred_confidence", INFERRED_CONFIDENCE_CAP),
+            ),
+            cause=None if observed else "uplink_lost",
+            cause_status=None if observed else CauseStatus.HYPOTHESIS,
         )
     )
 
@@ -2568,6 +2760,7 @@ def finding_evidence(
             affected=finding.affected,
             severity=finding.escalate,
             hold=finding.hold,
+            since=finding.since,
         )
     return Evidence(
         type=finding.rule,
@@ -2584,11 +2777,23 @@ def finding_evidence(
         hold=finding.hold,
         affected=finding.affected,
         severity=finding.escalate,
+        since=finding.since,
     )
 
 
 def log_event_evidence(event: NetEvent) -> Evidence | None:
-    """Evidence from a stored log event (DHCPDECLINE, procd crash loop)."""
+    """Evidence from a stored log event (DHCPDECLINE, procd crash loop,
+    P5: a DFS channel change of a radio)."""
+    if event.kind in RADIO_CHANGE_KINDS:
+        iface = event.subject.get("iface")
+        if isinstance(iface, str) and iface:
+            return Evidence.from_event(
+                event,
+                "wifi_radio_change",
+                Scope.RADIO,
+                radio_key(event.router, phy_of(iface)),
+            )
+        return None
     if event.kind == DECLINE_KIND:
         return Evidence.from_event(event, "dhcp_conflict", Scope.ROUTER, event.router)
     if event.kind == CRASH_LOOP_KIND:
@@ -3945,7 +4150,7 @@ def _weak_clients(
                 source=Source.POLL,
                 rule="wifi_weak_clients",
                 scope=Scope.RADIO,
-                scope_key=f"{router}:radio:{phy}",
+                scope_key=radio_key(router, phy),
                 value=float(n),
                 origin=Origin.INFERRED,
                 confidence=INFERRED_CONFIDENCE_CAP,
@@ -4109,3 +4314,489 @@ def wifi_auth_evidence(
             )
         )
     return out
+
+
+# --- topology and correlation (P5) ----------------------------------------------------
+#
+# ``build_topology`` derives which router hangs behind which from data the
+# engine already has: LLDP neighbours that match another router's identity
+# (observed) and the ARP + FDB host map ``trunk_port_map`` of every router
+# (inferred). ``AlarmMachine.correlate`` links the follow-up incidents and
+# events of a root cause to it (plan c4). Without a known gateway there is
+# no topology: then only links that need none are made (own router, fleet).
+
+LAN_UNREACHABLE_KEY = "fleet:lan_unreachable"
+ROUTER_UNREACHABLE_KIND = "system.router_unreachable"
+ROUTER_REACHABLE_KIND = "system.router_reachable"
+LAN_UNREACHABLE_KIND = "system.lan_unreachable"
+LAN_REACHABLE_KIND = "system.lan_reachable"
+# Stored DFS lines that move a radio off its channel (log_parser
+# DFS_EVIDENCE_KINDS): roots of the disconnects on that radio.
+RADIO_CHANGE_KINDS = frozenset(
+    {"dfs.radar_detected", "dfs.new_channel", "dfs.cac_failed"}
+)
+
+# Root types and their order (plan c4); a lower tier explains a higher one.
+ROOT_TIERS: dict[str, int] = {
+    "lan_unreachable": 1,
+    "router_unreachable": 2,
+    "system_reboot": 2,
+    "wan_down": 3,
+    "wifi_radio_change": 4,
+    "lan_uplink_down": 5,
+    "wifi_mass_disconnect": 6,
+}
+_CHILD_TIER = 7
+# Cause a child gets from its root.
+ROOT_CAUSES: dict[str, str] = {
+    "lan_unreachable": "lan_unreachable",
+    "router_unreachable": "router_unreachable",
+    "system_reboot": "router_reboot",
+    "wan_down": "wan_down",
+    "wifi_radio_change": "radio_change",
+    "lan_uplink_down": "uplink_down",
+    "wifi_mass_disconnect": "mass_disconnect",
+}
+# Seconds before the root starts and after it ends (c4 time windows). A
+# level root ends when it resolves (open: now), an event root at its last
+# evidence.
+_ROOT_WINDOWS: dict[str, tuple[float, float]] = {
+    "lan_unreachable": (120.0, 0.0),
+    "router_unreachable": (120.0, 180.0),
+    "system_reboot": (120.0, 180.0),
+    "wan_down": (60.0, 120.0),
+    "wifi_radio_change": (60.0, 60.0),
+    "lan_uplink_down": (60.0, 60.0),
+    "wifi_mass_disconnect": (30.0, 30.0),
+}
+_LEVEL_ROOTS = frozenset(
+    {"lan_unreachable", "router_unreachable", "wan_down", "lan_uplink_down"}
+)
+# Incidents a gateway outage explains anywhere (it serves DHCP): hypothesis.
+_GATEWAY_CHILDREN = frozenset({"wifi_no_ip", "wifi_dhcp_after_connect"})
+_WAN_CHILDREN = frozenset({"wan_unstable", "wan_ip_changed"})
+_ROUTER_EVENT_CATEGORIES = frozenset({Category.WIFI, Category.LAN})
+
+
+@dataclass(frozen=True)
+class RouterLinks:
+    """What the engine knows about one router for the topology.
+
+    ``ids``: own MACs (lower case) and host; ``lldp``: the LLDP neighbour
+    records of its last poll; ``trunk``: ``trunk_port_map`` (host IP ->
+    local port, from ARP + bridge FDB); ``gateway``: the IPv4 WAN gateway.
+    """
+
+    ids: frozenset[str] = frozenset()
+    host: str | None = None
+    lldp: tuple[Mapping[str, Any], ...] = ()
+    trunk: Mapping[str, str] = field(default_factory=dict)
+    gateway: bool = False
+
+
+@dataclass(frozen=True)
+class Uplink:
+    """How a router hangs on its parent: the parent's port facing it
+    (``port``), its own port facing the parent (``local_port``), and
+    whether the edge is observed (LLDP) or inferred (ARP + FDB)."""
+
+    parent: str
+    port: str | None = None
+    local_port: str | None = None
+    observed: bool = False
+
+
+@dataclass(frozen=True)
+class Topology:
+    """Router tree below the gateway(s); every walk is cycle-safe."""
+
+    uplinks: Mapping[str, Uplink] = field(default_factory=dict)
+    gateways: frozenset[str] = frozenset()
+
+    def chain(self, router: str) -> list[str]:
+        """The parents of ``router``, nearest first."""
+        out: list[str] = []
+        seen = {router}
+        up = self.uplinks.get(router)
+        while up is not None and up.parent not in seen:
+            out.append(up.parent)
+            seen.add(up.parent)
+            up = self.uplinks.get(up.parent)
+        return out
+
+    def depth(self, router: str) -> int:
+        """Hops from ``router`` up to its root (0 for a gateway or unknown)."""
+        return len(self.chain(router))
+
+    def behind(self, router: str) -> list[str]:
+        """All routers downstream of ``router`` (sorted)."""
+        return sorted(r for r in self.uplinks if router in self.chain(r))
+
+    def observed_path(self, router: str, ancestor: str) -> bool:
+        """True if every edge from ``router`` up to ``ancestor`` is observed
+        (also for ``router == ancestor``)."""
+        cur, seen = router, set()
+        while cur != ancestor:
+            up = self.uplinks.get(cur)
+            if up is None or not up.observed or cur in seen:
+                return False
+            seen.add(cur)
+            cur = up.parent
+        return True
+
+    def ports_of(self, router: str) -> frozenset[str]:
+        """Ports of ``router`` that lead to another router."""
+        ports: set[str] = set()
+        own = self.uplinks.get(router)
+        if own is not None and own.local_port:
+            ports.add(own.local_port)
+        for up in self.uplinks.values():
+            if up.parent == router and up.port:
+                ports.add(up.port)
+        return frozenset(ports)
+
+
+def build_topology(
+    links: Mapping[str, RouterLinks],
+    previous: Mapping[str, Uplink] | None = None,
+) -> Topology:
+    """Derive the router tree (no I/O, deterministic).
+
+    1. Observed: LLDP neighbours whose chassis ID or management IP belongs
+       to another router; a breadth-first walk from the gateways gives each
+       reached router its parent.
+    2. Inferred: a router N whose ``trunk`` shows router M's host on port p
+       is upstream of M if N is a gateway or p is not N's own way to the
+       gateway. Of these candidates the nearest one is M's parent: the one
+       that sees no other candidate on that same port. Exactly one nearest
+       candidate is required, else M stays without a parent.
+    3. ``previous`` uplinks fill in routers still without one, while the
+       parent is known (a router that is away drops out of the FDB after a
+       few minutes, its edge must stay for the correlation).
+    Without any gateway the topology is empty.
+    """
+    gateways = frozenset(r for r, link in links.items() if link.gateway)
+    if not gateways:
+        return Topology()
+    owners: dict[str, str | None] = {}
+    for router in sorted(links):
+        for ident in links[router].ids:
+            key = ident.strip().lower()
+            # an identity two routers claim is no identity
+            owners[key] = router if owners.get(key, router) == router else None
+    ports: dict[tuple[str, str], str | None] = {}
+    neighbours: dict[str, set[str]] = {}
+    for router in sorted(links):
+        for item in links[router].lldp:
+            other = _lldp_owner(item, owners)
+            if other is None or other == router or other not in links:
+                continue
+            port = item.get("local_interface")
+            if isinstance(port, str) and port:
+                ports[(router, other)] = port
+            neighbours.setdefault(router, set()).add(other)
+            neighbours.setdefault(other, set()).add(router)
+    uplinks: dict[str, Uplink] = {}
+    queue = deque(sorted(gateways))
+    placed = set(gateways)
+    while queue:
+        node = queue.popleft()
+        for other in sorted(neighbours.get(node, ())):
+            if other in placed:
+                continue
+            placed.add(other)
+            uplinks[other] = Uplink(
+                node, ports.get((node, other)), ports.get((other, node)), True
+            )
+            queue.append(other)
+    hosts = {r: link.host for r, link in links.items() if link.host}
+    up_port: dict[str, str] = {}
+    for router, link in links.items():
+        if router in gateways:
+            continue
+        own = uplinks.get(router)
+        if own is not None and own.local_port:
+            up_port[router] = own.local_port
+            continue
+        seen = {link.trunk.get(hosts[g]) for g in gateways if g in hosts} - {None}
+        if len(seen) == 1:
+            up_port[router] = str(seen.pop())
+    for child in sorted(links):
+        if child in gateways or child in uplinks or child not in hosts:
+            continue
+        candidates: dict[str, str] = {}
+        for router, link in links.items():
+            port = link.trunk.get(hosts[child]) if router != child else None
+            if not isinstance(port, str) or not port:
+                continue
+            if router not in gateways and up_port.get(router, port) == port:
+                continue  # child is upstream of router, or direction unknown
+            candidates[router] = port
+        nearest = [
+            router
+            for router, port in candidates.items()
+            if not any(
+                other != router
+                and other in hosts
+                and links[router].trunk.get(hosts[other]) == port
+                for other in candidates
+            )
+        ]
+        if len(nearest) != 1:
+            continue
+        parent = nearest[0]
+        if child in Topology(uplinks).chain(parent):
+            continue
+        local = links[child].trunk.get(hosts[parent]) if parent in hosts else None
+        uplinks[child] = Uplink(
+            parent, candidates[parent], local or up_port.get(child), False
+        )
+    for child, up in sorted((previous or {}).items()):
+        if (
+            child in uplinks
+            or child in gateways
+            or child not in links
+            or up.parent not in links
+            or child in Topology(uplinks).chain(up.parent)
+        ):
+            continue
+        uplinks[child] = up
+    return Topology(uplinks, gateways)
+
+
+def _lldp_owner(item: Any, owners: Mapping[str, str | None]) -> str | None:
+    if not isinstance(item, Mapping):
+        return None
+    for key in ("chassis_id", "management_ip"):
+        value = item.get(key)
+        if isinstance(value, str) and (owner := owners.get(value.strip().lower())):
+            return owner
+    return None
+
+
+@dataclass(frozen=True)
+class Correlation:
+    """New links of one ``AlarmMachine.correlate`` run: child incident id
+    -> parent id, and event id -> parent incident id."""
+
+    incidents: dict[str, str]
+    events: dict[str, str]
+
+
+def _tier(type_: str) -> int:
+    return ROOT_TIERS.get(type_, _CHILD_TIER)
+
+
+def _root_span(root: Incident, now: float) -> tuple[float, float]:
+    before, after = _ROOT_WINDOWS[root.type]
+    if root.type in _LEVEL_ROOTS:
+        end = root.resolved_at if root.resolved_at is not None else now
+    else:
+        end = root.last_seen
+    return root.first_seen - before, max(end, root.first_seen) + after
+
+
+@dataclass(frozen=True)
+class _RootView:
+    """A root incident with the topology facts its links need."""
+
+    inc: Incident
+    router: str
+    behind: tuple[str, ...]
+    depth: int
+
+    @classmethod
+    def of(cls, inc: Incident, topology: Topology) -> _RootView:
+        router = inc.scope_key.split(":", 1)[0]
+        if inc.type == "lan_uplink_down":
+            node, _sep, port = inc.scope_key.partition(":port:")
+            direct = [
+                r
+                for r, up in topology.uplinks.items()
+                if up.parent == node and up.port == port
+            ]
+            behind = sorted({*direct, *(m for r in direct for m in topology.behind(r))})
+        elif inc.type in ("router_unreachable", "system_reboot"):
+            behind = topology.behind(router)
+        else:
+            behind = []
+        return cls(inc, router, tuple(behind), topology.depth(router))
+
+    def rank(self, confirmed: bool) -> tuple[Any, ...]:
+        """Sort key among candidate roots (lowest wins)."""
+        inc = self.inc
+        return (
+            0 if inc.type == "lan_unreachable" else 1,
+            0 if confirmed else 1,
+            -_tier(inc.type),
+            -self.depth,
+            inc.first_seen,
+            inc.id,
+        )
+
+
+def _concerns(inc: Incident, router: str) -> bool:
+    """Is ``inc`` about ``router`` (its key, a sub-key, or a client on it)?"""
+    key = inc.scope_key
+    return (
+        key == router
+        or key.startswith(f"{router}:")
+        or (inc.scope is Scope.CLIENT and router in inc.routers)
+    )
+
+
+def _facing_port(topology: Topology, router: str) -> str | None:
+    """``scope_key`` of the parent's port that ``router`` hangs on."""
+    up = topology.uplinks.get(router)
+    return port_key(up.parent, up.port) if up is not None and up.port else None
+
+
+def _local_port(topology: Topology, router: str) -> str | None:
+    up = topology.uplinks.get(router)
+    return port_key(router, up.local_port) if up is not None and up.local_port else None
+
+
+def _incident_link(view: _RootView, child: Incident, topology: Topology) -> bool | None:
+    """Does ``view.inc`` explain ``child``? None: no; True: confirmed
+    (measured), False: hypothesis."""
+    root = view.inc
+    root_tier, child_tier = _tier(root.type), _tier(child.type)
+    if root_tier > child_tier:
+        return None
+    if root_tier == child_tier:
+        if root_tier != 2:
+            return None
+        if (
+            root.type == "router_unreachable"
+            and child.type == "system_reboot"
+            and child.scope_key == root.scope_key
+        ):
+            return True  # the router was away because it rebooted
+        if child.scope_key in view.behind:
+            return topology.observed_path(child.scope_key, view.router)
+        return None
+    if root.type == "lan_unreachable":
+        return True
+    if root.type in ("router_unreachable", "system_reboot"):
+        return _router_link(view, child, topology)
+    if root.type == "wan_down":
+        if child.type in _WAN_CHILDREN and child.scope_key == root.scope_key:
+            return True
+        return None
+    if root.type == "wifi_radio_change":
+        if child.type == "wifi_mass_disconnect" and child.scope_key == view.router:
+            return True
+        return None
+    if root.type == "lan_uplink_down":
+        for router in view.behind:
+            if _concerns(child, router):
+                return root.origin is Origin.OBSERVED and topology.observed_path(
+                    router, view.router
+                )
+        return None
+    if root.type == "wifi_mass_disconnect":
+        if child.scope is Scope.CLIENT and view.router in child.routers:
+            return False
+        return None
+    return None
+
+
+def _router_link(view: _RootView, child: Incident, topology: Topology) -> bool | None:
+    router = view.router
+    if _concerns(child, router):
+        return True
+    for other in view.behind:
+        if _concerns(child, other) or child.scope_key == _local_port(topology, other):
+            return topology.observed_path(other, router)
+    for other in (router, *view.behind):
+        if child.scope_key == _facing_port(topology, other):
+            return topology.observed_path(other, router) and bool(
+                (up := topology.uplinks.get(other)) and up.observed
+            )
+    if router in topology.gateways and child.type in _GATEWAY_CHILDREN:
+        return False
+    return None
+
+
+def _event_link(view: _RootView, event: NetEvent, topology: Topology) -> bool | None:
+    """Like ``_incident_link`` for a stored event (only the link matters)."""
+    root = view.inc
+    if root.type == "lan_unreachable":
+        return True
+    if root.type in ("router_unreachable", "system_reboot"):
+        routers = (view.router, *view.behind)
+        if (event.router in routers and event.category in _ROUTER_EVENT_CATEGORIES) or (
+            event.kind == ROUTER_UNREACHABLE_KIND and event.router in view.behind
+        ):
+            return True
+        if event.kind == WIFI_ROAM_KIND and event.params.get("from_router") in routers:
+            return True
+        port = event.subject.get("port")
+        if event.category is Category.LAN and isinstance(port, str):
+            key = port_key(event.router, port)
+            if any(key == _facing_port(topology, r) for r in routers):
+                return True
+        if view.router in topology.gateways and event.category is Category.DHCP:
+            return False
+        return None
+    if root.type == "wan_down":
+        if event.category is Category.DNS or (
+            event.router == root.scope_key
+            and event.category is Category.WAN
+            and event.kind != "wan.down"
+        ):
+            return True
+        return None
+    if root.type == "wifi_radio_change":
+        if event.router != view.router or event.category is not Category.WIFI:
+            return None
+        phy = root.scope_key.rpartition(":radio:")[2]
+        ifaces = [event.subject.get("iface"), *(event.subject.get("ifaces") or ())]
+        if any(isinstance(i, str) and i and phy_of(i) == phy for i in ifaces):
+            return True
+        return None
+    if root.type == "lan_uplink_down":
+        if event.router in view.behind and (
+            event.category in _ROUTER_EVENT_CATEGORIES
+            or event.kind == ROUTER_UNREACHABLE_KIND
+        ):
+            return False
+        return None
+    if root.type == "wifi_mass_disconnect":
+        if (
+            event.router == view.router
+            and event.category is Category.WIFI
+            and event.subject.get("mac")
+        ):
+            return False
+        return None
+    return None
+
+
+def _cause_of(root: Incident) -> tuple[str, bool]:
+    """Cause a child of ``root`` gets, and whether it is measured."""
+    if root.cause and root.cause_status is CauseStatus.CONFIRMED:
+        return root.cause, True
+    if root.parent_id is not None and root.cause:
+        return root.cause, False
+    return ROOT_CAUSES[root.type], root.origin is Origin.OBSERVED
+
+
+def _link(child: Incident, root: Incident, confirmed: bool) -> None:
+    child.parent_id = root.id
+    root.children += 1
+    cause, measured = _cause_of(root)
+    status = CauseStatus.CONFIRMED if confirmed and measured else CauseStatus.HYPOTHESIS
+    if not (
+        child.cause_status is CauseStatus.CONFIRMED and status is CauseStatus.HYPOTHESIS
+    ):
+        child.cause, child.cause_status = cause, status
+    if child.cause_status is CauseStatus.HYPOTHESIS:
+        child.confidence = min(child.confidence, INFERRED_CONFIDENCE_CAP)
+    if (
+        root.type == "router_unreachable"
+        and child.type == "system_reboot"
+        and child.scope_key == root.scope_key
+    ):
+        root.cause = ROOT_CAUSES["system_reboot"]
+        root.cause_status = CauseStatus.CONFIRMED
