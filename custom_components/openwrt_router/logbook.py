@@ -75,10 +75,13 @@ def async_describe_events(
         cause = f", cause {data['cause']}" if data.get("cause") else ""
         if cause and data.get("cause_status") == "hypothesis":
             cause += " (suspected)"
+        state = str(data.get("state") or "changed")
+        if data.get("reason") == "ignored":
+            state += " (ignored)"
         return {
             "name": name,
             "message": (
-                f"incident {data.get('state') or 'changed'}: {_kind(data)} "
+                f"incident {state}: {_kind(data)} "
                 f"({data.get('severity') or 'unknown'}{cause})"
             ),
         }

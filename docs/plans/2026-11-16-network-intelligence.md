@@ -12,10 +12,10 @@ belegt), **Annahme** (plausibel, aber noch nicht belegt; Prüfweg steht dabei), 
 
 - **Stand:** 2026-11-16 · **Phase:** freigegeben (Nutzer, 2026-11-16), in Umsetzung
 - **Branch/PR:** `feature/network-intelligence` · Worktree `../ha-openwrt-router-net-intel` · PR #— · Basis: v1.39.0 (`main@f8a2ac7`)
-- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review, P5, P6, P5-Review, P7, P6-Review, P8 (Doku) · **Offen:** P8-Aufräumen (Code, eigener Auftrag)
-- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 in `1e8fb71`; P5 in `2ba7674`; P6 in `4cef6a8`; Review-Fixes P5 im Commit `fix(intel): address P5 review`; P7 in `fd21931`; Review-Fixes P6 in `9fe9d54`; P8 (Doku) im Commit `docs(intel): document network intelligence (P8)`
+- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review, P5, P6, P5-Review, P7, P6-Review, P8 (Doku), P7-Review · **Offen:** P8-Aufräumen (Code, eigener Auftrag)
+- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 in `1e8fb71`; P5 in `2ba7674`; P6 in `4cef6a8`; Review-Fixes P5 im Commit `fix(intel): address P5 review`; P7 in `fd21931`; Review-Fixes P6 in `9fe9d54`; P8 (Doku) im Commit `docs(intel): document network intelligence (P8)`; Review-Fixes P7 im Commit `fix(intel): address P7 review`
 - **Blocker:** keine
-- **Nächster Schritt:** Review von `fd21931`/`9fe9d54`; danach P8-Aufräumen (`_record_events`, `useAlerts.ts`) als eigener Auftrag, dann PR (nur mit Freigabe).
+- **Nächster Schritt:** Prüfung der P7-Review-Fixes durch den Master; danach P8-Aufräumen (`_record_events`, `useAlerts.ts`) als eigener Auftrag, dann PR (nur mit Freigabe).
 
 ### Entscheidungen (2026-11-16)
 
@@ -637,6 +637,51 @@ Entschieden in P8 (Umsetzer, 2026-11-16; nur Doku, Code wird parallel geprüft):
   Schlüsseln `min_clients`/`min_ratio` genannt.
 - **P8-5 AKs:** P8 hakt kein AK ab; die Doku ist kein Nachweis für AK2, AK3, AK6, AK7 oder AK8
   (dafür braucht es die Prüfung im Code bzw. auf Hardware).
+
+Entschieden im P7-Review (Umsetzer, 2026-11-16; Masterentscheidungen E12–E15):
+
+- **E12 / Befund 1 Kind ohne eigene Belege:** Ein Kind einer aufgelösten Wurzel zählt nach
+  deren Nachfenster nur dann wieder als Wurzel, wenn es eigene Belege nach dem Fenster hat
+  (`inc.last_seen > parent.resolved_at + after`). Ohne bleibt es still, bis es sich selbst
+  auflöst. Damit meldet ein Reconnect-Sturm nach dem Ende des AP-Ausfalls kein `opened` mit
+  der bestätigten Ursache `router_unreachable` mehr. Ein Router, der weiter fehlt, liefert mit
+  jedem Poll neue Belege und zählt wie bisher (E8 bleibt für diesen Fall gleich).
+  `child_release_time` bleibt das Fensterende; neue Belege kommen ohnehin mit einem Schritt.
+- **E13 / Befund 2 Neuladen ohne Nachfenster:** Neues Feld `Incident.resolve_reason` (der
+  Grund des Auflösens, im Store kompakt; beim Wiederöffnen `None`). Eine Wurzel, die mit
+  `router_removed` (`net_events.ROUTER_REMOVED`) aufgelöst wurde, startet kein Nachfenster:
+  ihre Kinder bleiben still bis zur E6-Freigabe (Fenster + 1 h); `child_release_time` gibt
+  diese Zeit für den Weck-Timer.
+- **Befund 3 MACs mit Bindestrich:** `net_rules.normalize_mac` (Doppelpunkte, Großbuchstaben,
+  so vergleichen die WLAN-Detektoren) für `exclusions.macs` in `merge_settings` (Laden und
+  `apply_settings`) und in `_excluded_macs`. Abweichung vom Auftrag (dort „lowercase“): der
+  Vergleich in `net_rules` arbeitet mit Großbuchstaben, daher Großbuchstaben.
+- **E14 / Befund 4 Flotten-Score:** `fleet_score(scores, settings, incidents, now)` zieht je
+  gezähltem Flotten-Incident Strafe × Confidence (quittiert halb) × Gewichtsanteil seines
+  Bereichs ab (kritische `wifi_auth_wave`: 40 × 30/100 = 12 Punkte), wie ein Bereichsverlust
+  an jedem Router. Router-Scores bleiben unberührt (E10). Die Engine übergibt nur
+  Flotten-Incidents, deren Router nicht alle in Wartung oder ausgeschlossen sind
+  (`_fleet_counts`, Entscheidung Umsetzer).
+- **E15 / Befund 5 Ignorieren:** Ein gemeldeter Incident, der ignoriert wird, feuert einmal
+  `resolved` mit `reason: ignored`. Das Bus-Event hat dafür das Feld `reason` (sonst `null`),
+  das Logbook schreibt „incident resolved (ignored)“. Re-aktiviert und noch vorhanden: `reopened`,
+  wenn er schon `opened` gefeuert hat (Probe: `opened`, `resolved`, `reopened`), sonst
+  `opened`. `reopen_count` ändert sich dadurch nicht.
+- **Befund 6:** `_choice` macht aus `allowed` zuerst ein Tupel; die 400-Meldung nennt wieder
+  alle Werte.
+- **Befund 7 Dauer:** `duration_s` endet bei `resolved_at` auch für einen ignorierten
+  Incident, dessen Zustand vorbei ist (`resolved_at` gesetzt); ohne `resolved_at` wächst sie
+  weiter. So erwartet es die Probe („condition ended after 60 s“).
+- **Befund 8 Panel:** Die Diagnose-Liste rückt nur ein, wenn `inc.child` gesetzt ist; ein
+  Kind, das wieder selbst zählt, steht oben. Bundle neu gebaut, `_PANEL_VERSION`
+  `20261116-intel-p7r`.
+- **Regressionstests:** `tests/test_net_p7_review.py` (die sieben Proben umgekehrt, dazu
+  Freigabe nach E6, Store-Feld, Laden der MACs, Flotten-Score in der Engine, Logbook).
+- **Grenzen (P7-Review):**
+  - Ein Kind, das nach dem Fenster eigene Belege hat, behält die geerbte Ursache der Wurzel
+    (mit deren `cause_status`) bis zur E6-Freigabe; das war schon vor E12 so.
+  - Der Flotten-Abzug ist nicht durch die Abdeckung gewichtet und kann den Score bei vielen
+    gleichzeitigen Flotten-Incidents bis 0 senken.
 
 Weiter offen und nur mit eigener Freigabe des Nutzers: Änderungen an Routern, Deploy nach
 Home Assistant, Merge nach `main`, Release.
@@ -1527,6 +1572,11 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 – Flotten-Incidents zählen nur in Flotten-Entities, Router zählen nur Incidents mit Ursache am Router – kein doppeltes Zählen (E10, L4) – entschieden, Master
 - 2026-11-16 – WLAN-Bereich zählt nur mit lesbarem Log; leere Client-Liste/Speicherwerte keine Messung – kein Score 100 bei blindem Log (E11, L1) – entschieden, Master
 - 2026-11-16 – „spät“ nur bis Fehlerschwelle + 1 Intervalle, Auth-Fehler nie spät; Flotten-Entities ziehen zu Beginn des Entladens um; `cause_inherited` als Feld; Restore nur on/off; `reopened` nur nach `opened` – P6-Review M1, M2, L2, L3, L5, L6 – entschieden, Umsetzer
+- 2026-11-16 – Kind einer aufgelösten Wurzel zählt nach dem Nachfenster nur mit eigenen Belegen danach, sonst still bis zum eigenen Ende – Sturm ohne neue Reconnects meldete „opened“ mit bestätigter Fremdursache (E12, P7-Review Befund 1) – entschieden, Master
+- 2026-11-16 – Mit `router_removed` aufgelöste Wurzel startet kein Nachfenster; Kinder still bis E6 (Feld `resolve_reason`) – Neuladen eines ausgefallenen Uplinks machte seine Kinder nach 4,5 min laut (E13, Befund 2) – entschieden, Master; Feld vom Umsetzer
+- 2026-11-16 – Flotten-Incidents senken den Flotten-Score (Strafe × Confidence × Gewichtsanteil des Bereichs), Router-Scores unberührt – senkten bisher gar keinen Score (E14, Befund 4) – entschieden, Master; Formel vom Umsetzer
+- 2026-11-16 – Ignorieren eines gemeldeten Incidents feuert `resolved` mit `reason: ignored`; Re-aktivieren `opened`, wenn nie gemeldet – Automationen warteten sonst ewig (E15, Befund 5) – entschieden, Master
+- 2026-11-16 – MAC-Ausnahmen einheitlich `AA:BB:…` (auch beim Laden), 400-Meldung mit Werten, Dauer ignorierter beendeter Incidents fest, Einrücken nur bei `child` – P7-Review Befunde 3, 6, 7, 8 – entschieden, Umsetzer
 
 ## Prüfprotokoll
 
@@ -1543,3 +1593,4 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 `feature/network-intelligence` (P7) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2354 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_panel_api.py` (82 Tests: 403 für Nicht-Admins je GET-Route, Freigabe für alle Nutzer, POST bleibt Admin, 410, 503 ohne geladene Engine, Routen-Namen, Übersicht, Event-Filter/Cursor/ungültige Filter, Incident-Liste mit Reihenfolge, Detail mit Kindern und Kette, 404, Bestätigen/Ignorieren/Reaktivieren, 409, ungültige Bodys, Einstellungen GET/Teil-POST/15 ungültige Fälle/Standardwerte, `cause_level`-Abbildung, Snapshot-Warnsymbole, Ring-Kappung, AK5 Routen nach Neustart aus dem Store). Angepasst: `tests/test_panel_lifecycle.py` (sechs Views statt einer). Frontend: `npm run build` (tsc + vite) ohne Fehler, kein TS-Test vorhanden; Bundle 373 007 → 422 667 B. Render-Nachweis lokal (127.0.0.1): echte Engine (`ingest` → Detektoren → Automat) mit synthetischen Polls von drei Routern, echte View-Klassen und `build_mesh_snapshot`, Bundle in headless Chromium; Übersicht, Incidents, Detail, Timeline, Einstellungen, Topologie mit Warnsymbolen, Handybreite 390 px (Liste und Detail). AK5 und AK10 abgehakt; AK1 offen bis zu den P6-Review-Fixes (K1) · CI: – (kein Push) · Hardware/echtes HA: nicht geprüft (kein HA-Frontend, kein echtes Handy) · Review: –
 - 2026-11-16 `feature/network-intelligence` (P6-Review-Fixes E8–E11, K1, M1–M3, L1–L6) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2380 passed in 47,5 s (Python 3.13, HA 2026.2.3); neu `tests/test_net_p6_review.py` (26 Tests): die Review-Proben umgekehrt (blindes Log ergibt keinen Score 100, Restore `unavailable`/`unknown` lässt Wartung an, offenes Kind zählt ab Wurzel-Auflösung + 180 s, `opened` nach Fenster + Settle statt ~1 h später, Router mit Auth-Fehler hält nichts zurück), Ende des Spät-Bands, Timer auf `child_release_time`, stummes Entladen (E9), Flotten-Incident ohne Router-Zähler und -Symbol (E10), `cause_inherited` beim Verknüpfen, eigene gleichnamige Ursache bleibt, Altstore-Migration, `opened` vor `reopened` und gespeichert mit Altstore-Rückfall (L5), `withdraw_fleet` und Registry-Umzug mit echter `EntityRegistry` (M2), Reihenfolge in `async_unload_entry` (Mocks), Timer bleibt bei gleicher Zeit (L6). Angepasst: `tests/test_net_p6.py` und `tests/test_net_score.py` (volle Testdaten mit einem Client, L1), `tests/test_net_engine.py` (`test_m1_slow_polls_*` mit gepatchtem Timer und Dispatcher: 6,1 + 1,2 s → 3,9 + 0,5 s). AK1 abgehakt · CI: – (kein Push) · Hardware/echtes HA: nicht geprüft (M2 ohne echte Entity-Plattform) · Review: P6-Review umgesetzt
 - 2026-11-16 `feature/network-intelligence` (P8, Doku) – geändert nur `README.md`, `CHANGELOG.md`, `TODO.md`, `docs/network-intelligence.md` (neu) und dieser Plan; Fakten gegen den Code abgeglichen (Entity-Namen aus `translations/en.json`, Unique-IDs aus `const.py`, Event-Felder aus `NetIntelligence._event_data`, Routen/Limits aus `topology_panel.py`/`net_query.py`, Standardwerte aus `net_rules.DEFAULT_SETTINGS`, Fenster aus `_ROOT_WINDOWS`, Tab-Namen aus `DiagnoseView.tsx`); Markdown-Links/Anker geprüft. Keine Tests nötig (kein Code geändert) · CI: – (kein Push) · Hardware/echtes HA: nicht geprüft · AKs: keins neu abgehakt · Review: –
+- 2026-11-16 `feature/network-intelligence` (P7-Review-Fixes E12–E15, Befunde 1–8) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2396 passed in 45,0 s (Python 3.13); die sieben Proben des Reviews als umgekehrte Regressionstests in `tests/test_net_p7_review.py` (16 Tests); Panel mit `tsc && vite build` neu gebaut (`topology-bundle.js` 422 667 → 422 676 B), `_PANEL_VERSION` `20261116-intel-p7r` · CI: – · Hardware: nicht geprüft · Review: Probe-Datei nur gelesen

@@ -167,7 +167,9 @@ function IncidentTree({
     const kids = new Map<string, IntelIncident[]>();
     const top: IntelIncident[] = [];
     for (const inc of incidents) {
-      if (inc.parent_id && ids.has(inc.parent_id)) {
+      // indented only while it is a silent child; a child that counts on
+      // its own again (E8/E12) is a root of the list, parent_id is history
+      if (inc.child && inc.parent_id && ids.has(inc.parent_id)) {
         const list = kids.get(inc.parent_id) ?? [];
         list.push(inc);
         kids.set(inc.parent_id, list);

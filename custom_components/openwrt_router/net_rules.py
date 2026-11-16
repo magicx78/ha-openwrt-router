@@ -53,6 +53,7 @@ from .net_events import (
     CLOCK_SKEW_LIMIT,
     MAX_EVIDENCE,
     MAX_INCIDENTS,
+    ROUTER_REMOVED,
     Category,
     CauseStatus,
     Incident,
@@ -274,6 +275,8 @@ def _overlay(default: Any, stored: Any, key: str, mode: str | None) -> Any:
     if isinstance(default, list):
         if not isinstance(stored, list):
             return list(default)
+        if key == "macs":  # exclusions.macs: one spelling, stored and applied
+            return [normalize_mac(s) for s in stored if isinstance(s, str)]
         return [s for s in stored if isinstance(s, str)]
     if not _valid_leaf(default, stored, key, mode):
         return copy.deepcopy(default)
@@ -309,6 +312,12 @@ def _in_bounds(key: str, value: float, mode: str | None) -> bool:
 SETTINGS_LIST_MAX = 200
 SETTINGS_STRING_MAX = 64
 _SETTINGS_MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$")
+
+
+def normalize_mac(value: str) -> str:
+    """A MAC in the form the rules compare: colons, upper case (P7 review:
+    ``02-00-5e-10-00-01`` is accepted and must work)."""
+    return value.strip().replace("-", ":").upper()
 
 
 def settings_errors(patch: Any) -> list[str]:
@@ -1074,7 +1083,7 @@ class AlarmMachine:
         return len(dropped)
 
     def resolve_router(
-        self, entry_id: str, now: float, reason: str = "router_removed"
+        self, entry_id: str, now: float, reason: str = ROUTER_REMOVED
     ) -> list[Transition]:
         """Resolve the open ``router_unreachable`` of a router whose entry
         is unloaded or removed (P5 review E7): its state is unknown from
@@ -1471,6 +1480,7 @@ class AlarmMachine:
                 self._release(inc, drop_cause=True)
             inc.reopened_at = now
             inc.resolved_at = None
+            inc.resolve_reason = None
             inc.reopen_count += 1
             inc.occurrences += occurrences
             inc.severity = base
@@ -1617,6 +1627,7 @@ class AlarmMachine:
         track.live = False
         track.reset_streak()
         inc.resolved_at = at
+        inc.resolve_reason = reason
         if inc.status is IncidentStatus.IGNORED:
             return  # resolved silently; the status changes when the ignore ends
         inc.status = IncidentStatus.RESOLVED
@@ -5301,9 +5312,13 @@ def suppressed_child(
 
     A child (``parent_id`` of a known incident) is silent while its root
     is open and during the root's after-window once it resolved. After
-    that an open child counts as a root of its own (P6 review E8, K1);
-    ``parent_id`` stays for the history. Without ``now`` a child of a
-    known incident is always silent.
+    that it counts as a root of its own only with evidence of its own
+    after the window (``last_seen`` past it, P7 review E12); without, it
+    stays silent until it resolves itself. A root resolved because its
+    router was unloaded (``router_removed``) starts no after-window: its
+    children stay silent until the E6 release clears ``parent_id`` (P7
+    review E13). ``parent_id`` stays for the history (P6 review E8, K1).
+    Without ``now`` a child of a known incident is always silent.
     """
     if inc.parent_id is None:
         return False
@@ -5312,20 +5327,26 @@ def suppressed_child(
         return False
     if now is None or _is_open(parent) or parent.resolved_at is None:
         return True
-    after = _ROOT_WINDOWS.get(parent.type, (0.0, 0.0))[1]
-    return now < parent.resolved_at + after
+    if parent.resolve_reason == ROUTER_REMOVED:
+        return True  # E13: until the E6 release
+    window_end = parent.resolved_at + _ROOT_WINDOWS.get(parent.type, (0.0, 0.0))[1]
+    return now < window_end or inc.last_seen <= window_end
 
 
 def child_release_time(inc: Incident, known: Mapping[str, Incident]) -> float | None:
-    """When a child of a resolved root starts to count on its own (E8):
-    the root's ``resolved_at`` plus its after-window. None for no child,
-    an unknown root or a root that is still open."""
+    """When the state of a child of a resolved root can change next: the
+    end of the root's after-window (E8, E12), for a root resolved with
+    ``router_removed`` the E6 release (E13). None for no child, an unknown
+    root or a root that is still open."""
     if inc.parent_id is None:
         return None
     parent = known.get(inc.parent_id)
     if parent is None or _is_open(parent) or parent.resolved_at is None:
         return None
-    return parent.resolved_at + _ROOT_WINDOWS.get(parent.type, (0.0, 0.0))[1]
+    window_end = parent.resolved_at + _ROOT_WINDOWS.get(parent.type, (0.0, 0.0))[1]
+    if parent.resolve_reason == ROUTER_REMOVED:
+        return window_end + CHILD_RELEASE_AFTER
+    return window_end
 
 
 def counted_incidents(
@@ -5409,16 +5430,27 @@ def router_score(
 
 
 def fleet_score(
-    scores: Mapping[str, RouterScore], settings: Mapping[str, Any]
+    scores: Mapping[str, RouterScore],
+    settings: Mapping[str, Any],
+    incidents: Iterable[Incident] = (),
+    now: float | None = None,
 ) -> tuple[int | None, float]:
-    """Fleet score: router scores weighted with their coverage (plan c6).
+    """Fleet score: router scores weighted with their coverage (plan c6),
+    minus the fleet incidents (P7 review E14).
 
     An offline router counts with score 0 and the system share of the
     weights as its coverage (its outage is measured). Routers with an
     unknown score drop out. Callers leave routers in maintenance out.
+    Each counted fleet incident in ``incidents`` (``scope`` fleet:
+    ``wifi_auth_wave``, ``lan_unreachable``, ...; ``counted_incidents`` at
+    ``now``) lowers the score by its penalty times its confidence (half
+    when acknowledged), scaled with the weight share of its area, as if
+    that area of every router lost it; router scores stay untouched (E10).
     Returns (score or None, mean coverage of all given routers).
     """
-    weights = settings.get("score", {}).get("weights", {})
+    score_cfg = settings.get("score", {})
+    weights = score_cfg.get("weights", {})
+    penalty_cfg = score_cfg.get("penalty", {})
     total_w = sum(float(w) for w in weights.values()) or 1.0
     num = den = 0.0
     for result in scores.values():
@@ -5433,4 +5465,13 @@ def fleet_score(
     coverage = sum(r.coverage for r in scores.values()) / len(scores) if scores else 0.0
     if den <= 0:
         return None, round(coverage, 2)
-    return round(num / den), round(coverage, 2)
+    penalty = 0.0
+    for inc in counted_incidents(incidents, now):
+        area = incident_area(inc.type)
+        if inc.scope is not Scope.FLEET or area is None:
+            continue
+        p = float(penalty_cfg.get(inc.severity.value, 0)) * inc.confidence
+        if inc.status is IncidentStatus.ACKNOWLEDGED:
+            p *= _ACK_FACTOR
+        penalty += p * float(weights.get(area, 0)) / total_w
+    return round(max(0.0, num / den - penalty)), round(coverage, 2)

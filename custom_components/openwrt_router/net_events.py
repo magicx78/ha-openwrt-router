@@ -32,6 +32,9 @@ MAX_EVIDENCE = 20
 # open incidents with 20 entries each alone need about 1.5 MB as HA writes
 # it; with 5 they need about 0.54 MB and leave the rest for events.
 STORE_EVIDENCE = 5
+# Resolve reason of a router_unreachable whose entry was unloaded (P5
+# review E7): its children get no after-window (P7 review E13).
+ROUTER_REMOVED = "router_removed"
 HOURLY_KEEP_HOURS = 48
 CLOCK_SKEW_LIMIT = 300.0
 
@@ -365,6 +368,9 @@ class Incident:
     # P6 review L2: the cause was taken over from the parent when linking
     # (set by the correlation, not guessed from the value on release)
     cause_inherited: bool = False
+    # P7 review E13: why the incident resolved (the transition reason, e.g.
+    # ``ROUTER_REMOVED``); None while open and after a reopen
+    resolve_reason: str | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -411,6 +417,7 @@ class Incident:
             "ignore_until": self.ignore_until,
             "reopened_at": self.reopened_at,
             "cause_inherited": self.cause_inherited,
+            "resolve_reason": self.resolve_reason,
         }
         if not compact:
             return full
@@ -484,6 +491,7 @@ class Incident:
             ignore_until=_num(data.get("ignore_until")),
             reopened_at=_num(data.get("reopened_at")),
             cause_inherited=data.get("cause_inherited") is True,
+            resolve_reason=_opt_str(data, "resolve_reason"),
         )
 
 
@@ -508,6 +516,7 @@ _INCIDENT_DEFAULTS: dict[str, Any] = {
     "ignore_until": None,
     "reopened_at": None,
     "cause_inherited": False,
+    "resolve_reason": None,
 }
 
 

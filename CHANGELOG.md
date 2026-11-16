@@ -117,8 +117,27 @@ behoben:
   erreichbarer Router widerlegt die Verknüpfung.
 - Ein Folgeproblem, das nach dem Ende seiner Wurzel offen bleibt, zählt nach
   deren Nachfenster wieder selbst (Score, Zähler, HA-Event) statt bis zu einer
-  Stunde unsichtbar zu bleiben; nach einer weiteren Stunde wird es von der
-  Wurzel gelöst.
+  Stunde unsichtbar zu bleiben, aber nur mit eigenen neuen Belegen nach dem
+  Nachfenster. Ohne neue Belege bleibt es still, bis es sich selbst auflöst;
+  es meldet sich also nicht mehr als „neu“ mit der Ursache einer längst
+  behobenen Wurzel. Nach einer weiteren Stunde wird es von der Wurzel gelöst.
+- Wird ein ausgefallener Router neu geladen, bleiben die Router hinter ihm
+  still, bis sie nach einer Stunde von ihm gelöst werden, statt wenige Minuten
+  später als neue Probleme gemeldet zu werden.
+- MAC-Ausnahmen mit Bindestrichen (`02-00-5e-10-00-01`) wirken jetzt; MACs
+  werden einheitlich als `02:00:5E:10:00:01` gespeichert, auch bereits
+  gespeicherte Einstellungen.
+- Flotten-Incidents (`wifi_auth_wave`, `lan_unreachable`) senken jetzt den
+  Flotten-Score; die Router-Scores bleiben unberührt.
+- Ignorieren eines gemeldeten Incidents sendet `resolved` mit
+  `reason: ignored`, damit Automationen, die auf das Ende warten, nicht hängen
+  bleiben. Das Event hat dafür das neue Feld `reason`.
+- Die Dauer eines ignorierten Incidents endet, sobald sein Zustand vorbei ist,
+  statt weiterzuwachsen.
+- Die Fehlermeldung der Ereignis-Abfrage bei einer unbekannten Kategorie nennt
+  die erlaubten Werte wieder.
+- Diagnose-Panel: Ein Folgeproblem, das wieder selbst zählt, steht nicht mehr
+  eingerückt unter seiner früheren Wurzel.
 - Entladen oder Neuladen eines Routers löst seinen offenen Ausfall still auf
   (kein `resolved`-Event, kein Logbook-Eintrag).
 - Flotten-Incidents (`lan_unreachable`, `wifi_auth_wave`) zählen nur in den

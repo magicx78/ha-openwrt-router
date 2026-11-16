@@ -174,6 +174,7 @@ from .net_rules import (
     fleet_score,
     log_event_evidence,
     merge_settings,
+    normalize_mac,
     router_score,
     settings_errors,
     suppressed_child,
@@ -194,6 +195,8 @@ LOG_GAP_KIND = "system.log_gap"
 _REBOOT_KIND = "system.reboot"
 # ``NetEvent.router`` of the fleet-wide outage events (no single router).
 FLEET_ROUTER = "fleet"
+# ``reason`` of the ``resolved`` event of an ignored incident (P7 review E15)
+EVENT_REASON_IGNORED = "ignored"
 
 # Log event category -> NetEvent category. DFS radar/CAC lines are radio
 # events, so they count as Wi-Fi.
@@ -1134,14 +1137,13 @@ class NetIntelligence:
             return None
 
     def _excluded_macs(self) -> frozenset[str]:
-        """``exclusions.macs`` of the settings (upper case), plus the clients
+        """``exclusions.macs`` of the settings (colons, upper case; a MAC
+        with dashes works too, P7 review), plus the clients
         the loaded routers list on an SSID in ``exclusions.ssids`` (P6; a
         client is known by SSID only while a router lists it)."""
         exclusions = self.settings.get("exclusions", {})
         macs = {
-            m.strip().upper()
-            for m in exclusions.get("macs") or ()
-            if isinstance(m, str)
+            normalize_mac(m) for m in exclusions.get("macs") or () if isinstance(m, str)
         }
         ssids = {s for s in exclusions.get("ssids") or () if isinstance(s, str) and s}
         if ssids:
@@ -1608,13 +1610,17 @@ class NetIntelligence:
         ``opened`` / ``reopened``: an active incident (not acknowledged, not
         ignored) at or above ``notify_min_severity`` that is no silent child
         (``suppressed_child``: a child counts again after its root's
-        after-window, P6 review E8),
+        after-window with evidence of its own, P6 review E8, P7 review E12),
         not only on routers in maintenance, once per open period; only after
         the settle time since the engine first saw it open and while no
         router is late, at the latest after the hold maximum. ``resolved``:
-        only for an announced incident. An incident that resolves before it
-        was announced, or is ignored, stays silent; so does a silent child.
-        ``reopened`` only for an incident that fired ``opened`` before (L5).
+        only for an announced incident; an announced incident that is
+        ignored fires ``resolved`` with ``reason: ignored`` (P7 review E15),
+        so an automation waiting for the end does not hang. An incident that
+        resolves before it was announced stays silent; so does a silent
+        child. ``reopened`` only for an incident that fired ``opened``
+        before (L5); a re-activated incident that never fired ``opened``
+        fires ``opened``.
         """
         incidents = {inc.id: inc for inc in self.machine.peek()}
         fired = False
@@ -1624,9 +1630,13 @@ class NetIntelligence:
             fired = True  # stored state changed
         for inc_id, count in list(self._announced.items()):
             inc = incidents.get(inc_id)
-            if inc is None or inc.status is IncidentStatus.IGNORED:
+            if inc is None:
                 del self._announced[inc_id]
                 fired = True  # stored state changed
+            elif inc.status is IncidentStatus.IGNORED:
+                del self._announced[inc_id]
+                self._fire(inc, "resolved", reason=EVENT_REASON_IGNORED)
+                fired = True
             elif inc.status is IncidentStatus.RESOLVED:
                 del self._announced[inc_id]
                 self._fire(inc, "resolved")
@@ -1662,12 +1672,18 @@ class NetIntelligence:
         self._open_seen = pending
         return fired
 
-    def _fire(self, inc: Incident, state: str) -> None:
-        self.hass.bus.async_fire(EVENT_INCIDENT, self._event_data(inc, state))
+    def _fire(self, inc: Incident, state: str, *, reason: str | None = None) -> None:
+        self.hass.bus.async_fire(
+            EVENT_INCIDENT, self._event_data(inc, state, reason=reason)
+        )
 
-    def _event_data(self, inc: Incident, state: str) -> dict[str, Any]:
+    def _event_data(
+        self, inc: Incident, state: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
         """Bus payload (plan c9): router names, entry ids, the device of a
-        single router; the MAC only for a client incident."""
+        single router; the MAC only for a client incident. ``reason``:
+        ``ignored`` on the ``resolved`` of an ignored incident (E15), else
+        None."""
         entry_ids = [r for r in inc.routers if r != FLEET_ROUTER]
         names: list[str] = []
         for entry_id in entry_ids:
@@ -1698,6 +1714,7 @@ class NetIntelligence:
             "routers": names,
             "entry_ids": entry_ids,
             "device_id": device_id if isinstance(device_id, str) else None,
+            "reason": reason,
         }
         key = inc.scope_key.upper()
         if inc.scope is Scope.CLIENT and _MAC_RE.fullmatch(key):
@@ -1753,7 +1770,14 @@ class NetIntelligence:
                     for kind in _WAN_RECONNECT_KINDS
                 ),
             )
-        value, coverage = fleet_score(scores, self.settings)
+        # fleet incidents lower the fleet score only (P7 review E14), not
+        # when all their routers are in maintenance or excluded
+        fleet_incidents = [
+            inc
+            for inc in counted
+            if inc.scope is Scope.FLEET and self._fleet_counts(inc)
+        ]
+        value, coverage = fleet_score(scores, self.settings, fleet_incidents, now)
         self.view = NetView(
             routers=routers,
             fleet=FleetView(
@@ -1766,6 +1790,15 @@ class NetIntelligence:
             ),
         )
         async_dispatcher_send(self.hass, SIGNAL_NET_INTEL)
+
+    def _fleet_counts(self, inc: Incident) -> bool:
+        """Does a fleet incident lower the fleet score? Not when every
+        router it lists is in maintenance or excluded (E14)."""
+        excluded = set(self.settings.get("exclusions", {}).get("routers") or ())
+        real = [r for r in inc.routers if r != FLEET_ROUTER]
+        return not real or not all(
+            r in excluded or self.in_maintenance(r) for r in real
+        )
 
     def _schedule_wakeup(self, now: float) -> None:
         """Wake up for the next time-based change: an announcement coming

@@ -143,8 +143,12 @@ The panel shows the cause as one of four levels:
 
 Children stay silent: they do not lower the score, are not counted by the entities and fire no
 bus event. When the root has resolved and its "after" window has passed, a child that is
-still open counts as a problem of its own (it keeps the link for the history). A child still
-open one hour after that is released from its root.
+still open counts as a problem of its own only if it shows new evidence after that window
+(for example a router that is still down, or new reconnects); it keeps the link for the
+history. Without new evidence it stays silent until it resolves itself. A child still open one
+hour after the window is released from its root. When a router's outage ended only because
+its entry was unloaded or reloaded, its children get no "after" window: they stay silent until
+that release.
 
 ---
 
@@ -176,7 +180,10 @@ Each router gets a score from 0 to 100 over five areas:
   maintenance mode or excluded in the settings are left out.
 
 Fleet incidents (`lan_unreachable`, `wifi_auth_wave`) count only for the fleet entities, not
-for a single router.
+for a single router. They lower the fleet score by their penalty times their confidence (half
+when acknowledged), scaled with the weight of their area; for example a critical
+`wifi_auth_wave` lowers it by 40 × 30 / 100 = 12 points. A fleet incident whose routers are
+all in maintenance mode or excluded does not lower it.
 
 ---
 
@@ -217,14 +224,17 @@ Fired **once** per root incident and state:
 |---|---|
 | `opened` | A new root incident, after a settle time of 90 s (longer when a router polls more slowly) |
 | `reopened` | An incident that fired `opened` came back within its cooldown |
-| `resolved` | An announced incident resolved |
+| `resolved` | An announced incident resolved, or was ignored (`reason: ignored`) |
 
 Rules:
 
 - Only from severity `warning` upwards by default (`notify_min_severity`).
 - No event for children, for routers in maintenance mode, or for incidents that were
-  acknowledged before they were announced (then no `resolved` either). Once an incident is
-  ignored, it fires nothing more.
+  acknowledged before they were announced (then no `resolved` either).
+- Ignoring an announced incident fires `resolved` with `reason: ignored`, so an automation
+  waiting for the end does not hang; after that it fires nothing while it is ignored. When it
+  is re-activated and still present, it fires `reopened` (or `opened` if it was never
+  announced).
 - While a router has missed its poll and its outage may still be coming, announcements wait,
   at most 900 s.
 - Unloading or reloading a router entry ends its open outage silently (no event).
@@ -245,6 +255,7 @@ Fields:
 | `entry_ids` | Config entry IDs of those routers |
 | `device_id` | Device ID when exactly one router is involved, else `null` |
 | `mac` | Only for client incidents: the client's MAC address |
+| `reason` | `ignored` on the `resolved` of an ignored incident, else `null` |
 
 The logbook shows these events, for example "incident opened: wan_down (critical)".
 
@@ -335,7 +346,7 @@ entries or entries longer than 64 characters are rejected) and apply at once.
 | `thresholds.*` | Per incident type, see [What it detects](#what-it-detects) |
 | `thresholds.auto_resolve.clear` | 1800 s |
 | `thresholds.ignored.duration` | 7 days (default for "ignore") |
-| `exclusions` | `macs`, `ssids`, `routers`, `incident_types` (all empty) |
+| `exclusions` | `macs`, `ssids`, `routers`, `incident_types` (all empty); MACs with `:` or `-`, stored as `AA:BB:CC:DD:EE:FF` |
 | `maintenance.fleet_until` | none |
 
 Exclusions keep evidence away from the incident logic: an excluded router also leaves the fleet

@@ -224,11 +224,12 @@ when theirs is removed or reloaded and keep their entity IDs.
 
 Fired once per root incident with `state` `opened` (after a 90 s settle time), `reopened` or
 `resolved`, from severity `warning` upwards (setting `notify_min_severity`). Never for
-children or routers in maintenance mode.
+children or routers in maintenance mode. Ignoring an announced incident fires `resolved` with
+`reason: ignored`.
 
 Fields: `state`, `incident_id`, `type`, `severity`, `confidence`, `cause`, `cause_status`,
-`scope`, `routers` (names), `entry_ids`, `device_id` (one router only, else `null`) and, for
-client incidents, `mac`.
+`scope`, `routers` (names), `entry_ids`, `device_id` (one router only, else `null`), `reason`
+(`ignored` or `null`) and, for client incidents, `mac`.
 
 ```yaml
 automation:

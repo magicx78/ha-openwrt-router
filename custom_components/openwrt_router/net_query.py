@@ -134,8 +134,9 @@ def _time(query: Mapping[str, str], name: str) -> float | None:
 
 
 def _choice(query: Mapping[str, str], name: str, allowed: Iterable[str]) -> str | None:
+    allowed = tuple(allowed)  # a generator would be used up by the check
     raw = _text(query, name)
-    if raw is not None and raw not in set(allowed):
+    if raw is not None and raw not in allowed:
         raise QueryError(f"{name}: one of {', '.join(sorted(allowed))} expected")
     return raw
 
@@ -254,7 +255,8 @@ def incident_dict(
 
     Extra fields: ``cause_level``, ``area`` (score area, None = none),
     ``router_names``, ``duration_s`` (current episode: since the reopen or
-    the first sighting, up to the resolve time or ``now``) and ``child``
+    the first sighting, up to the resolve time, also of an ignored
+    incident whose condition ended, or ``now``) and ``child``
     (a silent child of a known incident, ``suppressed_child``: it does not
     count on its own).
     """
@@ -267,7 +269,12 @@ def incident_dict(
     out["area"] = incident_area(inc.type)
     out["router_names"] = [name_of(r) for r in inc.routers]
     start = inc.reopened_at if inc.reopened_at is not None else inc.first_seen
-    end = inc.resolved_at if inc.status is IncidentStatus.RESOLVED else None
+    # the condition ended: resolved, or ignored and cleared since (P7 review)
+    end = (
+        inc.resolved_at
+        if inc.status in (IncidentStatus.RESOLVED, IncidentStatus.IGNORED)
+        else None
+    )
     if end is None:
         end = max(now, inc.last_seen)
     out["duration_s"] = max(0.0, round(end - start, 1))
