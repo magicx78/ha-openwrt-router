@@ -259,7 +259,7 @@ class NetEvent:
             source=_opt_enum(Source, data, "source", Source.LOG),
             subject=_opt_dict(data, "subject"),
             signal=_int(data.get("signal")),
-            count=_opt(data, "count", _int, 1),
+            count=max(1, _opt(data, "count", _int, 1)),
             severity=_opt_enum(Severity, data, "severity", Severity.INFO),
             cause=_opt_str(data, "cause"),
             cause_status=None if status is None else _enum(CauseStatus, status),
@@ -467,6 +467,17 @@ class EventRing:
             self._items = deque(keep, maxlen=self.max_count)
         return dropped
 
+    def shift(self, delta: float) -> None:
+        """Move every event's ``ts`` by ``delta`` (large clock jump back).
+
+        ``src_ts`` (the router's own time) stays as it was.
+        """
+        if delta:
+            self._items = deque(
+                (replace(e, ts=e.ts + delta) for e in self._items),
+                maxlen=self.max_count,
+            )
+
     def remove_router(self, entry_id: str) -> int:
         """Drop all events of one router; return how many were removed."""
         keep = [e for e in self._items if e.router != entry_id]
@@ -552,7 +563,12 @@ class EventCounters:
         self._data: dict[str, dict[str, dict[str, dict[int, int]]]] = {}
 
     def add(self, router: str, kind: str, ts: float, n: int = 1) -> None:
-        """Count ``n`` occurrences at time ``ts``."""
+        """Count ``n`` occurrences at time ``ts``.
+
+        Ignored unless ``n`` is an int >= 1 and ``ts`` a finite number.
+        """
+        if _int(n) is None or n < 1 or _num(ts) is None:
+            return
         buckets = self._data.setdefault(router, {}).setdefault(kind, {"h": {}, "d": {}})
         hour = int(ts // _HOUR)
         buckets["h"][hour] = buckets["h"].get(hour, 0) + n

@@ -791,11 +791,18 @@ def test_clock_going_backwards_keeps_open_incident_and_its_timers() -> None:
 
 def test_clock_going_backwards_a_little_is_harmless() -> None:
     m = AlarmMachine()
-    inc_id = open_storm(m)
-    for t in (390, 380, 400, 399):
+    inc_id = open_storm(m)  # evidence 0..400
+    for t in (390, 380, 400, 399, 100):  # all within the 300 s skew limit
         assert feed(m, t) == []
     live = m.get(inc_id)
     assert live is not None and live.status is IncidentStatus.ACTIVE
+    # no time passed: stored times and timers are exactly as before
+    assert (live.first_seen, live.last_seen, live.occurrences) == (0, 400, 5)
+    assert m.last_now == 400
+    assert feed(m, 2199) == []
+    out = feed(m, 2200)
+    assert states(out) == [RESOLVED]
+    assert out[0].incident.resolved_at == 2200
 
 
 def test_clock_jump_back_keeps_level_streak_without_opening() -> None:
@@ -810,12 +817,32 @@ def test_clock_jump_back_keeps_level_streak_without_opening() -> None:
 
 def test_clock_jump_back_does_not_crash_with_acked_and_ignored_incidents() -> None:
     m = AlarmMachine()
-    a = open_storm(m, key="A")
-    b = open_storm(m, start=1000, key="B")
+    a = open_storm(m, key="A")  # evidence 0..400
+    b = open_storm(m, start=1000, key="B")  # evidence 1000..1400
     m.acknowledge(a)
     m.ignore(b, now=1400, until=3000)
-    for t in (1200, 1100, 10000, 5):
-        feed(m, t)
+
+    def status(inc_id: str) -> tuple[IncidentStatus, float | None]:
+        inc = m.get(inc_id)
+        assert inc is not None
+        return inc.status, inc.resolved_at
+
+    # small steps back (200 s, 300 s): no time passed, nothing changes
+    assert feed(m, 1200) == []
+    assert feed(m, 1100) == []
+    assert status(a) == (IncidentStatus.ACKNOWLEDGED, None)
+    assert status(b) == (IncidentStatus.IGNORED, None)
+    # forward jump: A resolves visibly (acknowledged), B silently, then the
+    # ignore of B ends and it stays resolved
+    out = feed(m, 10000)
+    assert states(out) == [RESOLVED]
+    assert out[0].incident.id == a
+    assert status(a) == (IncidentStatus.RESOLVED, 2200)
+    assert status(b) == (IncidentStatus.RESOLVED, 3200)
+    # a large jump back shifts every stored time by the same amount
+    assert feed(m, 5) == []
+    assert status(a) == (IncidentStatus.RESOLVED, 2200 - 9995)
+    assert status(b) == (IncidentStatus.RESOLVED, 3200 - 9995)
     assert len(m.incidents()) == 2
 
 
@@ -871,10 +898,28 @@ def test_from_dict_survives_damaged_state() -> None:
     for junk in (None, "x", [], {}, {"incidents": "no", "tracks": 5}):
         m = AlarmMachine.from_dict(junk)
         assert m.incidents() == []
-    data = AlarmMachine().to_dict()
-    data["incidents"] = [{"id": "broken"}, None, 5]
-    data["tracks"] = [{"type": STORM}, "junk", None]
-    assert AlarmMachine.from_dict(data).incidents() == []
+        assert m.last_now is None
+        # an empty machine from junk works normally
+        assert open_storm(m) == "inc-1"
+
+    good = AlarmMachine()
+    inc_id = open_storm(good)  # inc-1, evidence 0..400
+    data = json.loads(json.dumps(good.to_dict()))
+    valid_incident = data["incidents"][0]
+    data["incidents"] = [{"id": "broken"}, None, 5, valid_incident]
+    data["tracks"] = [{"type": STORM}, "junk", None, *data["tracks"]]
+    data["seq"] = "junk"
+    data["last_now"] = "junk"
+    restored = AlarmMachine.from_dict(data)
+    # only the valid incident survives, unchanged
+    assert snapshot(restored) == snapshot(good)
+    assert restored.last_now is None
+    # its timers still work: resolves 1800 s after the last evidence
+    assert feed(restored, 2199) == []
+    assert states(feed(restored, 2200)) == [RESOLVED]
+    # ids continue after the highest restored id despite the junk seq
+    assert open_storm(restored, start=10_000, key="B") == "inc-2"
+    assert restored.get(inc_id) is not None
 
 
 def test_restored_open_incident_without_track_still_auto_resolves() -> None:
@@ -944,7 +989,9 @@ def test_resolved_incidents_beyond_retention_are_dropped() -> None:
     feed(m, 0, ev("system_reboot", "r1", scope=Scope.ROUTER))
     feed(m, 1800)  # resolved
     assert len(m.incidents()) == 1
-    feed(m, 1800 + 31 * 86400)
+    feed(m, 1800 + 31 * 86400)  # forward jump: pruning waits one step
+    assert len(m.incidents()) == 1
+    feed(m, 1800 + 31 * 86400 + 60)
     assert m.incidents() == []
 
 

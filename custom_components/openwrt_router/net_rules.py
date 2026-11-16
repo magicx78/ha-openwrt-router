@@ -37,6 +37,7 @@ from enum import StrEnum
 from typing import Any
 
 from .net_events import (
+    CLOCK_SKEW_LIMIT,
     MAX_EVIDENCE,
     MAX_INCIDENTS,
     CauseStatus,
@@ -188,27 +189,42 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 _SEVERITY_KEYS = frozenset({"severity", "notify_min_severity", "inferred_severity"})
 _FIXED_KEYS = frozenset({"schema", "mode"})
+# Whole numbers >= 1 (a float like 3000.0 is accepted and stored as int).
 _INT_KEYS = frozenset(
     {"count", "debounce", "clear_below", "retention_days", "max_events"}
 )
+_INT_UPPER = {"retention_days": 365, "max_events": 10_000}
+# Durations that must be > 0 (``clear`` too, except in level rules).
+_POSITIVE_KEYS = frozenset({"window", "duration"})
+_FRACTION_KEYS = frozenset(
+    {"min_coverage", "min_area_coverage", "min_ratio", "inferred_confidence"}
+)
+# Measured levels and dBm limits: any finite number.
+_FREE_KEYS = frozenset({"raise", "value", "weak_dbm", "clear_dbm"})
 
 
 def merge_settings(stored: Any) -> dict[str, Any]:
     """Overlay stored settings on the defaults; return a private deep copy.
 
-    Unknown keys, values of the wrong type, non-finite numbers and invalid
-    severity names are discarded (the default stays). ``schema`` and the rule
-    ``mode`` cannot be changed.
+    Unknown keys, values of the wrong type, non-finite numbers, values out
+    of range and invalid severity names are discarded (the default stays).
+    Ranges: counts, ``debounce``, ``clear_below`` whole numbers >= 1
+    (``retention_days`` <= 365, ``max_events`` <= 10000); ``window``,
+    ``duration`` and a duration ``clear`` > 0; fractions 0..1; level
+    thresholds (``raise``, level ``clear``, ``escalate.value``) and dBm
+    limits free; everything else >= 0. ``schema`` and the rule ``mode``
+    cannot be changed.
     """
-    return _overlay(DEFAULT_SETTINGS, stored, "")
+    return _overlay(DEFAULT_SETTINGS, stored, "", None)
 
 
-def _overlay(default: Any, stored: Any, key: str) -> Any:
+def _overlay(default: Any, stored: Any, key: str, mode: str | None) -> Any:
     if isinstance(default, dict):
         if not isinstance(stored, dict):
             return copy.deepcopy(default)
+        sub_mode = default.get("mode", mode)
         return {
-            k: _overlay(v, stored[k], k) if k in stored else copy.deepcopy(v)
+            k: _overlay(v, stored[k], k, sub_mode) if k in stored else copy.deepcopy(v)
             for k, v in default.items()
         }
     if key in _FIXED_KEYS:
@@ -217,11 +233,12 @@ def _overlay(default: Any, stored: Any, key: str) -> Any:
         if not isinstance(stored, list):
             return list(default)
         return [s for s in stored if isinstance(s, str)]
-    valid = _valid_leaf(default, stored, key)
-    return stored if valid else copy.deepcopy(default)
+    if not _valid_leaf(default, stored, key, mode):
+        return copy.deepcopy(default)
+    return int(stored) if key in _INT_KEYS else stored
 
 
-def _valid_leaf(default: Any, stored: Any, key: str) -> bool:
+def _valid_leaf(default: Any, stored: Any, key: str, mode: str | None) -> bool:
     if key in _SEVERITY_KEYS:
         return isinstance(stored, str) and stored in Severity._value2member_map_
     if default is None:
@@ -229,10 +246,20 @@ def _valid_leaf(default: Any, stored: Any, key: str) -> bool:
     if isinstance(default, bool):
         return isinstance(stored, bool)
     if isinstance(default, (int, float)):
-        if not _is_number(stored):
-            return False
-        return key not in _INT_KEYS or float(stored).is_integer()
+        return _is_number(stored) and _in_bounds(key, float(stored), mode)
     return isinstance(stored, type(default))
+
+
+def _in_bounds(key: str, value: float, mode: str | None) -> bool:
+    if key in _FREE_KEYS or (key == "clear" and mode == "level"):
+        return True
+    if key in _INT_KEYS:
+        return value.is_integer() and 1 <= value <= _INT_UPPER.get(key, math.inf)
+    if key == "clear" or key in _POSITIVE_KEYS:
+        return value > 0
+    if key in _FRACTION_KEYS:
+        return 0 <= value <= 1
+    return value >= 0
 
 
 def _is_number(value: Any) -> bool:
@@ -315,6 +342,24 @@ class Transition:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class ClockStep:
+    """Result of ``AlarmMachine.sync_clock``.
+
+    ``now`` is the time to use for this step (never below the previous one
+    for small backward steps); ``shift`` is how far all stored times were
+    moved (0, or negative after a large backward jump).
+    """
+
+    now: float
+    shift: float = 0.0
+
+
+# Stale handling for a loaded incident whose type has no rule (yet): it
+# resolves after the general ``auto_resolve`` without evidence.
+_FALLBACK_RULE: dict[str, Any] = {"mode": "event", "count": 1, "cooldown": 0}
+
+
 # --- internal per-(type, scope_key) tracking state ------------------------------------
 
 
@@ -395,6 +440,7 @@ def _valid_entry(entry: Any) -> bool:
         and _is_number(entry[0])
         and isinstance(entry[1], int)
         and not isinstance(entry[1], bool)
+        and entry[1] > 0
     )
 
 
@@ -409,24 +455,39 @@ class AlarmMachine:
     transitions. Each transition is reported exactly once.
 
     Silent states: an ``ignored`` incident (until ``ignore_until``) emits no
-    transitions at all. An ``acknowledged`` incident emits no ``opened`` /
-    ``updated`` / ``reopened`` but does emit ``resolved``.
+    transitions at all; this holds for its (``type``, ``scope_key``) even
+    after it resolved silently: a return before ``ignore_until`` reopens it
+    silently, whatever the cooldown. An ``acknowledged`` incident emits no
+    ``opened`` / ``updated`` / ``reopened`` but does emit ``resolved``.
 
     Severity only rises while an incident is open (escalation is sticky); a
-    reopen starts again from the rule severity.
+    rise by rule or by evidence is reported as ``updated``. A reopen starts
+    again from the rule severity and counts only evidence after the resolve.
 
     Dedup: one incident per (``type``, ``scope_key``); for window rules an
     evidence whose ``event_id`` is already among the tracked entries is
-    dropped, so a re-read log line is not counted twice.
+    dropped, so a re-read log line is not counted twice. Level rules take at
+    most one observation per poll: a second one at the same ``now`` is
+    dropped, so debounce counts polls, not evidence.
 
-    Clock jumps: if ``now`` is lower than in the previous call, all stored
-    timestamps are shifted by the same amount, so elapsed times stay as they
-    were and nothing resolves or opens because of the jump. A forward jump
-    cannot be told apart from real elapsed time: open incidents resolve, but
-    ``resolved_at`` is the moment the condition cleared (last evidence +
-    ``clear``), not the jumped clock; old window entries age out, and a
-    level ``hold`` or debounce streak restarts after ``auto_resolve``
-    without polls, so a jump alone never opens an incident.
+    Maintenance: evidence flagged ``maintenance`` never counts and breaks a
+    running series (window entries, debounce streak, hold) of a
+    (``type``, ``scope_key``) without an open incident.
+
+    Types without a rule: their evidence is ignored; a loaded open incident
+    of such a type resolves after the general ``auto_resolve``.
+
+    Clock jumps (see ``sync_clock``): a step back of up to
+    ``CLOCK_SKEW_LIMIT`` counts as "no time passed" (``now`` is held at the
+    previous value). A larger step back shifts all stored timestamps by the
+    same amount, so elapsed times stay as they were and nothing resolves or
+    opens because of the jump. A forward jump cannot be told apart from real
+    elapsed time: open incidents resolve, but ``resolved_at`` is the moment
+    the condition cleared (last evidence + ``clear``), not the jumped clock;
+    old window entries age out, and a level ``hold`` or debounce streak
+    restarts after ``auto_resolve`` without polls, so a jump alone never
+    opens an incident. Retention pruning pauses after a forward jump of more
+    than ``CLOCK_SKEW_LIMIT`` until the clock moves on normally again.
     """
 
     def __init__(
@@ -441,8 +502,48 @@ class AlarmMachine:
         self._tracks: dict[tuple[str, str], _Track] = {}
         self._seq = 0
         self._last_now: float | None = None
+        self._prune_held = False
 
     # -- public ---------------------------------------------------------------
+
+    @property
+    def prune_held(self) -> bool:
+        """True after a forward clock jump until time moves on normally."""
+        return self._prune_held
+
+    @property
+    def last_now(self) -> float | None:
+        """The effective time of the previous step, None before the first."""
+        return self._last_now
+
+    def sync_clock(self, now: float) -> ClockStep:
+        """Advance the machine clock to ``now``; see the class doc on jumps.
+
+        ``update`` calls this itself. A caller that stamps its own records
+        (the engine) calls it first and uses ``ClockStep.now`` for them and
+        for the following ``update``; ``ClockStep.shift`` tells it how far
+        to move its own stored times. Raises ``ValueError`` for a time that
+        is not a finite number.
+        """
+        if not _is_number(now):
+            raise ValueError(f"invalid time: {now!r}")
+        now = float(now)
+        shift = 0.0
+        last = self._last_now
+        if last is not None:
+            step = now - last
+            if step < 0:
+                if -step <= CLOCK_SKEW_LIMIT:
+                    now = last  # small step back: no time passed
+                else:
+                    shift = step
+                    self._shift(step)
+            elif step > CLOCK_SKEW_LIMIT:
+                self._prune_held = True
+            elif step > 0:
+                self._prune_held = False
+        self._last_now = now
+        return ClockStep(now, shift)
 
     def set_settings(self, settings: Mapping[str, Any] | None) -> None:
         """Replace the settings (merged over the defaults)."""
@@ -463,12 +564,13 @@ class AlarmMachine:
             _LOGGER.debug("Ignoring update with invalid time %r", now)
             return []
         out: list[Transition] = []
-        self._sync_clock(float(now))
+        now = self.sync_clock(now).now
         self._resolve_stale(now, out)
         self._expire_ignores(now, out)
         for item in evidence:
             self._ingest(now, item, out)
-        self._prune(now)
+        if not self._prune_held:
+            self._prune(now)
         return out
 
     def acknowledge(self, incident_id: str) -> bool:
@@ -480,7 +582,15 @@ class AlarmMachine:
         return True
 
     def ignore(self, incident_id: str, now: float, until: float | None = None) -> bool:
-        """Suppress an open incident until ``until`` (default: settings duration)."""
+        """Suppress an open incident until ``until`` (default: settings duration).
+
+        False if the incident is unknown or resolved, ``now`` is not a finite
+        number, or ``until`` is not a finite number after ``now``.
+        """
+        if not _is_number(now) or (
+            until is not None and (not _is_number(until) or until <= now)
+        ):
+            return False
         inc = self._incidents.get(incident_id)
         if inc is None or inc.status is IncidentStatus.RESOLVED:
             return False
@@ -535,37 +645,34 @@ class AlarmMachine:
         return best
 
     def _reconcile(self) -> None:
-        """Make restored incidents and tracks agree; recreate lost tracks."""
-        for key, track in list(self._tracks.items()):
+        """Make restored incidents and tracks agree; recreate lost tracks.
+
+        Per (``type``, ``scope_key``) the track points at the open incident,
+        else at the newest one, so a reopen inside the cooldown still works
+        when the stored tracks were lost.
+        """
+        for track in self._tracks.values():
             if track.incident_id not in self._incidents:
                 track.incident_id = None
                 track.live = False
+        latest: dict[tuple[str, str], Incident] = {}
         for inc in sorted(self._incidents.values(), key=lambda i: i.last_seen):
-            track = self._tracks.get(inc.key)
-            condition = inc.status in (
-                IncidentStatus.ACTIVE,
-                IncidentStatus.ACKNOWLEDGED,
-            ) or (inc.status is IncidentStatus.IGNORED and inc.resolved_at is None)
+            cur = latest.get(inc.key)
+            if cur is None or _is_open(inc) or not _is_open(cur):
+                latest[inc.key] = inc
+        for key, inc in latest.items():
+            track = self._tracks.get(key)
             if track is None:
-                if not condition:
-                    continue
-                track = _Track(inc.type, inc.scope_key)
-                self._tracks[inc.key] = track
-            if track.incident_id not in (None, inc.id) and not condition:
-                continue
-            if condition or track.incident_id is None:
+                track = self._tracks[key] = _Track(*key)
+            cur = self._incidents.get(track.incident_id or "")
+            if cur is None or (cur is not inc and not _is_open(cur)):
                 track.incident_id = inc.id
-            if track.incident_id == inc.id:
-                track.live = condition
-                if condition and track.last_evidence is None:
-                    track.last_evidence = inc.last_seen
-                    track.last_obs = inc.last_seen
-                    track.entries = [[inc.last_seen, 1, None, ""]]
-
-    def _sync_clock(self, now: float) -> None:
-        if self._last_now is not None and now < self._last_now:
-            self._shift(now - self._last_now)
-        self._last_now = now
+                cur = inc
+            track.live = _is_open(cur)
+            if track.live and track.last_evidence is None:
+                track.last_evidence = cur.last_seen
+                track.last_obs = cur.last_seen
+                track.entries = [[cur.last_seen, 1, None, ""]]
 
     def _shift(self, delta: float) -> None:
         for track in self._tracks.values():
@@ -612,7 +719,9 @@ class AlarmMachine:
         for track in self._tracks.values():
             rule = self._rule(track.type)
             if rule is None:
-                continue
+                if self._live_incident(track) is None:
+                    continue
+                rule = _FALLBACK_RULE
             if rule["mode"] == "level":
                 self._stale_level(track, now, out)
             else:
@@ -693,9 +802,16 @@ class AlarmMachine:
 
     def _ingest(self, now: float, item: Evidence, out: list[Transition]) -> None:
         rule = self._rule(item.type)
-        if rule is None or item.maintenance:
+        if rule is None:
             return
         key = (item.type, item.scope_key)
+        if item.maintenance:
+            # Never counts, and breaks a running series (not an open incident).
+            track = self._tracks.get(key)
+            if track is not None and self._live_incident(track) is None:
+                track.reset_streak()
+                track.entries = []
+            return
         if rule["mode"] == "level":
             if not _is_number(item.value):
                 return
@@ -713,7 +829,7 @@ class AlarmMachine:
         track: _Track,
         out: list[Transition],
     ) -> None:
-        n = max(1, item.count)
+        n = _evidence_count(item.count)
         assert track.entries is not None
         if item.event_id is not None and any(
             e[2] == item.event_id for e in track.entries
@@ -724,8 +840,9 @@ class AlarmMachine:
         self._trim(track, rule, now)
         inc = self._live_incident(track)
         if inc is not None:
-            self._absorb(inc, item, now, n)
-            self._finish_update(inc, self._escalate(inc, rule, track, now, None), out)
+            changed = self._absorb(inc, item, now, n)
+            changed = self._escalate(inc, rule, track, now, None) or changed
+            self._finish_update(inc, changed, out)
             return
         count, window, _clear, _below = self._window_params(rule)
         total = _sum_within(track, window, now)
@@ -742,6 +859,8 @@ class AlarmMachine:
         track: _Track,
         out: list[Transition],
     ) -> None:
+        if track.last_obs is not None and now <= track.last_obs:
+            return  # one observation per poll: debounce counts polls
         value = float(item.value)  # type: ignore[arg-type]
         raise_at = float(rule["raise"])
         clear_at = float(rule.get("clear", raise_at))
@@ -753,10 +872,9 @@ class AlarmMachine:
             if track.pending_since is None:
                 track.pending_since = now
             if inc is not None:
-                self._absorb(inc, item, now, 1)
-                self._finish_update(
-                    inc, self._escalate(inc, rule, track, now, value), out
-                )
+                changed = self._absorb(inc, item, now, 1)
+                changed = self._escalate(inc, rule, track, now, value) or changed
+                self._finish_update(inc, changed, out)
                 return
             assert track.entries is not None
             track.entries.append([now, 1, item.event_id, item.kind])
@@ -819,15 +937,15 @@ class AlarmMachine:
         value: float | None = None,
     ) -> None:
         prev = self._incidents.get(track.incident_id or "")
-        cooldown = float(rule.get("cooldown", 0))
         base = _severity(rule.get("severity"))
-        shorts = [_short(e) for e in entries][-MAX_EVIDENCE:]
-        if (
-            prev is not None
-            and prev.resolved_at is not None
-            and cooldown > 0
-            and now - prev.resolved_at < cooldown
-        ):
+        if prev is not None and self._reopens(prev, rule, now):
+            assert prev.resolved_at is not None
+            if rule["mode"] != "level":
+                # only what came after the resolve counts for the reopen
+                cut = prev.resolved_at
+                entries = [e for e in entries if e[0] > cut] or entries[-1:]
+                occurrences = sum(e[1] for e in entries)
+            shorts = [_short(e) for e in entries][-MAX_EVIDENCE:]
             inc = prev
             state = TransitionState.REOPENED
             inc.resolved_at = None
@@ -851,7 +969,7 @@ class AlarmMachine:
                 severity=base,
                 confidence=_confidence(item),
                 origin=item.origin,
-                evidence=shorts,
+                evidence=[_short(e) for e in entries][-MAX_EVIDENCE:],
                 first_seen=first_seen,
                 last_seen=now,
                 occurrences=occurrences,
@@ -864,15 +982,35 @@ class AlarmMachine:
         if inc.status is not IncidentStatus.IGNORED:
             out.append(Transition(state, inc.copy()))
 
-    def _absorb(self, inc: Incident, item: Evidence, now: float, n: int) -> None:
+    @staticmethod
+    def _reopens(prev: Incident, rule: dict[str, Any], now: float) -> bool:
+        """Reopen ``prev`` instead of opening a new incident?
+
+        Yes inside the cooldown after its resolve, and while an ignore of it
+        is still running (silently, whatever the cooldown).
+        """
+        if prev.resolved_at is None:
+            return False
+        if (
+            prev.status is IncidentStatus.IGNORED
+            and prev.ignore_until is not None
+            and prev.ignore_until > now
+        ):
+            return True
+        cooldown = float(rule.get("cooldown", 0))
+        return cooldown > 0 and now - prev.resolved_at < cooldown
+
+    def _absorb(self, inc: Incident, item: Evidence, now: float, n: int) -> bool:
+        """Add one evidence to an open incident; True if the severity rose."""
         inc.occurrences += n
         inc.last_seen = now
         if item.event_id is not None or item.kind:
             inc.evidence.append(_short([now, n, item.event_id, item.kind]))
             del inc.evidence[:-MAX_EVIDENCE]
-        self._merge_meta(inc, item)
+        return self._merge_meta(inc, item)
 
-    def _merge_meta(self, inc: Incident, item: Evidence) -> None:
+    def _merge_meta(self, inc: Incident, item: Evidence) -> bool:
+        """Merge routers, confidence, cause; True if the severity rose."""
         if item.router and item.router not in inc.routers:
             inc.routers = sorted([*inc.routers, item.router])
         inc.affected = max(inc.affected, item.affected)
@@ -889,7 +1027,8 @@ class AlarmMachine:
             inc.cause = item.cause
             inc.cause_status = item.cause_status
         if item.severity is not None:
-            _raise_severity(inc, item.severity)
+            return _raise_severity(inc, item.severity)
+        return False
 
     def _escalate(
         self,
@@ -942,6 +1081,20 @@ class AlarmMachine:
 
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _is_open(inc: Incident) -> bool:
+    """Condition still present: active, acknowledged or ignored-not-resolved."""
+    return inc.status in (IncidentStatus.ACTIVE, IncidentStatus.ACKNOWLEDGED) or (
+        inc.status is IncidentStatus.IGNORED and inc.resolved_at is None
+    )
+
+
+def _evidence_count(value: Any) -> int:
+    """An evidence count as int >= 1 (bad or non-positive counts count once)."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return 1
 
 
 def _as_int(value: Any) -> int:
