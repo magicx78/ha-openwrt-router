@@ -663,10 +663,14 @@ def test_compact_machine_round_trip_and_old_full_format() -> None:
     m.correlate(T0 + 20, Topology())
     full, compact = m.to_dict(), m.to_dict(compact=True)
     assert len(str(compact)) < len(str(full))
-    for stored in (full, compact):
-        back = AlarmMachine.from_dict(stored)
-        assert back.incidents() == m.incidents()
-        assert back.to_dict() == full
+    back = AlarmMachine.from_dict(full)
+    assert back.incidents() == m.incidents()
+    assert back.to_dict() == full
+    # compact: open tracks are packed without kind (never read while the
+    # incident is open), so the compact form round-trips, not the full one
+    back = AlarmMachine.from_dict(compact)
+    assert back.incidents() == m.incidents()
+    assert back.to_dict(compact=True) == compact
     # a full record written before P5 (no parent_id/children) still loads
     old = full["incidents"][0].copy()
     old.pop("parent_id")
@@ -1205,17 +1209,48 @@ async def test_store_with_500_open_incidents_and_3000_events(clock: Clock) -> No
     assert after.occurrences == before.occurrences
 
 
-async def test_store_worst_case_500_storming_clients_is_written_with_a_warning(
+async def test_store_500_storming_clients_and_3000_events_stay_under_the_limit(
     clock: Clock, caplog: pytest.LogCaptureFixture
 ) -> None:
     # 500 clients storming at the same time: every window track keeps its
-    # entries for the 1800 s clear time; the machine alone exceeds the limit
+    # entries for the 1800 s clear time. Packed (P6) they fit with events.
     intel = await _intel_with_500_incidents("wifi_reconnect_storm", 60.0)
     payload = intel._data_to_save()
+    size = intel.last_save_bytes
+    full_tracks = {**payload, "events": [], "machine": intel.machine.to_dict()}
     print(
-        f"worst case store bytes: {intel.last_save_bytes}, "
-        f"events kept {len(payload['events'])}"
+        f"storm store bytes: {size}, events kept {len(payload['events'])}, "
+        f"full machine without events {_ha_file_bytes(full_tracks)}"
     )
-    assert payload["events"] == []
+    assert size is not None and size <= INTEL_MAX_STORE_BYTES
+    assert len(payload["events"]) >= 1000  # some events go, not all
     assert len(payload["machine"]["incidents"]) == 500  # never trimmed
-    assert "without any event" in caplog.text
+    assert "without any event" not in caplog.text
+    packed = [t for t in payload["machine"]["tracks"] if "packed" in t]
+    assert len(packed) == 500 and all("entries" not in t for t in packed)
+    # restored tracks count and deduplicate as before
+    restored = AlarmMachine.from_dict(payload["machine"])
+    before = intel.machine.to_dict()["tracks"]
+    after = restored.to_dict()["tracks"]
+    assert [[e[:3] for e in t["entries"]] for t in after] == [
+        [e[:3] for e in t["entries"]] for t in before
+    ]
+    mac = "02:00:5E:30:00:00"
+    [inc] = [i for i in restored.incidents() if i.scope_key == mac]
+    seen = inc.occurrences
+    old = intel.machine.to_dict()["tracks"][0]["entries"][-1]
+    restored.update(
+        old[0] + 1,
+        [
+            Evidence(
+                "wifi_reconnect_storm",
+                mac,
+                Scope.CLIENT,
+                kind="wifi.reconnect",
+                event_id=old[2],
+                count=5,
+                router=old[4],
+            )
+        ],
+    )
+    assert restored.get(inc.id).occurrences == seen  # the same line again

@@ -39,8 +39,16 @@ from .const import (
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator
+from .net_entities import async_setup_switches as async_setup_intel_switches
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# One switch action per router at a time: Wi-Fi and service switches run
+# uci commits and reloads on the router (quality scale "parallel-updates";
+# before, async entities had no limit). State updates come from the
+# coordinator or the engine (push), so this limits only the actions.
+PARALLEL_UPDATES = 1
 
 
 async def async_setup_entry(
@@ -92,6 +100,8 @@ async def async_setup_entry(
 
     async_add_entities(entities)
     _LOGGER.debug("Added %d OpenWrt switch entities", len(entities))
+    # Network intelligence (P6): maintenance switch, state in the engine.
+    async_setup_intel_switches(hass, entry.entry_id, async_add_entities)
 
 
 class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntity):

@@ -803,7 +803,9 @@ async def test_diagnostics_show_counts_only(
     assert intel["counts_by_kind_24h"]["wifi.connected"] == 1
     assert intel["active_by_type"] == {"wifi_auth_failures": 1}
     assert intel["log_mark_stored"] is True
-    assert intel["score"] is None and intel["coverage"] is None
+    # P6: a poll with only a log read covers too little: unknown, never 100
+    assert intel["score"] is None and 0 <= intel["coverage"] < 0.5
+    assert intel["maintenance"] is False
     dump = json.dumps(result, default=str).lower()
     for secret in (MAC1, MAC2, IP1, SSID, "phy1-ap0", "br-lan", f"{entry.entry_id}:1"):
         assert secret.lower() not in json.dumps(intel).lower(), secret

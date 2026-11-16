@@ -14,6 +14,19 @@ on every poll; their findings become events and evidence for the alarm
 machine. The WLAN detectors (P4) and the correlation (P5) run here too;
 score, entities and bus events (P6) build on it.
 
+Score, entities and bus event (P6): after every machine step (and on a
+timer for time-based changes) the engine re-reads the incidents after
+``correlate``, announces new roots on the HA bus (``EVENT_INCIDENT``) once
+the settle time has passed and no router is late (a parent may still be on
+its way, e.g. an outage needs several failed polls), and builds a
+``NetView`` (score per router and for the fleet, counts) that the entities
+read when ``SIGNAL_NET_INTEL`` is sent. Children (``parent_id`` of a known
+incident) never fire a bus event. Maintenance (per router from the switch,
+fleet-wide via ``settings.maintenance.fleet_until``) marks events, blocks
+new and reopened incidents and keeps the router out of the fleet score;
+``settings.exclusions`` (incident types, routers, SSIDs, MACs) keep
+evidence away from the machine.
+
 Correlation (P5): the engine follows ``fleet.FleetOutageTracker`` (observer
 hook) and turns its state into ``router_unreachable`` / ``lan_unreachable``
 incidents. After every machine step (a poll of any router, an outage start
@@ -63,21 +76,29 @@ import asyncio
 import logging
 import math
 import os
+import re
 import shutil
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any
 
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.json import prepare_save_json
 from homeassistant.helpers.storage import Store
 
 from .const import (
     DOMAIN,
     ERROR_TYPE_AUTH,
+    EVENT_INCIDENT,
+    INTEL_ANNOUNCE_HOLD_MAX_SECONDS,
+    INTEL_ANNOUNCE_SETTLE_SECONDS,
     INTEL_MAX_STORE_BYTES,
     INTEL_PRUNE_INTERVAL_SECONDS,
     INTEL_SAVE_DELAY_SECONDS,
@@ -87,6 +108,7 @@ from .const import (
     LLDP_REFRESH_INTERVAL,
     LLDP_STATUS_NO_NEIGHBORS,
     LLDP_STATUS_OK,
+    SIGNAL_NET_INTEL,
 )
 from .coordinator import LogBatch
 from .fleet import async_get_outage_tracker, dhcp_context
@@ -107,6 +129,7 @@ from .net_events import (
     CauseStatus,
     EventCounters,
     EventRing,
+    Incident,
     IncidentStatus,
     NetEvent,
     Origin,
@@ -122,25 +145,32 @@ from .net_rules import (
     LOG_EVENT_META,
     ROUTER_REACHABLE_KIND,
     ROUTER_UNREACHABLE_KIND,
+    WIFI_AUTH_KINDS,
     WIFI_LOG_RULES,
+    WIFI_RECONNECT_KIND,
     AlarmMachine,
+    AreaInput,
     Evidence,
     Finding,
     InfraSnapshot,
     InfraState,
     RouterLinks,
+    RouterScore,
     Topology,
     Uplink,
     WifiContext,
     WifiSnapshot,
     WifiState,
     build_topology,
+    counted_incidents,
     decline_cause,
     detect_infrastructure,
     detect_wifi,
     finding_evidence,
+    fleet_score,
     log_event_evidence,
     merge_settings,
+    router_score,
     wifi_auth_evidence,
     wifi_context,
     wifi_log_meta,
@@ -174,6 +204,48 @@ _CATEGORY_MAP: dict[str, Category] = {
 # number of lines in ``count``: a crash loop or a dead resolver repeats.
 _AGGREGATED_CATEGORIES = frozenset({CATEGORY_SYSTEM, CATEGORY_DNS})
 _PROCESS_SOURCE = {"netifd": Source.NETIFD, "procd": Source.PROCD}
+
+# P6: data is fresh up to this many poll intervals (plan c6); a router is
+# "late" (its outage may still be coming) after this many intervals.
+_FRESH_INTERVALS = 3.0
+_LATE_INTERVALS = 1.25
+_DEFAULT_INTERVAL = 60.0
+# WAN reconnects (``wan_unstable`` evidence) for the WAN stability sensor.
+_WAN_RECONNECT_KINDS = ("wan.up", "wan.reconnect")
+_MAC_RE = re.compile(r"[0-9A-F]{2}(?::[0-9A-F]{2}){5}")
+
+
+@dataclass(frozen=True)
+class RouterView:
+    """What the entities of one router show (built in ``_publish``)."""
+
+    score: RouterScore
+    maintenance: bool = False
+    incidents_active: int = 0
+    critical: bool = False
+    reconnects_1h: int = 0
+    auth_errors_1h: int = 0
+    wan_reconnects_24h: int = 0
+
+
+@dataclass(frozen=True)
+class FleetView:
+    """What the fleet entities show; ``score`` None = unknown."""
+
+    score: int | None = None
+    coverage: float = 0.0
+    routers: int = 0
+    maintenance: int = 0
+    incidents_active: int = 0
+    critical: bool = False
+
+
+@dataclass(frozen=True)
+class NetView:
+    """Snapshot of the engine for the entities (read only)."""
+
+    routers: Mapping[str, RouterView] = field(default_factory=dict)
+    fleet: FleetView = field(default_factory=FleetView)
 
 
 @callback
@@ -323,6 +395,20 @@ class NetIntelligence:
         self._closed = False
         self.last_save_bytes: int | None = None
         self.trimmed_events = 0
+        # P6: routers in maintenance (stored; the switch restores it too),
+        # the announced incidents (id -> reopen_count, stored: no second
+        # "opened" after a restart), when an unannounced incident was first
+        # seen open (in memory: a restart waits the settle time again), the
+        # time and poll interval of each router's last new data, the view
+        # for the entities, the wake-up timer and the fleet entity anchor.
+        self._maintenance: set[str] = set()
+        self._announced: dict[str, int] = {}
+        self._open_seen: dict[tuple[str, int], float] = {}
+        self._seen: dict[str, tuple[float, float]] = {}
+        self.view = NetView()
+        self._unsub_timer: Callable[[], None] | None = None
+        self._fleet_anchor: str | None = None
+        self._fleet_claims: dict[str, dict[str, Callable[[], None]]] = {}
 
     # -- life cycle ---------------------------------------------------------------
 
@@ -408,6 +494,8 @@ class NetIntelligence:
         self._seq = 0
         self._log_marks = {}
         self._wan_gateways = set()
+        self._maintenance = set()
+        self._announced = {}
 
     @callback
     def register(self, entry_id: str) -> None:
@@ -417,6 +505,7 @@ class NetIntelligence:
         self._last_data.pop(entry_id, None)
         self._infra.pop(entry_id, None)
         self._wifi.forget(entry_id)
+        self._seen.pop(entry_id, None)
 
     @callback
     def close(self) -> None:
@@ -437,6 +526,12 @@ class NetIntelligence:
         self._lan_routers = []
         self._uplinks.clear()
         self._topology = Topology()
+        self._seen.clear()
+        self._open_seen.clear()
+        self._cancel_timer()
+        self._fleet_anchor = None
+        self._fleet_claims.clear()
+        self.view = NetView()
 
     @callback
     def attach_outages(self, tracker: Any) -> None:
@@ -473,6 +568,11 @@ class NetIntelligence:
         self._hosts.pop(entry_id, None)
         self._down.discard(entry_id)
         self._uplinks.pop(entry_id, None)
+        self._seen.pop(entry_id, None)
+        for claims in self._fleet_claims.values():
+            claims.pop(entry_id, None)
+        if self._fleet_anchor == entry_id:
+            self._hand_over_fleet()
 
     def remove_router(self, entry_id: str) -> bool:
         """Forget all data of a router; True if anything was removed."""
@@ -484,6 +584,8 @@ class NetIntelligence:
         removed |= entry_id in self._wan_gateways
         self._wan_gateways.discard(entry_id)
         removed |= self.machine.remove_router(entry_id) > 0
+        removed |= entry_id in self._maintenance
+        self._maintenance.discard(entry_id)
         return removed
 
     @callback
@@ -552,6 +654,10 @@ class NetIntelligence:
         self._last_data[entry_id] = data
         self._update_identity(entry_id, data, host)
         now = self._sync(now, mono)
+        self._seen[entry_id] = (
+            now,
+            float(interval) if _positive(interval) else _DEFAULT_INTERVAL,
+        )
         log_events = getattr(data, "new_log_events", ())
         if not isinstance(log_events, (tuple, list)):
             log_events = ()
@@ -636,6 +742,8 @@ class NetIntelligence:
             for state in self._infra.values():
                 state.shift(step.shift)
             self._wifi.shift(step.shift)
+            self._seen = {r: (t + step.shift, i) for r, (t, i) in self._seen.items()}
+            self._open_seen = {k: t + step.shift for k, t in self._open_seen.items()}
         if self.machine.prune_held:
             for state in self._infra.values():
                 state.clock_jumped()
@@ -645,7 +753,7 @@ class NetIntelligence:
         """Outage evidence, machine step, topology, correlation; return the
         number of stored (outage) events."""
         stored, outage = self._outage_evidence(now)
-        self.machine.update(now, [*evidence, *outage])
+        self.machine.update(now, self._filter_evidence([*evidence, *outage], now))
         if self._lan_down:
             self.machine.set_routers(
                 "lan_unreachable", LAN_UNREACHABLE_KEY, self._lan_routers
@@ -653,6 +761,9 @@ class NetIntelligence:
         self._topology = self._build_topology()
         result = self.machine.correlate(now, self._topology, self.ring)
         self.ring.set_parents(result.events)
+        # Re-read after correlate: a root announced now may otherwise turn
+        # out to be a child a moment later (P5 hand-over to P6).
+        self._refresh(now)
         return stored
 
     def _outage_evidence(self, now: float) -> tuple[int, list[Evidence]]:
@@ -784,6 +895,7 @@ class NetIntelligence:
             msg_key=kind,
             params=params,
         )
+        event = self._mark(event)
         self.ring.add(event)
         if router != FLEET_ROUTER:
             self.counters.add(router, kind, now)
@@ -887,6 +999,7 @@ class NetIntelligence:
                     arp=arp,
                 )
             )
+        kept = [self._mark(net_event) for net_event in kept]
         for net_event in kept:
             self.ring.add(net_event)
         stored += len(kept)
@@ -939,7 +1052,7 @@ class NetIntelligence:
         for finding in findings:
             event: NetEvent | None = None
             if finding.event:
-                event = self._finding_event(entry_id, finding, now)
+                event = self._mark(self._finding_event(entry_id, finding, now))
                 self.ring.add(event)
                 stored += 1
             if finding.event or not finding.rule:
@@ -960,9 +1073,111 @@ class NetIntelligence:
             return None
 
     def _excluded_macs(self) -> frozenset[str]:
-        """``exclusions.macs`` of the settings, upper case."""
-        macs = self.settings.get("exclusions", {}).get("macs") or ()
-        return frozenset(m.strip().upper() for m in macs if isinstance(m, str))
+        """``exclusions.macs`` of the settings (upper case), plus the clients
+        the loaded routers list on an SSID in ``exclusions.ssids`` (P6; a
+        client is known by SSID only while a router lists it)."""
+        exclusions = self.settings.get("exclusions", {})
+        macs = {
+            m.strip().upper()
+            for m in exclusions.get("macs") or ()
+            if isinstance(m, str)
+        }
+        ssids = {s for s in exclusions.get("ssids") or () if isinstance(s, str) and s}
+        if ssids:
+            for router in self._routers:
+                data = self._last_data.get(router)
+                context = wifi_context(
+                    getattr(data, "ap_interfaces", None), getattr(data, "clients", None)
+                )
+                for mac, client in (context.clients or {}).items():
+                    radio = client.get("radio")
+                    _band, ssid, _phy = context.iface(
+                        radio if isinstance(radio, str) else None
+                    )
+                    if ssid in ssids:
+                        macs.add(mac)
+        return frozenset(macs)
+
+    # -- maintenance and exclusions (P6) ------------------------------------------
+
+    def router_maintenance(self, router: str) -> bool:
+        """The router's own maintenance switch (without the fleet window)."""
+        return router in self._maintenance
+
+    def in_maintenance(self, router: str) -> bool:
+        """True while ``router`` (or the whole fleet) is in maintenance."""
+        return router in self._maintenance or self._fleet_maintenance()
+
+    def _fleet_maintenance(self, now: float | None = None) -> bool:
+        """``settings.maintenance.fleet_until`` (epoch s) not yet reached."""
+        until = self.settings.get("maintenance", {}).get("fleet_until")
+        if now is None:
+            now = self.machine.last_now
+        return _finite(until) and now is not None and now < until
+
+    @callback
+    def set_maintenance(self, entry_id: str, on: bool) -> None:
+        """Switch a router's maintenance mode (the maintenance switch).
+
+        On: its events are stored marked, its evidence opens or reopens no
+        incident (an open one still resolves), and it leaves the fleet
+        score. Off: normal operation; the series broken during maintenance
+        start from zero, so nothing fires late.
+        """
+        if (entry_id in self._maintenance) == on or self._closed:
+            return
+        if on:
+            self._maintenance.add(entry_id)
+        else:
+            self._maintenance.discard(entry_id)
+        self.schedule_save()
+        now = self.machine.last_now
+        if now is not None and self._loaded:
+            self._refresh(now)
+
+    def _mark(self, event: NetEvent) -> NetEvent:
+        """An event recorded during maintenance: marked; a reboot is info."""
+        if not self.in_maintenance(event.router):
+            return event
+        severity = Severity.INFO if event.kind == _REBOOT_KIND else event.severity
+        return replace(event, maintenance=True, severity=severity)
+
+    def _filter_evidence(self, evidence: list[Evidence], now: float) -> list[Evidence]:
+        """Apply ``exclusions`` (incident types, routers) and maintenance.
+
+        Evidence of a router in maintenance is marked unless its incident
+        is open: an open incident keeps counting and resolves normally, a
+        new or resolved one never (re)opens. Fleet evidence (no router) is
+        marked only during a fleet-wide maintenance.
+        """
+        exclusions = self.settings.get("exclusions", {})
+        types = set(exclusions.get("incident_types") or ())
+        routers = set(exclusions.get("routers") or ())
+        fleet = self._fleet_maintenance(now)
+        if not (types or routers or fleet or self._maintenance) and not any(
+            item.maintenance for item in evidence
+        ):
+            return evidence
+        open_keys = {
+            (type_, key)
+            for type_, _scope, key in self.machine.open_keys(
+                self.settings["thresholds"]
+            )
+        }
+        out: list[Evidence] = []
+        for item in evidence:
+            if item.type in types or (
+                item.router is not None and item.router in routers
+            ):
+                continue
+            paused = fleet or (
+                item.router is not None and item.router in self._maintenance
+            )
+            want = paused and (item.type, item.scope_key) not in open_keys
+            if item.maintenance != want:
+                item = replace(item, maintenance=want)
+            out.append(item)
+        return out
 
     def _wifi_holds(
         self, entry_id: str, now: float, context: WifiContext
@@ -1058,17 +1273,19 @@ class NetIntelligence:
         self._seq += 1
         self.counters.add(entry_id, LOG_GAP_KIND, now)
         self.ring.add(
-            NetEvent(
-                id=f"{entry_id}:{self._seq}",
-                ts=now,
-                router=entry_id,
-                category=Category.SYSTEM,
-                kind=LOG_GAP_KIND,
-                origin=Origin.OBSERVED,
-                source=Source.LOG,
-                severity=Severity.INFO,
-                msg_key=LOG_GAP_KIND,
-                params={"gap_s": round(gap_s)},
+            self._mark(
+                NetEvent(
+                    id=f"{entry_id}:{self._seq}",
+                    ts=now,
+                    router=entry_id,
+                    category=Category.SYSTEM,
+                    kind=LOG_GAP_KIND,
+                    origin=Origin.OBSERVED,
+                    source=Source.LOG,
+                    severity=Severity.INFO,
+                    msg_key=LOG_GAP_KIND,
+                    params={"gap_s": round(gap_s)},
+                )
             )
         )
 
@@ -1173,6 +1390,7 @@ class NetIntelligence:
             for kind in sorted(counters)
             if (n := self.counters.hourly(entry_id, kind, now, 24))
         }
+        view = self.view.routers.get(entry_id)
         active = Counter(
             inc.type
             for inc in self.machine.incidents()
@@ -1194,12 +1412,293 @@ class NetIntelligence:
             "log_mark_stored": entry_id in self._log_marks,
             "store_bytes_last_save": self.last_save_bytes,
             "events_trimmed_for_size": self.trimmed_events,
-            # Health score and coverage arrive with P6; P4 reports the
-            # WLAN data coverage (no identities).
-            "score": None,
-            "coverage": None,
+            "score": view.score.score if view else None,
+            "coverage": view.score.coverage if view else None,
+            "score_areas": view.score.areas if view else None,
+            "maintenance": entry_id in self._maintenance,
+            "incidents_announced_fleet": len(self._announced),
             "wifi_coverage": self._wifi.coverage(entry_id),
         }
+
+    # -- score, entities and bus events (P6) --------------------------------------
+
+    @callback
+    def _refresh(self, now: float) -> None:
+        """Announce, rebuild the view, re-arm the timer; never raises."""
+        if self._closed:
+            return
+        try:
+            if self._announce(now):
+                self.schedule_save()
+            self._publish(now)
+            self._schedule_wakeup(now)
+        except Exception:
+            _LOGGER.warning(
+                "Network intelligence could not update its entities", exc_info=True
+            )
+
+    def _interval(self, router: str) -> float:
+        seen = self._seen.get(router)
+        return seen[1] if seen else _DEFAULT_INTERVAL
+
+    def _fresh(self, router: str, now: float) -> bool:
+        seen = self._seen.get(router)
+        return seen is not None and now - seen[0] <= _FRESH_INTERVALS * seen[1]
+
+    def _late(self, now: float) -> bool:
+        """A loaded router missed its poll but is not (yet) reported down:
+        an outage that would become the parent of new roots may be coming."""
+        return any(
+            now - seen[0] > _LATE_INTERVALS * seen[1]
+            for router, seen in self._seen.items()
+            if router in self._routers and router not in self._down
+        )
+
+    def _settle(self) -> float:
+        longest = max(
+            (self._interval(r) for r in self._routers), default=_DEFAULT_INTERVAL
+        )
+        return max(float(INTEL_ANNOUNCE_SETTLE_SECONDS), longest + 30.0)
+
+    def _announce(self, now: float) -> bool:
+        """Fire ``EVENT_INCIDENT`` for roots (plan c9, AK11); True if any fired.
+
+        ``opened`` / ``reopened``: an active incident (not acknowledged, not
+        ignored) at or above ``notify_min_severity`` without a known parent,
+        not only on routers in maintenance, once per open period; only after
+        the settle time since the engine first saw it open and while no
+        router is late, at the latest after the hold maximum. ``resolved``:
+        only for an announced incident. An incident that resolves before it
+        was announced, or is ignored, stays silent; a child (``parent_id``
+        of a known incident) never fires.
+        """
+        incidents = {inc.id: inc for inc in self.machine.peek()}
+        fired = False
+        for inc_id, count in list(self._announced.items()):
+            inc = incidents.get(inc_id)
+            if inc is None or inc.status is IncidentStatus.IGNORED:
+                del self._announced[inc_id]
+                fired = True  # stored state changed
+            elif inc.status is IncidentStatus.RESOLVED:
+                del self._announced[inc_id]
+                self._fire(inc, "resolved")
+                fired = True
+        min_rank = _severity_rank(self.settings.get("notify_min_severity"))
+        settle = self._settle()
+        late = self._late(now)
+        pending: dict[tuple[str, int], float] = {}
+        for inc in incidents.values():
+            if inc.status is not IncidentStatus.ACTIVE:
+                continue
+            if self._announced.get(inc.id) == inc.reopen_count:
+                continue
+            if (
+                inc.severity.rank < min_rank
+                or (inc.parent_id is not None and inc.parent_id in incidents)
+                or (inc.routers and all(self.in_maintenance(r) for r in inc.routers))
+            ):
+                continue  # the settle time starts when it becomes a candidate
+            key = (inc.id, inc.reopen_count)
+            seen = self._open_seen.get(key, now)
+            pending[key] = seen
+            waited = now - seen
+            if waited < INTEL_ANNOUNCE_HOLD_MAX_SECONDS and (waited < settle or late):
+                continue
+            reopened = inc.id in self._announced or inc.reopen_count > 0
+            self._announced[inc.id] = inc.reopen_count
+            self._fire(inc, "reopened" if reopened else "opened")
+            fired = True
+            del pending[key]
+        self._open_seen = pending
+        return fired
+
+    def _fire(self, inc: Incident, state: str) -> None:
+        self.hass.bus.async_fire(EVENT_INCIDENT, self._event_data(inc, state))
+
+    def _event_data(self, inc: Incident, state: str) -> dict[str, Any]:
+        """Bus payload (plan c9): router names, entry ids, the device of a
+        single router; the MAC only for a client incident."""
+        entry_ids = [r for r in inc.routers if r != FLEET_ROUTER]
+        names: list[str] = []
+        for entry_id in entry_ids:
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            title = getattr(entry, "title", None)
+            names.append(title if isinstance(title, str) and title else entry_id)
+        device_id: str | None = None
+        if len(entry_ids) == 1:
+            try:
+                device = dr.async_get(self.hass).async_get_device(
+                    identifiers={(DOMAIN, entry_ids[0])}
+                )
+                device_id = device.id if device is not None else None
+            except Exception:  # no registry (tests) or a broken one
+                _LOGGER.debug(
+                    "No device registry for the incident event", exc_info=True
+                )
+                device_id = None
+        data: dict[str, Any] = {
+            "state": state,
+            "incident_id": inc.id,
+            "type": inc.type,
+            "severity": inc.severity.value,
+            "confidence": round(inc.confidence, 2),
+            "cause": inc.cause,
+            "cause_status": inc.cause_status.value if inc.cause_status else None,
+            "scope": inc.scope.value,
+            "routers": names,
+            "entry_ids": entry_ids,
+            "device_id": device_id if isinstance(device_id, str) else None,
+        }
+        key = inc.scope_key.upper()
+        if inc.scope is Scope.CLIENT and _MAC_RE.fullmatch(key):
+            data["mac"] = key
+        return data
+
+    def _publish(self, now: float) -> None:
+        """Build the view for the entities and tell them (dispatcher)."""
+        incidents = self.machine.peek()
+        counted = counted_incidents(incidents)
+        excluded = set(self.settings.get("exclusions", {}).get("routers") or ())
+        since_1h = now - 3600
+        reconnects: Counter[str] = Counter()
+        auth: Counter[str] = Counter()
+        for event in self.ring:  # not sorted by ts: gap lines keep router time
+            if event.ts < since_1h or event.ts > now:
+                continue
+            if event.kind == WIFI_RECONNECT_KIND:
+                reconnects[event.router] += event.count
+            elif event.kind in WIFI_AUTH_KINDS:
+                auth[event.router] += event.count
+        routers: dict[str, RouterView] = {}
+        scores: dict[str, RouterScore] = {}
+        maintenance = 0
+        for router in sorted(self._routers):
+            score = router_score(
+                router,
+                area_inputs(
+                    self._last_data.get(router),
+                    fresh=self._fresh(router, now),
+                    gateway=router in self._wan_gateways,
+                ),
+                counted,
+                self.settings,
+                offline=router in self._down,
+            )
+            mine = [inc for inc in counted if router in inc.routers]
+            paused = self.in_maintenance(router)
+            if paused:
+                maintenance += 1
+            elif router not in excluded:
+                scores[router] = score
+            routers[router] = RouterView(
+                score=score,
+                maintenance=paused,
+                incidents_active=len(mine),
+                critical=any(i.severity is Severity.CRITICAL for i in mine),
+                reconnects_1h=reconnects.get(router, 0),
+                auth_errors_1h=auth.get(router, 0),
+                wan_reconnects_24h=sum(
+                    self.counters.hourly(router, kind, now, 24)
+                    for kind in _WAN_RECONNECT_KINDS
+                ),
+            )
+        value, coverage = fleet_score(scores, self.settings)
+        self.view = NetView(
+            routers=routers,
+            fleet=FleetView(
+                score=value,
+                coverage=coverage,
+                routers=len(scores),
+                maintenance=maintenance,
+                incidents_active=len(counted),
+                critical=any(i.severity is Severity.CRITICAL for i in counted),
+            ),
+        )
+        async_dispatcher_send(self.hass, SIGNAL_NET_INTEL)
+
+    def _schedule_wakeup(self, now: float) -> None:
+        """Wake up for the next time-based change: an announcement coming
+        due, a router getting late or its data getting stale."""
+        due: list[float] = []
+        if self._open_seen:
+            settle = self._settle()
+            first = min(self._open_seen.values())
+            due.append(first + settle)
+            due.append(first + INTEL_ANNOUNCE_HOLD_MAX_SECONDS)
+        for router, (seen, interval) in self._seen.items():
+            if router in self._routers:
+                due.append(seen + _LATE_INTERVALS * interval)
+                due.append(seen + _FRESH_INTERVALS * interval)
+        upcoming = [t for t in due if t > now]
+        self._cancel_timer()
+        if not upcoming:
+            return
+        delay = max(1.0, min(upcoming) - now + 1.0)
+        self._unsub_timer = async_call_later(self.hass, delay, self._async_wakeup)
+
+    @callback
+    def _async_wakeup(self, _now: Any) -> None:
+        self._unsub_timer = None
+        if self._closed or not self._loaded:
+            return
+        try:
+            self._refresh(self._sync(time.time(), time.monotonic()))
+        except Exception:
+            _LOGGER.warning("Network intelligence wake-up failed", exc_info=True)
+
+    def _cancel_timer(self) -> None:
+        if self._unsub_timer is not None:
+            self._unsub_timer()
+            self._unsub_timer = None
+
+    @callback
+    def claim_fleet(
+        self, platform: str, entry_id: str, create: Callable[[], None]
+    ) -> None:
+        """A router's ``platform`` offers to host the fleet entities.
+
+        The first router to claim is the anchor (plan F1) and ``create``
+        runs at once; the others are kept. When the anchor unloads (after
+        its platforms, so its entities are gone), the smallest remaining
+        entry id takes over and its ``create`` runs: the registry moves the
+        entities (same ``unique_id``) to that entry (A9).
+        """
+        if self._closed:
+            return
+        self._fleet_claims.setdefault(platform, {})[entry_id] = create
+        if self._fleet_anchor is None or self._fleet_anchor not in self._routers:
+            self._fleet_anchor = entry_id
+        if self._fleet_anchor == entry_id:
+            create()
+
+    @property
+    def fleet_anchor(self) -> str | None:
+        """Entry id hosting the fleet entities, None before any claim."""
+        return self._fleet_anchor
+
+    def _hand_over_fleet(self) -> None:
+        candidates = sorted(
+            {
+                entry
+                for claims in self._fleet_claims.values()
+                for entry in claims
+                if entry in self._routers
+            }
+        )
+        self._fleet_anchor = candidates[0] if candidates else None
+        if self._fleet_anchor is None:
+            return
+        for claims in self._fleet_claims.values():
+            create = claims.get(self._fleet_anchor)
+            if create is None:
+                continue
+            try:
+                create()
+            except Exception:
+                _LOGGER.warning(
+                    "Network intelligence could not move the fleet entities",
+                    exc_info=True,
+                )
 
     # -- persistence --------------------------------------------------------------
 
@@ -1231,6 +1730,24 @@ class NetIntelligence:
             if isinstance(gateways, list)
             else set()
         )
+        paused = stored.get("maintenance_routers")
+        self._maintenance = (
+            {r for r in paused if isinstance(r, str) and r}
+            if isinstance(paused, list)
+            else set()
+        )
+        announced = stored.get("announced")
+        self._announced = (
+            {
+                inc_id: count
+                for inc_id, count in announced.items()
+                if isinstance(inc_id, str)
+                and isinstance(count, int)
+                and not isinstance(count, bool)
+            }
+            if isinstance(announced, dict)
+            else {}
+        )
 
     def _prune(self, now: float) -> None:
         if self.machine.prune_held:
@@ -1253,6 +1770,8 @@ class NetIntelligence:
             "counters": self.counters.to_dict(),
             "log_marks": self._log_marks,
             "wan_gateways": sorted(self._wan_gateways),
+            "maintenance_routers": sorted(self._maintenance),
+            "announced": dict(self._announced),
         }
 
     @callback
@@ -1428,6 +1947,75 @@ def wifi_snapshot(
         wifi_actions=dict(actions) if isinstance(actions, dict) else None,
         exclude=exclude,
     )
+
+
+def area_inputs(data: Any, *, fresh: bool, gateway: bool) -> dict[str, AreaInput]:
+    """Score indicators of one router's last data (plan c6); never raises.
+
+    An area is applicable when the router has it: Wi-Fi with AP
+    interfaces, LAN with ports, WAN only on the IPv4 gateway, DHCP/DNS with
+    pools; the system always. An indicator counts when its value was read
+    (not a "not measured" default); all count 0 when the data is not fresh
+    (older than 3 poll intervals) or missing.
+    """
+    if data is None:
+        return {"system": AreaInput(fresh=0, total=5)}
+
+    def has_list(name: str) -> bool:
+        value = getattr(data, name, None)
+        return isinstance(value, list) and bool(value)
+
+    uptime = _positive(getattr(data, "uptime", None))
+    clock = getattr(data, "localtime", None)
+    services = getattr(data, "service_instances", None)
+    wan = getattr(data, "wan_status", None)
+    wan = wan if isinstance(wan, dict) and wan.get("wan_found") is True else None
+    leases = getattr(data, "dhcp_leases", None)
+    log_ok = getattr(data, "log_status", None) == "ok"
+    indicators: dict[str, tuple[bool, list[bool]]] = {
+        "wifi": (
+            has_list("ap_interfaces"),
+            [isinstance(getattr(data, "clients", None), list), log_ok],
+        ),
+        "system": (
+            True,
+            [
+                True,  # reachable: this data came from the router
+                uptime is not None and _finite(getattr(data, "cpu_load", None)),
+                uptime is not None
+                and isinstance(getattr(data, "memory_pressure", None), dict),
+                isinstance(services, dict) and bool(services),
+                _finite(clock),
+            ],
+        ),
+        "lan": (has_list("port_stats"), [True]),
+        "wan": (
+            gateway,
+            [
+                wan is not None,
+                wan is not None and _positive(wan.get("uptime")) is not None,
+            ],
+        ),
+        "dhcp_dns": (
+            has_list("dhcp_pools"),
+            [True, isinstance(leases, dict) and bool(leases), log_ok],
+        ),
+    }
+    return {
+        area: AreaInput(
+            applicable=applicable,
+            fresh=sum(values) if fresh else 0,
+            total=len(values),
+        )
+        for area, (applicable, values) in indicators.items()
+    }
+
+
+def _severity_rank(value: Any) -> int:
+    try:
+        return Severity(value).rank
+    except ValueError:
+        return Severity.WARNING.rank
 
 
 def _finite(value: Any) -> bool:

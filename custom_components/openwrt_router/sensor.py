@@ -93,9 +93,15 @@ from .const import (
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
 from .fleet import collect_radios, radios_of
+from .net_entities import async_setup_sensors as async_setup_intel_sensors
 from .topology_entities import setup_topology_entities
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# Read-only platform: entities update from the coordinator or the engine
+# (push), so no limit is needed.
+PARALLEL_UPDATES = 0
 
 
 def router_has_wan(data: OpenWrtCoordinatorData | None) -> bool:
@@ -518,6 +524,15 @@ async def async_setup_entry(
     static_entities.append(OpenWrtRouterStatusSensor(coordinator, entry))
     static_entities.append(OpenWrtChannelPlanSensor(coordinator, entry))
     async_add_entities(static_entities)
+
+    # Network intelligence (P6): read from the engine only.
+    async_setup_intel_sensors(
+        hass,
+        entry.entry_id,
+        coordinator.data,
+        router_has_wan(coordinator.data),
+        async_add_entities,
+    )
 
     # Track which dynamic entities have already been created
     tracked_interfaces: set[str] = set()

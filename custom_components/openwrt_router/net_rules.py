@@ -452,11 +452,16 @@ class _Track:
         }
         if not compact:
             return full
-        return {
+        out = {
             key: value
             for key, value in full.items()
             if key not in _TRACK_DEFAULTS or value != _TRACK_DEFAULTS[key]
         }
+        packed = _pack_entries(self.entries) if self.live else None
+        if packed is not None:
+            del out["entries"]
+            out["packed"] = packed
+        return out
 
     @classmethod
     def from_dict(cls, data: Any) -> _Track | None:
@@ -466,6 +471,8 @@ class _Track:
         if not isinstance(kind, str) or not isinstance(key, str):
             return None
         raw = data.get("entries")
+        if "packed" in data:
+            raw = _unpack_entries(data.get("packed"))
         entries = [
             [
                 float(e[0]),
@@ -505,6 +512,59 @@ _TRACK_DEFAULTS: dict[str, Any] = {
     "streak": 0,
     "pending_since": None,
 }
+
+
+# Compact store form of the window entries of a track with an open incident
+# (P6, store budget): "<id prefix>|ts,count,id;ts,count,id". Kind and router
+# are left out: while the incident is open they are never read again (the
+# incident already holds its evidence and routers; a reopen counts only
+# entries after the resolve), and the router is the id prefix. Measured with
+# 500 storming clients: about 170 B per entry as lists, about 30 B packed.
+_PACK_SEP = frozenset(",;|")
+
+
+def _pack_entries(entries: list[list[Any]] | None) -> str | None:
+    """Pack window entries; None when they cannot be packed losslessly
+    enough (no entries, a level streak, odd ids)."""
+    if not entries:
+        return None
+    ids = [e[2] for e in entries]
+    if any(
+        len(e) < 3
+        or not _is_number(e[0])
+        or isinstance(e[1], bool)
+        or not isinstance(e[1], int)
+        or (i is not None and (not isinstance(i, str) or _PACK_SEP & set(i)))
+        for e, i in zip(entries, ids, strict=True)
+    ):
+        return None
+    heads = {i.rpartition(":")[0] for i in ids if i is not None}
+    prefix = f"{heads.pop()}:" if len(heads) == 1 and all(ids) else ""
+    parts = [
+        f"{float(e[0])!r},{e[1]},{'' if i is None else i[len(prefix) :]}"
+        for e, i in zip(entries, ids, strict=True)
+    ]
+    return f"{prefix}|{';'.join(parts)}"
+
+
+def _unpack_entries(packed: Any) -> list[list[Any]]:
+    """Window entries from ``_pack_entries``; broken parts are skipped."""
+    if not isinstance(packed, str) or "|" not in packed:
+        return []
+    prefix, _sep, body = packed.partition("|")
+    out: list[list[Any]] = []
+    for part in body.split(";") if body else ():
+        fields = part.split(",")
+        if len(fields) != 3:
+            continue
+        try:
+            ts, count = float(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        event_id = f"{prefix}{fields[2]}" if fields[2] else None
+        router = event_id.rpartition(":")[0] if event_id else ""
+        out.append([ts, count, event_id, "", router])
+    return out
 
 
 def _opt_num(value: Any) -> float | None:
@@ -648,6 +708,11 @@ class AlarmMachine:
     def incidents(self) -> list[Incident]:
         """Copies of all incidents, oldest first."""
         return [i.copy() for i in self._incidents.values()]
+
+    def peek(self) -> list[Incident]:
+        """All incidents without copying, oldest first (P6: score, entities
+        and bus events read them on every step). Read only."""
+        return list(self._incidents.values())
 
     def open_keys(
         self, types: Iterable[str], router: str | None = None
@@ -4800,3 +4865,160 @@ def _link(child: Incident, root: Incident, confirmed: bool) -> None:
     ):
         root.cause = ROOT_CAUSES["system_reboot"]
         root.cause_status = CauseStatus.CONFIRMED
+
+
+# --- health score (P6) -------------------------------------------------------------
+#
+# Plan c6. Per router five areas with a weight each; an area's coverage c is
+# the share of its indicators with fresh data, its score s = 100 minus the
+# penalties of its open root incidents. Areas that do not apply (no AP, no
+# WAN, no DHCP server) count neither way; an area with c below
+# ``min_area_coverage`` is unknown and drops out. Without enough coverage the
+# score is unknown (None), never 100.
+
+SCORE_AREAS = ("wifi", "system", "lan", "wan", "dhcp_dns")
+# Incident types outside the prefix rule below.
+_AREA_OF_TYPE = {
+    "router_unreachable": "system",
+    "lan_unreachable": "system",
+    "dhcp_conflict": "dhcp_dns",
+    "dhcp_pool_full": "dhcp_dns",
+}
+_AREA_PREFIX = (
+    ("wifi_", "wifi"),
+    ("system_", "system"),
+    ("lan_", "lan"),
+    ("wan_", "wan"),
+    ("dhcp_", "dhcp_dns"),
+    ("dns_", "dhcp_dns"),
+)
+# Acknowledged incidents ("bestätigt" in plan c2/c6) count half.
+_ACK_FACTOR = 0.5
+_COUNTED_STATES = (IncidentStatus.ACTIVE, IncidentStatus.ACKNOWLEDGED)
+
+
+def incident_area(type_: str) -> str | None:
+    """Score area of an incident type, None when it belongs to none."""
+    if type_ in _AREA_OF_TYPE:
+        return _AREA_OF_TYPE[type_]
+    return next(
+        (area for prefix, area in _AREA_PREFIX if type_.startswith(prefix)), None
+    )
+
+
+@dataclass(frozen=True)
+class AreaInput:
+    """Indicators of one area of one router: ``fresh`` of ``total`` have
+    fresh data; ``applicable`` False = the area does not exist there."""
+
+    applicable: bool = True
+    fresh: int = 0
+    total: int = 1
+
+
+@dataclass(frozen=True)
+class RouterScore:
+    """Result of ``router_score``; ``score`` None = unknown."""
+
+    score: int | None
+    coverage: float
+    areas: dict[str, dict[str, Any]]
+    offline: bool = False
+
+
+def counted_incidents(incidents: Iterable[Incident]) -> list[Incident]:
+    """Open root incidents that count: active or acknowledged, not ignored,
+    not a child (suppressed: ``parent_id`` of a known incident, also after
+    the parent resolved; the same rule keeps children off the HA bus)."""
+    incidents = list(incidents)
+    known = {i.id for i in incidents}
+    return [
+        inc
+        for inc in incidents
+        if inc.status in _COUNTED_STATES
+        and (inc.parent_id is None or inc.parent_id not in known)
+    ]
+
+
+def router_score(
+    router: str,
+    areas: Mapping[str, AreaInput],
+    incidents: Iterable[Incident],
+    settings: Mapping[str, Any],
+    *,
+    offline: bool = False,
+) -> RouterScore:
+    """Health score of one router (plan c6).
+
+    ``incidents`` are all incidents; the counted ones (``counted_incidents``)
+    of this router (``Incident.routers``) reduce their area. An ``offline``
+    router (outage measured) has system ``s=0, c=1`` and no other area with
+    data.
+    """
+    score_cfg = settings.get("score", {})
+    weights = score_cfg.get("weights", {})
+    penalty_cfg = score_cfg.get("penalty", {})
+    min_area = float(score_cfg.get("min_area_coverage", 0.3))
+    min_cov = float(score_cfg.get("min_coverage", 0.5))
+    penalties: dict[str, float] = dict.fromkeys(SCORE_AREAS, 0.0)
+    for inc in counted_incidents(incidents):
+        area = incident_area(inc.type)
+        if area is None or router not in inc.routers:
+            continue
+        p = float(penalty_cfg.get(inc.severity.value, 0)) * inc.confidence
+        if inc.status is IncidentStatus.ACKNOWLEDGED:
+            p *= _ACK_FACTOR
+        penalties[area] += p
+    result: dict[str, dict[str, Any]] = {}
+    applicable_w = covered_w = known_w = weighted = 0.0
+    for area in SCORE_AREAS:
+        info = areas.get(area, AreaInput(applicable=False))
+        if not info.applicable:
+            continue
+        weight = float(weights.get(area, 0))
+        if offline:
+            cov = 1.0 if area == "system" else 0.0
+            value = 0.0 if area == "system" else None
+        else:
+            cov = min(1.0, max(0.0, info.fresh / info.total)) if info.total > 0 else 0.0
+            value = max(0.0, 100.0 - penalties[area])
+        applicable_w += weight
+        covered_w += weight * cov
+        if cov < min_area or value is None:
+            result[area] = {"score": None, "coverage": round(cov, 2)}
+            continue
+        known_w += weight * cov
+        weighted += weight * cov * value
+        result[area] = {"score": round(value), "coverage": round(cov, 2)}
+    # coverage over all applicable areas, unknown ones included (plan c6)
+    coverage = covered_w / applicable_w if applicable_w > 0 else 0.0
+    score = round(weighted / known_w) if known_w > 0 and coverage >= min_cov else None
+    return RouterScore(score, round(coverage, 2), result, offline)
+
+
+def fleet_score(
+    scores: Mapping[str, RouterScore], settings: Mapping[str, Any]
+) -> tuple[int | None, float]:
+    """Fleet score: router scores weighted with their coverage (plan c6).
+
+    An offline router counts with score 0 and the system share of the
+    weights as its coverage (its outage is measured). Routers with an
+    unknown score drop out. Callers leave routers in maintenance out.
+    Returns (score or None, mean coverage of all given routers).
+    """
+    weights = settings.get("score", {}).get("weights", {})
+    total_w = sum(float(w) for w in weights.values()) or 1.0
+    num = den = 0.0
+    for result in scores.values():
+        if result.offline:
+            share = float(weights.get("system", 0)) / total_w
+            den += share
+            continue
+        if result.score is None:
+            continue
+        num += result.coverage * result.score
+        den += result.coverage
+    coverage = sum(r.coverage for r in scores.values()) / len(scores) if scores else 0.0
+    if den <= 0:
+        return None, round(coverage, 2)
+    return round(num / den), round(coverage, 2)

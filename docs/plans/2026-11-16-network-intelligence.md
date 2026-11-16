@@ -12,10 +12,10 @@ belegt), **Annahme** (plausibel, aber noch nicht belegt; Prüfweg steht dabei), 
 
 - **Stand:** 2026-11-16 · **Phase:** freigegeben (Nutzer, 2026-11-16), in Umsetzung
 - **Branch/PR:** `feature/network-intelligence` · Worktree `../ha-openwrt-router-net-intel` · PR #— · Basis: v1.39.0 (`main@f8a2ac7`)
-- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review, P5 · **In Arbeit:** – · **Offen:** P6–P8
-- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 in `1e8fb71`; P5 im Commit `feat(intel): correlation and root cause (P5)`
+- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review, P5, P6 · **In Arbeit:** – · **Offen:** P5-Review-Fixes, P7, P8
+- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 in `1e8fb71`; P5 in `2ba7674`; P6 im Commit `feat(intel): health score, entities and events (P6)`
 - **Blocker:** keine
-- **Nächster Schritt:** P5 erledigt; nächster Schritt P6.
+- **Nächster Schritt:** P6 erledigt; nächster Schritt P7 (davor eingeschoben: P5-Review-Fixes als eigener Commit, Auftrag des Masters).
 
 ### Entscheidungen (2026-11-16)
 
@@ -384,10 +384,100 @@ Entschieden in P5 (Umsetzer, 2026-11-16; Korrelation und Root-Cause):
   - 500 gleichzeitig stürmende Clients: Die Tracks halten ihre Einträge 1800 s (`clear`), der
     Automat allein braucht dann 2 897 243 B. Die Datei wird ohne Events und mit Warnung
     geschrieben (Verhalten seit P2: Incidents werden nie gekappt). Folgearbeit, falls nötig:
-    Track-Einträge offener Incidents kürzer speichern.
+    Track-Einträge offener Incidents kürzer speichern (erledigt in P6-11).
   - Die Topologie kennt nur Router der Flotte. Ein Switch dazwischen ist unsichtbar; sein
     Ausfall zeigt sich als Ausfall der Router dahinter.
   - DFS-Zeilen sind nicht live gesehen.
+
+Entschieden in P6 (Umsetzer, 2026-11-16; Score, Entities, Bus-Event, Wartungsmodus):
+
+- **P6-1 Melden nach dem Settle (AK1, AK11):** Nach jedem Schritt des Automaten (Poll eines
+  Routers, Beginn oder Ende eines Ausfalls) liest die Engine die Incidents nach `correlate`
+  neu. Gemeldet wird eine Wurzel: aktiv (nicht bestätigt, nicht ignoriert), Schwere ab
+  `notify_min_severity`, ohne `parent_id` eines bekannten Incidents, nicht nur auf Routern im
+  Wartungsmodus. Sie wird erst gemeldet, wenn seit dem ersten Sehen als Kandidat die
+  Settle-Zeit vergangen ist (`max(90 s, längstes Poll-Intervall + 30 s)`) und kein Router
+  „spät“ ist. Spät heißt: Daten älter als 1,25 Intervalle, aber noch nicht als Ausfall
+  gemeldet. Ein Ausfall braucht 3 Fehlpolls, und so lange wartet die Meldung auf den
+  möglichen Elternteil. Spätestens nach 900 s wird trotzdem gemeldet. Ein Timer
+  (`async_call_later`) weckt die Engine zum nächsten Fälligkeitszeitpunkt, auch ohne Poll.
+- **P6-2 Zustände:** `opened`, dann `reopened` (gleiche Incident-ID, neuer `reopen_count`),
+  `resolved` nur für einen gemeldeten Incident. Bestätigte Incidents melden kein
+  `opened`/`reopened` mehr, wohl aber `resolved` (Automat c2). Ignorierte Incidents bleiben
+  stumm. Gemeldete IDs (`announced`: ID → `reopen_count`) stehen im Store, damit nach einem
+  Neustart kein zweites `opened` kommt. Grenze: Ein Incident, der vor Ablauf der
+  Settle-Zeit wieder aufgelöst ist, wird nie gemeldet (weder `opened` noch `resolved`);
+  er bleibt im Verlauf sichtbar.
+- **P6-3 Payload:** wie c9. `routers` sind die Titel der Config-Entries. `device_id` gibt es
+  nur, wenn genau ein Router betroffen ist; `mac` nur bei Scope `client` mit
+  MAC-Schlüssel. Die Logbook-Beschreibung ist englisch wie die vorhandenen (Muster
+  `logbook.py`).
+- **P6-4 Kind und Zählen:** Kind ist ein Incident mit `parent_id` eines bekannten Incidents,
+  auch nachdem der Elternteil aufgelöst ist. Für Score, `incidents_active` und Bus gilt
+  dieselbe Regel (`counted_incidents`). Ein verwaistes Kind zählt wieder als Wurzel. Die
+  Freigabe eines Kindes nach dem Ende seiner Wurzel regelt E6 (P5-Review).
+- **P6-5 Score-Indikatoren (c6):**
+  - WLAN (bei AP-Interfaces): Clients gelesen, Log `ok`.
+  - System (immer): erreichbar, CPU, RAM (nur mit Uptime > 0), Dienst-PIDs, Routerzeit.
+  - LAN (mit Ports): Port-Liste.
+  - WAN (nur IPv4-Gateway): `wan_status` mit `wan_found`, WAN-Uptime.
+  - DHCP/DNS (mit Pools): Pools, Leases, Log `ok`.
+
+  Frisch heißt: neue Daten höchstens 3 Poll-Intervalle alt. Ohne Daten gibt es nur den
+  System-Bereich mit `c = 0`, der Score ist dann `unknown`. Die Abdeckung zählt alle
+  anwendbaren Bereiche, auch unbekannte (Formel c6). Bestätigte Incidents zählen halb,
+  ignorierte und Kinder gar nicht. Offline (Router im Ausfall): System `s=0, c=1`. Ein
+  Router mit WLAN und LAN hat dann nur 25 von 70 Gewichtspunkten (0,36) und ist `unknown`
+  (AK4); in der Flotte zählt er 0 mit dem System-Anteil als Gewicht.
+- **P6-6 Wartungsmodus (AK9):**
+  - Schalter pro Router mit `RestoreEntity`. Der Zustand liegt in der Engine und im Store
+    (`maintenance_routers`); beim Start gewinnt der zuletzt in HA gesetzte Zustand.
+  - Zusätzlich gilt flottenweit `settings.maintenance.fleet_until`.
+  - Events werden markiert gespeichert, `system.reboot` als info.
+  - Belege eines Routers im Wartungsmodus werden markiert, außer der Incident ist schon
+    offen: Ein offener Incident zählt weiter und löst sich normal auf. Ein neuer oder
+    aufgelöster Incident öffnet bzw. öffnet erneut nicht.
+  - Markierte Belege brechen laufende Serien ab, deshalb kommen nach dem Ende keine
+    Nachzügler-Alarme (Test: 4 + 4 Reconnects in 10 min öffnen nichts).
+  - Der Router fällt aus dem Flotten-Score; sein eigener Score trägt `maintenance: true`.
+  - Grenze: Offene Incidents von vor dem Wartungsmodus mindern den Router-Score weiter.
+- **P6-7 Ausnahmen:**
+  - `incident_types` und `routers` halten Belege vom Automaten fern; ausgenommene Router
+    fallen auch aus dem Flotten-Score.
+  - `ssids`: Die Clients, die ein geladener Router auf so einer SSID listet, kommen zu
+    `exclusions.macs`, gelten also für alle WLAN-Detektoren. Grenze: Ein Client ist nur
+    über die SSID bekannt, solange ein Router ihn listet.
+- **P6-8 Entities:** Neues Modul `net_entities.py`. Alle Entities lesen nur `engine.view`;
+  die Ansicht wird nach jedem Schritt gebaut, Updates kommen per Dispatcher-Signal
+  `openwrt_router_net_intel_updated`. Kein Polling, keine Netzwerkaufrufe. Unique-IDs und
+  Übersetzungsschlüssel wie in c9.
+  - Die Fenster „1 h“ (WLAN) sind rollend aus dem Ringpuffer.
+  - Die WAN-Stabilität zählt `wan.up` und `wan.reconnect` über die letzten 24 Stunden-Buckets.
+  - Die WLAN-Sensoren gibt es nur, wenn beim Setup AP-Interfaces da sind.
+- **P6-9 Flotten-Anker (F1, A9):** Wer zuerst Anspruch erhebt, wird Anker. Das weicht von
+  „kleinste `entry_id`“ ab, weil ein späterer kleinerer Entry sonst die Entities
+  verschieben müsste. Entlädt der Anker, übernimmt die kleinste verbleibende `entry_id`
+  (nachdem seine Plattformen entladen sind). A9 ist im Test mit einer echten
+  `EntityRegistry` belegt: Dieselbe `unique_id` aus einem anderen Entry übernimmt
+  `config_entry_id` und `entity_id`. Die Flotten-Entities haben kein Gerät.
+- **P6-10 `PARALLEL_UPDATES`:** `sensor` und `binary_sensor` 0, `switch` 1. Das weicht von
+  c9 ab. Grund: Die Schalter führen `uci commit` und Reloads auf dem Router aus. Die
+  Quality-Scale-Regel „parallel-updates“ verlangt für Aktionen eine Grenze nach Gerät.
+  Vorher hatten asynchrone Entities keine Grenze.
+- **P6-11 Store (AK5, Masterentscheidung):** Die Track-Einträge offener Incidents werden
+  gepackt gespeichert (`"<router>:|ts,count,id;…"`, ohne Art und Router). Beides wird bei
+  offenem Incident nicht mehr gelesen. Gemessen mit `prepare_save_json`: 500 gleichzeitig
+  stürmende Clients + 3000 Events → 1 499 794 B mit 1285 behaltenen Events, ohne Warnung
+  „ohne Events geschrieben“. Der volle Automat ohne Packen bräuchte 4 235 295 B. 500
+  Level-Incidents + 3000 Events → 1 499 784 B mit 1931 Events (Werte mit den P6-Feldern
+  `announced` und `maintenance_routers`). Die Wiederherstellung eines
+  gepackten Tracks ergibt dieselben Einträge (ts, count, id), Dedup geht weiter.
+- **Grenzen (P6):**
+  - Score-Gewichte und Strafen sind nur über den Store einstellbar (Panel in P7).
+  - Die Diagnose zeigt jetzt Score, Abdeckung, Bereiche und Wartungsmodus (keine
+    Identitäten).
+  - hassfest lokal nicht gelaufen (nur in CI); die Übersetzungsdateien sind
+    JSON-geprüft und im Test gegen jede `translation_key` abgeglichen.
 
 Weiter offen und nur mit eigener Freigabe des Nutzers: Änderungen an Routern, Deploy nach
 Home Assistant, Merge nach `main`, Release.
@@ -435,14 +525,14 @@ die Engine meldet dann `unknown` bzw. leere Listen, nie einen Absturz des Polls.
 - [ ] AK1 Fällt ein Dumb-AP aus (alle Polls scheitern), entsteht genau **ein** aktiver Incident `router_unreachable` (Scope Router). Disconnect-Events seiner Clients in den 120 s davor werden ihm als Kinder zugeordnet und lösen weder HA-Events noch eigene Incidents aus.
 - [ ] AK2 Sind alle Router gleichzeitig weg, entsteht ein Incident `lan_unreachable` (Scope Flotte). Die Router-Incidents sind seine Kinder. Das Verhalten passt zum bestehenden `FleetOutageTracker`.
 - [ ] AK3 Ein Client mit ≥ 5 Reconnects in 10 min erzeugt einen Incident `wifi_reconnect_storm` (Scope Client). Weitere Reconnects erhöhen nur `occurrences`. Nach 30 min Ruhe wird der Incident `resolved`. Ein erneuter Sturm innerhalb des Cooldowns öffnet denselben Incident wieder (`reopen_count` + 1).
-- [ ] AK4 Ist der Health-Score-Sensor eines Routers aktiv, liegt sein Wert zwischen 0 und 100 oder ist `unknown`. Er ist `unknown`, solange die Abdeckung unter der Mindestabdeckung liegt, etwa direkt nach dem HA-Start oder bei Router offline. Er ist nie 100 bei fehlenden Daten.
+- [x] AK4 Ist der Health-Score-Sensor eines Routers aktiv, liegt sein Wert zwischen 0 und 100 oder ist `unknown`. Er ist `unknown`, solange die Abdeckung unter der Mindestabdeckung liegt, etwa direkt nach dem HA-Start oder bei Router offline. Er ist nie 100 bei fehlenden Daten.
 - [ ] AK5 Nach einem HA-Neustart sind Incidents und Problem-Events der letzten 30 Tage im Panel wieder sichtbar. Die Store-Datei bleibt unter 1,5 MB.
 - [ ] AK6 Jede Ursache trägt `cause_status`: `confirmed` nur bei Messdaten, sonst `hypothesis`. Ein Incident, der auf einer abgeleiteten Topologie-Kante beruht, hat höchstens Konfidenz 0,6 und `cause_status = hypothesis`.
 - [ ] AK7 Die Diagnose-Datei enthält aus der Engine nur Zähler, Typen und Zeiten. MAC, IP, Hostname, SSID und Routername sind redigiert.
 - [ ] AK8 Neue Abfragen pro Router und Poll: 0. Optional ab P4 höchstens 1 `hostapd.* get_status` je AP-Interface alle 5 Polls, und das nur nach L2. ACL bleibt v8.
-- [ ] AK9 Wartungsmodus an: Events werden markiert gespeichert, es entstehen keine Incidents, HA-Events oder Score-Abzüge. Wartungsmodus aus: Normalbetrieb ohne Nachzügler-Alarme.
+- [x] AK9 Wartungsmodus an: Events werden markiert gespeichert, es entstehen keine Incidents, HA-Events oder Score-Abzüge. Wartungsmodus aus: Normalbetrieb ohne Nachzügler-Alarme.
 - [ ] AK10 Panel: Der Tab „Diagnose“ zeigt Übersicht, Timeline mit Filtern (Router, Kategorie, Schweregrad, Zeitraum), WLAN, Infrastruktur und Incident-Detail. Die Topologie trägt Warnsymbole an betroffenen Knoten. Bestätigen und Ignorieren gehen nur als Admin.
-- [ ] AK11 Ein HA-Event `openwrt_router_incident_event` feuert genau einmal bei `opened`, `resolved` und `reopened`, ab Schweregrad `warning` (einstellbar). Für Kinder unter einer aktiven Eltern-Ursache feuert es nicht.
+- [x] AK11 Ein HA-Event `openwrt_router_incident_event` feuert genau einmal bei `opened`, `resolved` und `reopened`, ab Schweregrad `warning` (einstellbar). Für Kinder unter einer aktiven Eltern-Ursache feuert es nicht.
 
 ## Befunde im Code (verifiziert)
 
@@ -1258,6 +1348,12 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 – Wurzelwahl: `lan_unreachable` vor bestätigter Verknüpfung vor genauester Wurzel; Kind bleibt Kind; abgeleitete Verknüpfung Hypothese ≤ 0,6 – AK1, AK2, AK6 (P5-4 bis P5-6) – entschieden, Umsetzer
 - 2026-11-16 – `wifi_radio_change` aus DFS-Zeilen als Info-Ereignis; abgeleiteter `lan_uplink_down` über Topologie-Port mit 24-h-Gedächtnis – c4 Stufe 4/5 ohne neue Aufrufe (P5-7, P5-8) – entschieden, Umsetzer
 - 2026-11-16 – Automat kompakt speichern, je Incident 5 Belege im Store – 500 Incidents mit 20 Belegen brauchten allein ≈ 2,1 MB (P5-10) – entschieden, Umsetzer
+- 2026-11-16 – Track-Einträge offener Incidents gepackt speichern – 500 stürmende Clients + 3000 Events 1 499 794 B statt Warnung ohne Events (P6-11, AK5) – entschieden, Master; Format vom Umsetzer
+- 2026-11-16 – Bus-Event nur für Wurzeln nach Settle (90 s bzw. Intervall + 30 s) und ohne späten Router, höchstens 900 s Halt; vor dem Settle aufgelöst bleibt stumm – Wurzel kann vor ihrem Elternteil entstehen (P5-Übergabe, P6-1, P6-2) – entschieden, Master (Settle) / Umsetzer (Details)
+- 2026-11-16 – Kind = `parent_id` eines bekannten Incidents, gleich für Score, Zähler und Bus – eine Regel statt drei (P6-4) – entschieden, Umsetzer
+- 2026-11-16 – Wartungsmodus markiert Belege nur ohne offenen Incident; Zustand in Engine + Store, Schalter stellt wieder her – offene Incidents lösen sich normal, keine Nachzügler (P6-6, AK9) – entschieden, Umsetzer
+- 2026-11-16 – Flotten-Anker: erster Anspruch, Übergabe an kleinste verbleibende `entry_id` – kein Verschieben beim Laden eines kleineren Entries; A9 per Registry-Test belegt (P6-9) – entschieden, Umsetzer
+- 2026-11-16 – `PARALLEL_UPDATES` 0 für sensor/binary_sensor, 1 für switch – Quality-Scale-Regel: Aktionen pro Gerät begrenzen (P6-10) – entschieden, Umsetzer
 
 ## Prüfprotokoll
 
@@ -1269,3 +1365,4 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 `feature/network-intelligence` (P4) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 2102 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_wifi.py` (63 Tests: Parser mit Live- und synthetischen Formen, Bus unverändert, `rate` behalten, Sturm 8/10 min bei −78 dBm, PSK-/SAE-Serie, Backhaul, Auth-Welle über Router, Band-/Roaming-Flapping mit und ohne usteer, schwache Clients mit Halten und Hysterese, ohne IP, DHCP nach Connect, Massen-Disconnect, einzelner kurzer Abbruch, doppelte Zeilen, fehlendes Log, alte Track-Einträge). Angepasst: `tests/test_net_engine.py` (Aufrufzähler mit Live-WLAN-Zeilen und `get_clients` mit `rate`, gleiche Aufrufzahl; Restore-Test mit zweiter MAC; `LogBatch.new_lines`), `tests/test_log_parser.py` (EAPOL-4WAY-HS-COMPLETED und usteer nicht mehr ignoriert) · CI: – (kein Push) · Hardware: nicht geprüft (SAE, MIC, PSK, Assoc-Reject, Backhaul-Zeile, usteer „connected“ nicht live gesehen; `rate`-Einheit offen) · Review: P4-Review umgesetzt (Commit `fix(intel): address P4 review`)
 - 2026-11-16 `feature/network-intelligence` (P4-Review-Fixes M1–M6, K1–K4) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2128 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_wifi_review.py` (26 Tests), davon 25 gegen den Stand `4cc2935` rot (jedes M mindestens ein Fehlerfall-Test; der 26. sichert den beobachteten usteer-Fall ab); die 6 Review-Proben laufen gegen den neuen Stand nicht mehr durch (Fehlverhalten weg). Angepasst: `tests/test_net_wifi.py` (Auth-Welle zählt MACs, Roam ohne bestätigtes Signal, usteer mit Logzeilen, NAK nach 30 s, Massen-Cluster in 5 s, Poll-Rückfall über zwei Polls), `tests/test_net_engine.py` (Aufrufzähler: Reconnect-Ursache Hypothese, Fixture-Zeilen älter als ein Poll) · CI: – (kein Push) · Hardware: nicht geprüft (`AP-DISABLED`/`INTERFACE-DISABLED`, usteer „connected to“, DHCPNAK→ACK nicht live gesehen) · Review: –
 - 2026-11-16 `feature/network-intelligence` (P5) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2170 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_correlation.py` (40 Tests, 41 Fälle): Topologie (LLDP, Trunk-Karten mit nächstem Router, mehrdeutig, ohne Gateway, doppelte Identität, Gedächtnis, Zyklus), jede Wurzelregel mit Gegenfall (Fenster, anderer Router, Geschwister, anderer `phy`, Client am AP vor dem Port, WAN anderer Router), bestätigte Ursache bleibt, Kind bleibt Kind, Kappung 0,6 bleibt, Engine-Szenarien mit echtem `FleetOutageTracker`: AP-Ausfall mit 20 Clients (AK1: eine Wurzel `router_unreachable`, alle offenen Incidents und Events darunter), alle Router weg (AK2: `lan_unreachable` critical, Router-Incidents als Kinder, Erholung), WAN weg + DNS-Zeile (Kind) und WAN up + DNS (Hypothese ohne Eltern), abgeleitete Kante ≤ 0,6 + Hypothese (AK6), gestaffelte Polls (Settle), Auth-Fehler kein Ausfall, ungeladener Router, Beobachter-Fehler; Fleet-Hook; DFS → Funkwechsel; abgeleiteter Uplink-Port; kompaktes Format mit altem Vollformat; K2-Test; Store 500 offene Incidents + 3000 Events = 1 499 732 B (Worst Case 500 stürmende Clients 2 897 243 B, mit Warnung). Angepasst: `tests/test_net_rules_review.py` (Typ ohne Regel jetzt `something_new`, da `router_unreachable` eine Regel hat; neuer Test `stay_open`). AK1 nur für den Teil Korrelation: Kinder bleiben verknüpfte Incidents, ihre HA-Events unterdrückt erst P6 (AK11) · CI: – (kein Push) · Hardware: nicht geprüft (DFS-Zeilen, Trunk-Karten mit echtem Switch dazwischen, Ausfall eines APs mit Clients) · Review: –
+- 2026-11-16 `feature/network-intelligence` (P6) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2251 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_score.py` (22 Tests: Indikatoren je Bereich, nicht anwendbar, unbekannt bei fehlenden/alten Daten, Strafen nach Schwere und Konfidenz, bestätigt halb, ignoriert/aufgelöst/Kind nicht, Offline, Flotte gewichtet), `tests/test_net_p6.py` (37 Tests: Bus-Event nach Settle, später Router hält bis 900 s, vor Settle aufgelöst bleibt stumm, `reopened`, bestätigt/ignoriert, Kind stumm, kein zweites `opened` nach Neustart, Timer ohne Poll, AK1-Szenario mit einem Event, Wartungsmodus ohne Nachzügler und mit offenem Incident, Ausnahmen nach Typ/Router/SSID, Ansicht, Flotten-Anker und Übergabe), `tests/test_net_entities.py` (19 Tests, 22 Fälle: Unique-ID-Muster, Entities lesen nur die Ansicht, Übersetzungen je `translation_key`, ungespeicherte Attribute, Schalter mit Restore, A9 mit echter `EntityRegistry`, Logbook, `PARALLEL_UPDATES`). Angepasst: `tests/test_net_correlation.py` (kompakter Round-Trip vergleicht kompakt mit kompakt), `tests/test_net_engine.py` (Diagnose mit Score/Abdeckung/Wartungsmodus) · CI: – (kein Push; hassfest nicht lokal) · Hardware: nicht geprüft · Review: –

@@ -588,3 +588,27 @@ INTEL_SAVE_DELAY_SECONDS = 300
 INTEL_MAX_STORE_BYTES = 1_500_000
 # Retention pruning of events and counters runs at most this often.
 INTEL_PRUNE_INTERVAL_SECONDS = 300
+
+# Network intelligence (P6): score, entities, bus event.
+# Fired when an incident root is opened, reopened or resolved (plan c9, AK11).
+EVENT_INCIDENT = f"{DOMAIN}_incident_event"
+# Dispatcher signal: the engine has a new view (score, counts) for entities.
+SIGNAL_NET_INTEL = f"{DOMAIN}_net_intel_updated"
+# A new root is announced only after this settle time (a parent may still
+# appear, e.g. an outage needs several failed polls) ...
+INTEL_ANNOUNCE_SETTLE_SECONDS = 90
+# ... and at the latest after this long, even while a router is late.
+INTEL_ANNOUNCE_HOLD_MAX_SECONDS = 900
+# Per-router entities (unique_id f"{entry_id}_{suffix}").
+SUFFIX_NET_HEALTH = "net_health"
+SUFFIX_INCIDENTS_ACTIVE = "incidents_active"
+SUFFIX_WIFI_RECONNECTS_1H = "wifi_reconnects_1h"
+SUFFIX_WIFI_AUTH_ERRORS_1H = "wifi_auth_errors_1h"
+SUFFIX_WAN_STABILITY = "wan_stability"
+SUFFIX_INCIDENT_CRITICAL = "incident_critical"
+SUFFIX_MAINTENANCE_MODE = "maintenance_mode"
+# Fleet entities: one set per HA instance, on the anchor entry (plan F1).
+FLEET_UID_PREFIX = f"{DOMAIN}_fleet_"
+UID_FLEET_NET_HEALTH = f"{FLEET_UID_PREFIX}net_health"
+UID_FLEET_INCIDENTS_ACTIVE = f"{FLEET_UID_PREFIX}incidents_active"
+UID_FLEET_INCIDENT_CRITICAL = f"{FLEET_UID_PREFIX}incident_critical"
