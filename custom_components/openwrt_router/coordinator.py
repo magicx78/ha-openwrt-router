@@ -7,7 +7,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -227,6 +227,50 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+@dataclass(frozen=True)
+class LogBatch:
+    """Cursor facts of one log fetch, handed to the network intelligence engine.
+
+    ``baseline`` and ``missed`` come from ``LogCursor.ingest``. The times are
+    the router's epoch milliseconds of the oldest line in the answer and of
+    the cursor position after the fetch (None when unusable).
+    """
+
+    baseline: bool
+    missed: int
+    first_time_ms: int | None
+    last_id: int | None
+    last_time_ms: int | None
+
+
+def _log_time_ms(value: Any) -> int | None:
+    """A logd ``time`` field as int milliseconds, None if unusable."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _log_batch(
+    entries: list[dict[str, Any]], baseline: bool, missed: int, cursor: LogCursor
+) -> LogBatch:
+    """Summarise one fetch for the engine (oldest line by id, cursor state)."""
+    ids = [
+        e
+        for e in entries
+        if isinstance(e, dict)
+        and isinstance(e.get("id"), int)
+        and not isinstance(e.get("id"), bool)
+    ]
+    oldest = min(ids, key=lambda e: e["id"]) if ids else None
+    return LogBatch(
+        baseline=baseline,
+        missed=missed,
+        first_time_ms=_log_time_ms(oldest.get("time")) if oldest else None,
+        last_id=cursor.last_id,
+        last_time_ms=_log_time_ms(cursor.last_time),
+    )
+
+
 def _cpu_load_basis(data: OpenWrtCoordinatorData) -> str:
     """Describe what a cpu_load percentage refers to (throttle log lines)."""
     if data.cpu_cores:
@@ -333,6 +377,13 @@ class OpenWrtCoordinatorData:
         # Router log ingest (F6): status and counters, see _ingest_log()
         self.log_status: str = LOG_STATUS_PENDING
         self.log_stats: dict[str, Any] = {}
+        # Log events parsed in this poll's log fetch, and the cursor facts of
+        # that fetch, for the network intelligence engine. On a baseline
+        # fetch the events are the lines already in the buffer; the engine
+        # takes only those newer than its stored mark. Never in as_dict
+        # (MACs, IPs); a fresh data object per poll resets both.
+        self.new_log_events: tuple[LogEvent, ...] = ()
+        self.new_log_batch: LogBatch | None = None
         # DFS (F3): {"events_24h", "by_type", "last_event"}
         self.dfs: dict[str, Any] = {}
         # DHCP health (F5): usage per active pool, MACs of static hosts
@@ -1351,6 +1402,10 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self, entries: list[dict[str, Any]], data: OpenWrtCoordinatorData
     ) -> None:
         result = self._log_cursor.ingest(entries)
+        data.new_log_events = tuple(result.events)
+        data.new_log_batch = _log_batch(
+            entries, result.baseline, result.missed, self._log_cursor
+        )
         now_ms = int(time.time() * 1000)
         for event in result.events:
             # Router time only when plausible: a dumb AP without NTP sync

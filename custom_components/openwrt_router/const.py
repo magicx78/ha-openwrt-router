@@ -574,3 +574,17 @@ CONF_USE_AGGREGATOR = "use_aggregator"
 DEFAULT_USE_AGGREGATOR = False
 AGGREGATOR_SCHEMA_VERSION = "1.18.0"
 AGGREGATOR_REMOTE_SCRIPT_PATH = "/root/ha-collect.sh"
+
+# ---------------------------------------------------------------------------
+# Network intelligence (plan 2026-11-16, P2): fleet-wide event store
+# ---------------------------------------------------------------------------
+# One HA Store file for all routers (.storage/openwrt_router.intelligence).
+INTEL_STORE_KEY = f"{DOMAIN}.intelligence"
+INTEL_STORE_VERSION = 1
+INTEL_STORE_MINOR_VERSION = 1
+# Writes are batched: at most one store write per this many seconds.
+INTEL_SAVE_DELAY_SECONDS = 300
+# Hard limit of the store file; the oldest events are trimmed before a save.
+INTEL_MAX_STORE_BYTES = 1_500_000
+# Retention pruning of events and counters runs at most this often.
+INTEL_PRUNE_INTERVAL_SECONDS = 300

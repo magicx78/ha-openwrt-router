@@ -598,6 +598,37 @@ class AlarmMachine:
         inc.ignore_until = until if until is not None else now + self._ignore_seconds()
         return True
 
+    def remove_router(self, entry_id: str) -> int:
+        """Forget a removed router; return how many incidents were dropped.
+
+        Dropped with their tracks: incidents that only concern this router
+        (``routers`` holds nothing else) and incidents whose ``scope_key`` is
+        the router or starts with ``"<entry_id>:"`` (router-scoped keys). In
+        incidents shared with other routers it is only taken off
+        ``routers``. Tracks with such a ``scope_key`` go as well.
+        """
+        prefix = f"{entry_id}:"
+        dropped = [
+            inc_id
+            for inc_id, inc in self._incidents.items()
+            if (inc.routers and set(inc.routers) <= {entry_id})
+            or inc.scope_key == entry_id
+            or inc.scope_key.startswith(prefix)
+        ]
+        for inc_id in dropped:
+            del self._incidents[inc_id]
+        for inc in self._incidents.values():
+            if entry_id in inc.routers:
+                inc.routers = [r for r in inc.routers if r != entry_id]
+        for key, track in list(self._tracks.items()):
+            if (
+                track.incident_id in dropped
+                or track.scope_key == entry_id
+                or track.scope_key.startswith(prefix)
+            ):
+                del self._tracks[key]
+        return len(dropped)
+
     # -- persistence ---------------------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:

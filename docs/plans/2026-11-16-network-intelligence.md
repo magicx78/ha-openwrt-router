@@ -12,9 +12,10 @@ belegt), **Annahme** (plausibel, aber noch nicht belegt; Prüfweg steht dabei), 
 
 - **Stand:** 2026-11-16 · **Phase:** freigegeben (Nutzer, 2026-11-16), in Umsetzung
 - **Branch/PR:** `feature/network-intelligence` · Worktree `../ha-openwrt-router-net-intel` · PR #— · Basis: v1.39.0 (`main@f8a2ac7`)
-- **Erledigt:** Live-Checks · **In Arbeit:** P1 · **Offen:** P2–P8
+- **Erledigt:** Live-Checks, P1, P2 · **In Arbeit:** – · **Offen:** P3–P8
+- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 im Commit `feat(intel): add fleet engine with persistent store (P2)`
 - **Blocker:** keine
-- **Nächster Schritt:** P1 prüfen (Diff lesen, `checks.py`), dann P2.
+- **Nächster Schritt:** P1, P2 erledigt; nächster Schritt P3 (setzt die Live-Checks L1/L4/L5/L6/L8 voraus).
 
 ### Entscheidungen (2026-11-16)
 
@@ -27,6 +28,38 @@ Entschieden nach der Empfehlung des Plans:
 - F4 30 Tage, 3000 Events, 500 Incidents, höchstens 1,5 MB.
 - F5 Kanalauslastung über `hostapd get_status` alle 5 Polls, Standard aus (L2 zeigt die Felder).
 - F6 Keine zusätzlichen Benachrichtigungen; HA-Event und Entities genügen.
+
+Entschieden bei der Umsetzung von P1-Review und P2 (Coordinator bzw. Umsetzer, 2026-11-16):
+
+- Ruff-Gate (Coordinator): `ruff 0.17.3`, `ruff check` und `ruff format --check` auf
+  `custom_components/` und `tests/test_net_*.py`. Altbefunde in `scripts/` und älteren Tests
+  sind Folgearbeit.
+- Uhrmodell: Die Engine hat eine Uhr für die ganze Flotte, die nie rückwärts läuft
+  (`AlarmMachine.sync_clock`). Ein Rücksprung bis 300 s zählt als „keine Zeit vergangen“;
+  ein größerer verschiebt alle gespeicherten Zeiten im Automaten und im Ringpuffer um
+  denselben Betrag (Routerzeit `src_ts` bleibt). Nach einem Vorwärtssprung über 300 s wird
+  bis zum nächsten normalen Schritt nichts nach Alter gelöscht.
+- Pro Poll höchstens ein Level-Beleg je (Typ, Scope); ein Typ ohne Regel löst mit einer
+  Rückfallregel automatisch auf. Eigene Regeln für `router_unreachable`/`lan_unreachable`
+  kommen in P5.
+- Einstellungen aus dem Store werden begrenzt (Ganzzahlen, Fenster/Dauer > 0, Anteile 0..1,
+  `retention_days` ≤ 365, `max_events` ≤ 10000); ungültige Werte fallen auf den Standard.
+- Store-Inhalt abweichend von c5: `{settings, seq, events, machine, counters, log_marks}`;
+  `machine` ist der vollständige `AlarmMachine.to_dict()` (Incidents und Spuren).
+- `async_delay_save` verschiebt einen wartenden Schreibvorgang bei jedem Aufruf nach hinten.
+  Die Engine ruft es deshalb nur einmal je 300-s-Fenster auf (`_save_pending`).
+- Statt auf einen Schreibvorgang von HA beim Beenden zu vertrauen, schreibt der letzte
+  Unload sofort und wartet darauf (`async_unload_entry`, nur nach erfolgreichem Unload).
+  Ein Setup, das in diesen Schreibvorgang fällt, wartet auf ihn.
+- Größengrenze 1,5 MB gemessen mit `homeassistant.helpers.json.prepare_save_json` auf der
+  ganzen Datei (inklusive Hülle); die ältesten Events fallen auch im Speicher weg.
+- Log-Übergabe: `coordinator.py` setzt `new_log_events` (auch bei der Baseline) und
+  `new_log_batch` (`LogBatch`: Baseline, verpasste Zeilen, erste/letzte Zeit, letzte ID) direkt
+  nach `LogCursor.ingest`. Beide Felder stehen nicht in `as_dict()`. Die Engine füllt nach
+  einem Neustart die Lücke über `log_marks` (Zeit > `last_time_ms`); beginnt der logd-Puffer
+  erst nach der Marke, entsteht ein Info-Event `system.log_gap`. Ohne Marke wird keine
+  Vorgeschichte übernommen.
+- Der Engine-Listener wird vor dem Kanalplan-Listener registriert.
 
 Weiter offen und nur mit eigener Freigabe des Nutzers: Änderungen an Routern, Deploy nach
 Home Assistant, Merge nach `main`, Release.
@@ -853,7 +886,12 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 – Modulnamen `net_events.py`, `net_rules.py`, `net_engine.py` – kurze, eindeutige Namen, Regeln ohne HA-Import – Vorschlag, Planer
 - 2026-11-16 – `DEFAULT_SERVICES` bleibt unverändert; die Engine wertet `service list` selbst aus – sonst neue Dienst-Schalter/Buttons (`switch.py:363`) – Vorschlag, Planer
 - 2026-11-16 – Latenz nur als „vom HA-Host gemessen“, einmal pro Flotte – `coordinator.py:687-700` misst nicht vom Router – Vorschlag, Planer
+- 2026-11-16 – Ruff-Gate auf `custom_components/` + `tests/test_net_*.py` (ruff 0.17.3); Altbefunde sind Folgearbeit – Gate prüft nur, was P1/P2 berühren – entschieden, Coordinator
+- 2026-11-16 – Uhr der Engine läuft nie rückwärts; großer Rücksprung verschiebt Automat und Ringpuffer, Vorwärtssprung hält das Löschen nach Alter einen Schritt an – Review P1-1/P1-2 – entschieden, Umsetzer
+- 2026-11-16 – Store speichert den ganzen Automaten (`machine`), Schreiben einmal je 300 s, letzter Unload schreibt sofort und wartet – `async_delay_save` schiebt bei jedem Aufruf nach hinten; `async_on_unload`-Koroutinen werden nicht abgewartet – entschieden, Umsetzer
+- 2026-11-16 – `LogBatch` + `log_marks` mit Lückenfüllung und `system.log_gap` – c5, Neustart ohne Verlust und ohne doppelte Zeilen – entschieden, Umsetzer
 
 ## Prüfprotokoll
 
 - 2026-11-16 `main@f8a2ac7` – nur gelesen, kein Code geändert · lokal: – · CI: – · Hardware: nicht geprüft (L0–L12 offen) · Review: –
+- 2026-11-16 `feature/network-intelligence` (P1-Review-Fixes `4e62d7b`, P2) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 1884 passed (Python 3.13, HA 2026.2.3) · CI: – (kein Push) · Hardware: nicht geprüft · Review: P1-Review umgesetzt (P1-1, P1-2, P2-1…P2-8, billige P3-Eingabeprüfungen), übrige P3-Punkte offen
