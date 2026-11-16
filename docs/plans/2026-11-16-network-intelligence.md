@@ -12,10 +12,10 @@ belegt), **Annahme** (plausibel, aber noch nicht belegt; Prüfweg steht dabei), 
 
 - **Stand:** 2026-11-16 · **Phase:** freigegeben (Nutzer, 2026-11-16), in Umsetzung
 - **Branch/PR:** `feature/network-intelligence` · Worktree `../ha-openwrt-router-net-intel` · PR #— · Basis: v1.39.0 (`main@f8a2ac7`)
-- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review, P5, P6, P5-Review, P7 · **In Arbeit:** P6-Review · **Offen:** P8
-- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 in `1e8fb71`; P5 in `2ba7674`; P6 in `4cef6a8`; Review-Fixes P5 im Commit `fix(intel): address P5 review`; P7 im Commit `feat(panel): network intelligence diagnostics tab (P7)`
+- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review, P5, P6, P5-Review, P7, P6-Review · **Offen:** P8
+- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 in `1e8fb71`; P5 in `2ba7674`; P6 in `4cef6a8`; Review-Fixes P5 im Commit `fix(intel): address P5 review`; P7 in `fd21931`; Review-Fixes P6 im Commit `fix(intel): address P6 review`
 - **Blocker:** keine
-- **Nächster Schritt:** P7 erledigt; nächster Schritt P8 (vorher P6-Review-Fixes, Commit `fix(intel): address P6 review`).
+- **Nächster Schritt:** P8.
 
 ### Entscheidungen (2026-11-16)
 
@@ -572,6 +572,52 @@ Entschieden in P7 (Umsetzer, 2026-11-16; API-Routen, Diagnose-Tab, Badges, Einst
 - **P7-10 Dev-Mount:** Der bestehende `MOCK_DATA`-Dev-Mount bleibt unverändert; der
   Diagnose-Tab hat keine Mock-Daten und zeigt ohne Home Assistant nur einen Hinweis.
 
+Entschieden im P6-Review (Umsetzer, 2026-11-16; Masterentscheidungen E8–E11):
+
+- **E8 / K1 Kind nach der Wurzel:** Ein offenes Kind zählt wieder als Wurzel, sobald seine
+  Wurzel aufgelöst und deren Nachfenster (`resolved_at` + zweiter Wert aus `_ROOT_WINDOWS`)
+  vorbei ist: für Score, Zähler, Warnsymbole und Bus (`opened` nach dem Settle). `parent_id`
+  bleibt für die Historie, E6 (Freigabe nach 1 h) gilt weiter für die geerbte Ursache.
+  `net_rules.suppressed_child` ist die eine Regel für Zählen und Melden; ohne Uhrzeit bleibt
+  ein Kind stumm. Die Engine stellt ihren Timer auch auf `child_release_time`.
+- **E9 / M3 Entladen ist stumm:** `router_removed` beim Entladen oder Neuladen feuert kein
+  `resolved` auf dem Bus und schreibt nichts ins Logbook; der Incident ist danach aufgelöst und
+  nicht mehr als gemeldet vermerkt.
+- **E10 / L4 Flotten-Incidents:** `lan_unreachable` und `wifi_auth_wave` (Scope Flotte) zählen
+  nur in den Flotten-Entities. Router-Score, Router-Zähler, Router-Problemsensor und
+  Warnsymbole zählen nur Incidents, deren Ursache an diesem Router liegt
+  (`counts_for_router`).
+- **E11 / L1 WLAN braucht das Log:** Der Bereich WLAN zählt im Score nur, wenn das Log lesbar
+  ist. Eine leere Client-Liste und ein leeres `memory_pressure` sind keine Messung. Die Probe
+  „Score 100 bei Abdeckung 0,64 ohne Log“ ergibt jetzt keinen Score 100 mehr.
+- **M1 Später Router:** „spät“ nur zwischen 1,25 und Fehlerschwelle + 1 Poll-Intervallen
+  (`NOTIFICATION_FAILURE_THRESHOLD` + 1 = 4); danach ist sein Ausfall gemeldet oder kommt
+  nicht. Ein Router mit Auth-Fehler im `FleetOutageTracker` ist nie spät.
+- **M2 Flotten-Entities beim Entladen:** `async_unload_entry` ruft zuerst
+  `net_entities.async_withdraw_fleet`: die Engine nimmt die Ansprüche des Entries zurück und
+  wählt den Nachfolger (kleinste Entry-ID); die drei Registry-Einträge der Flotten-Entities
+  gehen sofort per `async_update_entity(..., config_entry_id=…)` an ihn. Die Entities selbst
+  legt sein `create` erst in `unregister` an, wenn die alten Entities weg sind (HA lehnt eine
+  zweite Entity mit lebender Entity-ID ab).
+- **L2 Geerbte Ursache:** Neues Feld `Incident.cause_inherited`, gesetzt beim Verknüpfen,
+  wenn das Kind die Ursache der Wurzel übernimmt; zurückgesetzt, wenn eine eigene Ursache sie
+  ersetzt. Ältere Stores ohne das Feld werden beim Laden einmal mit der alten Schätzung
+  belegt. Damit ist die Grenze aus dem P5-Review (eigene Ursache gleichen Namens) behoben.
+- **L3 Restore:** Der Wartungsschalter übernimmt nur `on` und `off`; `unavailable` und
+  `unknown` lassen den gespeicherten Zustand stehen.
+- **L5 Erst „opened“:** Die Engine merkt sich gespeichert (`opened`), welche Incidents
+  `opened` gefeuert haben. Ein Wiederöffnen ohne vorheriges `opened` meldet `opened`. Ältere
+  Stores ohne den Schlüssel nehmen die gemeldeten Incidents.
+- **L6 Timer:** Der Weck-Timer wird nur neu gestellt, wenn sich seine Zeit ändert. Die zwei
+  Langläufer-Tests (`test_m1_slow_polls_*`) patchen Timer und Dispatcher.
+- **Grenzen (P6-Review):**
+  - M2 ist ohne volle HA-Testumgebung geprüft: Registry-Umzug mit echter `EntityRegistry`,
+    Reihenfolge in `async_unload_entry` mit Mocks. Das Anlegen über eine echte
+    Entity-Plattform nach dem Entladen ist nicht getestet.
+  - Schlägt das Entladen der Plattformen fehl, stehen die Registry-Einträge schon beim
+    Nachfolger, die alten Entities leben weiter; angelegt wird erst beim nächsten
+    erfolgreichen Entladen dieses Entries. Seltener Fall, nicht getestet.
+
 Weiter offen und nur mit eigener Freigabe des Nutzers: Änderungen an Routern, Deploy nach
 Home Assistant, Merge nach `main`, Release.
 
@@ -615,7 +661,7 @@ die Engine meldet dann `unknown` bzw. leere Listen, nie einen Absturz des Polls.
 
 ## Akzeptanzkriterien
 
-- [ ] AK1 Fällt ein Dumb-AP aus (alle Polls scheitern), entsteht genau **ein** aktiver Incident `router_unreachable` (Scope Router). Disconnect-Events seiner Clients in den 120 s davor werden ihm als Kinder zugeordnet und lösen weder HA-Events noch eigene Incidents aus.
+- [x] AK1 Fällt ein Dumb-AP aus (alle Polls scheitern), entsteht genau **ein** aktiver Incident `router_unreachable` (Scope Router). Disconnect-Events seiner Clients in den 120 s davor werden ihm als Kinder zugeordnet und lösen weder HA-Events noch eigene Incidents aus.
 - [ ] AK2 Sind alle Router gleichzeitig weg, entsteht ein Incident `lan_unreachable` (Scope Flotte). Die Router-Incidents sind seine Kinder. Das Verhalten passt zum bestehenden `FleetOutageTracker`.
 - [ ] AK3 Ein Client mit ≥ 5 Reconnects in 10 min erzeugt einen Incident `wifi_reconnect_storm` (Scope Client). Weitere Reconnects erhöhen nur `occurrences`. Nach 30 min Ruhe wird der Incident `resolved`. Ein erneuter Sturm innerhalb des Cooldowns öffnet denselben Incident wieder (`reopen_count` + 1).
 - [x] AK4 Ist der Health-Score-Sensor eines Routers aktiv, liegt sein Wert zwischen 0 und 100 oder ist `unknown`. Er ist `unknown`, solange die Abdeckung unter der Mindestabdeckung liegt, etwa direkt nach dem HA-Start oder bei Router offline. Er ist nie 100 bei fehlenden Daten.
@@ -1455,6 +1501,11 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 – `cause_level` aus `cause_status` + `confidence` (0,7 / 0,4) abgeleitet, Empfehlungen statisch im Frontend – kein neues Feld im Store (P7-3, P7-4) – entschieden, Umsetzer
 - 2026-11-16 – Neuer Tab „Diagnose“ neben „Alarme“ (Aufräumen in P8), Laden im Snapshot-Takt, Handy über Warnsymbol + Zurück – keine zweite Abfrageschleife (P7-5 bis P7-7) – entschieden, Umsetzer
 - 2026-11-16 – Einstellungen streng geprüft (Listen ≤ 200 × 64 Zeichen, MACs), Wartung je Router bleibt am Schalter – eine Quelle je Zustand (P7-8) – entschieden, Umsetzer
+- 2026-11-16 – Offenes Kind zählt wieder als Wurzel nach Auflösung der Wurzel + deren Nachfenster; `parent_id` bleibt – Kind war sonst bis 1 h unsichtbar (E8, K1) – entschieden, Master
+- 2026-11-16 – `router_removed` beim Entladen/Neuladen stumm (kein Bus, kein Logbook) – Entladen ist kein Ende einer Störung (E9, M3) – entschieden, Master
+- 2026-11-16 – Flotten-Incidents zählen nur in Flotten-Entities, Router zählen nur Incidents mit Ursache am Router – kein doppeltes Zählen (E10, L4) – entschieden, Master
+- 2026-11-16 – WLAN-Bereich zählt nur mit lesbarem Log; leere Client-Liste/Speicherwerte keine Messung – kein Score 100 bei blindem Log (E11, L1) – entschieden, Master
+- 2026-11-16 – „spät“ nur bis Fehlerschwelle + 1 Intervalle, Auth-Fehler nie spät; Flotten-Entities ziehen zu Beginn des Entladens um; `cause_inherited` als Feld; Restore nur on/off; `reopened` nur nach `opened` – P6-Review M1, M2, L2, L3, L5, L6 – entschieden, Umsetzer
 
 ## Prüfprotokoll
 
@@ -1469,3 +1520,4 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 `feature/network-intelligence` (P6) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2251 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_score.py` (22 Tests: Indikatoren je Bereich, nicht anwendbar, unbekannt bei fehlenden/alten Daten, Strafen nach Schwere und Konfidenz, bestätigt halb, ignoriert/aufgelöst/Kind nicht, Offline, Flotte gewichtet), `tests/test_net_p6.py` (37 Tests: Bus-Event nach Settle, später Router hält bis 900 s, vor Settle aufgelöst bleibt stumm, `reopened`, bestätigt/ignoriert, Kind stumm, kein zweites `opened` nach Neustart, Timer ohne Poll, AK1-Szenario mit einem Event, Wartungsmodus ohne Nachzügler und mit offenem Incident, Ausnahmen nach Typ/Router/SSID, Ansicht, Flotten-Anker und Übergabe), `tests/test_net_entities.py` (19 Tests, 22 Fälle: Unique-ID-Muster, Entities lesen nur die Ansicht, Übersetzungen je `translation_key`, ungespeicherte Attribute, Schalter mit Restore, A9 mit echter `EntityRegistry`, Logbook, `PARALLEL_UPDATES`). Angepasst: `tests/test_net_correlation.py` (kompakter Round-Trip vergleicht kompakt mit kompakt), `tests/test_net_engine.py` (Diagnose mit Score/Abdeckung/Wartungsmodus) · CI: – (kein Push; hassfest nicht lokal) · Hardware: nicht geprüft · Review: –
 - 2026-11-16 `feature/network-intelligence` (P5-Review-Fixes E5–E7, K1, K2, M1–M4, L1, L2) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2272 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_p5_review.py` (21 Tests): die 7 Review-Proben umgekehrt auf das richtige Verhalten (Probe 6 lief schon richtig), E5 mit zeitgleichem und ohne eigenen Ausfall, Neustart nimmt Router dahinter mit, Freigabe nach Fenster + 1 h, aufgelöstes Kind bleibt verknüpft, eigene bestätigte Ursache bleibt, verwaist beim Laden/Kappen/Entfernen, `resolve_router`, entfernter Router, Funkwechsel je `phy` und Fenster je Beleg, gemerkte Kante altert, alter Port öffnet kein `lan_uplink_down` (Engine), neue Verknüpfungen speichern, Laufzeit < 10 ms. Gegen den Stand `4cef6a8` sind 16 der 21 neuen Tests rot (die übrigen 5 sichern unverändertes Verhalten ab). Angepasst: `tests/test_net_correlation.py` (Gedächtnis-Kante `remembered`, eigene CPU-/Port-Incidents vor dem Ausfall keine Kinder, Funkwechsel mit Event des Massen-Disconnects, entladener Router löst seinen Ausfall auf) · CI: – (kein Push) · Hardware: nicht geprüft · Review: P5-Review umgesetzt
 - 2026-11-16 `feature/network-intelligence` (P7) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2354 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_panel_api.py` (82 Tests: 403 für Nicht-Admins je GET-Route, Freigabe für alle Nutzer, POST bleibt Admin, 410, 503 ohne geladene Engine, Routen-Namen, Übersicht, Event-Filter/Cursor/ungültige Filter, Incident-Liste mit Reihenfolge, Detail mit Kindern und Kette, 404, Bestätigen/Ignorieren/Reaktivieren, 409, ungültige Bodys, Einstellungen GET/Teil-POST/15 ungültige Fälle/Standardwerte, `cause_level`-Abbildung, Snapshot-Warnsymbole, Ring-Kappung, AK5 Routen nach Neustart aus dem Store). Angepasst: `tests/test_panel_lifecycle.py` (sechs Views statt einer). Frontend: `npm run build` (tsc + vite) ohne Fehler, kein TS-Test vorhanden; Bundle 373 007 → 422 667 B. Render-Nachweis lokal (127.0.0.1): echte Engine (`ingest` → Detektoren → Automat) mit synthetischen Polls von drei Routern, echte View-Klassen und `build_mesh_snapshot`, Bundle in headless Chromium; Übersicht, Incidents, Detail, Timeline, Einstellungen, Topologie mit Warnsymbolen, Handybreite 390 px (Liste und Detail). AK5 und AK10 abgehakt; AK1 offen bis zu den P6-Review-Fixes (K1) · CI: – (kein Push) · Hardware/echtes HA: nicht geprüft (kein HA-Frontend, kein echtes Handy) · Review: –
+- 2026-11-16 `feature/network-intelligence` (P6-Review-Fixes E8–E11, K1, M1–M3, L1–L6) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests -q` 2380 passed in 47,5 s (Python 3.13, HA 2026.2.3); neu `tests/test_net_p6_review.py` (26 Tests): die Review-Proben umgekehrt (blindes Log ergibt keinen Score 100, Restore `unavailable`/`unknown` lässt Wartung an, offenes Kind zählt ab Wurzel-Auflösung + 180 s, `opened` nach Fenster + Settle statt ~1 h später, Router mit Auth-Fehler hält nichts zurück), Ende des Spät-Bands, Timer auf `child_release_time`, stummes Entladen (E9), Flotten-Incident ohne Router-Zähler und -Symbol (E10), `cause_inherited` beim Verknüpfen, eigene gleichnamige Ursache bleibt, Altstore-Migration, `opened` vor `reopened` und gespeichert mit Altstore-Rückfall (L5), `withdraw_fleet` und Registry-Umzug mit echter `EntityRegistry` (M2), Reihenfolge in `async_unload_entry` (Mocks), Timer bleibt bei gleicher Zeit (L6). Angepasst: `tests/test_net_p6.py` und `tests/test_net_score.py` (volle Testdaten mit einem Client, L1), `tests/test_net_engine.py` (`test_m1_slow_polls_*` mit gepatchtem Timer und Dispatcher: 6,1 + 1,2 s → 3,9 + 0,5 s). AK1 abgehakt · CI: – (kein Push) · Hardware/echtes HA: nicht geprüft (M2 ohne echte Entity-Plattform) · Review: P6-Review umgesetzt

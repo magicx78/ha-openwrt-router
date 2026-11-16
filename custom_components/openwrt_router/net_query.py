@@ -37,7 +37,9 @@ from .net_rules import (
     WIFI_AUTH_KINDS,
     WIFI_RECONNECT_KIND,
     counted_incidents,
+    counts_for_router,
     incident_area,
+    suppressed_child,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -219,13 +221,17 @@ def _empty_counts() -> dict[str, int]:
     return dict.fromkeys(_SEVERITIES, 0)
 
 
-def router_badges(incidents: Iterable[Incident]) -> dict[str, dict[str, int]]:
-    """Counted incidents (open roots) per router and severity: the warning
-    symbols of the topology (snapshot ``attributes.incidents``)."""
+def router_badges(
+    incidents: Iterable[Incident], now: float | None = None
+) -> dict[str, dict[str, int]]:
+    """Counted incidents (open roots at ``now``) per router and severity:
+    the warning symbols of the topology (snapshot ``attributes.incidents``).
+    Fleet incidents count for no single router (``counts_for_router``)."""
     out: dict[str, dict[str, int]] = {}
-    for inc in counted_incidents(incidents):
+    for inc in counted_incidents(incidents, now):
         for router in inc.routers:
-            out.setdefault(router, _empty_counts())[inc.severity.value] += 1
+            if counts_for_router(inc, router):
+                out.setdefault(router, _empty_counts())[inc.severity.value] += 1
     return out
 
 
@@ -241,7 +247,7 @@ def incident_dict(
     name_of: NameOf,
     now: float,
     *,
-    known: frozenset[str] = frozenset(),
+    known: Mapping[str, Incident] | None = None,
     evidence: bool = False,
 ) -> dict[str, Any]:
     """An incident for the panel; without ``evidence`` only its count.
@@ -249,7 +255,8 @@ def incident_dict(
     Extra fields: ``cause_level``, ``area`` (score area, None = none),
     ``router_names``, ``duration_s`` (current episode: since the reopen or
     the first sighting, up to the resolve time or ``now``) and ``child``
-    (its parent is a known incident: it does not count on its own).
+    (a silent child of a known incident, ``suppressed_child``: it does not
+    count on its own).
     """
     out = inc.to_dict()
     items = out.pop("evidence")
@@ -264,7 +271,7 @@ def incident_dict(
     if end is None:
         end = max(now, inc.last_seen)
     out["duration_s"] = max(0.0, round(end - start, 1))
-    out["child"] = inc.parent_id is not None and inc.parent_id in known
+    out["child"] = suppressed_child(inc, known or {}, now)
     return out
 
 
@@ -273,8 +280,8 @@ def summary(engine: Any, name_of: NameOf, now: float) -> dict[str, Any]:
     counted incidents by severity, event counts of the last 24 h, the WLAN
     clients with the most problem events."""
     incidents = engine.machine.peek()
-    badges = router_badges(incidents)
-    counted = counted_incidents(incidents)
+    badges = router_badges(incidents, now)
+    counted = counted_incidents(incidents, now)
     by_severity = _empty_counts()
     for inc in counted:
         by_severity[inc.severity.value] += 1
@@ -429,7 +436,7 @@ def incidents_page(
     """``GET intelligence/incidents``: open before acknowledged, ignored and
     resolved; within that the most severe, then the newest first."""
     incidents = engine.machine.peek()
-    known = frozenset(i.id for i in incidents)
+    known = {i.id: i for i in incidents}
     statuses = filters.get("status")
     router = filters.get("router")
     severity = filters.get("severity")
@@ -462,7 +469,7 @@ def incident_detail(
     if inc is None:
         return None
     incidents = engine.machine.peek()
-    known = frozenset(i.id for i in incidents)
+    known = {i.id: i for i in incidents}
     evidence_ids = {e.get("id") for e in inc.evidence if isinstance(e.get("id"), str)}
     stored: dict[str, NetEvent] = {}
     follow_ups: list[NetEvent] = []

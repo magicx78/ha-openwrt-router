@@ -362,6 +362,9 @@ class Incident:
     # P5 review E6: start of the current episode after a reopen (the
     # correlation links a reopened incident by this time, not first_seen)
     reopened_at: float | None = None
+    # P6 review L2: the cause was taken over from the parent when linking
+    # (set by the correlation, not guessed from the value on release)
+    cause_inherited: bool = False
 
     @property
     def key(self) -> tuple[str, str]:
@@ -407,6 +410,7 @@ class Incident:
             "occurrences": self.occurrences,
             "ignore_until": self.ignore_until,
             "reopened_at": self.reopened_at,
+            "cause_inherited": self.cause_inherited,
         }
         if not compact:
             return full
@@ -479,6 +483,7 @@ class Incident:
             occurrences=max(0, _opt(data, "occurrences", _int, 0)),
             ignore_until=_num(data.get("ignore_until")),
             reopened_at=_num(data.get("reopened_at")),
+            cause_inherited=data.get("cause_inherited") is True,
         )
 
 
@@ -502,6 +507,7 @@ _INCIDENT_DEFAULTS: dict[str, Any] = {
     "occurrences": 0,
     "ignore_until": None,
     "reopened_at": None,
+    "cause_inherited": False,
 }
 
 

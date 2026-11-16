@@ -548,7 +548,7 @@ def full(router: str) -> SimpleNamespace:
     """Coordinator data with every indicator read (gateway G has a WAN)."""
     return SimpleNamespace(
         ap_interfaces=[{"ifname": "phy1-ap0", "ssid": "Test-Net-xyz", "phy": "phy1"}],
-        clients=[],
+        clients=[{"mac": "AA:BB:CC:00:00:01"}],
         log_status="ok",
         uptime=1000,
         cpu_load=5.0,

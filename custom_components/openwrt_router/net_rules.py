@@ -934,20 +934,18 @@ class AlarmMachine:
         return tuple(released)
 
     def _release(self, child: Incident, *, drop_cause: bool = False) -> None:
-        """Clear ``parent_id``; a cause taken over from the parent becomes a
-        hypothesis (``drop_cause``: is removed, on a reopen)."""
+        """Clear ``parent_id``; a cause taken over from the parent (marked
+        ``cause_inherited`` when linking, P6 review L2) becomes a hypothesis
+        (``drop_cause``: is removed, on a reopen)."""
         parent = self._incidents.get(child.parent_id or "")
         child.parent_id = None
-        inherited = child.cause is not None and (
-            child.cause in _INHERITED_CAUSES
-            or (parent is not None and child.cause == parent.cause)
-        )
         if parent is not None:
             parent.children = max(0, parent.children - 1)
-        if not inherited:
+        if child.cause is None or not child.cause_inherited:
             return
         if drop_cause:
             child.cause, child.cause_status = None, None
+            child.cause_inherited = False
         elif child.cause_status is CauseStatus.CONFIRMED:
             child.cause_status = CauseStatus.HYPOTHESIS
 
@@ -1113,10 +1111,19 @@ class AlarmMachine:
         machine = cls(settings, max_incidents=max_incidents)
         if not isinstance(data, dict):
             return machine
+        legacy: list[Incident] = []
         for raw in _as_list(data.get("incidents")):
             inc = Incident.from_dict(raw)
             if inc is not None:
                 machine._incidents[inc.id] = inc
+                if "cause_inherited" not in raw and inc.parent_id is not None:
+                    legacy.append(inc)
+        for inc in legacy:  # stored before L2: the old guess, once
+            parent = machine._incidents.get(inc.parent_id or "")
+            inc.cause_inherited = inc.cause is not None and (
+                inc.cause in _INHERITED_CAUSES
+                or (parent is not None and inc.cause == parent.cause)
+            )
         for raw in _as_list(data.get("tracks")):
             track = _Track.from_dict(raw)
             if track is not None:
@@ -1563,6 +1570,7 @@ class AlarmMachine:
         ):
             inc.cause = item.cause
             inc.cause_status = item.cause_status
+            inc.cause_inherited = False
         if inc.parent_id is not None and inc.cause_status is CauseStatus.HYPOTHESIS:
             inc.confidence = min(inc.confidence, INFERRED_CONFIDENCE_CAP)
         if item.severity is not None:
@@ -5215,6 +5223,7 @@ def _link(child: Incident, root: Incident, confirmed: bool) -> None:
         child.cause_status is CauseStatus.CONFIRMED and status is CauseStatus.HYPOTHESIS
     ):
         child.cause, child.cause_status = cause, status
+        child.cause_inherited = True
     if child.cause_status is CauseStatus.HYPOTHESIS:
         child.confidence = min(child.confidence, INFERRED_CONFIDENCE_CAP)
     if (
@@ -5285,18 +5294,61 @@ class RouterScore:
     offline: bool = False
 
 
-def counted_incidents(incidents: Iterable[Incident]) -> list[Incident]:
+def suppressed_child(
+    inc: Incident, known: Mapping[str, Incident], now: float | None
+) -> bool:
+    """Is ``inc`` a child that stays silent (score, counters, HA bus)?
+
+    A child (``parent_id`` of a known incident) is silent while its root
+    is open and during the root's after-window once it resolved. After
+    that an open child counts as a root of its own (P6 review E8, K1);
+    ``parent_id`` stays for the history. Without ``now`` a child of a
+    known incident is always silent.
+    """
+    if inc.parent_id is None:
+        return False
+    parent = known.get(inc.parent_id)
+    if parent is None:
+        return False
+    if now is None or _is_open(parent) or parent.resolved_at is None:
+        return True
+    after = _ROOT_WINDOWS.get(parent.type, (0.0, 0.0))[1]
+    return now < parent.resolved_at + after
+
+
+def child_release_time(inc: Incident, known: Mapping[str, Incident]) -> float | None:
+    """When a child of a resolved root starts to count on its own (E8):
+    the root's ``resolved_at`` plus its after-window. None for no child,
+    an unknown root or a root that is still open."""
+    if inc.parent_id is None:
+        return None
+    parent = known.get(inc.parent_id)
+    if parent is None or _is_open(parent) or parent.resolved_at is None:
+        return None
+    return parent.resolved_at + _ROOT_WINDOWS.get(parent.type, (0.0, 0.0))[1]
+
+
+def counted_incidents(
+    incidents: Iterable[Incident], now: float | None = None
+) -> list[Incident]:
     """Open root incidents that count: active or acknowledged, not ignored,
-    not a child (suppressed: ``parent_id`` of a known incident, also after
-    the parent resolved; the same rule keeps children off the HA bus)."""
+    not a silent child (``suppressed_child``; the same rule keeps children
+    off the HA bus)."""
     incidents = list(incidents)
-    known = {i.id for i in incidents}
+    known = {i.id: i for i in incidents}
     return [
         inc
         for inc in incidents
-        if inc.status in _COUNTED_STATES
-        and (inc.parent_id is None or inc.parent_id not in known)
+        if inc.status in _COUNTED_STATES and not suppressed_child(inc, known, now)
     ]
+
+
+def counts_for_router(inc: Incident, router: str) -> bool:
+    """Does ``inc`` count for ``router``'s own entities (score, counters,
+    badge)? Only when its cause lies at that router: it lists the router
+    and is no fleet incident (``lan_unreachable``, ``wifi_auth_wave``),
+    which counts in the fleet entities only (P6 review E10, L4)."""
+    return inc.scope is not Scope.FLEET and router in inc.routers
 
 
 def router_score(
@@ -5306,11 +5358,12 @@ def router_score(
     settings: Mapping[str, Any],
     *,
     offline: bool = False,
+    now: float | None = None,
 ) -> RouterScore:
     """Health score of one router (plan c6).
 
-    ``incidents`` are all incidents; the counted ones (``counted_incidents``)
-    of this router (``Incident.routers``) reduce their area. An ``offline``
+    ``incidents`` are all incidents; the counted ones (``counted_incidents``
+    at ``now``) of this router (``counts_for_router``) reduce their area. An ``offline``
     router (outage measured) has system ``s=0, c=1`` and no other area with
     data.
     """
@@ -5320,9 +5373,9 @@ def router_score(
     min_area = float(score_cfg.get("min_area_coverage", 0.3))
     min_cov = float(score_cfg.get("min_coverage", 0.5))
     penalties: dict[str, float] = dict.fromkeys(SCORE_AREAS, 0.0)
-    for inc in counted_incidents(incidents):
+    for inc in counted_incidents(incidents, now):
         area = incident_area(inc.type)
-        if area is None or router not in inc.routers:
+        if area is None or not counts_for_router(inc, router):
             continue
         p = float(penalty_cfg.get(inc.severity.value, 0)) * inc.confidence
         if inc.status is IncidentStatus.ACKNOWLEDGED:

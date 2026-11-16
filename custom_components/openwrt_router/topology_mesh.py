@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import time
 from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any
@@ -1540,13 +1541,14 @@ def _intelligence(
     """
     try:
         from .net_engine import async_get_engine
-        from .net_query import router_badges
+        from .net_query import engine_now, router_badges
 
         engine = async_get_engine(hass)
         if engine is None or not engine.loaded:
             return {}, None
         fleet = engine.view.fleet
-        return router_badges(engine.machine.peek()), {
+        now = engine_now(engine, time.time())
+        return router_badges(engine.machine.peek(), now), {
             "fleet_score": fleet.score,
             "coverage": fleet.coverage,
         }
