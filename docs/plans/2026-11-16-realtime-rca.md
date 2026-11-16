@@ -385,7 +385,9 @@ aus. **[RT-Entscheidung]**: Echtzeit soll nicht zu mehr Router-Last führen.
 
 - Tasks über `entry.async_create_background_task` und in `async_unload_entry` abbrechen. Auf das Ende
   wird mit Timeout 5 s gewartet. Danach wird die Response geschlossen, damit uhttpd seinen Abonnenten
-  abmeldet (`uh_ubus_subscription_free`, **[Quelle]**).
+  abmeldet (`uh_ubus_subscription_free`, **[Quelle]**). **Korrektur nach P0:** Die Funktion gibt es erst
+  ab uhttpd-Commit `506e249` (2025-12-24). In der Version 2025.10.03~ebb92e6b auf ap2–ap4 und ap6 fehlt
+  sie. Dort führt ein Client-Abbruch zum bekannten Absturz, siehe 9.5.
 - `EVENT_HOMEASSISTANT_STOP`: gleiches Vorgehen.
 - Nach HA-Neustart: Streams starten neu. Die Zeit dazwischen deckt der Log-Ingest ab (Baseline mit
   Log-Mark, schon vorhanden).
@@ -672,6 +674,122 @@ aktiven ACL und mit `RPCD_ACL_CONTENT` v8.
      libubus der installierten Version prüfen und nach bekannten Fixes suchen.
   2. Erst danach, mit neuer Freigabe, einen Minimal-Repro auf ap4 mit **einem** Stream.
   3. Bis dahin bleibt Echtzeit beim Log-Fallback.
+
+### 9.5 Analyse Absturz uhttpd (nur lesend, 2026-11-16)
+
+**Ergebnis:** Der Absturz passt zu einem bekannten uhttpd-Fehler im SSE-Subscribe-Pfad. Upstream ist er
+behoben, aber erst **nach** der Version 2025.10.03~ebb92e6b, die auf ap2–ap4 und ap6 installiert ist.
+Was ihn im Pilot genau ausgelöst hat, ist **nicht belegt**.
+
+**Versionen (nur lesend abgefragt, ap4 und ap6 gleich):**
+- uhttpd und uhttpd-mod-ubus 2025.10.03~ebb92e6b-r1
+- libubus 2025.12.02~3cc98db1-r1
+- libubox 2026.03.13~81563384-r2
+- rpcd 2025.12.03~ffb9961c
+
+**Bekannter Fehler und Fix.** Angaben ohne Marke hat RT-1 über die GitHub-API selbst geprüft.
+Angaben mit (R) stammen vom Researcher, mit Quelle, und sind von RT-1 nicht nachgeprüft.
+- openwrt/uhttpd Issue #1, 17.04.2023: „SIGSEGV in uhttpd when subscribed to ubus messages over HTTP“.
+  - Kernel-Log mit demselben Muster wie auf ap6 (R): invalid read von `00000000`, epc in libubus, ra in
+    libubox.
+  - Repro dort (R): ACL `:subscribe` auf `hostapd.*`, dann ein `curl` mit Bearer auf
+    `/ubus/subscribe/hostapd.wlan0`.
+  - https://github.com/openwrt/uhttpd/issues/1
+- Fix `506e249`, 2025-12-24: „ubus: unregister ubus subscriber on HTTP client disconnect – Fixes a
+  potential SIGSEGV when a client disconnects from a /ubus/subscribe/... endpoint without
+  unsubscribing“. Das ist der direkte Nachfolger von `ebb92e6b` (GitHub-Vergleich: 1 Commit voraus).
+  - https://github.com/openwrt/uhttpd/commit/506e24987b97fbc866005bfb71316bd63601a1ef
+  - PR: https://github.com/openwrt/uhttpd/pull/18
+- Folgefix `3c48b9e`, 2026-08-03: „ubus: release client refcount on successful /ubus/subscribe“.
+  - Advisory GHSA-wvgh-cm54-q6f6 (R). Ohne diesen Fix wird ein Subscribe-Client nie freigegeben; das kann
+    `max_connections` erschöpfen (R).
+  - https://github.com/openwrt/uhttpd/commit/3c48b9e17d2086f9756b97e5825c2ebdf3ed233a
+- Der Branch `openwrt-25.12` liefert eine uhttpd-Version mit beiden Fixes aus (R). gateway und ap5 laufen
+  schon mit 2026.08.24 (3.1).
+  https://github.com/openwrt/openwrt/commits/openwrt-25.12/package/network/services/uhttpd
+- libubus `3cc98db1` ist nur ein CI-Commit (R). Einen libubus-Fix für diesen Fehler gibt es nicht (R).
+
+**Mechanismus bei ebb92e6b** (R, aus dem Quelltext:
+https://github.com/openwrt/uhttpd/blob/ebb92e6b339b88bbc6b76501b6603c52d4887ba1/ubus.c und `client.c`):
+- `uh_ubus_handle_get_subscribe` prüft die ACL nur beim Start. Danach meldet es den Abonnenten an
+  (`ubus_register_subscriber`, `ubus_subscribe`). Der Abonnent liegt direkt in `cl->dispatch.ubus`.
+- Abgemeldet wird er nur in `remove_cb` (das Objekt verschwindet) und im Fehlerpfad.
+- Beim Ende eines Requests nullt `uh_request_done` den Speicher (`memset(&cl->dispatch, 0, …)`). Der
+  Abonnent steht dann aber weiter im Objektbaum von libubus.
+- Das nächste Event (hier ein `probe`) liest den genullten Knoten, und es folgt ein SIGSEGV bei Adresse 0.
+- Den gleichen Mechanismus beschreibt schon ein Fix von 2020 für den `remove_cb`-Fall:
+  https://lists.openwrt.org/pipermail/openwrt-devel/2020-November/032111.html
+- Offsets 0x11b3 (libubus) und 0x2913 (libubox): passen zu `ubus_cmp_id` aus dem AVL-Baum.
+  **Vermutung**, nicht per Symboltabelle geprüft.
+
+**Auslöser im Pilot: offen.**
+- In Issue #1 löst ein Client-Abbruch den Fehler aus. Im Pilot blieben die curl-Streams aber offen, bis
+  der Absturz kam. Welcher Weg bei uns zu `uh_request_done` führte, ist **unbekannt**. Infrage kommen der
+  Netzwerk-Timeout, ein TLS-Fehler oder `remove_cb`.
+- HAs `session destroy` beim Re-Login (`api.py` Z. 1464–1468) berührt den Subscribe-Pfad laut Quelltext
+  nicht. Ein Einfluss ist deshalb unwahrscheinlich (**Vermutung**).
+- probe-Last allein ist nicht die Ursache: 49 kB in 9 min sind keine Menge. probes sind aber der
+  **Zünder**. Nach dem Nullen stürzt uhttpd beim nächsten Event ab. Viel Verkehr heißt also früher
+  Absturz, und das passt zu ap4 (1 min) gegenüber ap6 (9 min). **Vermutung.**
+- Mehrere Streams in einem Prozess sind keine Bedingung, denn Issue #1 hatte nur einen.
+- Sicherheit der Aussagen:
+  - „bekannter, in ebb92e6b nicht behobener Fehler“: **hoch**;
+  - genauer Auslöser: **niedrig**.
+
+**Folge:**
+- Mit uhttpd 2025.10.03 ist SSE nicht betriebssicher. Jeder Stream kann uhttpd abstürzen lassen und damit
+  auch HAs Polling unterbrechen.
+- Ein Minimal-Repro auf ap4 (alte Version) würde nur den bekannten Fehler bestätigen. Er entfällt.
+  **[RT-Entscheidung]**
+
+### 9.6 Alternativen und Empfehlung
+
+| Weg | RAM ap6 | Reconnect | Sicherheit | Router-Last | Passt zur Integration |
+|---|---|---|---|---|---|
+| A) SSE über uhttpd 2025.10.03 | ≈ 50–100 kB je Stream (9.4) | Backoff (RT2) | ACL `:subscribe` | gering | **nein, Absturz** |
+| B) SSE nach uhttpd-Update auf ≥ 2026.08.24 | wie A | wie A | wie A, dazu Paket-Update | gering | gut (RT2 fertig). Braucht `apk upgrade` auf 4 Routern; ob es unter Dauerlast stabil läuft, ist unbelegt |
+| C) Dauerhafte SSH-Sitzung mit `ubus subscribe` | dropbear + ubus + sh/awk: **ungemessen**, Vermutung 1–2 MB | eigener Neustart (`-t`) und Backoff | Dauer-Login als root; `known_hosts=None` (`api.py` Z. 3036) | gering, wenn probes auf dem Router gefiltert werden | mittel: widerspricht „kein aggressives SSH“; heute schließt die Integration SSH nach jedem Poll (`api.py` Z. 3065–3073) |
+| D) Log-Ingest bei jedem Poll (`LOG_READ_INTERVAL_CYCLES` 2 → 1) | 0 | entfällt, läuft mit dem Poll | unverändert (ACL v8, `log read`) | ein `log read` mehr je Minute | **sehr gut**: Parser, Dedup und Lücken-Erkennung gibt es schon |
+
+**Zu C** (R, aus `ubus` cli.c, Stand master: https://github.com/openwrt/ubus/blob/master/cli.c):
+- `ubus subscribe` nimmt mehrere Objekte in einem Aufruf.
+- `-t <s>` begrenzt auch `subscribe`. Damit endet der Prozess sicher, ohne BusyBox-`timeout`.
+- Es gibt kein `remove_cb`. Verschwindet ein BSS, läuft der Prozess still weiter. Deshalb muss er
+  regelmäßig neu gestartet werden.
+- probes ließen sich mit `awk` auf dem Router filtern. Ob die Ausgabe dann zeilenweise ankommt, ist
+  **ungeprüft**.
+- `hostapd-auth` nie abonnieren (3.5).
+
+**Zu D:**
+- Verzögerung höchstens ≈ 60 s; bei Drosselung 120 s, beim SSH-Fallback 300 s.
+- Die Trennungsgründe stehen im Klartext im Log (3.6), die Event-Payloads werden nicht gebraucht.
+- Der logd-Ring (64 kB, ≈ 620 Zeilen) läuft bei 60 s praktisch nicht über.
+
+**Empfehlung: D, also Log-Ingest bei jedem Poll, als Echtzeit-Weg für jetzt.**
+- Gründe:
+  - keine Änderung an Routern, kein neuer Prozess;
+  - kein Risiko für uhttpd und damit für das Polling;
+  - ap6 bleibt unberührt;
+  - nutzt den vorhandenen Parser und die vorhandene Korrelation;
+  - hält die eisernen Regeln ein (Netzwerk nur in `api.py`, kein Dauer-SSH).
+- Kosten:
+  - Verzögerung bis 60 s statt Sekunden;
+  - doppelt so viele `log read`-Aufrufe;
+  - kein RCPI-Push (802.11k-Berichte gibt es nur über ubus).
+- RT2 bleibt im Code. Es wird erst verdrahtet, wenn B belegt ist.
+- C wird nicht weiter verfolgt, solange D reicht. **[RT-Entscheidung]**
+
+**Spätere Option B (eigene Freigabe des Nutzers nötig):**
+1. Gegenprobe auf **ap5** (hat schon 2026.08.24) mit **einem** Stream, 30 min.
+   - ACL-Erweiterung wie in 9.3, vorher Backup.
+   - Alle 60 s messen: `pidof uhttpd`, `VmRSS`, `MemAvailable`, `logread | grep -i segfault`.
+   - Danach curl einmal bewusst beenden (das ist der Auslöser aus Issue #1) und 5 min weiter
+     beobachten.
+   - Abbruch bei einer neuen uhttpd-PID oder einem fehlenden HA-Poll.
+   - Rückweg: `session destroy`, Backup zurück, den sha256 gegen den des ap5-Backups prüfen (ap5 hat
+     eine eigene Datei), rpcd neu starten.
+2. Nur wenn die Gegenprobe sauber läuft: uhttpd-Update auf ap2–ap4 und ap6. Das ist eine Paketänderung
+   und braucht eine eigene Freigabe.
 
 ---
 
