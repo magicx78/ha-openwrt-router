@@ -305,6 +305,9 @@ class Evidence:
 
     ``value`` is the measured level for level rules; window rules count each
     evidence ``count`` times. Evidence marked ``maintenance`` is ignored.
+    Evidence marked ``hold`` only keeps an open incident alive (a state
+    that lasts, e.g. a crashed service still down): it never counts toward
+    the threshold, the occurrences or an escalation.
     """
 
     type: str
@@ -322,6 +325,7 @@ class Evidence:
     cause: str | None = None
     cause_status: CauseStatus | None = None
     maintenance: bool = False
+    hold: bool = False
 
     @classmethod
     def from_event(
@@ -878,6 +882,14 @@ class AlarmMachine:
                 track.reset_streak()
                 track.entries = []
             return
+        if item.hold:
+            # Keeps an open incident from resolving as "stable"; never counts.
+            track = self._tracks.get(key)
+            inc = self._live_incident(track) if track is not None else None
+            if track is not None and inc is not None:
+                track.last_evidence = now
+                inc.last_seen = now
+            return
         if rule["mode"] == "level":
             if not _is_number(item.value):
                 return
@@ -1222,22 +1234,43 @@ _SPEED_BUCKET = 3600.0
 # is down, but the down link is what lan_uplink_down is about).
 INFRA_PORT_MEMORY = 86400.0
 _MAX_PORTS = 64
-_ARP_CONFIDENCE = 0.7
 _DNS_CONFIDENCE = 0.5
 _MAX_NAMES = 4
+# A DHCPDECLINE is the client's claim that the offered address answered
+# ARP; confirmed only when the ARP table shows that address on another MAC.
+_DECLINE_CONFIDENCE = 0.8
+# PID changes this long after our own service action (HA button) are ours.
+OWN_ACTION_WINDOW = 120.0
+# Reboot from the boot time (read time - uptime): it must move later by more
+# than this plus the poll interval (read jitter, slow polls).
+_REBOOT_TOLERANCE = 60.0
+_DEFAULT_POLL_INTERVAL = 60.0
+# LLDP capabilities of a network device (live APs: Bridge and Router on,
+# Wlan and Station off, so Wlan is no AP marker).
+_INFRA_CAPABILITIES = frozenset({"bridge", "router"})
+# IPv6-only WAN sections are not judged (wan6 is pending in normal
+# operation on the live gateway; IPv6 stays open, plan A7).
+_IPV6_WAN_PROTOS = frozenset({"dhcpv6"})
 
 SERVICE_RESTART = "system.service_restart"
 SERVICE_STOPPED = "system.service_stopped"
 CRASH_LOOP_KIND = "system.service_crash_loop"
 DECLINE_KIND = "dhcp.decline"
+WAN_FAILOVER_KIND = "wan.failover"
 
 # Severity, cause, cause status and confidence of stored log event kinds that
 # differ from the P2 default (info, no cause, 1.0).
 LOG_EVENT_META: dict[str, tuple[Severity, str | None, CauseStatus | None, float]] = {
     CRASH_LOOP_KIND: (Severity.WARNING, None, None, 1.0),
     "system.oom_kill": (Severity.WARNING, None, None, 1.0),
-    # The client probed the address and found it taken (RFC 2131 DHCPDECLINE).
-    DECLINE_KIND: (Severity.INFO, "ip_conflict", CauseStatus.CONFIRMED, 1.0),
+    # The client says the offered address is taken (RFC 2131 DHCPDECLINE):
+    # a hypothesis until ARP shows a second MAC (``decline_cause``).
+    DECLINE_KIND: (
+        Severity.INFO,
+        "ip_conflict",
+        CauseStatus.HYPOTHESIS,
+        _DECLINE_CONFIDENCE,
+    ),
     # Only the dnsmasq line, no resolution test: a hypothesis (plan b 3.22).
     "dns.query_limit": (
         Severity.INFO,
@@ -1246,17 +1279,13 @@ LOG_EVENT_META: dict[str, tuple[Severity, str | None, CauseStatus | None, float]
         _DNS_CONFIDENCE,
     ),
     "dns.no_servers": (
-        Severity.WARNING,
-        "dns_resolution",
-        CauseStatus.HYPOTHESIS,
-        _DNS_CONFIDENCE,
-    ),
-    "dns.send_failed": (
         Severity.INFO,
         "dns_resolution",
         CauseStatus.HYPOTHESIS,
         _DNS_CONFIDENCE,
     ),
+    # "dns.send_failed" has no cause: dnsmasq logs it in send_from()
+    # (src/forward.c), which sends replies to clients, not upstream queries.
 }
 
 
@@ -1266,9 +1295,13 @@ class InfraSnapshot:
 
     Built by the engine from the coordinator data. ``None`` means "not
     measured in this poll" (missing field, failed call, missing ACL right).
-    ``wan`` is only set for a router that has a WAN (``wan_found``).
-    ``log_events`` are the new log lines of this poll (never the baseline
-    of a first read), ``log_read`` tells whether the log was read at all.
+    ``wan`` is only set for a router that has a WAN (``wan_found``),
+    ``wan_at`` is the HA time of the WAN read. ``log_events`` are the new
+    log lines of this poll (never the baseline of a first read),
+    ``log_read`` tells whether the log was read at all, ``log_fetched_at``
+    is the HA time of the log fetch and ``log_times`` the router times
+    (epoch seconds, UTC) of new lines. ``service_actions`` maps a service
+    to the HA time of our own last start/stop/restart.
     """
 
     uptime: float | None = None
@@ -1279,13 +1312,17 @@ class InfraSnapshot:
     conntrack: int | None = None
     services: Mapping[str, Any] | None = None
     ports: tuple[Mapping[str, Any], ...] | None = None
+    service_actions: Mapping[str, Any] | None = None
     wan: Mapping[str, Any] | None = None
     wan_connected: bool | None = None
+    wan_at: float | None = None
     dhcp_pools: tuple[Mapping[str, Any], ...] | None = None
-    arp: Mapping[str, Any] | None = None
     lldp: tuple[Mapping[str, Any], ...] | None = None
     log_events: tuple[Any, ...] = ()
     log_read: bool = False
+    log_fetched_at: float | None = None
+    log_times: tuple[float, ...] = ()
+    poll_interval: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1294,7 +1331,8 @@ class Finding:
 
     ``event`` True: store a ``NetEvent`` of ``kind`` (an observed change).
     ``rule`` set: feed evidence for that incident type (``value`` for level
-    rules). Neither: only count ``kind``.
+    rules). Neither: only count ``kind``. ``hold``: evidence that only keeps
+    an open incident alive (``Evidence.hold``).
     """
 
     kind: str
@@ -1313,6 +1351,7 @@ class Finding:
     cause_status: CauseStatus | None = None
     subject: dict[str, Any] = field(default_factory=dict)
     params: dict[str, Any] = field(default_factory=dict)
+    hold: bool = False
 
 
 @dataclass
@@ -1330,22 +1369,32 @@ class _PortState:
 
 @dataclass
 class InfraState:
-    """Per-router comparison state of the detectors (memory only)."""
+    """Per-router comparison state of the detectors (memory only).
+
+    Exception: ``wan_gateway`` is seeded by the engine from its store (a
+    router whose IPv4 WAN was connected once stays a gateway).
+    """
 
     uptime: float | None = None
+    boot_at: float | None = None  # HA time of the last boot (read - uptime)
+    tz_offset: float | None = None  # learned localtime - UTC (quarter hours)
+    log_fetched_at: float | None = None  # HA time of the previous log fetch
     services: dict[tuple[str, str], tuple[int | None, bool]] | None = None
+    services_at: float | None = None  # HA time of the previous service read
     # instances seen going from running to stopped (and not back yet)
     crashed: set[tuple[str, str]] = field(default_factory=set)
     conntrack: deque[tuple[float, int]] = field(
         default_factory=lambda: deque(maxlen=512)
     )
     ports: dict[str, _PortState] = field(default_factory=dict)
+    wan_gateway: bool = False
+    wan_iface: str | None = None
     wan_connected: bool | None = None
     wan_uptime: float | None = None
     wan_ip: str | None = None
     wan_poll_reconnects: int = 0
-    arp_conflicts: frozenset[str] = frozenset()
-    arp_reported: frozenset[str] = frozenset()
+    # WAN up lines written after the WAN read of their poll (next poll's)
+    wan_carry: int = 0
     lldp: dict[str, frozenset[tuple[str, str]]] | None = None
     lldp_candidate: dict[str, frozenset[tuple[str, str]]] | None = None
     lldp_since: float | None = None
@@ -1360,6 +1409,12 @@ class InfraState:
             port.bytes_base = None
         self.wan_connected = None
         self.wan_uptime = None
+        self.wan_poll_reconnects = 0
+        self.wan_carry = 0
+
+    def clock_jumped(self) -> None:
+        """HA's wall clock jumped ahead: the boot time is no reference."""
+        self.boot_at = None
 
     def shift(self, delta: float) -> None:
         """Move stored times by ``delta`` (large backward clock jump)."""
@@ -1378,6 +1433,9 @@ class InfraState:
                 for b, s in port.speeds.items()
             }
         self.lldp_since = _shifted(self.lldp_since, delta)
+        self.boot_at = _shifted(self.boot_at, delta)
+        self.services_at = _shifted(self.services_at, delta)
+        self.log_fetched_at = _shifted(self.log_fetched_at, delta)
 
 
 def port_key(router: str, port: str) -> str:
@@ -1403,24 +1461,37 @@ def detect_infrastructure(
     thresholds: Mapping[str, Any],
     *,
     lldp_interval: float = 600.0,
+    fleet: frozenset[str] = frozenset(),
 ) -> list[Finding]:
-    """Run all system, LAN, WAN and DHCP detectors for one poll of a router."""
+    """Run all system, LAN, WAN and DHCP detectors for one poll of a router.
+
+    ``fleet`` holds the identities of the other routers (lower-case MACs and
+    host IPs): an LLDP neighbour with one of them is infrastructure even
+    without a Bridge/Router capability.
+    """
     out: list[Finding] = []
     rules = _RuleSet(thresholds)
-    rebooted = detect_reboot(state, snap, router, rules.get("system_reboot"), out)
+    rebooted = detect_reboot(state, snap, now, router, rules.get("system_reboot"), out)
     if rebooted:
         state.after_reboot()
     detect_cpu(snap, router, rules.get("system_cpu_high"), out)
     detect_ram(snap, router, rules.get("system_ram_high"), out)
-    detect_clock_skew(snap, router, rules.get("system_clock_skew"), out)
+    detect_clock_skew(state, snap, router, rules.get("system_clock_skew"), out)
     detect_conntrack(state, snap, now, router, rules.get("system_conntrack_jump"), out)
-    detect_services(state, snap, router, rules.get("system_service_restart"), out)
+    detect_services(state, snap, now, router, rules.get("system_service_restart"), out)
     detect_lldp(
-        state, snap, now, router, rules.get("lan_lldp_change"), out, lldp_interval
+        state,
+        snap,
+        now,
+        router,
+        rules.get("lan_lldp_change"),
+        out,
+        lldp_interval,
+        fleet,
     )
     detect_ports(state, snap, now, router, rules, out)
     detect_wan(state, snap, router, rules, out)
-    detect_dhcp(state, snap, router, rules, out)
+    detect_dhcp(snap, router, out)
     return out
 
 
@@ -1450,17 +1521,40 @@ def _rule_num(rule: Mapping[str, Any], key: str, default: float) -> float:
 def detect_reboot(
     state: InfraState,
     snap: InfraSnapshot,
+    now: float,
     router: str,
     rule: Mapping[str, Any],
     out: list[Finding],
 ) -> bool:
-    """Uptime went down (both values > 0) -> ``system.reboot``; True if so."""
+    """Router reboot (``system.reboot``); True if one was found.
+
+    Either the uptime went down (both values > 0), or the boot time (HA
+    time of the read minus the uptime) moved later by more than
+    ``_REBOOT_TOLERANCE`` plus the poll interval: a reboot between two polls
+    whose new uptime already passed the old one (router away longer than
+    its old uptime). An uptime of 0 is "missing" (coordinator default),
+    never a reboot. A forward jump of HA's clock clears the boot time
+    first (``InfraState.clock_jumped``).
+    """
     uptime = snap.uptime
     if uptime is None or uptime <= 0:
-        return False  # 0 = missing (coordinator default), never a reboot
-    previous, state.uptime = state.uptime, uptime
-    if previous is None or uptime >= previous:
         return False
+    read_at = snap.localtime_at if snap.localtime_at is not None else now
+    boot = read_at - uptime
+    previous, state.uptime = state.uptime, uptime
+    last_boot, state.boot_at = state.boot_at, boot
+    if previous is None:
+        return False
+    interval = snap.poll_interval
+    if interval is None or not interval > 0:
+        interval = _DEFAULT_POLL_INTERVAL
+    dropped = uptime < previous
+    moved = last_boot is not None and boot - last_boot > _REBOOT_TOLERANCE + interval
+    if not dropped and not moved:
+        return False
+    params = {"uptime_s": int(uptime), "previous_uptime_s": int(previous)}
+    if not dropped and last_boot is not None:
+        params["boot_shift_s"] = round(boot - last_boot)
     out.append(
         Finding(
             kind="system.reboot",
@@ -1470,7 +1564,7 @@ def detect_reboot(
             scope_key=router,
             event=True,
             severity=_severity(rule.get("severity")),
-            params={"uptime_s": int(uptime), "previous_uptime_s": int(previous)},
+            params=params,
         )
     )
     return True
@@ -1541,19 +1635,68 @@ def clock_skew(localtime: float, read_at: float) -> float:
 
 
 def detect_clock_skew(
-    snap: InfraSnapshot, router: str, rule: Mapping[str, Any], out: list[Finding]
+    state: InfraState,
+    snap: InfraSnapshot,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
 ) -> None:
-    """Router clock against HA (level rule ``system_clock_skew``)."""
-    if snap.localtime is None or snap.localtime_at is None:
+    """Router clock against HA (level rule ``system_clock_skew``).
+
+    1. Log times (router UTC): every new line was written between the
+       previous and this log fetch (HA times). The value is how far the
+       newest/oldest new line lies outside that span (0 inside); the rule's
+       ``raise`` (120 s) is the tolerance.
+    2. ``localtime`` is UTC plus the router's UTC offset. While the log
+       shows a good UTC clock (value below ``clear``) the offset is learned
+       (rounded to quarter hours); later polls check ``localtime``
+       absolutely against it. Without a log line in a poll, a deviation of
+       whole quarter hours stays unknown (a DST/time zone change looks the
+       same as a fault); the next line decides.
+    3. Without any learned offset (no log data yet) the old modulo-900 s
+       measure is the fallback; a fault of whole quarter hours is invisible
+       there (blind spot, plan P3 review M1).
+    """
+    log_dev: float | None = None
+    fetched = snap.log_fetched_at
+    if fetched is not None and snap.log_times:
+        lower = state.log_fetched_at
+        dev = 0.0
+        for ts in snap.log_times:
+            dev = max(dev, ts - fetched)
+            if lower is not None:
+                dev = max(dev, lower - ts)
+        log_dev = dev
+    if fetched is not None:
+        state.log_fetched_at = fetched
+    local_dev: float | None = None
+    if snap.localtime is not None and snap.localtime_at is not None:
+        diff = snap.localtime - snap.localtime_at
+        clear = _rule_num(rule, "clear", 30.0)
+        if log_dev is not None and log_dev < clear and abs(diff) <= _TZ_MAX:
+            state.tz_offset = round(diff / _TZ_STEP) * _TZ_STEP
+        if state.tz_offset is None:
+            local_dev = clock_skew(snap.localtime, snap.localtime_at)
+        else:
+            local_dev = abs(diff - state.tz_offset)
+            steps = round(local_dev / _TZ_STEP)
+            if (
+                log_dev is None
+                and steps >= 1
+                and abs(local_dev - steps * _TZ_STEP) < clear
+            ):
+                local_dev = None  # offset change or whole-quarter fault: wait
+    values = [v for v in (log_dev, local_dev) if v is not None]
+    if not values:
         return
     out.append(
         Finding(
             kind="system.clock_skew",
             category=Category.SYSTEM,
-            source=Source.POLL,
+            source=Source.LOG if log_dev is not None else Source.POLL,
             rule="system_clock_skew",
             scope_key=router,
-            value=round(clock_skew(snap.localtime, snap.localtime_at), 1),
+            value=round(max(values), 1),
         )
     )
 
@@ -1621,6 +1764,7 @@ def _service_table(
 def detect_services(
     state: InfraState,
     snap: InfraSnapshot,
+    now: float,
     router: str,
     rule: Mapping[str, Any],
     out: list[Finding],
@@ -1630,23 +1774,33 @@ def detect_services(
     The watched services are the rule's ``services`` list (the engine's own
     list, ``DEFAULT_SERVICES`` is not involved). A service or instance that
     disappears from ``service list`` was stopped on purpose (init script)
-    and is not reported. A service that stays stopped after a crash keeps
-    feeding evidence, so its incident does not resolve as "stable".
+    and is not reported. A change within ``OWN_ACTION_WINDOW`` of our own
+    action on that service (HA button -> ``api.control_service``), or
+    between the previous read and this one (slow polls), is ours and not
+    reported; a LuCI apply cannot be told apart. A service that
+    stays stopped after a crash keeps its incident open with ``hold``
+    evidence, which never counts toward the escalation.
     """
     if not isinstance(snap.services, Mapping):
         return  # not fetched in this poll: keep the last known state
     watched = [s for s in rule.get("services") or () if isinstance(s, str)]
     current = _service_table(snap.services, watched)
     previous, state.services = state.services, current
+    read_before, state.services_at = state.services_at, now
     state.crashed &= set(current)
     if previous is None:
         return  # first poll or right after a reboot: baseline only
+    actions = snap.service_actions if isinstance(snap.service_actions, Mapping) else {}
     severity = _severity(rule.get("severity"))
     for (name, inst), (pid, running) in sorted(current.items()):
         before = previous.get((name, inst))
         if before is None:
             continue  # new instance: a start, not a restart
         old_pid, was_running = before
+        if running:
+            state.crashed.discard((name, inst))
+        if _own_action(actions.get(name), read_before, now):
+            continue  # our own start/stop/restart
         base = {
             "category": Category.SYSTEM,
             "source": Source.PROCD,
@@ -1655,8 +1809,6 @@ def detect_services(
             "severity": severity,
             "subject": {"service": name, "instance": inst},
         }
-        if running:
-            state.crashed.discard((name, inst))
         if was_running and running and pid and old_pid and pid != old_pid:
             out.append(Finding(kind=SERVICE_RESTART, event=True, **base))
         elif was_running and not running:
@@ -1664,7 +1816,17 @@ def detect_services(
             out.append(Finding(kind=SERVICE_STOPPED, event=True, **base))
         elif not running and (name, inst) in state.crashed:
             # still down after the crash: keep the incident open
-            out.append(Finding(kind=SERVICE_STOPPED, **base))
+            out.append(Finding(kind=SERVICE_STOPPED, hold=True, **base))
+
+
+def _own_action(acted: Any, read_before: float | None, now: float) -> bool:
+    """True if our own service action explains a change seen at ``now``."""
+    if not _is_number(acted):
+        return False
+    acted = float(acted)
+    if abs(now - acted) <= OWN_ACTION_WINDOW:
+        return True
+    return read_before is not None and read_before - OWN_ACTION_WINDOW <= acted <= now
 
 
 # -- LAN --------------------------------------------------------------------------
@@ -1679,12 +1841,33 @@ def _port_state(state: InfraState, name: str) -> _PortState | None:
     return port
 
 
+def is_infra_neighbor(item: Mapping[str, Any], fleet: frozenset[str]) -> bool:
+    """True for an LLDP neighbour that is a network device.
+
+    A Bridge or Router capability (enabled; lldpd on the live APs sends
+    both, Wlan off), or a chassis ID / management IP of a fleet router.
+    A PC, NAS or phone with lldpd announces Station and is no uplink.
+    """
+    caps = item.get("capabilities")
+    if isinstance(caps, (list, tuple)) and any(
+        isinstance(cap, str) and cap.strip().lower() in _INFRA_CAPABILITIES
+        for cap in caps
+    ):
+        return True
+    for key in ("chassis_id", "management_ip"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip().lower() in fleet:
+            return True
+    return False
+
+
 def _lldp_table(
-    neighbors: Iterable[Any],
+    neighbors: Iterable[Any], fleet: frozenset[str]
 ) -> dict[str, frozenset[tuple[str, str]]]:
+    """Infrastructure neighbours per local port (end devices left out)."""
     table: dict[str, set[tuple[str, str]]] = {}
     for item in neighbors:
-        if not isinstance(item, Mapping):
+        if not isinstance(item, Mapping) or not is_infra_neighbor(item, fleet):
             continue
         port = item.get("local_interface")
         ident = item.get("chassis_id") or item.get("chassis_name")
@@ -1707,17 +1890,19 @@ def detect_lldp(
     rule: Mapping[str, Any],
     out: list[Finding],
     interval: float,
+    fleet: frozenset[str] = frozenset(),
 ) -> None:
-    """A neighbour gone or replaced, confirmed by ``states`` LLDP states.
+    """An infrastructure neighbour gone or replaced, confirmed by ``states`` reads.
 
     LLDP is read every ``interval`` seconds and served from a cache in
     between, so a change counts once it has lasted ``states - 1`` reads
     plus half an interval. A new neighbour on a free port is not reported.
-    Also marks every port with a neighbour as infrastructure link.
+    Only network devices count (``is_infra_neighbor``); their ports are
+    marked as infrastructure links.
     """
     if snap.lldp is None:
         return  # LLDP unavailable or failed: unknown
-    current = _lldp_table(snap.lldp)
+    current = _lldp_table(snap.lldp, fleet)
     for name in current:
         port = _port_state(state, name)
         if port is not None:
@@ -1801,7 +1986,7 @@ def detect_ports(
             if isinstance(speed, int) and not isinstance(speed, bool) and speed > 0
             else None
         )
-        _port_flap(port, name, link, router, out)
+        _port_flap(port, name, link, now, router, out)
         _port_uplink(port, name, link, now, router, rules.get("lan_uplink_down"), out)
         if link and speed is not None:
             _port_speed(
@@ -1815,7 +2000,7 @@ def detect_ports(
             )
         _port_errors(port, name, raw, now, router, rules.get("lan_port_errors"), out)
         _port_load(port, name, raw, link, speed, now, router, out)
-    _log_flaps(state, snap, router, out)
+    _log_flaps(state, snap, now, router, out)
     # forget ports gone from the router for a day
     for name in [
         n
@@ -1825,23 +2010,39 @@ def detect_ports(
         del state.ports[name]
 
 
+def _infra_port(port: _PortState, name: str, now: float) -> bool:
+    """A WAN port, or a port with an infrastructure LLDP neighbour lately."""
+    if name.startswith("wan"):
+        return True
+    return port.infra_seen is not None and now - port.infra_seen <= INFRA_PORT_MEMORY
+
+
 def _port_flap(
-    port: _PortState, name: str, link: bool | None, router: str, out: list[Finding]
+    port: _PortState,
+    name: str,
+    link: bool | None,
+    now: float,
+    router: str,
+    out: list[Finding],
 ) -> None:
+    """Link down/up per poll. Only infrastructure and WAN ports feed
+    ``lan_port_flap``; on a client port (a PC rebooting) it is only counted.
+    """
     if link is None:
         return
     before, port.link = port.link, link
     if before is True and link is False:
         port.poll_downs += 1
+        infra = _infra_port(port, name, now)
         out.append(
             Finding(
                 kind="lan.port_down",
                 category=Category.LAN,
                 source=Source.POLL,
-                rule="lan_port_flap",
+                rule="lan_port_flap" if infra else None,
                 scope=Scope.PORT,
                 scope_key=port_key(router, name),
-                event=True,
+                event=infra,
                 subject={"port": name},
             )
         )
@@ -1857,13 +2058,17 @@ def _port_flap(
 
 
 def _log_flaps(
-    state: InfraState, snap: InfraSnapshot, router: str, out: list[Finding]
+    state: InfraState,
+    snap: InfraSnapshot,
+    now: float,
+    router: str,
+    out: list[Finding],
 ) -> None:
     """Link-down lines the poll did not see (flaps shorter than a poll).
 
     Kernel and netifd may both log the same down: per port the larger of
     the two counts is taken. Downs the poll already saw since the last log
-    read are subtracted.
+    read are subtracted. Client ports are only counted (as in the poll).
     """
     if not snap.log_read:
         return
@@ -1884,16 +2089,17 @@ def _log_flaps(
             continue  # not a port of this router (wifi, bridge, tunnel)
         extra = max(counts.values()) - port.poll_downs
         if extra > 0:
+            infra = _infra_port(port, name, now)
             source = Source.NETIFD if "netifd" in counts else Source.LOG
             out.append(
                 Finding(
                     kind="lan.port_flap",
                     category=Category.LAN,
                     source=source,
-                    rule="lan_port_flap",
+                    rule="lan_port_flap" if infra else None,
                     scope=Scope.PORT,
                     scope_key=port_key(router, name),
-                    event=True,
+                    event=infra,
                     count=extra,
                     subject={"port": name},
                 )
@@ -1952,8 +2158,7 @@ def _port_speed(
     oldest = bucket - max(1, int(window // _SPEED_BUCKET)) + 1
     port.speeds = {b: s for b, s in port.speeds.items() if oldest <= b <= bucket}
     port.speeds[bucket] = max(speed, port.speeds.get(bucket, 0))
-    infra = port.infra_seen is not None and now - port.infra_seen <= INFRA_PORT_MEMORY
-    if not infra and not name.startswith("wan"):
+    if not _infra_port(port, name, now):
         return
     highest = max(port.speeds.values())
     out.append(
@@ -2059,6 +2264,14 @@ def _port_load(
 # -- WAN --------------------------------------------------------------------------
 
 
+def _ipv6_only_wan(wan: Mapping[str, Any]) -> bool:
+    proto = wan.get("proto")
+    iface = wan.get("interface")
+    return (isinstance(proto, str) and proto.lower() in _IPV6_WAN_PROTOS) or (
+        isinstance(iface, str) and iface.lower().endswith("6")
+    )
+
+
 def detect_wan(
     state: InfraState,
     snap: InfraSnapshot,
@@ -2066,15 +2279,54 @@ def detect_wan(
     rules: _RuleSet,
     out: list[Finding],
 ) -> None:
-    """WAN down, reconnects and a new WAN IPv4 (gateway only).
+    """WAN down, reconnects, failover and a new WAN IPv4 (gateway only).
 
-    A reconnect is a down -> up between two polls, a WAN uptime that went
-    down while connected in both, or an "Interface '<wan>' is now up" log
-    line beyond those the poll saw since the last log read.
+    Judged only on a gateway: a router whose IPv4 WAN was connected at
+    least once while it carried the default route (``default_route`` not
+    False). The engine keeps that role in its store
+    (``InfraState.wan_gateway``). A dumb AP with OpenWrt's unplugged
+    ``wan`` section is never judged; neither is an IPv6-only section
+    (``wan6`` is pending in normal operation; IPv6 stays open, A7).
+
+    The state is per WAN interface: a switch (mwan3 ``wan`` -> ``lte``)
+    stores one info event ``wan.failover`` and starts a new baseline (no
+    reconnect, no IP change). A reconnect is a down -> up between two polls,
+    a WAN uptime that went down while connected in both, or an
+    "Interface '<wan>' is now up" log line beyond those the poll saw.
     """
     wan, connected = snap.wan, snap.wan_connected
-    if not isinstance(wan, Mapping) or connected is None:
+    if not isinstance(wan, Mapping) or connected is None or _ipv6_only_wan(wan):
         return
+    if connected and wan.get("default_route") is not False:
+        state.wan_gateway = True
+    if not state.wan_gateway:
+        return
+    iface = wan.get("interface")
+    iface = iface if isinstance(iface, str) and iface else None
+    switched_from = (
+        state.wan_iface
+        if iface is not None and state.wan_iface not in (None, iface)
+        else None
+    )
+    if iface is not None:
+        state.wan_iface = iface
+    if switched_from is not None:
+        out.append(
+            Finding(
+                kind=WAN_FAILOVER_KIND,
+                category=Category.WAN,
+                source=Source.NETIFD,
+                scope_key=router,
+                event=True,
+                severity=Severity.INFO,
+                params={"from": switched_from, "to": iface},
+            )
+        )
+        state.wan_connected = None
+        state.wan_uptime = None
+        state.wan_ip = None
+        state.wan_poll_reconnects = 0
+        state.wan_carry = 0
     down_rule = rules.get("wan_down")
     out.append(
         Finding(
@@ -2114,7 +2366,7 @@ def detect_wan(
         out.append(_wan_reconnect("wan.reconnect", router, Source.NETIFD, 1))
     state.wan_connected = connected
     state.wan_uptime = uptime if connected else None
-    _wan_log_reconnects(state, snap, wan, router, out)
+    _wan_log_reconnects(state, snap, wan, router, out, switched_from is not None)
     _wan_ip(state, wan, connected, router, rules.get("wan_ip_changed"), out)
 
 
@@ -2136,24 +2388,42 @@ def _wan_log_reconnects(
     wan: Mapping[str, Any],
     router: str,
     out: list[Finding],
+    switched: bool,
 ) -> None:
+    """Up lines of the WAN interface beyond the reconnects the polls saw.
+
+    The WAN is read early in a poll, the log late. An up line written after
+    the WAN read (router time > ``wan_at``) is seen by the next poll's WAN
+    read, so it is carried over to the next log read instead of counted
+    now. Router and HA clocks are compared directly (skew is a few seconds
+    at most when NTP works; ``system_clock_skew`` flags larger ones).
+    """
     if not snap.log_read:
         return
     iface = wan.get("interface")
-    ups = (
-        sum(
-            1
-            for e in snap.log_events
-            if getattr(e, "category", None) == "iface"
-            and getattr(e, "kind", None) == "up"
-            and getattr(e, "interface", None) == iface
-        )
-        if isinstance(iface, str) and iface
-        else 0
-    )
-    extra = ups - state.wan_poll_reconnects
+    early = later = 0
+    if isinstance(iface, str) and iface:
+        for event in snap.log_events:
+            if (
+                getattr(event, "category", None) != "iface"
+                or getattr(event, "kind", None) != "up"
+                or getattr(event, "interface", None) != iface
+            ):
+                continue
+            ts = getattr(event, "time_ms", 0)
+            if (
+                snap.wan_at is not None
+                and isinstance(ts, int)
+                and ts > 0
+                and ts / 1000 > snap.wan_at
+            ):
+                later += 1
+            else:
+                early += 1
+    extra = early + state.wan_carry - state.wan_poll_reconnects
     state.wan_poll_reconnects = 0
-    if extra > 0:
+    state.wan_carry = 0 if switched else later
+    if extra > 0 and not switched:
         out.append(_wan_reconnect("wan.reconnect", router, Source.NETIFD, extra))
 
 
@@ -2189,14 +2459,14 @@ def _wan_ip(
 # -- DHCP -------------------------------------------------------------------------
 
 
-def detect_dhcp(
-    state: InfraState,
-    snap: InfraSnapshot,
-    router: str,
-    rules: _RuleSet,
-    out: list[Finding],
-) -> None:
-    """Pool usage (level) and one IPv4 with several MACs in the ARP table."""
+def detect_dhcp(snap: InfraSnapshot, router: str, out: list[Finding]) -> None:
+    """Pool usage (level rule ``dhcp_pool_full``).
+
+    No ARP-based conflict detector (P3 review K5): ``/proc/net/arp`` holds
+    one entry per (IP, device), so two MACs for one IP in the merged map
+    come from two devices or a stale ``getHostHints`` row, not from a
+    conflict on one segment. Conflicts come from DHCPDECLINE only.
+    """
     for pool in snap.dhcp_pools or ():
         if not isinstance(pool, Mapping):
             continue
@@ -2218,49 +2488,22 @@ def detect_dhcp(
                 subject=subject,
             )
         )
-    _arp_conflicts(state, snap, router, rules.get("dhcp_conflict"), out)
 
 
-def _arp_conflicts(
-    state: InfraState,
-    snap: InfraSnapshot,
-    router: str,
-    rule: Mapping[str, Any],
-    out: list[Finding],
-) -> None:
-    """An IPv4 held by two MACs in two polls in a row (hypothesis).
+def decline_cause(
+    ip: str | None, mac: str | None, arp: Any
+) -> tuple[CauseStatus, float]:
+    """Cause status and confidence of a DHCPDECLINE (P3 review M3).
 
-    Also a device that switched from cable to Wi-Fi with a fixed address
-    looks like this until its old ARP entry expires; hence two polls,
-    confidence 0.7 and the cause only as hypothesis.
+    Confirmed only when the router's ARP map shows the declined address on
+    a MAC other than the declining client's; otherwise a hypothesis.
     """
-    if not isinstance(snap.arp, Mapping):
-        return
-    macs_by_ip: dict[str, set[str]] = {}
-    for mac, ip in snap.arp.items():
-        if isinstance(mac, str) and isinstance(ip, str) and ip:
-            macs_by_ip.setdefault(ip, set()).add(mac.upper())
-    conflicts = frozenset(ip for ip, macs in macs_by_ip.items() if len(macs) > 1)
-    confirmed = conflicts & state.arp_conflicts
-    reported = state.arp_reported
-    state.arp_conflicts, state.arp_reported = conflicts, confirmed
-    for ip in sorted(confirmed):
-        out.append(
-            Finding(
-                kind="dhcp.ip_conflict",
-                category=Category.DHCP,
-                source=Source.POLL,
-                rule="dhcp_conflict",
-                scope_key=router,
-                event=ip not in reported,
-                severity=_severity(rule.get("severity")),
-                confidence=_ARP_CONFIDENCE,
-                cause="ip_conflict",
-                cause_status=CauseStatus.HYPOTHESIS,
-                subject={"ip": ip},
-                params={"macs": len(macs_by_ip[ip])},
-            )
-        )
+    if isinstance(ip, str) and ip and isinstance(arp, Mapping):
+        own = mac.lower() if isinstance(mac, str) else ""
+        for other, addr in arp.items():
+            if addr == ip and isinstance(other, str) and other.lower() != own:
+                return CauseStatus.CONFIRMED, 1.0
+    return CauseStatus.HYPOTHESIS, _DECLINE_CONFIDENCE
 
 
 def finding_evidence(
@@ -2285,6 +2528,7 @@ def finding_evidence(
         origin=finding.origin,
         cause=finding.cause,
         cause_status=finding.cause_status,
+        hold=finding.hold,
     )
 
 

@@ -59,8 +59,10 @@ import shutil
 import time
 from collections import Counter
 from collections.abc import Iterable
+from datetime import timedelta
 from typing import Any
 
+from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.json import prepare_save_json
 from homeassistant.helpers.storage import Store
@@ -101,17 +103,20 @@ from .net_events import (
     Source,
 )
 from .net_rules import (
+    DECLINE_KIND,
     LOG_EVENT_META,
     AlarmMachine,
     Evidence,
     Finding,
     InfraSnapshot,
     InfraState,
+    decline_cause,
     detect_infrastructure,
     finding_evidence,
     log_event_evidence,
     merge_settings,
 )
+from .topology_ports import collect_own_macs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -257,6 +262,11 @@ class NetIntelligence:
         self._last_data: dict[str, Any] = {}
         # Comparison state of the infrastructure detectors per router.
         self._infra: dict[str, InfraState] = {}
+        # Routers whose IPv4 WAN was connected once with the default route
+        # (stored: a gateway stays one across restarts, P3 review H1).
+        self._wan_gateways: set[str] = set()
+        # In memory: own MACs and host IP per router, for LLDP fleet matches.
+        self._identity: dict[str, frozenset[str]] = {}
         self._last_prune: float | None = None
         # True while a delayed write is scheduled: HA's async_delay_save
         # moves a pending write back on every call, so we call it once.
@@ -348,6 +358,7 @@ class NetIntelligence:
         self.machine = AlarmMachine(self.settings)
         self._seq = 0
         self._log_marks = {}
+        self._wan_gateways = set()
 
     @callback
     def register(self, entry_id: str) -> None:
@@ -364,6 +375,7 @@ class NetIntelligence:
         self._routers.clear()
         self._last_data.clear()
         self._infra.clear()
+        self._identity.clear()
 
     @callback
     def unregister(self, entry_id: str) -> None:
@@ -371,6 +383,7 @@ class NetIntelligence:
         self._routers.discard(entry_id)
         self._last_data.pop(entry_id, None)
         self._infra.pop(entry_id, None)
+        self._identity.pop(entry_id, None)
 
     def remove_router(self, entry_id: str) -> bool:
         """Forget all data of a router; True if anything was removed."""
@@ -379,6 +392,8 @@ class NetIntelligence:
         removed |= entry_id in self.counters.to_dict()
         self.counters.remove_router(entry_id)
         removed |= self._log_marks.pop(entry_id, None) is not None
+        removed |= entry_id in self._wan_gateways
+        self._wan_gateways.discard(entry_id)
         removed |= self.machine.remove_router(entry_id) > 0
         return removed
 
@@ -400,7 +415,20 @@ class NetIntelligence:
     def async_ingest_coordinator(self, entry_id: str, coordinator: Any) -> None:
         """Coordinator listener: ingest the latest poll; never raises."""
         try:
-            self.ingest(entry_id, coordinator.data, time.time(), time.monotonic())
+            entry = getattr(coordinator, "config_entry", None)
+            entry_data = getattr(entry, "data", None)
+            host = entry_data.get(CONF_HOST) if isinstance(entry_data, dict) else None
+            interval = getattr(coordinator, "update_interval", None)
+            self.ingest(
+                entry_id,
+                coordinator.data,
+                time.time(),
+                time.monotonic(),
+                host=host if isinstance(host, str) else None,
+                interval=interval.total_seconds()
+                if isinstance(interval, timedelta)
+                else None,
+            )
         except Exception:
             _LOGGER.warning(
                 "Network intelligence could not process a poll of %s",
@@ -409,7 +437,14 @@ class NetIntelligence:
             )
 
     def ingest(
-        self, entry_id: str, data: Any, now: float, mono: float | None = None
+        self,
+        entry_id: str,
+        data: Any,
+        now: float,
+        mono: float | None = None,
+        *,
+        host: str | None = None,
+        interval: float | None = None,
     ) -> int:
         """Ingest one poll's data; return the number of stored events.
 
@@ -418,17 +453,23 @@ class NetIntelligence:
         after a failed poll the coordinator notifies its listeners with the
         previous data. ``now`` (wall time) and ``mono`` (monotonic time, if
         known) go through the machine clock first (see module doc).
+        ``host`` (the entry's router address) joins the router's identity
+        for LLDP fleet matches; ``interval`` is the poll interval in seconds.
         """
         if self._closed or entry_id not in self._routers:
             return 0
         if data is None or self._last_data.get(entry_id) is data:
             return 0
         self._last_data[entry_id] = data
+        self._update_identity(entry_id, data, host)
         step = self.machine.sync_clock(now, mono)
         if step.shift:
             self.ring.shift(step.shift)
             for state in self._infra.values():
                 state.shift(step.shift)
+        if self.machine.prune_held:
+            for state in self._infra.values():
+                state.clock_jumped()
         now = step.now
         log_events = getattr(data, "new_log_events", ())
         if not isinstance(log_events, (tuple, list)):
@@ -438,7 +479,7 @@ class NetIntelligence:
             batch = None
         mark_before = self._log_marks.get(entry_id)
         stored, log_stored, accepted = self._ingest_log(
-            entry_id, log_events, batch, now
+            entry_id, log_events, batch, now, getattr(data, "arp_table", None)
         )
         fresh = batch is not None and not batch.baseline
         evidence: list[Evidence] = []
@@ -448,7 +489,13 @@ class NetIntelligence:
                 for event in log_stored
                 if (item := log_event_evidence(event)) is not None
             )
-        snapshot = infra_snapshot(data, tuple(accepted) if fresh else (), fresh)
+        snapshot = infra_snapshot(
+            data,
+            tuple(accepted) if fresh else (),
+            fresh,
+            log_times=_log_times(batch, mark_before, accepted) if fresh else (),
+            poll_interval=interval,
+        )
         stored += self._ingest_findings(entry_id, snapshot, now, evidence)
         self.machine.update(now, evidence)
         self._prune(now)
@@ -462,11 +509,13 @@ class NetIntelligence:
         events: Iterable[Any],
         batch: LogBatch | None,
         now: float,
+        arp: Any = None,
     ) -> tuple[int, list[NetEvent], list[LogEvent]]:
         """Count and store the log events of one poll.
 
         Returns the number of stored events (a log gap included), the
         stored log events, and the log events taken in (for the detectors).
+        ``arp`` (MAC -> IPv4 of this poll) confirms a DHCPDECLINE.
         """
         stored = 0
         baseline = batch is not None and batch.baseline
@@ -492,7 +541,9 @@ class NetIntelligence:
                 groups.setdefault((event.key, event.name), []).append((event, ts))
                 continue
             kept.append(
-                self._net_event(entry_id, category, event, ts, src_ts, now, baseline)
+                self._net_event(
+                    entry_id, category, event, ts, src_ts, now, baseline, arp=arp
+                )
             )
         for group in groups.values():
             event, ts = group[0]
@@ -507,6 +558,7 @@ class NetIntelligence:
                     now,
                     baseline,
                     count=len(group),
+                    arp=arp,
                 )
             )
         for net_event in kept:
@@ -532,7 +584,13 @@ class NetIntelligence:
         rule become evidence (appended to ``evidence``), the rest is only
         counted.
         """
-        state = self._infra.setdefault(entry_id, InfraState())
+        state = self._infra.get(entry_id)
+        if state is None:
+            state = InfraState(wan_gateway=entry_id in self._wan_gateways)
+            self._infra[entry_id] = state
+        fleet = frozenset().union(
+            *(ids for router, ids in self._identity.items() if router != entry_id)
+        )
         findings = detect_infrastructure(
             state,
             snapshot,
@@ -540,7 +598,11 @@ class NetIntelligence:
             entry_id,
             self.settings["thresholds"],
             lldp_interval=LLDP_REFRESH_INTERVAL,
+            fleet=fleet,
         )
+        if state.wan_gateway and entry_id not in self._wan_gateways:
+            self._wan_gateways.add(entry_id)
+            self.schedule_save()
         stored = 0
         for finding in findings:
             event: NetEvent | None = None
@@ -554,6 +616,29 @@ class NetIntelligence:
             if item is not None:
                 evidence.append(item)
         return stored
+
+    def _update_identity(self, entry_id: str, data: Any, host: str | None) -> None:
+        """Own MACs and host address of a router (LLDP fleet matches)."""
+        info = getattr(data, "router_info", None)
+        aps = getattr(data, "ap_interfaces", None)
+        stas = getattr(data, "sta_interfaces", None)
+        try:
+            macs = collect_own_macs(
+                info if isinstance(info, dict) else None,
+                [a for a in aps if isinstance(a, dict)]
+                if isinstance(aps, list)
+                else [],
+                [s for s in stas if isinstance(s, dict)]
+                if isinstance(stas, list)
+                else [],
+            )
+        except (AttributeError, TypeError):
+            macs = set()
+        ids = set(macs) if macs else set(self._identity.get(entry_id, ()))
+        if host:
+            ids.add(host.strip().lower())
+        if ids:
+            self._identity[entry_id] = frozenset(ids)
 
     def _finding_event(self, entry_id: str, finding: Finding, now: float) -> NetEvent:
         self._seq += 1
@@ -626,6 +711,7 @@ class NetIntelligence:
         now: float,
         in_gap: bool = False,
         count: int = 1,
+        arp: Any = None,
     ) -> NetEvent:
         self._seq += 1
         # A gap line (read after a restart) is old by nature and newer than
@@ -649,6 +735,8 @@ class NetIntelligence:
         severity, cause, cause_status, confidence = LOG_EVENT_META.get(
             event.key, (Severity.INFO, None, None, 1.0)
         )
+        if event.key == DECLINE_KIND:
+            cause_status, confidence = decline_cause(event.ip, event.mac, arp)
         params = {
             key: value
             for key, value in (
@@ -743,6 +831,12 @@ class NetIntelligence:
         self._seq = seq if isinstance(seq, int) and not isinstance(seq, bool) else 0
         self._seq = max(self._seq, _highest_seq(ring))
         self._log_marks = _load_marks(stored.get("log_marks"))
+        gateways = stored.get("wan_gateways")
+        self._wan_gateways = (
+            {r for r in gateways if isinstance(r, str) and r}
+            if isinstance(gateways, list)
+            else set()
+        )
 
     def _prune(self, now: float) -> None:
         if self.machine.prune_held:
@@ -764,6 +858,7 @@ class NetIntelligence:
             "machine": self.machine.to_dict(),
             "counters": self.counters.to_dict(),
             "log_marks": self._log_marks,
+            "wan_gateways": sorted(self._wan_gateways),
         }
 
     @callback
@@ -820,15 +915,37 @@ class NetIntelligence:
 _NAME_KEY = {"system.service_crash_loop": "service", "system.oom_kill": "process"}
 
 
+def _log_times(
+    batch: LogBatch | None,
+    mark_before: dict[str, int] | None,
+    accepted: Iterable[LogEvent],
+) -> tuple[float, ...]:
+    """Router times (epoch s) of the new lines of a fresh log fetch."""
+    if batch is None or batch.last_id is None:
+        return ()
+    if mark_before is not None and mark_before.get("last_id") == batch.last_id:
+        return ()  # nothing new
+    times = {e.time_ms / 1000 for e in accepted if e.time_ms > 0}
+    if batch.last_time_ms is not None:
+        times.add(batch.last_time_ms / 1000)
+    return tuple(sorted(times))
+
+
 def infra_snapshot(
-    data: Any, log_events: tuple[Any, ...] = (), log_read: bool = False
+    data: Any,
+    log_events: tuple[Any, ...] = (),
+    log_read: bool = False,
+    *,
+    log_times: tuple[float, ...] = (),
+    poll_interval: float | None = None,
 ) -> InfraSnapshot:
     """Read the detector inputs from coordinator data; never raises.
 
     Coordinator defaults that stand for "not measured" become None:
     uptime 0 (then CPU and memory are not trusted either, they come from
-    the same call), conntrack 0, empty port, ARP and pool lists, LLDP with
-    a status other than ok/no_neighbors, and the WAN unless ``wan_found``.
+    the same call), conntrack 0, empty port and pool lists, LLDP with a
+    status other than ok/no_neighbors, the WAN unless ``wan_found``, and
+    an empty map of our own service actions.
     """
     uptime = _positive(getattr(data, "uptime", None))
     cpu = getattr(data, "cpu_load", None)
@@ -843,8 +960,11 @@ def infra_snapshot(
     connected = getattr(data, "wan_connected", None) if wan else None
     leases = getattr(data, "dhcp_leases", None)
     pools = _records(getattr(data, "dhcp_pools", None))
-    arp = getattr(data, "arp_table", None)
     lldp = getattr(data, "lldp_neighbors", None)
+    wan_at = getattr(data, "wan_status_at", None)
+    actions = getattr(data, "service_actions", None)
+    batch = getattr(data, "new_log_batch", None)
+    fetched = batch.fetched_at if isinstance(batch, LogBatch) else None
     lldp_ok = isinstance(lldp, list) and getattr(data, "lldp_status", None) in (
         LLDP_STATUS_OK,
         LLDP_STATUS_NO_NEIGHBORS,
@@ -857,15 +977,21 @@ def infra_snapshot(
         localtime_at=float(clock[1]) if clock_ok else None,
         conntrack=int(conntrack) if _positive(conntrack) else None,
         services=services if isinstance(services, dict) else None,
+        service_actions=dict(actions)
+        if isinstance(actions, dict) and actions
+        else None,
         ports=_records(getattr(data, "port_stats", None)),
         wan=wan,
         wan_connected=connected if isinstance(connected, bool) else None,
+        wan_at=float(wan_at) if wan and _finite(wan_at) else None,
         # no lease list: usage 0 % would be a guess, not a measurement
         dhcp_pools=pools if isinstance(leases, dict) and leases else None,
-        arp=arp if isinstance(arp, dict) and arp else None,
         lldp=tuple(n for n in lldp if isinstance(n, dict)) if lldp_ok else None,
         log_events=log_events,
         log_read=log_read,
+        log_fetched_at=float(fetched) if _finite(fetched) else None,
+        log_times=log_times,
+        poll_interval=float(poll_interval) if _positive(poll_interval) else None,
     )
 
 

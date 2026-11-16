@@ -1282,6 +1282,9 @@ class OpenWrtAPI:
         # from the reply the service switches already fetch, so it costs no
         # call; None = not known (no reply yet, rc/list fallback, error).
         self.service_instances: dict[str, dict[str, dict[str, Any]]] | None = None
+        # time.time() of our own last start/stop/restart per service (HA
+        # button): the engine does not report the PID change that follows.
+        self.service_actions: dict[str, float] = {}
 
         # Results of SSH-only readers that are refreshed at most every
         # SSH_SLOW_REFRESH_INTERVAL: key -> (time.monotonic() of fetch, value).
@@ -2042,7 +2045,7 @@ class OpenWrtAPI:
             )
             rx_bytes, tx_bytes = await self._read_wan_counters(str(wan_device))
 
-        return {
+        status = {
             "connected": wan_iface.get("up", False),
             "interface": wan_iface.get("interface", ""),
             "ipv4": ipv4,
@@ -2052,6 +2055,18 @@ class OpenWrtAPI:
             "rx_bytes": rx_bytes,
             "tx_bytes": tx_bytes,
         }
+        # Does this interface carry the IPv4 default route? A dumb AP with a
+        # plugged "wan" section that got a DHCP lease still routes via lan.
+        # Absent when netifd sent no route list (unknown).
+        routes = wan_iface.get("route")
+        if isinstance(routes, list):
+            status["default_route"] = any(
+                isinstance(route, dict)
+                and route.get("target") == "0.0.0.0"
+                and str(route.get("mask")) == "0"
+                for route in routes
+            )
+        return status
 
     async def _read_wan_counters(self, device: str) -> tuple[int | None, int | None]:
         """Return ``(rx_bytes, tx_bytes)`` of a network device, or ``(None, None)``.
@@ -5116,6 +5131,9 @@ class OpenWrtAPI:
             True on success, False on failure.
         """
         _LOGGER.info("Service control: %s %s", action, name)
+        if action not in ("enable", "disable"):
+            # Before the call: the process changes while it runs.
+            self.service_actions[name] = time.time()
         try:
             await self._call("rc", "init", {"name": name, "action": action})
             _LOGGER.debug("Service %s %s OK", name, action)

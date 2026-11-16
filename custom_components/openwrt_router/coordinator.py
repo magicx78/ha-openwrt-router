@@ -234,6 +234,8 @@ class LogBatch:
     ``baseline`` and ``missed`` come from ``LogCursor.ingest``. The times are
     the router's epoch milliseconds of the oldest line in the answer and of
     the cursor position after the fetch (None when unusable).
+    ``fetched_at`` is HA's wall time (``time.time()``) right after the
+    fetch: new lines were written before it (clock check, P3 review M1).
     """
 
     baseline: bool
@@ -241,6 +243,7 @@ class LogBatch:
     first_time_ms: int | None
     last_id: int | None
     last_time_ms: int | None
+    fetched_at: float | None = None
 
 
 def _log_time_ms(value: Any) -> int | None:
@@ -251,7 +254,11 @@ def _log_time_ms(value: Any) -> int | None:
 
 
 def _log_batch(
-    entries: list[dict[str, Any]], baseline: bool, missed: int, cursor: LogCursor
+    entries: list[dict[str, Any]],
+    baseline: bool,
+    missed: int,
+    cursor: LogCursor,
+    fetched_at: float | None = None,
 ) -> LogBatch:
     """Summarise one fetch for the engine (oldest line by id, cursor state)."""
     ids = [
@@ -268,6 +275,7 @@ def _log_batch(
         first_time_ms=_log_time_ms(oldest.get("time")) if oldest else None,
         last_id=cursor.last_id,
         last_time_ms=_log_time_ms(cursor.last_time),
+        fetched_at=fetched_at,
     )
 
 
@@ -348,6 +356,10 @@ class OpenWrtCoordinatorData:
         self.localtime: int | None = None
         self.localtime_at: float | None = None
         self.service_instances: dict[str, dict[str, dict[str, Any]]] | None = None
+        # HA wall time of the WAN read (None = not read), and our own last
+        # start/stop/restart per service (HA time, from the api).
+        self.wan_status_at: float | None = None
+        self.service_actions: dict[str, float] = {}
         self.ap_interfaces: list[dict[str, Any]] = []
         # STA-mode wireless interfaces (WiFi repeater / mesh backhaul).
         # Used by topology_mesh to detect wireless-uplinked routers via their
@@ -690,6 +702,9 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # Time of the counter read; the rate below is computed later in the
             # poll, after calls whose duration varies from poll to poll.
             wan_sampled_at = time.monotonic()
+            data.wan_status_at = time.time()
+            actions = getattr(self.api, "service_actions", None)
+            data.service_actions = dict(actions) if isinstance(actions, dict) else {}
             data.wan_connected = data.wan_status.get(
                 "wan_connected", False
             ) or data.wan_status.get("connected", False)
@@ -1414,10 +1429,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
     ) -> None:
         result = self._log_cursor.ingest(entries)
         data.new_log_events = tuple(result.events)
+        fetched_at = time.time()
         data.new_log_batch = _log_batch(
-            entries, result.baseline, result.missed, self._log_cursor
+            entries, result.baseline, result.missed, self._log_cursor, fetched_at
         )
-        now_ms = int(time.time() * 1000)
+        now_ms = int(fetched_at * 1000)
         for event in result.events:
             # Router time only when plausible: a dumb AP without NTP sync
             # would otherwise put lines outside the 24 h window.

@@ -86,6 +86,12 @@ def by_kind(findings: list[Any], kind: str) -> list[Any]:
     return [f for f in findings if f.kind == kind]
 
 
+# LLDP capability of a network device (live APs announce Bridge + Router).
+BRIDGE: dict[str, Any] = {"capabilities": ["Bridge"]}
+# lan1 is an uplink to another router (flaps only count on such ports).
+LAN1_UPLINK = ({"local_interface": "lan1", "chassis_id": MAC3, **BRIDGE},)
+
+
 def port(
     name: str = "lan1",
     *,
@@ -602,7 +608,7 @@ def test_service_unknown_or_removed_is_not_reported() -> None:
 
 def test_port_down_transitions_count_as_flaps() -> None:
     state = InfraState()
-    run(state, T0, ports=(port(),))
+    run(state, T0, ports=(port(),), lldp=LAN1_UPLINK)
     [down] = [f for f in run(state, T0 + 60, ports=(port(up=False),)) if f.event]
     assert down.kind == "lan.port_down" and down.rule == "lan_port_flap"
     assert down.scope is Scope.PORT and down.scope_key == port_key(R, "lan1")
@@ -629,7 +635,7 @@ def test_log_flaps_add_only_what_the_poll_missed() -> None:
         )
 
     state = InfraState()
-    run(state, T0, ports=(port(),))
+    run(state, T0, ports=(port(),), lldp=LAN1_UPLINK)
     run(state, T0 + 60, ports=(port(up=False),))  # the poll saw one down
     lines = (
         link(1, "down", "kernel"),
@@ -711,7 +717,9 @@ def test_port_load_from_byte_deltas() -> None:
 
 def test_speed_drop_only_on_infrastructure_and_wan_ports() -> None:
     state = InfraState()
-    lldp = ({"local_interface": "lan2", "chassis_id": MAC3, "port_id": "lan4"},)
+    lldp = (
+        {"local_interface": "lan2", "chassis_id": MAC3, "port_id": "lan4", **BRIDGE},
+    )
     run(
         state,
         T0,
@@ -734,7 +742,9 @@ def test_speed_drop_only_on_infrastructure_and_wan_ports() -> None:
 
 def test_uplink_down_on_a_port_with_an_lldp_neighbour() -> None:
     state = InfraState()
-    lldp = ({"local_interface": "lan4", "chassis_id": MAC3, "port_id": "lan1"},)
+    lldp = (
+        {"local_interface": "lan4", "chassis_id": MAC3, "port_id": "lan1", **BRIDGE},
+    )
     run(state, T0, ports=(port("lan4"),), lldp=lldp)
     # the neighbour vanishes from LLDP once the link is down; the role stays
     found = run(state, T0 + 60, ports=(port("lan4", up=False),), lldp=())
@@ -747,8 +757,8 @@ def test_uplink_down_on_a_port_with_an_lldp_neighbour() -> None:
 
 def test_lldp_change_needs_two_states() -> None:
     state = InfraState()
-    a = {"local_interface": "lan4", "chassis_id": MAC2, "port_id": "lan1"}
-    b = {"local_interface": "lan4", "chassis_id": MAC3, "port_id": "lan1"}
+    a = {"local_interface": "lan4", "chassis_id": MAC2, "port_id": "lan1", **BRIDGE}
+    b = {"local_interface": "lan4", "chassis_id": MAC3, "port_id": "lan1", **BRIDGE}
     assert not by_kind(run(state, T0, lldp=(a,)), "lan.lldp_change")
     assert not by_kind(run(state, T0 + 600, lldp=(b,)), "lan.lldp_change")
     assert not by_kind(run(state, T0 + 1200, lldp=(b,)), "lan.lldp_change")
@@ -766,7 +776,7 @@ def test_lldp_change_needs_two_states() -> None:
 def test_new_lldp_neighbour_on_a_free_port_is_not_a_change() -> None:
     state = InfraState()
     run(state, T0, lldp=())
-    new = ({"local_interface": "lan3", "chassis_id": MAC2, "port_id": "x"},)
+    new = ({"local_interface": "lan3", "chassis_id": MAC2, "port_id": "x", **BRIDGE},)
     for t in (600, 1200, 1800, 2400):
         assert not by_kind(run(state, T0 + t, lldp=new), "lan.lldp_change")
 
@@ -870,19 +880,6 @@ def test_pool_usage_level() -> None:
     assert run(InfraState(), T0, dhcp_pools=broken) == []
 
 
-def test_arp_conflict_needs_two_polls_and_is_a_hypothesis() -> None:
-    state = InfraState()
-    arp = {MAC1: IP1, MAC2: IP1, MAC3: "192.0.2.52"}
-    assert not by_kind(run(state, T0, arp=arp), "dhcp.ip_conflict")
-    [f] = by_kind(run(state, T0 + 60, arp=arp), "dhcp.ip_conflict")
-    assert f.event and f.rule == "dhcp_conflict"
-    assert f.cause == "ip_conflict" and f.cause_status is CauseStatus.HYPOTHESIS
-    assert f.confidence == 0.7 and f.params == {"macs": 2}
-    [again] = by_kind(run(state, T0 + 120, arp=arp), "dhcp.ip_conflict")
-    assert not again.event  # still evidence, no second event
-    assert not by_kind(run(state, T0 + 180, arp=None), "dhcp.ip_conflict")
-
-
 # --- engine: snapshot and scenarios ---------------------------------------------------
 
 
@@ -923,7 +920,7 @@ def test_snapshot_reads_measured_values() -> None:
     assert snap.conntrack == 50 and snap.localtime == 1.0
     assert snap.services == {"dnsmasq": {}} and snap.ports == (port(),)
     assert snap.wan is not None and snap.wan_connected is True
-    assert snap.dhcp_pools and snap.arp and snap.lldp
+    assert snap.dhcp_pools and snap.lldp
 
 
 def test_snapshot_cpu_without_uptime_is_unknown() -> None:
@@ -984,8 +981,9 @@ def log_poll(lines: list[dict], cursor: LogCursor, **fields: Any) -> Any:
 async def test_scenario_lan_port_flapping_opens_one_port_incident() -> None:
     engine = await make_engine(R)
     t = T0
+    uplink = {"lldp_neighbors": list(LAN1_UPLINK), "lldp_status": "ok"}
     for i in range(4):
-        engine.ingest(R, data(uptime=1000 + i * 120, port_stats=[port()]), t)
+        engine.ingest(R, data(uptime=1000 + i * 120, port_stats=[port()], **uplink), t)
         engine.ingest(
             R, data(uptime=1060 + i * 120, port_stats=[port(up=False)]), t + 60
         )
@@ -1052,7 +1050,7 @@ async def test_scenario_dns_trouble_is_one_aggregated_hypothesis_event() -> None
     assert event.kind == "dns.no_servers" and event.count == 4
     assert event.cause == "dns_resolution"
     assert event.cause_status is CauseStatus.HYPOTHESIS
-    assert event.confidence == 0.5 and event.severity is Severity.WARNING
+    assert event.confidence == 0.5 and event.severity is Severity.INFO
     assert engine.counters.hourly(R, "dns.no_servers", T0 + 60, 1) == 4
     assert engine.machine.incidents() == []  # DNS has no rule (plan b 3.22)
 
@@ -1083,6 +1081,7 @@ async def test_scenario_dhcp_decline_and_full_pool() -> None:
             uptime=110,
             dhcp_leases=leases,
             dhcp_pools=[{**pools[0], "usage_pct": 99.0}],
+            arp_table={MAC2.lower(): IP1},  # a second MAC holds the address
         ),
         T0 + 60,
     )
@@ -1217,7 +1216,7 @@ async def test_detector_error_never_reaches_the_poll(caplog: Any) -> None:
 @pytest.mark.asyncio
 async def test_clock_shift_moves_detector_times() -> None:
     engine = await make_engine(R)
-    lldp = [{"local_interface": "lan4", "chassis_id": MAC3, "port_id": "x"}]
+    lldp = [{"local_interface": "lan4", "chassis_id": MAC3, "port_id": "x", **BRIDGE}]
     engine.ingest(
         R,
         data(

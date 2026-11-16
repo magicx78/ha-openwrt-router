@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import json
 import logging
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -852,7 +854,12 @@ def test_coordinator_hands_over_log_events_and_cursor_facts() -> None:
     coordinator._process_log(first, data)
     # the baseline is handed over too; the engine decides what to take
     assert [e.kind for e in data.new_log_events] == [WIFI_PSK_MISMATCH]
-    assert data.new_log_batch == LogBatch(
+    batch = data.new_log_batch
+    assert batch is not None
+    # HA time right after the fetch (clock check, P3 review M1)
+    assert batch.fetched_at is not None
+    assert abs(batch.fetched_at - time.time()) < 60
+    assert dataclasses.replace(batch, fetched_at=None) == LogBatch(
         baseline=True,
         missed=0,
         first_time_ms=MS0 + 1000,
@@ -897,7 +904,8 @@ async def test_engine_adds_no_router_calls() -> None:
 
     # P3: the same replies also carry what the infrastructure detectors read
     # (localtime/uptime, service PIDs, carrier and error counters). Poll 2
-    # restarts dnsmasq, poll 3 drops the lan1 carrier, poll 4 is a reboot.
+    # restarts dnsmasq, poll 3 drops the wan and lan1 carriers (lan1 is a
+    # client port: only counted, P3 review M6), poll 4 is a reboot.
     uptimes = [86_400, 86_460, 86_520, 86_580, 30, 90]
     pids = [100, 100, 222, 222, 7, 7]
 
@@ -926,6 +934,7 @@ async def test_engine_adds_no_router_calls() -> None:
                 dev["carrier"] = True
                 dev["statistics"].update(rx_errors=0, tx_errors=0)
             devices["lan1"]["carrier"] = poll["n"] != 3
+            devices["wan"]["carrier"] = poll["n"] != 3
             name = params.get("name")
             return devices if name is None else devices.get(name)
 
@@ -986,6 +995,9 @@ async def test_engine_adds_no_router_calls() -> None:
         "wifi.inactivity_timeout",
         "wifi.psk_mismatch",
     ]
+    [down] = [e for e in engine.ring if e.kind == "lan.port_down"]
+    assert down.subject == {"port": "wan"}
+    assert engine.counters.hourly("r1", "lan.port_down", time.time(), 1) == 2
 
 
 def test_machine_remove_router_keeps_incidents_shared_with_other_routers() -> None:
@@ -1101,7 +1113,10 @@ async def test_m1_listener_passes_monotonic_time(disk: FakeDisk) -> None:
         patch.object(engine, "ingest") as ingest,
     ):
         engine.async_ingest_coordinator("r1", coordinator)
-    ingest.assert_called_once_with("r1", coordinator.data, T0, 42.0)
+    # no config entry or interval on this coordinator: both unknown
+    ingest.assert_called_once_with(
+        "r1", coordinator.data, T0, 42.0, host=None, interval=None
+    )
 
 
 def _incident_dict(incident_id: str) -> dict[str, Any]:

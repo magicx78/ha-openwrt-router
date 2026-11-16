@@ -12,10 +12,10 @@ belegt), **Annahme** (plausibel, aber noch nicht belegt; Prüfweg steht dabei), 
 
 - **Stand:** 2026-11-16 · **Phase:** freigegeben (Nutzer, 2026-11-16), in Umsetzung
 - **Branch/PR:** `feature/network-intelligence` · Worktree `../ha-openwrt-router-net-intel` · PR #— · Basis: v1.39.0 (`main@f8a2ac7`)
-- **Erledigt:** Live-Checks, P1, P2, P3 · **In Arbeit:** – · **Offen:** P4–P8
-- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 im Commit `feat(intel): add infrastructure detectors (P3)`
+- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review · **In Arbeit:** – · **Offen:** P4–P8
+- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`
 - **Blocker:** keine
-- **Nächster Schritt:** P3 erledigt; nächster Schritt P4.
+- **Nächster Schritt:** P3-Review umgesetzt; nächster Schritt P4.
 
 ### Entscheidungen (2026-11-16)
 
@@ -103,10 +103,12 @@ P3 (Infrastruktur-Detektoren, Umsetzer):
 - Ein Dienst, dessen Instanz verschwindet (gezielt gestoppt), wird nicht gemeldet. Ein
   abgestürzter Dienst (`running` false) hält den Incident offen, bis er wieder läuft.
 - Uhrabweichung: `localtime` ist Epoch plus UTC-Offset. Gemessen wird der Rest modulo 900 s
-  innerhalb ±14 h 15 min, sonst die absolute Differenz.
+  innerhalb ±14 h 15 min, sonst die absolute Differenz. → Ersetzt durch P3-Review M1; Modulo
+  ist nur noch der Rückfall ohne Logdaten.
 - Neustart streng nach c7: nur gesunkene Uptime bei beiden Werten > 0. Ein Neustart während
   einer HA-Pause oder ein langer Ausfall mit kleiner Uptime kann fehlen. Nach einem Neustart
-  beginnen alle Basiswerte neu (keine Folge-Events aus Zähler- oder PID-Sprüngen).
+  beginnen alle Basiswerte neu (keine Folge-Events aus Zähler- oder PID-Sprüngen). → Ergänzt
+  durch P3-Review K2 (Boot-Zeitpunkt).
 - `lan_uplink_down` nur beobachtet: ein Port gilt 24 h nach dem letzten LLDP-Nachbarn als
   Infrastruktur-Port. Die abgeleitete Variante braucht die Host-IPs der Flotte
   (`trunk_port_map` enthält alle Hosts) und folgt in P5.
@@ -123,7 +125,8 @@ P3 (Infrastruktur-Detektoren, Umsetzer):
 - RAM spiegelt `ram_high` mit ≥ statt > und zählt weniger als 16 MB verfügbar als hoch.
 - Pool-Auslastung gilt ohne Lease-Liste als unbekannt (0 % wäre geraten).
 - ARP-Konflikt (eine IP, ≥ 2 MACs) erst nach 2 Polls, als Hypothese mit Konfidenz 0,7.
-  `DHCPDECLINE` ist bestätigt.
+  `DHCPDECLINE` ist bestätigt. → Ersetzt durch P3-Review M3 und K5: kein ARP-Detektor mehr,
+  `DHCPDECLINE` ist eine Hypothese.
 - DNS-Zeilen sind nur eine Hypothese (`dns_resolution`, 0,5) ohne eigene Regel und ohne
   Incident.
 - Eine procd-Crash-Loop-Zeile plus ein PID-Wechsel im selben Zeitraum können doppelt zählen.
@@ -133,6 +136,74 @@ P3 (Infrastruktur-Detektoren, Umsetzer):
   - `system_reboot` als info im Wartungsmodus (Wartungsmodus kommt später);
   - Schleifen, Paketverlust, IPv6-RA, MAC-Wechsel (3.16) und VLAN (3.18), weil sie nicht im
     P3-Auftrag stehen.
+
+P3-Review (Entscheidungen des Masters, umgesetzt vom Umsetzer):
+
+- **H1 WAN nur am Gateway:** `wan_down` und `wan_unstable` gelten nur für einen Router, dessen
+  IPv4-WAN mindestens einmal verbunden war und dabei die Default-Route trug.
+  - `get_wan_status` liefert `default_route` aus der `route`-Liste derselben Dump-Antwort
+    (Ziel `0.0.0.0`, Maske 0). Fehlt die Liste, fehlt das Feld (unbekannt, zählt nicht gegen
+    den Router).
+  - Die Rolle steht im Store (`wan_gateways`); ein Neustart von HA während eines WAN-Ausfalls
+    verliert sie nicht. `remove_router` löscht sie.
+  - Nur IPv4: `proto` `dhcpv6` oder ein Interface-Name auf `6` wird nie bewertet (`wan6` ist im
+    Normalbetrieb `pending`, Live-Report).
+  - Grenze: Wird die Integration während eines WAN-Ausfalls neu eingerichtet, gilt der Router
+    bis zur ersten Verbindung nicht als Gateway; dieser erste Ausfall fehlt.
+- **M1 Uhrabweichung in UTC über Logzeiten:** Neue Logzeilen (Router-Zeit, UTC-ms) müssen
+  zwischen vorigem und aktuellem Log-Abruf (HA-Zeit, `LogBatch.fetched_at`) liegen; der Wert
+  ist der Abstand außerhalb dieses Fensters, Toleranz ist `raise` der Regel (120 s).
+  - Bei gutem Logwert (< `clear`) lernt der Detektor den Offset `localtime − UTC`, gerundet
+    auf 900 s (live +3600 s auf allen Routern), und prüft `localtime` danach absolut.
+  - Modulo 900 s nur als Rückfall, solange kein Offset gelernt ist. Blinder Fleck: ein Fehler
+    um ganze Viertelstunden ist dort unsichtbar.
+  - Ergänzung des Umsetzers: Weicht `localtime` in einem Poll ohne neue Logzeile um ganze
+    Viertelstunden vom gelernten Offset ab (Sommerzeit/Zeitzone oder Fehler), wartet der
+    Detektor auf die nächste Logzeile. Bei einem ruhigen Log bleibt das unbekannt.
+- **M2 WAN-Failover:** Zustand je `wan["interface"]`. Ein Wechsel (mwan3 `wan` → `lte`)
+  speichert ein Info-Event `wan.failover` (`from`, `to`, ohne Regel) und beginnt eine neue
+  Basis: kein Reconnect, keine IP-Änderung.
+- **M3 DHCPDECLINE:** Hypothese mit Konfidenz 0,8. Bestätigt (1,0) nur, wenn die ARP-Tabelle
+  desselben Polls die abgelehnte IP auf einer anderen MAC zeigt.
+- **M4 Infrastruktur-Port:** nur über LLDP-Nachbarn mit Fähigkeit Bridge oder Router (live
+  senden die APs Bridge+Router, Wlan/Station aus, deshalb ist Wlan kein Merkmal) oder über
+  Chassis-ID/Management-IP eines anderen Flotten-Routers. Die Engine sammelt dafür je Router
+  die eigenen MACs (`topology_ports.collect_own_macs`) und die Host-IP des Eintrags.
+  - Der lldpcli-Parser verarbeitet `interface` als Objekt, Liste oder fehlend (Tests mit den
+    Live-Formen).
+  - Grenze: Ein NAS oder Server mit lldpd und Docker meldet oft Router; sein Port gilt dann
+    als Infrastruktur.
+- **M5 Eigene Dienstaktion:** `api.control_service` merkt sich die HA-Zeit je Dienst
+  (start/stop/restart, nicht enable/disable) in `api.service_actions`; der Coordinator gibt
+  sie als `service_actions` weiter.
+  - Der Detektor ignoriert PID-Wechsel und Stopps, wenn die Aktion höchstens 120 s
+    zurückliegt. Ergänzung des Umsetzers: auch, wenn sie zwischen vorigem und aktuellem
+    Dienst-Lesen liegt (Polls mit 300 s im SSH-Rückfall).
+  - Grenze: Ein Apply in LuCI oder ein Neustart per SSH ist nicht erkennbar und wird
+    gemeldet.
+- **M6 Port-Flap:** `lan_port_flap` nur an Infrastruktur- und `wan*`-Ports. An Client-Ports
+  werden Poll- und Log-Downs nur gezählt (kein Event, keine Evidenz).
+- **K1 WAN-Logzeilen:** Up-Zeilen mit Router-Zeit nach dem WAN-Lesen (`wan_status_at`) zählen
+  erst beim nächsten Log-Lesen (Übertrag `wan_carry`). Grenze: Router- und HA-Uhr werden
+  direkt verglichen; bei großer Abweichung (die `system_clock_skew` meldet) kann eine Zeile
+  im falschen Poll landen.
+- **K2 Neustart über den Boot-Zeitpunkt:** zusätzlich Neustart, wenn `Lesezeit − Uptime`
+  um mehr als 60 s plus Poll-Intervall später liegt (Parameter `boot_shift_s`). Ein
+  Vorwärtssprung der HA-Uhr löscht den Bezug (`InfraState.clock_jumped`).
+- **K3 Dienst bleibt aus:** Halte-Evidenz (`Evidence.hold`) hält den Incident offen, zählt
+  aber weder für Schwelle, Vorkommen noch Eskalation.
+- **K4** `dns.no_servers` ist Info.
+- **K5 ARP-Konflikt entfällt:** `/proc/net/arp` hat einen Eintrag je (IP, Gerät). Zwei MACs
+  zu einer IP in der zusammengeführten Tabelle kommen von zwei Geräten (Bridges, VLANs) oder
+  aus veralteten `getHostHints`-Zeilen, nicht von einem Konflikt im selben Segment.
+- **K6** `dnsmasq: failed to send packet` bekommt keine Ursache: dnsmasq schreibt die Zeile in
+  `send_from()` (`src/forward.c`), das Antworten an DNS-Clients sendet. Upstream-Anfragen
+  gehen in `forward_query()` über `sendto()` und werden nicht so geloggt.
+- **Nicht live gesehen** (Live-Report 2026-11-16, Parser nur mit Mustern aus Quelltext und
+  Doku getestet): odhcpd-Fehler, DHCPNAK/DHCPDECLINE, dnsmasq-DNS-Fehler (`no servers`,
+  `query limit`, `failed to send packet`), procd-Crash-Loop, SAE/MIC/PSK-Fehler, DFS und
+  `reason=`-Codes. Kernel-, netifd- und procd-Zeilen von ap6 sind live gesehen und stehen als
+  Parser-Tests in `tests/test_net_infra_review.py`.
 
 Weiter offen und nur mit eigener Freigabe des Nutzers: Änderungen an Routern, Deploy nach
 Home Assistant, Merge nach `main`, Release.
@@ -969,7 +1040,15 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 – Dienst-PIDs als Seitenkanal `api.service_instances`; eigene Engine-Dienstliste ohne `rpcd` – `DEFAULT_SERVICES` bleibt, ACL-Deploy startet rpcd neu – entschieden, Umsetzer
 - 2026-11-16 – `lan_uplink_down` nur LLDP-beobachtet, abgeleitete Variante in P5; Speed-Drop nur an Infrastruktur-/WAN-Ports – ohne Flotten-Host-IPs keine sichere Ableitung – entschieden, Umsetzer
 - 2026-11-16 – Link-/Interface-Logzeilen nur Zähler, Events aus Poll + Log abgeleitet; neue Log-Kategorien nie als Bus-Event – keine doppelten Events, Bus-Verhalten unverändert – entschieden, Umsetzer
-- 2026-11-16 – DNS nur Hypothese ohne Incident, ARP-Konflikt Hypothese nach 2 Polls – Logtexte nicht live gesehen (A6), ARP kann veralten – entschieden, Umsetzer
+- 2026-11-16 – DNS nur Hypothese ohne Incident, ARP-Konflikt Hypothese nach 2 Polls – Logtexte nicht live gesehen (A6), ARP kann veralten – entschieden, Umsetzer (ARP-Teil ersetzt durch P3-Review K5)
+- 2026-11-16 – WAN-Regeln nur am IPv4-Gateway (Default-Route, Rolle im Store), `wan6` nie – Dumb-APs mit `wan`-Sektion und `wan6 pending` erzeugten Fehlalarme (P3-Review H1) – entschieden, Master
+- 2026-11-16 – Uhrabweichung über Logzeiten in UTC, gelernter Offset, Modulo nur als Rückfall – Modulo übersah Fehler um ganze Stunden (P3-Review M1) – entschieden, Master; Sommerzeit-Wartefall ergänzt vom Umsetzer
+- 2026-11-16 – WAN-Zustand je Interface, Wechsel als Info-Event `wan.failover` – mwan3-Failover zählte als Reconnect und IP-Wechsel (P3-Review M2) – entschieden, Master
+- 2026-11-16 – DHCPDECLINE Hypothese 0,8, bestätigt nur durch zweite MAC in ARP; ARP-Konfliktdetektor entfällt – Client-Aussage, ARP-Tabelle ist je Gerät (P3-Review M3, K5) – entschieden, Master
+- 2026-11-16 – Infrastruktur-Port nur über LLDP Bridge/Router oder Flotten-Identität – PCs/NAS mit lldpd machten Client-Ports zu Uplinks (P3-Review M4) – entschieden, Master
+- 2026-11-16 – Eigene Dienstaktionen 120 s bzw. bis zum nächsten Lesen ignoriert; LuCI-Apply nicht erkennbar – HA-Button erzeugte Neustart-Events (P3-Review M5) – entschieden, Master; Fenster für langsame Polls ergänzt vom Umsetzer
+- 2026-11-16 – Port-Flap-Regel nur an Infrastruktur-/WAN-Ports, Client-Ports nur Zähler – ein neu startender PC ist kein Netzproblem (P3-Review M6) – entschieden, Master
+- 2026-11-16 – K1 Übertrag späterer WAN-Up-Zeilen, K2 Neustart über Boot-Zeitpunkt, K3 Halte-Evidenz ohne Eskalation, K4 `dns.no_servers` Info, K6 `send_failed` ohne Ursache (`send_from()` in `src/forward.c`) – P3-Review – entschieden, Master
 
 ## Prüfprotokoll
 
@@ -977,3 +1056,4 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 `feature/network-intelligence` (P1-Review-Fixes `4e62d7b`, P2) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 1884 passed (Python 3.13, HA 2026.2.3) · CI: – (kein Push) · Hardware: nicht geprüft · Review: P1-Review umgesetzt (P1-1, P1-2, P2-1…P2-8, billige P3-Eingabeprüfungen), übrige P3-Punkte offen
 - 2026-11-16 `feature/network-intelligence` (P2-Review-Fixes M1–M4, K1–K4) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 1904 passed (Python 3.13, HA 2026.2.3); jeder M-Punkt mit einem Test, der vor dem Fix fehlschlug · CI: – (kein Push) · Hardware: nicht geprüft · Review: P2-Review vollständig umgesetzt
 - 2026-11-16 `feature/network-intelligence` (P3) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 1991 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_infra.py` (Parser, api-Felder, Detektoren je Regel, Szenarien). Der Aufrufzähler-Test erzeugt Infrastruktur-Events bei gleicher Zahl an Router-Aufrufen · CI: – (kein Push) · Hardware: nicht geprüft (Kernel-, netifd-, procd-, odhcpd- und dnsmasq-Resolver-Zeilen nicht live gesehen, A6) · Review: –
+- 2026-11-16 `feature/network-intelligence` (P3-Review-Fixes H1, M1–M6, K1–K6) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 2041 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_infra_review.py` (51 Tests), davon 37 gegen den Stand `e851ac0` rot (jeder Review-Punkt mindestens ein Fehlerfall-Test); die übrigen 14 sichern Live-Formen (lldpcli-Formen, ap6-Kernel-/netifd-/procd-Zeilen) und Gegenfälle ab. Angepasst: `tests/test_net_infra.py` (LLDP-Nachbarn mit Bridge, ARP-Test entfernt, DNS Info, DECLINE mit zweiter MAC), `tests/test_net_engine.py` (Aufrufzähler: Carrier-Verlust an `wan` als Event, an `lan1` nur gezählt; `fetched_at`; Listener mit `host`/`interval`) · CI: – (kein Push) · Hardware: nicht geprüft (Live-Report 2026-11-16 nur als Daten genutzt; DHCPDECLINE, DNS-Fehler, Crash-Loop, mwan3-Failover, Default-Route am Dumb-AP nicht live gesehen) · Review: P3-Review vollständig umgesetzt
