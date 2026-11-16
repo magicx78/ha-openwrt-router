@@ -341,6 +341,13 @@ class OpenWrtCoordinatorData:
             "last_check": None,
         }
         self.services: list[dict[str, Any]] = []
+        # For the network intelligence engine, never in as_dict: router clock
+        # from ``system info`` and the HA wall time it was read (None =
+        # unknown), and PID/running per procd instance of all services from
+        # this poll's ``service list`` (None = not fetched in this poll).
+        self.localtime: int | None = None
+        self.localtime_at: float | None = None
+        self.service_instances: dict[str, dict[str, dict[str, Any]]] | None = None
         self.ap_interfaces: list[dict[str, Any]] = []
         # STA-mode wireless interfaces (WiFi repeater / mesh backhaul).
         # Used by topology_mesh to detect wireless-uplinked routers via their
@@ -801,6 +808,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             data.load_average = status.get("load_average") or []
             data.memory = status.get("memory", {})
             data.memory_pressure = calc_memory_pressure(data.memory)
+            data.localtime = status.get("localtime")
+            data.localtime_at = status.get("localtime_at")
 
             # --- Priority 3: Extended Monitoring (optional, graceful fallback) ---
             # These are non-critical; failures don't affect core functionality
@@ -1064,6 +1073,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             if self.data and self.data.features.get(FEATURE_HAS_SERVICES, False):
                 try:
                     data.services = await self.api.get_services(names=DEFAULT_SERVICES)
+                    data.service_instances = self.api.service_instances
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.debug("Error fetching service status: %s", err)
                     data.services = self.data.services if self.data else []
@@ -1071,6 +1081,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 # First poll: try fetching services regardless (feature detection hasn't run yet)
                 try:
                     data.services = await self.api.get_services(names=DEFAULT_SERVICES)
+                    data.service_instances = self.api.service_instances
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.debug(
                         "Error fetching service status on first poll: %s", err
@@ -1934,6 +1945,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 svcs = await self.api.get_services(names=DEFAULT_SERVICES)
                 features[FEATURE_HAS_SERVICES] = len(svcs) > 0
                 data.services = svcs
+                data.service_instances = self.api.service_instances
             except Exception:  # noqa: BLE001
                 features[FEATURE_HAS_SERVICES] = False
 

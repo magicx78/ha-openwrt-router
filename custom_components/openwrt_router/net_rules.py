@@ -2,10 +2,13 @@
 
 Pure module, no Home Assistant imports. Time is never read from the clock:
 every entry point takes ``now`` (epoch seconds). Later work packages add the
-detectors, correlation and health score to this module; this part holds only
+WLAN detectors (P4), correlation (P5) and health score (P6) to this module;
+it holds
 
-* ``DEFAULT_SETTINGS`` / ``merge_settings`` (plan c7 and c8), and
-* ``AlarmMachine``: turns evidence into ``Incident`` life cycles.
+* ``DEFAULT_SETTINGS`` / ``merge_settings`` (plan c7 and c8),
+* ``AlarmMachine``: turns evidence into ``Incident`` life cycles, and
+* the infrastructure detectors (P3, system/LAN/WAN/DHCP):
+  ``detect_infrastructure`` turns one poll into ``Finding``s.
 
 Rule modes (key ``mode`` of each ``thresholds`` entry, not user-editable)::
 
@@ -31,8 +34,10 @@ from __future__ import annotations
 import copy
 import logging
 import math
+import statistics
+from collections import deque
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -40,6 +45,7 @@ from .net_events import (
     CLOCK_SKEW_LIMIT,
     MAX_EVIDENCE,
     MAX_INCIDENTS,
+    Category,
     CauseStatus,
     Incident,
     IncidentStatus,
@@ -47,6 +53,7 @@ from .net_events import (
     Origin,
     Scope,
     Severity,
+    Source,
     prune_incidents,
 )
 
@@ -142,20 +149,28 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "wifi_channel_busy": _level(70, 55, 3, 3600, "info"),
         # System
         "system_cpu_high": _level(80, 65, 3, 900),
-        "system_ram_high": _level(85, 80, 1, 0, hold=900),
+        # mirrors ram_high: RAM_PRESSURE_*_PCT, _HOLD_SECONDS, RAM_AVAILABLE_MIN_BYTES
+        "system_ram_high": _level(85, 80, 1, 0, hold=900, min_available_mb=16),
         "system_reboot": _event(0),
+        # services: the engine's own list (DEFAULT_SERVICES stays unchanged);
+        # rpcd is left out on purpose, every ACL deployment restarts it
         "system_service_restart": _window(
             1,
             3600,
             600,
             900,
             escalate={"severity": "critical", "count": 3, "window": 3600},
+            services=["dnsmasq", "odhcpd", "wpad", "hostapd", "network"],
         ),
         "system_clock_skew": _level(120, 30, 3, 3600),
-        "system_conntrack_jump": _level(3.0, 1.5, 3, 3600, "info", min_count=5000),
+        # value = count / median of the last ``window`` s (no conntrack max, F3)
+        "system_conntrack_jump": _level(
+            3.0, 1.5, 3, 3600, "info", min_count=5000, window=3600
+        ),
         # LAN
         "lan_port_flap": _window(3, 600, 1800, 3600),
-        "lan_port_speed_drop": _level(1, 1, 2, 3600),
+        # value 1 = speed below the highest of the last ``window`` s
+        "lan_port_speed_drop": _level(1, 1, 2, 3600, window=86400),
         # value = error ratio in percent
         "lan_port_errors": _level(0.1, 0.01, 1, 3600, min_packets=1000, interval=300),
         "lan_port_load": _level(90, 70, 5, 1800, "info"),
@@ -1186,3 +1201,1104 @@ def _short(entry: list[Any]) -> dict[str, Any]:
     if entry[3]:
         short["kind"] = entry[3]
     return short
+
+
+# --- infrastructure detectors (P3) --------------------------------------------------
+#
+# Deterministic functions without I/O: each reads one poll (``InfraSnapshot``)
+# and the router's previous state (``InfraState``, in memory only, owned by
+# the engine) and appends ``Finding``s. A value that is missing or broken is
+# "unknown": it produces nothing and leaves the stored state alone, so the
+# next usable poll compares with the last usable one. Counter resets
+# (delta < 0) and an uptime of 0 never produce an event.
+
+# UTC offsets are whole quarter hours between -12:00 and +14:00.
+_TZ_STEP = 900.0
+_TZ_MAX = 14 * 3600.0 + _TZ_STEP
+_CONNTRACK_MIN_SAMPLES = 10
+_SPEED_BUCKET = 3600.0
+# A port counts as an infrastructure link for this long after LLDP last
+# showed a neighbour on it (the neighbour vanishes from LLDP once the link
+# is down, but the down link is what lan_uplink_down is about).
+INFRA_PORT_MEMORY = 86400.0
+_MAX_PORTS = 64
+_ARP_CONFIDENCE = 0.7
+_DNS_CONFIDENCE = 0.5
+_MAX_NAMES = 4
+
+SERVICE_RESTART = "system.service_restart"
+SERVICE_STOPPED = "system.service_stopped"
+CRASH_LOOP_KIND = "system.service_crash_loop"
+DECLINE_KIND = "dhcp.decline"
+
+# Severity, cause, cause status and confidence of stored log event kinds that
+# differ from the P2 default (info, no cause, 1.0).
+LOG_EVENT_META: dict[str, tuple[Severity, str | None, CauseStatus | None, float]] = {
+    CRASH_LOOP_KIND: (Severity.WARNING, None, None, 1.0),
+    "system.oom_kill": (Severity.WARNING, None, None, 1.0),
+    # The client probed the address and found it taken (RFC 2131 DHCPDECLINE).
+    DECLINE_KIND: (Severity.INFO, "ip_conflict", CauseStatus.CONFIRMED, 1.0),
+    # Only the dnsmasq line, no resolution test: a hypothesis (plan b 3.22).
+    "dns.query_limit": (
+        Severity.INFO,
+        "dns_resolution",
+        CauseStatus.HYPOTHESIS,
+        _DNS_CONFIDENCE,
+    ),
+    "dns.no_servers": (
+        Severity.WARNING,
+        "dns_resolution",
+        CauseStatus.HYPOTHESIS,
+        _DNS_CONFIDENCE,
+    ),
+    "dns.send_failed": (
+        Severity.INFO,
+        "dns_resolution",
+        CauseStatus.HYPOTHESIS,
+        _DNS_CONFIDENCE,
+    ),
+}
+
+
+@dataclass(frozen=True)
+class InfraSnapshot:
+    """The facts of one poll the infrastructure detectors read.
+
+    Built by the engine from the coordinator data. ``None`` means "not
+    measured in this poll" (missing field, failed call, missing ACL right).
+    ``wan`` is only set for a router that has a WAN (``wan_found``).
+    ``log_events`` are the new log lines of this poll (never the baseline
+    of a first read), ``log_read`` tells whether the log was read at all.
+    """
+
+    uptime: float | None = None
+    cpu_load: float | None = None
+    memory_pressure: Mapping[str, Any] | None = None
+    localtime: float | None = None
+    localtime_at: float | None = None
+    conntrack: int | None = None
+    services: Mapping[str, Any] | None = None
+    ports: tuple[Mapping[str, Any], ...] | None = None
+    wan: Mapping[str, Any] | None = None
+    wan_connected: bool | None = None
+    dhcp_pools: tuple[Mapping[str, Any], ...] | None = None
+    arp: Mapping[str, Any] | None = None
+    lldp: tuple[Mapping[str, Any], ...] | None = None
+    log_events: tuple[Any, ...] = ()
+    log_read: bool = False
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One detector result.
+
+    ``event`` True: store a ``NetEvent`` of ``kind`` (an observed change).
+    ``rule`` set: feed evidence for that incident type (``value`` for level
+    rules). Neither: only count ``kind``.
+    """
+
+    kind: str
+    category: Category
+    source: Source
+    rule: str | None = None
+    scope: Scope = Scope.ROUTER
+    scope_key: str = ""
+    value: float | None = None
+    event: bool = False
+    count: int = 1
+    severity: Severity = Severity.INFO
+    origin: Origin = Origin.OBSERVED
+    confidence: float = 1.0
+    cause: str | None = None
+    cause_status: CauseStatus | None = None
+    subject: dict[str, Any] = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _PortState:
+    link: bool | None = None
+    # downs seen by the poll since the last log read (dedup with log lines)
+    poll_downs: int = 0
+    # hour bucket -> highest link speed (Mbit/s) seen in it
+    speeds: dict[int, int] = field(default_factory=dict)
+    err_base: tuple[float, int, int] | None = None  # ts, errors, packets
+    bytes_base: tuple[float, int, int] | None = None  # ts, rx, tx
+    infra_seen: float | None = None  # last LLDP neighbour on this port
+    last_seen: float | None = None
+
+
+@dataclass
+class InfraState:
+    """Per-router comparison state of the detectors (memory only)."""
+
+    uptime: float | None = None
+    services: dict[tuple[str, str], tuple[int | None, bool]] | None = None
+    # instances seen going from running to stopped (and not back yet)
+    crashed: set[tuple[str, str]] = field(default_factory=set)
+    conntrack: deque[tuple[float, int]] = field(
+        default_factory=lambda: deque(maxlen=512)
+    )
+    ports: dict[str, _PortState] = field(default_factory=dict)
+    wan_connected: bool | None = None
+    wan_uptime: float | None = None
+    wan_ip: str | None = None
+    wan_poll_reconnects: int = 0
+    arp_conflicts: frozenset[str] = frozenset()
+    arp_reported: frozenset[str] = frozenset()
+    lldp: dict[str, frozenset[tuple[str, str]]] | None = None
+    lldp_candidate: dict[str, frozenset[tuple[str, str]]] | None = None
+    lldp_since: float | None = None
+
+    def after_reboot(self) -> None:
+        """Forget what a reboot resets (PIDs, counters, the WAN session)."""
+        self.services = None
+        self.crashed.clear()
+        self.conntrack.clear()
+        for port in self.ports.values():
+            port.err_base = None
+            port.bytes_base = None
+        self.wan_connected = None
+        self.wan_uptime = None
+
+    def shift(self, delta: float) -> None:
+        """Move stored times by ``delta`` (large backward clock jump)."""
+        self.conntrack = deque(
+            ((ts + delta, n) for ts, n in self.conntrack), maxlen=512
+        )
+        for port in self.ports.values():
+            if port.err_base is not None:
+                port.err_base = (port.err_base[0] + delta, *port.err_base[1:])
+            if port.bytes_base is not None:
+                port.bytes_base = (port.bytes_base[0] + delta, *port.bytes_base[1:])
+            port.infra_seen = _shifted(port.infra_seen, delta)
+            port.last_seen = _shifted(port.last_seen, delta)
+            port.speeds = {
+                int((b * _SPEED_BUCKET + delta) // _SPEED_BUCKET): s
+                for b, s in port.speeds.items()
+            }
+        self.lldp_since = _shifted(self.lldp_since, delta)
+
+
+def port_key(router: str, port: str) -> str:
+    """``scope_key`` of a port incident."""
+    return f"{router}:port:{port}"
+
+
+def service_key(router: str, service: str) -> str:
+    """``scope_key`` of a service incident."""
+    return f"{router}:service:{service}"
+
+
+def pool_key(router: str, pool: str) -> str:
+    """``scope_key`` of a DHCP pool incident."""
+    return f"{router}:pool:{pool}"
+
+
+def detect_infrastructure(
+    state: InfraState,
+    snap: InfraSnapshot,
+    now: float,
+    router: str,
+    thresholds: Mapping[str, Any],
+    *,
+    lldp_interval: float = 600.0,
+) -> list[Finding]:
+    """Run all system, LAN, WAN and DHCP detectors for one poll of a router."""
+    out: list[Finding] = []
+    rules = _RuleSet(thresholds)
+    rebooted = detect_reboot(state, snap, router, rules.get("system_reboot"), out)
+    if rebooted:
+        state.after_reboot()
+    detect_cpu(snap, router, rules.get("system_cpu_high"), out)
+    detect_ram(snap, router, rules.get("system_ram_high"), out)
+    detect_clock_skew(snap, router, rules.get("system_clock_skew"), out)
+    detect_conntrack(state, snap, now, router, rules.get("system_conntrack_jump"), out)
+    detect_services(state, snap, router, rules.get("system_service_restart"), out)
+    detect_lldp(
+        state, snap, now, router, rules.get("lan_lldp_change"), out, lldp_interval
+    )
+    detect_ports(state, snap, now, router, rules, out)
+    detect_wan(state, snap, router, rules, out)
+    detect_dhcp(state, snap, router, rules, out)
+    return out
+
+
+class _RuleSet:
+    """Threshold lookup that never fails (missing rule -> empty dict)."""
+
+    def __init__(self, thresholds: Mapping[str, Any]) -> None:
+        self._thresholds = thresholds if isinstance(thresholds, Mapping) else {}
+
+    def get(self, name: str) -> Mapping[str, Any]:
+        rule = self._thresholds.get(name)
+        return rule if isinstance(rule, Mapping) else {}
+
+
+def _num_or_none(value: Any) -> float | None:
+    return float(value) if _is_number(value) else None
+
+
+def _rule_num(rule: Mapping[str, Any], key: str, default: float) -> float:
+    value = rule.get(key)
+    return float(value) if _is_number(value) else default
+
+
+# -- system ----------------------------------------------------------------------
+
+
+def detect_reboot(
+    state: InfraState,
+    snap: InfraSnapshot,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> bool:
+    """Uptime went down (both values > 0) -> ``system.reboot``; True if so."""
+    uptime = snap.uptime
+    if uptime is None or uptime <= 0:
+        return False  # 0 = missing (coordinator default), never a reboot
+    previous, state.uptime = state.uptime, uptime
+    if previous is None or uptime >= previous:
+        return False
+    out.append(
+        Finding(
+            kind="system.reboot",
+            category=Category.SYSTEM,
+            source=Source.POLL,
+            rule="system_reboot",
+            scope_key=router,
+            event=True,
+            severity=_severity(rule.get("severity")),
+            params={"uptime_s": int(uptime), "previous_uptime_s": int(previous)},
+        )
+    )
+    return True
+
+
+def detect_cpu(
+    snap: InfraSnapshot, router: str, rule: Mapping[str, Any], out: list[Finding]
+) -> None:
+    """CPU load per core in % (level rule ``system_cpu_high``)."""
+    if snap.cpu_load is None or snap.cpu_load < 0:
+        return
+    out.append(
+        Finding(
+            kind="system.cpu_load",
+            category=Category.SYSTEM,
+            source=Source.POLL,
+            rule="system_cpu_high",
+            scope_key=router,
+            value=round(snap.cpu_load, 1),
+        )
+    )
+
+
+def detect_ram(
+    snap: InfraSnapshot, router: str, rule: Mapping[str, Any], out: list[Finding]
+) -> None:
+    """Mirror of the ``ram_high`` Repairs issue (same pressure formula).
+
+    The value is the pressure in %; less available RAM than
+    ``min_available_mb`` counts as at least the raise level, like the
+    coordinator's "available below RAM_AVAILABLE_MIN_BYTES".
+    """
+    pressure = snap.memory_pressure
+    if not isinstance(pressure, Mapping):
+        return
+    ratio = _num_or_none(pressure.get("pressure_ratio"))
+    if ratio is None or not 0 <= ratio <= 1:
+        return
+    value = ratio * 100.0
+    available = _num_or_none(pressure.get("available_bytes"))
+    min_available = _rule_num(rule, "min_available_mb", 16.0) * 1024 * 1024
+    if available is not None and available < min_available:
+        value = max(value, _rule_num(rule, "raise", 85.0))
+    out.append(
+        Finding(
+            kind="system.memory_pressure",
+            category=Category.SYSTEM,
+            source=Source.POLL,
+            rule="system_ram_high",
+            scope_key=router,
+            value=round(value, 1),
+        )
+    )
+
+
+def clock_skew(localtime: float, read_at: float) -> float:
+    """Seconds between the router clock and HA, ignoring the UTC offset.
+
+    procd's ``localtime`` is epoch seconds plus the router's UTC offset,
+    which HA does not know. Within the range of real offsets (up to 14 h)
+    the nearest whole quarter hour is taken as that offset; only the rest
+    counts. A clock off by a whole quarter hour is therefore not seen.
+    """
+    diff = localtime - read_at
+    if abs(diff) > _TZ_MAX:
+        return abs(diff)
+    return abs(diff - round(diff / _TZ_STEP) * _TZ_STEP)
+
+
+def detect_clock_skew(
+    snap: InfraSnapshot, router: str, rule: Mapping[str, Any], out: list[Finding]
+) -> None:
+    """Router clock against HA (level rule ``system_clock_skew``)."""
+    if snap.localtime is None or snap.localtime_at is None:
+        return
+    out.append(
+        Finding(
+            kind="system.clock_skew",
+            category=Category.SYSTEM,
+            source=Source.POLL,
+            rule="system_clock_skew",
+            scope_key=router,
+            value=round(clock_skew(snap.localtime, snap.localtime_at), 1),
+        )
+    )
+
+
+def detect_conntrack(
+    state: InfraState,
+    snap: InfraSnapshot,
+    now: float,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    """Conntrack count against its median of the last ``window`` seconds.
+
+    No percentage (``nf_conntrack_max`` is not readable, F3). The value is
+    count / median above ``min_count``, else 0. It needs at least
+    ``_CONNTRACK_MIN_SAMPLES`` samples spanning half the window.
+    """
+    count = snap.conntrack
+    if count is None or count <= 0:
+        return  # 0 = not readable (api default), not "no connections"
+    window = _rule_num(rule, "window", 3600.0)
+    history = state.conntrack
+    while history and history[0][0] <= now - window:
+        history.popleft()
+    if len(history) >= _CONNTRACK_MIN_SAMPLES and now - history[0][0] >= window / 2:
+        median = statistics.median(n for _ts, n in history)
+        if median > 0:
+            min_count = _rule_num(rule, "min_count", 5000.0)
+            value = count / median if count > min_count else 0.0
+            out.append(
+                Finding(
+                    kind="system.conntrack",
+                    category=Category.SYSTEM,
+                    source=Source.POLL,
+                    rule="system_conntrack_jump",
+                    scope_key=router,
+                    value=round(value, 2),
+                    params={"count": count, "median": median},
+                )
+            )
+    history.append((now, count))
+
+
+def _service_table(
+    services: Mapping[str, Any], watched: Iterable[str]
+) -> dict[tuple[str, str], tuple[int | None, bool]]:
+    table: dict[tuple[str, str], tuple[int | None, bool]] = {}
+    for name in watched:
+        instances = services.get(name)
+        if not isinstance(instances, Mapping):
+            continue
+        for inst, info in instances.items():
+            if not isinstance(info, Mapping) or not isinstance(inst, str):
+                continue
+            pid = info.get("pid")
+            pid = pid if isinstance(pid, int) and not isinstance(pid, bool) else None
+            table[(name, inst)] = (
+                pid if pid is not None and pid > 0 else None,
+                info.get("running") is True,
+            )
+    return table
+
+
+def detect_services(
+    state: InfraState,
+    snap: InfraSnapshot,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    """Restart (PID change) or stop (running -> false) of a watched service.
+
+    The watched services are the rule's ``services`` list (the engine's own
+    list, ``DEFAULT_SERVICES`` is not involved). A service or instance that
+    disappears from ``service list`` was stopped on purpose (init script)
+    and is not reported. A service that stays stopped after a crash keeps
+    feeding evidence, so its incident does not resolve as "stable".
+    """
+    if not isinstance(snap.services, Mapping):
+        return  # not fetched in this poll: keep the last known state
+    watched = [s for s in rule.get("services") or () if isinstance(s, str)]
+    current = _service_table(snap.services, watched)
+    previous, state.services = state.services, current
+    state.crashed &= set(current)
+    if previous is None:
+        return  # first poll or right after a reboot: baseline only
+    severity = _severity(rule.get("severity"))
+    for (name, inst), (pid, running) in sorted(current.items()):
+        before = previous.get((name, inst))
+        if before is None:
+            continue  # new instance: a start, not a restart
+        old_pid, was_running = before
+        base = {
+            "category": Category.SYSTEM,
+            "source": Source.PROCD,
+            "rule": "system_service_restart",
+            "scope_key": service_key(router, name),
+            "severity": severity,
+            "subject": {"service": name, "instance": inst},
+        }
+        if running:
+            state.crashed.discard((name, inst))
+        if was_running and running and pid and old_pid and pid != old_pid:
+            out.append(Finding(kind=SERVICE_RESTART, event=True, **base))
+        elif was_running and not running:
+            state.crashed.add((name, inst))
+            out.append(Finding(kind=SERVICE_STOPPED, event=True, **base))
+        elif not running and (name, inst) in state.crashed:
+            # still down after the crash: keep the incident open
+            out.append(Finding(kind=SERVICE_STOPPED, **base))
+
+
+# -- LAN --------------------------------------------------------------------------
+
+
+def _port_state(state: InfraState, name: str) -> _PortState | None:
+    port = state.ports.get(name)
+    if port is None:
+        if len(state.ports) >= _MAX_PORTS:
+            return None
+        port = state.ports[name] = _PortState()
+    return port
+
+
+def _lldp_table(
+    neighbors: Iterable[Any],
+) -> dict[str, frozenset[tuple[str, str]]]:
+    table: dict[str, set[tuple[str, str]]] = {}
+    for item in neighbors:
+        if not isinstance(item, Mapping):
+            continue
+        port = item.get("local_interface")
+        ident = item.get("chassis_id") or item.get("chassis_name")
+        if not isinstance(port, str) or not port or not isinstance(ident, str):
+            continue
+        if not ident:
+            continue
+        remote = item.get("port_id")
+        table.setdefault(port, set()).add(
+            (ident, remote if isinstance(remote, str) else "")
+        )
+    return {port: frozenset(idents) for port, idents in table.items()}
+
+
+def detect_lldp(
+    state: InfraState,
+    snap: InfraSnapshot,
+    now: float,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+    interval: float,
+) -> None:
+    """A neighbour gone or replaced, confirmed by ``states`` LLDP states.
+
+    LLDP is read every ``interval`` seconds and served from a cache in
+    between, so a change counts once it has lasted ``states - 1`` reads
+    plus half an interval. A new neighbour on a free port is not reported.
+    Also marks every port with a neighbour as infrastructure link.
+    """
+    if snap.lldp is None:
+        return  # LLDP unavailable or failed: unknown
+    current = _lldp_table(snap.lldp)
+    for name in current:
+        port = _port_state(state, name)
+        if port is not None:
+            port.infra_seen = now
+    if state.lldp is None:
+        state.lldp = current
+        return
+    if current == state.lldp:
+        state.lldp_candidate = None
+        state.lldp_since = None
+        return
+    if state.lldp_candidate != current or state.lldp_since is None:
+        state.lldp_candidate = current
+        state.lldp_since = now
+        return
+    states = max(2, int(_rule_num(rule, "states", 2)))
+    if now - state.lldp_since < (states - 1) * interval + interval / 2:
+        return
+    severity = _severity(rule.get("severity"))
+    for name in sorted(state.lldp):
+        before = state.lldp[name]
+        after = current.get(name, frozenset())
+        if not before - after:
+            continue  # only additions
+        out.append(
+            Finding(
+                kind="lan.lldp_change",
+                category=Category.LAN,
+                source=Source.LLDP,
+                rule="lan_lldp_change",
+                scope=Scope.PORT,
+                scope_key=port_key(router, name),
+                event=True,
+                severity=severity,
+                subject={"port": name},
+                params={
+                    "change": "changed" if after else "gone",
+                    "before": sorted(i for i, _p in before)[:_MAX_NAMES],
+                    "after": sorted(i for i, _p in after)[:_MAX_NAMES],
+                },
+            )
+        )
+    state.lldp = current
+    state.lldp_candidate = None
+    state.lldp_since = None
+
+
+def _counter_value(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def detect_ports(
+    state: InfraState,
+    snap: InfraSnapshot,
+    now: float,
+    router: str,
+    rules: _RuleSet,
+    out: list[Finding],
+) -> None:
+    """Link flaps, uplink down, speed drop, error ratio and load per port."""
+    if snap.ports is None:
+        return  # port status not readable in this poll
+    for raw in snap.ports:
+        if not isinstance(raw, Mapping):
+            continue
+        name = raw.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        port = _port_state(state, name)
+        if port is None:
+            continue
+        port.last_seen = now
+        carrier, up = raw.get("carrier"), raw.get("up")
+        link = carrier if isinstance(carrier, bool) else up
+        link = link if isinstance(link, bool) else None
+        speed = raw.get("speed_mbps")
+        speed = (
+            speed
+            if isinstance(speed, int) and not isinstance(speed, bool) and speed > 0
+            else None
+        )
+        _port_flap(port, name, link, router, out)
+        _port_uplink(port, name, link, now, router, rules.get("lan_uplink_down"), out)
+        if link and speed is not None:
+            _port_speed(
+                port,
+                name,
+                speed,
+                now,
+                router,
+                rules.get("lan_port_speed_drop"),
+                out,
+            )
+        _port_errors(port, name, raw, now, router, rules.get("lan_port_errors"), out)
+        _port_load(port, name, raw, link, speed, now, router, out)
+    _log_flaps(state, snap, router, out)
+    # forget ports gone from the router for a day
+    for name in [
+        n
+        for n, p in state.ports.items()
+        if p.last_seen is not None and now - p.last_seen > INFRA_PORT_MEMORY
+    ]:
+        del state.ports[name]
+
+
+def _port_flap(
+    port: _PortState, name: str, link: bool | None, router: str, out: list[Finding]
+) -> None:
+    if link is None:
+        return
+    before, port.link = port.link, link
+    if before is True and link is False:
+        port.poll_downs += 1
+        out.append(
+            Finding(
+                kind="lan.port_down",
+                category=Category.LAN,
+                source=Source.POLL,
+                rule="lan_port_flap",
+                scope=Scope.PORT,
+                scope_key=port_key(router, name),
+                event=True,
+                subject={"port": name},
+            )
+        )
+    elif before is False and link is True:
+        out.append(
+            Finding(
+                kind="lan.port_up",
+                category=Category.LAN,
+                source=Source.POLL,
+                subject={"port": name},
+            )
+        )
+
+
+def _log_flaps(
+    state: InfraState, snap: InfraSnapshot, router: str, out: list[Finding]
+) -> None:
+    """Link-down lines the poll did not see (flaps shorter than a poll).
+
+    Kernel and netifd may both log the same down: per port the larger of
+    the two counts is taken. Downs the poll already saw since the last log
+    read are subtracted.
+    """
+    if not snap.log_read:
+        return
+    by_process: dict[str, dict[str, int]] = {}
+    for event in snap.log_events:
+        if (
+            getattr(event, "category", None) != "link"
+            or getattr(event, "kind", None) != "down"
+            or not isinstance(getattr(event, "interface", None), str)
+        ):
+            continue
+        counts = by_process.setdefault(event.interface, {})
+        process = str(getattr(event, "process", None))
+        counts[process] = counts.get(process, 0) + 1
+    for name, counts in sorted(by_process.items()):
+        port = state.ports.get(name)
+        if port is None:
+            continue  # not a port of this router (wifi, bridge, tunnel)
+        extra = max(counts.values()) - port.poll_downs
+        if extra > 0:
+            source = Source.NETIFD if "netifd" in counts else Source.LOG
+            out.append(
+                Finding(
+                    kind="lan.port_flap",
+                    category=Category.LAN,
+                    source=source,
+                    rule="lan_port_flap",
+                    scope=Scope.PORT,
+                    scope_key=port_key(router, name),
+                    event=True,
+                    count=extra,
+                    subject={"port": name},
+                )
+            )
+    for port in state.ports.values():
+        port.poll_downs = 0
+
+
+def _port_uplink(
+    port: _PortState,
+    name: str,
+    link: bool | None,
+    now: float,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    """Down state of a port LLDP showed a neighbour on (observed link)."""
+    if (
+        link is None
+        or port.infra_seen is None
+        or now - port.infra_seen > INFRA_PORT_MEMORY
+    ):
+        return
+    out.append(
+        Finding(
+            kind="lan.uplink",
+            category=Category.LAN,
+            source=Source.POLL,
+            rule="lan_uplink_down",
+            scope=Scope.PORT,
+            scope_key=port_key(router, name),
+            value=0.0 if link else 1.0,
+            subject={"port": name},
+        )
+    )
+
+
+def _port_speed(
+    port: _PortState,
+    name: str,
+    speed: int,
+    now: float,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    """Link speed below its highest value of the last ``window`` seconds.
+
+    Judged only on infrastructure links (LLDP neighbour) and WAN ports: an
+    access port changes its partner (a 100 Mbit/s printer after a laptop)
+    and would raise false alarms. The history is kept for all ports.
+    """
+    window = _rule_num(rule, "window", 86400.0)
+    bucket = int(now // _SPEED_BUCKET)
+    oldest = bucket - max(1, int(window // _SPEED_BUCKET)) + 1
+    port.speeds = {b: s for b, s in port.speeds.items() if oldest <= b <= bucket}
+    port.speeds[bucket] = max(speed, port.speeds.get(bucket, 0))
+    infra = port.infra_seen is not None and now - port.infra_seen <= INFRA_PORT_MEMORY
+    if not infra and not name.startswith("wan"):
+        return
+    highest = max(port.speeds.values())
+    out.append(
+        Finding(
+            kind="lan.port_speed",
+            category=Category.LAN,
+            source=Source.POLL,
+            rule="lan_port_speed_drop",
+            scope=Scope.PORT,
+            scope_key=port_key(router, name),
+            value=1.0 if speed < highest else 0.0,
+            subject={"port": name},
+            params={"speed_mbps": speed, "max_mbps": highest},
+        )
+    )
+
+
+def _port_errors(
+    port: _PortState,
+    name: str,
+    raw: Mapping[str, Any],
+    now: float,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    """RX+TX errors per packet in % over at least ``interval`` seconds."""
+    values = [
+        _counter_value(raw.get(key))
+        for key in ("rx_errors", "tx_errors", "rx_packets", "tx_packets")
+    ]
+    if any(v is None for v in values):
+        port.err_base = None  # counters not sent (older firmware, ACL)
+        return
+    rx_err, tx_err, rx_pkt, tx_pkt = values  # type: ignore[misc]
+    errors, packets = rx_err + tx_err, rx_pkt + tx_pkt
+    base = port.err_base
+    if base is None:
+        port.err_base = (now, errors, packets)
+        return
+    elapsed, d_err, d_pkt = now - base[0], errors - base[1], packets - base[2]
+    if d_err < 0 or d_pkt < 0 or elapsed < 0:
+        port.err_base = (now, errors, packets)  # counter reset: no event
+        return
+    interval = _rule_num(rule, "interval", 300.0)
+    if elapsed < interval:
+        return
+    if d_pkt >= _rule_num(rule, "min_packets", 1000.0):
+        port.err_base = (now, errors, packets)
+        out.append(
+            Finding(
+                kind="lan.port_errors",
+                category=Category.LAN,
+                source=Source.POLL,
+                rule="lan_port_errors",
+                scope=Scope.PORT,
+                scope_key=port_key(router, name),
+                value=round(d_err / d_pkt * 100.0, 4),
+                subject={"port": name},
+                params={"errors": d_err, "packets": d_pkt},
+            )
+        )
+    elif elapsed >= 4 * interval:
+        port.err_base = (now, errors, packets)  # too little traffic: start over
+
+
+def _port_load(
+    port: _PortState,
+    name: str,
+    raw: Mapping[str, Any],
+    link: bool | None,
+    speed: int | None,
+    now: float,
+    router: str,
+    out: list[Finding],
+) -> None:
+    """Busier direction in % of the link speed since the previous poll."""
+    rx, tx = _counter_value(raw.get("rx_bytes")), _counter_value(raw.get("tx_bytes"))
+    base, port.bytes_base = port.bytes_base, None
+    if rx is None or tx is None:
+        return
+    port.bytes_base = (now, rx, tx)
+    if base is None or not link or speed is None:
+        return
+    elapsed, d_rx, d_tx = now - base[0], rx - base[1], tx - base[2]
+    if elapsed <= 0 or d_rx < 0 or d_tx < 0:
+        return  # counter reset: no value
+    load = max(d_rx, d_tx) * 8 / elapsed / (speed * 1_000_000) * 100.0
+    out.append(
+        Finding(
+            kind="lan.port_load",
+            category=Category.LAN,
+            source=Source.POLL,
+            rule="lan_port_load",
+            scope=Scope.PORT,
+            scope_key=port_key(router, name),
+            value=round(load, 1),
+            subject={"port": name},
+        )
+    )
+
+
+# -- WAN --------------------------------------------------------------------------
+
+
+def detect_wan(
+    state: InfraState,
+    snap: InfraSnapshot,
+    router: str,
+    rules: _RuleSet,
+    out: list[Finding],
+) -> None:
+    """WAN down, reconnects and a new WAN IPv4 (gateway only).
+
+    A reconnect is a down -> up between two polls, a WAN uptime that went
+    down while connected in both, or an "Interface '<wan>' is now up" log
+    line beyond those the poll saw since the last log read.
+    """
+    wan, connected = snap.wan, snap.wan_connected
+    if not isinstance(wan, Mapping) or connected is None:
+        return
+    down_rule = rules.get("wan_down")
+    out.append(
+        Finding(
+            kind="wan.status",
+            category=Category.WAN,
+            source=Source.NETIFD,
+            rule="wan_down",
+            scope_key=router,
+            value=0.0 if connected else 1.0,
+        )
+    )
+    uptime = _num_or_none(wan.get("uptime"))
+    uptime = uptime if uptime is not None and uptime > 0 else None
+    before, last_uptime = state.wan_connected, state.wan_uptime
+    if before is True and not connected:
+        out.append(
+            Finding(
+                kind="wan.down",
+                category=Category.WAN,
+                source=Source.NETIFD,
+                scope_key=router,
+                event=True,
+                severity=_severity(down_rule.get("severity")),
+            )
+        )
+    elif before is False and connected:
+        state.wan_poll_reconnects += 1
+        out.append(_wan_reconnect("wan.up", router, Source.NETIFD, 1))
+    elif (
+        before is True
+        and connected
+        and uptime is not None
+        and last_uptime is not None
+        and uptime < last_uptime
+    ):
+        state.wan_poll_reconnects += 1
+        out.append(_wan_reconnect("wan.reconnect", router, Source.NETIFD, 1))
+    state.wan_connected = connected
+    state.wan_uptime = uptime if connected else None
+    _wan_log_reconnects(state, snap, wan, router, out)
+    _wan_ip(state, wan, connected, router, rules.get("wan_ip_changed"), out)
+
+
+def _wan_reconnect(kind: str, router: str, source: Source, count: int) -> Finding:
+    return Finding(
+        kind=kind,
+        category=Category.WAN,
+        source=source,
+        rule="wan_unstable",
+        scope_key=router,
+        event=True,
+        count=count,
+    )
+
+
+def _wan_log_reconnects(
+    state: InfraState,
+    snap: InfraSnapshot,
+    wan: Mapping[str, Any],
+    router: str,
+    out: list[Finding],
+) -> None:
+    if not snap.log_read:
+        return
+    iface = wan.get("interface")
+    ups = (
+        sum(
+            1
+            for e in snap.log_events
+            if getattr(e, "category", None) == "iface"
+            and getattr(e, "kind", None) == "up"
+            and getattr(e, "interface", None) == iface
+        )
+        if isinstance(iface, str) and iface
+        else 0
+    )
+    extra = ups - state.wan_poll_reconnects
+    state.wan_poll_reconnects = 0
+    if extra > 0:
+        out.append(_wan_reconnect("wan.reconnect", router, Source.NETIFD, extra))
+
+
+def _wan_ip(
+    state: InfraState,
+    wan: Mapping[str, Any],
+    connected: bool,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    ip = wan.get("ipv4")
+    if not connected or not isinstance(ip, str) or not ip:
+        return  # no address while down: keep the last one
+    before, state.wan_ip = state.wan_ip, ip
+    if before is None or before == ip:
+        return
+    out.append(
+        Finding(
+            kind="wan.ip_changed",
+            category=Category.WAN,
+            source=Source.NETIFD,
+            rule="wan_ip_changed",
+            scope_key=router,
+            event=True,
+            severity=_severity(rule.get("severity")),
+            subject={"ip": ip},
+            params={"previous": before},
+        )
+    )
+
+
+# -- DHCP -------------------------------------------------------------------------
+
+
+def detect_dhcp(
+    state: InfraState,
+    snap: InfraSnapshot,
+    router: str,
+    rules: _RuleSet,
+    out: list[Finding],
+) -> None:
+    """Pool usage (level) and one IPv4 with several MACs in the ARP table."""
+    for pool in snap.dhcp_pools or ():
+        if not isinstance(pool, Mapping):
+            continue
+        name, usage = pool.get("name"), _num_or_none(pool.get("usage_pct"))
+        if not isinstance(name, str) or not name or usage is None:
+            continue
+        subject = {"pool": name}
+        if isinstance(pool.get("interface"), str):
+            subject["iface"] = pool["interface"]
+        out.append(
+            Finding(
+                kind="dhcp.pool_usage",
+                category=Category.DHCP,
+                source=Source.POLL,
+                rule="dhcp_pool_full",
+                scope=Scope.SEGMENT,
+                scope_key=pool_key(router, name),
+                value=usage,
+                subject=subject,
+            )
+        )
+    _arp_conflicts(state, snap, router, rules.get("dhcp_conflict"), out)
+
+
+def _arp_conflicts(
+    state: InfraState,
+    snap: InfraSnapshot,
+    router: str,
+    rule: Mapping[str, Any],
+    out: list[Finding],
+) -> None:
+    """An IPv4 held by two MACs in two polls in a row (hypothesis).
+
+    Also a device that switched from cable to Wi-Fi with a fixed address
+    looks like this until its old ARP entry expires; hence two polls,
+    confidence 0.7 and the cause only as hypothesis.
+    """
+    if not isinstance(snap.arp, Mapping):
+        return
+    macs_by_ip: dict[str, set[str]] = {}
+    for mac, ip in snap.arp.items():
+        if isinstance(mac, str) and isinstance(ip, str) and ip:
+            macs_by_ip.setdefault(ip, set()).add(mac.upper())
+    conflicts = frozenset(ip for ip, macs in macs_by_ip.items() if len(macs) > 1)
+    confirmed = conflicts & state.arp_conflicts
+    reported = state.arp_reported
+    state.arp_conflicts, state.arp_reported = conflicts, confirmed
+    for ip in sorted(confirmed):
+        out.append(
+            Finding(
+                kind="dhcp.ip_conflict",
+                category=Category.DHCP,
+                source=Source.POLL,
+                rule="dhcp_conflict",
+                scope_key=router,
+                event=ip not in reported,
+                severity=_severity(rule.get("severity")),
+                confidence=_ARP_CONFIDENCE,
+                cause="ip_conflict",
+                cause_status=CauseStatus.HYPOTHESIS,
+                subject={"ip": ip},
+                params={"macs": len(macs_by_ip[ip])},
+            )
+        )
+
+
+def finding_evidence(
+    finding: Finding, router: str, event: NetEvent | None = None
+) -> Evidence | None:
+    """Evidence for the alarm machine, or None for a finding without rule."""
+    if not finding.rule:
+        return None
+    if event is not None:
+        return Evidence.from_event(
+            event, finding.rule, finding.scope, finding.scope_key, finding.value
+        )
+    return Evidence(
+        type=finding.rule,
+        scope_key=finding.scope_key,
+        scope=finding.scope,
+        kind=finding.kind,
+        value=finding.value,
+        count=finding.count,
+        router=router,
+        confidence=finding.confidence,
+        origin=finding.origin,
+        cause=finding.cause,
+        cause_status=finding.cause_status,
+    )
+
+
+def log_event_evidence(event: NetEvent) -> Evidence | None:
+    """Evidence from a stored log event (DHCPDECLINE, procd crash loop)."""
+    if event.kind == DECLINE_KIND:
+        return Evidence.from_event(event, "dhcp_conflict", Scope.ROUTER, event.router)
+    if event.kind == CRASH_LOOP_KIND:
+        service = event.subject.get("service")
+        if isinstance(service, str) and service:
+            return Evidence.from_event(
+                event,
+                "system_service_restart",
+                Scope.ROUTER,
+                service_key(event.router, service),
+            )
+    return None

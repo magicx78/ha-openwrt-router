@@ -12,10 +12,10 @@ belegt), **Annahme** (plausibel, aber noch nicht belegt; Prüfweg steht dabei), 
 
 - **Stand:** 2026-11-16 · **Phase:** freigegeben (Nutzer, 2026-11-16), in Umsetzung
 - **Branch/PR:** `feature/network-intelligence` · Worktree `../ha-openwrt-router-net-intel` · PR #— · Basis: v1.39.0 (`main@f8a2ac7`)
-- **Erledigt:** Live-Checks, P1, P2 · **In Arbeit:** – · **Offen:** P3–P8
-- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 im Commit `fix(intel): harden engine store and clock (P2 review)`
+- **Erledigt:** Live-Checks, P1, P2, P3 · **In Arbeit:** – · **Offen:** P4–P8
+- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 im Commit `feat(intel): add infrastructure detectors (P3)`
 - **Blocker:** keine
-- **Nächster Schritt:** P1, P2 erledigt; nächster Schritt P3 (setzt die Live-Checks L1/L4/L5/L6/L8 voraus).
+- **Nächster Schritt:** P3 erledigt; nächster Schritt P4.
 
 ### Entscheidungen (2026-11-16)
 
@@ -81,6 +81,58 @@ Entschieden bei der Umsetzung von P1-Review und P2 (Coordinator bzw. Umsetzer, 2
   erst nach der Marke, entsteht ein Info-Event `system.log_gap`. Ohne Marke wird keine
   Vorgeschichte übernommen.
 - Der Engine-Listener wird vor dem Kanalplan-Listener registriert.
+
+P3 (Infrastruktur-Detektoren, Umsetzer):
+
+- Neue Felder nur aus vorhandenen Antworten:
+  - `get_port_stats` behält `carrier` und die Fehlerzähler (rx/tx_errors, rx/tx_dropped,
+    collisions, rx_crc_errors); fehlt ein Zähler oder ist er kaputt, ist er `None`, nie 0.
+  - `get_services` legt die PIDs aller Instanzen aller Dienste in `api.service_instances` ab
+    (Seitenkanal). Die Schalterliste und `DEFAULT_SERVICES` bleiben unverändert; beim
+    rc-Fallback ist das Feld `None`.
+  - `get_router_status` behält `localtime` und die HA-Zeit beim Eintreffen der Antwort
+    (`localtime_at`).
+  - `coordinator.py` trägt `localtime`, `localtime_at` und `service_instances` weiter. Das
+    steht nicht in der Dateiliste von P3, ist aber für die Übergabe nötig; die Felder stehen
+    nicht in `as_dict()`.
+- Detektoren in `net_rules.py` (`detect_infrastructure` → `Finding`), Zustand `InfraState` je
+  Router nur im Speicher. Er wird bei register/unregister/close neu angelegt und bei einem
+  großen Uhren-Rücksprung mitverschoben.
+- Die Engine hat eine eigene Dienstliste (`dnsmasq`, `odhcpd`, `wpad`, `hostapd`, `network`).
+  `rpcd` fehlt bewusst, weil jedes ACL-Deployment ihn neu startet.
+- Ein Dienst, dessen Instanz verschwindet (gezielt gestoppt), wird nicht gemeldet. Ein
+  abgestürzter Dienst (`running` false) hält den Incident offen, bis er wieder läuft.
+- Uhrabweichung: `localtime` ist Epoch plus UTC-Offset. Gemessen wird der Rest modulo 900 s
+  innerhalb ±14 h 15 min, sonst die absolute Differenz.
+- Neustart streng nach c7: nur gesunkene Uptime bei beiden Werten > 0. Ein Neustart während
+  einer HA-Pause oder ein langer Ausfall mit kleiner Uptime kann fehlen. Nach einem Neustart
+  beginnen alle Basiswerte neu (keine Folge-Events aus Zähler- oder PID-Sprüngen).
+- `lan_uplink_down` nur beobachtet: ein Port gilt 24 h nach dem letzten LLDP-Nachbarn als
+  Infrastruktur-Port. Die abgeleitete Variante braucht die Host-IPs der Flotte
+  (`trunk_port_map` enthält alle Hosts) und folgt in P5.
+- `lan_port_speed_drop` nur an Infrastruktur- und `wan*`-Ports; an Client-Ports wechselt die
+  Geschwindigkeit mit dem Endgerät.
+- Port-Flap = Link down. Die Log-Zeilen zählen zusätzlich nur das, was der Poll verpasst hat
+  (Maximum je schreibendem Prozess minus Downs aus dem Poll). In einem kurzen Wettlauf kann
+  ein Down doppelt zählen.
+- Link-/Interface-Logzeilen sind nur Zähler (`COUNT_ONLY_KINDS`). Gespeichert werden die
+  daraus abgeleiteten Events. odhcpd-Fehler sind ebenfalls nur Zähler.
+- Neue Log-Kategorien (link, iface, system, dns) werden nie zu HA-Bus-Events
+  (`FIRE_CATEGORIES`).
+- `system`- und `dns`-Zeilen werden je Abruf zu einem Event mit `count` zusammengefasst.
+- RAM spiegelt `ram_high` mit ≥ statt > und zählt weniger als 16 MB verfügbar als hoch.
+- Pool-Auslastung gilt ohne Lease-Liste als unbekannt (0 % wäre geraten).
+- ARP-Konflikt (eine IP, ≥ 2 MACs) erst nach 2 Polls, als Hypothese mit Konfidenz 0,7.
+  `DHCPDECLINE` ist bestätigt.
+- DNS-Zeilen sind nur eine Hypothese (`dns_resolution`, 0,5) ohne eigene Regel und ohne
+  Incident.
+- Eine procd-Crash-Loop-Zeile plus ein PID-Wechsel im selben Zeitraum können doppelt zählen.
+- Nicht gebaut:
+  - IPv6-Präfixwechsel bei `wan_ip_changed` (A7 offen);
+  - Backhaul-down (sta) bei `lan_uplink_down`, folgt mit P4/P5;
+  - `system_reboot` als info im Wartungsmodus (Wartungsmodus kommt später);
+  - Schleifen, Paketverlust, IPv6-RA, MAC-Wechsel (3.16) und VLAN (3.18), weil sie nicht im
+    P3-Auftrag stehen.
 
 Weiter offen und nur mit eigener Freigabe des Nutzers: Änderungen an Routern, Deploy nach
 Home Assistant, Merge nach `main`, Release.
@@ -914,9 +966,14 @@ ohne MAC/IP/Hostname hier eintragen.
 - 2026-11-16 – Sprungerkennung über `time.monotonic()`, Halt höchstens einen Schritt – langsame Polls hielten das Löschen dauerhaft an (P2-Review M1) – entschieden, Umsetzer (bevorzugte Variante des Reviews)
 - 2026-11-16 – Bei `load_failed` einmal `<store>.bak` vor dem ersten Schreiben, im Executor – sonst überschreibt der erste Save die Historie (P2-Review M4) – entschieden, Master
 - 2026-11-16 – Events kompakt speichern, 3000 Events / 1,5 MB bleiben – 681 → 360 B je Event (P2-Review K1) – entschieden, Master
+- 2026-11-16 – Dienst-PIDs als Seitenkanal `api.service_instances`; eigene Engine-Dienstliste ohne `rpcd` – `DEFAULT_SERVICES` bleibt, ACL-Deploy startet rpcd neu – entschieden, Umsetzer
+- 2026-11-16 – `lan_uplink_down` nur LLDP-beobachtet, abgeleitete Variante in P5; Speed-Drop nur an Infrastruktur-/WAN-Ports – ohne Flotten-Host-IPs keine sichere Ableitung – entschieden, Umsetzer
+- 2026-11-16 – Link-/Interface-Logzeilen nur Zähler, Events aus Poll + Log abgeleitet; neue Log-Kategorien nie als Bus-Event – keine doppelten Events, Bus-Verhalten unverändert – entschieden, Umsetzer
+- 2026-11-16 – DNS nur Hypothese ohne Incident, ARP-Konflikt Hypothese nach 2 Polls – Logtexte nicht live gesehen (A6), ARP kann veralten – entschieden, Umsetzer
 
 ## Prüfprotokoll
 
 - 2026-11-16 `main@f8a2ac7` – nur gelesen, kein Code geändert · lokal: – · CI: – · Hardware: nicht geprüft (L0–L12 offen) · Review: –
 - 2026-11-16 `feature/network-intelligence` (P1-Review-Fixes `4e62d7b`, P2) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 1884 passed (Python 3.13, HA 2026.2.3) · CI: – (kein Push) · Hardware: nicht geprüft · Review: P1-Review umgesetzt (P1-1, P1-2, P2-1…P2-8, billige P3-Eingabeprüfungen), übrige P3-Punkte offen
 - 2026-11-16 `feature/network-intelligence` (P2-Review-Fixes M1–M4, K1–K4) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 1904 passed (Python 3.13, HA 2026.2.3); jeder M-Punkt mit einem Test, der vor dem Fix fehlschlug · CI: – (kein Push) · Hardware: nicht geprüft · Review: P2-Review vollständig umgesetzt
+- 2026-11-16 `feature/network-intelligence` (P3) – lokal: `ruff check` + `ruff format --check` (0.17.3) auf `custom_components/` und `tests/test_net_*.py` grün; `pytest tests/` 1991 passed (Python 3.13, HA 2026.2.3); neu `tests/test_net_infra.py` (Parser, api-Felder, Detektoren je Regel, Szenarien). Der Aufrufzähler-Test erzeugt Infrastruktur-Events bei gleicher Zahl an Router-Aufrufen · CI: – (kein Push) · Hardware: nicht geprüft (Kernel-, netifd-, procd-, odhcpd- und dnsmasq-Resolver-Zeilen nicht live gesehen, A6) · Review: –

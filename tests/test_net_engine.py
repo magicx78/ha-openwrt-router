@@ -895,11 +895,39 @@ async def test_engine_adds_no_router_calls() -> None:
         [_log_line(i, _CROND) for i in range(1, 6)],
     ]
 
+    # P3: the same replies also carry what the infrastructure detectors read
+    # (localtime/uptime, service PIDs, carrier and error counters). Poll 2
+    # restarts dnsmasq, poll 3 drops the lan1 carrier, poll 4 is a reboot.
+    uptimes = [86_400, 86_460, 86_520, 86_580, 30, 90]
+    pids = [100, 100, 222, 222, 7, 7]
+
     async def run(with_engine: bool) -> tuple[int, NetIntelligence | None]:
         queue = list(answers)
+        poll = {"n": 0}
 
         def log_read(_params: dict[str, Any]) -> Any:
             return {"log": queue.pop(0) if queue else []}
+
+        def system_info(_params: dict[str, Any]) -> Any:
+            n = poll["n"]
+            return {
+                **model._SYSTEM_INFO,
+                "uptime": uptimes[n],
+                "localtime": 1_763_283_600 + n * 60,
+            }
+
+        def service_list(_params: dict[str, Any]) -> Any:
+            instance = {"running": True, "pid": pids[poll["n"]]}
+            return {"dnsmasq": {"instances": {"cfg01411c": instance}}}
+
+        def device_status(params: dict[str, Any]) -> Any:
+            devices = copy.deepcopy(model._DEVICES)
+            for dev in devices.values():
+                dev["carrier"] = True
+                dev["statistics"].update(rx_errors=0, tx_errors=0)
+            devices["lan1"]["carrier"] = poll["n"] != 3
+            name = params.get("name")
+            return devices if name is None else devices.get(name)
 
         session = model._ubus_session()
         api = OpenWrtAPI(
@@ -924,7 +952,15 @@ async def test_engine_adds_no_router_calls() -> None:
             engine.register("r1")
         model._MODE["empty_tables"] = False
         with (
-            patch.dict(model.RESPONSES, {("log", "read"): log_read}),
+            patch.dict(
+                model.RESPONSES,
+                {
+                    ("log", "read"): log_read,
+                    ("system", "info"): system_info,
+                    ("service", "list"): service_list,
+                    ("network.device", "status"): device_status,
+                },
+            ),
             patch(
                 "custom_components.openwrt_router.api.asyncssh.connect",
                 AsyncMock(side_effect=AssertionError("SSH must not be used")),
@@ -932,6 +968,7 @@ async def test_engine_adds_no_router_calls() -> None:
             patch("asyncio.open_connection", side_effect=OSError("no net")),
         ):
             for n in range(6):
+                poll["n"] = n
                 coordinator.data = await coordinator._async_update_data()
                 if engine is not None:
                     engine.async_ingest_coordinator("r1", coordinator)
@@ -941,8 +978,14 @@ async def test_engine_adds_no_router_calls() -> None:
     calls_with, engine = await run(True)
     assert calls_with == calls_without > 0
     assert engine is not None
-    kinds = [e.kind for e in engine.ring]
-    assert kinds == ["wifi.psk_mismatch", "wifi.inactivity_timeout"]
+    kinds = sorted(e.kind for e in engine.ring)
+    assert kinds == [
+        "lan.port_down",
+        "system.reboot",
+        "system.service_restart",
+        "wifi.inactivity_timeout",
+        "wifi.psk_mismatch",
+    ]
 
 
 def test_machine_remove_router_keeps_incidents_shared_with_other_routers() -> None:

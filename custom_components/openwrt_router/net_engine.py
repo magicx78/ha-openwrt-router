@@ -8,10 +8,14 @@ poll (``OpenWrtCoordinatorData.new_log_events`` with the cursor facts in
 together with the full alarm machine state, in one ``Store`` file for the
 whole fleet.
 
-Scope of this module (plan 2026-11-16, P2): collecting and persisting. The
-detectors (P3/P4), correlation (P5), score, entities and bus events (P6)
-build on it. The engine never talks to a router: it only reads data the
-coordinator already has, so a poll costs exactly the same router calls.
+Scope of this module (plan 2026-11-16, P2/P3): collecting and persisting,
+and running the infrastructure detectors (``net_rules.detect_infrastructure``)
+on every poll; their findings become events and evidence for the alarm
+machine. The WLAN detectors (P4), correlation (P5), score, entities and bus
+events (P6) build on it. The engine never talks to a router: it only reads
+data the coordinator already has, so a poll costs exactly the same router
+calls. The detectors' comparison state per router lives in memory only; a
+reload or HA restart starts it fresh (first poll = baseline, no events).
 
 Life cycle:
 - ``async_get_net_intelligence`` creates the singleton on the first setup
@@ -69,11 +73,18 @@ from .const import (
     INTEL_STORE_KEY,
     INTEL_STORE_MINOR_VERSION,
     INTEL_STORE_VERSION,
+    LLDP_REFRESH_INTERVAL,
+    LLDP_STATUS_NO_NEIGHBORS,
+    LLDP_STATUS_OK,
 )
 from .coordinator import LogBatch
 from .log_parser import (
     CATEGORY_DFS,
     CATEGORY_DHCP,
+    CATEGORY_DNS,
+    CATEGORY_IFACE,
+    CATEGORY_LINK,
+    CATEGORY_SYSTEM,
     CATEGORY_WIFI,
     COUNT_ONLY_KINDS,
     LogEvent,
@@ -89,7 +100,18 @@ from .net_events import (
     Severity,
     Source,
 )
-from .net_rules import AlarmMachine, merge_settings
+from .net_rules import (
+    LOG_EVENT_META,
+    AlarmMachine,
+    Evidence,
+    Finding,
+    InfraSnapshot,
+    InfraState,
+    detect_infrastructure,
+    finding_evidence,
+    log_event_evidence,
+    merge_settings,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -106,7 +128,15 @@ _CATEGORY_MAP: dict[str, Category] = {
     CATEGORY_WIFI: Category.WIFI,
     CATEGORY_DHCP: Category.DHCP,
     CATEGORY_DFS: Category.WIFI,
+    CATEGORY_LINK: Category.LAN,
+    CATEGORY_IFACE: Category.LAN,
+    CATEGORY_SYSTEM: Category.SYSTEM,
+    CATEGORY_DNS: Category.DNS,
 }
+# Log categories stored as one event per (kind, name) and fetch, with the
+# number of lines in ``count``: a crash loop or a dead resolver repeats.
+_AGGREGATED_CATEGORIES = frozenset({CATEGORY_SYSTEM, CATEGORY_DNS})
+_PROCESS_SOURCE = {"netifd": Source.NETIFD, "procd": Source.PROCD}
 
 
 @callback
@@ -225,6 +255,8 @@ class NetIntelligence:
         # object seen per router (a failed poll re-sends the old one).
         self._routers: set[str] = set()
         self._last_data: dict[str, Any] = {}
+        # Comparison state of the infrastructure detectors per router.
+        self._infra: dict[str, InfraState] = {}
         self._last_prune: float | None = None
         # True while a delayed write is scheduled: HA's async_delay_save
         # moves a pending write back on every call, so we call it once.
@@ -323,6 +355,7 @@ class NetIntelligence:
         self._routers.add(entry_id)
         # A reload starts from a clean comparison state (no false alarms).
         self._last_data.pop(entry_id, None)
+        self._infra.pop(entry_id, None)
 
     @callback
     def close(self) -> None:
@@ -330,12 +363,14 @@ class NetIntelligence:
         self._closed = True
         self._routers.clear()
         self._last_data.clear()
+        self._infra.clear()
 
     @callback
     def unregister(self, entry_id: str) -> None:
         """A router's entry is unloaded; its stored data stays."""
         self._routers.discard(entry_id)
         self._last_data.pop(entry_id, None)
+        self._infra.pop(entry_id, None)
 
     def remove_router(self, entry_id: str) -> bool:
         """Forget all data of a router; True if anything was removed."""
@@ -392,6 +427,8 @@ class NetIntelligence:
         step = self.machine.sync_clock(now, mono)
         if step.shift:
             self.ring.shift(step.shift)
+            for state in self._infra.values():
+                state.shift(step.shift)
         now = step.now
         log_events = getattr(data, "new_log_events", ())
         if not isinstance(log_events, (tuple, list)):
@@ -400,8 +437,20 @@ class NetIntelligence:
         if not isinstance(batch, LogBatch):
             batch = None
         mark_before = self._log_marks.get(entry_id)
-        stored = self._ingest_log(entry_id, log_events, batch, now)
-        self.machine.update(now)
+        stored, log_stored, accepted = self._ingest_log(
+            entry_id, log_events, batch, now
+        )
+        fresh = batch is not None and not batch.baseline
+        evidence: list[Evidence] = []
+        if fresh:
+            evidence.extend(
+                item
+                for event in log_stored
+                if (item := log_event_evidence(event)) is not None
+            )
+        snapshot = infra_snapshot(data, tuple(accepted) if fresh else (), fresh)
+        stored += self._ingest_findings(entry_id, snapshot, now, evidence)
+        self.machine.update(now, evidence)
         self._prune(now)
         if stored or self._log_marks.get(entry_id) != mark_before:
             self.schedule_save()
@@ -413,33 +462,118 @@ class NetIntelligence:
         events: Iterable[Any],
         batch: LogBatch | None,
         now: float,
-    ) -> int:
+    ) -> tuple[int, list[NetEvent], list[LogEvent]]:
+        """Count and store the log events of one poll.
+
+        Returns the number of stored events (a log gap included), the
+        stored log events, and the log events taken in (for the detectors).
+        """
         stored = 0
         baseline = batch is not None and batch.baseline
         if batch is not None and baseline:
             events, stored = self._gap_events(entry_id, events, batch, now)
+        accepted: list[LogEvent] = []
+        kept: list[NetEvent] = []
+        groups: dict[tuple[str, str | None], list[tuple[LogEvent, float]]] = {}
         for event in events:
             if not isinstance(event, LogEvent):
                 continue
             category = _CATEGORY_MAP.get(event.category)
             if category is None:
                 continue
+            accepted.append(event)
             src_ts = event.time_ms / 1000 if event.time_ms > 0 else None
             # Gap lines happened before this poll: keep their router time.
             ts = src_ts if baseline and src_ts is not None and src_ts <= now else now
             self.counters.add(entry_id, event.key, ts)
             if (event.category, event.kind) in COUNT_ONLY_KINDS:
                 continue
-            self.ring.add(
+            if event.category in _AGGREGATED_CATEGORIES:
+                groups.setdefault((event.key, event.name), []).append((event, ts))
+                continue
+            kept.append(
                 self._net_event(entry_id, category, event, ts, src_ts, now, baseline)
             )
-            stored += 1
+        for group in groups.values():
+            event, ts = group[0]
+            src_ts = event.time_ms / 1000 if event.time_ms > 0 else None
+            kept.append(
+                self._net_event(
+                    entry_id,
+                    _CATEGORY_MAP[event.category],
+                    event,
+                    ts,
+                    src_ts,
+                    now,
+                    baseline,
+                    count=len(group),
+                )
+            )
+        for net_event in kept:
+            self.ring.add(net_event)
+        stored += len(kept)
         if batch is not None and batch.last_id is not None:
             mark = {"last_id": batch.last_id}
             if batch.last_time_ms is not None:
                 mark["last_time_ms"] = batch.last_time_ms
             self._log_marks[entry_id] = mark
+        return stored, kept, accepted
+
+    def _ingest_findings(
+        self,
+        entry_id: str,
+        snapshot: InfraSnapshot,
+        now: float,
+        evidence: list[Evidence],
+    ) -> int:
+        """Run the infrastructure detectors; return the number of stored events.
+
+        Findings marked ``event`` are stored and counted, findings with a
+        rule become evidence (appended to ``evidence``), the rest is only
+        counted.
+        """
+        state = self._infra.setdefault(entry_id, InfraState())
+        findings = detect_infrastructure(
+            state,
+            snapshot,
+            now,
+            entry_id,
+            self.settings["thresholds"],
+            lldp_interval=LLDP_REFRESH_INTERVAL,
+        )
+        stored = 0
+        for finding in findings:
+            event: NetEvent | None = None
+            if finding.event:
+                event = self._finding_event(entry_id, finding, now)
+                self.ring.add(event)
+                stored += 1
+            if finding.event or not finding.rule:
+                self.counters.add(entry_id, finding.kind, now, finding.count)
+            item = finding_evidence(finding, entry_id, event)
+            if item is not None:
+                evidence.append(item)
         return stored
+
+    def _finding_event(self, entry_id: str, finding: Finding, now: float) -> NetEvent:
+        self._seq += 1
+        return NetEvent(
+            id=f"{entry_id}:{self._seq}",
+            ts=now,
+            router=entry_id,
+            category=finding.category,
+            kind=finding.kind,
+            origin=finding.origin,
+            source=finding.source,
+            subject=dict(finding.subject),
+            count=finding.count,
+            severity=finding.severity,
+            cause=finding.cause,
+            cause_status=finding.cause_status,
+            confidence=finding.confidence,
+            msg_key=finding.kind,
+            params=dict(finding.params),
+        )
 
     def _gap_events(
         self,
@@ -491,6 +625,7 @@ class NetIntelligence:
         src_ts: float | None,
         now: float,
         in_gap: bool = False,
+        count: int = 1,
     ) -> NetEvent:
         self._seq += 1
         # A gap line (read after a restart) is old by nature and newer than
@@ -507,9 +642,13 @@ class NetIntelligence:
                 ("mac", event.mac),
                 ("iface", event.interface),
                 ("ip", event.ip),
+                (_NAME_KEY.get(event.key, "name"), event.name),
             )
             if value
         }
+        severity, cause, cause_status, confidence = LOG_EVENT_META.get(
+            event.key, (Severity.INFO, None, None, 1.0)
+        )
         params = {
             key: value
             for key, value in (
@@ -525,9 +664,13 @@ class NetIntelligence:
             category=category,
             kind=event.key,
             origin=Origin.OBSERVED,
-            source=Source.LOG,
+            source=_PROCESS_SOURCE.get(event.process or "", Source.LOG),
             subject=subject,
-            severity=Severity.INFO,
+            count=count,
+            severity=severity,
+            cause=cause,
+            cause_status=cause_status,
+            confidence=confidence,
             msg_key=event.key,
             params=params,
             src_ts=src_ts,
@@ -671,6 +814,80 @@ class NetIntelligence:
         for event in keep:
             ring.add(event)
         self.ring = ring
+
+
+# Subject key of ``LogEvent.name`` per kind (default "name").
+_NAME_KEY = {"system.service_crash_loop": "service", "system.oom_kill": "process"}
+
+
+def infra_snapshot(
+    data: Any, log_events: tuple[Any, ...] = (), log_read: bool = False
+) -> InfraSnapshot:
+    """Read the detector inputs from coordinator data; never raises.
+
+    Coordinator defaults that stand for "not measured" become None:
+    uptime 0 (then CPU and memory are not trusted either, they come from
+    the same call), conntrack 0, empty port, ARP and pool lists, LLDP with
+    a status other than ok/no_neighbors, and the WAN unless ``wan_found``.
+    """
+    uptime = _positive(getattr(data, "uptime", None))
+    cpu = getattr(data, "cpu_load", None)
+    memory = getattr(data, "memory_pressure", None)
+    clock = (getattr(data, "localtime", None), getattr(data, "localtime_at", None))
+    clock_ok = _finite(clock[0]) and _finite(clock[1])
+    conntrack = getattr(data, "active_connections", None)
+    services = getattr(data, "service_instances", None)
+    wan = getattr(data, "wan_status", None)
+    if not (isinstance(wan, dict) and wan.get("wan_found") is True):
+        wan = None  # no WAN on this router (or not read): unknown, not "down"
+    connected = getattr(data, "wan_connected", None) if wan else None
+    leases = getattr(data, "dhcp_leases", None)
+    pools = _records(getattr(data, "dhcp_pools", None))
+    arp = getattr(data, "arp_table", None)
+    lldp = getattr(data, "lldp_neighbors", None)
+    lldp_ok = isinstance(lldp, list) and getattr(data, "lldp_status", None) in (
+        LLDP_STATUS_OK,
+        LLDP_STATUS_NO_NEIGHBORS,
+    )
+    return InfraSnapshot(
+        uptime=uptime,
+        cpu_load=float(cpu) if uptime and _finite(cpu) else None,
+        memory_pressure=memory if uptime and isinstance(memory, dict) else None,
+        localtime=float(clock[0]) if clock_ok else None,
+        localtime_at=float(clock[1]) if clock_ok else None,
+        conntrack=int(conntrack) if _positive(conntrack) else None,
+        services=services if isinstance(services, dict) else None,
+        ports=_records(getattr(data, "port_stats", None)),
+        wan=wan,
+        wan_connected=connected if isinstance(connected, bool) else None,
+        # no lease list: usage 0 % would be a guess, not a measurement
+        dhcp_pools=pools if isinstance(leases, dict) and leases else None,
+        arp=arp if isinstance(arp, dict) and arp else None,
+        lldp=tuple(n for n in lldp if isinstance(n, dict)) if lldp_ok else None,
+        log_events=log_events,
+        log_read=log_read,
+    )
+
+
+def _finite(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _positive(value: Any) -> float | None:
+    return float(value) if _finite(value) and value > 0 else None
+
+
+def _records(value: Any) -> tuple[dict[str, Any], ...] | None:
+    """A non-empty list of dicts as tuple; empty or broken = None (unknown)."""
+    if not isinstance(value, list):
+        return None
+    records = tuple(item for item in value if isinstance(item, dict))
+    return records or None
 
 
 def _store_size(payload: dict[str, Any]) -> int:
