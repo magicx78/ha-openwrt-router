@@ -50,6 +50,9 @@ WIFI_DISASSOC = "disassoc"
 WIFI_HANDSHAKE_COMPLETED = "handshake_completed"
 WIFI_STEER_CONNECTED = "usteer_connected"
 WIFI_STEER_DISCONNECTED = "usteer_disconnected"
+# hostapd took an AP interface down (AP-DISABLED / INTERFACE-DISABLED): it
+# explains a mass disconnect (P4 review M5). Not seen live.
+WIFI_AP_DISABLED = "ap_disabled"
 # Problems, stored by the engine but never fired as HA events (the bus
 # keeps its P1 kinds). None of these was seen live (plan, P4).
 WIFI_ASSOC_REJECTED = "assoc_rejected"
@@ -118,6 +121,7 @@ COUNT_ONLY_KINDS = frozenset(
         # odhcpd repeats its errors on every RA/DHCPv6 round: count only.
         (CATEGORY_DHCP, DHCP_ODHCPD_ERROR),
         # P4: the WLAN detectors read these, they are no events of their own.
+        (CATEGORY_WIFI, WIFI_AP_DISABLED),
         (CATEGORY_WIFI, WIFI_DEAUTH),
         (CATEGORY_WIFI, WIFI_DISASSOC),
         (CATEGORY_WIFI, WIFI_HANDSHAKE_COMPLETED),
@@ -218,6 +222,8 @@ _REASONS = (
     ("local deauth request", REASON_LOCAL_REQUEST),
 )
 _REJECT_REASONS = {"MAX-STA": REASON_MAX_STA, "BLOCKED-STA": REASON_BLOCKED}
+# hostapd control events without a station (not seen live)
+_AP_DOWN_RE = re.compile(r"^(?:AP-DISABLED|INTERFACE-DISABLED)\s*$")
 # wpa_supplicant (router uplink), not seen live
 _SUPPLICANT_RE = re.compile(
     r"^(?P<iface>[\w.-]+): WPA: 4-Way Handshake failed - "
@@ -532,6 +538,15 @@ def _parse_hostapd(
     dfs = _DFS_RE.match(rest)
     if dfs:
         return _parse_dfs(dfs, match.group("iface"), log_id, time_ms, message)
+    if _AP_DOWN_RE.match(rest):
+        return LogEvent(
+            category=CATEGORY_WIFI,
+            kind=WIFI_AP_DISABLED,
+            log_id=log_id,
+            time_ms=time_ms,
+            interface=match.group("iface"),
+            message=message,
+        )
     for kind, pattern in _HOSTAPD_PATTERNS:
         hit = pattern.match(rest)
         if hit:

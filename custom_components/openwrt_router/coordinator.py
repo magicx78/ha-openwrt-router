@@ -364,6 +364,8 @@ class OpenWrtCoordinatorData:
         # start/stop/restart per service (HA time, from the api).
         self.wan_status_at: float | None = None
         self.service_actions: dict[str, float] = {}
+        # our own last Wi-Fi changes (HA time, from the api; P4 review M5)
+        self.wifi_actions: dict[str, float] = {}
         self.ap_interfaces: list[dict[str, Any]] = []
         # STA-mode wireless interfaces (WiFi repeater / mesh backhaul).
         # Used by topology_mesh to detect wireless-uplinked routers via their
@@ -713,6 +715,10 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             data.wan_status_at = time.time()
             actions = getattr(self.api, "service_actions", None)
             data.service_actions = dict(actions) if isinstance(actions, dict) else {}
+            wifi_actions = getattr(self.api, "wifi_actions", None)
+            data.wifi_actions = (
+                dict(wifi_actions) if isinstance(wifi_actions, dict) else {}
+            )
             data.wan_connected = data.wan_status.get(
                 "wan_connected", False
             ) or data.wan_status.get("connected", False)

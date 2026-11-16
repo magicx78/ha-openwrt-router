@@ -1045,7 +1045,9 @@ async def test_engine_adds_no_router_calls() -> None:
     assert reconnect.subject["mac"] == MAC1.upper()
     assert reconnect.signal == -80
     assert reconnect.cause == "weak_signal"
-    assert reconnect.cause_status is CauseStatus.CONFIRMED
+    # the fixture lines are far older than this poll (real clock): the
+    # measured signal does not confirm the cause (P4 review E1)
+    assert reconnect.cause_status is CauseStatus.HYPOTHESIS
     assert reconnect.params["reasons"] == ["local_request"]
     now = time.time()
     for kind in ("wifi.deauth", "wifi.disassoc", "wifi.handshake_completed"):

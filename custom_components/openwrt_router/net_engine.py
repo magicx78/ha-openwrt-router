@@ -100,6 +100,7 @@ from .net_events import (
     IncidentStatus,
     NetEvent,
     Origin,
+    Scope,
     Severity,
     Source,
 )
@@ -511,9 +512,11 @@ class NetIntelligence:
             now,
             getattr(data, "arp_table", None),
             context,
+            interval,
         )
         fresh = batch is not None and not batch.baseline
         thresholds = self.settings["thresholds"]
+        exclude = self._excluded_macs()
         evidence: list[Evidence] = []
         if fresh:
             evidence.extend(
@@ -529,6 +532,7 @@ class NetIntelligence:
                     now,
                     entry_id,
                     thresholds,
+                    exclude,
                 )
             )
         snapshot = infra_snapshot(
@@ -549,6 +553,7 @@ class NetIntelligence:
             hosts={host: router for router, host in self._hosts.items()},
             rebooted=any(f.kind == _REBOOT_KIND for f in findings),
             poll_interval=interval,
+            exclude=exclude,
         )
         stored += self._store_findings(
             entry_id,
@@ -556,7 +561,7 @@ class NetIntelligence:
             now,
             evidence,
         )
-        evidence.extend(self._wifi_holds(entry_id))
+        evidence.extend(self._wifi_holds(entry_id, now, context))
         self.machine.update(now, evidence)
         self._prune(now)
         if stored or self._log_marks.get(entry_id) != mark_before:
@@ -571,6 +576,7 @@ class NetIntelligence:
         now: float,
         arp: Any = None,
         wifi: WifiContext | None = None,
+        interval: float | None = None,
     ) -> tuple[int, list[NetEvent], list[LogEvent]]:
         """Count and store the log events of one poll.
 
@@ -578,7 +584,8 @@ class NetIntelligence:
         stored log events, and the log events taken in (for the detectors).
         ``arp`` (MAC -> IPv4 of this poll) confirms a DHCPDECLINE, ``wifi``
         (this poll's AP interfaces and clients) adds SSID, band and signal
-        to Wi-Fi lines.
+        to fresh Wi-Fi lines (not to the lines of a log gap); ``interval``
+        is the poll interval.
         """
         stored = 0
         baseline = batch is not None and batch.baseline
@@ -613,7 +620,8 @@ class NetIntelligence:
                     now,
                     baseline,
                     arp=arp,
-                    wifi=wifi,
+                    wifi=None if baseline else wifi,
+                    interval=interval,
                 )
             )
         for group in groups.values():
@@ -704,23 +712,31 @@ class NetIntelligence:
             _LOGGER.debug("DHCP context unavailable", exc_info=True)
             return None
 
-    def _wifi_holds(self, entry_id: str) -> list[Evidence]:
+    def _excluded_macs(self) -> frozenset[str]:
+        """``exclusions.macs`` of the settings, upper case."""
+        macs = self.settings.get("exclusions", {}).get("macs") or ()
+        return frozenset(m.strip().upper() for m in macs if isinstance(m, str))
+
+    def _wifi_holds(
+        self, entry_id: str, now: float, context: WifiContext
+    ) -> list[Evidence]:
         """Keep the router's open log-based Wi-Fi incidents open while its
-        log cannot be read: no lines is no proof of a healthy WLAN."""
-        if self._wifi.log_readable(entry_id):
+        log cannot be read: no lines is no proof of a healthy WLAN. Held at
+        most _WIFI_HOLD_MAX after the log was lost, and a client incident
+        only while the router still lists the client (P4 review K3)."""
+        if not self._wifi.may_hold(entry_id, now):
             return []
+        clients = context.clients
         return [
             Evidence(
-                type=inc.type,
-                scope_key=inc.scope_key,
-                scope=inc.scope,
+                type=type_,
+                scope_key=key,
+                scope=scope,
                 router=entry_id,
                 hold=True,
             )
-            for inc in self.machine.incidents()
-            if inc.status in _OPEN_STATES
-            and inc.type in WIFI_LOG_RULES
-            and entry_id in inc.routers
+            for type_, scope, key in self.machine.open_keys(WIFI_LOG_RULES, entry_id)
+            if scope is not Scope.CLIENT or clients is None or key in clients
         ]
 
     def _update_identity(self, entry_id: str, data: Any, host: str | None) -> None:
@@ -821,6 +837,7 @@ class NetIntelligence:
         count: int = 1,
         arp: Any = None,
         wifi: WifiContext | None = None,
+        interval: float | None = None,
     ) -> NetEvent:
         self._seq += 1
         # A gap line (read after a restart) is old by nature and newer than
@@ -857,7 +874,13 @@ class NetIntelligence:
         signal: int | None = None
         if category is Category.WIFI and wifi is not None:
             meta = wifi_log_meta(
-                self._wifi, wifi, event, entry_id, now, self.settings["thresholds"]
+                self._wifi,
+                wifi,
+                event,
+                entry_id,
+                now,
+                self.settings["thresholds"],
+                interval,
             )
             subject.update(meta.subject)
             signal = meta.signal
@@ -1129,6 +1152,7 @@ def wifi_snapshot(
     hosts: dict[str, str] | None = None,
     rebooted: bool = False,
     poll_interval: float | None = None,
+    exclude: frozenset[str] = frozenset(),
 ) -> WifiSnapshot:
     """Build the WLAN detector input from coordinator data (P4).
 
@@ -1138,6 +1162,7 @@ def wifi_snapshot(
     stability = getattr(data, "client_stability", None)
     usteer_status = stability.get("usteer") if isinstance(stability, dict) else None
     usteer = getattr(data, "usteer_connected", None)
+    actions = getattr(data, "wifi_actions", None)
     return WifiSnapshot(
         context=context,
         has_aps=bool(context.ifaces),
@@ -1151,6 +1176,8 @@ def wifi_snapshot(
         hosts=hosts or {},
         rebooted=rebooted,
         poll_interval=poll_interval,
+        wifi_actions=dict(actions) if isinstance(actions, dict) else None,
+        exclude=exclude,
     )
 
 

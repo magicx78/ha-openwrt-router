@@ -576,16 +576,18 @@ async def test_auth_wave_needs_several_clients(engine: NetIntelligence) -> None:
 
 @pytest.mark.asyncio
 async def test_auth_wave_across_routers_and_clients(engine: NetIntelligence) -> None:
+    """The wave counts distinct clients (P4 review M6): 3 on r1 (with
+    repeats), 2 more on r2."""
     log = Log()
-    macs = [MAC1, MAC2, MAC3, MAC4]
-    first = log.lines(*((10 + i * 10, psk(macs[i % 4])) for i in range(6)))
+    macs = [MAC1, MAC2, MAC3]
+    first = log.lines(*((10 + i * 10, psk(macs[i % 3])) for i in range(6)))
     engine.ingest("r1", data(first), T0 + 80)
     assert open_incidents(engine, "wifi_auth_wave") == []
-    second = log.lines(*((90 + i * 10, sae(macs[i % 4])) for i in range(4)))
+    second = log.lines((90, sae(MAC4)), (100, sae(MACS[0])), (110, sae(MAC4)))
     engine.ingest("r2", data(second), T0 + 140)
     [wave] = open_incidents(engine, "wifi_auth_wave")
     assert wave.scope is Scope.FLEET
-    assert wave.occurrences == 10 and wave.affected == 4
+    assert wave.occurrences == 5 and wave.affected == 5
     assert sorted(wave.routers) == ["r1", "r2"]
     assert wave.cause == "psk_changed"
     assert wave.cause_status is CauseStatus.HYPOTHESIS
@@ -628,8 +630,9 @@ async def test_roam_flapping_without_usteer_from_poll_differences(
     assert roams[0].params["from_router"] == "r1"
     assert roams[0].params["to_router"] == "r2"
     assert roams[0].source is Source.POLL and roams[0].origin is Origin.INFERRED
+    # a poll-measured signal never confirms the cause of a roam (E1)
     assert roams[0].cause == "weak_signal"
-    assert roams[0].cause_status is CauseStatus.CONFIRMED
+    assert roams[0].cause_status is CauseStatus.HYPOTHESIS
     [incident] = open_incidents(engine, "wifi_roam_flapping")
     assert incident.confidence <= INFERRED_CONFIDENCE_CAP
 
@@ -651,15 +654,23 @@ async def test_client_on_two_routers_counts_once_when_the_old_one_drops_it(
 
 @pytest.mark.asyncio
 async def test_roam_flapping_with_usteer_is_observed(engine: NetIntelligence) -> None:
+    """usteer's view plus its log line of the move: observed (E2)."""
     engine.ingest("r2", data(), T0, host="192.0.2.2")
     local = {MAC1.lower(): ("hostapd.phy1-ap0",)}
     remote = {MAC1.lower(): ("192.0.2.2#hostapd.phy1-ap0",)}
     unknown = {MAC1.lower(): ("192.0.2.99#hostapd.phy1-ap0",)}
+    log = Log()
     now = T0 + 10
     for n in range(5):
         view = local if n % 2 == 0 else remote
+        direction = "connected to" if n % 2 == 0 else "disconnected from"
+        line = f"usteer: station {MAC1.lower()} {direction} node hostapd.phy1-ap0"
+        lines = log.lines((now - T0 - 30, line)) if n else log.lines()
         engine.ingest(
-            "r1", data(usteer=view, usteer_status="ok"), now, host="192.0.2.1"
+            "r1",
+            data(lines, usteer=view, usteer_status="ok"),
+            now,
+            host="192.0.2.1",
         )
         now += 120
     engine.ingest("r1", data(usteer=unknown, usteer_status="ok"), now)
@@ -761,6 +772,9 @@ async def test_dhcp_failure_after_connect_across_routers(
         order.reverse()
     for n, (router, lines) in enumerate(order):
         engine.ingest(router, data(lines), T0 + 120 + n)
+    # a NAK counts once the gateway's log showed no ACK for 30 s (E4)
+    assert open_incidents(engine, "wifi_dhcp_after_connect") == []
+    engine.ingest("r1", data(log.lines()), T0 + 160)
     [incident] = open_incidents(engine, "wifi_dhcp_after_connect")
     assert incident.scope_key == MAC1
     assert incident.origin is Origin.OBSERVED
@@ -788,12 +802,12 @@ async def test_mass_disconnect_from_log_lines(engine: NetIntelligence) -> None:
     log = Log()
     clients = [client(m) for m in MACS[:8]]
     engine.ingest("r1", data(clients=clients, fetched=False), T0)
-    lines = log.lines(*((100 + i * 3, disc(MACS[i])) for i in range(6)))
+    lines = log.lines(*((100 + i * 0.5, disc(MACS[i])) for i in range(6)))
     engine.ingest("r1", data(lines, clients[6:]), T0 + 120)
     [event] = events_of(engine, "wifi.mass_disconnect")
     assert event.count == 6 and event.severity is Severity.WARNING
     assert event.origin is Origin.OBSERVED
-    assert event.params["window_s"] == 30
+    assert event.params["window_s"] == 5
     [incident] = open_incidents(engine, "wifi_mass_disconnect")
     assert incident.affected == 6 and incident.scope_key == "r1"
     # the same lines never count twice
@@ -819,6 +833,8 @@ async def test_mass_disconnect_without_log_is_inferred(engine: NetIntelligence) 
     clients = [client(m) for m in MACS[:8]]
     engine.ingest("r1", data(clients=clients, log_status="not_permitted"), T0)
     engine.ingest("r1", data(clients=clients[:2], log_status="not_permitted"), T0 + 60)
+    # the drop must persist on the next poll (K4)
+    engine.ingest("r1", data(clients=clients[:2], log_status="not_permitted"), T0 + 120)
     [event] = events_of(engine, "wifi.mass_disconnect")
     assert event.origin is Origin.INFERRED and event.source is Source.POLL
     assert event.confidence <= INFERRED_CONFIDENCE_CAP and event.count == 6

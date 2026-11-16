@@ -1285,6 +1285,9 @@ class OpenWrtAPI:
         # time.time() of our own last start/stop/restart per service (HA
         # button): the engine does not report the PID change that follows.
         self.service_actions: dict[str, float] = {}
+        # time.time() of our own last Wi-Fi change ("reload_wifi",
+        # "set_wifi_state"): the clients it drops are no mass disconnect.
+        self.wifi_actions: dict[str, float] = {}
 
         # Results of SSH-only readers that are refreshed at most every
         # SSH_SLOW_REFRESH_INTERVAL: key -> (time.monotonic() of fetch, value).
@@ -2872,6 +2875,8 @@ class OpenWrtAPI:
         """
         disabled_value = "0" if enabled else "1"
         action = "enable" if enabled else "disable"
+        # Before the calls: the radio can drop its clients while they run.
+        self.wifi_actions["set_wifi_state"] = time.time()
         _LOGGER.info(
             "Setting WiFi section %s %s (disabled=%s)",
             uci_section,
@@ -3740,6 +3745,7 @@ class OpenWrtAPI:
             available.
         """
         _LOGGER.debug("Reloading network configuration")
+        self.wifi_actions["reload_wifi"] = time.time()
         try:
             await self._call(UBUS_NETWORK_RELOAD, UBUS_NETWORK_RELOAD_METHOD, {})
             self._invalidate_hostapd_cache()
