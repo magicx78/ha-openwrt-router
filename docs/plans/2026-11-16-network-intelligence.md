@@ -12,8 +12,8 @@ belegt), **Annahme** (plausibel, aber noch nicht belegt; Prüfweg steht dabei), 
 
 - **Stand:** 2026-11-16 · **Phase:** freigegeben (Nutzer, 2026-11-16), in Umsetzung
 - **Branch/PR:** `feature/network-intelligence` · Worktree `../ha-openwrt-router-net-intel` · PR #— · Basis: v1.39.0 (`main@f8a2ac7`)
-- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review, P5, P6, P5-Review, P7, P6-Review, P8 (Doku), P7-Review · **Offen:** P8-Aufräumen (Code, eigener Auftrag)
-- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 in `1e8fb71`; P5 in `2ba7674`; P6 in `4cef6a8`; Review-Fixes P5 im Commit `fix(intel): address P5 review`; P7 in `fd21931`; Review-Fixes P6 in `9fe9d54`; P8 (Doku) im Commit `docs(intel): document network intelligence (P8)`; Review-Fixes P7 im Commit `fix(intel): address P7 review`
+- **Erledigt:** Live-Checks, P1, P2, P3, P3-Review, P4, P4-Review, P5, P6, P5-Review, P7, P6-Review, P8 (Doku), P7-Review, Release-Vorbereitung 1.40.0 (lokal) · **Offen:** P8-Aufräumen (Code, eigener Auftrag)
+- **Commits:** P1 in `8326a18` + `e03ac96`, Review-Fixes P1 in `4e62d7b`; P2 in `76cca2b`, Review-Fixes P2 in `db30a64`; P3 in `e851ac0`, Review-Fixes P3 im Commit `fix(intel): harden infrastructure detectors (P3 review)`; P4 in `4cc2935`, Review-Fixes P4 in `1e8fb71`; P5 in `2ba7674`; P6 in `4cef6a8`; Review-Fixes P5 im Commit `fix(intel): address P5 review`; P7 in `fd21931`; Review-Fixes P6 in `9fe9d54`; P8 (Doku) im Commit `docs(intel): document network intelligence (P8)`; Review-Fixes P7 in `4464a84`; Version 1.40.0 im Commit `chore(release): 1.40.0`
 - **Blocker:** keine
 - **Nächster Schritt:** Prüfung der P7-Review-Fixes durch den Master; danach P8-Aufräumen (`_record_events`, `useAlerts.ts`) als eigener Auftrag, dann PR (nur mit Freigabe).
 

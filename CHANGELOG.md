@@ -2,9 +2,7 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
-## [Unreleased]
-
-Geplant als **1.40.0** (noch nicht veröffentlicht, Manifest-Version unverändert).
+## [1.40.0] - 2026-11-16
 
 ### Added
 
