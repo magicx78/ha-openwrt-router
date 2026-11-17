@@ -1,0 +1,9 @@
+# logd remote syslog lines, one UDP datagram per line (no line end).
+# Head: belegt aus Upstream-Quelle (ubox log/logread.c, LOG_NET), not seen live.
+# Message parts: hostapd / dnsmasq-dhcp / dropbear success as seen live
+# (tests/test_log_parser.py:59-75, :105). Placeholders only (see README.md).
+<30>Nov 17 12:00:01 ap-test hostapd: phy0-ap1: AP-STA-CONNECTED 02:00:00:00:00:01 auth_alg=open
+<30>Nov  7 08:15:42 ap-test hostapd: phy0-ap2: AP-STA-POSSIBLE-PSK-MISMATCH 02:00:00:00:00:02
+<30>Nov 17 12:00:02 ap-test dnsmasq-dhcp[1234]: DHCPACK(br-lan) 192.0.2.10 02:00:00:00:00:01 laptop
+<85>Nov 17 12:00:03 ap-test dropbear[2565]: Password auth succeeded for 'root' from 192.0.2.5:64008
+<30>Nov 17 12:00:04 ap-test procd: - init complete -
