@@ -282,6 +282,8 @@ class PollFacts:
     with a lease or an ARP entry (fleet-wide, else this router's own).
     ``down_routers`` are the routers in outage, ``auth_failed`` those
     failing on their credentials, ``exclude`` the excluded client MACs.
+    ``log_coverage`` is the router's share of log lines read (0..1, None =
+    no log status yet; see ``WifiState.coverage``).
     """
 
     router: str
@@ -300,6 +302,7 @@ class PollFacts:
     down_routers: frozenset[str] = frozenset()
     auth_failed: frozenset[str] = frozenset()
     exclude: frozenset[str] = frozenset()
+    log_coverage: float | None = None
 
 
 class PollObserver(Protocol):
@@ -942,6 +945,7 @@ class NetIntelligence:
             down_routers=frozenset(self._down),
             auth_failed=self._auth_failed(),
             exclude=exclude,
+            log_coverage=_log_coverage(self._wifi.coverage(entry_id)),
         )
 
     def _sync(self, now: float, mono: float | None) -> float:
@@ -2474,6 +2478,12 @@ def _finite(value: Any) -> bool:
 
 def _positive(value: Any) -> float | None:
     return float(value) if _finite(value) and value > 0 else None
+
+
+def _log_coverage(coverage: Mapping[str, Any]) -> float | None:
+    """The ``log`` share of ``WifiState.coverage`` (None when unknown)."""
+    value = coverage.get("log")
+    return float(value) if _finite(value) else None
 
 
 def _upper_keys(value: Any) -> frozenset[str]:

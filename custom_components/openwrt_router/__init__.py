@@ -51,6 +51,7 @@ from .fleet import (
     usteer_node_info,
 )
 from .issues import async_clear_issue, ram_high_issue_id
+from .client_engine import async_get_client_stability, async_unload_client_stability
 from .net_engine import (
     async_get_net_intelligence,
     async_remove_router_data,
@@ -394,6 +395,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     try:
         engine = await async_get_net_intelligence(hass)
         engine.register(entry.entry_id)
+        # Client stability observes the engine's polls (no router calls of
+        # its own); a failure here leaves the engine running.
+        try:
+            await async_get_client_stability(hass, engine)
+        except Exception:
+            _LOGGER.warning(
+                "Client stability setup failed for '%s'", entry.title, exc_info=True
+            )
         # Also runs when the setup fails further down (HA calls these then).
         entry.async_on_unload(partial(engine.unregister, entry.entry_id))
         entry.async_on_unload(
@@ -534,6 +543,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
                 "Network intelligence unload raised for '%s'",
                 entry.title,
                 exc_info=True,
+            )
+        # After the last router: write the client history now.
+        try:
+            await async_unload_client_stability(hass)
+        except Exception:
+            _LOGGER.warning(
+                "Client stability unload raised for '%s'", entry.title, exc_info=True
             )
 
     runtime = getattr(entry, "runtime_data", None)

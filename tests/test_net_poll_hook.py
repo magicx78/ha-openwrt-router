@@ -106,6 +106,7 @@ async def test_observer_gets_the_facts_of_each_new_poll(disk: FakeDisk) -> None:
     assert facts.down_routers == frozenset()
     assert facts.auth_failed == frozenset()
     assert facts.loc.get(MAC2.upper()) == "r1"
+    assert facts.log_coverage == 1.0  # all lines read, none missed
     with pytest.raises(dataclasses.FrozenInstanceError):
         facts.router = "x"  # type: ignore[misc]
 

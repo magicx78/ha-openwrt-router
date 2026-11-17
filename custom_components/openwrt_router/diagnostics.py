@@ -26,6 +26,7 @@ from .const import (
     DOMAIN,
 )
 from .mac_utils import is_mac
+from .client_engine import async_get_client_engine
 from .net_engine import async_get_engine
 from .topology_ports import redacted_port_summary
 
@@ -128,8 +129,9 @@ async def async_get_config_entry_diagnostics(
         "port_mapping": port_mapping,
         # Counters, types and times only — no MAC, IP, SSID or names.
         "intelligence": _intelligence_summary(hass, entry.entry_id),
+        # Client stability: fleet-wide counts only (no MAC, IP or hostname).
+        "client_stability": _client_stability_summary(hass),
         # TODO: include bandwidth statistics once the bandwidth sensor is implemented
-        # TODO: include per-client online time once implemented
         # TODO: include traffic statistics once implemented
     }
 
@@ -147,6 +149,18 @@ def _intelligence_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any]:
     except Exception:
         _LOGGER.debug("Network intelligence diagnostics failed", exc_info=True)
         return {"loaded": engine.loaded, "error": True}
+
+
+def _client_stability_summary(hass: HomeAssistant) -> dict[str, Any]:
+    """Client stability counts; never fails the diagnostics download."""
+    cs = async_get_client_engine(hass)
+    if cs is None:
+        return {"loaded": False}
+    try:
+        return cs.diagnostics()
+    except Exception:
+        _LOGGER.debug("Client stability diagnostics failed", exc_info=True)
+        return {"loaded": cs.loaded, "error": True}
 
 
 def _client_summary(clients: list[dict[str, Any]]) -> dict[str, Any]:
