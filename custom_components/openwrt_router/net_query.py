@@ -40,6 +40,7 @@ from .net_rules import (
     events_by_id,
     incident_area,
     incident_cause_level,
+    recommendation_key,
     suppressed_child,
 )
 
@@ -232,7 +233,8 @@ def incident_dict(
     """An incident for the panel; without ``evidence`` only its count.
 
     Extra fields: ``cause_level`` (graded with the stored ``events`` by id;
-    without them from one family at most), ``area`` (score area, None = none),
+    without them from one family at most), ``recommendation_key``
+    (``rec_<cause>``, RT7), ``area`` (score area, None = none),
     ``router_names``, ``duration_s`` (current episode: since the reopen or
     the first sighting, up to the resolve time, also of an ignored
     incident whose condition ended, or ``now``) and ``child``
@@ -245,6 +247,7 @@ def incident_dict(
         out["evidence"] = items
     out["evidence_count"] = len(items)
     out["cause_level"] = incident_cause_level(inc, events or {}).value
+    out["recommendation_key"] = recommendation_key(inc.cause)
     out["area"] = incident_area(inc.type)
     out["router_names"] = [name_of(r) for r in inc.routers]
     start = inc.reopened_at if inc.reopened_at is not None else inc.first_seen

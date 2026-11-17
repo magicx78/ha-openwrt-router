@@ -125,6 +125,57 @@ const CAUSE_LABEL: Record<string, string> = {
   uplink_config: 'Uplink-Konfiguration',
   vlan: 'VLAN-Zuordnung',
   wrong_network: 'falsches Netz',
+  port_flap: 'Port geht ständig auf und ab',
+  client_side: 'Problem auf Client-Seite',
+  dns_resolution: 'DNS-Auflösung',
+  ip_conflict: 'IP-Adresskonflikt',
+  mac_filter: 'MAC-Filter',
+  roaming: 'Roaming',
+  auth: 'Anmeldung',
+};
+
+/**
+ * Advice per cause (RT7), by the engine's recommendation_key (rec_<cause>).
+ * English versions: docs/realtime-rca.md. tests/test_net_recommendations.py
+ * checks that every key the engine sends has a text here.
+ */
+const CAUSE_RECOMMENDATION: Record<string, string> = {
+  rec_ap_full: 'Clients auf weitere APs verteilen oder das Client-Limit des APs erhöhen.',
+  rec_attack: 'Auf unbekannte Geräte achten; ggf. WLAN-Passwort ändern.',
+  rec_auth: 'WLAN-Passwort und Verschlüsselung auf dem Client prüfen.',
+  rec_band_steering: 'Band-Steering-Einstellungen prüfen; ggf. den Client fest auf ein Band legen.',
+  rec_client_driver: 'Treiber oder Firmware des Clients aktualisieren.',
+  rec_client_power_save: 'Energiesparmodus des WLANs am Client abschalten (z. B. ESP: power_save_mode none).',
+  rec_client_side:
+    'Andere Clients am selben Funkmodul sind stabil: Gerät, Stromversorgung und Standort des Clients prüfen.',
+  rec_coverage: 'AP-Platzierung oder Sendeleistung prüfen; ggf. einen weiteren AP ergänzen.',
+  rec_dhcp_server: 'DHCP-Server (dnsmasq/odhcpd) auf dem Gateway prüfen.',
+  rec_dns_resolution: 'Upstream-DNS-Server und WAN-Verbindung des Gateways prüfen.',
+  rec_interference: 'Kanal und Störquellen prüfen; einen weniger belegten Kanal wählen.',
+  rec_ip_conflict: 'Gerät mit fester IP im DHCP-Bereich suchen und Adresse ändern.',
+  rec_lan_unreachable: 'Verbindung zwischen Home Assistant und dem Netz prüfen (Switch, Kabel, HA-Host).',
+  rec_mac_filter: 'MAC-Filter des WLANs prüfen.',
+  rec_mass_disconnect: 'Systemprotokoll des APs auf Funkneustart, DFS-Radar oder Stromausfall prüfen.',
+  rec_overlapping_coverage: 'Überlappung der APs verringern (Sendeleistung) oder Roaming-Schwellen anpassen.',
+  rec_pool_exhausted: 'DHCP-Pool vergrößern oder Lease-Zeit verkürzen.',
+  rec_port_flap: 'Kabel und Stecker am Port tauschen; Gegenstelle und deren Stromversorgung prüfen.',
+  rec_power_supply: 'Stromversorgung des Geräts prüfen (Netzteil, PoE-Budget).',
+  rec_psk_changed: 'Wurde das WLAN-Passwort geändert? Dann auf den Clients neu eingeben.',
+  rec_psk_wrong: 'WLAN-Passwort auf dem Client neu eingeben.',
+  rec_radio_change: 'DFS-Radar oder automatische Kanalwahl; tritt es oft auf, einen Nicht-DFS-Kanal wählen.',
+  rec_radio_restart: 'Systemprotokoll des APs auf Neustarts des Funkmoduls prüfen.',
+  rec_roaming: 'Roaming-Schwellen und Sendeleistung der APs prüfen.',
+  rec_router_reboot: 'Ursache des Neustarts im Systemprotokoll prüfen (Stromversorgung, Watchdog, Update).',
+  rec_router_unreachable: 'Strom und Kabel des Routers prüfen; ist sein Uplink-Port aktiv?',
+  rec_sae_mismatch: 'Prüfen, ob der Client WPA3/SAE unterstützt; sonst WPA2/WPA3-Mischmodus nutzen.',
+  rec_static_ip: 'Feste IP-Einstellung am Client entfernen oder an das Netz anpassen.',
+  rec_steering: 'Steering-Einstellungen (usteer) prüfen.',
+  rec_uplink_config: 'Konfiguration des Uplinks (VLAN, Bridge) prüfen.',
+  rec_uplink_down: 'Uplink-Kabel und den Switch-Port davor prüfen.',
+  rec_vlan: 'VLAN-Zuordnung des WLANs oder Ports prüfen.',
+  rec_wan_down: 'Modem und Provider-Status prüfen; WAN-Kabel kontrollieren.',
+  rec_weak_signal: 'Signal prüfen: AP näher, Antenne ausrichten, ggf. 2,4 GHz nutzen.',
+  rec_wrong_network: 'Prüfen, ob der Client mit dem richtigen WLAN verbunden ist.',
 };
 
 export const CATEGORY_LABEL: Record<string, string> = {
@@ -183,8 +234,9 @@ export function typeLabel(type: string): string {
   return TYPE_LABEL[type] ?? humanize(type);
 }
 
-export function recommendation(type: string): string | undefined {
-  return RECOMMENDATION[type];
+/** Advice for an incident: by its cause if there is one, else by its type. */
+export function recommendation(type: string, key?: string | null): string | undefined {
+  return (key ? CAUSE_RECOMMENDATION[key] : undefined) ?? RECOMMENDATION[type];
 }
 
 export function causeLabel(cause: string | null): string {
