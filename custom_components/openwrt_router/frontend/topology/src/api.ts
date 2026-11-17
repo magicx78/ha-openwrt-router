@@ -36,6 +36,11 @@ import type {
   IntelIncidentsPage,
   IntelIncidentDetail,
   IntelSettingsResponse,
+  ClientStabilityDetail,
+  StabilityApView,
+  StabilitySettingsResponse,
+  StabilityTable,
+  StabilityWindow,
 } from './types';
 import { clientDisplayName, clientVendor } from './utils/clientName';
 
@@ -1174,6 +1179,12 @@ export interface IntelApi {
   ): Promise<IntelIncidentDetail>;
   settings(): Promise<IntelSettingsResponse>;
   saveSettings(patch: Record<string, unknown>): Promise<IntelSettingsResponse>;
+  /** Client stability table (one page, worst first by default). */
+  clients(query?: IntelQuery): Promise<StabilityTable>;
+  client(mac: string, window: StabilityWindow): Promise<ClientStabilityDetail>;
+  clientAps(window: StabilityWindow): Promise<StabilityApView>;
+  clientSettings(): Promise<StabilitySettingsResponse>;
+  saveClientSettings(patch: Record<string, unknown>): Promise<StabilitySettingsResponse>;
 }
 
 /** Build the client; `getHass` is read on every call (HA swaps the object). */
@@ -1191,5 +1202,11 @@ export function createIntelApi(getHass: () => HassLike | null): IntelApi {
       }),
     settings: () => intelRequest(getHass, 'GET', 'settings'),
     saveSettings: (patch) => intelRequest(getHass, 'POST', 'settings', patch),
+    clients: (query) => intelRequest(getHass, 'GET', `clients${queryString(query)}`),
+    client: (mac, window) =>
+      intelRequest(getHass, 'GET', `clients/${encodeURIComponent(mac)}${queryString({ window })}`),
+    clientAps: (window) => intelRequest(getHass, 'GET', `clients/aps${queryString({ window })}`),
+    clientSettings: () => intelRequest(getHass, 'GET', 'clients/settings'),
+    saveClientSettings: (patch) => intelRequest(getHass, 'POST', 'clients/settings', patch),
   };
 }

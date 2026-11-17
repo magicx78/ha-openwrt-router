@@ -2,10 +2,11 @@
  * DiagnoseView — network intelligence tab (P7).
  *
  * Overview, incidents (roots with expandable follow-up incidents), timeline
- * with filters, WLAN, infrastructure, incident detail and settings. All data
- * comes from /api/openwrt_topology/intelligence/* (engine memory, no router
- * calls). Refresh: whenever the panel's snapshot refreshes (`refreshKey`,
- * every 30 s) — no own timer.
+ * with filters, WLAN, client stability, infrastructure, incident detail and
+ * settings. All data comes from /api/openwrt_topology/intelligence/* (engine
+ * memory, no router calls). Refresh: whenever the panel's snapshot refreshes
+ * (`refreshKey`, every 30 s; the stability tab at most every 60 s) — no own
+ * timer.
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -36,14 +37,16 @@ import {
   typeLabel,
 } from '../utils/intel';
 import { IntelSettingsView } from './IntelSettingsView';
+import { StabilityView } from './StabilityView';
 
-type SubTab = 'overview' | 'incidents' | 'timeline' | 'wifi' | 'infra' | 'settings';
+type SubTab = 'overview' | 'incidents' | 'timeline' | 'wifi' | 'stability' | 'infra' | 'settings';
 
 const SUB_TABS: Array<{ id: SubTab; label: string }> = [
   { id: 'overview', label: 'Übersicht' },
   { id: 'incidents', label: 'Incidents' },
   { id: 'timeline', label: 'Timeline' },
   { id: 'wifi', label: 'WLAN' },
+  { id: 'stability', label: 'Stabilität' },
   { id: 'infra', label: 'Infrastruktur' },
   { id: 'settings', label: 'Einstellungen' },
 ];
@@ -605,7 +608,7 @@ export function DiagnoseView({ api, refreshKey, routerFilter, onRouterFilterChan
         ))}
       </div>
 
-      {routerFilter && tab !== 'settings' && (
+      {routerFilter && tab !== 'settings' && tab !== 'stability' && (
         <div className="diag-filterchip">
           Router: {routerName ?? routerFilter}
           <button type="button" className="diag-link" onClick={() => onRouterFilterChange(null)}>× alle Router</button>
@@ -655,6 +658,9 @@ export function DiagnoseView({ api, refreshKey, routerFilter, onRouterFilterChan
           )}
           {tab === 'infra' && summary && (
             <InfraPanel summary={summary} incidents={infra} routerFilter={routerFilter} onOpen={open} />
+          )}
+          {tab === 'stability' && (
+            <StabilityView api={api} refreshKey={refreshKey} routers={summary?.routers ?? []} onOpenIncident={open} />
           )}
           {tab === 'settings' && <IntelSettingsView api={api} onSaved={reload} />}
         </>
