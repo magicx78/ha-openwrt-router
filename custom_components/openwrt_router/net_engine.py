@@ -83,7 +83,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant, callback
@@ -264,6 +264,57 @@ class NetView:
     fleet: FleetView = field(default_factory=FleetView)
 
 
+@dataclass(frozen=True, slots=True)
+class PollFacts:
+    """What one ingested poll gave, for read-only poll observers.
+
+    Built once per new poll after the detectors and the alarm machine ran;
+    observers read it and must not change the engine. ``now`` is the engine
+    clock, ``interval`` the poll interval in seconds. ``fresh_clients``: a
+    client list was read in this poll (``context.clients`` is not None).
+    ``wifi_lines`` are the accepted Wi-Fi lines of a fresh log read (empty
+    for a baseline or gap read), ``log_ok`` whether the log was readable.
+    ``findings`` are this poll's Wi-Fi findings that were stored as events,
+    ``stored_events`` the log events stored in it, ``auth_attempts`` the ids
+    of those that start a new failed authentication attempt.
+    ``loc`` maps the MACs of this router's client list to the router the
+    fleet places them on; ``lease_macs``/``arp_macs`` are upper-case MACs
+    with a lease or an ARP entry (fleet-wide, else this router's own).
+    ``down_routers`` are the routers in outage, ``auth_failed`` those
+    failing on their credentials, ``exclude`` the excluded client MACs.
+    """
+
+    router: str
+    now: float
+    interval: float
+    fresh_clients: bool
+    context: WifiContext
+    wifi_lines: tuple[LogEvent, ...] = ()
+    log_ok: bool = False
+    findings: tuple[Finding, ...] = ()
+    stored_events: tuple[NetEvent, ...] = ()
+    auth_attempts: frozenset[str] = frozenset()
+    loc: Mapping[str, str] = field(default_factory=dict)
+    lease_macs: frozenset[str] = frozenset()
+    arp_macs: frozenset[str] = frozenset()
+    down_routers: frozenset[str] = frozenset()
+    auth_failed: frozenset[str] = frozenset()
+    exclude: frozenset[str] = frozenset()
+
+
+class PollObserver(Protocol):
+    """Reads every ingested poll (client stability); never changes the engine."""
+
+    def on_poll(self, facts: PollFacts) -> None:
+        """One new poll of one router."""
+
+    def on_clock_shift(self, delta: float) -> None:
+        """The engine clock jumped back; stored times move by ``delta``."""
+
+    def on_router_removed(self, router: str) -> None:
+        """All data of a removed router is being deleted."""
+
+
 @callback
 def async_get_engine(hass: HomeAssistant) -> NetIntelligence | None:
     """Return the running engine, or None (not set up / already unloaded)."""
@@ -398,6 +449,8 @@ class NetIntelligence:
         self._hosts: dict[str, str] = {}
         self._wifi_attempts: dict[str, str] = {}
         self._last_prune: float | None = None
+        # Read-only observers of every ingested poll (client stability).
+        self._poll_observers: list[PollObserver] = []
         # P5 (in memory): the outage tracker followed, the routers and the
         # fleet outage last seen down (state change -> event), the routers
         # of the fleet outage, the last uplink per router and the topology.
@@ -646,6 +699,7 @@ class NetIntelligence:
     def remove_router(self, entry_id: str) -> bool:
         """Forget all data of a router; True if anything was removed."""
         self.unregister(entry_id)
+        self._notify("on_router_removed", entry_id)
         removed = self.ring.remove_router(entry_id) > 0
         removed |= entry_id in self.counters.to_dict()
         self.counters.remove_router(entry_id)
@@ -782,29 +836,113 @@ class NetIntelligence:
         )
         findings = self._infra_findings(entry_id, snapshot, now)
         stored += self._store_findings(entry_id, findings, now, evidence)
+        dhcp = self._dhcp_context()
         wifi = wifi_snapshot(
             data,
             context,
             tuple(accepted) if fresh else (),
             batch,
-            dhcp=self._dhcp_context(),
+            dhcp=dhcp,
             hosts={host: router for router, host in self._hosts.items()},
             rebooted=any(f.kind == _REBOOT_KIND for f in findings),
             poll_interval=interval,
             exclude=exclude,
         )
-        stored += self._store_findings(
-            entry_id,
-            detect_wifi(self._wifi, wifi, now, entry_id, thresholds),
-            now,
-            evidence,
-        )
+        wifi_findings = detect_wifi(self._wifi, wifi, now, entry_id, thresholds)
+        stored += self._store_findings(entry_id, wifi_findings, now, evidence)
         evidence.extend(self._wifi_holds(entry_id, now, context))
         stored += self._run_machine(now, evidence)
         self._prune(now)
         if stored or self._log_marks.get(entry_id) != mark_before:
             self.schedule_save()
+        if self._poll_observers:
+            self._notify(
+                "on_poll",
+                self._poll_facts(
+                    entry_id,
+                    data,
+                    now,
+                    interval,
+                    context,
+                    lines=accepted if fresh else (),
+                    findings=wifi_findings,
+                    stored_events=log_stored,
+                    dhcp=dhcp,
+                    exclude=exclude,
+                ),
+            )
         return stored
+
+    # -- poll observers (client stability) ------------------------------------------
+
+    def add_poll_observer(self, observer: PollObserver) -> Callable[[], None]:
+        """Call ``observer`` for every new poll; returns the unsubscribe."""
+        self._poll_observers.append(observer)
+
+        def unsubscribe() -> None:
+            if observer in self._poll_observers:
+                self._poll_observers.remove(observer)
+
+        return unsubscribe
+
+    def _notify(self, method: str, *args: Any) -> None:
+        """Call one observer method on every observer; errors stay there."""
+        for observer in tuple(self._poll_observers):
+            try:
+                getattr(observer, method)(*args)
+            except Exception:
+                _LOGGER.warning(
+                    "A network intelligence poll observer failed in %s",
+                    method,
+                    exc_info=True,
+                )
+
+    def _poll_facts(
+        self,
+        entry_id: str,
+        data: Any,
+        now: float,
+        interval: float | None,
+        context: WifiContext,
+        *,
+        lines: Iterable[LogEvent],
+        findings: Iterable[Finding],
+        stored_events: Iterable[NetEvent],
+        dhcp: tuple[frozenset[str], frozenset[str], frozenset[str]] | None,
+        exclude: frozenset[str],
+    ) -> PollFacts:
+        """The immutable facts of this poll for the observers (no I/O)."""
+        stored = tuple(stored_events)
+        if dhcp is not None:
+            leases, arp = dhcp[0], dhcp[1]
+        else:
+            leases = _upper_keys(getattr(data, "dhcp_leases", None))
+            arp = _upper_keys(getattr(data, "arp_table", None))
+        locs = self._wifi.loc
+        return PollFacts(
+            router=entry_id,
+            now=now,
+            interval=float(interval) if _positive(interval) else _DEFAULT_INTERVAL,
+            fresh_clients=context.clients is not None,
+            context=context,
+            wifi_lines=tuple(e for e in lines if e.category == CATEGORY_WIFI),
+            log_ok=getattr(data, "log_status", None) == LOG_STATUS_OK,
+            findings=tuple(f for f in findings if f.event),
+            stored_events=stored,
+            auth_attempts=frozenset(
+                e.id for e in stored if e.id in self._wifi_attempts
+            ),
+            loc={
+                mac: loc.router
+                for mac in context.clients or {}
+                if (loc := locs.get(mac)) is not None
+            },
+            lease_macs=leases,
+            arp_macs=arp,
+            down_routers=frozenset(self._down),
+            auth_failed=self._auth_failed(),
+            exclude=exclude,
+        )
 
     def _sync(self, now: float, mono: float | None) -> float:
         """Advance the machine clock; move or reset the detector state on a
@@ -817,6 +955,7 @@ class NetIntelligence:
             self._wifi.shift(step.shift)
             self._seen = {r: (t + step.shift, i) for r, (t, i) in self._seen.items()}
             self._open_seen = {k: t + step.shift for k, t in self._open_seen.items()}
+            self._notify("on_clock_shift", step.shift)
         if self.machine.prune_held:
             for state in self._infra.values():
                 state.clock_jumped()
@@ -2335,6 +2474,13 @@ def _finite(value: Any) -> bool:
 
 def _positive(value: Any) -> float | None:
     return float(value) if _finite(value) and value > 0 else None
+
+
+def _upper_keys(value: Any) -> frozenset[str]:
+    """Upper-case string keys of a dict (a MAC table); empty for anything else."""
+    if not isinstance(value, dict):
+        return frozenset()
+    return frozenset(k.upper() for k in value if isinstance(k, str))
 
 
 def _records(value: Any) -> tuple[dict[str, Any], ...] | None:
