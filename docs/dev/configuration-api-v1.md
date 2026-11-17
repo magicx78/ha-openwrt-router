@@ -7,34 +7,40 @@ Dieser Vertrag beschreibt, wie Module (zuerst `config-manager`, später Security
 Intelligence, Network Intelligence, Time Machine, Firmware Lifecycle, Self-Healing) mit dem
 Enterprise Core sprechen. Code, Docstrings und Bezeichner sind englisch, dieser Text deutsch.
 
+Stand: überarbeitet nach dem Review (Critic) und dem Abgleich mit `config-manager`. Alle
+Änderungen gegenüber Commit `5c9d248` stehen in Abschnitt 19.
+
 ## 0. Status: was es als Code gibt und was später kommt
 
 | Teil | Modul | Stand |
 |---|---|---|
-| Konstanten, Enums, Dataclasses, Helfer, `WriteAuthorization`, Protocols | `core_models.py` | **Code, getestet** |
-| `ErrorClass`, `ConfigApiError` + 24 Unterklassen | `core_errors.py` | **Code, getestet** |
-| `mask_secrets`, `is_secret_key`, `mask_value` | `core_masking.py` | **Code, getestet** |
+| Konstanten, Enums, Dataclasses, reine Helfer (Policy, Dedup, Aufbewahrung, Basis), `VerifiedActor`, `WriteAuthorization`, Protocols | `core_models.py` | **Code, getestet** |
+| `ErrorClass`, `ConfigApiError` + 27 Unterklassen | `core_errors.py` | **Code, getestet** |
+| Die eine Maskierung: `mask_secrets`, `mask_for_output`, `redact_text`, `is_secret_key`, `is_secret_option`, `is_secret_path`, `secret_digest_factory` | `core_masking.py` | **Code, getestet** |
 | `async_get_configuration_api(hass, version=1)` | `config_api.py` | später |
-| `ActionGuard` (Implementierung von `ActionGuardProtocol`) | `core_guard.py` | später |
+| `ActionGuard` (Implementierung von `ActionGuardProtocol`, mit Ledger) | `core_guard.py` | später |
 | `VersionStore` (Implementierung von `VersionStoreProtocol`) | `core_versions.py` | später |
 | `RouterRegistry`, Identität, Capability-Ableitung | `router_registry.py`, `router_identity.py`, `capabilities.py` | später |
-| Audit-Ring, Bus-Event, Dedup | `core_audit.py` | später |
-| Lebenszyklus, Verdrahtung in `__init__.py`, Option `config_backup_enabled` | `enterprise_core.py`, `config_flow.py` | später |
+| Zwei Audit-Ringe, Bus-Event, Dedup | `core_audit.py` | später |
+| Lebenszyklus, Verdrahtung in `__init__.py`, Option `config_backup_enabled`, Repair-Issue | `enterprise_core.py`, `config_flow.py` | später |
 | Gestufte ACL, TOFU-SSH-Pinning, Panel-Container „Enterprise“ | Abschnitt 18 | später, nur dokumentiert |
 
 Alles, was „später“ ist, steht hier als **Signatur**. Die Signaturen sind als Protocols in
 `core_models.py` festgeschrieben; ein Provider oder Modul kann heute schon dagegen
-programmieren und mit eigenen Test-Doubles testen.
+programmieren und mit eigenen Test-Doubles testen. Die reinen Regeln (wer darf was, welche
+Version wird dedupliziert, was die Aufbewahrung löscht, welche Basis gilt) sind schon heute
+als Funktionen im Code; die spätere Implementierung ruft genau diese Funktionen auf.
 
 Import für Module:
 
 ```python
 from custom_components.openwrt_router.core_models import (
-    Actor, BackupReason, Capability, ConfigRef, GuardedAction, ...
+    Actor, BackupReason, Capability, ConfigRef, GuardedAction, ProviderContext, ...
 )
 from custom_components.openwrt_router.core_errors import (
     ConfigApiError, ErrorClass, CapabilityUnavailableError, ...
 )
+from custom_components.openwrt_router.core_masking import mask_for_output, is_secret_key
 ```
 
 ## 1. Begriffe
@@ -46,7 +52,10 @@ from custom_components.openwrt_router.core_errors import (
 | Index | Metadaten aller Versionen im Store `openwrt_router.config_catalog`. Gehört dem Core. |
 | Provider | Das eine Modul, das Artefakte vom Router holt und analysiert (`config-manager`). |
 | Kritische Aktion | Braucht Antrag + Freigabe durch einen Admin-Benutzer. **Kritisch heißt nicht „schreibt“**: Export liest nur, ist aber kritisch, weil er alle Geheimnisse im Klartext herausgibt. |
-| Bindungsprüfsumme | Prüfsumme, an die eine Freigabe/Autorisierung gebunden ist (Abschnitt 6.4). |
+| Bindungsprüfsumme | Prüfsumme, an die eine Freigabe/Autorisierung gebunden ist (Abschnitt 6.6). |
+| `VerifiedActor` | Ein `Actor`, den der Core gerade gegen `hass.auth` geprüft hat (Abschnitt 6.2). Nur ihn nimmt der Guard an. |
+| Ledger | Liste der vom Guard ausgegebenen `WriteAuthorization`-IDs; `consume` akzeptiert nur IDs daraus. |
+| Basis | Die Version, gegen die Drift gemessen wird (Abschnitt 11.2). |
 
 ## 2. Versionierung und Zugriff
 
@@ -55,6 +64,7 @@ CONFIGURATION_API_VERSION = 1
 CONFIGURATION_API_MIN_VERSION = 1
 SUPPORTED_API_VERSIONS = (1,)
 PROVIDER_API_VERSION = 1
+SUPPORTED_PROVIDER_API_VERSIONS = (1,)
 BACKUP_METADATA_VERSION = 1
 
 async def async_get_configuration_api(
@@ -64,10 +74,21 @@ async def async_get_configuration_api(
 def ensure_supported_api_version(version: int) -> int: ...   # Code
 ```
 
+- `SUPPORTED_API_VERSIONS` gilt für Konsumenten der API, `SUPPORTED_PROVIDER_API_VERSIONS`
+  für `ConfigBackupProvider.provider_api_version`. Ein Provider mit einer anderen Version wird
+  bei `register_provider` mit `ApiVersionError` abgelehnt.
 - Innerhalb v1 nur **additive** Änderungen: neue optionale Felder mit Standardwert, neue
-  Enum-Werte, neue Event-Typen, neue Capability-Namen, neue Methoden. Alle Dataclasses sind
-  `kw_only`, neue Felder verschieben also keine Positionsargumente.
-- Ein Konsument muss unbekannte Enum-Werte in `str`-Feldern (`CoreEvent.type`,
+  Enum-Werte in **nicht persistierten** Enums, neue Event-Typen, neue Capability-Namen, neue
+  Methoden. Alle Dataclasses sind `kw_only`, neue Felder verschieben also keine
+  Positionsargumente.
+- **Neuer Wert in einem persistierten Enum ist nicht additiv.** Persistiert (über
+  `from_dict` gelesen) sind `ActorKind`, `BackupType`, `BackupReason`, `VersionStatus`,
+  `ErrorClass`, `ValidationStatus`, `DriftAckState`, `Severity`, `EventResult` und die
+  Artefaktschlüssel (`ArtifactKind`). Ein älterer Core würde einen neuen Wert als
+  `BackupMetadataError` ablehnen. Ein neuer Wert erhöht deshalb `BACKUP_METADATA_VERSION`
+  (bzw. `CORE_STORE_VERSION` für Audit und Drift-Bestätigungen) und bringt eine Migration in
+  `METADATA_MIGRATIONS` mit.
+- Ein Konsument muss unbekannte Werte in `str`-Feldern (`CoreEvent.type`,
   `CapabilityStatus.capability`/`reason`, `ApprovalRequest.action`) tolerieren.
 - Unbekannte Version (auch `True`, `0`, `"1"`) ⇒ `ApiVersionError` mit
   `details["supported_versions"]`.
@@ -90,10 +111,13 @@ except ApiVersionError as err:
 | `apr_` | Freigabe-Antrag | `new_id` |
 | `pln_` | Restore-Plan | `new_id` |
 | `wau_` | WriteAuthorization | nur der Guard |
+| `vac_` | Prüfung eines Akteurs (`VerifiedActor.verification_id`) | nur `async_verify_actor` |
 | `cor_` | Korrelations-ID | `new_id`, frei vom Aufrufer |
 
 `ROUTER_ID_NAMESPACE = 5fc97c09-217a-4ccb-af32-d954b049fecf` ändert sich nie.
 `is_valid_id(value, prefix)` prüft das Format (`<prefix><32 hex klein>`).
+`installation_key_id(key)` (16 hex) ist die öffentliche, nicht geheime Kennung eines
+Installations-Schlüssels (Abschnitt 11.3).
 
 ## 4. Identität und Registry
 
@@ -110,28 +134,34 @@ class RouterRegistryProtocol(Protocol):
     async def async_adopt(self, entry_id: str, orphan_router_id: str, *, actor: Actor) -> RouterRecord: ...
 ```
 
+`async_adopt` prüft `actor` neu gegen `hass.auth` (Abschnitt 6.2); nur ein Admin-Benutzer
+darf adoptieren.
+
 `RouterRecord`:
 
 | Feld | Typ | Bedeutung |
 |---|---|---|
-| `identity` | `RouterIdentity` | ID, Eintrag, Hostname, Host/Port, MACs, Modell, Board, Firmware, Rolle, APs, Interfaces, `fingerprint`, `status` |
+| `identity` | `RouterIdentity` | ID, Eintrag, Hostname, Host/Port, MACs, Modell, Board, Firmware, Rolle, APs, Interfaces, `fingerprint`, `identity_flags`, abgeleitet `status` |
 | `state` | `RecordState` | `active` / `orphaned` |
 | `connection` | `ConnectionInfo` | host, port, protocol, transport (`ubus`/`ssh_fallback`/`unknown`), nie Zugangsdaten |
 | `reachability` | `RouterReachability` | `online`/`offline`/`unknown`, letzte Erfolgs-/Versuchszeit |
 | `firmware` | `FirmwareInfo` | distribution, version, revision, target, kernel, architecture, board_name, package_manager |
-| `capabilities` | `Mapping[str, CapabilityStatus]` | Abschnitt 5 |
+| `capabilities` | `Mapping[str, CapabilityStatus]` | Abschnitt 5, schreibgeschützt (`MappingProxyType`) |
 | `registered_at`, `orphaned_at`, `adopted_at` | `datetime \| None` | UTC |
 | `previous_entry_ids` | `tuple[str, ...]` | Einträge vor einer Adoption |
 | `router_id`, `entry_id` | Eigenschaften | `entry_id` ist `None`, solange verwaist |
 
-`IdentityStatus`: `unverified`, `confirmed`, `changed` (Hardwaretausch vermutet),
-`duplicate_suspected`. IP- oder Hostname-Wechsel ändert die ID nie; nichts wird automatisch
+Identität: `RouterIdentity.identity_flags: frozenset[IdentityFlag]` hält **alle** Zweifel
+gleichzeitig (`unverified`, `changed` = Hardwaretausch vermutet, `duplicate_suspected`). Die
+Eigenschaft `status: IdentityStatus` ist daraus abgeleitet
+(`primary_identity_status`): `changed` vor `duplicate_suspected` vor `unverified`; keine
+Flagge = `confirmed`. IP- oder Hostname-Wechsel ändert die ID nie; nichts wird automatisch
 zusammengeführt.
 
 ```python
 record = api.registry.get_by_entry(entry.entry_id)
-if record.identity.status is IdentityStatus.DUPLICATE_SUSPECTED:
-    return  # nichts automatisch tun
+if IdentityFlag.DUPLICATE_SUSPECTED in record.identity.identity_flags:
+    return  # nichts automatisch tun, auch wenn status "changed" zeigt
 
 for cand in api.registry.adoption_candidates(new_entry_id):
     _LOGGER.debug("candidate %s, %d shared MACs", cand.router_id, len(cand.matched_macs))
@@ -150,9 +180,9 @@ await api.registry.async_adopt(new_entry_id, cand.router_id, actor=admin_actor)
 | `reason` | `str` | `CapabilityReason` (`ok`, `no_data_yet`, `not_checked`, `not_probed`, `not_detected`, `permission_denied`, `transport_unsupported`, `unsupported_firmware`, `router_offline`, `entry_not_loaded`, `disabled`, `no_provider`, `provider_declined`) oder `provider:<code>` |
 | `source` | `str` | z. B. `features.has_iwinfo`, `api.uses_ssh_fallback`, `probe:config_manager` |
 | `detected_at` | `datetime` | UTC |
-| `reason_text` | `str \| None` | Klartext für die UI |
+| `reason_text` | `str \| None` | Klartext für die UI; nie Konfigurationswerte, in `to_dict()` geschrubbt |
 | `required_permissions` | `tuple[str, ...]` | fehlende rpcd-Rechte, z. B. `cgi-io:backup` |
-| `detail` | `Mapping[str, Any]` | Einzelergebnisse, z. B. `{"wireless": True, "firewall": False}` für `config.uci_read`; in `to_dict()` maskiert |
+| `detail` | `Mapping[str, Any]` | Einzelergebnisse, z. B. `{"wireless": True, "firewall": False}` für `config.uci_read`; schreibgeschützt, in `to_dict()` maskiert |
 | `available` | Eigenschaft | `state is AVAILABLE` |
 
 Namen (alle mit Punkt):
@@ -162,20 +192,25 @@ Namen (alle mit Punkt):
 | Transport | `transport.ubus`, `transport.ssh` | `api.uses_ssh_fallback` |
 | Daten | `data.system_board`, `data.wireless`, `data.hostapd_clients`, `data.dhcp_leases`, `data.lldp`, `data.logs`, `data.iwinfo`, `data.services`, `data.uci` | `coordinator.data`, `FEATURE_CAPABILITIES` |
 | Stream, Pakete | `stream.ubus`, `pkg.apk`, `pkg.opkg` | `coordinator.data` |
-| Konfiguration (Provider) | `config.capture`, `config.backup`, `config.validate`, `config.diff`, `config.drift`, `config.restore_dry_run`, `config.restore`, `config.export` | `provider.supported(router)` |
-| Konfiguration (Router-Probe) | `config.cgi_backup`, `config.ssh_root`, `config.uci_read`, `config.packagelist` | `provider.async_probe(conn)` |
+| Konfiguration (Provider) | `config.capture`, `config.backup`, `config.validate`, `config.diff`, `config.drift`, `config.restore_dry_run`, `config.restore`, `config.export` | `provider.supported(router)` + `async_probe` |
+| Konfiguration (Router-Probe) | `config.cgi_backup`, `config.ssh_root`, `config.uci_read`, `config.packagelist` | `provider.async_probe(conn, ctx)` |
 
 Regeln:
 
 - Proben (`PROBED_CAPABILITIES`) laufen beim Setup, nach einer ACL-Neuverteilung und nach
   einem Firmware-Wechsel. **Nie im Poll.** Vor der ersten Probe: `unknown`/`not_probed`.
+- `provider.supported(router)` ist die grobe Ja/Nein-Vorprüfung ohne Router-Aufruf.
+  `async_probe` meldet **jede** `config.*`-Capability, über die der Provider entscheidet,
+  auch nicht verfügbare (z. B. `config.restore` = `unavailable` in Phase 1, während alle
+  anderen verfügbar sind). Nicht gemeldete `config.*`-Namen bleiben `unknown`/`not_probed`.
 - Ohne Provider: alle `config.*` `unavailable`/`no_provider`.
 - Option `config_backup_enabled` aus (`OPTION_CONFIG_BACKUP_ENABLED`): alle `config.*`
   `unavailable`/`disabled`, es wird nicht geprobt.
 - `config.restore` ist in Phase 1 `unavailable`, bis der Provider es meldet (Abschnitt 16).
-- Reservierte Namensräume `security.`, `diag.`, `log.` (`RESERVED_NAMESPACES`): der Core
-  vergibt dort selbst nichts. Module registrieren ein Präfix (Abschnitt 12.4) und melden
-  darunter eigene Namen.
+- Reservierte Capability-Namensräume `security.`, `diag.`, `log.` (`RESERVED_NAMESPACES`):
+  der Core vergibt dort selbst keine Capability. Module registrieren ein Präfix
+  (Abschnitt 12.5) und melden darunter eigene Capability-Namen. Für **Event-Typen** gilt eine
+  andere Regel (Abschnitt 12.3).
 
 ```python
 if not api.registry.has_capability(router_id, Capability.CONFIG_UCI_READ):
@@ -186,7 +221,9 @@ readable = [name for name, ok in status.detail.items() if ok]
 
 ```python
 # Provider-Seite: Probe (nur lesend, nur über conn.api)
-async def async_probe(self, conn: RouterConnection) -> Mapping[str, CapabilityStatus]:
+async def async_probe(
+    self, conn: RouterConnection, ctx: ProviderContext
+) -> Mapping[str, CapabilityStatus]:
     now = utcnow()
     ok = await conn.api.async_probe_cgi_backup()   # neue Methode in api.py (config-manager)
     return {
@@ -198,49 +235,103 @@ async def async_probe(self, conn: RouterConnection) -> Mapping[str, CapabilitySt
             detected_at=now,
             required_permissions=() if ok else ("cgi-io:backup",),
         ),
+        Capability.CONFIG_RESTORE: CapabilityStatus(
+            capability=Capability.CONFIG_RESTORE,
+            state=CapabilityState.UNAVAILABLE,
+            reason="provider:phase1",
+            source="probe:config_manager",
+            detected_at=now,
+        ),
     }
 ```
 
-## 6. Guard: Klassen, Entscheidung, Autorisierung
+## 6. Guard: Bedrohungsmodell, Akteure, Entscheidung, Autorisierung
 
-### 6.1 Aktionen
+### 6.1 Bedrohungsmodell
+
+| | |
+|---|---|
+| **Vertraut** | Code im HA-Prozess: Core und Module. Python kann private Sentinels (`_mint_write_authorization`, `_VERIFY_SENTINEL`) nicht erzwingen. |
+| **Abgewehrt** | Nicht-Admin-Benutzer und Automationen, die schreibende oder kritische Aktionen auslösen; ein Modul, das (aus Versehen oder durch einen Fehler) `Actor(is_admin=True)` weitergibt; Wiederverwendung einer Freigabe durch einen anderen Akteur; eine Freigabe für Version A, die Version B oder ein anderes Artefakt exportiert; doppelte Nutzung einer `WriteAuthorization`; eine Autorisierung, die der Guard nicht ausgegeben hat; Löschen fremder Versionen über eine Freigabe eines anderen Routers; Pfadausbruch über `StorageRef.locator`; Geheimnisse in Freitext, Events und Fehlern. |
+| **Nicht abgewehrt** | Ein Modul, das absichtlich private Helfer importiert oder Store-Dateien direkt liest; ein kompromittierter HA-Admin; Root auf dem Host; HA-Backups, die `.storage` (Installations-Schlüssel) und Klartext-Archive enthalten. |
+| **Quelle der Wahrheit** | `hass.auth`. Jede API-Methode mit `actor` und der Guard lösen den Benutzer **bei jedem Aufruf neu** auf. Ein vom Aufrufer gesetztes `Actor.is_admin` wird ignoriert. |
+
+### 6.2 Akteure und Prüfung
+
+- `Actor` ist ein Datensatz, kein Berechtigungsnachweis. `async_actor_from_context(hass,
+  context, module=None)` baut ihn aus einem HA-`Context` (Reihenfolge: `user_id` ⇒ `user`,
+  sonst `module` ⇒ `module`, sonst `parent_id` ⇒ `automation`, sonst `system`).
+- `async_verify_actor(hass, actor) -> VerifiedActor` prüft neu: Benutzer existiert und ist
+  aktiv (sonst `AuthorizationError`, `reason=unknown_user`); `is_admin` nur, wenn der
+  Benutzer aktiv, Admin und **nicht** systemgeneriert ist. Modul-, Automations- und
+  Systemakteure kommen ohne Adminrechte durch.
+- `async_resolve_actor(hass, context, module=None)` = beides in einem Schritt. Der Guard
+  bietet dieselben Methoden (`guard.async_verify_actor`, `guard.async_resolve_actor`).
+- `VerifiedActor` kann nur `async_verify_actor` bauen (Sentinel, sonst `TypeError`). Er gilt
+  `ACTOR_VERIFICATION_TTL` (60 s); danach lehnt der Guard mit
+  `actor_verification_expired` ab.
+
+```python
+actor = await api.guard.async_resolve_actor(call.context, module="config_manager")
+```
+
+### 6.3 Aktionen
 
 | Aktion (`GuardedAction`) | Klasse | Wer darf | Bindung (`checksum`) |
 |---|---|---|---|
-| `backup` | mutating | Benutzer, Automation, Modul, System | keine |
+| `backup` | mutating | Admin-Benutzer, Automation, Modul, System | keine |
 | `protect` | mutating | nur Admin-Benutzer | `binding_checksum(version_id, protected)` |
 | `drift_ack` | mutating | nur Admin-Benutzer | `binding_checksum(router_id, drift_id, state)` |
-| `export` | **critical** | nur Admin-Benutzer (Antrag und Freigabe) | `binding_checksum(version_id)` |
-| `delete` | **critical** | Antrag: Benutzer/Modul; Freigabe: Admin-Benutzer | `binding_checksum(*sorted(version_ids))` |
-| `prune` | mutating | nur System/Modul (Aufbewahrung) | `binding_checksum(*sorted(version_ids))` |
-| `restore` | **critical** | Antrag: Benutzer/Modul; Freigabe: Admin-Benutzer | `plan.checksum` |
+| `export` | **critical** | nur Admin-Benutzer (Antrag und Freigabe) | `binding_checksum(version_id, artifact)` |
+| `delete` | **critical** | Antrag: Admin-Benutzer, Modul, System; Freigabe: Admin-Benutzer | `binding_checksum(*sorted(version_ids))` |
+| `prune` | mutating | nur System (die Aufbewahrung des Core) | `binding_checksum(*sorted(version_ids))` |
+| `restore` | **critical** | Antrag: Admin-Benutzer, Modul; Freigabe: Admin-Benutzer | `plan.checksum` |
 | `adopt` | mutating | nur Admin-Benutzer | `binding_checksum(entry_id, orphan_router_id)` |
-| `acl_deploy` | **critical** | Freigabe: Admin-Benutzer | später festgelegt |
+| `acl_deploy` | **critical** | nur Admin-Benutzer | `binding_checksum(router_id, acl_checksum)` |
+| `installation_key_reset` | **critical** | nur Admin-Benutzer | `router_id = "-"` (flottenweit), `binding_checksum(last_key_id)` mit der `installation_key_id` der neuesten Version |
 | `<modul>.<aktion>` | bei `register_action` | bei `register_action` | frei |
 
-Tabellen im Code: `ACTION_CLASSES`, `ADMIN_USER_ONLY_ACTIONS`, `SYSTEM_ONLY_ACTIONS`.
+Tabellen im Code: `ACTION_CLASSES`, `ADMIN_USER_ONLY_ACTIONS`, `SYSTEM_ONLY_ACTIONS`. Die
+Regel selbst ist `policy_denial_reason(action, actor)`:
+
+1. kein `VerifiedActor` ⇒ `unverified_actor`; abgelaufen ⇒ `actor_verification_expired`
+2. unbekannte Aktion ⇒ `unknown_action`
+3. `SYSTEM_ONLY_ACTIONS` und kein System ⇒ `system_only`
+4. `ADMIN_USER_ONLY_ACTIONS` und kein geprüfter Admin-Benutzer ⇒ `not_admin`
+5. `read` ⇒ erlaubt
+6. **Benutzer ohne Admin ⇒ `not_admin` für jede mutating- oder critical-Aktion**, auch
+   `backup`
+7. critical und Automation ⇒ `automation_not_allowed`
 
 - **read:** keine Autorisierung. Auditiert werden nur Dry Run und Kompatibilitätsprüfung
   (`restore_checked`); Lesen der Live-Konfiguration, Listen und Vergleiche nicht (zu häufig).
 - **mutating:** sofortige Entscheidung `approved` oder `denied`.
 - **critical:** erster Aufruf ⇒ `pending` + `ApprovalRequest`; ein Admin-Benutzer gibt frei
   (`approve`) oder lehnt ab (`reject`); erst ein zweiter `authorize(..., approval_id=…)`
-  liefert `approved` + `WriteAuthorization`. Antrag gilt `APPROVAL_TTL` (15 min), eine
-  Freigabe erlaubt **genau eine** Ausführung (beim Export: einen Download).
-- `prune` löscht nie eine `protected`-Version: solche IDs werden übersprungen und fehlen im
-  Rückgabewert.
+  **desselben Antragstellers** liefert `approved` + `WriteAuthorization`. Antrag gilt
+  `APPROVAL_TTL` (15 min), eine Freigabe erlaubt **genau eine** Ausführung (beim Export:
+  einen Download).
+- Selbstfreigabe ist erlaubt: Ein Admin darf seinen eigenen Antrag freigeben
+  (Ein-Admin-Haushalt). Die zweite Stufe ist eine bewusste Bestätigung, kein
+  Vier-Augen-Prinzip.
 
-### 6.2 Entscheidung
+### 6.4 Entscheidung, Freigabe, Einlösen
 
 ```python
 class ActionGuardProtocol(Protocol):
+    async def async_verify_actor(self, actor: Actor) -> VerifiedActor: ...
+    async def async_resolve_actor(self, context: Context | None, *,
+                                  module: str | None = None) -> VerifiedActor: ...
     def authorize(
-        self, action: str, router_id: str, actor: Actor, *,
+        self, action: str, router_id: str, actor: VerifiedActor, *,
         subject_id: str | None = None, checksum: str | None = None,
         approval_id: str | None = None, correlation_id: str | None = None,
     ) -> AuthorizationDecision: ...
-    def approve(self, approval_id: str, *, actor: Actor) -> ApprovalRequest: ...
-    def reject(self, approval_id: str, *, actor: Actor, reason: str | None = None) -> ApprovalRequest: ...
+    def consume(self, authorization: WriteAuthorization, *, action: str,
+                router_id: str, checksum: str | None = None) -> None: ...
+    def approve(self, approval_id: str, *, actor: VerifiedActor) -> ApprovalRequest: ...
+    def reject(self, approval_id: str, *, actor: VerifiedActor,
+               reason: str | None = None) -> ApprovalRequest: ...
     def get_approval(self, approval_id: str) -> ApprovalRequest: ...
     def pending_approvals(self, router_id: str | None = None) -> tuple[ApprovalRequest, ...]: ...
     def register_action(self, name: str, action_class: ActionClass, *, module: str,
@@ -258,34 +349,55 @@ class ActionGuardProtocol(Protocol):
 | `audit_id` | `str` | `event_id` des Audit-Eintrags |
 | `authorization` | `WriteAuthorization \| None` | nur bei `approved` (nicht in `repr`) |
 | `approval_request` | `ApprovalRequest \| None` | nur bei `pending` |
-| `reason` | `str \| None` | bei `denied`, z. B. `not_admin`, `system_only`, `unknown_action`, `approval_rejected` |
+| `reason` | `str \| None` | bei `denied`: ein Grund aus 6.3, dazu `approval_rejected` |
 | `approved` | Eigenschaft | `state is APPROVED` |
 
 `ApprovalRequest`: `approval_id`, `action`, `router_id`, `subject_id` (Plan, Version oder
 Listenschlüssel), `checksum`, `requested_by`, `requested_at`, `expires_at`, `status`
-(`pending`/`approved`/`rejected`/`expired`/`used`), `decided_by`, `decided_at`, `reason`,
-`correlation_id`.
+(`pending`/`approved`/`rejected`/`expired`/`used`), `decided_by`, `decided_at`, `reason`
+(Freitext, in `to_dict()` geschrubbt), `correlation_id`.
 
-### 6.3 WriteAuthorization
+- **Freigeben/Ablehnen** (`approver_denial_reason`): nur ein frischer `VerifiedActor`, der
+  Admin-Benutzer ist; Antrag muss `pending` und nicht abgelaufen sein. Gründe:
+  `unverified_actor`, `actor_verification_expired`, `not_admin`, `not_pending`, `expired`.
+- **Einlösen** (`check_redeem`): nur der Antragsteller (`Actor.same_principal`: gleicher
+  `user_id`, gleiches Modul, oder beide System), neu geprüft; ein Benutzer muss noch Admin
+  sein. Aktion, Router und Bindungsprüfsumme müssen passen. Fehler:
+  `AuthorizationError` (Akteur nicht geprüft), `ApprovalRequiredError` (noch `pending`),
+  sonst `ApprovalInvalidError` mit `details["reason"]` ∈ `rejected`, `expired`, `used`,
+  `action_mismatch`, `router_mismatch`, `checksum_mismatch`, `not_requester`, `not_admin`.
+- **Offene Anträge überleben keinen Neustart.** Sie liegen nur im Speicher; nach einem
+  Neustart ist ein Antrag unbekannt (`ApprovalInvalidError`) und muss neu gestellt werden.
+  Der Audit-Eintrag des Antrags bleibt.
 
-- Nur der Guard prägt sie (`_mint_write_authorization`, privater Sentinel). Direkter Aufruf
-  von `WriteAuthorization(...)` ⇒ `TypeError`.
+### 6.5 WriteAuthorization, Ledger und `consume`
+
+- Nur der Guard prägt sie (`_mint_write_authorization`, privater Sentinel) und trägt ihre ID
+  ins **Ledger** ein. Direkter Aufruf von `WriteAuthorization(...)` ⇒ `TypeError`.
 - Gebunden an `action`, `router_id` und (optional) `checksum`; gültig
-  `WRITE_AUTHORIZATION_TTL` (5 min).
-- Wer handelt, ruft **unmittelbar vorher** `consume(action=…, router_id=…, checksum=…)`.
-  Jeder Versuch verbraucht sie, auch ein fehlgeschlagener (fail closed). Fehler:
-  `AuthorizationError` mit `details["reason"]` ∈ `already_used`, `expired`,
-  `action_mismatch`, `router_mismatch`, `checksum_mismatch`.
+  `WRITE_AUTHORIZATION_TTL` (5 min). `authorization.actor` ist der geprüfte Akteur; der
+  Store setzt daraus `created_by`.
+- Wer handelt (Store, Provider vor dem Router-Schreiben), ruft **unmittelbar vorher**
+  `guard.consume(authorization, action=…, router_id=…, checksum=…)`. Die frühere öffentliche
+  Methode `WriteAuthorization.consume` heißt jetzt `_consume` und ist Guard-intern.
+- `consume` prüft: ID im Ledger (sonst `unknown_authorization`), einmalig (`already_used`),
+  Ablauf (`expired`), Bindung (`action_mismatch`, `router_mismatch`, `checksum_mismatch`).
+  Jeder Versuch verbraucht sie, auch ein fehlgeschlagener (fail closed). Erfolg und
+  Fehlschlag werden auditiert (`security.authorization_consumed` /
+  `security.authorization_denied`).
+- `consume` ist **synchron** und läuft auf dem Event-Loop, nie in einem Executor-Job; so
+  gibt es kein Rennen zwischen Prüfen und Verbrauchen.
 
-### 6.4 Bindungsprüfsumme
+### 6.6 Bindungsprüfsumme
 
 `binding_checksum(*parts)` = sha256 über die kanonische JSON-Liste der Teile. Reihenfolge
-zählt. Eine Freigabe für Version A kann so nie Version B exportieren, eine Freigabe für
-„schützen“ nie „Schutz aufheben“.
+zählt. Eine Freigabe für Version A kann so nie Version B exportieren, eine Freigabe für das
+Archiv nie den UCI-Snapshot, eine Freigabe für „schützen“ nie „Schutz aufheben“.
 
 ```python
 # Modul: Backup vor einer eigenen Aktion (mutating)
-decision = api.guard.authorize(GuardedAction.BACKUP, router_id, Actor.for_module("firmware"))
+actor = await api.guard.async_verify_actor(Actor.for_module("firmware"))
+decision = api.guard.authorize(GuardedAction.BACKUP, router_id, actor)
 if not decision.approved:
     raise AuthorizationError(decision.reason or "denied", router_id=router_id)
 
@@ -294,7 +406,7 @@ api.guard.register_action("self_healing.restart_service", ActionClass.CRITICAL,
                           module="self_healing")
 ```
 
-## 7. Versionsspeicher (`VersionStoreProtocol`)
+## 7. Versionsspeicher
 
 ### 7.1 Ablage
 
@@ -308,6 +420,14 @@ api.guard.register_action("self_healing.restart_service", ActionClass.CRITICAL,
 | Grenzen | 50 MiB je Router, 250 MiB gesamt (`DEFAULT_*_STORAGE_LIMIT_BYTES`) |
 | Router entfernt | Ordner nach `removed/<router_id>/`; nie automatisch gelöscht |
 
+**Locator-Regeln:** `StorageRef.locator` ist **ein** Dateiname
+(`STORAGE_LOCATOR_PATTERN` = `[A-Za-z0-9._-]+`), ohne `..`, ohne führenden Punkt, ohne
+Trenner. `validate_locator` prüft das beim Bau jedes `StorageRef`
+(`InvalidStorageRefError`, `reason=bad_locator`). `resolve_artifact_path(router_dir,
+locator)` löst Symlinks auf (`realpath`, im Executor) und lehnt alles außerhalb des
+Router-Ordners ab (`reason=path_escape`). Beim Lesen aus dem Index wird ein ungültiger
+Locator zu `BackupMetadataError`.
+
 ### 7.2 Sweep beim Start (`async_sweep() -> SweepReport`)
 
 1. `*.partial` löschen (`partial_deleted`).
@@ -316,17 +436,24 @@ api.guard.register_action("self_healing.restart_service", ActionClass.CRITICAL,
 3. Indexeinträge ohne Datei: `validation.status = missing` (`marked_missing`).
 4. Event `configuration.storage_swept`, nur wenn ein Zähler > 0 ist.
 
-### 7.3 Operationen
+### 7.3 Lesesicht und Store (getrennt)
+
+Module bekommen über `api.versions` nur die **Lesesicht** ohne Bytes. Der Store selbst ist
+core-intern; kein Modul bekommt ihn.
 
 ```python
-class VersionStoreProtocol(Protocol):
-    async def async_put_version(self, router_id: str,
-        artifacts: Mapping[str, ArtifactPayload], meta: VersionMeta, *,
-        authorization: WriteAuthorization) -> PutVersionResult: ...
+class VersionReadView(Protocol):                       # api.versions
     async def async_list_versions(self, router_id: str | None = None, *,
         since: datetime | None = None, limit: int = 50) -> tuple[BackupRecord, ...]: ...
     async def async_get_version(self, version_id: str) -> BackupRecord: ...
-    async def async_read_artifact(self, storage_ref: StorageRef) -> bytes: ...
+    async def async_list_drift_acks(self, router_id: str) -> tuple[DriftAck, ...]: ...
+    def usage_bytes(self, router_id: str | None = None) -> int: ...
+
+class VersionStoreProtocol(VersionReadView, Protocol):  # nur der Core
+    async def async_put_version(self, router_id: str,
+        artifacts: Mapping[str, ArtifactPayload], meta: VersionMeta, *,
+        authorization: WriteAuthorization) -> PutVersionResult: ...
+    async def async_read_artifact(self, version_id: str, kind: str) -> bytes: ...
     async def async_delete_versions(self, version_ids: Sequence[str], *,
         authorization: WriteAuthorization) -> tuple[str, ...]: ...
     async def async_set_protected(self, version_id: str, protected: bool, *,
@@ -335,80 +462,156 @@ class VersionStoreProtocol(Protocol):
         validation: ValidationInfo) -> BackupRecord: ...
     async def async_put_drift_ack(self, ack: DriftAck, *,
         authorization: WriteAuthorization) -> DriftAck: ...
-    async def async_list_drift_acks(self, router_id: str) -> tuple[DriftAck, ...]: ...
     async def async_sweep(self) -> SweepReport: ...
     async def async_archive_router(self, router_id: str) -> None: ...
-    def usage_bytes(self, router_id: str | None = None) -> int: ...
 ```
+
+Bytes bekommt ein Provider nur über den **bereichsgebundenen Leser** in
+`ProviderContext.read(version_id, kind)` (Abschnitt 10): Er bedient nur die Versionen des
+jeweiligen Aufrufs und prüft sha256 gegen den Index. Ein `read_artifact` für Module gibt es
+nicht; der Export läuft über die kritische Aktion `export`.
 
 | Operation | Autorisierung | Verhalten | Fehler |
 |---|---|---|---|
-| `async_put_version` | `backup` | prüft sha256 jedes `ArtifactPayload`, Grenzen, schreibt atomar. **Dedup:** gleicher `content_hash` (oder ohne Archiv gleicher `uci_hash`) wie die neueste Version des Routers ⇒ nur `last_seen_at` setzen, `created=False`, keine Dateien | `BackupIntegrityError`, `ArtifactTooLargeError`, `StorageFullError`, `StorageError` |
+| `async_put_version` | `backup` | `consume`, prüft sha256 jedes `ArtifactPayload`, Grenzen, schreibt atomar; `created_by = authorization.actor`; **Dedup** nach 7.4. Eine `failed`-Version ohne Artefakte bekommt trotzdem einen Indexeintrag (Verlauf). | `AuthorizationError`, `BackupIntegrityError`, `ArtifactTooLargeError`, `StorageFullError`, `StorageError` |
 | `async_list_versions` | – | neueste zuerst, `limit` ≤ `MAX_LIST_LIMIT` (500) | – |
 | `async_get_version` | – | | `BackupNotFoundError` |
-| `async_read_artifact` | – | prüft `storage_format` und sha256 | `UnsupportedStorageFormatError`, `BackupIntegrityError`, `StorageError` |
-| `async_delete_versions` | `delete` oder `prune` | Rückgabe: tatsächlich gelöschte IDs; `prune` überspringt `protected` | `BackupNotFoundError`, `StorageError` |
+| `async_read_artifact` | – (core-intern) | prüft Locator, `storage_format` und sha256 | `InvalidStorageRefError`, `UnsupportedStorageFormatError`, `BackupIntegrityError`, `StorageError` |
+| `async_delete_versions` | `delete` oder `prune` | `delete`: vorher `validate_deletion` (fremde IDs ⇒ `AuthorizationError` `router_mismatch`; geschützte ⇒ `VersionProtectedError`, nichts gelöscht). `prune`: nur IDs aus `plan_retention`. Rückgabe: gelöschte IDs | `BackupNotFoundError`, `VersionProtectedError`, `StorageError` |
 | `async_set_protected` | `protect` | | `BackupNotFoundError` |
-| `async_set_validation` | – (core-intern) | speichert Prüfergebnis | `BackupNotFoundError` |
+| `async_set_validation` | – (core-intern) | speichert Prüfergebnis; `invalid`/`corrupt`/`missing` ⇒ Event `configuration.integrity_failed` | `BackupNotFoundError` |
 | `async_put_drift_ack` | `drift_ack` | ersetzt eine frühere Bestätigung derselben `drift_id` | – |
 | `async_archive_router` | – (Lebenszyklus) | verschiebt nach `removed/` | `StorageError` |
 
+Sperren: Die API hält den Router-Lock für jede schreibende Operation (Abschnitt 8); der
+Store hat zusätzlich eine eigene interne Sperre für seinen Index (mehrere Router schreiben
+in denselben Store).
+
 ```python
-# Modul (z. B. Zeitplan von config-manager) legt eine Version direkt ab
-decision = api.guard.authorize(GuardedAction.BACKUP, router_id, Actor.for_module("config_manager"))
-collected = await provider.async_collect(conn, request)
-result = await api.versions.async_put_version(
+# Modul (z. B. config-manager außerhalb der Warteschlange) legt eine selbst geholte Version ab.
+# Erst holen (nur lesend), DANN autorisieren: die Autorisierung gilt nur 5 min.
+collected = await provider.async_collect(conn, request, ctx)
+actor = await api.guard.async_verify_actor(Actor.for_module("config_manager"))
+decision = api.guard.authorize(GuardedAction.BACKUP, router_id, actor)
+if not decision.approved:
+    raise AuthorizationError(decision.reason or "denied", router_id=router_id)
+result = await api.async_put_version(
     router_id, collected.artifacts, collected.meta, authorization=decision.authorization
 )
 if not result.created:
     _LOGGER.debug("unchanged since %s", result.record.created_at)
 ```
 
+### 7.4 Dedup beim Ablegen
+
+`dedup_candidate(records, backup_type)` + `should_deduplicate(candidate, meta,
+artifact_kinds)`:
+
+1. Kandidat ist die neueste Version **desselben** `backup_type` mit Status `ok` oder
+   `partial`, deren `validation` nicht `invalid`, `corrupt` oder `missing` ist. `failed`
+   nimmt nie teil.
+2. Nur die Gründe `scheduled` und `drift` (`DEDUP_REASONS`) können ein Dedup-Treffer sein.
+   `manual`, alle `pre_*`, `incident`, `migration`, `import` und jede Version mit
+   `links.incident_id` legen **immer** eine neue Version an (keine Notiz, kein Grund geht
+   verloren).
+3. Der neue Status muss dem des Kandidaten gleichen (`partial` dedupliziert nie gegen `ok`
+   und umgekehrt), ein neuer `failed` nie.
+4. Gleiche Artefaktarten; mit Archiv gleicher `content_hash`, ohne Archiv gleicher
+   `uci_hash`. Beide Hashes kommen **immer vom Provider**; der Core rechnet sie nie nach.
+5. Treffer ⇒ nur `last_seen_at` wird gesetzt, `PutVersionResult(created=False)`, keine
+   Dateien, kein `backup_created`-Event.
+
+### 7.5 Aufbewahrung
+
+Nur der Core löscht im Rahmen der Aufbewahrung (Aktion `prune`, nur System). Ein Modul
+liefert die Regel, der Core führt sie aus.
+
+```python
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RetentionPolicy:
+    max_versions: int | None = None
+    max_age: timedelta | None = None
+    max_bytes_per_router: int | None = None
+
+api.set_retention_policy(RetentionPolicy(max_versions=30, max_age=timedelta(days=90)),
+                         module="config_manager")
+results = await api.async_apply_retention()      # tuple[RetentionResult, ...], je Router
+```
+
+`plan_retention(router_id, records, policy)`:
+
+- **Immer behalten**: geschützte Versionen (`KeepReason.PROTECTED`) und die neueste
+  verwendbare Version (`usable` = Status `ok` und Validierung `unverified`/`valid`,
+  `KeepReason.NEWEST_VALID`). Sie zählen zuerst gegen die Grenzen.
+- Danach, neueste zuerst: älter als `max_age`, jenseits von `max_versions` oder über
+  `max_bytes_per_router` ⇒ löschen; sonst `KeepReason.WITHIN_POLICY`.
+- `RetentionResult(router_id, evaluated_at, deleted, kept)`: **jede** bewertete Version
+  steht in `deleted` oder mit Grund in `kept`; nichts geschieht still. Event
+  `configuration.retention_applied` (Audit-Pflicht).
+- `StorageFullError` beim Ablegen: der Core wendet zuerst die Aufbewahrung **dieses** Routers
+  an und versucht es genau einmal neu; scheitert es wieder, `configuration.backup_failed`
+  mit `error_class=storage_full`. Es wird nie über Router hinweg gelöscht.
+
 ## 8. Operationen der Configuration API
 
 `ConfigurationApiProtocol` (Objekt aus `async_get_configuration_api`). Alle Methoden mit
-Router-Bezug werfen `RouterNotFoundError`, wenn die ID unbekannt ist.
+Router-Bezug werfen `RouterNotFoundError`, wenn die ID unbekannt ist. Jede Methode mit
+`actor: Actor` prüft den Akteur neu gegen `hass.auth` (Abschnitt 6.2).
 
 | Methode | Klasse | Rückgabe | Wichtige Fehler |
 |---|---|---|---|
-| `api_version`, `registry`, `guard`, `versions`, `provider_id` | – | Eigenschaften | – |
+| `api_version`, `registry`, `guard`, `versions` (`VersionReadView`), `provider_id` | – | Eigenschaften | – |
 | `register_provider(provider)` | – | Abmelde-Callback | `ProviderConflictError`, `ApiVersionError` (Provider-Version) |
-| `async_get_installation_key()` | – | `bytes` (32) | – |
+| `async_get_installation_key()` | – | `bytes` (32) | `InstallationKeyLostError` |
+| `installation_key_state` | – | `InstallationKeyState` | – |
+| `async_request_installation_key_reset(*, actor)` | critical, Admin | `ApprovalRequest` | `AuthorizationError` |
+| `async_reset_installation_key(approval_id, *, actor)` | critical | `None` | `ApprovalInvalidError` |
+| `async_get_baseline(router_id, *, baseline_backup_id=None)` | read | `Baseline \| None` | `BackupNotFoundError` |
 | `async_capture(router_id, *, actor, configs=None)` | read | `ConfigSnapshot` | `CapabilityUnavailableError`, `RouterUnavailableError`, `ProviderError` |
 | `async_list_backups(router_id=None, *, since=None, limit=50)` | read | `tuple[BackupRecord, ...]` | – |
 | `async_get_backup(backup_id)` | read | `BackupRecord` | `BackupNotFoundError` |
 | `async_validate_backup(backup_id)` | read | `BackupRecord` (mit neuer `validation`) | `BackupNotFoundError` |
 | `async_compare(base, other, *, actor)` | read | `ConfigDiff` | `BackupNotFoundError`, `CapabilityUnavailableError` |
-| `async_detect_drift(router_id, *, actor, baseline_backup_id=None)` | read | `DriftReport` | `BackupNotFoundError` (keine Basis), `RouterUnavailableError` |
+| `async_detect_drift(router_id, *, actor, baseline_backup_id=None)` | read | `DriftReport` | `BackupNotFoundError` (keine Basis), `RouterUnavailableError`, `InstallationKeyLostError` |
 | `async_check_restore_compatibility(backup_id, target_router_id, *, actor)` | read, auditiert | `CompatibilityCheck` | `BackupNotFoundError` |
 | `async_prepare_restore(backup_id, target_router_id, *, actor)` | read, auditiert (Dry Run) | `RestorePlan` | `CapabilityUnavailableError` (`config.restore_dry_run`) |
 | `async_create_backup(router_id, *, reason, actor, backup_type=None, note=None, links=None)` | mutating | `PutVersionResult` | `AuthorizationError`, `OperationInProgressError`, `RouterUnavailableError`, `OperationTimeoutError`, `StorageFullError`, … |
+| `async_put_version(router_id, artifacts, meta, *, authorization)` | mutating (`backup`) | `PutVersionResult` | wie `VersionStoreProtocol.async_put_version` |
 | `async_set_protected(backup_id, protected, *, actor)` | mutating, Admin | `BackupRecord` | `AuthorizationError` |
 | `async_acknowledge_drift(router_id, drift_id, *, state, actor, note=None)` | mutating, Admin | `DriftAck` | `AuthorizationError` |
 | `async_list_drift_acks(router_id)` | read | `tuple[DriftAck, ...]` | – |
-| `async_request_export(backup_id, *, actor)` | critical, Admin | `ApprovalRequest` | `AuthorizationError` |
-| `async_export_backup(approval_id, *, actor)` | critical | `ExportHandle` | `ApprovalRequiredError`, `ApprovalInvalidError` |
-| `async_request_deletion(backup_ids, *, actor)` | critical | `ApprovalRequest` | `BackupNotFoundError` |
-| `async_delete_backups(approval_id, *, actor)` | critical | gelöschte IDs | `ApprovalInvalidError` |
+| `set_retention_policy(policy, *, module)` | – | `None` | – |
+| `async_apply_retention(router_id=None)` | mutating (`prune`, als System) | `tuple[RetentionResult, ...]` | `StorageError` |
+| `async_request_export(backup_id, *, actor, artifact="archive")` | critical, Admin | `ApprovalRequest` | `AuthorizationError` |
+| `async_export_backup(approval_id, *, actor)` | critical, nur Antragsteller | `ExportHandle` | `ApprovalRequiredError`, `ApprovalInvalidError` |
+| `async_request_deletion(backup_ids, *, actor)` | critical | `ApprovalRequest` | `BackupNotFoundError`, `VersionProtectedError`, `AuthorizationError` (`router_mismatch`) |
+| `async_delete_backups(approval_id, *, actor)` | critical, nur Antragsteller | gelöschte IDs | `ApprovalInvalidError` |
 | `async_request_restore(plan, *, actor)` | critical | `ApprovalRequest` | **Phase 1:** `CapabilityUnavailableError` |
 | `async_approve(approval_id, *, actor)` / `async_reject(...)` | Admin | `ApprovalRequest` | `AuthorizationError`, `ApprovalInvalidError` |
 | `async_execute_restore(approval_id, *, actor)` | critical | `RestoreResult` | **Phase 1:** `CapabilityUnavailableError` |
 | `get_approval`, `pending_approvals` | read | | `ApprovalInvalidError` |
-| `events(...)`, `subscribe(listener)`, `register_event_prefix(prefix, *, module)`, `emit(...)` | – | Abschnitt 12 | – |
+| `events(..., ring=None)`, `subscribe(listener)`, `register_event_prefix(prefix, *, module)`, `emit(..., entry_id=None) -> EmitResult` | – | Abschnitt 12 | `ValueError` (Core-Typ von einem Modul) |
 
-Nebenläufigkeit: Lesen läuft parallel. Jede mutating/critical Operation hält den Lock des
-Routers; wer ihn nicht innerhalb von `ROUTER_LOCK_TIMEOUT` bekommt ⇒
-`OperationInProgressError` (retryable).
+**Nebenläufigkeit.** Lesen läuft parallel. Jede mutating/critical Operation nimmt **zuerst**
+den Lock des Routers und **autorisiert danach**; so kann eine Autorisierung nicht ablaufen,
+während sie auf den Lock wartet. Wer den Lock nicht innerhalb von `ROUTER_LOCK_TIMEOUT`
+bekommt ⇒ `OperationInProgressError` (retryable).
 
-Ablauf `async_create_backup`:
+**Flottenweite Warteschlange.** Backups laufen über eine Warteschlange des Core mit
+`FLEET_BACKUP_CONCURRENCY` (Standard 1) Plätzen. Reihenfolge, fest:
 
-1. `guard.authorize(backup, …)` (Audit: manuelles Backup bei `reason=manual`).
-2. Lock des Routers.
-3. `provider.async_collect(conn, CollectRequest(...))`.
-4. `versions.async_put_version(..., authorization=...)`.
-5. Event `configuration.backup_created` nur bei `created=True`; bei Fehler
-   `configuration.backup_failed` (Dedup `(router_id, error_class)`, 24 h Cooldown); erster
-   Erfolg danach `configuration.backup_recovered`.
+1. Platz in der Flotten-Warteschlange
+2. Lock des Routers
+3. Akteur prüfen, `guard.authorize(backup, …)` (Audit; Ablehnung ⇒ `AuthorizationError`)
+4. `provider.async_collect(conn, CollectRequest(...), ctx)`
+5. Dedup (7.4), `guard.consume`, Ablegen (`created_by = authorization.actor`)
+6. Events: `configuration.backup_created` nur bei `created=True`; bei Fehler
+   `configuration.backup_failed` (`dedup_key = error_class`, 24 h Cooldown); erster Erfolg
+   danach `configuration.backup_recovered`
+7. Lock und Platz freigeben
+
+Damit wartet keine ausgegebene Autorisierung in der Warteschlange (6 Router × bis 180 s
+würden die 5 min sonst überschreiten).
 
 ```python
 actor = await async_actor_from_context(hass, call.context, module="config_manager")
@@ -416,25 +619,31 @@ result = await api.async_create_backup(router_id, reason=BackupReason.MANUAL, ac
                                        note="before VLAN change")
 ```
 
-Export (kritisch, liest nur):
+Export (kritisch, liest nur, gebunden an Version **und** Artefakt):
 
 ```python
-req = await api.async_request_export(backup_id, actor=admin)       # pending
+req = await api.async_request_export(backup_id, actor=admin, artifact=ArtifactKind.ARCHIVE)
 await api.async_approve(req.approval_id, actor=admin)              # Admin bestätigt
-handle = await api.async_export_backup(req.approval_id, actor=admin)
+handle = await api.async_export_backup(req.approval_id, actor=admin)   # nur der Antragsteller
 data = await handle.reader()       # ein Download; zweiter Aufruf von async_export_backup
                                    # mit derselben approval_id ⇒ ApprovalInvalidError
 ```
 
-Löschen:
+Löschen (alle IDs eines Routers; geschützte vorher freigeben):
 
 ```python
-req = await api.async_request_deletion([bkp_a, bkp_b], actor=actor)
-await api.async_approve(req.approval_id, actor=admin)
-deleted = await api.async_delete_backups(req.approval_id, actor=actor)
+req = await api.async_request_deletion([bkp_a, bkp_b], actor=admin)
+await api.async_approve(req.approval_id, actor=other_admin)
+deleted = await api.async_delete_backups(req.approval_id, actor=admin)   # Antragsteller
 ```
 
 ## 9. Datenmodell
+
+Alle Typen sind `frozen`, `kw_only`, `slots`. Mapping-Felder werden beim Bau tief
+schreibgeschützt (`MappingProxyType`, Listen als Tupel); Schreiben ⇒ `TypeError`. Enum-Felder
+nehmen auch den `str`-Wert und werden umgewandelt; ein ungültiger Wert ⇒ `ValueError`.
+`from_dict` prüft Typen streng (z. B. `protected: "yes"`, `note: 5`, Zeitstempel ohne
+Zeitzone ⇒ Fehler, nie stillschweigend korrigiert).
 
 ### 9.1 `BackupRecord` (= `VersionRecord`, Metadatenformat 1)
 
@@ -450,91 +659,143 @@ deleted = await api.async_delete_backups(req.approval_id, actor=actor)
 | `status` | `VersionStatus` | | `ok` / `partial` / `failed` |
 | `error_class` | `ErrorClass \| None` | | warum `partial`/`failed` |
 | `fetch_method` | `str \| None` | | z. B. `cgi`, `ssh` (Provider) |
-| `content_hash` | `str \| None` (64 hex) | | Dedup-Fingerprint der Archivinhalte |
-| `uci_hash` | `str \| None` (64 hex) | | Inhalts-Hash des UCI-Snapshots |
+| `content_hash` | `str \| None` (64 hex) | | Dedup-Fingerprint der Archivinhalte (Provider) |
+| `uci_hash` | `str \| None` (64 hex) | | Inhalts-Hash des UCI-Snapshots (Provider) |
 | `openwrt_version`, `hardware_model`, `board_name` | `str \| None` | | Herkunft |
 | `compatibility` | `CompatibilityInfo \| None` | | Format, Version, Target, Board, Modell, Architektur, Paketmanager |
-| `artifacts` | `Mapping[str, ArtifactRef]` | | Schlüssel `archive` / `uci` / `inventory` |
+| `artifacts` | `Mapping[str, ArtifactRef]` | | Schlüssel `archive` / `uci` / `inventory` (nur `ArtifactKind`) |
 | `validation` | `ValidationInfo` | | `unverified`/`valid`/`invalid`/`corrupt`/`missing`, Zeit, Text |
 | `links` | `BackupLinks` | | `incident_id`, `change_id`, `correlation_id`, `parent_backup_id` |
-| `created_by` | `Actor` | ja | wer |
+| `created_by` | `Actor` | ja | aus der Autorisierung, nie vom Aufrufer |
 | `contains_secrets` | `bool` | | Standard `True` |
-| `protected` | `bool` | | vor `prune` geschützt |
+| `protected` | `bool` | | vor Aufbewahrung und `delete` geschützt |
 | `note` | `str \| None` | | ≤ `NOTE_MAX_LENGTH` (500) |
+| `warnings` | `tuple[str, ...]` | | Maschinencodes aus `VersionMeta.warnings` |
+| `installation_key_id` | `str \| None` | | Schlüssel, mit dem die Geheimnis-Digests gebildet wurden |
 | `sha256` | Eigenschaft | | sha256 des Archivs oder `None` |
 | `size_bytes` | Eigenschaft | | Summe aller Artefakte |
+| `usable` | Eigenschaft | | Status `ok` und Validierung `unverified`/`valid` |
 
 `to_dict()` enthält zusätzlich `sha256` und `size_bytes`; `from_dict()` ignoriert sie und
 wirft bei jedem Fehler `BackupMetadataError` (ältere Formate laufen durch
 `migrate_backup_metadata`, neuere werden abgelehnt).
 
-### 9.2 Artefakte
+### 9.2 Artefakte und Ablegen
 
 | Typ | Felder |
 |---|---|
-| `StorageRef` | `locator` (relativ zum Router-Ordner, für Module opak), `kind="file"`, `storage_format="plain-v1"`, `encrypted=False` |
+| `StorageRef` | `locator` (ein Dateiname, Abschnitt 7.1; für Module opak), `kind="file"`, `storage_format="plain-v1"`, `encrypted=False` |
 | `ArtifactRef` | `storage`, `sha256` (64 hex), `size_bytes` (≥ 0), `content_type` |
 | `ArtifactPayload` | `data: bytes` (nicht in `repr`), `sha256`, `content_type`; Eigenschaft `size_bytes` |
-| `VersionMeta` | `backup_type`, `reason`, `created_by`, `status`, `error_class`, `fetch_method`, `content_hash`, `uci_hash`, `openwrt_version`, `hardware_model`, `board_name`, `compatibility`, `contains_secrets`, `note`, `links`, `correlation_id` |
+| `VersionMeta` | `backup_type`, `reason`, `status`, `error_class`, `fetch_method`, `content_hash`, `uci_hash`, `openwrt_version`, `hardware_model`, `board_name`, `compatibility`, `contains_secrets`, `note`, `links`, `correlation_id`, `warnings`, `installation_key_id`. **Kein `created_by`.** |
 | `PutVersionResult` | `record`, `created` |
 | `SweepReport` | `checked_at`, `partial_deleted`, `orphaned_moved`, `marked_missing` |
 | `CollectRequest` | `router_id`, `backup_type`, `reason`, `actor`, `correlation_id`, `note`, `links`, `fetch_method` |
-| `CollectedVersion` | `artifacts: Mapping[str, ArtifactPayload]`, `meta: VersionMeta`, `warnings` |
+| `CollectedVersion` | `artifacts: Mapping[str, ArtifactPayload]`, `meta: VersionMeta` (Warnungen in `meta.warnings`) |
+| `RetentionPolicy`, `RetentionResult` | Abschnitt 7.5 |
+
+Regeln zu `VersionMeta`:
+
+- `error_class` ist genau bei `partial` und `failed` Pflicht, bei `ok` verboten
+  (`ValueError`).
+- Teilerfolg „Archiv fehlgeschlagen, UCI ok“: `backup_type=partial`, `status=partial`,
+  `error_class` = Fehler des Archivs.
+- `warnings`: Maschinencodes nach `WARNING_CODE_PATTERN` (`code` oder `code:detail`, z. B.
+  `uci_missing:sqm`, `config_missing_in_archive:firewall`), höchstens `MAX_WARNINGS` (50).
+  Kein Freitext, keine Werte.
 
 ### 9.3 Analyse
 
 | Typ | Felder |
 |---|---|
-| `ConfigSnapshot` | `router_id`, `captured_at`, `configs[config][section][option]`, `openwrt_version`, `board_name`, `format`, `format_version`, `contains_secrets`; Eigenschaft `checksum` (unmaskiert) |
+| `ConfigSnapshot` | `router_id`, `captured_at`, `configs` (opak, Abschnitt 10.3), `openwrt_version`, `board_name`, `format` (Standard `uci_normalized`), `format_version` (1), `contains_secrets`, `uci_hash` (Provider), `installation_key_id`; Eigenschaft `checksum` = Bindungsprüfsumme des Core, **nicht** vergleichbar mit `uci_hash` |
 | `ConfigRef` | genau eins von `backup_id` / `router_id` (live); `ConfigRef.backup(id)`, `ConfigRef.live(router_id)` |
-| `ConfigChange` | `kind` (`added`/`removed`/`modified`/`reordered`), `config`, `section`, `option`, `section_type`, `before`, `after`, `area`, `risk`; Eigenschaft `secret` |
-| `ConfigDiff` | `base`, `other`, `compared_at`, `changes`, `truncated`; `to_dict()` mit `counts` |
-| `DriftReport` | `router_id`, `baseline_backup_id`, `checked_at`, `drifted`, `diff`, `drift_id`, `ack_state`, `ignored_paths` |
-| `CompatibilityCheck` | `compatible`, `issues` (`code`, `message`, `blocking`) |
+| `ConfigChange` | `kind` (`added`/`removed`/`modified`/`reordered`/`not_comparable`), `config`, `section`, `option`, `section_type`, `before`, `after`, `area`, `risk`; Eigenschaft `secret` (über `is_secret_option`, kontextabhängig) |
+| `ConfigDiff` | `base`, `other`, `compared_at`, `changes`, `truncated`; Eigenschaften `has_changes`, `comparable_changes` (ohne `not_comparable`); `to_dict()` mit `counts` |
+| `DriftReport` | `router_id`, `baseline_backup_id`, `checked_at`, `drifted`, `diff`, `drift_id`, `ack_state`, `ignored_paths`, `baseline_rule`, `critical_count`, `unknown_count`, `secrets_comparable`, `rebaseline` (Abschnitt 11) |
+| `Baseline` | `router_id`, `version_id`, `rule` (`BaselineRule`), `drift_id`, `decided_at` |
+| `CompatibilityCheck` | `compatible`, `issues` (`code`, `message`, `blocking`; `message` in `to_dict()` geschrubbt) |
 | `RestorePlan` | `plan_id`, `backup_id`, Quell-/Zielrouter, `provider_id`, `created_at`, `compatibility`, `steps`, `diff`, `live_checksum`, `requires_reboot`, `warnings`, `instructions`; Eigenschaft `checksum` (unmaskiert) |
-| `RestoreResult` | `approval_id`, `plan_id`, `router_id`, `status`, Zeiten, `pre_restore_backup_id`, `applied_steps`, `failed_step`, `message`, `reboot_required`, `rolled_back`, `correlation_id` |
-| `ExportHandle` | `backup_id`, `artifact`, `filename`, `content_type`, `size_bytes`, `sha256`, `contains_secrets`, `reader()`, `expires_at` |
+| `RestoreResult` | `approval_id`, `plan_id`, `router_id`, `status`, Zeiten, `pre_restore_backup_id`, `applied_steps`, `failed_step`, `message` (geschrubbt), `reboot_required`, `rolled_back`, `correlation_id` |
+| `ExportHandle` | `backup_id`, `artifact` (`ArtifactKind`), `filename`, `content_type`, `size_bytes`, `sha256`, `contains_secrets`, `reader()`, `expires_at` |
 
-### 9.4 `Actor`
+### 9.4 `Actor` und `VerifiedActor`
 
-`kind` (`user`/`automation`/`system`/`module`), `user_id`, `context_id`,
+`Actor`: `kind` (`user`/`automation`/`system`/`module`), `user_id`, `context_id`,
 `parent_context_id`, `module`, `is_admin` (nur `user` kann Admin sein; sonst auf `False`
-gesetzt). `Actor.system()`, `Actor.for_module(name)`,
+gesetzt; vom Core nie aus Aufrufer-Angaben übernommen). `Actor.system()`,
+`Actor.for_module(name)`, `actor.same_principal(other)`,
 `await async_actor_from_context(hass, context, module=None)`.
 
+`VerifiedActor` (Abschnitt 6.2): `actor`, `is_admin`, `verified_at`, `verification_id`,
+`is_fresh(now)`, `to_dict()`.
+
 ## 10. Provider-Schnittstelle (`ConfigBackupProvider`)
+
+### 10.1 Signaturen
 
 ```python
 @runtime_checkable
 class ConfigBackupProvider(Protocol):
     provider_id: str                      # Eigenschaft, z. B. "config_manager"
-    provider_api_version: int             # 1
+    provider_api_version: int             # in SUPPORTED_PROVIDER_API_VERSIONS
     def supported(self, router: RouterRecord) -> bool: ...
-    async def async_probe(self, conn: RouterConnection) -> Mapping[str, CapabilityStatus]: ...
-    async def async_capture(self, conn, request: CaptureRequest) -> ConfigSnapshot: ...
-    async def async_collect(self, conn, request: CollectRequest) -> CollectedVersion: ...
-    async def async_validate(self, record: BackupRecord, read: ArtifactReader) -> ValidationInfo: ...
+    async def async_probe(self, conn: RouterConnection,
+                          ctx: ProviderContext) -> Mapping[str, CapabilityStatus]: ...
+    async def async_capture(self, conn: RouterConnection, request: CaptureRequest,
+                            ctx: ProviderContext) -> ConfigSnapshot: ...
+    async def async_collect(self, conn: RouterConnection, request: CollectRequest,
+                            ctx: ProviderContext) -> CollectedVersion: ...
+    async def async_validate(self, record: BackupRecord,
+                             ctx: ProviderContext) -> ValidationInfo: ...
     async def async_compare(self, base: ConfigSource, other: ConfigSource,
-                            read: ArtifactReader) -> ConfigDiff: ...
-    async def async_detect_drift(self, conn, baseline: BackupRecord, read: ArtifactReader,
-                                 acks: Sequence[DriftAck]) -> DriftReport: ...
-    async def async_prepare_restore(self, conn, record: BackupRecord, target: RouterRecord,
-                                    read: ArtifactReader) -> RestorePlan: ...
-    async def async_execute_restore(self, conn, plan: RestorePlan,
-                                    authorization: WriteAuthorization) -> RestoreResult: ...
+                            ctx: ProviderContext, *, base_router: RouterRecord,
+                            other_router: RouterRecord) -> ConfigDiff: ...
+    async def async_detect_drift(self, conn: RouterConnection, baseline: BackupRecord,
+                                 acks: Sequence[DriftAck], ctx: ProviderContext, *,
+                                 router: RouterRecord) -> DriftReport: ...
+    async def async_prepare_restore(self, conn: RouterConnection, record: BackupRecord,
+                                    target: RouterRecord,
+                                    ctx: ProviderContext) -> RestorePlan: ...
+    async def async_execute_restore(self, conn: RouterConnection, plan: RestorePlan,
+                                    authorization: WriteAuthorization,
+                                    ctx: ProviderContext) -> RestoreResult: ...
 ```
 
-- `ArtifactReader = Callable[[StorageRef], Awaitable[bytes]]` (= `versions.async_read_artifact`).
+### 10.2 `ProviderContext`
+
+Jeder Aufruf bekommt einen eigenen Kontext:
+
+| Feld | Typ | Bedeutung |
+|---|---|---|
+| `registry` | `RouterRegistryProtocol` | Lesezugriff auf die Registry |
+| `read` | `ArtifactReader` = `Callable[[str, str], Awaitable[bytes]]` | `await ctx.read(version_id, kind)`; nur die Versionen dieses Aufrufs, sha256 geprüft (`BackupIntegrityError`) |
+| `installation_key` | `Callable[[], Awaitable[bytes]]` | intern; Module rufen `await ctx.async_get_installation_key()` |
+| `installation_key_state` | `InstallationKeyState` | `ok` / `lost` / `uninitialised` |
+| `correlation_id` | `str \| None` | der Operation |
+
+Der Schlüssel wird je Verwendung geholt und nie gehalten;
+`async_get_installation_key()` wirft `InstallationKeyLostError`, solange er verloren ist.
+
+Weitere Regeln:
+
 - `ConfigSource = BackupRecord | ConfigSnapshot`.
+- `async_compare` bekommt den `RouterRecord` beider Seiten (z. B. Management-Host für die
+  Einstufung „Management-IP kritisch“).
 - `RouterConnection(router_id, entry_id, api, coordinator, transport)`: `api` ist die
   **bestehende** `OpenWrtAPI` des Eintrags. Neue Router-Aufrufe kommen als Methoden in
   `api.py`, nie als eigenes HTTP/SSH im Provider.
 - Der Provider speichert, exportiert und löscht **nichts**; er gibt Bytes in
   `CollectedVersion` zurück.
+- Der Provider **feuert keine Events**. Er gibt Ergebnisse zurück; der Core erzeugt daraus
+  die Events (Abschnitt 12.3).
+- Vor jedem Schreiben auf den Router ruft der Provider `api.guard.consume(authorization,
+  ...)`.
 - Fehler: Provider wirft `ConfigApiError`-Unterklassen (`RouterUnavailableError`,
   `RouterPermissionError`, `OperationTimeoutError`, `BackupIncompleteError`,
-  `ArtifactTooLargeError`, …) oder `ProviderError(cause=…, error_class=…)`. Unerwartete
-  Ausnahmen wickelt der Core in `ProviderError`.
+  `ArtifactTooLargeError`, …) oder `ProviderError(cause=…, error_class=…)`. Für
+  „Daten ungültig“ ist `ProviderError(error_class=ErrorClass.INVALID)` der vorgesehene Weg.
+  Unerwartete Ausnahmen wickelt der Core in `ProviderError`.
 - Genau ein Provider; ein zweiter `register_provider` ⇒ `ProviderConflictError`.
 
 ```python
@@ -542,9 +803,38 @@ unregister = api.register_provider(ConfigManagerProvider(hass))
 entry.async_on_unload(unregister)
 ```
 
-## 11. Drift-Bestätigung und Installations-Schlüssel
+### 10.3 Snapshot-Format `uci_normalized` v1
 
-`DriftAck`:
+`ConfigSnapshot.configs` ist für den Core **opak**: vom Provider definiert, JSON-fähig,
+beschrieben durch `format` + `format_version`. Für v1 gilt die Form von `config-manager`:
+
+```text
+configs[<config>] = {
+    "sections": {
+        <section_key>: {
+            "type": <section_type>,
+            "options": { <option>: <wert> | [<wert>, ...] | {"secret": "<hmac16>"} },
+        },
+    },
+    "order": [<section_key>, ...],          # Reihenfolge der Sections
+}
+```
+
+- `order` hält die Reihenfolge, weil eine Option `type` sonst mit dem Section-Typ kollidiert.
+- Geheime Werte stehen nur als Marker `{"secret": "<16 hex>"}`
+  (`secret_digest_factory(installation_key)`, `SECRET_MARKER_KEY`, `SECRET_DIGEST_LENGTH`).
+  `installation_key_id` des Snapshots nennt den Schlüssel.
+- Ein anderes Format braucht einen neuen `format`-Namen oder eine höhere `format_version`.
+
+**Hash-Regel.** `uci_hash` und `content_hash` kommen **immer vom Provider** (seine kanonische
+Form). Der Core rechnet sie nie nach und vergleicht sie nur auf Gleichheit.
+`ConfigSnapshot.checksum` (`canonical_checksum`, `ensure_ascii=True`) ist nur eine
+Bindungsprüfsumme des Core (z. B. `RestorePlan.live_checksum`) und mit `uci_hash` nicht
+vergleichbar.
+
+## 11. Drift, Basis und Installations-Schlüssel
+
+### 11.1 Bestätigung (`DriftAck`)
 
 | Feld | Typ | Bedeutung |
 |---|---|---|
@@ -554,22 +844,64 @@ entry.async_on_unload(unregister)
 | `actor` | `Actor` | Admin-Benutzer |
 | `ts` | `datetime` (UTC) | |
 | `note` | `str \| None` | ≤ 500 Zeichen |
+| `version_id` | `str \| None` | bei `known` **Pflicht**: die Version des bestätigten Live-Stands; bei `acknowledged` verboten |
 
-Der Provider bekommt die Bestätigungen in `async_detect_drift(..., acks=...)` und setzt
-`DriftReport.ack_state`.
-
-Installations-Schlüssel: 32 zufällige Bytes (`INSTALLATION_KEY_BYTES`) im Store
-`openwrt_router.installation_key`, beim ersten Zugriff erzeugt. Nur für HMAC-Digests von
-Geheimnissen in Snapshots. **Nie** in Audit, Bus-Event, Diagnose, Log.
-
-```python
-key = await api.async_get_installation_key()
-digest = hmac.new(key, value.encode(), "sha256").hexdigest()
-```
+Bei `known` holt der Core vor dem Speichern der Bestätigung eine Version des Live-Stands mit
+`reason=drift` (oder bekommt per Dedup die vorhandene) und trägt ihre ID in `version_id` ein.
+Der Provider bekommt die Bestätigungen in `async_detect_drift(..., acks, ctx, router=...)`
+und setzt `DriftReport.ack_state`.
 
 ```python
 ack = await api.async_acknowledge_drift(router_id, report.drift_id,
                                         state=DriftAckState.KNOWN, actor=admin)
+assert ack.version_id is not None
+```
+
+### 11.2 Basis
+
+`select_baseline(router_id, records, acks, *, explicit_backup_id=None)` und
+`api.async_get_baseline(router_id, *, baseline_backup_id=None) -> Baseline | None`:
+
+1. `explicit` – der Aufrufer nennt `baseline_backup_id`; sie muss eine verwendbare Version
+   dieses Routers sein (sonst Fehler).
+2. `known_ack` – die neueste `known`-Bestätigung, deren Version noch verwendbar ist
+   (sonst wird sie übersprungen).
+3. `newest_valid` – die neueste verwendbare Version.
+
+`Baseline.rule` und `DriftReport.baseline_rule` sagen, welche Regel gegriffen hat. Kein
+Ergebnis ⇒ `None` (die API wirft dann `BackupNotFoundError` in `async_detect_drift`).
+
+### 11.3 Installations-Schlüssel
+
+32 zufällige Bytes (`INSTALLATION_KEY_BYTES`) im Store `openwrt_router.installation_key`. Nur
+für HMAC-Digests von Geheimnissen in Snapshots. **Nie** in Audit, Bus-Event, Diagnose, Log.
+`installation_key_id(key)` (16 hex) ist öffentlich und wird an Versionen und Snapshots
+gestempelt.
+
+Zustand (`installation_key_state(key_readable=, has_versions=, has_acks=)`):
+
+| Zustand | Wann | Verhalten |
+|---|---|---|
+| `ok` | Schlüssel lesbar | normal |
+| `uninitialised` | erster Start, keine Versionen, keine Bestätigungen | **nur hier** erzeugt der Core einen Schlüssel |
+| `lost` | Store fehlt oder ist unlesbar, aber Versionen oder Bestätigungen existieren | kein stilles Neuerzeugen; `InstallationKeyLostError`; einmal Event `core.installation_key_lost` (Sicherheitsring); Repair-Issue `ISSUE_INSTALLATION_KEY_LOST`; Digests gelten als `not_comparable` |
+
+Neuer Schlüssel nach Verlust nur über die kritische Aktion `installation_key_reset`
+(`async_request_installation_key_reset` ⇒ Admin-Freigabe ⇒
+`async_reset_installation_key`, nur der Antragsteller). Event `core.installation_key_reset`.
+Danach ist die nächste Drift-Prüfung je Router ein **Re-Baseline**: `DriftReport.rebaseline
+= True`, `drifted = False` (beides zusammen ⇒ `ValueError`), der Core legt den Live-Stand als
+neue Basis ab statt Drift zu melden.
+
+Vergleichbarkeit: Wurde die Basis mit einem anderen Schlüssel gebildet
+(`installation_key_id` verschieden) oder ist der Schlüssel verloren, meldet der Provider
+geheime Optionen als `ChangeKind.NOT_COMPARABLE` und `secrets_comparable=False`. Solche
+Änderungen sind **kein Drift** (`ConfigDiff.comparable_changes` lässt sie weg).
+
+```python
+key = await ctx.async_get_installation_key()      # im Provider
+digest = secret_digest_factory(key)               # core_masking
+marker = {"secret": digest(f"{config}/{section}/{option}/{value}")}
 ```
 
 ## 12. Events und Audit
@@ -587,53 +919,91 @@ ack = await api.async_acknowledge_drift(router_id, report.drift_id,
 | `router_id`, `entry_id` | `str \| None` | |
 | `actor` | `Actor \| None` | |
 | `correlation_id` | `str \| None` | |
-| `dedup_key` | `str \| None` | `dedup_key(router_id, drift_id)` oder `dedup_key(router_id, error_class)` |
-| `data` | `Mapping` | **nur IDs und Zähler, nie Konfigurationswerte**; zusätzlich maskiert |
+| `dedup_key` | `str \| None` | nur der Unterscheider, z. B. `drift_id` oder `error_class` |
+| `repeat_count` | `int` | Wiederholungen im Cooldown |
+| `last_repeat_at` | `datetime \| None` | letzte Wiederholung |
+| `data` | `Mapping` | **nur IDs und Zähler, nie Konfigurationswerte**; schreibgeschützt, bei Ausgabe zusätzlich maskiert |
+| `dedup_scope` | Eigenschaft | `(router_id or "-", type, dedup_key)` oder `None` |
+| `audit_ring` | Eigenschaft | `general` / `security` |
 
-Ring `AUDIT_MAX_EVENTS = 1000`, Aufbewahrung `AUDIT_RETENTION_DAYS = 90`, persistiert im
-Store `openwrt_router.audit`. Bus-Event `EVENT_CORE = "openwrt_router_core_event"` mit
-`CoreEvent.to_dict()`; bewusst getrennt von `EVENT_INCIDENT`, `net_rules` und `logbook.py`
-bleiben unverändert.
+`EmitResult(event, published, deduplicated)` ist die Rückgabe von `emit`.
 
-### 12.2 Typen
+Bus-Event `EVENT_CORE = "openwrt_router_core_event"` mit `CoreEvent.to_dict()`; bewusst
+getrennt von `EVENT_INCIDENT`, `net_rules` und `logbook.py` bleiben unverändert.
+
+### 12.2 Zwei Audit-Ringe
+
+| Ring | Größe | Aufbewahrung | Inhalt |
+|---|---|---|---|
+| `general` | `AUDIT_MAX_EVENTS` = 1000 | `AUDIT_RETENTION_DAYS` = 90 | alles andere |
+| `security` | `SECURITY_AUDIT_MAX_EVENTS` = 500 | 90 Tage | jeder `security.*`-Typ und `SECURITY_EVENT_TYPES` (Export, Löschen, Adoption, Restore-Schritte, Installations-Schlüssel verloren/neu) |
+
+`audit_ring_for(type)` entscheidet. So verdrängen viele Backup-Events nie die
+Sicherheitsspur. Persistiert im Store `openwrt_router.audit`. `api.events(..., ring=None)`
+liest beide Ringe, `ring=AuditRing.SECURITY` nur einen.
+
+### 12.3 Typen und wer sie sendet
 
 `router.registered`, `router.identity_changed`, `router.duplicate_suspected`,
 `router.capabilities_changed`, `router.orphaned`, `router.adopted`,
 `configuration.backup_created`, `configuration.backup_failed`,
 `configuration.backup_recovered`, `configuration.backup_validated`,
 `configuration.backup_protection_changed`, `configuration.backup_exported`,
-`configuration.backup_deleted`, `configuration.drift_detected`,
-`configuration.drift_acknowledged`, `configuration.restore_checked`,
+`configuration.backup_deleted`, `configuration.retention_applied`,
+`configuration.drift_detected`, `configuration.drift_acknowledged`,
+`configuration.change_critical`, `configuration.change_unknown`,
+`configuration.integrity_failed`, `configuration.restore_checked`,
 `configuration.restore_requested`, `configuration.restore_approved`,
 `configuration.restore_rejected`, `configuration.restore_completed`,
 `configuration.restore_failed`, `configuration.storage_swept`,
-`security.authorization_denied`, `security.approval_requested`,
-`security.approval_approved`, `security.approval_rejected`, `security.approval_expired`.
+`security.authorization_denied`, `security.authorization_consumed`,
+`security.approval_requested`, `security.approval_approved`, `security.approval_rejected`,
+`security.approval_expired`, `core.installation_key_lost`, `core.installation_key_reset`.
 
-`security.approval_*` gelten für kritische Aktionen außer Restore (Export, Löschen,
-ACL-Verteilung, Modulaktionen); Restore behält seine `restore_*`-Typen.
+- **Nur der Core** sendet Typen in `CORE_EVENT_NAMESPACES` (`router.`, `configuration.`,
+  `security.`, `core.`; `is_core_event_type`). `emit` eines Moduls mit einem solchen Typ ⇒
+  `ValueError`.
+- Aus Provider-Ergebnissen erzeugt der Core: aus einem `DriftReport`
+  (`drift_event_types(report)`) `drift_detected` (bei `drifted`), `change_critical` (bei
+  `critical_count > 0`), `change_unknown` (bei `unknown_count > 0`), jeweils mit
+  `dedup_key = drift_id`; nichts bei `rebaseline`. Aus einer `ValidationInfo`
+  (`integrity_failed(validation)`, Status `invalid`/`corrupt`/`missing`)
+  `integrity_failed`.
+- Module senden eigene Typen nur unter einem eigenen, registrierten Präfix, der **nicht** in
+  einem Core-Namensraum liegt, z. B. `security_center.` oder `self_healing.`. (Für
+  Capabilities bleibt `security.<modul>.` erlaubt, Abschnitt 5.)
+- `security.approval_*` gelten für kritische Aktionen außer Restore (Export, Löschen,
+  ACL-Verteilung, Schlüssel-Reset, Modulaktionen); Restore behält seine `restore_*`-Typen.
 
-### 12.3 Dedup und Cooldown
+### 12.4 Dedup und Cooldown
 
-- Gleicher `dedup_key` innerhalb des Cooldowns ⇒ weder gespeichert noch gefeuert
-  (`emit` gibt `None` zurück).
-- Fehler: `(router_id, error_class)`, Cooldown `FAILURE_EVENT_COOLDOWN` (24 h); der erste
-  Erfolg danach feuert `backup_recovered` und setzt den Schlüssel zurück.
-- Drift: `(router_id, drift_id)`; derselbe Drift feuert einmal, ein geänderter Drift hat eine
-  neue `drift_id`.
+- Bereich: `(router_id or "-", type, dedup_key)` (`CoreEvent.dedup_scope`).
+- Wiederholung im festen Cooldown-Fenster: **nicht** auf dem Bus; der gespeicherte Eintrag
+  bekommt `repeat_count + 1` und `last_repeat_at`; `EmitResult(published=False,
+  deduplicated=True)`.
+- **Audit-Pflichtige Typen** (`AUDIT_MANDATORY_EVENT_TYPES`) ignorieren `dedup_key`: jeder
+  wird als eigener Eintrag geschrieben.
+- Fehler: `dedup_key = error_class`, Cooldown `FAILURE_EVENT_COOLDOWN` (24 h); der erste
+  Erfolg danach feuert `backup_recovered` und setzt den Bereich zurück.
+- Drift: `dedup_key = drift_id`; derselbe Drift feuert einmal. Die `drift_id` wird neu
+  vergeben, wenn der Drift verschwindet (`drifted=False`) oder die Basis wechselt; ein
+  wiederkehrender Drift feuert also erneut.
 - Erfolge (`backup_created`) nur bei neuer Version, nie bei Dedup-Treffern.
 
-### 12.4 Audit-Pflicht
+### 12.5 Audit-Pflicht und Modul-Events
 
-Jede Guard-Entscheidung, dazu: manuelles Backup, Schutz an/aus, Drift bestätigt/bekannt,
-Dry Run und Kompatibilitätsprüfung (`restore_checked`), Export (wer, wann, welche Version),
-Löschen, Adoption.
+Jede Guard-Entscheidung und jedes `consume`, dazu: manuelles Backup, Schutz an/aus, Drift
+bestätigt/bekannt, Dry Run und Kompatibilitätsprüfung (`restore_checked`), Export (wer, wann,
+welche Version, welches Artefakt), Löschen, Aufbewahrung, Adoption, Verlust und Reset des
+Installations-Schlüssels.
 
 ```python
-api.register_event_prefix("security.ids.", module="security_center")
-api.emit("security.ids.port_scan", source="security_center", router_id=router_id,
-         severity=Severity.WARNING, result=EventResult.INFO,
-         dedup_key=dedup_key(router_id, "port_scan"), data={"count": 12})
+api.register_event_prefix("security_center.", module="security_center")
+res = api.emit("security_center.port_scan", source="security_center", router_id=router_id,
+               entry_id=entry.entry_id, severity=Severity.WARNING,
+               result=EventResult.INFO, dedup_key="port_scan", data={"count": 12})
+if res.deduplicated:
+    _LOGGER.debug("repeat %d", res.event.repeat_count)
 
 def _on_event(event: CoreEvent) -> None:
     if event.type == CoreEventType.DRIFT_DETECTED:
@@ -641,28 +1011,57 @@ def _on_event(event: CoreEvent) -> None:
 
 unsubscribe = api.subscribe(_on_event)   # Listener sind synchron und kurz
 recent = api.events(router_id=router_id, types=[CoreEventType.BACKUP_FAILED], since=t0)
+denials = api.events(ring=AuditRing.SECURITY, types=[CoreEventType.AUTHORIZATION_DENIED])
 ```
 
 ## 13. Maskierung
 
-- `mask_secrets(data, *, extra_keys=())` gibt eine Kopie zurück; Schlüssel, die nach
-  Geheimnis klingen (`password`, `key`, `psk`, `private_key`, `token`, `secret`,
-  `ubus_rpc_session`, …, plus `DIAGNOSTICS_REDACT_KEYS`), werden zu `**REDACTED**`.
-  `None` bleibt `None`. Tiefe begrenzt (`**TRUNCATED**`).
-- Alle `to_dict()` der Typen mit Konfigurationsinhalt maskieren. Prüfsummen
-  (`ConfigSnapshot.checksum`, `RestorePlan.checksum`) laufen über den **unmaskierten**
-  Inhalt.
-- Grenze: namensbasiert. Ein Geheimnis unter einem neutralen Schlüssel wird nicht erkannt.
+Es gibt **genau eine** Implementierung: `core_masking.py`. Sie ist die Obermenge aus der
+früheren Core-Maskierung und `config_mask`/`config_const` des `config-manager`-Zweigs.
+`config-manager` importiert sie und hält keine eigene Liste; `core_masking` importiert kein
+`config_*`-Modul.
+
+| Funktion | Zweck |
+|---|---|
+| `is_secret_key(name, extra_keys=())` (= `is_secret_name`) | Name klingt nach Geheimnis. Reihenfolge: exakter Name (auch normalisiert: Punkte, Anführungszeichen, `--`) ⇒ `SAFE_KEYS`/`SAFE_SUFFIXES` ⇒ Teilstrings ⇒ Muster `_key$`, `^key\d*$`, `pin$` ⇒ Wörter (auch CamelCase) |
+| `is_secret_option(config, section_type, option)` | dasselbe plus Kontextregeln (`SECRET_CONTEXT_OPTIONS`, z. B. `ddns`, `rpcd`, `wireguard_*`, `openvpn`) |
+| `is_secret_path(path)` | Archivpfad mit Geheimnissen (`SECRET_ARCHIVE_PATHS`, 28 Muster, z. B. `etc/shadow`, `etc/config/wireless`, Host-Keys) |
+| `secret_digest_factory(key)` | HMAC-SHA256, 16 hex, Schlüssel ≥ 16 Bytes |
+| `redact_text(text)`, `scrub_text(text \| None)` | Freitext: PEM-Blöcke, URL-Zugangsdaten, `Bearer`/`Basic`/`Digest`, UCI-/Zuweisungs-/Flag-Formen (`option key '…'`, `password=…`, `--password …`), crypt-Hashes, WireGuard-Schlüssel, lange Tokens. IDs (`bkp_…`, `rtr_…`) und sha256 bleiben. |
+| `mask_secrets(data, *, extra_keys=())` | Schlüsselmodus für `to_dict()`: geheime Schlüssel ⇒ `**REDACTED**`, Dataclasses ⇒ maskierte dicts, `bytes` ⇒ `**REDACTED**`, Marker ⇒ `**REDACTED**`; Strings unter normalen Schlüsseln bleiben |
+| `mask_for_output(data, *, extra_keys=())` | Ausgabe-Schranke (Log, Diagnose, UI): wie oben, zusätzlich jeder String durch `redact_text` (außer unter `SAFE_KEYS`/`SAFE_SUFFIXES`) und Ausnahmen geschrubbt |
+| `mask_value(value)` | ein Wert; `None` und `bool` bleiben |
+
+Namenslisten: `SECRET_OPTIONS` (UCI-Optionen, u. a. `key`, `key1`–`key4`, `psk`, `sae_password`,
+`r0kh`, `r1kh`, `pincode`, `wps_pin`, `private_key`, `preshared_key`, `password`, …),
+`SECRET_EXTRA_NAMES` (`authorization`, `cookie`, `set_cookie`, `proxy_authorization`,
+`session`, `session_id`, `sessionid`, `sid`, `sysauth`, `ubus_rpc_session`),
+`SECRET_SUBSTRINGS` (`apikey`, `credential`, `pass`, `private`, `psk`, `pwd`, `secret`,
+`token`), `SECRET_WORDS` (u. a. `auth`, `privkey`, `session`, `bearer`, `community`), dazu
+`DIAGNOSTICS_REDACT_KEYS`. Lesbar bleiben `SAFE_KEYS` (`key_mgmt`, `auth_server`,
+`auth_port`, `keepalive`, `persistent_keepalive`, `ft_psk_generate_local`, `dedup_key`,
+`contains_secrets`, `sha256`) und Namen auf `_count`, `_hash`, `_sha256`, `_id`, `_ids`.
+
+- Alle `to_dict()` der Typen mit Konfigurationsinhalt maskieren; Freitextfelder
+  (`ConfigApiError.message`, `CompatibilityIssue.message`, `RestoreStep.description`,
+  `RestoreResult.message`, `ApprovalRequest.reason`, `CapabilityStatus.reason_text`) werden
+  geschrubbt. Prüfsummen (`ConfigSnapshot.checksum`, `RestorePlan.checksum`) laufen über den
+  **unmaskierten** Inhalt.
+- Zyklen ⇒ `**REDACTED**`, Tiefe > `MAX_DEPTH` (64) ⇒ `**TRUNCATED**`. Die Eingabe wird nie
+  verändert.
+- Grenze: namens- und musterbasiert. Ein Geheimnis unter einem neutralen Schlüssel in einem
+  Format, das kein Muster trifft, wird nicht erkannt; deshalb tragen Events nur IDs und
+  Zähler.
 
 ```python
-_LOGGER.debug("snapshot %s", mask_secrets(snapshot.configs))
+_LOGGER.debug("snapshot %s", mask_for_output(snapshot.configs))
 ```
 
 ## 14. Fehler
 
 Alle Fehler erben von `ConfigApiError(HomeAssistantError)` und haben `code`,
 `error_class`, `message`, `router_id`, `retryable`, `details` und `to_dict()` (Details
-maskiert). `code` und `error_class` ändern sich innerhalb v1 nie.
+maskiert, Nachricht geschrubbt). `code` und `error_class` ändern sich innerhalb v1 nie.
 
 | Klasse | `code` | `error_class` | Wann | Retryable |
 |---|---|---|---|---|
@@ -677,9 +1076,9 @@ maskiert). `code` und `error_class` ändern sich innerhalb v1 nie.
 | `CapabilityUnavailableError` | `capability_unavailable` | `not_available` | Capability fehlt (auch Restore in Phase 1) | nein |
 | `ProviderUnavailableError` | `provider_unavailable` | `not_available` | kein Provider registriert | nein |
 | `ProviderConflictError` | `provider_conflict` | `conflict` | zweiter Provider | nein |
-| `AuthorizationError` | `authorization_denied` | `denied` | Guard lehnt ab oder `consume` scheitert (`details.reason`) | nein |
-| `ApprovalRequiredError` | `approval_required` | `approval` | kritische Aktion ohne freigegebenen Antrag | nein |
-| `ApprovalInvalidError` | `approval_invalid` | `approval` | Antrag unbekannt, abgelaufen, benutzt, abgelehnt, anders gebunden | nein |
+| `AuthorizationError` | `authorization_denied` | `denied` | Guard lehnt ab, Akteur unbekannt/ungeprüft, oder `consume` scheitert (`details.reason`: `not_admin`, `unverified_actor`, `unknown_user`, `unknown_authorization`, `already_used`, `expired`, `action_mismatch`, `router_mismatch`, `checksum_mismatch`, …) | nein |
+| `ApprovalRequiredError` | `approval_required` | `approval` | kritische Aktion ohne freigegebenen Antrag (noch `pending`) | nein |
+| `ApprovalInvalidError` | `approval_invalid` | `approval` | Antrag unbekannt, abgelaufen, benutzt, abgelehnt, anders gebunden, nicht vom Antragsteller eingelöst | nein |
 | `BackupNotFoundError` | `backup_not_found` | `not_found` | Version unbekannt | nein |
 | `BackupIntegrityError` | `backup_integrity_failed` | `checksum_mismatch` | sha256/Größe passt nicht | nein |
 | `BackupMetadataError` | `backup_metadata_invalid` | `invalid` | Metadaten kaputt oder neuer als unterstützt | nein |
@@ -688,6 +1087,9 @@ maskiert). `code` und `error_class` ändern sich innerhalb v1 nie.
 | `StorageFullError` | `storage_full` | `storage_full` | Gesamtgrenze erreicht, nichts geschrieben | nein |
 | `StorageError` | `storage_error` | `storage_error` | Dateisystemfehler | nein |
 | `UnsupportedStorageFormatError` | `storage_format_unsupported` | `invalid` | unbekanntes `storage_format` | nein |
+| `InvalidStorageRefError` | `storage_ref_invalid` | `invalid` | Locator kein einfacher Dateiname oder außerhalb des Router-Ordners (`details.reason`: `bad_locator`, `path_escape`) | nein |
+| `VersionProtectedError` | `version_protected` | `conflict` | `delete` mit geschützten Versionen (`details.version_ids`), nichts gelöscht | nein |
+| `InstallationKeyLostError` | `installation_key_lost` | `not_available` | Installations-Schlüssel verloren, während Versionen oder Bestätigungen existieren | nein |
 | `RestoreIncompatibleError` | `restore_incompatible` | `incompatible` | Version passt nicht zum Zielrouter | nein |
 | `OperationInProgressError` | `operation_in_progress` | `busy` | Router-Lock belegt | ja |
 | `ProviderError` | `provider_error` | `internal` (überschreibbar) | unerwarteter Providerfehler, Ursache verkettet, nur Typname in `details.cause` | nein (überschreibbar) |
@@ -695,7 +1097,7 @@ maskiert). `code` und `error_class` ändern sich innerhalb v1 nie.
 `ErrorClass` enthält außerdem die elf Klassen aus `config-manager` 12.2 (`unreachable`,
 `timeout`, `auth`, `permission`, `not_available`, `too_large`, `incomplete`, `invalid`,
 `checksum_mismatch`, `storage_full`, `storage_error`) und wird auch in
-`BackupRecord.error_class` und in Dedup-Schlüsseln benutzt.
+`BackupRecord.error_class` und als `dedup_key` von `backup_failed` benutzt.
 
 ```python
 try:
@@ -709,7 +1111,8 @@ except ConfigApiError as err:
 ## 15. Abgleich mit config-manager Abschnitt 12
 
 Jede verbleibende Abweichung zwischen den Anforderungen in `config-manager` (Plan,
-Abschnitte 5, 9.1, 12, 20) und diesem Vertrag:
+Abschnitte 5, 9.1, 12, 20) und diesem Vertrag. Die 14 Punkte des Vertragsabgleichs nach
+`5c9d248` stehen in Abschnitt 19.2.
 
 | `config-manager` | Dieser Vertrag | Grund / was zu tun ist |
 |---|---|---|
@@ -721,24 +1124,25 @@ Abschnitte 5, 9.1, 12, 20) und diesem Vertrag:
 | 12.1 `release_version` | `openwrt_version` (+ `compatibility.openwrt_version`) | bestehender Name im Core |
 | 12.1 `protected` „nur über Freigabe“ | Aktion `protect`: mutating, nur Admin-Benutzer, sofortige Entscheidung (keine zweistufige Freigabe) | Schutz verringert kein Risiko; zweistufig wäre nur Reibung |
 | 12.2 `put_version(...) -> version_id` | `async_put_version(..., *, authorization) -> PutVersionResult(record, created)` | Dedup-Treffer muss erkennbar sein; Schreiben braucht eine Autorisierung (`backup`) |
-| 12.2 `delete_versions(ids)` „nur Aufbewahrung oder Freigabe“ | `async_delete_versions(ids, *, authorization)` mit `prune` (Aufbewahrung, überspringt `protected`) oder `delete` (kritisch) | – |
+| 12.2 `delete_versions(ids)` „nur Aufbewahrung oder Freigabe“ | `async_delete_versions(ids, *, authorization)` mit `prune` (nur Core, nach `plan_retention`) oder `delete` (kritisch, geschützte ⇒ `VersionProtectedError`) | Aufbewahrungsregel kommt vom Modul (`RetentionPolicy`), Ausführung vom Core |
 | 12.2 `set_protected`, `put_drift_ack` | mit `authorization` (`protect` / `drift_ack`) | – |
 | 12.2 Operationen ohne `async_` | alle mit `async_`-Präfix | HA-Konvention |
 | 12.3 Verschlüsselung „gemäß Q3“ | keine eigene; `storage_format="plain-v1"`, `encrypted=False` | Nachtrag 2.2 |
-| 12.4 / 9.1 Event-Namen | `config_backup_succeeded` → `configuration.backup_created`; `config_backup_failed` → `configuration.backup_failed`; `config_backup_recovered` → `configuration.backup_recovered`; `config_drift_detected` → `configuration.drift_detected`; `config_drift_acknowledged` → `configuration.drift_acknowledged`; `config_restore_checked` → `configuration.restore_checked` | Core-Schema mit Punkt-Namensraum; ein Bus-Event `openwrt_router_core_event`, Typ im Feld `type` |
-| 12.4 Dedup und Cooldown | `CoreEvent.dedup_key`, `FAILURE_EVENT_COOLDOWN` 24 h, Umsetzung im Core (`emit`) | – |
-| 12.4 Audit für Export „wer, wann, welche Version“ | ja, plus Antrag/Freigabe als `security.approval_*` | – |
+| 12.4 / 9.1 Event-Namen | `config_backup_succeeded` → `configuration.backup_created`; `config_backup_failed` → `configuration.backup_failed`; `config_backup_recovered` → `configuration.backup_recovered`; `config_drift_detected` → `configuration.drift_detected`; `config_drift_acknowledged` → `configuration.drift_acknowledged`; `config_restore_checked` → `configuration.restore_checked` | Core-Schema mit Punkt-Namensraum; ein Bus-Event `openwrt_router_core_event`, Typ im Feld `type`; gesendet nur vom Core |
+| 12.4 Dedup und Cooldown | `CoreEvent.dedup_key` + `dedup_scope`, `FAILURE_EVENT_COOLDOWN` 24 h, Umsetzung im Core (`emit`) | – |
+| 12.4 Audit für Export „wer, wann, welche Version“ | ja, plus Artefakt und Antrag/Freigabe als `security.approval_*` im Sicherheitsring | – |
 | 12.5 Freigabe „synchron freigegeben/abgelehnt/wartet + Kennung“ | `authorize()` ⇒ `AuthorizationDecision(state, audit_id, …)` | – |
-| 12.5 `export` als schreibende Aktion | `export` ist **critical**: Antrag ⇒ Admin-Freigabe ⇒ ein Download | Nachtrag 2.1; erster `authorize` liefert `pending`, nicht `approved` |
+| 12.5 `export` als schreibende Aktion | `export` ist **critical**: Antrag ⇒ Admin-Freigabe ⇒ ein Download durch den Antragsteller | Nachtrag 2.1; erster `authorize` liefert `pending`, nicht `approved` |
 | 12.5 `restore` „später“ | im Vertrag, Phase 1 `CapabilityUnavailableError` | Nachtrag 2.3 |
 | 12.6 Proben „einmal beim Setup und nach ACL-Neuverteilung“ | zusätzlich nach Firmware-Wechsel | neue Firmware kann rpcd-ACL und CGI ändern |
 | 12.6 `config.uci_read` „je Config“ | `CapabilityStatus.detail = {config_name: bool}` | – |
 | 11.6 Diff `changed` | `ChangeKind.MODIFIED` (`"modified"`) | bestehender Wert; Provider bildet ab |
-| 11.6 Area/Risk als Enums | `ConfigChange.area`/`risk` als `str` | Klassifikation gehört dem Provider |
+| 11.6 Area/Risk als Enums | `ConfigChange.area`/`risk` als `str`; Zähler `critical_count`/`unknown_count` im `DriftReport` | Klassifikation gehört dem Provider |
 | 9.2 Sensoren je Router | nicht im Core-Vertrag | Entities baut `config-manager` (Gruppe II) mit `router_id` aus der Registry |
-| Q2 Besitz ACL v9 | Core, später: gestufte ACL, nur angeboten, Aktion `acl_deploy` (kritisch) | Nachtrag H / 2.4 |
+| Q2 Besitz ACL v9 | Core, später: gestufte ACL, nur angeboten, Aktion `acl_deploy` (kritisch, nur Admin-Benutzer) | Nachtrag H / 2.4 |
 | Q6 SSH-Host-Key | TOFU nur für den Config-Pfad, später | Nachtrag H |
 | Q10 Panel-Container | Core legt „Enterprise“ an, nach Merge von 1.43.0 | Nachtrag H |
+| Maskierung `config_mask`/`config_const` | aufgegangen in `core_masking` (Abschnitt 13) | eine Implementierung |
 
 ## 16. Restore in Phase 1
 
@@ -750,7 +1154,8 @@ i18n-Schlüssel für eine Anleitung) und Export. Beides wird als
 Nicht verfügbar: `async_request_restore` und `async_execute_restore` werfen
 `CapabilityUnavailableError(capability="config.restore")`, solange der Provider
 `config.restore` nicht als verfügbar meldet. Eine spätere Phase bringt Restore auf
-UCI-Ebene mit Rollback (eigener Plan).
+UCI-Ebene mit Rollback (eigener Plan). Ob vor einem Restore ein `pre_restore`-Backup
+Pflicht ist, ist offen (Abschnitt 19.4).
 
 ```python
 plan = await api.async_prepare_restore(backup_id, router_id, actor=admin)
@@ -766,18 +1171,19 @@ except CapabilityUnavailableError:
 
 | Modul | Nutzt | Beispiel |
 |---|---|---|
-| Security Intelligence (`security-center`) | Präfix `security.<modul>.` für Events/Capabilities, `subscribe`, Audit lesen | `register_event_prefix("security.center.", module="security_center")`; reagiert auf `security.authorization_denied` |
-| Network Intelligence | `links.incident_id`, `BackupReason.INCIDENT`, Drift als Kontext (nur lesend) | Backup bei kritischem Incident: `async_create_backup(..., reason=INCIDENT, links=BackupLinks(incident_id=…))` |
+| Security Intelligence (`security-center`) | Event-Präfix `security_center.`, Capability-Präfix `security.center.`, `subscribe`, Sicherheitsring lesen | `register_event_prefix("security_center.", module="security_center")`; reagiert auf `security.authorization_denied` |
+| Network Intelligence | `links.incident_id`, `BackupReason.INCIDENT`, Drift als Kontext (nur lesend) | Backup bei kritischem Incident: `async_create_backup(..., reason=INCIDENT, links=BackupLinks(incident_id=…))` (nie dedupliziert) |
 | Network Time Machine | `async_list_backups(since=…)`, `async_compare(ConfigRef.backup(a), ConfigRef.backup(b))`, `events(since=…)` | Zeitleiste aus Versionen und Events |
 | Firmware Lifecycle | `BackupReason.PRE_FIRMWARE_UPDATE`/`RELEASE_CHANGE`, `FirmwareInfo`, `CompatibilityInfo` | vor Update `async_create_backup`, nach Update Proben neu |
 | Self-Healing | `register_action("self_healing.<aktion>", CRITICAL, …)`, `BackupReason.PRE_CHANGE`, Korrelations-ID | Backup + Freigabe vor jedem Eingriff, alles mit einer `correlation_id` |
-| Diagnose (`net-diagnostics`) | Präfix `diag.`/`log.` | eigene Capabilities `diag.traceroute` unter registriertem Präfix |
+| Diagnose (`net-diagnostics`) | Capability-Präfix `diag.`/`log.` | eigene Capabilities `diag.traceroute` unter registriertem Präfix |
 
 ## 18. Später (nur dokumentiert, kein Code)
 
 - **Gestufte rpcd-ACL** in `acl_provisioning.py`, Rechte je Capability, nur angeboten, nie
   automatisch geschrieben; Schreiben erst nach der einzelnen Freigabe des Nutzers
-  (`acl_deploy`), gekoppelt an `config_backup_enabled`:
+  (`acl_deploy`, gebunden an Router und ACL-Prüfsumme), gekoppelt an
+  `config_backup_enabled`:
   - `config.cgi_backup`: `"cgi-io": ["backup"]`
   - `config.uci_read`: `uci`-Lesebereich für `network`, `wireless`, `firewall`, `dhcp`,
     `system`, `dropbear`, `uhttpd`, `rpcd`, `ddns`, `sqm`, `usteer`, `mwan3`, `upnpd`,
@@ -791,3 +1197,149 @@ except CapabilityUnavailableError:
   Merge von 1.43.0.
 - **Option `config_backup_enabled`** im Options-Flow (`const.py`, `config_flow.py`).
 - **Restore auf UCI-Ebene** mit Rollback.
+
+## 19. Vertragsänderungen seit 5c9d248
+
+B = breaking (bestehender Aufrufer muss sich ändern), A = additiv. „Verhalten“ heißt: die
+Signatur bleibt, die Regel ist neu.
+
+### 19.1 Änderungen auf Feld- und Signaturebene
+
+**Akteure und Guard**
+
+| # | Änderung | Art |
+|---|---|---|
+| 1 | `ActionGuardProtocol.authorize(..., actor: Actor)` → `actor: VerifiedActor`; ebenso `approve(..., actor: VerifiedActor)`, `reject(..., actor: VerifiedActor)` | B |
+| 2 | neu: `VerifiedActor`, `async_verify_actor(hass, actor)`, `async_resolve_actor(hass, context, module=None)`, `ACTOR_VERIFICATION_TTL`, `VERIFICATION_ID_PREFIX` (`vac_`); Guard: `async_verify_actor`, `async_resolve_actor` | A |
+| 3 | `is_admin` eines übergebenen `Actor` wird ignoriert; API und Guard lösen über `hass.auth` neu auf; systemgenerierte Benutzer sind nie Admin | B (Verhalten) |
+| 4 | Benutzer ohne Admin: jede mutating/critical Aktion ⇒ `not_admin`, auch `backup` | B (Verhalten) |
+| 5 | neu: `policy_denial_reason`, `approver_denial_reason`, `check_redeem`, `Actor.same_principal` | A |
+| 6 | Freigabe einlösen nur durch den Antragsteller (`not_requester`) | B (Verhalten) |
+| 7 | `WriteAuthorization.consume(...)` → `_consume(...)` (Guard-intern); neu `ActionGuardProtocol.consume(authorization, *, action, router_id, checksum=None)` mit Ledger (`unknown_authorization`), synchron auf dem Event-Loop | B |
+| 8 | neu: `GuardedAction.INSTALLATION_KEY_RESET` (critical, nur Admin-Benutzer) | A |
+| 9 | Export-Bindung `binding_checksum(version_id)` → `binding_checksum(version_id, artifact)`; `async_request_export(..., artifact=ArtifactKind.ARCHIVE)` | B (Bindung), A (Parameter) |
+| 10 | offene Anträge überleben keinen Neustart (dokumentiert) | Verhalten |
+
+**Versionsspeicher**
+
+| # | Änderung | Art |
+|---|---|---|
+| 11 | `ConfigurationApiProtocol.versions` → `VersionReadView` (vorher `VersionStoreProtocol`); `VersionStoreProtocol(VersionReadView)` ist core-intern | B |
+| 12 | `VersionStoreProtocol.async_read_artifact(storage_ref: StorageRef)` → `async_read_artifact(version_id: str, kind: str)` | B |
+| 13 | `ArtifactReader = Callable[[StorageRef], Awaitable[bytes]]` → `Callable[[str, str], Awaitable[bytes]]`, bereichsgebunden je Aufruf | B |
+| 14 | `StorageRef.locator` wird geprüft (`STORAGE_LOCATOR_PATTERN`); neu `validate_locator`, `resolve_artifact_path`, `InvalidStorageRefError` | B (Verhalten), A (Helfer) |
+| 15 | `VersionMeta.created_by` entfernt; der Store setzt `created_by = authorization.actor` | B |
+| 16 | `VersionMeta.error_class` genau bei `partial`/`failed` Pflicht | B (Verhalten) |
+| 17 | neu: `VersionMeta.warnings`, `VersionMeta.installation_key_id`, `BackupRecord.warnings`, `BackupRecord.installation_key_id`, `BackupRecord.usable`, `WARNING_CODE_PATTERN`, `MAX_WARNINGS`, `USABLE_VALIDATION` | A |
+| 18 | `CollectedVersion.warnings` entfernt (→ `meta.warnings`) | B |
+| 19 | Dedup beim Ablegen: statt „gleicher Hash wie die neueste Version des Routers“ die Regeln aus 7.4; neu `dedup_candidate`, `should_deduplicate`, `DEDUP_REASONS` | B (Verhalten), A (Helfer) |
+| 20 | `delete` mit geschützten Versionen ⇒ `VersionProtectedError`; fremde IDs ⇒ `AuthorizationError` `router_mismatch`; neu `validate_deletion` | B (Verhalten), A (Helfer) |
+| 21 | neu: `RetentionPolicy`, `RetentionResult`, `KeepReason`, `plan_retention`, API `set_retention_policy`, `async_apply_retention`, Event `configuration.retention_applied`; `prune` nur noch System (vorher System/Modul) | A, B (`prune` für Module) |
+| 22 | neu: API `async_put_version(router_id, artifacts, meta, *, authorization)` | A |
+
+**Identität, Drift, Schlüssel**
+
+| # | Änderung | Art |
+|---|---|---|
+| 23 | `RouterIdentity.status` (Feld) → `identity_flags: frozenset[IdentityFlag]` + abgeleitete Eigenschaft `status`; neu `IdentityFlag`, `primary_identity_status` | B (Konstruktor), A (Lesen von `status` bleibt) |
+| 24 | `DriftAck.version_id`: bei `known` Pflicht, sonst verboten | B |
+| 25 | neu: `Baseline`, `BaselineRule`, `select_baseline`, API `async_get_baseline` | A |
+| 26 | `async_get_installation_key()` erzeugt nicht mehr beim ersten Zugriff, sondern nur im Zustand `uninitialised`; sonst ggf. `InstallationKeyLostError` | B (Verhalten) |
+| 27 | neu: `InstallationKeyState`, `installation_key_state()`, `installation_key_id()`, `INSTALLATION_KEY_ID_LENGTH`, `ISSUE_INSTALLATION_KEY_LOST`, API `installation_key_state`, `async_request_installation_key_reset`, `async_reset_installation_key`, `InstallationKeyLostError` | A |
+| 28 | neu: `ChangeKind.NOT_COMPARABLE`, `ConfigDiff.comparable_changes` | A |
+| 29 | neu: `DriftReport.baseline_rule`, `critical_count`, `unknown_count`, `secrets_comparable`, `rebaseline` (`rebaseline` mit `drifted` ⇒ `ValueError`); `drift_event_types`, `integrity_failed` | A |
+
+**Provider**
+
+| # | Änderung | Art |
+|---|---|---|
+| 30 | jede `ConfigBackupProvider`-Methode bekommt `ctx: ProviderContext`; Parameter `read` entfällt (in `async_validate`, `async_compare`, `async_detect_drift`, `async_prepare_restore`) | B |
+| 31 | `async_compare(base, other, ctx, *, base_router, other_router)` | B |
+| 32 | `async_detect_drift(conn, baseline, acks, ctx, *, router)` (vorher `conn, baseline, read, acks`) | B |
+| 33 | neu: `ProviderContext` (`registry`, `read`, `installation_key`, `installation_key_state`, `correlation_id`, `async_get_installation_key()`) | A |
+| 34 | `ConfigSnapshot.format` Standard `"uci_json"` → `"uci_normalized"` (`SNAPSHOT_FORMAT_UCI_NORMALIZED`); `configs: Mapping[str, Mapping[str, Any]]` → `Mapping[str, Any]` (opak) | B |
+| 35 | neu: `ConfigSnapshot.uci_hash`, `ConfigSnapshot.installation_key_id`; `checksum` ausdrücklich nur Bindungsprüfsumme | A |
+| 36 | Provider feuert keine Events; der Core erzeugt sie aus Ergebnissen | Verhalten |
+
+**Events**
+
+| # | Änderung | Art |
+|---|---|---|
+| 37 | `dedup_key(router_id, discriminator)` entfernt; `CoreEvent.dedup_key` ist nur der Unterscheider, Bereich `CoreEvent.dedup_scope` = `(router_id or "-", type, dedup_key)` | B |
+| 38 | `emit(...) -> CoreEvent \| None` → `emit(...) -> EmitResult`; neu Parameter `entry_id` | B (Rückgabe), A (Parameter) |
+| 39 | `emit` eines Core-Typs durch ein Modul ⇒ `ValueError`; Modul-Präfixe nicht in `CORE_EVENT_NAMESPACES` (Beispiel `security.ids.` → `security_center.`) | B |
+| 40 | neu: `CoreEvent.repeat_count`, `last_repeat_at`, Eigenschaften `dedup_scope`, `audit_ring`; `EmitResult` | A |
+| 41 | neu: `AuditRing`, `SECURITY_AUDIT_MAX_EVENTS` (500), `SECURITY_EVENT_TYPES`, `AUDIT_MANDATORY_EVENT_TYPES`, `audit_ring_for`, `CORE_EVENT_NAMESPACES`, `is_core_event_type`; `events(..., ring=None)` | A |
+| 42 | neu: Event-Typen `configuration.change_critical`, `configuration.change_unknown`, `configuration.integrity_failed`, `configuration.retention_applied`, `security.authorization_consumed`, `core.installation_key_lost`, `core.installation_key_reset` | A |
+| 43 | Wiederholung im Cooldown: Eintrag bekommt `repeat_count`, statt nicht gespeichert zu werden | B (Verhalten) |
+
+**Allgemein**
+
+| # | Änderung | Art |
+|---|---|---|
+| 44 | Mapping-Felder tief schreibgeschützt (`MappingProxyType`, Tupel); Schreiben ⇒ `TypeError` | B (Verhalten) |
+| 45 | Enum-Felder werden umgewandelt, ungültige Werte ⇒ `ValueError` (vorher ungeprüft) | B (Verhalten) |
+| 46 | `from_dict` prüft Typen streng; Zeitstempel ohne Zeitzone werden abgelehnt (vorher als UTC angenommen) | B (Verhalten) |
+| 47 | `BackupRecord.artifacts`-Schlüssel nur `ArtifactKind`; `ExportHandle.artifact` geprüft | B (Verhalten) |
+| 48 | Freitext in `to_dict()` geschrubbt (`ConfigApiError.message`, `CompatibilityIssue.message`, `RestoreStep.description`, `RestoreResult.message`, `ApprovalRequest.reason`) | A |
+| 49 | neu: `FLEET_BACKUP_CONCURRENCY`, `STORAGE_LOCATOR_PATTERN`; `SUPPORTED_PROVIDER_API_VERSIONS` jetzt dokumentiert | A |
+| 50 | neu in `core_errors`: `InvalidStorageRefError`, `VersionProtectedError`, `InstallationKeyLostError` | A |
+
+**Maskierung (`core_masking`)**
+
+| # | Änderung | Art |
+|---|---|---|
+| 51 | `mask_secrets` maskiert mehr Namen (Obermenge), `bytes` ⇒ `**REDACTED**`, Dataclasses ⇒ maskierte dicts, Sets ⇒ sortierte Listen | B (Verhalten) |
+| 52 | `MAX_DEPTH` 32 → 64; `SECRET_SUBSTRINGS` neu zusammengesetzt (`pass` statt `password`/`passwd`/`passphrase`, dazu `apikey`, `credential`, `private`, `psk`, `pwd`); `SAFE_KEYS` erweitert | B (Konstanten) |
+| 53 | neu: `mask_for_output`, `redact_text`, `scrub_text`, `is_secret_name`, `is_secret_option`, `is_secret_path`, `secret_digest_factory`, `SECRET_OPTIONS`, `SECRET_CONTEXT_OPTIONS`, `SECRET_EXTRA_NAMES`, `SECRET_ARCHIVE_PATHS`, `SAFE_SUFFIXES`, `SECRET_MARKER_KEY`, `SECRET_DIGEST_LENGTH` | A |
+
+### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
+
+| # | Punkt | Entscheidung | Grund |
+|---|---|---|---|
+| 1 | Dedup gegen „neueste Version“ unklar; wer sperrt | **übernommen** | Regeln 7.4 (gleicher `backup_type`, `ok`/`partial`, nicht `invalid`/`corrupt`/`missing`, `failed` nie, nur `scheduled`/`drift`). Sperren: Router-Lock der API plus interne Index-Sperre des Store. |
+| 2 | Autorisierung läuft in der Flotten-Warteschlange ab | **übernommen** | Core besitzt die Warteschlange: Platz → Lock → autorisieren → holen → ablegen (Abschnitt 8). |
+| 3 | Wie wird `known` zur neuen Basis | **übernommen** | Core holt (oder dedupliziert) eine Version mit `reason=drift`; `DriftAck.version_id` hält sie; Basisregel `known_ack`. |
+| 4 | Fehlende Event-Typen; wer sendet `drift_detected`; Core-Typen von Modulen | **geändert** | Statt `configuration.backup_integrity_failed` heißt der Typ `configuration.integrity_failed`; dazu `change_critical`/`change_unknown` als eigene Typen statt Zähler an `drift_detected`. Der Core sendet alle aus Provider-Ergebnissen; Module dürfen keine Core-Typen senden. Kein Event für „Größenlimit trotz Aufbewahrung“ (siehe 10). |
+| 5 | Installations-Schlüssel und Router im Provider | **geändert** | Statt Konstruktor-Callable und optionalem `router` in `async_compare`: `ProviderContext` (Schlüssel, Leser, Registry) in jeder Methode, `base_router`/`other_router` als Pflicht-Schlüsselwortargumente. |
+| 6 | Format `ConfigSnapshot.configs` | **übernommen** | `configs` ist opak; `uci_normalized` v1 mit `sections`/`options`/`order` ist das dokumentierte Format (10.3). |
+| 7 | Hash-Gleichheit | **übernommen** | `uci_hash` und `content_hash` kommen immer vom Provider; `ConfigSnapshot.checksum` ist nur Bindungsprüfsumme. |
+| 8 | Teilerfolg „Archiv fehlgeschlagen, UCI ok“ | **übernommen** | `backup_type=partial`, `status=partial`, `error_class` des Archivs; die `error_class`-Regel wird erzwungen. |
+| 9 | `warnings` gehen verloren | **geändert** | `CollectedVersion.warnings` entfällt; Warnungen sind Maschinencodes in `VersionMeta.warnings` und landen in `BackupRecord.warnings` (nicht im `uci`-Artefakt). |
+| 10 | Wer räumt bei `StorageFullError` flottenweit auf | **geändert** | Niemand löscht über Router hinweg. Der Core wendet die Aufbewahrung des betroffenen Routers an und versucht einmal neu, sonst `backup_failed` mit `error_class=storage_full`. Kein neuer Event-Typ. |
+| 11 | `config.restore=unavailable` melden | **übernommen** | `async_probe` meldet alle `config.*`, über die der Provider entscheidet, auch nicht verfügbare. |
+| 12 | Fehlerklasse `invalid` ohne Ausnahme | **abgelehnt** (keine neue Klasse) | `ProviderError(error_class=ErrorClass.INVALID)` ist der vorgesehene Weg und so dokumentiert. |
+| 13 | Guard `backup` verlangt keinen Admin | **geändert** | Der Guard lehnt jetzt jeden Nicht-Admin-Benutzer für jede mutating/critical Aktion ab, auch `backup`; die eigene Admin-Prüfung der Route ist nicht mehr nötig. Automationen, Module und System dürfen `backup` weiter. |
+| 14 | Installations-Schlüssel entsteht still neu | **übernommen** | Zustand `lost`, `InstallationKeyLostError`, einmal `core.installation_key_lost`, Repair-Issue, Digests `not_comparable`; neuer Schlüssel nur über `installation_key_reset`, danach Re-Baseline. |
+| – | Welche Maskierung bleibt / Import aus `config_const` | **abgelehnt** | Es gibt eine Implementierung in `core_masking` (Obermenge aus beiden). `config-manager` importiert sie; `core_masking` importiert kein `config_*`-Modul. |
+
+Gemessen an `5c9d248` (Test vor der Änderung): von den 14 gemeldeten Namen (`r0kh`, `r1kh`,
+`pincode`, `param_enc`, `param_opt`, `update_url`, `askpass`, `sessionid`, `session_id`,
+`authorization`, `proxy_authorization`, `cookie`, `set_cookie`, `auth_user_pass`) liefen
+**13** unmaskiert durch; nur `auth_user_pass` wurde über das Wort `auth` erkannt. Nach der
+Wortliste des Reviews waren es noch 7 (`r0kh`, `r1kh`, `pincode`, `param_enc`, `param_opt`,
+`update_url`, `askpass`). Jetzt werden alle 14 maskiert (`tests/test_core_masking.py`).
+
+### 19.3 Entschieden
+
+- `protect` wirkt sofort, nur Admin-Benutzer.
+- Eine `failed`-Version ohne Artefakte bekommt einen Indexeintrag.
+- Ein Modul darf `async_put_version` mit einer eigenen `backup`-Autorisierung nutzen.
+- `acl_deploy` ist kritisch, nur Admin-Benutzer, gebunden an `router_id` und
+  ACL-Prüfsumme.
+- `installation_key_reset` ist flottenweit (`router_id = "-"`) und an die
+  `installation_key_id` der neuesten Version gebunden; ein späterer zweiter Verlust braucht
+  eine neue Freigabe.
+- Selbstfreigabe durch denselben Admin ist erlaubt (kein Vier-Augen-Prinzip).
+- Modul-Event-Typen liegen unter einem eigenen Präfix außerhalb der Core-Namensräume.
+- Die 14 Punkte aus 19.2.
+
+### 19.4 Offene Fragen an den Nutzer
+
+1. **Ist ein `pre_restore`-Backup vor jedem Restore Pflicht?** Betrifft erst die
+   Restore-Phase; in Phase 1 gibt es keinen Restore.
+2. **Dürfen tokenbasierte Clients freigeben?** Ein HA-`Context` trägt nur `user_id`. Über
+   HTTP/WebSocket ist der Refresh-Token-Typ bekannt (`normal`, `system`,
+   `long_lived_access_token`); bei Service-Aufrufen ist er nicht unterscheidbar. Stand des
+   Vertrags: jeder aktive, nicht systemgenerierte Admin-Benutzer darf freigeben, egal über
+   welchen Token. Eine Einschränkung auf `normal` ginge nur für HTTP/WS-Wege.

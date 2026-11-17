@@ -17,8 +17,10 @@ Dieser Plan erklärt, warum er so aussieht, und wie er eingebaut wird.
 ## Status
 
 - **Stand:** 2026-11-17 · **Phase:** Schritt 1 (Vertrag) fertig: Dokumente + Typmodule
-  (`core_models.py`, `core_errors.py`, `core_masking.py`) + `tests/test_core_models.py`.
-  Beide Nachträge sind eingearbeitet.
+  (`core_models.py`, `core_errors.py`, `core_masking.py`) + Tests
+  (`test_core_models.py`, `test_core_masking.py`, `test_core_contract_hardening.py`).
+  Beide Nachträge, das Review (Critic) und der Abgleich mit `config-manager` sind
+  eingearbeitet (Abschnitt 2.2; Änderungsliste im Vertrag, Abschnitt 19).
 - **Noch nicht gebaut:** Registry, Guard, Audit, Versionsspeicher, ConfigurationManager,
   Lebenszyklus, Stores. Nichts ist verdrahtet; `__init__.py`, `api.py`, `coordinator.py`,
   `const.py` sind unverändert.
@@ -147,23 +149,27 @@ Keinen Backup-Manager, keine HA-Services, keine Websocket-Befehle. HTTP-Views pr
    Provider, zweiter ⇒ `ProviderConflictError`. Kein Dummy-Provider im Produktivcode.
    Methoden: `supported`, `async_probe`, `async_capture`, `async_collect`, `async_validate`,
    `async_compare`, `async_detect_drift`, `async_prepare_restore`, `async_execute_restore`.
-   Gespeicherte Bytes bekommt er über einen `ArtifactReader` vom Core. Kein Export, kein
-   Löschen im Provider.
+   Jede Methode bekommt einen `ProviderContext` (bereichsgebundener Leser
+   `read(version_id, kind)`, Registry-Lesezugriff, Installations-Schlüssel). Kein Export,
+   kein Löschen, keine Events im Provider.
 9. **Zentraler Guard** `ActionGuard` ist der einzige Ort, der eine `WriteAuthorization`
    prägt (einmalig, an Router + Aktion + Bindungsprüfsumme gebunden, mit Ablauf). Wer
-   handelt (Versionsspeicher, Provider), ruft vorher `authorization.consume(...)`.
+   handelt (Versionsspeicher, Provider), ruft vorher `guard.consume(authorization, ...)`
+   (Ledger, synchron). Der Guard nimmt nur einen `VerifiedActor` an (neu gegen `hass.auth`
+   geprüft, Bedrohungsmodell im Vertrag, Abschnitt 6.1).
    **Nachtrag D:** synchrone Entscheidung `authorize(action, router_id, actor, …) ->
    AuthorizationDecision(state approved|denied|pending, audit_id, authorization |
    approval_request, reason)`. Aktionen: `backup`, `protect`, `drift_ack`, `export`,
    `delete`, `prune`, `restore`, `adopt`, `acl_deploy`, dazu `<modul>.<aktion>` über
-   `register_action`.
-10. **Events und Audit** `CoreEvent`, Ring 1000 + 90 Tage, persistiert, auf dem Bus als
-    `openwrt_router_core_event` (maskiert), abfragbar nach Router, Typ, Zeitfenster,
-    Korrelations-ID. Zentrale `mask_secrets()` für Audit, Bus und Diagnose.
+   `register_action`, `installation_key_reset`.
+10. **Events und Audit** `CoreEvent`, zwei Ringe (allgemein 1000, Sicherheit 500, je 90
+    Tage), persistiert, auf dem Bus als `openwrt_router_core_event` (maskiert), abfragbar
+    nach Router, Typ, Zeitfenster, Korrelations-ID, Ring. Eine zentrale Maskierung
+    (`core_masking`) für Audit, Bus und Diagnose. Core-Typen sendet nur der Core, auch die
+    aus Provider-Ergebnissen.
     **Nachtrag G:** Typen aus `config-manager` 9.1 (Zuordnung im Vertrag, Abschnitt 15),
-    `dedup_key` (`(router_id, drift_id)` bzw. `(router_id, error_class)`), Cooldown für
-    Fehler 24 h, Payload ohne Werte. Audit für manuelles Backup, Schutz an/aus, Drift
-    bestätigt/bekannt, Dry Run, Export.
+    Dedup-Bereich `(router_id, type, dedup_key)` mit Wiederholungszähler, Cooldown für
+    Fehler 24 h, Payload ohne Werte. Audit-pflichtige Typen werden immer geschrieben.
 11. **Fehlerklassen** unter `ConfigApiError(HomeAssistantError)` mit stabilem `code`.
     **Nachtrag C:** jede trägt eine `error_class` (`ErrorClass`, enthält die elf Klassen
     aus `config-manager` 12.2).
@@ -177,12 +183,17 @@ Keinen Backup-Manager, keine HA-Services, keine Websocket-Befehle. HTTP-Views pr
     "config_backups", <router_id>)`, Ordner 0700, Dateien 0600, atomar über `.partial` +
     Umbenennen, Indexeintrag zuletzt, alle Datei-I/O im Executor. `sweep()` beim Start:
     `*.partial` löschen, indexlose Dateien älter als 1 h nach `orphaned/`, Indexeinträge ohne
-    Datei als `missing` markieren. Grenzen 50 MB je Router, 250 MB gesamt. Dedup über
-    `content_hash`/`uci_hash`: Treffer setzt nur `last_seen_at`, Ergebnis `created=False`.
+    Datei als `missing` markieren. Grenzen 50 MB je Router, 250 MB gesamt. Dedup nur für
+    `scheduled`/`drift` gegen die neueste brauchbare Version desselben `backup_type` und
+    Status (Vertrag 7.4): Treffer setzt nur `last_seen_at`, Ergebnis `created=False`.
+    Module sehen nur die Lesesicht `VersionReadView`; Aufbewahrung führt nur der Core aus
+    (`RetentionPolicy` vom Modul).
 15. **Drift-Bestätigung und Installations-Schlüssel (Nachtrag E).** `DriftAck(router_id,
-    drift_id, state acknowledged|known, actor, ts, note)` im Katalog-Store. 32 zufällige
+    drift_id, state acknowledged|known, actor, ts, note, version_id)` im Katalog-Store;
+    Basis: explizit > neueste `known`-Bestätigung > neueste brauchbare Version. 32 zufällige
     Bytes in `.storage`, gelesen über `async_get_installation_key()`, nie in Audit, Bus oder
-    Diagnose.
+    Diagnose. Nie still neu erzeugt: Zustand `lost` ⇒ Fehler, Event, Repair-Issue; neuer
+    Schlüssel nur über `installation_key_reset`, danach Re-Baseline.
 16. **Export ist kritisch (Nachtrag 2.1).** Kritisch heißt „Antrag + Admin-Freigabe“, nicht
     „schreibt“: Export liest nur, legt aber alle Router-Geheimnisse im Klartext offen. Nur
     Admin-Benutzer, eine Freigabe je Download, auditiert. Ablauf `async_request_export` ⇒
@@ -208,20 +219,25 @@ Keinen Backup-Manager, keine HA-Services, keine Websocket-Befehle. HTTP-Views pr
 - Die Protocols stehen am Ende von `core_models.py` (der Auftrag nennt genau drei
   Typmodule).
 - Bindungsprüfsummen (`binding_checksum(...)`) je Aktion: `protect` (version_id,
-  protected), `drift_ack` (router_id, drift_id, state), `export` (version_id), `delete` und
-  `prune` (sortierte IDs), `restore` (`plan.checksum`), `adopt` (entry_id,
-  orphan_router_id), `backup` ungebunden. Jeder `consume`-Versuch verbraucht die
-  Autorisierung, auch ein fehlgeschlagener.
+  protected), `drift_ack` (router_id, drift_id, state), `export` (version_id, artifact),
+  `delete` und `prune` (sortierte IDs), `restore` (`plan.checksum`), `adopt` (entry_id,
+  orphan_router_id), `acl_deploy` (router_id, ACL-Prüfsumme), `installation_key_reset`
+  (letzte `installation_key_id`), `backup` ungebunden. Jeder `consume`-Versuch verbraucht
+  die Autorisierung, auch ein fehlgeschlagener.
 - `RestorePlan.checksum` ist eine berechnete Eigenschaft über den **unmaskierten** Inhalt
   (sonst hätten zwei Pläne, die sich nur im WLAN-Schlüssel unterscheiden, dieselbe Summe).
 - `async_actor_from_context` ist `async` (der Benutzer kommt aus `hass.auth.async_get_user`).
   Reihenfolge: `user_id` ⇒ user, sonst `module` ⇒ module, sonst `parent_id` ⇒ automation,
-  sonst system. Nur ein aktiver Admin-Benutzer ist `is_admin`.
-- Löschen durch Benutzer/Module ist **critical** (zweistufig); Aufbewahrung läuft als eigene
-  Aktion `prune` (mutating, nur System/Modul, berührt nie geschützte Versionen; geschützte
-  IDs werden übersprungen und nicht zurückgegeben). Damit ist die frühere Frage F1 gelöst.
+  sonst system. Nur ein aktiver, nicht systemgenerierter Admin-Benutzer ist `is_admin`;
+  Guard und API prüfen das bei jedem Aufruf neu (`async_verify_actor`).
+- Löschen durch Benutzer/Module ist **critical** (zweistufig); geschützte Versionen ⇒
+  `VersionProtectedError`. Aufbewahrung läuft als eigene Aktion `prune` (mutating, nur der
+  Core als System, nach `plan_retention`; geschützte und die neueste brauchbare Version
+  bleiben immer). Damit ist die frühere Frage F1 gelöst.
 - Nur Admin-Benutzer (`ADMIN_USER_ONLY_ACTIONS`): `protect`, `drift_ack`, `export`,
-  `adopt`. `backup` dürfen Benutzer, Automationen, Module und System.
+  `adopt`, `acl_deploy`, `installation_key_reset`. `backup` dürfen Admin-Benutzer,
+  Automationen, Module und System; ein Benutzer ohne Admin darf keine mutating- oder
+  critical-Aktion.
 - `CoreEvent.type`, `CapabilityStatus.capability`, `WriteAuthorization.action` sind `str`
   (Werte aus den Enums oder Modulnamen unter einem registrierten Präfix), damit ein Store
   Typen einer neueren Minor-Version laden kann.
@@ -230,10 +246,35 @@ Keinen Backup-Manager, keine HA-Services, keine Websocket-Befehle. HTTP-Views pr
 - `ChangeKind.MODIFIED` heißt bei `config-manager` `changed`; `REORDERED` neu.
   `ConfigChange.area`/`risk` sind Strings (Klassifikation des Providers).
 - `async_validate_backup` gibt den aktualisierten `BackupRecord` zurück.
-- `mask_secrets` lässt `None` stehen (Fehlen ist kein Geheimnis) und maskiert alles andere,
-  auch leere Strings. `contains_secrets` ist von der Maskierung ausgenommen.
+- `mask_secrets` lässt `None` und `bool` stehen (Fehlen ist kein Geheimnis) und maskiert
+  alles andere, auch leere Strings. `contains_secrets` ist von der Maskierung ausgenommen.
 - Fristen: `APPROVAL_TTL` 15 min, `WRITE_AUTHORIZATION_TTL` 5 min, `ROUTER_LOCK_TIMEOUT`
-  5 min, `FAILURE_EVENT_COOLDOWN` 24 h, `ORPHAN_SWEEP_MIN_AGE` 1 h.
+  5 min, `ACTOR_VERIFICATION_TTL` 60 s, `FAILURE_EVENT_COOLDOWN` 24 h,
+  `ORPHAN_SWEEP_MIN_AGE` 1 h.
+
+### 2.2 Überarbeitung nach Review und Abgleich mit `config-manager`
+
+Die vollständige Liste (breaking/additiv, Feld- und Signaturebene) und die Entscheidung zu
+jedem der 14 Punkte von `config-manager` stehen im Vertrag, Abschnitt 19. Die wichtigsten
+Linien:
+
+- **Akteure:** `VerifiedActor` statt vertrauter `Actor.is_admin`; Bedrohungsmodell im
+  Vertrag 6.1. Einlösen einer Freigabe nur durch den Antragsteller.
+- **Bytes:** Module sehen nur `VersionReadView`; Provider lesen über einen
+  bereichsgebundenen `ArtifactReader(version_id, kind)`; Locators sind einfache
+  Dateinamen mit `realpath`-Prüfung.
+- **Dedup, Aufbewahrung, Löschen:** reine Funktionen `dedup_candidate`,
+  `should_deduplicate`, `plan_retention`, `validate_deletion` legen die Regeln heute schon
+  fest.
+- **Events:** zwei Ringe, Bereich `(router_id, type, dedup_key)`, Wiederholungszähler,
+  Audit-Pflicht-Typen, Core-only-Namensräume.
+- **Drift und Schlüssel:** Basisregeln, `DriftAck.version_id`, Zustände des
+  Installations-Schlüssels, `installation_key_reset`, Re-Baseline, `not_comparable`.
+- **Provider:** `ProviderContext` in jeder Methode; Snapshot-Format `uci_normalized` v1 von
+  `config-manager`; Hashes nur vom Provider.
+- **Warteschlange:** Platz → Router-Lock → autorisieren → holen → ablegen.
+- **Maskierung:** eine Implementierung (`core_masking`), Obermenge aus Core und
+  `config_mask`/`config_const`.
 
 ---
 
@@ -241,16 +282,16 @@ Keinen Backup-Manager, keine HA-Services, keine Websocket-Befehle. HTTP-Views pr
 
 | Modul | Inhalt | Status | hängt ab von |
 |---|---|---|---|
-| `core_masking.py` | `mask_secrets`, `is_secret_key`, `MASK` (rein, ohne HA) | **gebaut** | `const` |
-| `core_errors.py` | `ErrorClass`, `ConfigApiError` + 24 Unterklassen | **gebaut** | `core_masking`, `homeassistant.exceptions` |
-| `core_models.py` | Konstanten, Enums, Dataclasses, `WriteAuthorization`, reine Helfer, Protocols | **gebaut** | `const`, `core_errors`, `core_masking`, `mac_utils`, `net_events.Severity` |
+| `core_masking.py` | die eine Maskierung: Namen, Kontextregeln, Archivpfade, HMAC-Digest, Freitext, `mask_secrets`, `mask_for_output` (rein, ohne HA) | **gebaut** | `const` |
+| `core_errors.py` | `ErrorClass`, `ConfigApiError` + 27 Unterklassen | **gebaut** | `core_masking`, `homeassistant.exceptions` |
+| `core_models.py` | Konstanten, Enums, Dataclasses, `VerifiedActor`, `WriteAuthorization`, reine Helfer (Policy, Einlösen, Dedup, Aufbewahrung, Basis), Protocols | **gebaut** | `const`, `core_errors`, `core_masking`, `mac_utils`, `net_events.Severity` |
 | `router_identity.py` | Identität und Fingerprint aus `coordinator.data` bauen, Status bestimmen | später | `core_models` |
 | `capabilities.py` | Capability-Ableitung aus `coordinator.data`/API-Flags, Signatur, Proben-Anlass | später | `core_models` |
 | `router_registry.py` | `RouterRegistry` (Store `router_registry`, Lookup, Adoption) | später | `router_identity`, `capabilities`, `core_audit`, `core_guard` |
-| `core_guard.py` | `ActionGuard` (Policy, Approvals, Prägen der `WriteAuthorization`) | später | `core_models`, `core_audit` |
-| `core_audit.py` | Audit-Ring, Store `audit`, Dedup/Cooldown, Bus-Event, `events()`, `subscribe()` | später | `core_models`, `core_masking` |
-| `core_versions.py` | `VersionStore` (Index im Store `config_catalog`, Dateien, Sweep, Grenzen, Drift-Acks) | später | `core_models`, `core_audit` |
-| `config_api.py` | `ConfigurationManager` (Locks, Provider-Aufrufe, Installations-Schlüssel) | später | alle obigen |
+| `core_guard.py` | `ActionGuard` (Akteur prüfen, Policy, Approvals im Speicher, Prägen der `WriteAuthorization`, Ledger, `consume`) | später | `core_models`, `core_audit` |
+| `core_audit.py` | zwei Audit-Ringe, Store `audit`, Dedup/Cooldown/Wiederholungszähler, Bus-Event, `events()`, `subscribe()` | später | `core_models`, `core_masking` |
+| `core_versions.py` | `VersionStore` (Index im Store `config_catalog`, Dateien, Locator-Prüfung, Sweep, Grenzen, Drift-Acks) | später | `core_models`, `core_audit` |
+| `config_api.py` | `ConfigurationManager` (Flotten-Warteschlange, Locks, Provider-Aufrufe mit `ProviderContext`, Aufbewahrung, Installations-Schlüssel und Repair-Issue) | später | alle obigen |
 | `enterprise_core.py` | Lebenszyklus: Lazy-Getter, Setup/Unload je Eintrag, Flush | später | alle obigen |
 
 Richtung: nur von unten nach oben; `core_models` importiert keinen Dienst. `api.py` und
@@ -264,19 +305,19 @@ den Router; Provider bekommen `RouterConnection.api`.
 | Thema | Core (diese Reihe) | `config-manager` (Provider) |
 |---|---|---|
 | Router-ID, Identität, Registry, Adoption | ja | nein, liest nur `RouterRecord` |
-| `config.*`-Capabilities | entscheidet, **wann** geprobt wird; Option `config_backup_enabled` | liefert `async_probe(conn)` |
-| Index (`BackupRecord`, Historie, Links, Validierung, Schutz, Notiz) | **besitzt** | liefert `VersionMeta`, `ValidationInfo` |
-| Bytes (Ablage, Grenzen, Sweep, `removed/`, Export, Löschen) | **besitzt** (`VersionStore`) | liefert `ArtifactPayload`s, liest über `ArtifactReader` |
-| Dedup (`content_hash`, `uci_hash`) | atomar in `async_put_version` | berechnet die Hashes |
-| Drift-Bestätigungen, Installations-Schlüssel | **besitzt** | liest sie |
-| UCI-Snapshot, Diff, Drift, Restore-Plan | ruft auf, prüft, auditiert | implementiert |
+| `config.*`-Capabilities | entscheidet, **wann** geprobt wird; Option `config_backup_enabled` | liefert `async_probe(conn, ctx)` mit allen `config.*`, auch nicht verfügbaren |
+| Index (`BackupRecord`, Historie, Links, Validierung, Schutz, Notiz, Warnungen) | **besitzt** | liefert `VersionMeta` (mit `warnings`), `ValidationInfo` |
+| Bytes (Ablage, Grenzen, Sweep, `removed/`, Export, Löschen) | **besitzt** (`VersionStore`) | liefert `ArtifactPayload`s, liest über `ctx.read(version_id, kind)` |
+| Dedup | Regeln und Ausführung atomar beim Ablegen | berechnet `content_hash`/`uci_hash` (nur er) |
+| Drift-Bestätigungen, Basis, Installations-Schlüssel | **besitzt** (inkl. Verlust und Reset) | liest sie über `ProviderContext` |
+| UCI-Snapshot (`uci_normalized` v1), Diff, Drift, Restore-Plan | ruft auf, prüft, auditiert | implementiert |
 | Restore-Ausführung | Phase 1 gesperrt | erst, wenn er `config.restore` meldet |
-| Aufbewahrung (Retention) | Aktion `prune`, schützt `protected` | entscheidet, welche IDs (`config_retention.py`) |
-| Schreibrechte | prägt `WriteAuthorization` | ruft `consume()` vor dem Router-Schreiben |
-| Events, Audit, Bus | erzeugt alle `CoreEvent`s, Dedup und Cooldown | meldet Ergebnisse über die API, keine eigenen Bus-Events |
-| Maskierung | `mask_secrets` zentral, `to_dict()` maskiert | eigene Secret-Digests mit dem Installations-Schlüssel |
+| Aufbewahrung (Retention) | führt `prune` nach `plan_retention` aus, behält geschützte und neueste brauchbare Version | liefert `RetentionPolicy` |
+| Schreibrechte | prägt `WriteAuthorization`, Ledger | ruft `guard.consume()` vor dem Router-Schreiben |
+| Events, Audit, Bus | erzeugt alle `CoreEvent`s (auch aus Provider-Ergebnissen), Dedup und Cooldown | meldet Ergebnisse, keine Events; eigene Typen nur unter eigenem Präfix |
+| Maskierung | `core_masking`, die eine Implementierung | importiert `core_masking`; Secret-Digests mit dem Installations-Schlüssel |
 | Router-I/O | keine | nur über `conn.api`; neue ubus/SSH-Aufrufe kommen als Methoden in `api.py` (eiserne Regel) |
-| Locks | je Router, um jede schreibende Operation | keine eigenen Router-Locks nötig |
+| Locks, Warteschlange | Flotten-Warteschlange und Lock je Router um jede schreibende Operation | keine eigenen Router-Locks nötig |
 | Gestufte ACL, TOFU-SSH-Pinning, Panel-Container „Enterprise“ | später (Abschnitt 8) | hängt Untertab ein |
 
 ---
@@ -312,8 +353,9 @@ den Router; Provider bekommen `RouterConnection.api`.
 - Datei-I/O nur im Executor; Sweep einmal beim Start, O(Dateien).
 - Speicher: höchstens 50 MB je Router, 250 MB gesamt; Überschreitung ⇒
   `ArtifactTooLargeError` bzw. `StorageFullError`, nichts wird geschrieben.
-- Audit-Ring maximal 1000 Einträge; Bus-Events nur für Core-Events, nicht je Poll;
-  wiederholte Fehler werden 24 h unterdrückt.
+- Audit-Ringe maximal 1000 (allgemein) + 500 (Sicherheit) Einträge; Bus-Events nur für
+  Core-Events, nicht je Poll; wiederholte Fehler werden 24 h nicht gefeuert, nur gezählt.
+- Backups flottenweit nacheinander (`FLEET_BACKUP_CONCURRENCY` = 1).
 - Backups, Drift, Diff laufen nur auf Anforderung oder nach Zeitplan, nie im Poll-Pfad.
 
 ---
@@ -332,22 +374,30 @@ den Router; Provider bekommen `RouterConnection.api`.
 | 8 | Backup-Integrität | Prüfsumme/Größe, `corrupt`/`missing`, Sweep; ungültige Metadaten ⇒ `BackupMetadataError`; unbekanntes Format ⇒ `UnsupportedStorageFormatError` | `test_core_models.py`, `test_core_versions.py` | **teilweise gebaut** |
 | 9 | API-Versionierung | v1 ok, v2/bool ⇒ `ApiVersionError` mit unterstützten Versionen | `test_core_models.py` | **gebaut** |
 | 10 | Fehlende Capabilities | ohne Provider `no_provider`; Option aus ⇒ `disabled`; `require_capability` ⇒ `CapabilityUnavailableError`; Restore in Phase 1 gesperrt | `test_capabilities.py`, `test_config_api.py` | später |
-| 11 | Unautorisierter Restore/Export | Modul/Automation darf nicht genehmigen und nicht exportieren; ohne Approval ⇒ `ApprovalRequiredError`; Autorisierung einmalig/gebunden/ablaufend | `test_core_models.py` (Autorisierung, Policy-Tabellen), `test_core_guard.py` | **teilweise gebaut** |
+| 11 | Unautorisierter Restore/Export | Modul/Automation darf nicht genehmigen und nicht exportieren; vorgetäuschtes `is_admin` wirkungslos; nur der Antragsteller löst ein; ohne Approval ⇒ `ApprovalRequiredError`; Autorisierung einmalig/gebunden/ablaufend | `test_core_models.py`, `test_core_contract_hardening.py` (Policy, Einlösen, Ledger), `test_core_guard.py` | **teilweise gebaut** |
 | 12 | Router offline beim Backup | `RouterUnavailableError` (retryable), Event `backup_failed` einmal je 24 h, danach `backup_recovered` | `test_config_api.py` | später |
 | 13 | Paralleler Zugriff | Lesen parallel, Schreiben je Router serialisiert, zweiter Schreibvorgang ⇒ `OperationInProgressError` | `test_config_api.py` | später |
-| 14 | Event-/Audit-Erfassung | jede Operation erzeugt ein maskiertes Event; Dedup-Schlüssel; Abfrage nach Zeitfenster/Korrelation | `test_core_models.py` (Maskierung, Round-Trip, `dedup_key`), `test_core_audit.py` | **teilweise gebaut** |
+| 14 | Event-/Audit-Erfassung | jede Operation erzeugt ein maskiertes Event; Dedup-Bereich, Ringe, Audit-Pflicht; Abfrage nach Zeitfenster/Korrelation | `test_core_models.py`, `test_core_contract_hardening.py`, `test_core_masking.py`, `test_core_audit.py` | **teilweise gebaut** |
 | 15 | Unload/Neustart | Flush beim letzten Unload, Laden nach Neustart, Sweep, Waisen bleiben, Entfernen ⇒ `removed/` | `test_enterprise_core.py`, `test_core_versions.py` | später |
 | 16 | Rückwärtskompatibilität | Geräte-/Entity-IDs, `entry.unique_id`, Config-Entry-Version unverändert; alte Metadaten migrierbar | `test_enterprise_core.py`, `test_core_models.py` | später |
 
-Gebaut in diesem Schritt (`tests/test_core_models.py`, 111 Tests): Round-Trips
-`BackupRecord` (voll und minimal)/`Actor`/`CoreEvent`/`DriftAck`/`StorageRef`/`ArtifactRef`,
-abgeleitete Felder (`sha256`, `size_bytes`, `version_id`), Notizlänge,
-Metadaten-Versionsablehnung und Migrationskette, ungültige Felder, `mask_secrets`,
-eindeutige Fehlercodes mit `error_class`, die elf Fehlerklassen aus `config-manager`,
-Speicherformat, `WriteAuthorization` (einmalig, Abweichung, Ablauf, nicht direkt
-konstruierbar), Policy-Tabellen (Export kritisch, `prune` nur System), `binding_checksum`,
-`dedup_key`, `AuthorizationDecision`, `CapabilityStatus.detail` maskiert, Router-ID gepinnt,
-Capability-Namen, Plan-Prüfsumme, Protocols `runtime_checkable`.
+Gebaut in diesem Schritt (429 Tests, davon einer auf Windows übersprungen):
+
+- `tests/test_core_models.py` (110): Round-Trips `BackupRecord` (voll und
+  minimal)/`Actor`/`CoreEvent`/`DriftAck`/`StorageRef`/`ArtifactRef`, abgeleitete Felder,
+  Notizlänge, Metadaten-Versionsablehnung und Migrationskette, ungültige Felder, eindeutige
+  Fehlercodes mit `error_class`, die elf Fehlerklassen aus `config-manager`, Speicherformat,
+  `WriteAuthorization` (einmalig, Abweichung, Ablauf, nicht direkt konstruierbar),
+  Policy-Tabellen, `binding_checksum`, `AuthorizationDecision`, Router-ID gepinnt,
+  Capability-Namen, Plan-Prüfsumme, Protocols `runtime_checkable`.
+- `tests/test_core_masking.py` (166): die 14 von `config-manager` gemeldeten Namen über
+  beide Maskierungsfunktionen, jede `SECRET_OPTION`, Kontextnamen, CamelCase und
+  Ergänzungen, lesbare Namen, Archivpfade, Digest, Freitext (Geheimnisse weg, IDs bleiben),
+  Dataclasses, `bytes`, Ausnahmen, Marker, Zyklen, kein Import aus `config_*`.
+- `tests/test_core_contract_hardening.py` (153): Review-Befunde 1–3, 4, 6, 9, 10, 12, 13,
+  15, 16 und die Punkte des Koordinators (Warteschlange, `VersionMeta`-Regeln, Basis,
+  Installations-Schlüssel, Drift-Events, Provider-Signaturen, Snapshot-Format).
+  Der Symlink-Ausbruchstest läuft nur auf POSIX.
 
 ---
 
@@ -381,9 +431,12 @@ Capability-Namen, Plan-Prüfsumme, Protocols `runtime_checkable`.
   dieser Plan fasst `api.py` nicht an. Reihenfolge über den Master abstimmen.
 - `uuid5` über `entry_id`: Ein Nutzer, der Einträge per Backup-Restore von HA zurückholt,
   bekommt dieselben `entry_id`s und damit dieselben Router-IDs (gewollt).
-- Maskierung ist namensbasiert: Ein Geheimnis unter einem neutralen Schlüssel wird nicht
-  erkannt. Provider müssen strukturierte Daten liefern (`configs[config][section][option]`),
-  Diff-Werte werden über den Optionsnamen geprüft.
+- Maskierung ist namens- und musterbasiert: Ein Geheimnis unter einem neutralen Schlüssel in
+  einem unbekannten Format wird nicht erkannt. Provider liefern strukturierte Daten
+  (`uci_normalized` v1, Geheimnisse nur als HMAC-Marker), Diff-Werte werden über
+  `is_secret_option` geprüft, Events tragen nur IDs und Zähler.
+- Private Sentinels und das Ledger schützen gegen Fehler und fremde Akteure, nicht gegen ein
+  Modul, das absichtlich private Helfer importiert (Bedrohungsmodell, Vertrag 6.1).
 - Klartext-Archive auf der HA-Platte (Phase 1 ohne eigene Verschlüsselung): Schutz nur über
   Dateirechte und die HA-Backup-Verschlüsselung. Wer die HA-Platte liest, liest die
   Router-Geheimnisse. Deshalb Export kritisch und Ordner nicht unter `www`.
@@ -403,8 +456,11 @@ Capability-Namen, Plan-Prüfsumme, Protocols `runtime_checkable`.
   sie liefert; sonst bleibt `serial=None`.
 - **F5** Dürfen Automationen Backups anlegen (mutating, als `automation` protokolliert)?
   Umgesetzt: ja. Genehmigen, Exportieren, Schützen und Drift bestätigen dürfen sie nie.
-- **F6** Zählt eine `failed`-Version (ohne Artefakte) im Index? Umgesetzt: ja, damit Fehler
-  in der Historie stehen; Größe 0. Alternative: nur Event, kein Indexeintrag.
-- **F7** Darf ein Modul `async_put_version` direkt rufen (mit eigener `backup`-Autorisierung),
-  etwa für den Zeitplan von `config-manager`? Umgesetzt: ja; Alternative: nur über
-  `async_create_backup`.
+- **F6** ~~Zählt eine `failed`-Version (ohne Artefakte) im Index?~~ Entschieden: ja, damit
+  Fehler in der Historie stehen; Größe 0. Sie nimmt nie am Dedup teil.
+- **F7** ~~Darf ein Modul `async_put_version` direkt rufen?~~ Entschieden: ja, mit eigener
+  `backup`-Autorisierung (erst holen, dann autorisieren).
+- **F8** Dürfen tokenbasierte Clients freigeben? Ein HA-`Context` trägt nur `user_id`; der
+  Refresh-Token-Typ (`normal`, `system`, `long_lived_access_token`) ist nur über HTTP/WS
+  bekannt, bei Service-Aufrufen nicht. Stand: jeder aktive, nicht systemgenerierte
+  Admin-Benutzer darf freigeben.
