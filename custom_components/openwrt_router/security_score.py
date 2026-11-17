@@ -1,0 +1,337 @@
+"""Security score and monitoring coverage of the Security Center (stage 2, pure).
+
+The score (0-100) starts at 100 and every factor deducts a transparent
+amount: each :class:`FactorScore` carries its weight, deduction and an
+English reason. Hard rules (plan 2):
+
+* monitoring coverage (0-100) is the share of expected data sources that
+  are available; a missing or stale source lowers it;
+* below full coverage the score is capped below 100 (:func:`score_cap`):
+  "nothing found" by an incomplete monitor is never a perfect value;
+* with no usable source at all (or no assessable factor) the score is
+  ``None`` (unknown), never 100;
+* a factor whose source is missing is *not assessable*: it neither deducts
+  0 (which would look "clean") nor anything else, and its weight drops out.
+
+No clock, no I/O: inputs are counts and :class:`SourceStatus` values.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from typing import Any, Final
+
+from .security_model import Availability, DataSource, Severity, SourceStatus
+
+_LOGGER = logging.getLogger(__name__)
+
+FACTOR_INCIDENTS: Final = "active_incidents"
+FACTOR_CONFIG: Final = "critical_config_changes"
+FACTOR_AUTH: Final = "auth_failures"
+FACTOR_ACTIVITY: Final = "network_activity"
+FACTOR_UNKNOWN: Final = "unknown_devices"
+FACTOR_SEGMENTATION: Final = "segmentation"
+FACTOR_COVERAGE: Final = "detection_coverage"
+
+PERFECT_SCORE: Final = 100
+MAX_PARTIAL_SCORE: Final = 99
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class FactorRule:
+    """How one factor is scored.
+
+    ``deduction = min(weight, value * per_unit)``. The factor is assessable
+    if its sources are available: all of them, or any one with
+    ``require="any"``.
+    """
+
+    id: str
+    weight: float
+    per_unit: float
+    sources: frozenset[str]
+    require: str = "all"  # "all" | "any"
+    description: str = ""
+
+    def assessable(self, statuses: Mapping[str, SourceStatus]) -> bool:
+        """True if the rule's sources allow a judgement."""
+        if not self.sources:
+            return True
+        ok = [(st := statuses.get(s)) is not None and st.usable for s in self.sources]
+        return any(ok) if self.require == "any" else all(ok)
+
+
+DEFAULT_RULES: Final[tuple[FactorRule, ...]] = (
+    FactorRule(
+        id=FACTOR_INCIDENTS,
+        weight=30,
+        per_unit=10,
+        sources=frozenset({DataSource.NI_INCIDENTS}),
+        description="Active security incidents (weighted by severity)",
+    ),
+    FactorRule(
+        id=FACTOR_CONFIG,
+        weight=15,
+        per_unit=7.5,
+        sources=frozenset({DataSource.CONFIG_DRIFT}),
+        description="Critical configuration changes (drift events)",
+    ),
+    FactorRule(
+        id=FACTOR_AUTH,
+        weight=15,
+        per_unit=5,
+        sources=frozenset({DataSource.WIFI_EVENTS}),
+        description="Clients with repeated authentication failures",
+    ),
+    FactorRule(
+        id=FACTOR_ACTIVITY,
+        weight=15,
+        per_unit=5,
+        sources=frozenset(
+            {
+                DataSource.FIREWALL_LOG,
+                DataSource.DNS_QUERY_LOG,
+                DataSource.CONNTRACK_STATS,
+            }
+        ),
+        require="any",
+        description="Unusual network activity (firewall, DNS, connections)",
+    ),
+    FactorRule(
+        id=FACTOR_UNKNOWN,
+        weight=10,
+        per_unit=2.5,
+        sources=frozenset({DataSource.HOSTAPD_CLIENTS, DataSource.CLIENT_HISTORY}),
+        require="any",
+        description="Unrecognized or suspicious devices",
+    ),
+    FactorRule(
+        id=FACTOR_SEGMENTATION,
+        weight=10,
+        per_unit=5,
+        sources=frozenset({DataSource.FIREWALL_LOG, DataSource.CONFIG_DRIFT}),
+        require="any",
+        description="Segmentation findings (inter-VLAN attempts, drift)",
+    ),
+    FactorRule(
+        id=FACTOR_COVERAGE,
+        weight=5,
+        per_unit=0.05,  # per missing coverage point
+        sources=frozenset(),
+        description="Gaps in detection coverage",
+    ),
+)
+
+DEFAULT_EXPECTED_SOURCES: Final = frozenset(
+    {
+        DataSource.NI_INCIDENTS,
+        DataSource.WIFI_EVENTS,
+        DataSource.HOSTAPD_CLIENTS,
+        DataSource.CLIENT_HISTORY,
+        DataSource.CONFIG_DRIFT,
+        DataSource.FIREWALL_LOG,
+        DataSource.DNS_QUERY_LOG,
+    }
+)
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class FactorScore:
+    """One factor of the score (``deduction`` None = not assessable)."""
+
+    id: str
+    weight: float
+    deduction: float | None
+    assessable: bool
+    reason: str
+    value: float | None = None
+    missing: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form."""
+        return {
+            "id": self.id,
+            "weight": self.weight,
+            "deduction": self.deduction,
+            "assessable": self.assessable,
+            "reason": self.reason,
+            "value": self.value,
+            "missing": list(self.missing),
+        }
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class CoverageResult:
+    """Monitoring coverage with the sources that lower it."""
+
+    coverage: int
+    available: tuple[str, ...] = ()
+    stale: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ScoreResult:
+    """Score (None = unknown), coverage, cap and the factor breakdown."""
+
+    score: int | None
+    coverage: int
+    cap: int
+    factors: tuple[FactorScore, ...] = field(default=())
+    reason: str = ""
+
+    @property
+    def known(self) -> bool:
+        """True if a score could be computed."""
+        return self.score is not None
+
+    def factor(self, factor_id: str) -> FactorScore | None:
+        """Factor by id."""
+        return next((f for f in self.factors if f.id == factor_id), None)
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form (no identities: counts only)."""
+        return {
+            "score": self.score,
+            "coverage": self.coverage,
+            "cap": self.cap,
+            "reason": self.reason,
+            "factors": [f.to_dict() for f in self.factors],
+        }
+
+
+def monitoring_coverage(
+    statuses: Mapping[str, SourceStatus],
+    expected: Iterable[str] = DEFAULT_EXPECTED_SOURCES,
+    *,
+    stale_credit: float = 0.0,
+) -> CoverageResult:
+    """Share (0-100) of ``expected`` sources that are available.
+
+    A source without a status counts as missing. A stale source earns
+    ``stale_credit`` (default 0: old data does not cover the present).
+    """
+    names = sorted(set(expected))
+    if not names:
+        return CoverageResult(coverage=0)
+    credit = min(1.0, max(0.0, float(stale_credit)))
+    available, stale, missing = [], [], []
+    for name in names:
+        status = statuses.get(name)
+        if status is None or status.availability is Availability.NOT_AVAILABLE:
+            missing.append(name)
+        elif status.availability is Availability.STALE:
+            stale.append(name)
+        else:
+            available.append(name)
+    share = (len(available) + credit * len(stale)) / len(names)
+    coverage = int(share * 100)  # floor: 99.9 % is not full coverage
+    return CoverageResult(
+        coverage=coverage,
+        available=tuple(available),
+        stale=tuple(stale),
+        missing=tuple(missing),
+    )
+
+
+def score_cap(coverage: int) -> int:
+    """Highest score allowed at ``coverage`` (100 only at full coverage)."""
+    if coverage >= 100:
+        return PERFECT_SCORE
+    return min(MAX_PARTIAL_SCORE, round(50 + max(0, coverage) / 2))
+
+
+def incident_load(severities: Iterable[Severity | str]) -> float:
+    """Weighted incident count: critical 3, warning 1, info 0.25."""
+    weights = {Severity.CRITICAL: 3.0, Severity.WARNING: 1.0, Severity.INFO: 0.25}
+    total = 0.0
+    for sev in severities:
+        try:
+            total += weights[Severity(sev)]
+        except ValueError:
+            total += 1.0  # unknown severity: count as warning, never as 0
+    return total
+
+
+def _factor(
+    rule: FactorRule, value: float | None, statuses: Mapping[str, SourceStatus]
+) -> FactorScore:
+    missing = tuple(
+        sorted(s for s in rule.sources if not (statuses.get(s) and statuses[s].usable))
+    )
+    if not rule.assessable(statuses):
+        return FactorScore(
+            id=rule.id,
+            weight=rule.weight,
+            deduction=None,
+            assessable=False,
+            reason="not assessable: source unavailable",
+            missing=missing,
+        )
+    if value is None:
+        return FactorScore(
+            id=rule.id,
+            weight=rule.weight,
+            deduction=None,
+            assessable=False,
+            reason="not assessable: no value provided",
+            missing=missing,
+        )
+    deduction = round(min(rule.weight, max(0.0, value) * rule.per_unit), 2)
+    reason = (
+        f"{rule.description}: {value:g}" if deduction else f"{rule.description}: none"
+    )
+    return FactorScore(
+        id=rule.id,
+        weight=rule.weight,
+        deduction=deduction,
+        assessable=True,
+        reason=reason,
+        value=float(value),
+        missing=missing,
+    )
+
+
+def compute_score(
+    values: Mapping[str, float | None],
+    statuses: Mapping[str, SourceStatus],
+    *,
+    rules: Iterable[FactorRule] = DEFAULT_RULES,
+    expected: Iterable[str] = DEFAULT_EXPECTED_SOURCES,
+    stale_credit: float = 0.0,
+) -> ScoreResult:
+    """Score from factor ``values`` (factor id → count; None = unknown).
+
+    The coverage factor's value is filled in here (missing coverage points).
+    Not-assessable factors drop out; the remaining deductions are scaled to
+    the full 100 points so a missing factor neither helps nor hurts, and the
+    result is then capped by :func:`score_cap`.
+    """
+    cov = monitoring_coverage(statuses, expected, stale_credit=stale_credit)
+    cap = score_cap(cov.coverage)
+    filled = {**values, FACTOR_COVERAGE: float(100 - cov.coverage)}
+    factors = tuple(_factor(r, filled.get(r.id), statuses) for r in rules)
+    judged = [f for f in factors if f.assessable and f.id != FACTOR_COVERAGE]
+    if cov.coverage <= 0 or not judged:
+        return ScoreResult(
+            score=None,
+            coverage=cov.coverage,
+            cap=cap,
+            factors=factors,
+            reason="unknown: no usable data source",
+        )
+    assessed = [f for f in factors if f.assessable]
+    weight = sum(f.weight for f in assessed)
+    lost = sum(f.deduction or 0.0 for f in assessed)
+    raw = 100.0 * (1.0 - lost / weight) if weight > 0 else 0.0
+    score = max(0, min(cap, round(raw)))
+    reason = "complete" if cov.coverage >= 100 else f"capped at {cap}: partial coverage"
+    return ScoreResult(
+        score=score,
+        coverage=cov.coverage,
+        cap=cap,
+        factors=factors,
+        reason=reason,
+    )
