@@ -511,11 +511,12 @@ UBUS_SERVICE_LIST = "list"
 # logd ring buffer (F6 log ingest, ACL v6)
 UBUS_LOG_OBJECT = "log"
 UBUS_LOG_READ = "read"
-# Fetched every LOG_READ_INTERVAL_CYCLES polls (~165 B per line). The first
+# Fetched every LOG_READ_INTERVAL_CYCLES polls (~165 B per line); 1 = every
+# poll from poll 2 on (RT3-D: near-realtime events via the log). The first
 # fetch asks for LOG_READ_LINES; later fetches size themselves to 1.5x the
 # lines seen last time (LOG_READ_LINES_MIN..MAX), and after a gap ("missed"
 # lines) the next fetch takes LOG_READ_LINES_MAX (about the whole buffer).
-LOG_READ_INTERVAL_CYCLES = 2
+LOG_READ_INTERVAL_CYCLES = 1
 LOG_READ_LINES = 250
 LOG_READ_LINES_MIN = 100
 LOG_READ_LINES_MAX = 700
@@ -539,10 +540,13 @@ DHCP_CONFIG_REFRESH_CYCLES = 10
 DHCP_CONFIG_RETRY_CYCLES = 60
 
 # Client stability (F4): usteer's fleet-wide client view (ACL v6), fetched
-# every LOG_READ_INTERVAL_CYCLES polls on the polls between the log fetches;
-# a router without usteer is asked again every USTEER_RETRY_CYCLES polls.
+# every USTEER_READ_INTERVAL_CYCLES polls from poll 3 on, independent of the
+# log rhythm (RT3-D: the log is read on every poll, so usteer must not wait
+# for a poll without a log read); a router without usteer is asked again
+# every USTEER_RETRY_CYCLES polls.
 UBUS_USTEER_OBJECT = "usteer"
 UBUS_USTEER_GET_CLIENTS = "get_clients"
+USTEER_READ_INTERVAL_CYCLES = 2
 USTEER_RETRY_CYCLES = 30
 USTEER_STATUS_PENDING = "pending"
 USTEER_STATUS_OK = "ok"

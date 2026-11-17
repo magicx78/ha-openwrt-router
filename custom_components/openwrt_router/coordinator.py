@@ -112,6 +112,7 @@ from .const import (
     THROTTLED_INTERVAL_SECONDS,
     TOPOLOGY_SNAPSHOT_INTERVAL_CYCLES,
     TOPOLOGY_SNAPSHOT_MAX,
+    USTEER_READ_INTERVAL_CYCLES,
     USTEER_RETRY_CYCLES,
     USTEER_STATUS_OK,
     USTEER_STATUS_PENDING,
@@ -987,22 +988,19 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             )
             data.dhcp_static_macs = self._dhcp_static_macs
 
-            # Client stability (F4): usteer every LOG_READ_INTERVAL_CYCLES
-            # polls but never in the same poll as the log (spreads the two
-            # ~40 KB answers). Never fails the poll.
+            # Client stability (F4): usteer every USTEER_READ_INTERVAL_CYCLES
+            # polls from poll 3 on, with its own rhythm: the log is read on
+            # every poll (RT3-D), so usteer must not wait for a poll without
+            # a log read. Poll 2 carries the large first log read. Never
+            # fails the poll.
             usteer_interval = (
                 USTEER_RETRY_CYCLES
                 if self._usteer_status == USTEER_STATUS_UNAVAILABLE
-                else LOG_READ_INTERVAL_CYCLES
+                else USTEER_READ_INTERVAL_CYCLES
             )
-            if (
-                self._board_poll_count > 1
-                and self._last_log_poll != self._board_poll_count
-                and (
-                    self._last_usteer_poll is None
-                    or self._board_poll_count - self._last_usteer_poll
-                    >= usteer_interval
-                )
+            if self._board_poll_count > 2 and (
+                self._last_usteer_poll is None
+                or self._board_poll_count - self._last_usteer_poll >= usteer_interval
             ):
                 self._last_usteer_poll = self._board_poll_count
                 await self._fetch_usteer(data, now_ms)

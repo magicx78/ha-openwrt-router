@@ -201,6 +201,27 @@ class TestCoordinatorStability:
         assert sticky["delta_db"] == 12
 
     @pytest.mark.asyncio
+    async def test_log_every_poll_keeps_usteer_running(self):
+        """RT3-D: the log is read on every poll from poll 2 on, and usteer
+        keeps its own rhythm. It once ran only on polls without a log read,
+        so a log read on every poll would have silenced it (F4)."""
+        from custom_components.openwrt_router.const import (
+            LOG_READ_INTERVAL_CYCLES,
+            USTEER_READ_INTERVAL_CYCLES,
+        )
+
+        assert LOG_READ_INTERVAL_CYCLES == 1
+        assert USTEER_READ_INTERVAL_CYCLES == 2
+        coord, api = _coordinator()
+        t0 = T / 1000
+        for i in range(0, 13):  # polls 1..13
+            data = await _poll(coord, t0 + 60 * i)
+        assert api.get_log_entries.await_count == 12  # polls 2..13
+        assert api.get_usteer_clients.await_count == 6  # polls 3,5,7,9,11,13
+        assert data.client_stability["usteer"] == USTEER_STATUS_OK
+        assert data.client_stability["sticky"]
+
+    @pytest.mark.asyncio
     async def test_without_usteer_weak_clients_and_retry(self):
         from custom_components.openwrt_router.api import OpenWrtMethodNotFoundError
 
