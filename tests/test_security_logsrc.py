@@ -12,7 +12,6 @@ import pytest
 
 from custom_components.openwrt_router.security_logsrc import (
     KIND_SOURCES,
-    PATH_OFF,
     SCHEMA_VERSION,
     Deduper,
     KeyAssigner,
@@ -453,7 +452,7 @@ class TestNullSource:
     async def test_off_delivers_nothing(self):
         source = NullLogSource()
         assert isinstance(source, LogSource)
-        assert source.name == PATH_OFF
+        assert source.name == LogPath.OFF
         await source.async_start()
         assert source.drain(100) == []
         await source.async_stop()

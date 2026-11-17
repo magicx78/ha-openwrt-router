@@ -22,6 +22,7 @@ Core contract symbols are only used through ``security_model``.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import math
 from collections import OrderedDict, deque
@@ -70,7 +71,9 @@ DEAUTH_KINDS: Final = frozenset(
 AUTH_WAVE_KIND: Final = "wifi.auth_wave"
 # Off-router record kinds (SecLogRecord.kind, plan 4.2).
 FW_KINDS: Final = frozenset({"fw.drop", "fw.reject"})
+DEST_ZONE_UNKNOWN: Final = "dest_zone_unknown"
 DNS_QUERY_KIND: Final = "dns.query"
+DNS_REPLY_KIND: Final = "dns.reply"  # dnsmasq writes the rcode only here
 NXDOMAIN_CODES: Final = frozenset({"nxdomain", "3"})
 
 
@@ -365,6 +368,10 @@ class DetectorResult:
     events: tuple[SecurityEvent, ...] = ()
     missing: tuple[str, ...] = ()
     learning: bool = False
+    # Available but partly blind, e.g. DEST_ZONE_UNKNOWN (inter-VLAN): an
+    # empty result then means "nothing seen", not "all clear".
+    limitation: str | None = None
+    unattributed: int = 0  # records in the window that could not be judged
 
     @property
     def available(self) -> bool:
@@ -1111,7 +1118,18 @@ class FirewallMgmtAccessDetector(_LogDetector):
 
 
 class FirewallInterVlanDetector(_LogDetector):
-    """Repeated blocked forwards between internal zones (inter-VLAN attempts)."""
+    """Repeated blocked forwards between internal zones (inter-VLAN attempts).
+
+    fw4 log lines never name the destination zone (``dest_zone`` None), so a
+    blocked forward alone could just as well be lan to wan. A record counts
+    only with a known destination zone: from the record, or from
+    ``dest_subnets`` (caller-supplied ``{"192.168.1.0/24": "lan", ...}``,
+    longest prefix wins; a destination outside every listed subnet is
+    external, not inter-VLAN). Otherwise the record is *unattributable*: it
+    is counted, never guessed, and the result carries
+    ``limitation="dest_zone_unknown"`` so that "no finding" is not mistaken
+    for "all clear".
+    """
 
     id = "fw_inter_vlan"
     name = "Repeated blocked inter-VLAN connection attempts"
@@ -1127,23 +1145,104 @@ class FirewallInterVlanDetector(_LogDetector):
         threshold: int = 5,
         wan_zones: Iterable[str] = ("wan", "wan6"),
         allowed_pairs: Iterable[tuple[str, str]] = (),
+        dest_subnets: Mapping[str, str] | None = None,
         **kw: Any,
     ) -> None:
         super().__init__(window_s=window_s, threshold=threshold, **kw)
         self.wan_zones = frozenset(wan_zones)
         self.allowed_pairs = frozenset(tuple(p) for p in allowed_pairs)
+        # ValueError on a malformed subnet: a configuration error of the caller.
+        self.dest_subnets = tuple(
+            sorted(
+                (
+                    (ipaddress.ip_network(net, strict=False), _text(zone, 32))
+                    for net, zone in (dest_subnets or {}).items()
+                ),
+                key=lambda item: item[0].prefixlen,
+                reverse=True,
+            )
+        )
+        self._meta: OrderedDict[str, _Slot] = OrderedDict()
+
+    def _dest_zone(self, record: Any) -> str | None:
+        """Destination zone; ``""`` = external, None = not determinable."""
+        given = _field(record, "dest_zone") or _field(record, "dst_zone")
+        if given:
+            return _text(given, 32)
+        if not self.dest_subnets:
+            return None
+        try:
+            addr = ipaddress.ip_address(_text(_field(record, "dst")))
+        except ValueError:
+            return None
+        for net, zone in self.dest_subnets:
+            if addr.version == net.version and addr in net:
+                return zone
+        return ""
+
+    def _meta_slot(self, router: str) -> _Slot:
+        slot = self._meta.get(router)
+        if slot is None:
+            if len(self._meta) >= DEFAULT_MAX_ROUTERS:
+                self._meta.popitem(last=False)
+            slot = _Slot()
+            slot.count = WindowCounter(self.window_s)  # attributed forwards
+            slot.extra = WindowCounter(self.window_s)  # unattributable forwards
+            self._meta[router] = slot
+        return slot
 
     def _feed(self, router: str, ts: float, record: Any) -> None:
         if _text(_field(record, "dir"), 16).lower() != "forward":
             return
         zone = _text(_field(record, "zone"), 32)
-        dest_zone = _text(_field(record, "dest_zone") or _field(record, "dst_zone"), 32)
-        if not zone or zone in self.wan_zones or dest_zone in self.wan_zones:
+        if not zone or zone in self.wan_zones:
+            return
+        dest_zone = self._dest_zone(record)
+        meta = self._meta_slot(router)
+        if dest_zone is None:
+            meta.extra.add(ts)  # type: ignore[union-attr]
+            return
+        meta.count.add(ts)  # type: ignore[union-attr]
+        if not dest_zone or dest_zone in self.wan_zones or dest_zone == zone:
             return
         if (zone, dest_zone) in self.allowed_pairs:
             return
         src = _text(_field(record, "src"))
         self._slot((router, zone, dest_zone, src)).count.add(ts)  # type: ignore[union-attr]
+
+    def evaluate(
+        self, now: float, statuses: Mapping[str, Mapping[str, SourceStatus]]
+    ) -> tuple[DetectorResult, ...]:
+        """Like every detector, plus the honest limitation per router.
+
+        Limited when unattributable forwards are in the window, or when
+        there is no subnet map and no record with a destination zone was
+        seen (the detector then cannot see inter-VLAN traffic at all).
+        """
+        out = []
+        for result in super().evaluate(now, statuses):
+            if not result.available:
+                out.append(result)
+                continue
+            meta = self._meta.get(result.router_id or "")
+            unknown = int(meta.extra.count(now)) if meta else 0  # type: ignore[union-attr]
+            known = meta.count.count(now) if meta else 0  # type: ignore[union-attr]
+            limited = unknown > 0 or (not self.dest_subnets and known <= 0)
+            out.append(
+                replace(
+                    result,
+                    unattributed=unknown,
+                    limitation=DEST_ZONE_UNKNOWN if limited else None,
+                )
+            )
+        return tuple(out)
+
+    def reset_router(self, router_id: str) -> None:
+        super().reset_router(router_id)
+        self._meta.pop(router_id, None)
+
+    def state_size(self) -> int:
+        return super().state_size() + sum(s.size() for s in self._meta.values())
 
     def _check(
         self, key: tuple[str, ...], slot: _Slot, now: float
@@ -1357,10 +1456,20 @@ class DnsRateDetector(_DnsDetector):
 
 
 class DnsNxdomainDetector(_DnsDetector):
-    """Cluster of NXDOMAIN answers for one client."""
+    """Cluster of NXDOMAIN answers for one client.
+
+    dnsmasq writes the answer code only in its reply lines (``dns.reply``,
+    ``rcode="NXDOMAIN"``); the query line carries none. Questions are
+    counted from ``dns.query``, NXDOMAIN answers from ``dns.reply`` (and
+    from a ``dns.query`` record that already carries an rcode). Only this
+    detector reads replies, so the rate and many-domains detectors never
+    count one question twice. A reply without a client (dnsmasq without
+    ``--log-queries=extra``) cannot be attributed and is skipped.
+    """
 
     id = "dns_nxdomain_cluster"
     name = "NXDOMAIN cluster of one client"
+    kinds = frozenset({DNS_QUERY_KIND, DNS_REPLY_KIND})
 
     def __init__(
         self,
@@ -1375,7 +1484,7 @@ class DnsNxdomainDetector(_DnsDetector):
 
     def _new_slot(self) -> _Slot:
         slot = _Slot()
-        slot.count = WindowCounter(self.window_s)  # all queries
+        slot.count = WindowCounter(self.window_s)  # questions (dns.query)
         slot.extra = WindowCounter(self.window_s)  # NXDOMAIN
         return slot
 
@@ -1384,7 +1493,8 @@ class DnsNxdomainDetector(_DnsDetector):
         if not client:
             return
         slot = self._slot((router, client))
-        slot.count.add(ts)  # type: ignore[union-attr]
+        if _get(record, "kind") == DNS_QUERY_KIND:
+            slot.count.add(ts)  # type: ignore[union-attr]
         if _text(_field(record, "rcode"), 16).lower() in NXDOMAIN_CODES:
             slot.extra.add(ts)  # type: ignore[union-attr]
             self._remember(slot, _text(_field(record, "name"), 255))
@@ -1392,8 +1502,9 @@ class DnsNxdomainDetector(_DnsDetector):
     def _check(
         self, key: tuple[str, ...], slot: _Slot, now: float
     ) -> SecurityEvent | None:
-        total = slot.count.count(now)  # type: ignore[union-attr]
         nx = slot.extra.count(now)  # type: ignore[union-attr]
+        # A reply whose query line was lost still stands for one question.
+        total = max(slot.count.count(now), nx)  # type: ignore[union-attr]
         if nx < self.threshold or total <= 0 or nx / total < self.min_ratio:
             return None
         return self._event(
@@ -1508,14 +1619,33 @@ class DnsTunnelHintDetector(_DnsDetector):
 
 
 class DetectorSet:
-    """Runs a list of detectors; routes inputs; handles router restarts."""
+    """Runs a list of detectors; routes inputs; handles router restarts.
 
-    def __init__(self, detectors: Iterable[Detector]) -> None:
-        """Take the detectors (ids must be unique)."""
+    All baseline detectors share ONE ``BaselineBook`` (one size limit, one
+    later store); ``baseline`` is that book.
+    """
+
+    def __init__(
+        self, detectors: Iterable[Detector], *, baseline: BaselineBook | None = None
+    ) -> None:
+        """Take the detectors (unique ids, at most one baseline book)."""
         self.detectors: tuple[Detector, ...] = tuple(detectors)
         ids = [d.id for d in self.detectors]
         if len(ids) != len(set(ids)):
             raise ValueError("detector ids must be unique")
+        books = {
+            id(book): book
+            for book in [
+                baseline,
+                *(getattr(d, "baseline", None) for d in self.detectors),
+            ]
+            if book is not None
+        }
+        if len(books) > 1:
+            raise ValueError("baseline detectors must share one BaselineBook")
+        self.baseline: BaselineBook = (
+            next(iter(books.values())) if books else BaselineBook()
+        )
         self.guard = RestartGuard()
 
     def feed_wifi(self, items: Iterable[Any], *, router_id: str | None = None) -> int:
@@ -1587,10 +1717,17 @@ def default_detectors(
     mgmt_addrs: Iterable[str] = (),
     mgmt_ports: Iterable[int] = DEFAULT_MGMT_PORTS,
     noise_zones: Iterable[str] = ("wan",),
+    dest_subnets: Mapping[str, str] | None = None,
     max_keys: int = DEFAULT_MAX_KEYS,
+    baseline: BaselineBook | None = None,
 ) -> DetectorSet:
-    """All stage-2 detectors with their documented default thresholds."""
+    """All stage-2 detectors with their documented default thresholds.
+
+    Exactly one ``BaselineBook`` (``baseline`` or a new one) is shared by
+    every baseline detector.
+    """
     kw: dict[str, Any] = {"max_keys": max_keys}
+    book = baseline if baseline is not None else BaselineBook()
     return DetectorSet(
         [
             WifiAuthRepeatDetector(**kw),
@@ -1598,7 +1735,7 @@ def default_detectors(
             WifiAssocBurstDetector(**kw),
             WifiDeauthClusterDetector(**kw),
             WifiMultiApAuthDetector(**kw),
-            FirewallBlockedDetector(**kw),
+            FirewallBlockedDetector(baseline=book, **kw),
             FirewallPortScanDetector(noise_zones=noise_zones, **kw),
             FirewallMgmtAccessDetector(
                 watch_zones=watch_zones,
@@ -1606,13 +1743,14 @@ def default_detectors(
                 mgmt_ports=mgmt_ports,
                 **kw,
             ),
-            FirewallInterVlanDetector(**kw),
+            FirewallInterVlanDetector(dest_subnets=dest_subnets, **kw),
             VlanDriftDetector(**kw),
-            DnsRateDetector(keep_names=keep_names, **kw),
+            DnsRateDetector(keep_names=keep_names, baseline=book, **kw),
             DnsNxdomainDetector(keep_names=keep_names, **kw),
             DnsManyDomainsDetector(keep_names=keep_names, **kw),
             DnsTunnelHintDetector(keep_names=keep_names, **kw),
-        ]
+        ],
+        baseline=book,
     )
 
 
@@ -1668,16 +1806,17 @@ def _group_key(event: SecurityEvent) -> tuple[str, str]:
 def dedup_events(
     events: Iterable[SecurityEvent], *, cooldown_s: float = 300.0
 ) -> list[SecurityEvent]:
-    """Merge duplicates (same ``dedup_key`` within ``cooldown_s``) by count.
+    """Merge duplicates (same ``dedup_scope`` within ``cooldown_s``) by count.
 
-    Events with a different key (another client, router, type or endpoint)
-    are never merged or dropped.
+    The scope is the core's ``(router_id or "-", type, dedup_key)``. Events
+    with a different scope (another client, router, type or endpoint) are
+    never merged or dropped.
     """
     ordered = sorted(events, key=lambda e: (e.ts, e.event_id))
     out: list[SecurityEvent] = []
-    open_: dict[str, int] = {}
+    open_: dict[tuple[str, str, str], int] = {}
     for event in ordered:
-        key = event.dedup_key or event.event_id
+        key = event.dedup_scope
         idx = open_.get(key)
         if idx is not None:
             prev = out[idx]

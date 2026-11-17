@@ -45,10 +45,6 @@ from .security_model import (
 _LOGGER = logging.getLogger(__name__)
 
 SCHEMA_VERSION: Final = 1
-# Name of the "off" setting (plan 4.1). ``LogPath`` itself only knows the two
-# real paths; "off" is no path and delivers nothing.
-PATH_OFF: Final = "off"
-
 # Caps (plan 4.2 and 4.6). Lines are foreign, forgeable input.
 MAX_LINE_BYTES: Final = 2048
 MAX_MSG_CHARS: Final = 512
@@ -411,7 +407,7 @@ class LogSource(Protocol):
 class NullLogSource:
     """The "off" setting: delivers nothing, every path source not available."""
 
-    name = PATH_OFF
+    name = LogPath.OFF.value  # the "off" setting (plan 4.1): no path
 
     async def async_start(self) -> None:
         """Nothing to start."""

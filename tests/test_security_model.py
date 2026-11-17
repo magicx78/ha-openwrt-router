@@ -13,6 +13,7 @@ from custom_components.openwrt_router.core_models import (
     CapabilityState,
     CapabilityStatus,
     CoreEvent,
+    is_core_event_type,
 )
 from custom_components.openwrt_router.security_model import (
     EVENT_PREFIX,
@@ -105,26 +106,30 @@ def test_event_from_dict_is_tolerant() -> None:
     assert event.src is None
 
 
-def test_event_client_mac_normalised_and_dedup_key_core_format() -> None:
+def test_dedup_key_is_discriminator_and_scope_matches_core() -> None:
     event = _event()
-    assert event.dedup_key is not None
-    assert event.dedup_key.startswith(f"{ROUTER}:fw_port_scan_hint:")
+    assert event.dedup_key is not None and len(event.dedup_key) == 16
     _no_identity(event.dedup_key)
+    assert event.dedup_scope == (ROUTER, event.type, event.dedup_key)
+    assert event.to_core_event().dedup_scope == event.dedup_scope
 
 
 def test_dedup_key_differs_per_zone_client_and_router() -> None:
     base = _event(client=None, src=None, dst=Endpoint(zone="lan"))
     keys = {
-        base.dedup_key,
-        _event(client=None, src=None, dst=Endpoint(zone="iot")).dedup_key,
+        base.dedup_scope,
+        _event(client=None, src=None, dst=Endpoint(zone="iot")).dedup_scope,
         _event(
             client=None, src=None, dst=Endpoint(zone="lan"), router_id="rtr_" + "b" * 32
-        ).dedup_key,
+        ).dedup_scope,
         _event(
             client="aa:bb:cc:00:00:01", src=None, dst=Endpoint(zone="lan")
-        ).dedup_key,
+        ).dedup_scope,
+        _event(
+            client=None, src=None, dst=Endpoint(zone="lan"), type=event_type("other")
+        ).dedup_scope,
     }
-    assert len(keys) == 4
+    assert len(keys) == 5
 
 
 def test_event_rejects_bad_values() -> None:
@@ -238,7 +243,7 @@ def test_to_core_event_identity_only_as_digest() -> None:
 def test_fleet_event_has_no_router_id() -> None:
     event = _event(router_id=None)
     assert event.to_core_event().router_id is None
-    assert event.dedup_key is not None and event.dedup_key.startswith("-:")
+    assert event.dedup_scope[0] == "-"
 
 
 # --- data sources -----------------------------------------------------------
@@ -318,3 +323,43 @@ def test_case21_privacy_repr_mask_and_logs(caplog: pytest.LogCaptureFixture) -> 
     )
     for record in caplog.records:
         _no_identity(record.getMessage())
+
+
+# --- revised core contract (00b3d1f) ----------------------------------------
+
+
+def test_event_type_outside_core_namespaces() -> None:
+    assert EVENT_PREFIX == "security_center."
+    assert not is_core_event_type(event_type("port_scan"))
+    with pytest.raises(ValueError):
+        _event(type="security.center.port_scan")  # core namespace "security."
+    with pytest.raises(ValueError):
+        _event(type="configuration.drift_detected")
+
+
+def test_merged_duplicates_map_to_core_repeat_fields() -> None:
+    single = _event().to_core_event()
+    assert single.repeat_count == 0 and single.last_repeat_at is None
+    merged = (
+        _event(ts=100.0).merged_with(_event(ts=160.0)).merged_with(_event(ts=220.0))
+    )
+    core = merged.to_core_event()
+    assert core.repeat_count == 2
+    assert core.last_repeat_at == datetime.fromtimestamp(220.0, UTC)
+    assert "count" not in core.data and "last_ts" not in core.data
+
+
+def test_log_path_off() -> None:
+    assert LogPath("off") is LogPath.OFF
+    assert log_path_capability("collector") == "security.center.log_path.collector"
+    with pytest.raises(ValueError):
+        log_path_capability(LogPath.OFF)
+
+
+def test_mask_identities_also_applies_core_secret_masking() -> None:
+    masked = mask_identities(
+        {"note": "login password=hunter2 from aa:bb:cc:11:22:33", "psk": "x", "n": 3}
+    )
+    assert "hunter2" not in json.dumps(masked)
+    assert masked["psk"] != "x" and masked["n"] == 3
+    assert MASK_MAC in masked["note"]

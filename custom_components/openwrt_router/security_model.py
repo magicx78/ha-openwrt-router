@@ -19,8 +19,14 @@ Alignment with the core contract (section 12):
   :meth:`SecurityEvent.to_core_event`, the contract's extension point.
 * ``ts`` is a float here (the pure modules never build datetimes from a
   clock); ``to_core_event`` converts it to an aware UTC datetime.
-* ``type`` is ``security.center.<name>`` (registered prefix, contract
-  section 17); the matching incident type is ``sec_<name>`` (plan 3).
+* ``type`` is ``security_center.<name>``: module event types live outside
+  the core namespaces (contract 12.3; ``security.`` is core-only and
+  rejected), while capability names stay below ``security.center.``
+  (contract 5). The matching incident type is ``sec_<name>`` (plan 3).
+* ``dedup_key`` is only the discriminator; the scope is
+  ``(router_id or "-", type, dedup_key)`` (contract 12.4,
+  :attr:`SecurityEvent.dedup_scope`). Merged duplicates map to
+  ``CoreEvent.repeat_count`` / ``last_repeat_at``.
 * Ids follow the core formats (``evt_``/``cor_`` + 32 hex) but are derived
   deterministically from their inputs, so the same finding gets the same id.
 
@@ -32,11 +38,12 @@ This module is the only Security Center module that touches the core
 (``core_models``, ``core_masking``): the other ``security_*`` modules import
 core symbols only through it, so a contract revision changes one file.
 
-Masking: secrets go through ``core_masking.mask_secrets``. The core masks
-by key name only; identities inside free text (MAC, IP, domain) and the
-identity keys of ``const.DIAGNOSTICS_TO_REDACT`` are masked by the one
-helper :func:`mask_identities` (the only masking helper of the Security
-Center; all other modules call it).
+Masking: secrets go through ``core_masking.mask_for_output`` (secret keys
+and secrets in free text). The core masks no identities; MAC, IP, domain,
+identity keys (``const.DIAGNOSTICS_TO_REDACT``) and identity ``key=value``
+pairs in free text are masked by the one helper :func:`mask_identities`
+(the only masking helper of the Security Center; all other modules call
+it).
 """
 
 from __future__ import annotations
@@ -54,7 +61,7 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from .const import DIAGNOSTICS_TO_REDACT
-from .core_masking import MASK, mask_secrets
+from .core_masking import MASK, mask_for_output
 from .core_models import (
     CORRELATION_ID_PREFIX,
     EVENT_ID_PREFIX,
@@ -64,7 +71,7 @@ from .core_models import (
     CoreEvent,
     EventResult,
     Severity,
-    dedup_key,
+    is_core_event_type,
 )
 from .core_models import normalize_mac as _core_normalize_mac
 
@@ -73,8 +80,8 @@ _LOGGER = logging.getLogger(__name__)
 __all__ = ["EventResult", "Severity"]  # re-exported for the security modules
 
 SCHEMA_VERSION: Final = 1
-EVENT_PREFIX: Final = "security.center."
-CAPABILITY_PREFIX: Final = "security.center."
+EVENT_PREFIX: Final = "security_center."  # event types (contract 12.3)
+CAPABILITY_PREFIX: Final = "security.center."  # capabilities (contract 5)
 INCIDENT_PREFIX: Final = "sec_"
 MODULE_SOURCE: Final = "security_center"  # CoreEvent.source
 
@@ -174,15 +181,25 @@ class DataSource(StrEnum):
 
 
 class LogPath(StrEnum):
-    """Off-router log delivery path (plan 4.1); exactly one is active."""
+    """Off-router log delivery path setting (plan 4.1); at most one is active.
+
+    ``off`` is the setting "no off-router logs"; it has no capability name.
+    """
 
     SYSLOG = "syslog"
     COLLECTOR = "collector"
+    OFF = "off"
 
 
 def log_path_capability(path: LogPath | str) -> str:
-    """Capability name of one log path, e.g. ``security.center.log_path.syslog``."""
-    return f"{CAPABILITY_PREFIX}log_path.{LogPath(path).value}"
+    """Capability name of one log path, e.g. ``security.center.log_path.syslog``.
+
+    Raises ValueError for ``off`` (no delivery path, nothing to report).
+    """
+    value = LogPath(path)
+    if value is LogPath.OFF:
+        raise ValueError("log path 'off' has no capability")
+    return f"{CAPABILITY_PREFIX}log_path.{value.value}"
 
 
 # Matrix group of each source (plan 2.1): a = data already present,
@@ -297,16 +314,21 @@ def _mask_text(text: str) -> str:
     return _DOMAIN_RE.sub(_mask_domain, text)
 
 
-def mask_identities(value: Any, *, _depth: int = 0) -> Any:
+def mask_identities(value: Any) -> Any:
     """Copy of ``value`` with identities and secrets masked (logs, diagnostics).
 
-    Secrets: ``core_masking.mask_secrets``. Identities: mapping keys that
-    name one (``mac``, ``ip``, ``hostname``, ``domain``, ``client`` …) get
-    the core MASK; strings anywhere have MACs, IPv4/IPv6 addresses and
-    domain names replaced by ``<mac>``/``<ip>``/``<domain>``. A bare
-    hostname inside free text cannot be recognised: keep hostnames in keyed
-    fields. ``None`` stays ``None``.
+    Identities (the part the core does not cover): mapping keys that name
+    one (``mac``, ``ip``, ``hostname``, ``domain``, ``client`` …) get the
+    core MASK; strings anywhere have identity ``key=value`` pairs, MACs,
+    IPv4/IPv6 addresses and domain names replaced. Then everything goes
+    through ``core_masking.mask_for_output`` (secret keys, secrets in free
+    text). A bare hostname inside free text without a key cannot be
+    recognised: keep hostnames in keyed fields. ``None`` stays ``None``.
     """
+    return mask_for_output(_mask_identity_walk(value))
+
+
+def _mask_identity_walk(value: Any, _depth: int = 0) -> Any:
     if _depth > 16:
         return MASK
     if value is None or isinstance(value, bool | int | float):
@@ -314,17 +336,16 @@ def mask_identities(value: Any, *, _depth: int = 0) -> Any:
     if isinstance(value, str):
         return _mask_text(clean_text(value, MAX_TEXT_LEN))
     if isinstance(value, Mapping):
-        masked = mask_secrets(dict(value))
         return {
             key: (
                 (None if item is None else MASK)
                 if str(key).lower() in _IDENTITY_KEYS
-                else mask_identities(item, _depth=_depth + 1)
+                else _mask_identity_walk(item, _depth + 1)
             )
-            for key, item in masked.items()
+            for key, item in value.items()
         }
     if isinstance(value, list | tuple | set | frozenset):
-        return [mask_identities(item, _depth=_depth + 1) for item in value]
+        return [_mask_identity_walk(item, _depth + 1) for item in value]
     return _mask_text(clean_text(str(value), MAX_TEXT_LEN))
 
 
@@ -351,13 +372,17 @@ def make_correlation_id(*parts: Any) -> str:
     return CORRELATION_ID_PREFIX + _digest(parts)
 
 
-def make_dedup_key(router_id: str | None, name: str, *identity: Any) -> str:
-    """Core ``dedup_key(router_id, discriminator)``; identities only hashed."""
-    return dedup_key(router_id, f"{name}:{_digest(identity, 8)}")
+def make_dedup_key(*identity: Any) -> str:
+    """Dedup discriminator (contract 12.4): a digest of the identity parts.
+
+    Router and type are not part of it; they form the scope
+    (:attr:`SecurityEvent.dedup_scope`). Identities are only hashed.
+    """
+    return _digest(identity, 8)
 
 
 def event_type(name: str) -> str:
-    """``security.center.<name>`` (CoreEvent.type below the module prefix)."""
+    """``security_center.<name>`` (CoreEvent.type below the module prefix)."""
     return f"{EVENT_PREFIX}{name}"
 
 
@@ -485,6 +510,8 @@ class SecurityEvent:
             if not text:
                 raise ValueError(f"{name} must be a non-empty string")
             object.__setattr__(self, name, text)
+        if is_core_event_type(self.type):
+            raise ValueError("core event namespaces are reserved for the core")
         set_ = object.__setattr__
         set_(self, "ts", ts)
         set_(self, "category", SecCategory(self.category))
@@ -517,8 +544,6 @@ class SecurityEvent:
     def _default_dedup_key(self) -> str:
         src, dst = self.src, self.dst
         return make_dedup_key(
-            self.router_id,
-            self.name,
             self.client,
             src.addr if src else None,
             src.zone if src else None,
@@ -531,6 +556,11 @@ class SecurityEvent:
     def name(self) -> str:
         """Type without the module prefix, e.g. ``wifi_auth_repeat``."""
         return self.type.removeprefix(EVENT_PREFIX)
+
+    @property
+    def dedup_scope(self) -> tuple[str, str, str]:
+        """Dedup scope as in the core: ``(router_id or "-", type, dedup_key)``."""
+        return (self.router_id or "-", self.type, self.dedup_key or self.event_id)
 
     @property
     def incident_type(self) -> str:
@@ -631,7 +661,10 @@ class SecurityEvent:
     ) -> CoreEvent:
         """The event as a core ``CoreEvent``; security fields go to ``data``.
 
-        ``data`` carries ids, counters and masked evidence only. The client
+        Merged duplicates map to ``repeat_count`` (``count - 1``) and
+        ``last_repeat_at``. ``data`` carries ids, counters and masked
+        evidence only (the core's extension point has no typed fields for
+        them). The client
         and endpoint addresses appear only as ``identity_digest(value)`` (the
         caller's keyed digest, e.g. HMAC with the installation key); without
         it they are left out.
@@ -645,8 +678,6 @@ class SecurityEvent:
             "assessment": self.assessment.value,
             "confidence": self.confidence,
             "proof": self.proof,
-            "count": self.count,
-            "last_ts": self.last_ts,
             "evidence": mask_identities(list(self.evidence)),
             "linked_incident_ids": list(self.linked_incident_ids),
             "src_zone": self.src.zone if self.src else None,
@@ -668,6 +699,12 @@ class SecurityEvent:
             entry_id=self.entry_id,
             correlation_id=self.correlation_id,
             dedup_key=self.dedup_key,
+            repeat_count=self.count - 1,
+            last_repeat_at=(
+                datetime.fromtimestamp(self.last_ts, UTC)
+                if self.count > 1 and self.last_ts is not None
+                else None
+            ),
             data=payload,
         )
 

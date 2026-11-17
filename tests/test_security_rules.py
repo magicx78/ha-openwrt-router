@@ -7,6 +7,8 @@ import logging
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,10 +16,13 @@ import pytest
 from custom_components.openwrt_router.log_parser import LogEvent
 from custom_components.openwrt_router.net_events import Category, NetEvent
 from custom_components.openwrt_router.security_baseline import BaselineBook
+from custom_components.openwrt_router.security_logfmt import parse_remote_line
+from custom_components.openwrt_router.security_logsrc import KeyAssigner
 from custom_components.openwrt_router.security_model import (
     Assessment,
     Availability,
     DataSource,
+    LogPath,
     SecCategory,
     SecurityEvent,
     Severity,
@@ -31,6 +36,7 @@ from custom_components.openwrt_router.security_rules import (
     DistinctWindow,
     DnsManyDomainsDetector,
     DnsNxdomainDetector,
+    DnsRateDetector,
     DnsTunnelHintDetector,
     FirewallBlockedDetector,
     FirewallInterVlanDetector,
@@ -434,6 +440,109 @@ def test_case09_inter_vlan() -> None:
     assert event.category is SecCategory.VLAN
     assert event.src is not None and event.src.zone == "iot"
     assert event.dst is not None and event.dst.zone == "lan"
+
+
+# --- real fixture lines through the off-router log parser -------------------
+
+FIXTURES = Path(__file__).parent / "fixtures" / "security"
+FIX_RECV = datetime(2026, 11, 17, 12, 0, 30, tzinfo=UTC).timestamp()
+
+
+def fixture_records(name: str, router: str = R1) -> list[Any]:
+    """Parse the real fixture lines with ``security_logfmt``."""
+    assigner = KeyAssigner()
+    records = []
+    for line in (FIXTURES / name).read_text("utf-8").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        result = parse_remote_line(
+            "<4>Nov 17 12:00:10 ap-test " + line,
+            router=router,
+            path=LogPath.SYSLOG.value,
+            recv=FIX_RECV,
+            tz_offset_s=0,
+            assigner=assigner,
+        )
+        if result.record is not None and result.record.kind:
+            records.append(result.record)
+    return records
+
+
+def test_nxdomain_counted_from_dnsmasq_reply_lines() -> None:
+    records = fixture_records("dnsmasq_query.txt")
+    assert {r.kind for r in records} == {"dns.query", "dns.reply"}
+    now = records[0].ts + 10
+    nx = DnsNxdomainDetector()
+    many = DnsManyDomainsDetector(threshold=2)
+    for _ in range(30):  # 30 x (query + NXDOMAIN reply + cached NODATA reply)
+        for record in records:
+            nx.feed(record)
+            many.feed(record)
+    events = results_events(nx.evaluate(now, statuses(R1, now=now)))
+    assert len(events) == 1
+    # the reply is the NXDOMAIN, not a second question
+    assert {"nxdomain=30", "queries=30"} <= set(events[0].evidence)
+    # replies are no questions: one queried name per client, not two
+    assert results_events(many.evaluate(now, statuses(R1, now=now))) == []
+    for det in (DnsRateDetector(), many, DnsTunnelHintDetector()):
+        assert "dns.reply" not in det.kinds
+
+
+def test_inter_vlan_without_dest_zone_is_unattributable() -> None:
+    forwards = [
+        r for r in fixture_records("fw4_kernel.txt") if r.fields["dir"] == "forward"
+    ]
+    assert len(forwards) == 1 and forwards[0].fields["dest_zone"] is None
+    now = forwards[0].ts + 10
+    st = statuses(R1, now=now)
+
+    blind = FirewallInterVlanDetector()
+    (idle,) = blind.evaluate(now, st)  # nothing seen yet: still limited
+    assert idle.available and idle.limitation == "dest_zone_unknown"
+    for _ in range(10):
+        blind.feed(forwards[0])
+    (result,) = blind.evaluate(now, st)
+    assert result.events == ()  # never guessed as inter-VLAN
+    assert result.available and result.limitation == "dest_zone_unknown"
+    assert result.unattributed == 10
+
+    mapped = FirewallInterVlanDetector(
+        dest_subnets={"192.0.2.16/28": "lan", "192.0.2.64/27": "iot"}
+    )
+    for _ in range(10):
+        mapped.feed(forwards[0])
+    (result,) = mapped.evaluate(now, st)
+    assert result.limitation is None and result.unattributed == 0
+    (event,) = result.events
+    assert event.src is not None and event.src.zone == "iot"
+    assert event.dst is not None and event.dst.zone == "lan"
+
+    external = FirewallInterVlanDetector(dest_subnets={"192.0.2.128/25": "guest"})
+    for _ in range(10):
+        external.feed(forwards[0])
+    (result,) = external.evaluate(now, st)
+    assert result.events == () and result.limitation is None
+    with pytest.raises(ValueError):
+        FirewallInterVlanDetector(dest_subnets={"not-a-subnet": "lan"})
+    blind.reset_router(R1)
+    assert blind.state_size() == 0
+
+
+def test_default_detectors_share_one_baseline() -> None:
+    book = BaselineBook()
+    dets = default_detectors(baseline=book)
+    users = [d for d in dets.detectors if hasattr(d, "baseline")]
+    assert len(users) == 2
+    assert dets.baseline is book and all(d.baseline is book for d in users)
+    assert default_detectors().baseline is not None
+    shared = DetectorSet(
+        [FirewallBlockedDetector(baseline=book), DnsRateDetector(baseline=book)]
+    )
+    assert shared.baseline is book
+    with pytest.raises(ValueError):
+        DetectorSet([FirewallBlockedDetector(), DnsRateDetector()])
+    with pytest.raises(ValueError):
+        DetectorSet([FirewallBlockedDetector(baseline=book)], baseline=BaselineBook())
 
 
 def test_case09_vlan_drift_needs_drift_input() -> None:
