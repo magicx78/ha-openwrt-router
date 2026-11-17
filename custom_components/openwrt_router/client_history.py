@@ -56,7 +56,7 @@ import math
 import re
 from collections import deque
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 
 _LOGGER = logging.getLogger(__name__)
@@ -136,6 +136,12 @@ RAW_RING_S = 3600.0
 RAW_RING_MAX = 120
 TRANSITIONS_KEEP_S = 86400.0
 TRANSITIONS_MAX = 64
+# [CS 1.43] Event counts of the last hour (memory only, like the raw ring):
+# the trailing 1 h window counts log events from here, not from the clock
+# hour bucket. Capped per client; a storm beyond the cap is undercounted in
+# the 1 h view only (the buckets keep every count).
+RECENT_EVENTS_MAX = 64
+FAIL_KINDS = (EV_AUTH_FAIL, EV_ASSOC_FAIL, EV_DHCP_FAIL)
 HOURS_KEEP = 168
 RETENTION_DAYS_DEFAULT = 30
 RETENTION_DAYS_MAX = 90
@@ -549,6 +555,9 @@ class RingEntry:
     band: str | None
     rssi: int | None
     state: str
+    ip_visible: bool = False
+    rate_rx_kbit: int | None = None
+    rate_tx_kbit: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,6 +568,14 @@ class LastDisconnect:
     reason: str | None
     cls: str
     timed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LastFailure:
+    """The last auth, association or DHCP failure (``kind`` = event kind)."""
+
+    ts: float
+    kind: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -581,6 +598,7 @@ class ClientLive:
     hostname_changed: float | None
     ip: str | None
     ip_changed: float | None
+    last_failure: LastFailure | None = None
 
 
 class HourBucket(NamedTuple):
@@ -729,6 +747,11 @@ class _Client:
     transitions: deque[Transition] = field(
         default_factory=lambda: deque(maxlen=TRANSITIONS_MAX)
     )
+    # (ts, ((field index, value), ...)) of the log events of the last hour
+    recent: deque[tuple[float, tuple[tuple[int, float], ...]]] = field(
+        default_factory=lambda: deque(maxlen=RECENT_EVENTS_MAX)
+    )
+    last_fail: LastFailure | None = None
     open: dict[tuple[int, str], list[float]] = field(default_factory=dict)
     closed: dict[tuple[int, str], str] = field(default_factory=dict)
     days: dict[tuple[int, str], str] = field(default_factory=dict)
@@ -789,6 +812,7 @@ class ClientHistory:
             hostname_changed=c.host_t,
             ip=c.ip,
             ip_changed=c.ip_t,
+            last_failure=c.last_fail,
         )
 
     def hours(
@@ -902,6 +926,18 @@ class ClientHistory:
         c = self._get(mac)
         return tuple(c.ring) if c is not None else ()
 
+    def recent_bucket(self, mac: str, start: float, end: float) -> Bucket:
+        """Log event counts with ``start <= ts <= end`` from the in-memory
+        event ring (last hour, :data:`RECENT_EVENTS_MAX` events; empty after
+        a restart). Only the event fields are set."""
+        c = self._get(mac)
+        values = _zeros()
+        for ts, delta in c.recent if c is not None else ():
+            if start <= ts <= end:
+                for index, value in delta:
+                    values[index] += value
+        return _bucket(values)
+
     # --- maintenance -----------------------------------------------------------
 
     def forget(self, mac: str) -> bool:
@@ -951,6 +987,8 @@ class ClientHistory:
                 c.transitions.popleft()
             while c.ring and c.ring[0].ts < now - RAW_RING_S:
                 c.ring.popleft()
+            while c.recent and c.recent[0][0] < now - RAW_RING_S:
+                c.recent.popleft()
 
     # --- store size trimming (B8) ----------------------------------------------
 
@@ -1100,6 +1138,9 @@ class ClientHistory:
             delta = _zeros()
             delta[_EVENT_INDEX[ev.kind]] = min(count, 1000)
             self._add(c, ts, ev.router, delta)
+            _remember(c, ts, delta)
+            if ev.kind in FAIL_KINDS and (c.last_fail is None or ts >= c.last_fail.ts):
+                c.last_fail = LastFailure(ts, ev.kind)
             if ev.kind == EV_CONNECT:
                 c.pend_connect = _Pending(ts, ev.router)
 
@@ -1117,10 +1158,12 @@ class ClientHistory:
         ):
             delta[I_FLAPS] = 1
         self._add(c, ts, ev.router, delta)
+        _remember(c, ts, delta)
         if peer is not None:
             out = _zeros()
             out[I_ROAMS_OUT] = 1
             self._add(c, ts, peer, out)
+            _remember(c, ts, out)
             c.last_roam = (ts, peer, ev.router)
 
     def _apply_list(self, poll: PollInput, now: float, router: str) -> None:
@@ -1211,7 +1254,19 @@ class ClientHistory:
         if obs.band is not None:
             c.band = _opt_text(obs.band)
         self._sample(c, now, ap, obs)
-        c.ring.append(RingEntry(now, ap, c.band, c.rssi, STATE_ONLINE))
+        rates = _rate_ok(obs.rate_rx_kbit) and _rate_ok(obs.rate_tx_kbit)
+        c.ring.append(
+            RingEntry(
+                now,
+                ap,
+                c.band,
+                c.rssi,
+                STATE_ONLINE,
+                bool(obs.ip_visible),
+                obs.rate_rx_kbit if rates else None,
+                obs.rate_tx_kbit if rates else None,
+            )
+        )
 
     def _missing(self, c: _Client, now: float, router: str, poll: PollInput) -> None:
         other = self._listed_elsewhere(c.mac, now, router, poll)
@@ -1675,6 +1730,11 @@ def _split(a: float, b: float) -> list[tuple[float, float]]:
     return out
 
 
+def _remember(c: _Client, ts: float, delta: list[float]) -> None:
+    """Keep the non-zero event fields for the trailing hour (memory only)."""
+    c.recent.append((ts, tuple((i, v) for i, v in enumerate(delta) if v)))
+
+
 def _shift_client(c: _Client, delta: float) -> None:
     for name in (
         "first_seen",
@@ -1700,6 +1760,11 @@ def _shift_client(c: _Client, delta: float) -> None:
     if c.last_dc is not None:
         last = c.last_dc
         c.last_dc = LastDisconnect(last.ts + delta, last.reason, last.cls, last.timed)
+    if c.last_fail is not None:
+        c.last_fail = LastFailure(c.last_fail.ts + delta, c.last_fail.kind)
+    c.recent = deque(
+        ((ts + delta, values) for ts, values in c.recent), maxlen=RECENT_EVENTS_MAX
+    )
     c.transitions = deque(
         (
             Transition(
@@ -1709,10 +1774,7 @@ def _shift_client(c: _Client, delta: float) -> None:
         ),
         maxlen=TRANSITIONS_MAX,
     )
-    c.ring = deque(
-        (RingEntry(r.ts + delta, r.ap, r.band, r.rssi, r.state) for r in c.ring),
-        maxlen=RAW_RING_MAX,
-    )
+    c.ring = deque((replace(r, ts=r.ts + delta) for r in c.ring), maxlen=RAW_RING_MAX)
 
 
 def _clean(value: str | None) -> str:
@@ -1778,6 +1840,7 @@ def _dump_client(c: _Client) -> dict[str, Any]:
             if c.last_dc
             else None
         ),
+        "lf": [c.last_fail.ts, c.last_fail.kind] if c.last_fail else None,
     }
     meta_info: dict[str, Any] = {
         "p": int(c.private),
@@ -1966,6 +2029,9 @@ def _load_client(mac: str, raw: Any) -> _Client | None:
     ld = live.get("ld")
     if isinstance(ld, list) and len(ld) == 4 and _finite(ld[0]) and ld[2] in DC_CLASSES:
         c.last_dc = LastDisconnect(float(ld[0]), _opt_text(ld[1]), ld[2], bool(ld[3]))
+    lf = live.get("lf")  # [CS 1.43] absent in 1.42 stores
+    if isinstance(lf, list) and len(lf) == 2 and _finite(lf[0]) and lf[1] in FAIL_KINDS:
+        c.last_fail = LastFailure(float(lf[0]), lf[1])
     if state in (STATE_ONLINE, STATE_GRACE) and (c.ap is None or c.acc is None):
         return None  # a located state without location or booking time
     if state == STATE_GRACE and (c.grace_start is None or c.grace_from is None):

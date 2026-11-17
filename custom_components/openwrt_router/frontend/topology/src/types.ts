@@ -503,6 +503,18 @@ export interface StabilityRow {
   score_7d: number | null;
   availability_7d: number | null;
   trend: 'up' | 'down' | 'flat' | null;
+  // 1.43
+  score_previous_24h?: number | null;
+  trend_delta?: number | null;
+  last_problem?: StabilityProblem | null;
+}
+
+/** Newest disconnect or auth/assoc/DHCP failure of a client (1.43). */
+export interface StabilityProblem {
+  ts: number;
+  kind: 'disconnect' | 'auth_fail' | 'assoc_fail' | 'dhcp_fail' | string;
+  class: string | null;
+  reason: string | null;
 }
 
 export interface StabilityTable {
@@ -533,6 +545,29 @@ export interface StabilityPoint {
   rssi_mean: number | null;
   rssi_min: number | null;
   rssi_max: number | null;
+  // 1.43: main AP (most online time) and its band, roams, flaps, failures
+  aps?: string[];
+  ap?: string | null;
+  band?: string | null;
+  leaves?: number;
+  roams?: number;
+  flaps?: number;
+  auth_fail?: number;
+  dhcp_fail?: number;
+}
+
+/** One hour (7 d) or day (30 d) of the coarse strip; shares sum to 1 (1.43). */
+export interface StabilityStripCell {
+  t: number;
+  span_s: number;
+  online: number;
+  offline: number;
+  gap: number;
+  unknown: number;
+  disconnects: number;
+  infra: number;
+  roams: number;
+  flaps: number;
 }
 
 export interface StabilitySegment {
@@ -544,6 +579,7 @@ export interface StabilitySegment {
 export interface StabilityTransition {
   ts: number;
   kind: string;
+  router?: string | null;
   router_name: string | null;
   reason: string | null;
   class: string | null;
@@ -597,11 +633,32 @@ export interface ClientStabilityDetail {
     rssi_mean: number | null;
     weak_share: number | null;
     log_coverage: number | null;
+    // 1.43
+    start?: number | null;
+    memory_from?: number | null;
+    window_s?: number;
+    observed_s?: number;
+    online_s?: number;
+    gap_s?: number;
+    roams_out?: number;
+    band_changes?: number;
+    assoc_fail?: number;
+    rssi_n?: number;
+    rssi_min?: number | null;
+    rssi_max?: number | null;
+    rate_rx_kbit?: number | null;
+    rate_tx_kbit?: number | null;
+    finished_sessions?: number;
+    session_mean_s?: number | null;
+    ip_visible_share?: number | null;
+    notable_events?: number;
   };
   series: StabilityPoint[];
   score_series: Array<{ t: number; score: number | null; class: StabilityClass }>;
-  rssi: Array<{ t: number; rssi: number | null }>;
+  rssi: Array<{ t: number; rssi: number | null; router?: string | null; band?: string | null; state?: string }>;
   timeline: StabilitySegment[];
+  strip?: StabilityStripCell[];
+  routers?: Record<string, string>;
   transitions: StabilityTransition[];
   incidents: Array<{ incident_id: string; cause_status: string | null; cause: string | null }>;
   attribution: {
@@ -636,6 +693,11 @@ export interface StabilityApStats {
   infra_disconnects: number;
   low_basis: boolean;
   rank: number | null;
+  auth_fail_per_100h?: number | null;
+  roams_in_per_100h?: number | null;
+  roams_out_per_100h?: number | null;
+  weak_share?: number | null;
+  infra_clients?: number;
 }
 
 export interface StabilityApView {
@@ -652,11 +714,14 @@ export interface StabilitySettings {
   entity_macs: string[];
   sleepy_macs: string[];
   max_store_mb: number;
+  weights: Record<string, number>;
+  classes: number[];
   [key: string]: unknown;
 }
 
 export interface StabilitySettingsResponse {
   settings: StabilitySettings;
+  defaults?: StabilitySettings;
   can_edit: boolean;
   limits: {
     entity_max: number;
@@ -664,6 +729,8 @@ export interface StabilitySettingsResponse {
     retention_days_max: number;
     store_mb_min: number;
     store_mb_max: number;
+    parts?: string[];
+    classes?: string[];
   };
   status: {
     clients: number;
