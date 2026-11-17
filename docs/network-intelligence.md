@@ -137,9 +137,12 @@ The panel shows the cause as one of four levels:
 | `cause_status` | Confidence | Shown as |
 |---|---|---|
 | `confirmed` | any | confirmed (bestätigt) |
-| `hypothesis` | ≥ 0.7 | likely (wahrscheinlich) |
+| `hypothesis` | ≥ 0.7 and two independent sources | likely (wahrscheinlich) |
 | `hypothesis` | ≥ 0.4 | possible (möglich) |
 | otherwise / no cause | – | unknown (unbekannt) |
+
+Since 1.41.0 *likely* needs at least two independent source families behind the evidence;
+see [realtime-rca.md](realtime-rca.md#cause-levels).
 
 Children stay silent: they do not lower the score, are not counted by the entities and fire no
 bus event. When the root has resolved and its "after" window has passed, a child that is

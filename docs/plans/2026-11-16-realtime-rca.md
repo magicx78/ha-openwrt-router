@@ -172,23 +172,24 @@ fast deckungsgleich. Vorschlag in Abschnitt 11, Frage F3.
 
 ### 2.7 Die 12 Testszenarien (Auftrag §8) gegen `tests/test_net_*.py`
 
-| # | Szenario | Vorhanden | Lücke → Bauphase |
-|---|---|---|---|
-| 1 | 8 Reconnects in 10 min | `test_net_wifi.py::test_reconnect_storm_with_weak_signal_confirms_the_cause`, `::test_reconnects_with_good_signal_list_hypotheses_only` | Zusätzlich über Stream-Events (RT5) |
-| 2 | Normales Roaming ohne Fehlalarm | `test_band_steering_and_roaming_are_no_reconnect`, `test_net_wifi_review.py::test_m4_ping_pong_roaming_counts_no_reconnect`, `::test_m3_deep_sleep_client_is_no_reconnect_storm` | Mit Stream-Events, inklusive FT-Roam (RT5) |
-| 3 | Roaming-Flapping zwischen zwei APs | `test_roam_flapping_with_usteer_is_observed`, `test_roam_flapping_without_usteer_from_poll_differences` | – (Stream-Variante RT5) |
-| 4 | AP-Ausfall mit 12 Clients | `test_net_correlation.py::test_ak1_ap_outage_with_20_clients_is_one_root`, `test_net_p6.py::test_ak1_scenario_fires_only_the_outage` | Genau 12 Clients, Stream bricht dabei ab (RT10) |
-| 5 | Einzelner instabiler ESP32 | **keiner** im strengen Sinn | Neuer Test mit Vergleich zu den anderen Clients (RT7) |
-| 6 | LAN-Uplink-Flapping | `test_net_infra.py::test_scenario_lan_port_flapping_opens_one_port_incident`, `test_net_correlation.py::test_inferred_uplink_down_from_the_topology_port` | Flap **plus** Client-Abbrüche als ein Incident (RT7) |
-| 7 | Gemeinsamer DNS-Ausfall | `test_scenario_dns_trouble_is_one_aggregated_hypothesis_event`, `test_wan_down_with_dns_lines_explains_them` | Mehrere Clients, DNS-Sicht (RT7, F4) |
-| 8 | Mehrere APs gleichzeitig | `test_ak2_all_routers_down_is_one_lan_incident`, `test_staggered_polls_settle_into_one_root` | – |
-| 9 | Dedup | `test_duplicate_log_lines_count_once`, `test_same_event_id_fed_twice_counts_once`, `test_scenario_duplicate_polls_and_lines_count_once` | Stream gegen Log (RT5) |
-| 10 | Fehlende Ereignisdaten | `test_missing_log_lowers_coverage_and_never_reads_healthy`, `test_scenario_missing_log_and_missing_acl_rights`, `test_net_score.py::test_no_data_is_unknown_never_100` | Fehlendes `:subscribe`-Recht (RT3) |
-| 11 | Router- und HA-Neustart | `test_save_and_restart_restore_everything`, `test_baseline_after_restart_fills_the_gap_from_the_mark`, `test_scenario_router_reboot` | Stream-Wiederaufbau nach Reboot (RT3) |
-| 12 | Abbruch und Wiederherstellung Event-Stream | nur Log-Varianten (`test_open_storm_stays_open_while_the_log_is_unreadable`, `test_baseline_starting_after_the_mark_records_a_log_gap`) | **neu** (RT3) |
+| # | Szenario | Vorhanden | Lücke → Bauphase | Belegt in 1.41.0 (Weg D) |
+|---|---|---|---|---|
+| 1 | 8 Reconnects in 10 min | `test_net_wifi.py::test_reconnect_storm_with_weak_signal_confirms_the_cause`, `::test_reconnects_with_good_signal_list_hypotheses_only` | Zusätzlich über Stream-Events (RT5) | `test_net_rt_log.py::test_scenario_1_reconnects_in_ten_minutes_with_reason_category` (Log mit Grund-Kategorie statt Stream) |
+| 2 | Normales Roaming ohne Fehlalarm | `test_band_steering_and_roaming_are_no_reconnect`, `test_net_wifi_review.py::test_m4_ping_pong_roaming_counts_no_reconnect`, `::test_m3_deep_sleep_client_is_no_reconnect_storm` | Mit Stream-Events, inklusive FT-Roam (RT5) | `test_net_rt_log.py::test_scenario_2_steering_roam_is_no_alarm` |
+| 3 | Roaming-Flapping zwischen zwei APs | `test_roam_flapping_with_usteer_is_observed`, `test_roam_flapping_without_usteer_from_poll_differences` | – (Stream-Variante RT5) | `test_net_rt_log.py::test_scenario_3_roam_flapping_with_reason_lines` |
+| 4 | AP-Ausfall mit 12 Clients | `test_net_correlation.py::test_ak1_ap_outage_with_20_clients_is_one_root`, `test_net_p6.py::test_ak1_scenario_fires_only_the_outage` | Genau 12 Clients, Stream bricht dabei ab (RT10) | `test_net_rt_scenarios.py::test_scenario_4_ap_outage_with_12_clients_is_one_root` (genau 12 Clients; kein Stream, die Abbrüche kommen mit dem nächsten Log) |
+| 5 | Einzelner instabiler ESP32 | **keiner** im strengen Sinn | Neuer Test mit Vergleich zu den anderen Clients (RT7) | `test_net_rt_scenarios.py::test_scenario_5_*` (5 Tests: ruhige Nachbarn, zu wenige, anderes Radio, eigene Abbrüche, keine Client-Liste) |
+| 6 | LAN-Uplink-Flapping | `test_net_infra.py::test_scenario_lan_port_flapping_opens_one_port_incident`, `test_net_correlation.py::test_inferred_uplink_down_from_the_topology_port` | Flap **plus** Client-Abbrüche als ein Incident (RT7) | `test_net_rt_scenarios.py::test_scenario_6_*` (6 Tests: Port-Flap als Wurzel, eigener Uplink, abgeleitete Kante, fremder Port, WLAN-Ereignisse, Uplink-Down darüber) |
+| 7 | Gemeinsamer DNS-Ausfall | `test_scenario_dns_trouble_is_one_aggregated_hypothesis_event`, `test_wan_down_with_dns_lines_explains_them` | Mehrere Clients, DNS-Sicht (RT7, F4) | `test_net_rt_scenarios.py::test_scenario_7_shared_dns_failure_is_one_event_not_per_client` (nur dnsmasq-Zeilen, keine DNS-Probe, F4 offen) |
+| 8 | Mehrere APs gleichzeitig | `test_ak2_all_routers_down_is_one_lan_incident`, `test_staggered_polls_settle_into_one_root` | – | unverändert, siehe „Vorhanden“ |
+| 9 | Dedup | `test_duplicate_log_lines_count_once`, `test_same_event_id_fed_twice_counts_once`, `test_scenario_duplicate_polls_and_lines_count_once` | Stream gegen Log (RT5) | `test_net_rt_log.py::test_scenario_9_lines_read_twice_count_once` (Stream entfällt; doppelte Zeilen in einem Batch) |
+| 10 | Fehlende Ereignisdaten | `test_missing_log_lowers_coverage_and_never_reads_healthy`, `test_scenario_missing_log_and_missing_acl_rights`, `test_net_score.py::test_no_data_is_unknown_never_100` | Fehlendes `:subscribe`-Recht (RT3) | `test_net_rt_scenarios.py::test_scenario_10_no_right_to_read_the_log`, `::test_log_age_per_router_in_the_summary` (kein `log read`; `:subscribe` entfällt mit RT4) |
+| 11 | Router- und HA-Neustart | `test_save_and_restart_restore_everything`, `test_baseline_after_restart_fills_the_gap_from_the_mark`, `test_scenario_router_reboot` | Stream-Wiederaufbau nach Reboot (RT3) | `test_net_rt_scenarios.py::test_scenario_11_log_gap_after_a_router_reboot` |
+| 12 | Abbruch und Wiederherstellung Event-Stream | nur Log-Varianten (`test_open_storm_stays_open_while_the_log_is_unreadable`, `test_baseline_starting_after_the_mark_records_a_log_gap`) | **neu** (RT3) | `test_net_rt_scenarios.py::test_scenario_12_log_read_fails_and_comes_back` (Log statt Stream) |
 
-Die Zuordnung für 5–8 stammt aus Testnamen und Docstrings. In RT10 wird jeder Test einmal gegen das
-Szenario gelesen und das Ergebnis in dieser Tabelle nachgetragen.
+Die Zuordnung für 5–8 stammt aus Testnamen und Docstrings. In RT10 nachgetragen: die letzte Spalte
+nennt die neuen Tests für Weg D (Log bei jedem Poll, kein Stream); die Spalte „Vorhanden“ ist unverändert.
+Englische Fassung der Tabelle: `docs/realtime-rca.md`.
 
 ---
 
