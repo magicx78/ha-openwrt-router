@@ -620,7 +620,15 @@ class TestWithRealApi:
             on_state_change=states.append,
         )
         sub.start()
-        await until(lambda: len(session.calls) == 5 and sub.state == STREAM_STATE_UP)
+        # The state turns up before the last stream's probe is queued: wait
+        # for both probes, else the drain below races the reader task.
+        await until(
+            lambda: (
+                len(session.calls) == 5
+                and sub.state == STREAM_STATE_UP
+                and sub.queue_len == 2
+            )
+        )
         assert sleep.delays == [2, 4, 3600]
         assert STREAM_STATE_NOT_FOUND in states
         assert STREAM_STATE_NO_PERMISSION in states
