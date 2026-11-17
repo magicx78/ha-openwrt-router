@@ -2,6 +2,60 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.43.0] - 2026-11-17
+
+### Added
+
+- **Alle Kennzahlen im Client-Detail.** Je Zeitraum jetzt auch beobachtete
+  Zeit und Messlücken, Abbrüche je Klasse, Signal Ø / Min / Max, mittlere
+  TX-/RX-Rate, fehlgeschlagene Anmeldung, Assoziierung und DHCP getrennt,
+  Grund des letzten Abbruchs, Roaming rein und raus, **mittlere
+  Sitzungsdauer** und der *Anteil der Messpunkte mit bekannter IP*. Ein Satz
+  unter den Zahlen sagt, dass Verfügbarkeit die beobachtete WLAN-Anmeldung
+  ist, keine Ende-zu-Ende-Erreichbarkeit.
+- **Auffällige Ereignisse:** eine Zahl je Zeitraum aus Abbrüchen mit Fehler
+  oder ohne Grund, Flattern und fehlgeschlagener Anmeldung, Assoziierung und
+  DHCP (Definition in `docs/client-stability.md`).
+- **Echte letzte 60 Minuten.** Das 1-h-Fenster ist jetzt die tatsächliche
+  letzte Stunde statt der angebrochenen Uhrstunde. Nach einem Neustart sagt
+  das Panel *keine Daten seit Neustart* oder *Messwerte erst seit …*.
+- **Grober Verlauf für 7 und 30 Tage:** je Stunde bzw. Tag die Anteile
+  online, offline, Messlücke (schraffiert) und unbekannt, nie als offline
+  dargestellt, mit Abbruch-Markern je Abschnitt; Hinweis *genaue Zeitpunkte
+  nur für 24 h*.
+- **Diagramm Abbrüche und Reconnects** als echte Balken (1 h je 5 min,
+  sonst je Stunde bzw. Tag).
+- **Diagramm „AP-Wechsel/Roaming“:** farbiger Streifen je Access Point und
+  Band, Marker für Wechsel und Flattern, Legende mit AP-Namen.
+- **Tabelle:** Sortierung nach Access Point, Verfügbarkeit 7 Tage, Trend und
+  Verfügbarkeit absteigend; die Spalte *letztes Problem* zeigt auch
+  fehlgeschlagene Anmeldung, Assoziierung und DHCP.
+- **AP-Vergleich** zeigt zusätzlich Anmeldefehler und Roaming rein/raus je
+  100 Client-Stunden, den Anteil schwachen Signals und die Clients mit
+  Infrastruktur-Abbrüchen.
+- **Score-Gewichte und Klassengrenzen im Panel** (*Einstellungen*, nur
+  Admins): Gewichte 0–100, mindestens eines über 0, Grenzen streng
+  absteigend, Knopf für die Standardwerte.
+- Die letzte SSID je Client wird gespeichert (höchstens 32 Zeichen); der
+  SSID-Filter funktioniert damit auch nach einem Neustart.
+
+### Changed
+
+- Die Empfehlung *WLAN-Abdeckung prüfen* kommt jetzt ab **4** statt 10
+  Problem-Abbrüchen je 24 h (bei mindestens 30 % schwachem Signal).
+- Das 24-h-Fenster bleibt an Stunden ausgerichtet (23 volle Stunden plus die
+  laufende); die Antwort nennt den wirklichen Beginn (`stats.start`).
+- Ein Client mit wechselnder privater MAC bleibt je MAC ein eigener Client;
+  das ist jetzt getestet und dokumentiert.
+- **Last** (Entwickler-PC): je Poll unverändert (1000 Clients, bester Lauf
+  etwa 9 ms, wie 1.42.0). Die Speicherdatei wächst um etwa 30–35 Byte je
+  Client für die SSID (1000 Clients: 735 kB → 770 kB). Sortieren nach
+  7-Tage-Verfügbarkeit oder Trend kostet bei 150 Clients × 30 Tage
+  0,33–0,37 s beim ersten Abruf je Stunde, danach etwa 0,05 s. Das
+  Panel-Bundle wächst um 12,0 kB.
+- Gespeicherte Daten von 1.42.0 werden ohne Verlust gelesen; 1.42.0 liest
+  auch Dateien von 1.43.0 (Rückweg möglich). Entity-IDs bleiben gleich.
+
 ## [1.42.0] - 2026-11-17
 
 ### Added

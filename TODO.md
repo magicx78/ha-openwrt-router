@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-17 · Version: v1.42.0
+Stand: 2026-11-17 · Version: v1.43.0
 
 ---
 
@@ -13,12 +13,24 @@ B1–B9 auf `claude/client-stability-f9a22b`. Nutzerdoku: `docs/client-stability
 - [x] Zustandsautomat je MAC, Stunden-/Tagesbuckets, Score, Muster,
       AP-Vergleich, Empfehlungen, API-Routen, Tab „Stabilität“, Sensoren für
       ausgewählte Clients, eigener Store mit Größengrenze.
+- [x] 1.43.0: alle Fensterzahlen im Detail, echte letzte 60 min, grober
+      7-/30-Tage-Verlauf, Abbruch-/Reconnect-Balken, AP-Wechsel-Streifen,
+      Sortierung nach AP/7 Tagen/Trend, Gewichte und Klassengrenzen im Panel,
+      SSID im Store (Branch `feature/client-stability-panel-1.43`).
+- [ ] **VLAN-Filter** in der Client-Tabelle (nicht in 1.43).
+- [ ] **Identität bei wechselnder MAC** verknüpfen (private MAC je Netz oder
+      rotierend); heute ist jede MAC ein eigener Client, siehe
+      `docs/client-stability.md`.
+- [ ] **Numerische 802.11-Reason-Codes** auswerten, wo das Log sie liefert
+      (heute nur Text).
 - [ ] **B7a: v1.36-Reconnect-Zählung ablösen** (`AssociationTracker` →
       Zählung aus der Client-Stabilität, 300 s → Log-Ereignisse), eigener
       späterer PR. Entschieden (2026-11-17): bis dahin bleiben beide Zählungen;
       die Ablösung ändert das Verhalten des Sensors `unstable_clients`.
 - [ ] **Sichtprüfung im echten HA-Frontend**, Desktop und Handy (Tabelle,
-      Detail-Charts, Karten-Layout unter 760 px), als Admin und Nicht-Admin.
+      Detail-Charts, Karten-Layout unter 760 px), als Admin und Nicht-Admin;
+      seit 1.43 auch Streifen 7/30 Tage, AP-Wechsel-Streifen mit Legende,
+      Balken Abbrüche/Reconnects und das Formular für Gewichte/Grenzen.
 - [ ] **Muster beim Stundenwechsel vorberechnen** (der Tabellenabruf mit
       1000 Clients blockiert sonst etwa 1,4 s, weil er die Stundenmuster
       aller Clients rechnet).

@@ -609,3 +609,50 @@ async def test_long_windows_have_a_coarse_strip(
     assert strip[0]["unknown"] == 1.0
     assert (await detail(cs, M3, window="24h")).status == 200
     assert body(await detail(cs, M3, window="24h"))["strip"] == []
+
+
+# --- 1.43: AP figures and the score settings of the panel ----------------------------
+
+
+async def test_ap_comparison_has_the_figures_of_the_panel(cs: ClientStability) -> None:
+    rows = {row["ap"]: row for row in body(await aps(cs, window="24h"))["aps"]}
+    for row in rows.values():
+        assert {
+            "auth_fail_per_100h",
+            "roams_in_per_100h",
+            "roams_out_per_100h",
+            "weak_share",
+            "infra_clients",
+        } <= row.keys()
+        assert isinstance(row["infra_clients"], int)
+
+
+async def test_settings_limits_name_the_parts_and_classes(cs: ClientStability) -> None:
+    data = body(await OpenWrtClientSettingsView().get(Req(cs.hass)))
+    assert data["limits"]["parts"] == list(client_engine.PARTS)
+    assert set(data["defaults"]["weights"]) == set(client_engine.PARTS)
+    assert len(data["defaults"]["classes"]) == len(data["limits"]["classes"]) - 2
+
+
+async def test_settings_weights_and_classes_round_trip_and_reset(
+    cs: ClientStability,
+) -> None:
+    view = OpenWrtClientSettingsView()
+    weights = dict.fromkeys(client_engine.PARTS, 0)
+    weights["signal"] = 100
+    changed = await view.post(
+        Req(cs.hass, body={"weights": weights, "classes": [95, 80, 60, 30]})
+    )
+    assert changed.status == 200
+    data = body(changed)
+    assert data["settings"]["weights"]["signal"] == 100
+    assert data["settings"]["classes"] == [95, 80, 60, 30]
+    defaults = data["defaults"]
+    reset = await view.post(
+        Req(
+            cs.hass,
+            body={"weights": defaults["weights"], "classes": defaults["classes"]},
+        )
+    )
+    assert reset.status == 200
+    assert body(reset)["settings"] == defaults

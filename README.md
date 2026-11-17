@@ -346,6 +346,11 @@ that Network Intelligence already evaluates. Full details:
   (enabled), *reconnects (24 h)*, *connection uptime* and *last disconnect* (disabled).
 - **Storage:** `.storage/openwrt_router.client_history`, at most every 300 s, cap 3 MB
   (1–8 MB); hour buckets 7 days, day buckets 30 days (up to 90).
+- **Since 1.43.0:** every window figure in the detail (observed time and gaps, disconnects
+  per class, signal min/max, TX/RX rates, failures one by one, mean session length, notable
+  events, share of samples with a known IP), the real last 60 minutes, a coarse 7 d / 30 d
+  strip, disconnect/reconnect bars, an AP/band roaming strip, sorting by AP, 7-day
+  availability and trend, and score weights and class limits in the panel (admins).
 - **Load:** one pass per poll over the client list (below 20 ms at 1000 clients); 150 clients
   × 30 days take 2.5 MB. The panel costs only while the tab is open; at 1000 clients its first
   table request per hour blocks HA for about 1.4 s. Turn it off with `enabled: false` in the
