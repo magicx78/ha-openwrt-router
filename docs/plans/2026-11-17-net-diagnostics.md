@@ -270,12 +270,12 @@ dieser Sitzung, vom Master überstimmbar), **nicht belegt** (offen, siehe Abschn
   eigener Timer**.
 - API-Client `api.ts` (`fetchTopologyData` `1043`, Intel-Fetch `1112`, `IntelApi` `1167`;
   `ping_ms` `77`, `684-687`).
-- **Einhängepunkt (Vorschlag):** Es gibt kein „Enterprise“-Menü. „Network Diagnostics“
-  sollte **ein Unter-Tab in `DiagnoseView`** werden (neben Infrastruktur), nicht ein neuer
-  Sidebar-Eintrag „Diagnose 2“ — sonst zwei gleichnamige Bereiche. Ein späterer
-  Sidebar-Bereich „Enterprise“ hängt an der enterprise-core-Sitzung (Abschnitt 6).
-  DECIDED: Arbeitstitel im UI „Netzwerkprüfung“, um Verwechslung mit dem Tab „Diagnose“
-  zu vermeiden — kurz und deutsch wie die übrigen Tabs.
+- **Einhängepunkt — ENTSCHIEDEN (Master, 2026-11-17):** Auf `main` gibt es kein
+  „Enterprise“-Menü. „Network Diagnostics“ wird ein **Unter-Tab des neuen
+  „Enterprise“-Menü-Containers**, den die enterprise-core-Sitzung anlegt (Abschnitt 6),
+  **nicht** ein Unter-Tab von `DiagnoseView`. Deutscher Tab-Name: **„Netzwerkdiagnose“**.
+  Das ersetzt den früheren DECIDED-Punkt („Netzwerkprüfung“ in `DiagnoseView`). Bis der
+  Container auf `main` ist, hat Network Diagnostics keinen UI-Einhängepunkt (nur Backend).
 
 ---
 
@@ -414,12 +414,18 @@ neues ACL-Recht nötig; **exec** = routerseitiges `file exec`/SSH nötig; **Defa
 2. WAN down/Reconnect/IP-Wechsel: `detect_wan` + `wan_down`/`wan_unstable`/`wan_ip_changed`.
 3. DHCP-Pool-Auslastung: `detect_dhcp` + `DhcpPool`-Sensor.
 4. HA-Internetprobe: existiert bereits (`coordinator.py:769-787`) — je Router doppelt.
-   **Vorschlag:** in einen fleetweiten Diagnose-Scheduler verlegen (1 Probe statt N),
-   ehrlich beschriften („HA → Internet“), `ping_ms` am Gateway-Knoten durch Router-Sicht
-   ersetzen, sobald es sie gibt. Rückweg: alter Code bleibt bis zur Umstellung.
+   **ENTSCHIEDEN (Master, 2026-11-17, korrigiert):** erst **nach dem Merge von Enterprise
+   Core in `main`** zentralisieren (eine Messung für die Flotte; baut bestehende Methoden in
+   `coordinator.py` um), in Backend-Feld und Panel ehrlich als „HA → Internet“ beschriften; das
+   bestehende Feld `ping_ms` (`const.py:463` `KEY_PING_MS`, `coordinator.py:378`, Panel
+   `topology_mesh.py:1834`) darf nicht verschwinden, eine Entity-ID darf sich nicht ändern
+   (heute gibt es kein Entity dafür, 1.7); jede Bedeutungs- oder Namensänderung kommt in den
+   CHANGELOG. Bis dahin unverändert.
 5. Zweiter `network.interface dump` je Poll (`api.py:1948` ff. und `api.py:4230-4297`):
-   **Vorschlag:** einmal holen, beide Auswertungen daraus — spart einen Aufruf je Router
-   und Minute, bevor neue Auswertungen dazukommen.
+   **ENTSCHIEDEN (Master, 2026-11-17, korrigiert):** zusammenlegen, aber erst **nach dem
+   Merge von Enterprise Core in `main`** als eigener, klar abgegrenzter Commit mit Test „ein
+   Dump je Poll, alle bestehenden Felder unverändert“ (baut bestehende Methoden in `api.py`
+   um); nicht jetzt, weil mehrere Sitzungen `api.py` ändern.
 6. Capability-Prüfung: `check_capabilities` (`api.py:1563-1625`) existiert, läuft aber nur im
    Config-Flow; `_acl_blocked` merkt sich verweigerte Aufrufe zur Laufzeit. Eine neue
    Capability-Erkennung soll darauf aufbauen bzw. auf die enterprise-core-Erkennung warten
@@ -435,19 +441,75 @@ neues ACL-Recht nötig; **exec** = routerseitiges `file exec`/SSH nötig; **Defa
 - Latenz-/Verlust-Zeitreihe mit Verlust statt Einzelwert.
 - Routerseitige Messungen (nur mit ACL-Erweiterung, Phase C).
 
-**Korrelations-Regeln für neue Incident-Typen (Pflicht, Vorschlag):**
+**Korrelations-Regeln für neue Incident-Typen** — **ENTSCHIEDEN (Master, 2026-11-17):**
+Diagnose liefert zuerst Events und Score-Eingang; eigene Incident-Typen nur für
+**Gateway-Wechsel** und **DNS-Server-Wechsel**, jeweils mit expliziten Link-Regeln und Tests,
+dass sie nichts Fremdes schlucken und nicht geschluckt werden. Das bestehende
+Korrelationsverhalten (Abschnitt 4.1) wird **nicht** geändert. Hinweise zum Code dafür:
 
 - Ohne Eintrag in `DEFAULT_SETTINGS` ignoriert der Automat neue Typen (`net_rules.py:679-722`).
-- Mit Eintrag wird jedes neue Incident im Fenster von `lan_unreachable` stumm Kind
-  (`5186-5187`); das ist für Diagnose-Incidents richtig (HA selbst ist weg).
-- `wan_down` nimmt nur `_WAN_CHILDREN` (`4769`): ein neues `dns_failed` am Gateway während
-  WAN-Ausfall würde **nicht** verknüpft und eigenständig alarmieren → `_WAN_CHILDREN` bzw.
-  `_incident_link` gezielt erweitern, mit Gegenfall-Tests wie in `tests/test_net_correlation.py`.
-- Router-Wurzeln greifen über `_concerns` (`net_rules.py:5143`) auf `scope_key` mit
+- Mit Eintrag wird jedes neue Incident im Fenster von `lan_unreachable` Kind
+  (`net_rules.py:5186-5187`) — bestehendes Verhalten, bleibt (4.1, V1).
+- `wan_down` nimmt als Incident-Kinder nur `_WAN_CHILDREN` (`net_rules.py:4769`,
+  `5190-5193`). Ein neuer Typ wird nur dann Kind von `wan_down`, wenn eine neue, eigene
+  Link-Regel das ausdrücklich sagt; bestehende Regeln bleiben unverändert.
+- Router-Wurzeln greifen über `_concerns` (`net_rules.py:5143-5150`) auf `scope_key` mit
   Router-Präfix. Diagnose-Incidents mit Scope „HA“ (z. B. „HA → Internet“) brauchen einen
-  eigenen Scope ohne Router-Präfix, sonst werden sie bei einem Router-Ausfall fälschlich Kind.
+  eigenen Scope ohne Router-Präfix, sonst werden sie bei einem Router-Ausfall Kind.
 - Ergebnisse von HA-Messungen dürfen **nie** Router-Incidents erzeugen, deren Ursache bei HA
   liegt (gleicher Gedanke wie `lan_unreachable`).
+
+### 4.1 Was die bestehende Korrelation heute verdecken könnte
+
+Nur Fakten aus dem Code (Stand `0dc20cd`, für diesen Abschnitt erneut gelesen). **Kein
+Änderungsvorschlag** — das Verhalten bleibt (ENTSCHIEDEN, Master). Gemeinsame Mechanik:
+
+- **Verknüpfen:** `correlate` (`net_rules.py:834-931`) prüft nur Incidents ohne `parent_id`,
+  deren Episodenbeginn (`_link_time` = `reopened_at` oder `first_seen`, `5070-5072`) in der
+  Spanne einer Wurzel liegt. Spanne `_root_span` (`5047-5053`): `first_seen − vorher` bis
+  Ende `+ nachher`; Ende = `resolved_at` (bzw. jetzt) bei Level-Wurzeln
+  (`_LEVEL_ROOTS` `4764-4766`: `lan_unreachable`, `router_unreachable`, `wan_down`,
+  `lan_uplink_down`), sonst `last_seen`. Fenster `_ROOT_WINDOWS` (`4754-4763`). Bei mehreren
+  Wurzeln gewinnt `lan_unreachable`, dann bestätigt, dann spezifischer (Doku `846-848`).
+- **Stumm-Dauer eines Kind-Incidents** (`suppressed_child`, `5482-5507`): stumm, solange die
+  Wurzel offen ist; nach ihrer Auflösung bis `resolved_at + nachher`. Danach zählt es nur,
+  wenn es **eigene Evidence nach diesem Zeitpunkt** hat (`inc.last_seen > window_end`,
+  `5506-5507`); sonst bleibt es stumm, bis es sich selbst auflöst oder bis zur Freigabe:
+  `_release_children` (`933-944`) löscht `parent_id` eines **noch offenen** Kindes, wenn die
+  Wurzel länger als `nachher + CHILD_RELEASE_AFTER` (3600 s, `4815`) aufgelöst ist
+  (`_root_expired` `5075-5079`). Wurzel mit `router_removed`: stumm bis zu dieser Freigabe
+  (`5504-5505`). **Höchste Stumm-Dauer ohne eigene neue Evidence: Wurzeldauer + nachher +
+  3600 s.**
+- **Bus und Score:** `_announce` (`net_engine.py:1817-1883`) überspringt stumme Kinder
+  (`1865`); ein Kind, das **während** es stumm ist aufgelöst wird, feuert weder `opened` noch
+  `resolved` (Doku `1828-1831`). Wird es wieder Kandidat, beginnt die Settle-Zeit erst dann
+  (Kommentar `1868`, Prüfung `1869-1874`, mindestens 90 s, `const.py:596-605`). Score und Entities zählen über
+  `counted_incidents` (`net_rules.py:5660`) mit derselben Regel.
+- **Events:** verknüpfte Events bekommen nur `parent_id` (`correlate` `908-930`);
+  `EventRing.set_parents` (`net_events.py:614-629`) setzt ihn nur, wenn noch keiner da ist,
+  und es gibt **keine** Freigabe für Events (kein Gegenstück zu `_release_children` in
+  `net_events.py`/`net_engine.py`, grep `parent_id=None`: keine Treffer). Der Score-Bereich
+  hängt an Incident-Typen (`_AREA_PREFIX` `5440-5447`), nicht an Events. Ob die Timeline im
+  Panel verknüpfte Events ausblendet oder nur gruppiert: **nicht belegt** (Frontend nicht
+  geprüft).
+
+| # | Fall | Code | Bedingung | Wie lange verdeckt |
+|---|---|---|---|---|
+| V1 | Jedes unabhängige Incident in einem `lan_unreachable`-Fenster (z. B. echter `wan_down`, CPU, Port-Flap eines Routers, der in den 120 s davor begann) wird bestätigtes Kind | `net_rules.py:5186-5187`; Rang `ROOT_TIERS` `4727-4738` (jeder Typ hat Rang > 1) | Tracker: alle geladenen Router (mind. 2) zugleich weg (`fleet.py:228`); Episodenbeginn in `[first_seen − 120 s, resolved_at]` (`_ROOT_WINDOWS` `4755`, nachher 0) | solange `lan_unreachable` offen; danach sofort wieder zählbar, **wenn** neue eigene Evidence nach `resolved_at` kommt; sonst bis Selbst-Auflösung oder `resolved_at + 3600 s`. Löst es sich vorher auf: nie auf dem Bus |
+| V2 | Jedes Event (jede Kategorie, jeder Router) in diesem Fenster wird Kind von `lan_unreachable` | `net_rules.py:5287-5288` | wie V1, Zeitstempel des Events in der Spanne | dauerhaft (`parent_id` bleibt, keine Freigabe für Events) |
+| V3 | Echter DNS-Fehler am Resolver eines **AP** während eines kurzen, unabhängigen `wan_down` am Gateway: die DNS-Events des AP werden Kind von `wan_down` | `_event_link` `net_rules.py:5312-5318` (`Category.DNS` ohne Router-Bedingung) | `wan_down` nur am Gateway (`detect_wan` `2801-2896`); Event-Zeitstempel in `[first_seen − 60 s, resolved_at + 120 s]` (`4758`) | dauerhaft verknüpft (Events). Ein DNS-**Incident** gibt es heute nicht (kein Typ mit Präfix `dns_` in `DEFAULT_SETTINGS` `130-232`; `dns_resolution` ist nur eine Ursachen-Hypothese, `1749-1775`), also kein Bus-Event in beiden Fällen; verdeckt wird die Zuordnung |
+| V4 | Echter Wechsel der WAN-IP oder echte WAN-Instabilität desselben Routers rund um einen kurzen `wan_down` wird Kind | `net_rules.py:5190-5192`, `_WAN_CHILDREN` `4769` | gleicher Router (`scope_key`), Episodenbeginn in `[first_seen − 60 s, resolved_at + 120 s]` | Mechanik oben; nachher 120 s |
+| V5 | Echtes eigenes Problem eines Routers (CPU, RAM, Dienst, Port) kurz nach einem Neustart wird bestätigtes Kind von `system_reboot` | `_router_link` `net_rules.py:5263-5268`, `_concerns` `5143-5150` | Incident betrifft den Router (`scope_key` = Router oder `Router:`-Präfix, oder Client an ihm); Episodenbeginn ab `first_seen` bis `last_seen + 180 s` (Event-Wurzel, `4757`); vor `first_seen` nur `wifi_*`- und Client-Incidents | Mechanik oben, nachher 180 s. Wann eine `system_reboot`-Wurzel aufgelöst wird: **nicht belegt** (nicht gelesen) |
+| V6 | Gleiches bei `router_unreachable`, plus Incidents von Routern dahinter, die ebenfalls weg sind (beobachteter Pfad → bestätigt, sonst Hypothese) | `net_rules.py:5263-5277`, `_behind_down` | Level-Wurzel, Spanne `[first_seen − 120 s, resolved_at + 180 s]` (`4756`) | Mechanik oben, nachher 180 s |
+| V7 | Am Gateway-Ausfall: echte `wifi_no_ip` / `wifi_dhcp_after_connect` an **beliebigen** APs werden Kind (Hypothese) | `net_rules.py:5278-5279`, `_GATEWAY_CHILDREN` `4768` | Wurzel `router_unreachable`/`system_reboot` eines Gateways (`topology.gateways`) | Mechanik oben; Konfidenz auf 0,6 gekappt (`1585-1586`) |
+| V8 | Router-Events von WLAN/LAN der betroffenen Router und Router dahinter werden Kind einer Router-Wurzel; DHCP-Events am Gateway nur als Hypothese | `net_rules.py:5289-5310` | Event in der Spanne; eigene LAN-Events von vor dem Ausfall ausgenommen (`5290-5295`) | dauerhaft (Events) |
+| V9 | Incidents der Router hinter einem ausgefallenen Uplink | `net_rules.py:5201-5207` | `lan_uplink_down`, Router in `view.behind`; bestätigt nur bei beobachtetem Ursprung und Pfad | Mechanik oben, nachher 60 s (`4760`) |
+| V10 | Client-Incidents an einem Router während `wifi_mass_disconnect` (Hypothese) | `net_rules.py:5210-5212` | Client-Scope, Router in `child.routers`; Spanne ± 30 s (`4762`) | Mechanik oben, nachher 30 s |
+| V11 | Ein kurzes echtes Problem, das komplett innerhalb einer Wurzelspanne beginnt und endet | `net_engine.py:1828-1831`, `1865` | jedes Kind aus V1, V4–V7, V9, V10 | nie auf dem HA-Bus; nur in der Incident-Historie mit `parent_id` |
+
+**Nicht belegt** für diesen Abschnitt: wie oft diese Fälle in der echten Flotte vorkommen;
+ob das Panel verknüpfte Events ausblendet; wann `system_reboot` aufgelöst wird;
+`_port_flap_link` (`net_rules.py:5209`) und `_behind_down` nicht im Detail gelesen.
 
 ---
 
@@ -554,16 +616,46 @@ include/rpcd/exec.h, main.c).
   gefunden, aber auch keine Erlaubnis — nicht belegt.
 - DECIDED: Referenzziele sind Einstellungen mit leerer Standardliste außer dem Nexthop aus dem
   Dump — keine fest eingebauten Fremdziele ohne Zustimmung des Nutzers (Datenschutz, ToS
-  ungeklärt). Die bestehende 8.8.8.8-Probe ist davon ausgenommen, bis der Master über ihre
-  Zukunft entscheidet (Frage F2).
+  ungeklärt). Die bestehende 8.8.8.8-Probe ist davon ausgenommen; ihre Zukunft ist
+  entschieden (Abschnitt 4 Punkt 4, Abschnitt 9 F2).
 
 ### 5.7 Offene Live-Prüfungen (nur mit Freigabe des Nutzers über den Master)
 
-Aus der Recherche übernommen, **nicht** ausgeführt: Binärdateien und Pakete auflisten;
-`ubus list` und `ubus -v list` für `network.rrdns`, `dnsmasq`, `dhcp`, `luci-rpc`;
-`dnsmasq metrics`, `dhcp ipv4leases`, `network.interface dump`, `service list` lesen;
-`/usr/share/rpcd/acl.d/*.json` und `/etc/config/rpcd` lesen; exec-ACL mit Argumentmuster
-testen (ändert die ACL, eigene Freigabe); Kosten messen (ping, nslookup, SSH-Aufbau).
+Aus der Recherche übernommen und je Befehl beschrieben; in dieser Sitzung **nichts davon
+ausgeführt**. Platzhalter in spitzen Klammern; echte Adressen und Namen gehören nicht in
+dieses Dokument. Alle Befehle laufen in einer SSH-Sitzung auf **einem** Router; die
+SSH-Anmeldung selbst erzeugt einen Login-Eintrag im Systemlog (dropbear), sonst nichts.
+
+#### 5.7 (a) Nur lesende Befehle — ändern keine Konfiguration
+
+| # | Befehl | Was er liest | Änderung am Router |
+|---|---|---|---|
+| L1 | `ls -l /bin/ping /bin/ping6 /usr/bin/nslookup /usr/bin/traceroute /bin/busybox` | Dateiattribute und Symlink-Ziele (ob die Werkzeuge Busybox-Applets sind) | keine; liest nur Verzeichniseinträge |
+| L2 | `apk info -e <paketname>` (OpenWrt 25.12) bzw. `opkg list-installed` (ältere Versionen) | ob ein Paket installiert ist (z. B. `rpcd-mod-rrdns`, `odhcpd`, `dnsmasq`-Variante) | keine; liest nur die Paketdatenbank, installiert nichts |
+| L3 | `ps w \| grep '[r]pcd'` | Kommandozeile des laufenden rpcd (ob `-t <timeout>` gesetzt ist) | keine; liest die Prozessliste |
+| L4 | `cat /etc/init.d/rpcd` | ob das Init-Skript `-t` setzt | keine; liest eine Datei |
+| L5 | `ubus list` | Namen aller ubus-Objekte (gibt es `dnsmasq`, `dhcp`, `network.rrdns`, `luci-rpc`?) | keine; ruft keine Methode auf |
+| L6 | `ubus -v list network.rrdns`, `ubus -v list dnsmasq`, `ubus -v list dhcp`, `ubus -v list luci-rpc` | Methoden und Parameter dieser Objekte | keine; listet nur Signaturen, ruft keine Methode auf |
+| L7 | `ubus call dnsmasq metrics` | DNS-/DHCP-Zähler von dnsmasq (Schlüsselnamen) | keine Konfigurationsänderung; ob das Lesen Zähler zurücksetzt: **nicht belegt** |
+| L8 | `ubus call dhcp ipv4leases`, `ubus call dhcp ipv6leases`, `ubus call dhcp ipv6ra` | odhcpd-Leases v4/v6 und RA-Status | keine; Leseaufrufe von odhcpd. Ausgabe enthält MACs/IPs/Hostnamen → nicht in Dokumente kopieren |
+| L9 | `ubus call network.interface dump` | Interfaces inkl. `route`/`nexthop`, `dns-server`, IPv6-Felder | keine; derselbe Aufruf, den die Integration ohnehin jede Minute macht. Ausgabe enthält Adressen → nur Feldnamen notieren |
+| L10 | `ubus call service list '{"name":"dnsmasq"}'` (ebenso `odhcpd`) | ob procd den Dienst als laufend meldet | keine; Leseaufruf |
+| L11 | `uci show dhcp` | DHCP-Konfiguration inkl. ra/dhcpv6-Optionen | keine; liest die Konfiguration, kein `uci set`/`commit` |
+| L12 | `cat /usr/share/rpcd/acl.d/*.json` | alle installierten rpcd-ACL-Gruppen (gibt es `luci-mod-network-diagnostics` mit nacktem `/bin/ping`?) | keine; liest Dateien |
+| L13 | `cat /etc/config/rpcd` | welche ACL-Gruppen der Login `root` bekommt | keine; liest eine Datei. **Enthält Passwort-Verweise/-Hashes** → Ausgabe nicht kopieren, nur `read`/`write`-Zeilen notieren |
+| L14 | `time ping -c 3 -W 1 <Gateway-LAN-Adresse>` (auf einem AP) | Antwortzeit, Verlust und Laufzeit-/CPU-Kosten eines Pings | **keine Konfigurationsänderung**; startet einen Prozess (≈ 3 s) und sendet **3 ICMP-Echo-Pakete an ein internes Ziel** (den Gateway im LAN) |
+| L15 | `time nslookup <Testname> 127.0.0.1` | Antwortart des lokalen Resolvers und Laufzeit | **keine Konfigurationsänderung**; startet einen Prozess und sendet DNS-Anfragen an den **eigenen lokalen Resolver** (127.0.0.1; Busybox fragt je nach Variante A und AAAA, bei Timeout bis zu 2 Wiederholungen). Ist der Name nicht im Cache, leitet dnsmasq die Anfrage an den **externen Upstream-Resolver** weiter (wenige DNS-Pakete nach außen) |
+| L16 | `time ssh <router-alias> true` (vom Windows-Rechner aus) | Dauer des SSH-Aufbaus | **keine Konfigurationsänderung**; eine SSH-Verbindung, startet kurz eine Shell auf dem Router, Login-Eintrag im Systemlog |
+
+#### 5.7 (b) Einziger Punkt, der die rpcd-ACL des Routers ändert — eigene Freigabe
+
+| # | Schritt | Änderung | Rückweg |
+|---|---|---|---|
+| W1 | exec-ACL mit Argumentmuster testen: eine **zusätzliche** Test-ACL-Datei unter `/usr/share/rpcd/acl.d/` mit genau einem Eintrag wie `"/bin/ping -c 3 -W 1 *": ["exec"]` anlegen, rpcd neu starten (`/etc/init.d/rpcd restart`), dann per ubus `file exec` einen erlaubten und einen nicht erlaubten Aufruf prüfen | **ändert die ACL des Routers**; der rpcd-Neustart beendet **alle** rpcd-Sitzungen (HA meldet sich neu an, LuCI-Nutzer werden abgemeldet); der erlaubte Testaufruf sendet 3 ICMP-Pakete wie L14 | Test-Datei löschen, rpcd erneut neu starten; die Projekt-ACL `ha-openwrt-router.json` bleibt unberührt. Vorher L12 sichern (Backup der ACL-Dateien), Eintrag mit Befehl und Rückweg ins Änderungsprotokoll |
+
+W1 ist **nicht** von einer Freigabe für (a) gedeckt. Ob W1 überhaupt nötig ist, hängt von
+L12/L13 ab (Annahme 5.2: bei nacktem `/bin/ping` aus einer LuCI-Gruppe ist ein
+Argumentmuster wirkungslos).
 
 ---
 
@@ -576,6 +668,14 @@ Nichts davon existiert in `0dc20cd`; hier wird **nichts** davon entworfen.
   davon: Router-ID als Schlüssel im Diagnose-Store, Capability-Flags für „exec erlaubt /
   Busybox-Werkzeug vorhanden / odhcpd-ubus vorhanden“, Audit-Eintrag für jede aktive
   Messung auf einem Router, Approval für die ACL-Erweiterung.
+  **Stand laut Master (2026-11-17, nicht selbst geprüft, nichts geholt oder gemergt):** Der
+  Vertrag ist auf Branch `origin/claude/enterprise-core-49ade2` veröffentlicht — Commit
+  `2827c22` (Plan + Vertrag `docs/dev/configuration-api-v1.md`) und Commit `5c9d248` (Typen:
+  `core_models.py`, `core_errors.py`, `core_masking.py`). Bisher nur Typen und Doku;
+  Registry, Guard und Event-Bus als laufender Code folgen noch. Die zwei Umbauten aus
+  Abschnitt 9 F1/F2 warten auf den Merge dieses Branches in `main`. Außerdem der neue
+  „Enterprise“-Menü-Container im Panel, in den „Netzwerkdiagnose“ als Unter-Tab kommt
+  (ENTSCHIEDEN, 1.10).
 - **Configuration Manager** (UCI-Snapshots, Drift): Firewall-/Routing-/DHCP-Konfiguration
   gehört dorthin; Diagnose liest nur Laufzeitzustand. Die ACL-Erweiterung für exec wäre ein
   Drift-Fall.
@@ -664,8 +764,8 @@ uvx ruff@0.17.3 format --check custom_components/
 
 **DECIDED (diese Sitzung):**
 
-- DECIDED: Arbeitstitel „Netzwerkprüfung“ als Unter-Tab von `DiagnoseView` statt neuem
-  Sidebar-Eintrag — es gibt schon „Diagnose“, zwei gleichnamige Bereiche verwirren.
+- ~~DECIDED: Arbeitstitel „Netzwerkprüfung“ als Unter-Tab von `DiagnoseView`~~ — **ersetzt**
+  durch ENTSCHIEDEN (Master) F5 unten.
 - DECIDED: Phase B nutzt nur Daten ohne Routeränderung (Dump-Auswertung, HA-seitige
   Messungen, ubus-Zeitmessung); alles mit exec ist Phase C — die ACL-Erweiterung ist eine
   Routeränderung mit Freigabepflicht.
@@ -674,17 +774,37 @@ uvx ruff@0.17.3 format --check custom_components/
 - DECIDED: `network.rrdns` wird nicht genutzt — PTR an beliebigen Server ist SSRF-Fläche
   ohne Diagnosenutzen.
 
-**Offene Fragen an den Master:**
+**Fragen an den Master — entschieden:**
 
-- F1: Den zweiten `network.interface dump` je Poll vor Phase B zusammenlegen? (empfohlen: ja,
-  eigener kleiner Fix-PR)
-- F2: Bestehende 8.8.8.8-Probe: zentralisieren und als „HA → Internet“ umbenennen,
-  oder bis Phase B unverändert lassen? (empfohlen: zentralisieren in Phase B)
-- F3: exec-ACL in Phase C überhaupt anstreben angesichts des v8-Entscheids gegen breites
-  `file exec`? (empfohlen: erst nach Live-Prüfung 5.7 und Annahme 5.2 entscheiden)
-- F4: Diagnose-Ergebnisse als eigene Incident-Typen oder nur als Events/Score-Eingang?
-  (empfohlen: zuerst Events + Score, Incidents nur für Gateway-/DNS-Wechsel mit expliziten
-  Link-Regeln)
+- F1 — Zweiter `network.interface dump` je Poll. **ENTSCHIEDEN (Master, 2026-11-17,
+  korrigiert):** zusammenlegen, aber erst **nach dem Merge von Enterprise Core in `main`**
+  (nicht in Stufe 3; es baut bestehende Methoden in `api.py` um), als eigener, klar
+  abgegrenzter Commit mit einem Test, der belegt: ein Dump je Poll und alle bestehenden
+  Felder unverändert. Nicht jetzt, weil mehrere Sitzungen `api.py` ändern.
+- F2 — 8.8.8.8-Probe. **ENTSCHIEDEN (Master, 2026-11-17, korrigiert):** erst **nach dem
+  Merge von Enterprise Core in `main`** zentralisieren (nicht in Stufe 3; es baut bestehende
+  Methoden in `coordinator.py` um), eine Messung für die Flotte, in Backend-Feld und Panel ehrlich als „HA → Internet“ beschriften.
+  Das bestehende Sensor-/Datenfeld `ping_ms` darf nicht verschwinden, seine Entity-ID darf
+  sich nicht ändern; jede Bedeutungs- oder Namensänderung kommt in den CHANGELOG. Bis dahin
+  unverändert. (Bestand: `ping_ms` ist heute ein Datenfeld, `const.py:463`,
+  `coordinator.py:378`, `topology_mesh.py:1834`; ein Entity dafür gibt es nicht, 1.7.)
+- F3 — exec-ACL für routerseitige Tests. **ENTSCHIEDEN (Master, 2026-11-17): NICHT
+  entschieden.** Hängt an den Live-Prüfungen in 5.7, die nur der Nutzer freigeben kann. Bis
+  dahin wird der routerseitige Weg nur als Schnittstelle mit Capability-Prüfung gebaut,
+  standardmäßig aus, getestet gegen Mocks.
+- F4 — Incidents oder Events. **ENTSCHIEDEN (Master, 2026-11-17):** zuerst Events und
+  Score-Eingang; eigene Incident-Typen nur für Gateway-Wechsel und DNS-Server-Wechsel, mit
+  expliziten Link-Regeln und Tests, dass sie nichts Fremdes schlucken und nicht geschluckt
+  werden.
+- F5 — Bestehende Korrelation (`lan_unreachable` übernimmt jedes Incident im Fenster,
+  `wan_down` übernimmt alle DNS-Events jedes Routers). **ENTSCHIEDEN (Master, 2026-11-17):**
+  **nicht** ändern. Was sie verdecken kann: Abschnitt 4.1.
+- F6 — UI. **ENTSCHIEDEN (Master, 2026-11-17):** „Network Diagnostics“ wird Unter-Tab des
+  neuen „Enterprise“-Menü-Containers, den die enterprise-core-Sitzung anlegt, **nicht**
+  Unter-Tab der bestehenden Ansicht „Diagnose“. Deutscher Tab-Name: „Netzwerkdiagnose“.
+  Ersetzt den früheren DECIDED-Punkt „Netzwerkprüfung“.
+- F7 — Herkunft von `diag_targets.py` / `tests/test_diag_targets.py` im Worktree
+  (Abschnitt 6): offen, liegt beim Master.
 
 **Doku geprüft:** https://developers.home-assistant.io/blog/ (leitet um auf
 https://contributors.home-assistant.io/blog/), Liste bis 2026-11-17: keine Deprecation zu
@@ -697,3 +817,17 @@ https://contributors.home-assistant.io/blog/), Liste bis 2026-11-17: keine Depre
 
 - 2026-11-17 Phase A: nur diese Datei angelegt. Keine Verbindung zu Router, HA, Host, VM oder
   Drucker; keine Messung ins Netz; nichts installiert; kein Commit. Rückweg: Datei löschen.
+- 2026-11-17 Phase A, Nachtrag nach Master-Entscheidungen: Abschnitt 9 F1–F6 als
+  ENTSCHIEDEN (Master) eingetragen (UI-Einhängepunkt in 1.10 und Abschnitt 4 angepasst,
+  früherer DECIDED-Punkt „Netzwerkprüfung“ ersetzt); neuer Abschnitt 4.1 „Was die bestehende
+  Korrelation heute verdecken könnte“ (Code erneut gelesen: `net_rules.py` 834-944,
+  4727-4769, 5047-5079, 5143-5150, 5164-5320, 5482-5524; `net_engine.py:1817-1883`;
+  `net_events.py:614-629`); Abschnitt 5.7 in (a) nur lesende Befehle und (b) die eine
+  ACL-Änderung getrennt. Nur diese Datei geändert; keine Verbindung zu Router, HA, Host, VM
+  oder Drucker; kein Commit (macht der Master). Rückweg: `git checkout` des vorigen Stands
+  dieser Datei.
+- 2026-11-17 Korrektur des Masters: F1 (Dump zusammenlegen) und F2 (8.8.8.8-Probe
+  zentralisieren) erst nach dem Merge von Enterprise Core in `main`, nicht in Stufe 3
+  (Abschnitt 4 Punkte 4/5 und Abschnitt 9 angepasst); Abschnitt 6 um den veröffentlichten
+  enterprise-core-Vertrag ergänzt (Branch und Commits laut Master, nicht geholt). Nur diese
+  Datei geändert, kein Commit.
