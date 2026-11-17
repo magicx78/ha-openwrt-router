@@ -930,7 +930,10 @@ def test_allowed_symlinks(name: str, target: str) -> None:
 @pytest.mark.parametrize(
     ("name", "target", "code"),
     [
-        ("etc/a", "/tmp/x", ca.CODE_SYMLINK_ABSOLUTE),
+        ("etc/a", "/root/x", ca.CODE_SYMLINK_ABSOLUTE),
+        ("etc/a", "/tmp/../root/.ssh", ca.CODE_SYMLINK_ABSOLUTE),
+        ("etc/a", "/tmpx/y", ca.CODE_SYMLINK_ABSOLUTE),
+        ("etc/a", "/tmp", ca.CODE_SYMLINK_ABSOLUTE),
         ("etc/a", "/etc/../root/.ssh", ca.CODE_SYMLINK_ABSOLUTE),
         ("etc/a", "/etcetera/x", ca.CODE_SYMLINK_ABSOLUTE),
         ("etc/a", "/etc", ca.CODE_SYMLINK_ABSOLUTE),
@@ -946,6 +949,34 @@ def test_allowed_symlinks(name: str, target: str) -> None:
 def test_rejected_symlinks(name: str, target: str, code: str) -> None:
     data = _with(E(name, None, type=tarfile.SYMTYPE, linkname=target))
     assert_rejected(validate_archive(data, DEFAULT_ARCHIVE_LIMITS), ERR_INVALID, code)
+
+
+@pytest.mark.parametrize(
+    ("name", "target"),
+    [
+        ("etc/resolv.conf", "/tmp/resolv.conf"),
+        ("etc/mtab", "/proc/mounts"),
+        ("etc/ppp/resolv.conf", "/tmp/resolv.conf.ppp"),
+        ("etc/lock", "/var/lock"),
+    ],
+)
+def test_runtime_symlinks_of_full_etc_backup_are_allowed(
+    name: str, target: str
+) -> None:
+    """A backup of all of /etc carries links into /tmp, /var and /proc.
+
+    The archive is never extracted, so they are harmless and must not make
+    the whole backup invalid.
+    """
+    data = archive(
+        [
+            *sysupgrade_entries(),
+            E(name, None, type=tarfile.SYMTYPE, linkname=target, mode=0o777),
+        ]
+    )
+    report = validate_archive(data, DEFAULT_ARCHIVE_LIMITS)
+    assert report.ok, report.findings
+    assert any(m.name == name and m.type == "symlink" for m in report.members)
 
 
 def test_symlink_target_with_nul_is_rejected() -> None:

@@ -575,3 +575,25 @@ def test_mask_for_output_keeps_scalar_types() -> None:
         {"n": 3, "f": 1.5, "b": False, "s": "ok", "risk": cc.RISK_LOW}
     )
     assert out == {"n": 3, "f": 1.5, "b": False, "s": "ok", "risk": "low"}
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["PasswordAuth", "RootPasswordAuth", "passwordauth", "ROOTPASSWORDAUTH"],
+)
+def test_dropbear_password_auth_switches_stay_readable(name: str) -> None:
+    """on/off switches, no secret; the diff must show "on -> off" (any case)."""
+    assert not is_secret_option("dropbear", "dropbear", name)
+    assert mask_for_output({name: "off"}) == {name: "off"}
+    change = {
+        "config": "dropbear",
+        "section_type": "dropbear",
+        "option": name,
+        "old": "on",
+        "new": "off",
+    }
+    assert mask_for_output(change) == change
+    assert redact_text(f"option {name} 'off'") == f"option {name} 'off'"
+    # The whitelist only lifts the pattern: real secrets stay secret.
+    assert is_secret_option("dropbear", "dropbear", "Password")
+    assert is_secret_option("dropbear", "dropbear", "RootPassword")

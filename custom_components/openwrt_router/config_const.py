@@ -41,8 +41,17 @@ class ArchiveLimits:
 
 DEFAULT_ARCHIVE_LIMITS: Final = ArchiveLimits()
 
-# Absolute symlink targets OpenWrt itself creates (e.g. zoneinfo links).
-ARCHIVE_SYMLINK_ABS_PREFIXES: Final[tuple[str, ...]] = ("/etc/", "/usr/", "/lib/")
+# Absolute symlink targets OpenWrt itself creates (e.g. zoneinfo links, and
+# /etc/resolv.conf -> /tmp/resolv.conf when a backup covers all of /etc).
+# The archive is never extracted, so a link into runtime trees is harmless.
+ARCHIVE_SYMLINK_ABS_PREFIXES: Final[tuple[str, ...]] = (
+    "/etc/",
+    "/usr/",
+    "/lib/",
+    "/tmp/",
+    "/var/",
+    "/proc/",
+)
 # Configs an archive must contain under etc/config/, otherwise "incomplete".
 ARCHIVE_REQUIRED_CONFIGS: Final[frozenset[str]] = frozenset({"network", "system"})
 ARCHIVE_CONFIG_PREFIX: Final = "etc/config/"
@@ -166,12 +175,17 @@ SECRET_OPTION_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
 
 # Names the pattern would hit but whose value is not secret and is needed.
 # Applies only to the pattern, never to SECRET_OPTIONS or context names.
+# Entries are lower-case: the check runs on the normalised (lower-case) name.
+# dropbear PasswordAuth/RootPasswordAuth are on/off switches; the diff must
+# show "on -> off" because they decide whether HA can still log in.
 SECRET_OPTION_WHITELIST: Final[frozenset[str]] = frozenset(
     {
         "ft_psk_generate_local",
         "keepalive",
         "persistent_keepalive",
         "key_mgmt",
+        "passwordauth",
+        "rootpasswordauth",
     }
 )
 
