@@ -177,6 +177,7 @@ _LOG_KEYS: dict[str, ReasonInfo] = {
     "psk": _PSK,
     "max_sta": _MAX_STA,
     "blocked": _BLOCKED,
+    "missing_acks": _MISSING_ACKS,
 }
 
 

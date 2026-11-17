@@ -27,6 +27,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from .wifi_reasons import CATEGORY_SECURITY, classify_text, from_log_reason
+from .wifi_reasons import UNKNOWN as _REASON_UNKNOWN
+
 CATEGORY_WIFI = "wifi"
 CATEGORY_DHCP = "dhcp"
 CATEGORY_DFS = "dfs"
@@ -72,6 +75,8 @@ REASON_FAILED = "failed"
 REASON_PSK = "psk"
 REASON_MAX_STA = "max_sta"
 REASON_BLOCKED = "blocked"
+# "disconnected due to excessive missing ACKs" (live on ap5, plan 3.6)
+REASON_MISSING_ACKS = "missing_acks"
 
 DHCP_ACK = "ack"
 DHCP_NAK = "nak"
@@ -193,6 +198,11 @@ _HOSTAPD_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             rf"^STA {_MAC} IEEE 802\.11: disassociated(?: due to (?P<why>.+))?$"
         ),
     ),
+    # Live (ap5): "disconnected due to excessive missing ACKs" (RT5-D).
+    (
+        WIFI_DISASSOC,
+        re.compile(rf"^STA {_MAC} IEEE 802\.11: disconnected due to (?P<why>.+)$"),
+    ),
     # Live (ap5): the station associated with another BSS of this hostapd.
     (WIFI_DISASSOC, re.compile(rf"^Prune association for {_MAC}(?P<prune>)")),
     (WIFI_HANDSHAKE_COMPLETED, re.compile(rf"^EAPOL-4WAY-HS-COMPLETED {_MAC}\b")),
@@ -220,7 +230,15 @@ _HOSTAPD_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _REASONS = (
     ("inactivity", REASON_INACTIVITY),
     ("local deauth request", REASON_LOCAL_REQUEST),
+    ("excessive missing acks", REASON_MISSING_ACKS),
 )
+# Kinds whose reason category is known without a reason (RT5-D).
+_KIND_CATEGORIES = {
+    WIFI_PSK_MISMATCH: CATEGORY_SECURITY,
+    WIFI_HANDSHAKE_FAILED: CATEGORY_SECURITY,
+    WIFI_SAE_FAILED: CATEGORY_SECURITY,
+    WIFI_BACKHAUL_AUTH_FAILED: CATEGORY_SECURITY,
+}
 _REJECT_REASONS = {"MAX-STA": REASON_MAX_STA, "BLOCKED-STA": REASON_BLOCKED}
 # hostapd control events without a station (not seen live)
 _AP_DOWN_RE = re.compile(r"^(?:AP-DISABLED|INTERFACE-DISABLED)\s*$")
@@ -305,6 +323,11 @@ class LogEvent:
     name: str | None = None
     # Wi-Fi lines (P4): normalised plain-text reason (``REASON_*``).
     reason: str | None = None
+    # Wi-Fi lines (RT5-D): category of the reason (``wifi_reasons``
+    # ``CATEGORY_*``) and its IEEE 802.11 number when known. None = the line
+    # gives no reason; "unknown" = a reason whose cause is not provable.
+    reason_category: str | None = None
+    reason_code: int | None = None
 
     @property
     def key(self) -> str:
@@ -387,6 +410,7 @@ def _parse_supplicant(
     match = _SUPPLICANT_RE.match(body)
     if not match:
         return None
+    category, code = reason_category(WIFI_BACKHAUL_AUTH_FAILED, REASON_PSK, message)
     return LogEvent(
         category=CATEGORY_WIFI,
         kind=WIFI_BACKHAUL_AUTH_FAILED,
@@ -396,6 +420,8 @@ def _parse_supplicant(
         message=message,
         process="wpa_supplicant",
         reason=REASON_PSK,
+        reason_category=category,
+        reason_code=code,
     )
 
 
@@ -418,10 +444,32 @@ def _wifi_reason(kind: str, hit: re.Match[str]) -> str | None:
         return None
     if kind == WIFI_ASSOC_REJECTED:
         return _REJECT_REASONS.get(why, REASON_OTHER)
+    low = why.lower()
     for text, reason in _REASONS:
-        if why.startswith(text):
+        if low.startswith(text):
             return reason
     return REASON_OTHER
+
+
+def reason_category(
+    kind: str, reason: str | None, message: str
+) -> tuple[str | None, int | None]:
+    """Category and IEEE 802.11 number of a Wi-Fi line's reason (RT5-D).
+
+    The normalised reason decides first, then the text (a ``reason=N`` at a
+    higher hostapd log level), then the kind (an auth failure is a security
+    matter). (None, None) when the line gives no reason at all.
+    """
+    info = from_log_reason(reason)
+    if info is _REASON_UNKNOWN:
+        info = classify_text(message)
+    if info is not _REASON_UNKNOWN:
+        return info.category, info.code
+    if kind in _KIND_CATEGORIES:
+        return _KIND_CATEGORIES[kind], None
+    if reason:
+        return info.category, None
+    return None, None
 
 
 def _parse_kernel(msg: str, log_id: int, time_ms: int, message: str) -> LogEvent | None:
@@ -550,6 +598,8 @@ def _parse_hostapd(
     for kind, pattern in _HOSTAPD_PATTERNS:
         hit = pattern.match(rest)
         if hit:
+            reason = _wifi_reason(kind, hit)
+            category, code = reason_category(kind, reason, rest)
             return LogEvent(
                 category=CATEGORY_WIFI,
                 kind=kind,
@@ -558,7 +608,9 @@ def _parse_hostapd(
                 mac=hit.group("mac").upper(),
                 interface=match.group("iface"),
                 message=message,
-                reason=_wifi_reason(kind, hit),
+                reason=reason,
+                reason_category=category,
+                reason_code=code,
             )
     return None
 

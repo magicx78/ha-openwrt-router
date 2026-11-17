@@ -65,6 +65,7 @@ from .net_events import (
     Source,
     prune_incidents,
 )
+from .wifi_reasons import CATEGORY_RADIO, CATEGORY_SECURITY, from_log_reason
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -3137,6 +3138,11 @@ WIFI_LOG_RULES = frozenset(
 WIFI_AUTH_WAVE_KEY = "fleet:wifi_auth_wave"
 
 _DOWN_KINDS = frozenset({"disconnected", "deauth", "disassoc", "inactivity_timeout"})
+# Disconnect lines (counted only) that become stored events because their
+# reason category points at a problem (RT5-D): a radio link that broke
+# (missing ACKs) or a security failure. Inactivity, AP steering and a client
+# leaving stay counted only.
+STORED_DOWN_CATEGORIES = frozenset({CATEGORY_RADIO, CATEGORY_SECURITY})
 _DHCP_FAIL_KINDS = frozenset({"nak", "no_address"})
 # Lines of one failed attempt arrive together (hostapd writes the invalid
 # MIC line and AP-STA-POSSIBLE-PSK-MISMATCH for the same 4-way handshake).
@@ -3739,6 +3745,9 @@ def _reconnects(
                     ),
                     "window_s": round(window),
                     "reasons": sorted({r or "none" for r in reasons}),
+                    "reason_categories": sorted(
+                        {from_log_reason(r).category for r in reasons if r}
+                    ),
                     "causes": causes,
                 },
             )
@@ -4478,6 +4487,11 @@ def wifi_log_meta(
     params: dict[str, Any] = {}
     if getattr(event, "reason", None):
         params["reason"] = event.reason
+    category = getattr(event, "reason_category", None)
+    if category:
+        params["reason_category"] = category
+    if getattr(event, "reason_code", None) is not None:
+        params["reason_code"] = event.reason_code
     key = f"{event.category}.{event.kind}"
     hyps: list[tuple[str, CauseStatus]] = []
     attempt = False
@@ -4499,6 +4513,8 @@ def wifi_log_meta(
         )
         params["window_s"] = round(window)
         hyps = _auth_hypotheses(key, event.reason, signal, weak_dbm, fresh)
+    elif stores_down_line(event):
+        hyps = _down_hypotheses(category, signal, weak_dbm, fresh)
     elif key == WIFI_ASSOC_REJECTED_KIND:
         if event.reason == "max_sta":
             hyps = [("ap_full", CauseStatus.CONFIRMED)]
@@ -4518,6 +4534,31 @@ def wifi_log_meta(
         attempt=attempt,
         attempt_key=attempt_key,
     )
+
+
+def stores_down_line(event: Any) -> bool:
+    """Is this counted-only disconnect line stored as an event (RT5-D)?"""
+    return (
+        getattr(event, "category", None) == "wifi"
+        and getattr(event, "kind", None) in _DOWN_KINDS
+        and bool(getattr(event, "mac", None))
+        and getattr(event, "reason_category", None) in STORED_DOWN_CATEGORIES
+    )
+
+
+def _down_hypotheses(
+    category: str | None, signal: int | None, weak_dbm: float, fresh: bool
+) -> list[tuple[str, CauseStatus]]:
+    """Causes of a stored disconnect. Missing ACKs are a broken radio link:
+    a weak signal measured right after the line confirms it (as for a
+    reconnect, E1)."""
+    if category == CATEGORY_RADIO:
+        return [
+            _weak_cause(signal, weak_dbm, fresh),
+            _hyp("interference"),
+            _hyp("client_power_save"),
+        ]
+    return [_hyp("psk_wrong"), _hyp("client_driver")]
 
 
 def _auth_hypotheses(

@@ -177,6 +177,7 @@ from .net_rules import (
     normalize_mac,
     router_score,
     settings_errors,
+    stores_down_line,
     suppressed_child,
     wifi_auth_evidence,
     wifi_context,
@@ -1017,6 +1018,7 @@ class NetIntelligence:
         accepted: list[LogEvent] = []
         kept: list[NetEvent] = []
         groups: dict[tuple[str, str | None], list[tuple[LogEvent, float]]] = {}
+        downs: set[tuple[Any, ...]] = set()
         for event in events:
             if not isinstance(event, LogEvent):
                 continue
@@ -1029,7 +1031,12 @@ class NetIntelligence:
             ts = src_ts if baseline and src_ts is not None and src_ts <= now else now
             self.counters.add(entry_id, event.key, ts)
             if (event.category, event.kind) in COUNT_ONLY_KINDS:
-                continue
+                # RT5-D: a disconnect with a problem reason is stored, once
+                # per batch (the same line twice is one event)
+                down = (event.key, event.mac, event.interface, event.time_ms)
+                if not stores_down_line(event) or down in downs:
+                    continue
+                downs.add(down)
             if event.category in _AGGREGATED_CATEGORIES:
                 groups.setdefault((event.key, event.name), []).append((event, ts))
                 continue
