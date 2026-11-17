@@ -6028,6 +6028,389 @@ class OpenWrtAPI:
             )
         return stream_error_from_payload(payload, obj)
 
+    # --- Configuration Manager (config_*) ---
+    # Rarely called (about once a day per router), never from the poll. No
+    # retries except the one re-login of an expired session. Archive bytes,
+    # session token and remote stderr are never logged; error texts carry only
+    # the error class, HTTP status / exit code and lengths.
+
+    async def config_fetch_backup_cgi(self, *, max_bytes: int, timeout: float) -> bytes:
+        """Fetch the ``sysupgrade -b`` archive through LuCI's ``cgi-backup``.
+
+        POSTs ``sessionid=<token>`` (form body only, never URL or log) to
+        ``/cgi-bin/cgi-backup`` on the ubus host and streams the answer with
+        a hard cap of ``max_bytes``. cgi-io answers 403 both for a missing
+        ``cgi-io: backup`` right and for a session rpcd no longer knows, so a
+        403 triggers exactly one re-login and one repeat.
+
+        Network calls: 1 POST; plus 1 login when the token is due, plus
+        1 login (with its session destroy) and 1 POST after a 403.
+
+        Raises:
+            ValueError: ``max_bytes`` or ``timeout`` not positive.
+            OpenWrtConfigFetchPermissionError: 403 after the re-login, 401,
+                or a 200 body that says "denied".
+            OpenWrtConfigFetchNotAvailableError: 404 (no LuCI / cgi-io) or a
+                web page instead of the archive.
+            OpenWrtConfigFetchTooLargeError: More than ``max_bytes``.
+            OpenWrtConfigFetchIncompleteError: Other HTTP status, empty or
+                non-gzip body, transfer cut off.
+            OpenWrtAuthError: The login needed for a token failed.
+            OpenWrtConnectionError: Router unreachable / API closing.
+            OpenWrtTimeoutError: ``timeout`` seconds passed (whole operation).
+        """
+        _config_check_limits(max_bytes, timeout)
+        if self._closing:
+            raise OpenWrtConnectionError(
+                "OpenWrtAPI is closing – backup fetch rejected"
+            )
+        url = self._ubus_url.removesuffix("/ubus") + _CONFIG_CGI_BACKUP_PATH
+        try:
+            async with asyncio.timeout(timeout):
+                # Auth backoff gate + token refresh, shared with the RT2 streams.
+                await self._stream_ensure_token()
+                token = self._token
+                data = await self._config_cgi_post(url, token, max_bytes, timeout)
+                if data is None:
+                    _LOGGER.debug(
+                        "cgi-backup on %s: HTTP 403, logging in again once", self._host
+                    )
+                    await self._stream_relogin(token)
+                    data = await self._config_cgi_post(
+                        url, self._token, max_bytes, timeout
+                    )
+                if data is None:
+                    raise OpenWrtConfigFetchPermissionError(
+                        "cgi-backup: HTTP 403 after a fresh login "
+                        "(session lacks the cgi-io backup right)"
+                    )
+        except TimeoutError as err:
+            raise OpenWrtTimeoutError(f"cgi-backup timed out after {timeout}s") from err
+        _LOGGER.debug("cgi-backup on %s: %d bytes", self._host, len(data))
+        return data
+
+    async def _config_cgi_post(
+        self, url: str, token: str, max_bytes: int, timeout: float
+    ) -> bytes | None:
+        """POST one cgi-backup request; None means HTTP 403."""
+        client_timeout = aiohttp.ClientTimeout(
+            total=None, sock_connect=min(5.0, timeout), sock_read=timeout
+        )
+        try:
+            async with self._session.post(
+                url,
+                data={"sessionid": token},
+                timeout=client_timeout,
+                ssl=self._ssl_context,
+            ) as resp:
+                try:
+                    return await self._config_cgi_read(resp, max_bytes)
+                finally:
+                    # Close (not release): an aborted body must not go back to
+                    # the pool, and cgi-io/sysupgrade should see us leave.
+                    resp.close()
+        except TimeoutError as err:
+            # aiohttp's own timeouts (ServerTimeoutError is also a ClientError)
+            raise OpenWrtTimeoutError(
+                f"cgi-backup: {type(err).__name__} after {timeout}s"
+            ) from err
+        except aiohttp.ClientPayloadError as err:
+            raise OpenWrtConfigFetchIncompleteError(
+                f"cgi-backup: transfer cut off ({type(err).__name__})"
+            ) from err
+        except aiohttp.ClientError as err:
+            raise OpenWrtConnectionError(
+                f"cgi-backup: cannot reach {self._host} ({type(err).__name__})"
+            ) from err
+
+    async def _config_cgi_read(
+        self, resp: aiohttp.ClientResponse, max_bytes: int
+    ) -> bytes | None:
+        """Read a cgi-backup answer bounded by ``max_bytes``; None for 403."""
+        status = resp.status
+        if status == 403:
+            return None
+        if status == 401:
+            raise OpenWrtConfigFetchPermissionError("cgi-backup: HTTP 401")
+        if status == 404:
+            raise OpenWrtConfigFetchNotAvailableError("cgi-backup: HTTP 404")
+        if status != 200:
+            raise OpenWrtConfigFetchIncompleteError(f"cgi-backup: HTTP {status}")
+        buf = bytearray()
+        is_gzip: bool | None = None
+        async for chunk in resp.content.iter_chunked(_CONFIG_CHUNK_BYTES):
+            if is_gzip is None and len(buf) + len(chunk) >= len(_CONFIG_GZIP_MAGIC):
+                head = bytes(buf[:2]) + chunk[: 2 - min(len(buf), 2)]
+                is_gzip = head == _CONFIG_GZIP_MAGIC
+            if is_gzip is False:
+                # Not an archive: keep only a small head for the classification.
+                buf += chunk[: max(0, _CONFIG_PEEK_BYTES - len(buf))]
+                if len(buf) >= _CONFIG_PEEK_BYTES:
+                    break
+                continue
+            if len(buf) + len(chunk) > max_bytes:
+                raise OpenWrtConfigFetchTooLargeError(
+                    f"cgi-backup: archive exceeds {max_bytes} bytes "
+                    f"(stopped at {len(buf) + len(chunk)} bytes)"
+                )
+            buf += chunk
+        if is_gzip is not True:
+            raise _config_classify_body(bytes(buf), resp.content_type or "")
+        return bytes(buf)
+
+    async def config_fetch_backup_ssh(self, *, max_bytes: int, timeout: float) -> bytes:
+        """Fetch the ``sysupgrade -b`` archive over SSH (root only).
+
+        Runs the fixed command ``/sbin/sysupgrade --create-backup -`` on the
+        shared asyncssh connection and reads stdout with a hard cap of
+        ``max_bytes`` (``_asyncssh_run`` buffers without limit, so it is not
+        used). The archive holds /etc/shadow and the host keys, which only
+        root can read, so a non-root SSH user is refused without connecting.
+
+        Network calls: 1 SSH channel (on the open connection, else 1 connect;
+        1 more connect when password auth is refused and key auth is tried).
+
+        Raises:
+            ValueError: ``max_bytes`` or ``timeout`` not positive.
+            OpenWrtConfigFetchPermissionError: SSH user is not root, or SSH
+                login refused for password and key.
+            OpenWrtConfigFetchTooLargeError: More than ``max_bytes``; the
+                remote process is killed and the channel closed.
+            OpenWrtConfigFetchIncompleteError: Exit code != 0, no exit code,
+                empty or non-gzip output.
+            OpenWrtConnectionError: SSH not reachable / API closing.
+            OpenWrtTimeoutError: ``timeout`` seconds passed (whole operation).
+        """
+        _config_check_limits(max_bytes, timeout)
+        if self._username != "root":
+            raise OpenWrtConfigFetchPermissionError(
+                "SSH backup needs the root user (archive contains root-only files)"
+            )
+        rc, out, err = await self._config_ssh_read(
+            _CONFIG_SSH_BACKUP_CMD, max_bytes=max_bytes, timeout=timeout
+        )
+        if rc != 0:
+            raise OpenWrtConfigFetchIncompleteError(
+                f"sysupgrade over SSH: exit {rc}, stdout {len(out)} bytes, "
+                f"stderr {len(err)} bytes"
+            )
+        if not out.startswith(_CONFIG_GZIP_MAGIC):
+            raise OpenWrtConfigFetchIncompleteError(
+                f"sysupgrade over SSH: no gzip archive ({len(out)} bytes)"
+            )
+        _LOGGER.debug("SSH backup on %s: %d bytes", self._host, len(out))
+        return out
+
+    async def config_uci_get(self, config: str) -> dict[str, Any]:
+        """Return one UCI config in the ubus ``uci get`` shape.
+
+        ubus ``uci get {config}`` first. When rpcd denies it (ACL, also the
+        cached ``_acl_blocked`` entry) or does not know it, SSH
+        ``uci show <config>`` parsed by ``_parse_uci_show`` (anonymous
+        sections as ``@type[n]``). ``config`` is checked against
+        ``^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$`` before any call and passed
+        through ``shlex.quote``.
+
+        Network calls: 1 ubus call (plus the re-login of ``_call`` on a first
+        ACL denial); on fallback 1 SSH channel.
+
+        Raises:
+            ValueError: Invalid config name (no call made).
+            OpenWrtConfigFetchPermissionError: ubus denied and SSH not usable
+                or denied.
+            OpenWrtConfigFetchNotAvailableError: Config does not exist.
+            OpenWrtConfigFetchIncompleteError: Reply without values, or
+                ``uci show`` failed otherwise.
+            OpenWrtConfigFetchTooLargeError: ``uci show`` output too large.
+            OpenWrtAuthError / OpenWrtConnectionError / OpenWrtTimeoutError /
+            OpenWrtResponseError: from the ubus call (no SSH attempt).
+        """
+        name = _config_check_name(config)
+        try:
+            result = await self._call(UBUS_UCI_OBJECT, UBUS_UCI_GET, {"config": name})
+        except OpenWrtMethodNotFoundError:
+            _LOGGER.debug(
+                "uci get %s on %s denied or unknown via ubus, trying SSH uci show",
+                name,
+                self._host,
+            )
+            return await self._config_uci_show_ssh(name)
+        values = result.get("values") if isinstance(result, dict) else None
+        if not isinstance(values, dict):
+            raise OpenWrtConfigFetchIncompleteError(
+                f"uci get {name}: reply without values"
+            )
+        return values
+
+    async def _config_uci_show_ssh(self, name: str) -> dict[str, Any]:
+        """Read one config with ``uci show`` over SSH (``name`` is validated)."""
+        try:
+            rc, out, err = await self._config_ssh_read(
+                f"uci show {shlex.quote(name)}",
+                max_bytes=_CONFIG_UCI_SHOW_MAX_BYTES,
+                timeout=_CONFIG_SSH_TEXT_TIMEOUT,
+            )
+        except OpenWrtConnectionError as conn_err:
+            raise OpenWrtConfigFetchPermissionError(
+                f"uci get {name}: ubus denied and SSH not usable "
+                f"({type(conn_err).__name__})"
+            ) from conn_err
+        if rc != 0:
+            raise _config_classify_exit(f"uci show {name}", rc, err)
+        return _parse_uci_show(out.decode("utf-8", errors="replace"), name)
+
+    async def config_packagelist(self) -> dict[str, str] | None:
+        """Return installed packages as ``{name: version}``, None if unknown.
+
+        ubus ``rpc-sys packagelist {"all": true}`` first (rpcd-mod-rpcsys,
+        reads the apk or opkg database); otherwise over SSH ``apk list -I``
+        (OpenWrt >= 25) or ``opkg list-installed``. Never raises for a
+        missing source: None means no package list could be read.
+
+        Network calls: 1 ubus call (plus the re-login of ``_call`` on a first
+        ACL denial); on fallback 1 SSH channel.
+
+        Raises:
+            OpenWrtAuthError / OpenWrtConnectionError / OpenWrtTimeoutError:
+                from the ubus call (router not usable, no SSH attempt).
+        """
+        try:
+            result = await self._call(
+                _CONFIG_RPC_SYS_OBJECT, _CONFIG_RPC_SYS_PACKAGELIST, {"all": True}
+            )
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError) as err:
+            _LOGGER.debug(
+                "rpc-sys packagelist on %s unavailable (%s), trying SSH",
+                self._host,
+                type(err).__name__,
+            )
+        else:
+            packages = _config_packages_from_rpc(result)
+            if packages:
+                return packages
+        return await self._config_packagelist_ssh()
+
+    async def _config_packagelist_ssh(self) -> dict[str, str] | None:
+        """Read the package list over SSH with apk or opkg, None on failure."""
+        try:
+            rc, out, _err = await self._config_ssh_read(
+                _CONFIG_PACKAGES_SCRIPT,
+                max_bytes=_CONFIG_PACKAGES_MAX_BYTES,
+                timeout=_CONFIG_SSH_TEXT_TIMEOUT,
+            )
+        except (
+            OpenWrtConfigFetchError,
+            OpenWrtConnectionError,
+            OpenWrtTimeoutError,
+        ) as err:
+            _LOGGER.debug(
+                "SSH package list on %s failed (%s)", self._host, type(err).__name__
+            )
+            return None
+        if rc != 0:
+            _LOGGER.debug("SSH package list on %s: exit %s", self._host, rc)
+            return None
+        packages = _config_parse_package_output(out.decode("utf-8", errors="replace"))
+        return packages or None
+
+    async def _config_ssh_open(self, remote_cmd: str) -> Any:
+        """Open a process for ``remote_cmd`` on the shared SSH connection.
+
+        Same auth order as ``_asyncssh_run``: password first, key auth after
+        ``PermissionDenied`` (``_ssh_use_key``). Host keys: the shared
+        transport connects with ``known_hosts=None``; TOFU pinning for this
+        path is added by enterprise-core in that transport.
+        """
+        for _attempt in range(2):
+            password = None if self._ssh_use_key else self._password
+            try:
+                conn = await self._asyncssh_get_connection(password)
+            except asyncssh.PermissionDenied:
+                if not self._ssh_use_key:
+                    _LOGGER.debug("SSH password-auth denied, switching to key-auth")
+                    self._ssh_use_key = True
+                    continue
+                break
+            return await conn.create_process(
+                remote_cmd, encoding=None, stdin=asyncssh.DEVNULL
+            )
+        raise OpenWrtConfigFetchPermissionError("SSH login denied")
+
+    async def _config_ssh_read(
+        self, remote_cmd: str, *, max_bytes: int, timeout: float
+    ) -> tuple[int | None, bytes, bytes]:
+        """Run a fixed command over SSH and read its stdout bounded.
+
+        Returns ``(exit status or None, stdout, first <= 4 KiB of stderr)``.
+        stdout is read in 64 KiB pieces; more than ``max_bytes`` kills the
+        remote process and closes the channel. stderr is drained in 4 KiB
+        pieces so the channel never stalls; only its first piece is kept
+        (for the error class, never logged). On timeout, error or
+        cancellation the process is killed and the channel closed.
+
+        Raises:
+            OpenWrtConfigFetchTooLargeError: stdout over ``max_bytes``.
+            OpenWrtConfigFetchPermissionError: SSH login refused.
+            OpenWrtConnectionError: SSH not reachable / API closing.
+            OpenWrtTimeoutError: ``timeout`` seconds passed.
+        """
+        if self._closing:
+            raise OpenWrtConnectionError("OpenWrtAPI is closing – SSH read rejected")
+        proc: Any = None
+        drain: asyncio.Task[bytes] | None = None
+        finished = False
+        timed_out = False
+        self._ssh_inflight += 1
+        try:
+            try:
+                async with asyncio.timeout(timeout):
+                    proc = await self._config_ssh_open(remote_cmd)
+                    drain = asyncio.ensure_future(_config_drain_stderr(proc.stderr))
+                    out = bytearray()
+                    while chunk := await proc.stdout.read(_CONFIG_CHUNK_BYTES):
+                        if len(out) + len(chunk) > max_bytes:
+                            raise OpenWrtConfigFetchTooLargeError(
+                                f"SSH output exceeds {max_bytes} bytes "
+                                f"(stopped at {len(out) + len(chunk)} bytes)"
+                            )
+                        out += chunk
+                    stderr_head = await drain
+                    await proc.wait_closed()
+                    finished = True
+            except TimeoutError as err:
+                # MUST precede the OSError catch — TimeoutError subclasses OSError.
+                timed_out = True
+                raise OpenWrtTimeoutError(
+                    f"SSH command timed out after {timeout}s"
+                ) from err
+            except asyncssh.PermissionDenied as err:
+                raise OpenWrtConfigFetchPermissionError("SSH login denied") from err
+            except (OSError, asyncssh.Error) as err:
+                raise OpenWrtConnectionError(
+                    f"SSH to {self._host} failed ({type(err).__name__})"
+                ) from err
+            return proc.exit_status, bytes(out), stderr_head
+        finally:
+            if drain is not None:
+                if not drain.done():
+                    drain.cancel()
+                elif not drain.cancelled():
+                    drain.exception()  # mark a failed drain as retrieved
+            if proc is not None and not finished:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.close()
+            self._ssh_inflight -= 1
+            if timed_out:
+                # Like _asyncssh_run: start the next command on a clean connection.
+                await self._asyncssh_request_release()
+            elif self._ssh_inflight == 0 and self._ssh_release_pending:
+                self._ssh_release_pending = False
+                await self._asyncssh_drop_connection()
+
+    # --- end Configuration Manager ---
+
 
 # ---------------------------------------------------------------------------
 # Realtime event stream (RT2): exceptions, object validation, SSE parser
@@ -6240,3 +6623,206 @@ def parse_sse(
     for chunk in chunks:
         out.extend(parser.feed(chunk))
     return out
+
+
+# --- Configuration Manager (config_*) ---
+# Exceptions, constants and pure helpers of the config_* methods of OpenWrtAPI.
+
+
+class OpenWrtConfigFetchError(OpenWrtResponseError):
+    """Raised when a configuration fetch (archive, UCI, packages) fails.
+
+    A subclass of OpenWrtResponseError, never OpenWrtAuthError: a missing
+    right must not end in the reauth flow. ``error_class`` is the error class
+    of the Configuration API (core_errors.ErrorClass value). Messages carry
+    only the error class, HTTP status / exit code and lengths.
+    """
+
+    error_class: str = "incomplete"
+
+
+class OpenWrtConfigFetchPermissionError(OpenWrtConfigFetchError):
+    """The router refused: ACL lacks the right, SSH user not root or denied."""
+
+    error_class = "permission"
+
+
+class OpenWrtConfigFetchNotAvailableError(OpenWrtConfigFetchError):
+    """The source does not exist (no LuCI/cgi-io, HTTP 404, unknown config)."""
+
+    error_class = "not_available"
+
+
+class OpenWrtConfigFetchTooLargeError(OpenWrtConfigFetchError):
+    """The answer exceeded ``max_bytes``; reading was stopped."""
+
+    error_class = "too_large"
+
+
+class OpenWrtConfigFetchIncompleteError(OpenWrtConfigFetchError):
+    """No usable result: wrong status, non-gzip body, exit code != 0, cut off."""
+
+    error_class = "incomplete"
+
+
+# cgi-io selects its mode by argv[0]; LuCI links /www/cgi-bin/cgi-backup to it.
+_CONFIG_CGI_BACKUP_PATH = "/cgi-bin/cgi-backup"
+# Fixed command, no user input (same call as cgi-io's main_backup).
+_CONFIG_SSH_BACKUP_CMD = "/sbin/sysupgrade --create-backup -"
+_CONFIG_GZIP_MAGIC = b"\x1f\x8b"
+_CONFIG_CHUNK_BYTES = 65536
+# Head of a non-archive answer / of stderr kept for the error class.
+_CONFIG_PEEK_BYTES = 4096
+_CONFIG_UCI_SHOW_MAX_BYTES = 4 * 1024 * 1024
+_CONFIG_PACKAGES_MAX_BYTES = 2 * 1024 * 1024
+_CONFIG_SSH_TEXT_TIMEOUT = 30.0
+_CONFIG_RPC_SYS_OBJECT = "rpc-sys"
+_CONFIG_RPC_SYS_PACKAGELIST = "packagelist"
+# UCI package name: letters, digits, "_" and "-", no leading "-" (option).
+_CONFIG_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}")
+# apk (OpenWrt >= 25) before opkg, like _UPDATE_CHECK_SCRIPT. Read-only:
+# `apk list -I` prints "<name>-<version> <arch> {<origin>} (<license>)
+# [installed]", `opkg list-installed` prints "<name> - <version>".
+_CONFIG_PACKAGES_SCRIPT = (
+    "if command -v apk >/dev/null 2>&1; then "
+    "echo '@@pm=apk'; apk list -I 2>/dev/null; "
+    "elif command -v opkg >/dev/null 2>&1; then "
+    "echo '@@pm=opkg'; opkg list-installed 2>/dev/null; "
+    "else echo '@@pm=none'; fi"
+)
+# Error codes in a JSON body: rpcd -32002, ubus 6, posix -EACCES/-EPERM, HTTP.
+_CONFIG_PERMISSION_CODES = frozenset({-32002, 6, -13, -1, 401, 403})
+# ubus METHOD_NOT_FOUND/NOT_FOUND, posix -ENOENT, HTTP 404.
+_CONFIG_NOT_FOUND_CODES = frozenset({3, 4, -2, -3, -4, 404})
+_CONFIG_DENIED_WORDS = (
+    "permission denied",
+    "access denied",
+    "forbidden",
+    "unauthorized",
+    "not authorized",
+)
+
+
+def _config_check_limits(max_bytes: Any, timeout: Any) -> None:
+    """Raise ValueError unless both limits are positive numbers."""
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive int")
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, int | float)
+        or not 0 < timeout < float("inf")
+    ):
+        raise ValueError("timeout must be a positive number")
+
+
+def _config_check_name(config: Any) -> str:
+    """Return ``config`` if it is a safe UCI config name, else ValueError."""
+    if not isinstance(config, str) or not _CONFIG_NAME_RE.fullmatch(config):
+        raise ValueError("invalid UCI config name")
+    return config
+
+
+def _config_json_code(head: bytes) -> int | None:
+    """Return the error code of a JSON error body, None if there is none."""
+    try:
+        payload = json.loads(head)
+    except ValueError:
+        return None
+    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+        payload = payload["error"]
+    code = payload.get("code") if isinstance(payload, dict) else None
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
+def _config_classify_body(head: bytes, content_type: str) -> OpenWrtConfigFetchError:
+    """Map a cgi-backup HTTP 200 answer without gzip magic to an error.
+
+    Rules: empty → incomplete. JSON with a permission code → permission,
+    with a not-found code → not_available. Any body that says denied /
+    forbidden / unauthorized → permission. Other HTML (a web page instead
+    of the CGI) or "not found" → not_available. Everything else → incomplete.
+    """
+    text = head.decode("utf-8", errors="replace").strip().lower()
+    if not text:
+        return OpenWrtConfigFetchIncompleteError(
+            f"cgi-backup: HTTP 200 with empty or truncated body ({len(head)} bytes)"
+        )
+    ctype = content_type.lower()
+    if "html" in ctype or text.startswith("<"):
+        kind = "html"
+    elif "json" in ctype or text.startswith(("{", "[")):
+        kind = "json"
+    else:
+        kind = "text"
+    what = f"cgi-backup: HTTP 200 with {kind} body instead of gzip ({len(head)} bytes)"
+    if kind == "json":
+        code = _config_json_code(head)
+        if code in _CONFIG_PERMISSION_CODES:
+            return OpenWrtConfigFetchPermissionError(f"{what}, code {code}")
+        if code in _CONFIG_NOT_FOUND_CODES:
+            return OpenWrtConfigFetchNotAvailableError(f"{what}, code {code}")
+    if any(word in text for word in _CONFIG_DENIED_WORDS):
+        return OpenWrtConfigFetchPermissionError(what)
+    if kind == "html" or "not found" in text:
+        return OpenWrtConfigFetchNotAvailableError(what)
+    return OpenWrtConfigFetchIncompleteError(what)
+
+
+def _config_classify_exit(
+    what: str, rc: int | None, stderr_head: bytes
+) -> OpenWrtConfigFetchError:
+    """Map a failed SSH text command to an error (stderr only classifies)."""
+    lowered = stderr_head.lower()
+    message = f"{what}: exit {rc}, stderr {len(stderr_head)} bytes"
+    if b"not found" in lowered:
+        return OpenWrtConfigFetchNotAvailableError(message)
+    if b"denied" in lowered:
+        return OpenWrtConfigFetchPermissionError(message)
+    return OpenWrtConfigFetchIncompleteError(message)
+
+
+async def _config_drain_stderr(reader: Any) -> bytes:
+    """Read stderr to EOF in 4 KiB pieces; keep only the first piece."""
+    head = b""
+    while chunk := await reader.read(_CONFIG_PEEK_BYTES):
+        if not head:
+            head = bytes(chunk[:_CONFIG_PEEK_BYTES])
+    return head
+
+
+def _config_packages_from_rpc(result: Any) -> dict[str, str]:
+    """Return ``{name: version}`` from an rpc-sys packagelist reply."""
+    packages = result.get("packages") if isinstance(result, dict) else None
+    if not isinstance(packages, dict):
+        return {}
+    return {
+        name: version
+        for name, version in packages.items()
+        if isinstance(name, str) and isinstance(version, str) and name and version
+    }
+
+
+def _config_parse_package_output(text: str) -> dict[str, str]:
+    """Parse the output of ``_CONFIG_PACKAGES_SCRIPT`` into ``{name: version}``."""
+    lines = text.splitlines()
+    manager = ""
+    packages: dict[str, str] = {}
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith("@@pm="):
+            manager = line.removeprefix("@@pm=")
+            continue
+        if not line:
+            continue
+        if manager == "apk":
+            parsed = _split_apk_pkgver(line.split()[0])
+            if parsed is not None:
+                packages[parsed[0]] = parsed[1]
+        elif manager == "opkg":
+            parts = [part.strip() for part in line.split(" - ", 1)]
+            if len(parts) == 2 and all(parts) and " " not in parts[0]:
+                packages[parts[0]] = parts[1]
+    return packages
+
+
+# --- end Configuration Manager ---
