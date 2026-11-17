@@ -30,6 +30,12 @@ import type {
   ConnectionType,
   ConfidenceLevel,
   WanTraffic,
+  IncidentCounts,
+  IntelSummary,
+  IntelEventsPage,
+  IntelIncidentsPage,
+  IntelIncidentDetail,
+  IntelSettingsResponse,
 } from './types';
 import { clientDisplayName, clientVendor } from './utils/clientName';
 
@@ -687,6 +693,8 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     })),
     vlansStale: (gwAttr.vlans_stale as boolean | undefined) ?? false,
     topologySnapshots: (gwAttr.topology_snapshots as TopologySnapshot[] | undefined) ?? [],
+    entryId: (gwAttr.entry_id as string | undefined) || undefined,
+    incidents: adaptIncidentCounts(gwAttr.incidents),
   };
 
   // AP nodes = all router nodes that are not the gateway
@@ -807,6 +815,8 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       portStats: ((n.attributes?.port_stats as any[] | undefined) ?? []).map(adaptPortStat),
       lldpUplink: uplink?.lldp,
       uplinkStale: uplink?.stale || undefined,
+      entryId: (n.attributes?.entry_id as string | undefined) || undefined,
+      incidents: adaptIncidentCounts(n.attributes?.incidents),
     };
   });
 
@@ -916,6 +926,25 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     clients,
     switchNodes,
     timestamp: snap.generated_at,
+    intelligence: adaptIntelligenceMeta(snap.meta?.intelligence),
+  };
+}
+
+/** `attributes.incidents` of a router node (P7); undefined = engine not running. */
+function adaptIncidentCounts(raw: unknown): IncidentCounts | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  return { critical: n(r.critical), warning: n(r.warning), info: n(r.info) };
+}
+
+/** `meta.intelligence` of the snapshot (P7). */
+function adaptIntelligenceMeta(raw: unknown): TopologyData['intelligence'] {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  return {
+    fleetScore: typeof r.fleet_score === 'number' ? r.fleet_score : null,
+    coverage: typeof r.coverage === 'number' ? r.coverage : 0,
   };
 }
 
@@ -923,7 +952,8 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
 
 /** HA hass object — only the parts we need. */
 export interface HassLike {
-  callApi<T>(method: 'GET' | 'POST', path: string): Promise<T>;
+  callApi<T>(method: 'GET' | 'POST', path: string, parameters?: Record<string, unknown>): Promise<T>;
+  user?: { is_admin?: boolean };
   // The real HA Auth object (home-assistant-js-websocket) exposes the token
   // under auth.data.access_token — there is no auth.accessToken property.
   auth?: {
@@ -1049,4 +1079,117 @@ async function fetchSnapshot(hass: HassLike, forceCallApi = false): Promise<Snap
   }
 
   return snap;
+}
+
+// ── Network intelligence API (P7) ────────────────────────────────────────
+
+/** Query values; undefined / '' entries are left out. */
+export type IntelQuery = Record<string, string | number | undefined>;
+
+function queryString(query?: IntelQuery): string {
+  if (!query) return '';
+  const parts = Object.entries(query)
+    .filter(([, v]) => v !== undefined && v !== '')
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
+  return parts.length ? `?${parts.join('&')}` : '';
+}
+
+async function intelOnce<T>(
+  hass: HassLike,
+  method: 'GET' | 'POST',
+  path: string,
+  body: unknown,
+  forceCallApi: boolean,
+): Promise<T> {
+  const token = forceCallApi ? undefined : hassAccessToken(hass);
+  try {
+    if (token) {
+      const response = await window.fetch(`/api/openwrt_topology/intelligence/${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      if (!response.ok) {
+        let detail: string | undefined;
+        try {
+          const parsed = await response.json();
+          const errors = (parsed as { errors?: unknown }).errors;
+          detail = Array.isArray(errors) && errors.length
+            ? errors.map(String).join('; ')
+            : errorDetail(parsed);
+        } catch {
+          detail = undefined;
+        }
+        throw new TopologyFetchError(
+          detail ? `HTTP ${response.status}: ${detail}` : `HTTP ${response.status}`,
+          response.status,
+        );
+      }
+      return (await response.json()) as T;
+    }
+    return await hass.callApi<T>(
+      method,
+      `openwrt_topology/intelligence/${path}`,
+      body as Record<string, unknown> | undefined,
+    );
+  } catch (err) {
+    throw toFetchError(err);
+  }
+}
+
+/** One request to the intelligence API; a 401 is retried once with a refreshed token. */
+async function intelRequest<T>(
+  getHass: () => HassLike | null,
+  method: 'GET' | 'POST',
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  const hass = getHass();
+  if (!hass) throw new TopologyFetchError('Home Assistant not connected', null);
+  if (hass.auth?.expired) await refreshToken(hass);
+  try {
+    return await intelOnce<T>(hass, method, path, body, false);
+  } catch (err) {
+    if (!(err instanceof TopologyFetchError) || err.status !== 401) throw err;
+  }
+  const refreshed = await refreshToken(hass);
+  return intelOnce<T>(hass, method, path, body, !refreshed);
+}
+
+/** Client of /api/openwrt_topology/intelligence/* (reads engine memory only). */
+export interface IntelApi {
+  /** True when the HA user is an administrator (write actions are shown). */
+  isAdmin(): boolean;
+  summary(): Promise<IntelSummary>;
+  events(query?: IntelQuery): Promise<IntelEventsPage>;
+  incidents(query?: IntelQuery): Promise<IntelIncidentsPage>;
+  incident(id: string): Promise<IntelIncidentDetail>;
+  setIncidentStatus(
+    id: string,
+    status: 'acknowledged' | 'ignored' | 'active',
+    ignoreDays?: number,
+  ): Promise<IntelIncidentDetail>;
+  settings(): Promise<IntelSettingsResponse>;
+  saveSettings(patch: Record<string, unknown>): Promise<IntelSettingsResponse>;
+}
+
+/** Build the client; `getHass` is read on every call (HA swaps the object). */
+export function createIntelApi(getHass: () => HassLike | null): IntelApi {
+  return {
+    isAdmin: () => getHass()?.user?.is_admin === true,
+    summary: () => intelRequest(getHass, 'GET', 'summary'),
+    events: (query) => intelRequest(getHass, 'GET', `events${queryString(query)}`),
+    incidents: (query) => intelRequest(getHass, 'GET', `incidents${queryString(query)}`),
+    incident: (id) => intelRequest(getHass, 'GET', `incidents/${encodeURIComponent(id)}`),
+    setIncidentStatus: (id, status, ignoreDays) =>
+      intelRequest(getHass, 'POST', `incidents/${encodeURIComponent(id)}`, {
+        status,
+        ...(ignoreDays !== undefined ? { ignore_days: ignoreDays } : {}),
+      }),
+    settings: () => intelRequest(getHass, 'GET', 'settings'),
+    saveSettings: (patch) => intelRequest(getHass, 'POST', 'settings', patch),
+  };
 }

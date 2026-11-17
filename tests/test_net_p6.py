@@ -161,10 +161,12 @@ async def test_root_fires_once_after_the_settle_time(intel: NetIntelligence) -> 
         "confidence": 1.0,
         "cause": None,
         "cause_status": None,
+        "cause_level": "unknown",  # RT6, additive
         "scope": "router",
         "routers": ["Router gw"],
         "entry_ids": [G],
         "device_id": None,  # no device registry in this test
+        "reason": None,
     }
     step(intel, T0 + 400, wan(0.0))
     assert states(intel) == [
@@ -251,7 +253,9 @@ async def test_ignored_incident_stays_silent(intel: NetIntelligence) -> None:
     step(intel, T0 + 300, wan(0.0))
     step(intel, T0 + 400, wan())
     step(intel, T0 + 400 + SETTLE * 2, wan())
-    assert [s for s, _t, _i in states(intel)] == ["opened"]
+    # the ignore closes it on the bus once (P7 review E15), then silence
+    assert [s for s, _t, _i in states(intel)] == ["opened", "resolved"]
+    assert [e["reason"] for e in fired(intel)] == [None, "ignored"]
 
 
 async def test_child_never_fires_and_a_root_waits_for_its_parent(
@@ -548,7 +552,7 @@ def full(router: str) -> SimpleNamespace:
     """Coordinator data with every indicator read (gateway G has a WAN)."""
     return SimpleNamespace(
         ap_interfaces=[{"ifname": "phy1-ap0", "ssid": "Test-Net-xyz", "phy": "phy1"}],
-        clients=[],
+        clients=[{"mac": "AA:BB:CC:00:00:01"}],
         log_status="ok",
         uptime=1000,
         cpu_load=5.0,

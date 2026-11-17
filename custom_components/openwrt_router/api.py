@@ -14,7 +14,7 @@ import shlex
 import ssl
 import struct
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from typing import Any
 
 import aiohttp
@@ -91,6 +91,10 @@ from .const import (
     SOURCE_HOSTAPD,
     SOURCE_IWINFO,
     SSH_SLOW_REFRESH_INTERVAL,
+    STREAM_CONNECT_TIMEOUT,
+    STREAM_EVENT_MAX_BYTES,
+    STREAM_FORBIDDEN_OBJECTS,
+    STREAM_IDLE_TIMEOUT,
     UBUS_DEVICE_OBJECT,
     UBUS_DEVICE_STATUS,
     UBUS_FILE_OBJECT,
@@ -5843,3 +5847,396 @@ class OpenWrtAPI:
             )
 
         return services
+
+    # ------------------------------------------------------------------
+    # Realtime event stream (RT2): ubus SSE subscribe
+    # ------------------------------------------------------------------
+
+    async def async_subscribe(
+        self,
+        obj: str,
+        *,
+        on_open: Callable[[], None] | None = None,
+        stats: SseStats | None = None,
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """Subscribe to the push events of one ubus object via HTTP SSE.
+
+        Opens ``GET <ubus url>/subscribe/<obj>`` on the shared session with
+        the same TLS context and the current session token as bearer, and
+        yields ``(event, data)`` for every complete event until the server
+        closes the stream (object removed, hostapd reload, router reboot).
+        The response is always closed, also when the consumer stops early or
+        the task is cancelled, so uhttpd frees its subscriber. Consumers that
+        may stop iterating early should wrap the generator in
+        ``contextlib.aclosing``.
+
+        Args:
+            obj: ubus object name, e.g. ``hostapd`` or ``hostapd.phy0-ap0``.
+            on_open: Called once the server accepted the subscription (HTTP
+                200 ``text/event-stream``), before the first event.
+            stats: Parser counters (events, oversize, bad JSON, retry hint)
+                updated while the stream runs.
+
+        Raises:
+            ValueError: Invalid object name or a forbidden object.
+            OpenWrtStreamPermissionError: The session lacks the
+                ``:subscribe`` right (``-13``), also after one re-login.
+            OpenWrtStreamNotFoundError: HTTP 404 or ubus "not found".
+            OpenWrtStreamError: Any other unexpected answer.
+            OpenWrtAuthError: The login needed for a fresh token failed.
+            OpenWrtConnectionError: Router unreachable or connection lost.
+            OpenWrtTimeoutError: Connect timeout, or no data for
+                ``STREAM_IDLE_TIMEOUT`` seconds.
+        """
+        validate_stream_object(obj)
+        if self._closing:
+            raise OpenWrtConnectionError("OpenWrtAPI is closing – subscribe rejected")
+        await self._stream_ensure_token()
+
+        url = f"{self._ubus_url}/subscribe/{obj}"
+        # RT2 decision: no total timeout (the stream lives for hours); the
+        # read budget doubles as idle detection, see STREAM_IDLE_TIMEOUT.
+        timeout = aiohttp.ClientTimeout(
+            total=None,
+            sock_connect=STREAM_CONNECT_TIMEOUT,
+            sock_read=STREAM_IDLE_TIMEOUT,
+        )
+        relogged = False
+        while True:
+            token = self._token
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "text/event-stream",
+            }
+            error: Exception | None = None
+            try:
+                async with self._session.get(
+                    url, headers=headers, timeout=timeout, ssl=self._ssl_context
+                ) as resp:
+                    try:
+                        error = await self._stream_open_error(resp, obj)
+                        if error is None:
+                            _LOGGER.debug("ubus stream %s opened", obj)
+                            if on_open is not None:
+                                on_open()
+                            parser = SseParser(stats=stats)
+                            async for chunk in resp.content.iter_any():
+                                for item in parser.feed(chunk):
+                                    yield item
+                            _LOGGER.debug("ubus stream %s closed by router", obj)
+                            return
+                    finally:
+                        # Close (not release): the stream never reaches EOF on
+                        # our side, so the connection must not go back to the
+                        # pool and uhttpd must see the subscriber leave.
+                        resp.close()
+            except aiohttp.ClientConnectorError as err:
+                raise OpenWrtConnectionError(
+                    f"Cannot connect to {self._ubus_url} for stream {obj}: {err}"
+                ) from err
+            except TimeoutError as err:
+                raise OpenWrtTimeoutError(
+                    f"ubus stream {obj} timed out (connect {STREAM_CONNECT_TIMEOUT}s, "
+                    f"idle {STREAM_IDLE_TIMEOUT}s)"
+                ) from err
+            except aiohttp.ClientError as err:
+                raise OpenWrtConnectionError(
+                    f"ubus stream {obj} connection error: {err}"
+                ) from err
+
+            # RT2 decision: -13 also comes back for a session rpcd no longer
+            # knows (router reboot, rpcd restart) while our expiry clock still
+            # says "fresh". Re-login once, like _call does for -32002; only a
+            # second -13 is the missing ACL right.
+            if isinstance(error, OpenWrtStreamPermissionError) and not relogged:
+                relogged = True
+                await self._stream_relogin(token)
+                continue
+            raise error
+
+    def _stream_lock(self) -> asyncio.Lock:
+        """Return the lock that serialises stream logins (created lazily).
+
+        RT2 decision: lazily created instead of in ``__init__`` so existing
+        code stays untouched. Up to nine streams per router (re)connect at the
+        same time; without the lock each would log in and churn rpcd sessions.
+        """
+        lock: asyncio.Lock | None = getattr(self, "_stream_login_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._stream_login_lock = lock
+        return lock
+
+    async def _stream_ensure_token(self) -> None:
+        """Make sure a usable session token exists before subscribing.
+
+        Same auth backoff gate and failure counting as ``_call``; the login
+        itself is the existing ``_ensure_fresh_token``/``login``.
+        """
+        if self._auth_failure_count >= _MAX_AUTH_FAILURES:
+            if time.monotonic() < self._auth_backoff_until:
+                raise OpenWrtAuthBackoffError(
+                    "Authentication blocked after repeated failures — "
+                    "check credentials (backoff active)"
+                )
+            self._auth_failure_count = 0
+        async with self._stream_lock():
+            try:
+                await self._ensure_fresh_token()
+            except OpenWrtAuthError:
+                self._note_login_failure()
+                raise
+
+    async def _stream_relogin(self, used_token: str) -> None:
+        """Log in again unless another caller already replaced ``used_token``."""
+        async with self._stream_lock():
+            if self._token != used_token:
+                return
+            try:
+                await self.login()
+            except OpenWrtAuthError:
+                self._note_login_failure()
+                raise
+
+    async def _stream_open_error(
+        self, resp: aiohttp.ClientResponse, obj: str
+    ) -> Exception | None:
+        """Return the error for a failed subscribe answer, None for a stream."""
+        if resp.status == 404:
+            return OpenWrtStreamNotFoundError(f"ubus stream {obj}: HTTP 404")
+        if resp.status == 403:
+            return OpenWrtStreamPermissionError(f"ubus stream {obj}: HTTP 403")
+        if resp.status != 200:
+            return OpenWrtStreamError(f"ubus stream {obj}: HTTP {resp.status}")
+        content_type = (resp.content_type or "").lower()
+        if content_type == "text/event-stream":
+            return None
+        # Errors arrive as HTTP 200 with a small JSON body, e.g.
+        # {"code":-13,"message":"Permission denied"}. Read it bounded in size
+        # and time: a non-SSE body must not hang or fill memory.
+        body = bytearray()
+        async with asyncio.timeout(STREAM_CONNECT_TIMEOUT):
+            async for chunk in resp.content.iter_any():
+                body += chunk
+                if len(body) > STREAM_EVENT_MAX_BYTES:
+                    break
+        try:
+            payload = json.loads(bytes(body[:STREAM_EVENT_MAX_BYTES]))
+        except ValueError:
+            return OpenWrtStreamError(
+                f"ubus stream {obj}: unexpected content type {content_type!r}"
+            )
+        return stream_error_from_payload(payload, obj)
+
+
+# ---------------------------------------------------------------------------
+# Realtime event stream (RT2): exceptions, object validation, SSE parser
+# ---------------------------------------------------------------------------
+
+
+class OpenWrtStreamError(OpenWrtResponseError):
+    """Raised when a ubus SSE subscribe gets an unexpected answer.
+
+    A subclass of OpenWrtResponseError (never OpenWrtAuthError): a stream
+    problem must not end in the reauth flow.
+    """
+
+
+class OpenWrtStreamPermissionError(OpenWrtStreamError):
+    """Raised when the session lacks the ``:subscribe`` ACL right (-13)."""
+
+
+class OpenWrtStreamNotFoundError(OpenWrtStreamError):
+    """Raised for HTTP 404 or a ubus "not found" answer to a subscribe."""
+
+
+_STREAM_OBJECT_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+# uhttpd answers posix errors as {"code": -errno}: EACCES=13, EPERM=1. 6 is
+# UBUS_STATUS_PERMISSION_DENIED, -32002 rpcd's JSON-RPC "access denied".
+_STREAM_PERMISSION_CODES = frozenset({-13, -1, 6, -32002})
+# ENOENT=2 as posix error; ubus METHOD_NOT_FOUND=3, NOT_FOUND=4 (either sign).
+_STREAM_NOT_FOUND_CODES = frozenset({-2, 3, -3, 4, -4})
+
+
+def validate_stream_object(obj: str) -> str:
+    """Return ``obj`` if it may be subscribed, raise ValueError otherwise.
+
+    Only ``[A-Za-z0-9._-]`` (it becomes a URL path segment), no ``.``/``..``
+    and never ``hostapd-auth``: hostapd waits up to 1 s for an answer from
+    every subscriber there, so subscribing delays every client login.
+    """
+    if not isinstance(obj, str) or not _STREAM_OBJECT_RE.fullmatch(obj):
+        raise ValueError(f"invalid ubus object name for subscribe: {obj!r}")
+    if obj in (".", ".."):
+        raise ValueError(f"invalid ubus object name for subscribe: {obj!r}")
+    if obj in STREAM_FORBIDDEN_OBJECTS:
+        raise ValueError(
+            f"subscribing to {obj!r} is not allowed (delays every client login)"
+        )
+    return obj
+
+
+def stream_error_from_payload(payload: Any, obj: str) -> OpenWrtStreamError:
+    """Map a JSON error body of a subscribe request to a stream exception.
+
+    Accepts the uhttpd form ``{"code": -13, "message": "..."}`` and a
+    JSON-RPC envelope ``{"error": {"code": ..., "message": ...}}``.
+    """
+    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+        payload = payload["error"]
+    code: Any = None
+    message = ""
+    if isinstance(payload, dict):
+        code = payload.get("code")
+        message = str(payload.get("message") or "")[:100]
+    if code in _STREAM_PERMISSION_CODES:
+        return OpenWrtStreamPermissionError(
+            f"ubus stream {obj}: permission denied (code {code}) – the session "
+            f"needs the ':subscribe' ACL right"
+        )
+    if code in _STREAM_NOT_FOUND_CODES or "not found" in message.lower():
+        return OpenWrtStreamNotFoundError(
+            f"ubus stream {obj}: object not found (code {code})"
+        )
+    return OpenWrtStreamError(f"ubus stream {obj}: error code {code}: {message}")
+
+
+class SseStats:
+    """Counters of an SSE parser; one instance may span several connections."""
+
+    __slots__ = ("bad_json", "events", "oversize", "retry_ms")
+
+    def __init__(self) -> None:
+        """Start all counters at zero."""
+        self.events: int = 0
+        self.oversize: int = 0
+        self.bad_json: int = 0
+        # Last "retry:" hint of the server in ms (informational only).
+        self.retry_ms: int | None = None
+
+
+class SseParser:
+    """Incremental parser for ``text/event-stream`` (bytes in, events out).
+
+    Chunks may be split anywhere, also inside a line or a UTF-8 sequence.
+    Handles LF and CRLF line ends, ``event:``, multiple ``data:`` lines
+    (joined by ``\\n``), ``retry:``, ``id:`` (ignored) and comment lines
+    starting with ``:``. Every event's data must be a JSON object; anything
+    else is dropped and counted in ``stats.bad_json``. An event whose data
+    exceeds ``max_event_bytes`` is dropped and counted in ``stats.oversize``;
+    memory stays bounded by roughly twice that limit.
+    """
+
+    def __init__(
+        self,
+        max_event_bytes: int = STREAM_EVENT_MAX_BYTES,
+        stats: SseStats | None = None,
+    ) -> None:
+        """Create a parser with an empty buffer."""
+        self._max = max_event_bytes
+        self.stats = stats if stats is not None else SseStats()
+        self._buf = bytearray()  # incomplete line
+        self._skip_line = False  # discarding the rest of an over-long line
+        self._event = ""
+        self._data: list[bytes] = []
+        self._size = 0
+        self._oversize = False
+
+    def feed(self, chunk: bytes | str) -> list[tuple[str, dict[str, Any]]]:
+        """Consume a chunk and return the events it completed."""
+        if isinstance(chunk, str):
+            chunk = chunk.encode()
+        out: list[tuple[str, dict[str, Any]]] = []
+        start = 0
+        while True:
+            newline = chunk.find(b"\n", start)
+            if newline < 0:
+                if not self._skip_line:
+                    self._buf += chunk[start:]
+                    if len(self._buf) > self._max:
+                        self._buf.clear()
+                        self._skip_line = True
+                        self._oversize = True
+                break
+            piece = chunk[start:newline]
+            start = newline + 1
+            if self._skip_line:
+                self._skip_line = False
+                continue
+            if self._buf:
+                self._buf += piece
+                line = bytes(self._buf)
+                self._buf.clear()
+            else:
+                line = bytes(piece)
+            if line.endswith(b"\r"):
+                line = line[:-1]
+            self._line(line, out)
+        return out
+
+    def _line(self, line: bytes, out: list[tuple[str, dict[str, Any]]]) -> None:
+        """Handle one complete line (without its line end)."""
+        if not line:
+            self._dispatch(out)
+            return
+        if line.startswith(b":"):
+            return
+        if len(line) > self._max:
+            self._oversize = True
+            return
+        field, sep, value = line.partition(b":")
+        if sep and value.startswith(b" "):
+            value = value[1:]
+        if field == b"data":
+            if self._oversize:
+                return
+            self._size += len(value) + 1
+            if self._size > self._max:
+                self._oversize = True
+                self._data.clear()
+                return
+            self._data.append(value)
+        elif field == b"event":
+            self._event = value.decode("utf-8", "replace")
+        elif field == b"retry":
+            if value.isdigit():
+                self.stats.retry_ms = int(value)
+        # "id" and unknown fields are ignored (SSE spec).
+
+    def _dispatch(self, out: list[tuple[str, dict[str, Any]]]) -> None:
+        """Finish the current event at a blank line."""
+        event = self._event or "message"
+        data = self._data
+        oversize = self._oversize
+        self._event = ""
+        self._data = []
+        self._size = 0
+        self._oversize = False
+        if oversize:
+            self.stats.oversize += 1
+            return
+        if not data:
+            return  # no data lines: nothing to dispatch (SSE spec)
+        try:
+            payload = json.loads(b"\n".join(data).decode("utf-8"))
+        except ValueError:  # UnicodeDecodeError and JSONDecodeError
+            self.stats.bad_json += 1
+            return
+        if not isinstance(payload, dict):
+            self.stats.bad_json += 1
+            return
+        self.stats.events += 1
+        out.append((event, payload))
+
+
+def parse_sse(
+    chunks: Iterable[bytes | str],
+    max_event_bytes: int = STREAM_EVENT_MAX_BYTES,
+    stats: SseStats | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Parse a whole SSE body given as chunks (pure helper for tests/tools)."""
+    parser = SseParser(max_event_bytes, stats)
+    out: list[tuple[str, dict[str, Any]]] = []
+    for chunk in chunks:
+        out.extend(parser.feed(chunk))
+    return out

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import time
 from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any
@@ -1530,6 +1531,32 @@ def _mark_snapshot_stale(snapshot: dict[str, Any]) -> None:
             node.setdefault("attributes", {})["stale"] = True
 
 
+def _intelligence(
+    hass: HomeAssistant,
+) -> tuple[dict[str, dict[str, int]], dict[str, Any] | None]:
+    """Warning symbols per entry and the fleet score for the snapshot (P7).
+
+    Reads the engine's memory only. ``({}, None)`` while it is not running
+    or not loaded; an error there never breaks the topology.
+    """
+    try:
+        from .net_engine import async_get_engine
+        from .net_query import engine_now, router_badges
+
+        engine = async_get_engine(hass)
+        if engine is None or not engine.loaded:
+            return {}, None
+        fleet = engine.view.fleet
+        now = engine_now(engine, time.time())
+        return router_badges(engine.machine.peek(), now), {
+            "fleet_score": fleet.score,
+            "coverage": fleet.coverage,
+        }
+    except Exception:
+        _LOGGER.debug("Intelligence badges unavailable", exc_info=True)
+        return {}, None
+
+
 def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     """Build a unified mesh topology from all loaded openwrt_router entries.
 
@@ -1593,6 +1620,7 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     roles = _resolve_router_roles(fleet, _GATEWAY_MEMORY)
     _remember_gateways(fleet, now)
     offline_rids: set[str] = set()
+    badges, intelligence = _intelligence(hass)
 
     for entry, coordinator, data, host_ip, router_id in loaded:
         role = roles[router_id]
@@ -1615,9 +1643,15 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         # Inject online/offline status into the router node attributes
         for node in snapshot.get("nodes", []):
             if node.get("type") == "router":
-                node.setdefault("attributes", {})["node_status"] = (
-                    "online" if is_online else "offline"
-                )
+                attrs = node.setdefault("attributes", {})
+                attrs["node_status"] = "online" if is_online else "offline"
+                if intelligence is not None:
+                    # P7: warning symbols (open root incidents by severity)
+                    # and the key of the router in the intelligence API
+                    attrs["entry_id"] = entry.entry_id
+                    attrs["incidents"] = badges.get(
+                        entry.entry_id, {"critical": 0, "warning": 0, "info": 0}
+                    )
 
         # A router whose last update failed still serves its previous data.
         # Its clients and edges are marked stale so they lose the client
@@ -1819,23 +1853,26 @@ def build_mesh_snapshot(hass: HomeAssistant) -> dict[str, Any]:
         for x in [*deduped_nodes, *deduped_edges, *all_interfaces, *deduped_clients]
     )
 
+    meta: dict[str, Any] = {
+        "source": MESH_SOURCE,
+        "schema_version": "1.0",
+        "inference_used": inference_used,
+        "node_count": len(deduped_nodes),
+        "edge_count": len(deduped_edges),
+        "interface_count": iface_count,
+        "client_count": client_count,
+        "router_count": router_count,
+        "mesh": True,
+    }
+    if intelligence is not None:
+        meta["intelligence"] = intelligence
     return {
         "generated_at": now,
         "nodes": deduped_nodes,
         "edges": deduped_edges,
         "interfaces": all_interfaces,
         "clients": deduped_clients,
-        "meta": {
-            "source": MESH_SOURCE,
-            "schema_version": "1.0",
-            "inference_used": inference_used,
-            "node_count": len(deduped_nodes),
-            "edge_count": len(deduped_edges),
-            "interface_count": iface_count,
-            "client_count": client_count,
-            "router_count": router_count,
-            "mesh": True,
-        },
+        "meta": meta,
     }
 
 

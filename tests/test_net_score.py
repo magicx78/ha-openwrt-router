@@ -63,7 +63,7 @@ def full_data(**overrides: Any) -> SimpleNamespace:
     """Coordinator data of a gateway with everything read."""
     values: dict[str, Any] = {
         "ap_interfaces": [{"ifname": "phy0-ap0"}],
-        "clients": [],
+        "clients": [{"mac": "02:00:00:00:00:01"}],
         "log_status": "ok",
         "uptime": 1000,
         "cpu_load": 5.0,

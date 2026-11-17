@@ -94,6 +94,10 @@ export interface Gateway {
   vlans?: VlanInfo[];
   vlansStale?: boolean;  // true = VLAN-Daten aus Cache (Router war kurzzeitig offline)
   topologySnapshots?: TopologySnapshot[];
+  /** Config entry id: key of this router in the intelligence API (P7). */
+  entryId?: string;
+  /** Open root incidents by severity (warning symbol on the node, P7). */
+  incidents?: IncidentCounts;
 }
 
 /** WAN throughput averaged between two coordinator polls. */
@@ -188,6 +192,10 @@ export interface AccessPoint {
   lldpUplink?: LldpUplink;
   /** True when the uplink edge is built from old data (one end router offline). */
   uplinkStale?: boolean;
+  /** Config entry id: key of this router in the intelligence API (P7). */
+  entryId?: string;
+  /** Open root incidents by severity (warning symbol on the node, P7). */
+  incidents?: IncidentCounts;
 }
 
 export interface Client {
@@ -243,6 +251,8 @@ export interface TopologyData {
   // true = the snapshot listed no router at all; `gateway` is then only a
   // placeholder and must not raise "WAN offline" style alerts.
   noRouters?: boolean;
+  /** Fleet health score from the network intelligence (P7); absent = engine not running. */
+  intelligence?: { fleetScore: number | null; coverage: number };
 }
 
 // ── Layout types ──────────────────────────────────────────────────────────
@@ -294,4 +304,163 @@ export interface HoverContext {
   highlightedEdges: Set<string>;
   /** Node ids that should be dimmed when another node is hovered. */
   dimmedNodes: Set<string>;
+}
+
+// ── Network intelligence (P7, /api/openwrt_topology/intelligence/*) ───────
+
+export type Severity = 'info' | 'warning' | 'critical';
+export type IncidentStatus = 'active' | 'acknowledged' | 'ignored' | 'resolved';
+/** Graded by the engine (net_rules.cause_level, RT6): status, confidence, source families. */
+export type CauseLevel = 'confirmed' | 'likely' | 'possible' | 'unknown';
+
+export interface IncidentCounts {
+  critical: number;
+  warning: number;
+  info: number;
+}
+
+export interface IntelEvent {
+  id: string;
+  ts: number;
+  router: string;
+  router_name: string;
+  category: string;
+  kind: string;
+  origin: 'observed' | 'inferred';
+  source: string;
+  subject: Record<string, unknown>;
+  signal: number | null;
+  count: number;
+  severity: Severity;
+  cause: string | null;
+  cause_status: 'confirmed' | 'hypothesis' | null;
+  confidence: number;
+  msg_key: string;
+  params: Record<string, unknown>;
+  maintenance: boolean;
+  src_ts: number | null;
+  clock_skew: boolean;
+  parent_id: string | null;
+  role?: 'evidence' | 'follow_up';
+}
+
+export interface IntelIncident {
+  id: string;
+  type: string;
+  scope: string;
+  scope_key: string;
+  status: IncidentStatus;
+  severity: Severity;
+  confidence: number;
+  origin: 'observed' | 'inferred';
+  cause: string | null;
+  cause_status: 'confirmed' | 'hypothesis' | null;
+  cause_level: CauseLevel;
+  /** rec_<cause> for a cause with a recommendation (RT7), else null. */
+  recommendation_key?: string | null;
+  area: string | null;
+  parent_id: string | null;
+  children: number;
+  child: boolean;
+  routers: string[];
+  router_names: string[];
+  affected: number;
+  first_seen: number;
+  last_seen: number;
+  resolved_at: number | null;
+  reopened_at: number | null;
+  reopen_count: number;
+  occurrences: number;
+  ignore_until: number | null;
+  duration_s: number;
+  evidence_count: number;
+  evidence?: Array<{ ts: number; id: string | null; kind: string; event: IntelEvent | null }>;
+}
+
+export interface IntelIncidentDetail {
+  incident: IntelIncident;
+  parent: IntelIncident | null;
+  children: IntelIncident[];
+  chain: IntelEvent[];
+}
+
+export interface IntelRouterSummary {
+  id: string;
+  name: string;
+  score: number | null;
+  coverage: number;
+  areas: Record<string, { score: number | null; coverage: number }>;
+  offline: boolean;
+  maintenance: boolean;
+  incidents_active: number;
+  critical: boolean;
+  reconnects_1h: number;
+  auth_errors_1h: number;
+  wan_reconnects_24h: number;
+  incidents: IncidentCounts;
+  /** Last log read (RT9): the log is the event source, read on every poll. */
+  log?: IntelLogState;
+}
+
+export interface IntelLogState {
+  /** ok | error | not_permitted | pending, null before the first poll */
+  status: string | null;
+  read_at: number | null;
+  age_s: number | null;
+}
+
+export interface IntelSummary {
+  generated_at: number;
+  loaded: boolean;
+  load_failed: boolean;
+  fleet: {
+    score: number | null;
+    coverage: number;
+    routers: number;
+    maintenance: number;
+    maintenance_until: number | null;
+    incidents_active: number;
+    critical: boolean;
+  };
+  routers: IntelRouterSummary[];
+  incidents: IncidentCounts;
+  incidents_open_total: number;
+  incidents_ignored: number;
+  events_24h: Record<string, number>;
+  events_24h_by_severity: IncidentCounts;
+  events_stored: number;
+  wifi: {
+    top_clients: Array<{
+      mac: string;
+      router: string;
+      router_name: string;
+      events: number;
+      reconnects: number;
+      auth_errors: number;
+      last_ts: number;
+    }>;
+  };
+}
+
+export interface IntelEventsPage {
+  events: IntelEvent[];
+  next_before: string | null;
+  limit: number;
+}
+
+export interface IntelIncidentsPage {
+  incidents: IntelIncident[];
+  total: number;
+  limit: number;
+}
+
+/** Settings tree as stored by the engine (net_rules.DEFAULT_SETTINGS). */
+export type IntelSettingsTree = { [key: string]: unknown };
+
+export interface IntelSettingsResponse {
+  settings: IntelSettingsTree;
+  defaults: IntelSettingsTree;
+  can_edit: boolean;
+  routers: Array<{ id: string; name: string; maintenance: boolean }>;
+  limits: { list_max: number; string_max: number };
 }

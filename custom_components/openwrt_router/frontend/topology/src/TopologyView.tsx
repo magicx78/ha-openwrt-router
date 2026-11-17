@@ -35,6 +35,8 @@ import { Minimap, MinimapNode } from './components/Minimap';
 import { ContextMenu, ContextMenuEntry } from './components/ContextMenu';
 import { APClientList } from './components/APClientList';
 import { GlobalFooter } from './components/GlobalFooter';
+import { DiagnoseView } from './components/DiagnoseView';
+import type { IntelApi } from './api';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -61,16 +63,24 @@ function groupAPs(aps: AccessPoint[], by: GroupBy): Array<{ label: string; items
 
 interface Props {
   data: TopologyData;
+  /** Network intelligence API (P7); absent in the standalone dev mode. */
+  intel?: IntelApi;
 }
 
 const MIN_ZOOM  = 0.25;
 const MAX_ZOOM  = 3.0;
 const ZOOM_STEP = 0.12;
 
-export function TopologyView({ data }: Props) {
+export function TopologyView({ data, intel }: Props) {
   // ── Sidebar + active tab ─────────────────────────────────────────────────
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<SidebarTab>('topology');
+  // Diagnose tab (P7): router preselected from a node's warning symbol.
+  const [diagnoseRouter, setDiagnoseRouter] = useState<string | null>(null);
+  const openDiagnose = useCallback((entryId?: string) => {
+    setDiagnoseRouter(entryId ?? null);
+    setActiveTab('diagnose');
+  }, []);
 
   // ── Edge hover tooltip ────────────────────────────────────────────────────
   const [hoveredEdge, setHoveredEdge] = useState<{ edgeId: string; x: number; y: number } | null>(null);
@@ -408,6 +418,11 @@ export function TopologyView({ data }: Props) {
   const onlineNodes = [data.gateway, ...data.accessPoints].filter(n => n.status === 'online').length;
   const alerts      = useAlerts(data);
   const warningCount = alerts.length;
+  // Open critical + warning root incidents of all routers (snapshot badges, P7).
+  const diagnoseCount = [data.gateway, ...data.accessPoints].reduce(
+    (n, r) => n + (r.incidents ? r.incidents.critical + r.incidents.warning : 0),
+    0,
+  );
 
   // Highlight a client in the topology graph (called from TrafficView Top Talker)
   const highlightClient = useCallback((clientId: string) => {
@@ -470,6 +485,8 @@ export function TopologyView({ data }: Props) {
         open={sidebarOpen}
         activeTab={activeTab}
         warningCount={warningCount}
+        diagnoseCount={diagnoseCount}
+        showDiagnose={intel !== undefined}
         onToggle={() => setSidebarOpen(o => !o)}
         onTabChange={setActiveTab}
       />
@@ -528,6 +545,15 @@ export function TopologyView({ data }: Props) {
             onSelectGateway={selectGateway}
             onSelectAP={ap => setSelectedEntity({ type: 'ap', data: ap, clients: data.clients.filter(c => c.apId === ap.id) })}
             onSelectClient={selectClient}
+          />
+        )}
+        {activeTab === 'diagnose' && (
+          <DiagnoseView
+            api={intel}
+            refreshKey={data.timestamp}
+            routerFilter={diagnoseRouter}
+            onRouterFilterChange={setDiagnoseRouter}
+            onBack={() => setActiveTab('topology')}
           />
         )}
         {activeTab === 'settings' && <SettingsView />}
@@ -590,6 +616,7 @@ export function TopologyView({ data }: Props) {
                       vlanMode={vlanMode}
                       healthMode={healthMode}
                       onSelectPort={selectGatewayPort}
+                      onOpenDiagnose={intel ? () => openDiagnose(data.gateway.entryId) : undefined}
                     />
                   </div>
                   {clientsForAP(data.gateway.id).length > 0 && (
@@ -647,6 +674,7 @@ export function TopologyView({ data }: Props) {
                           vlanMode={vlanMode}
                           healthMode={healthMode}
                           onSelectPort={selectAPPort(ap)}
+                          onOpenDiagnose={intel ? () => openDiagnose(ap.entryId) : undefined}
                         />
                       </div>
                       {expandedApId === ap.id ? (

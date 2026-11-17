@@ -38,6 +38,7 @@ The panel and its snapshot API contain DHCP leases, ARP/switch tables, the WAN I
 | **Devices** | Gateway + APs as list rows — status, uplink type, backhaul signal, client count |
 | **Clients** | All WiFi clients with search (name / IP / MAC / vendor), band filter, status filter |
 | **Alarms** | Only offline or warning devices and clients, grouped |
+| **Diagnose** | Network Intelligence: overview, incidents, timeline, Wi-Fi, infrastructure, settings — see [Network Intelligence](#network-intelligence) |
 | **Settings** | HA links, polling interval, GitHub link, about |
 
 ### Topology interactions
@@ -157,6 +158,166 @@ The Inspector panel shows a per-device event timeline — status changes recorde
 - Nodes animate in/out when filters change (layout transition)
 - Status-change flash on online ↔ offline ↔ warning transitions
 - Programmatic zoom uses smooth cubic-bezier transition
+
+---
+
+## Network Intelligence
+
+Network Intelligence turns the data the integration already polls into **events**,
+**incidents with a root cause** and a **health score** per router and for the fleet. It adds
+no router calls (no extra ubus requests, no SSH commands, no ACL change). Full details:
+[docs/network-intelligence.md](docs/network-intelligence.md).
+
+### What it detects
+
+- **Wi-Fi** (from the router log and the client lists): reconnect storms, failed
+  authentications per client and as a fleet-wide wave, mass disconnects of one AP, clients
+  without IP address, DHCP failures after connecting, band and roam flapping, weak clients,
+  radio channel changes (DFS).
+- **Infrastructure:** router unreachable, all routers unreachable (`lan_unreachable`),
+  reboot, CPU and memory pressure, service restarts, clock skew, conntrack jumps, port flaps,
+  speed drops, port errors and load, uplink down, LLDP neighbour changes, WAN down / unstable /
+  IP changed, DHCP pool full and address conflicts.
+
+Every threshold has a default and can be changed by an admin in the Diagnose tab.
+
+### Root cause and correlation
+
+Follow-up problems are linked to a **root** (router outage, all routers away, reboot, WAN
+down, radio change, uplink down, mass disconnect) using the router tree from LLDP and the
+topology panel's port mapping. Children fire no event, are not counted and do not lower the
+score. Example: an access point fails → one `router_unreachable` incident; its clients'
+disconnects just before are its children.
+
+- **Observed vs. inferred:** a cause is `confirmed` only when it rests on measured data (same
+  router, or a path seen by LLDP). Otherwise it is a `hypothesis` with a confidence value; a
+  link over an inferred topology edge has a confidence of **at most 0.6**.
+- **Cause level** (since 1.41.0): *confirmed*, *likely* (confidence ≥ 0.7 **and** at least two
+  independent sources such as log, poll, usteer, LLDP or the other clients on the radio),
+  *possible* (≥ 0.4) or *unknown*. One source alone is at most *possible*. The level is in the
+  panel, the `incidents` API and the bus event (`cause_level`).
+- A flapping uplink port (`lan_port_flap`) is a root too (since 1.41.0): drops of the access
+  points behind it (mass disconnects, reconnect storms, missing DHCP) become its children;
+  failed authentication and band or roam flapping stay incidents of their own.
+- A client with reconnects is compared with the other clients on its radio: with at least three
+  quiet peers the top cause is the device itself (`client_side`).
+- Every cause comes with a recommendation (text only; German in the panel, English in
+  [docs/realtime-rca.md](docs/realtime-rca.md#recommendations-per-cause)).
+
+### Near-realtime Wi-Fi events (since 1.41.0)
+
+The router log is read on **every poll**, so Wi-Fi events (disconnects with their reason,
+failed authentication, roaming, DFS) reach the engine at most one poll interval late (60 s by
+default). There is no push stream, no new kind of router call and no ACL change; `log read`
+(ACL v6) is enough, it just runs on every poll instead of every second one. Each Wi-Fi
+event carries the category of its 802.11 reason (`radio`, `security`, `ap`, `inactivity`,
+`client`). The Diagnose tab shows how old the last log read of each router is. Details, limits
+and the test scenarios: [docs/realtime-rca.md](docs/realtime-rca.md).
+
+### Health score
+
+0–100 per router over five weighted areas (Wi-Fi 30, system 25, LAN 15, WAN 20, DHCP/DNS 10).
+Open root incidents lower their area (critical 40, warning 15, info 3, times confidence;
+acknowledged half). The score is **unknown, never 100,** while less than 50 % of it rests on
+fresh data; the Wi-Fi area needs a readable router log. The fleet score weights the routers by
+their coverage.
+
+### Entities
+
+| Entity | `unique_id` | Notes |
+|--------|-------------|-------|
+| Sensor *Network health* | `{entry_id}_net_health` | 0–100 or unknown; attributes `areas`, `coverage`, `maintenance` |
+| Sensor *Active incidents* | `{entry_id}_incidents_active` | Open root incidents of the router |
+| Sensor *Wi-Fi reconnects (1 h)* | `{entry_id}_wifi_reconnects_1h` | Routers with AP interfaces only |
+| Sensor *Wi-Fi authentication errors (1 h)* | `{entry_id}_wifi_auth_errors_1h` | Routers with AP interfaces only |
+| Sensor *WAN reconnects (24 h)* | `{entry_id}_wan_stability` | Disabled by default without WAN |
+| Binary sensor *Critical incident* | `{entry_id}_incident_critical` | Problem; on while a critical root incident is open |
+| Switch *Maintenance mode* | `{entry_id}_maintenance_mode` | Configuration entity |
+| Sensor *Fleet network health* | `openwrt_router_fleet_net_health` | One per HA instance, no device |
+| Sensor *Fleet active incidents* | `openwrt_router_fleet_incidents_active` | One per HA instance, no device |
+| Binary sensor *Fleet critical incident* | `openwrt_router_fleet_incident_critical` | One per HA instance, no device |
+
+`{entry_id}` is the router's config entry ID. The fleet entities move to another router entry
+when theirs is removed or reloaded and keep their entity IDs.
+
+### Bus event `openwrt_router_incident_event`
+
+Fired once per root incident with `state` `opened` (after a 90 s settle time), `reopened` or
+`resolved`, from severity `warning` upwards (setting `notify_min_severity`). Never for
+children or routers in maintenance mode. Ignoring an announced incident fires `resolved` with
+`reason: ignored`.
+
+Fields: `state`, `incident_id`, `type`, `severity`, `confidence`, `cause`, `cause_status`,
+`cause_level` (since 1.41.0), `scope`, `routers` (names), `entry_ids`, `device_id` (one
+router only, else `null`), `reason` (`ignored` or `null`) and, for client incidents, `mac`.
+
+```yaml
+automation:
+  - alias: "Notify on critical network incident"
+    triggers:
+      - trigger: event
+        event_type: openwrt_router_incident_event
+        event_data:
+          state: opened
+          severity: critical
+    actions:
+      - action: notify.notify
+        data:
+          title: "Network incident"
+          message: >-
+            {{ trigger.event.data.type }} on
+            {{ trigger.event.data.routers | join(', ') }}
+            (cause: {{ trigger.event.data.cause or 'unknown' }})
+```
+
+### Maintenance mode
+
+Per router with the switch *Maintenance mode*; for the whole fleet for 1, 4 or 24 h in the
+Diagnose tab. Events are still stored (marked), but no incidents open, no bus events fire and
+the router leaves the fleet score. No late alarms after it ends.
+
+### Diagnose tab
+
+A **Diagnose** tab in the topology panel (labels in German): *Übersicht* (scores, open
+incidents, events of the last 24 h), *Incidents* (with children, evidence, cause and
+recommendation), *Timeline* (filters: router, category, severity, period), *WLAN*,
+*Infrastruktur* and *Einstellungen*. Router nodes in the topology carry a warning badge that
+opens the Diagnose view of that router. Access follows the topology panel (admins, or all
+users with the option enabled).
+
+### Settings
+
+Retention (30 days), maximum events (3000), `notify_min_severity`, score weights and
+penalties, every threshold, exclusions (MACs, SSIDs, routers, incident types) and fleet
+maintenance. Everyone who can open the panel can read them; **only admins can change them**
+(also acknowledge / ignore / re-activate incidents). Changes are checked strictly and apply at
+once.
+
+### Storage
+
+One file for all routers: `.storage/openwrt_router.intelligence`, written at most every
+300 s, capped at **1.5 MB** (oldest events are dropped first). An unreadable file is copied to
+`openwrt_router.intelligence.bak` before the engine starts empty. Incidents and events
+survive HA restarts; removing a router entry deletes its data from the file.
+
+### Privacy
+
+Everything stays local. The store, the panel and the bus event can contain client MAC
+addresses, the WAN IP and router names; the panel is admin-only by default. The diagnostics
+download contains only counts, types, times and the score from this feature.
+
+### Limits / FAQ
+
+- **Not measurable** without new router calls: packet loss, router-side latency, DNS
+  resolution, network loops, foreign Wi-Fi interference / channel utilisation, fluctuating
+  client data rates, conntrack usage in percent.
+- Detection follows the poll interval (slower in SSH fallback mode); log events arrive with
+  the next poll.
+- *Score unknown?* Too little fresh data (right after start, router unreachable, log not
+  readable).
+- *No event for a client storm?* It was a child of a root (e.g. the AP went down), below
+  `notify_min_severity`, or the router was in maintenance.
+- Authentication errors are not counted as an outage.
 
 ---
 
@@ -323,6 +484,7 @@ service rpcd restart
 | `openwrt_router_outage_event` | A router (or all routers at once) became unreachable / reachable again |
 | `openwrt_router_wifi_event` | Router log: `psk_mismatch`, `handshake_failed`, `inactivity_timeout` (fields `mac`, `hostname`, `interface`, `router`, `time`) |
 | `openwrt_router_dhcp_event` | Router log: dnsmasq `nak`, `decline`, `no_address` (pool exhausted), with `ip` |
+| `openwrt_router_incident_event` | Network Intelligence: a root incident was `opened`, `reopened` or `resolved` — see [Network Intelligence](#network-intelligence) |
 | `openwrt_router_dfs_event` | Router log: hostapd `radar_detected`, `cac_*`, `nop_finished`, `new_channel`; or `channel_change` of a radio between two polls. `dfs_related` is only true with a DFS log line (`radar_detected`, `new_channel`, `cac_failed`) of the same 5 GHz radio within 15 min |
 
 Log events are limited to 10 per fetch and one per type and client (DFS lines: per interface and frequency) in 5 minutes; channel changes are not limited. They need rpcd ACL v6 or newer (`log read`), which the integration deploys on start.
@@ -395,7 +557,7 @@ Topology Panel (sidebar)
 - [ ] HACS Default Store submission
 - [ ] Parental control support
 - [ ] Shift+click multi-device compare in topology
-- [ ] Persistent event history (survive HA restarts)
+- [x] Persistent event history (survive HA restarts) — Network Intelligence
 - [ ] Per-client traffic history chart
 
 ---

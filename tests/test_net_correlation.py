@@ -252,7 +252,9 @@ def test_topology_identity_claimed_twice_is_ignored() -> None:
 def test_topology_remembers_an_uplink_while_the_parent_is_known() -> None:
     before = {A: Uplink(G, "lan3", "lan1", False)}
     links = {G: link(G, gateway=True), A: link(A)}
-    assert build_topology(links, before).uplinks == before
+    assert build_topology(links, before).uplinks == {
+        A: Uplink(G, "lan3", "lan1", False, remembered=True)
+    }
     # parent unloaded: the memory goes
     assert build_topology({G: link(G, gateway=True), B: link(B)}, before).uplinks == {}
     # a remembered cycle is not taken over
@@ -297,9 +299,16 @@ def test_lan_root_takes_all_router_incidents_and_nothing_after_its_end() -> None
 
 
 def test_router_root_takes_own_incidents_in_its_window_only() -> None:
+    """Before the outage only the router's client and Wi-Fi incidents can be
+    its follow-ups (P5 review M2); after its start everything of it."""
     m = AlarmMachine()
     m.update(T0 - 200, [storm(CLIENTS20[0], A)])  # long before the outage
+    for i in range(3):  # CPU high from T0 - 115 (debounce 3)
+        m.update(T0 - 115 + 5 * i, [level("system_cpu_high", A, value=95)])
     m.update(T0 - 100, [storm(CLIENTS20[1], A), storm(CLIENTS20[2], G)])
+    m.update(T0 - 90, [hit("lan_port_flap", port_key(A, "lan1"), A, count=5)])
+    band = hit("wifi_band_flapping", CLIENTS20[3], A, scope=Scope.CLIENT, count=4)
+    m.update(T0 - 90, [band])
     m.update(T0, [level("router_unreachable", A, since=T0)])
     m.correlate(T0, Topology())  # no topology needed for the own router
     root = inc_of(m, "router_unreachable", A)
@@ -311,6 +320,20 @@ def test_router_root_takes_own_incidents_in_its_window_only() -> None:
     )
     assert inc_of(m, "wifi_reconnect_storm", CLIENTS20[0]).parent_id is None
     assert inc_of(m, "wifi_reconnect_storm", CLIENTS20[2]).parent_id is None
+    # its own Wi-Fi incident before the outage: a follow-up
+    assert inc_of(m, "wifi_band_flapping", CLIENTS20[3]).parent_id == root.id
+    # its own CPU and port problems before the outage: no follow-ups
+    assert inc_of(m, "system_cpu_high", A).parent_id is None
+    assert inc_of(m, "lan_port_flap", port_key(A, "lan1")).parent_id is None
+    # the same CPU problem after the start of the outage is one
+    m2 = AlarmMachine()
+    m2.update(T0, [level("router_unreachable", A, since=T0)])
+    for i in range(3):
+        m2.update(T0 + 10 + 10 * i, [level("system_cpu_high", A, value=95)])
+    m2.correlate(T0 + 30, Topology())
+    assert inc_of(m2, "system_cpu_high", A).parent_id == (
+        inc_of(m2, "router_unreachable", A).id
+    )
 
 
 def test_reboot_under_the_outage_confirms_the_cause() -> None:
@@ -444,10 +467,18 @@ def test_radio_change_takes_mass_disconnect_and_events_of_that_radio() -> None:
     radio = f"{A}:radio:phy1"
     m = AlarmMachine()
     m.update(T0, [hit("wifi_radio_change", radio, A, scope=Scope.RADIO)])
-    m.update(T0 + 20, [hit("wifi_mass_disconnect", A, A, count=8)])
+    m.update(T0 + 20, [hit("wifi_mass_disconnect", A, A, count=8, event_id="m1")])
     m.update(T0 + 20, [hit("wifi_mass_disconnect", B, B, count=8)])
     m.update(T0 + 200, [hit("wifi_mass_disconnect", A, A, count=8)])  # same inc
     events = [
+        event(
+            "m1",
+            T0 + 20,
+            A,
+            "wifi.mass_disconnect",
+            Category.WIFI,
+            {"ifaces": ["phy1-ap0", "phy1-ap1"]},
+        ),
         event(
             "e1", T0 + 10, A, "wifi.psk_mismatch", Category.WIFI, {"iface": "phy1-ap0"}
         ),
@@ -464,7 +495,7 @@ def test_radio_change_takes_mass_disconnect_and_events_of_that_radio() -> None:
     assert mass.parent_id == root.id and mass.cause == "radio_change"
     assert mass.cause_status is CauseStatus.CONFIRMED
     assert inc_of(m, "wifi_mass_disconnect", B).parent_id is None
-    assert result.events == {"e1": root.id}
+    assert result.events == {"m1": root.id, "e1": root.id}
 
 
 def test_dfs_line_becomes_radio_change_evidence() -> None:
@@ -1004,18 +1035,27 @@ async def test_auth_errors_and_unreported_outages_open_nothing(fleet: Any) -> No
     assert f.intel.machine.incidents() == []
 
 
-async def test_unloaded_router_keeps_its_open_outage(fleet: Any) -> None:
+async def test_unloaded_router_resolves_its_open_outage(fleet: Any) -> None:
+    """P5 review E7: the state of an unloaded router is unknown; its open
+    outage is resolved at the last step and no longer counts."""
     f = fleet
     feed(f, A, T0, rdata(A))
     f.clock.now = T0 + 200
     f.h.tracker.report_down(A, ERROR_TYPE_TIMEOUT, dt(T0 + 60))
     f.h.fire_timer()
-    f.h.tracker.unregister(A)
-    f.intel.unregister(A)
-    feed(f, G, T0 + 300, rdata(G))
     assert inc_of(f.intel.machine, "router_unreachable", A).status is (
         IncidentStatus.ACTIVE
     )
+    f.h.tracker.unregister(A)
+    f.intel.unregister(A)
+    outage = inc_of(f.intel.machine, "router_unreachable", A)
+    assert outage.status is IncidentStatus.RESOLVED
+    assert outage.resolved_at == T0 + 200
+    feed(f, G, T0 + 300, rdata(G))
+    assert inc_of(f.intel.machine, "router_unreachable", A).status is (
+        IncidentStatus.RESOLVED
+    )
+    assert f.intel.view.fleet.incidents_active == 0
 
 
 async def test_wan_down_with_dns_lines_explains_them(fleet: Any) -> None:

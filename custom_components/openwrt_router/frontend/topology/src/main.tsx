@@ -11,7 +11,7 @@ import { createRoot } from 'react-dom/client';
 import type { Root } from 'react-dom/client';
 import topologyCSS from './topology.css?inline';
 import { TopologyView } from './TopologyView';
-import { fetchTopologyData, hassAccessToken, TopologyFetchError, type HassLike } from './api';
+import { createIntelApi, fetchTopologyData, hassAccessToken, TopologyFetchError, type HassLike } from './api';
 import type { TopologyData } from './types';
 import { MOCK_DATA } from './mockData';
 
@@ -37,6 +37,8 @@ function errorText(err: unknown): string {
 class OpenWrtTopologyPanel extends HTMLElement {
   private _root: Root | null = null;
   private _hass: HassLike | null = null;
+  // Network intelligence client (P7); reads the current hass on every call.
+  private readonly _intel = createIntelApi(() => this._hass);
   private _refreshTimer: ReturnType<typeof setInterval> | null = null;
   private _retryTimer: ReturnType<typeof setTimeout> | null = null;
   private _fetching = false;
@@ -198,7 +200,7 @@ class OpenWrtTopologyPanel extends HTMLElement {
   private _renderTopology(data: TopologyData, staleError: string | null) {
     this._root?.render(
       <React.StrictMode>
-        <TopologyView data={data} />
+        <TopologyView data={data} intel={this._intel} />
         {staleError && (
           <div
             role="status"
