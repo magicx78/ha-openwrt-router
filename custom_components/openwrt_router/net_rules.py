@@ -65,6 +65,7 @@ from .net_events import (
     Source,
     prune_incidents,
 )
+from .wifi_reasons import CATEGORY_RADIO, CATEGORY_SECURITY, from_log_reason
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -3137,6 +3138,11 @@ WIFI_LOG_RULES = frozenset(
 WIFI_AUTH_WAVE_KEY = "fleet:wifi_auth_wave"
 
 _DOWN_KINDS = frozenset({"disconnected", "deauth", "disassoc", "inactivity_timeout"})
+# Disconnect lines (counted only) that become stored events because their
+# reason category points at a problem (RT5-D): a radio link that broke
+# (missing ACKs) or a security failure. Inactivity, AP steering and a client
+# leaving stay counted only.
+STORED_DOWN_CATEGORIES = frozenset({CATEGORY_RADIO, CATEGORY_SECURITY})
 _DHCP_FAIL_KINDS = frozenset({"nak", "no_address"})
 # Lines of one failed attempt arrive together (hostapd writes the invalid
 # MIC line and AP-STA-POSSIBLE-PSK-MISMATCH for the same 4-way handshake).
@@ -3170,6 +3176,13 @@ _STEER_KINDS = frozenset({"usteer_connected", "usteer_disconnected"})
 
 # cause keys (translation keys later, P6)
 CAUSE_WEAK_SIGNAL = "weak_signal"
+CAUSE_CLIENT_SIDE = "client_side"
+# RT7 C: this many other clients on the same radio without trouble make a
+# client's reconnects its own problem (radio path or device).
+PEERS_MIN = 3
+# Reconnect param with the number of quiet peers; from PEERS_MIN on it is a
+# second, independent indicator for the cause level (RT6).
+PEERS_PARAM = "peers_ok"
 
 
 def _hyp(cause: str) -> tuple[str, CauseStatus]:
@@ -3708,17 +3721,34 @@ def _reconnects(
                 ifaces[ev.mac] = ev.interface
                 last_ms[ev.mac] = ev.time_ms
     window = _rule_num(rule, "window", 600)
+    busy = {ev.mac.upper() for ev in lines if ev.category == "wifi" and ev.mac}
     for mac, reasons in found.items():
         subject, signal = snap.context.describe(mac, ifaces.get(mac))
         fresh = _signal_fresh(last_ms[mac], now, snap.poll_interval)
-        hyps = [_weak_cause(signal, weak_dbm, fresh)]
+        peers = _quiet_peers(
+            state,
+            rstate,
+            snap,
+            busy,
+            mac,
+            subject.get("iface"),
+            now,
+            window,
+            last_ms[mac],
+        )
+        alone = peers is not None and peers >= PEERS_MIN
+        hyps = [_hyp(CAUSE_CLIENT_SIDE)] if alone else []
+        hyps.append(_weak_cause(signal, weak_dbm, fresh))
         if "local_request" in reasons:
             hyps.append(_hyp("steering"))
         if "inactivity" in reasons:
             hyps.append(_hyp("client_power_save"))
-        hyps += [_hyp(c) for c in ("interference", "power_supply", "roaming", "auth")]
+        # the AP's power supply would hit its quiet peers as well
+        others = ("interference", "roaming", "auth")
+        hyps += [_hyp(c) for c in (others if alone else ("power_supply", *others))]
         cause, status, causes = cause_list(hyps)
         n = len(reasons)
+        params: dict[str, Any] = {} if peers is None else {PEERS_PARAM: peers}
         out.append(
             Finding(
                 kind=WIFI_RECONNECT_KIND,
@@ -3739,10 +3769,50 @@ def _reconnects(
                     ),
                     "window_s": round(window),
                     "reasons": sorted({r or "none" for r in reasons}),
+                    "reason_categories": sorted(
+                        {from_log_reason(r).category for r in reasons if r}
+                    ),
                     "causes": causes,
+                    **params,
                 },
             )
         )
+
+
+def _quiet_peers(
+    state: WifiState,
+    rstate: _WifiRouter,
+    snap: WifiSnapshot,
+    busy: set[str],
+    mac: str,
+    iface: str | None,
+    now: float,
+    window: float,
+    line_ms: int,
+) -> int | None:
+    """Other clients on ``mac``'s radio in this poll's client list without
+    trouble: no line in this read, no reconnect in ``window``. None: no
+    comparison (no client list, radio unknown, or the AP went down in the
+    window before the line at router time ``line_ms``, so the radio was not
+    active all along)."""
+    clients = snap.context.clients
+    phy = snap.context.iface(iface)[2]
+    if clients is None or phy is None:
+        return None
+    if rstate.ap_down_ms and rstate.ap_down_ms > line_ms - window * 1000:
+        return None
+    count = 0
+    for peer, item in clients.items():
+        if peer == mac.upper() or peer in busy:
+            continue
+        radio = item.get("radio")
+        if not isinstance(radio, str) or snap.context.iface(radio)[2] != phy:
+            continue
+        history = state.history.get(("wifi_reconnect_storm", peer), ())
+        if any(ts > now - window for ts, _n in history):
+            continue
+        count += 1
+    return count
 
 
 def _connected_elsewhere(
@@ -4478,6 +4548,11 @@ def wifi_log_meta(
     params: dict[str, Any] = {}
     if getattr(event, "reason", None):
         params["reason"] = event.reason
+    category = getattr(event, "reason_category", None)
+    if category:
+        params["reason_category"] = category
+    if getattr(event, "reason_code", None) is not None:
+        params["reason_code"] = event.reason_code
     key = f"{event.category}.{event.kind}"
     hyps: list[tuple[str, CauseStatus]] = []
     attempt = False
@@ -4499,6 +4574,8 @@ def wifi_log_meta(
         )
         params["window_s"] = round(window)
         hyps = _auth_hypotheses(key, event.reason, signal, weak_dbm, fresh)
+    elif stores_down_line(event):
+        hyps = _down_hypotheses(category, signal, weak_dbm, fresh)
     elif key == WIFI_ASSOC_REJECTED_KIND:
         if event.reason == "max_sta":
             hyps = [("ap_full", CauseStatus.CONFIRMED)]
@@ -4518,6 +4595,31 @@ def wifi_log_meta(
         attempt=attempt,
         attempt_key=attempt_key,
     )
+
+
+def stores_down_line(event: Any) -> bool:
+    """Is this counted-only disconnect line stored as an event (RT5-D)?"""
+    return (
+        getattr(event, "category", None) == "wifi"
+        and getattr(event, "kind", None) in _DOWN_KINDS
+        and bool(getattr(event, "mac", None))
+        and getattr(event, "reason_category", None) in STORED_DOWN_CATEGORIES
+    )
+
+
+def _down_hypotheses(
+    category: str | None, signal: int | None, weak_dbm: float, fresh: bool
+) -> list[tuple[str, CauseStatus]]:
+    """Causes of a stored disconnect. Missing ACKs are a broken radio link:
+    a weak signal measured right after the line confirms it (as for a
+    reconnect, E1)."""
+    if category == CATEGORY_RADIO:
+        return [
+            _weak_cause(signal, weak_dbm, fresh),
+            _hyp("interference"),
+            _hyp("client_power_save"),
+        ]
+    return [_hyp("psk_wrong"), _hyp("client_driver")]
 
 
 def _auth_hypotheses(
@@ -4629,9 +4731,12 @@ ROOT_TIERS: dict[str, int] = {
     "wan_down": 3,
     "wifi_radio_change": 4,
     "lan_uplink_down": 5,
-    "wifi_mass_disconnect": 6,
+    # RT7 B: a flapping uplink port (measured link drops) explains the
+    # Wi-Fi drops of the access points behind it
+    "lan_port_flap": 6,
+    "wifi_mass_disconnect": 7,
 }
-_CHILD_TIER = 7
+_CHILD_TIER = 8
 # Cause a child gets from its root.
 ROOT_CAUSES: dict[str, str] = {
     "lan_unreachable": "lan_unreachable",
@@ -4640,6 +4745,7 @@ ROOT_CAUSES: dict[str, str] = {
     "wan_down": "wan_down",
     "wifi_radio_change": "radio_change",
     "lan_uplink_down": "uplink_down",
+    "lan_port_flap": "port_flap",
     "wifi_mass_disconnect": "mass_disconnect",
 }
 # Seconds before the root starts and after it ends (c4 time windows). A
@@ -4652,6 +4758,7 @@ _ROOT_WINDOWS: dict[str, tuple[float, float]] = {
     "wan_down": (60.0, 120.0),
     "wifi_radio_change": (60.0, 60.0),
     "lan_uplink_down": (60.0, 60.0),
+    "lan_port_flap": (60.0, 60.0),
     "wifi_mass_disconnect": (30.0, 30.0),
 }
 _LEVEL_ROOTS = frozenset(
@@ -4661,6 +4768,27 @@ _LEVEL_ROOTS = frozenset(
 _GATEWAY_CHILDREN = frozenset({"wifi_no_ip", "wifi_dhcp_after_connect"})
 _WAN_CHILDREN = frozenset({"wan_unstable", "wan_ip_changed"})
 _ROUTER_EVENT_CATEGORIES = frozenset({Category.WIFI, Category.LAN})
+# What a flapping wired port can explain behind it (PR #49 review): drops,
+# not auth failures, band or roam flapping.
+_PORT_FLAP_CHILDREN = frozenset(
+    {
+        "wifi_mass_disconnect",
+        "wifi_reconnect_storm",
+        "wifi_no_ip",
+        "wifi_dhcp_after_connect",
+    }
+)
+_PORT_FLAP_EVENT_KINDS = frozenset(
+    {
+        WIFI_MASS_DISCONNECT_KIND,
+        WIFI_RECONNECT_KIND,
+        WIFI_NO_IP_KIND,
+        WIFI_DHCP_AFTER_CONNECT_KIND,
+    }
+)
+# Event roots that may last for hours: a child links only near one of their
+# own evidence times, not anywhere in first..last (P5 review M1).
+_EVIDENCE_WINDOW_ROOTS = frozenset({"wifi_radio_change", "lan_port_flap"})
 # Roots of one router (outage, reboot): before the root starts only the
 # client and Wi-Fi incidents of that router can be its follow-ups (P5
 # review M2); a CPU or port problem before the outage is no consequence.
@@ -4675,6 +4803,7 @@ _ROOT_OWN_KINDS: dict[str, frozenset[str]] = {
     "wan_down": frozenset({"wan.down"}),
     "wifi_radio_change": RADIO_CHANGE_KINDS,
     "lan_uplink_down": frozenset({"lan.uplink"}),
+    "lan_port_flap": frozenset({"lan.port_down", "lan.port_flap"}),
     "wifi_mass_disconnect": frozenset({"wifi.mass_disconnect"}),
 }
 # Causes a child takes over from a root (released children lose them).
@@ -4925,12 +5054,13 @@ def _root_span(root: Incident, now: float) -> tuple[float, float]:
 
 
 def _in_window(root: Incident, span: tuple[float, float], at: float) -> bool:
-    """Is ``at`` inside the window of ``root``? A radio change counts
-    around each of its own evidence times, so a radio that keeps changing
-    does not stretch one window over hours (P5 review M1)."""
+    """Is ``at`` inside the window of ``root``? A radio change or a port
+    flap counts around each of its own evidence times, so a radio that
+    keeps changing or a port that keeps flapping does not stretch one
+    window over hours (P5 review M1)."""
     if not span[0] <= at <= span[1]:
         return False
-    if root.type != "wifi_radio_change":
+    if root.type not in _EVIDENCE_WINDOW_ROOTS:
         return True
     before, after = _ROOT_WINDOWS[root.type]
     stamps = [root.first_seen, *(e.get("ts") for e in root.evidence)]
@@ -4976,13 +5106,20 @@ class _RootView:
     @classmethod
     def of(cls, inc: Incident, topology: Topology) -> _RootView:
         router = inc.scope_key.split(":", 1)[0]
-        if inc.type == "lan_uplink_down":
+        if inc.type in ("lan_uplink_down", "lan_port_flap"):
             node, _sep, port = inc.scope_key.partition(":port:")
             direct = [
                 r
                 for r, up in topology.uplinks.items()
                 if up.parent == node and up.port == port
             ]
+            own = topology.uplinks.get(node)
+            if (
+                inc.type == "lan_port_flap"
+                and own is not None
+                and own.local_port == port
+            ):
+                direct.append(node)  # the router's own port towards its parent
             behind = sorted({*direct, *(m for r in direct for m in topology.behind(r))})
         elif inc.type in ("router_unreachable", "system_reboot"):
             behind = topology.behind(router)
@@ -5068,11 +5205,44 @@ def _incident_link(
                     router, view.router
                 )
         return None
+    if root.type == "lan_port_flap":
+        return _port_flap_link(view, child, topology)
     if root.type == "wifi_mass_disconnect":
         if child.scope is Scope.CLIENT and view.router in child.routers:
             return False
         return None
     return None
+
+
+def _port_flap_link(
+    view: _RootView, child: Incident, topology: Topology
+) -> bool | None:
+    """A flapping uplink port explains the drops behind it (RT7 B): mass
+    disconnects, reconnect storms and clients without (or late) DHCP of
+    the routers behind it. Never auth failures, band or roam flapping: a
+    cable cannot cause those, and a long flap must not silence them. The
+    drops are measured (poll or netifd/kernel lines): confirmed over an
+    observed path, else a hypothesis."""
+    if child.type not in _PORT_FLAP_CHILDREN:
+        return None
+    for router in view.behind:
+        if _concerns(child, router):
+            return topology.observed_path(router, view.router)
+    return None
+
+
+def _port_flap_explains(event: NetEvent) -> bool:
+    """Is ``event`` a drop a wired flap can cause? Reconnects, mass
+    disconnects, missing DHCP, and disconnect lines of the radio category
+    (missing ACKs); not auth failures, roams or security disconnects."""
+    if event.category is not Category.WIFI:
+        return False
+    if event.kind in _PORT_FLAP_EVENT_KINDS:
+        return True
+    return (
+        event.kind.removeprefix("wifi.") in _DOWN_KINDS
+        and event.params.get("reason_category") == CATEGORY_RADIO
+    )
 
 
 def _behind_down(view: _RootView, ctx: _LinkContext, at: float) -> tuple[str, ...]:
@@ -5160,6 +5330,10 @@ def _event_link(view: _RootView, event: NetEvent, ctx: _LinkContext) -> bool | N
             event.category in _ROUTER_EVENT_CATEGORIES
             or event.kind == ROUTER_UNREACHABLE_KIND
         ):
+            return False
+        return None
+    if root.type == "lan_port_flap":
+        if event.router in view.behind and _port_flap_explains(event):
             return False
         return None
     if root.type == "wifi_mass_disconnect":
@@ -5347,6 +5521,140 @@ def child_release_time(inc: Incident, known: Mapping[str, Incident]) -> float | 
     if parent.resolve_reason == ROUTER_REMOVED:
         return window_end + CHILD_RELEASE_AFTER
     return window_end
+
+
+# --- cause level (RT6): derived for the UI and the bus, never stored --------------
+
+CAUSE_LIKELY = 0.7
+CAUSE_POSSIBLE = 0.4
+# Independent source families a hypothesis needs to be "likely" (plan 5.2).
+LIKELY_FAMILIES = 2
+FAMILY_CORRELATION = "correlation"
+FAMILY_PEERS = "peers"
+# Where evidence came from. hostapd, netifd and procd write to the system log
+# (path D reads them there): one family, so two log lines are one indicator.
+_SOURCE_FAMILY: dict[Source, str] = {
+    Source.LOG: "log",
+    Source.HOSTAPD: "log",
+    Source.NETIFD: "log",
+    Source.PROCD: "log",
+    Source.POLL: "poll",
+    Source.USTEER: "usteer",
+    Source.LLDP: "topology",
+    Source.TOPOLOGY: "topology",
+    Source.FLEET: "fleet",
+}
+
+
+class CauseLevel(StrEnum):
+    """How sure a cause is (plan 5.2). The released API names the second
+    level ``likely`` (the plan's ``probable``)."""
+
+    CONFIRMED = "confirmed"
+    LIKELY = "likely"
+    POSSIBLE = "possible"
+    UNKNOWN = "unknown"
+
+
+def cause_level(
+    cause: str | None,
+    cause_status: CauseStatus | None,
+    confidence: float,
+    families: frozenset[str] | set[str],
+) -> CauseLevel:
+    """Grade a cause.
+
+    confirmed: measured (``cause_status`` confirmed). likely: a hypothesis
+    with confidence >= 0.7 from at least two independent source families.
+    possible: a hypothesis with confidence >= 0.4. unknown: no cause, or
+    less. 0.7 keeps AK6: a cause that rests on an inferred topology edge
+    (capped at 0.6) is at most possible.
+    """
+    if cause is None or cause_status is None:
+        return CauseLevel.UNKNOWN
+    if cause_status is CauseStatus.CONFIRMED:
+        return CauseLevel.CONFIRMED
+    if confidence >= CAUSE_LIKELY and len(families) >= LIKELY_FAMILIES:
+        return CauseLevel.LIKELY
+    if confidence >= CAUSE_POSSIBLE:
+        return CauseLevel.POSSIBLE
+    return CauseLevel.UNKNOWN
+
+
+def cause_families(inc: Incident, events: Mapping[str, NetEvent]) -> frozenset[str]:
+    """The independent source families behind ``inc``'s cause.
+
+    ``events`` maps event ids to stored events; evidence whose event left
+    the ring adds nothing. A link to a root (``parent_id``) adds the
+    correlation; a peer comparison on an evidence event adds the peers.
+    """
+    families: set[str] = set()
+    for item in inc.evidence:
+        event = events.get(item.get("id")) if isinstance(item, dict) else None
+        if event is None:
+            continue
+        family = _SOURCE_FAMILY.get(event.source)
+        if family is not None:
+            families.add(family)
+        if (_num_or_none(event.params.get(PEERS_PARAM)) or 0) >= PEERS_MIN:
+            families.add(FAMILY_PEERS)
+    if inc.parent_id is not None:
+        families.add(FAMILY_CORRELATION)
+    return frozenset(families)
+
+
+def incident_cause_level(inc: Incident, events: Mapping[str, NetEvent]) -> CauseLevel:
+    """``cause_level`` of an incident with the families of its evidence."""
+    return cause_level(
+        inc.cause, inc.cause_status, inc.confidence, cause_families(inc, events)
+    )
+
+
+# Causes with a recommendation (RT7): the panel shows the text of
+# ``rec_<cause>`` (German in the frontend, English in docs/realtime-rca.md).
+# A recommendation is text only, it never triggers an action.
+RECOMMENDED_CAUSES = frozenset(
+    {
+        *ROOT_CAUSES.values(),
+        "ap_full",
+        "attack",
+        "auth",
+        "band_steering",
+        "client_driver",
+        "client_power_save",
+        "client_side",
+        "coverage",
+        "dhcp_server",
+        "dns_resolution",
+        "interference",
+        "ip_conflict",
+        "mac_filter",
+        "overlapping_coverage",
+        "pool_exhausted",
+        "power_supply",
+        "psk_changed",
+        "psk_wrong",
+        "radio_restart",
+        "roaming",
+        "sae_mismatch",
+        "static_ip",
+        "steering",
+        "uplink_config",
+        "vlan",
+        "weak_signal",
+        "wrong_network",
+    }
+)
+
+
+def recommendation_key(cause: str | None) -> str | None:
+    """``rec_<cause>`` for a cause with a recommendation, else None."""
+    return f"rec_{cause}" if cause in RECOMMENDED_CAUSES else None
+
+
+def events_by_id(events: Iterable[NetEvent]) -> dict[str, NetEvent]:
+    """Index of stored events for ``cause_families``."""
+    return {event.id: event for event in events}
 
 
 def counted_incidents(

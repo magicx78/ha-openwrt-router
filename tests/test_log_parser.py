@@ -352,7 +352,7 @@ class TestCoordinatorIngest:
         assert coord._log_status == LOG_STATUS_ERROR
 
     @pytest.mark.asyncio
-    async def test_poll_fetches_every_second_cycle_and_never_fails(self):
+    async def test_poll_fetches_every_cycle_and_never_fails(self):
         from custom_components.openwrt_router.api import OpenWrtMethodNotFoundError
 
         coord, api, _ = _coordinator()
@@ -372,8 +372,8 @@ class TestCoordinatorIngest:
         for _ in range(5):
             coord.data = await coord._async_update_data()
             statuses.append(coord.data.log_status)
-        # polls 2 and 4 fetch; poll 1 (setup) is skipped
-        assert api.get_log_entries.await_count == 2
+        # RT3-D: polls 2 to 5 fetch; poll 1 (setup) is skipped
+        assert api.get_log_entries.await_count == 4
         assert statuses == [
             LOG_STATUS_PENDING,
             LOG_STATUS_NOT_PERMITTED,

@@ -511,11 +511,12 @@ UBUS_SERVICE_LIST = "list"
 # logd ring buffer (F6 log ingest, ACL v6)
 UBUS_LOG_OBJECT = "log"
 UBUS_LOG_READ = "read"
-# Fetched every LOG_READ_INTERVAL_CYCLES polls (~165 B per line). The first
+# Fetched every LOG_READ_INTERVAL_CYCLES polls (~165 B per line); 1 = every
+# poll from poll 2 on (RT3-D: near-realtime events via the log). The first
 # fetch asks for LOG_READ_LINES; later fetches size themselves to 1.5x the
 # lines seen last time (LOG_READ_LINES_MIN..MAX), and after a gap ("missed"
 # lines) the next fetch takes LOG_READ_LINES_MAX (about the whole buffer).
-LOG_READ_INTERVAL_CYCLES = 2
+LOG_READ_INTERVAL_CYCLES = 1
 LOG_READ_LINES = 250
 LOG_READ_LINES_MIN = 100
 LOG_READ_LINES_MAX = 700
@@ -539,10 +540,13 @@ DHCP_CONFIG_REFRESH_CYCLES = 10
 DHCP_CONFIG_RETRY_CYCLES = 60
 
 # Client stability (F4): usteer's fleet-wide client view (ACL v6), fetched
-# every LOG_READ_INTERVAL_CYCLES polls on the polls between the log fetches;
-# a router without usteer is asked again every USTEER_RETRY_CYCLES polls.
+# every USTEER_READ_INTERVAL_CYCLES polls from poll 3 on, independent of the
+# log rhythm (RT3-D: the log is read on every poll, so usteer must not wait
+# for a poll without a log read); a router without usteer is asked again
+# every USTEER_RETRY_CYCLES polls.
 UBUS_USTEER_OBJECT = "usteer"
 UBUS_USTEER_GET_CLIENTS = "get_clients"
+USTEER_READ_INTERVAL_CYCLES = 2
 USTEER_RETRY_CYCLES = 30
 USTEER_STATUS_PENDING = "pending"
 USTEER_STATUS_OK = "ok"
@@ -612,3 +616,38 @@ FLEET_UID_PREFIX = f"{DOMAIN}_fleet_"
 UID_FLEET_NET_HEALTH = f"{FLEET_UID_PREFIX}net_health"
 UID_FLEET_INCIDENTS_ACTIVE = f"{FLEET_UID_PREFIX}incidents_active"
 UID_FLEET_INCIDENT_CRITICAL = f"{FLEET_UID_PREFIX}incident_critical"
+
+# ---------------------------------------------------------------------------
+# Realtime event stream (plan 2026-11-16-realtime-rca, RT2): ubus SSE
+# subscribe via uhttpd-mod-ubus (GET /ubus/subscribe/<object>).
+# ---------------------------------------------------------------------------
+# Events buffered per subscription; on overflow the oldest is dropped.
+STREAM_QUEUE_MAX = 512
+# Reconnect backoff in seconds: 2, 4, 8 ... capped at 300, minus up to 20 %
+# jitter; back to the start after a connection that stayed up for 120 s.
+STREAM_BACKOFF_INITIAL = 2
+STREAM_BACKOFF_MAX = 300
+STREAM_BACKOFF_JITTER = 0.2
+STREAM_BACKOFF_RESET_AFTER = 120
+# Missing ":subscribe" ACL right: retry only after this many seconds.
+STREAM_NO_PERMISSION_RETRY = 3600
+# The server sends no keepalive; a stream silent this long is reconnected.
+STREAM_IDLE_TIMEOUT = 600
+# TCP/TLS connect budget and the read budget of a non-SSE error body.
+STREAM_CONNECT_TIMEOUT = 10
+# Largest accepted event (sum of its data lines); bigger ones are dropped.
+STREAM_EVENT_MAX_BYTES = 65536
+# How long stop() waits for the subscription task to end.
+STREAM_STOP_TIMEOUT = 5
+# Never subscribed: hostapd-auth waits up to 1 s for an answer from every
+# subscriber, so a subscriber there delays each client login.
+STREAM_FORBIDDEN_OBJECTS = frozenset({"hostapd-auth"})
+# States of one subscription (ubus_stream.UbusSubscription).
+STREAM_STATE_IDLE = "idle"
+STREAM_STATE_CONNECTING = "connecting"
+STREAM_STATE_UP = "up"
+STREAM_STATE_BACKOFF = "backoff"
+STREAM_STATE_NO_PERMISSION = "no_permission"
+STREAM_STATE_NOT_FOUND = "not_found"
+STREAM_STATE_PAUSED = "paused"
+STREAM_STATE_STOPPED = "stopped"

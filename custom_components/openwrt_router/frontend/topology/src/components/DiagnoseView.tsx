@@ -31,6 +31,7 @@ import {
   formatTs,
   isWifiIncident,
   kindLabel,
+  logLabel,
   recommendation,
   typeLabel,
 } from '../utils/intel';
@@ -287,7 +288,7 @@ function IncidentDetailView({
   };
 
   const inc = detail?.incident;
-  const rec = inc ? recommendation(inc.type) : undefined;
+  const rec = inc ? recommendation(inc.type, inc.recommendation_key) : undefined;
   const admin = api.isAdmin();
   return (
     <div className="diag-detail">
@@ -327,7 +328,7 @@ function IncidentDetailView({
             </div>
             <div className="settings-info">
               Einstufung: {CAUSE_LEVEL_LABEL[inc.cause_level]} – „bestätigt“ nur mit Messdaten,
-              sonst Hypothese mit Konfidenz.
+              „wahrscheinlich“ nur mit mindestens zwei unabhängigen Quellen, sonst „möglich“.
             </div>
           </div>
 
@@ -719,6 +720,7 @@ function Overview({
               <span className="diag-table__meta">
                 {r.offline ? 'offline' : `${Math.round(r.coverage * 100)} % Daten`}
                 {r.maintenance ? ' · Wartung' : ''}
+                {r.log ? ` · ${logLabel(r.log)}` : ''}
               </span>
               <CountPills counts={r.incidents} />
             </button>

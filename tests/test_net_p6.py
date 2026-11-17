@@ -161,6 +161,7 @@ async def test_root_fires_once_after_the_settle_time(intel: NetIntelligence) -> 
         "confidence": 1.0,
         "cause": None,
         "cause_status": None,
+        "cause_level": "unknown",  # RT6, additive
         "scope": "router",
         "routers": ["Router gw"],
         "entry_ids": [G],

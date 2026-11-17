@@ -108,6 +108,7 @@ from .const import (
     LLDP_REFRESH_INTERVAL,
     LLDP_STATUS_NO_NEIGHBORS,
     LLDP_STATUS_OK,
+    LOG_STATUS_OK,
     NOTIFICATION_FAILURE_THRESHOLD,
     SIGNAL_NET_INTEL,
 )
@@ -170,13 +171,16 @@ from .net_rules import (
     deep_merge,
     detect_infrastructure,
     detect_wifi,
+    events_by_id,
     finding_evidence,
     fleet_score,
+    incident_cause_level,
     log_event_evidence,
     merge_settings,
     normalize_mac,
     router_score,
     settings_errors,
+    stores_down_line,
     suppressed_child,
     wifi_auth_evidence,
     wifi_context,
@@ -377,6 +381,9 @@ class NetIntelligence:
         # object seen per router (a failed poll re-sends the old one).
         self._routers: set[str] = set()
         self._last_data: dict[str, Any] = {}
+        # In memory (RT9): per router the log status of its last poll and
+        # the engine time of its last log read (None: none yet).
+        self._log_reads: dict[str, tuple[str | None, float | None]] = {}
         # Comparison state of the infrastructure detectors per router.
         self._infra: dict[str, InfraState] = {}
         # Routers whose IPv4 WAN was connected once with the default route
@@ -537,6 +544,7 @@ class NetIntelligence:
         self._outages = None
         self._routers.clear()
         self._last_data.clear()
+        self._log_reads.clear()
         self._infra.clear()
         self._identity.clear()
         self._wifi = WifiState()
@@ -613,6 +621,7 @@ class NetIntelligence:
                 )
         self._routers.discard(entry_id)
         self._last_data.pop(entry_id, None)
+        self._log_reads.pop(entry_id, None)
         self._infra.pop(entry_id, None)
         self._identity.pop(entry_id, None)
         self._wifi.forget(entry_id)
@@ -725,6 +734,7 @@ class NetIntelligence:
         if not isinstance(batch, LogBatch):
             batch = None
         mark_before = self._log_marks.get(entry_id)
+        resumed = self._note_log_read(entry_id, data, batch, now)
         context = wifi_context(
             getattr(data, "ap_interfaces", None), getattr(data, "clients", None)
         )
@@ -737,6 +747,7 @@ class NetIntelligence:
             getattr(data, "arp_table", None),
             context,
             interval,
+            resumed=resumed,
         )
         fresh = batch is not None and not batch.baseline
         thresholds = self.settings["thresholds"]
@@ -991,6 +1002,30 @@ class NetIntelligence:
         self._uplinks = dict(topology.uplinks)
         return topology
 
+    def _note_log_read(
+        self, entry_id: str, data: Any, batch: LogBatch | None, now: float
+    ) -> bool:
+        """Remember the log status and read time; True if this poll read the
+        log again after polls whose read failed."""
+        status = getattr(data, "log_status", None)
+        old, read_at = self._log_reads.get(entry_id, (None, None))
+        self._log_reads[entry_id] = (
+            status if isinstance(status, str) else None,
+            now if batch is not None else read_at,
+        )
+        return batch is not None and old not in (None, LOG_STATUS_OK)
+
+    def log_state(self, entry_id: str, now: float) -> dict[str, Any]:
+        """Log status of a router's last poll, time and age of its last log
+        read (RT9: under path D the log is the realtime source, read on
+        every poll, so its age is the delay of the events)."""
+        status, read_at = self._log_reads.get(entry_id, (None, None))
+        return {
+            "status": status,
+            "read_at": read_at,
+            "age_s": None if read_at is None else max(0, round(now - read_at)),
+        }
+
     def _ingest_log(
         self,
         entry_id: str,
@@ -1000,6 +1035,8 @@ class NetIntelligence:
         arp: Any = None,
         wifi: WifiContext | None = None,
         interval: float | None = None,
+        *,
+        resumed: bool = False,
     ) -> tuple[int, list[NetEvent], list[LogEvent]]:
         """Count and store the log events of one poll.
 
@@ -1008,15 +1045,29 @@ class NetIntelligence:
         ``arp`` (MAC -> IPv4 of this poll) confirms a DHCPDECLINE, ``wifi``
         (this poll's AP interfaces and clients) adds SSID, band and signal
         to fresh Wi-Fi lines (not to the lines of a log gap); ``interval``
-        is the poll interval.
+        is the poll interval. ``resumed``: the log is read again after
+        failed reads; lines lost in between (``missed``) are a log gap.
         """
         stored = 0
         baseline = batch is not None and batch.baseline
         if batch is not None and baseline:
             events, stored = self._gap_events(entry_id, events, batch, now)
+        elif batch is not None and resumed and batch.missed > 0:
+            # RT10 scenario 12: reads failed for a while and lines left the
+            # router's buffer meanwhile (a busy log between two good reads
+            # only lowers the coverage, as before)
+            last_ms = self._log_marks.get(entry_id, {}).get("last_time_ms")
+            gap_s = (
+                (batch.first_time_ms - last_ms) / 1000
+                if last_ms is not None and batch.first_time_ms is not None
+                else None
+            )
+            self._record_gap(entry_id, gap_s, now, missed=batch.missed)
+            stored = 1
         accepted: list[LogEvent] = []
         kept: list[NetEvent] = []
         groups: dict[tuple[str, str | None], list[tuple[LogEvent, float]]] = {}
+        downs: set[tuple[Any, ...]] = set()
         for event in events:
             if not isinstance(event, LogEvent):
                 continue
@@ -1029,7 +1080,12 @@ class NetIntelligence:
             ts = src_ts if baseline and src_ts is not None and src_ts <= now else now
             self.counters.add(entry_id, event.key, ts)
             if (event.category, event.kind) in COUNT_ONLY_KINDS:
-                continue
+                # RT5-D: a disconnect with a problem reason is stored, once
+                # per batch (the same line twice is one event)
+                down = (event.key, event.mac, event.interface, event.time_ms)
+                if not stores_down_line(event) or down in downs:
+                    continue
+                downs.add(down)
             if event.category in _AGGREGATED_CATEGORIES:
                 groups.setdefault((event.key, event.name), []).append((event, ts))
                 continue
@@ -1390,7 +1446,14 @@ class NetIntelligence:
         newer = [e for e in events if isinstance(e, LogEvent) and e.time_ms > last_ms]
         return newer, gap
 
-    def _record_gap(self, entry_id: str, gap_s: float, now: float) -> None:
+    def _record_gap(
+        self, entry_id: str, gap_s: float | None, now: float, missed: int = 0
+    ) -> None:
+        params: dict[str, Any] = {}
+        if gap_s is not None:
+            params["gap_s"] = round(gap_s)
+        if missed > 0:
+            params["missed"] = missed
         self._seq += 1
         self.counters.add(entry_id, LOG_GAP_KIND, now)
         self.ring.add(
@@ -1405,7 +1468,7 @@ class NetIntelligence:
                     source=Source.LOG,
                     severity=Severity.INFO,
                     msg_key=LOG_GAP_KIND,
-                    params={"gap_s": round(gap_s)},
+                    params=params,
                 )
             )
         )
@@ -1512,12 +1575,15 @@ class NetIntelligence:
             if (n := self.counters.hourly(entry_id, kind, now, 24))
         }
         view = self.view.routers.get(entry_id)
-        active = Counter(
-            inc.type
+        mine = [
+            inc
             for inc in self.machine.incidents()
             if inc.status in _OPEN_STATES
             and (entry_id in inc.routers or inc.scope_key == entry_id)
-        )
+        ]
+        active = Counter(inc.type for inc in mine)
+        stored = events_by_id(self.ring)
+        levels = Counter(incident_cause_level(inc, stored).value for inc in mine)
         return {
             "loaded": self._loaded,
             "store_load_failed": self.load_failed,
@@ -1529,6 +1595,7 @@ class NetIntelligence:
             "counts_by_category_24h": dict(sorted(by_category.items())),
             "counts_by_kind_24h": by_kind,
             "active_by_type": dict(sorted(active.items())),
+            "active_by_cause_level": dict(sorted(levels.items())),
             "incidents_stored_fleet": len(self.machine.incidents()),
             "log_mark_stored": entry_id in self._log_marks,
             "store_bytes_last_save": self.last_save_bytes,
@@ -1710,6 +1777,8 @@ class NetIntelligence:
             "confidence": round(inc.confidence, 2),
             "cause": inc.cause,
             "cause_status": inc.cause_status.value if inc.cause_status else None,
+            # RT6, additive: how sure the cause is (derived, never stored)
+            "cause_level": incident_cause_level(inc, self._evidence_events(inc)).value,
             "scope": inc.scope.value,
             "routers": names,
             "entry_ids": entry_ids,
@@ -1720,6 +1789,11 @@ class NetIntelligence:
         if inc.scope is Scope.CLIENT and _MAC_RE.fullmatch(key):
             data["mac"] = key
         return data
+
+    def _evidence_events(self, inc: Incident) -> dict[str, NetEvent]:
+        """The stored events behind ``inc``'s evidence (for its cause level)."""
+        wanted = {e.get("id") for e in inc.evidence if isinstance(e, dict)}
+        return events_by_id(e for e in self.ring if e.id in wanted)
 
     def _publish(self, now: float) -> None:
         """Build the view for the entities and tell them (dispatcher)."""

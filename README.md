@@ -192,7 +192,27 @@ disconnects just before are its children.
 - **Observed vs. inferred:** a cause is `confirmed` only when it rests on measured data (same
   router, or a path seen by LLDP). Otherwise it is a `hypothesis` with a confidence value; a
   link over an inferred topology edge has a confidence of **at most 0.6**.
-- The panel shows the cause as *confirmed*, *likely* (≥ 0.7), *possible* (≥ 0.4) or *unknown*.
+- **Cause level** (since 1.41.0): *confirmed*, *likely* (confidence ≥ 0.7 **and** at least two
+  independent sources such as log, poll, usteer, LLDP or the other clients on the radio),
+  *possible* (≥ 0.4) or *unknown*. One source alone is at most *possible*. The level is in the
+  panel, the `incidents` API and the bus event (`cause_level`).
+- A flapping uplink port (`lan_port_flap`) is a root too (since 1.41.0): drops of the access
+  points behind it (mass disconnects, reconnect storms, missing DHCP) become its children;
+  failed authentication and band or roam flapping stay incidents of their own.
+- A client with reconnects is compared with the other clients on its radio: with at least three
+  quiet peers the top cause is the device itself (`client_side`).
+- Every cause comes with a recommendation (text only; German in the panel, English in
+  [docs/realtime-rca.md](docs/realtime-rca.md#recommendations-per-cause)).
+
+### Near-realtime Wi-Fi events (since 1.41.0)
+
+The router log is read on **every poll**, so Wi-Fi events (disconnects with their reason,
+failed authentication, roaming, DFS) reach the engine at most one poll interval late (60 s by
+default). There is no push stream, no new kind of router call and no ACL change; `log read`
+(ACL v6) is enough, it just runs on every poll instead of every second one. Each Wi-Fi
+event carries the category of its 802.11 reason (`radio`, `security`, `ap`, `inactivity`,
+`client`). The Diagnose tab shows how old the last log read of each router is. Details, limits
+and the test scenarios: [docs/realtime-rca.md](docs/realtime-rca.md).
 
 ### Health score
 
@@ -228,8 +248,8 @@ children or routers in maintenance mode. Ignoring an announced incident fires `r
 `reason: ignored`.
 
 Fields: `state`, `incident_id`, `type`, `severity`, `confidence`, `cause`, `cause_status`,
-`scope`, `routers` (names), `entry_ids`, `device_id` (one router only, else `null`), `reason`
-(`ignored` or `null`) and, for client incidents, `mac`.
+`cause_level` (since 1.41.0), `scope`, `routers` (names), `entry_ids`, `device_id` (one
+router only, else `null`), `reason` (`ignored` or `null`) and, for client incidents, `mac`.
 
 ```yaml
 automation:
@@ -291,7 +311,8 @@ download contains only counts, types, times and the score from this feature.
 - **Not measurable** without new router calls: packet loss, router-side latency, DNS
   resolution, network loops, foreign Wi-Fi interference / channel utilisation, fluctuating
   client data rates, conntrack usage in percent.
-- Detection follows the poll interval (slower in SSH fallback mode).
+- Detection follows the poll interval (slower in SSH fallback mode); log events arrive with
+  the next poll.
 - *Score unknown?* Too little fresh data (right after start, router unreachable, log not
   readable).
 - *No event for a client storm?* It was a child of a root (e.g. the AP went down), below

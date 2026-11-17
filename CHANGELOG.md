@@ -2,6 +2,67 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.41.0] - 2026-11-17
+
+### Added
+
+- **WLAN-Ereignisse fast in Echtzeit (Weg D).** Das Router-Log wird jetzt bei
+  jedem Poll gelesen statt bei jedem zweiten; WLAN-Ereignisse erreichen die
+  Network Intelligence höchstens einen Poll später (Standard 60 s). Kein
+  Push-Stream, keine neue Art von Router-Aufrufen, **keine ACL-Änderung**
+  (`log read` aus ACL v6 genügt). Weil `log read` jetzt jeden Poll läuft statt
+  jeden zweiten, kommt je Router etwa ein ubus-Aufruf alle zwei Polls dazu;
+  auf ruhigen Routern verdoppelt sich die gelesene Log-Menge ungefähr.
+  Ausführlich in `docs/realtime-rca.md`.
+- **Trennungsgründe.** Jede WLAN-Logzeile trägt die Kategorie ihres
+  802.11-Reason-Codes (`radio`, `security`, `ap`, `inactivity`, `client`,
+  `unknown`) und den Code. Trennungen der Kategorien `radio` (zum Beispiel
+  „missing ACKs“) und `security` werden mit möglichen Ursachen als Ereignis
+  gespeichert; Reconnect-Stürme nennen die gesehenen Kategorien.
+- **Ursachenstufe `cause_level`:** `confirmed`, `likely`, `possible` oder
+  `unknown`. *Wahrscheinlich* nur mit Konfidenz ≥ 0,7 **und** mindestens zwei
+  unabhängigen Quellen (Log, Poll, usteer, Topologie, Flotte, Nachbar-Clients,
+  Wurzel-Verknüpfung); eine Quelle allein ist höchstens *möglich*. Die Stufe
+  wird abgeleitet, nicht gespeichert. Neu im HA-Event
+  `openwrt_router_incident_event` (Feld `cause_level`), in der Incident-API
+  und im Diagnose-Download (`active_by_cause_level`).
+- **Port-Flap als Wurzel.** Ein flatternder Uplink-Port (`lan_port_flap`)
+  erklärt die Abbrüche der APs dahinter: Massen-Trennungen,
+  Reconnect-Stürme, Clients ohne IP und DHCP-Fehler nach dem Verbinden.
+  Anmeldefehler, Band- und Roaming-Flattern erklärt er nicht; sie bleiben
+  eigene Incidents und melden sich weiter. Flattert der Port eines
+  Nachbar-Routers, ist die Ursache nur über einen per LLDP gesehenen Pfad
+  bestätigt, sonst Hypothese. Flattert der eigene Uplink-Port eines APs,
+  gelten die Abbrüche an diesem AP immer als bestätigt, auch wenn sein Uplink
+  nur abgeleitet ist (die Messung liegt am selben Router); für Router hinter
+  ihm gilt wieder die LLDP-Regel. Ein Port, der lange flattert, erklärt nur
+  Abbrüche nahe an einem seiner Flaps (je ±60 s). Ein Uplink-Ausfall darüber
+  bleibt die Wurzel.
+- **Vergleich mit den Nachbar-Clients.** Ein Client mit Reconnects wird mit
+  den anderen Clients am selben Radio verglichen. Bleiben mindestens drei
+  davon ruhig, steht `client_side` (das Gerät selbst) vorne und die
+  Stromversorgung des APs fällt aus der Liste.
+- **Empfehlung je Ursache.** Die Incident-API liefert `recommendation_key`
+  (`rec_<ursache>`); das Panel zeigt den deutschen Text, die englischen Texte
+  stehen in `docs/realtime-rca.md`. Nur Text, keine Aktion am Router.
+- **Log-Alter im Diagnose-Tab.** Je Router „Log vor 40 s“, „Log: kein
+  Leserecht“ oder der Fehler mit dem Zeitpunkt des letzten guten Lesens
+  (`summary` liefert dafür `log` je Router).
+- **Log-Lücke nach Lesefehlern.** Kann das Log nach Fehlern wieder gelesen
+  werden und meldet der Router verlorene Zeilen, entsteht genau ein
+  `system.log_gap`-Ereignis mit `gap_s` und `missed`.
+- Szenario-Suite `tests/test_net_rt_scenarios.py` und
+  `tests/test_net_rt_log.py`: alle zwölf Szenarien des Plans mit Testnamen
+  belegt.
+
+### Changed
+
+- usteer wird in eigenem Rhythmus jeden zweiten Poll ab Poll 3 gelesen
+  (`USTEER_READ_INTERVAL_CYCLES = 2`); vorher lief es nur in Polls ohne
+  Log-Lesen und wäre mit dem Log bei jedem Poll still ausgefallen.
+- „Wahrscheinlich“ verlangt jetzt zwei unabhängige Quellen; ein Incident, der
+  bisher als *wahrscheinlich* galt, kann als *möglich* erscheinen.
+
 ## [1.40.0] - 2026-11-16
 
 ### Added

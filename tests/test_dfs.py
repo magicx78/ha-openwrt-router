@@ -326,12 +326,25 @@ class TestDfsLogbook:
 class TestReviewFollowUps:
     @pytest.mark.asyncio
     async def test_forced_fetch_restarts_log_rhythm(self):
+        # RT3-D reads the log on every poll; the rhythm logic still holds
+        # for a longer interval.
         coord, api = _coordinator()
-        await _poll(coord, api, [_iface("phy1-ap0", 36)])  # 1
-        await _poll(coord, api, [_iface("phy1-ap0", 36)])  # 2: regular
-        await _poll(coord, api, [_iface("phy1-ap0", 40)])  # 3: forced by change
-        await _poll(coord, api, [_iface("phy1-ap0", 40)])  # 4: not due
-        await _poll(coord, api, [_iface("phy1-ap0", 40)])  # 5: due again
+        with patch("custom_components.openwrt_router.coordinator.LOG_READ_INTERVAL_CYCLES", 2):
+            await _poll(coord, api, [_iface("phy1-ap0", 36)])  # 1
+            await _poll(coord, api, [_iface("phy1-ap0", 36)])  # 2: regular
+            await _poll(coord, api, [_iface("phy1-ap0", 40)])  # 3: forced by change
+            await _poll(coord, api, [_iface("phy1-ap0", 40)])  # 4: not due
+            await _poll(coord, api, [_iface("phy1-ap0", 40)])  # 5: due again
+        assert api.get_log_entries.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_log_read_on_every_poll_and_on_channel_change(self):
+        """RT3-D: from poll 2 on every poll reads the log, a channel change too."""
+        coord, api = _coordinator()
+        await _poll(coord, api, [_iface("phy1-ap0", 36)])  # 1: setup, no log
+        await _poll(coord, api, [_iface("phy1-ap0", 36)])  # 2
+        await _poll(coord, api, [_iface("phy1-ap0", 40)])  # 3: change
+        await _poll(coord, api, [_iface("phy1-ap0", 40)])  # 4
         assert api.get_log_entries.await_count == 3
 
     @pytest.mark.asyncio
