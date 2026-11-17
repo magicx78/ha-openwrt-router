@@ -40,12 +40,14 @@ from custom_components.openwrt_router.diag_model import (
     ProbeKind,
     ProbeOutcome,
     ProbeResult,
+    Severity,
     Stage,
 )
 
 PKG = Path(__file__).resolve().parent.parent / "custom_components" / "openwrt_router"
 
 V4 = AddressFamily.IPV4
+V6 = AddressFamily.IPV6
 OK = ProbeOutcome.OK
 TIMEOUT = ProbeOutcome.TIMEOUT
 WAN1 = Location(LocationKind.WAN, "wan1")
@@ -87,6 +89,7 @@ def p(
     outcome: ProbeOutcome = OK,
     kind: ProbeKind = ProbeKind.TCP,
     target: str = "t",
+    family: AddressFamily = V4,
     **kw: Any,
 ) -> ProbeResult:
     return ProbeResult(
@@ -94,7 +97,7 @@ def p(
         target_id=target,
         kind=kind,
         stage=stage,
-        family=V4,
+        family=family,
         outcome=outcome,
         timestamp=1000.0,
         **kw,
@@ -296,26 +299,297 @@ def test_linking_keeps_every_finding_unchanged() -> None:
     findings = [
         gw_wan_down(),
         no_internet("ap1"),
-        healthy("ap2"),
+        no_internet("ap2"),
         mgmt_lost("ap3"),
         dns_broken("ap4"),
         finding("ap5", [], management_reachable=None),
+        # IPv4 internet down like the others, plus its own IPv6 gateway loss
+        dual(
+            "ap6",
+            [
+                p("ap6", Stage.GATEWAY, target="gw"),
+                *internet("ap6", TIMEOUT),
+                p("ap6", Stage.GATEWAY, TIMEOUT, target="gw6", family=V6),
+            ],
+        ),
     ]
     snapshot = copy.deepcopy(findings)
-    result = correlate(findings, {**FLEET, "ap4": ap_deps()})
+    deps = {**FLEET, "ap4": ap_deps(wan="wan2"), "ap6": ap_deps()}
+    result = correlate(findings, deps)
     assert len(result.findings) == len(findings)
     for given, returned, before in zip(
         findings, result.findings, snapshot, strict=True
     ):
         assert returned is given
         assert returned == before
-    for index, item in enumerate(findings):
-        if item.is_problem:
-            assert result.links_for(index), index
-        else:
-            assert result.links_for(index) == ()
+    link_map = {
+        index: {
+            (link.rule, result.cause(link.cause_id).location)
+            for link in result.links_for(index)
+        }
+        for index in range(len(findings))
+    }
+    central = {("central_internet_access", WAN1)}
+    assert link_map == {
+        0: central,
+        1: central,
+        2: central,
+        3: {("local_finding", Location(LocationKind.ROUTER, "ap3"))},
+        4: {("local_finding", Location(LocationKind.ROUTER, "ap4"))},
+        5: set(),
+        6: {("local_finding", Location(LocationKind.ROUTER, "ap6"))},
+    }
+    assert "ap6" in result.cause("central_internet_access:wan:wan1:ipv4").router_keys
+    assert_links_sound(result)
     names = [f.name for f in dataclasses.fields(CorrelationResult)]
     assert not [n for n in names if "suppress" in n or "hidden" in n]
+
+
+def assert_links_sound(result: CorrelationResult) -> None:
+    """Every link: the finding's own stage/family fit the cause, and the link
+    is never stronger than the finding's own cause class."""
+    rank = list(reversed(CauseClass))  # UNKNOWN < POSSIBLE < PROBABLE < CONFIRMED
+    for link in result.links:
+        item = result.findings[link.finding_index]
+        cause = result.cause(link.cause_id)
+        if link.reason == "secondary_problem":
+            [other] = [
+                o
+                for o in item.also
+                if (o.stage, o.family) == (cause.evidence[0].stage, cause.family)
+            ]
+            assert link.cause_class is other.cause_class, link
+            continue
+        assert rank.index(link.cause_class) <= rank.index(item.cause_class), link
+        if cause.rule == "local_finding":
+            continue
+        assert item.cause_stage in STAGES_OF_RULE[cause.rule], link
+        assert cause.family is None or item.family == cause.family, link
+
+
+STAGES_OF_RULE = {
+    "central_internet_access": {Stage.WAN, Stage.INTERNET},
+    "segment_path": {Stage.GATEWAY},
+    "common_gateway": {Stage.GATEWAY},
+    "common_resolver": {Stage.DNS},
+}
+
+
+def dual(key: str, probes: list[ProbeResult]) -> Finding:
+    return finding(key, probes, ipv6_configured=True)
+
+
+# --- review regressions: a common cause must never excuse an unrelated finding --------
+
+
+def test_ipv4_central_cause_does_not_excuse_ipv6_gateway_loss() -> None:
+    ap1 = dual(
+        "ap1",
+        [
+            p("ap1", Stage.GATEWAY, target="gw"),
+            *internet("ap1", TIMEOUT),
+            p("ap1", Stage.GATEWAY, TIMEOUT, target="gw6", family=V6),
+        ],
+    )
+    assert (ap1.classification, ap1.family) == (Classification.GATEWAY_PROBLEM, V6)
+    result = correlate([ap1, no_internet("ap2")], FLEET)
+    [central] = fleet_causes(result)
+    assert central.family is V4
+    # both of ap1's problems stay visible: its IPv4 symptom in the common
+    # cause, its IPv6 gateway loss as its own cause
+    assert central.router_keys == ("ap1", "ap2")
+    assert linked(result, central.cause_id) == {1}
+    [link] = result.links_for(0)
+    assert link.rule == "local_finding"
+    assert result.cause(link.cause_id).summary_key == "gateway_problem"
+    assert_links_sound(result)
+
+
+def test_resolver_cause_does_not_excuse_gateway_degradation() -> None:
+    dns = [p(k, Stage.DNS, TIMEOUT, ProbeKind.DNS, "dns-gw") for k in ("ap1", "ap2")]
+    ap1 = finding(
+        "ap1",
+        [
+            p("ap1", Stage.GATEWAY, target="gw"),
+            p("ap1", Stage.GATEWAY, TIMEOUT, target="gw-http"),
+            *internet("ap1", OK),
+            dns[0],
+        ],
+    )
+    ap2 = finding(
+        "ap2", [p("ap2", Stage.GATEWAY, target="gw"), *internet("ap2", OK), dns[1]]
+    )
+    assert ap1.classification is Classification.GATEWAY_PROBLEM
+    assert ap1.cause_class is CauseClass.POSSIBLE
+    result = correlate([ap1, ap2], FLEET)
+    [resolver] = fleet_causes(result)
+    assert resolver.router_keys == ("ap1", "ap2")
+    assert linked(result, resolver.cause_id) == {1}
+    [link] = result.links_for(0)
+    assert link.rule == "local_finding"
+    assert link.cause_class is CauseClass.POSSIBLE
+    assert_links_sound(result)
+
+
+def test_segment_cause_does_not_excuse_own_interface_down() -> None:
+    ap1 = finding(
+        "ap1", [p("ap1", Stage.GATEWAY, TIMEOUT, target="gw")], interface_up=False
+    )
+    # the upstream (own LAN) problem is the root; severity reflects the outage
+    assert ap1.classification is Classification.LAN_PROBLEM
+    assert ap1.severity is Severity.CRITICAL
+    ap2 = finding("ap2", [p("ap2", Stage.GATEWAY, target="gw")])
+    result = correlate([ap1, ap2], {"ap1": ap_deps("lan"), "ap2": ap_deps("iot")})
+    assert fleet_causes(result) == []
+    [link] = result.links_for(0)
+    assert link.rule == "local_finding"
+    assert link.cause_class is CauseClass.CONFIRMED
+
+
+def test_central_cause_requires_measured_gateway_reachability() -> None:
+    a1 = finding("ap1", internet("ap1", TIMEOUT))
+    a2 = finding("ap2", internet("ap2", TIMEOUT))
+    result = correlate([a1, a2], FLEET)
+    assert fleet_causes(result) == []
+    assert [link.rule for link in result.links] == ["local_finding"] * 2
+
+
+def test_segment_rule_compares_same_family_only() -> None:
+    a1 = finding(
+        "ap1",
+        [p("ap1", Stage.GATEWAY, TIMEOUT, target="gw6", family=V6)],
+        ipv4_configured=False,
+        ipv6_configured=True,
+    )
+    a2 = finding("ap2", [p("ap2", Stage.GATEWAY, target="gw")])
+    result = correlate([a1, a2], {"ap1": ap_deps("lan"), "ap2": ap_deps("iot")})
+    assert fleet_causes(result) == []
+    assert result.links_for(0)[0].rule == "local_finding"
+
+
+def test_segment_cause_per_family() -> None:
+    lost6 = [
+        p(k, Stage.GATEWAY, TIMEOUT, target="gw6", family=V6) for k in ("ap1", "ap2")
+    ]
+    reached4 = [p(k, Stage.GATEWAY, target="gw") for k in ("ap1", "ap2", "ap3")]
+    ap1 = dual("ap1", [reached4[0], lost6[0]])
+    ap2 = dual("ap2", [reached4[1], lost6[1]])
+    ap3 = dual("ap3", [reached4[2], p("ap3", Stage.GATEWAY, target="gw6", family=V6)])
+    deps = {**FLEET, "ap1": ap_deps("iot"), "ap2": ap_deps("iot")}
+    result = correlate([ap1, ap2, ap3], deps)
+    [cause] = fleet_causes(result)
+    assert cause.rule == "segment_path"
+    assert cause.family is V6
+    assert linked(result, cause.cause_id) == {0, 1}
+    assert_links_sound(result)
+
+
+def test_link_class_never_stronger_than_the_findings_own_class() -> None:
+    def contradicted(key: str) -> Finding:
+        # internet fails while DNS through an external resolver answers:
+        # the finding's own class drops to POSSIBLE
+        return finding(
+            key,
+            [
+                p(key, Stage.GATEWAY, target="gw"),
+                *internet(key, TIMEOUT),
+                p(key, Stage.DNS, OK, ProbeKind.DNS, "dns-ext"),
+            ],
+        )
+
+    a1, a2 = contradicted("ap1"), contradicted("ap2")
+    assert a1.cause_class is CauseClass.POSSIBLE
+    result = correlate([a1, a2], FLEET)
+    [central] = fleet_causes(result)
+    assert central.cause_class is CauseClass.PROBABLE
+    assert {link.cause_class for link in result.links} == {CauseClass.POSSIBLE}
+    assert_links_sound(result)
+
+
+def test_linked_finding_keeps_its_secondary_problem_as_a_cause() -> None:
+    ap1 = dual(
+        "ap1",
+        [
+            p("ap1", Stage.GATEWAY, target="gw"),
+            *internet("ap1", TIMEOUT),
+            p("ap1", Stage.GATEWAY, target="gw6", family=V6),
+            p("ap1", Stage.GATEWAY, TIMEOUT, target="gw6-b", family=V6),
+        ],
+    )
+    assert (ap1.classification, ap1.family) == (Classification.WAN_PROBLEM, V4)
+    result = correlate([ap1, no_internet("ap2")], FLEET)
+    rules = sorted(
+        (link.rule, result.cause(link.cause_id).summary_key)
+        for link in result.links_for(0)
+    )
+    assert rules == [
+        ("central_internet_access", "central_internet_access"),
+        ("local_finding", "gateway_problem"),
+    ]
+    secondary = next(
+        result.cause(link.cause_id)
+        for link in result.links_for(0)
+        if link.rule == "local_finding"
+    )
+    assert secondary.family is V6
+    assert secondary.cause_class is CauseClass.POSSIBLE
+    assert_links_sound(result)
+
+
+def dual_no_internet(key: str, v6_outcome: ProbeOutcome = TIMEOUT) -> Finding:
+    return dual(
+        key,
+        [
+            p(key, Stage.GATEWAY, target="gw"),
+            p(key, Stage.GATEWAY, target="gw6", family=V6),
+            *internet(key, TIMEOUT),
+            *[
+                p(key, Stage.INTERNET, v6_outcome, target=t, family=V6)
+                for t in ("ext-a6", "ext-b6")
+            ],
+        ],
+    )
+
+
+def test_both_families_down_give_one_family_free_cause() -> None:
+    findings = [dual_no_internet("ap1"), dual_no_internet("ap2")]
+    assert findings[0].family is None
+    result = correlate(findings, FLEET)
+    [central] = fleet_causes(result)
+    assert central.family is None
+    assert {e.family for e in central.evidence} == {V4, V6}
+    assert linked(result, central.cause_id) == {0, 1}
+    assert_links_sound(result)
+
+
+def test_cause_of_one_family_does_not_explain_a_both_family_finding() -> None:
+    # ap1 is down in both families, ap2 only in IPv4: the IPv4 cause covers
+    # only half of ap1's finding, so ap1 keeps a local cause
+    findings = [dual_no_internet("ap1"), dual_no_internet("ap2", OK)]
+    result = correlate(findings, FLEET)
+    [central] = fleet_causes(result)
+    assert central.family is V4
+    assert central.router_keys == ("ap1", "ap2")
+    assert linked(result, central.cause_id) == {1}
+    assert [link.rule for link in result.links_for(0)] == ["local_finding"]
+    assert_links_sound(result)
+
+
+def test_resolver_answering_in_one_family_blocks_the_common_cause() -> None:
+    def broken_v4(key: str) -> Finding:
+        return dual(
+            key,
+            [
+                p(key, Stage.GATEWAY, target="gw"),
+                p(key, Stage.GATEWAY, target="gw6", family=V6),
+                *internet(key, OK),
+                p(key, Stage.DNS, TIMEOUT, ProbeKind.DNS, "dns-gw"),
+                p(key, Stage.DNS, OK, ProbeKind.DNS, "dns-gw", family=V6),
+            ],
+        )
+
+    result = correlate([broken_v4("ap1"), broken_v4("ap2")], FLEET)
+    assert fleet_causes(result) == []
 
 
 def test_correlate_accepts_any_iterable_and_returns_a_tuple() -> None:

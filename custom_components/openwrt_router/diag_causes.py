@@ -13,35 +13,46 @@ Rules:
   reports it down; a resolver answered SERVFAIL/REFUSED or timed out while
   the path to it was measured healthy). Correlation alone - the same symptom
   at several routers - gives at most PROBABLE, and a router linked only
-  through its dependency gets at most a PROBABLE link.
-* A finding is linked to a common cause only if the router depends on the
-  cause's location according to ``dependencies`` (a router hosting a
-  location counts as depending on it). Missing dependency data = no link.
+  through its dependency gets at most a PROBABLE link. A link is never
+  stronger than the finding's own cause class.
+* Every common-cause rule works per address family. A cause lists every
+  router it affects (``router_keys``), but a finding is linked to it only
+  if the router depends on the cause's location according to
+  ``dependencies`` (a router hosting a location counts as depending on it)
+  AND the finding's own ``cause_stage`` and family are the ones the cause
+  explains. Missing dependency data = no link.
 * Every problem finding that no common cause explains gets its own local
-  cause with the finding's own class (rule ``local_finding``).
+  cause with the finding's own class (rule ``local_finding``). The main
+  problem of another address family that no common cause covers gets a
+  local cause as well (link reason ``secondary_problem``), so two distinct
+  problems of one router both stay visible.
 
 Common-cause rules (the plan's examples A, C, D):
 
-* ``central_internet_access`` (A): routers that are up and reach their
-  gateway but no external target, all depending on one WAN, and no router
-  depending on that WAN reaches an external target directly.
-* ``segment_path`` (C): routers of a segment lose their gateway while a
-  router of another segment reaches it -> POSSIBLE VLAN/routing/firewall
-  problem of that segment (never more: there is no configuration data yet).
-  ``common_gateway``: all dependents with data lose the gateway -> PROBABLE.
-* ``common_resolver`` (D): routers with working IP connectivity fail to
-  resolve through the same resolver, and none resolves through it.
+* ``central_internet_access`` (A), explains WAN/INTERNET: routers that are
+  up and reach their gateway (measured directly; the router hosting the WAN
+  needs no gateway) but no external target, all depending on one WAN, and
+  no router depending on that WAN reaches an external target directly.
+* ``segment_path`` (C), explains GATEWAY: routers of a segment that are up
+  lose their gateway while a router of another segment reaches it ->
+  POSSIBLE VLAN/routing/firewall problem of that segment (never more: there
+  is no configuration data yet). ``common_gateway``: all dependents with
+  data lose the gateway -> PROBABLE.
+* ``common_resolver`` (D), explains DNS: routers with directly measured
+  working IP connectivity fail to resolve through the same resolver, and
+  none resolves through it.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 
-from .diag_chain import dns_failure_confirmed
+from .diag_chain import dns_failure_confirmed, summary_key
 from .diag_model import (
     FACT_WAN_UP,
+    SEVERITY_RANK,
     AddressFamily,
     Basis,
     Cause,
@@ -54,7 +65,9 @@ from .diag_model import (
     LocationKind,
     PointKind,
     ProbeKind,
+    Severity,
     Stage,
+    StageProblem,
     StageResult,
     StageState,
     weaker_class,
@@ -68,8 +81,17 @@ RULE_SEGMENT = "segment_path"
 RULE_GATEWAY = "common_gateway"
 RULE_RESOLVER = "common_resolver"
 
+# The stages of a finding that a common cause of each rule can explain.
+EXPLAINS: dict[str, frozenset[Stage]] = {
+    RULE_CENTRAL: frozenset({Stage.WAN, Stage.INTERNET}),
+    RULE_SEGMENT: frozenset({Stage.GATEWAY}),
+    RULE_GATEWAY: frozenset({Stage.GATEWAY}),
+    RULE_RESOLVER: frozenset({Stage.DNS}),
+}
+
 LINK_AT_LOCATION = "measured_at_cause_location"
 LINK_DEPENDS = "depends_on_cause_location"
+LINK_SECONDARY = "secondary_problem"
 
 
 def _id_set(value: Iterable[object], name: str) -> frozenset:
@@ -118,17 +140,29 @@ class _Member:
     deps: RouterDependencies
 
 
+@dataclass(frozen=True)
+class _Hit:
+    """A common cause found for one address family (None = both)."""
+
+    rule: str
+    location: Location
+    family: AddressFamily | None
+    cause_class: CauseClass
+    summary_key: str
+    reason: str
+    members: tuple[_Member, ...]
+    confirm: frozenset[int] = frozenset()
+    evidence: tuple[Evidence, ...] = ()
+
+    def shape(self) -> tuple[object, ...]:
+        indexes = tuple(m.index for m in self.members)
+        return (indexes, self.confirm, self.cause_class, self.reason)
+
+
 _Result = tuple[Cause, tuple[CauseLink, ...]]
 
 
-# --- chain predicates ---------------------------------------------------------------
-
-
-def _stages(member: _Member, stage: Stage) -> list[StageResult]:
-    chain = member.finding.chain
-    if chain is None:
-        return []
-    return [chain.stage(stage, family) for family in chain.families]
+# --- chain predicates (always for one family) -------------------------------------------
 
 
 def _stage(member: _Member, stage: Stage, family: AddressFamily) -> StageResult | None:
@@ -151,11 +185,17 @@ def _healthy_direct(result: StageResult | None) -> bool:
     )
 
 
-def _no_external(member: _Member, family: AddressFamily) -> bool:
-    """Up, gateway not lost, but WAN or internet failed in ``family``."""
+def _up(member: _Member, family: AddressFamily) -> bool:
+    return _state(member, Stage.ROUTER, family) == StageState.HEALTHY
+
+
+def _no_external(member: _Member, family: AddressFamily, wan: Location) -> bool:
+    """Up, gateway measured reachable (or hosting the WAN itself), but WAN or
+    internet failed in ``family``."""
+    gateway = _healthy_direct(_stage(member, Stage.GATEWAY, family))
     return (
-        _state(member, Stage.ROUTER, family) == StageState.HEALTHY
-        and _state(member, Stage.GATEWAY, family) != StageState.FAILED
+        _up(member, family)
+        and (gateway or wan in member.deps.hosts)
         and StageState.FAILED
         in (_state(member, Stage.WAN, family), _state(member, Stage.INTERNET, family))
     )
@@ -168,27 +208,26 @@ def _wan_down_fact(member: _Member, family: AddressFamily) -> bool:
     )
 
 
-def _gateway_lost(member: _Member) -> bool:
-    chain = member.finding.chain
-    return chain is not None and any(
-        _state(member, Stage.ROUTER, f) != StageState.FAILED
-        and _state(member, Stage.GATEWAY, f) == StageState.FAILED
-        for f in chain.families
+def _gateway_lost(member: _Member, family: AddressFamily) -> bool:
+    return (
+        _up(member, family)
+        and _state(member, Stage.GATEWAY, family) == StageState.FAILED
     )
 
 
-def _gateway_reached(member: _Member) -> bool:
-    return any(_healthy_direct(s) for s in _stages(member, Stage.GATEWAY))
+def _gateway_reached(member: _Member, family: AddressFamily) -> bool:
+    return _healthy_direct(_stage(member, Stage.GATEWAY, family))
 
 
 def _dns_items(
-    member: _Member, resolver: str, ok: bool, family: AddressFamily | None = None
+    member: _Member, resolver: str, ok: bool, family: AddressFamily
 ) -> list[Evidence]:
+    result = _stage(member, Stage.DNS, family)
+    if result is None:
+        return []
     return [
         e
-        for s in _stages(member, Stage.DNS)
-        if family is None or s.family == family
-        for e in s.evidence
+        for e in result.evidence
         if e.kind == ProbeKind.DNS
         and e.direct
         and e.ok is ok
@@ -196,83 +235,29 @@ def _dns_items(
     ]
 
 
-def _resolver_fails(member: _Member, resolver: str) -> bool:
-    """Direct DNS failures through ``resolver`` while IP was not lost."""
-    chain = member.finding.chain
-    return chain is not None and any(
-        _state(member, Stage.ROUTER, f) != StageState.FAILED
-        and _state(member, Stage.INTERNET, f) != StageState.FAILED
-        and _dns_items(member, resolver, False, f)
-        for f in chain.families
+def _resolver_fails(member: _Member, resolver: str, family: AddressFamily) -> bool:
+    """Direct DNS failures through ``resolver`` while IP connectivity was
+    measured working."""
+    return (
+        _up(member, family)
+        and _healthy_direct(_stage(member, Stage.INTERNET, family))
+        and bool(_dns_items(member, resolver, False, family))
     )
-
-
-def _resolver_confirmed(member: _Member, resolver: str) -> bool:
-    chain = member.finding.chain
-    return chain is not None and any(
-        dns_failure_confirmed(chain, f, resolver) for f in chain.families
-    )
-
-
-# --- building causes and links ----------------------------------------------------------
-
-
-def _make(
-    rule: str,
-    location: Location,
-    cause_class: CauseClass,
-    summary_key: str,
-    reason: str,
-    members: Iterable[_Member],
-    *,
-    confirming: Iterable[int] = (),
-    family: AddressFamily | None = None,
-    evidence: Iterable[Evidence] = (),
-) -> _Result:
-    members = sorted(members, key=lambda m: m.index)
-    at_location = set(confirming)
-    suffix = f":{family}" if family is not None else ""
-    cause = Cause(
-        cause_id=f"{rule}:{location.kind}:{location.id}{suffix}",
-        location=location,
-        cause_class=cause_class,
-        rule=rule,
-        summary_key=summary_key,
-        reason=reason,
-        family=family,
-        router_keys=tuple(sorted({m.finding.point.label for m in members})),
-        evidence=tuple(dict.fromkeys(evidence)),
-    )
-    links = tuple(
-        CauseLink(
-            finding_index=m.index,
-            router_key=m.finding.router_key,
-            cause_id=cause.cause_id,
-            cause_class=cause_class
-            if m.index in at_location
-            else weaker_class(cause_class, CauseClass.PROBABLE),
-            rule=rule,
-            reason=LINK_AT_LOCATION if m.index in at_location else LINK_DEPENDS,
-        )
-        for m in members
-    )
-    return cause, links
 
 
 def _evidence(
     members: Iterable[_Member],
-    stages: Iterable[Stage],
+    stage: Stage,
+    family: AddressFamily,
     keep: Callable[[Evidence], bool],
-) -> list[Evidence]:
-    wanted = tuple(stages)
-    return [
+) -> tuple[Evidence, ...]:
+    return tuple(
         e
         for m in members
-        for stage in wanted
-        for s in _stages(m, stage)
-        for e in s.evidence
+        if (result := _stage(m, stage, family)) is not None
+        for e in result.evidence
         if keep(e)
-    ]
+    )
 
 
 def _failing(item: Evidence) -> bool:
@@ -283,25 +268,94 @@ def _any(item: Evidence) -> bool:
     return item.ok is not None
 
 
+# --- building causes and links ----------------------------------------------------------
+
+
+def _merge(hits: Sequence[_Hit]) -> list[_Hit]:
+    """Both families showing the same routers and verdict: one cause."""
+    if len(hits) != len(AddressFamily) or len({h.shape() for h in hits}) != 1:
+        return list(hits)
+    evidence = tuple(dict.fromkeys(e for h in hits for e in h.evidence))
+    return [replace(hits[0], family=None, evidence=evidence)]
+
+
+def _explains(hit: _Hit, finding: Finding) -> bool:
+    """The finding's own main problem is what this cause can explain."""
+    return finding.cause_stage in EXPLAINS[hit.rule] and (
+        hit.family is None or finding.family == hit.family
+    )
+
+
+def _build(hit: _Hit) -> _Result:
+    members = sorted(hit.members, key=lambda m: m.index)
+    suffix = f":{hit.family}" if hit.family is not None else ""
+    cause = Cause(
+        cause_id=f"{hit.rule}:{hit.location.kind}:{hit.location.id}{suffix}",
+        location=hit.location,
+        cause_class=hit.cause_class,
+        rule=hit.rule,
+        summary_key=hit.summary_key,
+        reason=hit.reason,
+        family=hit.family,
+        router_keys=tuple(sorted({m.finding.point.label for m in members})),
+        evidence=tuple(dict.fromkeys(hit.evidence)),
+    )
+    links = []
+    for m in members:
+        if not _explains(hit, m.finding):
+            continue
+        at_location = m.index in hit.confirm
+        cause_class = (
+            hit.cause_class
+            if at_location
+            else weaker_class(hit.cause_class, CauseClass.PROBABLE)
+        )
+        links.append(
+            CauseLink(
+                finding_index=m.index,
+                router_key=m.finding.router_key,
+                cause_id=cause.cause_id,
+                cause_class=weaker_class(cause_class, m.finding.cause_class),
+                rule=hit.rule,
+                reason=LINK_AT_LOCATION if at_location else LINK_DEPENDS,
+            )
+        )
+    return cause, tuple(links)
+
+
 # --- rule A: central internet access -------------------------------------------------
 
 
 def _central_for(
     wan: Location, dependents: list[_Member], family: AddressFamily
-) -> tuple[tuple[_Member, ...], frozenset[int]] | None:
+) -> _Hit | None:
     if any(_healthy_direct(_stage(m, Stage.INTERNET, family)) for m in dependents):
         return None  # someone behind this WAN reaches the internet
-    affected = [m for m in dependents if _no_external(m, family)]
+    affected = tuple(m for m in dependents if _no_external(m, family, wan))
     confirm = frozenset(
         m.index for m in affected if wan in m.deps.hosts and _wan_down_fact(m, family)
     )
     if not confirm and len(affected) < 2:
         return None
-    return tuple(affected), confirm
+    evidence = _evidence(affected, Stage.WAN, family, _failing)
+    evidence += _evidence(affected, Stage.INTERNET, family, _failing)
+    return _Hit(
+        RULE_CENTRAL,
+        wan,
+        family,
+        CauseClass.CONFIRMED if confirm else CauseClass.PROBABLE,
+        RULE_CENTRAL,
+        "gateway_reports_wan_down"
+        if confirm
+        else "no_dependent_router_reaches_external_targets",
+        affected,
+        confirm,
+        evidence,
+    )
 
 
-def _central_internet(members: list[_Member]) -> list[_Result]:
-    results: list[_Result] = []
+def _central_internet(members: list[_Member]) -> list[_Hit]:
+    hits: list[_Hit] = []
     wans = {
         loc
         for m in members
@@ -310,51 +364,30 @@ def _central_internet(members: list[_Member]) -> list[_Result]:
     }
     for wan in sorted(wans, key=lambda loc: loc.id):
         dependents = [m for m in members if m.deps.depends_on(wan)]
-        hits = {
-            f: hit
-            for f in AddressFamily
-            if (hit := _central_for(wan, dependents, f)) is not None
-        }
-        values = set(hits.values())
-        if len(hits) == len(AddressFamily) and len(values) == 1:
-            hits = {None: values.pop()}  # same routers, same evidence: one cause
-        for family, (affected, confirm) in hits.items():
-            cause_class = CauseClass.CONFIRMED if confirm else CauseClass.PROBABLE
-            reason = (
-                "gateway_reports_wan_down"
-                if confirm
-                else "no_dependent_router_reaches_external_targets"
-            )
-            results.append(
-                _make(
-                    RULE_CENTRAL,
-                    wan,
-                    cause_class,
-                    RULE_CENTRAL,
-                    reason,
-                    affected,
-                    confirming=confirm,
-                    family=family,
-                    evidence=_evidence(affected, (Stage.WAN, Stage.INTERNET), _failing),
-                )
-            )
-    return results
+        found = [
+            hit for f in AddressFamily if (hit := _central_for(wan, dependents, f))
+        ]
+        hits.extend(_merge(found))
+    return hits
 
 
 # --- rule C: gateway reachability per segment ------------------------------------------
 
 
-def _segment_causes(affected: list[_Member], working: list[_Member]) -> list[_Result]:
+def _segment_hits(
+    affected: list[_Member], working: list[_Member], family: AddressFamily
+) -> list[_Hit]:
     taken = {s for m in working for s in m.deps.segments}
-    results: list[_Result] = []
+    hits: list[_Hit] = []
     for segment in sorted({s for m in affected for s in m.deps.segments} - taken):
-        hit = [m for m in affected if segment in m.deps.segments]
-        evidence = _evidence(hit, (Stage.GATEWAY,), _failing)
-        evidence += _evidence(working, (Stage.GATEWAY,), _any)
-        results.append(
-            _make(
+        hit = tuple(m for m in affected if segment in m.deps.segments)
+        evidence = _evidence(hit, Stage.GATEWAY, family, _failing)
+        evidence += _evidence(working, Stage.GATEWAY, family, _any)
+        hits.append(
+            _Hit(
                 RULE_SEGMENT,
                 Location(LocationKind.SEGMENT, segment),
+                family,
                 CauseClass.POSSIBLE,
                 "vlan_routing_or_firewall",
                 "segment_cannot_reach_gateway_other_segment_can",
@@ -362,43 +395,91 @@ def _segment_causes(affected: list[_Member], working: list[_Member]) -> list[_Re
                 evidence=evidence,
             )
         )
-    return results
+    return hits
 
 
-def _gateway_paths(members: list[_Member]) -> list[_Result]:
-    results: list[_Result] = []
+def _gateway_family(
+    gateway: str, dependents: list[_Member], family: AddressFamily
+) -> list[_Hit]:
+    affected = [m for m in dependents if _gateway_lost(m, family)]
+    working = [m for m in dependents if _gateway_reached(m, family)]
+    if not affected:
+        return []
+    if working:
+        return _segment_hits(affected, working, family)
+    if len(affected) < 2:
+        return []
+    return [
+        _Hit(
+            RULE_GATEWAY,
+            Location(LocationKind.ROUTER, gateway),
+            family,
+            CauseClass.PROBABLE,
+            RULE_GATEWAY,
+            "several_dependents_cannot_reach_gateway",
+            tuple(affected),
+            evidence=_evidence(affected, Stage.GATEWAY, family, _failing),
+        )
+    ]
+
+
+def _by_location(hits: Iterable[_Hit]) -> list[_Hit]:
+    """Merge the per-family hits of each (rule, location)."""
+    groups: dict[tuple[str, Location], list[_Hit]] = {}
+    for hit in hits:
+        groups.setdefault((hit.rule, hit.location), []).append(hit)
+    return [merged for group in groups.values() for merged in _merge(group)]
+
+
+def _gateway_paths(members: list[_Member]) -> list[_Hit]:
+    hits: list[_Hit] = []
     for gateway in sorted({m.deps.gateway for m in members if m.deps.gateway}):
         dependents = [
             m
             for m in members
             if m.deps.gateway == gateway and m.finding.router_key != gateway
         ]
-        affected = [m for m in dependents if _gateway_lost(m)]
-        working = [m for m in dependents if _gateway_reached(m)]
-        if not affected:
-            continue
-        if working:
-            results.extend(_segment_causes(affected, working))
-        elif len(affected) >= 2:
-            results.append(
-                _make(
-                    RULE_GATEWAY,
-                    Location(LocationKind.ROUTER, gateway),
-                    CauseClass.PROBABLE,
-                    RULE_GATEWAY,
-                    "several_dependents_cannot_reach_gateway",
-                    affected,
-                    evidence=_evidence(affected, (Stage.GATEWAY,), _failing),
-                )
-            )
-    return results
+        found = [
+            hit
+            for family in AddressFamily
+            for hit in _gateway_family(gateway, dependents, family)
+        ]
+        hits.extend(_by_location(found))
+    return hits
 
 
 # --- rule D: common resolver -------------------------------------------------------------
 
 
-def _common_resolver(members: list[_Member]) -> list[_Result]:
-    results: list[_Result] = []
+def _resolver_for(
+    resolver: Location, dependents: list[_Member], family: AddressFamily
+) -> _Hit | None:
+    affected = tuple(m for m in dependents if _resolver_fails(m, resolver.id, family))
+    confirm = frozenset(
+        m.index
+        for m in affected
+        if m.finding.chain is not None
+        and dns_failure_confirmed(m.finding.chain, family, resolver.id)
+    )
+    if not confirm and len(affected) < 2:
+        return None
+    return _Hit(
+        RULE_RESOLVER,
+        resolver,
+        family,
+        CauseClass.CONFIRMED if confirm else CauseClass.PROBABLE,
+        "common_resolver_or_upstream_dns",
+        "resolver_failure_measured"
+        if confirm
+        else "several_dependents_fail_to_resolve",
+        affected,
+        confirm,
+        tuple(e for m in affected for e in _dns_items(m, resolver.id, False, family)),
+    )
+
+
+def _common_resolver(members: list[_Member]) -> list[_Hit]:
+    hits: list[_Hit] = []
     resolvers = {
         loc
         for m in members
@@ -407,42 +488,32 @@ def _common_resolver(members: list[_Member]) -> list[_Result]:
     }
     for resolver in sorted(resolvers, key=lambda loc: loc.id):
         dependents = [m for m in members if m.deps.depends_on(resolver)]
-        if any(_dns_items(m, resolver.id, True) for m in dependents):
-            continue  # the resolver answers for someone
-        affected = [m for m in dependents if _resolver_fails(m, resolver.id)]
-        confirm = frozenset(
-            m.index for m in affected if _resolver_confirmed(m, resolver.id)
-        )
-        if not confirm and len(affected) < 2:
-            continue
-        failing = [e for m in affected for e in _dns_items(m, resolver.id, False)]
-        families = {e.family for e in failing}
-        results.append(
-            _make(
-                RULE_RESOLVER,
-                resolver,
-                CauseClass.CONFIRMED if confirm else CauseClass.PROBABLE,
-                "common_resolver_or_upstream_dns",
-                "resolver_failure_measured"
-                if confirm
-                else "several_dependents_fail_to_resolve",
-                affected,
-                confirming=confirm,
-                family=families.pop() if len(families) == 1 else None,
-                evidence=failing,
-            )
-        )
-    return results
+        if any(
+            _dns_items(m, resolver.id, True, f)
+            for m in dependents
+            for f in AddressFamily
+        ):
+            continue  # the resolver answers for someone, in any family
+        found = [
+            hit
+            for f in AddressFamily
+            if (hit := _resolver_for(resolver, dependents, f))
+        ]
+        hits.extend(_merge(found))
+    return hits
 
 
 # --- local causes and entry point ---------------------------------------------------------
 
 
-def _local(index: int, finding: Finding) -> _Result:
+def _location(finding: Finding) -> Location:
     if finding.point.kind == PointKind.HA:
-        location = Location(LocationKind.HA, PointKind.HA.value)
-    else:
-        location = Location(LocationKind.ROUTER, finding.point.label)
+        return Location(LocationKind.HA, PointKind.HA.value)
+    return Location(LocationKind.ROUTER, finding.point.label)
+
+
+def _local(index: int, finding: Finding) -> _Result:
+    location = _location(finding)
     cause = Cause(
         cause_id=f"{RULE_LOCAL}:{location.kind}:{location.id}:{index}",
         location=location,
@@ -465,6 +536,61 @@ def _local(index: int, finding: Finding) -> _Result:
     return cause, (link,)
 
 
+def _other_family_heads(finding: Finding) -> list[StageProblem]:
+    """Main (most upstream serious) problem of every family other than the
+    finding's own; a family-free finding has none."""
+    if finding.family is None:
+        return []
+    heads: dict[AddressFamily, StageProblem] = {}
+    for problem in finding.also:
+        if (
+            problem.family != finding.family
+            and SEVERITY_RANK[problem.severity] >= SEVERITY_RANK[Severity.WARNING]
+        ):
+            heads.setdefault(problem.family, problem)
+    return list(heads.values())
+
+
+def _covered(problem: StageProblem, router: str, causes: Iterable[Cause]) -> bool:
+    return any(
+        router in cause.router_keys
+        and problem.stage in EXPLAINS[cause.rule]
+        and cause.family in (None, problem.family)
+        for cause in causes
+    )
+
+
+def _secondary(index: int, finding: Finding, problem: StageProblem) -> _Result:
+    location = _location(finding)
+    chain = finding.chain
+    evidence = (
+        () if chain is None else chain.stage(problem.stage, problem.family).evidence
+    )
+    cause = Cause(
+        cause_id=(
+            f"{RULE_LOCAL}:{location.kind}:{location.id}:{index}"
+            f":{problem.family}:{problem.stage}"
+        ),
+        location=location,
+        cause_class=problem.cause_class,
+        rule=RULE_LOCAL,
+        summary_key=summary_key(problem.classification),
+        reason=problem.classification.value,
+        family=problem.family,
+        router_keys=(finding.point.label,),
+        evidence=evidence,
+    )
+    link = CauseLink(
+        finding_index=index,
+        router_key=finding.router_key,
+        cause_id=cause.cause_id,
+        cause_class=problem.cause_class,
+        rule=RULE_LOCAL,
+        reason=LINK_SECONDARY,
+    )
+    return cause, (link,)
+
+
 def _members(
     findings: tuple[Finding, ...], dependencies: Mapping[str, RouterDependencies]
 ) -> list[_Member]:
@@ -480,6 +606,21 @@ def _members(
     return members
 
 
+def _local_causes(
+    items: tuple[Finding, ...], common: list[Cause], explained: set[int]
+) -> list[_Result]:
+    results: list[_Result] = []
+    for index, finding in enumerate(items):
+        if not finding.is_problem:
+            continue
+        if index not in explained:
+            results.append(_local(index, finding))
+        for problem in _other_family_heads(finding):
+            if not _covered(problem, finding.point.label, common):
+                results.append(_secondary(index, finding, problem))
+    return results
+
+
 def correlate(
     findings: Iterable[Finding],
     dependencies: Mapping[str, RouterDependencies],
@@ -490,15 +631,13 @@ def correlate(
     causes: list[Cause] = []
     links: list[CauseLink] = []
     for rule in (_central_internet, _gateway_paths, _common_resolver):
-        for cause, rule_links in rule(members):
+        for cause, rule_links in map(_build, rule(members)):
             causes.append(cause)
             links.extend(rule_links)
     explained = {link.finding_index for link in links}
-    for index, finding in enumerate(items):
-        if finding.is_problem and index not in explained:
-            cause, local_links = _local(index, finding)
-            causes.append(cause)
-            links.extend(local_links)
+    for cause, local_links in _local_causes(items, list(causes), explained):
+        causes.append(cause)
+        links.extend(local_links)
     links.sort(key=lambda link: (link.finding_index, link.cause_id))
     _LOGGER.debug(
         "diag correlate: %d finding(s), %d cause(s), %d link(s)",

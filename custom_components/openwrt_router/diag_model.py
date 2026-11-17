@@ -12,8 +12,9 @@ Vocabulary:
   the chain Router -> Gateway -> WAN -> Internet -> DNS.
 * ``Evidence`` is what a probe result or a poll fact says about one stage.
   ``direct`` is True only when it was measured at the chain's own point (or
-  is a fact from that router's own poll); everything else is labelled
-  indirect and can never confirm a cause.
+  is a fact from that router's own poll). A Home Assistant probe enters a
+  router's chain only when its ``subject`` names that router; it is labelled
+  indirect, can never confirm a cause and never counts as coverage.
 * ``StageResult`` / ``ChainResult`` are the evaluated chain, per address
   family. ``Finding`` is the classification of one chain. ``Cause`` and
   ``CauseLink`` are produced by ``diag_causes.correlate``; links never hide
@@ -143,6 +144,7 @@ SEVERITY_RANK = {
 class Classification(StrEnum):
     NO_FAULT_DETECTED = "no_fault_detected"
     INSUFFICIENT_DATA = "insufficient_data"
+    PARTIALLY_MEASURED = "partially_measured"
     ROUTER_OFFLINE = "router_offline"
     MANAGEMENT_UNREACHABLE = "management_unreachable"
     LAN_PROBLEM = "lan_problem"
@@ -160,7 +162,11 @@ class Classification(StrEnum):
 
 
 NON_PROBLEM_CLASSIFICATIONS = frozenset(
-    {Classification.NO_FAULT_DETECTED, Classification.INSUFFICIENT_DATA}
+    {
+        Classification.NO_FAULT_DETECTED,
+        Classification.INSUFFICIENT_DATA,
+        Classification.PARTIALLY_MEASURED,
+    }
 )
 
 
@@ -231,6 +237,9 @@ class MeasurementPoint:
 class ProbeResult:
     """One measurement. ``via``: stages a reply also proves reachable (e.g. a
     DNS answer from the resolver on the gateway proves the gateway hop).
+    ``subject``: for a probe taken at Home Assistant, the router key whose
+    chain it is about (None = about Home Assistant's own path); a router's
+    probe is always about that router.
     ``evidence``: raw extra details (never logged)."""
 
     point: MeasurementPoint
@@ -245,11 +254,16 @@ class ProbeResult:
     sent: int | None = None
     received: int | None = None
     via: frozenset[Stage] = frozenset()
+    subject: str | None = None
     evidence: Mapping[str, Any] = field(default_factory=dict, hash=False)
 
     def __post_init__(self) -> None:
         if self.kind == ProbeKind.FACT:
             raise ValueError("poll facts are passed as ChainFacts, not probes")
+        if self.subject is not None and (
+            not self.subject or self.point.kind != PointKind.HA
+        ):
+            raise ValueError("only a Home Assistant probe takes a router subject")
         if self.outcome in DNS_ONLY_OUTCOMES and self.kind != ProbeKind.DNS:
             raise ValueError("NXDOMAIN/SERVFAIL only apply to DNS probes")
         if not self.target_id:
@@ -344,8 +358,10 @@ def _ratio(part: int, whole: int) -> float:
 
 @dataclass(frozen=True)
 class ChainResult:
-    """Evaluated chain for one measurement point. ``excluded``: probes taken
-    at another router, never used for this chain."""
+    """Evaluated chain for one measurement point. ``excluded``: probes not
+    about this chain (taken at another router, or a Home Assistant probe
+    whose ``subject`` is another router or, for the Home Assistant chain,
+    any router), never used for it."""
 
     point: MeasurementPoint
     stages: tuple[StageResult, ...]
@@ -366,26 +382,38 @@ class ChainResult:
     def _of(self, family: AddressFamily | None) -> list[StageResult]:
         return [s for s in self.stages if family is None or s.family == family]
 
-    def coverage_for(self, family: AddressFamily | None = None) -> float:
-        """Measured stages / applicable stages (0.0 if nothing applies)."""
+    def _share(self, family: AddressFamily | None, basis: Basis) -> float:
         stages = [s for s in self._of(family) if s.applicable]
-        return _ratio(sum(s.measured for s in stages), len(stages))
+        hits = sum(s.measured and s.basis == basis for s in stages)
+        return _ratio(hits, len(stages))
+
+    def coverage_for(self, family: AddressFamily | None = None) -> float:
+        """Stages measured by direct evidence / applicable stages (0.0 if
+        nothing applies). Indirect evidence never counts as coverage."""
+        return self._share(family, Basis.DIRECT)
 
     @property
     def coverage(self) -> float:
         return self.coverage_for(None)
 
     @property
-    def direct_coverage(self) -> float:
-        """Like ``coverage`` but only stages resting on direct evidence."""
-        stages = [s for s in self.stages if s.applicable]
-        direct = sum(s.measured and s.basis == Basis.DIRECT for s in stages)
-        return _ratio(direct, len(stages))
+    def indirect_coverage(self) -> float:
+        """Applicable stages measured by indirect (Home Assistant) evidence
+        only; reported separately, never part of ``coverage``."""
+        return self._share(None, Basis.INDIRECT)
+
+    def unmeasured(self) -> tuple[str, ...]:
+        """``family:stage`` of applicable stages without direct measurement."""
+        return tuple(
+            f"{s.family}:{s.stage}"
+            for s in self.stages
+            if s.applicable and not (s.measured and s.basis == Basis.DIRECT)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         data = plain(self)
         data["coverage"] = self.coverage
-        data["direct_coverage"] = self.direct_coverage
+        data["indirect_coverage"] = self.indirect_coverage
         return data
 
 
@@ -401,12 +429,28 @@ class ChangeRecord:
 
 
 @dataclass(frozen=True)
+class StageProblem:
+    """A further problem of the same chain, next to the finding's main one."""
+
+    stage: Stage
+    family: AddressFamily
+    classification: Classification
+    severity: Severity
+    cause_class: CauseClass
+
+    def to_dict(self) -> dict[str, Any]:
+        return plain(self)
+
+
+@dataclass(frozen=True)
 class Finding:
     """Classification of one chain (or one observed change).
 
     ``cause_class`` rates the local hypothesis ``cause_stage``;
     ``underlying`` holds the stage classification behind an
-    IPv4-/IPv6-only disturbance.
+    IPv4-/IPv6-only disturbance. ``also`` keeps every other stage problem of
+    the chain; ``unmeasured`` lists applicable stages (``family:stage``)
+    without a direct measurement.
     """
 
     point: MeasurementPoint
@@ -421,6 +465,8 @@ class Finding:
     evidence: tuple[Evidence, ...] = ()
     reasons: tuple[str, ...] = ()
     contradictions: tuple[Contradiction, ...] = ()
+    also: tuple[StageProblem, ...] = ()
+    unmeasured: tuple[str, ...] = ()
     chain: ChainResult | None = None
     change: ChangeRecord | None = None
 

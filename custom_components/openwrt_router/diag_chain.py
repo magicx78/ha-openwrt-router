@@ -5,7 +5,9 @@ Pure module: standard library only, no Home Assistant imports, no I/O.
 
 Rules implemented here (numbers from the plan's acceptance list):
 
-1. A stage without usable evidence is UNKNOWN and lowers coverage.
+1. A stage without usable evidence is UNKNOWN and lowers coverage. "No
+   fault detected" needs every applicable stage measured directly; otherwise
+   the result is PARTIALLY_MEASURED with the unmeasured stages listed.
 2. Only a non-ICMP ("hard") failure can fail a stage; any success for the
    same stage (TCP, a DNS reply through that hop, a poll fact, an indirect
    success) keeps it from FAILED. ICMP-only failure is DEGRADED with reason
@@ -14,10 +16,12 @@ Rules implemented here (numbers from the plan's acceptance list):
    targets all fail hard in the same round. One failing target among working
    ones is HEALTHY with reason ``single_external_service``; a single
    configured target failing is DEGRADED at most.
-4. Probes taken at another router are excluded. Probes taken at Home
-   Assistant are indirect evidence for a router's chain: they are used only
-   when no direct evidence exists for that stage and then cap it at
-   DEGRADED, and they never yield a CONFIRMED cause.
+4. Probes taken at another router are excluded. A probe taken at Home
+   Assistant is indirect evidence for a router's chain only when its
+   ``subject`` is that router; Home Assistant probes without a subject
+   belong to the Home Assistant chain only. Indirect evidence is used only
+   when no direct evidence exists for that stage, caps it at DEGRADED, never
+   yields a CONFIRMED cause and never counts as coverage.
 5. Below a FAILED stage, probe failures are masked (stage UNKNOWN unless
    other evidence remains); a downstream stage measured HEALTHY directly is
    reported as a ``Contradiction``.
@@ -33,7 +37,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .diag_model import (
     FACT_DEFAULT_ROUTE,
@@ -61,6 +65,7 @@ from .diag_model import (
     ProbeResult,
     Severity,
     Stage,
+    StageProblem,
     StageResult,
     StageState,
     weaker_class,
@@ -94,6 +99,7 @@ R_CONTRADICTED = "contradicted_by_downstream"
 _RECOMMENDATION = {
     Classification.NO_FAULT_DETECTED: "none",
     Classification.INSUFFICIENT_DATA: "enable_more_measurements",
+    Classification.PARTIALLY_MEASURED: "enable_more_measurements",
     Classification.ROUTER_OFFLINE: "check_router_power_and_uplink",
     Classification.MANAGEMENT_UNREACHABLE: "check_rpcd_and_uhttpd",
     Classification.LAN_PROBLEM: "check_lan_interface_and_cabling",
@@ -110,6 +116,11 @@ _RECOMMENDATION = {
     Classification.DNS_SERVER_CHANGED: "review_dns_server_change",
 }
 _SUMMARY = {Classification.DNS_PROBLEM: "internet_access_restricted"}
+
+
+def summary_key(classification: Classification) -> str:
+    """Summary text key for a classification."""
+    return _SUMMARY.get(classification, classification.value)
 
 
 @dataclass(frozen=True)
@@ -241,17 +252,22 @@ def _fact_evidence(point: MeasurementPoint, facts: ChainFacts) -> list[Evidence]
     return items
 
 
+def _about(point: MeasurementPoint, probe: ProbeResult) -> bool:
+    """Is ``probe`` about the chain of ``point``? A router uses its own probes
+    and Home Assistant probes naming it as subject; Home Assistant uses its
+    own probes without a subject."""
+    if probe.point.kind == PointKind.HA:
+        return probe.subject == point.key
+    return probe.point == point
+
+
 def _split(
     point: MeasurementPoint, probes: Iterable[ProbeResult]
 ) -> tuple[list[ProbeResult], list[ProbeResult]]:
-    """Own and Home Assistant probes are used; other routers' are excluded."""
     used: list[ProbeResult] = []
     excluded: list[ProbeResult] = []
     for probe in probes:
-        if probe.point == point or probe.point.kind == PointKind.HA:
-            used.append(probe)
-        else:
-            excluded.append(probe)
+        (used if _about(point, probe) else excluded).append(probe)
     return used, excluded
 
 
@@ -633,11 +649,35 @@ def _rank(problem: _Problem) -> tuple[int, int]:
     return (-SEVERITY_RANK[problem.severity], STAGE_ORDER.index(problem.stage))
 
 
+def _key(problem: _Problem) -> tuple[Stage, AddressFamily]:
+    return problem.stage, problem.family
+
+
+def _serious(problem: _Problem) -> bool:
+    return SEVERITY_RANK[problem.severity] >= SEVERITY_RANK[Severity.WARNING]
+
+
+def _primary(problems: Sequence[_Problem]) -> _Problem:
+    """Main problem of one family (``problems`` in stage order): the most
+    upstream one at warning level or above - later stages depend on it -
+    carrying the family's worst severity. Notes only: the most severe one."""
+    serious = [p for p in problems if _serious(p)]
+    if not serious:
+        return min(problems, key=_rank)
+    worst = max((p.severity for p in serious), key=SEVERITY_RANK.__getitem__)
+    return replace(serious[0], severity=worst)
+
+
+def _stage_problems(problems: Iterable[_Problem]) -> tuple[StageProblem, ...]:
+    return tuple(
+        StageProblem(p.stage, p.family, p.classification, p.severity, p.cause_class)
+        for p in problems
+    )
+
+
 def _also(problems: Iterable[_Problem], chosen: _Problem) -> tuple[str, ...]:
     out = []
     for p in problems:
-        if p is chosen:
-            continue
         prefix = "also:" if p.family == chosen.family else f"also:{p.family}:"
         out.append(f"{prefix}{p.stage}:{p.classification}")
     return tuple(out)
@@ -665,7 +705,7 @@ def _finding(
         point=chain.point,
         classification=classification,
         severity=problem.severity,
-        summary_key=_SUMMARY.get(classification, classification.value),
+        summary_key=summary_key(classification),
         recommendation_key=_RECOMMENDATION[classification],
         cause_class=problem.cause_class,
         cause_stage=problem.stage,
@@ -674,13 +714,18 @@ def _finding(
         evidence=tuple(dict.fromkeys((*problem.evidence, *extra))),
         reasons=(*problem.reasons, *_also(others, problem)),
         contradictions=chain.contradictions,
+        also=_stage_problems(others),
+        unmeasured=chain.unmeasured(),
         chain=chain,
     )
 
 
 def _no_problem(chain: ChainResult) -> Finding:
+    unmeasured = chain.unmeasured()
     if chain.coverage == 0.0:
         classification, severity = Classification.INSUFFICIENT_DATA, Severity.INFO
+    elif unmeasured:
+        classification, severity = Classification.PARTIALLY_MEASURED, Severity.INFO
     else:
         classification, severity = Classification.NO_FAULT_DETECTED, Severity.OK
     return Finding(
@@ -691,18 +736,22 @@ def _no_problem(chain: ChainResult) -> Finding:
         recommendation_key=_RECOMMENDATION[classification],
         cause_class=CauseClass.UNKNOWN,
         contradictions=chain.contradictions,
+        unmeasured=unmeasured,
         chain=chain,
     )
 
 
 def classify(chain: ChainResult) -> Finding:
-    """Classify a chain into one finding (most severe, most upstream first;
-    every other stage problem is kept in ``reasons`` as ``also:...``)."""
-    problems = [p for f in chain.families for p in _family_problems(chain, f)]
-    if not problems:
-        finding = _no_problem(chain)
-    else:
-        finding = _pick(chain, problems)
+    """Classify a chain into one finding: per family the most upstream
+    serious problem, across families the most severe, most upstream one.
+    Every other stage problem is kept in ``also`` (and in ``reasons`` as
+    ``also:...``)."""
+    by_family = [
+        problems
+        for family in chain.families
+        if (problems := _family_problems(chain, family))
+    ]
+    finding = _pick(chain, by_family) if by_family else _no_problem(chain)
     _LOGGER.debug(
         "diag classify %s: %s (%s)",
         chain.point.label,
@@ -712,15 +761,16 @@ def classify(chain: ChainResult) -> Finding:
     return finding
 
 
-def _pick(chain: ChainResult, problems: list[_Problem]) -> Finding:
-    chosen = min(problems, key=_rank)
-    others = [p for p in problems if p is not chosen]
+def _pick(chain: ChainResult, by_family: list[list[_Problem]]) -> Finding:
+    heads = [_primary(problems) for problems in by_family]
+    chosen = min(heads, key=_rank)
+    problems = [p for problems in by_family for p in problems]
     twin = next(
         (
-            p
-            for p in others
-            if p.family != chosen.family
-            and (p.stage, p.classification) == (chosen.stage, chosen.classification)
+            h
+            for h in heads
+            if h.family != chosen.family
+            and (h.stage, h.classification) == (chosen.stage, chosen.classification)
         ),
         None,
     )
@@ -734,8 +784,10 @@ def _pick(chain: ChainResult, problems: list[_Problem]) -> Finding:
             tuple(dict.fromkeys((*chosen.evidence, *twin.evidence))),
             tuple(sorted({*chosen.reasons, *twin.reasons})),
         )
-        rest = [p for p in others if p is not twin]
+        used = {_key(chosen), _key(twin)}
+        rest = [p for p in problems if _key(p) not in used]
         return _finding(chain, merged, None, others=rest)
+    others = [p for p in problems if _key(p) != _key(chosen)]
     other = next((f for f in chain.families if f != chosen.family), None)
     if other is not None and _only_in_family(chain, chosen, other, others):
         same = chain.stage(chosen.stage, other)
@@ -753,15 +805,11 @@ def _only_in_family(
 ) -> bool:
     """The other family is measured healthy where this one breaks and has no
     problem of its own at warning level or above."""
-    if SEVERITY_RANK[chosen.severity] < SEVERITY_RANK[Severity.WARNING]:
+    if not _serious(chosen):
         return False
     if chain.stage(chosen.stage, other).state != StageState.HEALTHY:
         return False
-    return not any(
-        p.family == other
-        and SEVERITY_RANK[p.severity] >= SEVERITY_RANK[Severity.WARNING]
-        for p in others
-    )
+    return not any(p.family == other and _serious(p) for p in others)
 
 
 # --- change findings ----------------------------------------------------------------
@@ -824,6 +872,9 @@ def gateway_change(
 
 
 def _server_set(servers: Iterable[str] | None) -> tuple[str, ...] | None:
+    if isinstance(servers, str):
+        # a bare string would be compared character by character
+        raise TypeError("DNS servers must be a collection of ids, not a string")
     return None if servers is None else tuple(sorted(set(servers)))
 
 

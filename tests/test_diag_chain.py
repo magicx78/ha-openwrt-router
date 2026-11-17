@@ -110,13 +110,15 @@ def test_case_01_gateway_reachable() -> None:
             *ext(OK, "ext-a", "ext-b"),
             probe(Stage.DNS, OK, DNS, "dns-gw"),
         ],
-        facts(),
+        facts(default_route_v4=True),
     )
     assert state(chain, Stage.GATEWAY) is StageState.HEALTHY
     assert chain.stage(Stage.GATEWAY, V4).basis is Basis.DIRECT
+    assert chain.coverage == 1.0
     finding = classify(chain)
     assert finding.classification is Classification.NO_FAULT_DETECTED
     assert finding.severity is Severity.OK
+    assert finding.unmeasured == ()
     assert not finding.is_problem
 
 
@@ -256,8 +258,11 @@ def test_case_17_missing_measurements_are_unknown() -> None:
         assert state(partial, stage) is StageState.UNKNOWN
     assert partial.coverage == pytest.approx(2 / 5)
     finding = classify(partial)
-    assert finding.classification is Classification.NO_FAULT_DETECTED
-    assert finding.classification is not Classification.INSUFFICIENT_DATA
+    # unmeasured stages never read as "no fault"
+    assert finding.classification is Classification.PARTIALLY_MEASURED
+    assert finding.severity is Severity.INFO
+    assert finding.unmeasured == ("ipv4:wan", "ipv4:internet", "ipv4:dns")
+    assert not finding.is_problem
 
 
 # --- rule 1: unknown, coverage ------------------------------------------------
@@ -282,7 +287,7 @@ def test_coverage_counts_only_applicable_stages() -> None:
     assert chain.coverage_for(V4) == pytest.approx(2 / 5)
     assert all(not s.applicable for s in chain.stages if s.family is V6)
     assert chain.coverage == pytest.approx(2 / 5)
-    assert chain.direct_coverage == pytest.approx(2 / 5)
+    assert chain.indirect_coverage == 0.0
 
 
 def test_unknown_family_configuration_is_applicable_and_unknown() -> None:
@@ -417,22 +422,57 @@ def test_router_probes_never_enter_the_ha_chain() -> None:
 
 def test_ha_measurements_are_labelled_indirect_for_a_router() -> None:
     chain = evaluate_chain(
-        AP, [*ext(OK, "ext-a", "ext-b", point=HA)], ChainFacts(ipv6_configured=False)
+        AP,
+        [*ext(OK, "ext-a", "ext-b", point=HA, subject="ap1")],
+        ChainFacts(ipv6_configured=False),
     )
     internet = chain.stage(Stage.INTERNET, V4)
     assert internet.state is StageState.HEALTHY
     assert internet.basis is Basis.INDIRECT
     assert all(not e.direct for e in internet.evidence)
-    assert chain.coverage == pytest.approx(1 / 5)
-    assert chain.direct_coverage == 0.0
+
+
+def test_indirect_evidence_does_not_count_as_coverage() -> None:
+    chain = evaluate_chain(
+        AP,
+        [*ext(OK, "ext-a", "ext-b", point=HA, subject="ap1")],
+        ChainFacts(ipv6_configured=False),
+    )
+    assert chain.coverage == 0.0
+    assert chain.coverage_for(V4) == 0.0
+    assert chain.indirect_coverage == pytest.approx(1 / 5)
+    assert chain.to_dict()["coverage"] == 0.0
+    assert classify(chain).classification is Classification.INSUFFICIENT_DATA
+
+
+def test_ha_probe_about_another_router_is_not_used() -> None:
+    about_ap2 = probe(Stage.ROUTER, TIMEOUT, TCP, "ap2", point=HA, subject="ap2")
+    chain = evaluate_chain(AP, [about_ap2], facts(management_reachable=None))
+    assert state(chain, Stage.ROUTER) is StageState.UNKNOWN
+    assert chain.excluded == (about_ap2,)
+    assert classify(chain).classification is not Classification.ROUTER_OFFLINE
+
+
+def test_ha_probe_without_subject_belongs_to_ha_chain_only() -> None:
+    ha_probes = [*ext(OK, "ext-a", "ext-b", point=HA)]
+    chain = evaluate_chain(AP, ha_probes, facts())
+    assert state(chain, Stage.INTERNET) is StageState.UNKNOWN
+    assert len(chain.excluded) == 2
+    ha_chain = evaluate_chain(HA, ha_probes)
+    assert state(ha_chain, Stage.INTERNET) is StageState.HEALTHY
+    # an HA probe about a router is not about HA's own path
+    about = probe(Stage.ROUTER, TIMEOUT, TCP, "ap1", point=HA, subject="ap1")
+    assert evaluate_chain(HA, [about]).excluded == (about,)
 
 
 def test_ha_measurements_never_fail_or_confirm_for_a_router() -> None:
     chain = evaluate_chain(
         AP,
         [
-            *ext(TIMEOUT, "ext-a", "ext-b", point=HA),
-            probe(Stage.DNS, ProbeOutcome.SERVFAIL, DNS, "dns", point=HA),
+            *ext(TIMEOUT, "ext-a", "ext-b", point=HA, subject="ap1"),
+            probe(
+                Stage.DNS, ProbeOutcome.SERVFAIL, DNS, "dns", point=HA, subject="ap1"
+            ),
         ],
         facts(),
     )
@@ -452,7 +492,10 @@ def test_ha_chain_uses_its_own_probes_directly() -> None:
 def test_direct_evidence_wins_over_indirect() -> None:
     chain = evaluate_chain(
         AP,
-        [*ext(OK, "ext-a", "ext-b", point=HA), *ext(TIMEOUT, "ext-a", "ext-b")],
+        [
+            *ext(OK, "ext-a", "ext-b", point=HA, subject="ap1"),
+            *ext(TIMEOUT, "ext-a", "ext-b"),
+        ],
         facts(),
     )
     internet = chain.stage(Stage.INTERNET, V4)
@@ -467,7 +510,7 @@ def test_direct_evidence_wins_over_indirect() -> None:
 def test_router_offline_leaves_everything_downstream_unknown() -> None:
     chain = evaluate_chain(
         AP,
-        [probe(Stage.ROUTER, TIMEOUT, ICMP, "ap1", point=HA)],
+        [probe(Stage.ROUTER, TIMEOUT, ICMP, "ap1", point=HA, subject="ap1")],
         facts(management_reachable=False),
     )
     assert state(chain, Stage.ROUTER) is StageState.FAILED
@@ -561,7 +604,7 @@ def test_family_specific_wan_fact() -> None:
 def test_management_unreachable_when_router_answers_otherwise() -> None:
     chain = evaluate_chain(
         AP,
-        [probe(Stage.ROUTER, OK, ICMP, "ap1", point=HA)],
+        [probe(Stage.ROUTER, OK, ICMP, "ap1", point=HA, subject="ap1")],
         facts(management_reachable=False),
     )
     assert state(chain, Stage.ROUTER) is StageState.DEGRADED
@@ -658,6 +701,31 @@ def test_icmp_note_upstream_does_not_hide_a_real_failure_downstream() -> None:
     assert finding.classification is Classification.WAN_PROBLEM
     assert finding.severity is Severity.CRITICAL
     assert any(r.startswith("also:gateway") for r in finding.reasons)
+    [other] = finding.also
+    assert (other.stage, other.family, other.classification) == (
+        Stage.GATEWAY,
+        V4,
+        Classification.ICMP_UNANSWERED,
+    )
+
+
+def test_secondary_problems_are_kept_structured() -> None:
+    chain = evaluate_chain(
+        AP,
+        [
+            probe(Stage.GATEWAY, OK, TCP, "gw"),
+            *ext(TIMEOUT, "ext-a", "ext-b"),
+            probe(Stage.GATEWAY, OK, TCP, "gw6", family=V6),
+            probe(Stage.GATEWAY, TIMEOUT, TCP, "gw6-b", family=V6),
+        ],
+        facts(ipv6_configured=True),
+    )
+    finding = classify(chain)
+    assert (finding.classification, finding.family) == (Classification.WAN_PROBLEM, V4)
+    [other] = finding.also
+    assert (other.stage, other.family) == (Stage.GATEWAY, V6)
+    assert other.classification is Classification.GATEWAY_PROBLEM
+    assert other.severity is Severity.WARNING
 
 
 # --- change findings ----------------------------------------------------------------
@@ -695,6 +763,13 @@ def test_dns_server_change_ignores_order() -> None:
     assert finding.change.current == ("r1", "r3")
 
 
+def test_dns_server_change_rejects_a_string() -> None:
+    with pytest.raises(TypeError):
+        dns_server_change(AP, "192.0.2.1", "192.0.2.11")
+    with pytest.raises(TypeError):
+        dns_server_change(AP, ["r1"], "r1")
+
+
 # --- model --------------------------------------------------------------------------
 
 
@@ -707,6 +782,9 @@ def test_probe_validation() -> None:
         probe(Stage.GATEWAY, OK, sent=1, received=2)
     with pytest.raises(ValueError):
         MeasurementPoint.router("")
+    # a router's probe is always about that router
+    with pytest.raises(ValueError):
+        probe(Stage.GATEWAY, OK, subject="ap2")
 
 
 def test_results_are_immutable_and_serialisable() -> None:
