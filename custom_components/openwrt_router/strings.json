@@ -88,6 +88,12 @@
       },
       "wan_connectivity": {
         "name": "WAN Connectivity"
+      },
+      "incident_critical": {
+        "name": "Critical incident"
+      },
+      "fleet_incident_critical": {
+        "name": "Fleet critical incident"
       }
     },
     "sensor": {
@@ -208,9 +214,34 @@
       },
       "network_topology": {
         "name": "Network Topology"
+      },
+      "net_health": {
+        "name": "Network health"
+      },
+      "incidents_active": {
+        "name": "Active incidents"
+      },
+      "wifi_reconnects_1h": {
+        "name": "Wi-Fi reconnects (1 h)"
+      },
+      "wifi_auth_errors_1h": {
+        "name": "Wi-Fi authentication errors (1 h)"
+      },
+      "wan_stability": {
+        "name": "WAN reconnects (24 h)"
+      },
+      "fleet_net_health": {
+        "name": "Fleet network health"
+      },
+      "fleet_incidents_active": {
+        "name": "Fleet active incidents"
       }
     },
-    "switch": {},
+    "switch": {
+      "maintenance_mode": {
+        "name": "Maintenance mode"
+      }
+    },
     "button": {
       "reload_wifi": {
         "name": "Reload WiFi"

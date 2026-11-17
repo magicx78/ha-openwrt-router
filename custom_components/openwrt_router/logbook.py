@@ -7,7 +7,7 @@ from typing import Any
 
 from homeassistant.core import Event, HomeAssistant, callback
 
-from .const import DOMAIN, EVENT_DFS, EVENT_DHCP, EVENT_WIFI
+from .const import DOMAIN, EVENT_DFS, EVENT_DHCP, EVENT_INCIDENT, EVENT_WIFI
 
 
 def _client(data: dict[str, Any]) -> str:
@@ -63,6 +63,30 @@ def async_describe_events(
             message = f"DFS {_kind(data)} on {radio}{channel}"
         return {"name": _name(data), "message": message}
 
+    @callback
+    def describe_incident(event: Event) -> dict[str, str]:
+        data = event.data
+        routers = data.get("routers")
+        name = (
+            ", ".join(str(r) for r in routers)
+            if isinstance(routers, list) and routers
+            else "OpenWrt network"
+        )
+        cause = f", cause {data['cause']}" if data.get("cause") else ""
+        if cause and data.get("cause_status") == "hypothesis":
+            cause += " (suspected)"
+        state = str(data.get("state") or "changed")
+        if data.get("reason") == "ignored":
+            state += " (ignored)"
+        return {
+            "name": name,
+            "message": (
+                f"incident {state}: {_kind(data)} "
+                f"({data.get('severity') or 'unknown'}{cause})"
+            ),
+        }
+
     async_describe_event(DOMAIN, EVENT_WIFI, describe_wifi)
+    async_describe_event(DOMAIN, EVENT_INCIDENT, describe_incident)
     async_describe_event(DOMAIN, EVENT_DFS, describe_dfs)
     async_describe_event(DOMAIN, EVENT_DHCP, describe_dhcp)

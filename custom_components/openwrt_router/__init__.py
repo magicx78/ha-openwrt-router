@@ -51,6 +51,11 @@ from .fleet import (
     usteer_node_info,
 )
 from .issues import async_clear_issue, ram_high_issue_id
+from .net_engine import (
+    async_get_net_intelligence,
+    async_remove_router_data,
+    async_unload_net_intelligence,
+)
 from .ssl_util import ssl_context_for_protocol
 
 _LOGGER = logging.getLogger(__name__)
@@ -382,6 +387,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         partial(async_clear_issue, hass, ram_high_issue_id(entry.entry_id))
     )
 
+    # Network intelligence: one fleet-wide engine collects the events of all
+    # routers from data the coordinator already has (no extra router calls).
+    # Its store is loaded before the first ingest. An add-on like the panel:
+    # a failure here must not stop the router from working.
+    try:
+        engine = await async_get_net_intelligence(hass)
+        engine.register(entry.entry_id)
+        # Also runs when the setup fails further down (HA calls these then).
+        entry.async_on_unload(partial(engine.unregister, entry.entry_id))
+        entry.async_on_unload(
+            coordinator.async_add_listener(
+                partial(engine.async_ingest_coordinator, entry.entry_id, coordinator)
+            )
+        )
+        engine.async_ingest_coordinator(entry.entry_id, coordinator)
+    except Exception:
+        _LOGGER.warning(
+            "Network intelligence setup failed for '%s' — the router works "
+            "without event history",
+            entry.title,
+            exc_info=True,
+        )
+
     # Channel conflicts are judged across all routers after every poll.
     channel_plan = async_get_channel_plan_monitor(hass)
     entry.async_on_unload(
@@ -466,6 +494,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
     """
     _LOGGER.debug("Unloading OpenWrt Router entry for %s", entry.data.get(CONF_HOST))
 
+    # Before the platforms go: the fleet entities' registry entries move to
+    # the next router now, their entities follow once this entry's are gone.
+    try:
+        from .net_entities import async_withdraw_fleet
+
+        async_withdraw_fleet(hass, entry.entry_id)
+    except Exception:
+        _LOGGER.debug("Fleet entity hand-over raised", exc_info=True)
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     # Always run lifecycle cleanup — even if platform unload partially failed
@@ -485,6 +522,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
     except Exception:
         _LOGGER.debug("Topology card teardown raised", exc_info=True)
 
+    # Stored events of this router stay; the last unload writes the store
+    # (awaited here: coroutines given to async_on_unload are not awaited).
+    # Only after a successful unload: otherwise HA keeps the entry and its
+    # coordinator listener, and the engine must keep the router.
+    if unload_ok:
+        try:
+            await async_unload_net_intelligence(hass, entry.entry_id)
+        except Exception:
+            _LOGGER.warning(
+                "Network intelligence unload raised for '%s'",
+                entry.title,
+                exc_info=True,
+            )
+
     runtime = getattr(entry, "runtime_data", None)
     api = getattr(runtime, "api", None) if runtime is not None else None
     if api is not None and hasattr(api, "async_close"):
@@ -494,6 +545,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
             _LOGGER.debug("API async_close raised", exc_info=True)
 
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> None:
+    """Delete what the integration stored itself about a removed router.
+
+    HA removes devices, entities and issues on its own; this drops the
+    router's events, counters and incidents from the network intelligence
+    store. Runs after the unload, so for the last router the engine is
+    already gone and the store file is edited directly.
+    """
+    try:
+        await async_remove_router_data(hass, entry.entry_id)
+    except Exception:
+        _LOGGER.warning(
+            "Could not remove the network intelligence data of '%s'",
+            entry.title,
+            exc_info=True,
+        )
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> None:

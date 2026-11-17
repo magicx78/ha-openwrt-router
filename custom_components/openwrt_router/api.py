@@ -658,6 +658,24 @@ def _lldp_named_items(node: Any) -> list[tuple[str, Any]]:
 _LLDP_CHASSIS_DATA_KEYS = {"id", "descr", "mgmt-ip", "mgmt-iface", "capability"}
 
 
+# Error/drop counters of ``network.device status`` kept per port.
+_PORT_ERROR_COUNTERS = (
+    "rx_errors",
+    "tx_errors",
+    "rx_dropped",
+    "tx_dropped",
+    "collisions",
+    "rx_crc_errors",
+)
+
+
+def _counter(value: Any) -> int | None:
+    """A non-negative integer counter/PID from a router reply, else None."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _parse_lldpcli_json(raw: str) -> list[dict[str, Any]]:
     """Parse ``lldpcli -f json show neighbors`` output into neighbor dicts.
 
@@ -1258,6 +1276,19 @@ class OpenWrtAPI:
         # None = not seen (older OpenWrt or SSH-fallback status path).
         self._system_info_fs: dict[str, Any] | None = None
 
+        # PID and running flag per procd instance of every service in the
+        # last ``service list`` reply ({service: {instance: {"pid", "running"}}})
+        # for the network intelligence engine (restart = PID change). Kept
+        # from the reply the service switches already fetch, so it costs no
+        # call; None = not known (no reply yet, rc/list fallback, error).
+        self.service_instances: dict[str, dict[str, dict[str, Any]]] | None = None
+        # time.time() of our own last start/stop/restart per service (HA
+        # button): the engine does not report the PID change that follows.
+        self.service_actions: dict[str, float] = {}
+        # time.time() of our own last Wi-Fi change ("reload_wifi",
+        # "set_wifi_state"): the clients it drops are no mass disconnect.
+        self.wifi_actions: dict[str, float] = {}
+
         # Results of SSH-only readers that are refreshed at most every
         # SSH_SLOW_REFRESH_INTERVAL: key -> (time.monotonic() of fetch, value).
         self._ssh_slow_cache: dict[str, tuple[float, Any]] = {}
@@ -1710,6 +1741,8 @@ class OpenWrtAPI:
                 "cpu_load_5min": float,  # 5-min load as % of total CPU capacity
                 "cpu_load_15min": float, # 15-min load as % of total CPU capacity
                 "memory": dict,       # total, free, shared, buffered, available (bytes)
+                "localtime": int,     # router clock (epoch + its UTC offset), if sent
+                "localtime_at": float,  # HA wall time when the reply arrived
             }
 
             The percentages are divided by the core count (load average 1.22
@@ -1724,6 +1757,7 @@ class OpenWrtAPI:
         self._system_info_fs = None
         try:
             result = await self._call(UBUS_SYSTEM_OBJECT, UBUS_SYSTEM_INFO, {})
+            received_at = time.time()
         except (
             OpenWrtMethodNotFoundError,
             OpenWrtAuthError,
@@ -1771,7 +1805,7 @@ class OpenWrtAPI:
         percents = [round(v / _LOAD_SCALE * 100 / divisor, 1) for v in raw_load[:3]]
         percents += [0.0] * (3 - len(percents))
 
-        return {
+        status = {
             "uptime": result.get("uptime", 0),
             "load": raw_load,
             "load_average": [round(v / _LOAD_SCALE, 2) for v in raw_load[:3]],
@@ -1781,6 +1815,13 @@ class OpenWrtAPI:
             "cpu_load_15min": percents[2],
             "memory": result.get("memory", {}),
         }
+        # procd's clock (epoch seconds plus the router's UTC offset) with the
+        # moment it was read, for the clock-skew check; no extra call.
+        localtime = result.get("localtime")
+        if isinstance(localtime, int) and not isinstance(localtime, bool):
+            status["localtime"] = localtime
+            status["localtime_at"] = received_at
+        return status
 
     async def _get_cpu_cores(self) -> int | None:
         """Return the router's logical CPU count from /proc/cpuinfo, or None.
@@ -2007,7 +2048,7 @@ class OpenWrtAPI:
             )
             rx_bytes, tx_bytes = await self._read_wan_counters(str(wan_device))
 
-        return {
+        status = {
             "connected": wan_iface.get("up", False),
             "interface": wan_iface.get("interface", ""),
             "ipv4": ipv4,
@@ -2017,6 +2058,18 @@ class OpenWrtAPI:
             "rx_bytes": rx_bytes,
             "tx_bytes": tx_bytes,
         }
+        # Does this interface carry the IPv4 default route? A dumb AP with a
+        # plugged "wan" section that got a DHCP lease still routes via lan.
+        # Absent when netifd sent no route list (unknown).
+        routes = wan_iface.get("route")
+        if isinstance(routes, list):
+            status["default_route"] = any(
+                isinstance(route, dict)
+                and route.get("target") == "0.0.0.0"
+                and str(route.get("mask")) == "0"
+                for route in routes
+            )
+        return status
 
     async def _read_wan_counters(self, device: str) -> tuple[int | None, int | None]:
         """Return ``(rx_bytes, tx_bytes)`` of a network device, or ``(None, None)``.
@@ -2698,6 +2751,11 @@ class OpenWrtAPI:
                     sta = sta_data if isinstance(sta_data, dict) else {}
                     signal = sta.get("signal", 0)
                     connected_time = sta.get("connected_time", 0) or 0
+                    # Current link rate (P4, kept for the network
+                    # intelligence; unit as hostapd reports it, not checked
+                    # live). Momentary values only, see plan 2.12.
+                    rate = sta.get("rate")
+                    rate = rate if isinstance(rate, dict) else {}
                     clients.append(
                         {
                             CLIENT_KEY_MAC: mac,
@@ -2711,6 +2769,8 @@ class OpenWrtAPI:
                             or sta.get("rx_bytes"),
                             "tx_bytes": (sta.get("bytes") or {}).get("tx")
                             or sta.get("tx_bytes"),
+                            "rx_rate": rate.get("rx"),
+                            "tx_rate": rate.get("tx"),
                         }
                     )
                 _LOGGER.debug(
@@ -2815,6 +2875,8 @@ class OpenWrtAPI:
         """
         disabled_value = "0" if enabled else "1"
         action = "enable" if enabled else "disable"
+        # Before the calls: the radio can drop its clients while they run.
+        self.wifi_actions["set_wifi_state"] = time.time()
         _LOGGER.info(
             "Setting WiFi section %s %s (disabled=%s)",
             uci_section,
@@ -3683,6 +3745,7 @@ class OpenWrtAPI:
             available.
         """
         _LOGGER.debug("Reloading network configuration")
+        self.wifi_actions["reload_wifi"] = time.time()
         try:
             await self._call(UBUS_NETWORK_RELOAD, UBUS_NETWORK_RELOAD_METHOD, {})
             self._invalidate_hostapd_cache()
@@ -4268,6 +4331,13 @@ class OpenWrtAPI:
                     "tx_bytes": int,
                     "rx_packets": int,
                     "tx_packets": int,
+                    "carrier": bool | None,   # physical link; None = not sent
+                    "rx_errors": int | None,  # error/drop counters, None = not sent
+                    "tx_errors": int | None,
+                    "rx_dropped": int | None,
+                    "tx_dropped": int | None,
+                    "collisions": int | None,
+                    "rx_crc_errors": int | None,
                 },
                 ...
             ]
@@ -4294,18 +4364,23 @@ class OpenWrtAPI:
             speed_mbps, duplex = _parse_port_speed(raw_speed)
 
             stats = dev.get("statistics", {})
-            ports.append(
-                {
-                    "name": name,
-                    "up": bool(dev.get("up", False)),
-                    "speed_mbps": speed_mbps,
-                    "duplex": duplex,
-                    "rx_bytes": int(stats.get("rx_bytes", 0)),
-                    "tx_bytes": int(stats.get("tx_bytes", 0)),
-                    "rx_packets": int(stats.get("rx_packets", 0)),
-                    "tx_packets": int(stats.get("tx_packets", 0)),
-                }
-            )
+            carrier = dev.get("carrier")
+            port: dict[str, Any] = {
+                "name": name,
+                "up": bool(dev.get("up", False)),
+                "speed_mbps": speed_mbps,
+                "duplex": duplex,
+                "rx_bytes": int(stats.get("rx_bytes", 0)),
+                "tx_bytes": int(stats.get("tx_bytes", 0)),
+                "rx_packets": int(stats.get("rx_packets", 0)),
+                "tx_packets": int(stats.get("tx_packets", 0)),
+                "carrier": carrier if isinstance(carrier, bool) else None,
+            }
+            # Kept from the same reply for the network intelligence engine
+            # (error ratio, link flaps); None when the field is missing.
+            for key in _PORT_ERROR_COUNTERS:
+                port[key] = _counter(stats.get(key))
+            ports.append(port)
 
         ports.sort(key=lambda p: p["name"])
         return ports
@@ -4943,19 +5018,32 @@ class OpenWrtAPI:
             result = None
 
         if not isinstance(result, dict):
+            self.service_instances = None
             return await self._get_services_rc_list(names)
 
         enabled = await self._get_rc_enabled()
         running: dict[str, bool] = {}
+        instances_seen: dict[str, dict[str, dict[str, Any]]] = {}
         for svc_name, info in result.items():
             if not isinstance(info, dict):
                 continue
             instances = info.get("instances", {})
+            if not isinstance(instances, dict):
+                instances = {}
             running[svc_name] = any(
                 inst.get("running", False)
                 for inst in instances.values()
                 if isinstance(inst, dict)
             )
+            instances_seen[svc_name] = {
+                str(inst_name): {
+                    "pid": _counter(inst.get("pid")),
+                    "running": inst.get("running") is True,
+                }
+                for inst_name, inst in instances.items()
+                if isinstance(inst, dict)
+            }
+        self.service_instances = instances_seen
 
         # Union: init scripts without a procd instance (e.g. firewall) are only
         # known from rc/list; they are "not running", exactly as rc/list said.
@@ -5056,6 +5144,9 @@ class OpenWrtAPI:
             True on success, False on failure.
         """
         _LOGGER.info("Service control: %s %s", action, name)
+        if action not in ("enable", "disable"):
+            # Before the call: the process changes while it runs.
+            self.service_actions[name] = time.time()
         try:
             await self._call("rc", "init", {"name": name, "action": action})
             _LOGGER.debug("Service %s %s OK", name, action)

@@ -7,7 +7,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -227,6 +227,62 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+@dataclass(frozen=True)
+class LogBatch:
+    """Cursor facts of one log fetch, handed to the network intelligence engine.
+
+    ``baseline`` and ``missed`` come from ``LogCursor.ingest``. The times are
+    the router's epoch milliseconds of the oldest line in the answer and of
+    the cursor position after the fetch (None when unusable).
+    ``fetched_at`` is HA's wall time (``time.time()``) right after the
+    fetch: new lines were written before it (clock check, P3 review M1).
+    """
+
+    baseline: bool
+    missed: int
+    first_time_ms: int | None
+    last_id: int | None
+    last_time_ms: int | None
+    fetched_at: float | None = None
+    # Lines new to the cursor (P4: share of read vs. missed lines)
+    new_lines: int = 0
+
+
+def _log_time_ms(value: Any) -> int | None:
+    """A logd ``time`` field as int milliseconds, None if unusable."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _log_batch(
+    entries: list[dict[str, Any]],
+    baseline: bool,
+    missed: int,
+    cursor: LogCursor,
+    fetched_at: float | None = None,
+    new_lines: int = 0,
+) -> LogBatch:
+    """Summarise one fetch for the engine (oldest line by id, cursor state)."""
+    ids = [
+        e
+        for e in entries
+        if isinstance(e, dict)
+        and isinstance(e.get("id"), int)
+        and not isinstance(e.get("id"), bool)
+    ]
+    oldest = min(ids, key=lambda e: e["id"]) if ids else None
+    return LogBatch(
+        baseline=baseline,
+        missed=missed,
+        first_time_ms=_log_time_ms(oldest.get("time")) if oldest else None,
+        last_id=cursor.last_id,
+        last_time_ms=_log_time_ms(cursor.last_time),
+        fetched_at=fetched_at,
+        new_lines=new_lines,
+    )
+
+
 def _cpu_load_basis(data: OpenWrtCoordinatorData) -> str:
     """Describe what a cpu_load percentage refers to (throttle log lines)."""
     if data.cpu_cores:
@@ -297,6 +353,19 @@ class OpenWrtCoordinatorData:
             "last_check": None,
         }
         self.services: list[dict[str, Any]] = []
+        # For the network intelligence engine, never in as_dict: router clock
+        # from ``system info`` and the HA wall time it was read (None =
+        # unknown), and PID/running per procd instance of all services from
+        # this poll's ``service list`` (None = not fetched in this poll).
+        self.localtime: int | None = None
+        self.localtime_at: float | None = None
+        self.service_instances: dict[str, dict[str, dict[str, Any]]] | None = None
+        # HA wall time of the WAN read (None = not read), and our own last
+        # start/stop/restart per service (HA time, from the api).
+        self.wan_status_at: float | None = None
+        self.service_actions: dict[str, float] = {}
+        # our own last Wi-Fi changes (HA time, from the api; P4 review M5)
+        self.wifi_actions: dict[str, float] = {}
         self.ap_interfaces: list[dict[str, Any]] = []
         # STA-mode wireless interfaces (WiFi repeater / mesh backhaul).
         # Used by topology_mesh to detect wireless-uplinked routers via their
@@ -333,6 +402,13 @@ class OpenWrtCoordinatorData:
         # Router log ingest (F6): status and counters, see _ingest_log()
         self.log_status: str = LOG_STATUS_PENDING
         self.log_stats: dict[str, Any] = {}
+        # Log events parsed in this poll's log fetch, and the cursor facts of
+        # that fetch, for the network intelligence engine. On a baseline
+        # fetch the events are the lines already in the buffer; the engine
+        # takes only those newer than its stored mark. Never in as_dict
+        # (MACs, IPs); a fresh data object per poll resets both.
+        self.new_log_events: tuple[LogEvent, ...] = ()
+        self.new_log_batch: LogBatch | None = None
         # DFS (F3): {"events_24h", "by_type", "last_event"}
         self.dfs: dict[str, Any] = {}
         # DHCP health (F5): usage per active pool, MACs of static hosts
@@ -341,6 +417,10 @@ class OpenWrtCoordinatorData:
         self.dhcp_static_macs: frozenset[str] = frozenset()
         # Client stability (F4), see _client_stability_snapshot()
         self.client_stability: dict[str, Any] = {}
+        # usteer's fleet view of this poll's usteer fetch for the network
+        # intelligence (P4): client MAC -> nodes reporting it connected.
+        # None when usteer was not read in this poll. Never in as_dict.
+        self.usteer_connected: dict[str, tuple[str, ...]] | None = None
         # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
         self.vlans_stale: bool = False
         # Connectivity health tracking (used by binary_sensor / sensor platform)
@@ -632,6 +712,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # Time of the counter read; the rate below is computed later in the
             # poll, after calls whose duration varies from poll to poll.
             wan_sampled_at = time.monotonic()
+            data.wan_status_at = time.time()
+            actions = getattr(self.api, "service_actions", None)
+            data.service_actions = dict(actions) if isinstance(actions, dict) else {}
+            wifi_actions = getattr(self.api, "wifi_actions", None)
+            data.wifi_actions = (
+                dict(wifi_actions) if isinstance(wifi_actions, dict) else {}
+            )
             data.wan_connected = data.wan_status.get(
                 "wan_connected", False
             ) or data.wan_status.get("connected", False)
@@ -750,6 +837,8 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             data.load_average = status.get("load_average") or []
             data.memory = status.get("memory", {})
             data.memory_pressure = calc_memory_pressure(data.memory)
+            data.localtime = status.get("localtime")
+            data.localtime_at = status.get("localtime_at")
 
             # --- Priority 3: Extended Monitoring (optional, graceful fallback) ---
             # These are non-critical; failures don't affect core functionality
@@ -1013,6 +1102,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             if self.data and self.data.features.get(FEATURE_HAS_SERVICES, False):
                 try:
                     data.services = await self.api.get_services(names=DEFAULT_SERVICES)
+                    data.service_instances = self.api.service_instances
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.debug("Error fetching service status: %s", err)
                     data.services = self.data.services if self.data else []
@@ -1020,6 +1110,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 # First poll: try fetching services regardless (feature detection hasn't run yet)
                 try:
                     data.services = await self.api.get_services(names=DEFAULT_SERVICES)
+                    data.service_instances = self.api.service_instances
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.debug(
                         "Error fetching service status on first poll: %s", err
@@ -1351,7 +1442,17 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         self, entries: list[dict[str, Any]], data: OpenWrtCoordinatorData
     ) -> None:
         result = self._log_cursor.ingest(entries)
-        now_ms = int(time.time() * 1000)
+        data.new_log_events = tuple(result.events)
+        fetched_at = time.time()
+        data.new_log_batch = _log_batch(
+            entries,
+            result.baseline,
+            result.missed,
+            self._log_cursor,
+            fetched_at,
+            result.new_lines,
+        )
+        now_ms = int(fetched_at * 1000)
         for event in result.events:
             # Router time only when plausible: a dumb AP without NTP sync
             # would otherwise put lines outside the 24 h window.
@@ -1526,7 +1627,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             except Exception:
                 _LOGGER.debug("%s: usteer node lookup failed", self.name, exc_info=True)
         self._usteer_status = USTEER_STATUS_OK
-        self._sticky_now = sticky_candidates(parse_usteer_clients(raw), node_info)
+        parsed = parse_usteer_clients(raw)
+        self._sticky_now = sticky_candidates(parsed, node_info)
+        data.usteer_connected = {
+            mac: nodes
+            for mac, seen in parsed.items()
+            if (nodes := tuple(s.node for s in seen if s.connected))
+        }
         self._sticky_timer.update(self._sticky_now, now_ms)
 
     def _client_stability_snapshot(
@@ -1879,6 +1986,7 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 svcs = await self.api.get_services(names=DEFAULT_SERVICES)
                 features[FEATURE_HAS_SERVICES] = len(svcs) > 0
                 data.services = svcs
+                data.service_instances = self.api.service_instances
             except Exception:  # noqa: BLE001
                 features[FEATURE_HAS_SERVICES] = False
 

@@ -88,6 +88,12 @@
       },
       "wan_connectivity": {
         "name": "WAN-Verbindung"
+      },
+      "incident_critical": {
+        "name": "Kritischer Incident"
+      },
+      "fleet_incident_critical": {
+        "name": "Kritischer Incident (alle Router)"
       }
     },
     "sensor": {
@@ -208,9 +214,34 @@
       },
       "network_topology": {
         "name": "Netzwerk-Topologie"
+      },
+      "net_health": {
+        "name": "Netzwerk-Gesundheit"
+      },
+      "incidents_active": {
+        "name": "Aktive Incidents"
+      },
+      "wifi_reconnects_1h": {
+        "name": "WLAN-Wiederverbindungen (1 h)"
+      },
+      "wifi_auth_errors_1h": {
+        "name": "WLAN-Anmeldefehler (1 h)"
+      },
+      "wan_stability": {
+        "name": "WAN-Wiederverbindungen (24 h)"
+      },
+      "fleet_net_health": {
+        "name": "Netzwerk-Gesundheit (alle Router)"
+      },
+      "fleet_incidents_active": {
+        "name": "Aktive Incidents (alle Router)"
       }
     },
-    "switch": {},
+    "switch": {
+      "maintenance_mode": {
+        "name": "Wartungsmodus"
+      }
+    },
     "button": {
       "reload_wifi": {
         "name": "WLAN neu laden"

@@ -10,6 +10,7 @@ per-client lists are reduced to counts before the data is returned.
 from __future__ import annotations
 
 import logging
+import time
 from collections import Counter
 from typing import Any
 
@@ -25,6 +26,7 @@ from .const import (
     DOMAIN,
 )
 from .mac_utils import is_mac
+from .net_engine import async_get_engine
 from .topology_ports import redacted_port_summary
 
 _LOGGER = logging.getLogger(__name__)
@@ -124,6 +126,8 @@ async def async_get_config_entry_diagnostics(
         "features": _redact(coordinator.features),
         "router_info": _redact(coordinator.router_info),
         "port_mapping": port_mapping,
+        # Counters, types and times only — no MAC, IP, SSID or names.
+        "intelligence": _intelligence_summary(hass, entry.entry_id),
         # TODO: include bandwidth statistics once the bandwidth sensor is implemented
         # TODO: include per-client online time once implemented
         # TODO: include traffic statistics once implemented
@@ -131,6 +135,18 @@ async def async_get_config_entry_diagnostics(
 
     _LOGGER.debug("Diagnostics generated for entry %s", entry.entry_id)
     return diagnostics
+
+
+def _intelligence_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any]:
+    """Engine summary for one router; never fails the diagnostics download."""
+    engine = async_get_engine(hass)
+    if engine is None:
+        return {"loaded": False}
+    try:
+        return engine.diagnostics(entry_id, time.time())
+    except Exception:
+        _LOGGER.debug("Network intelligence diagnostics failed", exc_info=True)
+        return {"loaded": engine.loaded, "error": True}
 
 
 def _client_summary(clients: list[dict[str, Any]]) -> dict[str, Any]:

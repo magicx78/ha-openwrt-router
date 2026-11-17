@@ -162,6 +162,17 @@ export function IconAlerts({ size = 20, className }: IconProps) {
   );
 }
 
+/** Diagnose tab (P7): pulse line in a magnifier. */
+export function IconDiagnose({ size = 20, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <circle cx="10.5" cy="10.5" r="7" />
+      <line x1="15.5" y1="15.5" x2="21" y2="21" />
+      <polyline points="6 11 8.5 11 9.8 8 11.5 13.5 12.8 10.5 15 10.5" />
+    </svg>
+  );
+}
+
 export function IconSettings({ size = 20, className }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={className}>

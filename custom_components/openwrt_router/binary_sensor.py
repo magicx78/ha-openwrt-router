@@ -33,9 +33,15 @@ from .const import (
 )
 from .coordinator import OpenWrtCoordinator
 from .fleet import collect_radios
+from .net_entities import async_setup_binary_sensors as async_setup_intel_binary_sensors
 from .sensor import router_has_wan
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# Read-only platform: entities update from the coordinator or the engine
+# (push), so no limit is needed.
+PARALLEL_UPDATES = 0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -102,6 +108,8 @@ async def async_setup_entry(
     ]
     entities.append(OpenWrtStickyClientsBinarySensor(coordinator, entry))
     async_add_entities(entities)
+    # Network intelligence (P6): read from the engine only.
+    async_setup_intel_binary_sensors(hass, entry.entry_id, async_add_entities)
 
 
 class OpenWrtBinarySensorEntity(

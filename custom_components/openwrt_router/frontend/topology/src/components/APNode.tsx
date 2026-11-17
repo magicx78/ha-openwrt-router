@@ -1,6 +1,7 @@
 import React from 'react';
 import { AccessPoint, Client, PortStat } from '../types';
 import { StatusDot } from './StatusDot';
+import { IncidentBadge } from './IncidentBadge';
 import { IconAP } from './Icons';
 import { SignalBar } from './SignalBar';
 import { computeHealth } from './GatewayNode';
@@ -60,6 +61,8 @@ interface Props {
   vlanMode?: boolean;
   healthMode?: boolean;
   onSelectPort?: (port: PortStat) => void;
+  /** Click on the warning symbol: open the Diagnose tab for this router (P7). */
+  onOpenDiagnose?: () => void;
 }
 
 function avgSignalDbm(clients: Client[]): number | null {
@@ -93,7 +96,7 @@ function portSpeedLabel(mbps: number | null): string {
   return '10M';
 }
 
-export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHover, onContextMenu, onDoubleClick, onToggleExpand, heatmap, vlanMode, healthMode, onSelectPort }: Props) {
+export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHover, onContextMenu, onDoubleClick, onToggleExpand, heatmap, vlanMode, healthMode, onSelectPort, onOpenDiagnose }: Props) {
   const statusClass = ap.status === 'online'
     ? 'status-online'
     : ap.status === 'warning'
@@ -145,7 +148,10 @@ export function APNode({ ap, clients, selected, dimmed, expanded, onSelect, onHo
           <div className="ap-card__ip">{ap.ip}</div>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
-          <StatusDot status={ap.status} />
+          <div className="node-status-row">
+            <IncidentBadge counts={ap.incidents} onOpen={onOpenDiagnose} />
+            <StatusDot status={ap.status} />
+          </div>
           {health && (
             <span className={`health-badge health-badge--${health}`}>
               {ap.cpuLoad != null ? `${ap.cpuLoad > 100 ? 'Load' : 'CPU'} ${ap.cpuLoad}%` : `${ap.backhaulSignal} dBm`}
