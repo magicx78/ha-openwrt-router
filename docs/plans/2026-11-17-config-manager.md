@@ -1110,3 +1110,28 @@ Nicht geprüft:
 
 - 2026-11-17 `claude/config-manager-d9fdac@0dc20cd` – Plan erstellt. Lokal: keine Tests (nur Doku).
   CI: –. Hardware: keine (Vorgabe). Review: offen.
+
+---
+
+## 23. Antworten auf Abschnitt 20 (Stand 2026-11-17)
+
+Alle zehn Fragen sind beantwortet, jeweils nach Empfehlung. Q2, Q5, Q6, Q7, Q8, Q10 hat der Master
+entschieden; Q1, Q3, Q4, Q9 der Nutzer (vom Master übermittelt).
+
+| Frage | Antwort |
+|---|---|
+| Q1 ACL für Nicht-root | ACL wird erweitert, gekoppelt an `config_backup_enabled`: das Recht wird nur angeboten, wenn die Backup-Funktion eingeschaltet ist. Auf echte Router wird erst nach Einzelfreigabe des Nutzers geschrieben, nichts automatisch. |
+| Q2 Wer baut die ACL | `enterprise-core` liefert die nächste ACL-Version und ändert `acl_provisioning.py`. Dieses Modul fasst die Datei nicht an. |
+| Q3 Verschlüsselung | Keine eigene Verschlüsselung in Phase 1. Abgeschotteter Ordner, 0700/0600, Schutzgrenzen dokumentieren. Speicherformat lässt spätere Verschlüsselung zu. |
+| Q4 Automatischer Restore | Nicht in Phase 1. Später nur auf UCI-Ebene mit `uci apply`, Rollback und Freigabe. Phase 1: Prüfung, Vorschau, validierter Export, dokumentierte manuelle Wiederherstellung. |
+| Q5 Backup vor Firmware-Update | Release-Wechsel erkennen und danach vergleichen, plus Dienst `create_config_backup`. Kein eigener Firmware-Pfad. |
+| Q6 SSH-Hostkey | TOFU-Pinning nur für den Config-Pfad; die Änderung am geteilten SSH-Transport macht `enterprise-core`. |
+| Q7 Drift-Bestätigungen, HMAC-Schlüssel | Im Core-Vertrag. Kein eigener Store. |
+| Q8 Dedup | `content_hash`, `uci_hash` und die atomare Operation „Version anlegen oder `last_seen_at` setzen" übernimmt der Core. |
+| Q9 Export des Klartext-Archivs | Erlaubt: nur Admin, ausdrückliche Bestätigung pro Download über den zentralen Freigabemechanismus, Audit-Eintrag. |
+| Q10 Container „Enterprise" | Legt `enterprise-core` an; dieses Modul hängt einen Untertab ein. |
+
+Abweichungen aus G1 gegenüber Abschnitt 11: Bereich und Risiko sind in `config_const` einfache
+Strings (`AREA_*`, `RISK_*`); die StrEnums in `config_diff` tragen genau diese Werte.
+`lookup_risk_rule(config, section_type, option, *, section_name="")` ersetzt die reine Tabelle;
+wertabhängige Hochstufungen (Management-IP, Firewall-Input, SSH-Port, Uplink) macht `config_diff`.
