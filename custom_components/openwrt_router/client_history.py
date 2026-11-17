@@ -111,8 +111,19 @@ TRANSITION_KINDS = frozenset({TR_START, TR_END, TR_MOVE, TR_GAP, TR_RESUME, TR_B
 _REASON_PRUNE = "prune"
 _REASON_INACTIVITY = "inactivity"
 _LEAVE_REASONS = frozenset({"local_request", "leave", "sta_leaving"})
+# [CS-Anpassung 1.41] ``missing_acks`` (reason 34, new in log_parser 1.41) is
+# a link error like ``timeout``.
 _ERROR_REASONS = frozenset(
-    {"timeout", "invalid_mic", "failed", "psk", "max_sta", "blocked", "other"}
+    {
+        "timeout",
+        "invalid_mic",
+        "failed",
+        "psk",
+        "max_sta",
+        "blocked",
+        "other",
+        "missing_acks",
+    }
 )
 
 WEAK_SIGNAL_DBM = -75  # same value as client_stability.WEAK_SIGNAL_DBM
@@ -783,8 +794,10 @@ class ClientHistory:
             return []
         out: list[HourBucket] = []
         for (hour, ap), packed in c.closed.items():
+            if not _in(hour, first, last):
+                continue
             values = unpack_bucket(packed)
-            if values is not None and _in(hour, first, last):
+            if values is not None:
                 out.append(HourBucket(hour, ap, _bucket(values), True))
         for (hour, ap), values in c.open.items():
             if _in(hour, first, last):
@@ -876,6 +889,50 @@ class ClientHistory:
                 c.transitions.popleft()
             while c.ring and c.ring[0].ts < now - RAW_RING_S:
                 c.ring.popleft()
+
+    # --- store size trimming (B8) ----------------------------------------------
+
+    def trim_transitions(self) -> int:
+        """Drop the transitions of offline and unknown clients; returns count."""
+        dropped = 0
+        for c in self._clients.values():
+            if c.state in (STATE_OFFLINE, STATE_UNKNOWN) and c.transitions:
+                dropped += len(c.transitions)
+                c.transitions.clear()
+        return dropped
+
+    def trim_closed_hours(self, before_hour: int, private_only: bool = False) -> int:
+        """Drop closed hour buckets below ``before_hour``; returns count.
+
+        Closed hours are already folded into the day buckets, so only the hour
+        resolution of that time is lost.
+        """
+        dropped = 0
+        for c in self._clients.values():
+            if private_only and not c.private:
+                continue
+            for key in [k for k in c.closed if k[0] < before_hour]:
+                del c.closed[key]
+                dropped += 1
+        return dropped
+
+    def drop_oldest(self, count: int) -> int:
+        """Drop up to ``count`` clients, least recently active first.
+
+        Offline and unknown clients go before online ones.
+        """
+        order = sorted(
+            self._clients.values(),
+            key=lambda c: (
+                c.state not in (STATE_OFFLINE, STATE_UNKNOWN),
+                c.last_activity,
+                c.mac,
+            ),
+        )
+        victims = order[: max(0, int(count))]
+        for c in victims:
+            del self._clients[c.mac]
+        return len(victims)
 
     # --- ingest ----------------------------------------------------------------
 

@@ -52,10 +52,11 @@ M1 = "AA:BB:CC:00:00:01"
 M2 = "AA:BB:CC:00:00:02"
 M3 = "AA:BB:CC:00:00:03"
 PRIV = "02:BB:CC:00:00:09"
+PUB = "00:BB:CC:00:00:05"  # globally unique (M1..M3 have the local bit)
 R1 = "router_a"
 R2 = "router_b"
 R3 = "router_c"
-I = 60.0  # poll interval
+I = 60.0  # poll interval  # noqa: E741
 T0 = 1_800_000_000.0  # exact hour border (500000 * 3600)
 H0 = int(T0 // 3600)
 N = len(BUCKET_FIELDS)
@@ -137,6 +138,7 @@ def test_roam_grace() -> None:
         ("blocked", False, DC_ERROR),
         ("other", False, DC_ERROR),
         ("failed", False, DC_ERROR),
+        ("missing_acks", False, DC_ERROR),
         ("inactivity", False, DC_INACTIVITY),
         ("local_request", False, DC_LEAVE),
         (None, False, DC_UNKNOWN),
@@ -1039,3 +1041,80 @@ def test_old_format_rows_load_with_new_fields_zero() -> None:
     # and it keeps working with the new fields from here on
     run(loaded, [band_poll(T0 + k * I, "5g") for k in range(70, 72)])
     assert total(loaded).online_5g_s == 120
+
+
+# --- store size trimming (B8) ---------------------------------------------------
+
+
+def _hours_of(hist: ClientHistory, mac: str) -> set[int]:
+    return {b.hour for b in hist.hours(mac) if b.closed}
+
+
+def _three_days(hist: ClientHistory, macs: list[str]) -> float:
+    """Every client online for 72 h on R1, then M2 offline; returns the end."""
+    end = T0 + 72 * 3600
+    t = T0
+    while t <= end:
+        hist.ingest(poll(R1, t, macs))
+        t += 600
+    return end
+
+
+def test_hours_filter_skips_unpacking_outside_the_range(monkeypatch) -> None:
+    hist = ClientHistory()
+    end = _three_days(hist, [M1])
+    calls: list[str] = []
+    real = ch.unpack_bucket
+
+    def spy(packed):
+        calls.append(packed)
+        return real(packed)
+
+    monkeypatch.setattr(ch, "unpack_bucket", spy)
+    last = int(end // 3600)
+    got = hist.hours(M1, last - 2, last)
+    assert {b.hour for b in got} <= {last - 2, last - 1, last}
+    assert len(calls) <= 3
+    calls.clear()
+    assert len(hist.hours(M1)) > 70  # unfiltered still returns everything
+
+
+def test_trim_transitions_of_offline_clients_only() -> None:
+    hist = ClientHistory()
+    run(hist, [poll(R1, T0 + k * I, [M1, M2]) for k in range(3)])
+    run(hist, [poll(R1, T0 + k * I, [M1]) for k in range(3, 10)])
+    assert hist.live(M2).state == STATE_OFFLINE
+    assert hist.transitions(M2) and hist.transitions(M1)
+    assert hist.trim_transitions() > 0
+    assert hist.transitions(M2) == ()
+    assert hist.transitions(M1)  # online client keeps its transitions
+
+
+def test_trim_closed_hours_private_first_then_all() -> None:
+    hist = ClientHistory()
+    assert not ch.is_private_mac(PUB)
+    end = _three_days(hist, [PUB, PRIV])
+    cut = int(end // 3600) - 48
+    days_before = sum_buckets(d.bucket for d in hist.days(PUB))
+    assert min(_hours_of(hist, PRIV)) < cut
+    assert hist.trim_closed_hours(cut, private_only=True) > 0
+    assert min(_hours_of(hist, PRIV)) >= cut
+    assert min(_hours_of(hist, PUB)) < cut  # public MAC untouched
+    assert hist.trim_closed_hours(cut) > 0
+    assert min(_hours_of(hist, PUB)) >= cut
+    # the day buckets (already folded) are unchanged
+    assert sum_buckets(d.bucket for d in hist.days(PUB)) == days_before
+    assert hist.trim_closed_hours(cut) == 0
+
+
+def test_drop_oldest_prefers_idle_clients() -> None:
+    hist = ClientHistory()
+    run(hist, [poll(R1, T0 + k * I, [M1, M2, M3]) for k in range(3)])
+    run(hist, [poll(R1, T0 + k * I, [M1, M3]) for k in range(3, 6)])
+    run(hist, [poll(R1, T0 + k * I, [M1]) for k in range(6, 12)])
+    assert hist.live(M2).state == STATE_OFFLINE
+    assert hist.live(M3).state == STATE_OFFLINE
+    assert hist.drop_oldest(1) == 1
+    assert M2 not in hist and M3 in hist  # M2 idle the longest
+    assert hist.drop_oldest(5) == 2  # then M3, then the online M1
+    assert len(hist) == 0
