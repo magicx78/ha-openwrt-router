@@ -44,6 +44,7 @@ from .client_analysis import (
     WindowStats,
     active_patterns,
     ap_pattern,
+    collect_trailing_hour,
     collect_window,
     collect_window_days,
     make_settings,
@@ -102,6 +103,7 @@ _DATA_KEY = f"{DOMAIN}_client_stability"
 _FLUSH_KEY = f"{DOMAIN}_client_stability_flush"
 
 _HOUR = 3600
+_DAY = 86400
 # Root incidents whose routers' disconnects are infrastructure (plan 5):
 # every NI root except a WAN outage (Wi-Fi clients stay associated).
 INFRA_ROOT_TYPES = frozenset(t for t in ROOT_TIERS if t != "wan_down")
@@ -126,6 +128,9 @@ _DOWN_KINDS = frozenset({"disconnected", "deauth", "disassoc", "inactivity_timeo
 _DHCP_FAIL_KINDS = frozenset({WIFI_DHCP_AFTER_CONNECT_KIND, WIFI_NO_IP_KIND})
 # Closed hour buckets older than this many hours go first when trimming.
 _TRIM_KEEP_HOURS = 48
+# [CS 1.43] The last SSID per client is stored (one short string per client;
+# 802.11 SSIDs have at most 32 bytes, so at most 32 characters).
+SSID_MAX_LEN = 32
 _MB = 1_000_000
 
 
@@ -519,8 +524,13 @@ class ClientStability:
         self.entity_states: dict[str, ClientEntityState] = {}
         # MAC -> (hour index, active patterns) of the part W cache
         self._patterns: dict[str, tuple[int, int]] = {}
-        # MAC -> SSID of the last client list it was in (memory only)
+        # MAC -> SSID of the last client list it was in (stored since 1.43)
         self._ssid: dict[str, str] = {}
+        # MAC -> 7-day values of the table, cached per hour (1.43)
+        self._week: dict[str, WeekValues] = {}
+        # first poll after the store was read: the raw ring and the event
+        # ring (memory only) hold data from here on
+        self._memory_from: float | None = None
         self.last_save_bytes: int | None = None
         self.trimmed = 0
 
@@ -562,6 +572,7 @@ class ClientStability:
         self.history = ClientHistory.from_dict(
             stored.get("history"), self.settings["retention_days"]
         )
+        self._ssid = ssids_from_store(stored.get("ssids"), self.history)
 
     async def _async_backup(self) -> None:
         path = getattr(self._store, "path", None)
@@ -613,6 +624,11 @@ class ClientStability:
         return {
             "settings": self.settings,
             "history": self.history.to_dict(),
+            "ssids": {
+                mac: ssid
+                for mac, ssid in sorted(self._ssid.items())
+                if mac in self.history
+            },
             "saved_at": self.last_now,
         }
 
@@ -672,6 +688,8 @@ class ClientStability:
             self._ssid.pop(mac, None)
         infra = self._infra(now, facts.auth_failed)
         self.history.ingest(poll_input(facts, interval=interval, infra=infra))
+        if self._memory_from is None:
+            self._memory_from = now
         self._remember_ssids(facts)
         self.schedule_save()
         if (
@@ -685,6 +703,9 @@ class ClientStability:
         """The engine clock jumped back by ``delta``."""
         self.history.shift_clock(delta)
         self._seen = {r: t + delta for r, t in self._seen.items()}
+        self._week.clear()
+        if self._memory_from is not None:
+            self._memory_from += delta
         if self._last_publish is not None:
             self._last_publish += delta
         if self.last_now is not None:
@@ -706,7 +727,7 @@ class ClientStability:
             _band, ssid, _phy = facts.context.iface(
                 radio if isinstance(radio, str) else None
             )
-            if isinstance(ssid, str) and ssid:
+            if isinstance(ssid, str) and 0 < len(ssid) <= SSID_MAX_LEN:
                 self._ssid[mac] = ssid
         if len(self._ssid) > len(self.history) + 64:
             self._ssid = {
@@ -813,6 +834,47 @@ class ClientStability:
             return None
         return stats, score_window(stats, self.score_settings(live.mac))
 
+    def window_trailing_hour(
+        self, mac: str, now: float
+    ) -> tuple[WindowStats, ScoreResult] | None:
+        """Statistics and score of the real last 60 minutes (1.43)."""
+        live = self.history.live(mac)
+        if live is None:
+            return None
+        stats = collect_trailing_hour(
+            self.history,
+            mac,
+            now,
+            memory_from=self._memory_from,
+            log_coverage=self.log_coverage(live.ap),
+            patterns=self.patterns(mac, now) or 0,
+        )
+        if stats is None:
+            return None
+        return stats, score_window(stats, self.score_settings(live.mac))
+
+    def week_values(self, mac: str, now: float) -> WeekValues | None:
+        """7-day score and availability and the score of the 24 h before the
+        last 24 h, cached per hour (table sorting needs them for all rows)."""
+        hour = int(now // _HOUR)
+        cached = self._week.get(mac)
+        if cached is not None and cached.hour == hour:
+            return cached
+        week = self.window(mac, now, 168)
+        if week is None:
+            return None
+        before = self.score(mac, now, 24, end=now - _DAY)
+        values = WeekValues(
+            hour=hour,
+            score_7d=week[1].score,
+            availability_7d=week[0].availability,
+            score_previous_24h=before.score if before is not None else None,
+        )
+        if len(self._week) >= max(64, 2 * len(self.history)):
+            self._week.clear()
+        self._week[mac] = values
+        return values
+
     def window_days(
         self, mac: str, now: float, days: int = 30
     ) -> tuple[WindowStats, ScoreResult] | None:
@@ -884,6 +946,7 @@ class ClientStability:
         self.settings = merged
         self.history.retention_days = merged["retention_days"]
         self._patterns.clear()
+        self._week.clear()
         self.schedule_save()
         if self.last_now is not None:
             self._publish(self.last_now)
@@ -908,6 +971,34 @@ class ClientStability:
             "store_limit_bytes": int(self.settings["max_store_mb"]) * _MB,
             "trimmed_for_size": self.trimmed,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class WeekValues:
+    """Cached 7-day table values of one client (``hour`` = cache hour)."""
+
+    hour: int
+    score_7d: float | None
+    availability_7d: float | None
+    score_previous_24h: float | None
+
+
+def ssids_from_store(raw: Any, history: ClientHistory) -> dict[str, str]:
+    """Stored SSIDs of known clients; damaged entries are dropped (1.42
+    stores have none)."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, ssid in raw.items():
+        mac = normalize_mac(key)
+        if (
+            mac is not None
+            and mac in history
+            and isinstance(ssid, str)
+            and 0 < len(ssid) <= SSID_MAX_LEN
+        ):
+            out[mac] = ssid
+    return out
 
 
 def _store_size(payload: dict[str, Any]) -> int:

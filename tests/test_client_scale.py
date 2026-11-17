@@ -220,6 +220,18 @@ def test_table_of_150_clients_with_30_days_stays_cheap() -> None:
     assert again < 400, again
 
 
+@pytest.mark.parametrize("sort", ["availability_7d", "-trend"])
+def test_table_sorted_by_7_day_values_stays_cheap(sort: str) -> None:
+    cs, now = cloned(150)
+    query = parse_table_query({"sort": sort})
+    first = best_ms(lambda: clients_table(cs, str, now, query), runs=1)
+    again = best_ms(lambda: clients_table(cs, str, now, query))
+    # 1.43, dev machine: ~330-370 ms / ~50 ms. Sorting needs the 7-day values
+    # of every row; the engine caches them per hour like the patterns.
+    assert first < 1000, first
+    assert again < 400, again
+
+
 def test_ap_view_of_150_clients_over_30_days_stays_cheap() -> None:
     cs, now = cloned(150)
     # dev machine ~115 ms, before B8 ~740 ms

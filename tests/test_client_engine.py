@@ -8,6 +8,7 @@ disk). MACs are locally administered test values.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from types import SimpleNamespace
@@ -837,3 +838,146 @@ async def test_client_stability_adds_no_router_calls() -> None:
     calls_with, cs = await run(True)
     assert calls_with == calls_without > 0
     assert cs is not None and M1 in cs.history
+
+
+# --- 1.43: store format, SSID, trailing hour, week cache --------------------------
+
+# A client history exactly as 1.42.0 wrote it (generated with the 1.42.0
+# client_history.py: three polls, one auth failure, no "lf" field).
+HISTORY_142: dict[str, Any] = {
+    "v": 1,
+    "mark": 500000,
+    "lists": {"r1": [1800000120.0, 60.0, 0, [M1]]},
+    "clients": {
+        M1: {
+            "m": {
+                "p": 1,
+                "fs": 1800000000.0,
+                "ls": 1800000120.0,
+                "la": 1800000120.0,
+                "hn": "phone",
+                "ht": 1800000000.0,
+                "ip": "192.0.2.10",
+                "it": 1800000000.0,
+            },
+            "l": {
+                "s": "online",
+                "si": 1800000000.0,
+                "ap": "r1",
+                "b": "5g",
+                "r": -55,
+                "acc": 1800000120.0,
+                "ss": 1800000000.0,
+                "sk": 0,
+                "gp": 0,
+                "gt": 1,
+            },
+            "aps": ["r1"],
+            "ho": [
+                "500000:0:120,120,,1,,,,,,,,,,,,,1,,,3,-165,-55,-55,,3,3000,1500,3,,120"
+            ],
+            "tr": ["1800000000.0|start|0||||1"],
+        }
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_a_1_42_store_loads_without_loss(disk) -> None:
+    cs_disk(disk).data = {
+        "settings": {**default_settings(), "retention_days": 14},
+        "history": copy.deepcopy(HISTORY_142),
+        "saved_at": T0 + 120,
+    }
+    hass = make_hass()
+    _engine, cs = await setup(hass, "r1")
+    assert not cs.load_failed
+    assert cs.settings["retention_days"] == 14
+    assert cs.history.to_dict() == HISTORY_142
+    assert cs.history.live(M1).last_failure is None  # 1.42 did not keep it
+    assert cs.ssid(M1) is None
+    payload = cs._data_to_save()
+    assert payload["history"] == HISTORY_142
+    assert payload["ssids"] == {}
+
+
+@pytest.mark.asyncio
+async def test_last_ssid_survives_a_restart(disk) -> None:
+    hass = make_hass()
+    engine, cs = await setup(hass, "r1")
+    engine.ingest("r1", data([client(M1)]), T0, interval=60.0)
+    assert cs.ssid(M1) == "Test"
+    await async_unload_net_intelligence(hass, "r1")
+    await async_unload_client_stability(hass)
+    assert cs_disk(disk).saves[-1]["ssids"] == {M1: "Test"}
+    _engine2, cs2 = await setup(make_hass(), "r1")
+    assert cs2.ssid(M1) == "Test"
+
+
+@pytest.mark.asyncio
+async def test_stored_ssids_are_validated_and_bounded_by_the_history(disk) -> None:
+    cs_disk(disk).data = {
+        "settings": default_settings(),
+        "history": copy.deepcopy(HISTORY_142),
+        "ssids": {M1.lower(): "Home", "bad": "x", M2: "Guest", M3: 5},
+    }
+    _engine, cs = await setup(make_hass(), "r1")
+    assert cs.ssid(M1) == "Home"
+    assert cs.ssid(M2) is None  # not in the history
+    for bad in ([], "x", {M1: "y" * 40}):
+        cs_disk(disk).data = {"history": copy.deepcopy(HISTORY_142), "ssids": bad}
+        hass = make_hass()
+        _engine, cs = await setup(hass, "r1")
+        assert cs.ssid(M1) is None and not cs.load_failed
+        await async_unload_client_stability(hass)
+
+
+@pytest.mark.asyncio
+async def test_forgotten_clients_leave_no_ssid_in_the_store(disk) -> None:
+    hass = make_hass()
+    engine, cs = await setup(hass, "r1")
+    engine.ingest("r1", data([client(M1), client(M2)]), T0, interval=60.0)
+    cs.history.forget(M2)
+    assert cs._data_to_save()["ssids"] == {M1: "Test"}
+
+
+@pytest.mark.asyncio
+async def test_trailing_hour_marks_the_memory_start_after_a_restart(disk) -> None:
+    hass = make_hass()
+    engine, cs = await setup(hass, "r1")
+    for k in range(90):
+        engine.ingest("r1", data([client(M1)]), T0 + k * 60, interval=60.0)
+    now = T0 + 89 * 60
+    stats, result = cs.window_trailing_hour(M1, now)
+    assert stats.start == now - 3600 and stats.memory_from is None
+    assert stats.bucket.rssi_n == 61
+    assert stats.coverage == 1.0 and result.score is not None
+    await async_unload_net_intelligence(hass, "r1")
+    await async_unload_client_stability(hass)
+
+    engine2, cs2 = await setup(make_hass(), "r1")
+    later = now + 60
+    engine2.ingest("r1", data([client(M1)]), later, interval=60.0)
+    stats2, _result = cs2.window_trailing_hour(M1, later)
+    assert stats2.memory_from == later  # samples only since the restart
+    assert stats2.bucket.rssi_n == 1
+    assert stats2.bucket.online_s == pytest.approx(3600, abs=1)
+    assert cs2.window_trailing_hour("02:00:5E:10:00:99", later) is None
+
+
+@pytest.mark.asyncio
+async def test_week_values_are_cached_per_hour(disk) -> None:
+    hass = make_hass()
+    engine, cs = await setup(hass, "r1")
+    for k in range(3):
+        engine.ingest("r1", data([client(M1)]), T0 + k * 60, interval=60.0)
+    now = T0 + 120
+    first = cs.week_values(M1, now)
+    assert first.availability_7d == 1.0
+    with patch.object(cs, "window", side_effect=AssertionError("not cached")):
+        assert cs.week_values(M1, now + 60) is first
+    assert cs.week_values(M1, now + 3600) is not first  # next hour
+    again = cs.week_values(M1, now)
+    cs.update_settings({"classes": [95, 80, 60, 30]})
+    assert cs.week_values(M1, now) is not again  # settings change the score
+    assert cs.week_values("02:00:5E:10:00:99", now) is None

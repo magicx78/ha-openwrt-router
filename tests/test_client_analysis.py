@@ -1080,13 +1080,35 @@ def test_rule_coverage_triggers() -> None:
 def test_rule_coverage_does_not_trigger() -> None:
     for s in (
         bad_day(weak_s=int(0.2 * 86400)),  # signal fine
-        bad_day(dc_unknown=3),  # 9 disconnects
-        bad_day(dc_unknown=0, dc_infra=10),  # infra does not count
+        bad_day(dc_error=3, dc_unknown=0),  # 3 disconnects (threshold 4)
+        bad_day(dc_error=0, dc_unknown=0, dc_infra=10),  # infra does not count
         bad_day(rssi_n=5, rssi_sum=-390),  # too few RSSI values
         stats(bad_day().bucket, window_s=3 * DAY),  # coverage below 0.5
         None,
     ):
         assert ca.rule_coverage(ca.ClientFindings(M1, stats_24h=s)) is None
+
+
+def test_rule_coverage_threshold_is_four_disconnects_per_day() -> None:
+    assert ca.COVERAGE_MIN_DISCONNECTS == 4.0
+    rec = ca.rule_coverage(
+        ca.ClientFindings(M1, stats_24h=bad_day(dc_unknown=0, dc_error=4))
+    )
+    assert rec is not None and rec.params["disconnects_24h"] == 4.0
+    # half a day observed: 2 disconnects are 4 per 24 observed hours
+    half = bad_day(
+        dc_error=2,
+        dc_unknown=0,
+        observed_s=43200,
+        online_s=43200,
+        weak_s=int(0.4 * 43200),
+    )
+    assert (
+        ca.rule_coverage(
+            ca.ClientFindings(M1, stats_24h=stats(half.bucket, window_s=43200))
+        )
+        is not None
+    )
 
 
 def test_rule_roaming() -> None:
@@ -1253,3 +1275,108 @@ def test_recommend_client_collects_rules_and_kinds_stay_apart() -> None:
     assert all(
         k == ca.KIND_HYPOTHESIS for key, k in kinds.items() if key != ca.REC_INFRA_CAUSE
     )
+
+
+# --- 1.43: window edges, trailing hour, timeline start state --------------------
+
+
+def online_for(hist: ClientHistory, start: float, end: float, **kw) -> None:
+    t = start
+    while t <= end:
+        hist.ingest(PollInput(AP1, t, 60.0, True, (ClientObs(M1, "5g", -50, **kw),)))
+        t += 60.0
+
+
+def test_bucket_windows_are_aligned_to_the_clock_hour() -> None:
+    """Documented edge: ``collect_window`` sums whole hour buckets, so ``1 h``
+    is only the current clock hour and ``24 h`` is 23 h plus that hour."""
+    hist = ClientHistory()
+    now = T0 + 600  # T0 is an hour border
+    online_for(hist, T0 - 30 * 3600, now)
+    hour = collect_window(hist, M1, now, 1)
+    assert hour.window_s == 600 and hour.bucket.observed_s == 600
+    assert hour.start == T0
+    day = collect_window(hist, M1, now, 24)
+    assert day.window_s == 23 * 3600 + 600
+    assert day.start == T0 - 23 * 3600
+
+
+def test_trailing_hour_covers_the_last_60_minutes() -> None:
+    hist = ClientHistory()
+    now = T0 + 600
+    online_for(hist, T0 - 30 * 3600, now, ip_visible=True)
+    win = ca.collect_trailing_hour(hist, M1, now)
+    assert win.start == now - 3600 and win.window_s == 3600
+    assert win.bucket.observed_s == win.bucket.online_s == 3600
+    assert win.availability == 1.0 and win.coverage == 1.0
+    assert win.bucket.rssi_n == 61 and win.bucket.rssi_sum == -50 * 61
+    assert win.bucket.ip_visible_n == 61
+    assert win.memory_from is None
+    assert ca.collect_trailing_hour(hist, "AA:BB:CC:00:00:99", now) is None
+
+
+def test_trailing_hour_counts_disconnects_and_log_events() -> None:
+    hist = ClientHistory()
+    online_for(hist, T0 - 7200, T0 - 1800)
+    end = T0 - 1800
+    ev = (
+        ClientEvent(M1, "disconnect", end + 30, AP1, reason="timeout"),
+        ClientEvent(M1, "auth_fail", end + 40, AP1, count=2),
+    )
+    hist.ingest(PollInput(AP1, end + 60, 60.0, True, (), ev))
+    t = end + 120
+    while t <= T0:  # offline from end + 30 on
+        hist.ingest(PollInput(AP1, t, 60.0, True, ()))
+        t += 60
+    win = ca.collect_trailing_hour(hist, M1, T0)
+    b = win.bucket
+    assert b.dc_error == 1 and b.auth_fail == 2
+    assert b.online_s == pytest.approx(1830, abs=1)
+    assert b.observed_s == pytest.approx(3600, abs=1)
+    assert win.availability == pytest.approx(1830 / 3600, abs=0.001)
+    # the finished session ended in the window: it counts for the mean
+    assert b.session_s_sum == pytest.approx(5430, abs=1)
+    assert sum(win.session_hist) == 1
+
+
+def test_trailing_hour_after_a_restart_has_no_samples_before_it() -> None:
+    hist = ClientHistory()
+    now = T0 + 600
+    online_for(hist, T0 - 30 * 3600, now)
+    loaded = ClientHistory.from_dict(hist.to_dict())
+    later = now + 1200  # HA was down for 20 minutes
+    loaded.ingest(PollInput(AP1, later, 60.0, True, (ClientObs(M1, "5g", -50),)))
+    win = ca.collect_trailing_hour(loaded, M1, later, memory_from=later)
+    assert win.memory_from == later
+    assert win.bucket.rssi_n == 1  # only the sample after the restart
+    assert win.bucket.gap_s == pytest.approx(1200, abs=1)
+    assert win.bucket.online_s == pytest.approx(2400, abs=1)
+    # memory older than the window start is no limit
+    full = ca.collect_trailing_hour(loaded, M1, later, memory_from=later - 7200)
+    assert full.memory_from is None
+
+
+def test_timeline_of_a_long_session_without_transitions_is_online() -> None:
+    hist = ClientHistory()
+    now = T0 + 600
+    online_for(hist, T0 - 30 * 3600, now)
+    hist.prune(now)  # the start transition is older than 24 h
+    assert hist.transitions(M1) == ()
+    live = hist.live(M1)
+    segments = ca.timeline_segments(hist.transitions(M1), now - 3600, now, live)
+    assert segments == [(now - 3600, now, "online")]
+
+
+def test_timeline_before_the_first_sighting_is_unknown() -> None:
+    hist = ClientHistory()
+    online_for(hist, T0, T0 + 600)
+    live = hist.live(M1)
+    segments = ca.timeline_segments(hist.transitions(M1), T0 - 600, T0 + 600, live)
+    assert segments == [(T0 - 600, T0, "unknown"), (T0, T0 + 600, "online")]
+
+
+def test_timeline_start_state_is_inferred_from_the_first_transition() -> None:
+    live = None
+    trs = [Transition(T0 + 100, TR_END, AP1, "timeout", "error")]
+    segments = ca.timeline_segments(trs, T0, T0 + 200, live)
+    assert segments == [(T0, T0 + 100, "online"), (T0 + 100, T0 + 200, "offline")]

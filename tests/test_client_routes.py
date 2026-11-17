@@ -492,3 +492,120 @@ def test_topology_panel_module_is_not_imported_twice() -> None:
     # client_views imports the panel's base view; the panel imports the
     # client views lazily (no import cycle at module level)
     assert client_views._IntelView is topology_panel._IntelView
+
+
+# --- 1.43: new figures, sorting, last problem, strips --------------------------------
+
+
+async def test_window_figures_of_1_43(cs: ClientStability) -> None:
+    stats = body(await detail(cs, M1))["stats"]
+    assert stats["start"] is not None and stats["memory_from"] is None
+    # IP known in every sample of the phone; share of the signal samples
+    assert stats["ip_visible_share"] == 1.0
+    assert stats["notable_events"] == 0
+    assert stats["finished_sessions"] == 0 and stats["session_mean_s"] is None
+    gone = body(await detail(cs, M3))["stats"]
+    assert gone["finished_sessions"] == 1
+    assert gone["session_mean_s"] == pytest.approx(120 * STEP, abs=STEP)
+    assert gone["ip_visible_share"] == 0.0
+    assert gone["notable_events"] == 1  # one disconnect of class unknown
+    assert gone["disconnects"]["unknown"] == 1
+
+
+def test_notable_events_sum() -> None:
+    from custom_components.openwrt_router.client_analysis import notable_events
+    from custom_components.openwrt_router.client_history import Bucket
+
+    b = Bucket(
+        dc_error=1,
+        dc_unknown=2,
+        dc_inactivity=4,
+        dc_leave=8,
+        dc_infra=16,
+        roam_flaps=32,
+        auth_fail=64,
+        assoc_fail=128,
+        dhcp_fail=256,
+        reconnects=512,
+    )
+    # error + unknown + flaps + auth + assoc + DHCP; not inactivity, leave,
+    # infrastructure or reconnects
+    assert notable_events(b) == 1 + 2 + 32 + 64 + 128 + 256
+
+
+async def test_detail_1h_is_the_trailing_hour(cs: ClientStability) -> None:
+    data = body(await detail(cs, M1, window="1h"))
+    stats = data["stats"]
+    now = data["now"]
+    assert stats["start"] == now - 3600
+    assert stats["window_s"] == 3600
+    assert stats["online_s"] == pytest.approx(3600, abs=1)
+    assert stats["rssi_n"] == 61
+    assert data["timeline"] == [{"start": now - 3600, "end": now, "state": "online"}]
+
+
+async def test_table_last_problem_includes_failures(cs: ClientStability) -> None:
+    now = T0 + (POLLS - 1) * STEP
+    facts = poll("r1", now - 30, client(M1, signal=-55, hostname="phone"))
+    cs.on_poll(replace(facts, findings=(finding("wifi.no_ip", M1),)))
+    rows = {r["mac"]: r for r in body(await table(cs))["clients"]}
+    problem = rows[M1]["last_problem"]
+    assert problem["kind"] == "dhcp_fail" and problem["ts"] == now - 30
+    gone = rows[M3]["last_problem"]
+    assert gone["kind"] == "disconnect"
+    assert gone["class"] == "unknown"
+    assert gone["ts"] == rows[M3]["last_disconnect"]["ts"]
+    assert rows[M2]["last_problem"] is None
+
+
+async def test_table_sorts_by_ap_7d_availability_and_trend(
+    cs: ClientStability,
+) -> None:
+    by_ap = macs(body(await table(cs, sort="router")))
+    assert by_ap[0] == M2 or by_ap[0] == M3  # "AP Flur" < "Gateway"
+    assert by_ap[-1] == M1
+    assert macs(body(await table(cs, sort="-router")))[0] == M1
+    week = body(await table(cs, sort="availability_7d"))["clients"]
+    values = [r["availability_7d"] for r in week]
+    known = [v for v in values if v is not None]
+    assert known == sorted(known)
+    down = body(await table(cs, sort="-availability"))["clients"]
+    known = [r["availability_24h"] for r in down if r["availability_24h"] is not None]
+    assert known == sorted(known, reverse=True)
+    trend = body(await table(cs, sort="trend"))
+    assert trend["total"] == 3
+    for row in trend["clients"]:
+        assert {"trend", "score_previous_24h", "trend_delta"} <= row.keys()
+    assert macs(body(await table(cs, sort="last_problem")))
+
+
+async def test_detail_series_name_the_main_ap_and_band(cs: ClientStability) -> None:
+    data = body(await detail(cs, M2, window="24h"))
+    assert data["routers"] == {"r2": "AP Flur"}
+    assert all(p["ap"] == "r2" and p["band"] == "2.4g" for p in data["series"])
+    phone = body(await detail(cs, M1, window="7d"))
+    assert all(p["ap"] == "r1" and p["band"] == "5g" for p in phone["series"])
+
+
+@pytest.mark.parametrize(
+    ("window", "count", "span"), [("7d", 168, 3600), ("30d", 30, 86400)]
+)
+async def test_long_windows_have_a_coarse_strip(
+    cs: ClientStability, window: str, count: int, span: int
+) -> None:
+    data = body(await detail(cs, M3, window=window))
+    strip = data["strip"]
+    assert len(strip) == count
+    assert all(s["span_s"] == span for s in strip[:-1])
+    assert 0 < strip[-1]["span_s"] <= span  # the running bucket ends now
+    seen = [s for s in strip if s["online"] or s["offline"] or s["gap"]]
+    assert seen
+    for s in strip:
+        assert s["online"] + s["offline"] + s["gap"] + s["unknown"] == pytest.approx(
+            1.0
+        )
+    assert sum(s["disconnects"] for s in strip) == 1
+    # before the first sighting everything is unknown, never offline
+    assert strip[0]["unknown"] == 1.0
+    assert (await detail(cs, M3, window="24h")).status == 200
+    assert body(await detail(cs, M3, window="24h"))["strip"] == []
