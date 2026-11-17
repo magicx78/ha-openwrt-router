@@ -843,6 +843,15 @@ def test_max_clients_evicts_oldest_idle_and_never_online() -> None:
     assert len(hist) == 2
 
 
+def test_full_history_logs_no_mac(caplog: pytest.LogCaptureFixture) -> None:
+    hist = ClientHistory(max_clients=1)
+    caplog.set_level("DEBUG", logger=ch.__name__)
+    hist.ingest(poll(R1, T0, [M1, PRIV]))
+    assert len(hist) == 1
+    assert "max_clients" in caplog.text
+    assert PRIV not in caplog.text.upper() and M1 not in caplog.text.upper()
+
+
 def test_raw_ring_and_transition_caps() -> None:
     hist = ClientHistory()
     t = T0

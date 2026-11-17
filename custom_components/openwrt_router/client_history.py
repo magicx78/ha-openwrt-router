@@ -1518,7 +1518,7 @@ class ClientHistory:
         if c is not None:
             return c
         if len(self._clients) >= self.max_clients and not self._evict():
-            _LOGGER.debug("client history: max_clients reached, %s not tracked", mac)
+            _LOGGER.debug("client history: max_clients reached, new client not tracked")
             return None
         c = _Client(mac=mac, private=is_private_mac(mac), last_activity=now)
         self._clients[mac] = c
