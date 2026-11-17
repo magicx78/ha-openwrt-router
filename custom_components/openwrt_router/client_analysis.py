@@ -37,18 +37,30 @@ from itertools import pairwise
 
 from .client_history import (
     DC_ERROR,
+    DC_INACTIVITY,
     DC_INFRA,
     DC_LEAVE,
+    DC_UNKNOWN,
     SESSION_BIN_HOURS,
+    SESSION_BINS,
+    STATE_GRACE,
     STATE_OFFLINE,
+    STATE_ONLINE,
+    STATE_UNKNOWN,
+    TR_BLIP,
     TR_END,
+    TR_GAP,
     TR_MOVE,
+    TR_RESUME,
     TR_START,
+    WEAK_SIGNAL_DBM,
     Bucket,
     ClientHistory,
+    ClientLive,
     DayMeta,
     Transition,
     band_online,
+    session_bin,
     session_histogram,
     sum_buckets,
 )
@@ -284,6 +296,11 @@ class WindowStats:
     log_coverage: float | None = None
     patterns: int = 0
     data_days: int = 0
+    # [CS 1.43] where the window really starts (bucket windows are aligned to
+    # the clock hour or day) and, for the trailing hour, since when the
+    # memory-only samples and events exist (None = the whole window)
+    start: float | None = None
+    memory_from: float | None = None
 
     @property
     def coverage(self) -> float:
@@ -446,6 +463,26 @@ def score_trend(current: float | None, previous: float | None) -> str | None:
     return "flat"
 
 
+# [CS 1.43] "Notable events" of a window (A3): disconnects of class error or
+# unknown, ping-pong roam flaps and failed authentications, associations and
+# DHCP. Leaves, inactivity, infrastructure disconnects and reconnects are not
+# counted (normal behaviour or not the client's problem; reconnects already
+# have their own figure).
+NOTABLE_FIELDS: tuple[str, ...] = (
+    "dc_error",
+    "dc_unknown",
+    "roam_flaps",
+    "auth_fail",
+    "assoc_fail",
+    "dhcp_fail",
+)
+
+
+def notable_events(bucket: Bucket) -> int:
+    """Number of notable events in a bucket (see :data:`NOTABLE_FIELDS`)."""
+    return int(sum(getattr(bucket, name) for name in NOTABLE_FIELDS))
+
+
 def collect_window(
     history: ClientHistory,
     mac: str,
@@ -485,6 +522,245 @@ def collect_window(
     )
 
 
+# Segment states of :func:`timeline_segments`.
+SEG_ONLINE = "online"
+SEG_OFFLINE = "offline"
+SEG_GAP = "gap"
+SEG_UNKNOWN = "unknown"
+_LIVE_SEGMENT = {
+    STATE_ONLINE: SEG_ONLINE,
+    STATE_GRACE: SEG_ONLINE,
+    STATE_OFFLINE: SEG_OFFLINE,
+    STATE_UNKNOWN: SEG_GAP,
+}
+# State before a transition of this kind (the first stored one). A
+# ``resume`` without its ``gap`` is handled by :func:`_open_gap_state`.
+_BEFORE = {
+    TR_START: SEG_OFFLINE,
+    TR_END: SEG_ONLINE,
+    TR_GAP: SEG_ONLINE,
+    TR_MOVE: SEG_ONLINE,
+    TR_BLIP: SEG_ONLINE,
+}
+
+
+def _open_gap_state(trs: list[Transition], live: ClientLive | None) -> str | None:
+    """State after the first ``resume`` when the window starts inside a gap
+    (its ``gap`` was pruned: a ``resume`` comes before any ``gap``); None
+    when the window does not start inside a gap.
+
+    The state comes from the first transition after the resume, else from
+    the live state."""
+    first = next(
+        (i for i, tr in enumerate(trs) if tr.kind in (TR_GAP, TR_RESUME)), None
+    )
+    if first is None or trs[first].kind != TR_RESUME:
+        return None
+    for tr in trs[first + 1 :]:
+        if tr.kind in _BEFORE:
+            return _BEFORE[tr.kind]
+    if live is None:
+        return SEG_UNKNOWN
+    return _LIVE_SEGMENT.get(live.state, SEG_UNKNOWN)
+
+
+def timeline_segments(
+    transitions: Iterable[Transition],
+    start: float,
+    end: float,
+    live: ClientLive | None,
+) -> list[tuple[float, float, str]]:
+    """``(from, to, state)`` segments of ``[start, end]`` from the stored
+    transitions (24 h).
+
+    [CS 1.43] The state before the first stored transition is inferred from
+    its kind (a ``start`` follows offline time, an ``end`` online time); with
+    no transitions at all it is the live state since ``live.since``. Time
+    before the first sighting, and before ``live.since`` when there are no
+    transitions, is ``unknown``.
+
+    A gap stays a gap: a ``start`` or ``end`` inside an open gap (an end is
+    dated back to the gap start when the client is gone after it) only sets
+    the state that follows the ``resume``, as in the buckets.
+    """
+    trs = sorted(transitions, key=lambda tr: tr.ts)
+    floor = start
+    after_gap = _open_gap_state(trs, live)
+    if after_gap is not None:
+        state = SEG_GAP
+    elif trs:
+        state = _BEFORE.get(trs[0].kind, SEG_UNKNOWN)
+    elif live is not None and live.first_seen is not None:
+        state = _LIVE_SEGMENT.get(live.state, SEG_UNKNOWN)
+        if live.since is not None:
+            floor = max(floor, live.since)
+    else:
+        state = SEG_UNKNOWN
+    if live is not None and live.first_seen is not None:
+        floor = max(floor, live.first_seen)
+    current = state
+    changes: list[tuple[float, str]] = []
+    in_gap = after_gap is not None
+    before_gap = after_gap if after_gap is not None else state
+    for tr in trs:
+        if tr.kind in (TR_START, TR_END):
+            new = SEG_ONLINE if tr.kind == TR_START else SEG_OFFLINE
+            if in_gap:
+                before_gap = new
+                continue
+            state = new
+        elif tr.kind == TR_GAP:
+            if not in_gap:
+                before_gap = state
+            in_gap, state = True, SEG_GAP
+        elif tr.kind == TR_RESUME:
+            in_gap, state = False, before_gap
+        else:
+            continue
+        changes.append((tr.ts, state))
+    out: list[tuple[float, float, str]] = []
+    seg_start = min(max(floor, start), end)
+    if seg_start > start:
+        out.append((start, seg_start, SEG_UNKNOWN))
+    for ts, new in changes:
+        if ts <= seg_start:
+            current = new
+            continue
+        if ts >= end:
+            break
+        if new != current:
+            out.append((seg_start, ts, current))
+            seg_start, current = ts, new
+    out.append((seg_start, end, current))
+    return [seg for seg in out if seg[1] > seg[0]]
+
+
+_DC_FIELDS = {
+    DC_ERROR: "dc_error",
+    DC_INACTIVITY: "dc_inactivity",
+    DC_LEAVE: "dc_leave",
+    DC_UNKNOWN: "dc_unknown",
+    DC_INFRA: "dc_infra",
+}
+# Log event fields of the in-memory event ring.
+_EVENT_FIELDS = (
+    "associations",
+    "reconnects",
+    "roams_in",
+    "roams_out",
+    "roam_flaps",
+    "band_changes",
+    "auth_fail",
+    "assoc_fail",
+    "dhcp_fail",
+)
+_SESSION_BIN_FIELDS = tuple(f for f in Bucket._fields if f.startswith("sess_"))
+
+
+def collect_trailing_hour(
+    history: ClientHistory,
+    mac: str,
+    now: float,
+    *,
+    memory_from: float | None = None,
+    log_coverage: float | None = None,
+    patterns: int = 0,
+) -> WindowStats | None:
+    """[CS 1.43] Statistics of the real last 60 minutes (not the clock hour).
+
+    Online, offline and gap time, sessions and disconnect classes come from
+    the stored transitions (they survive a restart); signal, IP and rate
+    samples from the raw ring and log event counts from the event ring
+    (memory only). ``memory_from`` is when the memory-only data starts (the
+    first poll after HA started); it is returned when it lies inside the
+    window, so the panel can say the samples are incomplete.
+    """
+    live = history.live(mac)
+    if live is None:
+        return None
+    start = now - _HOUR
+    begin = max(start, live.first_seen) if live.first_seen is not None else start
+    memory = memory_from if memory_from is not None and memory_from > start else None
+    if memory is not None and log_coverage is not None:
+        # [CS 1.43] log events are only known since the restart: the log
+        # based parts (reconnects, auth, roaming) get the share of the hour
+        # the event ring covers, so they drop out (< PART_MIN_COVERAGE) in
+        # the first 18 minutes and weigh less until the hour is full.
+        log_coverage *= max(0.0, now - memory) / _HOUR
+    trs = history.transitions(mac)
+    seconds: dict[str, float] = {}
+    for a, b, state in timeline_segments(trs, start, now, live):
+        seconds[state] = seconds.get(state, 0.0) + (b - a)
+    online = seconds.get(SEG_ONLINE, 0.0)
+    values: dict[str, float] = {
+        "observed_s": online + seconds.get(SEG_OFFLINE, 0.0),
+        "online_s": online,
+        "gap_s": seconds.get(SEG_GAP, 0.0),
+        "sessions": sum(
+            1 for tr in trs if tr.kind == TR_START and start < tr.ts <= now
+        ),
+    }
+    for tr in trs:
+        if tr.kind == TR_END and start <= tr.ts <= now and tr.cls in _DC_FIELDS:
+            name = _DC_FIELDS[tr.cls]
+            values[name] = values.get(name, 0.0) + 1
+    finished, ongoing = session_lengths(history, mac, start, now, now)
+    bins = [0] * SESSION_BINS
+    for length in finished:
+        bins[session_bin(length)] += 1
+    values["session_s_sum"] = sum(finished)
+    values["longest_stable_s"] = max(finished, default=0.0)
+    values.update(_ring_values(history, mac, start, now, online))
+    events = history.recent_bucket(mac, start, now)
+    for name in _EVENT_FIELDS:
+        values[name] = getattr(events, name)
+    fields = {name: round(value) for name, value in values.items()}
+    fields.update(zip(_SESSION_BIN_FIELDS, bins, strict=True))
+    bucket = Bucket(**fields)
+    return WindowStats(
+        window_s=max(0.0, now - begin),
+        bucket=bucket,
+        session_hist=session_histogram(bucket),
+        ongoing_h=ongoing / _HOUR if ongoing is not None else None,
+        log_coverage=log_coverage,
+        patterns=patterns,
+        data_days=data_days(history, mac),
+        start=start,
+        memory_from=memory,
+    )
+
+
+def _ring_values(
+    history: ClientHistory, mac: str, start: float, end: float, online: float
+) -> dict[str, float]:
+    """Signal, IP and rate figures of the online raw samples in the window.
+
+    [CS-Entscheidung 1.43] The weak-signal time is the online time times the
+    share of weak samples (the ring has samples, not durations).
+    """
+    samples = [
+        e for e in history.ring(mac) if start <= e.ts <= end and e.state == STATE_ONLINE
+    ]
+    rssi = [e.rssi for e in samples if e.rssi is not None]
+    rates = [
+        (e.rate_rx_kbit, e.rate_tx_kbit)
+        for e in samples
+        if e.rate_rx_kbit is not None and e.rate_tx_kbit is not None
+    ]
+    weak = sum(1 for value in rssi if value <= WEAK_SIGNAL_DBM)
+    return {
+        "rssi_n": len(rssi),
+        "rssi_sum": sum(rssi),
+        "rssi_min": min(rssi, default=0),
+        "rssi_max": max(rssi, default=0),
+        "weak_s": online * weak / len(rssi) if rssi else 0.0,
+        "ip_visible_n": sum(1 for e in samples if e.ip_visible),
+        "rate_rx_sum": sum(rx for rx, _tx in rates),
+        "rate_tx_sum": sum(tx for _rx, tx in rates),
+        "rate_n": len(rates),
+    }
+
+
 def collect_window_days(
     history: ClientHistory,
     mac: str,
@@ -507,7 +783,7 @@ def collect_window_days(
         history,
         mac,
         live_first=live.first_seen,
-        start=first_day * _DAY,
+        start=float(first_day * _DAY),
         end=now,
         now=now,
         bucket=bucket,
@@ -543,6 +819,7 @@ def _stats(
         log_coverage=log_coverage,
         patterns=patterns,
         data_days=data_days(history, mac),
+        start=start,
     )
 
 
@@ -1332,7 +1609,9 @@ REC_CHECK_AP = "check_ap"
 REC_INFRA_CAUSE = "infrastructure_cause"
 REC_INFRA_OBSERVED = "infrastructure_disconnects"
 
-COVERAGE_MIN_DISCONNECTS = 10.0  # per 24 observed hours
+# [CS 1.43] Lowered from 10 to 4 as the owner ordered; with 10 the rule
+# almost never fired for a weak-signal client.
+COVERAGE_MIN_DISCONNECTS = 4.0  # per 24 observed hours
 COVERAGE_MIN_WEAK = 0.3
 INFRA_MIN_CLIENTS = 3
 INFRA_ELEVATED_RECONNECTS = 3  # same threshold as v1.36 UNSTABLE_RECONNECTS
@@ -1388,7 +1667,7 @@ def _hypothesis(
 
 
 def rule_coverage(f: ClientFindings) -> Recommendation | None:
-    """>= 10 problem disconnects per 24 h and weak signal >= 30 %."""
+    """>= 4 problem disconnects per 24 h and weak signal >= 30 %."""
     s = f.stats_24h
     if s is None or s.coverage < SCORE_MIN_COVERAGE:
         return None

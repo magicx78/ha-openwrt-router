@@ -48,6 +48,7 @@ from .client_analysis import (
     attribute_disconnects,
     data_days,
     disconnect_ends,
+    notable_events,
     recommend_aps,
     recommend_client,
     roam_burst,
@@ -56,21 +57,19 @@ from .client_analysis import (
     score_window,
     signal_trend,
     time_pattern,
+    timeline_segments,
 )
 from .client_engine import ClientStability, async_get_client_engine, default_settings
 from .client_history import (
     RETENTION_DAYS_MAX,
     STATE_OFFLINE,
     STATES,
-    TR_END,
-    TR_GAP,
-    TR_RESUME,
-    TR_START,
     Bucket,
     ClientLive,
     LastDisconnect,
     Transition,
     band_key,
+    band_online,
     normalize_mac,
     session_histogram,
     sum_buckets,
@@ -119,7 +118,14 @@ _SORTS: dict[str, Callable[[Mapping[str, Any]], Any]] = {
     "reconnects": lambda r: r["reconnects_24h"],
     "last_disconnect": lambda r: (r["last_disconnect"] or {}).get("ts"),
     "last_seen": lambda r: r["last_seen"],
+    # [CS 1.43] AP (by name), 7-day availability, trend and last problem
+    "router": lambda r: (r["router_name"] or r["router"] or "").casefold() or None,
+    "availability_7d": lambda r: r["availability_7d"],
+    "trend": lambda r: r["trend_delta"],
+    "last_problem": lambda r: (r["last_problem"] or {}).get("ts"),
 }
+# Sort keys that need the 7-day values of every row (hourly cache).
+_WEEK_SORTS = frozenset({"availability_7d", "trend"})
 
 
 # --- request parsing -------------------------------------------------------------
@@ -230,6 +236,17 @@ def _last_disconnect(last: LastDisconnect | None) -> dict[str, Any] | None:
     }
 
 
+def _last_problem(live: ClientLive) -> dict[str, Any] | None:
+    """The newer of the last disconnect and the last auth, association or
+    DHCP failure (1.43)."""
+    dc, fail = live.last_disconnect, live.last_failure
+    if fail is not None and (dc is None or fail.ts > dc.ts):
+        return {"ts": fail.ts, "kind": fail.kind, "class": None, "reason": None}
+    if dc is not None:
+        return {"ts": dc.ts, "kind": "disconnect", "class": dc.cls, "reason": dc.reason}
+    return None
+
+
 def _score(result: ScoreResult) -> dict[str, Any]:
     return {
         "score": _round(result.score),
@@ -243,7 +260,10 @@ def _stats(stats: WindowStats) -> dict[str, Any]:
     b = stats.bucket
     online = float(b.online_s)
     has_rssi = b.rssi_n > 0
+    finished = sum(stats.session_hist)
     return {
+        "start": stats.start,
+        "memory_from": stats.memory_from,
         "window_s": _round(stats.window_s, 0),
         "observed_s": b.observed_s,
         "online_s": b.online_s,
@@ -276,15 +296,47 @@ def _stats(stats: WindowStats) -> dict[str, Any]:
         "rate_rx_kbit": round(b.rate_rx_sum / b.rate_n) if b.rate_n else None,
         "rate_tx_kbit": round(b.rate_tx_sum / b.rate_n) if b.rate_n else None,
         "log_coverage": _round(stats.log_coverage, 2),
+        # [CS 1.43] finished sessions and their mean length, the share of
+        # samples with a known IP (not end-to-end reachability; denominator:
+        # samples with a signal value) and the notable events
+        "finished_sessions": finished,
+        "session_mean_s": round(b.session_s_sum / finished) if finished else None,
+        "ip_visible_share": (
+            _round(min(1.0, b.ip_visible_n / b.rssi_n), 3) if has_rssi else None
+        ),
+        "notable_events": notable_events(b),
     }
 
 
-def _point(t: float, b: Bucket, aps: Iterable[str]) -> dict[str, Any]:
-    """One series point (an hour or a day) from the merged buckets."""
+def _main_ap(items: list[tuple[str, Bucket]]) -> tuple[str | None, str | None]:
+    """AP with the most online time in a series point and its main band
+    (None when the band was not reported)."""
+    online: dict[str, int] = {}
+    bands: dict[str, dict[str, int]] = {}
+    for ap, b in items:
+        if not ap or b.online_s <= 0:
+            continue
+        online[ap] = online.get(ap, 0) + b.online_s
+        per = bands.setdefault(ap, {})
+        for band, secs in band_online(b).items():
+            per[band] = per.get(band, 0) + secs
+    if not online:
+        return None, None
+    ap = max(sorted(online), key=lambda a: online[a])
+    known = {band: secs for band, secs in bands[ap].items() if secs > 0}
+    return ap, max(sorted(known), key=lambda k: known[k]) if known else None
+
+
+def _point(t: float, items: list[tuple[str, Bucket]]) -> dict[str, Any]:
+    """One series point (an hour or a day) from the buckets of all APs."""
+    b = sum_buckets(bucket for _ap, bucket in items)
     has_rssi = b.rssi_n > 0
+    ap, band = _main_ap(items)
     return {
         "t": t,
-        "aps": sorted({ap for ap in aps if ap}),
+        "aps": sorted({ap for ap, _b in items if ap}),
+        "ap": ap,
+        "band": band,
         "observed_s": b.observed_s,
         "online_s": b.online_s,
         "gap_s": b.gap_s,
@@ -343,6 +395,7 @@ def _base_row(
             int(stats.bucket.reconnects) if cs.log_coverage(live.ap) else None
         ),
         "last_disconnect": _last_disconnect(live.last_disconnect),
+        "last_problem": _last_problem(live),
         "entity": live.mac in entity,
         "sleepy": live.mac in sleepy,
     }
@@ -377,17 +430,22 @@ def _sorted(rows: list[dict[str, Any]], key: str, desc: bool) -> list[dict[str, 
 
 
 def _page_row(cs: ClientStability, row: dict[str, Any], now: float) -> dict[str, Any]:
-    """Seven-day values and the trend (only for the rows of the page)."""
-    mac = row["mac"]
-    week = cs.window(mac, now, 168)
-    before = cs.score(mac, now, 24, end=now - _DAY)
-    previous = before.score if before is not None else None
+    """Seven-day values and the trend (the rows of the page, or every row
+    when sorting by them; cached per hour by the engine)."""
+    week = cs.week_values(row["mac"], now)
+    previous = week.score_previous_24h if week is not None else None
+    score = row["score"]
     return {
         **row,
-        "score_7d": _round(week[1].score) if week is not None else None,
-        "availability_7d": _round(week[0].availability, 3) if week else None,
+        "score_7d": _round(week.score_7d) if week is not None else None,
+        "availability_7d": _round(week.availability_7d, 3) if week else None,
         "score_previous_24h": _round(previous),
-        "trend": score_trend(row["score"], previous),
+        "trend": score_trend(score, previous),
+        "trend_delta": (
+            _round(score - previous)
+            if score is not None and previous is not None
+            else None
+        ),
     }
 
 
@@ -413,9 +471,15 @@ def clients_table(
             ssids.add(row["ssid"])
         if _matches(row, params):
             rows.append(row)
+    week_sort = params["sort"] in _WEEK_SORTS
+    if week_sort:
+        rows = [_page_row(cs, row, now) for row in rows]
     rows = _sorted(rows, params["sort"], params["desc"])
     offset, limit = params["offset"], params["limit"]
-    page = [_page_row(cs, row, now) for row in rows[offset : offset + limit]]
+    page = [
+        row if week_sort else _page_row(cs, row, now)
+        for row in rows[offset : offset + limit]
+    ]
     end = offset + limit
     return {
         "now": now,
@@ -437,10 +501,9 @@ def _hour_series(
     grouped: dict[int, list[tuple[str, Bucket]]] = {}
     for h in cs.history.hours(mac, first_hour, last_hour):
         grouped.setdefault(h.hour, []).append((h.ap, h.bucket))
-    return [
-        _point(hour * _HOUR, sum_buckets(b for _ap, b in items), (a for a, _b in items))
-        for hour, items in sorted(grouped.items())
-    ][-SERIES_MAX:]
+    return [_point(hour * _HOUR, items) for hour, items in sorted(grouped.items())][
+        -SERIES_MAX:
+    ]
 
 
 def _day_series(cs: ClientStability, mac: str, first_day: int) -> list[dict[str, Any]]:
@@ -449,10 +512,9 @@ def _day_series(cs: ClientStability, mac: str, first_day: int) -> list[dict[str,
         grouped.setdefault(d.day, []).append((d.ap, d.bucket))
     for h in cs.history.hours(mac, first_day * 24, open_only=True):
         grouped.setdefault(h.hour // 24, []).append((h.ap, h.bucket))
-    return [
-        _point(day * _DAY, sum_buckets(b for _ap, b in items), (a for a, _b in items))
-        for day, items in sorted(grouped.items())
-    ][-SERIES_MAX:]
+    return [_point(day * _DAY, items) for day, items in sorted(grouped.items())][
+        -SERIES_MAX:
+    ]
 
 
 def _series(
@@ -527,39 +589,54 @@ def _bucket_of(cs: ClientStability, mac: str, day: int) -> Bucket:
 
 
 def _timeline(
-    transitions: Iterable[Transition], start: float, now: float
+    transitions: Iterable[Transition],
+    start: float,
+    now: float,
+    live: ClientLive | None = None,
 ) -> list[dict[str, Any]]:
     """Online/offline/gap segments of ``[start, now]`` from the transitions
-    (24 h stored); ``unknown`` before the first one."""
-    changes: list[tuple[float, str]] = []
-    state = "unknown"
-    before_gap = state
-    for tr in transitions:
-        if tr.kind == TR_START:
-            state = "online"
-        elif tr.kind == TR_END:
-            state = "offline"
-        elif tr.kind == TR_GAP:
-            before_gap, state = state, "gap"
-        elif tr.kind == TR_RESUME:
-            state = before_gap
-        else:
-            continue
-        changes.append((tr.ts, state))
-    segments: list[dict[str, Any]] = []
-    current = "unknown"
-    seg_start = start
-    for ts, new in changes:
-        if ts <= start:
-            current = new
-            continue
-        if ts >= now:
+    (24 h stored; see ``client_analysis.timeline_segments``)."""
+    return [
+        {"start": a, "end": b, "state": state}
+        for a, b, state in timeline_segments(transitions, start, now, live)
+    ]
+
+
+def _strip(
+    points: list[dict[str, Any]], first: int, count: int, span: int, now: float
+) -> list[dict[str, Any]]:
+    """[CS 1.43] Coarse timeline of the 7 d and 30 d windows: per hour or day
+    the online, offline, gap and unknown shares of the bucket and its
+    disconnect, roam and flap counts. Built from the series (no new data);
+    an hour or day without a bucket is unknown, never offline."""
+    by_t = {int(p["t"]): p for p in points}
+    out: list[dict[str, Any]] = []
+    for index in range(first, first + count):
+        t = index * span
+        length = min(float(span), now - t)
+        if length <= 0:
             break
-        if new != current:
-            segments.append({"start": seg_start, "end": ts, "state": current})
-            seg_start, current = ts, new
-    segments.append({"start": seg_start, "end": now, "state": current})
-    return [s for s in segments if s["end"] > s["start"]]
+        p = by_t.get(t, {})
+        online = float(p.get("online_s", 0))
+        offline = max(0.0, float(p.get("observed_s", 0)) - online)
+        gap = float(p.get("gap_s", 0))
+        scale = min(1.0, length / (online + offline + gap or 1.0)) / length
+        shares = [_round(v * scale, 3) or 0.0 for v in (online, offline, gap)]
+        out.append(
+            {
+                "t": t,
+                "span_s": round(length),
+                "online": shares[0],
+                "offline": shares[1],
+                "gap": shares[2],
+                "unknown": _round(max(0.0, 1.0 - sum(shares)), 3),
+                "disconnects": p.get("disconnects", 0),
+                "infra": p.get("infra", 0),
+                "roams": p.get("roams", 0),
+                "flaps": p.get("flaps", 0),
+            }
+        )
+    return out
 
 
 def _transition(tr: Transition, name_of: _NameOf) -> dict[str, Any]:
@@ -605,6 +682,9 @@ def client_detail(
         return None
     if window == WINDOW_30D:
         found = cs.window_days(mac, now, 30)
+    elif window == WINDOW_1H:
+        # [CS 1.43] the real last 60 minutes, not the clock hour bucket
+        found = cs.window_trailing_hour(mac, now)
     else:
         found = cs.window(mac, now, _WINDOW_HOURS[window])
     day = cs.window(mac, now, 24)
@@ -646,6 +726,19 @@ def client_detail(
         for e in cs.history.ring(mac)
         if start <= e.ts <= now
     ]
+    series = _series(cs, mac, now, window)
+    if window == WINDOW_30D:
+        strip = _strip(series, int(now // _DAY) - 29, 30, _DAY, now)
+    elif window == WINDOW_7D:
+        last = math.ceil(now / _HOUR) - 1
+        strip = _strip(series, last - 167, 168, _HOUR, now)
+    else:
+        strip = []
+    aps = {p["router"] for p in ring if p["router"]}
+    aps.update(ap for p in series for ap in p["aps"])
+    aps.update(tr.ap for tr in shown if tr.ap)
+    if live.ap:
+        aps.add(live.ap)
     return {
         "now": now,
         "mac": mac,
@@ -653,10 +746,14 @@ def client_detail(
         "live": _live(cs, live, name_of),
         "score": _score(result),
         "stats": _stats(stats),
-        "series": _series(cs, mac, now, window),
+        "series": series,
         "score_series": _score_series(cs, live, now, window),
         "rssi": ring[-SERIES_MAX:],
-        "timeline": _timeline(stored, start, now) if window != WINDOW_30D else [],
+        # [CS 1.43] exact segments for 1 h and 24 h (transitions are kept
+        # 24 h); the long windows get the coarse strip instead
+        "timeline": _timeline(stored, start, now, live) if not strip else [],
+        "strip": strip,
+        "routers": {ap: name_of(ap) for ap in sorted(aps)},
         "transitions": [_transition(tr, name_of) for tr in shown],
         "incidents": [plain(ref) for _id, ref in sorted(refs.items())],
         "attribution": {**plain(attribution), "total": attribution.total},

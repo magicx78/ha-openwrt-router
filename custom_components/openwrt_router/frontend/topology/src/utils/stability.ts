@@ -6,7 +6,7 @@
  * recommendation parameters are shown by name via `nameOf`.
  */
 
-import type { StabilityClass, StabilityRecommendation } from '../types';
+import type { StabilityClass, StabilityProblem, StabilityRecommendation } from '../types';
 
 export const CLASS_LABEL: Record<StabilityClass, string> = {
   very_stable: 'sehr stabil',
@@ -98,3 +98,34 @@ export function recommendationText(
       return rec.key;
   }
 }
+
+// ── 1.43 ─────────────────────────────────────────────────────────────────
+
+export const FAIL_LABEL: Record<string, string> = {
+  auth_fail: 'Anmeldung fehlgeschlagen',
+  assoc_fail: 'Assoziierung fehlgeschlagen',
+  dhcp_fail: 'keine IP (DHCP)',
+};
+
+/** Short text of the last problem of a table row (disconnect or failure). */
+export function problemText(problem: StabilityProblem): string {
+  if (problem.kind === 'disconnect') {
+    return `Abbruch (${DISCONNECT_LABEL[problem.class ?? ''] ?? 'unbekannt'})`;
+  }
+  return FAIL_LABEL[problem.kind] ?? problem.kind;
+}
+
+/** Data rate in kbit/s as Mbit/s text. */
+export function rateText(kbit: number | null | undefined): string {
+  return kbit == null ? '–' : `${(kbit / 1000).toLocaleString('de-DE', { maximumFractionDigits: 1 })} Mbit/s`;
+}
+
+/** Colour of an AP+band entry of the roaming strip (cycles after 8). */
+const AP_COLORS = ['#3b82f6', '#a855f7', '#14b8a6', '#f97316', '#ec4899', '#eab308', '#84cc16', '#06b6d4'];
+
+export function apColor(index: number): string {
+  return AP_COLORS[index % AP_COLORS.length];
+}
+
+/** Ping-pong window of the engine (FLAP_WINDOW_S): back to the AP left within 10 min. */
+export const FLAP_WINDOW_S = 600;

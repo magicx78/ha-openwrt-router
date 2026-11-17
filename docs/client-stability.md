@@ -1,4 +1,4 @@
-# Client Stability (1.42.0)
+# Client Stability (1.43.0)
 
 This builds on [Network Intelligence](network-intelligence.md). It keeps a long-term history
 per Wi-Fi client and answers: *how stable is this device, since when, at which access point,
@@ -32,9 +32,9 @@ after each poll.
 | Router | **nothing**: 0 ubus calls, 0 SSH sessions, 0 file reads, no ACL change | call-counter test |
 | HA, per poll and router | one pass over the client list and the new log lines | 1000 clients: ≤ 20 ms (test budget), best run 9 ms |
 | HA, store write | at most every 300 s; builds the payload from packed strings | 150 clients × 30 d: ~22 ms; 1000 clients: ~100 ms, the first save that has to trim ~0.5 s |
-| Disk | one extra file `.storage/openwrt_router.client_history`, default cap 3 MB (1–8 MB) | 150 clients × 30 d, all always online: 2.5 MB |
-| HA, panel request | only while the *Stabilität* tab is open, at most every 60 s | 150 clients × 30 d: table 262 ms first / 107 ms after, AP view 114 ms, detail ≤ 9 ms |
-| Browser | panel bundle +28.9 kB | – |
+| Disk | one extra file `.storage/openwrt_router.client_history`, default cap 3 MB (1–8 MB) | 150 clients × 30 d, all always online: 2.5 MB; since 1.43 about 30–35 bytes more per client for the last SSID |
+| HA, panel request | only while the *Stabilität* tab is open, at most every 60 s | 150 clients × 30 d: table 262 ms first / 107 ms after, sorted by 7-day availability or trend 330–370 ms first / ~50 ms in the same hour, AP view 114 ms, detail ≤ 9 ms |
+| Browser | panel bundle +28.9 kB (1.42), +12.2 kB (1.43) | – |
 
 At the client limit (1000 clients × 30 days) the first table request of each hour takes about
 1.4 s (it computes the hourly patterns of every client; later requests in that hour take about
@@ -73,6 +73,11 @@ Every client has a state:
 - **Reconnects** come only from the Network Intelligence `wifi.reconnect` events (router log).
 - **IP visible** (DHCP lease or ARP entry) is counted separately and never mixed with
   availability.
+- **A client that changes its MAC is a new client.** Phones with a private MAC per network,
+  or a MAC that rotates over time, start a new history with each new MAC; the old one stops
+  (offline, later deleted after `retention_days`). Scores, sessions and the last SSID are
+  not carried over. Linking the two would need an identity hint (hostname, DHCP client ID)
+  that is not reliable enough; it is listed as open in TODO.md.
 - Tracking stops for clients that are unknown for more than 1 day or offline for more than
   7 days; their time is then neither online nor offline.
 
@@ -80,16 +85,57 @@ Every client has a state:
 
 | Window | Source |
 |---|---|
-| 1 h | per-poll ring in memory (empty after an HA restart) and the transitions |
-| 24 h | hour buckets, the running hour and the transitions |
-| 7 d | hour buckets (kept 168 h) |
+| 1 h | the real last 60 minutes: transitions (time), per-poll ring (signal, IP, rates) and an event ring (roams, failures); both rings are memory only |
+| 24 h | hour buckets: the 23 whole hours before the running one plus the running hour (so 23 h plus the minutes of this hour); the transitions |
+| 7 d | hour buckets (kept 168 h), the same alignment |
 | 30 d | day buckets (kept `retention_days`, default 30, max. 90) |
 
-For each window: observed time, **coverage** (observed time / window length since first
-seen), **availability** = online time / observed time (`unknown`, never 100 %, while nothing
-was observed), disconnects per class, reconnects, sessions and the longest stable session,
-RSSI mean / min / max, share of weak signal (≤ −75 dBm), roams, band changes, failed
-authentication, association and DHCP, measurement gaps and the IP-visible share.
+The detail answer carries `stats.start`, the start of the window it really covers. After an
+HA restart the 1 h window has no ring data from before the restart: `stats.memory_from` then
+names the moment the store was loaded, and the panel says *keine Daten seit Neustart* (no
+sample yet) or *Signal- und Log-Werte erst seit …*. Online time comes from the stored
+transitions and stays complete, but log events (reconnects, failed logins, roam flaps) are
+only known since the load: the log coverage of the 1 h window is scaled by the share of the
+hour since then, so these score parts drop out in the first 18 minutes (coverage < 0.3) and
+weigh less until the hour is full. The shown *Datenbasis* of the score drops accordingly.
+
+In the timeline a measurement gap stays a gap: a disconnect dated back to the gap start
+(the client was gone when the access point came back) turns into offline only after the
+gap. Time before the first stored transition is inferred from that transition, or from the
+live state when the first stored transition ends a gap whose start was already deleted.
+
+For each window the panel shows:
+
+- observed time and measurement gaps, **coverage** (observed time / window length since
+  first seen), **availability** = online time / observed time (`unknown`, never 100 %,
+  while nothing was observed);
+- disconnects per class, reconnects (only with a readable router log), sessions, finished
+  sessions with their **mean length**, the longest stable session;
+- RSSI mean / min / max and the share of weak signal (≤ −75 dBm), mean TX and RX rate (only
+  samples that report both);
+- roams in and out and roam flaps, band changes (API only), failed authentication,
+  association and DHCP, each on its own;
+- the reason text of the last disconnect;
+- the **share of samples with a known IP** (*Anteil der Messpunkte mit bekannter IP*:
+  samples with a DHCP lease or ARP entry / samples with a signal value). It says whether
+  the router knew an IP, not whether the device answered;
+- **notable events**: disconnects of class `error` or `unknown`, roam flaps and failed
+  authentications, associations and DHCP. Not counted: `leave`, `inactivity`, `infra`
+  disconnects and reconnects (normal behaviour, not the client's problem, or a figure of
+  their own).
+
+Availability is the observed Wi-Fi association reported by the access points, **not**
+end-to-end reachability; the panel says so under the figures.
+
+Charts in the detail: connection timeline (1 h and 24 h, exact times) or a coarse strip per
+hour (7 d) or day (30 d) with the online, offline, gap and unknown share of each bucket
+(gaps hatched, unknown faint, never shown as offline; disconnect marks per bucket, the panel
+says *genaue Zeitpunkte nur für 24 h*); online share; disconnects and reconnects as bars (per
+5 min in 1 h, where reconnects are only a total; per hour or day else); signal; score; and
+*AP-Wechsel/Roaming*: a strip coloured by access point and band (1 h per sample, else the AP
+with the most online time in the hour or day), roam marks and flap marks (back to the AP
+left within 10 min; exact for 1 h and 24 h, per bucket for 7 d and 30 d) and a legend with the
+AP names.
 
 ## Stability score
 
@@ -114,7 +160,11 @@ a weight `w`:
 - Classes (default `[90, 75, 50, 25]`): 90–100 *very stable*, 75–89 *stable*, 50–74
   *noticeable*, 25–49 *unstable*, 0–24 *critical*, otherwise *unknown*.
 - The table and the entities show the 24 h score; the 7 d score is an attribute. The trend
-  arrow compares the last 24 h with the 24 h before (±10 points).
+  arrow compares the last 24 h with the 24 h before (±10 points); `trend_delta` is the
+  difference in points.
+- Weights and class limits can be changed in the panel (*Einstellungen*, admins only):
+  weights 0–100 with at least one above 0, four strictly falling class limits, and a
+  button that fills in the defaults (saved with *Speichern*).
 
 ## Recurring patterns
 
@@ -141,7 +191,7 @@ confirmed Network Intelligence root explains the disconnects).
 
 | Key | When |
 |---|---|
-| `check_coverage` | ≥ 10 disconnects per 24 h and ≥ 30 % weak signal |
+| `check_coverage` | ≥ 4 problem disconnects (`error`, `unknown`, `inactivity`) per 24 observed hours and ≥ 30 % weak signal (`COVERAGE_MIN_DISCONNECTS`; 10 before 1.43) |
 | `check_roaming` | ≥ 8 roams between two access points within 30 min |
 | `check_device_schedule` | a time-of-day pattern |
 | `check_ap` | an access-point-specific pattern |
@@ -156,15 +206,19 @@ infrastructure or to the client (attribution).
 
 A sub-tab of **Diagnose** in the topology panel (labels in German):
 
-- **Clients:** table (worst first), filters for router, band, class, state and a search;
-  "Weitere laden" loads the next 100. A click opens the detail.
-- **Detail** (1 h, 24 h, 7 d, 30 d): figures, connection timeline (online green, offline red,
-  measurement gaps hatched; incidents as markers that open the incident), RSSI with min/max
-  band, online share with disconnects, score parts, patterns and recommendations. Admins can
-  switch the entities and the *sleepy* mark of the client here.
-- **AP-Vergleich:** the AP comparison (default 7 d).
-- **Einstellungen:** on/off, retention, store cap and the store status. Weights and class
-  limits can only be changed over the API.
+- **Clients:** table (worst first), filters for router, band, SSID, class, state and a
+  search; sorting by score, 24 h availability (both directions), 7-day availability, trend,
+  reconnects, last problem, last disconnect, coverage, access point (both directions) and
+  name; "Weitere laden" loads the next 100. The column *last problem* shows the newest
+  disconnect or failed authentication, association or DHCP. A click opens the detail.
+- **Detail** (1 h, 24 h, 7 d, 30 d): the figures and charts listed under
+  [Windows and figures](#windows-and-figures), score parts, patterns and recommendations.
+  Admins can switch the entities and the *sleepy* mark of the client here.
+- **AP-Vergleich:** the AP comparison (default 7 d), with failed authentications and roams
+  in and out per 100 client hours, the weak-signal share and the clients with `infra`
+  disconnects.
+- **Einstellungen:** on/off, retention, store cap, score weights and class limits, and the
+  store status.
 
 The tab loads data when it opens, when the window changes and at most every 60 s while it is
 open. On phones the table becomes cards.
@@ -195,8 +249,8 @@ unload; POST admin only):
 
 | Method | Path | Content |
 |---|---|---|
-| GET | `clients` | table; `router`, `band` (`2.4g`/`5g`/`6g`), `ssid`, `class`, `state`, `q` (search), `sort` (`score`, `name`, `availability`, `coverage`, `reconnects`, `last_disconnect`, `last_seen`; `-` = descending), `limit` ≤ 500 (default 100), `cursor` |
-| GET | `clients/{mac}?window=1h\|24h\|7d\|30d` | detail with series (≤ 720 points) |
+| GET | `clients` | table; `router`, `band` (`2.4g`/`5g`/`6g`), `ssid`, `class`, `state`, `q` (search), `sort` (`score`, `name`, `availability`, `coverage`, `reconnects`, `last_disconnect`, `last_seen`, `router`, `availability_7d`, `trend`, `last_problem`; `-` = descending), `limit` ≤ 500 (default 100), `cursor` |
+| GET | `clients/{mac}?window=1h\|24h\|7d\|30d` | detail with series (≤ 720 points), `strip` (7 d: 168 hours, 30 d: 30 days), `routers` (id → name) |
 | GET | `clients/aps?window=24h\|7d\|30d` | AP comparison |
 | GET / POST | `clients/settings` | settings, defaults, limits, status; POST takes a partial change and answers 400 with `errors` |
 
@@ -218,10 +272,17 @@ deleted.
 ## Storage
 
 One file for all routers: `.storage/openwrt_router.client_history`, written only after a
-change and at most every 300 s (at once on the last unload). Data per client: live state,
-transitions of the last 24 h (≤ 64), hour buckets of 7 days and day buckets of
-`retention_days`. Buckets are packed as short strings; the score is computed on request and
-never stored.
+change and at most every 300 s (at once on the last unload). Data per client: live state
+(since 1.43 with the last failed authentication, association or DHCP), transitions of the
+last 24 h (≤ 64), hour buckets of 7 days and day buckets of `retention_days`. Buckets are
+packed as short strings; the score is computed on request and never stored. Since 1.43 the
+file also keeps the **last SSID** of each tracked client (at most 32 characters, only for
+clients in the history), so the SSID filter works after a restart. Files of 1.42.0 load
+unchanged; the new fields start empty.
+
+Memory only (empty after a restart): the per-poll ring of the last hour and an event ring
+of at most 64 entries per client for the real last 60 minutes. The 7-day values of the table
+are cached per hour (bounded like the pattern cache), so they can be up to one hour old.
 
 Clean-up every hour: older hours, days and transitions go; clients idle longer than
 `retention_days` go. Above `max_store_mb` the save trims in this order (a warning goes to
@@ -247,7 +308,8 @@ log lines contain no client data.
 
 - **Not measurable** without new router calls: wired clients, end-to-end reachability (no
   ping), the real connection time of a client before the first poll, numeric reason codes
-  where the log has only text. TX/RX rates are shown but are not part of the score.
+  where the log has only text. The mean TX/RX rates are shown in the detail but are not part
+  of the score.
 - A radio change (DFS, channel switch, radio restart) marks the disconnects of the **whole
   router** as `infra` for 300 s, not only those of the changed radio; a client on the other
   band of that router that drops in this time costs nothing in the score.
@@ -269,4 +331,6 @@ log lines contain no client data.
 - **Delete the history:** remove `.storage/openwrt_router.client_history` while HA is stopped.
 - **Remove the entities:** clear `entity_macs`.
 - **Roll back the code:** install 1.41.0. The extra store file is then unused and can be
-  deleted; Network Intelligence keeps its own store.
+  deleted; Network Intelligence keeps its own store. Going back from 1.43.0 to 1.42.0 keeps
+  the history: 1.42.0 reads the 1.43 file and ignores the stored SSIDs and last failures
+  (checked with a 1.43 file loaded by the 1.42.0 code).
