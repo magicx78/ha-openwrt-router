@@ -37,7 +37,9 @@ Section keys:
 Random ``cfgXXXXXX`` names never appear. Values are not converted (``"1"``
 stays ``"1"``), lists keep their order. A one-element list is stored like an
 option, because ``uci show`` prints both the same way. Secret option values
-are replaced by ``{"secret": "<hmac16>"}`` (per element for lists).
+are replaced by ``{"secret": "<hmac16>"}`` (per element for lists); the
+digest covers config, section type, option and value, not the section key
+(:func:`secret_digest_input`).
 
 Pure module: no Home Assistant imports, no I/O, never logs values.
 """
@@ -76,6 +78,7 @@ __all__ = [
     "parse_uci_file_detailed",
     "parse_uci_show",
     "parse_uci_show_detailed",
+    "secret_digest_input",
 ]
 
 # ---------------------------------------------------------------------------
@@ -494,10 +497,21 @@ def _identity(
     return None
 
 
+def secret_digest_input(config: str, section_type: str, option: str, value: Any) -> str:
+    """Return the text fed to ``secret_digest`` for one secret value.
+
+    Canonical JSON array ``[config, section_type, option, value]``: each part
+    is quoted and escaped on its own, so no split of the parts can collide
+    with another (plain ``a/b/c`` concatenation could). The section key is
+    deliberately not part of it (see :func:`normalize_uci`). ``value`` is
+    taken as ``str`` so ubus, ``uci show`` and file text agree.
+    """
+    return canonical_json([config, section_type, option, str(value)])
+
+
 def _protect(
     config: str,
     stype: str,
-    section_key: str,
     option: str,
     value: Any,
     secret_digest: Callable[[str], str],
@@ -505,10 +519,14 @@ def _protect(
     """Replace a secret option value by its digest marker (per list element)."""
     if not is_secret_option(config, stype, option):
         return value
-    prefix = f"{config}/{section_key}/{option}/"
+
+    def marker(item: Any) -> dict[str, str]:
+        digest = secret_digest(secret_digest_input(config, stype, option, item))
+        return {SECRET_MARKER_KEY: digest}
+
     if isinstance(value, list):
-        return [{SECRET_MARKER_KEY: secret_digest(f"{prefix}{item}")} for item in value]
-    return {SECRET_MARKER_KEY: secret_digest(f"{prefix}{value}")}
+        return [marker(item) for item in value]
+    return marker(value)
 
 
 def normalize_uci(
@@ -523,8 +541,16 @@ def normalize_uci(
     ``_parse_uci_show`` or :func:`parse_uci_file`. Keys starting with ``.``
     are metadata and dropped; a section is anonymous if ``.anonymous`` is
     true or its key starts with ``@``. ``secret_digest`` receives
-    ``config/section_key/option/value`` (section key before collision
-    suffixes) for every secret value.
+    :func:`secret_digest_input` (config, section type, option, value) for
+    every secret value, per element for lists.
+
+    The section key is not part of the digest input: for anonymous sections
+    it can contain an identity value such as the SSID, and renaming the SSID
+    must not look like a changed WLAN key. Known and accepted consequence:
+    the same secret in two sections of the same type and config (two SSIDs
+    sharing one key) gives the same digest, so their equality is visible
+    inside HA. Outside HA the marker is masked anyway
+    (``config_mask.mask_for_output``).
     """
     prepared: list[tuple[str, str, dict[str, Any]]] = []
     fallback_counts: dict[str, int] = {}
@@ -552,7 +578,7 @@ def normalize_uci(
                 fallback_counts[stype] = position + 1
                 base = f"{ANON_PREFIX}{stype}[{position}]"
         protected = {
-            opt: _protect(config, stype, base, opt, value, secret_digest)
+            opt: _protect(config, stype, opt, value, secret_digest)
             for opt, value in options.items()
         }
         prepared.append((base, stype, protected))

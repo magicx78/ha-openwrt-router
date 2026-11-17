@@ -144,7 +144,8 @@ def is_secret_path(path: str) -> bool:
 def secret_digest_factory(key: bytes) -> Callable[[str], str]:
     """Return ``digest(value) -> hex`` = first 16 hex chars of HMAC-SHA256.
 
-    The caller builds ``value`` (plan 3.2: ``config/section/option/value``).
+    The caller builds ``value`` (``config_snapshot.secret_digest_input``:
+    config, section type, option and value; no section key).
     The installation key comes from enterprise-core and must be bytes with at
     least 16 bytes (32 recommended).
     """

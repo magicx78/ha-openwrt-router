@@ -22,9 +22,11 @@ Matching of sections:
 
 Secrets are digest markers ``{"secret": "<hmac16>"}`` in the snapshot and
 stay markers in ``Change.old``/``Change.new``; the plaintext never exists
-here. The digest is bound to the section key (config_snapshot), so for a
-section whose key changed a secret cannot be compared: such changes carry
-``detail = DETAIL_SECRET_UNVERIFIABLE``.
+here. The digest covers config, section type, option and value but not the
+section key (``config_snapshot.secret_digest_input``). Paired sections always
+share config and type, so their digests compare reliably even when the key
+changed (renamed SSID): an equal digest is no change, a different digest is
+``detail = DETAIL_SECRET_CHANGED``.
 
 Pure module: no Home Assistant imports, no network, no files, never logs
 values.
@@ -89,7 +91,6 @@ __all__ = [
     "ACK_ACKNOWLEDGED",
     "ACK_KNOWN",
     "DETAIL_SECRET_CHANGED",
-    "DETAIL_SECRET_UNVERIFIABLE",
     "DRIFT_ACKNOWLEDGED",
     "DRIFT_KNOWN",
     "DRIFT_NEW",
@@ -140,9 +141,8 @@ KIND_REMOVED: Final = "removed"
 KIND_CHANGED: Final = "changed"
 KIND_REORDERED: Final = "reordered"
 
-# Change.detail values.
+# Change.detail value.
 DETAIL_SECRET_CHANGED: Final = "secret_changed"
-DETAIL_SECRET_UNVERIFIABLE: Final = "secret_unverifiable"
 
 AckState = Literal["acknowledged", "known"]
 ACK_ACKNOWLEDGED: Final = "acknowledged"
@@ -187,9 +187,9 @@ class Change:
     ``section`` is the key in the new snapshot (the old one for "removed");
     ``old_section`` is set when a matched section changed its key.
     ``detail`` is ``DETAIL_SECRET_CHANGED`` for a secret whose digest changed
-    and ``DETAIL_SECRET_UNVERIFIABLE`` when the section key changed and the
-    digests cannot be compared. Values are plain JSON types (dict/list), so a
-    ``Change`` with such values is not hashable.
+    (also when the section key changed; the digest does not depend on it).
+    Values are plain JSON types (dict/list), so a ``Change`` with such values
+    is not hashable.
     """
 
     kind: ChangeKind
@@ -494,7 +494,11 @@ def _uplinks(*configs: Mapping[str, Any] | None) -> frozenset[str]:
 
 
 def _signature(section: Mapping[str, Any]) -> str:
-    """Content of a section with secrets blanked (digests are key-bound)."""
+    """Content of a section with secrets blanked.
+
+    Pairing goes by visible content: a section that moved and got a new
+    secret is still the same section (the secret change is reported on it).
+    """
     options = {
         opt: (_SECRET_PLACEHOLDER if _has_marker(value) else value)
         for opt, value in _options(section).items()
@@ -715,15 +719,12 @@ def _option_changes(
             and isinstance(after, list)
             and sorted(map(canonical_json, before))
             == sorted(map(canonical_json, after))
-            and not (secret and rekeyed)
         ):
             kind, risk = KIND_REORDERED, Risk(RISK_REORDERED)
         else:
             kind = KIND_CHANGED
             if secret:
-                detail = (
-                    DETAIL_SECRET_UNVERIFIABLE if rekeyed else DETAIL_SECRET_CHANGED
-                )
+                detail = DETAIL_SECRET_CHANGED
         out.append(
             Change(
                 kind=kind,

@@ -946,10 +946,113 @@ def test_secret_list_masked_per_element_and_digest_input() -> None:
     assert all(set(item) == {SECRET_MARKER_KEY} for item in r0kh)
     assert r0kh[0] != r0kh[1]
     assert "KeyMaterial" not in _dump(out)
+    # Config, section type, option, value as a JSON array: no section key.
     assert calls == [
-        "wireless/default_radio0/r0kh/ff:ff:ff:ff:ff:ff,*,KeyMaterialA",
-        "wireless/default_radio0/r0kh/aa:bb:cc:dd:ee:ff,*,KeyMaterialB",
+        '["wireless","wifi-iface","r0kh","ff:ff:ff:ff:ff:ff,*,KeyMaterialA"]',
+        '["wireless","wifi-iface","r0kh","aa:bb:cc:dd:ee:ff,*,KeyMaterialB"]',
     ]
+
+
+def _guest_iface(ssid: str, key: str, index: int = 0) -> dict[str, Any]:
+    return _anon(
+        "wifi-iface",
+        f"cfg0{index}3579",
+        index,
+        device="radio0",
+        mode="ap",
+        ssid=ssid,
+        encryption="psk2",
+        key=key,
+    )
+
+
+def test_secret_digest_independent_of_section_key() -> None:
+    """The SSID is part of the anonymous key; the key digest must not move."""
+    before = normalize_uci("wireless", {"a": _guest_iface("Gast", "GuestPass")}, DIGEST)
+    after = normalize_uci(
+        "wireless", {"a": _guest_iface("Gast-2", "GuestPass")}, DIGEST
+    )
+    (old_key,) = before["sections"]
+    (new_key,) = after["sections"]
+    assert old_key != new_key
+    assert "Gast" in old_key and "Gast-2" in new_key
+    old_digest = before["sections"][old_key]["options"]["key"]
+    new_digest = after["sections"][new_key]["options"]["key"]
+    assert old_digest == new_digest
+    # A changed key still changes the digest under the new section key.
+    rekeyed = normalize_uci(
+        "wireless", {"a": _guest_iface("Gast-2", "OtherPass")}, DIGEST
+    )
+    assert rekeyed["sections"][new_key]["options"]["key"] != new_digest
+    # Named sections: renaming the section keeps the digest as well.
+    named = {
+        name: _named("wifi-iface", name, 0, device="radio0", key="WifiSecret#1")
+        for name in ("default_radio0", "home_2g")
+    }
+    digests = {
+        name: normalize_uci("wireless", {name: body}, DIGEST)["sections"][name][
+            "options"
+        ]["key"]
+        for name, body in named.items()
+    }
+    assert digests["default_radio0"] == digests["home_2g"]
+
+
+def test_secret_digest_input_is_unambiguous() -> None:
+    """Config, type, option and value are encoded separately (JSON array)."""
+    calls: list[str] = []
+
+    def recording(value: str) -> str:
+        calls.append(value)
+        return DIGEST(value)
+
+    tricky = 'a","b/c'
+    normalize_uci(
+        "network",
+        {"wan": _named("interface", "wan", 0, proto="pppoe", password=tricky)},
+        recording,
+    )
+    assert [json.loads(call) for call in calls] == [
+        ["network", "interface", "password", tricky]
+    ]
+    # "ddns/a/password/password/b" for both under plain concatenation; the
+    # array keeps them apart.
+    a = normalize_uci(
+        "ddns",
+        {"s": _named("a", "s", 0, password="password/b")},
+        DIGEST,
+    )["sections"]["s"]["options"]["password"]
+    b = normalize_uci(
+        "ddns",
+        {"s": _named("a/password", "s", 0, password="b")},
+        DIGEST,
+    )["sections"]["s"]["options"]["password"]
+    assert a != b
+
+
+def test_secret_digest_bound_to_config_type_and_option() -> None:
+    def digest_of(config: str, stype: str, option: str) -> Any:
+        raw = {"s": _named(stype, "s", 0, **{option: "SamePlaintext"})}
+        return normalize_uci(config, raw, DIGEST)["sections"]["s"]["options"][option]
+
+    base = digest_of("wireless", "wifi-iface", "key")
+    assert set(base) == {SECRET_MARKER_KEY}
+    assert digest_of("wireless", "wifi-iface", "sae_password") != base
+    assert digest_of("wireless", "wifi-mesh", "key") != base
+    assert digest_of("openvpn", "wifi-iface", "key") != base
+
+
+def test_same_secret_in_two_sections_of_same_type_gives_same_digest() -> None:
+    """Accepted consequence (see normalize_uci): equality is visible in HA."""
+    raw = {
+        "a": _guest_iface("Gast", "SharedPass", 0),
+        "b": _guest_iface("Lab", "SharedPass", 1),
+    }
+    sections = normalize_uci("wireless", raw, DIGEST)["sections"]
+    digests = [body["options"]["key"] for body in sections.values()]
+    assert len(digests) == 2
+    assert digests[0] == digests[1]
+    assert "SharedPass" not in _dump(sections)
 
 
 def test_installation_key_changes_digest_not_structure() -> None:

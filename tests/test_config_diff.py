@@ -462,10 +462,57 @@ def test_wlan_ssid_change_on_anonymous_iface_is_paired_not_removed_added() -> No
     assert (ssid.old, ssid.new) == ("Gast", "Gast-2")
     assert ssid.old_section is not None and "Gast" in ssid.old_section
     assert "Gast-2" in ssid.section
-    # The key digest is bound to the section key, so it cannot be compared:
-    # reported, but flagged as not verifiable instead of "changed".
-    key = [c for c in changes if c.option == "key"]
-    assert [c.detail for c in key] == [cd.DETAIL_SECRET_UNVERIFIABLE]
+    # The key digest does not depend on the section key: same key, no change.
+    assert [c.option for c in changes] == ["ssid"]
+
+
+def test_wlan_ssid_and_key_change_on_anonymous_iface_reports_secret() -> None:
+    new_text = sub(
+        sub(WIRELESS, "option ssid 'Gast'", "option ssid 'Gast-2'"),
+        f"option key '{GUEST_KEY}'",
+        "option key 'NewWlanSecret#2027'",
+    )
+    changes = diff_snapshots(snap(), snap(wireless=new_text), mgmt_host=MGMT)
+    assert sorted(c.option or "" for c in changes) == ["key", "ssid"]
+    key = next(c for c in changes if c.option == "key")
+    assert (key.kind, key.detail) == ("changed", cd.DETAIL_SECRET_CHANGED)
+    assert key.old_section is not None and "Gast" in key.old_section
+    assert "Gast-2" in key.section
+    assert (key.area, key.risk) == (Area.WLAN, Risk.HIGH)
+    assert set(key.old) == {SECRET_MARKER_KEY}
+    assert set(key.new) == {SECRET_MARKER_KEY}
+    assert key.old != key.new
+    text = repr(changes) + dump([c.old for c in changes] + [c.new for c in changes])
+    for secret in PLAINTEXT:
+        assert secret not in text
+    assert mask_for_output(key)["new"] == MASK_PLACEHOLDER
+
+
+def test_secret_comparison_has_no_unverifiable_case() -> None:
+    """Paired sections always share config and type, so digests compare."""
+    assert not hasattr(cd, "DETAIL_SECRET_UNVERIFIABLE")
+    assert "DETAIL_SECRET_UNVERIFIABLE" not in cd.__all__
+
+
+def test_reordered_secret_list_in_rekeyed_section_is_reordered() -> None:
+    base = sub(
+        WIRELESS,
+        "\toption isolate '1'\n",
+        "\toption isolate '1'\n\tlist r0kh 'aa,*,KeyA'\n\tlist r0kh 'bb,*,KeyB'\n",
+    )
+    new_text = sub(
+        sub(base, "option ssid 'Gast'", "option ssid 'Gast-2'"),
+        "\tlist r0kh 'aa,*,KeyA'\n\tlist r0kh 'bb,*,KeyB'\n",
+        "\tlist r0kh 'bb,*,KeyB'\n\tlist r0kh 'aa,*,KeyA'\n",
+    )
+    changes = diff_snapshots(
+        snap(wireless=base), snap(wireless=new_text), mgmt_host=MGMT
+    )
+    by_option = {c.option: c for c in changes}
+    assert set(by_option) == {"ssid", "r0kh"}
+    assert by_option["r0kh"].kind == "reordered"
+    assert by_option["r0kh"].detail is None
+    assert "KeyA" not in repr(changes)
 
 
 def test_wlan_key_change_detected_via_digest_without_plaintext() -> None:
