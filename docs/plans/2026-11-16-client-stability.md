@@ -10,11 +10,13 @@ Kennzeichnung wie im NI-Plan: **verifiziert** (mit `datei:zeile`, Stand `4cef6a8
 
 ## Status
 
-- **Stand:** 2026-11-16 · **Phase:** A (Analyse und Plan) fertig, wartet auf Freigabe Phase B
-- **Branch:** `claude/client-stability-f9a22b` · Basis `feature/network-intelligence@4cef6a8`
-- **Blocker für Phase B:** NI-1 muss P5-Review-Fixes und P7 abgeschlossen haben (Dateikonflikte,
-  Abschnitt 11). Danach Rebase auf den neuen NI-Stand.
-- **Regeln:** 0 neue Router-Aufrufe, 0 neue SSH-Kommandos, keine Routeränderung, kein Push/PR.
+- **Stand:** 2026-11-17 · **Phase:** B gebaut (B1–B6, B7, B8, B9), Release 1.42.0 als PR;
+  **B7a offen** (wartet auf F10/F11). Anpassungen beim Bau: Abschnitt 14 (im Text mit
+  **[Anpassung]** markiert).
+- **Branch:** `claude/client-stability-f9a22b` · Basis ursprünglich
+  `feature/network-intelligence@4cef6a8`, dann `origin/main` (1.40.0, 1.41.0) eingemergt.
+- ~~Blocker für Phase B~~: erledigt, NI P5–P8 und RT sind in `main`.
+- **Regeln:** 0 neue Router-Aufrufe, 0 neue SSH-Kommandos, keine Routeränderung.
 
 ---
 
@@ -307,12 +309,33 @@ Inhalt: `{schema, settings, clients: {mac: {meta, live, transitions, hours[], da
 
 Roaming-Clients erzeugen mehr Zeilen (je AP eine). Messung mit `prepare_save_json` ist Teil von B8.
 
+**[Anpassung] Messung B8** (2026-11-17, Entwickler-PC, Python 3.13, `tests/test_client_scale.py`
+und Messskript; Clients je 1 AP, stündliche Polls über 30 Tage, alle immer online):
+
+| Messung | 150 Clients | 1000 Clients |
+|---|---|---|
+| Store-Größe (Format wie HA `Store`) | **2,53 MB** (Schätzung oben 1,5 MB; Bucket-Strings sind länger als ~45 B, weil Sitzungs-Bins und Raten mitgespeichert werden) | 16,87 MB roh → gekürzt auf 7,75 MB bei 8 MB Grenze |
+| `_data_to_save` | ≈ 22 ms | ≈ 94–107 ms; erstes Speichern mit Kürzen 528 ms |
+| `on_poll` (Ingest eines Polls) | – | < 20 ms (Testbudget), bester Lauf 9,1 ms |
+| Tabelle (erster Abruf je Stunde / danach) | 262 / 107 ms (vor B8: 1097 / 726 ms) | 1432 / 354 ms |
+| AP-Vergleich 30 d / 24 h | 114 / 100 ms (vor B8: 739 ms bei 30 d) | 838 / 652 ms |
+| Detail | ≤ 9 ms | – |
+
+Ursache der B8-Beschleunigung: `observed_days` liest nur das erste Feld der gepackten Buckets,
+`span()` nimmt für ganze UTC-Tage den Tagesbucket statt 24 Stundenbuckets, und Serien lesen nur
+offene Stunden ungepackt (`open_only`). Budgets als Tests: Tabelle 150 Clients < 1000 / 400 ms,
+AP-Vergleich 30 d < 400 ms, Poll 1000 Clients < 20 ms, 150 × 30 d < 3 MB ohne Kürzen.
+
 - **Harte Grenze** (Vorschlag): 3 MB, einstellbar 1–8 MB. Kürzen in dieser Reihenfolge:
   Übergänge offline-Clients → Stundenbuckets älter 48 h von Clients mit `private_mac` →
   Stundenbuckets älter 48 h aller → ganze Clients nach `last_seen` (älteste zuerst).
   Tagesbuckets aktiver Clients zuletzt. Warnung im Log bei Kürzung.
 - **Client-Grenze:** `max_clients` 1000. Gastclients (gesamt online < 1 h, seit 7 d weg) und
   private MACs ohne Wiederkehr nach 7 d fallen beim Bereinigen raus.
+  **[Anpassung] nicht gebaut:** Die Erfassung endet nach 1 d `unknown` bzw. 7 d `offline`
+  (`GAP_TRACK_S`, `OFFLINE_TRACK_S`); entfernt werden Clients erst nach `retention_days`
+  Untätigkeit, beim Kürzen (Schritt 4, ältester zuerst) oder wenn `max_clients` erreicht ist.
+  Offen in TODO.md.
 - **Schreiben:** nur bei Änderung (`dirty`), `async_delay_save` 300 s mit `_save_pending`
   (NI-Muster). Buckets werden beim Schließen sofort gepackt → `_data_to_save` baut nur
   Listen aus fertigen Strings (kein JSON-Aufbau im Event-Loop über ms). Letzter Unload: sofort
@@ -383,6 +406,11 @@ Unload; POST nur Admin):
 | GET | `.../clients/aps?window=` | AP-Vergleich | – |
 | GET/POST | `.../clients/settings` | Aufbewahrung, Klassen, Gewichte, `entity_macs`, `sleepy`, Größe | POST Admin, voluptuous-Prüfung |
 
+**[Anpassung]** Tabellenfilter gebaut: `router`, `band`, `ssid`, `class`, `state`, Suche `q`;
+ein AP wird über `router` + `band` gewählt (kein eigener Parameter `ap`), **kein
+`vlan`-Filter** (Zuordnung nicht verlässlich, 1.2). Gewichte und Klassen nimmt der
+Settings-POST an, das Panel bietet sie aber nicht zum Ändern an.
+
 Panel: neuer Tab „Stabilität“ im NI-Diagnosebereich (P7-Gerüst). Tabelle sortierbar, schlechteste
 zuerst; Detail mit Zeitraumwahl; SVG-Charts ohne neue Bibliothek (Muster `SpeedChart.tsx`).
 Zeitleiste: Messlücken schraffiert, offline rot, online grün; Vorfälle als Marker mit Link.
@@ -406,6 +434,21 @@ Allgemein: jeder Commit mit `ruff check`/`ruff format --check` (`uvx ruff@0.17.3
 | **B7a** Ablösung v1.36-Zählung | 7 | `coordinator.py` (`AssociationTracker` nicht mehr füttern, `_client_stability_snapshot` liest `cs.counts_24h`), `client_stability.py` (Deprecation-Hinweis), `fleet.py` (`client_counts` aus CS), `client_engine.py`, `tests/test_client_stability.py` (Erwartungen an 30-s-Definition), neu `tests/test_client_counts_migration.py` | unique_ids und Attributnamen unverändert (Test); `unstable_clients` unbekannt ohne Log; Ping-Pong und 60-s-Wiederkehr zählen nicht; Zählung übersteht Neustart; `enabled=false` lässt Zählung laufen; CHANGELOG-„Changed“-Text vorbereitet |
 | **B8** Persistenz-Härtung und Performance | 8 + 9 | `client_engine.py`, `client_history.py`, neu `tests/test_client_scale.py` | Messung `prepare_save_json` 150 und 1000 Clients × 30 d im Plan nachgetragen; Kürzreihenfolge, Aufbewahrung, Gäste, Identitätswechsel, Uhrsprung, HA-Neustart getestet; Ingest 1000 Clients < 20 ms (Test mit Budget); alle bestehenden Tests grün |
 | **B9** Doku | 10 | `README.md`, `CHANGELOG.md`, `TODO.md`, neu `docs/client-stability.md`, dieser Plan | Formel, Gewichte, Grenzen (1.2), Rückweg, Speicher; Abschlussbericht mit Testergebnis |
+
+**[Anpassung] Stand der Bauphasen (2026-11-17):**
+
+| Bauphase | Stand | Commit(s) |
+|---|---|---|
+| B1 | fertig | `012f592`, `3760f89` (Kürzen, `missing_acks` als `error`) |
+| B2 | fertig | `17ab403` (Hook), `58b7d03` (Engine, Store) |
+| B3 | fertig | `5bc32f8`, `c5faa89` |
+| B4 | fertig | `0e5ef4b`, Anbindung in `58b7d03` |
+| B5 | fertig | `7167df5` |
+| B6 | fertig bis auf die Sichtprüfung Desktop/Handy (kein Browser in der Bau-Sitzung; offen in TODO.md). Statt `Sidebar.tsx` ein Unter-Tab „Stabilität“ in `DiagnoseView.tsx`; Bundle +28,9 kB | `0735657` |
+| B7 | fertig; Sensoren ohne eigenes Gerät am Flotten-Anker | `e0aa5ba` |
+| B7a | **offen**, wartet auf F10/F11 | – |
+| B8 | fertig bis auf das Gäste-Bereinigen (4.2) | `5eee05b`, `4414a6f` (keine MAC im Debug-Log) |
+| B9 | fertig | Doku-/Release-Commit 1.42.0 |
 
 Tests gemäß Auftrag 12, Zuordnung: stabiler Client, Reconnects, Roaming, Flapping, Messlücken,
 HA-Neustart → B1/B2; schwaches Signal, Score → B3; AP-Ausfall mehrere Clients, AP-Vergleich → B4;
@@ -475,6 +518,31 @@ Antworten des Masters (2026-11-16): F1–F9 ja; F1 mit Kappe 3 MB und Speichern 
 300 s; F7 Live-Prüfung erlaubt (nur lesend) → erledigt in 1.4. F10, F11 und die Entscheidung in
 1.3 sind offen.
 
+Stand 2026-11-17: F10, F11 und 1.3 weiter offen → B7a nicht gebaut; die v1.36-Zählung läuft
+unverändert neben der neuen (im CHANGELOG 1.42.0 unter „Changed“ benannt).
+
+## 14. Anpassungen beim Bau (Phase B)
+
+Kleine Entscheidungen der Bau-Sitzung, vom Master überstimmbar:
+
+| Nr | Plan | Gebaut | Grund |
+|---|---|---|---|
+| A1 | `infra` bei NI-Wurzeln `router_unreachable`, `system_reboot`, `wifi_radio_change`, `wifi_mass_disconnect` | alle Wurzel-Typen der NI (`ROOT_TIERS`) außer `wan_down`, also auch `lan_unreachable`, `lan_uplink_down` und `lan_port_flap`; Ereignis-Wurzeln (Neustart, Kanalwechsel, Port-Flap, Massen-Trennung) zählen nur bis 300 s nach ihrem letzten Zeitpunkt | WAN-Ausfall trennt keine WLAN-Clients; Port-Flap erklärt seit 1.41.0 Abbrüche |
+| A2 | Kind-Incident einer Wurzel | ein Abbruch in einem Kind-Incident meldet die Wurzel (`incident_id` der Wurzel) | ein Verweis je Ursache |
+| A3 | Klassen `error` | zusätzlich `missing_acks` (Reason 34) als `error` | Funkabbruch, seit 1.41.0 als Grund im Log |
+| A4 | Poll-Intervall der Regel `roam_grace`/offline | beobachtetes Intervall je Router, höchstens 2× das gemeldete | adaptiver Poll (120/300 s) ohne Fehl-Abbrüche |
+| A5 | SSID im Store | SSID nur im Speicher (nach Neustart bis zum ersten Poll leer) | kleinerer Store |
+| A6 | Filter `ap`, `vlan` | `router` + `band`, kein `vlan` | 9 |
+| A7 | Zuordnung (Gerät oder Netz) | über die letzten 24 h | passt zum Score-Fenster |
+| A8 | Muster in der Tabelle | Tabelle rechnet Muster, Ergebnis je Stunde gecacht | Spalte Muster/Score ohne zweiten Abruf; Kosten bei 1000 Clients siehe 4.2 (TODO) |
+| A9 | Entities am Gerät des Trackers | Sensoren ohne Gerät am Flotten-Anker | die Integration legt keine Client-Geräte an und hängt nichts an Geräte anderer Einträge |
+| A10 | Speicherrechnung 1,5 MB | gemessen 2,53 MB (150 × 30 d), Grenze 3 MB passt | 4.2 |
+| A11 | Fenster aus Stunden- bzw. Tagesbuckets | `span()`: ganze UTC-Tage aus Tagesbuckets, Ränder aus Stunden | Laufzeit (4.2) |
+| A12 | Gäste-Bereinigung | nicht gebaut | 4.2, TODO |
+| A13 | Panel-Ort „Sidebar.tsx“ | Unter-Tab „Stabilität“ in `DiagnoseView.tsx`, AP-Vergleich standardmäßig 7 d | NI-Diagnose ist der Ort aller Analysen |
+| A14 | Gewichte/Klassen im Panel einstellbar | nur über `POST clients/settings` | kleiner Tab; Standardwerte reichen für die Beta |
+| A15 | B7a | offen | F10/F11 |
+
 ## Prüfprotokoll
 
 - 2026-11-16 CS-1: NI-Plan, `net_events.py`, `net_rules.py` (WLAN-Zustand), `net_engine.py`
@@ -487,3 +555,9 @@ Antworten des Masters (2026-11-16): F1–F9 ja; F1 mit Kappe 3 MB und Speichern 
   Übersetzungsschlüssel auf Kollision geprüft, Live-Prüfung der Raten auf Gateway und einem AP
   (nur `ubus call … get_clients`, `iwinfo assoclist`; nichts geändert). Rückweg: entfällt
   (nur Lesen).
+- 2026-11-17 Bau-Sitzung (B6–B9): nur Code und Tests im Worktree, keine Verbindung zu Router,
+  HA, Host oder VM. Geprüft: volle Testsuite auf HA 2026.2.3 (Python 3.13) und HA 2026.11.2
+  (Python 3.14), `ruff@0.17.3` check/format, Frontend-Build (`npm ci --legacy-peer-deps`,
+  `npm run build`). Nicht geprüft: Sichtprüfung im Browser (Desktop/Handy), Verhalten auf
+  echter Hardware. Rückweg: `enabled: false`, Store-Datei löschen, 1.41.0 installieren
+  (`docs/client-stability.md`).
