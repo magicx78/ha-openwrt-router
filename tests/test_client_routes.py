@@ -12,12 +12,13 @@ the documentation range.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
-from test_client_engine import IFACES, client
+from test_client_engine import IFACES, client, finding, incident
 from test_net_engine import FakeDisk, FakeStore, make_hass
 from test_net_panel_api import Req, body
 
@@ -392,6 +393,31 @@ async def test_ap_comparison_windows(cs: ClientStability, window: str) -> None:
 
 async def test_ap_comparison_rejects_a_bad_window(cs: ClientStability) -> None:
     assert (await aps(cs, window="1h")).status == 400
+
+
+async def test_port_root_of_the_ap_keeps_infrastructure_likely(
+    cs: ClientStability,
+) -> None:
+    storm = [f"02:00:5E:10:01:{i:02X}" for i in range(3)]
+    facts = poll("r1", T0 + POLLS * STEP - 30, *(client(m) for m in storm))
+    cs.on_poll(
+        replace(
+            facts, findings=tuple(finding("wifi.reconnect", m, count=3) for m in storm)
+        )
+    )
+
+    async def keys(*roots: Any) -> list[str]:
+        with patch.object(cs._engine.machine, "peek", return_value=list(roots)):
+            data = body(await aps(cs, window="24h"))
+        return [rec["key"] for rec in data["recommendations"]]
+
+    # r1's own port towards another AP is down: r1's clients are not behind it
+    uplink = incident("u", "lan_uplink_down", ["r1"], scope_key="r1:port:lan1")
+    assert "infrastructure_likely" in await keys(uplink)
+    # a root on r1 itself explains the reconnects
+    assert "infrastructure_likely" not in await keys(
+        incident("a", "router_unreachable", ["r1"])
+    )
 
 
 # --- settings -----------------------------------------------------------------------

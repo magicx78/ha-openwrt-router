@@ -15,11 +15,12 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
-from test_client_engine import client
+from test_client_engine import client, incident
 from test_client_routes import poll
 from test_net_engine import FakeDisk, FakeStore, make_hass
 
@@ -227,6 +228,14 @@ def test_ap_view_of_150_clients_over_30_days_stays_cheap() -> None:
 
 def test_poll_of_1000_clients_stays_under_the_ingest_budget() -> None:
     cs = engine()
+    # 500 incidents (the NI cap), read without copies: only peek() exists
+    incidents = [
+        incident(f"i{k}", "wifi_reconnect_storm", [f"r{k % 6}"], parent=f"i{k - 1}")
+        if k % 5
+        else incident(f"i{k}", "router_unreachable", [f"r{k % 6 + 2}"])
+        for k in range(500)
+    ]
+    cs._engine = SimpleNamespace(machine=SimpleNamespace(peek=lambda: incidents))
     clients = [client(mac(i), signal=-55) for i in range(1000)]
     feed(cs, T0, 3, 60.0, *clients)
     best = float("inf")

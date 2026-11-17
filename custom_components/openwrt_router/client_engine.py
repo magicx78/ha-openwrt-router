@@ -111,6 +111,8 @@ _EVENT_ROOTS = frozenset(
     {"system_reboot", "wifi_radio_change", "lan_port_flap", "wifi_mass_disconnect"}
 )
 INFRA_WINDOW_S = 300.0
+# Roots on a port: ``routers`` is the port's owner, not the routers behind it.
+_PORT_ROOTS = frozenset({"lan_port_flap", "lan_uplink_down"})
 _OPEN = (IncidentStatus.ACTIVE, IncidentStatus.ACKNOWLEDGED)
 # hostapd ``rate`` values are in 100 kbit/s
 _RATE_DIVISOR = 100
@@ -228,10 +230,12 @@ def infra_roots(
 
     Open roots (and roots resolved within ``INFRA_WINDOW_S``) of
     ``INFRA_ROOT_TYPES``; the routers of their linked children count too.
-    Moment roots only while last seen within the window. Routers in
-    ``skip`` (failing on their credentials) are never infrastructure. The
-    lowest root tier wins on a router; a root linked under another root
-    reports its parent.
+    A port root names the router owning the port, not the routers behind
+    it, so only its linked children count (NI links only drops behind the
+    port, or at the owner when its own uplink port flaps). Moment roots
+    only while last seen within the window. Routers in ``skip`` (failing on
+    their credentials) are never infrastructure. The lowest root tier wins
+    on a router; a root linked under another root reports its parent.
     """
     items = list(incidents)
     roots: dict[str, Incident] = {}
@@ -249,15 +253,21 @@ def infra_roots(
     out: dict[str, str] = {}
     for inc in ordered:
         top = inc.parent_id if inc.parent_id in roots else inc.id
-        for router in inc.routers:
+        for router in _explained(inc):
             out.setdefault(router, top)
     for inc in items:
         if inc.parent_id in roots and _recent(inc, now):
-            for router in inc.routers:
+            for router in _explained(inc):
                 out.setdefault(router, inc.parent_id)
     for router in skip:
         out.pop(router, None)
     return out
+
+
+def _explained(inc: Incident) -> Iterable[str]:
+    """Routers whose disconnects ``inc`` explains itself (none for a port
+    root: its owner's Wi-Fi is not behind the port)."""
+    return () if inc.type in _PORT_ROOTS else inc.routers
 
 
 def _recent(inc: Incident, now: float) -> bool:
@@ -715,7 +725,8 @@ class ClientStability:
         engine = self._engine
         if engine is None:
             return {}
-        return infra_roots(engine.machine.incidents(), now, auth_failed)
+        # peek: no copies on every poll; infra_roots only reads them
+        return infra_roots(engine.machine.peek(), now, auth_failed)
 
     # -- reading (views, entities) -------------------------------------------------------
 
@@ -736,9 +747,10 @@ class ClientStability:
         engine = self._engine
         if engine is None:
             return {}
+        by_id = {inc.id: inc for inc in engine.machine.peek()}  # read only
         out: dict[str, IncidentRef] = {}
         for inc_id in ids:
-            inc = engine.machine.get(inc_id) if inc_id else None
+            inc = by_id.get(inc_id) if inc_id else None
             if inc is not None:
                 out[inc_id] = incident_ref(inc)
         return out
@@ -832,7 +844,8 @@ class ClientStability:
     def _publish(self, now: float) -> None:
         self._last_publish = now
         states: dict[str, ClientEntityState] = {}
-        for mac in self.settings["entity_macs"]:
+        # disabled: no states, so the sensors go unavailable instead of stale
+        for mac in self.settings["entity_macs"] if self.settings["enabled"] else ():
             state = self._entity_state(mac, now)
             if state is not None:
                 states[mac] = state

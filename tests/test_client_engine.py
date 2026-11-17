@@ -33,6 +33,7 @@ from custom_components.openwrt_router.client_engine import (
 from custom_components.openwrt_router.client_history import (
     DC_ERROR,
     DC_INFRA,
+    DC_LEAVE,
     EV_ASSOC_FAIL,
     EV_AUTH_FAIL,
     EV_BAND_CHANGE,
@@ -160,12 +161,13 @@ def incident(
     last_seen: float = T0,
     parent: str | None = None,
     resolved_at: float | None = None,
+    scope_key: str | None = None,
 ) -> Incident:
     return Incident(
         id=inc_id,
         type=kind,
         scope=Scope.ROUTER,
-        scope_key=routers[0] if routers else "",
+        scope_key=scope_key or (routers[0] if routers else ""),
         status=status,
         routers=routers,
         last_seen=last_seen,
@@ -353,14 +355,16 @@ def test_infra_roots_open_roots_children_and_windows() -> None:
             incident("w", "wan_down", ["r3"]),
             # a reboot root long ago (still open): not any more
             incident("b", "system_reboot", ["r4"], last_seen=T0 - 900),
-            # resolved two minutes ago: still counts
+            # resolved two minutes ago: still counts, behind the port only
             incident(
                 "d",
                 "lan_port_flap",
                 ["r5"],
                 status=IncidentStatus.RESOLVED,
                 resolved_at=T0 - 120,
+                scope_key="r5:port:lan2",
             ),
+            incident("d1", "wifi_reconnect_storm", ["r7"], parent="d"),
             # resolved ten minutes ago: not
             incident(
                 "e",
@@ -368,13 +372,36 @@ def test_infra_roots_open_roots_children_and_windows() -> None:
                 ["r6"],
                 status=IncidentStatus.RESOLVED,
                 resolved_at=T0 - 600,
+                scope_key="r6:port:lan1",
             ),
+            incident("e1", "wifi_reconnect_storm", ["r8"], parent="e"),
             # the lower tier wins on a router with two roots
             incident("f", "wifi_mass_disconnect", ["r1"]),
         ],
         T0,
     )
-    assert roots == {"r1": "a", "r2": "a", "r5": "d"}
+    assert roots == {"r1": "a", "r2": "a", "r7": "d"}
+
+
+def test_wan_port_flap_on_the_gateway_is_not_infrastructure() -> None:
+    # like wan_down: the gateway's Wi-Fi clients stay associated
+    flap = incident("g", "lan_port_flap", ["gw"], scope_key="gw:port:wan")
+    assert infra_roots([flap], T0) == {}
+
+
+def test_port_roots_count_only_the_routers_behind_the_port() -> None:
+    roots = infra_roots(
+        [
+            # P's port towards B is down (a level root, open for hours)
+            incident("u", "lan_uplink_down", ["p"], scope_key="p:port:lan1"),
+            incident("u1", "wifi_reconnect_storm", ["b"], parent="u"),
+            # an AP's own uplink port flaps: NI links its drops as children
+            incident("f", "lan_port_flap", ["q"], scope_key="q:port:lan"),
+            incident("f1", "wifi_mass_disconnect", ["q"], parent="f"),
+        ],
+        T0,
+    )
+    assert roots == {"b": "u", "q": "f"}
 
 
 def test_a_router_failing_on_credentials_is_never_infrastructure() -> None:
@@ -559,7 +586,7 @@ async def test_disconnect_during_a_root_is_tagged_infra(disk) -> None:
     for k in range(3):
         engine.ingest("r1", data([client(M1)]), T0 + k * 60, interval=60.0)
     root = incident("root-1", "system_reboot", ["r1"], last_seen=T0 + 170)
-    with patch.object(engine.machine, "incidents", return_value=[root]):
+    with patch.object(engine.machine, "peek", return_value=[root]):
         down = LogEvent(
             CATEGORY_WIFI,
             WIFI_DISCONNECTED,
@@ -594,7 +621,7 @@ async def test_auth_failure_of_the_router_is_not_infrastructure(disk) -> None:
         reason="timeout",
     )
     with (
-        patch.object(engine.machine, "incidents", return_value=[root]),
+        patch.object(engine.machine, "peek", return_value=[root]),
         patch.object(engine, "_auth_failed", return_value=frozenset({"r1"})),
     ):
         for k in range(3, 9):
@@ -602,6 +629,35 @@ async def test_auth_failure_of_the_router_is_not_infrastructure(disk) -> None:
             engine.ingest("r1", data([], events), T0 + k * 60, interval=60.0)
     ends = [t for t in cs.history.transitions(M1) if t.kind == TR_END]
     assert ends and ends[-1].cls == DC_ERROR and ends[-1].incident_id is None
+
+
+@pytest.mark.asyncio
+async def test_leaving_client_on_the_port_owner_is_not_infrastructure(disk) -> None:
+    hass = make_hass()
+    engine, cs = await setup(hass, "p", "b")
+    for k in range(3):
+        engine.ingest("p", data([client(M1)]), T0 + k * 60, interval=60.0)
+    # P's port towards B is down; only B's drops are linked to it
+    roots = [
+        incident("u", "lan_uplink_down", ["p"], scope_key="p:port:lan1"),
+        incident("u1", "wifi_reconnect_storm", ["b"], parent="u"),
+    ]
+    leave = LogEvent(
+        CATEGORY_WIFI,
+        WIFI_DISCONNECTED,
+        9,
+        int((T0 + 175) * 1000),
+        mac=M1,
+        interface="phy1-ap0",
+        reason="local_request",
+    )
+    with patch.object(engine.machine, "peek", return_value=roots):
+        assert cs.infra_routers(T0 + 180) == frozenset({"b"})
+        for k in range(3, 9):
+            events = (leave,) if k == 3 else ()
+            engine.ingest("p", data([], events), T0 + k * 60, interval=60.0)
+    ends = [t for t in cs.history.transitions(M1) if t.kind == TR_END]
+    assert ends and ends[-1].cls == DC_LEAVE and ends[-1].incident_id is None
 
 
 @pytest.mark.asyncio
@@ -652,6 +708,21 @@ async def test_entity_view_is_throttled_and_dispatched(disk) -> None:
     state = cs.entity_states[M1]
     assert state.connected and state.name == M1
     assert state.session_start is not None and state.last_disconnect is None
+
+
+@pytest.mark.asyncio
+async def test_disabling_clears_the_entity_view(disk) -> None:
+    hass = make_hass()
+    engine, cs = await setup(hass, "r1")
+    cs.update_settings({"entity_macs": [M1]})
+    engine.ingest("r1", data([client(M1)]), T0, interval=60.0)
+    assert M1 in cs.entity_states
+    with patch.object(client_engine, "async_dispatcher_send") as send:
+        cs.update_settings({"enabled": False})
+    assert cs.entity_states == {}  # the sensors go unavailable
+    assert send.call_count == 1
+    cs.update_settings({"enabled": True})
+    assert M1 in cs.entity_states
 
 
 @pytest.mark.asyncio
