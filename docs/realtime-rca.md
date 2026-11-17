@@ -2,9 +2,11 @@
 
 This builds on [Network Intelligence](network-intelligence.md). It makes Wi-Fi events reach
 the engine faster, explains disconnects by their reason, grades every cause and adds a
-recommendation per cause. It adds **no new router call kind and no ACL change**: everything
+recommendation per cause. It adds **no new kind of router call and no ACL change**: everything
 comes from the router log (`log read`, ACL v6 and later) and the data the integration already
-polls.
+polls. The cost: `log read` now runs on every poll instead of every second one, so each router
+gets about one more ubus call every two polls, and on a quiet router the log bytes read
+roughly double.
 
 ## What is fast and what follows the poll
 
@@ -75,10 +77,16 @@ The level is in the panel (*bestätigt*, *wahrscheinlich*, *möglich*, *unbekann
 
 ## Root causes added
 
-- **Port flap** (`lan_port_flap`) is now a root. Mass disconnects and client incidents of the
-  access points behind the flapping port, or of the router whose own uplink port flaps, become
-  its children. The link is `confirmed` over an observed LLDP path, else a hypothesis. An
-  uplink-down above it still explains the port flap.
+- **Port flap** (`lan_port_flap`) is now a root. It explains the drops behind the flapping
+  port: mass disconnects, reconnect storms, clients without an IP address and DHCP failures
+  after connecting. It does **not** explain failed authentication, band or roam flapping; those
+  stay incidents of their own and still fire. For a port of a parent router, the link is
+  `confirmed` only over a path seen by LLDP, else a hypothesis. When an access point's **own**
+  uplink port flaps, the drops on that access point are always `confirmed`, even if its uplink
+  is only inferred (the port and the drops are measured on the same router); routers further
+  behind it follow the LLDP rule. A port that flaps for a long time explains only drops near one
+  of its own flaps (±60 s each), not everything between the first and the last. An uplink-down
+  above it still explains the port flap.
 - **Peer comparison.** A client with reconnects is compared with the other clients on the same
   radio. With at least three peers without drops in the same time window, the top cause is
   `client_side` (*the device itself*) and the AP's power supply leaves the list. No
@@ -105,6 +113,9 @@ loses lines between two good reads records no gap.
 - Not realtime in the strict sense: up to one poll interval delay (see above).
 - The log ring buffer of the router is small. On a very busy router lines can be lost between
   two polls; the read size adapts (100 to 700 lines) and a gap is recorded after failed reads.
+- No `system.log_gap` after a full outage of a router without a reboot (the whole poll failed,
+  for example a cut cable): lines lost in that time are not reported. After a reboot the gap is
+  recorded.
 - Signal strength is a snapshot per poll, not a history.
 - No DNS probe: DNS trouble is seen only from dnsmasq log lines.
 - No per-client metrics (online time, link quality) in this release.
@@ -119,7 +130,7 @@ loses lines between two good reads records no gap.
 | 3 | Roam flapping between two APs | `test_net_rt_log.py::test_scenario_3_roam_flapping_with_reason_lines`, `test_net_wifi.py::test_roam_flapping_with_usteer_is_observed` |
 | 4 | AP outage with 12 clients | `test_net_rt_scenarios.py::test_scenario_4_ap_outage_with_12_clients_is_one_root` |
 | 5 | One unstable ESP32 among quiet clients | `test_net_rt_scenarios.py::test_scenario_5_*` (5 tests) |
-| 6 | LAN uplink flapping with client drops | `test_net_rt_scenarios.py::test_scenario_6_*` (6 tests) |
+| 6 | LAN uplink flapping with client drops | `test_net_rt_scenarios.py::test_scenario_6_*` (9 tests) |
 | 7 | Shared DNS failure | `test_net_rt_scenarios.py::test_scenario_7_shared_dns_failure_is_one_event_not_per_client` |
 | 8 | Several APs at once | `test_net_correlation.py::test_ak2_all_routers_down_is_one_lan_incident`, `::test_staggered_polls_settle_into_one_root` |
 | 9 | Dedup | `test_net_rt_log.py::test_scenario_9_lines_read_twice_count_once`, `test_net_infra.py::test_scenario_duplicate_polls_and_lines_count_once` |

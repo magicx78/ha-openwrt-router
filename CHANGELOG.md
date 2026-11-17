@@ -9,8 +9,11 @@ All notable changes to the OpenWrt Router integration will be documented in this
 - **WLAN-Ereignisse fast in Echtzeit (Weg D).** Das Router-Log wird jetzt bei
   jedem Poll gelesen statt bei jedem zweiten; WLAN-Ereignisse erreichen die
   Network Intelligence höchstens einen Poll später (Standard 60 s). Kein
-  Push-Stream, keine neuen Router-Aufrufe, **keine ACL-Änderung** (`log read`
-  aus ACL v6 genügt). Ausführlich in `docs/realtime-rca.md`.
+  Push-Stream, keine neue Art von Router-Aufrufen, **keine ACL-Änderung**
+  (`log read` aus ACL v6 genügt). Weil `log read` jetzt jeden Poll läuft statt
+  jeden zweiten, kommt je Router etwa ein ubus-Aufruf alle zwei Polls dazu;
+  auf ruhigen Routern verdoppelt sich die gelesene Log-Menge ungefähr.
+  Ausführlich in `docs/realtime-rca.md`.
 - **Trennungsgründe.** Jede WLAN-Logzeile trägt die Kategorie ihres
   802.11-Reason-Codes (`radio`, `security`, `ap`, `inactivity`, `client`,
   `unknown`) und den Code. Trennungen der Kategorien `radio` (zum Beispiel
@@ -24,10 +27,17 @@ All notable changes to the OpenWrt Router integration will be documented in this
   `openwrt_router_incident_event` (Feld `cause_level`), in der Incident-API
   und im Diagnose-Download (`active_by_cause_level`).
 - **Port-Flap als Wurzel.** Ein flatternder Uplink-Port (`lan_port_flap`)
-  erklärt Massen-Trennungen und Client-Incidents der APs dahinter, auch wenn
-  der eigene Uplink-Port eines APs flattert; bestätigt über einen per LLDP
-  gesehenen Pfad, sonst Hypothese. Ein Uplink-Ausfall darüber bleibt die
-  Wurzel.
+  erklärt die Abbrüche der APs dahinter: Massen-Trennungen,
+  Reconnect-Stürme, Clients ohne IP und DHCP-Fehler nach dem Verbinden.
+  Anmeldefehler, Band- und Roaming-Flattern erklärt er nicht; sie bleiben
+  eigene Incidents und melden sich weiter. Flattert der Port eines
+  Nachbar-Routers, ist die Ursache nur über einen per LLDP gesehenen Pfad
+  bestätigt, sonst Hypothese. Flattert der eigene Uplink-Port eines APs,
+  gelten die Abbrüche an diesem AP immer als bestätigt, auch wenn sein Uplink
+  nur abgeleitet ist (die Messung liegt am selben Router); für Router hinter
+  ihm gilt wieder die LLDP-Regel. Ein Port, der lange flattert, erklärt nur
+  Abbrüche nahe an einem seiner Flaps (je ±60 s). Ein Uplink-Ausfall darüber
+  bleibt die Wurzel.
 - **Vergleich mit den Nachbar-Clients.** Ein Client mit Reconnects wird mit
   den anderen Clients am selben Radio verglichen. Bleiben mindestens drei
   davon ruhig, steht `client_side` (das Gerät selbst) vorne und die

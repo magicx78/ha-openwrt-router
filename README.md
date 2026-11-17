@@ -197,7 +197,8 @@ disconnects just before are its children.
   *possible* (≥ 0.4) or *unknown*. One source alone is at most *possible*. The level is in the
   panel, the `incidents` API and the bus event (`cause_level`).
 - A flapping uplink port (`lan_port_flap`) is a root too (since 1.41.0): drops of the access
-  points behind it become its children.
+  points behind it (mass disconnects, reconnect storms, missing DHCP) become its children;
+  failed authentication and band or roam flapping stay incidents of their own.
 - A client with reconnects is compared with the other clients on its radio: with at least three
   quiet peers the top cause is the device itself (`client_side`).
 - Every cause comes with a recommendation (text only; German in the panel, English in
@@ -207,7 +208,8 @@ disconnects just before are its children.
 
 The router log is read on **every poll**, so Wi-Fi events (disconnects with their reason,
 failed authentication, roaming, DFS) reach the engine at most one poll interval late (60 s by
-default). There is no push stream and no ACL change; `log read` (ACL v6) is enough. Each Wi-Fi
+default). There is no push stream, no new kind of router call and no ACL change; `log read`
+(ACL v6) is enough, it just runs on every poll instead of every second one. Each Wi-Fi
 event carries the category of its 802.11 reason (`radio`, `security`, `ap`, `inactivity`,
 `client`). The Diagnose tab shows how old the last log read of each router is. Details, limits
 and the test scenarios: [docs/realtime-rca.md](docs/realtime-rca.md).
