@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.const import STATE_ON
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -327,14 +328,28 @@ async def test_every_translation_key_exists(engine: NetIntelligence, name: str) 
 # --- fleet anchor in the entity registry (A9) --------------------------------------
 
 
-def test_fleet_entity_moves_to_the_new_anchor_entry() -> None:
+async def loaded_registry(hass: Any) -> er.EntityRegistry:
+    """A real entity registry, set up like HA does it: the device registry
+    first (HA 2026.11 waits for it), then each by its own ``async_load``
+    from an empty store (no file, nothing saved). So it holds whatever the
+    installed HA release needs (``settings`` since HA 2026.11)."""
+    # HA 2026.11 also waits for the config entries (mocked here)
+    hass.config_entries.async_wait_initialized = AsyncMock(return_value=None)
+    devices = dr.DeviceRegistry(hass)
+    hass.data[dr.DATA_REGISTRY] = devices
+    registry = er.EntityRegistry(hass)
+    for item in (devices, registry):
+        with patch.object(item._store, "async_load", AsyncMock(return_value=None)):
+            await item.async_load()
+        item.async_schedule_save = lambda: None
+    return registry
+
+
+async def test_fleet_entity_moves_to_the_new_anchor_entry() -> None:
     """A9: the same unique_id from another config entry takes it over."""
     hass = MagicMock()
     hass.data = {}
-    registry = er.EntityRegistry(hass)
-    registry.entities = er.EntityRegistryItems()
-    registry.deleted_entities = {}
-    registry.async_schedule_save = lambda: None
+    registry = await loaded_registry(hass)
 
     def entry(entry_id: str) -> MagicMock:
         e = MagicMock()

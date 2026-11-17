@@ -25,9 +25,13 @@ from custom_components.openwrt_router.topology_panel import (  # noqa: E402
     _PANEL_URL_PATH,
     _PANEL_VIEW_BOUND_KEY,
     _PANEL_VIEW_DISABLED_KEY,
+    _api_views,
     async_setup_topology_panel,
     async_teardown_topology_panel,
 )
+
+# P7: the snapshot view plus the five network intelligence views
+_VIEW_COUNT = len(_api_views())
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +84,7 @@ async def test_first_setup_registers_and_bumps_refcount(hass, patch_panel_apis):
     assert hass.data[_PANEL_REGISTERED_KEY] is True
     assert hass.data[_PANEL_VIEW_DISABLED_KEY] is False
     register_panel.assert_awaited_once()
-    hass.http.register_view.assert_called_once()
+    assert hass.http.register_view.call_count == _VIEW_COUNT
     hass.http.async_register_static_paths.assert_awaited_once()
 
 
@@ -94,7 +98,7 @@ async def test_second_setup_only_bumps_refcount(hass, patch_panel_apis):
 
     assert hass.data[_PANEL_REFCOUNT_KEY] == 2
     register_panel.assert_awaited_once()  # still 1 — not 2
-    hass.http.register_view.assert_called_once()
+    assert hass.http.register_view.call_count == _VIEW_COUNT
 
 
 async def test_setup_clears_view_disabled_flag(hass, patch_panel_apis):
@@ -345,4 +349,4 @@ async def test_full_unload_clears_master_flag_so_next_setup_re_registers_panel(h
     assert register_panel.await_count == 2
     # Static and view bound exactly once (append-only, NOT re-registered)
     assert hass.http.async_register_static_paths.await_count == 1
-    assert hass.http.register_view.call_count == 1
+    assert hass.http.register_view.call_count == _VIEW_COUNT

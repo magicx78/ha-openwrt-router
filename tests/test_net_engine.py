@@ -15,6 +15,8 @@ import json
 import logging
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1110,11 +1112,23 @@ def _ingest_series(
     return now - step
 
 
+@contextmanager
+def _no_timer_or_dispatch() -> Iterator[None]:
+    """Thousands of polls: the MagicMock hass would record every timer and
+    dispatcher call (P6 review L6); neither matters for pruning."""
+    with (
+        patch.object(net_engine, "async_call_later", MagicMock()),
+        patch.object(net_engine, "async_dispatcher_send", MagicMock()),
+    ):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_m1_slow_polls_keep_pruning_with_monotonic_time(disk: FakeDisk) -> None:
     # SSH fallback: 300 s interval plus the poll duration, 35 days long
     engine = await engine_for(make_hass(), "r1")
-    end = _ingest_series(engine, 305, 35 * 86_400 // 305, mono=True)
+    with _no_timer_or_dispatch():
+        end = _ingest_series(engine, 305, 35 * 86_400 // 305, mono=True)
     assert not engine.machine.prune_held
     buckets = engine.counters._data["r1"]["wifi.psk_mismatch"]
     assert len(buckets["h"]) <= 49  # hourly for 48 h only
@@ -1127,7 +1141,8 @@ async def test_m1_slow_polls_without_monotonic_time_hold_one_step_only(
     disk: FakeDisk,
 ) -> None:
     engine = await engine_for(make_hass(), "r1")
-    _ingest_series(engine, 305, 5 * 86_400 // 305, mono=False)
+    with _no_timer_or_dispatch():
+        _ingest_series(engine, 305, 5 * 86_400 // 305, mono=False)
     buckets = engine.counters._data["r1"]["wifi.psk_mismatch"]
     assert len(buckets["h"]) <= 50
 

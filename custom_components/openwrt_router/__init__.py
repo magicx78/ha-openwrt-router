@@ -494,6 +494,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
     """
     _LOGGER.debug("Unloading OpenWrt Router entry for %s", entry.data.get(CONF_HOST))
 
+    # Before the platforms go: the fleet entities' registry entries move to
+    # the next router now, their entities follow once this entry's are gone.
+    try:
+        from .net_entities import async_withdraw_fleet
+
+        async_withdraw_fleet(hass, entry.entry_id)
+    except Exception:
+        _LOGGER.debug("Fleet entity hand-over raised", exc_info=True)
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     # Always run lifecycle cleanup — even if platform unload partially failed

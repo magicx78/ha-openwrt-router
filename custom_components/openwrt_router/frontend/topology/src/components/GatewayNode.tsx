@@ -1,6 +1,7 @@
 import React from 'react';
 import { Gateway, PortStat, VlanInfo } from '../types';
 import { StatusDot } from './StatusDot';
+import { IncidentBadge } from './IncidentBadge';
 import { IconRouter } from './Icons';
 import { PortStrip } from './PortStrip';
 import { PortDeviceStrip } from './PortDeviceStrip';
@@ -19,6 +20,8 @@ interface Props {
   vlanMode?: boolean;
   healthMode?: boolean;
   onSelectPort?: (port: PortStat) => void;
+  /** Click on the warning symbol: open the Diagnose tab for this router (P7). */
+  onOpenDiagnose?: () => void;
 }
 
 function trendArrow(history: number[]): string {
@@ -73,7 +76,7 @@ export function computeHealth(cpu?: number, mem?: number, signalDbm?: number): '
   return 'ok';
 }
 
-export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onContextMenu, onDoubleClick, clientCount, vlanMode, healthMode, onSelectPort }: Props) {
+export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onContextMenu, onDoubleClick, clientCount, vlanMode, healthMode, onSelectPort, onOpenDiagnose }: Props) {
   const statusClass = gateway.status === 'online'
     ? 'status-online'
     : gateway.status === 'warning'
@@ -122,7 +125,10 @@ export function GatewayNode({ gateway, selected, dimmed, onSelect, onHover, onCo
           <div className="gateway-card__model">{gateway.model}</div>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-          <StatusDot status={gateway.status} />
+          <div className="node-status-row">
+            <IncidentBadge counts={gateway.incidents} onOpen={onOpenDiagnose} />
+            <StatusDot status={gateway.status} />
+          </div>
           {health ? (
             <span className={`health-badge health-badge--${health}`}>
               {cpu != null ? `CPU ${cpu}%` : health}

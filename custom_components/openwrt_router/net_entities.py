@@ -29,8 +29,9 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.const import STATE_ON, EntityCategory
+from homeassistant.const import STATE_OFF, STATE_ON, EntityCategory
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
@@ -65,6 +66,32 @@ def _engine_for(hass: HomeAssistant, entry_id: str) -> NetIntelligence | None:
 def _has_aps(data: Any) -> bool:
     aps = getattr(data, "ap_interfaces", None)
     return isinstance(aps, list) and bool(aps)
+
+
+@callback
+def async_withdraw_fleet(hass: HomeAssistant, entry_id: str) -> None:
+    """``entry_id`` starts to unload: if it hosts the fleet entities, move
+    their registry entries to the successor at once (P6 review M2).
+
+    Called at the start of ``async_unload_entry``, before the platforms
+    unload: the registry entries never point at an unloading entry, and the
+    successor creates the entities once the old ones are gone
+    (``NetIntelligence.unregister``).
+    """
+    engine = async_get_engine(hass)
+    if engine is None:
+        return
+    successor = engine.withdraw_fleet(entry_id)
+    if successor is None:
+        return
+    registry = er.async_get(hass)
+    for domain, unique_id in _FLEET_REGISTRY:
+        entity_id = registry.async_get_entity_id(domain, DOMAIN, unique_id)
+        if entity_id is None:
+            continue
+        entry = registry.async_get(entity_id)
+        if entry is not None and entry.config_entry_id != successor:
+            registry.async_update_entity(entity_id, config_entry_id=successor)
 
 
 @callback
@@ -274,7 +301,8 @@ class MaintenanceModeSwitch(_RouterIntelEntity, SwitchEntity, RestoreEntity):
     """Maintenance mode of the router (plan c8, AK9).
 
     The engine keeps the state (also in its store); the restored state of
-    the switch wins at start, as it is what the user last set in HA.
+    the switch wins at start, as it is what the user last set in HA, but
+    only when it is ``on`` or ``off`` (P6 review L3).
     """
 
     _attr_entity_category = EntityCategory.CONFIG
@@ -286,7 +314,12 @@ class MaintenanceModeSwitch(_RouterIntelEntity, SwitchEntity, RestoreEntity):
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
         engine = _engine_for(self.hass, self._entry_id)
-        if last is not None and engine is not None:
+        # only a real on/off wins; unavailable/unknown keep the stored state
+        if (
+            last is not None
+            and engine is not None
+            and last.state in (STATE_ON, STATE_OFF)
+        ):
             engine.set_maintenance(self._entry_id, last.state == STATE_ON)
 
     @property
@@ -379,4 +412,10 @@ FLEET_UNIQUE_IDS: tuple[str, ...] = (
     UID_FLEET_NET_HEALTH,
     UID_FLEET_INCIDENTS_ACTIVE,
     UID_FLEET_INCIDENT_CRITICAL,
+)
+# (platform, unique_id) of the fleet entities in the entity registry
+_FLEET_REGISTRY: tuple[tuple[str, str], ...] = (
+    ("sensor", UID_FLEET_NET_HEALTH),
+    ("sensor", UID_FLEET_INCIDENTS_ACTIVE),
+    ("binary_sensor", UID_FLEET_INCIDENT_CRITICAL),
 )
