@@ -2,9 +2,12 @@
 
 Path D: events come from the router log, read on every poll, and from the
 poll itself. Scenarios of plan table 2.7 not already covered elsewhere:
-5 (one unstable client among quiet ones: peer comparison), 6 (uplink port
-flapping plus client drops as one incident), 7 (shared DNS failure without
-a DNS probe). Router names are roles, MACs locally administered test values.
+4 (AP outage with exactly 12 clients), 5 (one unstable client among quiet
+ones: peer comparison), 6 (uplink port flapping plus client drops as one
+incident), 7 (shared DNS failure without a DNS probe), 10 (no right to read
+the log), 11 (log gap after a router reboot), 12 (log read fails and comes
+back). Scenarios 1, 2, 3 and 9 from log lines: ``test_net_rt_log.py``.
+Router names are roles, MACs locally administered test values.
 """
 
 from __future__ import annotations
@@ -12,21 +15,31 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from test_net_correlation import (
+from test_net_correlation import (  # noqa: F401  (fixtures clock, fleet)
+    AP_TRUNK,
     CLIENTS20,
+    OPEN,
     T0,
     A,
     B,
     G,
+    clock,
+    dt,
     event,
+    feed,
+    fleet,
+    gw_poll,
     hit,
     inc_of,
     inferred_tree,
     level,
     observed_tree,
+    rdata,
     roots,
     storm,
+    top,
 )
+from test_net_engine import MS0, poll, wifi
 from test_net_infra import entry, log_poll, make_engine
 from test_net_wifi import (
     MAC1,
@@ -43,14 +56,16 @@ from test_net_wifi import (
     open_incidents,
 )
 
-from custom_components.openwrt_router.log_parser import LogCursor
-from custom_components.openwrt_router.net_engine import NetIntelligence
+from custom_components.openwrt_router.const import ERROR_TYPE_TIMEOUT
+from custom_components.openwrt_router.log_parser import WIFI_PSK_MISMATCH, LogCursor
+from custom_components.openwrt_router.net_engine import LOG_GAP_KIND, NetIntelligence
 from custom_components.openwrt_router.net_events import (
     Category,
     CauseStatus,
     Incident,
     Scope,
 )
+from custom_components.openwrt_router.net_query import summary
 from custom_components.openwrt_router.net_rules import (
     AlarmMachine,
     CauseLevel,
@@ -264,3 +279,122 @@ async def test_scenario_7_shared_dns_failure_is_one_event_not_per_client() -> No
     assert dns.count == 6
     assert (dns.cause, dns.cause_status) == ("dns_resolution", CauseStatus.HYPOTHESIS)
     assert not [i for i in intel.machine.incidents() if i.scope is Scope.CLIENT]
+
+
+# --- scenario 4: AP outage with exactly 12 clients -----------------------------------
+
+
+async def test_scenario_4_ap_outage_with_12_clients_is_one_root(
+    fleet: Any,  # noqa: F811
+) -> None:
+    """The log is read on every poll: the 12 drops arrive with the next poll,
+    the outage settles; every open incident hangs below the AP outage."""
+    f, log = fleet, Log()
+    twelve = CLIENTS20[:12]
+    clients = [client(mac) for mac in twelve]
+    for n in range(3):
+        gw_poll(f, T0 + 60 * n)
+        feed(f, A, T0 + 60 * n + 20, rdata(A, clients=clients, trunk=AP_TRUNK))
+        feed(f, B, T0 + 60 * n + 40, rdata(B, clients=[], trunk=AP_TRUNK))
+    lines = log.lines(*((200 + i / 10, disc(mac)) for i, mac in enumerate(twelve)))
+    feed(f, A, T0 + 200, rdata(A, events=lines, clients=[], trunk=AP_TRUNK))
+    [mass] = [
+        i for i in f.intel.machine.incidents() if i.type == "wifi_mass_disconnect"
+    ]
+    assert mass.affected == 12
+    gw_poll(f, T0 + 240, lan3=False)
+    f.clock.now = T0 + 380
+    f.h.tracker.report_down(A, ERROR_TYPE_TIMEOUT, dt(T0 + 260))
+    gw_poll(f, T0 + 420, lan3=False)
+    f.clock.now = T0 + 470
+    f.h.fire_timer()
+    intel = f.intel
+    [root] = roots(intel.machine)
+    assert (root.type, root.scope_key) == ("router_unreachable", A)
+    assert level_of(intel, root) is CauseLevel.CONFIRMED
+    for inc in intel.machine.incidents():
+        if inc.status in OPEN:
+            assert top(intel, inc.id).id == root.id, inc.type
+    assert open_incidents(intel, "wifi_reconnect_storm") == []
+
+
+# --- scenarios 10 to 12: missing or broken log data --------------------------------
+
+
+def log_of(intel: NetIntelligence, router: str, now: float) -> dict[str, Any]:
+    [item] = [r for r in summary(intel, str, now)["routers"] if r["id"] == router]
+    return item["log"]
+
+
+@pytest.mark.asyncio
+async def test_scenario_10_no_right_to_read_the_log(
+    engine: NetIntelligence,  # noqa: F811
+) -> None:
+    """Without ``log read`` (old ACL) the panel says so; the WLAN coverage
+    drops, and nothing reads as healthy."""
+    engine.ingest(
+        "r1", data([], [client(MAC1)], log_status="not_permitted", fetched=False), T0
+    )
+    log = log_of(engine, "r1", T0 + 30)
+    assert log == {"status": "not_permitted", "read_at": None, "age_s": None}
+    assert engine.diagnostics("r1", T0 + 30)["wifi_coverage"]["log"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_log_age_per_router_in_the_summary(
+    engine: NetIntelligence,  # noqa: F811
+) -> None:
+    engine.ingest("r1", data(), T0)
+    assert log_of(engine, "r1", T0 + 45) == {
+        "status": "ok",
+        "read_at": T0,
+        "age_s": 45,
+    }
+    # a poll without a log read (error) keeps the time of the last read
+    engine.ingest("r1", data(log_status="error", fetched=False), T0 + 60)
+    assert log_of(engine, "r1", T0 + 70) == {
+        "status": "error",
+        "read_at": T0,
+        "age_s": 70,
+    }
+    assert log_of(engine, "r2", T0 + 70) == {
+        "status": None,
+        "read_at": None,
+        "age_s": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_scenario_11_log_gap_after_a_router_reboot(
+    engine: NetIntelligence,  # noqa: F811
+) -> None:
+    """The router rebooted: logd starts anew (a baseline read) and its oldest
+    line is newer than the last line read before: a gap event."""
+    engine.ingest("r1", poll((wifi(WIFI_PSK_MISMATCH, 5),)), T0)
+    # after the reboot: lines 120.. (router time), read as a baseline
+    after = poll((wifi(WIFI_PSK_MISMATCH, 120),), baseline=True)
+    engine.ingest("r1", after, T0 + 180)
+    [gap] = events_of(engine, LOG_GAP_KIND)
+    assert gap.params == {"gap_s": 115}
+    assert len(events_of(engine, "wifi.psk_mismatch")) == 2
+
+
+@pytest.mark.asyncio
+async def test_scenario_12_log_read_fails_and_comes_back(
+    engine: NetIntelligence,  # noqa: F811
+) -> None:
+    """Three reads fail; the next one finds lines lost from the router's
+    buffer (``missed``): a gap event says so, with the lost line count."""
+    engine.ingest("r1", poll((wifi(WIFI_PSK_MISMATCH, 5),)), T0)
+    for n in (1, 2, 3):
+        engine.ingest("r1", data(log_status="error", fetched=False), T0 + 60 * n)
+    back = poll((wifi(WIFI_PSK_MISMATCH, 250),), missed=40)
+    engine.ingest("r1", back, T0 + 240)
+    [gap] = events_of(engine, LOG_GAP_KIND)
+    assert gap.params == {"gap_s": 245, "missed": 40}
+    assert engine._log_marks["r1"]["last_time_ms"] == MS0 + 250_000
+    # a later read without loss adds no gap; nor does a loss between two
+    # good reads (a busy log: it only lowers the coverage)
+    engine.ingest("r1", poll((wifi(WIFI_PSK_MISMATCH, 260),)), T0 + 300)
+    engine.ingest("r1", poll((wifi(WIFI_PSK_MISMATCH, 300),), missed=30), T0 + 360)
+    assert len(events_of(engine, LOG_GAP_KIND)) == 1

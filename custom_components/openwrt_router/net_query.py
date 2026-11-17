@@ -293,6 +293,8 @@ def summary(engine: Any, name_of: NameOf, now: float) -> dict[str, Any]:
                 "auth_errors_1h": rv.auth_errors_1h,
                 "wan_reconnects_24h": rv.wan_reconnects_24h,
                 "incidents": badges.get(router, _empty_counts()),
+                # RT9: age of the last log read (the delay of the events)
+                "log": engine.log_state(router, now),
             }
         )
     since = now - _DAY

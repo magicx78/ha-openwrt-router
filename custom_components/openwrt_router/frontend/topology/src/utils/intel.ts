@@ -7,7 +7,7 @@
  */
 
 import { TopologyFetchError } from '../api';
-import type { CauseLevel, IncidentCounts, IncidentStatus, Severity } from '../types';
+import type { CauseLevel, IncidentCounts, IncidentStatus, IntelLogState, Severity } from '../types';
 
 /** Short German text for a failed intelligence request. */
 export function errorMessage(err: unknown): string {
@@ -209,7 +209,7 @@ export const STATUS_LABEL: Record<IncidentStatus, string> = {
   resolved: 'behoben',
 };
 
-/** cause_level → German (planned field for RT-1; today derived in net_query.py). */
+/** cause_level → German (graded by the engine, net_rules.cause_level, RT6). */
 export const CAUSE_LEVEL_LABEL: Record<CauseLevel, string> = {
   confirmed: 'bestätigt',
   likely: 'wahrscheinlich',
@@ -242,6 +242,17 @@ export function recommendation(type: string, key?: string | null): string | unde
 export function causeLabel(cause: string | null): string {
   if (!cause) return 'keine Ursache ermittelt';
   return CAUSE_LABEL[cause] ?? humanize(cause);
+}
+
+/**
+ * Log state of a router (RT9). The log is read on every poll, so its age is
+ * the delay of the events (up to one poll interval, 60 s by default).
+ */
+export function logLabel(log: IntelLogState): string {
+  if (log.status === 'not_permitted') return 'Log: kein Leserecht';
+  const age = log.age_s != null ? `vor ${formatDuration(log.age_s)}` : 'noch nie gelesen';
+  if (log.status === 'error') return `Log: Fehler (zuletzt ${age})`;
+  return `Log ${age}`;
 }
 
 export function kindLabel(kind: string): string {

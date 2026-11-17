@@ -310,7 +310,7 @@ export interface HoverContext {
 
 export type Severity = 'info' | 'warning' | 'critical';
 export type IncidentStatus = 'active' | 'acknowledged' | 'ignored' | 'resolved';
-/** Derived from cause_status + confidence (see net_query.py); planned engine field for RT-1. */
+/** Graded by the engine (net_rules.cause_level, RT6): status, confidence, source families. */
 export type CauseLevel = 'confirmed' | 'likely' | 'possible' | 'unknown';
 
 export interface IncidentCounts {
@@ -356,6 +356,8 @@ export interface IntelIncident {
   cause: string | null;
   cause_status: 'confirmed' | 'hypothesis' | null;
   cause_level: CauseLevel;
+  /** rec_<cause> for a cause with a recommendation (RT7), else null. */
+  recommendation_key?: string | null;
   area: string | null;
   parent_id: string | null;
   children: number;
@@ -396,6 +398,15 @@ export interface IntelRouterSummary {
   auth_errors_1h: number;
   wan_reconnects_24h: number;
   incidents: IncidentCounts;
+  /** Last log read (RT9): the log is the event source, read on every poll. */
+  log?: IntelLogState;
+}
+
+export interface IntelLogState {
+  /** ok | error | not_permitted | pending, null before the first poll */
+  status: string | null;
+  read_at: number | null;
+  age_s: number | null;
 }
 
 export interface IntelSummary {
