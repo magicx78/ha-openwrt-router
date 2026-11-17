@@ -5390,6 +5390,101 @@ def child_release_time(inc: Incident, known: Mapping[str, Incident]) -> float | 
     return window_end
 
 
+# --- cause level (RT6): derived for the UI and the bus, never stored --------------
+
+CAUSE_LIKELY = 0.7
+CAUSE_POSSIBLE = 0.4
+# Independent source families a hypothesis needs to be "likely" (plan 5.2).
+LIKELY_FAMILIES = 2
+FAMILY_CORRELATION = "correlation"
+FAMILY_PEERS = "peers"
+# Where evidence came from. hostapd, netifd and procd write to the system log
+# (path D reads them there): one family, so two log lines are one indicator.
+_SOURCE_FAMILY: dict[Source, str] = {
+    Source.LOG: "log",
+    Source.HOSTAPD: "log",
+    Source.NETIFD: "log",
+    Source.PROCD: "log",
+    Source.POLL: "poll",
+    Source.USTEER: "usteer",
+    Source.LLDP: "topology",
+    Source.TOPOLOGY: "topology",
+    Source.FLEET: "fleet",
+}
+# An event that compared the client with its quiet neighbours on the same
+# radio (RT7 peer comparison) is a second, independent indicator.
+PEERS_PARAM = "peers_ok"
+
+
+class CauseLevel(StrEnum):
+    """How sure a cause is (plan 5.2). The released API names the second
+    level ``likely`` (the plan's ``probable``)."""
+
+    CONFIRMED = "confirmed"
+    LIKELY = "likely"
+    POSSIBLE = "possible"
+    UNKNOWN = "unknown"
+
+
+def cause_level(
+    cause: str | None,
+    cause_status: CauseStatus | None,
+    confidence: float,
+    families: frozenset[str] | set[str],
+) -> CauseLevel:
+    """Grade a cause.
+
+    confirmed: measured (``cause_status`` confirmed). likely: a hypothesis
+    with confidence >= 0.7 from at least two independent source families.
+    possible: a hypothesis with confidence >= 0.4. unknown: no cause, or
+    less. 0.7 keeps AK6: a cause that rests on an inferred topology edge
+    (capped at 0.6) is at most possible.
+    """
+    if cause is None or cause_status is None:
+        return CauseLevel.UNKNOWN
+    if cause_status is CauseStatus.CONFIRMED:
+        return CauseLevel.CONFIRMED
+    if confidence >= CAUSE_LIKELY and len(families) >= LIKELY_FAMILIES:
+        return CauseLevel.LIKELY
+    if confidence >= CAUSE_POSSIBLE:
+        return CauseLevel.POSSIBLE
+    return CauseLevel.UNKNOWN
+
+
+def cause_families(inc: Incident, events: Mapping[str, NetEvent]) -> frozenset[str]:
+    """The independent source families behind ``inc``'s cause.
+
+    ``events`` maps event ids to stored events; evidence whose event left
+    the ring adds nothing. A link to a root (``parent_id``) adds the
+    correlation; a peer comparison on an evidence event adds the peers.
+    """
+    families: set[str] = set()
+    for item in inc.evidence:
+        event = events.get(item.get("id")) if isinstance(item, dict) else None
+        if event is None:
+            continue
+        family = _SOURCE_FAMILY.get(event.source)
+        if family is not None:
+            families.add(family)
+        if _num_or_none(event.params.get(PEERS_PARAM)):
+            families.add(FAMILY_PEERS)
+    if inc.parent_id is not None:
+        families.add(FAMILY_CORRELATION)
+    return frozenset(families)
+
+
+def incident_cause_level(inc: Incident, events: Mapping[str, NetEvent]) -> CauseLevel:
+    """``cause_level`` of an incident with the families of its evidence."""
+    return cause_level(
+        inc.cause, inc.cause_status, inc.confidence, cause_families(inc, events)
+    )
+
+
+def events_by_id(events: Iterable[NetEvent]) -> dict[str, NetEvent]:
+    """Index of stored events for ``cause_families``."""
+    return {event.id: event for event in events}
+
+
 def counted_incidents(
     incidents: Iterable[Incident], now: float | None = None
 ) -> list[Incident]:

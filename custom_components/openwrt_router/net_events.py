@@ -847,6 +847,7 @@ _INCIDENT_KEEP = (
     "origin",
     "cause",
     "cause_status",
+    "cause_level",
     "children",
     "affected",
     "first_seen",

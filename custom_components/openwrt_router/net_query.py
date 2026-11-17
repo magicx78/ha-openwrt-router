@@ -4,13 +4,14 @@ The routes in ``topology_panel.py`` parse the request with the ``parse_*``
 helpers and answer with the dicts built here. Everything reads the engine's
 memory (``view``, ring, automaton); nothing here talks to a router.
 
-``cause_level`` (UI field, planned for RT-1): until the engine grades causes
-itself it is derived from ``cause_status`` and ``confidence``::
+``cause_level`` (RT6) is graded in ``net_rules.cause_level`` from the
+cause status, the confidence and the independent source families of the
+evidence (the stored events, looked up in the ring)::
 
-    cause_status confirmed                      -> "confirmed" (bestätigt)
-    cause_status hypothesis, confidence >= 0.7  -> "likely"    (wahrscheinlich)
-    cause_status hypothesis, confidence >= 0.4  -> "possible"  (möglich)
-    otherwise (lower confidence, no cause)      -> "unknown"   (unbekannt)
+    cause_status confirmed                                  -> "confirmed"
+    hypothesis, confidence >= 0.7, >= 2 source families     -> "likely"
+    hypothesis, confidence >= 0.4                           -> "possible"
+    otherwise (lower confidence, no cause)                  -> "unknown"
 
 An inferred topology edge caps the confidence at 0.6 (AK6), so a cause that
 rests on one is at most "possible".
@@ -22,12 +23,10 @@ import logging
 import math
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from enum import StrEnum
 from typing import Any
 
 from .net_events import (
     Category,
-    CauseStatus,
     Incident,
     IncidentStatus,
     NetEvent,
@@ -38,16 +37,15 @@ from .net_rules import (
     WIFI_RECONNECT_KIND,
     counted_incidents,
     counts_for_router,
+    events_by_id,
     incident_area,
+    incident_cause_level,
     suppressed_child,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 _DAY = 86400
-
-CAUSE_LIKELY = 0.7
-CAUSE_POSSIBLE = 0.4
 
 EVENTS_LIMIT_DEFAULT = 100
 EVENTS_LIMIT_MAX = 500
@@ -72,27 +70,6 @@ type NameOf = Callable[[str], str]
 
 class QueryError(ValueError):
     """A request parameter or body is invalid (HTTP 400)."""
-
-
-class CauseLevel(StrEnum):
-    """How sure the cause is (UI field; see the module doc for the mapping)."""
-
-    CONFIRMED = "confirmed"
-    LIKELY = "likely"
-    POSSIBLE = "possible"
-    UNKNOWN = "unknown"
-
-
-def cause_level(cause_status: CauseStatus | None, confidence: float) -> CauseLevel:
-    """Derive the UI cause level from ``cause_status`` and ``confidence``."""
-    if cause_status is CauseStatus.CONFIRMED:
-        return CauseLevel.CONFIRMED
-    if cause_status is CauseStatus.HYPOTHESIS:
-        if confidence >= CAUSE_LIKELY:
-            return CauseLevel.LIKELY
-        if confidence >= CAUSE_POSSIBLE:
-            return CauseLevel.POSSIBLE
-    return CauseLevel.UNKNOWN
 
 
 # --- request parsing -------------------------------------------------------------
@@ -250,10 +227,12 @@ def incident_dict(
     *,
     known: Mapping[str, Incident] | None = None,
     evidence: bool = False,
+    events: Mapping[str, NetEvent] | None = None,
 ) -> dict[str, Any]:
     """An incident for the panel; without ``evidence`` only its count.
 
-    Extra fields: ``cause_level``, ``area`` (score area, None = none),
+    Extra fields: ``cause_level`` (graded with the stored ``events`` by id;
+    without them from one family at most), ``area`` (score area, None = none),
     ``router_names``, ``duration_s`` (current episode: since the reopen or
     the first sighting, up to the resolve time, also of an ignored
     incident whose condition ended, or ``now``) and ``child``
@@ -265,7 +244,7 @@ def incident_dict(
     if evidence:
         out["evidence"] = items
     out["evidence_count"] = len(items)
-    out["cause_level"] = cause_level(inc.cause_status, inc.confidence).value
+    out["cause_level"] = incident_cause_level(inc, events or {}).value
     out["area"] = incident_area(inc.type)
     out["router_names"] = [name_of(r) for r in inc.routers]
     start = inc.reopened_at if inc.reopened_at is not None else inc.first_seen
@@ -456,9 +435,11 @@ def incidents_page(
     ]
     matched.sort(key=_sort_key)
     limit = filters["limit"]
+    events = events_by_id(engine.ring)
     return {
         "incidents": [
-            incident_dict(inc, name_of, now, known=known) for inc in matched[:limit]
+            incident_dict(inc, name_of, now, known=known, events=events)
+            for inc in matched[:limit]
         ],
         "total": len(matched),
         "limit": limit,
@@ -480,12 +461,13 @@ def incident_detail(
     evidence_ids = {e.get("id") for e in inc.evidence if isinstance(e.get("id"), str)}
     stored: dict[str, NetEvent] = {}
     follow_ups: list[NetEvent] = []
-    for event in engine.ring:
+    events = events_by_id(engine.ring)
+    for event in events.values():
         if event.id in evidence_ids:
             stored[event.id] = event
         elif event.parent_id == incident_id:
             follow_ups.append(event)
-    detail = incident_dict(inc, name_of, now, known=known, evidence=True)
+    detail = incident_dict(inc, name_of, now, known=known, evidence=True, events=events)
     detail["evidence"] = [
         {
             **item,
@@ -504,8 +486,12 @@ def incident_detail(
     )
     return {
         "incident": detail,
-        "parent": incident_dict(parent, name_of, now, known=known) if parent else None,
-        "children": [incident_dict(c, name_of, now, known=known) for c in children],
+        "parent": incident_dict(parent, name_of, now, known=known, events=events)
+        if parent
+        else None,
+        "children": [
+            incident_dict(c, name_of, now, known=known, events=events) for c in children
+        ],
         "chain": [
             {
                 **event_dict(e, name_of),

@@ -33,16 +33,14 @@ from custom_components.openwrt_router.net_events import (
     NetEvent,
     Severity,
 )
-from custom_components.openwrt_router.net_query import (
-    CauseLevel,
-    cause_level,
-    router_badges,
-)
+from custom_components.openwrt_router.net_query import router_badges
 from custom_components.openwrt_router.net_rules import (
     DEFAULT_SETTINGS,
     SETTINGS_LIST_MAX,
     WIFI_RECONNECT_KIND,
     AlarmMachine,
+    CauseLevel,
+    cause_level,
     settings_errors,
 )
 from custom_components.openwrt_router.topology_mesh import _intelligence
@@ -551,7 +549,10 @@ def test_settings_errors_accept_the_full_defaults() -> None:
 def test_cause_level_mapping(
     status: CauseStatus | None, confidence: float, expected: CauseLevel
 ) -> None:
-    assert cause_level(status, confidence) is expected
+    """The P7 thresholds, now with two independent source families (RT6;
+    one family alone is at most possible: tests/test_net_cause_level.py)."""
+    families = frozenset({"log", "poll"})
+    assert cause_level("weak_signal", status, confidence, families) is expected
 
 
 async def test_snapshot_badges_and_fleet_meta(intel: NetIntelligence) -> None:

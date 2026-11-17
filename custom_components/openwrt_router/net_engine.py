@@ -170,8 +170,10 @@ from .net_rules import (
     deep_merge,
     detect_infrastructure,
     detect_wifi,
+    events_by_id,
     finding_evidence,
     fleet_score,
+    incident_cause_level,
     log_event_evidence,
     merge_settings,
     normalize_mac,
@@ -1519,12 +1521,15 @@ class NetIntelligence:
             if (n := self.counters.hourly(entry_id, kind, now, 24))
         }
         view = self.view.routers.get(entry_id)
-        active = Counter(
-            inc.type
+        mine = [
+            inc
             for inc in self.machine.incidents()
             if inc.status in _OPEN_STATES
             and (entry_id in inc.routers or inc.scope_key == entry_id)
-        )
+        ]
+        active = Counter(inc.type for inc in mine)
+        stored = events_by_id(self.ring)
+        levels = Counter(incident_cause_level(inc, stored).value for inc in mine)
         return {
             "loaded": self._loaded,
             "store_load_failed": self.load_failed,
@@ -1536,6 +1541,7 @@ class NetIntelligence:
             "counts_by_category_24h": dict(sorted(by_category.items())),
             "counts_by_kind_24h": by_kind,
             "active_by_type": dict(sorted(active.items())),
+            "active_by_cause_level": dict(sorted(levels.items())),
             "incidents_stored_fleet": len(self.machine.incidents()),
             "log_mark_stored": entry_id in self._log_marks,
             "store_bytes_last_save": self.last_save_bytes,
@@ -1717,6 +1723,8 @@ class NetIntelligence:
             "confidence": round(inc.confidence, 2),
             "cause": inc.cause,
             "cause_status": inc.cause_status.value if inc.cause_status else None,
+            # RT6, additive: how sure the cause is (derived, never stored)
+            "cause_level": incident_cause_level(inc, self._evidence_events(inc)).value,
             "scope": inc.scope.value,
             "routers": names,
             "entry_ids": entry_ids,
@@ -1727,6 +1735,11 @@ class NetIntelligence:
         if inc.scope is Scope.CLIENT and _MAC_RE.fullmatch(key):
             data["mac"] = key
         return data
+
+    def _evidence_events(self, inc: Incident) -> dict[str, NetEvent]:
+        """The stored events behind ``inc``'s evidence (for its cause level)."""
+        wanted = {e.get("id") for e in inc.evidence if isinstance(e, dict)}
+        return events_by_id(e for e in self.ring if e.id in wanted)
 
     def _publish(self, now: float) -> None:
         """Build the view for the entities and tell them (dispatcher)."""
