@@ -3837,7 +3837,7 @@ button.diag-table__row:hover { background: var(--surface-hover); }
 .stab-rows { display: flex; flex-direction: column; gap: 3px; }
 .stab-row {
   display: grid; align-items: center; gap: 8px; width: 100%; padding: 6px 8px;
-  grid-template-columns: minmax(130px, 1.4fr) minmax(120px, 1.2fr) 70px 120px 90px 70px 110px 70px;
+  grid-template-columns: minmax(130px, 1.4fr) minmax(120px, 1.2fr) 70px 120px 90px 70px 170px 70px;
   border: none; border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03);
   color: inherit; font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
 }
@@ -3894,6 +3894,16 @@ button.diag-table__row:hover { background: var(--surface-hover); }
 .stab-key--offline::before { background: var(--red); }
 .stab-key--gap::before { background: repeating-linear-gradient(45deg, var(--amber) 0 2px, rgba(245, 158, 11, 0.15) 2px 5px); }
 .stab-key--unknown::before { background: rgba(255, 255, 255, 0.08); }
+/* 1.43: event bars, AP strip, score settings */
+.stab-cbar--dc { fill: var(--red); }
+.stab-cbar--rc { fill: var(--amber); }
+.stab-key--dc::before { background: var(--red); }
+.stab-key--rc::before { background: var(--amber); }
+.stab-key--ap::before { background: var(--stab-ap); }
+.stab-marker--static { cursor: default; }
+.stab-roam { color: var(--blue); }
+.stab-roam--flap { color: var(--amber); }
+.stab-score-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 12px; }
 
 /* Phone width: table rows become cards */
 @media (max-width: 760px) {

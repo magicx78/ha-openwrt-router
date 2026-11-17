@@ -16,7 +16,7 @@ from typing import Any, ClassVar
 
 from homeassistant.exceptions import HomeAssistantError
 
-from .core_masking import mask_secrets
+from .core_masking import mask_secrets, scrub_text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,11 +76,11 @@ class ConfigApiError(HomeAssistantError):
         self.details: dict[str, Any] = dict(details or {})
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-safe description with masked details."""
+        """Return a JSON-safe description; details masked, message scrubbed."""
         return {
             "code": self.code,
             "error_class": self.error_class.value,
-            "message": self.message,
+            "message": scrub_text(self.message),
             "router_id": self.router_id,
             "retryable": self.retryable,
             "details": mask_secrets(self.details),
@@ -198,7 +198,8 @@ class AuthorizationError(ConfigApiError):
     """The actor may not perform the action, or a WriteAuthorization is invalid.
 
     ``details["reason"]`` says why (for example ``not_admin``,
-    ``already_used``, ``expired``, ``action_mismatch``).
+    ``unverified_actor``, ``unknown_authorization``, ``already_used``,
+    ``expired``, ``action_mismatch``, ``router_mismatch``).
     """
 
     code = "authorization_denied"
@@ -213,7 +214,8 @@ class ApprovalRequiredError(ConfigApiError):
 
 
 class ApprovalInvalidError(ConfigApiError):
-    """The approval is unknown, expired, used, rejected or bound elsewhere."""
+    """The approval is unknown, expired, used, rejected, bound elsewhere or
+    redeemed by someone other than the requester (``details["reason"]``)."""
 
     code = "approval_invalid"
     default_error_class = ErrorClass.APPROVAL
@@ -273,6 +275,32 @@ class UnsupportedStorageFormatError(ConfigApiError):
 
     code = "storage_format_unsupported"
     default_error_class = ErrorClass.INVALID
+
+
+class InvalidStorageRefError(ConfigApiError):
+    """A storage locator is malformed or resolves outside the router folder."""
+
+    code = "storage_ref_invalid"
+    default_error_class = ErrorClass.INVALID
+
+
+class VersionProtectedError(ConfigApiError):
+    """Delete was asked for protected versions; unprotect them first.
+
+    ``details["version_ids"]`` lists the protected ids; nothing was deleted.
+    """
+
+    code = "version_protected"
+    default_error_class = ErrorClass.CONFLICT
+
+
+class InstallationKeyLostError(ConfigApiError):
+    """The installation key store is missing or unreadable while versions or
+    drift acks exist. The core never creates a new key silently; only the
+    critical action ``installation_key_reset`` does."""
+
+    code = "installation_key_lost"
+    default_error_class = ErrorClass.NOT_AVAILABLE
 
 
 class RestoreIncompatibleError(ConfigApiError):

@@ -6,6 +6,10 @@
  * client stability engine. Data from /api/openwrt_topology/intelligence/
  * clients* (engine memory, no router calls). Loads on open and on a change
  * of filter or window; the panel's 30 s refresh reloads at most every 60 s.
+ *
+ * 1.43: sort by AP, 7-day availability and trend; the last problem includes
+ * failed authentication, association and DHCP; more AP figures; score
+ * weights and class limits editable here (admin only).
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -20,10 +24,12 @@ import type {
 import { errorMessage, formatTs } from '../utils/intel';
 import {
   CLASS_LABEL,
+  PART_LABEL,
   STATE_LABEL,
   bandLabel,
   kindText,
   pct,
+  problemText,
   recommendationText,
 } from '../utils/stability';
 import { ClientStabilityDetail, Score } from './ClientStabilityDetail';
@@ -33,10 +39,16 @@ type Section = 'clients' | 'aps' | 'settings';
 const SORTS: Array<{ id: string; label: string }> = [
   { id: 'score', label: 'Score (schlechteste zuerst)' },
   { id: '-score', label: 'Score (beste zuerst)' },
-  { id: 'availability', label: 'Verfügbarkeit' },
+  { id: 'availability', label: 'Verfügbarkeit 24 h (schlechteste zuerst)' },
+  { id: '-availability', label: 'Verfügbarkeit 24 h (beste zuerst)' },
+  { id: 'availability_7d', label: 'Verfügbarkeit 7 Tage (schlechteste zuerst)' },
+  { id: 'trend', label: 'Trend (stärkster Abfall zuerst)' },
   { id: '-reconnects', label: 'Reconnects' },
+  { id: '-last_problem', label: 'Letztes Problem' },
   { id: '-last_disconnect', label: 'Letzter Abbruch' },
   { id: 'coverage', label: 'Messabdeckung' },
+  { id: 'router', label: 'Access Point (A–Z)' },
+  { id: '-router', label: 'Access Point (Z–A)' },
   { id: 'name', label: 'Name' },
 ];
 const PAGE = 100;
@@ -93,8 +105,10 @@ function Row({ row, onOpen }: { row: StabilityRow; onOpen: () => void }) {
       <span className="stab-row__num" title="Reconnects 24 h">
         {row.reconnects_24h ?? '–'} <span className="diag-table__meta">Reconn.</span>
       </span>
-      <span className="stab-row__num diag-table__meta" title="Letzter Abbruch">
-        {row.last_disconnect ? formatTs(row.last_disconnect.ts) : 'kein Abbruch'}
+      <span className="stab-row__num diag-table__meta" title="Letztes Problem (Abbruch oder fehlgeschlagene Anmeldung, Assoziierung, DHCP)">
+        {row.last_problem
+          ? `${formatTs(row.last_problem.ts)} · ${problemText(row.last_problem)}`
+          : row.last_disconnect ? formatTs(row.last_disconnect.ts) : 'kein Problem'}
       </span>
       <span className="stab-row__num diag-table__meta" title="Messabdeckung 24 h">{pct(row.coverage)} Daten</span>
     </button>
@@ -252,8 +266,12 @@ function ApComparison({ api, tick, nameOf }: { api: IntelApi; tick: number; name
                   {a.disconnects_per_100h != null ? ` · ${a.disconnects_per_100h} Abbrüche` : ''}
                   {a.reconnects_per_100h != null ? ` · ${a.reconnects_per_100h} Reconnects` : ''}
                   {a.flaps_per_100h != null ? ` · ${a.flaps_per_100h} Flattern` : ''}
+                  {a.auth_fail_per_100h != null ? ` · ${a.auth_fail_per_100h} Anmeldefehler` : ''}
+                  {a.roams_in_per_100h != null ? ` · Roaming ${a.roams_in_per_100h} rein / ${a.roams_out_per_100h ?? '–'} raus` : ''}
                   {a.rssi_mean != null ? ` · Ø ${a.rssi_mean} dBm` : ''}
+                  {a.weak_share != null ? ` · ${pct(a.weak_share)} schwaches Signal` : ''}
                   {a.infra_disconnects ? ` · ${a.infra_disconnects} durch Infrastruktur` : ''}
+                  {a.infra_clients ? ` (${a.infra_clients} Clients)` : ''}
                 </span>
                 <span className="diag-table__meta">
                   {a.status === 'insufficient' ? 'zu wenig Daten' : a.low_basis ? 'schmale Basis' : ''}
@@ -277,6 +295,64 @@ function ApComparison({ api, tick, nameOf }: { api: IntelApi; tick: number; name
   );
 }
 
+/** Client-side check of weights and class limits (the server checks again). */
+function scoreSettingsProblem(weights: Record<string, number>, classes: number[]): string | null {
+  const values = Object.values(weights);
+  if (values.some(v => !Number.isFinite(v) || v < 0 || v > 100)) return 'Gewichte müssen zwischen 0 und 100 liegen.';
+  if (!values.some(v => v > 0)) return 'Mindestens ein Gewicht muss über 0 liegen.';
+  if (classes.some(v => !Number.isFinite(v) || v < 0 || v > 100)) return 'Klassengrenzen müssen zwischen 0 und 100 liegen.';
+  if (classes.some((v, i) => i > 0 && v >= classes[i - 1])) return 'Klassengrenzen müssen streng absteigen.';
+  return null;
+}
+
+/** Weights of the score parts and the lower limits of the classes. */
+function ScoreSettings({
+  data,
+  weights,
+  classes,
+  readOnly,
+  onChange,
+}: {
+  data: StabilitySettingsResponse;
+  weights: Record<string, number>;
+  classes: number[];
+  readOnly: boolean;
+  onChange: (patch: Record<string, unknown>) => void;
+}) {
+  const parts = data.limits.parts ?? Object.keys(weights);
+  const names = (data.limits.classes ?? Object.keys(CLASS_LABEL)) as Array<keyof typeof CLASS_LABEL>;
+  const num = (value: string) => (value === '' ? Number.NaN : Number(value));
+  return (
+    <>
+      <div className="settings-card__heading">Score-Gewichte (0–100)</div>
+      <div className="stab-score-grid">
+        {parts.map(p => (
+          <label key={p} className="diag-field">
+            <span className="diag-field__label">{PART_LABEL[p] ?? p}</span>
+            <input type="number" min={0} max={100} step={1} disabled={readOnly}
+              value={Number.isFinite(weights[p]) ? weights[p] : ''}
+              onChange={e => onChange({ weights: { ...weights, [p]: num(e.target.value) } })} />
+          </label>
+        ))}
+      </div>
+      <div className="settings-card__heading">Klassengrenzen (Score ab …)</div>
+      <div className="stab-score-grid">
+        {classes.map((v, i) => (
+          <label key={names[i] ?? i} className="diag-field">
+            <span className="diag-field__label">{CLASS_LABEL[names[i]] ?? `Klasse ${i + 1}`}</span>
+            <input type="number" min={0} max={100} step={1} disabled={readOnly}
+              value={Number.isFinite(v) ? v : ''}
+              onChange={e => onChange({ classes: classes.map((c, k) => (k === i ? num(e.target.value) : c)) })} />
+          </label>
+        ))}
+      </div>
+      <div className="settings-info">
+        Darunter: {CLASS_LABEL[names[classes.length]] ?? 'kritisch'}. Der Score ist das gewichtete Mittel der bewerteten Teile; ein Teil mit Gewicht 0 zählt nicht.
+      </div>
+    </>
+  );
+}
+
 function Settings({
   data,
   onSave,
@@ -291,6 +367,9 @@ function Settings({
   const s = { ...data.settings, ...draft };
   const st = data.status;
   const readOnly = !data.can_edit;
+  const weights = (s.weights ?? {}) as Record<string, number>;
+  const classes = (s.classes ?? []) as number[];
+  const problem = scoreSettingsProblem(weights, classes);
   const save = async () => {
     setBusy(true);
     try {
@@ -330,19 +409,28 @@ function Settings({
         <span>Schlafende Geräte: <b>{data.settings.sleepy_macs.length}</b></span>
       </div>
       {st.store_load_failed && <div className="diag-error">Der gespeicherte Verlauf war unlesbar; es wird neu gesammelt.</div>}
+      <ScoreSettings data={data} weights={weights} classes={classes} readOnly={readOnly}
+        onChange={patch => setDraft(d => ({ ...d, ...patch }))} />
+      {problem && <div className="diag-error">{problem}</div>}
       {error && <div className="diag-error">{error}</div>}
       {data.can_edit ? (
         <div className="diag-actions">
-          <button type="button" className="diag-btn diag-btn--primary" disabled={busy || Object.keys(draft).length === 0} onClick={save}>
+          <button type="button" className="diag-btn diag-btn--primary" disabled={busy || problem != null || Object.keys(draft).length === 0} onClick={save}>
             Speichern
           </button>
+          {data.defaults && (
+            <button type="button" className="diag-btn" disabled={busy}
+              onClick={() => setDraft(d => ({ ...d, weights: { ...data.defaults!.weights }, classes: [...data.defaults!.classes] }))}>
+              Gewichte und Grenzen zurücksetzen
+            </button>
+          )}
         </div>
       ) : (
         <div className="settings-info">Ändern nur als Administrator.</div>
       )}
       <div className="settings-info">
         Sensoren und „schlafendes Gerät“ werden in der Detailansicht eines Clients gesetzt.
-        Gewichte und Klassengrenzen sind über die API einstellbar (POST …/intelligence/clients/settings).
+        Zurücksetzen trägt die Standardwerte ein; erst „Speichern“ übernimmt sie.
       </div>
     </div>
   );
