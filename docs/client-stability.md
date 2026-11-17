@@ -64,9 +64,12 @@ Every client has a state:
 - Each disconnect gets a **class** from the reason in the router log: `error` (timeout,
   handshake, MIC, wrong PSK, missing ACKs, AP full, other), `inactivity`, `leave` (the client
   left on its own), `unknown` (no log line, only the poll) or `infra` (during an open Network
-  Intelligence root of the client's router: router or fleet outage, uplink down, or up to 300 s
-  after a reboot, radio change, port flap or mass disconnect; WAN down does not count). An
-  `infra` disconnect carries the root's incident ID.
+  Intelligence root of the client's router: router or fleet outage, or up to 300 s after a
+  reboot, radio change or mass disconnect; WAN down does not count). A port root (uplink down,
+  port flap) counts only for the routers whose drops Network Intelligence linked to it, that
+  is the routers behind the port, or the port's owner when its own uplink port flaps; a WAN
+  port flap on the gateway never makes the gateway's clients `infra`. An `infra` disconnect
+  carries the root's incident ID.
 - **Reconnects** come only from the Network Intelligence `wifi.reconnect` events (router log).
 - **IP visible** (DHCP lease or ARP entry) is counted separately and never mixed with
   availability.
@@ -201,7 +204,7 @@ unload; POST admin only):
 
 | Key | Default | Range |
 |---|---|---|
-| `enabled` | `true` | off stops recording; history and entities stay |
+| `enabled` | `true` | off stops recording; the history stays, the client sensors stay registered but unavailable |
 | `retention_days` | 30 | 1–90 (day buckets; hour buckets are always 7 days) |
 | `entity_macs` | `[]` | ≤ 25 MACs |
 | `sleepy_macs` | `[]` | ≤ 1000 MACs |
@@ -245,6 +248,9 @@ log lines contain no client data.
 - **Not measurable** without new router calls: wired clients, end-to-end reachability (no
   ping), the real connection time of a client before the first poll, numeric reason codes
   where the log has only text. TX/RX rates are shown but are not part of the score.
+- A radio change (DFS, channel switch, radio restart) marks the disconnects of the **whole
+  router** as `infra` for 300 s, not only those of the changed radio; a client on the other
+  band of that router that drops in this time costs nothing in the score.
 - Detection follows the poll interval; a disconnect shorter than the offline rule
   (2 polls, at least 150 s) is a blip.
 - *Score unknown?* Less than half of the weighted parts have enough data, for example right
@@ -258,8 +264,8 @@ log lines contain no client data.
 
 ## Turning it off and rolling back
 
-- **Off:** `enabled: false` (panel tab *Einstellungen*). Nothing is recorded; the network
-  intelligence works on unchanged.
+- **Off:** `enabled: false` (panel tab *Einstellungen*). Nothing is recorded, the client
+  sensors become unavailable, and Network Intelligence keeps working as before.
 - **Delete the history:** remove `.storage/openwrt_router.client_history` while HA is stopped.
 - **Remove the entities:** clear `entity_macs`.
 - **Roll back the code:** install 1.41.0. The extra store file is then unused and can be

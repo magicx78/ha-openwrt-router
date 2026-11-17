@@ -330,8 +330,9 @@ that Network Intelligence already evaluates. Full details:
 - **Tolerant state per MAC:** roaming and a short absence are no disconnect (offline only
   after 2 polls and at least 150 s in no list); an access point outage is a measurement gap,
   never offline. Disconnects are classed by their log reason (`error`, `inactivity`, `leave`,
-  `unknown`, `infra`); those during a Network Intelligence root count as `infra` and raise no
-  alarm of their own.
+  `unknown`, `infra`); those during a Network Intelligence root of the client's router count
+  as `infra` and raise no alarm of their own (port roots only behind the port, never for a
+  gateway's WAN port flap).
 - **Stability score** 0–100 from disconnects 30, reconnects 15, session length 15, signal 20,
   authentication 10, roaming 5 and recurring patterns 5; *unknown*, never 100, without enough
   data. Classes *very stable* … *critical*; devices can be marked *sleepy*.

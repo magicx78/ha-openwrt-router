@@ -14,14 +14,17 @@ B1–B9 auf `claude/client-stability-f9a22b`. Nutzerdoku: `docs/client-stability
       AP-Vergleich, Empfehlungen, API-Routen, Tab „Stabilität“, Sensoren für
       ausgewählte Clients, eigener Store mit Größengrenze.
 - [ ] **B7a: v1.36-Reconnect-Zählung ablösen** (`AssociationTracker` →
-      Zählung aus der Client-Stabilität, 300 s → Log-Ereignisse). Wartet auf
-      die Entscheidungen F10/F11 im Plan; ändert das Verhalten des Sensors
-      `unstable_clients`.
+      Zählung aus der Client-Stabilität, 300 s → Log-Ereignisse), eigener
+      späterer PR. Entschieden (2026-11-17): bis dahin bleiben beide Zählungen;
+      die Ablösung ändert das Verhalten des Sensors `unstable_clients`.
 - [ ] **Sichtprüfung im echten HA-Frontend**, Desktop und Handy (Tabelle,
       Detail-Charts, Karten-Layout unter 760 px), als Admin und Nicht-Admin.
-- [ ] **Muster nicht im Tabellenabruf rechnen:** bei 1000 Clients blockiert
-      der erste Tabellenabruf je Stunde etwa 1,4 s (Stundenmuster aller
-      Clients). Vorschlag: im Executor oder beim Stundenwechsel vorberechnen.
+- [ ] **Muster beim Stundenwechsel vorberechnen** (der Tabellenabruf mit
+      1000 Clients blockiert sonst etwa 1,4 s, weil er die Stundenmuster
+      aller Clients rechnet).
+- [ ] **`infra` je Radio statt je Router** bei `wifi_radio_change`: heute
+      markiert ein Kanalwechsel 300 s lang den ganzen Router. Braucht in
+      `client_history.py` eine `infra`-Zuordnung je Router und Radio.
 - [ ] **Gastclients früher entfernen** (gesamt online < 1 h, seit 7 d weg;
       private MACs ohne Wiederkehr nach 7 d) – geplant in 4.2, nicht gebaut;
       heute erst nach `retention_days` oder beim Kürzen.

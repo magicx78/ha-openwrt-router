@@ -19,7 +19,12 @@ All notable changes to the OpenWrt Router integration will be documented in this
   AP-Ausfall oder eine Poll-Lücke ist Messlücke, nie offline. Jeder Abbruch
   bekommt eine Klasse aus dem Log-Grund (`error`, `inactivity`, `leave`,
   `unknown`, `infra`); Abbrüche während einer Network-Intelligence-Wurzel
-  zählen als `infra` und lösen **keinen eigenen Alarm** aus.
+  am Router des Clients zählen als `infra` und lösen **keinen eigenen
+  Alarm** aus. Bei Port-Wurzeln (Uplink aus, Port-Flap) gilt das nur für die
+  Router, deren Abbrüche die Network Intelligence damit verknüpft hat (hinter
+  dem Port, oder der Besitzer bei Flap seines eigenen Uplink-Ports), nie für
+  das Gateway bei einem flatternden WAN-Port. Ein Kanalwechsel markiert
+  300 s lang den ganzen Router, nicht nur das betroffene Radio.
 - **Stabilitäts-Score** 0–100 aus sieben Teilen (Abbrüche 30, Reconnects 15,
   Sitzungsdauer 15, Signal 20, Anmeldung 10, Roaming 5, wiederkehrende
   Muster 5) mit Klassen *sehr stabil* bis *kritisch*. Bei zu wenig Daten

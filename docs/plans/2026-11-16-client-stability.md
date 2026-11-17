@@ -527,7 +527,7 @@ Kleine Entscheidungen der Bau-Sitzung, vom Master überstimmbar:
 
 | Nr | Plan | Gebaut | Grund |
 |---|---|---|---|
-| A1 | `infra` bei NI-Wurzeln `router_unreachable`, `system_reboot`, `wifi_radio_change`, `wifi_mass_disconnect` | alle Wurzel-Typen der NI (`ROOT_TIERS`) außer `wan_down`, also auch `lan_unreachable`, `lan_uplink_down` und `lan_port_flap`; Ereignis-Wurzeln (Neustart, Kanalwechsel, Port-Flap, Massen-Trennung) zählen nur bis 300 s nach ihrem letzten Zeitpunkt | WAN-Ausfall trennt keine WLAN-Clients; Port-Flap erklärt seit 1.41.0 Abbrüche |
+| A1 | `infra` bei NI-Wurzeln `router_unreachable`, `system_reboot`, `wifi_radio_change`, `wifi_mass_disconnect` | alle Wurzel-Typen der NI (`ROOT_TIERS`) außer `wan_down`, also auch `lan_unreachable`, `lan_uplink_down` und `lan_port_flap`; Ereignis-Wurzeln (Neustart, Kanalwechsel, Port-Flap, Massen-Trennung) zählen nur bis 300 s nach ihrem letzten Zeitpunkt. **Korrektur nach Review PR #50:** Port-Wurzeln (`lan_uplink_down`, `lan_port_flap`) nennen in `routers` den Besitzer des Ports, nicht die Router dahinter; sie markieren deshalb **nur die Router ihrer verknüpften Kind-Incidents** (NI verknüpft nur Abbrüche hinter dem Port). Die Ausnahme „eigener Uplink-Port des Besitzers“ braucht keinen eigenen Code: NI zählt den Besitzer bei Flap seines eigenen Uplink-Ports zu `behind` (`net_rules._RootView.of`) und verknüpft seine Abbrüche als Kinder. Ein WAN-Port-Flap am Gateway markiert das Gateway nie (wie `wan_down`) | WAN-Ausfall trennt keine WLAN-Clients; Port-Flap erklärt seit 1.41.0 Abbrüche, aber nur hinter dem Port |
 | A2 | Kind-Incident einer Wurzel | ein Abbruch in einem Kind-Incident meldet die Wurzel (`incident_id` der Wurzel) | ein Verweis je Ursache |
 | A3 | Klassen `error` | zusätzlich `missing_acks` (Reason 34) als `error` | Funkabbruch, seit 1.41.0 als Grund im Log |
 | A4 | Poll-Intervall der Regel `roam_grace`/offline | beobachtetes Intervall je Router, höchstens 2× das gemeldete | adaptiver Poll (120/300 s) ohne Fehl-Abbrüche |
@@ -541,7 +541,10 @@ Kleine Entscheidungen der Bau-Sitzung, vom Master überstimmbar:
 | A12 | Gäste-Bereinigung | nicht gebaut | 4.2, TODO |
 | A13 | Panel-Ort „Sidebar.tsx“ | Unter-Tab „Stabilität“ in `DiagnoseView.tsx`, AP-Vergleich standardmäßig 7 d | NI-Diagnose ist der Ort aller Analysen |
 | A14 | Gewichte/Klassen im Panel einstellbar | nur über `POST clients/settings` | kleiner Tab; Standardwerte reichen für die Beta |
-| A15 | B7a | offen | F10/F11 |
+| A15 | B7a | offen; entschieden (Master, 2026-11-17): beide Zählungen bleiben vorerst, Ablösung in einem späteren PR | F10/F11 |
+| A16 | Kanalwechsel als Wurzel | **bekannte Grenze:** `wifi_radio_change` markiert 300 s lang den ganzen Router, nicht nur das Radio. Das Radio steht zwar im `scope_key` (`<router>:radio:<phy>`), aber die Historie führt `infra` je Router (`PollInput.infra`, `c.infra`, an etwa sechs Stellen); eine Zuordnung je Radio wäre ein größerer Umbau (TODO.md) | Review PR #50 (L2) |
+| A17 | Entities bei `enabled: false` | leere `entity_states`, die Sensoren werden unavailable statt den letzten Wert zu behalten | Review PR #50 (L3) |
+| A18 | Incidents je Poll lesen | `machine.peek()` (nur lesen, keine Kopien) statt `machine.incidents()`; auch `incident_refs` | Review PR #50 (L1): Kopien kosteten 21 ms bei 500 Incidents je Poll |
 
 ## Prüfprotokoll
 
