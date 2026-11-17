@@ -993,6 +993,28 @@ Nichts davon fällt still weg.
 
 ---
 
+### 9.3 Entscheidungen des Masters (2026-11-17)
+
+Diese Entscheidungen ersetzen die Empfehlungen in 9.2 und abweichende Angaben in den Abschnitten 6 bis 8.
+
+| Frage | Entscheidung |
+|---|---|
+| Q-ORDER | R1 (Schnittstelle, Weg A, Detektoren Gruppe a, Hooks), dann R2 (Weg B, Collector), dann R3 (Gruppe b mit ACL). In R1 ist die Auswahl des Log-Wegs schon sichtbar; Weg B steht dort als „noch nicht verfügbar“, nicht versteckt |
+| Q-HOOK | Erlaubt, aber erst in Stufe 4 (nach dem Merge von Enterprise Core), rein additiv und markiert. Tests müssen belegen, dass ohne aktives Security Center jedes bestehende Incident, jeder Zähler und jeder Sensorwert unverändert bleibt. Vorher prüfen, ob der Ereignisbus von Enterprise Core einen Teil der Hooks überflüssig macht |
+| Q-EVENT | `sec_*` mit eigenem Ereignis über das `CoreEvent`-Schema und eigenen Zählern; nicht in die bestehenden Zähler mitzählen |
+| Q-CAP | Eigene Kappe 100 für `sec_*` |
+| Q-STREAM | Nein. Kein ubus-Ereignisstrom, solange der uhttpd-Absturz bekannt ist |
+| Q-FLOW | Nein. Keine volle Conntrack-Tabelle, kein Flow-Export; nur Erweiterungspunkt |
+| Q-UCI-FW | Nein. Kein eigener regelmäßiger `uci get firewall`; Firewall-Konfiguration und Änderungen kommen aus Snapshots und Drift-Ereignissen des Configuration Managers. Der Abruf entfällt damit in 6.2 und 7 |
+| Q-NFT, Q-SCAN | Nur manuell auf Anforderung eines Admins über den Guard von Enterprise Core, nicht in R1; spätere Option |
+| Q-TLS | Collector-API mit Pflicht-Token; TLS unterstützt und empfohlen, im reinen LAN-Betrieb abschaltbar mit deutlichem Hinweis. Der Collector lauscht standardmäßig nicht auf allen Schnittstellen |
+| Q-NI-LOG | Vorerst nein. Der `log read` von Network Intelligence bleibt unverändert, auch bei aktivem Empfangsweg (mögliche Ersparnis siehe 4.8) |
+| Q-ACL | Die Rechte für Gruppe b gehen in die gestufte ACL von Enterprise Core (je Fähigkeit einzeln zuschaltbar), keine eigene ACL v9 hier. Ob sie auf die Router kommen, gibt der Nutzer beim Deploy frei |
+
+**Weiter offen, beim Nutzer** (Änderungen an seinen Geräten, werden gebündelt vorgelegt; nichts davon wird vorher ausgeführt): Q-SYSLOG, Q-FWLOG, Q-DNSLOG, Q-PROXMOX, Q-LIVE.
+
+---
+
 ## 10. Gelesen und nicht gelesen
 
 **Gelesen:**
