@@ -21,6 +21,7 @@ from custom_components.openwrt_router.core_errors import (
     BackupMetadataError,
     ConfigApiError,
     ErrorClass,
+    InvalidStorageRefError,
     ProviderError,
     RouterUnavailableError,
     UnsupportedStorageFormatError,
@@ -84,7 +85,6 @@ from custom_components.openwrt_router.core_models import (
     async_actor_from_context,
     binding_checksum,
     canonical_checksum,
-    dedup_key,
     default_router_id,
     ensure_supported_api_version,
     ensure_supported_storage_format,
@@ -107,6 +107,10 @@ def _actor() -> Actor:
         module="config_manager",
         is_admin=True,
     )
+
+
+def _user(*, admin=True, active=True, system=False):
+    return MagicMock(is_admin=admin, is_active=active, system_generated=system)
 
 
 def _artifact(name: str, sha: str = SHA, size: int = 100) -> ArtifactRef:
@@ -258,7 +262,6 @@ class TestBackupRecord:
             VersionMeta(
                 backup_type=BackupType.FULL_ARCHIVE,
                 reason=BackupReason.MANUAL,
-                created_by=_actor(),
                 note="x" * (NOTE_MAX_LENGTH + 1),
             )
 
@@ -406,7 +409,7 @@ class TestActorAndEvent:
 class TestActorFromContext:
     async def test_admin_user(self):
         hass = MagicMock()
-        hass.auth.async_get_user = AsyncMock(return_value=MagicMock(is_admin=True))
+        hass.auth.async_get_user = AsyncMock(return_value=_user())
         actor = await async_actor_from_context(hass, Context(user_id="u1"), "cm")
         assert actor.kind is ActorKind.USER
         assert actor.is_admin is True
@@ -701,6 +704,7 @@ class TestDriftAckAndDedup:
             actor=_actor(),
             ts=T0,
             note="new baseline",
+            version_id="bkp_" + "1" * 32,
         )
         data = ack.to_dict()
         json.dumps(data)
@@ -718,19 +722,22 @@ class TestDriftAckAndDedup:
         with pytest.raises(ValueError):
             DriftAck(**base, ts=T0, note="x" * (NOTE_MAX_LENGTH + 1))
 
-    def test_dedup_key(self):
-        assert dedup_key("rtr_a", "drf_1") == "rtr_a:drf_1"
-        assert dedup_key(None, ErrorClass.TIMEOUT) == "-:timeout"
-
     def test_event_carries_dedup_key(self):
         event = CoreEvent(
             event_id=new_id("evt_"),
             ts=T0,
             type=CoreEventType.BACKUP_FAILED,
             source="config_manager",
-            dedup_key=dedup_key("rtr_a", ErrorClass.TIMEOUT),
+            router_id="rtr_a",
+            dedup_key=ErrorClass.TIMEOUT,
         )
-        assert CoreEvent.from_dict(event.to_dict()).dedup_key == "rtr_a:timeout"
+        restored = CoreEvent.from_dict(event.to_dict())
+        assert restored.dedup_key == "timeout"
+        assert restored.dedup_scope == (
+            "rtr_a",
+            "configuration.backup_failed",
+            "timeout",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -805,7 +812,7 @@ class TestWriteAuthorization:
 
     def test_single_use(self):
         auth = _auth()
-        auth.consume(
+        auth._consume(
             action=GuardedAction.RESTORE,
             router_id="rtr_a",
             checksum="c" * 64,
@@ -813,7 +820,7 @@ class TestWriteAuthorization:
         )
         assert auth.consumed
         with pytest.raises(AuthorizationError) as err:
-            auth.consume(
+            auth._consume(
                 action=GuardedAction.RESTORE,
                 router_id="rtr_a",
                 checksum="c" * 64,
@@ -840,11 +847,11 @@ class TestWriteAuthorization:
         }
         call.update(kwargs)
         with pytest.raises(AuthorizationError) as err:
-            auth.consume(**call)
+            auth._consume(**call)
         assert err.value.details["reason"] == reason
         # A failed attempt burns the authorization (fail closed).
         with pytest.raises(AuthorizationError) as err:
-            auth.consume(
+            auth._consume(
                 action=GuardedAction.RESTORE,
                 router_id="rtr_a",
                 checksum="c" * 64,
@@ -855,7 +862,7 @@ class TestWriteAuthorization:
     def test_expired(self):
         auth = _auth(ttl=timedelta(seconds=10))
         with pytest.raises(AuthorizationError) as err:
-            auth.consume(
+            auth._consume(
                 action=GuardedAction.RESTORE,
                 router_id="rtr_a",
                 checksum="c" * 64,
@@ -865,7 +872,7 @@ class TestWriteAuthorization:
 
     def test_unbound_checksum_allows_none(self):
         auth = _auth(action=GuardedAction.BACKUP, checksum=None)
-        auth.consume(action=GuardedAction.BACKUP, router_id="rtr_a", now=T0)
+        auth._consume(action=GuardedAction.BACKUP, router_id="rtr_a", now=T0)
         assert auth.to_dict()["consumed"] is True
 
     def test_attributes_read_only(self):
@@ -886,14 +893,14 @@ class _FakeProvider:
     def supported(self, router):
         return True
 
-    async def async_probe(self, conn): ...
-    async def async_capture(self, conn, request): ...
-    async def async_collect(self, conn, request): ...
-    async def async_validate(self, record, read): ...
-    async def async_compare(self, base, other, read): ...
-    async def async_detect_drift(self, conn, baseline, read, acks): ...
-    async def async_prepare_restore(self, conn, record, target, read): ...
-    async def async_execute_restore(self, conn, plan, authorization): ...
+    async def async_probe(self, conn, ctx): ...
+    async def async_capture(self, conn, request, ctx): ...
+    async def async_collect(self, conn, request, ctx): ...
+    async def async_validate(self, record, ctx): ...
+    async def async_compare(self, base, other, ctx, *, base_router, other_router): ...
+    async def async_detect_drift(self, conn, baseline, acks, ctx, *, router): ...
+    async def async_prepare_restore(self, conn, record, target, ctx): ...
+    async def async_execute_restore(self, conn, plan, authorization, ctx): ...
 
 
 def test_provider_protocol_runtime_checkable():
@@ -921,7 +928,7 @@ def test_storage_ref_defaults_and_round_trip():
     assert StorageRef.from_dict(ref.to_dict()) == ref
     # Records written before storage_format existed read as plain-v1.
     assert StorageRef.from_dict({"locator": "a"}).storage_format == "plain-v1"
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidStorageRefError):
         StorageRef.from_dict({"locator": ""})
 
 

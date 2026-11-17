@@ -3,13 +3,23 @@
 Plan: docs/plans/2026-11-17-enterprise-core.md, contract:
 docs/dev/configuration-api-v1.md.
 
-This module holds constants, enums, frozen dataclasses, a few pure helpers
-and the service interfaces (Protocols) at the end of the file. It holds no state, makes no router call and does not touch ``hass``
-except in :func:`async_actor_from_context`.
+This module holds constants, enums, frozen dataclasses, pure helpers (ids,
+checksums, guard policy, dedup and retention rules) and the service
+interfaces (Protocols) at the end of the file. It holds no state, makes no
+router call and touches ``hass`` only in the actor helpers.
 
-Rules for changes within API v1: additive only (new optional fields with a
-default, new enum members, new event types, new capability names).
-Dataclasses are ``kw_only`` so a new field never shifts positional arguments.
+Rules for changes within API v1:
+
+* Additive only: new optional fields with a default, new methods, new
+  non-persisted enum values (capabilities, event types, reasons).
+* A new value of an enum that is PERSISTED in a versioned record
+  (``BackupType``, ``BackupReason``, ``VersionStatus``, ``ValidationStatus``,
+  ``ArtifactKind``, ``ErrorClass`` in BackupRecord, ``DriftAckState``,
+  ``ActorKind``) bumps that record's format version (BACKUP_METADATA_VERSION
+  or the store version), because older readers reject unknown values.
+
+Dataclasses are ``frozen`` and ``kw_only``; mapping fields are stored as
+read-only ``MappingProxyType`` (deep), enum fields are coerced and checked.
 
 Naming: a "backup" and a "version" are the same thing. The id is
 ``backup_id`` (``bkp_<32 hex>``); ``BackupRecord.version_id`` is an alias.
@@ -18,12 +28,14 @@ Naming: a "backup" and a "version" are the same thing. The id is
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
+import os
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum, StrEnum
 from types import MappingProxyType
@@ -38,12 +50,16 @@ from .const import (
 )
 from .core_errors import (
     ApiVersionError,
+    ApprovalInvalidError,
+    ApprovalRequiredError,
     AuthorizationError,
     BackupMetadataError,
     ErrorClass,
+    InvalidStorageRefError,
     UnsupportedStorageFormatError,
+    VersionProtectedError,
 )
-from .core_masking import is_secret_key, mask_secrets, mask_value
+from .core_masking import is_secret_option, mask_secrets, mask_value, scrub_text
 from .mac_utils import is_mac
 from .net_events import Severity
 
@@ -66,7 +82,8 @@ CONFIGURATION_API_MIN_VERSION: Final = 1
 SUPPORTED_API_VERSIONS: Final = tuple(
     range(CONFIGURATION_API_MIN_VERSION, CONFIGURATION_API_VERSION + 1)
 )
-# Version of the ConfigBackupProvider protocol a provider implements.
+# Version of the ConfigBackupProvider protocol a provider implements;
+# register_provider() refuses a provider_api_version outside this tuple.
 PROVIDER_API_VERSION: Final = 1
 SUPPORTED_PROVIDER_API_VERSIONS: Final = (1,)
 BACKUP_METADATA_VERSION: Final = 1
@@ -81,6 +98,7 @@ EVENT_ID_PREFIX: Final = "evt_"
 APPROVAL_ID_PREFIX: Final = "apr_"
 PLAN_ID_PREFIX: Final = "pln_"
 AUTHORIZATION_ID_PREFIX: Final = "wau_"
+VERIFICATION_ID_PREFIX: Final = "vac_"
 CORRELATION_ID_PREFIX: Final = "cor_"
 
 # HA bus event of the audit log (payload = CoreEvent.to_dict(), masked).
@@ -95,8 +113,13 @@ ROUTER_REGISTRY_STORE_KEY: Final = f"{DOMAIN}.router_registry"
 CONFIG_CATALOG_STORE_KEY: Final = f"{DOMAIN}.config_catalog"
 AUDIT_STORE_KEY: Final = f"{DOMAIN}.audit"
 # 32 random bytes for HMAC secret digests; never in audit, bus or diagnostics.
+# Created ONLY on the very first initialisation (no versions, no acks, no key
+# store); never regenerated silently (see installation_key_state).
 INSTALLATION_KEY_STORE_KEY: Final = f"{DOMAIN}.installation_key"
 INSTALLATION_KEY_BYTES: Final = 32
+INSTALLATION_KEY_ID_LENGTH: Final = 16
+# Repair issue id raised when the key is lost (issue registry, later step).
+ISSUE_INSTALLATION_KEY_LOST: Final = "installation_key_lost"
 CORE_STORE_VERSION: Final = 1
 
 # Version store on disk: hass.config.path(*CONFIG_BACKUP_PATH, <router_id>).
@@ -111,7 +134,19 @@ DEFAULT_ROUTER_STORAGE_LIMIT_BYTES: Final = 50 * 1024 * 1024
 DEFAULT_TOTAL_STORAGE_LIMIT_BYTES: Final = 250 * 1024 * 1024
 STORAGE_FORMAT_PLAIN_V1: Final = "plain-v1"
 SUPPORTED_STORAGE_FORMATS: Final = frozenset({STORAGE_FORMAT_PLAIN_V1})
+# A locator is one file name inside the router folder.
+STORAGE_LOCATOR_PATTERN: Final = re.compile(r"[A-Za-z0-9._-]+")
 NOTE_MAX_LENGTH: Final = 500
+# Version warnings are machine codes, optionally with a subject:
+# "config_missing_in_archive:firewall", "uci_missing:sqm".
+WARNING_CODE_PATTERN: Final = re.compile(r"[a-z0-9_]+(?::[A-Za-z0-9_.@-]+)?")
+MAX_WARNINGS: Final = 50
+
+# Snapshot format v1 of the configuration provider (ConfigSnapshot.configs):
+# configs[config] = {"sections": {name: {"type": str, "options": {opt: v}}},
+#                    "order": [section names]}; secret values are
+# {"secret": "<hmac16>"} markers. The core treats configs as opaque.
+SNAPSHOT_FORMAT_UCI_NORMALIZED: Final = "uci_normalized"
 
 # Options-flow switch that gates all config.* capabilities and the matching
 # ACL tier (the option itself is added to const.py/config_flow.py later).
@@ -123,11 +158,18 @@ RESERVED_NAMESPACES: Final = ("security.", "diag.", "log.")
 
 APPROVAL_TTL: Final = timedelta(minutes=15)
 WRITE_AUTHORIZATION_TTL: Final = timedelta(minutes=5)
+# A VerifiedActor is accepted by the guard for this long after verification.
+ACTOR_VERIFICATION_TTL: Final = timedelta(seconds=60)
 # Mutating operations wait at most this long for the per-router lock.
 ROUTER_LOCK_TIMEOUT: Final = timedelta(minutes=5)
-# Same dedup key again within the cooldown: not stored, not fired.
+# Fleet-wide backup queue owned by the core. Order of one backup:
+# fleet slot -> router lock -> authorize -> collect -> put, so a
+# WriteAuthorization is minted only once the backup can start.
+FLEET_BACKUP_CONCURRENCY: Final = 1
+# Fixed window: a repeat of the same dedup scope inside it is not published.
 FAILURE_EVENT_COOLDOWN: Final = timedelta(hours=24)
 AUDIT_MAX_EVENTS: Final = 1000
+SECURITY_AUDIT_MAX_EVENTS: Final = 500
 AUDIT_RETENTION_DAYS: Final = 90
 DEFAULT_LIST_LIMIT: Final = 50
 MAX_LIST_LIMIT: Final = 500
@@ -191,6 +233,8 @@ def _json_default(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, Enum):
         return value.value
+    if isinstance(value, Mapping):
+        return dict(value)
     if isinstance(value, set | frozenset):
         return sorted(value, key=str)
     if isinstance(value, bytes):
@@ -207,13 +251,8 @@ def canonical_checksum(data: Any) -> str:
 
 
 def binding_checksum(*parts: Any) -> str:
-    """Checksum a WriteAuthorization / approval is bound to (see contract §6)."""
+    """Checksum an approval / WriteAuthorization is bound to (contract §6.4)."""
     return canonical_checksum(list(parts))
-
-
-def dedup_key(router_id: str | None, discriminator: str) -> str:
-    """Event dedup key, e.g. ``(router_id, drift_id)`` or ``(router_id, error_class)``."""
-    return f"{router_id or '-'}:{discriminator}"
 
 
 def ensure_supported_api_version(version: int) -> int:
@@ -242,36 +281,122 @@ def ensure_supported_storage_format(storage_format: str) -> str:
     return storage_format
 
 
+def validate_locator(locator: object) -> str:
+    """Return ``locator`` if it is one safe file name, else InvalidStorageRefError."""
+    if (
+        not isinstance(locator, str)
+        or STORAGE_LOCATOR_PATTERN.fullmatch(locator) is None
+        or ".." in locator
+        or locator.startswith(".")
+    ):
+        raise InvalidStorageRefError(
+            "Storage locator must be a plain file name",
+            details={"reason": "bad_locator"},
+        )
+    return locator
+
+
+def resolve_artifact_path(router_dir: str, locator: str) -> str:
+    """Absolute path of ``locator`` inside ``router_dir``.
+
+    Follows symlinks (``os.path.realpath``), so call it in the executor. Raises
+    InvalidStorageRefError if the result leaves the router folder.
+    """
+    validate_locator(locator)
+    root = os.path.realpath(router_dir)
+    path = os.path.realpath(os.path.join(root, locator))
+    if path == root or os.path.commonpath([root, path]) != root:
+        raise InvalidStorageRefError(
+            "Storage locator resolves outside the router folder",
+            details={"reason": "path_escape"},
+        )
+    return path
+
+
+def _freeze(value: Any) -> Any:
+    """Deep read-only copy: mappings -> MappingProxyType, lists -> tuples."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({k: _freeze(v) for k, v in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze(v) for v in value)
+    if isinstance(value, set):
+        return frozenset(value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    """Plain JSON-safe copy of a frozen structure (dicts and lists)."""
+    if isinstance(value, Mapping):
+        return {k: _thaw(v) for k, v in value.items()}
+    if isinstance(value, tuple | list):
+        return [_thaw(v) for v in value]
+    return value
+
+
+def _set(obj: object, name: str, value: Any) -> None:
+    """Set a field on a frozen dataclass during __post_init__."""
+    object.__setattr__(obj, name, value)
+
+
+def _coerce(obj: object, name: str, enum_cls: type[Enum], *, optional: bool = False):
+    """Coerce ``obj.name`` to ``enum_cls``; ValueError for an invalid value."""
+    value = getattr(obj, name)
+    if value is None and optional:
+        return
+    _set(obj, name, enum_cls(value))
+
+
 def _iso(value: datetime | None) -> str | None:
     """ISO 8601 string of an aware datetime, or None."""
     return None if value is None else value.isoformat()
 
 
 def _require_aware(value: datetime | None, name: str) -> None:
-    """Raise ValueError unless ``value`` is None or an aware datetime."""
+    """Raise unless ``value`` is None or an aware datetime."""
     if value is None:
         return
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if not isinstance(value, datetime):
+        raise TypeError(f"{name} must be a datetime")
+    if value.tzinfo is None:
         raise ValueError(f"{name} must be an aware datetime")
 
 
 def _parse_dt(value: Any, name: str) -> datetime | None:
-    """Parse an ISO 8601 string (or datetime); naive values are taken as UTC."""
+    """Parse an aware ISO 8601 string; naive values and other types fail."""
     if value is None:
         return None
-    if isinstance(value, datetime):
-        parsed = value
-    elif isinstance(value, str):
-        parsed = datetime.fromisoformat(value)
-    else:
-        raise TypeError(f"{name} is not a timestamp")
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    if not isinstance(value, str):
+        raise TypeError(f"{name} is not an ISO 8601 string")
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError(f"{name} has no time zone")
+    return parsed
 
 
 def _opt_str(data: Mapping[str, Any], key: str) -> str | None:
-    """``data[key]`` if it is a string, else None."""
+    """``data[key]`` if it is a string or absent/None; TypeError otherwise."""
     value = data.get(key)
-    return value if isinstance(value, str) else None
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"{key} must be a string")
+    return value
+
+
+def _opt_bool(data: Mapping[str, Any], key: str, default: bool) -> bool:
+    """``data[key]`` if it is a bool, ``default`` if absent; TypeError otherwise."""
+    value = data.get(key, default)
+    if not isinstance(value, bool):
+        raise TypeError(f"{key} must be a bool")
+    return value
+
+
+def _list_of_str(data: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    """``data[key]`` as a tuple of strings; empty if absent."""
+    value = data.get(key) or []
+    if not isinstance(value, list | tuple) or not all(
+        isinstance(v, str) for v in value
+    ):
+        raise TypeError(f"{key} must be a list of strings")
+    return tuple(value)
 
 
 def _opt_hash(data: Mapping[str, Any], key: str) -> str | None:
@@ -282,6 +407,41 @@ def _opt_hash(data: Mapping[str, Any], key: str) -> str | None:
     if not is_sha256(value):
         raise ValueError(f"{key} must be 64 lower-case hex characters")
     return value
+
+
+def _check_note(note: str | None) -> None:
+    """Raise for a non-string or too long note."""
+    if note is None:
+        return
+    if not isinstance(note, str):
+        raise TypeError("note must be a string")
+    if len(note) > NOTE_MAX_LENGTH:
+        raise ValueError(f"note must be at most {NOTE_MAX_LENGTH} characters")
+
+
+def _check_warnings(warnings: Iterable[str]) -> tuple[str, ...]:
+    """Validated tuple of warning codes (WARNING_CODE_PATTERN, MAX_WARNINGS)."""
+    if isinstance(warnings, str):
+        raise TypeError("warnings must be a sequence of codes, not a string")
+    codes = tuple(warnings)
+    if len(codes) > MAX_WARNINGS:
+        raise ValueError(f"at most {MAX_WARNINGS} warnings")
+    for code in codes:
+        if not isinstance(code, str) or WARNING_CODE_PATTERN.fullmatch(code) is None:
+            raise ValueError("warnings must be machine codes like 'uci_missing:sqm'")
+    return codes
+
+
+def installation_key_id(key: bytes) -> str:
+    """Public, non-secret id of an installation key (16 hex).
+
+    Stamped on versions so the core can tell digests made with an older key
+    (after an ``installation_key_reset``) from comparable ones.
+    """
+    if not isinstance(key, bytes) or len(key) < 16:
+        raise ValueError("installation key must be at least 16 bytes")
+    digest = hmac.new(key, b"openwrt_router.installation_key_id", hashlib.sha256)
+    return digest.hexdigest()[:INSTALLATION_KEY_ID_LENGTH]
 
 
 # ---------------------------------------------------------------------------
@@ -297,13 +457,34 @@ class RouterRole(StrEnum):
     UNKNOWN = "unknown"
 
 
-class IdentityStatus(StrEnum):
-    """How sure the core is that a record still describes the same hardware."""
+class IdentityFlag(StrEnum):
+    """Doubts about a router record; several can be set at once."""
 
     UNVERIFIED = "unverified"  # no data seen yet (e.g. entry in setup_retry)
-    CONFIRMED = "confirmed"
     CHANGED = "changed"  # board/model changed or no MAC overlap: swap suspected
     DUPLICATE_SUSPECTED = "duplicate_suspected"  # another entry shares MACs
+
+
+class IdentityStatus(StrEnum):
+    """Primary identity status, derived from the flags (see primary_status)."""
+
+    UNVERIFIED = "unverified"
+    CONFIRMED = "confirmed"
+    CHANGED = "changed"
+    DUPLICATE_SUSPECTED = "duplicate_suspected"
+
+
+def primary_identity_status(flags: Iterable[IdentityFlag]) -> IdentityStatus:
+    """CHANGED outranks DUPLICATE_SUSPECTED outranks UNVERIFIED; none = CONFIRMED."""
+    present = set(flags)
+    for flag in (
+        IdentityFlag.CHANGED,
+        IdentityFlag.DUPLICATE_SUSPECTED,
+        IdentityFlag.UNVERIFIED,
+    ):
+        if flag in present:
+            return IdentityStatus(flag.value)
+    return IdentityStatus.CONFIRMED
 
 
 class RecordState(StrEnum):
@@ -438,8 +619,8 @@ class GuardedAction(StrEnum):
     """Actions known to the guard in v1.
 
     Later modules register further actions as ``<module>.<action>`` (e.g.
-    ``router_settings.change``, ``service.restart``) with
-    ``ActionGuardProtocol.register_action``; APIs take actions as ``str``.
+    ``router_settings.change``) with ``ActionGuardProtocol.register_action``;
+    APIs take actions as ``str``.
     """
 
     BACKUP = "backup"
@@ -447,14 +628,16 @@ class GuardedAction(StrEnum):
     DRIFT_ACK = "drift_ack"
     EXPORT = "export"
     DELETE = "delete"
-    PRUNE = "prune"  # retention; system/module only, never protected versions
+    PRUNE = "prune"  # only the core's own retention run (system actor)
     RESTORE = "restore"
     ADOPT = "adopt"
     ACL_DEPLOY = "acl_deploy"
+    INSTALLATION_KEY_RESET = "installation_key_reset"
 
 
 ACTION_CLASSES: Final[Mapping[str, ActionClass]] = MappingProxyType(
     {
+        GuardedAction.INSTALLATION_KEY_RESET: ActionClass.CRITICAL,
         GuardedAction.BACKUP: ActionClass.MUTATING,
         GuardedAction.PROTECT: ActionClass.MUTATING,
         GuardedAction.DRIFT_ACK: ActionClass.MUTATING,
@@ -466,16 +649,18 @@ ACTION_CLASSES: Final[Mapping[str, ActionClass]] = MappingProxyType(
         GuardedAction.ACL_DEPLOY: ActionClass.CRITICAL,
     }
 )
-# Only an admin USER may perform (and approve) these.
+# Only a verified admin USER may perform these.
 ADMIN_USER_ONLY_ACTIONS: Final = frozenset(
     {
         GuardedAction.PROTECT,
         GuardedAction.DRIFT_ACK,
         GuardedAction.EXPORT,
         GuardedAction.ADOPT,
+        GuardedAction.ACL_DEPLOY,
+        GuardedAction.INSTALLATION_KEY_RESET,
     }
 )
-# Only the integration itself (system) or a module may perform these.
+# Only the core itself (ActorKind.SYSTEM) may perform these.
 SYSTEM_ONLY_ACTIONS: Final = frozenset({GuardedAction.PRUNE})
 
 
@@ -498,7 +683,7 @@ class ApprovalStatus(StrEnum):
 
 
 class BackupType(StrEnum):
-    """Kind of backup artifact set."""
+    """Kind of backup artifact set (persisted)."""
 
     FULL_ARCHIVE = "full_archive"  # sysupgrade -b style archive (+ uci, inventory)
     UCI_SNAPSHOT = "uci_snapshot"
@@ -506,7 +691,7 @@ class BackupType(StrEnum):
 
 
 class BackupReason(StrEnum):
-    """Why a version was taken (config-manager calls this ``kind``)."""
+    """Why a version was taken (persisted; config-manager calls it ``kind``)."""
 
     MANUAL = "manual"
     SCHEDULED = "scheduled"
@@ -520,16 +705,20 @@ class BackupReason(StrEnum):
     IMPORT = "import"
 
 
+# Only these reasons may end in a dedup hit; all others always create.
+DEDUP_REASONS: Final = frozenset({BackupReason.SCHEDULED, BackupReason.DRIFT})
+
+
 class VersionStatus(StrEnum):
-    """Collection result of a version."""
+    """Collection result of a version (persisted)."""
 
     OK = "ok"
     PARTIAL = "partial"  # some artifacts missing (error_class says why)
-    FAILED = "failed"  # nothing usable; kept for history and dedup of errors
+    FAILED = "failed"  # nothing usable; kept for history
 
 
 class ArtifactKind(StrEnum):
-    """Artifacts of a version; artifact maps are keyed by ``str``."""
+    """Artifacts of a version (persisted as artifact map keys)."""
 
     ARCHIVE = "archive"
     UCI = "uci"
@@ -537,7 +726,7 @@ class ArtifactKind(StrEnum):
 
 
 class ValidationStatus(StrEnum):
-    """Integrity state of a stored version."""
+    """Integrity state of a stored version (persisted)."""
 
     UNVERIFIED = "unverified"
     VALID = "valid"
@@ -546,8 +735,13 @@ class ValidationStatus(StrEnum):
     MISSING = "missing"  # file gone (sweep marks index entries without file)
 
 
+USABLE_VALIDATION: Final = frozenset(
+    {ValidationStatus.UNVERIFIED, ValidationStatus.VALID}
+)
+
+
 class DriftAckState(StrEnum):
-    """User decision about one drift."""
+    """User decision about one drift (persisted)."""
 
     ACKNOWLEDGED = "acknowledged"  # seen, baseline stays
     KNOWN = "known"  # this drift_id is the new baseline
@@ -567,6 +761,41 @@ class ChangeKind(StrEnum):
     REMOVED = "removed"
     MODIFIED = "modified"  # config-manager: "changed"
     REORDERED = "reordered"
+    # Secret digests made with different installation keys: not a drift.
+    NOT_COMPARABLE = "not_comparable"
+
+
+class BaselineRule(StrEnum):
+    """Which rule picked a drift baseline (highest priority first)."""
+
+    EXPLICIT = "explicit"  # caller named baseline_backup_id
+    KNOWN_ACK = "known_ack"  # newest DriftAck with state KNOWN
+    NEWEST_VALID = "newest_valid"  # newest usable version
+
+
+class InstallationKeyState(StrEnum):
+    """State of the installation key (never regenerated silently)."""
+
+    OK = "ok"
+    LOST = "lost"  # key store missing/unreadable while versions or acks exist
+    UNINITIALISED = "uninitialised"  # first start: nothing exists yet
+
+
+def installation_key_state(
+    *, key_readable: bool, has_versions: bool, has_acks: bool
+) -> InstallationKeyState:
+    """Decide the key state; only UNINITIALISED may create a new key.
+
+    A missing or unreadable key store with existing versions or acks is
+    LOST: the core raises InstallationKeyLostError, emits
+    ``core.installation_key_lost`` once and opens a repair issue; a new key
+    then only comes from the critical action ``installation_key_reset``.
+    """
+    if key_readable:
+        return InstallationKeyState.OK
+    if has_versions or has_acks:
+        return InstallationKeyState.LOST
+    return InstallationKeyState.UNINITIALISED
 
 
 class RestoreStatus(StrEnum):
@@ -577,6 +806,14 @@ class RestoreStatus(StrEnum):
     FAILED = "failed"
 
 
+class KeepReason(StrEnum):
+    """Why retention kept a version."""
+
+    PROTECTED = "protected"
+    NEWEST_VALID = "newest_valid"
+    WITHIN_POLICY = "within_policy"
+
+
 class EventResult(StrEnum):
     """Result field of a CoreEvent."""
 
@@ -585,6 +822,13 @@ class EventResult(StrEnum):
     DENIED = "denied"
     PENDING = "pending"
     INFO = "info"
+
+
+class AuditRing(StrEnum):
+    """Which audit ring an event is kept in."""
+
+    GENERAL = "general"  # AUDIT_MAX_EVENTS
+    SECURITY = "security"  # SECURITY_AUDIT_MAX_EVENTS
 
 
 class CoreEventType(StrEnum):
@@ -607,8 +851,12 @@ class CoreEventType(StrEnum):
     BACKUP_PROTECTION_CHANGED = "configuration.backup_protection_changed"
     BACKUP_EXPORTED = "configuration.backup_exported"
     BACKUP_DELETED = "configuration.backup_deleted"
+    RETENTION_APPLIED = "configuration.retention_applied"
     DRIFT_DETECTED = "configuration.drift_detected"
     DRIFT_ACKNOWLEDGED = "configuration.drift_acknowledged"
+    CHANGE_CRITICAL = "configuration.change_critical"
+    CHANGE_UNKNOWN = "configuration.change_unknown"
+    INTEGRITY_FAILED = "configuration.integrity_failed"
     RESTORE_CHECKED = "configuration.restore_checked"  # dry run / compatibility
     RESTORE_REQUESTED = "configuration.restore_requested"
     RESTORE_APPROVED = "configuration.restore_approved"
@@ -617,20 +865,87 @@ class CoreEventType(StrEnum):
     RESTORE_FAILED = "configuration.restore_failed"
     STORAGE_SWEPT = "configuration.storage_swept"
     AUTHORIZATION_DENIED = "security.authorization_denied"
+    AUTHORIZATION_CONSUMED = "security.authorization_consumed"
     APPROVAL_REQUESTED = "security.approval_requested"
     APPROVAL_APPROVED = "security.approval_approved"
     APPROVAL_REJECTED = "security.approval_rejected"
     APPROVAL_EXPIRED = "security.approval_expired"
+    INSTALLATION_KEY_LOST = "core.installation_key_lost"
+    INSTALLATION_KEY_RESET = "core.installation_key_reset"
+
+
+# Namespaces of core event types. Only the core emits these (also the ones
+# derived from provider results); modules emit below a registered prefix.
+CORE_EVENT_NAMESPACES: Final = ("router.", "configuration.", "security.", "core.")
+
+
+def is_core_event_type(event_type: str) -> bool:
+    """True for a type in a core namespace (not emittable by modules)."""
+    return str(event_type).startswith(CORE_EVENT_NAMESPACES)
+
+
+# Kept in the security ring (besides every "security.*" type).
+SECURITY_EVENT_TYPES: Final = frozenset(
+    {
+        CoreEventType.INSTALLATION_KEY_LOST,
+        CoreEventType.INSTALLATION_KEY_RESET,
+        CoreEventType.BACKUP_EXPORTED,
+        CoreEventType.BACKUP_DELETED,
+        CoreEventType.ROUTER_ADOPTED,
+        CoreEventType.RESTORE_REQUESTED,
+        CoreEventType.RESTORE_APPROVED,
+        CoreEventType.RESTORE_REJECTED,
+        CoreEventType.RESTORE_COMPLETED,
+        CoreEventType.RESTORE_FAILED,
+    }
+)
+# Always written as a new audit entry; their dedup_key is ignored.
+AUDIT_MANDATORY_EVENT_TYPES: Final = frozenset(
+    {
+        CoreEventType.BACKUP_PROTECTION_CHANGED,
+        CoreEventType.BACKUP_EXPORTED,
+        CoreEventType.BACKUP_DELETED,
+        CoreEventType.RETENTION_APPLIED,
+        CoreEventType.DRIFT_ACKNOWLEDGED,
+        CoreEventType.RESTORE_CHECKED,
+        CoreEventType.RESTORE_REQUESTED,
+        CoreEventType.RESTORE_APPROVED,
+        CoreEventType.RESTORE_REJECTED,
+        CoreEventType.RESTORE_COMPLETED,
+        CoreEventType.RESTORE_FAILED,
+        CoreEventType.ROUTER_ADOPTED,
+        CoreEventType.AUTHORIZATION_DENIED,
+        CoreEventType.AUTHORIZATION_CONSUMED,
+        CoreEventType.APPROVAL_REQUESTED,
+        CoreEventType.APPROVAL_APPROVED,
+        CoreEventType.APPROVAL_REJECTED,
+        CoreEventType.APPROVAL_EXPIRED,
+        CoreEventType.INSTALLATION_KEY_LOST,
+        CoreEventType.INSTALLATION_KEY_RESET,
+    }
+)
+
+
+def audit_ring_for(event_type: str) -> AuditRing:
+    """SECURITY for critical actions, denials, approvals, exports, adoption."""
+    if str(event_type).startswith("security.") or event_type in SECURITY_EVENT_TYPES:
+        return AuditRing.SECURITY
+    return AuditRing.GENERAL
 
 
 # ---------------------------------------------------------------------------
-# Actor
+# Actor and verification
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class Actor:
-    """Who performs an operation; only a USER can be admin."""
+    """Who performs an operation (a record, not a credential).
+
+    ``is_admin`` is what the core found when it verified the actor; a value a
+    caller passes in is never trusted. The guard only accepts a
+    :class:`VerifiedActor`, built by :func:`async_verify_actor`.
+    """
 
     kind: ActorKind
     user_id: str | None = None
@@ -641,19 +956,29 @@ class Actor:
 
     def __post_init__(self) -> None:
         """Coerce the kind and drop admin rights of non-user actors."""
-        object.__setattr__(self, "kind", ActorKind(self.kind))
+        _coerce(self, "kind", ActorKind)
         if self.kind is not ActorKind.USER and self.is_admin:
-            object.__setattr__(self, "is_admin", False)
+            _set(self, "is_admin", False)
 
     @classmethod
     def system(cls, module: str | None = None) -> Actor:
-        """The integration itself (startup, retention, migrations)."""
+        """The core itself (startup, retention, migrations)."""
         return cls(kind=ActorKind.SYSTEM, module=module)
 
     @classmethod
     def for_module(cls, module: str, *, context_id: str | None = None) -> Actor:
         """Another enterprise module acting on its own."""
         return cls(kind=ActorKind.MODULE, module=module, context_id=context_id)
+
+    def same_principal(self, other: Actor) -> bool:
+        """Same user (by user_id), same module, or both system."""
+        if self.kind is not other.kind:
+            return False
+        if self.kind is ActorKind.USER:
+            return self.user_id is not None and self.user_id == other.user_id
+        if self.kind is ActorKind.MODULE:
+            return self.module is not None and self.module == other.module
+        return self.kind is ActorKind.SYSTEM
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -669,41 +994,48 @@ class Actor:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Actor:
         """Inverse of :meth:`to_dict`; ValueError/TypeError/KeyError on bad data."""
+        if not isinstance(data, Mapping):
+            raise TypeError("actor must be a mapping")
         return cls(
             kind=ActorKind(data["kind"]),
             user_id=_opt_str(data, "user_id"),
             context_id=_opt_str(data, "context_id"),
             parent_context_id=_opt_str(data, "parent_context_id"),
             module=_opt_str(data, "module"),
-            is_admin=data.get("is_admin") is True,
+            is_admin=_opt_bool(data, "is_admin", False),
         )
+
+
+def _user_is_admin(user: Any) -> bool:
+    """Exists, active, admin and not system-generated."""
+    return bool(
+        user is not None
+        and getattr(user, "is_active", False) is True
+        and getattr(user, "is_admin", False) is True
+        and getattr(user, "system_generated", True) is False
+    )
 
 
 async def async_actor_from_context(
     hass: HomeAssistant, context: Context | None, module: str | None = None
 ) -> Actor:
-    """Build an Actor from an HA ``Context``.
+    """Build an (unverified) Actor from an HA ``Context``.
 
-    Order: a ``user_id`` makes a USER (admin only if the user exists, is
-    active and is admin); else a given ``module`` makes a MODULE; else a
-    ``parent_id`` makes an AUTOMATION; else SYSTEM.
+    Order: a ``user_id`` makes a USER (``is_admin`` from hass.auth); else a
+    given ``module`` makes a MODULE; else a ``parent_id`` makes an
+    AUTOMATION; else SYSTEM. Use :func:`async_resolve_actor` for the guard.
     """
     context_id = context.id if context is not None else None
     parent_id = context.parent_id if context is not None else None
     if context is not None and context.user_id:
         user = await hass.auth.async_get_user(context.user_id)
-        is_admin = bool(
-            user is not None
-            and getattr(user, "is_active", True)
-            and getattr(user, "is_admin", False)
-        )
         return Actor(
             kind=ActorKind.USER,
             user_id=context.user_id,
             context_id=context_id,
             parent_context_id=parent_id,
             module=module,
-            is_admin=is_admin,
+            is_admin=_user_is_admin(user),
         )
     if module:
         kind = ActorKind.MODULE
@@ -714,6 +1046,140 @@ async def async_actor_from_context(
     return Actor(
         kind=kind, context_id=context_id, parent_context_id=parent_id, module=module
     )
+
+
+# Module-private sentinel: only async_verify_actor builds a VerifiedActor.
+_VERIFY_SENTINEL: Final = object()
+
+
+class VerifiedActor:
+    """An Actor the core has just re-checked against ``hass.auth``.
+
+    For a USER, ``is_admin`` means: the user exists, is active, is admin and
+    is not system-generated, at ``verified_at``. A caller-supplied
+    ``Actor.is_admin`` is ignored. Accepted by the guard for
+    :data:`ACTOR_VERIFICATION_TTL`. Threat model: in-process modules are
+    trusted code; this defends against users, automations and module bugs,
+    not against a module that deliberately imports private helpers.
+    """
+
+    __slots__ = ("_actor", "_verification_id", "_verified_at")
+
+    def __init__(
+        self, *, actor: Actor, verified_at: datetime, _sentinel: object = None
+    ) -> None:
+        """Refuse construction outside async_verify_actor."""
+        if _sentinel is not _VERIFY_SENTINEL:
+            raise TypeError("VerifiedActor can only be built by async_verify_actor")
+        _require_aware(verified_at, "verified_at")
+        self._actor = actor
+        self._verified_at = verified_at
+        self._verification_id = new_id(VERIFICATION_ID_PREFIX)
+
+    @property
+    def actor(self) -> Actor:
+        """The verified actor record (``is_admin`` as found by the core)."""
+        return self._actor
+
+    @property
+    def is_admin(self) -> bool:
+        """True only for a verified admin user."""
+        return self._actor.kind is ActorKind.USER and self._actor.is_admin
+
+    @property
+    def verified_at(self) -> datetime:
+        """When hass.auth was checked."""
+        return self._verified_at
+
+    @property
+    def verification_id(self) -> str:
+        """``vac_<32 hex>``, for audit."""
+        return self._verification_id
+
+    def is_fresh(self, now: datetime | None = None) -> bool:
+        """True within ACTOR_VERIFICATION_TTL of verification."""
+        return (now or utcnow()) - self._verified_at <= ACTOR_VERIFICATION_TTL
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form for audit."""
+        return {
+            **self._actor.to_dict(),
+            "verified_at": _iso(self._verified_at),
+            "verification_id": self._verification_id,
+        }
+
+    def __repr__(self) -> str:
+        """Short representation."""
+        return f"VerifiedActor({self._actor.kind}, admin={self.is_admin})"
+
+
+async def async_verify_actor(
+    hass: HomeAssistant, actor: Actor, *, now: datetime | None = None
+) -> VerifiedActor:
+    """Re-check ``actor`` against hass.auth and return a VerifiedActor.
+
+    A USER whose user does not exist or is inactive raises
+    AuthorizationError (reason ``unknown_user``); ``is_admin`` is recomputed.
+    Module, automation and system actors pass through without admin rights.
+    """
+    verified = replace(actor, is_admin=False)
+    if actor.kind is ActorKind.USER:
+        user = await hass.auth.async_get_user(actor.user_id) if actor.user_id else None
+        if user is None or getattr(user, "is_active", False) is not True:
+            raise AuthorizationError(
+                "User is unknown or inactive", details={"reason": "unknown_user"}
+            )
+        verified = replace(actor, is_admin=_user_is_admin(user))
+    return VerifiedActor(
+        actor=verified, verified_at=now or utcnow(), _sentinel=_VERIFY_SENTINEL
+    )
+
+
+async def async_resolve_actor(
+    hass: HomeAssistant, context: Context | None, module: str | None = None
+) -> VerifiedActor:
+    """async_actor_from_context + async_verify_actor in one step."""
+    return await async_verify_actor(
+        hass, await async_actor_from_context(hass, context, module)
+    )
+
+
+def policy_denial_reason(
+    action: str,
+    actor: object,
+    *,
+    now: datetime | None = None,
+    action_classes: Mapping[str, ActionClass] = ACTION_CLASSES,
+    admin_user_only: frozenset[str] = ADMIN_USER_ONLY_ACTIONS,
+    system_only: frozenset[str] = SYSTEM_ONLY_ACTIONS,
+) -> str | None:
+    """Guard policy: None if ``actor`` may perform/request ``action``.
+
+    Reasons: unverified_actor, actor_verification_expired, unknown_action,
+    system_only, not_admin, automation_not_allowed. A user who is not a
+    verified admin may not perform or request any mutating or critical
+    action. Critical actions may be requested by verified admin users,
+    modules and the system only.
+    """
+    if not isinstance(actor, VerifiedActor):
+        return "unverified_actor"
+    if not actor.is_fresh(now):
+        return "actor_verification_expired"
+    action_class = action_classes.get(str(action))
+    if action_class is None:
+        return "unknown_action"
+    kind = actor.actor.kind
+    if action in system_only:
+        return None if kind is ActorKind.SYSTEM else "system_only"
+    if action in admin_user_only and not actor.is_admin:
+        return "not_admin"
+    if action_class is ActionClass.READ:
+        return None
+    if kind is ActorKind.USER and not actor.is_admin:
+        return "not_admin"
+    if action_class is ActionClass.CRITICAL and kind is ActorKind.AUTOMATION:
+        return "automation_not_allowed"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -805,7 +1271,11 @@ class HardwareFingerprint:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class RouterIdentity:
-    """Identity snapshot of one router. router_id never follows host/hostname."""
+    """Identity snapshot of one router. router_id never follows host/hostname.
+
+    ``identity_flags`` holds every current doubt (a swapped device can be
+    CHANGED and DUPLICATE_SUSPECTED at once); ``status`` is the primary one.
+    """
 
     router_id: str
     entry_id: str | None
@@ -827,14 +1297,25 @@ class RouterIdentity:
     first_seen: datetime | None = None
     last_seen: datetime | None = None
     fingerprint: HardwareFingerprint = HardwareFingerprint()
-    status: IdentityStatus = IdentityStatus.UNVERIFIED
+    identity_flags: frozenset[IdentityFlag] = frozenset({IdentityFlag.UNVERIFIED})
 
     def __post_init__(self) -> None:
-        """Validate the id and timestamps."""
+        """Validate the id, timestamps and enums."""
         if not is_valid_id(self.router_id, ROUTER_ID_PREFIX):
             raise ValueError("router_id must be rtr_<32 hex>")
         _require_aware(self.first_seen, "first_seen")
         _require_aware(self.last_seen, "last_seen")
+        _coerce(self, "role", RouterRole)
+        _set(
+            self,
+            "identity_flags",
+            frozenset(IdentityFlag(f) for f in self.identity_flags),
+        )
+
+    @property
+    def status(self) -> IdentityStatus:
+        """Primary status: changed > duplicate_suspected > unverified > confirmed."""
+        return primary_identity_status(self.identity_flags)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form (not masked: holds no secrets, but MACs/hostnames)."""
@@ -859,6 +1340,7 @@ class RouterIdentity:
             "first_seen": _iso(self.first_seen),
             "last_seen": _iso(self.last_seen),
             "fingerprint": self.fingerprint.to_dict(),
+            "identity_flags": sorted(f.value for f in self.identity_flags),
             "status": self.status.value,
         }
 
@@ -870,6 +1352,12 @@ class RouterReachability:
     state: ReachabilityState = ReachabilityState.UNKNOWN
     last_success: datetime | None = None
     last_attempt: datetime | None = None
+
+    def __post_init__(self) -> None:
+        """Coerce and validate."""
+        _coerce(self, "state", ReachabilityState)
+        _require_aware(self.last_success, "last_success")
+        _require_aware(self.last_attempt, "last_attempt")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -888,6 +1376,10 @@ class ConnectionInfo:
     port: int | None = None
     protocol: str | None = None  # "http" | "https"
     transport: Transport = Transport.UNKNOWN
+
+    def __post_init__(self) -> None:
+        """Coerce."""
+        _coerce(self, "transport", Transport)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -932,7 +1424,7 @@ class DiagnosticSource:
 
     name: str
     available: bool
-    detail: str | None = None
+    detail: str | None = None  # free text: never configuration values
     updated_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -940,7 +1432,7 @@ class DiagnosticSource:
         return {
             "name": self.name,
             "available": self.available,
-            "detail": self.detail,
+            "detail": scrub_text(self.detail),
             "updated_at": _iso(self.updated_at),
         }
 
@@ -954,7 +1446,7 @@ class CapabilityStatus:
     ``source`` names what it was derived from, e.g. ``features.has_iwinfo``,
     ``api.uses_ssh_fallback`` or ``probe:<provider_id>``. ``detail`` carries
     per-item results, e.g. ``{"wireless": True, "firewall": False}`` for
-    ``config.uci_read``.
+    ``config.uci_read`` (stored read-only).
     """
 
     capability: str
@@ -962,9 +1454,16 @@ class CapabilityStatus:
     reason: str
     source: str
     detected_at: datetime
-    reason_text: str | None = None
+    reason_text: str | None = None  # free text: never configuration values
     required_permissions: tuple[str, ...] = ()
     detail: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Coerce, validate and freeze."""
+        _coerce(self, "state", CapabilityState)
+        _require_aware(self.detected_at, "detected_at")
+        _set(self, "required_permissions", tuple(self.required_permissions))
+        _set(self, "detail", _freeze(self.detail))
 
     @property
     def available(self) -> bool:
@@ -977,17 +1476,21 @@ class CapabilityStatus:
             "capability": str(self.capability),
             "state": self.state.value,
             "reason": str(self.reason),
-            "reason_text": self.reason_text,
+            "reason_text": scrub_text(self.reason_text),
             "source": self.source,
             "required_permissions": list(self.required_permissions),
             "detected_at": _iso(self.detected_at),
-            "detail": mask_secrets(dict(self.detail)),
+            "detail": mask_secrets(_thaw(self.detail)),
         }
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class RouterRecord:
-    """Registry entry of one router (active or orphaned)."""
+    """Registry entry of one router (active or orphaned).
+
+    The registry hands out these immutable records; ``capabilities`` is a
+    read-only mapping, so callers cannot change the registry's state.
+    """
 
     identity: RouterIdentity
     state: RecordState = RecordState.ACTIVE
@@ -999,6 +1502,16 @@ class RouterRecord:
     orphaned_at: datetime | None = None
     adopted_at: datetime | None = None
     previous_entry_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Coerce and freeze."""
+        _coerce(self, "state", RecordState)
+        _set(
+            self,
+            "capabilities",
+            MappingProxyType({str(k): v for k, v in self.capabilities.items()}),
+        )
+        _set(self, "previous_entry_ids", tuple(self.previous_entry_ids))
 
     @property
     def router_id(self) -> str:
@@ -1021,7 +1534,7 @@ class RouterRecord:
             "reachability": self.reachability.to_dict(),
             "firmware": self.firmware.to_dict(),
             "capabilities": {
-                str(cap): status.to_dict()
+                cap: status.to_dict()
                 for cap, status in sorted(self.capabilities.items())
             },
             "registered_at": _iso(self.registered_at),
@@ -1068,6 +1581,10 @@ class RouterConnection:
     coordinator: OpenWrtCoordinator = field(repr=False)
     transport: Transport = Transport.UNKNOWN
 
+    def __post_init__(self) -> None:
+        """Coerce."""
+        _coerce(self, "transport", Transport)
+
 
 # ---------------------------------------------------------------------------
 # Version store: storage references and artifacts
@@ -1076,17 +1593,30 @@ class RouterConnection:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class StorageRef:
-    """Where the core keeps one artifact; ``locator`` is opaque to modules.
+    """Where the core keeps one artifact. Core-internal: modules never read
+    files through it (they get a scoped ArtifactReader).
 
-    ``storage_format`` names the on-disk encoding (phase 1: ``plain-v1``,
-    private folder, mode 0600, no own encryption). Reading an unknown format
-    raises UnsupportedStorageFormatError.
+    ``locator`` is one plain file name inside the router's folder
+    (``STORAGE_LOCATOR_PATTERN``, no ``..``); anything else raises
+    InvalidStorageRefError. ``storage_format`` names the encoding (phase 1:
+    ``plain-v1``); reading an unknown format raises
+    UnsupportedStorageFormatError.
     """
 
-    locator: str  # path relative to the router's folder, e.g. "<bkp>.tar.gz"
+    locator: str
     kind: str = "file"
     storage_format: str = STORAGE_FORMAT_PLAIN_V1
     encrypted: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate the locator and field types."""
+        validate_locator(self.locator)
+        for name in ("kind", "storage_format"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        if not isinstance(self.encrypted, bool):
+            raise TypeError("encrypted must be a bool")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -1099,17 +1629,14 @@ class StorageRef:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> StorageRef:
-        """Inverse of :meth:`to_dict`."""
-        locator = data["locator"]
-        kind = data.get("kind", "file")
-        storage_format = data.get("storage_format", STORAGE_FORMAT_PLAIN_V1)
-        if not all(isinstance(v, str) and v for v in (locator, kind, storage_format)):
-            raise ValueError("storage fields must be non-empty strings")
+        """Inverse of :meth:`to_dict` (missing storage_format = plain-v1)."""
+        if not isinstance(data, Mapping):
+            raise TypeError("storage must be a mapping")
         return cls(
-            locator=locator,
-            kind=kind,
-            storage_format=storage_format,
-            encrypted=data.get("encrypted") is True,
+            locator=data["locator"],
+            kind=data.get("kind", "file"),
+            storage_format=data.get("storage_format", STORAGE_FORMAT_PLAIN_V1),
+            encrypted=_opt_bool(data, "encrypted", False),
         )
 
 
@@ -1126,12 +1653,10 @@ class ArtifactRef:
         """Validate checksum and size."""
         if not is_sha256(self.sha256):
             raise ValueError("artifact sha256 must be 64 lower-case hex characters")
-        if (
-            not isinstance(self.size_bytes, int)
-            or isinstance(self.size_bytes, bool)
-            or self.size_bytes < 0
-        ):
-            raise ValueError("artifact size_bytes must be a non-negative int")
+        if not isinstance(self.size_bytes, int) or isinstance(self.size_bytes, bool):
+            raise TypeError("artifact size_bytes must be an int")
+        if self.size_bytes < 0:
+            raise ValueError("artifact size_bytes must not be negative")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -1145,6 +1670,8 @@ class ArtifactRef:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ArtifactRef:
         """Inverse of :meth:`to_dict`."""
+        if not isinstance(data, Mapping):
+            raise TypeError("artifact must be a mapping")
         return cls(
             storage=StorageRef.from_dict(data["storage"]),
             sha256=data["sha256"],
@@ -1155,7 +1682,7 @@ class ArtifactRef:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ArtifactPayload:
-    """Bytes of one artifact handed to ``async_put_version``.
+    """Bytes of one artifact handed to the put path.
 
     The store recomputes sha256 and refuses a mismatch (checksum_mismatch).
     """
@@ -1164,14 +1691,28 @@ class ArtifactPayload:
     sha256: str
     content_type: str = "application/octet-stream"
 
+    def __post_init__(self) -> None:
+        """Validate."""
+        if not isinstance(self.data, bytes):
+            raise TypeError("data must be bytes")
+        if not is_sha256(self.sha256):
+            raise ValueError("sha256 must be 64 lower-case hex characters")
+
     @property
     def size_bytes(self) -> int:
         """Length of ``data``."""
         return len(self.data)
 
 
+def _freeze_artifacts(artifacts: Mapping[Any, Any]) -> MappingProxyType[str, Any]:
+    """Read-only artifact map with ArtifactKind keys as plain strings."""
+    if not isinstance(artifacts, Mapping):
+        raise TypeError("artifacts must be a mapping")
+    return MappingProxyType({ArtifactKind(k).value: v for k, v in artifacts.items()})
+
+
 # ---------------------------------------------------------------------------
-# Version metadata (index owned by the core, bytes stored by the core)
+# Version metadata (index and bytes owned by the core)
 # ---------------------------------------------------------------------------
 
 
@@ -1181,24 +1722,26 @@ class ValidationInfo:
 
     status: ValidationStatus = ValidationStatus.UNVERIFIED
     checked_at: datetime | None = None
-    details: str | None = None
+    details: str | None = None  # free text: never configuration values
 
     def __post_init__(self) -> None:
         """Coerce and validate."""
-        object.__setattr__(self, "status", ValidationStatus(self.status))
+        _coerce(self, "status", ValidationStatus)
         _require_aware(self.checked_at, "checked_at")
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-safe form."""
+        """JSON-safe form (details scrubbed)."""
         return {
             "status": self.status.value,
             "checked_at": _iso(self.checked_at),
-            "details": self.details,
+            "details": scrub_text(self.details),
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ValidationInfo:
         """Inverse of :meth:`to_dict`."""
+        if not isinstance(data, Mapping):
+            raise TypeError("validation must be a mapping")
         return cls(
             status=ValidationStatus(data.get("status", ValidationStatus.UNVERIFIED)),
             checked_at=_parse_dt(data.get("checked_at"), "checked_at"),
@@ -1235,6 +1778,8 @@ class CompatibilityInfo:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> CompatibilityInfo:
         """Inverse of :meth:`to_dict`."""
+        if not isinstance(data, Mapping):
+            raise TypeError("compatibility must be a mapping")
         fmt = data["format"]
         version = data.get("format_version", 1)
         if not isinstance(fmt, str) or not fmt:
@@ -1275,6 +1820,8 @@ class BackupLinks:
     def from_dict(cls, data: Mapping[str, Any] | None) -> BackupLinks:
         """Inverse of :meth:`to_dict`."""
         data = data or {}
+        if not isinstance(data, Mapping):
+            raise TypeError("links must be a mapping")
         return cls(
             incident_id=_opt_str(data, "incident_id"),
             change_id=_opt_str(data, "change_id"),
@@ -1320,18 +1867,13 @@ def migrate_backup_metadata(data: Mapping[str, Any]) -> dict[str, Any]:
     return current
 
 
-def _check_note(note: str | None) -> None:
-    """Raise ValueError for a non-string or too long note."""
-    if note is not None and (not isinstance(note, str) or len(note) > NOTE_MAX_LENGTH):
-        raise ValueError(f"note must be a string of at most {NOTE_MAX_LENGTH} chars")
-
-
 @dataclass(frozen=True, kw_only=True, slots=True)
 class BackupRecord:
     """Index entry of one version (metadata format BACKUP_METADATA_VERSION).
 
     ``sha256`` is the archive's sha256 and ``size_bytes`` the sum over all
     artifacts (both derived). A FAILED version may have no artifacts.
+    ``created_by`` is set by the store from the authorization's actor.
     """
 
     backup_id: str
@@ -1355,11 +1897,14 @@ class BackupRecord:
     links: BackupLinks = BackupLinks()
     contains_secrets: bool = True
     protected: bool = False
-    note: str | None = None
+    note: str | None = None  # user text, shown back to admins only
+    warnings: tuple[str, ...] = ()  # machine codes from VersionMeta.warnings
+    installation_key_id: str | None = None  # key the secret digests used
     metadata_version: int = BACKUP_METADATA_VERSION
 
     def __post_init__(self) -> None:
-        """Validate ids, hashes, enums, note and timestamps."""
+        """Validate ids, hashes, enums, flags, note and timestamps."""
+        _set(self, "warnings", _check_warnings(self.warnings))
         if not is_valid_id(self.backup_id, BACKUP_ID_PREFIX):
             raise ValueError("backup_id must be bkp_<32 hex>")
         if not is_valid_id(self.router_id, ROUTER_ID_PREFIX):
@@ -1372,12 +1917,17 @@ class BackupRecord:
             value = getattr(self, name)
             if value is not None and not is_sha256(value):
                 raise ValueError(f"{name} must be 64 lower-case hex characters")
+        for name in ("contains_secrets", "protected"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a bool")
+        if not isinstance(self.created_by, Actor):
+            raise TypeError("created_by must be an Actor")
         _check_note(self.note)
-        object.__setattr__(self, "backup_type", BackupType(self.backup_type))
-        object.__setattr__(self, "reason", BackupReason(self.reason))
-        object.__setattr__(self, "status", VersionStatus(self.status))
-        if self.error_class is not None:
-            object.__setattr__(self, "error_class", ErrorClass(self.error_class))
+        _coerce(self, "backup_type", BackupType)
+        _coerce(self, "reason", BackupReason)
+        _coerce(self, "status", VersionStatus)
+        _coerce(self, "error_class", ErrorClass, optional=True)
+        _set(self, "artifacts", _freeze_artifacts(self.artifacts))
         if self.metadata_version != BACKUP_METADATA_VERSION:
             raise ValueError("metadata_version must be the current version")
 
@@ -1389,13 +1939,21 @@ class BackupRecord:
     @property
     def sha256(self) -> str | None:
         """sha256 of the archive artifact, None without archive."""
-        archive = self.artifacts.get(ArtifactKind.ARCHIVE)
+        archive = self.artifacts.get(ArtifactKind.ARCHIVE.value)
         return None if archive is None else archive.sha256
 
     @property
     def size_bytes(self) -> int:
         """Total size of all artifacts."""
         return sum(a.size_bytes for a in self.artifacts.values())
+
+    @property
+    def usable(self) -> bool:
+        """Status ok and validation unverified or valid."""
+        return (
+            self.status is VersionStatus.OK
+            and self.validation.status in USABLE_VALIDATION
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form (metadata only, never the bytes)."""
@@ -1419,7 +1977,7 @@ class BackupRecord:
                 None if self.compatibility is None else self.compatibility.to_dict()
             ),
             "artifacts": {
-                str(kind): ref.to_dict() for kind, ref in sorted(self.artifacts.items())
+                kind: ref.to_dict() for kind, ref in sorted(self.artifacts.items())
             },
             "sha256": self.sha256,
             "size_bytes": self.size_bytes,
@@ -1429,19 +1987,25 @@ class BackupRecord:
             "contains_secrets": self.contains_secrets,
             "protected": self.protected,
             "note": self.note,
+            "warnings": list(self.warnings),
+            "installation_key_id": self.installation_key_id,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> BackupRecord:
-        """Parse (and migrate) index metadata; raises BackupMetadataError."""
+        """Parse (and migrate) index metadata; raises BackupMetadataError.
+
+        Bad types are rejected, never silently fixed (``protected: "yes"``,
+        ``note: 5``, naive timestamps).
+        """
         if not isinstance(data, Mapping):
             raise BackupMetadataError("Backup metadata must be a mapping")
         current = migrate_backup_metadata(data)
         try:
             return cls._from_current(current)
-        except (KeyError, TypeError, ValueError) as err:
+        except (KeyError, TypeError, ValueError, InvalidStorageRefError) as err:
             raise BackupMetadataError(
-                f"Invalid backup metadata: {type(err).__name__}: {err}"
+                f"Invalid backup metadata: {type(err).__name__}"
             ) from err
 
     @classmethod
@@ -1474,15 +2038,16 @@ class BackupRecord:
                 None if compat is None else CompatibilityInfo.from_dict(compat)
             ),
             artifacts={
-                str(kind): ArtifactRef.from_dict(ref)
-                for kind, ref in raw_artifacts.items()
+                kind: ArtifactRef.from_dict(ref) for kind, ref in raw_artifacts.items()
             },
             validation=ValidationInfo.from_dict(data.get("validation") or {}),
             links=BackupLinks.from_dict(data.get("links")),
             created_by=Actor.from_dict(data["created_by"]),
-            contains_secrets=data.get("contains_secrets", True) is not False,
-            protected=data.get("protected") is True,
+            contains_secrets=_opt_bool(data, "contains_secrets", True),
+            protected=_opt_bool(data, "protected", False),
             note=_opt_str(data, "note"),
+            warnings=_list_of_str(data, "warnings"),
+            installation_key_id=_opt_str(data, "installation_key_id"),
             metadata_version=data["metadata_version"],
         )
 
@@ -1493,11 +2058,17 @@ VersionRecord = BackupRecord
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class VersionMeta:
-    """Metadata handed to ``async_put_version`` together with the artifacts."""
+    """Metadata handed to the put path together with the artifacts.
+
+    There is no ``created_by``: the store takes it from the authorization.
+    ``content_hash`` and ``uci_hash`` always come from the provider; the core
+    never recomputes them. ``warnings`` are machine codes (e.g.
+    ``config_missing_in_archive:firewall``, ``uci_missing:sqm``) and are
+    copied to the record.
+    """
 
     backup_type: BackupType
     reason: BackupReason
-    created_by: Actor
     status: VersionStatus = VersionStatus.OK
     error_class: ErrorClass | None = None
     fetch_method: str | None = None
@@ -1511,19 +2082,90 @@ class VersionMeta:
     note: str | None = None
     links: BackupLinks = BackupLinks()
     correlation_id: str | None = None
+    warnings: tuple[str, ...] = ()
+    installation_key_id: str | None = None
 
     def __post_init__(self) -> None:
-        """Validate hashes and the note."""
+        """Coerce enums, validate hashes and the note."""
+        _coerce(self, "backup_type", BackupType)
+        _coerce(self, "reason", BackupReason)
+        _coerce(self, "status", VersionStatus)
+        _coerce(self, "error_class", ErrorClass, optional=True)
         for name in ("content_hash", "uci_hash"):
             value = getattr(self, name)
             if value is not None and not is_sha256(value):
                 raise ValueError(f"{name} must be 64 lower-case hex characters")
         _check_note(self.note)
+        _set(self, "warnings", _check_warnings(self.warnings))
+        # ok carries no error_class; partial/failed must say what failed
+        # ("archive failed, uci ok" = backup_type partial, status partial,
+        # error_class of the archive).
+        if (self.status is VersionStatus.OK) != (self.error_class is None):
+            raise ValueError("error_class is required exactly for partial/failed")
+
+
+# Validation states that rule a version out as dedup candidate.
+_DEDUP_EXCLUDED_VALIDATION: Final = frozenset(
+    {ValidationStatus.INVALID, ValidationStatus.CORRUPT, ValidationStatus.MISSING}
+)
+
+
+def dedup_candidate(
+    records: Iterable[BackupRecord], backup_type: BackupType
+) -> BackupRecord | None:
+    """Newest version a new one of ``backup_type`` may repeat, or None.
+
+    Only versions of the SAME backup_type with status ok or partial whose
+    validation is not invalid, corrupt or missing; FAILED never takes part.
+    """
+    candidates = [
+        r
+        for r in records
+        if r.backup_type is BackupType(backup_type)
+        and r.status is not VersionStatus.FAILED
+        and r.validation.status not in _DEDUP_EXCLUDED_VALIDATION
+    ]
+    return max(candidates, key=lambda r: r.created_at, default=None)
+
+
+def should_deduplicate(
+    candidate: BackupRecord | None, meta: VersionMeta, artifact_kinds: Iterable[str]
+) -> bool:
+    """True if a new version would only repeat ``candidate`` (dedup hit).
+
+    ``candidate`` comes from :func:`dedup_candidate`. All must hold: the
+    reason is scheduled or drift; no incident link; the new status is not
+    failed and equals the candidate's (partial never dedups against ok, nor
+    the reverse); same backup_type and artifact kinds; equal ``content_hash``
+    when there is an archive, else equal ``uci_hash`` (both provider-made).
+    On a hit the core only moves ``last_seen_at`` and returns created=False;
+    manual, pre_* and incident-linked versions always create, so no note or
+    reason is lost.
+    """
+    kinds = {ArtifactKind(k).value for k in artifact_kinds}
+    if candidate is None or candidate.status is VersionStatus.FAILED:
+        return False
+    if candidate.validation.status in _DEDUP_EXCLUDED_VALIDATION:
+        return False
+    if meta.reason not in DEDUP_REASONS or meta.links.incident_id is not None:
+        return False
+    if meta.status is VersionStatus.FAILED or meta.status is not candidate.status:
+        return False
+    if (
+        candidate.backup_type is not meta.backup_type
+        or set(candidate.artifacts) != kinds
+    ):
+        return False
+    if ArtifactKind.ARCHIVE.value in kinds:
+        return meta.content_hash is not None and meta.content_hash == (
+            candidate.content_hash
+        )
+    return meta.uci_hash is not None and meta.uci_hash == candidate.uci_hash
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class PutVersionResult:
-    """Result of ``async_put_version``: dedup hit means ``created=False``."""
+    """Result of the put path: a dedup hit means ``created=False``."""
 
     record: BackupRecord
     created: bool
@@ -1531,6 +2173,144 @@ class PutVersionResult:
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
         return {"record": self.record.to_dict(), "created": self.created}
+
+
+def validate_deletion(records: Sequence[BackupRecord], *, router_id: str) -> None:
+    """Check a ``delete`` request before anything is removed.
+
+    Raises AuthorizationError (reason ``router_mismatch``) if a version
+    belongs to another router than the authorization, and
+    VersionProtectedError naming the protected ids (unprotect first).
+    """
+    foreign = sorted(r.backup_id for r in records if r.router_id != router_id)
+    if foreign:
+        raise AuthorizationError(
+            "Versions belong to another router",
+            router_id=router_id,
+            details={"reason": "router_mismatch", "version_ids": foreign},
+        )
+    protected = sorted(r.backup_id for r in records if r.protected)
+    if protected:
+        raise VersionProtectedError(
+            "Protected versions cannot be deleted; unprotect them first",
+            router_id=router_id,
+            details={"version_ids": protected},
+        )
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RetentionPolicy:
+    """Retention a module supplies; the core executes it (``prune``).
+
+    None means "no limit". Protected versions and the newest usable version
+    of each router are ALWAYS kept, whatever the policy says.
+    """
+
+    max_versions: int | None = None
+    max_age: timedelta | None = None
+    max_bytes_per_router: int | None = None
+
+    def __post_init__(self) -> None:
+        """Positive limits only."""
+        for name in ("max_versions", "max_bytes_per_router"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 1
+            ):
+                raise ValueError(f"{name} must be a positive int or None")
+        if self.max_age is not None and (
+            not isinstance(self.max_age, timedelta) or self.max_age <= timedelta(0)
+        ):
+            raise ValueError("max_age must be a positive timedelta or None")
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form."""
+        return {
+            "max_versions": self.max_versions,
+            "max_age_seconds": (
+                None if self.max_age is None else self.max_age.total_seconds()
+            ),
+            "max_bytes_per_router": self.max_bytes_per_router,
+        }
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RetentionResult:
+    """What one retention run decided for one router; nothing is silent.
+
+    Every evaluated version is either in ``deleted`` or in ``kept`` (with
+    the reason).
+    """
+
+    router_id: str
+    evaluated_at: datetime
+    deleted: tuple[str, ...] = ()
+    kept: Mapping[str, KeepReason] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Coerce and freeze."""
+        _set(self, "deleted", tuple(self.deleted))
+        _set(
+            self,
+            "kept",
+            MappingProxyType({k: KeepReason(v) for k, v in self.kept.items()}),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form."""
+        return {
+            "router_id": self.router_id,
+            "evaluated_at": _iso(self.evaluated_at),
+            "deleted": list(self.deleted),
+            "kept": {k: v.value for k, v in sorted(self.kept.items())},
+        }
+
+
+def plan_retention(
+    router_id: str,
+    records: Iterable[BackupRecord],
+    policy: RetentionPolicy,
+    *,
+    now: datetime | None = None,
+) -> RetentionResult:
+    """Decide which versions of one router the core's prune run deletes.
+
+    Protected versions and the newest usable version are always kept and
+    count against the limits first; then, newest first, every other version
+    is deleted if it is older than ``max_age``, beyond ``max_versions`` or
+    would exceed ``max_bytes_per_router``.
+    """
+    now = now or utcnow()
+    ordered = sorted(records, key=lambda r: r.created_at, reverse=True)
+    if any(r.router_id != router_id for r in ordered):
+        raise ValueError("records must all belong to router_id")
+    newest_usable = next((r for r in ordered if r.usable), None)
+    kept: dict[str, KeepReason] = {}
+    for record in ordered:
+        if record.protected:
+            kept[record.backup_id] = KeepReason.PROTECTED
+        elif record is newest_usable:
+            kept[record.backup_id] = KeepReason.NEWEST_VALID
+    size = sum(r.size_bytes for r in ordered if r.backup_id in kept)
+    deleted: list[str] = []
+    for record in ordered:
+        if record.backup_id in kept:
+            continue
+        if (
+            (policy.max_age is not None and now - record.created_at > policy.max_age)
+            or (policy.max_versions is not None and len(kept) >= policy.max_versions)
+            or (
+                policy.max_bytes_per_router is not None
+                and size + record.size_bytes > policy.max_bytes_per_router
+            )
+        ):
+            deleted.append(record.backup_id)
+            continue
+        kept[record.backup_id] = KeepReason.WITHIN_POLICY
+        size += record.size_bytes
+    return RetentionResult(
+        router_id=router_id, evaluated_at=now, deleted=tuple(deleted), kept=kept
+    )
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -1554,7 +2334,13 @@ class SweepReport:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class DriftAck:
-    """User decision about one drift (stored in the core's catalog store)."""
+    """User decision about one drift (stored in the core's catalog store).
+
+    ``KNOWN`` makes the drifted live content the new baseline: before storing
+    the ack the core takes (or dedups to) a version of the live
+    configuration with reason ``drift`` and puts its id into ``version_id``.
+    ``ACKNOWLEDGED`` keeps the baseline and has no ``version_id``.
+    """
 
     router_id: str
     drift_id: str
@@ -1562,12 +2348,20 @@ class DriftAck:
     actor: Actor
     ts: datetime
     note: str | None = None
+    version_id: str | None = None
 
     def __post_init__(self) -> None:
         """Validate."""
-        object.__setattr__(self, "state", DriftAckState(self.state))
+        _coerce(self, "state", DriftAckState)
+        if not isinstance(self.ts, datetime):
+            raise TypeError("ts must be a datetime")
         _require_aware(self.ts, "ts")
         _check_note(self.note)
+        if self.state is DriftAckState.KNOWN:
+            if not is_valid_id(self.version_id, BACKUP_ID_PREFIX):
+                raise ValueError("a known ack needs the accepted version_id")
+        elif self.version_id is not None:
+            raise ValueError("only a known ack carries a version_id")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -1578,6 +2372,7 @@ class DriftAck:
             "actor": self.actor.to_dict(),
             "ts": _iso(self.ts),
             "note": self.note,
+            "version_id": self.version_id,
         }
 
     @classmethod
@@ -1586,6 +2381,9 @@ class DriftAck:
         ts = _parse_dt(data["ts"], "ts")
         if ts is None:
             raise ValueError("ts is required")
+        for key in ("router_id", "drift_id"):
+            if not isinstance(data[key], str):
+                raise TypeError(f"{key} must be a string")
         return cls(
             router_id=data["router_id"],
             drift_id=data["drift_id"],
@@ -1593,7 +2391,87 @@ class DriftAck:
             actor=Actor.from_dict(data["actor"]),
             ts=ts,
             note=_opt_str(data, "note"),
+            version_id=_opt_str(data, "version_id"),
         )
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Baseline:
+    """The version drift is measured against, and the rule that picked it."""
+
+    router_id: str
+    version_id: str
+    rule: BaselineRule
+    drift_id: str | None = None  # the KNOWN ack's drift (rule known_ack)
+    decided_at: datetime | None = None  # ack ts or version created_at
+
+    def __post_init__(self) -> None:
+        """Coerce."""
+        _coerce(self, "rule", BaselineRule)
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form."""
+        return {
+            "router_id": self.router_id,
+            "version_id": self.version_id,
+            "rule": self.rule.value,
+            "drift_id": self.drift_id,
+            "decided_at": _iso(self.decided_at),
+        }
+
+
+def select_baseline(
+    router_id: str,
+    records: Iterable[BackupRecord],
+    acks: Iterable[DriftAck],
+    *,
+    explicit_backup_id: str | None = None,
+) -> Baseline | None:
+    """Pick the drift baseline: explicit > newest KNOWN ack > newest usable.
+
+    An explicit id must name a usable version of this router (else
+    ValueError). A KNOWN ack whose version is gone or no longer usable is
+    skipped. None if the router has no usable version at all.
+    """
+    usable = {r.backup_id: r for r in records if r.router_id == router_id and r.usable}
+    if explicit_backup_id is not None:
+        record = usable.get(explicit_backup_id)
+        if record is None:
+            raise ValueError("explicit baseline is not a usable version of router")
+        return Baseline(
+            router_id=router_id,
+            version_id=record.backup_id,
+            rule=BaselineRule.EXPLICIT,
+            decided_at=record.created_at,
+        )
+    known = sorted(
+        (
+            a
+            for a in acks
+            if a.router_id == router_id
+            and a.state is DriftAckState.KNOWN
+            and a.version_id in usable
+        ),
+        key=lambda a: a.ts,
+        reverse=True,
+    )
+    if known:
+        return Baseline(
+            router_id=router_id,
+            version_id=str(known[0].version_id),
+            rule=BaselineRule.KNOWN_ACK,
+            drift_id=known[0].drift_id,
+            decided_at=known[0].ts,
+        )
+    newest = max(usable.values(), key=lambda r: r.created_at, default=None)
+    if newest is None:
+        return None
+    return Baseline(
+        router_id=router_id,
+        version_id=newest.backup_id,
+        rule=BaselineRule.NEWEST_VALID,
+        decided_at=newest.created_at,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1613,33 +2491,52 @@ class CaptureRequest:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ConfigSnapshot:
-    """Structured live configuration: ``configs[config][section][option]``."""
+    """Live configuration as the provider captured it.
+
+    ``configs`` is OPAQUE to the core: provider-defined, JSON-safe content
+    described by ``format`` + ``format_version`` (v1:
+    SNAPSHOT_FORMAT_UCI_NORMALIZED, see the contract). It is stored deep
+    read-only. ``uci_hash`` is the provider's content hash (the one stored in
+    versions); :attr:`checksum` is only the core's binding checksum (e.g.
+    RestorePlan.live_checksum) and is NOT comparable with ``uci_hash``.
+    """
 
     router_id: str
     captured_at: datetime
-    configs: Mapping[str, Mapping[str, Any]]
+    configs: Mapping[str, Any]
     openwrt_version: str | None = None
     board_name: str | None = None
-    format: str = "uci_json"
+    format: str = SNAPSHOT_FORMAT_UCI_NORMALIZED
     format_version: int = 1
     contains_secrets: bool = True
+    uci_hash: str | None = None
+    installation_key_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Freeze the configuration."""
+        _require_aware(self.captured_at, "captured_at")
+        if self.uci_hash is not None and not is_sha256(self.uci_hash):
+            raise ValueError("uci_hash must be 64 lower-case hex characters")
+        _set(self, "configs", _freeze(self.configs))
 
     @property
     def checksum(self) -> str:
-        """sha256 of the canonical (unmasked) configuration content."""
-        return canonical_checksum(self.configs)
+        """Core binding checksum of the unmasked content (not uci_hash)."""
+        return canonical_checksum(_thaw(self.configs))
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form with secrets masked."""
         return {
             "router_id": self.router_id,
             "captured_at": _iso(self.captured_at),
-            "configs": mask_secrets(self.configs),
+            "configs": mask_secrets(_thaw(self.configs)),
             "openwrt_version": self.openwrt_version,
             "board_name": self.board_name,
             "format": self.format,
             "format_version": self.format_version,
             "contains_secrets": self.contains_secrets,
+            "uci_hash": self.uci_hash,
+            "installation_key_id": self.installation_key_id,
             "checksum": self.checksum,
         }
 
@@ -1657,14 +2554,26 @@ class CollectRequest:
     links: BackupLinks = BackupLinks()
     fetch_method: str | None = None  # preferred path; None = provider's chain
 
+    def __post_init__(self) -> None:
+        """Coerce."""
+        _coerce(self, "backup_type", BackupType)
+        _coerce(self, "reason", BackupReason)
+        _check_note(self.note)
+
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class CollectedVersion:
-    """What a provider fetched: artifact bytes plus metadata. Not stored yet."""
+    """What a provider fetched: artifact bytes plus metadata. Not stored yet.
+
+    Warnings travel in ``meta.warnings`` and end up in the record.
+    """
 
     artifacts: Mapping[str, ArtifactPayload]
     meta: VersionMeta
-    warnings: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Freeze."""
+        _set(self, "artifacts", _freeze_artifacts(self.artifacts))
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -1710,8 +2619,35 @@ class ConfigRef:
 
 # What a provider compares: a stored version or a live snapshot.
 ConfigSource = BackupRecord | ConfigSnapshot
-# Reads stored artifact bytes (the core's VersionStore.async_read_artifact).
-ArtifactReader = Callable[[StorageRef], Awaitable[bytes]]
+# Scoped reader the core hands to a provider per call: (version_id, kind) ->
+# bytes. It only serves the versions of that call and checks sha256 against
+# the index (BackupIntegrityError on mismatch).
+ArtifactReader = Callable[[str, str], Awaitable[bytes]]
+
+
+@dataclass(frozen=True, kw_only=True, slots=True, eq=False)
+class ProviderContext:
+    """What the core hands a provider with every call.
+
+    ``read`` is scoped to the versions of this call; ``registry`` is the
+    read side of the router registry. The installation key is fetched per
+    use and never kept: :meth:`async_get_installation_key` raises
+    InstallationKeyLostError while the key is lost.
+    """
+
+    registry: RouterRegistryProtocol = field(repr=False)
+    read: ArtifactReader = field(repr=False)
+    installation_key: Callable[[], Awaitable[bytes]] = field(repr=False)
+    installation_key_state: InstallationKeyState = InstallationKeyState.OK
+    correlation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Coerce."""
+        _coerce(self, "installation_key_state", InstallationKeyState)
+
+    async def async_get_installation_key(self) -> bytes:
+        """The 32-byte installation key for HMAC secret digests."""
+        return await self.installation_key()
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -1732,10 +2668,18 @@ class ConfigChange:
     area: str | None = None
     risk: str | None = None
 
+    def __post_init__(self) -> None:
+        """Coerce and freeze values."""
+        _coerce(self, "kind", ChangeKind)
+        _set(self, "before", _freeze(self.before))
+        _set(self, "after", _freeze(self.after))
+
     @property
     def secret(self) -> bool:
-        """True if the option names a secret (values are masked)."""
-        return self.option is not None and is_secret_key(self.option)
+        """True if the option holds a secret here (values are masked)."""
+        return self.option is not None and is_secret_option(
+            self.config, self.section_type or "", self.option
+        )
 
     def _raw(self) -> dict[str, Any]:
         """Unmasked content, only for checksums."""
@@ -1745,8 +2689,8 @@ class ConfigChange:
             "section": self.section,
             "option": self.option,
             "section_type": self.section_type,
-            "before": self.before,
-            "after": self.after,
+            "before": _thaw(self.before),
+            "after": _thaw(self.after),
             "area": self.area,
             "risk": self.risk,
         }
@@ -1759,8 +2703,8 @@ class ConfigChange:
             data["before"] = mask_value(self.before)
             data["after"] = mask_value(self.after)
         else:
-            data["before"] = mask_secrets(self.before)
-            data["after"] = mask_secrets(self.after)
+            data["before"] = mask_secrets(data["before"])
+            data["after"] = mask_secrets(data["after"])
         data["secret"] = self.secret
         return data
 
@@ -1775,10 +2719,19 @@ class ConfigDiff:
     changes: tuple[ConfigChange, ...] = ()
     truncated: bool = False
 
+    def __post_init__(self) -> None:
+        """Freeze."""
+        _set(self, "changes", tuple(self.changes))
+
     @property
     def has_changes(self) -> bool:
         """True if anything differs."""
         return bool(self.changes)
+
+    @property
+    def comparable_changes(self) -> tuple[ConfigChange, ...]:
+        """Changes without NOT_COMPARABLE ones (these are no drift)."""
+        return tuple(c for c in self.changes if c.kind is not ChangeKind.NOT_COMPARABLE)
 
     def _raw(self) -> dict[str, Any]:
         """Unmasked content, only for checksums."""
@@ -1806,7 +2759,21 @@ class ConfigDiff:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class DriftReport:
-    """Live configuration compared with a baseline version."""
+    """Live configuration compared with a baseline version.
+
+    The provider only returns this report; the CORE emits
+    ``configuration.drift_detected`` (``drifted``),
+    ``configuration.change_critical`` (``critical_count > 0``) and
+    ``configuration.change_unknown`` (``unknown_count > 0``) from it, with
+    ``drift_id`` as dedup key. ``drift_id`` resets when the drift clears
+    (``drifted=False``) or the baseline changes.
+
+    ``secrets_comparable=False``: the baseline's secret digests were made
+    with another installation key (or the key is lost); such options are
+    NOT_COMPARABLE changes, not drift. ``rebaseline=True``: first check
+    after ``installation_key_reset``; the core stores the live state as new
+    baseline instead of reporting drift.
+    """
 
     router_id: str
     baseline_backup_id: str
@@ -1816,6 +2783,23 @@ class DriftReport:
     drift_id: str | None = None  # stable id of this drift (dedup, acks)
     ack_state: DriftAckState | None = None
     ignored_paths: tuple[str, ...] = ()  # volatile options left out
+    baseline_rule: BaselineRule | None = None
+    critical_count: int = 0  # changes the provider rates critical
+    unknown_count: int = 0  # changes the provider cannot classify
+    secrets_comparable: bool = True
+    rebaseline: bool = False
+
+    def __post_init__(self) -> None:
+        """Coerce and validate."""
+        _coerce(self, "ack_state", DriftAckState, optional=True)
+        _coerce(self, "baseline_rule", BaselineRule, optional=True)
+        _set(self, "ignored_paths", tuple(self.ignored_paths))
+        for name in ("critical_count", "unknown_count"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative int")
+        if self.rebaseline and self.drifted:
+            raise ValueError("a rebaseline report is never a drift")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form with secrets masked."""
@@ -1828,7 +2812,31 @@ class DriftReport:
             "ack_state": None if self.ack_state is None else self.ack_state.value,
             "diff": self.diff.to_dict(),
             "ignored_paths": list(self.ignored_paths),
+            "baseline_rule": (
+                None if self.baseline_rule is None else self.baseline_rule.value
+            ),
+            "critical_count": self.critical_count,
+            "unknown_count": self.unknown_count,
+            "secrets_comparable": self.secrets_comparable,
+            "rebaseline": self.rebaseline,
         }
+
+
+def drift_event_types(report: DriftReport) -> tuple[CoreEventType, ...]:
+    """Core event types the core emits for one drift report (in order)."""
+    if report.rebaseline or not report.drifted:
+        return ()
+    types = [CoreEventType.DRIFT_DETECTED]
+    if report.critical_count:
+        types.append(CoreEventType.CHANGE_CRITICAL)
+    if report.unknown_count:
+        types.append(CoreEventType.CHANGE_UNKNOWN)
+    return tuple(types)
+
+
+def integrity_failed(validation: ValidationInfo) -> bool:
+    """True if the core emits ``configuration.integrity_failed`` for it."""
+    return validation.status in _DEDUP_EXCLUDED_VALIDATION
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -1836,12 +2844,16 @@ class CompatibilityIssue:
     """One finding of a restore compatibility check."""
 
     code: str  # e.g. "board_mismatch", "major_version_mismatch"
-    message: str
+    message: str  # free text: never configuration values
     blocking: bool = True
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-safe form."""
-        return {"code": self.code, "message": self.message, "blocking": self.blocking}
+        """JSON-safe form (message scrubbed)."""
+        return {
+            "code": self.code,
+            "message": scrub_text(self.message),
+            "blocking": self.blocking,
+        }
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -1866,8 +2878,12 @@ class RestoreStep:
     order: int
     action: str  # e.g. "uci_set", "uci_delete", "archive_restore", "reboot"
     target: str  # e.g. "wireless.default_radio0.key" or a service name
-    description: str | None = None
+    description: str | None = None  # free text: never configuration values
     detail: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Freeze."""
+        _set(self, "detail", _freeze(self.detail))
 
     def _raw(self) -> dict[str, Any]:
         """Unmasked content, only for checksums."""
@@ -1876,13 +2892,14 @@ class RestoreStep:
             "action": self.action,
             "target": self.target,
             "description": self.description,
-            "detail": dict(self.detail),
+            "detail": _thaw(self.detail),
         }
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form with secrets masked."""
         data = self._raw()
-        data["detail"] = mask_secrets(self.detail)
+        data["description"] = scrub_text(self.description)
+        data["detail"] = mask_secrets(data["detail"])
         return data
 
 
@@ -1907,6 +2924,11 @@ class RestorePlan:
     requires_reboot: bool = False
     warnings: tuple[str, ...] = ()
     instructions: tuple[str, ...] = ()  # i18n keys for a manual restore
+
+    def __post_init__(self) -> None:
+        """Freeze."""
+        for name in ("steps", "warnings", "instructions"):
+            _set(self, name, tuple(getattr(self, name)))
 
     def _raw(self) -> dict[str, Any]:
         """Unmasked content, only for the checksum."""
@@ -1945,7 +2967,7 @@ class RestorePlan:
             "diff": None if self.diff is None else self.diff.to_dict(),
             "live_checksum": self.live_checksum,
             "requires_reboot": self.requires_reboot,
-            "warnings": list(self.warnings),
+            "warnings": [scrub_text(w) for w in self.warnings],
             "instructions": list(self.instructions),
             "checksum": self.checksum,
         }
@@ -1964,13 +2986,17 @@ class RestoreResult:
     pre_restore_backup_id: str | None = None
     applied_steps: int = 0
     failed_step: int | None = None
-    message: str | None = None
+    message: str | None = None  # free text: never configuration values
     reboot_required: bool = False
     rolled_back: bool = False
     correlation_id: str | None = None
 
+    def __post_init__(self) -> None:
+        """Coerce."""
+        _coerce(self, "status", RestoreStatus)
+
     def to_dict(self) -> dict[str, Any]:
-        """JSON-safe form."""
+        """JSON-safe form (message scrubbed)."""
         return {
             "approval_id": self.approval_id,
             "plan_id": self.plan_id,
@@ -1981,7 +3007,7 @@ class RestoreResult:
             "pre_restore_backup_id": self.pre_restore_backup_id,
             "applied_steps": self.applied_steps,
             "failed_step": self.failed_step,
-            "message": self.message,
+            "message": scrub_text(self.message),
             "reboot_required": self.reboot_required,
             "rolled_back": self.rolled_back,
             "correlation_id": self.correlation_id,
@@ -1990,7 +3016,7 @@ class RestoreResult:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ExportHandle:
-    """Download handle of an exported version; ``reader`` returns the bytes."""
+    """Download handle of an exported version; ``reader`` returns the bytes once."""
 
     backup_id: str
     artifact: str  # ArtifactKind value
@@ -2001,6 +3027,10 @@ class ExportHandle:
     contains_secrets: bool
     reader: Callable[[], Awaitable[bytes]] = field(repr=False, compare=False)
     expires_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the artifact kind."""
+        _set(self, "artifact", ArtifactKind(self.artifact).value)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form (without the reader)."""
@@ -2026,7 +3056,10 @@ class ApprovalRequest:
     """Two-step approval of a critical action, bound to ``checksum``.
 
     ``subject_id`` is the plan_id (restore), backup_id (export) or a list
-    key (delete); ``checksum`` is the binding checksum of the action.
+    key (delete); ``checksum`` is the binding checksum of the action. Only
+    ``requested_by`` may redeem it (see :func:`check_redeem`). Approval ids
+    are not secrets. Pending approvals live in memory only and do NOT
+    survive a restart.
     """
 
     approval_id: str
@@ -2040,8 +3073,15 @@ class ApprovalRequest:
     status: ApprovalStatus = ApprovalStatus.PENDING
     decided_by: Actor | None = None
     decided_at: datetime | None = None
-    reason: str | None = None
+    reason: str | None = None  # free text: never configuration values
     correlation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Coerce and validate."""
+        _coerce(self, "status", ApprovalStatus)
+        _require_aware(self.requested_at, "requested_at")
+        _require_aware(self.expires_at, "expires_at")
+        _require_aware(self.decided_at, "decided_at")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -2059,23 +3099,97 @@ class ApprovalRequest:
                 None if self.decided_by is None else self.decided_by.to_dict()
             ),
             "decided_at": _iso(self.decided_at),
-            "reason": self.reason,
+            "reason": scrub_text(self.reason),
             "correlation_id": self.correlation_id,
         }
 
 
+def approver_denial_reason(
+    approval: ApprovalRequest, approver: object, *, now: datetime | None = None
+) -> str | None:
+    """None if ``approver`` may approve/reject ``approval`` now.
+
+    Reasons: unverified_actor, actor_verification_expired, not_admin,
+    not_pending, expired.
+    """
+    now = now or utcnow()
+    if not isinstance(approver, VerifiedActor):
+        return "unverified_actor"
+    if not approver.is_fresh(now):
+        return "actor_verification_expired"
+    if not approver.is_admin:
+        return "not_admin"
+    if approval.status is not ApprovalStatus.PENDING:
+        return "not_pending"
+    if now >= approval.expires_at:
+        return "expired"
+    return None
+
+
+def check_redeem(
+    approval: ApprovalRequest,
+    actor: object,
+    *,
+    action: str,
+    router_id: str,
+    checksum: str,
+    now: datetime | None = None,
+) -> None:
+    """Raise unless ``actor`` may redeem ``approval`` for this action now.
+
+    Only the requester (same principal, re-verified; a user must still be
+    admin) may redeem; action, router and binding checksum must match.
+    AuthorizationError for an unverified actor, ApprovalRequiredError while
+    pending, ApprovalInvalidError otherwise (``details["reason"]``).
+    """
+    now = now or utcnow()
+    if not isinstance(actor, VerifiedActor) or not actor.is_fresh(now):
+        raise AuthorizationError(
+            "Actor is not verified", details={"reason": "unverified_actor"}
+        )
+
+    def _invalid(reason: str) -> ApprovalInvalidError:
+        return ApprovalInvalidError(
+            f"Approval cannot be redeemed: {reason}",
+            router_id=approval.router_id,
+            details={"reason": reason, "approval_id": approval.approval_id},
+        )
+
+    if approval.status is ApprovalStatus.PENDING:
+        raise ApprovalRequiredError(
+            "Approval is still pending",
+            router_id=approval.router_id,
+            details={"reason": "pending", "approval_id": approval.approval_id},
+        )
+    if approval.status is not ApprovalStatus.APPROVED:
+        raise _invalid(approval.status.value)
+    if now >= approval.expires_at:
+        raise _invalid("expired")
+    if str(action) != str(approval.action):
+        raise _invalid("action_mismatch")
+    if router_id != approval.router_id:
+        raise _invalid("router_mismatch")
+    if checksum != approval.checksum:
+        raise _invalid("checksum_mismatch")
+    if not actor.actor.same_principal(approval.requested_by):
+        raise _invalid("not_requester")
+    if actor.actor.kind is ActorKind.USER and not actor.is_admin:
+        raise _invalid("not_admin")
+
+
 # Module-private mint sentinel: only the ActionGuard (core_guard.py) may call
-# _mint_write_authorization(). Python cannot enforce this; tests and review do.
+# _mint_write_authorization(). Python cannot enforce this; the guard's ledger
+# rejects any authorization it did not issue.
 _MINT_SENTINEL: Final = object()
 
 
 class WriteAuthorization:
     """Single-use permission for one guarded action, minted only by the guard.
 
-    Bound to action, router_id and (optionally) a binding checksum. The
-    component that performs the action (version store, provider) calls
-    :meth:`consume` right before it acts. Every consume attempt uses the
-    authorization up, also a failed one (fail closed).
+    Bound to action, router_id and (optionally) a binding checksum. Whoever
+    performs the action calls ``guard.consume(authorization, ...)`` right
+    before it acts; the guard checks its ledger and calls :meth:`_consume`.
+    Every consume attempt uses the authorization up, also a failed one.
     """
 
     __slots__ = (
@@ -2138,7 +3252,7 @@ class WriteAuthorization:
 
     @property
     def actor(self) -> Actor:
-        """Who the action is performed for."""
+        """Who the action is performed for (the store's ``created_by``)."""
         return self._actor
 
     @property
@@ -2163,12 +3277,12 @@ class WriteAuthorization:
 
     @property
     def expires_at(self) -> datetime:
-        """After this, consume() fails."""
+        """After this, consume fails."""
         return self._expires_at
 
     @property
     def consumed(self) -> bool:
-        """True once consume() was called (successfully or not)."""
+        """True once a consume was attempted (successfully or not)."""
         return self._consumed
 
     def is_expired(self, now: datetime | None = None) -> bool:
@@ -2187,7 +3301,7 @@ class WriteAuthorization:
             },
         )
 
-    def consume(
+    def _consume(
         self,
         *,
         action: str,
@@ -2195,11 +3309,12 @@ class WriteAuthorization:
         checksum: str | None = None,
         now: datetime | None = None,
     ) -> None:
-        """Use the authorization once or raise AuthorizationError.
+        """Guard-internal: use once or raise AuthorizationError.
 
         ``checksum`` is required (and must match) when the authorization is
         bound to one. Reasons: already_used, expired, action_mismatch,
-        router_mismatch, checksum_mismatch.
+        router_mismatch, checksum_mismatch. Synchronous: call on the event
+        loop, never in an executor job.
         """
         if self._consumed:
             raise self._deny("already_used")
@@ -2247,7 +3362,8 @@ def _mint_write_authorization(
     ttl: timedelta = WRITE_AUTHORIZATION_TTL,
     now: datetime | None = None,
 ) -> WriteAuthorization:
-    """Mint a WriteAuthorization. PRIVATE: only core_guard.ActionGuard calls it."""
+    """Mint a WriteAuthorization. PRIVATE: only core_guard.ActionGuard calls
+    it and records the id in its ledger."""
     issued = now or utcnow()
     return WriteAuthorization(
         authorization_id=new_id(AUTHORIZATION_ID_PREFIX),
@@ -2279,6 +3395,10 @@ class AuthorizationDecision:
     authorization: WriteAuthorization | None = field(default=None, repr=False)
     approval_request: ApprovalRequest | None = None
     reason: str | None = None
+
+    def __post_init__(self) -> None:
+        """Coerce."""
+        _coerce(self, "state", DecisionState)
 
     @property
     def approved(self) -> bool:
@@ -2315,9 +3435,14 @@ class CoreEvent:
 
     ``type`` is a CoreEventType value or a module type below a registered
     prefix (kept as str when it comes from a newer version). ``data`` must
-    carry ids and counters, never configuration values; it is masked on
-    output as a second safety net. Events with the same ``dedup_key`` within
-    the cooldown are neither stored nor fired.
+    carry ids and counters, never configuration values; it is stored
+    read-only and masked on output as a second safety net.
+
+    Dedup: ``dedup_key`` is the discriminator (drift_id, error_class, …);
+    the scope is ``(router_id, type, dedup_key)``. A repeat inside the fixed
+    cooldown window is not published on the bus; the stored entry's
+    ``repeat_count`` / ``last_repeat_at`` are updated instead. Types in
+    AUDIT_MANDATORY_EVENT_TYPES ignore ``dedup_key``.
     """
 
     event_id: str
@@ -2331,11 +3456,33 @@ class CoreEvent:
     actor: Actor | None = None
     correlation_id: str | None = None
     dedup_key: str | None = None
+    repeat_count: int = 0
+    last_repeat_at: datetime | None = None
     data: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Validate the timestamp."""
+        """Coerce, validate and freeze."""
+        if not isinstance(self.type, str) or not self.type:
+            raise ValueError("event type must be a non-empty string")
         _require_aware(self.ts, "ts")
+        _require_aware(self.last_repeat_at, "last_repeat_at")
+        _coerce(self, "severity", Severity)
+        _coerce(self, "result", EventResult)
+        if not isinstance(self.repeat_count, int) or self.repeat_count < 0:
+            raise ValueError("repeat_count must be a non-negative int")
+        _set(self, "data", _freeze(self.data))
+
+    @property
+    def dedup_scope(self) -> tuple[str, str, str] | None:
+        """``(router_id or "-", type, dedup_key)``; None if not deduplicated."""
+        if self.dedup_key is None or self.type in AUDIT_MANDATORY_EVENT_TYPES:
+            return None
+        return (self.router_id or "-", str(self.type), self.dedup_key)
+
+    @property
+    def audit_ring(self) -> AuditRing:
+        """Which ring keeps this event."""
+        return audit_ring_for(self.type)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form with ``data`` masked."""
@@ -2351,7 +3498,9 @@ class CoreEvent:
             "actor": None if self.actor is None else self.actor.to_dict(),
             "correlation_id": self.correlation_id,
             "dedup_key": self.dedup_key,
-            "data": mask_secrets(dict(self.data)),
+            "repeat_count": self.repeat_count,
+            "last_repeat_at": _iso(self.last_repeat_at),
+            "data": mask_secrets(_thaw(self.data)),
         }
 
     @classmethod
@@ -2369,6 +3518,8 @@ class CoreEvent:
             raise ValueError("ts is required")
         actor = data.get("actor")
         payload = data.get("data")
+        if payload is not None and not isinstance(payload, Mapping):
+            raise TypeError("data must be a mapping")
         return cls(
             event_id=data["event_id"],
             ts=ts,
@@ -2378,11 +3529,22 @@ class CoreEvent:
             result=EventResult(data.get("result", EventResult.INFO)),
             router_id=_opt_str(data, "router_id"),
             entry_id=_opt_str(data, "entry_id"),
-            actor=Actor.from_dict(actor) if isinstance(actor, Mapping) else None,
+            actor=None if actor is None else Actor.from_dict(actor),
             correlation_id=_opt_str(data, "correlation_id"),
             dedup_key=_opt_str(data, "dedup_key"),
-            data=dict(payload) if isinstance(payload, Mapping) else {},
+            repeat_count=data.get("repeat_count", 0),
+            last_repeat_at=_parse_dt(data.get("last_repeat_at"), "last_repeat_at"),
+            data=payload or {},
         )
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class EmitResult:
+    """Result of ``emit``: the stored entry and whether the bus saw it."""
+
+    event: CoreEvent
+    published: bool
+    deduplicated: bool = False
 
 
 CoreEventListener = Callable[[CoreEvent], None]
@@ -2399,8 +3561,13 @@ class ConfigBackupProvider(Protocol):
 
     Produces and analyses artifacts only: it reads from the router through
     the entry's existing OpenWrtAPI and never stores, exports or deletes
-    bytes itself (the core's VersionStore does). Stored bytes come in
-    through ``read``. Exactly one provider can be registered.
+    bytes itself. Every call gets a :class:`ProviderContext` (scoped
+    ``read``, registry read access, installation key). The provider never
+    fires bus events: it returns results and the core emits the events.
+    ``async_probe`` reports every config.* capability it decides, also
+    unavailable ones (e.g. ``config.restore`` in phase 1). Before writing
+    to a router it calls ``api.guard.consume(authorization, ...)``. Exactly
+    one provider can be registered.
     """
 
     @property
@@ -2409,43 +3576,51 @@ class ConfigBackupProvider(Protocol):
 
     @property
     def provider_api_version(self) -> int:
-        """Version of this protocol the provider implements."""
+        """Version of this protocol (in SUPPORTED_PROVIDER_API_VERSIONS)."""
 
     def supported(self, router: RouterRecord) -> bool:
         """Cheap, synchronous pre-check (no router call)."""
 
     async def async_probe(
-        self, conn: RouterConnection
+        self, conn: RouterConnection, ctx: ProviderContext
     ) -> Mapping[str, CapabilityStatus]:
         """Probe config.* capabilities on the router (setup, ACL redeploy,
         firmware change; never in the poll)."""
 
     async def async_capture(
-        self, conn: RouterConnection, request: CaptureRequest
+        self, conn: RouterConnection, request: CaptureRequest, ctx: ProviderContext
     ) -> ConfigSnapshot:
-        """Read the live configuration."""
+        """Read the live configuration (uci_hash made by the provider)."""
 
     async def async_collect(
-        self, conn: RouterConnection, request: CollectRequest
+        self, conn: RouterConnection, request: CollectRequest, ctx: ProviderContext
     ) -> CollectedVersion:
         """Fetch a version (archive, uci, inventory) from the router."""
 
     async def async_validate(
-        self, record: BackupRecord, read: ArtifactReader
+        self, record: BackupRecord, ctx: ProviderContext
     ) -> ValidationInfo:
         """Check a stored version beyond checksums (format, members)."""
 
     async def async_compare(
-        self, base: ConfigSource, other: ConfigSource, read: ArtifactReader
+        self,
+        base: ConfigSource,
+        other: ConfigSource,
+        ctx: ProviderContext,
+        *,
+        base_router: RouterRecord,
+        other_router: RouterRecord,
     ) -> ConfigDiff:
-        """Compare two sources (versions or live snapshots)."""
+        """Compare two sources; the RouterRecords carry the management host."""
 
     async def async_detect_drift(
         self,
         conn: RouterConnection,
         baseline: BackupRecord,
-        read: ArtifactReader,
         acks: Sequence[DriftAck],
+        ctx: ProviderContext,
+        *,
+        router: RouterRecord,
     ) -> DriftReport:
         """Compare live configuration with ``baseline``."""
 
@@ -2454,7 +3629,7 @@ class ConfigBackupProvider(Protocol):
         conn: RouterConnection,
         record: BackupRecord,
         target: RouterRecord,
-        read: ArtifactReader,
+        ctx: ProviderContext,
     ) -> RestorePlan:
         """Dry run: compatibility plus plan. Never writes."""
 
@@ -2463,8 +3638,9 @@ class ConfigBackupProvider(Protocol):
         conn: RouterConnection,
         plan: RestorePlan,
         authorization: WriteAuthorization,
+        ctx: ProviderContext,
     ) -> RestoreResult:
-        """Write to the router. Must consume ``authorization`` first.
+        """Write to the router after ``guard.consume(authorization, ...)``.
 
         Phase 1: the core only calls this when the provider declares
         ``config.restore`` available; otherwise CapabilityUnavailableError.
@@ -2473,7 +3649,10 @@ class ConfigBackupProvider(Protocol):
 
 @runtime_checkable
 class RouterRegistryProtocol(Protocol):
-    """Read side of the router registry (fleet-wide, one per HA instance)."""
+    """Read side of the router registry (fleet-wide, one per HA instance).
+
+    Records are immutable; every call returns the current snapshot.
+    """
 
     def get(self, router_id: str) -> RouterRecord:
         """Record by router id; RouterNotFoundError if unknown."""
@@ -2488,7 +3667,7 @@ class RouterRegistryProtocol(Protocol):
         """All active (and optionally orphaned) records."""
 
     def capabilities(self, router_id: str) -> Mapping[str, CapabilityStatus]:
-        """Capability map of a router."""
+        """Read-only capability map of a router."""
 
     def has_capability(self, router_id: str, capability: str) -> bool:
         """True if available now."""
@@ -2502,33 +3681,60 @@ class RouterRegistryProtocol(Protocol):
     async def async_adopt(
         self, entry_id: str, orphan_router_id: str, *, actor: Actor
     ) -> RouterRecord:
-        """Bind an orphaned record (history, versions) to ``entry_id``."""
+        """Bind an orphaned record (history, versions) to ``entry_id``.
+
+        ``actor`` is re-verified; only an admin user may adopt."""
 
 
 @runtime_checkable
 class ActionGuardProtocol(Protocol):
-    """Decides every mutating or critical action; mints WriteAuthorizations."""
+    """Decides every mutating or critical action; mints and consumes
+    WriteAuthorizations (with a ledger of issued ids)."""
+
+    async def async_verify_actor(self, actor: Actor) -> VerifiedActor:
+        """Re-check an Actor against hass.auth (ignores its is_admin)."""
+
+    async def async_resolve_actor(
+        self, context: Context | None, *, module: str | None = None
+    ) -> VerifiedActor:
+        """Actor from an HA Context, verified."""
 
     def authorize(
         self,
         action: str,
         router_id: str,
-        actor: Actor,
+        actor: VerifiedActor,
         *,
         subject_id: str | None = None,
         checksum: str | None = None,
         approval_id: str | None = None,
         correlation_id: str | None = None,
     ) -> AuthorizationDecision:
-        """Synchronous decision; always writes one audit entry."""
+        """Synchronous decision; always writes one audit entry.
 
-    def approve(self, approval_id: str, *, actor: Actor) -> ApprovalRequest:
-        """Admin user approves a pending request."""
+        Unverified or stale actors are denied. With ``approval_id`` the
+        approval is redeemed (check_redeem).
+        """
+
+    def consume(
+        self,
+        authorization: WriteAuthorization,
+        *,
+        action: str,
+        router_id: str,
+        checksum: str | None = None,
+    ) -> None:
+        """Check ledger, single use, expiry and binding; audit; or raise
+        AuthorizationError (``unknown_authorization`` if not issued here).
+        Synchronous: call on the event loop, never in an executor job."""
+
+    def approve(self, approval_id: str, *, actor: VerifiedActor) -> ApprovalRequest:
+        """Verified admin user approves a pending request."""
 
     def reject(
-        self, approval_id: str, *, actor: Actor, reason: str | None = None
+        self, approval_id: str, *, actor: VerifiedActor, reason: str | None = None
     ) -> ApprovalRequest:
-        """Admin user rejects a pending request."""
+        """Verified admin user rejects a pending request."""
 
     def get_approval(self, approval_id: str) -> ApprovalRequest:
         """Request by id; ApprovalInvalidError if unknown."""
@@ -2536,7 +3742,7 @@ class ActionGuardProtocol(Protocol):
     def pending_approvals(
         self, router_id: str | None = None
     ) -> tuple[ApprovalRequest, ...]:
-        """Open requests, newest first."""
+        """Open requests, newest first (in memory; lost on restart)."""
 
     def register_action(
         self,
@@ -2550,22 +3756,8 @@ class ActionGuardProtocol(Protocol):
 
 
 @runtime_checkable
-class VersionStoreProtocol(Protocol):
-    """Index plus artifact files under hass.config.path(*CONFIG_BACKUP_PATH).
-
-    Directories 0700, files 0600, atomic writes via ``.partial`` + rename,
-    index entry written last, all file I/O in the executor.
-    """
-
-    async def async_put_version(
-        self,
-        router_id: str,
-        artifacts: Mapping[str, ArtifactPayload],
-        meta: VersionMeta,
-        *,
-        authorization: WriteAuthorization,
-    ) -> PutVersionResult:
-        """Store a version; a content_hash/uci_hash hit only moves last_seen_at."""
+class VersionReadView(Protocol):
+    """Module-facing, read-only view of the version index (no bytes)."""
 
     async def async_list_versions(
         self,
@@ -2579,31 +3771,56 @@ class VersionStoreProtocol(Protocol):
     async def async_get_version(self, version_id: str) -> BackupRecord:
         """One version; BackupNotFoundError if unknown."""
 
-    async def async_read_artifact(self, storage_ref: StorageRef) -> bytes:
-        """Bytes of one artifact (checks storage_format and sha256)."""
+    async def async_list_drift_acks(self, router_id: str) -> tuple[DriftAck, ...]:
+        """Acknowledgements of a router."""
+
+    def usage_bytes(self, router_id: str | None = None) -> int:
+        """Bytes used by one router or in total."""
+
+
+@runtime_checkable
+class VersionStoreProtocol(VersionReadView, Protocol):
+    """CORE-INTERNAL store: index plus artifact files.
+
+    Directories 0700, files 0600, atomic writes via ``.partial`` + rename,
+    index entry written last, all file I/O in the executor. Modules never
+    get this object.
+    """
+
+    async def async_put_version(
+        self,
+        router_id: str,
+        artifacts: Mapping[str, ArtifactPayload],
+        meta: VersionMeta,
+        *,
+        authorization: WriteAuthorization,
+    ) -> PutVersionResult:
+        """Store a version (``created_by`` = authorization.actor); a dedup
+        hit (should_deduplicate) only moves last_seen_at."""
+
+    async def async_read_artifact(self, version_id: str, kind: str) -> bytes:
+        """Bytes of one artifact; checks storage_format, locator and sha256."""
 
     async def async_delete_versions(
         self, version_ids: Sequence[str], *, authorization: WriteAuthorization
     ) -> tuple[str, ...]:
-        """Delete versions (delete or prune authorization); returns deleted ids."""
+        """``delete``: validate_deletion first; ``prune``: only ids from
+        plan_retention. Returns deleted ids."""
 
     async def async_set_protected(
         self, version_id: str, protected: bool, *, authorization: WriteAuthorization
     ) -> BackupRecord:
-        """Set or clear protection against prune."""
+        """Set or clear protection."""
 
     async def async_set_validation(
         self, version_id: str, validation: ValidationInfo
     ) -> BackupRecord:
-        """Store a validation result (core-internal, no authorization)."""
+        """Store a validation result."""
 
     async def async_put_drift_ack(
         self, ack: DriftAck, *, authorization: WriteAuthorization
     ) -> DriftAck:
         """Store a drift acknowledgement."""
-
-    async def async_list_drift_acks(self, router_id: str) -> tuple[DriftAck, ...]:
-        """Acknowledgements of a router."""
 
     async def async_sweep(self) -> SweepReport:
         """Startup cleanup: partials, index-less files, missing files."""
@@ -2611,13 +3828,15 @@ class VersionStoreProtocol(Protocol):
     async def async_archive_router(self, router_id: str) -> None:
         """Move a removed router's folder to ``removed/<router_id>/``."""
 
-    def usage_bytes(self, router_id: str | None = None) -> int:
-        """Bytes used by one router or in total."""
-
 
 @runtime_checkable
 class ConfigurationApiProtocol(Protocol):
-    """Configuration API v1, from ``async_get_configuration_api(hass, 1)``."""
+    """Configuration API v1, from ``async_get_configuration_api(hass, 1)``.
+
+    Every method that takes ``actor: Actor`` re-verifies it against
+    hass.auth; a caller-supplied ``is_admin`` is ignored. Mutating and
+    critical operations take the router lock first, then authorize.
+    """
 
     @property
     def api_version(self) -> int:
@@ -2632,8 +3851,8 @@ class ConfigurationApiProtocol(Protocol):
         """Action guard."""
 
     @property
-    def versions(self) -> VersionStoreProtocol:
-        """Version store."""
+    def versions(self) -> VersionReadView:
+        """Read-only version index."""
 
     @property
     def provider_id(self) -> str | None:
@@ -2643,7 +3862,27 @@ class ConfigurationApiProtocol(Protocol):
         """Register the provider; returns an unregister callback."""
 
     async def async_get_installation_key(self) -> bytes:
-        """32-byte installation key for HMAC secret digests."""
+        """32-byte installation key; InstallationKeyLostError while LOST."""
+
+    @property
+    def installation_key_state(self) -> InstallationKeyState:
+        """ok, lost or uninitialised (see installation_key_state())."""
+
+    async def async_request_installation_key_reset(
+        self, *, actor: Actor
+    ) -> ApprovalRequest:
+        """Ask for a new key after a loss (CRITICAL, admin user)."""
+
+    async def async_reset_installation_key(
+        self, approval_id: str, *, actor: Actor
+    ) -> None:
+        """Create the new key after approval; requester only. The next
+        drift check per router is a rebaseline, not a drift."""
+
+    async def async_get_baseline(
+        self, router_id: str, *, baseline_backup_id: str | None = None
+    ) -> Baseline | None:
+        """Current drift baseline and the rule that picked it (READ)."""
 
     async def async_capture(
         self, router_id: str, *, actor: Actor, configs: tuple[str, ...] | None = None
@@ -2697,10 +3936,20 @@ class ConfigurationApiProtocol(Protocol):
     ) -> PutVersionResult:
         """Collect and store a version (MUTATING)."""
 
+    async def async_put_version(
+        self,
+        router_id: str,
+        artifacts: Mapping[str, ArtifactPayload],
+        meta: VersionMeta,
+        *,
+        authorization: WriteAuthorization,
+    ) -> PutVersionResult:
+        """Store a version a module collected itself (``backup`` authorization)."""
+
     async def async_set_protected(
         self, backup_id: str, protected: bool, *, actor: Actor
     ) -> BackupRecord:
-        """Protect against prune (MUTATING, admin user)."""
+        """Protect against retention and delete (MUTATING, admin user)."""
 
     async def async_acknowledge_drift(
         self,
@@ -2716,25 +3965,33 @@ class ConfigurationApiProtocol(Protocol):
     async def async_list_drift_acks(self, router_id: str) -> tuple[DriftAck, ...]:
         """Acknowledgements of a router (READ)."""
 
+    def set_retention_policy(self, policy: RetentionPolicy, *, module: str) -> None:
+        """Supply the retention policy the core's prune run applies."""
+
+    async def async_apply_retention(
+        self, router_id: str | None = None
+    ) -> tuple[RetentionResult, ...]:
+        """Run retention now (as system); one result per router."""
+
     async def async_request_export(
-        self, backup_id: str, *, actor: Actor
+        self, backup_id: str, *, actor: Actor, artifact: str = ArtifactKind.ARCHIVE
     ) -> ApprovalRequest:
-        """Ask to export a plain-text archive (CRITICAL, admin user)."""
+        """Ask to export one artifact (CRITICAL, admin user)."""
 
     async def async_export_backup(
         self, approval_id: str, *, actor: Actor
     ) -> ExportHandle:
-        """Export after approval; single use per download."""
+        """Export after approval; requester only, one download."""
 
     async def async_request_deletion(
         self, backup_ids: Sequence[str], *, actor: Actor
     ) -> ApprovalRequest:
-        """Ask to delete versions (CRITICAL)."""
+        """Ask to delete versions (CRITICAL; VersionProtectedError if protected)."""
 
     async def async_delete_backups(
         self, approval_id: str, *, actor: Actor
     ) -> tuple[str, ...]:
-        """Delete after approval."""
+        """Delete after approval; requester only."""
 
     async def async_request_restore(
         self, plan: RestorePlan, *, actor: Actor
@@ -2742,12 +3999,12 @@ class ConfigurationApiProtocol(Protocol):
         """Ask to restore (CRITICAL; phase 1: CapabilityUnavailableError)."""
 
     async def async_approve(self, approval_id: str, *, actor: Actor) -> ApprovalRequest:
-        """Approve any pending request (admin user)."""
+        """Approve any pending request (verified admin user)."""
 
     async def async_reject(
         self, approval_id: str, *, actor: Actor, reason: str | None = None
     ) -> ApprovalRequest:
-        """Reject any pending request (admin user)."""
+        """Reject any pending request (verified admin user)."""
 
     async def async_execute_restore(
         self, approval_id: str, *, actor: Actor
@@ -2768,15 +4025,17 @@ class ConfigurationApiProtocol(Protocol):
         router_id: str | None = None,
         types: Iterable[str] | None = None,
         since: datetime | None = None,
+        ring: AuditRing | None = None,
         limit: int = DEFAULT_LIST_LIMIT,
     ) -> tuple[CoreEvent, ...]:
-        """Audit entries, newest first."""
+        """Audit entries from both rings (or one), newest first."""
 
     def subscribe(self, listener: CoreEventListener) -> Callable[[], None]:
-        """Listen to new events; returns an unsubscribe callback."""
+        """Listen to published events; returns an unsubscribe callback."""
 
     def register_event_prefix(self, prefix: str, *, module: str) -> None:
-        """Allow a module's own event types below ``prefix``."""
+        """Allow a module's own event types below ``prefix`` (not a core
+        namespace, see CORE_EVENT_NAMESPACES)."""
 
     def emit(
         self,
@@ -2784,11 +4043,17 @@ class ConfigurationApiProtocol(Protocol):
         *,
         source: str,
         router_id: str | None = None,
+        entry_id: str | None = None,
         severity: Severity = Severity.INFO,
         result: EventResult = EventResult.INFO,
         actor: Actor | None = None,
         correlation_id: str | None = None,
         dedup_key: str | None = None,
         data: Mapping[str, Any] | None = None,
-    ) -> CoreEvent | None:
-        """Write an audit entry and fire EVENT_CORE; None if deduplicated."""
+    ) -> EmitResult:
+        """Write an audit entry and fire EVENT_CORE unless deduplicated.
+
+        For modules: only types below a prefix registered by the same
+        module; core types (is_core_event_type) raise ValueError, the core
+        emits them itself from provider results.
+        """
