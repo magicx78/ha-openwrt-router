@@ -2,6 +2,72 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.42.0] - 2026-11-17
+
+### Added
+
+- **Client-Stabilität (Beta).** Eine Langzeit-Historie je WLAN-Client: wie
+  stabil ist das Gerät, seit wann, an welchem AP, und liegt es am Gerät oder
+  am Netz? **Keine zusätzlichen Router-Aufrufe:** keine neue ubus-Abfrage,
+  kein SSH, kein Datei-Lesen oder -Ausführen, **keine ACL-Änderung**. Die
+  Daten kommen aus den Client-Listen und Logzeilen, die die Network
+  Intelligence nach jedem Poll ohnehin auswertet. Ausführlich in
+  `docs/client-stability.md`.
+- **Zustand mit Toleranz.** Je MAC `online`, `grace`, `offline` oder
+  `unknown`. Normales Roaming ist kein Abbruch, ein kurzes Fehlen auch nicht
+  (offline erst nach 2 Polls und mindestens 150 s in keiner Liste). Ein
+  AP-Ausfall oder eine Poll-Lücke ist Messlücke, nie offline. Jeder Abbruch
+  bekommt eine Klasse aus dem Log-Grund (`error`, `inactivity`, `leave`,
+  `unknown`, `infra`); Abbrüche während einer Network-Intelligence-Wurzel
+  am Router des Clients zählen als `infra` und lösen **keinen eigenen
+  Alarm** aus. Bei Port-Wurzeln (Uplink aus, Port-Flap) gilt das nur für die
+  Router, deren Abbrüche die Network Intelligence damit verknüpft hat (hinter
+  dem Port, oder der Besitzer bei Flap seines eigenen Uplink-Ports), nie für
+  das Gateway bei einem flatternden WAN-Port. Ein Kanalwechsel markiert
+  300 s lang den ganzen Router, nicht nur das betroffene Radio.
+- **Stabilitäts-Score** 0–100 aus sieben Teilen (Abbrüche 30, Reconnects 15,
+  Sitzungsdauer 15, Signal 20, Anmeldung 10, Roaming 5, wiederkehrende
+  Muster 5) mit Klassen *sehr stabil* bis *kritisch*. Bei zu wenig Daten
+  ist der Score unbekannt, nie 100. Clients können als *schlafend*
+  markiert werden (Inaktivität kostet dann nichts).
+- **Muster und Empfehlungen:** Abbrüche zur selben Tageszeit, schlechter
+  werdendes Signal, Probleme nur an einem AP; Empfehlungen als
+  Beobachtung, Hypothese oder bestätigt, immer mit den Messwerten. Nur Text,
+  keine Aktion am Router.
+- **AP-Vergleich** je Router und Band über 24 h / 7 d / 30 d, alle Werte je
+  100 Client-Stunden.
+- **Tab „Stabilität“** unter *Diagnose* im Topologie-Panel: Client-Tabelle mit
+  Filtern, Detail mit Zeitleiste, Signal- und Verfügbarkeitsverlauf
+  (1 h bis 30 d), AP-Vergleich und Einstellungen. Lädt nur bei offenem Tab,
+  höchstens alle 60 s.
+- **Sensoren nur für ausgewählte Clients** (höchstens 25, im Detail wählbar):
+  Stabilitäts-Score und Verbindungsqualität (an), Reconnects 24 h,
+  Verbindungsdauer und letzter Abbruch (aus). Ohne Auswahl entstehen keine
+  Entities.
+- API-Routen `/api/openwrt_topology/intelligence/clients`, `clients/{mac}`,
+  `clients/aps` und `clients/settings` (gleiche Zugriffsregeln wie die
+  Network-Intelligence-Routen, Ändern nur für Admins).
+- Diagnose-Download: Abschnitt `client_stability` nur mit Zahlen (Clients je
+  Zustand, Speichergröße, gekürzte Einträge), ohne MAC, IP oder Hostname.
+
+### Changed
+
+- **Zusätzliche Last in Home Assistant** (gemessen auf einem Entwickler-PC):
+  je Poll und Router ein Durchlauf über Client-Liste und neue Logzeilen,
+  bei 1000 Clients unter 20 ms (bester Lauf 9 ms). Eine neue Datei
+  `.storage/openwrt_router.client_history`, Standardgrenze 3 MB (1–8 MB
+  einstellbar), geschrieben höchstens alle 300 s; 150 Clients × 30 Tage, alle
+  immer online, ergeben 2,5 MB, das Schreiben dauert dann etwa 22 ms. Das
+  Panel kostet nur bei offenem Tab: bei 150 Clients die Tabelle 0,26 s beim
+  ersten Abruf je Stunde, danach 0,11 s. An der Grenze von 1000 Clients
+  blockiert der erste Tabellenabruf je Stunde den Event-Loop etwa 1,4 s,
+  der AP-Vergleich 0,65–0,85 s, das erste Speichern mit Kürzen etwa 0,5 s.
+  Das Panel-Bundle wächst um 28,9 kB.
+- Die Reconnect-Zählung des v1.36-Sensors `unstable_clients` (Verbinden
+  innerhalb von 300 s nach einer Trennung am selben Router) bleibt unverändert; die Stabilitätsansicht zählt nur
+  Reconnect-Ereignisse aus dem Router-Log. Beide Zahlen können sich
+  unterscheiden.
+
 ## [1.41.0] - 2026-11-17
 
 ### Added

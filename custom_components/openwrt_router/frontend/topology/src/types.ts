@@ -464,3 +464,212 @@ export interface IntelSettingsResponse {
   routers: Array<{ id: string; name: string; maintenance: boolean }>;
   limits: { list_max: number; string_max: number };
 }
+
+// ── Client stability (B5 routes /intelligence/clients*) ─────────────────
+
+export type StabilityClass =
+  | 'very_stable' | 'stable' | 'noticeable' | 'unstable' | 'critical' | 'unknown';
+export type ClientState = 'online' | 'grace' | 'offline' | 'unknown';
+export type StabilityWindow = '1h' | '24h' | '7d' | '30d';
+
+export interface ClientLastDisconnect {
+  ts: number;
+  reason: string | null;
+  class: string | null;
+  timed: boolean;
+}
+
+export interface StabilityRow {
+  mac: string;
+  name: string | null;
+  ip: string | null;
+  private_mac: boolean;
+  router: string | null;
+  router_name: string | null;
+  band: string | null;
+  ssid: string | null;
+  state: ClientState;
+  rssi: number | null;
+  since: number | null;
+  last_seen: number | null;
+  score: number | null;
+  class: StabilityClass;
+  coverage: number | null;
+  availability_24h: number | null;
+  reconnects_24h: number | null;
+  last_disconnect: ClientLastDisconnect | null;
+  entity: boolean;
+  sleepy: boolean;
+  score_7d: number | null;
+  availability_7d: number | null;
+  trend: 'up' | 'down' | 'flat' | null;
+}
+
+export interface StabilityTable {
+  now: number;
+  enabled: boolean;
+  total: number;
+  clients: StabilityRow[];
+  next_cursor: string | null;
+  routers: Array<{ id: string; name: string }>;
+  ssids: string[];
+}
+
+export interface StabilityPart {
+  value: number | null;
+  coverage: number;
+  metric: number | null;
+  included: boolean;
+}
+
+export interface StabilityPoint {
+  t: number;
+  observed_s: number;
+  online_s: number;
+  gap_s: number;
+  disconnects: number;
+  infra: number;
+  reconnects: number;
+  rssi_mean: number | null;
+  rssi_min: number | null;
+  rssi_max: number | null;
+}
+
+export interface StabilitySegment {
+  start: number;
+  end: number;
+  state: 'online' | 'offline' | 'gap' | 'unknown';
+}
+
+export interface StabilityTransition {
+  ts: number;
+  kind: string;
+  router_name: string | null;
+  reason: string | null;
+  class: string | null;
+  incident_id: string | null;
+}
+
+export interface StabilityRecommendation {
+  key: string;
+  kind: 'observation' | 'hypothesis' | 'confirmed';
+  confidence: number | null;
+  subject: string;
+  params: Record<string, string | number>;
+}
+
+export interface ClientStabilityDetail {
+  now: number;
+  mac: string;
+  window: StabilityWindow;
+  live: {
+    state: ClientState;
+    since: number | null;
+    router_name: string | null;
+    band: string | null;
+    ssid: string | null;
+    rssi: number | null;
+    session_start: number | null;
+    first_seen: number | null;
+    last_seen: number | null;
+    last_disconnect: ClientLastDisconnect | null;
+    hostname: string | null;
+    ip: string | null;
+    private_mac: boolean;
+  };
+  score: {
+    score: number | null;
+    class: StabilityClass;
+    coverage: number | null;
+    parts: Record<string, StabilityPart>;
+  };
+  stats: {
+    coverage: number | null;
+    availability: number | null;
+    sessions: number;
+    longest_stable_s: number;
+    disconnects: Record<string, number>;
+    reconnects: number;
+    roams_in: number;
+    roam_flaps: number;
+    auth_fail: number;
+    dhcp_fail: number;
+    rssi_mean: number | null;
+    weak_share: number | null;
+    log_coverage: number | null;
+  };
+  series: StabilityPoint[];
+  score_series: Array<{ t: number; score: number | null; class: StabilityClass }>;
+  rssi: Array<{ t: number; rssi: number | null }>;
+  timeline: StabilitySegment[];
+  transitions: StabilityTransition[];
+  incidents: Array<{ incident_id: string; cause_status: string | null; cause: string | null }>;
+  attribution: {
+    attribution: string;
+    kind: string | null;
+    confidence: number | null;
+    infra: number;
+    client: number;
+    total: number;
+  };
+  patterns: {
+    time: { status: string; hours: Array<{ hour: number; hit_days: number; covered_days: number }> };
+    signal: { status: string; reason: string | null; delta_db: number | null };
+    ap: { status: string; worst_ap: string | null; best_ap: string | null };
+  };
+  recommendations: StabilityRecommendation[];
+  entity: boolean;
+  sleepy: boolean;
+}
+
+export interface StabilityApStats {
+  ap: string;
+  name: string;
+  status: string;
+  clients: number;
+  client_hours: number;
+  disconnects_per_100h: number | null;
+  reconnects_per_100h: number | null;
+  flaps_per_100h: number | null;
+  rssi_mean: number | null;
+  stability: number | null;
+  infra_disconnects: number;
+  low_basis: boolean;
+  rank: number | null;
+}
+
+export interface StabilityApView {
+  now: number;
+  window: StabilityWindow;
+  aps: StabilityApStats[];
+  ranking: string[];
+  recommendations: StabilityRecommendation[];
+}
+
+export interface StabilitySettings {
+  enabled: boolean;
+  retention_days: number;
+  entity_macs: string[];
+  sleepy_macs: string[];
+  max_store_mb: number;
+  [key: string]: unknown;
+}
+
+export interface StabilitySettingsResponse {
+  settings: StabilitySettings;
+  can_edit: boolean;
+  limits: {
+    entity_max: number;
+    sleepy_max: number;
+    retention_days_max: number;
+    store_mb_min: number;
+    store_mb_max: number;
+  };
+  status: {
+    clients: number;
+    store_bytes_last_save: number | null;
+    store_limit_bytes: number;
+    trimmed_for_size: number;
+    store_load_failed: boolean;
+  };
+}

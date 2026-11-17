@@ -70,7 +70,7 @@ except ImportError:  # pragma: no cover - older HA cores keyed the app by str
 _LOGGER = logging.getLogger(__name__)
 
 # Cache-busting query for the bundle URL — bump on every frontend rebuild.
-_PANEL_VERSION = "20261116-intel-p7r"
+_PANEL_VERSION = "20261117-client-stability"
 # Master flag: set ONLY after every registration step completed.  Until then,
 # a partial setup must still allow re-entry to register the missing pieces.
 _PANEL_REGISTERED_KEY = f"{DOMAIN}_panel_registered"
@@ -453,6 +453,9 @@ class OpenWrtIntelSettingsView(_IntelView):
 
 def _api_views() -> tuple[HomeAssistantView, ...]:
     """Every API view of the panel (bound once per HA session)."""
+    # Imported here: client_views builds on this module's base view.
+    from .client_views import client_api_views
+
     return (
         OpenWrtMeshSnapshotView(),
         OpenWrtIntelSummaryView(),
@@ -460,6 +463,7 @@ def _api_views() -> tuple[HomeAssistantView, ...]:
         OpenWrtIntelIncidentsView(),
         OpenWrtIntelIncidentView(),
         OpenWrtIntelSettingsView(),
+        *client_api_views(),
     )
 
 

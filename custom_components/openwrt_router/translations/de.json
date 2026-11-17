@@ -235,6 +235,28 @@
       },
       "fleet_incidents_active": {
         "name": "Aktive Incidents (alle Router)"
+      },
+      "client_stability_score": {
+        "name": "{client} Stabilitätswert"
+      },
+      "client_connection_quality": {
+        "name": "{client} Verbindungsqualität",
+        "state": {
+          "very_stable": "Sehr stabil",
+          "stable": "Stabil",
+          "noticeable": "Auffällig",
+          "unstable": "Instabil",
+          "critical": "Kritisch"
+        }
+      },
+      "client_reconnects_24h": {
+        "name": "{client} Neuverbindungen (24 h)"
+      },
+      "client_connection_uptime": {
+        "name": "{client} Verbindungsdauer"
+      },
+      "client_last_disconnect": {
+        "name": "{client} letzter Verbindungsabbruch"
       }
     },
     "switch": {

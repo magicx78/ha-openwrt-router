@@ -281,7 +281,7 @@ the router leaves the fleet score. No late alarms after it ends.
 A **Diagnose** tab in the topology panel (labels in German): *Übersicht* (scores, open
 incidents, events of the last 24 h), *Incidents* (with children, evidence, cause and
 recommendation), *Timeline* (filters: router, category, severity, period), *WLAN*,
-*Infrastruktur* and *Einstellungen*. Router nodes in the topology carry a warning badge that
+*Stabilität* (client stability, since 1.42.0), *Infrastruktur* and *Einstellungen*. Router nodes in the topology carry a warning badge that
 opens the Diagnose view of that router. Access follows the topology panel (admins, or all
 users with the option enabled).
 
@@ -318,6 +318,38 @@ download contains only counts, types, times and the score from this feature.
 - *No event for a client storm?* It was a child of a root (e.g. the AP went down), below
   `notify_min_severity`, or the router was in maintenance.
 - Authentication errors are not counted as an outage.
+
+### Client stability (since 1.42.0)
+
+A long-term history per Wi-Fi client: how stable is this device, since when, at which access
+point, and is the device or the network to blame? It adds **no router calls** (no ubus
+request, no SSH, no file read or exec, no ACL change); it reuses the client lists and log lines
+that Network Intelligence already evaluates. Full details:
+[docs/client-stability.md](docs/client-stability.md).
+
+- **Tolerant state per MAC:** roaming and a short absence are no disconnect (offline only
+  after 2 polls and at least 150 s in no list); an access point outage is a measurement gap,
+  never offline. Disconnects are classed by their log reason (`error`, `inactivity`, `leave`,
+  `unknown`, `infra`); those during a Network Intelligence root of the client's router count
+  as `infra` and raise no alarm of their own (port roots only behind the port, never for a
+  gateway's WAN port flap).
+- **Stability score** 0–100 from disconnects 30, reconnects 15, session length 15, signal 20,
+  authentication 10, roaming 5 and recurring patterns 5; *unknown*, never 100, without enough
+  data. Classes *very stable* … *critical*; devices can be marked *sleepy*.
+- **Patterns and recommendations:** disconnects at the same time of day, signal getting worse,
+  problems at one access point only; every recommendation is an observation, a hypothesis or
+  confirmed and comes with its numbers.
+- **AP comparison** per router and band over 24 h / 7 d / 30 d, per 100 client hours.
+- **Panel:** sub-tab *Stabilität* in *Diagnose* (table, detail with timeline and charts from
+  1 h to 30 d, AP comparison, settings).
+- **Entities only for picked clients** (up to 25): *stability score* and *connection quality*
+  (enabled), *reconnects (24 h)*, *connection uptime* and *last disconnect* (disabled).
+- **Storage:** `.storage/openwrt_router.client_history`, at most every 300 s, cap 3 MB
+  (1–8 MB); hour buckets 7 days, day buckets 30 days (up to 90).
+- **Load:** one pass per poll over the client list (below 20 ms at 1000 clients); 150 clients
+  × 30 days take 2.5 MB. The panel costs only while the tab is open; at 1000 clients its first
+  table request per hour blocks HA for about 1.4 s. Turn it off with `enabled: false` in the
+  tab's settings.
 
 ---
 

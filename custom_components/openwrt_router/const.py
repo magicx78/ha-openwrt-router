@@ -618,6 +618,26 @@ UID_FLEET_INCIDENTS_ACTIVE = f"{FLEET_UID_PREFIX}incidents_active"
 UID_FLEET_INCIDENT_CRITICAL = f"{FLEET_UID_PREFIX}incident_critical"
 
 # ---------------------------------------------------------------------------
+# Client stability (plan 2026-11-16-client-stability): history per client
+# ---------------------------------------------------------------------------
+# Own HA Store file (.storage/openwrt_router.client_history), own size cap.
+CLIENT_STORE_KEY = f"{DOMAIN}.client_history"
+CLIENT_STORE_VERSION = 1
+CLIENT_STORE_MINOR_VERSION = 1
+# At most one store write per this many seconds (nothing written unchanged).
+CLIENT_SAVE_DELAY_SECONDS = 300
+# Default size cap of the store file (settable 1..8 MB).
+CLIENT_MAX_STORE_MB = 3
+# Entities: at most this many selected clients, five sensors each.
+CLIENT_ENTITY_MAX = 25
+# Entity view and dispatcher update at most this often.
+CLIENT_PUBLISH_SECONDS = 60
+# Dispatcher signal: the client stability view changed.
+SIGNAL_CLIENT_STABILITY = f"{DOMAIN}_client_stability_updated"
+# Per-client sensors (unique_id f"{CLIENT_UID_PREFIX}{mac12}_{key}").
+CLIENT_UID_PREFIX = f"{DOMAIN}_client_"
+
+# ---------------------------------------------------------------------------
 # Realtime event stream (plan 2026-11-16-realtime-rca, RT2): ubus SSE
 # subscribe via uhttpd-mod-ubus (GET /ubus/subscribe/<object>).
 # ---------------------------------------------------------------------------
