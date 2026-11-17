@@ -43,6 +43,7 @@ from .api import (
     OpenWrtResponseError,
     OpenWrtTimeoutError,
 )
+from .client_engine import async_get_client_stability, async_unload_client_stability
 from .const import CONF_PROTOCOL, DEFAULT_PROTOCOL, DOMAIN, PROTOCOL_HTTP
 from .coordinator import OpenWrtCoordinator
 from .fleet import (
@@ -51,7 +52,6 @@ from .fleet import (
     usteer_node_info,
 )
 from .issues import async_clear_issue, ram_high_issue_id
-from .client_engine import async_get_client_stability, async_unload_client_stability
 from .net_engine import (
     async_get_net_intelligence,
     async_remove_router_data,

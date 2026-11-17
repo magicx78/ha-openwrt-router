@@ -464,7 +464,7 @@ async def test_observer_failure_does_not_reach_the_engine(
 @pytest.mark.asyncio
 async def test_store_round_trip_and_unload_flush(disk) -> None:
     hass = make_hass()
-    engine, cs = await setup(hass, "r1")
+    engine, _cs = await setup(hass, "r1")
     for k in range(3):
         engine.ingest("r1", data([client(M1)]), T0 + k * 60, interval=60.0)
     # one delayed write per window, with the planned delay

@@ -18,6 +18,7 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
 
 from . import OpenWrtConfigEntry
+from .client_engine import async_get_client_engine
 from .const import (
     DIAGNOSTICS_CLIENT_LISTS,
     DIAGNOSTICS_REDACT_KEYS,
@@ -26,7 +27,6 @@ from .const import (
     DOMAIN,
 )
 from .mac_utils import is_mac
-from .client_engine import async_get_client_engine
 from .net_engine import async_get_engine
 from .topology_ports import redacted_port_summary
 

@@ -453,6 +453,9 @@ class OpenWrtIntelSettingsView(_IntelView):
 
 def _api_views() -> tuple[HomeAssistantView, ...]:
     """Every API view of the panel (bound once per HA session)."""
+    # Imported here: client_views builds on this module's base view.
+    from .client_views import client_api_views
+
     return (
         OpenWrtMeshSnapshotView(),
         OpenWrtIntelSummaryView(),
@@ -460,6 +463,7 @@ def _api_views() -> tuple[HomeAssistantView, ...]:
         OpenWrtIntelIncidentsView(),
         OpenWrtIntelIncidentView(),
         OpenWrtIntelSettingsView(),
+        *client_api_views(),
     )
 
 

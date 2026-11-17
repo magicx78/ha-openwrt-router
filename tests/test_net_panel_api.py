@@ -221,7 +221,8 @@ async def test_post_routes_are_admin_only_even_when_open_to_all(
 
 def test_views_have_unique_names_under_the_panel_api() -> None:
     views = _api_views()
-    assert len({v.name for v in views}) == len(views) == 6
+    # 6 network intelligence views + 4 client stability views (B5)
+    assert len({v.name for v in views}) == len(views) == 10
     assert all(v.url.startswith("/api/openwrt_topology/") for v in views)
     assert all(v.requires_auth for v in views)
 

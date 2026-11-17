@@ -19,6 +19,7 @@ Privacy: log lines name no MAC, IP or hostname; diagnostics give counts.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import math
 import time
@@ -39,9 +40,12 @@ from .client_analysis import (
     PARTS,
     IncidentRef,
     ScoreResult,
+    ScoreSettings,
+    WindowStats,
     active_patterns,
     ap_pattern,
     collect_window,
+    collect_window_days,
     make_settings,
     score_window,
     signal_trend,
@@ -138,7 +142,7 @@ def _unique(values: list[str]) -> list[str]:
 
 
 def _descending(values: list[float]) -> list[float]:
-    if any(a <= b for a, b in zip(values, values[1:], strict=False)):
+    if any(a <= b for a, b in itertools.pairwise(values)):
         raise vol.Invalid("class thresholds must be strictly descending")
     return values
 
@@ -505,6 +509,8 @@ class ClientStability:
         self.entity_states: dict[str, ClientEntityState] = {}
         # MAC -> (hour index, active patterns) of the part W cache
         self._patterns: dict[str, tuple[int, int]] = {}
+        # MAC -> SSID of the last client list it was in (memory only)
+        self._ssid: dict[str, str] = {}
         self.last_save_bytes: int | None = None
         self.trimmed = 0
 
@@ -653,8 +659,10 @@ class ClientStability:
         self._log_cov[facts.router] = facts.log_coverage
         for mac in facts.exclude:
             self.history.forget(mac)
+            self._ssid.pop(mac, None)
         infra = self._infra(now, facts.auth_failed)
         self.history.ingest(poll_input(facts, interval=interval, infra=infra))
+        self._remember_ssids(facts)
         self.schedule_save()
         if (
             self._last_publish is None
@@ -679,6 +687,22 @@ class ClientStability:
         self._log_cov.pop(router, None)
         self.schedule_save()
 
+    def _remember_ssids(self, facts: PollFacts) -> None:
+        """SSID per listed client (memory only; bounded by the history)."""
+        for mac, client in (facts.context.clients or {}).items():
+            if mac in facts.exclude or not isinstance(client, Mapping):
+                continue
+            radio = client.get("radio")
+            _band, ssid, _phy = facts.context.iface(
+                radio if isinstance(radio, str) else None
+            )
+            if isinstance(ssid, str) and ssid:
+                self._ssid[mac] = ssid
+        if len(self._ssid) > len(self.history) + 64:
+            self._ssid = {
+                m: v for m, v in self._ssid.items() if self.history.live(m) is not None
+            }
+
     def _interval(self, router: str, now: float, configured: float) -> float:
         """The configured interval, or the observed one when polls run late
         (at most twice the configured one: a slow poll is no outage)."""
@@ -694,6 +718,14 @@ class ClientStability:
         return infra_roots(engine.machine.incidents(), now, auth_failed)
 
     # -- reading (views, entities) -------------------------------------------------------
+
+    def infra_routers(self, now: float) -> frozenset[str]:
+        """Routers with an NI root that explains disconnects there now."""
+        return frozenset(self._infra(now, frozenset()))
+
+    def ssid(self, mac: str) -> str | None:
+        """SSID of the last client list the client was in (None = unknown)."""
+        return self._ssid.get(mac)
 
     def log_coverage(self, router: str | None) -> float | None:
         """Log coverage of the router a client is on (None = unknown)."""
@@ -740,6 +772,19 @@ class ClientStability:
         compute_patterns: bool = True,
     ) -> ScoreResult | None:
         """Score of one client over the ``hours`` before ``end`` (or now)."""
+        found = self.window(mac, now, hours, end=end, compute_patterns=compute_patterns)
+        return found[1] if found is not None else None
+
+    def window(
+        self,
+        mac: str,
+        now: float,
+        hours: int = 24,
+        *,
+        end: float | None = None,
+        compute_patterns: bool = True,
+    ) -> tuple[WindowStats, ScoreResult] | None:
+        """Statistics and score of one client over ``hours`` hour buckets."""
         live = self.history.live(mac)
         if live is None:
             return None
@@ -754,11 +799,34 @@ class ClientStability:
         )
         if stats is None:
             return None
-        sleepy = live.mac in self.settings["sleepy_macs"]
-        settings = make_settings(
-            self.settings["weights"], self.settings["classes"], sleepy
+        return stats, score_window(stats, self.score_settings(live.mac))
+
+    def window_days(
+        self, mac: str, now: float, days: int = 30
+    ) -> tuple[WindowStats, ScoreResult] | None:
+        """Statistics and score of one client over ``days`` day buckets."""
+        live = self.history.live(mac)
+        if live is None:
+            return None
+        stats = collect_window_days(
+            self.history,
+            mac,
+            now,
+            days,
+            log_coverage=self.log_coverage(live.ap),
+            patterns=self.patterns(mac, now) or 0,
         )
-        return score_window(stats, settings)
+        if stats is None:
+            return None
+        return stats, score_window(stats, self.score_settings(live.mac))
+
+    def score_settings(self, mac: str) -> ScoreSettings:
+        """Weights, classes and the ``sleepy`` option of one client."""
+        return make_settings(
+            self.settings["weights"],
+            self.settings["classes"],
+            mac in self.settings["sleepy_macs"],
+        )
 
     @callback
     def _publish(self, now: float) -> None:
