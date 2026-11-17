@@ -185,8 +185,10 @@ export function ClientStabilityDetail({ api, mac, tick, nameOf, canEdit, onToggl
           {st!.memory_from != null && (
             <div className="settings-info">
               {(st!.rssi_n ?? 0) === 0
-                ? 'Keine Daten seit Neustart: Messwerte der letzten Stunde liegen nur im Speicher.'
-                : `Messwerte erst seit ${formatTs(st!.memory_from)} (Neustart); die Abdeckung dieser Stunde ist geringer.`}
+                ? `Keine Daten seit Neustart (${formatTs(st!.memory_from)}): Signal- und Log-Werte fehlen noch.`
+                : `Signal- und Log-Werte erst seit ${formatTs(st!.memory_from)} (Neustart).`}
+              {' '}Online-Zeiten sind gespeichert; Reconnects, Anmeldung und Roaming zählen im Score nur anteilig
+              (Datenbasis {pct(d.score.coverage)}).
             </div>
           )}
 
@@ -220,6 +222,9 @@ export function ClientStabilityDetail({ api, mac, tick, nameOf, canEdit, onToggl
               end={end}
               step={step}
             />
+            {win === '1h' && (
+              <div className="settings-info">Der Balken zeigt die laufende Uhrstunde, die Zahlen oben die letzten 60 Minuten.</div>
+            )}
             <CountBars points={countPoints(d, win, start)} start={start} end={end}
               step={win === '1h' ? 300 : step}
               note={win === '1h' ? 'Reconnects nur als Summe (keine Zeitpunkte je 5 min)' : st!.log_coverage ? undefined : 'Reconnects: kein Log'} />

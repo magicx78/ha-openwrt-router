@@ -69,6 +69,7 @@ from custom_components.openwrt_router.client_history import (
     SESSION_BIN_HOURS,
     TR_END,
     TR_MOVE,
+    TR_RESUME,
     TR_START,
     Bucket,
     ClientEvent,
@@ -1380,3 +1381,142 @@ def test_timeline_start_state_is_inferred_from_the_first_transition() -> None:
     trs = [Transition(T0 + 100, TR_END, AP1, "timeout", "error")]
     segments = ca.timeline_segments(trs, T0, T0 + 200, live)
     assert segments == [(T0, T0 + 100, "online"), (T0 + 100, T0 + 200, "offline")]
+
+
+# --- 1.43 review: gaps stay gaps, log parts after a restart ---------------------------
+
+M2 = "AA:BB:CC:00:00:02"
+
+
+def outage_history() -> tuple[ClientHistory, float]:
+    """AP1 lists M1 and M2 until T0+120, is stale until T0+720 (AP2 polls),
+    then lists only M1: M2's disconnect is dated back to the gap start."""
+    hist = ClientHistory()
+
+    def obs(*macs: str) -> tuple[ClientObs, ...]:
+        return tuple(ClientObs(m, "5g", -55) for m in macs)
+
+    for k in range(3):
+        hist.ingest(PollInput(AP1, T0 + k * 60, 60.0, True, obs(M1, M2)))
+    for k in range(10):
+        hist.ingest(PollInput(AP2, T0 + 125 + k * 60, 60.0, True, ()))
+    t = T0 + 720
+    while t <= T0 + 2460:
+        hist.ingest(PollInput(AP1, t, 60.0, True, obs(M1)))
+        t += 60
+    return hist, T0 + 2460
+
+
+def test_timeline_keeps_the_gap_when_the_disconnect_is_dated_into_it() -> None:
+    from custom_components.openwrt_router.client_views import _timeline
+
+    hist, now = outage_history()
+    live = hist.live(M2)
+    assert live.state == "offline"
+    trs = hist.transitions(M2)
+    expected = [
+        (now - 3600, T0, "unknown"),
+        (T0, T0 + 120, "online"),
+        (T0 + 120, T0 + 720, "gap"),
+        (T0 + 720, now, "offline"),
+    ]
+    assert ca.timeline_segments(trs, now - 3600, now, live) == expected
+    assert [
+        (s["start"], s["end"], s["state"])
+        for s in _timeline(trs, now - 3600, now, live)
+    ] == expected
+
+
+def test_trailing_hour_of_the_outage_matches_the_buckets() -> None:
+    hist, now = outage_history()
+    win = ca.collect_trailing_hour(hist, M2, now)
+    tot = collect_window(hist, M2, now, 24).bucket  # whole history in the 24 h buckets
+    assert (
+        (win.bucket.online_s, win.bucket.observed_s, win.bucket.gap_s)
+        == (
+            tot.online_s,
+            tot.observed_s,
+            tot.gap_s,
+        )
+        == (120, 1860, 600)
+    )
+    assert win.availability == pytest.approx(120 / 1860, abs=0.001)
+
+
+def test_timeline_starting_with_a_resume_continues_after_the_gap() -> None:
+    """The ``gap`` of the first stored ``resume`` was pruned."""
+    online = [
+        Transition(T0 + 100, TR_RESUME, AP1),
+        Transition(T0 + 150, TR_END, AP1, "timeout", "error"),
+    ]
+    assert ca.timeline_segments(online, T0, T0 + 200, None) == [
+        (T0, T0 + 100, "gap"),
+        (T0 + 100, T0 + 150, "online"),
+        (T0 + 150, T0 + 200, "offline"),
+    ]
+    # the disconnect dated into the pruned gap: offline after the resume
+    backdated = [
+        Transition(T0 + 100, TR_RESUME, AP1),
+        Transition(T0 + 50, TR_END, AP1, None, "unknown", timed=False),
+    ]
+    assert ca.timeline_segments(backdated, T0, T0 + 200, None) == [
+        (T0, T0 + 100, "gap"),
+        (T0 + 100, T0 + 200, "offline"),
+    ]
+    # nothing after the resume: the live state decides
+    hist = ClientHistory()
+    online_for(hist, T0 - 600, T0 + 200)
+    only = [Transition(T0 + 100, TR_RESUME, AP1)]
+    assert ca.timeline_segments(only, T0, T0 + 200, hist.live(M1)) == [
+        (T0, T0 + 100, "gap"),
+        (T0 + 100, T0 + 200, "online"),
+    ]
+
+
+def reconnecting_client() -> ClientHistory:
+    """M1 online for 2 h with a reconnect and two failed logins every 2
+    minutes in the last hour."""
+    hist = ClientHistory()
+    t = T0 - 7200
+    k = 0
+    while t <= T0:
+        events: tuple[ClientEvent, ...] = ()
+        if t > T0 - 3600 and k % 2 == 0:
+            events = (
+                ClientEvent(M1, "reconnect", t - 10, AP1),
+                ClientEvent(M1, "auth_fail", t - 5, AP1, count=2),
+            )
+        obs = (ClientObs(M1, "5g", -50),)
+        hist.ingest(PollInput(AP1, t, 60.0, True, obs, events))
+        t += 60
+        k += 1
+    return hist
+
+
+def test_log_parts_are_left_out_right_after_a_restart() -> None:
+    settings = make_settings()
+    hist = reconnecting_client()
+    before = score_window(
+        ca.collect_trailing_hour(hist, M1, T0, log_coverage=1.0), settings
+    )
+    assert before.parts[PART_R].included and before.parts[PART_R].value < 10
+    assert before.parts[PART_A].included and before.parts[PART_A].value < 10
+    # HA restarts: the event ring (memory only) is empty
+    loaded = ClientHistory.from_dict(hist.to_dict())
+    later = T0 + 60
+    loaded.ingest(PollInput(AP1, later, 60.0, True, (ClientObs(M1, "5g", -50),)))
+    win = ca.collect_trailing_hour(
+        loaded, M1, later, memory_from=later - 30, log_coverage=1.0
+    )
+    assert win.log_coverage == pytest.approx(30 / 3600)
+    after = score_window(win, settings)
+    # no event since the restart is no proof of a clean hour: the log based
+    # parts are left out instead of counting as perfect
+    for part in (PART_R, PART_A, PART_M):
+        assert after.parts[part].included is False
+    assert after.coverage < before.coverage
+    # once the event ring covers the hour again, the log parts count fully
+    again = ca.collect_trailing_hour(
+        loaded, M1, later, memory_from=later - 3600, log_coverage=1.0
+    )
+    assert again.log_coverage == 1.0

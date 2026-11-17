@@ -955,11 +955,12 @@ async def test_trailing_hour_marks_the_memory_start_after_a_restart(disk) -> Non
     await async_unload_net_intelligence(hass, "r1")
     await async_unload_client_stability(hass)
 
-    engine2, cs2 = await setup(make_hass(), "r1")
     later = now + 60
+    with patch.object(client_engine, "_wall_clock", return_value=later - 20):
+        engine2, cs2 = await setup(make_hass(), "r1")
     engine2.ingest("r1", data([client(M1)]), later, interval=60.0)
     stats2, _result = cs2.window_trailing_hour(M1, later)
-    assert stats2.memory_from == later  # samples only since the restart
+    assert stats2.memory_from == later - 20  # samples only since the load
     assert stats2.bucket.rssi_n == 1
     assert stats2.bucket.online_s == pytest.approx(3600, abs=1)
     assert cs2.window_trailing_hour("02:00:5E:10:00:99", later) is None
@@ -981,3 +982,23 @@ async def test_week_values_are_cached_per_hour(disk) -> None:
     cs.update_settings({"classes": [95, 80, 60, 30]})
     assert cs.week_values(M1, now) is not again  # settings change the score
     assert cs.week_values("02:00:5E:10:00:99", now) is None
+
+
+@pytest.mark.asyncio
+async def test_memory_start_is_set_when_the_store_loads(disk) -> None:
+    """Before the first poll after a restart the 1 h view already names the
+    restart (HA downtime is not shown as fully measured)."""
+    hass = make_hass()
+    engine, _cs = await setup(hass, "r1")
+    for k in range(90):
+        engine.ingest("r1", data([client(M1)]), T0 + k * 60, interval=60.0)
+    now = T0 + 89 * 60
+    await async_unload_net_intelligence(hass, "r1")
+    await async_unload_client_stability(hass)
+
+    loaded = now + 600  # HA was down for 10 minutes
+    with patch.object(client_engine, "_wall_clock", return_value=loaded):
+        _engine2, cs2 = await setup(make_hass(), "r1")
+    stats, _result = cs2.window_trailing_hour(M1, loaded + 30)  # no poll yet
+    assert stats.memory_from == loaded
+    assert stats.bucket.rssi_n == 0

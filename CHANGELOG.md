@@ -18,7 +18,7 @@ All notable changes to the OpenWrt Router integration will be documented in this
   DHCP (Definition in `docs/client-stability.md`).
 - **Echte letzte 60 Minuten.** Das 1-h-Fenster ist jetzt die tatsächliche
   letzte Stunde statt der angebrochenen Uhrstunde. Nach einem Neustart sagt
-  das Panel *keine Daten seit Neustart* oder *Messwerte erst seit …*.
+  das Panel *keine Daten seit Neustart* oder *Signal- und Log-Werte erst seit …*.
 - **Grober Verlauf für 7 und 30 Tage:** je Stunde bzw. Tag die Anteile
   online, offline, Messlücke (schraffiert) und unbekannt, nie als offline
   dargestellt, mit Abbruch-Markern je Abschnitt; Hinweis *genaue Zeitpunkte
@@ -45,6 +45,13 @@ All notable changes to the OpenWrt Router integration will be documented in this
   Problem-Abbrüchen je 24 h (bei mindestens 30 % schwachem Signal).
 - Das 24-h-Fenster bleibt an Stunden ausgerichtet (23 volle Stunden plus die
   laufende); die Antwort nennt den wirklichen Beginn (`stats.start`).
+- In der 24-h-Zeitleiste wird die Zeit vor dem ersten gespeicherten
+  Verbindungswechsel jetzt aus diesem Wechsel oder dem aktuellen Zustand
+  abgeleitet, statt als unbekannt zu erscheinen. Eine Messlücke bleibt
+  Messlücke, auch wenn ein Abbruch auf ihren Beginn zurückdatiert wird.
+- Direkt nach einem Neustart zählen Reconnects, Anmeldung und Roaming im
+  1-h-Score nur anteilig (das Ereignis-Gedächtnis beginnt beim Laden); in
+  den ersten 18 Minuten fallen sie ganz heraus.
 - Ein Client mit wechselnder privater MAC bleibt je MAC ein eigener Client;
   das ist jetzt getestet und dokumentiert.
 - **Last** (Entwickler-PC): je Poll unverändert (1000 Clients, bester Lauf
@@ -52,7 +59,7 @@ All notable changes to the OpenWrt Router integration will be documented in this
   Client für die SSID (1000 Clients: 735 kB → 770 kB). Sortieren nach
   7-Tage-Verfügbarkeit oder Trend kostet bei 150 Clients × 30 Tage
   0,33–0,37 s beim ersten Abruf je Stunde, danach etwa 0,05 s. Das
-  Panel-Bundle wächst um 12,0 kB.
+  Panel-Bundle wächst um 12,2 kB.
 - Gespeicherte Daten von 1.42.0 werden ohne Verlust gelesen; 1.42.0 liest
   auch Dateien von 1.43.0 (Rückweg möglich). Entity-IDs bleiben gleich.
 

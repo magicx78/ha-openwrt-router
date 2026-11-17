@@ -131,6 +131,13 @@ _TRIM_KEEP_HOURS = 48
 # [CS 1.43] The last SSID per client is stored (one short string per client;
 # 802.11 SSIDs have at most 32 bytes, so at most 32 characters).
 SSID_MAX_LEN = 32
+
+
+def _wall_clock() -> float:
+    """Wall time at store load (a function so tests can set it)."""
+    return time.time()
+
+
 _MB = 1_000_000
 
 
@@ -563,6 +570,9 @@ class ClientStability:
                 self.load_failed = True
             if stored:
                 self._restore(stored)
+            # [CS 1.43] the memory-only rings start empty here, not at the
+            # first poll: until then the 1 h view says so too
+            self._memory_from = _wall_clock()
             if self.load_failed:
                 await self._async_backup()
             self.loaded = True

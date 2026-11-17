@@ -533,15 +533,35 @@ _LIVE_SEGMENT = {
     STATE_OFFLINE: SEG_OFFLINE,
     STATE_UNKNOWN: SEG_GAP,
 }
-# State before a transition of this kind (the first stored one).
+# State before a transition of this kind (the first stored one). A
+# ``resume`` without its ``gap`` is handled by :func:`_open_gap_state`.
 _BEFORE = {
     TR_START: SEG_OFFLINE,
     TR_END: SEG_ONLINE,
     TR_GAP: SEG_ONLINE,
-    TR_RESUME: SEG_GAP,
     TR_MOVE: SEG_ONLINE,
     TR_BLIP: SEG_ONLINE,
 }
+
+
+def _open_gap_state(trs: list[Transition], live: ClientLive | None) -> str | None:
+    """State after the first ``resume`` when the window starts inside a gap
+    (its ``gap`` was pruned: a ``resume`` comes before any ``gap``); None
+    when the window does not start inside a gap.
+
+    The state comes from the first transition after the resume, else from
+    the live state."""
+    first = next(
+        (i for i, tr in enumerate(trs) if tr.kind in (TR_GAP, TR_RESUME)), None
+    )
+    if first is None or trs[first].kind != TR_RESUME:
+        return None
+    for tr in trs[first + 1 :]:
+        if tr.kind in _BEFORE:
+            return _BEFORE[tr.kind]
+    if live is None:
+        return SEG_UNKNOWN
+    return _LIVE_SEGMENT.get(live.state, SEG_UNKNOWN)
 
 
 def timeline_segments(
@@ -558,10 +578,17 @@ def timeline_segments(
     no transitions at all it is the live state since ``live.since``. Time
     before the first sighting, and before ``live.since`` when there are no
     transitions, is ``unknown``.
+
+    A gap stays a gap: a ``start`` or ``end`` inside an open gap (an end is
+    dated back to the gap start when the client is gone after it) only sets
+    the state that follows the ``resume``, as in the buckets.
     """
     trs = sorted(transitions, key=lambda tr: tr.ts)
     floor = start
-    if trs:
+    after_gap = _open_gap_state(trs, live)
+    if after_gap is not None:
+        state = SEG_GAP
+    elif trs:
         state = _BEFORE.get(trs[0].kind, SEG_UNKNOWN)
     elif live is not None and live.first_seen is not None:
         state = _LIVE_SEGMENT.get(live.state, SEG_UNKNOWN)
@@ -573,16 +600,21 @@ def timeline_segments(
         floor = max(floor, live.first_seen)
     current = state
     changes: list[tuple[float, str]] = []
-    before_gap = state
+    in_gap = after_gap is not None
+    before_gap = after_gap if after_gap is not None else state
     for tr in trs:
-        if tr.kind == TR_START:
-            state = SEG_ONLINE
-        elif tr.kind == TR_END:
-            state = SEG_OFFLINE
+        if tr.kind in (TR_START, TR_END):
+            new = SEG_ONLINE if tr.kind == TR_START else SEG_OFFLINE
+            if in_gap:
+                before_gap = new
+                continue
+            state = new
         elif tr.kind == TR_GAP:
-            before_gap, state = state, SEG_GAP
+            if not in_gap:
+                before_gap = state
+            in_gap, state = True, SEG_GAP
         elif tr.kind == TR_RESUME:
-            state = before_gap
+            in_gap, state = False, before_gap
         else:
             continue
         changes.append((tr.ts, state))
@@ -648,6 +680,13 @@ def collect_trailing_hour(
         return None
     start = now - _HOUR
     begin = max(start, live.first_seen) if live.first_seen is not None else start
+    memory = memory_from if memory_from is not None and memory_from > start else None
+    if memory is not None and log_coverage is not None:
+        # [CS 1.43] log events are only known since the restart: the log
+        # based parts (reconnects, auth, roaming) get the share of the hour
+        # the event ring covers, so they drop out (< PART_MIN_COVERAGE) in
+        # the first 18 minutes and weigh less until the hour is full.
+        log_coverage *= max(0.0, now - memory) / _HOUR
     trs = history.transitions(mac)
     seconds: dict[str, float] = {}
     for a, b, state in timeline_segments(trs, start, now, live):
@@ -687,9 +726,7 @@ def collect_trailing_hour(
         patterns=patterns,
         data_days=data_days(history, mac),
         start=start,
-        memory_from=(
-            memory_from if memory_from is not None and memory_from > start else None
-        ),
+        memory_from=memory,
     )
 
 

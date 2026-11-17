@@ -34,7 +34,7 @@ after each poll.
 | HA, store write | at most every 300 s; builds the payload from packed strings | 150 clients × 30 d: ~22 ms; 1000 clients: ~100 ms, the first save that has to trim ~0.5 s |
 | Disk | one extra file `.storage/openwrt_router.client_history`, default cap 3 MB (1–8 MB) | 150 clients × 30 d, all always online: 2.5 MB; since 1.43 about 30–35 bytes more per client for the last SSID |
 | HA, panel request | only while the *Stabilität* tab is open, at most every 60 s | 150 clients × 30 d: table 262 ms first / 107 ms after, sorted by 7-day availability or trend 330–370 ms first / ~50 ms in the same hour, AP view 114 ms, detail ≤ 9 ms |
-| Browser | panel bundle +28.9 kB (1.42), +12.0 kB (1.43) | – |
+| Browser | panel bundle +28.9 kB (1.42), +12.2 kB (1.43) | – |
 
 At the client limit (1000 clients × 30 days) the first table request of each hour takes about
 1.4 s (it computes the hourly patterns of every client; later requests in that hour take about
@@ -92,8 +92,17 @@ Every client has a state:
 
 The detail answer carries `stats.start`, the start of the window it really covers. After an
 HA restart the 1 h window has no ring data from before the restart: `stats.memory_from` then
-names the first poll after the restart, and the panel says *keine Daten seit Neustart*
-(no sample yet) or *Messwerte erst seit …* (reduced coverage).
+names the moment the store was loaded, and the panel says *keine Daten seit Neustart* (no
+sample yet) or *Signal- und Log-Werte erst seit …*. Online time comes from the stored
+transitions and stays complete, but log events (reconnects, failed logins, roam flaps) are
+only known since the load: the log coverage of the 1 h window is scaled by the share of the
+hour since then, so these score parts drop out in the first 18 minutes (coverage < 0.3) and
+weigh less until the hour is full. The shown *Datenbasis* of the score drops accordingly.
+
+In the timeline a measurement gap stays a gap: a disconnect dated back to the gap start
+(the client was gone when the access point came back) turns into offline only after the
+gap. Time before the first stored transition is inferred from that transition, or from the
+live state when the first stored transition ends a gap whose start was already deleted.
 
 For each window the panel shows:
 

@@ -34,6 +34,10 @@ B1–B9 auf `claude/client-stability-f9a22b`. Nutzerdoku: `docs/client-stability
 - [ ] **Muster beim Stundenwechsel vorberechnen** (der Tabellenabruf mit
       1000 Clients blockiert sonst etwa 1,4 s, weil er die Stundenmuster
       aller Clients rechnet).
+- [ ] **7-Tage-Werte beim Stundenwechsel vorberechnen** (1.43, Review
+      LOW-2): der erste Tabellenabruf je Stunde, sortiert nach
+      7-Tage-Verfügbarkeit oder Trend, läuft bei 150 Clients etwa 0,46 s im
+      Event-Loop.
 - [ ] **`infra` je Radio statt je Router** bei `wifi_radio_change`: heute
       markiert ein Kanalwechsel 300 s lang den ganzen Router. Braucht in
       `client_history.py` eine `infra`-Zuordnung je Router und Radio.
