@@ -456,6 +456,12 @@ def unpack_bucket(packed: Any) -> list[float] | None:
     return out
 
 
+def _observed(packed: str) -> bool:
+    """Whether a packed row has observed time (reads the first field only)."""
+    head = packed.partition(",")[0]
+    return bool(head) and round(float(head)) > 0
+
+
 def _bucket(values: list[float]) -> Bucket:
     return Bucket(*(round(v) for v in values))
 
@@ -786,14 +792,20 @@ class ClientHistory:
         )
 
     def hours(
-        self, mac: str, first: int | None = None, last: int | None = None
+        self,
+        mac: str,
+        first: int | None = None,
+        last: int | None = None,
+        *,
+        open_only: bool = False,
     ) -> list[HourBucket]:
-        """Hour buckets (closed and open) with ``first <= hour <= last``."""
+        """Hour buckets (closed and open) with ``first <= hour <= last``;
+        ``open_only`` skips the closed ones without unpacking them."""
         c = self._get(mac)
         if c is None:
             return []
         out: list[HourBucket] = []
-        for (hour, ap), packed in c.closed.items():
+        for (hour, ap), packed in () if open_only else c.closed.items():
             if not _in(hour, first, last):
                 continue
             values = unpack_bucket(packed)
@@ -819,6 +831,56 @@ class ClientHistory:
         ]
         out.sort(key=lambda b: (b.day, b.ap))
         return out
+
+    def span(self, mac: str, first: int, last: int) -> list[tuple[str, Bucket]]:
+        """(AP, bucket) pairs covering the hours ``first..last``.
+
+        Whole UTC days inside the range come from their day bucket (the
+        closed hours folded with the same merge as :func:`sum_buckets`); the
+        edge hours and every open hour come from the hour buckets. Merged per
+        AP this equals :meth:`hours` but unpacks far fewer rows; after
+        :meth:`trim_closed_hours` the whole days keep their data.
+        """
+        c = self._get(mac)
+        if c is None:
+            return []
+        day_first, day_last = -(-first // 24), (last + 1) // 24 - 1
+        out: list[tuple[str, Bucket]] = []
+        for (day, ap), packed in c.days.items():
+            if not day_first <= day <= day_last:
+                continue
+            if (values := unpack_bucket(packed)) is not None:
+                out.append((ap, _bucket(values)))
+        for (hour, ap), packed in c.closed.items():
+            if not first <= hour <= last or day_first <= hour // 24 <= day_last:
+                continue
+            if (values := unpack_bucket(packed)) is not None:
+                out.append((ap, _bucket(values)))
+        out.extend(
+            (ap, _bucket(values))
+            for (hour, ap), values in c.open.items()
+            if first <= hour <= last
+        )
+        return out
+
+    def observed_days(self, mac: str) -> int:
+        """UTC days with observed time (day buckets, closed and open hours).
+
+        Reads only the leading ``observed_s`` field of the packed rows (they
+        are validated on load and written by :func:`pack_bucket`), so no
+        bucket is unpacked just to count days.
+        """
+        c = self._get(mac)
+        if c is None:
+            return 0
+        days = {day for (day, _ap), packed in c.days.items() if _observed(packed)}
+        days.update(
+            hour // 24 for (hour, _ap), packed in c.closed.items() if _observed(packed)
+        )
+        days.update(
+            hour // 24 for (hour, _ap), values in c.open.items() if round(values[0]) > 0
+        )
+        return len(days)
 
     def day_meta(self, mac: str) -> dict[int, DayMeta]:
         """Coverage mask and disconnect histogram per UTC day."""

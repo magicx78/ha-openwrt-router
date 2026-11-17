@@ -447,9 +447,8 @@ def _day_series(cs: ClientStability, mac: str, first_day: int) -> list[dict[str,
     grouped: dict[int, list[tuple[str, Bucket]]] = {}
     for d in cs.history.days(mac, first_day):
         grouped.setdefault(d.day, []).append((d.ap, d.bucket))
-    for h in cs.history.hours(mac, first_day * 24):
-        if not h.closed:
-            grouped.setdefault(h.hour // 24, []).append((h.ap, h.bucket))
+    for h in cs.history.hours(mac, first_day * 24, open_only=True):
+        grouped.setdefault(h.hour // 24, []).append((h.ap, h.bucket))
     return [
         _point(day * _DAY, sum_buckets(b for _ap, b in items), (a for a, _b in items))
         for day, items in sorted(grouped.items())
@@ -522,7 +521,7 @@ def _day_scores(
 def _bucket_of(cs: ClientStability, mac: str, day: int) -> Bucket:
     items = [d.bucket for d in cs.history.days(mac, day, day)]
     items += [
-        h.bucket for h in cs.history.hours(mac, day * 24, day * 24 + 23) if not h.closed
+        h.bucket for h in cs.history.hours(mac, day * 24, day * 24 + 23, open_only=True)
     ]
     return sum_buckets(items)
 

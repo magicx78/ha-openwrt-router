@@ -471,7 +471,7 @@ def collect_window(
     last = math.ceil(end / _HOUR) - 1
     first = last - hours + 1
     start = first * _HOUR
-    bucket = sum_buckets(b.bucket for b in history.hours(mac, first, last))
+    bucket = sum_buckets(b for _ap, b in history.span(mac, first, last))
     return _stats(
         history,
         mac,
@@ -501,7 +501,7 @@ def collect_window_days(
     days = max(1, int(days))
     first_day = int(now // _DAY) - days + 1
     closed = [b.bucket for b in history.days(mac, first_day)]
-    open_hours = [b.bucket for b in history.hours(mac, first_day * 24) if not b.closed]
+    open_hours = [b.bucket for b in history.hours(mac, first_day * 24, open_only=True)]
     bucket = sum_buckets([*closed, *open_hours])
     return _stats(
         history,
@@ -573,10 +573,8 @@ def session_lengths(
 
 
 def data_days(history: ClientHistory, mac: str) -> int:
-    """Days with observed time (from day buckets and open hours)."""
-    days = {d.day for d in history.days(mac) if d.bucket.observed_s > 0}
-    days |= {h.hour // 24 for h in history.hours(mac) if h.bucket.observed_s > 0}
-    return len(days)
+    """Days with observed time (from day buckets and hours)."""
+    return history.observed_days(mac)
 
 
 # --- Time pattern (plan 5) -------------------------------------------------------
@@ -699,9 +697,7 @@ def daily_by_ap(history: ClientHistory, mac: str) -> dict[int, dict[str, Bucket]
     out: dict[int, dict[str, Bucket]] = {}
     for d in history.days(mac):
         out.setdefault(d.day, {})[d.ap] = d.bucket
-    for h in history.hours(mac):
-        if h.closed:
-            continue
+    for h in history.hours(mac, open_only=True):
         per_ap = out.setdefault(h.hour // 24, {})
         prev = per_ap.get(h.ap)
         per_ap[h.ap] = h.bucket if prev is None else sum_buckets([prev, h.bucket])
@@ -1212,8 +1208,8 @@ def window_ap_buckets(
     hours = 24 if window == WINDOW_24H else 168
     last = math.ceil(now / _HOUR) - 1
     grouped: dict[str, list[Bucket]] = {}
-    for h in history.hours(mac, last - hours + 1, last):
-        grouped.setdefault(h.ap, []).append(h.bucket)
+    for ap, bucket in history.span(mac, last - hours + 1, last):
+        grouped.setdefault(ap, []).append(bucket)
     return {ap: sum_buckets(items) for ap, items in grouped.items()}
 
 
@@ -1526,10 +1522,10 @@ def ap_reconnects(
     first = last - max(1, min(int(hours), 168)) + 1
     out: dict[str, dict[str, int]] = {}
     for mac in history.macs() if macs is None else macs:
-        for h in history.hours(mac, first, last):
-            if h.ap and h.bucket.reconnects > 0:
-                per = out.setdefault(h.ap, {})
-                per[mac] = per.get(mac, 0) + int(h.bucket.reconnects)
+        for ap, bucket in history.span(mac, first, last):
+            if ap and bucket.reconnects > 0:
+                per = out.setdefault(ap, {})
+                per[mac] = per.get(mac, 0) + int(bucket.reconnects)
     return out
 
 
