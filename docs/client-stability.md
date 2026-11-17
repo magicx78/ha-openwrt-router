@@ -1,4 +1,4 @@
-# Client Stability (1.43.0)
+# Client Stability (1.43.1)
 
 This builds on [Network Intelligence](network-intelligence.md). It keeps a long-term history
 per Wi-Fi client and answers: *how stable is this device, since when, at which access point,
@@ -71,6 +71,10 @@ Every client has a state:
   port flap on the gateway never makes the gateway's clients `infra`. An `infra` disconnect
   carries the root's incident ID.
 - **Reconnects** come only from the Network Intelligence `wifi.reconnect` events (router log).
+  A reconnect is a short re-login that does **not** end the session, so a client can have
+  reconnects and no disconnect at all; a disconnect needs the client to stay away past the
+  offline rule. The detail view says so next to the figure: *Reconnects stammen aus dem
+  Router-Log; kurze Neuanmeldungen beenden keine Sitzung.*
 - **IP visible** (DHCP lease or ARP entry) is counted separately and never mixed with
   availability.
 - **A client that changes its MAC is a new client.** Phones with a private MAC per network,
@@ -182,6 +186,10 @@ clients, client hours, mean stability (weighted by client hours), disconnects, r
 failed authentication and roams in and out **per 100 client hours**, `infra` disconnects,
 RSSI mean and weak share. Values appear only from 10 client hours on (else *zu wenig Daten*);
 below 5 events the panel says *geringe Datenbasis*. There is no ranking by absolute counts.
+The list is in rank order (since 1.43.1): rank 1 has the fewest disconnects per 100 client
+hours; access points without a rank (under 10 client hours) follow by name and show *–*.
+The panel writes every rate with its unit (*5,4 Abbrüche/100 h*) and all numbers with a
+German decimal comma.
 
 ## Recommendations
 
@@ -210,7 +218,9 @@ A sub-tab of **Diagnose** in the topology panel (labels in German):
   search; sorting by score, 24 h availability (both directions), 7-day availability, trend,
   reconnects, last problem, last disconnect, coverage, access point (both directions) and
   name; "Weitere laden" loads the next 100. The column *last problem* shows the newest
-  disconnect or failed authentication, association or DHCP. A click opens the detail.
+  disconnect or failed authentication, association or DHCP (cut with "…" when narrow; the
+  tooltip has the full text). The *Trend* column shows the arrow of the trend sort (score
+  against the 24 h before, ±10 points); *–* means too little data. A click opens the detail.
 - **Detail** (1 h, 24 h, 7 d, 30 d): the figures and charts listed under
   [Windows and figures](#windows-and-figures), score parts, patterns and recommendations.
   Admins can switch the entities and the *sleepy* mark of the client here.
@@ -221,7 +231,9 @@ A sub-tab of **Diagnose** in the topology panel (labels in German):
   store status.
 
 The tab loads data when it opens, when the window changes and at most every 60 s while it is
-open. On phones the table becomes cards.
+open. On phones the table becomes cards and the filter selects fold behind a *Filter*
+button that shows how many are set (below 760 px). Below 420 px the panel's side navigation
+becomes a tab bar at the bottom, so *Diagnose → Stabilität* stays reachable.
 
 ## Entities
 
@@ -317,6 +329,9 @@ log lines contain no client data.
   (2 polls, at least 150 s) is a blip.
 - *Score unknown?* Less than half of the weighted parts have enough data, for example right
   after the start, for a sleeping device or without a readable router log.
+- *Reconnects but no disconnects?* That is expected: a reconnect is a short re-login seen in
+  the router log and does not end the session; only a client that stays away past the
+  offline rule counts as a disconnect.
 - *Why are the reconnects different from `unstable_clients`?* The v1.36 count behind the
   router sensor `unstable_clients` stays as it was (a connect within 300 s after a disconnect
   on the same router). The stability view counts only

@@ -2,6 +2,37 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [1.43.1] - 2026-11-17
+
+Reine Panel-Korrekturen am Tab *Diagnose → Stabilität*; keine neuen
+Router-Abfragen, Entitäten und Sensorwerte unverändert.
+
+### Fixed
+
+- **Deutsche Zahlen im ganzen Tab.** Alle Zahlen (Liste, Detail,
+  AP-Vergleich, Einstellungen, Empfehlungen) laufen über eine Hilfsfunktion
+  mit Dezimalkomma: aus „5.404 Abbrüche“ wird „5,4 Abbrüche/100 h“, aus
+  „Speicher: 0.11 MB“ wird „0,11 MB“. Raten haben eine Nachkommastelle und
+  die Einheit „/100 h“, Signal ganze dBm, Zähler ganze Zahlen.
+- **AP-Vergleich in Rangfolge.** Die Liste kam nach interner AP-Kennung
+  sortiert, die Rangnummer zählt aber nach den wenigsten Abbrüchen je
+  100 Client-Stunden; die Liste folgt jetzt dem Rang. APs mit zu wenig Daten
+  (unter 10 Client-Stunden) stehen danach, nach Namen sortiert, mit „–“.
+- **Einstellungen:** Score-Gewichte und Klassengrenzen überlappen am Desktop
+  nicht mehr; jedes Feld steht unter seiner Beschriftung in seiner Zelle.
+- **Client-Liste:** Kopfzeile am Desktop (Name, Access Point, Zustand,
+  Score, Verfügbarkeit 24 h / 7 Tage, Reconnects 24 h, letztes Problem,
+  Datenabdeckung, Trend) und eine eigene Trend-Spalte aus denselben Werten
+  wie die Trend-Sortierung, mit Text für Screenreader; „–“ heißt zu wenig
+  Daten. Das letzte Problem wird bei Platzmangel mit „…“ gekürzt (voller
+  Text im Tooltip) und überlappt die Nachbarspalte nicht mehr.
+- **Reconnects ohne Abbrüche** sind kein Widerspruch: das Detail sagt jetzt
+  neben der Zahl, dass Reconnects aus dem Router-Log stammen und kurze
+  Neuanmeldungen keine Sitzung beenden.
+- **Handy:** unter 760 px liegen die sechs Filter hinter einem
+  „Filter“-Knopf (zeigt, wie viele gesetzt sind); unter 420 px wird die
+  Seitennavigation zur Leiste unten, damit *Diagnose* erreichbar bleibt.
+
 ## [1.43.0] - 2026-11-17
 
 ### Added

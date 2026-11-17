@@ -48,8 +48,25 @@ export function bandLabel(band: string | null | undefined): string {
   return band ? BAND_LABEL[band] ?? band : '–';
 }
 
+/**
+ * German number (comma decimal, dot thousands) with exactly `digits`
+ * decimals; '–' when unknown. Every number of the stability tab goes
+ * through here so "5.404" never means 5,4.
+ */
+export function num(value: number | null | undefined, digits = 0): string {
+  if (value == null || !Number.isFinite(value)) return '–';
+  const scale = 10 ** digits;
+  const rounded = Math.round(value * scale) / scale || 0; // no "-0"
+  return rounded.toLocaleString('de-DE', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+/** Rate per 100 client hours with its unit, e.g. "5,4 Abbrüche/100 h". */
+export function per100h(value: number | null | undefined, what: string): string {
+  return `${num(value, 1)} ${what}/100 h`;
+}
+
 export function pct(value: number | null | undefined): string {
-  return value == null ? '–' : `${Math.round(value * 100)} %`;
+  return value == null ? '–' : `${num(value * 100)} %`;
 }
 
 /** CSS modifier of a score (same thresholds as the Diagnose scores). */
@@ -75,25 +92,25 @@ export function recommendationText(
   const ap = (key: string) => (p[key] != null ? nameOf(String(p[key])) : '?');
   switch (rec.key) {
     case 'check_coverage':
-      return `WLAN-Abdeckung prüfen: ${p.disconnects_24h} Abbrüche je 24 h, `
-        + `${pct(Number(p.weak_share))} der Zeit schwaches Signal (Ø ${p.rssi_mean} dBm).`;
+      return `WLAN-Abdeckung prüfen: ${num(Number(p.disconnects_24h), 1)} Abbrüche je 24 h, `
+        + `${pct(Number(p.weak_share))} der Zeit schwaches Signal (Ø ${num(Number(p.rssi_mean))} dBm).`;
     case 'check_roaming':
-      return `Roaming prüfen: ${p.roams} Wechsel zwischen ${ap('ap_a')} und ${ap('ap_b')} `
+      return `Roaming prüfen: ${num(Number(p.roams))} Wechsel zwischen ${ap('ap_a')} und ${ap('ap_b')} `
         + `in ${p.minutes} min.`;
     case 'check_device_schedule':
       return `Zeitplan des Geräts prüfen: Abbrüche gehäuft gegen ${p.hour} Uhr `
         + `(${p.hit_days} von ${p.covered_days} Tagen).`;
     case 'check_ap':
-      return `${ap('worst_ap')} prüfen (Kanal, Sendeleistung): ${p.worst_rate} Abbrüche je `
-        + `24 h dort, ${p.best_rate} an ${ap('best_ap')}.`;
+      return `${ap('worst_ap')} prüfen (Kanal, Sendeleistung): ${num(Number(p.worst_rate), 1)} Abbrüche je `
+        + `24 h dort, ${num(Number(p.best_rate), 1)} an ${ap('best_ap')}.`;
     case 'infrastructure_cause':
-      return `Ursache in der Infrastruktur: ${p.infra} Abbrüche fallen in `
-        + `${p.incidents} Netzwerk-Vorfall/-Vorfälle.`;
+      return `Ursache in der Infrastruktur: ${num(Number(p.infra))} Abbrüche fallen in `
+        + `${num(Number(p.incidents))} Netzwerk-Vorfall/-Vorfälle.`;
     case 'infrastructure_disconnects':
-      return `${p.infra} Abbrüche während Infrastruktur-Problemen beobachtet.`;
+      return `${num(Number(p.infra))} Abbrüche während Infrastruktur-Problemen beobachtet.`;
     case 'infrastructure_likely':
-      return `Infrastruktur wahrscheinlich: ${p.clients} Clients mit zusammen `
-        + `${p.reconnects} Reconnects, ohne erkannten Vorfall.`;
+      return `Infrastruktur wahrscheinlich: ${num(Number(p.clients))} Clients mit zusammen `
+        + `${num(Number(p.reconnects))} Reconnects, ohne erkannten Vorfall.`;
     default:
       return rec.key;
   }
@@ -115,9 +132,30 @@ export function problemText(problem: StabilityProblem): string {
   return FAIL_LABEL[problem.kind] ?? problem.kind;
 }
 
+/**
+ * Trend cell of a table row from the fields the "trend" sort uses
+ * (`trend` arrow, `trend_delta` in score points against the 24 h before).
+ */
+export function trendCell(
+  trend: 'up' | 'down' | 'flat' | null | undefined,
+  delta: number | null | undefined,
+): { arrow: string; text: string; known: boolean } {
+  if (trend == null) return { arrow: '–', text: 'zu wenig Daten', known: false };
+  const points = Math.abs(delta ?? 0);
+  if (trend === 'up') return { arrow: '↑', text: `Score ${num(points)} Punkte besser als die 24 h davor`, known: true };
+  if (trend === 'down') return { arrow: '↓', text: `Score ${num(points)} Punkte schlechter als die 24 h davor`, known: true };
+  const signed = `${(delta ?? 0) > 0 ? '+' : ''}${num(delta ?? 0)}`;
+  return { arrow: '→', text: `Score etwa gleich wie die 24 h davor (${signed} Punkte)`, known: true };
+}
+
+/** Filter selects of the client table that differ from their default. */
+export function activeFilterCount(filters: Record<string, string>): number {
+  return Object.entries(filters).filter(([key, value]) => (key === 'sort' ? value !== 'score' : value !== '')).length;
+}
+
 /** Data rate in kbit/s as Mbit/s text. */
 export function rateText(kbit: number | null | undefined): string {
-  return kbit == null ? '–' : `${(kbit / 1000).toLocaleString('de-DE', { maximumFractionDigits: 1 })} Mbit/s`;
+  return kbit == null ? '–' : `${num(kbit / 1000, 1)} Mbit/s`;
 }
 
 /** Colour of an AP+band entry of the roaming strip (cycles after 8). */
