@@ -4768,6 +4768,27 @@ _LEVEL_ROOTS = frozenset(
 _GATEWAY_CHILDREN = frozenset({"wifi_no_ip", "wifi_dhcp_after_connect"})
 _WAN_CHILDREN = frozenset({"wan_unstable", "wan_ip_changed"})
 _ROUTER_EVENT_CATEGORIES = frozenset({Category.WIFI, Category.LAN})
+# What a flapping wired port can explain behind it (PR #49 review): drops,
+# not auth failures, band or roam flapping.
+_PORT_FLAP_CHILDREN = frozenset(
+    {
+        "wifi_mass_disconnect",
+        "wifi_reconnect_storm",
+        "wifi_no_ip",
+        "wifi_dhcp_after_connect",
+    }
+)
+_PORT_FLAP_EVENT_KINDS = frozenset(
+    {
+        WIFI_MASS_DISCONNECT_KIND,
+        WIFI_RECONNECT_KIND,
+        WIFI_NO_IP_KIND,
+        WIFI_DHCP_AFTER_CONNECT_KIND,
+    }
+)
+# Event roots that may last for hours: a child links only near one of their
+# own evidence times, not anywhere in first..last (P5 review M1).
+_EVIDENCE_WINDOW_ROOTS = frozenset({"wifi_radio_change", "lan_port_flap"})
 # Roots of one router (outage, reboot): before the root starts only the
 # client and Wi-Fi incidents of that router can be its follow-ups (P5
 # review M2); a CPU or port problem before the outage is no consequence.
@@ -5033,12 +5054,13 @@ def _root_span(root: Incident, now: float) -> tuple[float, float]:
 
 
 def _in_window(root: Incident, span: tuple[float, float], at: float) -> bool:
-    """Is ``at`` inside the window of ``root``? A radio change counts
-    around each of its own evidence times, so a radio that keeps changing
-    does not stretch one window over hours (P5 review M1)."""
+    """Is ``at`` inside the window of ``root``? A radio change or a port
+    flap counts around each of its own evidence times, so a radio that
+    keeps changing or a port that keeps flapping does not stretch one
+    window over hours (P5 review M1)."""
     if not span[0] <= at <= span[1]:
         return False
-    if root.type != "wifi_radio_change":
+    if root.type not in _EVIDENCE_WINDOW_ROOTS:
         return True
     before, after = _ROOT_WINDOWS[root.type]
     stamps = [root.first_seen, *(e.get("ts") for e in root.evidence)]
@@ -5195,16 +5217,32 @@ def _incident_link(
 def _port_flap_link(
     view: _RootView, child: Incident, topology: Topology
 ) -> bool | None:
-    """A flapping uplink port explains the mass disconnects and client
-    incidents of the routers behind it (RT7 B). The drops are measured
-    (poll or netifd/kernel lines): confirmed over an observed path, else a
-    hypothesis."""
-    if child.type != "wifi_mass_disconnect" and child.scope is not Scope.CLIENT:
+    """A flapping uplink port explains the drops behind it (RT7 B): mass
+    disconnects, reconnect storms and clients without (or late) DHCP of
+    the routers behind it. Never auth failures, band or roam flapping: a
+    cable cannot cause those, and a long flap must not silence them. The
+    drops are measured (poll or netifd/kernel lines): confirmed over an
+    observed path, else a hypothesis."""
+    if child.type not in _PORT_FLAP_CHILDREN:
         return None
     for router in view.behind:
         if _concerns(child, router):
             return topology.observed_path(router, view.router)
     return None
+
+
+def _port_flap_explains(event: NetEvent) -> bool:
+    """Is ``event`` a drop a wired flap can cause? Reconnects, mass
+    disconnects, missing DHCP, and disconnect lines of the radio category
+    (missing ACKs); not auth failures, roams or security disconnects."""
+    if event.category is not Category.WIFI:
+        return False
+    if event.kind in _PORT_FLAP_EVENT_KINDS:
+        return True
+    return (
+        event.kind.removeprefix("wifi.") in _DOWN_KINDS
+        and event.params.get("reason_category") == CATEGORY_RADIO
+    )
 
 
 def _behind_down(view: _RootView, ctx: _LinkContext, at: float) -> tuple[str, ...]:
@@ -5295,7 +5333,7 @@ def _event_link(view: _RootView, event: NetEvent, ctx: _LinkContext) -> bool | N
             return False
         return None
     if root.type == "lan_port_flap":
-        if event.router in view.behind and event.category is Category.WIFI:
+        if event.router in view.behind and _port_flap_explains(event):
             return False
         return None
     if root.type == "wifi_mass_disconnect":

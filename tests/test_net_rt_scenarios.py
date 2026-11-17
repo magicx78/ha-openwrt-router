@@ -69,6 +69,7 @@ from custom_components.openwrt_router.net_query import summary
 from custom_components.openwrt_router.net_rules import (
     AlarmMachine,
     CauseLevel,
+    counted_incidents,
     events_by_id,
     incident_cause_level,
     port_key,
@@ -242,11 +243,102 @@ def test_scenario_6_wifi_events_behind_the_port_follow_it() -> None:
     key = port_key(G, "lan3")
     m.update(T0, [flap(key, G)])
     events = [
-        event("ap1:1", T0 + 10, A, "wifi.disassoc", Category.WIFI, {"mac": "x"}),
+        event(
+            "ap1:1",
+            T0 + 10,
+            A,
+            "wifi.disassoc",
+            Category.WIFI,
+            {"mac": "x"},
+            {"reason_category": "radio"},
+        ),
         event("gw:2", T0 + 10, G, "wifi.disassoc", Category.WIFI, {"mac": "y"}),
     ]
     result = m.correlate(T0 + 20, observed_tree(), events)
     assert result.events == {"ap1:1": inc_of(m, "lan_port_flap", key).id}
+
+
+def client_hit(type_: str, mac: str, router: str) -> Any:
+    return hit(type_, mac, router, scope=Scope.CLIENT, count=5)
+
+
+def test_scenario_6_flap_does_not_silence_auth_failures_behind_it() -> None:
+    """A cable cannot type a wrong password: auth failures, band and roam
+    flapping behind a flapping port stay incidents of their own and still
+    count (and so fire); the drops behind the port follow it."""
+    m = AlarmMachine()
+    key = port_key(G, "lan3")
+    m.update(T0, [flap(key, G)])
+    others = {
+        "wifi_auth_failures": CLIENTS20[0],
+        "wifi_band_flapping": CLIENTS20[1],
+        "wifi_roam_flapping": CLIENTS20[2],
+    }
+    drops = {
+        "wifi_reconnect_storm": CLIENTS20[3],
+        "wifi_no_ip": CLIENTS20[4],
+        "wifi_dhcp_after_connect": CLIENTS20[5],
+    }
+    no_ip = level("wifi_no_ip", drops["wifi_no_ip"], router=A, scope=Scope.CLIENT)
+    m.update(T0 + 10, [no_ip])  # a level rule: two readings (debounce 2)
+    m.update(
+        T0 + 20,
+        [
+            *(client_hit(t, mac, A) for t, mac in others.items()),
+            client_hit("wifi_reconnect_storm", drops["wifi_reconnect_storm"], A),
+            client_hit("wifi_dhcp_after_connect", drops["wifi_dhcp_after_connect"], A),
+            no_ip,
+        ],
+    )
+    m.correlate(T0 + 20, observed_tree())
+    root = inc_of(m, "lan_port_flap", key)
+    counted = {i.id for i in counted_incidents(m.incidents(), T0 + 20)}
+    for type_, mac in others.items():
+        inc = inc_of(m, type_, mac)
+        assert inc.parent_id is None, type_
+        assert inc.cause != "port_flap", type_
+        assert inc.id in counted, type_
+    for type_, mac in drops.items():
+        inc = inc_of(m, type_, mac)
+        assert inc.parent_id == root.id, type_
+        assert inc.id not in counted, type_
+
+
+def test_scenario_6_long_flap_links_only_near_its_own_drops() -> None:
+    """A port flapping for an hour does not stretch one window over the
+    hour: a storm far from every flap evidence is no child (as for a radio
+    change, P5 review M1)."""
+    m = AlarmMachine()
+    key = port_key(G, "lan3")
+    for n in range(3):
+        m.update(T0 + 1200 * n, [flap(key, G)])  # T0 .. T0 + 2400
+        m.correlate(T0 + 1200 * n, observed_tree())
+    m.update(T0 + 3000, [storm(CLIENTS20[0], A)])  # 600 s from both flaps
+    m.correlate(T0 + 3000, observed_tree())
+    m.update(T0 + 3600, [flap(key, G)])
+    m.update(T0 + 3620, [storm(CLIENTS20[1], A)])  # 20 s after the last flap
+    m.correlate(T0 + 3620, observed_tree())
+    root = inc_of(m, "lan_port_flap", key)
+    assert inc_of(m, "wifi_reconnect_storm", CLIENTS20[0]).parent_id is None
+    assert inc_of(m, "wifi_reconnect_storm", CLIENTS20[1]).parent_id == root.id
+
+
+def test_scenario_6_auth_events_behind_the_port_are_not_its_follow_ups() -> None:
+    m = AlarmMachine()
+    key = port_key(G, "lan3")
+    m.update(T0, [flap(key, G)])
+    radio = {"reason_category": "radio"}
+    security = {"reason_category": "security"}
+    events = [
+        event("a:1", T0 + 10, A, "wifi.disassoc", Category.WIFI, {"mac": "x"}, radio),
+        event("a:2", T0 + 10, A, "wifi.reconnect", Category.WIFI, {"mac": "x"}),
+        event("a:3", T0 + 10, A, "wifi.psk_mismatch", Category.WIFI, {"mac": "y"}),
+        event("a:4", T0 + 10, A, "wifi.deauth", Category.WIFI, {"mac": "y"}, security),
+        event("a:5", T0 + 10, A, "wifi.roam", Category.WIFI, {"mac": "z"}),
+    ]
+    result = m.correlate(T0 + 20, observed_tree(), events)
+    root = inc_of(m, "lan_port_flap", key)
+    assert result.events == {"a:1": root.id, "a:2": root.id}
 
 
 def test_scenario_6_uplink_down_still_explains_a_port_flap_behind_it() -> None:
