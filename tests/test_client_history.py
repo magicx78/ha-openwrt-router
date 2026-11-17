@@ -1127,3 +1127,128 @@ def test_drop_oldest_prefers_idle_clients() -> None:
     assert M2 not in hist and M3 in hist  # M2 idle the longest
     assert hist.drop_oldest(5) == 2  # then M3, then the online M1
     assert len(hist) == 0
+
+
+# --- 1.43: ring extras, recent events, last failure, changing MACs ----------------
+
+
+def test_ring_keeps_ip_and_rates_of_each_sample() -> None:
+    hist = ClientHistory()
+    sample = obs(rate_rx_kbit=1000, rate_tx_kbit=500, ip_visible=True)
+    hist.ingest(PollInput(router=R1, now=T0, interval=I, fresh=True, clients=(sample,)))
+    hist.ingest(poll(R1, T0 + I, [M1]))
+    first, second = hist.ring(M1)
+    assert (first.ip_visible, first.rate_rx_kbit, first.rate_tx_kbit) == (
+        True,
+        1000,
+        500,
+    )
+    assert (second.ip_visible, second.rate_rx_kbit, second.rate_tx_kbit) == (
+        False,
+        None,
+        None,
+    )
+
+
+def test_recent_events_sum_like_the_buckets_and_stay_in_memory() -> None:
+    hist = ClientHistory()
+    ev = (
+        ClientEvent(M1, EV_BAND_CHANGE, T0 + 1, R1),
+        ClientEvent(M1, EV_AUTH_FAIL, T0 + 2, R1, count=3),
+        ClientEvent(M1, EV_ASSOC_FAIL, T0 + 3, R1),
+        ClientEvent(M1, EV_DHCP_FAIL, T0 + 4, R1),
+        ClientEvent(M1, EV_RECONNECT, T0 + 5, R1),
+        ClientEvent(M1, EV_ROAM, T0 + 6, R2, peer=R1),
+        ClientEvent(M1, EV_ROAM, T0 + 7, R1, peer=R2),
+        ClientEvent(M1, EV_ROAM, T0 + 8, R2, peer=R1),
+    )
+    hist.ingest(poll(R1, T0 + 10, [M1], events=ev))
+    recent = hist.recent_bucket(M1, T0, T0 + 10)
+    tot = total(hist)
+    for name in (
+        "band_changes",
+        "auth_fail",
+        "assoc_fail",
+        "dhcp_fail",
+        "reconnects",
+        "roams_in",
+        "roams_out",
+        "roam_flaps",
+    ):
+        assert getattr(recent, name) == getattr(tot, name), name
+    assert recent.auth_fail == 3 and recent.roam_flaps == 2
+    # the window bounds count, an unknown MAC has none, nothing is stored
+    assert hist.recent_bucket(M1, T0 + 5, T0 + 10).auth_fail == 0
+    assert hist.recent_bucket(M2, T0, T0 + 10) == Bucket()
+    assert "rc" not in json.dumps(hist.to_dict()["clients"][M1])
+    assert (
+        ClientHistory.from_dict(hist.to_dict()).recent_bucket(M1, T0, T0 + 10)
+        == Bucket()
+    )
+
+
+def test_recent_events_are_bounded() -> None:
+    hist = ClientHistory()
+    ev = tuple(ClientEvent(M1, EV_AUTH_FAIL, T0 + k, R1) for k in range(500))
+    hist.ingest(poll(R1, T0 + 600, [M1], events=ev))
+    assert hist.recent_bucket(M1, T0, T0 + 600).auth_fail == ch.RECENT_EVENTS_MAX
+
+
+def test_last_failure_is_kept_and_survives_a_reload() -> None:
+    hist = ClientHistory()
+    hist.ingest(poll(R1, T0, [M1]))
+    assert hist.live(M1).last_failure is None
+    ev = (
+        ClientEvent(M1, EV_AUTH_FAIL, T0 + 20, R1),
+        ClientEvent(M1, EV_DHCP_FAIL, T0 + 30, R1),
+        ClientEvent(M1, EV_BAND_CHANGE, T0 + 40, R1),  # no failure
+    )
+    hist.ingest(poll(R1, T0 + 60, [M1], events=ev))
+    last = hist.live(M1).last_failure
+    assert (last.ts, last.kind) == (T0 + 30, EV_DHCP_FAIL)
+    loaded = ClientHistory.from_dict(hist.to_dict())
+    assert loaded.live(M1).last_failure == last
+    hist.shift_clock(-100)
+    assert hist.live(M1).last_failure.ts == T0 - 70
+
+
+def test_store_without_last_failure_loads_and_bad_values_are_dropped() -> None:
+    hist = ClientHistory()
+    ev = (ClientEvent(M1, EV_ASSOC_FAIL, T0 + 5, R1),)
+    hist.ingest(poll(R1, T0 + 10, [M1], events=ev))
+    data = hist.to_dict()
+    assert data["clients"][M1]["l"]["lf"] == [T0 + 5, EV_ASSOC_FAIL]
+    for bad in (None, "x", [1], [T0, "connect"], ["x", EV_AUTH_FAIL]):
+        raw = json.loads(json.dumps(data))
+        if bad is None:
+            del raw["clients"][M1]["l"]["lf"]
+        else:
+            raw["clients"][M1]["l"]["lf"] = bad
+        loaded = ClientHistory.from_dict(raw)
+        assert M1 in loaded
+        assert loaded.live(M1).last_failure is None
+
+
+def test_changing_private_mac_is_a_new_client_without_linking() -> None:
+    """A9: no identity linking. A device that changes its random MAC shows up
+    as a new client with the private flag; the old MAC ages out by retention
+    and private MACs lose their hour detail first when the store is trimmed."""
+    old, new = "02:BB:CC:00:00:10", "06:BB:CC:00:00:11"
+    hist = ClientHistory(retention_days=3)
+    run(hist, [poll(R1, T0 + k * I, [old]) for k in range(10)])
+    run(hist, [poll(R1, T0 + k * I, [new]) for k in range(10, 20)])
+    assert hist.live(old).state == STATE_OFFLINE
+    assert hist.live(new).state == STATE_ONLINE
+    assert hist.live(new).private_mac and hist.live(old).private_mac
+    # nothing of the old MAC was carried over to the new one
+    assert hist.live(new).first_seen == T0 + 10 * I
+    assert total(hist, new).sessions == 1
+    # the old MAC is dropped once it was idle longer than the retention
+    t = T0 + 20 * I
+    while t < T0 + 4 * 86400:
+        hist.ingest(
+            PollInput(router=R1, now=t, interval=600, fresh=True, clients=(obs(new),))
+        )
+        t += 600
+    hist.prune(t)
+    assert old not in hist and new in hist

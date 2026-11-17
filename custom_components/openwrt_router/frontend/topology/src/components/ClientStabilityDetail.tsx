@@ -6,6 +6,11 @@
  * incident), online share, RSSI and score history, attribution, recurring
  * patterns and recommendations. Admins can create the HA sensors of the
  * client and mark it as a sleepy device. Reads engine memory only.
+ *
+ * 1.43: all window figures (observed time, gaps, disconnects per class,
+ * signal range, rates, failures, session mean, notable events), the real
+ * last 60 minutes, a coarse strip for 7 d / 30 d, disconnect/reconnect bars
+ * and the AP/band strip with roam and flap marks.
  */
 
 import React, { useEffect, useState } from 'react';
@@ -21,9 +26,11 @@ import {
   kindText,
   pct,
   recommendationText,
+  rateText,
   scoreLevel,
 } from '../utils/stability';
-import { AvailabilityBars, LineChart, TimelineBar } from './StabilityCharts';
+import { apLegend, apSpans, countPoints, roamMarks } from '../utils/stabilityCharts';
+import { ApStrip, AvailabilityBars, CountBars, LineChart, StripBar, TimelineBar } from './StabilityCharts';
 import type { Marker } from './StabilityCharts';
 
 const WINDOWS: Array<{ id: StabilityWindow; label: string; seconds: number }> = [
@@ -106,6 +113,13 @@ export function ClientStabilityDetail({ api, mac, tick, nameOf, canEdit, onToggl
     ? (d?.rssi ?? []).map(p => ({ t: p.t, y: p.rssi }))
     : (d?.series ?? []).map(p => ({ t: p.t + step / 2, y: p.rssi_mean, lo: p.rssi_min, hi: p.rssi_max }));
   const live = d?.live;
+  const st = d?.stats;
+  const spans = d ? apSpans(d, win, step) : [];
+  const exact = win === '1h' || win === '24h';
+  const dcText = st
+    ? Object.entries(DISCONNECT_LABEL).map(([k, label]) => `${label} ${st.disconnects[k] ?? 0}`).join(' · ')
+    : '';
+  const lastDc = live?.last_disconnect;
 
   return (
     <div className="diag-detail">
@@ -140,23 +154,57 @@ export function ClientStabilityDetail({ api, mac, tick, nameOf, canEdit, onToggl
             <Fact label="Signal" value={live.rssi != null ? `${live.rssi} dBm` : '–'} />
             <Fact label="Verbunden seit" value={live.session_start ? formatTs(live.session_start) : '–'} />
             <Fact label="Zuletzt gesehen" value={formatTs(live.last_seen)} />
-            <Fact label="Letzter Abbruch" value={live.last_disconnect ? formatTs(live.last_disconnect.ts) : '–'} />
-            <Fact label="Verfügbarkeit" value={pct(d.stats.availability)} />
-            <Fact label="Messabdeckung" value={pct(d.stats.coverage)} />
-            <Fact label="Sitzungen" value={String(d.stats.sessions)} />
-            <Fact label="Längste stabile Sitzung" value={d.stats.longest_stable_s ? formatDuration(d.stats.longest_stable_s) : '–'} />
-            <Fact label="Reconnects" value={d.stats.log_coverage ? String(d.stats.reconnects) : 'kein Log'} />
-            <Fact label="Roaming · Flattern" value={`${d.stats.roams_in} · ${d.stats.roam_flaps}`} />
-            <Fact label="Anmelde-/DHCP-Fehler" value={`${d.stats.auth_fail} · ${d.stats.dhcp_fail}`} />
-            <Fact label="Schwaches Signal" value={pct(d.stats.weak_share)} />
+            <Fact label="Letzter Abbruch" value={lastDc ? formatTs(lastDc.ts) : '–'} />
+            <Fact label="Grund letzter Abbruch" value={lastDc
+              ? `${DISCONNECT_LABEL[lastDc.class ?? ''] ?? 'unbekannt'}${lastDc.reason ? ` (${lastDc.reason})` : ''}`
+              : '–'} />
+            <Fact label="Verfügbarkeit" value={pct(st!.availability)} />
+            <Fact label="Messabdeckung" value={pct(st!.coverage)} />
+            <Fact label="Beobachtet · Messlücken" value={`${formatDuration(st!.observed_s ?? 0)} · ${formatDuration(st!.gap_s ?? 0)}`} />
+            <Fact label="Sitzungen" value={String(st!.sessions)} />
+            <Fact label="Ø Sitzungsdauer" value={st!.session_mean_s != null
+              ? `${formatDuration(st!.session_mean_s)} (${st!.finished_sessions ?? 0} beendet)`
+              : 'keine beendete Sitzung'} />
+            <Fact label="Längste stabile Sitzung" value={st!.longest_stable_s ? formatDuration(st!.longest_stable_s) : '–'} />
+            <Fact label="Abbrüche je Klasse" value={dcText} />
+            <Fact label="Auffällige Ereignisse" value={<span title="Abbrüche mit Fehler oder ohne Grund, Flattern, fehlgeschlagene Anmeldung, Assoziierung und DHCP">{st!.notable_events ?? 0}</span>} />
+            <Fact label="Reconnects" value={st!.log_coverage ? String(st!.reconnects) : 'kein Log'} />
+            <Fact label="Roaming rein · raus · Flattern" value={`${st!.roams_in} · ${st!.roams_out ?? 0} · ${st!.roam_flaps}`} />
+            <Fact label="Anmelde- · Assoziierungs- · DHCP-Fehler" value={`${st!.auth_fail} · ${st!.assoc_fail ?? 0} · ${st!.dhcp_fail}`} />
+            <Fact label="Signal Ø · Min · Max" value={st!.rssi_mean != null
+              ? `${st!.rssi_mean} · ${st!.rssi_min ?? '–'} · ${st!.rssi_max ?? '–'} dBm`
+              : '–'} />
+            <Fact label="Schwaches Signal" value={pct(st!.weak_share)} />
+            <Fact label="Datenrate Ø RX · TX" value={`${rateText(st!.rate_rx_kbit)} · ${rateText(st!.rate_tx_kbit)}`} />
+            <Fact label="Anteil der Messpunkte mit bekannter IP" value={pct(st!.ip_visible_share)} />
           </div>
+          <div className="settings-info">
+            Verfügbarkeit heißt hier: am WLAN angemeldet, wie die Access Points es melden.
+            Ob das Gerät Ende-zu-Ende erreichbar war, wird nicht gemessen.
+          </div>
+          {st!.memory_from != null && (
+            <div className="settings-info">
+              {(st!.rssi_n ?? 0) === 0
+                ? `Keine Daten seit Neustart (${formatTs(st!.memory_from)}): Signal- und Log-Werte fehlen noch.`
+                : `Signal- und Log-Werte erst seit ${formatTs(st!.memory_from)} (Neustart).`}
+              {' '}Online-Zeiten sind gespeichert; Reconnects, Anmeldung und Roaming zählen im Score nur anteilig
+              (Datenbasis {pct(d.score.coverage)}).
+            </div>
+          )}
 
           <div className="settings-card">
             <div className="settings-card__heading">Verlauf</div>
-            {d.timeline.length > 0 ? (
+            {d.strip && d.strip.length > 0 ? (
+              <>
+                <StripBar cells={d.strip} start={start} end={end} />
+                <div className="settings-info">
+                  Je {win === '30d' ? 'Tag' : 'Stunde'} grob; genaue Zeitpunkte nur für 24 h.
+                </div>
+              </>
+            ) : d.timeline.length > 0 ? (
               <TimelineBar segments={d.timeline} start={start} end={end} markers={markers} onOpenIncident={onOpenIncident} />
             ) : (
-              <div className="settings-info">Keine Zeitleiste für 30 Tage (Verbindungswechsel werden 24 h gespeichert); der Online-Anteil je Tag steht darunter.</div>
+              <div className="settings-info">Keine Zeitleiste für diesen Zeitraum.</div>
             )}
             <div className="stab-legend">
               <span className="stab-key stab-key--online">online</span>
@@ -169,12 +217,21 @@ export function ClientStabilityDetail({ api, mac, tick, nameOf, canEdit, onToggl
               points={d.series.map(p => ({
                 t: p.t,
                 share: p.observed_s > 0 ? Math.min(1, p.online_s / p.observed_s) : null,
-                problems: p.disconnects + p.infra,
               }))}
               start={start}
               end={end}
               step={step}
             />
+            {win === '1h' && (
+              <div className="settings-info">Der Balken zeigt die laufende Uhrstunde, die Zahlen oben die letzten 60 Minuten.</div>
+            )}
+            <CountBars points={countPoints(d, win, start)} start={start} end={end}
+              step={win === '1h' ? 300 : step}
+              note={win === '1h' ? 'Reconnects nur als Summe (keine Zeitpunkte je 5 min)' : st!.log_coverage ? undefined : 'Reconnects: kein Log'} />
+            <ApStrip spans={spans} marks={roamMarks(d, win, step, nameOf)} legend={apLegend(spans, d, nameOf)}
+              start={start} end={end}
+              note={win === '1h' ? 'je Abfrage' : exact ? 'Haupt-AP je Stunde, Wechsel mit Uhrzeit'
+                : `Haupt-AP je ${win === '30d' ? 'Tag' : 'Stunde'}; genaue Zeitpunkte nur für 24 h`} />
             <LineChart points={rssi} start={start} end={end} min={-95} max={-30} unit="dBm"
               label={win === '1h' ? 'Signal je Abfrage' : 'Signal (Mittel, Min–Max)'} />
             {d.score_series.length > 0 && (
