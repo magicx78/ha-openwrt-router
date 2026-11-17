@@ -821,15 +821,8 @@ async def test_uci_acl_block_uses_ssh_uci_show() -> None:
     assert snap_files.content_hash == snap_ubus.content_hash
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "api._parse_uci_show keeps only the first line of a multi-line value "
-        '(unbalanced quote -> raw.strip("\'")), so the SSH fallback and ubus '
-        "differ for such values; config_snapshot.parse_uci_show handles it"
-    ),
-)
 async def test_api_uci_show_fallback_multiline_value_matches_ubus() -> None:
+    """SSH `uci show` fallback keeps multi-line values whole (same hash as ubus)."""
     show = (
         "system.@system[0]=system\n"
         "system.@system[0].hostname='gw'\n"

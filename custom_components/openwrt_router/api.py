@@ -6206,8 +6206,9 @@ class OpenWrtAPI:
 
         ubus ``uci get {config}`` first. When rpcd denies it (ACL, also the
         cached ``_acl_blocked`` entry) or does not know it, SSH
-        ``uci show <config>`` parsed by ``_parse_uci_show`` (anonymous
-        sections as ``@type[n]``). ``config`` is checked against
+        ``uci show <config>`` parsed by ``config_snapshot.parse_uci_show``
+        (anonymous sections as ``@type[n]``, multi-line quoted values kept
+        whole, so both paths hash alike). ``config`` is checked against
         ``^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$`` before any call and passed
         through ``shlex.quote``.
 
@@ -6243,7 +6244,15 @@ class OpenWrtAPI:
         return values
 
     async def _config_uci_show_ssh(self, name: str) -> dict[str, Any]:
-        """Read one config with ``uci show`` over SSH (``name`` is validated)."""
+        """Read one config with ``uci show`` over SSH (``name`` is validated).
+
+        Parsed by ``config_snapshot.parse_uci_show``, not the poll's
+        ``_parse_uci_show``: that one keeps only the first line of a
+        multi-line value. Imported here because config_collector imports
+        this module (keeps the module graph one-way).
+        """
+        from .config_snapshot import parse_uci_show
+
         try:
             rc, out, err = await self._config_ssh_read(
                 f"uci show {shlex.quote(name)}",
@@ -6257,7 +6266,7 @@ class OpenWrtAPI:
             ) from conn_err
         if rc != 0:
             raise _config_classify_exit(f"uci show {name}", rc, err)
-        return _parse_uci_show(out.decode("utf-8", errors="replace"), name)
+        return parse_uci_show(out.decode("utf-8", errors="replace"), name)
 
     async def config_packagelist(self) -> dict[str, str] | None:
         """Return installed packages as ``{name: version}``, None if unknown.
