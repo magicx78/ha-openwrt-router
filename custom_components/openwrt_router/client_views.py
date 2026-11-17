@@ -788,12 +788,19 @@ def ap_view(
         stats = comparison.aps.get(ap)
         tagged = stats is not None and stats.infra_disconnects > 0
         groups.append(ApReconnects(ap, per, ap in infra or tagged))
+    # Rows in rank order (rank 1 first), then the unranked APs by name, so a
+    # rank prefix in the panel always counts up from the top.
+    ranked = [ap for ap in comparison.ranking if ap in comparison.aps]
+    unranked = sorted(
+        set(comparison.aps) - set(ranked),
+        key=lambda ap: (name_of(ap).casefold(), ap),
+    )
     return {
         "now": now,
         "window": window,
         "aps": [
-            {**plain(stats), "name": name_of(ap)}
-            for ap, stats in sorted(comparison.aps.items())
+            {**plain(comparison.aps[ap]), "name": name_of(ap)}
+            for ap in (*ranked, *unranked)
         ],
         "ranking": list(comparison.ranking),
         "recommendations": [plain(r) for r in recommend_aps(groups)],
