@@ -39,6 +39,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
+    CLIENT_UID_PREFIX,
     DOMAIN,
     SIGNAL_NET_INTEL,
     SUFFIX_INCIDENT_CRITICAL,
@@ -92,6 +93,10 @@ def async_withdraw_fleet(hass: HomeAssistant, entry_id: str) -> None:
         entry = registry.async_get(entity_id)
         if entry is not None and entry.config_entry_id != successor:
             registry.async_update_entity(entity_id, config_entry_id=successor)
+    # The client stability sensors (B7) live on the anchor as well.
+    for item in er.async_entries_for_config_entry(registry, entry_id):
+        if item.unique_id.startswith(CLIENT_UID_PREFIX):
+            registry.async_update_entity(item.entity_id, config_entry_id=successor)
 
 
 @callback

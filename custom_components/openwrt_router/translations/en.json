@@ -235,6 +235,28 @@
       },
       "fleet_incidents_active": {
         "name": "Fleet active incidents"
+      },
+      "client_stability_score": {
+        "name": "{client} stability score"
+      },
+      "client_connection_quality": {
+        "name": "{client} connection quality",
+        "state": {
+          "very_stable": "Very stable",
+          "stable": "Stable",
+          "noticeable": "Noticeable",
+          "unstable": "Unstable",
+          "critical": "Critical"
+        }
+      },
+      "client_reconnects_24h": {
+        "name": "{client} reconnects (24 h)"
+      },
+      "client_connection_uptime": {
+        "name": "{client} connection uptime"
+      },
+      "client_last_disconnect": {
+        "name": "{client} last disconnect"
       }
     },
     "switch": {
