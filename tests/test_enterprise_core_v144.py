@@ -124,23 +124,81 @@ _SCENARIOS = {
     "legacy": json.dumps({"root": {"read": {"ubus": {}}}}),
     "corrupted": "{not json",
     "unreachable": OpenWrtConnectionError("down"),
+    "write_blocked": "write_blocked",
 }
+
+# Literal expectations per scenario, taken from ensure_acl on origin/main
+# (1.43, before the 1.44.0 changes; review finding 18): the router calls as
+# (object, method, params) with a written ``data`` given by the sha256 of
+# its bytes, the SSH commands by their sha256, and the result. Comparing the
+# two variants with each other would not notice a change made to both.
+_ACL_PATH = "/usr/share/rpcd/acl.d/ha-openwrt-router.json"
+_V8_BYTES = "sha256:c774021615dbc83d2241b96666b864675383132f0147ad5496f8d1fc0bb71df1"
+_READ = ("file", "read", {"path": _ACL_PATH})
+_WRITE = ("file", "write", {"path": _ACL_PATH, "data": _V8_BYTES})
+_RESTART = ("file", "exec", {"command": "/etc/init.d/rpcd", "params": ["restart"]})
+_SSH_DEPLOY = (
+    "sha256:2f6b32bd90246670829f4b0f46b7ecb48215c81bf04146d34f6512fad253eafe",
+    {"timeout": 15.0},
+)
+_EXPECTED = {
+    "v8_current": (("ok", False), [_READ], []),
+    "missing": (("ok", True), [_READ, _WRITE, _RESTART], []),
+    "legacy": (("ok", True), [_READ, _WRITE, _RESTART], []),
+    "corrupted": (("ok", True), [_READ, _WRITE, _RESTART], []),
+    "unreachable": (
+        ("ok", False),
+        [_READ, ("file", "stat", {"path": _ACL_PATH})],
+        [],
+    ),
+    "write_blocked": (("ok", True), [_READ, _WRITE], [_SSH_DEPLOY]),
+}
+
+
+def _sha(text):
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+
+
+def _scenario_api(scenario):
+    if scenario != "write_blocked":
+        return acl_api(_SCENARIOS[scenario])
+    # ACL missing and ubus file/write blocked: the SSH fallback writes it
+    api = acl_api(None)
+    api._run_ssh = AsyncMock(return_value="HA_ACL_DEPLOYED\n")
+
+    def _blocked(obj, method, params):
+        raise OpenWrtMethodNotFoundError("NOT_FOUND")
+
+    api._call = AsyncMock(side_effect=_blocked)
+    return api
+
+
+def _seen(api):
+    calls = []
+    for call in api._call.await_args_list:
+        obj, method, params = call.args
+        params = dict(params)
+        if "data" in params:
+            params["data"] = _sha(params["data"])
+        calls.append((obj, method, params))
+    ssh = [(_sha(c.args[0]), dict(c.kwargs)) for c in api._run_ssh.await_args_list]
+    return calls, ssh
 
 
 @pytest.mark.parametrize("scenario", sorted(_SCENARIOS))
 async def test_respecting_offer_makes_exactly_the_calls_of_ensure_acl(scenario):
-    """Pin: with no tiered ACL deployed, calls and bytes equal ensure_acl's."""
-    read = _SCENARIOS[scenario]
-    plain, respecting = acl_api(read), acl_api(read)
-    results = []
-    for api, fn in ((plain, ensure_acl), (respecting, ensure_acl_respecting_offer)):
+    """Pin: with no tiered ACL deployed, calls and bytes equal 1.43's ensure_acl."""
+    result, calls, ssh = _EXPECTED[scenario]
+    for fn in (ensure_acl, ensure_acl_respecting_offer):
+        api = _scenario_api(scenario)
         try:
-            results.append(("ok", await fn(api)))
+            outcome = ("ok", await fn(api))
         except Exception as err:  # noqa: BLE001 - compare the outcome
-            results.append(("raised", type(err).__name__))
-    assert results[0] == results[1]
-    assert plain._call.await_args_list == respecting._call.await_args_list
-    assert plain._run_ssh.await_args_list == respecting._run_ssh.await_args_list
+            outcome = ("raised", type(err).__name__)
+        assert outcome == result, fn.__name__
+        assert _seen(api) == (calls, ssh), fn.__name__
 
 
 @pytest.mark.parametrize("tiers", [[], [TIER_RF_SURVEY, TIER_RF_SCAN]])
@@ -414,7 +472,8 @@ async def test_acl_deploy_ssh_fallback_only_over_the_pin(disks, tmp_path):
     with _patched(router), pytest.raises(AuthorizationError) as err:
         await env.api.async_deploy_acl_offer(approval.approval_id, actor=ADMIN)
     assert err.value.details["reason"] == "ssh_pin_pending"
-    assert router.conns[0].run.await_count == 0  # command never ran
+    # first contact: key read without credentials, no login, no command
+    assert router.conns == [] and router.auth_attempts == []
     api._run_ssh.assert_not_awaited()
     failed = bus_events(env.hass, CoreEventType.ACL_DEPLOY_FAILED.value)
     assert failed[-1]["data"]["reason"] == "ssh_pin_pending"
@@ -459,7 +518,8 @@ async def test_first_use_is_pending_not_trusted(disks, tmp_path):
     with pytest.raises(OpenWrtHostKeyError) as err:
         await _run(env, router)
     assert err.value.reason == "pin_pending"
-    assert router.conns[0].run.await_count == 0  # no silent TOFU
+    # no silent TOFU and (finding 2) no login before the key is confirmed
+    assert router.conns == [] and router.auth_attempts == []
     status = env.api.ssh_pin_status(env.rid)
     assert status["state"] == "pending"
     assert status["pending_fingerprint"] == KEY_A.get_fingerprint("sha256")

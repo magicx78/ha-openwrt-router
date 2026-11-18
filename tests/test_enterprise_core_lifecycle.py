@@ -28,6 +28,7 @@ from core_testkit import (
     bus_events,
     core_of,
     drain,
+    ha_entry_calls,
     make_hass,
     router_data,
     setup_router,
@@ -37,6 +38,7 @@ from homeassistant.helpers import entity_registry as er
 from test_net_entities import loaded_registry
 
 from custom_components.openwrt_router import (
+    PLATFORMS,
     async_remove_entry,
     async_setup_entry,
     async_unload_entry,
@@ -372,8 +374,14 @@ async def _lifecycle_snapshot(
 async def test_case16_working_core_changes_nothing_ha_owns(
     disks: FakeDisks, tmp_path: Path
 ) -> None:
-    before, after, (_hass, listeners) = await _lifecycle_snapshot(disks, tmp_path)
+    before, after, (hass, listeners) = await _lifecycle_snapshot(disks, tmp_path)
     assert after == before
+    # the mocked config_entries never applies a call: assert on the calls;
+    # the only one is the integration's own platform forward
+    entry = hass.entries[0]
+    assert ha_entry_calls(hass) == {
+        "async_forward_entry_setups": [((entry, PLATFORMS), {})]
+    }
     assert len(_core_listeners(listeners)) == 1  # the core really ran
     assert disks[ROUTER_REGISTRY_STORE_KEY].data is not None
 

@@ -77,7 +77,17 @@ from custom_components.openwrt_router.core_models import (
 ROUTER = "rtr_" + "a" * 32
 OTHER_ROUTER = "rtr_" + "b" * 32
 NOW = datetime(2026, 11, 18, 12, 0, 0, tzinfo=UTC)
-BACKUP = ACL_BACKUP_PREFIX + "20261118T120000Z"
+# Changed deliberately (security review finding 10): the backup name ends in
+# a random suffix; the fixture below makes it fixed for these tests.
+BACKUP_SUFFIX = "a1b2c3d4"
+BACKUP = ACL_BACKUP_PREFIX + "20261118T120000Z-" + BACKUP_SUFFIX
+
+
+@pytest.fixture(autouse=True)
+def _fixed_backup_suffix(monkeypatch):
+    monkeypatch.setattr(acl_mod.secrets, "token_hex", lambda n: BACKUP_SUFFIX)
+
+
 V8_TEXT = json.dumps(RPCD_ACL_CONTENT, indent=2)
 OPTS_ON = {OPTION_CONFIG_BACKUP_ENABLED: True}
 
@@ -360,7 +370,14 @@ class TestRegistry:
         base.update(kw)
         return AclTier(**base)
 
-    def test_later_module_registers_a_tier(self):
+    def test_later_module_registers_a_tier(self, monkeypatch):
+        # Changed deliberately (security review finding 1): a new right must
+        # first be added to the reviewed extension table.
+        monkeypatch.setattr(
+            acl_mod,
+            "OPTIONAL_TIER_EXTENSIONS",
+            frozenset({("ubus", "luci", "getTraceroute")}),
+        )
         reg = AclTierRegistry(DEFAULT_TIER_REGISTRY.tiers())
         reg.register(self._tier())
         assert reg.capability_tiers()["diag.traceroute"] == "diag_traceroute"

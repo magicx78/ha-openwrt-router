@@ -24,6 +24,7 @@ from core_testkit import (
     bus_events,
     core_of,
     guard_adopt_auth,
+    ha_entry_calls,
     make_hass,
     router_data,
     setup_router,
@@ -117,6 +118,8 @@ async def test_case05_seven_entries_one_never_reachable(disks: FakeDisks) -> Non
         )
         assert record.identity.status is expected
     assert _ha_owned(entries) == before  # entry unique_id/data/version untouched
+    # the mocked config_entries never applies a call: assert on the calls
+    assert ha_entry_calls(hass) == {}
     assert core_of(hass).entry_ids == frozenset(ENTRY_IDS[:6])
 
 
