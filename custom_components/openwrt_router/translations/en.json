@@ -295,6 +295,24 @@
     },
     "update_check_running": {
       "message": "An update check is already running on this router. Wait for its result."
+    },
+    "config_backup_unknown_device": {
+      "message": "The device {device_id} is not an OpenWrt router of this integration."
+    },
+    "config_backup_disabled": {
+      "message": "The configuration backup is switched off for {router}. Turn it on in the integration options first."
+    },
+    "config_backup_not_ready": {
+      "message": "The configuration manager is not running yet. Try again once the routers are loaded."
+    },
+    "config_backup_denied": {
+      "message": "Creating a configuration backup was denied for this user."
+    },
+    "config_backup_failed": {
+      "message": "The configuration backup failed ({error_class})."
+    },
+    "config_backup_invalid_note": {
+      "message": "The note is too long or contains control characters."
     }
   },
   "issues": {
@@ -332,6 +350,22 @@
       "options": {
         "daily": "Daily",
         "off": "Off (manual backups only)"
+      }
+    }
+  },
+  "services": {
+    "create_config_backup": {
+      "name": "Create configuration backup",
+      "description": "Saves a new configuration version of the selected OpenWrt routers, one after another. Needs the configuration backup switched on for each router. Only a changed configuration creates a new version for scheduled runs; a manual backup is always kept.",
+      "fields": {
+        "device_id": {
+          "name": "Router",
+          "description": "One or more OpenWrt router devices of this integration."
+        },
+        "note": {
+          "name": "Note",
+          "description": "Optional note stored with the version (at most 200 characters, no control characters). Never put passwords here."
+        }
       }
     }
   }

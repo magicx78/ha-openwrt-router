@@ -295,6 +295,24 @@
     },
     "update_check_running": {
       "message": "Auf diesem Router läuft bereits eine Update-Suche. Bitte warte auf ihr Ergebnis."
+    },
+    "config_backup_unknown_device": {
+      "message": "Das Gerät {device_id} ist kein OpenWrt-Router dieser Integration."
+    },
+    "config_backup_disabled": {
+      "message": "Das Konfigurations-Backup ist für {router} ausgeschaltet. Bitte zuerst in den Optionen der Integration einschalten."
+    },
+    "config_backup_not_ready": {
+      "message": "Der Konfigurations-Manager läuft noch nicht. Bitte erneut versuchen, sobald die Router geladen sind."
+    },
+    "config_backup_denied": {
+      "message": "Das Erstellen eines Konfigurations-Backups wurde für diesen Benutzer abgelehnt."
+    },
+    "config_backup_failed": {
+      "message": "Das Konfigurations-Backup ist fehlgeschlagen ({error_class})."
+    },
+    "config_backup_invalid_note": {
+      "message": "Die Notiz ist zu lang oder enthält Steuerzeichen."
     }
   },
   "issues": {
@@ -332,6 +350,22 @@
       "options": {
         "daily": "Täglich",
         "off": "Aus (nur manuelle Backups)"
+      }
+    }
+  },
+  "services": {
+    "create_config_backup": {
+      "name": "Konfigurations-Backup erstellen",
+      "description": "Speichert eine neue Konfigurationsversion der gewählten OpenWrt-Router, einen nach dem anderen. Setzt voraus, dass das Konfigurations-Backup für jeden Router eingeschaltet ist. Bei geplanten Läufen entsteht nur bei geänderter Konfiguration eine neue Version; ein manuelles Backup wird immer behalten.",
+      "fields": {
+        "device_id": {
+          "name": "Router",
+          "description": "Ein oder mehrere OpenWrt-Router-Geräte dieser Integration."
+        },
+        "note": {
+          "name": "Notiz",
+          "description": "Optionale Notiz zur Version (höchstens 200 Zeichen, keine Steuerzeichen). Niemals Passwörter eintragen."
+        }
       }
     }
   }

@@ -7,14 +7,19 @@ objects must never be called. No Home Assistant instance, no router.
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 from config_manager_kit import (
+    ON,
     attach_entry,
     cm_env,
     drain,
     factory_of,
+    macs,
     restart,
     stop,
     unload_entry,
@@ -23,16 +28,31 @@ from core_test_provider import (
     FakeConfigProvider,
     short_tmp_path,  # noqa: F401 - short tmp_path (Windows path limit)
 )
-from core_testkit import ADMIN_ID, FakeDisks, make_hass, user_actor
+from core_testkit import (
+    ADMIN_ID,
+    FakeDisks,
+    bus_events,
+    make_hass,
+    router_data,
+    user_actor,
+)
+from homeassistant.util import dt as dt_util
 
 from custom_components.openwrt_router import config_manager as cm
 from custom_components.openwrt_router.const import (
+    CONFIG_BACKUP_SCHEDULE_OFF,
     CONFIG_STATUS_DISABLED,
     CONFIG_STATUS_NEVER,
     CONFIG_STATUS_OK,
     DATA_CONFIG_MANAGER,
+    OPTION_CONFIG_BACKUP_SCHEDULE,
+    OPTION_CONFIG_DRIFT_CHECK,
 )
-from custom_components.openwrt_router.core_models import BackupReason
+from custom_components.openwrt_router.core_errors import (
+    OperationInProgressError,
+    RouterUnavailableError,
+)
+from custom_components.openwrt_router.core_models import BackupReason, BackupType
 
 ADMIN = user_actor(ADMIN_ID)
 
@@ -230,3 +250,379 @@ async def test_bus_event_refreshes_the_state(disks, tmp_path):
     assert runtime.stats["refreshes"] > before
     assert runtime.routers[env.rid].version_count == 1
     await stop(env)
+
+
+# ---------------------------------------------------------------------------
+# Schedule, worker and drift trigger (section 3)
+# ---------------------------------------------------------------------------
+
+NO_SCHEDULE = {**ON, OPTION_CONFIG_BACKUP_SCHEDULE: CONFIG_BACKUP_SCHEDULE_OFF}
+
+
+async def _records(env, router_id=None):
+    return list(await env.api.async_list_backups(router_id or env.rid, limit=50))
+
+
+def _collected(env):
+    return [rid for _op, rid in env.provider.ops("collect")]
+
+
+async def _wait_entered(env, op="collect"):
+    event = env.provider.entered.setdefault(op, asyncio.Event())
+    await asyncio.wait_for(event.wait(), 5)
+
+
+def _release_hook(version):
+    def hook(collected):
+        return replace(collected, meta=replace(collected.meta, openwrt_version=version))
+
+    return hook
+
+
+async def _drifted_poll(env, index):
+    """Change the live configuration and let one poll show a new fingerprint."""
+    env.provider.live(env.rid)["network"]["lan"]["ipaddr"] = f"10.0.{index}.1"
+    env.coords[env.rid].poll(
+        data=router_data(
+            hostname="r1",
+            macs=macs(0),
+            wan={"wan_found": True, "interface": "wan", "proto": f"proto{index}"},
+        )
+    )
+
+
+async def test_option_off_starts_no_timer(disks, tmp_path):
+    env = await cm_env(disks, tmp_path, options={})
+    assert env.timers.active == []
+    await env.tick()  # even a forced tick plans nothing
+    assert env.provider.calls == [] and env.router_calls() == []
+    await stop(env)
+
+
+async def test_option_on_starts_one_tick_timer(disks, tmp_path):
+    env = await cm_env(disks, tmp_path, routers=3)
+    assert [interval for _a, interval in env.timers.active] == [timedelta(minutes=5)]
+    await stop(env)
+    assert env.timers.active == []
+
+
+async def test_scheduled_run_once_per_day(disks, tmp_path):
+    env = await cm_env(disks, tmp_path)
+    await env.tick()
+    assert _collected(env) == [env.rid]
+    for _ in range(5):  # the rest of the day: nothing more
+        env.clock.advance(minutes=5)
+        await env.tick()
+    assert _collected(env) == [env.rid]
+    env.clock.advance(days=1)
+    await env.tick()
+    assert _collected(env) == [env.rid, env.rid]
+    assert [r.reason for r in await _records(env)] == [BackupReason.SCHEDULED]
+    assert env.router_calls() == []
+    await stop(env)
+
+
+async def test_identical_scheduled_run_is_deduplicated(disks, tmp_path):
+    env = await cm_env(disks, tmp_path)
+    await env.tick()
+    first = (await _records(env))[0]
+    created = bus_events(env.hass, "configuration.backup_created")
+    env.clock.advance(days=1)
+    await env.tick()
+    records = await _records(env)
+    assert len(_collected(env)) == 2  # the router was read again ...
+    assert len(records) == 1  # ... but the content was the same
+    assert records[0].backup_id == first.backup_id
+    assert first.last_seen_at is None
+    assert records[0].last_seen_at > first.created_at
+    assert env.runtime.routers[env.rid].version_count == 1
+    assert bus_events(env.hass, "configuration.backup_created") == created
+    # the moved last_seen_at marks the day as done (also after a restart)
+    env = await restart(env)
+    await env.tick()
+    assert len(_collected(env)) == 2
+    await stop(env)
+
+
+async def test_retryable_failure_retried_once_after_900s(disks, tmp_path):
+    env = await cm_env(disks, tmp_path)
+    env.provider.fail["collect"] = RouterUnavailableError("offline")
+    await env.tick()
+    assert len(_collected(env)) == 1
+    env.clock.advance(seconds=600)
+    await env.tick()
+    assert len(_collected(env)) == 1  # retry not due yet
+    env.clock.advance(seconds=301)
+    await env.tick()
+    assert len(_collected(env)) == 2  # the one retry
+    env.clock.advance(hours=2)
+    await env.tick()
+    assert len(_collected(env)) == 2  # no third attempt that day
+    del env.provider.fail["collect"]
+    env.clock.advance(days=1)
+    await env.tick()
+    assert len(_collected(env)) == 3
+    assert len(await _records(env)) == 1
+    await stop(env)
+
+
+async def test_release_change_backup_once_per_version(disks, tmp_path):
+    options = {**NO_SCHEDULE, OPTION_CONFIG_DRIFT_CHECK: False}
+    env = await cm_env(disks, tmp_path, options=options)
+    await env.runtime.async_backup_now(env.rid, actor=ADMIN)
+    assert env.runtime.routers[env.rid].newest_ok_release == "24.10.2"
+    env.coords[env.rid].poll(
+        data=router_data(hostname="r1", macs=macs(0), version="25.12.0")
+    )
+    await drain(env.hass)
+    assert env.api.registry.find(env.rid).firmware.version == "25.12.0"
+    env.provider.collect_hook = _release_hook("25.12.0")
+    await env.tick()
+    assert len(_collected(env)) == 1  # first sighting: wait 300 s
+    env.clock.advance(seconds=301)
+    await env.tick()
+    assert len(_collected(env)) == 2
+    newest = (await _records(env))[0]
+    assert newest.reason is BackupReason.RELEASE_CHANGE
+    assert newest.openwrt_version == "25.12.0"
+    for _ in range(3):
+        env.clock.advance(seconds=301)
+        await env.tick()
+    assert len(_collected(env)) == 2  # once per (router, release)
+    env = await restart(env)
+    env.clock.advance(seconds=301)
+    await env.tick()
+    assert len(_collected(env)) == 2  # survives the restart (store)
+    await stop(env)
+
+
+async def test_first_fingerprint_is_reference_only(disks, tmp_path):
+    env = await cm_env(disks, tmp_path, options=NO_SCHEDULE)
+    await env.runtime.async_backup_now(env.rid, actor=ADMIN)
+    env.coords[env.rid].poll()  # first value after the start
+    env.clock.advance(hours=2)
+    await env.tick()
+    assert env.provider.ops("detect_drift") == []
+    await stop(env)
+
+
+async def test_drift_check_debounced_and_rate_limited(disks, tmp_path):
+    env = await cm_env(disks, tmp_path, options=NO_SCHEDULE)
+    await env.runtime.async_backup_now(env.rid, actor=ADMIN)
+    env.coords[env.rid].poll()  # reference value
+    await _drifted_poll(env, 1)
+    env.clock.advance(seconds=200)
+    await env.tick()
+    assert env.provider.ops("detect_drift") == []  # 300 s debounce
+    env.clock.advance(seconds=101)
+    await env.tick()
+    assert len(env.provider.ops("detect_drift")) == 1
+    await _drifted_poll(env, 2)
+    env.clock.advance(seconds=600)
+    await env.tick()
+    assert len(env.provider.ops("detect_drift")) == 1  # at most one per hour
+    env.clock.advance(seconds=3000)
+    await env.tick()
+    assert len(env.provider.ops("detect_drift")) == 2
+    assert env.runtime.routers[env.rid].drift["state"] == "open"
+    await stop(env)
+
+
+async def test_drift_without_baseline_waits_for_the_daily_run(disks, tmp_path):
+    env = await cm_env(disks, tmp_path, options=NO_SCHEDULE)
+    env.coords[env.rid].poll()
+    await _drifted_poll(env, 1)
+    env.clock.advance(hours=2)
+    await env.tick()
+    assert env.provider.ops("detect_drift") == []
+    assert env.provider.ops("collect") == []
+    await stop(env)
+
+
+async def test_drift_version_capped_per_day(disks, tmp_path):
+    env = await cm_env(disks, tmp_path, options=NO_SCHEDULE)
+    await env.runtime.async_backup_now(env.rid, actor=ADMIN)
+    env.coords[env.rid].poll()  # reference value
+    for index in range(1, 7):  # six new drifts, one per hour, same day
+        await _drifted_poll(env, index)
+        env.clock.advance(seconds=3601)
+        await env.tick()
+    assert len(env.provider.ops("detect_drift")) == 6
+
+    def drift_created():
+        # Counted on the bus: the core's retention keeps only the newest
+        # automatic version of a day in the store.
+        return [
+            e["data"]
+            for e in bus_events(env.hass, "configuration.backup_created")
+            if e["data"].get("reason") == BackupReason.DRIFT.value
+        ]
+
+    created = drift_created()
+    assert len(created) == 4  # CONFIG_DRIFT_VERSIONS_PER_DAY
+    assert {e["backup_type"] for e in created} == {BackupType.UCI_SNAPSHOT.value}
+    assert len(_collected(env)) == 1 + 4  # manual + four drift versions
+    assert env.runtime.stats["drift_versions_capped"] == 2
+    # the same (already seen) drift again: no further version
+    env.runtime.routers[env.rid].fp_changed_at = env.clock.local()
+    env.clock.advance(seconds=3601)
+    await env.tick()
+    assert len(env.provider.ops("detect_drift")) == 7
+    assert len(_collected(env)) == 5
+    # the next day the cap starts again
+    await _drifted_poll(env, 7)
+    env.clock.advance(days=1)
+    await env.tick()
+    assert len(drift_created()) == 5
+    await stop(env)
+
+
+async def test_six_routers_run_one_at_a_time(disks, tmp_path):
+    env = await cm_env(disks, tmp_path, routers=6)
+    gate = env.provider.gates["collect"] = asyncio.Event()
+    env.runtime.async_tick()
+    await _wait_entered(env)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert env.provider.active == 1  # the rest waits in our queue
+    assert len(env.runtime._queue) == 5
+    gate.set()
+    await drain(env.hass)
+    assert env.provider.max_active == 1
+    assert sorted(_collected(env)) == sorted(env.rids)
+    assert env.router_calls() == []
+    await stop(env)
+
+
+async def test_stagger_stable_within_hour(disks, tmp_path):
+    env = await cm_env(disks, tmp_path, routers=6)
+    offsets = {rid: cm.stagger_offset(rid) for rid in env.rids}
+    assert offsets == {rid: cm.stagger_offset(rid) for rid in env.rids}
+    assert all(timedelta(0) <= o < timedelta(hours=1) for o in offsets.values())
+    assert len(set(offsets.values())) > 1
+    order = sorted(env.rids, key=offsets.__getitem__)
+    runtime = env.runtime
+    day = runtime._today_slot(order[0])
+    env.clock.t = dt_util.as_utc(runtime._slot_at(order[0], day))
+    await env.tick()
+    assert _collected(env) == [order[0]]  # only the earliest offset is due
+    env.clock.t = dt_util.as_utc(runtime._slot_at(order[1], day))
+    await env.tick()
+    assert _collected(env) == order[:2]
+    assert runtime.next_run_at(order[0]) == runtime._slot_at(
+        order[0], day + timedelta(days=1)
+    )
+    await stop(env)
+
+
+async def test_operation_in_progress_retried_next_tick(disks, tmp_path):
+    env = await cm_env(disks, tmp_path)
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_router_lock():
+        async with env.core.manager._locked(env.rid):
+            held.set()
+            await release.wait()
+
+    holder = asyncio.ensure_future(hold_router_lock())
+    await held.wait()
+    await env.tick()
+    assert _collected(env) == []  # lock held: skipped, no router call
+    assert env.runtime.stats["runs_deferred"] == 1
+    release.set()
+    await holder
+    # the core itself reports busy once: not a failure, next tick again
+    env.provider.fail["collect"] = OperationInProgressError("busy")
+    await env.tick()
+    assert len(_collected(env)) == 1
+    assert env.runtime.routers[env.rid].last_scheduled_day is None
+    del env.provider.fail["collect"]
+    await env.tick()
+    assert len(_collected(env)) == 2
+    assert [r.reason for r in await _records(env)] == [BackupReason.SCHEDULED]
+    await stop(env)
+
+
+async def test_restart_mid_backup_reruns_same_day(disks, tmp_path):
+    env = await cm_env(disks, tmp_path)
+    env.provider.gates["collect"] = asyncio.Event()
+    env.runtime.async_tick()
+    await _wait_entered(env)
+    env = await restart(env)  # HA stops while the router is being read
+    assert await _records(env) == []
+    env.provider.gates.pop("collect")
+    await env.tick()
+    assert len(_collected(env)) == 2
+    assert [r.reason for r in await _records(env)] == [BackupReason.SCHEDULED]
+    await stop(env)
+
+
+async def test_unload_cancels_timers_and_tasks(disks, tmp_path):
+    env = await cm_env(disks, tmp_path)
+    runtime = env.runtime
+    listeners = env.coords[env.rid]._listeners
+    count_with_ours = len(listeners)
+    assert len(env.timers.active) == 1
+    env.provider.gates["collect"] = asyncio.Event()
+    runtime.async_tick()
+    await _wait_entered(env)
+    worker = runtime._worker
+    await stop(env)
+    assert env.timers.active == [] and env.timers.cancelled == 1
+    assert worker is not None and worker.cancelled()
+    assert runtime._tasks == set() and runtime._queue == []
+    assert env.provider.active == 0
+    assert len(listeners) < count_with_ours  # drift listener removed
+    env.provider.gates.pop("collect")
+    env = await restart(env)
+    assert await _records(env) == []  # the cancelled run stored nothing
+    await stop(env)
+
+
+async def test_unloading_one_entry_cancels_only_its_run(disks, tmp_path):
+    env = await cm_env(disks, tmp_path, routers=2)
+    runtime = env.runtime
+    first, second = list(runtime.routers)
+    gate = env.provider.gates["collect"] = asyncio.Event()
+    runtime.async_tick()
+    await _wait_entered(env)
+    assert _collected(env) == [first]
+    old_worker = runtime._worker
+    unload = asyncio.ensure_future(unload_entry(env, env.entry_of(first)))
+
+    async def second_started():
+        while _collected(env) != [first, second]:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(second_started(), 5)  # the other router goes on
+    gate.set()
+    await unload
+    assert old_worker.cancelled()
+    assert await _records(env, second) != []
+    assert first not in runtime.routers
+    await unload_entry(env, env.entry_of(second))
+
+
+async def test_manual_run_rejected_while_a_run_is_active(disks, tmp_path):
+    env = await cm_env(disks, tmp_path, routers=2, options=NO_SCHEDULE)
+    env.provider.gates["collect"] = asyncio.Event()
+    first = asyncio.ensure_future(env.runtime.async_backup_now(env.rid, actor=ADMIN))
+    await _wait_entered(env)
+    with pytest.raises(OperationInProgressError):
+        await env.runtime.async_backup_now(env.rids[1], actor=ADMIN)
+    env.provider.gates["collect"].set()
+    result = await first
+    assert result.created
+    await stop(env)
+
+
+def test_note_validation():
+    assert cm.validate_note(None) is None
+    assert cm.validate_note("  ") is None
+    assert cm.validate_note(" before VLAN ") == "before VLAN"
+    assert cm.validate_note("x" * 200) == "x" * 200
+    for bad in ("x" * 201, "a\nb", "a\x00b", "a" + chr(0x202E) + "b"):
+        with pytest.raises(ValueError):
+            cm.validate_note(bad)
+    with pytest.raises(TypeError):
+        cm.validate_note(5)

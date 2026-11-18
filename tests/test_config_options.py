@@ -13,10 +13,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+from config_manager_kit import ON, cm_env, stop
+from core_test_provider import short_tmp_path  # noqa: F401 - Windows path limit
+from core_testkit import FakeDisks
 
 import custom_components.openwrt_router as integration
 from custom_components.openwrt_router import config_flow as cf
 from custom_components.openwrt_router.const import (
+    CONFIG_BACKUP_SCHEDULE_DAILY,
+    CONFIG_BACKUP_SCHEDULE_OFF,
     CONFIG_BACKUP_SCHEDULES,
     DEFAULT_CONFIG_BACKUP_SCHEDULE,
     DEFAULT_CONFIG_BACKUP_TIME,
@@ -160,3 +165,38 @@ def test_hooks_sit_where_the_plan_puts_them():
     release = unload.index("async_release_config_manager(hass, entry.entry_id)")
     assert release < unload.index("async_unload_entry_core(hass, entry)")
     assert unload.index("if unload_ok:") < release
+
+
+@pytest.fixture
+def disks():
+    with FakeDisks().patch() as fake:
+        yield fake
+
+
+async def test_schedule_reads_new_options_at_next_tick(disks, tmp_path):
+    """Saved without a reload: the next tick uses the new values (12:00 now)."""
+    env = await cm_env(
+        disks,
+        tmp_path,
+        options={**ON, OPTION_CONFIG_BACKUP_SCHEDULE: CONFIG_BACKUP_SCHEDULE_OFF},
+    )
+    entry = env.entries[0]
+
+    def collects() -> int:
+        return len(env.provider.ops("collect"))
+
+    await env.tick()
+    assert collects() == 0  # schedule off
+    entry.options = {
+        **ON,
+        OPTION_CONFIG_BACKUP_SCHEDULE: CONFIG_BACKUP_SCHEDULE_DAILY,
+        OPTION_CONFIG_BACKUP_TIME: "13:30:00",
+    }
+    await env.tick()
+    assert collects() == 0  # daily, but 13:30 + offset is still ahead
+    entry.options = {**entry.options, OPTION_CONFIG_BACKUP_TIME: "06:00:00"}
+    await env.tick()
+    assert collects() == 1
+    entry.options = {**entry.options, OPTION_CONFIG_BACKUP_TIME: "garbage"}
+    assert env.runtime.next_run_at(env.rid) is not None  # falls back to 03:30
+    await stop(env)

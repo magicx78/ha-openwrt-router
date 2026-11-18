@@ -33,9 +33,11 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv  # configuration manager
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType  # configuration manager
 
 from .api import (
     OpenWrtAPI,
@@ -108,6 +110,27 @@ PLATFORMS: list[Platform] = [
     Platform.BUTTON,
     Platform.BINARY_SENSOR,
 ]
+
+# --- Configuration manager (plan 2026-11-18, section 4): the action
+# openwrt_router.create_config_backup. Config entries only (no YAML); the
+# action is registered once here and stays registered across entry reloads.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration's actions (independent of config entries)."""
+    if _config_manager is not None:
+        try:
+            _config_manager.async_register_services(hass)
+        except Exception:
+            _LOGGER.warning(
+                "The configuration backup action could not be registered",
+                exc_info=True,
+            )
+    return True
+
+
+# --- end configuration manager action
 
 
 @dataclass

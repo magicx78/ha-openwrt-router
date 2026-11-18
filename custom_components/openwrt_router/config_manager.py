@@ -20,35 +20,78 @@ to finished polls from outside (``coordinator.async_add_listener``).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import secrets
+import unicodedata
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
-from homeassistant.core import HomeAssistant, callback
+import voluptuous as vol
+from homeassistant.const import ATTR_DEVICE_ID
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+    callback,
+)
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
+from .config_const import DRIFT_DEBOUNCE_S, DRIFT_MIN_INTERVAL_S, FETCH_RETRY_DELAY_S
+from .config_snapshot import fingerprint_from_coordinator
 from .const import (
+    CONFIG_BACKUP_SCHEDULE_DAILY,
+    CONFIG_DRIFT_VERSIONS_PER_DAY,
     CONFIG_MANAGER_MODULE,
+    CONFIG_MANAGER_TICK_SECONDS,
+    CONFIG_NOTE_MAX_LENGTH,
+    CONFIG_RELEASE_CHANGE_DELAY_SECONDS,
+    CONFIG_STAGGER_SECONDS,
     CONFIG_STATUS_DISABLED,
     CONFIG_STATUS_FAILED,
     CONFIG_STATUS_NEVER,
     CONFIG_STATUS_RUNNING,
     DATA_CONFIG_MANAGER,
+    DEFAULT_CONFIG_BACKUP_SCHEDULE,
+    DEFAULT_CONFIG_BACKUP_TIME,
+    DEFAULT_CONFIG_DRIFT_CHECK,
+    DOMAIN,
+    OPTION_CONFIG_BACKUP_SCHEDULE,
+    OPTION_CONFIG_BACKUP_TIME,
+    OPTION_CONFIG_DRIFT_CHECK,
+    SERVICE_CREATE_CONFIG_BACKUP,
     SIGNAL_CONFIG_MANAGER,
 )
-from .core_errors import ConfigApiError, ProviderConflictError
+from .core_errors import (
+    AuthorizationError,
+    BackupNotFoundError,
+    ConfigApiError,
+    OperationInProgressError,
+    ProviderConflictError,
+    RouterNotFoundError,
+)
 from .core_models import (
     MAX_LIST_LIMIT,
     OPTION_CONFIG_BACKUP_ENABLED,
     Actor,
     BackupReason,
     BackupRecord,
+    BackupType,
+    CapabilityReason,
+    CapabilityState,
     CoreEvent,
     CoreEventType,
+    DriftReport,
+    PutVersionResult,
+    async_actor_from_context,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -103,11 +146,91 @@ class RouterState:
     # --- drift summary (from the last check or the audit at start)
     drift: dict[str, Any] | None = None
     drift_ids: set[str] = field(default_factory=set)
+    # drift ids that already got (or never get) an automatic drift version
+    drift_versioned: set[str] = field(default_factory=set)
     loaded: bool = False
 
 
 def _local_day(when: datetime | None) -> date | None:
     return None if when is None else dt_util.as_local(when).date()
+
+
+def stagger_offset(router_id: str) -> timedelta:
+    """Stable per-router offset after the daily time (plan section 3)."""
+    digest = hashlib.sha256(router_id.encode("utf-8")).hexdigest()
+    return timedelta(seconds=int(digest, 16) % CONFIG_STAGGER_SECONDS)
+
+
+def _parse_time(value: Any) -> time:
+    """``HH:MM[:SS]`` of the option; the default for anything odd."""
+    parsed = dt_util.parse_time(value) if isinstance(value, str) else None
+    return parsed or dt_util.parse_time(DEFAULT_CONFIG_BACKUP_TIME) or time(3, 30)
+
+
+# Drift summary states besides the DriftAckState values.
+DRIFT_OPEN = "open"
+DRIFT_CLEAR = "clear"
+
+
+def _drift_summary(
+    *,
+    drift_id: str | None,
+    state: str,
+    critical_count: Any,
+    unknown_count: Any,
+    comparison: Any,
+    baseline_backup_id: Any,
+    checked_at: datetime | None,
+) -> dict[str, Any]:
+    def count(value: Any) -> int:
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    return {
+        "state": state,
+        "drift_id": drift_id,
+        "critical_count": count(critical_count),
+        "unknown_count": count(unknown_count),
+        "comparison": None if comparison is None else str(comparison),
+        "baseline_backup_id": (
+            baseline_backup_id if isinstance(baseline_backup_id, str) else None
+        ),
+        "checked_at": checked_at,
+    }
+
+
+# Job kinds of the worker, in priority order (lower runs first).
+JOB_RELEASE = "release_change"
+JOB_SCHEDULED = "scheduled"
+JOB_DRIFT = "drift_check"
+_JOB_PRIORITY = {JOB_RELEASE: 0, JOB_SCHEDULED: 1, JOB_DRIFT: 2}
+
+
+@dataclass(frozen=True)
+class _Job:
+    router_id: str
+    kind: str
+    release: str | None = None
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.router_id, self.kind)
+
+
+def validate_note(note: Any) -> str | None:
+    """A note: <= 200 characters, no control characters; ``""`` -> None.
+
+    Raises TypeError or ValueError (callers map them to their own error).
+    """
+    if note is None:
+        return None
+    if not isinstance(note, str):
+        raise TypeError("note must be a string")
+    note = note.strip()
+    if len(note) > CONFIG_NOTE_MAX_LENGTH:
+        raise ValueError("note too long")
+    if any(unicodedata.category(ch) in ("Cc", "Cf") for ch in note):
+        raise ValueError("note contains control characters")
+    return note or None
 
 
 class ConfigManagerRuntime:
@@ -141,10 +264,22 @@ class ConfigManagerRuntime:
         self._entry_unsubs: dict[str, list[Callable[[], None]]] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
         self._refresh_pending: set[str] = set()
+        self._unsub_tick: Callable[[], None] | None = None
+        # One run at a time on our side (scheduled, drift and manual); the
+        # core's fleet semaphore enforces the same (FLEET_BACKUP_CONCURRENCY).
+        self._run_lock = asyncio.Lock()
+        self._queue: list[_Job] = []
+        self._queued: set[tuple[str, str]] = set()
+        self._worker: asyncio.Task[Any] | None = None
+        self._current: _Job | None = None
         self.stats: dict[str, int] = {
             "runs_started": 0,
             "runs_failed": 0,
+            "runs_deferred": 0,
+            "drift_checks": 0,
+            "drift_versions": 0,
             "refreshes": 0,
+            "ticks": 0,
         }
 
     # -- lifecycle ---------------------------------------------------------------------
@@ -186,7 +321,14 @@ class ConfigManagerRuntime:
         if state is None or state.entry_id != entry_id:
             state = RouterState(router_id=router_id, entry_id=entry_id)
             self.routers[router_id] = state
+        if entry_id not in self._entry_unsubs:
+            add_listener = getattr(coordinator, "async_add_listener", None)
+            if callable(add_listener):
+                self._entry_unsubs[entry_id] = [
+                    add_listener(self._poll_listener(entry_id))
+                ]
         await self._async_load_state(state)
+        self._sync_timer()
         return state
 
     @callback
@@ -201,12 +343,14 @@ class ConfigManagerRuntime:
                 _LOGGER.debug("Listener of %s already removed", entry_id)
         self.entries.pop(entry_id, None)
         self.coordinators.pop(entry_id, None)
-        for router_id in [
-            rid for rid, s in self.routers.items() if s.entry_id == entry_id
-        ]:
+        gone = {rid for rid, s in self.routers.items() if s.entry_id == entry_id}
+        for router_id in gone:
             del self.routers[router_id]
         if not self.entries:
             self.close()
+            return
+        self._drop_jobs(gone)
+        self._sync_timer()
 
     @callback
     def close(self) -> None:
@@ -225,6 +369,9 @@ class ConfigManagerRuntime:
                 except Exception:  # noqa: BLE001 - listener already gone
                     _LOGGER.debug("Listener already removed")
         self._entry_unsubs.clear()
+        self._queue.clear()
+        self._queued.clear()
+        self._worker = None
         for task in list(self._tasks):
             task.cancel()
         self._tasks.clear()
@@ -237,7 +384,34 @@ class ConfigManagerRuntime:
 
     @callback
     def _stop_timers(self) -> None:
-        """Cancel the timers (none in this part)."""
+        """Cancel the schedule tick."""
+        if self._unsub_tick is not None:
+            self._unsub_tick()
+            self._unsub_tick = None
+
+    @callback
+    def _sync_timer(self, *, force: bool = False) -> None:
+        """The tick runs only while a router of ours has the option on.
+
+        Option off everywhere (the default) -> no timer at all: nothing of
+        the configuration manager runs in HA while idle. ``force``: an
+        option was just switched on (entry options not stored yet).
+        """
+        wanted = (
+            not self.closed
+            and self.provider_registered
+            and (force or any(self.enabled(rid) for rid in self.routers))
+        )
+        if wanted and self._unsub_tick is None:
+            self._unsub_tick = async_track_time_interval(
+                self.hass,
+                self.async_tick,
+                timedelta(seconds=CONFIG_MANAGER_TICK_SECONDS),
+                name="openwrt_router configuration manager",
+                cancel_on_shutdown=True,
+            )
+        elif not wanted:
+            self._stop_timers()
 
     def _spawn(self, coro: Coroutine[Any, Any, Any], name: str) -> asyncio.Task[Any]:
         """A background task that ends with the runtime."""
@@ -267,6 +441,58 @@ class ConfigManagerRuntime:
     def enabled(self, router_id: str) -> bool:
         """``config_backup_enabled`` of the router's entry (default OFF)."""
         return self.options(router_id).get(OPTION_CONFIG_BACKUP_ENABLED) is True
+
+    def schedule_daily(self, router_id: str) -> bool:
+        """Option on and schedule ``daily`` (odd stored values: the default)."""
+        if not self.enabled(router_id):
+            return False
+        value = self.options(router_id).get(
+            OPTION_CONFIG_BACKUP_SCHEDULE, DEFAULT_CONFIG_BACKUP_SCHEDULE
+        )
+        if not isinstance(value, str):
+            value = DEFAULT_CONFIG_BACKUP_SCHEDULE
+        return value == CONFIG_BACKUP_SCHEDULE_DAILY
+
+    def drift_check_enabled(self, router_id: str) -> bool:
+        """Option on and ``config_drift_check`` on (default on)."""
+        if not self.enabled(router_id):
+            return False
+        value = self.options(router_id).get(
+            OPTION_CONFIG_DRIFT_CHECK, DEFAULT_CONFIG_DRIFT_CHECK
+        )
+        return value if isinstance(value, bool) else DEFAULT_CONFIG_DRIFT_CHECK
+
+    def _slot_day(self, router_id: str, when: datetime | None) -> date | None:
+        """Day of the daily slot ``when`` belongs to (offset taken off).
+
+        A run at 00:20 for a 23:30 time with a 50-minute offset still counts
+        for the day before.
+        """
+        if when is None:
+            return None
+        return (dt_util.as_local(when) - stagger_offset(router_id)).date()
+
+    def _today_slot(self, router_id: str) -> date:
+        """The slot day the current time belongs to."""
+        return (dt_util.as_local(self.now()) - stagger_offset(router_id)).date()
+
+    def _slot_at(self, router_id: str, day: date) -> datetime:
+        """When the daily run of ``day`` is due (time + offset, local)."""
+        at = _parse_time(self.options(router_id).get(OPTION_CONFIG_BACKUP_TIME))
+        start = datetime.combine(day, at, tzinfo=dt_util.get_default_time_zone())
+        return start + stagger_offset(router_id)
+
+    def next_run_at(self, router_id: str) -> datetime | None:
+        """Next planned daily run (or its retry); None without a schedule."""
+        state = self.routers.get(router_id)
+        if state is None or not self.schedule_daily(router_id):
+            return None
+        today = self._today_slot(router_id)
+        if state.retry_at is not None and state.last_scheduled_day != today:
+            return state.retry_at
+        if state.last_scheduled_day == today:
+            return self._slot_at(router_id, today + timedelta(days=1))
+        return self._slot_at(router_id, today)
 
     def status(self, router_id: str) -> str:
         """ok, partial, failed, running, disabled or never."""
@@ -317,29 +543,42 @@ class ConfigManagerRuntime:
             _LOGGER.debug("Audit of %s not readable", state.router_id)
             events = ()
         self._drift_from_events(state, events)
+        # Drifts seen before the restart get no further automatic version.
+        state.drift_versioned |= state.drift_ids
 
     def _drift_from_events(self, state: RouterState, events: Iterable[Any]) -> None:
-        """Drift summary from the newest detection and its acknowledgement."""
+        """Drift summary from the newest detection and its acknowledgement.
+
+        Acknowledgements count regardless of their position in the audit (a
+        drift id, once acknowledged, stays acknowledged in the core).
+        """
+        events = list(events)  # newest first
         acks: dict[str, str] = {}
-        for event in events:  # newest first
+        for event in events:
             data = getattr(event, "data", None) or {}
             drift_id = data.get("drift_id")
-            if not isinstance(drift_id, str):
-                continue
-            if event.type == str(CoreEventType.DRIFT_ACKNOWLEDGED):
+            if isinstance(drift_id, str) and str(event.type) == str(
+                CoreEventType.DRIFT_ACKNOWLEDGED
+            ):
                 acks.setdefault(drift_id, str(data.get("state") or "acknowledged"))
+        for event in events:
+            data = getattr(event, "data", None) or {}
+            drift_id = data.get("drift_id")
+            if not isinstance(drift_id, str) or str(event.type) != str(
+                CoreEventType.DRIFT_DETECTED
+            ):
                 continue
             state.drift_ids.add(drift_id)
             if state.drift is None:
-                state.drift = {
-                    "state": acks.get(drift_id, "open"),
-                    "drift_id": drift_id,
-                    "critical_count": int(data.get("critical_count") or 0),
-                    "unknown_count": int(data.get("unknown_count") or 0),
-                    "comparison": data.get("comparison"),
-                    "baseline_backup_id": data.get("baseline_version_id"),
-                    "checked_at": event.ts,
-                }
+                state.drift = _drift_summary(
+                    drift_id=drift_id,
+                    state=acks.get(drift_id, DRIFT_OPEN),
+                    critical_count=data.get("critical_count"),
+                    unknown_count=data.get("unknown_count"),
+                    comparison=data.get("comparison"),
+                    baseline_backup_id=data.get("baseline_version_id"),
+                    checked_at=event.ts,
+                )
 
     async def async_refresh(self, router_id: str) -> None:
         """Re-read the router's versions from the store (no router call)."""
@@ -374,7 +613,7 @@ class ConfigManagerRuntime:
         for record in records:
             if record.reason is BackupReason.SCHEDULED:
                 for when in (record.created_at, record.last_seen_at):
-                    day = _local_day(when)
+                    day = self._slot_day(state.router_id, when)
                     if day is not None and (
                         state.last_scheduled_day is None
                         or day > state.last_scheduled_day
@@ -416,14 +655,45 @@ class ConfigManagerRuntime:
         state = self.routers.get(router_id) if router_id else None
         if state is None:
             return
+        data = event.data or {}
         if event_type == str(CoreEventType.BACKUP_FAILED):
-            data = event.data or {}
             state.last_failure_at = event.ts
             error_class = data.get("error_class")
             state.last_error_class = (
                 error_class if isinstance(error_class, str) else None
             )
-        if router_id in self._refresh_pending:
+        elif event_type == str(CoreEventType.DRIFT_DETECTED):
+            drift_id = data.get("drift_id")
+            if isinstance(drift_id, str):
+                state.drift_ids.add(drift_id)
+                state.drift = _drift_summary(
+                    drift_id=drift_id,
+                    state=DRIFT_OPEN,
+                    critical_count=data.get("critical_count"),
+                    unknown_count=data.get("unknown_count"),
+                    comparison=data.get("comparison"),
+                    baseline_backup_id=data.get("baseline_version_id"),
+                    checked_at=event.ts,
+                )
+        elif event_type == str(CoreEventType.DRIFT_ACKNOWLEDGED):
+            drift = state.drift
+            if drift is not None and drift.get("drift_id") == data.get("drift_id"):
+                drift["state"] = str(data.get("state") or "acknowledged")
+        elif event_type == "security.config_option_changed":
+            # Emitted before Home Assistant stores the new options: the
+            # event's value counts here; the tick re-syncs the timer later.
+            if data.get("new") is True:
+                self._sync_timer(force=True)
+            else:
+                state.last_fp = None  # a fresh reference value when back on
+                state.fp_changed_at = None
+                self._sync_timer()
+        self._schedule_refresh(router_id)
+
+    @callback
+    def _schedule_refresh(self, router_id: str) -> None:
+        """One pending store re-read per router (coalesced)."""
+        if self.closed or router_id in self._refresh_pending:
             return
         self._refresh_pending.add(router_id)
         self._spawn(self._async_refresh_soon(router_id), "config_manager_refresh")
@@ -447,6 +717,360 @@ class ConfigManagerRuntime:
         self._spawn(
             self._async_load_state(self.routers[new_id]), "config_manager_rebind"
         )
+
+    # -- drift trigger: coordinator listener (hash only, no router call) ---------------
+
+    def _poll_listener(self, entry_id: str) -> Callable[[], None]:
+        @callback
+        def _on_poll() -> None:
+            try:
+                self._on_poll(entry_id)
+            except Exception:  # never break a poll
+                _LOGGER.debug("Drift trigger of %s failed", entry_id, exc_info=True)
+
+        return _on_poll
+
+    @callback
+    def _on_poll(self, entry_id: str) -> None:
+        """A finished poll: compare the configuration fingerprint."""
+        if self.closed:
+            return
+        state = self.state_for_entry(entry_id)
+        coordinator = self.coordinators.get(entry_id)
+        if state is None or coordinator is None:
+            return
+        if not self.drift_check_enabled(state.router_id):
+            state.last_fp = None
+            state.fp_changed_at = None
+            return
+        if getattr(coordinator, "last_update_success", False) is not True:
+            return
+        fingerprint = fingerprint_from_coordinator(coordinator.data)
+        if state.last_fp is None:
+            state.last_fp = fingerprint  # reference value only, no check
+            return
+        if fingerprint != state.last_fp:
+            state.last_fp = fingerprint
+            state.fp_changed_at = self.now()
+
+    # -- schedule (plan section 3) -----------------------------------------------------
+
+    @callback
+    def async_tick(self, _now: datetime | None = None) -> None:
+        """The 5-minute tick: plan due runs in memory, start the worker."""
+        if self.closed or not self.provider_registered:
+            return
+        self.stats["ticks"] += 1
+        now = self.now()
+        for state in list(self.routers.values()):
+            if not self.enabled(state.router_id):
+                continue
+            try:
+                self._plan(state, now)
+            except Exception:  # one router never stops the rest
+                _LOGGER.debug("Planning of %s failed", state.router_id, exc_info=True)
+        self._sync_timer()
+        self._ensure_worker()
+
+    def _plan(self, state: RouterState, now: datetime) -> None:
+        router_id = state.router_id
+        release = self._release_due(state, now)
+        if release is not None:
+            self._enqueue(_Job(router_id, JOB_RELEASE, release))
+        if self._scheduled_due(state, now):
+            self._enqueue(_Job(router_id, JOB_SCHEDULED))
+        if self._drift_due(state, now):
+            self._enqueue(_Job(router_id, JOB_DRIFT))
+
+    def _scheduled_due(self, state: RouterState, now: datetime) -> bool:
+        router_id = state.router_id
+        if not self.schedule_daily(router_id):
+            return False
+        today = self._today_slot(router_id)
+        if state.last_scheduled_day is not None and state.last_scheduled_day >= today:
+            return False
+        if state.retry_at is not None:
+            if state.retried_day == today:
+                return now >= state.retry_at
+            state.retry_at = None  # a retry of an earlier day
+        return now >= self._slot_at(router_id, today)
+
+    def _release_due(self, state: RouterState, now: datetime) -> str | None:
+        """New firmware release against the newest usable version (L3)."""
+        record = self.api.registry.find(state.router_id)
+        current = getattr(getattr(record, "firmware", None), "version", None)
+        stored = state.newest_ok_release
+        if (
+            not isinstance(current, str)
+            or not current
+            or not stored
+            or current == stored
+            or current in state.release_done
+        ):
+            return None
+        seen = state.release_seen.setdefault(current, now)
+        if now - seen < timedelta(seconds=CONFIG_RELEASE_CHANGE_DELAY_SECONDS):
+            return None
+        return current
+
+    def _drift_due(self, state: RouterState, now: datetime) -> bool:
+        if state.fp_changed_at is None or not self.drift_check_enabled(state.router_id):
+            return False
+        if state.last_backup_at is None:
+            state.fp_changed_at = None  # no baseline yet: the daily run first
+            return False
+        if now - state.fp_changed_at < timedelta(seconds=DRIFT_DEBOUNCE_S):
+            return False
+        return state.last_drift_at is None or now - state.last_drift_at >= timedelta(
+            seconds=DRIFT_MIN_INTERVAL_S
+        )
+
+    # -- worker: one job at a time -----------------------------------------------------
+
+    @callback
+    def _enqueue(self, job: _Job) -> None:
+        if job.key in self._queued:
+            return
+        self._queued.add(job.key)
+        self._queue.append(job)
+        self._queue.sort(key=lambda queued: _JOB_PRIORITY[queued.kind])
+
+    @callback
+    def _ensure_worker(self) -> None:
+        if self.closed or not self._queue:
+            return
+        if self._worker is not None and not self._worker.done():
+            return
+        self._worker = self._spawn(
+            self._async_work(), "openwrt_router configuration manager worker"
+        )
+
+    @callback
+    def _drop_jobs(self, router_ids: set[str]) -> None:
+        """Forget the jobs of released routers; cancel the one running."""
+        if not router_ids:
+            return
+        self._queue = [job for job in self._queue if job.router_id not in router_ids]
+        self._queued = {key for key in self._queued if key[0] not in router_ids}
+        current = self._current
+        worker = self._worker
+        if current is not None and current.router_id in router_ids and worker:
+            worker.cancel()  # the entry is going away: never wait for its router
+            self._worker = None
+            self._current = None
+            self._ensure_worker()  # the others continue in a new worker
+
+    async def _async_work(self) -> None:
+        while self._queue and not self.closed:
+            job = self._queue.pop(0)
+            self._current = job
+            try:
+                async with self._run_lock:
+                    await self._async_run_job(job)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # the worker never dies of one job
+                _LOGGER.warning(
+                    "Configuration job %s of %s failed unexpectedly",
+                    job.kind,
+                    job.router_id,
+                    exc_info=True,
+                )
+            finally:
+                self._queued.discard(job.key)
+                if self._current is job:
+                    self._current = None
+
+    def _backup_possible(self, router_id: str) -> bool:
+        """No router lock held and config.backup usable (no router call)."""
+        try:
+            if self.core.manager.locked(router_id):
+                return False
+            status = self.api.capability(router_id, "config.backup")
+        except ConfigApiError:
+            return False
+        return status.available or (
+            status.state is CapabilityState.UNKNOWN
+            and str(status.reason) == CapabilityReason.DETERMINED_ON_FIRST_USE.value
+        )
+
+    async def _async_run_job(self, job: _Job) -> None:
+        state = self.routers.get(job.router_id)
+        if state is None or not self.enabled(job.router_id):
+            return
+        if job.kind == JOB_DRIFT:
+            await self._async_auto_drift(state)
+            return
+        if not self._backup_possible(job.router_id):
+            self.stats["runs_deferred"] += 1  # again at a later tick
+            return
+        scheduled = job.kind == JOB_SCHEDULED
+        today = self._today_slot(job.router_id)
+        reason = BackupReason.SCHEDULED if scheduled else BackupReason.RELEASE_CHANGE
+        try:
+            await self._async_backup(state, reason=reason, actor=self.module_actor)
+        except OperationInProgressError:
+            self.stats["runs_deferred"] += 1  # not a failure: next tick
+            return
+        except ConfigApiError as err:
+            self.stats["runs_failed"] += 1
+            _LOGGER.info(
+                "Configuration backup (%s) of %s failed: %s",
+                job.kind,
+                job.router_id,
+                err.code,
+            )
+            if not scheduled:
+                state.release_done.add(job.release or "")
+            elif err.retryable and state.retried_day != today:
+                state.retried_day = today
+                state.retry_at = self.now() + timedelta(seconds=FETCH_RETRY_DELAY_S)
+            else:
+                state.last_scheduled_day = today
+                state.retry_at = None
+            return
+        if scheduled:
+            state.last_scheduled_day = today
+            state.retry_at = None
+        else:
+            state.release_done.add(job.release or "")
+
+    async def _async_backup(
+        self,
+        state: RouterState,
+        *,
+        reason: BackupReason,
+        actor: Actor,
+        backup_type: BackupType | None = None,
+        note: str | None = None,
+    ) -> PutVersionResult:
+        """One create_backup through the Configuration API (the only path)."""
+        router_id = state.router_id
+        state.running = True
+        state.last_attempt_at = self.now()
+        self.stats["runs_started"] += 1
+        self._notify(router_id)
+        try:
+            result = await self.api.async_create_backup(
+                router_id,
+                reason=reason,
+                actor=actor,
+                backup_type=backup_type,
+                note=note,
+            )
+        except BaseException:
+            state.running = False
+            self._notify(router_id)
+            self._schedule_refresh(router_id)
+            raise
+        state.running = False
+        await self.async_refresh(router_id)
+        return result
+
+    async def async_backup_now(
+        self,
+        router_id: str,
+        *,
+        actor: Actor,
+        note: str | None = None,
+        wait: bool = False,
+    ) -> PutVersionResult:
+        """A manual version (service, route R5); the core guard decides.
+
+        ``wait`` False: another run of ours -> OperationInProgressError at
+        once (route: 409 + Retry-After). The service waits its turn.
+        """
+        state = self.routers.get(router_id)
+        if state is None:
+            raise RouterNotFoundError("Unknown router", router_id=router_id)
+        if not wait and self._run_lock.locked():
+            raise OperationInProgressError(
+                "Another configuration backup is running", router_id=router_id
+            )
+        async with self._run_lock:
+            return await self._async_backup(
+                state, reason=BackupReason.MANUAL, actor=actor, note=note
+            )
+
+    # -- drift -------------------------------------------------------------------------
+
+    async def async_check_drift(self, router_id: str, *, actor: Actor) -> DriftReport:
+        """One drift check (read-only in the core; route R10, auto trigger)."""
+        self.stats["drift_checks"] += 1
+        report = await self.api.async_detect_drift(router_id, actor=actor)
+        state = self.routers.get(router_id)
+        if state is not None:
+            self._apply_drift_report(state, report)
+            self._notify(router_id)
+        return report
+
+    def _apply_drift_report(self, state: RouterState, report: DriftReport) -> None:
+        if report.drift_id:
+            state.drift_ids.add(report.drift_id)
+        if not report.drifted:
+            summary_state = DRIFT_CLEAR
+        elif report.ack_state is not None:
+            summary_state = str(report.ack_state)
+        else:
+            summary_state = DRIFT_OPEN
+        state.drift = _drift_summary(
+            drift_id=report.drift_id,
+            state=summary_state,
+            critical_count=report.critical_count,
+            unknown_count=report.unknown_count,
+            comparison=report.comparison,
+            baseline_backup_id=report.baseline_backup_id,
+            checked_at=report.checked_at,
+        )
+
+    def _roll_drift_day(self, state: RouterState) -> None:
+        today = _local_day(self.now())
+        if state.drift_day != today:
+            state.drift_day = today
+            state.drift_versions_today = 0
+
+    async def _async_auto_drift(self, state: RouterState) -> None:
+        """Debounced drift check; a new drift id gets one UCI version."""
+        router_id = state.router_id
+        state.fp_changed_at = None
+        state.last_drift_at = self.now()
+        try:
+            report = await self.async_check_drift(router_id, actor=self.module_actor)
+        except BackupNotFoundError:
+            return  # no baseline: wait for the daily run
+        except ConfigApiError as err:
+            _LOGGER.debug("Drift check of %s failed: %s", router_id, err.code)
+            return
+        drift_id = report.drift_id
+        if (
+            not report.drifted
+            or not drift_id
+            or report.ack_state is not None
+            or drift_id in state.drift_versioned
+        ):
+            return
+        state.drift_versioned.add(drift_id)
+        self._roll_drift_day(state)
+        if state.drift_versions_today >= CONFIG_DRIFT_VERSIONS_PER_DAY:
+            self.stats["drift_versions_capped"] = (
+                self.stats.get("drift_versions_capped", 0) + 1
+            )
+            return
+        if not self._backup_possible(router_id):
+            return
+        # Counted per attempt: bounds the router calls, not only the versions.
+        state.drift_versions_today += 1
+        try:
+            await self._async_backup(
+                state,
+                reason=BackupReason.DRIFT,
+                actor=self.module_actor,
+                backup_type=BackupType.UCI_SNAPSHOT,
+            )
+        except ConfigApiError as err:
+            _LOGGER.debug("Drift version of %s failed: %s", router_id, err.code)
+            return
+        self.stats["drift_versions"] += 1
 
 
 # -- module entry points --------------------------------------------------------------
@@ -514,10 +1138,145 @@ def async_release_config_manager(hass: HomeAssistant, entry_id: str) -> None:
         runtime.release(entry_id)
 
 
+# -- service create_config_backup (plan section 4) ------------------------------------
+
+ATTR_NOTE = "note"
+
+SERVICE_CREATE_CONFIG_BACKUP_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_DEVICE_ID): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(ATTR_NOTE): vol.Any(None, cv.string),
+    }
+)
+
+
+def _service_error(key: str, **placeholders: str) -> ServiceValidationError:
+    return ServiceValidationError(
+        translation_domain=DOMAIN,
+        translation_key=key,
+        translation_placeholders=placeholders or None,
+    )
+
+
+def _resolve_targets(
+    hass: HomeAssistant, runtime: ConfigManagerRuntime, device_ids: Iterable[str]
+) -> list[str]:
+    """Router ids of the devices; every validation error before any run."""
+    registry = dr.async_get(hass)
+    router_ids: list[str] = []
+    for device_id in dict.fromkeys(device_ids):
+        device = registry.async_get(device_id)
+        entry_id = None
+        if device is not None:
+            entry_id = next(
+                (
+                    ident[1]
+                    for ident in device.identifiers
+                    if ident[0] == DOMAIN and ident[1] in runtime.entries
+                ),
+                None,
+            )
+        if device is None or entry_id is None:
+            raise _service_error("config_backup_unknown_device", device_id=device_id)
+        state = runtime.state_for_entry(entry_id)
+        if state is None:
+            raise _service_error("config_backup_not_ready")
+        if not runtime.enabled(state.router_id):
+            name = device.name_by_user or device.name or entry_id
+            raise _service_error("config_backup_disabled", router=name)
+        if state.router_id not in router_ids:
+            router_ids.append(state.router_id)
+    return router_ids
+
+
+async def async_handle_create_config_backup(
+    hass: HomeAssistant, call: ServiceCall
+) -> ServiceResponse:
+    """``openwrt_router.create_config_backup``: one manual version per router.
+
+    Routers run one after the other. A router or storage failure of one
+    router is reported in the response; only when every router failed the
+    call raises ``config_backup_failed``.
+    """
+    try:
+        note = validate_note(call.data.get(ATTR_NOTE))
+    except (TypeError, ValueError) as err:
+        raise _service_error("config_backup_invalid_note") from err
+    runtime = async_get_runtime(hass)
+    if runtime is None or not runtime.provider_registered:
+        raise _service_error("config_backup_not_ready")
+    router_ids = _resolve_targets(hass, runtime, call.data[ATTR_DEVICE_ID])
+    actor = await async_actor_from_context(hass, call.context)
+    results: list[dict[str, Any]] = []
+    failures: list[ConfigApiError] = []
+    for router_id in router_ids:
+        try:
+            result = await runtime.async_backup_now(
+                router_id, actor=actor, note=note, wait=True
+            )
+        except AuthorizationError as err:
+            raise _service_error("config_backup_denied") from err
+        except ConfigApiError as err:
+            failures.append(err)
+            results.append(
+                {
+                    "router_id": router_id,
+                    "backup_id": None,
+                    "created": False,
+                    "status": CONFIG_STATUS_FAILED,
+                    "error_class": err.error_class.value,
+                }
+            )
+            continue
+        record = result.record
+        results.append(
+            {
+                "router_id": router_id,
+                "backup_id": record.backup_id,
+                "created": result.created,
+                "status": str(record.status),
+                "error_class": (
+                    None if record.error_class is None else str(record.error_class)
+                ),
+            }
+        )
+    if failures and len(failures) == len(results):
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="config_backup_failed",
+            translation_placeholders={"error_class": failures[0].error_class.value},
+        )
+    if call.return_response:
+        return {"results": results}
+    return None
+
+
+@callback
+def async_register_services(hass: HomeAssistant) -> None:
+    """Register the action once (from ``async_setup``; it stays registered)."""
+    if hass.services.has_service(DOMAIN, SERVICE_CREATE_CONFIG_BACKUP):
+        return
+
+    async def _async_handle(call: ServiceCall) -> ServiceResponse:
+        return await async_handle_create_config_backup(hass, call)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CREATE_CONFIG_BACKUP,
+        _async_handle,
+        schema=SERVICE_CREATE_CONFIG_BACKUP_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+
 __all__ = [
     "ConfigManagerRuntime",
     "RouterState",
     "async_get_runtime",
+    "async_handle_create_config_backup",
+    "async_register_services",
     "async_release_config_manager",
     "async_setup_config_manager",
+    "stagger_offset",
+    "validate_note",
 ]
