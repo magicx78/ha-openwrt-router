@@ -10,6 +10,8 @@ See ``docs/dev/configuration-api-v1.md`` for when each one is raised.
 from __future__ import annotations
 
 import logging
+import math
+import re
 from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from typing import Any, ClassVar
@@ -25,7 +27,10 @@ class ErrorClass(StrEnum):
     """Coarse error category (version records, events, dedup keys).
 
     The first eleven come from the config-manager plan (section 12.2); the
-    rest are core categories. New members are an additive change.
+    rest are core categories. ``ErrorClass`` is persisted (version records),
+    so a new member needs a metadata version bump - except members listed in
+    ``NON_PERSISTED_ERROR_CLASSES``: they only describe a refused call and
+    are refused by every persisted record.
     """
 
     UNREACHABLE = "unreachable"
@@ -47,6 +52,20 @@ class ErrorClass(StrEnum):
     INCOMPATIBLE = "incompatible"
     UNSUPPORTED_VERSION = "unsupported_version"
     INTERNAL = "internal"
+    # call-time only (never stored; see NON_PERSISTED_ERROR_CLASSES)
+    RATE_LIMITED = "rate_limited"  # too many calls; try again later
+    SAFETY_REFUSED = "safety_refused"  # the core/module refuses: unsafe
+
+
+# Error classes that describe a refused call and never reach a stored record
+# (``VersionMeta`` / ``BackupRecord`` refuse them). An older core reading the
+# stores therefore never meets them, so adding them needs no metadata bump.
+NON_PERSISTED_ERROR_CLASSES: frozenset[ErrorClass] = frozenset(
+    {ErrorClass.RATE_LIMITED, ErrorClass.SAFETY_REFUSED}
+)
+
+# Machine code of a safety refusal (``SafetyRefusedError.reason``).
+SAFETY_REASON_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.:-]{0,63}")
 
 
 class ConfigApiError(HomeAssistantError):
@@ -199,7 +218,8 @@ class AuthorizationError(ConfigApiError):
 
     ``details["reason"]`` says why (for example ``not_admin``,
     ``unverified_actor``, ``unknown_authorization``, ``already_used``,
-    ``expired``, ``action_mismatch``, ``router_mismatch``).
+    ``expired``, ``action_mismatch``, ``router_mismatch``, ``actor_required``,
+    ``unknown_router``).
     """
 
     code = "authorization_denied"
@@ -316,6 +336,68 @@ class OperationInProgressError(ConfigApiError):
     code = "operation_in_progress"
     default_error_class = ErrorClass.BUSY
     default_retryable = True
+
+
+class RateLimitedError(ConfigApiError):
+    """Too many calls of this action (per router); try again after
+    ``retry_after`` seconds. Always retryable; nothing was done."""
+
+    code = "rate_limited"
+    default_error_class = ErrorClass.RATE_LIMITED
+    default_retryable = True
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        retry_after: float,
+        router_id: str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Remember when the caller may try again (seconds, finite, >= 0)."""
+        if isinstance(retry_after, bool) or not isinstance(retry_after, int | float):
+            raise TypeError("retry_after must be a number of seconds")
+        if not math.isfinite(retry_after) or retry_after < 0:
+            raise ValueError("retry_after must be finite and >= 0")
+        self.retry_after = float(retry_after)
+        super().__init__(
+            message,
+            router_id=router_id,
+            details={**dict(details or {}), "retry_after": self.retry_after},
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Base description plus ``retry_after`` at the top level."""
+        return {**super().to_dict(), "retry_after": self.retry_after}
+
+
+class SafetyRefusedError(ConfigApiError):
+    """The core or a module refuses the action because it is unsafe (for
+    example it would cut the management link). Not an authorization
+    question and never retryable as is; ``reason`` is a machine code."""
+
+    code = "safety_refused"
+    default_error_class = ErrorClass.SAFETY_REFUSED
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason: str,
+        router_id: str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Remember the machine-readable reason (``SAFETY_REASON_PATTERN``)."""
+        if not isinstance(reason, str):
+            raise TypeError("reason must be a str")
+        if SAFETY_REASON_PATTERN.fullmatch(reason) is None:
+            raise ValueError("reason must match SAFETY_REASON_PATTERN")
+        self.reason = reason
+        super().__init__(
+            message,
+            router_id=router_id,
+            details={**dict(details or {}), "reason": reason},
+        )
 
 
 class ProviderError(ConfigApiError):
