@@ -166,6 +166,15 @@ Eigenschaft `status: IdentityStatus` ist daraus abgeleitet
 Flagge = `confirmed`. IP- oder Hostname-Wechsel ändert die ID nie; nichts wird automatisch
 zusammengeführt.
 
+Verwaiste Datensätze bleiben für Adoption und Verlauf, aber nicht unbegrenzt (Review PR
+#55, Punkt 6). Bei jedem Core-Laden, nur wenn Einträge UND Versionsspeicher bekannt sind
+(`RouterRegistry.prune_orphans`): ohne Versionen nach `ORPHAN_RETENTION_DAYS` (90) Tagen
+vergessen; über `MAX_ORPHANED_RECORDS` (64) gehen die ältesten, die ohne Versionen zuerst.
+Ein Datensatz, dessen Eintrag (oder früherer Eintrag) noch existiert, wird nie gelöscht.
+Jedes Löschen zählt (`orphans_forgotten_aged`/`_capped`), loggt und auditiert
+`router.forgotten`; ausgelassene Läufe zählen `orphan_prune_skipped`. Beim Entladen fällt
+der Laufzeitzustand des Eintrags weg (`release_entry`, Zähler `runtimes_released`).
+
 ```python
 record = api.registry.get_by_entry(entry.entry_id)
 if IdentityFlag.DUPLICATE_SUSPECTED in record.identity.identity_flags:
@@ -1121,7 +1130,12 @@ liest beide Ringe, `ring=AuditRing.SECURITY` nur einen.
 `core.store_recovered`;
 neu in 1.44.0: `security.acl_deployed`, `security.acl_deploy_failed`,
 `security.ssh_pin_pending`, `security.ssh_pin_confirmed`, `security.ssh_pin_mismatch`,
-`security.ssh_pin_reset`, `configuration.router_archived`.
+`security.ssh_pin_reset`, `configuration.router_archived`;
+neu (Review PR #55): `router.forgotten`.
+
+- `router.forgotten` (Ring `security`, audit-pflichtig): ein verwaister Datensatz wurde
+  gelöscht. `data`: `reason` (`aged`/`capped`), `orphaned_at`, `has_versions`,
+  `last_entry_id`, `retention_days`, `max_orphans`.
 
 - 1.44.0, alle im Ring `security` und, außer `ssh_pin_pending`, audit-pflichtig:
   - `security.acl_deployed` (Warnung): `AclDeployResult.to_dict()` (u. a. `command`,
@@ -1567,6 +1581,7 @@ Signatur bleibt, die Regel ist neu.
 | 95 | `async_capture` und `async_compare` (Review PR #55, Punkt 2): ein Benutzer ohne Admin ⇒ `AuthorizationError` `reason` `not_admin` (`details.action` `config_capture`/`config_compare`, `audit_id`), auditiert auf dem Sicherheitsring, vor jedem Provider-Aufruf; Modul-, System- und Automationsakteure unverändert. Konstanten `READ_CAPTURE`, `READ_COMPARE` (`config_api`). | B (Verhalten) |
 | 96 | Versionsdateien (Review PR #55, Punkt 3): `.partial` wird exklusiv angelegt (`O_CREAT \| O_EXCL`, `O_NOFOLLOW` wo vorhanden, `0o600`, Rechte per `fchmod` am offenen Deskriptor). Link/Junction/Ordner am `.partial`-Pfad ⇒ `StorageError` `reason` `partial_not_regular`, `found` (`symlink`/`folder`/`other`), Warn-Log, Zähler `partial_refused` (zählt auch in `write_errors`); gleichnamige reguläre Datei ⇒ entfernt, einmal neu angelegt. | Verhalten, A |
 | 97 | `ensure_acl_outcome(respect_offer=True)` (Review PR #55, Punkt 5): eine gestufte ACL ohne alle Basis-Leserechte bleibt behalten, aber mit Warn-Log, `AclEnsureOutcome.missing_base_rights` (neu, Standard `()`) und Reparaturhinweis `acl_base_rights_missing_<entry_id>` (de/en, verschwindet bei vollständigen Rechten und beim Entladen). Neu `missing_base_read_rights(acl)`, `issues.async_sync_acl_base_rights_issue`, `ISSUE_ACL_BASE_RIGHTS_MISSING`. Auf diesem Pfad `parse_acl_text` statt `json.loads`: zu groß/zu tief ⇒ `corrupted`, v8 wird eingespielt. Pfad ohne Angebot unverändert. | A, Verhalten |
+| 98 | Router-Registry (Review PR #55, Punkt 6): Entladen verwirft den Laufzeitzustand (`RouterRegistry.release_entry`, von `EnterpriseCore.forget_entry`). Verwaiste Datensätze begrenzt: `prune_orphans(known_entry_ids, versioned_router_ids)` beim Core-Laden; ohne Versionen nach `ORPHAN_RETENTION_DAYS` = 90 Tagen, über `MAX_ORPHANED_RECORDS` = 64 die ältesten (ohne Versionen zuerst); Datensätze bestehender (auch früherer) Einträge nie; ohne bekannte Einträge oder ohne geladenen Versionsspeicher nichts. Neuer Event-Typ `router.forgotten` (Ring `security`, audit-pflichtig); Zähler `runtimes_released`, `orphans_forgotten_aged`, `orphans_forgotten_capped`, `orphan_prune_skipped`. | A, Verhalten |
 
 Befunde 15 und 18 ändern nur Tests (kein Vertrag): die Wächter „HA-eigene Daten
 unverändert“ prüfen zusätzlich die Aufrufe `async_update_entry`, `async_remove`,

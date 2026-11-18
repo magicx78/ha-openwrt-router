@@ -33,7 +33,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -133,6 +133,20 @@ ORPHAN_ENTRY_MISSING = "entry_missing_at_load"
 ORPHAN_REPLACED = "replaced_by_adoption"
 ORPHAN_DUPLICATE_BINDING = "duplicate_entry_binding"
 _MAX_ID_ATTEMPTS = 16
+
+# Orphaned records are kept for adoption and as history, but not forever
+# (review PR #55, finding 6). Applied once per core load, only when the
+# config entries AND the version store are known:
+# * an orphan WITHOUT versions is forgotten this many days after it was
+#   orphaned (adoption happens when a router is re-added, i.e. days, not
+#   months, later);
+# * above this many orphans the oldest go, those without versions first,
+#   so an orphan with (archived) versions always outlives one without.
+# A record bound to (or earlier bound to) an existing entry is never dropped.
+ORPHAN_RETENTION_DAYS = 90
+MAX_ORPHANED_RECORDS = 64
+FORGET_AGED = "aged"
+FORGET_CAPPED = "capped"
 
 
 def migrate_registry_store(
@@ -446,6 +460,10 @@ class RouterRegistry:
             "detector_runs": 0,
             "detector_errors": 0,
             "detector_entries_refused": 0,
+            "runtimes_released": 0,
+            "orphans_forgotten_aged": 0,
+            "orphans_forgotten_capped": 0,
+            "orphan_prune_skipped": 0,
         }
         self.timing: dict[str, float] = {"runs": 0, "total_s": 0.0, "max_s": 0.0}
 
@@ -604,6 +622,7 @@ class RouterRegistry:
         """Detach every coordinator listener; no further writes are scheduled."""
         for entry_id in list(self._runtime):
             self.detach(entry_id)
+        self._runtime.clear()
         self._probe_listener = None
         self._closed = True
 
@@ -766,6 +785,17 @@ class RouterRegistry:
         runtime = self._runtime.get(entry_id)
         if runtime is not None and runtime.remove_listener is not None:
             runtime.remove_listener()
+
+    @callback
+    def release_entry(self, entry_id: str) -> None:
+        """Detach and drop the entry's runtime state (unload; idempotent).
+
+        The record stays; the next setup creates the runtime again. Until
+        then :meth:`config_enabled` reads the option from the config entry.
+        """
+        self.detach(entry_id)
+        if self._runtime.pop(entry_id, None) is not None:
+            self.stats["runtimes_released"] += 1
 
     @property
     def attached_entry_ids(self) -> frozenset[str]:
@@ -1174,6 +1204,93 @@ class RouterRegistry:
         self.stats["store_saves_immediate"] += 1
         await self.async_flush()
         return record
+
+    @callback
+    def prune_orphans(
+        self,
+        known_entry_ids: Iterable[str],
+        versioned_router_ids: Iterable[str] | None,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[str, ...]:
+        """Forget aged orphans and the oldest above the cap; returns dropped ids.
+
+        ``known_entry_ids``: ALL config entries of the domain. Empty means a
+        half-started HA: nothing is dropped. ``versioned_router_ids``: routers
+        with versions in the version store (archived ones included); None
+        (store not loaded) drops nothing. Both skips are counted. Every drop
+        is counted, logged and audited (``router.forgotten``).
+        """
+        known = {e for e in known_entry_ids if isinstance(e, str) and e}
+        if not known or versioned_router_ids is None:
+            self.stats["orphan_prune_skipped"] += 1
+            return ()
+        versioned = set(versioned_router_ids)
+        now = now or utcnow()
+        cutoff = now - timedelta(days=ORPHAN_RETENTION_DAYS)
+        orphans = [r for r in self._records.values() if r.state is RecordState.ORPHANED]
+        droppable: list[RouterRecord] = []
+        for record in orphans:
+            bound = {record.identity.entry_id, *record.previous_entry_ids}
+            if not bound & known:
+                droppable.append(record)
+        drops: list[tuple[RouterRecord, str]] = []
+        kept: list[RouterRecord] = []
+        for record in droppable:
+            if (
+                record.router_id not in versioned
+                and record.orphaned_at is not None
+                and record.orphaned_at < cutoff
+            ):
+                drops.append((record, FORGET_AGED))
+            else:
+                kept.append(record)
+        excess = len(orphans) - len(drops) - MAX_ORPHANED_RECORDS
+        if excess > 0:
+            # versionless first, then oldest first (unknown age = oldest)
+            kept.sort(
+                key=lambda r: (
+                    r.router_id in versioned,
+                    r.orphaned_at or datetime.min.replace(tzinfo=UTC),
+                    r.router_id,
+                )
+            )
+            drops.extend((record, FORGET_CAPPED) for record in kept[:excess])
+        for record, reason in drops:
+            self._forget(record, reason, has_versions=record.router_id in versioned)
+        if drops:
+            _LOGGER.info(
+                "Router registry: forgot %d orphaned record(s): %d without "
+                "versions orphaned more than %d days ago, %d over the cap of %d "
+                "orphans (see router.forgotten in the audit log)",
+                len(drops),
+                sum(1 for _, reason in drops if reason == FORGET_AGED),
+                ORPHAN_RETENTION_DAYS,
+                sum(1 for _, reason in drops if reason == FORGET_CAPPED),
+                MAX_ORPHANED_RECORDS,
+            )
+            self.schedule_save()
+        return tuple(record.router_id for record, _ in drops)
+
+    def _forget(self, record: RouterRecord, reason: str, *, has_versions: bool) -> None:
+        rid = record.router_id
+        del self._records[rid]
+        self._last_known_caps.pop(rid, None)
+        self.stats[f"orphans_forgotten_{reason}"] += 1
+        self._emit(
+            CoreEventType.ROUTER_FORGOTTEN,
+            router_id=rid,
+            data={
+                "reason": reason,
+                "orphaned_at": (
+                    record.orphaned_at.isoformat() if record.orphaned_at else None
+                ),
+                "has_versions": has_versions,
+                "last_entry_id": record.identity.entry_id,
+                "retention_days": ORPHAN_RETENTION_DAYS,
+                "max_orphans": MAX_ORPHANED_RECORDS,
+            },
+        )
 
     def adoption_candidates(self, entry_id: str) -> tuple[AdoptionCandidate, ...]:
         """Orphaned records sharing hardware MACs with the entry's router."""

@@ -141,6 +141,21 @@ class EnterpriseCore:
                         name,
                         exc_info=True,
                     )
+            # Bound the orphaned records (review PR #55, finding 6); only
+            # with a loaded version store (who has versions is known).
+            try:
+                self.registry.prune_orphans(
+                    known,
+                    self.versions.router_ids() if self.versions.loaded else None,
+                )
+            except Exception:
+                self.load_errors["orphan_prune"] = (
+                    self.load_errors.get("orphan_prune", 0) + 1
+                )
+                _LOGGER.warning(
+                    "Enterprise core: bounding orphaned router records failed",
+                    exc_info=True,
+                )
             self.loaded = True
 
     async def _async_sweep_once(self) -> None:
@@ -198,8 +213,8 @@ class EnterpriseCore:
 
     @callback
     def forget_entry(self, entry_id: str) -> None:
-        """Detach the entry's listener and drop it from the live set."""
-        self.registry.detach(entry_id)
+        """Detach the entry, drop its runtime state and the live-set entry."""
+        self.registry.release_entry(entry_id)
         self._entries.discard(entry_id)
 
     @callback

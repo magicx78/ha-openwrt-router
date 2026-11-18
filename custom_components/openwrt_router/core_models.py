@@ -1032,6 +1032,9 @@ class CoreEventType(StrEnum):
     ROUTER_CAPABILITIES_CHANGED = "router.capabilities_changed"
     ROUTER_ORPHANED = "router.orphaned"
     ROUTER_ADOPTED = "router.adopted"
+    # Review PR #55 (additive): an orphaned record was dropped from the
+    # registry (aged out or over the cap); security ring, audit-mandatory.
+    ROUTER_FORGOTTEN = "router.forgotten"
     BACKUP_CREATED = "configuration.backup_created"
     BACKUP_FAILED = "configuration.backup_failed"
     BACKUP_RECOVERED = "configuration.backup_recovered"
@@ -1111,6 +1114,7 @@ SECURITY_EVENT_TYPES: Final = frozenset(
         CoreEventType.BACKUP_EXPORTED,
         CoreEventType.BACKUP_DELETED,
         CoreEventType.ROUTER_ADOPTED,
+        CoreEventType.ROUTER_FORGOTTEN,
         CoreEventType.RESTORE_REQUESTED,
         CoreEventType.RESTORE_APPROVED,
         CoreEventType.RESTORE_REJECTED,
@@ -1133,6 +1137,7 @@ AUDIT_MANDATORY_EVENT_TYPES: Final = frozenset(
         CoreEventType.RESTORE_COMPLETED,
         CoreEventType.RESTORE_FAILED,
         CoreEventType.ROUTER_ADOPTED,
+        CoreEventType.ROUTER_FORGOTTEN,
         CoreEventType.AUTHORIZATION_DENIED,
         CoreEventType.AUTHORIZATION_CONSUMED,
         CoreEventType.AUTHORIZATION_GRANTED,
