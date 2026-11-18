@@ -328,6 +328,13 @@ Regel selbst ist `policy_denial_reason(action, actor)`:
 
 - **read:** keine Autorisierung. Auditiert werden nur Dry Run und Kompatibilitätsprüfung
   (`restore_checked`); Lesen der Live-Konfiguration, Listen und Vergleiche nicht (zu häufig).
+- **read von Konfigurationsinhalt** (`async_capture`, `async_compare`; Geheimnisse
+  enthalten): ein Benutzer muss geprüfter Admin sein, sonst `AuthorizationError`
+  `not_admin`, auditiert als `security.authorization_denied` (Sicherheitsring, `action`
+  `config_capture` bzw. `config_compare`), vor jedem Provider-Aufruf und vor dem Nachschlagen
+  von Versionen. Modul-, System- und Automationsakteure lesen ohne Adminrechte (wie
+  `backup`, das denselben Inhalt liest und ablegt). Die Prüfung sitzt in den Methoden selbst,
+  nicht in einem Panel. Erfolgreiche Lesezugriffe werden weiter nicht auditiert.
 - **mutating:** sofortige Entscheidung `approved` oder `denied`.
 - **critical:** erster Aufruf ⇒ `pending` + `ApprovalRequest`; ein Admin-Benutzer gibt frei
   (`approve`) oder lehnt ab (`reject`); erst ein zweiter `authorize(..., approval_id=…)`
@@ -692,11 +699,11 @@ Router-Bezug werfen `RouterNotFoundError`, wenn die ID unbekannt ist. Jede Metho
 | `async_request_installation_key_reset(*, actor)` | critical, Admin | `ApprovalRequest` | `AuthorizationError` |
 | `async_reset_installation_key(approval_id, *, actor)` | critical | `None` | `ApprovalInvalidError` |
 | `async_get_baseline(router_id, *, baseline_backup_id=None)` | read | `Baseline \| None` | `BackupNotFoundError` |
-| `async_capture(router_id, *, actor, configs=None)` | read | `ConfigSnapshot` | `CapabilityUnavailableError`, `RouterUnavailableError`, `ProviderError` |
+| `async_capture(router_id, *, actor, configs=None)` | read, Inhalt (Benutzer: nur Admin) | `ConfigSnapshot` | `AuthorizationError` (`not_admin`, auditiert), `CapabilityUnavailableError`, `RouterUnavailableError`, `ProviderError` |
 | `async_list_backups(router_id=None, *, since=None, limit=50)` | read | `tuple[BackupRecord, ...]` | – |
 | `async_get_backup(backup_id)` | read | `BackupRecord` | `BackupNotFoundError` |
 | `async_validate_backup(backup_id)` | read | `BackupRecord` (mit neuer `validation`) | `BackupNotFoundError` |
-| `async_compare(base, other, *, actor)` | read | `ConfigDiff` | `BackupNotFoundError`, `CapabilityUnavailableError` |
+| `async_compare(base, other, *, actor)` | read, Inhalt (Benutzer: nur Admin) | `ConfigDiff` | `AuthorizationError` (`not_admin`, auditiert), `BackupNotFoundError`, `CapabilityUnavailableError` |
 | `async_detect_drift(router_id, *, actor, baseline_backup_id=None)` | read | `DriftReport` | `BackupNotFoundError` (keine Basis), `RouterUnavailableError`, `InstallationKeyLostError` |
 | `async_check_restore_compatibility(backup_id, target_router_id, *, actor)` | read, auditiert | `CompatibilityCheck` | `BackupNotFoundError` |
 | `async_prepare_restore(backup_id, target_router_id, *, actor)` | read, auditiert (Dry Run) | `RestorePlan` | `CapabilityUnavailableError` (`config.restore_dry_run`) |
@@ -1557,6 +1564,7 @@ Signatur bleibt, die Regel ist neu.
 | 92 | `backup_recovered` (Befund 14): auch ein deduplizierter Erfolg beendet Fehlerfenster; welche Fehlerklassen offen waren, kommt zusätzlich aus dem gespeicherten Audit (nach einem Neustart); der Dedup-Reset gilt allen Fehlerklassen des Routers. | Verhalten |
 | 93 | `capabilities.merge(..., *, last_known=None)` (Befund 16); die Registry führt den letzten bekannten Zustand je Router: bekannt → unknown → anders bekannt meldet `router_capabilities_changed` vom letzten bekannten Zustand (vorher stille Erstdetektion). | A, Verhalten |
 | 94 | Config-Flow (Befund 17): wurde nichts geschrieben, unterscheidet der Fehler `acl_tiered_kept` (gestufte ACL behalten), `acl_check_transient` (ACL nicht lesbar, nichts geändert) und wie bisher `acl_already_current`; Konstanten `ERROR_ACL_TIERED_KEPT`, `ERROR_ACL_CHECK_TRANSIENT`; Texte en/de. | A, Verhalten (UI-Text) |
+| 95 | `async_capture` und `async_compare` (Review PR #55, Punkt 2): ein Benutzer ohne Admin ⇒ `AuthorizationError` `reason` `not_admin` (`details.action` `config_capture`/`config_compare`, `audit_id`), auditiert auf dem Sicherheitsring, vor jedem Provider-Aufruf; Modul-, System- und Automationsakteure unverändert. Konstanten `READ_CAPTURE`, `READ_COMPARE` (`config_api`). | B (Verhalten) |
 
 Befunde 15 und 18 ändern nur Tests (kein Vertrag): die Wächter „HA-eigene Daten
 unverändert“ prüfen zusätzlich die Aufrufe `async_update_entry`, `async_remove`,

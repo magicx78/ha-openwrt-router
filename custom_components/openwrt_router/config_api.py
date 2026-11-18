@@ -80,6 +80,7 @@ from .core_models import (
     SUPPORTED_API_VERSIONS,
     SUPPORTED_PROVIDER_API_VERSIONS,
     Actor,
+    ActorKind,
     ApprovalRequest,
     ArtifactKind,
     ArtifactPayload,
@@ -158,6 +159,11 @@ _DRIFT_EVENT_TYPES = (
 _EVENT_ID_LIST_MAX = 50
 REBASELINE_DRIFT_PREFIX = "rebaseline:"
 _ARTIFACT_KINDS = frozenset(kind.value for kind in ArtifactKind)
+# Reads of configuration content (secrets): the ``action`` named in the
+# audited refusal of a user who is not a verified admin (no guard action:
+# reads mint no authorization).
+READ_CAPTURE = "config_capture"
+READ_COMPARE = "config_compare"
 # Dry-run plans waiting for async_request_restore (security review #4):
 # dropped after this long, and the oldest beyond the cap (both counted).
 RESTORE_PLAN_TTL = APPROVAL_TTL
@@ -1014,6 +1020,34 @@ class ConfigurationManager:
             return decision.approval_request
         raise error_for_decision(decision)
 
+    def _require_content_reader(
+        self, action: str, router_id: str, verified: VerifiedActor
+    ) -> None:
+        """Reads of configuration content: a user must be a verified admin.
+
+        Live configuration and diffs carry secrets. Module, system and
+        automation actors pass (contract §6.2: only users need admin
+        rights; a ``backup`` by them reads the same content). A refusal is
+        audited on the security ring and raised before any provider call.
+        """
+        if verified.actor.kind is not ActorKind.USER or verified.is_admin:
+            return
+        audit_id = self.guard.audit_denial(router_id, action, verified, "not_admin")
+        raise AuthorizationError(
+            f"Reading configuration content ({action}) needs an admin user",
+            router_id=router_id,
+            details={"reason": "not_admin", "audit_id": audit_id, "action": action},
+        )
+
+    def _ref_router_id(self, ref: ConfigRef) -> str:
+        """Router of a reference for an audit entry (never raises)."""
+        if ref.is_live:
+            return str(ref.router_id)
+        try:
+            return self.versions.get(str(ref.backup_id)).router_id
+        except ConfigApiError:
+            return FLEET_ROUTER_ID
+
     def _precheck(self, action: str, router_id: str, verified: VerifiedActor) -> None:
         """Deny early (audited) before doing work for an action."""
         if self.guard.denial_reason(action, verified) is not None:
@@ -1130,8 +1164,9 @@ class ConfigurationManager:
     async def async_capture(
         self, router_id: str, *, actor: Actor, configs: tuple[str, ...] | None = None
     ) -> ConfigSnapshot:
-        """Live configuration (READ)."""
+        """Live configuration (READ; a user must be a verified admin)."""
         verified = await self._verify(actor)
+        self._require_content_reader(READ_CAPTURE, router_id, verified)
         provider = self._require(router_id, Capability.CONFIG_CAPTURE)
         with self._settling(router_id, Capability.CONFIG_CAPTURE, "capture"):
             return await self._capture(provider, router_id, verified, configs)
@@ -1224,8 +1259,18 @@ class ConfigurationManager:
     async def async_compare(
         self, base: ConfigRef, other: ConfigRef, *, actor: Actor
     ) -> ConfigDiff:
-        """Compare two references (stored and/or live)."""
+        """Compare two references (stored and/or live; a user must be admin).
+
+        The admin check comes before any lookup, so a refused user learns
+        nothing about version ids; the audit entry names the live router of
+        ``base`` (live router or the router of a known version), else the
+        fleet (``-``); the error is the same either way.
+        """
         verified = await self._verify(actor)
+        if verified.actor.kind is ActorKind.USER and not verified.is_admin:
+            self._require_content_reader(
+                READ_COMPARE, self._ref_router_id(base), verified
+            )
         provider = self._require_provider(Capability.CONFIG_DIFF)
         sources: list[Any] = []
         routers: list[RouterRecord] = []
