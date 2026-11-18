@@ -1027,9 +1027,13 @@ class TestDriftEvents:
         assert drift_event_types(self._report(drifted=False)) == ()
 
     def test_rebaseline_is_never_drift(self):
-        with pytest.raises(ValueError):
-            self._report(rebaseline=True)
+        # Contract row #56: a key change and a real change are reportable
+        # together; such a report is drift, never a re-baseline.
+        both = self._report(rebaseline=True)
+        assert not both.rebaseline_allowed
+        assert drift_event_types(both) == (CoreEventType.DRIFT_DETECTED,)
         report = self._report(drifted=False, rebaseline=True, secrets_comparable=False)
+        assert report.rebaseline_allowed
         assert drift_event_types(report) == ()
         assert report.to_dict()["rebaseline"] is True
 

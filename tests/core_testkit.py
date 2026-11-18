@@ -110,15 +110,25 @@ class FakeDisks:
     def __init__(self) -> None:
         self.disks: dict[str, FakeDisk] = {}
         self.stores: list[FakeStore] = []
+        self.options: dict[str, dict[str, bool]] = {}
 
     def __getitem__(self, key: str) -> FakeDisk:
         return self.disks.setdefault(key, FakeDisk(key))
 
     def create(
-        self, hass: Any, version: int, key: str, *, minor_version: int, migrate: Any
+        self,
+        hass: Any,
+        version: int,
+        key: str,
+        *,
+        minor_version: int,
+        migrate: Any,
+        private: bool = False,
+        atomic_writes: bool = False,
     ) -> FakeStore:
         store = FakeStore(self[key], version, minor_version, migrate)
         self.stores.append(store)
+        self.options[key] = {"private": private, "atomic_writes": atomic_writes}
         return store
 
     def flush_delayed(self) -> None:
@@ -178,7 +188,57 @@ def make_hass(entries: list[Any] | None = None) -> MagicMock:
             (e for e in hass.entries if e.entry_id == eid), None
         )
     )
+    # hass.auth with known users (see add_user); unknown ids return None.
+    hass.users = {}
+    hass.auth.async_get_user = AsyncMock(side_effect=lambda uid: hass.users.get(uid))
     return hass
+
+
+ADMIN_ID = "user-admin"
+USER_ID = "user-plain"
+OTHER_ADMIN_ID = "user-admin-2"
+
+
+def add_user(
+    hass: Any,
+    user_id: str,
+    *,
+    admin: bool,
+    active: bool = True,
+    system_generated: bool = False,
+) -> Any:
+    """Register a user in the fake ``hass.auth``."""
+    user = SimpleNamespace(
+        id=user_id,
+        is_admin=admin,
+        is_active=active,
+        system_generated=system_generated,
+    )
+    hass.users[user_id] = user
+    return user
+
+
+def add_users(hass: Any) -> None:
+    """Two admins and one plain user."""
+    add_user(hass, ADMIN_ID, admin=True)
+    add_user(hass, OTHER_ADMIN_ID, admin=True)
+    add_user(hass, USER_ID, admin=False)
+
+
+def user_actor(user_id: str = ADMIN_ID, *, claims_admin: bool = False) -> Any:
+    """A user actor; ``claims_admin`` is a self-declaration the core ignores."""
+    from custom_components.openwrt_router.core_models import Actor, ActorKind
+
+    return Actor(kind=ActorKind.USER, user_id=user_id, is_admin=claims_admin)
+
+
+async def guard_adopt_auth(hass: Any, entry_id: str, orphan_id: str) -> Any:
+    """An adopt authorization issued by the running core's guard (admin)."""
+    if ADMIN_ID not in hass.users:
+        add_user(hass, ADMIN_ID, admin=True)
+    return await core_of(hass).manager.async_authorize_adopt(
+        entry_id, orphan_id, user_actor(ADMIN_ID)
+    )
 
 
 async def drain(hass: Any) -> None:

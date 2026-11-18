@@ -23,6 +23,7 @@ from core_testkit import (
     FakeEntry,
     bus_events,
     core_of,
+    guard_adopt_auth,
     make_hass,
     router_data,
     setup_router,
@@ -34,13 +35,9 @@ from test_net_entities import loaded_registry
 from custom_components.openwrt_router.const import DOMAIN
 from custom_components.openwrt_router.core_models import (
     ROUTER_REGISTRY_STORE_KEY,
-    Actor,
     CoreEventType,
-    GuardedAction,
     IdentityStatus,
     RecordState,
-    _mint_write_authorization,
-    binding_checksum,
 )
 from custom_components.openwrt_router.enterprise_core import (
     async_get_core,
@@ -209,12 +206,7 @@ async def test_case05_corrupt_store_loses_only_adoption_links_audited(
     new = FakeEntry("01JNEW", host="192.168.1.99")
     entries.append(new)
     await setup_router(hass, new, router_data(hostname="r1", macs=_macs(1)))
-    auth = _mint_write_authorization(
-        action=GuardedAction.ADOPT,
-        router_id=orphan_id,
-        actor=Actor.system("test"),
-        checksum=binding_checksum("01JNEW", orphan_id),
-    )
+    auth = await guard_adopt_auth(hass, "01JNEW", orphan_id)
     await registry.async_adopt_authorized("01JNEW", orphan_id, authorization=auth)
     await _stop(hass, entries)
 

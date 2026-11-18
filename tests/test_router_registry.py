@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import pytest
 from core_testkit import (
+    ADMIN_ID,
     MAC_A,
     MAC_B,
+    USER_ID,
     FakeDisks,
     FakeEntry,
+    add_users,
     bus_events,
     core_of,
     make_hass,
     router_data,
     setup_router,
+    user_actor,
 )
 
 from custom_components.openwrt_router.core_errors import (
@@ -20,6 +24,7 @@ from custom_components.openwrt_router.core_errors import (
     RouterIdentityError,
     RouterNotFoundError,
 )
+from custom_components.openwrt_router.core_guard import raise_for_decision
 from custom_components.openwrt_router.core_models import (
     ROUTER_REGISTRY_STORE_KEY,
     Actor,
@@ -54,13 +59,20 @@ def disks():
         yield fake
 
 
-def _adopt_auth(entry_id: str, orphan_id: str, **kw):
-    return _mint_write_authorization(
-        action=kw.pop("action", GuardedAction.ADOPT),
-        router_id=kw.pop("router_id", orphan_id),
-        actor=ADMIN,
-        checksum=kw.pop("checksum", binding_checksum(entry_id, orphan_id)),
-        **kw,
+async def _adopt_auth(hass, entry_id: str, orphan_id: str, **kw):
+    """An authorization issued by the core's guard (bound as given)."""
+    add_users(hass)
+    action = kw.pop("action", GuardedAction.ADOPT)
+    actor = ADMIN if action is GuardedAction.PRUNE else user_actor(ADMIN_ID)
+    guard = core_of(hass).guard
+    verified = await guard.async_verify_actor(actor)
+    return raise_for_decision(
+        guard.authorize(
+            action,
+            kw.pop("router_id", orphan_id),
+            verified,
+            checksum=kw.pop("checksum", binding_checksum(entry_id, orphan_id)),
+        )
     )
 
 
@@ -166,7 +178,7 @@ async def test_adoption_candidates_and_authorized_adoption(disks: FakeDisks) -> 
     assert cand.board_match and cand.model_match
 
     adopted = await registry.async_adopt_authorized(
-        "new", orphan_id, authorization=_adopt_auth("new", orphan_id)
+        "new", orphan_id, authorization=await _adopt_auth(hass, "new", orphan_id)
     )
     assert adopted.router_id == orphan_id
     assert adopted.state is RecordState.ACTIVE
@@ -189,7 +201,7 @@ async def test_adoption_needs_a_matching_authorization(disks: FakeDisks) -> None
     orphan_id = await _orphan_of(hass, FakeEntry("old"), router_data())
     await setup_router(hass, FakeEntry("new"), router_data())
     registry = core_of(hass).registry
-    wrong = _adopt_auth("other-entry", orphan_id)  # bound to another entry
+    wrong = await _adopt_auth(hass, "other-entry", orphan_id)  # bound to another entry
     with pytest.raises(AuthorizationError) as err:
         await registry.async_adopt_authorized("new", orphan_id, authorization=wrong)
     assert err.value.details["reason"] == "checksum_mismatch"
@@ -197,14 +209,14 @@ async def test_adoption_needs_a_matching_authorization(disks: FakeDisks) -> None
     with pytest.raises(AuthorizationError) as err:  # single use, also when failed
         await registry.async_adopt_authorized("new", orphan_id, authorization=wrong)
     assert err.value.details["reason"] == "already_used"
-    other_action = _adopt_auth("new", orphan_id, action=GuardedAction.PRUNE)
+    other_action = await _adopt_auth(hass, "new", orphan_id, action=GuardedAction.PRUNE)
     with pytest.raises(AuthorizationError) as err:
         await registry.async_adopt_authorized(
             "new", orphan_id, authorization=other_action
         )
     assert err.value.details["reason"] == "action_mismatch"
     assert registry.get(orphan_id).state is RecordState.ORPHANED  # nothing changed
-    good = _adopt_auth("new", orphan_id)
+    good = await _adopt_auth(hass, "new", orphan_id)
     await registry.async_adopt_authorized("new", orphan_id, authorization=good)
     assert registry.get(orphan_id).state is RecordState.ACTIVE
     denied = core_of(hass).audit.events(types=[CoreEventType.AUTHORIZATION_DENIED])
@@ -215,9 +227,53 @@ async def test_adopt_without_guard_is_denied(disks: FakeDisks) -> None:
     hass = make_hass()
     orphan_id = await _orphan_of(hass, FakeEntry("old"), router_data())
     await setup_router(hass, FakeEntry("new"), router_data())
+    registry = core_of(hass).registry
+    registry.set_adopt_authorizer(None)  # the core wires the guard; unwire it
     with pytest.raises(AuthorizationError) as err:
-        await core_of(hass).registry.async_adopt("new", orphan_id, actor=ADMIN)
+        await registry.async_adopt("new", orphan_id, actor=ADMIN)
     assert err.value.details["reason"] == "guard_unavailable"
+
+
+async def test_adopt_through_the_guard_needs_a_verified_admin_user(
+    disks: FakeDisks,
+) -> None:
+    hass = make_hass()
+    add_users(hass)
+    orphan_id = await _orphan_of(hass, FakeEntry("old"), router_data())
+    await setup_router(hass, FakeEntry("new"), router_data())
+    registry = core_of(hass).registry
+    for actor in (ADMIN, user_actor(USER_ID, claims_admin=True)):
+        with pytest.raises(AuthorizationError) as err:
+            await registry.async_adopt("new", orphan_id, actor=actor)
+        assert err.value.details["reason"] in {"system_only", "not_admin"}
+    assert registry.get(orphan_id).state is RecordState.ORPHANED
+    adopted = await registry.async_adopt("new", orphan_id, actor=user_actor(ADMIN_ID))
+    assert adopted.router_id == orphan_id
+    guard = core_of(hass).guard
+    assert guard.stats["consumed"] == 1
+    denied = core_of(hass).audit.events(
+        types=[CoreEventType.AUTHORIZATION_DENIED], ring=AuditRing.SECURITY
+    )
+    assert len(denied) == 2
+
+
+async def test_adopt_refuses_an_authorization_the_guard_never_issued(
+    disks: FakeDisks,
+) -> None:
+    hass = make_hass()
+    orphan_id = await _orphan_of(hass, FakeEntry("old"), router_data())
+    await setup_router(hass, FakeEntry("new"), router_data())
+    registry = core_of(hass).registry
+    forged = _mint_write_authorization(
+        action=GuardedAction.ADOPT,
+        router_id=orphan_id,
+        actor=ADMIN,
+        checksum=binding_checksum("new", orphan_id),
+    )
+    with pytest.raises(AuthorizationError) as err:
+        await registry.async_adopt_authorized("new", orphan_id, authorization=forged)
+    assert err.value.details["reason"] == "unknown_authorization"
+    assert registry.get(orphan_id).state is RecordState.ORPHANED
 
 
 async def test_only_orphans_can_be_adopted(disks: FakeDisks) -> None:
@@ -228,7 +284,7 @@ async def test_only_orphans_can_be_adopted(disks: FakeDisks) -> None:
     active = registry.get_by_entry("a").router_id
     with pytest.raises(RouterIdentityError):
         await registry.async_adopt_authorized(
-            "b", active, authorization=_adopt_auth("b", active)
+            "b", active, authorization=await _adopt_auth(hass, "b", active)
         )
 
 
