@@ -167,7 +167,11 @@ class TestCoChannel:
 
 class TestNeighborSignal:
     def test_case_08_mutual_reception_above_threshold_is_measured(self):
-        heard = {"r0b": metric_measured(-60, SOURCE_IWINFO_SCAN, measured_at=1.0)}
+        heard = {
+            RadioRef("ap2", "r0b"): metric_measured(
+                -60, SOURCE_IWINFO_SCAN, measured_at=1.0
+            )
+        }
         radios = [
             _view("ap1", "r0a", 6, neighbors=heard),
             _view("ap2", "r0b", 6),
@@ -178,16 +182,46 @@ class TestNeighborSignal:
         assert "neighbor_signal:ap1/r0a<-ap2/r0b:-60dBm:iwinfo.scan" in c.evidence
 
     def test_weak_reception_is_evidence_only(self):
-        weak = {"r0b": metric_measured(-90, SOURCE_IWINFO_SCAN, measured_at=1.0)}
+        weak = {
+            RadioRef("ap2", "r0b"): metric_measured(
+                -90, SOURCE_IWINFO_SCAN, measured_at=1.0
+            )
+        }
         radios = [_view("ap1", "r0a", 6, neighbors=weak), _view("ap2", "r0b", 6)]
         (c,) = detect_conflicts(radios, TH)
         assert c.status is S.POTENTIAL
         assert "neighbor_signal:ap1/r0a<-ap2/r0b:-90dBm:iwinfo.scan" in c.evidence
 
     def test_missing_neighbor_metric_is_ignored(self):
-        gone = {"r0b": metric_missing(CapabilityState.UNSUPPORTED, SOURCE_IWINFO_SCAN)}
+        gone = {
+            RadioRef("ap2", "r0b"): metric_missing(
+                CapabilityState.UNSUPPORTED, SOURCE_IWINFO_SCAN
+            )
+        }
         radios = [_view("ap1", "r0a", 6, neighbors=gone), _view("ap2", "r0b", 6)]
         assert detect_conflicts(radios, TH)[0].status is S.POTENTIAL
+
+    def test_same_radio_key_on_two_routers_is_looked_up_per_router(self):
+        # radio0 exists on every router: hearing ap2/radio0 says nothing
+        # about ap3/radio0.
+        heard = {
+            RadioRef("ap2", "radio0"): metric_measured(
+                -60, SOURCE_IWINFO_SCAN, measured_at=1.0
+            )
+        }
+        radios = [
+            _view("ap1", "radio0", 6, neighbors=heard),
+            _view("ap2", "radio0", 6),
+            _view("ap3", "radio0", 6),
+        ]
+        by_members = {c.members: c for c in detect_conflicts(radios, TH)}
+        a1, a2, a3 = (RadioRef(f"ap{i}", "radio0") for i in (1, 2, 3))
+        assert by_members[(a1, a2)].status is S.MEASURED
+        assert by_members[(a1, a3)].status is S.POTENTIAL
+        assert not any(
+            e.startswith("neighbor_signal") for e in by_members[(a1, a3)].evidence
+        )
+        assert by_members[(a2, a3)].status is S.POTENTIAL
 
 
 class TestBackhaulAndSameRouter:

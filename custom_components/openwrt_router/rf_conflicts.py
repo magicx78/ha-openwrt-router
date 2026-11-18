@@ -102,8 +102,10 @@ class RadioRef:
 class RadioView:
     """What the conflict check needs to know about one radio.
 
-    ``neighbors`` maps the radio_key of another radio to the measured
-    signal (dBm) at which this radio hears it. ``regulatory`` is the radio's
+    ``neighbors`` maps the :class:`RadioRef` (router and radio key) of another
+    radio to the measured signal (dBm) at which this radio hears it; the
+    radio key alone is not unique (``radio0`` exists on every router).
+    ``regulatory`` is the radio's
     reported channel list; without it no ``uneven_distribution`` finding.
     """
 
@@ -116,7 +118,7 @@ class RadioView:
     utilization: Metric | None = None
     noise: Metric | None = None
     client_count: int | None = None
-    neighbors: Mapping[str, Metric] | None = None
+    neighbors: Mapping[RadioRef, Metric] | None = None
     center_channel: int | None = None
     htmode: str | None = None
     regulatory: RadioRegulatory | None = None
@@ -200,7 +202,7 @@ def _utilization_evidence(view: RadioView) -> tuple[float | None, str]:
 def _neighbor_evidence(
     hearer: RadioView, heard: RadioView, threshold: float
 ) -> tuple[bool, list[str]]:
-    metric = (hearer.neighbors or {}).get(heard.radio_key)
+    metric = (hearer.neighbors or {}).get(heard.ref)
     dbm = _measured_number(metric)
     if dbm is None:
         return False, []
