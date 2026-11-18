@@ -71,6 +71,7 @@ from .core_guard import (
 from .core_models import (
     APPROVAL_TTL,
     CONFIG_CAPABILITIES,
+    CORE_KEY_OWNER,
     CORRELATION_ID_PREFIX,
     DEFAULT_LIST_LIMIT,
     DEFAULT_RETENTION_POLICY,
@@ -134,7 +135,9 @@ from .core_models import (
     VersionStatus,
     WriteAuthorization,
     binding_checksum,
+    check_module_name,
     check_token,
+    derive_module_key,
     drift_event_types,
     ensure_supported_api_version,
     new_id,
@@ -471,6 +474,8 @@ class ConfigurationManager:
             "plans_expired": 0,
             "plans_evicted": 0,
             "refused_disabled": 0,
+            "module_keys_issued": 0,
+            "module_keys_refused": 0,
         }
         # Request data dies with its approval (expired, rejected, unload).
         self._remove_approval_listener = guard.add_approval_listener(
@@ -1094,6 +1099,46 @@ class ConfigurationManager:
         return approval, data
 
     # -- installation key --------------------------------------------------------------
+
+    async def async_get_module_key(self, module: str, purpose: str = "") -> bytes:
+        """HKDF key of a registered module (contract §11.5); never logged.
+
+        ``module`` must own an event prefix registered in this core run;
+        ``core`` is never a module. A lost installation key raises
+        InstallationKeyLostError (nothing is substituted); while it is
+        ``uninitialised`` the first use creates it, exactly as for the
+        provider (logged, ``keys_created``).
+        """
+
+        def refuse(reason: str, message: str) -> ConfigApiError:
+            self.stats["module_keys_refused"] += 1
+            _LOGGER.debug("Module key refused (%s)", reason)
+            return ConfigApiError(
+                message, error_class=ErrorClass.INVALID, details={"reason": reason}
+            )
+
+        try:
+            check_module_name(module)
+        except ValueError:
+            raise refuse("invalid_module", "Not a module name") from None
+        if module == CORE_KEY_OWNER:
+            raise refuse("reserved_module", "The core is not a module")
+        if module not in self.audit.registered_modules():
+            raise refuse(
+                "module_not_registered",
+                "Only a module that registered its event prefix gets a key",
+            )
+        try:
+            derive_module_key(b"\x00" * 16, module, purpose)  # validates purpose
+        except ValueError:
+            raise refuse("invalid_purpose", "Not a valid key purpose") from None
+        try:
+            installation_key = await self.versions.async_get_installation_key()
+        except ConfigApiError:
+            self.stats["module_keys_refused"] += 1
+            raise
+        self.stats["module_keys_issued"] += 1
+        return derive_module_key(installation_key, module, purpose)
 
     async def async_request_installation_key_reset(
         self, *, actor: Actor
@@ -2586,6 +2631,10 @@ class ConfigurationApi:
     async def async_get_installation_key(self) -> bytes:
         """32-byte installation key; InstallationKeyLostError while LOST."""
         return await self._m.versions.async_get_installation_key()
+
+    async def async_get_module_key(self, module: str, purpose: str = "") -> bytes:
+        """32-byte HKDF key of ``module`` for ``purpose`` (contract §11.5)."""
+        return await self._m.async_get_module_key(module, purpose)
 
     async def async_request_installation_key_reset(
         self, *, actor: Actor

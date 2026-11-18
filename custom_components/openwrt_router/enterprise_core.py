@@ -40,7 +40,7 @@ from .config_api import ConfigurationManager
 from .const import DOMAIN
 from .core_audit import AuditLog
 from .core_guard import ActionGuard
-from .core_models import DATA_ENTERPRISE_CORE, RouterRecord
+from .core_models import DATA_ENTERPRISE_CORE, RouterRecord, derive_core_key
 from .core_security import SecurityActions, SshPinRegistry
 from .router_registry import RouterRegistry
 from .version_store import VersionStore
@@ -141,6 +141,7 @@ class EnterpriseCore:
                         name,
                         exc_info=True,
                     )
+            self._set_bus_salt()
             # Bound the orphaned records (review PR #55, finding 6); only
             # with a loaded version store (who has versions is known).
             try:
@@ -157,6 +158,29 @@ class EnterpriseCore:
                     exc_info=True,
                 )
             self.loaded = True
+
+    def _set_bus_salt(self) -> None:
+        """Stable bus pseudonyms from the installation key (§12.1).
+
+        Without a loaded key (first start, key lost, store not loaded) the
+        audit log keeps a random salt for this run, counted and logged once;
+        the core never creates the key for it.
+        """
+        key = (
+            self.versions.existing_installation_key() if self.versions.loaded else None
+        )
+        if key is None:
+            state = (
+                self.versions.key_state.value if self.versions.loaded else "not_loaded"
+            )
+            self.audit.set_bus_salt(None, reason=state)
+            return
+        try:
+            salt = derive_core_key(key, "bus_pseudonym")
+        except ValueError:
+            self.audit.set_bus_salt(None, reason="unusable_key")
+            return
+        self.audit.set_bus_salt(salt)
 
     async def _async_sweep_once(self) -> None:
         """Sweep the version store unless a sweep finished recently.

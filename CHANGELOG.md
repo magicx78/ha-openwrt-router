@@ -4,6 +4,19 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+### Added
+
+- Enterprise Core: Module bekommen einen eigenen, abgeleiteten Schlüssel
+  (`api.async_get_module_key(module, purpose)`, HKDF-SHA256 aus dem
+  Installations-Schlüssel); nur für Module mit registriertem Event-Präfix, nie in Log,
+  Diagnose oder Event.
+
+### Changed
+
+- Enterprise Core: Das Benutzer-Pseudonym (`usr_…`) im Core-Event bleibt über Neustarts
+  gleich, sobald der Installations-Schlüssel existiert. Ohne Schlüssel ist es je Lauf
+  zufällig; das steht einmal im Log und im Zähler `bus_salt_ephemeral`.
+
 ## [1.44.0] - 2026-11-18
 
 Enterprise Core: ein interner Unterbau für spätere Module (Konfigurations-Backup,

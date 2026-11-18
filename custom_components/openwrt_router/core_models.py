@@ -537,6 +537,76 @@ def installation_key_id(key: bytes) -> str:
     return digest.hexdigest()[:INSTALLATION_KEY_ID_LENGTH]
 
 
+# Module keys (§11.5): HKDF-SHA256 over the installation key. The salt and
+# the info prefix are fixed and versioned; a new derivation gets ``/v2``.
+MODULE_KEY_BYTES: Final = 32
+MODULE_KEY_SALT: Final = b"openwrt_router/hkdf-salt/v1"
+MODULE_KEY_INFO_PREFIX: Final = b"openwrt_router/module-key/v1"
+MODULE_NAME_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
+MODULE_KEY_PURPOSE_PATTERN: Final = re.compile(r"[a-z0-9_.:-]{0,64}")
+# Name of the core's own derivations (bus pseudonym); never a module name.
+CORE_KEY_OWNER: Final = "core"
+
+
+def hkdf_sha256(ikm: bytes, *, salt: bytes, info: bytes, length: int) -> bytes:
+    """HKDF-SHA256 (RFC 5869): extract, then expand to ``length`` bytes."""
+    if not isinstance(ikm, bytes) or not ikm:
+        raise ValueError("input key material must be non-empty bytes")
+    if not 0 < length <= 255 * hashlib.sha256().digest_size:
+        raise ValueError("HKDF length out of range")
+    prk = hmac.new(salt or b"\x00" * 32, ikm, hashlib.sha256).digest()
+    okm = b""
+    block = b""
+    counter = 1
+    while len(okm) < length:
+        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+        okm += block
+        counter += 1
+    return okm[:length]
+
+
+def check_module_name(module: object) -> str:
+    """A plain module name (``[a-z][a-z0-9_]*``, at most 64); ValueError else."""
+    if not isinstance(module, str) or MODULE_NAME_PATTERN.fullmatch(module) is None:
+        raise ValueError("module must be a plain lower-case name")
+    return module
+
+
+def derive_module_key(installation_key: bytes, module: str, purpose: str = "") -> bytes:
+    """32-byte key of ``module`` for ``purpose`` (pure; the key stays secret).
+
+    ``info`` = MODULE_KEY_INFO_PREFIX, NUL, module, NUL, purpose: neither part
+    may contain NUL, so two (module, purpose) pairs never share an info
+    string. ``core`` is refused (the core derives its own keys internally).
+    """
+    check_module_name(module)
+    if module == CORE_KEY_OWNER:
+        raise ValueError("core is not a module name")
+    return _derive(installation_key, module, purpose)
+
+
+def _derive(installation_key: bytes, owner: str, purpose: str) -> bytes:
+    if (
+        not isinstance(purpose, str)
+        or MODULE_KEY_PURPOSE_PATTERN.fullmatch(purpose) is None
+        or ".." in purpose
+    ):
+        raise ValueError("purpose must be up to 64 characters of [a-z0-9_.:-]")
+    if not isinstance(installation_key, bytes) or len(installation_key) < 16:
+        raise ValueError("installation key must be at least 16 bytes")
+    info = b"\x00".join(
+        (MODULE_KEY_INFO_PREFIX, owner.encode("ascii"), purpose.encode("ascii"))
+    )
+    return hkdf_sha256(
+        installation_key, salt=MODULE_KEY_SALT, info=info, length=MODULE_KEY_BYTES
+    )
+
+
+def derive_core_key(installation_key: bytes, purpose: str) -> bytes:
+    """The core's own derived key (e.g. ``bus_pseudonym``); core-internal."""
+    return _derive(installation_key, CORE_KEY_OWNER, purpose)
+
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -4445,6 +4515,9 @@ class ConfigurationApiProtocol(Protocol):
 
     async def async_get_installation_key(self) -> bytes:
         """32-byte installation key; InstallationKeyLostError while LOST."""
+
+    async def async_get_module_key(self, module: str, purpose: str = "") -> bytes:
+        """HKDF-SHA256 key of a registered module (§11.5); never logged."""
 
     @property
     def installation_key_state(self) -> InstallationKeyState:

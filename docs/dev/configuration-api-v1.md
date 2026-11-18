@@ -1069,6 +1069,33 @@ digest = secret_digest_factory(key)               # core_masking
 marker = {"secret": digest(f"{config}/{section}/{option}/{value}")}
 ```
 
+### 11.5 Modul-Schlüssel (ab Folgeauftrag B1)
+
+`await api.async_get_module_key(module, purpose="") -> bytes` liefert 32 Bytes, abgeleitet
+aus dem Installations-Schlüssel mit HKDF-SHA256 (RFC 5869, nur `hmac`/`hashlib`):
+
+| Teil | Wert |
+|---|---|
+| Salz | `MODULE_KEY_SALT = b"openwrt_router/hkdf-salt/v1"` |
+| `info` | `MODULE_KEY_INFO_PREFIX` (`b"openwrt_router/module-key/v1"`), NUL, Modulname, NUL, `purpose` |
+| Länge | `MODULE_KEY_BYTES = 32` |
+| Helfer | `hkdf_sha256(...)`, `derive_module_key(installation_key, module, purpose)` (rein, `core_models`) |
+
+- Nur ein Modul, das in diesem Core-Lauf sein Event-Präfix registriert hat
+  (`register_event_prefix`), bekommt einen Schlüssel, und nur seinen eigenen (der Name ist
+  Teil der Ableitung). `core` ist kein Modul (`reserved_module`). Fehler sind
+  `ConfigApiError` mit `reason` `invalid_module` / `reserved_module` /
+  `module_not_registered` / `invalid_purpose`; gezählt in `module_keys_refused`, Ausgaben in
+  `module_keys_issued`. In einem Python-Prozess ist das eine Namensprüfung, keine Isolation:
+  wer Code im selben Prozess hat, kann jeden Namen angeben.
+- `purpose`: höchstens 64 Zeichen `[a-z0-9_.:-]`, ohne `..`. Andere Zwecke ⇒ unabhängige
+  Schlüssel.
+- `lost` ⇒ `InstallationKeyLostError`, kein Ersatz. `uninitialised` ⇒ die erste Nutzung legt
+  den echten Installations-Schlüssel an, genau wie beim Provider (Log, `keys_created`).
+- Nach `installation_key_reset` ändern sich alle Modul-Schlüssel; Module erkennen das an
+  `installation_key_id`-Stempeln ihrer eigenen Daten.
+- Der Schlüssel steht nie in Diagnose, Log, Event oder `repr`.
+
 ## 12. Events und Audit
 
 ### 12.1 `CoreEvent`
@@ -1098,9 +1125,19 @@ getrennt von `EVENT_INCIDENT`, `net_rules` bleibt unverändert. Das Event landet
 und im Logbuch (`logbook.py` zeigt `<type>: <result>` unter dem Eintragstitel, nie einen
 Benutzer). Jede `user_id` im Bus-Payload (`actor.user_id` und verschachtelte) ist ein
 Pseudonym `usr_<12 hex>` (`core_masking.pseudonymise_user_ids`, derselbe Helfer wie in der
-Diagnose; Salz zufällig je Audit-Log, nur im Speicher: gleicher Benutzer gleiches Pseudonym,
-solange der Core läuft). Audit-Store, `api.events(...)` und `subscribe`-Listener behalten die
-echte ID.
+Diagnose). Audit-Store, `api.events(...)` und `subscribe`-Listener behalten die echte ID.
+
+Salz des Bus-Pseudonyms (ab Folgeauftrag B1): Ist der Installations-Schlüssel beim Laden
+des Core vorhanden (`ok`), ist das Salz `derive_core_key(key, "bus_pseudonym")` (HKDF wie
+§11.5, Besitzer `core`): **gleicher Benutzer, gleiches Pseudonym über Neustarts hinweg**,
+bis zu einem `installation_key_reset`. Ohne Schlüssel (erster Start, `lost`, Store nicht
+geladen) bleibt das Salz zufällig für diesen Lauf; das zählt `bus_salt_ephemeral` und steht
+einmal im Log. Das Senden scheitert daran nie; der Core legt dafür keinen Schlüssel an.
+Abwägung: Ein stabiles Pseudonym lässt Recorder- und Logbuch-Einträge eines Benutzers über
+Neustarts verknüpfen (gewollt für Auswertungen), damit aber auch durch jeden, der den
+Recorder liest. Den Benutzer selbst verrät es nicht: ohne den Installations-Schlüssel ist
+das Pseudonym nicht umkehrbar und nicht nachrechenbar. Die Diagnose nimmt weiterhin je
+Download ein frisches Salz, damit zwei Downloads nicht verknüpfbar sind.
 
 ### 12.2 Zwei Audit-Ringe
 
@@ -1434,6 +1471,13 @@ Option `config_backup_enabled`. Offen:
 B = breaking (bestehender Aufrufer muss sich ändern), A = additiv. „Verhalten“ heißt: die
 Signatur bleibt, die Regel ist neu.
 
+**Brechende Änderungen seit 1.44.0** (Folgeauftrag, Zeilen ab #100; was ein Modul ändern
+muss):
+
+- (#100) Bus-Pseudonyme sind bei vorhandenem Installations-Schlüssel über Neustarts stabil
+  statt je Lauf neu. Wer sich auf den Wechsel nach einem Neustart verlassen hat, darf das
+  nicht mehr.
+
 ### 19.1 Änderungen auf Feld- und Signaturebene
 
 **Akteure und Guard**
@@ -1595,6 +1639,12 @@ unverändert“ prüfen zusätzlich die Aufrufe `async_update_entry`, `async_rem
 `async_reload`, `async_schedule_reload`, `async_forward_entry_setups(_setup)`
 (`core_testkit.ha_entry_calls`), und der ACL-Aufruf-Pin vergleicht mit wörtlichen
 Erwartungen aus 1.43 statt beide Varianten miteinander.
+
+**Folgeauftrag nach 1.44.0 (Teil B)**
+
+| # | Änderung | Art |
+|---|---|---|
+| 100 | Modul-Schlüssel (B1, §11.5): `api.async_get_module_key(module, purpose="")` (HKDF-SHA256, `MODULE_KEY_SALT`, `MODULE_KEY_INFO_PREFIX` `…/v1`, 32 Bytes); nur für Module mit registriertem Event-Präfix; `lost` ⇒ `InstallationKeyLostError`. Reine Helfer `hkdf_sha256`, `derive_module_key`, `check_module_name`, `MODULE_NAME_PATTERN`, `MODULE_KEY_PURPOSE_PATTERN`, `CORE_KEY_OWNER`; `AuditLog.registered_modules()`; Zähler `module_keys_issued`/`module_keys_refused`. Bus-Pseudonym (§12.1): Salz aus `derive_core_key(key, "bus_pseudonym")`, über Neustarts stabil; ohne Schlüssel zufällig je Lauf, Zähler `bus_salt_ephemeral` + ein Log-Eintrag. `async_get_installation_key` für Provider unverändert. | A; B (Verhalten des Bus-Pseudonyms) |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 

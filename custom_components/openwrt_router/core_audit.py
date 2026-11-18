@@ -110,9 +110,11 @@ class AuditLog:
         # cooldown of the window)
         self._dedup: dict[tuple[str, str, str], tuple[str, datetime, timedelta]] = {}
         self._listeners: list[CoreEventListener] = []
-        # Salt of the user pseudonyms on the bus; in memory only, new per
-        # audit log (same user, same pseudonym while this core runs).
+        # Salt of the user pseudonyms on the bus; in memory only. Random per
+        # audit log until the core sets the stable, key-derived salt
+        # (set_bus_salt) or declares this run ephemeral (§12.1).
         self._bus_salt = secrets.token_bytes(16)
+        self.bus_salt_stable = False
         # registered module event prefixes -> module
         self._prefixes: dict[str, str] = {}
         self.loaded = False
@@ -133,7 +135,37 @@ class AuditLog:
             "skipped_on_load": 0,
             "dedup_scopes_pruned": 0,
             "dedup_scopes_dropped": 0,
+            "bus_salt_ephemeral": 0,
         }
+
+    # -- bus pseudonym salt ------------------------------------------------------------
+
+    @callback
+    def set_bus_salt(self, salt: bytes | None, *, reason: str = "") -> None:
+        """Core-internal: the stable bus salt, or None for a random one.
+
+        None keeps a random salt for this run; that is counted
+        (``bus_salt_ephemeral``) and logged once. Emission never fails on it.
+        """
+        if salt is not None:
+            if not isinstance(salt, bytes) or len(salt) < 16:
+                raise ValueError("bus salt must be at least 16 bytes")
+            self._bus_salt = salt
+            self.bus_salt_stable = True
+            return
+        self.bus_salt_stable = False
+        if self.stats["bus_salt_ephemeral"]:
+            return
+        self.stats["bus_salt_ephemeral"] += 1
+        _LOGGER.info(
+            "Enterprise core: no usable installation key (%s); bus pseudonyms "
+            "are random for this run and change on the next restart",
+            reason or "unavailable",
+        )
+
+    def registered_modules(self) -> frozenset[str]:
+        """Modules that registered an event prefix in this run."""
+        return frozenset(self._prefixes.values())
 
     # -- store ---------------------------------------------------------------------
 
