@@ -1629,7 +1629,12 @@ class ConfigManagerProvider:
                     None if report.ack is None else DriftAckState(report.ack.state)
                 ),
                 critical_count=report.critical_count,
-                unknown_count=sum(1 for c in report.changes if c.area == Area.OTHER),
+                # Unclassified changes plus every config that could not be
+                # compared: the core contract has no "degraded" field, so
+                # an unreadable config is a drift with unknown changes
+                # (review M2), never drifted=False.
+                unknown_count=sum(1 for c in report.changes if c.area == Area.OTHER)
+                + len(report.not_comparable),
                 secrets_comparable=comparable,
             )
         _log("drift", started, method=FETCH_METHOD_UCI)

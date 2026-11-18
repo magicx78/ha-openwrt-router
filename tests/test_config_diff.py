@@ -855,8 +855,56 @@ def test_missing_config_is_not_comparable_not_removed() -> None:
     assert not_comparable(old, new) == ("dropbear",)
     assert not_comparable(new, old) == ("dropbear",)
     report = evaluate_drift(old, new, (), mgmt_host=MGMT)
-    assert report.state == "none"
+    # Review M2: a config that cannot be compared is never "no drift".
+    assert report.state == "unknown"
     assert report.not_comparable == ("dropbear",)
+
+
+def test_not_comparable_config_is_unknown_not_clean() -> None:
+    """Review M2: unreadable configs make a visible state of their own."""
+    old, new = snap(), snap(firewall=None)
+    report = evaluate_drift(old, new, (), mgmt_host=MGMT)
+    assert report.state == "unknown"
+    assert report.degraded and report.is_drift and report.notify
+    assert not report.rebaseline
+    assert report.changes == ()
+    assert report.drift_id == drift_id(
+        (), new.content_hash, not_comparable=("firewall",)
+    )
+    # Acknowledging it is possible; "known" never rebuilds the baseline
+    # from a view that misses configs.
+    at = datetime(2026, 11, 17, tzinfo=UTC)
+    did = report.drift_id
+    assert did is not None
+    seen = evaluate_drift(
+        old, new, [DriftAck(did, "acknowledged", "a", at)], mgmt_host=MGMT
+    )
+    assert seen.state == "acknowledged" and not seen.notify
+    known = evaluate_drift(old, new, [DriftAck(did, "known", "a", at)], mgmt_host=MGMT)
+    assert known.state == "acknowledged" and not known.rebaseline
+
+
+def test_changes_plus_unreadable_config_never_rebaseline() -> None:
+    baseline, current = _drifted()
+    current = snap(
+        wireless=sub(WIRELESS, "option channel '6'", "option channel '11'"),
+        firewall=None,
+    )
+    report = evaluate_drift(baseline, current, (), mgmt_host=MGMT)
+    assert report.state == "new" and report.degraded
+    did = report.drift_id
+    assert did is not None
+    ack = DriftAck(did, "known", "a", datetime(2026, 11, 17, tzinfo=UTC))
+    known = evaluate_drift(baseline, current, [ack], mgmt_host=MGMT)
+    assert known.state == "acknowledged" and not known.rebaseline
+
+
+def test_drift_id_without_not_comparable_is_unchanged() -> None:
+    baseline, current = _drifted()
+    changes = diff_snapshots(baseline, current, mgmt_host=MGMT)
+    plain = drift_id(changes, current.content_hash)
+    assert plain == drift_id(changes, current.content_hash, not_comparable=())
+    assert plain != drift_id(changes, current.content_hash, not_comparable=("sqm",))
 
 
 # ---------------------------------------------------------------------------

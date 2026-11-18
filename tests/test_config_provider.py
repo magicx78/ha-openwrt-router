@@ -1833,3 +1833,45 @@ async def test_oversized_archive_config_without_live_read_is_missing() -> None:
     assert "uci_too_large:firewall" in meta.warnings
     assert "uci_failed:firewall" in meta.warnings
     assert "firewall" not in uci_doc(version)["configs"]
+
+
+# ---------------------------------------------------------------------------
+# Security review M2: a config unreadable during the drift check is never
+# reported as "no drift"
+# ---------------------------------------------------------------------------
+
+
+async def test_unreadable_changed_config_is_never_reported_clean() -> None:
+    store = Store()
+    baseline = store.put(ROUTER_A, await collect())
+    uci = ubus_values(changed(firewall=True))
+    uci["firewall"] = OpenWrtConfigFetchIncompleteError("cut off")
+    report = await ConfigManagerProvider().async_detect_drift(
+        make_conn(FakeApi(uci=uci)),
+        baseline,
+        (),
+        make_ctx(store),
+        router=router_record(),
+    )
+    assert report.drifted
+    assert report.drift_id is not None
+    assert report.unknown_count >= 1
+    assert not report.rebaseline
+    gaps = [c for c in report.diff.changes if c.kind is ChangeKind.NOT_COMPARABLE]
+    assert [c.config for c in gaps] == ["firewall"]
+
+
+async def test_unreadable_config_after_key_reset_is_no_rebaseline() -> None:
+    store = Store()
+    baseline = store.put(ROUTER_A, await collect(key=OTHER_KEY))
+    uci = ubus_values()
+    uci["firewall"] = OpenWrtConfigFetchPermissionError("acl")
+    report = await ConfigManagerProvider().async_detect_drift(
+        make_conn(FakeApi(uci=uci)),
+        baseline,
+        (),
+        make_ctx(store, key=KEY),
+        router=router_record(),
+    )
+    assert report.drifted and not report.rebaseline
+    assert report.unknown_count >= 1

@@ -95,6 +95,7 @@ __all__ = [
     "DRIFT_KNOWN",
     "DRIFT_NEW",
     "DRIFT_NONE",
+    "DRIFT_UNKNOWN",
     "Area",
     "Change",
     "DriftAck",
@@ -149,11 +150,14 @@ ACK_ACKNOWLEDGED: Final = "acknowledged"
 ACK_KNOWN: Final = "known"
 _ACK_STATES: Final = frozenset({ACK_ACKNOWLEDGED, ACK_KNOWN})
 
-DriftState = Literal["none", "new", "acknowledged", "known"]
+DriftState = Literal["none", "new", "acknowledged", "known", "unknown"]
 DRIFT_NONE: Final = "none"
 DRIFT_NEW: Final = "new"
 DRIFT_ACKNOWLEDGED: Final = "acknowledged"
 DRIFT_KNOWN: Final = "known"
+# No change seen, but configs could not be compared (review M2): neither
+# "no drift" nor a proven drift; shown and notified like a new drift.
+DRIFT_UNKNOWN: Final = "unknown"
 
 # Section types whose order decides behaviour (first matching rule wins).
 _ORDER_SENSITIVE: Final[frozenset[tuple[str, str]]] = frozenset(
@@ -227,11 +231,13 @@ class DriftAck:
 class DriftReport:
     """Outcome of ``evaluate_drift``.
 
-    ``state``: ``none`` (no change), ``new`` (not acknowledged yet),
-    ``acknowledged`` or ``known`` (see ``DriftAck``). ``not_comparable``
-    lists configs readable on one side only; they are never reported as
-    removed or added. The report changes nothing; the caller acts on
-    ``rebaseline``.
+    ``state``: ``none`` (no change and every config compared), ``new``
+    (not acknowledged yet), ``acknowledged`` or ``known`` (see
+    ``DriftAck``), ``unknown`` (no change seen, but configs could not be
+    compared). ``not_comparable`` lists configs readable on one side only;
+    they are never reported as removed or added, and they make the report
+    ``degraded``: never "no drift", never a rebaseline (review M2). The
+    report changes nothing; the caller acts on ``rebaseline``.
     """
 
     state: DriftState
@@ -245,14 +251,20 @@ class DriftReport:
     ack: DriftAck | None = None
 
     @property
+    def degraded(self) -> bool:
+        """True when configs could not be compared (one-sided)."""
+        return bool(self.not_comparable)
+
+    @property
     def is_drift(self) -> bool:
-        """True while the router differs from its baseline."""
-        return self.state in (DRIFT_NEW, DRIFT_ACKNOWLEDGED)
+        """True while the router differs from its baseline or cannot be
+        shown to match it."""
+        return self.state in (DRIFT_NEW, DRIFT_ACKNOWLEDGED, DRIFT_UNKNOWN)
 
     @property
     def notify(self) -> bool:
         """True for a drift nobody has looked at yet."""
-        return self.state == DRIFT_NEW
+        return self.state in (DRIFT_NEW, DRIFT_UNKNOWN)
 
     @property
     def rebaseline(self) -> bool:
@@ -897,12 +909,19 @@ def diff_snapshots(
 # ---------------------------------------------------------------------------
 
 
-def drift_id(changes: Sequence[Change], content_hash: str) -> str:
+def drift_id(
+    changes: Sequence[Change],
+    content_hash: str,
+    *,
+    not_comparable: Iterable[str] = (),
+) -> str:
     """Stable id of a drift: SHA-256 hex over the changes and the content.
 
     Independent of the order of ``changes`` and of area/risk (those depend
     on ``mgmt_host``). 64 hex characters on purpose: ``redact_text`` masks
-    stand-alone 32-hex strings as session tokens.
+    stand-alone 32-hex strings as session tokens. ``not_comparable``
+    configs are part of the id only when there are any, so the id of a
+    fully compared drift stays what it was.
     """
     rows = sorted(
         canonical_json(
@@ -910,7 +929,11 @@ def drift_id(changes: Sequence[Change], content_hash: str) -> str:
         )
         for c in changes
     )
-    payload = canonical_json([_DRIFT_ID_SCHEME, content_hash, rows])
+    parts: list[Any] = [_DRIFT_ID_SCHEME, content_hash, rows]
+    skipped = sorted(not_comparable)
+    if skipped:
+        parts.append(skipped)
+    payload = canonical_json(parts)
     return hashlib.sha256(payload.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
@@ -933,11 +956,14 @@ def evaluate_drift(
 
     Never changes the baseline itself: ``known`` only sets
     ``DriftReport.rebaseline``. Of several acks for the same drift the
-    latest counts.
+    latest counts. With configs that could not be compared the result is
+    never ``none`` (``unknown`` without changes), and ``known`` counts as
+    ``acknowledged``: a view that misses configs never becomes the
+    baseline (review M2).
     """
     changes = diff_snapshots(baseline, current, mgmt_host=mgmt_host)
     skipped = not_comparable(baseline, current)
-    if not changes:
+    if not changes and not skipped:
         return DriftReport(
             state=DRIFT_NONE,
             drift_id=None,
@@ -948,9 +974,15 @@ def evaluate_drift(
             highest_risk=None,
             critical_count=0,
         )
-    did = drift_id(changes, current.content_hash)
+    did = drift_id(changes, current.content_hash, not_comparable=skipped)
     ack = _latest_ack(acks, did)
-    state: DriftState = DRIFT_NEW if ack is None else ack.state
+    state: DriftState
+    if ack is None:
+        state = DRIFT_NEW if changes else DRIFT_UNKNOWN
+    elif skipped:
+        state = DRIFT_ACKNOWLEDGED
+    else:
+        state = ack.state
     return DriftReport(
         state=state,
         drift_id=did,
@@ -958,7 +990,7 @@ def evaluate_drift(
         not_comparable=skipped,
         baseline_hash=baseline.content_hash,
         current_hash=current.content_hash,
-        highest_risk=max_risk(*(c.risk for c in changes)),
+        highest_risk=max_risk(*(c.risk for c in changes)) if changes else None,
         critical_count=sum(1 for c in changes if c.risk == Risk.CRITICAL),
         ack=ack,
     )
