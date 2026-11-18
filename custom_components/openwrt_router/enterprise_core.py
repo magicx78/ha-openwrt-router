@@ -89,7 +89,14 @@ class EnterpriseCore:
         self.hass = hass
         self.audit = AuditLog(hass)
         self.registry = RouterRegistry(hass, self.audit)
-        self.guard = ActionGuard(hass, self.audit)
+        # Rate windows only for routers the registry knows (review L4).
+        self.guard = ActionGuard(
+            hass,
+            self.audit,
+            router_known=lambda rid: (
+                isinstance(rid, str) and self.registry.find(rid) is not None
+            ),
+        )
         self.versions = VersionStore(hass, self.audit, consume=self.guard.consume)
         self.manager = ConfigurationManager(
             hass,

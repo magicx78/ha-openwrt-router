@@ -118,6 +118,9 @@ REASON_RATE_LIMITED = "rate_limited"
 # Open rate windows (action, router_id) kept at most; above it the oldest
 # window is dropped (counter rate_windows_dropped, debug log).
 MAX_RATE_WINDOWS = 1024
+# Review L4 of PR #56: a rate limited active action for a router id that is
+# neither known (``router_known``) nor the fleet id is refused; no window.
+REASON_UNKNOWN_ROUTER = "unknown_router"
 
 
 @dataclass(slots=True)
@@ -196,11 +199,19 @@ class ActionGuard:
         audit: AuditLog,
         *,
         clock: Callable[[], datetime] = utcnow,
+        router_known: Callable[[str], bool] | None = None,
     ) -> None:
-        """Create the guard; ``clock`` is the time source (tests move it)."""
+        """Create the guard; ``clock`` is the time source (tests move it).
+
+        ``router_known(router_id)`` says whether the core knows a router
+        (the core passes its registry lookup). Rate windows exist only for
+        known routers and the fleet id; without it only the fleet id is
+        known (fail closed).
+        """
         self.hass = hass
         self.audit = audit
         self._clock = clock
+        self._router_known = router_known
         self._action_classes: dict[str, ActionClass] = dict(ACTION_CLASSES)
         self._admin_only: set[str] = {str(a) for a in ADMIN_USER_ONLY_ACTIONS}
         self._system_only: set[str] = {str(a) for a in SYSTEM_ONLY_ACTIONS}
@@ -231,6 +242,7 @@ class ActionGuard:
             "active_granted": 0,
             "rate_limited": 0,
             "rate_windows_dropped": 0,
+            "rate_unknown_router": 0,
         }
 
     # -- actors ----------------------------------------------------------------------
@@ -374,6 +386,16 @@ class ActionGuard:
                 action, router_id, actor, subject_id, checksum, correlation_id, now
             )
         if action_class is ActionClass.ACTIVE:
+            if action in self._rate_limits and not self._is_known_router(router_id):
+                # no window for an invented id (it could push out a real one)
+                self.stats["rate_unknown_router"] += 1
+                return self._denied(
+                    action,
+                    FLEET_ROUTER_ID,  # the unknown id is never echoed
+                    actor,
+                    REASON_UNKNOWN_ROUTER,
+                    correlation_id,
+                )
             retry_after = self._rate_check(action, router_id, now)
             if retry_after is not None:
                 return self._rate_limited(
@@ -430,6 +452,20 @@ class ActionGuard:
             audit_id=audit_id,
             authorization=authorization,
         )
+
+    def _is_known_router(self, router_id: object) -> bool:
+        """The fleet id or a router ``router_known`` accepts (errors: unknown)."""
+        if not isinstance(router_id, str):
+            return False
+        if router_id == FLEET_ROUTER_ID:
+            return True
+        if self._router_known is None:
+            return False
+        try:
+            return self._router_known(router_id) is True
+        except Exception:  # a broken lookup fails closed
+            _LOGGER.debug("Guard: router lookup failed", exc_info=True)
+            return False
 
     def _rate_check(self, action: str, router_id: str, now: datetime) -> float | None:
         """Seconds until the next grant is allowed; None if allowed now."""

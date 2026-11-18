@@ -389,6 +389,16 @@ sensitive_read=False, rate_limit=None)`.
   Fenster, Wiederholungen in `repeat_count`), Zähler `rate_limited`. Höchstens
   `MAX_RATE_WINDOWS` = 1024 offene Fenster; darüber fällt das älteste weg (Zähler
   `rate_windows_dropped`, Debug-Log).
+- Fenster gibt es nur für Router, die der Core kennt (ab Review L4 von PR #56): die
+  Registry (`registry.find`, auch verwaiste Einträge) oder die Flotten-Kennung `-`. Eine
+  ratenbegrenzte `active`-Aktion für eine andere `router_id` ⇒ `DENIED`, `reason`
+  `unknown_router` (`REASON_UNKNOWN_ROUTER`), `error_for_decision` ⇒ `AuthorizationError`;
+  auditiert als `security.authorization_denied` auf dem Sicherheitsring unter `-` (die
+  unbekannte Kennung steht weder im Audit noch in der Entscheidung, deren `router_id` ist
+  `-`), Zähler `rate_unknown_router`, kein Fenster. So kann niemand mit erfundenen
+  Kennungen die Fenster echter Router verdrängen. Der Guard bekommt dafür
+  `ActionGuard(..., router_known=...)`; ohne diesen Parameter kennt er nur `-`
+  (geschlossen). Aktionen ohne `rate_limit` sind unverändert.
 - Gleiche Registrierung erneut ist ein No-op; eine abweichende (auch nur anderes Limit)
   ⇒ `ValueError`.
 
@@ -1499,7 +1509,7 @@ maskiert, Nachricht geschrubbt). `code` und `error_class` ändern sich innerhalb
 | `CapabilityUnavailableError` | `capability_unavailable` | `not_available` | Capability fehlt (auch Restore in Phase 1) | nein |
 | `ProviderUnavailableError` | `provider_unavailable` | `not_available` | kein Provider registriert | nein |
 | `ProviderConflictError` | `provider_conflict` | `conflict` | zweiter Provider | nein |
-| `AuthorizationError` | `authorization_denied` | `denied` | Guard lehnt ab, Akteur unbekannt/ungeprüft, oder `consume` scheitert (`details.reason`: `not_admin`, `unverified_actor`, `unknown_user`, `unknown_authorization`, `already_used`, `expired`, `action_mismatch`, `router_mismatch`, `checksum_mismatch`, …) | nein |
+| `AuthorizationError` | `authorization_denied` | `denied` | Guard lehnt ab, Akteur unbekannt/ungeprüft, oder `consume` scheitert (`details.reason`: `not_admin`, `unverified_actor`, `unknown_user`, `unknown_authorization`, `already_used`, `expired`, `action_mismatch`, `router_mismatch`, `checksum_mismatch`, `actor_required` (#111), `unknown_router` (#113), …) | nein |
 | `ApprovalRequiredError` | `approval_required` | `approval` | kritische Aktion ohne freigegebenen Antrag (noch `pending`) | nein |
 | `ApprovalInvalidError` | `approval_invalid` | `approval` | Antrag unbekannt, abgelaufen, benutzt, abgelehnt, anders gebunden, nicht vom Antragsteller eingelöst | nein |
 | `BackupNotFoundError` | `backup_not_found` | `not_found` | Version unbekannt | nein |
@@ -1696,6 +1706,10 @@ muss):
   `otp_total`, …) zeigen keine Zahl mehr. Ein Modul, das einen solchen Zähler lesbar
   ausgeben will, benennt ihn ohne Wort aus `SECRET_WORDS` (z. B. `wifi_login_failures`
   statt `wifi_auth_failures`).
+- (#113) Eine ratenbegrenzte `active`-Aktion wird nur für Router erteilt, die die Registry
+  kennt, oder für die Flotte `-`; sonst `unknown_router`. Ein Modul, das eine solche Aktion
+  für ein Ziel außerhalb der Registry braucht, nimmt `-` (ein gemeinsames Fenster) oder
+  registriert die Aktion ohne `rate_limit` und begrenzt selbst.
 
 ### 19.1 Änderungen auf Feld- und Signaturebene
 
@@ -1881,6 +1895,7 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 | 110 | Maskierung (L1, §13): `is_counter_name` ist `False`, sobald ein Wort des Namens (oder alle Wörter zusammengeschrieben) in `SECRET_WORDS` steht; `pin_total`, `wps_pin_attempts`, `otp_total`, `psk_retries`, `auth_failures`, `auth_errors`, `wifi_auth_failures` zeigen keine Zahl mehr (`**REDACTED**`, strukturiert und im Freitext). Die Zählerregel hebt damit keinen geheimen Namen mehr auf; Signatur und `COUNTER_SUFFIXES` unverändert. | B (Verhalten gegenüber #102: weniger lesbar, wie auf `main`) |
 | 111 | Backup-Prüfung (L2, §8): `async_validate_backup(backup_id, *, actor: Actor)` im Manager, in der Fassade und in `ConfigurationApiProtocol`, `actor` ohne Standardwert. `actor=None` oder ein Nicht-`Actor` ⇒ `AuthorizationError` `actor_required` (neu `REASON_ACTOR_REQUIRED`; `details.action` `config_validate`, `audit_id`), auditiert auf dem Sicherheitsring (Router der bekannten Version, sonst `-`), vor jedem Nachschlagen und Provider-Aufruf; Zähler `validate_refused_no_actor` statt `validate_without_actor` (entfernt). Damit gibt es keinen Weg mehr an der Admin-Prüfung aus #101 vorbei. Geschwister geprüft, keines hat dieselbe Lücke: `async_list_backups`, `async_get_backup`, `async_list_drift_acks`, `async_get_baseline`, `ssh_pin_status`, `acl_offer` liefern nur Metadaten ohne Inhalt; `async_apply_retention` läuft als System nach Core-Politik; `on_config_option_changed`/`audit_config_option_changed` und `emit` nutzen `actor` nur zur Zuordnung im Audit, nicht als Zugriffsprüfung. | B (Signatur und Verhalten) |
 | 112 | Modul-Schlüssel (L3, §11.5): ein Satz zur Grenze; Modul-Schlüssel trennen Module gegen Versehen, nicht gegen feindlichen Code im selben Prozess. Nur Doku, kein Code. | Doku |
+| 113 | Guard (L4, §6.3): `ActionGuard(..., router_known: Callable[[str], bool] \| None = None)`, der Core übergibt die Registry-Abfrage; ohne ihn ist nur `-` bekannt. Ratenbegrenzte `active`-Aktion für eine unbekannte `router_id` (nicht `-`) ⇒ `DENIED` `unknown_router` (neu `REASON_UNKNOWN_ROUTER`), Sicherheitsring unter `-`, Entscheidung mit `router_id` `-`, Zähler `rate_unknown_router` (neu), kein Rate-Fenster. Eine Lookup-Funktion, die wirft, zählt als „unbekannt“. Vorher legte jede erfundene Kennung ein Fenster an und verdrängte ab 1024 die Fenster echter Router (deren Limit begann neu). | A (Parameter, Konstante, Zähler); B (Verhalten: unbekannte Router werden für ratenbegrenzte Aktionen abgelehnt) |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 

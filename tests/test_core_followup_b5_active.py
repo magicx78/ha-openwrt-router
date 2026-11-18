@@ -83,7 +83,10 @@ async def _guard(clock: Clock | None = None):
     add_users(hass)
     audit = AuditLog(hass)
     await audit.async_load()
-    guard = ActionGuard(hass, audit, clock=clock or Clock())
+    # review L4: rate windows only for known routers
+    guard = ActionGuard(
+        hass, audit, clock=clock or Clock(), router_known=lambda rid: rid in {R1, R2}
+    )
     return hass, audit, guard
 
 

@@ -218,7 +218,8 @@ class AuthorizationError(ConfigApiError):
 
     ``details["reason"]`` says why (for example ``not_admin``,
     ``unverified_actor``, ``unknown_authorization``, ``already_used``,
-    ``expired``, ``action_mismatch``, ``router_mismatch``).
+    ``expired``, ``action_mismatch``, ``router_mismatch``, ``actor_required``,
+    ``unknown_router``).
     """
 
     code = "authorization_denied"
