@@ -1128,7 +1128,19 @@ async def async_setup_config_manager(
             await asyncio.sleep(0)
     await runtime.async_attach(entry, coordinator)
     entry.async_on_unload(_release_callback(runtime, entry.entry_id))
+    _register_views(hass)
     return runtime
+
+
+def _register_views(hass: HomeAssistant) -> None:
+    """HTTP routes R1-R20, bound once per HA session (also with the option off:
+    they then answer ``disabled``). A failure never breaks the setup."""
+    try:
+        from .config_views import async_register_config_views
+
+        async_register_config_views(hass)
+    except Exception as err:  # noqa: BLE001 - routes missing, entry still loads
+        _LOGGER.warning("Configuration routes not registered: %s", type(err).__name__)
 
 
 def _release_callback(
