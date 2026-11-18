@@ -6,7 +6,8 @@ to find the open hours), a poll of 1000 clients stays under the 20 ms ingest
 budget, 150 clients x 30 days fit in the 3 MB default store and 1000 clients
 are trimmed under the cap. The large histories are clones of a few clients
 fed through the engine's public poll observer (hourly polls), rebuilt with
-``ClientHistory.from_dict``. Timings are the best of several runs. MACs are
+``ClientHistory.from_dict``. Timings are the best of several runs after an
+untimed warm-up; first calls run on fresh engines (empty caches). MACs are
 locally administered test values.
 """
 
@@ -96,12 +97,40 @@ def cloned(n: int) -> tuple[ClientStability, float]:
     return cs, now
 
 
-def best_ms(call: Callable[[], Any], runs: int = 3) -> float:
+def best_ms(call: Callable[[], Any], runs: int = 5, warmup: int = 1) -> float:
+    """Best of ``runs`` timings after ``warmup`` untimed calls (a busy shared
+    CI runner only ever adds time, so the best run is the fair one)."""
+    for _ in range(warmup):
+        call()
     best = float("inf")
     for _ in range(runs):
         start = time.perf_counter()
         call()
         best = min(best, time.perf_counter() - start)
+    return best * 1000
+
+
+def rewired(cs: ClientStability) -> ClientStability:
+    """A fresh engine (empty per-hour caches) over the same history."""
+    fresh = engine()
+    fresh.settings = cs.settings
+    fresh.history = cs.history
+    fresh.last_now = cs.last_now
+    return fresh
+
+
+def best_first_ms(
+    cs: ClientStability, view: Callable[[ClientStability], Any], runs: int = 5
+) -> float:
+    """Best time of a first (uncached) call of ``view``, each run on a fresh
+    engine over the same history, after one untimed warm-up run."""
+    best = float("inf")
+    for run in range(runs + 1):
+        fresh = rewired(cs)
+        start = time.perf_counter()
+        view(fresh)
+        if run:
+            best = min(best, time.perf_counter() - start)
     return best * 1000
 
 
@@ -212,7 +241,7 @@ def test_span_keeps_whole_days_after_the_hours_are_trimmed() -> None:
 def test_table_of_150_clients_with_30_days_stays_cheap() -> None:
     cs, now = cloned(150)
     query = parse_table_query({})
-    first = best_ms(lambda: clients_table(cs, str, now, query), runs=1)
+    first = best_first_ms(cs, lambda fresh: clients_table(fresh, str, now, query))
     again = best_ms(lambda: clients_table(cs, str, now, query))
     # dev machine: ~260 ms (patterns computed, cached per hour) / ~110 ms;
     # before B8 1100 / 730 ms. The budgets leave room for slower CI runners.
@@ -224,7 +253,7 @@ def test_table_of_150_clients_with_30_days_stays_cheap() -> None:
 def test_table_sorted_by_7_day_values_stays_cheap(sort: str) -> None:
     cs, now = cloned(150)
     query = parse_table_query({"sort": sort})
-    first = best_ms(lambda: clients_table(cs, str, now, query), runs=1)
+    first = best_first_ms(cs, lambda fresh: clients_table(fresh, str, now, query))
     again = best_ms(lambda: clients_table(cs, str, now, query))
     # 1.43, dev machine: ~330-370 ms / ~50 ms. Sorting needs the 7-day values
     # of every row; the engine caches them per hour like the patterns.
@@ -249,10 +278,10 @@ def test_poll_of_1000_clients_stays_under_the_ingest_budget() -> None:
     ]
     cs._engine = SimpleNamespace(machine=SimpleNamespace(peek=lambda: incidents))
     clients = [client(mac(i), signal=-55) for i in range(1000)]
-    feed(cs, T0, 3, 60.0, *clients)
+    feed(cs, T0, 3, 60.0, *clients)  # untimed warm-up
     best = float("inf")
     with patch.object(client_engine, "async_dispatcher_send", lambda *a: None):
-        for k in range(3, 13):
+        for k in range(3, 23):  # best of 20 polls: a busy runner only adds time
             facts = poll("r1", T0 + k * 60.0, *clients)
             start = time.perf_counter()
             cs.on_poll(facts)
