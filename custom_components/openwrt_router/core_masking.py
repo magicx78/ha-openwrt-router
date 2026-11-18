@@ -1180,3 +1180,48 @@ def mask_for_output(data: Any, *, extra_keys: Iterable[str] = ()) -> Any:
     """
     walk = _Walk(extra=frozenset(extra_keys), redact_strings=True)
     return _mask(data, walk, set(), 0)
+
+
+# --- user pseudonyms ----------------------------------------------------------
+
+# Home Assistant user ids never leave the core as they are: diagnostics and
+# the bus event (recorder, logbook) carry ``usr_<12 hex>`` instead, an
+# HMAC-SHA256 of the id with a caller-owned random salt (security review
+# 2026-11-18 #11, review PR #55 finding 7). The audit store keeps the id.
+ACTOR_PSEUDONYM_PREFIX: Final = "usr_"
+ACTOR_PSEUDONYM_HEX_LENGTH: Final = 12
+USER_ID_KEY: Final = "user_id"
+
+
+def pseudonymise_user_id(user_id: str, salt: bytes) -> str:
+    """``usr_<12 hex>`` for ``user_id``; same id and salt, same pseudonym."""
+    digest = hmac.new(salt, user_id.encode("utf-8"), hashlib.sha256).hexdigest()
+    return ACTOR_PSEUDONYM_PREFIX + digest[:ACTOR_PSEUDONYM_HEX_LENGTH]
+
+
+def pseudonymise_user_ids(data: Any, salt: bytes) -> Any:
+    """Copy of ``data`` with every string under a ``user_id`` key replaced.
+
+    Walks mappings, lists and tuples (as lists) up to MAX_DEPTH; deeper
+    values are returned unchanged, which is safe only because the result
+    then goes through :func:`mask_for_output` (it truncates beyond the
+    same depth). The input is never changed.
+    """
+    return _pseudonymise(data, salt, 0)
+
+
+def _pseudonymise(data: Any, salt: bytes, depth: int) -> Any:
+    if depth > MAX_DEPTH:
+        return data
+    if isinstance(data, Mapping):
+        return {
+            key: (
+                pseudonymise_user_id(value, salt)
+                if key == USER_ID_KEY and isinstance(value, str)
+                else _pseudonymise(value, salt, depth + 1)
+            )
+            for key, value in data.items()
+        }
+    if isinstance(data, list | tuple):
+        return [_pseudonymise(value, salt, depth + 1) for value in data]
+    return data

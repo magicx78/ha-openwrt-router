@@ -9,13 +9,10 @@ per-client lists are reduced to counts before the data is returned.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
 import secrets
 import time
 from collections import Counter
-from collections.abc import Mapping
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -30,6 +27,8 @@ from .const import (
     DIAGNOSTICS_TO_REDACT,
     DOMAIN,
 )
+from .core_masking import ACTOR_PSEUDONYM_PREFIX as _SHARED_PSEUDONYM_PREFIX
+from .core_masking import pseudonymise_user_ids
 from .mac_utils import is_mac
 from .net_engine import async_get_engine
 from .topology_ports import redacted_port_summary
@@ -173,27 +172,16 @@ def _client_stability_summary(hass: HomeAssistant) -> dict[str, Any]:
 ENTERPRISE_CORE_AUDIT_ENTRIES = 20
 # Actor user ids in the audit entries are replaced by a pseudonym: same user
 # -> same pseudonym inside ONE download (a fresh random salt per download),
-# never the Home Assistant user id (security review 2026-11-18, #11).
-ACTOR_PSEUDONYM_PREFIX = "usr_"
+# never the Home Assistant user id (security review 2026-11-18, #11). The
+# helper is shared with the core bus event (core_masking owns the prefix).
+ACTOR_PSEUDONYM_PREFIX = _SHARED_PSEUDONYM_PREFIX
 
 
 def _pseudonymise_actors(
     entries: list[dict[str, Any]], salt: bytes
 ) -> list[dict[str, Any]]:
-    """Copy of ``entries`` with every ``actor.user_id`` replaced."""
-    out: list[dict[str, Any]] = []
-    for entry in entries:
-        actor = entry.get("actor") if isinstance(entry, Mapping) else None
-        if isinstance(actor, Mapping) and isinstance(actor.get("user_id"), str):
-            digest = hmac.new(
-                salt, actor["user_id"].encode("utf-8"), hashlib.sha256
-            ).hexdigest()[:12]
-            entry = {
-                **entry,
-                "actor": {**actor, "user_id": ACTOR_PSEUDONYM_PREFIX + digest},
-            }
-        out.append(entry)
-    return out
+    """Copy of ``entries`` with every ``user_id`` (actor included) replaced."""
+    return [pseudonymise_user_ids(entry, salt) for entry in entries]
 
 
 def _enterprise_core_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any]:

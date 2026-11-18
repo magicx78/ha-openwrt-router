@@ -1094,7 +1094,13 @@ marker = {"secret": digest(f"{config}/{section}/{option}/{value}")}
 `EmitResult(event, published, deduplicated)` ist die Rückgabe von `emit`.
 
 Bus-Event `EVENT_CORE = "openwrt_router_core_event"` mit `CoreEvent.to_dict()`; bewusst
-getrennt von `EVENT_INCIDENT`, `net_rules` und `logbook.py` bleiben unverändert.
+getrennt von `EVENT_INCIDENT`, `net_rules` bleibt unverändert. Das Event landet im Recorder
+und im Logbuch (`logbook.py` zeigt `<type>: <result>` unter dem Eintragstitel, nie einen
+Benutzer). Jede `user_id` im Bus-Payload (`actor.user_id` und verschachtelte) ist ein
+Pseudonym `usr_<12 hex>` (`core_masking.pseudonymise_user_ids`, derselbe Helfer wie in der
+Diagnose; Salz zufällig je Audit-Log, nur im Speicher: gleicher Benutzer gleiches Pseudonym,
+solange der Core läuft). Audit-Store, `api.events(...)` und `subscribe`-Listener behalten die
+echte ID.
 
 ### 12.2 Zwei Audit-Ringe
 
@@ -1582,6 +1588,7 @@ Signatur bleibt, die Regel ist neu.
 | 96 | Versionsdateien (Review PR #55, Punkt 3): `.partial` wird exklusiv angelegt (`O_CREAT \| O_EXCL`, `O_NOFOLLOW` wo vorhanden, `0o600`, Rechte per `fchmod` am offenen Deskriptor). Link/Junction/Ordner am `.partial`-Pfad ⇒ `StorageError` `reason` `partial_not_regular`, `found` (`symlink`/`folder`/`other`), Warn-Log, Zähler `partial_refused` (zählt auch in `write_errors`); gleichnamige reguläre Datei ⇒ entfernt, einmal neu angelegt. | Verhalten, A |
 | 97 | `ensure_acl_outcome(respect_offer=True)` (Review PR #55, Punkt 5): eine gestufte ACL ohne alle Basis-Leserechte bleibt behalten, aber mit Warn-Log, `AclEnsureOutcome.missing_base_rights` (neu, Standard `()`) und Reparaturhinweis `acl_base_rights_missing_<entry_id>` (de/en, verschwindet bei vollständigen Rechten und beim Entladen). Neu `missing_base_read_rights(acl)`, `issues.async_sync_acl_base_rights_issue`, `ISSUE_ACL_BASE_RIGHTS_MISSING`. Auf diesem Pfad `parse_acl_text` statt `json.loads`: zu groß/zu tief ⇒ `corrupted`, v8 wird eingespielt. Pfad ohne Angebot unverändert. | A, Verhalten |
 | 98 | Router-Registry (Review PR #55, Punkt 6): Entladen verwirft den Laufzeitzustand (`RouterRegistry.release_entry`, von `EnterpriseCore.forget_entry`). Verwaiste Datensätze begrenzt: `prune_orphans(known_entry_ids, versioned_router_ids)` beim Core-Laden; ohne Versionen nach `ORPHAN_RETENTION_DAYS` = 90 Tagen, über `MAX_ORPHANED_RECORDS` = 64 die ältesten (ohne Versionen zuerst); Datensätze bestehender (auch früherer) Einträge nie; ohne bekannte Einträge oder ohne geladenen Versionsspeicher nichts. Neuer Event-Typ `router.forgotten` (Ring `security`, audit-pflichtig); Zähler `runtimes_released`, `orphans_forgotten_aged`, `orphans_forgotten_capped`, `orphan_prune_skipped`. | A, Verhalten |
+| 99 | Bus-Event `openwrt_router_core_event` (Review PR #55, Punkt 7): jede `user_id` im Payload wird zu `usr_<12 hex>` (HMAC-SHA256, Zufallssalz je Audit-Log, nur im Speicher). Gemeinsamer Helfer `core_masking.pseudonymise_user_id(s)`, `ACTOR_PSEUDONYM_PREFIX` jetzt in `core_masking` (Diagnose re-exportiert); die Diagnose ersetzt nun auch verschachtelte `user_id`. Audit-Store und Listener unverändert mit echter ID. | B (Verhalten des Bus-Payloads) |
 
 Befunde 15 und 18 ändern nur Tests (kein Vertrag): die Wächter „HA-eigene Daten
 unverändert“ prüfen zusätzlich die Aufrufe `async_update_entry`, `async_remove`,

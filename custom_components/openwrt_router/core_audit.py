@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta
@@ -32,7 +33,7 @@ from homeassistant.core import HomeAssistant, callback
 
 from . import core_store
 from .const import AUDIT_SAVE_DELAY_SECONDS, AUDIT_STORE_MINOR_VERSION
-from .core_masking import mask_for_output
+from .core_masking import mask_for_output, pseudonymise_user_ids
 from .core_models import (
     AUDIT_MAX_EVENTS,
     AUDIT_RETENTION_DAYS,
@@ -109,6 +110,9 @@ class AuditLog:
         # cooldown of the window)
         self._dedup: dict[tuple[str, str, str], tuple[str, datetime, timedelta]] = {}
         self._listeners: list[CoreEventListener] = []
+        # Salt of the user pseudonyms on the bus; in memory only, new per
+        # audit log (same user, same pseudonym while this core runs).
+        self._bus_salt = secrets.token_bytes(16)
         # registered module event prefixes -> module
         self._prefixes: dict[str, str] = {}
         self.loaded = False
@@ -382,7 +386,12 @@ class AuditLog:
                 self.stats["expired"] += 1
 
     def _publish(self, event: CoreEvent) -> bool:
-        payload = mask_for_output(event.to_dict())
+        # The bus event reaches the recorder and the logbook: user ids go
+        # out as pseudonyms (review PR #55, finding 7). Listeners in this
+        # process and the audit store keep the real id.
+        payload = mask_for_output(
+            pseudonymise_user_ids(event.to_dict(), self._bus_salt)
+        )
         published = True
         try:
             self.hass.bus.async_fire(EVENT_CORE, payload)
