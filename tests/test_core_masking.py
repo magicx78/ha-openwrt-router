@@ -9,6 +9,8 @@ dataclasses) and adds CamelCase splitting, ``privkey``, ``auth``,
 from __future__ import annotations
 
 import ast
+import hashlib
+import hmac
 import json
 from collections import namedtuple
 from dataclasses import dataclass
@@ -22,11 +24,13 @@ from custom_components.openwrt_router.core_masking import (
     MASK,
     SECRET_ARCHIVE_PATHS,
     SECRET_CONTEXT_OPTIONS,
+    SECRET_OPTION_WHITELIST,
     SECRET_OPTIONS,
     is_secret_key,
     is_secret_name,
     is_secret_option,
     is_secret_path,
+    is_snapshot_secret,
     mask_for_output,
     mask_secrets,
     redact_text,
@@ -357,6 +361,298 @@ class TestMaskForOutput:
             "radio": {"ssid": "s", "key": MASK}
         }
         assert mask_secrets({"raw": b"x"}) == {"raw": MASK}
+
+
+SECRET = "Sup3rS3cretValue"
+
+# Real OpenWrt options whose values are not secret: the snapshot keeps them
+# as plain text so a diff shows "old -> new" (config-manager's view).
+READABLE_UCI_OPTIONS = [
+    ("wireless", "wifi-iface", "sae_pwe"),
+    ("wireless", "wifi-iface", "sae_require_mfp"),
+    ("wireless", "wifi-iface", "wpa_group_rekey"),
+    ("wireless", "wifi-iface", "wpa_disable_eapol_key_retries"),
+    ("wireless", "wifi-iface", "auth_cache"),
+    ("wireless", "wifi-iface", "r0_key_lifetime"),
+    ("wireless", "wifi-iface", "wpa_strict_rekey"),
+    ("wireless", "wifi-iface", "auth_type"),
+    ("dropbear", "dropbear", "PasswordAuth"),
+    ("dropbear", "dropbear", "RootPasswordAuth"),
+    ("dropbear", "dropbear", "MaxAuthTries"),
+    ("network", "interface", "auth"),
+    ("openvpn", "openvpn", "auth"),
+    ("openvpn", "openvpn", "tls_auth"),
+    ("openvpn", "openvpn", "auth_nocache"),
+    ("openvpn", "openvpn", "key_direction"),
+    ("usteer", "usteer", "key_value"),
+]
+
+
+class TestRedactTextValueEnd:
+    """An unquoted secret value runs to the end of the line."""
+
+    def test_unquoted_value_with_spaces_removed_to_end_of_line(self):
+        out = redact_text("wpa_passphrase=correct horse battery staple")
+        for word in ("correct", "horse", "battery", "staple"):
+            assert word not in out
+
+    def test_r0kh_key_after_space_removed(self):
+        out = redact_text(f"r0kh=02:00:00:00:03:00 nas1 0001020304{SECRET}")
+        assert SECRET not in out
+        assert "0001020304" not in out
+
+    def test_value_with_comma_and_semicolon_removed(self):
+        out = redact_text("key=abc,def;ghi")
+        assert "def" not in out
+        assert "ghi" not in out
+
+    @pytest.mark.parametrize("name", ["r0kh", "r1kh"])
+    def test_r0kh_r1kh_with_64_hex_key_removed(self, name):
+        hex_key = "a1b2c3d4" * 8
+        out = redact_text(f"{name}=02:00:00:00:03:00,nas1.example,{hex_key}")
+        assert hex_key not in out
+
+    def test_quoted_value_ends_at_closing_quote(self):
+        out = redact_text('psk="a b c" ssid=Home')
+        assert "a b c" not in out
+        assert out.endswith(" ssid=Home")
+
+    def test_value_ends_at_line_break(self):
+        assert redact_text("psk=x y\nssid=Home").endswith("\nssid=Home")
+
+    def test_flag_value_quoted_ends_at_quote(self):
+        out = redact_text("sshpass --password 'a b' ssh root@ap1")
+        assert "a b" not in out
+        assert out.endswith(" ssh root@ap1")
+
+
+class TestSnapshotSecretPrecise:
+    """is_snapshot_secret: config-manager's digest decision, exactly."""
+
+    @pytest.mark.parametrize(("config", "section_type", "option"), READABLE_UCI_OPTIONS)
+    def test_readable_uci_options_are_not_snapshot_secrets(
+        self, config, section_type, option
+    ):
+        assert not is_snapshot_secret(config, section_type, option)
+
+    @pytest.mark.parametrize("name", sorted(SECRET_OPTIONS))
+    def test_exact_options_are_snapshot_secrets(self, name):
+        assert is_snapshot_secret("wireless", "wifi-iface", name)
+        assert is_snapshot_secret("", "", name.upper())
+
+    @pytest.mark.parametrize(
+        ("config", "section_type", "option"),
+        [
+            ("ddns", "service", "param_enc"),
+            ("ddns", "service", "param_opt"),
+            ("ddns", "service", "update_url"),
+            ("rpcd", "login", "password"),
+            ("network", "interface", "pincode"),
+            ("network", "wireguard_wg0", "private_key"),
+            ("openvpn", "client", "auth_user_pass"),
+            ("openvpn", "client", "askpass"),
+            ("openvpn", "client", "secret"),
+            ("openvpn", "client", "key"),
+        ],
+    )
+    def test_context_options_are_snapshot_secrets(self, config, section_type, option):
+        assert is_snapshot_secret(config, section_type, option)
+
+    @pytest.mark.parametrize(
+        "name", ["wpa_passphrase", "my_credential", "ddns_token", "API-KEY", "Password"]
+    )
+    def test_pattern_names_are_snapshot_secrets(self, name):
+        assert is_snapshot_secret("whatever", "whatever", name)
+
+    def test_openvpn_auth_is_algorithm_tls_auth_is_file_path(self):
+        # config-manager: "auth" names a digest algorithm (SHA256) and
+        # "tls_auth" a key FILE path; the file content is protected by the
+        # archive path rules, the option value itself is not secret.
+        assert not is_snapshot_secret("openvpn", "openvpn", "auth")
+        assert not is_snapshot_secret("openvpn", "openvpn", "tls_auth")
+        assert is_secret_path("etc/openvpn/ta.key")
+
+    def test_lists_identical_to_config_manager(self):
+        assert len(SECRET_OPTIONS) == 29
+        rules = {
+            (rule.config, rule.section_type): set(rule.options)
+            for rule in SECRET_CONTEXT_OPTIONS
+        }
+        assert rules == {
+            ("ddns", "service"): {"password", "param_enc", "param_opt", "update_url"},
+            ("rpcd", "login"): {"password"},
+            ("network", "interface"): {"password", "pincode"},
+            ("network", "wireguard_*"): {"private_key", "preshared_key"},
+            ("openvpn", "*"): {"auth_user_pass", "askpass", "secret", "key"},
+        }
+        assert len({n for names in rules.values() for n in names}) == 11
+        assert len(SECRET_ARCHIVE_PATHS) == 28
+        assert SECRET_OPTION_WHITELIST == frozenset(
+            {
+                "ft_psk_generate_local",
+                "keepalive",
+                "persistent_keepalive",
+                "key_mgmt",
+                "passwordauth",
+                "rootpasswordauth",
+            }
+        )
+
+    def test_digest_value_is_plain_hmac_sha256_16(self):
+        key = b"k" * 32
+        value = '["wireless","wifi-iface","key","x"]'
+        expected = hmac.new(key, value.encode(), hashlib.sha256).hexdigest()[:16]
+        assert secret_digest_factory(key)(value) == expected
+        assert MASK == "**REDACTED**"
+
+
+class TestPasswordAuthSwitches:
+    @pytest.mark.parametrize(
+        "name", ["PasswordAuth", "RootPasswordAuth", "passwordauth", "ROOTPASSWORDAUTH"]
+    )
+    def test_switch_readable_in_every_mode(self, name):
+        change = {
+            "config": "dropbear",
+            "section_type": "dropbear",
+            "option": name,
+            "old": "on",
+            "new": "off",
+        }
+        assert not is_snapshot_secret("dropbear", "dropbear", name)
+        assert not is_secret_key(name)
+        assert not is_secret_option("dropbear", "dropbear", name)
+        assert mask_for_output(change) == change
+        assert mask_secrets(change) == change
+        assert mask_for_output({name: "off"}) == {name: "off"}
+        assert redact_text(f"option {name} 'off'") == f"option {name} 'off'"
+
+    def test_real_passwords_stay_secret(self):
+        for name in ("Password", "RootPassword"):
+            assert is_snapshot_secret("dropbear", "dropbear", name)
+            assert is_secret_key(name)
+
+
+class TestBroadOutput:
+    @pytest.mark.parametrize(("config", "section_type", "option"), READABLE_UCI_OPTIONS)
+    def test_change_record_of_readable_option_stays_readable(
+        self, config, section_type, option
+    ):
+        change = {
+            "config": config,
+            "section_type": section_type,
+            "option": option,
+            "old": "SHA1",
+            "new": "SHA256",
+        }
+        assert not is_secret_option(config, section_type, option)
+        assert mask_for_output(change) == change
+        assert mask_secrets(change) == change
+
+    @pytest.mark.parametrize("option", ["sae_pwe", "auth", "tls_auth", "community"])
+    def test_change_record_without_known_context_is_masked(self, option):
+        # No config -> no readable lift: when in doubt, mask.
+        out = mask_for_output({"option": option, "old": "a", "new": "b"})
+        assert out["old"] == MASK
+        assert out["new"] == MASK
+        out = mask_for_output(
+            {"config": "snmpd", "option": "community", "old": "a", "new": "b"}
+        )
+        assert out["old"] == MASK
+
+    def test_plain_auth_key_still_masked(self):
+        assert mask_for_output({"auth": "x"}) == {"auth": MASK}
+        assert mask_secrets({"auth": "x"}) == {"auth": MASK}
+
+    @pytest.mark.parametrize(
+        "name",
+        sorted(SECRET_OPTIONS)
+        + ["param_enc", "update_url", "askpass", "wpa_passphrase", "API-KEY"]
+        + [option for _, _, option in READABLE_UCI_OPTIONS],
+    )
+    def test_broad_is_superset_of_precise(self, name):
+        for config, section_type in (
+            ("wireless", "wifi-iface"),
+            ("openvpn", "client"),
+            ("ddns", "service"),
+            ("", ""),
+        ):
+            if is_snapshot_secret(config, section_type, name):
+                assert is_secret_option(config, section_type, name)
+                assert is_secret_key(name)
+
+    @pytest.mark.parametrize("name", ["password_hash", "secret_id", "token_count"])
+    def test_secret_word_beats_safe_suffix(self, name):
+        assert is_secret_key(name)
+
+    def test_metadata_survives_output(self):
+        data = {
+            "sha256": "b" * 64,
+            "dedup_key": "audit:r1:backup",
+            "content_hash": "c" * 64,
+            "backup_id": "bkp_" + "1" * 32,
+            "repeat_count": 3,
+            "contains_secrets": True,
+        }
+        assert mask_for_output(data) == data
+        assert mask_secrets(data) == data
+
+
+ARCHIVE_MEMBERS = (
+    "etc/dropbear/dropbear_rsa_host_key",
+    "etc/dropbear/dropbear_ed25519_host_key",
+    "etc/dropbear/dropbear_ecdsa_host_key",
+    "etc/config/wireless",
+    "etc/openvpn/client.key",
+    "etc/luci-uploads/cbid.openvpn.x.secret",
+)
+
+
+class TestNamesAreNotTokens:
+    def test_archive_member_list_displayable(self):
+        members = list(ARCHIVE_MEMBERS)
+        assert mask_for_output({"members": members}) == {"members": members}
+        for member in ARCHIVE_MEMBERS:
+            assert redact_text(member) == member
+
+    @pytest.mark.parametrize(
+        "hostname",
+        [
+            "openwrt-ap-wohnzimmer-erdgeschoss-1",
+            "OpenWrt-AP-Wohnzimmer-Erdgeschoss-2",
+            "router_keller_technikraum_hauptverteiler",
+        ],
+    )
+    def test_hostname_with_dashes_kept(self, hostname):
+        text = f"router {hostname} offline"
+        assert redact_text(text) == text
+        assert mask_for_output({"router": hostname}) == {"router": hostname}
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "dGhpcyBpcyBhIHNlY3JldCB0b2tlbiB2YWx1ZQ",
+            "aB3dE9fG2hJ7kL4mN8pQ1rS6tU0vW5xY_zA-bC",
+            "Zm9v/YmFy+YmF6L3F1eC9xdXV4L2NvcmdlL2dyYXVsdA",
+            "sk-proj-Ab3x9Kq2Lm7Np4Rt8Vw1Yz6Bc0Df5Gh",
+            "eyJhbGciOiJIUzI1NiJ9-eyJzdWIiOiJyb290In0_c2lnbmF0dXJl",
+            "ghp_" + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2",
+            "x" * 40,
+        ],
+    )
+    def test_real_tokens_still_masked(self, token):
+        assert token not in redact_text(f"value {token} end")
+
+    def test_token_shapes_still_masked(self):
+        assert "0123456789abcdef" * 2 not in redact_text(
+            "session " + "0123456789abcdef" * 2
+        )
+        assert "Bearer abc" not in redact_text("Authorization: Bearer abc")
+        assert "MIIB" not in redact_text(
+            "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----"
+        )
+        wg_key = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+        assert wg_key not in redact_text(f"PrivateKey = {wg_key}")
+        assert wg_key not in redact_text(f"peer {wg_key}")
 
 
 def test_core_masking_imports_no_config_module():

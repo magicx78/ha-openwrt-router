@@ -6,19 +6,37 @@ and by the configuration provider (snapshots, HTTP responses, logs). It is
 the superset of the former ``config_mask`` / ``config_const`` name lists of
 the config-manager branch and the core's word rules.
 
-Detection (:func:`is_secret_key`, alias :func:`is_secret_name`):
+Two modes of detection:
+
+PRECISE, :func:`is_snapshot_secret` ("is this UCI option a secret?"): the
+decision whether a snapshot stores a UCI value as a ``{"secret": <hmac16>}``
+digest marker. Exactly config-manager's rules: ``SECRET_OPTIONS``, the
+context rules, its credential names, then ``SECRET_OPTION_WHITELIST``, then
+``SECRET_OPTION_PATTERNS``. Readable switches like ``sae_pwe``,
+``PasswordAuth`` or openvpn ``auth`` stay plain text so a diff shows them.
+
+BROAD, :func:`is_secret_key` (alias :func:`is_secret_name`) for mapping
+keys and :func:`is_secret_option` for change records: the decision for
+output (audit, bus, diagnostics, API ``to_dict``). It masks everything the
+precise mode masks and more:
 
 1. exact names (UCI options, context names, HTTP/CLI credential names,
    ``DIAGNOSTICS_REDACT_KEYS``) on the full and on the normalised name
    (lower case, ``-`` as ``_``, quotes and leading dashes stripped, last
    dotted segment), always secret;
-2. readable names (core metadata, ``key_mgmt``, ``keepalive`` …) are exempt
-   from the rules below, never from rule 1;
-3. secret substrings (``pass``, ``secret``, ``token`` …) and the
-   config-manager pattern (``_key$``, ``^key\\d*$``, ``pin$``);
-4. secret words after splitting at ``_ - .``, spaces and CamelCase /
-   acronym boundaries, with trailing digits dropped (``WEPKey`` -> ``wep
-   key``, ``key1`` -> ``key``), and the words joined (``api-key``).
+2. readable names (core metadata, ``key_mgmt``, ``PasswordAuth`` …) are
+   exempt from the rules below, never from rule 1;
+3. the precise pattern (``pass``, ``secret``, ``token`` … ``_key$``) unless
+   whitelisted; it beats the id/hash/count suffixes (``password_hash``);
+4. id/hash/count suffixes (``*_id``, ``*_hash``, ``*_count`` …) are readable;
+5. secret substrings and secret words after splitting at ``_ - .``, spaces
+   and CamelCase / acronym boundaries, with trailing digits dropped
+   (``WEPKey`` -> ``wep key``, ``key1`` -> ``key``), and the words joined
+   (``api-key``).
+
+A change record (mapping with ``option`` and ``config``) of an option that
+is readable in that config (``READABLE_CONTEXT_OPTIONS``) keeps its values,
+so a diff stays useful; without a known config the broad rule masks.
 
 Over-masking is preferred to a leak. Two walkers share one implementation:
 :func:`mask_secrets` (key based, used in core ``to_dict()``) and
@@ -97,7 +115,7 @@ class SecretContextRule:
     """Options that are secret inside a config / section type (fnmatch globs).
 
     The names are treated as secret everywhere as well; the rule documents
-    where they come from and serves :func:`is_secret_option`.
+    where they come from and serves :func:`is_snapshot_secret`.
     """
 
     config: str
@@ -121,45 +139,114 @@ SECRET_CONTEXT_OPTIONS: Final = (
     ),
 )
 
-# Credential names of HTTP bodies, headers and command output.
-SECRET_EXTRA_NAMES: Final = frozenset(
+# Credential names of HTTP bodies, headers and command output that
+# config-manager treats as secret option names (precise mode).
+_UCI_CREDENTIAL_NAMES: Final = frozenset(
     {
         "authorization",
         "cookie",
         "proxy_authorization",
-        "session",
         "session_id",
         "sessionid",
         "set_cookie",
-        "sid",
-        "sysauth",
         "ubus_rpc_session",
     }
+)
+# All credential names of HTTP bodies, headers and command output.
+SECRET_EXTRA_NAMES: Final = _UCI_CREDENTIAL_NAMES | frozenset(
+    {"session", "sid", "sysauth"}
 )
 
 _CONTEXT_NAMES: Final = frozenset(
     name for rule in SECRET_CONTEXT_OPTIONS for name in rule.options
 )
+# Precise mode: always secret, whatever the config.
+_SNAPSHOT_EXACT: Final = SECRET_OPTIONS | _UCI_CREDENTIAL_NAMES | _CONTEXT_NAMES
 SECRET_EXACT_KEYS: Final = (
-    SECRET_OPTIONS
+    _SNAPSHOT_EXACT
     | SECRET_EXTRA_NAMES
-    | _CONTEXT_NAMES
     | frozenset(k.lower() for k in DIAGNOSTICS_REDACT_KEYS)
 )
 
-# Readable names: exempt from substrings, pattern and words (not from exact).
-SAFE_KEYS: Final = frozenset(
+# config-manager's safety net for unknown option names (re.search against
+# the normalised name).
+SECRET_OPTION_PATTERNS: Final = (
+    re.compile(
+        r"(pass|secret|token|psk|private|credential|pwd|apikey|_key$|^key\d*$|pin$)"
+    ),
+)
+# Names the pattern hits whose value is not secret and is needed; lifts only
+# the pattern, never an exact name. dropbear PasswordAuth/RootPasswordAuth
+# are on/off switches: the diff must show "on -> off" (HA may lose access).
+SECRET_OPTION_WHITELIST: Final = frozenset(
+    {
+        "ft_psk_generate_local",
+        "keepalive",
+        "key_mgmt",
+        "passwordauth",
+        "persistent_keepalive",
+        "rootpasswordauth",
+    }
+)
+
+# Readable names: exempt from pattern, substrings and words (not from exact).
+SAFE_KEYS: Final = SECRET_OPTION_WHITELIST | frozenset(
     {
         "auth_port",
         "auth_server",
         "contains_secrets",
         "dedup_key",
-        "ft_psk_generate_local",
-        "keepalive",
-        "key_mgmt",
-        "persistent_keepalive",
         "sha256",
     }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ReadableContextRule:
+    """Options whose values are not secret inside a config (fnmatch globs).
+
+    Only lifts the broad word rules for change records that name their
+    config; an option that is a snapshot secret is never lifted.
+    """
+
+    config: str
+    section_type: str
+    options: frozenset[str]
+
+
+# Real OpenWrt options the broad words ("auth", "sae", "wpa", "key") would
+# hit; config-manager stores them in plain text, so a diff shows them.
+READABLE_CONTEXT_OPTIONS: Final = (
+    ReadableContextRule(
+        "wireless",
+        "*",
+        frozenset(
+            {
+                "auth_cache",
+                "auth_type",
+                "r0_key_lifetime",
+                "sae_pwe",
+                "sae_require_mfp",
+                "wpa_disable_eapol_key_retries",
+                "wpa_group_rekey",
+                "wpa_strict_rekey",
+            }
+        ),
+    ),
+    ReadableContextRule(
+        "dropbear", "*", frozenset({"maxauthtries", "passwordauth", "rootpasswordauth"})
+    ),
+    # PPP / modem authentication type (pap, chap, both, none).
+    ReadableContextRule("network", "*", frozenset({"auth"})),
+    # openvpn "auth" is a digest algorithm name (SHA256). "tls_auth" holds a
+    # key FILE path, not the key: config-manager classifies it as readable;
+    # the file's content is protected by SECRET_ARCHIVE_PATHS
+    # (etc/openvpn/*, *.key). Inline keys are not a UCI option.
+    ReadableContextRule(
+        "openvpn", "*", frozenset({"auth", "auth_nocache", "key_direction", "tls_auth"})
+    ),
+    # usteer key_value: not a key; config-manager keeps it readable.
+    ReadableContextRule("usteer", "*", frozenset({"key_value"})),
 )
 # Suffixes of counters, hashes and ids (never secret values).
 SAFE_SUFFIXES: Final = ("_count", "_hash", "_sha256", "_id", "_ids")
@@ -175,8 +262,6 @@ SECRET_SUBSTRINGS: Final = (
     "secret",
     "token",
 )
-# The config-manager safety-net pattern (normalised name).
-_SECRET_PATTERN: Final = re.compile(r"_key$|^key\d*$|pin$")
 # Whole words that mark a secret.
 SECRET_WORDS: Final = frozenset(
     {
@@ -263,8 +348,15 @@ def _words(name: str) -> list[str]:
     ]
 
 
+def _matches_pattern(norm: str) -> bool:
+    """config-manager's safety net: pattern hit and not whitelisted."""
+    return norm not in SECRET_OPTION_WHITELIST and any(
+        pattern.search(norm) for pattern in SECRET_OPTION_PATTERNS
+    )
+
+
 def is_secret_key(name: object, extra_keys: Iterable[str] = ()) -> bool:
-    """Return True if a mapping key or option ``name`` names a secret."""
+    """BROAD: True if a mapping key or option ``name`` may name a secret."""
     if not isinstance(name, str) or not name.strip():
         return False
     lowered = name.lower()
@@ -272,11 +364,13 @@ def is_secret_key(name: object, extra_keys: Iterable[str] = ()) -> bool:
     extra = {k.lower() for k in extra_keys}
     if {lowered, norm} & (SECRET_EXACT_KEYS | extra):
         return True
-    if norm in SAFE_KEYS or lowered in SAFE_KEYS or norm.endswith(SAFE_SUFFIXES):
+    if norm in SAFE_KEYS or lowered in SAFE_KEYS:
+        return False
+    if _matches_pattern(norm):
+        return True
+    if norm.endswith(SAFE_SUFFIXES):
         return False
     if any(sub in norm for sub in SECRET_SUBSTRINGS):
-        return True
-    if _SECRET_PATTERN.search(norm):
         return True
     words = _words(name.rsplit(".", 1)[-1])
     if any(word in SECRET_WORDS for word in words):
@@ -289,10 +383,13 @@ def is_secret_key(name: object, extra_keys: Iterable[str] = ()) -> bool:
 is_secret_name = is_secret_key
 
 
-def is_secret_option(config: str, section_type: str, option: str) -> bool:
-    """Return True if UCI ``config.<section_type>.option`` holds a secret."""
-    if is_secret_key(option):
-        return True
+def _in_context(
+    rules: Iterable[SecretContextRule | ReadableContextRule],
+    config: str,
+    section_type: str,
+    option: str,
+) -> bool:
+    """True if a rule lists ``option`` for this config / section type."""
     cfg = (config or "").lower()
     stype = (section_type or "").lower()
     opt = _normalise_name(option or "")
@@ -300,8 +397,39 @@ def is_secret_option(config: str, section_type: str, option: str) -> bool:
         opt in rule.options
         and fnmatchcase(cfg, rule.config)
         and fnmatchcase(stype, rule.section_type)
-        for rule in SECRET_CONTEXT_OPTIONS
+        for rule in rules
     )
+
+
+def is_snapshot_secret(config: str, section_type: str, option: str) -> bool:
+    """PRECISE: True if UCI ``config.<section_type>.option`` is a secret.
+
+    The snapshot decision (store a ``{"secret": <hmac16>}`` marker instead
+    of the value), identical to config-manager's ``is_secret_option``.
+    Output paths use the broad :func:`is_secret_option` / :func:`is_secret_key`.
+    """
+    if not isinstance(option, str):
+        return False
+    norm = _normalise_name(option)
+    if not norm:
+        return False
+    if norm in _SNAPSHOT_EXACT or _matches_pattern(norm):
+        return True
+    return _in_context(SECRET_CONTEXT_OPTIONS, config, section_type, option)
+
+
+def is_secret_option(config: str, section_type: str, option: str) -> bool:
+    """BROAD: True if output must mask the values of this UCI option.
+
+    Masks every snapshot secret and every name :func:`is_secret_key` flags,
+    except options listed as readable for this config
+    (``READABLE_CONTEXT_OPTIONS``), so a diff of ``sae_pwe`` stays useful.
+    """
+    if is_snapshot_secret(config, section_type, option):
+        return True
+    if not is_secret_key(option):
+        return False
+    return not _in_context(READABLE_CONTEXT_OPTIONS, config, section_type, option)
 
 
 def _normalise_path(path: str) -> str:
@@ -371,10 +499,12 @@ _ASSIGN_HEAD_RE: Final = re.compile(
 _FLAG_HEAD_RE: Final = re.compile(
     r"(?<![\w\-])(?P<name>--?[A-Za-z][A-Za-z0-9_\-]*)[ \t]+(?=[^\s\-])"
 )
-# A value: quoted string, else up to whitespace/comma/semicolon (assignment)
-# or the rest of the line (UCI and flags).
+# A value: a complete double- or single-quoted string (UCI '\'' escapes),
+# otherwise the rest of the line. Spaces, commas and semicolons do not end
+# it: "correct horse battery staple" and "r0kh=<mac> <id> <key>" are one
+# value each (over-masking on purpose).
 _VALUE_RE: Final = re.compile(
-    r"\"(?:[^\"\\\r\n]|\\.)*\"|'(?:'\\''|[^'\r\n])*'|[^\s,;]+"
+    r"\"(?:[^\"\\\r\n]|\\.)*\"|'(?:'\\''|[^'\r\n])*'|[^\r\n]*"
 )
 _LINE_VALUE_RE: Final = re.compile(r"[^\r\n]*")
 # crypt(3) hashes as in /etc/shadow.
@@ -389,6 +519,15 @@ _HEX32_RE: Final = re.compile(r"(?<![0-9A-Za-z_])[0-9A-Fa-f]{32}(?![0-9A-Za-z_])
 # Opaque runs of 32+ token characters; ids and pure hex hashes are kept.
 _LONG_TOKEN_RE: Final = re.compile(r"(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_=-]{32,}")
 _KEEP_TOKEN_RE: Final = re.compile(r"[a-z]{3}_[0-9a-f]{32}|[0-9a-f]{40,}")
+# Names, not tokens: paths and hostnames are words joined by "/", "-", "_".
+# Each part is one word (lower, Capitalised or UPPER), at most one more
+# CamelCase hump of 3+ letters ("OpenWrt"), digits only around it; random
+# base64/base64url mixes case and digits inside a part, so it does not split
+# into such parts. "+" and "=" never occur in names.
+_NAME_PART_RE: Final = re.compile(
+    r"[0-9]*(?:[A-Z]?[a-z]+|[A-Z]+)(?:[A-Z][a-z]{2,}|[A-Z]{3,})?[0-9]*|[0-9]+"
+)
+_NAME_SEP_RE: Final = re.compile(r"[/_-]+")
 
 
 def _quoted_mask(value: str) -> str:
@@ -420,10 +559,18 @@ def _mask_after_heads(
     return "".join(out)
 
 
+def _is_name(token: str) -> bool:
+    """True for a path or hostname made of words (not an opaque token)."""
+    parts = [part for part in _NAME_SEP_RE.split(token) if part]
+    return len(parts) >= 2 and all(_NAME_PART_RE.fullmatch(part) for part in parts)
+
+
 def _mask_long_token(match: re.Match[str]) -> str:
-    """Mask an opaque run unless it is an id or a hex hash."""
+    """Mask an opaque run unless it is an id, a hex hash or a name."""
     token = match.group(0)
-    return token if _KEEP_TOKEN_RE.fullmatch(token) else MASK
+    if _KEEP_TOKEN_RE.fullmatch(token) or _is_name(token):
+        return token
+    return MASK
 
 
 def redact_text(text: object) -> str:
@@ -431,9 +578,11 @@ def redact_text(text: object) -> str:
 
     Covers PEM blocks, URL credentials, Authorization schemes, UCI lines
     (``option key '…'``), ``uci show`` / ``name=value`` / ``name: value`` /
-    JSON pairs and ``--flag value`` with a secret name, crypt hashes, base64
-    32-byte keys, 32-hex session tokens and other opaque runs of 32+
-    characters. ``<prefix>_<32 hex>`` ids and hex hashes are kept.
+    JSON pairs and ``--flag value`` with a secret name (value to the closing
+    quote or the end of the line), crypt hashes, base64 32-byte keys, 32-hex
+    session tokens and other opaque runs of 32+ characters.
+    ``<prefix>_<32 hex>`` ids, hex hashes and word-built names (archive
+    paths, hostnames) are kept.
     """
     if not isinstance(text, str):
         text = str(text)
@@ -444,7 +593,7 @@ def redact_text(text: object) -> str:
     text = _AUTH_SCHEME_RE.sub(rf"\1 {MASK}", text)
     text = _mask_after_heads(text, _UCI_HEAD_RE, _LINE_VALUE_RE)
     text = _mask_after_heads(text, _ASSIGN_HEAD_RE, _VALUE_RE)
-    text = _mask_after_heads(text, _FLAG_HEAD_RE, _LINE_VALUE_RE)
+    text = _mask_after_heads(text, _FLAG_HEAD_RE, _VALUE_RE)
     text = _CRYPT_RE.sub(MASK, text)
     text = _WG_KEY_RE.sub(MASK, text)
     text = _HEX32_RE.sub(MASK, text)
