@@ -153,6 +153,21 @@ fehlend, alt, kaputt, nicht erreichbar, Schreiben blockiert). Seit der Prüfung 
 2026-11-18 vergleicht der Test beide Varianten mit wörtlichen Erwartungen aus 1.43
 (Pfad, Prüfsumme der v8-Bytes, SSH-Befehl und Timeout), nicht nur miteinander.
 
+**Behalten, aber sichtbar (Review PR #55, Punkt 5):** Still behalten wird eine gestufte
+ACL nur, wenn sie alle Basis-Leserechte gewährt (`rights_from_acl(acl) >=
+_base_read_rights()`). Fehlen welche, bleibt sie trotzdem unangetastet (nur ein
+freigegebenes Angebot ändert sie), aber `ensure_acl_outcome` schreibt eine Warnung ins Log
+und meldet die fehlenden Rechte in `AclEnsureOutcome.missing_base_rights`
+(`missing_base_read_rights(acl)`, sortierte `describe()`-Texte). Das Setup öffnet daraus
+den Reparaturhinweis `acl_base_rights_missing_<entry_id>` (Warnung, nicht persistent,
+Texte de/en, Platzhalter `router`, `count`, `rights`, `path`; ohne `config_entry_id`,
+damit er unter HA 2026.2.3 läuft). Er verschwindet beim nächsten Setup mit vollständigen
+Rechten und beim Entladen; ist die ACL nicht lesbar (Ergebnis unbekannt), bleibt er
+unverändert. Auf diesem Pfad wird der Text mit `parse_acl_text` gelesen, also gelten
+`MAX_ACL_TEXT_BYTES` und `MAX_ACL_NESTING_DEPTH`: zu groß oder zu tief = `corrupted`, es
+wird v8 eingespielt (wie bei kaputtem JSON). Der Pfad ohne Angebot (reines v8) ist
+unverändert, der wörtliche Aufruf-Test von oben läuft unverändert durch.
+
 Im Config-Flow nennt der Fehler den Grund, wenn nichts geschrieben wurde:
 `acl_tiered_kept` (gestufte ACL behalten), `acl_check_transient` (ACL nicht lesbar,
 nichts geändert), sonst wie bisher `acl_already_current`.

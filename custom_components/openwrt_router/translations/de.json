@@ -292,6 +292,10 @@
     }
   },
   "issues": {
+    "acl_base_rights_missing": {
+      "title": "Behaltene rpcd-ACL von {router}: Leserechte fehlen",
+      "description": "Die rpcd-ACL auf dem Router {router} ist eine gestufte ACL, die ein Admin freigegeben hat. Home Assistant behält sie deshalb und überschreibt sie nicht. Ihr fehlen {count} Leserecht(e), die die Integration braucht:\n\n{rights}\n\nSensoren, die sie nutzen, bleiben eventuell nicht verfügbar oder weichen auf SSH aus. Abhilfe: eine aktuelle gestufte ACL über ein freigegebenes ACL-Angebot einspielen, oder `{path}` auf dem Router löschen: Die Integration spielt dann beim nächsten Start ihre Standard-ACL ein (die optionalen Stufen fehlen, bis sie wieder freigegeben werden).\n\nDiese Meldung verschwindet, sobald die eingespielte ACL diese Rechte wieder gewährt."
+    },
     "channel_plan_conflict": {
       "title": "WLAN-Kanalkonflikte zwischen OpenWrt-Routern",
       "description": "Zwischen deinen OpenWrt-Routern gibt es {count} Kanalkonflikt(e):\n\n{findings}\n\n- `same_channel`: Zwei Funkmodule nutzen denselben Hauptkanal und müssen sich die Sendezeit teilen.\n- `overlap`: Die Kanalbreiten überlappen, z. B. 40 MHz auf 44 und 48 oder 160 MHz auf 36, das 36–64 belegt.\n- `non_standard_24`: Ein 2,4-GHz-Funkmodul liegt nicht auf Kanal 1, 6 oder 11 und überlappt mit den Nachbarn.\n\nStelle benachbarte Access Points in den WLAN-Einstellungen auf unterschiedliche, nicht überlappende Kanäle oder schmalere Kanalbreiten. DFS-Kanäle sind kein Konflikt; sie stehen im Diagnosesensor „Kanalplan-Befunde“ des jeweiligen Routers.\n\nDieser Hinweis verschwindet automatisch, sobald die Konflikte behoben sind."

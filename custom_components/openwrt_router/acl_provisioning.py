@@ -173,13 +173,16 @@ class AclEnsureOutcome:
     nothing written), or the redeploy reason ``missing`` / ``outdated`` /
     ``corrupted`` / ``unverifiable`` with ``written`` True.
     ``deployed`` is the parsed file content after the run when known
-    (``known``), else None.
+    (``known``), else None. ``missing_base_rights``: only for
+    ``tiered_kept``, the base read rights the kept ACL does not grant
+    (sorted :meth:`AclRight.describe` strings; empty = complete).
     """
 
     written: bool
     reason: str
     known: bool
     deployed: Any = None
+    missing_base_rights: tuple[str, ...] = ()
 
 
 async def ensure_acl(api: OpenWrtAPI) -> bool:
@@ -219,6 +222,12 @@ async def ensure_acl_outcome(
     alone instead of being replaced with v8. That decision uses the content
     of the same read, so it adds no router call: with no tiered ACL on the
     router the calls and bytes are exactly those of :func:`ensure_acl`.
+    On this path the text is parsed with :func:`parse_acl_text` (size and
+    nesting limits; a refused text counts as ``corrupted`` and v8 is
+    deployed, as for invalid JSON). A tiered ACL that lacks base read
+    rights is still kept (only an approved offer changes it), but logged
+    as a warning and reported in ``missing_base_rights`` (setup turns that
+    into a repair issue).
     """
     # Read the currently deployed ACL and decide whether a (re)deploy is needed.
     # file/read returns {"data": "<content>"} on success and raises
@@ -229,7 +238,14 @@ async def ensure_acl_outcome(
         current = await api._call("file", "read", {"path": ACL_FILE_PATH})
         current_str = current.get("data") if isinstance(current, dict) else current
         try:
-            parsed = json.loads(current_str) if isinstance(current_str, str) else None
+            if respect_offer:
+                parsed, why = parse_acl_text(current_str)
+                if why is not None and why != "missing":
+                    raise ValueError(f"deployed ACL refused: {why}")
+            else:
+                parsed = (
+                    json.loads(current_str) if isinstance(current_str, str) else None
+                )
             if isinstance(current_str, str) and parsed == RPCD_ACL_CONTENT:
                 _LOGGER.debug(
                     "rpcd ACL on %s is up to date (v%s) — nothing to do",
@@ -238,13 +254,26 @@ async def ensure_acl_outcome(
                 )
                 return AclEnsureOutcome(False, "current", True, parsed)
             if respect_offer and parse_tiered_acl(parsed) is not None:
-                _LOGGER.debug(
-                    "Tiered ACL on %s (%s) — left alone, changes only via an "
-                    "approved offer",
-                    api._host,
-                    classify_deployed_acl(parsed).value,
+                missing = missing_base_read_rights(parsed)
+                if missing:
+                    _LOGGER.warning(
+                        "Tiered ACL on %s lacks %d base read right(s) the "
+                        "integration needs (%s) — kept as approved, not "
+                        "overwritten; see the repair issue",
+                        api._host,
+                        len(missing),
+                        ", ".join(missing[:5]) + (", ..." if len(missing) > 5 else ""),
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Tiered ACL on %s (%s) — left alone, changes only via "
+                        "an approved offer",
+                        api._host,
+                        classify_deployed_acl(parsed).value,
+                    )
+                return AclEnsureOutcome(
+                    False, "tiered_kept", True, parsed, missing_base_rights=missing
                 )
-                return AclEnsureOutcome(False, "tiered_kept", True, parsed)
             reason = "outdated"  # content differs from what this version expects
         except (ValueError, TypeError, RecursionError):
             # present but not valid JSON (RecursionError: hostile nesting,
@@ -886,6 +915,13 @@ _TXPOWERLIST_RIGHT: Final = AclRight("read", "ubus", "iwinfo", "txpowerlist")
 
 def _base_read_rights() -> frozenset[AclRight]:
     return (rights_from_acl(RPCD_ACL_CONTENT) - {_SCAN_RIGHT}) | {_TXPOWERLIST_RIGHT}
+
+
+def missing_base_read_rights(acl: Any) -> tuple[str, ...]:
+    """Base read rights ``acl`` does not grant (sorted describe() strings)."""
+    return tuple(
+        sorted(r.describe() for r in _base_read_rights() - rights_from_acl(acl))
+    )
 
 
 def _default_tiers() -> tuple[AclTier, ...]:

@@ -647,14 +647,17 @@ class TestOutageTrackerWiring:
         assert tracker.register.call_args.args[:2] == ("test_entry_id", "OpenWrt-Test")
         mock_coordinator.attach_outage_tracker.assert_called_once_with(tracker)
         # The unload callbacks unregister exactly this entry and drop its
-        # RAM pressure issue.
+        # RAM pressure issue and its ACL base-rights issue (PR #55 point 5).
         with patch("custom_components.openwrt_router.issues.ir") as mock_ir:
             for call in entry.async_on_unload.call_args_list:
                 call.args[0]()
         tracker.unregister.assert_called_once_with("test_entry_id")
-        mock_ir.async_delete_issue.assert_called_once_with(
-            hass, "openwrt_router", "ram_high_test_entry_id"
-        )
+        assert sorted(
+            c.args for c in mock_ir.async_delete_issue.call_args_list
+        ) == [
+            (hass, "openwrt_router", "acl_base_rights_missing_test_entry_id"),
+            (hass, "openwrt_router", "ram_high_test_entry_id"),
+        ]
 
 
 class TestChannelPlanWiring:

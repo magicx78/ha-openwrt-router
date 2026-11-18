@@ -52,7 +52,12 @@ from .fleet import (
     async_get_outage_tracker,
     usteer_node_info,
 )
-from .issues import async_clear_issue, ram_high_issue_id
+from .issues import (
+    acl_base_rights_issue_id,
+    async_clear_issue,
+    async_sync_acl_base_rights_issue,
+    ram_high_issue_id,
+)
 from .net_engine import (
     async_get_net_intelligence,
     async_remove_router_data,
@@ -277,6 +282,36 @@ def _core_note_acl(hass: HomeAssistant, entry: ConfigEntry, outcome: Any) -> Non
         )
 
 
+def _sync_acl_base_rights_issue(
+    hass: HomeAssistant, entry: ConfigEntry, outcome: Any
+) -> None:
+    """Repair issue for a kept tiered ACL that lacks base read rights.
+
+    Opened when ensure kept such an ACL, cleared when the deployed ACL is
+    complete again and on unload; unknown (ensure failed) changes nothing.
+    Never raises (logged).
+    """
+    issue_id = acl_base_rights_issue_id(entry.entry_id)
+    entry.async_on_unload(partial(async_clear_issue, hass, issue_id))
+    try:
+        from .acl_provisioning import ACL_FILE_PATH
+
+        known = outcome is not None and getattr(outcome, "known", False)
+        async_sync_acl_base_rights_issue(
+            hass,
+            entry.entry_id,
+            entry.title,
+            tuple(outcome.missing_base_rights) if known else None,
+            ACL_FILE_PATH,
+        )
+    except Exception:
+        _LOGGER.warning(
+            "Repair issue for the ACL of '%s' could not be updated",
+            entry.title,
+            exc_info=True,
+        )
+
+
 def _stagger_offset(entry_ids: list[str], entry_id: str, interval: int) -> int:
     """Return the poll offset of ``entry_id`` within ``interval`` seconds.
 
@@ -386,7 +421,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     except Exception:
         acl_deployed = False
         _LOGGER.debug("rpcd ACL provisioning skipped for %s", host, exc_info=True)
-    _core_note_acl(hass, entry, acl_outcomes[0] if acl_outcomes else None)
+    acl_outcome = acl_outcomes[0] if acl_outcomes else None
+    _core_note_acl(hass, entry, acl_outcome)
+    _sync_acl_base_rights_issue(hass, entry, acl_outcome)
 
     if acl_deployed:
         _LOGGER.info("rpcd ACL on %s was deployed/updated", host)

@@ -292,6 +292,10 @@
     }
   },
   "issues": {
+    "acl_base_rights_missing": {
+      "title": "Kept rpcd ACL of {router} lacks read rights",
+      "description": "The rpcd ACL on router {router} is a tiered ACL that an admin approved, so Home Assistant keeps it and does not overwrite it. It lacks {count} read right(s) the integration needs:\n\n{rights}\n\nSensors that use them may stay unavailable or fall back to SSH. To fix it, deploy a current tiered ACL through an approved ACL offer, or remove `{path}` on the router: the integration then deploys its standard ACL at the next start (the optional tiers are gone until they are approved again).\n\nThis message disappears once the deployed ACL grants these rights again."
+    },
     "channel_plan_conflict": {
       "title": "Wi-Fi channel conflicts between OpenWrt routers",
       "description": "{count} channel conflict(s) were found across your OpenWrt routers:\n\n{findings}\n\n- `same_channel`: two radios use the same primary channel and have to share airtime.\n- `overlap`: the channel widths overlap, for example 40 MHz on 44 and 48, or 160 MHz on 36, which covers 36–64.\n- `non_standard_24`: a 2.4 GHz radio is not on channel 1, 6 or 11 and overlaps with its neighbours.\n\nGive neighbouring access points different, non-overlapping channels or narrower channel widths in their wireless settings. DFS channels are not a conflict; they are listed in the diagnostic sensor \"Channel plan findings\" of each router.\n\nThis message disappears automatically once the conflicts are gone."
