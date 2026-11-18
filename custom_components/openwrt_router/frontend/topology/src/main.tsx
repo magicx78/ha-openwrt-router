@@ -272,7 +272,8 @@ if (rootEl) {
   shadow.appendChild(devContainer);
   // DEV/MOCK ONLY — placeholder module so the Enterprise sub-tab bar can be
   // seen; never registered in the HA panel build path.
-  registerEnterpriseTab({
+  // ?nomock starts the page without it (production-like: no Enterprise entry).
+  if (!new URLSearchParams(location.search).has('nomock')) registerEnterpriseTab({
     id: 'dev-mock', title: 'Mock-Modul (nur Dev)', order: 999,
     component: () => <div className="view-empty">Mock-Inhalt — nur im Dev-Modus.</div>,
   });
