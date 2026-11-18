@@ -392,6 +392,11 @@ class AuditLog:
         cooldown: timedelta | None = None,
         now: datetime | None = None,
         security_relevant: bool = False,
+        client_ref: str | None = None,
+        confidence: float | None = None,
+        classification: str | None = None,
+        incident_ref: str | None = None,
+        radio_id: str | None = None,
     ) -> EmitResult:
         """Record one event; publish it unless it repeats a scope in cooldown.
 
@@ -400,7 +405,9 @@ class AuditLog:
         (default ``FAILURE_EVENT_COOLDOWN``). Raises ValueError for a core
         type from a module or a module type below no registered prefix.
         ``security_relevant`` puts the event on the security ring; a type
-        registered as audit-mandatory is never deduplicated.
+        registered as audit-mandatory is never deduplicated. ``client_ref``,
+        ``confidence``, ``classification``, ``incident_ref`` and ``radio_id``
+        are the typed optional fields of ``CoreEvent`` (B8).
         """
         event_type = str(event_type)
         self._check_type(event_type, source)
@@ -423,6 +430,11 @@ class AuditLog:
             data=mask_for_output(dict(data or {})),
             security_relevant=security_relevant,
             audit_mandatory=self._mandatory.get(event_type) == source,
+            client_ref=client_ref,
+            confidence=confidence,
+            classification=classification,
+            incident_ref=incident_ref,
+            radio_id=radio_id,
         )
         if security_relevant and source != CORE_SOURCE:
             self.stats["security_relevant_module_events"] += 1

@@ -25,6 +25,9 @@ All notable changes to the OpenWrt Router integration will be documented in this
   keine Freigabe, Audit im allgemeinen Ring, optional mit Ratenlimit je Router
   (`rate_limited` mit `retry_after`). Module können ein sensibles Lesen als
   Admin-pflichtig für Benutzer registrieren (`sensitive_read=True`).
+- Enterprise Core: Core-Events haben fünf optionale Felder für Module:
+  `client_ref` (nur als Pseudonym `cli_…`), `confidence`, `classification`,
+  `incident_ref`, `radio_id`.
 
 ### Changed
 

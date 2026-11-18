@@ -1193,10 +1193,22 @@ aus dem Installations-Schlüssel mit HKDF-SHA256 (RFC 5869, nur `hmac`/`hashlib`
 | `data` | `Mapping` | **nur IDs und Zähler, nie Konfigurationswerte**; schreibgeschützt, bei Ausgabe zusätzlich maskiert |
 | `security_relevant` | `bool` (Standard `False`) | ab B3: vom Modul gesetzt (`emit(..., security_relevant=True)`) ⇒ Sicherheitsring |
 | `audit_mandatory` | `bool` (Standard `False`) | ab B3: vom Audit-Log gesetzt, wenn das Modul den Typ als audit-pflichtig registriert hat ⇒ kein Dedup |
+| `client_ref` | `str \| None` | ab B8: Client als Pseudonym `cli_<16 hex>` (`CLIENT_REF_PATTERN`, aus `pseudonymise_identifier("client", …)` mit dem Modul-Schlüssel); eine rohe MAC oder ein anderes Pseudonym ⇒ `ValueError` |
+| `confidence` | `float \| None` | ab B8: Sicherheit eines Befunds, endlich, 0..1 (`int` wird `float`; `bool`, Text ⇒ Fehler) |
+| `classification` | `str \| None` | ab B8: Maschinencode des Befunds, `EVENT_CLASSIFICATION_PATTERN` = `[a-z0-9][a-z0-9_.:-]{0,63}` (z. B. `port_scan`, `rogue_ap.suspected`) |
+| `incident_ref` | `str \| None` | ab B8: Kennung eines Incidents des Moduls (`check_token`: 1–128 Zeichen `[A-Za-z0-9._:@-]`, kein `..`) |
+| `radio_id` | `str \| None` | ab B8: Funkschnittstelle, z. B. `radio1` (`check_token`) |
 | `dedup_scope` | Eigenschaft | `(router_id or "-", type, dedup_key)` oder `None` |
 | `audit_ring` | Eigenschaft | `general` / `security` |
 
 `EmitResult(event, published, deduplicated)` ist die Rückgabe von `emit`.
+
+Die B8-Felder (`EVENT_REF_FIELDS`) setzt ein Modul über `emit(..., client_ref=…,
+confidence=…, classification=…, incident_ref=…, radio_id=…)` (Audit-Log und API). Alle
+Standard `None`; sie stehen in `to_dict()`/`from_dict()`, im Store und im Bus-Payload, sind
+**nicht** Teil des Dedup-Bereichs und werden nicht maskiert (sie nehmen nur Pseudonyme und
+Codes an). Alte Einträge lesen sich unverändert; ein älterer Core ignoriert die neuen
+Schlüssel (`from_dict` liest nur benannte Schlüssel), daher keine Store-Version.
 
 Bus-Event `EVENT_CORE = "openwrt_router_core_event"` mit `CoreEvent.to_dict()`; bewusst
 getrennt von `EVENT_INCIDENT`, `net_rules` bleibt unverändert. Das Event landet im Recorder
@@ -1807,6 +1819,7 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 | 104 | Fehler (B6, §14): `RateLimitedError` (`code` `rate_limited`, `ErrorClass.RATE_LIMITED`, immer retryable, `retry_after`) und `SafetyRefusedError` (`code` `safety_refused`, `ErrorClass.SAFETY_REFUSED`, nie retryable, `reason`); `NON_PERSISTED_ERROR_CLASSES`, `SAFETY_REASON_PATTERN`. Beide Klassen sind Aufruf-Klassen: `VersionMeta`/`BackupRecord` lehnen sie ab, `version_error_class` bildet sie auf `busy`/`denied` ab, keine Metadaten-Version. Ein Provider, der eine davon als `error_class` eines Datensatzes setzen wollte, bekommt `ValueError` (vorher gab es die Werte nicht). | A |
 | 105 | Guard (B5, §6.3, §12.3): `ActionClass.ACTIVE` ("aktiv, nicht ändernd"; nicht persistiert), Politik wie `mutating`, keine Freigabe, Erteilung als `core.active_action_granted` auf dem allgemeinen Ring (audit-pflichtig), Ablehnung wie bisher auf dem Sicherheitsring. `register_action(..., sensitive_read=False, rate_limit=None)` (Guard und `api.guard`); `RateLimit(max_calls, per)`, `RATE_LIMIT_MAX_CALLS`, `RATE_LIMIT_MAX_PERIOD`; Ablehnung `rate_limited` mit `AuthorizationDecision.retry_after` (neues optionales Feld, auch in `to_dict`), `core.action_rate_limited` (allgemeiner Ring, dedupliziert je Fenster), `error_for_decision` ⇒ `RateLimitedError`; `REASON_RATE_LIMITED`, `MAX_RATE_WINDOWS`. `policy_denial_reason(..., sensitive_reads=frozenset())`. Zähler `active_granted`, `rate_limited`, `rate_windows_dropped`. B6 kam vor B5, weil das Limit `RateLimitedError` braucht. | A |
 | 106 | Vertrag an Code angeglichen (B7): §6.3 beschreibt, dass `authorize` auch für `read` eine `WriteAuthorization` prägt und `security.authorization_granted` auditiert (die Core-Lesewege rufen `authorize` nicht auf); §17/§17.1 Modulnamen `security_center`/`net_diagnostics` und „ein Detektor, ein Präfix“ (`diag.` **oder** `log.`); §5 nennt `rf.` als reservierten Namensraum; neue Tabelle §3.1 (alle reservierten Präfixe, per Test vollständig); neuer §4.1. Code: `FLEET_ROUTER_ID` jetzt in `core_models` (`core_guard.FLEET_ROUTER_ID` bleibt, derselbe Wert), `is_fleet_router_id`; `registry.get("-")` ergänzt `details.fleet = true` (Grund unverändert `invalid_router_id`). | A |
+| 107 | `CoreEvent` (B8, §12.1): neue optionale Felder `client_ref` (`cli_<16 hex>`, `CLIENT_REF_PATTERN`), `confidence` (0..1, `float`), `classification` (`EVENT_CLASSIFICATION_PATTERN`), `incident_ref`, `radio_id` (`check_token`); `EVENT_REF_FIELDS`; `emit(...)` (Audit-Log, API, Protokoll) nimmt sie als Schlüsselwortargumente. Standard `None`, in `to_dict`/`from_dict`, nicht im Dedup-Bereich, keine Store-Version. Bus-Payload hat fünf neue Schlüssel. | A |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 

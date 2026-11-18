@@ -2996,10 +2996,16 @@ class ConfigurationApi:
         dedup_key: str | None = None,
         data: Mapping[str, Any] | None = None,
         security_relevant: bool = False,
+        client_ref: str | None = None,
+        confidence: float | None = None,
+        classification: str | None = None,
+        incident_ref: str | None = None,
+        radio_id: str | None = None,
     ) -> EmitResult:
         """Module event (never as the core, never a core type).
 
-        ``security_relevant`` puts it on the security ring (default general).
+        ``security_relevant`` puts it on the security ring (default general);
+        the typed optional fields (B8) are stored on the ``CoreEvent``.
         """
         if source == CORE_SOURCE:
             raise ValueError("modules cannot emit as the core")
@@ -3015,6 +3021,11 @@ class ConfigurationApi:
             dedup_key=dedup_key,
             data=data,
             security_relevant=security_relevant,
+            client_ref=client_ref,
+            confidence=confidence,
+            classification=classification,
+            incident_ref=incident_ref,
+            radio_id=radio_id,
         )
 
 

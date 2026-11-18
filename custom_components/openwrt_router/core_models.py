@@ -61,7 +61,14 @@ from .core_errors import (
     UnsupportedStorageFormatError,
     VersionProtectedError,
 )
-from .core_masking import is_secret_option, mask_secrets, mask_value, scrub_text
+from .core_masking import (
+    IDENTIFIER_PSEUDONYM_HEX_LENGTH,
+    IDENTIFIER_PSEUDONYM_PREFIXES,
+    is_secret_option,
+    mask_secrets,
+    mask_value,
+    scrub_text,
+)
 from .mac_utils import is_mac
 from .net_events import Severity
 
@@ -4154,6 +4161,49 @@ class AuthorizationDecision:
 # ---------------------------------------------------------------------------
 
 
+# Follow-up B8: typed optional event fields for modules.
+EVENT_CLASSIFICATION_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9_.:-]{0,63}")
+CLIENT_REF_PATTERN: Final = re.compile(
+    re.escape(IDENTIFIER_PSEUDONYM_PREFIXES["client"])
+    + rf"[0-9a-f]{{{IDENTIFIER_PSEUDONYM_HEX_LENGTH}}}"
+)
+EVENT_REF_FIELDS: Final = (
+    "client_ref",
+    "confidence",
+    "classification",
+    "incident_ref",
+    "radio_id",
+)
+
+
+def _check_event_refs(event: CoreEvent) -> None:
+    """Validate the B8 fields; ``confidence`` is stored as float."""
+    client_ref = event.client_ref
+    if client_ref is not None:
+        if not isinstance(client_ref, str):
+            raise TypeError("client_ref must be a string")
+        if CLIENT_REF_PATTERN.fullmatch(client_ref) is None:
+            raise ValueError(
+                "client_ref must be a client pseudonym cli_<16 hex> "
+                "(pseudonymise_identifier('client', ...)), never a raw identifier"
+            )
+    confidence = event.confidence
+    if confidence is not None:
+        if isinstance(confidence, bool) or not isinstance(confidence, int | float):
+            raise TypeError("confidence must be a number")
+        if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+            raise ValueError("confidence must be between 0 and 1")
+        _set(event, "confidence", float(confidence))
+    classification = event.classification
+    if classification is not None:
+        if not isinstance(classification, str):
+            raise TypeError("classification must be a string")
+        if EVENT_CLASSIFICATION_PATTERN.fullmatch(classification) is None:
+            raise ValueError("classification must match EVENT_CLASSIFICATION_PATTERN")
+    check_token("incident_ref", event.incident_ref, optional=True)
+    check_token("radio_id", event.radio_id, optional=True)
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class CoreEvent:
     """One audit / bus event.
@@ -4173,6 +4223,11 @@ class CoreEvent:
     security ring; ``audit_mandatory`` (set by the audit log for a type a
     module registered as mandatory) disables dedup. Both default False, so
     entries stored before them read unchanged.
+
+    B8 fields (all optional, default None, never part of the dedup scope):
+    ``client_ref`` (``cli_<16 hex>`` pseudonym), ``confidence`` (0..1),
+    ``classification`` (machine code), ``incident_ref``, ``radio_id``
+    (tokens). They are not masked: only pseudonyms and codes fit them.
     """
 
     event_id: str
@@ -4191,9 +4246,15 @@ class CoreEvent:
     data: Mapping[str, Any] = field(default_factory=dict)
     security_relevant: bool = False
     audit_mandatory: bool = False
+    client_ref: str | None = None
+    confidence: float | None = None
+    classification: str | None = None
+    incident_ref: str | None = None
+    radio_id: str | None = None
 
     def __post_init__(self) -> None:
         """Coerce, validate and freeze."""
+        _check_event_refs(self)
         if not isinstance(self.type, str) or not self.type:
             raise ValueError("event type must be a non-empty string")
         for flag in ("security_relevant", "audit_mandatory"):
@@ -4244,6 +4305,11 @@ class CoreEvent:
             "data": mask_secrets(_thaw(self.data)),
             "security_relevant": self.security_relevant,
             "audit_mandatory": self.audit_mandatory,
+            "client_ref": self.client_ref,
+            "confidence": self.confidence,
+            "classification": self.classification,
+            "incident_ref": self.incident_ref,
+            "radio_id": self.radio_id,
         }
 
     @classmethod
@@ -4280,6 +4346,11 @@ class CoreEvent:
             data=payload or {},
             security_relevant=data.get("security_relevant", False),
             audit_mandatory=data.get("audit_mandatory", False),
+            client_ref=data.get("client_ref"),
+            confidence=data.get("confidence"),
+            classification=data.get("classification"),
+            incident_ref=data.get("incident_ref"),
+            radio_id=data.get("radio_id"),
         )
 
 
@@ -4815,6 +4886,11 @@ class ConfigurationApiProtocol(Protocol):
         dedup_key: str | None = None,
         data: Mapping[str, Any] | None = None,
         security_relevant: bool = False,
+        client_ref: str | None = None,
+        confidence: float | None = None,
+        classification: str | None = None,
+        incident_ref: str | None = None,
+        radio_id: str | None = None,
     ) -> EmitResult:
         """Write an audit entry and fire EVENT_CORE unless deduplicated.
 
