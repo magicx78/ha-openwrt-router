@@ -46,8 +46,14 @@ can still be folded in.
 
 Windows (:data:`WINDOWS`): 1 h, 24 h and 7 d come from hour buckets, 30 d from
 day buckets plus the hours not folded yet. A bucket belongs to a window when
-its start lies in ``[now - window, now]``, so a window never reports data
-older than its length (it may hold up to one bucket span less).
+it overlaps ``[now - window, now]``; the window start is thereby extended to
+the border of the bucket holding ``now - window``. So the 1 h window spans
+between 1 and 2 hours of buckets (right after a full hour it still holds the
+previous hour instead of a nearly empty one), 24 h up to 25 hours, 30 d up to
+31 days. With the probe interval given, ``expected`` is the number of probes
+planned in that extended span (``ceil(span / interval) * probes_per_round``,
+counted from ``since`` when monitoring started later), so missing rounds
+lower coverage.
 
 Retention: :func:`prune_history` keeps hour buckets 7 days and day buckets 30
 days by default. Fold an hour before it is pruned.
@@ -97,6 +103,8 @@ HOUR_S = 3600.0
 DAY_S = 86400.0
 HOUR_RETENTION_S = 7 * DAY_S
 DAY_RETENTION_S = 30 * DAY_S
+
+_EPS = 1e-9
 
 WINDOWS: Mapping[str, float] = {
     "1h": HOUR_S,
@@ -403,6 +411,33 @@ class Bucket:
             self.start <= _check_ts(self.last_ts) < self.end
         ):
             raise ValueError("last_ts outside the bucket")
+        self._check_consistency()
+
+    def _check_consistency(self) -> None:
+        """Counters and rtt fields must describe one possible sample set."""
+        if (self.last_ts is None) != (self.answered + self.lost + self.gaps == 0):
+            raise ValueError("last_ts must be set exactly when samples exist")
+        if self.outliers > self.answered:
+            raise ValueError("more outliers than answers")
+        if self.tail_lost and self.lost == 0:
+            raise ValueError("newest probe lost, but no probe was lost")
+        n = self.answered
+        if n == 0:
+            if self.rtt_sum != 0 or self.diff_sum != 0:
+                raise ValueError("rtt sums without answers")
+            return
+        lo, hi = self.rtt_min, self.rtt_max
+        if not _le(lo, hi):  # type: ignore[arg-type]
+            raise ValueError("rtt_min above rtt_max")
+        if n == 1 and lo != hi:
+            raise ValueError("one answer, but min and max differ")
+        for value in (self.first_rtt, self.last_rtt):
+            if not (_le(lo, value) and _le(value, hi)):  # type: ignore[arg-type]
+                raise ValueError("first/last rtt outside min..max")
+        if not (_le(n * lo, self.rtt_sum) and _le(self.rtt_sum, n * hi)):  # type: ignore[operator]
+            raise ValueError("rtt_sum outside n * min .. n * max")
+        if not _le(self.diff_sum, (n - 1) * (hi - lo)):  # type: ignore[operator]
+            raise ValueError("diff_sum above (n - 1) * (max - min)")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe plain dict."""
@@ -421,6 +456,11 @@ class Bucket:
             return cls(**{name: data[name] for name in cls.__dataclass_fields__})
         except (KeyError, TypeError) as err:
             raise ValueError(f"damaged bucket: {err}") from err
+
+
+def _le(a: float, b: float) -> bool:
+    """``a <= b`` with a relative tolerance for float sums."""
+    return a <= b + _EPS * max(1.0, abs(a), abs(b))
 
 
 def empty_bucket(start: float, span: float) -> Bucket:
@@ -590,9 +630,32 @@ def fold_into_days(
 def window_bucket(
     buckets: Iterable[Bucket], *, now: float, window_s: float
 ) -> Bucket | None:
-    """Merge of the buckets whose start lies in ``[now - window_s, now]``."""
+    """Merge of the buckets overlapping ``[now - window_s, now]``."""
     lo = now - window_s
-    return merge_all(b for b in buckets if lo <= b.start <= now)
+    return merge_all(b for b in buckets if b.end > lo and b.start <= now)
+
+
+def window_expected(
+    *,
+    now: float,
+    window_s: float,
+    span: float,
+    interval_s: float,
+    probes_per_round: int = 1,
+    since: float | None = None,
+) -> int:
+    """Probes planned in a window extended to its bucket border (module doc)."""
+    if not math.isfinite(interval_s) or interval_s <= 0:
+        raise ValueError("interval must be positive")
+    if isinstance(probes_per_round, bool) or not isinstance(probes_per_round, int):
+        raise TypeError("probes_per_round must be an integer")
+    if probes_per_round < 1:
+        raise ValueError("probes_per_round must be at least 1")
+    start = align(now - window_s, span)
+    if since is not None:
+        start = max(start, _check_ts(since))
+    covered = max(0.0, now - start)
+    return math.ceil(covered / interval_s) * probes_per_round
 
 
 def _not_folded(hours: Iterable[Bucket], days: Sequence[Bucket]) -> list[Bucket]:
@@ -604,20 +667,40 @@ def window_summaries(
     days: Iterable[Bucket],
     *,
     now: float,
+    interval_s: float | None = None,
+    probes_per_round: int = 1,
+    since: float | None = None,
     hour_retention_s: float = HOUR_RETENTION_S,
 ) -> dict[str, LatencySummary]:
     """Summaries for every window of :data:`WINDOWS`.
 
     Windows up to ``hour_retention_s`` use hour buckets; longer ones use day
-    buckets plus the hours no day holds yet.
+    buckets plus the hours no day holds yet. With ``interval_s`` (seconds
+    between probe rounds) coverage is measured against the planned probes of
+    the window (:func:`window_expected`); without it against the samples
+    recorded, gaps included.
     """
     hour_list = tuple(hours)
     day_list = tuple(days)
     long_parts = (*day_list, *_not_folded(hour_list, day_list))
     out: dict[str, LatencySummary] = {}
     for name, length in WINDOWS.items():
-        parts = hour_list if length <= hour_retention_s else long_parts
-        out[name] = bucket_summary(window_bucket(parts, now=now, window_s=length))
+        short = length <= hour_retention_s
+        expected = (
+            None
+            if interval_s is None
+            else window_expected(
+                now=now,
+                window_s=length,
+                span=HOUR_S if short else DAY_S,
+                interval_s=interval_s,
+                probes_per_round=probes_per_round,
+                since=since,
+            )
+        )
+        parts = hour_list if short else long_parts
+        merged = window_bucket(parts, now=now, window_s=length)
+        out[name] = bucket_summary(merged, expected=expected)
     return out
 
 

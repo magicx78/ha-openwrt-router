@@ -7,6 +7,7 @@ plain epoch seconds chosen by the test.
 from __future__ import annotations
 
 import ast
+import math
 import random
 from pathlib import Path
 
@@ -510,8 +511,9 @@ def test_case_26_historical_aggregation() -> None:
     assert set(WINDOWS) == {"1h", "24h", "7d", "30d"}
     now = T0 + 3 * DAY_S - 1  # last second of day 3
     win = window_summaries(hours, days, now=now)
-    assert win["1h"].answered == 12  # only the last hour bucket overlaps
-    assert win["24h"].answered == 12 * 24 - 2
+    # a bucket counts when it overlaps the window: 1 s of hour 22 is inside
+    assert win["1h"].answered == 24
+    assert win["24h"].answered == 12 + (12 * 24 - 2)  # day 1 hour 23 overlaps
     assert win["7d"].answered == 3 * (12 * 24 - 2)
     assert win["30d"].answered == 3 * (12 * 24 - 2)
     assert win["7d"].mean_ms == pytest.approx(11.0)
@@ -521,7 +523,8 @@ def test_case_26_historical_aggregation() -> None:
     open_hour = bucket_samples(_hour_samples(3, 0, rtt=50.0))[0]
     win2 = window_summaries((*hours, open_hour), days, now=T0 + 3 * DAY_S + 1800)
     assert win2["30d"].answered == 3 * (12 * 24 - 2) + 12
-    assert win2["1h"].mean_ms == 50.0
+    # 1h: day 2 hour 23 (12 x 12 ms) overlaps, plus the open hour (12 x 50 ms)
+    assert win2["1h"].mean_ms == pytest.approx(31.0)
     # no data in a window is unknown, not healthy
     far = window_summaries(hours, days, now=T0 + 60 * DAY_S)
     assert far["1h"].coverage == 0.0 and far["1h"].loss_pct is None
@@ -554,3 +557,79 @@ def test_bucket_samples_counts_outliers_per_bucket() -> None:
     samples = [ans(T0 + i * R, 10.0) for i in range(11)] + [ans(T0 + 11 * R, 90.0)]
     (hour,) = bucket_samples(samples)
     assert hour.outliers == 1
+
+
+# --- review M6: windows right after a full hour, coverage from the interval ---
+
+
+def test_m6_one_hour_window_right_after_the_hour() -> None:
+    # two clean hours, then the first probe of the new hour is lost
+    samples = [ans(T0 + i * R, 10.0) for i in range(24)] + [lost(T0 + 2 * HOUR_S + 1)]
+    hours = bucket_samples(samples)
+    win = window_summaries(hours, (), now=T0 + 2 * HOUR_S + 5, interval_s=R)
+    one = win["1h"]
+    # the previous hour overlaps the window and is included: no 100 % loss
+    assert one.answered == 12 and one.lost == 1
+    assert one.loss_pct == pytest.approx(100 / 13)
+    assert one.coverage == 1.0
+
+
+def test_m6_window_coverage_follows_the_probe_interval() -> None:
+    # one probe every 5 minutes was planned, only 3 ran in the last hour
+    hours = bucket_samples([ans(T0 + HOUR_S + i * R, 10.0) for i in range(3)])
+    now = T0 + 2 * HOUR_S - 1
+    win = window_summaries(hours, (), now=now, interval_s=R)
+    # the window [now - 1 h, now] overlaps the hour bucket starting at T0 by
+    # one second, so it is extended to T0: up to 2 h of buckets, 24 rounds
+    assert win["1h"].expected == 24
+    assert win["1h"].coverage == pytest.approx(3 / 24)
+    # 24 h window: the window start is extended to its bucket border
+    assert win["24h"].expected == math.ceil((now - (T0 - 23 * HOUR_S)) / R)
+    assert win["24h"].coverage == pytest.approx(3 / win["24h"].expected)
+    # monitoring started at T0 + 1 h: earlier time is not expected
+    since = window_summaries(hours, (), now=now, interval_s=R, since=T0 + HOUR_S)
+    assert since["1h"].expected == since["24h"].expected == 12
+    assert since["7d"].coverage == pytest.approx(0.25)
+    # several probes a round
+    three = window_summaries(hours, (), now=now, interval_s=R, probes_per_round=3)
+    assert three["1h"].expected == 72
+    # nothing measured stays coverage 0, never healthy
+    empty = window_summaries((), (), now=now, interval_s=R)
+    assert empty["1h"].coverage == 0.0 and empty["1h"].expected == 24
+    with pytest.raises(ValueError):
+        window_summaries(hours, (), now=now, interval_s=0)
+    with pytest.raises(ValueError):
+        window_summaries(hours, (), now=now, interval_s=R, probes_per_round=0)
+
+
+# --- review L1: damaged bucket data is rejected -------------------------------
+
+
+def test_l1_from_dict_rejects_inconsistent_buckets() -> None:
+    good = bucket_samples([ans(T0 + 10, 5.0), ans(T0 + 20, 15.0)])[0].to_dict()
+    assert Bucket.from_dict(good).answered == 2
+    damage = (
+        {"rtt_min": 500.0, "rtt_max": 1.0},
+        {"rtt_min": 20.0},  # above the max
+        {"outliers": 3},  # more outliers than answers
+        {"tail_lost": True},  # newest probe lost, but nothing was lost
+        {"first_rtt": 900.0},  # outside min..max
+        {"last_rtt": 0.5},
+        {"rtt_sum": 1000.0},  # mean above max
+        {"rtt_sum": 1.0},  # mean below min
+        {"diff_sum": 999.0},  # more than (n - 1) * (max - min)
+        {"last_ts": None},  # samples without a newest time
+    )
+    for bad in damage:
+        with pytest.raises(ValueError):
+            Bucket.from_dict({**good, **bad})
+    single = bucket_samples([ans(T0 + 10, 5.0)])[0].to_dict()
+    with pytest.raises(ValueError):
+        Bucket.from_dict(
+            {**single, "rtt_max": 9.0, "rtt_sum": 5.0}
+        )  # one rtt, two values
+    with pytest.raises(ValueError):
+        Bucket.from_dict({**single, "diff_sum": 1.0})  # one rtt has no difference
+    empty = empty_bucket(T0, HOUR_S).to_dict()
+    with pytest.raises(ValueError):
+        Bucket.from_dict({**empty, "last_ts": T0 + 5})  # a time without samples

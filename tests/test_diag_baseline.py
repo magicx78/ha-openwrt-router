@@ -411,3 +411,109 @@ def test_bucket_metric() -> None:
     assert bucket_metric(b, METRIC_LOSS) == pytest.approx(25.0)
     with pytest.raises(ValueError):
         bucket_metric(b, "bogus")
+
+
+# --- review H4: a lasting fault is never learned --------------------------------
+
+
+def _ceiling(config: BaselineConfig, reference: float) -> float:
+    return reference + max(config.drift_rel * reference, config.drift_abs)
+
+
+def test_h4_sustained_moderate_loss_degrades() -> None:
+    cfg = LOSS_CONFIG
+    state = learned(cfg, value=0.0)
+    state, obs = feed(state, [15.0] * 300, cfg, next_ts(state))
+    assert obs[cfg.enter_rounds - 1].transition == PHASE_DEGRADED
+    assert state.phase == PHASE_DEGRADED
+    assert state.mean == 0.0 and state.reference == 0.0
+    # a few lost points (below the floor) on a clean link are no alarm
+    calm, obs = feed(learned(cfg, value=0.0), [2.0] * 50, cfg, T0 + 100 * R)
+    assert calm.phase == PHASE_NORMAL and not any(o.outlier for o in obs)
+
+
+def test_h4_band_values_are_neither_learned_nor_recovery() -> None:
+    cfg = LATENCY_CONFIG
+    state = learned()
+    enter, leave = thresholds(state, cfg)
+    band = (enter + leave) / 2
+    after, obs = feed(state, [band] * 50, cfg, next_ts(state))
+    assert (after.mean, after.dev) == (state.mean, state.dev)
+    assert after.phase == PHASE_NORMAL and not any(o.outlier for o in obs)
+    # values below exit are learned as before
+    lower, _ = feed(state, [leave - 1.0] * 5, cfg, next_ts(state))
+    assert lower.mean > state.mean
+
+
+def test_h4_latency_creep_cannot_move_the_baseline() -> None:
+    cfg = LATENCY_CONFIG
+    for share, pick in ((0.95, 0), (0.99, 1)):  # just under enter, just under exit
+        state = learned()
+        ceiling = _ceiling(cfg, 10.0)
+        for _step in range(40):
+            level = min(thresholds(state, cfg)[pick] * share, 120.0)
+            state, _ = feed(state, [level] * 30, cfg, next_ts(state))
+            assert state.mean <= ceiling + 1e-9
+        assert state.reference == pytest.approx(10.0)
+        enter, _leave = thresholds(state, cfg)
+        assert enter < 120.0
+        # the real fault still flips to degraded
+        state, obs = feed(state, [120.0] * cfg.enter_rounds, cfg, next_ts(state))
+        assert all(o.outlier for o in obs)
+        assert state.phase == PHASE_DEGRADED
+
+
+def test_h4_drift_is_judged_against_the_frozen_reference() -> None:
+    cfg = LATENCY_CONFIG
+    state = learned()
+    # the live mean may wander a little (values below exit are learned) ...
+    state, _ = feed(state, [19.0] * 200, cfg, next_ts(state))
+    assert state.mean > 14.0
+    # ... but drift is measured from the learning result, not the live mean
+    assert state.reference == pytest.approx(10.0)
+    days = [_day(d, 16.0) for d in range(cfg.drift_days)]
+    now = T0 + (cfg.drift_days - 1) * DAY_S
+    drift = detect_drift(state, days, config=cfg, now=now)
+    assert drift.threshold == pytest.approx(15.0)
+    assert drift.drifting
+
+
+def _loss_day(day: int, every: int) -> Bucket:
+    base = T0 + day * DAY_S
+    samples = [
+        Sample.lost(base + i * 60)
+        if i % every == 0
+        else Sample.answered(base + i * 60, 10.0)
+        for i in range(200)
+    ]
+    return _merged_day(samples)[0]
+
+
+def test_h4_lasting_loss_is_drift_and_only_relearn_accepts_it() -> None:
+    cfg = LOSS_CONFIG
+    state = learned(cfg, value=0.0)
+    state, _ = feed(state, [15.0] * 300, cfg, next_ts(state))
+    days = [_loss_day(d, 7) for d in range(4)]  # 29 of 200 lost = 14.5 %
+    now = T0 + 3 * DAY_S + 60
+    drift = detect_drift(state, days, config=cfg, now=now)
+    assert drift.threshold == pytest.approx(cfg.drift_abs)
+    assert drift.drifting and drift.days_above == 4
+    # only an explicit relearn makes 15 % the new normal
+    fresh, _ = feed(relearn(state), [15.0] * cfg.min_samples, cfg, next_ts(state))
+    assert fresh.phase == PHASE_NORMAL and fresh.reference == pytest.approx(15.0)
+    assert not detect_drift(fresh, days, config=cfg, now=now).drifting
+
+
+def test_h4_reference_is_set_once_per_learning() -> None:
+    cfg = LATENCY_CONFIG
+    state = new_baseline(KEY, cfg)
+    assert state.reference is None
+    state = learned()
+    ref = state.reference
+    state, _ = feed(state, [12.0] * 100, cfg, next_ts(state))
+    state, _ = feed(
+        state, [90.0] * cfg.enter_rounds + [10.0] * cfg.exit_rounds, cfg, next_ts(state)
+    )
+    state = on_restart(state, ts=next_ts(state))
+    assert state.reference == ref
+    assert relearn(state).reference is None

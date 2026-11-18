@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import itertools
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from custom_components.openwrt_router.diag_score import (
     MIN_COVERAGE,
     MIN_OBSERVATION_S,
     NETWORK_WORST_MARGIN,
+    STATUS_NO_ANSWER,
     STATUS_NOT_APPLICABLE,
     STATUS_OK,
     STATUS_UNKNOWN,
@@ -359,4 +361,87 @@ def test_segment_and_wan_use_the_same_function() -> None:
     assert wan.coverage == 1.0
     assert wan.score == pytest.approx(
         (25 * 80 + 20 * 100 + 15 * 100 + 10 * 100) / 70, abs=0.05
+    )
+
+
+# --- review H5: a dead path never scores better than a poor one ---------------
+
+
+def _context() -> dict:
+    gw = summarize([Sample.answered(T0 + i * R, 1.0) for i in range(100)])
+    dns = summarize_dns([DnsSample(T0 + i * R, DNS_NOERROR, 20.0) for i in range(100)])
+    return {
+        "gateway": gw,
+        "dns": dns,
+        "wan_availability": Reading(100.0),
+        "router_restarts": Reading(0.0),
+        "observation_seconds": 7200.0,
+    }
+
+
+def test_h5_dead_path_scores_zero_for_latency_and_jitter() -> None:
+    dead = summarize([Sample.lost(T0 + i * R) for i in range(100)])
+    result = compute_score(inputs_from_summaries(path=dead, **_context()))
+    for name in (COMP_LATENCY, COMP_JITTER):
+        c = comp(result, name)
+        assert c.status == STATUS_NO_ANSWER, name
+        assert c.score == 0.0 and c.coverage == 1.0
+    assert result.coverage == 1.0 and result.low_confidence is False
+    # (25*100 + 20*0 + 15*0 + 10*0 + 15*100 + 10*100 + 5*100) / 100
+    assert result.score == pytest.approx(55.0)
+    poor = summarize(
+        [
+            Sample.lost(T0 + i * R)
+            if i % 25 == 0
+            else Sample.answered(T0 + i * R, 300.0 + (i % 2) * 40)
+            for i in range(100)
+        ]
+    )
+    poor_score = compute_score(inputs_from_summaries(path=poor, **_context())).score
+    assert result.score < poor_score
+
+
+def test_h5_no_answer_reading() -> None:
+    assert Reading(None, coverage=0.5, no_answer=True).has_data
+    assert not Reading(None, coverage=0.0, no_answer=True).has_data
+    with pytest.raises(ValueError):
+        Reading(5.0, no_answer=True)
+    # a single answer cannot give jitter: with loss it is a failed path, not unknown
+    one = summarize([Sample.answered(T0, 30.0), Sample.lost(T0 + R)])
+    inputs = inputs_from_summaries(path=one)
+    assert inputs.jitter == Reading(None, coverage=1.0, no_answer=True)
+    assert inputs.latency == Reading(30.0, coverage=1.0)
+    # one answer and no loss is simply too little data for jitter
+    alone = inputs_from_summaries(path=summarize([Sample.answered(T0, 30.0)]))
+    assert alone.jitter is None
+    # gaps only: nothing was measured, everything stays unknown
+    gaps = inputs_from_summaries(
+        path=summarize([Sample.gap(T0 + i * R) for i in range(5)])
+    )
+    assert gaps.latency is None and gaps.jitter is None and gaps.packet_loss is None
+
+
+@pytest.mark.parametrize(
+    ("rtts", "step"),
+    [((300.0,), 1), ((30.0,), 1), ((300.0, 340.0), 2), ((30.0, 50.0), 2)],
+)
+def test_h5_worse_loss_never_raises_the_score(
+    rtts: tuple[float, ...], step: int
+) -> None:
+    """Replace answers by losses (whole rtt cycles, so mean and jitter stay)."""
+    n = 20
+    scores = []
+    for lost_n in range(0, n + 1, step):
+        samples = [
+            Sample.lost(T0 + i * R)
+            if i >= n - lost_n
+            else Sample.answered(T0 + i * R, rtts[i % len(rtts)])
+            for i in range(n)
+        ]
+        result = compute_score(
+            inputs_from_summaries(path=summarize(samples), **_context())
+        )
+        scores.append(result.score)
+    assert all(later <= earlier for earlier, later in itertools.pairwise(scores)), (
+        scores
     )

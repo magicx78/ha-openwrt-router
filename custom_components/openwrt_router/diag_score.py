@@ -33,6 +33,13 @@ Rules
   above 0 (DNS: the failure reading). Components without data are
   ``unknown``: left out of the weighted mean, they add 0 to coverage. They
   never count as perfect.
+* Measured but failed is not unknown: a reading with ``no_answer`` (probes
+  ran, none answered, so there is no rtt) scores 0 points with its coverage,
+  status ``no_answer``. :func:`inputs_from_summaries` sets it for latency
+  when no probe answered and for jitter when fewer than two answered while
+  probes were lost (one answer and no loss is just too little data: unknown).
+  So a dead path never scores better than a poor one, and more loss never
+  raises the score.
 * ``score`` = weighted mean (weights above) of the components with data,
   rounded to 0.1. ``None`` when no component has data.
 * ``coverage`` = ``sum(weight * component coverage) / sum(weight)`` over the
@@ -119,6 +126,7 @@ NETWORK_WORST_MARGIN = 25.0
 STATUS_OK = "ok"
 STATUS_UNKNOWN = "unknown"
 STATUS_NOT_APPLICABLE = "not_applicable"
+STATUS_NO_ANSWER = "no_answer"
 
 
 def piecewise(x: float, points: Points) -> float:
@@ -145,16 +153,19 @@ class Reading:
 
     value: float | None
     coverage: float = 1.0
+    no_answer: bool = False  # measured, but nothing answered: scores 0
 
     def __post_init__(self) -> None:
         if self.value is not None and not math.isfinite(self.value):
             raise ValueError("value must be finite")
         if not 0.0 <= self.coverage <= 1.0:
             raise ValueError("coverage must be in [0, 1]")
+        if self.no_answer and self.value is not None:
+            raise ValueError("a no_answer reading has no value")
 
     @property
     def has_data(self) -> bool:
-        return self.value is not None and self.coverage > 0.0
+        return (self.value is not None or self.no_answer) and self.coverage > 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +218,12 @@ def _value(reading: Reading | None) -> float | None:
     return reading.value if reading is not None else None
 
 
+def _points(reading: Reading, points: Points) -> float:
+    if reading.no_answer:
+        return 0.0
+    return piecewise(reading.value, points)  # type: ignore[arg-type]
+
+
 def _single(
     name: str, input_name: str, reading: Reading | None, points: Points
 ) -> ComponentResult:
@@ -214,8 +231,9 @@ def _single(
     weight = COMPONENT_WEIGHTS[name]
     if reading is None or not reading.has_data:
         return ComponentResult(name, weight, STATUS_UNKNOWN, None, 0.0, inputs)
-    score = piecewise(reading.value, points)  # type: ignore[arg-type]
-    return ComponentResult(name, weight, STATUS_OK, score, reading.coverage, inputs)
+    status = STATUS_NO_ANSWER if reading.no_answer else STATUS_OK
+    score = _points(reading, points)
+    return ComponentResult(name, weight, status, score, reading.coverage, inputs)
 
 
 def _dns(failure: Reading | None, response: Reading | None) -> ComponentResult:
@@ -223,9 +241,9 @@ def _dns(failure: Reading | None, response: Reading | None) -> ComponentResult:
     weight = COMPONENT_WEIGHTS[COMP_DNS]
     if failure is None or not failure.has_data:
         return ComponentResult(COMP_DNS, weight, STATUS_UNKNOWN, None, 0.0, inputs)
-    score = piecewise(failure.value, DNS_FAILURE_POINTS)  # type: ignore[arg-type]
+    score = _points(failure, DNS_FAILURE_POINTS)
     if response is not None and response.has_data:
-        score = min(score, piecewise(response.value, DNS_RESPONSE_POINTS))  # type: ignore[arg-type]
+        score = min(score, _points(response, DNS_RESPONSE_POINTS))
     return ComponentResult(COMP_DNS, weight, STATUS_OK, score, failure.coverage, inputs)
 
 
@@ -353,8 +371,12 @@ def inputs_from_summaries(
     (``100 - loss %``); ``dns`` feeds failure % and response time.
     """
 
-    def reading(value: float | None, coverage: float) -> Reading | None:
-        return Reading(value, coverage) if value is not None else None
+    def reading(
+        value: float | None, coverage: float, failed: bool = False
+    ) -> Reading | None:
+        if value is not None:
+            return Reading(value, coverage)
+        return Reading(None, coverage, no_answer=True) if failed else None
 
     gateway_pct = (
         100.0 - gateway.loss_pct
@@ -364,10 +386,22 @@ def inputs_from_summaries(
     return ScoreInputs(
         wan_availability=wan_availability,
         packet_loss=reading(path.loss_pct, path.coverage) if path else None,
-        latency=reading(path.mean_ms, path.coverage) if path else None,
-        jitter=reading(path.jitter_ms, path.coverage) if path else None,
+        latency=(
+            reading(path.mean_ms, path.coverage, path.answered == 0 and path.lost > 0)
+            if path
+            else None
+        ),
+        jitter=(
+            reading(path.jitter_ms, path.coverage, path.answered < 2 and path.lost > 0)
+            if path
+            else None
+        ),
         dns_failure=reading(dns.failure_pct, dns.coverage) if dns else None,
-        dns_response=reading(dns.mean_ms, dns.coverage) if dns else None,
+        dns_response=(
+            reading(dns.mean_ms, dns.coverage, dns.queries > 0 and dns.answered == 0)
+            if dns
+            else None
+        ),
         gateway_reachability=(
             reading(gateway_pct, gateway.coverage) if gateway is not None else None
         ),

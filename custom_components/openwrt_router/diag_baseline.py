@@ -14,7 +14,11 @@ EWMA of the absolute deviation, the RFC 6298 SRTT/RTTVAR pair::
     mean = (1 - alpha) * mean + alpha * value
 
 with ``alpha = 1/8`` and ``beta = 1/4``. The first value sets ``mean = value``
-and ``dev = value / 2``.
+and ``dev = value / 2``. When learning ends, the mean is kept as the
+``reference``; only :func:`relearn` replaces it. The live mean may never rise
+above the drift threshold of the reference
+(``reference + max(drift_rel * reference, drift_abs)``), so slow creep cannot
+drag the baseline along. It may fall freely (a link that gets better).
 
 Thresholds (relative part, absolute floor, deviation part; the largest wins)::
 
@@ -30,8 +34,10 @@ States
   verdict; every value is learned.
 * ``normal`` -- a value above ``enter`` is an outlier: counted, not learned,
   and it raises the ``above`` streak. ``enter_rounds`` consecutive outliers
-  switch to ``degraded``. Any value at or below ``enter`` ends the streak and
-  is learned.
+  switch to ``degraded``. Any value at or below ``enter`` ends the streak.
+  Only values below ``exit`` are learned; values between ``exit`` and
+  ``enter`` are neither learned nor outliers (a fault just under ``enter``
+  must not become the baseline).
 * ``degraded`` -- the baseline is frozen (``degraded_learn_factor`` 0.0; a
   value between 0 and 1 learns with ``alpha * factor`` and ``beta * factor``
   instead) so the fault is never learned. ``exit_rounds`` consecutive values
@@ -41,14 +47,19 @@ A round without a value (``None``: gap, or no answer for an rtt metric) does
 not change anything: it neither confirms nor breaks a streak. A restart of a
 router or of Home Assistant, signalled with :func:`on_restart`, restarts both
 streak counters and keeps the baseline and the state. A lasting change of the
-link (new provider) stays ``degraded`` until the caller calls
-:func:`relearn`; :func:`detect_drift` reports it as long-term drift.
+link (new provider) never becomes the new normal by itself: it stays
+``degraded`` or, if it sits between the thresholds, shows as long-term drift,
+until the caller calls :func:`relearn`.
+
+``exit_dev_k`` is at most 1: with a larger factor, values just below ``exit``
+would grow ``dev`` (and with it both thresholds) without bound.
 
 Drift
 -----
 Short-term outliers come from :func:`observe`. Long-term drift is judged on
 UTC day buckets: :func:`detect_drift` counts the newest consecutive days whose
-day value is above ``mean + max(drift_rel * mean, drift_abs)``. Days with
+day value is above :func:`drift_threshold` of the frozen ``reference`` (not
+the live mean, which the fault could have moved). Days with
 fewer than ``drift_min_samples`` measured probes, or missing days, end the
 run (no data is neither drift nor healthy). ``drift_days`` days in a row,
 ending today or yesterday, are drift.
@@ -59,14 +70,19 @@ Default configs
 =========== ===== ====== ===== ====== ===== ===== ====== ===== ===== ====
 metric      e_rel e_abs  e_dev x_rel  x_abs x_dev rounds learn drift d_abs
 =========== ===== ====== ===== ====== ===== ===== ====== ===== ===== ====
-latency_ms  1.0   20 ms  4     0.5    10 ms 2     3 / 4  12    0.25  5 ms
-loss_pct    1.0   20 pp  4     0.5    5 pp  2     3 / 4  12    0.5   1 pp
-jitter_ms   1.0   10 ms  4     0.5    5 ms  2     3 / 4  12    0.5   3 ms
+latency_ms  1.0   20 ms  4     0.5    10 ms 1     3 / 4  12    0.25  5 ms
+loss_pct    1.0   5 pp   4     0.5    2 pp  1     3 / 4  12    0.5   1 pp
+jitter_ms   1.0   10 ms  4     0.5    5 ms  1     3 / 4  12    0.5   3 ms
 =========== ===== ====== ===== ====== ===== ===== ====== ===== ===== ====
 
 ``rounds`` = ``enter_rounds / exit_rounds``; ``learn`` = ``min_samples``
 rounds (one hour at one round per 5 minutes); drift needs 3 days in a row
 with at least 12 measured probes each.
+
+Loss is fed as the loss % of a round. With few probes a round (3 probes:
+0 / 33 / 67 / 100 %) moderate loss arrives as scattered single-loss rounds
+that do not form ``enter_rounds`` in a row; it is then caught as drift on the
+day buckets, or the caller feeds the loss over several rounds.
 """
 
 from __future__ import annotations
@@ -112,7 +128,7 @@ class BaselineConfig:
     drift_rel: float
     drift_abs: float
     enter_dev_k: float = 4.0
-    exit_dev_k: float = 2.0
+    exit_dev_k: float = 1.0
     alpha: float = ALPHA
     beta: float = BETA
     min_samples: int = MIN_SAMPLES
@@ -152,6 +168,8 @@ class BaselineConfig:
             and self.exit_dev_k <= self.enter_dev_k
         ):
             raise ValueError("exit thresholds must lie below the enter thresholds")
+        if self.exit_dev_k > 1.0:
+            raise ValueError("exit_dev_k above 1 lets dev grow without bound")
 
 
 LATENCY_CONFIG = BaselineConfig(
@@ -166,9 +184,9 @@ LATENCY_CONFIG = BaselineConfig(
 LOSS_CONFIG = BaselineConfig(
     metric=METRIC_LOSS,
     enter_rel=1.0,
-    enter_abs=20.0,
+    enter_abs=5.0,
     exit_rel=0.5,
-    exit_abs=5.0,
+    exit_abs=2.0,
     drift_rel=0.5,
     drift_abs=1.0,
 )
@@ -202,6 +220,7 @@ class BaselineState:
     last_outlier_ts: float | None = None
     phase_since: float | None = None
     last_ts: float | None = None
+    reference: float | None = None  # mean at the end of learning
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,13 +258,24 @@ def thresholds(
     return enter, leave
 
 
+def drift_threshold(reference: float, config: BaselineConfig) -> float:
+    """Drift limit above the reference; also the ceiling of the live mean."""
+    return reference + max(config.drift_rel * reference, config.drift_abs)
+
+
 def _learn(
-    state: BaselineState, value: float, alpha: float, beta: float
+    state: BaselineState,
+    value: float,
+    config: BaselineConfig,
+    factor: float = 1.0,
 ) -> BaselineState:
     if state.mean is None or state.dev is None:
         return replace(state, mean=value, dev=value / 2.0, learned=state.learned + 1)
+    alpha, beta = config.alpha * factor, config.beta * factor
     dev = (1.0 - beta) * state.dev + beta * abs(state.mean - value)
     mean = (1.0 - alpha) * state.mean + alpha * value
+    if state.reference is not None:
+        mean = min(mean, drift_threshold(state.reference, config))
     return replace(state, mean=mean, dev=dev, learned=state.learned + 1)
 
 
@@ -295,10 +325,10 @@ def observe(
 def _observe_learning(
     state: BaselineState, value: float, ts: float, config: BaselineConfig
 ) -> Observation:
-    learned = _learn(state, value, config.alpha, config.beta)
+    learned = _learn(state, value, config)
     if learned.learned < config.min_samples:
         return Observation(learned, False, None)
-    done = replace(learned, phase=PHASE_NORMAL, phase_since=ts)
+    done = replace(learned, phase=PHASE_NORMAL, phase_since=ts, reference=learned.mean)
     return Observation(done, False, PHASE_NORMAL)
 
 
@@ -309,10 +339,12 @@ def _outlier(state: BaselineState, ts: float) -> BaselineState:
 def _observe_normal(
     state: BaselineState, value: float, ts: float, config: BaselineConfig
 ) -> Observation:
-    enter, _leave = thresholds(state, config)  # type: ignore[misc]
-    if value <= enter:
+    enter, leave = thresholds(state, config)  # type: ignore[misc]
+    if value < leave:
         calm = replace(state, above=0)
-        return Observation(_learn(calm, value, config.alpha, config.beta), False, None)
+        return Observation(_learn(calm, value, config), False, None)
+    if value <= enter:
+        return Observation(replace(state, above=0), False, None)
     marked = replace(_outlier(state, ts), above=state.above + 1)
     if marked.above < config.enter_rounds:
         return Observation(marked, True, None)
@@ -328,7 +360,7 @@ def _observe_degraded(
     marked = _outlier(state, ts) if is_outlier else state
     factor = config.degraded_learn_factor
     if factor > 0.0:
-        marked = _learn(marked, value, config.alpha * factor, config.beta * factor)
+        marked = _learn(marked, value, config, factor)
         marked = replace(marked, learned=state.learned)
     if value >= leave:
         return Observation(replace(marked, below=0), is_outlier, None)
@@ -384,9 +416,9 @@ def detect_drift(
     now: float,
 ) -> Drift:
     """Count the newest consecutive UTC days above the drift threshold."""
-    if state.phase == PHASE_LEARNING or state.mean is None:
+    if state.phase == PHASE_LEARNING or state.reference is None:
         return Drift(False, 0, None)
-    threshold = state.mean + max(config.drift_rel * state.mean, config.drift_abs)
+    threshold = drift_threshold(state.reference, config)
     by_day = {int(align(day.start, DAY_S) // DAY_S): day for day in days}
     today = int(align(now, DAY_S) // DAY_S)
     newest = max((d for d in by_day if d <= today), default=None)
