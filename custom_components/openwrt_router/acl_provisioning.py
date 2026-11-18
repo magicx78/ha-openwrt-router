@@ -14,7 +14,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import posixpath
 import re
+import secrets
 import shlex
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -244,8 +246,10 @@ async def ensure_acl_outcome(
                 )
                 return AclEnsureOutcome(False, "tiered_kept", True, parsed)
             reason = "outdated"  # content differs from what this version expects
-        except (ValueError, TypeError):
-            reason = "corrupted"  # present but not valid JSON
+        except (ValueError, TypeError, RecursionError):
+            # present but not valid JSON (RecursionError: hostile nesting,
+            # 1.44.0 hardening; before it escaped from ensure_acl)
+            reason = "corrupted"
     except OpenWrtMethodNotFoundError:
         reason = "missing"  # file does not exist yet (first install)
     except (
@@ -455,8 +459,11 @@ TIERED_ACL_DESCRIPTION_PREFIX: Final = (
     "Home Assistant openwrt_router integration, tiered ACL"
 )
 _TIERED_MARKER_RE: Final = re.compile(
-    r"tiered ACL v(?P<version>\d+); tiers: (?P<tiers>[a-z0-9_]+(?:,[a-z0-9_]+)*)$"
+    r"tiered ACL v(?P<version>\d{1,6}); tiers: (?P<tiers>[a-z0-9_]+(?:,[a-z0-9_]+)*)$"
 )
+# A deployed ACL text above this size is not parsed (hostile file; the
+# shipped ACLs are a few kB). Parsing also stops on deep nesting.
+MAX_ACL_TEXT_BYTES: Final = 64 * 1024
 
 TIER_READ: Final = "read"
 TIER_CONFIG_BACKUP_READ: Final = "config_backup_read"
@@ -678,21 +685,92 @@ class AclTier:
         }
 
 
-def _forbidden_optional_right(right: AclRight) -> str | None:
-    """Why an optional tier may not carry this right (None = allowed).
+# Optional tiers (everything but the base) may only grant rights from this
+# ALLOWLIST (security review 2026-11-18, finding 1). rpcd matches ACL
+# entries with fnmatch, so a denylist cannot be complete: ``fil?``, ``f*``,
+# ``*`` or ``[w]rite`` grant what a denylist forbids by name. Keys are exact
+# (scope, object, method) triples; method "" for list scopes (uci, cgi-io).
+# The union of what the built-in optional tiers need:
+OPTIONAL_TIER_ALLOWLIST: Final[frozenset[tuple[str, str, str]]] = frozenset(
+    {
+        ("cgi-io", "backup", ""),
+        ("ubus", "rpc-sys", "packagelist"),
+        *(("uci", config, "") for config in CONFIG_BACKUP_UCI_CONFIGS),
+        ("ubus", "iwinfo", "survey"),
+        ("ubus", "iwinfo", "scan"),
+    }
+)
+# Reviewed extensions for later modules (security-center, net-diagnostics).
+# A module that needs a new right adds the exact triple HERE, in a reviewed
+# change, with a comment why it is read-only. Empty on purpose.
+OPTIONAL_TIER_EXTENSIONS: Final[frozenset[tuple[str, str, str]]] = frozenset()
+# File rights of optional tiers: "read" only, on a normalised absolute path
+# below one of these prefixes (read-only kernel views, no secrets).
+OPTIONAL_TIER_FILE_READ_PREFIXES: Final = (
+    "/proc/net/",
+    "/sys/class/net/",
+    "/sys/class/ieee80211/",
+)
+# fnmatch/glob characters (and the escape) are never accepted in an
+# optional right: rpcd would expand them.
+_PATTERN_CHARS: Final = frozenset("*?[]{}\\")  # incl. the backslash escape
 
-    Optional tiers only ever ADD READ rights. No file exec, no file write,
-    nothing on the ACL directory itself, no write section at all. A later
-    module that needs more must change this rule deliberately (review).
+
+class AclTierRightRefusedError(AclTierError):
+    """A tier carries a right the registry does not accept.
+
+    ``right`` is the refused :class:`AclRight`, ``reason`` the machine code
+    (``write_section``, ``pattern``, ``not_allowlisted``, ``file_method``,
+    ``file_path``, ``base_tier_fixed``).
+    """
+
+    def __init__(self, tier_id: str, right: AclRight | None, reason: str, why: str):
+        """Name the tier, the right and why."""
+        named = right.describe() if right is not None else "base tier rights"
+        super().__init__(f"tier {tier_id}: {named} refused ({reason}: {why})")
+        self.tier_id = tier_id
+        self.right = right
+        self.reason = reason
+
+
+def _optional_allowlist() -> frozenset[tuple[str, str, str]]:
+    return OPTIONAL_TIER_ALLOWLIST | OPTIONAL_TIER_EXTENSIONS
+
+
+def _forbidden_optional_right(right: AclRight) -> tuple[str, str] | None:
+    """(reason, explanation) if an optional tier may not carry ``right``.
+
+    Allowlist, not denylist: read section only; no pattern characters in
+    object or method; ubus and every non-file scope only as an exact
+    triple of :data:`OPTIONAL_TIER_ALLOWLIST` /
+    :data:`OPTIONAL_TIER_EXTENSIONS`; files only ``read`` on a normalised
+    path below :data:`OPTIONAL_TIER_FILE_READ_PREFIXES`.
     """
     if right.section != "read":
-        return "optional tiers may only add read rights"
-    if right.scope == "file" and right.method in ("exec", "write"):
-        return "file exec/write is never added by an optional tier"
-    if right.scope == "ubus" and right.object == "file":
-        return "ubus file methods are part of the base tier only"
-    if "/rpcd/acl.d" in right.object:
-        return "optional tiers must not touch the rpcd ACL directory"
+        return ("write_section", "optional tiers may only add read rights")
+    if any(c in _PATTERN_CHARS for c in right.object + right.method):
+        return ("pattern", "wildcards and pattern characters are never allowed")
+    if right.scope == "file":
+        if right.method != "read":
+            return ("file_method", "optional file rights are read only")
+        path = right.object
+        if (
+            not path.startswith("/")
+            or posixpath.normpath(path) != path
+            or not path.startswith(OPTIONAL_TIER_FILE_READ_PREFIXES)
+        ):
+            return (
+                "file_path",
+                "file reads only below "
+                + ", ".join(OPTIONAL_TIER_FILE_READ_PREFIXES)
+                + " with a normalised path",
+            )
+        return None
+    if (right.scope, right.object, right.method) not in _optional_allowlist():
+        return (
+            "not_allowlisted",
+            "not in OPTIONAL_TIER_ALLOWLIST / OPTIONAL_TIER_EXTENSIONS",
+        )
     return None
 
 
@@ -711,18 +789,37 @@ class AclTierRegistry:
             self.register(tier)
 
     def register(self, tier: AclTier) -> None:
-        """Add a tier; refuse duplicates, a second base tier and unsafe rights."""
+        """Add a tier; refuse duplicates, a second base tier and unsafe rights.
+
+        The base (mandatory) tier is fixed: only the built-in rights derived
+        from ACL v8 are accepted, so it cannot be used to widen the ACL.
+        Optional tiers pass the allowlist (:func:`_forbidden_optional_right`);
+        a refusal raises :class:`AclTierRightRefusedError` naming the right.
+        """
         if tier.tier_id in self._tiers:
             raise AclTierError(f"tier {tier.tier_id} already registered")
         if tier.mandatory and any(t.mandatory for t in self._tiers.values()):
             raise AclTierError("only one mandatory (base) tier is allowed")
-        if not tier.mandatory:
-            for right in tier.rights:
-                why = _forbidden_optional_right(right)
-                if why:
-                    raise AclTierError(
-                        f"tier {tier.tier_id}: {right.describe()} refused ({why})"
+        if tier.mandatory:
+            if tier.rights != _base_read_rights():
+                extra = sorted(tier.rights - _base_read_rights())
+                raise AclTierRightRefusedError(
+                    tier.tier_id,
+                    extra[0] if extra else None,
+                    "base_tier_fixed",
+                    "the base tier is derived from ACL v8 and cannot be changed",
+                )
+        else:
+            for right in sorted(tier.rights):
+                refused = _forbidden_optional_right(right)
+                if refused:
+                    _LOGGER.warning(
+                        "ACL tier %s refused: %s (%s)",
+                        tier.tier_id,
+                        right.describe(),
+                        refused[0],
                     )
+                    raise AclTierRightRefusedError(tier.tier_id, right, *refused)
         self._tiers[tier.tier_id] = tier
 
     def get(self, tier_id: str) -> AclTier:
@@ -936,6 +1033,25 @@ def parse_tiered_acl(acl: Any) -> TieredAclInfo | None:
     )
 
 
+def parse_acl_text(text: str | None) -> tuple[Any, str | None]:
+    """Parse a deployed ACL text defensively: (parsed, None) or (None, why).
+
+    ``why``: ``missing`` (no text), ``too_large`` (above
+    :data:`MAX_ACL_TEXT_BYTES`, not parsed), ``too_deep`` (nesting beyond
+    the parser's recursion limit) or ``invalid_json``. Never raises.
+    """
+    if not isinstance(text, str):
+        return None, "missing"
+    if len(text.encode("utf-8", "surrogatepass")) > MAX_ACL_TEXT_BYTES:
+        return None, "too_large"
+    try:
+        return json.loads(text), None
+    except RecursionError:
+        return None, "too_deep"
+    except ValueError:
+        return None, "invalid_json"
+
+
 class DeployedAclKind(StrEnum):
     """What the ACL file on a router is, compared with this code."""
 
@@ -1000,6 +1116,10 @@ class AclOffer:
     removed: tuple[AclRight, ...]
     current_kind: DeployedAclKind
     risks: tuple[tuple[str, str], ...]
+    # Every right of the proposed ACL (sorted) and per tier, so an admin
+    # approves rights, not only a checksum (security review, finding 1).
+    rights: tuple[AclRight, ...] = ()
+    tier_rights: tuple[tuple[str, tuple[AclRight, ...]], ...] = ()
 
     @property
     def unchanged(self) -> bool:
@@ -1026,7 +1146,29 @@ class AclOffer:
             "removed": [r.describe() for r in self.removed],
             "unchanged": self.unchanged,
             "risks": [{"tier_id": t, "risk": r} for t, r in self.risks],
+            "rights": [r.describe() for r in self.rights],
+            "tier_rights": {
+                t: [r.describe() for r in rs] for t, rs in self.tier_rights
+            },
+            "rights_text": self.rights_text(),
         }
+
+    def rights_text(self) -> str:
+        """Human-readable list of every right, grouped by tier (for approval)."""
+        tiers = ", ".join(self.tiers)
+        lines = [
+            f"ACL v{TIERED_ACL_VERSION}, tiers {tiers}; {len(self.rights)} rights in total:"
+        ]
+        for tier_id, rights in self.tier_rights:
+            lines.append(f"[{tier_id}]")
+            lines.extend(f"  {r.describe()}" for r in rights)
+        if self.added:
+            lines.append("added compared with the router:")
+            lines.extend(f"  + {r.describe()}" for r in self.added)
+        if self.removed:
+            lines.append("removed compared with the router:")
+            lines.extend(f"  - {r.describe()}" for r in self.removed)
+        return "\n".join(lines)
 
 
 def describe_offer(
@@ -1062,6 +1204,8 @@ def describe_offer(
         removed=tuple(sorted(have - want)),
         current_kind=classify_deployed_acl(current_acl, registry=registry),
         risks=tuple((t, registry.get(t).risk) for t in tier_ids),
+        rights=tuple(sorted(want)),
+        tier_rights=tuple((t, tuple(sorted(registry.get(t).rights))) for t in tier_ids),
     )
 
 
@@ -1283,7 +1427,12 @@ async def async_deploy_acl_offer(
     )
 
     applied_at = now or utcnow()
-    backup_path = f"{ACL_BACKUP_PREFIX}{applied_at.strftime('%Y%m%dT%H%M%SZ')}"
+    # Random suffix: two deploys in the same second never share (and so
+    # overwrite) one backup file (security review, finding 10).
+    backup_path = (
+        f"{ACL_BACKUP_PREFIX}{applied_at.strftime('%Y%m%dT%H%M%SZ')}"
+        f"-{secrets.token_hex(4)}"
+    )
     command = f"write {ACL_FILE_PATH} (sha256 {checksum}) && {_RPCD_RESTART_CMD}"
 
     def _result(**kw: Any) -> AclDeployResult:
@@ -1297,10 +1446,8 @@ async def async_deploy_acl_offer(
 
     state, previous = await _read_current_acl(api)
     if state == "present":
-        try:
-            same = json.loads(previous or "") == acl
-        except ValueError:
-            same = False
+        parsed, _why = parse_acl_text(previous)
+        same = parsed == acl
         if same:
             _LOGGER.info(
                 "Tiered ACL %s already on %s — nothing written", tier_ids, api._host
