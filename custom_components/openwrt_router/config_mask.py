@@ -349,6 +349,15 @@ def _unknown(obj: Any) -> str:
         return MASK_PLACEHOLDER
 
 
+def _is_namedtuple(obj: tuple[Any, ...]) -> bool:
+    fields_ = getattr(obj, "_fields", None)
+    return (
+        isinstance(fields_, tuple)
+        and len(fields_) == len(obj)
+        and all(isinstance(name, str) for name in fields_)
+    )
+
+
 def _mask(obj: Any, stack: set[int], depth: int) -> Any:
     if obj is None or isinstance(obj, (bool, int, float, Enum)):
         return obj
@@ -377,12 +386,19 @@ def _mask(obj: Any, stack: set[int], depth: int) -> Any:
             return _mask_mapping(as_map, stack, depth)
         if isinstance(obj, Mapping):
             return _mask_mapping(obj, stack, depth)
+        if isinstance(obj, tuple) and _is_namedtuple(obj):
+            # Field names are keys, like a dict: the name decides, not the slot.
+            masked = _mask_mapping(
+                dict(zip(obj._fields, obj, strict=True)), stack, depth
+            )
+            try:
+                return type(obj)(*masked.values())
+            except Exception:  # noqa: BLE001 - a custom __new__ may refuse
+                return masked
         items = [_mask(item, stack, depth + 1) for item in obj]
         if isinstance(obj, list):
             return items
         if isinstance(obj, tuple):
-            if hasattr(obj, "_fields"):  # namedtuple
-                return type(obj)(*items)
             return tuple(items)
         if isinstance(obj, frozenset):
             return frozenset(items)
@@ -395,7 +411,9 @@ def mask_for_output(obj: Any) -> Any:
     """Return a masked copy of ``obj`` for JSON responses, logs and events.
 
     Never mutates ``obj``. Handles nested dict/Mapping, list, tuple, set and
-    dataclass instances (dataclasses become dicts). Rules:
+    dataclass instances (dataclasses become dicts). A namedtuple is masked by
+    field name like a dict and stays its type (a dict if it cannot be rebuilt).
+    Rules:
     - ``{"secret": …}`` digest markers become ``"***"``.
     - Values under a secret key name become ``"***"`` (None/bool stay).
     - Records with ``option`` (diff changes) mask old/new/value when the option

@@ -8,8 +8,9 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from collections import namedtuple
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple, Self
 
 import pytest
 
@@ -672,3 +673,71 @@ def test_dropbear_password_auth_switches_stay_readable(name: str) -> None:
     # The whitelist only lifts the pattern: real secrets stay secret.
     assert is_secret_option("dropbear", "dropbear", "Password")
     assert is_secret_option("dropbear", "dropbear", "RootPassword")
+
+
+class _Wifi(NamedTuple):
+    password: str
+    ssid: str
+
+
+class _NtChange(NamedTuple):
+    config: str
+    option: str
+    old: str
+    new: str
+
+
+def test_mask_for_output_masks_namedtuple_fields_by_name() -> None:
+    """A namedtuple is read like a dict: the field name decides, not the slot."""
+    for nt in (_Wifi(password=SECRET, ssid="Home"), _Wifi(SECRET, "Home")):
+        out = mask_for_output(nt)
+        assert SECRET not in repr(out)
+        assert isinstance(out, _Wifi)
+        assert out.password == cc.MASK_PLACEHOLDER
+        assert out.ssid == "Home"
+
+    untyped = namedtuple("untyped", "psk ssid")(SECRET, "Home")
+    out = mask_for_output(untyped)
+    assert SECRET not in repr(out)
+    assert out.ssid == "Home"
+
+
+def test_mask_for_output_namedtuple_nested_and_in_list() -> None:
+    data = [_Wifi(SECRET, "A"), {"nets": (_Wifi(SECRET, "B"),)}]
+    out = mask_for_output(data)
+    assert SECRET not in repr(out)
+    assert out[0].ssid == "A"
+    assert out[1]["nets"][0].ssid == "B"
+    assert isinstance(out[1]["nets"][0], _Wifi)
+
+
+def test_mask_for_output_namedtuple_with_secret_option_record() -> None:
+    change = _NtChange("wireless", "ssid_note", old=SECRET, new=SECRET)
+    keyed = _NtChange("wireless", "key", old=SECRET, new=SECRET)
+    assert SECRET not in repr(mask_for_output(keyed))
+    out = mask_for_output(keyed)
+    assert out.option == "key"
+    assert out.old == out.new == cc.MASK_PLACEHOLDER
+    # Not a secret option: values stay (as redacted text).
+    assert mask_for_output(change).option == "ssid_note"
+
+
+def test_mask_for_output_namedtuple_falls_back_to_dict() -> None:
+    """If the type cannot be rebuilt, the result is a plain dict."""
+
+    class Odd(namedtuple("_OddBase", "password ssid")):
+        __slots__ = ()
+
+        def __new__(cls, *args: Any) -> Self:
+            if cc.MASK_PLACEHOLDER in args:
+                raise TypeError("odd")
+            return super().__new__(cls, *args)
+
+    out = mask_for_output(Odd(SECRET, "Home"))
+    assert SECRET not in repr(out)
+    assert out["ssid"] == "Home"
+
+
+def test_mask_for_output_plain_tuple_still_a_tuple() -> None:
+    assert mask_for_output(("a", 1)) == ("a", 1)
+    assert isinstance(mask_for_output(("a", 1)), tuple)
