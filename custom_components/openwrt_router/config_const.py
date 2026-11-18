@@ -365,6 +365,26 @@ UPLINK_INTERFACE_NAMES: Final[frozenset[str]] = frozenset({"wan", "wan6", "wwan"
 #   -> critical; same for any firewall rule touching the SSH port.
 FIREWALL_INPUT_SECTION_TYPES: Final[frozenset[str]] = frozenset({"rule", "redirect"})
 SSH_PORTS: Final[frozenset[str]] = frozenset({"22"})
+# Review M3, all "critical":
+# - LuCI/ubus ports (uhttpd); the listen_http(s) ports of the uhttpd config
+#   count too. Hit by an input rule (no dest) or by any redirect (DNAT).
+MGMT_WEB_PORTS: Final[frozenset[str]] = frozenset({"80", "443"})
+# - a whole section of these types added or removed (zone, bridge, VLAN,
+#   interface: each can cut HA off the router),
+SECTION_PRESENCE_CRITICAL: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        ("firewall", "zone"),
+        ("network", "bridge-vlan"),
+        ("network", "device"),
+        ("network", "interface"),
+    }
+)
+# - with the management interface not known for sure (mgmt_host is a host
+#   name, or its IP is on no interface statically, e.g. DHCP): a change to
+#   these options of any non-uplink interface.
+MGMT_ADDRESS_OPTIONS: Final[frozenset[str]] = MGMT_IP_OPTIONS | frozenset(
+    {"ip6assign", "ip6hint", "ip6ifaceid", "ip6prefix", "ip6gw"}
+)
 
 
 @dataclass(frozen=True, slots=True)

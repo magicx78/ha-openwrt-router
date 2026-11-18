@@ -60,7 +60,9 @@ from .config_const import (
     AREA_VLAN,
     AREA_WLAN,
     FIREWALL_INPUT_SECTION_TYPES,
+    MGMT_ADDRESS_OPTIONS,
     MGMT_IP_OPTIONS,
+    MGMT_WEB_PORTS,
     RISK_CRITICAL,
     RISK_HIGH,
     RISK_LOW,
@@ -68,6 +70,7 @@ from .config_const import (
     RISK_REORDERED,
     RISKS,
     SECRET_MARKER_KEY,
+    SECTION_PRESENCE_CRITICAL,
     SSH_PORTS,
     UPLINK_INTERFACE_NAMES,
     lookup_risk_rule,
@@ -168,6 +171,9 @@ _PORT_OPTIONS: Final = ("dest_port", "src_dport", "port")
 _ADDRESS_OPTIONS: Final = ("ipaddr", "ip6addr")
 _SSH_PORT_NUMBERS: Final[frozenset[int]] = frozenset(int(p) for p in SSH_PORTS)
 _SSH_SERVICE_NAMES: Final = frozenset({"ssh"})
+_WEB_PORT_NUMBERS: Final[frozenset[int]] = frozenset(int(p) for p in MGMT_WEB_PORTS)
+_WEB_SERVICE_NAMES: Final = frozenset({"http", "https", "www"})
+_LISTEN_OPTIONS: Final = ("listen_http", "listen_https")
 # Pairing threshold: share of comparable options that must be equal.
 _PAIR_MIN_SIMILARITY: Final = 0.5
 _SECRET_PLACEHOLDER: Final = "<secret>"
@@ -391,11 +397,13 @@ def _is_uplink(name: str, options: Mapping[str, Any]) -> bool:
     return proto in WAN_PROTOS
 
 
-def _port_spec_hits(spec: str, ports: frozenset[int]) -> bool:
+def _port_spec_hits(
+    spec: str, ports: frozenset[int], names: frozenset[str] = _SSH_SERVICE_NAMES
+) -> bool:
     for token in re.split(r"[\s,]+", spec.strip()):
         if not token:
             continue
-        if token.lower() in _SSH_SERVICE_NAMES:
+        if token.lower() in names:
             return True
         bounds = re.fullmatch(r"!?(\d+)(?:[-:](\d+))?", token)
         if bounds is None or token.startswith("!"):
@@ -407,11 +415,50 @@ def _port_spec_hits(spec: str, ports: frozenset[int]) -> bool:
     return False
 
 
-def _touches_ssh(options: Mapping[str, Any]) -> bool:
+def _touches_ports(
+    options: Mapping[str, Any], ports: frozenset[int], names: frozenset[str]
+) -> bool:
     return any(
-        isinstance(value, str) and _port_spec_hits(value, _SSH_PORT_NUMBERS)
+        isinstance(value, str) and _port_spec_hits(value, ports, names)
         for opt in _PORT_OPTIONS
         for value in _as_list(options.get(opt))
+    )
+
+
+def _touches_ssh(options: Mapping[str, Any]) -> bool:
+    return _touches_ports(options, _SSH_PORT_NUMBERS, _SSH_SERVICE_NAMES)
+
+
+def _listen_ports(*configs: Mapping[str, Any] | None) -> frozenset[int]:
+    """Ports uhttpd listens on (``listen_http(s)``: ``[addr:]port``)."""
+    found: set[int] = set()
+    for cfg in configs:
+        if not cfg:
+            continue
+        for section in _sections(cfg).values():
+            options = _options(section)
+            for opt in _LISTEN_OPTIONS:
+                for value in _as_list(options.get(opt)):
+                    if not isinstance(value, str):
+                        continue
+                    for token in value.split():
+                        port = token.rsplit(":", 1)[-1]
+                        if port.isdecimal() and len(port) <= 5:
+                            found.add(int(port))
+    return frozenset(found)
+
+
+def _mgmt_interface_known(
+    mgmt_host: str | None, *configs: Mapping[str, Any] | None
+) -> bool:
+    """True if ``mgmt_host`` is an IP set statically on some interface."""
+    if not mgmt_host or _host_address(mgmt_host) is None:
+        return False
+    return any(
+        _stype(section) == "interface" and _carries_host(_options(section), mgmt_host)
+        for cfg in configs
+        if cfg
+        for section in _sections(cfg).values()
     )
 
 
@@ -424,6 +471,8 @@ def classify(
     section_name: str = "",
     section_options: Iterable[Mapping[str, Any]] = (),
     uplinks: Iterable[str] = (),
+    mgmt_known: bool | None = None,
+    web_ports: Iterable[int] = (),
 ) -> tuple[Area, Risk]:
     """Return (area, risk) of a change.
 
@@ -436,7 +485,14 @@ def classify(
     - uplink interfaces (name ``wan*``/``wwan*``, upstream protocol, or
       listed in ``uplinks``) -> critical,
     - firewall rule/redirect without ``dest`` (acts on input) -> critical,
-    - firewall rule/redirect matching an SSH port -> SSH/critical.
+    - firewall rule/redirect matching an SSH port -> SSH/critical,
+    - firewall redirect matching a LuCI/ubus port (80, 443, ``web_ports``)
+      -> critical,
+    - a whole zone/device/interface/bridge-vlan section added or removed
+      -> critical,
+    - management interface not known for sure (``mgmt_known`` False; None =
+      derive from ``mgmt_host`` and ``section_options``): address, device
+      and protocol options of every non-uplink interface -> critical.
 
     ``section_name`` is the section key (anonymous keys are ignored by the
     table), ``section_options`` the option maps of the section before and/or
@@ -451,22 +507,32 @@ def classify(
     opt = option.lower() if option is not None else None
     sides = [o for o in section_options if isinstance(o, Mapping)]
 
+    if opt is None and (cfg, stype) in SECTION_PRESENCE_CRITICAL:
+        risk = Risk.CRITICAL
     if cfg == "network" and stype == "interface":
         name = _rule_name(section_name)
         uplink_names = {u.lower() for u in uplinks}
-        if name and (
+        uplink = bool(name) and (
             name.lower() in uplink_names or any(_is_uplink(name, o) for o in sides)
-        ):
+        )
+        if uplink:
             risk = Risk.CRITICAL
-        if (
-            mgmt_host
-            and (opt is None or opt in MGMT_IP_OPTIONS)
-            and any(_carries_host(o, mgmt_host) for o in sides)
-        ):
+        carries = bool(mgmt_host) and any(
+            _carries_host(o, mgmt_host or "") for o in sides
+        )
+        if carries and (opt is None or opt in MGMT_IP_OPTIONS):
             area, risk = Area.MGMT_IP, Risk.CRITICAL
+        if mgmt_known is None:
+            mgmt_known = carries and _host_address(mgmt_host or "") is not None
+        if not mgmt_known and not uplink and opt in MGMT_ADDRESS_OPTIONS:
+            risk = Risk.CRITICAL
     elif cfg == "firewall" and stype in FIREWALL_INPUT_SECTION_TYPES and sides:
         if any(not o.get("dest") for o in sides):
             risk = Risk.CRITICAL
+        if stype == "redirect":
+            ports = _WEB_PORT_NUMBERS | frozenset(web_ports)
+            if any(_touches_ports(o, ports, _WEB_SERVICE_NAMES) for o in sides):
+                risk = Risk.CRITICAL
         if any(_touches_ssh(o) for o in sides):
             area, risk = Area.SSH, Risk.CRITICAL
     return area, risk
@@ -697,6 +763,8 @@ def _option_changes(
     new_sec: Mapping[str, Any],
     mgmt_host: str | None,
     uplinks: frozenset[str],
+    mgmt_known: bool,
+    web_ports: frozenset[int],
 ) -> list[Change]:
     stype = _stype(new_sec)
     old_opts, new_opts = _options(old_sec), _options(new_sec)
@@ -715,6 +783,8 @@ def _option_changes(
             section_name=new_key,
             section_options=sides,
             uplinks=uplinks,
+            mgmt_known=mgmt_known,
+            web_ports=web_ports,
         )
         secret = (
             is_secret_option(config, stype, opt)
@@ -761,6 +831,8 @@ def _diff_config(
     new_cfg: Mapping[str, Any],
     mgmt_host: str | None,
     uplinks: frozenset[str],
+    mgmt_known: bool,
+    web_ports: frozenset[int],
 ) -> list[Change]:
     old_secs, new_secs = _sections(old_cfg), _sections(new_cfg)
     old_order, new_order = _order(old_cfg), _order(new_cfg)
@@ -781,6 +853,8 @@ def _diff_config(
                     new_sec,
                     mgmt_host,
                     uplinks,
+                    mgmt_known,
+                    web_ports,
                 )
             )
             continue
@@ -793,6 +867,8 @@ def _diff_config(
             section_name=new_key,
             section_options=(_options(new_sec),),
             uplinks=uplinks,
+            mgmt_known=mgmt_known,
+            web_ports=web_ports,
         )
         out.append(
             Change(
@@ -821,6 +897,8 @@ def _diff_config(
             section_name=old_key,
             section_options=(_options(old_sec),),
             uplinks=uplinks,
+            mgmt_known=mgmt_known,
+            web_ports=web_ports,
         )
         out.append(
             Change(
@@ -855,6 +933,8 @@ def _diff_config(
             section_name=new_key,
             section_options=(_options(old_secs[old_key]), _options(new_sec)),
             uplinks=uplinks,
+            mgmt_known=mgmt_known,
+            web_ports=web_ports,
         )
         if (config, stype) in _ORDER_SENSITIVE:
             risk = max_risk(Risk.HIGH, base_risk)
@@ -894,12 +974,20 @@ def diff_snapshots(
         old.configs.get("firewall"),
         new.configs.get("firewall"),
     )
+    mgmt_known = _mgmt_interface_known(
+        mgmt_host, old.configs.get("network"), new.configs.get("network")
+    )
+    web_ports = _listen_ports(old.configs.get("uhttpd"), new.configs.get("uhttpd"))
     changes: list[Change] = []
     for config in sorted(set(old.configs) & set(new.configs)):
         old_cfg, new_cfg = old.configs[config], new.configs[config]
         if old_cfg == new_cfg:
             continue
-        changes.extend(_diff_config(config, old_cfg, new_cfg, mgmt_host, uplinks))
+        changes.extend(
+            _diff_config(
+                config, old_cfg, new_cfg, mgmt_host, uplinks, mgmt_known, web_ports
+            )
+        )
     _LOGGER.debug("config diff: %d change(s)", len(changes))
     return tuple(changes)
 
