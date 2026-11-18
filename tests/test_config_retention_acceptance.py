@@ -10,6 +10,8 @@ adapter keeps the readable version names of the old tests: it builds one
 Mapping: ``ok=False`` -> ``VersionStatus.FAILED``; ``kind`` ->
 ``BackupReason``; ``max_bytes`` -> ``max_bytes_per_router``; ``KEEP_*`` ->
 ``KeepReason``. ``now`` and time zones come from the test.
+Two cases follow the core 1.44.0 rule that GFS never thins a manual version
+(contract 7.5, ruling Q3); a strict xfail pins the core's size-limit defect.
 """
 
 from __future__ import annotations
@@ -243,14 +245,28 @@ def test_newest_version_of_a_day_represents_it() -> None:
         item(date(2026, 11, 17), hour=3),
     ]
     decision = select_for_deletion(items, RetentionPolicy(weekly=0, monthly=0), NOW)
-    assert set(decision.keep) == {"v2026-11-16T22", "v2026-11-17T03"}
-    assert set(decision.delete) == {"v2026-11-16T01", "v2026-11-16T09"}
+    # Core 1.44.0 (contract 7.5, ruling Q3): GFS never thins a manual
+    # version, so the manual 09:00 version stays as well (formerly deleted).
+    assert set(decision.keep) == {
+        "v2026-11-16T09",
+        "v2026-11-16T22",
+        "v2026-11-17T03",
+    }
+    assert set(decision.delete) == {"v2026-11-16T01"}
+    assert KeepReason.MANUAL in decision.reasons["v2026-11-16T09"]
 
 
 def test_days_use_the_callers_time_zone() -> None:
     # 23:30 UTC on Nov 15 is 00:30 CET on Nov 16, the same local day as 10:00.
+    # Core 1.44.0 (contract 7.5, ruling Q3) never thins manual versions, so
+    # the case uses scheduled ones to test the day boundary (formerly manual).
     night = RetentionItem(
-        "night", datetime(2026, 11, 15, 23, 30, tzinfo=UTC), KB, False, True, "manual"
+        "night",
+        datetime(2026, 11, 15, 23, 30, tzinfo=UTC),
+        KB,
+        False,
+        True,
+        "scheduled",
     )
     morning = RetentionItem(
         "morning",
@@ -258,7 +274,7 @@ def test_days_use_the_callers_time_zone() -> None:
         KB,
         False,
         True,
-        "manual",
+        "scheduled",
     )
     newest = item(date(2026, 11, 17))
     policy = RetentionPolicy(weekly=0, monthly=0)
@@ -364,6 +380,48 @@ def test_over_limit_reported_not_forced() -> None:
     assert set(decision.keep) == {name_of(p) for p in protected} | {name_of(newest)}
     assert decision.total_bytes == 9 * KB
     assert decision.max_bytes == 4 * KB
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Core 1.44.0 size-limit defect: plan_retention evicts manual versions "
+        "only after every other one, so it drops the scheduled S as well "
+        "although removing the manual M alone would already fit the limit; "
+        "expected: N and S stay. Strict: turns red once the core is fixed."
+    ),
+)
+def test_size_limit_keeps_scheduled_when_evicting_manual_suffices() -> None:
+    manual = RetentionItem(
+        "M-2026-10-01-manual-2KiB",
+        datetime(2026, 10, 1, 3, tzinfo=LOCAL),
+        2048,
+        False,
+        True,
+        "manual",
+    )
+    scheduled = RetentionItem(
+        "S-2026-11-16-scheduled-1KiB",
+        datetime(2026, 11, 16, 3, tzinfo=LOCAL),
+        1024,
+        False,
+        True,
+        "scheduled",
+    )
+    newest = RetentionItem(
+        "N-2026-11-17-scheduled-1KiB",
+        datetime(2026, 11, 17, 3, tzinfo=LOCAL),
+        1024,
+        False,
+        True,
+        "scheduled",
+    )
+    policy = RetentionPolicy(daily=7, weekly=4, monthly=0, max_bytes=2048)
+    decision = select_for_deletion([manual, scheduled, newest], policy, NOW)
+    assert set(decision.keep) == {name_of(scheduled), name_of(newest)}
+    assert set(decision.delete) == {name_of(manual)}
+    assert decision.total_bytes == 2048
+    assert decision.over_limit is False
 
 
 def test_no_size_limit() -> None:
