@@ -1390,11 +1390,20 @@ maskiert, Nachricht geschrubbt). `code` und `error_class` ändern sich innerhalb
 | `RestoreIncompatibleError` | `restore_incompatible` | `incompatible` | Version passt nicht zum Zielrouter | nein |
 | `OperationInProgressError` | `operation_in_progress` | `busy` | Router-Lock belegt | ja |
 | `ProviderError` | `provider_error` | `internal` (überschreibbar) | unerwarteter Providerfehler, Ursache verkettet, nur Typname in `details.cause` | nein (überschreibbar) |
+| `RateLimitedError` | `rate_limited` | `rate_limited` | zu viele Aufrufe einer Aktion (je Router); nichts getan. `retry_after` (Sekunden, endlich, ≥ 0) als Attribut, in `details.retry_after` und oben in `to_dict()` (ab B6) | ja (fest) |
+| `SafetyRefusedError` | `safety_refused` | `safety_refused` | Core oder Modul lehnt ab, weil die Aktion unsicher ist (z. B. trennt die Verwaltungsverbindung); keine Rechtefrage. `reason` (Attribut und `details.reason`, Muster `SAFETY_REASON_PATTERN` = `[a-z0-9][a-z0-9_.:-]{0,63}`) (ab B6) | nein (fest) |
 
 `ErrorClass` enthält außerdem die elf Klassen aus `config-manager` 12.2 (`unreachable`,
 `timeout`, `auth`, `permission`, `not_available`, `too_large`, `incomplete`, `invalid`,
 `checksum_mismatch`, `storage_full`, `storage_error`) und wird auch in
 `BackupRecord.error_class` und als `dedup_key` von `backup_failed` benutzt.
+
+`rate_limited` und `safety_refused` (ab B6) sind **Aufruf-Klassen**
+(`NON_PERSISTED_ERROR_CLASSES`): sie beschreiben einen abgelehnten Aufruf und landen nie
+in einem gespeicherten Datensatz. `VersionMeta` und `BackupRecord` lehnen sie mit
+`ValueError` ab; `version_error_class` bildet sie auf `busy` bzw. `denied` ab. Ein älterer
+Core liest deshalb nie einen unbekannten Wert; der neue Wert ist additiv, ohne
+`BACKUP_METADATA_VERSION`-Erhöhung (Ausnahme zur Regel in §2, weil nie persistiert).
 
 ```python
 try:
@@ -1708,6 +1717,7 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 | 101 | `async_validate_backup(backup_id, *, actor=None)` (neues optionales Argument), `async_detect_drift`, `async_prepare_restore` und damit `async_check_restore_compatibility` (B2): Benutzer ohne Admin ⇒ `AuthorizationError` `not_admin` (`details.action` `config_validate`/`config_drift`/`config_restore_dry_run`, `audit_id`), auditiert auf dem Sicherheitsring, vor jedem Nachschlagen und Provider-Aufruf; Audit-Router ist der bekannte Router bzw. der Router einer bekannten Version, sonst `-` (unbekannte IDs werden nicht wiedergegeben). Modul-, System- und Automationsakteure unverändert. `async_validate_backup` ohne `actor` bleibt erlaubt (Altaufruf), Zähler `validate_without_actor`. Konstanten `READ_VALIDATE`, `READ_DRIFT`, `READ_RESTORE_DRY_RUN`. | A (Signatur); B (Verhalten für Benutzer ohne Admin) |
 | 102 | Maskierung (B4, §13): Kennungsnamen (`IDENTIFIER_KEY_NAMES`, `is_identifier_name`) sind keine geheimen Namen mehr, ihr Wert wird nur bei Schlüsselmaterial maskiert (`looks_like_key_material`); Zählernamen (`COUNTER_SUFFIXES`, `is_counter_name`) zeigen Zahlen. `is_snapshot_secret` unverändert. Neu, rein: `pseudonymise_identifier(kind, value, key)`, `pseudonymise_fields(data, key, fields)`, `IDENTIFIER_PSEUDONYM_PREFIXES`, `IDENTIFIER_PSEUDONYM_HEX_LENGTH` (16), `IDENTIFIER_INVALID`. MAC/IP/Hostname/SSID/BSSID werden vom Core nie maskiert (unverändert, jetzt festgeschrieben). | A; Verhalten (weniger Überdeckung) |
 | 103 | Modul-Events (B3, §12.1/§12.2/§12.5): `CoreEvent.security_relevant`, `CoreEvent.audit_mandatory` (beide `bool`, Standard `False`, in `to_dict`/`from_dict`; alte Einträge lesen sich unverändert, keine Store-Version); `emit(..., security_relevant=False)` (Audit-Log und API); `register_audit_mandatory_types(types, *, module) -> remover`; `register_event_prefix(...)` liefert einen Entferner statt `None`; Dedup nur im selben Ring; Zähler `security_relevant_module_events`, `module_mandatory_types`. Bus-Payload hat zwei neue Schlüssel. | A |
+| 104 | Fehler (B6, §14): `RateLimitedError` (`code` `rate_limited`, `ErrorClass.RATE_LIMITED`, immer retryable, `retry_after`) und `SafetyRefusedError` (`code` `safety_refused`, `ErrorClass.SAFETY_REFUSED`, nie retryable, `reason`); `NON_PERSISTED_ERROR_CLASSES`, `SAFETY_REASON_PATTERN`. Beide Klassen sind Aufruf-Klassen: `VersionMeta`/`BackupRecord` lehnen sie ab, `version_error_class` bildet sie auf `busy`/`denied` ab, keine Metadaten-Version. Ein Provider, der eine davon als `error_class` eines Datensatzes setzen wollte, bekommt `ValueError` (vorher gab es die Werte nicht). | A |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 

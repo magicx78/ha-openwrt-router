@@ -16,6 +16,10 @@ All notable changes to the OpenWrt Router integration will be documented in this
 - Enterprise Core: Module können eigene Events als sicherheitsrelevant markieren
   (Sicherheits-Audit) und eigene Event-Typen als audit-pflichtig registrieren (nie
   zusammengefasst); `register_event_prefix` gibt einen Entferner zurück.
+- Enterprise Core: zwei neue Fehler für Module, `RateLimitedError` (`rate_limited`,
+  mit `retry_after`, wiederholbar) und `SafetyRefusedError` (`safety_refused`, mit
+  `reason`, nicht wiederholbar). Beide Fehlerklassen landen nie in gespeicherten
+  Versionsdaten.
 
 ### Changed
 

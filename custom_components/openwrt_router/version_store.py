@@ -1624,10 +1624,20 @@ class VersionStore:
 
 
 def version_error_class(err: BaseException) -> ErrorClass:
-    """error_class of a store/provider failure (for backup_failed)."""
+    """error_class of a store/provider failure (for backup_failed).
+
+    Call-time classes (``NON_PERSISTED_ERROR_CLASSES``) map to the stored
+    class closest to them: rate limited -> busy, safety refused -> denied.
+    """
     if isinstance(err, ConfigApiError):
-        return err.error_class
+        return _STORED_ERROR_CLASS.get(err.error_class, err.error_class)
     return ErrorClass.INTERNAL
+
+
+_STORED_ERROR_CLASS: dict[ErrorClass, ErrorClass] = {
+    ErrorClass.RATE_LIMITED: ErrorClass.BUSY,
+    ErrorClass.SAFETY_REFUSED: ErrorClass.DENIED,
+}
 
 
 __all__ = [

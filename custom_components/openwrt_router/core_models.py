@@ -49,6 +49,7 @@ from .const import (
     FEATURE_UCI_AVAILABLE,
 )
 from .core_errors import (
+    NON_PERSISTED_ERROR_CLASSES,
     ApiVersionError,
     ApprovalInvalidError,
     ApprovalRequiredError,
@@ -459,6 +460,18 @@ def _check_note(note: str | None) -> None:
         raise TypeError("note must be a string")
     if len(note) > NOTE_MAX_LENGTH:
         raise ValueError(f"note must be at most {NOTE_MAX_LENGTH} characters")
+
+
+def _check_stored_error_class(error_class: ErrorClass | None) -> None:
+    """Raise for a call-time error class (``NON_PERSISTED_ERROR_CLASSES``).
+
+    Such a class describes a refused call, not a stored version; keeping it
+    out of every record means an older core never reads an unknown value.
+    """
+    if error_class in NON_PERSISTED_ERROR_CLASSES:
+        raise ValueError(
+            f"error_class {error_class.value!r} is call-time only and never stored"
+        )
 
 
 # Provider-supplied metadata text (versions, board names, fetch methods).
@@ -2232,6 +2245,7 @@ class BackupRecord:
         _coerce(self, "reason", BackupReason)
         _coerce(self, "status", VersionStatus)
         _coerce(self, "error_class", ErrorClass, optional=True)
+        _check_stored_error_class(self.error_class)
         _set(self, "artifacts", _freeze_artifacts(self.artifacts))
         if self.metadata_version != BACKUP_METADATA_VERSION:
             raise ValueError("metadata_version must be the current version")
@@ -2396,6 +2410,7 @@ class VersionMeta:
         _coerce(self, "reason", BackupReason)
         _coerce(self, "status", VersionStatus)
         _coerce(self, "error_class", ErrorClass, optional=True)
+        _check_stored_error_class(self.error_class)
         for name in ("content_hash", "uci_hash"):
             value = getattr(self, name)
             if value is not None and not is_sha256(value):
