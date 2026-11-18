@@ -171,7 +171,7 @@ Weitere Belege:
 - `luci-base` hängt von `+cgi-io +rpcd-mod-file +rpcd-mod-luci` ab
   ([luci-base Makefile](https://github.com/openwrt/luci/blob/master/modules/luci-base/Makefile)).
   Ohne LuCI gibt es also kein `cgi-backup` **[Quelle]**.
-- Der Pfad `/www/cgi-bin/cgi-backup` als Link auf `cgi-io` **[Annahme]**: `main.c` wählt den Modus über
+- Der Pfad `/www/cgi-bin/cgi-backup` als Link auf `cgi-io` (belegt am 2026-11-18 auf vier Geräten mit OpenWrt 25.12, siehe Abschnitt 21): `main.c` wählt den Modus über
   `argv[0]`, LuCI ruft `cgi_base + '/cgi-backup'` auf. Der Collector behandelt HTTP 404 als
   `not_available` und geht zum nächsten Weg.
 - Die Antwort bei fehlendem Recht **[Annahme]**: HTTP 403 oder ein Fehlertext statt
