@@ -11,10 +11,16 @@ iwinfo, system, log, usteer — plus read access to a fixed set of files.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 import shlex
-from typing import TYPE_CHECKING
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from .api import (
     OpenWrtAuthError,
@@ -22,6 +28,15 @@ from .api import (
     OpenWrtMethodNotFoundError,
     OpenWrtResponseError,
     OpenWrtTimeoutError,
+)
+from .core_errors import AuthorizationError
+from .core_models import (
+    OPTION_CONFIG_BACKUP_ENABLED,
+    Capability,
+    GuardedAction,
+    WriteAuthorization,
+    binding_checksum,
+    utcnow,
 )
 
 if TYPE_CHECKING:
@@ -364,4 +379,1008 @@ async def check_and_deploy_acl(api: OpenWrtAPI) -> bool:
     Like ``ensure_acl`` it raises :class:`AclDeployError` when a needed deploy
     fails on every path.
     """
+    return await ensure_acl(api)
+
+
+# =====================================================================
+# Tiered ACL (next ACL version) — OFFERED ONLY, never deployed automatically
+# =====================================================================
+#
+# Everything above this line is the automatic path (ensure_acl, ACL v8) and
+# is unchanged. Everything below builds an *offer*: a base tier plus tiers
+# the user picks per router. Pure helpers (build_acl, acl_checksum,
+# describe_offer, ...) never touch a router. The single writing function,
+# async_deploy_acl_offer, refuses unless it is handed a WriteAuthorization
+# for action ``acl_deploy`` bound to this router and to the checksum of
+# exactly the ACL it is about to write (docs/dev/acl-tiers.md).
+#
+# One file, one write and at most one rpcd restart per router for all tiers
+# together: that is the reason for the tier model.
+
+TIERED_ACL_VERSION: Final = 9
+
+# Backups of the replaced ACL live next to acl.d, not in it: rpcd loads
+# acl.d/*.json, so a backup inside acl.d with a .json suffix would be active.
+ACL_BACKUP_PREFIX: Final = "/usr/share/rpcd/ha-openwrt-router.json.bak-"
+# SSH path writes to this temp name first and renames it (no half-written
+# ACL file if the connection drops). Not *.json, so rpcd never loads it.
+_ACL_TMP_PATH: Final = ACL_FILE_PATH + ".new"
+_RPCD_RESTART_CMD: Final = "/etc/init.d/rpcd restart"
+_SSH_OFFER_BACKUP_MARKER: Final = "HA_ACL_BACKED_UP"
+_SSH_OFFER_DEPLOY_MARKER: Final = "HA_ACL_OFFER_DEPLOYED"
+
+# The group description carries a machine-readable marker so the deployed
+# file can be recognised as a tiered ACL (rpcd ignores "description").
+TIERED_ACL_DESCRIPTION_PREFIX: Final = (
+    "Home Assistant openwrt_router integration, tiered ACL"
+)
+_TIERED_MARKER_RE: Final = re.compile(
+    r"tiered ACL v(?P<version>\d+); tiers: (?P<tiers>[a-z0-9_]+(?:,[a-z0-9_]+)*)$"
+)
+
+TIER_READ: Final = "read"
+TIER_CONFIG_BACKUP_READ: Final = "config_backup_read"
+TIER_RF_SURVEY: Final = "rf_survey"
+TIER_RF_SCAN: Final = "rf_scan"
+
+# Capability names served by the RF tiers (module prefix "rf.", owned by
+# the WiFi RF module; listed here so the offer can name them).
+CAPABILITY_RF_TXPOWERLIST: Final = "rf.txpowerlist"
+CAPABILITY_RF_SURVEY: Final = "rf.survey"
+CAPABILITY_RF_SCAN: Final = "rf.scan"
+
+ACL_SECTIONS: Final = ("read", "write")
+# Scopes whose value is {object: [methods]}; every other scope is a list of
+# objects (rpcd grants function = section name, e.g. "cgi-io": ["backup"]).
+_MAPPED_SCOPES: Final = frozenset({"ubus", "file"})
+_TIER_ID_RE: Final = re.compile(r"[a-z][a-z0-9_]*")
+
+# The UCI configs the Configuration Manager snapshots (config-manager plan
+# 2.2, contract section 18). Read access includes every secret in them.
+CONFIG_BACKUP_UCI_CONFIGS: Final = (
+    "network",
+    "wireless",
+    "firewall",
+    "dhcp",
+    "system",
+    "dropbear",
+    "uhttpd",
+    "rpcd",
+    "ddns",
+    "sqm",
+    "usteer",
+    "mwan3",
+    "upnpd",
+    "openvpn",
+)
+
+
+class AclTierError(ValueError):
+    """Unknown tier, invalid tier definition or tier not allowed by options."""
+
+
+class AclOfferRefusedError(AuthorizationError):
+    """async_deploy_acl_offer refused before anything was written.
+
+    ``reason`` (also ``details["reason"]``): ``no_authorization``,
+    ``option_disabled``, ``not_consumed``, ``action_mismatch``,
+    ``router_mismatch``, ``checksum_mismatch``, ``consume_failed`` or the
+    guard's own reason (``already_used``, ``expired``,
+    ``unknown_authorization``, ...).
+    """
+
+    code = "acl_offer_refused"
+
+    def __init__(self, reason: str, message: str, *, router_id: str | None) -> None:
+        """Remember the machine-readable reason."""
+        super().__init__(message, router_id=router_id, details={"reason": reason})
+        self.reason = reason
+
+
+class AclOfferDeployError(AclDeployError):
+    """An authorized offer deploy failed on the router.
+
+    ``reason``: ``unreachable`` | ``write_blocked``.
+    ``written`` is False when the ACL file was certainly not replaced, None
+    when that is unknown (connection lost during the write).
+    ``rollback_command`` is set whenever a backup was taken.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        *,
+        written: bool | None = False,
+        backup_path: str | None = None,
+        rollback_command: str | None = None,
+    ) -> None:
+        """Remember what happened on the router."""
+        super().__init__(reason, message)
+        self.written = written
+        self.backup_path = backup_path
+        self.rollback_command = rollback_command
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class AclRight:
+    """One rpcd right: section, scope, object and (mapped scopes) method.
+
+    Examples: ``AclRight("read", "ubus", "iwinfo", "scan")``,
+    ``AclRight("read", "file", "/proc/cpuinfo", "read")``,
+    ``AclRight("read", "cgi-io", "backup")``, ``AclRight("read", "uci", "network")``.
+    """
+
+    section: str
+    scope: str
+    object: str
+    method: str = ""
+
+    def __post_init__(self) -> None:
+        """Reject malformed rights early (the ACL is built from them)."""
+        if self.section not in ACL_SECTIONS:
+            raise AclTierError(f"invalid ACL section {self.section!r}")
+        if not self.scope or not self.object:
+            raise AclTierError("ACL right needs scope and object")
+        if (self.scope in _MAPPED_SCOPES) != bool(self.method):
+            raise AclTierError(
+                f"scope {self.scope!r}: method is "
+                + ("required" if self.scope in _MAPPED_SCOPES else "not allowed")
+            )
+
+    @property
+    def permission(self) -> str:
+        """Permission string as CapabilityStatus.required_permissions uses it."""
+        if self.scope == "ubus":
+            return f"ubus:{self.object}.{self.method}"
+        if self.scope == "file":
+            return f"file:{self.object}:{self.method}"
+        return f"{self.scope}:{self.object}"
+
+    def describe(self) -> str:
+        """One line for the UI, e.g. ``read ubus:iwinfo.scan``."""
+        return f"{self.section} {self.permission}"
+
+
+def rights_from_acl(acl: Mapping[str, Any] | None) -> frozenset[AclRight]:
+    """Flatten an rpcd ACL file (all groups) into a set of rights.
+
+    Unknown shapes are skipped, never guessed: a non-table group, section or
+    scope value contributes nothing.
+    """
+    rights: set[AclRight] = set()
+    if not isinstance(acl, Mapping):
+        return frozenset()
+    for group in acl.values():
+        if not isinstance(group, Mapping):
+            continue
+        for section in ACL_SECTIONS:
+            scopes = group.get(section)
+            if not isinstance(scopes, Mapping):
+                continue
+            for scope, value in scopes.items():
+                if scope in _MAPPED_SCOPES and isinstance(value, Mapping):
+                    for obj, methods in value.items():
+                        if isinstance(methods, list):
+                            rights.update(
+                                AclRight(section, scope, str(obj), str(m))
+                                for m in methods
+                                if isinstance(m, str) and m
+                            )
+                elif scope not in _MAPPED_SCOPES and isinstance(value, list):
+                    rights.update(
+                        AclRight(section, scope, str(obj))
+                        for obj in value
+                        if isinstance(obj, str) and obj
+                    )
+    return frozenset(rights)
+
+
+def _sections_from_rights(rights: Iterable[AclRight]) -> dict[str, Any]:
+    """Deterministic {section: {scope: ...}} tree, everything sorted."""
+    tree: dict[str, dict[str, Any]] = {}
+    for right in sorted(set(rights)):
+        scopes = tree.setdefault(right.section, {})
+        if right.scope in _MAPPED_SCOPES:
+            objects = scopes.setdefault(right.scope, {})
+            objects.setdefault(right.object, []).append(right.method)
+        else:
+            scopes.setdefault(right.scope, []).append(right.object)
+    return {section: tree[section] for section in ACL_SECTIONS if section in tree}
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class AclTier:
+    """One selectable block of rights and the capabilities it serves.
+
+    ``option``: options-flow key that must be on before the tier may be
+    offered or deployed (``config_backup_enabled`` for the config tier).
+    ``mandatory``: part of every offer (only the base read tier).
+    """
+
+    tier_id: str
+    title: str
+    capabilities: tuple[str, ...]
+    rights: frozenset[AclRight]
+    risk: str
+    module: str = "core"
+    mandatory: bool = False
+    option: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate id, rights and capability names."""
+        if not _TIER_ID_RE.fullmatch(self.tier_id):
+            raise AclTierError(f"invalid tier id {self.tier_id!r}")
+        if not self.rights:
+            raise AclTierError(f"tier {self.tier_id} adds no rights")
+        if not self.title or not self.risk:
+            raise AclTierError(f"tier {self.tier_id} needs title and risk note")
+        for cap in self.capabilities:
+            if "." not in cap:
+                raise AclTierError(f"capability {cap!r} has no namespace")
+
+    @property
+    def permissions(self) -> tuple[str, ...]:
+        """Sorted permission strings of this tier."""
+        return tuple(sorted({r.permission for r in self.rights}))
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form for the UI."""
+        return {
+            "tier_id": self.tier_id,
+            "title": self.title,
+            "module": self.module,
+            "mandatory": self.mandatory,
+            "option": self.option,
+            "capabilities": list(self.capabilities),
+            "rights": [r.describe() for r in sorted(self.rights)],
+            "risk": self.risk,
+        }
+
+
+def _forbidden_optional_right(right: AclRight) -> str | None:
+    """Why an optional tier may not carry this right (None = allowed).
+
+    Optional tiers only ever ADD READ rights. No file exec, no file write,
+    nothing on the ACL directory itself, no write section at all. A later
+    module that needs more must change this rule deliberately (review).
+    """
+    if right.section != "read":
+        return "optional tiers may only add read rights"
+    if right.scope == "file" and right.method in ("exec", "write"):
+        return "file exec/write is never added by an optional tier"
+    if right.scope == "ubus" and right.object == "file":
+        return "ubus file methods are part of the base tier only"
+    if "/rpcd/acl.d" in right.object:
+        return "optional tiers must not touch the rpcd ACL directory"
+    return None
+
+
+class AclTierRegistry:
+    """Ordered registry of tier definitions (not an if-chain).
+
+    The core registers its tiers at import; later modules (security-center,
+    net-diagnostics) call :meth:`register` with their own tier. Order of
+    registration is the canonical order of tiers in an offer.
+    """
+
+    def __init__(self, tiers: Iterable[AclTier] = ()) -> None:
+        """Start with ``tiers`` (validated like :meth:`register`)."""
+        self._tiers: dict[str, AclTier] = {}
+        for tier in tiers:
+            self.register(tier)
+
+    def register(self, tier: AclTier) -> None:
+        """Add a tier; refuse duplicates, a second base tier and unsafe rights."""
+        if tier.tier_id in self._tiers:
+            raise AclTierError(f"tier {tier.tier_id} already registered")
+        if tier.mandatory and any(t.mandatory for t in self._tiers.values()):
+            raise AclTierError("only one mandatory (base) tier is allowed")
+        if not tier.mandatory:
+            for right in tier.rights:
+                why = _forbidden_optional_right(right)
+                if why:
+                    raise AclTierError(
+                        f"tier {tier.tier_id}: {right.describe()} refused ({why})"
+                    )
+        self._tiers[tier.tier_id] = tier
+
+    def get(self, tier_id: str) -> AclTier:
+        """Tier by id or AclTierError."""
+        try:
+            return self._tiers[tier_id]
+        except KeyError:
+            raise AclTierError(f"unknown ACL tier {tier_id!r}") from None
+
+    def tiers(self) -> tuple[AclTier, ...]:
+        """All tiers in canonical order."""
+        return tuple(self._tiers.values())
+
+    def normalize(self, tier_ids: Iterable[str]) -> tuple[str, ...]:
+        """Selected ids + mandatory ones, deduplicated, canonical order."""
+        if isinstance(tier_ids, str):
+            raise AclTierError("tiers must be an iterable of ids, not a string")
+        wanted = set()
+        for tier_id in tier_ids:
+            self.get(tier_id)  # raises for unknown ids
+            wanted.add(tier_id)
+        return tuple(
+            t.tier_id
+            for t in self._tiers.values()
+            if t.mandatory or t.tier_id in wanted
+        )
+
+    def offerable(self, options: Mapping[str, Any] | None) -> tuple[AclTier, ...]:
+        """Tiers the UI may offer under the given entry options."""
+        opts = options or {}
+        return tuple(
+            t
+            for t in self._tiers.values()
+            if t.option is None or bool(opts.get(t.option))
+        )
+
+    def check_options(
+        self, tier_ids: Iterable[str], options: Mapping[str, Any] | None
+    ) -> None:
+        """Raise AclTierError if a selected tier is gated by an option that is off."""
+        opts = options or {}
+        for tier_id in self.normalize(tier_ids):
+            tier = self._tiers[tier_id]
+            if tier.option is not None and not bool(opts.get(tier.option)):
+                raise AclTierError(
+                    f"tier {tier_id} needs option {tier.option} to be enabled"
+                )
+
+    def capability_tiers(self) -> dict[str, str]:
+        """Capability name -> id of the tier that serves it."""
+        return {
+            cap: tier.tier_id
+            for tier in self._tiers.values()
+            for cap in tier.capabilities
+        }
+
+
+# Today's (v8) read rights minus the radio scan, plus txpowerlist. Derived
+# from RPCD_ACL_CONTENT so the base tier can never drift from what the
+# integration reads; tests pin the exact difference to v8.
+_SCAN_RIGHT: Final = AclRight("read", "ubus", "iwinfo", "scan")
+_TXPOWERLIST_RIGHT: Final = AclRight("read", "ubus", "iwinfo", "txpowerlist")
+
+
+def _base_read_rights() -> frozenset[AclRight]:
+    return (rights_from_acl(RPCD_ACL_CONTENT) - {_SCAN_RIGHT}) | {_TXPOWERLIST_RIGHT}
+
+
+def _default_tiers() -> tuple[AclTier, ...]:
+    return (
+        AclTier(
+            tier_id=TIER_READ,
+            title="Base: everything the integration reads today, without radio scan",
+            capabilities=(
+                Capability.DATA_SYSTEM_BOARD.value,
+                Capability.DATA_WIRELESS.value,
+                Capability.DATA_HOSTAPD_CLIENTS.value,
+                Capability.DATA_DHCP_LEASES.value,
+                Capability.DATA_LOGS.value,
+                Capability.DATA_IWINFO.value,
+                Capability.DATA_SERVICES.value,
+                Capability.DATA_UCI.value,
+                CAPABILITY_RF_TXPOWERLIST,
+            ),
+            rights=_base_read_rights(),
+            risk=(
+                "Same rights as ACL v8 (including its existing Wi-Fi on/off, "
+                "network reload and rpcd restart rights) minus iwinfo scan, plus "
+                "the read-only iwinfo txpowerlist. No access to secrets."
+            ),
+            mandatory=True,
+        ),
+        AclTier(
+            tier_id=TIER_CONFIG_BACKUP_READ,
+            title="Configuration backup (read)",
+            capabilities=(
+                Capability.CONFIG_CGI_BACKUP.value,
+                Capability.CONFIG_UCI_READ.value,
+                Capability.CONFIG_PACKAGELIST.value,
+            ),
+            rights=frozenset(
+                {
+                    AclRight("read", "cgi-io", "backup"),
+                    AclRight("read", "ubus", "rpc-sys", "packagelist"),
+                    *(AclRight("read", "uci", c) for c in CONFIG_BACKUP_UCI_CONFIGS),
+                }
+            ),
+            risk=(
+                "Gives the Home Assistant rpcd user READ ACCESS TO ALL ROUTER "
+                "SECRETS: the backup archive contains /etc/shadow, SSH host keys, "
+                "Wi-Fi keys, VPN keys; the UCI configs contain Wi-Fi, VPN and DDNS "
+                "passwords. Anyone who can use this HA rpcd login can read them."
+            ),
+            option=OPTION_CONFIG_BACKUP_ENABLED,
+        ),
+        AclTier(
+            tier_id=TIER_RF_SURVEY,
+            title="Wi-Fi channel survey",
+            capabilities=(CAPABILITY_RF_SURVEY,),
+            rights=frozenset({AclRight("read", "ubus", "iwinfo", "survey")}),
+            risk=(
+                "Read-only channel statistics from the driver (busy/noise per "
+                "channel). Does not change the channel. Not measured on the "
+                "user's hardware yet."
+            ),
+            module="wifi_rf",
+        ),
+        AclTier(
+            tier_id=TIER_RF_SCAN,
+            title="Wi-Fi neighbour scan",
+            capabilities=(CAPABILITY_RF_SCAN,),
+            rights=frozenset({_SCAN_RIGHT}),
+            risk=(
+                "A scan can take the radio off its channel for a moment (clients "
+                "may see a short gap) and blocks rpcd while it runs. Only for "
+                "on-demand use, never in the poll."
+            ),
+            module="wifi_rf",
+        ),
+    )
+
+
+DEFAULT_TIER_REGISTRY: Final = AclTierRegistry(_default_tiers())
+
+
+def _tiered_description(tier_ids: Iterable[str]) -> str:
+    return (
+        f"{TIERED_ACL_DESCRIPTION_PREFIX} v{TIERED_ACL_VERSION}; "
+        f"tiers: {','.join(tier_ids)}"
+    )
+
+
+def build_acl(
+    tiers: Iterable[str], *, registry: AclTierRegistry = DEFAULT_TIER_REGISTRY
+) -> dict[str, Any]:
+    """Build the tiered ACL for the selected tiers (base tier always included).
+
+    Deterministic: the same set of tiers gives the same dict in any order.
+    Pure — no router access.
+    """
+    tier_ids = registry.normalize(tiers)
+    rights: set[AclRight] = set()
+    for tier_id in tier_ids:
+        rights |= registry.get(tier_id).rights
+    group: dict[str, Any] = {"description": _tiered_description(tier_ids)}
+    group.update(_sections_from_rights(rights))
+    return {"root": group}
+
+
+def render_acl(acl: Mapping[str, Any]) -> str:
+    """Exact text written to the router (sorted keys, 2-space indent)."""
+    return json.dumps(acl, indent=2, sort_keys=True, ensure_ascii=True)
+
+
+def acl_checksum(acl: Mapping[str, Any]) -> str:
+    """sha256 hex of :func:`render_acl` — of exactly the bytes written."""
+    return hashlib.sha256(render_acl(acl).encode("utf-8")).hexdigest()
+
+
+def acl_binding_checksum(router_id: str, acl: Mapping[str, Any]) -> str:
+    """Checksum an ``acl_deploy`` approval is bound to (contract 6.3)."""
+    return binding_checksum(router_id, acl_checksum(acl))
+
+
+@dataclass(frozen=True, slots=True)
+class TieredAclInfo:
+    """Marker read back from a deployed tiered ACL."""
+
+    version: int
+    tiers: tuple[str, ...]
+
+
+def parse_tiered_acl(acl: Any) -> TieredAclInfo | None:
+    """Return the tier marker of a deployed ACL, or None if it is not tiered."""
+    if not isinstance(acl, Mapping):
+        return None
+    group = acl.get("root")
+    if not isinstance(group, Mapping):
+        return None
+    description = group.get("description")
+    if not isinstance(description, str) or not description.startswith(
+        TIERED_ACL_DESCRIPTION_PREFIX
+    ):
+        return None
+    match = _TIERED_MARKER_RE.search(description)
+    if match is None:
+        return None
+    return TieredAclInfo(
+        version=int(match.group("version")),
+        tiers=tuple(match.group("tiers").split(",")),
+    )
+
+
+class DeployedAclKind(StrEnum):
+    """What the ACL file on a router is, compared with this code."""
+
+    MISSING = "missing"
+    LEGACY_CURRENT = "legacy_current"  # exactly RPCD_ACL_CONTENT (v8)
+    TIERED_CURRENT = "tiered_current"  # marker + equals build_acl(its tiers)
+    TIERED_OTHER = "tiered_other"  # marker, but other version/content
+    FOREIGN = "foreign"  # anything else (older legacy, hand-edited, broken)
+
+
+def classify_deployed_acl(
+    acl: Any, *, registry: AclTierRegistry = DEFAULT_TIER_REGISTRY
+) -> DeployedAclKind:
+    """Classify a parsed ACL file (None = missing). Pure."""
+    if acl is None:
+        return DeployedAclKind.MISSING
+    if acl == RPCD_ACL_CONTENT:
+        return DeployedAclKind.LEGACY_CURRENT
+    info = parse_tiered_acl(acl)
+    if info is None:
+        return DeployedAclKind.FOREIGN
+    if info.version == TIERED_ACL_VERSION:
+        try:
+            if build_acl(info.tiers, registry=registry) == acl:
+                return DeployedAclKind.TIERED_CURRENT
+        except AclTierError:
+            pass
+    return DeployedAclKind.TIERED_OTHER
+
+
+def granted_capabilities(
+    acl: Any, *, registry: AclTierRegistry = DEFAULT_TIER_REGISTRY
+) -> dict[str, bool]:
+    """Capability -> True if ``acl`` grants every right of the serving tier."""
+    rights = rights_from_acl(acl)
+    return {
+        cap: registry.get(tier_id).rights <= rights
+        for cap, tier_id in registry.capability_tiers().items()
+    }
+
+
+def missing_permissions(
+    acl: Any, capability: str, *, registry: AclTierRegistry = DEFAULT_TIER_REGISTRY
+) -> tuple[str, ...]:
+    """Permission strings ``acl`` lacks for ``capability`` (for
+    ``CapabilityStatus.required_permissions``); () if not tier-served."""
+    tier_id = registry.capability_tiers().get(capability)
+    if tier_id is None:
+        return ()
+    missing = registry.get(tier_id).rights - rights_from_acl(acl)
+    return tuple(sorted({r.permission for r in missing}))
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class AclOffer:
+    """What deploying the selected tiers would change (shown before approval)."""
+
+    tiers: tuple[str, ...]
+    acl_json: str = field(repr=False)
+    acl_checksum: str
+    added: tuple[AclRight, ...]
+    removed: tuple[AclRight, ...]
+    current_kind: DeployedAclKind
+    risks: tuple[tuple[str, str], ...]
+
+    @property
+    def unchanged(self) -> bool:
+        """True if the router would end up with exactly the same rights."""
+        return not self.added and not self.removed
+
+    @property
+    def acl(self) -> dict[str, Any]:
+        """The proposed ACL as a fresh dict."""
+        return json.loads(self.acl_json)
+
+    def binding_checksum(self, router_id: str) -> str:
+        """Checksum to pass to ``guard.authorize(acl_deploy, ...)``."""
+        return binding_checksum(router_id, self.acl_checksum)
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form for the UI."""
+        return {
+            "tiers": list(self.tiers),
+            "acl_checksum": self.acl_checksum,
+            "acl_version": TIERED_ACL_VERSION,
+            "current_kind": self.current_kind.value,
+            "added": [r.describe() for r in self.added],
+            "removed": [r.describe() for r in self.removed],
+            "unchanged": self.unchanged,
+            "risks": [{"tier_id": t, "risk": r} for t, r in self.risks],
+        }
+
+
+def describe_offer(
+    current: Mapping[str, Any] | int | None,
+    tiers: Iterable[str],
+    *,
+    options: Mapping[str, Any] | None = None,
+    registry: AclTierRegistry = DEFAULT_TIER_REGISTRY,
+) -> AclOffer:
+    """Diff of rights between what is deployed and the offer. Pure.
+
+    ``current``: the parsed ACL file read from the router, ``None`` if there
+    is none, or ``ACL_VERSION`` (int) as shorthand for the shipped v8 file.
+    ``options``: when given, a tier gated by an option that is off raises
+    AclTierError (the UI should only offer ``registry.offerable(options)``).
+    """
+    if isinstance(current, bool) or (
+        isinstance(current, int) and current != ACL_VERSION
+    ):
+        raise AclTierError(f"only ACL v{ACL_VERSION} can be named by version")
+    current_acl: Any = RPCD_ACL_CONTENT if isinstance(current, int) else current
+    tier_ids = registry.normalize(tiers)
+    if options is not None:
+        registry.check_options(tier_ids, options)
+    proposed = build_acl(tier_ids, registry=registry)
+    have = rights_from_acl(current_acl)
+    want = rights_from_acl(proposed)
+    return AclOffer(
+        tiers=tier_ids,
+        acl_json=render_acl(proposed),
+        acl_checksum=acl_checksum(proposed),
+        added=tuple(sorted(want - have)),
+        removed=tuple(sorted(have - want)),
+        current_kind=classify_deployed_acl(current_acl, registry=registry),
+        risks=tuple((t, registry.get(t).risk) for t in tier_ids),
+    )
+
+
+class GuardConsume(Protocol):
+    """``ActionGuardProtocol.consume`` (pass ``guard.consume``)."""
+
+    def __call__(
+        self,
+        authorization: WriteAuthorization,
+        *,
+        action: str,
+        router_id: str,
+        checksum: str | None = None,
+    ) -> None:
+        """Check ledger/single use/expiry/binding or raise AuthorizationError."""
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class AclDeployResult:
+    """Outcome of an authorized offer deploy — command and way back."""
+
+    router_id: str
+    tiers: tuple[str, ...]
+    acl_checksum: str
+    changed: bool
+    transport: str  # "ubus" | "ssh" | "none" (unchanged)
+    backup_path: str | None
+    previous_checksum: str | None
+    previous_content: str | None = field(repr=False)
+    command: str | None
+    rollback_command: str | None
+    rpcd_restarted: bool
+    applied_at: datetime
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form for the change log / audit."""
+        return {
+            "router_id": self.router_id,
+            "tiers": list(self.tiers),
+            "acl_checksum": self.acl_checksum,
+            "changed": self.changed,
+            "transport": self.transport,
+            "backup_path": self.backup_path,
+            "previous_checksum": self.previous_checksum,
+            "command": self.command,
+            "rollback_command": self.rollback_command,
+            "rpcd_restarted": self.rpcd_restarted,
+            "applied_at": self.applied_at.isoformat(),
+        }
+
+
+def _rollback_command(backup_path: str | None) -> str:
+    if backup_path:
+        return f"cp -p {backup_path} {ACL_FILE_PATH} && {_RPCD_RESTART_CMD}"
+    # No ACL file existed before: remove ours. ensure_acl redeploys v8 at the
+    # next Home Assistant start.
+    return f"rm -f {ACL_FILE_PATH} && {_RPCD_RESTART_CMD}"
+
+
+def _sha256_text(text: str | None) -> str | None:
+    return None if text is None else hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _refuse(reason: str, router_id: str | None, message: str) -> AclOfferRefusedError:
+    _LOGGER.warning("ACL offer deploy refused (%s): %s", reason, message)
+    return AclOfferRefusedError(reason, message, router_id=router_id)
+
+
+def _check_authorization(
+    authorization: WriteAuthorization | None,
+    guard_consume: GuardConsume,
+    *,
+    router_id: str,
+    checksum: str,
+) -> None:
+    """Consume the authorization via the guard, then re-check it ourselves.
+
+    The guard does the binding/ledger/single-use checks and audits. The
+    re-check afterwards is defence in depth against a ``guard_consume`` that
+    does not really consume (e.g. a stub): no write without a used,
+    matching authorization.
+    """
+    if not isinstance(authorization, WriteAuthorization):
+        raise _refuse("no_authorization", router_id, "no WriteAuthorization given")
+    try:
+        guard_consume(
+            authorization,
+            action=GuardedAction.ACL_DEPLOY.value,
+            router_id=router_id,
+            checksum=checksum,
+        )
+    except AuthorizationError as err:
+        reason = str(err.details.get("reason") or "consume_failed")
+        raise _refuse(reason, router_id, f"guard refused: {reason}") from err
+    except Exception as err:  # fail closed on any guard error
+        raise _refuse("consume_failed", router_id, f"guard error: {err}") from err
+    if not authorization.consumed:
+        raise _refuse("not_consumed", router_id, "authorization was not consumed")
+    if authorization.action != GuardedAction.ACL_DEPLOY.value:
+        raise _refuse("action_mismatch", router_id, "authorization is not acl_deploy")
+    if authorization.router_id != router_id:
+        raise _refuse(
+            "router_mismatch", router_id, "authorization is for another router"
+        )
+    if authorization.checksum != checksum:
+        raise _refuse(
+            "checksum_mismatch", router_id, "authorization is for another ACL"
+        )
+
+
+_PERMISSION_ERRORS: Final = (
+    OpenWrtAuthError,
+    OpenWrtResponseError,
+    OpenWrtMethodNotFoundError,
+)
+_TRANSPORT_ERRORS: Final = (OpenWrtConnectionError, OpenWrtTimeoutError)
+
+
+async def _read_current_acl(api: OpenWrtAPI) -> tuple[str, str | None]:
+    """("present", text) or ("unreadable", None).
+
+    No "missing" via ubus on purpose: _call reports NOT_FOUND and an
+    ACL-blocked read with the same exception, so a file we cannot read might
+    exist. Writing over it without a backup would break the user's rule
+    (every change with a way back); "unreadable" goes to the SSH path, whose
+    shell checks existence itself and copies the file before writing.
+    """
+    try:
+        current = await api._call("file", "read", {"path": ACL_FILE_PATH})
+    except _TRANSPORT_ERRORS as err:
+        raise AclOfferDeployError(
+            "unreachable", f"router unreachable before ACL deploy: {err}"
+        ) from err
+    except _PERMISSION_ERRORS:
+        return ("unreadable", None)
+    text = current.get("data") if isinstance(current, dict) else current
+    if not isinstance(text, str):
+        return ("unreadable", None)
+    return ("present", text)
+
+
+async def _deploy_offer_ssh(
+    api: OpenWrtAPI, acl_text: str, backup_path: str
+) -> tuple[bool, bool]:
+    """Backup + atomic write + one rpcd restart in one SSH command.
+
+    Returns (deployed, backed_up). Backup first: if ``cp`` fails, nothing is
+    written. The restart only runs after a successful write.
+    """
+    remote_cmd = (
+        f"{{ [ ! -e {ACL_FILE_PATH} ] || "
+        f"{{ cp -p {ACL_FILE_PATH} {backup_path} && echo {_SSH_OFFER_BACKUP_MARKER}; }}; }} "
+        f"&& printf '%s' {shlex.quote(acl_text)} > {_ACL_TMP_PATH} "
+        f"&& mv {_ACL_TMP_PATH} {ACL_FILE_PATH} "
+        f"&& echo {_SSH_OFFER_DEPLOY_MARKER} "
+        f"&& {_RPCD_RESTART_CMD} >/dev/null 2>&1"
+    )
+    out = await api._run_ssh(remote_cmd, timeout=15.0) or ""
+    return (_SSH_OFFER_DEPLOY_MARKER in out, _SSH_OFFER_BACKUP_MARKER in out)
+
+
+async def async_deploy_acl_offer(
+    api: OpenWrtAPI,
+    tiers: Iterable[str],
+    *,
+    router_id: str,
+    authorization: WriteAuthorization | None,
+    guard_consume: GuardConsume,
+    options: Mapping[str, Any] | None = None,
+    registry: AclTierRegistry = DEFAULT_TIER_REGISTRY,
+    now: datetime | None = None,
+) -> AclDeployResult:
+    """Write the tiered ACL for ``tiers`` to ONE router — only when authorized.
+
+    Order: validate tiers and options (pure) -> consume the authorization
+    (``guard_consume`` = ``guard.consume``; action ``acl_deploy``, this
+    ``router_id``, ``acl_binding_checksum(router_id, acl)``) -> read the
+    current ACL -> back it up on the router -> write -> restart rpcd once.
+    An identical ACL on the router is left alone (no write, no restart).
+
+    Raises:
+        AclTierError: unknown tier or tier gated by an option that is off
+            (``options`` None counts as "all options off").
+        AclOfferRefusedError: no/invalid/used/mismatching authorization —
+            nothing was sent to the router.
+        AclOfferDeployError: router-side failure after the authorization was
+            used; carries ``rollback_command`` when a backup was taken.
+    """
+    tier_ids = registry.normalize(tiers)
+    try:
+        registry.check_options(tier_ids, options)
+    except AclTierError as err:
+        raise _refuse("option_disabled", router_id, str(err)) from err
+    acl = build_acl(tier_ids, registry=registry)
+    acl_text = render_acl(acl)
+    checksum = acl_checksum(acl)
+    _check_authorization(
+        authorization,
+        guard_consume,
+        router_id=router_id,
+        checksum=binding_checksum(router_id, checksum),
+    )
+
+    applied_at = now or utcnow()
+    backup_path = f"{ACL_BACKUP_PREFIX}{applied_at.strftime('%Y%m%dT%H%M%SZ')}"
+    command = f"write {ACL_FILE_PATH} (sha256 {checksum}) && {_RPCD_RESTART_CMD}"
+
+    def _result(**kw: Any) -> AclDeployResult:
+        return AclDeployResult(
+            router_id=router_id,
+            tiers=tier_ids,
+            acl_checksum=checksum,
+            applied_at=applied_at,
+            **kw,
+        )
+
+    state, previous = await _read_current_acl(api)
+    if state == "present":
+        try:
+            same = json.loads(previous or "") == acl
+        except ValueError:
+            same = False
+        if same:
+            _LOGGER.info(
+                "Tiered ACL %s already on %s — nothing written", tier_ids, api._host
+            )
+            return _result(
+                changed=False,
+                transport="none",
+                backup_path=None,
+                previous_checksum=_sha256_text(previous),
+                previous_content=previous,
+                command=None,
+                rollback_command=None,
+                rpcd_restarted=False,
+            )
+
+    use_ssh = state == "unreadable"
+    backed_up_path: str | None = None
+    if not use_ssh and state == "present":
+        try:
+            await api._call(
+                "file", "write", {"path": backup_path, "data": previous or ""}
+            )
+            backed_up_path = backup_path
+        except _TRANSPORT_ERRORS as err:
+            raise AclOfferDeployError(
+                "unreachable", f"router unreachable during ACL backup: {err}"
+            ) from err
+        except _PERMISSION_ERRORS as err:
+            _LOGGER.debug("ubus backup write rejected on %s (%s)", api._host, err)
+            use_ssh = True
+
+    if not use_ssh:
+        try:
+            await api._call("file", "write", {"path": ACL_FILE_PATH, "data": acl_text})
+        except _TRANSPORT_ERRORS as err:
+            raise AclOfferDeployError(
+                "unreachable",
+                f"router unreachable during ACL write: {err}",
+                written=None,
+                backup_path=backed_up_path,
+                rollback_command=_rollback_command(backed_up_path),
+            ) from err
+        except _PERMISSION_ERRORS as err:
+            _LOGGER.debug("ubus ACL write rejected on %s (%s)", api._host, err)
+            use_ssh = True
+        else:
+            restarted = True
+            try:
+                await api._call(
+                    "file",
+                    "exec",
+                    {"command": "/etc/init.d/rpcd", "params": ["restart"]},
+                )
+            except (*_PERMISSION_ERRORS, *_TRANSPORT_ERRORS) as err:
+                restarted = False
+                _LOGGER.debug(
+                    "rpcd restart on %s failed (non-fatal): %s", api._host, err
+                )
+            _LOGGER.info(
+                "Deployed tiered ACL v%s %s to %s via ubus (backup %s)",
+                TIERED_ACL_VERSION,
+                tier_ids,
+                api._host,
+                backed_up_path,
+            )
+            return _result(
+                changed=True,
+                transport="ubus",
+                backup_path=backed_up_path,
+                previous_checksum=_sha256_text(previous),
+                previous_content=previous,
+                command=command,
+                rollback_command=_rollback_command(backed_up_path),
+                rpcd_restarted=restarted,
+            )
+
+    deployed, ssh_backed_up = await _deploy_offer_ssh(api, acl_text, backup_path)
+    if ssh_backed_up:
+        backed_up_path = backup_path
+    if not deployed:
+        # Either the backup cp or the write failed; the shell chain stops at
+        # the first error, so the ACL file was not replaced by a complete one.
+        raise AclOfferDeployError(
+            "write_blocked",
+            "ubus file/write rejected and SSH deploy did not confirm success",
+            written=False,
+            backup_path=backed_up_path,
+            rollback_command=(
+                _rollback_command(backed_up_path) if backed_up_path else None
+            ),
+        )
+    if state == "present" and backed_up_path is None:
+        # The chain only writes after a successful cp when a file existed;
+        # a missing marker here means the file vanished in between.
+        _LOGGER.debug("ACL on %s disappeared before the SSH backup", api._host)
+    _LOGGER.info(
+        "Deployed tiered ACL v%s %s to %s via SSH (backup %s)",
+        TIERED_ACL_VERSION,
+        tier_ids,
+        api._host,
+        backed_up_path,
+    )
+    return _result(
+        changed=True,
+        transport="ssh",
+        backup_path=backed_up_path,
+        previous_checksum=_sha256_text(previous),
+        previous_content=previous,
+        command=command,
+        rollback_command=_rollback_command(backed_up_path),
+        rpcd_restarted=True,
+    )
+
+
+async def ensure_acl_respecting_offer(api: OpenWrtAPI) -> bool:
+    """Like :func:`ensure_acl`, but never overwrites a deployed tiered ACL.
+
+    ``ensure_acl`` rewrites any ACL that differs from v8, so it would undo a
+    user-approved tiered ACL at the next start. Callers that may face a
+    tiered ACL (``__init__.py`` / the config flow repair, once offers can be
+    deployed) switch to this function. For every non-tiered file it simply
+    delegates to ``ensure_acl`` (one extra file/read).
+    """
+    try:
+        current = await api._call("file", "read", {"path": ACL_FILE_PATH})
+    except (*_PERMISSION_ERRORS, *_TRANSPORT_ERRORS):
+        return await ensure_acl(api)
+    text = current.get("data") if isinstance(current, dict) else current
+    try:
+        parsed = json.loads(text) if isinstance(text, str) else None
+    except ValueError:
+        parsed = None
+    if parse_tiered_acl(parsed) is not None:
+        _LOGGER.debug(
+            "Tiered ACL on %s (%s) — left alone, changes only via an approved offer",
+            api._host,
+            classify_deployed_acl(parsed).value,
+        )
+        return False
     return await ensure_acl(api)
