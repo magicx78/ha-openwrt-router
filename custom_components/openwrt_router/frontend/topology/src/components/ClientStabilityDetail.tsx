@@ -24,6 +24,7 @@ import {
   STATE_LABEL,
   bandLabel,
   kindText,
+  num,
   pct,
   recommendationText,
   rateText,
@@ -43,7 +44,7 @@ const WINDOWS: Array<{ id: StabilityWindow; label: string; seconds: number }> = 
 export function Score({ score }: { score: number | null }) {
   return (
     <span className={`diag-score diag-score--${scoreLevel(score)}`} title={score == null ? 'Zu wenig Daten' : undefined}>
-      {score == null ? '–' : Math.round(score)}
+      {num(score)}
     </span>
   );
 }
@@ -117,7 +118,7 @@ export function ClientStabilityDetail({ api, mac, tick, nameOf, canEdit, onToggl
   const spans = d ? apSpans(d, win, step) : [];
   const exact = win === '1h' || win === '24h';
   const dcText = st
-    ? Object.entries(DISCONNECT_LABEL).map(([k, label]) => `${label} ${st.disconnects[k] ?? 0}`).join(' · ')
+    ? Object.entries(DISCONNECT_LABEL).map(([k, label]) => `${label} ${num(st.disconnects[k] ?? 0)}`).join(' · ')
     : '';
   const lastDc = live?.last_disconnect;
 
@@ -151,7 +152,7 @@ export function ClientStabilityDetail({ api, mac, tick, nameOf, canEdit, onToggl
             <Fact label="IP" value={live.ip ?? '–'} />
             <Fact label="Access Point" value={live.router_name ?? '–'} />
             <Fact label="Band · SSID" value={`${bandLabel(live.band)} · ${live.ssid ?? '–'}`} />
-            <Fact label="Signal" value={live.rssi != null ? `${live.rssi} dBm` : '–'} />
+            <Fact label="Signal" value={live.rssi != null ? `${num(live.rssi)} dBm` : '–'} />
             <Fact label="Verbunden seit" value={live.session_start ? formatTs(live.session_start) : '–'} />
             <Fact label="Zuletzt gesehen" value={formatTs(live.last_seen)} />
             <Fact label="Letzter Abbruch" value={lastDc ? formatTs(lastDc.ts) : '–'} />
@@ -161,18 +162,20 @@ export function ClientStabilityDetail({ api, mac, tick, nameOf, canEdit, onToggl
             <Fact label="Verfügbarkeit" value={pct(st!.availability)} />
             <Fact label="Messabdeckung" value={pct(st!.coverage)} />
             <Fact label="Beobachtet · Messlücken" value={`${formatDuration(st!.observed_s ?? 0)} · ${formatDuration(st!.gap_s ?? 0)}`} />
-            <Fact label="Sitzungen" value={String(st!.sessions)} />
+            <Fact label="Sitzungen" value={num(st!.sessions)} />
             <Fact label="Ø Sitzungsdauer" value={st!.session_mean_s != null
-              ? `${formatDuration(st!.session_mean_s)} (${st!.finished_sessions ?? 0} beendet)`
+              ? `${formatDuration(st!.session_mean_s)} (${num(st!.finished_sessions ?? 0)} beendet)`
               : 'keine beendete Sitzung'} />
             <Fact label="Längste stabile Sitzung" value={st!.longest_stable_s ? formatDuration(st!.longest_stable_s) : '–'} />
             <Fact label="Abbrüche je Klasse" value={dcText} />
-            <Fact label="Auffällige Ereignisse" value={<span title="Abbrüche mit Fehler oder ohne Grund, Flattern, fehlgeschlagene Anmeldung, Assoziierung und DHCP">{st!.notable_events ?? 0}</span>} />
-            <Fact label="Reconnects" value={st!.log_coverage ? String(st!.reconnects) : 'kein Log'} />
-            <Fact label="Roaming rein · raus · Flattern" value={`${st!.roams_in} · ${st!.roams_out ?? 0} · ${st!.roam_flaps}`} />
-            <Fact label="Anmelde- · Assoziierungs- · DHCP-Fehler" value={`${st!.auth_fail} · ${st!.assoc_fail ?? 0} · ${st!.dhcp_fail}`} />
+            <Fact label="Auffällige Ereignisse" value={<span title="Abbrüche mit Fehler oder ohne Grund, Flattern, fehlgeschlagene Anmeldung, Assoziierung und DHCP">{num(st!.notable_events ?? 0)}</span>} />
+            <Fact label="Reconnects" value={st!.log_coverage
+              ? <>{num(st!.reconnects)}<span className="diag-table__meta stab-fact-note">Reconnects stammen aus dem Router-Log; kurze Neuanmeldungen beenden keine Sitzung.</span></>
+              : 'kein Log'} />
+            <Fact label="Roaming rein · raus · Flattern" value={`${num(st!.roams_in)} · ${num(st!.roams_out ?? 0)} · ${num(st!.roam_flaps)}`} />
+            <Fact label="Anmelde- · Assoziierungs- · DHCP-Fehler" value={`${num(st!.auth_fail)} · ${num(st!.assoc_fail ?? 0)} · ${num(st!.dhcp_fail)}`} />
             <Fact label="Signal Ø · Min · Max" value={st!.rssi_mean != null
-              ? `${st!.rssi_mean} · ${st!.rssi_min ?? '–'} · ${st!.rssi_max ?? '–'} dBm`
+              ? `${num(st!.rssi_mean)} · ${num(st!.rssi_min)} · ${num(st!.rssi_max)} dBm`
               : '–'} />
             <Fact label="Schwaches Signal" value={pct(st!.weak_share)} />
             <Fact label="Datenrate Ø RX · TX" value={`${rateText(st!.rate_rx_kbit)} · ${rateText(st!.rate_tx_kbit)}`} />
@@ -260,8 +263,8 @@ export function ClientStabilityDetail({ api, mac, tick, nameOf, canEdit, onToggl
             <div className="settings-info">
               {d.attribution.total === 0
                 ? 'Keine Abbrüche in den letzten 24 Stunden.'
-                : `${d.attribution.infra} von ${d.attribution.total} Abbrüchen fallen in Infrastruktur-Probleme, `
-                  + `${d.attribution.client} liegen beim Client oder sind ungeklärt`
+                : `${num(d.attribution.infra)} von ${num(d.attribution.total)} Abbrüchen fallen in Infrastruktur-Probleme, `
+                  + `${num(d.attribution.client)} liegen beim Client oder sind ungeklärt`
                   + `${d.attribution.kind === 'hypothesis' ? ` (Hypothese, ${pct(d.attribution.confidence)})` : d.attribution.kind === 'confirmed' ? ' (bestätigt)' : ''}.`}
             </div>
             {d.incidents.length > 0 && (
@@ -278,7 +281,7 @@ export function ClientStabilityDetail({ api, mac, tick, nameOf, canEdit, onToggl
                 ? d.patterns.time.hours.map(h => `${h.hour} Uhr (${h.hit_days}/${h.covered_days} Tage)`).join(', ')
                 : d.patterns.time.status === 'insufficient' ? 'zu wenig Tage' : 'keins'}</b></span>
               <span>Signaltrend: <b>{d.patterns.signal.status === 'degraded'
-                ? `schlechter um ${Math.abs(d.patterns.signal.delta_db ?? 0)} dB`
+                ? `schlechter um ${num(Math.abs(d.patterns.signal.delta_db ?? 0))} dB`
                 : d.patterns.signal.status === 'no_trend' ? 'gleichbleibend' : 'nicht vergleichbar'}</b></span>
               <span>AP-Muster: <b>{d.patterns.ap.status === 'found' && d.patterns.ap.worst_ap
                 ? `instabil an ${nameOf(d.patterns.ap.worst_ap)}`

@@ -8,6 +8,7 @@ from typing import Any
 from homeassistant.core import Event, HomeAssistant, callback
 
 from .const import DOMAIN, EVENT_DFS, EVENT_DHCP, EVENT_INCIDENT, EVENT_WIFI
+from .core_models import EVENT_CORE
 
 
 def _client(data: dict[str, Any]) -> str:
@@ -90,3 +91,21 @@ def async_describe_events(
     async_describe_event(DOMAIN, EVENT_INCIDENT, describe_incident)
     async_describe_event(DOMAIN, EVENT_DFS, describe_dfs)
     async_describe_event(DOMAIN, EVENT_DHCP, describe_dhcp)
+
+    # Enterprise core (part 1): audit events on the bus (payload is masked).
+    @callback
+    def describe_core(event: Event) -> dict[str, str]:
+        data = event.data
+        entry = (
+            hass.config_entries.async_get_entry(data["entry_id"])
+            if data.get("entry_id")
+            else None
+        )
+        kind = str(data.get("type") or "core event")
+        result = str(data.get("result") or "info")
+        return {
+            "name": entry.title if entry is not None else "OpenWrt Router",
+            "message": f"{kind}: {result}",
+        }
+
+    async_describe_event(DOMAIN, EVENT_CORE, describe_core)
