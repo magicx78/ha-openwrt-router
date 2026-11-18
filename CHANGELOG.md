@@ -9,7 +9,8 @@ All notable changes to the OpenWrt Router integration will be documented in this
 - Enterprise Core: Module bekommen einen eigenen, abgeleiteten Schlüssel
   (`api.async_get_module_key(module, purpose)`, HKDF-SHA256 aus dem
   Installations-Schlüssel); nur für Module mit registriertem Event-Präfix, nie in Log,
-  Diagnose oder Event.
+  Diagnose oder Event. Er trennt Module gegen Versehen, nicht gegen feindlichen Code im
+  selben Prozess.
 - Enterprise Core: `pseudonymise_identifier` / `pseudonymise_fields` ersetzen MAC, IP,
   Hostname, SSID, BSSID und Client-Kennungen durch stabile Pseudonyme (`mac_…`, `ipa_…`,
   `hst_…`, `ssd_…`, `bss_…`, `cli_…`) unter einem Modul-Schlüssel.

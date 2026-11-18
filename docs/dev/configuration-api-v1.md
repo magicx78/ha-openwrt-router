@@ -1163,7 +1163,9 @@ aus dem Installations-Schlüssel mit HKDF-SHA256 (RFC 5869, nur `hmac`/`hashlib`
   `ConfigApiError` mit `reason` `invalid_module` / `reserved_module` /
   `module_not_registered` / `invalid_purpose`; gezählt in `module_keys_refused`, Ausgaben in
   `module_keys_issued`. In einem Python-Prozess ist das eine Namensprüfung, keine Isolation:
-  wer Code im selben Prozess hat, kann jeden Namen angeben.
+  wer Code im selben Prozess hat, kann jeden Namen angeben. Modul-Schlüssel trennen Module
+  also gegen Versehen (falscher Name, vertauschter Zweck), nicht gegen feindlichen Code im
+  selben Prozess (Review L3 von PR #56).
 - `purpose`: höchstens 64 Zeichen `[a-z0-9_.:-]`, ohne `..`. Andere Zwecke ⇒ unabhängige
   Schlüssel.
 - `lost` ⇒ `InstallationKeyLostError`, kein Ersatz. `uninitialised` ⇒ die erste Nutzung legt
@@ -1878,6 +1880,7 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 | 109 | Sicherheitsring (M2, §12.2): Core- und Modul-Einträge getrennt begrenzt; `SECURITY_AUDIT_MAX_EVENTS` (500) gilt nur noch für Core-Einträge, neu `SECURITY_MODULE_QUOTA` (100 je Modul), `SECURITY_MODULE_MAX_EVENTS` (500 alle Module), `core_audit.security_owner`; der Ring hält damit bis zu 1000 Einträge. Ein Modul-Event verdrängt nie einen Core-Eintrag, an der eigenen Quote nur die eigenen. Zähler `module_security_evicted`, `summary()` mit `security_core_entries`, `security_module_entries`, `security_module_total`, `security_module_evicted`; Warn-Log einmal je Modul. `register_event_prefix(..., module="core")` ⇒ `ValueError`. Store-Layout unverändert. | A, B (Verhalten: ein Modul mit mehr als 100 sicherheitsrelevanten Einträgen verliert seine ältesten statt fremder; Modulname `core` abgelehnt) |
 | 110 | Maskierung (L1, §13): `is_counter_name` ist `False`, sobald ein Wort des Namens (oder alle Wörter zusammengeschrieben) in `SECRET_WORDS` steht; `pin_total`, `wps_pin_attempts`, `otp_total`, `psk_retries`, `auth_failures`, `auth_errors`, `wifi_auth_failures` zeigen keine Zahl mehr (`**REDACTED**`, strukturiert und im Freitext). Die Zählerregel hebt damit keinen geheimen Namen mehr auf; Signatur und `COUNTER_SUFFIXES` unverändert. | B (Verhalten gegenüber #102: weniger lesbar, wie auf `main`) |
 | 111 | Backup-Prüfung (L2, §8): `async_validate_backup(backup_id, *, actor: Actor)` im Manager, in der Fassade und in `ConfigurationApiProtocol`, `actor` ohne Standardwert. `actor=None` oder ein Nicht-`Actor` ⇒ `AuthorizationError` `actor_required` (neu `REASON_ACTOR_REQUIRED`; `details.action` `config_validate`, `audit_id`), auditiert auf dem Sicherheitsring (Router der bekannten Version, sonst `-`), vor jedem Nachschlagen und Provider-Aufruf; Zähler `validate_refused_no_actor` statt `validate_without_actor` (entfernt). Damit gibt es keinen Weg mehr an der Admin-Prüfung aus #101 vorbei. Geschwister geprüft, keines hat dieselbe Lücke: `async_list_backups`, `async_get_backup`, `async_list_drift_acks`, `async_get_baseline`, `ssh_pin_status`, `acl_offer` liefern nur Metadaten ohne Inhalt; `async_apply_retention` läuft als System nach Core-Politik; `on_config_option_changed`/`audit_config_option_changed` und `emit` nutzen `actor` nur zur Zuordnung im Audit, nicht als Zugriffsprüfung. | B (Signatur und Verhalten) |
+| 112 | Modul-Schlüssel (L3, §11.5): ein Satz zur Grenze; Modul-Schlüssel trennen Module gegen Versehen, nicht gegen feindlichen Code im selben Prozess. Nur Doku, kein Code. | Doku |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 
