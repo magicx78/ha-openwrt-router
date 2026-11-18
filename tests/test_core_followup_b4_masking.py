@@ -43,16 +43,17 @@ HEX64 = "ab" * 32
 RTR = "rtr_" + "0123456789abcdef" * 2
 
 
-@pytest.mark.parametrize("name", ["router_key", "radio_key", "routerKey", "RADIO-KEY"])
+@pytest.mark.parametrize("name", ["rule_key", "scope_key", "ruleKey", "SCOPE-KEY"])
 def test_identifier_names_readable(name):
-    assert not is_secret_key(name)
+    # review M1: still a secret NAME; only a strict identifier value shows
+    assert is_secret_key(name)
     assert mask_secrets({name: "radio0"}) == {name: "radio0"}
     assert mask_for_output({name: RTR}) == {name: RTR}
     assert redact_text(f"{name}=radio0") == f"{name}=radio0"
 
 
 @pytest.mark.parametrize("value", [PEM, B64, B64URL, HEX64, "  " + B64 + "  "])
-@pytest.mark.parametrize("name", ["router_key", "radio_key"])
+@pytest.mark.parametrize("name", ["rule_key", "scope_key", "router_key", "radio_key"])
 def test_identifier_value_key_material(name, value):
     assert mask_secrets({name: value}) == {name: MASK}
     assert mask_for_output({name: value}) == {name: MASK}
@@ -62,7 +63,9 @@ def test_identifier_value_key_material(name, value):
 
 
 def test_identifier_names_listed():
-    assert {"router_key", "radio_key"} <= IDENTIFIER_KEY_NAMES
+    assert {"rule_key", "scope_key"} <= IDENTIFIER_KEY_NAMES
+    # review M1: router_key / radio_key are off the list (masked like on main)
+    assert not {"router_key", "radio_key"} & IDENTIFIER_KEY_NAMES
     # real secrets stay secret
     for name in ("key", "key1", "wpa_key", "private_key", "auth_key", "api_key"):
         assert is_secret_key(name), name
@@ -71,7 +74,7 @@ def test_identifier_names_listed():
 
 def test_snapshot_rule_unchanged():
     """UCI options keep config-manager's precise rule (``_key$``)."""
-    for option in ("router_key", "radio_key"):
+    for option in ("router_key", "radio_key", "rule_key"):
         assert is_snapshot_secret("wireless", "wifi-iface", option)
         assert cm.is_secret_option("wireless", "wifi-iface", option)
     change = {"config": "x", "option": "radio_key", "old": "a", "new": "b"}

@@ -34,9 +34,12 @@ All notable changes to the OpenWrt Router integration will be documented in this
 - Enterprise Core: Drift-Prüfung, Restore-Probelauf und Backup-Prüfung (mit Akteur)
   verlangen von einem Benutzer Admin-Rechte, wie schon Capture und Vergleich; die
   Ablehnung steht im Sicherheits-Audit.
-- Enterprise Core: Die Maskierung schwärzt Kennungen wie `router_key` oder `radio_key`
-  und Zähler wie `auth_failures` nicht mehr; ein Wert, der wie Schlüsselmaterial aussieht,
-  bleibt maskiert.
+- Enterprise Core: Die Maskierung zeigt Kennungen unter wenigen Namen wie `rule_key` oder
+  `translation_key`, aber nur in strenger Form (Core-ID oder kurzer Slug in
+  Kleinbuchstaben); alles andere darunter, auch verschachtelte Daten, bleibt maskiert.
+  `client_key`, `device_key`, `router_key`, `radio_key` und weitere Namen, die anderswo
+  ein Schlüssel sind, werden wieder vollständig maskiert (Sicherheitsprüfung von PR #56).
+  Zähler wie `auth_failures` zeigen Zahlen.
 - Enterprise Core: Das Benutzer-Pseudonym (`usr_…`) im Core-Event bleibt über Neustarts
   gleich, sobald der Installations-Schlüssel existiert. Ohne Schlüssel ist es je Lauf
   zufällig; das steht einmal im Log und im Zähler `bus_salt_ephemeral`.

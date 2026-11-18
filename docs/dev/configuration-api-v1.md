@@ -1423,12 +1423,20 @@ _LOGGER.debug("snapshot %s", mask_for_output(snapshot.configs))
 
 | Regel | Namen | Wert bleibt lesbar | Wert wird maskiert |
 |---|---|---|---|
-| Kennungen (`is_identifier_name`) | `IDENTIFIER_KEY_NAMES`: `router_key`, `radio_key`, `client_key`, `device_key`, `entry_key`, `event_key`, `incident_key`, `finding_key`, `rule_key`, `scope_key`, `msg_key`, `message_key`, `sort_key`, `cache_key`, `lookup_key`, `recommendation_key`, `translation_key` (Wörter mit `_` verbunden, also auch `routerKey`, `RADIO-KEY`) | alles, was nicht wie Schlüsselmaterial aussieht | `looks_like_key_material`: PEM-Block, base64/base64url ab 22 Zeichen, Hex ab 32 Zeichen (Core-IDs `xxx_<32 hex>` und aus Wörtern gebaute Namen ausgenommen); gilt für Schlüssel, `{"key": "radio_key", "value": …}`-Datensätze und Freitext `radio_key=…` |
+| Kennungen (`is_identifier_name`, ab Review M1 von PR #56) | `IDENTIFIER_KEY_NAMES`: `finding_key`, `incident_key`, `recommendation_key`, `rule_key`, `scope_key`, `sort_key`, `translation_key` (Wörter mit `_` verbunden, Ziffern bleiben: `ruleKey`, `RULE-KEY` ja, `rule_key2` nein). Sie bleiben für `is_secret_key` **geheime Namen**; nur die Walker und `redact_text` zeigen einen Wert. | nur ein String nach `is_identifier_value`: Core-ID (`xxx_<32 hex>`, `xxx_<16 hex>`) oder Slug `[a-z0-9][a-z0-9_.:-]*` mit höchstens `IDENTIFIER_VALUE_MAX_LENGTH` = 64 Zeichen, der nicht wie Schlüsselmaterial aussieht; im Freitext genau ein solches Token, danach Ende, `,`/`;` oder das nächste `name=` | alles andere: dict, Liste, Tupel (nie hineingelaufen), Zahl (eine PIN ist eine Zahl), Groß-/Kleinschreibung gemischt, Leerzeichen, Sonderzeichen, PEM, base64 ab 22, Hex ab 32; im Freitext eine Phrase bis zum Zeilenende; in escaptem JSON immer; gilt für Schlüssel, `{"key": "rule_key", "value": …}`-Datensätze und Freitext |
 | Zähler (`is_counter_name`) | Endung `COUNTER_SUFFIXES` (`_failures`, `_failed`, `_fail`, `_errors`, `_attempts`, `_retries`, `_total`), nicht exakt geheim, kein Treffer des Präzisionsmusters, kein geheimer Teilstring | Zahlen (`int`/`float`, im Freitext eine alleinstehende Zahl) | jeder andere Wert (`auth_failures="hunter2"`) |
 
 Bewusst nicht gelistet: echte Schlüsselnamen wie `group_key`, `wpa_key`, `public_key`.
-Grenze: ein Passwort unter einem Kennungsnamen, das nicht wie Schlüsselmaterial aussieht,
-bleibt lesbar; Kennungsnamen gehören Modul-Daten, nie Konfigurationswerten. In
+Seit Review M1 auch nicht mehr, weil sie anderswo ein Geheimnis tragen: `client_key`
+(TLS-/MQTT-Client-Schlüssel; Clients heißen `client_ref`), `device_key` (IoT-Geräteschlüssel),
+`message_key`/`msg_key` (Nachrichtenschlüssel in Signal/MTProto), `router_key`
+(Tor-Router-Schlüssel), `entry_key` (Schlüsseleintrag eines Keystores),
+`cache_key`/`lookup_key` (oft aus Zugangsdaten gebaut), `event_key` (Webhook-/Event-Dienst-
+Schlüssel), `radio_key` (keine sichere Bedeutung; Module haben `radio_id`). Sie sind wieder
+wie auf `main` maskiert.
+Grenze: ein Passwort aus Kleinbuchstaben und Ziffern ohne Leerzeichen (`hunter2`) unter
+einem Kennungsnamen bleibt lesbar; Kennungsnamen gehören Modul-Daten, nie
+Konfigurationswerten. In
 maskiertem, verschachteltem JSON (`\"auth_failures\": 3`) gilt weiter die alte Regel
 (maskiert).
 
@@ -1642,9 +1650,17 @@ muss):
   `AuthorizationError` `not_admin`. Module, die diese Aufrufe für normale Benutzer anbieten,
   müssen auf Admin prüfen oder als Modul-/Systemakteur aufrufen (und dann selbst
   entscheiden, wem sie das Ergebnis zeigen).
-- (#102) Ausgabe zeigt jetzt Werte unter Kennungsnamen (`router_key`, `radio_key`, …) und
-  Zahlen unter Zählernamen (`auth_failures`, …), die vorher `**REDACTED**` waren. Ein Modul,
-  das unter solchen Namen Geheimnisse ablegt, muss sie umbenennen.
+- (#102, eingeschränkt durch #108) Ausgabe zeigt jetzt Werte unter Kennungsnamen
+  (`rule_key`, `scope_key`, …), die vorher `**REDACTED**` waren, aber nur in strenger
+  Kennungsform. Ein Modul, das unter solchen Namen Geheimnisse ablegt, muss sie umbenennen.
+- (#108) Gegenüber dem ersten Stand dieses Zweigs: `client_key`, `device_key`,
+  `router_key`, `radio_key`, `entry_key`, `event_key`, `cache_key`, `lookup_key`,
+  `message_key`, `msg_key` sind keine Kennungsnamen mehr (maskiert wie auf `main`);
+  `is_secret_key` ist für Kennungsnamen wieder `True`; unter einem Kennungsnamen wird ein
+  dict/eine Liste/eine Zahl maskiert statt durchlaufen. Ein Modul, das eine Router-,
+  Funk- oder Client-Referenz unter einem der entfernten Namen ausgibt, nimmt `router_id`,
+  `radio_id` bzw. `client_ref`; eine Kennung unter einem verbliebenen Namen muss eine
+  Core-ID oder ein Slug sein (Kleinbuchstaben, Ziffern, `_ . : -`, höchstens 64 Zeichen).
 
 ### 19.1 Änderungen auf Feld- und Signaturebene
 
@@ -1820,6 +1836,12 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 | 105 | Guard (B5, §6.3, §12.3): `ActionClass.ACTIVE` ("aktiv, nicht ändernd"; nicht persistiert), Politik wie `mutating`, keine Freigabe, Erteilung als `core.active_action_granted` auf dem allgemeinen Ring (audit-pflichtig), Ablehnung wie bisher auf dem Sicherheitsring. `register_action(..., sensitive_read=False, rate_limit=None)` (Guard und `api.guard`); `RateLimit(max_calls, per)`, `RATE_LIMIT_MAX_CALLS`, `RATE_LIMIT_MAX_PERIOD`; Ablehnung `rate_limited` mit `AuthorizationDecision.retry_after` (neues optionales Feld, auch in `to_dict`), `core.action_rate_limited` (allgemeiner Ring, dedupliziert je Fenster), `error_for_decision` ⇒ `RateLimitedError`; `REASON_RATE_LIMITED`, `MAX_RATE_WINDOWS`. `policy_denial_reason(..., sensitive_reads=frozenset())`. Zähler `active_granted`, `rate_limited`, `rate_windows_dropped`. B6 kam vor B5, weil das Limit `RateLimitedError` braucht. | A |
 | 106 | Vertrag an Code angeglichen (B7): §6.3 beschreibt, dass `authorize` auch für `read` eine `WriteAuthorization` prägt und `security.authorization_granted` auditiert (die Core-Lesewege rufen `authorize` nicht auf); §17/§17.1 Modulnamen `security_center`/`net_diagnostics` und „ein Detektor, ein Präfix“ (`diag.` **oder** `log.`); §5 nennt `rf.` als reservierten Namensraum; neue Tabelle §3.1 (alle reservierten Präfixe, per Test vollständig); neuer §4.1. Code: `FLEET_ROUTER_ID` jetzt in `core_models` (`core_guard.FLEET_ROUTER_ID` bleibt, derselbe Wert), `is_fleet_router_id`; `registry.get("-")` ergänzt `details.fleet = true` (Grund unverändert `invalid_router_id`). | A |
 | 107 | `CoreEvent` (B8, §12.1): neue optionale Felder `client_ref` (`cli_<16 hex>`, `CLIENT_REF_PATTERN`), `confidence` (0..1, `float`), `classification` (`EVENT_CLASSIFICATION_PATTERN`), `incident_ref`, `radio_id` (`check_token`); `EVENT_REF_FIELDS`; `emit(...)` (Audit-Log, API, Protokoll) nimmt sie als Schlüsselwortargumente. Standard `None`, in `to_dict`/`from_dict`, nicht im Dedup-Bereich, keine Store-Version. Bus-Payload hat fünf neue Schlüssel. | A |
+
+**Review von PR #56 (M1, M2, L1–L4)**
+
+| # | Änderung | Art |
+|---|---|---|
+| 108 | Maskierung (M1, §13): `IDENTIFIER_KEY_NAMES` auf `finding_key`, `incident_key`, `recommendation_key`, `rule_key`, `scope_key`, `sort_key`, `translation_key` verkleinert (entfernt mit Grund in §13); `is_secret_key` ist für Kennungsnamen wieder `True`; Erkennung ohne Ziffern-Abschneiden (`rule_key2` ist keine Kennung). Unter einem Kennungsnamen bleibt nur ein Wert nach `is_identifier_value` (neu) lesbar: Core-ID oder Slug bis `IDENTIFIER_VALUE_MAX_LENGTH` (64, neu), kein Schlüsselmaterial; dict, Liste, Zahl und jede andere Form ⇒ `**REDACTED**`, nie durchlaufen; Freitext nur ein Token, escaptes JSON immer maskiert. `is_snapshot_secret` unverändert. Vorher (B4) liefen u. a. `{"client_key": "hunter2"}` und `{"device_key": {"value": …}}` unmaskiert durch. | B (Verhalten gegenüber #102), A (`is_identifier_value`, `IDENTIFIER_VALUE_MAX_LENGTH`) |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 

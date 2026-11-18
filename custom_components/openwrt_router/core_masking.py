@@ -34,13 +34,14 @@ precise mode masks and more:
    (``WEPKey`` -> ``wep key``, ``key1`` -> ``key``), and the words joined
    (``api-key``).
 
-Two value-aware exceptions (follow-up B4): identifier names
-(``IDENTIFIER_KEY_NAMES``: ``router_key``, ``radio_key`` …) are not secret
-names, but their value is masked when it looks like key material (PEM, long
-base64/base64url, long hex); counter names (``COUNTER_SUFFIXES``:
-``auth_failures`` …) keep a NUMBER readable, any other value is masked.
-The precise snapshot rule is unchanged (``option radio_key`` in a UCI diff
-stays masked).
+Two value-aware exceptions (follow-up B4, narrowed by review of PR #56):
+identifier names (``IDENTIFIER_KEY_NAMES``: ``rule_key``, ``scope_key`` …)
+stay secret names, but the walkers show a value under them if it is a
+strict identifier (:func:`is_identifier_value`: core id or short lower-case
+slug, no key material); anything else, also a dict or list, is masked.
+Counter names (``COUNTER_SUFFIXES``) keep a NUMBER readable unless a secret
+word is part of the name. The precise snapshot rule is unchanged
+(``option rule_key`` in a UCI diff stays masked).
 
 Network identifiers (MAC, IP, hostname, SSID, BSSID) are never masked here;
 modules that must hide them use :func:`pseudonymise_identifier` /
@@ -300,31 +301,37 @@ READABLE_CONTEXT_OPTIONS: Final = (
 )
 # Suffixes of counters, hashes and ids (never secret values).
 SAFE_SUFFIXES: Final = ("_count", "_hash", "_sha256", "_id", "_ids")
-# Names of identifiers that end in "key" (follow-up B4), compared as the
-# name's words joined by "_" (``routerKey``, ``RADIO-KEY`` -> ``router_key``,
-# ``radio_key``). The broad name rules skip them; a value that looks like
-# key material is masked anyway. Real key names (``group_key``, ``wpa_key``,
-# ``public_key`` …) are deliberately not listed.
+# Names of identifiers that end in "key" (follow-up B4, narrowed by review
+# M1 of PR #56), compared as the name's words joined by "_" without dropping
+# digits (``ruleKey``, ``RULE-KEY`` -> ``rule_key``; ``rule_key2`` is not
+# one). They stay SECRET names for :func:`is_secret_key`; only the walkers
+# and :func:`redact_text` show a value under them, and only a strict
+# identifier value (:func:`is_identifier_value`). A name is listed only if
+# it never names a secret anywhere. Removed in M1 because they do:
+# ``client_key`` (MQTT/TLS client private key), ``device_key`` (IoT device
+# keys), ``message_key``/``msg_key`` (Signal/MTProto message keys),
+# ``router_key`` (Tor router identity key), ``entry_key`` (keystore key
+# entry), ``cache_key``/``lookup_key`` (often built from credentials),
+# ``event_key`` (webhook/event service keys), ``radio_key`` (no safe
+# meaning; modules have ``radio_id``).
 IDENTIFIER_KEY_NAMES: Final = frozenset(
     {
-        "cache_key",
-        "client_key",
-        "device_key",
-        "entry_key",
-        "event_key",
         "finding_key",
         "incident_key",
-        "lookup_key",
-        "message_key",
-        "msg_key",
-        "radio_key",
         "recommendation_key",
-        "router_key",
         "rule_key",
         "scope_key",
         "sort_key",
         "translation_key",
     }
+)
+# A value under an identifier name stays readable only in one of these
+# shapes: a core id (``rtr_<32 hex>``, ``cli_<16 hex>`` …) or a short
+# lower-case slug; and never if it looks like key material.
+IDENTIFIER_VALUE_MAX_LENGTH: Final = 64
+_IDENTIFIER_VALUE_RE: Final = re.compile(
+    r"[a-z]{3}_[0-9a-f]{32}|[a-z]{3}_[0-9a-f]{16}"
+    rf"|[a-z0-9][a-z0-9_.:-]{{0,{IDENTIFIER_VALUE_MAX_LENGTH - 1}}}"
 )
 # Counter names: a number under such a name is readable even if a broad
 # word hits (``auth_failures``); a string or any other value is not.
@@ -583,8 +590,6 @@ def _is_secret_plain_key(name: str) -> bool:
         return True
     if norm in SAFE_KEYS or lowered in SAFE_KEYS:
         return False
-    if _is_identifier_plain(name):
-        return False
     if _matches_pattern(norm):
         return True
     if norm.endswith(SAFE_SUFFIXES):
@@ -603,18 +608,45 @@ is_secret_name = is_secret_key
 
 
 def _is_identifier_plain(name: str) -> bool:
-    """True if one spelling of ``name`` is in IDENTIFIER_KEY_NAMES."""
-    return "_".join(_words(name.rsplit(".", 1)[-1])) in IDENTIFIER_KEY_NAMES
+    """True if one spelling of ``name`` is in IDENTIFIER_KEY_NAMES.
+
+    Words keep their digits (``rule_key2`` and ``rule2_key`` are not
+    identifiers; ``key1``…``key4`` are WEP keys).
+    """
+    spaced = _CAMEL.sub(" ", name.rsplit(".", 1)[-1])
+    joined = "_".join(part.lower() for part in _SPLIT.split(spaced) if part)
+    return joined in IDENTIFIER_KEY_NAMES
 
 
 def is_identifier_name(name: object) -> bool:
     """True for a field that names an identifier ending in "key".
 
     Exact secret names never count; the canonical spelling (URL escapes,
-    zero-width, look-alikes) must agree, so ``radio%5Fkey`` is judged like
-    ``radio_key``.
+    zero-width, look-alikes) must agree, so ``rule%5Fkey`` is judged like
+    ``rule_key``. Such a name is still a secret name for
+    :func:`is_secret_key`; the walkers show a value under it only if
+    :func:`is_identifier_value` accepts it.
     """
     return isinstance(name, str) and bool(name.strip()) and _identifier_str(name)
+
+
+def is_identifier_value(value: object) -> bool:
+    """True if ``value`` may be shown under an identifier name.
+
+    Only a string: a core id (``rtr_<32 hex>``, ``cli_<16 hex>`` …) or a
+    lower-case slug ``[a-z0-9][a-z0-9_.:-]*`` of at most
+    IDENTIFIER_VALUE_MAX_LENGTH characters that does not look like key
+    material. Numbers (a PIN is a number), containers, mixed case, blanks
+    and symbols are not identifier values.
+    """
+    return (
+        isinstance(value, str)
+        and _IDENTIFIER_VALUE_RE.fullmatch(value) is not None
+        and (
+            _CORE_ID_RE.fullmatch(value) is not None
+            or not looks_like_key_material(value)
+        )
+    )
 
 
 @lru_cache(maxsize=4096)
@@ -875,6 +907,19 @@ _NAME_SEP_RE: Final = re.compile(r"[/_-]+")
 _NUMBER_VALUE_RE: Final = re.compile(
     r"([\"']?)-?[0-9]{1,20}(?:\.[0-9]{1,20})?\1(?=$|[\s,;})\]])"
 )
+# The value after an identifier head in free text: one (optionally quoted)
+# token that ends the value, or is followed by "," / ";" or by the next
+# "name=" / "name:" pair. Anything else (a phrase) is masked to the end.
+_IDENTIFIER_TEXT_RE: Final = re.compile(
+    rf"(?P<q>['\"]?)(?P<tok>[^\s'\",;]{{1,{IDENTIFIER_VALUE_MAX_LENGTH}}})(?P=q)"
+    r"(?:[ \t]*\Z|[ \t]*[,;]|[ \t]+(?=[^\s=:'\"]+[ \t]*[=:]))"
+)
+
+
+def _identifier_text_value(raw: str) -> bool:
+    """True if free text after an identifier head is one identifier value."""
+    match = _IDENTIFIER_TEXT_RE.match(raw)
+    return match is not None and is_identifier_value(match.group("tok"))
 
 
 def _quoted_mask(value: str) -> str:
@@ -898,18 +943,18 @@ def _mask_after_heads(
         if match.start() < pos:
             continue
         name = match.group("name")
-        secret = is_secret_key(name)
-        if not secret and not is_identifier_name(name):
+        if not is_secret_key(name):
             continue
         value = value_re.match(text, match.end())
         end = value.end() if value else match.end()
         if end == match.end():
             continue
         raw = text[match.end() : end]
-        if secret and is_counter_name(name) and _NUMBER_VALUE_RE.match(raw):
-            continue  # "auth_failures=3": a count, the rest is scanned on
-        if not secret and not looks_like_key_material(raw):
-            continue  # "radio_key=radio0": an identifier
+        if is_identifier_name(name):
+            if _identifier_text_value(raw):
+                continue  # "rule_key=wan_in": an identifier, the rest is scanned on
+        elif is_counter_name(name) and _NUMBER_VALUE_RE.match(raw):
+            continue  # a count, the rest is scanned on
         out.append(text[pos : match.end()])
         out.append(_quoted_mask(text[match.end() : end]))
         pos = end
@@ -1201,12 +1246,17 @@ def _record_masked_keys(mapping: Mapping[Any, Any]) -> frozenset[str]:
             named = mapping.get(name_key)
             if not isinstance(named, str):
                 continue
-            if is_secret_key(named) or (
-                is_identifier_name(named)
-                and any(
-                    looks_like_key_material(mapping.get(k)) for k in _OPTION_VALUE_KEYS
+            if is_identifier_name(named):
+                # {"key": "rule_key", "value": …}: only strict identifier
+                # values (or None) stay readable
+                shown = all(
+                    mapping.get(k) is None or is_identifier_value(mapping.get(k))
+                    for k in _OPTION_VALUE_KEYS
                 )
-            ):
+                if not shown:
+                    masked |= _OPTION_VALUE_KEYS
+                break
+            if is_secret_key(named):
                 masked |= _OPTION_VALUE_KEYS
                 break
     for path_key in _PATH_KEYS:
@@ -1231,14 +1281,20 @@ def _mask_mapping(
                 result[key] = mask_value(value)
                 continue
         else:
+            if (
+                key.lower() not in masked_keys
+                and is_identifier_name(key)
+                and not _is_extra(key, walk)
+            ):
+                # only a strict identifier value is shown; dicts, lists,
+                # numbers and phrases are masked, never walked into (M1)
+                result[key] = value if is_identifier_value(value) else mask_value(value)
+                continue
             if key.lower() in masked_keys or is_secret_key(key, walk.extra):
                 if _readable_count(key, value, walk):
                     result[key] = value
                 else:
                     result[key] = mask_value(value)
-                continue
-            if is_identifier_name(key) and looks_like_key_material(value):
-                result[key] = mask_value(value)
                 continue
             if is_secret_path(key):
                 result[key] = _path_value(value)
@@ -1254,6 +1310,14 @@ def _mask_mapping(
                     continue
         result[key] = _mask(value, walk, stack, depth + 1)
     return result
+
+
+def _is_extra(key: str, walk: _Walk) -> bool:
+    """True if the caller named ``key`` as secret (extra_keys)."""
+    if not walk.extra:
+        return False
+    extra = {k.lower() for k in walk.extra}
+    return key.lower() in extra or _normalise_name(key) in extra
 
 
 def _readable_count(key: str, value: Any, walk: _Walk) -> bool:
