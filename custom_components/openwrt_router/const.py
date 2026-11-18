@@ -703,3 +703,56 @@ CONFIG_PROVIDER_COLLECT_TIMEOUT_SECONDS = 180
 CONFIG_PROVIDER_CALL_TIMEOUT_SECONDS = 60
 CONFIG_PROVIDER_PROBE_TIMEOUT_SECONDS = 60
 CONFIG_PROVIDER_RESTORE_TIMEOUT_SECONDS = 300
+
+# ---------------------------------------------------------------------------
+# Configuration manager wiring (plan docs/plans/2026-11-18-config-manager-
+# integration.md, sections 2-7). The option config_backup_enabled itself
+# lives in core_models (OPTION_CONFIG_BACKUP_ENABLED, default OFF).
+# ---------------------------------------------------------------------------
+OPTION_CONFIG_BACKUP_SCHEDULE = "config_backup_schedule"
+CONFIG_BACKUP_SCHEDULE_DAILY = "daily"
+CONFIG_BACKUP_SCHEDULE_OFF = "off"
+CONFIG_BACKUP_SCHEDULES = (CONFIG_BACKUP_SCHEDULE_DAILY, CONFIG_BACKUP_SCHEDULE_OFF)
+DEFAULT_CONFIG_BACKUP_SCHEDULE = CONFIG_BACKUP_SCHEDULE_DAILY
+OPTION_CONFIG_BACKUP_TIME = "config_backup_time"  # local time, "HH:MM:SS"
+DEFAULT_CONFIG_BACKUP_TIME = "03:30:00"
+OPTION_CONFIG_DRIFT_CHECK = "config_drift_check"
+DEFAULT_CONFIG_DRIFT_CHECK = True
+# Runtime: one per HA instance, released after the last entry.
+CONFIG_MANAGER_MODULE = "config_manager"
+DATA_CONFIG_MANAGER = f"{DOMAIN}_config_manager"
+DATA_CONFIG_VIEWS_BOUND = f"{DOMAIN}_config_views_bound"
+SIGNAL_CONFIG_MANAGER = f"{DOMAIN}_config_manager_update"
+# Schedule tick (memory only; router contact only when a run is due).
+CONFIG_MANAGER_TICK_SECONDS = 300
+# Daily run: per-router offset in [0, CONFIG_STAGGER_SECONDS) after the time.
+CONFIG_STAGGER_SECONDS = 3600
+# Release change: wait this long after the first sighting of a new release.
+CONFIG_RELEASE_CHANGE_DELAY_SECONDS = 300
+# Drift: at most this many automatic drift versions per router and day.
+CONFIG_DRIFT_VERSIONS_PER_DAY = 4
+# Versions read at start to rebuild the memory of the schedule.
+CONFIG_MANAGER_HISTORY_LIMIT = 20
+# Service create_config_backup.
+SERVICE_CREATE_CONFIG_BACKUP = "create_config_backup"
+CONFIG_NOTE_MAX_LENGTH = 200
+# Entities (unique_id f"{router_id}_{suffix}").
+SUFFIX_CONFIG_LAST_BACKUP = "config_last_backup"
+SUFFIX_CONFIG_BACKUP_STATUS = "config_backup_status"
+SUFFIX_CONFIG_VERSIONS = "config_versions"
+SUFFIX_CONFIG_DRIFT = "config_drift"
+CONFIG_STATUS_OK = "ok"
+CONFIG_STATUS_PARTIAL = "partial"
+CONFIG_STATUS_FAILED = "failed"
+CONFIG_STATUS_RUNNING = "running"
+CONFIG_STATUS_DISABLED = "disabled"
+CONFIG_STATUS_NEVER = "never"
+CONFIG_BACKUP_STATUSES = (
+    CONFIG_STATUS_OK,
+    CONFIG_STATUS_PARTIAL,
+    CONFIG_STATUS_FAILED,
+    CONFIG_STATUS_RUNNING,
+    CONFIG_STATUS_DISABLED,
+    CONFIG_STATUS_NEVER,
+)
+# --- end configuration manager wiring

@@ -7,13 +7,19 @@
           "extended_wifi_sensors": "Extended Wi-Fi sensors (radio, AP, port)",
           "topology_port_debug": "Port mapping debug data in topology snapshot",
           "topology_panel_all_users": "Show topology panel to all users",
-          "config_backup_enabled": "Configuration backup (config_backup_enabled)"
+          "config_backup_enabled": "Configuration backup (config_backup_enabled)",
+          "config_backup_schedule": "Automatic configuration backup (config_backup_schedule)",
+          "config_backup_time": "Time of the daily backup (config_backup_time)",
+          "config_drift_check": "Check for configuration changes (config_drift_check)"
         },
         "data_description": {
           "extended_wifi_sensors": "Enables all per-radio, per-SSID (AP) and per-port sensors of this router at once instead of one by one. Turning it off disables only the sensors this switch enabled; sensors you disabled yourself are never touched. Takes effect after about 30 seconds.",
           "topology_port_debug": "Include the raw per-port mapping trace (FDB/DHCP/ARP matches and assignment reasons) in the topology snapshot endpoint. HA diagnostics always stay redacted.",
           "topology_panel_all_users": "Makes the Network Topology sidebar panel and its snapshot API available to every Home Assistant user, not only administrators. The topology contains DHCP leases, ARP/switch tables, the WAN IP and DDNS details. The panel is shared by all routers: it is open to all users as soon as one router has this enabled.",
-          "config_backup_enabled": "Allows the configuration backup of this router (all config.* capabilities and the optional ACL tier 'config_backup_read'). Off by default. The switch is shown once a configuration provider (backup engine) is installed or while it is on; without a provider it has no effect. Turning it off stops every backup, probe and comparison for this router at once; stored versions stay. Warning: a backup contains ALL router secrets: /etc/shadow (password hashes of every router login, including root), private keys (SSH host keys, VPN and TLS keys) and the Wi-Fi, VPN and DDNS passwords."
+          "config_backup_enabled": "Allows the configuration backup of this router (all config.* capabilities and the optional ACL tier 'config_backup_read'). Off by default. The switch is shown once a configuration provider (backup engine) is installed or while it is on; without a provider it has no effect. Turning it off stops every backup, probe and comparison for this router at once; stored versions stay. Warning: a backup contains ALL router secrets: /etc/shadow (password hashes of every router login, including root), private keys (SSH host keys, VPN and TLS keys) and the Wi-Fi, VPN and DDNS passwords.",
+          "config_backup_schedule": "Daily: one backup per day at the time below; each router starts at its own fixed offset of up to one hour, so they never run at the same time. Off: only manual backups and drift versions. Has an effect only while the configuration backup is on.",
+          "config_backup_time": "Local time of Home Assistant. A daily run missed while Home Assistant was off is made up later the same day.",
+          "config_drift_check": "Compares the router with its last version when the polled data shows a configuration-near change (5 minutes after the change, at most once per hour). A detected change is saved as a new version (at most four per day). Off: no drift checks."
         }
       }
     }
@@ -319,6 +325,14 @@
     "router_unreachable": {
       "title": "OpenWrt router {router} unreachable",
       "description": "The router {router} has not answered since {since} (error type: {error_type}).\n\nCheck power, cabling and the rpcd/uhttpd services on the router.\n\nThis message disappears automatically as soon as the router answers again."
+    }
+  },
+  "selector": {
+    "config_backup_schedule": {
+      "options": {
+        "daily": "Daily",
+        "off": "Off (manual backups only)"
+      }
     }
   }
 }
