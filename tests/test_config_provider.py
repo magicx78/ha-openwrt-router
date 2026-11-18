@@ -1499,6 +1499,40 @@ async def test_restore_preparation_on_same_board() -> None:
     assert (channel.before, channel.after) == ("11", "6")
 
 
+async def test_restore_plan_warns_about_access_files_without_their_digests() -> None:
+    """Review M4: shadow and host keys are named as a warning, never hashed out."""
+    store = Store()
+    version = await collect()
+    shadow = f"root:{SHADOW_HASH}:19000:0:99999:7:::\n".encode()
+    host_key = bytes(range(83))
+    digests = (sha(shadow), sha(host_key))
+    # The archive analysis does see both digests (change detection in HA) ...
+    members = {m.name: m for m in validate_archive(ARCHIVE).members}
+    assert members["etc/shadow"].sha256 == digests[0]
+    assert members["etc/dropbear/dropbear_ed25519_host_key"].sha256 == digests[1]
+    # ... but no artifact, warning or plan carries them.
+    exported = [
+        payload.data.decode()
+        for name, payload in version.artifacts.items()
+        if name != "archive"
+    ]
+    exported.append(repr(version.meta))
+    record = store.put(ROUTER_A, version)
+    plan = await ConfigManagerProvider().async_prepare_restore(
+        make_conn(FakeApi(files=changed(channel=True))),
+        record,
+        router_record(),
+        make_ctx(store),
+    )
+    assert "access_files_overwritten" in plan.warnings
+    exported.append(json.dumps(plan.to_dict()))
+    exported.append(repr(plan))
+    for text in exported:
+        for digest in digests:
+            assert digest not in text
+            assert digest.upper() not in text
+
+
 async def test_restore_preparation_needs_an_archive() -> None:
     store = Store()
     record = store.put(ROUTER_A, await collect(backup_type=BackupType.UCI_SNAPSHOT))

@@ -223,12 +223,18 @@ def sub(text: str, old: str, new: str) -> str:
     return text.replace(old, new, 1)
 
 
-def make_archive(texts: dict[str, str]) -> bytes:
-    """A tar.gz shaped like `sysupgrade -b` output."""
+SHADOW = b"root:$5$abc$def:19000:0:99999:7:::\n"
+
+
+def make_archive(texts: dict[str, str], files: dict[str, bytes] | None = None) -> bytes:
+    """A tar.gz shaped like `sysupgrade -b` output.
+
+    ``files`` are the non-UCI members (default: only ``etc/shadow``).
+    """
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.GNU_FORMAT) as tf:
         members = {f"etc/config/{name}": text.encode() for name, text in texts.items()}
-        members["etc/shadow"] = b"root:$5$abc$def:19000:0:99999:7:::\n"
+        members.update({"etc/shadow": SHADOW} if files is None else files)
         for name, data in members.items():
             info = tarfile.TarInfo(name)
             info.size = len(data)
@@ -351,7 +357,8 @@ def test_dry_run_reports_diff_and_instructions() -> None:
     )
     assert all(re.fullmatch(r"[a-z0-9_]+", key) for key in plan.instructions)
     assert plan.reversible is False
-    assert plan.warnings == ()
+    # The archive carries etc/shadow (review M4).
+    assert plan.warnings == (cr.WARN_ACCESS_FILES,)
     assert plan.archive_sha256 == sha(make_archive(BASE))
     assert plan.snapshot_age_s == 600.0
     # The configs missing on both sides (sqm) are not "not comparable".
@@ -708,6 +715,55 @@ def test_no_console_hint_without_access_changes() -> None:
     plan = plan_for(BASE, current)
     assert plan.changes
     assert cr.INSTR_CONSOLE_FAILSAFE not in plan.instructions
+
+
+# Review M4: access files in the archive change the login after a restore.
+_HOST_KEY = bytes(range(83))
+_AUTH_KEYS = b"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAccessKeyForTests user@host\n"
+_ACCESS_FILES = {
+    "shadow": {"etc/shadow": SHADOW},
+    "passwd": {"etc/passwd": b"root:x:0:0:root:/root:/bin/ash\n"},
+    "authorized_keys": {"etc/dropbear/authorized_keys": _AUTH_KEYS},
+    "host_key": {"etc/dropbear/dropbear_ed25519_host_key": _HOST_KEY},
+    "uhttpd_key": {"etc/uhttpd.key": b"-----BEGIN EC PRIVATE KEY-----\nx\n"},
+    "uhttpd_crt": {"etc/uhttpd.crt": b"-----BEGIN CERTIFICATE-----\nx\n"},
+    "user_ssh": {"home/admin/.ssh/authorized_keys": _AUTH_KEYS},
+}
+
+
+def _plan_with_files(files: dict[str, bytes]) -> RestorePlan:
+    data = make_archive(BASE, files)
+    report = validate_archive(data)
+    assert report.ok, report.findings
+    return dry_run(
+        report,
+        snapshot(dict(extract_uci_texts(data))),
+        snapshot(BASE),
+        SOURCE,
+        TARGET,
+        mgmt_host=MGMT,
+        snapshot_age_s=600.0,
+        expected_sha256=sha(data),
+    )
+
+
+@pytest.mark.parametrize("files", _ACCESS_FILES.values(), ids=_ACCESS_FILES)
+def test_access_files_in_archive_give_a_plan_warning(files: dict[str, bytes]) -> None:
+    plan = _plan_with_files(files)
+    assert cr.WARN_ACCESS_FILES in plan.warnings
+    # A warning of the plan, not a compatibility verdict: every sysupgrade
+    # archive carries etc/shadow, so "warn" would lose its meaning.
+    assert plan.compatibility.status == cr.COMPAT_OK
+    text = _dump(mask_for_output(plan)) + repr(plan)
+    for name, data in files.items():
+        assert name not in text
+        assert sha(data) not in text
+
+
+def test_archive_without_access_files_has_no_access_warning() -> None:
+    plan = _plan_with_files({"etc/rc.local": b"exit 0\n", "etc/group": b"root:x:0:\n"})
+    assert cr.WARN_ACCESS_FILES not in plan.warnings
+    assert plan.warnings == ()
 
 
 # ---------------------------------------------------------------------------

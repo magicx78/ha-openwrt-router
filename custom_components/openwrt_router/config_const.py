@@ -273,6 +273,19 @@ SECRET_ARCHIVE_PATHS: Final[tuple[str, ...]] = (
     "*.pfx",
 )
 
+# Review M4: archive members a restore writes back that decide how one logs
+# in (passwords, SSH keys, SSH host keys, the uhttpd TLS key pair). Same
+# glob rules as SECRET_ARCHIVE_PATHS. Only their presence is reported.
+ACCESS_ARCHIVE_PATHS: Final[tuple[str, ...]] = (
+    "etc/shadow",
+    "etc/passwd",
+    "etc/dropbear/authorized_keys",
+    "etc/dropbear/*host_key*",
+    "*/.ssh/authorized_keys*",
+    "etc/uhttpd.key",
+    "etc/uhttpd.crt",
+)
+
 # ---------------------------------------------------------------------------
 # Areas and risks (plan section 11.6)
 # ---------------------------------------------------------------------------

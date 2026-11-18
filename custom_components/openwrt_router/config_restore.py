@@ -31,8 +31,8 @@ from fnmatch import fnmatchcase
 from types import MappingProxyType
 from typing import Final, Literal
 
-from .config_archive import ArchiveReport
-from .config_const import SNAPSHOT_STALE_S
+from .config_archive import MEMBER_DIR, ArchiveReport
+from .config_const import ACCESS_ARCHIVE_PATHS, SNAPSHOT_STALE_S
 from .config_diff import (
     Area,
     Change,
@@ -94,6 +94,9 @@ CODE_LOCKOUT_RISK: Final = "lockout_risk"
 WARN_SNAPSHOT_STALE: Final = "snapshot_stale"
 WARN_SNAPSHOT_AGE_UNKNOWN: Final = "snapshot_age_unknown"
 WARN_CONFIG_NOT_COMPARABLE: Final = "config_not_comparable"
+# The archive writes back passwords, SSH keys or the TLS key pair: the
+# login can change (review M4). Presence only, never names or digests.
+WARN_ACCESS_FILES: Final = "access_files_overwritten"
 
 # Instruction steps (translation keys, plan 8.4).
 INSTR_BLOCKED: Final = "restore_blocked"
@@ -313,6 +316,18 @@ def _release_findings(source: Inventory, target: Inventory) -> list[Finding]:
     return out
 
 
+def _has_access_files(archive: ArchiveReport) -> bool:
+    """True if a restore of ``archive`` overwrites login data (review M4)."""
+    return any(
+        member.type != MEMBER_DIR
+        and any(
+            fnmatchcase(member.name.lower(), pattern)
+            for pattern in ACCESS_ARCHIVE_PATHS
+        )
+        for member in archive.members
+    )
+
+
 def _lockout_changes(changes: Sequence[Change]) -> list[Change]:
     return [c for c in changes if c.area in _LOCKOUT_AREAS or c.risk == Risk.CRITICAL]
 
@@ -491,7 +506,8 @@ def dry_run(
     """Preview a restore of ``archive`` onto ``target`` without touching it.
 
     Uses the latest snapshot ``current`` (the router is not asked); one
-    older than ``SNAPSHOT_STALE_S`` (or of unknown age) is flagged.
+    older than ``SNAPSHOT_STALE_S`` (or of unknown age) is flagged, and so
+    is an archive that writes back login data (``WARN_ACCESS_FILES``).
     """
     changes = diff_snapshots(current, archive_snapshot, mgmt_host=mgmt_host)
     compat = _evaluate(
@@ -506,6 +522,8 @@ def dry_run(
         warnings.append(WARN_SNAPSHOT_STALE)
     if skipped:
         warnings.append(WARN_CONFIG_NOT_COMPARABLE)
+    if _has_access_files(archive):
+        warnings.append(WARN_ACCESS_FILES)
     for code in sorted({finding.code for finding in archive.warnings}):
         if code not in warnings:
             warnings.append(code)
