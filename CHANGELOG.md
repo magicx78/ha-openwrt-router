@@ -2,6 +2,157 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [Unreleased]
+
+## [1.44.0] - 2026-11-18
+
+Enterprise Core: ein interner Unterbau für spätere Module (Konfigurations-Backup,
+Security Center, Netzwerkdiagnose, WiFi RF). Keine neue Entität, keine geänderte
+`unique_id`, keine geänderte Geräte- oder Entity-ID, keine neue Config-Entry-Version und
+**0 zusätzliche Router-Aufrufe je Poll**. **Sichtbar wird:** Core-Ereignisse
+(`openwrt_router_core_event`) erscheinen im Logbuch, beim ersten Start einmal
+`router.registered` je Router, und im Recorder. Ein Fehler im neuen Code lässt weder einen Poll noch das
+Setup eines Eintrags scheitern, er wird geloggt. Nutzerdoku: `docs/enterprise-core.md`.
+
+### Added
+
+- **Stabile Router-ID** (`rtr_…`) je Config-Entry, unabhängig von IP und Hostname, mit
+  Flotten-Registry (Store `openwrt_router.router_registry`). Identität aus Daten, die der
+  Poll ohnehin holt: IP-Wechsel, Hostname-Wechsel und Werksreset behalten die ID;
+  gleiche Hardware in zwei Einträgen wird als *Duplikat vermutet* gemeldet, nie
+  zusammengelegt; einen getauschten oder neu angelegten Router übernimmt nur ein Admin
+  ausdrücklich (Adoption).
+- **Capability-Erkennung** je Router (`transport.*`, `data.*`, `stream.*`, `pkg.*`) aus
+  den Poll-Daten, neu bewertet nur bei Änderung. Neu in 1.44: `rf.txpowerlist`,
+  `rf.survey`, `rf.scan` aus der verteilten rpcd-ACL (mit plain v8: `rf.scan`
+  verfügbar, die anderen `permission_denied` mit den fehlenden Rechten; ACL unbekannt:
+  `unknown` mit Grund). Module können eigene Capabilities unter ihrem Präfix melden
+  (`security.`, `diag.`, `rf.`, `log.`).
+- **Configuration API v1** (`async_get_configuration_api(hass, version=1)`) für Module.
+  **Ohne Backup-Engine:** Es ist kein Provider eingebaut; alle `config.*`-Capabilities
+  bleiben `unavailable`, bis ein Provider installiert ist, und der Core ruft dafür nie
+  den Router.
+- **Option `config_backup_enabled`** (Standard aus). Aus heißt: `config.*` ist
+  `disabled`, der Provider wird nie aufgerufen, die ACL-Stufe `config_backup_read` wird
+  abgelehnt. Der Schalter erscheint in den Optionen erst, wenn ein Provider installiert
+  ist (oder solange er an ist).
+- **Freigaben (Approval-Gate):** kritische Aktionen (Export, Löschen, ACL verteilen,
+  SSH-Pin bestätigen/zurücksetzen, Schlüssel-Reset) nur für Admin-Benutzer, mit
+  Antrag, Freigabe und einmaliger, an Router und Prüfsumme gebundener Ausführung.
+- **Audit-Log** mit zwei Ringen (allgemein 1000, Sicherheit 500 Einträge, 90 Tage),
+  HA-Bus-Event, Dedup mit Wiederholungszähler; Events tragen nur IDs, Zähler und
+  Fingerprints.
+- **Versionsspeicher** für spätere Konfigurations-Backups: GFS-Aufbewahrung (7/4/6),
+  Größengrenzen, Prüfsummen, Sweep beim Start. Manuelle und `pre_*`-Versionen werden
+  nie ausgedünnt; das Größenlimit nennt sie, falls es sie entfernen muss. Dedup nur bei
+  byte-gleichen Artefakten (sha256 des Core). Beim Entfernen eines Eintrags werden
+  seine Versionen nach `removed/<router_id>/` verschoben (auditiert).
+- **Gestufte rpcd-ACL v9, nur als Angebot:** nichts wird automatisch geschrieben. Ein
+  Admin beantragt die Stufen, sieht Unterschied und Risiken, gibt frei; dann sichert der
+  Core die alte Datei, schreibt, startet rpcd neu, prüft die Capabilities neu und
+  protokolliert Befehl und Rückweg auf dem Sicherheitsring. Eine verteilte gestufte ACL
+  bleibt über HA-Neustarts erhalten (`ensure_acl_respecting_offer`, ohne zusätzlichen
+  Router-Aufruf).
+- **Gepinntes SSH** für den Config-Pfad und das ACL-Verteilen per SSH: eigener Store
+  je Router (`openwrt_router.ssh_host_keys`, privat, atomar). Kein stilles TOFU: ein
+  erstmals gesehener Host-Key wird *ausstehend*, bis ein Admin ihn bestätigt
+  (`ssh_pin_confirm`); ein abweichender Key wird immer abgelehnt und auditiert;
+  Zurücksetzen nur über `ssh_pin_reset`. Der bestehende SSH-Fallback des Polls bleibt
+  unverändert.
+- **Panel:** Navigationseintrag „Enterprise“ mit Untertab-Container; er bleibt
+  verborgen, solange kein Modul einen Tab anmeldet.
+
+### Migration
+
+Nichts zu tun. Keine ID-Änderungen; bestehende Einträge bekommen ihre Router-ID beim
+nächsten Start ohne Router-Kontakt. Neue Stores: `openwrt_router.router_registry`,
+`openwrt_router.audit`, `openwrt_router.config_catalog`,
+`openwrt_router.ssh_host_keys` (der Installations-Schlüssel
+`openwrt_router.installation_key` erst, wenn ein Provider ihn braucht).
+
+### Fixed
+
+- **Handy: untere Leiste wieder bedienbar.** Unter 420 px lag der Kopf der
+  geschlossenen, leeren Detailansicht („Details ×“) über der neuen
+  Symbolleiste und fing jeden Tipp ab. Die geschlossene Detailansicht ist
+  jetzt unsichtbar und nimmt keine Tipps mehr an; geöffnet sitzt sie über
+  der Leiste. Am Desktop unverändert.
+- **Speicheranzeige nach dem Start:** bis zum ersten Speichern (bis 5 min
+  nach dem Start) steht in den Stabilitäts-Einstellungen „noch nicht
+  gespeichert“ statt „–“.
+- **Deutsche Zahlen auch in der Fußleiste** und überall, wo Datenraten und
+  Datenmengen stehen (Traffic, Detailansicht, Verbindungs-Tooltip):
+  „5,0 Mbit/s“, „8,9 GB“.
+- **Screenreader:** die Symbole der Seitenleiste nennen wieder ihre Zahl,
+  z. B. „Diagnose (3)“.
+- **Detailansicht am Handy:** nimmt beim Zuklappen keine Tipps mehr an und
+  bleibt bei wenig Bildschirmhöhe samt „×“ vollständig sichtbar.
+
+### Security (Prüfung des Enterprise Core vor dem Release)
+
+- **ACL-Stufen:** optionale Stufen dürfen nur noch exakt freigegebene Leserechte
+  enthalten (Allowlist, keine Muster wie `*` oder `fil?`, Dateien nur lesen unter
+  `/proc/net`, `/sys/class/net`, `/sys/class/ieee80211`); das Angebot zeigt dem Admin
+  jedes Recht, nicht nur eine Prüfsumme.
+- **Gepinntes SSH:** beim ersten Kontakt geht kein Passwort an den Router, bevor der
+  Host-Key bestätigt ist; die Ausgabe ist begrenzt (Abbruch mit Meldung statt
+  unbegrenztem Speicher).
+- **Freigaben:** offene Anträge sind je Benutzer und insgesamt begrenzt; abgelaufene
+  Anträge und Restore-Pläne geben ihre Daten frei.
+- **Audit:** Daten werden vor dem Speichern maskiert (auch escaptes JSON, URL-kodierte
+  und verschleierte Namen); Dedup-Fenster begrenzt; die Option „Konfigurations-Backup“
+  wird beim Umschalten auditiert; die Diagnose zeigt Benutzer-IDs nur pseudonym.
+- **Speicher:** der Startup-Sweep folgt keinen Links/Junctions; ein ersetzter
+  Installations-Schlüssel meldet einen Reparaturhinweis; feindliches ACL-JSON vom
+  Router (zu groß, zu tief) wird gezählt statt zu werfen; Backup-Namen kollidieren
+  nicht mehr.
+
+### Fixed (Enterprise Core)
+
+- setup_retry fegt den Speicher nicht bei jedem Versuch neu; die Freigabe schreibt nur
+  geänderte Stores.
+- Ein defekter Store unter echtem HA (umbenannt zu `.corrupt.*`) gilt als
+  fehlgeschlagenes Laden; Versionsdateien bleiben liegen, solange der Index
+  wiederhergestellt wurde.
+- `backup_recovered` auch nach einem deduplizierten Erfolg und nach einem Neustart.
+- Capabilities: bekannt → unbekannt → anders bekannt meldet die Änderung.
+- Einrichtung: wurde die ACL nicht geschrieben, nennt der Fehler den Grund (gestufte
+  ACL behalten / ACL nicht lesbar / schon aktuell).
+
+## [1.43.1] - 2026-11-17
+
+Reine Panel-Korrekturen am Tab *Diagnose → Stabilität*; keine neuen
+Router-Abfragen, Entitäten und Sensorwerte unverändert.
+
+### Fixed
+
+- **Deutsche Zahlen im ganzen Tab.** Alle Zahlen (Liste, Detail,
+  AP-Vergleich, Einstellungen, Empfehlungen) laufen über eine Hilfsfunktion
+  mit Dezimalkomma: aus „5.404 Abbrüche“ wird „5,4 Abbrüche/100 h“, aus
+  „Speicher: 0.11 MB“ wird „0,11 MB“. Raten haben eine Nachkommastelle und
+  die Einheit „/100 h“, Signal ganze dBm, Zähler ganze Zahlen.
+- **AP-Vergleich in Rangfolge.** Die Liste kam nach interner AP-Kennung
+  sortiert, die Rangnummer zählt aber nach den wenigsten Abbrüchen je
+  100 Client-Stunden; die Liste folgt jetzt dem Rang. APs mit zu wenig Daten
+  (unter 10 Client-Stunden) stehen danach, nach Namen sortiert, mit „–“.
+- **Einstellungen:** Score-Gewichte und Klassengrenzen überlappen am Desktop
+  nicht mehr; jedes Feld steht unter seiner Beschriftung in seiner Zelle.
+- **Client-Liste:** Kopfzeile am Desktop (Name, Access Point, Zustand,
+  Score, Verfügbarkeit 24 h / 7 Tage, Reconnects 24 h, letztes Problem,
+  Datenabdeckung, Trend) und eine eigene Trend-Spalte aus denselben Werten
+  wie die Trend-Sortierung, mit Text für Screenreader; „–“ heißt zu wenig
+  Daten. Das letzte Problem wird bei Platzmangel mit „…“ gekürzt (voller
+  Text im Tooltip) und überlappt die Nachbarspalte nicht mehr.
+- **Schmale Liste:** die Client-Liste wechselt nach ihrer eigenen Breite
+  (unter 820 px) zu Karten, auch bei offener HA-Seitenleiste oder halbem
+  Browserfenster.
+- **Reconnects ohne Abbrüche** sind kein Widerspruch: das Detail sagt jetzt
+  neben der Zahl, dass Reconnects aus dem Router-Log stammen und kurze
+  Neuanmeldungen keine Sitzung beenden.
+- **Handy:** unter 760 px liegen die sechs Filter hinter einem
+  „Filter“-Knopf (zeigt, wie viele gesetzt sind); unter 420 px wird die
+  Seitennavigation zur Leiste unten, damit *Diagnose* erreichbar bleibt.
+
 ## [1.43.0] - 2026-11-17
 
 ### Added

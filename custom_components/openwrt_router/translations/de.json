@@ -6,12 +6,14 @@
         "data": {
           "extended_wifi_sensors": "Erweiterte WLAN-Sensoren (Funk, AP, Port)",
           "topology_port_debug": "Port-Zuordnungs-Debugdaten im Topology-Snapshot",
-          "topology_panel_all_users": "Topologie-Panel allen Benutzern anzeigen"
+          "topology_panel_all_users": "Topologie-Panel allen Benutzern anzeigen",
+          "config_backup_enabled": "Konfigurations-Backup (config_backup_enabled)"
         },
         "data_description": {
           "extended_wifi_sensors": "Schaltet alle Sensoren pro Funkmodul, pro SSID (AP) und pro Port dieses Routers auf einmal ein statt einzeln. Ausschalten deaktiviert nur die Sensoren, die dieser Schalter eingeschaltet hat; selbst deaktivierte Sensoren bleiben unberührt. Wirksam nach etwa 30 Sekunden.",
           "topology_port_debug": "Rohe Port-Zuordnungsdaten (FDB/DHCP/ARP-Treffer und Zuordnungsgründe) im Topology-Snapshot-Endpoint mitliefern. HA-Diagnostics bleiben immer redacted.",
-          "topology_panel_all_users": "Macht das Seitenleisten-Panel „Network Topology“ und seine Snapshot-API für alle Home-Assistant-Benutzer verfügbar, nicht nur für Administratoren. Die Topologie enthält DHCP-Leases, ARP-/Switch-Tabellen, die WAN-IP und DDNS-Angaben. Das Panel gilt für alle Router gemeinsam: Es ist für alle Benutzer offen, sobald ein Router diese Option aktiviert hat."
+          "topology_panel_all_users": "Macht das Seitenleisten-Panel „Network Topology“ und seine Snapshot-API für alle Home-Assistant-Benutzer verfügbar, nicht nur für Administratoren. Die Topologie enthält DHCP-Leases, ARP-/Switch-Tabellen, die WAN-IP und DDNS-Angaben. Das Panel gilt für alle Router gemeinsam: Es ist für alle Benutzer offen, sobald ein Router diese Option aktiviert hat.",
+          "config_backup_enabled": "Erlaubt das Konfigurations-Backup dieses Routers (alle config.*-Fähigkeiten und die optionale ACL-Stufe „config_backup_read“). Standardmäßig aus. Der Schalter erscheint, sobald ein Konfigurations-Provider (Backup-Engine) installiert ist oder solange er an ist; ohne Provider hat er keine Wirkung. Ausschalten stoppt sofort jedes Backup, jede Prüfung und jeden Vergleich für diesen Router; gespeicherte Versionen bleiben. Achtung: Ein Backup enthält ALLE Router-Geheimnisse: /etc/shadow (Passwort-Hashes aller Router-Logins, auch root), private Schlüssel (SSH-Host-Keys, VPN- und TLS-Schlüssel) sowie die WLAN-, VPN- und DDNS-Passwörter."
         }
       }
     }
@@ -71,7 +73,9 @@
       "rpcd_setup_required": "rpcd ist auf diesem Router nicht konfiguriert. Per SSH auf dem Router ausführen: opkg update && opkg install rpcd rpcd-mod-rpcsys && uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock' && uci set rpcd.@rpcd[0].timeout=30 && uci commit rpcd && service rpcd restart",
       "acl_deploy_failed": "Automatisches ACL-Deployment fehlgeschlagen — der Router hat ubus file/write abgelehnt und auch der SSH-Fallback war nicht erfolgreich. Bitte die ACL manuell mit den oben gezeigten SSH-Befehlen einspielen und erneut prüfen.",
       "acl_deploy_no_change": "Die ACL-Datei wurde geschrieben, aber die Berechtigungen haben sich nach erneuter Prüfung nicht geändert. Möglicherweise ist rpcd noch nicht fertig neu gestartet oder es fehlen Pakete — siehe Installationsbefehle oben, dann erneut versuchen.",
-      "acl_already_current": "Die ACL-Datei auf dem Router ist bereits aktuell — die fehlenden Berechtigungen haben eine andere Ursache (fehlende Pakete oder ausstehender rpcd-Neustart). Siehe Installationsbefehle oben."
+      "acl_already_current": "Die ACL-Datei auf dem Router ist bereits aktuell — die fehlenden Berechtigungen haben eine andere Ursache (fehlende Pakete oder ausstehender rpcd-Neustart). Siehe Installationsbefehle oben.",
+      "acl_tiered_kept": "Der Router hat eine neuere, gestufte Zugriffsliste (ACL). Sie wurde behalten; die alte automatische ACL wurde nicht darübergeschrieben. Rechte für neue Funktionen werden über das ACL-Angebot des Kerns vergeben.",
+      "acl_check_transient": "Der Router war für die Prüfung seiner Zugriffsliste (ACL) nicht erreichbar. Es wurde nichts geändert; versuche es erneut, wenn der Router erreichbar ist."
     },
     "abort": {
       "already_configured": "Dieser Router ist bereits konfiguriert.",
@@ -288,9 +292,21 @@
     }
   },
   "issues": {
+    "acl_base_rights_missing": {
+      "title": "Behaltene rpcd-ACL von {router}: Leserechte fehlen",
+      "description": "Die rpcd-ACL auf dem Router {router} ist eine gestufte ACL, die ein Admin freigegeben hat. Home Assistant behält sie deshalb und überschreibt sie nicht. Ihr fehlen {count} Leserecht(e), die die Integration braucht:\n\n{rights}\n\nSensoren, die sie nutzen, bleiben eventuell nicht verfügbar oder weichen auf SSH aus. Abhilfe: eine aktuelle gestufte ACL über ein freigegebenes ACL-Angebot einspielen, oder `{path}` auf dem Router löschen: Die Integration spielt dann beim nächsten Start ihre Standard-ACL ein (die optionalen Stufen fehlen, bis sie wieder freigegeben werden).\n\nDiese Meldung verschwindet, sobald die eingespielte ACL diese Rechte wieder gewährt."
+    },
     "channel_plan_conflict": {
       "title": "WLAN-Kanalkonflikte zwischen OpenWrt-Routern",
       "description": "Zwischen deinen OpenWrt-Routern gibt es {count} Kanalkonflikt(e):\n\n{findings}\n\n- `same_channel`: Zwei Funkmodule nutzen denselben Hauptkanal und müssen sich die Sendezeit teilen.\n- `overlap`: Die Kanalbreiten überlappen, z. B. 40 MHz auf 44 und 48 oder 160 MHz auf 36, das 36–64 belegt.\n- `non_standard_24`: Ein 2,4-GHz-Funkmodul liegt nicht auf Kanal 1, 6 oder 11 und überlappt mit den Nachbarn.\n\nStelle benachbarte Access Points in den WLAN-Einstellungen auf unterschiedliche, nicht überlappende Kanäle oder schmalere Kanalbreiten. DFS-Kanäle sind kein Konflikt; sie stehen im Diagnosesensor „Kanalplan-Befunde“ des jeweiligen Routers.\n\nDieser Hinweis verschwindet automatisch, sobald die Konflikte behoben sind."
+    },
+    "installation_key_lost": {
+      "title": "OpenWrt Router: Installationsschlüssel verloren",
+      "description": "Der Installationsschlüssel der Integration OpenWrt Router fehlt oder ist nicht lesbar, obwohl {versions} gespeicherte Konfigurationsversion(en) vorhanden sind. Der Schlüssel schützt die Geheimnis-Prüfsummen in diesen Versionen; ohne ihn lassen sich Geheimnisse in alten und neuen Versionen nicht vergleichen, Drift-Prüfungen melden daher keine geänderten Passwörter oder Schlüssel.\n\nDie Integration erzeugt nie selbst einen neuen Schlüssel. Ein Administrator muss das Zurücksetzen beantragen, ein zweiter Schritt muss es freigeben (kritische Aktion). Nach dem Zurücksetzen speichert die nächste Drift-Prüfung jedes Routers die aktuelle Konfiguration als neue Vergleichsbasis.\n\nWenn du Home Assistant aus einer Sicherung wiederhergestellt hast, prüfe zuerst, ob die Datei `.storage/openwrt_router.installation_key` darin enthalten war. Wird sie zurückgespielt und Home Assistant neu gestartet, verschwindet dieser Hinweis."
+    },
+    "installation_key_replaced": {
+      "title": "OpenWrt Router: Installationsschlüssel ersetzt",
+      "description": "Die Datei des Installationsschlüssels der Integration OpenWrt Router war nicht lesbar oder nicht verwendbar. Keine gespeicherte Konfigurationsversion hat sie benutzt, daher wurde ein neuer Schlüssel ({key_id}) erzeugt.\n\nWenn du das nicht erwartet hast, prüfe den Speicherordner von Home Assistant (`.storage/openwrt_router.installation_key`) und den Datenträger auf Schäden. Das Sicherheitsprotokoll des Kerns enthält das Ereignis `core.installation_key_replaced`.\n\nDieser Hinweis verschwindet nach dem nächsten Neustart von Home Assistant."
     },
     "lan_unreachable": {
       "title": "Kein OpenWrt-Router erreichbar",
