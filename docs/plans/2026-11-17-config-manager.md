@@ -1063,21 +1063,38 @@ Gruppe II: `tests/test_config_views.py` (Admin-only trotz `topology_panel_all_us
 ## 21. Annahmen (nicht belegt) und nicht Geprüftes
 
 Annahmen, vor dem jeweiligen Paket zu prüfen:
-- `/www/cgi-bin/cgi-backup` existiert überall, wo LuCI installiert ist (Link auf `cgi-io`). Prüfen:
-  cgi-io-Makefile lesen und lesend auf einem Router `ls -l /www/cgi-bin/` (mit Freigabe).
+- `/www/cgi-bin/cgi-backup` existiert überall, wo LuCI installiert ist (Link auf `cgi-io`).
+  **Belegt am 2026-11-18** (lesende Prüfung, vier Geräte: 2× WR3000 25.12.1, FRITZ!Repeater 3000 25.12.6,
+  1750E 25.12.2): `/www/cgi-bin/` enthält überall `cgi-backup` als Link auf `/usr/libexec/cgi-io`
+  (daneben `cgi-download`, `cgi-exec`, `cgi-upload`); `cgi-io` und `luci-base` sind überall installiert.
+  Weiter nicht belegt: Router ohne LuCI (keiner geprüft) und ein tatsächlicher Abruf über `cgi-backup`.
 - `cgi-backup` antwortet bei fehlendem Recht mit 403 oder Nicht-Gzip. Abgefangen über Gzip-Magic.
 - rpcd `file remove` prüft das Recht `write` (nur relevant für den verworfenen Weg a).
 - Die Temp-Datei von `sysupgrade -b <datei>` ist 0644 (nur Weg a).
 - rpcd in 24.10 liest für `packagelist` den opkg-Status, 25.12 die apk-Datenbank.
+  Teilweise belegt am 2026-11-18: auf allen vier 25.12-Geräten ist `apk` der Paketmanager (`apk list -I`
+  liefert die Pakete, keine `opkg`-Spuren). Weiter nicht belegt: dass rpcd `packagelist` aus der
+  apk-Datenbank liest (kein Aufruf gemacht) und das 24.10-Verhalten (kein 24.10-Gerät geprüft).
+  Befund zu D17: `rpcd-mod-rpcsys` und das ubus-Objekt `rpc-sys` sind auf 3 von 4 Geräten vorhanden
+  (gateway, FRITZ!Repeater 3000, 1750E), auf einem WR3000 (ap2) fehlen beide. Das bestätigt den Fallback
+  aus D17 (SSH-Paketliste, sonst nur Board); die Entscheidung bleibt unverändert.
 - Der Rollback-Zustand von `uci apply` geht beim Neustart verloren.
 - `sysupgrade -r` gibt es in 22.03.
 - Automatische HA-Backups sind standardmäßig verschlüsselt.
 - Größen von Archiv und `uci get`-Antworten sowie Laufzeit von `sysupgrade -b` (Abschnitt 15).
 - Die ACL-Gruppe heißt `"root"` (`acl_provisioning.py:62`). Wie ein dedizierter Nicht-Root-Login sie
-  referenziert (`list read`), ist nicht geprüft.
+  referenziert (`list read`), ist nicht geprüft. Am 2026-11-18 gesehen (kein Beleg für den Gruppennamen):
+  der root-Login steht auf allen vier Geräten mit `read '*'` und `write '*'`; ein zweiter Login mit
+  eigener Gruppe existiert nur auf einem Gerät.
+- ACL-Datei der Integration: am 2026-11-18 liegt auf allen vier Geräten `ha-openwrt-router.json` unter
+  `/usr/share/rpcd/acl.d/` (gleiche Größe überall, daneben die LuCI-Dateien). Ihr Inhalt wurde nicht
+  ausgegeben; ob dort `cgi-io: backup` (read) steht, ist **nicht belegt**. Der Plan geht für den Code in `acl_provisioning.py` von „fehlt“
+  aus (Abschnitt 1, `Fehlt:`), das wurde weder bestätigt noch widerlegt.
 
 Nicht geprüft:
-- Kein Router, kein HA, kein Netzwerkzugriff (Vorgabe). Keine Live-Werte.
+- Kein Router, kein HA, kein Netzwerkzugriff (Vorgabe). Keine Live-Werte, außer den am 2026-11-18
+  mit Freigabe lesend erhobenen (siehe oben, vier Geräte). Dabei ausdrücklich nicht geprüft: ein Abruf über
+  `cgi-backup`, Archivgröße, Laufzeit von `sysupgrade -b`, `uci get`-Laufzeiten.
 - Der Vertrag von enterprise-core existiert noch nicht. Abschnitt 12 ist eine Anforderung, kein Abgleich.
 - Frontend nicht gebaut. Keine Tests ausgeführt (reiner Plan).
 - Verhalten von `cgi-backup` über HTTPS mit selbstsigniertem Zertifikat (sollte `self._ssl_context`
