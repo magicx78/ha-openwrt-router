@@ -18,12 +18,17 @@ run in the poll.
   Part 1 has none: they are ``unavailable``/``no_provider`` (or
   ``disabled`` when the entry option ``config_backup_enabled`` is off).
   Part 2 registers a :data:`ConfigCapabilityProvider` hook.
+* ``rf.txpowerlist`` / ``rf.survey`` / ``rf.scan`` (1.44.0) come from the
+  deployed rpcd ACL the core observed at entry setup
+  (:class:`DeployedAclObservation`), never from a router call. Unknown
+  ACL -> ``unknown`` with a reason text. Like ``config.*`` they follow
+  their source exactly (no stale known state kept).
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -40,12 +45,15 @@ from .const import (
     ROUTER_INFO_FALLBACK_MODEL,
 )
 from .core_models import (
+    ACL_CAPABILITIES,
     CONFIG_CAPABILITIES,
     FEATURE_CAPABILITIES,
+    STRICT_CAPABILITIES,
     Capability,
     CapabilityReason,
     CapabilityState,
     CapabilityStatus,
+    DeployedAclObservation,
     RouterRecord,
 )
 
@@ -65,6 +73,7 @@ SOURCE_PACKAGE_MANAGER = "updates_available.package_manager"
 SOURCE_STREAM = "ubus_stream"
 SOURCE_CONFIG = "config_provider"
 SOURCE_CONFIG_OPTION = "options.config_backup_enabled"
+SOURCE_DEPLOYED_ACL = "acl.deployed_file"
 
 
 def capability_signature(
@@ -74,6 +83,7 @@ def capability_signature(
     ssh_seen: bool,
     config_enabled: bool,
     provider_token: Any,
+    acl: DeployedAclObservation | None = None,
 ) -> tuple[Any, ...]:
     """Cheap tuple of every input of :func:`evaluate`."""
     info = getattr(data, "router_info", None)
@@ -96,6 +106,7 @@ def capability_signature(
         getattr(data, "lldp_status", None),
         getattr(data, "log_status", None),
         updates.get("package_manager"),
+        acl,
     )
 
 
@@ -218,6 +229,8 @@ def _config(
     now: datetime,
 ) -> list[CapabilityStatus]:
     names = sorted(CONFIG_CAPABILITIES)
+    # The option wins (1.44.0: default OFF): OFF is "disabled" with or
+    # without a provider, and the provider is never asked.
     if not config_enabled:
         return [
             _unavailable(c, SOURCE_CONFIG_OPTION, now, CapabilityReason.DISABLED)
@@ -247,6 +260,48 @@ def _config(
     return out
 
 
+def _rf(acl: DeployedAclObservation | None, now: datetime) -> list[CapabilityStatus]:
+    """rf.* from the deployed ACL observation (no router call)."""
+    out: list[CapabilityStatus] = []
+    for cap in sorted(ACL_CAPABILITIES):
+        if acl is None:
+            out.append(
+                _unknown(
+                    cap,
+                    SOURCE_DEPLOYED_ACL,
+                    now,
+                    text="deployed ACL not read yet (read once per entry setup)",
+                )
+            )
+            continue
+        granted = acl.is_granted(cap)
+        detail = {"acl_kind": acl.kind, "acl_reason": acl.reason}
+        if granted is None:
+            out.append(
+                _unknown(
+                    cap,
+                    SOURCE_DEPLOYED_ACL,
+                    now,
+                    text=f"deployed ACL unknown ({acl.reason})",
+                    detail=detail,
+                )
+            )
+        elif granted:
+            out.append(_available(cap, SOURCE_DEPLOYED_ACL, now, detail=detail))
+        else:
+            out.append(
+                _unavailable(
+                    cap,
+                    SOURCE_DEPLOYED_ACL,
+                    now,
+                    CapabilityReason.PERMISSION_DENIED,
+                    permissions=acl.missing_for(cap),
+                    detail=detail,
+                )
+            )
+    return out
+
+
 def evaluate(
     data: Any,
     *,
@@ -256,6 +311,7 @@ def evaluate(
     record: RouterRecord | None = None,
     config_enabled: bool = True,
     provider: ConfigCapabilityProvider | None = None,
+    acl: DeployedAclObservation | None = None,
 ) -> dict[str, CapabilityStatus]:
     """All core capabilities of one router from one finished poll."""
     info = getattr(data, "router_info", None)
@@ -310,6 +366,7 @@ def evaluate(
     items.extend(
         _config(record, config_enabled=config_enabled, provider=provider, now=now)
     )
+    items.extend(_rf(acl, now))
     return {status.capability: status for status in items}
 
 
@@ -343,11 +400,27 @@ def _same(a: CapabilityStatus, b: CapabilityStatus) -> bool:
 def merge(
     previous: Mapping[str, CapabilityStatus],
     fresh: Mapping[str, CapabilityStatus],
+    *,
+    last_known: MutableMapping[str, CapabilityState] | None = None,
 ) -> MergeResult:
-    """Apply ``fresh`` to ``previous`` (see module docstring for the rules)."""
+    """Apply ``fresh`` to ``previous`` (see module docstring for the rules).
+
+    ``last_known`` (kept by the caller, updated here): the last KNOWN state
+    per capability. A strict capability that goes known -> unknown -> a
+    different known state (available -> unknown -> unavailable) is then
+    reported as a change from the last known state instead of a silent
+    first detection (security review 2026-11-18, finding 16).
+    """
     result = MergeResult(capabilities=dict(previous))
     for name, new in fresh.items():
         old = previous.get(name)
+        prior: CapabilityState | None = None
+        if last_known is not None:
+            if old is not None and old.state is not CapabilityState.UNKNOWN:
+                last_known[name] = old.state
+            prior = last_known.get(name)
+            if new.state is not CapabilityState.UNKNOWN:
+                last_known[name] = new.state
         if old is None:
             result.capabilities[name] = new
             result.first_detections += 1
@@ -357,14 +430,19 @@ def merge(
         new_known = new.state is not CapabilityState.UNKNOWN
         old_known = old.state is not CapabilityState.UNKNOWN
         # config.* follow the provider/option exactly (a new provider turns
-        # no_provider into not_probed); everything else keeps its last
-        # known state through a hiccup.
-        if not new_known and old_known and name not in CONFIG_CAPABILITIES:
+        # no_provider into not_probed), rf.* their ACL observation; all
+        # else keeps its last known state through a hiccup.
+        if not new_known and old_known and name not in STRICT_CAPABILITIES:
             result.kept_stale += 1
             continue
         result.capabilities[name] = new
         if not old_known and new_known:
-            result.first_detections += 1
+            if prior is not None and prior is not new.state:
+                result.changes.append(
+                    {"capability": name, "from": prior.value, "to": new.state.value}
+                )
+            else:
+                result.first_detections += 1
         elif not old_known or not new_known or old.state is new.state:
             result.updated += 1
         else:

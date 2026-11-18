@@ -1,4 +1,11 @@
-"""Tests for async_ssh_run_pinned (TOFU host-key pinning, config/backup path).
+"""Tests for async_ssh_run_pinned (host-key pinning, config/backup path).
+
+Since the security review of 2026-11-18 (finding 2) the first contact reads
+the host key WITHOUT credentials and stops before authentication; only a
+connection pinned to a CONFIRMED key logs in. The first-use tests below were
+changed deliberately for that (they asserted the old "log in with the
+password, then pin" order). The fake process models asyncssh's
+``create_process`` streams for the output caps (finding 3).
 
 asyncssh.connect is replaced by a fake router that behaves like asyncssh in
 the parts that matter: the host key is checked during the handshake (trusted
@@ -74,6 +81,37 @@ class MemoryPinStore(HostKeyPinStore):
         self.pin = pin
 
 
+class FakeStream:
+    """asyncssh process stream: read(n) returns chunks, b"" at EOF."""
+
+    def __init__(self, data: bytes, chunk: int = 7000):
+        self.data = data
+        self.pos = 0
+        self.chunk = chunk
+        self.reads = 0
+
+    async def read(self, n: int = -1) -> bytes:
+        self.reads += 1
+        size = min(n if n > 0 else len(self.data), self.chunk)
+        out = self.data[self.pos : self.pos + size]
+        self.pos += len(out)
+        return out
+
+
+class FakeProcess:
+    def __init__(self, stdout: bytes, stderr: bytes, exit_status):
+        self.stdout = FakeStream(stdout)
+        self.stderr = FakeStream(stderr)
+        self.exit_status = exit_status
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+    async def wait_closed(self):
+        return None
+
+
 class FakeRouter:
     """Stand-in for asyncssh.connect against one router."""
 
@@ -85,6 +123,7 @@ class FakeRouter:
         deny_all: bool = False,
         exit_status: int | None = 0,
         stdout: bytes = b"ok\n",
+        stderr: bytes = b"",
         connect_error: Exception | None = None,
         connect_delay: float = 0.0,
     ):
@@ -94,6 +133,8 @@ class FakeRouter:
         self.deny_all = deny_all
         self.exit_status = exit_status
         self.stdout = stdout
+        self.stderr = stderr
+        self.processes: list[FakeProcess] = []
         self.connect_error = connect_error
         self.connect_delay = connect_delay
         self.connect_kwargs: list[dict] = []
@@ -124,14 +165,16 @@ class FakeRouter:
         conn = MagicMock()
         conn.get_server_host_key = MagicMock(return_value=key)
 
-        async def _run(cmd, **run_kw):
+        async def _create_process(cmd, **run_kw):
+            assert run_kw.get("encoding", "x") is None
             if self.on_run:
                 self.on_run()
-            return SimpleNamespace(
-                exit_status=self.exit_status, stdout=self.stdout, stderr=b""
-            )
+            proc = FakeProcess(self.stdout, self.stderr, self.exit_status)
+            self.processes.append(proc)
+            return proc
 
-        conn.run = AsyncMock(side_effect=_run)
+        conn.create_process = AsyncMock(side_effect=_create_process)
+        conn.run = AsyncMock(side_effect=AssertionError("unbounded conn.run"))
         conn.close = MagicMock()
         conn.wait_closed = AsyncMock()
         self.conns.append(conn)
@@ -160,6 +203,9 @@ def _guard_shared_transport(api: OpenWrtAPI):
 
 @pytest.mark.asyncio
 async def test_first_use_pins_before_running_the_command():
+    """Changed deliberately (finding 2): the first connection carries NO
+    credentials and stops in the handshake; a store that confirms at once
+    (MemoryPinStore = tofu) gets a SECOND, pinned connection that logs in."""
     api, store, router = _api(), MemoryPinStore(), FakeRouter(KEY_A)
     _guard_shared_transport(api)
     seen_at_run: list[int] = []
@@ -176,11 +222,15 @@ async def test_first_use_pins_before_running_the_command():
     assert result.pin == store.saved[0]
     assert result.stdout == "ok\n"
     assert result.exit_status == 0
-    kw = router.connect_kwargs[0]
-    assert kw["known_hosts"] == ([], [], [])  # checked, not None, not empty
-    assert kw["password"] == _PW
-    assert kw["connect_timeout"] == SSH_CONNECT_TIMEOUT
-    assert "port" not in kw
+    probe, login = router.connect_kwargs
+    assert probe["known_hosts"] == ([], [], [])  # checked, not None, not empty
+    assert probe["password"] is None and probe["client_keys"] is None
+    assert probe["agent_path"] is None and probe["gss_host"] is None
+    assert [k.public_data for k in login["known_hosts"][0]] == [KEY_A.public_data]
+    assert login["password"] == _PW
+    assert router.auth_attempts == [_PW]  # only the pinned connection logged in
+    assert login["connect_timeout"] == SSH_CONNECT_TIMEOUT
+    assert "port" not in login
     router.conns[0].close.assert_called_once()
     assert api._ssh_conn is None
 
@@ -263,7 +313,7 @@ async def test_mismatch_after_handshake_is_still_refused():
     ):
         await async_ssh_run_pinned(api, "true", pin_store=MemoryPinStore(pin))
     assert exc.value.presented_fingerprint == KEY_B.get_fingerprint("sha256")
-    router.conns[0].run.assert_not_awaited()
+    router.conns[0].create_process.assert_not_awaited()
     router.conns[0].close.assert_called_once()
 
 
@@ -286,8 +336,8 @@ async def test_failed_pin_save_refuses_the_command():
     with _patched(router), pytest.raises(OpenWrtHostKeyError) as exc:
         await async_ssh_run_pinned(api, "sysupgrade -b -", pin_store=store)
     assert exc.value.reason == "pin_save_failed"
-    router.conns[0].run.assert_not_awaited()
-    router.conns[0].close.assert_called_once()
+    # changed deliberately (finding 2): no login, no session, no command
+    assert router.conns == [] and router.auth_attempts == []
 
 
 @pytest.mark.asyncio
@@ -323,10 +373,12 @@ async def test_password_denied_retries_with_key_on_the_same_host_key():
     router = FakeRouter(KEY_A, deny_password=True)
     with _patched(router):
         result = await async_ssh_run_pinned(api, "true", pin_store=store)
-    assert [kw["password"] for kw in router.connect_kwargs] == [_PW, None]
-    # first use: the retry already trusts only the key shown the first time
-    second_trusted = router.connect_kwargs[1]["known_hosts"][0]
-    assert [k.public_data for k in second_trusted] == [KEY_A.public_data]
+    # changed deliberately (finding 2): probe without credentials first
+    assert [kw["password"] for kw in router.connect_kwargs] == [None, _PW, None]
+    assert router.connect_kwargs[0]["client_keys"] is None
+    # both logins trust only the key the probe captured
+    for kw in router.connect_kwargs[1:]:
+        assert [k.public_data for k in kw["known_hosts"][0]] == [KEY_A.public_data]
     assert result.pinned_now is True
     assert api._ssh_use_key is False  # shared transport state untouched
 
@@ -335,10 +387,13 @@ async def test_password_denied_retries_with_key_on_the_same_host_key():
 async def test_first_use_retry_with_a_different_key_is_refused():
     api, store = _api(), MemoryPinStore()
     router = FakeRouter([KEY_A, KEY_B], deny_password=True)
-    with _patched(router), pytest.raises(OpenWrtHostKeyMismatchError):
+    with _patched(router), pytest.raises(OpenWrtHostKeyMismatchError) as exc:
         await async_ssh_run_pinned(api, "true", pin_store=store)
-    assert store.saved == []
-    assert router.auth_attempts == [_PW]  # key auth never offered to KEY_B
+    # changed deliberately (finding 2): the probe saw KEY_A (stored), the
+    # login connection presented KEY_B and was refused before any password
+    assert [p.fingerprint for p in store.saved] == [KEY_A.get_fingerprint("sha256")]
+    assert exc.value.presented_fingerprint == KEY_B.get_fingerprint("sha256")
+    assert router.auth_attempts == []
 
 
 @pytest.mark.asyncio
@@ -347,7 +402,11 @@ async def test_key_auth_first_when_instance_already_uses_keys():
     api._ssh_use_key = True
     with _patched(router):
         await async_ssh_run_pinned(api, "true", pin_store=MemoryPinStore())
-    assert [kw["password"] for kw in router.connect_kwargs] == [None]
+    # changed deliberately (finding 2): probe (no credentials at all), then
+    # key auth on the pinned connection
+    assert [kw["password"] for kw in router.connect_kwargs] == [None, None]
+    assert router.connect_kwargs[0]["client_keys"] is None
+    assert "client_keys" not in router.connect_kwargs[1]
 
 
 @pytest.mark.asyncio
@@ -356,8 +415,10 @@ async def test_both_auth_methods_denied():
     store = MemoryPinStore()
     with _patched(router), pytest.raises(OpenWrtAuthError):
         await async_ssh_run_pinned(api, "true", pin_store=store)
-    assert len(router.connect_kwargs) == 2
-    assert store.saved == []  # nothing pinned without a successful login
+    # changed deliberately (finding 2): probe + two pinned logins; the key
+    # was stored (tofu store) from the credential-less probe, before any login
+    assert len(router.connect_kwargs) == 3
+    assert len(store.saved) == 1
 
 
 @pytest.mark.asyncio
@@ -365,9 +426,9 @@ async def test_password_never_in_the_command():
     api, router = _api(), FakeRouter(KEY_A)
     with _patched(router):
         await async_ssh_run_pinned(api, "sysupgrade -b -", pin_store=MemoryPinStore())
-    cmd = router.conns[0].run.await_args.args[0]
+    cmd = router.conns[0].create_process.await_args.args[0]
     assert cmd == "sysupgrade -b -"
-    assert _PW not in repr(router.conns[0].run.await_args)
+    assert _PW not in repr(router.conns[0].create_process.await_args)
 
 
 # ---------------------------------------------------------------------------
@@ -466,8 +527,9 @@ def test_pin_round_trip_and_immutability():
 
 
 def test_client_decision():
+    # changed deliberately (finding 2): first contact captures and REFUSES
     first_use = _PinningSSHClient(None)
-    assert first_use.validate_host_public_key(_HOST, _HOST, 22, KEY_B) is True
+    assert first_use.validate_host_public_key(_HOST, _HOST, 22, KEY_B) is False
     assert first_use.presented_key is KEY_B
     pinned = _PinningSSHClient(KEY_A)
     assert pinned.validate_host_public_key(_HOST, _HOST, 22, KEY_B) is False

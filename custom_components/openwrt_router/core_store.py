@@ -6,11 +6,18 @@ engines (``net_engine``/``client_engine``): an unreadable or foreign store
 is copied to ``<store>.bak`` once and the caller starts empty. The caller
 decides what "empty" means; for the registry the router ids come back
 deterministically (``default_router_id``), only adoption links can be lost.
+
+Home Assistant's own ``Store.async_load`` does not raise for a file that is
+not valid JSON: it renames it to ``<file>.corrupt.<ISO time>``, opens its
+own repair issue and returns None, exactly like a missing file. The loader
+therefore looks for such a sibling when the store returns None and treats
+it as a failed load (security review 2026-11-18, finding 13).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -91,6 +98,31 @@ class StoreLoad:
     data: dict[str, Any] | None
     failed: bool = False
     backed_up: bool = False
+    # Home Assistant's .corrupt.<time> copy, when it renamed the file
+    corrupt_path: str | None = None
+
+
+CORRUPT_INFIX = ".corrupt."
+
+
+def _corrupt_copy(path: Any) -> str | None:
+    """Newest ``<path>.corrupt.*`` sibling while ``path`` is gone (executor).
+
+    Only meaningful right after the store returned None: Home Assistant
+    renamed an unreadable file (missing main file + corrupt copy). A main
+    file that exists means the store was written again since.
+    """
+    if not isinstance(path, str) or not path or os.path.exists(path):
+        return None
+    directory, base = os.path.split(path)
+    prefix = base + CORRUPT_INFIX
+    try:
+        names = [n for n in os.listdir(directory or ".") if n.startswith(prefix)]
+    except OSError:
+        return None
+    if not names:
+        return None
+    return os.path.join(directory, max(names))
 
 
 async def async_load_store(hass: HomeAssistant, store: Any, key: str) -> StoreLoad:
@@ -114,6 +146,22 @@ async def async_load_store(hass: HomeAssistant, store: Any, key: str) -> StoreLo
             "Enterprise core store %s has an unknown format; rebuilding it", key
         )
         return StoreLoad(None, True, await async_backup_store(hass, store, key))
+    if stored is None:
+        try:
+            corrupt = await hass.async_add_executor_job(
+                _corrupt_copy, getattr(store, "path", None)
+            )
+        except Exception:
+            _LOGGER.debug("Store %s: corrupt-copy check failed", key, exc_info=True)
+            corrupt = None
+        if isinstance(corrupt, str):
+            _LOGGER.warning(
+                "Enterprise core store %s was unreadable; Home Assistant kept it "
+                "as %s; rebuilding it",
+                key,
+                corrupt,
+            )
+            return StoreLoad(None, True, True, corrupt)
     return StoreLoad(stored)
 
 

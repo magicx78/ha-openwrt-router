@@ -28,6 +28,7 @@ private helpers on purpose.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -94,6 +95,13 @@ _APPROVAL_TYPES: Mapping[str, CoreEventType] = {
 }
 # Fleet-wide subject (installation_key_reset).
 FLEET_ROUTER_ID = "-"
+# Open (pending or approved, not yet used) approvals: per principal and in
+# total. Above it a new request is denied (audited, reason below) instead of
+# growing the guard and the request data kept for it (security review #4).
+MAX_OPEN_APPROVALS_PER_PRINCIPAL = 20
+MAX_OPEN_APPROVALS_TOTAL = 200
+REASON_TOO_MANY_OPEN = "too_many_open_approvals"
+REASON_TOO_MANY_OPEN_TOTAL = "too_many_open_approvals_total"
 
 
 @dataclass(slots=True)
@@ -175,6 +183,7 @@ class ActionGuard:
         self._action_owner: dict[str, str] = {}
         self._approvals: dict[str, ApprovalRequest] = {}
         self._ledger: dict[str, _LedgerEntry] = {}
+        self._listeners: list[Callable[[str, str], None]] = []
         self.closed = False
         self.stats: dict[str, int] = {
             "decisions_approved": 0,
@@ -189,6 +198,8 @@ class ActionGuard:
             "ledger_pruned": 0,
             "actor_rejected": 0,
             "audit_errors": 0,
+            "approvals_capped": 0,
+            "listener_errors": 0,
         }
 
     # -- actors ----------------------------------------------------------------------
@@ -367,6 +378,13 @@ class ActionGuard:
         correlation_id: str | None,
         now: datetime,
     ) -> AuthorizationDecision:
+        cap_reason = self._open_cap_reason(actor)
+        if cap_reason is not None:
+            self.stats["approvals_capped"] += 1
+            _LOGGER.warning(
+                "Guard: approval request for %s refused (%s)", action, cap_reason
+            )
+            return self._denied(action, router_id, actor, cap_reason, correlation_id)
         subject = subject_id or router_id
         approval = ApprovalRequest(
             approval_id=new_id(APPROVAL_ID_PREFIX),
@@ -401,6 +419,20 @@ class ActionGuard:
             audit_id=audit_id,
             approval_request=approval,
         )
+
+    def _open_cap_reason(self, actor: VerifiedActor) -> str | None:
+        """Reason to refuse one more open approval, None if room is left."""
+        open_ = [
+            a
+            for a in self._approvals.values()
+            if a.status in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED)
+        ]
+        if len(open_) >= MAX_OPEN_APPROVALS_TOTAL:
+            return REASON_TOO_MANY_OPEN_TOTAL
+        mine = sum(1 for a in open_ if a.requested_by.same_principal(actor.actor))
+        if mine >= MAX_OPEN_APPROVALS_PER_PRINCIPAL:
+            return REASON_TOO_MANY_OPEN
+        return None
 
     def _redeem(
         self,
@@ -569,6 +601,8 @@ class ActionGuard:
         )
         self._approvals[approval_id] = decided
         self.stats["approvals_approved" if approve else "approvals_rejected"] += 1
+        if not approve:
+            self._notify(approval_id, "rejected")
         self._audit(
             self._approval_type(approval.action, "approved" if approve else "rejected"),
             router_id=approval.router_id,
@@ -615,8 +649,36 @@ class ActionGuard:
         return _APPROVAL_TYPES[step]
 
     @callback
+    def add_approval_listener(
+        self, listener: Callable[[str, str], None]
+    ) -> Callable[[], None]:
+        """Call ``listener(approval_id, reason)`` when an approval ends unused.
+
+        ``reason`` is ``ttl`` / ``unload`` (expired) or ``rejected``. Owners of
+        per-approval request data drop it there. Returns the remover.
+        """
+        self._listeners.append(listener)
+
+        def _remove() -> None:
+            with contextlib.suppress(ValueError):
+                self._listeners.remove(listener)
+
+        return _remove
+
+    def _notify(self, approval_id: str, reason: str) -> None:
+        for listener in tuple(self._listeners):
+            try:
+                listener(approval_id, reason)
+            except Exception:
+                self.stats["listener_errors"] += 1
+                _LOGGER.warning(
+                    "Guard: approval listener failed for %s", reason, exc_info=True
+                )
+
+    @callback
     def _expire(self, now: datetime, *, reason: str = "ttl") -> None:
         """Expire pending/approved requests past their TTL (audited once)."""
+        ended: list[str] = []
         for approval_id, approval in list(self._approvals.items()):
             if approval.status in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED):
                 if reason == "ttl" and now < approval.expires_at:
@@ -638,6 +700,7 @@ class ActionGuard:
                         "reason": reason,
                     },
                 )
+                ended.append(approval_id)
             elif now - approval.expires_at > _APPROVAL_KEEP:
                 del self._approvals[approval_id]
                 self.stats["approvals_dropped"] += 1
@@ -645,6 +708,8 @@ class ActionGuard:
             if now - entry.authorization.expires_at > _LEDGER_GRACE:
                 del self._ledger[authorization_id]
                 self.stats["ledger_pruned"] += 1
+        for approval_id in ended:
+            self._notify(approval_id, reason)
 
     # -- consume ---------------------------------------------------------------------
 

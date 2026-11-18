@@ -21,6 +21,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from functools import partial
+from typing import Any
 
 from homeassistant.config_entries import SOURCE_IGNORE, ConfigEntry
 from homeassistant.const import (
@@ -51,7 +52,12 @@ from .fleet import (
     async_get_outage_tracker,
     usteer_node_info,
 )
-from .issues import async_clear_issue, ram_high_issue_id
+from .issues import (
+    acl_base_rights_issue_id,
+    async_clear_issue,
+    async_sync_acl_base_rights_issue,
+    ram_high_issue_id,
+)
 from .net_engine import (
     async_get_net_intelligence,
     async_remove_router_data,
@@ -59,7 +65,28 @@ from .net_engine import (
 )
 from .ssl_util import ssl_context_for_protocol
 
+# Enterprise core: imported here, not inside the setup functions. HA imports
+# the integration package in the executor, so the ~300 ms import of the core
+# modules never runs on the event loop ("blocking call to import_module").
+# Guarded: a broken core must not break the integration, the routers work
+# without it. Every hook below checks for None and stays inside its own
+# try/except; the warning is logged once, when the package is imported.
+_core_import_error: Exception | None = None
+try:
+    from . import enterprise_core as _enterprise_core
+except Exception as _err:  # noqa: BLE001 - any error raised by the core import
+    _enterprise_core = None  # type: ignore[assignment]
+    _core_import_error = _err
+
 _LOGGER = logging.getLogger(__name__)
+
+if _core_import_error is not None:
+    _LOGGER.warning(
+        "Enterprise core unavailable (import failed: %s) — the routers work "
+        "without it; router ids, config versions and the audit log are off",
+        type(_core_import_error).__name__,
+        exc_info=_core_import_error,
+    )
 
 # Grace periods around the ACL-deploy rpcd restart (tests patch these to 0).
 _ACL_DEPLOY_GRACE_S: float = 2.0
@@ -229,6 +256,62 @@ def _disable_legacy_dynamic_sensors(hass: HomeAssistant, entry: ConfigEntry) -> 
         )
 
 
+def _core_note_acl(hass: HomeAssistant, entry: ConfigEntry, outcome: Any) -> None:
+    """Tell the enterprise core what ensure_acl saw (no router call).
+
+    ``outcome`` None = ensure failed or was skipped: the core reports the
+    rf.* capabilities as unknown. Never raises (logged).
+    """
+    if _enterprise_core is None:
+        return
+    try:
+        from .acl_provisioning import observe_deployed_acl
+
+        core = _enterprise_core.async_get_core(hass)
+        if core is None:
+            return
+        core.registry.note_deployed_acl(
+            entry.entry_id,
+            observe_deployed_acl(outcome, failure="ensure_failed"),
+        )
+    except Exception:
+        _LOGGER.warning(
+            "Enterprise core: recording the deployed ACL of '%s' failed",
+            entry.title,
+            exc_info=True,
+        )
+
+
+def _sync_acl_base_rights_issue(
+    hass: HomeAssistant, entry: ConfigEntry, outcome: Any
+) -> None:
+    """Repair issue for a kept tiered ACL that lacks base read rights.
+
+    Opened when ensure kept such an ACL, cleared when the deployed ACL is
+    complete again and on unload; unknown (ensure failed) changes nothing.
+    Never raises (logged).
+    """
+    issue_id = acl_base_rights_issue_id(entry.entry_id)
+    entry.async_on_unload(partial(async_clear_issue, hass, issue_id))
+    try:
+        from .acl_provisioning import ACL_FILE_PATH
+
+        known = outcome is not None and getattr(outcome, "known", False)
+        async_sync_acl_base_rights_issue(
+            hass,
+            entry.entry_id,
+            entry.title,
+            tuple(outcome.missing_base_rights) if known else None,
+            ACL_FILE_PATH,
+        )
+    except Exception:
+        _LOGGER.warning(
+            "Repair issue for the ACL of '%s' could not be updated",
+            entry.title,
+            exc_info=True,
+        )
+
+
 def _stagger_offset(entry_ids: list[str], entry_id: str, interval: int) -> int:
     """Return the poll offset of ``entry_id`` within ``interval`` seconds.
 
@@ -277,9 +360,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # --- Enterprise core (part 1): router id BEFORE any router contact, so an
     # entry stuck in setup_retry still has its stable id. Never fails setup.
     try:
-        from .enterprise_core import async_setup_entry_core
-
-        await async_setup_entry_core(hass, entry)
+        if _enterprise_core is not None:
+            await _enterprise_core.async_setup_entry_core(hass, entry)
     except Exception:
         _LOGGER.warning(
             "Enterprise core: router id assignment failed for '%s' — the "
@@ -326,13 +408,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # in and clearing the block cache — lets the very first poll use the freshly
     # granted methods. Best-effort: a router that blocks the deploy still works
     # via the SSH fallbacks, so failures here must never abort setup.
+    # 1.44.0: the variant that leaves an approved tiered ACL alone (same single
+    # file/read, zero extra router calls); its outcome tells the enterprise
+    # core which rights the deployed ACL grants (rf.* capabilities).
+    acl_outcomes: list[Any] = []
     try:
-        from .acl_provisioning import ensure_acl
+        from .acl_provisioning import ensure_acl_respecting_offer
 
-        acl_deployed = await ensure_acl(api)
+        acl_deployed = await ensure_acl_respecting_offer(
+            api, observe=acl_outcomes.append
+        )
     except Exception:
         acl_deployed = False
         _LOGGER.debug("rpcd ACL provisioning skipped for %s", host, exc_info=True)
+    acl_outcome = acl_outcomes[0] if acl_outcomes else None
+    _core_note_acl(hass, entry, acl_outcome)
+    _sync_acl_base_rights_issue(hass, entry, acl_outcome)
 
     if acl_deployed:
         _LOGGER.info("rpcd ACL on %s was deployed/updated", host)
@@ -437,9 +528,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # --- Enterprise core (part 1): registry listener on finished polls; reads
     # coordinator data only (no router calls). Never fails setup.
     try:
-        from .enterprise_core import async_setup_entry_core
-
-        await async_setup_entry_core(hass, entry, coordinator)
+        if _enterprise_core is not None:
+            await _enterprise_core.async_setup_entry_core(hass, entry, coordinator)
     except Exception:
         _LOGGER.warning(
             "Enterprise core: registry listener setup failed for '%s' — the "
@@ -584,9 +674,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
         # --- Enterprise core (part 1): detach; the last entry flushes and
         # releases the core.
         try:
-            from .enterprise_core import async_unload_entry_core
-
-            await async_unload_entry_core(hass, entry)
+            if _enterprise_core is not None:
+                await _enterprise_core.async_unload_entry_core(hass, entry)
         except Exception:
             _LOGGER.warning(
                 "Enterprise core unload raised for '%s'", entry.title, exc_info=True
@@ -623,9 +712,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
     # --- Enterprise core (part 1): the router record is orphaned, not deleted
     # (history stays; it can be adopted by a new entry).
     try:
-        from .enterprise_core import async_remove_entry_core
-
-        await async_remove_entry_core(hass, entry)
+        if _enterprise_core is not None:
+            await _enterprise_core.async_remove_entry_core(hass, entry)
     except Exception:
         _LOGGER.warning(
             "Enterprise core: could not orphan the router record of '%s'",

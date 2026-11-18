@@ -2,9 +2,10 @@
 
 Stand: 2026-11-18. Code: `custom_components/openwrt_router/acl_provisioning.py`
 (Block „Tiered ACL“ am Dateiende) und `api.py` (Block „Config/backup path: SSH with
-TOFU host-key pinning“ am Dateiende). Tests: `tests/test_acl_tiers.py`,
-`tests/test_ssh_hostkey_pinning.py`. Vertrag: `docs/dev/configuration-api-v1.md`
-Abschnitte 5, 6 und 18.
+TOFU host-key pinning“ am Dateiende), seit 1.44.0 `core_security.py` (Pins je Router,
+ACL-Verteilen über den Core). Tests: `tests/test_acl_tiers.py`,
+`tests/test_ssh_hostkey_pinning.py`, `tests/test_enterprise_core_v144.py`. Vertrag:
+`docs/dev/configuration-api-v1.md` Abschnitte 5, 6.3, 12.3 und 17.1.
 
 ## 1. Grundsatz
 
@@ -47,8 +48,9 @@ Unterschied zu v8 genau `-scan +txpowerlist` ist.
 - **`read`**: gleiche Rechte wie v8, ohne Funkscan, plus das reine Lesen der
   Sendeleistungsstufen. Kein Zugriff auf Geheimnisse.
 - **`config_backup_read`**: **Gibt dem rpcd-Benutzer von Home Assistant Lesezugriff auf
-  alle Geheimnisse des Routers.** Das Backup-Archiv enthält `/etc/shadow`, die
-  SSH-Host-Keys, WLAN- und VPN-Schlüssel; die UCI-Configs enthalten WLAN-, VPN- und
+  alle Geheimnisse des Routers.** Das Backup-Archiv enthält `/etc/shadow` (Passwort-Hashes
+  aller Router-Logins, auch root) und private Schlüssel (SSH-Host-Keys, VPN- und
+  TLS-Schlüssel), dazu die WLAN-Schlüssel; die UCI-Configs enthalten WLAN-, VPN- und
   DDNS-Passwörter. Wer diesen HA-rpcd-Login nutzen kann, kann sie lesen.
 - **`rf_survey`**: liest Kanalstatistiken (belegt/Rauschen je Kanal) aus dem Treiber,
   wechselt den Kanal nicht. Auf der Hardware des Nutzers noch nicht gemessen.
@@ -108,8 +110,13 @@ Ablauf nach erfolgreichem `consume`:
 1. ACL-Datei per `file/read` lesen. Ist sie inhaltlich gleich der neuen: **nichts
    schreiben, kein Neustart** (`changed=False`).
 2. Vorhandene Datei sichern nach
-   `/usr/share/rpcd/ha-openwrt-router.json.bak-<JJJJMMTTThhmmssZ>` (außerhalb von
-   `acl.d`, damit rpcd sie nicht lädt).
+   `/usr/share/rpcd/ha-openwrt-router.json.bak-<JJJJMMTTThhmmssZ>-<8 hex>` (außerhalb
+   von `acl.d`, damit rpcd sie nicht lädt; der zufällige Zusatz verhindert, dass zwei
+   Verteilungen in derselben Sekunde dieselbe Sicherung überschreiben).
+   Die gelesene Datei wird defensiv geparst (`parse_acl_text`): über
+   `MAX_ACL_TEXT_BYTES` (64 KiB) gar nicht, zu tiefe Verschachtelung und ungültiges
+   JSON gelten als „nicht lesbar“ (gezählt, geloggt), nie als Ausnahme. Die
+   Versionsnummer der Marke hat höchstens 6 Ziffern.
 3. Neue Datei schreiben, dann einmal `/etc/init.d/rpcd restart`.
 4. Wird ubus `file/write` abgelehnt oder ist die alte Datei per ubus nicht lesbar, geht
    alles in **einem** SSH-Befehl: `[ ! -e ACL ] || cp -p ACL BACKUP`, dann in eine
@@ -134,12 +141,44 @@ eine Kopie hat. Befehl und Rückweg gehören ins Änderungsprotokoll.
 `ensure_acl()` vergleicht beim Start die Datei mit v8 und **überschreibt alles andere**,
 also auch eine freigegebene gestufte ACL (Test
 `test_ensure_acl_still_replaces_a_tiered_acl_with_v8`). Deshalb gibt es
-`ensure_acl_respecting_offer(api)`: lässt jede Datei mit der Marke in Ruhe und ruft für
-alle anderen `ensure_acl()` auf (ein zusätzliches `file/read` beim Start).
+`ensure_acl_respecting_offer(api, *, observe=None)`: lässt jede Datei mit der Marke in
+Ruhe (`reason = tiered_kept`) und verhält sich für alle anderen genau wie `ensure_acl()`.
 
-Bevor ein Angebot auf einem Router verteilt werden darf, müssen `__init__.py`
-(Aufruf von `ensure_acl`) und der Repair-Schritt im Config-Flow
-(`check_and_deploy_acl`) auf `ensure_acl_respecting_offer` umgestellt sein.
+**Seit 1.44.0 umgestellt:** `__init__.py` (Setup jedes Eintrags) und der Repair-Schritt
+im Config-Flow (Checkliste) rufen `ensure_acl_respecting_offer`. Es nutzt dasselbe eine
+`file/read`, das `ensure_acl` ohnehin macht (`ensure_acl_outcome`): **kein zusätzlicher
+Router-Aufruf.** Ohne gestufte ACL sind Aufrufe und geschriebene Bytes identisch mit
+`ensure_acl` (Test `test_respecting_offer_makes_exactly_the_calls_of_ensure_acl` für v8,
+fehlend, alt, kaputt, nicht erreichbar, Schreiben blockiert). Seit der Prüfung vom
+2026-11-18 vergleicht der Test beide Varianten mit wörtlichen Erwartungen aus 1.43
+(Pfad, Prüfsumme der v8-Bytes, SSH-Befehl und Timeout), nicht nur miteinander.
+
+**Behalten, aber sichtbar (Review PR #55, Punkt 5):** Still behalten wird eine gestufte
+ACL nur, wenn sie alle Basis-Leserechte gewährt (`rights_from_acl(acl) >=
+_base_read_rights()`). Fehlen welche, bleibt sie trotzdem unangetastet (nur ein
+freigegebenes Angebot ändert sie), aber `ensure_acl_outcome` schreibt eine Warnung ins Log
+und meldet die fehlenden Rechte in `AclEnsureOutcome.missing_base_rights`
+(`missing_base_read_rights(acl)`, sortierte `describe()`-Texte). Das Setup öffnet daraus
+den Reparaturhinweis `acl_base_rights_missing_<entry_id>` (Warnung, nicht persistent,
+Texte de/en, Platzhalter `router`, `count`, `rights`, `path`; ohne `config_entry_id`,
+damit er unter HA 2026.2.3 läuft). Er verschwindet beim nächsten Setup mit vollständigen
+Rechten und beim Entladen; ist die ACL nicht lesbar (Ergebnis unbekannt), bleibt er
+unverändert. Auf diesem Pfad wird der Text mit `parse_acl_text` gelesen, also gelten
+`MAX_ACL_TEXT_BYTES` und `MAX_ACL_NESTING_DEPTH`: zu groß oder zu tief = `corrupted`, es
+wird v8 eingespielt (wie bei kaputtem JSON). Der Pfad ohne Angebot (reines v8) ist
+unverändert, der wörtliche Aufruf-Test von oben läuft unverändert durch.
+
+Im Config-Flow nennt der Fehler den Grund, wenn nichts geschrieben wurde:
+`acl_tiered_kept` (gestufte ACL behalten), `acl_check_transient` (ACL nicht lesbar,
+nichts geändert), sonst wie bisher `acl_already_current`.
+
+`observe` bekommt das `AclEnsureOutcome` (gelesener Inhalt, ob bekannt, Grund); der Core
+macht daraus `observe_deployed_acl(...)` und daraus `rf.*` (Abschnitt 5). Ein Fehler im
+Beobachter wird geloggt und ändert das Ergebnis nicht.
+
+Verteilen über den Core (statt direkt `async_deploy_acl_offer`): `ConfigurationApi`
+`async_request_acl_deploy` → Freigabe → `async_deploy_acl_offer`; Ablauf, Fehler und
+Events im Vertrag, Abschnitt 6.3 und 12.3.
 
 ## 5. Folgen des fehlenden `iwinfo scan` in der Basis
 
@@ -148,14 +187,51 @@ Bevor ein Angebot auf einem Router verteilt werden darf, müssen `__init__.py`
   `api.py`, `coordinator.py` und dem ganzen Integrationsordner).
 - Wer die Basis ohne `rf_scan` verteilt, verliert also heute nichts. Betroffen ist erst
   das künftige Modul `wifi-rf` mit `rf.scan`.
-- `capabilities.py` muss dann `rf.scan` als `unavailable` / `permission_denied` mit
-  `required_permissions=("ubus:iwinfo.scan",)` melden. Die Helfer dafür:
-  `granted_capabilities(acl)` und `missing_permissions(acl, "rf.scan")`.
+- **Seit 1.44.0** meldet `capabilities.py` `rf.txpowerlist`, `rf.survey` und `rf.scan`
+  aus der beobachteten ACL: Recht vorhanden ⇒ `available`; fehlt es ⇒ `unavailable` /
+  `permission_denied` mit `required_permissions` aus `missing_permissions(acl, name)`;
+  ACL unbekannt (noch nicht gelesen, nicht lesbar, Transportfehler) ⇒ `unknown` mit
+  Grund. Mit plain v8: `rf.scan` verfügbar, die anderen beiden `permission_denied`.
+  Gesehen wird nur die Datei der Integration, keine anderen Dateien in `acl.d`.
 
 ## 6. Spätere Stufen (`security.`, `diag.`)
 
-Stufen stehen in einer Registry (`AclTierRegistry`), nicht in einer if-Kette. Ein Modul
-registriert seine Stufe einmal:
+Stufen stehen in einer Registry (`AclTierRegistry`), nicht in einer if-Kette.
+
+**Regeln (seit der Sicherheitsprüfung vom 2026-11-18: Allowlist statt Sperrliste).**
+rpcd vergleicht ACL-Einträge mit `fnmatch`; eine Sperrliste kann deshalb nie
+vollständig sein (`fil?`, `f*`, `*` oder `[w]rite` gewähren, was sie beim Namen
+verbietet). Eine optionale Stufe darf nur enthalten:
+
+| Bereich | erlaubt |
+|---|---|
+| Abschnitt | nur `read` |
+| Musterzeichen | keine: `* ? [ ] { } \` in Objekt oder Methode werden immer abgelehnt |
+| `ubus`, `uci`, `cgi-io` und jeder andere Bereich außer `file` | nur ein exaktes Tripel `(Bereich, Objekt, Methode)` aus `OPTIONAL_TIER_ALLOWLIST` (was die eingebauten Stufen brauchen: `cgi-io backup`, `rpc-sys packagelist`, die genannten UCI-Configs, `iwinfo survey`, `iwinfo scan`) oder aus der Erweiterungstabelle `OPTIONAL_TIER_EXTENSIONS`; `rpc-sys`, `system`, `luci`, `uci`, `cgi-io` sonst nie |
+| `file` | nur Methode `read`, absoluter Pfad, der nach `posixpath.normpath` unverändert bleibt (kein `..`, kein `//`), unter `/proc/net/`, `/sys/class/net/` oder `/sys/class/ieee80211/` |
+
+Die Basis-Stufe `read` ist fest: sie wird aus ACL v8 abgeleitet und lässt sich über die
+Registry nicht erweitern (`base_tier_fixed`). Abgelehnt wird mit
+`AclTierRightRefusedError` (Unterklasse von `AclTierError`): `tier_id`, das abgelehnte
+`right` und `reason` (`write_section`, `pattern`, `not_allowlisted`, `file_method`,
+`file_path`, `base_tier_fixed`); dazu ein Warn-Log. Weiter abgelehnt: doppelte IDs und
+eine zweite Pflichtstufe.
+
+**Neues Recht für ein späteres Modul.** Zuerst trägt eine geprüfte Änderung das exakte
+Tripel in `OPTIONAL_TIER_EXTENSIONS` in `acl_provisioning.py` ein, mit einem Kommentar,
+warum es nur liest. Beispiel Network Diagnostics:
+
+```python
+OPTIONAL_TIER_EXTENSIONS: Final[frozenset[tuple[str, str, str]]] = frozenset(
+    {
+        # net-diagnostics: luci getTraceroute startet nur traceroute zu einem
+        # Ziel und liefert die Ausgabe; keine Konfiguration, kein Schreiben.
+        ("ubus", "luci", "getTraceroute"),
+    }
+)
+```
+
+Erst danach registriert das Modul seine Stufe:
 
 ```python
 DEFAULT_TIER_REGISTRY.register(AclTier(
@@ -166,14 +242,19 @@ DEFAULT_TIER_REGISTRY.register(AclTier(
 ))
 ```
 
-Die Registry lehnt bei optionalen Stufen ab: Rechte im Schreibteil, `file exec`,
-`file write`, `ubus file`-Methoden und alles unter `rpcd/acl.d`; dazu doppelte IDs und
-eine zweite Pflichtstufe. Wer mehr braucht, ändert diese Regel bewusst (Review).
+Ohne den Eintrag lehnt `register()` mit `not_allowlisted` ab (Test
+`test_f01_allowlisted_and_extension_rights_are_accepted`). Die Tabelle ist heute leer.
+
+**Was der Admin freigibt.** `describe_offer(...)` liefert neben Prüfsumme und Unterschied
+jedes Recht der vorgeschlagenen Datei: `AclOffer.rights`, je Stufe `tier_rights` und
+`rights_text()` (lesbare Liste, gruppiert nach Stufe, mit „hinzugefügt“/„entfernt“
+gegenüber dem Router); `to_dict()` enthält `rights`, `tier_rights` und `rights_text`.
+Freigegeben werden damit Rechte, nicht nur eine Prüfsumme.
 
 Zuordnung der Capability-Präfixe: `config.` Configuration Manager, `rf.` WiFi RF,
 `diag.` Network Diagnostics, `security.` Security Center.
 
-## 7. SSH-Host-Key-Pinning (TOFU), nur Config/Backup-Pfad
+## 7. SSH-Host-Key-Pinning, nur Config/Backup-Pfad (seit 1.44.0 mit Bestätigung)
 
 Heute: der gemeinsame SSH-Weg verbindet mit `asyncssh.connect(..., known_hosts=None)`
 (`api.py:3036`, `OpenWrtAPI._asyncssh_get_connection`), prüft den Host-Key also gar
@@ -181,25 +262,64 @@ nicht. `sshpass` gibt es seit v1.22.0 nicht mehr. Das bleibt so für alle besteh
 Aufrufer.
 
 Neu (am Ende von `api.py`): `async_ssh_run_pinned(api, cmd, *, pin_store, timeout=60,
-binary=False) -> PinnedSshResult`.
+binary=False, max_output_bytes=None) -> PinnedSshResult`.
 
 - Eigene Verbindung je Aufruf, nie die gemeinsame ungeprüfte.
 - `known_hosts=([gepinnter_key] oder [], [], [])` und ein eigener `SSHClient`: asyncssh
   prüft den Schlüssel im Handshake, **vor** der Anmeldung. Mit Pin akzeptiert er nur
   diesen Schlüssel und nur dessen Schlüsseltyp.
-- Erste Nutzung: Schlüssel annehmen, nach erfolgreicher Anmeldung
-  `pin_store.async_save_pin(HostKeyPin)` aufrufen, **erst dann** den Befehl ausführen.
-  Scheitert das Speichern: `OpenWrtHostKeyError("pin_save_failed")`, kein Befehl.
+- Erste Nutzung (seit der Sicherheitsprüfung vom 2026-11-18): eine eigene Verbindung
+  **ohne Zugangsdaten** (kein Passwort, keine Schlüssel, kein Agent, kein GSS) liest den
+  Host-Key im Handshake; der `SSHClient` merkt ihn sich und lehnt ihn ab, asyncssh bricht
+  also **vor** der Anmeldung ab. Danach `pin_store.async_save_pin(HostKeyPin)`. Wirft der
+  Store (`pin_pending` bei `confirm`), endet der Aufruf dort: keine Anmeldung, kein
+  Befehl. Bestätigt der Store sofort (nur `tofu`, nicht Standard), folgt eine **zweite**
+  Verbindung, die nur genau diesen Key akzeptiert, und erst sie meldet sich an. Scheitert
+  das Speichern: `OpenWrtHostKeyError("pin_save_failed")`, keine Anmeldung, kein Befehl.
+- Angemeldet wird also nur auf einer Verbindung, deren Key gleich einem gespeicherten
+  Pin ist.
+- Ausgabe begrenzt: der Befehl läuft über `create_process`; stdout wird stückweise bis
+  `max_output_bytes` gelesen (Standard `PINNED_SSH_DEFAULT_MAX_OUTPUT_BYTES` =
+  Artefakt-Grenze + 1 MiB). Darüber: Prozess schließen,
+  `OpenWrtSshOutputTooLargeError` (`error_class` `too_large`, `limit_bytes`,
+  `received_bytes`); im Core `ArtifactTooLargeError` `ssh_output_too_large`, Zähler
+  `output_too_large`. stderr bleibt höchstens 4 KiB (`stderr_truncated`), der Rest wird
+  gelesen und verworfen. Das ACL-Verteilen per SSH nutzt 64 KiB. Gesamt-Timeout
+  unverändert.
 - Abweichung: `OpenWrtHostKeyMismatchError` (`mismatch` oder `algorithm_unavailable`).
   **Kein** Rückfall auf den ungepinnten Weg. Die Fehlerklasse erbt nicht von
   `OpenWrtConnectionError`, damit „Router nicht erreichbar, später wieder“-Zweige sie
   nicht schlucken.
-- Anmeldung wie beim gemeinsamen Weg (erst Passwort, dann Schlüssel), ohne dessen
-  Zustand `_ssh_use_key` zu ändern.
+- Anmeldung (nur auf der gepinnten Verbindung) wie beim gemeinsamen Weg (erst
+  Passwort, dann Schlüssel), ohne dessen Zustand `_ssh_use_key` zu ändern.
 - `HostKeyPin`: `algorithm`, `fingerprint` (`SHA256:…`), `public_key` (OpenSSH-Zeile),
   `host` (nur zur Info, der Pin folgt der `router_id`), `pinned_at` (ISO UTC);
   `to_dict()`/`from_dict()`.
-- `HostKeyPinStore`: zwei Koroutinen `async_load_pin()` / `async_save_pin(pin)`. Die
-  Speicherung baut der Enterprise-Core (je `router_id`). Einen bewusst neuen
-  Router-Schlüssel (Neuinstallation) übernimmt nur ein Admin über eine eigene, später zu
-  definierende Aktion (z. B. `core.ssh_pin_reset`, kritisch).
+- `HostKeyPinStore`: zwei Koroutinen `async_load_pin()` / `async_save_pin(pin)`. Wirft
+  einer davon `OpenWrtHostKeyError`, reicht `async_ssh_run_pinned` ihn unverändert durch
+  (seit 1.44.0; `async_load_pin` lehnt so **vor** dem Verbinden ab).
+
+**Seit 1.44.0: Speicher je Router und kein stilles TOFU** (`core_security.py`):
+
+- `SshPinRegistry` (Store `openwrt_router.ssh_host_keys`, `private`, `atomic_writes`,
+  `migrate_pin_store`) gibt je `router_id` einen `RouterPinStore`. Geschrieben wird nur
+  bei Pin-Ereignissen (erster Kontakt, Bestätigung, Reset), nie je Poll.
+- Regel ist eine Konstante: `SSH_PIN_FIRST_USE_POLICY = SSH_PIN_POLICY_CONFIRM`. Der erste
+  Kontakt speichert den Key als **ausstehend**, sendet `security.ssh_pin_pending` und
+  bricht mit `OpenWrtHostKeyError("pin_pending")` ab, **ohne** den Befehl auszuführen.
+  Danach lehnt jeder Aufruf vor dem Verbinden ab, bis ein Admin `ssh_pin_confirm`
+  (kritisch, gebunden an Router und Fingerprint) freigibt und einlöst.
+- Abweichender Key: immer `OpenWrtHostKeyMismatchError`, Event
+  `security.ssh_pin_mismatch` (kritisch, erwarteter und gezeigter Fingerprint), der Pin
+  bleibt unverändert.
+- Neuer Router-Key (Neuinstallation): `ssh_pin_reset` (kritisch, nur Admin), Event
+  `security.ssh_pin_reset`; der nächste Kontakt ist wieder „ausstehend“.
+- Module bekommen gepinntes SSH nur über `ProviderContext.async_ssh_run_pinned(router_id,
+  command, timeout=…, binary=…)`; das ACL-Verteilen per SSH nutzt denselben Weg.
+- Erster Kontakt ohne Passwort (behoben, Sicherheitsprüfung 2026-11-18, vorher
+  „bekannte Grenze“): beim allerersten Kontakt geht **kein** Passwort und kein Schlüssel
+  an den Router, bevor ein Admin den Key bestätigt hat. Ein Angreifer im Netz beim
+  ersten Kontakt sieht nur einen Verbindungsaufbau ohne Anmeldung; der Admin vergleicht
+  den Fingerprint aus `security.ssh_pin_pending` mit dem Router, bevor er bestätigt.
+  Tests: `test_f02_first_contact_sends_no_credentials`,
+  `test_first_use_is_pending_not_trusted`.

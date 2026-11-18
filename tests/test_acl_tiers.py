@@ -77,7 +77,17 @@ from custom_components.openwrt_router.core_models import (
 ROUTER = "rtr_" + "a" * 32
 OTHER_ROUTER = "rtr_" + "b" * 32
 NOW = datetime(2026, 11, 18, 12, 0, 0, tzinfo=UTC)
-BACKUP = ACL_BACKUP_PREFIX + "20261118T120000Z"
+# Changed deliberately (security review finding 10): the backup name ends in
+# a random suffix; the fixture below makes it fixed for these tests.
+BACKUP_SUFFIX = "a1b2c3d4"
+BACKUP = ACL_BACKUP_PREFIX + "20261118T120000Z-" + BACKUP_SUFFIX
+
+
+@pytest.fixture(autouse=True)
+def _fixed_backup_suffix(monkeypatch):
+    monkeypatch.setattr(acl_mod.secrets, "token_hex", lambda n: BACKUP_SUFFIX)
+
+
 V8_TEXT = json.dumps(RPCD_ACL_CONTENT, indent=2)
 OPTS_ON = {OPTION_CONFIG_BACKUP_ENABLED: True}
 
@@ -360,7 +370,14 @@ class TestRegistry:
         base.update(kw)
         return AclTier(**base)
 
-    def test_later_module_registers_a_tier(self):
+    def test_later_module_registers_a_tier(self, monkeypatch):
+        # Changed deliberately (security review finding 1): a new right must
+        # first be added to the reviewed extension table.
+        monkeypatch.setattr(
+            acl_mod,
+            "OPTIONAL_TIER_EXTENSIONS",
+            frozenset({("ubus", "luci", "getTraceroute")}),
+        )
         reg = AclTierRegistry(DEFAULT_TIER_REGISTRY.tiers())
         reg.register(self._tier())
         assert reg.capability_tiers()["diag.traceroute"] == "diag_traceroute"
@@ -706,7 +723,16 @@ class TestDeployRefusals:
 # ---------------------------------------------------------------------------
 
 
-async def _deploy(api, tiers=(), *, options=None, guard=None):
+def _pinned_runner(api):
+    """Stand-in for the core's pinned SSH runner (records on api._run_ssh)."""
+
+    async def runner(cmd, timeout):
+        return await api._run_ssh(cmd, timeout=timeout)
+
+    return runner
+
+
+async def _deploy(api, tiers=(), *, options=None, guard=None, pinned=True):
     guard = guard or FakeGuard()
     auth = guard.issue(tiers=tiers)
     result = await async_deploy_acl_offer(
@@ -717,6 +743,7 @@ async def _deploy(api, tiers=(), *, options=None, guard=None):
         guard_consume=guard.consume,
         options=options,
         now=NOW,
+        ssh_runner=_pinned_runner(api) if pinned else None,
     )
     assert auth.consumed
     assert guard.calls == [
@@ -906,6 +933,36 @@ class TestDeploySsh:
             assert exc.value.rollback_command is None
 
 
+class TestDeploySshOnlyPinned:
+    """1.44.0: the offer's SSH fallback only runs over the pinned path."""
+
+    @pytest.mark.asyncio
+    async def test_without_pinned_runner_refuses_before_any_ssh(self):
+        api = _api(OpenWrtMethodNotFoundError("blocked or missing"))
+        guard = FakeGuard()
+        auth = guard.issue(tiers=())
+        with pytest.raises(AclOfferDeployError) as exc:
+            await async_deploy_acl_offer(
+                api,
+                (),
+                router_id=ROUTER,
+                authorization=auth,
+                guard_consume=guard.consume,
+                now=NOW,
+            )
+        assert exc.value.reason == "ssh_pin_unavailable"
+        assert exc.value.written is False
+        api._run_ssh.assert_not_awaited()  # never the shared, unpinned SSH
+        assert _writes(api) == []
+
+    @pytest.mark.asyncio
+    async def test_ubus_path_needs_no_runner(self):
+        api = _api(V8_TEXT)
+        result = await _deploy(api, [], pinned=False)
+        assert result.transport == "ubus"
+        api._run_ssh.assert_not_awaited()
+
+
 class TestRestartAtMostOnce:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1026,13 +1083,17 @@ class TestOnlyAuthorizedWrites:
         tree = ast.parse(inspect.getsource(acl_mod))
         assert set(_router_writers(tree)) == {
             "_deploy_acl",  # legacy v8 path (unchanged)
-            "_deploy_acl_ssh",  # legacy v8 path (unchanged)
+            "_deploy_acl_ssh",  # legacy v8 path (unchanged, the only _run_ssh)
             "async_deploy_acl_offer",
-            "_deploy_offer_ssh",
         }
-        assert _callers(tree, "_deploy_acl") == {"ensure_acl"}
+        # 1.44.0: one shared ensure implementation; the offer's SSH goes
+        # through the injected pinned runner only, never api._run_ssh.
+        assert _callers(tree, "_deploy_acl") == {"ensure_acl_outcome"}
         assert _callers(tree, "_deploy_acl_ssh") == {"_deploy_acl"}
         assert _callers(tree, "_deploy_offer_ssh") == {"async_deploy_acl_offer"}
+        offer_ssh = inspect.getsource(acl_mod._deploy_offer_ssh)
+        assert "_run_ssh" not in offer_ssh
+        assert "await ssh_runner(" in offer_ssh
 
     def test_legacy_path_only_ever_writes_v8(self):
         src = inspect.getsource(acl_mod._deploy_acl) + inspect.getsource(
@@ -1072,3 +1133,35 @@ class TestOnlyAuthorizedWrites:
         ]
         assert io_lines
         assert check_line < min(io_lines)
+
+
+def test_config_backup_risk_names_shadow_and_private_keys():
+    """Review PR #55 point 4: the risk says what a backup really holds.
+
+    Code (risk text shown in the offer), the option text in en/de and the
+    tier document all name /etc/shadow with its password hashes and the
+    private keys.
+    """
+    from pathlib import Path
+
+    risk = DEFAULT_TIER_REGISTRY.get(TIER_CONFIG_BACKUP_READ).risk
+    assert "/etc/shadow (password hashes" in risk
+    assert "private keys" in risk
+    root = Path(__file__).resolve().parent.parent
+    comp = root / "custom_components" / "openwrt_router"
+    texts = {
+        name: json.loads((comp / name).read_text(encoding="utf-8"))
+        for name in ("strings.json", "translations/en.json", "translations/de.json")
+    }
+    for name, data in texts.items():
+        option = data["options"]["step"]["init"]["data_description"][
+            "config_backup_enabled"
+        ]
+        assert "/etc/shadow" in option, name
+        if name.endswith("de.json"):
+            assert "Passwort-Hashes" in option and "private Schlüssel" in option
+        else:
+            assert "password hashes" in option and "private keys" in option
+    doc = (root / "docs" / "dev" / "acl-tiers.md").read_text(encoding="utf-8")
+    assert "`/etc/shadow` (Passwort-Hashes" in doc
+    assert "private Schlüssel" in doc

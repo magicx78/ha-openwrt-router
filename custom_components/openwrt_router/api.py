@@ -6896,11 +6896,13 @@ def _config_parse_package_output(text: str) -> dict[str, str]:
 # is for every existing caller. Only the config/backup path — which pulls
 # archives full of router secrets — uses async_ssh_run_pinned():
 #
-#   * first use: the presented host key is accepted, and after a successful
-#     login its fingerprint is handed to the caller's pin store BEFORE the
-#     command runs (a failed save refuses the command);
+#   * first contact: one connection WITHOUT credentials reads the host key
+#     and stops before authentication; the key goes to the caller's pin
+#     store (the core records it as pending). Authentication only ever
+#     happens against a CONFIRMED pin (security review 2026-11-18);
 #   * every later use: only the pinned key is trusted (asyncssh checks it
 #     during the handshake, before any password is sent);
+#   * output is capped (stdout by the caller, stderr at 4 KiB);
 #   * mismatch: OpenWrtHostKeyMismatchError. There is no fallback to the
 #     unpinned transport — not here, and callers must not add one.
 #
@@ -6914,7 +6916,8 @@ class OpenWrtHostKeyError(Exception):
     """The pinned SSH path refused to run (never retried unpinned).
 
     ``reason``: ``mismatch`` | ``algorithm_unavailable`` | ``pin_invalid`` |
-    ``pin_save_failed`` | ``no_host_key``.
+    ``pin_save_failed`` | ``no_host_key``; a pin store may raise its own
+    reason (the core: ``pin_pending``, ``pin_refused``), passed through as is.
     """
 
     def __init__(
@@ -7060,23 +7063,43 @@ class HostKeyPinStore:
     """
 
     async def async_load_pin(self) -> HostKeyPin | None:
-        """Return the pin, or None if this router was never pinned."""
+        """Return the pin, or None if this router was never pinned.
+
+        May raise OpenWrtHostKeyError to refuse before any connection (the
+        core does while a first-seen key awaits confirmation).
+        """
         raise NotImplementedError
 
     async def async_save_pin(self, pin: HostKeyPin) -> None:
-        """Persist the first-use pin; raise if it cannot be stored."""
+        """Persist the first-use pin; raise if it cannot be stored.
+
+        An OpenWrtHostKeyError raised here (e.g. ``pin_pending``) is passed
+        through unchanged and the command does not run.
+        """
         raise NotImplementedError
 
 
 class PinnedSshResult:
-    """Outcome of :func:`async_ssh_run_pinned` (read-only attributes)."""
+    """Outcome of :func:`async_ssh_run_pinned` (read-only attributes).
 
-    __slots__ = ("exit_status", "pin", "pinned_now", "stderr", "stdout")
+    ``stderr`` is capped at :data:`PINNED_SSH_STDERR_MAX_BYTES`;
+    ``stderr_truncated`` says whether more was sent (and dropped).
+    """
+
+    __slots__ = (
+        "exit_status",
+        "pin",
+        "pinned_now",
+        "stderr",
+        "stderr_truncated",
+        "stdout",
+    )
 
     exit_status: int
     pin: HostKeyPin
     pinned_now: bool
     stderr: bytes
+    stderr_truncated: bool
     stdout: str | bytes
 
     def __init__(
@@ -7087,6 +7110,7 @@ class PinnedSshResult:
         stderr: bytes,
         pin: HostKeyPin,
         pinned_now: bool,
+        stderr_truncated: bool = False,
     ) -> None:
         """Store the fields."""
         object.__setattr__(self, "exit_status", exit_status)
@@ -7094,6 +7118,7 @@ class PinnedSshResult:
         object.__setattr__(self, "stderr", stderr)
         object.__setattr__(self, "pin", pin)
         object.__setattr__(self, "pinned_now", pinned_now)
+        object.__setattr__(self, "stderr_truncated", stderr_truncated)
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Results are immutable."""
@@ -7107,27 +7132,57 @@ class PinnedSshResult:
         )
 
 
+# Output caps of the pinned path (security review 2026-11-18, finding 3).
+# stdout: the caller passes ``max_output_bytes``; the default is the core's
+# per-artifact limit (core_models.DEFAULT_ROUTER_STORAGE_LIMIT_BYTES, 50 MiB;
+# a test keeps both in step) plus 1 MiB margin. Above it the run is aborted
+# with OpenWrtSshOutputTooLargeError. stderr is kept up to 4 KiB, the rest
+# is read and dropped (``stderr_truncated``), so the channel never stalls.
+PINNED_SSH_OUTPUT_MARGIN_BYTES = 1024 * 1024
+PINNED_SSH_DEFAULT_MAX_OUTPUT_BYTES = 50 * 1024 * 1024 + PINNED_SSH_OUTPUT_MARGIN_BYTES
+PINNED_SSH_STDERR_MAX_BYTES = 4096
+_PINNED_READ_CHUNK = 65536
+
+
+class OpenWrtSshOutputTooLargeError(Exception):
+    """The pinned command produced more stdout than the caller allowed.
+
+    The process was closed; nothing of the output is returned.
+    ``error_class`` is ``too_large`` (the core maps it to its own error).
+    """
+
+    error_class = "too_large"
+
+    def __init__(self, message: str, *, limit_bytes: int, received_bytes: int):
+        """Remember the cap and how much arrived before the abort."""
+        super().__init__(message)
+        self.limit_bytes = limit_bytes
+        self.received_bytes = received_bytes
+
+
 class _PinningSSHClient(asyncssh.SSHClient):
     """Host-key decision for one handshake.
 
     asyncssh calls validate_host_public_key only for a key that is NOT in
     the trusted list. Pinned: the trusted list is exactly the pinned key, so
     a call here means a different key -> False (handshake aborted before
-    authentication). First use: accept and remember the key.
+    authentication). First contact (``pinned_key`` None): remember the key
+    and ALSO return False, so the handshake stops before authentication and
+    no credential is ever sent to an unconfirmed host (finding 2).
     """
 
     def __init__(self, pinned_key: asyncssh.SSHKey | None) -> None:
-        """``pinned_key`` None = trust on first use."""
+        """``pinned_key`` None = first contact (capture only)."""
         self.pinned_key = pinned_key
         self.presented_key: asyncssh.SSHKey | None = None
 
     def validate_host_public_key(
         self, host: str, addr: str, port: int, key: asyncssh.SSHKey
     ) -> bool:
-        """Accept on first use; otherwise only the pinned key."""
+        """Capture on first contact (refuse); otherwise only the pinned key."""
         self.presented_key = key
         if self.pinned_key is None:
-            return True
+            return False
         return key.public_data == self.pinned_key.public_data
 
 
@@ -7139,22 +7194,64 @@ def _fingerprint(key: asyncssh.SSHKey | None) -> str | None:
 async def _pinned_connect(
     api: OpenWrtAPI, password: str | None, client: _PinningSSHClient
 ) -> asyncssh.SSHClientConnection:
-    """One connection attempt with the host-key rule of _PinningSSHClient.
+    """One authenticating connection attempt; only ever with a pinned key.
 
     ``known_hosts`` is a 3-tuple (trusted keys, CA keys, revoked keys): never
     None (that disables checking) and never empty/falsy (that would read
-    ~/.ssh/known_hosts). With a pin, asyncssh also restricts the host-key
-    algorithms to the pinned key's type.
+    ~/.ssh/known_hosts). The pin also restricts the host-key algorithms to
+    the pinned key's type.
     """
     pinned_key = client.pinned_key
+    if pinned_key is None:  # never authenticate against an unconfirmed key
+        raise OpenWrtHostKeyError(
+            "pin_pending", "no confirmed host key pin; not authenticating"
+        )
     return await asyncssh.connect(
         api._host,
         username=api._username,
         password=password,
-        known_hosts=([pinned_key] if pinned_key is not None else [], [], []),
+        known_hosts=([pinned_key], [], []),
         client_factory=lambda: client,
         connect_timeout=SSH_CONNECT_TIMEOUT,
     )
+
+
+async def _capture_host_key(api: OpenWrtAPI) -> asyncssh.SSHKey:
+    """First contact: read the host key WITHOUT any credentials.
+
+    The client refuses the key in the handshake (after recording it), so
+    asyncssh aborts before authentication: no password, no client key, no
+    agent, no GSSAPI. Returns the presented key.
+    """
+    client = _PinningSSHClient(None)
+    try:
+        conn = await asyncssh.connect(
+            api._host,
+            username=api._username,
+            password=None,
+            client_keys=None,
+            agent_path=None,
+            gss_host=None,
+            known_hosts=([], [], []),
+            client_factory=lambda: client,
+            connect_timeout=SSH_CONNECT_TIMEOUT,
+        )
+    except asyncssh.HostKeyNotVerifiable:
+        conn = None  # expected: the key was refused before authentication
+    except (OSError, asyncssh.Error) as err:
+        if client.presented_key is None:
+            raise OpenWrtConnectionError(
+                f"pinned SSH connection to {api._host} failed: {err}"
+            ) from err
+        conn = None
+    if conn is not None:  # defence in depth: never keep such a connection
+        with contextlib.suppress(Exception):
+            conn.close()
+    if client.presented_key is None:
+        raise OpenWrtHostKeyError(
+            "no_host_key", f"{api._host} presented no host key", host=api._host
+        )
+    return client.presented_key
 
 
 async def async_ssh_run_pinned(
@@ -7164,46 +7261,171 @@ async def async_ssh_run_pinned(
     pin_store: HostKeyPinStore,
     timeout: float = 60.0,
     binary: bool = False,
+    max_output_bytes: int | None = None,
 ) -> PinnedSshResult:
     """Run one command over SSH with a pinned host key (config/backup path).
 
-    Auth mirrors the shared transport (password first unless the instance
-    already switched to key auth, then key auth on PermissionDenied) but
-    never changes the instance's state. The password is only the asyncssh
-    ``password=`` kwarg.
+    First contact (no confirmed pin): one connection WITHOUT credentials
+    reads the host key and stops before authentication; the key goes to
+    ``pin_store.async_save_pin``. The core's store records it as pending
+    and raises ``pin_pending`` (policy ``confirm``). A store that confirms
+    at once (policy ``tofu``) returns; the pin is then loaded again and
+    only a SECOND connection, pinned to it, authenticates.
+
+    Auth (pinned connections only) mirrors the shared transport (password
+    first unless the instance already switched to key auth, then key auth
+    on PermissionDenied) but never changes the instance's state. The
+    password is only the asyncssh ``password=`` kwarg.
+
+    ``max_output_bytes``: stdout cap (default
+    :data:`PINNED_SSH_DEFAULT_MAX_OUTPUT_BYTES`); above it the process is
+    closed and OpenWrtSshOutputTooLargeError raised. stderr is capped at
+    :data:`PINNED_SSH_STDERR_MAX_BYTES` (``stderr_truncated``).
 
     Raises:
         OpenWrtHostKeyMismatchError: the router's key differs from the pin
             (``mismatch``) or its key type is no longer offered
             (``algorithm_unavailable``). No unpinned retry.
         OpenWrtHostKeyError: stored pin unusable (``pin_invalid``), first-use
-            pin could not be stored (``pin_save_failed``; the command did not
-            run), or the server gave no host key (``no_host_key``).
+            pin could not be stored (``pin_save_failed``), the store did not
+            confirm it (``pin_pending``), or no host key (``no_host_key``).
+        OpenWrtSshOutputTooLargeError: stdout above ``max_output_bytes``.
         OpenWrtAuthError: SSH login refused with password and with key.
         OpenWrtTimeoutError / OpenWrtConnectionError: transport failures.
     """
     if api._closing:
         raise OpenWrtConnectionError("API is closing")
+    cap = (
+        PINNED_SSH_DEFAULT_MAX_OUTPUT_BYTES
+        if max_output_bytes is None
+        else int(max_output_bytes)
+    )
+    if cap <= 0:
+        raise ValueError("max_output_bytes must be positive")
     pin = await pin_store.async_load_pin()
     pinned_key = pin.to_key() if pin is not None else None
     try:
         async with asyncio.timeout(timeout):
+            pinned_now = False
+            if pin is None:
+                pin, pinned_key = await _first_contact(api, pin_store)
+                pinned_now = True
             return await _ssh_run_pinned_inner(
-                api, remote_cmd, pin, pinned_key, pin_store, binary
+                api, remote_cmd, pin, pinned_key, binary, cap, pinned_now
             )
     except TimeoutError as err:
         raise OpenWrtTimeoutError(f"pinned SSH to {api._host} timed out") from err
 
 
+async def _first_contact(
+    api: OpenWrtAPI, pin_store: HostKeyPinStore
+) -> tuple[HostKeyPin, asyncssh.SSHKey]:
+    """Capture the key without credentials, hand it to the store, reload.
+
+    Returns the CONFIRMED pin (only a store that auto-confirms returns at
+    all); anything else raises before any authentication.
+    """
+    presented = await _capture_host_key(api)
+    candidate = HostKeyPin.from_key(presented, api._host)
+    try:
+        await pin_store.async_save_pin(candidate)
+    except OpenWrtHostKeyError:
+        raise  # the store's own refusal (e.g. pin_pending), as is
+    except Exception as err:
+        raise OpenWrtHostKeyError(
+            "pin_save_failed",
+            f"could not store the host key pin of {api._host}",
+            host=api._host,
+            presented_fingerprint=candidate.fingerprint,
+        ) from err
+    confirmed = await pin_store.async_load_pin()
+    if confirmed is None:
+        raise OpenWrtHostKeyError(
+            "pin_pending",
+            "the first-seen host key is not confirmed; not authenticating",
+            host=api._host,
+            presented_fingerprint=candidate.fingerprint,
+        )
+    confirmed_key = confirmed.to_key()
+    if confirmed_key.public_data != presented.public_data:
+        raise OpenWrtHostKeyMismatchError(
+            "mismatch",
+            f"SSH host key of {api._host} differs from the stored pin",
+            host=api._host,
+            expected_fingerprint=confirmed.fingerprint,
+            presented_fingerprint=candidate.fingerprint,
+        )
+    _LOGGER.info(
+        "Pinned SSH host key of %s on first use (store confirmed it): %s",
+        api._host,
+        confirmed.fingerprint,
+    )
+    return confirmed, confirmed_key
+
+
+async def _read_capped(stream: Any, cap: int, *, drain: bool) -> tuple[bytes, int]:
+    """(first ``cap`` bytes, total bytes seen) of an asyncssh stream.
+
+    ``drain`` False stops right after the cap is exceeded; True reads to EOF
+    and drops everything above the cap.
+    """
+    buf = bytearray()
+    total = 0
+    while True:
+        chunk = await stream.read(_PINNED_READ_CHUNK)
+        if not chunk:
+            return bytes(buf), total
+        total += len(chunk)
+        room = cap - len(buf)
+        if room > 0:
+            buf.extend(chunk[:room])
+        if total > cap and not drain:
+            return bytes(buf), total
+
+
+async def _run_capped(
+    conn: asyncssh.SSHClientConnection, remote_cmd: str, cap: int, host: str
+) -> tuple[int | None, bytes, bytes, bool]:
+    """Run once: (exit_status, stdout, stderr, stderr_truncated); stdout capped."""
+    process = await conn.create_process(remote_cmd, encoding=None)
+    err_task = asyncio.ensure_future(
+        _read_capped(process.stderr, PINNED_SSH_STDERR_MAX_BYTES, drain=True)
+    )
+    try:
+        out, out_total = await _read_capped(process.stdout, cap, drain=False)
+        if out_total > cap:
+            _LOGGER.warning(
+                "Pinned SSH command on %s produced more than %d bytes; aborted",
+                host,
+                cap,
+            )
+            raise OpenWrtSshOutputTooLargeError(
+                f"pinned SSH output from {host} exceeds {cap} bytes",
+                limit_bytes=cap,
+                received_bytes=out_total,
+            )
+        err, err_total = await err_task
+        await process.wait_closed()
+        return process.exit_status, out, err, err_total > len(err)
+    finally:
+        if not err_task.done():
+            err_task.cancel()
+            with contextlib.suppress(BaseException):
+                await err_task
+        with contextlib.suppress(Exception):
+            process.close()
+
+
 async def _ssh_run_pinned_inner(
     api: OpenWrtAPI,
     remote_cmd: str,
-    pin: HostKeyPin | None,
-    pinned_key: asyncssh.SSHKey | None,
-    pin_store: HostKeyPinStore,
+    pin: HostKeyPin,
+    pinned_key: asyncssh.SSHKey,
     binary: bool,
+    cap: int,
+    pinned_now: bool,
 ) -> PinnedSshResult:
-    """Connect (password, then key), verify/pin the host key, run once."""
+    """Connect pinned (password, then key), verify the host key, run once."""
     use_key = api._ssh_use_key  # read only; the shared transport owns it
     for _attempt in range(2):
         password = None if use_key else api._password
@@ -7216,18 +7438,15 @@ async def _ssh_run_pinned_inner(
                 f"SSH host key of {api._host} does not match the pinned key",
                 host=api._host,
                 expected_fingerprint=_fingerprint(pinned_key),
+                presented_fingerprint=_fingerprint(client.presented_key),
             ) from err
         except asyncssh.KeyExchangeFailed as err:
-            if pinned_key is not None:
-                raise OpenWrtHostKeyMismatchError(
-                    "algorithm_unavailable",
-                    f"{api._host} no longer offers the pinned host key type "
-                    f"{pinned_key.get_algorithm()}",
-                    host=api._host,
-                    expected_fingerprint=_fingerprint(pinned_key),
-                ) from err
-            raise OpenWrtConnectionError(
-                f"SSH key exchange with {api._host} failed: {err}"
+            raise OpenWrtHostKeyMismatchError(
+                "algorithm_unavailable",
+                f"{api._host} no longer offers the pinned host key type "
+                f"{pinned_key.get_algorithm()}",
+                host=api._host,
+                expected_fingerprint=_fingerprint(pinned_key),
             ) from err
         except asyncssh.PermissionDenied as err:
             if use_key:
@@ -7235,10 +7454,6 @@ async def _ssh_run_pinned_inner(
                     f"SSH login to {api._host} refused (password and key)"
                 ) from err
             use_key = True
-            # The key check ran before authentication: on first use, the
-            # retry trusts only the key this attempt was shown.
-            if pinned_key is None and client.presented_key is not None:
-                pinned_key = client.presented_key
             continue
         except (OSError, asyncssh.Error) as err:
             raise OpenWrtConnectionError(
@@ -7250,10 +7465,7 @@ async def _ssh_run_pinned_inner(
                 raise OpenWrtHostKeyError(
                     "no_host_key", f"{api._host} presented no host key", host=api._host
                 )
-            if (
-                pinned_key is not None
-                and presented_key.public_data != pinned_key.public_data
-            ):
+            if presented_key.public_data != pinned_key.public_data:
                 # Defence in depth: asyncssh should already have refused.
                 raise OpenWrtHostKeyMismatchError(
                     "mismatch",
@@ -7262,51 +7474,21 @@ async def _ssh_run_pinned_inner(
                     expected_fingerprint=_fingerprint(pinned_key),
                     presented_fingerprint=_fingerprint(presented_key),
                 )
-            if (
-                pinned_key is None
-                and client.presented_key is not None
-                and presented_key.public_data != client.presented_key.public_data
-            ):
-                raise OpenWrtHostKeyMismatchError(
-                    "mismatch",
-                    f"{api._host} changed its host key during the handshake",
-                    host=api._host,
-                    presented_fingerprint=_fingerprint(presented_key),
-                )
-            pinned_now = pin is None
-            if pin is None:
-                pin = HostKeyPin.from_key(presented_key, api._host)
-                try:
-                    await pin_store.async_save_pin(pin)
-                except Exception as err:
-                    raise OpenWrtHostKeyError(
-                        "pin_save_failed",
-                        f"could not store the host key pin of {api._host}",
-                        host=api._host,
-                        presented_fingerprint=pin.fingerprint,
-                    ) from err
-                _LOGGER.info(
-                    "Pinned SSH host key of %s on first use: %s",
-                    api._host,
-                    pin.fingerprint,
-                )
-            result = await conn.run(remote_cmd, check=False, encoding=None)
+            exit_status, stdout_b, stderr_b, stderr_cut = await _run_capped(
+                conn, remote_cmd, cap, api._host
+            )
         finally:
             with contextlib.suppress(Exception):
                 conn.close()
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(conn.wait_closed(), timeout=2.0)
-        rc = (
-            result.exit_status
-            if result.exit_status is not None
-            else SUBPROCESS_RC_FAILED_TO_SPAWN
-        )
-        stdout_b = result.stdout or b""
+        rc = exit_status if exit_status is not None else SUBPROCESS_RC_FAILED_TO_SPAWN
         return PinnedSshResult(
             exit_status=rc,
             stdout=stdout_b if binary else stdout_b.decode(errors="replace"),
-            stderr=result.stderr or b"",
+            stderr=stderr_b,
             pin=pin,
             pinned_now=pinned_now,
+            stderr_truncated=stderr_cut,
         )
     raise OpenWrtAuthError(f"SSH login to {api._host} refused")

@@ -214,10 +214,11 @@ async def test_case07_history_newest_first(disks, tmp_path):
 
 
 async def test_case07_default_gfs_thins_same_day_versions_visibly(disks, tmp_path):
+    # Scheduled versions: ruling (a) of 1.44.0 keeps manual/pre_* ones.
     env = await start_env(disks, tmp_path)
     for name in ("one", "two", "three"):
         _hostname(env, name)
-        newest = (await _backup(env)).record
+        newest = (await _backup(env, reason=BackupReason.SCHEDULED)).record
     history = await env.api.async_list_backups(env.rid)
     assert [r.backup_id for r in history] == [newest.backup_id]
     applied = bus_events(env.hass, CoreEventType.RETENTION_APPLIED.value)

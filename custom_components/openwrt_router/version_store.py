@@ -30,15 +30,18 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import errno
+import functools
 import hashlib
 import logging
 import os
 import secrets
 import shutil
+import stat
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
@@ -77,6 +80,7 @@ from .core_models import (
     INSTALLATION_KEY_BYTES,
     INSTALLATION_KEY_STORE_KEY,
     ISSUE_INSTALLATION_KEY_LOST,
+    ISSUE_INSTALLATION_KEY_REPLACED,
     MAX_LIST_LIMIT,
     ORPHAN_SWEEP_MIN_AGE,
     PARTIAL_SUFFIX,
@@ -173,20 +177,70 @@ def _ensure_dir(path: str) -> None:
         os.chmod(path, STORAGE_DIR_MODE)
 
 
+# POSIX: never open through a symbolic link. Platforms without it (Windows)
+# rely on O_EXCL alone, which also refuses an existing link or junction.
+_O_NOFOLLOW: int = getattr(os, "O_NOFOLLOW", 0)
+REASON_PARTIAL_NOT_REGULAR = "partial_not_regular"
+
+
+def _partial_refused(kind: str) -> StorageError:
+    return StorageError(
+        "A link or folder sits where a version file is written; refused",
+        details={"reason": REASON_PARTIAL_NOT_REGULAR, "found": kind},
+    )
+
+
+def _open_partial(partial: str) -> int:
+    """Create ``partial`` exclusively (0o600), never through a link.
+
+    Something already there: a link (symbolic or junction), a folder or any
+    other non-regular entry is refused (``partial_not_regular``) and left
+    alone. A regular file of the same name can only be a crashed write of
+    this very locator: it is removed and the exclusive create retried once.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
+    flags |= getattr(os, "O_BINARY", 0)
+    try:
+        return os.open(partial, flags, STORAGE_FILE_MODE)
+    except OSError as err:
+        # FileExistsError; ELOOP = O_NOFOLLOW met a link; Windows answers a
+        # folder with PermissionError. Anything else, with nothing at the
+        # path, is a plain write error.
+        if err.errno == errno.ELOOP or _path_is_link(partial):
+            raise _partial_refused("symlink") from err
+        if not isinstance(err, FileExistsError) and not os.path.lexists(partial):
+            raise
+    try:
+        mode = os.lstat(partial).st_mode
+    except FileNotFoundError:
+        mode = None  # gone meanwhile: just create it
+    if mode is not None:
+        if not stat.S_ISREG(mode):
+            raise _partial_refused("folder" if stat.S_ISDIR(mode) else "other")
+        os.remove(partial)  # removes the entry itself, never a link target
+    return os.open(partial, flags, STORAGE_FILE_MODE)
+
+
 def _write_atomic(router_dir: str, locator: str, data: bytes) -> str:
-    """Write ``data`` to ``router_dir/locator`` via .partial, fsync, rename."""
+    """Write ``data`` to ``router_dir/locator`` via .partial, fsync, rename.
+
+    The .partial is created with ``O_CREAT | O_EXCL`` (+ ``O_NOFOLLOW``),
+    see :func:`_open_partial`; the rename replaces a link at the final
+    path itself, it never writes through it.
+    """
     _ensure_dir(router_dir)
     path = resolve_artifact_path(router_dir, locator)
     partial = path + PARTIAL_SUFFIX
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
-    fd = os.open(partial, flags, STORAGE_FILE_MODE)
+    fd = _open_partial(partial)
     try:
         with os.fdopen(fd, "wb") as handle:
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:  # on the open file, never by path
+                with contextlib.suppress(OSError):
+                    fchmod(handle.fileno(), STORAGE_FILE_MODE)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        with contextlib.suppress(OSError):
-            os.chmod(partial, STORAGE_FILE_MODE)
         os.replace(partial, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -226,31 +280,73 @@ class _SweepFiles:
     partial_deleted: int = 0
     orphaned_moved: int = 0
     unknown_entries: int = 0
+    symlinks_skipped: int = 0
+    unindexed_kept: int = 0
     present: dict[str, set[str]] | None = None
 
 
-def _sweep_files(root: str, indexed: Mapping[str, set[str]], now: float) -> _SweepFiles:
-    """Delete partials, move old index-less files to orphaned/ (executor)."""
+def _scan(path: str) -> list[os.DirEntry[str]]:
+    """Directory entries sorted by name (no symlink is followed here)."""
+    with os.scandir(path) as entries:
+        return sorted(entries, key=lambda e: e.name)
+
+
+def _is_link(entry: os.DirEntry[str]) -> bool:
+    """Symbolic link, or a Windows junction (Python 3.12+), never followed."""
+    is_junction = getattr(entry, "is_junction", None)
+    return entry.is_symlink() or bool(is_junction and is_junction())
+
+
+def _path_is_link(path: str) -> bool:
+    is_junction = getattr(os.path, "isjunction", None)
+    return os.path.islink(path) or bool(is_junction and is_junction(path))
+
+
+def _sweep_files(
+    root: str,
+    indexed: Mapping[str, set[str]],
+    now: float,
+    *,
+    keep_unindexed: bool = False,
+) -> _SweepFiles:
+    """Delete partials, move old index-less files to orphaned/ (executor).
+
+    Symbolic links (to files or folders) are never followed, deleted or
+    moved; they are counted in ``symlinks_skipped``. ``keep_unindexed``
+    (index recovered or empty): index-less files stay where they are and
+    are counted in ``unindexed_kept`` instead of being moved.
+    """
     out = _SweepFiles(present={})
-    if not os.path.isdir(root):
+    if _path_is_link(root) or not os.path.isdir(root):
+        out.symlinks_skipped += int(_path_is_link(root))
         return out
     min_age = ORPHAN_SWEEP_MIN_AGE.total_seconds()
-    for name in sorted(os.listdir(root)):
-        path = os.path.join(root, name)
+    for top in _scan(root):
+        name = top.name
+        path = top.path
         if name in (CONFIG_BACKUP_ORPHANED_DIR, CONFIG_BACKUP_REMOVED_DIR):
             continue
-        if name.endswith(PARTIAL_SUFFIX) and os.path.isfile(path):
+        if _is_link(top):
+            out.symlinks_skipped += 1
+            continue
+        if name.endswith(PARTIAL_SUFFIX) and top.is_file(follow_symlinks=False):
             os.remove(path)
             out.partial_deleted += 1
             continue
-        if not os.path.isdir(path) or not is_valid_id(name, ROUTER_ID_PREFIX):
+        if not top.is_dir(follow_symlinks=False) or not is_valid_id(
+            name, ROUTER_ID_PREFIX
+        ):
             out.unknown_entries += 1
             continue
         known = indexed.get(name, set())
         present: set[str] = set()
-        for file_name in sorted(os.listdir(path)):
-            file_path = os.path.join(path, file_name)
-            if not os.path.isfile(file_path):
+        for item in _scan(path):
+            file_name = item.name
+            file_path = item.path
+            if _is_link(item):
+                out.symlinks_skipped += 1
+                continue
+            if not item.is_file(follow_symlinks=False):
                 out.unknown_entries += 1
                 continue
             if file_name.endswith(PARTIAL_SUFFIX):
@@ -260,7 +356,10 @@ def _sweep_files(root: str, indexed: Mapping[str, set[str]], now: float) -> _Swe
             if file_name in known:
                 present.add(file_name)
                 continue
-            if now - os.path.getmtime(file_path) < min_age:
+            if keep_unindexed:
+                out.unindexed_kept += 1
+                continue
+            if now - item.stat(follow_symlinks=False).st_mtime < min_age:
                 continue  # may belong to a put that is still running
             target_dir = os.path.join(root, CONFIG_BACKUP_ORPHANED_DIR, name)
             _ensure_dir(target_dir)
@@ -332,9 +431,20 @@ class VersionStore:
         self._acks: dict[str, dict[str, DriftAck]] = {}
         self._rebaseline: set[str] = set()
         self._reserved: dict[str, int] = {}
+        # Newest created_at handed out: versions get strictly increasing
+        # timestamps, so history order never depends on clock resolution, a
+        # clock step back or the random id (1.44.0).
+        self._last_created_at: datetime | None = None
         self._key: bytes | None = None
         self._key_state = InstallationKeyState.UNINITIALISED
         self._key_lost_reported = False
+        # A key file existed but gave no usable key (review #9): a new key
+        # is then audited and raises a repair issue (hook, replaceable).
+        self._key_doc_unusable = False
+        self.key_replaced_hook: Callable[[str], None] = self._raise_key_replaced_issue
+        # The index was unreadable (review #13): when it happened (ISO), kept
+        # in the catalog; the sweep then never moves index-less files.
+        self.index_recovered_at: str | None = None
         self._root = self._resolve_root()
         self.loaded = False
         self.closed = False
@@ -348,6 +458,7 @@ class VersionStore:
             "too_large": 0,
             "refused_input": 0,
             "write_errors": 0,
+            "partial_refused": 0,
             "reads": 0,
             "integrity_failures": 0,
             "deleted": 0,
@@ -361,11 +472,18 @@ class VersionStore:
             "sweeps": 0,
             "sweep_unknown_entries": 0,
             "archived_routers": 0,
+            "archive_missing_folder": 0,
+            "created_at_adjusted": 0,
+            "dedup_refused_sha256": 0,
             "keys_created": 0,
+            "keys_replaced": 0,
             "key_resets": 0,
             "key_lost_events": 0,
             "key_lost_already_reported": 0,
             "refused_not_ready": 0,
+            "sweep_symlinks_skipped": 0,
+            "sweep_unindexed_kept": 0,
+            "sweeps_skipped": 0,
         }
 
     def _require_loaded(self) -> None:
@@ -412,13 +530,18 @@ class VersionStore:
         loaded = await core_store.async_load_store(
             self.hass, self._catalog, CONFIG_CATALOG_STORE_KEY
         )
-        if loaded.failed:
-            self._report_recovered(backup_written=loaded.backed_up)
         self._restore(loaded.data or {})
+        if loaded.failed:
+            self.index_recovered_at = self.now().isoformat()
+            self._report_recovered(backup_written=loaded.backed_up)
+            self._schedule_save()  # keep index_recovered_at
         key_load = await core_store.async_load_store(
             self.hass, self._key_store, INSTALLATION_KEY_STORE_KEY
         )
         key = None if key_load.failed else _decode_key(key_load.data)
+        self._key_doc_unusable = key is None and (
+            key_load.failed or key_load.data is not None
+        )
         if key_load.data is not None and key is None and not key_load.failed:
             _LOGGER.warning("Installation key store has an unusable key document")
             await core_store.async_backup_store(
@@ -449,6 +572,10 @@ class VersionStore:
                 skipped += 1
                 continue
             self._records[backup_id] = record
+            if self._last_created_at is None or (
+                record.created_at > self._last_created_at
+            ):
+                self._last_created_at = record.created_at
         acks_skipped = 0
         acks = data.get("acks")
         for router_id, items in (acks if isinstance(acks, Mapping) else {}).items():
@@ -469,6 +596,8 @@ class VersionStore:
             if isinstance(r, str)
         }
         self._key_lost_reported = data.get("key_lost_reported") is True
+        recovered = data.get("index_recovered_at")
+        self.index_recovered_at = recovered if isinstance(recovered, str) else None
         self.stats["records_skipped_on_load"] += skipped
         self.stats["acks_skipped_on_load"] += acks_skipped
         if skipped or acks_skipped:
@@ -505,6 +634,11 @@ class VersionStore:
             },
             "rebaseline": sorted(self._rebaseline),
             "key_lost_reported": self._key_lost_reported,
+            **(
+                {"index_recovered_at": self.index_recovered_at}
+                if self.index_recovered_at
+                else {}
+            ),
         }
 
     async def _async_save(self) -> None:
@@ -642,8 +776,64 @@ class VersionStore:
             key = secrets.token_bytes(INSTALLATION_KEY_BYTES)
             await self._async_store_key(key)
             self.stats["keys_created"] += 1
-            _LOGGER.info("Enterprise core: installation key created (first use)")
+            if self._key_doc_unusable:
+                self._report_key_replaced(key)
+            else:
+                _LOGGER.info("Enterprise core: installation key created (first use)")
             return key
+
+    @property
+    def file_activity(self) -> int:
+        """Writes, deletions and moves of version files by this store."""
+        return sum(
+            self.stats[name]
+            for name in (
+                "puts",
+                "deleted",
+                "pruned",
+                "write_errors",
+                "archived_routers",
+                "archive_missing_folder",
+                "keys_created",
+                "keys_replaced",
+                "key_resets",
+            )
+        )
+
+    @property
+    def has_pending_save(self) -> bool:
+        """True while a delayed index write is scheduled."""
+        return self._save_pending
+
+    def _report_key_replaced(self, key: bytes) -> None:
+        """A key file existed but was unusable: audit + repair issue."""
+        self._key_doc_unusable = False
+        self.stats["keys_replaced"] += 1
+        key_id = installation_key_id(key)
+        _LOGGER.warning(
+            "Enterprise core: the installation key file was unreadable and has "
+            "been replaced by a new key (%s); no stored version used the old key",
+            key_id,
+        )
+        self._emit(
+            CoreEventType.INSTALLATION_KEY_REPLACED,
+            severity=Severity.WARNING,
+            result=EventResult.FAILURE,
+            data={"key_id": key_id, "store": INSTALLATION_KEY_STORE_KEY},
+        )
+        try:
+            self.key_replaced_hook(key_id)
+        except Exception:
+            _LOGGER.warning("Repair issue for the replaced key failed", exc_info=True)
+
+    def _raise_key_replaced_issue(self, key_id: str) -> None:
+        async_raise_issue(
+            self.hass,
+            ISSUE_INSTALLATION_KEY_REPLACED,
+            ISSUE_INSTALLATION_KEY_REPLACED,
+            ir.IssueSeverity.WARNING,
+            {"key_id": key_id},
+        )
 
     async def _async_store_key(self, key: bytes) -> None:
         document = {
@@ -811,11 +1001,22 @@ class VersionStore:
                 details={"reason": "checksum_mismatch", "artifacts": bad},
             )
         size = sum(p.size_bytes for p in payloads.values())
-        now = self.now()
         async with self._lock:
+            now = self._next_created_at()
             records = self.records(router_id)
             candidate = dedup_candidate(records, meta.backup_type)
-            if should_deduplicate(candidate, meta, payloads.keys()):
+            repeat = should_deduplicate(
+                candidate, meta, payloads.keys(), artifact_sha256=hashes
+            )
+            if not repeat and should_deduplicate(candidate, meta, payloads.keys()):
+                # Provider hashes say "same", the core's sha256 says "not
+                # byte-identical": stored as a new version (counted).
+                self.stats["dedup_refused_sha256"] += 1
+                _LOGGER.debug(
+                    "Version of %s kept: provider hash equal, artifact sha256 differs",
+                    router_id,
+                )
+            if repeat:
                 assert candidate is not None
                 self._consume(
                     authorization, action=GuardedAction.BACKUP, router_id=router_id
@@ -881,6 +1082,23 @@ class VersionStore:
                     raise
         except BaseException as err:
             await self._async_cleanup(router_dir, refs, backup_id, payloads)
+            if (
+                isinstance(err, StorageError)
+                and err.details.get("reason") == REASON_PARTIAL_NOT_REGULAR
+            ):
+                self.stats["write_errors"] += 1
+                self.stats["partial_refused"] += 1
+                _LOGGER.warning(
+                    "Version store: a %s sits where a version file of %s is "
+                    "written; refused, nothing was followed",
+                    err.details.get("found"),
+                    router_id,
+                )
+                raise StorageError(
+                    "Writing the version failed",
+                    router_id=router_id,
+                    details=dict(err.details),
+                ) from err
             if isinstance(err, OSError):
                 self.stats["write_errors"] += 1
                 raise StorageError(
@@ -1196,9 +1414,16 @@ class VersionStore:
         for record in self._records.values():
             names = indexed.setdefault(record.router_id, set())
             names.update(a.storage.locator for a in record.artifacts.values())
+        keep_unindexed = self.index_recovered_at is not None or not self._records
         try:
             files = await self.hass.async_add_executor_job(
-                _sweep_files, self._root, indexed, time.time()
+                functools.partial(
+                    _sweep_files,
+                    self._root,
+                    indexed,
+                    time.time(),
+                    keep_unindexed=keep_unindexed,
+                )
             )
         except OSError as err:
             raise StorageError(
@@ -1226,14 +1451,47 @@ class VersionStore:
                 await self._async_save()
         self.stats["sweeps"] += 1
         self.stats["sweep_unknown_entries"] += files.unknown_entries
+        self.stats["sweep_symlinks_skipped"] += files.symlinks_skipped
+        self.stats["sweep_unindexed_kept"] += files.unindexed_kept
         report = SweepReport(
             checked_at=now,
             partial_deleted=files.partial_deleted,
             orphaned_moved=files.orphaned_moved,
             marked_missing=len(missing),
+            symlinks_skipped=files.symlinks_skipped,
+            unindexed_kept=files.unindexed_kept,
         )
         self.last_sweep = report
-        if report.partial_deleted or report.orphaned_moved or report.marked_missing:
+        if files.symlinks_skipped:
+            _LOGGER.warning(
+                "Version store sweep: %d symbolic link(s) in the backup folder "
+                "left alone (never followed)",
+                files.symlinks_skipped,
+            )
+        if files.unindexed_kept:
+            _LOGGER.warning(
+                "Version store sweep: %d file(s) without an index entry kept in "
+                "place (index %s); rebuilding the index is not automatic",
+                files.unindexed_kept,
+                "recovered" if self.index_recovered_at else "empty",
+            )
+            self._emit(
+                CoreEventType.STORE_RECOVERED,
+                severity=Severity.WARNING,
+                result=EventResult.FAILURE,
+                data={
+                    "store": CONFIG_CATALOG_STORE_KEY,
+                    "index_state": "recovered" if self.index_recovered_at else "empty",
+                    "index_recovered_at": self.index_recovered_at,
+                    "unindexed_files_kept": files.unindexed_kept,
+                },
+            )
+        if (
+            report.partial_deleted
+            or report.orphaned_moved
+            or report.marked_missing
+            or report.symlinks_skipped
+        ):
             self._emit(
                 CoreEventType.STORAGE_SWEPT,
                 severity=Severity.WARNING if missing else Severity.INFO,
@@ -1254,11 +1512,31 @@ class VersionStore:
                 )
         return report
 
-    async def async_archive_router(self, router_id: str) -> None:
+    def _next_created_at(self) -> datetime:
+        """Clock time, but strictly after every created_at handed out before.
+
+        Call with ``self._lock`` held. Equal clock readings (Windows returns
+        the same microsecond for quick consecutive calls) and a clock that
+        steps back would otherwise give two versions the same or a reversed
+        order (history sorts by created_at, ties by the random id).
+        """
+        now = self.now()
+        last = self._last_created_at
+        if last is not None and now <= last:
+            now = last + timedelta(microseconds=1)
+            self.stats["created_at_adjusted"] += 1
+        self._last_created_at = now
+        return now
+
+    async def async_archive_router(
+        self, router_id: str, *, entry_id: str | None = None
+    ) -> bool:
         """Move a removed router's folder to ``removed/<router_id>/``.
 
         Its index entries stay (history) and are marked ``missing`` by the
-        next sweep; nothing is ever deleted automatically.
+        next sweep; nothing is ever deleted automatically. Audited
+        (``configuration.router_archived``) whether or not a folder existed.
+        Returns True if a folder was moved.
         """
         self._require_loaded()
         router_dir = self._router_dir(router_id)  # validates the id
@@ -1268,6 +1546,14 @@ class VersionStore:
                 _archive_dir, root, router_id, time.time()
             )
         except OSError as err:
+            self._emit(
+                CoreEventType.ROUTER_ARCHIVED,
+                router_id=router_id,
+                entry_id=entry_id,
+                severity=Severity.WARNING,
+                result=EventResult.FAILURE,
+                data={"moved": False, "cause": type(err).__name__},
+            )
             raise StorageError(
                 "Archiving the router folder failed",
                 router_id=router_id,
@@ -1275,6 +1561,19 @@ class VersionStore:
             ) from err
         if moved:
             self.stats["archived_routers"] += 1
+        else:
+            self.stats["archive_missing_folder"] += 1
+        self._emit(
+            CoreEventType.ROUTER_ARCHIVED,
+            router_id=router_id,
+            entry_id=entry_id,
+            data={
+                "moved": bool(moved),
+                "target": f"{CONFIG_BACKUP_REMOVED_DIR}/{router_id}" if moved else None,
+                "versions": len(self.records(router_id)),
+            },
+        )
+        return bool(moved)
 
     # -- diagnostics -----------------------------------------------------------------
 
@@ -1300,6 +1599,7 @@ class VersionStore:
             "drift_acks": sum(len(a) for a in self._acks.values()),
             "rebaseline_pending": len(self._rebaseline),
             "installation_key_state": self._key_state.value,
+            "index_recovered_at": self.index_recovered_at,
             "last_sweep": None
             if self.last_sweep is None
             else self.last_sweep.to_dict(),

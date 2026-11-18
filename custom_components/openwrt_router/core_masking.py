@@ -53,6 +53,7 @@ import hmac
 import logging
 import posixpath
 import re
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, time, timedelta
@@ -70,6 +71,7 @@ from ipaddress import (
 )
 from pathlib import PurePath
 from typing import Any, Final
+from urllib.parse import unquote
 from uuid import UUID
 
 from .const import DIAGNOSTICS_REDACT_KEYS, DIAGNOSTICS_REDACTED
@@ -166,8 +168,10 @@ _UCI_CREDENTIAL_NAMES: Final = frozenset(
     }
 )
 # All credential names of HTTP bodies, headers and command output.
+# "pw" (security review 2026-11-18, broad mode only): a common short name
+# for a password in scripts and JSON bodies.
 SECRET_EXTRA_NAMES: Final = _UCI_CREDENTIAL_NAMES | frozenset(
-    {"session", "sid", "sysauth"}
+    {"pw", "session", "sid", "sysauth"}
 )
 
 _CONTEXT_NAMES: Final = frozenset(
@@ -322,6 +326,7 @@ SECRET_WORDS: Final = frozenset(
         "privatekey",
         "privkey",
         "psk",
+        "pw",
         "pwd",
         "sae",
         "sauth",  # LuCI session cookie variant
@@ -373,6 +378,78 @@ SECRET_ARCHIVE_PATHS: Final = (
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _SPLIT = re.compile(r"[^A-Za-z0-9]+")
 _TRAILING_DIGITS = re.compile(r"\d+$")
+
+
+# Look-alike letters (Cyrillic, Greek) mapped to the Latin letter they mimic;
+# NFKC already folds fullwidth and other compatibility forms.
+_CONFUSABLES: Final = str.maketrans(
+    {
+        "\u0430": "a",
+        "\u0435": "e",
+        "\u043e": "o",
+        "\u0440": "p",
+        "\u0441": "c",
+        "\u0443": "y",
+        "\u0445": "x",
+        "\u043a": "k",
+        "\u0456": "i",
+        "\u0455": "s",
+        "\u0458": "j",
+        "\u0501": "d",
+        "\u0410": "A",
+        "\u0412": "B",
+        "\u0415": "E",
+        "\u041a": "K",
+        "\u041c": "M",
+        "\u041d": "H",
+        "\u041e": "O",
+        "\u0420": "P",
+        "\u0421": "C",
+        "\u0422": "T",
+        "\u0425": "X",
+        "\u0405": "S",
+        "\u0406": "I",
+        "\u03b1": "a",
+        "\u03b5": "e",
+        "\u03bf": "o",
+        "\u03c1": "p",
+        "\u03ba": "k",
+        "\u03c4": "t",
+        "\u03bd": "v",
+        "\u03b9": "i",
+        "\u0391": "A",
+        "\u0392": "B",
+        "\u0395": "E",
+        "\u0396": "Z",
+        "\u0397": "H",
+        "\u0399": "I",
+        "\u039a": "K",
+        "\u039c": "M",
+        "\u039d": "N",
+        "\u039f": "O",
+        "\u03a1": "P",
+        "\u03a4": "T",
+        "\u03a5": "Y",
+        "\u03a7": "X",
+    }
+)
+
+
+def _canonical_name(name: str) -> str:
+    """``name`` as a reader sees it: URL-decoded, format characters
+    (zero-width) removed, NFKC-folded, look-alike letters mapped to Latin.
+
+    Plain ASCII names without ``%`` are returned as they are.
+    """
+    if name.isascii() and "%" not in name:
+        return name
+    canon = name
+    for _ in range(2):  # pass%2577ord -> pass%77ord -> password
+        if "%" not in canon:
+            break
+        canon = unquote(canon)
+    canon = "".join(ch for ch in canon if unicodedata.category(ch) != "Cf")
+    return unicodedata.normalize("NFKC", canon).translate(_CONFUSABLES)
 
 
 def _normalise_name(name: str) -> str:
@@ -437,7 +514,19 @@ def _is_secret_non_str_key(key: object, extra_keys: Iterable[str], depth: int) -
 
 @lru_cache(maxsize=4096)
 def _is_secret_str_key(name: str) -> bool:
-    """The broad rules of :func:`is_secret_key` without extra keys."""
+    """The broad rules of :func:`is_secret_key` without extra keys.
+
+    A name with URL escapes, zero-width or look-alike characters is also
+    judged in its canonical form (:func:`_canonical_name`).
+    """
+    canon = _canonical_name(name)
+    if canon != name and canon.strip() and _is_secret_plain_key(canon):
+        return True
+    return _is_secret_plain_key(name)
+
+
+def _is_secret_plain_key(name: str) -> bool:
+    """The broad rules on one spelling of a name."""
     lowered = name.lower()
     norm = _normalise_name(name)
     if lowered in SECRET_EXACT_KEYS or norm in SECRET_EXACT_KEYS:
@@ -581,9 +670,39 @@ _UCI_HEAD_RE: Final = re.compile(
 )
 # The name starts only at the start of a run of name characters and is
 # taken possessively (it can only end at the run's end): linear runtime.
+# Name characters of free-text heads: word characters in any script, the
+# separators of UCI / JSON paths, "%" (URL escapes) and the invisible format
+# characters an attacker could slip into a name (zero-width, soft hyphen).
+_NAME_CHARS: Final = r"\w.@\[\]\-%\u00ad\u200b-\u200f\u2060-\u2064\ufeff"
 _ASSIGN_HEAD_RE: Final = re.compile(
-    r"(?P<q>[\"']?)(?<![A-Za-z0-9_.@\[\]\-])(?P<name>[A-Za-z0-9_.@\[\]\-]++)"
+    rf"(?P<q>[\"']?)(?<![{_NAME_CHARS}])(?P<name>[{_NAME_CHARS}]++)"
     r"(?P=q)[ \t]*[=:][ \t]*"
+)
+# JSON inside a JSON string: \"name\": \"value\" (any number of backslashes,
+# the same before both quotes of the name).
+_ESCAPED_HEAD_RE: Final = re.compile(
+    rf"(?<!\\)(?P<bs>\\++)\"(?P<name>[{_NAME_CHARS}]++)(?P=bs)\"[ \t]*:[ \t]*"
+)
+# name<TAB>value (hostapd/wpa_cli, "uci -d '\t'", tab separated dumps).
+_TAB_HEAD_RE: Final = re.compile(
+    rf"(?<![{_NAME_CHARS}])(?P<name>[{_NAME_CHARS}]++)\t[ \t]*(?=\S)"
+)
+# <name attr="…">value</name> (XML / HTML forms).
+_XML_HEAD_RE: Final = re.compile(
+    rf"<(?P<name>[{_NAME_CHARS}:]++)(?:[ \t][^<>\r\n]*+)?>"
+)
+_XML_VALUE_RE: Final = re.compile(r"[^<]*+")
+# sshpass -p PASSWORD (also -pPASSWORD): every -p on such a line.
+_SSHPASS_LINE_RE: Final = re.compile(r"\bsshpass\b[^\r\n]*+")
+_SSHPASS_P_RE: Final = re.compile(
+    r"(?<!\S)(?P<flag>-p)(?P<sep>[ \t]*+)(?P<value>'[^'\r\n]*+'|\"[^\"\r\n]*+\"|\S++)"
+)
+# user/password and user:password after a login name, as in exception
+# texts ("login failed for root/…"); the login name must stand alone.
+_LOGIN_PAIR_RE: Final = re.compile(
+    r"(?<![^\s'\"(\[=,;])(?P<user>root|admin|user|username|login)"
+    r"(?P<sep>[/:])(?P<value>[^\s'\")\],;/]++)(?!/)",
+    re.IGNORECASE,
 )
 _FLAG_HEAD_RE: Final = re.compile(
     r"(?<![\w\-])(?P<name>--?[A-Za-z][A-Za-z0-9_\-]*)[ \t]+(?=[^\s\-])"
@@ -609,6 +728,9 @@ _HEX32_RE: Final = re.compile(r"(?<![0-9A-Za-z_])[0-9A-Fa-f]{32}(?![0-9A-Za-z_])
 # Opaque runs of 32+ token characters; ids and pure hex hashes are kept.
 _LONG_TOKEN_RE: Final = re.compile(r"(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_=-]{32,}")
 _KEEP_TOKEN_RE: Final = re.compile(r"[a-z]{3}_[0-9a-f]{32}|[0-9a-f]{40,}")
+# OpenSSH fingerprint: "SHA256:" + 43 base64 characters (no padding).
+_FINGERPRINT_HEAD: Final = "SHA256:"
+_FINGERPRINT_LEN: Final = 43
 # Names, not tokens: paths and hostnames are words joined by "/", "-", "_".
 # Each part is one word (lower, Capitalised or UPPER), at most one more
 # CamelCase hump of 3+ letters ("OpenWrt"), digits only around it; random
@@ -630,7 +752,11 @@ def _quoted_mask(value: str) -> str:
 def _mask_after_heads(
     text: str, head_re: re.Pattern[str], value_re: re.Pattern[str]
 ) -> str:
-    """Mask the value after every head whose name is secret."""
+    """Mask the value after every head whose name is secret.
+
+    Names are judged by the broad :func:`is_secret_key`, which also checks
+    the canonical spelling (URL escapes, zero-width, look-alikes).
+    """
     out: list[str] = []
     pos = 0
     for match in head_re.finditer(text):
@@ -649,16 +775,115 @@ def _mask_after_heads(
     return "".join(out)
 
 
+_ESCAPED_SCALAR_RE: Final = re.compile(r"[^,}\]\s\\]*+")
+_MAX_ESCAPE_DEPTH: Final = 64
+
+
+@lru_cache(maxsize=16)
+def _escaped_close_re(depth: int) -> re.Pattern[str]:
+    """End of an escaped string value at ``depth`` backslashes, or a newline."""
+    return re.compile(r"(?<!\\)" + r"\\" * depth + r'"|[\r\n]')
+
+
+def _mask_escaped_json(text: str) -> str:
+    """Mask \\"name\\": \\"value\\" pairs of escaped JSON (any depth).
+
+    The value ends at the same escape depth's quote (a deeper escaped quote
+    inside it does not end it) or at the end of the line. Every character
+    is scanned at most once by the value search (linear).
+    """
+    out: list[str] = []
+    pos = 0
+    for match in _ESCAPED_HEAD_RE.finditer(text):
+        if match.start() < pos or not is_secret_key(match.group("name")):
+            continue
+        quote = match.group("bs") + '"'
+        start = match.end()
+        if text.startswith(quote, start):
+            depth = len(match.group("bs"))
+            close = (
+                _escaped_close_re(depth).search(text, start + len(quote))
+                if depth <= _MAX_ESCAPE_DEPTH
+                else None
+            )
+            if close is not None and close.group(0) not in ("\r", "\n"):
+                end, masked = close.end(), f"{quote}{MASK}{quote}"
+            elif close is not None:
+                end, masked = close.start(), MASK
+            else:
+                eol = re.compile(r"[\r\n]").search(text, start)
+                end, masked = (eol.start() if eol else len(text)), MASK
+        else:
+            value = _ESCAPED_SCALAR_RE.match(text, start)
+            end, masked = (value.end() if value else start), MASK
+        if end == start:
+            continue
+        out.append(text[pos:start])
+        out.append(masked)
+        pos = end
+    if not out:
+        return text
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _mask_sshpass(text: str) -> str:
+    """Mask the value of every ``-p`` on a line that runs sshpass."""
+    if "sshpass" not in text:
+        return text
+
+    def _line(match: re.Match[str]) -> str:
+        return _SSHPASS_P_RE.sub(
+            lambda m: (
+                f"{m.group('flag')}{m.group('sep')}{_quoted_mask(m.group('value'))}"
+            ),
+            match.group(0),
+        )
+
+    return _SSHPASS_LINE_RE.sub(_line, text)
+
+
 def _is_name(token: str) -> bool:
     """True for a path or hostname made of words (not an opaque token)."""
     parts = [part for part in _NAME_SEP_RE.split(token) if part]
     return len(parts) >= 2 and all(_NAME_PART_RE.fullmatch(part) for part in parts)
 
 
+def _is_id_path(token: str) -> bool:
+    """True for a path whose parts are core ids, hex hashes or plain words.
+
+    ``removed/rtr_<32 hex>`` (archive targets in audit data) stays readable;
+    a part that is an opaque token (or a bare 32-hex session token) does not.
+    """
+    if "/" not in token:
+        return False
+    parts = token.split("/")
+    return all(
+        part
+        and (
+            _KEEP_TOKEN_RE.fullmatch(part)
+            or _NAME_PART_RE.fullmatch(part)
+            or _is_name(part)
+        )
+        for part in parts
+    )
+
+
 def _mask_long_token(match: re.Match[str]) -> str:
-    """Mask an opaque run unless it is an id, a hex hash or a name."""
+    """Mask an opaque run unless it is an id, a hex hash or a name.
+
+    The 43 characters after ``SHA256:`` are an SSH host key fingerprint
+    (public, needed to compare pins) and stay readable too.
+    """
     token = match.group(0)
-    if _KEEP_TOKEN_RE.fullmatch(token) or _is_name(token):
+    if _KEEP_TOKEN_RE.fullmatch(token) or _is_name(token) or _is_id_path(token):
+        return token
+    start = match.start()
+    if (
+        len(token) == _FINGERPRINT_LEN
+        and match.string[max(0, start - len(_FINGERPRINT_HEAD)) : start]
+        == _FINGERPRINT_HEAD
+    ):
         return token
     return MASK
 
@@ -668,9 +893,13 @@ def redact_text(text: object) -> str:
 
     Covers PEM blocks, URL credentials, Authorization schemes, UCI lines
     (``option key '…'``), ``uci show`` / ``name=value`` / ``name: value`` /
-    JSON pairs and ``--flag value`` with a secret name (value to the closing
-    quote or the end of the line), crypt hashes, base64 32-byte keys, 32-hex
-    session tokens and other opaque runs of 32+ characters.
+    JSON pairs (also escaped JSON inside a string), ``--flag value``,
+    ``name<TAB>value`` and ``<name>value</name>`` with a secret name (value
+    to the closing quote or the end of the line; names also judged
+    URL-decoded, without zero-width characters, NFKC-folded and with
+    look-alike letters mapped), ``sshpass -p …``, ``root/…`` login pairs,
+    crypt hashes, base64 32-byte keys, 32-hex session tokens and other
+    opaque runs of 32+ characters.
     ``<prefix>_<32 hex>`` ids, hex hashes and word-built names (archive
     paths, hostnames) are kept. Text longer than MAX_TEXT_LENGTH is cut and
     ends with TRUNCATED. Runtime is linear in the length.
@@ -699,8 +928,13 @@ def _redact(text: str) -> str:
     text = _URL_CRED_RE.sub(rf"\1:{MASK}@", text)
     text = _AUTH_SCHEME_RE.sub(rf"\1 {MASK}", text)
     text = _mask_after_heads(text, _UCI_HEAD_RE, _LINE_VALUE_RE)
+    text = _mask_escaped_json(text)
     text = _mask_after_heads(text, _ASSIGN_HEAD_RE, _VALUE_RE)
     text = _mask_after_heads(text, _FLAG_HEAD_RE, _VALUE_RE)
+    text = _mask_after_heads(text, _TAB_HEAD_RE, _LINE_VALUE_RE)
+    text = _mask_after_heads(text, _XML_HEAD_RE, _XML_VALUE_RE)
+    text = _mask_sshpass(text)
+    text = _LOGIN_PAIR_RE.sub(rf"\g<user>\g<sep>{MASK}", text)
     text = _CRYPT_RE.sub(MASK, text)
     text = _WG_KEY_RE.sub(MASK, text)
     text = _HEX32_RE.sub(MASK, text)
@@ -720,6 +954,20 @@ _OPTION_VALUE_KEYS: Final = frozenset(
     {"old", "new", "value", "values", "before", "after", "current", "previous"}
 )
 _PATH_KEYS: Final = ("path", "name", "member", "file", "filename")
+# Records that name their field in one of these keys ({"key": "password",
+# "value": …}, {"name": "psk", "new": …}) mask their values like a secret
+# option record (security review 2026-11-18).
+_FIELD_NAME_KEYS: Final = ("key", "name", "field", "param", "parameter", "setting")
+# Strings under id/hash keys stay readable only in these strict shapes;
+# anything else under such a key is redacted as free text.
+_STRICT_ID_RE: Final = re.compile(
+    r"[a-z]{3}_[0-9a-f]{32}"  # core ids (rtr_, bkp_, evt_, apr_ …)
+    r"|[0-9A-Fa-f]{8,128}"  # hex digests and hashes
+    r"|[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}"  # UUID
+    r"|[0-9A-HJKMNP-TV-Z]{26}"  # ULID (HA config entry ids)
+    r"|SHA256:[A-Za-z0-9+/]{43}=?"  # ssh fingerprint
+    r"|[0-9]{1,20}|-|"
+)
 _INLINE_KEY: Final = "-----BEGIN "
 # Value types without attributes that could hold a secret; they stay as
 # they are. Every other unknown object becomes an OBJECT marker.
@@ -804,6 +1052,12 @@ def _record_masked_keys(mapping: Mapping[Any, Any]) -> frozenset[str]:
             option,
         ) or _has_inline_key(mapping):
             masked |= _OPTION_VALUE_KEYS
+    if not masked and any(key in mapping for key in _OPTION_VALUE_KEYS):
+        for name_key in _FIELD_NAME_KEYS:
+            named = mapping.get(name_key)
+            if isinstance(named, str) and is_secret_key(named):
+                masked |= _OPTION_VALUE_KEYS
+                break
     for path_key in _PATH_KEYS:
         path = mapping.get(path_key)
         if isinstance(path, str) and is_secret_path(path):
@@ -835,7 +1089,11 @@ def _mask_mapping(
             if walk.redact_strings and isinstance(value, str):
                 lowered = key.lower()
                 if lowered in SAFE_KEYS or lowered.endswith(SAFE_SUFFIXES):
-                    result[key] = value  # ids and hashes stay readable
+                    # ids and hashes stay readable in their strict shapes;
+                    # anything else there is free text (review 2026-11-18)
+                    result[key] = (
+                        value if _STRICT_ID_RE.fullmatch(value) else redact_text(value)
+                    )
                     continue
         result[key] = _mask(value, walk, stack, depth + 1)
     return result
@@ -916,8 +1174,54 @@ def mask_for_output(data: Any, *, extra_keys: Iterable[str] = ()) -> Any:
     """Like :func:`mask_secrets`, and every string goes through redact_text.
 
     The last barrier before HTTP responses, logs and events. Strings under
-    id/hash keys (``*_id``, ``*_ids``, ``*_hash``, ``sha256``) stay; sets
+    id/hash keys (``*_id``, ``*_ids``, ``*_hash``, ``sha256``) stay only in
+    a strict id/hash shape, otherwise they are redacted like any text; sets
     and namedtuples keep their type.
     """
     walk = _Walk(extra=frozenset(extra_keys), redact_strings=True)
     return _mask(data, walk, set(), 0)
+
+
+# --- user pseudonyms ----------------------------------------------------------
+
+# Home Assistant user ids never leave the core as they are: diagnostics and
+# the bus event (recorder, logbook) carry ``usr_<12 hex>`` instead, an
+# HMAC-SHA256 of the id with a caller-owned random salt (security review
+# 2026-11-18 #11, review PR #55 finding 7). The audit store keeps the id.
+ACTOR_PSEUDONYM_PREFIX: Final = "usr_"
+ACTOR_PSEUDONYM_HEX_LENGTH: Final = 12
+USER_ID_KEY: Final = "user_id"
+
+
+def pseudonymise_user_id(user_id: str, salt: bytes) -> str:
+    """``usr_<12 hex>`` for ``user_id``; same id and salt, same pseudonym."""
+    digest = hmac.new(salt, user_id.encode("utf-8"), hashlib.sha256).hexdigest()
+    return ACTOR_PSEUDONYM_PREFIX + digest[:ACTOR_PSEUDONYM_HEX_LENGTH]
+
+
+def pseudonymise_user_ids(data: Any, salt: bytes) -> Any:
+    """Copy of ``data`` with every string under a ``user_id`` key replaced.
+
+    Walks mappings, lists and tuples (as lists) up to MAX_DEPTH; deeper
+    values are returned unchanged, which is safe only because the result
+    then goes through :func:`mask_for_output` (it truncates beyond the
+    same depth). The input is never changed.
+    """
+    return _pseudonymise(data, salt, 0)
+
+
+def _pseudonymise(data: Any, salt: bytes, depth: int) -> Any:
+    if depth > MAX_DEPTH:
+        return data
+    if isinstance(data, Mapping):
+        return {
+            key: (
+                pseudonymise_user_id(value, salt)
+                if key == USER_ID_KEY and isinstance(value, str)
+                else _pseudonymise(value, salt, depth + 1)
+            )
+            for key, value in data.items()
+        }
+    if isinstance(data, list | tuple):
+        return [_pseudonymise(value, salt, depth + 1) for value in data]
+    return data

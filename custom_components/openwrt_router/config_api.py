@@ -69,15 +69,18 @@ from .core_guard import (
     raise_for_decision,
 )
 from .core_models import (
+    APPROVAL_TTL,
     CONFIG_CAPABILITIES,
     CORRELATION_ID_PREFIX,
     DEFAULT_LIST_LIMIT,
     DEFAULT_RETENTION_POLICY,
     FLEET_BACKUP_CONCURRENCY,
+    OPTION_CONFIG_BACKUP_ENABLED,
     ROUTER_LOCK_TIMEOUT,
     SUPPORTED_API_VERSIONS,
     SUPPORTED_PROVIDER_API_VERSIONS,
     Actor,
+    ActorKind,
     ApprovalRequest,
     ArtifactKind,
     ArtifactPayload,
@@ -156,6 +159,15 @@ _DRIFT_EVENT_TYPES = (
 _EVENT_ID_LIST_MAX = 50
 REBASELINE_DRIFT_PREFIX = "rebaseline:"
 _ARTIFACT_KINDS = frozenset(kind.value for kind in ArtifactKind)
+# Reads of configuration content (secrets): the ``action`` named in the
+# audited refusal of a user who is not a verified admin (no guard action:
+# reads mint no authorization).
+READ_CAPTURE = "config_capture"
+READ_COMPARE = "config_compare"
+# Dry-run plans waiting for async_request_restore (security review #4):
+# dropped after this long, and the oldest beyond the cap (both counted).
+RESTORE_PLAN_TTL = APPROVAL_TTL
+MAX_RESTORE_PLANS = 50
 
 
 def _ids(values: Iterable[str]) -> list[str]:
@@ -417,8 +429,12 @@ class ConfigurationManager:
         self._exports: dict[str, tuple[str, str]] = {}
         self._deletions: dict[str, tuple[str, ...]] = {}
         self._plans: dict[str, RestorePlan] = {}
+        self._plan_made: dict[str, datetime] = {}
         self._restores: dict[str, RestorePlan] = {}
         self._apis: dict[int, ConfigurationApi] = {}
+        # ACL deploy + SSH pin flows (core_security.SecurityActions), set by
+        # the enterprise core; None in bare manager tests.
+        self.security: Any = None
         self.closed = False
         self.stats: dict[str, int] = {
             "providers_registered": 0,
@@ -451,7 +467,15 @@ class ConfigurationManager:
             "deletions": 0,
             "restores": 0,
             "requests_dropped_on_close": 0,
+            "requests_dropped_on_expiry": 0,
+            "plans_expired": 0,
+            "plans_evicted": 0,
+            "refused_disabled": 0,
         }
+        # Request data dies with its approval (expired, rejected, unload).
+        self._remove_approval_listener = guard.add_approval_listener(
+            self._approval_ended
+        )
 
     def now(self) -> datetime:
         """Current time (aware UTC)."""
@@ -576,15 +600,19 @@ class ConfigurationManager:
             )
 
         provider = self._provider
+        if record.state is RecordState.ACTIVE and not self.registry.config_enabled(
+            router_id
+        ):
+            # Option config_backup_enabled (default OFF since 1.44.0; read
+            # from the config entry when the entry is not loaded). Same order
+            # as the registry: the option wins over a missing provider.
+            return status(CapabilityState.UNAVAILABLE, CapabilityReason.DISABLED)
         if provider is None:
             return status(CapabilityState.UNAVAILABLE, CapabilityReason.NO_PROVIDER)
         if record.state is not RecordState.ACTIVE:
             return status(
                 CapabilityState.UNAVAILABLE, CapabilityReason.ENTRY_NOT_LOADED
             )
-        attached = self.registry.attached(router_id)
-        if attached is not None and not attached.config_enabled:
-            return status(CapabilityState.UNAVAILABLE, CapabilityReason.DISABLED)
         if not provider.supported(record):
             return status(
                 CapabilityState.UNAVAILABLE, CapabilityReason.PROVIDER_DECLINED
@@ -673,6 +701,66 @@ class ConfigurationManager:
                 capability=str(capability), reason=CapabilityReason.NO_PROVIDER.value
             )
         return self._provider
+
+    def _require_enabled(self, router_id: str, capability: str) -> None:
+        """Refuse a stored-version operation while the option is OFF.
+
+        Only for an ACTIVE router whose entry has ``config_backup_enabled``
+        off; versions of orphaned routers keep their existing behaviour.
+        Counted in ``refused_disabled``.
+        """
+        record = self.registry.find(router_id)
+        if (
+            record is not None
+            and record.state is RecordState.ACTIVE
+            and not self.registry.config_enabled(router_id)
+        ):
+            self.stats["refused_disabled"] += 1
+            raise CapabilityUnavailableError(
+                capability=str(capability),
+                reason=CapabilityReason.DISABLED.value,
+                router_id=router_id,
+            )
+
+    @callback
+    def on_config_option_changed(
+        self, router_id: str, enabled: bool, *, actor: Actor | None = None
+    ) -> None:
+        """Options flow: ``config_backup_enabled`` changed for a router.
+
+        Audited first (security ring, ``security.config_option_changed``
+        with actor, old and new value). ON probes again (one provider probe,
+        only with a provider); OFF drops the stored probe results so nothing
+        stale comes back.
+        """
+        self.audit_config_option_changed(router_id, enabled, actor=actor)
+        if enabled:
+            self.request_probe(router_id, "config_option_enabled")
+            return
+        if self._probes.pop(router_id, None) is not None:
+            self.registry.invalidate_capabilities()
+
+    def audit_config_option_changed(
+        self, router_id: str | None, enabled: bool, *, actor: Actor | None = None
+    ) -> None:
+        """One security-ring entry for a changed ``config_backup_enabled``.
+
+        ``actor`` None: Home Assistant did not say who submitted the options
+        form (``actor_known`` False in the data).
+        """
+        self._emit(
+            CoreEventType.CONFIG_OPTION_CHANGED,
+            router_id=router_id or "-",
+            actor=actor,
+            result=EventResult.SUCCESS,
+            data={
+                "option": OPTION_CONFIG_BACKUP_ENABLED,
+                "old": not enabled,
+                "new": bool(enabled),
+                "source": "options_flow",
+                "actor_known": actor is not None,
+            },
+        )
 
     # -- probes ----------------------------------------------------------------------
 
@@ -795,12 +883,14 @@ class ConfigurationManager:
                 )
             return await store.async_read_artifact(version_id, kind)
 
+        security = self.security
         return ProviderContext(
             registry=RegistryReadView(self.registry),
             read=read,
             installation_key=store.async_get_installation_key,
             installation_key_state=store.key_state,
             correlation_id=correlation_id,
+            ssh=None if security is None else security.async_ssh_run,
         )
 
     def _connection(self, router_id: str) -> RouterConnection:
@@ -930,6 +1020,34 @@ class ConfigurationManager:
             return decision.approval_request
         raise error_for_decision(decision)
 
+    def _require_content_reader(
+        self, action: str, router_id: str, verified: VerifiedActor
+    ) -> None:
+        """Reads of configuration content: a user must be a verified admin.
+
+        Live configuration and diffs carry secrets. Module, system and
+        automation actors pass (contract §6.2: only users need admin
+        rights; a ``backup`` by them reads the same content). A refusal is
+        audited on the security ring and raised before any provider call.
+        """
+        if verified.actor.kind is not ActorKind.USER or verified.is_admin:
+            return
+        audit_id = self.guard.audit_denial(router_id, action, verified, "not_admin")
+        raise AuthorizationError(
+            f"Reading configuration content ({action}) needs an admin user",
+            router_id=router_id,
+            details={"reason": "not_admin", "audit_id": audit_id, "action": action},
+        )
+
+    def _ref_router_id(self, ref: ConfigRef) -> str:
+        """Router of a reference for an audit entry (never raises)."""
+        if ref.is_live:
+            return str(ref.router_id)
+        try:
+            return self.versions.get(str(ref.backup_id)).router_id
+        except ConfigApiError:
+            return FLEET_ROUTER_ID
+
     def _precheck(self, action: str, router_id: str, verified: VerifiedActor) -> None:
         """Deny early (audited) before doing work for an action."""
         if self.guard.denial_reason(action, verified) is not None:
@@ -1046,8 +1164,9 @@ class ConfigurationManager:
     async def async_capture(
         self, router_id: str, *, actor: Actor, configs: tuple[str, ...] | None = None
     ) -> ConfigSnapshot:
-        """Live configuration (READ)."""
+        """Live configuration (READ; a user must be a verified admin)."""
         verified = await self._verify(actor)
+        self._require_content_reader(READ_CAPTURE, router_id, verified)
         provider = self._require(router_id, Capability.CONFIG_CAPTURE)
         with self._settling(router_id, Capability.CONFIG_CAPTURE, "capture"):
             return await self._capture(provider, router_id, verified, configs)
@@ -1107,6 +1226,7 @@ class ConfigurationManager:
         """Core sha256 check of every artifact, then the provider's check."""
         provider = self._require_provider(Capability.CONFIG_VALIDATE)
         record = self.versions.get(backup_id)
+        self._require_enabled(record.router_id, Capability.CONFIG_VALIDATE)
         for kind in sorted(record.artifacts):
             try:
                 await self.versions.async_read_artifact(backup_id, kind)
@@ -1139,8 +1259,18 @@ class ConfigurationManager:
     async def async_compare(
         self, base: ConfigRef, other: ConfigRef, *, actor: Actor
     ) -> ConfigDiff:
-        """Compare two references (stored and/or live)."""
+        """Compare two references (stored and/or live; a user must be admin).
+
+        The admin check comes before any lookup, so a refused user learns
+        nothing about version ids; the audit entry names the live router of
+        ``base`` (live router or the router of a known version), else the
+        fleet (``-``); the error is the same either way.
+        """
         verified = await self._verify(actor)
+        if verified.actor.kind is ActorKind.USER and not verified.is_admin:
+            self._require_content_reader(
+                READ_COMPARE, self._ref_router_id(base), verified
+            )
         provider = self._require_provider(Capability.CONFIG_DIFF)
         sources: list[Any] = []
         routers: list[RouterRecord] = []
@@ -1154,6 +1284,7 @@ class ConfigurationManager:
                 routers.append(self.registry.get(rid))
             else:
                 record = self.versions.get(str(ref.backup_id))
+                self._require_enabled(record.router_id, Capability.CONFIG_DIFF)
                 sources.append(record)
                 routers.append(self.registry.get(record.router_id))
                 version_ids.append(record.backup_id)
@@ -1424,7 +1555,14 @@ class ConfigurationManager:
                 error_class=ErrorClass.INVALID,
                 details={"operation": "prepare_restore"},
             )
+        self._prune_plans()
+        while len(self._plans) >= MAX_RESTORE_PLANS:
+            oldest = min(self._plan_made, key=self._plan_made.__getitem__)
+            self._plans.pop(oldest, None)
+            self._plan_made.pop(oldest, None)
+            self.stats["plans_evicted"] += 1
         self._plans[plan.plan_id] = plan
+        self._plan_made[plan.plan_id] = self.now()
         self._emit(
             CoreEventType.RESTORE_CHECKED,
             router_id=target_router_id,
@@ -1629,6 +1767,9 @@ class ConfigurationManager:
         record = result.record
         if not result.created:
             self.stats["backups_deduplicated"] += 1
+            if record.status is not VersionStatus.FAILED:
+                # an unchanged configuration is a successful collection too
+                self._recovered(router_id, record)
             return result
         if record.status is VersionStatus.FAILED:
             raise_from = ConfigApiError(
@@ -1709,17 +1850,55 @@ class ConfigurationManager:
             self.stats["backup_failed_events_suppressed"] += 1
 
     def _recovered(self, router_id: str, record: BackupRecord) -> None:
-        failing = self._failing.pop(router_id, None)
+        """A successful backup: end every backup_failed window of the router.
+
+        The dedup reset always covers ALL error classes (also windows
+        restored from the audit store after a restart); "was failing" comes
+        from memory and from the persisted audit entries, so a failure
+        before a restart is still followed by ``backup_recovered``.
+        """
+        failing = self._failing.pop(router_id, set()) | self._failing_in_audit(
+            router_id, record.backup_id
+        )
+        self.audit.reset_dedup(router_id, CoreEventType.BACKUP_FAILED)
         if not failing:
             return
-        for error_class in failing:
-            self.audit.reset_dedup(router_id, CoreEventType.BACKUP_FAILED, error_class)
         self._emit(
             CoreEventType.BACKUP_RECOVERED,
             router_id=router_id,
             result=EventResult.SUCCESS,
             data={"version_id": record.backup_id, "error_classes": sorted(failing)},
         )
+
+    def _failing_in_audit(self, router_id: str, version_id: str) -> set[str]:
+        """Error classes of backup_failed entries after the last success."""
+        try:
+            events = self.audit.events(
+                router_id=router_id,
+                types=(
+                    CoreEventType.BACKUP_FAILED,
+                    CoreEventType.BACKUP_RECOVERED,
+                    CoreEventType.BACKUP_CREATED,
+                ),
+            )
+        except Exception:
+            _LOGGER.debug("Audit not readable for %s", router_id, exc_info=True)
+            return set()
+        classes: set[str] = set()
+        for event in sorted(
+            events, key=lambda e: e.last_repeat_at or e.ts, reverse=True
+        ):
+            if (
+                event.type == CoreEventType.BACKUP_CREATED
+                and event.data.get("version_id") == version_id
+            ):
+                continue  # the success being handled right now
+            if event.type != CoreEventType.BACKUP_FAILED:
+                break
+            error_class = event.data.get("error_class")
+            if isinstance(error_class, str):
+                classes.add(error_class)
+        return classes
 
     # -- protect / drift ack -------------------------------------------------------------
 
@@ -2094,6 +2273,7 @@ class ConfigurationManager:
         if not isinstance(plan, RestorePlan):
             raise TypeError("plan must be a RestorePlan")
         self._require(plan.target_router_id, Capability.CONFIG_RESTORE)
+        self._prune_plans()
         known = self._plans.get(plan.plan_id)
         if known is None or known.checksum != plan.checksum:
             self.guard.audit_denial(
@@ -2229,7 +2409,52 @@ class ConfigurationManager:
         )
         for store in (self._exports, self._deletions, self._restores):
             store.pop(approval_id, None)
+        for store in self._security_stores():
+            store.pop(approval_id, None)
         return decided
+
+    @callback
+    def _approval_ended(self, approval_id: str, reason: str) -> None:
+        """Guard hook: an approval expired or was rejected -> drop its data."""
+        dropped = 0
+        for store in (
+            self._exports,
+            self._deletions,
+            self._restores,
+            *self._security_stores(),
+        ):
+            if store.pop(approval_id, None) is not None:
+                dropped += 1
+        if dropped and reason == "unload":
+            self.stats["requests_dropped_on_close"] += dropped
+        elif dropped and reason != "rejected":
+            self.stats["requests_dropped_on_expiry"] += dropped
+            security = self.security
+            if security is not None:
+                security.stats["requests_dropped_on_expiry"] += dropped
+
+    def _prune_plans(self) -> None:
+        """Forget dry-run plans older than RESTORE_PLAN_TTL (counted)."""
+        limit = self.now() - RESTORE_PLAN_TTL
+        for plan_id, made in list(self._plan_made.items()):
+            if made <= limit:
+                self._plans.pop(plan_id, None)
+                del self._plan_made[plan_id]
+                self.stats["plans_expired"] += 1
+
+    def _security_stores(self) -> tuple[dict[str, Any], ...]:
+        security = self.security
+        return () if security is None else tuple(security.request_stores)
+
+    def _security(self) -> Any:
+        """The security flows or ConfigApiError ``security_unavailable``."""
+        if self.security is None or self.closed:
+            raise ConfigApiError(
+                "The core's security actions are not available",
+                error_class=ErrorClass.NOT_AVAILABLE,
+                details={"reason": "security_unavailable"},
+            )
+        return self.security
 
     # -- lifecycle ---------------------------------------------------------------------
 
@@ -2240,12 +2465,17 @@ class ConfigurationManager:
             return
         self.closed = True
         self._drop_provider()
+        self._remove_approval_listener()
         dropped = len(self._exports) + len(self._deletions) + len(self._restores)
+        for store in self._security_stores():
+            dropped += len(store)
+            store.clear()
         self.stats["requests_dropped_on_close"] += dropped
         self._exports.clear()
         self._deletions.clear()
         self._restores.clear()
         self._plans.clear()
+        self._plan_made.clear()
 
     def summary(self) -> dict[str, Any]:
         """Counters (no ids, no actors)."""
@@ -2265,6 +2495,7 @@ class ConfigurationManager:
                 "delete": len(self._deletions),
                 "restore": len(self._restores),
             },
+            "security": None if self.security is None else self.security.summary(),
             **self.stats,
         }
 
@@ -2544,6 +2775,73 @@ class ConfigurationApi:
     ) -> RestoreResult:
         """Restore after approval."""
         return await self._m.async_execute_restore(approval_id, actor=actor)
+
+    # -- 1.44.0: ACL offer, SSH pin, module capability detectors -----------------
+
+    async def async_request_acl_deploy(
+        self, router_id: str, tiers: Iterable[str], *, actor: Actor
+    ) -> ApprovalRequest:
+        """Ask to deploy the tiered ACL (CRITICAL, admin user)."""
+        return await self._m._security().async_request_acl_deploy(
+            router_id, tiers, actor=actor
+        )
+
+    def acl_offer(self, approval_id: str) -> Any:
+        """Diff and risks (``AclOffer``) behind an open acl_deploy request."""
+        return self._m._security().acl_offer(approval_id)
+
+    async def async_deploy_acl_offer(
+        self, approval_id: str, *, actor: Actor
+    ) -> dict[str, Any]:
+        """Deploy after approval; result carries command and rollback_command."""
+        return await self._m._security().async_deploy_acl_offer(
+            approval_id, actor=actor
+        )
+
+    def ssh_pin_status(self, router_id: str) -> dict[str, Any]:
+        """SSH host key pin state of a router (fingerprints only)."""
+        return self._m._security().ssh_pin_status(router_id)
+
+    async def async_request_ssh_pin_confirm(
+        self, router_id: str, *, actor: Actor
+    ) -> ApprovalRequest:
+        """Ask to trust the pending first-seen host key."""
+        return await self._m._security().async_request_ssh_pin_confirm(
+            router_id, actor=actor
+        )
+
+    async def async_confirm_ssh_pin(
+        self, approval_id: str, *, actor: Actor
+    ) -> dict[str, Any]:
+        """Pin the pending key after approval."""
+        return await self._m._security().async_confirm_ssh_pin(approval_id, actor=actor)
+
+    async def async_request_ssh_pin_reset(
+        self, router_id: str, *, actor: Actor
+    ) -> ApprovalRequest:
+        """Ask to forget the router's pin."""
+        return await self._m._security().async_request_ssh_pin_reset(
+            router_id, actor=actor
+        )
+
+    async def async_reset_ssh_pin(
+        self, approval_id: str, *, actor: Actor
+    ) -> dict[str, Any]:
+        """Forget the pin after approval."""
+        return await self._m._security().async_reset_ssh_pin(approval_id, actor=actor)
+
+    def register_capability_detector(
+        self,
+        module: str,
+        detector: Callable[[RouterRecord, Any], Mapping[str, CapabilityStatus]],
+        *,
+        prefix: str,
+        signature: Callable[[Any], Any] | None = None,
+    ) -> Callable[[], None]:
+        """Report module capabilities below ``prefix`` (sync, no I/O)."""
+        return self._m.registry.register_capability_detector(
+            module, detector, prefix=prefix, signature=signature
+        )
 
     def get_approval(self, approval_id: str) -> ApprovalRequest:
         """Request by id."""

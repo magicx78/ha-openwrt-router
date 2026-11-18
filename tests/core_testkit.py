@@ -53,6 +53,11 @@ class FakeDisk:
         self.delayed: list[tuple[Any, float]] = []
         self.path = f"/nonexistent/.storage/{key}"
         self.backups = 0
+        # corrupt=True: the next load behaves like Home Assistant's Store on
+        # a file that is not valid JSON: rename to .corrupt.<time>, return
+        # None (no exception). load_error keeps the raising variant.
+        self.corrupt = False
+        self.corrupt_copies: list[str] = []
 
 
 class FakeStore:
@@ -66,6 +71,13 @@ class FakeStore:
     async def async_load(self) -> Any:
         if self.disk.load_error is not None:
             raise self.disk.load_error
+        if self.disk.corrupt:
+            self.disk.corrupt = False
+            self.disk.corrupt_copies.append(
+                f"{self.path}.corrupt.2026-11-18T12:00:00.000000+00:00"
+            )
+            self.disk.data = None
+            return None
         raw = copy.deepcopy(self.disk.data)
         if raw is None:
             return None
@@ -147,9 +159,17 @@ class FakeDisks:
                     return True
             return False
 
+        def corrupt_copy(path: Any) -> str | None:
+            for disk in self.disks.values():
+                if disk.path == path and disk.data is None and disk.corrupt_copies:
+                    return disk.corrupt_copies[-1]
+            return None
+
         with (
             patch.object(core_store, "create_store", self.create),
             patch.object(core_store, "_backup_file", backup),
+            # create=True: the same kit also runs against code before 1.44.0
+            patch.object(core_store, "_corrupt_copy", corrupt_copy, create=True),
         ):
             yield self
 
@@ -468,6 +488,31 @@ def core_of(hass: Any) -> Any:
     core = async_get_core(hass)
     assert core is not None
     return core
+
+
+# Config-entry calls that change what Home Assistant owns (entry data,
+# version, unique_id, the entry itself, its platforms). The guard tests of
+# "the core changes nothing HA owns" assert on these calls, because the
+# mocked hass.config_entries records a call but never applies it to the
+# FakeEntry (review finding 15).
+HA_ENTRY_MUTATORS = (
+    "async_update_entry",
+    "async_remove",
+    "async_reload",
+    "async_schedule_reload",
+    "async_forward_entry_setups",
+    "async_forward_entry_setup",
+)
+
+
+def ha_entry_calls(hass: Any) -> dict[str, list[Any]]:
+    """Recorded calls of :data:`HA_ENTRY_MUTATORS` (only names with calls)."""
+    calls: dict[str, list[Any]] = {}
+    for name in HA_ENTRY_MUTATORS:
+        recorded = list(getattr(hass.config_entries, name).call_args_list)
+        if recorded:
+            calls[name] = recorded
+    return calls
 
 
 def bus_events(hass: Any, event_type: str | None = None) -> list[dict[str, Any]]:

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta
@@ -32,7 +33,7 @@ from homeassistant.core import HomeAssistant, callback
 
 from . import core_store
 from .const import AUDIT_SAVE_DELAY_SECONDS, AUDIT_STORE_MINOR_VERSION
-from .core_masking import mask_for_output
+from .core_masking import mask_for_output, pseudonymise_user_ids
 from .core_models import (
     AUDIT_MAX_EVENTS,
     AUDIT_RETENTION_DAYS,
@@ -67,6 +68,11 @@ _RING_SIZES: Mapping[AuditRing, int] = {
     AuditRing.GENERAL: AUDIT_MAX_EVENTS,
     AuditRing.SECURITY: SECURITY_AUDIT_MAX_EVENTS,
 }
+# Open dedup windows (security review #7): windows that have passed are
+# pruned whenever a new scope opens; above this many the oldest windows are
+# dropped (counted in stats["dedup_scopes_dropped"], logged). A dropped
+# window only means the next repeat is published again.
+MAX_DEDUP_SCOPES = 4096
 
 
 def migrate_audit_store(
@@ -104,6 +110,9 @@ class AuditLog:
         # cooldown of the window)
         self._dedup: dict[tuple[str, str, str], tuple[str, datetime, timedelta]] = {}
         self._listeners: list[CoreEventListener] = []
+        # Salt of the user pseudonyms on the bus; in memory only, new per
+        # audit log (same user, same pseudonym while this core runs).
+        self._bus_salt = secrets.token_bytes(16)
         # registered module event prefixes -> module
         self._prefixes: dict[str, str] = {}
         self.loaded = False
@@ -122,6 +131,8 @@ class AuditLog:
             "listener_errors": 0,
             "bus_errors": 0,
             "skipped_on_load": 0,
+            "dedup_scopes_pruned": 0,
+            "dedup_scopes_dropped": 0,
         }
 
     # -- store ---------------------------------------------------------------------
@@ -288,7 +299,8 @@ class AuditLog:
             actor=actor,
             correlation_id=correlation_id,
             dedup_key=dedup_key,
-            data=dict(data or {}),
+            # masked before it is kept, persisted or published (review #6)
+            data=mask_for_output(dict(data or {})),
         )
         self._expire(ts)
         scope = event.dedup_scope
@@ -305,6 +317,7 @@ class AuditLog:
                     repeated.repeat_count,
                 )
                 return EmitResult(event=repeated, published=False, deduplicated=True)
+            self._prune_dedup(ts)
             self._dedup[scope] = (
                 event.event_id,
                 ts,
@@ -315,6 +328,29 @@ class AuditLog:
         self.schedule_save()
         published = self._publish(event)
         return EmitResult(event=event, published=published)
+
+    def _prune_dedup(self, now: datetime) -> None:
+        """Forget passed windows; keep at most MAX_DEDUP_SCOPES - 1 open."""
+        passed = [
+            scope
+            for scope, (_eid, started, cooldown) in self._dedup.items()
+            if now - started >= cooldown
+        ]
+        for scope in passed:
+            del self._dedup[scope]
+        self.stats["dedup_scopes_pruned"] += len(passed)
+        excess = len(self._dedup) - (MAX_DEDUP_SCOPES - 1)
+        if excess > 0:
+            oldest = sorted(self._dedup, key=lambda sc: self._dedup[sc][1])[:excess]
+            for scope in oldest:
+                del self._dedup[scope]
+            self.stats["dedup_scopes_dropped"] += excess
+            _LOGGER.warning(
+                "Audit dedup: %d open windows dropped (cap %d); their next "
+                "repeat is published again",
+                excess,
+                MAX_DEDUP_SCOPES,
+            )
 
     def _repeat(self, scope: tuple[str, str, str], ts: datetime) -> CoreEvent | None:
         """Bump the stored entry of ``scope`` if its window is still open."""
@@ -350,7 +386,12 @@ class AuditLog:
                 self.stats["expired"] += 1
 
     def _publish(self, event: CoreEvent) -> bool:
-        payload = mask_for_output(event.to_dict())
+        # The bus event reaches the recorder and the logbook: user ids go
+        # out as pseudonyms (review PR #55, finding 7). Listeners in this
+        # process and the audit store keep the real id.
+        payload = mask_for_output(
+            pseudonymise_user_ids(event.to_dict(), self._bus_salt)
+        )
         published = True
         try:
             self.hass.bus.async_fire(EVENT_CORE, payload)
@@ -454,6 +495,7 @@ class AuditLog:
             "general": self.ring_size(AuditRing.GENERAL),
             "security": self.ring_size(AuditRing.SECURITY),
             "listeners": len(self._listeners),
+            "dedup_scopes": len(self._dedup),
             **self.stats,
         }
 
