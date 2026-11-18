@@ -17,8 +17,14 @@ dieser Sitzung, vom Master überstimmbar), **nicht belegt** (offen, siehe Abschn
   Host, VM oder Drucker, keine Pings/DNS/HTTP ins Netz, keine Installation, kein Commit.
   Ausnahme: öffentliche Doku per WebFetch (HA-Contributor-Blog, Abschnitt 9).
 - **Externe Befunde** (Router als Messpunkt) stammen aus der Recherche-Notiz der
-  Schwestersitzung (Abschnitt 5) und sind mit Quell-URLs übernommen; sie sind
-  **nicht** auf echten Routern geprüft.
+  Schwestersitzung (Abschnitt 5) und sind mit Quell-URLs übernommen.
+- **Live-Befunde 2026-11-18:** Der Nutzer hat die nur lesenden Prüfungen aus 5.7 (a)
+  freigegeben; die Master-Sitzung hat sie per SSH auf vier Routern ausgeführt (kein Ping,
+  kein nslookup, kein traceroute, keine ACL-Probe). Diese Sitzung hat nur die
+  Ergebnisdateien ausgewertet, ohne Kontakt zu Geräten. Ergebnisse in **5.8**, Folgen in
+  **5.9**. Geräte nur als Rolle: **gateway** (Cudy WR3000 v1, OpenWrt 25.12.1), **ap2**
+  (Cudy WR3000 v1, 25.12.1), **ap5** (AVM FRITZ!Repeater 3000, 25.12.6), **ap6** (AVM
+  FRITZ!WLAN Repeater 1750E, 25.12.2).
 - **Regel für alles Folgende (Auftrag):** schwere oder häufige Messungen nicht auf den
   Routern. Routerseitige aktive Tests sind **standardmäßig AUS** und hängen an einer
   Capability-Prüfung.
@@ -41,11 +47,16 @@ dieser Sitzung, vom Master überstimmbar), **nicht belegt** (offen, siehe Abschn
    (`api.py:1948-2076`) behält nur die erste IPv4, `default_route` (bool) und Zähler. Der Dump
    wird zudem **zweimal pro Poll** geholt (`api.py:1948` ff. und `api.py:4230-4297`).
    Gateway-Wechsel, DNS-Server der WAN und IPv6-Status sind damit **ohne neuen
-   Router-Aufruf** auswertbar (Feldnamen **nicht belegt** in Fixtures, Abschnitt 8).
+   Router-Aufruf** auswertbar. Feldnamen `route`, `nexthop`, `dns-server`, `dns-search`,
+   `ipv6-address`, `ipv6-prefix` **belegt am 2026-11-18 auf gateway, ap2, ap5, ap6** (nur
+   Schlüssel gezählt, Inhalte nicht geprüft, 5.8).
 4. **Für Ping, Vorwärts-DNS und Traceroute auf dem Router gibt es kein ubus-Objekt**; nur
-   `file exec` oder SSH (Abschnitt 5). Heute erlaubt die Projekt-ACL `file exec` nur für
-   `/etc/init.d/rpcd` (`acl_provisioning.py:135`). Jeder routerseitige aktive Test braucht
-   eine ACL-Erweiterung (= Routeränderung, Freigabe nötig) und ist daher Phase-C-Stoff.
+   `file exec` oder SSH (Abschnitt 5; am 2026-11-18 auf allen vier geprüften Routern
+   bestätigt: kein solches Objekt in `ubus list`). Heute erlaubt die Projekt-ACL `file exec`
+   nur für `/etc/init.d/rpcd` (`acl_provisioning.py:135`). Jeder routerseitige aktive Test
+   mit **eigenem** Argumentmuster braucht eine ACL-Erweiterung (= Routeränderung, Freigabe
+   nötig) und ist daher Phase-C-Stoff. Achtung (5.8, 5.9): der Login `root` erhält auf allen
+   vier Routern **alle** ACL-Gruppen, auch die von LuCI.
 5. **Korrelations-Falle:** `lan_unreachable` übernimmt **jedes** Incident und Event in seinem
    Fenster als Kind (`net_rules.py:5186-5187`, `5287-5288`), `wan_down` übernimmt **alle**
    DNS-Events aller Router (`net_rules.py:5312-5318`). Neue Diagnose-Incidents brauchen
@@ -285,10 +296,15 @@ Allgemein zu (b): HA misst **von HAs Netzposition** aus. Ein Ergebnis belegt den
 HA → Ziel, nicht den Weg Router → Ziel. HA-Kern bringt `aiodns` mit (**verifiziert** lokal:
 `homeassistant` 2026.2.3 verlangt `aiodns==4.0.0`, 2026.11.2 `aiodns==4.0.4`), also sind
 DNS-Abfragen an einen gewählten Server ohne neue Requirement möglich. ICMP aus HA:
-**nicht belegt** (unprivilegierte ICMP-Sockets je nach HA-Installationsart; `icmplib` ist
-keine Kern-Abhängigkeit). TCP-Connect ist überall möglich.
+**nicht belegt** (Grund: betrifft HA, nicht die Router; die Live-Prüfung 2026-11-18 lief
+nur auf Routern. Unprivilegierte ICMP-Sockets hängen von der HA-Installationsart ab;
+`icmplib` ist keine Kern-Abhängigkeit). TCP-Connect ist überall möglich.
 
-Zu (c): Details, ACLs und Quellen in Abschnitt 5. Alles in (c) ist standardmäßig AUS.
+Zu (c): Details, ACLs und Quellen in Abschnitt 5, Live-Befunde in 5.8. Alles in (c) ist
+standardmäßig AUS. **Folge aus 5.8:** Die Router sind nicht gleich — ap6 hat weder
+dnsmasq noch odhcpd noch usteer laufen, ap5/ap6 haben kein `curl`, die `dnsmasq
+metrics`-Schlüssel hängen an der dnsmasq-Version. (c) ist deshalb immer **je Gerät** an
+eine Capability gebunden.
 
 ### 2.1 Erreichbarkeitskette
 
@@ -296,32 +312,32 @@ Zu (c): Details, ACLs und Quellen in Abschnitt 5. Alles in (c) ist standardmäß
 |---|---|---|---|
 | Router-Verwaltung (ubus) | Poll-Erfolg, `consecutive_failures`, `last_seen`, `error_type` (`coordinator.py:298-430`); Tracker + `router_unreachable`/`lan_unreachable` (`net_engine.py:987-1093`); binary `connectivity` (`binary_sensor.py:65`) | Dauer je ubus-Aufruf (fehlt: `_raw_call` misst nicht, `api.py:5324-5435`). Belegt: rpcd/uhttpd antwortet und wie schnell. Belegt nicht: Paketverlust, Ursache (CPU vs. Netz) | entfällt (der Router misst sich nicht selbst) |
 | Router-Interface (LAN/WAN up) | `network.interface dump` je Poll (`api.py:1948`, `4230`), `network.device status` (`api.py:4211`), Port-Zähler | — (HA sieht Interfaces nur über den Router) | gleiche Daten; mehr nicht nötig |
-| Gateway (Nexthop der WAN) | nur `default_route` bool (`api.py:2068-2075`); `nexthop` im Dump vorhanden, aber verworfen (Feld **nicht belegt** in Fixtures) | HA kann den Upstream-Gateway des Gateways meist nicht erreichen (anderes Netz, NAT). Belegt nichts über die WAN-Strecke | Ping des Nexthops vom **Gateway**: braucht `file exec` (Abschnitt 5). Belegt: L3 bis zum Provider-Router |
+| Gateway (Nexthop der WAN) | nur `default_route` bool (`api.py:2068-2075`); `nexthop` im Dump vorhanden, aber verworfen (Feld **belegt am 2026-11-18 auf gateway, ap2, ap5, ap6**; auf den APs genau eine Route mit `nexthop`, auf dem gateway zwei — Inhalt nicht geprüft) | HA kann den Upstream-Gateway des Gateways meist nicht erreichen (anderes Netz, NAT). Belegt nichts über die WAN-Strecke | Ping des Nexthops vom **Gateway**: braucht `file exec` (Abschnitt 5). Belegt: L3 bis zum Provider-Router |
 | Interne Ziele (AP → Gateway, Gateway → AP) | Topologie-Kanten LLDP/ARP+FDB (`net_rules.py:4903-5016`), Port-Status | TCP-Connect HA → Router-Verwaltungsport schon implizit im Poll. Belegt: HA ↔ Router. Belegt nicht: AP ↔ Gateway direkt | Ping vom AP zum Gateway: braucht exec. Belegt: Backhaul-Strecke |
 | Externe IP | HA-TCP-Probe 8.8.8.8:53 je Coordinator (`coordinator.py:769-787`) → `ping_ms` | Ein zentraler Probe genügt (nicht je Router). Belegt: HA hat Internet. Belegt nicht: Gateway hat Internet (HA kann z. B. über anderen Weg gehen; Annahme: meist derselbe Weg) | Ping vom Gateway zu Referenzzielen: exec. Belegt: Internet aus Sicht des Gateways |
-| DNS | nur Logzeilen-Events (Abschnitt 2.2) | `aiodns` an Router-Resolver. Belegt: dnsmasq des Routers antwortet HA | `nslookup` auf dem Router: exec |
-| HTTP | — | HTTP-GET HA → Referenz-URL über `async_get_clientsession`. Belegt: HA-Internet inkl. TLS. Belegt nicht: Router-Sicht | `wget`/`uclient-fetch` auf dem Router: exec; **nicht** vorgeschlagen (Last, Missbrauchsfläche) |
+| DNS | nur Logzeilen-Events (Abschnitt 2.2) | `aiodns` an Router-Resolver. Belegt: dnsmasq des Routers antwortet HA. **Nur wo dnsmasq läuft** (2026-11-18: gateway, ap2, ap5; nicht ap6) | `nslookup` auf dem Router: exec (Binärdatei auf allen vier vorhanden) |
+| HTTP | — | HTTP-GET HA → Referenz-URL über `async_get_clientsession`. Belegt: HA-Internet inkl. TLS. Belegt nicht: Router-Sicht | `wget`/`uclient-fetch` (auf allen vier vorhanden; `curl` nur gateway, ap2) auf dem Router: exec; **nicht** vorgeschlagen (Last, Missbrauchsfläche) |
 
 ### 2.2 DNS
 
 | Teil | (a) heute | (b) HA misst selbst | (c) Router als Messpunkt |
 |---|---|---|---|
-| Resolver-Dienst läuft | `service list` (dnsmasq in `DEFAULT_SERVICES`, `const.py:561`; Detektor Dienste in `detect_infrastructure`) | — | gleich |
+| Resolver-Dienst läuft | `service list` (dnsmasq in `DEFAULT_SERVICES`, `const.py:561`; Detektor Dienste in `detect_infrastructure`) | — | gleich. **2026-11-18:** dnsmasq als Dienst und ubus-Objekt auf gateway, ap2, ap5; auf ap6 Paket installiert, aber weder Dienst noch ubus-Objekt (ap6 läuft als Relay mit `relayd`) → „dnsmasq fehlt“ ist auf ap6 der Normalzustand, kein Fehler |
 | Resolver antwortet | Logzeilen `dns.query_limit`/`no_servers`/`send_failed` (`log_parser.py:94-96`), nur Events, Hypothese 0,5 (`net_rules.py:1749-1775`), keine Incident-Regel | A-Abfrage per `aiodns` direkt an den LAN-Resolver jedes Routers, 1×/5–15 min. Belegt: dnsmasq antwortet HA, Upstream erreichbar (bei Nicht-Cache-Namen). Belegt nicht: was Clients am AP sehen, wenn sie einen anderen Resolver nutzen | `nslookup <name> 127.0.0.1` (exec). Belegt: lokaler Resolver aus Router-Sicht |
-| Upstream-Server | `dns-server` im Dump vorhanden, verworfen | Abfrage HA → Upstream direkt: belegt nur HA-Weg | — |
-| Statistik | — | — | `dnsmasq metrics` (ubus, ohne exec): Weiterleitungen, unbeantwortet, Cache. ACL fehlt im Projekt; Schlüssel **nicht belegt** |
-| Reverse-DNS | — | — | `network.rrdns lookup`: nur PTR, beliebiger Server → SSRF-relevant, **nicht verwenden** |
+| Upstream-Server | `dns-server` im Dump vorhanden, verworfen (Schlüssel **belegt am 2026-11-18** auf allen vier; ob gefüllt: nicht belegt, nur Schlüssel gezählt) | Abfrage HA → Upstream direkt: belegt nur HA-Weg | — |
+| Statistik | — | — | `dnsmasq metrics` (ubus, ohne exec): Weiterleitungen, unbeantwortet, Cache. ACL fehlt im Projekt; Schlüssel **belegt am 2026-11-18 auf gateway, ap2, ap5** (Liste in 5.8; Schlüsselsatz hängt an der dnsmasq-Version); auf ap6 nicht vorhanden |
+| Reverse-DNS | — | — | `network.rrdns lookup`: nur PTR, beliebiger Server → SSRF-relevant, **nicht verwenden**. **2026-11-18:** Objekt auf allen vier Routern vorhanden (`rpcd-mod-rrdns` überall installiert) |
 
 ### 2.3 DHCP
 
 | Teil | (a) heute | (b) HA misst selbst | (c) Router als Messpunkt |
 |---|---|---|---|
 | Dienst | `service list` dnsmasq/odhcpd (`net_rules.py:192`), Pools übersprungen bei gestopptem dnsmasq (`coordinator.py:978`) | — | gleich |
-| Leases | `get_dhcp_leases` (`api.py:3825`, Datei, Rückfall luci-rpc `3868`) | — | odhcpd `dhcp ipv4leases`/`ipv6leases` (ubus, ohne exec; ACL fehlt) |
+| Leases | `get_dhcp_leases` (`api.py:3825`, Datei, Rückfall luci-rpc `3868`) | — | odhcpd `dhcp ipv6leases` (ubus, ohne exec; ACL fehlt). **`ipv4leases` widerlegt am 2026-11-18 auf gateway, ap2, ap5:** installiert ist `odhcpd-ipv6only`, das Objekt `dhcp` hat nur `ipv6leases`, `ipv6ra` und den **Schreibaufruf** `add_lease`; IPv4-Leases bleiben bei dnsmasq (Datei/luci-rpc wie heute). Auf ap6 kein `dhcp`-Objekt |
 | Pool-Auslastung | `dhcp_health.pool_usage`, `detect_dhcp` (`net_rules.py:2988`), Schwellen 90/85 (`net_rules.py:130-232`), `DhcpPool`-Sensor (`sensor.py:1485`) | — | — |
 | Konflikte | nur `DHCPDECLINE`-Logzeilen | HA sieht keine Duplikate (kein L2-Zugriff auf alle Segmente). Doppelte IP mit zwei MACs in `arp_table`/Leases über die Flotte ist **heute schon in den Daten**, aber nicht ausgewertet | `arp-scan` braucht exec + Paket; **nicht** vorgeschlagen |
-| DHCPv6/RA | nicht gelesen; `parse_dhcp_config` nur IPv4 (`dhcp_health.py`) | — | odhcpd `dhcp ipv6ra` (ubus, ohne exec, ACL fehlt); `uci get dhcp` (`api.py:3944`) liefert ra/dhcpv6-Optionen vermutlich schon heute mit, wird aber nur für IPv4 ausgewertet (**Annahme**, Prüfweg: Live-Form oder Fixture) |
-| Antwortprobe | — | DHCP-Discover von HA: braucht Raw-Socket, stört Leases → **nicht** vorgeschlagen | `dnsmasq metrics` DHCP-Zähler (offer/ack/nak/noanswer) |
+| DHCPv6/RA | nicht gelesen; `parse_dhcp_config` nur IPv4 (`dhcp_health.py`) | — | odhcpd `dhcp ipv6ra` (ubus, ohne exec, ACL fehlt; Methode **belegt am 2026-11-18 auf gateway, ap2, ap5**, nicht ap6); `luci-rpc getDUIDHints` ebenfalls vorhanden. `uci get dhcp` (`api.py:3944`) liefert ra/dhcpv6-Optionen vermutlich schon heute mit (**nicht belegt** — Grund: die Live-Prüfung hat `uci show dhcp` nur nach Log-Optionen gefiltert) |
+| Antwortprobe | — | DHCP-Discover von HA: braucht Raw-Socket, stört Leases → **nicht** vorgeschlagen | `dnsmasq metrics` DHCP-Zähler (`dhcp_discover`, `dhcp_offer`, `dhcp_request`, `dhcp_ack`, `dhcp_nak`, `dhcp_decline`, `noanswer` …, 5.8). Sinnvoll nur am DHCP-Server: auf ap2/ap5 sind alle DHCP-Zähler 0 (dnsmasq dort nur als Resolver) |
 
 ### 2.4 VLAN & Routing
 
@@ -339,9 +355,9 @@ Zu (c): Details, ACLs und Quellen in Abschnitt 5. Alles in (c) ist standardmäß
 |---|---|---|---|
 | Reconnects | `wan.up`/`wan.reconnect` → `wan_unstable` 3 je 3600 s (`net_rules.py:2801-2896`, Schwellen `130-232`), `WanStability`-Entity | — | — |
 | Down | `wan_down` (Wurzel, Rang 3) | — | — |
-| Gateway-Wechsel | **fehlt**; `nexthop` im Dump verworfen | — | Auswertung `route[].nexthop` aus vorhandenem Dump (kein neuer Aufruf) |
+| Gateway-Wechsel | **fehlt**; `nexthop` im Dump verworfen | — | Auswertung `route[].nexthop` aus vorhandenem Dump (kein neuer Aufruf). Am gateway gibt es `wan` und `wan6`, auf den APs kein `wan`-Interface; deren Default-Route hängt an einem LAN-Interface (je eine Route mit `target`/`nexthop`, 2026-11-18) → auf APs zeigt `nexthop` den **LAN-Gateway**, nicht die WAN-Strecke |
 | Öffentliche IP-Wechsel | `wan.ip_changed` aus WAN-IPv4 (`_wan_ip` `net_rules.py:2956`); bei CGNAT/Kaskade ist das die private WAN-IP; DDNS-`ip` (`api.py:5731`) als zweite Quelle, nicht ausgewertet | HTTP-„what is my IP“-Dienst aus HA: externe Abhängigkeit, Datenschutz → **nicht** vorgeschlagen; DDNS-Datei genügt, wo vorhanden | — |
-| IPv4/IPv6 | nur IPv4; IPv6-only-WAN übersprungen (`net_rules.py:2793`) | IPv6-Erreichbarkeit HA → extern: belegt nur HA | `ipv6-address`/`ipv6-prefix` im Dump (Felder **nicht belegt**), `wan6`-Interface im Dump |
+| IPv4/IPv6 | nur IPv4; IPv6-only-WAN übersprungen (`net_rules.py:2793`) | IPv6-Erreichbarkeit HA → extern: belegt nur HA | `ipv6-address`/`ipv6-prefix`/`ipv6-prefix-assignment`/`delegation` im Dump (Schlüssel **belegt am 2026-11-18** auf allen vier; Inhalte nicht geprüft), `wan6`-Interface und ubus-Objekt `odhcp6c.wan` nur am gateway |
 | Failover | `wan.failover` | — | mwan3-Status: nicht untersucht |
 
 ### 2.6 Latenz und Verlust
@@ -360,6 +376,7 @@ Zu (c): Details, ACLs und Quellen in Abschnitt 5. Alles in (c) ist standardmäß
 Spalten: **heute** = vorhanden auf `main`; **neuer ubus** = neuer read-only ubus-Aufruf bzw.
 neues ACL-Recht nötig; **exec** = routerseitiges `file exec`/SSH nötig; **Default**.
 „Dump“ = bestehender `network.interface dump`, nur neue Auswertung.
+**[2026-11-18]** = nach den Live-Befunden (5.8) geändert; Begründung in 5.9.
 
 ### 3.1 Messpunkt HA
 
@@ -370,9 +387,9 @@ neues ACL-Recht nötig; **exec** = routerseitiges `file exec`/SSH nötig; **Defa
 | TCP-Connect Verwaltungsport | nein | nein | nein | aus (Dublette zum Poll; nur auf Anforderung) |
 | HA → extern (TCP) | ja, je Coordinator | nein | nein | an, **zentral 1×**, nicht je Router |
 | HA → extern (HTTP 204) | nein | nein | nein | aus |
-| DNS an Router-Resolver (`aiodns`) | nein | nein | nein | aus, wählbar je Router; Intervall ≥ 5 min |
+| DNS an Router-Resolver (`aiodns`) | nein | nein | nein | aus, wählbar je Router; Intervall ≥ 5 min. **[2026-11-18]** nur für Router mit laufendem dnsmasq anbieten (gateway, ap2, ap5; nicht ap6) |
 | DNS an externen Resolver | nein | nein | nein | aus |
-| ICMP HA → Router | nein | nein | nein | aus (nicht belegt, ob ICMP aus HA möglich) |
+| ICMP HA → Router | nein | nein | nein | aus (nicht belegt, ob ICMP aus HA möglich; HA-seitig, nicht Teil der Router-Prüfung) |
 
 ### 3.2 Messpunkt Gateway-Router
 
@@ -387,11 +404,11 @@ neues ACL-Recht nötig; **exec** = routerseitiges `file exec`/SSH nötig; **Defa
 | DHCP-Pool-Auslastung | ja | nein | nein | an (besteht) |
 | DHCP-Konflikt aus ARP/Leases | nein (nur DECLINE) | nein | nein | an (Auswertung vorhandener Daten) |
 | DHCPv6/RA-Konfiguration | nein | nein (`uci get dhcp` besteht) | nein | an |
-| odhcpd Leases v4/v6, RA | nein | ja (`dhcp` ipv4leases/ipv6leases/ipv6ra) | nein | aus, Capability |
-| dnsmasq-Zähler | nein | ja (`dnsmasq metrics`) | nein | aus, Capability |
-| Ping Nexthop / Referenzziel | nein | ja (ACL `file` exec mit Argumentmuster) | ja | aus, Capability, ≥ 5 min |
-| nslookup lokal | nein | ja (ACL) | ja | aus, Capability |
-| traceroute | nein | ja (ACL) | ja | aus, nur auf Anforderung |
+| odhcpd Leases v6, RA **[2026-11-18]** | nein | ja (`dhcp` `ipv6leases`/`ipv6ra`; **kein** `ipv4leases` bei `odhcpd-ipv6only`; `add_lease` ist ein Schreibaufruf und wird nicht freigegeben) | nein | aus, Capability |
+| dnsmasq-Zähler **[2026-11-18]** | nein | ja (`dnsmasq metrics`; Schlüsselsatz je dnsmasq-Version, gateway 2.93) | nein | aus, Capability |
+| Ping Nexthop / Referenzziel **[2026-11-18]** | nein | ja (ACL `file` exec mit Argumentmuster) — **wirkungslos als Grenze**, solange der Login über `read '*'` auch LuCI-Gruppen erhält und eine davon den nackten Pfad freigibt (5.9 K1) | ja | aus, Capability, ≥ 5 min |
+| nslookup lokal | nein | ja (ACL; gleiche Einschränkung) | ja | aus, Capability |
+| traceroute | nein | ja (ACL; gleiche Einschränkung) | ja | aus, nur auf Anforderung |
 
 ### 3.3 Messpunkt AP-Router
 
@@ -399,8 +416,11 @@ neues ACL-Recht nötig; **exec** = routerseitiges `file exec`/SSH nötig; **Defa
 |---|---|---|---|---|
 | Uplink/Port-Status, LLDP | ja | nein | nein | an (besteht) |
 | Interface/Default-Route | ja (bool) | nein | nein | an (besteht) |
-| Ping AP → Gateway | nein | ja (ACL) | ja | aus, Capability, ≥ 5 min |
+| LAN-Gateway des AP (Nexthop der Default-Route) **[2026-11-18]** | nein | nein (Dump; je AP eine Route mit `nexthop`) | nein | an |
+| Ping AP → Gateway | nein | ja (ACL; Einschränkung wie 3.2) | ja | aus, Capability, ≥ 5 min; **[2026-11-18]** auf ap6 (≈ 55 MB RAM, ≈ 12 MB verfügbar) zusätzlich Speicherschwelle |
 | nslookup AP → Gateway-Resolver | nein | ja (ACL) | ja | aus, Capability |
+| dnsmasq-Zähler am AP **[2026-11-18]** | nein | ja (`dnsmasq metrics`) | nein | aus; nur ap2/ap5 (ap6 ohne dnsmasq); DHCP-Zähler dort 0, nur DNS-Teil aussagekräftig |
+| odhcpd am AP **[2026-11-18]** | nein | — | nein | aus; auf ap2/ap5 läuft odhcpd (`odhcpd-ipv6only`, Objekt `dhcp`), ob es dort RA/DHCPv6 bedient: nicht belegt (Inhalt nicht gelesen); auf ap6 nicht vorhanden |
 | DNS-Server-Konfiguration AP | nein | nein (Dump) | nein | an |
 
 ---
@@ -507,9 +527,12 @@ Nur Fakten aus dem Code (Stand `0dc20cd`, für diesen Abschnitt erneut gelesen).
 | V10 | Client-Incidents an einem Router während `wifi_mass_disconnect` (Hypothese) | `net_rules.py:5210-5212` | Client-Scope, Router in `child.routers`; Spanne ± 30 s (`4762`) | Mechanik oben, nachher 30 s |
 | V11 | Ein kurzes echtes Problem, das komplett innerhalb einer Wurzelspanne beginnt und endet | `net_engine.py:1828-1831`, `1865` | jedes Kind aus V1, V4–V7, V9, V10 | nie auf dem HA-Bus; nur in der Incident-Historie mit `parent_id` |
 
-**Nicht belegt** für diesen Abschnitt: wie oft diese Fälle in der echten Flotte vorkommen;
-ob das Panel verknüpfte Events ausblendet; wann `system_reboot` aufgelöst wird;
-`_port_flap_link` (`net_rules.py:5209`) und `_behind_down` nicht im Detail gelesen.
+**Nicht belegt** für diesen Abschnitt (die Live-Prüfung 2026-11-18 betraf nur Router und
+ändert daran nichts): wie oft diese Fälle in der echten Flotte vorkommen (Grund: braucht die
+Incident-Historie aus HA, HA nicht gelesen); ob das Panel verknüpfte Events ausblendet
+(Grund: Frontend nicht geprüft); wann `system_reboot` aufgelöst wird und
+`_port_flap_link` (`net_rules.py:5209`) / `_behind_down` im Detail (Grund: Code noch nicht
+gelesen, reine Lesearbeit im Repo).
 
 ---
 
@@ -524,7 +547,10 @@ ob das Panel verknüpfte Events ausblendet; wann `system_reboot` aufgelöst wird
 
 - **Kein ubus-Objekt für Ping, Vorwärts-DNS oder Traceroute.** netifd bietet keine
   Probe-Methode (https://raw.githubusercontent.com/openwrt/netifd/master/ubus.c); rpcd-Plugin
-  `luci` hat keine (luci-rpc-Methodenliste nicht vollständig belegt). Einziger Weg:
+  `luci` hat keine. `luci-rpc` hat **belegt am 2026-11-18 auf gateway, ap2, ap5, ap6** genau
+  sechs Methoden: `getNetworkDevices`, `getWirelessDevices`, `getHostHints`,
+  `getDUIDHints`, `getBoardJSON`, `getDHCPLeases` (Parameter `family`) — keine davon
+  misst. In `ubus list` gibt es auf keinem der vier Router ein Mess-Objekt. Einziger Weg:
   `file exec` oder SSH.
 - **LuCI Network → Diagnostics** nutzt `fs.exec_direct` = ubus `file exec` mit
   ping `-4 -c 5 -W 1 <addr>` / `-6 -c 5 <addr>`, traceroute `-4 -q 1 -w 1 -n -m 20 <addr>`,
@@ -537,6 +563,11 @@ ob das Panel verknüpfte Events ausblendet; wann `system_reboot` aufgelöst wird
 - **Reverse-DNS** `network.rrdns lookup` (Paket `rpcd-mod-rrdns`; Parameter addrs, server,
   port, limit, timeout): nur PTR, beliebiger Server → SSRF-relevant. **Nicht verwenden**
   (https://raw.githubusercontent.com/openwrt/luci/master/libs/rpcd-mod-rrdns/src/rrdns.c).
+  **Belegt am 2026-11-18 auf gateway, ap2, ap5, ap6:** Objekt `network.rrdns` mit genau
+  `lookup` (`addrs`, `timeout`, `server`, `port`, `limit`) vorhanden, Paket
+  `rpcd-mod-rrdns` überall installiert. Die Fläche besteht also schon heute auf jedem
+  Router; ob die HA-Session sie aufrufen darf, hängt am Inhalt von `luci-mod-status.json`
+  (nicht gelesen) → Punkt für das Security Center.
 
 ### 5.2 rpcd `file exec` und ACL-Muster
 
@@ -553,7 +584,11 @@ include/rpcd/exec.h, main.c).
   Ziele aus einer festen Liste (Nexthop aus Dump, Gateway-LAN-IP, konfigurierte
   Referenzziele), Muster möglichst ohne `*` an Flag-Positionen.
 - Ausgabe max. 256 KiB je stdout/stderr (Überlauf = Fehler). Timeout Standard 120 s,
-  `rpcd -t` 1–600 s, danach SIGKILL; ob das Init-Skript `-t` setzt: nicht belegt.
+  `rpcd -t` 1–600 s, danach SIGKILL. **Teilweise belegt am 2026-11-18 auf gateway, ap2,
+  ap5, ap6:** `/etc/config/rpcd` enthält `option timeout 30`. Ob das Init-Skript diesen Wert
+  als `-t` übergibt und ob er den exec-Timeout bestimmt: **nicht belegt** (Grund:
+  Init-Skript und rpcd-Kommandozeile wurden nicht gelesen; L3/L4 waren nicht im
+  Prüfskript). Planung bis dahin: ein exec-Aufruf muss deutlich unter 30 s bleiben.
 - **Abgleich mit dem Repo (selbst geprüft, verifiziert):** `acl_provisioning.py:101` gibt auf
   ubus-Ebene `"file": ["read", "stat", "list", "exec"]` frei — stimmt. `acl_provisioning.py:123`
   `"service": ["list", "get_data"]` — stimmt. `acl_provisioning.py:135`
@@ -563,21 +598,38 @@ include/rpcd/exec.h, main.c).
   rpcd-Neustart (`_deploy_acl` `244`, `301-305`). Das ist eine **Routeränderung** und der
   Produktentscheid gegen breites `file exec` (ACL v8, rpcd-Neustarts und Speicherlecks,
   `docs/plans/2026-10-28-ssh-polling-und-audit.md:123`) muss neu abgewogen werden.
-- **Annahme (eigene, nicht belegt):** Das Projekt meldet sich standardmäßig als `root` an
-  (`const.py:12`). Wenn die rpcd-Login-Konfiguration für root alle ACL-Gruppen zulässt
-  (OpenWrt-Standard `read '*'`/`write '*'`) und LuCI mit `luci-mod-network` installiert ist,
-  hat die HA-Session **schon heute** `exec` auf den nackten `/bin/ping`-Pfad — ohne
-  Argumentprüfung. Ein Argumentmuster in der Projekt-ACL schränkt dann nichts ein. Prüfweg:
-  `cat /usr/share/rpcd/acl.d/*.json` und `/etc/config/rpcd` auf einem Router (nur mit
-  Freigabe). Bis dahin: Capability-Prüfung darf nicht aus „exec erlaubt“ schließen, dass das
-  Projekt-Muster greift.
+- **Annahme „nackter exec-Pfad schon heute erlaubt“ — Stand 2026-11-18:** Das Projekt
+  meldet sich standardmäßig als `root` an (`const.py:12`).
+  - **Belegt am 2026-11-18 auf gateway, ap2, ap5, ap6:** Der rpcd-Login `root` hat
+    `list read '*'` und `list write '*'`, bekommt also **jede** installierte ACL-Gruppe.
+    Auf allen vier liegt `luci-mod-network.json` in `/usr/share/rpcd/acl.d/` (überall
+    gleiche Größe), daneben u. a. `luci-base.json`, `luci-mod-status.json`,
+    `luci-mod-system.json` und die Projekt-ACL `ha-openwrt-router.json` (überall gleiche
+    Größe). Die Werkzeuge `/bin/ping`, `/bin/ping6`, `/usr/bin/nslookup`,
+    `/bin/traceroute`, `/bin/traceroute6` liegen auf allen vier genau unter den Pfaden, die
+    die LuCI-Diagnose-Gruppe laut Upstream (5.1) nackt freigibt.
+  - **Nicht belegt:** ob die installierte `luci-mod-network.json` die Gruppe
+    `luci-mod-network-diagnostics` mit nacktem Pfad enthält (Grund: die Prüfung hat das
+    Verzeichnis nur aufgelistet, die Dateien nicht gelesen — L12 war im Prüfskript nur als
+    `ls`); welcher Benutzer in den HA-Einträgen tatsächlich konfiguriert ist (Grund: HA
+    wurde nicht gelesen).
+  - **Folge (abgeleitet):** Wenn die Upstream-Datei unverändert ausgeliefert ist, hat eine
+    als `root` angemeldete HA-Session **schon heute** `exec` auf die nackten Pfade, ohne
+    Argumentprüfung; ein Argumentmuster in der Projekt-ACL schränkt dann nichts ein. Die
+    Capability-Prüfung darf daher nie aus „exec erlaubt“ schließen, dass ein Projekt-Muster
+    greift (5.9 K1).
 
 ### 5.3 Benötigte Pakete und Binärdateien
 
 - OpenWrt-Busybox-Standard: PING, PING6, NSLOOKUP, TRACEROUTE, TRACEROUTE6, FANCY_PING,
   NSLOOKUP_BIG = y
   (https://raw.githubusercontent.com/openwrt/openwrt/master/package/utils/busybox/Config-defaults.in).
-  Ob die Images der eingesetzten Geräte das so bauen: nicht belegt.
+  **Belegt am 2026-11-18 auf gateway, ap2, ap5, ap6:** Paket `busybox` 1.37.0 installiert;
+  `ping`, `ping6`, `nslookup`, `traceroute`, `traceroute6`, `wget`, `uclient-fetch`, `iw`,
+  `iwinfo` vorhanden; `arping` fehlt überall; `curl` nur auf gateway und ap2. **Nicht
+  belegt:** ob `ping`/`nslookup`/`traceroute` Busybox-Applets sind und ob `nslookup` die
+  große Variante ist (Grund: nur `command -v`, kein `ls -l`; der Aufruf `busybox` ohne
+  Argumente lieferte „applet not found“ statt der Applet-Liste).
 - busybox ping: Zusammenfassung gesendet/empfangen, Verlust in ganzen Prozent,
   `round-trip min/avg/max` nur bei ≥ 1 Antwort. busybox nslookup (groß): unterscheidet
   NXDOMAIN, SERVFAIL, „No answer“, Timeout; Antwortzeit nur mit `-debug`; Standard 2 Wdh.,
@@ -590,19 +642,27 @@ include/rpcd/exec.h, main.c).
 
 | Objekt / Methode | Inhalt | Projekt-ACL heute (`acl_provisioning.py:100-129`) |
 |---|---|---|
-| `network.interface dump` / `.<if> status` | `route`, `dns-server`, `dns-search`, IPv6 (Feldliste nicht aus Quelltext belegt) | **erlaubt** (`105-107`) |
+| `network.interface dump` / `.<if> status` | `route` (mit `target`, `nexthop`, `source`, `mask`, `metric`), `dns-server`, `dns-search`, `dns_metric`, `ipv4-address`, `ipv6-address`, `ipv6-prefix`, `ipv6-prefix-assignment`, `delegation`, `neighbors`, `inactive`, `data` — Schlüssel **belegt am 2026-11-18 auf allen vier** (nur Häufigkeit gezählt). Abgeleitet aus der Häufigkeit: Die Adress-, Routen- und DNS-Schlüssel kommen je Interface **zweimal** vor (einmal oben, einmal in `inactive`) → ein Parser muss die oberste Ebene lesen, nicht `inactive` | **erlaubt** (`105-107`) |
 | `network.device status` | Geräte, Carrier, Statistik | **erlaubt** (`104`) |
-| odhcpd `dhcp` `ipv4leases` / `ipv6leases` / `ipv6ra` (https://raw.githubusercontent.com/openwrt/odhcpd/master/src/ubus.c) | Leases v4/v6, RA-Status | **fehlt**; auch von keiner gelesenen LuCI-ACL freigegeben |
-| `dnsmasq metrics` | ca. 30 Zähler DNS (forwarded, local answered, unanswered, Cache) und DHCP (discover…decline, noanswer, Leases) | **fehlt**; Schlüssel/erste Version nicht belegt |
-| `service list` | laufende Dienste | **erlaubt** (`123`); ob dnsmasq/odhcpd als laufend gemeldet werden: nicht belegt |
-| `uci get dhcp` | Pools, ra/dhcpv6-Optionen | ubus `uci get` **erlaubt** (`121`), Config-spezifisches Leserecht hängt an rpcd-Login (siehe Annahme 5.2); der Code nutzt es schon (`api.py:3944`) |
+| odhcpd `dhcp` (https://raw.githubusercontent.com/openwrt/odhcpd/master/src/ubus.c) | **Live 2026-11-18 (gateway, ap2, ap5, Paket `odhcpd-ipv6only`):** `ipv6leases`, `ipv6ra`, `add_lease` (**schreibend**). `ipv4leases` **widerlegt** (Methode fehlt, Aufruf liefert nichts). ap6: kein Objekt | **fehlt**; nur `ipv6leases`/`ipv6ra` freigeben, nie `add_lease` |
+| `dnsmasq metrics` | **Live 2026-11-18:** Schlüssel in 5.8; 26 Schlüssel bei dnsmasq 2.91 (ap2), 30 bei 2.93 (gateway, ap5); ap6 ohne Objekt. Daneben gibt es überall, wo dnsmasq läuft, ein Objekt `dnsmasq.dns` (Methoden nicht gelistet) | **fehlt** |
+| `service list` | laufende Dienste | **erlaubt** (`123`). **2026-11-18:** dnsmasq und odhcpd erscheinen auf gateway, ap2, ap5, auf ap6 nicht. Ob das `running`-Kennzeichen je Instanz stimmt: **nicht belegt** (Grund: es wurden nur Dienstnamen ausgegeben) |
+| `uci get dhcp` | Pools, ra/dhcpv6-Optionen | ubus `uci get` **erlaubt** (`121`); Leserecht für `root` über `read '*'` belegt (5.2). Der Code nutzt es schon (`api.py:3944`). Ob ra/dhcpv6-Optionen enthalten sind: nicht belegt (nur nach Log-Optionen gefiltert) |
 
 ### 5.5 Last auf dem Router
 
-- Keine veröffentlichten Zahlen (Zielplattform MT7981). Schätzung der Recherche: Ping mit
+- Keine veröffentlichten Zahlen (Zielplattform laut Recherche MT7981; korrigiert im
+  nächsten Punkt). Schätzung der Recherche: Ping mit
   3–5 Paketen und nslookup vernachlässigbar; `file exec` ein fork/exec, wenige ms;
   SSH-Aufbau am teuersten (Schlüsseltausch, vermutlich einige hundert ms). **Muss gemessen
-  werden.**
+  werden.** Stand 2026-11-18: **nicht belegt (aktiver Test, eigene Freigabe nötig)** — die
+  Live-Prüfung hat bewusst weder ping noch nslookup noch eine Zeitmessung des SSH-Aufbaus
+  ausgeführt (L14–L16 offen).
+- **Belegt am 2026-11-18:** Die Flotte ist nicht nur MT7981. gateway und ap2 sind Cudy
+  WR3000 v1, ap5 ist ein AVM FRITZ!Repeater 3000, ap6 ein AVM FRITZ!WLAN Repeater 1750E
+  mit etwa 55 MB RAM, davon zum Prüfzeitpunkt etwa 12 MB verfügbar. Für ap6 ist jeder
+  zusätzliche Prozess (auch ein kurzer fork/exec) relevanter als auf den anderen; eine
+  Speicherschwelle als Vorbedingung für aktive Tests ist dort Pflicht (5.9).
 - **Vorschlag Budget:** je Router höchstens 1 aktiver Test je 5 min, max. 3 Pakete, `-W 1`,
   nur über ubus (kein SSH für periodische Tests), nicht bei gedrosseltem Coordinator
   (CPU > 100 %, `coordinator.py:1244-1270`) und nicht im SSH-Rückfall.
@@ -613,7 +673,9 @@ include/rpcd/exec.h, main.c).
   (https://raw.githubusercontent.com/openwrt/packages/master/net/mwan3/files/etc/config/mwan3);
   öffentliche Resolver Google, Quad9, Cloudflare; HTTP-204: `connectivitycheck.gstatic.com/generate_204`;
   NetworkManager-Prüfintervall Standard 300 s. Nutzungsbedingungen: keine Beschränkung
-  gefunden, aber auch keine Erlaubnis — nicht belegt.
+  gefunden, aber auch keine Erlaubnis — **nicht belegt** (Grund: Recherchefrage zu
+  Fremddiensten, durch eine Router-Prüfung nicht klärbar; die Live-Prüfung 2026-11-18 hat
+  dazu nichts beigetragen).
 - DECIDED: Referenzziele sind Einstellungen mit leerer Standardliste außer dem Nexthop aus dem
   Dump — keine fest eingebauten Fremdziele ohne Zustimmung des Nutzers (Datenschutz, ToS
   ungeklärt). Die bestehende 8.8.8.8-Probe ist davon ausgenommen; ihre Zukunft ist
@@ -626,6 +688,31 @@ ausgeführt**. Platzhalter in spitzen Klammern; echte Adressen und Namen gehöre
 dieses Dokument. Alle Befehle laufen in einer SSH-Sitzung auf **einem** Router; die
 SSH-Anmeldung selbst erzeugt einen Login-Eintrag im Systemlog (dropbear), sonst nichts.
 
+**Stand 2026-11-18:** Der Nutzer hat die nur lesenden Prüfungen freigegeben; der Master hat
+sie per SSH auf gateway, ap2, ap5 und ap6 ausgeführt (eigenes Prüfskript, kein ping, kein
+nslookup, kein traceroute, keine ACL-Probe). Diese Sitzung hat nur die Ergebnisdateien
+gelesen, keinen Router berührt. Abdeckung je Punkt:
+
+| # | Stand 2026-11-18 |
+|---|---|
+| L1 | **nicht ausgeführt** — nur `command -v` je Werkzeug (Pfad belegt), kein `ls -l`; Applet-Frage offen |
+| L2 | **ausgeführt** (`apk list -I`, gefiltert) auf allen vier |
+| L3 | **nicht ausgeführt** (nicht im Prüfskript) |
+| L4 | **nicht ausgeführt** (nicht im Prüfskript) |
+| L5 | **ausgeführt** auf allen vier |
+| L6 | **ausgeführt** für `luci-rpc`, `network.rrdns`, `dnsmasq`, `dhcp` (zusätzlich `iwinfo`, `usteer`); `dnsmasq.dns` nicht gelistet |
+| L7 | **ausgeführt** (je ein Aufruf); ob das Lesen Zähler zurücksetzt: **nicht belegt** (Grund: nur ein Aufruf je Router, kein Vorher/Nachher) |
+| L8 | **teilweise:** `ipv4leases` aufgerufen (leere Ausgabe, Methode fehlt); `ipv6leases`/`ipv6ra` nur als Signatur (L6), nicht aufgerufen |
+| L9 | **ausgeführt**, nur Schlüsselhäufigkeit gezählt, keine Werte |
+| L10 | **teilweise:** `service list` ohne Filter, nur Dienstnamen ausgegeben, kein `running`-Kennzeichen |
+| L11 | **teilweise:** `uci show dhcp` nur nach Log-Optionen gefiltert |
+| L12 | **teilweise:** Verzeichnis `acl.d` gelistet (Namen, Größen), Inhalte nicht gelesen |
+| L13 | **ausgeführt**, Passwort maskiert |
+| L14–L16 | **nicht ausgeführt** — aktive Tests, eigene Freigabe nötig |
+| W1 | **nicht ausgeführt** — ändert die ACL, eigene Freigabe nötig |
+
+Ergebnisse: 5.8; Folgerungen: 5.9.
+
 #### 5.7 (a) Nur lesende Befehle — ändern keine Konfiguration
 
 | # | Befehl | Was er liest | Änderung am Router |
@@ -636,7 +723,7 @@ SSH-Anmeldung selbst erzeugt einen Login-Eintrag im Systemlog (dropbear), sonst 
 | L4 | `cat /etc/init.d/rpcd` | ob das Init-Skript `-t` setzt | keine; liest eine Datei |
 | L5 | `ubus list` | Namen aller ubus-Objekte (gibt es `dnsmasq`, `dhcp`, `network.rrdns`, `luci-rpc`?) | keine; ruft keine Methode auf |
 | L6 | `ubus -v list network.rrdns`, `ubus -v list dnsmasq`, `ubus -v list dhcp`, `ubus -v list luci-rpc` | Methoden und Parameter dieser Objekte | keine; listet nur Signaturen, ruft keine Methode auf |
-| L7 | `ubus call dnsmasq metrics` | DNS-/DHCP-Zähler von dnsmasq (Schlüsselnamen) | keine Konfigurationsänderung; ob das Lesen Zähler zurücksetzt: **nicht belegt** |
+| L7 | `ubus call dnsmasq metrics` | DNS-/DHCP-Zähler von dnsmasq (Schlüsselnamen) | keine Konfigurationsänderung; ob das Lesen Zähler zurücksetzt: **nicht belegt** (Grund siehe Stand-Tabelle oben) |
 | L8 | `ubus call dhcp ipv4leases`, `ubus call dhcp ipv6leases`, `ubus call dhcp ipv6ra` | odhcpd-Leases v4/v6 und RA-Status | keine; Leseaufrufe von odhcpd. Ausgabe enthält MACs/IPs/Hostnamen → nicht in Dokumente kopieren |
 | L9 | `ubus call network.interface dump` | Interfaces inkl. `route`/`nexthop`, `dns-server`, IPv6-Felder | keine; derselbe Aufruf, den die Integration ohnehin jede Minute macht. Ausgabe enthält Adressen → nur Feldnamen notieren |
 | L10 | `ubus call service list '{"name":"dnsmasq"}'` (ebenso `odhcpd`) | ob procd den Dienst als laufend meldet | keine; Leseaufruf |
@@ -655,7 +742,132 @@ SSH-Anmeldung selbst erzeugt einen Login-Eintrag im Systemlog (dropbear), sonst 
 
 W1 ist **nicht** von einer Freigabe für (a) gedeckt. Ob W1 überhaupt nötig ist, hängt von
 L12/L13 ab (Annahme 5.2: bei nacktem `/bin/ping` aus einer LuCI-Gruppe ist ein
-Argumentmuster wirkungslos).
+Argumentmuster wirkungslos). **Stand 2026-11-18:** L13 belegt `root` mit `read '*'`; L12
+ist ohne Dateiinhalte, also bleibt offen, ob W1 überhaupt etwas Neues zeigen kann (5.9 K1).
+
+### 5.8 Live-Befunde 2026-11-18 (nur lesend, vier Router)
+
+Quelle: Ergebnisdateien des Masters, nur gelesen. Keine Adressen, MACs, Hostnamen, SSIDs,
+Lease-Inhalte oder Zählerstände übernommen; Geräte nur als Rolle mit Modell und Version.
+
+**Geräte**
+
+| Gerät | Modell | OpenWrt | rpcd | dnsmasq (Paket) | Rolle laut Dump/Diensten |
+|---|---|---|---|---|---|
+| gateway | Cudy WR3000 v1 | 25.12.1 | 2026.10.04 | 2.93 | `wan`, `wan6`, `wg0`, `odhcp6c.wan`; dnsmasq + odhcpd laufen als Objekt |
+| ap2 | Cudy WR3000 v1 | 25.12.1 | 2025.12.03 | 2.91 | Default-Route im LAN; dnsmasq + odhcpd als Objekt |
+| ap5 | AVM FRITZ!Repeater 3000 | 25.12.6 | 2026.10.04 | 2.93 | Default-Route im LAN; dnsmasq + odhcpd als Objekt |
+| ap6 | AVM FRITZ!WLAN Repeater 1750E | 25.12.2 | 2025.12.03 | 2.91 (installiert, kein Objekt, nicht in `service list`) | Relay (`relayd` in `service list`); kein `dnsmasq`, `dhcp`, `usteer`; ca. 55 MB RAM |
+
+**Pakete und Werkzeuge (alle vier, sofern nicht anders genannt)**
+
+| Punkt | Befund |
+|---|---|
+| `busybox` | 1.37.0 überall |
+| `rpcd-mod-file` (liefert `file exec`) | überall installiert, gleiche Version wie rpcd |
+| `rpcd-mod-luci` | 20240305 überall |
+| `rpcd-mod-rrdns` | 20170710 überall, Objekt `network.rrdns` überall |
+| `rpcd-mod-rpcsys` | gateway, ap5, ap6; **nicht** auf ap2 (für Diagnose ohne Bedeutung, nur Abweichung) |
+| `odhcpd-ipv6only` | gateway, ap2, ap5 (ap6: Objekt fehlt; Paketstatus nicht im Filter sichtbar) |
+| `usteer` | gateway, ap2, ap5; nicht ap6 |
+| `wpad` | gateway, ap2, ap5 `wpad-mesh-openssl`; ap6 `wpad-mbedtls` |
+| `ping`, `ping6`, `nslookup`, `traceroute`, `traceroute6`, `wget`, `uclient-fetch`, `iw`, `iwinfo` | überall vorhanden, Pfade wie in der LuCI-ACL (5.2) |
+| `curl` | nur gateway, ap2 |
+| `arping` | nirgends |
+
+**ubus-Signaturen**
+
+| Objekt | Methoden | Wo |
+|---|---|---|
+| `luci-rpc` | `getNetworkDevices`, `getWirelessDevices`, `getHostHints`, `getDUIDHints`, `getBoardJSON`, `getDHCPLeases` | alle vier |
+| `network.rrdns` | `lookup` (`addrs`, `timeout`, `server`, `port`, `limit`) | alle vier |
+| `dnsmasq` | nur `metrics` | gateway, ap2, ap5 |
+| `dnsmasq.dns` | nicht gelistet | gateway, ap2, ap5 |
+| `dhcp` (odhcpd) | `ipv6leases`, `ipv6ra`, `add_lease` (`ip`, `mac`, `duid`, `hostid`, `leasetime`, `name`) — **kein** `ipv4leases` | gateway, ap2, ap5 |
+| Mess-Objekt (Ping/DNS/Traceroute) | keins | alle vier |
+
+**`dnsmasq metrics` — Schlüssel (Werte nicht übernommen)**
+
+- dnsmasq 2.91 (ap2), 26 Schlüssel: `dns_cache_inserted`, `dns_cache_live_freed`,
+  `dns_queries_forwarded`, `dns_auth_answered`, `dns_local_answered`, `dns_stale_answered`,
+  `dns_unanswered`, `dnssec_max_crypto_use`, `dnssec_max_sig_fail`, `dnssec_max_work`,
+  `bootp`, `pxe`, `dhcp_ack`, `dhcp_decline`, `dhcp_discover`, `dhcp_inform`, `dhcp_nak`,
+  `dhcp_offer`, `dhcp_release`, `dhcp_request`, `noanswer`, `leases_allocated_4`,
+  `leases_pruned_4`, `leases_allocated_6`, `leases_pruned_6`, `tcp_connections`.
+- dnsmasq 2.93 (gateway, ap5), 30 Schlüssel: zusätzlich `dhcp_leasequery`,
+  `dhcp_lease_unassigned`, `dhcp_lease_actve` (Schreibweise so ausgeliefert),
+  `dhcp_lease_unknown`.
+- Auf ap2 und ap5 stehen alle DHCP-Zähler auf 0 (dnsmasq vergibt dort keine Leases);
+  welche Zähler dort steigen, wurde nicht im Zeitverlauf beobachtet.
+
+**rpcd-Konfiguration und ACL-Dateien**
+
+- `/etc/config/rpcd` auf allen vier: `option timeout 30`; Login `root` mit
+  `list read '*'` / `list write '*'`. Auf dem gateway gibt es zusätzlich einen
+  Paket-eigenen Login mit eigener Gruppe (für Diagnose ohne Bedeutung).
+- `/usr/share/rpcd/acl.d/` auf allen vier: `ha-openwrt-router.json`, `luci-base.json`,
+  `luci-mod-network.json`, `luci-mod-status.json`, `luci-mod-status-index.json`,
+  `luci-mod-system.json`, `luci-app-firewall.json`, `luci-app-package-manager.json`,
+  `unauthenticated.json`; je nach Gerät dazu Dateien für usteer, DDNS, WireGuard und
+  Attended Sysupgrade. Inhalte nicht gelesen.
+
+**`network.interface dump` — Form**
+
+- Schlüssel auf allen vier: `route` mit `target`, `mask`, `nexthop`, `source`, `metric`;
+  `dns-server`, `dns-search`, `dns_metric`, `ipv4-address`, `ipv6-address`, `ipv6-prefix`,
+  `ipv6-prefix-assignment`, `delegation`, `neighbors`, `l3_device`, `inactive`, `data`.
+- `nexthop` (wie `target`, `source`) tritt am gateway zweimal, auf jedem AP einmal auf
+  (nur gezählt). Abgeleitet: ein AP hat genau eine Route mit Nexthop; da `wan`/`wan6` dort
+  fehlen, liegt sie auf dem LAN-Interface. Über welche Interfaces die zwei Routen des
+  gateway laufen: nicht belegt (Grund: nur Häufigkeiten, keine Zuordnung ausgegeben).
+- Die Adress-, Routen- und DNS-Schlüssel kommen am gateway je 14-mal bei 7 Interfaces vor
+  (je einmal oben und einmal in `inactive`); auf den APs gilt dasselbe Verhältnis.
+- Alle Zählungen sind Schlüssel-Häufigkeiten, keine Werte; ob `dns-server` gefüllt ist,
+  geht daraus nicht hervor.
+
+### 5.9 Folgerungen für das Design (abgeleitet, Vorschlag — nicht vom Master entschieden)
+
+- **K1 — Argumentmuster sind vermutlich wirkungslos.** `root` bekommt jede ACL-Gruppe
+  (belegt); `luci-mod-network.json` liegt überall (belegt); Upstream gibt darin die
+  nackten Werkzeugpfade frei (5.1, nicht auf den Geräten gelesen). Folge: Die Projekt-ACL
+  kann eine `root`-Session nicht enger machen. Ein Argumentmuster wirkt nur für einen
+  eigenen, nicht-`root`-Login ohne LuCI-Gruppen. Vor jeder ACL-Arbeit (W1) zuerst L12 mit
+  Dateiinhalten wiederholen. Für F3 heißt das: die Begrenzung muss in HA liegen (feste
+  Zielliste, feste Argumente, `diag_targets.py`), nicht im Router.
+- **K2 — Capability je Gerät statt je Flotte.** Die vier Router unterscheiden sich in
+  Objekten, Paketen, Versionen und RAM. Die Capability-Erkennung (enterprise-core) braucht
+  mindestens diese Flags je Router:
+  - `has_dnsmasq_ubus` (Objekt `dnsmasq` in `ubus list`) — fehlt auf ap6.
+  - `dnsmasq_metric_keys` — Schlüsselmenge als Liste, nicht als Version; die vier
+    2.93-Schlüssel optional behandeln.
+  - `has_odhcpd_ubus` und `odhcpd_v4 = false` — `ipv4leases` nie aufrufen; v4-Leases
+    weiterhin über `luci-rpc getDHCPLeases`.
+  - `is_relay` (Dienst `relayd`, kein `dnsmasq`/`dhcp`) — DNS- und DHCP-Prüfungen auf dem
+    Gerät aus.
+  - `tools` (Pfad je Werkzeug) — `curl` nicht voraussetzen; HTTP-Prüfungen nur mit `wget`
+    oder `uclient-fetch`; `arping` gibt es nicht.
+  - `mem_available` als Vorbedingung — aktive Tests auf Geräten mit wenig freiem Speicher
+    (ap6) aussetzen; Schwelle selbst ist noch nicht belegt (Grund: Abschnitt 8 Punkt 17).
+  - Erkennung über vorhandene Wege: `ubus list` bzw. Methoden-nicht-gefunden und
+    `_acl_blocked`, kein Versionsvergleich.
+- **K3 — exec-Laufzeit.** `option timeout 30` ist überall gesetzt; bis L3/L4 belegen, wie
+  rpcd den Wert nutzt, plant jeder exec-Aufruf mit klar unter 30 s (Ping 3 Pakete `-W 1`
+  passt).
+- **K4 — `dhcp add_lease` nie freigeben.** Die Methode schreibt; eine künftige
+  Projekt-ACL nennt `ipv6leases` und `ipv6ra` einzeln, kein `dhcp: ["*"]`.
+- **K5 — rrdns ist vorhandene Fläche.** `network.rrdns lookup` mit freiem `server`/`port`
+  existiert auf allen vier; für `root` ist sie vermutlich schon erreichbar (K1). Gehört ins
+  Security Center, Diagnose nutzt sie weiterhin nicht (DECIDED 9).
+- **K6 — Nexthop-Deutung.** Auf APs ist der Nexthop der Default-Route der LAN-Gateway, nicht
+  der Provider. Die Kette „AP → Nexthop“ misst also den LAN-Weg zum gateway; „Gateway →
+  Nexthop“ ist der WAN-Weg. Die Matrix 3.3 ist entsprechend angepasst.
+- **K7 — Parser auf die oberste Ebene.** Wegen `inactive` kommen Adress-, Routen- und
+  DNS-Schlüssel je Interface doppelt vor; Dump-Auswertung liest nur die oberste Ebene.
+  Testfixtures dafür mit erfundenen Werten (Dokumentationsadressen) und mit befülltem
+  `inactive`, damit ein falscher Zugriff auffällt.
+- **K8 — Reichweite der Belege.** Belegt sind nur diese vier Router mit 25.12.x. Für
+  weitere Geräte der Flotte und ältere Versionen gelten die Aussagen nicht automatisch; die
+  Capability-Prüfung darf deshalb keinen Gerätetyp fest annehmen.
 
 ---
 
@@ -727,7 +939,9 @@ uvx ruff@0.17.3 format --check custom_components/
   `coordinator.py:775-779`; `tests/conftest.py` patcht `open_connection` nicht global, nur
   einzelne Testdateien tun es: `test_coordinator.py`, `test_net_engine.py`,
   `test_client_engine.py`, `test_poll_no_ssh.py`, `test_wan_detection.py`). Ob die Suite ohne
-  Netz vollständig offline läuft: nicht belegt.
+  Netz vollständig offline läuft: **nicht belegt** (Grund: braucht einen Testlauf ohne
+  Netzzugang auf diesem Rechner; betrifft nicht die Router und war nicht Teil der
+  Live-Prüfung 2026-11-18).
 - **Vorschlag für Phase B:** autouse-Fixture in `conftest.py`, die `asyncio.open_connection`
   und jede Diagnose-Messung patcht, damit Tests nie ins Netz gehen.
 
@@ -735,28 +949,66 @@ uvx ruff@0.17.3 format --check custom_components/
 
 ## 8. Nicht belegt
 
+Stand nach der Live-Prüfung vom 2026-11-18 (nur lesend; gateway, ap2, ap5, ap6; siehe
+5.7 Stand-Tabelle und 5.8). Jeder Punkt hat ein Urteil.
+
 1. Feldnamen und Form von `route[].nexthop`, `dns-server`, `ipv6-address`/`ipv6-prefix` im
-   `network.interface dump` der eingesetzten Router. `tests/fixtures/*.json` und
-   `scripts/mock_router.py` enthalten keines dieser Felder; nur
-   `tests/test_net_infra_review.py:248-256` hat eine synthetische Route mit `nexthop`
-   (Dokumentationsadresse), dazu ein `wan6`-Interface — keine Live-Form.
-2. Ob ICMP aus HA (unprivilegiert) in der Zielinstallation möglich ist.
-3. Ob die Router-Images Busybox ping/nslookup/traceroute so enthalten wie der Standard.
+   `network.interface dump`. — **Belegt am 2026-11-18 auf gateway, ap2, ap5, ap6**
+   (Schlüssel und Häufigkeit, 5.8). Werte und Verschachtelung im Einzelnen nicht gelesen;
+   die Fixtures bleiben synthetisch (`tests/test_net_infra_review.py:248-256`) und müssen um
+   `inactive` erweitert werden (5.9 K7).
+2. Ob ICMP aus HA (unprivilegiert) in der Zielinstallation möglich ist. — **Nicht belegt**
+   (Grund: betrifft HA, nicht die Router; HA wurde nicht berührt).
+3. Ob die Router-Images Busybox ping/nslookup/traceroute so enthalten wie der Standard. —
+   **Belegt am 2026-11-18 auf gateway, ap2, ap5, ap6** für Vorhandensein und Pfad (busybox
+   1.37.0). **Nicht belegt**, ob es Applets sind und ob `nslookup` die große Variante ist
+   (Grund: kein `ls -l`, `busybox` ohne Argumente gab keine Liste aus; L1).
 4. rpcd-Login-Konfiguration für root und ob `luci-mod-network`-ACL schon nackte exec-Rechte
-   gibt (Annahme 5.2).
-5. Ob das rpcd-Init-Skript `-t` setzt (exec-Timeout).
-6. `dnsmasq metrics`: Schlüssel, erste Version, nötige ACL. odhcpd-`dhcp`-Objekt auf den
-   eingesetzten Versionen vorhanden.
-7. Ob `service list` dnsmasq/odhcpd zuverlässig als laufend meldet.
-8. Unterschiede 23.05 / 24.10 / 25.12 für LuCI-Diagnostics-ACL und `file exec`.
-9. Kosten (CPU, Zeit) von ping/nslookup per `file exec` und SSH-Aufbau auf MT7981.
-10. Nutzungsbedingungen öffentlicher Referenzziele.
-11. Ob HA denselben Internetweg nutzt wie das Gateway (für die Deutung von `ping_ms`).
-12. Ob die Testsuite ohne Netzzugang komplett offline bleibt (Abschnitt 7).
+   gibt. — **Belegt am 2026-11-18 auf gateway, ap2, ap5, ap6:** `root` hat `read '*'` /
+   `write '*'`, `luci-mod-network.json` ist installiert. **Nicht belegt:** Inhalt der Datei
+   (Grund: L12 nur als Verzeichnisliste) und welcher Benutzer in HA konfiguriert ist (Grund:
+   HA nicht gelesen).
+5. Ob das rpcd-Init-Skript `-t` setzt (exec-Timeout). — **Teilweise:** `option timeout 30`
+   **belegt am 2026-11-18 auf allen vier**; ob daraus `-t` wird: **nicht belegt** (Grund:
+   L3/L4 nicht ausgeführt).
+6. `dnsmasq metrics` und odhcpd-`dhcp`. — **Belegt am 2026-11-18:** `metrics` auf gateway,
+   ap2, ap5 mit 26 (2.91) bzw. 30 (2.93) Schlüsseln; auf ap6 kein Objekt. odhcpd-`dhcp` auf
+   gateway, ap2, ap5 vorhanden. **Widerlegt am 2026-11-18 auf gateway, ap2, ap5:** die
+   Annahme, odhcpd liefere `ipv4leases` — Paket ist `odhcpd-ipv6only`, Methoden sind nur
+   `ipv6leases`, `ipv6ra` und das schreibende `add_lease`. Erste dnsmasq-Version mit
+   `metrics`: **nicht belegt** (Grund: nur 2.91 und 2.93 gesehen). Nötige ACL: Projekt-ACL
+   hat sie nicht (5.4), `root` bekommt sie über `read '*'` vermutlich trotzdem (nicht belegt,
+   ACL-Inhalte ungelesen).
+7. Ob `service list` dnsmasq/odhcpd zuverlässig als laufend meldet. — **Teilweise:**
+   Dienstnamen **belegt am 2026-11-18** (gateway, ap2, ap5 ja; ap6 nein, dafür `relayd`).
+   `running`-Kennzeichen: **nicht belegt** (Grund: nur Namen ausgegeben, L10 teilweise).
+8. Unterschiede 23.05 / 24.10 / 25.12 für LuCI-Diagnostics-ACL und `file exec`. —
+   **Nicht belegt** (Grund: alle vier Router laufen auf 25.12.x; ältere Versionen nicht in
+   der Prüfung). Innerhalb 25.12 belegt: zwei rpcd-Stände (2025.12.03, 2026.10.04), beide
+   mit `rpcd-mod-file`.
+9. Kosten (CPU, Zeit) von ping/nslookup per `file exec` und SSH-Aufbau. — **Nicht belegt
+   (aktiver Test, eigene Freigabe nötig)**; L14–L16 nicht ausgeführt. Korrigiert: die
+   Flotte ist nicht nur MT7981 (5.5).
+10. Nutzungsbedingungen öffentlicher Referenzziele. — **Nicht belegt** (Grund:
+    Recherchefrage, durch eine Router-Prüfung nicht klärbar).
+11. Ob HA denselben Internetweg nutzt wie das Gateway (für die Deutung von `ping_ms`). —
+    **Nicht belegt** (Grund: betrifft HA-Host und dessen Routing; nicht gelesen).
+12. Ob die Testsuite ohne Netzzugang komplett offline bleibt (Abschnitt 7). — **Nicht
+    belegt** (Grund: braucht einen Offline-Testlauf auf diesem Rechner; nicht Teil der
+    Router-Prüfung).
 13. Ob netifd/odhcpd/dnsmasq-Logzeilen live so aussehen wie im Parser erwartet
-    (`log_parser.py:1-20`, A6 aus dem NI-Plan).
+    (`log_parser.py:1-20`, A6 aus dem NI-Plan). — **Nicht belegt** (Grund: die Prüfung hat
+    nur dropbear- und uhttpd/rpcd-Logzeilen gelesen, keine von netifd, odhcpd oder dnsmasq).
 14. Schnittstellen der enterprise-core-Sitzung (Router-ID, Capability, Audit, Approval) —
-    nicht auf `main`, nicht gelesen.
+    **nicht belegt** (Grund: nicht auf `main`, Branch nicht geholt; laut Master bisher nur
+    Typen und Doku, 6).
+15. **Neu 2026-11-18:** ob `dnsmasq.dns` Methoden mit Diagnosewert hat — **nicht belegt**
+    (Grund: Objekt nur in `ubus list` gesehen, Signatur nicht gelistet).
+16. **Neu 2026-11-18:** ob odhcpd auf ap2/ap5 tatsächlich RA/DHCPv6 bedient und wie
+    `ipv6leases`/`ipv6ra` antworten — **nicht belegt** (Grund: nur Signaturen, nicht
+    aufgerufen).
+17. **Neu 2026-11-18:** Speicherschwelle für aktive Tests auf ap6 — **nicht belegt**
+    (Grund: nur ein Messpunkt des freien Speichers, kein Verlauf).
 
 ---
 
@@ -831,3 +1083,14 @@ https://contributors.home-assistant.io/blog/), Liste bis 2026-11-17: keine Depre
   (Abschnitt 4 Punkte 4/5 und Abschnitt 9 angepasst); Abschnitt 6 um den veröffentlichten
   enterprise-core-Vertrag ergänzt (Branch und Commits laut Master, nicht geholt). Nur diese
   Datei geändert, kein Commit.
+- 2026-11-18 Live-Befunde eingearbeitet: Der Nutzer hat nur lesende Prüfungen freigegeben,
+  der Master hat sie per SSH auf gateway, ap2, ap5, ap6 ausgeführt (kein ping, nslookup,
+  traceroute, keine ACL-Probe). Diese Sitzung hat nur die Ergebnisdateien gelesen und dieses
+  Dokument geändert; keine Verbindung zu Router, HA, Host, VM oder Drucker; keine privaten
+  Daten (Adressen, MACs, Hostnamen, SSIDs, Lease-Inhalte, Zählerstände) übernommen.
+  Geändert: Status, Kurzfazit, Abschnitt 2 (2.1–2.5), Matrix 3.1–3.3 (Markierung
+  „[2026-11-18]“), 5.1–5.5, 5.7 (Stand-Tabelle je Prüfpunkt), neu 5.8 (Befunde) und 5.9
+  (Folgerungen K1–K8, Vorschlag), Abschnitt 8 mit Urteil je Punkt und drei neuen offenen
+  Punkten, Begründungen bei 4.1, 5.6 und 7. Widerlegt: odhcpd liefert kein `ipv4leases`;
+  die Flotte ist nicht nur MT7981. Kein Commit. Rückweg: `git checkout` dieser Datei auf
+  den Stand vor diesem Eintrag.
