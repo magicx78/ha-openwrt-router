@@ -26,9 +26,16 @@ No second client database: the input is a narrow observation Protocol (the
 fields of Client Stability ``ClientLive``); this layer keeps only trust
 state, name, times, the last IP/hostname (to see a change) and indicators,
 for at most ``max_entries`` devices. When full, the least recently seen
-unconfirmed, unquarantined entry is evicted; confirmed and quarantined
-entries are never evicted silently: the new device is then not tracked,
+unconfirmed, unquarantined entry *without active indicators* is evicted
+(review H4). Confirmed, quarantined and suspicious-in-the-making entries
+are never evicted silently: the new device is then not tracked,
 ``capacity_overflow`` counts it and a ``capacity`` notice reports it.
+
+Entries created only by :meth:`TrustBook.add_indicator` (a MAC that was
+never observed as a client, e.g. from a forged log line) live in their own
+smaller area of at most ``max_indicator_only`` entries. A flood of such
+MACs displaces only its own oldest entry, and every such displacement is
+counted in ``capacity_overflow`` and reported with a ``capacity`` notice.
 """
 
 from __future__ import annotations
@@ -220,6 +227,7 @@ class TrustRecord:
     notified: bool = False
     quarantined_at: float | None = None
     quarantine_method: str | None = None
+    observed: bool = True  # False: only known from indicators so far
 
     @property
     def confirmed(self) -> bool:
@@ -251,6 +259,7 @@ class TrustRecord:
             "notified": self.notified,
             "quarantined_at": self.quarantined_at,
             "quarantine_method": self.quarantine_method,
+            "observed": self.observed,
         }
 
     @classmethod
@@ -291,6 +300,7 @@ class TrustRecord:
                 if quarantined_at is not None
                 else None
             ),
+            observed=data.get("observed") is not False,
         )
 
 
@@ -325,8 +335,13 @@ class TrustBook:
         indicator_window_s: float = DEFAULT_INDICATOR_WINDOW_S,
         suspicious_min_indicators: int = DEFAULT_SUSPICIOUS_MIN_INDICATORS,
         max_entries: int = DEFAULT_MAX_ENTRIES,
+        max_indicator_only: int | None = None,
     ) -> None:
-        """Create an empty book; all thresholds are parameters."""
+        """Create an empty book; all thresholds are parameters.
+
+        ``max_indicator_only`` (default ``max_entries // 8``, at least 1)
+        bounds the entries known only from indicators.
+        """
         self.new_period_s = float(new_period_s)
         self.ip_churn_window_s = float(ip_churn_window_s)
         self.ip_churn_min = max(2, int(ip_churn_min))
@@ -334,10 +349,16 @@ class TrustBook:
         # An unknown MAC alone must never be suspicious: at least 2 kinds.
         self.suspicious_min_indicators = max(2, int(suspicious_min_indicators))
         self.max_entries = max(1, int(max_entries))
+        cap = (
+            self.max_entries // 8 if max_indicator_only is None else max_indicator_only
+        )
+        self.max_indicator_only = min(self.max_entries, max(1, int(cap)))
         self.capacity_overflow = 0
         self._records: dict[str, TrustRecord] = {}
         # Evictable (unconfirmed, unquarantined) MACs, least recently seen first.
         self._evictable: OrderedDict[str, None] = OrderedDict()
+        # Never-observed MACs (only from indicators), oldest first.
+        self._indicator_only: OrderedDict[str, None] = OrderedDict()
 
     def __len__(self) -> int:
         """Number of tracked devices."""
@@ -394,15 +415,17 @@ class TrustBook:
         private = getattr(obs, "private_mac", None)
         if not isinstance(private, bool):
             private = is_locally_administered(mac)
+        room: tuple[TrustNotice, ...] = ()
         if old is None:
-            if not self._make_room():
-                return (self._overflow_notice(now),)
+            room = self._make_room(now)
+            if len(self._records) >= self.max_entries:
+                return (*room, self._overflow_notice(now))
             old = TrustRecord(mac=mac, private_mac=private)
         created = mac not in self._records
         before = None if created else self._derive(old, now)
         record, notices = self._apply(old, obs, private, now, created)
-        self._store(record)
-        return tuple(notices) + self._transition(before, record, now)
+        self._store(replace(record, observed=True))
+        return room + tuple(notices) + self._transition(before, record, now)
 
     def _apply(
         self,
@@ -466,15 +489,20 @@ class TrustBook:
         if key is None:
             return ()
         old = self._records.get(key)
+        room: tuple[TrustNotice, ...] = ()
         if old is None:
-            if not self._make_room():
-                return (self._overflow_notice(now),)
-            old = TrustRecord(mac=key, private_mac=is_locally_administered(key))
+            room = self._trim_indicator_only(self.max_indicator_only - 1, now)
+            room += self._make_room(now)
+            if len(self._records) >= self.max_entries:
+                return (*room, self._overflow_notice(now))
+            old = TrustRecord(
+                mac=key, private_mac=is_locally_administered(key), observed=False
+            )
         before = self._derive(old, now) if key in self._records else None
         name = clean_text(str(kind), 32)
         record = replace(old, indicators=_add_indicator(old.indicators, name, now))
         self._store(record)
-        return self._transition(before, record, now)
+        return room + self._transition(before, record, now)
 
     def confirm(self, mac: str, now: float, *, name: str | None = None) -> bool:
         """Manual confirmation → known; refused for a quarantined device."""
@@ -485,12 +513,14 @@ class TrustBook:
         if old is not None and old.quarantined:
             return False
         if old is None:
-            if not self._make_room():
+            self._make_room(now)  # notices of a manual action are not returned
+            if len(self._records) >= self.max_entries:
                 self.capacity_overflow += 1
                 return False
             old = TrustRecord(mac=key, private_mac=is_locally_administered(key))
         record = replace(
             old,
+            observed=True,
             confirmed_at=now,
             indicators=(),
             ip_changes=(),
@@ -558,14 +588,39 @@ class TrustBook:
             kind=NoticeKind.CAPACITY, state=TrustState.UNRECOGNIZED, at=now
         )
 
-    def _make_room(self) -> bool:
+    def _make_room(self, now: float) -> tuple[TrustNotice, ...]:
+        """Free one entry if full; the book may stay full (caller checks).
+
+        First choice: the least recently seen evictable entry without active
+        indicators (silent: nothing is lost). Otherwise the oldest entry
+        known only from indicators (counted and reported). Entries with
+        active indicators that were observed as clients are never evicted.
+        """
         if len(self._records) < self.max_entries:
-            return True
-        if not self._evictable:
-            return False
-        victim, _ = self._evictable.popitem(last=False)
-        self._records.pop(victim, None)
-        return True
+            return ()
+        for mac in self._evictable:
+            record = self._records[mac]
+            if not record.active_indicators(now, self.indicator_window_s):
+                self._drop(mac)
+                return ()
+        return self._trim_indicator_only(len(self._indicator_only) - 1, now)
+
+    def _trim_indicator_only(self, keep: int, now: float) -> tuple[TrustNotice, ...]:
+        """Displace the oldest indicator-only entries down to ``keep``."""
+        notices: list[TrustNotice] = []
+        while self._indicator_only and len(self._indicator_only) > max(0, keep):
+            mac = next(iter(self._indicator_only))
+            self._drop(mac)
+            if not notices:
+                notices.append(self._overflow_notice(now))
+            else:
+                self.capacity_overflow += 1
+        return tuple(notices)
+
+    def _drop(self, mac: str) -> None:
+        self._records.pop(mac, None)
+        self._evictable.pop(mac, None)
+        self._indicator_only.pop(mac, None)
 
     def _store(self, record: TrustRecord) -> None:
         self._records[record.mac] = record
@@ -574,6 +629,10 @@ class TrustBook:
         else:
             self._evictable[record.mac] = None
             self._evictable.move_to_end(record.mac)
+        if record.observed or record.confirmed or record.quarantined:
+            self._indicator_only.pop(record.mac, None)
+        elif record.mac not in self._indicator_only:
+            self._indicator_only[record.mac] = None
 
     # --- persistence -----------------------------------------------------------
 
@@ -595,11 +654,22 @@ class TrustBook:
             record = TrustRecord.from_dict(row)
             if record is None or record.mac in book._records:
                 continue
-            if not book._make_room():
+            if len(book._records) >= book.max_entries and not book._load_room():
                 book.capacity_overflow += 1
                 continue
             book._store(record)
         return book
+
+    def _load_room(self) -> bool:
+        """Room while loading (no clock): oldest evictable; counted if it
+        carried indicators."""
+        if not self._evictable:
+            return False
+        victim = next(iter(self._evictable))
+        if self._records[victim].indicators:
+            self.capacity_overflow += 1
+        self._drop(victim)
+        return True
 
 
 def _add_indicator(

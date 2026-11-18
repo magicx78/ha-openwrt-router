@@ -628,3 +628,65 @@ def test_case21_privacy_no_identifiers_logged(caplog):
     assert "r1" not in repr(deduper) and "r1" not in repr(Liveness())
     status = Liveness().status("r1", DataSource.DNS_QUERY_LOG, now=base)
     assert isinstance(status, SourceStatus)
+
+
+# =====================================================================
+# Independent review
+# =====================================================================
+
+
+NOV18 = datetime(2026, 11, 18, 12, 0, 0, tzinfo=UTC).timestamp()
+FORGED = (
+    "<4>May 15 11:59:59 OpenWrt kernel: drop lan in: IN=br-lan "
+    "SRC=192.168.1.66 DST=192.168.1.1 PROTO=TCP SPT=1 DPT=22"
+)
+
+
+def _real_fw(i: int, ts: float) -> str:
+    wall = datetime.fromtimestamp(ts, UTC).strftime("%b %d %H:%M:%S")
+    return (
+        f"<4>{wall} OpenWrt kernel: drop wan in: IN=wan SRC=203.0.113.{i} "
+        "DST=198.51.100.1 PROTO=TCP SPT=1 DPT=22"
+    )
+
+
+def test_review_h1_future_ts_cannot_poison_hwm():
+    assigner = KeyAssigner()
+
+    def rec(text: str, recv: float):
+        return _parse(text, assigner=assigner, router="rtrA", recv=recv).record
+
+    result = _parse(FORGED, assigner=assigner, router="rtrA", recv=NOV18)
+    assert result.ts_future and result.ts_estimated
+    assert result.record.ts == NOV18
+    assert result.record.fields["ts_future"] is True
+    assert resolve_time(parse_remote_header(FORGED), NOV18, 0).future
+    forged = result.record
+    deduper = Deduper()
+    out = deduper.filter([rec(_real_fw(1, NOV18), NOV18)], NOV18)
+    out += deduper.filter([forged], NOV18 + 1)
+    out += deduper.filter(
+        [rec(_real_fw(i, NOV18 + i), NOV18 + 30) for i in range(2, 30)], NOV18 + 30
+    )
+    out += deduper.filter([forged], NOV18 + 31)
+    out += deduper.filter([], NOV18 + 100)
+    out += deduper.filter(
+        [rec(_real_fw(i, NOV18 + 100 + i), NOV18 + 140) for i in range(30, 40)],
+        NOV18 + 140,
+    )
+    out += deduper.filter([forged], NOV18 + 141)
+    out += deduper.filter([], NOV18 + 250)
+    assert sum(1 for r in out if r is not forged) == 39
+    assert deduper.hwm("rtrA") <= NOV18 + 140 + deduper.max_future_s
+    # a line within the tolerance keeps its own time
+    near = _parse(_real_fw(9, NOV18 + 60), router="rtrA", recv=NOV18)
+    assert near.record.ts == NOV18 + 60 and not near.ts_future
+
+
+def test_review_l3_stream_line_repr_hides_content():
+    line = b"<4>Nov 18 12:00:00 h dnsmasq[1]: query[A] secret.example from 192.0.2.30\n"
+    (piece,) = StreamSplitter().feed(line)
+    assert piece.data.startswith(b"<4>")  # content still available
+    text = repr(piece)
+    assert "secret" not in text and "192.0.2" not in text
+    assert "StreamLine" in text

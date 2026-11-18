@@ -29,7 +29,13 @@ Rules:
 * a gap longer than ``max_gap_s`` between samples (HA or router restart,
   outage) is not counted as observed time, and the next ``settle_samples``
   samples after a gap or an explicit :meth:`BaselineBook.mark_gap` are
-  skipped (status ``gap``: no anomaly, no update).
+  skipped (status ``gap``: no anomaly, no update);
+* fair share when full (review M1): keys belong to a *group* (e.g. router +
+  detector). A new key evicts from the group that holds the most keys,
+  a learning key before a ready one, least recently used first. So a flood
+  of new keys (forged DNS clients) evicts its own group's keys and never a
+  ready baseline of a smaller group. Evictions are counted per group
+  (:meth:`BaselineBook.pop_evictions`) so the detector can report them.
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ DEFAULT_MAX_GAP_S: Final = 1800.0
 DEFAULT_SETTLE_SAMPLES: Final = 1
 DEFAULT_MAX_KEYS: Final = 4096
 MAX_KEY_LEN: Final = 200
+NO_GROUP: Final = ""  # keys observed without a group share this one
 
 
 class BaselineStatus(StrEnum):
@@ -137,7 +144,7 @@ def _count(value: Any) -> bool:
 
 
 class BaselineBook:
-    """Baselines for at most ``max_keys`` keys (least recently used evicted)."""
+    """Baselines for at most ``max_keys`` keys (fair share by group when full)."""
 
     def __init__(
         self,
@@ -168,6 +175,9 @@ class BaselineBook:
         self.two_sided = bool(two_sided)
         self.evicted = 0
         self._states: OrderedDict[str, BaselineState] = OrderedDict()
+        self._group_of: dict[str, str] = {}
+        self._groups: dict[str, OrderedDict[str, None]] = {}  # LRU per group
+        self._pending: OrderedDict[str, int] = OrderedDict()  # evictions
 
     def __len__(self) -> int:
         """Number of keys."""
@@ -199,8 +209,14 @@ class BaselineBook:
         state = self._states.get(key)
         return self._judge(key, state, _num(value), now)
 
-    def observe(self, key: str, value: Any, now: float) -> Verdict:
-        """Judge ``value`` against the baseline, then learn from it."""
+    def observe(
+        self, key: str, value: Any, now: float, *, group: str | None = None
+    ) -> Verdict:
+        """Judge ``value`` against the baseline, then learn from it.
+
+        ``group`` (e.g. ``"<router>|<detector>"``) only matters when the book
+        is full: see the module notes on fair share.
+        """
         key = str(key)[:MAX_KEY_LEN]
         number = _num(value)
         state = self._states.get(key)
@@ -209,12 +225,50 @@ class BaselineBook:
             return verdict  # missing is not 0 and not normal: no update
         if state is None:
             if len(self._states) >= self.max_keys:
-                self._states.popitem(last=False)
-                self.evicted += 1
+                self._evict()
             state = BaselineState()
+            self._join(key, NO_GROUP if group is None else str(group))
         self._states[key] = self._update(state, number, now, verdict)
         self._states.move_to_end(key)
+        self._groups[self._group_of[key]].move_to_end(key)
         return verdict
+
+    def pop_evictions(self, group: str) -> int:
+        """Keys of ``group`` evicted since the last call (then reset to 0)."""
+        return self._pending.pop(group, 0)
+
+    def _join(self, key: str, group: str) -> None:
+        self._leave(key)
+        self._group_of[key] = group
+        self._groups.setdefault(group, OrderedDict())[key] = None
+
+    def _leave(self, key: str) -> str | None:
+        group = self._group_of.pop(key, None)
+        members = self._groups.get(group) if group is not None else None
+        if members is not None:
+            members.pop(key, None)
+            if not members:
+                del self._groups[group]  # type: ignore[arg-type]
+        return group
+
+    def _evict(self) -> None:
+        """Drop one key of the largest group (learning before ready, LRU)."""
+        if not self._groups:
+            self._states.popitem(last=False)
+            self.evicted += 1
+            return
+        members = max(self._groups.values(), key=len)
+        victim = next(
+            (k for k in members if not self.is_ready(self._states.get(k))),
+            next(iter(members)),
+        )
+        del self._states[victim]
+        group = self._leave(victim)
+        self.evicted += 1
+        if group is not None:
+            self._pending[group] = self._pending.pop(group, 0) + 1
+            if len(self._pending) > self.max_keys:
+                self._pending.popitem(last=False)
 
     def _judge(
         self, key: str, state: BaselineState | None, number: float | None, now: float
@@ -309,6 +363,7 @@ class BaselineBook:
     def reset(self, key: str) -> None:
         """Forget ``key`` (it starts learning again)."""
         self._states.pop(key, None)
+        self._leave(key)
 
     def to_dict(self) -> dict[str, Any]:
         """Store form (keys may hold identities: never log it)."""
@@ -330,4 +385,11 @@ class BaselineBook:
                 book.evicted += 1
                 continue
             book._states[key[:MAX_KEY_LEN]] = state
+            book._join(key[:MAX_KEY_LEN], _stored_group(key))
         return book
+
+
+def _stored_group(key: str) -> str:
+    """Group of a stored key: ``"<router>|<detector>"`` of a detector key."""
+    parts = key.split("|", 2)
+    return "|".join(parts[:2]) if len(parts) == 3 else NO_GROUP

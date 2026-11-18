@@ -11,7 +11,15 @@ English reason. Hard rules (plan 2):
 * with no usable source at all (or no assessable factor) the score is
   ``None`` (unknown), never 100;
 * a factor whose source is missing is *not assessable*: it neither deducts
-  0 (which would look "clean") nor anything else, and its weight drops out.
+  0 (which would look "clean") nor anything else, and its weight drops out;
+  so does a factor whose value is missing or not finite (NaN, inf). While
+  any factor is not assessable the score stays below 100;
+* a factor is *partially assessable* (``partial``) when a detector behind it
+  reported a limitation (``compute_score(limitations=...)``, e.g.
+  ``dest_zone_unknown`` or ``capacity``) or when an "any source" factor
+  misses one of its expected sources. Its reason always says so ("none
+  (partial: ...)", never a plain "none"), and a limitation lowers the
+  coverage by half the factor's share of the weights.
 
 No clock, no I/O: inputs are counts and :class:`SourceStatus` values.
 """
@@ -19,6 +27,7 @@ No clock, no I/O: inputs are counts and :class:`SourceStatus` values.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -148,6 +157,8 @@ class FactorScore:
     reason: str
     value: float | None = None
     missing: tuple[str, ...] = ()
+    partial: bool = False  # assessable, but with a limitation or a gap
+    limitations: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -159,6 +170,8 @@ class FactorScore:
             "reason": self.reason,
             "value": self.value,
             "missing": list(self.missing),
+            "partial": self.partial,
+            "limitations": list(self.limitations),
         }
 
 
@@ -256,7 +269,12 @@ def incident_load(severities: Iterable[Severity | str]) -> float:
 
 
 def _factor(
-    rule: FactorRule, value: float | None, statuses: Mapping[str, SourceStatus]
+    rule: FactorRule,
+    value: float | None,
+    statuses: Mapping[str, SourceStatus],
+    *,
+    limits: tuple[str, ...] = (),
+    expected: frozenset[str] = frozenset(),
 ) -> FactorScore:
     missing = tuple(
         sorted(s for s in rule.sources if not (statuses.get(s) and statuses[s].usable))
@@ -270,28 +288,53 @@ def _factor(
             reason="not assessable: source unavailable",
             missing=missing,
         )
-    if value is None:
+    if not _finite(value):
         return FactorScore(
             id=rule.id,
             weight=rule.weight,
             deduction=None,
             assessable=False,
-            reason="not assessable: no value provided",
+            reason="not assessable: no value provided"
+            if value is None
+            else "not assessable: value not finite",
             missing=missing,
         )
-    deduction = round(min(rule.weight, max(0.0, value) * rule.per_unit), 2)
+    number = float(value)  # type: ignore[arg-type]
+    deduction = round(min(rule.weight, max(0.0, number) * rule.per_unit), 2)
     reason = (
-        f"{rule.description}: {value:g}" if deduction else f"{rule.description}: none"
+        f"{rule.description}: {number:g}" if deduction else f"{rule.description}: none"
     )
+    gaps = (*limits, *(f"missing {s}" for s in missing if s in expected))
+    if gaps:
+        reason = f"{reason} (partial: {', '.join(gaps)})"
     return FactorScore(
         id=rule.id,
         weight=rule.weight,
         deduction=deduction,
         assessable=True,
         reason=reason,
-        value=float(value),
+        value=number,
         missing=missing,
+        partial=bool(gaps),
+        limitations=limits,
     )
+
+
+def _finite(value: Any) -> bool:
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _limits_of(
+    limitations: Mapping[str, Iterable[str]] | None, factor_id: str
+) -> tuple[str, ...]:
+    raw = (limitations or {}).get(factor_id) or ()
+    if isinstance(raw, str):
+        raw = (raw,)
+    return tuple(dict.fromkeys(str(x)[:64] for x in raw if x))
 
 
 def compute_score(
@@ -301,37 +344,71 @@ def compute_score(
     rules: Iterable[FactorRule] = DEFAULT_RULES,
     expected: Iterable[str] = DEFAULT_EXPECTED_SOURCES,
     stale_credit: float = 0.0,
+    limitations: Mapping[str, Iterable[str]] | None = None,
 ) -> ScoreResult:
     """Score from factor ``values`` (factor id → count; None = unknown).
 
-    The coverage factor's value is filled in here (missing coverage points).
+    ``limitations`` maps a factor id to the limitations its detectors
+    reported (``DetectorResult.limitation``), e.g. ``{"segmentation":
+    ("dest_zone_unknown",)}``: that factor is then partially assessable and
+    the coverage drops by half its share of the factor weights. The coverage
+    factor's value is filled in here (missing coverage points).
     Not-assessable factors drop out; the remaining deductions are scaled to
     the full 100 points so a missing factor neither helps nor hurts, and the
-    result is then capped by :func:`score_cap`.
+    result is then capped by :func:`score_cap` (below 100 while a factor is
+    not assessable).
     """
+    rules = tuple(rules)
+    expected = frozenset(expected)
     cov = monitoring_coverage(statuses, expected, stale_credit=stale_credit)
-    cap = score_cap(cov.coverage)
-    filled = {**values, FACTOR_COVERAGE: float(100 - cov.coverage)}
-    factors = tuple(_factor(r, filled.get(r.id), statuses) for r in rules)
+    limits = {r.id: _limits_of(limitations, r.id) for r in rules}
+    coverage = _limited_coverage(cov.coverage, rules, limits, statuses)
+    cap = score_cap(coverage)
+    filled = {**values, FACTOR_COVERAGE: float(100 - coverage)}
+    factors = tuple(
+        _factor(r, filled.get(r.id), statuses, limits=limits[r.id], expected=expected)
+        for r in rules
+    )
     judged = [f for f in factors if f.assessable and f.id != FACTOR_COVERAGE]
-    if cov.coverage <= 0 or not judged:
+    if coverage <= 0 or not judged:
         return ScoreResult(
             score=None,
-            coverage=cov.coverage,
+            coverage=coverage,
             cap=cap,
             factors=factors,
             reason="unknown: no usable data source",
         )
+    reason = "complete" if coverage >= 100 else f"capped at {cap}: partial coverage"
+    if any(not f.assessable for f in factors) and cap > MAX_PARTIAL_SCORE:
+        cap = MAX_PARTIAL_SCORE
+        reason = f"capped at {cap}: a factor is not assessable"
     assessed = [f for f in factors if f.assessable]
     weight = sum(f.weight for f in assessed)
     lost = sum(f.deduction or 0.0 for f in assessed)
     raw = 100.0 * (1.0 - lost / weight) if weight > 0 else 0.0
     score = max(0, min(cap, round(raw)))
-    reason = "complete" if cov.coverage >= 100 else f"capped at {cap}: partial coverage"
     return ScoreResult(
         score=score,
-        coverage=cov.coverage,
+        coverage=coverage,
         cap=cap,
         factors=factors,
         reason=reason,
     )
+
+
+def _limited_coverage(
+    coverage: int,
+    rules: tuple[FactorRule, ...],
+    limits: Mapping[str, tuple[str, ...]],
+    statuses: Mapping[str, SourceStatus],
+) -> int:
+    """Coverage minus half the weight share of every limited factor."""
+    weights = sum(r.weight for r in rules if r.id != FACTOR_COVERAGE)
+    if weights <= 0:
+        return coverage
+    share = sum(
+        r.weight
+        for r in rules
+        if r.id != FACTOR_COVERAGE and limits.get(r.id) and r.assessable(statuses)
+    )
+    return max(0, math.floor(coverage - 100.0 * 0.5 * share / weights))

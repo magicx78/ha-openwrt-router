@@ -49,6 +49,7 @@ from .log_parser import (
     parse_entry,
 )
 from .security_logsrc import (
+    DEFAULT_MAX_FUTURE_S,
     MAX_LINE_BYTES,
     MAX_MSG_CHARS,
     MAX_ROUTER_CHARS,
@@ -173,6 +174,7 @@ class LineResult:
     record: SecLogRecord | None = None
     truncated: bool = False
     ts_estimated: bool = False
+    ts_future: bool = False  # dated too far after recv: ``ts`` is recv
 
 
 class StreamLine(NamedTuple):
@@ -180,6 +182,19 @@ class StreamLine(NamedTuple):
 
     data: bytes
     truncated: bool
+
+    def __repr__(self) -> str:
+        """Length only: the line carries identities."""
+        return f"StreamLine(bytes={len(self.data)}, truncated={self.truncated})"
+
+
+class Timing(NamedTuple):
+    """Result of :func:`resolve_time`."""
+
+    ts: float
+    estimated: bool  # ``ts`` is the receive time, not the line's own time
+    local_wall: int
+    future: bool = False  # line dated more than ``max_future_s`` after recv
 
 
 # =============================================================================
@@ -333,15 +348,22 @@ def valid_offset(tz_offset_s: Any) -> float | None:
 
 
 def resolve_time(
-    header: RemoteHeader, recv: float, tz_offset_s: float | None
-) -> tuple[float, bool, int] | None:
-    """``(ts, estimated, local_wall)`` of a head; None if the date is impossible.
+    header: RemoteHeader,
+    recv: float,
+    tz_offset_s: float | None,
+    *,
+    max_future_s: float = DEFAULT_MAX_FUTURE_S,
+) -> Timing | None:
+    """:class:`Timing` of a head; None if the date is impossible.
 
     The year comes from the receive time: of the previous, current and next
     year the one closest to the router's "now" wins (a December line
     received in January belongs to the old year). ``local_wall`` is the
     router's wall clock as epoch seconds read as UTC. Without a valid zone
-    offset ``ts`` is ``recv`` and ``estimated`` is True (plan 4.4).
+    offset ``ts`` is ``recv`` and ``estimated`` is True (plan 4.4). A line
+    dated more than ``max_future_s`` after ``recv`` (forged, or a broken
+    clock) also gets ``ts = recv``, ``estimated`` and ``future`` (review H1):
+    no line can push a time mark into the future.
     """
     offset = valid_offset(tz_offset_s)
     local_now = recv + (offset or 0.0)
@@ -365,8 +387,11 @@ def resolve_time(
     if best is None:
         return None
     if offset is None:
-        return recv, True, int(best)
-    return best - offset, False, int(best)
+        return Timing(recv, True, int(best))
+    ts = best - offset
+    if ts > recv + max(0.0, max_future_s):
+        return Timing(recv, True, int(best), True)
+    return Timing(ts, False, int(best))
 
 
 # =============================================================================
@@ -614,13 +639,16 @@ def parse_remote_line(
     assigner: KeyAssigner,
     prefix: str | None = None,
     truncated: bool = False,
+    max_future_s: float = DEFAULT_MAX_FUTURE_S,
 ) -> LineResult:
     """One received line → :class:`LineResult` (never raises).
 
     ``router`` is the caller's opaque id of the sender (never taken from
     the line's HOST field), ``path`` the delivery path (``LogPath`` value),
     ``recv`` the receive time, ``assigner`` the stream's key assigner and
-    ``truncated`` the flag of a :class:`StreamLine`.
+    ``truncated`` the flag of a :class:`StreamLine`. A line dated more than
+    ``max_future_s`` after ``recv`` gets ``ts = recv`` and the fields
+    ``ts_estimated`` and ``ts_future``.
     """
     try:
         return _parse_remote_line(
@@ -632,6 +660,7 @@ def parse_remote_line(
             assigner=assigner,
             prefix=prefix,
             truncated=truncated,
+            max_future_s=max_future_s,
         )
     except Exception as err:  # noqa: BLE001 - foreign input must never raise
         _LOGGER.debug("Remote log line not parsed (%s)", type(err).__name__)
@@ -648,6 +677,7 @@ def _parse_remote_line(
     assigner: KeyAssigner,
     prefix: str | None,
     truncated: bool,
+    max_future_s: float,
 ) -> LineResult:
     if (
         not isinstance(router, str)
@@ -660,13 +690,15 @@ def _parse_remote_line(
     header = parse_remote_header(data, prefix=prefix, truncated=truncated)
     if header is None:
         return LineResult(outcome=OUTCOME_INVALID)
-    timing = resolve_time(header, float(recv), tz_offset_s)
+    timing = resolve_time(header, float(recv), tz_offset_s, max_future_s=max_future_s)
     if timing is None:
         return LineResult(outcome=OUTCOME_INVALID, truncated=header.truncated)
-    ts, estimated, local_wall = timing
+    ts, estimated, local_wall, future = timing
     kind, fields = parse_message(header.proc, header.msg)
     if estimated:
         fields["ts_estimated"] = True
+    if future:
+        fields["ts_future"] = True
     if header.truncated:
         fields["truncated"] = True
     second = second_token(ts, estimated=estimated, local_wall=local_wall)
@@ -688,4 +720,5 @@ def _parse_remote_line(
         record=record,
         truncated=header.truncated,
         ts_estimated=estimated,
+        ts_future=future,
     )

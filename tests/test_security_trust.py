@@ -253,3 +253,42 @@ def test_case21_trust_privacy(caplog: pytest.LogCaptureFixture) -> None:
         assert ident not in text
         for record in caplog.records:
             assert ident not in record.getMessage()
+
+
+def _fake(i: int) -> str:
+    return f"00:aa:00:00:{i // 256:02x}:{i % 256:02x}"
+
+
+def test_review_h4_suspicious_device_survives_mac_flood() -> None:
+    book = TrustBook(max_entries=100)
+    book.observe(live(first_seen=T0 - 10 * 86400), T0)
+    book.add_indicator(MAC, Indicator.AUTH_FAILURES, T0)
+    assert kinds(book.add_indicator(MAC, Indicator.PORT_SCAN, T0)) == [
+        NoticeKind.SUSPICIOUS
+    ]
+    notices: list = []
+    for i in range(500):  # forged MACs that only ever appear in indicators
+        notices += book.add_indicator(_fake(i), Indicator.AUTH_FAILURES, T0 + 1)
+    assert book.state(MAC, T0 + 2) is TrustState.SUSPICIOUS
+    assert len(book) <= 100
+    unobserved = [m for m in (_fake(i) for i in range(500)) if book.get(m)]
+    assert 0 < len(unobserved) <= book.max_indicator_only
+    # every displaced entry with indicators is counted and reported
+    assert book.capacity_overflow == 500 - len(unobserved)
+    assert NoticeKind.CAPACITY in kinds(tuple(notices))
+
+
+def test_review_h4_full_protected_area_reports_instead_of_evicting() -> None:
+    book = TrustBook(max_entries=4)
+    macs = [f"3c:22:fb:00:01:0{i}" for i in range(5)]
+    for mac in macs[:4]:
+        book.observe(live(mac), T0)
+        book.add_indicator(mac, Indicator.PORT_SCAN, T0)
+    notices = book.observe(live(macs[4]), T0 + 1)
+    assert kinds(notices) == [NoticeKind.CAPACITY]
+    assert all(book.get(m) is not None for m in macs[:4])
+    assert book.capacity_overflow == 1
+    # once the indicators are old, such an entry may make room again
+    late = T0 + book.indicator_window_s + 10
+    assert NoticeKind.CAPACITY not in kinds(book.observe(live(macs[4]), late))
+    assert book.get(macs[4]) is not None and len(book) == 4

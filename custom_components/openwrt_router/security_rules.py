@@ -13,8 +13,17 @@ Every detector has ``id``, ``sources`` (capability names it needs),
 ``describe()`` and ``evaluate(now, statuses)``. For a router whose source is
 missing or stale the result is ``not_available`` / ``stale`` with the
 missing sources, never "no finding". Memory is bounded everywhere: windows
-are bucketed, every per-key map is an LRU with ``max_keys``; one router's
-restart resets only that router's windows (:class:`RestartGuard`).
+are bucketed, every router has its own LRU of at most ``max_keys`` keys and
+at most ``max_routers`` routers are kept; one router's restart resets only
+that router's windows (:class:`RestartGuard`).
+
+Log lines are forgeable (review H1-H3, M1). No state that one line or one
+router's flood can set may silently swallow another router's, client's or
+detector's events: a time more than ``max_ahead_s`` ahead of the reference
+(receive time, else the evaluation clock) is clamped and counted
+(``future_ts``), a router's evictions only hit that router, and every lost
+state shows up as ``limitation`` (``capacity``, ``baseline_capacity``) with
+``evicted`` while the window runs.
 
 Core contract symbols are only used through ``security_model``.
 """
@@ -42,6 +51,7 @@ from .security_model import (
     assess,
     event_type,
     make_correlation_id,
+    make_dedup_key,
     make_event_id,
     missing_status,
     normalize_mac,
@@ -52,7 +62,14 @@ _LOGGER = logging.getLogger(__name__)
 STORE_VERSION: Final = 1
 DEFAULT_MAX_KEYS: Final = 2048
 DEFAULT_MAX_ROUTERS: Final = 256
+# Routers with own detector state (fleet of a handful of routers; worst case
+# max_routers x max_keys slots per detector, see _BaseDetector).
+DEFAULT_DETECTOR_ROUTERS: Final = 16
+# Tolerance for a time ahead of its reference (clock skew, batching).
+DEFAULT_MAX_AHEAD_S: Final = 120.0
 WINDOW_BUCKETS: Final = 30  # resolution = window / 30
+LIMIT_CAPACITY: Final = "capacity"  # state of the router was evicted/refused
+LIMIT_BASELINE_CAPACITY: Final = "baseline_capacity"  # a baseline was evicted
 
 # --- Wi-Fi event kinds (net_rules / log_parser vocabulary, plan 1.4) --------
 AUTH_FAIL_KINDS: Final = frozenset(
@@ -85,43 +102,91 @@ NXDOMAIN_CODES: Final = frozenset({"nxdomain", "3"})
 class WindowCounter:
     """Event count over the last ``window_s`` seconds in fixed-size buckets.
 
-    Memory: at most ``WINDOW_BUCKETS + 2`` buckets; ``add`` and ``count`` are
-    O(1) amortised. A value older than the newest bucket but still inside
-    the window is added to the newest bucket (bounded, slightly late);
-    older values are dropped.
+    Memory: at most ``(window_s + max_ahead_s) / resolution_s + 2`` buckets
+    (30 for the window plus 6 for a 600 s window with the default tolerance;
+    plus 60 for a 60 s window). A value older than the newest bucket goes
+    into its own bucket (at most that many steps back); values older than
+    the window are dropped. A time more than ``max_ahead_s`` after the last
+    known now (``count`` time or :meth:`see_now`) is clamped to that now and
+    counted in ``clamped``; a bucket that is that far ahead at ``count`` time
+    (added before any now was known) is moved to now. So one forged future
+    time can never expire the real events (review H2).
     """
 
-    __slots__ = ("_buckets", "_total", "resolution_s", "window_s")
+    __slots__ = (
+        "_buckets",
+        "_now",
+        "_total",
+        "clamped",
+        "max_ahead_s",
+        "resolution_s",
+        "window_s",
+    )
 
-    def __init__(self, window_s: float, resolution_s: float | None = None) -> None:
+    def __init__(
+        self,
+        window_s: float,
+        resolution_s: float | None = None,
+        *,
+        max_ahead_s: float = DEFAULT_MAX_AHEAD_S,
+    ) -> None:
         """Create an empty window."""
         self.window_s = max(1.0, float(window_s))
         res = resolution_s if resolution_s else self.window_s / WINDOW_BUCKETS
         self.resolution_s = max(0.001, float(res))
+        self.max_ahead_s = max(0.0, float(max_ahead_s))
         self._buckets: deque[list[float]] = deque()
         self._total = 0.0
+        self._now: float | None = None
+        self.clamped = 0
 
     def __len__(self) -> int:
         """Number of buckets held (for memory checks)."""
         return len(self._buckets)
 
+    def see_now(self, now: float | None) -> None:
+        """Note a trusted current time (receive or evaluation time)."""
+        if now is not None and (self._now is None or now > self._now):
+            self._now = now
+
     def add(self, ts: float, n: float = 1.0) -> None:
         """Count ``n`` events at ``ts``."""
+        if self._now is not None and ts > self._now + self.max_ahead_s:
+            ts = self._now
+            self.clamped += 1
         start = math.floor(ts / self.resolution_s) * self.resolution_s
         buckets = self._buckets
-        if buckets and start <= buckets[-1][0]:
-            if start <= buckets[-1][0] - self.window_s:
-                return  # far older than the window: dropped
-            buckets[-1][1] += n
-        else:
-            buckets.append([start, n])
+        if buckets and start <= buckets[-1][0] - self.window_s - self.max_ahead_s:
+            return  # far older than the window: dropped
+        self._put(start, n)
         self._total += n
-        self._expire(buckets[-1][0])
+        self._expire(buckets[-1][0] - self.max_ahead_s)
+
+    def _put(self, start: float, n: float) -> None:
+        buckets = self._buckets
+        index = len(buckets)
+        while index and buckets[index - 1][0] > start:
+            index -= 1
+        if index and buckets[index - 1][0] == start:
+            buckets[index - 1][1] += n
+        else:
+            buckets.insert(index, [start, n])
 
     def count(self, now: float) -> float:
         """Events within ``window_s`` before ``now``."""
+        self.see_now(now)
+        self._heal(now)
         self._expire(now)
         return self._total
+
+    def _heal(self, now: float) -> None:
+        buckets = self._buckets
+        moved = 0.0
+        while buckets and buckets[-1][0] > now + self.max_ahead_s:
+            moved += buckets.pop()[1]
+            self.clamped += 1
+        if moved:
+            self._put(math.floor(now / self.resolution_s) * self.resolution_s, moved)
 
     def _expire(self, now: float) -> None:
         limit = now - self.window_s
@@ -158,42 +223,88 @@ class DistinctWindow:
 
     Ordered by last sighting; expiry pops from the front (O(1) amortised).
     When more than ``max_items`` are live the oldest is dropped and
-    ``saturated`` is set: the count is then a lower bound.
+    ``saturated`` is set: the count is then a lower bound. A time more than
+    ``max_ahead_s`` after the last known now is clamped to it (``clamped``);
+    an item that far ahead at ``count`` time is moved to now, so a forged
+    future item cannot block the expiry of the others (review H2).
     """
 
-    __slots__ = ("_seen", "max_items", "saturated", "window_s")
+    __slots__ = (
+        "_max_ts",
+        "_now",
+        "_seen",
+        "clamped",
+        "max_ahead_s",
+        "max_items",
+        "saturated",
+        "window_s",
+    )
 
-    def __init__(self, window_s: float, max_items: int = 512) -> None:
+    def __init__(
+        self,
+        window_s: float,
+        max_items: int = 512,
+        *,
+        max_ahead_s: float = DEFAULT_MAX_AHEAD_S,
+    ) -> None:
         """Create an empty window."""
         self.window_s = max(1.0, float(window_s))
         self.max_items = max(1, int(max_items))
+        self.max_ahead_s = max(0.0, float(max_ahead_s))
         self._seen: OrderedDict[str, float] = OrderedDict()
         self.saturated = False
+        self._now: float | None = None
+        self._max_ts: float | None = None
+        self.clamped = 0
 
     def __len__(self) -> int:
         """Items held (for memory checks)."""
         return len(self._seen)
 
+    def see_now(self, now: float | None) -> None:
+        """Note a trusted current time (receive or evaluation time)."""
+        if now is not None and (self._now is None or now > self._now):
+            self._now = now
+
     def add(self, item: str, ts: float) -> None:
         """Note ``item`` at ``ts``."""
+        if self._now is not None and ts > self._now + self.max_ahead_s:
+            ts = self._now
+            self.clamped += 1
         seen = self._seen
         old = seen.get(item)
         seen[item] = ts if old is None else max(ts, old)
         seen.move_to_end(item)
+        if self._max_ts is None or ts > self._max_ts:
+            self._max_ts = ts
         if len(seen) > self.max_items:
             seen.popitem(last=False)
             self.saturated = True
-        self._expire(ts)
+        self._expire(ts - self.max_ahead_s)
 
     def count(self, now: float) -> int:
         """Distinct items within the window."""
+        self._heal(now)
         self._expire(now)
         return len(self._seen)
 
     def items(self, now: float) -> tuple[str, ...]:
         """Live items, oldest first."""
+        self._heal(now)
         self._expire(now)
         return tuple(self._seen)
+
+    def _heal(self, now: float) -> None:
+        self.see_now(now)
+        limit = now + self.max_ahead_s
+        if self._max_ts is None or self._max_ts <= limit:
+            return
+        seen = self._seen
+        for item in [i for i, ts in seen.items() if ts > limit]:
+            seen[item] = now
+            seen.move_to_end(item)
+            self.clamped += 1
+        self._max_ts = max(seen.values(), default=None)
 
     def discard_prefix(self, prefix: str) -> None:
         """Drop every item starting with ``prefix`` (router reset)."""
@@ -368,10 +479,17 @@ class DetectorResult:
     events: tuple[SecurityEvent, ...] = ()
     missing: tuple[str, ...] = ()
     learning: bool = False
-    # Available but partly blind, e.g. DEST_ZONE_UNKNOWN (inter-VLAN): an
-    # empty result then means "nothing seen", not "all clear".
+    # Available but partly blind, e.g. DEST_ZONE_UNKNOWN (inter-VLAN) or
+    # LIMIT_CAPACITY: an empty result then means "nothing seen", not "all
+    # clear". Several limitations are joined with ",".
     limitation: str | None = None
     unattributed: int = 0  # records in the window that could not be judged
+    evicted: int = 0  # window state / baselines lost in the window (capacity)
+
+    @property
+    def limitations(self) -> tuple[str, ...]:
+        """The single limitations (empty when there is none)."""
+        return tuple(self.limitation.split(",")) if self.limitation else ()
 
     @property
     def available(self) -> bool:
@@ -422,30 +540,75 @@ def check_sources(
     return worst, tuple(missing)
 
 
-class _Slot:
-    """Per-key window state."""
+def join_limitations(*limits: str | None) -> str | None:
+    """Several limitations as one ``limitation`` value (None if none)."""
+    parts = [p for limit in limits if limit for p in limit.split(",")]
+    return ",".join(dict.fromkeys(parts)) or None
 
-    __slots__ = ("count", "distinct", "examples", "extra", "last_fail", "last_ok")
+
+class _Slot:
+    """Per-key window state (``size`` counts every stored entry)."""
+
+    __slots__ = (
+        "count",
+        "distinct",
+        "examples",
+        "extra",
+        "last_fail",
+        "last_ok",
+        "parts",
+        "sampled",
+    )
 
     def __init__(self) -> None:
         self.count: WindowCounter | None = None
         self.extra: WindowCounter | None = None
         self.distinct: DistinctWindow | None = None
+        self.parts: dict[str, WindowCounter] | None = None  # per-router counts
         self.examples: list[str] = []
         self.last_fail: float | None = None
         self.last_ok: float | None = None
+        self.sampled: float | None = None  # last baseline sample (review M4)
+
+    def windows(self) -> Iterator[WindowCounter | DistinctWindow]:
+        for win in (self.count, self.extra, self.distinct):
+            if win is not None:
+                yield win
+        if self.parts:
+            yield from self.parts.values()
+
+    def see_now(self, now: float | None) -> None:
+        for win in self.windows():
+            win.see_now(now)
 
     def size(self) -> int:
         return (
-            (len(self.count) if self.count else 0)
-            + (len(self.extra) if self.extra else 0)
-            + (len(self.distinct) if self.distinct else 0)
+            1
+            + sum(len(win) for win in self.windows())
+            + (len(self.parts) if self.parts else 0)
             + len(self.examples)
+            + (self.sampled is not None)
         )
 
 
 class _BaseDetector:
-    """Shared window keeping, cooldown and per-router evaluation."""
+    """Shared window keeping, cooldown and per-router evaluation.
+
+    State per router (review H3): every router has its own LRU of at most
+    ``max_keys`` keys, so a flood at one router only evicts that router's
+    keys; at most ``max_routers`` routers are kept (a further router is not
+    stored). Worst case per detector: ``max_routers * max_keys`` slots. Each
+    eviction or refused input is counted per router; while such a loss lies
+    inside ``window_s`` the router's result carries ``limitation`` =
+    ``capacity`` and ``evicted``, so "no finding" is never reported over
+    lost state.
+
+    Times (review H2): an input time more than ``max_ahead_s`` after its
+    reference is clamped to the reference and counted in ``future_ts``. The
+    reference is the record's ``recv`` (receive time) if it has one, else
+    the last evaluation time plus the last evaluation interval (at most
+    ``window_s``).
+    """
 
     id: str = ""
     name: str = ""
@@ -460,15 +623,26 @@ class _BaseDetector:
         window_s: float,
         threshold: float,
         max_keys: int = DEFAULT_MAX_KEYS,
+        max_routers: int = DEFAULT_DETECTOR_ROUTERS,
+        max_ahead_s: float = DEFAULT_MAX_AHEAD_S,
         cooldown_s: float | None = None,
     ) -> None:
         self.window_s = float(window_s)
         self.threshold = threshold
         self.max_keys = max(1, int(max_keys))
+        self.max_routers = max(1, int(max_routers))
+        self.max_ahead_s = max(0.0, float(max_ahead_s))
         self.cooldown_s = self.window_s if cooldown_s is None else float(cooldown_s)
-        self.evicted = 0
-        self._slots: OrderedDict[tuple[str, ...], _Slot] = OrderedDict()
+        self.evicted = 0  # slots evicted or inputs refused (all time)
+        self.future_ts = 0  # input times clamped to their reference
+        self._slots: dict[tuple[str, ...], _Slot] = {}
+        self._lru: dict[str, OrderedDict[tuple[str, ...], None]] = {}
         self._reported: OrderedDict[tuple[str, ...], float] = OrderedDict()
+        self._loss: OrderedDict[tuple[str, str], WindowCounter] = OrderedDict()
+        self._clock: float | None = None  # last evaluation time
+        self._interval = 0.0  # last evaluation interval
+        self._ref: float | None = None  # reference time of the current input
+        self._cur_ts = 0.0  # (clamped) time of the current input
 
     def __repr__(self) -> str:
         """No keys (they hold identities)."""
@@ -479,39 +653,108 @@ class _BaseDetector:
 
     # --- state -------------------------------------------------------------
 
+    def _accept_ts(self, ts: float, recv: Any = None) -> float:
+        """Input time, clamped to its reference if too far ahead (H2)."""
+        ref: float | None = float(recv) if _is_num(recv) else None
+        if ref is None and self._clock is not None:
+            ref = self._clock + self._interval
+        self._ref = ref
+        if ref is not None and ts > ref + self.max_ahead_s:
+            self.future_ts += 1
+            ts = ref
+        self._cur_ts = ts
+        return ts
+
+    def _tick(self, now: float) -> None:
+        """Note an evaluation time (reference for inputs without recv)."""
+        if self._clock is not None and now > self._clock:
+            self._interval = min(now - self._clock, self.window_s)
+        if self._clock is None or now > self._clock:
+            self._clock = now
+
     def _slot(self, key: tuple[str, ...]) -> _Slot:
         slot = self._slots.get(key)
-        if slot is None:
-            if len(self._slots) >= self.max_keys:
-                self._slots.popitem(last=False)
-                self.evicted += 1
-            slot = self._new_slot()
-            self._slots[key] = slot
-        else:
-            self._slots.move_to_end(key)
+        if slot is not None:
+            self._lru[key[0]].move_to_end(key)
+            slot.see_now(self._ref)
+            return slot
+        router = key[0]
+        lru = self._lru.get(router)
+        if lru is None:
+            if len(self._lru) >= self.max_routers:
+                self._note_loss(router, LIMIT_CAPACITY, self._cur_ts)
+                return self._new_slot()  # router table full: not stored
+            lru = self._lru[router] = OrderedDict()
+        if len(lru) >= self.max_keys:
+            old, _ = lru.popitem(last=False)
+            del self._slots[old]
+            self._reported.pop(old, None)
+            self._note_loss(router, LIMIT_CAPACITY, self._cur_ts)
+        slot = self._new_slot()
+        slot.see_now(self._ref)
+        self._slots[key] = slot
+        lru[key] = None
         return slot
 
     def _new_slot(self) -> _Slot:
         slot = _Slot()
-        slot.count = WindowCounter(self.window_s)
+        slot.count = WindowCounter(self.window_s, max_ahead_s=self.max_ahead_s)
         return slot
 
+    def _note_loss(self, router: str, reason: str, ts: float, n: int = 1) -> None:
+        """Count lost state of ``router`` (shown as limitation in the window)."""
+        if n <= 0:
+            return
+        if reason == LIMIT_CAPACITY:
+            self.evicted += n
+        key = (router, reason)
+        win = self._loss.get(key)
+        if win is None:
+            if len(self._loss) >= 2 * self.max_routers:
+                self._loss.popitem(last=False)
+            win = self._loss[key] = WindowCounter(
+                self.window_s, max_ahead_s=self.max_ahead_s
+            )
+        else:
+            self._loss.move_to_end(key)
+        win.add(ts, n)
+
+    def _limits(self, router: str, now: float) -> tuple[str | None, int]:
+        """``(limitation, evicted)`` of ``router`` from losses in the window."""
+        limits: list[str] = []
+        lost = 0
+        for reason in (LIMIT_CAPACITY, LIMIT_BASELINE_CAPACITY):
+            win = self._loss.get((router, reason))
+            count = int(win.count(now)) if win is not None else 0
+            if count > 0:
+                limits.append(reason)
+                lost += count
+        return join_limitations(*limits), lost
+
     def reset_router(self, router_id: str) -> None:
-        for store in (self._slots, self._reported):
-            for key in [k for k in store if k and k[0] == router_id]:
-                del store[key]
+        for key in self._lru.pop(router_id, {}):
+            self._slots.pop(key, None)
+        for key in [k for k in self._reported if k and k[0] == router_id]:
+            del self._reported[key]
 
     def state_size(self) -> int:
-        return sum(slot.size() for slot in self._slots.values()) + len(self._reported)
+        """Every stored entry: slots and their windows, cooldowns, losses."""
+        return (
+            sum(slot.size() for slot in self._slots.values())
+            + len(self._reported)
+            + len(self._lru)
+            + sum(1 + len(win) for win in self._loss.values())
+        )
 
     def _routers(self, statuses: Mapping[str, Any]) -> list[str]:
-        return sorted(set(statuses) | {k[0] for k in self._slots if k})
+        return sorted(set(statuses) | {r for r in self._lru if r})
 
     # --- evaluation ----------------------------------------------------------
 
     def evaluate(
         self, now: float, statuses: Mapping[str, Mapping[str, SourceStatus]]
     ) -> tuple[DetectorResult, ...]:
+        self._tick(now)
         results = []
         for router in self._routers(statuses):
             status, missing = check_sources(self.sources, statuses.get(router, {}))
@@ -526,6 +769,7 @@ class _BaseDetector:
                 )
                 continue
             events, learning = self._evaluate_router(router, now)
+            limitation, lost = self._limits(router, now)
             results.append(
                 DetectorResult(
                     detector_id=self.id,
@@ -533,17 +777,20 @@ class _BaseDetector:
                     status=Availability.AVAILABLE,
                     events=tuple(events),
                     learning=learning,
+                    limitation=limitation,
+                    evicted=lost,
                 )
             )
         return tuple(results)
+
+    def _router_slots(self, router: str) -> list[tuple[tuple[str, ...], _Slot]]:
+        return [(key, self._slots[key]) for key in self._lru.get(router, ())]
 
     def _evaluate_router(
         self, router: str, now: float
     ) -> tuple[list[SecurityEvent], bool]:
         events = []
-        for key, slot in list(self._slots.items()):
-            if key[0] != router:
-                continue
+        for key, slot in self._router_slots(router):
             event = self._check(key, slot, now)
             if event is not None and self._may_report(key, now):
                 events.append(event)
@@ -561,7 +808,7 @@ class _BaseDetector:
             return False
         self._reported[key] = now
         self._reported.move_to_end(key)
-        if len(self._reported) > self.max_keys:
+        if len(self._reported) > self.max_keys * self.max_routers:
             self._reported.popitem(last=False)
         return True
 
@@ -585,6 +832,9 @@ class _BaseDetector:
             ts=now,
             type=event_type(self.id),
             router_id=router_id,
+            # The whole key (AP, zone, area, client ...) tells findings apart:
+            # dedup never merges two APs or two configuration areas (M2).
+            dedup_key=make_dedup_key(self.id, *key[1:]),
             category=self.category,
             severity=severity,
             assessment=assess(indicators, data_source=self.data_source),
@@ -610,7 +860,8 @@ class _WifiDetector(_BaseDetector):
 
     def feed(self, item: Any) -> None:
         if isinstance(item, WifiSignal):
-            self._feed(item)
+            ts = self._accept_ts(item.ts)
+            self._feed(item if ts == item.ts else replace(item, ts=ts))
 
     def _feed(self, sig: WifiSignal) -> None:
         raise NotImplementedError
@@ -680,9 +931,13 @@ class WifiAuthManyClientsDetector(_WifiDetector):
     def _new_slot(self) -> _Slot:
         slot = _Slot()
         slot.distinct = DistinctWindow(
-            self.window_s, max_items=max(64, 4 * self.threshold)
+            self.window_s,
+            max_items=max(64, 4 * self.threshold),
+            max_ahead_s=self.max_ahead_s,
         )
-        slot.count = WindowCounter(self.window_s)  # NI auth-wave markers
+        slot.count = WindowCounter(
+            self.window_s, max_ahead_s=self.max_ahead_s
+        )  # NI auth-wave markers
         return slot
 
     def _feed(self, sig: WifiSignal) -> None:
@@ -780,7 +1035,9 @@ class WifiMultiApAuthDetector(_WifiDetector):
     """Authentication failures of one client at several APs/routers.
 
     A shared pattern indicator across the fleet (``router_id`` None); it does
-    not claim an attack. Keys are per client, items are ``router/ap``.
+    not claim an attack. Keys are per client, items are ``router/ap``; the
+    failures are counted per router, so one router's restart forgets only
+    that router's share (review L5).
     """
 
     id = "wifi_multi_ap_auth"
@@ -799,23 +1056,41 @@ class WifiMultiApAuthDetector(_WifiDetector):
 
     def _new_slot(self) -> _Slot:
         slot = _Slot()
-        slot.distinct = DistinctWindow(self.window_s, max_items=64)
-        slot.count = WindowCounter(self.window_s)
+        slot.distinct = DistinctWindow(
+            self.window_s,
+            max_items=64,
+            max_ahead_s=self.max_ahead_s,
+        )
+        slot.parts = {}
         return slot
 
     def _feed(self, sig: WifiSignal) -> None:
-        if sig.kind in AUTH_FAIL_KINDS and sig.client is not None:
-            slot = self._slot(("", sig.client))
-            slot.distinct.add(f"{sig.router_id}/{sig.ap or ''}", sig.ts)  # type: ignore[union-attr]
-            slot.count.add(sig.ts)  # type: ignore[union-attr]
+        if sig.kind not in AUTH_FAIL_KINDS or sig.client is None:
+            return
+        slot = self._slot(("", sig.client))
+        slot.distinct.add(f"{sig.router_id}/{sig.ap or ''}", sig.ts)  # type: ignore[union-attr]
+        parts = slot.parts if slot.parts is not None else {}
+        part = parts.get(sig.router_id)
+        if part is None:
+            if len(parts) >= self.max_routers:
+                self._note_loss("", LIMIT_CAPACITY, sig.ts)
+                return
+            part = WindowCounter(self.window_s, max_ahead_s=self.max_ahead_s)
+            parts[sig.router_id] = part
+            slot.parts = parts
+        part.see_now(self._ref)
+        part.add(sig.ts)
 
     def reset_router(self, router_id: str) -> None:
         for slot in self._slots.values():
             slot.distinct.discard_prefix(f"{router_id}/")  # type: ignore[union-attr]
+            if slot.parts:
+                slot.parts.pop(router_id, None)
 
     def evaluate(
         self, now: float, statuses: Mapping[str, Mapping[str, SourceStatus]]
     ) -> tuple[DetectorResult, ...]:
+        self._tick(now)
         usable = {
             r
             for r, st in statuses.items()
@@ -832,10 +1107,11 @@ class WifiMultiApAuthDetector(_WifiDetector):
                 ),
             )
         events = []
-        for key, slot in list(self._slots.items()):
+        for key, slot in self._router_slots(""):
             event = self._check(key, slot, now)
             if event is not None and self._may_report(key, now):
                 events.append(event)
+        limitation, lost = self._limits("", now)
         return (
             DetectorResult(
                 detector_id=self.id,
@@ -843,6 +1119,8 @@ class WifiMultiApAuthDetector(_WifiDetector):
                 status=Availability.AVAILABLE,
                 events=tuple(events),
                 missing=missing,
+                limitation=limitation,
+                evicted=lost,
             ),
         )
 
@@ -850,7 +1128,7 @@ class WifiMultiApAuthDetector(_WifiDetector):
         self, key: tuple[str, ...], slot: _Slot, now: float
     ) -> SecurityEvent | None:
         places = slot.distinct.items(now)  # type: ignore[union-attr]
-        failures = slot.count.count(now)  # type: ignore[union-attr]
+        failures = sum(part.count(now) for part in (slot.parts or {}).values())
         if len(places) < self.threshold or failures < self.min_failures:
             return None
         routers = {p.split("/", 1)[0] for p in places}
@@ -911,7 +1189,7 @@ class _LogDetector(_BaseDetector):
         ts = _get(item, "ts")
         if router is None or not _is_num(ts):
             return
-        self._feed(router, float(ts), item)
+        self._feed(router, self._accept_ts(float(ts), _get(item, "recv")), item)
 
     def _feed(self, router: str, ts: float, record: Any) -> None:
         raise NotImplementedError
@@ -944,7 +1222,6 @@ class FirewallBlockedDetector(_LogDetector):
     ) -> None:
         super().__init__(window_s=window_s, threshold=threshold, **kw)
         self.baseline = baseline if baseline is not None else BaselineBook()
-        self._sampled: dict[tuple[str, ...], float] = {}
 
     def _feed(self, router: str, ts: float, record: Any) -> None:
         zone = _text(_field(record, "zone"), 32) or "?"
@@ -955,8 +1232,6 @@ class FirewallBlockedDetector(_LogDetector):
 
     def reset_router(self, router_id: str) -> None:
         super().reset_router(router_id)
-        for key in [k for k in self._sampled if k[0] == router_id]:
-            del self._sampled[key]
         self.baseline.mark_gap(prefix=f"{router_id}|{self.id}|")
 
     def _evaluate_router(
@@ -964,15 +1239,13 @@ class FirewallBlockedDetector(_LogDetector):
     ) -> tuple[list[SecurityEvent], bool]:
         events: list[SecurityEvent] = []
         learning = False
-        for key, slot in list(self._slots.items()):
-            if key[0] != router:
+        group = f"{router}|{self.id}"
+        for key, slot in self._router_slots(router):
+            if slot.sampled is not None and now - slot.sampled < self.window_s:
                 continue
-            last = self._sampled.get(key)
-            if last is not None and now - last < self.window_s:
-                continue
-            self._sampled[key] = now
+            slot.sampled = now
             value = slot.count.count(now)  # type: ignore[union-attr]
-            verdict = self.baseline.observe(self._key(key), value, now)
+            verdict = self.baseline.observe(self._key(key), value, now, group=group)
             if verdict.status is not BaselineStatus.READY:
                 learning = learning or verdict.status is BaselineStatus.LEARNING
                 continue
@@ -997,6 +1270,8 @@ class FirewallBlockedDetector(_LogDetector):
                         ),
                     )
                 )
+        lost = self.baseline.pop_evictions(group)
+        self._note_loss(router, LIMIT_BASELINE_CAPACITY, now, lost)
         return events, learning
 
 
@@ -1028,7 +1303,9 @@ class FirewallPortScanDetector(_LogDetector):
     def _new_slot(self) -> _Slot:
         slot = _Slot()
         slot.distinct = DistinctWindow(
-            self.window_s, max_items=max(64, 2 * self.threshold)
+            self.window_s,
+            max_items=max(64, 2 * self.threshold),
+            max_ahead_s=self.max_ahead_s,
         )
         return slot
 
@@ -1162,7 +1439,7 @@ class FirewallInterVlanDetector(_LogDetector):
                 reverse=True,
             )
         )
-        self._meta: OrderedDict[str, _Slot] = OrderedDict()
+        self._meta: dict[str, _Slot] = {}
 
     def _dest_zone(self, record: Any) -> str | None:
         """Destination zone; ``""`` = external, None = not determinable."""
@@ -1180,15 +1457,21 @@ class FirewallInterVlanDetector(_LogDetector):
                 return zone
         return ""
 
-    def _meta_slot(self, router: str) -> _Slot:
+    def _meta_slot(self, router: str) -> _Slot | None:
         slot = self._meta.get(router)
         if slot is None:
-            if len(self._meta) >= DEFAULT_MAX_ROUTERS:
-                self._meta.popitem(last=False)
+            if len(self._meta) >= self.max_routers:
+                self._note_loss(router, LIMIT_CAPACITY, self._cur_ts)
+                return None  # router table full: reported as capacity
             slot = _Slot()
-            slot.count = WindowCounter(self.window_s)  # attributed forwards
-            slot.extra = WindowCounter(self.window_s)  # unattributable forwards
+            slot.count = WindowCounter(
+                self.window_s, max_ahead_s=self.max_ahead_s
+            )  # attributed forwards
+            slot.extra = WindowCounter(
+                self.window_s, max_ahead_s=self.max_ahead_s
+            )  # unattributable forwards
             self._meta[router] = slot
+        slot.see_now(self._ref)
         return slot
 
     def _feed(self, router: str, ts: float, record: Any) -> None:
@@ -1199,6 +1482,8 @@ class FirewallInterVlanDetector(_LogDetector):
             return
         dest_zone = self._dest_zone(record)
         meta = self._meta_slot(router)
+        if meta is None:
+            return
         if dest_zone is None:
             meta.extra.add(ts)  # type: ignore[union-attr]
             return
@@ -1217,7 +1502,8 @@ class FirewallInterVlanDetector(_LogDetector):
 
         Limited when unattributable forwards are in the window, or when
         there is no subnet map and no record with a destination zone was
-        seen (the detector then cannot see inter-VLAN traffic at all).
+        seen (the detector then cannot see inter-VLAN traffic at all). A
+        capacity limitation of the base class is kept.
         """
         out = []
         for result in super().evaluate(now, statuses):
@@ -1232,7 +1518,9 @@ class FirewallInterVlanDetector(_LogDetector):
                 replace(
                     result,
                     unattributed=unknown,
-                    limitation=DEST_ZONE_UNKNOWN if limited else None,
+                    limitation=join_limitations(
+                        result.limitation, DEST_ZONE_UNKNOWN if limited else None
+                    ),
                 )
             )
         return tuple(out)
@@ -1309,8 +1597,12 @@ class VlanDriftDetector(_BaseDetector):
 
     def _new_slot(self) -> _Slot:
         slot = _Slot()
-        slot.count = WindowCounter(self.window_s)  # all relevant changes
-        slot.extra = WindowCounter(self.window_s)  # critical ones
+        slot.count = WindowCounter(
+            self.window_s, max_ahead_s=self.max_ahead_s
+        )  # all relevant changes
+        slot.extra = WindowCounter(
+            self.window_s, max_ahead_s=self.max_ahead_s
+        )  # critical ones
         return slot
 
     def feed(self, item: Any) -> None:
@@ -1321,10 +1613,11 @@ class VlanDriftDetector(_BaseDetector):
         area = _text(_field(item, "area"), 48).lower()
         if router is None or not _is_num(ts) or not area.startswith(self.areas):
             return
+        when = self._accept_ts(float(ts), _get(item, "recv"))
         slot = self._slot((router, area))
-        slot.count.add(float(ts))  # type: ignore[union-attr]
+        slot.count.add(when)  # type: ignore[union-attr]
         if _field(item, "critical") is True:
-            slot.extra.add(float(ts))  # type: ignore[union-attr]
+            slot.extra.add(when)  # type: ignore[union-attr]
 
     def _check(
         self, key: tuple[str, ...], slot: _Slot, now: float
@@ -1404,7 +1697,6 @@ class DnsRateDetector(_DnsDetector):
     ) -> None:
         super().__init__(window_s=window_s, threshold=threshold, **kw)
         self.baseline = baseline if baseline is not None else BaselineBook()
-        self._sampled: dict[tuple[str, ...], float] = {}
 
     def _feed(self, router: str, ts: float, record: Any) -> None:
         client = self._client(record)
@@ -1413,8 +1705,6 @@ class DnsRateDetector(_DnsDetector):
 
     def reset_router(self, router_id: str) -> None:
         super().reset_router(router_id)
-        for key in [k for k in self._sampled if k[0] == router_id]:
-            del self._sampled[key]
         self.baseline.mark_gap(prefix=f"{router_id}|{self.id}|")
 
     def _evaluate_router(
@@ -1422,15 +1712,15 @@ class DnsRateDetector(_DnsDetector):
     ) -> tuple[list[SecurityEvent], bool]:
         events: list[SecurityEvent] = []
         learning = False
-        for key, slot in list(self._slots.items()):
-            if key[0] != router:
+        group = f"{router}|{self.id}"
+        for key, slot in self._router_slots(router):
+            if slot.sampled is not None and now - slot.sampled < self.window_s:
                 continue
-            last = self._sampled.get(key)
-            if last is not None and now - last < self.window_s:
-                continue
-            self._sampled[key] = now
+            slot.sampled = now
             value = slot.count.count(now)  # type: ignore[union-attr]
-            verdict = self.baseline.observe(f"{key[0]}|{self.id}|{key[1]}", value, now)
+            verdict = self.baseline.observe(
+                f"{key[0]}|{self.id}|{key[1]}", value, now, group=group
+            )
             if verdict.status is not BaselineStatus.READY:
                 learning = learning or verdict.status is BaselineStatus.LEARNING
                 continue
@@ -1452,6 +1742,8 @@ class DnsRateDetector(_DnsDetector):
                         ),
                     )
                 )
+        lost = self.baseline.pop_evictions(group)
+        self._note_loss(router, LIMIT_BASELINE_CAPACITY, now, lost)
         return events, learning
 
 
@@ -1484,8 +1776,12 @@ class DnsNxdomainDetector(_DnsDetector):
 
     def _new_slot(self) -> _Slot:
         slot = _Slot()
-        slot.count = WindowCounter(self.window_s)  # questions (dns.query)
-        slot.extra = WindowCounter(self.window_s)  # NXDOMAIN
+        slot.count = WindowCounter(
+            self.window_s, max_ahead_s=self.max_ahead_s
+        )  # questions (dns.query)
+        slot.extra = WindowCounter(
+            self.window_s, max_ahead_s=self.max_ahead_s
+        )  # NXDOMAIN
         return slot
 
     def _feed(self, router: str, ts: float, record: Any) -> None:
@@ -1529,7 +1825,11 @@ class DnsManyDomainsDetector(_DnsDetector):
 
     def _new_slot(self) -> _Slot:
         slot = _Slot()
-        slot.distinct = DistinctWindow(self.window_s, max_items=2 * int(self.threshold))
+        slot.distinct = DistinctWindow(
+            self.window_s,
+            max_items=2 * int(self.threshold),
+            max_ahead_s=self.max_ahead_s,
+        )
         return slot
 
     def _feed(self, router: str, ts: float, record: Any) -> None:

@@ -6,6 +6,7 @@ Placeholders only: RFC 5737 addresses, 02:00:00 MACs, example.org.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
@@ -468,3 +469,87 @@ class TestNullSource:
         assert data["received"] == 3 and data["parsed"] == 2 and data["invalid"] == 0
         assert all(isinstance(v, int) for v in data.values())
         assert "router" not in data and "x" not in data
+
+
+# =====================================================================
+# Independent review: forged lines must never swallow real ones
+# =====================================================================
+
+
+class TestReview:
+    def test_review_h1_future_ts_cannot_poison_hwm(self):
+        deduper = Deduper()
+        assigner = KeyAssigner()
+        # a collector-style record whose time was never checked by the parser
+        forged = _rec(assigner, "r1", T0 + 178 * 86_400, "forged", recv=T0)
+        deduper.filter([forged], now=T0)
+        assert deduper.hwm("r1") <= T0 + deduper.max_future_s
+        real = _stream("r1", T0 + 1, 39, assigner=assigner)
+        out = _feed(deduper, real, batch=5)
+        out += deduper.filter([forged], now=T0 + 45)  # forged duplicate
+        out += deduper.flush(now=T0 + 500)
+        assert out == real
+        assert deduper.stats().dup_old == 0
+        # a stored mark in the future is lowered by the next line
+        restored = Deduper.from_dict({"v": 1, "hwm": {"r1": T0 + 178 * 86_400}})
+        lines = _stream("r1", T0, 10)
+        assert _feed(restored, lines) == lines
+        assert restored.hwm("r1") <= T0 + 9.2 + restored.max_future_s
+        assert restored.stats().hwm_clamped >= 1
+
+    def test_review_h1_forged_mark_within_tolerance_cannot_drop_live_lines(self):
+        deduper = Deduper()
+        assigner = KeyAssigner()
+        forged = _rec(assigner, "r1", T0 + 100, "forged", recv=T0)
+        out = deduper.filter([forged], now=T0)
+        real = _stream("r1", T0 + 1, 30, assigner=assigner)
+        out += _feed(deduper, real, batch=3)
+        out += deduper.filter([forged, forged], now=T0 + 40)  # replay marker
+        out += deduper.flush(now=T0 + 500)
+        assert [r for r in out if r is not forged] == real
+
+    def test_review_h1_forged_old_line_in_run_keeps_real_lines(self):
+        for copies in (1, 2):
+            deduper = Deduper(hold_s=60)
+            assigner = KeyAssigner()
+            deduper.filter([_rec(assigner, "r1", T0, "before")], now=T0 + 1)
+            behind = T0 - 3600  # the router clock jumped back one hour
+            lines = [
+                _rec(assigner, "r1", behind + i, f"after {i}", recv=T0 + 10 + i)
+                for i in range(20)
+            ]
+            forged = _rec(assigner, "r1", T0 - 30 * 86_400, "forged", recv=T0 + 15)
+            deduper.filter(lines[:5] + [forged] * copies + lines[5:], now=T0 + 30)
+            released = deduper.flush(now=T0 + 80)
+            assert [r.msg for r in released] == [f"after {i}" for i in range(20)]
+            assert deduper.hwm("r1") == behind + 19
+            assert deduper.stats().dup_old == 1
+
+    def test_review_m3_accept_and_clamped_records_prove_nothing(self):
+        live = Liveness()
+        assigner = KeyAssigner()
+        assert "fw.accept" not in KIND_SOURCES
+        live.observe([_rec(assigner, "r1", T0, "accept", kind="fw.accept")])
+        status = live.status("r1", DataSource.FIREWALL_LOG, now=T0 + 5)
+        assert status.availability is Availability.NOT_AVAILABLE
+        clamped = replace(
+            _rec(assigner, "r1", T0, "drop", kind="fw.drop"),
+            fields={"ts_estimated": True, "ts_future": True},
+        )
+        live.observe([clamped])
+        status = live.status("r1", DataSource.FIREWALL_LOG, now=T0 + 5)
+        assert status.availability is Availability.NOT_AVAILABLE
+        live.observe([_rec(assigner, "r1", T0, "drop", kind="fw.drop")])
+        status = live.status("r1", DataSource.FIREWALL_LOG, now=T0 + 5)
+        assert status.availability is Availability.AVAILABLE
+        assert "never proof" in (Liveness.__doc__ or "")
+
+    def test_review_l2_out_of_order_identical_line_keeps_its_own_index(self):
+        assigner = KeyAssigner()
+        first = assigner.assign("r1", "100", "hostapd", "same")
+        assigner.assign("r1", "101", "x", "y")
+        second = assigner.assign("r1", "100", "hostapd", "same")
+        assert first != second and second.endswith(":1")
+        # a re-sent stretch far behind restarts the indices: same keys again
+        assigner.assign("r1", "5000", "p", "m")
+        assert assigner.assign("r1", "100", "hostapd", "same") == first

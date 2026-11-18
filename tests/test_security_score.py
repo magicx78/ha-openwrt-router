@@ -130,3 +130,33 @@ def test_coverage_factor_and_cap_formula() -> None:
     cov = result.factor(FACTOR_COVERAGE)
     assert cov is not None and cov.deduction is not None and cov.deduction > 0
     assert monitoring_coverage({}, expected=()).coverage == 0
+
+
+def test_review_l1_non_finite_value_is_not_assessable() -> None:
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        result = compute_score({**CLEAN, FACTOR_INCIDENTS: bad}, all_ok())
+        incidents = result.factor(FACTOR_INCIDENTS)
+        assert incidents is not None and not incidents.assessable
+        assert incidents.deduction is None and "not assessable" in incidents.reason
+        assert result.score is not None and result.score < 100
+
+
+def test_review_l4_limited_factor_is_partial_never_plain_none() -> None:
+    clean = compute_score(CLEAN, all_ok())
+    assert clean.score == 100 and clean.coverage == 100
+    limited = compute_score(
+        CLEAN, all_ok(), limitations={FACTOR_SEGMENTATION: ("dest_zone_unknown",)}
+    )
+    seg = limited.factor(FACTOR_SEGMENTATION)
+    assert seg is not None and seg.assessable and seg.partial
+    assert "dest_zone_unknown" in seg.reason and "partial" in seg.reason
+    assert limited.coverage < 100 and limited.score is not None
+    assert limited.score <= limited.cap < 100
+    # an "any source" factor with one expected source missing is partial too
+    no_dns = compute_score(CLEAN, all_ok(without=(DataSource.DNS_QUERY_LOG,)))
+    activity = no_dns.factor(FACTOR_ACTIVITY)
+    assert activity is not None and activity.assessable and activity.partial
+    assert DataSource.DNS_QUERY_LOG in activity.reason
+    for factor in (*limited.factors, *no_dns.factors):
+        if factor.partial:
+            assert factor.reason.endswith(")") and "partial" in factor.reason

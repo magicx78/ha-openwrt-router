@@ -60,13 +60,20 @@ DEFAULT_HOLD_S: Final = 60.0
 DEFAULT_MAX_HELD: Final = 5_000
 DEFAULT_SPREAD_S: Final = 120.0
 DEFAULT_MAX_ROUTERS: Final = 256
+# A line may be at most this far ahead of its receive time (clock skew,
+# batching); anything later is forged or a broken clock (review H1).
+DEFAULT_MAX_FUTURE_S: Final = 120.0
+# Share of a held run that must share one clock offset to be live.
+DEFAULT_LIVE_SHARE: Final = 0.8
+# Out-of-order window of the running index (seconds, review L2).
+DEFAULT_ORDER_WINDOW_S: Final = 5
 
-# Records that prove a data source of the detectors is being delivered.
+# Records that show a data source of the detectors is being delivered: only
+# the kinds the detectors read (``fw.accept`` is no blocked connection).
 KIND_SOURCES: Final[Mapping[str, str]] = MappingProxyType(
     {
         "fw.drop": DataSource.FIREWALL_LOG.value,
         "fw.reject": DataSource.FIREWALL_LOG.value,
-        "fw.accept": DataSource.FIREWALL_LOG.value,
         "dns.query": DataSource.DNS_QUERY_LOG.value,
         "dns.reply": DataSource.DNS_QUERY_LOG.value,
     }
@@ -80,7 +87,8 @@ _TOKEN_RE = re.compile(r"[a-z][a-z0-9_]{0,15}")
 _INT_LIMIT = 2**63
 # Field names the parsers write (skip the name check for them).
 _KNOWN_FIELDS: Final = frozenset(
-    {"fmt", "unconfirmed", "ts_estimated", "truncated", "zone", "dest_zone", "dir"}
+    {"fmt", "unconfirmed", "ts_estimated", "ts_future", "truncated", "zone"}
+    | {"dest_zone", "dir"}
     | {"src", "dst", "proto", "spt", "dpt", "in_if", "out_if", "client", "name"}
     | {"rcode", "qtype", "qid", "source", "user", "reason", "method", "mac"}
     | {"iface", "ip", "frequency", "channel"}
@@ -147,8 +155,10 @@ class SecLogRecord:
     registry router id). ``fields`` is read-only. Markers in ``fields``:
     ``fmt`` (format id), ``unconfirmed`` (True when the line format was
     built from upstream documentation and not seen on a real router),
-    ``ts_estimated`` (no zone offset: ``ts`` is the receive time) and
-    ``truncated`` (line or message cut at a cap).
+    ``ts_estimated`` (no zone offset: ``ts`` is the receive time),
+    ``ts_future`` (the line's own time lay too far after its receive time:
+    ``ts`` is the receive time) and ``truncated`` (line or message cut at a
+    cap).
     """
 
     router: str
@@ -290,22 +300,44 @@ def make_key(router: str, second: str, proc: str, msg: str, index: int = 0) -> s
     return f"{base_hash(router, second, proc, msg)}:{index}"
 
 
+def _second_number(second: str) -> int | None:
+    """Numeric value of a second token (``"123"`` or ``"L123"``)."""
+    digits = second.removeprefix("L")
+    body = digits.removeprefix("-")
+    return int(digits) if body.isdigit() and len(body) <= 12 else None
+
+
+@dataclass(slots=True)
+class _KeyState:
+    newest: int
+    counts: dict[str, int] = field(default_factory=dict)  # "second|hash" → next
+
+
 class KeyAssigner:
     """Running index for identical lines within one second of one stream.
 
     One instance per stream (per delivery path, or for the ``log read``
-    hook). The index restarts whenever a router's second changes, so a
-    re-sent stretch of the log gets the same keys as the first delivery,
-    while three identical lines in one second stay three records.
+    hook). The index of ``(router, second, line)`` is kept while that second
+    lies within ``order_window_s`` of the router's newest second, so a line
+    arriving out of order still continues its own count (review L2). A line
+    further back than that starts a new run of indices (a re-sent stretch
+    of the log gets the same keys as the first delivery), while three
+    identical lines in one second stay three records. Bounded by
+    ``max_per_second`` entries per router.
     """
 
     def __init__(
-        self, *, max_routers: int = DEFAULT_MAX_ROUTERS, max_per_second: int = 20_000
+        self,
+        *,
+        max_routers: int = DEFAULT_MAX_ROUTERS,
+        max_per_second: int = 20_000,
+        order_window_s: int = DEFAULT_ORDER_WINDOW_S,
     ) -> None:
-        """Create an empty assigner (bounded per router and second)."""
+        """Create an empty assigner (bounded per router)."""
         self._max_routers = max(1, int(max_routers))
         self._max_per_second = max(1, int(max_per_second))
-        self._state: dict[str, tuple[str, dict[str, int]]] = {}
+        self._order_window_s = max(0, int(order_window_s))
+        self._state: dict[str, _KeyState] = {}
 
     def assign(self, router: str, second: str, proc: str, msg: str) -> str:
         """Key of the next line ``(router, second, proc, msg)`` of this stream."""
@@ -313,14 +345,32 @@ class KeyAssigner:
         state = self._state.get(router)
         if state is None and len(self._state) >= self._max_routers:
             return f"{base}:0"
-        if state is None or state[0] != second:
-            state = (second, {})
+        number = _second_number(second)
+        if state is None or number is None:
+            state = _KeyState(newest=number or 0)
             self._state[router] = state
-        counts = state[1]
-        index = counts.get(base, 0)
+        elif number > state.newest:
+            state.newest = number
+            self._forget_before(state, number - self._order_window_s)
+        elif number < state.newest - self._order_window_s:
+            state = _KeyState(newest=number)  # far back: a re-sent stretch
+            self._state[router] = state
+        slot = f"{second}|{base}"
+        counts = state.counts
+        index = counts.get(slot, 0)
         if index or len(counts) < self._max_per_second:
-            counts[base] = index + 1
+            counts[slot] = index + 1
         return f"{base}:{index}"
+
+    @staticmethod
+    def _forget_before(state: _KeyState, oldest: int) -> None:
+        stale = [
+            k
+            for k in state.counts
+            if (n := _second_number(k.split("|", 1)[0])) is None or n < oldest
+        ]
+        for key in stale:
+            del state.counts[key]
 
 
 # =============================================================================
@@ -338,6 +388,7 @@ class SourceStats:
     invalid: int = 0  # no valid syslog head: no record
     truncated: int = 0
     ts_estimated: int = 0
+    ts_future: int = 0  # line dated after its receive time: time = receive time
     dropped_sender: int = 0
     dropped_rate: int = 0
     dropped_buffer: int = 0
@@ -374,6 +425,7 @@ class DedupStats:
     held_overflow: int = 0  # dropped: hold buffer full
     epoch_resets: int = 0  # router clock moved: high-water mark restarted
     untracked: int = 0  # passed on without dedup (router cap reached)
+    hwm_clamped: int = 0  # a mark ahead of the receive time was lowered
 
     def to_dict(self) -> dict[str, int]:
         """Plain counter mapping."""
@@ -443,7 +495,7 @@ class _Run:
     max_ts: float
     held: list[SecLogRecord] = field(default_factory=list)
     keys: set[str] = field(default_factory=set)
-    replay: bool = False
+    replay: bool = False  # a line accepted earlier came again: a re-send
 
 
 @dataclass(slots=True)
@@ -460,20 +512,32 @@ class Deduper:
     another):
 
     1. Key seen within ``window_s`` (at most ``max_keys``) → duplicate.
-    2. No mark yet, or ``ts > hwm - grace_s`` → accepted.
+    2. No mark yet, ``ts > hwm - grace_s``, or a *fresh* line (``recv - ts
+       <= grace_s``: dated about when it arrived) → accepted. A fresh line
+       cannot be part of an old log ring (recent lines are caught by their
+       key), so no forged mark can hold a live line back.
     3. Older and unknown → held. A held run is a *re-send* (dropped) if a
-       known key showed up while it was open, or if the delay ``recv - ts``
-       of its lines varies by more than ``spread_s`` (a replayed ring
-       arrives in one burst with very different ages). Otherwise it is
-       *live* with a router clock that jumped back (reboot, NTP step): its
-       lines are released, nothing new is lost. A run is decided when the
-       stream catches up (``ts > hwm - grace_s``) or ``hold_s`` after it
-       started; in the latter case the mark restarts at the run's newest
-       ``ts`` (new clock epoch).
+       line accepted earlier came again while it was open (a duplicate
+       inside the run itself is only dropped), or if fewer than
+       ``live_share`` of its lines share one delay ``recv - ts`` (within
+       ``spread_s`` of the median; a replayed ring arrives in one burst
+       with very different ages). Otherwise it is *live* with a router
+       clock that jumped back (reboot, NTP step): its lines with that delay
+       are released, the few others (e.g. one forged old-dated line) are
+       dropped. A run is decided when the stream catches up (``ts > hwm -
+       grace_s``) or ``hold_s`` after it started; in the latter case the
+       mark restarts at the newest released ``ts`` (new clock epoch).
+    4. The mark never rises above ``recv + max_future_s`` of the line that
+       sets it, and a mark found above the current receive time plus
+       ``max_future_s`` (stored, or left by a run) is lowered to it
+       (``hwm_clamped``): a forged future date cannot hold real lines back.
 
-    Known limit: a re-send consisting only of lines older than the key
-    window whose ages differ by less than ``spread_s`` (router log idle
-    for longer than the window) is taken as live and passes again.
+    Known limits: a re-send consisting only of lines older than the key
+    window whose ages differ by less than ``spread_s`` (router log idle for
+    longer than the window) is taken as live and passes again. During a
+    clock jump of the router (lines not fresh), a forged copy of a line
+    accepted earlier marks the open run as a re-send and drops it
+    (``dup_old`` counts it); live lines are never affected.
     """
 
     def __init__(
@@ -486,8 +550,12 @@ class Deduper:
         max_held: int = DEFAULT_MAX_HELD,
         spread_s: float = DEFAULT_SPREAD_S,
         max_routers: int = DEFAULT_MAX_ROUTERS,
+        max_future_s: float = DEFAULT_MAX_FUTURE_S,
+        live_share: float = DEFAULT_LIVE_SHARE,
     ) -> None:
         """Create an empty deduper (all limits are parameters)."""
+        self.max_future_s = max(0.0, float(max_future_s))
+        self.live_share = min(1.0, max(0.5, float(live_share)))
         self.window_s = float(window_s)
         self.max_keys = max(1, int(max_keys))
         self.grace_s = float(grace_s)
@@ -521,7 +589,7 @@ class Deduper:
         for state in self._routers.values():
             run = state.run
             if run is not None and now - run.first_recv >= self.hold_s:
-                self._resolve(state, out, timed_out=True)
+                self._resolve(state, out, timed_out=True, now=now)
         return out
 
     def hwm(self, router: str) -> float | None:
@@ -591,21 +659,30 @@ class Deduper:
             self._count("untracked")
             out.append(record)
             return
+        self._cap_mark(state, record.recv)
         run = state.run
         if run is not None and record.recv - run.first_recv >= self.hold_s:
-            self._resolve(state, out, timed_out=True)
+            self._resolve(state, out, timed_out=True, now=record.recv)
             run = None
         if record.key in state.keys:
             self._count("dup_key")
             if run is not None:
                 run.replay = True
             return
-        if state.hwm is None or record.ts > state.hwm - self.grace_s:
-            if run is not None:
-                self._resolve(state, out, timed_out=False)
+        caught_up = state.hwm is None or record.ts > state.hwm - self.grace_s
+        if caught_up or record.recv - record.ts <= self.grace_s:
+            if run is not None and caught_up:
+                self._resolve(state, out, timed_out=False, now=record.recv)
             self._accept(state, record, out)
             return
         self._hold(state, record)
+
+    def _cap_mark(self, state: _RouterState, recv: float) -> None:
+        """Lower a mark that lies further ahead than ``recv + max_future_s``."""
+        limit = recv + self.max_future_s
+        if state.hwm is not None and state.hwm > limit:
+            state.hwm = limit
+            self._count("hwm_clamped")
 
     def _accept(
         self, state: _RouterState, record: SecLogRecord, out: list[SecLogRecord]
@@ -613,8 +690,9 @@ class Deduper:
         state.keys[record.key] = record.recv
         if len(state.keys) > self.max_keys:
             state.keys.popitem(last=False)
-        if state.hwm is None or record.ts > state.hwm:
-            state.hwm = record.ts
+        mark = min(record.ts, record.recv + self.max_future_s)
+        if state.hwm is None or mark > state.hwm:
+            state.hwm = mark
         out.append(record)
         self._count("accepted")
 
@@ -627,8 +705,7 @@ class Deduper:
             )
             state.run = run
         if record.key in run.keys:
-            self._count("dup_key")
-            run.replay = True
+            self._count("dup_key")  # only dropped: no evidence of a re-send
             return
         if len(run.held) >= self.max_held:
             self._count("held_overflow")
@@ -641,18 +718,25 @@ class Deduper:
         self._count("held")
 
     def _resolve(
-        self, state: _RouterState, out: list[SecLogRecord], *, timed_out: bool
+        self,
+        state: _RouterState,
+        out: list[SecLogRecord],
+        *,
+        timed_out: bool,
+        now: float,
     ) -> None:
         run = state.run
         state.run = None
         if run is None:
             return
-        live = not run.replay and run.max_skew - run.min_skew <= self.spread_s
+        live = [] if run.replay else self._live_part(run.held)
         if not live:
             self._count("dup_old", len(run.held))
             _LOGGER.debug("Dropped %d re-sent old log lines", len(run.held))
+            self._cap_mark(state, now)
             return
-        for record in run.held:
+        self._count("dup_old", len(run.held) - len(live))
+        for record in live:
             if record.key in state.keys:
                 self._count("dup_key")
                 continue
@@ -662,9 +746,19 @@ class Deduper:
             out.append(record)
             self._count("released")
         if timed_out:
-            state.hwm = run.max_ts
+            state.hwm = max(r.ts for r in live)
             self._count("epoch_resets")
             _LOGGER.debug("Router clock moved back: high-water mark restarted")
+        self._cap_mark(state, now)
+
+    def _live_part(self, held: list[SecLogRecord]) -> list[SecLogRecord]:
+        """Held lines sharing the run's typical delay; [] for a re-send."""
+        if not held:
+            return []
+        delays = sorted(r.recv - r.ts for r in held)
+        median = delays[len(delays) // 2]
+        live = [r for r in held if abs(r.recv - r.ts - median) <= self.spread_s]
+        return live if len(live) >= self.live_share * len(held) else []
 
 
 # =============================================================================
@@ -679,6 +773,12 @@ class Liveness:
     "fine" by silence) and ``stale`` after ``stale_after_s`` without one.
     Sources: ``KIND_SOURCES`` (firewall log, DNS query log) and, for any
     record, the capability of its delivery path. Times are receive times.
+
+    Honest limit: syslog lines are forgeable (UDP, any sender address), so
+    liveness only says "this path delivers such lines", never proof that the
+    router logs them. Records whose time had to be replaced
+    (``ts_future``) do not count for a detector source, and ``fw.accept``
+    does not count for the firewall log the detectors read.
     """
 
     def __init__(
@@ -704,7 +804,8 @@ class Liveness:
                 if len(self._last) >= self.max_routers:
                     continue
                 seen = self._last[record.router] = {}
-            sources = [KIND_SOURCES.get(record.kind or "")]
+            future = record.fields.get("ts_future") is True
+            sources = [None if future else KIND_SOURCES.get(record.kind or "")]
             if record.path in (LogPath.SYSLOG.value, LogPath.COLLECTOR.value):
                 sources.append(log_path_capability(record.path))
             for source in sources:

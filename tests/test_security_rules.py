@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -125,7 +126,8 @@ def test_window_counter_bounded_and_expiring() -> None:
     win = WindowCounter(600)
     for i in range(10_000):
         win.add(T0 + i)
-    assert len(win) <= 32
+    # window plus the tolerance for times ahead (review H2), in buckets
+    assert len(win) <= (600 + win.max_ahead_s) / win.resolution_s + 2
     assert win.count(T0 + 9_999) == pytest.approx(600, abs=21)
     assert win.count(T0 + 20_000) == 0
     win.add(T0)  # far older than the newest bucket: dropped
@@ -720,6 +722,23 @@ def test_no_rule_silently_suppresses_another_alarm() -> None:
     items.append(sig("wifi.connected", T0 + 6, client=MAC_A))
     events = run(det2, items, T0 + 10, statuses(R1))
     assert events[0].severity is Severity.WARNING
+    # same router, another AP or configuration area: never merged (review M2)
+    deauth = WifiDeauthClusterDetector(threshold=2)
+    signals = [
+        WifiSignal(ts=T0 + i, router_id=R1, kind="wifi.deauth", ap=ap)
+        for ap in ("wlan0", "wlan1")
+        for i in range(3)
+    ]
+    found = run(deauth, signals, T0 + 5, statuses(R1))
+    drift = VlanDriftDetector()
+    areas = [
+        Rec(R1, T0, "config.drift", {"area": a})
+        for a in ("firewall.zone", "network.vlan")
+    ]
+    found += run(drift, areas, T0 + 5, statuses(R1))
+    assert len(found) == 4
+    assert len(dedup_events(found, cooldown_s=3600)) == 4
+    assert sum(len(g.events) for g in correlate(found)) == 4
 
 
 # --- case 17: router restart ------------------------------------------------
@@ -793,7 +812,9 @@ def test_case20_high_load_stays_bounded_and_fast() -> None:
     elapsed = time.perf_counter() - start
     assert elapsed < 30, elapsed
     for det in dets.detectors:
-        assert len(det._slots) <= det.max_keys  # type: ignore[attr-defined]
+        # per router at most max_keys (review H3); the whole state is counted
+        assert len(det._slots) <= det.max_keys * len(routers)  # type: ignore[attr-defined]
+        assert _container_size(det) <= det.state_size() + 16, det.id
     assert dets.state_size() < 13 * 512 * 600
     events = results_events(results)
     groups = correlate(events)
@@ -839,3 +860,183 @@ def test_describe_and_unique_ids() -> None:
         DetectorSet([WifiAuthRepeatDetector(), WifiAuthRepeatDetector()])
     assert isinstance(WifiMultiApAuthDetector().describe(), str)
     assert BaselineBook() is not None
+
+
+# --- independent review (forgeable input must never blind a detector) -------
+
+
+@dataclass(frozen=True)
+class RecvRec:
+    """``SecLogRecord`` stand-in with the receive time."""
+
+    router: str
+    ts: float
+    recv: float
+    kind: str
+    fields: Mapping[str, Any] = field(default_factory=dict)
+
+
+FUTURE = 42 * 86400.0  # a forged line dated six weeks ahead
+
+
+def test_review_h2_future_record_cannot_blind_window_detectors() -> None:
+    def mgmt(ts: float, recv: float | None) -> Any:
+        fields = {"zone": "guest", "src": "192.168.3.50", "dpt": 22, "dir": "in"}
+        if recv is None:
+            return Rec(R1, ts, "fw.reject", fields)
+        return RecvRec(R1, ts, recv, "fw.reject", fields)
+
+    def nx(ts: float, recv: float | None) -> Any:
+        fields = {"client": "192.168.1.30", "name": "x.example", "rcode": "NXDOMAIN"}
+        if recv is None:
+            return Rec(R1, ts, "dns.reply", fields)
+        return RecvRec(R1, ts, recv, "dns.reply", fields)
+
+    st = statuses(R1, now=T0 + 60)
+    for det, make in (
+        (FirewallMgmtAccessDetector(threshold=3), mgmt),
+        (DnsNxdomainDetector(threshold=3), nx),
+    ):
+        # receive time known: the forged date is clamped on arrival
+        det.feed(make(T0 + FUTURE, T0))
+        for i in range(50):
+            det.feed(make(T0 + i, T0 + i))
+        (result,) = det.evaluate(T0 + 60, st)
+        assert result.available and len(result.events) == 1, det.id
+        assert det.future_ts == 1
+    for det, make in (
+        (FirewallMgmtAccessDetector(threshold=3), mgmt),
+        (DnsNxdomainDetector(threshold=3), nx),
+    ):
+        # no receive time: the last evaluation time is the reference
+        det.evaluate(T0, statuses(R1, now=T0))
+        det.feed(make(T0 + FUTURE, None))
+        for i in range(50):
+            det.feed(make(T0 + i, None))
+        (result,) = det.evaluate(T0 + 60, st)
+        assert len(result.events) == 1, det.id
+
+
+def test_review_h2_windows_heal_a_future_entry() -> None:
+    win = WindowCounter(600)
+    win.add(T0 + FUTURE)  # nothing known yet about "now"
+    assert win.count(T0) == 1  # counted, but moved to now
+    for i in range(50):
+        win.add(T0 + i)
+    assert win.count(T0 + 60) == 51 and win.clamped == 1
+    win.add(T0 + FUTURE)  # "now" known: clamped on arrival
+    assert win.count(T0 + 61) == 52 and win.clamped == 2
+    seen = DistinctWindow(300)
+    seen.add("p0", T0 + FUTURE)
+    assert seen.count(T0) == 1
+    for i in range(1, 10):
+        seen.add(f"p{i}", T0 + i)
+    assert seen.count(T0 + 400) == 0  # the forged item no longer blocks expiry
+    assert seen.clamped == 1
+
+
+def test_review_h3_flood_on_one_router_keeps_other_router_state() -> None:
+    det = WifiAuthRepeatDetector(max_keys=64, max_routers=4)
+    for i in range(4):
+        det.feed(sig("wifi.psk_mismatch", T0 + i, router=R1))
+    for i in range(500):
+        mac = f"02:00:00:00:{i // 256:02x}:{i % 256:02x}"
+        det.feed(sig("wifi.psk_mismatch", T0 + 10, client=mac, router=R2))
+    det.feed(sig("wifi.psk_mismatch", T0 + 20, router=R1))
+    out = {r.router_id: r for r in det.evaluate(T0 + 30, statuses(R1, R2, now=T0 + 30))}
+    assert len(out[R1].events) == 1 and out[R1].limitation is None
+    assert out[R2].available and out[R2].limitation == "capacity"
+    assert out[R2].evicted == 500 - 64
+    # the router table is capped as well, and the refused router says so
+    extra = [f"rtr_{k:032x}" for k in range(3)]
+    for router in extra:
+        det.feed(sig("wifi.psk_mismatch", T0 + 25, router=router))
+    out = {
+        r.router_id: r
+        for r in det.evaluate(T0 + 30, statuses(R1, R2, *extra, now=T0 + 30))
+    }
+    assert out[extra[-1]].limitation == "capacity"
+    assert out[extra[0]].limitation is None
+    assert len(det._slots) <= det.max_keys * det.max_routers
+    # after the window the limitation is gone again
+    late = T0 + 30 + 700
+    out = {r.router_id: r for r in det.evaluate(late, statuses(R1, R2, now=late))}
+    assert out[R2].limitation is None and out[R2].evicted == 0
+
+
+def test_review_m1_dns_flood_keeps_other_routers_baseline() -> None:
+    book = BaselineBook(max_keys=64, min_samples=2, min_age_s=0)
+    dets = default_detectors(baseline=book)
+    fwd = next(d for d in dets.detectors if d.id == "fw_blocked")
+    rate = next(d for d in dets.detectors if d.id == "dns_rate")
+    ts = T0
+    for _ in range(5):
+        fwd.feed(fw(R1, ts, zone="wan"))
+        fwd.evaluate(ts, statuses(R1, now=ts))
+        ts += 300
+    assert book.is_ready(book.get(f"{R1}|fw_blocked|wan"))
+    for c in range(64):
+        rate.feed(dns(R2, ts, f"10.0.{c // 250}.{c % 250}", "x.example"))
+    (result,) = rate.evaluate(ts, statuses(R2, now=ts))
+    assert book.is_ready(book.get(f"{R1}|fw_blocked|wan"))  # not evicted
+    assert len(book) <= 64 and book.evicted >= 1
+    assert result.limitation == "baseline_capacity" and result.evicted >= 1
+
+
+def test_review_m2_distinct_aps_and_areas_stay_separate() -> None:
+    deauth = WifiDeauthClusterDetector(threshold=2)
+    for ap in ("wlan0", "wlan1"):
+        for i in range(3):
+            deauth.feed(WifiSignal(ts=T0 + i, router_id=R1, kind="wifi.deauth", ap=ap))
+    events = results_events(deauth.evaluate(T0 + 5, statuses(R1, now=T0 + 5)))
+    assert len(dedup_events(events)) == 2
+    drift = VlanDriftDetector()
+    for area in ("firewall.zone", "network.vlan"):
+        drift.feed(
+            Rec(
+                R1,
+                T0,
+                "config.drift",
+                {"area": area, "critical": area == "network.vlan"},
+            )
+        )
+    events = results_events(drift.evaluate(T0 + 5, statuses(R1, now=T0 + 5)))
+    merged = dedup_events(events)
+    assert len(merged) == 2 and all(e.count == 1 for e in merged)
+    assert sum(len(g.events) for g in correlate(events)) == 2
+
+
+def test_review_m4_sample_times_bounded_and_counted() -> None:
+    det = DnsRateDetector(max_keys=100, baseline=BaselineBook(max_keys=100))
+    ts = T0
+    for round_ in range(50):
+        for c in range(100):
+            det.feed(dns(R1, ts, f"r{round_}c{c}", "x.example"))
+        det.evaluate(ts, statuses(R1, now=ts))
+        ts += 1
+    assert _container_size(det) <= det.state_size() + det.max_keys
+    assert len(det._slots) <= det.max_keys
+
+
+def test_review_l5_multi_ap_reset_keeps_other_routers_failures() -> None:
+    det = WifiMultiApAuthDetector(min_failures=3)
+    items = [sig("wifi.psk_mismatch", T0 + i, router=R1, ap="wlan0") for i in range(5)]
+    items += [sig("wifi.psk_mismatch", T0 + 6, router=R2, ap="wlan1")]
+    items += [sig("wifi.psk_mismatch", T0 + 7, router=R3, ap="wlan2")]
+    for item in items:
+        det.feed(item)
+    det.reset_router(R1)  # R1 restarted: only its share is forgotten
+    st = statuses(R1, R2, R3, now=T0 + 10)
+    assert results_events(det.evaluate(T0 + 10, st)) == []  # 2 failures left
+    det.feed(sig("wifi.psk_mismatch", T0 + 11, router=R2, ap="wlan1"))
+    (event,) = results_events(det.evaluate(T0 + 12, st))
+    assert "auth_failures=3" in event.evidence
+
+
+def _container_size(det: Any) -> int:
+    """Entries in every container attribute of a detector (shallow)."""
+    total = 0
+    for value in vars(det).values():
+        if isinstance(value, dict | list | set | tuple | deque):
+            total += len(value)
+    return total
