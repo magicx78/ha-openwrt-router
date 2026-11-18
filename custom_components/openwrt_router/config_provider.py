@@ -770,6 +770,46 @@ def _uci_failure(uci: UciCollection) -> str:
     return ERR_NOT_AVAILABLE
 
 
+def _uci_gap(uci: UciCollection | None, uci_stop: str | None) -> str | None:
+    """Error class when the live read left out configs that may exist.
+
+    None when every config was read or reported not_available (absent on
+    the router). An abort (unreachable/timeout/auth) gives its own class,
+    single unreadable configs give ``incomplete``.
+    """
+    if uci_stop is not None:
+        return uci_stop
+    if uci is None:
+        return ERR_INCOMPLETE
+    if uci.not_tried or any(
+        error_class != ERR_NOT_AVAILABLE for _name, error_class in uci.failed
+    ):
+        return ERR_INCOMPLETE
+    return None
+
+
+def _filled_from_archive(
+    live: UciSnapshot, archived: UciSnapshot, warnings: _Warnings
+) -> UciSnapshot:
+    """``live`` plus the configs only the archive holds (review H3).
+
+    The archive was taken in the same run, so it stands in for configs the
+    live read could not deliver; each one gets ``uci_source:<config>``.
+    """
+    filled = sorted(set(archived.configs) - set(live.configs))
+    if not filled:
+        return live
+    configs = dict(live.configs)
+    for name in filled:
+        configs[name] = archived.configs[name]
+        warnings.add(WARN_UCI_SOURCE, name)
+    return UciSnapshot(
+        configs=configs,
+        content_hash=_snapshot_hash(configs),
+        missing=live.missing - set(filled),
+    )
+
+
 def _collect_failure(
     uci: UciCollection | None,
     uci_stop: str | None,
@@ -1318,7 +1358,8 @@ class ConfigManagerProvider:
                 else:
                     warnings.add(WARN_ARCHIVE, finding.code)
             if live is not None:
-                uci_snapshot, source = live, UCI_SOURCE_LIVE
+                uci_snapshot = _filled_from_archive(live, analysis.snapshot, warnings)
+                source = UCI_SOURCE_LIVE
                 for name in sorted(set(live.configs) & set(analysis.snapshot.configs)):
                     if live.configs[name] != analysis.snapshot.configs[name]:
                         warnings.add(WARN_UCI_ARCHIVE_MISMATCH, name)
@@ -1334,7 +1375,15 @@ class ConfigManagerProvider:
             assert live is not None
             uci_snapshot, source = live, UCI_SOURCE_LIVE
             fetch_method = FETCH_METHOD_UCI
-            if archive_skipped:
+            uci_gap = _uci_gap(uci, uci_stop)
+            if archive_skipped and uci_gap is not None:
+                # Configs that exist could not be read: never a baseline
+                # (review H2). not_available alone (config absent) is fine.
+                backup_type, status = BackupType.PARTIAL, VersionStatus.PARTIAL
+                error_class_out = ErrorClass(uci_gap)
+                if order:
+                    warnings.add(WARN_ARCHIVE_UNAVAILABLE, archive_class)
+            elif archive_skipped:
                 # The router cannot deliver an archive: a UCI snapshot is the
                 # complete result (usable as baseline), not a partial one.
                 backup_type, status = BackupType.UCI_SNAPSHOT, VersionStatus.OK
@@ -1511,7 +1560,7 @@ class ConfigManagerProvider:
         mgmt_host = router.connection.host
         comparable = base_key is not None and base_key == key_id
         # Baseline digests of another key: the key was reset since.
-        rebaseline = base_key is not None and base_key != key_id
+        key_reset = base_key is not None and base_key != key_id
         engine_acks = tuple(
             EngineDriftAck(
                 drift_id=ack.drift_id,
@@ -1550,7 +1599,9 @@ class ConfigManagerProvider:
                 secrets_comparable=comparable,
             ),
         )
-        if rebaseline:
+        # A key reset only rebuilds the baseline when nothing but the secret
+        # digests differs; a real change is drift as usual (review H1).
+        if key_reset and not report.changes and not report.not_comparable:
             result = DriftReport(
                 router_id=router.router_id,
                 baseline_backup_id=baseline.backup_id,

@@ -1387,10 +1387,15 @@ async def test_drift_detection_with_acknowledgements() -> None:
 
 
 async def test_drift_after_key_reset_is_a_rebaseline() -> None:
+    """Only the secret digests differ: the baseline is rebuilt (review H1).
+
+    Before the review fix this test used a channel change, which a key
+    reset silently turned into "no drift".
+    """
     store = Store()
     baseline = store.put(ROUTER_A, await collect(key=OTHER_KEY))
     report = await ConfigManagerProvider().async_detect_drift(
-        make_conn(FakeApi(files=changed(channel=True))),
+        make_conn(FakeApi(files=FILES)),
         baseline,
         (),
         make_ctx(store, key=KEY),
@@ -1693,3 +1698,95 @@ def test_provider_uses_only_the_config_read_methods_of_the_api() -> None:
     assert not any(name.startswith("homeassistant") for name in runtime_imports)
     assert ".api" not in runtime_imports
     assert ".coordinator" not in runtime_imports
+
+
+# ---------------------------------------------------------------------------
+# Security review: drift after a key reset (H1), incomplete UCI reads (H2),
+# archive filling the gaps of the live read (H3)
+# ---------------------------------------------------------------------------
+
+
+async def test_key_reset_with_real_changes_is_drift_not_rebaseline() -> None:
+    store = Store()
+    baseline = store.put(ROUTER_A, await collect(key=OTHER_KEY))
+    report = await ConfigManagerProvider().async_detect_drift(
+        make_conn(FakeApi(files=changed(vlan=True, firewall=True))),
+        baseline,
+        (),
+        make_ctx(store, key=KEY),
+        router=router_record(),
+    )
+    assert report.drifted and not report.rebaseline
+    assert report.critical_count >= 2
+    assert report.drift_id is not None
+    assert not report.secrets_comparable
+    secret = [c for c in report.diff.changes if c.option == "key"]
+    assert secret and all(c.kind is ChangeKind.NOT_COMPARABLE for c in secret)
+    assert find_change(report.diff, "firewall", "input")
+    assert find_change(report.diff, "network", "ports")
+
+
+async def test_uci_read_aborted_without_archive_path_is_partial() -> None:
+    uci = ubus_values()
+    uci["wireless"] = OpenWrtTimeoutError("slow")
+    api = FakeApi(
+        uci=uci,
+        cgi=OpenWrtConfigFetchPermissionError("acl"),
+        ssh=OpenWrtConfigFetchPermissionError("not root"),
+    )
+    version = await collect(api)
+    meta = version.meta
+    assert meta.status is VersionStatus.PARTIAL
+    assert meta.backup_type is BackupType.PARTIAL
+    assert meta.error_class is ErrorClass.TIMEOUT
+    assert "uci_failed:firewall" in meta.warnings
+    assert not Store().put(ROUTER_A, version).usable
+
+
+async def test_unreadable_config_without_archive_path_is_partial() -> None:
+    uci = ubus_values()
+    uci["firewall"] = OpenWrtConfigFetchPermissionError("acl")
+    version = await collect(FakeApi(uci=uci), backup_type=BackupType.UCI_SNAPSHOT)
+    meta = version.meta
+    assert meta.status is VersionStatus.PARTIAL
+    assert meta.error_class is ErrorClass.INCOMPLETE
+    assert "uci_failed:firewall" in meta.warnings
+    # Configs that do not exist on the router (not_available) are fine.
+    assert "uci_missing:sqm" in meta.warnings
+    assert not Store().put(ROUTER_A, version).usable
+
+    complete = await collect(FakeApi(), backup_type=BackupType.UCI_SNAPSHOT)
+    assert complete.meta.status is VersionStatus.OK
+
+
+async def test_archive_fills_configs_the_live_read_missed() -> None:
+    uci = ubus_values()
+    uci["firewall"] = OpenWrtConfigFetchPermissionError("acl")
+    uci["wireless"] = OpenWrtConfigFetchPermissionError("acl")
+    version = await collect(FakeApi(uci=uci))
+    meta = version.meta
+    assert meta.status is VersionStatus.OK
+    assert meta.backup_type is BackupType.FULL_ARCHIVE
+    doc = uci_doc(version)
+    assert {"network", "wireless", "firewall", "system"} <= set(doc["configs"])
+    assert "uci_source:firewall" in meta.warnings
+    assert "uci_source:wireless" in meta.warnings
+    assert "uci_failed:firewall" in meta.warnings
+    assert meta.uci_hash == (await collect()).meta.uci_hash
+
+
+async def test_baseline_with_unreadable_config_still_sees_drift_there() -> None:
+    store = Store()
+    uci = ubus_values()
+    uci["firewall"] = OpenWrtConfigFetchPermissionError("acl")
+    baseline = store.put(ROUTER_A, await collect(FakeApi(uci=uci)))
+    report = await ConfigManagerProvider().async_detect_drift(
+        make_conn(FakeApi(files=changed(firewall=True))),
+        baseline,
+        (),
+        make_ctx(store),
+        router=router_record(),
+    )
+    assert report.drifted
+    assert report.critical_count >= 1
+    assert find_change(report.diff, "firewall", "input")
