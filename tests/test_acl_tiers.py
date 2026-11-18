@@ -1133,3 +1133,35 @@ class TestOnlyAuthorizedWrites:
         ]
         assert io_lines
         assert check_line < min(io_lines)
+
+
+def test_config_backup_risk_names_shadow_and_private_keys():
+    """Review PR #55 point 4: the risk says what a backup really holds.
+
+    Code (risk text shown in the offer), the option text in en/de and the
+    tier document all name /etc/shadow with its password hashes and the
+    private keys.
+    """
+    from pathlib import Path
+
+    risk = DEFAULT_TIER_REGISTRY.get(TIER_CONFIG_BACKUP_READ).risk
+    assert "/etc/shadow (password hashes" in risk
+    assert "private keys" in risk
+    root = Path(__file__).resolve().parent.parent
+    comp = root / "custom_components" / "openwrt_router"
+    texts = {
+        name: json.loads((comp / name).read_text(encoding="utf-8"))
+        for name in ("strings.json", "translations/en.json", "translations/de.json")
+    }
+    for name, data in texts.items():
+        option = data["options"]["step"]["init"]["data_description"][
+            "config_backup_enabled"
+        ]
+        assert "/etc/shadow" in option, name
+        if name.endswith("de.json"):
+            assert "Passwort-Hashes" in option and "private Schlüssel" in option
+        else:
+            assert "password hashes" in option and "private keys" in option
+    doc = (root / "docs" / "dev" / "acl-tiers.md").read_text(encoding="utf-8")
+    assert "`/etc/shadow` (Passwort-Hashes" in doc
+    assert "private Schlüssel" in doc

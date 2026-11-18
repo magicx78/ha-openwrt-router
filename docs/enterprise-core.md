@@ -67,7 +67,9 @@ Je Router hält der Core eine Liste von Fähigkeiten mit Zustand (`available`, `
   aus heißt `config.*` = `disabled`, das Backup-Modul wird für diesen Router nie aufgerufen,
   und die ACL-Stufe `config_backup_read` wird nicht angeboten. Der Schalter erscheint erst,
   wenn ein Backup-Modul installiert ist (oder solange er an ist). Er wirkt sofort, ohne
-  Neuladen. Achtung: ein Konfigurations-Backup enthält **alle** Router-Geheimnisse.
+  Neuladen. Achtung: ein Konfigurations-Backup enthält **alle** Router-Geheimnisse,
+  darunter `/etc/shadow` (Passwort-Hashes aller Router-Logins) und private Schlüssel
+  (SSH-Host-Keys, VPN- und TLS-Schlüssel).
 - **`rf.*` aus der ACL:** Mit der normalen ACL (v8) ist `rf.scan` verfügbar;
   `rf.txpowerlist` und `rf.survey` sind `unavailable` mit Grund `permission_denied` und der
   Liste der fehlenden Rechte. Ist die ACL unbekannt (noch nicht gelesen, nicht lesbar),

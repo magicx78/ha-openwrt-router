@@ -929,9 +929,11 @@ def _default_tiers() -> tuple[AclTier, ...]:
             ),
             risk=(
                 "Gives the Home Assistant rpcd user READ ACCESS TO ALL ROUTER "
-                "SECRETS: the backup archive contains /etc/shadow, SSH host keys, "
-                "Wi-Fi keys, VPN keys; the UCI configs contain Wi-Fi, VPN and DDNS "
-                "passwords. Anyone who can use this HA rpcd login can read them."
+                "SECRETS: the backup archive contains /etc/shadow (password hashes "
+                "of every router login, including root) and private keys (SSH host "
+                "keys, VPN and TLS keys), plus Wi-Fi keys; the UCI configs contain "
+                "Wi-Fi, VPN and DDNS passwords. Anyone who can use this HA rpcd "
+                "login can read them."
             ),
             option=OPTION_CONFIG_BACKUP_ENABLED,
         ),

@@ -48,8 +48,9 @@ Unterschied zu v8 genau `-scan +txpowerlist` ist.
 - **`read`**: gleiche Rechte wie v8, ohne Funkscan, plus das reine Lesen der
   Sendeleistungsstufen. Kein Zugriff auf Geheimnisse.
 - **`config_backup_read`**: **Gibt dem rpcd-Benutzer von Home Assistant Lesezugriff auf
-  alle Geheimnisse des Routers.** Das Backup-Archiv enthält `/etc/shadow`, die
-  SSH-Host-Keys, WLAN- und VPN-Schlüssel; die UCI-Configs enthalten WLAN-, VPN- und
+  alle Geheimnisse des Routers.** Das Backup-Archiv enthält `/etc/shadow` (Passwort-Hashes
+  aller Router-Logins, auch root) und private Schlüssel (SSH-Host-Keys, VPN- und
+  TLS-Schlüssel), dazu die WLAN-Schlüssel; die UCI-Configs enthalten WLAN-, VPN- und
   DDNS-Passwörter. Wer diesen HA-rpcd-Login nutzen kann, kann sie lesen.
 - **`rf_survey`**: liest Kanalstatistiken (belegt/Rauschen je Kanal) aus dem Treiber,
   wechselt den Kanal nicht. Auf der Hardware des Nutzers noch nicht gemessen.
