@@ -167,6 +167,10 @@ _ARTIFACT_KINDS = frozenset(kind.value for kind in ArtifactKind)
 # reads mint no authorization).
 READ_CAPTURE = "config_capture"
 READ_COMPARE = "config_compare"
+# Same rule for validation, drift and the restore dry run (follow-up B2).
+READ_VALIDATE = "config_validate"
+READ_DRIFT = "config_drift"
+READ_RESTORE_DRY_RUN = "config_restore_dry_run"
 # Dry-run plans waiting for async_request_restore (security review #4):
 # dropped after this long, and the oldest beyond the cap (both counted).
 RESTORE_PLAN_TTL = APPROVAL_TTL
@@ -476,6 +480,7 @@ class ConfigurationManager:
             "refused_disabled": 0,
             "module_keys_issued": 0,
             "module_keys_refused": 0,
+            "validate_without_actor": 0,
         }
         # Request data dies with its approval (expired, rejected, unload).
         self._remove_approval_listener = guard.add_approval_listener(
@@ -1044,6 +1049,19 @@ class ConfigurationManager:
             details={"reason": "not_admin", "audit_id": audit_id, "action": action},
         )
 
+    def _known_router_id(self, router_id: object) -> str:
+        """``router_id`` if the registry knows it, else the fleet (audit only)."""
+        if isinstance(router_id, str) and self.registry.find(router_id) is not None:
+            return router_id
+        return FLEET_ROUTER_ID
+
+    def _version_router_id(self, backup_id: object) -> str:
+        """Router of a known version, else the fleet (never raises)."""
+        try:
+            return self.versions.get(str(backup_id)).router_id
+        except ConfigApiError:
+            return FLEET_ROUTER_ID
+
     def _ref_router_id(self, ref: ConfigRef) -> str:
         """Router of a reference for an audit entry (never raises)."""
         if ref.is_live:
@@ -1267,8 +1285,24 @@ class ConfigurationManager:
         """One version."""
         return self.versions.get(backup_id)
 
-    async def async_validate_backup(self, backup_id: str) -> BackupRecord:
-        """Core sha256 check of every artifact, then the provider's check."""
+    async def async_validate_backup(
+        self, backup_id: str, *, actor: Actor | None = None
+    ) -> BackupRecord:
+        """Core sha256 check of every artifact, then the provider's check.
+
+        With ``actor`` a user must be a verified admin (checked before any
+        lookup, audited on the security ring). Without one the call is a
+        legacy call: allowed as before 1.45, counted
+        (``validate_without_actor``).
+        """
+        if actor is None:
+            self.stats["validate_without_actor"] += 1
+            _LOGGER.debug("async_validate_backup called without an actor")
+        else:
+            verified = await self._verify(actor)
+            self._require_content_reader(
+                READ_VALIDATE, self._version_router_id(backup_id), verified
+            )
         provider = self._require_provider(Capability.CONFIG_VALIDATE)
         record = self.versions.get(backup_id)
         self._require_enabled(record.router_id, Capability.CONFIG_VALIDATE)
@@ -1366,6 +1400,9 @@ class ConfigurationManager:
         as drift with its events and the old baseline stays.
         """
         verified = await self._verify(actor)
+        self._require_content_reader(
+            READ_DRIFT, self._known_router_id(router_id), verified
+        )
         provider = self._require(router_id, Capability.CONFIG_DRIFT)
         self.stats["drift_checks"] += 1
         baseline = await self.async_get_baseline(
@@ -1571,8 +1608,14 @@ class ConfigurationManager:
     async def async_prepare_restore(
         self, backup_id: str, target_router_id: str, *, actor: Actor
     ) -> RestorePlan:
-        """Dry run; never writes. The plan is kept for a later request."""
+        """Dry run; never writes. The plan is kept for a later request.
+
+        A user must be a verified admin (before any lookup; audited).
+        """
         verified = await self._verify(actor)
+        self._require_content_reader(
+            READ_RESTORE_DRY_RUN, self._known_router_id(target_router_id), verified
+        )
         record = self.versions.get(backup_id)
         provider = self._require(target_router_id, Capability.CONFIG_RESTORE_DRY_RUN)
         target = self.registry.get(target_router_id)
@@ -2676,9 +2719,11 @@ class ConfigurationApi:
         """One version."""
         return await self._m.async_get_backup(backup_id)
 
-    async def async_validate_backup(self, backup_id: str) -> BackupRecord:
-        """Validate and store the result."""
-        return await self._m.async_validate_backup(backup_id)
+    async def async_validate_backup(
+        self, backup_id: str, *, actor: Actor | None = None
+    ) -> BackupRecord:
+        """Validate and store the result (with ``actor``: users must be admin)."""
+        return await self._m.async_validate_backup(backup_id, actor=actor)
 
     async def async_compare(
         self, base: ConfigRef, other: ConfigRef, *, actor: Actor

@@ -4556,8 +4556,10 @@ class ConfigurationApiProtocol(Protocol):
     async def async_get_backup(self, backup_id: str) -> BackupRecord:
         """One version (READ)."""
 
-    async def async_validate_backup(self, backup_id: str) -> BackupRecord:
-        """Validate and store the result (READ)."""
+    async def async_validate_backup(
+        self, backup_id: str, *, actor: Actor | None = None
+    ) -> BackupRecord:
+        """Validate and store the result (READ; with ``actor`` users need admin)."""
 
     async def async_compare(
         self, base: ConfigRef, other: ConfigRef, *, actor: Actor

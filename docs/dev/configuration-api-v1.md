@@ -711,11 +711,11 @@ Router-Bezug werfen `RouterNotFoundError`, wenn die ID unbekannt ist. Jede Metho
 | `async_capture(router_id, *, actor, configs=None)` | read, Inhalt (Benutzer: nur Admin) | `ConfigSnapshot` | `AuthorizationError` (`not_admin`, auditiert), `CapabilityUnavailableError`, `RouterUnavailableError`, `ProviderError` |
 | `async_list_backups(router_id=None, *, since=None, limit=50)` | read | `tuple[BackupRecord, ...]` | – |
 | `async_get_backup(backup_id)` | read | `BackupRecord` | `BackupNotFoundError` |
-| `async_validate_backup(backup_id)` | read | `BackupRecord` (mit neuer `validation`) | `BackupNotFoundError` |
+| `async_validate_backup(backup_id, *, actor=None)` | read (mit `actor`: Benutzer nur Admin; ohne `actor` Altaufruf, Zähler `validate_without_actor`) | `BackupRecord` (mit neuer `validation`) | `AuthorizationError` (`not_admin`, auditiert), `BackupNotFoundError` |
 | `async_compare(base, other, *, actor)` | read, Inhalt (Benutzer: nur Admin) | `ConfigDiff` | `AuthorizationError` (`not_admin`, auditiert), `BackupNotFoundError`, `CapabilityUnavailableError` |
-| `async_detect_drift(router_id, *, actor, baseline_backup_id=None)` | read | `DriftReport` | `BackupNotFoundError` (keine Basis), `RouterUnavailableError`, `InstallationKeyLostError` |
-| `async_check_restore_compatibility(backup_id, target_router_id, *, actor)` | read, auditiert | `CompatibilityCheck` | `BackupNotFoundError` |
-| `async_prepare_restore(backup_id, target_router_id, *, actor)` | read, auditiert (Dry Run) | `RestorePlan` | `CapabilityUnavailableError` (`config.restore_dry_run`) |
+| `async_detect_drift(router_id, *, actor, baseline_backup_id=None)` | read, Inhalt (Benutzer: nur Admin) | `DriftReport` | `AuthorizationError` (`not_admin`, auditiert), `BackupNotFoundError` (keine Basis), `RouterUnavailableError`, `InstallationKeyLostError` |
+| `async_check_restore_compatibility(backup_id, target_router_id, *, actor)` | read, auditiert (Benutzer: nur Admin) | `CompatibilityCheck` | `AuthorizationError` (`not_admin`), `BackupNotFoundError` |
+| `async_prepare_restore(backup_id, target_router_id, *, actor)` | read, auditiert (Dry Run; Benutzer: nur Admin) | `RestorePlan` | `AuthorizationError` (`not_admin`, auditiert), `CapabilityUnavailableError` (`config.restore_dry_run`) |
 | `async_create_backup(router_id, *, reason, actor, backup_type=None, note=None, links=None)` | mutating | `PutVersionResult` | `AuthorizationError`, `OperationInProgressError`, `RouterUnavailableError`, `OperationTimeoutError`, `StorageFullError`, … |
 | `async_put_version(router_id, artifacts, meta, *, authorization)` | mutating (`backup`) | `PutVersionResult` | wie `VersionStoreProtocol.async_put_version` |
 | `async_set_protected(backup_id, protected, *, actor)` | mutating, Admin | `BackupRecord` | `AuthorizationError` |
@@ -1477,6 +1477,11 @@ muss):
 - (#100) Bus-Pseudonyme sind bei vorhandenem Installations-Schlüssel über Neustarts stabil
   statt je Lauf neu. Wer sich auf den Wechsel nach einem Neustart verlassen hat, darf das
   nicht mehr.
+- (#101) `async_detect_drift`, `async_prepare_restore`, `async_check_restore_compatibility`
+  und `async_validate_backup(..., actor=...)`: ein Benutzer ohne Admin bekommt
+  `AuthorizationError` `not_admin`. Module, die diese Aufrufe für normale Benutzer anbieten,
+  müssen auf Admin prüfen oder als Modul-/Systemakteur aufrufen (und dann selbst
+  entscheiden, wem sie das Ergebnis zeigen).
 
 ### 19.1 Änderungen auf Feld- und Signaturebene
 
@@ -1645,6 +1650,7 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 | # | Änderung | Art |
 |---|---|---|
 | 100 | Modul-Schlüssel (B1, §11.5): `api.async_get_module_key(module, purpose="")` (HKDF-SHA256, `MODULE_KEY_SALT`, `MODULE_KEY_INFO_PREFIX` `…/v1`, 32 Bytes); nur für Module mit registriertem Event-Präfix; `lost` ⇒ `InstallationKeyLostError`. Reine Helfer `hkdf_sha256`, `derive_module_key`, `check_module_name`, `MODULE_NAME_PATTERN`, `MODULE_KEY_PURPOSE_PATTERN`, `CORE_KEY_OWNER`; `AuditLog.registered_modules()`; Zähler `module_keys_issued`/`module_keys_refused`. Bus-Pseudonym (§12.1): Salz aus `derive_core_key(key, "bus_pseudonym")`, über Neustarts stabil; ohne Schlüssel zufällig je Lauf, Zähler `bus_salt_ephemeral` + ein Log-Eintrag. `async_get_installation_key` für Provider unverändert. | A; B (Verhalten des Bus-Pseudonyms) |
+| 101 | `async_validate_backup(backup_id, *, actor=None)` (neues optionales Argument), `async_detect_drift`, `async_prepare_restore` und damit `async_check_restore_compatibility` (B2): Benutzer ohne Admin ⇒ `AuthorizationError` `not_admin` (`details.action` `config_validate`/`config_drift`/`config_restore_dry_run`, `audit_id`), auditiert auf dem Sicherheitsring, vor jedem Nachschlagen und Provider-Aufruf; Audit-Router ist der bekannte Router bzw. der Router einer bekannten Version, sonst `-` (unbekannte IDs werden nicht wiedergegeben). Modul-, System- und Automationsakteure unverändert. `async_validate_backup` ohne `actor` bleibt erlaubt (Altaufruf), Zähler `validate_without_actor`. Konstanten `READ_VALIDATE`, `READ_DRIFT`, `READ_RESTORE_DRY_RUN`. | A (Signatur); B (Verhalten für Benutzer ohne Admin) |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 

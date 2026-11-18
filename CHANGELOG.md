@@ -13,6 +13,9 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ### Changed
 
+- Enterprise Core: Drift-Prüfung, Restore-Probelauf und Backup-Prüfung (mit Akteur)
+  verlangen von einem Benutzer Admin-Rechte, wie schon Capture und Vergleich; die
+  Ablehnung steht im Sicherheits-Audit.
 - Enterprise Core: Das Benutzer-Pseudonym (`usr_…`) im Core-Event bleibt über Neustarts
   gleich, sobald der Installations-Schlüssel existiert. Ohne Schlüssel ist es je Lauf
   zufällig; das steht einmal im Log und im Zähler `bus_salt_ephemeral`.

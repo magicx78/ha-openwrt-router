@@ -19,7 +19,12 @@ import logging
 from unittest.mock import patch
 
 import pytest
-from core_test_provider import restart, start_env, stop_env
+from core_test_provider import (
+    restart,
+    short_tmp_path,  # noqa: F401 - short tmp_path (Windows path limit)
+    start_env,
+    stop_env,
+)
 from core_testkit import ADMIN_ID, FakeDisks, bus_events, core_of, user_actor
 
 from custom_components.openwrt_router import version_store as version_store_module
