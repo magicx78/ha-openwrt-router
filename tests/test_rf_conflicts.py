@@ -45,8 +45,8 @@ def _util(pct, at=100.0):
 
 def _view(router, radio, channel, width=20, band="2.4g", **kw):
     return RadioView(
-        router_key=router,
-        radio_key=radio,
+        router_id=router,
+        radio_id=radio,
         band=band,
         channel=channel,
         width_mhz=width,
@@ -162,7 +162,7 @@ class TestCoChannel:
         radios = [_view("ap1", "r0", 6), _view("ap1", "r0", 6)]
         assert detect_conflicts(radios, TH) == []
 
-    def test_same_radio_key_on_two_routers_is_two_radios(self):
+    def test_same_radio_id_on_two_routers_is_two_radios(self):
         radios = [_view("ap1", "radio0", 6), _view("ap2", "radio0", 6)]
         assert len(detect_conflicts(radios, TH)) == 1
 
@@ -203,7 +203,7 @@ class TestNeighborSignal:
         radios = [_view("ap1", "r0a", 6, neighbors=gone), _view("ap2", "r0b", 6)]
         assert detect_conflicts(radios, TH)[0].status is S.POTENTIAL
 
-    def test_same_radio_key_on_two_routers_is_looked_up_per_router(self):
+    def test_same_radio_id_on_two_routers_is_looked_up_per_router(self):
         # radio0 exists on every router: hearing ap2/radio0 says nothing
         # about ap3/radio0.
         heard = {
@@ -463,7 +463,7 @@ def _rf_pairs(radios):
         if c.kind in (K.CO_CHANNEL, K.ADJACENT_OVERLAP):
             if any(e.startswith("backhaul_") for e in c.evidence):
                 continue  # channel_plan skips backhaul pairs by design
-            members = frozenset((m.router_key, m.radio_key) for m in c.members)
+            members = frozenset((m.router_id, m.radio_id) for m in c.members)
             pairs.add((c.kind, members))
     return pairs
 
@@ -492,9 +492,7 @@ class TestMatchesChannelPlan:
             if any(e.startswith("backhaul_") for e in c.evidence)
         ]
         assert len(backhaul) == 2  # e2 with e1 and with e3
-        status = {
-            frozenset(m.router_key for m in c.members): c.status for c in backhaul
-        }
+        status = {frozenset(m.router_id for m in c.members): c.status for c in backhaul}
         # Only the real uplink pair is acceptable by the flag (review H1).
         assert status == {
             frozenset({_rid("e1"), _rid("e2")}): S.ACCEPTABLE,
@@ -516,7 +514,7 @@ class TestMatchesChannelPlan:
         view = from_channel_plan_radio(
             _cp("e1", "phy0", "2.4g", 1, 40, 3, True), router_id=_rid("e1")
         )
-        assert (view.router_key, view.radio_key) == (_rid("e1"), "phy0")
+        assert (view.router_id, view.radio_id) == (_rid("e1"), "phy0")
         assert (view.band, view.channel, view.width_mhz) == ("2.4g", 1, 40)
         assert view.center_channel == 3
         assert view.backhaul is True
@@ -530,10 +528,10 @@ def test_as_dict():
     assert data["status"] == "measured"
     assert data["severity"] == "warning"
     assert data["members"] == [
-        {"router_key": "ap1", "radio_key": "radio0"},
-        {"router_key": "ap2", "radio_key": "radio0"},
+        {"router_id": "ap1", "radio_id": "radio0"},
+        {"router_id": "ap2", "radio_id": "radio0"},
     ]
-    assert c.radio_keys == ("radio0", "radio0")
+    assert c.radio_ids == ("radio0", "radio0")
 
 
 def test_severity_is_the_core_severity():

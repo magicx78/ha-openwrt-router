@@ -306,8 +306,8 @@ class TestRadioCapabilities:
     def test_as_dict_lists_every_metric(self):
         caps = RadioCapabilities("rtr", "r", {METRIC_CHANNEL: M.MEASURED})
         data = caps.as_dict()
-        assert data["router_key"] == "rtr"
-        assert data["radio_key"] == "r"
+        assert data["router_id"] == "rtr"
+        assert data["radio_id"] == "r"
         assert list(data["states"]) == list(ALL_METRICS)
         assert data["excluded"] == []
         assert data["coverage"] == pytest.approx(1 / len(ALL_METRICS))

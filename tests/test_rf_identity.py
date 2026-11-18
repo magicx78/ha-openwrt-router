@@ -7,6 +7,7 @@ import pytest
 from custom_components.openwrt_router.channel_plan import Radio
 from custom_components.openwrt_router.core_models import (
     ROUTER_ID_PREFIX,
+    check_token,
     default_router_id,
     new_id,
 )
@@ -14,7 +15,11 @@ from custom_components.openwrt_router.rf_conflicts import (
     RadioRef,
     from_channel_plan_radio,
 )
-from custom_components.openwrt_router.rf_identity import radio_ref, require_router_id
+from custom_components.openwrt_router.rf_identity import (
+    radio_ref,
+    require_radio_id,
+    require_router_id,
+)
 
 R1 = default_router_id("e1")
 # After an adoption the router keeps its OLD id: it is not derivable from
@@ -56,7 +61,7 @@ class TestRadioRef:
         assert str(ref) == f"{R1}/radio0"
 
     @pytest.mark.parametrize("radio", ["", "  ", None, 3, "radio0/x"])
-    def test_refuses_bad_radio_keys(self, radio):
+    def test_refuses_bad_radio_ids(self, radio):
         with pytest.raises(ValueError):
             radio_ref(R1, radio)
 
@@ -65,12 +70,28 @@ class TestRadioRef:
             radio_ref("e1", "radio0")
 
 
+class TestRequireRadioId:
+    """The radio id follows the token rule of ``CoreEvent.radio_id``."""
+
+    @pytest.mark.parametrize("radio", ["radio0", "phy1", "wifi0", "radio1.sta:2"])
+    def test_every_accepted_id_fits_the_typed_event_field(self, radio):
+        assert require_radio_id(radio) == radio
+        check_token("radio_id", radio)  # the Core accepts it as well
+
+    @pytest.mark.parametrize("radio", ["radio..0", "radio 0", "-radio0", "r" * 129])
+    def test_what_the_core_refuses_is_refused(self, radio):
+        with pytest.raises(ValueError):
+            check_token("radio_id", radio)
+        with pytest.raises(ValueError):
+            require_radio_id(radio)
+
+
 class TestChannelPlanAdapter:
-    def test_router_key_is_the_given_core_id_not_the_entry_id(self):
+    def test_router_id_is_the_given_core_id_not_the_entry_id(self):
         view = from_channel_plan_radio(_radio(), router_id=ADOPTED)
-        assert view.router_key == ADOPTED
-        assert view.router_key != default_router_id("e1")
-        assert view.radio_key == "phy0"
+        assert view.router_id == ADOPTED
+        assert view.router_id != default_router_id("e1")
+        assert view.radio_id == "phy0"
 
     def test_router_id_is_required(self):
         with pytest.raises(TypeError):

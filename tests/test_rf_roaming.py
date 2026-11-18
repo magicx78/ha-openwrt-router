@@ -40,7 +40,7 @@ SRC = "usteer"
 
 def _ev(ts, frm=A, to=B, before=-75.0, after=-60.0, gap=0.3, **kw):
     base = {
-        "client_key": "c1",
+        "client_mac": "c1",
         "ts": ts,
         "from_radio": frm,
         "to_radio": to,
@@ -49,7 +49,7 @@ def _ev(ts, frm=A, to=B, before=-75.0, after=-60.0, gap=0.3, **kw):
         "rssi_before": before,
         "rssi_after": after,
         "gap_s": gap,
-        "auth_failures": 0,
+        "handshake_failures": 0,
         "reauth": False,
     }
     base.update(kw)
@@ -66,7 +66,7 @@ def _ping_pong(n, step_s, start=0.0):
 
 def _window(events, online_s=8 * 3600.0, mobility="mobile"):
     return ClientRoamWindow(
-        client_key="c1",
+        client_mac="c1",
         window_s=24 * 3600.0,
         online_s=online_s,
         events=tuple(events),
@@ -163,7 +163,7 @@ class TestFlapping:
 
     def test_clients_are_separated(self):
         events = [
-            _ev(i * 60.0, *((A, B) if i % 2 == 0 else (B, A)), client_key=f"c{i % 2}")
+            _ev(i * 60.0, *((A, B) if i % 2 == 0 else (B, A)), client_mac=f"c{i % 2}")
             for i in range(6)
         ]
         assert detect_flapping(events, TH) == []
@@ -215,10 +215,11 @@ class TestRoamingQuality:
         assert r.score is None
 
     def test_review_l1_missing_parts_lower_coverage_not_score(self):
-        # Unknown auth data is None, not 0 (review M2); the old test counted
-        # the auth part as known.
+        # Unknown handshake data is None, not 0 (review M2); the old test counted
+        # the handshake part as known.
         events = [
-            _ev(i * 3600.0, before=None, gap=None, auth_failures=None) for i in range(3)
+            _ev(i * 3600.0, before=None, gap=None, handshake_failures=None)
+            for i in range(3)
         ]
         r = roaming_quality(_window(events), TH)
         assert r.coverage == pytest.approx(0.35)
@@ -227,7 +228,7 @@ class TestRoamingQuality:
         parts = {p.name: p for p in r.parts}
         assert parts["signal"].score is None
         assert parts["gap"].score is None
-        assert parts["auth"].score is None
+        assert parts["handshake"].score is None
 
     def test_missing_part_is_renormalized_not_counted_full(self):
         events = [
@@ -241,14 +242,14 @@ class TestRoamingQuality:
         expected = (0.25 * (200 / 3) + 0.20 * 100 + 0.15 * 100 + 0.15 * 100) / 0.75
         assert r.score == pytest.approx(expected, abs=0.1)
 
-    def test_auth_failures_and_degraded_roams(self):
+    def test_handshake_failures_and_degraded_roams(self):
         events = [
-            _ev(0, auth_failures=2),
+            _ev(0, handshake_failures=2),
             _ev(3600, B, A, before=-60, after=-75),
             _ev(7200),
         ]
         parts = {p.name: p for p in roaming_quality(_window(events), TH).parts}
-        assert parts["auth"].score == pytest.approx(100 * 2 / 3)
+        assert parts["handshake"].score == pytest.approx(100 * 2 / 3)
         assert parts["signal"].score == pytest.approx(100 * 2 / 3)
 
 
@@ -267,7 +268,7 @@ def _sticky(
     alternatives=(), *, rssi=-80.0, dwell=1800.0, weak=0.8, mobility=None, band="5g"
 ):
     return StickyInput(
-        client_key="c1",
+        client_mac="c1",
         current_radio=A,
         current_rssi=_rssi(rssi),
         dwell_s=dwell,
@@ -371,7 +372,7 @@ class TestSticky:
     def test_case_25_unknown_inputs(self):
         alt = [_alt(B, -60.0, "measured_same_client")]
         missing = StickyInput(
-            client_key="c1",
+            client_mac="c1",
             current_radio=A,
             current_rssi=_rssi(None, CapabilityState.NO_DATA),
             dwell_s=1800.0,
@@ -402,28 +403,28 @@ class TestSticky:
         s = assess_sticky(_sticky([_alt(B, -62.0, "measured_same_client")]), STH)
         d = s.as_dict()
         assert d["status"] == "supported_by_measurement"
-        assert d["better_radio"] == {"router_key": "ap2", "radio_key": "radio1"}
+        assert d["better_radio"] == {"router_id": "ap2", "radio_id": "radio1"}
 
 
 class TestReviewM2AuthUnknown:
-    def test_review_m2_all_auth_unknown_is_unknown_part(self):
-        events = [_ev(i * 3600.0, auth_failures=None) for i in range(3)]
+    def test_review_m2_all_handshake_unknown_is_unknown_part(self):
+        events = [_ev(i * 3600.0, handshake_failures=None) for i in range(3)]
         r = roaming_quality(_window(events), TH)
         parts = {p.name: p for p in r.parts}
-        assert parts["auth"].score is None
-        assert r.coverage == pytest.approx(1.0 - WEIGHTS["auth"])
+        assert parts["handshake"].score is None
+        assert r.coverage == pytest.approx(1.0 - WEIGHTS["handshake"])
 
     def test_review_m2_unknown_events_leave_the_share(self):
         events = [
-            _ev(0.0, auth_failures=None),
-            _ev(3600.0, B, A, auth_failures=2),
-            _ev(7200.0, auth_failures=0),
+            _ev(0.0, handshake_failures=None),
+            _ev(3600.0, B, A, handshake_failures=2),
+            _ev(7200.0, handshake_failures=0),
         ]
         r = roaming_quality(_window(events), TH)
-        auth = {p.name: p for p in r.parts}["auth"]
-        assert auth.score == pytest.approx(50.0)  # 1 of 2 known roams failed
-        assert "roams_with_auth_failures:1/2" in auth.evidence
-        assert "auth_unknown:1" in auth.evidence
+        handshake = {p.name: p for p in r.parts}["handshake"]
+        assert handshake.score == pytest.approx(50.0)  # 1 of 2 known roams failed
+        assert "roams_with_handshake_failures:1/2" in handshake.evidence
+        assert "handshake_unknown:1" in handshake.evidence
 
 
 class TestReviewM5StickyBands:

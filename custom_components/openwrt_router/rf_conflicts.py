@@ -28,7 +28,7 @@ from .channel_plan import BAND_24, STANDARD_24_CHANNELS, Radio
 
 # One severity for RF findings and Core events (CoreEvent.severity).
 from .net_events import Severity
-from .rf_identity import RadioRef, require_radio_key, require_router_id
+from .rf_identity import RadioRef, require_radio_id, require_router_id
 from .rf_models import CapabilityState, Metric
 from .rf_spectrum import (
     Block,
@@ -88,18 +88,19 @@ class ConflictThresholds:
 class RadioView:
     """What the conflict check needs to know about one radio.
 
-    ``router_key`` is the Core router id, ``radio_key`` the UCI radio name
-    (see :mod:`.rf_identity`). ``neighbors`` maps the :class:`RadioRef` (router and radio key) of another
-    radio to the measured signal (dBm) at which this radio hears it; the
-    radio key alone is not unique (``radio0`` exists on every router).
+    ``router_id`` is the Core router id, ``radio_id`` the UCI radio name
+    (see :mod:`.rf_identity`). ``neighbors`` maps the :class:`RadioRef`
+    (router id and radio id) of another radio to the measured signal (dBm)
+    at which this radio hears it; the radio id alone is not unique
+    (``radio0`` exists on every router).
     ``regulatory`` is the radio's
     reported channel list; without it no ``uneven_distribution`` finding.
     ``uplink_peer`` is the radio at the other end of this radio's WLAN
     uplink (set on the backhaul radio, or on the parent); None means unknown.
     """
 
-    router_key: str
-    radio_key: str
+    router_id: str
+    radio_id: str
     band: str
     channel: int
     width_mhz: int
@@ -116,7 +117,7 @@ class RadioView:
     @property
     def ref(self) -> RadioRef:
         """Return the radio's identity."""
-        return RadioRef(self.router_key, self.radio_key)
+        return RadioRef(self.router_id, self.radio_id)
 
 
 @dataclass(frozen=True)
@@ -131,9 +132,9 @@ class Conflict:
     evidence: tuple[str, ...]
 
     @property
-    def radio_keys(self) -> tuple[str, ...]:
-        """Return the radio keys of the members (see ``members`` for routers)."""
-        return tuple(m.radio_key for m in self.members)
+    def radio_ids(self) -> tuple[str, ...]:
+        """Return the radio ids of the members (see ``members`` for routers)."""
+        return tuple(m.radio_id for m in self.members)
 
     def as_dict(self) -> dict[str, Any]:
         """Return the finding as a plain dict."""
@@ -148,15 +149,15 @@ class Conflict:
 
 
 def from_channel_plan_radio(radio: Radio, *, router_id: str, **extra: Any) -> RadioView:
-    """Adapt a ``channel_plan.Radio`` (phy → radio_key).
+    """Adapt a ``channel_plan.Radio`` (phy → radio_id).
 
     ``router_id`` is the Core router id of the radio's entry, taken from the
     router registry; ``radio.entry_id`` is never turned into a router id
     (after an adoption they no longer match).
     """
     return RadioView(
-        router_key=require_router_id(router_id),
-        radio_key=require_radio_key(radio.phy),
+        router_id=require_router_id(router_id),
+        radio_id=require_radio_id(radio.phy),
         band=radio.band,
         channel=radio.channel,
         width_mhz=radio.width,
@@ -255,9 +256,9 @@ def _pair_conflict(
         evidence.extend(texts)
     uplink_pair = is_uplink_pair(a, b)
     evidence.extend(_backhaul_evidence(a, b, uplink_pair))
-    same_router = a.router_key == b.router_key
+    same_router = a.router_id == b.router_id
     if same_router:
-        evidence.append(f"same_router:{a.router_key}")
+        evidence.append(f"same_router:{a.router_id}")
 
     high = any(u is not None and u >= th.high_utilization_pct for u in utils)
     all_low = all(u is not None and u < th.low_utilization_pct for u in utils)
@@ -280,7 +281,7 @@ def _conflict(
     evidence: Sequence[str],
 ) -> Conflict:
     members = tuple(
-        sorted({v.ref for v in views}, key=lambda r: (r.router_key, r.radio_key))
+        sorted({v.ref for v in views}, key=lambda r: (r.router_id, r.radio_id))
     )
     severity = Severity.WARNING if status is ConflictStatus.MEASURED else Severity.INFO
     return Conflict(kind, band, members, status, severity, tuple(evidence))
@@ -382,7 +383,7 @@ def detect_conflicts(
 ) -> list[Conflict]:
     """Return all findings for the given radios, sorted by kind, band, members.
 
-    A radio listed twice (same router and radio key) is one radio.
+    A radio listed twice (same router id and radio id) is one radio.
     """
     unique: dict[RadioRef, RadioView] = {}
     for view in radios:
@@ -404,7 +405,7 @@ def detect_conflicts(
         key=lambda c: (
             _KIND_ORDER.index(c.kind),
             c.band,
-            [(m.router_key, m.radio_key) for m in c.members],
+            [(m.router_id, m.radio_id) for m in c.members],
         )
     )
     return conflicts

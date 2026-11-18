@@ -150,7 +150,7 @@ def _pair(
 
 
 def _sort_key(ref: RadioRef) -> tuple[str, str]:
-    return (ref.router_key, ref.radio_key)
+    return (ref.router_id, ref.radio_id)
 
 
 def correlate_radios(

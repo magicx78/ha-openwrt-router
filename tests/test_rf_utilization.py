@@ -27,7 +27,7 @@ R = UnknownReason
 
 def _sample(**overrides):
     base = {
-        "radio_key": "radio0",
+        "radio_id": "radio0",
         "mhz": 2437,
         "taken_at": 1000.0,
         "uptime_s": 5000,
@@ -190,7 +190,7 @@ class TestUtilizationFromDelta:
         assert result.busy_pct is None
 
     def test_radio_mismatch(self):
-        result = _delta(_next(radio_key="radio1"))
+        result = _delta(_next(radio_id="radio1"))
         assert result.reason is R.RADIO_MISMATCH
 
     def test_case_25_missing_active_makes_everything_unknown(self):

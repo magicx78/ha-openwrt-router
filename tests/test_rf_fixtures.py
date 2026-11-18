@@ -268,7 +268,7 @@ def test_reliable_window_from_fixture_counters():
         "02:00:00:00:02:02"
     ]
     window = ClientRfWindow(
-        client_key="c1",
+        client_mac="c1",
         radio=RadioRef("ap1", "radio1"),
         band="5g",
         driver="mt7915e",

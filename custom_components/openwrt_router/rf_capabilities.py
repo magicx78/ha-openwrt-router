@@ -50,7 +50,7 @@ from .core_models import (
     CapabilityStatus,
 )
 from .core_models import CapabilityState as CoreState
-from .rf_identity import require_radio_key, require_router_id
+from .rf_identity import require_radio_id, require_router_id
 from .rf_models import ALL_METRICS, METRIC_SCAN, CapabilityState, RadioCapabilities
 from .rf_scan_policy import DEFAULT_SCAN_CAPABILITY
 
@@ -107,12 +107,12 @@ def _radio_detail(caps: RadioCapabilities, metric: str) -> dict[str, Any]:
 def _check(caps: Sequence[RadioCapabilities], router_id: str) -> None:
     seen: set[str] = set()
     for item in caps:
-        if item.router_key != router_id:
+        if item.router_id != router_id:
             raise ValueError("every radio must belong to router_id")
-        require_radio_key(item.radio_key)
-        if item.radio_key in seen:
-            raise ValueError(f"radio listed twice: {item.radio_key}")
-        seen.add(item.radio_key)
+        require_radio_id(item.radio_id)
+        if item.radio_id in seen:
+            raise ValueError(f"radio listed twice: {item.radio_id}")
+        seen.add(item.radio_id)
 
 
 def to_core_capabilities(
@@ -135,7 +135,7 @@ def to_core_capabilities(
             source=RF_CAPABILITY_SOURCE,
             detected_at=now,
             detail={
-                _DETAIL_RADIOS: {c.radio_key: _radio_detail(c, metric) for c in caps}
+                _DETAIL_RADIOS: {c.radio_id: _radio_detail(c, metric) for c in caps}
             },
         )
     return result

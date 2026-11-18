@@ -162,7 +162,7 @@ class HealthScore:
 class HealthItem:
     """One member of an aggregate (a radio of an AP, an AP of the network)."""
 
-    key: str
+    member_id: str
     score: int | None
     coverage: float
     clients: int | None
@@ -176,7 +176,7 @@ class AggregateHealth:
     coverage: float
     grade: str
     capped: bool
-    worst_key: str | None
+    worst_member_id: str | None
     worst_score: int | None
     items: tuple[HealthItem, ...]
     evidence: tuple[str, ...]
@@ -188,11 +188,11 @@ class AggregateHealth:
             "coverage": self.coverage,
             "grade": self.grade,
             "capped": self.capped,
-            "worst_key": self.worst_key,
+            "worst_member_id": self.worst_member_id,
             "worst_score": self.worst_score,
             "items": [
                 {
-                    "key": i.key,
+                    "member_id": i.member_id,
                     "score": i.score,
                     "coverage": i.coverage,
                     "clients": i.clients,
@@ -370,10 +370,10 @@ def _weighted_mean(components: Sequence[ComponentScore]) -> float:
 
 
 def item_from(
-    key: str, health: HealthScore | AggregateHealth, clients: int | None
+    member_id: str, health: HealthScore | AggregateHealth, clients: int | None
 ) -> HealthItem:
     """Turn a radio or AP result into a member of the next aggregate."""
-    return HealthItem(key, health.score, health.coverage, clients)
+    return HealthItem(member_id, health.score, health.coverage, clients)
 
 
 def aggregate_health(
@@ -395,13 +395,13 @@ def aggregate_health(
         mean = sum(w * (i.score or 0) for w, i in scored) / sum(w for w, _ in scored)
     score, capped, evidence = _limit(mean, coverage, thresholds)
     worst = min((i for _, i in scored), key=lambda i: i.score or 0, default=None)
-    unscored = tuple(f"unscored:{i.key}" for i in items if i.score is None)
+    unscored = tuple(f"unscored:{i.member_id}" for i in items if i.score is None)
     return AggregateHealth(
         score=score,
         coverage=coverage,
         grade=grade(score, thresholds),
         capped=capped,
-        worst_key=worst.key if worst else None,
+        worst_member_id=worst.member_id if worst else None,
         worst_score=worst.score if worst else None,
         items=tuple(items),
         evidence=evidence + unscored,

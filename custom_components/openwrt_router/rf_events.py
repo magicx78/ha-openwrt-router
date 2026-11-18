@@ -10,10 +10,18 @@ never ``security.*``) and publishes it.
 
 Contract rules kept here:
 
-- ``data`` carries ids, codes and counters only: Core router ids under
-  ``router_id``, UCI radio names under ``radio``, never SSIDs, BSSIDs,
-  MACs, channel parameters or user ids (tested: ``mask_for_output`` leaves
-  it unchanged, so the Core's second masking pass does not lose anything);
+- the radio of an event is the typed ``CoreEvent.radio_id`` (contract
+  §12.1, #107), a kind of finding is ``classification`` and a confidence is
+  ``confidence``; a client would be ``client_ref`` (Core pseudonym
+  ``cli_<16 hex>``, :func:`.rf_privacy.client_ref`), never a MAC. No RF event
+  names a client yet;
+- ``data`` carries ids, codes and counters only (Core router ids under
+  ``router_id``, UCI radio names under ``radio_id`` only where an event has
+  several radios), never SSIDs, BSSIDs, MACs, channel parameters or user
+  ids. It passes ``core_masking.mask_for_output`` here, and the tests show
+  that pass leaves it unchanged, so the Core's second pass loses nothing;
+- scan events stay in the general audit ring (``security_relevant`` False,
+  no dedup key); the guard writes its own decisions to the security ring;
 - who acted is the Core :class:`Actor` in ``CoreEvent.actor`` (the Core
   replaces its user id by a pseudonym on the bus and keeps it in the audit
   store); a user id is never copied into ``data``;
@@ -27,8 +35,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Final
 
+from .core_masking import mask_for_output
 from .core_models import (
     EVENT_ID_PREFIX,
+    EVENT_REF_FIELDS,
     MODULE_EVENT_PREFIXES,
     Actor,
     CoreEvent,
@@ -40,8 +50,7 @@ from .core_models import (
 )
 from .net_events import Severity
 from .rf_conflicts import Conflict, ConflictStatus
-from .rf_identity import RadioRef, require_radio_key, require_router_id
-from .rf_privacy import mask_rf_output
+from .rf_identity import RadioRef, require_radio_id, require_router_id
 from .rf_recommend import Recommendation
 from .rf_scan_policy import ScanDecision
 from .rf_utilization import UtilizationSummary
@@ -83,6 +92,9 @@ def _event(
     actor: Actor | None = None,
     correlation_id: str | None = None,
     dedup_key: str | None = None,
+    radio_id: str | None = None,
+    classification: str | None = None,
+    confidence: float | None = None,
 ) -> CoreEvent:
     return CoreEvent(
         event_id=new_id(EVENT_ID_PREFIX),
@@ -95,15 +107,18 @@ def _event(
         actor=actor,
         correlation_id=correlation_id,
         dedup_key=dedup_key,
-        data=mask_rf_output(dict(data)),
+        data=mask_for_output(dict(data)),
+        radio_id=radio_id,
+        classification=classification,
+        confidence=confidence,
     )
 
 
 def _ref_data(ref: RadioRef) -> dict[str, str]:
-    """A radio in event data: never the ``*_key`` names the Core masks."""
+    """A checked radio reference (``router_id``, ``radio_id``)."""
     return {
-        "router_id": require_router_id(ref.router_key),
-        "radio": require_radio_key(ref.radio_key),
+        "router_id": require_router_id(ref.router_id),
+        "radio_id": require_radio_id(ref.radio_id),
     }
 
 
@@ -121,7 +136,10 @@ def _actor(actor: Actor | VerifiedActor) -> Actor:
 
 
 def emit_kwargs(event: CoreEvent) -> dict[str, Any]:
-    """Keyword arguments for ``AuditLog.emit`` / ``api.emit`` of ``event``."""
+    """Keyword arguments for ``AuditLog.emit`` / ``api.emit`` of ``event``.
+
+    Includes every typed reference field (``core_models.EVENT_REF_FIELDS``).
+    """
     return {
         "event_type": event.type,
         "source": event.source,
@@ -134,6 +152,7 @@ def emit_kwargs(event: CoreEvent) -> dict[str, Any]:
         "dedup_key": event.dedup_key,
         "data": event.data,
         "now": event.ts,
+        **{name: getattr(event, name) for name in EVENT_REF_FIELDS},
     }
 
 
@@ -144,13 +163,15 @@ def channel_conflict_event(conflict: Conflict, *, now: datetime) -> CoreEvent | 
     """Event for a measured channel conflict; None for other statuses.
 
     ``router_id`` is set when all members are on one router (cross-router
-    conflicts name their routers in ``data.members``).
+    conflicts name their routers in ``data.members``). The conflict kind is
+    the typed ``classification``; with several radios there is no single
+    ``radio_id``.
     """
     if conflict.status is not ConflictStatus.MEASURED:
         return None
     members = [_ref_data(m) for m in conflict.members]
     routers = {m["router_id"] for m in members}
-    pairs = [(m["router_id"], m["radio"]) for m in members]
+    pairs = [(m["router_id"], m["radio_id"]) for m in members]
     return _event(
         EVENT_CHANNEL_CONFLICT,
         now=now,
@@ -159,8 +180,8 @@ def channel_conflict_event(conflict: Conflict, *, now: datetime) -> CoreEvent | 
         dedup_key=binding_checksum(str(conflict.kind), conflict.band, pairs)[
             :_DEDUP_LENGTH
         ],
+        classification=conflict.kind.value,
         data={
-            "kind": conflict.kind.value,
             "band": conflict.band,
             "status": conflict.status.value,
             "members": members,
@@ -181,9 +202,9 @@ def channel_utilization_event(
         now=now,
         router_id=ref["router_id"],
         severity=Severity.WARNING,
-        dedup_key=ref["radio"],
+        dedup_key=ref["radio_id"],
+        radio_id=ref["radio_id"],
         data={
-            "radio": ref["radio"],
             "current_pct": summary.current,
             "mean_pct": summary.mean,
             "peak_pct": summary.peak,
@@ -219,20 +240,22 @@ def recommendation_key(rec: Recommendation) -> str:
 def _recommendation_event(
     event_type: str, rec: Recommendation, now: datetime
 ) -> CoreEvent:
+    """The target goes into ``router_id``/``radio_id``, kind and confidence
+    into ``classification``/``confidence`` (typed fields, not ``data``)."""
     router_id, target = _target(rec)
     return _event(
         event_type,
         now=now,
         router_id=router_id,
+        radio_id=(target or {}).get("radio_id"),
+        classification=rec.kind,
+        confidence=rec.confidence,
         dedup_key=recommendation_key(rec),
         data={
-            "kind": rec.kind,
             "problem": rec.problem,
             "action": rec.action,
             "scope": rec.scope,
-            "target": target,
             "priority": rec.priority,
-            "confidence": rec.confidence,
             "risk": list(rec.risk),
         },
     )
@@ -266,7 +289,7 @@ def recommendation_events(
 def _scan_event(
     event_type: str,
     router_id: str,
-    radio_key: str,
+    radio_id: str,
     *,
     actor: Actor | VerifiedActor,
     now: datetime,
@@ -283,8 +306,8 @@ def _scan_event(
         result=result,
         actor=_actor(actor),
         correlation_id=correlation_id,
+        radio_id=require_radio_id(radio_id),
         data={
-            "radio": require_radio_key(radio_key),
             "action": SCAN_ACTION_NAME,
             **(extra or {}),
         },
@@ -293,7 +316,7 @@ def _scan_event(
 
 def scan_requested_event(
     router_id: str,
-    radio_key: str,
+    radio_id: str,
     *,
     actor: Actor | VerifiedActor,
     now: datetime,
@@ -303,7 +326,7 @@ def scan_requested_event(
     return _scan_event(
         EVENT_SCAN_REQUESTED,
         router_id,
-        radio_key,
+        radio_id,
         actor=actor,
         now=now,
         result=EventResult.PENDING,
@@ -313,7 +336,7 @@ def scan_requested_event(
 
 def scan_refused_event(
     router_id: str,
-    radio_key: str,
+    radio_id: str,
     decision: ScanDecision,
     *,
     actor: Actor | VerifiedActor,
@@ -326,7 +349,7 @@ def scan_refused_event(
     return _scan_event(
         EVENT_SCAN_REFUSED,
         router_id,
-        radio_key,
+        radio_id,
         actor=actor,
         now=now,
         result=EventResult.DENIED,
@@ -340,7 +363,7 @@ def scan_refused_event(
 
 def scan_executed_event(
     router_id: str,
-    radio_key: str,
+    radio_id: str,
     *,
     actor: Actor | VerifiedActor,
     now: datetime,
@@ -352,7 +375,7 @@ def scan_executed_event(
     return _scan_event(
         EVENT_SCAN_EXECUTED,
         router_id,
-        radio_key,
+        radio_id,
         actor=actor,
         now=now,
         result=EventResult.SUCCESS,
@@ -379,7 +402,7 @@ def _belongs_to(key: Any, router_id: str) -> bool:
     if key == router_id:
         return True
     if isinstance(key, RadioRef):
-        return key.router_key == router_id
+        return key.router_id == router_id
     if isinstance(key, tuple):
         return any(_belongs_to(part, router_id) for part in key)
     return False
@@ -389,7 +412,7 @@ def forget_router(state: Mapping[Any, Any], router_id: str) -> dict[Any, Any]:
     """Return ``state`` without every entry of ``router_id`` (input unchanged).
 
     Keys may be the router id, a :class:`RadioRef` or a tuple containing
-    either (e.g. ``(RadioRef, client_key)``).
+    either (e.g. ``(RadioRef, client_mac)``).
     """
     require_router_id(router_id)
     return {k: v for k, v in state.items() if not _belongs_to(k, router_id)}

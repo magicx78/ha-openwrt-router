@@ -189,7 +189,7 @@ class TestLossless:
         ]
         statuses = to_core_capabilities(caps, router_id=R1, now=T0)
         back = from_core_capabilities(statuses, router_id=R1)
-        assert sorted(back, key=lambda c: c.radio_key) == caps
+        assert sorted(back, key=lambda c: c.radio_id) == caps
 
     def test_metric_both_measured_and_excluded_survives(self):
         caps = [_caps("radio0", {METRIC_NOISE: C.MEASURED}, excluded={METRIC_NOISE})]

@@ -6,11 +6,14 @@ import inspect
 
 import pytest
 
-from custom_components.openwrt_router.core_masking import secret_digest_factory
+from custom_components.openwrt_router.core_masking import (
+    IDENTIFIER_PSEUDONYM_PREFIXES,
+    pseudonymise_identifier,
+)
+from custom_components.openwrt_router.core_models import derive_module_key
 from custom_components.openwrt_router.rf_models import CapabilityState
 from custom_components.openwrt_router.rf_scan_policy import (
     DEFAULT_SCAN_CAPABILITY,
-    NEIGHBOR_DIGEST_DOMAIN,
     NeighborBss,
     ScanPolicy,
     ScanReason,
@@ -30,7 +33,7 @@ NOW = 100_000.0
 
 def _req(manual=True, is_admin=True, radio="radio0", at=NOW):
     return ScanRequest(
-        radio_key=radio, requested_at=at, manual=manual, is_admin=is_admin
+        radio_id=radio, requested_at=at, manual=manual, is_admin=is_admin
     )
 
 
@@ -307,9 +310,9 @@ class TestReviewM3ScanGate:
 FOREIGN_SSID = "Nachbar-WLAN-Mueller"
 FOREIGN_BSSID = "AA:BB:CC:DD:EE:01"
 OWN_BSSID = "02:11:22:33:44:55"
-# The neighbor key is a Core secret digest key (bytes, >= 16).
-SALT = b"test-salt-0123456789abcdef"
-OTHER_SALT = b"other-salt-0123456789abcdef"
+# The neighbor key is the Core module key of wifi_rf (bytes, >= 16).
+KEY = derive_module_key(b"\x07" * 32, "wifi_rf", "pseudonym")
+OTHER_KEY = derive_module_key(b"\x08" * 32, "wifi_rf", "pseudonym")
 
 
 def _scan_entry(ssid, bssid, channel, signal, mhz=None, **extra):
@@ -357,15 +360,15 @@ def _scan():
 
 class TestSanitizeNeighbors:
     def test_separates_own_from_foreign(self):
-        result = sanitize_neighbors(_scan(), [OWN_BSSID], salt=SALT)
+        result = sanitize_neighbors(_scan(), [OWN_BSSID], key=KEY)
         own = [n for n in result if n.own]
         foreign = [n for n in result if not n.own]
         assert len(own) == 1
-        assert own[0].key == OWN_BSSID.lower()
+        assert own[0].bssid == OWN_BSSID.lower()
         assert len(foreign) == 2
 
     def test_foreign_ssid_and_bssid_never_in_output(self):
-        result = sanitize_neighbors(_scan(), [OWN_BSSID], salt=SALT)
+        result = sanitize_neighbors(_scan(), [OWN_BSSID], key=KEY)
         text = repr(result) + repr([n.as_dict() for n in result])
         for secret in (
             FOREIGN_SSID,
@@ -379,10 +382,11 @@ class TestSanitizeNeighbors:
         assert "MyHome" not in text  # SSIDs are never kept
 
     def test_foreign_fields(self):
-        result = sanitize_neighbors(_scan(), [], salt=SALT)
+        result = sanitize_neighbors(_scan(), [], key=KEY)
         strongest = result[0]
         assert strongest.own is False
-        assert len(strongest.key) == 16
+        assert strongest.bssid.startswith(IDENTIFIER_PSEUDONYM_PREFIXES["bssid"])
+        assert len(strongest.bssid) == 20
         assert (strongest.band, strongest.channel, strongest.signal_dbm) == (
             "2.4g",
             6,
@@ -394,32 +398,34 @@ class TestSanitizeNeighbors:
         third = result[2]
         assert (third.band, third.width_mhz, third.encryption) == ("5g", 80, "open")
 
-    def test_key_is_stable_per_salt(self):
-        a = sanitize_neighbors(_scan(), [], salt=SALT)
-        b = sanitize_neighbors(_scan(), [], salt=SALT)
-        c = sanitize_neighbors(_scan(), [], salt=OTHER_SALT)
-        assert [n.key for n in a] == [n.key for n in b]
-        assert a[0].key != c[0].key
+    def test_pseudonym_is_stable_per_key(self):
+        a = sanitize_neighbors(_scan(), [], key=KEY)
+        b = sanitize_neighbors(_scan(), [], key=KEY)
+        c = sanitize_neighbors(_scan(), [], key=OTHER_KEY)
+        assert [n.bssid for n in a] == [n.bssid for n in b]
+        assert a[0].bssid != c[0].bssid
 
-    def test_empty_salt_is_refused(self):
+    def test_empty_key_is_refused(self):
         with pytest.raises(ValueError):
-            sanitize_neighbors(_scan(), [], salt=b"")
+            sanitize_neighbors(_scan(), [], key=b"")
 
-    def test_short_or_text_salt_is_refused(self):
+    def test_short_or_text_key_is_refused(self):
         with pytest.raises(ValueError):
-            sanitize_neighbors(_scan(), [], salt=b"too-short")
+            sanitize_neighbors(_scan(), [], key=b"too-short")
         with pytest.raises(TypeError):
-            sanitize_neighbors(_scan(), [], salt="test-salt-0123456789abcdef")
+            sanitize_neighbors(_scan(), [], key="test-salt-0123456789abcdef")
 
-    def test_key_is_the_core_secret_digest(self):
-        # RF makes no hash of its own: the key is core_masking's HMAC digest
-        # of a domain-separated value.
-        digest = secret_digest_factory(SALT)
+    def test_pseudonym_is_the_core_bssid_pseudonym(self):
+        # RF makes no hash of its own: the value is core_masking's pseudonym
+        # of kind bssid (the Core separates kinds, RF adds no domain).
         (n,) = sanitize_neighbors(
-            [_scan_entry("x", FOREIGN_BSSID, 6, -60)], [], salt=SALT
+            [_scan_entry("x", FOREIGN_BSSID, 6, -60)], [], key=KEY
         )
-        assert n.key == digest(f"{NEIGHBOR_DIGEST_DOMAIN}{FOREIGN_BSSID.lower()}")
-        assert NEIGHBOR_DIGEST_DOMAIN.startswith("wifi_rf/")
+        assert n.bssid == pseudonymise_identifier("bssid", FOREIGN_BSSID, KEY)
+
+    def test_a_foreign_bssid_that_is_no_mac_is_dropped(self):
+        raw = [_scan_entry("x", "not-a-mac", 6, -60)]
+        assert sanitize_neighbors(raw, [], key=KEY) == []
 
     def test_limit_keeps_strongest_foreign_and_all_own(self):
         raw = [
@@ -427,7 +433,7 @@ class TestSanitizeNeighbors:
         ]
         raw.append(_scan_entry("mine", OWN_BSSID, 1, -95))
         result = sanitize_neighbors(
-            raw, [OWN_BSSID.replace(":", "-")], salt=SALT, max_neighbors=3
+            raw, [OWN_BSSID.replace(":", "-")], key=KEY, max_neighbors=3
         )
         foreign = [n for n in result if not n.own]
         assert [n.signal_dbm for n in foreign] == [-50, -51, -52]
@@ -436,7 +442,7 @@ class TestSanitizeNeighbors:
     def test_width_variants(self):
         def width(**ops):
             raw = [_scan_entry("x", "aa:bb:cc:dd:ee:09", 36, -60, **ops)]
-            return sanitize_neighbors(raw, [], salt=SALT)[0].width_mhz
+            return sanitize_neighbors(raw, [], key=KEY)[0].width_mhz
 
         assert width() is None
         assert (
@@ -453,7 +459,7 @@ class TestSanitizeNeighbors:
 
     def test_invalid_values_are_unknown(self):
         raw = [_scan_entry("x", "aa:bb:cc:dd:ee:09", 6, 0, encryption=None)]
-        (n,) = sanitize_neighbors(raw, [], salt=SALT)
+        (n,) = sanitize_neighbors(raw, [], key=KEY)
         assert n.signal_dbm is None
         assert n.encryption is None
 
@@ -461,8 +467,13 @@ class TestSanitizeNeighbors:
         "raw", [None, "x", {"results": "x"}, [None, {"ssid": "no bssid"}]]
     )
     def test_garbage(self, raw):
-        assert sanitize_neighbors(raw, [], salt=SALT) == []
+        assert sanitize_neighbors(raw, [], key=KEY) == []
 
     def test_neighbor_bss_has_no_ssid_field(self):
         assert "ssid" not in NeighborBss.__dataclass_fields__
-        assert "bssid" not in NeighborBss.__dataclass_fields__
+        # ``bssid`` replaced ``key`` (a Core secret name, contract #108); it
+        # never holds a foreign BSSID in clear text, only the Core pseudonym
+        result = sanitize_neighbors(_scan(), [OWN_BSSID], key=KEY)
+        prefix = IDENTIFIER_PSEUDONYM_PREFIXES["bssid"]
+        assert all(n.bssid.startswith(prefix) for n in result if not n.own)
+        assert [n.bssid for n in result if n.own] == [OWN_BSSID]

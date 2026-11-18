@@ -1,15 +1,26 @@
-"""RF output masking on top of core_masking (rf_privacy.py)."""
+"""RF output masking on top of core_masking (rf_privacy.py).
+
+Identifiers become Core pseudonyms (``pseudonymise_identifier``) under the
+``wifi_rf`` module key; without a key they become the Core ``MASK``.
+"""
 
 from __future__ import annotations
 
 import pytest
 
 from custom_components.openwrt_router.core_masking import (
+    IDENTIFIER_INVALID,
+    IDENTIFIER_PSEUDONYM_PREFIXES,
     MASK,
     is_secret_key,
     mask_for_output,
+    pseudonymise_fields,
+    pseudonymise_identifier,
 )
-from custom_components.openwrt_router.core_models import default_router_id
+from custom_components.openwrt_router.core_models import (
+    default_router_id,
+    derive_module_key,
+)
 from custom_components.openwrt_router.rf_clients import (
     ClientRfWindow,
     assess_client,
@@ -28,8 +39,9 @@ from custom_components.openwrt_router.rf_models import (
     metric_measured,
 )
 from custom_components.openwrt_router.rf_privacy import (
-    IDENTIFIER_KEYS,
-    REFERENCE_KEYS,
+    RF_IDENTIFIER_FIELDS,
+    RF_PSEUDONYM_PURPOSE,
+    client_ref,
     mask_rf_output,
 )
 from custom_components.openwrt_router.rf_recommend import Recommendation
@@ -46,7 +58,8 @@ R2 = default_router_id("e2")
 MAC = "aa:bb:cc:dd:ee:01"
 MAC_FORMS = (MAC, MAC.upper(), "aa-bb-cc-dd-ee-01", "aabb.ccdd.ee01", "aabbccddee01")
 OWN_BSSID = "02:11:22:33:44:55"
-SALT = b"test-salt-0123456789abcdef"
+KEY = derive_module_key(b"\x07" * 32, "wifi_rf", RF_PSEUDONYM_PURPOSE)
+MAC_PSEUDO = pseudonymise_identifier("mac", MAC, KEY)
 
 
 def _text(data):
@@ -59,78 +72,125 @@ def _no_mac(data):
         assert form.lower() not in text
 
 
-class TestCoreGap:
-    """What core_masking does NOT do (reported as a Core gap)."""
+class TestCoreGapClosed:
+    """The former Core gaps (``TestCoreGap``), inverted: the Core closes them."""
 
-    def test_core_does_not_mask_ssid_bssid_or_mac(self):
-        data = {"ssid": "Home", "bssid": MAC, "mac": MAC, "note": f"client {MAC}"}
+    def test_core_pseudonymises_ssid_bssid_and_mac(self):
+        data = {"ssid": "Home", "bssid": MAC, "mac": MAC}
+        out = pseudonymise_fields(data, KEY, RF_IDENTIFIER_FIELDS)
+        assert out == {
+            "ssid": pseudonymise_identifier("ssid", "Home", KEY),
+            "bssid": pseudonymise_identifier("bssid", MAC, KEY),
+            "mac": MAC_PSEUDO,
+        }
+        assert mask_rf_output(data, key=KEY) == out
+        # the masking alone still shows them: pseudonyms are a separate step
         assert mask_for_output(data) == data
 
-    def test_core_over_masks_rf_reference_keys(self):
-        # "key" is a secret word for the core: router_key/radio_key would be
-        # wiped, so RF cannot hand its as_dict forms to mask_for_output.
+    def test_rf_reference_names_are_no_core_secret_any_more(self):
+        for name in ("router_id", "radio_id", "member_id", "worst_member_id"):
+            assert not is_secret_key(name), name
+        assert mask_for_output({"router_id": R1}) == {"router_id": R1}
+        # the old *_key names would be masked: that is why they were renamed
         for name in ("router_key", "radio_key", "key", "client_key"):
-            assert is_secret_key(name)
-        assert mask_for_output({"router_key": R1})["router_key"] == MASK
+            assert is_secret_key(name), name
 
 
 class TestMaskRfOutput:
-    def test_identifier_keys_become_the_core_placeholder(self):
-        data = {k: "x" for k in ("ssid", "ssids", "bssid", "mac", "hostname", "ip")}
-        data["client_key"] = MAC
-        out = mask_rf_output(data)
+    FIELDS = ("ssid", "ssids", "bssid", "mac", "hostname", "ip", "client_mac")
+
+    def test_without_a_key_identifiers_become_the_core_placeholder(self):
+        data = {k: "x" for k in self.FIELDS}
+        data["client_mac"] = MAC
+        out = mask_rf_output(data, key=None)
         assert set(out.values()) == {MASK}
-        assert {"ssid", "bssid", "mac", "client_key"} <= IDENTIFIER_KEYS
+        assert set(self.FIELDS) <= set(RF_IDENTIFIER_FIELDS)
+
+    def test_with_a_key_no_identifier_keeps_its_value(self):
+        data = {k: "x" for k in self.FIELDS}
+        data["client_mac"] = MAC
+        out = mask_rf_output(data, key=KEY)
+        for name, value in out.items():
+            prefix = IDENTIFIER_PSEUDONYM_PREFIXES[RF_IDENTIFIER_FIELDS[name]]
+            assert value == IDENTIFIER_INVALID or value.startswith(prefix), name
+            assert value != data[name]
+        assert out["client_mac"] == client_ref(MAC, KEY)
+        assert out["ssid"] == pseudonymise_identifier("ssid", "x", KEY)
+        assert out["mac"] == IDENTIFIER_INVALID  # "x" is no MAC
 
     @pytest.mark.parametrize("form", MAC_FORMS)
-    def test_macs_in_free_text_are_masked(self, form):
-        out = mask_rf_output({"evidence": [f"roam:{form}->x", f"x {form} y"]})
+    def test_macs_in_free_text_become_the_core_pseudonym(self, form):
+        out = mask_rf_output({"evidence": [f"roam:{form}->x", f"x {form} y"]}, key=KEY)
+        _no_mac(out)
+        assert out["evidence"] == [f"roam:{MAC_PSEUDO}->x", f"x {MAC_PSEUDO} y"]
+
+    @pytest.mark.parametrize("form", MAC_FORMS)
+    def test_macs_in_free_text_without_a_key_are_masked(self, form):
+        out = mask_rf_output({"evidence": [f"roam:{form}->x", f"x {form} y"]}, key=None)
         _no_mac(out)
         assert out["evidence"] == [f"roam:{MASK}->x", f"x {MASK} y"]
 
     def test_reference_keys_and_rf_codes_stay_readable(self):
         data = {
-            "router_key": R1,
-            "radio_key": "radio0",
+            "router_id": R1,
+            "radio_id": "radio0",
             "evidence": [f"utilization:{R1}/radio0:78.0%:hostapd.get_status"],
             "kind": "co_channel",
             "coverage": 0.5,
             "count": 3,
             "flag": None,
         }
-        assert mask_rf_output(data) == data
-        assert {"router_key", "radio_key", "key"} <= REFERENCE_KEYS
+        assert mask_rf_output(data, key=KEY) == data
+        assert not [k for k in data if is_secret_key(k)]
 
-    def test_a_mac_under_a_reference_key_is_masked(self):
-        assert mask_rf_output({"key": OWN_BSSID}) == {"key": MASK}
+    def test_a_mac_under_any_other_name_is_pseudonymised(self):
+        assert mask_rf_output({"note": OWN_BSSID}, key=KEY) == {
+            "note": pseudonymise_identifier("mac", OWN_BSSID, KEY)
+        }
+        # a ``*_key`` name is a Core secret: its value never shows
+        assert mask_rf_output({"key": OWN_BSSID}, key=KEY) == {"key": MASK}
 
     def test_secret_keys_use_the_core_rule(self):
-        out = mask_rf_output({"password": "hunter2", "nested": {"token": "abc"}})
+        out = mask_rf_output(
+            {"password": "hunter2", "nested": {"token": "abc"}}, key=KEY
+        )
         assert out == {"password": MASK, "nested": {"token": MASK}}
 
     def test_core_text_redaction_runs_on_strings(self):
-        out = mask_rf_output({"note": "url http://root:hunter2@10.0.0.1/"})
+        out = mask_rf_output({"note": "url http://root:hunter2@10.0.0.1/"}, key=KEY)
         assert "hunter2" not in _text(out)
+
+    def test_identifying_names_without_a_core_kind_are_masked(self):
+        out = mask_rf_output({"username": "root", "web_url": "http://x/"}, key=KEY)
+        assert out == {"username": MASK, "web_url": MASK}
 
     def test_accepts_objects_with_as_dict_and_sequences(self):
         ref = RadioRef(R1, "radio0")
-        assert mask_rf_output(ref) == {"router_key": R1, "radio_key": "radio0"}
-        assert mask_rf_output([ref]) == [{"router_key": R1, "radio_key": "radio0"}]
-        assert mask_rf_output((1, "a")) == [1, "a"]
+        assert mask_rf_output(ref, key=KEY) == {"router_id": R1, "radio_id": "radio0"}
+        assert mask_rf_output([ref], key=KEY) == [
+            {"router_id": R1, "radio_id": "radio0"}
+        ]
+        assert mask_rf_output((1, "a"), key=KEY) == [1, "a"]
 
     def test_input_is_not_changed(self):
-        data = {"client_key": MAC, "inner": {"mac": MAC}}
-        mask_rf_output(data)
-        assert data == {"client_key": MAC, "inner": {"mac": MAC}}
+        data = {"client_mac": MAC, "inner": {"mac": MAC}}
+        mask_rf_output(data, key=KEY)
+        assert data == {"client_mac": MAC, "inner": {"mac": MAC}}
 
-    def test_idempotent(self):
-        data = {"client_key": MAC, "evidence": [f"a:{MAC}"], "router_key": R1}
-        once = mask_rf_output(data)
-        assert mask_rf_output(once) == once
+    @pytest.mark.parametrize("key", [KEY, None])
+    def test_idempotent(self, key):
+        data = {"client_mac": MAC, "evidence": [f"a:{MAC}"], "router_id": R1}
+        once = mask_rf_output(data, key=key)
+        assert mask_rf_output(once, key=key) == once
+
+    def test_a_pseudonym_of_another_kind_is_not_taken_as_is(self):
+        # a client pseudonym under ``mac`` is no MAC: refused, not passed on
+        out = mask_rf_output({"mac": client_ref(MAC, KEY)}, key=KEY)
+        assert out == {"mac": IDENTIFIER_INVALID}
 
     def test_unknown_objects_are_refused(self):
         with pytest.raises(TypeError):
-            mask_rf_output(object())
+            mask_rf_output(object(), key=KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +200,7 @@ class TestMaskRfOutput:
 
 def _window(**kw):
     base = {
-        "client_key": MAC,
+        "client_mac": MAC,
         "radio": RadioRef(R1, "radio0"),
         "band": "5g",
         "driver": "mt7915e",
@@ -170,7 +230,7 @@ def _roams():
     a, b = RadioRef(R1, "radio0"), RadioRef(R2, "radio0")
     events = tuple(
         RoamEvent(
-            client_key=MAC,
+            client_mac=MAC,
             ts=100.0 * i,
             from_radio=a if i % 2 == 0 else b,
             to_radio=b if i % 2 == 0 else a,
@@ -179,27 +239,27 @@ def _roams():
             rssi_before=-75.0,
             rssi_after=-70.0,
             gap_s=0.5,
-            auth_failures=1,
+            handshake_failures=1,
             reauth=False,
         )
         for i in range(6)
     )
     return ClientRoamWindow(
-        client_key=MAC, window_s=3600.0, online_s=3600.0, events=events, mobility=None
+        client_mac=MAC, window_s=3600.0, online_s=3600.0, events=events, mobility=None
     )
 
 
 def _outputs():
     view = RadioView(
-        router_key=R1,
-        radio_key="radio0",
+        router_id=R1,
+        radio_id="radio0",
         band="2.4g",
         channel=6,
         width_mhz=20,
         utilization=metric_measured(78.0, SOURCE_HOSTAPD_STATUS, measured_at=1.0),
     )
     other = RadioView(
-        router_key=R2, radio_key="radio0", band="2.4g", channel=6, width_mhz=20
+        router_id=R2, radio_id="radio0", band="2.4g", channel=6, width_mhz=20
     )
     assessment = assess_client(_window())
     roams = _roams()
@@ -209,7 +269,7 @@ def _outputs():
             {"ssid": "Nachbar", "bssid": MAC, "channel": 6, "signal": -70},
         ],
         [OWN_BSSID],
-        salt=SALT,
+        key=KEY,
     )
     rec = Recommendation(
         kind="channel",
@@ -240,30 +300,43 @@ class TestEveryOutputForm:
     def test_no_mac_survives_and_router_ids_stay(self):
         outputs = _outputs()
         assert outputs["flaps"]  # the window really flaps
-        masked = mask_rf_output(outputs)
-        _no_mac(masked)
-        assert R1 in _text(masked)
+        for key in (KEY, None):
+            masked = mask_rf_output(outputs, key=key)
+            _no_mac(masked)
+            assert R1 in _text(masked)
 
-    def test_client_identity_is_masked_not_dropped(self):
-        masked = mask_rf_output(_outputs())
-        assert masked["assessment"]["client_key"] == MASK
-        assert masked["roaming"]["client_key"] == MASK
-        assert all(f["client_key"] == MASK for f in masked["flaps"])
+    def test_client_identity_is_pseudonymised_not_dropped(self):
+        masked = mask_rf_output(_outputs(), key=KEY)
+        ref = client_ref(MAC, KEY)
+        assert masked["assessment"]["client_mac"] == ref
+        assert masked["roaming"]["client_mac"] == ref
+        assert all(f["client_mac"] == ref for f in masked["flaps"])
 
-    def test_own_bssid_masked_foreign_hash_kept(self):
-        masked = mask_rf_output(_outputs())["neighbors"]
+    def test_client_identity_without_a_key_is_masked(self):
+        masked = mask_rf_output(_outputs(), key=None)
+        assert masked["assessment"]["client_mac"] == MASK
+        assert masked["roaming"]["client_mac"] == MASK
+        assert all(f["client_mac"] == MASK for f in masked["flaps"])
+
+    def test_own_bssid_pseudonymised_foreign_pseudonym_kept(self):
+        masked = mask_rf_output(_outputs(), key=KEY)["neighbors"]
         own = [n for n in masked if n["own"]]
         foreign = [n for n in masked if not n["own"]]
-        assert own[0]["key"] == MASK
-        assert len(foreign[0]["key"]) == 16 and foreign[0]["key"] != MASK
+        assert own[0]["bssid"] == pseudonymise_identifier("bssid", OWN_BSSID, KEY)
+        assert foreign[0]["bssid"] == pseudonymise_identifier("bssid", MAC, KEY)
+        assert len(foreign[0]["bssid"]) == 20
         assert "Nachbar" not in _text(masked) and "Mine" not in _text(masked)
 
+    def test_own_bssid_without_a_key_is_masked(self):
+        masked = mask_rf_output(_outputs(), key=None)["neighbors"]
+        assert [n["bssid"] for n in masked if n["own"]] == [MASK]
+
     def test_radio_references_stay_readable(self):
-        masked = mask_rf_output(_outputs())
+        masked = mask_rf_output(_outputs(), key=KEY)
         assert masked["recommendation"]["target"] == {
-            "router_key": R1,
-            "radio_key": "radio0",
+            "router_id": R1,
+            "radio_id": "radio0",
         }
-        assert masked["capabilities"]["router_key"] == R1
+        assert masked["capabilities"]["router_id"] == R1
         members = masked["conflicts"][0]["members"]
-        assert {m["router_key"] for m in members} == {R1, R2}
+        assert {m["router_id"] for m in members} == {R1, R2}

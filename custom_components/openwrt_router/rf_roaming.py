@@ -14,7 +14,7 @@ part            weight  score (0..100)
 gap             0.25    share of roams without a long interruption (``gap_s``)
 frequency       0.20    roams per 24 online hours above the free amount, e^-x
 signal          0.25    share of classified roams that did not degrade RSSI
-auth            0.15    share of roams without authentication failures
+handshake       0.15    share of roams without failed authentication handshakes
 continuity      0.15    share of roams outside a ping-pong flap
 ==============  ======  ==========================================================
 
@@ -22,8 +22,10 @@ A part without data is unknown: it is left out, the remaining weights are
 renormalised and ``coverage`` (sum of known weights) says how much was seen.
 Below ``min_coverage`` there is no score.
 
-Unknown auth data (``auth_failures=None``) leaves the auth share; with no
-known roam the auth part is unknown.
+Unknown handshake data (``handshake_failures=None``) leaves the share; with no
+known roam the handshake part is unknown. The part was called ``auth``:
+the Core masks every name with a secret word (``auth``, contract #110), so
+neither the part nor its counter would show a value.
 
 Sticky: there is deliberately no "confirmed" status. Only a fresh comparable
 measurement of the same client at another AP on the same known band
@@ -52,7 +54,7 @@ _LOGGER = logging.getLogger(__name__)
 PART_GAP = "gap"
 PART_FREQUENCY = "frequency"
 PART_SIGNAL = "signal"
-PART_AUTH = "auth"
+PART_HANDSHAKE = "handshake"
 PART_CONTINUITY = "continuity"
 
 WEIGHTS: Mapping[str, float] = MappingProxyType(
@@ -60,7 +62,7 @@ WEIGHTS: Mapping[str, float] = MappingProxyType(
         PART_GAP: 0.25,
         PART_FREQUENCY: 0.20,
         PART_SIGNAL: 0.25,
-        PART_AUTH: 0.15,
+        PART_HANDSHAKE: 0.15,
         PART_CONTINUITY: 0.15,
     }
 )
@@ -105,7 +107,7 @@ DEFAULT_ROAM_THRESHOLDS = RoamThresholds()
 class RoamEvent:
     """One roam of one client (from Client Stability transitions or NI)."""
 
-    client_key: str
+    client_mac: str
     ts: float
     from_radio: RadioRef
     to_radio: RadioRef
@@ -114,7 +116,7 @@ class RoamEvent:
     rssi_before: float | None
     rssi_after: float | None
     gap_s: float | None
-    auth_failures: int | None  # None: not known for this roam
+    handshake_failures: int | None  # None: not known for this roam
     reauth: bool
 
 
@@ -122,7 +124,7 @@ class RoamEvent:
 class ClientRoamWindow:
     """The roams of one client in one window plus its online time."""
 
-    client_key: str
+    client_mac: str
     window_s: float
     online_s: float
     events: tuple[RoamEvent, ...]
@@ -176,10 +178,10 @@ def classify_roam(
     band_change = None
     if event.from_band is not None and event.to_band is not None:
         band_change = event.from_band != event.to_band
-    same_router = event.from_radio.router_key == event.to_radio.router_key
+    same_router = event.from_radio.router_id == event.to_radio.router_id
     switch = bool(band_change) and same_router
     if switch:
-        evidence.append(f"same_router_band_switch:{event.from_radio.router_key}")
+        evidence.append(f"same_router_band_switch:{event.from_radio.router_id}")
     return RoamClass(
         event, quality, delta, long_gap, band_change, switch, tuple(evidence)
     )
@@ -202,7 +204,7 @@ class Flap:
     """Back-and-forth between the same two radios inside a window."""
 
     kind: FlapKind
-    client_key: str
+    client_mac: str
     pair: tuple[RadioRef, RadioRef]
     switches: int
     start: float
@@ -213,7 +215,7 @@ class Flap:
         """Return the flap as a plain dict."""
         return {
             "kind": self.kind.value,
-            "client_key": self.client_key,
+            "client_mac": self.client_mac,
             "pair": [r.as_dict() for r in self.pair],
             "switches": self.switches,
             "start": self.start,
@@ -253,7 +255,7 @@ def _densest(run: Sequence[RoamEvent], window_s: float) -> tuple[int, int, int]:
 
 
 def _ref_key(ref: RadioRef) -> tuple[str, str]:
-    return ref.router_key, ref.radio_key
+    return ref.router_id, ref.radio_id
 
 
 def _pair(ev: RoamEvent) -> tuple[RadioRef, RadioRef]:
@@ -275,12 +277,12 @@ def _flaps_of(
         first = run[lo]
         evidence = [f"switches:{count}/{window_s:g}s"]
         if kind is FlapKind.BAND_FLAPPING:
-            evidence.append(f"router:{first.from_radio.router_key}")
+            evidence.append(f"router:{first.from_radio.router_id}")
             evidence.append(f"bands:{first.from_band}<->{first.to_band}")
         flaps.append(
             Flap(
                 kind,
-                first.client_key,
+                first.client_mac,
                 _pair(first),
                 count,
                 first.ts,
@@ -293,7 +295,7 @@ def _flaps_of(
 
 def _is_band_switch(ev: RoamEvent) -> bool:
     return (
-        ev.from_radio.router_key == ev.to_radio.router_key
+        ev.from_radio.router_id == ev.to_radio.router_id
         and ev.from_band is not None
         and ev.to_band is not None
         and ev.from_band != ev.to_band
@@ -311,7 +313,7 @@ def detect_flapping(
     th = thresholds
     by_client: dict[str, list[RoamEvent]] = defaultdict(list)
     for ev in events:
-        by_client[ev.client_key].append(ev)
+        by_client[ev.client_mac].append(ev)
     flaps: list[Flap] = []
     for client in sorted(by_client):
         ordered = sorted(by_client[client], key=lambda e: e.ts)
@@ -368,7 +370,7 @@ class RoamPart:
 class RoamingScore:
     """Roaming score of one client window."""
 
-    client_key: str
+    client_mac: str
     status: RoamStatus
     score: float | None
     coverage: float
@@ -378,7 +380,7 @@ class RoamingScore:
     def as_dict(self) -> dict[str, Any]:
         """Return the score as a plain dict."""
         return {
-            "client_key": self.client_key,
+            "client_mac": self.client_mac,
             "status": self.status.value,
             "score": self.score,
             "coverage": self.coverage,
@@ -431,19 +433,22 @@ def _signal_part(classes: Sequence[RoamClass]) -> RoamPart:
     )
 
 
-def _auth_part(events: Sequence[RoamEvent]) -> RoamPart:
-    """Share of roams without auth failures; unknown roams leave the share."""
-    known = [e.auth_failures for e in events if e.auth_failures is not None]
+def _handshake_part(events: Sequence[RoamEvent]) -> RoamPart:
+    """Share of roams without handshake failures; unknown roams leave the share."""
+    known = [e.handshake_failures for e in events if e.handshake_failures is not None]
     failed = sum(1 for n in known if n > 0)
     attempts = sum(max(0, n) for n in known)
     evidence = [
-        f"roams_with_auth_failures:{failed}/{len(known)}",
+        f"roams_with_handshake_failures:{failed}/{len(known)}",
         f"failures:{attempts}",
     ]
     if len(known) < len(events):
-        evidence.append(f"auth_unknown:{len(events) - len(known)}")
+        evidence.append(f"handshake_unknown:{len(events) - len(known)}")
     return RoamPart(
-        PART_AUTH, _share_score(failed, len(known)), WEIGHTS[PART_AUTH], tuple(evidence)
+        PART_HANDSHAKE,
+        _share_score(failed, len(known)),
+        WEIGHTS[PART_HANDSHAKE],
+        tuple(evidence),
     )
 
 
@@ -483,14 +488,14 @@ def roaming_quality(
             "no_roams:stationary" if window.mobility == "stationary" else "no_roams"
         )
         return RoamingScore(
-            window.client_key, RoamStatus.NOT_APPLICABLE, None, 0.0, (), (reason,)
+            window.client_mac, RoamStatus.NOT_APPLICABLE, None, 0.0, (), (reason,)
         )
     classes = [classify_roam(e, th) for e in events]
     parts = (
         _gap_part(classes, th),
         _frequency_part(window, th),
         _signal_part(classes),
-        _auth_part(events),
+        _handshake_part(events),
         _continuity_part(events, th),
     )
     score, coverage = _combine(parts)
@@ -501,7 +506,7 @@ def roaming_quality(
             "too_few_roams" if len(events) < th.min_events else "coverage_too_low"
         )
         return RoamingScore(
-            window.client_key,
+            window.client_mac,
             RoamStatus.INSUFFICIENT,
             None,
             coverage,
@@ -509,7 +514,7 @@ def roaming_quality(
             tuple(evidence),
         )
     return RoamingScore(
-        window.client_key,
+        window.client_mac,
         RoamStatus.SCORED,
         None if score is None else round(score, 1),
         coverage,
@@ -573,7 +578,7 @@ class StickyInput:
     comparable (signal differs by band).
     """
 
-    client_key: str
+    client_mac: str
     current_radio: RadioRef
     current_rssi: Metric
     dwell_s: float
@@ -600,7 +605,7 @@ class StickyAssessment:
     ``supported_by_measurement``.
     """
 
-    client_key: str
+    client_mac: str
     radio: RadioRef
     status: StickyStatus
     better_radio: RadioRef | None
@@ -611,7 +616,7 @@ class StickyAssessment:
     def as_dict(self) -> dict[str, Any]:
         """Return the assessment as a plain dict."""
         return {
-            "client_key": self.client_key,
+            "client_mac": self.client_mac,
             "radio": self.radio.as_dict(),
             "status": self.status.value,
             "better_radio": self.better_radio.as_dict() if self.better_radio else None,
@@ -642,7 +647,7 @@ def _result(
     better: tuple[RadioRef, float] | None = None,
 ) -> StickyAssessment:
     return StickyAssessment(
-        client_key=inp.client_key,
+        client_mac=inp.client_mac,
         radio=inp.current_radio,
         status=status,
         better_radio=better[0] if better else None,

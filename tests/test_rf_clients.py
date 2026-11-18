@@ -35,7 +35,7 @@ RADIO = RadioRef("ap1", "radio1")
 
 def _win(**kw):
     base = {
-        "client_key": "c1",
+        "client_mac": "c1",
         "radio": RADIO,
         "band": "5g",
         "driver": "mt7915e",
@@ -350,7 +350,7 @@ class TestOtherFindings:
     def test_as_dict(self):
         a = assess_client(_win(tx_retries=4000), TH)
         d = a.as_dict()
-        assert d["radio"] == {"router_key": "ap1", "radio_key": "radio1"}
+        assert d["radio"] == {"router_id": "ap1", "radio_id": "radio1"}
         assert d["findings"][0]["kind"] == "retry_rate_high"
         assert d["retry_rate"]["state"] == "measured"
 
@@ -362,8 +362,8 @@ class TestOtherFindings:
 
 class TestSummary:
     def test_weighted_retry_rate_and_counts(self):
-        a = assess_client(_win(client_key="a", tx_packets=1000, tx_retries=100), TH)
-        b = assess_client(_win(client_key="b", tx_packets=9000, tx_retries=4500), TH)
+        a = assess_client(_win(client_mac="a", tx_packets=1000, tx_retries=100), TH)
+        b = assess_client(_win(client_mac="b", tx_packets=9000, tx_retries=4500), TH)
         s = summarize_radio_clients([a, b])
         assert s.radio == RADIO
         assert s.client_count == 2
@@ -372,9 +372,9 @@ class TestSummary:
         assert s.problem_clients == 1
 
     def test_case_25_unknown_clients_do_not_count_as_zero(self):
-        a = assess_client(_win(client_key="a", tx_packets=1000, tx_retries=500), TH)
+        a = assess_client(_win(client_mac="a", tx_packets=1000, tx_retries=500), TH)
         b = assess_client(
-            _win(client_key="b", tx_packets=None, tx_retries=None, rssi_mean=None),
+            _win(client_mac="b", tx_packets=None, tx_retries=None, rssi_mean=None),
             TH,
         )
         s = summarize_radio_clients([a, b])
@@ -391,14 +391,14 @@ class TestSummary:
         assert s.retry_coverage == 0.0
 
     def test_rule_mixed_driver_families_give_no_retry_rate(self):
-        a = assess_client(_win(client_key="a"), TH)
-        b = assess_client(_win(client_key="b", driver="ath10k-ct"), TH)
+        a = assess_client(_win(client_mac="a"), TH)
+        b = assess_client(_win(client_mac="b", driver="ath10k-ct"), TH)
         s = summarize_radio_clients([a, b])
         assert s.retry_rate.state is C.NO_DATA
         assert "mixed_driver_families" in s.evidence
 
     def test_weak_persistent_clients(self):
-        weak = _win(client_key="w", rssi_mean=-82.0, weak_share=0.9)
+        weak = _win(client_mac="w", rssi_mean=-82.0, weak_share=0.9)
         s = summarize_radio_clients(
             [assess_client(weak, TH), assess_client(_win(), TH)]
         )

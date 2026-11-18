@@ -74,8 +74,8 @@ ADMIN = Actor(kind=ActorKind.USER, user_id=USER, is_admin=True)
 
 def _view(router, radio="radio0", util=None, channel=6):
     return RadioView(
-        router_key=router,
-        radio_key=radio,
+        router_id=router,
+        radio_id=radio,
         band="2.4g",
         channel=channel,
         width_mhz=20,
@@ -205,15 +205,17 @@ class TestConflictEvent:
         assert event.type == EVENT_CHANNEL_CONFLICT
         assert event.severity is Severity.WARNING
         assert event.router_id is None  # spans two routers
+        assert event.classification == ConflictKind.CO_CHANNEL
+        assert event.radio_id is None  # several radios: named in members
         data = _plain(dict(event.data))
-        assert data["kind"] == ConflictKind.CO_CHANNEL
+        assert "kind" not in data
         assert data["status"] == "measured"
         assert data["members"] == sorted(
             [
-                {"router_id": R1, "radio": "radio0"},
-                {"router_id": R2, "radio": "radio0"},
+                {"router_id": R1, "radio_id": "radio0"},
+                {"router_id": R2, "radio_id": "radio0"},
             ],
-            key=lambda m: (m["router_id"], m["radio"]),
+            key=lambda m: (m["router_id"], m["radio_id"]),
         )
         assert "utilization" in data["evidence_codes"]
         assert event.dedup_key
@@ -239,9 +241,9 @@ class TestUtilizationEvent:
         assert event.type == EVENT_UTILIZATION_HIGH
         assert event.router_id == R1
         assert event.severity is Severity.WARNING
+        assert event.radio_id == "radio0"
         data = _plain(dict(event.data))
         assert data == {
-            "radio": "radio0",
             "current_pct": 82.0,
             "mean_pct": 76.5,
             "peak_pct": 91.0,
@@ -280,25 +282,28 @@ class TestRecommendationEvents:
 
     def test_data_carries_codes_not_parameters(self):
         (event,) = recommendation_events([], [_rec()], now=T0)
+        # kind, target and confidence are the typed CoreEvent fields
+        assert event.classification == "channel"
+        assert (event.router_id, event.radio_id) == (R1, "radio0")
+        assert event.confidence == 0.6
         data = _plain(dict(event.data))
         assert data == {
-            "kind": "channel",
             "problem": "co_channel",
             "action": "change_channel",
             "scope": "radio",
-            "target": {"router_id": R1, "radio": "radio0"},
             "priority": "normal",
-            "confidence": 0.6,
             "risk": ["clients_reconnect_on_change"],
         }
 
     def test_router_and_network_targets(self):
         (router,) = recommendation_events([], [_rec(target=R2)], now=T0)
         assert router.router_id == R2
-        assert _plain(dict(router.data))["target"] == {"router_id": R2}
+        assert router.radio_id is None
+        assert "target" not in router.data
         (network,) = recommendation_events([], [replace(_rec(), target=None)], now=T0)
         assert network.router_id is None
-        assert _plain(dict(network.data))["target"] is None
+        assert network.radio_id is None
+        assert "target" not in network.data
 
     def test_key_has_no_identifier_beyond_router_and_radio(self):
         key = recommendation_key(_rec())
@@ -314,10 +319,8 @@ class TestScanEvents:
         assert event.result is EventResult.PENDING
         assert event.router_id == R1
         assert event.correlation_id == "cor_" + "1" * 32
-        assert _plain(dict(event.data)) == {
-            "radio": "radio0",
-            "action": "wifi_rf.scan",
-        }
+        assert event.radio_id == "radio0"
+        assert _plain(dict(event.data)) == {"action": "wifi_rf.scan"}
 
     @pytest.mark.parametrize("reason", [r for r in ScanReason if r.value != "allowed"])
     def test_refused_carries_the_scan_reason(self, reason):
@@ -325,6 +328,7 @@ class TestScanEvents:
         event = scan_refused_event(R1, "radio0", decision, actor=ADMIN, now=T0)
         assert event.type == EVENT_SCAN_REFUSED
         assert event.result is EventResult.DENIED
+        assert event.radio_id == "radio0"
         data = _plain(dict(event.data))
         assert data["reason"] == reason.value
         assert data["retry_after_s"] == decision.retry_after_s
@@ -345,8 +349,8 @@ class TestScanEvents:
         )
         assert event.type == EVENT_SCAN_EXECUTED
         assert event.result is EventResult.SUCCESS
+        assert event.radio_id == "radio0"
         assert _plain(dict(event.data)) == {
-            "radio": "radio0",
             "action": "wifi_rf.scan",
             "neighbor_count": 7,
             "own_count": 2,

@@ -10,22 +10,23 @@ truthy or falsy non-bools are refused. Non-finite times (NaN, inf) are
 treated like a clock going back (full wait). Until a scan has been proven
 on a radio its capability is ``unsupported`` (:data:`DEFAULT_SCAN_CAPABILITY`).
 
-:func:`sanitize_neighbors` keeps own BSSs by BSSID and replaces foreign
-SSID/BSSID with the Core's keyed digest (``core_masking``): neighbors'
-network names and MAC addresses are their data and are not kept in clear
-text. Output forms go through :func:`.rf_privacy.mask_rf_output`.
+:func:`sanitize_neighbors` keeps own BSSs by BSSID, replaces a foreign
+BSSID with the Core's pseudonym (``core_masking.pseudonymise_identifier``,
+kind ``bssid``, ``bss_<16 hex>``) and drops every SSID: neighbors' network
+names and MAC addresses are their data and are not kept in clear text.
+Output forms go through :func:`.rf_privacy.mask_rf_output`.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from .core_masking import SECRET_DIGEST_LENGTH, secret_digest_factory
+from .core_masking import SECRET_DIGEST_MIN_KEY_BYTES, pseudonymise_identifier
 from .rf_models import CapabilityState
 from .wifi_band import band_from_frequency
 
@@ -66,11 +67,6 @@ DEFAULT_MIN_GAP_PER_ROUTER_S = 300.0
 
 # Cap on kept foreign neighbors. Startwert, nicht kalibriert.
 DEFAULT_MAX_NEIGHBORS = 50
-# Hex digits of the neighbor key (64 bit): the Core secret digest length.
-NEIGHBOR_KEY_LENGTH = SECRET_DIGEST_LENGTH
-# Prefix of the digested value: keeps neighbor digests apart from any other
-# digest made with the same key.
-NEIGHBOR_DIGEST_DOMAIN = "wifi_rf/neighbor_bssid/"
 
 
 def _norm_mode(mode: Any) -> str:
@@ -123,7 +119,7 @@ class ScanRequest:
     so the caller sets ``is_admin`` for those too.
     """
 
-    radio_key: str
+    radio_id: str
     requested_at: float
     manual: bool
     is_admin: bool
@@ -254,7 +250,7 @@ def decide_scan(
     interval = policy.min_interval_manual_s if manual else policy.min_interval_auto_s
     if not _finite(now):
         return _refuse(ScanReason.RATE_LIMIT_RADIO, interval)
-    wait = _wait(state.last_scan_at.get(request.radio_key), now, interval)
+    wait = _wait(state.last_scan_at.get(request.radio_id), now, interval)
     if wait is not None:
         return _refuse(ScanReason.RATE_LIMIT_RADIO, wait)
     wait = _wait(_latest_router_scan(state), now, policy.min_gap_per_router_s)
@@ -272,11 +268,12 @@ def decide_scan(
 class NeighborBss:
     """One BSS from a scan, without foreign SSID/BSSID in clear text.
 
-    ``key`` is the BSSID for own BSSs and a salted hash for foreign ones.
-    There is no SSID field at all.
+    ``bssid`` is the BSSID (lower case) for own BSSs and the Core pseudonym
+    ``bss_<16 hex>`` for foreign ones. There is no SSID field at all. The
+    field was called ``key``, which the Core masks as a secret name.
     """
 
-    key: str
+    bssid: str
     own: bool
     band: str | None
     channel: int | None
@@ -287,7 +284,7 @@ class NeighborBss:
     def as_dict(self) -> dict[str, Any]:
         """Return the neighbor as a plain dict."""
         return {
-            "key": self.key,
+            "bssid": self.bssid,
             "own": self.own,
             "band": self.band,
             "channel": self.channel,
@@ -355,18 +352,27 @@ def _encryption(value: Any) -> str | None:
     return f"wpa{max(wpa)}{suffix}"
 
 
-def _neighbor(
-    entry: Any, own: frozenset[str], digest: Callable[[str], str]
-) -> NeighborBss | None:
+def _foreign_bssid(bssid: str, key: bytes) -> str | None:
+    """Core pseudonym of a foreign BSSID; None if it is not a MAC address."""
+    try:
+        return pseudonymise_identifier("bssid", bssid, key)
+    except ValueError:
+        return None
+
+
+def _neighbor(entry: Any, own: frozenset[str], key: bytes) -> NeighborBss | None:
     if not isinstance(entry, Mapping):
         return None
     bssid = _norm_bssid(entry.get("bssid"))
     if bssid is None:
         return None  # nothing to key it by
     is_own = bssid in own
+    shown = bssid if is_own else _foreign_bssid(bssid, key)
+    if shown is None:
+        return None  # DECIDED: a malformed foreign BSSID is dropped, not kept
     band = band_from_frequency(entry.get("mhz")) or _band_field(entry.get("band"))
     return NeighborBss(
-        key=bssid if is_own else digest(NEIGHBOR_DIGEST_DOMAIN + bssid),
+        bssid=shown,
         own=is_own,
         band=band,
         channel=_int(entry.get("channel")),
@@ -384,35 +390,43 @@ def _strongest_first(n: NeighborBss) -> tuple[bool, int]:
     return (n.signal_dbm is None, -(n.signal_dbm or 0))
 
 
+def _check_key(key: Any) -> bytes:
+    """The Core's key rule, checked before any entry is looked at."""
+    if not isinstance(key, bytes):
+        raise TypeError("key must be bytes (the wifi_rf module key)")
+    if len(key) < SECRET_DIGEST_MIN_KEY_BYTES:
+        raise ValueError(f"key must be at least {SECRET_DIGEST_MIN_KEY_BYTES} bytes")
+    return key
+
+
 def sanitize_neighbors(
     raw: Any,
     own_bssids: Iterable[str],
     *,
-    salt: bytes,
+    key: bytes,
     max_neighbors: int = DEFAULT_MAX_NEIGHBORS,
 ) -> list[NeighborBss]:
     """Turn an ``iwinfo scan`` result into redacted neighbors, strongest first.
 
     Own BSSs are all kept; foreign BSSs are capped at ``max_neighbors``.
-    Entries without a BSSID are dropped.
+    Entries without a BSSID, or with a foreign one that is no MAC address,
+    are dropped.
 
-    ``salt`` is the secret key of the foreign-BSSID digest and is hashed by
-    the Core (``core_masking.secret_digest_factory``: HMAC-SHA256, 16 hex;
-    bytes of at least 16, TypeError for text, ValueError when too short).
-    RF makes no key of its own: the caller hands in a key that stays
-    stable across restarts, or every neighbor looks new after a restart.
-    Origin (later wiring, not built yet): a per-installation secret the
-    Core provides for modules. The Core has none today (gap reported in
-    the plan document, section 9), so the wiring must not start before it
-    exists. ``NEIGHBOR_DIGEST_DOMAIN`` separates these digests from any
-    other use of the same key.
+    ``key`` is the ``wifi_rf`` module key from the Core
+    (:func:`.rf_privacy.rf_key_request`: ``api.async_get_module_key("wifi_rf",
+    "pseudonym")``, HKDF of the installation key, contract §11.5). A foreign
+    BSSID becomes ``core_masking.pseudonymise_identifier("bssid", bssid,
+    key)``; the Core separates kinds and modules, so RF adds no domain of
+    its own and makes no key. The same key pseudonymises the own BSSIDs on
+    output (:func:`.rf_privacy.mask_rf_output`), so both match. Bytes of at
+    least 16; TypeError for anything else, ValueError when too short.
     """
-    digest = secret_digest_factory(salt)
+    key = _check_key(key)
     own = frozenset(b for b in (_norm_bssid(x) for x in own_bssids) if b)
     results = raw.get("results") if isinstance(raw, Mapping) else raw
     if not isinstance(results, list):
         return []
-    parsed = [n for n in (_neighbor(e, own, digest) for e in results) if n is not None]
+    parsed = [n for n in (_neighbor(e, own, key) for e in results) if n is not None]
     foreign = sorted((n for n in parsed if not n.own), key=_strongest_first)
     kept = [n for n in parsed if n.own] + foreign[: max(0, max_neighbors)]
     return sorted(kept, key=_strongest_first)

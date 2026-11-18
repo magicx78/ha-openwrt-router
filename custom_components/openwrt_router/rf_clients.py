@@ -132,7 +132,7 @@ class ClientRfWindow:
     None when unknown. An mt76 retry count of 0 is unknown unless True.
     """
 
-    client_key: str
+    client_mac: str
     radio: RadioRef
     band: str | None
     driver: str | None
@@ -183,7 +183,7 @@ class ClientAssessment:
     names the inputs that were unknown.
     """
 
-    client_key: str
+    client_mac: str
     radio: RadioRef
     driver_family: str | None
     findings: tuple[ClientFinding, ...]
@@ -208,7 +208,7 @@ class ClientAssessment:
     def as_dict(self) -> dict[str, Any]:
         """Return the assessment as a plain dict."""
         return {
-            "client_key": self.client_key,
+            "client_mac": self.client_mac,
             "radio": self.radio.as_dict(),
             "driver_family": self.driver_family,
             "findings": [f.as_dict() for f in self.findings],
@@ -658,7 +658,7 @@ def assess_client(
     if window.rssi_mean is not None and window.weak_share is not None:
         quality = round(score_signal(window.rssi_mean, window.weak_share), 1)
     return ClientAssessment(
-        client_key=window.client_key,
+        client_mac=window.client_mac,
         radio=window.radio,
         driver_family=ctx.family,
         findings=tuple(findings),

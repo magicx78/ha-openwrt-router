@@ -19,7 +19,8 @@ from custom_components.openwrt_router.core_errors import (
     AuthorizationError,
     CapabilityUnavailableError,
     ConfigApiError,
-    OperationInProgressError,
+    RateLimitedError,
+    SafetyRefusedError,
 )
 from custom_components.openwrt_router.core_guard import ActionGuard
 from custom_components.openwrt_router.core_models import (
@@ -35,7 +36,7 @@ from custom_components.openwrt_router.rf_capabilities import capability_name
 from custom_components.openwrt_router.rf_guard import (
     RF_ACTIONS,
     SCAN_ACTION,
-    SENSITIVE_READS,
+    SENSITIVE_READ_ACTIONS,
     register_rf_actions,
     scan_guard_request,
     scan_policy_denial,
@@ -78,7 +79,7 @@ class TestActionRegistration:
         assert SCAN_ACTION.action_class is ActionClass.CRITICAL
         assert SCAN_ACTION.admin_user_only is True
         assert SCAN_ACTION.critical is True
-        assert RF_ACTIONS == (SCAN_ACTION,)
+        assert RF_ACTIONS == (SCAN_ACTION, *SENSITIVE_READ_ACTIONS)
 
     async def test_the_core_guard_accepts_the_registration(self, disks):
         hass = _hass()
@@ -88,16 +89,42 @@ class TestActionRegistration:
         register_rf_actions(guard)
         register_rf_actions(guard)  # same definition again is a no-op
         assert guard.action_class(SCAN_ACTION.name) is ActionClass.CRITICAL
+        for action in SENSITIVE_READ_ACTIONS:
+            assert guard.action_class(action.name) is ActionClass.READ
 
     def test_registration_is_plain_data_passed_to_register_action(self):
         calls = []
 
         class Recorder:
-            def register_action(self, name, action_class, *, module, admin_user_only):
-                calls.append((name, action_class, module, admin_user_only))
+            def register_action(
+                self,
+                name,
+                action_class,
+                *,
+                module,
+                admin_user_only,
+                sensitive_read,
+                rate_limit,
+            ):
+                calls.append(
+                    (
+                        name,
+                        action_class,
+                        module,
+                        admin_user_only,
+                        sensitive_read,
+                        rate_limit,
+                    )
+                )
 
         register_rf_actions(Recorder())
-        assert calls == [("wifi_rf.scan", ActionClass.CRITICAL, "wifi_rf", True)]
+        read = ActionClass.READ
+        assert calls == [
+            ("wifi_rf.scan", ActionClass.CRITICAL, "wifi_rf", True, False, None),
+            ("wifi_rf.neighbor_list", read, "wifi_rf", False, True, None),
+            ("wifi_rf.client_rf", read, "wifi_rf", False, True, None),
+            ("wifi_rf.client_roam_history", read, "wifi_rf", False, True, None),
+        ]
 
 
 class TestPolicy:
@@ -233,12 +260,12 @@ class TestRefusalErrors:
             (ScanReason.SCAN_UNAVAILABLE, CapabilityUnavailableError, False),
             (ScanReason.NOT_ADMIN, AuthorizationError, False),
             (ScanReason.AUTO_DISABLED, AuthorizationError, False),
-            (ScanReason.UPLINK_RADIO, AuthorizationError, False),
-            (ScanReason.UPLINK_UNKNOWN, AuthorizationError, False),
-            (ScanReason.CAC_UNKNOWN, AuthorizationError, False),
-            (ScanReason.CAC_ACTIVE, OperationInProgressError, True),
-            (ScanReason.RATE_LIMIT_RADIO, OperationInProgressError, True),
-            (ScanReason.RATE_LIMIT_ROUTER, OperationInProgressError, True),
+            (ScanReason.UPLINK_RADIO, SafetyRefusedError, False),
+            (ScanReason.UPLINK_UNKNOWN, SafetyRefusedError, False),
+            (ScanReason.CAC_UNKNOWN, SafetyRefusedError, False),
+            (ScanReason.CAC_ACTIVE, SafetyRefusedError, False),
+            (ScanReason.RATE_LIMIT_RADIO, RateLimitedError, True),
+            (ScanReason.RATE_LIMIT_ROUTER, RateLimitedError, True),
         ],
     )
     def test_every_refusal_maps_to_a_core_error(self, reason, error, retryable):
@@ -261,7 +288,23 @@ class TestRefusalErrors:
         err = scan_refusal_error(
             ScanDecision(False, ScanReason.RATE_LIMIT_ROUTER, 42.0), router_id=R1
         )
-        assert err.details["retry_after_s"] == 42.0
+        assert err.retry_after == 42.0
+        assert err.details["retry_after"] == 42.0
+        assert err.to_dict()["retry_after"] == 42.0
+
+    @pytest.mark.parametrize("wait", [float("nan"), float("inf"), -1.0])
+    def test_an_unusable_wait_takes_the_full_interval(self, wait):
+        err = scan_refusal_error(
+            ScanDecision(False, ScanReason.RATE_LIMIT_ROUTER, wait), router_id=R1
+        )
+        assert err.retry_after == 300.0
+
+    def test_safety_refusals_carry_the_core_reason(self):
+        err = scan_refusal_error(
+            ScanDecision(False, ScanReason.UPLINK_RADIO), router_id=R1
+        )
+        assert err.reason == "uplink_radio"
+        assert err.to_dict()["details"]["action"] == "wifi_rf.scan"
 
     def test_every_reason_is_covered(self):
         for reason in ScanReason:
@@ -278,6 +321,7 @@ class TestRefusalErrors:
 
 
 def test_sensitive_reads_are_listed():
-    assert {"neighbor_list", "client_rf"} <= set(SENSITIVE_READS)
-    for name, why in SENSITIVE_READS.items():
-        assert name and why
+    names = {a.name for a in SENSITIVE_READ_ACTIONS}
+    assert {"wifi_rf.neighbor_list", "wifi_rf.client_rf"} <= names
+    for action in SENSITIVE_READ_ACTIONS:
+        assert action.sensitive_read and action.module == "wifi_rf"

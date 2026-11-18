@@ -10,8 +10,8 @@ never be mistaken for a measured zero:
 - ``unreachable``: the source (ubus object, method, ACL) did not answer;
 - ``stale``: a value exists but is older than allowed.
 
-No clock, no I/O: time always comes in as a parameter. ``router_key`` is
-the Core router id and ``radio_key`` the UCI radio name, both supplied by
+No clock, no I/O: time always comes in as a parameter. ``router_id`` is
+the Core router id and ``radio_id`` the UCI radio name, both supplied by
 the caller (see :mod:`.rf_identity`). This state model is per radio and
 richer than the Core's per-router ``available/unavailable/unknown``;
 :mod:`.rf_capabilities` maps it onto the Core model without loss.
@@ -206,8 +206,8 @@ class RadioCapabilities:
     out of scope for this radio and leave the coverage denominator.
     """
 
-    router_key: str
-    radio_key: str
+    router_id: str
+    radio_id: str
     states: Mapping[str, CapabilityState]
     excluded: frozenset[str] = field(default_factory=frozenset)
 
@@ -235,8 +235,8 @@ class RadioCapabilities:
     def as_dict(self) -> dict[str, Any]:
         """Return the matrix as a plain dict with every metric listed."""
         return {
-            "router_key": self.router_key,
-            "radio_key": self.radio_key,
+            "router_id": self.router_id,
+            "radio_id": self.radio_id,
             "states": {
                 m: (self.states[m].value if m in self.states else None)
                 for m in ALL_METRICS

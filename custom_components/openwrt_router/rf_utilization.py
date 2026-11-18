@@ -90,7 +90,7 @@ class SurveySample:
     samples built from its ``airtime`` counters (:meth:`BssLoad.as_sample`).
     """
 
-    radio_key: str
+    radio_id: str
     mhz: int
     taken_at: float
     uptime_s: float | None
@@ -110,7 +110,7 @@ class UtilizationResult:
     None. ``part_reasons`` names why an individual share is None.
     """
 
-    radio_key: str
+    radio_id: str
     busy_pct: float | None = None
     rx_pct: float | None = None
     tx_pct: float | None = None
@@ -141,7 +141,7 @@ class UtilizationResult:
     def as_dict(self) -> dict[str, Any]:
         """Return the result as a plain dict."""
         return {
-            "radio_key": self.radio_key,
+            "radio_id": self.radio_id,
             "source": self.source,
             "busy_pct": self.busy_pct,
             "rx_pct": self.rx_pct,
@@ -165,7 +165,7 @@ def _pair_reason(
     prev: SurveySample, cur: SurveySample, max_gap_s: float, tolerance_s: float
 ) -> UnknownReason | None:
     """Reasons that invalidate the whole pair, most specific first."""
-    if prev.radio_key != cur.radio_key:
+    if prev.radio_id != cur.radio_id:
         return UnknownReason.RADIO_MISMATCH
     if prev.source != cur.source:
         return UnknownReason.SOURCE_MISMATCH
@@ -202,7 +202,7 @@ def utilization_from_delta(
 ) -> UtilizationResult:
     """Return busy/rx/tx shares of the active time between two samples."""
     unknown = UtilizationResult(
-        radio_key=cur.radio_key, measured_at=cur.taken_at, source=cur.source
+        radio_id=cur.radio_id, measured_at=cur.taken_at, source=cur.source
     )
     if prev is None:
         return _with_reason(unknown, UnknownReason.NO_PREVIOUS)
@@ -228,7 +228,7 @@ def utilization_from_delta(
 
 def _with_reason(result: UtilizationResult, reason: UnknownReason) -> UtilizationResult:
     return UtilizationResult(
-        radio_key=result.radio_key,
+        radio_id=result.radio_id,
         measured_at=result.measured_at,
         reason=reason,
         source=result.source,
@@ -259,7 +259,7 @@ def _shares(
     if prev.uptime_s is None or cur.uptime_s is None:
         notes = (NOTE_UPTIME_UNAVAILABLE,)
     return UtilizationResult(
-        radio_key=cur.radio_key,
+        radio_id=cur.radio_id,
         busy_pct=pct[PART_BUSY],
         rx_pct=pct[PART_RX],
         tx_pct=pct[PART_TX],
@@ -341,7 +341,7 @@ def _survey_entries(raw: Any) -> list[Any]:
 
 def survey_samples_from_iwinfo(
     raw: Any,
-    radio_key: str,
+    radio_id: str,
     taken_at: float,
     uptime_s: float | None,
     *,
@@ -367,7 +367,7 @@ def survey_samples_from_iwinfo(
             continue
         samples.append(
             SurveySample(
-                radio_key=radio_key,
+                radio_id=radio_id,
                 mhz=freq,
                 taken_at=taken_at,
                 uptime_s=uptime_s,
@@ -400,11 +400,11 @@ class BssLoad:
     cac_active: bool | None
 
     def as_sample(
-        self, radio_key: str, taken_at: float, uptime_s: float | None
+        self, radio_id: str, taken_at: float, uptime_s: float | None
     ) -> SurveySample:
         """Return the counters as a sample (busy only, no rx/tx split)."""
         return SurveySample(
-            radio_key=radio_key,
+            radio_id=radio_id,
             mhz=self.freq or 0,
             taken_at=taken_at,
             uptime_s=uptime_s,

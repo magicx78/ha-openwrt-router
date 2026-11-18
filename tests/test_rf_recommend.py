@@ -75,8 +75,8 @@ REG_5 = _reg("5g", CH_5G)
 
 def _view(router, radio, channel, width=20, band="2.4g", **kw):
     return RadioView(
-        router_key=router,
-        radio_key=radio,
+        router_id=router,
+        radio_id=radio,
         band=band,
         channel=channel,
         width_mhz=width,
@@ -231,7 +231,7 @@ class TestChannelRules:
     def test_as_dict(self):
         r = recommend_channel(AP1, _summary(78.0), OTHERS, None, TH)
         d = r.as_dict()
-        assert d["target"] == {"router_key": "ap1", "radio_key": "radio0"}
+        assert d["target"] == {"router_id": "ap1", "radio_id": "radio0"}
         assert d["action"] == "change_channel"
         assert d["action_params"]["channel"] == 11
         assert isinstance(d["risk"], list)

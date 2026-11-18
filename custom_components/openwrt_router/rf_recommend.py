@@ -133,7 +133,7 @@ DEFAULT_RECOMMEND_THRESHOLDS = RecommendThresholds()
 class Recommendation:
     """One recommendation; all texts are codes.
 
-    ``target`` is a radio, a router key, or None for a network-wide finding
+    ``target`` is a radio, a Core router id, or None for a network-wide finding
     (see ``scope``). ``basis`` names the argument (e.g.
     ``lower_observed_utilization``), ``priority`` is ``normal`` or ``low``.
     ``requires`` lists data that would make it stronger.
@@ -174,7 +174,7 @@ class Recommendation:
         elif isinstance(self.target, RadioRef):
             target = self.target.as_dict()
         else:
-            target = {"router_key": self.target}
+            target = {"router_id": self.target}
         return {
             "kind": self.kind,
             "target": target,
@@ -861,7 +861,7 @@ def recommend_tx_power(
 
 
 def _load_rec(
-    router_key: str | None,
+    router_id: str | None,
     action: str,
     problem: str,
     evidence: Sequence[str],
@@ -871,7 +871,7 @@ def _load_rec(
 ) -> Recommendation:
     return Recommendation(
         kind=KIND_LOAD,
-        target=router_key,
+        target=router_id,
         problem=problem,
         evidence=tuple(evidence),
         action=action,
@@ -898,14 +898,14 @@ def recommend_load(
         if ap.status is LoadStatus.OVERLOADED:
             out.append(
                 _load_rec(
-                    ap.router_key, "review_ap_load", "ap_overloaded", evidence, conf
+                    ap.router_id, "review_ap_load", "ap_overloaded", evidence, conf
                 )
             )
         elif ap.status is LoadStatus.ELEVATED:
             if any(e.startswith("utilization_unknown") for e in evidence):
                 out.append(
                     _load_rec(
-                        ap.router_key,
+                        ap.router_id,
                         "collect_utilization",
                         "load_hints_without_utilization",
                         evidence,
@@ -917,7 +917,7 @@ def recommend_load(
             else:
                 out.append(
                     _load_rec(
-                        ap.router_key,
+                        ap.router_id,
                         "review_ap_load",
                         "ap_load_elevated",
                         evidence,

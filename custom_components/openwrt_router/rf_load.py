@@ -96,7 +96,7 @@ class RadioLoad:
 class ApLoadInput:
     """All radios of one router."""
 
-    router_key: str
+    router_id: str
     radios: Sequence[RadioLoad]
 
 
@@ -123,7 +123,7 @@ class RadioLoadAssessment:
 class ApLoadAssessment:
     """Load verdict of one AP: the worst radio; unknown radios block ``ok``."""
 
-    router_key: str
+    router_id: str
     status: LoadStatus
     radios: tuple[RadioLoadAssessment, ...]
     evidence: tuple[str, ...]
@@ -132,7 +132,7 @@ class ApLoadAssessment:
     def as_dict(self) -> dict[str, Any]:
         """Return the assessment as a plain dict."""
         return {
-            "router_key": self.router_key,
+            "router_id": self.router_id,
             "status": self.status.value,
             "radios": [r.as_dict() for r in self.radios],
             "evidence": list(self.evidence),
@@ -248,9 +248,7 @@ def assess_load(
         status, confidence = _ap_status(radios)
         unknown = [str(r.ref) for r in radios if r.status is LoadStatus.UNKNOWN]
         evidence = tuple(f"radio_unknown:{ref}" for ref in unknown)
-        out.append(
-            ApLoadAssessment(ap.router_key, status, radios, evidence, confidence)
-        )
+        out.append(ApLoadAssessment(ap.router_id, status, radios, evidence, confidence))
     return LoadReport(tuple(out))
 
 
@@ -317,7 +315,7 @@ def _counts(
     radios = known = 0
     for ap in aps:
         counts = [r.client_count for r in ap.radios if r.client_count is not None]
-        per_ap[ap.router_key] = sum(counts) if counts else None
+        per_ap[ap.router_id] = sum(counts) if counts else None
         for r in ap.radios:
             radios += 1
             if r.client_count is not None:

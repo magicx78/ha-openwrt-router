@@ -288,7 +288,7 @@ class TestAggregation:
     def test_weighted_by_clients_min_weight_one(self):
         ap = ap_health([HealthItem("r0", 90, 1.0, 9), HealthItem("r1", 50, 1.0, 0)], TH)
         assert ap.score == 86  # (90*9 + 50*1) / 10
-        assert ap.worst_key == "r1"
+        assert ap.worst_member_id == "r1"
         assert ap.worst_score == 50
 
     def test_unknown_clients_weight_one(self):
@@ -308,7 +308,7 @@ class TestAggregation:
         ap = ap_health([HealthItem("r0", None, 0.3, 5)], TH)
         assert ap.score is None
         assert ap.grade == "unknown"
-        assert ap.worst_key is None
+        assert ap.worst_member_id is None
 
     def test_network_from_aps(self):
         r = radio_health(_all(80.0), TH)
@@ -316,7 +316,7 @@ class TestAggregation:
         ap2 = ap_health([HealthItem("r0", 40, 1.0, 4)], TH)
         net = network_health([item_from("ap1", ap1, 4), item_from("ap2", ap2, 4)], TH)
         assert net.score == 60
-        assert net.worst_key == "ap2"
+        assert net.worst_member_id == "ap2"
 
 
 class TestMonitoringCoverage:

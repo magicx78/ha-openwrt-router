@@ -51,7 +51,7 @@ def _radio(router="ap1", radio="radio1", band="5g", **kw):
 
 
 def _ap(*radios, router="ap1"):
-    return ApLoadInput(router_key=router, radios=tuple(radios))
+    return ApLoadInput(router_id=router, radios=tuple(radios))
 
 
 def _status(radio):
@@ -149,7 +149,7 @@ class TestAssessLoad:
             ],
             TH,
         )
-        by = {ap.router_key: ap for ap in report.aps}
+        by = {ap.router_id: ap for ap in report.aps}
         assert by["a"].status is L.OVERLOADED
         assert by["b"].status is L.UNKNOWN
         assert by["c"].status is L.OK
@@ -158,8 +158,8 @@ class TestAssessLoad:
         d = assess_load([_ap(_radio(utilization=_m(20.0)))], TH).as_dict()
         assert d["aps"][0]["status"] == "ok"
         assert d["aps"][0]["radios"][0]["ref"] == {
-            "router_key": "ap1",
-            "radio_key": "radio1",
+            "router_id": "ap1",
+            "radio_id": "radio1",
         }
 
 
