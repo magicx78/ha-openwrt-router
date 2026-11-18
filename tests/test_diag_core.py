@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -26,14 +26,28 @@ from core_testkit import (
 
 from custom_components.openwrt_router import diag_core
 from custom_components.openwrt_router.core_audit import AuditLog
-from custom_components.openwrt_router.core_guard import ActionGuard
+from custom_components.openwrt_router.core_errors import (
+    ConfigApiError,
+    ErrorClass,
+    OperationInProgressError,
+    RateLimitedError,
+    SafetyRefusedError,
+)
+from custom_components.openwrt_router.core_guard import (
+    ActionGuard,
+    error_for_decision,
+)
 from custom_components.openwrt_router.core_masking import (
     ACTOR_PSEUDONYM_PREFIX,
+    IDENTIFIER_INVALID,
     MASK,
+    mask_for_output,
+    pseudonymise_identifier,
 )
 from custom_components.openwrt_router.core_models import (
     CORE_OWNED_MODULE_CAPABILITIES,
     CORRELATION_ID_PREFIX,
+    FLEET_ROUTER_ID,
     MODULE_CAPABILITY_NAMESPACES,
     MODULE_EVENT_PREFIXES,
     ActionClass,
@@ -74,10 +88,12 @@ from custom_components.openwrt_router.diag_chain import (
 from custom_components.openwrt_router.diag_model import (
     AddressFamily,
     Basis,
+    Cause,
     CauseClass,
     ChainResult,
     Classification,
     Finding,
+    Location,
     LocationKind,
     MeasurementPoint,
     PointKind,
@@ -89,7 +105,14 @@ from custom_components.openwrt_router.diag_model import (
     StageResult,
     StageState,
 )
-from custom_components.openwrt_router.diag_scheduler import DiagJob, RequestStatus
+from custom_components.openwrt_router.diag_scheduler import (
+    DiagJob,
+    RequestStatus,
+    RunRequest,
+)
+from custom_components.openwrt_router.diag_scheduler import (
+    RateLimit as SchedulerRateLimit,
+)
 from custom_components.openwrt_router.diag_stats import SeriesKey
 from custom_components.openwrt_router.diag_targets import (
     PendingTarget,
@@ -113,6 +136,8 @@ DNS_NEW = ("2001:db8::53", "198.51.100.54")
 RAW_ADDR = "203.0.113.77"
 RAW_HOST = "nas-cellar.example.invalid"
 SENSITIVE = (GW_OLD, GW_NEW, *DNS_OLD, *DNS_NEW, RAW_ADDR, RAW_HOST)
+# an invented module key (the real one comes from api.async_get_module_key)
+KEY = bytes(range(32))
 
 
 @pytest.fixture
@@ -308,9 +333,46 @@ def test_no_incidents_are_created() -> None:
 async def test_event_prefix_registration_and_reserved_diag_prefix(disks) -> None:
     log = await _log()
     diag_core.register_event_prefix(log)
-    diag_core.register_event_prefix(log)  # idempotent
+    remove = diag_core.register_event_prefix(log)  # idempotent
     with pytest.raises(ValueError):  # the capability namespace is no event prefix
         log.register_event_prefix("diag.", module=diag_core.MODULE)
+    assert log.emit(**_manual(R1).emit_kwargs(), now=T0).published
+    remove()  # drops the prefix and the mandatory types
+    with pytest.raises(ValueError):
+        log.emit(**_manual(R1).emit_kwargs(), now=T0)
+
+
+def _manual(router_id: str | None, status: Any = RequestStatus.ACCEPTED):
+    return diag_core.manual_run_event(
+        router_id,
+        actor=user_actor(ADMIN_ID),
+        status=status,
+        kinds=[diag_core.KIND_HA_TCP],
+    )
+
+
+async def test_audit_duty_types_are_registered_mandatory(disks) -> None:
+    """Registered mandatory types are never deduplicated (contract 12.5),
+    whatever their dedup_key; the other module types still are."""
+    log = await _log()
+    diag_core.register_event_prefix(log)
+    first = log.emit(**_manual(R1).emit_kwargs(), now=T0)
+    again = log.emit(**_manual(R1).emit_kwargs(), now=T0)
+    assert first.published and again.published and not again.deduplicated
+    stored = log.events(types=[diag_core.EVENT_MANUAL_RUN])
+    assert len(stored) == 2
+    assert all(event.audit_mandatory for event in stored)
+    assert {event.dedup_key for event in stored} == {"accepted"}
+    finding = diag_core.finding_event(_problem(R1))
+    assert finding is not None
+    assert log.emit(**finding.emit_kwargs(), now=T0).published
+    assert log.emit(**finding.emit_kwargs(), now=T0).deduplicated
+    assert not log.events(types=[diag_core.EVENT_FINDING])[0].audit_mandatory
+    # the core refuses mandatory types that are not below the module prefix
+    with pytest.raises(ValueError):
+        AuditLog(make_hass()).register_audit_mandatory_types(
+            sorted(diag_core.AUDIT_DUTY_EVENT_TYPES), module=diag_core.MODULE
+        )
 
 
 def test_severity_mapping() -> None:
@@ -370,6 +432,72 @@ def test_change_findings_have_own_types_and_no_values() -> None:
         _assert_clean(event.emit_kwargs())
     assert dns_event.data["previous_count"] == 1
     assert dns_event.data["current_count"] == 2
+    assert "previous_servers" not in dns_event.data  # no key: counts only
+
+
+def _ip(value: str) -> str:
+    return pseudonymise_identifier("ip", value, KEY)
+
+
+def test_change_events_name_the_pseudonymous_address() -> None:
+    """With the module key a change says WHICH server changed, never raw."""
+    gw = gateway_change(diag_core.point_for(R1), GW_OLD, GW_NEW)
+    dns = dns_server_change(diag_core.point_for(R1), DNS_OLD, DNS_NEW)
+    assert gw is not None and dns is not None
+    gw_event = diag_core.finding_event(gw, key=KEY)
+    dns_event = diag_core.finding_event(dns, key=KEY)
+    assert gw_event is not None and dns_event is not None
+    assert gw_event.data["previous_gateway"] == _ip(GW_OLD)
+    assert gw_event.data["current_gateway"] == _ip(GW_NEW)
+    assert dns_event.data["previous_servers"] == [_ip(DNS_OLD[0])]
+    assert dns_event.data["current_servers"] == sorted(_ip(a) for a in DNS_NEW)
+    assert dns_event.data["added_servers"] == sorted(_ip(a) for a in DNS_NEW)
+    assert dns_event.data["removed_servers"] == [_ip(DNS_OLD[0])]
+    assert dns_event.data["previous_count"] == 1
+    # stable: the same server keeps its pseudonym across rounds
+    later = dns_server_change(diag_core.point_for(R1), DNS_NEW, DNS_OLD)
+    later_event = diag_core.finding_event(later, key=KEY)  # type: ignore[arg-type]
+    assert later_event is not None
+    assert later_event.data["added_servers"] == [_ip(DNS_OLD[0])]
+    # another key gives other pseudonyms (no cross-install linking)
+    other = diag_core.finding_event(dns, key=bytes(32))
+    assert other is not None
+    assert other.data["previous_servers"] != dns_event.data["previous_servers"]
+    for event in (gw_event, dns_event, later_event):
+        _assert_clean(event.data)
+        _assert_clean(event.emit_kwargs())
+    # a value that is no address is never shown, not even pseudonymised
+    odd = gateway_change(diag_core.point_for(R1), GW_OLD, RAW_HOST)
+    assert odd is not None
+    odd_event = diag_core.finding_event(odd, key=KEY)
+    assert odd_event is not None
+    assert odd_event.data["current_gateway"] == IDENTIFIER_INVALID
+    _assert_clean(odd_event.data)
+
+
+def test_admin_output_shows_change_pseudonyms() -> None:
+    dns = dns_server_change(diag_core.point_for(None), DNS_OLD, DNS_NEW)
+    assert dns is not None
+    out = diag_core.finding_output(dns, admin=True, key=KEY)
+    assert out["change"]["removed_servers"] == [_ip(DNS_OLD[0])]
+    _assert_clean(out)
+    assert diag_core.finding_output(dns, admin=True)["change"] == MASK
+    result = correlate([dns, _problem(R1, chain=_leaky_chain(R1))], {})
+    keyed = diag_core.correlation_output(result, admin=True, key=KEY)
+    _assert_clean(keyed)
+    assert keyed["findings"][1]["chain"]["excluded"] == MASK
+
+
+async def test_identifier_key_comes_from_the_core() -> None:
+    asked: list[tuple[str, str]] = []
+
+    class FakeApi:
+        async def async_get_module_key(self, module: str, purpose: str = "") -> bytes:
+            asked.append((module, purpose))
+            return KEY
+
+    assert await diag_core.async_identifier_key(FakeApi()) == KEY
+    assert asked == [("net_diagnostics", diag_core.IDENTIFIER_KEY_PURPOSE)]
 
 
 def test_correlation_id_is_checked() -> None:
@@ -402,6 +530,50 @@ def test_cause_and_link_mapping() -> None:
         assert event.data["link_rules"] == ["local_finding"]
     for event in events:
         assert "cause_id" not in event.data
+
+
+async def test_fleet_wide_causes_use_the_fleet_id(disks) -> None:
+    """WAN, resolver and segment causes sit outside one router: fleet id
+    ``-``; the HA point has no router (None); neither is a router id."""
+    assert not is_valid_id(FLEET_ROUTER_ID, "rtr_")
+    assert FLEET_ROUTER_ID != diag_core.HA_POINT_KEY
+    for bad in (FLEET_ROUTER_ID, diag_core.HA_POINT_KEY):
+        with pytest.raises(ValueError):
+            diag_core.check_router_id(bad)
+    hass = make_hass()
+    log = await _log(hass)
+    diag_core.register_event_prefix(log)
+    for kind in (LocationKind.WAN, LocationKind.RESOLVER, LocationKind.SEGMENT):
+        cause = Cause(
+            cause_id=f"cause-{kind.value}",
+            location=Location(kind, f"{kind.value}-main"),
+            cause_class=CauseClass.PROBABLE,
+            rule="central_internet",
+            summary_key="invented_summary",
+            reason="invented_reason",
+            family=AddressFamily.IPV4,
+            router_keys=(R1, R2, diag_core.HA_POINT_KEY),
+        )
+        event = diag_core.cause_event(cause, ())
+        assert event.router_id == FLEET_ROUTER_ID
+        assert event.data["router_ids"] == sorted([R1, R2])
+        assert event.data["router_count"] == 3
+        assert f"{kind.value}-main" not in _dump(event.to_dict())
+        assert log.emit(**event.emit_kwargs(), now=T0).published
+    assert len(log.events(router_id=FLEET_ROUTER_ID)) == 3
+    ha = Cause(
+        cause_id="cause-ha",
+        location=Location(LocationKind.HA, diag_core.HA_POINT_KEY),
+        cause_class=CauseClass.POSSIBLE,
+        rule="local_finding",
+        summary_key="invented_summary",
+        reason="invented_reason",
+    )
+    assert diag_core.cause_event(ha, ()).router_id is None
+    assert diag_core.guard_subject(None) == FLEET_ROUTER_ID
+    assert diag_core.guard_subject(R1) == R1
+    with pytest.raises(ValueError):
+        diag_core.guard_subject(FLEET_ROUTER_ID)
 
 
 async def test_events_round_trip_through_the_audit_log(disks) -> None:
@@ -491,6 +663,76 @@ def test_outputs_keep_i18n_keys_readable() -> None:
     assert cause_out["summary"] == "wan_problem"
 
 
+def _every_event() -> list[diag_core.DiagEvent]:
+    gw = gateway_change(diag_core.point_for(R1), GW_OLD, GW_NEW)
+    dns = dns_server_change(diag_core.point_for(None), DNS_OLD, DNS_NEW)
+    findings = [_problem(R1), _problem(None, Classification.DNS_PROBLEM), gw, dns]
+    events = list(diag_core.correlation_events(correlate(findings, {}), key=KEY))
+    events.append(_manual(R1, RequestStatus.REFUSED_RATE_LIMIT))
+    events.append(
+        diag_core.router_probes_event(
+            R1,
+            actor=user_actor(ADMIN_ID),
+            kinds=list(diag_core.EXEC_KINDS),
+            result=EventResult.SUCCESS,
+        )
+    )
+    return events
+
+
+def _diff(raw: Any, masked: Any, path: str = "") -> list[str]:
+    """Paths whose value masking changed (tuples and lists compare equal)."""
+    if not path:
+        raw, masked = json.loads(_dump(raw)), json.loads(_dump(masked))
+    if isinstance(raw, dict) and isinstance(masked, dict):
+        return [
+            p
+            for k in sorted(set(raw) | set(masked))
+            for p in _diff(raw.get(k), masked.get(k), f"{path}.{k}")
+        ]
+    if isinstance(raw, list) and isinstance(masked, list) and len(raw) == len(masked):
+        return [p for i, r in enumerate(raw) for p in _diff(r, masked[i], path)]
+    return [] if raw == masked else [path]
+
+
+async def test_every_emitted_field_survives_core_masking(disks) -> None:
+    """No counter or field is blanked: secret words (key, token, ...) and
+    ``*_key`` names are absent from all event data and outputs."""
+    events = _every_event()
+    assert {e.event_type for e in events} == diag_core.DIAG_EVENT_TYPES
+    log = await _log()
+    diag_core.register_event_prefix(log)
+    for event in events:
+        data = dict(event.data)
+        assert _diff(data, mask_for_output(data)) == [], event.event_type
+        log.emit(**event.emit_kwargs(), now=T0)
+    for stored, event in zip(log.events(limit=100), events, strict=True):
+        assert stored.type == event.event_type
+        assert _diff(dict(event.data), dict(stored.data)) == []
+    salt = b"0123456789abcdef"
+    for event in events:
+        raw = diag_core._renamed(event.to_dict())
+        # only the actor's user id is replaced (by its pseudonym)
+        assert _diff(raw, diag_core.event_output(event, salt)) in (
+            [],
+            [".actor.user_id"],
+        )
+    # outputs: only change values and excluded probes are masked
+    gw = gateway_change(diag_core.point_for(R1), GW_OLD, GW_NEW)
+    for finding in (_problem(R1, chain=_leaky_chain(R1)), gw):
+        assert finding is not None
+        brief = diag_core._brief_finding(finding)
+        assert diag_core.finding_output(finding, admin=False) == brief
+        raw = diag_core._renamed(finding.to_dict())
+        raw["router_id"] = R1
+        masked = diag_core.finding_output(finding, admin=True)
+        assert set(_diff(raw, masked)) <= {".change", ".chain.excluded"}
+        keyed = diag_core.finding_output(finding, admin=True, key=KEY)
+        changed = _diff(raw, keyed)
+        assert all(p.startswith((".change", ".chain.excluded")) for p in changed)
+        assert keyed["change"] != MASK or finding.change is None
+
+
 def test_sensitive_reads_need_an_admin() -> None:
     finding = _problem(R1, chain=_leaky_chain(R1))
     brief = diag_core.finding_output(finding, admin=False)
@@ -503,20 +745,34 @@ def test_sensitive_reads_need_an_admin() -> None:
     assert set(diag_core.SENSITIVE_READS) >= {"chain", "evidence", "probe"}
 
 
-async def test_sensitive_reads_follow_the_verified_admin_flag(disks) -> None:
+async def test_sensitive_reads_are_the_cores_sensitive_read(disks) -> None:
     hass = make_hass()
     add_users(hass)
-    guard = ActionGuard(hass, await _log(hass))
+    log = await _log(hass)
+    now = [datetime.now(UTC)]
+    guard = ActionGuard(hass, log, clock=lambda: now[0])
+    diag_core.register_actions(guard)
     admin = await guard.async_verify_actor(user_actor(ADMIN_ID))
     plain = await guard.async_verify_actor(user_actor(USER_ID, claims_admin=True))
     module = await guard.async_verify_actor(Actor.for_module(diag_core.MODULE))
-    assert diag_core.may_read_sensitive(admin)
-    assert not diag_core.may_read_sensitive(plain)
+    read = diag_core.authorize_sensitive_read
+    assert read(guard, admin, R1)
+    assert read(guard, admin, None)  # HA point: decided under the fleet id
+    assert not read(guard, plain, R1)
     # like the core's content reads: non-user actors read without admin rights
-    assert diag_core.may_read_sensitive(module)
-    assert not diag_core.may_read_sensitive(admin, now=T0.replace(year=2099))
-    assert not diag_core.may_read_sensitive(None)
-    assert not diag_core.may_read_sensitive(user_actor(ADMIN_ID, claims_admin=True))
+    assert read(guard, module, R1)
+    assert not read(guard, user_actor(ADMIN_ID, claims_admin=True), R1)  # unverified
+    now[0] += timedelta(days=3650)
+    assert not read(guard, admin, R1)  # the verification expired
+    # every decision is audited by the core, denials on the security ring
+    denied = log.events(types=["security.authorization_denied"])
+    assert len(denied) == 3
+    assert all(e.audit_ring is AuditRing.SECURITY for e in denied)
+    granted = log.events(types=["security.authorization_granted"])
+    assert {e.router_id for e in granted} == {R1, FLEET_ROUTER_ID}
+    assert ADMIN_ID not in _dump([dict(e.data) for e in denied + granted])
+    with pytest.raises(ValueError):
+        read(guard, admin, "ha")
 
 
 async def test_no_raw_user_id_in_audit_payloads(disks) -> None:
@@ -565,17 +821,24 @@ async def test_manual_runs_are_all_audited(disks) -> None:
     assert accepted.result is EventResult.SUCCESS
     assert refused.result is EventResult.DENIED
     assert denied.result is EventResult.DENIED and denied.router_id is None
+    assert (accepted.dedup_key, refused.dedup_key, denied.dedup_key) == (
+        "accepted",
+        "refused_rate_limit",
+        "denied",
+    )
     for event in (accepted, accepted, refused, denied):
-        assert event.dedup_key is None
+        assert not event.security_relevant
         assert log.emit(**event.emit_kwargs(), now=T0).published
-    assert len(log.events(types=[diag_core.EVENT_MANUAL_RUN])) == 4
+    stored = log.events(types=[diag_core.EVENT_MANUAL_RUN])
+    assert len(stored) == 4
+    assert all(e.audit_ring is AuditRing.GENERAL for e in stored)
     with pytest.raises(ValueError):
         diag_core.manual_run_event(R1, actor=actor, status="accepted", kinds=["x"])
     with pytest.raises(ValueError):
         diag_core.manual_run_event(R1, actor=actor, status="accepted", kinds=[])
 
 
-def test_router_probe_change_event() -> None:
+async def test_router_probe_change_event(disks) -> None:
     actor = user_actor(ADMIN_ID)
     event = diag_core.router_probes_event(
         R1,
@@ -585,8 +848,21 @@ def test_router_probe_change_event() -> None:
     )
     assert event.event_type == diag_core.EVENT_ROUTER_PROBES_CHANGED
     assert event.severity is CoreSeverity.WARNING
-    assert event.dedup_key is None
+    assert event.dedup_key == "enabled"
+    assert event.security_relevant
     assert event.data["enabled_kinds"] == ["diag.exec.ping", "diag.exec.traceroute"]
+    off = diag_core.router_probes_event(
+        R1, actor=actor, kinds=[], result=EventResult.SUCCESS
+    )
+    assert off.dedup_key == "disabled" and off.severity is CoreSeverity.INFO
+    log = await _log()
+    diag_core.register_event_prefix(log)
+    for item in (event, event, off):
+        assert log.emit(**item.emit_kwargs(), now=T0).published
+    stored = log.events(types=[diag_core.EVENT_ROUTER_PROBES_CHANGED])
+    assert len(stored) == 3
+    assert all(e.audit_ring is AuditRing.SECURITY for e in stored)
+    assert all(e.audit_mandatory for e in stored)
     with pytest.raises(ValueError):
         diag_core.router_probes_event(
             R1, actor=actor, kinds=["diag.probe.ha_tcp"], result=EventResult.SUCCESS
@@ -762,11 +1038,27 @@ def test_guard_declarations() -> None:
     enable = diag_core.ACTION_ENABLE_ROUTER_PROBES
     assert run.name == "net_diagnostics.run_manual"
     assert run.agreed_name == "diag.run_manual"
-    assert run.action_class is ActionClass.READ and run.admin_user_only
+    assert run.action_class is ActionClass.ACTIVE and run.admin_user_only
+    assert not run.sensitive_read
+    # the guard's limit equals the scheduler's default (10 runs / 600 s)
+    assert run.rate_limit is not None
+    assert run.rate_limit.max_calls == SchedulerRateLimit().max_runs
+    assert run.rate_limit.per == timedelta(seconds=SchedulerRateLimit().window)
     assert enable.name == "net_diagnostics.enable_router_probes"
     assert enable.agreed_name == "diag.enable_router_probes"
     assert enable.action_class is ActionClass.CRITICAL and enable.admin_user_only
-    assert diag_core.DIAG_ACTIONS == (run, enable)
+    assert enable.rate_limit is None
+    detail = diag_core.ACTION_READ_DETAIL
+    assert detail.name == "net_diagnostics.read_detail"
+    assert detail.action_class is ActionClass.READ and detail.sensitive_read
+    assert not detail.admin_user_only and detail.rate_limit is None
+    assert diag_core.DIAG_ACTIONS == (run, enable, detail)
+    assert diag_core.diag_actions() == diag_core.DIAG_ACTIONS
+    custom = diag_core.diag_actions(SchedulerRateLimit(max_runs=3, window=30.0))
+    assert custom[0].rate_limit.max_calls == 3  # type: ignore[union-attr]
+    assert custom[0].rate_limit.per == timedelta(seconds=30)  # type: ignore[union-attr]
+    with pytest.raises(ValueError):  # longer than the core's maximum of a day
+        diag_core.guard_rate_limit(SchedulerRateLimit(window=2 * 86400.0))
 
 
 async def test_actions_register_only_on_request(disks) -> None:
@@ -778,21 +1070,27 @@ async def test_actions_register_only_on_request(disks) -> None:
     assert names == (
         "net_diagnostics.run_manual",
         "net_diagnostics.enable_router_probes",
+        "net_diagnostics.read_detail",
     )
     assert diag_core.register_actions(guard) == names  # idempotent
-    assert guard.action_class(names[0]) is ActionClass.READ
+    assert guard.action_class(names[0]) is ActionClass.ACTIVE
+    assert guard.action_class(names[2]) is ActionClass.READ
     with pytest.raises(ValueError):  # the agreed name breaks <module>.<action>
         guard.register_action(
-            "diag.run_manual", ActionClass.READ, module=diag_core.MODULE
+            "diag.run_manual", ActionClass.ACTIVE, module=diag_core.MODULE
+        )
+    with pytest.raises(ValueError):  # another limit is another definition
+        diag_core.register_actions(
+            guard, scheduler_limit=SchedulerRateLimit(max_runs=3)
         )
 
 
 async def test_run_manual_is_for_verified_admin_users_only(disks) -> None:
     hass = make_hass()
     add_users(hass)
-    guard = ActionGuard(hass, await _log(hass))
+    log = await _log(hass)
+    guard = ActionGuard(hass, log, router_known=lambda rid: rid == R1)
     diag_core.register_actions(guard)
-    name = diag_core.ACTION_RUN_MANUAL.name
     admin = await guard.async_verify_actor(user_actor(ADMIN_ID))
     plain = await guard.async_verify_actor(user_actor(USER_ID, claims_admin=True))
     module = await guard.async_verify_actor(Actor.for_module(diag_core.MODULE))
@@ -800,11 +1098,137 @@ async def test_run_manual_is_for_verified_admin_users_only(disks) -> None:
         Actor(kind=ActorKind.AUTOMATION, parent_context_id="ctx-invented")
     )
     system = await guard.async_verify_actor(Actor.system())
-    assert guard.authorize(name, R1, admin).state is DecisionState.APPROVED
+    run = diag_core.authorize_manual_run
+    assert run(guard, admin, R1).state is DecisionState.APPROVED
+    ha = run(guard, admin, None)  # the HA point: decided under the fleet id
+    assert ha.state is DecisionState.APPROVED and ha.router_id == FLEET_ROUTER_ID
     for actor in (plain, module, automation, system):
-        decision = guard.authorize(name, R1, actor)
+        decision = run(guard, actor, R1)
         assert decision.state is DecisionState.DENIED
         assert decision.reason == "not_admin"
+    granted = log.events(types=["core.active_action_granted"])
+    assert {e.router_id for e in granted} == {R1, FLEET_ROUTER_ID}
+    # a router the core does not know gets no rate window and no run
+    unknown = run(guard, admin, R2)
+    assert unknown.state is DecisionState.DENIED
+    assert unknown.reason == "unknown_router"
+    assert unknown.router_id == FLEET_ROUTER_ID  # the unknown id is not echoed
+    with pytest.raises(ValueError):
+        run(guard, admin, "ha")
+
+
+async def test_run_manual_is_rate_limited_per_router(disks) -> None:
+    """The guard's limit stacks with the scheduler's: the guard counts
+    granted manual runs per router, the scheduler every started run."""
+    hass = make_hass()
+    add_users(hass)
+    log = await _log(hass)
+    now = [datetime.now(UTC)]
+    guard = ActionGuard(
+        hass, log, clock=lambda: now[0], router_known=lambda rid: rid in (R1, R2)
+    )
+    limit = SchedulerRateLimit(max_runs=2, window=60.0)
+    diag_core.register_actions(guard, scheduler_limit=limit)
+    admin = await guard.async_verify_actor(user_actor(ADMIN_ID))
+    run = diag_core.authorize_manual_run
+    cor = diag_core.new_correlation_id()
+    assert run(guard, admin, R1).state is DecisionState.APPROVED
+    assert run(guard, admin, R1, correlation_id=cor).state is DecisionState.APPROVED
+    over = run(guard, admin, R1)
+    assert over.state is DecisionState.DENIED and over.reason == "rate_limited"
+    assert over.retry_after is not None and 0 < over.retry_after <= 60
+    error = error_for_decision(over)
+    assert isinstance(error, RateLimitedError) and error.retryable
+    assert run(guard, admin, R2).state is DecisionState.APPROVED  # own window
+    (limited,) = log.events(types=["core.action_rate_limited"])
+    assert limited.router_id == R1
+    now[0] += timedelta(seconds=61)
+    admin = await guard.async_verify_actor(user_actor(ADMIN_ID))  # fresh proof
+    assert run(guard, admin, R1).state is DecisionState.APPROVED
+    with pytest.raises(ValueError):
+        run(guard, admin, R1, correlation_id="cor_bad")
+
+
+# --- errors --------------------------------------------------------------------
+
+
+def test_scheduler_refusals_map_to_core_errors() -> None:
+    assert diag_core.error_for_run_request(RunRequest(RequestStatus.ACCEPTED)) is None
+    limited = diag_core.error_for_run_request(
+        RunRequest(RequestStatus.REFUSED_RATE_LIMIT, retry_after=12.5), router_id=R1
+    )
+    assert isinstance(limited, RateLimitedError)
+    assert limited.retry_after == 12.5 and limited.retryable
+    assert limited.router_id == R1
+    assert limited.error_class is ErrorClass.RATE_LIMITED
+    assert limited.details["reason"] == "refused_rate_limit"
+    assert limited.details["limit_source"] == "scheduler"
+    unknown_wait = diag_core.error_for_run_request(RequestStatus.REFUSED_RATE_LIMIT)
+    assert isinstance(unknown_wait, RateLimitedError)
+    assert unknown_wait.retry_after == 0.0 and unknown_wait.router_id is None
+    queued = diag_core.error_for_run_request(RequestStatus.REFUSED_ALREADY_QUEUED)
+    assert isinstance(queued, OperationInProgressError) and queued.retryable
+    unknown = diag_core.error_for_run_request(RequestStatus.REFUSED_UNKNOWN_JOB)
+    assert type(unknown) is ConfigApiError
+    assert unknown.error_class is ErrorClass.NOT_FOUND and not unknown.retryable
+    stopped = diag_core.error_for_run_request(RequestStatus.REFUSED_STOPPED)
+    assert type(stopped) is ConfigApiError
+    assert stopped.error_class is ErrorClass.NOT_AVAILABLE
+    for status in RequestStatus:  # every scheduler answer is mapped
+        error = diag_core.error_for_run_request(status, router_id=R1)
+        assert (error is None) == (status is RequestStatus.ACCEPTED)
+        if error is not None:
+            assert error.to_dict()["details"]["reason"] == status.value
+    with pytest.raises(ValueError):
+        diag_core.error_for_run_request(RequestStatus.REFUSED_STOPPED, router_id="ha")
+
+
+def test_target_refusals_map_to_core_errors_without_the_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import socket
+
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("network I/O attempted")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _boom)
+    secret = "198.51.100.77"
+    refused = make_target("t1", "icmp", "external", f"http://{secret}/")
+    assert refused is Refusal.URL_NOT_ALLOWED
+    for refusal in Refusal:  # every refusal is mapped
+        error = diag_core.error_for_refusal(refusal, router_id=R1)
+        assert error.router_id == R1
+        reason = f"target.{refusal.value}"
+        if refusal in diag_core.SAFETY_REFUSALS:
+            assert isinstance(error, SafetyRefusedError)
+            assert error.reason == reason and not error.retryable
+            assert error.error_class is ErrorClass.SAFETY_REFUSED
+        else:
+            assert not isinstance(error, SafetyRefusedError)
+            assert error.details["reason"] == reason
+            assert error.error_class in {
+                ErrorClass.INVALID,
+                ErrorClass.NOT_FOUND,
+                ErrorClass.CONFLICT,
+                ErrorClass.TOO_LARGE,
+            }
+        assert secret not in _dump(error.to_dict()) and secret not in str(error)
+    for refusal in (Refusal.LOOPBACK, Refusal.METADATA, Refusal.NOT_GLOBAL):
+        assert refusal in diag_core.SAFETY_REFUSALS
+    assert diag_core.error_for_refusal(Refusal.INVALID_PORT).error_class is (
+        ErrorClass.INVALID
+    )
+    assert diag_core.error_for_refusal(Refusal.UNKNOWN_TARGET).error_class is (
+        ErrorClass.NOT_FOUND
+    )
+    assert diag_core.error_for_refusal(Refusal.DUPLICATE_ID).error_class is (
+        ErrorClass.CONFLICT
+    )
+    assert diag_core.error_for_refusal(Refusal.REGISTRY_FULL).error_class is (
+        ErrorClass.TOO_LARGE
+    )
+    with pytest.raises(ValueError):  # only Refusal members, never raw input
+        diag_core.error_for_refusal(secret)  # type: ignore[arg-type]
 
 
 async def test_enable_router_probes_needs_an_approval(disks) -> None:
@@ -839,26 +1263,75 @@ def test_register_with_core_wires_all_three_hooks() -> None:
     calls: list[tuple[str, Any]] = []
 
     class FakeGuard:
-        def register_action(self, name, action_class, *, module, admin_user_only):
-            calls.append(("action", (name, action_class, module, admin_user_only)))
+        def register_action(
+            self,
+            name,
+            action_class,
+            *,
+            module,
+            admin_user_only,
+            sensitive_read,
+            rate_limit,
+        ):
+            calls.append(
+                ("action", (name, action_class, admin_user_only, sensitive_read))
+            )
+            calls.append(("limit", rate_limit))
 
     class FakeApi:
         guard = FakeGuard()
 
         def register_event_prefix(self, prefix, *, module):
             calls.append(("prefix", (prefix, module)))
+            return lambda: calls.append(("removed", "prefix"))
+
+        def register_audit_mandatory_types(self, event_types, *, module):
+            calls.append(("mandatory", (tuple(event_types), module)))
+            return lambda: calls.append(("removed", "mandatory"))
 
         def register_capability_detector(self, module, detector, *, prefix, signature):
             calls.append(("detector", (module, prefix, callable(signature))))
-            return lambda: calls.append(("removed", module))
+            return lambda: calls.append(("removed", "detector"))
 
-    remove = diag_core.register_with_core(FakeApi(), lambda data: None)
+    limit = SchedulerRateLimit(max_runs=4, window=120.0)
+    remove = diag_core.register_with_core(
+        FakeApi(), lambda data: None, scheduler_limit=limit
+    )
     kinds = [kind for kind, _ in calls]
-    assert kinds == ["prefix", "action", "action", "detector"]
+    assert kinds == [
+        "prefix",
+        "mandatory",
+        *["action", "limit"] * 3,
+        "detector",
+    ]
     assert calls[0][1] == ("net_diagnostics.", "net_diagnostics")
+    assert calls[1][1] == (
+        tuple(sorted(diag_core.AUDIT_DUTY_EVENT_TYPES)),
+        "net_diagnostics",
+    )
+    actions = [args for kind, args in calls if kind == "action"]
+    assert actions[0] == (
+        "net_diagnostics.run_manual",
+        ActionClass.ACTIVE,
+        True,
+        False,
+    )
+    assert actions[2] == (
+        "net_diagnostics.read_detail",
+        ActionClass.READ,
+        False,
+        True,
+    )
+    limits = [args for kind, args in calls if kind == "limit"]
+    assert limits[0].max_calls == 4 and limits[0].per == timedelta(seconds=120)
+    assert limits[1:] == [None, None]
     assert calls[-1][1] == ("net_diagnostics", "diag.", True)
     remove()
-    assert calls[-1] == ("removed", "net_diagnostics")
+    assert calls[-3:] == [
+        ("removed", "detector"),
+        ("removed", "mandatory"),
+        ("removed", "prefix"),
+    ]
 
 
 # --- router.forgotten ------------------------------------------------------------

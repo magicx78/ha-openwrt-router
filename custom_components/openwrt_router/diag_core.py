@@ -3,29 +3,34 @@
 The ``diag_*`` modules know opaque router keys, opaque target ids and their
 own enums. This module is the only place that says "router key = core
 router id" (``rtr_<32 hex>``) and maps diag results onto the Configuration
-API v1 contract (docs/dev/configuration-api-v1.md, sections 6, 13 and 17).
-It holds pure mapping functions only: no I/O, no scheduling, no entities,
-nothing runs at import (the ``register_*`` helpers are called by the
-caller).
+API v1 contract (docs/dev/configuration-api-v1.md, sections 4.1, 6, 12, 13,
+14 and 17). It holds pure mapping functions plus small docking helpers that
+call the core API (no network I/O, no scheduling, no entities); nothing runs
+at import.
 
 Identity
     The Home Assistant measurement point is keyed ``"ha"`` (``PointKind.HA``)
     in series keys and labels; that can never be a core router id, and every
-    router key passing this adapter is checked with ``is_valid_id(.., rtr_)``.
-    In core events the HA point (and a fleet-wide cause) has
-    ``router_id=None`` (dedup scope ``"-"``); the scheduler uses ``None``.
+    router key passing this adapter is checked with ``is_valid_id(.., rtr_)``
+    (which also refuses the fleet id ``"-"``). In core events the HA point
+    has ``router_id=None`` (no router); a cause that sits outside one router
+    (WAN, resolver, segment) has ``FLEET_ROUTER_ID``. The guard knows only
+    registry routers and the fleet id, so a guarded action for the HA point
+    is decided under ``FLEET_ROUTER_ID`` (:func:`guard_subject`).
 
 Events
     Module ``net_diagnostics``, event prefix ``net_diagnostics.``, capability
     prefix ``diag.`` (core tables MODULE_EVENT_PREFIXES /
-    MODULE_CAPABILITY_NAMESPACES). Event data carries enum codes, counters
-    and router ids only: never a target id, address, hostname, change value
-    or user id. No incidents are created.
+    MODULE_CAPABILITY_NAMESPACES). Event data carries enum codes, counters,
+    router ids and identifier pseudonyms only: never a target id, address,
+    hostname, raw change value or user id. Manual runs and router probe
+    changes are registered audit-mandatory types. No incidents are created.
 
 Masking
     Every output (diagnostics, logs, event views) goes through
-    ``core_masking.mask_for_output``; change records, excluded probes and
-    raw probe evidence are masked by key, actors are pseudonymised with
+    ``core_masking.mask_for_output``; excluded probes and raw probe evidence
+    are masked by key, change values are masked or replaced by identifier
+    pseudonyms made with the module key, actors are pseudonymised with
     ``core_masking.pseudonymise_user_ids``.
 """
 
@@ -33,33 +38,49 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Final
 
-from .core_masking import mask_for_output, pseudonymise_user_ids
+from .core_errors import (
+    ConfigApiError,
+    ErrorClass,
+    OperationInProgressError,
+    RateLimitedError,
+    SafetyRefusedError,
+)
+from .core_masking import (
+    IDENTIFIER_INVALID,
+    mask_for_output,
+    pseudonymise_identifier,
+    pseudonymise_user_ids,
+)
 from .core_models import (
     CORRELATION_ID_PREFIX,
+    FLEET_ROUTER_ID,
     MODULE_CAPABILITY_NAMESPACES,
     MODULE_EVENT_PREFIXES,
     ROUTER_ID_PREFIX,
     ActionClass,
     Actor,
-    ActorKind,
+    AuthorizationDecision,
     Capability,
     CapabilityReason,
     CapabilityState,
     CapabilityStatus,
     CoreEvent,
     CoreEventType,
+    DecisionState,
     EventResult,
     RouterRecord,
-    VerifiedActor,
     binding_checksum,
     is_valid_id,
     new_id,
     utcnow,
+)
+from .core_models import (
+    RateLimit as CoreRateLimit,
 )
 from .core_models import (
     Severity as CoreSeverity,
@@ -73,6 +94,7 @@ from .diag_model import (
     Classification,
     CorrelationResult,
     Finding,
+    Location,
     LocationKind,
     MeasurementPoint,
     PointKind,
@@ -80,7 +102,10 @@ from .diag_model import (
     Severity,
     plain,
 )
+from .diag_scheduler import RateLimit as SchedulerRateLimit
+from .diag_scheduler import RequestStatus, RunRequest
 from .diag_stats import SeriesKey
+from .diag_targets import Refusal
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,7 +114,10 @@ _LOGGER = logging.getLogger(__name__)
 MODULE: Final = "net_diagnostics"
 EVENT_PREFIX: Final = MODULE_EVENT_PREFIXES[MODULE]  # "net_diagnostics."
 CAPABILITY_PREFIX: Final = MODULE_CAPABILITY_NAMESPACES[MODULE]  # "diag."
-HA_POINT_KEY: Final = PointKind.HA.value  # never a valid rtr_ id
+HA_POINT_KEY: Final = PointKind.HA.value  # never a valid rtr_ id, never "-"
+# Purpose of the module key (api.async_get_module_key) for identifier
+# pseudonyms; another purpose would give unlinkable pseudonyms.
+IDENTIFIER_KEY_PURPOSE: Final = "identifiers"
 
 # --- capability / kind names ---------------------------------------------------------
 
@@ -131,8 +159,8 @@ _PERMISSIONS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
         KIND_DATA_ODHCPD: ("ubus:dhcp/ipv6leases", "ubus:dhcp/ipv6ra"),
         KIND_DATA_DNSMASQ: ("ubus:dnsmasq/metrics",),
         KIND_DATA_DHCP_CONFIG: ("ubus:uci/get",),
-        # rpcd file exec on the tool; the core ACL tier registry refuses
-        # file exec in optional tiers today (contract gap, see report).
+        # rpcd file exec on the tool; optional ACL tiers accept file "read"
+        # only (OPTIONAL_TIER_FILE_READ_PREFIXES), so no tier grants it today.
         **{kind: ("file:exec",) for kind in EXEC_KINDS},
     }
 )
@@ -168,11 +196,14 @@ DIAG_EVENT_TYPES: Final = frozenset(
         EVENT_ROUTER_PROBES_CHANGED,
     }
 )
-# Acts of a person: always recorded, never deduplicated (dedup_key None).
-# The core cannot mark module types audit-mandatory (contract gap).
+# Acts of a person: registered as audit-mandatory types (contract 12.5),
+# so the core never deduplicates them (every one is stored and sent).
 AUDIT_DUTY_EVENT_TYPES: Final = frozenset(
     {EVENT_MANUAL_RUN, EVENT_ROUTER_PROBES_CHANGED}
 )
+# Emitted with security_relevant=True: enabling router-side exec widens what
+# HA may run on a router (security ring, contract 12.2).
+SECURITY_EVENT_TYPES: Final = frozenset({EVENT_ROUTER_PROBES_CHANGED})
 _CHANGE_EVENTS: Final[Mapping[Classification, str]] = MappingProxyType(
     {
         Classification.GATEWAY_CHANGED: EVENT_GATEWAY_CHANGED,
@@ -190,17 +221,18 @@ _SEVERITY: Final[Mapping[Severity, CoreSeverity]] = MappingProxyType(
 
 # --- outputs ------------------------------------------------------------------------
 
-# Keys whose whole value is masked in diagnostics output: change values and
-# probes excluded from a chain (their raw evidence may hold addresses).
+# Keys whose whole value is masked in diagnostics output: change values
+# (unless replaced by pseudonyms) and probes excluded from a chain (their raw
+# evidence may hold addresses).
 OUTPUT_MASK_KEYS: Final = ("change", "excluded")
 # Logs also mask raw probe evidence wherever it appears.
 LOG_MASK_KEYS: Final = (*OUTPUT_MASK_KEYS, "evidence")
-# Detail only a verified admin user may read (contract: sensitive reads).
+# Detail shown only after the core's sensitive read (ACTION_READ_DETAIL).
 SENSITIVE_READS: Final = frozenset(
     {"chain", "evidence", "probe", "change", "reasons", "location"}
 )
-# core_masking treats ``*_key`` names as secret; diag i18n keys and router
-# keys are renamed so they stay readable after masking.
+# core_masking treats ``*_key`` names (router_key, summary_key, ...) as
+# secret; diag i18n keys and router keys are renamed so they stay readable.
 _RENAMES: Final[Mapping[str, str]] = MappingProxyType(
     {
         "router_key": "router_id",
@@ -235,6 +267,12 @@ def router_id_for(point: MeasurementPoint) -> str | None:
     if point.kind == PointKind.HA:
         return None
     return check_router_id(point.key)
+
+
+def guard_subject(router_id: str | None) -> str:
+    """``router_id`` the guard decides on: the router, or ``FLEET_ROUTER_ID``
+    for the HA point (the guard knows only registry routers and ``-``)."""
+    return FLEET_ROUTER_ID if router_id is None else check_router_id(router_id)
 
 
 def series_point(router_id: str | None) -> str:
@@ -282,6 +320,17 @@ def dependencies_by_router(
                 check_router_id(host.id)
         checked[router_id] = deps
     return checked
+
+
+def location_router_id(location: Location) -> str | None:
+    """Core ``router_id`` of a cause location: the router, ``None`` for HA,
+    ``FLEET_ROUTER_ID`` for a place outside one router (WAN, resolver,
+    segment)."""
+    if location.kind == LocationKind.ROUTER:
+        return check_router_id(location.id)
+    if location.kind == LocationKind.HA:
+        return None
+    return FLEET_ROUTER_ID
 
 
 # =============================================================================
@@ -534,7 +583,11 @@ def make_detector(
     *,
     clock: Callable[[], datetime] = utcnow,
 ) -> Callable[[RouterRecord, Any], dict[str, CapabilityStatus]]:
-    """Capability detector for ``register_capability_detector`` (sync, no I/O)."""
+    """Capability detector for ``register_capability_detector`` (sync, no I/O).
+
+    The core passes the record as it was before this poll's evaluation, so
+    the ``transport.ubus`` status seen here may be one poll old.
+    """
 
     def detector(record: RouterRecord, data: Any) -> dict[str, CapabilityStatus]:
         return detect_capabilities(
@@ -563,21 +616,40 @@ def make_signature(extract_facts: FactsExtractor) -> Callable[[Any], Any]:
 
 @dataclass(frozen=True)
 class DiagAction:
-    """A guarded module action. ``agreed_name`` is the planned ``diag.*``
-    name; the guard requires ``<module>.<action>``, so ``name`` is used."""
+    """A guarded module action (``register_action`` arguments).
+
+    ``agreed_name`` is the planned ``diag.*`` name, where there was one; the
+    guard requires ``<module>.<action>``, so ``name`` is what is registered.
+    """
 
     name: str
     action_class: ActionClass
-    admin_user_only: bool
-    agreed_name: str
+    admin_user_only: bool = False
+    sensitive_read: bool = False
+    rate_limit: CoreRateLimit | None = None
+    agreed_name: str | None = None
 
 
-# Active but not mutating, admin only: no such class; READ + admin_user_only
-# is the closest (immediate decision, verified admin users only, audited).
+def guard_rate_limit(limit: SchedulerRateLimit | None = None) -> CoreRateLimit:
+    """The guard's limit for manual runs, equal to the scheduler's limit.
+
+    The two stack: the guard counts granted manual runs per (action,
+    router), the scheduler counts every started run (manual, event,
+    periodic) per router key and stays the limit that makes a manual run
+    obey the same budget as automatic ones. ValueError for a scheduler
+    window longer than one day (the core's maximum).
+    """
+    limit = limit or SchedulerRateLimit()
+    return CoreRateLimit(max_calls=limit.max_runs, per=timedelta(seconds=limit.window))
+
+
+# Active, not mutating: acts on the router or network (probe runs). Only a
+# verified admin user starts one; rate limited per router like the scheduler.
 ACTION_RUN_MANUAL: Final = DiagAction(
     name=f"{MODULE}.run_manual",
-    action_class=ActionClass.READ,
+    action_class=ActionClass.ACTIVE,
     admin_user_only=True,
+    rate_limit=guard_rate_limit(),
     agreed_name="diag.run_manual",
 )
 # Most restricted class: request + admin approval + single use.
@@ -587,20 +659,44 @@ ACTION_ENABLE_ROUTER_PROBES: Final = DiagAction(
     admin_user_only=True,
     agreed_name="diag.enable_router_probes",
 )
-DIAG_ACTIONS: Final = (ACTION_RUN_MANUAL, ACTION_ENABLE_ROUTER_PROBES)
+# Reading diagnosis detail (SENSITIVE_READS): the core's sensitive read
+# (a user must be a verified admin; module, system and automation read).
+ACTION_READ_DETAIL: Final = DiagAction(
+    name=f"{MODULE}.read_detail",
+    action_class=ActionClass.READ,
+    sensitive_read=True,
+)
+DIAG_ACTIONS: Final = (
+    ACTION_RUN_MANUAL,
+    ACTION_ENABLE_ROUTER_PROBES,
+    ACTION_READ_DETAIL,
+)
 
 
-def register_actions(guard: Any) -> tuple[str, ...]:
+def diag_actions(
+    scheduler_limit: SchedulerRateLimit | None = None,
+) -> tuple[DiagAction, ...]:
+    """The module actions; ``run_manual`` limited like ``scheduler_limit``."""
+    run = replace(ACTION_RUN_MANUAL, rate_limit=guard_rate_limit(scheduler_limit))
+    return (run, ACTION_ENABLE_ROUTER_PROBES, ACTION_READ_DETAIL)
+
+
+def register_actions(
+    guard: Any, *, scheduler_limit: SchedulerRateLimit | None = None
+) -> tuple[str, ...]:
     """Register the module actions with ``guard`` (``api.guard`` or the core
-    ActionGuard). Idempotent; never called at import."""
-    for action in DIAG_ACTIONS:
+    ActionGuard). Idempotent for the same limit; never called at import."""
+    actions = diag_actions(scheduler_limit)
+    for action in actions:
         guard.register_action(
             action.name,
             action.action_class,
             module=MODULE,
             admin_user_only=action.admin_user_only,
+            sensitive_read=action.sensitive_read,
+            rate_limit=action.rate_limit,
         )
-    return tuple(action.name for action in DIAG_ACTIONS)
+    return tuple(action.name for action in actions)
 
 
 def _exec_kinds(kinds: Iterable[str]) -> list[str]:
@@ -617,13 +713,247 @@ def enable_probes_checksum(router_id: str, kinds: Iterable[str]) -> str:
     return binding_checksum(check_router_id(router_id), _exec_kinds(kinds))
 
 
-def may_read_sensitive(reader: object, *, now: datetime | None = None) -> bool:
-    """Sensitive diag reads, by the core's content-read rule (contract 6.3):
-    a user must be a freshly verified admin; module, system and automation
-    actors read without admin rights. Anything unverified is refused."""
-    if not isinstance(reader, VerifiedActor) or not reader.is_fresh(now):
-        return False
-    return reader.actor.kind is not ActorKind.USER or reader.is_admin
+def authorize_manual_run(
+    guard: Any,
+    actor: Any,
+    router_id: str | None,
+    *,
+    correlation_id: str | None = None,
+) -> AuthorizationDecision:
+    """Guard decision for one manual run (audited by the core).
+
+    The HA point is decided under ``FLEET_ROUTER_ID``; an unknown router is
+    refused by the core (``unknown_router``). On a denial raise
+    ``core_guard.error_for_decision(decision)`` (``RateLimitedError`` when
+    over the limit). An approved run still goes through the scheduler.
+    """
+    return guard.authorize(
+        ACTION_RUN_MANUAL.name,
+        guard_subject(router_id),
+        actor,
+        correlation_id=_check_correlation(correlation_id),
+    )
+
+
+def authorize_sensitive_read(
+    guard: Any,
+    reader: Any,
+    router_id: str | None,
+    *,
+    correlation_id: str | None = None,
+) -> bool:
+    """True if ``reader`` may see the detail (``admin=True`` outputs).
+
+    Decided by the core's sensitive read (``ACTION_READ_DETAIL``): grants
+    and denials are audited on the security ring.
+    """
+    decision = guard.authorize(
+        ACTION_READ_DETAIL.name,
+        guard_subject(router_id),
+        reader,
+        correlation_id=_check_correlation(correlation_id),
+    )
+    return decision.state is DecisionState.APPROVED
+
+
+# =============================================================================
+# Errors (contract 14): refusals of the scheduler and the target checks
+# =============================================================================
+
+# Scheduler answers that are not a rate limit (the job id is never echoed).
+_RUN_REFUSALS: Final[Mapping[RequestStatus, tuple[type[ConfigApiError], Any]]] = (
+    MappingProxyType(
+        {
+            RequestStatus.REFUSED_ALREADY_QUEUED: (OperationInProgressError, None),
+            RequestStatus.REFUSED_UNKNOWN_JOB: (ConfigApiError, ErrorClass.NOT_FOUND),
+            RequestStatus.REFUSED_STOPPED: (ConfigApiError, ErrorClass.NOT_AVAILABLE),
+        }
+    )
+)
+
+
+def error_for_run_request(
+    request: RunRequest | RequestStatus, *, router_id: str | None = None
+) -> ConfigApiError | None:
+    """Core error for a refused scheduler request; ``None`` if accepted.
+
+    ``refused_rate_limit`` -> ``RateLimitedError`` with the scheduler's
+    ``retry_after`` (0 if unknown); ``refused_already_queued`` ->
+    ``OperationInProgressError``; ``refused_unknown_job`` -> ``not_found``;
+    ``refused_stopped`` -> ``not_available``. ``details.reason`` is the
+    scheduler status; the job id is never part of the error.
+    """
+    if isinstance(request, RunRequest):
+        status, retry_after = request.status, request.retry_after
+    else:
+        status, retry_after = RequestStatus(request), None
+    if status is RequestStatus.ACCEPTED:
+        return None
+    rid = None if router_id is None else check_router_id(router_id)
+    details = {
+        "reason": status.value,
+        "action": ACTION_RUN_MANUAL.name,
+        "limit_source": "scheduler",
+    }
+    if status is RequestStatus.REFUSED_RATE_LIMIT:
+        return RateLimitedError(
+            "Diagnosis run is rate limited",
+            retry_after=max(0.0, float(retry_after or 0.0)),
+            router_id=rid,
+            details=details,
+        )
+    cls, error_class = _RUN_REFUSALS[status]
+    message = f"Diagnosis run refused: {status.value}"
+    if error_class is None:
+        return cls(message, router_id=rid, details=details)
+    return cls(message, router_id=rid, error_class=error_class, details=details)
+
+
+# Refusals because probing there (or a host of that shape) is unsafe: a
+# non-global or special address, a name outside the allowed scope, a shape
+# that could inject options or URLs, an unconfirmed target, a resolver that
+# answered oddly. Every other refusal is a plain input error.
+SAFETY_REFUSALS: Final = frozenset(
+    {
+        Refusal.NOT_CONFIRMED,
+        Refusal.NON_ASCII_HOST,
+        Refusal.BAD_CHARACTER,
+        Refusal.URL_NOT_ALLOWED,
+        Refusal.LEADING_DASH,
+        Refusal.PORT_IN_HOST,
+        Refusal.NUMERIC_HOST,
+        Refusal.BAD_PUNYCODE,
+        Refusal.INTERNAL_NAME,
+        Refusal.NOT_INTERNAL_NAME,
+        Refusal.LOOPBACK,
+        Refusal.LINK_LOCAL,
+        Refusal.METADATA,
+        Refusal.MULTICAST,
+        Refusal.BROADCAST,
+        Refusal.UNSPECIFIED,
+        Refusal.RESERVED,
+        Refusal.DOCUMENTATION,
+        Refusal.TRANSLATED,
+        Refusal.NOT_GLOBAL,
+        Refusal.NOT_INTERNAL_NETWORK,
+        Refusal.RESOLVED_INVALID,
+        Refusal.TOO_MANY_ADDRESSES,
+    }
+)
+_REFUSAL_ERROR_CLASSES: Final[Mapping[Refusal, ErrorClass]] = MappingProxyType(
+    {
+        Refusal.UNKNOWN_TARGET: ErrorClass.NOT_FOUND,
+        Refusal.RESOLVED_EMPTY: ErrorClass.NOT_FOUND,
+        Refusal.DUPLICATE_ID: ErrorClass.CONFLICT,
+        Refusal.REGISTRY_FULL: ErrorClass.TOO_LARGE,
+        **{
+            refusal: ErrorClass.INVALID
+            for refusal in (
+                Refusal.INVALID_ID,
+                Refusal.INVALID_TARGET,
+                Refusal.INVALID_KIND,
+                Refusal.INVALID_SCOPE,
+                Refusal.INVALID_PORT,
+                Refusal.PORT_REQUIRED,
+                Refusal.EMPTY_HOST,
+                Refusal.HOST_TOO_LONG,
+                Refusal.INVALID_IP,
+                Refusal.EMPTY_LABEL,
+                Refusal.LABEL_TOO_LONG,
+                Refusal.BAD_LABEL,
+            )
+        },
+    }
+)
+
+
+def refusal_reason(refusal: Refusal) -> str:
+    """Machine code of a target refusal (``target.<code>``)."""
+    return f"target.{Refusal(refusal).value}"
+
+
+def error_for_refusal(
+    refusal: Refusal, *, router_id: str | None = None
+) -> ConfigApiError:
+    """Core error for a ``diag_targets.Refusal``; never holds the input.
+
+    Safety refusals (:data:`SAFETY_REFUSALS`, and any refusal this table
+    does not know: fail closed) -> ``SafetyRefusedError``; the rest ->
+    ``ConfigApiError`` with ``invalid`` / ``not_found`` / ``conflict`` /
+    ``too_large``. ``reason`` is ``target.<code>``.
+    """
+    refusal = Refusal(refusal)
+    reason = refusal_reason(refusal)
+    rid = None if router_id is None else check_router_id(router_id)
+    error_class = _REFUSAL_ERROR_CLASSES.get(refusal)
+    if refusal in SAFETY_REFUSALS or error_class is None:
+        return SafetyRefusedError(
+            f"Target refused for safety: {refusal.value}", reason=reason, router_id=rid
+        )
+    return ConfigApiError(
+        f"Target refused: {refusal.value}",
+        router_id=rid,
+        error_class=error_class,
+        details={"reason": reason},
+    )
+
+
+# =============================================================================
+# Identifier pseudonyms (contract 11.5, 13)
+# =============================================================================
+
+
+async def async_identifier_key(api: Any) -> bytes:
+    """The module key for identifier pseudonyms (``api.async_get_module_key``).
+
+    Needs the module's event prefix registered first (core rule); never log
+    or store the key.
+    """
+    return await api.async_get_module_key(MODULE, IDENTIFIER_KEY_PURPOSE)
+
+
+def pseudonymise_address(value: Any, key: bytes) -> str:
+    """``ipa_<16 hex>`` of an address (``IDENTIFIER_INVALID`` if it is none)."""
+    try:
+        return pseudonymise_identifier("ip", value, key)
+    except (TypeError, ValueError):
+        return IDENTIFIER_INVALID
+
+
+def _addresses(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(item) for item in value]
+
+
+def _change_pseudonyms(finding: Finding, key: bytes) -> dict[str, Any]:
+    """Which pseudonymous gateway / servers changed (sorted, never raw)."""
+    change = finding.change
+    if change is None:
+        return {}
+    if finding.classification is Classification.GATEWAY_CHANGED:
+        return {
+            "previous_gateway": (
+                None
+                if change.previous is None
+                else pseudonymise_address(change.previous, key)
+            ),
+            "current_gateway": (
+                None
+                if change.current is None
+                else pseudonymise_address(change.current, key)
+            ),
+        }
+    before = {pseudonymise_address(a, key) for a in _addresses(change.previous)}
+    after = {pseudonymise_address(a, key) for a in _addresses(change.current)}
+    return {
+        "previous_servers": sorted(before),
+        "current_servers": sorted(after),
+        "added_servers": sorted(after - before),
+        "removed_servers": sorted(before - after),
+    }
 
 
 # =============================================================================
@@ -643,10 +973,13 @@ class DiagEvent:
     data: Mapping[str, Any] = field(default_factory=dict)
     correlation_id: str | None = None
     actor: Actor | None = None
+    security_relevant: bool = False
 
     def __post_init__(self) -> None:
         if self.event_type not in DIAG_EVENT_TYPES:
             raise ValueError("unknown diag event type")
+        if not isinstance(self.security_relevant, bool):
+            raise TypeError("security_relevant must be a bool")
         object.__setattr__(self, "data", MappingProxyType(plain(dict(self.data))))
 
     def emit_kwargs(self) -> dict[str, Any]:
@@ -661,6 +994,7 @@ class DiagEvent:
             "correlation_id": self.correlation_id,
             "dedup_key": self.dedup_key,
             "data": plain(dict(self.data)),
+            "security_relevant": self.security_relevant,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -673,14 +1007,26 @@ class DiagEvent:
             "router_id": self.router_id,
             "correlation_id": self.correlation_id,
             "dedup_key": self.dedup_key,  # a SAFE_KEYS name: stays readable
+            "security_relevant": self.security_relevant,
             "actor": None if self.actor is None else self.actor.to_dict(),
             "data": plain(dict(self.data)),
         }
 
 
-def register_event_prefix(target: Any) -> None:
-    """Allow the module's event types on ``target`` (api or AuditLog)."""
-    target.register_event_prefix(EVENT_PREFIX, module=MODULE)
+def register_event_prefix(target: Any) -> Callable[[], None]:
+    """Allow the module's event types on ``target`` (api or AuditLog) and
+    make :data:`AUDIT_DUTY_EVENT_TYPES` audit-mandatory there; returns one
+    remover for both (the core's removers)."""
+    remove_prefix = target.register_event_prefix(EVENT_PREFIX, module=MODULE)
+    remove_types = target.register_audit_mandatory_types(
+        sorted(AUDIT_DUTY_EVENT_TYPES), module=MODULE
+    )
+
+    def remove() -> None:
+        remove_types()
+        remove_prefix()
+
+    return remove
 
 
 def new_correlation_id() -> str:
@@ -714,9 +1060,22 @@ def _count(value: Any) -> int:
 
 
 def _change_event(
-    finding: Finding, router_id: str | None, correlation_id: str | None
+    finding: Finding,
+    router_id: str | None,
+    correlation_id: str | None,
+    key: bytes | None,
 ) -> DiagEvent:
     change = finding.change
+    data: dict[str, Any] = {
+        "classification": finding.classification.value,
+        "point_kind": finding.point.kind.value,
+        "stage": _value(finding.cause_stage),
+        "family": _value(finding.family),
+        "previous_count": _count(None if change is None else change.previous),
+        "current_count": _count(None if change is None else change.current),
+    }
+    if key is not None:
+        data.update(_change_pseudonyms(finding, key))
     return DiagEvent(
         event_type=_CHANGE_EVENTS[finding.classification],
         severity=core_severity(finding.severity),
@@ -724,14 +1083,7 @@ def _change_event(
         router_id=router_id,
         dedup_key=None,  # each observed change is a fact of its own
         correlation_id=correlation_id,
-        data={
-            "classification": finding.classification.value,
-            "point_kind": finding.point.kind.value,
-            "stage": _value(finding.cause_stage),
-            "family": _value(finding.family),
-            "previous_count": _count(None if change is None else change.previous),
-            "current_count": _count(None if change is None else change.current),
-        },
+        data=data,
     )
 
 
@@ -740,12 +1092,18 @@ def finding_event(
     *,
     links: Iterable[CauseLink] = (),
     correlation_id: str | None = None,
+    key: bytes | None = None,
 ) -> DiagEvent | None:
-    """Event of one finding; ``None`` for no fault / not enough data."""
+    """Event of one finding; ``None`` for no fault / not enough data.
+
+    With the module ``key`` (:func:`async_identifier_key`) a gateway or DNS
+    server change also names WHICH pseudonymous address changed; without
+    it only counts.
+    """
     correlation_id = _check_correlation(correlation_id)
     router_id = router_id_for(finding.point)
     if finding.classification in _CHANGE_EVENTS:
-        return _change_event(finding, router_id, correlation_id)
+        return _change_event(finding, router_id, correlation_id, key)
     if not finding.is_problem or finding.severity == Severity.OK:
         return None
     linked = tuple(links)
@@ -789,19 +1147,20 @@ def cause_event(
     severity: Severity = Severity.WARNING,
     correlation_id: str | None = None,
 ) -> DiagEvent:
-    """Event of one cause; ``severity`` = worst linked finding's severity."""
+    """Event of one cause; ``severity`` = worst linked finding's severity.
+
+    ``router_id`` follows :func:`location_router_id` (fleet id for WAN,
+    resolver and segment causes).
+    """
     correlation_id = _check_correlation(correlation_id)
     location = cause.location
-    router_id = (
-        check_router_id(location.id) if location.kind == LocationKind.ROUTER else None
-    )
     linked = tuple(links)
     family = _value(cause.family) or "any"
     return DiagEvent(
         event_type=EVENT_CAUSE,
         severity=core_severity(severity),
         result=EventResult.FAILURE,
-        router_id=router_id,
+        router_id=location_router_id(location),
         dedup_key=(
             f"{location.kind.value}:{cause.rule}:{family}:{cause.cause_class.value}"
         ),
@@ -820,14 +1179,20 @@ def cause_event(
 
 
 def correlation_events(
-    result: CorrelationResult, *, correlation_id: str | None = None
+    result: CorrelationResult,
+    *,
+    correlation_id: str | None = None,
+    key: bytes | None = None,
 ) -> tuple[DiagEvent, ...]:
     """Events of one correlated round: findings first, then causes."""
     correlation_id = _check_correlation(correlation_id)
     events: list[DiagEvent] = []
     for index, finding in enumerate(result.findings):
         event = finding_event(
-            finding, links=result.links_for(index), correlation_id=correlation_id
+            finding,
+            links=result.links_for(index),
+            correlation_id=correlation_id,
+            key=key,
         )
         if event is not None:
             events.append(event)
@@ -866,10 +1231,12 @@ def manual_run_event(
     kinds: Iterable[str],
     correlation_id: str | None = None,
 ) -> DiagEvent:
-    """Audit record of a manual run (audit duty: never deduplicated).
+    """Audit record of a manual run (an audit-mandatory type).
 
     ``status`` is a ``diag_scheduler.RequestStatus`` value or ``denied``
-    (guard). The actor is kept in ``CoreEvent.actor``; data has no user id.
+    (guard); it is also the ``dedup_key`` (the discriminator; the core never
+    deduplicates a registered mandatory type). The actor is kept in
+    ``CoreEvent.actor``; data has no user id.
     """
     status = str(getattr(status, "value", status))
     return DiagEvent(
@@ -877,7 +1244,7 @@ def manual_run_event(
         severity=CoreSeverity.INFO,
         result=_run_result(status),
         router_id=scheduler_key(router_id),
-        dedup_key=None,
+        dedup_key=status,
         correlation_id=_check_correlation(correlation_id),
         actor=actor,
         data={"status": status, "kinds": _kinds(kinds)},
@@ -892,17 +1259,19 @@ def router_probes_event(
     result: EventResult,
     correlation_id: str | None = None,
 ) -> DiagEvent:
-    """Audit record of enabling router-side exec probes (audit duty)."""
+    """Audit record of enabling router-side exec probes (audit-mandatory,
+    security ring). ``dedup_key`` is ``enabled`` or ``disabled``."""
     enabled = _exec_kinds(kinds)
     return DiagEvent(
         event_type=EVENT_ROUTER_PROBES_CHANGED,
         severity=CoreSeverity.WARNING if enabled else CoreSeverity.INFO,
         result=EventResult(result),
         router_id=check_router_id(router_id),
-        dedup_key=None,
+        dedup_key="enabled" if enabled else "disabled",
         correlation_id=_check_correlation(correlation_id),
         actor=actor,
         data={"enabled_kinds": enabled, "enabled_count": len(enabled)},
+        security_relevant=True,
     )
 
 
@@ -942,14 +1311,24 @@ def _brief_finding(finding: Finding) -> dict[str, Any]:
     }
 
 
-def finding_output(finding: Finding, *, admin: bool) -> dict[str, Any]:
-    """Masked view of a finding; detail only for ``admin`` (see
-    :func:`may_read_sensitive`). Change values are masked even then."""
+def finding_output(
+    finding: Finding, *, admin: bool, key: bytes | None = None
+) -> dict[str, Any]:
+    """Masked view of a finding.
+
+    Detail only for ``admin`` (the caller got it from
+    :func:`authorize_sensitive_read`). Change values are masked, or with the
+    module ``key`` replaced by their pseudonyms; never shown raw.
+    """
     if not admin:
         return mask_for_output(_brief_finding(finding))
     data = finding.to_dict()
     data["router_id"] = router_id_for(finding.point)
-    return _masked(data)
+    keys: tuple[str, ...] = OUTPUT_MASK_KEYS
+    if key is not None and finding.change is not None:
+        data["change"] = _change_pseudonyms(finding, key)
+        keys = tuple(k for k in OUTPUT_MASK_KEYS if k != "change")
+    return _masked(data, keys)
 
 
 def _brief_cause(cause: Cause) -> dict[str, Any]:
@@ -964,7 +1343,9 @@ def _brief_cause(cause: Cause) -> dict[str, Any]:
     }
 
 
-def correlation_output(result: CorrelationResult, *, admin: bool) -> dict[str, Any]:
+def correlation_output(
+    result: CorrelationResult, *, admin: bool, key: bytes | None = None
+) -> dict[str, Any]:
     """Masked view of one correlated round (detail only for ``admin``)."""
     causes = (
         [_masked(cause.to_dict()) for cause in result.causes]
@@ -972,7 +1353,7 @@ def correlation_output(result: CorrelationResult, *, admin: bool) -> dict[str, A
         else [mask_for_output(_brief_cause(cause)) for cause in result.causes]
     )
     return {
-        "findings": [finding_output(f, admin=admin) for f in result.findings],
+        "findings": [finding_output(f, admin=admin, key=key) for f in result.findings],
         "causes": causes,
         "links": [_masked(link.to_dict()) for link in result.links],
     }
@@ -980,7 +1361,7 @@ def correlation_output(result: CorrelationResult, *, admin: bool) -> dict[str, A
 
 def probe_output(probe: ProbeResult) -> dict[str, Any]:
     """Masked view of one probe result; raw evidence is always masked
-    (admin-only read, see SENSITIVE_READS)."""
+    (detail behind the sensitive read, see SENSITIVE_READS)."""
     return _masked(probe.to_dict(), LOG_MASK_KEYS)
 
 
@@ -989,8 +1370,9 @@ def log_safe(data: Any) -> Any:
     return _masked(data, LOG_MASK_KEYS)
 
 
-def actor_output(actor: Actor | VerifiedActor, salt: bytes) -> dict[str, Any]:
-    """Masked actor with the user id replaced by its ``usr_`` pseudonym."""
+def actor_output(actor: Any, salt: bytes) -> dict[str, Any]:
+    """Masked actor (``Actor`` or ``VerifiedActor``) with the user id
+    replaced by its ``usr_`` pseudonym."""
     return mask_for_output(pseudonymise_user_ids(actor.to_dict(), salt))
 
 
@@ -1070,14 +1452,22 @@ def register_with_core(
     extract_facts: FactsExtractor,
     *,
     clock: Callable[[], datetime] = utcnow,
+    scheduler_limit: SchedulerRateLimit | None = None,
 ) -> Callable[[], None]:
-    """Event prefix, guard actions and capability detector on a
-    ConfigurationApi; returns the detector's remove callable."""
-    register_event_prefix(api)
-    register_actions(api.guard)
-    return api.register_capability_detector(
+    """Event prefix + audit-mandatory types, guard actions and capability
+    detector on a ConfigurationApi; returns one remover for the detector,
+    the mandatory types and the prefix (guard actions cannot be removed)."""
+    remove_events = register_event_prefix(api)
+    register_actions(api.guard, scheduler_limit=scheduler_limit)
+    remove_detector = api.register_capability_detector(
         MODULE,
         make_detector(extract_facts, clock=clock),
         prefix=CAPABILITY_PREFIX,
         signature=make_signature(extract_facts),
     )
+
+    def remove() -> None:
+        remove_detector()
+        remove_events()
+
+    return remove
