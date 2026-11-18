@@ -26,6 +26,9 @@ Router-Abfragen, Entitäten und Sensorwerte unverändert.
   wie die Trend-Sortierung, mit Text für Screenreader; „–“ heißt zu wenig
   Daten. Das letzte Problem wird bei Platzmangel mit „…“ gekürzt (voller
   Text im Tooltip) und überlappt die Nachbarspalte nicht mehr.
+- **Schmale Liste:** die Client-Liste wechselt nach ihrer eigenen Breite
+  (unter 820 px) zu Karten, auch bei offener HA-Seitenleiste oder halbem
+  Browserfenster.
 - **Reconnects ohne Abbrüche** sind kein Widerspruch: das Detail sagt jetzt
   neben der Zahl, dass Reconnects aus dem Router-Log stammen und kurze
   Neuanmeldungen keine Sitzung beenden.

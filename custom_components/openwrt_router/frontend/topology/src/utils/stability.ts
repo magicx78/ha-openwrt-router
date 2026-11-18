@@ -101,8 +101,8 @@ export function recommendationText(
       return `Zeitplan des Geräts prüfen: Abbrüche gehäuft gegen ${p.hour} Uhr `
         + `(${p.hit_days} von ${p.covered_days} Tagen).`;
     case 'check_ap':
-      return `${ap('worst_ap')} prüfen (Kanal, Sendeleistung): ${num(Number(p.worst_rate), 1)} Abbrüche je `
-        + `24 h dort, ${num(Number(p.best_rate), 1)} an ${ap('best_ap')}.`;
+      return `${ap('worst_ap')} prüfen (Kanal, Sendeleistung): ${num(Number(p.worst_rate), 2)} Abbrüche je `
+        + `24 h dort, ${num(Number(p.best_rate), 2)} an ${ap('best_ap')}.`;
     case 'infrastructure_cause':
       return `Ursache in der Infrastruktur: ${num(Number(p.infra))} Abbrüche fallen in `
         + `${num(Number(p.incidents))} Netzwerk-Vorfall/-Vorfälle.`;
@@ -144,7 +144,8 @@ export function trendCell(
   const points = Math.abs(delta ?? 0);
   if (trend === 'up') return { arrow: '↑', text: `Score ${num(points)} Punkte besser als die 24 h davor`, known: true };
   if (trend === 'down') return { arrow: '↓', text: `Score ${num(points)} Punkte schlechter als die 24 h davor`, known: true };
-  const signed = `${(delta ?? 0) > 0 ? '+' : ''}${num(delta ?? 0)}`;
+  const shown = Math.round((delta ?? 0) * 10) / 10; // sign of the shown value
+  const signed = `${shown > 0 ? '+' : ''}${num(shown, 1)}`;
   return { arrow: '→', text: `Score etwa gleich wie die 24 h davor (${signed} Punkte)`, known: true };
 }
 
