@@ -198,12 +198,11 @@ _ASSIGN_HEAD_RE: Final = re.compile(
 _FLAG_HEAD_RE: Final = re.compile(
     r"(?<![\w\-])(?P<name>--?[A-Za-z][A-Za-z0-9_\-]*)[ \t]+(?=[^\s\-])"
 )
-# Value: complete double-quoted, complete single-quoted (UCI '\'' escapes),
-# otherwise the rest of the line (over-masking on purpose).
-_VALUE_RE: Final = re.compile(
-    r"\"(?:[^\"\\\r\n]|\\.)*\"|'(?:'\\''|[^'\r\n])*'|[^\r\n]*"
-)
-_UCI_VALUE_RE: Final = re.compile(r"[^\r\n]*")
+# After a secret head the rest of the line goes (over-masking on purpose):
+# `uci show` prints a list as 'one' 'two' on one line (review L1), a flag
+# can be followed by more quoted words, and whatever else follows a secret
+# on its line is not worth the risk.
+_LINE_REST_RE: Final = re.compile(r"[^\r\n]*")
 # crypt(3) hashes as in /etc/shadow.
 _CRYPT_RE: Final = re.compile(r"\$(?:1|2[abxy]?|5|6|7|y|gy|sha1|md5|apr1)\$[^\s:'\"]+")
 # 32-byte keys in base64 (WireGuard private/preshared keys).
@@ -260,9 +259,9 @@ def redact_text(text: str) -> str:
     text = _PEM_RE.sub(MASK_PLACEHOLDER, text)
     text = _URL_CRED_RE.sub(rf"\1:{MASK_PLACEHOLDER}@", text)
     text = _AUTH_SCHEME_RE.sub(rf"\1 {MASK_PLACEHOLDER}", text)
-    text = _mask_after_heads(text, _UCI_HEAD_RE, _UCI_VALUE_RE)
-    text = _mask_after_heads(text, _ASSIGN_HEAD_RE, _VALUE_RE)
-    text = _mask_after_heads(text, _FLAG_HEAD_RE, _VALUE_RE)
+    text = _mask_after_heads(text, _UCI_HEAD_RE, _LINE_REST_RE)
+    text = _mask_after_heads(text, _ASSIGN_HEAD_RE, _LINE_REST_RE)
+    text = _mask_after_heads(text, _FLAG_HEAD_RE, _LINE_REST_RE)
     text = _CRYPT_RE.sub(MASK_PLACEHOLDER, text)
     text = _WG_KEY_RE.sub(MASK_PLACEHOLDER, text)
     return _HEX32_RE.sub(MASK_PLACEHOLDER, text)

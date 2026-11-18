@@ -565,6 +565,36 @@ def test_redact_text_secret_after_readable_pair_on_same_line() -> None:
     assert SECRET not in red
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        # `uci show` prints a list on one line (review L1).
+        "wireless.wifinet0.sae_password='pw-one' 'pw-two-{s}'",
+        "wireless.@wifi-iface[0].key='pw-one' 'pw-two' '{s}'",
+        "openvpn.x.auth_user_pass='it'\\''s' '{s}'",
+        'password="pw-one" "{s}"',
+        "psk: 'pw-one'{s}",
+        "psk='pw-one' trailing {s}",
+        "--password 'pw-one' '{s}'",
+    ],
+)
+def test_redact_text_masks_every_value_after_a_secret_head(line: str) -> None:
+    text = line.format(s=SECRET)
+    red = redact_text(text)
+    assert SECRET not in red
+    assert "pw-one" not in red and "pw-two" not in red
+    # The head stays readable.
+    head = text.split("'", 1)[0].split('"', 1)[0]
+    assert red.startswith(head)
+
+
+def test_redact_text_secret_list_does_not_mask_the_next_line() -> None:
+    text = f"wireless.w.sae_password='a' '{SECRET}'\nwireless.w.ssid='HomeNet'"
+    red = redact_text(text)
+    assert SECRET not in red
+    assert red.endswith("\nwireless.w.ssid='HomeNet'")
+
+
 def test_redact_text_keeps_ordinary_messages() -> None:
     msg = "Connection refused: host unreachable after 60 s (error: timeout)"
     assert redact_text(msg) == msg
