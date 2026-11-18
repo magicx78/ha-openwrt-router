@@ -87,7 +87,7 @@ class TestSetupEntry:
             "custom_components.openwrt_router.OpenWrtCoordinator",
             return_value=mock_coordinator,
         ), patch(
-            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
             AsyncMock(return_value=False),
         ):
             result = await async_setup_entry(hass, entry)
@@ -180,7 +180,7 @@ class TestSetupEntry:
             "custom_components.openwrt_router.OpenWrtCoordinator",
             return_value=mock_coordinator,
         ), patch(
-            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
             AsyncMock(return_value=False),
         ):
             await async_setup_entry(hass, entry)
@@ -208,7 +208,7 @@ class TestSetupEntry:
         )
         mock_coordinator.router_info = {}
 
-        async def _ensure(_api):
+        async def _ensure(_api, **_kw):
             order.append("ensure_acl")
             return True  # simulate a deploy happened
 
@@ -222,7 +222,7 @@ class TestSetupEntry:
             "custom_components.openwrt_router.OpenWrtCoordinator",
             return_value=mock_coordinator,
         ), patch(
-            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
             side_effect=_ensure,
         ), patch(
             "custom_components.openwrt_router._ACL_DEPLOY_GRACE_S", 0
@@ -527,7 +527,7 @@ class TestLegacySensorDisableRunsOnce:
             "custom_components.openwrt_router.OpenWrtCoordinator",
             return_value=mock_coordinator,
         ), patch(
-            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
             AsyncMock(return_value=False),
         ), patch(
             "custom_components.openwrt_router._merge_orphan_mac_devices"
@@ -636,7 +636,7 @@ class TestOutageTrackerWiring:
             "custom_components.openwrt_router.OpenWrtCoordinator",
             return_value=mock_coordinator,
         ), patch(
-            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
             AsyncMock(return_value=False),
         ), patch(
             "custom_components.openwrt_router.async_get_outage_tracker",
@@ -680,7 +680,7 @@ class TestChannelPlanWiring:
             "custom_components.openwrt_router.OpenWrtCoordinator",
             return_value=mock_coordinator,
         ), patch(
-            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
             AsyncMock(return_value=False),
         ), patch(
             "custom_components.openwrt_router.async_get_outage_tracker",
@@ -757,7 +757,7 @@ class TestResponseErrorsAfterReview:
             "custom_components.openwrt_router.OpenWrtCoordinator",
             return_value=mock_coordinator,
         ), patch(
-            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
             AsyncMock(return_value=True),
         ), patch(
             "custom_components.openwrt_router._ACL_DEPLOY_GRACE_S", 0

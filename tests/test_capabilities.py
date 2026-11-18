@@ -73,9 +73,11 @@ async def test_case10_fritz_repeater_missing_capabilities(disks: FakeDisks) -> N
     assert caps[Capability.DATA_UCI].source == "features.uci_available"
     assert _state(caps, Capability.PKG_APK) is CapabilityState.UNKNOWN
     assert _state(caps, Capability.DATA_HOSTAPD_CLIENTS) is CapabilityState.AVAILABLE
+    # 1.44.0: config_backup_enabled is default OFF, so "disabled" (the
+    # option wins over the missing provider).
     for name in CONFIG_CAPABILITIES:
         assert caps[name].state is CapabilityState.UNAVAILABLE
-        assert caps[name].reason == CapabilityReason.NO_PROVIDER
+        assert caps[name].reason == CapabilityReason.DISABLED
 
     with pytest.raises(CapabilityUnavailableError) as err:
         registry.require_capability(rid, Capability.DATA_LOGS)
@@ -84,7 +86,7 @@ async def test_case10_fritz_repeater_missing_capabilities(disks: FakeDisks) -> N
     assert err.value.router_id == rid
     with pytest.raises(CapabilityUnavailableError) as err:
         registry.require_capability(rid, Capability.CONFIG_BACKUP)
-    assert err.value.reason == "no_provider"
+    assert err.value.reason == "disabled"
     with pytest.raises(CapabilityUnavailableError) as err:
         registry.require_capability(rid, "security.unknown_thing")
     assert err.value.reason == "not_checked"
@@ -202,7 +204,9 @@ async def test_config_capabilities_disabled_by_option(disks: FakeDisks) -> None:
 
 async def test_config_provider_hook_for_part_two(disks: FakeDisks) -> None:
     hass = make_hass()
-    coord = await setup_router(hass, FakeEntry("e1"), router_data())
+    # config_backup_enabled is default OFF since 1.44.0: switch it on here.
+    entry = FakeEntry("e1", options={OPTION_CONFIG_BACKUP_ENABLED: True})
+    coord = await setup_router(hass, entry, router_data())
     registry = core_of(hass).registry
 
     def provider(record):

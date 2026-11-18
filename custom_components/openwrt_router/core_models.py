@@ -122,6 +122,22 @@ INSTALLATION_KEY_ID_LENGTH: Final = 16
 ISSUE_INSTALLATION_KEY_LOST: Final = "installation_key_lost"
 CORE_STORE_VERSION: Final = 1
 
+# Per-router SSH host-key pins of the config/backup path (1.44.0). Own store
+# (private, atomic), keyed by router_id: the pin follows the router, not
+# its address. Only the pinned path reads it; the shared SSH transport of
+# the poll keeps its known_hosts=None behaviour.
+SSH_PIN_STORE_KEY: Final = f"{DOMAIN}.ssh_host_keys"
+SSH_PIN_STORE_MINOR_VERSION: Final = 1
+# What happens with a router's FIRST host key on the pinned path:
+# "confirm" = it becomes a PENDING pin and every pinned call refuses
+#             (reason pin_pending) until an admin confirms the fingerprint
+#             with the critical guard action ssh_pin_confirm;
+# "tofu"    = trust on first use (the key is pinned at once, audited).
+# One constant on purpose: the owner decides; "confirm" until then.
+SSH_PIN_POLICY_CONFIRM: Final = "confirm"
+SSH_PIN_POLICY_TOFU: Final = "tofu"
+SSH_PIN_FIRST_USE_POLICY: Final = SSH_PIN_POLICY_CONFIRM
+
 # Version store on disk: hass.config.path(*CONFIG_BACKUP_PATH, <router_id>).
 CONFIG_BACKUP_PATH: Final = ("openwrt_router", "config_backups")
 CONFIG_BACKUP_ORPHANED_DIR: Final = "orphaned"
@@ -149,15 +165,19 @@ MAX_WARNINGS: Final = 50
 SNAPSHOT_FORMAT_UCI_NORMALIZED: Final = "uci_normalized"
 
 # Options-flow switch that gates all config.* capabilities and the matching
-# ACL tier (the option itself is added to const.py/config_flow.py later).
+# ACL tier. Default OFF (1.44.0): only an explicit True enables it.
 OPTION_CONFIG_BACKUP_ENABLED: Final = "config_backup_enabled"
+DEFAULT_CONFIG_BACKUP_ENABLED: Final = False
 
 # Naming scheme (contract §5 / §12.3). Capability namespaces:
 # core-owned (derived from the poll) ...
 CORE_CAPABILITY_NAMESPACES: Final = ("transport.", "data.", "stream.", "pkg.")
 # ... decided by the one configuration provider (config-manager) ...
 CONFIG_CAPABILITY_NAMESPACE: Final = "config."
-# ... and reserved for modules: the core never names a capability there.
+# ... and reserved for modules: the core never names a capability there,
+# with ONE exception (1.44.0): rf.txpowerlist / rf.survey / rf.scan are
+# facts about the deployed rpcd ACL, which only the core knows; they are
+# listed in CORE_OWNED_MODULE_CAPABILITIES and refused for module detectors.
 # security. = Security Center, diag. = Network Diagnostics, rf. = WiFi RF,
 # log. = log sources shared by several modules.
 RESERVED_NAMESPACES: Final = ("security.", "diag.", "log.", "rf.")
@@ -613,12 +633,28 @@ class Capability(StrEnum):
     CONFIG_SSH_ROOT = "config.ssh_root"
     CONFIG_UCI_READ = "config.uci_read"  # detail: {config_name: bool}
     CONFIG_PACKAGELIST = "config.packagelist"
+    # Rights in the DEPLOYED rpcd ACL file of the integration (1.44.0): read
+    # once per entry setup by ensure_acl, never in the poll. Core-owned
+    # names inside the reserved rf. namespace (see RESERVED_NAMESPACES).
+    RF_TXPOWERLIST = "rf.txpowerlist"
+    RF_SURVEY = "rf.survey"
+    RF_SCAN = "rf.scan"
 
 
 # Capabilities the configuration provider decides (no provider: unavailable).
 CONFIG_CAPABILITIES: Final = frozenset(
     c for c in Capability if c.value.startswith("config.")
 )
+# Decided from the deployed ACL the core observed at entry setup.
+ACL_CAPABILITIES: Final = frozenset(
+    {Capability.RF_TXPOWERLIST, Capability.RF_SURVEY, Capability.RF_SCAN}
+)
+# Core-owned names inside a module namespace; a module detector may never
+# report them (refused and counted).
+CORE_OWNED_MODULE_CAPABILITIES: Final = ACL_CAPABILITIES
+# These follow their source exactly: "unknown" replaces a known state (the
+# source is a setting or a one-off observation, not a flaky poll value).
+STRICT_CAPABILITIES: Final = CONFIG_CAPABILITIES | ACL_CAPABILITIES
 # Of these, the ones found by the provider's router probe (async_probe).
 PROBED_CAPABILITIES: Final = frozenset(
     {
@@ -668,6 +704,56 @@ class CapabilityReason(StrEnum):
     DETERMINED_ON_FIRST_USE = "determined_on_first_use"
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
+class DeployedAclObservation:
+    """What the core knows about the integration's rpcd ACL file on a router.
+
+    Made from the ONE ``file/read`` ensure_acl does at entry setup (or from
+    what it wrote / what an approved offer deploy wrote); never a router
+    call of its own. ``known`` False means the file could not be read or a
+    deploy failed: the rf.* capabilities are then ``unknown`` with
+    ``reason_text`` saying why. Only this file is considered; other files in
+    rpcd's acl.d may grant more (a known blind spot, documented).
+
+    ``granted``/``missing``: sorted ``(capability, ...)`` pairs (hashable,
+    part of the capability signature).
+    """
+
+    known: bool
+    reason: str  # current | tiered | written | deploy_failed | unreadable | ...
+    kind: str | None = None  # acl_provisioning.DeployedAclKind value
+    tiers: tuple[str, ...] = ()
+    acl_checksum: str | None = None
+    granted: tuple[tuple[str, bool], ...] = ()
+    missing: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    observed_at: datetime | None = None
+
+    def is_granted(self, capability: str) -> bool | None:
+        """True/False if known, None if this observation cannot tell."""
+        if not self.known:
+            return None
+        return dict(self.granted).get(str(capability))
+
+    def missing_for(self, capability: str) -> tuple[str, ...]:
+        """Permission strings the deployed ACL lacks for ``capability``."""
+        return dict(self.missing).get(str(capability), ())
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form (diagnostics; no ACL content)."""
+        return {
+            "known": self.known,
+            "reason": self.reason,
+            "kind": self.kind,
+            "tiers": list(self.tiers),
+            "acl_checksum": self.acl_checksum,
+            "granted": dict(self.granted),
+            "missing": {k: list(v) for k, v in self.missing},
+            "observed_at": None
+            if self.observed_at is None
+            else self.observed_at.isoformat(),
+        }
+
+
 class ActorKind(StrEnum):
     """Who triggered an operation."""
 
@@ -707,6 +793,11 @@ class GuardedAction(StrEnum):
     ADOPT = "adopt"
     ACL_DEPLOY = "acl_deploy"
     INSTALLATION_KEY_RESET = "installation_key_reset"
+    # Host-key pins of the pinned SSH path (1.44.0): confirm a pending
+    # first-use fingerprint / drop a router's pin (both bound to router_id
+    # + fingerprint).
+    SSH_PIN_CONFIRM = "ssh_pin_confirm"
+    SSH_PIN_RESET = "ssh_pin_reset"
 
 
 ACTION_CLASSES: Final[Mapping[str, ActionClass]] = MappingProxyType(
@@ -721,6 +812,8 @@ ACTION_CLASSES: Final[Mapping[str, ActionClass]] = MappingProxyType(
         GuardedAction.RESTORE: ActionClass.CRITICAL,
         GuardedAction.ADOPT: ActionClass.MUTATING,
         GuardedAction.ACL_DEPLOY: ActionClass.CRITICAL,
+        GuardedAction.SSH_PIN_CONFIRM: ActionClass.CRITICAL,
+        GuardedAction.SSH_PIN_RESET: ActionClass.CRITICAL,
     }
 )
 # Only a verified admin USER may perform these.
@@ -732,6 +825,8 @@ ADMIN_USER_ONLY_ACTIONS: Final = frozenset(
         GuardedAction.ADOPT,
         GuardedAction.ACL_DEPLOY,
         GuardedAction.INSTALLATION_KEY_RESET,
+        GuardedAction.SSH_PIN_CONFIRM,
+        GuardedAction.SSH_PIN_RESET,
     }
 )
 # Only the core itself (ActorKind.SYSTEM) may perform these.
@@ -900,6 +995,9 @@ class KeepReason(StrEnum):
     # Not usable (failed, partial, invalid): kept for diagnosis only while
     # recent; never represents a period, never pushes a usable one out.
     RECENT_FAILED = "recent_failed"
+    # GFS never thins a manual or pre_* version (1.44.0); only the size
+    # limit can remove one, and RetentionResult.limit_deleted_manual names it.
+    MANUAL = "manual"
 
 
 class EventResult(StrEnum):
@@ -972,6 +1070,17 @@ class CoreEventType(StrEnum):
     # A core store was unreadable, copied to .bak and rebuilt (additive, part 1:
     # router ids are deterministic; adoption links are what can be lost).
     STORE_RECOVERED = "core.store_recovered"
+    # 1.44.0 (additive): approved tiered-ACL deploy and its failure (data
+    # carries command and rollback_command) ...
+    ACL_DEPLOYED = "security.acl_deployed"
+    ACL_DEPLOY_FAILED = "security.acl_deploy_failed"
+    # ... host-key pins of the pinned SSH path ...
+    SSH_PIN_PENDING = "security.ssh_pin_pending"
+    SSH_PIN_CONFIRMED = "security.ssh_pin_confirmed"
+    SSH_PIN_MISMATCH = "security.ssh_pin_mismatch"
+    SSH_PIN_RESET = "security.ssh_pin_reset"
+    # ... and the version folder of a removed entry moved to removed/<id>/.
+    ROUTER_ARCHIVED = "configuration.router_archived"
 
 
 # Namespaces of core event types. Only the core emits these (also the ones
@@ -989,6 +1098,7 @@ SECURITY_EVENT_TYPES: Final = frozenset(
     {
         CoreEventType.INSTALLATION_KEY_LOST,
         CoreEventType.INSTALLATION_KEY_RESET,
+        CoreEventType.ROUTER_ARCHIVED,
         CoreEventType.BACKUP_EXPORTED,
         CoreEventType.BACKUP_DELETED,
         CoreEventType.ROUTER_ADOPTED,
@@ -1024,6 +1134,12 @@ AUDIT_MANDATORY_EVENT_TYPES: Final = frozenset(
         CoreEventType.INSTALLATION_KEY_LOST,
         CoreEventType.INSTALLATION_KEY_RESET,
         CoreEventType.STORE_RECOVERED,
+        CoreEventType.ACL_DEPLOYED,
+        CoreEventType.ACL_DEPLOY_FAILED,
+        CoreEventType.SSH_PIN_CONFIRMED,
+        CoreEventType.SSH_PIN_MISMATCH,
+        CoreEventType.SSH_PIN_RESET,
+        CoreEventType.ROUTER_ARCHIVED,
     }
 )
 
@@ -2241,7 +2357,11 @@ def dedup_candidate(
 
 
 def should_deduplicate(
-    candidate: BackupRecord | None, meta: VersionMeta, artifact_kinds: Iterable[str]
+    candidate: BackupRecord | None,
+    meta: VersionMeta,
+    artifact_kinds: Iterable[str],
+    *,
+    artifact_sha256: Mapping[str, str] | None = None,
 ) -> bool:
     """True if a new version would only repeat ``candidate`` (dedup hit).
 
@@ -2255,6 +2375,11 @@ def should_deduplicate(
     reset must store a version stamped with the new key). On a hit the core only moves ``last_seen_at`` and returns created=False;
     manual, pre_* and incident-linked versions always create, so no note or
     reason is lost.
+
+    ``artifact_sha256`` (1.44.0 ruling): the sha256 the CORE computed of
+    the new artifacts, per kind. When given, every kind must also equal the
+    candidate's stored sha256 — the provider's hashes alone no longer make
+    a repeat (byte-identical artifacts are required).
     """
     kinds = {ArtifactKind(k).value for k in artifact_kinds}
     if candidate is None or candidate.status is VersionStatus.FAILED:
@@ -2273,10 +2398,17 @@ def should_deduplicate(
     ):
         return False
     if ArtifactKind.ARCHIVE.value in kinds:
-        return meta.content_hash is not None and meta.content_hash == (
+        same = meta.content_hash is not None and meta.content_hash == (
             candidate.content_hash
         )
-    return meta.uci_hash is not None and meta.uci_hash == candidate.uci_hash
+    else:
+        same = meta.uci_hash is not None and meta.uci_hash == candidate.uci_hash
+    if not same or artifact_sha256 is None:
+        return same
+    return all(
+        artifact_sha256.get(kind) == ref.sha256
+        for kind, ref in candidate.artifacts.items()
+    )
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -2412,6 +2544,10 @@ class RetentionResult:
     kept version. ``total_bytes`` is the size of the kept versions,
     ``max_bytes`` the effective limit and ``over_limit`` True if the kept
     versions still exceed it (only protected/newest-valid remain).
+    ``limit_deleted`` (1.44.0, additive): the deleted versions the policy
+    alone would have kept, removed only because of the size limit;
+    ``limit_deleted_manual`` the manual/pre_* ones among them (named on
+    purpose: GFS itself never thins those).
     """
 
     router_id: str
@@ -2422,10 +2558,14 @@ class RetentionResult:
     total_bytes: int = 0
     max_bytes: int | None = None
     over_limit: bool = False
+    limit_deleted: tuple[str, ...] = ()
+    limit_deleted_manual: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Coerce and freeze."""
         _set(self, "deleted", tuple(self.deleted))
+        _set(self, "limit_deleted", tuple(self.limit_deleted))
+        _set(self, "limit_deleted_manual", tuple(self.limit_deleted_manual))
         _set(
             self,
             "kept",
@@ -2449,7 +2589,22 @@ class RetentionResult:
             "total_bytes": self.total_bytes,
             "max_bytes": self.max_bytes,
             "over_limit": self.over_limit,
+            "limit_deleted": list(self.limit_deleted),
+            "limit_deleted_manual": list(self.limit_deleted_manual),
         }
+
+
+# Reasons GFS never thins (1.44.0 ruling): a user's own backup and the
+# safety copies taken before a change are kept until a size limit forces
+# a choice.
+GFS_KEEP_REASONS: Final = frozenset(
+    {
+        BackupReason.MANUAL,
+        BackupReason.PRE_FIRMWARE_UPDATE,
+        BackupReason.PRE_RESTORE,
+        BackupReason.PRE_CHANGE,
+    }
+)
 
 
 def _month_back(day: date, months: int) -> tuple[int, int]:
@@ -2479,10 +2634,14 @@ def plan_retention(
        unusable ones by the same rule, so a failed version never pushes a
        usable one out.
     3. Unusable versions never represent a period; in GFS mode they stay
-       (``recent_failed``) while inside the daily window.
+       (``recent_failed``) while inside the daily window. GFS never thins a
+       usable manual or pre_* version (``KeepReason.MANUAL``).
     4. Over the size limit: evict kept versions except protected and newest
-       usable: unusable first, then the oldest; no newer version is skipped
-       to keep an older one. Still over: ``over_limit``, nothing forced.
+       usable: unusable first, then the oldest; manual/pre_* versions only
+       after every other one; no newer version is skipped to keep an older
+       one within a group. Still over: ``over_limit``, nothing forced. Every
+       eviction is listed in ``limit_deleted`` (manual/pre_* also in
+       ``limit_deleted_manual``).
 
     Raises ValueError for a naive ``now``, duplicate ids or a foreign router.
     """
@@ -2548,6 +2707,9 @@ def plan_retention(
         for month, version_id in newest_month.items():
             if month in months:
                 keep(version_id, KeepReason.MONTHLY)
+        for record in items:
+            if record.usable and record.reason in GFS_KEEP_REASONS:
+                keep(record.backup_id, KeepReason.MANUAL)
     else:
         count = len(reasons)
         for usable_pass in (True, False):
@@ -2570,20 +2732,35 @@ def plan_retention(
 
     by_id = {r.backup_id: r for r in items}
     total = sum(by_id[v].size_bytes for v in reasons)
+    limit_deleted: list[str] = []
     if limit is not None and total > limit:
         evictable = [
             r
             for r in chrono
             if r.backup_id in reasons and not r.protected and r is not newest_usable
         ]
-        # unusable first, then oldest (chrono order inside each group)
-        evictable.sort(key=lambda r: (r.usable, local[r.backup_id], r.backup_id))
+        # unusable first, then oldest (chrono order inside each group);
+        # versions GFS keeps for their reason (manual/pre_*) go last.
+        evictable.sort(
+            key=lambda r: (
+                KeepReason.MANUAL in reasons[r.backup_id],
+                r.usable,
+                local[r.backup_id],
+                r.backup_id,
+            )
+        )
         for record in evictable:
             if total <= limit:
                 break
             del reasons[record.backup_id]
+            limit_deleted.append(record.backup_id)
             total -= record.size_bytes
     over_limit = limit is not None and total > limit
+    limit_manual = [
+        v
+        for v in limit_deleted
+        if by_id[v].usable and by_id[v].reason in GFS_KEEP_REASONS
+    ]
     ordered_reasons = {
         version_id: tuple(r for r in _KEEP_ORDER if r in reasons[version_id])
         for version_id in (r.backup_id for r in chrono if r.backup_id in reasons)
@@ -2597,6 +2774,8 @@ def plan_retention(
         total_bytes=total,
         max_bytes=limit,
         over_limit=over_limit,
+        limit_deleted=tuple(limit_deleted),
+        limit_deleted_manual=tuple(limit_manual),
     )
 
 
@@ -2911,6 +3090,11 @@ ConfigSource = BackupRecord | ConfigSnapshot
 # bytes. It only serves the versions of that call and checks sha256 against
 # the index (BackupIntegrityError on mismatch).
 ArtifactReader = Callable[[str, str], Awaitable[bytes]]
+# Pinned SSH of the core per call (1.44.0): (router_id, command, timeout_s,
+# binary) -> api.PinnedSshResult. Bound to the core's per-router host-key
+# pin store; refuses (OpenWrtHostKeyError) on a pending or mismatching pin.
+# The ONLY SSH a provider may use for config/backup work.
+PinnedSshRunner = Callable[[str, str, float, bool], Awaitable[Any]]
 
 
 @dataclass(frozen=True, kw_only=True, slots=True, eq=False)
@@ -2928,6 +3112,8 @@ class ProviderContext:
     installation_key: Callable[[], Awaitable[bytes]] = field(repr=False)
     installation_key_state: InstallationKeyState = InstallationKeyState.OK
     correlation_id: str | None = None
+    # Additive (1.44.0): pinned SSH bound to the core's host-key pin store.
+    ssh: PinnedSshRunner | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Coerce."""
@@ -2936,6 +3122,29 @@ class ProviderContext:
     async def async_get_installation_key(self) -> bytes:
         """The 32-byte installation key for HMAC secret digests."""
         return await self.installation_key()
+
+    async def async_ssh_run_pinned(
+        self,
+        router_id: str,
+        command: str,
+        *,
+        timeout: float = 60.0,
+        binary: bool = False,
+    ) -> Any:
+        """Run one command over the pinned SSH path (never the shared one).
+
+        Raises AuthorizationError (reason ``ssh_pin_unavailable``) when the
+        core has no pin store; the pin store's own refusals
+        (``api.OpenWrtHostKeyError``: ``pin_pending``, ``mismatch`` ...)
+        pass through unchanged.
+        """
+        if self.ssh is None:
+            raise AuthorizationError(
+                "No host-key pin store: the pinned SSH path is unavailable",
+                router_id=router_id,
+                details={"reason": "ssh_pin_unavailable"},
+            )
+        return await self.ssh(router_id, command, timeout, binary)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -4166,8 +4375,11 @@ class VersionStoreProtocol(VersionReadView, Protocol):
     async def async_sweep(self) -> SweepReport:
         """Startup cleanup: partials, index-less files, missing files."""
 
-    async def async_archive_router(self, router_id: str) -> None:
-        """Move a removed router's folder to ``removed/<router_id>/``."""
+    async def async_archive_router(
+        self, router_id: str, *, entry_id: str | None = None
+    ) -> bool:
+        """Move a removed router's folder to ``removed/<router_id>/`` (audited;
+        True if a folder was moved). Runs automatically on entry removal."""
 
 
 @runtime_checkable

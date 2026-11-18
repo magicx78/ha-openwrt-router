@@ -16,7 +16,7 @@ import json
 import logging
 import re
 import shlex
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -31,8 +31,10 @@ from .api import (
 )
 from .core_errors import AuthorizationError
 from .core_models import (
+    ACL_CAPABILITIES,
     OPTION_CONFIG_BACKUP_ENABLED,
     Capability,
+    DeployedAclObservation,
     GuardedAction,
     WriteAuthorization,
     binding_checksum,
@@ -160,6 +162,24 @@ RPCD_ACL_CONTENT: dict = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class AclEnsureOutcome:
+    """What one ensure run saw and did (1.44.0; for the core's rf.* view).
+
+    ``reason``: ``current`` (v8 already there), ``tiered_kept`` (an approved
+    tiered ACL, left alone), ``transient`` (read failed on a network blip,
+    nothing written), or the redeploy reason ``missing`` / ``outdated`` /
+    ``corrupted`` / ``unverifiable`` with ``written`` True.
+    ``deployed`` is the parsed file content after the run when known
+    (``known``), else None.
+    """
+
+    written: bool
+    reason: str
+    known: bool
+    deployed: Any = None
+
+
 async def ensure_acl(api: OpenWrtAPI) -> bool:
     """Ensure the rpcd ACL on the router exists AND matches the current content.
 
@@ -185,6 +205,19 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
             ``async_setup_entry`` catches this (best-effort at startup); the
             config flow surfaces it to the user.
     """
+    return (await ensure_acl_outcome(api)).written
+
+
+async def ensure_acl_outcome(
+    api: OpenWrtAPI, *, respect_offer: bool = False
+) -> AclEnsureOutcome:
+    """:func:`ensure_acl` with the outcome; ONE ``file/read`` either way.
+
+    ``respect_offer``: a deployed tiered ACL (an approved offer) is left
+    alone instead of being replaced with v8. That decision uses the content
+    of the same read, so it adds no router call: with no tiered ACL on the
+    router the calls and bytes are exactly those of :func:`ensure_acl`.
+    """
     # Read the currently deployed ACL and decide whether a (re)deploy is needed.
     # file/read returns {"data": "<content>"} on success and raises
     # OpenWrtMethodNotFoundError when the file is missing (ubus NOT_FOUND = 4)
@@ -194,16 +227,22 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
         current = await api._call("file", "read", {"path": ACL_FILE_PATH})
         current_str = current.get("data") if isinstance(current, dict) else current
         try:
-            if (
-                isinstance(current_str, str)
-                and json.loads(current_str) == RPCD_ACL_CONTENT
-            ):
+            parsed = json.loads(current_str) if isinstance(current_str, str) else None
+            if isinstance(current_str, str) and parsed == RPCD_ACL_CONTENT:
                 _LOGGER.debug(
                     "rpcd ACL on %s is up to date (v%s) — nothing to do",
                     api._host,
                     ACL_VERSION,
                 )
-                return False
+                return AclEnsureOutcome(False, "current", True, parsed)
+            if respect_offer and parse_tiered_acl(parsed) is not None:
+                _LOGGER.debug(
+                    "Tiered ACL on %s (%s) — left alone, changes only via an "
+                    "approved offer",
+                    api._host,
+                    classify_deployed_acl(parsed).value,
+                )
+                return AclEnsureOutcome(False, "tiered_kept", True, parsed)
             reason = "outdated"  # content differs from what this version expects
         except (ValueError, TypeError):
             reason = "corrupted"  # present but not valid JSON
@@ -244,7 +283,7 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
                     api._host,
                     err,
                 )
-                return False
+                return AclEnsureOutcome(False, "transient", False)
             # The file exists but reading it is permission-denied. Every ACL
             # shipped since v5 grants file/read on its own path, so a deployed
             # ACL we cannot read back is by definition older than what this
@@ -253,7 +292,8 @@ async def ensure_acl(api: OpenWrtAPI) -> bool:
             # and 300s polling — forever.
             reason = "outdated"
 
-    return await _deploy_acl(api, reason)
+    await _deploy_acl(api, reason)
+    return AclEnsureOutcome(True, reason, True, RPCD_ACL_CONTENT)
 
 
 async def _deploy_acl(api: OpenWrtAPI, reason: str) -> bool:
@@ -1163,14 +1203,28 @@ async def _read_current_acl(api: OpenWrtAPI) -> tuple[str, str | None]:
     return ("present", text)
 
 
+# Pinned SSH for the offer deploy: (command, timeout_s) -> stdout or None.
+# The core binds it to the router's host-key pin (async_ssh_run_pinned).
+AclSshRunner = Callable[[str, float], Awaitable[str | None]]
+
+
 async def _deploy_offer_ssh(
-    api: OpenWrtAPI, acl_text: str, backup_path: str
+    ssh_runner: AclSshRunner | None, acl_text: str, backup_path: str
 ) -> tuple[bool, bool]:
     """Backup + atomic write + one rpcd restart in one SSH command.
 
     Returns (deployed, backed_up). Backup first: if ``cp`` fails, nothing is
-    written. The restart only runs after a successful write.
+    written. The restart only runs after a successful write. Only over the
+    pinned path: without a runner it refuses (``ssh_pin_unavailable``) —
+    never the shared, unverified SSH connection (1.44.0).
     """
+    if ssh_runner is None:
+        raise AclOfferDeployError(
+            "ssh_pin_unavailable",
+            "ubus cannot write the ACL and no pinned SSH path is available "
+            "(no host-key pin store or pin); nothing written",
+            written=False,
+        )
     remote_cmd = (
         f"{{ [ ! -e {ACL_FILE_PATH} ] || "
         f"{{ cp -p {ACL_FILE_PATH} {backup_path} && echo {_SSH_OFFER_BACKUP_MARKER}; }}; }} "
@@ -1179,7 +1233,7 @@ async def _deploy_offer_ssh(
         f"&& echo {_SSH_OFFER_DEPLOY_MARKER} "
         f"&& {_RPCD_RESTART_CMD} >/dev/null 2>&1"
     )
-    out = await api._run_ssh(remote_cmd, timeout=15.0) or ""
+    out = await ssh_runner(remote_cmd, 15.0) or ""
     return (_SSH_OFFER_DEPLOY_MARKER in out, _SSH_OFFER_BACKUP_MARKER in out)
 
 
@@ -1193,6 +1247,7 @@ async def async_deploy_acl_offer(
     options: Mapping[str, Any] | None = None,
     registry: AclTierRegistry = DEFAULT_TIER_REGISTRY,
     now: datetime | None = None,
+    ssh_runner: AclSshRunner | None = None,
 ) -> AclDeployResult:
     """Write the tiered ACL for ``tiers`` to ONE router — only when authorized.
 
@@ -1209,6 +1264,8 @@ async def async_deploy_acl_offer(
             nothing was sent to the router.
         AclOfferDeployError: router-side failure after the authorization was
             used; carries ``rollback_command`` when a backup was taken.
+            ``ssh_pin_unavailable`` when ubus cannot write and no pinned
+            ``ssh_runner`` was given (the unpinned SSH is never used).
     """
     tier_ids = registry.normalize(tiers)
     try:
@@ -1320,7 +1377,7 @@ async def async_deploy_acl_offer(
                 rpcd_restarted=restarted,
             )
 
-    deployed, ssh_backed_up = await _deploy_offer_ssh(api, acl_text, backup_path)
+    deployed, ssh_backed_up = await _deploy_offer_ssh(ssh_runner, acl_text, backup_path)
     if ssh_backed_up:
         backed_up_path = backup_path
     if not deployed:
@@ -1358,29 +1415,65 @@ async def async_deploy_acl_offer(
     )
 
 
-async def ensure_acl_respecting_offer(api: OpenWrtAPI) -> bool:
+async def ensure_acl_respecting_offer(
+    api: OpenWrtAPI,
+    *,
+    observe: Callable[[AclEnsureOutcome], None] | None = None,
+) -> bool:
     """Like :func:`ensure_acl`, but never overwrites a deployed tiered ACL.
 
     ``ensure_acl`` rewrites any ACL that differs from v8, so it would undo a
-    user-approved tiered ACL at the next start. Callers that may face a
-    tiered ACL (``__init__.py`` / the config flow repair, once offers can be
-    deployed) switch to this function. For every non-tiered file it simply
-    delegates to ``ensure_acl`` (one extra file/read).
+    user-approved tiered ACL at the next start. ``__init__.py`` and the
+    config flow repair use this function (1.44.0). Zero extra router calls:
+    the tiered check uses the content of ensure_acl's own ``file/read``;
+    with no tiered ACL deployed, calls and written bytes are identical to
+    :func:`ensure_acl`.
+
+    ``observe`` receives the :class:`AclEnsureOutcome` (the core turns it
+    into the rf.* capabilities); an error in it is logged, never raised.
+    Raises AclDeployError like ``ensure_acl``.
     """
-    try:
-        current = await api._call("file", "read", {"path": ACL_FILE_PATH})
-    except (*_PERMISSION_ERRORS, *_TRANSPORT_ERRORS):
-        return await ensure_acl(api)
-    text = current.get("data") if isinstance(current, dict) else current
-    try:
-        parsed = json.loads(text) if isinstance(text, str) else None
-    except ValueError:
-        parsed = None
-    if parse_tiered_acl(parsed) is not None:
-        _LOGGER.debug(
-            "Tiered ACL on %s (%s) — left alone, changes only via an approved offer",
-            api._host,
-            classify_deployed_acl(parsed).value,
+    outcome = await ensure_acl_outcome(api, respect_offer=True)
+    if observe is not None:
+        try:
+            observe(outcome)
+        except Exception:
+            _LOGGER.warning("ACL outcome observer failed", exc_info=True)
+    return outcome.written
+
+
+def observe_deployed_acl(
+    outcome: AclEnsureOutcome | None,
+    *,
+    failure: str | None = None,
+    registry: AclTierRegistry = DEFAULT_TIER_REGISTRY,
+    now: datetime | None = None,
+) -> DeployedAclObservation:
+    """Turn an ensure/deploy outcome into what the core keeps. Pure.
+
+    ``failure``: why there is no outcome (``deploy_failed``,
+    ``ensure_failed`` ...); the observation is then unknown.
+    """
+    when = now or utcnow()
+    if outcome is None or not outcome.known:
+        return DeployedAclObservation(
+            known=False,
+            reason=failure or (outcome.reason if outcome else "not_read"),
+            observed_at=when,
         )
-        return False
-    return await ensure_acl(api)
+    acl = outcome.deployed
+    info = parse_tiered_acl(acl)
+    granted = granted_capabilities(acl, registry=registry)
+    caps = sorted(str(c) for c in ACL_CAPABILITIES)
+    return DeployedAclObservation(
+        known=True,
+        reason=outcome.reason,
+        kind=classify_deployed_acl(acl, registry=registry).value,
+        tiers=() if info is None else info.tiers,
+        acl_checksum=acl_checksum(acl) if isinstance(acl, Mapping) else None,
+        granted=tuple((c, bool(granted.get(c, False))) for c in caps),
+        missing=tuple(
+            (c, missing_permissions(acl, c, registry=registry)) for c in caps
+        ),
+        observed_at=when,
+    )

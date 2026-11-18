@@ -171,8 +171,14 @@ def test_gfs02_newest_version_of_a_day_represents_it() -> None:
         item(date(2026, 11, 17), hour=3),
     ]
     result = plan(items, gfs(weekly=0, monthly=0))
-    assert set(result.kept) == {V("v2026-11-16T22"), V("v2026-11-17T03")}
-    assert set(result.deleted) == {V("v2026-11-16T01"), V("v2026-11-16T09")}
+    # 1.44.0 ruling (a): the manual version of the day is never thinned.
+    assert set(result.kept) == {
+        V("v2026-11-16T09"),
+        V("v2026-11-16T22"),
+        V("v2026-11-17T03"),
+    }
+    assert set(result.deleted) == {V("v2026-11-16T01")}
+    assert KeepReason.MANUAL in result.reasons[V("v2026-11-16T09")]
 
 
 def test_gfs03_days_use_the_callers_time_zone() -> None:

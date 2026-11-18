@@ -706,7 +706,16 @@ class TestDeployRefusals:
 # ---------------------------------------------------------------------------
 
 
-async def _deploy(api, tiers=(), *, options=None, guard=None):
+def _pinned_runner(api):
+    """Stand-in for the core's pinned SSH runner (records on api._run_ssh)."""
+
+    async def runner(cmd, timeout):
+        return await api._run_ssh(cmd, timeout=timeout)
+
+    return runner
+
+
+async def _deploy(api, tiers=(), *, options=None, guard=None, pinned=True):
     guard = guard or FakeGuard()
     auth = guard.issue(tiers=tiers)
     result = await async_deploy_acl_offer(
@@ -717,6 +726,7 @@ async def _deploy(api, tiers=(), *, options=None, guard=None):
         guard_consume=guard.consume,
         options=options,
         now=NOW,
+        ssh_runner=_pinned_runner(api) if pinned else None,
     )
     assert auth.consumed
     assert guard.calls == [
@@ -906,6 +916,36 @@ class TestDeploySsh:
             assert exc.value.rollback_command is None
 
 
+class TestDeploySshOnlyPinned:
+    """1.44.0: the offer's SSH fallback only runs over the pinned path."""
+
+    @pytest.mark.asyncio
+    async def test_without_pinned_runner_refuses_before_any_ssh(self):
+        api = _api(OpenWrtMethodNotFoundError("blocked or missing"))
+        guard = FakeGuard()
+        auth = guard.issue(tiers=())
+        with pytest.raises(AclOfferDeployError) as exc:
+            await async_deploy_acl_offer(
+                api,
+                (),
+                router_id=ROUTER,
+                authorization=auth,
+                guard_consume=guard.consume,
+                now=NOW,
+            )
+        assert exc.value.reason == "ssh_pin_unavailable"
+        assert exc.value.written is False
+        api._run_ssh.assert_not_awaited()  # never the shared, unpinned SSH
+        assert _writes(api) == []
+
+    @pytest.mark.asyncio
+    async def test_ubus_path_needs_no_runner(self):
+        api = _api(V8_TEXT)
+        result = await _deploy(api, [], pinned=False)
+        assert result.transport == "ubus"
+        api._run_ssh.assert_not_awaited()
+
+
 class TestRestartAtMostOnce:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1026,13 +1066,17 @@ class TestOnlyAuthorizedWrites:
         tree = ast.parse(inspect.getsource(acl_mod))
         assert set(_router_writers(tree)) == {
             "_deploy_acl",  # legacy v8 path (unchanged)
-            "_deploy_acl_ssh",  # legacy v8 path (unchanged)
+            "_deploy_acl_ssh",  # legacy v8 path (unchanged, the only _run_ssh)
             "async_deploy_acl_offer",
-            "_deploy_offer_ssh",
         }
-        assert _callers(tree, "_deploy_acl") == {"ensure_acl"}
+        # 1.44.0: one shared ensure implementation; the offer's SSH goes
+        # through the injected pinned runner only, never api._run_ssh.
+        assert _callers(tree, "_deploy_acl") == {"ensure_acl_outcome"}
         assert _callers(tree, "_deploy_acl_ssh") == {"_deploy_acl"}
         assert _callers(tree, "_deploy_offer_ssh") == {"async_deploy_acl_offer"}
+        offer_ssh = inspect.getsource(acl_mod._deploy_offer_ssh)
+        assert "_run_ssh" not in offer_ssh
+        assert "await ssh_runner(" in offer_ssh
 
     def test_legacy_path_only_ever_writes_v8(self):
         src = inspect.getsource(acl_mod._deploy_acl) + inspect.getsource(

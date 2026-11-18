@@ -336,7 +336,7 @@ async def _run_entry_lifecycle(
             return_value=coordinator,
         ),
         patch(
-            "custom_components.openwrt_router.acl_provisioning.ensure_acl",
+            "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
             AsyncMock(return_value=False),
         ),
     ):

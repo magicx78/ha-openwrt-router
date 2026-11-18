@@ -21,6 +21,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from functools import partial
+from typing import Any
 
 from homeassistant.config_entries import SOURCE_IGNORE, ConfigEntry
 from homeassistant.const import (
@@ -229,6 +230,31 @@ def _disable_legacy_dynamic_sensors(hass: HomeAssistant, entry: ConfigEntry) -> 
         )
 
 
+def _core_note_acl(hass: HomeAssistant, entry: ConfigEntry, outcome: Any) -> None:
+    """Tell the enterprise core what ensure_acl saw (no router call).
+
+    ``outcome`` None = ensure failed or was skipped: the core reports the
+    rf.* capabilities as unknown. Never raises (logged).
+    """
+    try:
+        from .acl_provisioning import observe_deployed_acl
+        from .enterprise_core import async_get_core
+
+        core = async_get_core(hass)
+        if core is None:
+            return
+        core.registry.note_deployed_acl(
+            entry.entry_id,
+            observe_deployed_acl(outcome, failure="ensure_failed"),
+        )
+    except Exception:
+        _LOGGER.warning(
+            "Enterprise core: recording the deployed ACL of '%s' failed",
+            entry.title,
+            exc_info=True,
+        )
+
+
 def _stagger_offset(entry_ids: list[str], entry_id: str, interval: int) -> int:
     """Return the poll offset of ``entry_id`` within ``interval`` seconds.
 
@@ -326,13 +352,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # in and clearing the block cache — lets the very first poll use the freshly
     # granted methods. Best-effort: a router that blocks the deploy still works
     # via the SSH fallbacks, so failures here must never abort setup.
+    # 1.44.0: the variant that leaves an approved tiered ACL alone (same single
+    # file/read, zero extra router calls); its outcome tells the enterprise
+    # core which rights the deployed ACL grants (rf.* capabilities).
+    acl_outcomes: list[Any] = []
     try:
-        from .acl_provisioning import ensure_acl
+        from .acl_provisioning import ensure_acl_respecting_offer
 
-        acl_deployed = await ensure_acl(api)
+        acl_deployed = await ensure_acl_respecting_offer(
+            api, observe=acl_outcomes.append
+        )
     except Exception:
         acl_deployed = False
         _LOGGER.debug("rpcd ACL provisioning skipped for %s", host, exc_info=True)
+    _core_note_acl(hass, entry, acl_outcomes[0] if acl_outcomes else None)
 
     if acl_deployed:
         _LOGGER.info("rpcd ACL on %s was deployed/updated", host)

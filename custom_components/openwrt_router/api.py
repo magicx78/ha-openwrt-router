@@ -6268,7 +6268,8 @@ class OpenWrtHostKeyError(Exception):
     """The pinned SSH path refused to run (never retried unpinned).
 
     ``reason``: ``mismatch`` | ``algorithm_unavailable`` | ``pin_invalid`` |
-    ``pin_save_failed`` | ``no_host_key``.
+    ``pin_save_failed`` | ``no_host_key``; a pin store may raise its own
+    reason (the core: ``pin_pending``, ``pin_refused``), passed through as is.
     """
 
     def __init__(
@@ -6414,11 +6415,19 @@ class HostKeyPinStore:
     """
 
     async def async_load_pin(self) -> HostKeyPin | None:
-        """Return the pin, or None if this router was never pinned."""
+        """Return the pin, or None if this router was never pinned.
+
+        May raise OpenWrtHostKeyError to refuse before any connection (the
+        core does while a first-seen key awaits confirmation).
+        """
         raise NotImplementedError
 
     async def async_save_pin(self, pin: HostKeyPin) -> None:
-        """Persist the first-use pin; raise if it cannot be stored."""
+        """Persist the first-use pin; raise if it cannot be stored.
+
+        An OpenWrtHostKeyError raised here (e.g. ``pin_pending``) is passed
+        through unchanged and the command does not run.
+        """
         raise NotImplementedError
 
 
@@ -6632,6 +6641,8 @@ async def _ssh_run_pinned_inner(
                 pin = HostKeyPin.from_key(presented_key, api._host)
                 try:
                     await pin_store.async_save_pin(pin)
+                except OpenWrtHostKeyError:
+                    raise  # the store's own refusal (e.g. pin_pending), as is
                 except Exception as err:
                     raise OpenWrtHostKeyError(
                         "pin_save_failed",

@@ -419,6 +419,9 @@ class ConfigurationManager:
         self._plans: dict[str, RestorePlan] = {}
         self._restores: dict[str, RestorePlan] = {}
         self._apis: dict[int, ConfigurationApi] = {}
+        # ACL deploy + SSH pin flows (core_security.SecurityActions), set by
+        # the enterprise core; None in bare manager tests.
+        self.security: Any = None
         self.closed = False
         self.stats: dict[str, int] = {
             "providers_registered": 0,
@@ -451,6 +454,7 @@ class ConfigurationManager:
             "deletions": 0,
             "restores": 0,
             "requests_dropped_on_close": 0,
+            "refused_disabled": 0,
         }
 
     def now(self) -> datetime:
@@ -576,15 +580,19 @@ class ConfigurationManager:
             )
 
         provider = self._provider
+        if record.state is RecordState.ACTIVE and not self.registry.config_enabled(
+            router_id
+        ):
+            # Option config_backup_enabled (default OFF since 1.44.0; read
+            # from the config entry when the entry is not loaded). Same order
+            # as the registry: the option wins over a missing provider.
+            return status(CapabilityState.UNAVAILABLE, CapabilityReason.DISABLED)
         if provider is None:
             return status(CapabilityState.UNAVAILABLE, CapabilityReason.NO_PROVIDER)
         if record.state is not RecordState.ACTIVE:
             return status(
                 CapabilityState.UNAVAILABLE, CapabilityReason.ENTRY_NOT_LOADED
             )
-        attached = self.registry.attached(router_id)
-        if attached is not None and not attached.config_enabled:
-            return status(CapabilityState.UNAVAILABLE, CapabilityReason.DISABLED)
         if not provider.supported(record):
             return status(
                 CapabilityState.UNAVAILABLE, CapabilityReason.PROVIDER_DECLINED
@@ -673,6 +681,39 @@ class ConfigurationManager:
                 capability=str(capability), reason=CapabilityReason.NO_PROVIDER.value
             )
         return self._provider
+
+    def _require_enabled(self, router_id: str, capability: str) -> None:
+        """Refuse a stored-version operation while the option is OFF.
+
+        Only for an ACTIVE router whose entry has ``config_backup_enabled``
+        off; versions of orphaned routers keep their existing behaviour.
+        Counted in ``refused_disabled``.
+        """
+        record = self.registry.find(router_id)
+        if (
+            record is not None
+            and record.state is RecordState.ACTIVE
+            and not self.registry.config_enabled(router_id)
+        ):
+            self.stats["refused_disabled"] += 1
+            raise CapabilityUnavailableError(
+                capability=str(capability),
+                reason=CapabilityReason.DISABLED.value,
+                router_id=router_id,
+            )
+
+    @callback
+    def on_config_option_changed(self, router_id: str, enabled: bool) -> None:
+        """Options flow: ``config_backup_enabled`` changed for a router.
+
+        ON probes again (one provider probe, only with a provider); OFF
+        drops the stored probe results so nothing stale comes back.
+        """
+        if enabled:
+            self.request_probe(router_id, "config_option_enabled")
+            return
+        if self._probes.pop(router_id, None) is not None:
+            self.registry.invalidate_capabilities()
 
     # -- probes ----------------------------------------------------------------------
 
@@ -795,12 +836,14 @@ class ConfigurationManager:
                 )
             return await store.async_read_artifact(version_id, kind)
 
+        security = self.security
         return ProviderContext(
             registry=RegistryReadView(self.registry),
             read=read,
             installation_key=store.async_get_installation_key,
             installation_key_state=store.key_state,
             correlation_id=correlation_id,
+            ssh=None if security is None else security.async_ssh_run,
         )
 
     def _connection(self, router_id: str) -> RouterConnection:
@@ -1107,6 +1150,7 @@ class ConfigurationManager:
         """Core sha256 check of every artifact, then the provider's check."""
         provider = self._require_provider(Capability.CONFIG_VALIDATE)
         record = self.versions.get(backup_id)
+        self._require_enabled(record.router_id, Capability.CONFIG_VALIDATE)
         for kind in sorted(record.artifacts):
             try:
                 await self.versions.async_read_artifact(backup_id, kind)
@@ -1154,6 +1198,7 @@ class ConfigurationManager:
                 routers.append(self.registry.get(rid))
             else:
                 record = self.versions.get(str(ref.backup_id))
+                self._require_enabled(record.router_id, Capability.CONFIG_DIFF)
                 sources.append(record)
                 routers.append(self.registry.get(record.router_id))
                 version_ids.append(record.backup_id)
@@ -2229,7 +2274,23 @@ class ConfigurationManager:
         )
         for store in (self._exports, self._deletions, self._restores):
             store.pop(approval_id, None)
+        for store in self._security_stores():
+            store.pop(approval_id, None)
         return decided
+
+    def _security_stores(self) -> tuple[dict[str, Any], ...]:
+        security = self.security
+        return () if security is None else tuple(security.request_stores)
+
+    def _security(self) -> Any:
+        """The security flows or ConfigApiError ``security_unavailable``."""
+        if self.security is None or self.closed:
+            raise ConfigApiError(
+                "The core's security actions are not available",
+                error_class=ErrorClass.NOT_AVAILABLE,
+                details={"reason": "security_unavailable"},
+            )
+        return self.security
 
     # -- lifecycle ---------------------------------------------------------------------
 
@@ -2241,6 +2302,9 @@ class ConfigurationManager:
         self.closed = True
         self._drop_provider()
         dropped = len(self._exports) + len(self._deletions) + len(self._restores)
+        for store in self._security_stores():
+            dropped += len(store)
+            store.clear()
         self.stats["requests_dropped_on_close"] += dropped
         self._exports.clear()
         self._deletions.clear()
@@ -2265,6 +2329,7 @@ class ConfigurationManager:
                 "delete": len(self._deletions),
                 "restore": len(self._restores),
             },
+            "security": None if self.security is None else self.security.summary(),
             **self.stats,
         }
 
@@ -2544,6 +2609,73 @@ class ConfigurationApi:
     ) -> RestoreResult:
         """Restore after approval."""
         return await self._m.async_execute_restore(approval_id, actor=actor)
+
+    # -- 1.44.0: ACL offer, SSH pin, module capability detectors -----------------
+
+    async def async_request_acl_deploy(
+        self, router_id: str, tiers: Iterable[str], *, actor: Actor
+    ) -> ApprovalRequest:
+        """Ask to deploy the tiered ACL (CRITICAL, admin user)."""
+        return await self._m._security().async_request_acl_deploy(
+            router_id, tiers, actor=actor
+        )
+
+    def acl_offer(self, approval_id: str) -> Any:
+        """Diff and risks (``AclOffer``) behind an open acl_deploy request."""
+        return self._m._security().acl_offer(approval_id)
+
+    async def async_deploy_acl_offer(
+        self, approval_id: str, *, actor: Actor
+    ) -> dict[str, Any]:
+        """Deploy after approval; result carries command and rollback_command."""
+        return await self._m._security().async_deploy_acl_offer(
+            approval_id, actor=actor
+        )
+
+    def ssh_pin_status(self, router_id: str) -> dict[str, Any]:
+        """SSH host key pin state of a router (fingerprints only)."""
+        return self._m._security().ssh_pin_status(router_id)
+
+    async def async_request_ssh_pin_confirm(
+        self, router_id: str, *, actor: Actor
+    ) -> ApprovalRequest:
+        """Ask to trust the pending first-seen host key."""
+        return await self._m._security().async_request_ssh_pin_confirm(
+            router_id, actor=actor
+        )
+
+    async def async_confirm_ssh_pin(
+        self, approval_id: str, *, actor: Actor
+    ) -> dict[str, Any]:
+        """Pin the pending key after approval."""
+        return await self._m._security().async_confirm_ssh_pin(approval_id, actor=actor)
+
+    async def async_request_ssh_pin_reset(
+        self, router_id: str, *, actor: Actor
+    ) -> ApprovalRequest:
+        """Ask to forget the router's pin."""
+        return await self._m._security().async_request_ssh_pin_reset(
+            router_id, actor=actor
+        )
+
+    async def async_reset_ssh_pin(
+        self, approval_id: str, *, actor: Actor
+    ) -> dict[str, Any]:
+        """Forget the pin after approval."""
+        return await self._m._security().async_reset_ssh_pin(approval_id, actor=actor)
+
+    def register_capability_detector(
+        self,
+        module: str,
+        detector: Callable[[RouterRecord, Any], Mapping[str, CapabilityStatus]],
+        *,
+        prefix: str,
+        signature: Callable[[Any], Any] | None = None,
+    ) -> Callable[[], None]:
+        """Report module capabilities below ``prefix`` (sync, no I/O)."""
+        return self._m.registry.register_capability_detector(
+            module, detector, prefix=prefix, signature=signature
+        )
 
     def get_approval(self, approval_id: str) -> ApprovalRequest:
         """Request by id."""

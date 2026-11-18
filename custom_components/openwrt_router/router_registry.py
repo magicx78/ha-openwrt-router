@@ -64,7 +64,11 @@ from .core_errors import (
 )
 from .core_models import (
     CONFIG_CAPABILITIES,
+    CONFIG_CAPABILITY_NAMESPACE,
+    CORE_CAPABILITY_NAMESPACES,
+    CORE_OWNED_MODULE_CAPABILITIES,
     CORE_STORE_VERSION,
+    MODULE_CAPABILITY_NAMESPACES,
     OPTION_CONFIG_BACKUP_ENABLED,
     ROUTER_ID_PREFIX,
     ROUTER_REGISTRY_STORE_KEY,
@@ -76,6 +80,7 @@ from .core_models import (
     CapabilityStatus,
     ConnectionInfo,
     CoreEventType,
+    DeployedAclObservation,
     EmitResult,
     EventResult,
     FirmwareInfo,
@@ -337,7 +342,10 @@ class _Runtime:
     host: str | None = None
     port: int | None = None
     protocol: str | None = None
-    config_enabled: bool = True
+    # Option config_backup_enabled; default OFF since 1.44.0.
+    config_enabled: bool = False
+    # Deployed rpcd ACL seen at entry setup (rf.* capabilities); None = not yet.
+    acl: DeployedAclObservation | None = None
     coordinator: Any = None
     remove_listener: Callable[[], None] | None = None
     identity_sig: tuple[Any, ...] | None = None
@@ -349,6 +357,21 @@ class _Runtime:
     # (router_id, firmware version) of the last probe trigger; None = attach.
     probe_sig: tuple[str, str | None] | None = None
     stats: dict[str, int] = field(default_factory=dict)
+
+
+# Module capability detector: (record, coordinator data) -> {name: status}.
+CapabilityDetector = Callable[[RouterRecord, Any], Mapping[str, CapabilityStatus]]
+DetectorSignature = Callable[[Any], Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _Detector:
+    """One registered module capability detector."""
+
+    module: str
+    prefix: str
+    run: CapabilityDetector
+    signature: DetectorSignature | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,6 +404,9 @@ class RouterRegistry:
         self._runtime: dict[str, _Runtime] = {}
         self._config_provider: ConfigCapabilityProvider | None = None
         self._provider_revision = 0
+        # Module capability detectors (1.44.0): module -> detector. Sync, no
+        # I/O; they run only when the capability signature changes.
+        self._detectors: dict[str, _Detector] = {}
         self._adopt_authorizer: AdoptAuthorizer | None = None
         self._consume: AuthorizationConsumer = default_consume
         self._probe_listener: ProbeListener | None = None
@@ -412,6 +438,12 @@ class RouterRegistry:
             "device_lookup_errors": 0,
             "probe_triggers": 0,
             "probe_listener_errors": 0,
+            "config_option_changes": 0,
+            "acl_observations": 0,
+            "detectors_registered": 0,
+            "detector_runs": 0,
+            "detector_errors": 0,
+            "detector_entries_refused": 0,
         }
         self.timing: dict[str, float] = {"runs": 0, "total_s": 0.0, "max_s": 0.0}
 
@@ -591,7 +623,7 @@ class RouterRegistry:
         protocol = _s(data.get(CONF_PROTOCOL))
         runtime = self._runtime.setdefault(entry_id, _Runtime(entry_id))
         runtime.host, runtime.port, runtime.protocol = host, port, protocol
-        runtime.config_enabled = options.get(OPTION_CONFIG_BACKUP_ENABLED) is not False
+        runtime.config_enabled = options.get(OPTION_CONFIG_BACKUP_ENABLED) is True
 
         rid = self._entry_map.get(entry_id)
         if rid is not None:
@@ -831,7 +863,8 @@ class RouterRegistry:
             ssh_seen=runtime.ssh_seen,
             config_enabled=runtime.config_enabled,
             provider_token=self._provider_revision,
-        )
+            acl=runtime.acl,
+        ) + self._detector_signature(data)
         if cap_sig != runtime.cap_sig:
             runtime.cap_sig = cap_sig
             self._update_capabilities(rid, runtime, data, uses_ssh, now)
@@ -1018,7 +1051,9 @@ class RouterRegistry:
             record=record,
             config_enabled=runtime.config_enabled,
             provider=self._config_provider,
+            acl=runtime.acl,
         )
+        fresh.update(self._run_detectors(record, data))
         result = merge(record.capabilities, fresh)
         self.stats["capability_kept_stale"] += result.kept_stale
         self.stats["capability_first_detections"] += result.first_detections
@@ -1314,6 +1349,212 @@ class RouterRegistry:
         next finished poll of every router evaluates again.
         """
         self._provider_revision += 1
+
+    # -- 1.44.0: option, deployed ACL, module detectors ----------------------------
+
+    @callback
+    def set_config_enabled(self, entry_id: str, enabled: bool) -> bool:
+        """Apply the option ``config_backup_enabled`` live (options flow).
+
+        Returns True if it changed. ``config.*`` are re-evaluated right away
+        from the last poll's data (no router call).
+        """
+        runtime = self._runtime.get(entry_id)
+        if runtime is None or runtime.config_enabled is bool(enabled):
+            return False
+        runtime.config_enabled = bool(enabled)
+        self.stats["config_option_changes"] += 1
+        _LOGGER.info(
+            "Configuration backup %s for entry %s",
+            "enabled" if enabled else "disabled",
+            entry_id,
+        )
+        self._recheck(entry_id)
+        return True
+
+    def config_enabled(self, router_id: str) -> bool:
+        """Option ``config_backup_enabled`` of the router's entry (default OFF).
+
+        Entries without runtime state are read from the config entry; an
+        orphaned record or an unknown entry counts as OFF.
+        """
+        record = self._records.get(router_id)
+        if record is None or record.state is not RecordState.ACTIVE:
+            return False
+        entry_id = record.entry_id
+        if entry_id is None:
+            return False
+        runtime = self._runtime.get(entry_id)
+        if runtime is not None:
+            return runtime.config_enabled
+        try:
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+        except Exception:
+            _LOGGER.debug("Config entry %s not readable", entry_id, exc_info=True)
+            return False
+        options = getattr(entry, "options", None)
+        return isinstance(options, Mapping) and (
+            options.get(OPTION_CONFIG_BACKUP_ENABLED) is True
+        )
+
+    @callback
+    def note_deployed_acl(
+        self, entry_id: str, observation: DeployedAclObservation
+    ) -> None:
+        """Remember what ensure_acl / an offer deploy saw (no store write).
+
+        Re-evaluates the rf.* capabilities from the last poll's data, if any.
+        """
+        runtime = self._runtime.setdefault(entry_id, _Runtime(entry_id))
+        runtime.acl = observation
+        self.stats["acl_observations"] += 1
+        self._recheck(entry_id)
+
+    def deployed_acl(self, router_id: str) -> DeployedAclObservation | None:
+        """The deployed-ACL observation of the router's entry, if any."""
+        for entry_id, rid in self._entry_map.items():
+            if rid == router_id:
+                runtime = self._runtime.get(entry_id)
+                return None if runtime is None else runtime.acl
+        return None
+
+    @callback
+    def _recheck(self, entry_id: str) -> None:
+        """Run the capability part of a poll again on the last data."""
+        runtime = self._runtime.get(entry_id)
+        rid = self._entry_map.get(entry_id)
+        if runtime is None or rid is None or self._closed:
+            return
+        runtime.cap_sig = None
+        coordinator = runtime.coordinator
+        data = getattr(coordinator, "data", None) if coordinator is not None else None
+        if (
+            data is None
+            or getattr(coordinator, "last_update_success", None) is not True
+        ):
+            return  # the next finished poll evaluates
+        try:
+            api = getattr(coordinator, "api", None)
+            uses_ssh = getattr(api, "uses_ssh_fallback", False) is True
+            self._update_capabilities(rid, runtime, data, uses_ssh, utcnow())
+        except Exception:
+            self.stats["listener_errors"] += 1
+            _LOGGER.warning(
+                "Enterprise core: capability re-check of %s failed",
+                entry_id,
+                exc_info=True,
+            )
+
+    @callback
+    def register_capability_detector(
+        self,
+        module: str,
+        detector: CapabilityDetector,
+        *,
+        prefix: str,
+        signature: DetectorSignature | None = None,
+    ) -> Callable[[], None]:
+        """Let ``module`` report capabilities below ``prefix`` (contract §17).
+
+        ``detector(record, data)`` is sync and does NO I/O: it reads the poll
+        data the core already has and returns ``{name: CapabilityStatus}``.
+        It runs only when the core's capability signature or its own
+        ``signature(data)`` changes. A known module may use its own namespace
+        (``security.``, ``diag.``, ``rf.``) or the shared ``log.``; nobody
+        may use a core or ``config.`` namespace, another module's namespace
+        or a core-owned name (rf.txpowerlist/survey/scan). Such names and
+        non-status values are dropped and counted
+        (``detector_entries_refused``); an exception is counted
+        (``detector_errors``) and never breaks the poll.
+        """
+        if not isinstance(module, str) or not module:
+            raise ValueError("module must be a non-empty string")
+        if not isinstance(prefix, str) or not prefix.endswith("."):
+            raise ValueError("capability prefix must end with '.'")
+        if prefix.startswith(
+            (*CORE_CAPABILITY_NAMESPACES, CONFIG_CAPABILITY_NAMESPACE)
+        ):
+            raise ValueError(f"{prefix} is a core capability namespace")
+        own = MODULE_CAPABILITY_NAMESPACES.get(module)
+        if own is not None and not (prefix.startswith(own) or prefix == "log."):
+            raise ValueError(f"module {module} reports below {own} or log. only")
+        for other, other_ns in MODULE_CAPABILITY_NAMESPACES.items():
+            if other != module and prefix.startswith(other_ns):
+                raise ValueError(f"capability namespace {prefix} belongs to {other}")
+        if module in self._detectors:
+            raise ValueError(f"module {module} already has a capability detector")
+        if not callable(detector) or (
+            signature is not None and not callable(signature)
+        ):
+            raise TypeError("detector and signature must be callables")
+        entry = _Detector(
+            module=module, prefix=prefix, run=detector, signature=signature
+        )
+        self._detectors[module] = entry
+        self.stats["detectors_registered"] += 1
+        self.invalidate_capabilities()
+
+        @callback
+        def _remove() -> None:
+            if self._detectors.get(module) is entry:
+                del self._detectors[module]
+                self.invalidate_capabilities()
+
+        return _remove
+
+    def _detector_signature(self, data: Any) -> tuple[Any, ...]:
+        out: list[Any] = []
+        for module, det in sorted(self._detectors.items()):
+            if det.signature is None:
+                out.append((module, None))
+                continue
+            try:
+                out.append((module, det.signature(data)))
+            except Exception:
+                self.stats["detector_errors"] += 1
+                _LOGGER.debug("Signature of detector %s failed", module, exc_info=True)
+                out.append((module, "error"))
+        return tuple(out)
+
+    def _run_detectors(
+        self, record: RouterRecord, data: Any
+    ) -> dict[str, CapabilityStatus]:
+        found: dict[str, CapabilityStatus] = {}
+        for module, det in sorted(self._detectors.items()):
+            self.stats["detector_runs"] += 1
+            try:
+                reported = dict(det.run(record, data) or {})
+            except Exception:
+                self.stats["detector_errors"] += 1
+                _LOGGER.warning(
+                    "Capability detector of %s failed for %s (poll not affected)",
+                    module,
+                    record.router_id,
+                    exc_info=True,
+                )
+                continue
+            refused = 0
+            for raw_name, status in reported.items():
+                name = str(raw_name)
+                if (
+                    not name.startswith(det.prefix)
+                    or name in CORE_OWNED_MODULE_CAPABILITIES
+                    or not isinstance(status, CapabilityStatus)
+                    or status.capability != name
+                ):
+                    refused += 1
+                    continue
+                found[name] = status
+            if refused:
+                self.stats["detector_entries_refused"] += refused
+                _LOGGER.warning(
+                    "Capability detector of %s reported %d entries outside %s or "
+                    "core-owned; dropped",
+                    module,
+                    refused,
+                    det.prefix,
+                )
+        return found
 
     @callback
     def set_probe_listener(self, listener: ProbeListener | None) -> None:

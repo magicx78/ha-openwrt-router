@@ -53,6 +53,7 @@ from custom_components.openwrt_router.config_api import (
 )
 from custom_components.openwrt_router.core_errors import ErrorClass
 from custom_components.openwrt_router.core_models import (
+    OPTION_CONFIG_BACKUP_ENABLED,
     CONFIG_CAPABILITIES,
     PLAN_ID_PREFIX,
     ArtifactKind,
@@ -489,7 +490,13 @@ async def start_env(
     provider: FakeConfigProvider | None | bool = True,
     options: dict[str, Any] | None = None,
 ) -> Env:
-    """Core + ``routers`` polled routers (+ provider registered and probed)."""
+    """Core + ``routers`` polled routers (+ provider registered and probed).
+
+    ``options`` None = config backup switched ON (the option is default OFF
+    since 1.44.0; this environment exists to exercise the config API).
+    """
+    if options is None:
+        options = {OPTION_CONFIG_BACKUP_ENABLED: True}
     hass = make_hass()
     root = str(tmp_path)
     hass.config.path = lambda *parts: os.path.join(root, *parts)

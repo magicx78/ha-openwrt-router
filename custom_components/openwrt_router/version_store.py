@@ -38,7 +38,7 @@ import shutil
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
@@ -332,6 +332,10 @@ class VersionStore:
         self._acks: dict[str, dict[str, DriftAck]] = {}
         self._rebaseline: set[str] = set()
         self._reserved: dict[str, int] = {}
+        # Newest created_at handed out: versions get strictly increasing
+        # timestamps, so history order never depends on clock resolution, a
+        # clock step back or the random id (1.44.0).
+        self._last_created_at: datetime | None = None
         self._key: bytes | None = None
         self._key_state = InstallationKeyState.UNINITIALISED
         self._key_lost_reported = False
@@ -361,6 +365,9 @@ class VersionStore:
             "sweeps": 0,
             "sweep_unknown_entries": 0,
             "archived_routers": 0,
+            "archive_missing_folder": 0,
+            "created_at_adjusted": 0,
+            "dedup_refused_sha256": 0,
             "keys_created": 0,
             "key_resets": 0,
             "key_lost_events": 0,
@@ -449,6 +456,10 @@ class VersionStore:
                 skipped += 1
                 continue
             self._records[backup_id] = record
+            if self._last_created_at is None or (
+                record.created_at > self._last_created_at
+            ):
+                self._last_created_at = record.created_at
         acks_skipped = 0
         acks = data.get("acks")
         for router_id, items in (acks if isinstance(acks, Mapping) else {}).items():
@@ -811,11 +822,22 @@ class VersionStore:
                 details={"reason": "checksum_mismatch", "artifacts": bad},
             )
         size = sum(p.size_bytes for p in payloads.values())
-        now = self.now()
         async with self._lock:
+            now = self._next_created_at()
             records = self.records(router_id)
             candidate = dedup_candidate(records, meta.backup_type)
-            if should_deduplicate(candidate, meta, payloads.keys()):
+            repeat = should_deduplicate(
+                candidate, meta, payloads.keys(), artifact_sha256=hashes
+            )
+            if not repeat and should_deduplicate(candidate, meta, payloads.keys()):
+                # Provider hashes say "same", the core's sha256 says "not
+                # byte-identical": stored as a new version (counted).
+                self.stats["dedup_refused_sha256"] += 1
+                _LOGGER.debug(
+                    "Version of %s kept: provider hash equal, artifact sha256 differs",
+                    router_id,
+                )
+            if repeat:
                 assert candidate is not None
                 self._consume(
                     authorization, action=GuardedAction.BACKUP, router_id=router_id
@@ -1254,11 +1276,31 @@ class VersionStore:
                 )
         return report
 
-    async def async_archive_router(self, router_id: str) -> None:
+    def _next_created_at(self) -> datetime:
+        """Clock time, but strictly after every created_at handed out before.
+
+        Call with ``self._lock`` held. Equal clock readings (Windows returns
+        the same microsecond for quick consecutive calls) and a clock that
+        steps back would otherwise give two versions the same or a reversed
+        order (history sorts by created_at, ties by the random id).
+        """
+        now = self.now()
+        last = self._last_created_at
+        if last is not None and now <= last:
+            now = last + timedelta(microseconds=1)
+            self.stats["created_at_adjusted"] += 1
+        self._last_created_at = now
+        return now
+
+    async def async_archive_router(
+        self, router_id: str, *, entry_id: str | None = None
+    ) -> bool:
         """Move a removed router's folder to ``removed/<router_id>/``.
 
         Its index entries stay (history) and are marked ``missing`` by the
-        next sweep; nothing is ever deleted automatically.
+        next sweep; nothing is ever deleted automatically. Audited
+        (``configuration.router_archived``) whether or not a folder existed.
+        Returns True if a folder was moved.
         """
         self._require_loaded()
         router_dir = self._router_dir(router_id)  # validates the id
@@ -1268,6 +1310,14 @@ class VersionStore:
                 _archive_dir, root, router_id, time.time()
             )
         except OSError as err:
+            self._emit(
+                CoreEventType.ROUTER_ARCHIVED,
+                router_id=router_id,
+                entry_id=entry_id,
+                severity=Severity.WARNING,
+                result=EventResult.FAILURE,
+                data={"moved": False, "cause": type(err).__name__},
+            )
             raise StorageError(
                 "Archiving the router folder failed",
                 router_id=router_id,
@@ -1275,6 +1325,19 @@ class VersionStore:
             ) from err
         if moved:
             self.stats["archived_routers"] += 1
+        else:
+            self.stats["archive_missing_folder"] += 1
+        self._emit(
+            CoreEventType.ROUTER_ARCHIVED,
+            router_id=router_id,
+            entry_id=entry_id,
+            data={
+                "moved": bool(moved),
+                "target": f"{CONFIG_BACKUP_REMOVED_DIR}/{router_id}" if moved else None,
+                "versions": len(self.records(router_id)),
+            },
+        )
+        return bool(moved)
 
     # -- diagnostics -----------------------------------------------------------------
 

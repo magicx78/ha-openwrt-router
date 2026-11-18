@@ -40,6 +40,7 @@ from .const import DOMAIN
 from .core_audit import AuditLog
 from .core_guard import ActionGuard
 from .core_models import DATA_ENTERPRISE_CORE, RouterRecord
+from .core_security import SecurityActions, SshPinRegistry
 from .router_registry import RouterRegistry
 from .version_store import VersionStore
 
@@ -88,6 +89,10 @@ class EnterpriseCore:
         self.registry.set_adopt_authorizer(self.manager.async_authorize_adopt)
         self.registry.set_authorization_consumer(self.manager.consume_adopt)
         self.registry.set_probe_listener(self.manager.on_probe_trigger)
+        # SSH host-key pins + ACL deploy / pin approval flows (1.44.0).
+        self.pins = SshPinRegistry(hass, self.audit)
+        self.security = SecurityActions(self.manager, self.pins)
+        self.manager.security = self.security
         self.load_errors: dict[str, int] = {}
         self._claim = claim
         self._entries: set[str] = set()
@@ -110,6 +115,7 @@ class EnterpriseCore:
             for name, step in (
                 ("versions", self.versions.async_load),
                 ("sweep", self.versions.async_sweep),
+                ("ssh_pins", self.pins.async_load),
             ):
                 if name == "sweep" and not self.versions.loaded:
                     continue  # counted as a "versions" load error already
@@ -167,6 +173,7 @@ class EnterpriseCore:
             ("manager", self.manager.close),
             ("guard", self.guard.close),
             ("versions", self.versions.close),
+            ("ssh_pins", self.pins.close),
             ("registry", self.registry.close),
             ("audit", self.audit.close),
         ):
@@ -182,6 +189,7 @@ class EnterpriseCore:
         for name, flush in (
             ("registry", self.registry.async_flush),
             ("versions", self.versions.async_flush),
+            ("ssh_pins", self.pins.async_flush),
             ("audit", self.audit.async_flush),
         ):
             try:
@@ -200,6 +208,7 @@ class EnterpriseCore:
             "guard": self.guard.summary(),
             "versions": self.versions.summary(),
             "configuration_api": self.manager.summary(),
+            "ssh_pins": self.pins.summary(),
             "load_errors": dict(self.load_errors),
         }
 
@@ -271,7 +280,8 @@ async def async_remove_entry_core(hass: HomeAssistant, entry: ConfigEntry) -> No
         await core.async_load()
         if core is async_get_core(hass):
             core.forget_entry(entry.entry_id)
-            await core.registry.async_orphan_entry(entry.entry_id)
+            record = await core.registry.async_orphan_entry(entry.entry_id)
+            await _async_archive_versions(core, record, entry.entry_id)
             return
     # No core running (last entry already unloaded): edit the stores with a
     # temporary core under a claim, so a racing setup loads after the write.
@@ -280,11 +290,44 @@ async def async_remove_entry_core(hass: HomeAssistant, entry: ConfigEntry) -> No
     try:
         temp = EnterpriseCore(hass, claim=claim)
         await temp.async_load()
-        await temp.registry.async_orphan_entry(entry.entry_id)
+        record = await temp.registry.async_orphan_entry(entry.entry_id)
+        await _async_archive_versions(temp, record, entry.entry_id)
         temp.close()
         await temp.async_flush()
     finally:
         _release_claim(slot, claim)
+
+
+async def _async_archive_versions(
+    core: EnterpriseCore, record: RouterRecord | None, entry_id: str
+) -> None:
+    """Move the removed router's version folder to ``removed/<router_id>/``.
+
+    Never deletes, never fails the removal: an error is logged and counted
+    (``archive_errors`` in load_errors); the store audits every attempt.
+    """
+    if record is None:
+        return
+    if not core.versions.loaded:
+        core.load_errors["archive_skipped"] = (
+            core.load_errors.get("archive_skipped", 0) + 1
+        )
+        _LOGGER.warning(
+            "Enterprise core: version store not loaded, folder of %s not archived",
+            record.router_id,
+        )
+        return
+    try:
+        await core.versions.async_archive_router(record.router_id, entry_id=entry_id)
+    except Exception:
+        core.load_errors["archive_errors"] = (
+            core.load_errors.get("archive_errors", 0) + 1
+        )
+        _LOGGER.warning(
+            "Enterprise core: archiving the versions of %s failed",
+            record.router_id,
+            exc_info=True,
+        )
 
 
 async def _async_release(hass: HomeAssistant, core: EnterpriseCore) -> None:

@@ -37,6 +37,7 @@ from custom_components.openwrt_router.core_models import (
     BACKUP_METADATA_VERSION,
     CONFIG_CAPABILITIES,
     CONFIGURATION_API_VERSION,
+    CORE_OWNED_MODULE_CAPABILITIES,
     FEATURE_CAPABILITIES,
     NOTE_MAX_LENGTH,
     PROBED_CAPABILITIES,
@@ -636,8 +637,17 @@ class TestCapabilities:
         assert Capability.CONFIG_UCI_READ in PROBED_CAPABILITIES
 
     def test_reserved_namespaces_unused_by_core(self):
-        values = [c.value for c in Capability]
+        # 1.44.0: the only exception are the three rf.* names the core reads
+        # from the deployed ACL; they are core-owned and refused to modules.
+        values = [
+            c.value for c in Capability if c not in CORE_OWNED_MODULE_CAPABILITIES
+        ]
         assert not [v for v in values if v.startswith(RESERVED_NAMESPACES)]
+        assert {str(c) for c in CORE_OWNED_MODULE_CAPABILITIES} == {
+            "rf.txpowerlist",
+            "rf.survey",
+            "rf.scan",
+        }
 
     def test_status_detail_is_serialised_and_masked(self):
         status = CapabilityStatus(
