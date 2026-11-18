@@ -144,6 +144,10 @@ class TestDriverFamily:
             ("ath9k", "ath9k"),
             (None, None),
             ("", None),
+            # iwinfo's catch-all hardware name (fixtures/rf/iwinfo_info_ath9k.json)
+            # names no driver family
+            ("Generic MAC80211", None),
+            ("brcmfmac", None),
         ],
     )
     def test_family(self, driver, family):
@@ -154,6 +158,8 @@ class TestDriverFamily:
         assert retry_comparable("mt7915e", "ath10k-ct") is False
         assert retry_comparable(None, "mt76") is False
         assert retry_comparable(None, None) is False
+        # two unknown drivers are never comparable, even with the same name
+        assert retry_comparable("Generic MAC80211", "Generic MAC80211") is False
 
 
 # =====================================================================

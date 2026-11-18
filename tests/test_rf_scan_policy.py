@@ -6,9 +6,11 @@ import inspect
 
 import pytest
 
+from custom_components.openwrt_router.core_masking import secret_digest_factory
 from custom_components.openwrt_router.rf_models import CapabilityState
 from custom_components.openwrt_router.rf_scan_policy import (
     DEFAULT_SCAN_CAPABILITY,
+    NEIGHBOR_DIGEST_DOMAIN,
     NeighborBss,
     ScanPolicy,
     ScanReason,
@@ -305,7 +307,9 @@ class TestReviewM3ScanGate:
 FOREIGN_SSID = "Nachbar-WLAN-Mueller"
 FOREIGN_BSSID = "AA:BB:CC:DD:EE:01"
 OWN_BSSID = "02:11:22:33:44:55"
-SALT = "test-salt"
+# The neighbor key is a Core secret digest key (bytes, >= 16).
+SALT = b"test-salt-0123456789abcdef"
+OTHER_SALT = b"other-salt-0123456789abcdef"
 
 
 def _scan_entry(ssid, bssid, channel, signal, mhz=None, **extra):
@@ -393,13 +397,29 @@ class TestSanitizeNeighbors:
     def test_key_is_stable_per_salt(self):
         a = sanitize_neighbors(_scan(), [], salt=SALT)
         b = sanitize_neighbors(_scan(), [], salt=SALT)
-        c = sanitize_neighbors(_scan(), [], salt="other")
+        c = sanitize_neighbors(_scan(), [], salt=OTHER_SALT)
         assert [n.key for n in a] == [n.key for n in b]
         assert a[0].key != c[0].key
 
     def test_empty_salt_is_refused(self):
         with pytest.raises(ValueError):
-            sanitize_neighbors(_scan(), [], salt="")
+            sanitize_neighbors(_scan(), [], salt=b"")
+
+    def test_short_or_text_salt_is_refused(self):
+        with pytest.raises(ValueError):
+            sanitize_neighbors(_scan(), [], salt=b"too-short")
+        with pytest.raises(TypeError):
+            sanitize_neighbors(_scan(), [], salt="test-salt-0123456789abcdef")
+
+    def test_key_is_the_core_secret_digest(self):
+        # RF makes no hash of its own: the key is core_masking's HMAC digest
+        # of a domain-separated value.
+        digest = secret_digest_factory(SALT)
+        (n,) = sanitize_neighbors(
+            [_scan_entry("x", FOREIGN_BSSID, 6, -60)], [], salt=SALT
+        )
+        assert n.key == digest(f"{NEIGHBOR_DIGEST_DOMAIN}{FOREIGN_BSSID.lower()}")
+        assert NEIGHBOR_DIGEST_DOMAIN.startswith("wifi_rf/")
 
     def test_limit_keeps_strongest_foreign_and_all_own(self):
         raw = [

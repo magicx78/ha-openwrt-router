@@ -10,6 +10,8 @@ from custom_components.openwrt_router.channel_plan import (
     Radio,
     analyze,
 )
+from custom_components.openwrt_router.core_models import default_router_id
+from custom_components.openwrt_router.net_events import Severity as CoreSeverity
 from custom_components.openwrt_router.rf_conflicts import (
     ConflictKind,
     ConflictStatus,
@@ -439,8 +441,13 @@ CONSTELLATIONS = {
 _KIND_MAP = {FINDING_SAME_CHANNEL: K.CO_CHANNEL, FINDING_OVERLAP: K.ADJACENT_OVERLAP}
 
 
+def _rid(entry_id):
+    """Core router id of a test entry (the registry would hand it out)."""
+    return default_router_id(entry_id)
+
+
 def _cp_pairs(radios):
-    by_attr = {(r.router, r.phy): (r.entry_id, r.phy) for r in radios}
+    by_attr = {(r.router, r.phy): (_rid(r.entry_id), r.phy) for r in radios}
     pairs = set()
     for f in analyze(radios):
         if f["type"] in _KIND_MAP:
@@ -450,7 +457,7 @@ def _cp_pairs(radios):
 
 
 def _rf_pairs(radios):
-    views = [from_channel_plan_radio(r) for r in radios]
+    views = [from_channel_plan_radio(r, router_id=_rid(r.entry_id)) for r in radios]
     pairs = set()
     for c in detect_conflicts(views, TH):
         if c.kind in (K.CO_CHANNEL, K.ADJACENT_OVERLAP):
@@ -473,7 +480,9 @@ class TestMatchesChannelPlan:
         radios = CONSTELLATIONS["mixed_with_backhaul_and_same_router"]
         views = [
             from_channel_plan_radio(
-                r, uplink_peer=RadioRef("e1", "phy0") if r.backhaul else None
+                r,
+                router_id=_rid(r.entry_id),
+                uplink_peer=RadioRef(_rid("e1"), "phy0") if r.backhaul else None,
             )
             for r in radios
         ]
@@ -483,9 +492,14 @@ class TestMatchesChannelPlan:
             if any(e.startswith("backhaul_") for e in c.evidence)
         ]
         assert len(backhaul) == 2  # e2 with e1 and with e3
-        status = {tuple(m.router_key for m in c.members): c.status for c in backhaul}
+        status = {
+            frozenset(m.router_key for m in c.members): c.status for c in backhaul
+        }
         # Only the real uplink pair is acceptable by the flag (review H1).
-        assert status == {("e1", "e2"): S.ACCEPTABLE, ("e2", "e3"): S.POTENTIAL}
+        assert status == {
+            frozenset({_rid("e1"), _rid("e2")}): S.ACCEPTABLE,
+            frozenset({_rid("e2"), _rid("e3")}): S.POTENTIAL,
+        }
 
     def test_identical_block_other_primary_is_co_channel_here(self):
         # Deliberate difference: channel_plan calls this "overlap", the RF
@@ -499,8 +513,10 @@ class TestMatchesChannelPlan:
         assert {m for _, m in _cp_pairs(radios)} == {m for _, m in _rf_pairs(radios)}
 
     def test_adapter_keeps_fields(self):
-        view = from_channel_plan_radio(_cp("e1", "phy0", "2.4g", 1, 40, 3, True))
-        assert (view.router_key, view.radio_key) == ("e1", "phy0")
+        view = from_channel_plan_radio(
+            _cp("e1", "phy0", "2.4g", 1, 40, 3, True), router_id=_rid("e1")
+        )
+        assert (view.router_key, view.radio_key) == (_rid("e1"), "phy0")
         assert (view.band, view.channel, view.width_mhz) == ("2.4g", 1, 40)
         assert view.center_channel == 3
         assert view.backhaul is True
@@ -518,3 +534,10 @@ def test_as_dict():
         {"router_key": "ap2", "radio_key": "radio0"},
     ]
     assert c.radio_keys == ("radio0", "radio0")
+
+
+def test_severity_is_the_core_severity():
+    # One severity type for RF findings and Core events (net_events.Severity).
+    assert Severity is CoreSeverity
+    (c,) = detect_conflicts(_four_aps(util_a=_util(78.0)), TH)
+    assert c.severity is CoreSeverity.WARNING

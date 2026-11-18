@@ -25,6 +25,10 @@ from enum import StrEnum
 from typing import Any
 
 from .channel_plan import BAND_24, STANDARD_24_CHANNELS, Radio
+
+# One severity for RF findings and Core events (CoreEvent.severity).
+from .net_events import Severity
+from .rf_identity import RadioRef, require_radio_key, require_router_id
 from .rf_models import CapabilityState, Metric
 from .rf_spectrum import (
     Block,
@@ -61,13 +65,6 @@ class ConflictStatus(StrEnum):
     ACCEPTABLE = "acceptable"  # plan, but measurements show no harm
 
 
-class Severity(StrEnum):
-    """Severity of a finding."""
-
-    INFO = "info"
-    WARNING = "warning"
-
-
 @dataclass(frozen=True)
 class ConflictThresholds:
     """Thresholds for :func:`detect_conflicts`."""
@@ -88,25 +85,11 @@ class ConflictThresholds:
 
 
 @dataclass(frozen=True)
-class RadioRef:
-    """Identity of a radio: router and radio key together."""
-
-    router_key: str
-    radio_key: str
-
-    def __str__(self) -> str:
-        return f"{self.router_key}/{self.radio_key}"
-
-    def as_dict(self) -> dict[str, str]:
-        """Return the reference as a plain dict."""
-        return {"router_key": self.router_key, "radio_key": self.radio_key}
-
-
-@dataclass(frozen=True)
 class RadioView:
     """What the conflict check needs to know about one radio.
 
-    ``neighbors`` maps the :class:`RadioRef` (router and radio key) of another
+    ``router_key`` is the Core router id, ``radio_key`` the UCI radio name
+    (see :mod:`.rf_identity`). ``neighbors`` maps the :class:`RadioRef` (router and radio key) of another
     radio to the measured signal (dBm) at which this radio hears it; the
     radio key alone is not unique (``radio0`` exists on every router).
     ``regulatory`` is the radio's
@@ -164,11 +147,16 @@ class Conflict:
         }
 
 
-def from_channel_plan_radio(radio: Radio, **extra: Any) -> RadioView:
-    """Adapt a ``channel_plan.Radio`` (entry_id → router_key, phy → radio_key)."""
+def from_channel_plan_radio(radio: Radio, *, router_id: str, **extra: Any) -> RadioView:
+    """Adapt a ``channel_plan.Radio`` (phy → radio_key).
+
+    ``router_id`` is the Core router id of the radio's entry, taken from the
+    router registry; ``radio.entry_id`` is never turned into a router id
+    (after an adoption they no longer match).
+    """
     return RadioView(
-        router_key=radio.entry_id,
-        radio_key=radio.phy,
+        router_key=require_router_id(router_id),
+        radio_key=require_radio_key(radio.phy),
         band=radio.band,
         channel=radio.channel,
         width_mhz=radio.width,

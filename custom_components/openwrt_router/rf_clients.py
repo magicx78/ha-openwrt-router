@@ -300,7 +300,12 @@ _MT76_RE = re.compile(r"^mt7\d")
 
 
 def driver_family(driver: str | None) -> str | None:
-    """Map a driver name to its counter family; None when unknown."""
+    """Map a driver name to its counter family; None when unknown.
+
+    Only known families are returned. Any other name (e.g. iwinfo's
+    catch-all ``Generic MAC80211``) says nothing about the counters, so two
+    such radios must not look comparable.
+    """
     if not driver:
         return None
     name = driver.strip().lower()
@@ -309,7 +314,7 @@ def driver_family(driver: str | None) -> str | None:
     for family in (FAMILY_ATH10K, "ath11k", "ath12k", "ath9k"):
         if name.startswith(family):
             return family
-    return name
+    return None
 
 
 def retry_comparable(driver_a: str | None, driver_b: str | None) -> bool:

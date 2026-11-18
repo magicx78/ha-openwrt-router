@@ -11,20 +11,21 @@ treated like a clock going back (full wait). Until a scan has been proven
 on a radio its capability is ``unsupported`` (:data:`DEFAULT_SCAN_CAPABILITY`).
 
 :func:`sanitize_neighbors` keeps own BSSs by BSSID and replaces foreign
-SSID/BSSID with a salted, shortened hash: neighbors' network names and MAC
-addresses are their data and are not kept in clear text.
+SSID/BSSID with the Core's keyed digest (``core_masking``): neighbors'
+network names and MAC addresses are their data and are not kept in clear
+text. Output forms go through :func:`.rf_privacy.mask_rf_output`.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from .core_masking import SECRET_DIGEST_LENGTH, secret_digest_factory
 from .rf_models import CapabilityState
 from .wifi_band import band_from_frequency
 
@@ -65,8 +66,11 @@ DEFAULT_MIN_GAP_PER_ROUTER_S = 300.0
 
 # Cap on kept foreign neighbors. Startwert, nicht kalibriert.
 DEFAULT_MAX_NEIGHBORS = 50
-# Hex digits of the neighbor key (64 bit).
-NEIGHBOR_KEY_LENGTH = 16
+# Hex digits of the neighbor key (64 bit): the Core secret digest length.
+NEIGHBOR_KEY_LENGTH = SECRET_DIGEST_LENGTH
+# Prefix of the digested value: keeps neighbor digests apart from any other
+# digest made with the same key.
+NEIGHBOR_DIGEST_DOMAIN = "wifi_rf/neighbor_bssid/"
 
 
 def _norm_mode(mode: Any) -> str:
@@ -351,12 +355,9 @@ def _encryption(value: Any) -> str | None:
     return f"wpa{max(wpa)}{suffix}"
 
 
-def _neighbor_key(bssid: str, salt: str) -> str:
-    digest = hashlib.sha256(f"{salt}|{bssid}".encode()).hexdigest()
-    return digest[:NEIGHBOR_KEY_LENGTH]
-
-
-def _neighbor(entry: Any, own: frozenset[str], salt: str) -> NeighborBss | None:
+def _neighbor(
+    entry: Any, own: frozenset[str], digest: Callable[[str], str]
+) -> NeighborBss | None:
     if not isinstance(entry, Mapping):
         return None
     bssid = _norm_bssid(entry.get("bssid"))
@@ -365,7 +366,7 @@ def _neighbor(entry: Any, own: frozenset[str], salt: str) -> NeighborBss | None:
     is_own = bssid in own
     band = band_from_frequency(entry.get("mhz")) or _band_field(entry.get("band"))
     return NeighborBss(
-        key=bssid if is_own else _neighbor_key(bssid, salt),
+        key=bssid if is_own else digest(NEIGHBOR_DIGEST_DOMAIN + bssid),
         own=is_own,
         band=band,
         channel=_int(entry.get("channel")),
@@ -387,22 +388,31 @@ def sanitize_neighbors(
     raw: Any,
     own_bssids: Iterable[str],
     *,
-    salt: str,
+    salt: bytes,
     max_neighbors: int = DEFAULT_MAX_NEIGHBORS,
 ) -> list[NeighborBss]:
     """Turn an ``iwinfo scan`` result into redacted neighbors, strongest first.
 
     Own BSSs are all kept; foreign BSSs are capped at ``max_neighbors``.
-    Entries without a BSSID are dropped. ``salt`` must be a non-empty secret
-    of the caller (a MAC hash without salt is easy to reverse).
+    Entries without a BSSID are dropped.
+
+    ``salt`` is the secret key of the foreign-BSSID digest and is hashed by
+    the Core (``core_masking.secret_digest_factory``: HMAC-SHA256, 16 hex;
+    bytes of at least 16, TypeError for text, ValueError when too short).
+    RF makes no key of its own: the caller hands in a key that stays
+    stable across restarts, or every neighbor looks new after a restart.
+    Origin (later wiring, not built yet): a per-installation secret the
+    Core provides for modules. The Core has none today (gap reported in
+    the plan document, section 9), so the wiring must not start before it
+    exists. ``NEIGHBOR_DIGEST_DOMAIN`` separates these digests from any
+    other use of the same key.
     """
-    if not isinstance(salt, str) or not salt:
-        raise ValueError("salt must be a non-empty string")
+    digest = secret_digest_factory(salt)
     own = frozenset(b for b in (_norm_bssid(x) for x in own_bssids) if b)
     results = raw.get("results") if isinstance(raw, Mapping) else raw
     if not isinstance(results, list):
         return []
-    parsed = [n for n in (_neighbor(e, own, salt) for e in results) if n is not None]
+    parsed = [n for n in (_neighbor(e, own, digest) for e in results) if n is not None]
     foreign = sorted((n for n in parsed if not n.own), key=_strongest_first)
     kept = [n for n in parsed if n.own] + foreign[: max(0, max_neighbors)]
     return sorted(kept, key=_strongest_first)

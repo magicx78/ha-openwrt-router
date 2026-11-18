@@ -10,8 +10,11 @@ never be mistaken for a measured zero:
 - ``unreachable``: the source (ubus object, method, ACL) did not answer;
 - ``stale``: a value exists but is older than allowed.
 
-No clock, no I/O: time always comes in as a parameter. Router and radio are
-opaque strings supplied by the caller.
+No clock, no I/O: time always comes in as a parameter. ``router_key`` is
+the Core router id and ``radio_key`` the UCI radio name, both supplied by
+the caller (see :mod:`.rf_identity`). This state model is per radio and
+richer than the Core's per-router ``available/unavailable/unknown``;
+:mod:`.rf_capabilities` maps it onto the Core model without loss.
 """
 
 from __future__ import annotations
