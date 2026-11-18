@@ -13,8 +13,9 @@ Rules (plan section 7, same intent as ``tarfile.data_filter`` without
 extracting): member names must be relative, without ``..``, NUL, control
 characters or backslashes, and short enough; only regular files,
 directories and symlinks are allowed; symlinks must stay inside the archive
-tree or point below ``ARCHIVE_SYMLINK_ABS_PREFIXES``; no member may sit
-below a symlink.
+tree or point below ``ARCHIVE_SYMLINK_ABS_PREFIXES`` (or exactly to
+``ARCHIVE_SYMLINK_ABS_EXACT``), also after resolving them through the other
+symlinks of the archive; no member may sit below a symlink.
 
 Pure logic: no Home Assistant imports, no network, no file access. The
 functions are synchronous and CPU-bound; callers run them in the executor.
@@ -39,6 +40,7 @@ from typing import Final
 from .config_const import (
     ARCHIVE_CONFIG_PREFIX,
     ARCHIVE_REQUIRED_CONFIGS,
+    ARCHIVE_SYMLINK_ABS_EXACT,
     ARCHIVE_SYMLINK_ABS_PREFIXES,
     DEFAULT_ARCHIVE_LIMITS,
     ERR_INCOMPLETE,
@@ -131,6 +133,9 @@ CODE_UNSUPPORTED_TYPE: Final = "unsupported_type"
 CODE_SYMLINK_TARGET_INVALID: Final = "symlink_target_invalid"
 CODE_SYMLINK_ABSOLUTE: Final = "symlink_absolute"
 CODE_SYMLINK_ESCAPE: Final = "symlink_escape"
+CODE_SYMLINK_LOOP: Final = "symlink_loop"
+# Like Linux MAXSYMLINKS: more links in one chain is a loop.
+_MAX_SYMLINK_HOPS: Final = 40
 CODE_NO_ETC_CONFIG: Final = "no_etc_config"
 CODE_MISSING_REQUIRED_CONFIG: Final = "missing_required_config"
 
@@ -384,6 +389,12 @@ def _check_name(raw: str, limits: ArchiveLimits) -> str:
     return "/".join(part for part in parts if part not in ("", "."))
 
 
+def _abs_target_allowed(path: str) -> bool:
+    return path in ARCHIVE_SYMLINK_ABS_EXACT or path.startswith(
+        ARCHIVE_SYMLINK_ABS_PREFIXES
+    )
+
+
 def _check_symlink(name: str, target: str, limits: ArchiveLimits) -> None:
     """Allow relative targets inside the archive tree or allowed absolutes."""
     if (
@@ -395,8 +406,7 @@ def _check_symlink(name: str, target: str, limits: ArchiveLimits) -> None:
     ):
         raise _Abort(ERR_INVALID, CODE_SYMLINK_TARGET_INVALID, name)
     if target.startswith("/"):
-        resolved = posixpath.normpath(target)
-        if not resolved.startswith(ARCHIVE_SYMLINK_ABS_PREFIXES):
+        if not _abs_target_allowed(posixpath.normpath(target)):
             raise _Abort(ERR_INVALID, CODE_SYMLINK_ABSOLUTE, name)
         return
     stack = name.split("/")[:-1]
@@ -521,7 +531,7 @@ class _Scan:
         self._count = 0
         self._declared = 0
         self.members: dict[str, MemberInfo] = {}
-        self.symlinks: set[str] = set()
+        self.symlinks: dict[str, str] = {}  # name -> target
         self.texts: dict[str, bytes] = {}
         self.oversized: set[str] = set()
 
@@ -571,7 +581,7 @@ class _Scan:
         elif kind == MEMBER_SYMLINK:
             _check_symlink(name, member.linkname, limits)
             digest = hashlib.sha256(member.linkname.encode("utf-8")).hexdigest()
-            self.symlinks.add(name)
+            self.symlinks[name] = member.linkname
 
         self.members[name] = MemberInfo(
             name=name,
@@ -623,6 +633,58 @@ class _Scan:
             for depth in range(1, len(parts)):
                 if "/".join(parts[:depth]) in self.symlinks:
                     raise _Abort(ERR_INVALID, CODE_PATH_THROUGH_SYMLINK, name)
+
+    def check_symlink_chains(self) -> None:
+        """Resolve every symlink through the others (review L3).
+
+        The per-link check is lexical: ``etc/x/b -> ../tmp`` plus
+        ``etc/x/c -> b/../..`` passes it, yet c ends above the root. Here
+        each target is walked component by component; a component that is
+        itself a symlink of the archive is replaced by its resolved path.
+        The archive root is the router's ``/``. Memoised per link, so the
+        cost stays linear in the total target length.
+        """
+        resolved: dict[str, tuple[tuple[str, ...], bool]] = {}
+        for name in sorted(self.symlinks):
+            self._resolve(name, resolved, set())
+
+    def _resolve(
+        self,
+        name: str,
+        resolved: dict[str, tuple[tuple[str, ...], bool]],
+        active: set[str],
+    ) -> tuple[tuple[str, ...], bool]:
+        """(path components, went through an absolute target) of a link."""
+        done = resolved.get(name)
+        if done is not None:
+            return done
+        if name in active or len(active) >= _MAX_SYMLINK_HOPS:
+            raise _Abort(ERR_INVALID, CODE_SYMLINK_LOOP, name)
+        active.add(name)
+        target = self.symlinks[name]
+        absolute = target.startswith("/")
+        stack = [] if absolute else name.split("/")[:-1]
+        for part in target.split("/"):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                if not stack:
+                    raise _Abort(ERR_INVALID, CODE_SYMLINK_ESCAPE, name)
+                stack.pop()
+                continue
+            stack.append(part)
+            path = "/".join(stack)
+            if path in self.symlinks:
+                inner, inner_abs = self._resolve(path, resolved, active)
+                stack, absolute = list(inner), absolute or inner_abs
+        if not stack:
+            # The archive root is "/", which an absolute target may not be.
+            raise _Abort(ERR_INVALID, CODE_SYMLINK_ESCAPE, name)
+        if absolute and not _abs_target_allowed("/" + "/".join(stack)):
+            raise _Abort(ERR_INVALID, CODE_SYMLINK_ABSOLUTE, name)
+        active.discard(name)
+        resolved[name] = (tuple(stack), absolute)
+        return resolved[name]
 
 
 _TAR_ERRORS: Final = (
@@ -738,6 +800,7 @@ def _scan(
     try:
         _walk(stream, scan)
         scan.check_symlink_parents()
+        scan.check_symlink_chains()
     except _Abort as abort:
         _LOGGER.debug(
             "Archive rejected: %s/%s after %d decoded bytes",

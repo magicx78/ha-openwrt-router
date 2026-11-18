@@ -50,8 +50,10 @@ ARCHIVE_SYMLINK_ABS_PREFIXES: Final[tuple[str, ...]] = (
     "/lib/",
     "/tmp/",
     "/var/",
-    "/proc/",
 )
+# Single allowed targets outside the prefixes. Only /etc/mtab -> /proc/mounts
+# is needed; a /proc prefix would allow /proc/1/root (= "/") (review L3).
+ARCHIVE_SYMLINK_ABS_EXACT: Final[frozenset[str]] = frozenset({"/proc/mounts"})
 # Configs an archive must contain under etc/config/, otherwise "incomplete".
 ARCHIVE_REQUIRED_CONFIGS: Final[frozenset[str]] = frozenset({"network", "system"})
 ARCHIVE_CONFIG_PREFIX: Final = "etc/config/"

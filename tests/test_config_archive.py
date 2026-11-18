@@ -15,6 +15,7 @@ import io
 import logging
 import struct
 import tarfile
+import time
 import zlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -1356,4 +1357,87 @@ def test_non_file_member_with_size_zero_stays_valid(kind: bytes) -> None:
     linkname = "/tmp/resolv.conf" if kind == tarfile.SYMTYPE else ""
     data = _smuggled(_ustar(name, 0, kind=kind, linkname=linkname))
     report = validate_archive(data, DEFAULT_ARCHIVE_LIMITS)
+    assert report.ok, report.findings
+
+
+# ---------------------------------------------------------------------------
+# Review L3: symlink targets are resolved through the other symlinks of the
+# archive, not only lexically; /proc only for /proc/mounts.
+# ---------------------------------------------------------------------------
+
+
+def _links(*pairs: tuple[str, str]) -> bytes:
+    return _with(*(E(n, None, type=tarfile.SYMTYPE, linkname=t) for n, t in pairs))
+
+
+@pytest.mark.parametrize(
+    ("pairs", "code"),
+    [
+        pytest.param(
+            [("etc/x/b", "../..")], ca.CODE_SYMLINK_ESCAPE, id="link_to_archive_root"
+        ),
+        pytest.param(
+            [("etc/x/b", "../tmp"), ("etc/x/c", "b/../..")],
+            ca.CODE_SYMLINK_ESCAPE,
+            id="chain_escapes_above_root",
+        ),
+        pytest.param(
+            [("etc/x/c", "b/../.."), ("etc/x/b", "../tmp")],
+            ca.CODE_SYMLINK_ESCAPE,
+            id="chain_order_independent",
+        ),
+        pytest.param(
+            [("etc/t", "/tmp/x"), ("etc/u", "t/../../root/.ssh")],
+            ca.CODE_SYMLINK_ABSOLUTE,
+            id="relative_through_absolute_link",
+        ),
+        pytest.param(
+            [("etc/t", "../root/a"), ("etc/u", "/etc/t/../b")],
+            ca.CODE_SYMLINK_ABSOLUTE,
+            id="absolute_through_relative_link",
+        ),
+        pytest.param([("etc/a", "b"), ("etc/b", "a")], ca.CODE_SYMLINK_LOOP, id="loop"),
+        pytest.param(
+            [(f"etc/l{i}", f"l{i + 1}") for i in range(60)],
+            ca.CODE_SYMLINK_LOOP,
+            id="too_many_hops",
+        ),
+        pytest.param([("etc/p", "/proc/1/root")], ca.CODE_SYMLINK_ABSOLUTE, id="proc"),
+        pytest.param(
+            [("etc/p", "/proc/self/root/root")],
+            ca.CODE_SYMLINK_ABSOLUTE,
+            id="proc_self_root",
+        ),
+    ],
+)
+def test_symlink_chains_are_resolved(pairs: list[tuple[str, str]], code: str) -> None:
+    assert_rejected(
+        validate_archive(_links(*pairs), DEFAULT_ARCHIVE_LIMITS), ERR_INVALID, code
+    )
+
+
+@pytest.mark.parametrize(
+    "pairs",
+    [
+        pytest.param([("etc/a", "b"), ("etc/b", "config/network")], id="chain"),
+        pytest.param([("etc/a", "/etc/b"), ("etc/b", "../tmp/x")], id="abs_rel"),
+        pytest.param([("etc/mtab", "/proc/mounts")], id="mtab"),
+        pytest.param(
+            [(f"etc/l{i}", f"l{i + 1}") for i in range(30)] + [("etc/l30", "../tmp")],
+            id="long_chain",
+        ),
+    ],
+)
+def test_harmless_symlink_chains_stay_valid(pairs: list[tuple[str, str]]) -> None:
+    report = validate_archive(_links(*pairs), DEFAULT_ARCHIVE_LIMITS)
+    assert report.ok, report.findings
+
+
+def test_many_symlinks_resolve_fast() -> None:
+    pairs = [(f"etc/l{i}", f"l{i + 1}") for i in range(39)] + [("etc/l39", "../tmp")]
+    pairs += [(f"etc/m{i}", "l0") for i in range(2000)]
+    data = _links(*pairs)
+    started = time.perf_counter()
+    report = validate_archive(data, DEFAULT_ARCHIVE_LIMITS)
+    assert time.perf_counter() - started < 5.0
     assert report.ok, report.findings
