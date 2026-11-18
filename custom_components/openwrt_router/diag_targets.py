@@ -671,7 +671,7 @@ def make_target(
         return Refusal.INVALID_SCOPE
     host_norm = normalize_host(host)
     if isinstance(host_norm, Refusal):
-        _LOGGER.debug("Refused host %r: %s", host, host_norm.value)
+        _LOGGER.debug("Refused host of target %s: %s", target_id, host_norm.value)
         return host_norm
     reason = _field_refusal(
         target_id, kind_enum, scope_enum, host_norm, port, confirmed
@@ -853,10 +853,7 @@ def _vet_addresses(
         reason = check_address(addr, target.scope, policy)
         if reason is not None:
             _LOGGER.debug(
-                "Resolved address %s refused for %s: %s",
-                addr,
-                target.target_id,
-                reason.value,
+                "Resolved address refused for %s: %s", target.target_id, reason.value
             )
             return reason
         vetted.append(addr)
@@ -985,7 +982,7 @@ class TargetRegistry:
         back as ``PendingTarget``: resolve the name, then ``check_resolved``.
         """
         if not isinstance(target_id, str) or not _ID_RE.fullmatch(target_id):
-            _LOGGER.debug("Refused malformed target id %r", target_id)
+            _LOGGER.debug("Refused malformed target id")
             return Refusal.INVALID_ID
         target = self._targets.get(target_id)
         if target is None:
