@@ -46,6 +46,8 @@ from .core_models import (
     MODULE_EVENT_PREFIXES,
     RESERVED_NAMESPACES,
     SECURITY_AUDIT_MAX_EVENTS,
+    SECURITY_MODULE_MAX_EVENTS,
+    SECURITY_MODULE_QUOTA,
     Actor,
     AuditRing,
     CoreEvent,
@@ -73,6 +75,15 @@ _RING_SIZES: Mapping[AuditRing, int] = {
 # dropped (counted in stats["dedup_scopes_dropped"], logged). A dropped
 # window only means the next repeat is published again.
 MAX_DEDUP_SCOPES = 4096
+
+
+def security_owner(event: CoreEvent) -> str:
+    """Who an entry of the security ring belongs to (review M2).
+
+    By type, not by ``source``: only the core emits core types, so a module
+    can never make its entries count as core entries.
+    """
+    return CORE_SOURCE if is_core_event_type(event.type) else event.source
 
 
 def migrate_audit_store(
@@ -120,6 +131,11 @@ class AuditLog:
         self._prefix_tokens: dict[str, object] = {}
         # module types registered as audit-mandatory -> module (follow-up B3)
         self._mandatory: dict[str, str] = {}
+        # security ring: entries per owner ("core" or a module), dropped
+        # module entries per module, modules already warned about (M2)
+        self._security_counts: dict[str, int] = {}
+        self._module_evicted: dict[str, int] = {}
+        self._module_evict_warned: set[str] = set()
         self.loaded = False
         self.load_failed = False
         self.backed_up = False
@@ -141,6 +157,7 @@ class AuditLog:
             "bus_salt_ephemeral": 0,
             "module_mandatory_types": 0,
             "security_relevant_module_events": 0,
+            "module_security_evicted": 0,
         }
 
     # -- bus pseudonym salt ------------------------------------------------------------
@@ -214,11 +231,20 @@ class AuditLog:
                     continue
                 items.append(event)
             items.sort(key=lambda e: e.ts)
-            size = _RING_SIZES[ring]
-            if len(items) > size:
-                self.stats[f"evicted_{ring.value}"] += len(items) - size
-                items = items[-size:]
-            self._rings[ring] = deque(items)
+            if ring is AuditRing.SECURITY:
+                # replayed through the same quotas as new entries (M2); a
+                # store written before M2 has the same layout
+                self._rings[ring] = deque()
+                self._security_counts = {}
+                for event in items:
+                    self._append_security(event)
+                items = list(self._rings[ring])
+            else:
+                size = _RING_SIZES[ring]
+                if len(items) > size:
+                    self.stats[f"evicted_{ring.value}"] += len(items) - size
+                    items = items[-size:]
+                self._rings[ring] = deque(items)
             for event in items:
                 scope = event.dedup_scope
                 if scope is not None:
@@ -346,6 +372,10 @@ class AuditLog:
     def _add_prefix(self, prefix: str, module: str) -> None:
         if not isinstance(prefix, str) or not prefix.endswith("."):
             raise ValueError("event prefix must end with '.'")
+        if module == CORE_SOURCE:
+            # a module never emits as the core (its entries would count as
+            # core entries of the security ring otherwise, review M2)
+            raise ValueError("the core registers no event prefix")
         if is_core_event_type(prefix):
             raise ValueError("core event namespaces are reserved for the core")
         if prefix.startswith(RESERVED_NAMESPACES):
@@ -514,18 +544,92 @@ class AuditLog:
 
     def _append(self, event: CoreEvent) -> None:
         ring_name = event.audit_ring
+        if ring_name is AuditRing.SECURITY:
+            self._append_security(event)
+            return
         ring = self._rings[ring_name]
         if len(ring) >= _RING_SIZES[ring_name]:
             ring.popleft()
             self.stats[f"evicted_{ring_name.value}"] += 1
         ring.append(event)
 
+    def _append_security(self, event: CoreEvent) -> None:
+        """Security ring: core and module entries have separate quotas (M2).
+
+        A core entry evicts only the oldest core entry (at
+        SECURITY_AUDIT_MAX_EVENTS). A module entry evicts the module's own
+        oldest entry at SECURITY_MODULE_QUOTA; when all module entries
+        together reach SECURITY_MODULE_MAX_EVENTS, the oldest entry of the
+        module with the most entries goes. Dropped module entries are
+        counted per module and logged once per module and run.
+        """
+        owner = security_owner(event)
+        counts = self._security_counts
+        if owner == CORE_SOURCE:
+            if counts.get(CORE_SOURCE, 0) >= SECURITY_AUDIT_MAX_EVENTS:
+                self._evict_security({CORE_SOURCE})
+                self.stats["evicted_security"] += 1
+        else:
+            victims: set[str] = set()
+            if counts.get(owner, 0) >= SECURITY_MODULE_QUOTA:
+                victims = {owner}
+            elif self._module_total() >= SECURITY_MODULE_MAX_EVENTS:
+                largest = max(c for m, c in counts.items() if m != CORE_SOURCE)
+                victims = {
+                    m for m, c in counts.items() if m != CORE_SOURCE and c == largest
+                }
+            if victims:
+                dropped = self._evict_security(victims)
+                if dropped is not None:
+                    self._note_module_evicted(dropped)
+        self._rings[AuditRing.SECURITY].append(event)
+        counts[owner] = counts.get(owner, 0) + 1
+
+    def _module_total(self) -> int:
+        return sum(c for m, c in self._security_counts.items() if m != CORE_SOURCE)
+
+    def _evict_security(self, owners: set[str]) -> str | None:
+        """Drop the oldest security entry of one of ``owners``; its owner."""
+        ring = self._rings[AuditRing.SECURITY]
+        for index, stored in enumerate(ring):
+            owner = security_owner(stored)
+            if owner in owners:
+                del ring[index]
+                self._count_down(owner)
+                return owner
+        return None
+
+    def _count_down(self, owner: str) -> None:
+        left = self._security_counts.get(owner, 0) - 1
+        if left > 0:
+            self._security_counts[owner] = left
+        else:
+            self._security_counts.pop(owner, None)
+
+    def _note_module_evicted(self, module: str) -> None:
+        self.stats["module_security_evicted"] += 1
+        self._module_evicted[module] = self._module_evicted.get(module, 0) + 1
+        if module in self._module_evict_warned:
+            return
+        self._module_evict_warned.add(module)
+        _LOGGER.warning(
+            "Audit: module %s is over its quota on the security ring (%d per "
+            "module, %d for all modules); its oldest entries are dropped and "
+            "counted (module_security_evicted). Core entries are never dropped "
+            "for module entries",
+            module,
+            SECURITY_MODULE_QUOTA,
+            SECURITY_MODULE_MAX_EVENTS,
+        )
+
     def _expire(self, now: datetime) -> None:
         cutoff = now - RETENTION
-        for ring in self._rings.values():
+        for name, ring in self._rings.items():
             while ring and ring[0].ts < cutoff:
-                ring.popleft()
+                expired = ring.popleft()
                 self.stats["expired"] += 1
+                if name is AuditRing.SECURITY:
+                    self._count_down(security_owner(expired))
 
     def _publish(self, event: CoreEvent) -> bool:
         # The bus event reaches the recorder and the logbook: user ids go
@@ -638,6 +742,14 @@ class AuditLog:
             "security": self.ring_size(AuditRing.SECURITY),
             "listeners": len(self._listeners),
             "dedup_scopes": len(self._dedup),
+            "security_core_entries": self._security_counts.get(CORE_SOURCE, 0),
+            "security_module_entries": {
+                m: c
+                for m, c in sorted(self._security_counts.items())
+                if m != CORE_SOURCE
+            },
+            "security_module_total": self._module_total(),
+            "security_module_evicted": dict(sorted(self._module_evicted.items())),
             **self.stats,
         }
 

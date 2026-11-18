@@ -1234,7 +1234,22 @@ Download ein frisches Salz, damit zwei Downloads nicht verknüpfbar sind.
 | Ring | Größe | Aufbewahrung | Inhalt |
 |---|---|---|---|
 | `general` | `AUDIT_MAX_EVENTS` = 1000 | `AUDIT_RETENTION_DAYS` = 90 | alles andere |
-| `security` | `SECURITY_AUDIT_MAX_EVENTS` = 500 | 90 Tage | jeder `security.*`-Typ und `SECURITY_EVENT_TYPES` (Export, Löschen, Adoption, Restore-Schritte, Installations-Schlüssel verloren/neu) |
+| `security` | Core-Einträge `SECURITY_AUDIT_MAX_EVENTS` = 500; dazu Modul-Einträge mit eigener Quote (ab Review M2): `SECURITY_MODULE_QUOTA` = 100 je Modul, `SECURITY_MODULE_MAX_EVENTS` = 500 für alle Module | 90 Tage | jeder `security.*`-Typ und `SECURITY_EVENT_TYPES` (Export, Löschen, Adoption, Restore-Schritte, Installations-Schlüssel verloren/neu); sicherheitsrelevante Modul-Events |
+
+Verdrängung im Sicherheitsring (ab Review M2 von PR #56): Wem ein Eintrag gehört, entscheidet
+der Typ (`security_owner`: Kerntyp ⇒ Core, sonst `source`), nicht ein frei gesetztes Feld;
+`register_event_prefix(..., module="core")` ⇒ `ValueError`. Ein Core-Eintrag verdrängt nur
+den ältesten Core-Eintrag (Zähler `evicted_security`). Ein Modul-Eintrag verdrängt an der
+Quote seines Moduls dessen ältesten Eintrag; sind alle Modul-Einträge zusammen voll, geht
+der älteste Eintrag des Moduls mit den meisten Einträgen. Ein Core-Eintrag weicht nie einem
+Modul-Eintrag, und ein flutendes Modul verdrängt ein anderes Modul nicht, solange es selbst
+an seiner Quote steht. Verdrängte Modul-Einträge zählen `module_security_evicted` und
+`summary()["security_module_evicted"]` (je Modul), dazu einmal je Modul und Lauf eine
+Warnung im Log; `summary()` nennt `security_core_entries`, `security_module_entries` (je
+Modul) und `security_module_total`. Gespeichert wird wie bisher eine Liste `security`; ein
+älterer Store lädt unverändert, beim Laden gelten dieselben Quoten (keine Store-Version).
+Ein älterer Core liest einen neueren Store mit seiner alten Regel (die 500 neuesten
+Einträge des Rings).
 
 `audit_ring_for(type)` entscheidet, ab B3 zusätzlich `CoreEvent.security_relevant`: ein
 Modul markiert ein eigenes Event als sicherheitsrelevant, dann liegt es im Sicherheitsring
@@ -1661,6 +1676,10 @@ muss):
   Funk- oder Client-Referenz unter einem der entfernten Namen ausgibt, nimmt `router_id`,
   `radio_id` bzw. `client_ref`; eine Kennung unter einem verbliebenen Namen muss eine
   Core-ID oder ein Slug sein (Kleinbuchstaben, Ziffern, `_ . : -`, höchstens 64 Zeichen).
+- (#109) Ein Modul behält höchstens `SECURITY_MODULE_QUOTA` = 100 eigene Einträge im
+  Sicherheitsring (danach fallen seine ältesten weg, gezählt); wer mehr Spur braucht, muss
+  sie selbst halten oder seltener auf den Sicherheitsring schreiben. Ein Modul kann sich
+  nicht `core` nennen (`register_event_prefix` ⇒ `ValueError`).
 
 ### 19.1 Änderungen auf Feld- und Signaturebene
 
@@ -1842,6 +1861,7 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 | # | Änderung | Art |
 |---|---|---|
 | 108 | Maskierung (M1, §13): `IDENTIFIER_KEY_NAMES` auf `finding_key`, `incident_key`, `recommendation_key`, `rule_key`, `scope_key`, `sort_key`, `translation_key` verkleinert (entfernt mit Grund in §13); `is_secret_key` ist für Kennungsnamen wieder `True`; Erkennung ohne Ziffern-Abschneiden (`rule_key2` ist keine Kennung). Unter einem Kennungsnamen bleibt nur ein Wert nach `is_identifier_value` (neu) lesbar: Core-ID oder Slug bis `IDENTIFIER_VALUE_MAX_LENGTH` (64, neu), kein Schlüsselmaterial; dict, Liste, Zahl und jede andere Form ⇒ `**REDACTED**`, nie durchlaufen; Freitext nur ein Token, escaptes JSON immer maskiert. `is_snapshot_secret` unverändert. Vorher (B4) liefen u. a. `{"client_key": "hunter2"}` und `{"device_key": {"value": …}}` unmaskiert durch. | B (Verhalten gegenüber #102), A (`is_identifier_value`, `IDENTIFIER_VALUE_MAX_LENGTH`) |
+| 109 | Sicherheitsring (M2, §12.2): Core- und Modul-Einträge getrennt begrenzt; `SECURITY_AUDIT_MAX_EVENTS` (500) gilt nur noch für Core-Einträge, neu `SECURITY_MODULE_QUOTA` (100 je Modul), `SECURITY_MODULE_MAX_EVENTS` (500 alle Module), `core_audit.security_owner`; der Ring hält damit bis zu 1000 Einträge. Ein Modul-Event verdrängt nie einen Core-Eintrag, an der eigenen Quote nur die eigenen. Zähler `module_security_evicted`, `summary()` mit `security_core_entries`, `security_module_entries`, `security_module_total`, `security_module_evicted`; Warn-Log einmal je Modul. `register_event_prefix(..., module="core")` ⇒ `ValueError`. Store-Layout unverändert. | A, B (Verhalten: ein Modul mit mehr als 100 sicherheitsrelevanten Einträgen verliert seine ältesten statt fremder; Modulname `core` abgelehnt) |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 

@@ -40,6 +40,10 @@ All notable changes to the OpenWrt Router integration will be documented in this
   `client_key`, `device_key`, `router_key`, `radio_key` und weitere Namen, die anderswo
   ein Schlüssel sind, werden wieder vollständig maskiert (Sicherheitsprüfung von PR #56).
   Zähler wie `auth_failures` zeigen Zahlen.
+- Enterprise Core: Sicherheitsrelevante Modul-Events haben im Sicherheits-Audit eine
+  eigene Quote (100 je Modul, 500 für alle Module) und verdrängen nie mehr Einträge des
+  Core; ein flutendes Modul verliert seine eigenen ältesten Einträge (gezählt, einmal im
+  Log), nicht die eines anderen Moduls.
 - Enterprise Core: Das Benutzer-Pseudonym (`usr_…`) im Core-Event bleibt über Neustarts
   gleich, sobald der Installations-Schlüssel existiert. Ohne Schlüssel ist es je Lauf
   zufällig; das steht einmal im Log und im Zähler `bus_salt_ephemeral`.

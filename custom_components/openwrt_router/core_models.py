@@ -223,7 +223,13 @@ FLEET_BACKUP_CONCURRENCY: Final = 1
 # Fixed window: a repeat of the same dedup scope inside it is not published.
 FAILURE_EVENT_COOLDOWN: Final = timedelta(hours=24)
 AUDIT_MAX_EVENTS: Final = 1000
+# Core entries of the security ring (only core entries evict them).
 SECURITY_AUDIT_MAX_EVENTS: Final = 500
+# Security-relevant module entries (review M2 of PR #56): a separate quota,
+# per module and for all modules together, so a module never pushes a core
+# entry out and one module cannot push out another beyond its own quota.
+SECURITY_MODULE_QUOTA: Final = 100
+SECURITY_MODULE_MAX_EVENTS: Final = 500
 AUDIT_RETENTION_DAYS: Final = 90
 DEFAULT_LIST_LIMIT: Final = 50
 MAX_LIST_LIMIT: Final = 500
