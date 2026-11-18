@@ -569,6 +569,9 @@ async def test_f09_first_key_without_a_file_is_not_a_replacement(disks, tmp_path
         ("{not json", "invalid_json"),
         (None, "missing"),
     ],
+    # Short explicit ids: the generated ids of the huge strings exceed 32767
+    # characters, which aborts pytest on Windows (temp dir name from the id).
+    ids=["huge_100k_brackets", "deep_30k_brackets", "invalid_json", "none"],
 )
 def test_f10_parse_acl_text_never_raises(text, why):
     parsed, reason = acl_mod.parse_acl_text(text)

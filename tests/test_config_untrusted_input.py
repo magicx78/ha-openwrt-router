@@ -567,7 +567,7 @@ async def test_case59_hostile_ids_are_refused_without_echo(disks, tmp_path, host
         env.api.versions.async_get_version(hostile),
         env.versions.async_read_artifact(hostile, "uci"),
         env.api.async_request_export(hostile, actor=ADMIN),
-        env.api.async_validate_backup(hostile),
+        env.api.async_validate_backup(hostile, actor=ADMIN),
     ):
         with pytest.raises(BackupNotFoundError) as err:
             await call
