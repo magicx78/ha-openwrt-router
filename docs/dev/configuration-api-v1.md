@@ -17,9 +17,10 @@ Stand: überarbeitet nach dem Review (Critic) und dem Abgleich mit `config-manag
 | Konstanten, Enums, Dataclasses, reine Helfer (Policy, Dedup, Aufbewahrung, Basis), `VerifiedActor`, `WriteAuthorization`, Protocols | `core_models.py` | **Code, getestet** |
 | `ErrorClass`, `ConfigApiError` + 27 Unterklassen | `core_errors.py` | **Code, getestet** |
 | Die eine Maskierung: `mask_secrets`, `mask_for_output`, `redact_text`, `is_secret_key`, `is_secret_option`, `is_secret_path`, `secret_digest_factory` | `core_masking.py` | **Code, getestet** |
-| `async_get_configuration_api(hass, version=1)` | `config_api.py` | später |
-| `ActionGuard` (Implementierung von `ActionGuardProtocol`, mit Ledger) | `core_guard.py` | später |
-| `VersionStore` (Implementierung von `VersionStoreProtocol`) | `core_versions.py` | später |
+| `async_get_configuration_api(hass, version=1)`, `ConfigurationManager` (Warteschlange, Locks, Drift, Export, Löschen, Aufbewahrung, Proben) | `config_api.py` | **Code, getestet** (Teil 2) |
+| `ActionGuard` (Implementierung von `ActionGuardProtocol`, mit Ledger) | `core_guard.py` | **Code, getestet** (Teil 2) |
+| `VersionStore` (Implementierung von `VersionStoreProtocol`) inkl. Installations-Schlüssel und GFS-Aufbewahrung | `version_store.py` | **Code, getestet** (Teil 2) |
+| Test-Provider (nur für Tests, kein Router-Aufruf) | `tests/core_test_provider.py` | nur unter `tests/` |
 | `RouterRegistry`, Identität, Capability-Ableitung | `router_registry.py`, `router_identity.py`, `capabilities.py` | **Code, getestet** (Teil 1) |
 | Zwei Audit-Ringe, Bus-Event, Dedup | `core_audit.py` | **Code, getestet** (Teil 1) |
 | Store-Laden mit `.bak` und Wiederaufbau (gemeinsamer Helfer für Registry und Audit) | `core_store.py` | **Code, getestet** (Teil 1) |
@@ -205,6 +206,19 @@ Regeln:
   `async_probe` meldet **jede** `config.*`-Capability, über die der Provider entscheidet,
   auch nicht verfügbare (z. B. `config.restore` = `unavailable` in Phase 1, während alle
   anderen verfügbar sind). Nicht gemeldete `config.*`-Namen bleiben `unknown`/`not_probed`.
+- Eine Probe prüft **nur Rechte und Metadaten** (z. B. ACL-Einträge, Paketliste, ob ein
+  Endpunkt existiert). Sie holt nie ein Backup und liest keine Konfiguration, nur um zu
+  sehen, ob es geht. Was sich so nicht klären lässt, meldet der Provider als
+  `unknown`/`determined_on_first_use` (`CapabilityReason.DETERMINED_ON_FIRST_USE`).
+- Ein `config.*` im Zustand `unknown`/`determined_on_first_use` **darf versucht werden**
+  (`require_capability` lässt es durch). Das Ergebnis der ersten Verwendung setzt den Status:
+  Erfolg ⇒ `available`; `ErrorClass.PERMISSION` ⇒ `unavailable`/`permission_denied`;
+  `ErrorClass.NOT_AVAILABLE` ⇒ `unavailable`/`not_detected`; jeder andere Fehler lässt ihn
+  `unknown`. `detail.settled_by` nennt die Operation; Zähler `first_use_settled`. Die
+  Registry-Sicht folgt beim nächsten Coordinator-Poll.
+- Neue Proben: beim Anhängen eines Routers, nach Firmware-Wechsel und auf Anfrage
+  (`request_probe`, z. B. nach ACL-Neuverteilung). Laufende Proben werden zusammengefasst:
+  höchstens eine läuft und eine wartet je Router (Zähler `probes_coalesced`).
 - Ohne Provider: alle `config.*` `unavailable`/`no_provider`.
 - Option `config_backup_enabled` aus (`OPTION_CONFIG_BACKUP_ENABLED`): alle `config.*`
   `unavailable`/`disabled`, es wird nicht geprobt.
@@ -489,6 +503,31 @@ Sperren: Die API hält den Router-Lock für jede schreibende Operation (Abschnit
 Store hat zusätzlich eine eigene interne Sperre für seinen Index (mehrere Router schreiben
 in denselben Store).
 
+**Provider-Ausgabe ist ungeprüfte Eingabe.** Der Core prüft beim Ablegen (erzwungen in
+`config_api.py` und `version_store.py`, Tests `tests/test_config_untrusted_input.py`):
+
+1. `async_collect` muss ein `CollectedVersion` mit `VersionMeta` liefern; sonst
+   `ProviderError(error_class=invalid)` mit `reason` `not_a_collected_version` bzw.
+   `meta_not_version_meta`.
+2. Artefaktarten sind eine **geschlossene Menge** (`ArtifactKind`); jede andere Art ⇒
+   `invalid`/`unknown_artifact_kind`; ein Wert, der kein `ArtifactPayload` ist ⇒
+   `artifact_not_a_payload`. Der Store prüft dasselbe noch einmal (`BackupMetadataError`,
+   Zähler `refused_input`).
+3. Das Größenlimit (`router_limit`) gilt **vor** dem Hashen: ein zu großes Artefakt ⇒
+   `ArtifactTooLargeError`, ohne dass es gehasht oder geschrieben wird.
+4. sha256 rechnet **der Core**. Ein mitgelieferter `ArtifactPayload.sha256` muss passen,
+   sonst `BackupIntegrityError`; in `ArtifactRef.sha256` steht immer der Core-Wert.
+5. Locator erzeugt **nur der Core** (`<backup_id>.<kind>`). Ein Provider kann keinen Pfad
+   vorgeben; ein ungültiger Locator in einer `ArtifactRef` ⇒ `InvalidStorageRefError`.
+6. Metadaten sind begrenzt (Länge von `note`, Warnungscodes nach `WARNING_CODE_PATTERN`,
+   `MAX_WARNINGS`); IDs (`drift_id`, `not_compared`-Einträge, Links) sind Tokens ohne
+   Pfadtrenner; `installation_key_id` ist `None` oder genau 16 Kleinbuchstaben-Hex
+   (`check_key_id`).
+7. Ungültige Router- oder Versions-IDs werden abgelehnt, **ohne** die ID im Fehler
+   zurückzugeben (`RouterNotFoundError` `invalid_router_id`, `BackupNotFoundError`
+   `invalid_version_id`; `async_read_artifact` mit unbekannter Art ⇒
+   `BackupNotFoundError` `unknown_artifact_kind`).
+
 ```python
 # Modul (z. B. config-manager außerhalb der Warteschlange) legt eine selbst geholte Version ab.
 # Erst holen (nur lesend), DANN autorisieren: die Autorisierung gilt nur 5 min.
@@ -520,7 +559,10 @@ artifact_kinds)`:
    und umgekehrt), ein neuer `failed` nie.
 4. Gleiche Artefaktarten; mit Archiv gleicher `content_hash`, ohne Archiv gleicher
    `uci_hash`. Beide Hashes kommen **immer vom Provider**; der Core rechnet sie nie nach.
-5. Treffer ⇒ nur `last_seen_at` wird gesetzt, `PutVersionResult(created=False)`, keine
+5. Gleiche `installation_key_id` wie der Kandidat. Nach einem Schlüsselwechsel legt der
+   Core also immer eine neue Version an; sonst bliebe die Basis auf dem alten Schlüssel und
+   jede Drift-Prüfung wäre erneut ein Re-Baseline (Schleife).
+6. Treffer ⇒ nur `last_seen_at` wird gesetzt, `PutVersionResult(created=False)`, keine
    Dateien, kein `backup_created`-Event.
 
 ### 7.5 Aufbewahrung
@@ -540,13 +582,38 @@ api.set_retention_policy(RetentionPolicy(max_versions=30, max_age=timedelta(days
 results = await api.async_apply_retention()      # tuple[RetentionResult, ...], je Router
 ```
 
-`plan_retention(router_id, records, policy)`:
+**GFS (Standard).** `RetentionPolicy` hat zwei Regelwerke, die sich nicht mischen lassen
+(beides zusammen ⇒ `ValueError`): GFS mit `daily`/`weekly`/`monthly` oder Anzahl/Alter mit
+`max_versions`/`max_age`. `max_bytes_per_router` gilt für beide. Solange kein Modul eine
+Regel setzt, gilt `DEFAULT_RETENTION_POLICY = RetentionPolicy.gfs()` = 7 Tage / 4
+ISO-Wochen / 6 Kalendermonate. Die Aufbewahrung läuft **nach jedem Ablegen** für den
+betroffenen Router (als System, Aktion `prune`).
+
+```python
+api.set_retention_policy(RetentionPolicy.gfs(daily=14, weekly=8, monthly=12),
+                         module="config_manager")
+```
+
+Folge des Standards: Mehrere Versionen desselben Tages werden sofort auf die neueste
+verwendbare ausgedünnt, auch manuelle (sichtbar als `configuration.retention_applied`).
+Wer das nicht will, schützt die Version (`protect`) oder setzt eine eigene Regel.
+
+`plan_retention(router_id, records, policy, *, now=None, max_bytes=None)`:
 
 - **Immer behalten**: geschützte Versionen (`KeepReason.PROTECTED`) und die neueste
   verwendbare Version (`usable` = Status `ok` und Validierung `unverified`/`valid`,
   `KeepReason.NEWEST_VALID`). Sie zählen zuerst gegen die Grenzen.
-- Danach, neueste zuerst: älter als `max_age`, jenseits von `max_versions` oder über
-  `max_bytes_per_router` ⇒ löschen; sonst `KeepReason.WITHIN_POLICY`.
+- GFS: je Tag/Woche/Monat im Fenster die neueste verwendbare Version
+  (`KeepReason.DAILY`/`WEEKLY`/`MONTHLY`), gezählt in der Zeitzone von `now`. Nicht
+  verwendbare Versionen vertreten nie einen Zeitraum; sie bleiben nur innerhalb des
+  Tagesfensters (`KeepReason.RECENT_FAILED`).
+- Anzahl/Alter, neueste zuerst: älter als `max_age` oder jenseits von `max_versions` ⇒
+  löschen; sonst `KeepReason.WITHIN_POLICY`. Verwendbare zählen vor nicht verwendbaren,
+  eine `failed`-Version verdrängt also nie eine verwendbare.
+- Über dem Größenlimit (das kleinere aus `max_bytes_per_router` und dem Router-Limit des
+  Store): zuerst nicht verwendbare, dann die ältesten entfernen, nie geschützte oder die
+  neueste verwendbare. Reicht das nicht, `RetentionResult.over_limit = True` und Event
+  `configuration.storage_limit_exceeded`; erzwungen wird nichts.
 - `RetentionResult(router_id, evaluated_at, deleted, kept)`: **jede** bewertete Version
   steht in `deleted` oder mit Grund in `kept`; nichts geschieht still. Event
   `configuration.retention_applied` (Audit-Pflicht).
@@ -877,6 +944,8 @@ Ergebnis ⇒ `None` (die API wirft dann `BackupNotFoundError` in `async_detect_d
 
 32 zufällige Bytes (`INSTALLATION_KEY_BYTES`) im Store `openwrt_router.installation_key`. Nur
 für HMAC-Digests von Geheimnissen in Snapshots. **Nie** in Audit, Bus-Event, Diagnose, Log.
+Der Store wird mit `private=True` (Dateirechte 0600) und `atomic_writes=True` angelegt und
+nur einmal geschrieben (beim Erzeugen bzw. nach einem Reset).
 `installation_key_id(key)` (16 hex) ist öffentlich und wird an Versionen und Snapshots
 gestempelt.
 
@@ -891,9 +960,31 @@ Zustand (`installation_key_state(key_readable=, has_versions=, has_acks=)`):
 Neuer Schlüssel nach Verlust nur über die kritische Aktion `installation_key_reset`
 (`async_request_installation_key_reset` ⇒ Admin-Freigabe ⇒
 `async_reset_installation_key`, nur der Antragsteller). Event `core.installation_key_reset`.
-Danach ist die nächste Drift-Prüfung je Router ein **Re-Baseline**: `DriftReport.rebaseline
-= True`, `drifted = False` (beides zusammen ⇒ `ValueError`), der Core legt den Live-Stand als
-neue Basis ab statt Drift zu melden.
+Danach meldet der Provider bei der nächsten Drift-Prüfung je Router `DriftReport.rebaseline
+= True` („Schlüssel gewechselt“). Das darf **zusammen** mit echten Änderungen kommen
+(`drifted = True` oder vergleichbare Änderungen im Diff); dann ist der Bericht ein Drift
+und der Core sendet die Drift-Events wie sonst (dazu ein Log-Eintrag und Zähler
+`rebaseline_refused`). Der Core legt den Live-Stand nur bei einer **Entwarnung** als
+neue Basis ab (`DriftReport.rebaseline_allowed`: `rebaseline`, kein Drift, keine
+vergleichbare Änderung, Vergleich `complete`) **und** nur, wenn er selbst einen
+Schlüsselwechsel kennt (offener Re-Baseline-Vermerk nach `installation_key_reset`). Ein
+`rebaseline` ohne solchen Vermerk wird verworfen (Zähler `rebaseline_unconfirmed`). Ein
+`drifted = False` mit vergleichbaren Änderungen gilt als Drift (Zähler
+`drift_inconsistent`). Eine `known`-Bestätigung löscht den offenen Vermerk, weil sie selbst
+eine neue Basis setzt.
+
+### 11.4 Vollständigkeit des Vergleichs
+
+`DriftReport.comparison` (`DriftComparison`): `complete`, `partial` (dann nennt
+`not_compared` die Configs, die nicht gelesen oder verglichen werden konnten; Pflicht) oder
+`unknown` (der Vergleich als Ganzes ist nicht verlässlich). `complete` mit
+`not_compared` ⇒ `ValueError`.
+
+- **Entwarnung** (`DriftReport.all_clear`) nur bei `complete` ohne Drift. Nur dann setzt
+  der Core den Drift-Dedup-Zustand zurück.
+- Unvollständig ⇒ Event `configuration.drift_incomplete` (`data`: `comparison`,
+  `not_compared` gekürzt, `not_compared_count`), der Dedup-Zustand eines laufenden Drifts
+  bleibt, ein Re-Baseline findet nicht statt. Der Zustand steht im Ergebnis und im Audit.
 
 Vergleichbarkeit: Wurde die Basis mit einem anderen Schlüssel gebildet
 (`installation_key_id` verschieden) oder ist der Schlüssel verloren, meldet der Provider
@@ -954,11 +1045,14 @@ liest beide Ringe, `ring=AuditRing.SECURITY` nur einen.
 `configuration.backup_deleted`, `configuration.retention_applied`,
 `configuration.drift_detected`, `configuration.drift_acknowledged`,
 `configuration.change_critical`, `configuration.change_unknown`,
+`configuration.drift_incomplete`,
 `configuration.integrity_failed`, `configuration.restore_checked`,
 `configuration.restore_requested`, `configuration.restore_approved`,
 `configuration.restore_rejected`, `configuration.restore_completed`,
 `configuration.restore_failed`, `configuration.storage_swept`,
+`configuration.storage_limit_exceeded`,
 `security.authorization_denied`, `security.authorization_consumed`,
+`security.authorization_granted`,
 `security.approval_requested`, `security.approval_approved`, `security.approval_rejected`,
 `security.approval_expired`, `core.installation_key_lost`, `core.installation_key_reset`,
 `core.store_recovered`.
@@ -978,7 +1072,8 @@ liest beide Ringe, `ring=AuditRing.SECURITY` nur einen.
 - Aus Provider-Ergebnissen erzeugt der Core: aus einem `DriftReport`
   (`drift_event_types(report)`) `drift_detected` (bei `drifted`), `change_critical` (bei
   `critical_count > 0`), `change_unknown` (bei `unknown_count > 0`), jeweils mit
-  `dedup_key = drift_id`; nichts bei `rebaseline`. Aus einer `ValidationInfo`
+  `dedup_key = drift_id`, dazu `drift_incomplete` bei Vergleich `partial`/`unknown`;
+  nichts nur bei einem erlaubten Re-Baseline (`rebaseline_allowed`, Abschnitt 11.3). Aus einer `ValidationInfo`
   (`integrity_failed(validation)`, Status `invalid`/`corrupt`/`missing`)
   `integrity_failed`.
 - Module senden eigene Typen nur unter einem eigenen, registrierten Präfix, der **nicht** in
@@ -1259,7 +1354,7 @@ Signatur bleibt, die Regel ist neu.
 | 26 | `async_get_installation_key()` erzeugt nicht mehr beim ersten Zugriff, sondern nur im Zustand `uninitialised`; sonst ggf. `InstallationKeyLostError` | B (Verhalten) |
 | 27 | neu: `InstallationKeyState`, `installation_key_state()`, `installation_key_id()`, `INSTALLATION_KEY_ID_LENGTH`, `ISSUE_INSTALLATION_KEY_LOST`, API `installation_key_state`, `async_request_installation_key_reset`, `async_reset_installation_key`, `InstallationKeyLostError` | A |
 | 28 | neu: `ChangeKind.NOT_COMPARABLE`, `ConfigDiff.comparable_changes` | A |
-| 29 | neu: `DriftReport.baseline_rule`, `critical_count`, `unknown_count`, `secrets_comparable`, `rebaseline` (`rebaseline` mit `drifted` ⇒ `ValueError`); `drift_event_types`, `integrity_failed` | A |
+| 29 | neu: `DriftReport.baseline_rule`, `critical_count`, `unknown_count`, `secrets_comparable`, `rebaseline`; `drift_event_types`, `integrity_failed`. (Die Regel „`rebaseline` mit `drifted` ⇒ `ValueError`“ ist durch #56 ersetzt.) | A |
 
 **Provider**
 
@@ -1311,6 +1406,21 @@ Signatur bleibt, die Regel ist neu.
 |---|---|---|
 | 54 | neu: Event-Typ `CoreEventType.STORE_RECOVERED` = `core.store_recovered`, in `AUDIT_MANDATORY_EVENT_TYPES` (Abschnitt 12.3). Grund: ein unlesbarer Core-Store wird neu aufgebaut; ohne eigenes Event wäre der Verlust von Adoptionen nur im Log sichtbar. | A |
 
+**Teil 2 (Guard, Versionsspeicher, Configuration API)**
+
+| # | Änderung | Art |
+|---|---|---|
+| 55 | Implementiert: `core_guard.py` (`ActionGuard`), `version_store.py` (`VersionStore`, Installations-Schlüssel), `config_api.py` (`ConfigurationManager`, `async_get_configuration_api(hass, version=1)`), angehängt an `EnterpriseCore`. Modulname `core_versions.py` → `version_store.py`. Ohne Provider kein Router-Aufruf. | A |
+| 56 | `DriftReport(rebaseline=True, drifted=True)` ist erlaubt (vorher `ValueError`, ersetzt #29): Schlüsselwechsel und echte Änderung zusammen sind ein Drift. Neu `DriftReport.rebaseline_allowed`; Re-Baseline nur bei Entwarnung und bekanntem Schlüsselwechsel (11.3). | B (Verhalten) |
+| 57 | neu: `DriftComparison` (`complete`/`partial`/`unknown`), `DriftReport.comparison`, `DriftReport.not_compared`, `DriftReport.all_clear`, Event `configuration.drift_incomplete`. `partial` ohne `not_compared` oder `complete` mit `not_compared` ⇒ `ValueError`. Keine Entwarnung und kein Dedup-Reset bei unvollständigem Vergleich (11.4). | A (Felder mit Standard `complete`), B (Verhalten) |
+| 58 | Proben prüfen nur Rechte/Metadaten; neu `CapabilityReason.DETERMINED_ON_FIRST_USE`; `config.*` in `unknown`/`determined_on_first_use` darf versucht werden, das Ergebnis setzt den Status (Abschnitt 5). | A, B (Verhalten von `require_capability`) |
+| 59 | Ungeprüfte Provider-Eingabe (7.3): Größenlimit vor dem Hash, sha256 vom Core, geschlossene Artefaktarten, nur Core-Locator, begrenzte Metadaten, `check_key_id`; neue `reason`-Werte `not_a_collected_version`, `meta_not_version_meta`, `unknown_artifact_kind`, `artifact_not_a_payload`. | B (Verhalten), A (Helfer) |
+| 60 | Dedup verlangt zusätzlich gleiche `installation_key_id` (7.4, Regel 5). | B (Verhalten) |
+| 61 | `RouterRegistry.get` und `VersionStore.get` lehnen ungültige IDs ab, ohne sie zurückzugeben (`reason` `invalid_router_id` / `invalid_version_id`). | B (Verhalten) |
+| 62 | Aufbewahrung: `RetentionPolicy.daily`/`weekly`/`monthly`, `RetentionPolicy.gfs()`, `uses_gfs`, `DEFAULT_RETENTION_POLICY` (GFS 7/4/6), `KeepReason.DAILY`/`WEEKLY`/`MONTHLY`/`RECENT_FAILED`, `plan_retention(..., now=, max_bytes=)`, `RetentionResult.over_limit`; Aufbewahrung nach jedem Ablegen. | A, B (Standardverhalten: vorher keine Aufbewahrung ohne Modulregel) |
+| 63 | neu: Event-Typen `configuration.storage_limit_exceeded`, `security.authorization_granted` (Audit-Pflicht: jede Guard-Entscheidung schreibt einen Eintrag). | A |
+| 64 | `core_store.create_store(..., private=False, atomic_writes=False)`: neue optionale Parameter; der Store des Installations-Schlüssels nutzt `private=True`, `atomic_writes=True`. | A |
+
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 
 | # | Punkt | Entscheidung | Grund |
@@ -1351,6 +1461,12 @@ Wortliste des Reviews waren es noch 7 (`r0kh`, `r1kh`, `pincode`, `param_enc`, `
 - Selbstfreigabe durch denselben Admin ist erlaubt (kein Vier-Augen-Prinzip).
 - Modul-Event-Typen liegen unter einem eigenen Präfix außerhalb der Core-Namensräume.
 - Die 14 Punkte aus 19.2.
+- Teil 2: `FLEET_BACKUP_CONCURRENCY = 1`; die Aufbewahrung läuft nach jedem Ablegen; der
+  Standard ist GFS 7/4/6.
+- Teil 2: Ein fehlgeschlagener Versuch mit einer Autorisierung (falscher Router, falsche
+  Aktion) verbraucht sie.
+- Teil 2: Ein Schlüsselwechsel mit gleichzeitiger echter Änderung ist ein Drift; ein
+  Re-Baseline gibt es nur bei vollständiger Entwarnung.
 
 ### 19.4 Offene Fragen an den Nutzer
 
@@ -1361,3 +1477,13 @@ Wortliste des Reviews waren es noch 7 (`r0kh`, `r1kh`, `pincode`, `param_enc`, `
    `long_lived_access_token`); bei Service-Aufrufen ist er nicht unterscheidbar. Stand des
    Vertrags: jeder aktive, nicht systemgenerierte Admin-Benutzer darf freigeben, egal über
    welchen Token. Eine Einschränkung auf `normal` ginge nur für HTTP/WS-Wege.
+3. **Soll GFS manuelle und `pre_*`-Versionen vom Ausdünnen ausnehmen?** Heute bleibt am
+   selben Tag nur die neueste verwendbare Version, auch wenn die älteren manuell waren
+   (Notiz geht mit). Vorschlag: `manual` und `pre_*` für das Tagesfenster ausnehmen.
+4. **Braucht der Export `config.export`?** Heute prüft der Export nur die Freigabe, nicht
+   die Capability (er liest nur gespeicherte Bytes, kein Router-Aufruf).
+5. **Soll `async_archive_router` beim Entfernen eines Eintrags automatisch laufen?** Heute
+   bleiben die Versionen liegen, bis ein Aufrufer archiviert.
+6. **`content_hash`/`uci_hash` für den Dedup bleiben Provider-Werte.** Ein fehlerhafter
+   Provider kann damit eine neue Version unterdrücken (nur `scheduled`/`drift`). Soll der
+   Core für den Dedup zusätzlich seine eigenen sha256 vergleichen?
