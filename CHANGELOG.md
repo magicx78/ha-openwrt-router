@@ -34,6 +34,9 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ### Changed
 
+- Enterprise Core, Maskierung: Nennt ein Record sein Feld in mehreren Namensfeldern
+  (`key`, `name`, `field`, `param`, `parameter`, `setting`), werden alle geprüft; ein
+  geheimer Name maskiert die Werte unabhängig von der Reihenfolge (Vertrag #114).
 - Enterprise Core: Drift-Prüfung, Restore-Probelauf und Backup-Prüfung verlangen von
   einem Benutzer Admin-Rechte, wie schon Capture und Vergleich; die Ablehnung steht im
   Sicherheits-Audit. Die Backup-Prüfung braucht immer einen Akteur; ohne ihn wird sie

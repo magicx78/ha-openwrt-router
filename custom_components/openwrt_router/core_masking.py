@@ -1249,23 +1249,26 @@ def _record_masked_keys(mapping: Mapping[Any, Any]) -> frozenset[str]:
         ) or _has_inline_key(mapping):
             masked |= _OPTION_VALUE_KEYS
     if not masked and any(key in mapping for key in _OPTION_VALUE_KEYS):
-        for name_key in _FIELD_NAME_KEYS:
-            named = mapping.get(name_key)
-            if not isinstance(named, str):
-                continue
-            if is_identifier_name(named):
-                # {"key": "rule_key", "value": …}: only strict identifier
-                # values (or None) stay readable
-                shown = all(
-                    mapping.get(k) is None or is_identifier_value(mapping.get(k))
-                    for k in _OPTION_VALUE_KEYS
-                )
-                if not shown:
-                    masked |= _OPTION_VALUE_KEYS
-                break
-            if is_secret_key(named):
+        # A record may name its field in several keys at once. Look at ALL of
+        # them first: one secret name masks the values, whatever the others
+        # say and in whatever order (review N1). Only when none is secret
+        # does an allowed identifier name get the strict value rule.
+        names = [
+            named
+            for named in (mapping.get(name_key) for name_key in _FIELD_NAME_KEYS)
+            if isinstance(named, str)
+        ]
+        if any(is_secret_key(n) and not is_identifier_name(n) for n in names):
+            masked |= _OPTION_VALUE_KEYS
+        elif any(is_identifier_name(n) for n in names):
+            # {"key": "rule_key", "value": …}: only strict identifier values
+            # (or None) stay readable
+            shown = all(
+                mapping.get(k) is None or is_identifier_value(mapping.get(k))
+                for k in _OPTION_VALUE_KEYS
+            )
+            if not shown:
                 masked |= _OPTION_VALUE_KEYS
-                break
     for path_key in _PATH_KEYS:
         path = mapping.get(path_key)
         if isinstance(path, str) and is_secret_path(path):
