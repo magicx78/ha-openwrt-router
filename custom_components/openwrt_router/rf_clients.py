@@ -318,6 +318,80 @@ def retry_comparable(driver_a: str | None, driver_b: str | None) -> bool:
     return family_a is not None and family_a == family_b
 
 
+def mt76_retries_reliable(wed_enable: str | None) -> bool | None:
+    """Map the mt76 module parameter ``wed_enable`` to ``retries_reliable``.
+
+    "N" (WED off, seen on both WR3000 on 2026-11-18) → True, "Y" → False,
+    anything else → None (unknown).
+    """
+    value = wed_enable.strip().upper() if isinstance(wed_enable, str) else None
+    return {"N": True, "Y": False}.get(value or "")
+
+
+# =====================================================================
+# iwinfo assoclist
+# =====================================================================
+
+
+@dataclass(frozen=True)
+class AssocCounters:
+    """One station of ``iwinfo assoclist``; every field may be unknown.
+
+    Units as seen live 2026-11-18: ``connected_time_s`` seconds,
+    ``inactive_ms`` milliseconds, ``tx_rate_kbps`` kbit/s, signal and noise
+    signed dBm (noise 0 is unknown). TX counters are running totals; use
+    :func:`counter_delta` between polls.
+    """
+
+    tx_packets: int | None
+    tx_retries: int | None
+    tx_failed: int | None
+    connected_time_s: int | None
+    inactive_ms: int | None
+    signal_dbm: int | None
+    noise_dbm: int | None
+    tx_rate_kbps: int | None
+
+
+def _whole(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    return int(value)
+
+
+def _station(entry: dict[str, Any]) -> AssocCounters:
+    tx = entry.get("tx")
+    tx = tx if isinstance(tx, dict) else {}
+    noise = _whole(entry.get("noise"))
+    return AssocCounters(
+        tx_packets=_whole(tx.get("packets")),
+        tx_retries=_whole(tx.get("retries")),
+        tx_failed=_whole(tx.get("failed")),
+        connected_time_s=_whole(entry.get("connected_time")),
+        inactive_ms=_whole(entry.get("inactive")),
+        signal_dbm=_whole(entry.get("signal")),
+        noise_dbm=noise if noise else None,
+        tx_rate_kbps=_whole(tx.get("rate")),
+    )
+
+
+def assoc_counters_from_assoclist(raw: Any) -> dict[str, AssocCounters]:
+    """Parse ``iwinfo assoclist`` into counters per lower-case MAC."""
+    entries = raw.get("results") if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        return {}
+    out: dict[str, AssocCounters] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        mac = entry.get("mac")
+        if isinstance(mac, str) and mac:
+            out[mac.lower()] = _station(entry)
+    return out
+
+
 # =====================================================================
 # Assessment
 # =====================================================================

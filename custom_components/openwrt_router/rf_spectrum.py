@@ -128,9 +128,16 @@ def _int(value: Any) -> int | None:
         return None
 
 
+# Numeric ``band`` values of ``iwinfo freqlist`` seen live 2026-11-18. Other
+# numbers (6 GHz was not seen) are not guessed.
+_NUMERIC_BANDS = {2: BAND_24, 5: BAND_5}
+
+
 def _band_alias(value: Any) -> str | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return _NUMERIC_BANDS.get(value)
     if not isinstance(value, str):
-        return None  # numeric band enums are not documented; not guessed
+        return None
     return _BAND_ALIASES.get(value.lower().replace(" ", ""))
 
 

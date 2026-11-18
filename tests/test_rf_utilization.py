@@ -255,11 +255,18 @@ class TestUtilizationFromDelta:
             "other_busy": "missing_field",
         }
 
+    def test_mixed_sources_are_unknown(self):
+        cur = replace(_next(), source=SOURCE_HOSTAPD_STATUS)
+        result = _delta(cur)
+        assert result.reason is R.SOURCE_MISMATCH
+        assert result.source == SOURCE_HOSTAPD_STATUS
+
     def test_every_unknown_reason_is_covered(self):
         # Guard: a new reason must get a test above.
         assert {r.value for r in R} == {
             "no_previous",
             "radio_mismatch",
+            "source_mismatch",
             "time_not_advancing",
             "gap_too_large",
             "router_restart",

@@ -6,9 +6,15 @@ Two sources, never mixed:
     (``active_time``, ``busy_time``, ``rx_time``, ``tx_time``). A share needs
     two samples; :func:`utilization_from_delta` returns either a value or a
     named :class:`UnknownReason`, never 0 % as a stand-in.
-(B) ``hostapd get_status`` → ``airtime.utilization`` (0–255, busy only,
-    computed by hostapd every ``bss_load_update_period`` beacons).
+(B) ``hostapd get_status`` → ``airtime`` (busy only). V1 source. The
+    share comes from the delta of the running ``time``/``time_busy``
+    counters between two polls (:func:`bss_load_from_get_status`,
+    :meth:`BssLoad.as_sample`, :func:`utilization_from_delta`). The
+    ``utilization`` byte (0–255, :func:`utilization_from_bss_load`) covers
+    only the last ``bss_load_update_period`` and jumped between 0 and 255
+    within seconds in the live check of 2026-11-18.
 
+A sample pair from two different sources is unknown (``source_mismatch``).
 :func:`summarize` evaluates a window of percentages (from either source,
 one source per call) without turning unknown points into numbers.
 """
@@ -61,6 +67,7 @@ class UnknownReason(StrEnum):
 
     NO_PREVIOUS = "no_previous"
     RADIO_MISMATCH = "radio_mismatch"
+    SOURCE_MISMATCH = "source_mismatch"  # survey and get_status never mixed
     TIME_NOT_ADVANCING = "time_not_advancing"
     GAP_TOO_LARGE = "gap_too_large"
     ROUTER_RESTART = "router_restart"  # uptime went back
@@ -78,7 +85,9 @@ class SurveySample:
 
     Counter fields are milliseconds as reported (running totals); each may be
     None when the driver does not fill it. ``noise`` is dBm as already
-    converted by the caller (rpcd reports it unsigned, e.g. 161 for -95).
+    converted by the caller (rpcd reports it unsigned, e.g. 161 for -95,
+    see :func:`survey_noise_dbm`). ``source`` is ``hostapd.get_status`` for
+    samples built from its ``airtime`` counters (:meth:`BssLoad.as_sample`).
     """
 
     radio_key: str
@@ -90,6 +99,7 @@ class SurveySample:
     rx_ms: int | None
     tx_ms: int | None
     noise: int | None = None
+    source: str = SOURCE_IWINFO_SURVEY
 
 
 @dataclass(frozen=True)
@@ -157,6 +167,8 @@ def _pair_reason(
     """Reasons that invalidate the whole pair, most specific first."""
     if prev.radio_key != cur.radio_key:
         return UnknownReason.RADIO_MISMATCH
+    if prev.source != cur.source:
+        return UnknownReason.SOURCE_MISMATCH
     elapsed = cur.taken_at - prev.taken_at
     if elapsed <= 0:
         return UnknownReason.TIME_NOT_ADVANCING
@@ -189,7 +201,9 @@ def utilization_from_delta(
     uptime_tolerance_s: float = DEFAULT_UPTIME_TOLERANCE_S,
 ) -> UtilizationResult:
     """Return busy/rx/tx shares of the active time between two samples."""
-    unknown = UtilizationResult(radio_key=cur.radio_key, measured_at=cur.taken_at)
+    unknown = UtilizationResult(
+        radio_key=cur.radio_key, measured_at=cur.taken_at, source=cur.source
+    )
     if prev is None:
         return _with_reason(unknown, UnknownReason.NO_PREVIOUS)
     reason = _pair_reason(prev, cur, max_gap_s, uptime_tolerance_s)
@@ -214,7 +228,10 @@ def utilization_from_delta(
 
 def _with_reason(result: UtilizationResult, reason: UnknownReason) -> UtilizationResult:
     return UtilizationResult(
-        radio_key=result.radio_key, measured_at=result.measured_at, reason=reason
+        radio_key=result.radio_key,
+        measured_at=result.measured_at,
+        reason=reason,
+        source=result.source,
     )
 
 
@@ -251,6 +268,7 @@ def _shares(
         interval_s=cur.taken_at - prev.taken_at,
         measured_at=cur.taken_at,
         notes=notes,
+        source=cur.source,
     )
 
 
@@ -284,6 +302,143 @@ def utilization_from_bss_load(
             return metric_missing(CapabilityState.NO_DATA, SOURCE_HOSTAPD_STATUS)
     return metric_measured(
         100.0 * load / BSS_LOAD_MAX, SOURCE_HOSTAPD_STATUS, measured_at=measured_at
+    )
+
+
+# =====================================================================
+# Raw ubus parsing
+# =====================================================================
+
+# Signed 8-bit range of the noise value (dBm).
+_NOISE_SIGNED_MIN = -128
+_NOISE_UNSIGNED_MIN = 128
+_NOISE_UNSIGNED_MAX = 255
+
+
+def survey_noise_dbm(raw: Any) -> int | None:
+    """Return survey noise in dBm; None when unknown.
+
+    rpcd reports the survey noise as an unsigned byte (164 means -92 dBm,
+    seen live 2026-11-18); 0 means "not reported". 1..127 would be a
+    positive noise floor and is unknown. Values that are already negative
+    are taken as they are.
+    """
+    value = _as_whole_number(raw)
+    if value is None:
+        return None
+    if _NOISE_UNSIGNED_MIN <= value <= _NOISE_UNSIGNED_MAX:
+        return value - 256
+    if _NOISE_SIGNED_MIN <= value < 0:
+        return value
+    return None
+
+
+def _survey_entries(raw: Any) -> list[Any]:
+    if isinstance(raw, dict):
+        raw = raw.get("results")
+    return raw if isinstance(raw, list) else []
+
+
+def survey_samples_from_iwinfo(
+    raw: Any,
+    radio_key: str,
+    taken_at: float,
+    uptime_s: float | None,
+    *,
+    mhz: int | None = None,
+) -> tuple[SurveySample, ...]:
+    """Parse ``iwinfo survey`` into samples, one per frequency with data.
+
+    Entries whose ``active_time`` is missing or 0 were never visited and are
+    no measurement. There is no "in use" field: the caller passes the
+    radio's operating ``mhz``, because off-channel entries can hold small
+    leftover counts (up to about 160 ms, seen on mt76, ath10k-ct and ath9k)
+    that are no live measurement.
+    """
+    samples = []
+    for entry in _survey_entries(raw):
+        if not isinstance(entry, dict):
+            continue
+        freq = _as_whole_number(entry.get("mhz"))
+        active = _as_whole_number(entry.get("active_time"))
+        if freq is None or freq <= 0 or active is None or active <= 0:
+            continue
+        if mhz is not None and freq != mhz:
+            continue
+        samples.append(
+            SurveySample(
+                radio_key=radio_key,
+                mhz=freq,
+                taken_at=taken_at,
+                uptime_s=uptime_s,
+                active_ms=active,
+                busy_ms=_as_whole_number(entry.get("busy_time")),
+                rx_ms=_as_whole_number(entry.get("rx_time")),
+                tx_ms=_as_whole_number(entry.get("tx_time")),
+                noise=survey_noise_dbm(entry.get("noise")),
+            )
+        )
+    return tuple(samples)
+
+
+@dataclass(frozen=True)
+class BssLoad:
+    """``airtime`` and channel of one ``hostapd get_status`` answer.
+
+    ``time_ms``/``busy_ms`` are hostapd's running channel time counters
+    (milliseconds, per radio, refreshed every ``bss_load_update_period``
+    beacons). ``load_byte`` is ``airtime.utilization`` (0..255); live it
+    jumped between 0 and 255 within seconds, so the share is taken from the
+    counter delta (:meth:`as_sample` plus :func:`utilization_from_delta`).
+    """
+
+    freq: int | None
+    channel: int | None
+    time_ms: int
+    busy_ms: int
+    load_byte: int | None
+    cac_active: bool | None
+
+    def as_sample(
+        self, radio_key: str, taken_at: float, uptime_s: float | None
+    ) -> SurveySample:
+        """Return the counters as a sample (busy only, no rx/tx split)."""
+        return SurveySample(
+            radio_key=radio_key,
+            mhz=self.freq or 0,
+            taken_at=taken_at,
+            uptime_s=uptime_s,
+            active_ms=self.time_ms,
+            busy_ms=self.busy_ms,
+            rx_ms=None,
+            tx_ms=None,
+            source=SOURCE_HOSTAPD_STATUS,
+        )
+
+
+def bss_load_from_get_status(raw: Any) -> BssLoad | None:
+    """Parse ``hostapd.<if> get_status``; None without usable counters."""
+    if not isinstance(raw, dict):
+        return None
+    airtime = raw.get("airtime")
+    if not isinstance(airtime, dict):
+        return None
+    time = _as_whole_number(airtime.get("time"))
+    busy = _as_whole_number(airtime.get("time_busy"))
+    if time is None or busy is None or time < 0 or busy < 0:
+        return None
+    load = _as_whole_number(airtime.get("utilization"))
+    if load is not None and not 0 <= load <= BSS_LOAD_MAX:
+        load = None
+    dfs = raw.get("dfs")
+    cac = dfs.get("cac_active") if isinstance(dfs, dict) else None
+    return BssLoad(
+        freq=_as_whole_number(raw.get("freq")),
+        channel=_as_whole_number(raw.get("channel")),
+        time_ms=time,
+        busy_ms=busy,
+        load_byte=load,
+        cac_active=cac if isinstance(cac, bool) else None,
     )
 
 

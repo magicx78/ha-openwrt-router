@@ -1,0 +1,59 @@
+{
+  "_comment": "synthetisch, Struktur nach Live-Prüfung 2026-11-18",
+  "results": [
+    {
+      "mhz": 2412,
+      "noise": 161,
+      "active_time": 120,
+      "busy_time": 30,
+      "busy_time_ext": 0,
+      "rx_time": 10,
+      "tx_time": 0
+    },
+    {
+      "mhz": 2417,
+      "noise": 0,
+      "active_time": 0,
+      "busy_time": 0,
+      "busy_time_ext": 0,
+      "rx_time": 0,
+      "tx_time": 0
+    },
+    {
+      "mhz": 2422,
+      "noise": 0,
+      "active_time": 0,
+      "busy_time": 0,
+      "busy_time_ext": 0,
+      "rx_time": 0,
+      "tx_time": 0
+    },
+    {
+      "mhz": 2437,
+      "noise": 162,
+      "active_time": 230000000,
+      "busy_time": 92000000,
+      "busy_time_ext": 0,
+      "rx_time": 60000000,
+      "tx_time": 9000000
+    },
+    {
+      "mhz": 2462,
+      "noise": 160,
+      "active_time": 118,
+      "busy_time": 25,
+      "busy_time_ext": 0,
+      "rx_time": 8,
+      "tx_time": 0
+    },
+    {
+      "mhz": 2472,
+      "noise": 0,
+      "active_time": 0,
+      "busy_time": 0,
+      "busy_time_ext": 0,
+      "rx_time": 0,
+      "tx_time": 0
+    }
+  ]
+}

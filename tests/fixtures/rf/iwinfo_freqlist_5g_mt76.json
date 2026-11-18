@@ -1,0 +1,174 @@
+{
+  "_comment": "synthetisch, Struktur nach Live-Prüfung 2026-11-18",
+  "results": [
+    {
+      "band": 5,
+      "channel": 36,
+      "mhz": 5180,
+      "restricted": false,
+      "flags": [],
+      "active": true
+    },
+    {
+      "band": 5,
+      "channel": 40,
+      "mhz": 5200,
+      "restricted": false,
+      "flags": [],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 44,
+      "mhz": 5220,
+      "restricted": false,
+      "flags": [],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 48,
+      "mhz": 5240,
+      "restricted": false,
+      "flags": [],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 52,
+      "mhz": 5260,
+      "restricted": false,
+      "flags": [],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 56,
+      "mhz": 5280,
+      "restricted": false,
+      "flags": [],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 60,
+      "mhz": 5300,
+      "restricted": false,
+      "flags": [],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 64,
+      "mhz": 5320,
+      "restricted": false,
+      "flags": [],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 100,
+      "mhz": 5500,
+      "restricted": false,
+      "flags": [],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 104,
+      "mhz": 5520,
+      "restricted": false,
+      "flags": [],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 108,
+      "mhz": 5540,
+      "restricted": false,
+      "flags": [],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 112,
+      "mhz": 5560,
+      "restricted": false,
+      "flags": [],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 116,
+      "mhz": 5580,
+      "restricted": false,
+      "flags": [
+        "no_160mhz"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 120,
+      "mhz": 5600,
+      "restricted": false,
+      "flags": [
+        "no_160mhz"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 124,
+      "mhz": 5620,
+      "restricted": false,
+      "flags": [
+        "no_160mhz"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 128,
+      "mhz": 5640,
+      "restricted": false,
+      "flags": [
+        "no_160mhz"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 132,
+      "mhz": 5660,
+      "restricted": false,
+      "flags": [
+        "no_80mhz",
+        "no_160mhz"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 136,
+      "mhz": 5680,
+      "restricted": false,
+      "flags": [
+        "no_80mhz",
+        "no_160mhz"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 140,
+      "mhz": 5700,
+      "restricted": false,
+      "flags": [
+        "no_80mhz",
+        "no_160mhz"
+      ],
+      "active": false
+    }
+  ]
+}
