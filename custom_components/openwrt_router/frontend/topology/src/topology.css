@@ -1128,9 +1128,20 @@
   .status-bar__stats { display: none; }  /* hide on tablet, keep filters + search */
 }
 
-/* Mobile ≤ 420px */
+/* Mobile ≤ 420px: the sidebar becomes a tab bar under the main column (in
+   flow, never position: fixed — see .global-footer), icons only, so every
+   view including Diagnose stays reachable. */
 @media (max-width: 420px) {
-  .topo-sidebar { display: none; }
+  .topo-app { flex-direction: column-reverse; }
+  .topo-main { min-height: 0; }
+  .topo-sidebar, .topo-sidebar.open {
+    width: 100%; height: var(--statusbar-h); flex-direction: row;
+    border-right: none; border-top: 1px solid var(--border);
+  }
+  .topo-sidebar .sidebar-toggle { display: none; }
+  .topo-sidebar .sidebar-nav { flex-direction: row; padding: 0; gap: 0; overflow-x: auto; }
+  .topo-sidebar .sidebar-item { flex: 1 0 40px; width: auto; height: 100%; padding: 0; justify-content: center; }
+  .topo-sidebar .sidebar-item__label, .topo-sidebar .sidebar-badge { display: none; }
   .topo-layout   { gap: 14px; padding: 14px 8px 28px; }
   .topo-row--aps { gap: 8px; }
   .topo-col-ap   { flex: 0 0 100%; max-width: 100%; }
@@ -3834,17 +3845,39 @@ button.diag-table__row:hover { background: var(--surface-hover); }
 
 /* ── Client stability tab (B6) ───────────────────────────────────────── */
 .stab-sections, .stab-windows { display: flex; flex-wrap: wrap; gap: 6px; }
-.stab-rows { display: flex; flex-direction: column; gap: 3px; }
+/* The list is a size container so rows switch to cards by the list's own
+   width (HA sidebar open, half-screen window), not only the window's. It is
+   a stretched block in the .topo-view column, so its width never depends on
+   the rows. */
+.stab-rows { display: flex; flex-direction: column; gap: 3px; container: stab-rows / inline-size; }
 .stab-row {
   display: grid; align-items: center; gap: 8px; width: 100%; padding: 6px 8px;
-  grid-template-columns: minmax(130px, 1.4fr) minmax(120px, 1.2fr) 70px 120px 90px 70px 170px 70px;
+  /* 1.43.1: flexible columns may shrink to 0 and every fixed one clips its
+     text, so no cell runs into its neighbour at any width (cards ≤ 760 px). */
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.2fr) 76px 110px 96px 56px minmax(0, 1.6fr) 56px 44px;
   border: none; border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03);
   color: inherit; font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
 }
 .stab-row:hover { background: var(--surface-hover); }
+.stab-row--head, .stab-row--head:hover {
+  cursor: default; background: none; padding-top: 0; padding-bottom: 0;
+  align-items: end; font-size: 11px; color: var(--text-muted);
+}
+.stab-row--head > span { min-width: 0; overflow-wrap: break-word; }
 .stab-row__name { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
-.stab-row__score { display: inline-flex; align-items: baseline; gap: 5px; }
-.stab-row__num { white-space: nowrap; }
+.stab-row__where { min-width: 0; overflow-wrap: anywhere; }
+.stab-row__score { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; min-width: 0; }
+.stab-row__num { white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.stab-row__unit { display: none; }
+.stab-row__trend { text-align: center; }
+.stab-trend--none { color: var(--text-muted); }
+.stab-sr {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap;
+}
+.stab-fact-note { display: block; font-weight: 400; margin-top: 2px; }
+.stab-filter-toggle { display: none; align-self: flex-end; }
+.stab-filter-more { display: contents; }
 .stab-trend { font-weight: 700; }
 .stab-trend--up { color: var(--green); }
 .stab-trend--down { color: var(--red); }
@@ -3904,10 +3937,21 @@ button.diag-table__row:hover { background: var(--surface-hover); }
 .stab-roam { color: var(--blue); }
 .stab-roam--flap { color: var(--amber); }
 .stab-score-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 12px; }
+/* Label above its own input inside each grid cell (the 3-column .diag-field
+   needs ~260 px and spilled into the next cell). */
+.stab-score-grid .diag-field { grid-template-columns: minmax(0, 1fr); gap: 3px; align-content: start; }
+.stab-score-grid .diag-field input { width: 100%; max-width: 120px; }
 
 /* Phone width: table rows become cards */
 @media (max-width: 760px) {
   .stab-row { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 8px 10px; }
+  .stab-row--head { display: none; }
+  .stab-row__unit { display: inline; }
+  .stab-row__trend { order: 1; }
+  .stab-row__problem { white-space: normal; }
+  .stab-filter-toggle { display: inline-flex; gap: 4px; }
+  .stab-filter-more { display: none; }
+  .stab-filter-more.open { display: flex; flex-wrap: wrap; gap: 8px; flex-basis: 100%; }
   .stab-row__name { flex: 1 1 55%; }
   .stab-row__score { order: 1; margin-left: auto; }
   .stab-row__where { order: 2; flex-basis: 100%; }
@@ -3916,4 +3960,21 @@ button.diag-table__row:hover { background: var(--surface-hover); }
   .stab-ap { grid-template-columns: 1fr auto; }
   .stab-ap .diag-table__meta { grid-column: 1 / -1; }
   .stab-head-score { margin-left: 0; }
+}
+
+/* Same cards when the list itself is narrower than 820 px (the grid needs
+   ~520 px for its fixed columns); the media query above stays as the
+   fallback for browsers without container queries. The filter toggle stays
+   on the media query (it sits outside the list). */
+@container stab-rows (max-width: 820px) {
+  .stab-row { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 8px 10px; }
+  .stab-row--head { display: none; }
+  .stab-row__unit { display: inline; }
+  .stab-row__trend { order: 1; }
+  .stab-row__problem { white-space: normal; }
+  .stab-row__name { flex: 1 1 55%; }
+  .stab-row__score { order: 1; margin-left: auto; }
+  .stab-row__where { order: 2; flex-basis: 100%; }
+  .stab-row .stab-state { order: 3; }
+  .stab-row__num { order: 4; font-size: 11.5px; }
 }
