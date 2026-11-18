@@ -535,6 +535,10 @@ class _Scan:
         try:
             kind = _member_kind(member)
             _check_headers(raw, member)
+            if kind != MEMBER_FILE and member.size != 0:
+                # Python reads the data of a link/directory as the next
+                # header, GNU tar and busybox skip it (review M5).
+                raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
         except _Abort as abort:
             raise _Abort(abort.error, abort.finding.code, name or None) from None
         if not name:

@@ -1318,3 +1318,42 @@ def test_pax_names_and_octal_variants_stay_valid() -> None:
         report = validate_archive(_smuggled(_rule_with_size_field(size_field)))
         assert report.ok, (size_field, report.findings)
         assert "etc/config/firewall" in {m.name for m in report.members}
+
+
+# ---------------------------------------------------------------------------
+# Review M5: a non-file member with size != 0. Python does not skip its data
+# and reads it as the next header; GNU tar and busybox skip it. Either way
+# the two would see different members.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "kind", "linkname"),
+    [
+        ("etc/resolv.conf", tarfile.SYMTYPE, "/tmp/resolv.conf"),
+        ("etc/hidden/", tarfile.DIRTYPE, ""),
+    ],
+    ids=["symlink", "directory"],
+)
+def test_non_file_member_with_data_is_rejected(
+    name: str, kind: bytes, linkname: str
+) -> None:
+    hidden = _rule_member()
+    header = _ustar(name, len(hidden), kind=kind, linkname=linkname)
+    assert tarfile.TarInfo.frombuf(header, "utf-8", "strict").size == len(hidden)
+    data = _smuggled(header + hidden)
+    report = validate_archive(data, DEFAULT_ARCHIVE_LIMITS)
+    assert report.ok is False, [m.name for m in report.members]
+    assert report.error == ERR_INVALID
+    assert first_code(report) == ca.CODE_BAD_TAR_HEADER
+    with pytest.raises(ArchiveError):
+        extract_uci_texts(data, DEFAULT_ARCHIVE_LIMITS)
+
+
+@pytest.mark.parametrize("kind", [tarfile.SYMTYPE, tarfile.DIRTYPE])
+def test_non_file_member_with_size_zero_stays_valid(kind: bytes) -> None:
+    name = "etc/resolv.conf" if kind == tarfile.SYMTYPE else "etc/empty/"
+    linkname = "/tmp/resolv.conf" if kind == tarfile.SYMTYPE else ""
+    data = _smuggled(_ustar(name, 0, kind=kind, linkname=linkname))
+    report = validate_archive(data, DEFAULT_ARCHIVE_LIMITS)
+    assert report.ok, report.findings
