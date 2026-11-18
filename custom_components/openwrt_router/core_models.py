@@ -31,6 +31,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import uuid
@@ -49,6 +50,7 @@ from .const import (
     FEATURE_UCI_AVAILABLE,
 )
 from .core_errors import (
+    NON_PERSISTED_ERROR_CLASSES,
     ApiVersionError,
     ApprovalInvalidError,
     ApprovalRequiredError,
@@ -59,7 +61,14 @@ from .core_errors import (
     UnsupportedStorageFormatError,
     VersionProtectedError,
 )
-from .core_masking import is_secret_option, mask_secrets, mask_value, scrub_text
+from .core_masking import (
+    IDENTIFIER_PSEUDONYM_HEX_LENGTH,
+    IDENTIFIER_PSEUDONYM_PREFIXES,
+    is_secret_option,
+    mask_secrets,
+    mask_value,
+    scrub_text,
+)
 from .mac_utils import is_mac
 from .net_events import Severity
 
@@ -100,6 +109,9 @@ PLAN_ID_PREFIX: Final = "pln_"
 AUTHORIZATION_ID_PREFIX: Final = "wau_"
 VERIFICATION_ID_PREFIX: Final = "vac_"
 CORRELATION_ID_PREFIX: Final = "cor_"
+# Fleet-wide subject (installation_key_reset, audit entries of an unknown
+# router). Never a router id: the registry refuses it (contract §4.1).
+FLEET_ROUTER_ID: Final = "-"
 
 # HA bus event of the audit log (payload = CoreEvent.to_dict(), masked).
 # Deliberately separate from EVENT_INCIDENT: net_rules and logbook stay as is.
@@ -211,7 +223,13 @@ FLEET_BACKUP_CONCURRENCY: Final = 1
 # Fixed window: a repeat of the same dedup scope inside it is not published.
 FAILURE_EVENT_COOLDOWN: Final = timedelta(hours=24)
 AUDIT_MAX_EVENTS: Final = 1000
+# Core entries of the security ring (only core entries evict them).
 SECURITY_AUDIT_MAX_EVENTS: Final = 500
+# Security-relevant module entries (review M2 of PR #56): a separate quota,
+# per module and for all modules together, so a module never pushes a core
+# entry out and one module cannot push out another beyond its own quota.
+SECURITY_MODULE_QUOTA: Final = 100
+SECURITY_MODULE_MAX_EVENTS: Final = 500
 AUDIT_RETENTION_DAYS: Final = 90
 DEFAULT_LIST_LIMIT: Final = 50
 MAX_LIST_LIMIT: Final = 500
@@ -248,6 +266,11 @@ def is_valid_id(value: object, prefix: str) -> bool:
         and value.startswith(prefix)
         and _ID_HEX.fullmatch(value[len(prefix) :]) is not None
     )
+
+
+def is_fleet_router_id(value: object) -> bool:
+    """True for ``FLEET_ROUTER_ID`` ("-"), the fleet-wide subject."""
+    return isinstance(value, str) and value == FLEET_ROUTER_ID
 
 
 def is_sha256(value: object) -> bool:
@@ -461,6 +484,18 @@ def _check_note(note: str | None) -> None:
         raise ValueError(f"note must be at most {NOTE_MAX_LENGTH} characters")
 
 
+def _check_stored_error_class(error_class: ErrorClass | None) -> None:
+    """Raise for a call-time error class (``NON_PERSISTED_ERROR_CLASSES``).
+
+    Such a class describes a refused call, not a stored version; keeping it
+    out of every record means an older core never reads an unknown value.
+    """
+    if error_class in NON_PERSISTED_ERROR_CLASSES:
+        raise ValueError(
+            f"error_class {error_class.value!r} is call-time only and never stored"
+        )
+
+
 # Provider-supplied metadata text (versions, board names, fetch methods).
 META_TEXT_MAX_LENGTH: Final = 128
 # Provider-supplied ids (drift_id, plan_id) and config names in reports.
@@ -535,6 +570,76 @@ def installation_key_id(key: bytes) -> str:
         raise ValueError("installation key must be at least 16 bytes")
     digest = hmac.new(key, b"openwrt_router.installation_key_id", hashlib.sha256)
     return digest.hexdigest()[:INSTALLATION_KEY_ID_LENGTH]
+
+
+# Module keys (§11.5): HKDF-SHA256 over the installation key. The salt and
+# the info prefix are fixed and versioned; a new derivation gets ``/v2``.
+MODULE_KEY_BYTES: Final = 32
+MODULE_KEY_SALT: Final = b"openwrt_router/hkdf-salt/v1"
+MODULE_KEY_INFO_PREFIX: Final = b"openwrt_router/module-key/v1"
+MODULE_NAME_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
+MODULE_KEY_PURPOSE_PATTERN: Final = re.compile(r"[a-z0-9_.:-]{0,64}")
+# Name of the core's own derivations (bus pseudonym); never a module name.
+CORE_KEY_OWNER: Final = "core"
+
+
+def hkdf_sha256(ikm: bytes, *, salt: bytes, info: bytes, length: int) -> bytes:
+    """HKDF-SHA256 (RFC 5869): extract, then expand to ``length`` bytes."""
+    if not isinstance(ikm, bytes) or not ikm:
+        raise ValueError("input key material must be non-empty bytes")
+    if not 0 < length <= 255 * hashlib.sha256().digest_size:
+        raise ValueError("HKDF length out of range")
+    prk = hmac.new(salt or b"\x00" * 32, ikm, hashlib.sha256).digest()
+    okm = b""
+    block = b""
+    counter = 1
+    while len(okm) < length:
+        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+        okm += block
+        counter += 1
+    return okm[:length]
+
+
+def check_module_name(module: object) -> str:
+    """A plain module name (``[a-z][a-z0-9_]*``, at most 64); ValueError else."""
+    if not isinstance(module, str) or MODULE_NAME_PATTERN.fullmatch(module) is None:
+        raise ValueError("module must be a plain lower-case name")
+    return module
+
+
+def derive_module_key(installation_key: bytes, module: str, purpose: str = "") -> bytes:
+    """32-byte key of ``module`` for ``purpose`` (pure; the key stays secret).
+
+    ``info`` = MODULE_KEY_INFO_PREFIX, NUL, module, NUL, purpose: neither part
+    may contain NUL, so two (module, purpose) pairs never share an info
+    string. ``core`` is refused (the core derives its own keys internally).
+    """
+    check_module_name(module)
+    if module == CORE_KEY_OWNER:
+        raise ValueError("core is not a module name")
+    return _derive(installation_key, module, purpose)
+
+
+def _derive(installation_key: bytes, owner: str, purpose: str) -> bytes:
+    if (
+        not isinstance(purpose, str)
+        or MODULE_KEY_PURPOSE_PATTERN.fullmatch(purpose) is None
+        or ".." in purpose
+    ):
+        raise ValueError("purpose must be up to 64 characters of [a-z0-9_.:-]")
+    if not isinstance(installation_key, bytes) or len(installation_key) < 16:
+        raise ValueError("installation key must be at least 16 bytes")
+    info = b"\x00".join(
+        (MODULE_KEY_INFO_PREFIX, owner.encode("ascii"), purpose.encode("ascii"))
+    )
+    return hkdf_sha256(
+        installation_key, salt=MODULE_KEY_SALT, info=info, length=MODULE_KEY_BYTES
+    )
+
+
+def derive_core_key(installation_key: bytes, purpose: str) -> bytes:
+    """The core's own derived key (e.g. ``bus_pseudonym``); core-internal."""
+    return _derive(installation_key, CORE_KEY_OWNER, purpose)
 
 
 # ---------------------------------------------------------------------------
@@ -769,12 +874,46 @@ class ActionClass(StrEnum):
     """Guard class of an action.
 
     CRITICAL means "needs request + admin approval", not "writes": export
-    only reads but is critical because it discloses secrets.
+    only reads but is critical because it discloses secrets. ACTIVE (B5)
+    means "acts on the router or the network without changing its
+    configuration" (scan, ping, survey): like MUTATING for the policy, no
+    approval, audited on the general ring, optionally rate limited.
+    Not persisted (additive member).
     """
 
     READ = "read"
     MUTATING = "mutating"
     CRITICAL = "critical"
+    ACTIVE = "active"
+
+
+# Bounds of a RateLimit (register_action(..., rate_limit=...)).
+RATE_LIMIT_MAX_CALLS: Final = 100_000
+RATE_LIMIT_MAX_PERIOD: Final = timedelta(days=1)
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RateLimit:
+    """At most ``max_calls`` grants of one active action per router and
+    sliding window ``per`` (B5). Only grants count; a denial never does."""
+
+    max_calls: int
+    per: timedelta
+
+    def __post_init__(self) -> None:
+        """Validate the bounds."""
+        if isinstance(self.max_calls, bool) or not isinstance(self.max_calls, int):
+            raise TypeError("max_calls must be an int")
+        if not 1 <= self.max_calls <= RATE_LIMIT_MAX_CALLS:
+            raise ValueError(f"max_calls must be 1..{RATE_LIMIT_MAX_CALLS}")
+        if not isinstance(self.per, timedelta):
+            raise TypeError("per must be a timedelta")
+        if not timedelta(0) < self.per <= RATE_LIMIT_MAX_PERIOD:
+            raise ValueError("per must be > 0 and at most one day")
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form (seconds)."""
+        return {"max_calls": self.max_calls, "per": self.per.total_seconds()}
 
 
 class GuardedAction(StrEnum):
@@ -1092,6 +1231,11 @@ class CoreEventType(StrEnum):
     # Security review (1.44.0, additive): the options-flow switch
     # config_backup_enabled changed (actor, old and new value).
     CONFIG_OPTION_CHANGED = "security.config_option_changed"
+    # Follow-up B5 (additive): an ACTIVE action was authorized (general
+    # ring, audit-mandatory) / refused by its rate limit (general ring, one
+    # entry per router, action and window; repeats are counted).
+    ACTIVE_ACTION_GRANTED = "core.active_action_granted"
+    ACTION_RATE_LIMITED = "core.action_rate_limited"
 
 
 # Namespaces of core event types. Only the core emits these (also the ones
@@ -1141,6 +1285,7 @@ AUDIT_MANDATORY_EVENT_TYPES: Final = frozenset(
         CoreEventType.AUTHORIZATION_DENIED,
         CoreEventType.AUTHORIZATION_CONSUMED,
         CoreEventType.AUTHORIZATION_GRANTED,
+        CoreEventType.ACTIVE_ACTION_GRANTED,
         CoreEventType.APPROVAL_REQUESTED,
         CoreEventType.APPROVAL_APPROVED,
         CoreEventType.APPROVAL_REJECTED,
@@ -1386,14 +1531,16 @@ def policy_denial_reason(
     action_classes: Mapping[str, ActionClass] = ACTION_CLASSES,
     admin_user_only: frozenset[str] = ADMIN_USER_ONLY_ACTIONS,
     system_only: frozenset[str] = SYSTEM_ONLY_ACTIONS,
+    sensitive_reads: frozenset[str] = frozenset(),
 ) -> str | None:
     """Guard policy: None if ``actor`` may perform/request ``action``.
 
     Reasons: unverified_actor, actor_verification_expired, unknown_action,
     system_only, not_admin, automation_not_allowed. A user who is not a
-    verified admin may not perform or request any mutating or critical
-    action. Critical actions may be requested by verified admin users,
-    modules and the system only.
+    verified admin may not perform or request any mutating, active or
+    critical action, nor a read listed in ``sensitive_reads``. Critical
+    actions may be requested by verified admin users, modules and the
+    system only.
     """
     if not isinstance(actor, VerifiedActor):
         return "unverified_actor"
@@ -1407,7 +1554,7 @@ def policy_denial_reason(
         return None if kind is ActorKind.SYSTEM else "system_only"
     if action in admin_user_only and not actor.is_admin:
         return "not_admin"
-    if action_class is ActionClass.READ:
+    if action_class is ActionClass.READ and action not in sensitive_reads:
         return None
     if kind is ActorKind.USER and not actor.is_admin:
         return "not_admin"
@@ -2162,6 +2309,7 @@ class BackupRecord:
         _coerce(self, "reason", BackupReason)
         _coerce(self, "status", VersionStatus)
         _coerce(self, "error_class", ErrorClass, optional=True)
+        _check_stored_error_class(self.error_class)
         _set(self, "artifacts", _freeze_artifacts(self.artifacts))
         if self.metadata_version != BACKUP_METADATA_VERSION:
             raise ValueError("metadata_version must be the current version")
@@ -2326,6 +2474,7 @@ class VersionMeta:
         _coerce(self, "reason", BackupReason)
         _coerce(self, "status", VersionStatus)
         _coerce(self, "error_class", ErrorClass, optional=True)
+        _check_stored_error_class(self.error_class)
         for name in ("content_hash", "uci_hash"):
             value = getattr(self, name)
             if value is not None and not is_sha256(value):
@@ -3964,7 +4113,8 @@ class AuthorizationDecision:
 
     APPROVED carries ``authorization``; PENDING carries ``approval_request``;
     DENIED carries ``reason``. ``audit_id`` is the event_id of the audit
-    entry written for this decision.
+    entry written for this decision. ``retry_after`` (seconds) is set only
+    for a ``rate_limited`` denial (B5).
     """
 
     state: DecisionState
@@ -3974,10 +4124,18 @@ class AuthorizationDecision:
     authorization: WriteAuthorization | None = field(default=None, repr=False)
     approval_request: ApprovalRequest | None = None
     reason: str | None = None
+    retry_after: float | None = None
 
     def __post_init__(self) -> None:
         """Coerce."""
         _coerce(self, "state", DecisionState)
+        if self.retry_after is not None and (
+            isinstance(self.retry_after, bool)
+            or not isinstance(self.retry_after, int | float)
+            or not math.isfinite(self.retry_after)
+            or self.retry_after < 0
+        ):
+            raise ValueError("retry_after must be a finite number >= 0")
 
     @property
     def approved(self) -> bool:
@@ -4000,12 +4158,56 @@ class AuthorizationDecision:
                 else self.approval_request.to_dict()
             ),
             "reason": self.reason,
+            "retry_after": self.retry_after,
         }
 
 
 # ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
+
+
+# Follow-up B8: typed optional event fields for modules.
+EVENT_CLASSIFICATION_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9_.:-]{0,63}")
+CLIENT_REF_PATTERN: Final = re.compile(
+    re.escape(IDENTIFIER_PSEUDONYM_PREFIXES["client"])
+    + rf"[0-9a-f]{{{IDENTIFIER_PSEUDONYM_HEX_LENGTH}}}"
+)
+EVENT_REF_FIELDS: Final = (
+    "client_ref",
+    "confidence",
+    "classification",
+    "incident_ref",
+    "radio_id",
+)
+
+
+def _check_event_refs(event: CoreEvent) -> None:
+    """Validate the B8 fields; ``confidence`` is stored as float."""
+    client_ref = event.client_ref
+    if client_ref is not None:
+        if not isinstance(client_ref, str):
+            raise TypeError("client_ref must be a string")
+        if CLIENT_REF_PATTERN.fullmatch(client_ref) is None:
+            raise ValueError(
+                "client_ref must be a client pseudonym cli_<16 hex> "
+                "(pseudonymise_identifier('client', ...)), never a raw identifier"
+            )
+    confidence = event.confidence
+    if confidence is not None:
+        if isinstance(confidence, bool) or not isinstance(confidence, int | float):
+            raise TypeError("confidence must be a number")
+        if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+            raise ValueError("confidence must be between 0 and 1")
+        _set(event, "confidence", float(confidence))
+    classification = event.classification
+    if classification is not None:
+        if not isinstance(classification, str):
+            raise TypeError("classification must be a string")
+        if EVENT_CLASSIFICATION_PATTERN.fullmatch(classification) is None:
+            raise ValueError("classification must match EVENT_CLASSIFICATION_PATTERN")
+    check_token("incident_ref", event.incident_ref, optional=True)
+    check_token("radio_id", event.radio_id, optional=True)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -4022,6 +4224,16 @@ class CoreEvent:
     cooldown window is not published on the bus; the stored entry's
     ``repeat_count`` / ``last_repeat_at`` are updated instead. Types in
     AUDIT_MANDATORY_EVENT_TYPES ignore ``dedup_key``.
+
+    ``security_relevant`` (a module marks its own event) puts it on the
+    security ring; ``audit_mandatory`` (set by the audit log for a type a
+    module registered as mandatory) disables dedup. Both default False, so
+    entries stored before them read unchanged.
+
+    B8 fields (all optional, default None, never part of the dedup scope):
+    ``client_ref`` (``cli_<16 hex>`` pseudonym), ``confidence`` (0..1),
+    ``classification`` (machine code), ``incident_ref``, ``radio_id``
+    (tokens). They are not masked: only pseudonyms and codes fit them.
     """
 
     event_id: str
@@ -4038,11 +4250,22 @@ class CoreEvent:
     repeat_count: int = 0
     last_repeat_at: datetime | None = None
     data: Mapping[str, Any] = field(default_factory=dict)
+    security_relevant: bool = False
+    audit_mandatory: bool = False
+    client_ref: str | None = None
+    confidence: float | None = None
+    classification: str | None = None
+    incident_ref: str | None = None
+    radio_id: str | None = None
 
     def __post_init__(self) -> None:
         """Coerce, validate and freeze."""
+        _check_event_refs(self)
         if not isinstance(self.type, str) or not self.type:
             raise ValueError("event type must be a non-empty string")
+        for flag in ("security_relevant", "audit_mandatory"):
+            if not isinstance(getattr(self, flag), bool):
+                raise TypeError(f"{flag} must be a bool")
         _require_aware(self.ts, "ts")
         _require_aware(self.last_repeat_at, "last_repeat_at")
         _coerce(self, "severity", Severity)
@@ -4054,13 +4277,19 @@ class CoreEvent:
     @property
     def dedup_scope(self) -> tuple[str, str, str] | None:
         """``(router_id or "-", type, dedup_key)``; None if not deduplicated."""
-        if self.dedup_key is None or self.type in AUDIT_MANDATORY_EVENT_TYPES:
+        if (
+            self.dedup_key is None
+            or self.audit_mandatory
+            or self.type in AUDIT_MANDATORY_EVENT_TYPES
+        ):
             return None
         return (self.router_id or "-", str(self.type), self.dedup_key)
 
     @property
     def audit_ring(self) -> AuditRing:
-        """Which ring keeps this event."""
+        """Which ring keeps this event (security if marked so)."""
+        if self.security_relevant:
+            return AuditRing.SECURITY
         return audit_ring_for(self.type)
 
     def to_dict(self) -> dict[str, Any]:
@@ -4080,6 +4309,13 @@ class CoreEvent:
             "repeat_count": self.repeat_count,
             "last_repeat_at": _iso(self.last_repeat_at),
             "data": mask_secrets(_thaw(self.data)),
+            "security_relevant": self.security_relevant,
+            "audit_mandatory": self.audit_mandatory,
+            "client_ref": self.client_ref,
+            "confidence": self.confidence,
+            "classification": self.classification,
+            "incident_ref": self.incident_ref,
+            "radio_id": self.radio_id,
         }
 
     @classmethod
@@ -4114,6 +4350,13 @@ class CoreEvent:
             repeat_count=data.get("repeat_count", 0),
             last_repeat_at=_parse_dt(data.get("last_repeat_at"), "last_repeat_at"),
             data=payload or {},
+            security_relevant=data.get("security_relevant", False),
+            audit_mandatory=data.get("audit_mandatory", False),
+            client_ref=data.get("client_ref"),
+            confidence=data.get("confidence"),
+            classification=data.get("classification"),
+            incident_ref=data.get("incident_ref"),
+            radio_id=data.get("radio_id"),
         )
 
 
@@ -4330,8 +4573,14 @@ class ActionGuardProtocol(Protocol):
         *,
         module: str,
         admin_user_only: bool = False,
+        sensitive_read: bool = False,
+        rate_limit: RateLimit | None = None,
     ) -> None:
-        """Register an extension action ``<module>.<action>``."""
+        """Register an extension action ``<module>.<action>``.
+
+        ``sensitive_read`` (READ only): a user must be a verified admin.
+        ``rate_limit`` (ACTIVE only): grants per router and window.
+        """
 
 
 @runtime_checkable
@@ -4446,6 +4695,9 @@ class ConfigurationApiProtocol(Protocol):
     async def async_get_installation_key(self) -> bytes:
         """32-byte installation key; InstallationKeyLostError while LOST."""
 
+    async def async_get_module_key(self, module: str, purpose: str = "") -> bytes:
+        """HKDF-SHA256 key of a registered module (§11.5); never logged."""
+
     @property
     def installation_key_state(self) -> InstallationKeyState:
         """ok, lost or uninitialised (see installation_key_state())."""
@@ -4483,8 +4735,10 @@ class ConfigurationApiProtocol(Protocol):
     async def async_get_backup(self, backup_id: str) -> BackupRecord:
         """One version (READ)."""
 
-    async def async_validate_backup(self, backup_id: str) -> BackupRecord:
-        """Validate and store the result (READ)."""
+    async def async_validate_backup(
+        self, backup_id: str, *, actor: Actor
+    ) -> BackupRecord:
+        """Validate and store the result (READ; actor required, users need admin)."""
 
     async def async_compare(
         self, base: ConfigRef, other: ConfigRef, *, actor: Actor
@@ -4615,9 +4869,14 @@ class ConfigurationApiProtocol(Protocol):
     def subscribe(self, listener: CoreEventListener) -> Callable[[], None]:
         """Listen to published events; returns an unsubscribe callback."""
 
-    def register_event_prefix(self, prefix: str, *, module: str) -> None:
+    def register_event_prefix(self, prefix: str, *, module: str) -> Callable[[], None]:
         """Allow a module's own event types below ``prefix`` (not a core
-        namespace, see CORE_EVENT_NAMESPACES)."""
+        namespace, see CORE_EVENT_NAMESPACES); returns a remover."""
+
+    def register_audit_mandatory_types(
+        self, event_types: Iterable[str], *, module: str
+    ) -> Callable[[], None]:
+        """Make the module's own types audit-mandatory (§12.5); returns a remover."""
 
     def emit(
         self,
@@ -4632,6 +4891,12 @@ class ConfigurationApiProtocol(Protocol):
         correlation_id: str | None = None,
         dedup_key: str | None = None,
         data: Mapping[str, Any] | None = None,
+        security_relevant: bool = False,
+        client_ref: str | None = None,
+        confidence: float | None = None,
+        classification: str | None = None,
+        incident_ref: str | None = None,
+        radio_id: str | None = None,
     ) -> EmitResult:
         """Write an audit entry and fire EVENT_CORE unless deduplicated.
 

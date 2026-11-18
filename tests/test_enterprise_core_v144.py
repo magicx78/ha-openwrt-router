@@ -338,7 +338,7 @@ async def test_option_live_on_and_off(disks, tmp_path):
     calls = len(env.provider.calls)
     assert _caps(env)[Capability.CONFIG_BACKUP].reason == CapabilityReason.DISABLED
     with pytest.raises(CapabilityUnavailableError):
-        await env.api.async_validate_backup(made.record.backup_id)
+        await env.api.async_validate_backup(made.record.backup_id, actor=ADMIN)
     assert len(env.provider.calls) == calls  # refused before the provider
     assert env.manager.stats["refused_disabled"] == 1
     assert env.core.registry.stats["config_option_changes"] == 2

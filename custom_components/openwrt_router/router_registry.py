@@ -99,6 +99,7 @@ from .core_models import (
     WriteAuthorization,
     binding_checksum,
     canonical_checksum,
+    is_fleet_router_id,
     is_valid_id,
     normalize_mac,
     utcnow,
@@ -1730,12 +1731,15 @@ class RouterRegistry:
         """Record by router id; RouterNotFoundError if unknown.
 
         A malformed id (path parts, NUL, oversized, wrong type) is refused
-        without being echoed into the error.
+        without being echoed into the error. The fleet id ``"-"``
+        (``FLEET_ROUTER_ID``) is never a router: same refusal, plus
+        ``details["fleet"] = True``.
         """
         if not is_valid_id(router_id, ROUTER_ID_PREFIX):
-            raise RouterNotFoundError(
-                "Unknown router id", details={"reason": "invalid_router_id"}
-            )
+            details: dict[str, Any] = {"reason": "invalid_router_id"}
+            if is_fleet_router_id(router_id):
+                details["fleet"] = True
+            raise RouterNotFoundError("Unknown router id", details=details)
         record = self._records.get(router_id)
         if record is None:
             raise RouterNotFoundError("Unknown router id", router_id=router_id)
