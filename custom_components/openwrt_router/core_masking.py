@@ -55,9 +55,22 @@ import posixpath
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
+from datetime import date, time, timedelta
+from decimal import Decimal
 from enum import Enum
-from fnmatch import fnmatchcase
+from fnmatch import fnmatchcase, translate
+from functools import lru_cache
+from ipaddress import (
+    IPv4Address,
+    IPv4Interface,
+    IPv4Network,
+    IPv6Address,
+    IPv6Interface,
+    IPv6Network,
+)
+from pathlib import PurePath
 from typing import Any, Final
+from uuid import UUID
 
 from .const import DIAGNOSTICS_REDACT_KEYS, DIAGNOSTICS_REDACTED
 
@@ -160,8 +173,15 @@ SECRET_EXTRA_NAMES: Final = _UCI_CREDENTIAL_NAMES | frozenset(
 _CONTEXT_NAMES: Final = frozenset(
     name for rule in SECRET_CONTEXT_OPTIONS for name in rule.options
 )
+# Real OpenWrt secrets missing from config-manager's list (security review
+# 2026-11-18): 6in4 "updatekey" (tunnel broker key) and ppp "pppd_options"
+# (may carry "password …"). They change the precise mode: the snapshot
+# stores a digest marker for them.
+SECRET_OPTIONS_ADDED: Final = frozenset({"pppd_options", "updatekey"})
 # Precise mode: always secret, whatever the config.
-_SNAPSHOT_EXACT: Final = SECRET_OPTIONS | _UCI_CREDENTIAL_NAMES | _CONTEXT_NAMES
+_SNAPSHOT_EXACT: Final = (
+    SECRET_OPTIONS | _UCI_CREDENTIAL_NAMES | _CONTEXT_NAMES | SECRET_OPTIONS_ADDED
+)
 SECRET_EXACT_KEYS: Final = (
     _SNAPSHOT_EXACT
     | SECRET_EXTRA_NAMES
@@ -238,12 +258,25 @@ READABLE_CONTEXT_OPTIONS: Final = (
     ),
     # PPP / modem authentication type (pap, chap, both, none).
     ReadableContextRule("network", "*", frozenset({"auth"})),
-    # openvpn "auth" is a digest algorithm name (SHA256). "tls_auth" holds a
-    # key FILE path, not the key: config-manager classifies it as readable;
-    # the file's content is protected by SECRET_ARCHIVE_PATHS
-    # (etc/openvpn/*, *.key). Inline keys are not a UCI option.
+    # openvpn "auth" is a digest algorithm name (SHA256). "tls_auth",
+    # "tls_crypt(_v2)" and "pkcs12" hold a key FILE path, not the key:
+    # config-manager classifies tls_auth as readable; the file's content is
+    # protected by SECRET_ARCHIVE_PATHS (etc/openvpn/*, *.key, *.p12). An
+    # inline key block in such a value is masked anyway (_has_inline_key).
     ReadableContextRule(
-        "openvpn", "*", frozenset({"auth", "auth_nocache", "key_direction", "tls_auth"})
+        "openvpn",
+        "*",
+        frozenset(
+            {
+                "auth",
+                "auth_nocache",
+                "key_direction",
+                "pkcs12",
+                "tls_auth",
+                "tls_crypt",
+                "tls_crypt_v2",
+            }
+        ),
     ),
     # usteer key_value: not a key; config-manager keeps it readable.
     ReadableContextRule("usteer", "*", frozenset({"key_value"})),
@@ -265,20 +298,25 @@ SECRET_SUBSTRINGS: Final = (
 # Whole words that mark a secret.
 SECRET_WORDS: Final = frozenset(
     {
+        "accesskey",
         "apikey",
         "auth",
+        "authkey",
         "authorization",
         "bearer",
         "community",  # SNMP community string
         "cookie",
         "credential",
         "credentials",
+        "crypt",  # openvpn tls_crypt / tls_crypt_v2 (path or key)
         "key",
+        "otp",  # one-time password
         "passphrase",
         "passwd",
         "password",
         "pin",
         "pincode",
+        "pkcs",  # pkcs12 / pkcs8 (trailing digits are dropped)
         "presharedkey",
         "private",
         "privatekey",
@@ -286,10 +324,13 @@ SECRET_WORDS: Final = frozenset(
         "psk",
         "pwd",
         "sae",
+        "sauth",  # LuCI session cookie variant
         "secret",
         "session",
+        "sharedkey",
         "sysauth",  # LuCI session cookie
         "token",
+        "updatekey",
         "wepkey",
         "wpa",
     }
@@ -355,14 +396,51 @@ def _matches_pattern(norm: str) -> bool:
     )
 
 
+_MAX_KEY_NESTING: Final = 8
+
+
 def is_secret_key(name: object, extra_keys: Iterable[str] = ()) -> bool:
-    """BROAD: True if a mapping key or option ``name`` may name a secret."""
-    if not isinstance(name, str) or not name.strip():
+    """BROAD: True if a mapping key or option ``name`` may name a secret.
+
+    Non-str keys: bytes are decoded, tuples / frozensets are secret if any
+    element is (nesting deeper than 8 counts as secret), numbers and None
+    name nothing, any other object is judged by ``str(key)``.
+    """
+    if not isinstance(name, str):
+        return _is_secret_non_str_key(name, extra_keys, 0)
+    if not name.strip():
         return False
+    if extra_keys:
+        extra = {k.lower() for k in extra_keys}
+        if name.lower() in extra or _normalise_name(name) in extra:
+            return True
+    return _is_secret_str_key(name)
+
+
+def _is_secret_non_str_key(key: object, extra_keys: Iterable[str], depth: int) -> bool:
+    """is_secret_key for bytes, tuple, frozenset, number and object keys."""
+    if key is None or isinstance(key, bool | int | float):
+        return False
+    if isinstance(key, bytes | bytearray | memoryview):
+        return is_secret_key(bytes(key).decode("utf-8", "replace"), extra_keys)
+    if isinstance(key, tuple | frozenset):
+        if depth >= _MAX_KEY_NESTING:
+            return True  # when in doubt, mask
+        return any(
+            is_secret_key(item, extra_keys)
+            if isinstance(item, str)
+            else _is_secret_non_str_key(item, extra_keys, depth + 1)
+            for item in key
+        )
+    return is_secret_key(str(key), extra_keys)
+
+
+@lru_cache(maxsize=4096)
+def _is_secret_str_key(name: str) -> bool:
+    """The broad rules of :func:`is_secret_key` without extra keys."""
     lowered = name.lower()
     norm = _normalise_name(name)
-    extra = {k.lower() for k in extra_keys}
-    if {lowered, norm} & (SECRET_EXACT_KEYS | extra):
+    if lowered in SECRET_EXACT_KEYS or norm in SECRET_EXACT_KEYS:
         return True
     if norm in SAFE_KEYS or lowered in SAFE_KEYS:
         return False
@@ -448,9 +526,13 @@ def is_secret_path(path: object) -> bool:
     if not isinstance(path, str):
         return False
     norm = _normalise_path(path)
-    return bool(norm) and any(
-        fnmatchcase(norm, pattern) for pattern in SECRET_ARCHIVE_PATHS
-    )
+    return bool(norm) and _SECRET_PATH_RE.match(norm) is not None
+
+
+# SECRET_ARCHIVE_PATHS as one regex (same globs as fnmatchcase, one pass).
+_SECRET_PATH_RE: Final = re.compile(
+    "|".join(translate(pattern) for pattern in SECRET_ARCHIVE_PATHS)
+)
 
 
 # --- digest -------------------------------------------------------------------
@@ -483,8 +565,12 @@ def secret_digest_factory(key: bytes) -> Callable[[str], str]:
 _PEM_RE: Final = re.compile(
     r"-----BEGIN [^\r\n-]*-----.*?(?:-----END [^\r\n-]*-----|\Z)", re.DOTALL
 )
-# scheme://user:password@host
-_URL_CRED_RE: Final = re.compile(r"(\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s/:@]*):[^\s/@]*@")
+# Longer free text is cut (at a whitespace, so no fragment of a token is
+# left) and ends with TRUNCATED; the remainder is dropped, never passed on.
+MAX_TEXT_LENGTH: Final = 65536
+# scheme://user:password@host; anchored on the literal "://" so a long run
+# of scheme characters is scanned once, not once per start position.
+_URL_CRED_RE: Final = re.compile(r"(://[^\s/:@]*):[^\s/@]*@")
 _AUTH_SCHEME_RE: Final = re.compile(
     r"\b(Bearer|Basic|Digest)[ \t]+[A-Za-z0-9._~+/=\-]+", re.IGNORECASE
 )
@@ -493,19 +579,23 @@ _AUTH_SCHEME_RE: Final = re.compile(
 _UCI_HEAD_RE: Final = re.compile(
     r"\b(?:option|list)[ \t]+(['\"]?)(?P<name>[A-Za-z0-9_.\-]+)\1[ \t]+"
 )
+# The name starts only at the start of a run of name characters and is
+# taken possessively (it can only end at the run's end): linear runtime.
 _ASSIGN_HEAD_RE: Final = re.compile(
-    r"(?P<q>[\"']?)(?P<name>[A-Za-z0-9_.@\[\]\-]+)(?P=q)[ \t]*[=:][ \t]*"
+    r"(?P<q>[\"']?)(?<![A-Za-z0-9_.@\[\]\-])(?P<name>[A-Za-z0-9_.@\[\]\-]++)"
+    r"(?P=q)[ \t]*[=:][ \t]*"
 )
 _FLAG_HEAD_RE: Final = re.compile(
     r"(?<![\w\-])(?P<name>--?[A-Za-z][A-Za-z0-9_\-]*)[ \t]+(?=[^\s\-])"
 )
-# A value: a complete double- or single-quoted string (UCI '\'' escapes),
-# otherwise the rest of the line. Spaces, commas and semicolons do not end
-# it: "correct horse battery staple" and "r0kh=<mac> <id> <key>" are one
-# value each (over-masking on purpose).
-_VALUE_RE: Final = re.compile(
-    r"\"(?:[^\"\\\r\n]|\\.)*\"|'(?:'\\''|[^'\r\n])*'|[^\r\n]*"
-)
+# A value: complete double- or single-quoted strings (UCI '\'' escapes),
+# several separated by blanks as ``uci show`` prints a list
+# (``'pw-one' 'pw-two'``); if another quote follows (unterminated), or the
+# value is unquoted, the rest of the line. Spaces, commas and semicolons do
+# not end it: "correct horse battery staple" and "r0kh=<mac> <id> <key>"
+# are one value each (over-masking on purpose).
+_QUOTED: Final = r"(?:\"(?:[^\"\\\r\n]|\\.)*\"|'(?:'\\''|[^'\r\n])*')"
+_VALUE_RE: Final = re.compile(rf"{_QUOTED}(?:[ \t]+{_QUOTED})*(?![ \t]*[\"'])|[^\r\n]*")
 _LINE_VALUE_RE: Final = re.compile(r"[^\r\n]*")
 # crypt(3) hashes as in /etc/shadow.
 _CRYPT_RE: Final = re.compile(r"\$(?:1|2[abxy]?|5|6|7|y|gy|sha1|md5|apr1)\$[^\s:'\"]+")
@@ -582,12 +672,29 @@ def redact_text(text: object) -> str:
     quote or the end of the line), crypt hashes, base64 32-byte keys, 32-hex
     session tokens and other opaque runs of 32+ characters.
     ``<prefix>_<32 hex>`` ids, hex hashes and word-built names (archive
-    paths, hostnames) are kept.
+    paths, hostnames) are kept. Text longer than MAX_TEXT_LENGTH is cut and
+    ends with TRUNCATED. Runtime is linear in the length.
     """
     if not isinstance(text, str):
         text = str(text)
     if not text:
         return text
+    if len(text) <= MAX_TEXT_LENGTH:
+        return _redact(text)
+    return _redact(_cut(text)) + TRUNCATED
+
+
+def _cut(text: str) -> str:
+    """First MAX_TEXT_LENGTH chars, back to the last whitespace."""
+    head = text[:MAX_TEXT_LENGTH]
+    if text[MAX_TEXT_LENGTH].isspace():
+        return head
+    last = max(head.rfind(blank) for blank in " \t\r\n")
+    return head[: last + 1]  # no whitespace at all: nothing is kept
+
+
+def _redact(text: str) -> str:
+    """The rules of :func:`redact_text` on a bounded text."""
     text = _PEM_RE.sub(MASK, text)
     text = _URL_CRED_RE.sub(rf"\1:{MASK}@", text)
     text = _AUTH_SCHEME_RE.sub(rf"\1 {MASK}", text)
@@ -613,6 +720,24 @@ _OPTION_VALUE_KEYS: Final = frozenset(
     {"old", "new", "value", "values", "before", "after", "current", "previous"}
 )
 _PATH_KEYS: Final = ("path", "name", "member", "file", "filename")
+_INLINE_KEY: Final = "-----BEGIN "
+# Value types without attributes that could hold a secret; they stay as
+# they are. Every other unknown object becomes an OBJECT marker.
+_PLAIN_VALUE_TYPES: Final = (
+    complex,
+    date,
+    time,
+    timedelta,
+    Decimal,
+    UUID,
+    PurePath,
+    IPv4Address,
+    IPv6Address,
+    IPv4Network,
+    IPv6Network,
+    IPv4Interface,
+    IPv6Interface,
+)
 _CONTENT_KEYS: Final = frozenset(
     {"content", "contents", "data", "text", "body", "raw", "value", "lines"}
 )
@@ -652,6 +777,20 @@ class _Walk:
     redact_strings: bool
 
 
+def _has_inline_key(mapping: Mapping[Any, Any]) -> bool:
+    """True if a value of a change record holds a PEM-style key block.
+
+    A readable option (openvpn ``tls_auth`` names a key file) must not show
+    a key pasted inline in place of the path.
+    """
+    for key in _OPTION_VALUE_KEYS:
+        value = mapping.get(key)
+        items = value if isinstance(value, list | tuple) else (value,)
+        if any(isinstance(item, str) and _INLINE_KEY in item for item in items):
+            return True
+    return False
+
+
 def _record_masked_keys(mapping: Mapping[Any, Any]) -> frozenset[str]:
     """Keys a diff or archive record masks because of its option or path."""
     masked: set[str] = set()
@@ -663,7 +802,7 @@ def _record_masked_keys(mapping: Mapping[Any, Any]) -> frozenset[str]:
             config if isinstance(config, str) else "",
             section_type if isinstance(section_type, str) else "",
             option,
-        ):
+        ) or _has_inline_key(mapping):
             masked |= _OPTION_VALUE_KEYS
     for path_key in _PATH_KEYS:
         path = mapping.get(path_key)
@@ -682,7 +821,11 @@ def _mask_mapping(
     masked_keys = _record_masked_keys(mapping)
     result: dict[Any, Any] = {}
     for key, value in mapping.items():
-        if isinstance(key, str):
+        if not isinstance(key, str):  # bytes, tuple, number, object keys
+            if is_secret_key(key, walk.extra):
+                result[key] = mask_value(value)
+                continue
+        else:
             if key.lower() in masked_keys or is_secret_key(key, walk.extra):
                 result[key] = mask_value(value)
                 continue
@@ -700,12 +843,19 @@ def _mask_mapping(
 
 def _mask_sequence(obj: Any, walk: _Walk, stack: set[int], depth: int) -> Any:
     """Mask the items of a list, tuple, namedtuple or set."""
+    if isinstance(obj, tuple) and hasattr(obj, "_fields"):  # namedtuple
+        return type(obj)(
+            *(
+                mask_value(item)
+                if is_secret_key(name, walk.extra)
+                else _mask(item, walk, stack, depth + 1)
+                for name, item in zip(obj._fields, obj, strict=False)
+            )
+        )
     items = [_mask(item, walk, stack, depth + 1) for item in obj]
     if isinstance(obj, list):
         return items
     if isinstance(obj, tuple):
-        if hasattr(obj, "_fields"):  # namedtuple
-            return type(obj)(*items)
         return tuple(items)
     if not walk.redact_strings:  # key-only mode: JSON-safe sorted list
         return sorted(items, key=str)
@@ -724,9 +874,12 @@ def _mask(obj: Any, walk: _Walk, stack: set[int], depth: int) -> Any:
         return MASK
     if isinstance(obj, BaseException):
         return redact_text(str(obj))
+    if isinstance(obj, _PLAIN_VALUE_TYPES):
+        return obj
     is_dc = is_dataclass(obj) and not isinstance(obj, type)
     if not (is_dc or isinstance(obj, Mapping | list | tuple | set | frozenset)):
-        return obj
+        # Unknown object: its attributes may hold a secret; show the type.
+        return f"**OBJECT:{type(obj).__name__}**"
     if depth > MAX_DEPTH:
         _LOGGER.debug("masking: nesting deeper than %d truncated", MAX_DEPTH)
         return TRUNCATED

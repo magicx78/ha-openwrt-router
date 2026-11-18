@@ -12,10 +12,13 @@ import ast
 import hashlib
 import hmac
 import json
+import time
 from collections import namedtuple
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
+from uuid import UUID
 
 import pytest
 
@@ -653,6 +656,221 @@ class TestNamesAreNotTokens:
         wg_key = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
         assert wg_key not in redact_text(f"PrivateKey = {wg_key}")
         assert wg_key not in redact_text(f"peer {wg_key}")
+
+
+class TestReviewPoint1UpdatekeyPppdOptions:
+    """6in4 ``updatekey`` and ppp ``pppd_options`` (may carry a password)."""
+
+    @pytest.mark.parametrize("name", ["updatekey", "pppd_options"])
+    def test_masked_in_every_mode(self, name):
+        assert is_secret_key(name)
+        assert is_snapshot_secret("network", "interface", name)
+        assert is_secret_option("network", "interface", name)
+        assert mask_secrets({name: SECRET}) == {name: MASK}
+        assert mask_for_output({name: SECRET}) == {name: MASK}
+        assert SECRET not in redact_text(f"{name}={SECRET}")
+        assert SECRET not in redact_text(f"network.wan6.{name}='{SECRET}'")
+
+    def test_pppd_options_password_in_uci_line(self):
+        out = redact_text(f"option pppd_options 'password {SECRET} debug'")
+        assert SECRET not in out
+
+
+class TestReviewPoint2MoreNames:
+    @pytest.mark.parametrize(
+        "name",
+        ["authkey", "sharedkey", "otp", "tls_crypt", "tls_crypt_v2", "pkcs12"]
+        + ["sauth", "sysauth_https", "tls_auth", "accesskey"],
+    )
+    def test_broad_mode_masks_without_context(self, name):
+        assert is_secret_key(name)
+        assert mask_secrets({name: SECRET}) == {name: MASK}
+        assert SECRET not in redact_text(f"{name}={SECRET}")
+        out = mask_for_output({"option": name, "old": "a", "new": SECRET})
+        assert out["new"] == MASK
+
+    @pytest.mark.parametrize("option", ["tls_auth", "tls_crypt", "pkcs12"])
+    def test_openvpn_key_file_path_readable_in_context(self, option):
+        change = {
+            "config": "openvpn",
+            "section_type": "openvpn",
+            "option": option,
+            "old": "/etc/openvpn/a.key",
+            "new": "/etc/openvpn/b.key",
+        }
+        assert not is_snapshot_secret("openvpn", "openvpn", option)
+        assert mask_secrets(change) == change
+        assert mask_for_output(change) == change
+
+    @pytest.mark.parametrize("option", ["tls_auth", "tls_crypt", "pkcs12"])
+    def test_inline_key_block_masked_even_in_context(self, option):
+        block = (
+            "-----BEGIN OpenVPN Static key V1-----\n"
+            f"{SECRET}\n-----END OpenVPN Static key V1-----"
+        )
+        change = {
+            "config": "openvpn",
+            "section_type": "openvpn",
+            "option": option,
+            "old": "/etc/openvpn/a.key",
+            "new": block,
+        }
+        for fn in (mask_secrets, mask_for_output):
+            assert SECRET not in json.dumps(fn(change))
+        listed = dict(change, new=[block])
+        assert SECRET not in json.dumps(mask_secrets(listed))
+
+
+HOSTILE = 100 * 1024
+HOSTILE_INPUTS = {
+    "a": "a" * HOSTILE,
+    "a-": "a-" * (HOSTILE // 2),
+    "a@": "a@" * (HOSTILE // 2),
+    "[a]": "[a]" * (HOSTILE // 3),
+    "a.": "a." * (HOSTILE // 2),
+    "a=": "a=" * (HOSTILE // 2),
+    "a b ": "a b " * (HOSTILE // 4),
+    "slashes": "/".join(["a"] * (HOSTILE // 2)),
+    "quotes": "key='a' " * (HOSTILE // 8),
+    "uci_escapes": "psk='" + "'\\''" * (HOSTILE // 4),
+    "token32000": "aB3dE9fG2h" * 3200,
+    "board_name32000": "openwrt-" * 4000,
+}
+
+
+class TestReviewPoint3Runtime:
+    @pytest.mark.parametrize("name", sorted(HOSTILE_INPUTS))
+    def test_hostile_input_is_fast(self, name):
+        start = time.perf_counter()
+        redact_text(HOSTILE_INPUTS[name])
+        assert time.perf_counter() - start < 2.0
+
+    def test_long_text_truncated_visibly(self):
+        text = "x " * core_masking.MAX_TEXT_LENGTH + f"password={SECRET}"
+        out = redact_text(text)
+        assert out.endswith(core_masking.TRUNCATED)
+        assert SECRET not in out
+        assert len(out) <= core_masking.MAX_TEXT_LENGTH + len(core_masking.TRUNCATED)
+
+    def test_cut_never_leaves_a_token_fragment(self):
+        filler = "x " * (core_masking.MAX_TEXT_LENGTH // 2 - 5)
+        text = filler + SECRET * 10
+        out = redact_text(text)
+        assert SECRET[:5] not in out
+        assert out.endswith(core_masking.TRUNCATED)
+
+    def test_short_text_unchanged(self):
+        assert redact_text("router offline") == "router offline"
+
+    def test_url_credentials_any_scheme_shape(self):
+        for text in (
+            "curl https://user:hunter2@example.org/x",
+            "+https://u:hunter2@h",
+            "x" * 40 + "https://u:hunter2@h",
+        ):
+            assert "hunter2" not in redact_text(text)
+
+
+class TestReviewPoint4MultiValue:
+    def test_uci_show_second_value_masked(self):
+        out = redact_text("wireless.default_radio0.sae_password='pw-one' 'pw-two'")
+        assert "pw-one" not in out
+        assert "pw-two" not in out
+
+    def test_unterminated_second_value_masked(self):
+        assert "pw-two" not in redact_text("sae_password='pw-one' 'pw-two")
+
+    def test_json_pair_after_secret_kept(self):
+        out = redact_text('{"password": "x1", "user": "root"}')
+        assert "x1" not in out
+        assert '"user": "root"' in out
+
+    def test_list_under_secret_key_fully_masked(self):
+        data = {"sae_password": ["pw-one", "pw-two"]}
+        for fn in (mask_secrets, mask_for_output):
+            assert "pw-" not in json.dumps(fn(data))
+            assert "pw-" not in json.dumps(fn({"options": data}))
+        change = {"config": "wireless", "option": "r0kh", "values": ["a1", "a2"]}
+        assert mask_secrets(change)["values"] == MASK
+
+    def test_list_of_digest_markers(self):
+        out = mask_secrets({"r0kh": [{"secret": "ab"}], "x": [{"secret": "cd"}]})
+        assert out == {"r0kh": MASK, "x": [MASK]}
+
+
+class _PlainSecret:
+    def __init__(self) -> None:
+        self.password = SECRET
+
+
+class _SlotSecret:
+    __slots__ = ("password",)
+
+    def __init__(self) -> None:
+        self.password = SECRET
+
+
+_NTSecret = namedtuple("_NTSecret", "user password")
+
+
+class TestReviewPoint5OddKeysAndObjects:
+    @pytest.mark.parametrize(
+        "key", [b"password", ("wifi", "key"), frozenset({"token"}), (1, (b"psk",))]
+    )
+    def test_non_str_secret_keys_masked(self, key):
+        for fn in (mask_secrets, mask_for_output):
+            assert fn({key: SECRET}) == {key: MASK}
+        assert is_secret_key(key)
+
+    def test_unhashable_byte_names(self):
+        assert is_secret_key(bytearray(b"psk"))
+        assert is_secret_key(memoryview(b"password"))
+        assert not is_secret_key(b"ssid")
+
+    def test_int_key_is_not_a_name(self):
+        assert mask_secrets({1: "plain"}) == {1: "plain"}
+
+    @pytest.mark.parametrize("obj", [_PlainSecret(), _SlotSecret()])
+    def test_unknown_objects_become_type_marker(self, obj):
+        for fn in (mask_secrets, mask_for_output):
+            out = fn({"x": obj})
+            assert out == {"x": f"**OBJECT:{type(obj).__name__}**"}
+
+    def test_namedtuple_secret_field_masked(self):
+        for fn in (mask_secrets, mask_for_output):
+            out = fn({"x": _NTSecret("root", SECRET)})["x"]
+            assert out == _NTSecret("root", MASK)
+
+    def test_known_value_types_kept(self):
+        when = datetime(2026, 11, 18, tzinfo=UTC)
+        data = {"at": when, "id": UUID(int=1), "path": PurePosixPath("/etc/x")}
+        assert mask_secrets(data) == data
+
+
+class TestHostileNesting:
+    def test_deep_dict_and_list(self):
+        deep: object = SECRET
+        for _ in range(10_000):
+            deep = {"a": [deep]}
+        for fn in (mask_secrets, mask_for_output):
+            start = time.perf_counter()
+            assert SECRET not in repr(fn(deep))
+            assert time.perf_counter() - start < 2.0
+
+    def test_deep_tuple_key(self):
+        key: object = "password"
+        for _ in range(10_000):
+            key = (key,)
+        assert mask_secrets({key: SECRET}) == {key: MASK}
+
+    def test_wide_dict(self):
+        # 100 000 keys measured ~0.95 s per walk (2026-11-18); 50 000 here
+        # keeps CI runners well inside the bound.
+        wide = {f"k{i}": "v" for i in range(50_000)}
+        for fn in (mask_secrets, mask_for_output):
+            start = time.perf_counter()
+            assert fn(wide) == wide
+            assert time.perf_counter() - start < 2.0
 
 
 def test_core_masking_imports_no_config_module():
