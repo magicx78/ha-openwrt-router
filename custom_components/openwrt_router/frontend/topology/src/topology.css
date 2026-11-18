@@ -983,6 +983,8 @@
   visibility: visible;
   transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), visibility 0s;
 }
+/* No taps on the drawer while it slides out (it passes over the phone bar). */
+.detail-panel:not(.open) { pointer-events: none; }
 
 .detail-panel__header {
   display: flex;
@@ -1165,6 +1167,7 @@
     top: auto;
     bottom: 0;
     height: 72vh;
+    max-height: calc(100% - 8px); /* 72vh can exceed the room above a phone's toolbars */
     transform: translateY(100%);
     border-left: none;
     border-top: 1px solid var(--border);

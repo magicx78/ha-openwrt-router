@@ -19,6 +19,8 @@ All notable changes to the OpenWrt Router integration will be documented in this
   „5,0 Mbit/s“, „8,9 GB“.
 - **Screenreader:** die Symbole der Seitenleiste nennen wieder ihre Zahl,
   z. B. „Diagnose (3)“.
+- **Detailansicht am Handy:** nimmt beim Zuklappen keine Tipps mehr an und
+  bleibt bei wenig Bildschirmhöhe samt „×“ vollständig sichtbar.
 
 ## [1.43.1] - 2026-11-17
 
