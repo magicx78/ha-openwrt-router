@@ -18,13 +18,39 @@ or `kernel: body`); the tests put a remote head in front.
 | `logd_remote_tcp.bin` | the same lines as a TCP stream, terminated by `\n` or NUL (`log_trailer_null`), one terminator per line, mixed | **belegt aus Upstream-Quelle**: `logread.c`, `log.init` (`-0`); not seen live |
 | `fw4_kernel.txt` | `kernel: [<sec>] <verdict> <zone> in\|out: …` / `<policy> <zone> forward: …` followed by netfilter fields `IN= OUT= MAC= SRC= DST= … PROTO= SPT= DPT= …` | prefix **belegt** (fw4 `zone-verdict.uc`, `rule.uc`, per plan 4.9); `[<sec>]` from the repo fixture `tests/test_net_infra.py:253` (origin **nicht belegt**); netfilter fields **nicht belegt, nach Upstream-Doku konstruiert** (kernel `nf_log_syslog` field names) |
 | `dnsmasq_query.txt` | `--log-queries=extra` lines: `<id> <addr>/<port> query[A] <name> from <client>`, `… reply <name> is <answer>`, `… forwarded …`, plus one line without `extra` | switch **belegt** (`dnsmasq.init`); line form **nicht belegt, nach Upstream-Doku konstruiert** (dnsmasq `cache.c`, `log_query`) |
-| `dropbear_fail.txt` | `Bad password attempt for '<user>' from <ip>:<port>`, `Login attempt for nonexistent user from <ip>:<port>` (and the older form with the user name) | **nicht belegt, nach Upstream-Doku konstruiert** (dropbear `svr-authpasswd.c`, `svr-auth.c`) |
-| `dropbear_ok.txt` | `Password auth succeeded for '<user>' from <ip>:<port>` / `Pubkey auth succeeded for '<user>' with key … from <ip>:<port>` | password line **belegt** (live seen, `tests/test_log_parser.py:3-4, :105`); pubkey line **nicht belegt** (repo fixture `tests/test_net_wifi.py:254`, origin not stated) |
+| `dropbear_fail.txt` | `Bad password attempt for '<user>' from <ip>:<port>`, `Login attempt for nonexistent user from <ip>:<port>` (and the older form with the user name) | **nicht belegt, nach Upstream-Doku konstruiert** (dropbear `svr-authpasswd.c`, `svr-auth.c`). The live check of 2026-11-18 read only the last 5 dropbear lines per router; none was a failure |
+| `dropbear_ok.txt` | `Password auth succeeded for '<user>' from <ip>:<port>` / `Pubkey auth succeeded for '<user>' with <type> key SHA256:<fingerprint> from <ip>:<port>` | both lines **belegt am 2026-11-18** auf gateway (WR3000, 25.12.1), ap2 (WR3000, 25.12.1), ap5 (FRITZ!Repeater 3000, 25.12.6), ap6 (1750E, 25.12.2); facility/severity `authpriv.notice` (PRI 85). The older repo form `… with key from …` (`tests/test_net_wifi.py:254`) is **widerlegt**: the live line names key type and fingerprint |
+| `dropbear_session.txt` | `Child connection from <ip>:<port>`, auth line, `Exit (<user>) from <<ip>:<port>>: Disconnect received` | **belegt am 2026-11-18** on the same four routers; `Child connection` and `Exit` are `authpriv.info` (PRI 86). They stay unparsed (`kind` None) |
+
+### Live check 2026-11-18 (read only, done by another session)
+
+What the outputs show, per router: gateway (Cudy WR3000, 25.12.1), ap2
+(WR3000, 25.12.1), ap5 (FRITZ!Repeater 3000, 25.12.6), ap6 (FRITZ!WLAN
+Repeater 1750E, 25.12.2).
+
+- The dropbear lines were read with `logread` (local form
+  `<date> authpriv.notice dropbear[<pid>]: <body>`, addresses masked to `IP`
+  before hand-over). The message part after `dropbear[<pid>]: ` is what logd
+  also sends remotely; the remote head itself was **not** seen, because no
+  router has `log_ip` set (only `log_proto='udp'` and `log_size='64'`), and
+  only `logd -S 64` runs, no `logread -r` instance.
+- Every source address was IPv4. The IPv6 form of the dropbear address is
+  **nicht belegt** (`dropbear_fail.txt` line 3 stays a guess).
+- No router sets a firewall `log`/`log_limit` option or dnsmasq
+  `logqueries`. So there are no fw4 log lines and no query lines to copy:
+  `fw4_kernel.txt` and `dnsmasq_query.txt` stay **nicht belegt**. That the
+  switches are off is belegt from the configuration; the line format is not.
+- `logread -e 'uhttpd|rpcd'` gave no line on any router. Whether a failed
+  LuCI/rpcd login writes a line is **nicht belegt**.
+
+Values copied into the fixtures: none. PIDs, addresses, ports and the key
+fingerprint are invented; only field order, separators, quotes, brackets
+and spaces follow the seen lines.
 
 In the records, every unconfirmed format is marked with
 `fields["unconfirmed"] = True` and its format id in `fields["fmt"]`
-(`security_logfmt.FORMAT_CONFIRMED`). After the live check (plan Q-LIVE)
-replace the lines here with seen lines and flip the flag.
+(`security_logfmt.FORMAT_CONFIRMED`). When a line is seen live, replace the
+fixture line with one of the same structure and flip the flag.
 
 `logd_remote_tcp.bin` is generated from `logd_remote_udp.txt` (non-comment
 lines; odd lines end in `\n`, even lines in NUL). Regenerate with:

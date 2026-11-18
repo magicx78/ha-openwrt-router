@@ -192,7 +192,31 @@ class TestFixtures:
         ok = [_record(line) for line in _lines("dropbear_ok.txt")]
         assert [r.kind for r in ok] == ["auth.ssh_ok"] * 2
         assert ok[0].fields["method"] == "password" and not ok[0].unconfirmed
-        assert ok[1].fields["method"] == "pubkey" and ok[1].unconfirmed
+        # live form 2026-11-18: "... for '<user>' with <type> key SHA256:<fp>
+        # from <ip>:<port>"
+        assert ok[1].fields["method"] == "pubkey" and not ok[1].unconfirmed
+        assert ok[1].fields["fmt"] == "dropbear_pubkey_ok"
+        assert ok[1].fields["user"] == "root"
+        assert (ok[1].fields["src"], ok[1].fields["spt"]) == ("192.0.2.5", 64009)
+
+    def test_dropbear_live_session(self):
+        """Session lines as seen live: only the auth lines become records
+        with a kind; connection and exit lines stay unparsed, so an own SSH
+        login never counts as a failure."""
+        recs = [_record(line) for line in _lines("dropbear_session.txt")]
+        assert [r.kind for r in recs] == [
+            None,
+            "auth.ssh_ok",
+            None,
+            None,
+            "auth.ssh_ok",
+        ]
+        assert all(r.proc == "dropbear" for r in recs)
+        assert [r.pid for r in recs] == [2601] * 3 + [2602] * 2
+        ok = [r for r in recs if r.kind]
+        assert [r.fields["method"] for r in ok] == ["password", "pubkey"]
+        assert not any(r.unconfirmed for r in ok)
+        assert [r.fields["spt"] for r in ok] == [64010, 64011]
 
     def test_confirmation_table(self):
         unconfirmed = {k for k, v in FORMAT_CONFIRMED.items() if not v}
@@ -202,7 +226,6 @@ class TestFixtures:
             "dnsmasq_reply",
             "dropbear_bad_password",
             "dropbear_unknown_user",
-            "dropbear_pubkey_ok",
         }
 
 

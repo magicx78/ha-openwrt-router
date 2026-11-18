@@ -11,12 +11,17 @@ Formats and their evidence (details: ``tests/fixtures/security/README.md``):
 
 * logd remote line ``<PRI>Mmm dd hh:mm:ss HOST [PREFIX: ][kernel: ]MSG``:
   from the upstream source (ubox ``log/logread.c``, ``LOG_NET`` branch), not
-  seen live. Both day forms (``Nov  7``, ``Nov 17``) are accepted.
-* hostapd / dnsmasq-dhcp lines (via ``log_parser``) and the dropbear
-  ``Password auth succeeded`` line: seen live (``tests/test_log_parser.py``).
+  seen live (remote syslog was off on every router checked 2026-11-18).
+  Both day forms (``Nov  7``, ``Nov 17``) are accepted.
+* hostapd / dnsmasq-dhcp lines (via ``log_parser``): seen live
+  (``tests/test_log_parser.py``). dropbear ``Password auth succeeded`` and
+  ``Pubkey auth succeeded … with <type> key SHA256:<fp> from …``: seen live
+  2026-11-18 on four routers (WR3000, FRITZ!Repeater 3000, 1750E).
 * fw4 netfilter fields after the log prefix, dnsmasq ``--log-queries=extra``
   lines and the dropbear failure lines: **not confirmed**, built from the
-  upstream formats. Their records carry ``fields["unconfirmed"] = True``.
+  upstream formats (firewall logging and ``logqueries`` were off, no failed
+  SSH login was in the checked lines). Their records carry
+  ``fields["unconfirmed"] = True``.
 
 Every recognised record has ``fields["fmt"]`` (format id, see
 ``FORMAT_CONFIRMED``) so the analysis can show "format unconfirmed".
@@ -77,7 +82,7 @@ FMT_SSH_PUBKEY_OK: Final = "dropbear_pubkey_ok"
 FMT_LOG_PARSER: Final = "log_parser"
 
 # False = built from upstream documentation, never seen on a real router
-# (plan 4.9). Replace the fixture and flip the flag after the live check.
+# (plan 4.9). Replace the fixture and flip the flag once a line is seen live.
 FORMAT_CONFIRMED: Final[Mapping[str, bool]] = MappingProxyType(
     {
         FMT_FW4: False,
@@ -85,8 +90,8 @@ FORMAT_CONFIRMED: Final[Mapping[str, bool]] = MappingProxyType(
         FMT_DNS_REPLY: False,
         FMT_SSH_BAD_PASSWORD: False,
         FMT_SSH_UNKNOWN_USER: False,
-        FMT_SSH_PASSWORD_OK: True,  # tests/test_log_parser.py:105
-        FMT_SSH_PUBKEY_OK: False,
+        FMT_SSH_PASSWORD_OK: True,  # live check 2026-11-18, four routers
+        FMT_SSH_PUBKEY_OK: True,  # live check 2026-11-18, four routers
     }
 )
 # log_parser kinds whose line format was seen live (tests/test_log_parser.py
@@ -566,8 +571,9 @@ def parse_dropbear(body: str) -> tuple[str, dict[str, Any]] | None:
     """dropbear login line → ``auth.ssh_failed``/``auth.ssh_ok``.
 
     Fields: ``user`` (None if the line names none), ``src``, ``spt`` and
-    ``reason`` (failed) or ``method`` (ok). Only the password success line
-    is confirmed live; the others follow the upstream source.
+    ``reason`` (failed) or ``method`` (ok). The two success lines are
+    confirmed live; the failure lines follow the upstream source. The key
+    type and fingerprint of a pubkey line are not taken into ``fields``.
     """
     for lead, kind, fmt in _SSH_FORMS:
         if not body.startswith(lead):

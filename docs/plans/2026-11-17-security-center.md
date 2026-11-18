@@ -11,6 +11,8 @@ Kennzeichnung wie in den NI- und CS-Plänen:
 - **Annahme**: mit Prüfweg;
 - **Schätzung**: Kostenangabe ohne Messung;
 - **nicht belegt**: wörtlich so, wenn weder Repo, Fixtures noch offizielle Quellen es zeigen;
+- **belegt am 2026-11-18 auf <Gerät>** / **widerlegt am 2026-11-18 auf <Gerät>: <was stattdessen gilt>**: aus der lesenden Live-Prüfung (Q-LIVE, Router-Teil, Abschnitt 2.4);
+- **gemessen**: Größe oder Zähler aus derselben Live-Prüfung (eine Messung, kein Mittelwert);
 - **Vorschlag**: Planentscheidung, Freigabe durch den Master;
 - **DECIDED** / **QUESTION**: Abschnitt 9.
 
@@ -22,6 +24,7 @@ Begriffe, damit nichts verwechselt wird:
 ## Status
 
 - **Stand:** 2026-11-17 · **Phase:** A (Bestandsanalyse und Fähigkeitsmatrix). Es ist **nichts gebaut**.
+- **Nachtrag 2026-11-18:** Der Router-Teil von Q-LIVE ist ausgeführt (nur lesend, von einer anderen Sitzung nach Freigabe des Nutzers) auf gateway (Cudy WR3000, 25.12.1), ap2 (WR3000, 25.12.1), ap5 (FRITZ!Repeater 3000, 25.12.6) und ap6 (FRITZ!WLAN Repeater 1750E, 25.12.2). Ergebnisse und Geräteunterschiede: Abschnitt 2.4. Der HA-OS-Teil (`docker inspect`) ist **nicht** ausgeführt.
 - **Branch:** `claude/security-center-6fdcdd` · Basis `main@0dc20cd` (1.42.0).
 - **Regeln dieser Phase:**
   - kein Kontakt zu Routern, HA, Host, VM oder Drucker;
@@ -354,8 +357,8 @@ Enums:
 | Datei | Inhalt |
 |---|---|
 | `tests/test_log_parser.py:3-4` | Laut Docstring *„exact format seen on OpenWrt 25.12.1 routers (hostapd, dnsmasq-dhcp, usteer, dropbear)“*. Eintragsform `{"msg","id","priority":30,"source":1,"time"}` (`:46-47`). Zeilen hostapd/dnsmasq-dhcp `:59-75`, ignorierte Zeilen inkl. `dropbear[2565]: Password auth succeeded for 'root' from 192.0.2.5:64008` (`:105`) |
-| `tests/test_net_infra.py:250-264` | Unbekannte Zeilen (kein Ergebnis): Kernel `[ 1.0] random: …` (Quelle 0), `crond`, `dropbear[3000]: Child connection from 192.0.2.10:50000`, netifd, procd, odhcpd, `dnsmasq[2345]: using nameserver 192.0.2.1#53`, usteer. Ob diese Zeilen live gesehen wurden, steht dort nicht: **nicht belegt** |
-| `tests/test_net_wifi.py:254` | `dropbear[2565]: Pubkey auth succeeded for 'root' with key from 192.0.2.5:64008` |
+| `tests/test_net_infra.py:250-264` | Unbekannte Zeilen (kein Ergebnis): Kernel `[ 1.0] random: …` (Quelle 0), `crond`, `dropbear[3000]: Child connection from 192.0.2.10:50000`, netifd, procd, odhcpd, `dnsmasq[2345]: using nameserver 192.0.2.1#53`, usteer. Die dropbear-Zeile `Child connection from <ip>:<port>` ist **belegt am 2026-11-18 auf gateway, ap2, ap5 und ap6** (Abschnitt 2.4); für die übrigen Zeilen steht dort nicht, ob sie live gesehen wurden: **nicht belegt** |
+| `tests/test_net_wifi.py:254` | `dropbear[2565]: Pubkey auth succeeded for 'root' with key from 192.0.2.5:64008`. **Widerlegt am 2026-11-18 auf gateway, ap2, ap5 und ap6**: die echte Zeile nennt Schlüsseltyp und Fingerprint, `… for '<user>' with ssh-ed25519 key SHA256:<fp> from <ip>:<port>` |
 | `tests/test_poll_no_ssh.py:1-16` | Ein gesunder Poll öffnet keine SSH-Verbindung, weil dropbear-Zeilen das Router-Log füllten. LLDP ist der einzige SSH-Leser (alle 600 s) |
 | `tests/test_net_rt_log.py`, `test_net_rt_scenarios.py` | RT-Szenarien (`docs/realtime-rca.md:124-139`); im Detail nicht gelesen |
 | `scripts/mock_router.py` | Enthält **kein** `log`, dnsmasq, conntrack oder firewall (Grep ohne Treffer) |
@@ -402,25 +405,26 @@ Weitere Kürzel:
 - **Weg**: Welcher Empfangsweg die Quelle nutzen kann. **A** = Syslog-Empfänger in HA, **B** = Collector, **P** = vorhandener Poll (kein Log-Weg nötig).
 - **Stock**: Auf Standard-OpenWrt ohne Zusatzpaket und ohne Konfigänderung vorhanden.
 - **(S)**: Schätzung.
+- **gemessen**: Wert aus der Live-Prüfung 2026-11-18 (2.4); Spannen gehen über die vier geprüften Geräte.
 
 ### 2.2 Matrix (eine Zeile je Quelle)
 
 | # | Quelle | Schon in den Daten? (wo) | Sonst nötiger Abruf | ACL nötig / heute gedeckt? | Kosten WR3000 | Stock? | Gruppe | Weg | Auslagerung | Beleg |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 1 | nftables/fw4-Regelsatz (laufend) | nein | `nft -j list ruleset` per SSH, nur auf Anforderung | keine rpcd-ACL (SSH); ubus-exec gemieden (rpcd-Leck) | einige 10 KB Ausgabe, kurzer CPU-Stoß (S); SSH erzeugt dropbear-Logzeilen | ja (fw4) | b | P | – | Leck-Kommentar `api.py:4651`; Größe **nicht belegt** |
-| 2 | nftables-Zähler | nein | derselbe Abruf wie #1, Zähler je Regel/Zone | wie #1 | wie #1 (S) | ja: `counter` ist für Zonen und Regeln standardmäßig an | b | P | – | fw4 `fw4.uc` (parse_zone/parse_rule `counter: ["bool","1"]`), `zone-verdict.uc`, `rule.uc` |
-| 3 | Conntrack-Statistik aggregiert (Anzahl/Max, `conntrack -S`) | Anzahl ja: `active_connections` (`api.py:4843`), NI `system.conntrack` (`net_rules.py:2209`, relativ zum Median, **ohne** Max) | file read `/proc/sys/net/netfilter/nf_conntrack_max` (selten); `conntrack -S` nicht vorgesehen (Paket/exec) | Max: **nicht** in ACL v8 → Erweiterung | < 100 B je Abruf (S) | Max-Datei ja (Kernel); `conntrack`-Tool **nicht belegt** | b | P | – | Docstring `net_rules.py:2219` „nf_conntrack_max is not readable, F3“ |
-| 4 | Volle Conntrack-Tabelle | nein | über ubus nicht lesbar (4-KiB-Grenze, `api.py:1889-1891`); per SSH zu teuer | – | hoch: Tabelle mit Tausenden Zeilen (S) | ja (Kernel) | c | B | nur ausgelagert: Flow-Export (NetFlow/IPFIX, Paket) zum Collector; **nicht empfohlen** auf dem WR3000 | Kosten und Paketverfügbarkeit **nicht belegt** |
-| 5 | Firewall-Logs (fw4 `option log`) | nein | Router-Konfig: `log` und `log_limit` an Zone oder Regel | keine (kommt als Kernel-Logzeile) | je geloggtes Paket eine Zeile; ohne `log_limit` Flutgefahr für den logd-Ring (S) | **standardmäßig aus** | c | A, B | Kernel → logd → Remote-Syslog (Abschnitte 2.3 und 4.10) | Standard-Config ohne `log`: firewall4 `root/etc/config/firewall`; Präfix: `zone-verdict.uc`, `ruleset.uc`, `rule.uc` |
+| 1 | nftables/fw4-Regelsatz (laufend) | nein | `nft -j list ruleset` per SSH, nur auf Anforderung | keine rpcd-ACL (SSH); ubus-exec gemieden (rpcd-Leck) | gemessen (Textform `nft list ruleset`): 15 109 B auf gateway, 3 084–3 100 B auf den drei APs; JSON-Form `-j` nicht gemessen; kurzer CPU-Stoß (S); SSH erzeugt dropbear-Logzeilen | ja (fw4) | b | P | – | Leck-Kommentar `api.py:4651`; Größe der Textform **belegt am 2026-11-18 auf gateway, ap2, ap5, ap6** (2.4) |
+| 2 | nftables-Zähler | nein | derselbe Abruf wie #1, Zähler je Regel/Zone | wie #1 | wie #1 | ja: `counter` ist für Zonen und Regeln standardmäßig an; keine `counter`-Option überschrieben (belegt am 2026-11-18 auf allen vier Geräten) | b | P | – | fw4 `fw4.uc` (parse_zone/parse_rule `counter: ["bool","1"]`), `zone-verdict.uc`, `rule.uc` |
+| 3 | Conntrack-Statistik aggregiert (Anzahl/Max, `conntrack -S`) | Anzahl ja: `active_connections` (`api.py:4843`), NI `system.conntrack` (`net_rules.py:2209`, relativ zum Median, **ohne** Max) | file read `/proc/sys/net/netfilter/nf_conntrack_max` (selten); `conntrack -S` nicht vorgesehen (Paket/exec) | Max: **nicht** in ACL v8 → Erweiterung | gemessen: Dateiinhalt 5–6 B (Max 7 168 bis 32 768, je Gerät verschieden, 2.4) | Max-Datei ja (Kernel, als root lesbar, belegt am 2026-11-18 auf allen vier Geräten); `conntrack`-Paket: **widerlegt am 2026-11-18 auf gateway, ap2, ap5, ap6: auf keinem installiert**, `conntrack -S` fällt damit weg | b | P | – | Docstring `net_rules.py:2219` „nf_conntrack_max is not readable, F3“ |
+| 4 | Volle Conntrack-Tabelle | nein | über ubus nicht lesbar (4-KiB-Grenze, `api.py:1889-1891`); per SSH zu teuer | – | hoch: Tabelle mit Tausenden Zeilen (S); gemessen waren es 39–517 Einträge bei Max 7 168–32 768 | ja (Kernel) | c | B | nur ausgelagert: Flow-Export (NetFlow/IPFIX, Paket) zum Collector; **nicht empfohlen** auf dem WR3000 | `softflowd` auf keinem der vier Geräte installiert (belegt am 2026-11-18); Kosten und Verfügbarkeit im Paket-Feed **nicht belegt** |
+| 5 | Firewall-Logs (fw4 `option log`) | nein | Router-Konfig: `log` und `log_limit` an Zone oder Regel | keine (kommt als Kernel-Logzeile) | je geloggtes Paket eine Zeile; ohne `log_limit` Flutgefahr für den logd-Ring (S) | **standardmäßig aus**; auf keinem Gerät eine `log`- oder `log_limit`-Option gesetzt (belegt am 2026-11-18 auf gateway, ap2, ap5, ap6). „Aus“ folgt daraus mit dem fw4-Standard `log=0`; Zeilenformat nicht gesehen | c | A, B | Kernel → logd → Remote-Syslog (Abschnitte 2.3 und 4.10) | Standard-Config ohne `log`: firewall4 `root/etc/config/firewall`; Präfix: `zone-verdict.uc`, `ruleset.uc`, `rule.uc` |
 | 6 | Kernel-Logs | ja: `log read` liefert Kernelzeilen (Quelle 0), Parser nutzt nur Link und OOM (`log_parser.py`) | – | `log read` (v6+) gedeckt | 0 | ja | a | P (auch A/B) | – | `tests/test_net_infra.py:253` |
 | 7 | Interface-Zähler | ja: `network_interfaces`, `port_stats`, `wan_traffic` (`api.py:4230`, `:4307`) | – | gedeckt | 0 | ja | a | P | – | `coordinator.py:298-430` |
-| 8 | Netzwerk-Verbindungsstatistik (`/proc/net/snmp`, TCP/UDP-Zähler) | nein | file read `/proc/net/snmp`, alle 5 min | **nicht** in ACL v8 | ca. 1–2 KB (S); passt in die 4 KiB **(nicht belegt)** | ja (Kernel) | b | P | – | **nicht belegt** (Inhalt live nicht gesehen) |
-| 9 | dnsmasq-Dienst und Metriken | Dienststatus ja: `services` (`DEFAULT_SERVICES`, `const.py:561`) | `ubus call <dnsmasq-Objekt> metrics` | **nicht** in ACL v8 | < 1 KB (S) | ubus-Anbindung standardmäßig an (`--enable-ubus`); Objektname und Felder von `metrics` **nicht belegt** | b | P | – | OpenWrt `dnsmasq.init`: `config_get_bool ubus "$cfg" "ubus" 1` → `--enable-ubus=$instance_name` |
+| 8 | Netzwerk-Verbindungsstatistik (`/proc/net/snmp`, TCP/UDP-Zähler) | nein | file read `/proc/net/snmp`, alle 5 min | **nicht** in ACL v8 | gemessen: 1 279–1 506 B, also unter der 4-KiB-Grenze (belegt am 2026-11-18 auf allen vier Geräten) | ja (Kernel) | b | P | – | Größe belegt (2.4); Inhalt und Lesen über rpcd `file read` live nicht gesehen: **nicht belegt** |
+| 9 | dnsmasq-Dienst und Metriken | Dienststatus ja: `services` (`DEFAULT_SERVICES`, `const.py:561`) | `ubus call dnsmasq metrics` (ohne Parameter) | **nicht** in ACL v8 | gemessen: 577–705 B (eingerückte ubus-CLI-Ausgabe; über rpcd kompakter) | Objekt `dnsmasq` mit einziger Methode `metrics` **belegt am 2026-11-18 auf gateway, ap2, ap5**; daneben gibt es `dnsmasq.dns`. **Widerlegt am 2026-11-18 auf ap6 (1750E): kein dnsmasq-Objekt**, dnsmasq ist installiert, läuft aber nicht (kein Dienst, `relayd`-Gerät). Felder: 26 Zähler bei dnsmasq 2.91 (ap2), 30 bei 2.93 (gateway, ap5; zusätzlich `dhcp_leasequery`, `dhcp_lease_unassigned`, `dhcp_lease_actve` (Tippfehler von dnsmasq), `dhcp_lease_unknown`) | b | P | – | OpenWrt `dnsmasq.init`: `config_get_bool ubus "$cfg" "ubus" 1` → `--enable-ubus=$instance_name`; Live-Prüfung (2.4) |
 | 10 | DHCP-Leases | ja: `dhcp_leases` (`api.py:3825`), DHCP-Logzeilen `dhcp.*` | – | gedeckt | 0 | ja | a | P | – | `tests/test_log_parser.py:71-75` |
 | 11 | DNS-Fehlerstatistik | ja, eingeschränkt: dnsmasq-Logzeilen `dns.query_limit/no_servers/send_failed` | – | gedeckt | 0 | ja (Format laut Parser-Docstring nicht live gesehen) | a | P (auch A/B) | – | `log_parser.py` (Arten), Docstring |
-| 12 | DNS-Abfragelogs (`logqueries`) | nein | Router-Konfig: `dhcp.@dnsmasq[0].logqueries=1` | keine | **hoch**: je Abfrage eine Logzeile; verdrängt NI-Zeilen im logd-Ring (Abschnitt 4.10) | **standardmäßig aus** | c | A, B | dnsmasq → logd → Remote-Syslog; besser Alternative AdGuard/Unbound auf eigenem Host (Abschnitt 5) | `dhcp.conf` ohne `logqueries`; `dnsmasq.init`: `append_bool "$cfg" logqueries "--log-queries=extra"`; Zeilenformat **nicht belegt** |
+| 12 | DNS-Abfragelogs (`logqueries`) | nein | Router-Konfig: `dhcp.@dnsmasq[0].logqueries=1` | keine | **hoch**: je Abfrage eine Logzeile; verdrängt NI-Zeilen im logd-Ring (Abschnitt 4.10). Größenordnung: dnsmasq auf gateway zählte gemessen rund 1,34 Mio. Abfragen (`dns_local_answered` + `dns_queries_forwarded`) bei 13,5 Tagen System-Laufzeit, also im Mittel mindestens rund 1 Abfrage/s und mit `logqueries` mindestens ebenso viele Logzeilen (die Laufzeit von dnsmasq selbst ist nicht gemessen) | **standardmäßig aus**; `logqueries` auf keinem Gerät gesetzt (belegt am 2026-11-18 auf gateway, ap2, ap5, ap6) | c | A, B | dnsmasq → logd → Remote-Syslog; besser Alternative AdGuard/Unbound auf eigenem Host (Abschnitt 5) | `dhcp.conf` ohne `logqueries`; `dnsmasq.init`: `append_bool "$cfg" logqueries "--log-queries=extra"`; Zeilenformat **nicht belegt** (Schalter aus, keine Zeilen vorhanden) |
 | 13 | odhcpd | ja: Logart `dhcp.odhcpd_error` | – | gedeckt | 0 | ja | a | P (auch A/B) | – | `log_parser.py`; Format **nicht belegt** (Docstring) |
-| 14 | IPv6-Nachbarn | nein (ARP nur IPv4) | `luci-rpc getHostHints` (schon erlaubt; heute nur bei ARP-Abschneiden), alle 10 Polls | gedeckt | ca. 100 B je Gerät (S) | ja (LuCI-rpc) | b | P | – | Ob `getHostHints` IPv6-Adressen liefert: **nicht belegt** |
+| 14 | IPv6-Nachbarn | nein (ARP nur IPv4) | `luci-rpc getHostHints` (schon erlaubt; heute nur bei ARP-Abschneiden), alle 10 Polls | gedeckt | ca. 100 B je Gerät (S); gemessen: 30–145 Einträge mit `ip6addrs` je Router (gateway 145, ap2 68, ap5 46, ap6 30), `ip -6 neigh` 30–82 Zeilen; Gesamtgröße der Antwort nicht gemessen | ja (LuCI-rpc) | b | P | – | Feld `ip6addrs` in `getHostHints` **belegt am 2026-11-18 auf allen vier Geräten**; ob die Listen gefüllt sind, zeigt die Zählung nicht: **nicht belegt** |
 | 15 | hostapd `get_clients` | ja: `clients` (`api.py:2553`) | – | gedeckt | 0 | ja | a | P | – | `docs/plans/2026-11-16-client-stability.md` 1.1 |
 | 16 | ubus-WLAN-Ereignisstrom (subscribe) | nein | `ubus subscribe hostapd.*` über SSE (`api.async_subscribe` `api.py:5855`, `ubus_stream.py`) | `:subscribe` fehlt in ACL v8 | uhttpd stürzte auf zwei APs ab | ja, aber instabil | c | – | keine (Push-Strom, kein Log); **nicht empfohlen** | `docs/realtime-rca.md:15-17`; `STREAM_FORBIDDEN_OBJECTS = {"hostapd-auth"}` (`const.py:645-673`) |
 | 17 | Assoziations- und Authentifizierungsfehler | ja: `wifi.psk_mismatch, handshake_failed, assoc_rejected, sae_failed, backhaul_auth_failed`; CS `auth_fail`, `assoc_fail` | – | gedeckt | 0 | ja | a | P (auch A/B) | – | `tests/test_log_parser.py:61-70` |
@@ -430,7 +434,7 @@ Weitere Kürzel:
 | 21 | logread (Router-Log) | ja: `log read` jeden Poll, 100–700 Zeilen | – | gedeckt (v6+) | vorhanden: ca. 40–115 KB je Poll und Router (S, 165 B/Zeile) | ja | a | P (A/B als Ersatz denkbar, 4.8) | Remote-Syslog möglich (2.3) | `const.py:514-522`, `docs/realtime-rca.md` |
 | 22 | procd- und Dienst-Ereignisse | ja: `services`, `service_instances`; Logarten `system.service_crash_loop`, NI `system.service_restart/stopped` | – | gedeckt | 0 | ja | a | P | – | `net_rules.py:186-193` |
 | 23 | Unerwartete Router-Neustarts (Uptime-Sprung) | ja: `uptime`, `localtime_at`; NI `detect_reboot` → `system_reboot` | – | gedeckt | 0 | ja | a | P | – | `net_rules.py:2024-2075` |
-| 24 | Fehlgeschlagene Admin-Logins (dropbear; uhttpd/rpcd `session.login`) | dropbear: Rohzeilen im vorhandenen `log read` (Erfolgszeilen live belegt), heute vom Parser verworfen; uhttpd/rpcd: nein | kein neuer Abruf; Parser und Rohzeilen-Hook (Q-HOOK) | gedeckt | 0 | dropbear loggt standardmäßig (Erfolg belegt); Format der Fehlzeile **nicht belegt**; ob uhttpd/rpcd Fehlversuche loggen: **nicht belegt** | a | P (auch A/B) | – | `tests/test_log_parser.py:3-4`, `:105`; `tests/test_net_infra.py:255` |
+| 24 | Fehlgeschlagene Admin-Logins (dropbear; uhttpd/rpcd `session.login`) | dropbear: Rohzeilen im vorhandenen `log read` (Erfolgszeilen live belegt), heute vom Parser verworfen; uhttpd/rpcd: nein | kein neuer Abruf; Parser und Rohzeilen-Hook (Q-HOOK) | gedeckt | 0 | dropbear loggt standardmäßig: Erfolgszeilen `Password auth succeeded …` und `Pubkey auth succeeded … with <typ> key SHA256:<fp> from …` (`authpriv.notice`) sowie `Child connection from …` und `Exit (<user>) from <…>: …` (`authpriv.info`) **belegt am 2026-11-18 auf gateway, ap2, ap5, ap6**; Format der Fehlzeile **nicht belegt** (in den geprüften letzten 5 dropbear-Zeilen je Gerät kein Fehlversuch). uhttpd/rpcd: auf keinem Gerät eine Zeile im Log-Ring (belegt am 2026-11-18); ob ein Fehlversuch eine Zeile schreibt: **nicht belegt** | a | P (auch A/B) | – | `tests/test_log_parser.py:3-4`, `:105`; `tests/test_net_infra.py:255`; Live-Prüfung (2.4) |
 | 25 | VLAN-, Bridge- und Zonen-Konfiguration (UCI network/firewall) | network ja: `port_vlan_map` (`uci get network`, jeder Poll, `api.py:4392`); firewall nein | `uci get firewall` alle 30 min; später Drift-Events des Configuration Managers | UCI ohne eigenen ACL-Abschnitt; `firewall` über LuCI-ACL **nicht belegt** | 2–8 KB (S) | ja | b | P | – | `api.py:3947-3949` (Analogie `dhcp`) |
 | 26 | Client-VLAN-Zuordnung | ja, indirekt: SSID/Interface → Netz (`ap_interfaces`, UCI wireless), kabelgebunden über FDB und `port_vlan_map` | – | gedeckt | 0 | ja | a | P | – | CS-Plan 1.4 („VLAN je Client nur indirekt über SSID“) |
 | 27 | ARP-Tabelle | ja: `arp_table` (`api.py:4745`) | – | gedeckt | 0 | ja | a | P | – | `net_rules.py:2991-2994` (Grenzen der ARP-Konfliktlogik) |
@@ -452,11 +456,48 @@ Weitere Kürzel:
 
 | Quelle | Wie die Daten vom Router kommen | Einmalige Router-Einstellung | Routerkosten | Empfang | Beleg |
 |---|---|---|---|---|---|
-| Router-Log allgemein (Basis für #5, #12, #24) | logd → `logread -f -r <log_ip> <log_port>`, als eigene procd-Instanz | `system.@system[0].log_ip`, `log_port` (Standard 514), `log_proto` (Standard udp) | ein zusätzlicher `logread`-Prozess (wenige 100 KB RAM, S); **keine Flash-Schreibvorgänge**, solange `log_file` leer bleibt; Netz ca. Lograte × 150 B (S) | Weg A oder B (genau ein Ziel je Router, 4.5) | OpenWrt `package/system/ubox/files/log.init` |
+| Router-Log allgemein (Basis für #5, #12, #24) | logd → `logread -f -r <log_ip> <log_port>`, als eigene procd-Instanz | `system.@system[0].log_ip`, `log_port` (Standard 514), `log_proto` (Standard udp) | ein zusätzlicher `logread`-Prozess (wenige 100 KB RAM, S); **keine Flash-Schreibvorgänge**, solange `log_file` leer bleibt; Netz ca. Lograte × 150 B (S) | Weg A oder B (genau ein Ziel je Router, 4.5) | OpenWrt `package/system/ubox/files/log.init`. Ist-Zustand **belegt am 2026-11-18 auf gateway, ap2, ap5, ap6**: `log_ip` nirgends gesetzt, aber `log_proto='udp'` und `log_size='64'` ausdrücklich gesetzt; es läuft nur `logd -S 64`, keine `logread -r`-Instanz; Init-Skript `/etc/init.d/log` vorhanden |
 | Firewall-Logs (#5) | nft-`log`-Regel → Kernel-Log → logd → Remote-Syslog | `firewall.<zone>.log=1` und `log_limit` (z. B. 10/minute) | je geloggtes Paket eine Zeile; mit `log_limit` begrenzt; RAM im logd-Ring | A oder B | fw4 `zone-verdict.uc`, `rule.uc`, `fw4.uc` |
 | DNS-Abfragelogs (#12) | dnsmasq `--log-queries=extra` → syslog → logd → Remote-Syslog | `dhcp.@dnsmasq[0].logqueries=1`, optional `logfacility` | je Abfrage eine Zeile; CPU gering (S); **Ring-Verdrängung** (4.10) | A oder B | `dnsmasq.init` |
-| Volle Conntrack-Tabelle (#4) | Flow-Export (softflowd o. ä.) zum Collector | Paket installieren und konfigurieren | Paket, RAM und CPU je Flow (S); **nicht empfohlen** | nur B | **nicht belegt** (Paketverfügbarkeit, Kosten) |
+| Volle Conntrack-Tabelle (#4) | Flow-Export (softflowd o. ä.) zum Collector | Paket installieren und konfigurieren | Paket, RAM und CPU je Flow (S); **nicht empfohlen** | nur B | `softflowd` auf keinem Gerät installiert (belegt am 2026-11-18); Paketverfügbarkeit im Feed und Kosten **nicht belegt** |
 | ubus-Ereignisstrom (#16) | kein Log-Weg | ACL `:subscribe` | uhttpd-Absturz beobachtet | – | `docs/realtime-rca.md:15-17` |
+
+### 2.4 Live-Leseprüfung und Geräteunterschiede (2026-11-18)
+
+Die 17 Router-Befehle aus 9.2 (Q-LIVE) liefen nur lesend auf vier Geräten. Die Ausgaben liegen **außerhalb des Repos** und enthalten echte Kennungen; hier stehen nur Aussagen, Größen und Zähler. Jede Größe ist eine einzelne Messung zum Prüfzeitpunkt.
+
+**Was die Ausgaben belegen und was nur aus der Konfiguration folgt:**
+
+- Belegt durch gesehene Zeilen: das dropbear-Format der Erfolgs-, Verbindungs- und Ende-Zeilen (lokale `logread`-Form, Adressen vor der Weitergabe maskiert). Alle gesehenen Quelladressen waren IPv4.
+- Belegt durch die Konfiguration (Option fehlt bzw. ist gesetzt): Remote-Syslog aus (`log_ip` fehlt), Firewall-Logging aus (keine `log`-Option), DNS-Abfragelog aus (kein `logqueries`). Daraus folgt nur, dass es keine solchen Zeilen gibt. **Ihr Zeilenformat ist damit nicht belegt**, auch nicht der Kopf der logd-Remote-Zeile.
+- Nicht ausgeführt: der HA-OS-Teil (`docker inspect`). Port 5514 auf HA OS bleibt **nicht belegt** (4.6).
+
+**Geräteunterschiede** (alle vier OpenWrt 25.12.x mit `apk`):
+
+| Merkmal | gateway | ap2 | ap5 | ap6 |
+|---|---|---|---|---|
+| Gerät, OpenWrt | Cudy WR3000 v1, 25.12.1 | Cudy WR3000 v1, 25.12.1 | AVM FRITZ!Repeater 3000, 25.12.6 | AVM FRITZ!WLAN Repeater 1750E, 25.12.2 |
+| Ziel, Architektur | mediatek/filogic, aarch64 | mediatek/filogic, aarch64 | ipq40xx, arm_cortex-a7 | ath79, mips_24kc |
+| RAM gesamt (gemessen) | 234 MiB | 234 MiB | 240 MiB | **55 MiB** |
+| dnsmasq | 2.93, läuft; `dnsmasq metrics` mit 30 Zählern | 2.91, läuft; 26 Zähler | 2.93, läuft; 30 Zähler | 2.91 installiert, **läuft nicht** (kein Dienst, kein ubus-Objekt); Gerät nutzt `relayd` |
+| ubus `dhcp` (odhcpd) / `usteer` | ja / ja | ja / ja | ja / ja | **nein / nein** |
+| ubus `rpc-sys` | ja | **nein** | ja | ja |
+| WAN-Interfaces (`ubus list`) | `wan`, `wan6`, `wg0` | keine | keine | keine |
+| `nf_conntrack_max` / Einträge (gemessen) | 32 768 / 517 | 15 360 / 51 | 31 744 / 46 | **7 168** / 39 |
+| `/proc/net/snmp` (gemessen) | 1 506 B | 1 378 B | 1 351 B | 1 279 B |
+| `ip -6 neigh` Zeilen / `getHostHints` mit `ip6addrs` (gemessen) | 82 / 145 | 81 / 68 | 44 / 46 | 30 / 30 |
+| `nft list ruleset` Text (gemessen) | 15 109 B | 3 100 B | 3 096 B | 3 084 B |
+| `curl` | ja | ja | **nein** | **nein** |
+| wpad | mesh-openssl | mesh-openssl | mesh-openssl | mbedtls |
+| rpcd-Stand | 2026.10.04 | 2025.12.03 | 2026.10.04 | 2025.12.03 |
+
+**Auf allen vier gleich:** `log_size='64'`, `log_proto='udp'`, kein `log_ip`; keine Firewall-`log`/`log_limit`/`counter`-Option; kein `logqueries`/`logfacility`/`logdhcp`; keines der Pakete `conntrack`, `softflowd`, `banip`, `crowdsec`, `adguard*`, `unbound*` installiert; ACL-Datei `ha-openwrt-router.json` gleich groß (2 605 B); `dns-server` steht in jedem Eintrag von `network.interface dump`; in den letzten 5 dropbear-Zeilen kein Fehlversuch; keine uhttpd/rpcd-Zeile im Log-Ring.
+
+**Folgen für die Matrix:**
+
+- #9 (dnsmasq-Metriken) und die DNS-Erkennungen gibt es nur auf Geräten mit laufendem dnsmasq; auf ap6 meldet die Fähigkeit „nicht verfügbar“, nicht „0 Abfragen“. Der Abruf muss 26 und 30 Zähler vertragen.
+- Die Grenzwerte für Conntrack-Last brauchen den Anteil am gerätespezifischen Max (7 168 bis 32 768), keinen festen Wert.
+- `nft list ruleset` ist auf dem Gateway rund fünfmal größer als auf den APs; die Kosten des Abrufs #1/#2 liegen damit vor allem beim Gateway.
 
 ---
 
@@ -492,24 +533,24 @@ Weitere Kürzel:
 |---|---|---|---|---|
 | Viele blockierte Verbindungen: Summe je Zone oder Regel | 2 | b | verfügbar mit neuem Abruf | Zählerdifferenz, nur auf Anforderung (SSH). Je Client nur mit #5 |
 | Viele blockierte Verbindungen: je Quelle | 5 | c | nicht verfügbar (optional, standardmäßig aus) | |
-| Zugriffe auf nicht erlaubte Dienste | 5 | c | nicht verfügbar (optional, standardmäßig aus) | Ziel-Port aus der Logzeile; Felder **nicht belegt** |
+| Zugriffe auf nicht erlaubte Dienste | 5 | c | nicht verfügbar (optional, standardmäßig aus) | Ziel-Port aus der Logzeile; Felder **nicht belegt** (Firewall-Logging auf allen vier Geräten aus, also keine Zeilen; 2.4) |
 | Viele ausgehende Verbindungen / Verbindungsraten | 3 | a | verfügbar (nur router-weit) | **Bestand** NI `system_conntrack_jump`. Je Client: #4 (c) |
 | Viele Zielports | 4, 5 | c | nicht verfügbar (optional, standardmäßig aus) | |
 | Inter-VLAN-Versuche | 5, 25 | c | nicht verfügbar (optional, standardmäßig aus) | Braucht Logging auf den Zonen mit REJECT/DROP |
 | Conntrack-Überlastung (Prozent von Max) | 3 | b | verfügbar mit neuem Abruf | Relativer Sprung schon im **Bestand** (`system_conntrack_jump`). Neu ist nur der Anteil am Max |
 | Änderungen der Firewall-Zähler | 2 | b | verfügbar mit neuem Abruf | Auf Anforderung |
-| Zugriffe auf Management-Schnittstellen: SSH | 24 | a | verfügbar | dropbear-Fehlzeile **nicht belegt** (Q-LIVE). Eigene Logins der Integration (LLDP-SSH alle 600 s, `tests/test_poll_no_ssh.py:14-15`) über die HA-Adresse ausfiltern |
-| Zugriffe auf Management-Schnittstellen: LuCI/rpcd oder aus dem WAN | 5, 24 | c | nicht verfügbar (optional, standardmäßig aus) | uhttpd/rpcd-Fehlversuche **nicht belegt** |
+| Zugriffe auf Management-Schnittstellen: SSH | 24 | a | verfügbar | dropbear-Fehlzeile **nicht belegt** (keine in der Live-Prüfung). Erfolgs-, Verbindungs- und Ende-Zeilen belegt am 2026-11-18 auf gateway, ap2, ap5, ap6 (2.4). Eigene Logins der Integration (LLDP-SSH alle 600 s, `tests/test_poll_no_ssh.py:14-15`) über die HA-Adresse ausfiltern |
+| Zugriffe auf Management-Schnittstellen: LuCI/rpcd oder aus dem WAN | 5, 24 | c | nicht verfügbar (optional, standardmäßig aus) | Keine uhttpd/rpcd-Zeile im Log-Ring (belegt am 2026-11-18 auf allen vier Geräten); ob Fehlversuche geloggt werden: **nicht belegt** |
 
 ### 3.3 DNS
 
 | Erkennung | Quellen (#) | Gruppe | Status | Bestand / Hinweis |
 |---|---|---|---|---|
-| DNS-Abfrageraten (router-weit) | 9 | b | verfügbar mit neuem Abruf | Nur wenn `metrics` Abfragezähler liefert: **nicht belegt** |
+| DNS-Abfrageraten (router-weit) | 9 | b | verfügbar mit neuem Abruf | `metrics` liefert laufende Summen `dns_local_answered`, `dns_queries_forwarded`, `dns_auth_answered`, `dns_stale_answered`, `dns_unanswered` (belegt am 2026-11-18 auf gateway, ap2, ap5); Rate nur als Differenz zweier Abrufe, ein dnsmasq-Neustart setzt sie zurück. Kein NXDOMAIN-Zähler, nichts je Client. Auf ap6 (1750E) kein dnsmasq: nicht verfügbar |
 | DNS-Abfrageraten je Client | 12 | c | nicht verfügbar (optional, standardmäßig aus) | |
 | NXDOMAIN-Cluster | 12 | c | nicht verfügbar (optional, standardmäßig aus) | |
 | Viele unterschiedliche Domains | 12 | c | nicht verfügbar (optional, standardmäßig aus) | |
-| Änderung des DNS-Servers | 11, 25 | a | verfügbar | dnsmasq-Zeilen „using nameserver“ (Format nur als Platzhalter in `tests/test_net_infra.py:259`); `dns-server` im vorhandenen `network.interface dump` **nicht belegt**; DHCP-Option 6 aus `uci get dhcp` |
+| Änderung des DNS-Servers | 11, 25 | a | verfügbar | dnsmasq-Zeilen „using nameserver“ (Format nur als Platzhalter in `tests/test_net_infra.py:259`); Schlüssel `dns-server` im vorhandenen `network.interface dump` **belegt am 2026-11-18 auf gateway (14 Einträge), ap2, ap5, ap6 (je 10)**, Inhalt nicht angesehen; DHCP-Option 6 aus `uci get dhcp` |
 | DNS-Umgehung | 4, 5 | c | nicht verfügbar (optional, standardmäßig aus) | Port 53/853 an fremde Ziele; DoH ist grundsätzlich nicht erkennbar |
 | DNS-Tunneling-Indikator | 12 | c | nicht verfügbar (optional, standardmäßig aus) | Länge und Entropie der Namen; nur Hypothese |
 
@@ -537,7 +578,7 @@ Weitere Kürzel:
 | Erkennung | Quellen (#) | Gruppe | Status | Bestand / Hinweis |
 |---|---|---|---|---|
 | Unerwarteter Router-Neustart | 23 | a | verfügbar | **Bestand** `system_reboot`. „Unerwartet“ ist eine Hypothese: ohne Wartungsmodus und ohne Update-Aktion |
-| Fehlgeschlagene Admin-Logins | 24 | a | verfügbar | Nur dropbear. Fehlzeilenformat **nicht belegt**, LuCI/rpcd **nicht belegt** |
+| Fehlgeschlagene Admin-Logins | 24 | a | verfügbar | Nur dropbear. Fehlzeilenformat **nicht belegt** (Erfolgszeilen belegt am 2026-11-18, 2.4); LuCI/rpcd: keine Zeile im Log-Ring gesehen, Fehlversuche **nicht belegt** |
 
 **Neue `sec_*`-Typen** (Vorschlag, nur wo kein Bestand passt):
 
@@ -636,7 +677,7 @@ class LogSource(Protocol):
 
 ### 4.5 Ein Ziel je Router
 
-`log.init` liest **ein** `log_ip`, `log_port` und `log_proto` und startet **eine** `logread -r`-Instanz. Ob mehrere Ziele möglich sind, ist **nicht belegt**.
+`log.init` liest **ein** `log_ip`, `log_port` und `log_proto` und startet **eine** `logread -r`-Instanz. Ob mehrere Ziele möglich sind, ist **nicht belegt**. Heute ist auf keinem der geprüften Router ein Ziel gesetzt und keine `logread -r`-Instanz aktiv (belegt am 2026-11-18 auf gateway, ap2, ap5, ap6); es gibt also kein bestehendes Ziel, das Weg A oder B verdrängen würde.
 
 **Folge:** Der Wechsel zwischen A und B heißt, auf jedem Router `log_ip` umzustellen. Das ist eine Routeränderung und braucht Freigabe (Q-SYSLOG).
 
@@ -648,7 +689,7 @@ class LogSource(Protocol):
 |---|---|
 | Modul | `security_syslog.py` (eingehend, kein ausgehender Aufruf; deshalb nicht in `api.py`) |
 | Transport | UDP über `loop.create_datagram_endpoint`; TCP optional über `asyncio.start_server` mit Zeilenende `\n` oder NUL (`log_trailer_null`) |
-| Port | **5514/udp** als Standard (unprivilegiert). 514 ist privilegiert. Router-Einstellung `log_port=5514` |
+| Port | **5514/udp** als Standard (unprivilegiert). 514 ist privilegiert. Router-Einstellung `log_port=5514`; `log_port` ist heute auf keinem Router gesetzt, `log_proto='udp'` schon (belegt am 2026-11-18, 2.4) |
 | Absender | Nur Quell-IPs aus der Router-Registry: heute die Hosts der Config-Entries plus ihre Interface-Adressen aus `network_interfaces`. Alles andere wird verworfen und gezählt. **Annahme**, live prüfen: Der Router sendet von der LAN-Adresse, die HA kennt |
 | Zeilenlänge | Kappe 2048 Byte; länger wird abgeschnitten und gezählt. logd-Puffer `LOG_LINE_SIZE + 128`; Wert von `LOG_LINE_SIZE` **nicht belegt** |
 | Rate | Token-Bucket je Absender 200 Zeilen/s, global 1000 Zeilen/s |
@@ -656,7 +697,7 @@ class LogSource(Protocol):
 | Überlast | **Verwerfen und zählen, nie blockieren.** `datagram_received` macht nur Kappenprüfung und `append` (O(1)). Geparst wird gebündelt alle 5 s, höchstens 2000 Zeilen je Durchgang |
 | Zähler | `received`, `dropped_sender`, `dropped_rate`, `dropped_buffer`, `truncated`, `unparsed`, je Router `last_seen` (Diagnose ohne IPs) |
 | Rohzeilen | werden **nicht** gespeichert, nur Aggregate und gekürzte Evidenz (`STORE_EVIDENCE`-Muster) |
-| HA OS | Ob der Core-Container auf HA OS eingehende UDP/TCP-Pakete auf 5514 ohne Zusatzschritte bekommt (Host-Netz, keine Host-Firewall), ist **nicht belegt**. `contributors.home-assistant.io/os/operating-system/networking/` sagt nur „Home Assistant OS uses NetworkManager for the host network.“ Live-Prüfung: Q-LIVE (HA-Teil). Bei HA in Docker ohne `network_mode: host` ist ein Port-Mapping nötig |
+| HA OS | Ob der Core-Container auf HA OS eingehende UDP/TCP-Pakete auf 5514 ohne Zusatzschritte bekommt (Host-Netz, keine Host-Firewall), ist **nicht belegt**. `contributors.home-assistant.io/os/operating-system/networking/` sagt nur „Home Assistant OS uses NetworkManager for the host network.“ Live-Prüfung: Q-LIVE (HA-Teil), am 2026-11-18 **nicht ausgeführt**. Bei HA in Docker ohne `network_mode: host` ist ein Port-Mapping nötig |
 | Sicherheit | Der Listener ist im ganzen LAN erreichbar, und UDP-Quellen sind fälschbar. Deshalb gelten Allowlist, Kappen und „nie bestätigt allein aus Syslog“. Standard aus |
 
 ### 4.7 Empfangsweg B: separater Collector
@@ -711,14 +752,16 @@ Neue Fixtures unter `tests/fixtures/security/` (Vorschlag). Jede Datei trägt im
 
 | Fixture | Format | Herkunft |
 |---|---|---|
-| `logd_remote_udp.txt` | `<PRI>Mmm dd hh:mm:ss HOST [PREFIX: ][kernel: ]MSG`, ohne Zeilenende (ein Datagramm je Zeile) | **belegt**: ubox `log/logread.c` (`log_notify`, Zweig `LOG_NET`). Tag mit Leerzeichen-Auffüllung (`Nov  7`) folgt aus dem `asctime`-Format: **Annahme** (C-Standard), Tests decken beide Formen ab |
-| `logd_remote_tcp.bin` | dieselbe Zeile mit `\n` bzw. NUL am Ende (`log_trailer_null`) | **belegt**: `logread.c`, `log.init` (`-0`) |
-| Nachrichtenteil hostapd / dnsmasq-dhcp / dropbear-Erfolg | wie `tests/test_log_parser.py:59-75`, `:105` | **belegt** (live gesehen laut Docstring `:3-4`) |
-| `fw4_kernel.txt` | `kernel: [<sek>] <verdict> <zone> <in\|out>: …` bzw. `<policy> <zone> forward: …` oder freier Regel-Präfix | Präfix **belegt** (fw4 `zone-verdict.uc`, `ruleset.uc`, `rule.uc`). `[<sek>]` laut Repo-Fixture `tests/test_net_infra.py:253` (Herkunft **nicht belegt**). Felder danach (`IN= OUT= SRC= DST= PROTO= SPT= DPT=`): **nicht belegt** |
-| `dnsmasq_query.txt` | Zeilen von `--log-queries=extra` | Schalter **belegt** (`dnsmasq.init`); Zeilenform **nicht belegt** (Upstream-Quelle nicht erreichbar) |
-| `dropbear_fail.txt` | Fehlversuch | **nicht belegt** |
+| `logd_remote_udp.txt` | `<PRI>Mmm dd hh:mm:ss HOST [PREFIX: ][kernel: ]MSG`, ohne Zeilenende (ein Datagramm je Zeile) | **belegt aus der Upstream-Quelle**: ubox `log/logread.c` (`log_notify`, Zweig `LOG_NET`); live nicht gesehen, weil Remote-Syslog auf allen geprüften Routern aus ist (2.4). Tag mit Leerzeichen-Auffüllung (`Nov  7`) folgt aus dem `asctime`-Format: **Annahme** (C-Standard), Tests decken beide Formen ab. PRI 85 der dropbear-Zeile passt zu `authpriv.notice` (belegt am 2026-11-18) |
+| `logd_remote_tcp.bin` | dieselbe Zeile mit `\n` bzw. NUL am Ende (`log_trailer_null`) | **belegt aus der Upstream-Quelle**: `logread.c`, `log.init` (`-0`); live nicht gesehen |
+| Nachrichtenteil hostapd / dnsmasq-dhcp | wie `tests/test_log_parser.py:59-75` | **belegt** (live gesehen laut Docstring `:3-4`) |
+| `dropbear_ok.txt` | `Password auth succeeded for '<user>' from <ip>:<port>`; `Pubkey auth succeeded for '<user>' with <typ> key SHA256:<fp> from <ip>:<port>` | **belegt am 2026-11-18 auf gateway, ap2, ap5, ap6**. Die frühere Repo-Form `… with key from …` ist widerlegt; Fixture auf die echte Struktur umgestellt (Werte erfunden), `FORMAT_CONFIRMED["dropbear_pubkey_ok"] = True` |
+| `dropbear_session.txt` (neu) | `Child connection from <ip>:<port>`, Anmeldezeile, `Exit (<user>) from <<ip>:<port>>: Disconnect received` | **belegt am 2026-11-18 auf gateway, ap2, ap5, ap6**; der Parser lässt Verbindungs- und Ende-Zeilen ohne `kind` |
+| `fw4_kernel.txt` | `kernel: [<sek>] <verdict> <zone> <in\|out>: …` bzw. `<policy> <zone> forward: …` oder freier Regel-Präfix | Präfix **belegt** (fw4 `zone-verdict.uc`, `ruleset.uc`, `rule.uc`). `[<sek>]` laut Repo-Fixture `tests/test_net_infra.py:253` (Herkunft **nicht belegt**). Felder danach (`IN= OUT= SRC= DST= PROTO= SPT= DPT=`): **nicht belegt**; Firewall-Logging ist auf allen geprüften Routern aus, es gab keine Zeile zum Vergleich |
+| `dnsmasq_query.txt` | Zeilen von `--log-queries=extra` | Schalter **belegt** (`dnsmasq.init`); auf allen geprüften Routern aus (belegt am 2026-11-18); Zeilenform **nicht belegt** (Upstream-Quelle nicht erreichbar, keine Zeile live) |
+| `dropbear_fail.txt` | Fehlversuch | **nicht belegt** (in den geprüften Zeilen kein Fehlversuch); die IPv6-Form der Adresse ebenfalls **nicht belegt** (alle gesehenen Adressen IPv4) |
 
-Alle Platzhalter-Formate werden nach Q-LIVE durch live gesehene Zeilen ersetzt. Bis dahin gilt: Der Parser erkennt sie, aber die Erkennung meldet „Format unbestätigt“.
+Platzhalter-Formate werden durch live gesehene Strukturen ersetzt, sobald es solche Zeilen gibt (für fw4 und dnsmasq erst nach Q-FWLOG bzw. Q-DNSLOG). Bis dahin gilt: Der Parser erkennt sie, aber die Erkennung meldet „Format unbestätigt“.
 
 **Tests ohne Router:**
 
@@ -742,16 +785,19 @@ Für alle Befehle gilt:
 uci export system > /tmp/system.vor-security
 uci set system.@system[0].log_ip='<ziel>'
 uci set system.@system[0].log_port='5514'
-uci set system.@system[0].log_proto='udp'
+uci set system.@system[0].log_proto='udp'   # ist auf allen geprüften Routern schon 'udp'
 uci commit system
-/etc/init.d/log restart        # Name des Init-Skripts: Annahme (ubox log.init), live prüfen
+/etc/init.d/log restart        # /etc/init.d/log: belegt am 2026-11-18 auf gateway, ap2, ap5, ap6
 # Rückweg:
 uci delete system.@system[0].log_ip
 uci delete system.@system[0].log_port
-uci delete system.@system[0].log_proto
+# log_proto NICHT löschen, wenn es vorher gesetzt war (heute überall 'udp'):
+# Wert aus /tmp/system.vor-security übernehmen.
 uci commit system
 /etc/init.d/log restart
 ```
+
+**Korrektur 2026-11-18:** Der frühere Rückweg löschte `log_proto`. Auf allen vier geprüften Routern ist `log_proto='udp'` aber schon vor jeder Security-Änderung gesetzt (belegt am 2026-11-18). Der Rückweg stellt deshalb den gesicherten Wert her, statt die Option zu löschen.
 
 **Firewall-Logging (Q-FWLOG, nur Gateway, Zone über ihren Namen finden):**
 
@@ -782,7 +828,7 @@ uci commit dhcp
 /etc/init.d/dnsmasq restart
 ```
 
-**Risiko:** Jede Abfrage wird eine Zeile im logd-Ring. Der Ring ist standardmäßig klein: `log.init` setzt 64, wenn `log_size` und `log_buffer_size` 0 sind; die Einheit ist **nicht belegt**. Die Zeilen verdrängen hostapd-Zeilen, bevor NI sie per `log read` liest. Das senkt die WLAN-Abdeckung der NI. Mögliche Abhilfe ist ein größerer Ring (`system.@system[0].log_size`, RAM), Wirkung **nicht belegt**. Besser ist ein eigener DNS-Resolver mit Statistik-Schnittstelle auf einem separaten Host (Abschnitt 5).
+**Risiko:** Jede Abfrage wird eine Zeile im logd-Ring. Der Ring ist standardmäßig klein: `log.init` setzt 64, wenn `log_size` und `log_buffer_size` 0 sind. Auf den vier geprüften Routern ist `log_size='64'` ausdrücklich gesetzt und `logd` läuft mit `-S 64` (belegt am 2026-11-18); die Einheit ist **nicht belegt**. Gemessene Größenordnung: auf gateway mindestens rund 1 DNS-Abfrage/s im Mittel (#12), also mindestens ebenso viele Zeilen. Die Zeilen verdrängen hostapd-Zeilen, bevor NI sie per `log read` liest. Das senkt die WLAN-Abdeckung der NI. Mögliche Abhilfe ist ein größerer Ring (`system.@system[0].log_size`, RAM), Wirkung **nicht belegt**. Besser ist ein eigener DNS-Resolver mit Statistik-Schnittstelle auf einem separaten Host (Abschnitt 5).
 
 **Collector auf Proxmox (Q-PROXMOX, Platzhalter `<ctid>`, nichts davon ausgeführt):**
 
@@ -808,11 +854,11 @@ pct destroy <ctid>
 |---|---|---|---|
 | Suricata | nein: RAM und CPU reichen für IDS in Leitungsgeschwindigkeit nicht (S); Paketverfügbarkeit **nicht belegt** | eigener Linux-/Proxmox-Host mit Spiegelport | EVE-JSON → Collector (B) → `SecLogRecord` (`kind = ids.alert`) |
 | Zeek | nein (S) | Proxmox mit Spiegelport | Zeek-JSON-Logs → Collector → Records/Summary |
-| NetFlow/IPFIX | Exporter evtl. auf dem Router (Paket, RAM je Flow, **nicht belegt**) | Exporter Router, Kollektor Proxmox | Flow-Summary → Collector `/v1/summary` (füllt #4: Zielports, Verbindungsraten je Client) |
-| banIP | möglich mit kleinen Listen (S, RAM für Sets **nicht belegt**) | Router | banIP-Logzeilen über Syslog (A/B); später ein Status-Abruf (Gruppe b), falls ubus-Schnittstelle vorhanden (**nicht belegt**) |
-| CrowdSec | Agent nein (S); Firewall-Bouncer auf dem Router **nicht belegt** | Agent auf Proxmox, liest Syslog vom Collector | CrowdSec-Alarme → Collector → Records |
-| AdGuard Home | knapp (RAM, S); nicht empfohlen | Proxmox oder eigener Host | Querylog/Statistik-API → Collector-Summary (füllt die DNS-Erkennungen ohne `logqueries` und ohne Ring-Verdrängung) |
-| Unbound | möglich, aber Query-Log wieder im Ring (S) | besser Proxmox | `unbound-control stats` → Collector-Summary |
+| NetFlow/IPFIX | Exporter evtl. auf dem Router (Paket, RAM je Flow, **nicht belegt**); `softflowd` heute auf keinem Router installiert (belegt am 2026-11-18) | Exporter Router, Kollektor Proxmox | Flow-Summary → Collector `/v1/summary` (füllt #4: Zielports, Verbindungsraten je Client) |
+| banIP | möglich mit kleinen Listen (S, RAM für Sets **nicht belegt**); heute auf keinem Router installiert (belegt am 2026-11-18) | Router | banIP-Logzeilen über Syslog (A/B); später ein Status-Abruf (Gruppe b), falls ubus-Schnittstelle vorhanden (**nicht belegt**) |
+| CrowdSec | Agent nein (S); Firewall-Bouncer auf dem Router **nicht belegt**; kein `crowdsec*`-Paket installiert (belegt am 2026-11-18) | Agent auf Proxmox, liest Syslog vom Collector | CrowdSec-Alarme → Collector → Records |
+| AdGuard Home | knapp (RAM, S); nicht empfohlen; auf ap6 (1750E) praktisch ausgeschlossen (S; gemessen 55 MiB RAM gesamt, 12 MiB verfügbar); heute nirgends installiert (belegt am 2026-11-18) | Proxmox oder eigener Host | Querylog/Statistik-API → Collector-Summary (füllt die DNS-Erkennungen ohne `logqueries` und ohne Ring-Verdrängung) |
+| Unbound | möglich, aber Query-Log wieder im Ring (S); heute nirgends installiert (belegt am 2026-11-18) | besser Proxmox | `unbound-control stats` → Collector-Summary |
 | Externer Syslog-Collector | – | Proxmox | ist Empfangsweg B |
 | Lokale KI-Analyse | nein | Proxmox, nur lokal, keine Daten in die Cloud | liest `/v1/summary` bzw. die Security-Routen der Integration; schreibt nichts zurück |
 
@@ -893,18 +939,20 @@ Bestehende Incidents bleiben unverändert: andere Schlüssel, keine Wurzel, kein
 
 Sparsamer Standard: **alles aus**, solange das Security Center aus ist. Wenn es eingeschaltet ist, gelten die Werte unten. Es gibt keinen zusätzlichen Dauer-Poll-Takt: Alles hängt am vorhandenen Poll mit Zykluszähler, wie bei `DHCP_CONFIG_REFRESH_CYCLES`.
 
-| Abruf | Intervall | Datengrenze | Standard | Kosten WR3000 (S) |
-|---|---|---|---|---|
-| `uci get firewall` | alle 30 Polls (30 min) und bei Start | 64 KB Antwortkappe | an (mit Security Center) | 2–8 KB, ein rpcd-Aufruf |
-| file read `nf_conntrack_max` | alle 60 Polls (1 h) | 64 B | an | vernachlässigbar |
-| `dnsmasq metrics` | alle 5 Polls | 4 KB | an | < 1 KB |
-| file read `/proc/net/snmp` | alle 5 Polls | 4 KiB (rpcd-Grenze) | aus | 1–2 KB |
-| `luci-rpc getHostHints` (IPv6) | alle 10 Polls | 256 KB | aus | ca. 100 B je Gerät |
-| `iwinfo scan` | **nur manuell** (Panel-Knopf, Admin) | 200 BSS | aus | Kanalwechsel, Wirkung **nicht belegt** |
-| `nft -j list ruleset` (SSH) | **nur manuell** | 512 KB | aus | einige 10 KB, CPU-Stoß; dropbear-Logzeilen |
-| Conntrack-Tabellendump | **nie** | – | – | – |
+Kosten: **gemessen** = Größe aus der Live-Prüfung 2026-11-18 (2.4), Spanne über gateway, ap2, ap5, ap6; **(S)** = weiter geschätzt.
 
-**Summe bei eingeschaltetem Standard** (S): etwa 2 + 1 + 12 = 15 zusätzliche Aufrufe je Stunde und Router. Heute sind es etwa 20–25 Aufrufe je Poll, also rund 1200–1500 je Stunde. Die Mehrlast liegt damit bei ≈ 1 %.
+| Abruf | Intervall | Datengrenze | Standard | Kosten je Abruf |
+|---|---|---|---|---|
+| `uci get firewall` | alle 30 Polls (30 min) und bei Start | 64 KB Antwortkappe | **entfällt** (9.3, Q-UCI-FW) | 2–8 KB, ein rpcd-Aufruf (S) |
+| file read `nf_conntrack_max` | alle 60 Polls (1 h) | 64 B | an | 5–6 B Dateiinhalt (gemessen) |
+| `dnsmasq metrics` | alle 5 Polls | 4 KB | an, nur wo dnsmasq läuft (nicht auf ap6) | 577–705 B als eingerückte ubus-CLI-Ausgabe, 26 oder 30 Zähler (gemessen); über rpcd kompakter |
+| file read `/proc/net/snmp` | alle 5 Polls | 4 KiB (rpcd-Grenze) | aus | 1 279–1 506 B (gemessen), passt in die Grenze |
+| `luci-rpc getHostHints` (IPv6) | alle 10 Polls | 256 KB | aus | 30–145 Einträge mit `ip6addrs` (gemessen); bei ca. 100 B je Eintrag (S) rund 3–15 KB |
+| `iwinfo scan` | **nur manuell** (Panel-Knopf, Admin) | 200 BSS | aus | Kanalwechsel, Wirkung **nicht belegt** |
+| `nft -j list ruleset` (SSH) | **nur manuell** | 512 KB | aus | Textform 15 109 B auf gateway, 3 084–3 100 B auf den APs (gemessen); JSON-Form größer (S, nicht gemessen); CPU-Stoß (S); dropbear-Logzeilen (je SSH-Login drei Zeilen: Verbindung, Anmeldung, Ende, belegt) |
+| Conntrack-Tabellendump | **nie** | – | – | – (gemessen 39–517 Einträge) |
+
+**Summe bei eingeschaltetem Standard** (S): Ohne `uci get firewall` (9.3) sind es etwa 1 + 12 = 13 zusätzliche Aufrufe je Stunde und Router, auf ap6 ohne dnsmasq nur 1. Heute sind es etwa 20–25 Aufrufe je Poll, also rund 1200–1500 je Stunde. Die Mehrlast liegt damit unter 1 %. Die Datenmenge der beiden Standard-Abrufe liegt gemessen unter 1 KB je Abruf.
 
 ---
 
@@ -971,6 +1019,7 @@ Nichts davon fällt still weg.
 - **Q-ORDER:** Reihenfolge der Releases?
 - **Q-NI-LOG:** `log read` der NI bei aktivem Empfangsweg reduzieren?
 - **Q-LIVE:** Live-Leseprüfungen für alles „nicht belegt“ durch den Master nach Freigabe, nur lesend.
+  - **Stand 2026-11-18:** Router-Teil ausgeführt auf gateway, ap2, ap5, ap6 (Ergebnisse in 2.4); HA-OS-Teil offen.
   - **Router**, je einer der Rollen Gateway, AP, Repeater:
     1. `uci show system | grep -E 'log_|hostname'`
     2. `ls /etc/init.d/ | grep -E '^log$'`
@@ -1011,7 +1060,7 @@ Diese Entscheidungen ersetzen die Empfehlungen in 9.2 und abweichende Angaben in
 | Q-NI-LOG | Vorerst nein. Der `log read` von Network Intelligence bleibt unverändert, auch bei aktivem Empfangsweg (mögliche Ersparnis siehe 4.8) |
 | Q-ACL | Die Rechte für Gruppe b gehen in die gestufte ACL von Enterprise Core (je Fähigkeit einzeln zuschaltbar), keine eigene ACL v9 hier. Ob sie auf die Router kommen, gibt der Nutzer beim Deploy frei |
 
-**Weiter offen, beim Nutzer** (Änderungen an seinen Geräten, werden gebündelt vorgelegt; nichts davon wird vorher ausgeführt): Q-SYSLOG, Q-FWLOG, Q-DNSLOG, Q-PROXMOX, Q-LIVE.
+**Weiter offen, beim Nutzer** (Änderungen an seinen Geräten, werden gebündelt vorgelegt; nichts davon wird vorher ausgeführt): Q-SYSLOG, Q-FWLOG, Q-DNSLOG, Q-PROXMOX, Q-LIVE (nur noch der HA-OS-Teil; der Router-Teil ist am 2026-11-18 erledigt, 2.4).
 
 ---
 
@@ -1057,6 +1106,8 @@ Geprüft:
 - OpenWrt `package/network/services/dnsmasq/files/dhcp.conf` und `dnsmasq.init` (Zweig main)
 
 **Stand master/main, nicht gegen den 25.12-Tag geprüft.**
+
+Live-Leseprüfung 2026-11-18 (Router-Teil von Q-LIVE): Ausgaben je Gerät als Textdatei außerhalb des Repos, nicht eingecheckt, weil sie echte Kennungen enthalten. Gelesen wurden die Abschnitte IDENT bis INTERFACE DUMP SHAPE; die WLAN-Abschnitte derselben Dateien gehören nicht zu diesem Plan und wurden nicht ausgewertet.
 
 Nicht erreichbar:
 
