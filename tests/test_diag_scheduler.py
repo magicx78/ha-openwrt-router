@@ -39,6 +39,9 @@ MODULE_PATH = (
 )
 WALL0 = 1_800_000_000.0
 T0 = 1000.0
+# Hang guards: a broken timeout/stop path must fail a test, never block it.
+MAX_VIRTUAL_STEPS = 10_000
+STOP_STEPS = 120
 
 
 class VirtualTime:
@@ -72,7 +75,7 @@ class VirtualTime:
     async def advance(self, seconds: float) -> None:
         target = self.now + seconds
         await self.settle()
-        while True:
+        for _step in range(MAX_VIRTUAL_STEPS):
             live = [s for s in self._sleepers if not s[2].done()]
             heapq.heapify(live)
             self._sleepers = live
@@ -82,8 +85,18 @@ class VirtualTime:
             self.now = max(self.now, deadline)
             fut.set_result(None)
             await self.settle()
+        else:
+            raise AssertionError("virtual time step limit reached")
         self.now = target
         await self.settle()
+
+    async def run_until_done(self, task: asyncio.Task[Any], steps: int) -> bool:
+        """Advance 1 s at a time until ``task`` is done; False after ``steps``."""
+        for _ in range(steps):
+            if task.done():
+                return True
+            await self.advance(1.0)
+        return task.done()
 
 
 class Body:
@@ -118,6 +131,23 @@ class Body:
             self.active -= 1
 
 
+class Stubborn:
+    """Job body that swallows every cancellation until ``release`` is set."""
+
+    def __init__(self, env: Env) -> None:
+        self.release = asyncio.Event()
+        self.cancels = 0
+        env.releases.append(self.release)
+
+    async def __call__(self) -> str:
+        while not self.release.is_set():
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancels += 1
+        return "late"
+
+
 class Env:
     """Virtual time, recorded results and a scheduler factory."""
 
@@ -126,6 +156,7 @@ class Env:
         self.results: list[RunResult] = []
         self.log: list[tuple[str, float]] = []
         self.made: list[DiagScheduler] = []
+        self.releases: list[asyncio.Event] = []
 
     def body(self, name: str) -> Body:
         return Body(self, name)
@@ -173,8 +204,18 @@ def diag_tasks(*parts: str) -> list[asyncio.Task[Any]]:
 async def env() -> AsyncIterator[Env]:
     environment = Env()
     yield environment
-    for sched in environment.made:
-        await sched.async_stop()
+    loop = asyncio.get_running_loop()
+    stops = [loop.create_task(sched.async_stop()) for sched in environment.made]
+    stopped = True
+    for stop in stops:
+        stopped = await environment.vt.run_until_done(stop, STOP_STEPS) and stopped
+    for release in environment.releases:  # let stubborn bodies end either way
+        release.set()
+    await environment.settle()
+    for stop in stops:
+        stop.cancel()
+    await asyncio.gather(*stops, return_exceptions=True)
+    assert stopped, "async_stop did not return within its bound"
     assert diag_tasks() == []
 
 
@@ -220,6 +261,38 @@ async def test_case_20_scheduler_rate_limiting(env: Env) -> None:
     # Refusals never show up as failures
     assert Outcome.FAILURE not in [r.outcome for r in env.results]
 
+    # Long-running runs: the window limits *started* runs, not accepted requests
+    s2 = env.scheduler(rate_limit=RateLimit(max_runs=2, window=100.0))
+    names = ("A", "B", "C", "D")
+    long_bodies = {n: env.body(n) for n in names}
+    long_bodies["A"].gate = asyncio.Event()
+    for name in names:
+        s2.add_job(DiagJob(name, "ping", long_bodies[name], "r9", timeout=1000.0))
+    s2.start()
+    t0 = env.vt.now
+    assert s2.request_run("A").status is RequestStatus.ACCEPTED  # runs 0..150
+    await env.vt.advance(99.0)
+    rb2 = s2.request_run("B")  # queued behind A
+    await env.vt.advance(1.0)
+    rc2 = s2.request_run("C")
+    assert rb2.status is RequestStatus.ACCEPTED
+    assert rc2.status is RequestStatus.ACCEPTED
+    await env.vt.advance(50.0)
+    long_bodies["A"].gate.set()
+    await env.vt.advance(49.0)
+    rd2 = s2.request_run("D")  # B and C started at 150: the window is full
+    assert rd2.status is RequestStatus.REFUSED_RATE_LIMIT
+    assert rd2.retry_after == pytest.approx(51.0)
+    starts = [t - t0 for name, t in env.log if name in names]
+    assert starts == [0.0, 150.0, 150.0]
+    for t in starts:
+        assert len([u for u in starts if t <= u < t + 100.0]) <= 2
+    for req in (rb2, rc2):
+        assert req.completion is not None
+        assert req.completion.result().outcome is Outcome.SUCCESS
+    await env.vt.advance(51.0)
+    assert s2.request_run("D").status is RequestStatus.ACCEPTED
+
 
 async def test_case_21_test_timeouts(env: Env) -> None:
     """A hanging run is cancelled at its timeout and reported as 'timeout'."""
@@ -260,6 +333,69 @@ async def test_case_21_test_timeouts(env: Env) -> None:
     assert second.completion.result().outcome is Outcome.TIMEOUT
     assert s.job_status("h").consecutive_failures == 2
     assert s.running
+
+
+async def test_job_ignoring_cancellation_times_out_and_frees_its_key(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A job that swallows CancelledError is orphaned after a bounded grace."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.openwrt_router")
+    secret = "192.168.77.1"
+    s = env.scheduler()  # default cancel grace: 5 s
+    stubborn = Stubborn(env)
+    after = env.body("after")
+    s.add_job(DiagJob("stub", "ping", stubborn, router_key=secret, timeout=5.0))
+    s.add_job(DiagJob("after", "ping", after, router_key=secret, timeout=5.0))
+    s.start()
+    req = s.request_run("stub")
+    await env.vt.advance(5.0)
+    assert stubborn.cancels == 1
+    assert req.completion is not None and not req.completion.done()  # in grace
+    await env.vt.advance(5.0)
+    assert req.completion.done()
+    result = req.completion.result()
+    assert result.outcome is Outcome.TIMEOUT
+    assert result.error == "CancellationIgnored"
+    assert result.finished - result.started == pytest.approx(10.0)
+    assert s.orphaned_tasks == 1
+    assert s.job_status("stub").running is False
+    # The router key is free again
+    follow = s.request_run("after")
+    assert follow.status is RequestStatus.ACCEPTED
+    await env.settle()
+    assert follow.completion is not None
+    assert follow.completion.result().outcome is Outcome.SUCCESS
+    loud = [r for r in caplog.records if r.levelno > logging.DEBUG]
+    assert len([r for r in loud if "cancellation" in r.getMessage()]) == 1
+    assert all(secret not in r.getMessage() for r in loud)
+    # The orphan is tracked until it really ends
+    stubborn.release.set()
+    await env.settle()
+    assert s.orphaned_tasks == 0
+    assert diag_tasks("job") == []
+
+
+async def test_stop_is_bounded_when_a_job_ignores_cancellation(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="custom_components.openwrt_router")
+    s = env.scheduler()  # default stop grace: 10 s
+    stubborn = Stubborn(env)
+    s.add_job(DiagJob("stub", "ping", stubborn, router_key="r1", timeout=100.0))
+    s.start()
+    s.request_run("stub")
+    await env.settle()
+    stop = asyncio.get_running_loop().create_task(s.async_stop())
+    assert await env.vt.run_until_done(stop, 30), "async_stop must be bounded"
+    assert stop.result() == 1  # the job task that did not stop
+    assert s.orphaned_tasks == 1
+    assert not s.running
+    assert any("did not stop" in r.getMessage() for r in caplog.records)
+    assert await s.async_stop() == 1  # idempotent, same answer
+    stubborn.release.set()
+    await env.settle()
+    assert s.orphaned_tasks == 0
+    assert diag_tasks() == []
 
 
 # --- priority, single flight, concurrency ---------------------------------------
@@ -709,6 +845,40 @@ async def test_hosts_are_logged_at_debug_only(
     assert any(secret in r.getMessage() for r in caplog.records)  # debug has details
 
 
+async def test_failed_scheduler_pass_logs_the_type_only(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.openwrt_router")
+    secret = "192.168.77.1"
+    s = env.scheduler()
+    job = env.body("j")
+    s.add_job(DiagJob("j", "ping", job, router_key="r1"))
+    real_dispatch = s._dispatch
+    passes = 0
+
+    def flaky_dispatch() -> None:
+        nonlocal passes
+        passes += 1
+        if passes == 1:
+            raise RuntimeError(f"bad state for {secret}")
+        real_dispatch()
+
+    s._dispatch = flaky_dispatch  # type: ignore[method-assign]
+    s.request_run("j")
+    s.start()
+    await env.settle()
+    assert job.calls == 0
+    await env.vt.advance(10.0)  # retried after min_interval
+    assert job.calls == 1 and s.running
+    loud = [r for r in caplog.records if r.levelno > logging.DEBUG]
+    assert [r.getMessage() for r in loud] == [
+        "Diagnostic scheduler pass failed (RuntimeError)"
+    ]
+    assert all(r.exc_info is None for r in loud)
+    debug = [r for r in caplog.records if r.levelno == logging.DEBUG and r.exc_info]
+    assert any(secret in str(r.exc_info[1]) for r in debug)
+
+
 # --- configuration, validation, status ---------------------------------------------
 
 
@@ -762,6 +932,10 @@ async def test_config_validation() -> None:
         {"backoff_cap": -1.0},
         {"backoff_jitter": 1.5},
         {"max_jobs": 0},
+        {"cancel_grace": 0.0},
+        {"cancel_grace": math.inf},
+        {"stop_grace": -1.0},
+        {"stop_grace": math.nan},
     ):
         with pytest.raises(ValueError):
             SchedulerConfig(**bad)

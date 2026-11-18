@@ -9,12 +9,16 @@ Guarantees:
 * priority per run request: manual > event-triggered > periodic;
 * bounded global concurrency and at most one running job per router key
   (``None`` counts as one key);
-* a sliding-window rate limit per router key that applies equally to manual,
-  event and periodic runs. Manual/event requests over the limit are refused
-  at once with ``RequestStatus.REFUSED_RATE_LIMIT``; a periodic run over the
-  limit is deferred until the window frees (not counted as a failure);
-* every run has a timeout; a timed-out run is cancelled, awaited and
-  reported as ``Outcome.TIMEOUT``. Jobs must honour cancellation;
+* a sliding-window rate limit per router key on *started* runs that applies
+  equally to manual, event and periodic runs. A manual/event request is
+  refused at once with ``RequestStatus.REFUSED_RATE_LIMIT`` when the runs
+  started in the window plus the requests already waiting would exceed it;
+  an accepted run that still finds the window full at start waits for a
+  slot. A periodic run over the limit is deferred (not a failure);
+* every run has a timeout; a timed-out run is cancelled and reported as
+  ``Outcome.TIMEOUT``. A job that ignores cancellation for longer than
+  ``cancel_grace`` is left running as a tracked orphan (``orphaned_tasks``)
+  and its router key is freed;
 * exponential backoff (capped, optional jitter from an injected ``rand``)
   after consecutive failures or timeouts, reset on success;
 * adaptive intervals: slower while a router key is marked under load, faster
@@ -23,7 +27,8 @@ Guarantees:
   ranges) skip periodic runs with ``Outcome.SKIPPED_MAINTENANCE``;
 * an exception in a job is a ``FAILURE`` outcome, never a dead loop. Router
   keys, job IDs and exception messages are logged at debug level only;
-* ``async_stop`` cancels and awaits every task it created; idempotent.
+* ``async_stop`` cancels every task it created and waits at most
+  ``stop_grace`` for them; it returns how many did not stop. Idempotent.
 
 Clock, wall clock, sleep and random source are injectable, so tests run in
 virtual time. A run's ``value`` is whatever the job returned; a measured
@@ -123,6 +128,8 @@ class SchedulerConfig:
     backoff_cap: float = 3600.0
     backoff_jitter: float = 0.1
     max_jobs: int = 256
+    cancel_grace: float = 5.0  # wait for a cancelled job before orphaning it
+    stop_grace: float = 10.0  # wait for all tasks in async_stop
 
     def __post_init__(self) -> None:
         """Validate the configuration."""
@@ -142,6 +149,10 @@ class SchedulerConfig:
             raise ValueError("backoff_cap must not be negative")
         if not _finite(self.backoff_jitter) or not 0 <= self.backoff_jitter < 1:
             raise ValueError("backoff_jitter must be in [0, 1)")
+        for name in ("cancel_grace", "stop_grace"):
+            value = getattr(self, name)
+            if not _finite(value) or value <= 0:
+                raise ValueError(f"{name} must be a positive number")
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +328,10 @@ class DiagScheduler:
         self._global_windows: tuple[MaintenanceWindow, ...] = ()
         self._key_windows: dict[str | None, tuple[MaintenanceWindow, ...]] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._orphans: set[asyncio.Task[Any]] = set()
         self._loop_task: asyncio.Task[None] | None = None
+        self._stop_task: asyncio.Task[int] | None = None
+        self._rate_free_at: float | None = None
         self._wake = asyncio.Event()
         self._seq = 0
         self._stopped = False
@@ -335,6 +349,11 @@ class DiagScheduler:
         task = self._loop_task
         return not self._stopped and task is not None and not task.done()
 
+    @property
+    def orphaned_tasks(self) -> int:
+        """Job tasks that ignored cancellation and are still running."""
+        return len(self._orphans)
+
     def start(self) -> None:
         """Start the scheduling loop (no-op if already running)."""
         if self._stopped:
@@ -350,8 +369,19 @@ class DiagScheduler:
         self._loop_task = task
         self._track(task)
 
-    async def async_stop(self) -> None:
-        """Cancel the loop and all runs, await them; idempotent and final."""
+    async def async_stop(self) -> int:
+        """Cancel the loop and all runs; idempotent and final.
+
+        Waits at most ``stop_grace`` seconds and returns how many tasks did
+        not stop in that time (they stay tracked as orphans).
+        """
+        if self._stop_task is None:
+            self._stop_task = asyncio.get_running_loop().create_task(
+                self._stop_all(), name=f"{TASK_NAME_PREFIX} stop"
+            )
+        return await asyncio.shield(self._stop_task)
+
+    async def _stop_all(self) -> int:
         self._stopped = True
         now = self._clock()
         for job_id, pending in list(self._pending.items()):
@@ -359,15 +389,38 @@ class DiagScheduler:
             if job is not None:
                 self._publish(self._cancelled(job, pending, now), pending.completion)
         self._pending.clear()
-        current = asyncio.current_task()
-        while True:
-            alive = [t for t in self._tasks if not t.done() and t is not current]
-            if not alive:
-                break
-            for task in alive:
-                task.cancel()
-            await asyncio.gather(*alive, return_exceptions=True)
+        stuck = await self._cancel_all_bounded()
         self._loop_task = None
+        if stuck:
+            for task in stuck:
+                self._orphan(task)
+            _LOGGER.warning(
+                "%d diagnostic task(s) did not stop within %.0f s",
+                len(stuck),
+                self._cfg.stop_grace,
+            )
+        return len(stuck)
+
+    async def _cancel_all_bounded(self) -> list[asyncio.Task[Any]]:
+        """Cancel every tracked task once; wait up to stop_grace; return stuck."""
+        cancelled: set[asyncio.Task[Any]] = set()
+        grace = asyncio.get_running_loop().create_task(
+            _sleep_for(self._sleep, self._cfg.stop_grace),
+            name=f"{TASK_NAME_PREFIX} stop grace",
+        )
+        try:
+            while not grace.done():
+                alive = {t for t in self._tasks if not t.done()}
+                if not alive:
+                    break
+                for task in alive - cancelled:
+                    task.cancel()
+                cancelled |= alive
+                await asyncio.wait({*alive, grace}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            grace.cancel()
+            await asyncio.gather(grace, return_exceptions=True)
+        return [t for t in self._tasks if not t.done()]
 
     def add_job(self, job: DiagJob) -> None:
         """Register a job; periodic jobs are first due after ``first_delay``."""
@@ -404,9 +457,9 @@ class DiagScheduler:
     ) -> RunRequest:
         """Ask for an extra run now (manual or event-triggered).
 
-        Refusals are returned, never raised. An accepted request takes one
-        rate-limit slot at once; a pending periodic run of the same job is
-        upgraded instead of duplicated.
+        Refusals are returned, never raised. An accepted request reserves a
+        rate-limit slot (it is charged when the run starts); a pending
+        periodic run of the same job is upgraded instead of duplicated.
         """
         if trigger is Trigger.PERIODIC:
             raise ValueError("periodic runs are scheduled, not requested")
@@ -420,12 +473,10 @@ class DiagScheduler:
             current is not None and current.trigger is not Trigger.PERIODIC
         ):
             return RunRequest(RequestStatus.REFUSED_ALREADY_QUEUED)
-        now = self._clock()
-        wait = self._rate_wait(job.router_key, now)
+        wait = self._accept_wait(job.router_key, self._clock())
         if wait is not None:
             _LOGGER.debug("Run of %s refused by rate limit (%.0f s)", job_id, wait)
             return RunRequest(RequestStatus.REFUSED_RATE_LIMIT, retry_after=wait)
-        self._charge(job.router_key, now)
         completion: asyncio.Future[RunResult] = (
             asyncio.get_running_loop().create_future()
         )
@@ -506,8 +557,11 @@ class DiagScheduler:
             try:
                 self._dispatch()
                 delay = self._next_delay()
-            except Exception:  # a scheduler bug must not end diagnostics for good
-                _LOGGER.exception("Diagnostic scheduler pass failed")
+            except Exception as err:  # a scheduler bug must not end diagnostics
+                _LOGGER.error(
+                    "Diagnostic scheduler pass failed (%s)", type(err).__name__
+                )
+                _LOGGER.debug("Scheduler pass failure details", exc_info=err)
                 delay = self._cfg.min_interval
             await self._wait(delay)
 
@@ -562,6 +616,8 @@ class DiagScheduler:
             self._pending[job_id] = _Pending(self._next_seq(), Trigger.PERIODIC, None)
 
     def _start_ready(self, now: float) -> None:
+        """Start pending runs by priority; every start is charged to its key."""
+        self._rate_free_at = None
         order = sorted(
             self._pending.items(), key=lambda kv: (-kv[1].trigger, kv[1].seq)
         )
@@ -571,15 +627,23 @@ class DiagScheduler:
             job = self._jobs.get(job_id)
             if job is None or job.router_key in self._busy:
                 continue
-            if pending.trigger is Trigger.PERIODIC:
-                wait = self._rate_wait(job.router_key, now)
-                if wait is not None:
-                    del self._pending[job_id]
-                    self._states[job_id].next_due = now + wait
-                    _LOGGER.debug("Periodic run of %s deferred %.0f s", job_id, wait)
-                    continue
-                self._charge(job.router_key, now)
+            wait = self._rate_wait(job.router_key, now)
+            if wait is not None:
+                self._hold(job_id, pending, now + wait)
+                continue
+            self._charge(job.router_key, now)
             self._start(job, pending)
+
+    def _hold(self, job_id: str, pending: _Pending, free_at: float) -> None:
+        """Rate window full: defer a periodic run, let a requested one wait."""
+        if pending.trigger is Trigger.PERIODIC:
+            del self._pending[job_id]
+            self._states[job_id].next_due = free_at
+            _LOGGER.debug("Periodic run of %s deferred by rate limit", job_id)
+            return
+        if self._rate_free_at is None or free_at < self._rate_free_at:
+            self._rate_free_at = free_at
+        _LOGGER.debug("Requested run of %s waits for a rate-limit slot", job_id)
 
     def _start(self, job: DiagJob, pending: _Pending) -> None:
         del self._pending[job.job_id]
@@ -599,6 +663,8 @@ class DiagScheduler:
             and job_id not in self._running
             and job_id not in self._pending
         ]
+        if self._rate_free_at is not None:
+            dues.append(self._rate_free_at)
         if not dues:
             return None
         return max(0.0, min(dues) - self._clock())
@@ -629,10 +695,11 @@ class DiagScheduler:
             timed_out = work not in done
         finally:
             timer.cancel()
-            work.cancel()
-            await asyncio.gather(work, timer, return_exceptions=True)
+            if not work.done():
+                await self._reap(work, job.kind)
+            await asyncio.gather(timer, return_exceptions=True)
         if timed_out:
-            return Outcome.TIMEOUT, None, None
+            return Outcome.TIMEOUT, None, None if work.done() else "CancellationIgnored"
         if work.cancelled():
             return Outcome.FAILURE, None, "CancelledError"
         err = work.exception()
@@ -645,6 +712,37 @@ class DiagScheduler:
             )
             return Outcome.FAILURE, None, type(err).__name__
         return Outcome.SUCCESS, work.result(), None
+
+    async def _reap(self, work: asyncio.Task[Any], kind: str) -> None:
+        """Cancel ``work`` and wait up to cancel_grace; orphan it if it lingers."""
+        work.cancel()
+        grace = asyncio.get_running_loop().create_task(
+            _sleep_for(self._sleep, self._cfg.cancel_grace),
+            name=f"{TASK_NAME_PREFIX} grace",
+        )
+        try:
+            await asyncio.wait((work, grace), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            grace.cancel()
+            if not work.done() and self._orphan(work):
+                _LOGGER.warning(
+                    "A diagnostic job of kind %s ignored cancellation and keeps "
+                    "running in the background",
+                    kind,
+                )
+
+    def _orphan(self, task: asyncio.Task[Any]) -> bool:
+        """Track a task that would not stop; False if it already was."""
+        if task in self._orphans or task.done():
+            return False
+        self._orphans.add(task)
+        task.add_done_callback(self._drop_orphan)
+        return True
+
+    def _drop_orphan(self, task: asyncio.Task[Any]) -> None:
+        self._orphans.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            _LOGGER.debug("Orphaned diagnostic task ended with an error")
 
     def _complete(
         self,
@@ -810,6 +908,30 @@ class DiagScheduler:
         if len(charges) < limit.max_runs:
             return None
         return charges[0] + limit.window - now
+
+    def _accept_wait(self, key: str | None, now: float) -> float | None:
+        """None if a manual/event request fits, else a retry hint in seconds.
+
+        Started runs in the window plus requests of ``key`` that are already
+        waiting must stay below the limit. The hint is exact when a started
+        run has to leave the window first, else ``window`` (a lower bound).
+        """
+        limit = self._cfg.rate_limit
+        self._rate_wait(key, now)  # drop expired charges
+        charges = self._charges.get(key, deque())
+        reserved = sum(
+            1
+            for job_id, pending in self._pending.items()
+            if pending.trigger is not Trigger.PERIODIC
+            and (job := self._jobs.get(job_id)) is not None
+            and job.router_key == key
+        )
+        over = len(charges) + reserved - limit.max_runs
+        if over < 0:
+            return None
+        if over < len(charges):
+            return charges[over] + limit.window - now
+        return limit.window
 
     def _charge(self, key: str | None, now: float) -> None:
         self._charges.setdefault(key, deque()).append(now)
