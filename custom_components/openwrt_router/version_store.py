@@ -30,12 +30,14 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import errno
 import functools
 import hashlib
 import logging
 import os
 import secrets
 import shutil
+import stat
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -175,20 +177,70 @@ def _ensure_dir(path: str) -> None:
         os.chmod(path, STORAGE_DIR_MODE)
 
 
+# POSIX: never open through a symbolic link. Platforms without it (Windows)
+# rely on O_EXCL alone, which also refuses an existing link or junction.
+_O_NOFOLLOW: int = getattr(os, "O_NOFOLLOW", 0)
+REASON_PARTIAL_NOT_REGULAR = "partial_not_regular"
+
+
+def _partial_refused(kind: str) -> StorageError:
+    return StorageError(
+        "A link or folder sits where a version file is written; refused",
+        details={"reason": REASON_PARTIAL_NOT_REGULAR, "found": kind},
+    )
+
+
+def _open_partial(partial: str) -> int:
+    """Create ``partial`` exclusively (0o600), never through a link.
+
+    Something already there: a link (symbolic or junction), a folder or any
+    other non-regular entry is refused (``partial_not_regular``) and left
+    alone. A regular file of the same name can only be a crashed write of
+    this very locator: it is removed and the exclusive create retried once.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
+    flags |= getattr(os, "O_BINARY", 0)
+    try:
+        return os.open(partial, flags, STORAGE_FILE_MODE)
+    except OSError as err:
+        # FileExistsError; ELOOP = O_NOFOLLOW met a link; Windows answers a
+        # folder with PermissionError. Anything else, with nothing at the
+        # path, is a plain write error.
+        if err.errno == errno.ELOOP or _path_is_link(partial):
+            raise _partial_refused("symlink") from err
+        if not isinstance(err, FileExistsError) and not os.path.lexists(partial):
+            raise
+    try:
+        mode = os.lstat(partial).st_mode
+    except FileNotFoundError:
+        mode = None  # gone meanwhile: just create it
+    if mode is not None:
+        if not stat.S_ISREG(mode):
+            raise _partial_refused("folder" if stat.S_ISDIR(mode) else "other")
+        os.remove(partial)  # removes the entry itself, never a link target
+    return os.open(partial, flags, STORAGE_FILE_MODE)
+
+
 def _write_atomic(router_dir: str, locator: str, data: bytes) -> str:
-    """Write ``data`` to ``router_dir/locator`` via .partial, fsync, rename."""
+    """Write ``data`` to ``router_dir/locator`` via .partial, fsync, rename.
+
+    The .partial is created with ``O_CREAT | O_EXCL`` (+ ``O_NOFOLLOW``),
+    see :func:`_open_partial`; the rename replaces a link at the final
+    path itself, it never writes through it.
+    """
     _ensure_dir(router_dir)
     path = resolve_artifact_path(router_dir, locator)
     partial = path + PARTIAL_SUFFIX
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
-    fd = os.open(partial, flags, STORAGE_FILE_MODE)
+    fd = _open_partial(partial)
     try:
         with os.fdopen(fd, "wb") as handle:
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:  # on the open file, never by path
+                with contextlib.suppress(OSError):
+                    fchmod(handle.fileno(), STORAGE_FILE_MODE)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        with contextlib.suppress(OSError):
-            os.chmod(partial, STORAGE_FILE_MODE)
         os.replace(partial, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -406,6 +458,7 @@ class VersionStore:
             "too_large": 0,
             "refused_input": 0,
             "write_errors": 0,
+            "partial_refused": 0,
             "reads": 0,
             "integrity_failures": 0,
             "deleted": 0,
@@ -1029,6 +1082,23 @@ class VersionStore:
                     raise
         except BaseException as err:
             await self._async_cleanup(router_dir, refs, backup_id, payloads)
+            if (
+                isinstance(err, StorageError)
+                and err.details.get("reason") == REASON_PARTIAL_NOT_REGULAR
+            ):
+                self.stats["write_errors"] += 1
+                self.stats["partial_refused"] += 1
+                _LOGGER.warning(
+                    "Version store: a %s sits where a version file of %s is "
+                    "written; refused, nothing was followed",
+                    err.details.get("found"),
+                    router_id,
+                )
+                raise StorageError(
+                    "Writing the version failed",
+                    router_id=router_id,
+                    details=dict(err.details),
+                ) from err
             if isinstance(err, OSError):
                 self.stats["write_errors"] += 1
                 raise StorageError(

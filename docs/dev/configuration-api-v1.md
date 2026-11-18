@@ -483,7 +483,7 @@ api.guard.register_action("self_healing.restart_service", ActionClass.CRITICAL,
 |---|---|
 | Wurzel | `hass.config.path(*CONFIG_BACKUP_PATH, <router_id>)` = `<config>/openwrt_router/config_backups/<router_id>/` (nicht unter `www`) |
 | Rechte | Ordner `0o700`, Dateien `0o600` (`STORAGE_DIR_MODE`, `STORAGE_FILE_MODE`) |
-| Schreiben | in `<name>.partial`, `fsync`, umbenennen; **Indexeintrag zuletzt** |
+| Schreiben | in `<name>.partial` (neu angelegt mit `O_CREAT \| O_EXCL \| O_NOFOLLOW`, `0o600`; ohne `O_NOFOLLOW` auf der Plattform nur `O_EXCL`), `fsync`, umbenennen; **Indexeintrag zuletzt**. Liegt am `.partial`-Pfad ein Link, eine Junction oder ein Ordner: `StorageError` `reason=partial_not_regular` (`found`), nie gefolgt, Zähler `partial_refused`; eine gleichnamige reguläre Datei (abgebrochener Schreibvorgang desselben Locators) wird entfernt und das Anlegen einmal wiederholt |
 | I/O | jede Datei-Operation im Executor |
 | Format | `StorageRef.storage_format = "plain-v1"` (Klartext, keine eigene Verschlüsselung), `encrypted = False` |
 | Grenzen | 50 MiB je Router, 250 MiB gesamt (`DEFAULT_*_STORAGE_LIMIT_BYTES`) |
@@ -1565,6 +1565,7 @@ Signatur bleibt, die Regel ist neu.
 | 93 | `capabilities.merge(..., *, last_known=None)` (Befund 16); die Registry führt den letzten bekannten Zustand je Router: bekannt → unknown → anders bekannt meldet `router_capabilities_changed` vom letzten bekannten Zustand (vorher stille Erstdetektion). | A, Verhalten |
 | 94 | Config-Flow (Befund 17): wurde nichts geschrieben, unterscheidet der Fehler `acl_tiered_kept` (gestufte ACL behalten), `acl_check_transient` (ACL nicht lesbar, nichts geändert) und wie bisher `acl_already_current`; Konstanten `ERROR_ACL_TIERED_KEPT`, `ERROR_ACL_CHECK_TRANSIENT`; Texte en/de. | A, Verhalten (UI-Text) |
 | 95 | `async_capture` und `async_compare` (Review PR #55, Punkt 2): ein Benutzer ohne Admin ⇒ `AuthorizationError` `reason` `not_admin` (`details.action` `config_capture`/`config_compare`, `audit_id`), auditiert auf dem Sicherheitsring, vor jedem Provider-Aufruf; Modul-, System- und Automationsakteure unverändert. Konstanten `READ_CAPTURE`, `READ_COMPARE` (`config_api`). | B (Verhalten) |
+| 96 | Versionsdateien (Review PR #55, Punkt 3): `.partial` wird exklusiv angelegt (`O_CREAT \| O_EXCL`, `O_NOFOLLOW` wo vorhanden, `0o600`, Rechte per `fchmod` am offenen Deskriptor). Link/Junction/Ordner am `.partial`-Pfad ⇒ `StorageError` `reason` `partial_not_regular`, `found` (`symlink`/`folder`/`other`), Warn-Log, Zähler `partial_refused` (zählt auch in `write_errors`); gleichnamige reguläre Datei ⇒ entfernt, einmal neu angelegt. | Verhalten, A |
 
 Befunde 15 und 18 ändern nur Tests (kein Vertrag): die Wächter „HA-eigene Daten
 unverändert“ prüfen zusätzlich die Aufrufe `async_update_entry`, `async_remove`,
