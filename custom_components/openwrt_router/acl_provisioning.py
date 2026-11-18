@@ -1044,12 +1044,41 @@ def parse_acl_text(text: str | None) -> tuple[Any, str | None]:
         return None, "missing"
     if len(text.encode("utf-8", "surrogatepass")) > MAX_ACL_TEXT_BYTES:
         return None, "too_large"
+    # Explicit depth check: whether json.loads raises RecursionError for deep
+    # nesting depends on the platform and Python version, so do not rely on it.
+    if _json_nesting_depth(text) > MAX_ACL_NESTING_DEPTH:
+        return None, "too_deep"
     try:
         return json.loads(text), None
     except RecursionError:
         return None, "too_deep"
     except ValueError:
         return None, "invalid_json"
+
+
+MAX_ACL_NESTING_DEPTH: Final = 32
+
+
+def _json_nesting_depth(text: str) -> int:
+    """Deepest bracket nesting in a JSON text, ignoring brackets in strings."""
+    depth = deepest = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif char in "]}":
+            depth -= 1
+    return deepest
 
 
 class DeployedAclKind(StrEnum):
