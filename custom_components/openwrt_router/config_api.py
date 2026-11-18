@@ -349,10 +349,17 @@ class GuardView:
         *,
         module: str,
         admin_user_only: bool = False,
+        sensitive_read: bool = False,
+        rate_limit: Any = None,
     ) -> None:
-        """Register ``<module>.<action>``."""
+        """Register ``<module>.<action>`` (``sensitive_read``, ``rate_limit``: B5)."""
         self._guard.register_action(
-            name, action_class, module=module, admin_user_only=admin_user_only
+            name,
+            action_class,
+            module=module,
+            admin_user_only=admin_user_only,
+            sensitive_read=sensitive_read,
+            rate_limit=rate_limit,
         )
 
 

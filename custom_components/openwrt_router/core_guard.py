@@ -20,6 +20,12 @@ Rules (all from ``core_models``, this module only applies them):
   restart or an unload (they are expired and audited on close).
 * ``consume`` is synchronous on the event loop: ledger, single use,
   expiry and binding; every attempt is audited.
+* ACTIVE actions (B5: scan, ping, survey; nothing configured) follow the
+  mutating policy without approval; a grant is audited as
+  ``core.active_action_granted`` on the general ring. An optional
+  :class:`RateLimit` per (action, router) refuses further grants with
+  reason ``rate_limited`` (``core.action_rate_limited``, general ring,
+  deduplicated per window, ``retry_after`` on the decision).
 
 Threat model (§6.1): in-process code is trusted; the guard defends against
 users, automations and module bugs, not against a module that imports
@@ -30,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -43,6 +50,7 @@ from .core_errors import (
     ApprovalRequiredError,
     AuthorizationError,
     ConfigApiError,
+    RateLimitedError,
 )
 from .core_models import (
     ACTION_CLASSES,
@@ -61,6 +69,7 @@ from .core_models import (
     DecisionState,
     EventResult,
     GuardedAction,
+    RateLimit,
     Severity,
     VerifiedActor,
     WriteAuthorization,
@@ -102,6 +111,11 @@ MAX_OPEN_APPROVALS_PER_PRINCIPAL = 20
 MAX_OPEN_APPROVALS_TOTAL = 200
 REASON_TOO_MANY_OPEN = "too_many_open_approvals"
 REASON_TOO_MANY_OPEN_TOTAL = "too_many_open_approvals_total"
+# Follow-up B5: an active action over its RateLimit.
+REASON_RATE_LIMITED = "rate_limited"
+# Open rate windows (action, router_id) kept at most; above it the oldest
+# window is dropped (counter rate_windows_dropped, debug log).
+MAX_RATE_WINDOWS = 1024
 
 
 @dataclass(slots=True)
@@ -116,14 +130,22 @@ def error_for_decision(decision: AuthorizationDecision) -> ConfigApiError:
     """The exception a caller raises for a non-approved decision.
 
     PENDING (redeem of a still pending approval) -> ApprovalRequiredError;
-    a denial from an approval check -> ApprovalInvalidError; any other
+    a denial from an approval check -> ApprovalInvalidError; a rate limited
+    active action -> RateLimitedError (``retry_after``); any other
     denial -> AuthorizationError. ``details["reason"]`` and ``audit_id``
     are always set.
     """
     reason = decision.reason or "denied"
-    details = {"reason": reason, "audit_id": decision.audit_id}
+    details: dict[str, Any] = {"reason": reason, "audit_id": decision.audit_id}
     if decision.approval_request is not None:
         details["approval_id"] = decision.approval_request.approval_id
+    if reason == REASON_RATE_LIMITED:
+        return RateLimitedError(
+            f"Action {decision.action} is rate limited",
+            retry_after=decision.retry_after or 0.0,
+            router_id=decision.router_id,
+            details={**details, "action": str(decision.action)},
+        )
     if decision.state is DecisionState.PENDING or reason == "pending":
         return ApprovalRequiredError(
             "Approval is still pending", router_id=decision.router_id, details=details
@@ -181,6 +203,10 @@ class ActionGuard:
         self._admin_only: set[str] = {str(a) for a in ADMIN_USER_ONLY_ACTIONS}
         self._system_only: set[str] = {str(a) for a in SYSTEM_ONLY_ACTIONS}
         self._action_owner: dict[str, str] = {}
+        self._sensitive_reads: set[str] = set()
+        self._rate_limits: dict[str, RateLimit] = {}
+        # (action, router_id) -> grant times inside the window (oldest first)
+        self._calls: dict[tuple[str, str], deque[datetime]] = {}
         self._approvals: dict[str, ApprovalRequest] = {}
         self._ledger: dict[str, _LedgerEntry] = {}
         self._listeners: list[Callable[[str, str], None]] = []
@@ -200,6 +226,9 @@ class ActionGuard:
             "audit_errors": 0,
             "approvals_capped": 0,
             "listener_errors": 0,
+            "active_granted": 0,
+            "rate_limited": 0,
+            "rate_windows_dropped": 0,
         }
 
     # -- actors ----------------------------------------------------------------------
@@ -249,15 +278,29 @@ class ActionGuard:
         *,
         module: str,
         admin_user_only: bool = False,
+        sensitive_read: bool = False,
+        rate_limit: RateLimit | None = None,
     ) -> None:
         """Register ``<module>.<action>`` (below the module's own prefix).
 
-        Re-registering the same definition is a no-op; a different one, a
-        name outside ``<module>.``, a core action or a core namespace raises
-        ValueError.
+        ``sensitive_read`` (READ only): a user must be a verified admin;
+        module, system and automation actors read as before.
+        ``rate_limit`` (ACTIVE only): at most ``max_calls`` grants per
+        router within ``per``. Re-registering the same definition is a
+        no-op; a different one, a name outside ``<module>.``, a core action
+        or a core namespace raises ValueError.
         """
         name = str(name)
         action_class = ActionClass(action_class)
+        if not isinstance(sensitive_read, bool):
+            raise TypeError("sensitive_read must be a bool")
+        if sensitive_read and action_class is not ActionClass.READ:
+            raise ValueError("sensitive_read is only for read actions")
+        if rate_limit is not None:
+            if not isinstance(rate_limit, RateLimit):
+                raise TypeError("rate_limit must be a RateLimit")
+            if action_class is not ActionClass.ACTIVE:
+                raise ValueError("rate_limit is only for active actions")
         if not isinstance(module, str) or not module or "." in module:
             raise ValueError("module must be a plain, non-empty name")
         prefix = f"{module}."
@@ -271,6 +314,8 @@ class ActionGuard:
                 self._action_owner.get(name) == module
                 and known is action_class
                 and (name in self._admin_only) == admin_user_only
+                and (name in self._sensitive_reads) == sensitive_read
+                and self._rate_limits.get(name) == rate_limit
             )
             if same:
                 return
@@ -279,6 +324,10 @@ class ActionGuard:
         self._action_owner[name] = module
         if admin_user_only:
             self._admin_only.add(name)
+        if sensitive_read:
+            self._sensitive_reads.add(name)
+        if rate_limit is not None:
+            self._rate_limits[name] = rate_limit
 
     # -- decisions -------------------------------------------------------------------
 
@@ -308,6 +357,7 @@ class ActionGuard:
             action_classes=self._action_classes,
             admin_user_only=frozenset(self._admin_only),
             system_only=frozenset(self._system_only),
+            sensitive_reads=frozenset(self._sensitive_reads),
         )
         if reason is not None:
             return self._denied(action, router_id, actor, reason, correlation_id)
@@ -321,6 +371,12 @@ class ActionGuard:
             return self._request(
                 action, router_id, actor, subject_id, checksum, correlation_id, now
             )
+        if action_class is ActionClass.ACTIVE:
+            retry_after = self._rate_check(action, router_id, now)
+            if retry_after is not None:
+                return self._rate_limited(
+                    action, router_id, actor, retry_after, correlation_id, now
+                )
         return self._grant(
             action, router_id, actor, checksum, None, correlation_id, now
         )
@@ -346,8 +402,13 @@ class ActionGuard:
         )
         self._ledger[authorization.authorization_id] = _LedgerEntry(authorization)
         self.stats["decisions_approved"] += 1
+        event_type = CoreEventType.AUTHORIZATION_GRANTED
+        if self._action_classes.get(action) is ActionClass.ACTIVE:
+            event_type = CoreEventType.ACTIVE_ACTION_GRANTED
+            self.stats["active_granted"] += 1
+            self._record_call(action, router_id, now)
         audit_id = self._audit(
-            CoreEventType.AUTHORIZATION_GRANTED,
+            event_type,
             router_id=router_id,
             actor=actor.actor,
             correlation_id=correlation_id,
@@ -366,6 +427,85 @@ class ActionGuard:
             router_id=router_id,
             audit_id=audit_id,
             authorization=authorization,
+        )
+
+    def _rate_check(self, action: str, router_id: str, now: datetime) -> float | None:
+        """Seconds until the next grant is allowed; None if allowed now."""
+        limit = self._rate_limits.get(action)
+        if limit is None:
+            return None
+        calls = self._calls.get((action, str(router_id)))
+        if calls is None:
+            return None
+        while calls and now - calls[0] >= limit.per:
+            calls.popleft()
+        if len(calls) < limit.max_calls:
+            return None
+        return max(0.0, (calls[0] + limit.per - now).total_seconds())
+
+    def _record_call(self, action: str, router_id: str, now: datetime) -> None:
+        limit = self._rate_limits.get(action)
+        if limit is None:
+            return
+        key = (action, str(router_id))
+        calls = self._calls.get(key)
+        if calls is None:
+            if len(self._calls) >= MAX_RATE_WINDOWS:
+                self._prune_windows(now)
+            calls = self._calls[key] = deque(maxlen=limit.max_calls)
+        calls.append(now)
+
+    def _prune_windows(self, now: datetime) -> None:
+        """Forget passed windows; above MAX_RATE_WINDOWS - 1 the oldest."""
+        for key, calls in list(self._calls.items()):
+            limit = self._rate_limits.get(key[0])
+            if limit is None or not calls or now - calls[-1] >= limit.per:
+                del self._calls[key]
+        excess = len(self._calls) - (MAX_RATE_WINDOWS - 1)
+        if excess > 0:
+            oldest = sorted(self._calls, key=lambda k: self._calls[k][-1])[:excess]
+            for key in oldest:
+                del self._calls[key]
+            self.stats["rate_windows_dropped"] += excess
+            _LOGGER.debug("Guard: %d open rate windows dropped (cap)", excess)
+
+    def _rate_limited(
+        self,
+        action: str,
+        router_id: str,
+        actor: VerifiedActor,
+        retry_after: float,
+        correlation_id: str | None,
+        now: datetime,
+    ) -> AuthorizationDecision:
+        """Refuse an active action over its limit (general ring, deduped)."""
+        self.stats["decisions_denied"] += 1
+        self.stats["rate_limited"] += 1
+        limit = self._rate_limits[action]
+        audit_id = self._audit(
+            CoreEventType.ACTION_RATE_LIMITED,
+            router_id=router_id,
+            actor=actor.actor,
+            correlation_id=correlation_id,
+            severity=Severity.WARNING,
+            result=EventResult.DENIED,
+            dedup_key=action,
+            cooldown=limit.per,
+            now=now,
+            data={
+                "action": action,
+                "reason": REASON_RATE_LIMITED,
+                "retry_after": retry_after,
+                **limit.to_dict(),
+            },
+        )
+        return AuthorizationDecision(
+            state=DecisionState.DENIED,
+            action=action,
+            router_id=router_id,
+            audit_id=audit_id,
+            reason=REASON_RATE_LIMITED,
+            retry_after=retry_after,
         )
 
     def _request(
@@ -704,6 +844,8 @@ class ActionGuard:
             elif now - approval.expires_at > _APPROVAL_KEEP:
                 del self._approvals[approval_id]
                 self.stats["approvals_dropped"] += 1
+        if self._calls:
+            self._prune_windows(now)
         for authorization_id, entry in list(self._ledger.items()):
             if now - entry.authorization.expires_at > _LEDGER_GRACE:
                 del self._ledger[authorization_id]
@@ -819,6 +961,7 @@ class ActionGuard:
             action_classes=self._action_classes,
             admin_user_only=frozenset(self._admin_only),
             system_only=frozenset(self._system_only),
+            sensitive_reads=frozenset(self._sensitive_reads),
         )
 
     def audit_denial(

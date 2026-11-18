@@ -20,6 +20,11 @@ All notable changes to the OpenWrt Router integration will be documented in this
   mit `retry_after`, wiederholbar) und `SafetyRefusedError` (`safety_refused`, mit
   `reason`, nicht wiederholbar). Beide Fehlerklassen landen nie in gespeicherten
   Versionsdaten.
+- Enterprise Core: neue Guard-Klasse `active` für Aktionen, die am Router oder im Netz
+  etwas tun, ohne die Konfiguration zu ändern (Scan, Ping): Benutzer brauchen Admin,
+  keine Freigabe, Audit im allgemeinen Ring, optional mit Ratenlimit je Router
+  (`rate_limited` mit `retry_after`). Module können ein sensibles Lesen als
+  Admin-pflichtig für Benutzer registrieren (`sensitive_read=True`).
 
 ### Changed
 

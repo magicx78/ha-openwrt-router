@@ -31,6 +31,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import uuid
@@ -852,12 +853,46 @@ class ActionClass(StrEnum):
     """Guard class of an action.
 
     CRITICAL means "needs request + admin approval", not "writes": export
-    only reads but is critical because it discloses secrets.
+    only reads but is critical because it discloses secrets. ACTIVE (B5)
+    means "acts on the router or the network without changing its
+    configuration" (scan, ping, survey): like MUTATING for the policy, no
+    approval, audited on the general ring, optionally rate limited.
+    Not persisted (additive member).
     """
 
     READ = "read"
     MUTATING = "mutating"
     CRITICAL = "critical"
+    ACTIVE = "active"
+
+
+# Bounds of a RateLimit (register_action(..., rate_limit=...)).
+RATE_LIMIT_MAX_CALLS: Final = 100_000
+RATE_LIMIT_MAX_PERIOD: Final = timedelta(days=1)
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RateLimit:
+    """At most ``max_calls`` grants of one active action per router and
+    sliding window ``per`` (B5). Only grants count; a denial never does."""
+
+    max_calls: int
+    per: timedelta
+
+    def __post_init__(self) -> None:
+        """Validate the bounds."""
+        if isinstance(self.max_calls, bool) or not isinstance(self.max_calls, int):
+            raise TypeError("max_calls must be an int")
+        if not 1 <= self.max_calls <= RATE_LIMIT_MAX_CALLS:
+            raise ValueError(f"max_calls must be 1..{RATE_LIMIT_MAX_CALLS}")
+        if not isinstance(self.per, timedelta):
+            raise TypeError("per must be a timedelta")
+        if not timedelta(0) < self.per <= RATE_LIMIT_MAX_PERIOD:
+            raise ValueError("per must be > 0 and at most one day")
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form (seconds)."""
+        return {"max_calls": self.max_calls, "per": self.per.total_seconds()}
 
 
 class GuardedAction(StrEnum):
@@ -1175,6 +1210,11 @@ class CoreEventType(StrEnum):
     # Security review (1.44.0, additive): the options-flow switch
     # config_backup_enabled changed (actor, old and new value).
     CONFIG_OPTION_CHANGED = "security.config_option_changed"
+    # Follow-up B5 (additive): an ACTIVE action was authorized (general
+    # ring, audit-mandatory) / refused by its rate limit (general ring, one
+    # entry per router, action and window; repeats are counted).
+    ACTIVE_ACTION_GRANTED = "core.active_action_granted"
+    ACTION_RATE_LIMITED = "core.action_rate_limited"
 
 
 # Namespaces of core event types. Only the core emits these (also the ones
@@ -1224,6 +1264,7 @@ AUDIT_MANDATORY_EVENT_TYPES: Final = frozenset(
         CoreEventType.AUTHORIZATION_DENIED,
         CoreEventType.AUTHORIZATION_CONSUMED,
         CoreEventType.AUTHORIZATION_GRANTED,
+        CoreEventType.ACTIVE_ACTION_GRANTED,
         CoreEventType.APPROVAL_REQUESTED,
         CoreEventType.APPROVAL_APPROVED,
         CoreEventType.APPROVAL_REJECTED,
@@ -1469,14 +1510,16 @@ def policy_denial_reason(
     action_classes: Mapping[str, ActionClass] = ACTION_CLASSES,
     admin_user_only: frozenset[str] = ADMIN_USER_ONLY_ACTIONS,
     system_only: frozenset[str] = SYSTEM_ONLY_ACTIONS,
+    sensitive_reads: frozenset[str] = frozenset(),
 ) -> str | None:
     """Guard policy: None if ``actor`` may perform/request ``action``.
 
     Reasons: unverified_actor, actor_verification_expired, unknown_action,
     system_only, not_admin, automation_not_allowed. A user who is not a
-    verified admin may not perform or request any mutating or critical
-    action. Critical actions may be requested by verified admin users,
-    modules and the system only.
+    verified admin may not perform or request any mutating, active or
+    critical action, nor a read listed in ``sensitive_reads``. Critical
+    actions may be requested by verified admin users, modules and the
+    system only.
     """
     if not isinstance(actor, VerifiedActor):
         return "unverified_actor"
@@ -1490,7 +1533,7 @@ def policy_denial_reason(
         return None if kind is ActorKind.SYSTEM else "system_only"
     if action in admin_user_only and not actor.is_admin:
         return "not_admin"
-    if action_class is ActionClass.READ:
+    if action_class is ActionClass.READ and action not in sensitive_reads:
         return None
     if kind is ActorKind.USER and not actor.is_admin:
         return "not_admin"
@@ -4049,7 +4092,8 @@ class AuthorizationDecision:
 
     APPROVED carries ``authorization``; PENDING carries ``approval_request``;
     DENIED carries ``reason``. ``audit_id`` is the event_id of the audit
-    entry written for this decision.
+    entry written for this decision. ``retry_after`` (seconds) is set only
+    for a ``rate_limited`` denial (B5).
     """
 
     state: DecisionState
@@ -4059,10 +4103,18 @@ class AuthorizationDecision:
     authorization: WriteAuthorization | None = field(default=None, repr=False)
     approval_request: ApprovalRequest | None = None
     reason: str | None = None
+    retry_after: float | None = None
 
     def __post_init__(self) -> None:
         """Coerce."""
         _coerce(self, "state", DecisionState)
+        if self.retry_after is not None and (
+            isinstance(self.retry_after, bool)
+            or not isinstance(self.retry_after, int | float)
+            or not math.isfinite(self.retry_after)
+            or self.retry_after < 0
+        ):
+            raise ValueError("retry_after must be a finite number >= 0")
 
     @property
     def approved(self) -> bool:
@@ -4085,6 +4137,7 @@ class AuthorizationDecision:
                 else self.approval_request.to_dict()
             ),
             "reason": self.reason,
+            "retry_after": self.retry_after,
         }
 
 
@@ -4435,8 +4488,14 @@ class ActionGuardProtocol(Protocol):
         *,
         module: str,
         admin_user_only: bool = False,
+        sensitive_read: bool = False,
+        rate_limit: RateLimit | None = None,
     ) -> None:
-        """Register an extension action ``<module>.<action>``."""
+        """Register an extension action ``<module>.<action>``.
+
+        ``sensitive_read`` (READ only): a user must be a verified admin.
+        ``rate_limit`` (ACTIVE only): grants per router and window.
+        """
 
 
 @runtime_checkable

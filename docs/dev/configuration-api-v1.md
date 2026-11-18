@@ -323,6 +323,36 @@ actor = await api.guard.async_resolve_actor(call.context, module="config_manager
 | `ssh_pin_reset` | **critical** | nur Admin-Benutzer | `binding_checksum(router_id, fingerprint, "reset")` (`fingerprint` = gepinnter, sonst ausstehender Key) |
 | `<modul>.<aktion>` | bei `register_action` | bei `register_action` | frei |
 
+**Modulaktionen registrieren (ab B5):**
+`api.guard.register_action(name, action_class, *, module, admin_user_only=False,
+sensitive_read=False, rate_limit=None)`.
+
+| Klasse | Wer darf | Freigabe | Audit bei Erteilung |
+|---|---|---|---|
+| `read` | jeder geprüfte Akteur | nein | `security.authorization_granted` (Sicherheitsring) |
+| `read` + `sensitive_read=True` | Admin-Benutzer, Modul, System, Automation; Benutzer ohne Admin ⇒ `not_admin` | nein | wie `read` |
+| `active` (ab B5) | Admin-Benutzer, Modul, System, Automation; Benutzer ohne Admin ⇒ `not_admin` | nein | `core.active_action_granted` (**allgemeiner** Ring, audit-pflichtig) |
+| `mutating` | Admin-Benutzer, Modul, System, Automation | nein | `security.authorization_granted` |
+| `critical` | Antrag: Admin-Benutzer, Modul, System | ja | `security.approval_*`, beim Einlösen `security.authorization_granted` |
+
+- `active` heißt „handelt am Router oder im Netz, ändert keine Konfiguration“ (Scan, Ping,
+  Survey). Ablehnungen bleiben `security.authorization_denied` (Sicherheitsring).
+- `admin_user_only=True` heißt weiterhin „nur ein geprüfter Admin-**Benutzer**“ (auch
+  Module und System werden abgelehnt). Für ein sensibles Lesen, das Module weiter dürfen
+  sollen, ist `sensitive_read=True` gedacht (nur mit `read`, sonst `ValueError`).
+- `rate_limit=RateLimit(max_calls=…, per=timedelta(…))` (nur mit `active`, sonst
+  `ValueError`; `max_calls` 1..100000, `per` > 0 und ≤ 1 Tag): höchstens `max_calls`
+  Erteilungen je `(aktion, router_id)` im gleitenden Fenster `per`; nur Erteilungen zählen.
+  Darüber: `DENIED`, `reason` `rate_limited` (`REASON_RATE_LIMITED`),
+  `AuthorizationDecision.retry_after` (Sekunden), `error_for_decision` ⇒
+  `RateLimitedError` (§14). Auditiert als `core.action_rate_limited` (allgemeiner Ring,
+  Warnung, `dedup_key` = Aktion, Cooldown = `per`: ein Eintrag je Router, Aktion und
+  Fenster, Wiederholungen in `repeat_count`), Zähler `rate_limited`. Höchstens
+  `MAX_RATE_WINDOWS` = 1024 offene Fenster; darüber fällt das älteste weg (Zähler
+  `rate_windows_dropped`, Debug-Log).
+- Gleiche Registrierung erneut ist ein No-op; eine abweichende (auch nur anderes Limit)
+  ⇒ `ValueError`.
+
 Tabellen im Code: `ACTION_CLASSES`, `ADMIN_USER_ONLY_ACTIONS`, `SYSTEM_ONLY_ACTIONS`. Die
 Regel selbst ist `policy_denial_reason(action, actor)`:
 
@@ -330,9 +360,9 @@ Regel selbst ist `policy_denial_reason(action, actor)`:
 2. unbekannte Aktion ⇒ `unknown_action`
 3. `SYSTEM_ONLY_ACTIONS` und kein System ⇒ `system_only`
 4. `ADMIN_USER_ONLY_ACTIONS` und kein geprüfter Admin-Benutzer ⇒ `not_admin`
-5. `read` ⇒ erlaubt
-6. **Benutzer ohne Admin ⇒ `not_admin` für jede mutating- oder critical-Aktion**, auch
-   `backup`
+5. `read` ⇒ erlaubt (außer `sensitive_reads`, ab B5: weiter mit 6)
+6. **Benutzer ohne Admin ⇒ `not_admin` für jede mutating-, active- oder
+   critical-Aktion**, auch `backup`, und für ein `sensitive_read`
 7. critical und Automation ⇒ `automation_not_allowed`
 
 - **read:** keine Autorisierung. Auditiert werden nur Dry Run und Kompatibilitätsprüfung
@@ -1180,7 +1210,15 @@ liest beide Ringe, `ring=AuditRing.SECURITY` nur einen.
 neu in 1.44.0: `security.acl_deployed`, `security.acl_deploy_failed`,
 `security.ssh_pin_pending`, `security.ssh_pin_confirmed`, `security.ssh_pin_mismatch`,
 `security.ssh_pin_reset`, `configuration.router_archived`;
-neu (Review PR #55): `router.forgotten`.
+neu (Review PR #55): `router.forgotten`;
+neu (Folgeauftrag B5): `core.active_action_granted`, `core.action_rate_limited`.
+
+- `core.active_action_granted` (Ring `general`, audit-pflichtig): eine `active`-Aktion
+  wurde erteilt. `data` wie `security.authorization_granted` (`action`,
+  `authorization_id`, `approval_id` = `null`, `verification_id`, `bound`).
+- `core.action_rate_limited` (Ring `general`, Warnung, nicht audit-pflichtig,
+  `dedup_key` = Aktion, Cooldown = Fenster des Limits): `action`, `reason`
+  (`rate_limited`), `retry_after`, `max_calls`, `per` (Sekunden).
 
 - `router.forgotten` (Ring `security`, audit-pflichtig): ein verwaister Datensatz wurde
   gelöscht. `data`: `reason` (`aged`/`capped`), `orphaned_at`, `has_versions`,
@@ -1390,7 +1428,7 @@ maskiert, Nachricht geschrubbt). `code` und `error_class` ändern sich innerhalb
 | `RestoreIncompatibleError` | `restore_incompatible` | `incompatible` | Version passt nicht zum Zielrouter | nein |
 | `OperationInProgressError` | `operation_in_progress` | `busy` | Router-Lock belegt | ja |
 | `ProviderError` | `provider_error` | `internal` (überschreibbar) | unerwarteter Providerfehler, Ursache verkettet, nur Typname in `details.cause` | nein (überschreibbar) |
-| `RateLimitedError` | `rate_limited` | `rate_limited` | zu viele Aufrufe einer Aktion (je Router); nichts getan. `retry_after` (Sekunden, endlich, ≥ 0) als Attribut, in `details.retry_after` und oben in `to_dict()` (ab B6) | ja (fest) |
+| `RateLimitedError` | `rate_limited` | `rate_limited` | zu viele Aufrufe einer Aktion (je Router); nichts getan. `retry_after` (Sekunden, endlich, ≥ 0) als Attribut, in `details.retry_after` und oben in `to_dict()` (ab B6); der Guard liefert ihn für `active`-Aktionen über ihrem `RateLimit` (`details.reason` `rate_limited`, `action`, `audit_id`; ab B5) | ja (fest) |
 | `SafetyRefusedError` | `safety_refused` | `safety_refused` | Core oder Modul lehnt ab, weil die Aktion unsicher ist (z. B. trennt die Verwaltungsverbindung); keine Rechtefrage. `reason` (Attribut und `details.reason`, Muster `SAFETY_REASON_PATTERN` = `[a-z0-9][a-z0-9_.:-]{0,63}`) (ab B6) | nein (fest) |
 
 `ErrorClass` enthält außerdem die elf Klassen aus `config-manager` 12.2 (`unreachable`,
@@ -1718,6 +1756,7 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 | 102 | Maskierung (B4, §13): Kennungsnamen (`IDENTIFIER_KEY_NAMES`, `is_identifier_name`) sind keine geheimen Namen mehr, ihr Wert wird nur bei Schlüsselmaterial maskiert (`looks_like_key_material`); Zählernamen (`COUNTER_SUFFIXES`, `is_counter_name`) zeigen Zahlen. `is_snapshot_secret` unverändert. Neu, rein: `pseudonymise_identifier(kind, value, key)`, `pseudonymise_fields(data, key, fields)`, `IDENTIFIER_PSEUDONYM_PREFIXES`, `IDENTIFIER_PSEUDONYM_HEX_LENGTH` (16), `IDENTIFIER_INVALID`. MAC/IP/Hostname/SSID/BSSID werden vom Core nie maskiert (unverändert, jetzt festgeschrieben). | A; Verhalten (weniger Überdeckung) |
 | 103 | Modul-Events (B3, §12.1/§12.2/§12.5): `CoreEvent.security_relevant`, `CoreEvent.audit_mandatory` (beide `bool`, Standard `False`, in `to_dict`/`from_dict`; alte Einträge lesen sich unverändert, keine Store-Version); `emit(..., security_relevant=False)` (Audit-Log und API); `register_audit_mandatory_types(types, *, module) -> remover`; `register_event_prefix(...)` liefert einen Entferner statt `None`; Dedup nur im selben Ring; Zähler `security_relevant_module_events`, `module_mandatory_types`. Bus-Payload hat zwei neue Schlüssel. | A |
 | 104 | Fehler (B6, §14): `RateLimitedError` (`code` `rate_limited`, `ErrorClass.RATE_LIMITED`, immer retryable, `retry_after`) und `SafetyRefusedError` (`code` `safety_refused`, `ErrorClass.SAFETY_REFUSED`, nie retryable, `reason`); `NON_PERSISTED_ERROR_CLASSES`, `SAFETY_REASON_PATTERN`. Beide Klassen sind Aufruf-Klassen: `VersionMeta`/`BackupRecord` lehnen sie ab, `version_error_class` bildet sie auf `busy`/`denied` ab, keine Metadaten-Version. Ein Provider, der eine davon als `error_class` eines Datensatzes setzen wollte, bekommt `ValueError` (vorher gab es die Werte nicht). | A |
+| 105 | Guard (B5, §6.3, §12.3): `ActionClass.ACTIVE` ("aktiv, nicht ändernd"; nicht persistiert), Politik wie `mutating`, keine Freigabe, Erteilung als `core.active_action_granted` auf dem allgemeinen Ring (audit-pflichtig), Ablehnung wie bisher auf dem Sicherheitsring. `register_action(..., sensitive_read=False, rate_limit=None)` (Guard und `api.guard`); `RateLimit(max_calls, per)`, `RATE_LIMIT_MAX_CALLS`, `RATE_LIMIT_MAX_PERIOD`; Ablehnung `rate_limited` mit `AuthorizationDecision.retry_after` (neues optionales Feld, auch in `to_dict`), `core.action_rate_limited` (allgemeiner Ring, dedupliziert je Fenster), `error_for_decision` ⇒ `RateLimitedError`; `REASON_RATE_LIMITED`, `MAX_RATE_WINDOWS`. `policy_denial_reason(..., sensitive_reads=frozenset())`. Zähler `active_granted`, `rate_limited`, `rate_windows_dropped`. B6 kam vor B5, weil das Limit `RateLimitedError` braucht. | A |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 
