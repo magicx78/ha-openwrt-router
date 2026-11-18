@@ -1135,3 +1135,11 @@ Abweichungen aus G1 gegenüber Abschnitt 11: Bereich und Risiko sind in `config_
 Strings (`AREA_*`, `RISK_*`); die StrEnums in `config_diff` tragen genau diese Werte.
 `lookup_risk_rule(config, section_type, option, *, section_name="")` ersetzt die reine Tabelle;
 wertabhängige Hochstufungen (Management-IP, Firewall-Input, SSH-Port, Uplink) macht `config_diff`.
+
+Umstellung auf den Core (2026-11-18): Die Aufbewahrung nutzt jetzt `core_models.plan_retention` mit
+`RetentionPolicy.gfs`; `config_retention.py` ist gelöscht, die alten Fälle laufen unverändert als
+`tests/test_config_retention_acceptance.py` gegen den Core (alle 14 Läufe und 4000 Zufallsfälle gleich).
+Die Maskierung bleibt vorerst `config_mask`: In der Abnahme gegen `core_masking` blieben Klartext-Secrets
+übrig (16 Namen im Snapshot ohne Digest, `ikey`/`okey`/`form_entry` auch in der Ausgabe, Text nach einem
+geschlossenen Anführungszeichen, bytes-Schlüssel mit Archivpfad); die Fallliste geht über den Master an
+`enterprise-core`.
