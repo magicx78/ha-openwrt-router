@@ -104,6 +104,26 @@
       },
       "fleet_incident_critical": {
         "name": "Fleet critical incident"
+      },
+      "config_drift": {
+        "name": "Configuration drift",
+        "state_attributes": {
+          "drift_id": {
+            "name": "Drift ID"
+          },
+          "critical_count": {
+            "name": "Critical changes"
+          },
+          "unknown_count": {
+            "name": "Unclassified changes"
+          },
+          "comparison": {
+            "name": "Comparison"
+          },
+          "checked_at": {
+            "name": "Checked at"
+          }
+        }
       }
     },
     "sensor": {
@@ -267,6 +287,34 @@
       },
       "client_last_disconnect": {
         "name": "{client} last disconnect"
+      },
+      "config_last_backup": {
+        "name": "Last configuration backup"
+      },
+      "config_backup_status": {
+        "name": "Configuration backup status",
+        "state": {
+          "ok": "OK",
+          "partial": "Partial",
+          "failed": "Failed",
+          "running": "Running",
+          "disabled": "Disabled",
+          "never": "Never"
+        },
+        "state_attributes": {
+          "error_class": {
+            "name": "Error class"
+          },
+          "last_attempt_at": {
+            "name": "Last attempt"
+          },
+          "next_run_at": {
+            "name": "Next run"
+          }
+        }
+      },
+      "config_versions": {
+        "name": "Configuration versions"
       }
     },
     "switch": {

@@ -24,6 +24,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import OpenWrtConfigEntry
+from .config_entities import (  # configuration manager
+    async_setup_config_binary_sensors,
+)
 from .const import (
     DOMAIN,
     SUFFIX_CONNECTIVITY,
@@ -110,6 +113,8 @@ async def async_setup_entry(
     async_add_entities(entities)
     # Network intelligence (P6): read from the engine only.
     async_setup_intel_binary_sensors(hass, entry.entry_id, async_add_entities)
+    # Configuration manager: drift problem sensor, read from its runtime only.
+    async_setup_config_binary_sensors(hass, entry, async_add_entities)
 
 
 class OpenWrtBinarySensorEntity(

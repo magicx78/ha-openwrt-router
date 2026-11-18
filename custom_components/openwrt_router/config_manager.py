@@ -713,10 +713,21 @@ class ConfigManagerRuntime:
             return
         if old is not None:
             del self.routers[old.router_id]
+            self._migrate_entities(old.router_id, new_id)
         self.routers[new_id] = RouterState(router_id=new_id, entry_id=entry_id)
         self._spawn(
             self._async_load_state(self.routers[new_id]), "config_manager_rebind"
         )
+
+    @callback
+    def _migrate_entities(self, old_id: str, new_id: str) -> None:
+        """Keep the entity ids of the entry's sensors across the adoption."""
+        try:
+            from .config_entities import async_migrate_config_unique_ids
+
+            async_migrate_config_unique_ids(self.hass, old_id, new_id)
+        except Exception:  # a registry problem never breaks the adoption
+            _LOGGER.debug("Entity migration after adoption failed", exc_info=True)
 
     # -- drift trigger: coordinator listener (hash only, no router call) ---------------
 

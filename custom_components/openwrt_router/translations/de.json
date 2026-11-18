@@ -104,6 +104,26 @@
       },
       "fleet_incident_critical": {
         "name": "Kritischer Incident (alle Router)"
+      },
+      "config_drift": {
+        "name": "Konfigurationsabweichung",
+        "state_attributes": {
+          "drift_id": {
+            "name": "Abweichungs-ID"
+          },
+          "critical_count": {
+            "name": "Kritische Änderungen"
+          },
+          "unknown_count": {
+            "name": "Nicht eingeordnete Änderungen"
+          },
+          "comparison": {
+            "name": "Vergleich"
+          },
+          "checked_at": {
+            "name": "Geprüft am"
+          }
+        }
       }
     },
     "sensor": {
@@ -267,6 +287,34 @@
       },
       "client_last_disconnect": {
         "name": "{client} letzter Verbindungsabbruch"
+      },
+      "config_last_backup": {
+        "name": "Letztes Konfigurations-Backup"
+      },
+      "config_backup_status": {
+        "name": "Status Konfigurations-Backup",
+        "state": {
+          "ok": "OK",
+          "partial": "Unvollständig",
+          "failed": "Fehlgeschlagen",
+          "running": "Läuft",
+          "disabled": "Ausgeschaltet",
+          "never": "Noch nie"
+        },
+        "state_attributes": {
+          "error_class": {
+            "name": "Fehlerklasse"
+          },
+          "last_attempt_at": {
+            "name": "Letzter Versuch"
+          },
+          "next_run_at": {
+            "name": "Nächster Lauf"
+          }
+        }
+      },
+      "config_versions": {
+        "name": "Konfigurationsversionen"
       }
     },
     "switch": {
