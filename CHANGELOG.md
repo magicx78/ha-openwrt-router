@@ -10,12 +10,18 @@ All notable changes to the OpenWrt Router integration will be documented in this
   (`api.async_get_module_key(module, purpose)`, HKDF-SHA256 aus dem
   Installations-Schlüssel); nur für Module mit registriertem Event-Präfix, nie in Log,
   Diagnose oder Event.
+- Enterprise Core: `pseudonymise_identifier` / `pseudonymise_fields` ersetzen MAC, IP,
+  Hostname, SSID, BSSID und Client-Kennungen durch stabile Pseudonyme (`mac_…`, `ipa_…`,
+  `hst_…`, `ssd_…`, `bss_…`, `cli_…`) unter einem Modul-Schlüssel.
 
 ### Changed
 
 - Enterprise Core: Drift-Prüfung, Restore-Probelauf und Backup-Prüfung (mit Akteur)
   verlangen von einem Benutzer Admin-Rechte, wie schon Capture und Vergleich; die
   Ablehnung steht im Sicherheits-Audit.
+- Enterprise Core: Die Maskierung schwärzt Kennungen wie `router_key` oder `radio_key`
+  und Zähler wie `auth_failures` nicht mehr; ein Wert, der wie Schlüsselmaterial aussieht,
+  bleibt maskiert.
 - Enterprise Core: Das Benutzer-Pseudonym (`usr_…`) im Core-Event bleibt über Neustarts
   gleich, sobald der Installations-Schlüssel existiert. Ohne Schlüssel ist es je Lauf
   zufällig; das steht einmal im Log und im Zähler `bus_salt_ephemeral`.

@@ -1302,6 +1302,38 @@ Namenslisten: `SECRET_OPTIONS` (UCI-Optionen, u. a. `key`, `key1`–`key4`, `psk
 _LOGGER.debug("snapshot %s", mask_for_output(snapshot.configs))
 ```
 
+**Wertabhängige Ausnahmen (ab Folgeauftrag B4).** Nur die breite Ausgaberegel ändert sich;
+`is_snapshot_secret` bleibt gleich (eine UCI-Option `radio_key` bleibt im Diff maskiert).
+
+| Regel | Namen | Wert bleibt lesbar | Wert wird maskiert |
+|---|---|---|---|
+| Kennungen (`is_identifier_name`) | `IDENTIFIER_KEY_NAMES`: `router_key`, `radio_key`, `client_key`, `device_key`, `entry_key`, `event_key`, `incident_key`, `finding_key`, `rule_key`, `scope_key`, `msg_key`, `message_key`, `sort_key`, `cache_key`, `lookup_key`, `recommendation_key`, `translation_key` (Wörter mit `_` verbunden, also auch `routerKey`, `RADIO-KEY`) | alles, was nicht wie Schlüsselmaterial aussieht | `looks_like_key_material`: PEM-Block, base64/base64url ab 22 Zeichen, Hex ab 32 Zeichen (Core-IDs `xxx_<32 hex>` und aus Wörtern gebaute Namen ausgenommen); gilt für Schlüssel, `{"key": "radio_key", "value": …}`-Datensätze und Freitext `radio_key=…` |
+| Zähler (`is_counter_name`) | Endung `COUNTER_SUFFIXES` (`_failures`, `_failed`, `_fail`, `_errors`, `_attempts`, `_retries`, `_total`), nicht exakt geheim, kein Treffer des Präzisionsmusters, kein geheimer Teilstring | Zahlen (`int`/`float`, im Freitext eine alleinstehende Zahl) | jeder andere Wert (`auth_failures="hunter2"`) |
+
+Bewusst nicht gelistet: echte Schlüsselnamen wie `group_key`, `wpa_key`, `public_key`.
+Grenze: ein Passwort unter einem Kennungsnamen, das nicht wie Schlüsselmaterial aussieht,
+bleibt lesbar; Kennungsnamen gehören Modul-Daten, nie Konfigurationswerten. In
+maskiertem, verschachteltem JSON (`\"auth_failures\": 3`) gilt weiter die alte Regel
+(maskiert).
+
+**Netzwerk-Kennungen.** Die Core-Maskierung maskiert MAC, IP, Hostname, SSID und BSSID
+**nicht**. Wer sie verbergen muss, nimmt seinen Modul-Schlüssel (§11.5) und
+
+- `pseudonymise_identifier(kind, value, key) -> str` (rein, kein I/O, deterministisch):
+  `kind` ∈ `mac`, `ip`, `hostname`, `ssid`, `bssid`, `client` (Client = seine MAC);
+  Ergebnis `<Präfix><16 hex>` (`IDENTIFIER_PSEUDONYM_HEX_LENGTH`, insgesamt 20 Zeichen),
+  Präfixe `IDENTIFIER_PSEUDONYM_PREFIXES`: `mac_`, `ipa_`, `hst_`, `ssd_`, `bss_`, `cli_`.
+  HMAC-SHA256 über `b"openwrt_router/identifier/v1"`, NUL, Art, NUL, normalisierter Wert;
+  die Art gehört zur Eingabe (dieselbe MAC als `mac` und als `client` ist nicht
+  verknüpfbar). Normalisierung: MAC/BSSID/Client klein mit `:` (`AA-BB-…`,
+  `aabb.ccdd.eeff`, bloße 12 Hex), IPv4/IPv6 kanonisch komprimiert, Hostname klein ohne
+  abschließenden Punkt, SSID unverändert (Groß/Klein zählt, 1–32 Bytes). `ValueError` bei
+  unbekannter Art, falschem Wert oder Schlüssel unter 16 Bytes, `TypeError` für einen
+  Nicht-String.
+- `pseudonymise_fields(data, key, fields)`: Kopie, in der Strings (auch in Listen) unter den
+  Feldnamen von `fields` (`{"mac": "mac", "ip": "ip"}`) ersetzt sind; ungültige Werte werden
+  `IDENTIFIER_INVALID` (`**INVALID_IDENTIFIER**`, nie der Rohwert), `None` bleibt.
+
 ## 14. Fehler
 
 Alle Fehler erben von `ConfigApiError(HomeAssistantError)` und haben `code`,
@@ -1482,6 +1514,9 @@ muss):
   `AuthorizationError` `not_admin`. Module, die diese Aufrufe für normale Benutzer anbieten,
   müssen auf Admin prüfen oder als Modul-/Systemakteur aufrufen (und dann selbst
   entscheiden, wem sie das Ergebnis zeigen).
+- (#102) Ausgabe zeigt jetzt Werte unter Kennungsnamen (`router_key`, `radio_key`, …) und
+  Zahlen unter Zählernamen (`auth_failures`, …), die vorher `**REDACTED**` waren. Ein Modul,
+  das unter solchen Namen Geheimnisse ablegt, muss sie umbenennen.
 
 ### 19.1 Änderungen auf Feld- und Signaturebene
 
@@ -1651,6 +1686,7 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 |---|---|---|
 | 100 | Modul-Schlüssel (B1, §11.5): `api.async_get_module_key(module, purpose="")` (HKDF-SHA256, `MODULE_KEY_SALT`, `MODULE_KEY_INFO_PREFIX` `…/v1`, 32 Bytes); nur für Module mit registriertem Event-Präfix; `lost` ⇒ `InstallationKeyLostError`. Reine Helfer `hkdf_sha256`, `derive_module_key`, `check_module_name`, `MODULE_NAME_PATTERN`, `MODULE_KEY_PURPOSE_PATTERN`, `CORE_KEY_OWNER`; `AuditLog.registered_modules()`; Zähler `module_keys_issued`/`module_keys_refused`. Bus-Pseudonym (§12.1): Salz aus `derive_core_key(key, "bus_pseudonym")`, über Neustarts stabil; ohne Schlüssel zufällig je Lauf, Zähler `bus_salt_ephemeral` + ein Log-Eintrag. `async_get_installation_key` für Provider unverändert. | A; B (Verhalten des Bus-Pseudonyms) |
 | 101 | `async_validate_backup(backup_id, *, actor=None)` (neues optionales Argument), `async_detect_drift`, `async_prepare_restore` und damit `async_check_restore_compatibility` (B2): Benutzer ohne Admin ⇒ `AuthorizationError` `not_admin` (`details.action` `config_validate`/`config_drift`/`config_restore_dry_run`, `audit_id`), auditiert auf dem Sicherheitsring, vor jedem Nachschlagen und Provider-Aufruf; Audit-Router ist der bekannte Router bzw. der Router einer bekannten Version, sonst `-` (unbekannte IDs werden nicht wiedergegeben). Modul-, System- und Automationsakteure unverändert. `async_validate_backup` ohne `actor` bleibt erlaubt (Altaufruf), Zähler `validate_without_actor`. Konstanten `READ_VALIDATE`, `READ_DRIFT`, `READ_RESTORE_DRY_RUN`. | A (Signatur); B (Verhalten für Benutzer ohne Admin) |
+| 102 | Maskierung (B4, §13): Kennungsnamen (`IDENTIFIER_KEY_NAMES`, `is_identifier_name`) sind keine geheimen Namen mehr, ihr Wert wird nur bei Schlüsselmaterial maskiert (`looks_like_key_material`); Zählernamen (`COUNTER_SUFFIXES`, `is_counter_name`) zeigen Zahlen. `is_snapshot_secret` unverändert. Neu, rein: `pseudonymise_identifier(kind, value, key)`, `pseudonymise_fields(data, key, fields)`, `IDENTIFIER_PSEUDONYM_PREFIXES`, `IDENTIFIER_PSEUDONYM_HEX_LENGTH` (16), `IDENTIFIER_INVALID`. MAC/IP/Hostname/SSID/BSSID werden vom Core nie maskiert (unverändert, jetzt festgeschrieben). | A; Verhalten (weniger Überdeckung) |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 
