@@ -32,6 +32,11 @@ Branch `claude/enterprise-core-49ade2`. Nutzerdoku: `docs/enterprise-core.md`, V
       `known_hosts=None` (`api.py`). Der gepinnte Weg (Backup, ACL-Schreiben) meldet
       sich seit 7c82e78 erst bei bestätigtem Key an; der erste Kontakt dort sendet
       keine Zugangsdaten. Prüfen, ob der gemeinsame Pfad dieselben Pins nutzen kann.
+- [ ] **Guard-Ablehnungen deduplizieren:** jede Ablehnung schreibt heute einen eigenen
+      Eintrag in den Sicherheitsring und kann ältere Core-Einträge verdrängen. Wiederholte
+      Ablehnungen je (Akteur, Aktion, Grund) zählen statt neu schreiben (Vertrag §19.5).
+- [ ] **Allgemeiner Audit-Ring ohne Modul-Kontingent:** Modul-Ereignisse können dort
+      ältere Einträge verdrängen; das Kontingent gilt bisher nur im Sicherheitsring.
 - [ ] **`npm ci` im Frontend braucht `--legacy-peer-deps`:** das Lockfile unter
       `frontend/topology/` löst ohne den Schalter nicht auf (ERESOLVE). Liegt schon vor
       PR #55 vor; Peer-Abhängigkeiten bereinigen, damit `npm ci` ohne Schalter läuft.

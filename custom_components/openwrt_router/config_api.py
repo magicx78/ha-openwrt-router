@@ -71,6 +71,7 @@ from .core_guard import (
 from .core_models import (
     APPROVAL_TTL,
     CONFIG_CAPABILITIES,
+    CORE_KEY_OWNER,
     CORRELATION_ID_PREFIX,
     DEFAULT_LIST_LIMIT,
     DEFAULT_RETENTION_POLICY,
@@ -134,7 +135,9 @@ from .core_models import (
     VersionStatus,
     WriteAuthorization,
     binding_checksum,
+    check_module_name,
     check_token,
+    derive_module_key,
     drift_event_types,
     ensure_supported_api_version,
     new_id,
@@ -164,6 +167,12 @@ _ARTIFACT_KINDS = frozenset(kind.value for kind in ArtifactKind)
 # reads mint no authorization).
 READ_CAPTURE = "config_capture"
 READ_COMPARE = "config_compare"
+# Same rule for validation, drift and the restore dry run (follow-up B2).
+READ_VALIDATE = "config_validate"
+READ_DRIFT = "config_drift"
+READ_RESTORE_DRY_RUN = "config_restore_dry_run"
+# async_validate_backup without an Actor (review L2 of PR #56): refused.
+REASON_ACTOR_REQUIRED = "actor_required"
 # Dry-run plans waiting for async_request_restore (security review #4):
 # dropped after this long, and the oldest beyond the cap (both counted).
 RESTORE_PLAN_TTL = APPROVAL_TTL
@@ -342,10 +351,17 @@ class GuardView:
         *,
         module: str,
         admin_user_only: bool = False,
+        sensitive_read: bool = False,
+        rate_limit: Any = None,
     ) -> None:
-        """Register ``<module>.<action>``."""
+        """Register ``<module>.<action>`` (``sensitive_read``, ``rate_limit``: B5)."""
         self._guard.register_action(
-            name, action_class, module=module, admin_user_only=admin_user_only
+            name,
+            action_class,
+            module=module,
+            admin_user_only=admin_user_only,
+            sensitive_read=sensitive_read,
+            rate_limit=rate_limit,
         )
 
 
@@ -471,6 +487,9 @@ class ConfigurationManager:
             "plans_expired": 0,
             "plans_evicted": 0,
             "refused_disabled": 0,
+            "module_keys_issued": 0,
+            "module_keys_refused": 0,
+            "validate_refused_no_actor": 0,
         }
         # Request data dies with its approval (expired, rejected, unload).
         self._remove_approval_listener = guard.add_approval_listener(
@@ -1039,6 +1058,19 @@ class ConfigurationManager:
             details={"reason": "not_admin", "audit_id": audit_id, "action": action},
         )
 
+    def _known_router_id(self, router_id: object) -> str:
+        """``router_id`` if the registry knows it, else the fleet (audit only)."""
+        if isinstance(router_id, str) and self.registry.find(router_id) is not None:
+            return router_id
+        return FLEET_ROUTER_ID
+
+    def _version_router_id(self, backup_id: object) -> str:
+        """Router of a known version, else the fleet (never raises)."""
+        try:
+            return self.versions.get(str(backup_id)).router_id
+        except ConfigApiError:
+            return FLEET_ROUTER_ID
+
     def _ref_router_id(self, ref: ConfigRef) -> str:
         """Router of a reference for an audit entry (never raises)."""
         if ref.is_live:
@@ -1094,6 +1126,46 @@ class ConfigurationManager:
         return approval, data
 
     # -- installation key --------------------------------------------------------------
+
+    async def async_get_module_key(self, module: str, purpose: str = "") -> bytes:
+        """HKDF key of a registered module (contract §11.5); never logged.
+
+        ``module`` must own an event prefix registered in this core run;
+        ``core`` is never a module. A lost installation key raises
+        InstallationKeyLostError (nothing is substituted); while it is
+        ``uninitialised`` the first use creates it, exactly as for the
+        provider (logged, ``keys_created``).
+        """
+
+        def refuse(reason: str, message: str) -> ConfigApiError:
+            self.stats["module_keys_refused"] += 1
+            _LOGGER.debug("Module key refused (%s)", reason)
+            return ConfigApiError(
+                message, error_class=ErrorClass.INVALID, details={"reason": reason}
+            )
+
+        try:
+            check_module_name(module)
+        except ValueError:
+            raise refuse("invalid_module", "Not a module name") from None
+        if module == CORE_KEY_OWNER:
+            raise refuse("reserved_module", "The core is not a module")
+        if module not in self.audit.registered_modules():
+            raise refuse(
+                "module_not_registered",
+                "Only a module that registered its event prefix gets a key",
+            )
+        try:
+            derive_module_key(b"\x00" * 16, module, purpose)  # validates purpose
+        except ValueError:
+            raise refuse("invalid_purpose", "Not a valid key purpose") from None
+        try:
+            installation_key = await self.versions.async_get_installation_key()
+        except ConfigApiError:
+            self.stats["module_keys_refused"] += 1
+            raise
+        self.stats["module_keys_issued"] += 1
+        return derive_module_key(installation_key, module, purpose)
 
     async def async_request_installation_key_reset(
         self, *, actor: Actor
@@ -1222,8 +1294,34 @@ class ConfigurationManager:
         """One version."""
         return self.versions.get(backup_id)
 
-    async def async_validate_backup(self, backup_id: str) -> BackupRecord:
-        """Core sha256 check of every artifact, then the provider's check."""
+    async def async_validate_backup(
+        self, backup_id: str, *, actor: Actor
+    ) -> BackupRecord:
+        """Core sha256 check of every artifact, then the provider's check.
+
+        ``actor`` is required: ``None`` or any non-Actor raises
+        AuthorizationError ``actor_required`` (audited on the security ring,
+        counted ``validate_refused_no_actor``; review L2 of PR #56). A user
+        must be a verified admin. Both checks run before any lookup or
+        provider call.
+        """
+        router_id = self._version_router_id(backup_id)
+        if not isinstance(actor, Actor):
+            self.stats["validate_refused_no_actor"] += 1
+            audit_id = self.guard.audit_denial(
+                router_id, READ_VALIDATE, None, REASON_ACTOR_REQUIRED
+            )
+            raise AuthorizationError(
+                "Validating a backup needs an actor",
+                router_id=router_id,
+                details={
+                    "reason": REASON_ACTOR_REQUIRED,
+                    "audit_id": audit_id,
+                    "action": READ_VALIDATE,
+                },
+            )
+        verified = await self._verify(actor)
+        self._require_content_reader(READ_VALIDATE, router_id, verified)
         provider = self._require_provider(Capability.CONFIG_VALIDATE)
         record = self.versions.get(backup_id)
         self._require_enabled(record.router_id, Capability.CONFIG_VALIDATE)
@@ -1321,6 +1419,9 @@ class ConfigurationManager:
         as drift with its events and the old baseline stays.
         """
         verified = await self._verify(actor)
+        self._require_content_reader(
+            READ_DRIFT, self._known_router_id(router_id), verified
+        )
         provider = self._require(router_id, Capability.CONFIG_DRIFT)
         self.stats["drift_checks"] += 1
         baseline = await self.async_get_baseline(
@@ -1526,8 +1627,14 @@ class ConfigurationManager:
     async def async_prepare_restore(
         self, backup_id: str, target_router_id: str, *, actor: Actor
     ) -> RestorePlan:
-        """Dry run; never writes. The plan is kept for a later request."""
+        """Dry run; never writes. The plan is kept for a later request.
+
+        A user must be a verified admin (before any lookup; audited).
+        """
         verified = await self._verify(actor)
+        self._require_content_reader(
+            READ_RESTORE_DRY_RUN, self._known_router_id(target_router_id), verified
+        )
         record = self.versions.get(backup_id)
         provider = self._require(target_router_id, Capability.CONFIG_RESTORE_DRY_RUN)
         target = self.registry.get(target_router_id)
@@ -2587,6 +2694,10 @@ class ConfigurationApi:
         """32-byte installation key; InstallationKeyLostError while LOST."""
         return await self._m.versions.async_get_installation_key()
 
+    async def async_get_module_key(self, module: str, purpose: str = "") -> bytes:
+        """32-byte HKDF key of ``module`` for ``purpose`` (contract §11.5)."""
+        return await self._m.async_get_module_key(module, purpose)
+
     async def async_request_installation_key_reset(
         self, *, actor: Actor
     ) -> ApprovalRequest:
@@ -2627,9 +2738,11 @@ class ConfigurationApi:
         """One version."""
         return await self._m.async_get_backup(backup_id)
 
-    async def async_validate_backup(self, backup_id: str) -> BackupRecord:
-        """Validate and store the result."""
-        return await self._m.async_validate_backup(backup_id)
+    async def async_validate_backup(
+        self, backup_id: str, *, actor: Actor
+    ) -> BackupRecord:
+        """Validate and store the result (actor required; users must be admin)."""
+        return await self._m.async_validate_backup(backup_id, actor=actor)
 
     async def async_compare(
         self, base: ConfigRef, other: ConfigRef, *, actor: Actor
@@ -2871,9 +2984,15 @@ class ConfigurationApi:
         """Listen to published events."""
         return self._m.audit.subscribe(listener)
 
-    def register_event_prefix(self, prefix: str, *, module: str) -> None:
-        """Allow a module's own event types below ``prefix``."""
-        self._m.audit.register_event_prefix(prefix, module=module)
+    def register_event_prefix(self, prefix: str, *, module: str) -> Callable[[], None]:
+        """Allow a module's own event types below ``prefix``; returns a remover."""
+        return self._m.audit.register_event_prefix(prefix, module=module)
+
+    def register_audit_mandatory_types(
+        self, event_types: Iterable[str], *, module: str
+    ) -> Callable[[], None]:
+        """Make the module's own types audit-mandatory; returns a remover."""
+        return self._m.audit.register_audit_mandatory_types(event_types, module=module)
 
     def emit(
         self,
@@ -2888,8 +3007,18 @@ class ConfigurationApi:
         correlation_id: str | None = None,
         dedup_key: str | None = None,
         data: Mapping[str, Any] | None = None,
+        security_relevant: bool = False,
+        client_ref: str | None = None,
+        confidence: float | None = None,
+        classification: str | None = None,
+        incident_ref: str | None = None,
+        radio_id: str | None = None,
     ) -> EmitResult:
-        """Module event (never as the core, never a core type)."""
+        """Module event (never as the core, never a core type).
+
+        ``security_relevant`` puts it on the security ring (default general);
+        the typed optional fields (B8) are stored on the ``CoreEvent``.
+        """
         if source == CORE_SOURCE:
             raise ValueError("modules cannot emit as the core")
         return self._m.audit.emit(
@@ -2903,6 +3032,12 @@ class ConfigurationApi:
             correlation_id=correlation_id,
             dedup_key=dedup_key,
             data=data,
+            security_relevant=security_relevant,
+            client_ref=client_ref,
+            confidence=confidence,
+            classification=classification,
+            incident_ref=incident_ref,
+            radio_id=radio_id,
         )
 
 

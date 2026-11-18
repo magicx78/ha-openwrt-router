@@ -127,6 +127,26 @@ except ApiVersionError as err:
 `installation_key_id(key)` (16 hex) ist die öffentliche, nicht geheime Kennung eines
 Installations-Schlüssels (Abschnitt 11.3).
 
+### 3.1 Reservierte Präfixe und Namensräume
+
+Ein Test (`test_core_followup_b7_contract.py`) prüft, dass jede Konstante hier steht.
+
+| Präfix / Wert | Art | Wem gehört es | Konstante | Regel |
+|---|---|---|---|---|
+| `rtr_`, `bkp_`, `evt_`, `apr_`, `pln_`, `wau_`, `vac_`, `cor_` | Kennungen (§3) | Core | `*_ID_PREFIX` | nur vom Core vergeben (`cor_` auch vom Aufrufer) |
+| `-` | Flotten-Kennung (§4.1) | Core | `FLEET_ROUTER_ID` | nie eine Router-ID |
+| `usr_` | Benutzer-Pseudonym im Bus-Event (§12.1) | Core | `ACTOR_PSEUDONYM_PREFIX` | nur im Bus-Payload und in der Diagnose |
+| `mac_`, `ipa_`, `hst_`, `ssd_`, `bss_`, `cli_` | Kennungs-Pseudonyme (§13) | Modul (mit eigenem Schlüssel) | `IDENTIFIER_PSEUDONYM_PREFIXES` | `pseudonymise_identifier` |
+| `router.`, `configuration.`, `security.`, `core.` | Event-Namensräume (§12.3) | Core | `CORE_EVENT_NAMESPACES` | `emit` eines Moduls ⇒ `ValueError` |
+| `security_center.`, `net_diagnostics.`, `wifi_rf.` | Event-Präfixe bekannter Module (§17.1) | das genannte Modul | `MODULE_EVENT_PREFIXES` | kein anderes Modul registriert darunter |
+| `transport.`, `data.`, `stream.`, `pkg.` | Capability-Namensräume des Core (§5) | Core | `CORE_CAPABILITY_NAMESPACES` | kein Detektor darf sie melden |
+| `config.` | Capability-Namensraum des Providers (§5) | Provider | `CONFIG_CAPABILITY_NAMESPACE` | nur über `async_probe` |
+| `security.`, `diag.`, `rf.` | Capability-Namensräume der Module (§17.1) | `security_center`, `net_diagnostics`, `wifi_rf` | `MODULE_CAPABILITY_NAMESPACES`, `RESERVED_NAMESPACES` | Core vergibt dort nichts, außer `rf.txpowerlist`, `rf.survey`, `rf.scan` (`CORE_OWNED_MODULE_CAPABILITIES`) |
+| `log.` | geteilter Capability-Namensraum | jedes Modul (als sein eines Präfix) | `RESERVED_NAMESPACES` | Core vergibt dort nichts |
+| `<modul>.` | Aktionsnamen (§6.3) | das Modul | `register_action` | Name muss mit `<modul>.` beginnen; kein Core-Namensraum, keine `GuardedAction` |
+| `core` | Schlüssel-Besitzer (§11.5) | Core | `CORE_KEY_OWNER` | kein Modul heißt so |
+| `rebaseline:` | Präfix einer `drift_id` beim erlaubten Re-Baseline (§11.3) | Core | `REBASELINE_DRIFT_PREFIX` | nur vom Core |
+
 ## 4. Identität und Registry
 
 ```python
@@ -186,6 +206,23 @@ for cand in api.registry.adoption_candidates(new_entry_id):
 await api.registry.async_adopt(new_entry_id, cand.router_id, actor=admin_actor)
 ```
 
+### 4.1 Flotten-Kennung `-` (`FLEET_ROUTER_ID`)
+
+`FLEET_ROUTER_ID = "-"` (`core_models`, von `core_guard` re-exportiert;
+`is_fleet_router_id(value)`) steht für „die ganze Flotte“ bzw. „kein bekannter Router“:
+`installation_key_reset` wird mit `router_id = "-"` autorisiert, und eine Ablehnung für eine
+unbekannte Router- oder Versions-ID wird unter `-` auditiert (die unbekannte ID wird nicht
+wiedergegeben). `-` ist **nie** eine Router-ID:
+
+- `registry.get("-")` ⇒ `RouterNotFoundError` mit `details = {"reason":
+  "invalid_router_id", "fleet": true}` (ab B7; `fleet` fehlt bei anderen ungültigen IDs),
+  `router_id = None`. `registry.capabilities("-")` ebenso.
+- `registry.find("-")` ⇒ `None`; `registry.has_capability("-", …)` ⇒ `False`.
+- `AuditLog.events(router_id="-")` (`events(router_id="-")`) liefert genau die Einträge, die
+  mit `router_id = "-"` gespeichert sind, **nicht** die ohne Router (`router_id = None`, etwa
+  `core.store_recovered` oder Modul-Events ohne Router). Nur der Dedup-Bereich
+  (`dedup_scope`, §12.4) fasst `None` und `-` zusammen.
+
 ## 5. Capabilities
 
 `CapabilityStatus`:
@@ -237,10 +274,12 @@ Regeln:
 - Option `config_backup_enabled` aus (`OPTION_CONFIG_BACKUP_ENABLED`): alle `config.*`
   `unavailable`/`disabled`, es wird nicht geprobt.
 - `config.restore` ist in Phase 1 `unavailable`, bis der Provider es meldet (Abschnitt 16).
-- Reservierte Capability-Namensräume `security.`, `diag.`, `log.` (`RESERVED_NAMESPACES`):
-  der Core vergibt dort selbst keine Capability. Module registrieren ein Präfix
-  (Abschnitt 12.5) und melden darunter eigene Capability-Namen. Für **Event-Typen** gilt eine
-  andere Regel (Abschnitt 12.3).
+- Reservierte Capability-Namensräume `security.`, `diag.`, `rf.`, `log.`
+  (`RESERVED_NAMESPACES`, Tabelle §3.1): der Core vergibt dort selbst keine Capability,
+  außer `rf.txpowerlist`, `rf.survey`, `rf.scan` (aus der ACL). Module melden darunter eigene
+  Capability-Namen über **einen** Detektor mit **einem** Präfix
+  (`register_capability_detector`, Abschnitt 17.1). Für **Event-Typen** gilt eine andere
+  Regel (Abschnitt 12.3).
 
 ```python
 if not api.registry.has_capability(router_id, Capability.CONFIG_UCI_READ):
@@ -323,6 +362,46 @@ actor = await api.guard.async_resolve_actor(call.context, module="config_manager
 | `ssh_pin_reset` | **critical** | nur Admin-Benutzer | `binding_checksum(router_id, fingerprint, "reset")` (`fingerprint` = gepinnter, sonst ausstehender Key) |
 | `<modul>.<aktion>` | bei `register_action` | bei `register_action` | frei |
 
+**Modulaktionen registrieren (ab B5):**
+`api.guard.register_action(name, action_class, *, module, admin_user_only=False,
+sensitive_read=False, rate_limit=None)`.
+
+| Klasse | Wer darf | Freigabe | Audit bei Erteilung |
+|---|---|---|---|
+| `read` | jeder geprüfte Akteur | nein | `security.authorization_granted` (Sicherheitsring) |
+| `read` + `sensitive_read=True` | Admin-Benutzer, Modul, System, Automation; Benutzer ohne Admin ⇒ `not_admin` | nein | wie `read` |
+| `active` (ab B5) | Admin-Benutzer, Modul, System, Automation; Benutzer ohne Admin ⇒ `not_admin` | nein | `core.active_action_granted` (**allgemeiner** Ring, audit-pflichtig) |
+| `mutating` | Admin-Benutzer, Modul, System, Automation | nein | `security.authorization_granted` |
+| `critical` | Antrag: Admin-Benutzer, Modul, System | ja | `security.approval_*`, beim Einlösen `security.authorization_granted` |
+
+- `active` heißt „handelt am Router oder im Netz, ändert keine Konfiguration“ (Scan, Ping,
+  Survey). Ablehnungen bleiben `security.authorization_denied` (Sicherheitsring).
+- `admin_user_only=True` heißt weiterhin „nur ein geprüfter Admin-**Benutzer**“ (auch
+  Module und System werden abgelehnt). Für ein sensibles Lesen, das Module weiter dürfen
+  sollen, ist `sensitive_read=True` gedacht (nur mit `read`, sonst `ValueError`).
+- `rate_limit=RateLimit(max_calls=…, per=timedelta(…))` (nur mit `active`, sonst
+  `ValueError`; `max_calls` 1..100000, `per` > 0 und ≤ 1 Tag): höchstens `max_calls`
+  Erteilungen je `(aktion, router_id)` im gleitenden Fenster `per`; nur Erteilungen zählen.
+  Darüber: `DENIED`, `reason` `rate_limited` (`REASON_RATE_LIMITED`),
+  `AuthorizationDecision.retry_after` (Sekunden), `error_for_decision` ⇒
+  `RateLimitedError` (§14). Auditiert als `core.action_rate_limited` (allgemeiner Ring,
+  Warnung, `dedup_key` = Aktion, Cooldown = `per`: ein Eintrag je Router, Aktion und
+  Fenster, Wiederholungen in `repeat_count`), Zähler `rate_limited`. Höchstens
+  `MAX_RATE_WINDOWS` = 1024 offene Fenster; darüber fällt das älteste weg (Zähler
+  `rate_windows_dropped`, Debug-Log).
+- Fenster gibt es nur für Router, die der Core kennt (ab Review L4 von PR #56): die
+  Registry (`registry.find`, auch verwaiste Einträge) oder die Flotten-Kennung `-`. Eine
+  ratenbegrenzte `active`-Aktion für eine andere `router_id` ⇒ `DENIED`, `reason`
+  `unknown_router` (`REASON_UNKNOWN_ROUTER`), `error_for_decision` ⇒ `AuthorizationError`;
+  auditiert als `security.authorization_denied` auf dem Sicherheitsring unter `-` (die
+  unbekannte Kennung steht weder im Audit noch in der Entscheidung, deren `router_id` ist
+  `-`), Zähler `rate_unknown_router`, kein Fenster. So kann niemand mit erfundenen
+  Kennungen die Fenster echter Router verdrängen. Der Guard bekommt dafür
+  `ActionGuard(..., router_known=...)`; ohne diesen Parameter kennt er nur `-`
+  (geschlossen). Aktionen ohne `rate_limit` sind unverändert.
+- Gleiche Registrierung erneut ist ein No-op; eine abweichende (auch nur anderes Limit)
+  ⇒ `ValueError`.
+
 Tabellen im Code: `ACTION_CLASSES`, `ADMIN_USER_ONLY_ACTIONS`, `SYSTEM_ONLY_ACTIONS`. Die
 Regel selbst ist `policy_denial_reason(action, actor)`:
 
@@ -330,13 +409,20 @@ Regel selbst ist `policy_denial_reason(action, actor)`:
 2. unbekannte Aktion ⇒ `unknown_action`
 3. `SYSTEM_ONLY_ACTIONS` und kein System ⇒ `system_only`
 4. `ADMIN_USER_ONLY_ACTIONS` und kein geprüfter Admin-Benutzer ⇒ `not_admin`
-5. `read` ⇒ erlaubt
-6. **Benutzer ohne Admin ⇒ `not_admin` für jede mutating- oder critical-Aktion**, auch
-   `backup`
+5. `read` ⇒ erlaubt (außer `sensitive_reads`, ab B5: weiter mit 6)
+6. **Benutzer ohne Admin ⇒ `not_admin` für jede mutating-, active- oder
+   critical-Aktion**, auch `backup`, und für ein `sensitive_read`
 7. critical und Automation ⇒ `automation_not_allowed`
 
-- **read:** keine Autorisierung. Auditiert werden nur Dry Run und Kompatibilitätsprüfung
-  (`restore_checked`); Lesen der Live-Konfiguration, Listen und Vergleiche nicht (zu häufig).
+- **read:** die Lese-Operationen des Core (Listen, Capture, Vergleich, Validierung,
+  Drift, Dry Run) rufen `authorize` **nicht** auf; sie prüfen den Akteur selbst (siehe
+  nächster Punkt). Auditiert werden davon nur Ablehnungen und Dry Run/Kompatibilitätsprüfung
+  (`restore_checked`); erfolgreiches Lesen nicht (zu häufig). Ruft ein Modul `authorize`
+  für eine `read`-Aktion auf (eigene Modulaktion), dann gilt dasselbe wie bei `mutating`:
+  der Guard prägt eine `WriteAuthorization` (im Ledger, `consume` möglich, aber nicht
+  nötig) und auditiert die Erteilung als `security.authorization_granted`
+  (Sicherheitsring, audit-pflichtig). Für häufige Modul-Lesezugriffe deshalb `authorize`
+  nur bei sensiblen Lesezugriffen (`sensitive_read=True`) verwenden.
 - **read von Konfigurationsinhalt** (`async_capture`, `async_compare`; Geheimnisse
   enthalten): ein Benutzer muss geprüfter Admin sein, sonst `AuthorizationError`
   `not_admin`, auditiert als `security.authorization_denied` (Sicherheitsring, `action`
@@ -711,11 +797,11 @@ Router-Bezug werfen `RouterNotFoundError`, wenn die ID unbekannt ist. Jede Metho
 | `async_capture(router_id, *, actor, configs=None)` | read, Inhalt (Benutzer: nur Admin) | `ConfigSnapshot` | `AuthorizationError` (`not_admin`, auditiert), `CapabilityUnavailableError`, `RouterUnavailableError`, `ProviderError` |
 | `async_list_backups(router_id=None, *, since=None, limit=50)` | read | `tuple[BackupRecord, ...]` | – |
 | `async_get_backup(backup_id)` | read | `BackupRecord` | `BackupNotFoundError` |
-| `async_validate_backup(backup_id)` | read | `BackupRecord` (mit neuer `validation`) | `BackupNotFoundError` |
+| `async_validate_backup(backup_id, *, actor)` | read (`actor` Pflicht, ab Review L2 von PR #56; ohne `Actor` ⇒ `actor_required`, auditiert, Zähler `validate_refused_no_actor`; Benutzer nur Admin) | `BackupRecord` (mit neuer `validation`) | `AuthorizationError` (`actor_required`, `not_admin`, auditiert), `BackupNotFoundError` |
 | `async_compare(base, other, *, actor)` | read, Inhalt (Benutzer: nur Admin) | `ConfigDiff` | `AuthorizationError` (`not_admin`, auditiert), `BackupNotFoundError`, `CapabilityUnavailableError` |
-| `async_detect_drift(router_id, *, actor, baseline_backup_id=None)` | read | `DriftReport` | `BackupNotFoundError` (keine Basis), `RouterUnavailableError`, `InstallationKeyLostError` |
-| `async_check_restore_compatibility(backup_id, target_router_id, *, actor)` | read, auditiert | `CompatibilityCheck` | `BackupNotFoundError` |
-| `async_prepare_restore(backup_id, target_router_id, *, actor)` | read, auditiert (Dry Run) | `RestorePlan` | `CapabilityUnavailableError` (`config.restore_dry_run`) |
+| `async_detect_drift(router_id, *, actor, baseline_backup_id=None)` | read, Inhalt (Benutzer: nur Admin) | `DriftReport` | `AuthorizationError` (`not_admin`, auditiert), `BackupNotFoundError` (keine Basis), `RouterUnavailableError`, `InstallationKeyLostError` |
+| `async_check_restore_compatibility(backup_id, target_router_id, *, actor)` | read, auditiert (Benutzer: nur Admin) | `CompatibilityCheck` | `AuthorizationError` (`not_admin`), `BackupNotFoundError` |
+| `async_prepare_restore(backup_id, target_router_id, *, actor)` | read, auditiert (Dry Run; Benutzer: nur Admin) | `RestorePlan` | `AuthorizationError` (`not_admin`, auditiert), `CapabilityUnavailableError` (`config.restore_dry_run`) |
 | `async_create_backup(router_id, *, reason, actor, backup_type=None, note=None, links=None)` | mutating | `PutVersionResult` | `AuthorizationError`, `OperationInProgressError`, `RouterUnavailableError`, `OperationTimeoutError`, `StorageFullError`, … |
 | `async_put_version(router_id, artifacts, meta, *, authorization)` | mutating (`backup`) | `PutVersionResult` | wie `VersionStoreProtocol.async_put_version` |
 | `async_set_protected(backup_id, protected, *, actor)` | mutating, Admin | `BackupRecord` | `AuthorizationError` |
@@ -1069,6 +1155,35 @@ digest = secret_digest_factory(key)               # core_masking
 marker = {"secret": digest(f"{config}/{section}/{option}/{value}")}
 ```
 
+### 11.5 Modul-Schlüssel (ab Folgeauftrag B1)
+
+`await api.async_get_module_key(module, purpose="") -> bytes` liefert 32 Bytes, abgeleitet
+aus dem Installations-Schlüssel mit HKDF-SHA256 (RFC 5869, nur `hmac`/`hashlib`):
+
+| Teil | Wert |
+|---|---|
+| Salz | `MODULE_KEY_SALT = b"openwrt_router/hkdf-salt/v1"` |
+| `info` | `MODULE_KEY_INFO_PREFIX` (`b"openwrt_router/module-key/v1"`), NUL, Modulname, NUL, `purpose` |
+| Länge | `MODULE_KEY_BYTES = 32` |
+| Helfer | `hkdf_sha256(...)`, `derive_module_key(installation_key, module, purpose)` (rein, `core_models`) |
+
+- Nur ein Modul, das in diesem Core-Lauf sein Event-Präfix registriert hat
+  (`register_event_prefix`), bekommt einen Schlüssel, und nur seinen eigenen (der Name ist
+  Teil der Ableitung). `core` ist kein Modul (`reserved_module`). Fehler sind
+  `ConfigApiError` mit `reason` `invalid_module` / `reserved_module` /
+  `module_not_registered` / `invalid_purpose`; gezählt in `module_keys_refused`, Ausgaben in
+  `module_keys_issued`. In einem Python-Prozess ist das eine Namensprüfung, keine Isolation:
+  wer Code im selben Prozess hat, kann jeden Namen angeben. Modul-Schlüssel trennen Module
+  also gegen Versehen (falscher Name, vertauschter Zweck), nicht gegen feindlichen Code im
+  selben Prozess (Review L3 von PR #56).
+- `purpose`: höchstens 64 Zeichen `[a-z0-9_.:-]`, ohne `..`. Andere Zwecke ⇒ unabhängige
+  Schlüssel.
+- `lost` ⇒ `InstallationKeyLostError`, kein Ersatz. `uninitialised` ⇒ die erste Nutzung legt
+  den echten Installations-Schlüssel an, genau wie beim Provider (Log, `keys_created`).
+- Nach `installation_key_reset` ändern sich alle Modul-Schlüssel; Module erkennen das an
+  `installation_key_id`-Stempeln ihrer eigenen Daten.
+- Der Schlüssel steht nie in Diagnose, Log, Event oder `repr`.
+
 ## 12. Events und Audit
 
 ### 12.1 `CoreEvent`
@@ -1088,29 +1203,72 @@ marker = {"secret": digest(f"{config}/{section}/{option}/{value}")}
 | `repeat_count` | `int` | Wiederholungen im Cooldown |
 | `last_repeat_at` | `datetime \| None` | letzte Wiederholung |
 | `data` | `Mapping` | **nur IDs und Zähler, nie Konfigurationswerte**; schreibgeschützt, bei Ausgabe zusätzlich maskiert |
+| `security_relevant` | `bool` (Standard `False`) | ab B3: vom Modul gesetzt (`emit(..., security_relevant=True)`) ⇒ Sicherheitsring |
+| `audit_mandatory` | `bool` (Standard `False`) | ab B3: vom Audit-Log gesetzt, wenn das Modul den Typ als audit-pflichtig registriert hat ⇒ kein Dedup |
+| `client_ref` | `str \| None` | ab B8: Client als Pseudonym `cli_<16 hex>` (`CLIENT_REF_PATTERN`, aus `pseudonymise_identifier("client", …)` mit dem Modul-Schlüssel); eine rohe MAC oder ein anderes Pseudonym ⇒ `ValueError` |
+| `confidence` | `float \| None` | ab B8: Sicherheit eines Befunds, endlich, 0..1 (`int` wird `float`; `bool`, Text ⇒ Fehler) |
+| `classification` | `str \| None` | ab B8: Maschinencode des Befunds, `EVENT_CLASSIFICATION_PATTERN` = `[a-z0-9][a-z0-9_.:-]{0,63}` (z. B. `port_scan`, `rogue_ap.suspected`) |
+| `incident_ref` | `str \| None` | ab B8: Kennung eines Incidents des Moduls (`check_token`: 1–128 Zeichen `[A-Za-z0-9._:@-]`, kein `..`) |
+| `radio_id` | `str \| None` | ab B8: Funkschnittstelle, z. B. `radio1` (`check_token`) |
 | `dedup_scope` | Eigenschaft | `(router_id or "-", type, dedup_key)` oder `None` |
 | `audit_ring` | Eigenschaft | `general` / `security` |
 
 `EmitResult(event, published, deduplicated)` ist die Rückgabe von `emit`.
+
+Die B8-Felder (`EVENT_REF_FIELDS`) setzt ein Modul über `emit(..., client_ref=…,
+confidence=…, classification=…, incident_ref=…, radio_id=…)` (Audit-Log und API). Alle
+Standard `None`; sie stehen in `to_dict()`/`from_dict()`, im Store und im Bus-Payload, sind
+**nicht** Teil des Dedup-Bereichs und werden nicht maskiert (sie nehmen nur Pseudonyme und
+Codes an). Alte Einträge lesen sich unverändert; ein älterer Core ignoriert die neuen
+Schlüssel (`from_dict` liest nur benannte Schlüssel), daher keine Store-Version.
 
 Bus-Event `EVENT_CORE = "openwrt_router_core_event"` mit `CoreEvent.to_dict()`; bewusst
 getrennt von `EVENT_INCIDENT`, `net_rules` bleibt unverändert. Das Event landet im Recorder
 und im Logbuch (`logbook.py` zeigt `<type>: <result>` unter dem Eintragstitel, nie einen
 Benutzer). Jede `user_id` im Bus-Payload (`actor.user_id` und verschachtelte) ist ein
 Pseudonym `usr_<12 hex>` (`core_masking.pseudonymise_user_ids`, derselbe Helfer wie in der
-Diagnose; Salz zufällig je Audit-Log, nur im Speicher: gleicher Benutzer gleiches Pseudonym,
-solange der Core läuft). Audit-Store, `api.events(...)` und `subscribe`-Listener behalten die
-echte ID.
+Diagnose). Audit-Store, `api.events(...)` und `subscribe`-Listener behalten die echte ID.
+
+Salz des Bus-Pseudonyms (ab Folgeauftrag B1): Ist der Installations-Schlüssel beim Laden
+des Core vorhanden (`ok`), ist das Salz `derive_core_key(key, "bus_pseudonym")` (HKDF wie
+§11.5, Besitzer `core`): **gleicher Benutzer, gleiches Pseudonym über Neustarts hinweg**,
+bis zu einem `installation_key_reset`. Ohne Schlüssel (erster Start, `lost`, Store nicht
+geladen) bleibt das Salz zufällig für diesen Lauf; das zählt `bus_salt_ephemeral` und steht
+einmal im Log. Das Senden scheitert daran nie; der Core legt dafür keinen Schlüssel an.
+Abwägung: Ein stabiles Pseudonym lässt Recorder- und Logbuch-Einträge eines Benutzers über
+Neustarts verknüpfen (gewollt für Auswertungen), damit aber auch durch jeden, der den
+Recorder liest. Den Benutzer selbst verrät es nicht: ohne den Installations-Schlüssel ist
+das Pseudonym nicht umkehrbar und nicht nachrechenbar. Die Diagnose nimmt weiterhin je
+Download ein frisches Salz, damit zwei Downloads nicht verknüpfbar sind.
 
 ### 12.2 Zwei Audit-Ringe
 
 | Ring | Größe | Aufbewahrung | Inhalt |
 |---|---|---|---|
 | `general` | `AUDIT_MAX_EVENTS` = 1000 | `AUDIT_RETENTION_DAYS` = 90 | alles andere |
-| `security` | `SECURITY_AUDIT_MAX_EVENTS` = 500 | 90 Tage | jeder `security.*`-Typ und `SECURITY_EVENT_TYPES` (Export, Löschen, Adoption, Restore-Schritte, Installations-Schlüssel verloren/neu) |
+| `security` | Core-Einträge `SECURITY_AUDIT_MAX_EVENTS` = 500; dazu Modul-Einträge mit eigener Quote (ab Review M2): `SECURITY_MODULE_QUOTA` = 100 je Modul, `SECURITY_MODULE_MAX_EVENTS` = 500 für alle Module | 90 Tage | jeder `security.*`-Typ und `SECURITY_EVENT_TYPES` (Export, Löschen, Adoption, Restore-Schritte, Installations-Schlüssel verloren/neu); sicherheitsrelevante Modul-Events |
 
-`audit_ring_for(type)` entscheidet. So verdrängen viele Backup-Events nie die
-Sicherheitsspur. Persistiert im Store `openwrt_router.audit`. `api.events(..., ring=None)`
+Verdrängung im Sicherheitsring (ab Review M2 von PR #56): Wem ein Eintrag gehört, entscheidet
+der Typ (`security_owner`: Kerntyp ⇒ Core, sonst `source`), nicht ein frei gesetztes Feld;
+`register_event_prefix(..., module="core")` ⇒ `ValueError`. Ein Core-Eintrag verdrängt nur
+den ältesten Core-Eintrag (Zähler `evicted_security`). Ein Modul-Eintrag verdrängt an der
+Quote seines Moduls dessen ältesten Eintrag; sind alle Modul-Einträge zusammen voll, geht
+der älteste Eintrag des Moduls mit den meisten Einträgen. Ein Core-Eintrag weicht nie einem
+Modul-Eintrag, und ein flutendes Modul verdrängt ein anderes Modul nicht, solange es selbst
+an seiner Quote steht. Verdrängte Modul-Einträge zählen `module_security_evicted` und
+`summary()["security_module_evicted"]` (je Modul), dazu einmal je Modul und Lauf eine
+Warnung im Log; `summary()` nennt `security_core_entries`, `security_module_entries` (je
+Modul) und `security_module_total`. Gespeichert wird wie bisher eine Liste `security`; ein
+älterer Store lädt unverändert, beim Laden gelten dieselben Quoten (keine Store-Version).
+Ein älterer Core liest einen neueren Store mit seiner alten Regel (die 500 neuesten
+Einträge des Rings).
+
+`audit_ring_for(type)` entscheidet, ab B3 zusätzlich `CoreEvent.security_relevant`: ein
+Modul markiert ein eigenes Event als sicherheitsrelevant, dann liegt es im Sicherheitsring
+(Standard: allgemein; Zähler `security_relevant_module_events`). Kerntypen behalten ihren
+Ring. Ein Dedup-Fenster zählt nur im selben Ring: ein sicherheitsrelevantes Event erhöht
+nie den `repeat_count` eines allgemeinen Eintrags desselben Bereichs. So verdrängen viele
+Backup-Events nie die Sicherheitsspur. Persistiert im Store `openwrt_router.audit`. `api.events(..., ring=None)`
 liest beide Ringe, `ring=AuditRing.SECURITY` nur einen.
 
 ### 12.3 Typen und wer sie sendet
@@ -1137,7 +1295,15 @@ liest beide Ringe, `ring=AuditRing.SECURITY` nur einen.
 neu in 1.44.0: `security.acl_deployed`, `security.acl_deploy_failed`,
 `security.ssh_pin_pending`, `security.ssh_pin_confirmed`, `security.ssh_pin_mismatch`,
 `security.ssh_pin_reset`, `configuration.router_archived`;
-neu (Review PR #55): `router.forgotten`.
+neu (Review PR #55): `router.forgotten`;
+neu (Folgeauftrag B5): `core.active_action_granted`, `core.action_rate_limited`.
+
+- `core.active_action_granted` (Ring `general`, audit-pflichtig): eine `active`-Aktion
+  wurde erteilt. `data` wie `security.authorization_granted` (`action`,
+  `authorization_id`, `approval_id` = `null`, `verification_id`, `bound`).
+- `core.action_rate_limited` (Ring `general`, Warnung, nicht audit-pflichtig,
+  `dedup_key` = Aktion, Cooldown = Fenster des Limits): `action`, `reason`
+  (`rate_limited`), `retry_after`, `max_calls`, `per` (Sekunden).
 
 - `router.forgotten` (Ring `security`, audit-pflichtig): ein verwaister Datensatz wurde
   gelöscht. `data`: `reason` (`aged`/`capped`), `orphaned_at`, `has_versions`,
@@ -1205,8 +1371,22 @@ bestätigt/bekannt, Dry Run und Kompatibilitätsprüfung (`restore_checked`), Ex
 welche Version, welches Artefakt), Löschen, Aufbewahrung, Adoption, Verlust und Reset des
 Installations-Schlüssels, Wiederaufbau eines Core-Stores (`core.store_recovered`).
 
+**Modul-eigene Pflichttypen (ab B3).** `api.register_audit_mandatory_types(types, *,
+module) -> remover`: jeder Typ muss unter einem Präfix liegen, das dieses Modul registriert
+hat (nicht das nackte Präfix); Kerntypen, reservierte Namensräume, Typen anderer Module
+und `module="core"` ⇒ `ValueError` (dann wird nichts registriert). Folge: kein Dedup
+(`CoreEvent.audit_mandatory = True`, `dedup_scope = None`), jedes Auftreten wird
+gespeichert und gesendet; offene Dedup-Fenster dieser Typen enden sofort. Zähler
+`module_mandatory_types`. Rückgängig: der Rückgabewert, das Abmelden des Präfixes
+(`register_event_prefix` liefert jetzt einen Entferner; wer ihn ignoriert, verhält sich wie
+in 1.44) und das Ende des Core (der nächste Core beginnt ohne Registrierungen). Die
+Kerntypen in `AUDIT_MANDATORY_EVENT_TYPES` kann kein Modul ändern.
+
 ```python
-api.register_event_prefix("security_center.", module="security_center")
+remove_prefix = api.register_event_prefix("security_center.", module="security_center")
+api.register_audit_mandatory_types(["security_center.login_failed"], module="security_center")
+api.emit("security_center.login_failed", source="security_center", router_id=router_id,
+         security_relevant=True, result=EventResult.FAILURE, data={"attempts": 3})
 res = api.emit("security_center.port_scan", source="security_center", router_id=router_id,
                entry_id=entry.entry_id, severity=Severity.WARNING,
                result=EventResult.INFO, dedup_key="port_scan", data={"count": 12})
@@ -1265,6 +1445,51 @@ Namenslisten: `SECRET_OPTIONS` (UCI-Optionen, u. a. `key`, `key1`–`key4`, `psk
 _LOGGER.debug("snapshot %s", mask_for_output(snapshot.configs))
 ```
 
+**Wertabhängige Ausnahmen (ab Folgeauftrag B4).** Nur die breite Ausgaberegel ändert sich;
+`is_snapshot_secret` bleibt gleich (eine UCI-Option `radio_key` bleibt im Diff maskiert).
+
+| Regel | Namen | Wert bleibt lesbar | Wert wird maskiert |
+|---|---|---|---|
+| Kennungen (`is_identifier_name`, ab Review M1 von PR #56) | `IDENTIFIER_KEY_NAMES`: `finding_key`, `incident_key`, `recommendation_key`, `rule_key`, `scope_key`, `sort_key`, `translation_key` (Wörter mit `_` verbunden, Ziffern bleiben: `ruleKey`, `RULE-KEY` ja, `rule_key2` nein). Sie bleiben für `is_secret_key` **geheime Namen**; nur die Walker und `redact_text` zeigen einen Wert. | nur ein String nach `is_identifier_value`: Core-ID (`xxx_<32 hex>`, `xxx_<16 hex>`) oder Slug `[a-z0-9][a-z0-9_.:-]*` mit höchstens `IDENTIFIER_VALUE_MAX_LENGTH` = 64 Zeichen, der nicht wie Schlüsselmaterial aussieht; im Freitext genau ein solches Token, danach Ende, `,`/`;` oder das nächste `name=` | alles andere: dict, Liste, Tupel (nie hineingelaufen), Zahl (eine PIN ist eine Zahl), Groß-/Kleinschreibung gemischt, Leerzeichen, Sonderzeichen, PEM, base64 ab 22, Hex ab 32; im Freitext eine Phrase bis zum Zeilenende; in escaptem JSON immer; gilt für Schlüssel, `{"key": "rule_key", "value": …}`-Datensätze und Freitext |
+| Zähler (`is_counter_name`) | Endung `COUNTER_SUFFIXES` (`_failures`, `_failed`, `_fail`, `_errors`, `_attempts`, `_retries`, `_total`), nicht exakt geheim, kein Treffer des Präzisionsmusters, kein geheimer Teilstring und (ab Review L1 von PR #56) **kein Wort aus `SECRET_WORDS`** (`pin`, `pincode`, `otp`, `psk`, `auth`, `key`, `session`, `sae` …, auch zusammengeschrieben) | Zahlen (`int`/`float`, im Freitext eine alleinstehende Zahl) | jeder andere Wert; jeder Wert unter `pin_total`, `wps_pin_attempts`, `otp_total`, `auth_failures` (eine PIN oder ein Einmalpasswort ist eine Zahl) |
+
+Bewusst nicht gelistet: echte Schlüsselnamen wie `group_key`, `wpa_key`, `public_key`.
+Seit Review M1 auch nicht mehr, weil sie anderswo ein Geheimnis tragen: `client_key`
+(TLS-/MQTT-Client-Schlüssel; Clients heißen `client_ref`), `device_key` (IoT-Geräteschlüssel),
+`message_key`/`msg_key` (Nachrichtenschlüssel in Signal/MTProto), `router_key`
+(Tor-Router-Schlüssel), `entry_key` (Schlüsseleintrag eines Keystores),
+`cache_key`/`lookup_key` (oft aus Zugangsdaten gebaut), `event_key` (Webhook-/Event-Dienst-
+Schlüssel), `radio_key` (keine sichere Bedeutung; Module haben `radio_id`). Sie sind wieder
+wie auf `main` maskiert.
+Grenze: ein Passwort aus Kleinbuchstaben und Ziffern ohne Leerzeichen (`hunter2`) unter
+einem Kennungsnamen bleibt lesbar; Kennungsnamen gehören Modul-Daten, nie
+Konfigurationswerten. In
+maskiertem, verschachteltem JSON gilt weiter die alte Regel (unter einem geheimen Namen
+maskiert).
+Folge von L1: die Zählerregel hebt keinen geheimen Namen mehr auf; sie bleibt als
+Schnittstelle bestehen und betrifft nur Namen, die ohnehin nicht geheim sind
+(`wan_failures`). `auth_failures`, `auth_errors`, `wifi_auth_failures` sind wieder wie auf
+`main` maskiert; ein Modul, das solche Zähler lesbar ausgeben will, nennt sie ohne
+geheimes Wort (z. B. `wifi_login_failures`).
+
+**Netzwerk-Kennungen.** Die Core-Maskierung maskiert MAC, IP, Hostname, SSID und BSSID
+**nicht**. Wer sie verbergen muss, nimmt seinen Modul-Schlüssel (§11.5) und
+
+- `pseudonymise_identifier(kind, value, key) -> str` (rein, kein I/O, deterministisch):
+  `kind` ∈ `mac`, `ip`, `hostname`, `ssid`, `bssid`, `client` (Client = seine MAC);
+  Ergebnis `<Präfix><16 hex>` (`IDENTIFIER_PSEUDONYM_HEX_LENGTH`, insgesamt 20 Zeichen),
+  Präfixe `IDENTIFIER_PSEUDONYM_PREFIXES`: `mac_`, `ipa_`, `hst_`, `ssd_`, `bss_`, `cli_`.
+  HMAC-SHA256 über `b"openwrt_router/identifier/v1"`, NUL, Art, NUL, normalisierter Wert;
+  die Art gehört zur Eingabe (dieselbe MAC als `mac` und als `client` ist nicht
+  verknüpfbar). Normalisierung: MAC/BSSID/Client klein mit `:` (`AA-BB-…`,
+  `aabb.ccdd.eeff`, bloße 12 Hex), IPv4/IPv6 kanonisch komprimiert, Hostname klein ohne
+  abschließenden Punkt, SSID unverändert (Groß/Klein zählt, 1–32 Bytes). `ValueError` bei
+  unbekannter Art, falschem Wert oder Schlüssel unter 16 Bytes, `TypeError` für einen
+  Nicht-String.
+- `pseudonymise_fields(data, key, fields)`: Kopie, in der Strings (auch in Listen) unter den
+  Feldnamen von `fields` (`{"mac": "mac", "ip": "ip"}`) ersetzt sind; ungültige Werte werden
+  `IDENTIFIER_INVALID` (`**INVALID_IDENTIFIER**`, nie der Rohwert), `None` bleibt.
+
 ## 14. Fehler
 
 Alle Fehler erben von `ConfigApiError(HomeAssistantError)` und haben `code`,
@@ -1284,7 +1509,7 @@ maskiert, Nachricht geschrubbt). `code` und `error_class` ändern sich innerhalb
 | `CapabilityUnavailableError` | `capability_unavailable` | `not_available` | Capability fehlt (auch Restore in Phase 1) | nein |
 | `ProviderUnavailableError` | `provider_unavailable` | `not_available` | kein Provider registriert | nein |
 | `ProviderConflictError` | `provider_conflict` | `conflict` | zweiter Provider | nein |
-| `AuthorizationError` | `authorization_denied` | `denied` | Guard lehnt ab, Akteur unbekannt/ungeprüft, oder `consume` scheitert (`details.reason`: `not_admin`, `unverified_actor`, `unknown_user`, `unknown_authorization`, `already_used`, `expired`, `action_mismatch`, `router_mismatch`, `checksum_mismatch`, …) | nein |
+| `AuthorizationError` | `authorization_denied` | `denied` | Guard lehnt ab, Akteur unbekannt/ungeprüft, oder `consume` scheitert (`details.reason`: `not_admin`, `unverified_actor`, `unknown_user`, `unknown_authorization`, `already_used`, `expired`, `action_mismatch`, `router_mismatch`, `checksum_mismatch`, `actor_required` (#111), `unknown_router` (#113), …) | nein |
 | `ApprovalRequiredError` | `approval_required` | `approval` | kritische Aktion ohne freigegebenen Antrag (noch `pending`) | nein |
 | `ApprovalInvalidError` | `approval_invalid` | `approval` | Antrag unbekannt, abgelaufen, benutzt, abgelehnt, anders gebunden, nicht vom Antragsteller eingelöst | nein |
 | `BackupNotFoundError` | `backup_not_found` | `not_found` | Version unbekannt | nein |
@@ -1301,11 +1526,20 @@ maskiert, Nachricht geschrubbt). `code` und `error_class` ändern sich innerhalb
 | `RestoreIncompatibleError` | `restore_incompatible` | `incompatible` | Version passt nicht zum Zielrouter | nein |
 | `OperationInProgressError` | `operation_in_progress` | `busy` | Router-Lock belegt | ja |
 | `ProviderError` | `provider_error` | `internal` (überschreibbar) | unerwarteter Providerfehler, Ursache verkettet, nur Typname in `details.cause` | nein (überschreibbar) |
+| `RateLimitedError` | `rate_limited` | `rate_limited` | zu viele Aufrufe einer Aktion (je Router); nichts getan. `retry_after` (Sekunden, endlich, ≥ 0) als Attribut, in `details.retry_after` und oben in `to_dict()` (ab B6); der Guard liefert ihn für `active`-Aktionen über ihrem `RateLimit` (`details.reason` `rate_limited`, `action`, `audit_id`; ab B5) | ja (fest) |
+| `SafetyRefusedError` | `safety_refused` | `safety_refused` | Core oder Modul lehnt ab, weil die Aktion unsicher ist (z. B. trennt die Verwaltungsverbindung); keine Rechtefrage. `reason` (Attribut und `details.reason`, Muster `SAFETY_REASON_PATTERN` = `[a-z0-9][a-z0-9_.:-]{0,63}`) (ab B6) | nein (fest) |
 
 `ErrorClass` enthält außerdem die elf Klassen aus `config-manager` 12.2 (`unreachable`,
 `timeout`, `auth`, `permission`, `not_available`, `too_large`, `incomplete`, `invalid`,
 `checksum_mismatch`, `storage_full`, `storage_error`) und wird auch in
 `BackupRecord.error_class` und als `dedup_key` von `backup_failed` benutzt.
+
+`rate_limited` und `safety_refused` (ab B6) sind **Aufruf-Klassen**
+(`NON_PERSISTED_ERROR_CLASSES`): sie beschreiben einen abgelehnten Aufruf und landen nie
+in einem gespeicherten Datensatz. `VersionMeta` und `BackupRecord` lehnen sie mit
+`ValueError` ab; `version_error_class` bildet sie auf `busy` bzw. `denied` ab. Ein älterer
+Core liest deshalb nie einen unbekannten Wert; der neue Wert ist additiv, ohne
+`BACKUP_METADATA_VERSION`-Erhöhung (Ausnahme zur Regel in §2, weil nie persistiert).
 
 ```python
 try:
@@ -1379,20 +1613,20 @@ except CapabilityUnavailableError:
 
 | Modul | Nutzt | Beispiel |
 |---|---|---|
-| Security Intelligence (`security-center`) | Event-Präfix `security_center.`, Capability-Präfix `security.`, `subscribe`, Sicherheitsring lesen | `register_event_prefix("security_center.", module="security_center")`; reagiert auf `security.authorization_denied` |
+| Security Intelligence (`security_center`) | Event-Präfix `security_center.`, Capability-Präfix `security.`, `subscribe`, Sicherheitsring lesen | `register_event_prefix("security_center.", module="security_center")`; reagiert auf `security.authorization_denied` |
 | Network Intelligence | `links.incident_id`, `BackupReason.INCIDENT`, Drift als Kontext (nur lesend) | Backup bei kritischem Incident: `async_create_backup(..., reason=INCIDENT, links=BackupLinks(incident_id=…))` (nie dedupliziert) |
 | Network Time Machine | `async_list_backups(since=…)`, `async_compare(ConfigRef.backup(a), ConfigRef.backup(b))`, `events(since=…)` | Zeitleiste aus Versionen und Events |
 | Firmware Lifecycle | `BackupReason.PRE_FIRMWARE_UPDATE`/`RELEASE_CHANGE`, `FirmwareInfo`, `CompatibilityInfo` | vor Update `async_create_backup`, nach Update Proben neu |
 | Self-Healing | `register_action("self_healing.<aktion>", CRITICAL, …)`, `BackupReason.PRE_CHANGE`, Korrelations-ID | Backup + Freigabe vor jedem Eingriff, alles mit einer `correlation_id` |
-| Diagnose (`net-diagnostics`) | Capability-Präfix `diag.`/`log.` | eigene Capabilities `diag.traceroute` unter registriertem Präfix |
+| Diagnose (`net_diagnostics`) | Event-Präfix `net_diagnostics.`, Capability-Präfix `diag.` **oder** `log.` (ein Detektor, ein Präfix), `active`-Aktionen mit `RateLimit` (§6.3) | `register_capability_detector("net_diagnostics", detect, prefix="diag.")` meldet `diag.traceroute`; ein Name außerhalb des Präfixes (z. B. `log.syslog`) wird verworfen und gezählt |
 
 ### 17.1 Andocken der Module (1.44.0)
 
 | Modul (`module=`) | Event-Präfix (`MODULE_EVENT_PREFIXES`) | Capability-Präfix (`MODULE_CAPABILITY_NAMESPACES`) | Core-eigene Namen darin | ACL-Stufen |
 |---|---|---|---|---|
-| `security_center` | `security_center.` | `security.` (+ `log.`) | – | später (`security.`) |
-| `net_diagnostics` | `net_diagnostics.` | `diag.` (+ `log.`) | – | später (`diag.`) |
-| `wifi_rf` | `wifi_rf.` | `rf.` (+ `log.`) | `rf.txpowerlist`, `rf.survey`, `rf.scan` (`CORE_OWNED_MODULE_CAPABILITIES`, aus der ACL) | `rf_scan`, `rf_survey` |
+| `security_center` | `security_center.` | `security.` (oder `log.`) | – | später (`security.`) |
+| `net_diagnostics` | `net_diagnostics.` | `diag.` (oder `log.`) | – | später (`diag.`) |
+| `wifi_rf` | `wifi_rf.` | `rf.` (oder `log.`) | `rf.txpowerlist`, `rf.survey`, `rf.scan` (`CORE_OWNED_MODULE_CAPABILITIES`, aus der ACL) | `rf_scan`, `rf_survey` |
 | Provider (`config-manager`) | – (der Core sendet `configuration.*`) | `config.` (nur über `async_probe`) | – | `config_backup_read` (nur mit Option) |
 
 ```python
@@ -1406,7 +1640,10 @@ unsubscribe = api.subscribe(on_event)
 
 - `detect(record, data) -> Mapping[str, CapabilityStatus]` ist synchron und macht **keine**
   I/O; er läuft nur, wenn sich die Capability-Signatur des Core oder sein eigenes
-  `signature(data)` ändert. Ein Modul hat höchstens einen Detektor.
+  `signature(data)` ändert. Ein Modul hat höchstens einen Detektor und damit **ein**
+  Präfix: sein eigener Namensraum (oder ein Präfix darunter) **oder** `log.`, nicht beides.
+  Der Modulname ist der aus `MODULE_EVENT_PREFIXES` (`net_diagnostics`, nicht
+  `net-diagnostics`); ein unbekannter Name unter einem fremden Namensraum ⇒ `ValueError`.
 - Registrieren ⇒ `ValueError` bei: Präfix ohne Punkt am Ende, Core-Namensraum
   (`transport.`, `data.`, `stream.`, `pkg.`, `config.`), fremdem Modul-Namensraum, zweitem
   Detektor desselben Moduls; `TypeError` bei Nicht-Callables.
@@ -1433,6 +1670,46 @@ Option `config_backup_enabled`. Offen:
 
 B = breaking (bestehender Aufrufer muss sich ändern), A = additiv. „Verhalten“ heißt: die
 Signatur bleibt, die Regel ist neu.
+
+**Brechende Änderungen seit 1.44.0** (Folgeauftrag, Zeilen ab #100; was ein Modul ändern
+muss):
+
+- (#100) Bus-Pseudonyme sind bei vorhandenem Installations-Schlüssel über Neustarts stabil
+  statt je Lauf neu. Wer sich auf den Wechsel nach einem Neustart verlassen hat, darf das
+  nicht mehr.
+- (#101) `async_detect_drift`, `async_prepare_restore`, `async_check_restore_compatibility`
+  und `async_validate_backup(..., actor=...)`: ein Benutzer ohne Admin bekommt
+  `AuthorizationError` `not_admin`. Module, die diese Aufrufe für normale Benutzer anbieten,
+  müssen auf Admin prüfen oder als Modul-/Systemakteur aufrufen (und dann selbst
+  entscheiden, wem sie das Ergebnis zeigen).
+- (#111, verschärft #101) `async_validate_backup(backup_id, *, actor)`: `actor` ist
+  Pflicht. Ein Aufruf ohne `actor` scheitert mit `TypeError`, `actor=None` oder ein
+  Nicht-`Actor` mit `AuthorizationError` `actor_required` (auditiert). Jeder Aufrufer
+  übergibt einen `Actor` (Benutzer: Admin; sonst `Actor.for_module(...)` oder
+  `Actor.system()`); der Zähler `validate_without_actor` entfällt.
+- (#102, eingeschränkt durch #108 und #110) Ausgabe zeigt jetzt Werte unter Kennungsnamen
+  (`rule_key`, `scope_key`, …), die vorher `**REDACTED**` waren, aber nur in strenger
+  Kennungsform. Ein Modul, das unter solchen Namen Geheimnisse ablegt, muss sie umbenennen.
+- (#108) Gegenüber dem ersten Stand dieses Zweigs: `client_key`, `device_key`,
+  `router_key`, `radio_key`, `entry_key`, `event_key`, `cache_key`, `lookup_key`,
+  `message_key`, `msg_key` sind keine Kennungsnamen mehr (maskiert wie auf `main`);
+  `is_secret_key` ist für Kennungsnamen wieder `True`; unter einem Kennungsnamen wird ein
+  dict/eine Liste/eine Zahl maskiert statt durchlaufen. Ein Modul, das eine Router-,
+  Funk- oder Client-Referenz unter einem der entfernten Namen ausgibt, nimmt `router_id`,
+  `radio_id` bzw. `client_ref`; eine Kennung unter einem verbliebenen Namen muss eine
+  Core-ID oder ein Slug sein (Kleinbuchstaben, Ziffern, `_ . : -`, höchstens 64 Zeichen).
+- (#109) Ein Modul behält höchstens `SECURITY_MODULE_QUOTA` = 100 eigene Einträge im
+  Sicherheitsring (danach fallen seine ältesten weg, gezählt); wer mehr Spur braucht, muss
+  sie selbst halten oder seltener auf den Sicherheitsring schreiben. Ein Modul kann sich
+  nicht `core` nennen (`register_event_prefix` ⇒ `ValueError`).
+- (#110) Zähler mit einem geheimen Wort im Namen (`auth_failures`, `pin_total`,
+  `otp_total`, …) zeigen keine Zahl mehr. Ein Modul, das einen solchen Zähler lesbar
+  ausgeben will, benennt ihn ohne Wort aus `SECRET_WORDS` (z. B. `wifi_login_failures`
+  statt `wifi_auth_failures`).
+- (#113) Eine ratenbegrenzte `active`-Aktion wird nur für Router erteilt, die die Registry
+  kennt, oder für die Flotte `-`; sonst `unknown_router`. Ein Modul, das eine solche Aktion
+  für ein Ziel außerhalb der Registry braucht, nimmt `-` (ein gemeinsames Fenster) oder
+  registriert die Aktion ohne `rate_limit` und begrenzt selbst.
 
 ### 19.1 Änderungen auf Feld- und Signaturebene
 
@@ -1596,6 +1873,31 @@ unverändert“ prüfen zusätzlich die Aufrufe `async_update_entry`, `async_rem
 (`core_testkit.ha_entry_calls`), und der ACL-Aufruf-Pin vergleicht mit wörtlichen
 Erwartungen aus 1.43 statt beide Varianten miteinander.
 
+**Folgeauftrag nach 1.44.0 (Teil B)**
+
+| # | Änderung | Art |
+|---|---|---|
+| 100 | Modul-Schlüssel (B1, §11.5): `api.async_get_module_key(module, purpose="")` (HKDF-SHA256, `MODULE_KEY_SALT`, `MODULE_KEY_INFO_PREFIX` `…/v1`, 32 Bytes); nur für Module mit registriertem Event-Präfix; `lost` ⇒ `InstallationKeyLostError`. Reine Helfer `hkdf_sha256`, `derive_module_key`, `check_module_name`, `MODULE_NAME_PATTERN`, `MODULE_KEY_PURPOSE_PATTERN`, `CORE_KEY_OWNER`; `AuditLog.registered_modules()`; Zähler `module_keys_issued`/`module_keys_refused`. Bus-Pseudonym (§12.1): Salz aus `derive_core_key(key, "bus_pseudonym")`, über Neustarts stabil; ohne Schlüssel zufällig je Lauf, Zähler `bus_salt_ephemeral` + ein Log-Eintrag. `async_get_installation_key` für Provider unverändert. | A; B (Verhalten des Bus-Pseudonyms) |
+| 101 | `async_validate_backup(backup_id, *, actor=None)` (neues optionales Argument), `async_detect_drift`, `async_prepare_restore` und damit `async_check_restore_compatibility` (B2): Benutzer ohne Admin ⇒ `AuthorizationError` `not_admin` (`details.action` `config_validate`/`config_drift`/`config_restore_dry_run`, `audit_id`), auditiert auf dem Sicherheitsring, vor jedem Nachschlagen und Provider-Aufruf; Audit-Router ist der bekannte Router bzw. der Router einer bekannten Version, sonst `-` (unbekannte IDs werden nicht wiedergegeben). Modul-, System- und Automationsakteure unverändert. `async_validate_backup` ohne `actor` blieb erlaubt (Altaufruf, Zähler `validate_without_actor`); seit #111 abgelehnt. Konstanten `READ_VALIDATE`, `READ_DRIFT`, `READ_RESTORE_DRY_RUN`. | A (Signatur); B (Verhalten für Benutzer ohne Admin) |
+| 102 | Maskierung (B4, §13): Kennungsnamen (`IDENTIFIER_KEY_NAMES`, `is_identifier_name`) sind keine geheimen Namen mehr, ihr Wert wird nur bei Schlüsselmaterial maskiert (`looks_like_key_material`); Zählernamen (`COUNTER_SUFFIXES`, `is_counter_name`) zeigen Zahlen. `is_snapshot_secret` unverändert. Neu, rein: `pseudonymise_identifier(kind, value, key)`, `pseudonymise_fields(data, key, fields)`, `IDENTIFIER_PSEUDONYM_PREFIXES`, `IDENTIFIER_PSEUDONYM_HEX_LENGTH` (16), `IDENTIFIER_INVALID`. MAC/IP/Hostname/SSID/BSSID werden vom Core nie maskiert (unverändert, jetzt festgeschrieben). | A; Verhalten (weniger Überdeckung) |
+| 103 | Modul-Events (B3, §12.1/§12.2/§12.5): `CoreEvent.security_relevant`, `CoreEvent.audit_mandatory` (beide `bool`, Standard `False`, in `to_dict`/`from_dict`; alte Einträge lesen sich unverändert, keine Store-Version); `emit(..., security_relevant=False)` (Audit-Log und API); `register_audit_mandatory_types(types, *, module) -> remover`; `register_event_prefix(...)` liefert einen Entferner statt `None`; Dedup nur im selben Ring; Zähler `security_relevant_module_events`, `module_mandatory_types`. Bus-Payload hat zwei neue Schlüssel. | A |
+| 104 | Fehler (B6, §14): `RateLimitedError` (`code` `rate_limited`, `ErrorClass.RATE_LIMITED`, immer retryable, `retry_after`) und `SafetyRefusedError` (`code` `safety_refused`, `ErrorClass.SAFETY_REFUSED`, nie retryable, `reason`); `NON_PERSISTED_ERROR_CLASSES`, `SAFETY_REASON_PATTERN`. Beide Klassen sind Aufruf-Klassen: `VersionMeta`/`BackupRecord` lehnen sie ab, `version_error_class` bildet sie auf `busy`/`denied` ab, keine Metadaten-Version. Ein Provider, der eine davon als `error_class` eines Datensatzes setzen wollte, bekommt `ValueError` (vorher gab es die Werte nicht). | A |
+| 105 | Guard (B5, §6.3, §12.3): `ActionClass.ACTIVE` ("aktiv, nicht ändernd"; nicht persistiert), Politik wie `mutating`, keine Freigabe, Erteilung als `core.active_action_granted` auf dem allgemeinen Ring (audit-pflichtig), Ablehnung wie bisher auf dem Sicherheitsring. `register_action(..., sensitive_read=False, rate_limit=None)` (Guard und `api.guard`); `RateLimit(max_calls, per)`, `RATE_LIMIT_MAX_CALLS`, `RATE_LIMIT_MAX_PERIOD`; Ablehnung `rate_limited` mit `AuthorizationDecision.retry_after` (neues optionales Feld, auch in `to_dict`), `core.action_rate_limited` (allgemeiner Ring, dedupliziert je Fenster), `error_for_decision` ⇒ `RateLimitedError`; `REASON_RATE_LIMITED`, `MAX_RATE_WINDOWS`. `policy_denial_reason(..., sensitive_reads=frozenset())`. Zähler `active_granted`, `rate_limited`, `rate_windows_dropped`. B6 kam vor B5, weil das Limit `RateLimitedError` braucht. | A |
+| 106 | Vertrag an Code angeglichen (B7): §6.3 beschreibt, dass `authorize` auch für `read` eine `WriteAuthorization` prägt und `security.authorization_granted` auditiert (die Core-Lesewege rufen `authorize` nicht auf); §17/§17.1 Modulnamen `security_center`/`net_diagnostics` und „ein Detektor, ein Präfix“ (`diag.` **oder** `log.`); §5 nennt `rf.` als reservierten Namensraum; neue Tabelle §3.1 (alle reservierten Präfixe, per Test vollständig); neuer §4.1. Code: `FLEET_ROUTER_ID` jetzt in `core_models` (`core_guard.FLEET_ROUTER_ID` bleibt, derselbe Wert), `is_fleet_router_id`; `registry.get("-")` ergänzt `details.fleet = true` (Grund unverändert `invalid_router_id`). | A |
+| 107 | `CoreEvent` (B8, §12.1): neue optionale Felder `client_ref` (`cli_<16 hex>`, `CLIENT_REF_PATTERN`), `confidence` (0..1, `float`), `classification` (`EVENT_CLASSIFICATION_PATTERN`), `incident_ref`, `radio_id` (`check_token`); `EVENT_REF_FIELDS`; `emit(...)` (Audit-Log, API, Protokoll) nimmt sie als Schlüsselwortargumente. Standard `None`, in `to_dict`/`from_dict`, nicht im Dedup-Bereich, keine Store-Version. Bus-Payload hat fünf neue Schlüssel. | A |
+
+**Review von PR #56 (M1, M2, L1–L4)**
+
+| # | Änderung | Art |
+|---|---|---|
+| 108 | Maskierung (M1, §13): `IDENTIFIER_KEY_NAMES` auf `finding_key`, `incident_key`, `recommendation_key`, `rule_key`, `scope_key`, `sort_key`, `translation_key` verkleinert (entfernt mit Grund in §13); `is_secret_key` ist für Kennungsnamen wieder `True`; Erkennung ohne Ziffern-Abschneiden (`rule_key2` ist keine Kennung). Unter einem Kennungsnamen bleibt nur ein Wert nach `is_identifier_value` (neu) lesbar: Core-ID oder Slug bis `IDENTIFIER_VALUE_MAX_LENGTH` (64, neu), kein Schlüsselmaterial; dict, Liste, Zahl und jede andere Form ⇒ `**REDACTED**`, nie durchlaufen; Freitext nur ein Token, escaptes JSON immer maskiert. `is_snapshot_secret` unverändert. Vorher (B4) liefen u. a. `{"client_key": "hunter2"}` und `{"device_key": {"value": …}}` unmaskiert durch. | B (Verhalten gegenüber #102), A (`is_identifier_value`, `IDENTIFIER_VALUE_MAX_LENGTH`) |
+| 109 | Sicherheitsring (M2, §12.2): Core- und Modul-Einträge getrennt begrenzt; `SECURITY_AUDIT_MAX_EVENTS` (500) gilt nur noch für Core-Einträge, neu `SECURITY_MODULE_QUOTA` (100 je Modul), `SECURITY_MODULE_MAX_EVENTS` (500 alle Module), `core_audit.security_owner`; der Ring hält damit bis zu 1000 Einträge. Ein Modul-Event verdrängt nie einen Core-Eintrag, an der eigenen Quote nur die eigenen. Zähler `module_security_evicted`, `summary()` mit `security_core_entries`, `security_module_entries`, `security_module_total`, `security_module_evicted`; Warn-Log einmal je Modul. `register_event_prefix(..., module="core")` ⇒ `ValueError`. Store-Layout unverändert. | A, B (Verhalten: ein Modul mit mehr als 100 sicherheitsrelevanten Einträgen verliert seine ältesten statt fremder; Modulname `core` abgelehnt) |
+| 110 | Maskierung (L1, §13): `is_counter_name` ist `False`, sobald ein Wort des Namens (oder alle Wörter zusammengeschrieben) in `SECRET_WORDS` steht; `pin_total`, `wps_pin_attempts`, `otp_total`, `psk_retries`, `auth_failures`, `auth_errors`, `wifi_auth_failures` zeigen keine Zahl mehr (`**REDACTED**`, strukturiert und im Freitext). Die Zählerregel hebt damit keinen geheimen Namen mehr auf; Signatur und `COUNTER_SUFFIXES` unverändert. | B (Verhalten gegenüber #102: weniger lesbar, wie auf `main`) |
+| 111 | Backup-Prüfung (L2, §8): `async_validate_backup(backup_id, *, actor: Actor)` im Manager, in der Fassade und in `ConfigurationApiProtocol`, `actor` ohne Standardwert. `actor=None` oder ein Nicht-`Actor` ⇒ `AuthorizationError` `actor_required` (neu `REASON_ACTOR_REQUIRED`; `details.action` `config_validate`, `audit_id`), auditiert auf dem Sicherheitsring (Router der bekannten Version, sonst `-`), vor jedem Nachschlagen und Provider-Aufruf; Zähler `validate_refused_no_actor` statt `validate_without_actor` (entfernt). Damit gibt es keinen Weg mehr an der Admin-Prüfung aus #101 vorbei. Geschwister geprüft, keines hat dieselbe Lücke: `async_list_backups`, `async_get_backup`, `async_list_drift_acks`, `async_get_baseline`, `ssh_pin_status`, `acl_offer` liefern nur Metadaten ohne Inhalt; `async_apply_retention` läuft als System nach Core-Politik; `on_config_option_changed`/`audit_config_option_changed` und `emit` nutzen `actor` nur zur Zuordnung im Audit, nicht als Zugriffsprüfung. | B (Signatur und Verhalten) |
+| 112 | Modul-Schlüssel (L3, §11.5): ein Satz zur Grenze; Modul-Schlüssel trennen Module gegen Versehen, nicht gegen feindlichen Code im selben Prozess. Nur Doku, kein Code. | Doku |
+| 113 | Guard (L4, §6.3): `ActionGuard(..., router_known: Callable[[str], bool] \| None = None)`, der Core übergibt die Registry-Abfrage; ohne ihn ist nur `-` bekannt. Ratenbegrenzte `active`-Aktion für eine unbekannte `router_id` (nicht `-`) ⇒ `DENIED` `unknown_router` (neu `REASON_UNKNOWN_ROUTER`), Sicherheitsring unter `-`, Entscheidung mit `router_id` `-`, Zähler `rate_unknown_router` (neu), kein Rate-Fenster. Eine Lookup-Funktion, die wirft, zählt als „unbekannt“. Vorher legte jede erfundene Kennung ein Fenster an und verdrängte ab 1024 die Fenster echter Router (deren Limit begann neu). | A (Parameter, Konstante, Zähler); B (Verhalten: unbekannte Router werden für ratenbegrenzte Aktionen abgelehnt) |
+| 114 | Maskierung (N1, §13): Ein Record kann sein Feld in mehreren Namensfeldern nennen (`key`, `name`, `field`, `param`, `parameter`, `setting`). Es werden jetzt ALLE Namensfelder geprüft: Trägt irgendeines einen geheimen Namen, werden die Werte maskiert, unabhängig von der Reihenfolge; die strenge Kennungs-Wertregel (#108) gilt nur, wenn keines geheim ist. Vorher beendete ein erlaubter Kennungsname (`sort_key`, `rule_key` …) die Prüfung, und z. B. `{"key":"sort_key","field":"password","value":…}` zeigte den Wert. | A (stellt das Verhalten von 1.44.0 wieder her) |
+
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 
 | # | Punkt | Entscheidung | Grund |
@@ -1672,3 +1974,9 @@ Wortliste des Reviews waren es noch 7 (`r0kh`, `r1kh`, `pincode`, `param_enc`, `
    eine spätere Adoption holt die Versionen nicht zurück.
 6. ~~Soll der Core für den Dedup zusätzlich seine eigenen sha256 vergleichen?~~
    **Entschieden (1.44.0): ja** (7.4, #72).
+
+### 19.5 Vorgemerkte Folgeschritte (kein Code in dieser Runde)
+
+1. **Guard-Ablehnungen werden nie dedupliziert (N2).** Jede Ablehnung (`security.authorization_denied`, auch `unknown_router` aus #113) schreibt einen eigenen Core-Eintrag in den Sicherheitsring. Code im Prozess, der Ablehnungen in Schleife auslöst, kann damit ältere Core-Einträge verdrängen. Folgeschritt: wiederholte Ablehnungen je (Akteur, Aktion, Grund) zählen (`repeat_count`), statt neu zu schreiben.
+2. **Modul-Ereignisse im allgemeinen Ring.** Das Kontingent aus #109 gilt nur für den Sicherheitsring. Im allgemeinen Ring (1000 Einträge) können Modul-Ereignisse weiterhin ältere Einträge verdrängen, auch solche des Core.
+3. **`auth` bleibt für Zähler gesperrt (entschieden).** Zähler wie `auth_failures` werden maskiert (#110); Module benennen sie um.
