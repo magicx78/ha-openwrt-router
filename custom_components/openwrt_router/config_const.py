@@ -6,6 +6,9 @@ config_* modules share lives here, not in const.py.
 Area and risk values are plain strings. config_diff defines the StrEnums
 ``Area``/``Risk`` with exactly these values, so both compare equal.
 
+Secrets are masked by ``core_masking`` only; this module adds the thin
+bridge for the names the core does not catch yet (section "Secrets").
+
 This module is pure: no Home Assistant imports, no I/O.
 """
 
@@ -13,10 +16,25 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, fields, is_dataclass
 from fnmatch import fnmatchcase
 from types import MappingProxyType
-from typing import Final
+from typing import Any, Final
+
+from .core_masking import (
+    MASK,
+    MAX_DEPTH,
+    READABLE_CONTEXT_OPTIONS,
+    SAFE_KEYS,
+    is_secret_key,
+    is_secret_option,
+    is_secret_path,
+    is_snapshot_secret,
+    mask_for_output,
+    mask_value,
+    redact_text,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -81,201 +99,287 @@ UCI_CONFIGS: Final[tuple[str, ...]] = (
 )
 
 # ---------------------------------------------------------------------------
-# Secrets (plan section 14)
+# Secrets (plan section 14): core_masking plus a thin bridge
 # ---------------------------------------------------------------------------
+#
+# There is exactly one masking, ``core_masking`` (contract
+# docs/dev/configuration-api-v1.md section 13): names, patterns, whitelist,
+# archive paths, digest, placeholder and free-text rules all come from it.
+# The names and the pattern below are only what the configuration manager
+# caught before the switch and core_masking 1.44.0 does not ("gap in the
+# core, bridged here"). The functions further down put them ON TOP of the
+# core (secret if the core OR the bridge says so); they never lift a core
+# decision. Each gap has an acceptance test in tests/test_config_mask.py
+# (``test_bridge_*``); once the core covers a name, drop it here.
 
-MASK_PLACEHOLDER: Final = "***"
-# redact_text works on at most this many characters (review H4); longer
-# text is cut first and gets the marker appended. stderr is cut at 4 KiB
-# already, so only hostile or broken input reaches the cap.
-REDACT_MAX_CHARS: Final = 65536
-REDACT_TRUNCATED: Final = " [truncated]"
-# Snapshot form of a secret value: {"secret": "<hmac16>"} (plan 3.2 point 6).
-SECRET_MARKER_KEY: Final = "secret"
-SECRET_DIGEST_LENGTH: Final = 16
-SECRET_DIGEST_MIN_KEY_BYTES: Final = 16
-
-# 14.1 exact option names, independent of the config.
-SECRET_OPTIONS: Final[frozenset[str]] = frozenset(
+# Exact UCI option names that are secret in every config. network: GRE keys
+# (ikey/okey), openconnect OTP secret and form fields, generic key
+# spellings; openvpn: static TLS keys and the PKCS#12 bundle (the core reads
+# them as file paths and keeps them readable); luci session store; usteer
+# key_value (the core keeps it readable). An exact name here wins over the
+# core's readable names.
+CONFIG_EXTRA_SECRET_OPTIONS: Final[frozenset[str]] = frozenset(
     {
-        "key",
-        "key1",
-        "key2",
-        "key3",
-        "key4",
-        "password",
-        "passwd",
-        "psk",
-        "sae_password",
-        "auth_secret",
-        "acct_secret",
-        "dae_secret",
-        "priv_key_pwd",
-        "private_key",
-        "preshared_key",
-        "secret",
-        "token",
-        "api_key",
-        "apikey",
-        "auth_key",
-        "shared_secret",
-        "pre_shared_key",
-        "pin",
-        "pincode",
-        "wps_pin",
-        "r0kh",
-        "r1kh",
-        "mesh_psk",
-        "nas_secret",
-        # Review C2. network: 6in4 tunnelbroker update key, raw pppd
-        # options (may carry "password …"), GRE tunnel keys, openconnect
-        # OTP secret and form fields; openvpn: static TLS keys and the
-        # PKCS#12 bundle; luci session store; generic key spellings.
-        "updatekey",
-        "pppd_options",
         "authkey",
-        "sharedkey",
-        "privkey",
-        "otp",
-        "ikey",
-        "okey",
-        "token_secret",
         "form_entry",
+        "ikey",
+        "key_value",
+        "okey",
+        "otp",
+        "pkcs12",
+        "privkey",
+        "sauth",
+        "sharedkey",
         "tls_auth",
         "tls_crypt",
         "tls_crypt_v2",
-        "pkcs12",
-        "sauth",
     }
 )
 
-
-@dataclass(frozen=True, slots=True)
-class SecretContextRule:
-    """Options that are secret inside a given config/section type (globs)."""
-
-    config: str
-    section_type: str
-    options: frozenset[str]
-
-
-# 14.1 context-dependent names. The masking treats these names as secret
-# everywhere as well (over-masking is harmless, under-masking is not).
-SECRET_CONTEXT_OPTIONS: Final[tuple[SecretContextRule, ...]] = (
-    SecretContextRule(
-        "ddns",
-        "service",
-        frozenset({"password", "param_enc", "param_opt", "update_url"}),
-    ),
-    SecretContextRule("rpcd", "login", frozenset({"password"})),
-    SecretContextRule("network", "interface", frozenset({"password", "pincode"})),
-    SecretContextRule(
-        "network", "wireguard_*", frozenset({"private_key", "preshared_key"})
-    ),
-    SecretContextRule(
-        "openvpn", "*", frozenset({"auth_user_pass", "askpass", "secret", "key"})
-    ),
+# Safety net for unknown names, the part of the former pattern the core's
+# precise pattern lacks: "key" at the end of a word (also CamelCase
+# "accessKey"), "key_" ("key_value"), "auth...key", raw daemon options
+# ("*_options"), a standalone "otp" and "cookie" ("peer_cookie"). Searched
+# in the normalised name. The core's readable names (SAFE_KEYS and every
+# name of READABLE_CONTEXT_OPTIONS, in any config, as the former whitelist)
+# are exempt from it, never from the exact names above.
+CONFIG_EXTRA_SECRET_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"cookie|key\d*$|key_|auth[a-z0-9_]{0,32}key|_options$|(?:^|_)otp(?:$|_)"
 )
 
-# Not UCI options, but names that carry credentials in HTTP bodies, headers
-# and command output (plan 14.3: the ubus session token).
-SECRET_EXTRA_NAMES: Final[frozenset[str]] = frozenset(
-    {
-        "sessionid",
-        "session_id",
-        "ubus_rpc_session",
-        "authorization",
-        "proxy_authorization",
-        "cookie",
-        "set_cookie",
-    }
+
+def _normalised_option(name: str) -> str:
+    """Lower case, ``-`` as ``_``, no quotes/leading dashes, last dotted part.
+
+    The same normalisation as core_masking applies to names.
+    """
+    norm = name.strip().strip("'\"").lower().replace("-", "_").lstrip("_")
+    return norm.rsplit(".", 1)[-1]
+
+
+_CORE_READABLE_NAMES: Final[frozenset[str]] = SAFE_KEYS | frozenset(
+    name for rule in READABLE_CONTEXT_OPTIONS for name in rule.options
 )
 
-# Safety net for unknown names. Plan 14.1 pattern plus "pwd" and "apikey".
-# Matched with re.search against the lower-case name, "-" normalised to "_".
-# Review C2 widened it: "key" at the end of a word (also CamelCase
-# "accessKey" -> "accesskey", digits allowed: "key2") or followed by "_"
-# ("key_value"), "auth…key", "*_options" (raw daemon options such as
-# pppd_options), a standalone "otp" and "cookie" (l2tpv3 cookies).
-SECRET_OPTION_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+
+def _bridge_secret(norm: str) -> bool:
+    """True if the bridge (not the core) calls a normalised name secret."""
+    if norm in CONFIG_EXTRA_SECRET_OPTIONS:
+        return True
+    return norm not in _CORE_READABLE_NAMES and bool(
+        CONFIG_EXTRA_SECRET_PATTERN.search(norm)
+    )
+
+
+def is_config_secret_option(config: str, section_type: str, option: str) -> bool:
+    """True if UCI ``config.<section_type>.option`` holds a secret.
+
+    The snapshot decision (digest marker instead of the value) and the diff's
+    secret flag: the core's precise rule
+    (:func:`core_masking.is_snapshot_secret`, readable switches such as
+    dropbear ``PasswordAuth`` or wireless ``sae_pwe`` stay plain text) OR
+    the bridge above.
+    """
+    if is_snapshot_secret(config, section_type, option):
+        return True
+    if not isinstance(option, str):
+        return False
+    norm = _normalised_option(option)
+    return bool(norm) and _bridge_secret(norm)
+
+
+def _is_bridge_name(name: object) -> bool:
+    """True for a mapping key / free-text name the bridge calls secret."""
+    if isinstance(name, bytes):
+        name = name.decode("utf-8", errors="replace")
+    if not isinstance(name, str):
+        return False
+    norm = _normalised_option(name)
+    return bool(norm) and _bridge_secret(norm)
+
+
+# Record shapes as core_masking reads them: a change record names its
+# option, a field record its field; these keys then carry the values.
+_RECORD_VALUE_KEYS: Final = frozenset(
+    {"old", "new", "value", "values", "before", "after", "current", "previous"}
+)
+_RECORD_NAME_KEYS: Final = ("key", "name", "field", "param", "parameter", "setting")
+
+
+def _record_is_bridge_secret(mapping: Mapping[Any, Any]) -> bool:
+    option = mapping.get("option")
+    if isinstance(option, str):
+        return _is_bridge_name(option)
+    return any(_is_bridge_name(mapping.get(key)) for key in _RECORD_NAME_KEYS)
+
+
+def _bridge_value(key: Any, value: Any, masked: bool) -> tuple[bool, Any]:
+    """(True, masked value) if the bridge masks ``value`` under ``key``."""
+    if masked or _is_bridge_name(key):
+        return True, mask_value(value)
+    if isinstance(key, bytes) and is_secret_path(key.decode("utf-8", errors="replace")):
+        # The core checks archive paths on str keys only.
+        keep = value is None or isinstance(value, bool | int | float)
+        return True, value if keep else MASK
+    return False, value
+
+
+def _bridge_namedtuple(obj: Any, stack: set[int], depth: int) -> Any:
+    """A namedtuple read like a record (the field names decide).
+
+    The core masks a namedtuple by field name only, so a change record as a
+    namedtuple (``option="key"``, ``old=…``) would keep its values; and it
+    rebuilds the type without a fallback. Here the record rule is applied
+    (core OR bridge), the secret fields are masked, and a type that refuses
+    the masked values becomes a dict.
+    """
+    as_map = dict(zip(obj._fields, obj, strict=False))
+    option = as_map.get("option")
+    record = _record_is_bridge_secret(as_map) or (
+        isinstance(option, str)
+        and is_secret_option(
+            str(as_map.get("config") or ""),
+            str(as_map.get("section_type", as_map.get("type")) or ""),
+            option,
+        )
+    )
+    items = [
+        mask_value(item)
+        if (record and name.lower() in _RECORD_VALUE_KEYS)
+        or is_secret_key(name)
+        or _is_bridge_name(name)
+        else _bridge(item, stack, depth + 1)
+        for name, item in as_map.items()
+    ]
+    try:
+        return type(obj)(*items)
+    except Exception:  # noqa: BLE001 - a custom __new__ may refuse the mask
+        return dict(zip(obj._fields, items, strict=False))
+
+
+def _bridge(obj: Any, stack: set[int], depth: int) -> Any:
+    """Copy of ``obj`` with only the bridge's secrets masked.
+
+    Walks what core_masking walks (mappings, dataclasses, lists, tuples,
+    namedtuples); everything else, deeper nesting and cycles are left to
+    the core, which masks or truncates them.
+    """
+    is_dc = is_dataclass(obj) and not isinstance(obj, type)
+    if depth > MAX_DEPTH or not (is_dc or isinstance(obj, Mapping | list | tuple)):
+        return obj
+    ident = id(obj)
+    if ident in stack:
+        return MASK  # a cycle, masked as the core masks it
+    stack.add(ident)
+    try:
+        if is_dc:
+            obj = {f.name: getattr(obj, f.name) for f in fields(obj)}
+        if isinstance(obj, Mapping):
+            masked = _record_is_bridge_secret(obj)
+            out: dict[Any, Any] = {}
+            for key, value in obj.items():
+                in_record = masked and isinstance(key, str)
+                hit, new = _bridge_value(
+                    key, value, in_record and key.lower() in _RECORD_VALUE_KEYS
+                )
+                out[key] = new if hit else _bridge(value, stack, depth + 1)
+            return out
+        if isinstance(obj, tuple) and hasattr(obj, "_fields"):
+            return _bridge_namedtuple(obj, stack, depth)
+        items = [_bridge(item, stack, depth + 1) for item in obj]
+        return items if isinstance(obj, list) else tuple(items)
+    finally:
+        stack.discard(ident)
+
+
+def is_config_secret_name(name: object) -> bool:
+    """The name decision of :func:`config_mask_for_output` for a mapping key.
+
+    :func:`core_masking.is_secret_key` (broad: readable switches without a
+    config such as ``sae_pwe`` count as secret) OR the bridge.
+    """
+    return is_secret_key(name) or _is_bridge_name(name)
+
+
+def config_mask_for_output(data: Any) -> Any:
+    """:func:`core_masking.mask_for_output` with the bridge's names on top.
+
+    The last barrier before HTTP responses, logs and events of the
+    configuration manager. Never mutates ``data``.
+    """
+    return mask_for_output(_bridge(data, set(), 0))
+
+
+# Free-text heads after which a value follows (UCI file line, assignment /
+# JSON pair, command-line flag). Names are taken possessively from the start
+# of a run of name characters, so the scan stays linear.
+_TEXT_HEAD_RES: Final = (
+    re.compile(r"\b(?:option|list)[ \t]+(['\"]?)(?P<name>[A-Za-z0-9_.\-]++)\1[ \t]+"),
     re.compile(
-        r"(pass|secret|token|psk|private|credential|pwd|apikey|cookie"
-        r"|key\d*$|key_|auth[a-z0-9_]{0,32}key|_options$|(?:^|_)otp(?:$|_)|pin$)"
+        r"(?P<q>[\"']?)(?<![\w.@\[\]\-])(?P<name>[\w.@\[\]\-]++)(?P=q)[ \t]*[=:][ \t]*"
     ),
+    re.compile(r"(?<![\w\-])(?P<name>--?[A-Za-z][A-Za-z0-9_\-]*+)[ \t]+(?=[^\s\-])"),
+)
+# A quoted value the core masked after an assignment, a tab or a flag,
+# followed by more text on the same line: the core ends a quoted value at
+# its closing quote and keeps the rest ("psk='a' x S", "psk='a'; S"). As
+# before the switch, the rest of such a line goes too (over-masking on
+# purpose). Unquoted values already run to the end of the line in the core.
+_MASKED_THEN_REST_RE: Final = re.compile(
+    r"(?P<head>(?:[=:]|(?<!\S)--?[A-Za-z][A-Za-z0-9_\-]*+)[ \t]*+|\t)"
+    r"(?P<value>(?P<q>['\"])" + re.escape(MASK) + r"(?P=q))(?P<rest>[^\r\n]+)"
 )
 
-# Names the pattern would hit but whose value is not secret and is needed.
-# Applies only to the pattern, never to SECRET_OPTIONS or context names.
-# Entries are lower-case: the check runs on the normalised (lower-case) name.
-# dropbear PasswordAuth/RootPasswordAuth are on/off switches; the diff must
-# show "on -> off" because they decide whether HA can still log in. The
-# rest are hostapd/wireless, dropbear, openvpn and RADIUS settings whose
-# names look like secrets (review C2, exact list).
-SECRET_OPTION_WHITELIST: Final[frozenset[str]] = frozenset(
-    {
-        "ft_psk_generate_local",
-        "keepalive",
-        "persistent_keepalive",
-        "key_mgmt",
-        "passwordauth",
-        "rootpasswordauth",
-        "maxauthtries",
-        "sae_pwe",
-        "sae_require_mfp",
-        "wpa_group_rekey",
-        "wpa_disable_eapol_key_retries",
-        "wpa_strict_rekey",
-        "auth_cache",
-        "r0_key_lifetime",
-        "auth_type",
-        "auth_nocache",
-        "key_direction",
-        "auth_server",
-        "auth_port",
-        "acct_server",
-        "acct_port",
-        "macfilter",
-        "maclist",
-    }
-)
 
-# 14.2 archive members whose content never leaves HA (path + presence only).
-# fnmatch globs against the normalised, lower-case member name; "*" also
-# matches "/", so "etc/wireguard/*" covers sub-directories.
-SECRET_ARCHIVE_PATHS: Final[tuple[str, ...]] = (
-    "etc/shadow",
-    "etc/shadow-",
-    "etc/passwd",
-    "etc/passwd-",
-    "etc/dropbear/*",
-    "root/.ssh/*",
-    "*/.ssh/*",
-    "etc/uhttpd.key",
-    "etc/config/rpcd",
-    "etc/config/wireless",
-    "etc/config/network",
-    "etc/config/ddns",
-    "etc/config/openvpn",
-    "etc/config/acme",
-    "etc/wireguard/*",
-    "etc/openvpn/*",
-    "etc/acme/*",
-    "etc/ssl/private/*",
-    "etc/luci-uploads/*",
-    "etc/ipsec.secrets",
-    "etc/swanctl/*",
-    "etc/ppp/chap-secrets",
-    "etc/ppp/pap-secrets",
-    "etc/crontabs/*",
-    "*.psk",
-    "*.key",
-    "*.p12",
-    "*.pfx",
-)
+def _mask_rest(match: re.Match[str]) -> str:
+    rest = match.group("rest")
+    if not rest.strip():
+        return match.group(0)
+    return f"{match.group('head')}{match.group('value')} {MASK}"
+
+
+def _mask_bridge_heads(text: str, head_re: re.Pattern[str]) -> str:
+    """Mask the rest of the line after every head naming a bridge secret."""
+    out: list[str] = []
+    pos = 0
+    for match in head_re.finditer(text):
+        if match.start() < pos or not _is_bridge_name(match.group("name")):
+            continue
+        end = text.find("\n", match.end())
+        end = len(text) if end < 0 else end
+        if end > match.end() and text[end - 1] == "\r":
+            end -= 1
+        if end <= match.end():
+            continue
+        value = text[match.end() : end]
+        quoted = len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]
+        out.append(text[pos : match.end()])
+        out.append(f"{value[0]}{MASK}{value[0]}" if quoted else MASK)
+        pos = end
+    if not out:
+        return text
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def config_redact_text(text: object) -> str:
+    """:func:`core_masking.redact_text` with the bridge on top.
+
+    After the core: values after a head naming a bridge secret (``option
+    ikey '…'``, ``okey=…``, ``--form-entry …``) are masked to the end of the
+    line, and so is the rest of a line after a value the core masked. The
+    core already cut the text to its length limit, so this stays linear.
+    """
+    out = redact_text(text)
+    for head_re in _TEXT_HEAD_RES:
+        out = _mask_bridge_heads(out, head_re)
+    return _MASKED_THEN_REST_RE.sub(_mask_rest, out)
+
 
 # Review M4: archive members a restore writes back that decide how one logs
 # in (passwords, SSH keys, SSH host keys, the uhttpd TLS key pair). Same
-# glob rules as SECRET_ARCHIVE_PATHS. Only their presence is reported.
+# glob rules as core_masking.SECRET_ARCHIVE_PATHS. Only their presence is
+# reported.
 ACCESS_ARCHIVE_PATHS: Final[tuple[str, ...]] = (
     "etc/shadow",
     "etc/passwd",

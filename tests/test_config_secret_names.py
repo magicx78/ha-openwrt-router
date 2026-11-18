@@ -3,6 +3,13 @@
 Each name is checked end to end: detection, the snapshot (digest marker,
 never the plaintext), the diff (no plaintext in old/new) and the output
 masking. A fixed whitelist of look-alike names must stay readable.
+
+Since 2026-11-18 these run as acceptance tests against core_masking plus
+the configuration manager's bridge (config_const). Readable names are
+judged in their real config: the core keeps them readable in the snapshot,
+the diff and a change record that names its config; a bare key or a text
+line without a config is masked by the core's broad rule for some of them
+(accepted over-masking, display only, M6).
 """
 
 from __future__ import annotations
@@ -12,15 +19,22 @@ from typing import Any
 
 import pytest
 
-from custom_components.openwrt_router import config_const as cc
+from custom_components.openwrt_router import core_masking as cm
+from custom_components.openwrt_router.config_const import (
+    config_mask_for_output as mask_for_output,
+)
+from custom_components.openwrt_router.config_const import (
+    config_redact_text as redact_text,
+)
+from custom_components.openwrt_router.config_const import (
+    is_config_secret_option as is_secret_option,
+)
 from custom_components.openwrt_router.config_diff import diff_snapshots
-from custom_components.openwrt_router.config_mask import (
-    is_secret_option,
-    mask_for_output,
-    redact_text,
+from custom_components.openwrt_router.config_snapshot import build_snapshot
+from custom_components.openwrt_router.core_masking import (
+    SECRET_MARKER_KEY,
     secret_digest_factory,
 )
-from custom_components.openwrt_router.config_snapshot import build_snapshot
 
 SECRET = "Hx7kP2mQ9wLzSecret"
 DIGEST = secret_digest_factory(b"k" * 32)
@@ -49,7 +63,7 @@ NEW_SECRETS = [
 ]
 
 # Must stay readable (review C2, exact list) plus the openvpn digest
-# algorithm "auth" and the PPP auth type "auth".
+# algorithm "auth" and the PPP auth type "auth", each in its real config.
 WHITELIST = [
     "key_mgmt",
     "keepalive",
@@ -75,8 +89,18 @@ WHITELIST = [
     "macfilter",
     "maclist",
 ]
+_REAL_CONFIG = {
+    "keepalive": ("openvpn", "client"),
+    "persistent_keepalive": ("network", "wireguard_wg0"),
+    "passwordauth": ("dropbear", "dropbear"),
+    "rootpasswordauth": ("dropbear", "dropbear"),
+    "maxauthtries": ("dropbear", "dropbear"),
+    "auth_nocache": ("openvpn", "client"),
+    "key_direction": ("openvpn", "client"),
+}
 READABLE = [
-    *(("wireless", "wifi-iface", name) for name in WHITELIST),
+    (*_REAL_CONFIG.get(name, ("wireless", "wifi-iface")), name) for name in WHITELIST
+] + [
     ("openvpn", "client", "auth"),
     ("network", "interface", "auth"),
     ("dropbear", "dropbear", "PasswordAuth"),
@@ -108,7 +132,7 @@ def test_new_secret_name_is_a_digest_in_the_snapshot(
     config, stype, option = case
     snap = _snapshot(config, stype, option, SECRET)
     value = snap.configs[config]["sections"]["s"]["options"][option]
-    assert set(value) == {cc.SECRET_MARKER_KEY}
+    assert set(value) == {SECRET_MARKER_KEY}
     assert SECRET not in json.dumps(snap.configs)
 
 
@@ -132,5 +156,15 @@ def test_whitelisted_names_stay_readable(case: tuple[str, str, str]) -> None:
     assert not is_secret_option(config, stype, option)
     snap = _snapshot(config, stype, option, "visible")
     assert snap.configs[config]["sections"]["s"]["options"][option] == "visible"
-    assert mask_for_output({option: "visible"}) == {option: "visible"}
-    assert redact_text(f"option {option} 'visible'") == f"option {option} 'visible'"
+    # The diff record names its config: the value stays readable.
+    old = _snapshot(config, stype, option, "visible")
+    new = _snapshot(config, stype, option, "other")
+    (change,) = diff_snapshots(old, new, mgmt_host=None)
+    masked = mask_for_output(change)
+    assert (masked["old"], masked["new"]) == ("visible", "other")
+    if not cm.is_secret_key(option):
+        # Without a config only names the core's broad rule lets through
+        # stay readable; the others are masked (accepted over-masking, M6).
+        assert mask_for_output({option: "visible"}) == {option: "visible"}
+        line = f"option {option} 'visible'"
+        assert redact_text(line) == line

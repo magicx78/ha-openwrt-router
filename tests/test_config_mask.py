@@ -15,12 +15,21 @@ from typing import Any, NamedTuple, Self
 import pytest
 
 from custom_components.openwrt_router import config_const as cc
-from custom_components.openwrt_router.config_mask import (
-    is_secret_name,
-    is_secret_option,
+from custom_components.openwrt_router import core_masking as cm
+from custom_components.openwrt_router.config_const import (
+    config_mask_for_output as mask_for_output,
+)
+from custom_components.openwrt_router.config_const import (
+    config_redact_text as redact_text,
+)
+from custom_components.openwrt_router.config_const import (
+    is_config_secret_name as is_secret_name,
+)
+from custom_components.openwrt_router.config_const import (
+    is_config_secret_option as is_secret_option,
+)
+from custom_components.openwrt_router.core_masking import (
     is_secret_path,
-    mask_for_output,
-    redact_text,
     secret_digest_factory,
 )
 
@@ -29,9 +38,11 @@ KEY = b"k" * 32
 
 # Every exact and context-dependent option name from plan section 14.1.
 _CONTEXT_NAMES = sorted(
-    {name for rule in cc.SECRET_CONTEXT_OPTIONS for name in rule.options}
+    {name for rule in cm.SECRET_CONTEXT_OPTIONS for name in rule.options}
 )
-ALL_SECRET_NAMES = sorted(set(cc.SECRET_OPTIONS) | set(_CONTEXT_NAMES))
+ALL_SECRET_NAMES = sorted(
+    set(cm.SECRET_OPTIONS) | set(cc.CONFIG_EXTRA_SECRET_OPTIONS) | set(_CONTEXT_NAMES)
+)
 
 # Section 14.1 literally, so a shrinking constant is caught by the test.
 PLAN_14_1_EXACT = (
@@ -143,7 +154,7 @@ def _dump(obj: Any) -> str:
 
 
 def test_secret_options_cover_plan_section_14_1() -> None:
-    assert set(PLAN_14_1_EXACT) <= cc.SECRET_OPTIONS
+    assert set(PLAN_14_1_EXACT) <= cm.SECRET_OPTIONS
     for (config, section_type), names in PLAN_14_1_CONTEXT.items():
         for name in names:
             assert is_secret_option(config, section_type, name), (config, name)
@@ -288,14 +299,14 @@ def test_all_secret_options_masked(name: str) -> None:
     section = {".type": "wifi-iface", "ssid": "HomeNet", name: SECRET}
     out = mask_for_output({"wireless": {"default_radio0": section}})
     assert SECRET not in _dump(out)
-    assert out["wireless"]["default_radio0"][name] == cc.MASK_PLACEHOLDER
+    assert out["wireless"]["default_radio0"][name] == cm.MASK
     assert out["wireless"]["default_radio0"]["ssid"] == "HomeNet"
 
     # List values (UCI `list` options) and digest markers.
     out = mask_for_output({name: [SECRET, SECRET + "2"]})
-    assert out == {name: cc.MASK_PLACEHOLDER}
+    assert out == {name: cm.MASK}
     out = mask_for_output({name: {"secret": "0123456789abcdef"}})
-    assert out == {name: cc.MASK_PLACEHOLDER}
+    assert out == {name: cm.MASK}
 
     # Free text: UCI file, `uci show`, assignment and JSON forms.
     for text in (
@@ -405,7 +416,7 @@ def test_mask_for_output_json_contains_no_plaintext() -> None:
     iface = out["snapshot"]["wireless"]["@wifi-iface[0]"]
     assert iface["ssid"] == "HomeNet"
     assert iface["encryption"] == "psk2"
-    assert iface["key"] == cc.MASK_PLACEHOLDER
+    assert iface["key"] == cm.MASK
     assert out["changes"][1] == {
         "kind": "changed",
         "config": "wireless",
@@ -414,10 +425,10 @@ def test_mask_for_output_json_contains_no_plaintext() -> None:
         "old": "Old",
         "new": "New",
     }
-    assert out["changes"][0]["old"] == cc.MASK_PLACEHOLDER
+    assert out["changes"][0]["old"] == cm.MASK
     assert out["changes"][2]["new"] is None
     assert isinstance(out["changes"], tuple)
-    assert out["raw"] == cc.MASK_PLACEHOLDER
+    assert out["raw"] == cm.MASK
     assert out["counts"]["critical"] == 1
     assert out["counts"]["secret_changed"] is True
 
@@ -485,19 +496,19 @@ def test_pattern_catches_unknown_secret_names(name: str) -> None:
 
 def test_case_insensitive_keys_and_marker() -> None:
     out = mask_for_output({"PSK": SECRET, "Password": SECRET, "Key2": SECRET})
-    assert set(out.values()) == {cc.MASK_PLACEHOLDER}
+    assert set(out.values()) == {cm.MASK}
     # Digest marker is masked wherever it appears, also under neutral keys.
     assert mask_for_output({"value": {"secret": "abcdef0123456789"}}) == {
-        "value": cc.MASK_PLACEHOLDER
+        "value": cm.MASK
     }
 
 
 def test_empty_and_none_values() -> None:
     out = mask_for_output({"key": "", "psk": None, "pin": 0, "password": []})
-    assert out["key"] == cc.MASK_PLACEHOLDER
+    assert out["key"] == cm.MASK
     assert out["psk"] is None
-    assert out["pin"] == cc.MASK_PLACEHOLDER
-    assert out["password"] == cc.MASK_PLACEHOLDER
+    assert out["pin"] == cm.MASK
+    assert out["password"] == cm.MASK
     assert mask_for_output({}) == {}
     assert mask_for_output([]) == []
     assert mask_for_output(None) is None
@@ -516,7 +527,7 @@ def test_cycle_does_not_recurse_forever() -> None:
     a.append(a)
     out = mask_for_output(a)
     assert out[0] == "x"
-    assert out[1] == cc.MASK_PLACEHOLDER
+    assert out[1] == cm.MASK
 
 
 def test_digest_is_stable_and_key_dependent() -> None:
@@ -525,7 +536,7 @@ def test_digest_is_stable_and_key_dependent() -> None:
     d2 = secret_digest_factory(b"z" * 32)
     value = "wireless/default_radio0/key/" + SECRET
     assert d1(value) == d1(value) == d1b(value)
-    assert len(d1(value)) == cc.SECRET_DIGEST_LENGTH
+    assert len(d1(value)) == cm.SECRET_DIGEST_LENGTH
     assert all(ch in "0123456789abcdef" for ch in d1(value))
     assert d1(value) != d2(value)
     assert d1(value) != d1(value + "x")
@@ -560,8 +571,11 @@ def test_redact_text_free_text_forms() -> None:
 
 
 def test_redact_text_secret_after_readable_pair_on_same_line() -> None:
-    assert redact_text(f"ssid=Home psk={SECRET}") == "ssid=Home psk=***"
-    assert redact_text(f"GET /x?user=a&token={SECRET}&y=1") == "GET /x?user=a&token=***"
+    assert redact_text(f"ssid=Home psk={SECRET}") == f"ssid=Home psk={cm.MASK}"
+    assert (
+        redact_text(f"GET /x?user=a&token={SECRET}&y=1")
+        == f"GET /x?user=a&token={cm.MASK}"
+    )
     red = redact_text(f"r0kh=02:00:00:00:03:00 nas1 0001020304{SECRET}")
     assert SECRET not in red
 
@@ -693,7 +707,7 @@ def test_mask_for_output_masks_namedtuple_fields_by_name() -> None:
         out = mask_for_output(nt)
         assert SECRET not in repr(out)
         assert isinstance(out, _Wifi)
-        assert out.password == cc.MASK_PLACEHOLDER
+        assert out.password == cm.MASK
         assert out.ssid == "Home"
 
     untyped = namedtuple("untyped", "psk ssid")(SECRET, "Home")
@@ -717,7 +731,7 @@ def test_mask_for_output_namedtuple_with_secret_option_record() -> None:
     assert SECRET not in repr(mask_for_output(keyed))
     out = mask_for_output(keyed)
     assert out.option == "key"
-    assert out.old == out.new == cc.MASK_PLACEHOLDER
+    assert out.old == out.new == cm.MASK
     # Not a secret option: values stay (as redacted text).
     assert mask_for_output(change).option == "ssid_note"
 
@@ -729,7 +743,7 @@ def test_mask_for_output_namedtuple_falls_back_to_dict() -> None:
         __slots__ = ()
 
         def __new__(cls, *args: Any) -> Self:
-            if cc.MASK_PLACEHOLDER in args:
+            if cm.MASK in args:
                 raise TypeError("odd")
             return super().__new__(cls, *args)
 
@@ -741,3 +755,133 @@ def test_mask_for_output_namedtuple_falls_back_to_dict() -> None:
 def test_mask_for_output_plain_tuple_still_a_tuple() -> None:
     assert mask_for_output(("a", 1)) == ("a", 1)
     assert isinstance(mask_for_output(("a", 1)), tuple)
+
+
+# ---------------------------------------------------------------------------
+# Bridge: gaps of core_masking 1.44.0 closed in config_const (2026-11-18)
+# ---------------------------------------------------------------------------
+# Each case is a secret the former config_mask caught and core_masking alone
+# leaves in plain text. When the core covers one, drop the bridge entry; the
+# test stays and then checks the core.
+
+BRIDGE_SNAPSHOT_SECRETS = [
+    ("network", "interface", "authkey"),
+    ("network", "interface", "sharedkey"),
+    ("network", "interface", "otp"),
+    ("network", "interface", "ikey"),
+    ("network", "interface", "okey"),
+    ("network", "interface", "form_entry"),
+    ("network", "interface", "privkey"),
+    ("network", "interface", "peer_cookie"),
+    ("network", "interface", "xl2tpd_options"),
+    ("openvpn", "client", "tls_auth"),
+    ("openvpn", "client", "tls_crypt"),
+    ("openvpn", "client", "tls_crypt_v2"),
+    ("openvpn", "client", "pkcs12"),
+    ("luci", "internal", "sauth"),
+    ("acme", "cert", "accessKey"),
+    ("usteer", "usteer", "key_value"),
+]
+
+
+@pytest.mark.parametrize("case", BRIDGE_SNAPSHOT_SECRETS, ids=".".join)
+def test_bridge_snapshot_secret_names(case: tuple[str, str, str]) -> None:
+    """M1: the snapshot stores a digest marker (core OR bridge)."""
+    config, stype, option = case
+    assert is_secret_option(config, stype, option)
+
+
+@pytest.mark.parametrize("name", ["ikey", "okey", "form_entry", "Form-Entry"])
+def test_bridge_output_names(name: str) -> None:
+    """M2: mapping keys, field records and free text with a bridge name."""
+    out = mask_for_output({name: SECRET, "ssid": "a"})
+    assert out == {name: cm.MASK, "ssid": "a"}
+    assert SECRET not in _dump(mask_for_output({"name": name, "value": SECRET}))
+    for text in (
+        f"option {name} '{SECRET}'",
+        f"network.gre.{name}='{SECRET}'",
+        f"{name}={SECRET}",
+        f'{{"{name}": "{SECRET}"}}',
+        f"--{name} {SECRET}",
+    ):
+        red = redact_text(text)
+        assert SECRET not in red, text
+        assert name in red, text
+
+
+@pytest.mark.parametrize(
+    ("config", "stype", "option"),
+    [
+        ("openvpn", "client", "tls_auth"),
+        ("openvpn", "client", "tls_crypt"),
+        ("openvpn", "client", "tls_crypt_v2"),
+        ("openvpn", "client", "pkcs12"),
+        ("usteer", "usteer", "key_value"),
+        ("network", "interface", "ikey"),
+    ],
+)
+def test_bridge_change_records(config: str, stype: str, option: str) -> None:
+    """M3: a change record of a bridge option masks old/new."""
+    record = {
+        "config": config,
+        "section_type": stype,
+        "option": option,
+        "old": SECRET,
+        "new": "x",
+    }
+    out = mask_for_output(record)
+    assert out["old"] == out["new"] == cm.MASK
+    assert out["option"] == option
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "psk='a' x {s}",
+        "psk='a'{s}",
+        "psk='a', '{s}'",
+        "psk='a'; {s}",
+        "psk='a' # {s}",
+        '--password "a" {s}',
+    ],
+)
+def test_bridge_rest_of_line_after_a_quoted_secret(line: str) -> None:
+    """M4: the core ends a quoted value at its quote; the rest goes too."""
+    red = redact_text(line.format(s=SECRET))
+    assert SECRET not in red
+    assert red.startswith(line.split("'", 1)[0].split('"', 1)[0])
+
+
+def test_bridge_rest_of_line_keeps_other_lines_and_urls() -> None:
+    text = f"psk='a' {SECRET}\nssid='HomeNet'\nhttps://admin:pw@10.0.0.1/x"
+    red = redact_text(text)
+    assert SECRET not in red
+    assert "\nssid='HomeNet'\n" in red
+    assert red.endswith(f"https://admin:{cm.MASK}@10.0.0.1/x")
+
+
+def test_bridge_bytes_key_with_a_secret_archive_path() -> None:
+    """M5: a bytes key naming a secret archive member masks its content."""
+    out = mask_for_output({b"etc/shadow": SECRET, b"etc/hosts": "127.0.0.1"})
+    assert out[b"etc/shadow"] == cm.MASK
+    assert out[b"etc/hosts"] == "127.0.0.1"
+    assert mask_for_output({b"etc/shadow": 42}) == {b"etc/shadow": 42}
+
+
+def test_bridge_namedtuple_change_record() -> None:
+    """A namedtuple change record is read like a dict record (core: by field)."""
+    for option in ("key", "tls_auth"):
+        out = mask_for_output(_NtChange("openvpn", option, old=SECRET, new=SECRET))
+        assert isinstance(out, _NtChange)
+        assert out.old == out.new == cm.MASK
+        assert out.option == option
+
+
+def test_bridge_does_not_mutate_and_keeps_cycles_masked() -> None:
+    data: dict[str, Any] = {"ikey": SECRET, "nested": [{"okey": SECRET}]}
+    data["self"] = data
+    original_nested = data["nested"]
+    out = mask_for_output(data)
+    assert SECRET not in repr(out)
+    assert out["self"] == cm.MASK
+    assert data["ikey"] == SECRET and data["nested"] is original_nested

@@ -76,10 +76,11 @@ from .config_const import (
     FETCH_PACKAGELIST,
     FETCH_TIMEOUTS,
     FETCH_UCI,
-    SECRET_MARKER_KEY,
     UCI_CONFIGS,
     WARN_CONFIG_MISSING_IN_ARCHIVE,
     ArchiveLimits,
+    config_mask_for_output,
+    config_redact_text,
 )
 from .config_diff import (
     DETAIL_SECRET_CHANGED,
@@ -91,7 +92,6 @@ from .config_diff import (
 )
 from .config_diff import DriftAck as EngineDriftAck
 from .config_inventory import Inventory
-from .config_mask import mask_for_output, redact_text, secret_digest_factory
 from .config_restore import INSTR_NOT_REVERSIBLE, LEVEL_BLOCK, Finding, dry_run
 from .config_snapshot import (
     NORM_ORDER,
@@ -115,6 +115,7 @@ from .core_errors import (
     RouterPermissionError,
     RouterUnavailableError,
 )
+from .core_masking import SECRET_MARKER_KEY, secret_digest_factory
 from .core_models import (
     MAX_WARNINGS,
     PLAN_ID_PREFIX,
@@ -703,7 +704,7 @@ def _finding_message(finding: Finding) -> str:
     params = ", ".join(
         f"{key}={value}" for key, value in sorted(finding.params.items())
     )
-    return redact_text(f"{finding.code}: {params}" if params else finding.code)
+    return config_redact_text(f"{finding.code}: {params}" if params else finding.code)
 
 
 def _restore_steps(archive_sha256: str) -> tuple[RestoreStep, ...]:
@@ -716,7 +717,7 @@ def _restore_steps(archive_sha256: str) -> tuple[RestoreStep, ...]:
                 "Upload the archive in LuCI or run sysupgrade -r by hand; "
                 "not reversible"
             ),
-            detail=mask_for_output(
+            detail=config_mask_for_output(
                 {"archive_sha256": archive_sha256, "manual": True, "reversible": False}
             ),
         ),

@@ -69,13 +69,12 @@ from .config_const import (
     RISK_MEDIUM,
     RISK_REORDERED,
     RISKS,
-    SECRET_MARKER_KEY,
     SECTION_PRESENCE_CRITICAL,
     SSH_PORTS,
     UPLINK_INTERFACE_NAMES,
+    is_config_secret_option,
     lookup_risk_rule,
 )
-from .config_mask import is_secret_option
 from .config_snapshot import (
     ANON_PREFIX,
     NORM_OPTIONS,
@@ -87,6 +86,7 @@ from .config_snapshot import (
     canonical_json,
 )
 from .const import WAN_PROTOS
+from .core_masking import SECRET_MARKER_KEY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -605,7 +605,7 @@ def _similarity(
         name
         for name in set(old_opts) | set(new_opts)
         if name not in skip
-        and not is_secret_option(config, stype, name)
+        and not is_config_secret_option(config, stype, name)
         and not _has_marker(old_opts.get(name))
         and not _has_marker(new_opts.get(name))
     }
@@ -787,7 +787,7 @@ def _option_changes(
             web_ports=web_ports,
         )
         secret = (
-            is_secret_option(config, stype, opt)
+            is_config_secret_option(config, stype, opt)
             or _has_marker(before)
             or _has_marker(after)
         )

@@ -28,17 +28,12 @@ from custom_components.openwrt_router.config_archive import (
     extract_uci_texts,
     validate_archive,
 )
+from custom_components.openwrt_router.config_const import SNAPSHOT_STALE_S
 from custom_components.openwrt_router.config_const import (
-    MASK_PLACEHOLDER,
-    SECRET_MARKER_KEY,
-    SNAPSHOT_STALE_S,
+    config_mask_for_output as mask_for_output,
 )
 from custom_components.openwrt_router.config_diff import Area, Risk
 from custom_components.openwrt_router.config_inventory import Inventory, parse_release
-from custom_components.openwrt_router.config_mask import (
-    mask_for_output,
-    secret_digest_factory,
-)
 from custom_components.openwrt_router.config_restore import (
     Compatibility,
     RestorePlan,
@@ -50,6 +45,11 @@ from custom_components.openwrt_router.config_snapshot import (
     UciSnapshot,
     build_snapshot,
     parse_uci_file,
+)
+from custom_components.openwrt_router.core_masking import MASK as MASK_PLACEHOLDER
+from custom_components.openwrt_router.core_masking import (
+    SECRET_MARKER_KEY,
+    secret_digest_factory,
 )
 
 DIGEST = secret_digest_factory(b"r" * 32)
@@ -610,6 +610,13 @@ _FORBIDDEN_IMPORTS = (
     "pathlib",
     "tempfile",
 )
+# Pure helpers of the one shared masking, core_masking (reached through
+# config_diff -> config_const since the switch on 2026-11-18): PurePath only
+# for isinstance checks, urllib.parse.unquote for URL-escaped names. Neither
+# touches a file or the network; any other import of these modules fails.
+_ALLOWED_PURE_IMPORTS = {
+    "core_masking": {("pathlib", "PurePath"), ("urllib.parse", "unquote")},
+}
 _WRITE_NAME = re.compile(
     r"(write|apply|execute|upload|send|push|commit|reboot|flash|sysupgrade|"
     r"perform|run_restore|do_restore|restore_backup|^restore$)",
@@ -640,6 +647,25 @@ def _imports(tree: ast.Module) -> tuple[set[str], set[str]]:
     return absolute, relative
 
 
+def _allowed_tops(name: str, tree: ast.Module) -> set[str]:
+    """Forbidden top-level modules ``name`` may import (only listed names)."""
+    allowed = _ALLOWED_PURE_IMPORTS.get(name, set())
+    tops: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            pairs = {(node.module, alias.name) for alias in node.names}
+            if pairs <= allowed:
+                tops.add(node.module.split(".")[0])
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            tops -= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            pairs = {(node.module, alias.name) for alias in node.names}
+            if not pairs <= allowed:
+                tops.discard(node.module.split(".")[0])
+    return tops
+
+
 def test_restore_module_has_no_router_access() -> None:
     # Every module config_restore pulls in from the package, transitively.
     todo, seen = ["config_restore"], set()
@@ -648,8 +674,10 @@ def test_restore_module_has_no_router_access() -> None:
         if name in seen:
             continue
         seen.add(name)
-        absolute, relative = _imports(_module_tree(name))
+        tree = _module_tree(name)
+        absolute, relative = _imports(tree)
         assert "api" not in relative, name
+        absolute -= _allowed_tops(name, tree)
         assert not absolute & set(_FORBIDDEN_IMPORTS), (name, absolute)
         todo.extend(relative)
     assert {"config_restore", "config_inventory", "config_diff"} <= seen

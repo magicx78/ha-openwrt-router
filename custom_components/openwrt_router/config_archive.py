@@ -52,7 +52,7 @@ from .config_const import (
     WARN_CONFIG_MISSING_IN_ARCHIVE,
     ArchiveLimits,
 )
-from .config_mask import is_secret_path
+from .core_masking import is_secret_path
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -162,7 +162,7 @@ class MemberInfo:
 
     ``sha256`` is the digest of the content (files), of the UTF-8 link
     target (symlinks) or None (directories). For ``secret`` members
-    (``config_mask.is_secret_path``) the digest is for change detection
+    (``core_masking.is_secret_path``) the digest is for change detection
     inside HA only: a short secret file is brute-forceable from it, so it
     must not reach the frontend.
     """

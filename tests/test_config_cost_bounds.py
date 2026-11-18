@@ -22,10 +22,14 @@ import pytest
 from custom_components.openwrt_router import config_const as cc
 from custom_components.openwrt_router.config_archive import extract_uci_texts
 from custom_components.openwrt_router.config_collector import collect_inventory
-from custom_components.openwrt_router.config_mask import (
-    is_secret_name,
-    mask_for_output,
-    redact_text,
+from custom_components.openwrt_router.config_const import (
+    config_mask_for_output as mask_for_output,
+)
+from custom_components.openwrt_router.config_const import (
+    config_redact_text as redact_text,
+)
+from custom_components.openwrt_router.config_const import (
+    is_config_secret_name as is_secret_name,
 )
 from custom_components.openwrt_router.config_provider import _finding_message
 from custom_components.openwrt_router.config_restore import Finding
@@ -36,6 +40,11 @@ from custom_components.openwrt_router.config_snapshot import (
     _show_words,
     parse_uci_file,
     parse_uci_show,
+)
+from custom_components.openwrt_router.core_masking import (
+    MASK,
+    MAX_TEXT_LENGTH,
+    TRUNCATED,
 )
 
 K = 100 * 1024
@@ -73,16 +82,20 @@ def test_secret_name_check_is_fast_on_hostile_names(text: str) -> None:
 
 
 def test_redact_text_caps_the_length() -> None:
-    text = "word " * (cc.REDACT_MAX_CHARS // 2)
+    text = "word " * (MAX_TEXT_LENGTH // 2)
     out = redact_text(text)
-    assert len(out) <= cc.REDACT_MAX_CHARS + 32
-    assert out.endswith(cc.REDACT_TRUNCATED)
+    assert len(out) <= MAX_TEXT_LENGTH + 32
+    assert out.endswith(TRUNCATED)
     # Masking still applies to the kept part.
     assert "Secret9" not in redact_text("psk=Secret9 " + text)
 
 
 def test_long_secret_names_are_still_found() -> None:
-    assert redact_text("x" * 120 + ".password=Hunter2") == "x" * 120 + ".password=***"
+    # The core also masks the 120-character run in front (an opaque run of
+    # 32+ characters, accepted over-masking M7); the head stays.
+    out = redact_text("x" * 120 + ".password=Hunter2")
+    assert "Hunter2" not in out
+    assert out.endswith(f".password={MASK}")
 
 
 def test_finding_message_with_a_huge_board_name_is_fast() -> None:

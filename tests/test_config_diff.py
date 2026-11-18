@@ -17,11 +17,9 @@ from typing import Any
 import pytest
 
 from custom_components.openwrt_router import config_diff as cd
+from custom_components.openwrt_router.config_const import AREAS, RISKS
 from custom_components.openwrt_router.config_const import (
-    AREAS,
-    MASK_PLACEHOLDER,
-    RISKS,
-    SECRET_MARKER_KEY,
+    config_mask_for_output as mask_for_output,
 )
 from custom_components.openwrt_router.config_diff import (
     Area,
@@ -35,14 +33,15 @@ from custom_components.openwrt_router.config_diff import (
     evaluate_drift,
     not_comparable,
 )
-from custom_components.openwrt_router.config_mask import (
-    mask_for_output,
-    secret_digest_factory,
-)
 from custom_components.openwrt_router.config_snapshot import (
     UciSnapshot,
     build_snapshot,
     parse_uci_file,
+)
+from custom_components.openwrt_router.core_masking import MASK as MASK_PLACEHOLDER
+from custom_components.openwrt_router.core_masking import (
+    SECRET_MARKER_KEY,
+    secret_digest_factory,
 )
 
 DIGEST = secret_digest_factory(b"k" * 32)

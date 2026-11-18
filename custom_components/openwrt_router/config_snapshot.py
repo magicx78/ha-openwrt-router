@@ -56,12 +56,12 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from .config_const import (
-    SECRET_MARKER_KEY,
     UCI_CONFIGS,
     UCI_TEXT_MAX_BYTES,
     UPLINK_INTERFACE_NAMES,
+    is_config_secret_option,
 )
-from .config_mask import is_secret_option
+from .core_masking import SECRET_MARKER_KEY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -626,7 +626,7 @@ def _identity(
     config: str, stype: str, options: Mapping[str, Any]
 ) -> dict[str, Any] | None:
     for fields in SECTION_IDENTITY_FIELDS.get((config, stype), ()):
-        if any(is_secret_option(config, stype, field) for field in fields):
+        if any(is_config_secret_option(config, stype, field) for field in fields):
             continue
         values = {field: options.get(field) for field in fields}
         if all(value not in (None, "", []) for value in values.values()):
@@ -654,7 +654,7 @@ def _protect(
     secret_digest: Callable[[str], str],
 ) -> Any:
     """Replace a secret option value by its digest marker (per list element)."""
-    if not is_secret_option(config, stype, option):
+    if not is_config_secret_option(config, stype, option):
         return value
 
     def marker(item: Any) -> dict[str, str]:
@@ -687,7 +687,7 @@ def normalize_uci(
     the same secret in two sections of the same type and config (two SSIDs
     sharing one key) gives the same digest, so their equality is visible
     inside HA. Outside HA the marker is masked anyway
-    (``config_mask.mask_for_output``).
+    (``config_const.config_mask_for_output``).
     """
     prepared: list[tuple[str, str, dict[str, Any]]] = []
     fallback_counts: dict[str, int] = {}

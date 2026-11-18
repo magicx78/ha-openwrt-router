@@ -1160,3 +1160,14 @@ Die Maskierung bleibt vorerst `config_mask`: In der Abnahme gegen `core_masking`
 übrig (16 Namen im Snapshot ohne Digest, `ikey`/`okey`/`form_entry` auch in der Ausgabe, Text nach einem
 geschlossenen Anführungszeichen, bytes-Schlüssel mit Archivpfad); die Fallliste geht über den Master an
 `enterprise-core`.
+
+Nachtrag (2026-11-18, gegen Core v1.44.0): `config_mask.py` ist gelöscht; Snapshot, Diff, Archiv und
+Provider nutzen nur noch `core_masking`, die eigenen Namenslisten in `config_const` sind entfernt. Die
+Lücken, die der Core noch hat (16 Optionsnamen, Text nach einem geschlossenen Anführungszeichen,
+bytes-Schlüssel mit Archivpfad, namedtuple-Änderungssätze), schließt eine dünne Brücke in
+`config_const` (`is_config_secret_option`, `config_mask_for_output`, `config_redact_text`), die nur auf
+den Core aufsetzt; die alten Maskierungstests laufen als Abnahme gegen Core plus Brücke weiter, der
+Snapshot-Hash ist mit alter und neuer Erkennung in allen 2098 Testläufen gleich. Die
+Aufbewahrungsabnahme bleibt bewusst unverändert rot: Die neue Core-Regel (manuelle Versionen werden
+zuletzt verdrängt) löscht unter der Größengrenze auch eine geplante Version, die neben der neuesten
+noch Platz hätte; der Fall geht über den Master an `enterprise-core`.

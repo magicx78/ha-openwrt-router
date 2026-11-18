@@ -74,11 +74,11 @@ from custom_components.openwrt_router.config_inventory import (
     PACKAGE_MANAGER_OPKG,
     Inventory,
 )
-from custom_components.openwrt_router.config_mask import secret_digest_factory
 from custom_components.openwrt_router.config_snapshot import (
     build_snapshot,
     parse_uci_file,
 )
+from custom_components.openwrt_router.core_masking import secret_digest_factory
 
 DIGEST = secret_digest_factory(b"c" * 32)
 MGMT = "192.168.1.1"

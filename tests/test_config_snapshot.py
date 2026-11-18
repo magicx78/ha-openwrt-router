@@ -19,11 +19,7 @@ from typing import Any
 import pytest
 
 from custom_components.openwrt_router.api import _parse_uci_show as api_parse_uci_show
-from custom_components.openwrt_router.config_const import (
-    SECRET_MARKER_KEY,
-    UCI_CONFIGS,
-)
-from custom_components.openwrt_router.config_mask import secret_digest_factory
+from custom_components.openwrt_router.config_const import UCI_CONFIGS
 from custom_components.openwrt_router.config_snapshot import (
     UciSnapshot,
     build_snapshot,
@@ -34,6 +30,10 @@ from custom_components.openwrt_router.config_snapshot import (
     parse_uci_file_detailed,
     parse_uci_show,
     parse_uci_show_detailed,
+)
+from custom_components.openwrt_router.core_masking import (
+    SECRET_MARKER_KEY,
+    secret_digest_factory,
 )
 
 DIGEST = secret_digest_factory(b"k" * 32)
