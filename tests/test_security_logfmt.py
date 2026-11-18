@@ -480,6 +480,9 @@ class TestMessageParsers:
 # Hand-over to the detectors (security_rules.DetectorSet)
 # =====================================================================
 
+# The detectors take contract router ids only (others are counted, not kept).
+DET_ROUTER = "rtr_" + "d" * 32
+
 
 class TestDetectorHandOver:
     def test_fw4_records_reach_port_scan_indicator(self):
@@ -490,6 +493,7 @@ class TestDetectorHandOver:
                 HEAD.replace("12:00:10", f"12:00:{i:02d}")
                 + template.replace("DPT=443", f"DPT={1000 + i}"),
                 assigner=assigner,
+                router=DET_ROUTER,
             ).record
             for i in range(25)
         ]
@@ -497,8 +501,8 @@ class TestDetectorHandOver:
         detectors.feed_records(records)
         live = Liveness()
         live.observe(records)
-        statuses = {"r1": live.statuses("r1", now=RECV)}
-        assert statuses["r1"][DataSource.FIREWALL_LOG].availability is (
+        statuses = {DET_ROUTER: live.statuses(DET_ROUTER, now=RECV)}
+        assert statuses[DET_ROUTER][DataSource.FIREWALL_LOG].availability is (
             Availability.AVAILABLE
         )
         results = {r.detector_id: r for r in detectors.evaluate(RECV, statuses)}
@@ -508,7 +512,10 @@ class TestDetectorHandOver:
         assert "distinct_ports=25" in scan.events[0].evidence
         assert scan.events[0].src.zone == "guest"
         # one guest line hits port 443 on the router: management indicator
-        mgmt_all = [_parse(HEAD + line).record for line in _lines("fw4_kernel.txt")]
+        mgmt_all = [
+            _parse(HEAD + line, router=DET_ROUTER).record
+            for line in _lines("fw4_kernel.txt")
+        ]
         mgmt_set = DetectorSet([FirewallMgmtAccessDetector(threshold=1)])
         mgmt_set.feed_records(mgmt_all)
         (res,) = mgmt_set.evaluate(RECV, statuses)
@@ -521,12 +528,13 @@ class TestDetectorHandOver:
                 HEAD + f"dnsmasq[1]: {i} 192.0.2.10/5{i:04d} query[A] "
                 f"host{i}.example.org from 192.0.2.10",
                 assigner=assigner,
+                router=DET_ROUTER,
             ).record
             for i in range(30)
         ]
         live = Liveness()
         live.observe(records)
-        statuses = {"r1": live.statuses("r1", now=RECV)}
+        statuses = {DET_ROUTER: live.statuses(DET_ROUTER, now=RECV)}
         dset = DetectorSet([DnsManyDomainsDetector(threshold=20)])
         dset.feed_records(records)
         (res,) = dset.evaluate(RECV, statuses)

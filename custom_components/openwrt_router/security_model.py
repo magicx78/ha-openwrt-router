@@ -22,7 +22,19 @@ Alignment with the core contract (section 12):
 * ``type`` is ``security_center.<name>``: module event types live outside
   the core namespaces (contract 12.3; ``security.`` is core-only and
   rejected), while capability names stay below ``security.center.``
-  (contract 5). The matching incident type is ``sec_<name>`` (plan 3).
+  (contract 5). Both prefixes come from the core tables
+  (``MODULE_EVENT_PREFIXES``, ``MODULE_CAPABILITY_NAMESPACES``). The
+  matching incident type is ``sec_<name>`` (plan 3).
+* ``router_id`` is a contract router id (``rtr_`` + 32 hex, checked with
+  ``core_models.is_valid_id``; :func:`valid_router_id`). It stays a
+  parameter: this module never reads the registry.
+* ``actor`` is a ``core_models.Actor`` that carries no Home Assistant user
+  id: :func:`pseudonymous_actor` replaces it with the core pseudonym
+  (``core_masking.pseudonymise_user_id``, ``usr_<12 hex>``) and drops the
+  context ids (the recorder links a context id to its user).
+* Client and endpoint addresses reach ``CoreEvent.data`` only as references
+  made with the core digest (``core_masking.secret_digest_factory``,
+  :func:`identity_digest`).
 * ``dedup_key`` is only the discriminator; the scope is
   ``(router_id or "-", type, dedup_key)`` (contract 12.4,
   :attr:`SecurityEvent.dedup_scope`). Merged duplicates map to
@@ -39,11 +51,23 @@ This module is the only Security Center module that touches the core
 core symbols only through it, so a contract revision changes one file.
 
 Masking: secrets go through ``core_masking.mask_for_output`` (secret keys
-and secrets in free text). The core masks no identities; MAC, IP, domain,
-identity keys (``const.DIAGNOSTICS_TO_REDACT``) and identity ``key=value``
-pairs in free text are masked by the one helper :func:`mask_identities`
-(the only masking helper of the Security Center; all other modules call
-it).
+and secrets in free text) FIRST, on the uncut text. The core masks no
+identities; MAC, IP, domain, identity keys (``const.DIAGNOSTICS_TO_REDACT``)
+and identity ``key=value`` pairs in free text are masked afterwards by the
+one helper :func:`mask_identities` (the only masking helper of the Security
+Center; all other modules call it).
+
+Forgotten routers (core event ``router.forgotten``): :func:`forgotten_router_id`
+reads the event, :func:`forget_router` drops the router's state from every
+holder (detectors, baselines, dedup, liveness, key assigner). The trust book
+is fleet-wide and keeps its records.
+
+Sensitive reads (note for the wiring stage, nothing enforced here): the
+store forms ``SecurityEvent.to_dict``, ``TrustBook.to_dict``/``get``,
+``BaselineBook.to_dict`` and the log records hold MACs, IPs, names and
+domains unmasked. Any later read path for users (panel, service, websocket)
+must require an admin user like the core does for ``config_capture`` /
+``config_compare`` (contract 19.1 #95) and hand out only masked forms.
 """
 
 from __future__ import annotations
@@ -58,32 +82,53 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from .const import DIAGNOSTICS_TO_REDACT
-from .core_masking import MASK, mask_for_output
+from .core_masking import (
+    ACTOR_PSEUDONYM_HEX_LENGTH,
+    ACTOR_PSEUDONYM_PREFIX,
+    MASK,
+    MAX_DEPTH,
+    TRUNCATED,
+    mask_for_output,
+    pseudonymise_user_id,
+    secret_digest_factory,
+)
 from .core_models import (
     CORRELATION_ID_PREFIX,
     EVENT_ID_PREFIX,
+    MODULE_CAPABILITY_NAMESPACES,
+    MODULE_EVENT_PREFIXES,
+    ROUTER_ID_PREFIX,
+    Actor,
     Capability,
     CapabilityReason,
+    CapabilityState,
     CapabilityStatus,
     CoreEvent,
+    CoreEventType,
     EventResult,
     Severity,
     is_core_event_type,
+    is_valid_id,
 )
 from .core_models import normalize_mac as _core_normalize_mac
 
 _LOGGER = logging.getLogger(__name__)
 
-__all__ = ["EventResult", "Severity"]  # re-exported for the security modules
+# re-exported for the security modules
+__all__ = ["Actor", "EventResult", "Severity"]
 
 SCHEMA_VERSION: Final = 1
-EVENT_PREFIX: Final = "security_center."  # event types (contract 12.3)
-CAPABILITY_PREFIX: Final = "security.center."  # capabilities (contract 5)
+MODULE_SOURCE: Final = "security_center"  # CoreEvent.source, core module name
+# Event types (contract 12.3) and capabilities (contract 5 / 17.1).
+EVENT_PREFIX: Final = MODULE_EVENT_PREFIXES[MODULE_SOURCE]
+CAPABILITY_PREFIX: Final = f"{MODULE_CAPABILITY_NAMESPACES[MODULE_SOURCE]}center."
 INCIDENT_PREFIX: Final = "sec_"
-MODULE_SOURCE: Final = "security_center"  # CoreEvent.source
+# Domain of the identity references (the core digest key is shared with
+# the configuration digests, so the value names its use).
+IDENTITY_DIGEST_DOMAIN: Final = "security_center/identity/"
 
 MAX_EVIDENCE: Final = 8
 MAX_EVIDENCE_LEN: Final = 160
@@ -315,22 +360,29 @@ def _mask_text(text: str) -> str:
 
 
 def mask_identities(value: Any) -> Any:
-    """Copy of ``value`` with identities and secrets masked (logs, diagnostics).
+    """Copy of ``value`` with secrets and identities masked (logs, diagnostics).
 
-    Identities (the part the core does not cover): mapping keys that name
-    one (``mac``, ``ip``, ``hostname``, ``domain``, ``client`` …) get the
-    core MASK; strings anywhere have identity ``key=value`` pairs, MACs,
-    IPv4/IPv6 addresses and domain names replaced. Then everything goes
-    through ``core_masking.mask_for_output`` (secret keys, secrets in free
-    text). A bare hostname inside free text without a key cannot be
-    recognised: keep hostnames in keyed fields. ``None`` stays ``None``.
+    First ``core_masking.mask_for_output`` on the original value (secret
+    keys, secrets in free text): the core must judge the uncut text, since
+    a token cut by the length cap below is too short for it to recognise.
+    A secret value is masked by the core up to the end of its line, so an
+    identity behind it is gone with it.
+
+    Then the identities (the part the core does not cover): mapping keys
+    that name one (``mac``, ``ip``, ``hostname``, ``domain``, ``client`` …)
+    get the core MASK; strings anywhere are cleaned and capped
+    (:func:`clean_text`) and have identity ``key=value`` pairs, MACs,
+    IPv4/IPv6 addresses and domain names replaced. A bare hostname inside
+    free text without a key cannot be recognised: keep hostnames in keyed
+    fields. ``None`` stays ``None``; deeper than the core's ``MAX_DEPTH``
+    becomes the core's ``TRUNCATED``.
     """
-    return mask_for_output(_mask_identity_walk(value))
+    return _mask_identity_walk(mask_for_output(value))
 
 
 def _mask_identity_walk(value: Any, _depth: int = 0) -> Any:
-    if _depth > 16:
-        return MASK
+    if _depth > MAX_DEPTH:
+        return TRUNCATED
     if value is None or isinstance(value, bool | int | float):
         return value
     if isinstance(value, str):
@@ -352,6 +404,73 @@ def _mask_identity_walk(value: Any, _depth: int = 0) -> Any:
 def normalize_mac(value: object) -> str | None:
     """``aa:bb:cc:dd:ee:ff`` (core contract form) or None if not a MAC."""
     return _core_normalize_mac(value)
+
+
+def valid_router_id(value: object) -> str | None:
+    """``value`` if it is a contract router id (``rtr_`` + 32 hex), else None.
+
+    No normalisation: the registry hands out exactly this form and rejects
+    every other one (contract 3, 19.1 #61).
+    """
+    return value if is_valid_id(value, ROUTER_ID_PREFIX) else None  # type: ignore[return-value]
+
+
+# --- actors and identity references -------------------------------------------
+
+_PSEUDONYM_RE = re.compile(
+    rf"{re.escape(ACTOR_PSEUDONYM_PREFIX)}[0-9a-f]{{{ACTOR_PSEUDONYM_HEX_LENGTH}}}"
+)
+
+
+def is_pseudonym(value: object) -> bool:
+    """True for a core user pseudonym ``usr_<12 hex>``."""
+    return isinstance(value, str) and _PSEUDONYM_RE.fullmatch(value) is not None
+
+
+def pseudonymous_actor(actor: Actor | None, salt: bytes) -> Actor | None:
+    """Copy of ``actor`` fit for an event: no Home Assistant user id.
+
+    ``user_id`` becomes ``core_masking.pseudonymise_user_id(user_id, salt)``
+    (an existing pseudonym is kept); ``context_id`` and
+    ``parent_context_id`` are dropped, because the recorder stores the user
+    of every context. Kind, module and ``is_admin`` stay.
+    """
+    if actor is None:
+        return None
+    user = actor.user_id
+    if user is not None and not is_pseudonym(user):
+        user = pseudonymise_user_id(user, salt)
+    return Actor(
+        kind=actor.kind, user_id=user, module=actor.module, is_admin=actor.is_admin
+    )
+
+
+def _check_actor(actor: Any) -> None:
+    if actor is None:
+        return
+    if not isinstance(actor, Actor):
+        raise TypeError("actor must be a core Actor")
+    if actor.user_id is not None and not is_pseudonym(actor.user_id):
+        raise ValueError("events carry user pseudonyms only (pseudonymous_actor)")
+    if actor.context_id is not None or actor.parent_context_id is not None:
+        raise ValueError("events carry no context ids (pseudonymous_actor)")
+
+
+def identity_digest(key: bytes) -> Callable[[str], str]:
+    """Reference function for client and endpoint identities (core digest).
+
+    ``core_masking.secret_digest_factory(key)`` (HMAC-SHA256, 16 hex, key of
+    at least 16 bytes; TypeError/ValueError otherwise) over
+    ``IDENTITY_DIGEST_DOMAIN + value``. A MAC is normalised first, other
+    values are stripped and lower-cased, so one device has one reference.
+    """
+    digest = secret_digest_factory(key)
+
+    def ref(value: str) -> str:
+        mac = normalize_mac(value)
+        return digest(IDENTITY_DIGEST_DOMAIN + (mac or value.strip().lower()))
+
+    return ref
 
 
 # --- ids ----------------------------------------------------------------------
@@ -474,8 +593,9 @@ class SecurityEvent:
 
     Construction sanitises every text (control characters dropped, lengths
     and the evidence list capped). ``assessment=CONFIRMED`` without
-    :func:`can_confirm` raises ValueError. ``repr`` never shows the client,
-    addresses or evidence text.
+    :func:`can_confirm` raises ValueError, so do a ``router_id`` that is not
+    a contract router id and an ``actor`` with a raw user id or a context
+    id. ``repr`` never shows the client, addresses, actor or evidence text.
     """
 
     event_id: str
@@ -499,6 +619,7 @@ class SecurityEvent:
     linked_incident_ids: tuple[str, ...] = ()
     count: int = 1
     last_ts: float | None = None
+    actor: Actor | None = field(default=None, repr=False)  # pseudonymous only
 
     def __post_init__(self) -> None:
         """Validate and sanitise (frozen: values are set once, here)."""
@@ -518,7 +639,8 @@ class SecurityEvent:
         set_(self, "severity", Severity(self.severity))
         set_(self, "result", EventResult(self.result))
         set_(self, "assessment", Assessment(self.assessment))
-        set_(self, "router_id", _opt_text(self.router_id))
+        if self.router_id is not None and valid_router_id(self.router_id) is None:
+            raise ValueError("router_id must be a contract router id (rtr_...)")
         set_(self, "entry_id", _opt_text(self.entry_id))
         set_(self, "correlation_id", _opt_text(self.correlation_id))
         set_(self, "data_source", _opt_text(self.data_source) or "")
@@ -534,6 +656,7 @@ class SecurityEvent:
         for name in ("src", "dst"):
             if not isinstance(getattr(self, name), Endpoint | None):
                 raise TypeError(f"{name} must be an Endpoint")
+        _check_actor(self.actor)
         if self.assessment is Assessment.CONFIRMED and not can_confirm(
             self.data_source, self.proof
         ):
@@ -634,6 +757,7 @@ class SecurityEvent:
             "linked_incident_ids": list(self.linked_incident_ids),
             "count": self.count,
             "last_ts": self.last_ts,
+            "actor": None if self.actor is None else self.actor.to_dict(),
         }
 
     def redacted(self) -> dict[str, Any]:
@@ -646,7 +770,8 @@ class SecurityEvent:
 
         Unknown keys are ignored; optional values of a wrong type fall back
         to the defaults; a stored ``confirmed`` that does not meet the rule
-        is downgraded to ``suspicious``.
+        is downgraded to ``suspicious``; an actor that is not pseudonymous
+        is dropped; an invalid router id makes the event unusable.
         """
         if not isinstance(data, Mapping) or any(k not in data for k in _REQUIRED):
             return None
@@ -656,18 +781,17 @@ class SecurityEvent:
             _LOGGER.debug("Skipping stored security event: %s", type(err).__name__)
             return None
 
-    def to_core_event(
-        self, *, identity_digest: Callable[[str], str] | None = None
-    ) -> CoreEvent:
+    def to_core_event(self, *, identity_key: bytes | None = None) -> CoreEvent:
         """The event as a core ``CoreEvent``; security fields go to ``data``.
 
-        Merged duplicates map to ``repeat_count`` (``count - 1``) and
-        ``last_repeat_at``. ``data`` carries ids, counters and masked
-        evidence only (the core's extension point has no typed fields for
-        them). The client
-        and endpoint addresses appear only as ``identity_digest(value)`` (the
-        caller's keyed digest, e.g. HMAC with the installation key); without
-        it they are left out.
+        Typed core fields: ids, time, type, severity, result, router, entry,
+        ``actor`` (pseudonymous), correlation, dedup, ``repeat_count``
+        (``count - 1``) and ``last_repeat_at``. ``data`` carries ids,
+        counters and masked evidence (the core has no typed fields for
+        them). The client and endpoint addresses appear only as references
+        made with the core digest (:func:`identity_digest` with
+        ``identity_key``, e.g. the installation key); without a key they are
+        left out.
         """
         payload: dict[str, Any] = {
             "schema": SCHEMA_VERSION,
@@ -684,10 +808,11 @@ class SecurityEvent:
             "dst_zone": self.dst.zone if self.dst else None,
             "dst_port": self.dst.port if self.dst else None,
         }
-        if identity_digest is not None:
-            payload["client_ref"] = _ref(identity_digest, self.client)
-            payload["src_ref"] = _ref(identity_digest, self.src and self.src.addr)
-            payload["dst_ref"] = _ref(identity_digest, self.dst and self.dst.addr)
+        if identity_key is not None:
+            ref = identity_digest(identity_key)
+            payload["client_ref"] = _ref(ref, self.client)
+            payload["src_ref"] = _ref(ref, self.src and self.src.addr)
+            payload["dst_ref"] = _ref(ref, self.dst and self.dst.addr)
         return CoreEvent(
             event_id=self.event_id,
             ts=datetime.fromtimestamp(self.ts, UTC),
@@ -697,6 +822,7 @@ class SecurityEvent:
             result=self.result,
             router_id=self.router_id,
             entry_id=self.entry_id,
+            actor=self.actor,
             correlation_id=self.correlation_id,
             dedup_key=self.dedup_key,
             repeat_count=self.count - 1,
@@ -790,7 +916,20 @@ def _from_dict_kwargs(data: Mapping[str, Any]) -> dict[str, Any]:
         "linked_incident_ids": tuple(links) if isinstance(links, list) else (),
         "count": count if isinstance(count, int) and not isinstance(count, bool) else 1,
         "last_ts": _finite(data.get("last_ts")),
+        "actor": _stored_actor(data.get("actor")),
     }
+
+
+def _stored_actor(value: Any) -> Actor | None:
+    """A stored pseudonymous actor; anything else is dropped (None)."""
+    if value is None:
+        return None
+    try:
+        actor = Actor.from_dict(value)
+        _check_actor(actor)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return actor
 
 
 # --- source status --------------------------------------------------------------
@@ -890,11 +1029,17 @@ def status_from_capability(
 ) -> SourceStatus:
     """Combine a core ``CapabilityStatus`` with the last delivery time.
 
-    An unavailable or unknown capability is ``not_available`` with the core
-    reason; an available one is judged by ``last_ok`` like
-    :func:`source_status`.
+    An available capability, and an ``unknown`` one with reason
+    ``determined_on_first_use`` (contract 5: it may be used, the first use
+    settles it; here the deliveries show it), is judged by ``last_ok`` like
+    :func:`source_status`. Any other unavailable or unknown capability is
+    ``not_available`` with the core reason.
     """
-    if not capability.available:
+    first_use = (
+        capability.state is CapabilityState.UNKNOWN
+        and capability.reason == CapabilityReason.DETERMINED_ON_FIRST_USE
+    )
+    if not capability.available and not first_use:
         return SourceStatus(
             source=str(capability.capability),
             availability=Availability.NOT_AVAILABLE,
@@ -916,3 +1061,37 @@ def missing_status(source: str) -> SourceStatus:
         availability=Availability.NOT_AVAILABLE,
         reason=REASON_NOT_REPORTED,
     )
+
+
+# --- forgotten routers ----------------------------------------------------------
+
+
+class RouterStateHolder(Protocol):
+    """Anything that keeps per-router state (detectors, dedup, liveness …)."""
+
+    def forget_router(self, router_id: str) -> None:
+        """Drop every piece of state of ``router_id``; others stay."""
+
+
+def forgotten_router_id(event: CoreEvent) -> str | None:
+    """Router id of a core ``router.forgotten`` event, else None."""
+    if str(event.type) != CoreEventType.ROUTER_FORGOTTEN.value:
+        return None
+    return valid_router_id(event.router_id)
+
+
+def forget_router(router_id: str, holders: Iterable[RouterStateHolder]) -> int:
+    """Drop the state of a forgotten router from every holder.
+
+    ValueError if ``router_id`` is no contract router id (prefix matches in
+    the holders must not reach another router). Returns the number of
+    holders asked. The trust book is fleet-wide and is no holder.
+    """
+    if valid_router_id(router_id) is None:
+        raise ValueError("router_id must be a contract router id (rtr_...)")
+    count = 0
+    for holder in holders:
+        holder.forget_router(router_id)
+        count += 1
+    _LOGGER.debug("Forgotten router: state dropped from %d holders", count)
+    return count

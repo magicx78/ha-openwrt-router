@@ -8,9 +8,12 @@ import logging
 import pytest
 
 from custom_components.openwrt_router.client_history import ClientLive
+from custom_components.openwrt_router.core_masking import pseudonymise_user_id
+from custom_components.openwrt_router.core_models import Actor, ActorKind
 from custom_components.openwrt_router.security_model import (
     Assessment,
     DataSource,
+    EventResult,
     SecCategory,
     Severity,
 )
@@ -18,6 +21,7 @@ from custom_components.openwrt_router.security_trust import (
     Indicator,
     IsolationProof,
     NoticeKind,
+    TrustActionKind,
     TrustBook,
     TrustState,
 )
@@ -194,6 +198,50 @@ def test_manual_confirm_and_naming() -> None:
     assert record is not None and record.name == "Printer hall"
     assert book.confirm("aa:bb:cc:dd:ee:01", T0, name="pre-registered")
     assert book.state("aa:bb:cc:dd:ee:01", T0) is TrustState.KNOWN
+
+
+HA_USER = "0d5a2f3b9c8e4a71b6f0e2d4c6a8b0f1"
+SALT = b"t" * 16
+
+
+def test_manual_actions_carry_the_actor_only_as_pseudonym() -> None:
+    book = TrustBook(actor_salt=SALT)
+    user = Actor(kind=ActorKind.USER, user_id=HA_USER, context_id="ctx-9")
+    book.observe(live(), T0)
+    proof = IsolationProof(method="vlan_isolated", verified_at=T0)
+    actions = [
+        book.confirm(MAC, T0 + 1, name="Kids tablet", actor=user),
+        book.set_name(MAC, "Kids tablet", actor=user),
+        book.quarantine(MAC, proof, T0 + 2, actor=user),
+        book.release_quarantine(MAC, actor=user),
+    ]
+    assert [a.kind for a in actions] == [  # type: ignore[union-attr]
+        TrustActionKind.CONFIRMED,
+        TrustActionKind.RENAMED,
+        TrustActionKind.QUARANTINED,
+        TrustActionKind.RELEASED,
+    ]
+    pseudonym = pseudonymise_user_id(HA_USER, SALT)
+    for action in actions:
+        assert action is not None
+        assert action.actor is not None and action.actor.user_id == pseudonym
+        event = action.to_event(router_id=ROUTER)
+        assert event.result is EventResult.SUCCESS
+        assert event.category is SecCategory.DEVICE
+        core = event.to_core_event(identity_key=b"k" * 32)
+        assert core.actor is not None and core.actor.user_id == pseudonym
+        text = json.dumps(core.to_dict()) + json.dumps(event.to_dict())
+        text += repr(action) + repr(event)
+        for secret in (HA_USER, "ctx-9", "Kids tablet"):
+            assert secret not in text
+    assert actions[2].to_event().severity is Severity.WARNING  # type: ignore[union-attr]
+    # two actions never share a dedup scope (each is its own audit entry)
+    scopes = {a.to_event().dedup_scope for a in actions}  # type: ignore[union-attr]
+    assert len(scopes) == len(actions)
+    # without an actor (automation, test) the action has none
+    assert book.set_name(MAC, None).actor is None  # type: ignore[union-attr]
+    # a refused action returns nothing
+    assert book.set_name("aa:aa:aa:aa:aa:aa", "x", actor=user) is None
 
 
 def test_hostname_change_is_an_indicator() -> None:

@@ -365,6 +365,18 @@ class BaselineBook:
         self._states.pop(key, None)
         self._leave(key)
 
+    def forget(self, prefix: str) -> int:
+        """Drop every key and eviction count starting with ``prefix``.
+
+        For a forgotten router (``"<router>|"``). Returns the keys dropped.
+        """
+        names = [name for name in self._states if name.startswith(prefix)]
+        for name in names:
+            self.reset(name)
+        for group in [g for g in self._pending if g.startswith(prefix)]:
+            del self._pending[group]
+        return len(names)
+
     def to_dict(self) -> dict[str, Any]:
         """Store form (keys may hold identities: never log it)."""
         return {

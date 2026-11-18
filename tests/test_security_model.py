@@ -8,21 +8,37 @@ from datetime import UTC, datetime
 
 import pytest
 
+from custom_components.openwrt_router.core_masking import (
+    MASK,
+    pseudonymise_user_id,
+    secret_digest_factory,
+)
 from custom_components.openwrt_router.core_models import (
+    CORE_OWNED_MODULE_CAPABILITIES,
+    MODULE_CAPABILITY_NAMESPACES,
+    MODULE_EVENT_PREFIXES,
+    Actor,
+    ActorKind,
     Capability,
+    CapabilityReason,
     CapabilityState,
     CapabilityStatus,
     CoreEvent,
+    CoreEventType,
+    default_router_id,
     is_core_event_type,
 )
 from custom_components.openwrt_router.security_model import (
+    CAPABILITY_PREFIX,
     EVENT_PREFIX,
+    IDENTITY_DIGEST_DOMAIN,
     MASK_DOMAIN,
     MASK_IP,
     MASK_MAC,
     MAX_EVIDENCE,
     MAX_EVIDENCE_LEN,
     MAX_LINKED_INCIDENTS,
+    MODULE_SOURCE,
     Assessment,
     Availability,
     DataSource,
@@ -36,13 +52,17 @@ from custom_components.openwrt_router.security_model import (
     can_confirm,
     clean_text,
     event_type,
+    forget_router,
+    forgotten_router_id,
     log_path_capability,
     make_correlation_id,
     make_event_id,
     mask_identities,
     missing_status,
+    pseudonymous_actor,
     source_status,
     status_from_capability,
+    valid_router_id,
 )
 
 ROUTER = "rtr_" + "a" * 32
@@ -53,6 +73,8 @@ IP6 = "fe80::1234:5678:9abc:def0"
 DOMAIN = "evil-tracker.example.com"
 HOST = "kids-tablet"
 IDENTITIES = (MAC, MAC_NORM, IP4, IP6, DOMAIN, HOST)
+HA_USER = "0d5a2f3b9c8e4a71b6f0e2d4c6a8b0f1"  # Home Assistant user id form
+SALT = b"s" * 16
 
 
 def _event(**kw: object) -> SecurityEvent:
@@ -234,9 +256,9 @@ def test_to_core_event_aligns_with_contract() -> None:
 
 
 def test_to_core_event_identity_only_as_digest() -> None:
-    core = _event().to_core_event(identity_digest=lambda v: "ref-" + str(len(v)))
-    assert core.data["client_ref"] == "ref-17"
-    assert core.data["src_ref"] == "ref-13"
+    core = _event().to_core_event(identity_key=b"k" * 32)
+    for ref in ("client_ref", "src_ref", "dst_ref"):
+        assert len(core.data[ref]) == 16
     _no_identity(json.dumps(dict(core.data), default=str))
 
 
@@ -358,8 +380,132 @@ def test_log_path_off() -> None:
 
 def test_mask_identities_also_applies_core_secret_masking() -> None:
     masked = mask_identities(
-        {"note": "login password=hunter2 from aa:bb:cc:11:22:33", "psk": "x", "n": 3}
+        {"note": "from aa:bb:cc:11:22:33 login password=hunter2", "psk": "x", "n": 3}
     )
     assert "hunter2" not in json.dumps(masked)
     assert masked["psk"] != "x" and masked["n"] == 3
-    assert MASK_MAC in masked["note"]
+    assert masked["note"] == f"from {MASK_MAC} login password={MASK}"
+
+
+def test_secret_value_masked_by_core_swallows_a_following_identity() -> None:
+    # The core masks a secret value up to the end of the line on purpose
+    # (core_masking._VALUE_RE "over-masking on purpose"): a MAC behind it is
+    # inside the masked span. It must not survive in any form.
+    masked = mask_identities({"note": "login password=hunter2 from " + MAC})
+    assert masked == {"note": f"login password={MASK}"}
+    _no_identity(json.dumps(masked))
+
+
+def test_core_masks_before_the_text_is_cut() -> None:
+    # A token cut by the 200-character cap first is too short for the core
+    # to recognise; the core must see the uncut text.
+    token = "Zx9" + "q7Lm2Vb8Nc4Xs1Kd6Fg3Hj5" * 3
+    for pad in range(150, 200, 5):
+        text = "a " * (pad // 2) + "session token " + token + " end"
+        masked = mask_identities({"n": text})["n"]
+        assert token[:8] not in masked, pad
+
+
+def test_valid_router_id_uses_core_format() -> None:
+    assert valid_router_id(ROUTER) == ROUTER
+    assert valid_router_id(default_router_id("entry-1")) == default_router_id("entry-1")
+    for bad in (None, "", "r1", "rtr_" + "A" * 32, ROUTER + "|x", 5):
+        assert valid_router_id(bad) is None
+    with pytest.raises(ValueError):
+        _event(router_id="r1")
+    assert SecurityEvent.from_dict({**_event().to_dict(), "router_id": "r1"}) is None
+
+
+def test_identity_refs_use_core_secret_digest() -> None:
+    key = bytes(range(32))
+    core = _event().to_core_event(identity_key=key)
+    digest = secret_digest_factory(key)
+    assert core.data["client_ref"] == digest(IDENTITY_DIGEST_DOMAIN + MAC_NORM)
+    assert core.data["src_ref"] == digest(IDENTITY_DIGEST_DOMAIN + IP4)
+    # the same client in another spelling gets the same reference
+    other = _event(client=MAC_NORM).to_core_event(identity_key=key)
+    assert other.data["client_ref"] == core.data["client_ref"]
+    _no_identity(json.dumps(dict(core.data), default=str))
+    with pytest.raises(ValueError):
+        _event().to_core_event(identity_key=b"short")
+
+
+def test_actor_reaches_an_event_only_as_pseudonym() -> None:
+    raw = Actor(kind=ActorKind.USER, user_id=HA_USER, context_id="ctx-1", is_admin=True)
+    with pytest.raises(ValueError):
+        _event(actor=raw)
+    actor = pseudonymous_actor(raw, SALT)
+    assert actor is not None
+    assert actor.user_id == pseudonymise_user_id(HA_USER, SALT)
+    assert actor.context_id is None and actor.parent_context_id is None
+    assert pseudonymous_actor(actor, SALT) == actor  # idempotent
+    assert pseudonymous_actor(None, SALT) is None
+    event = _event(actor=actor)
+    core = event.to_core_event()
+    assert core.actor == actor
+    assert HA_USER not in json.dumps(core.to_dict())
+    assert HA_USER not in repr(event)
+    assert SecurityEvent.from_dict(json.loads(json.dumps(event.to_dict()))) == event
+    stored = {**event.to_dict(), "actor": raw.to_dict()}
+    assert SecurityEvent.from_dict(stored).actor is None  # type: ignore[union-attr]
+
+
+def test_module_prefixes_come_from_the_core() -> None:
+    assert EVENT_PREFIX == MODULE_EVENT_PREFIXES[MODULE_SOURCE]
+    assert CAPABILITY_PREFIX.startswith(MODULE_CAPABILITY_NAMESPACES[MODULE_SOURCE])
+    core_names = {c.value for c in Capability}
+    for source in DataSource:
+        assert source in core_names or source.startswith(CAPABILITY_PREFIX), source
+        assert source not in CORE_OWNED_MODULE_CAPABILITIES
+
+
+def test_capability_determined_on_first_use_is_judged_by_delivery() -> None:
+    def cap(reason: str) -> CapabilityStatus:
+        return CapabilityStatus(
+            capability=Capability.CONFIG_DRIFT.value,
+            state=CapabilityState.UNKNOWN,
+            reason=reason,
+            source="test",
+            detected_at=datetime(2026, 11, 18, tzinfo=UTC),
+        )
+
+    first_use = cap(CapabilityReason.DETERMINED_ON_FIRST_USE)
+    assert status_from_capability(first_use, now=100.0, last_ok=90.0).usable
+    assert not status_from_capability(first_use, now=100.0, last_ok=None).usable
+    pending = status_from_capability(
+        cap(CapabilityReason.NO_DATA_YET), now=100.0, last_ok=90.0
+    )
+    assert pending.availability is Availability.NOT_AVAILABLE
+    assert pending.reason == CapabilityReason.NO_DATA_YET
+
+
+def test_forgotten_router_id_reads_the_core_event() -> None:
+    def core_event(event_type: str, router_id: str | None) -> CoreEvent:
+        return CoreEvent(
+            event_id="evt_" + "0" * 32,
+            ts=datetime(2026, 11, 18, tzinfo=UTC),
+            type=event_type,
+            source="core",
+            router_id=router_id,
+        )
+
+    assert forgotten_router_id(core_event(CoreEventType.ROUTER_FORGOTTEN, ROUTER)) == (
+        ROUTER
+    )
+    assert (
+        forgotten_router_id(core_event(CoreEventType.ROUTER_ORPHANED, ROUTER)) is None
+    )
+    assert forgotten_router_id(core_event(CoreEventType.ROUTER_FORGOTTEN, None)) is None
+
+
+def test_forget_router_asks_every_holder_and_checks_the_id() -> None:
+    seen: list[str] = []
+
+    class Holder:
+        def forget_router(self, router_id: str) -> None:
+            seen.append(router_id)
+
+    assert forget_router(ROUTER, [Holder(), Holder()]) == 2
+    assert seen == [ROUTER, ROUTER]
+    with pytest.raises(ValueError):
+        forget_router("rtr_x|", [Holder()])

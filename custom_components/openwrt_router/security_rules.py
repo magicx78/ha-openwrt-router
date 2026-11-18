@@ -15,7 +15,11 @@ missing or stale the result is ``not_available`` / ``stale`` with the
 missing sources, never "no finding". Memory is bounded everywhere: windows
 are bucketed, every router has its own LRU of at most ``max_keys`` keys and
 at most ``max_routers`` routers are kept; one router's restart resets only
-that router's windows (:class:`RestartGuard`).
+that router's windows (:class:`RestartGuard`). Router ids are contract
+router ids (``rtr_`` + 32 hex, core validation via ``security_model``):
+inputs with any other router value are not stored, only counted
+(``DetectorSet.invalid_router``); ``DetectorSet.forget_router`` drops every
+piece of state of a forgotten router.
 
 Log lines are forgeable (review H1-H3, M1). No state that one line or one
 router's flood can set may silently swallow another router's, client's or
@@ -55,6 +59,7 @@ from .security_model import (
     make_event_id,
     missing_status,
     normalize_mac,
+    valid_router_id,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -386,6 +391,10 @@ class RestartGuard:
             self._last.popitem(last=False)
         return last is not None and uptime + self.tolerance_s < last  # type: ignore[operator]
 
+    def forget(self, router_id: str) -> None:
+        """Drop the last uptime of a forgotten router."""
+        self._last.pop(router_id, None)
+
 
 # =============================================================================
 # Inputs
@@ -418,6 +427,11 @@ def _get(obj: Any, name: str) -> Any:
     return getattr(obj, name, None)
 
 
+def _raw_router(obj: Any, router_id: str | None = None) -> Any:
+    """The router value of an input as given (not yet validated)."""
+    return router_id or _get(obj, "router_id") or _get(obj, "router")
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class WifiSignal:
     """One Wi-Fi fact normalised from a ``NetEvent``/``LogEvent``/mapping."""
@@ -431,6 +445,9 @@ class WifiSignal:
 
 def wifi_signal(obj: Any, *, router_id: str | None = None) -> WifiSignal | None:
     """Normalise a NI event; None when it lacks time, router or kind.
+
+    The router (``router_id`` argument, else the object's ``router_id`` or
+    ``router``) must be a contract router id; any other value gives None.
 
     Reads ``NetEvent`` (``ts``, ``router``, ``kind`` = ``wifi.x``,
     ``subject["mac"]``/``["iface"]``), ``LogEvent`` (``time_ms``,
@@ -448,8 +465,8 @@ def wifi_signal(obj: Any, *, router_id: str | None = None) -> WifiSignal | None:
     if not _is_num(ts):
         ms = _get(obj, "time_ms")
         ts = ms / 1000.0 if _is_num(ms) else None
-    router = router_id or _get(obj, "router_id") or _get(obj, "router")
-    if ts is None or not isinstance(router, str) or not router:
+    router = valid_router_id(_raw_router(obj, router_id))
+    if ts is None or router is None:
         return None
     subject = _get(obj, "subject")
     subject = subject if isinstance(subject, Mapping) else {}
@@ -517,6 +534,9 @@ class Detector(Protocol):
 
     def reset_router(self, router_id: str) -> None:
         """Forget all window state of one router (restart)."""
+
+    def forget_router(self, router_id: str) -> None:
+        """Drop every piece of state of one router (router forgotten)."""
 
     def state_size(self) -> int:
         """Number of stored window entries (memory check)."""
@@ -736,6 +756,12 @@ class _BaseDetector:
             self._slots.pop(key, None)
         for key in [k for k in self._reported if k and k[0] == router_id]:
             del self._reported[key]
+
+    def forget_router(self, router_id: str) -> None:
+        """Windows, cooldowns and loss counts of a forgotten router."""
+        self.reset_router(router_id)
+        for key in [k for k in self._loss if k[0] == router_id]:
+            del self._loss[key]
 
     def state_size(self) -> int:
         """Every stored entry: slots and their windows, cooldowns, losses."""
@@ -1087,6 +1113,21 @@ class WifiMultiApAuthDetector(_WifiDetector):
             if slot.parts:
                 slot.parts.pop(router_id, None)
 
+    def forget_router(self, router_id: str) -> None:
+        """Also drop the clients that were only seen at that router."""
+        super().forget_router(router_id)
+        empty = [
+            key
+            for key, slot in self._slots.items()
+            if not slot.parts and not len(slot.distinct)  # type: ignore[arg-type]
+        ]
+        for key in empty:
+            del self._slots[key]
+            self._lru[key[0]].pop(key, None)
+            self._reported.pop(key, None)
+        if not self._lru.get("", True):
+            del self._lru[""]
+
     def evaluate(
         self, now: float, statuses: Mapping[str, Mapping[str, SourceStatus]]
     ) -> tuple[DetectorResult, ...]:
@@ -1158,8 +1199,7 @@ def _field(record: Any, name: str) -> Any:
 
 
 def _record_router(record: Any) -> str | None:
-    router = _get(record, "router_id") or _get(record, "router")
-    return router if isinstance(router, str) and router else None
+    return valid_router_id(_raw_router(record))
 
 
 def _text(value: Any, max_len: int = 64) -> str:
@@ -1947,12 +1987,24 @@ class DetectorSet:
             next(iter(books.values())) if books else BaselineBook()
         )
         self.guard = RestartGuard()
+        self.invalid_router = 0  # inputs with a router that is no contract id
+
+    def _foreign(self, item: Any, router_id: str | None = None) -> bool:
+        """True (and counted) if the input names a non-contract router."""
+        raw = _raw_router(item, router_id)
+        if raw is None or valid_router_id(raw) is not None:
+            return False
+        self.invalid_router += 1
+        return True
 
     def feed_wifi(self, items: Iterable[Any], *, router_id: str | None = None) -> int:
         """Feed NI events / Wi-Fi signals; returns the number accepted."""
         accepted = 0
         wifi = [d for d in self.detectors if d.input_kind == "wifi"]
         for item in items:
+            given = None if isinstance(item, WifiSignal) else router_id
+            if self._foreign(item, given):
+                continue
             sig = (
                 item
                 if isinstance(item, WifiSignal)
@@ -1969,6 +2021,8 @@ class DetectorSet:
         """Feed off-router log records (``SecLogRecord``-like)."""
         logs = [d for d in self.detectors if d.input_kind == "log"]
         for record in records:
+            if self._foreign(record):
+                continue
             for det in logs:
                 det.feed(record)
 
@@ -1976,6 +2030,8 @@ class DetectorSet:
         """Feed config-drift records (from the later drift component)."""
         drift = [d for d in self.detectors if d.input_kind == "drift"]
         for record in records:
+            if self._foreign(record):
+                continue
             for det in drift:
                 det.feed(record)
 
@@ -1991,6 +2047,22 @@ class DetectorSet:
         """Forget all window state of ``router_id`` in every detector."""
         for det in self.detectors:
             det.reset_router(router_id)
+
+    def forget_router(self, router_id: str) -> None:
+        """Drop all state of a forgotten router (core ``router.forgotten``).
+
+        Windows, cooldowns and loss counts in every detector, the router's
+        baselines and eviction counts in the shared book, and its last
+        uptime. Other routers keep theirs. ValueError if ``router_id`` is no
+        contract router id (the baseline prefix must not reach another
+        router).
+        """
+        if valid_router_id(router_id) is None:
+            raise ValueError("router_id must be a contract router id (rtr_...)")
+        for det in self.detectors:
+            det.forget_router(router_id)
+        self.baseline.forget(f"{router_id}|")
+        self.guard.forget(router_id)
 
     def evaluate(
         self, now: float, statuses: Mapping[str, Mapping[str, SourceStatus]]

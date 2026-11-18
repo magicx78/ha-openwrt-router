@@ -151,8 +151,9 @@ def cap_fields(fields: Mapping[str, Any]) -> MappingProxyType[str, Any]:
 class SecLogRecord:
     """One normalised off-router log line (plan 4.2, version 1).
 
-    ``router`` is an opaque id chosen by the caller (entry id, later the
-    registry router id). ``fields`` is read-only. Markers in ``fields``:
+    ``router`` is chosen by the caller and should be the registry router id
+    (``rtr_`` + 32 hex): the detectors ignore and count records with any
+    other value (``DetectorSet.invalid_router``). ``fields`` is read-only. Markers in ``fields``:
     ``fmt`` (format id), ``unconfirmed`` (True when the line format was
     built from upstream documentation and not seen on a real router),
     ``ts_estimated`` (no zone offset: ``ts`` is the receive time),
@@ -361,6 +362,10 @@ class KeyAssigner:
         if index or len(counts) < self._max_per_second:
             counts[slot] = index + 1
         return f"{base}:{index}"
+
+    def forget_router(self, router: str) -> None:
+        """Drop the key state of a forgotten router."""
+        self._state.pop(router, None)
 
     @staticmethod
     def _forget_before(state: _KeyState, oldest: int) -> None:
@@ -592,6 +597,10 @@ class Deduper:
                 self._resolve(state, out, timed_out=True, now=now)
         return out
 
+    def forget_router(self, router: str) -> None:
+        """Drop the state of a forgotten router, held records included."""
+        self._routers.pop(router, None)
+
     def hwm(self, router: str) -> float | None:
         """High-water mark of ``router`` (largest accepted ``ts``)."""
         state = self._routers.get(router)
@@ -811,6 +820,10 @@ class Liveness:
             for source in sources:
                 if source is not None and record.recv > seen.get(source, -math.inf):
                     seen[source] = record.recv
+
+    def forget_router(self, router: str) -> None:
+        """Drop the receive times of a forgotten router."""
+        self._last.pop(router, None)
 
     def last_ok(self, router: str, source: str) -> float | None:
         """Receive time of the newest record of ``source`` from ``router``."""

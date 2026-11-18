@@ -21,6 +21,10 @@ Rules (plan 3.1 and the stage-2 task):
   explicit :meth:`TrustBook.release_quarantine` does.
 * A manual confirmation makes a device ``known`` and clears its current
   indicators (the user vouched for it); new indicators count again.
+* Every manual action (confirm, rename, quarantine, release) returns a
+  :class:`TrustAction` with the acting core ``Actor``, reduced to a user
+  pseudonym (``security_model.pseudonymous_actor``, salt ``actor_salt``),
+  for the audit event; the display name never goes into it. None = refused.
 
 No second client database: the input is a narrow observation Protocol (the
 fields of Client Stability ``ClientLive``); this layer keeps only trust
@@ -42,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import math
+import secrets
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -50,15 +55,19 @@ from typing import Any, Final, Protocol
 
 from .mac_utils import is_locally_administered
 from .security_model import (
+    Actor,
     Assessment,
     DataSource,
+    EventResult,
     SecCategory,
     SecurityEvent,
     Severity,
     clean_text,
     event_type,
+    make_dedup_key,
     make_event_id,
     normalize_mac,
+    pseudonymous_actor,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -110,6 +119,15 @@ class NoticeKind(StrEnum):
     IP_CHURN = "ip_churn"
     SUSPICIOUS = "suspicious"
     CAPACITY = "capacity"
+
+
+class TrustActionKind(StrEnum):
+    """Manual trust actions (each one is an audit entry)."""
+
+    CONFIRMED = "confirmed"
+    RENAMED = "renamed"
+    QUARANTINED = "quarantined"
+    RELEASED = "released"
 
 
 _NOTICE_LEVEL: Final[Mapping[NoticeKind, tuple[Severity, Assessment]]] = {
@@ -207,6 +225,40 @@ class TrustNotice:
             client=self.mac,
             evidence=(f"state={self.state.value}",)
             + tuple(f"indicator={i}" for i in self.indicators),
+        )
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class TrustAction:
+    """One manual trust action; the actor is pseudonymous, no name inside."""
+
+    kind: TrustActionKind
+    at: float
+    mac: str = field(repr=False)
+    actor: Actor | None = field(default=None, repr=False)
+    method: str | None = None  # isolation method of a quarantine
+    nonce: str = field(default_factory=lambda: secrets.token_hex(8), repr=False)
+
+    def to_event(self, *, router_id: str | None = None) -> SecurityEvent:
+        """The action as a successful :class:`SecurityEvent` (own dedup scope)."""
+        name = f"trust_{self.kind.value}"
+        severity = (
+            Severity.WARNING
+            if self.kind is TrustActionKind.QUARANTINED
+            else Severity.INFO
+        )
+        return SecurityEvent(
+            event_id=make_event_id(name, router_id, self.mac, self.at, self.nonce),
+            ts=self.at,
+            type=event_type(name),
+            router_id=router_id,
+            category=SecCategory.DEVICE,
+            severity=severity,
+            result=EventResult.SUCCESS,
+            dedup_key=make_dedup_key(name, self.mac, self.at, self.nonce),
+            client=self.mac,
+            actor=self.actor,
+            evidence=() if self.method is None else (f"method={self.method}",),
         )
 
 
@@ -336,12 +388,18 @@ class TrustBook:
         suspicious_min_indicators: int = DEFAULT_SUSPICIOUS_MIN_INDICATORS,
         max_entries: int = DEFAULT_MAX_ENTRIES,
         max_indicator_only: int | None = None,
+        actor_salt: bytes | None = None,
     ) -> None:
         """Create an empty book; all thresholds are parameters.
 
         ``max_indicator_only`` (default ``max_entries // 8``, at least 1)
-        bounds the entries known only from indicators.
+        bounds the entries known only from indicators. ``actor_salt`` (at
+        least 16 bytes; default random per book) salts the user pseudonyms
+        of manual actions.
         """
+        self._actor_salt = (
+            secrets.token_bytes(16) if actor_salt is None else bytes(actor_salt)
+        )
         self.new_period_s = float(new_period_s)
         self.ip_churn_window_s = float(ip_churn_window_s)
         self.ip_churn_min = max(2, int(ip_churn_min))
@@ -504,19 +562,43 @@ class TrustBook:
         self._store(record)
         return room + self._transition(before, record, now)
 
-    def confirm(self, mac: str, now: float, *, name: str | None = None) -> bool:
-        """Manual confirmation → known; refused for a quarantined device."""
+    def _action(
+        self,
+        kind: TrustActionKind,
+        record: TrustRecord,
+        at: float | None,
+        actor: Actor | None,
+        method: str | None = None,
+    ) -> TrustAction:
+        when = at if _is_time(at) else (record.last_seen or record.first_seen or 0.0)
+        return TrustAction(
+            kind=kind,
+            at=float(when),  # type: ignore[arg-type]
+            mac=record.mac,
+            actor=pseudonymous_actor(actor, self._actor_salt),
+            method=method,
+        )
+
+    def confirm(
+        self,
+        mac: str,
+        now: float,
+        *,
+        name: str | None = None,
+        actor: Actor | None = None,
+    ) -> TrustAction | None:
+        """Manual confirmation → known; refused (None) for a quarantined device."""
         key = normalize_mac(mac)
         if key is None:
-            return False
+            return None
         old = self._records.get(key)
         if old is not None and old.quarantined:
-            return False
+            return None
         if old is None:
             self._make_room(now)  # notices of a manual action are not returned
             if len(self._records) >= self.max_entries:
                 self.capacity_overflow += 1
-                return False
+                return None
             old = TrustRecord(mac=key, private_mac=is_locally_administered(key))
         record = replace(
             old,
@@ -528,17 +610,35 @@ class TrustBook:
             name=_opt_str(name, MAX_NAME_LEN) if name is not None else old.name,
         )
         self._store(record)
-        return True
+        return self._action(TrustActionKind.CONFIRMED, record, now, actor)
 
-    def set_name(self, mac: str, name: str | None) -> bool:
-        """Give a tracked device a display name (None clears it)."""
+    def set_name(
+        self,
+        mac: str,
+        name: str | None,
+        *,
+        actor: Actor | None = None,
+        now: float | None = None,
+    ) -> TrustAction | None:
+        """Give a tracked device a display name (None clears it).
+
+        ``now`` dates the action (default: the device's last seen time).
+        """
         record = self.get(mac)
         if record is None:
-            return False
-        self._store(replace(record, name=_opt_str(name, MAX_NAME_LEN)))
-        return True
+            return None
+        record = replace(record, name=_opt_str(name, MAX_NAME_LEN))
+        self._store(record)
+        return self._action(TrustActionKind.RENAMED, record, now, actor)
 
-    def quarantine(self, mac: str, proof: IsolationProof, now: float) -> bool:
+    def quarantine(
+        self,
+        mac: str,
+        proof: IsolationProof,
+        now: float,
+        *,
+        actor: Actor | None = None,
+    ) -> TrustAction | None:
         """Mark a tracked device quarantined; requires an isolation proof.
 
         Never called automatically (no caller in this stage). Raises
@@ -548,17 +648,26 @@ class TrustBook:
             raise TypeError("quarantine requires an IsolationProof")
         record = self.get(mac)
         if record is None:
-            return False
-        self._store(replace(record, quarantined_at=now, quarantine_method=proof.method))
-        return True
+            return None
+        record = replace(record, quarantined_at=now, quarantine_method=proof.method)
+        self._store(record)
+        return self._action(
+            TrustActionKind.QUARANTINED, record, now, actor, proof.method
+        )
 
-    def release_quarantine(self, mac: str) -> bool:
-        """Explicitly leave quarantine (the only way out)."""
+    def release_quarantine(
+        self, mac: str, *, actor: Actor | None = None, now: float | None = None
+    ) -> TrustAction | None:
+        """Explicitly leave quarantine (the only way out).
+
+        ``now`` dates the action (default: the device's last seen time).
+        """
         record = self.get(mac)
         if record is None or not record.quarantined:
-            return False
-        self._store(replace(record, quarantined_at=None, quarantine_method=None))
-        return True
+            return None
+        record = replace(record, quarantined_at=None, quarantine_method=None)
+        self._store(record)
+        return self._action(TrustActionKind.RELEASED, record, now, actor)
 
     # --- internals -------------------------------------------------------------
 
