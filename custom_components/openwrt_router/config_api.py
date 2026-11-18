@@ -2965,9 +2965,15 @@ class ConfigurationApi:
         """Listen to published events."""
         return self._m.audit.subscribe(listener)
 
-    def register_event_prefix(self, prefix: str, *, module: str) -> None:
-        """Allow a module's own event types below ``prefix``."""
-        self._m.audit.register_event_prefix(prefix, module=module)
+    def register_event_prefix(self, prefix: str, *, module: str) -> Callable[[], None]:
+        """Allow a module's own event types below ``prefix``; returns a remover."""
+        return self._m.audit.register_event_prefix(prefix, module=module)
+
+    def register_audit_mandatory_types(
+        self, event_types: Iterable[str], *, module: str
+    ) -> Callable[[], None]:
+        """Make the module's own types audit-mandatory; returns a remover."""
+        return self._m.audit.register_audit_mandatory_types(event_types, module=module)
 
     def emit(
         self,
@@ -2982,8 +2988,12 @@ class ConfigurationApi:
         correlation_id: str | None = None,
         dedup_key: str | None = None,
         data: Mapping[str, Any] | None = None,
+        security_relevant: bool = False,
     ) -> EmitResult:
-        """Module event (never as the core, never a core type)."""
+        """Module event (never as the core, never a core type).
+
+        ``security_relevant`` puts it on the security ring (default general).
+        """
         if source == CORE_SOURCE:
             raise ValueError("modules cannot emit as the core")
         return self._m.audit.emit(
@@ -2997,6 +3007,7 @@ class ConfigurationApi:
             correlation_id=correlation_id,
             dedup_key=dedup_key,
             data=data,
+            security_relevant=security_relevant,
         )
 
 

@@ -26,6 +26,7 @@ import logging
 import secrets
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -53,7 +54,6 @@ from .core_models import (
     EmitResult,
     EventResult,
     Severity,
-    audit_ring_for,
     is_core_event_type,
     new_id,
     utcnow,
@@ -115,8 +115,11 @@ class AuditLog:
         # (set_bus_salt) or declares this run ephemeral (§12.1).
         self._bus_salt = secrets.token_bytes(16)
         self.bus_salt_stable = False
-        # registered module event prefixes -> module
+        # registered module event prefixes -> module (and the registration)
         self._prefixes: dict[str, str] = {}
+        self._prefix_tokens: dict[str, object] = {}
+        # module types registered as audit-mandatory -> module (follow-up B3)
+        self._mandatory: dict[str, str] = {}
         self.loaded = False
         self.load_failed = False
         self.backed_up = False
@@ -136,6 +139,8 @@ class AuditLog:
             "dedup_scopes_pruned": 0,
             "dedup_scopes_dropped": 0,
             "bus_salt_ephemeral": 0,
+            "module_mandatory_types": 0,
+            "security_relevant_module_events": 0,
         }
 
     # -- bus pseudonym salt ------------------------------------------------------------
@@ -259,8 +264,86 @@ class AuditLog:
 
     # -- emit ----------------------------------------------------------------------
 
-    def register_event_prefix(self, prefix: str, *, module: str) -> None:
-        """Allow ``module`` to emit types below ``prefix`` (e.g. ``foo.``)."""
+    def register_event_prefix(self, prefix: str, *, module: str) -> Callable[[], None]:
+        """Allow ``module`` to emit types below ``prefix`` (e.g. ``foo.``).
+
+        Returns a remover (idempotent): it drops the prefix and the
+        module's audit-mandatory types below it. Callers that ignore the
+        return value keep the 1.44 behaviour.
+        """
+        self._add_prefix(prefix, module)
+        token = object()
+        self._prefix_tokens[prefix] = token
+
+        @callback
+        def _remove() -> None:
+            if self._prefix_tokens.get(prefix) is not token:
+                return  # removed already, or registered again since
+            del self._prefix_tokens[prefix]
+            self._prefixes.pop(prefix, None)
+            for event_type in [
+                t
+                for t, owner in self._mandatory.items()
+                if owner == module and not self._owns(t, module)
+            ]:
+                del self._mandatory[event_type]
+            self.stats["module_mandatory_types"] = len(self._mandatory)
+
+        return _remove
+
+    def _owns(self, event_type: str, module: str) -> bool:
+        """True if ``module`` owns a registered prefix of ``event_type``."""
+        return any(
+            event_type.startswith(prefix) and len(event_type) > len(prefix)
+            for prefix, owner in self._prefixes.items()
+            if owner == module
+        )
+
+    def register_audit_mandatory_types(
+        self, event_types: Iterable[str], *, module: str
+    ) -> Callable[[], None]:
+        """Make ``module``'s own types audit-mandatory (never deduplicated).
+
+        Every type must lie below a prefix ``module`` registered (not the
+        bare prefix); core types, reserved namespaces and other modules'
+        types raise ValueError (nothing is registered then). Open dedup
+        windows of these types end now. Returns a remover; unregistering
+        the prefix or a core release undoes it too.
+        """
+        if not isinstance(event_types, Iterable) or isinstance(event_types, str):
+            raise TypeError("event_types must be a list of type names")
+        wanted = [str(t) for t in event_types]
+        if module == CORE_SOURCE:
+            raise ValueError("the core's mandatory types are fixed")
+        for event_type in wanted:
+            if (
+                is_core_event_type(event_type)
+                or event_type.startswith(RESERVED_NAMESPACES)
+                or not self._owns(event_type, module)
+            ):
+                raise ValueError(
+                    f"{event_type} is not a type below a prefix of {module}"
+                )
+            owner = self._mandatory.get(event_type)
+            if owner is not None and owner != module:
+                raise ValueError(f"{event_type} belongs to {owner}")
+        added = [t for t in wanted if t not in self._mandatory]
+        for event_type in added:
+            self._mandatory[event_type] = module
+        for scope in [s for s in self._dedup if s[1] in added]:
+            del self._dedup[scope]
+        self.stats["module_mandatory_types"] = len(self._mandatory)
+
+        @callback
+        def _remove() -> None:
+            for event_type in added:
+                if self._mandatory.get(event_type) == module:
+                    del self._mandatory[event_type]
+            self.stats["module_mandatory_types"] = len(self._mandatory)
+
+        return _remove
+
+    def _add_prefix(self, prefix: str, module: str) -> None:
         if not isinstance(prefix, str) or not prefix.endswith("."):
             raise ValueError("event prefix must end with '.'")
         if is_core_event_type(prefix):
@@ -308,6 +391,7 @@ class AuditLog:
         data: Mapping[str, Any] | None = None,
         cooldown: timedelta | None = None,
         now: datetime | None = None,
+        security_relevant: bool = False,
     ) -> EmitResult:
         """Record one event; publish it unless it repeats a scope in cooldown.
 
@@ -315,9 +399,13 @@ class AuditLog:
         values, MACs, IPs or hostnames). ``cooldown`` is the dedup window
         (default ``FAILURE_EVENT_COOLDOWN``). Raises ValueError for a core
         type from a module or a module type below no registered prefix.
+        ``security_relevant`` puts the event on the security ring; a type
+        registered as audit-mandatory is never deduplicated.
         """
         event_type = str(event_type)
         self._check_type(event_type, source)
+        if not isinstance(security_relevant, bool):
+            raise TypeError("security_relevant must be a bool")
         ts = now or utcnow()
         event = CoreEvent(
             event_id=new_id(EVENT_ID_PREFIX),
@@ -333,11 +421,15 @@ class AuditLog:
             dedup_key=dedup_key,
             # masked before it is kept, persisted or published (review #6)
             data=mask_for_output(dict(data or {})),
+            security_relevant=security_relevant,
+            audit_mandatory=self._mandatory.get(event_type) == source,
         )
+        if security_relevant and source != CORE_SOURCE:
+            self.stats["security_relevant_module_events"] += 1
         self._expire(ts)
         scope = event.dedup_scope
         if scope is not None:
-            repeated = self._repeat(scope, ts)
+            repeated = self._repeat(scope, ts, event.audit_ring)
             if repeated is not None:
                 self.stats["deduplicated"] += 1
                 self.schedule_save()
@@ -384,15 +476,21 @@ class AuditLog:
                 MAX_DEDUP_SCOPES,
             )
 
-    def _repeat(self, scope: tuple[str, str, str], ts: datetime) -> CoreEvent | None:
-        """Bump the stored entry of ``scope`` if its window is still open."""
+    def _repeat(
+        self, scope: tuple[str, str, str], ts: datetime, ring_name: AuditRing
+    ) -> CoreEvent | None:
+        """Bump the stored entry of ``scope`` if its window is still open.
+
+        Only an entry in the same ring counts: a security-relevant event
+        never bumps a general entry (it opens its own window instead).
+        """
         known = self._dedup.get(scope)
         if known is None:
             return None
         event_id, started, cooldown = known
         if ts - started >= cooldown:
             return None
-        ring = self._rings[audit_ring_for(scope[1])]
+        ring = self._rings[ring_name]
         for index in range(len(ring) - 1, -1, -1):
             stored = ring[index]
             if stored.event_id == event_id:
@@ -533,20 +631,8 @@ class AuditLog:
 
 
 def _with_repeat(event: CoreEvent, ts: datetime) -> CoreEvent:
-    """``event`` with one more repeat at ``ts`` (frozen: a new object)."""
-    return CoreEvent(
-        event_id=event.event_id,
-        ts=event.ts,
-        type=event.type,
-        source=event.source,
-        severity=event.severity,
-        result=event.result,
-        router_id=event.router_id,
-        entry_id=event.entry_id,
-        actor=event.actor,
-        correlation_id=event.correlation_id,
-        dedup_key=event.dedup_key,
-        repeat_count=event.repeat_count + 1,
-        last_repeat_at=ts,
-        data=event.data,
-    )
+    """``event`` with one more repeat at ``ts`` (frozen: a new object).
+
+    ``replace`` keeps every other field, also ones added later.
+    """
+    return replace(event, repeat_count=event.repeat_count + 1, last_repeat_at=ts)

@@ -4092,6 +4092,11 @@ class CoreEvent:
     cooldown window is not published on the bus; the stored entry's
     ``repeat_count`` / ``last_repeat_at`` are updated instead. Types in
     AUDIT_MANDATORY_EVENT_TYPES ignore ``dedup_key``.
+
+    ``security_relevant`` (a module marks its own event) puts it on the
+    security ring; ``audit_mandatory`` (set by the audit log for a type a
+    module registered as mandatory) disables dedup. Both default False, so
+    entries stored before them read unchanged.
     """
 
     event_id: str
@@ -4108,11 +4113,16 @@ class CoreEvent:
     repeat_count: int = 0
     last_repeat_at: datetime | None = None
     data: Mapping[str, Any] = field(default_factory=dict)
+    security_relevant: bool = False
+    audit_mandatory: bool = False
 
     def __post_init__(self) -> None:
         """Coerce, validate and freeze."""
         if not isinstance(self.type, str) or not self.type:
             raise ValueError("event type must be a non-empty string")
+        for flag in ("security_relevant", "audit_mandatory"):
+            if not isinstance(getattr(self, flag), bool):
+                raise TypeError(f"{flag} must be a bool")
         _require_aware(self.ts, "ts")
         _require_aware(self.last_repeat_at, "last_repeat_at")
         _coerce(self, "severity", Severity)
@@ -4124,13 +4134,19 @@ class CoreEvent:
     @property
     def dedup_scope(self) -> tuple[str, str, str] | None:
         """``(router_id or "-", type, dedup_key)``; None if not deduplicated."""
-        if self.dedup_key is None or self.type in AUDIT_MANDATORY_EVENT_TYPES:
+        if (
+            self.dedup_key is None
+            or self.audit_mandatory
+            or self.type in AUDIT_MANDATORY_EVENT_TYPES
+        ):
             return None
         return (self.router_id or "-", str(self.type), self.dedup_key)
 
     @property
     def audit_ring(self) -> AuditRing:
-        """Which ring keeps this event."""
+        """Which ring keeps this event (security if marked so)."""
+        if self.security_relevant:
+            return AuditRing.SECURITY
         return audit_ring_for(self.type)
 
     def to_dict(self) -> dict[str, Any]:
@@ -4150,6 +4166,8 @@ class CoreEvent:
             "repeat_count": self.repeat_count,
             "last_repeat_at": _iso(self.last_repeat_at),
             "data": mask_secrets(_thaw(self.data)),
+            "security_relevant": self.security_relevant,
+            "audit_mandatory": self.audit_mandatory,
         }
 
     @classmethod
@@ -4184,6 +4202,8 @@ class CoreEvent:
             repeat_count=data.get("repeat_count", 0),
             last_repeat_at=_parse_dt(data.get("last_repeat_at"), "last_repeat_at"),
             data=payload or {},
+            security_relevant=data.get("security_relevant", False),
+            audit_mandatory=data.get("audit_mandatory", False),
         )
 
 
@@ -4690,9 +4710,14 @@ class ConfigurationApiProtocol(Protocol):
     def subscribe(self, listener: CoreEventListener) -> Callable[[], None]:
         """Listen to published events; returns an unsubscribe callback."""
 
-    def register_event_prefix(self, prefix: str, *, module: str) -> None:
+    def register_event_prefix(self, prefix: str, *, module: str) -> Callable[[], None]:
         """Allow a module's own event types below ``prefix`` (not a core
-        namespace, see CORE_EVENT_NAMESPACES)."""
+        namespace, see CORE_EVENT_NAMESPACES); returns a remover."""
+
+    def register_audit_mandatory_types(
+        self, event_types: Iterable[str], *, module: str
+    ) -> Callable[[], None]:
+        """Make the module's own types audit-mandatory (§12.5); returns a remover."""
 
     def emit(
         self,
@@ -4707,6 +4732,7 @@ class ConfigurationApiProtocol(Protocol):
         correlation_id: str | None = None,
         dedup_key: str | None = None,
         data: Mapping[str, Any] | None = None,
+        security_relevant: bool = False,
     ) -> EmitResult:
         """Write an audit entry and fire EVENT_CORE unless deduplicated.
 

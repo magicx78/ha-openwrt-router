@@ -13,6 +13,9 @@ All notable changes to the OpenWrt Router integration will be documented in this
 - Enterprise Core: `pseudonymise_identifier` / `pseudonymise_fields` ersetzen MAC, IP,
   Hostname, SSID, BSSID und Client-Kennungen durch stabile Pseudonyme (`mac_…`, `ipa_…`,
   `hst_…`, `ssd_…`, `bss_…`, `cli_…`) unter einem Modul-Schlüssel.
+- Enterprise Core: Module können eigene Events als sicherheitsrelevant markieren
+  (Sicherheits-Audit) und eigene Event-Typen als audit-pflichtig registrieren (nie
+  zusammengefasst); `register_event_prefix` gibt einen Entferner zurück.
 
 ### Changed
 

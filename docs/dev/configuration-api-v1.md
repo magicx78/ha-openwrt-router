@@ -1115,6 +1115,8 @@ aus dem Installations-Schlüssel mit HKDF-SHA256 (RFC 5869, nur `hmac`/`hashlib`
 | `repeat_count` | `int` | Wiederholungen im Cooldown |
 | `last_repeat_at` | `datetime \| None` | letzte Wiederholung |
 | `data` | `Mapping` | **nur IDs und Zähler, nie Konfigurationswerte**; schreibgeschützt, bei Ausgabe zusätzlich maskiert |
+| `security_relevant` | `bool` (Standard `False`) | ab B3: vom Modul gesetzt (`emit(..., security_relevant=True)`) ⇒ Sicherheitsring |
+| `audit_mandatory` | `bool` (Standard `False`) | ab B3: vom Audit-Log gesetzt, wenn das Modul den Typ als audit-pflichtig registriert hat ⇒ kein Dedup |
 | `dedup_scope` | Eigenschaft | `(router_id or "-", type, dedup_key)` oder `None` |
 | `audit_ring` | Eigenschaft | `general` / `security` |
 
@@ -1146,8 +1148,12 @@ Download ein frisches Salz, damit zwei Downloads nicht verknüpfbar sind.
 | `general` | `AUDIT_MAX_EVENTS` = 1000 | `AUDIT_RETENTION_DAYS` = 90 | alles andere |
 | `security` | `SECURITY_AUDIT_MAX_EVENTS` = 500 | 90 Tage | jeder `security.*`-Typ und `SECURITY_EVENT_TYPES` (Export, Löschen, Adoption, Restore-Schritte, Installations-Schlüssel verloren/neu) |
 
-`audit_ring_for(type)` entscheidet. So verdrängen viele Backup-Events nie die
-Sicherheitsspur. Persistiert im Store `openwrt_router.audit`. `api.events(..., ring=None)`
+`audit_ring_for(type)` entscheidet, ab B3 zusätzlich `CoreEvent.security_relevant`: ein
+Modul markiert ein eigenes Event als sicherheitsrelevant, dann liegt es im Sicherheitsring
+(Standard: allgemein; Zähler `security_relevant_module_events`). Kerntypen behalten ihren
+Ring. Ein Dedup-Fenster zählt nur im selben Ring: ein sicherheitsrelevantes Event erhöht
+nie den `repeat_count` eines allgemeinen Eintrags desselben Bereichs. So verdrängen viele
+Backup-Events nie die Sicherheitsspur. Persistiert im Store `openwrt_router.audit`. `api.events(..., ring=None)`
 liest beide Ringe, `ring=AuditRing.SECURITY` nur einen.
 
 ### 12.3 Typen und wer sie sendet
@@ -1242,8 +1248,22 @@ bestätigt/bekannt, Dry Run und Kompatibilitätsprüfung (`restore_checked`), Ex
 welche Version, welches Artefakt), Löschen, Aufbewahrung, Adoption, Verlust und Reset des
 Installations-Schlüssels, Wiederaufbau eines Core-Stores (`core.store_recovered`).
 
+**Modul-eigene Pflichttypen (ab B3).** `api.register_audit_mandatory_types(types, *,
+module) -> remover`: jeder Typ muss unter einem Präfix liegen, das dieses Modul registriert
+hat (nicht das nackte Präfix); Kerntypen, reservierte Namensräume, Typen anderer Module
+und `module="core"` ⇒ `ValueError` (dann wird nichts registriert). Folge: kein Dedup
+(`CoreEvent.audit_mandatory = True`, `dedup_scope = None`), jedes Auftreten wird
+gespeichert und gesendet; offene Dedup-Fenster dieser Typen enden sofort. Zähler
+`module_mandatory_types`. Rückgängig: der Rückgabewert, das Abmelden des Präfixes
+(`register_event_prefix` liefert jetzt einen Entferner; wer ihn ignoriert, verhält sich wie
+in 1.44) und das Ende des Core (der nächste Core beginnt ohne Registrierungen). Die
+Kerntypen in `AUDIT_MANDATORY_EVENT_TYPES` kann kein Modul ändern.
+
 ```python
-api.register_event_prefix("security_center.", module="security_center")
+remove_prefix = api.register_event_prefix("security_center.", module="security_center")
+api.register_audit_mandatory_types(["security_center.login_failed"], module="security_center")
+api.emit("security_center.login_failed", source="security_center", router_id=router_id,
+         security_relevant=True, result=EventResult.FAILURE, data={"attempts": 3})
 res = api.emit("security_center.port_scan", source="security_center", router_id=router_id,
                entry_id=entry.entry_id, severity=Severity.WARNING,
                result=EventResult.INFO, dedup_key="port_scan", data={"count": 12})
@@ -1687,6 +1707,7 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 | 100 | Modul-Schlüssel (B1, §11.5): `api.async_get_module_key(module, purpose="")` (HKDF-SHA256, `MODULE_KEY_SALT`, `MODULE_KEY_INFO_PREFIX` `…/v1`, 32 Bytes); nur für Module mit registriertem Event-Präfix; `lost` ⇒ `InstallationKeyLostError`. Reine Helfer `hkdf_sha256`, `derive_module_key`, `check_module_name`, `MODULE_NAME_PATTERN`, `MODULE_KEY_PURPOSE_PATTERN`, `CORE_KEY_OWNER`; `AuditLog.registered_modules()`; Zähler `module_keys_issued`/`module_keys_refused`. Bus-Pseudonym (§12.1): Salz aus `derive_core_key(key, "bus_pseudonym")`, über Neustarts stabil; ohne Schlüssel zufällig je Lauf, Zähler `bus_salt_ephemeral` + ein Log-Eintrag. `async_get_installation_key` für Provider unverändert. | A; B (Verhalten des Bus-Pseudonyms) |
 | 101 | `async_validate_backup(backup_id, *, actor=None)` (neues optionales Argument), `async_detect_drift`, `async_prepare_restore` und damit `async_check_restore_compatibility` (B2): Benutzer ohne Admin ⇒ `AuthorizationError` `not_admin` (`details.action` `config_validate`/`config_drift`/`config_restore_dry_run`, `audit_id`), auditiert auf dem Sicherheitsring, vor jedem Nachschlagen und Provider-Aufruf; Audit-Router ist der bekannte Router bzw. der Router einer bekannten Version, sonst `-` (unbekannte IDs werden nicht wiedergegeben). Modul-, System- und Automationsakteure unverändert. `async_validate_backup` ohne `actor` bleibt erlaubt (Altaufruf), Zähler `validate_without_actor`. Konstanten `READ_VALIDATE`, `READ_DRIFT`, `READ_RESTORE_DRY_RUN`. | A (Signatur); B (Verhalten für Benutzer ohne Admin) |
 | 102 | Maskierung (B4, §13): Kennungsnamen (`IDENTIFIER_KEY_NAMES`, `is_identifier_name`) sind keine geheimen Namen mehr, ihr Wert wird nur bei Schlüsselmaterial maskiert (`looks_like_key_material`); Zählernamen (`COUNTER_SUFFIXES`, `is_counter_name`) zeigen Zahlen. `is_snapshot_secret` unverändert. Neu, rein: `pseudonymise_identifier(kind, value, key)`, `pseudonymise_fields(data, key, fields)`, `IDENTIFIER_PSEUDONYM_PREFIXES`, `IDENTIFIER_PSEUDONYM_HEX_LENGTH` (16), `IDENTIFIER_INVALID`. MAC/IP/Hostname/SSID/BSSID werden vom Core nie maskiert (unverändert, jetzt festgeschrieben). | A; Verhalten (weniger Überdeckung) |
+| 103 | Modul-Events (B3, §12.1/§12.2/§12.5): `CoreEvent.security_relevant`, `CoreEvent.audit_mandatory` (beide `bool`, Standard `False`, in `to_dict`/`from_dict`; alte Einträge lesen sich unverändert, keine Store-Version); `emit(..., security_relevant=False)` (Audit-Log und API); `register_audit_mandatory_types(types, *, module) -> remover`; `register_event_prefix(...)` liefert einen Entferner statt `None`; Dedup nur im selben Ring; Zähler `security_relevant_module_events`, `module_mandatory_types`. Bus-Payload hat zwei neue Schlüssel. | A |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 
