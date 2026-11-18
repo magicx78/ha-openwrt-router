@@ -60,7 +60,28 @@ from .net_engine import (
 )
 from .ssl_util import ssl_context_for_protocol
 
+# Enterprise core: imported here, not inside the setup functions. HA imports
+# the integration package in the executor, so the ~300 ms import of the core
+# modules never runs on the event loop ("blocking call to import_module").
+# Guarded: a broken core must not break the integration, the routers work
+# without it. Every hook below checks for None and stays inside its own
+# try/except; the warning is logged once, when the package is imported.
+_core_import_error: Exception | None = None
+try:
+    from . import enterprise_core as _enterprise_core
+except Exception as _err:  # noqa: BLE001 - any error raised by the core import
+    _enterprise_core = None  # type: ignore[assignment]
+    _core_import_error = _err
+
 _LOGGER = logging.getLogger(__name__)
+
+if _core_import_error is not None:
+    _LOGGER.warning(
+        "Enterprise core unavailable (import failed: %s) — the routers work "
+        "without it; router ids, config versions and the audit log are off",
+        type(_core_import_error).__name__,
+        exc_info=_core_import_error,
+    )
 
 # Grace periods around the ACL-deploy rpcd restart (tests patch these to 0).
 _ACL_DEPLOY_GRACE_S: float = 2.0
@@ -236,11 +257,12 @@ def _core_note_acl(hass: HomeAssistant, entry: ConfigEntry, outcome: Any) -> Non
     ``outcome`` None = ensure failed or was skipped: the core reports the
     rf.* capabilities as unknown. Never raises (logged).
     """
+    if _enterprise_core is None:
+        return
     try:
         from .acl_provisioning import observe_deployed_acl
-        from .enterprise_core import async_get_core
 
-        core = async_get_core(hass)
+        core = _enterprise_core.async_get_core(hass)
         if core is None:
             return
         core.registry.note_deployed_acl(
@@ -303,9 +325,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # --- Enterprise core (part 1): router id BEFORE any router contact, so an
     # entry stuck in setup_retry still has its stable id. Never fails setup.
     try:
-        from .enterprise_core import async_setup_entry_core
-
-        await async_setup_entry_core(hass, entry)
+        if _enterprise_core is not None:
+            await _enterprise_core.async_setup_entry_core(hass, entry)
     except Exception:
         _LOGGER.warning(
             "Enterprise core: router id assignment failed for '%s' — the "
@@ -470,9 +491,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     # --- Enterprise core (part 1): registry listener on finished polls; reads
     # coordinator data only (no router calls). Never fails setup.
     try:
-        from .enterprise_core import async_setup_entry_core
-
-        await async_setup_entry_core(hass, entry, coordinator)
+        if _enterprise_core is not None:
+            await _enterprise_core.async_setup_entry_core(hass, entry, coordinator)
     except Exception:
         _LOGGER.warning(
             "Enterprise core: registry listener setup failed for '%s' — the "
@@ -617,9 +637,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
         # --- Enterprise core (part 1): detach; the last entry flushes and
         # releases the core.
         try:
-            from .enterprise_core import async_unload_entry_core
-
-            await async_unload_entry_core(hass, entry)
+            if _enterprise_core is not None:
+                await _enterprise_core.async_unload_entry_core(hass, entry)
         except Exception:
             _LOGGER.warning(
                 "Enterprise core unload raised for '%s'", entry.title, exc_info=True
@@ -656,9 +675,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
     # --- Enterprise core (part 1): the router record is orphaned, not deleted
     # (history stays; it can be adopted by a new entry).
     try:
-        from .enterprise_core import async_remove_entry_core
-
-        await async_remove_entry_core(hass, entry)
+        if _enterprise_core is not None:
+            await _enterprise_core.async_remove_entry_core(hass, entry)
     except Exception:
         _LOGGER.warning(
             "Enterprise core: could not orphan the router record of '%s'",
