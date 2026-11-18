@@ -7,6 +7,9 @@
  */
 
 import type { StabilityClass, StabilityProblem, StabilityRecommendation } from '../types';
+import { num } from './format';
+
+export { num };
 
 export const CLASS_LABEL: Record<StabilityClass, string> = {
   very_stable: 'sehr stabil',
@@ -46,18 +49,6 @@ const BAND_LABEL: Record<string, string> = { '2.4g': '2,4 GHz', '5g': '5 GHz', '
 
 export function bandLabel(band: string | null | undefined): string {
   return band ? BAND_LABEL[band] ?? band : '–';
-}
-
-/**
- * German number (comma decimal, dot thousands) with exactly `digits`
- * decimals; '–' when unknown. Every number of the stability tab goes
- * through here so "5.404" never means 5,4.
- */
-export function num(value: number | null | undefined, digits = 0): string {
-  if (value == null || !Number.isFinite(value)) return '–';
-  const scale = 10 ** digits;
-  const rounded = Math.round(value * scale) / scale || 0; // no "-0"
-  return rounded.toLocaleString('de-DE', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
 /** Rate per 100 client hours with its unit, e.g. "5,4 Abbrüche/100 h". */
