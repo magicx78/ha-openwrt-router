@@ -30,7 +30,7 @@ after each poll.
 | Where | Cost | Measured (dev PC, Python 3.13) |
 |---|---|---|
 | Router | **nothing**: 0 ubus calls, 0 SSH sessions, 0 file reads, no ACL change | call-counter test |
-| HA, per poll and router | one pass over the client list and the new log lines | 1000 clients: ≤ 20 ms (test budget), best run 9 ms |
+| HA, per poll and router | one pass over the client list and the new log lines | 1000 clients: ≤ 30 ms (test budget), best run 9 ms |
 | HA, store write | at most every 300 s; builds the payload from packed strings | 150 clients × 30 d: ~22 ms; 1000 clients: ~100 ms, the first save that has to trim ~0.5 s |
 | Disk | one extra file `.storage/openwrt_router.client_history`, default cap 3 MB (1–8 MB) | 150 clients × 30 d, all always online: 2.5 MB; since 1.43 about 30–35 bytes more per client for the last SSID |
 | HA, panel request | only while the *Stabilität* tab is open, at most every 60 s | 150 clients × 30 d: table 262 ms first / 107 ms after, sorted by 7-day availability or trend 330–370 ms first / ~50 ms in the same hour, AP view 114 ms, detail ≤ 9 ms |
