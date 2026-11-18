@@ -11,9 +11,10 @@ import {
   IconCompare,
   IconWiring,
   IconDiagnose,
+  IconEnterprise,
 } from './Icons';
 
-export type SidebarTab = 'topology' | 'devices' | 'clients' | 'traffic' | 'alerts' | 'diagnose' | 'compare' | 'wiring' | 'settings';
+export type SidebarTab = 'topology' | 'devices' | 'clients' | 'traffic' | 'alerts' | 'diagnose' | 'compare' | 'wiring' | 'enterprise' | 'settings';
 
 interface NavItem {
   id: SidebarTab;
@@ -30,11 +31,13 @@ interface Props {
   diagnoseCount?: number;
   /** False hides the Diagnose tab (network intelligence not running). */
   showDiagnose?: boolean;
+  /** False hides the Enterprise tab (no module registered). */
+  showEnterprise?: boolean;
   onToggle: () => void;
   onTabChange: (tab: SidebarTab) => void;
 }
 
-export function Sidebar({ open, activeTab, warningCount, diagnoseCount, showDiagnose = true, onToggle, onTabChange }: Props) {
+export function Sidebar({ open, activeTab, warningCount, diagnoseCount, showDiagnose = true, showEnterprise = false, onToggle, onTabChange }: Props) {
   const items: NavItem[] = [
     { id: 'topology', label: 'Topologie',  Icon: IconTopology },
     { id: 'devices',  label: 'Geräte',     Icon: IconDevices },
@@ -46,6 +49,7 @@ export function Sidebar({ open, activeTab, warningCount, diagnoseCount, showDiag
       ? [{ id: 'diagnose' as const, label: 'Diagnose', Icon: IconDiagnose, badge: diagnoseCount && diagnoseCount > 0 ? diagnoseCount : undefined }]
       : []),
     { id: 'compare',  label: 'Vergleich',  Icon: IconCompare },
+    ...(showEnterprise ? [{ id: 'enterprise' as const, label: 'Enterprise', Icon: IconEnterprise }] : []),
     { id: 'settings', label: 'Einst.',     Icon: IconSettings },
   ];
 

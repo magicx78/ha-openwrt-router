@@ -3997,3 +3997,38 @@ button.diag-table__row:hover { background: var(--surface-hover); }
   .stab-row .stab-state { order: 3; }
   .stab-row__num { order: 4; font-size: 11.5px; }
 }
+
+/* =============================================================================
+   ENTERPRISE VIEW — sub-tab container (components/EnterpriseView.tsx) and the
+   phone tab bar's scroll hint. Appended block; keep it last.
+   ============================================================================ */
+.ent-tabs {
+  display: flex; gap: 4px; overflow-x: auto; flex-shrink: 0;
+  scrollbar-width: none; border-bottom: 1px solid var(--border);
+}
+.ent-tabs::-webkit-scrollbar { display: none; }
+.ent-tab {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--text-secondary); font: inherit; font-size: 12.5px; font-weight: 600;
+  padding: 7px 10px; cursor: pointer; white-space: nowrap;
+}
+.ent-tab.active { color: var(--text-primary); border-bottom-color: var(--blue); }
+.ent-tab:hover { color: var(--text-primary); }
+.ent-tab:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
+.ent-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+
+@media (max-width: 420px) {
+  .ent.topo-view { padding: 12px 10px; }
+  /* More items than fit (10 x 40 px > narrow phones): the bar scrolls and
+     shows a shadow on the side that has more items (pure CSS scroll shadows). */
+  .topo-sidebar .sidebar-nav {
+    scrollbar-width: none;
+    background:
+      linear-gradient(to right, var(--bg-sidebar) 30%, transparent) left center / 24px 100% no-repeat local,
+      linear-gradient(to left, var(--bg-sidebar) 30%, transparent) right center / 24px 100% no-repeat local,
+      linear-gradient(to right, rgba(255,255,255,0.3), transparent) left center / 14px 100% no-repeat scroll,
+      linear-gradient(to left, rgba(255,255,255,0.3), transparent) right center / 14px 100% no-repeat scroll;
+  }
+  .topo-sidebar .sidebar-nav::-webkit-scrollbar { display: none; }
+}
