@@ -320,7 +320,9 @@ TH = UtilizationThresholds()
 class TestSummarize:
     def test_basic_figures(self):
         samples = [(100.0, 10.0), (160.0, 30.0), (220.0, 20.0)]
-        s = summarize(samples, now=220.0, window_s=300, thresholds=TH)
+        s = summarize(
+            samples, now=220.0, window_s=180, thresholds=TH, expected_interval_s=60
+        )
         assert s.current == 20.0
         assert s.mean == pytest.approx(20.0)
         assert s.peak == 30.0
@@ -331,7 +333,9 @@ class TestSummarize:
 
     def test_unknown_never_becomes_zero_and_lowers_coverage(self):
         samples = [(100.0, 80.0), (160.0, None), (220.0, 80.0), (280.0, None)]
-        s = summarize(samples, now=280.0, window_s=300, thresholds=TH)
+        s = summarize(
+            samples, now=280.0, window_s=240, thresholds=TH, expected_interval_s=60
+        )
         assert s.mean == pytest.approx(80.0)  # not 40 (None is no 0 %)
         assert s.current is None  # newest point unknown → no current value
         assert s.valid_count == 2
@@ -340,22 +344,26 @@ class TestSummarize:
 
     def test_points_outside_window_are_ignored(self):
         samples = [(0.0, 99.0), (250.0, 10.0)]
-        s = summarize(samples, now=300.0, window_s=100, thresholds=TH)
+        s = summarize(
+            samples, now=300.0, window_s=100, thresholds=TH, expected_interval_s=60
+        )
         assert s.valid_count == 1
         assert s.peak == 10.0
 
     def test_out_of_range_values_are_invalid(self):
         samples = [(10.0, -1.0), (20.0, 101.0), (30.0, float("nan")), (40.0, 5.0)]
-        s = summarize(samples, now=40.0, window_s=100, thresholds=TH)
+        s = summarize(
+            samples, now=40.0, window_s=100, thresholds=TH, expected_interval_s=60
+        )
         assert s.valid_count == 1
         assert s.invalid_count == 3
 
     def test_empty_window(self):
-        s = summarize([], now=40.0, window_s=100, thresholds=TH)
+        s = summarize([], now=40.0, window_s=100, thresholds=TH, expected_interval_s=60)
         assert s.current is None
         assert s.mean is None
         assert s.peak is None
-        assert s.coverage is None
+        assert s.coverage == 0.0  # points were expected, none came (review H4)
         assert s.sustained_overload is None
 
     def test_phases_split_by_unknown_and_low_points(self):
@@ -367,7 +375,9 @@ class TestSummarize:
             (50.0, 20.0),  # below → breaks
             (60.0, 71.0),
         ]
-        s = summarize(samples, now=60.0, window_s=100, thresholds=TH)
+        s = summarize(
+            samples, now=60.0, window_s=100, thresholds=TH, expected_interval_s=60
+        )
         assert [(p.start, p.end, p.peak, p.points) for p in s.phases] == [
             (10.0, 20.0, 90.0, 2),
             (40.0, 40.0, 80.0, 1),
@@ -376,45 +386,93 @@ class TestSummarize:
 
     def test_unsorted_input_is_sorted(self):
         samples = [(30.0, 3.0), (10.0, 1.0), (20.0, 2.0)]
-        s = summarize(samples, now=30.0, window_s=100, thresholds=TH)
+        s = summarize(
+            samples, now=30.0, window_s=100, thresholds=TH, expected_interval_s=60
+        )
         assert s.current == 3.0
 
     def test_case_06_high_channel_utilization_sustained_overload(self):
         samples = [(float(t), 85.0) for t in range(0, 600, 60)]
         samples[3] = (180.0, 50.0)  # one dip, 9 of 10 over the threshold
-        s = summarize(samples, now=540.0, window_s=600, thresholds=TH)
+        s = summarize(
+            samples, now=540.0, window_s=600, thresholds=TH, expected_interval_s=60
+        )
         assert s.sustained_overload is True
         assert s.peak == 85.0
 
     def test_case_06_not_sustained_when_share_too_low(self):
         samples = [(float(t), 85.0 if t < 240 else 20.0) for t in range(0, 600, 60)]
-        s = summarize(samples, now=540.0, window_s=600, thresholds=TH)
+        s = summarize(
+            samples, now=540.0, window_s=600, thresholds=TH, expected_interval_s=60
+        )
         assert s.sustained_overload is False
 
     def test_case_06_too_little_coverage_is_none_not_false(self):
         samples = [
             (float(t), 85.0 if t % 120 == 0 else None) for t in range(0, 600, 60)
         ]
-        s = summarize(samples, now=540.0, window_s=600, thresholds=TH)
+        s = summarize(
+            samples, now=540.0, window_s=600, thresholds=TH, expected_interval_s=60
+        )
         assert s.coverage == pytest.approx(0.5)
         assert s.sustained_overload is None
 
     def test_case_06_too_few_points_is_none(self):
-        s = summarize([(10.0, 95.0)], now=10.0, window_s=600, thresholds=TH)
-        assert s.coverage == 1.0
+        s = summarize(
+            [(10.0, 95.0)],
+            now=10.0,
+            window_s=600,
+            thresholds=TH,
+            expected_interval_s=60,
+        )
+        assert s.coverage == pytest.approx(0.1)  # 1 of 10 expected points
         assert s.sustained_overload is None
 
     def test_thresholds_are_overridable(self):
         samples = [(float(t), 50.0) for t in range(0, 300, 60)]
         low = UtilizationThresholds(warn_pct=40.0)
-        s = summarize(samples, now=240.0, window_s=300, thresholds=low)
+        s = summarize(
+            samples, now=240.0, window_s=300, thresholds=low, expected_interval_s=60
+        )
         assert s.sustained_overload is True
         assert len(s.phases) == 1
 
     def test_as_dict(self):
-        s = summarize([(10.0, 80.0)], now=10.0, window_s=60, thresholds=TH)
+        s = summarize(
+            [(10.0, 80.0)], now=10.0, window_s=60, thresholds=TH, expected_interval_s=60
+        )
         data = s.as_dict()
         assert data["phases"] == [
             {"start": 10.0, "end": 10.0, "peak": 80.0, "points": 1}
         ]
         assert data["sustained_overload"] is None
+
+
+class TestReviewH4ExpectedPoints:
+    def test_review_h4_three_points_in_an_hour_are_not_a_verdict(self):
+        samples = [(0.0, 90.0), (1800.0, 90.0), (3500.0, 90.0)]
+        s = summarize(
+            samples, now=3600.0, window_s=3600, thresholds=TH, expected_interval_s=60
+        )
+        assert s.valid_count == 3
+        assert s.coverage == pytest.approx(3 / 60)
+        assert s.sustained_overload is None
+
+    def test_review_h4_more_points_than_expected_cap_at_one(self):
+        samples = [(float(t), 90.0) for t in range(0, 600, 30)]
+        s = summarize(
+            samples, now=570.0, window_s=600, thresholds=TH, expected_interval_s=60
+        )
+        assert s.coverage == 1.0
+        assert s.sustained_overload is True
+
+    def test_review_h4_interval_is_required(self):
+        with pytest.raises(TypeError):
+            summarize([], now=1.0, window_s=60, thresholds=TH)
+
+    @pytest.mark.parametrize("interval", [0, -60, float("nan"), float("inf")])
+    def test_review_h4_bad_interval_is_rejected(self, interval):
+        with pytest.raises(ValueError):
+            summarize(
+                [], now=1.0, window_s=60, thresholds=TH, expected_interval_s=interval
+            )

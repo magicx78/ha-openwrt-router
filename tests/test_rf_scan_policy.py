@@ -8,6 +8,7 @@ import pytest
 
 from custom_components.openwrt_router.rf_models import CapabilityState
 from custom_components.openwrt_router.rf_scan_policy import (
+    DEFAULT_SCAN_CAPABILITY,
     NeighborBss,
     ScanPolicy,
     ScanReason,
@@ -159,8 +160,12 @@ class TestDecideScan:
         state = ScanState(last_scan_at={"radio0": last}, last_router_scan_at=last)
         assert _decide(state=state).allowed is True
 
-    def test_case_17_other_radio_is_not_limited_by_radio_limit(self):
+    def test_review_m3_other_radio_is_limited_only_by_router_gap(self):
+        # Old test expected "allowed" for another radio scanned 10 s ago;
+        # that ignored the router gap (review M3c).
         state = ScanState(last_scan_at={"radio1": NOW - 10}, last_router_scan_at=None)
+        assert _decide(state=state).reason is R.RATE_LIMIT_ROUTER
+        state = ScanState(last_scan_at={"radio1": NOW - 400}, last_router_scan_at=None)
         assert _decide(state=state).allowed is True
 
     def test_case_17_auto_scans_use_the_long_interval(self):
@@ -220,6 +225,77 @@ class TestDecideScan:
             "reason": "uplink_radio",
             "retry_after_s": None,
         }
+
+
+BAD_TIMES = [float("nan"), float("inf"), float("-inf")]
+
+
+class TestReviewM3ScanGate:
+    @pytest.mark.parametrize("bad", BAD_TIMES)
+    def test_review_m3_non_finite_request_time_is_refused(self, bad):
+        decision = _decide(_req(at=bad))
+        assert decision.allowed is False
+        assert decision.reason is R.RATE_LIMIT_RADIO
+        assert decision.retry_after_s == pytest.approx(POLICY.min_interval_manual_s)
+
+    @pytest.mark.parametrize("bad", BAD_TIMES)
+    def test_review_m3_non_finite_last_radio_scan_is_refused(self, bad):
+        state = ScanState(last_scan_at={"radio0": bad}, last_router_scan_at=None)
+        assert _decide(state=state).allowed is False
+
+    @pytest.mark.parametrize("bad", BAD_TIMES)
+    def test_review_m3_non_finite_router_scan_is_refused(self, bad):
+        state = ScanState(last_scan_at={}, last_router_scan_at=bad)
+        decision = _decide(state=state)
+        assert decision.allowed is False
+        assert decision.reason is R.RATE_LIMIT_ROUTER
+
+    @pytest.mark.parametrize("value", [1, "yes", [1], 0.5])
+    def test_review_m3_truthy_uplink_is_not_false(self, value):
+        assert _decide(uplink=value).allowed is False
+
+    @pytest.mark.parametrize("value", [0, "", [], 0.0, "no"])
+    def test_review_m3_falsy_non_bool_uplink_is_unknown(self, value):
+        assert _decide(uplink=value).reason is R.UPLINK_UNKNOWN
+
+    @pytest.mark.parametrize("value", [0, "", "no", 1])
+    def test_review_m3_cac_must_be_false(self, value):
+        assert _decide(cac_active=value).allowed is False
+
+    @pytest.mark.parametrize("value", [1, "no", "yes", [True]])
+    def test_review_m3_admin_must_be_true(self, value):
+        decision = _decide(_req(is_admin=value))
+        assert decision.reason is R.NOT_ADMIN
+
+    @pytest.mark.parametrize("value", [1, "yes", "no"])
+    def test_review_m3_manual_must_be_true(self, value):
+        # A truthy non-bool must not bypass the auto-scan switch.
+        assert _decide(_req(manual=value)).reason is R.AUTO_DISABLED
+
+    def test_review_m3_router_gap_uses_every_radio(self):
+        # Another radio of the same router scanned 10 s ago; the router
+        # timestamp was not kept (None).
+        state = ScanState(last_scan_at={"radio1": NOW - 10}, last_router_scan_at=None)
+        decision = _decide(state=state)
+        assert decision.reason is R.RATE_LIMIT_ROUTER
+        assert decision.retry_after_s == pytest.approx(POLICY.min_gap_per_router_s - 10)
+
+    def test_review_m3_router_gap_takes_the_latest(self):
+        state = ScanState(
+            last_scan_at={"radio1": NOW - 20}, last_router_scan_at=NOW - 4000
+        )
+        assert _decide(state=state).reason is R.RATE_LIMIT_ROUTER
+
+    def test_review_m3_scan_capability_defaults_to_unsupported(self):
+        decision = decide_scan(
+            _req(), uplink=False, cac_active=False, state=EMPTY, policy=POLICY
+        )
+        assert decision.reason is R.SCAN_UNSUPPORTED
+        assert DEFAULT_SCAN_CAPABILITY is C.UNSUPPORTED
+        assert _decide(capability=None).reason is R.SCAN_UNSUPPORTED
+
+    def test_review_m3_state_is_documented_per_router(self):
+        assert "one per router" in (ScanState.__doc__ or "")
 
 
 # =====================================================================

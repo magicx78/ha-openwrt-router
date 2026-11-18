@@ -15,8 +15,9 @@ Rules:
   mobile + high demand together with a persistent weak share.
 - Retry and failure counters of different drivers are not comparable (mt76
   counts retries inside ``tx_failed``, ath10k does not; mt76 reports retries
-  only without WED). Rates are only compared within one driver family
-  (:func:`retry_comparable`); an unknown driver compares with nothing.
+  only without WED, so an mt76 retry count of 0 is unknown unless
+  ``retries_reliable`` is True). Rates are only compared within one driver
+  family (:func:`retry_comparable`); an unknown driver compares with nothing.
 """
 
 from __future__ import annotations
@@ -126,6 +127,9 @@ class ClientRfWindow:
     WEAK_SIGNAL_DBM. ``rate_tx_trend`` is the change of the mean TX rate
     against the previous window in percent; None without a previous window.
     ``driver`` is the kernel driver name (e.g. ``mt7915e``, ``ath10k-ct``).
+    ``retries_reliable`` says whether the driver reports retries at all:
+    True for mt76 only when WED is known to be off (``wed_enable`` "N"),
+    None when unknown. An mt76 retry count of 0 is unknown unless True.
     """
 
     client_key: str
@@ -148,6 +152,7 @@ class ClientRfWindow:
     mobility: str | None
     demand: str | None
     samples: int
+    retries_reliable: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -360,14 +365,31 @@ def _missing(w: ClientRfWindow) -> tuple[str, ...]:
         "driver",
     )
     out = [n for n in names if getattr(w, n) is None]
+    if _retries_unverified(w):
+        out.append("retries_reliable")
     if w.samples <= 0:
         out.append("samples")
     return tuple(out)
 
 
+def _retries_unverified(w: ClientRfWindow) -> bool:
+    """True for an mt76 retry count of 0 while WED is not known to be off."""
+    return (
+        driver_family(w.driver) == FAMILY_MT76
+        and w.retries_reliable is not True
+        and w.tx_retries == 0
+    )
+
+
+def _window_retry(w: ClientRfWindow, th: ClientThresholds) -> Metric:
+    if _retries_unverified(w):
+        return metric_missing(CapabilityState.NO_DATA, SOURCE_IWINFO_ASSOCLIST)
+    return retry_rate(w.tx_retries, w.tx_packets, min_packets=th.min_packets)
+
+
 def _context(w: ClientRfWindow, th: ClientThresholds) -> _Ctx:
     family = driver_family(w.driver)
-    retry = _number(retry_rate(w.tx_retries, w.tx_packets, min_packets=th.min_packets))
+    retry = _number(_window_retry(w, th))
     failure = None
     if family in th.failed_independent_families:
         failure = _number(
@@ -562,9 +584,7 @@ def assess_client(
         driver_family=ctx.family,
         findings=tuple(findings),
         signal_quality=quality,
-        retry_rate=retry_rate(
-            window.tx_retries, window.tx_packets, min_packets=th.min_packets
-        ),
+        retry_rate=_window_retry(window, th),
         failure_rate=failure_rate(
             window.tx_failed, window.tx_packets, min_packets=th.min_packets
         ),

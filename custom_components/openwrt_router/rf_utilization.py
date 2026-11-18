@@ -385,19 +385,26 @@ def summarize(
     now: float,
     window_s: float,
     thresholds: UtilizationThresholds,
+    expected_interval_s: float,
 ) -> UtilizationSummary:
     """Summarize utilization points (timestamp, percent or None) of a window.
 
     Unknown points (None, NaN, outside 0..100) count as invalid: they lower
     the coverage, break overload phases and never enter mean or peak.
+    Missing points lower the coverage too: the denominator is the larger of
+    the points in the window and ``window_s / expected_interval_s`` (the
+    poll interval that fed the samples).
     """
+    if not math.isfinite(expected_interval_s) or expected_interval_s <= 0:
+        raise ValueError(f"expected_interval_s must be > 0: {expected_interval_s}")
     in_window = sorted(
         ((ts, _valid_pct(pct)) for ts, pct in samples if now - window_s <= ts <= now),
         key=lambda p: p[0],
     )
     valid = [pct for _, pct in in_window if pct is not None]
     total = len(in_window)
-    coverage = len(valid) / total if total else None
+    expected = max(float(total), window_s / expected_interval_s)
+    coverage = min(1.0, len(valid) / expected) if expected > 0 else None
     sustained: bool | None = None
     if (
         coverage is not None

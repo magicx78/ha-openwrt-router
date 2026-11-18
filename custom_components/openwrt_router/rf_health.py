@@ -22,6 +22,14 @@ overlap        0.10
 stability      0.10
 ============== ======
 
+Plan-only parts (``basis="plan"``): the overlap part counts as measured
+only if at least one involved overlap conflict is ``measured`` or
+``acceptable``. Otherwise (no conflicts, or only ``potential`` ones) it is a
+plan result: state ``no_data`` with a score. Its weight never enters
+``coverage`` and ``min_coverage`` is checked on measured parts only. The
+plan score can only pull the mean down: the score is the lower of the
+measured mean and the mean that includes the plan parts.
+
 Aggregates (AP, network, SSID) weight each member by its client count
 (minimum 1). Members without a score lower the coverage, not the score.
 """
@@ -54,6 +62,8 @@ WEIGHTS: Mapping[str, float] = MappingProxyType(
 )
 
 GRADE_UNKNOWN = "unknown"
+BASIS_MEASURED = "measured"
+BASIS_PLAN = "plan"
 _OVERLAP_KINDS = frozenset({ConflictKind.CO_CHANNEL, ConflictKind.ADJACENT_OVERLAP})
 # Rounding of coverage sums so 0.1 + 0.2 style drift does not cross a limit.
 _COVERAGE_DIGITS = 6
@@ -86,19 +96,28 @@ DEFAULT_HEALTH_THRESHOLDS = HealthThresholds()
 
 @dataclass(frozen=True)
 class ComponentScore:
-    """One component: a 0..100 score only when ``state`` is measured."""
+    """One component: a 0..100 score when measured or a plan-only result.
+
+    A plan-only component (``basis="plan"``) has state ``no_data`` and a
+    score that may lower the radio score but never adds coverage.
+    """
 
     name: str
     score: float | None
     state: CapabilityState
     evidence: tuple[str, ...]
+    basis: str = BASIS_MEASURED
 
     def __post_init__(self) -> None:
         if self.name not in WEIGHTS:
             raise ValueError(f"unknown health component: {self.name}")
-        if self.state is CapabilityState.MEASURED:
+        if self.basis not in (BASIS_MEASURED, BASIS_PLAN):
+            raise ValueError(f"unknown basis: {self.basis}")
+        if self.basis == BASIS_PLAN and self.state is not CapabilityState.NO_DATA:
+            raise ValueError(f"plan component {self.name} must be no_data")
+        if self.state is CapabilityState.MEASURED or self.basis == BASIS_PLAN:
             if self.score is None or math.isnan(self.score):
-                raise ValueError(f"measured component {self.name} needs a score")
+                raise ValueError(f"component {self.name} needs a score")
             if not 0.0 <= self.score <= 100.0:
                 raise ValueError(f"score out of range: {self.score}")
         elif self.score is not None:
@@ -110,6 +129,7 @@ class ComponentScore:
             "name": self.name,
             "score": self.score,
             "state": self.state.value,
+            "basis": self.basis,
             "weight": WEIGHTS[self.name],
             "evidence": list(self.evidence),
         }
@@ -248,13 +268,15 @@ def overlap_component(
 
     ``conflicts=None`` means no conflict check ran (``no_data``). Acceptable
     findings cost nothing but stay in the evidence; findings that are not
-    about overlap are listed as hints.
+    about overlap are listed as hints. Without a ``measured`` or
+    ``acceptable`` overlap finding the result is plan basis (see module doc).
     """
     if conflicts is None:
         return ComponentScore(
             "overlap", None, CapabilityState.NO_DATA, ("overlap:not_checked",)
         )
     penalty = 0.0
+    backed = False
     evidence: list[str] = []
     for conflict in conflicts:
         if ref not in conflict.members:
@@ -267,12 +289,21 @@ def overlap_component(
         evidence.append(f"overlap:{entry}")
         if conflict.status is ConflictStatus.POTENTIAL:
             penalty += thresholds.overlap_potential_penalty
-        elif conflict.status is ConflictStatus.MEASURED:
-            penalty += thresholds.overlap_measured_penalty
+        else:
+            backed = True
+            if conflict.status is ConflictStatus.MEASURED:
+                penalty += thresholds.overlap_measured_penalty
     if not evidence:
         evidence.append("overlap:no_conflicts")
     score = max(0.0, 100.0 - penalty)
-    return ComponentScore("overlap", score, CapabilityState.MEASURED, tuple(evidence))
+    if backed:
+        return ComponentScore(
+            "overlap", score, CapabilityState.MEASURED, tuple(evidence)
+        )
+    evidence.append("overlap:plan_only")
+    return ComponentScore(
+        "overlap", score, CapabilityState.NO_DATA, tuple(evidence), BASIS_PLAN
+    )
 
 
 def _complete(components: Sequence[ComponentScore]) -> tuple[ComponentScore, ...]:
@@ -309,25 +340,33 @@ def radio_health(
     """Return the health of one radio from its component scores."""
     complete = _complete(components)
     measured = [c for c in complete if c.state is CapabilityState.MEASURED]
+    plan = [c for c in complete if c.basis == BASIS_PLAN]
     coverage = round(sum(WEIGHTS[c.name] for c in measured), _COVERAGE_DIGITS)
     mean = None
     if measured:
-        total = sum(WEIGHTS[c.name] * (c.score or 0.0) for c in measured)
-        mean = total / sum(WEIGHTS[c.name] for c in measured)
+        mean = _weighted_mean(measured)
+        if plan:
+            mean = min(mean, _weighted_mean([*measured, *plan]))
     score, capped, evidence = _limit(mean, coverage, thresholds)
     unmeasured = tuple(
         f"unmeasured:{c.name}:{c.state.value}"
         for c in complete
         if c.state is not CapabilityState.MEASURED
     )
+    plan_notes = tuple(f"plan_basis:{c.name}" for c in plan)
     return HealthScore(
         score=score,
         coverage=coverage,
         components=complete,
         grade=grade(score, thresholds),
         capped=capped,
-        evidence=evidence + unmeasured,
+        evidence=evidence + unmeasured + plan_notes,
     )
+
+
+def _weighted_mean(components: Sequence[ComponentScore]) -> float:
+    total = sum(WEIGHTS[c.name] * (c.score or 0.0) for c in components)
+    return total / sum(WEIGHTS[c.name] for c in components)
 
 
 def item_from(

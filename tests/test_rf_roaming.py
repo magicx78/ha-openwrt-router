@@ -214,15 +214,20 @@ class TestRoamingQuality:
         assert r.status is RoamStatus.INSUFFICIENT
         assert r.score is None
 
-    def test_case_25_missing_parts_lower_coverage_not_score(self):
-        events = [_ev(i * 3600.0, before=None, gap=None) for i in range(3)]
+    def test_review_l1_missing_parts_lower_coverage_not_score(self):
+        # Unknown auth data is None, not 0 (review M2); the old test counted
+        # the auth part as known.
+        events = [
+            _ev(i * 3600.0, before=None, gap=None, auth_failures=None) for i in range(3)
+        ]
         r = roaming_quality(_window(events), TH)
-        assert r.coverage == pytest.approx(0.5)
+        assert r.coverage == pytest.approx(0.35)
         assert r.status is RoamStatus.INSUFFICIENT
         assert r.score is None
         parts = {p.name: p for p in r.parts}
         assert parts["signal"].score is None
         assert parts["gap"].score is None
+        assert parts["auth"].score is None
 
     def test_missing_part_is_renormalized_not_counted_full(self):
         events = [
@@ -258,7 +263,9 @@ def _rssi(value, state=CapabilityState.MEASURED):
     return metric_missing(state, SRC)
 
 
-def _sticky(alternatives=(), *, rssi=-80.0, dwell=1800.0, weak=0.8, mobility=None):
+def _sticky(
+    alternatives=(), *, rssi=-80.0, dwell=1800.0, weak=0.8, mobility=None, band="5g"
+):
     return StickyInput(
         client_key="c1",
         current_radio=A,
@@ -266,12 +273,15 @@ def _sticky(alternatives=(), *, rssi=-80.0, dwell=1800.0, weak=0.8, mobility=Non
         dwell_s=dwell,
         weak_share=weak,
         alternatives=tuple(alternatives),
+        band=band,
         mobility=mobility,
     )
 
 
-def _alt(radio, rssi, basis, age=60.0):
-    return AlternativeAp(radio=radio, rssi=_rssi(rssi), basis=basis, age_s=age)
+def _alt(radio, rssi, basis, age=60.0, band="5g"):
+    return AlternativeAp(
+        radio=radio, rssi=_rssi(rssi), basis=basis, age_s=age, band=band
+    )
 
 
 class TestSticky:
@@ -367,6 +377,7 @@ class TestSticky:
             dwell_s=1800.0,
             weak_share=0.8,
             alternatives=tuple(alt),
+            band="5g",
         )
         s = assess_sticky(missing, STH)
         assert s.status is StickyStatus.UNKNOWN
@@ -392,3 +403,50 @@ class TestSticky:
         d = s.as_dict()
         assert d["status"] == "supported_by_measurement"
         assert d["better_radio"] == {"router_key": "ap2", "radio_key": "radio1"}
+
+
+class TestReviewM2AuthUnknown:
+    def test_review_m2_all_auth_unknown_is_unknown_part(self):
+        events = [_ev(i * 3600.0, auth_failures=None) for i in range(3)]
+        r = roaming_quality(_window(events), TH)
+        parts = {p.name: p for p in r.parts}
+        assert parts["auth"].score is None
+        assert r.coverage == pytest.approx(1.0 - WEIGHTS["auth"])
+
+    def test_review_m2_unknown_events_leave_the_share(self):
+        events = [
+            _ev(0.0, auth_failures=None),
+            _ev(3600.0, B, A, auth_failures=2),
+            _ev(7200.0, auth_failures=0),
+        ]
+        r = roaming_quality(_window(events), TH)
+        auth = {p.name: p for p in r.parts}["auth"]
+        assert auth.score == pytest.approx(50.0)  # 1 of 2 known roams failed
+        assert "roams_with_auth_failures:1/2" in auth.evidence
+        assert "auth_unknown:1" in auth.evidence
+
+
+class TestReviewM5StickyBands:
+    def test_review_m5_other_band_measurement_is_not_comparable(self):
+        alt = _alt(A24, -62.0, "measured_same_client", band="2.4g")
+        s = assess_sticky(_sticky([alt]), STH)
+        assert s.status is StickyStatus.SUSPECTED
+        assert s.better_radio is None
+        assert "alternative_other_band_not_comparable:ap1/radio0" in s.evidence
+
+    def test_review_m5_unknown_band_is_not_comparable(self):
+        alt = _alt(B, -55.0, "measured_same_client", band=None)
+        s = assess_sticky(_sticky([alt]), STH)
+        assert s.status is not StickyStatus.SUPPORTED_BY_MEASUREMENT
+        assert s.better_radio is None
+        s = assess_sticky(_sticky([_alt(B, -55.0, "measured_same_client")], band=None))
+        assert s.status is not StickyStatus.SUPPORTED_BY_MEASUREMENT
+
+    def test_review_m5_same_band_still_supported(self):
+        alts = [
+            _alt(A24, -40.0, "measured_same_client", band="2.4g"),
+            _alt(B, -62.0, "measured_same_client"),
+        ]
+        s = assess_sticky(_sticky(alts), STH)
+        assert s.status is StickyStatus.SUPPORTED_BY_MEASUREMENT
+        assert s.better_radio == B

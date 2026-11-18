@@ -409,3 +409,36 @@ class TestSummary:
         assert s.client_count == 0
         assert s.radio is None
         assert s.signal_coverage is None
+
+
+class TestReviewM4Mt76RetriesReliable:
+    """mt76 with WED reports no retries: a 0 there is unknown, not good."""
+
+    def test_review_m4_mt76_zero_retries_wed_unknown_is_no_data(self):
+        a = assess_client(_win(tx_retries=0, tx_packets=5000, tx_failed=0))
+        assert a.retry_rate.state is C.NO_DATA
+        assert "retries_reliable" in a.missing
+
+    def test_review_m4_mt76_zero_retries_wed_on_is_no_data(self):
+        w = _win(tx_retries=0, tx_packets=5000, retries_reliable=False)
+        assert assess_client(w).retry_rate.state is C.NO_DATA
+
+    def test_review_m4_reliable_zero_stays_measured_zero(self):
+        w = _win(tx_retries=0, tx_packets=5000, retries_reliable=True)
+        a = assess_client(w)
+        assert a.retry_rate.state is C.MEASURED
+        assert a.retry_rate.value == 0.0
+        assert "retries_reliable" not in a.missing
+
+    def test_review_m4_nonzero_retries_are_measured(self):
+        a = assess_client(_win(tx_retries=500, tx_packets=10_000))
+        assert a.retry_rate.state is C.MEASURED
+
+    def test_review_m4_other_family_zero_is_measured(self):
+        w = _win(driver="ath10k-ct", tx_retries=0, tx_packets=5000)
+        assert assess_client(w).retry_rate.state is C.MEASURED
+
+    def test_review_m4_documented(self):
+        import custom_components.openwrt_router.rf_clients as mod
+
+        assert "retries_reliable" in (mod.ClientRfWindow.__doc__ or "")

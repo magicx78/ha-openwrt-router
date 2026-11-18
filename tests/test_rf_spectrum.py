@@ -246,8 +246,12 @@ class TestDfs:
         info = block_dfs(block_for("2.4g", 6, 20))
         assert (info.dfs, info.basis) == (False, DFS_BASIS_OUTSIDE_5G)
 
-    def test_case_18_basis_says_not_reported_by_radio(self):
-        assert "not_reported" in DFS_BASIS_FREQUENCY_RANGE
+    def test_review_l2_block_basis_says_not_reported_by_radio(self):
+        # The verdict a caller gets, not just the constant.
+        for channel in (52, 100):
+            basis = block_dfs(block_for("5g", channel, 20)).basis
+            assert basis == DFS_BASIS_FREQUENCY_RANGE
+            assert "not_reported" in basis
 
 
 # =====================================================================

@@ -5,8 +5,12 @@ says whether it is merely possible from the plan (``potential``), backed by
 a measurement (``measured``) or shown harmless by measurements on all
 involved radios (``acceptable``). Same channel alone is never a warning.
 
-Pairs with a backhaul radio are not hidden (``channel_plan`` skips them);
-they carry ``backhaul_shared_channel`` evidence. This module does not
+Pairs with a backhaul radio are not hidden (``channel_plan`` skips them).
+Only the real uplink pair (one radio's ``uplink_peer`` is the other) is
+``acceptable`` by the backhaul alone and carries ``backhaul_shared_channel``.
+A backhaul radio paired with any other radio is judged like every other
+pair; the evidence says ``backhaul_peer_unknown`` (peer not known) or
+``backhaul_other_peer`` (peer is a different radio). This module does not
 replace ``channel_plan.analyze`` and finds the same pairs for
 ``same_channel``/``overlap`` (tested).
 """
@@ -107,6 +111,8 @@ class RadioView:
     radio key alone is not unique (``radio0`` exists on every router).
     ``regulatory`` is the radio's
     reported channel list; without it no ``uneven_distribution`` finding.
+    ``uplink_peer`` is the radio at the other end of this radio's WLAN
+    uplink (set on the backhaul radio, or on the parent); None means unknown.
     """
 
     router_key: str
@@ -115,6 +121,7 @@ class RadioView:
     channel: int
     width_mhz: int
     backhaul: bool = False
+    uplink_peer: RadioRef | None = None
     utilization: Metric | None = None
     noise: Metric | None = None
     client_count: int | None = None
@@ -210,6 +217,31 @@ def _neighbor_evidence(
     return dbm >= threshold, [text]
 
 
+def is_uplink_pair(a: RadioView, b: RadioView) -> bool:
+    """Return True if ``a`` and ``b`` are the two ends of one WLAN uplink."""
+    return a.uplink_peer == b.ref or b.uplink_peer == a.ref
+
+
+def _backhaul_evidence(a: RadioView, b: RadioView, uplink_pair: bool) -> list[str]:
+    if uplink_pair:
+        return [
+            f"backhaul_shared_channel:{v.ref}"
+            for v in (a, b)
+            if v.backhaul or v.uplink_peer is not None
+        ]
+    texts = []
+    for view in (a, b):
+        if not view.backhaul:
+            continue
+        code = (
+            "backhaul_peer_unknown"
+            if view.uplink_peer is None
+            else "backhaul_other_peer"
+        )
+        texts.append(f"{code}:{view.ref}")
+    return texts
+
+
 def _pair_conflict(
     a: RadioView,
     b: RadioView,
@@ -233,8 +265,8 @@ def _pair_conflict(
         loud, texts = _neighbor_evidence(hearer, other, th.neighbor_signal_dbm)
         heard = heard or loud
         evidence.extend(texts)
-    backhaul = [v for v in (a, b) if v.backhaul]
-    evidence.extend(f"backhaul_shared_channel:{v.ref}" for v in backhaul)
+    uplink_pair = is_uplink_pair(a, b)
+    evidence.extend(_backhaul_evidence(a, b, uplink_pair))
     same_router = a.router_key == b.router_key
     if same_router:
         evidence.append(f"same_router:{a.router_key}")
@@ -245,7 +277,7 @@ def _pair_conflict(
         status = ConflictStatus.MEASURED
     elif same_router:
         status = ConflictStatus.POTENTIAL  # never downgraded on one router
-    elif backhaul or all_low:
+    elif uplink_pair or all_low:
         status = ConflictStatus.ACCEPTABLE
     else:
         status = ConflictStatus.POTENTIAL

@@ -224,19 +224,74 @@ class TestNeighborSignal:
         assert by_members[(a2, a3)].status is S.POTENTIAL
 
 
+ROOT_R0 = RadioRef("root", "r0")
+
+
 class TestBackhaulAndSameRouter:
-    def test_backhaul_pair_is_reported_as_expected(self):
-        radios = [_view("root", "r0", 6), _view("rep", "r0", 6, backhaul=True)]
+    def test_review_l1_backhaul_pair_with_known_peer_is_acceptable(self):
+        radios = [
+            _view("root", "r0", 6),
+            _view("rep", "r0", 6, backhaul=True, uplink_peer=ROOT_R0),
+        ]
         (c,) = detect_conflicts(radios, TH)
         assert c.kind is K.CO_CHANNEL
         assert c.status is S.ACCEPTABLE
         assert c.severity is Severity.INFO
         assert "backhaul_shared_channel:rep/r0" in c.evidence
 
+    def test_review_l1_backhaul_flag_without_peer_is_not_acceptable(self):
+        # The old test pinned ACCEPTABLE for a bare backhaul flag (bug H1).
+        radios = [_view("root", "r0", 6), _view("rep", "r0", 6, backhaul=True)]
+        (c,) = detect_conflicts(radios, TH)
+        assert c.status is S.POTENTIAL
+        assert "backhaul_peer_unknown:rep/r0" in c.evidence
+        assert not any(e.startswith("backhaul_shared") for e in c.evidence)
+
+    def test_review_h1_backhaul_flag_does_not_silence_a_third_radio(self):
+        rep = _view("rep", "r0", 6, backhaul=True, uplink_peer=ROOT_R0)
+        radios = [_view("root", "r0", 6), rep, _view("ap3", "r0", 6)]
+        by_members = {c.members: c for c in detect_conflicts(radios, TH)}
+        uplink = by_members[(RadioRef("rep", "r0"), ROOT_R0)]
+        third = by_members[(RadioRef("ap3", "r0"), RadioRef("rep", "r0"))]
+        assert uplink.status is S.ACCEPTABLE
+        assert "backhaul_shared_channel:rep/r0" in uplink.evidence
+        assert third.status is S.POTENTIAL
+        assert third.severity is Severity.INFO
+        assert not any(e.startswith("backhaul_shared") for e in third.evidence)
+        assert "backhaul_other_peer:rep/r0" in third.evidence
+
+    def test_review_h1_unknown_peer_with_third_radio_is_potential(self):
+        radios = [
+            _view("root", "r0", 6),
+            _view("rep", "r0", 6, backhaul=True),
+            _view("ap3", "r0", 6),
+        ]
+        conflicts = detect_conflicts(radios, TH)
+        assert {c.status for c in conflicts} == {S.POTENTIAL}
+        with_rep = [c for c in conflicts if RadioRef("rep", "r0") in c.members]
+        assert len(with_rep) == 2
+        assert all("backhaul_peer_unknown:rep/r0" in c.evidence for c in with_rep)
+
+    def test_review_h1_unknown_peer_low_load_is_acceptable_by_measurement(self):
+        radios = [
+            _view("ap3", "r0", 6, utilization=_util(5.0)),
+            _view("rep", "r0", 6, backhaul=True, utilization=_util(5.0)),
+        ]
+        (c,) = detect_conflicts(radios, TH)
+        assert c.status is S.ACCEPTABLE  # by measurement, not by the flag
+        assert "backhaul_peer_unknown:rep/r0" in c.evidence
+
+    def test_review_h1_peer_given_on_either_side(self):
+        # The parent radio may carry the link as well.
+        root = _view("root", "r0", 6, uplink_peer=RadioRef("rep", "r0"))
+        (c,) = detect_conflicts([root, _view("rep", "r0", 6)], TH)
+        assert c.status is S.ACCEPTABLE
+        assert "backhaul_shared_channel:root/r0" in c.evidence
+
     def test_backhaul_does_not_hide_a_measured_load(self):
         radios = [
             _view("root", "r0", 6, utilization=_util(90.0)),
-            _view("rep", "r0", 6, backhaul=True),
+            _view("rep", "r0", 6, backhaul=True, uplink_peer=ROOT_R0),
         ]
         (c,) = detect_conflicts(radios, TH)
         assert c.status is S.MEASURED
@@ -399,7 +454,7 @@ def _rf_pairs(radios):
     pairs = set()
     for c in detect_conflicts(views, TH):
         if c.kind in (K.CO_CHANNEL, K.ADJACENT_OVERLAP):
-            if any("backhaul_shared_channel" in e for e in c.evidence):
+            if any(e.startswith("backhaul_") for e in c.evidence):
                 continue  # channel_plan skips backhaul pairs by design
             members = frozenset((m.router_key, m.radio_key) for m in c.members)
             pairs.add((c.kind, members))
@@ -416,14 +471,21 @@ class TestMatchesChannelPlan:
 
     def test_backhaul_pairs_are_extra_not_missing(self):
         radios = CONSTELLATIONS["mixed_with_backhaul_and_same_router"]
-        views = [from_channel_plan_radio(r) for r in radios]
+        views = [
+            from_channel_plan_radio(
+                r, uplink_peer=RadioRef("e1", "phy0") if r.backhaul else None
+            )
+            for r in radios
+        ]
         backhaul = [
             c
             for c in detect_conflicts(views, TH)
-            if any("backhaul_shared_channel" in e for e in c.evidence)
+            if any(e.startswith("backhaul_") for e in c.evidence)
         ]
-        assert {c.status for c in backhaul} == {S.ACCEPTABLE}
         assert len(backhaul) == 2  # e2 with e1 and with e3
+        status = {tuple(m.router_key for m in c.members): c.status for c in backhaul}
+        # Only the real uplink pair is acceptable by the flag (review H1).
+        assert status == {("e1", "e2"): S.ACCEPTABLE, ("e2", "e3"): S.POTENTIAL}
 
     def test_identical_block_other_primary_is_co_channel_here(self):
         # Deliberate difference: channel_plan calls this "overlap", the RF

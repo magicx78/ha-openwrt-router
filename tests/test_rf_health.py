@@ -12,6 +12,8 @@ from custom_components.openwrt_router.rf_conflicts import (
     Severity,
 )
 from custom_components.openwrt_router.rf_health import (
+    BASIS_MEASURED,
+    BASIS_PLAN,
     WEIGHTS,
     ComponentScore,
     HealthItem,
@@ -184,15 +186,90 @@ class TestScorers:
                 ConflictKind.CO_CHANNEL, "2.4g", (ref, other), status, Severity.INFO, ()
             )
 
-        assert overlap_component(ref, []).score == 100.0
-        assert overlap_component(ref, [conflict(ConflictStatus.ACCEPTABLE)]).score == (
-            100.0
-        )
+        # Review L1: an empty list is plan basis, not a measured 100.
+        empty = overlap_component(ref, [])
+        assert empty.state is C.NO_DATA
+        assert empty.basis == BASIS_PLAN
+        assert empty.score == 100.0
+        acceptable = overlap_component(ref, [conflict(ConflictStatus.ACCEPTABLE)])
+        assert acceptable.score == 100.0
+        assert acceptable.state is C.MEASURED
         potential = overlap_component(ref, [conflict(ConflictStatus.POTENTIAL)])
+        assert potential.basis == BASIS_PLAN
         measured = overlap_component(
             ref, [conflict(ConflictStatus.POTENTIAL), conflict(ConflictStatus.MEASURED)]
         )
+        assert measured.state is C.MEASURED
         assert measured.score < potential.score < 100.0
+
+
+class TestReviewH2PlanBasis:
+    REF = RadioRef("ap1", "radio0")
+    OTHER = RadioRef("ap2", "radio0")
+
+    def _three_measured(self):
+        # utilization 0.20 + signal 0.15 + client_quality 0.10 = 0.45 < 0.5
+        return [
+            _c("utilization", 100.0),
+            _c("signal", 100.0),
+            _c("client_quality", 100.0),
+        ]
+
+    def _conflict(self, status):
+        return Conflict(
+            ConflictKind.CO_CHANNEL,
+            "2.4g",
+            (self.REF, self.OTHER),
+            status,
+            Severity.INFO,
+            (),
+        )
+
+    def test_review_h2_plan_overlap_does_not_lift_coverage(self):
+        ov = overlap_component(self.REF, [])
+        h = radio_health([*self._three_measured(), ov], TH)
+        assert h.coverage == pytest.approx(0.45)
+        assert h.score is None
+        assert "plan_basis:overlap" in h.evidence
+
+    def test_review_h2_potential_only_is_plan_basis(self):
+        ov = overlap_component(self.REF, [self._conflict(ConflictStatus.POTENTIAL)])
+        assert ov.state is C.NO_DATA
+        assert ov.basis == BASIS_PLAN
+        h = radio_health([*self._three_measured(), ov], TH)
+        assert h.coverage == pytest.approx(0.45)
+
+    def test_review_h2_plan_penalty_still_lowers_the_score(self):
+        base = [*_all(100.0)]
+        base = [c for c in base if c.name != "overlap"]
+        ov = overlap_component(
+            self.REF,
+            [self._conflict(ConflictStatus.POTENTIAL)] * 3,
+        )
+        without = radio_health(base, TH)
+        with_plan = radio_health([*base, ov], TH)
+        assert with_plan.coverage == without.coverage == pytest.approx(0.9)
+        assert with_plan.score < without.score
+
+    def test_review_h2_plan_never_raises_the_score(self):
+        base = [_c(name, 60.0) for name in WEIGHTS if name != "overlap"]
+        ov = overlap_component(self.REF, [])
+        assert radio_health([*base, ov], TH).score == radio_health(base, TH).score
+
+    def test_review_h2_measured_conflict_makes_overlap_measured(self):
+        ov = overlap_component(self.REF, [self._conflict(ConflictStatus.MEASURED)])
+        assert ov.state is C.MEASURED
+        assert ov.basis == BASIS_MEASURED
+        h = radio_health([*self._three_measured(), ov], TH)
+        assert h.coverage == pytest.approx(0.55)
+
+    def test_review_h2_plan_component_dict_names_basis(self):
+        assert overlap_component(self.REF, []).as_dict()["basis"] == BASIS_PLAN
+
+    def test_review_h2_documented(self):
+        from custom_components.openwrt_router import rf_health
+
+        assert "plan" in rf_health.__doc__
 
 
 class TestAggregation:

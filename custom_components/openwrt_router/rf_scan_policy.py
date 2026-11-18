@@ -4,7 +4,11 @@ A scan is not a read: the radio leaves its channel or the driver adds a
 temporary interface (plan document, section 6). :func:`decide_scan` only
 answers "may this scan run now?" with a fixed order of refusal reasons.
 A radio carrying an uplink (STA, mesh, WDS, ad-hoc) is always refused; there
-is deliberately no force parameter.
+is deliberately no force parameter. The gates are strict: a scan runs only
+for ``uplink is False``, ``cac_active is False``, ``is_admin is True``;
+truthy or falsy non-bools are refused. Non-finite times (NaN, inf) are
+treated like a clock going back (full wait). Until a scan has been proven
+on a radio its capability is ``unsupported`` (:data:`DEFAULT_SCAN_CAPABILITY`).
 
 :func:`sanitize_neighbors` keeps own BSSs by BSSID and replaces foreign
 SSID/BSSID with a salted, shortened hash: neighbors' network names and MAC
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -47,6 +52,8 @@ _NON_UPLINK_MODES = frozenset({"ap", "master", "monitor"})
 _SCAN_POSSIBLE = frozenset(
     {CapabilityState.MEASURED, CapabilityState.NO_DATA, CapabilityState.STALE}
 )
+# A scan counts as "nicht verfügbar" until it is proven on the radio.
+DEFAULT_SCAN_CAPABILITY = CapabilityState.UNSUPPORTED
 
 # Plan document 6.4: at most once per hour and radio.
 DEFAULT_MIN_INTERVAL_MANUAL_S = 3600.0
@@ -120,7 +127,12 @@ class ScanRequest:
 
 @dataclass(frozen=True)
 class ScanState:
-    """Earlier scans of one router: per radio and for the router as a whole."""
+    """Earlier scans of one router: per radio and for the router as a whole.
+
+    ScanState is one per router (never shared between routers): the
+    router gap is checked against the latest of ``last_router_scan_at`` and
+    every ``last_scan_at`` value.
+    """
 
     last_scan_at: Mapping[str, float]
     last_router_scan_at: float | None
@@ -157,39 +169,62 @@ def _refuse(reason: ScanReason, retry_after_s: float | None = None) -> ScanDecis
     return ScanDecision(False, reason, retry_after_s)
 
 
-def _wait(last: float | None, now: float, interval: float) -> float | None:
-    """Seconds still to wait, None if free. A clock going back waits fully."""
+def _finite(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int | float)
+        and math.isfinite(value)
+    )
+
+
+def _wait(last: Any, now: Any, interval: float) -> float | None:
+    """Seconds still to wait, None if free.
+
+    A clock going back and a non-finite time both wait fully.
+    """
     if last is None:
         return None
+    if not (_finite(last) and _finite(now)):
+        return interval
     elapsed = now - last
     if elapsed < 0:
         return interval
     return interval - elapsed if elapsed < interval else None
 
 
+def _latest_router_scan(state: ScanState) -> Any:
+    """Latest scan on any radio of the router; a non-finite value wins."""
+    times = [state.last_router_scan_at, *state.last_scan_at.values()]
+    known = [t for t in times if t is not None]
+    if not known:
+        return None
+    bad = [t for t in known if not _finite(t)]
+    return bad[0] if bad else max(known)
+
+
 def _gate_reason(
     request: ScanRequest,
-    capability: CapabilityState,
+    capability: CapabilityState | None,
     uplink: bool | None,
     cac_active: bool | None,
     policy: ScanPolicy,
 ) -> ScanReason | None:
-    """Refusals that do not depend on time, in fixed order."""
-    if capability is CapabilityState.UNSUPPORTED:
+    """Refusals that do not depend on time, in fixed order (strict bools)."""
+    if capability is None or capability is CapabilityState.UNSUPPORTED:
         return ScanReason.SCAN_UNSUPPORTED
     if capability not in _SCAN_POSSIBLE:
         return ScanReason.SCAN_UNAVAILABLE
-    if not request.is_admin:
+    if request.is_admin is not True:
         return ScanReason.NOT_ADMIN
-    if not request.manual and not policy.enabled_auto:
+    if request.manual is not True and policy.enabled_auto is not True:
         return ScanReason.AUTO_DISABLED
     if uplink is True:
         return ScanReason.UPLINK_RADIO
-    if uplink is None:
+    if uplink is not False:
         return ScanReason.UPLINK_UNKNOWN
     if cac_active is True:
         return ScanReason.CAC_ACTIVE
-    if cac_active is None:
+    if cac_active is not False:
         return ScanReason.CAC_UNKNOWN
     return None
 
@@ -197,24 +232,28 @@ def _gate_reason(
 def decide_scan(
     request: ScanRequest,
     *,
-    capability: CapabilityState,
+    capability: CapabilityState | None = DEFAULT_SCAN_CAPABILITY,
     uplink: bool | None,
     cac_active: bool | None,
     state: ScanState,
     policy: ScanPolicy,
 ) -> ScanDecision:
-    """Decide whether a scan may run now. Never triggers one."""
+    """Decide whether a scan may run now. Never triggers one.
+
+    ``state`` belongs to the router of the radio (one ScanState per router).
+    """
     reason = _gate_reason(request, capability, uplink, cac_active, policy)
     if reason is not None:
         return _refuse(reason)
     now = request.requested_at
-    interval = (
-        policy.min_interval_manual_s if request.manual else policy.min_interval_auto_s
-    )
+    manual = request.manual is True
+    interval = policy.min_interval_manual_s if manual else policy.min_interval_auto_s
+    if not _finite(now):
+        return _refuse(ScanReason.RATE_LIMIT_RADIO, interval)
     wait = _wait(state.last_scan_at.get(request.radio_key), now, interval)
     if wait is not None:
         return _refuse(ScanReason.RATE_LIMIT_RADIO, wait)
-    wait = _wait(state.last_router_scan_at, now, policy.min_gap_per_router_s)
+    wait = _wait(_latest_router_scan(state), now, policy.min_gap_per_router_s)
     if wait is not None:
         return _refuse(ScanReason.RATE_LIMIT_ROUTER, wait)
     return ScanDecision(True, ScanReason.ALLOWED)

@@ -98,6 +98,19 @@ def _summary(mean, sustained=True, coverage=1.0):
 
 
 AP1 = _view("ap1", "radio0", 6, regulatory=REG_24)
+
+
+def _width_conflict(radio, other, status, kind=ConflictKind.ADJACENT_OVERLAP):
+    return Conflict(
+        kind,
+        radio.band,
+        (radio.ref, other.ref),
+        status,
+        Severity.WARNING if status is ConflictStatus.MEASURED else Severity.INFO,
+        (),
+    )
+
+
 OTHERS = [_view("ap2", "radio0", 6), _view("ap3", "radio0", 1)]
 
 
@@ -108,7 +121,10 @@ OTHERS = [_view("ap2", "radio0", 6), _view("ap3", "radio0", 1)]
 
 class TestChannelExample:
     def test_example_lower_observed_utilization_only_with_comparison_data(self):
-        per_channel = {11: _summary(20.0, sustained=False), 1: _summary(75.0)}
+        per_channel = {
+            ("2.4g", 11): _summary(20.0, sustained=False),
+            ("2.4g", 1): _summary(75.0),
+        }
         r = recommend_channel(AP1, _summary(78.0), OTHERS, per_channel, TH)
         assert r.action == "change_channel"
         assert r.action_params["channel"] == 11
@@ -132,14 +148,14 @@ class TestChannelExample:
     def test_rule_no_comparison_argument_without_data_for_that_channel(self):
         # Data only for channel 1 (busy) and an empty summary for 11.
         empty = UtilizationSummary(None, None, None, 0, 5, 0.0, (), None)
-        per_channel = {1: _summary(75.0), 11: empty}
+        per_channel = {("2.4g", 1): _summary(75.0), ("2.4g", 11): empty}
         r = recommend_channel(AP1, _summary(78.0), OTHERS, per_channel, TH)
         assert r.action_params["channel"] == 11
         assert r.basis == "fewer_managed_radios_on_channel"
         assert r.confidence <= TH.planning_confidence_cap
 
     def test_candidate_busier_by_data_is_not_recommended(self):
-        per_channel = {11: _summary(70.0), 1: _summary(75.0)}
+        per_channel = {("2.4g", 11): _summary(70.0), ("2.4g", 1): _summary(75.0)}
         r = recommend_channel(AP1, _summary(78.0), OTHERS, per_channel, TH)
         assert r.action == "review_channel_plan"
         assert "no_better_candidate" in r.evidence
@@ -205,7 +221,7 @@ class TestChannelRules:
             "rep", "radio1", 36, 80, band="5g", regulatory=REG_5, backhaul=True
         )
         others = [_view("ap2", "radio1", 36, 80, band="5g")]
-        per_channel = {ch: _summary(5.0, False) for ch in CH_5G}
+        per_channel = {("5g", ch): _summary(5.0, False) for ch in CH_5G}
         r = recommend_channel(radio, _summary(90.0), others, per_channel, TH)
         assert r.action == "review_backhaul_channel"
         assert "channel" not in r.action_params
@@ -244,20 +260,24 @@ class TestWidth:
     def test_24_20mhz_nothing(self):
         assert recommend_width(AP1, None, OTHERS, TH) is None
 
-    def test_5g_narrower_only_with_overlap_and_high_load(self):
+    def test_5g_narrower_only_with_measured_conflict(self):
         radio = _view("ap1", "radio1", 36, 80, band="5g", regulatory=REG_5)
         others = [_view("ap2", "radio1", 44, 20, band="5g")]
-        r = recommend_width(radio, _summary(85.0), others, TH)
+        measured = [_width_conflict(radio, others[0], ConflictStatus.MEASURED)]
+        r = recommend_width(radio, _summary(85.0), others, TH, conflicts=measured)
         assert r.action == "change_width"
         assert r.action_params["width_mhz"] == 40
-        assert recommend_width(radio, _summary(20.0, False), others, TH) is None
-        assert recommend_width(radio, _summary(85.0), [], TH) is None
+        assert recommend_width(radio, _summary(85.0), [], TH, conflicts=[]) is None
 
     def test_width_not_confirmed_by_allowed_is_never_recommended(self):
         unknown_flags = _reg("5g", CH_5G, flags=None)
         radio = _view("ap1", "radio1", 36, 80, band="5g", regulatory=unknown_flags)
         others = [_view("ap2", "radio1", 44, 20, band="5g")]
-        assert recommend_width(radio, _summary(85.0), others, TH) is None
+        measured = [_width_conflict(radio, others[0], ConflictStatus.MEASURED)]
+        assert (
+            recommend_width(radio, _summary(85.0), others, TH, conflicts=measured)
+            is None
+        )
 
     def test_backhaul_width_is_hint_only(self):
         radio = _view(
@@ -476,3 +496,223 @@ class TestSelfHealing:
         assert isinstance(r, Recommendation)
         with pytest.raises(AttributeError):
             r.confidence = 1.0  # type: ignore[misc]
+
+
+# =====================================================================
+# Review findings (2026-11-18)
+# =====================================================================
+
+
+def _thin(mean, valid=1, coverage=0.1):
+    return UtilizationSummary(mean, mean, mean, valid, 0, coverage, (), None)
+
+
+class TestReviewH3ComparisonLimits:
+    def test_review_h3_single_point_is_no_comparison(self):
+        per_channel = {("2.4g", 11): _thin(5.0), ("2.4g", 1): _thin(5.0)}
+        r = recommend_channel(AP1, _summary(78.0), OTHERS, per_channel, TH)
+        assert r.basis == "fewer_managed_radios_on_channel"
+        assert r.confidence <= TH.planning_confidence_cap
+        assert "comparison_data_insufficient:ch11" in r.evidence
+
+    def test_review_h3_low_coverage_is_no_comparison(self):
+        per_channel = {("2.4g", 11): _thin(5.0, valid=20, coverage=0.5)}
+        r = recommend_channel(AP1, _summary(78.0), OTHERS, per_channel, TH)
+        assert r.basis == "fewer_managed_radios_on_channel"
+
+    def test_review_h3_enough_data_is_comparison(self):
+        per_channel = {("2.4g", 11): _thin(5.0, valid=3, coverage=0.75)}
+        r = recommend_channel(AP1, _summary(78.0), OTHERS, per_channel, TH)
+        assert r.basis == "lower_observed_utilization"
+
+
+class TestReviewM6BandKeyedComparison:
+    def test_review_m6_24_data_is_not_used_for_6g_channel(self):
+        raw = [
+            {"channel": c, "mhz": 5950 + 5 * c, "restricted": False, "flags": []}
+            for c in range(1, 30, 4)
+        ]
+        reg6 = RadioRegulatory(
+            channels=tuple(channels_from_freqlist(raw)),
+            txpower_dbm_list=None,
+            country=None,
+        )
+        radio = _view("ap1", "radio2", 5, band="6g", regulatory=reg6)
+        per_channel = {("2.4g", 1): _summary(2.0, False)}
+        others = [_view("ap2", "radio2", 5, band="6g")]
+        r = recommend_channel(radio, _summary(80.0), others, per_channel, TH)
+        assert r.basis != "lower_observed_utilization"
+        assert not any(e.startswith("utilization:ch1:") for e in r.evidence)
+        same_band = {("6g", ch): _summary(2.0, False) for ch in range(1, 30, 4)}
+        r = recommend_channel(radio, _summary(80.0), others, same_band, TH)
+        assert r.basis == "lower_observed_utilization"
+
+
+ROOT_REF = RadioRef("root", "radio1")
+
+
+class TestReviewH5UplinkParent:
+    def _root(self, **kw):
+        return _view("root", "radio1", 36, 80, band="5g", regulatory=REG_5, **kw)
+
+    def _rep(self, channel=36, peer=ROOT_REF):
+        return _view(
+            "rep", "radio1", channel, 80, band="5g", backhaul=True, uplink_peer=peer
+        )
+
+    def test_review_h5_parent_of_known_uplink_gets_no_change(self):
+        r = recommend_channel(self._root(), _summary(85.0), [self._rep()], None, TH)
+        assert r.action == "review_backhaul_channel"
+        assert "channel" not in r.action_params
+        assert "uplink_loss_on_change" in r.risk
+        assert "uplink_parent_of:rep/radio1" in r.evidence
+
+    def test_review_h5_radio_with_own_peer_is_backhaul(self):
+        root = self._root(uplink_peer=RadioRef("rep", "radio1"))
+        r = recommend_channel(root, _summary(85.0), [], None, TH)
+        assert r.action == "review_backhaul_channel"
+
+    def test_review_h5_unknown_peer_co_channel_is_cautious(self):
+        root = _view("root", "radio1", 36, 20, band="5g", regulatory=REG_5)
+        rep = _view("rep", "radio1", 36, 20, band="5g", backhaul=True)
+        r = recommend_channel(root, _summary(85.0), [rep], None, TH)
+        assert r.action == "change_channel"
+        assert "possible_uplink_parent" in r.risk
+        assert "dfs_radar_may_force_change" not in r.risk
+        assert r.action_params["channel"] < 52  # no DFS candidate
+
+    def test_review_h5_unknown_peer_other_channel_is_normal(self):
+        rep = self._rep(channel=100, peer=None)
+        other = _view("ap2", "radio1", 36, 80, band="5g")
+        r = recommend_channel(self._root(), _summary(85.0), [rep, other], None, TH)
+        assert "possible_uplink_parent" not in r.risk
+
+    def test_review_h5_parent_width_is_review_only(self):
+        root, rep = self._root(), self._rep()
+        measured = [_width_conflict(root, rep, ConflictStatus.MEASURED)]
+        r = recommend_width(root, _summary(85.0), [rep], TH, conflicts=measured)
+        assert r.action == "review_backhaul_width"
+
+
+class TestReviewM1TxDirection:
+    def test_review_m1_raise_above_max_gives_no_lower_number(self):
+        r = recommend_tx_power(RADIO, _dbm(23), (0, 20), _clients(4), [], [], (), TH)
+        assert r.action == "review_ap_placement"
+        assert "dbm" not in r.action_params
+        assert "tx_power_outside_limits:23dBm" in r.evidence
+
+    def test_review_m1_lower_below_min_gives_no_higher_number(self):
+        r = recommend_tx_power(
+            RADIO, _dbm(2), (5, 20), None, _sticky(2), [_overlap()], (), TH
+        )
+        assert r.action == "review_ap_placement"
+        assert "dbm" not in r.action_params
+
+    def test_review_m1_number_always_follows_direction(self):
+        cases = ((_clients(4), [], []), (None, _sticky(2), [_overlap()]))
+        for current in range(-2, 30):
+            for clients, sticky, conflicts in cases:
+                r = recommend_tx_power(
+                    RADIO, _dbm(current), (5, 20), clients, sticky, conflicts, (), TH
+                )
+                dbm = r.action_params.get("dbm")
+                if dbm is None:
+                    continue
+                if r.action_params["direction"] == "lower":
+                    assert dbm < current
+                else:
+                    assert dbm > current
+
+
+class TestReviewH5TxPowerOnUplink:
+    """Same class as H5: lowering TX power can cut the uplink."""
+
+    def test_review_h5_backhaul_radio_lower_is_review_only(self):
+        radio = _view("ap1", "radio1", 36, 80, band="5g", backhaul=True)
+        r = recommend_tx_power(
+            radio, _dbm(20), (5, 23), None, _sticky(2), [_overlap()], (), TH
+        )
+        assert r.action == "review_backhaul_tx_power"
+        assert "dbm" not in r.action_params
+        assert rf_recommend.RISK_UPLINK in r.risk
+        assert "backhaul:ap1/radio1" in r.evidence
+
+    def test_review_h5_parent_radio_lower_is_review_only(self):
+        child = _view("ap2", "radio1", 36, 80, band="5g", uplink_peer=RADIO.ref)
+        r = recommend_tx_power(
+            RADIO,
+            _dbm(20),
+            (5, 23),
+            None,
+            _sticky(2),
+            [_overlap()],
+            (),
+            TH,
+            others=[child],
+        )
+        assert r.action == "review_backhaul_tx_power"
+        assert "dbm" not in r.action_params
+
+    def test_review_h5_raise_on_uplink_stays_a_number(self):
+        radio = _view("ap1", "radio1", 36, 80, band="5g", backhaul=True)
+        r = recommend_tx_power(radio, _dbm(14), (5, 23), _clients(4), [], [], (), TH)
+        assert r.action_params == {"direction": "raise", "dbm": 17}
+
+
+class TestReviewM7WidthNeedsMeasurement:
+    RADIO5 = _view("ap1", "radio1", 36, 80, band="5g", regulatory=REG_5)
+    OTHER5 = _view("ap2", "radio1", 44, 20, band="5g")
+
+    def test_review_m7_5g_high_load_without_measured_conflict_is_none(self):
+        assert recommend_width(self.RADIO5, _summary(85.0), [self.OTHER5], TH) is None
+        potential = [
+            _width_conflict(self.RADIO5, self.OTHER5, ConflictStatus.POTENTIAL)
+        ]
+        r = recommend_width(
+            self.RADIO5, _summary(85.0), [self.OTHER5], TH, conflicts=potential
+        )
+        assert r is None
+
+    def test_review_m7_5g_measured_conflict_names_it(self):
+        measured = [_width_conflict(self.RADIO5, self.OTHER5, ConflictStatus.MEASURED)]
+        r = recommend_width(self.RADIO5, None, [self.OTHER5], TH, conflicts=measured)
+        assert r.action == "change_width"
+        assert "measured_conflict:ap2/radio1:adjacent_overlap" in r.evidence
+
+    def test_review_m7_conflict_of_other_radios_does_not_count(self):
+        third = _view("ap3", "radio1", 44, 20, band="5g")
+        measured = [_width_conflict(third, self.OTHER5, ConflictStatus.MEASURED)]
+        r = recommend_width(self.RADIO5, None, [self.OTHER5], TH, conflicts=measured)
+        assert r is None
+
+    def test_review_m7_24_is_planning_with_capped_confidence(self):
+        radio = _view("ap1", "radio0", 1, 40, regulatory=REG_24, htmode="HT40+")
+        r = recommend_width(radio, None, OTHERS, TH)
+        assert r.action == "change_width"
+        assert r.basis == "channel_plan"
+        assert r.confidence <= TH.planning_confidence_cap
+
+    def test_review_m7_docstring(self):
+        assert "measured" in (recommend_width.__doc__ or "")
+
+
+class TestReviewL3NetworkTarget:
+    def test_review_l3_band_imbalance_is_network_wide(self):
+        aps = [
+            _load_radio("ap1", 10, 10.0, band="2.4g"),
+            _load_radio("ap2", 10, 10.0, band="2.4g"),
+            _load_radio("ap3", 1, 10.0),
+        ]
+        th = LoadThresholds()
+        dist = distribution(aps, th, capable_5g_on_24=15)
+        recs = recommend_load(assess_load(aps, th), dist)
+        (band,) = [r for r in recs if r.problem == "band_imbalance"]
+        assert band.target is None
+        assert band.scope == "network"
+        assert band.as_dict()["target"] is None
+        assert band.as_dict()["scope"] == "network"
+
+    def test_review_l3_other_scopes(self):
+        r = recommend_channel(AP1, _summary(78.0), OTHERS, None, TH)
+        assert r.scope == "radio"
+        assert r.as_dict()["scope"] == "radio"

@@ -22,9 +22,14 @@ A part without data is unknown: it is left out, the remaining weights are
 renormalised and ``coverage`` (sum of known weights) says how much was seen.
 Below ``min_coverage`` there is no score.
 
+Unknown auth data (``auth_failures=None``) leaves the auth share; with no
+known roam the auth part is unknown.
+
 Sticky: there is deliberately no "confirmed" status. Only a fresh comparable
-measurement of the same client at another AP (``measured_same_client``) can
-give ``supported_by_measurement`` and name a ``better_radio``.
+measurement of the same client at another AP on the same known band
+(``measured_same_client``) can give ``supported_by_measurement`` and name a
+``better_radio``. A louder alternative on another or unknown band gives at
+most ``suspected`` with ``alternative_other_band_not_comparable``.
 """
 
 from __future__ import annotations
@@ -109,7 +114,7 @@ class RoamEvent:
     rssi_before: float | None
     rssi_after: float | None
     gap_s: float | None
-    auth_failures: int
+    auth_failures: int | None  # None: not known for this roam
     reauth: bool
 
 
@@ -427,14 +432,18 @@ def _signal_part(classes: Sequence[RoamClass]) -> RoamPart:
 
 
 def _auth_part(events: Sequence[RoamEvent]) -> RoamPart:
-    failed = sum(1 for e in events if e.auth_failures > 0)
-    attempts = sum(max(0, e.auth_failures) for e in events)
-    evidence = (
-        f"roams_with_auth_failures:{failed}/{len(events)}",
+    """Share of roams without auth failures; unknown roams leave the share."""
+    known = [e.auth_failures for e in events if e.auth_failures is not None]
+    failed = sum(1 for n in known if n > 0)
+    attempts = sum(max(0, n) for n in known)
+    evidence = [
+        f"roams_with_auth_failures:{failed}/{len(known)}",
         f"failures:{attempts}",
-    )
+    ]
+    if len(known) < len(events):
+        evidence.append(f"auth_unknown:{len(events) - len(known)}")
     return RoamPart(
-        PART_AUTH, _share_score(failed, len(events)), WEIGHTS[PART_AUTH], evidence
+        PART_AUTH, _share_score(failed, len(known)), WEIGHTS[PART_AUTH], tuple(evidence)
     )
 
 
@@ -551,6 +560,7 @@ class AlternativeAp:
     rssi: Metric | None
     basis: str
     age_s: float | None
+    band: str | None  # None: unknown band, never comparable
 
 
 @dataclass(frozen=True)
@@ -558,7 +568,9 @@ class StickyInput:
     """One client at its current radio.
 
     ``mobility`` was added to the specified fields: the "no comparable
-    measurement" path applies to mobile clients only.
+    measurement" path applies to mobile clients only. ``band`` is the band
+    of the current radio; only alternatives on the same known band are
+    comparable (signal differs by band).
     """
 
     client_key: str
@@ -567,6 +579,7 @@ class StickyInput:
     dwell_s: float
     weak_share: float | None
     alternatives: Sequence[AlternativeAp]
+    band: str | None
     mobility: str | None = None
 
 
@@ -655,6 +668,32 @@ def _best(
     return best
 
 
+def _same_band(inp: StickyInput, alt: AlternativeAp) -> bool:
+    return inp.band is not None and alt.band == inp.band
+
+
+def _cross_band_better(
+    inp: StickyInput,
+    alternatives: Sequence[AlternativeAp],
+    current: float,
+    th: StickyThresholds,
+) -> AlternativeAp | None:
+    """A louder alternative that is not comparable (other or unknown band)."""
+    usable = [a for a in alternatives if not _same_band(inp, a) and _recent(a, th)]
+    best = _best(usable, current, lambda a: _value(a.rssi, _ANY_VALUE))
+    if best is None or best[1] < th.better_by_db:
+        return None
+    return best[0]
+
+
+def _recent(alt: AlternativeAp, th: StickyThresholds) -> bool:
+    if alt.basis == BASIS_MEASURED:
+        return alt.age_s is not None and alt.age_s <= th.max_measurement_age_s
+    if alt.basis == BASIS_HISTORIC:
+        return alt.age_s is None or alt.age_s <= th.max_historic_age_s
+    return False
+
+
 def assess_sticky(
     inp: StickyInput, thresholds: StickyThresholds = DEFAULT_STICKY_THRESHOLDS
 ) -> StickyAssessment:
@@ -675,7 +714,8 @@ def assess_sticky(
     if inp.weak_share < th.min_weak_share:
         return _result(inp, StickyStatus.NONE, [*evidence, "weak_share_low"])
 
-    others = [a for a in inp.alternatives if a.radio != inp.current_radio]
+    alternatives = [a for a in inp.alternatives if a.radio != inp.current_radio]
+    others = [a for a in alternatives if _same_band(inp, a)]
     measured = [a for a in others if a.basis == BASIS_MEASURED]
     fresh = [
         a
@@ -715,6 +755,13 @@ def assess_sticky(
         alt, delta = best
         evidence.append(f"historic_better:{alt.radio}:{delta:g}dB")
         return _result(inp, StickyStatus.SUSPECTED, evidence, th.confidence_historic)
+
+    cross = _cross_band_better(inp, alternatives, current, th)
+    if cross is not None:
+        evidence.append(f"alternative_other_band_not_comparable:{cross.radio}")
+        return _result(
+            inp, StickyStatus.SUSPECTED, evidence, th.confidence_no_measurement
+        )
 
     if inp.mobility == "mobile":
         evidence.append("no_comparable_measurement")
