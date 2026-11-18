@@ -5,8 +5,9 @@
    rule; their VALUE is still masked when it looks like key material (PEM
    block, long base64 / base64url, long hex). UCI options keep the precise
    snapshot rule (``is_snapshot_secret`` unchanged).
-2. Counter names (``auth_failures``, ``auth_errors`` …) keep NUMBERS
-   readable; any other value under them is masked as before.
+2. Counter names keep NUMBERS readable; any other value under them is
+   masked as before. Since review L1 the rule never lifts a name with a
+   word of SECRET_WORDS, so ``auth_failures`` is masked again.
 3. ``pseudonymise_identifier(kind, value, key)`` for mac / ip / hostname /
    ssid / bssid / client and ``pseudonymise_fields(data, key, fields)``:
    deterministic, normalised per kind, prefix per kind, 16 hex. Core
@@ -84,14 +85,15 @@ def test_snapshot_rule_unchanged():
 
 @pytest.mark.parametrize("name", ["auth_failures", "auth_errors", "wifi_auth_failures"])
 def test_counter_names(name):
-    assert mask_secrets({name: 3}) == {name: 3}
+    # review L1: the word "auth" is in SECRET_WORDS, so the counter rule no
+    # longer lifts these names; numbers are masked again (as on main)
+    assert mask_secrets({name: 3}) == {name: MASK}
     assert mask_for_output({name: 0, "nested": {name: 12}}) == {
-        name: 0,
-        "nested": {name: 12},
+        name: MASK,
+        "nested": {name: MASK},
     }
-    assert redact_text(f"{name}=3 ok") == f"{name}=3 ok"
-    assert redact_text(f'"{name}": 7,') == f'"{name}": 7,'
-    # anything but a number stays masked
+    assert "=3" not in redact_text(f"{name}=3 ok")
+    assert ": 7" not in redact_text(f'"{name}": 7,')
     assert mask_secrets({name: "hunter2"}) == {name: MASK}
     assert "hunter2" not in redact_text(f"{name}=hunter2")
     assert mask_secrets({name: True}) == {name: True}  # bool carries nothing
@@ -104,8 +106,8 @@ def test_counter_rule_keeps_real_secrets():
 
 
 def test_redact_keeps_other_secrets_on_line():
-    out = redact_text("auth_failures=3 password=hunter2")
-    assert out.startswith("auth_failures=3 ") and "hunter2" not in out
+    out = redact_text("wan_failures=3 password=hunter2")
+    assert out.startswith("wan_failures=3 ") and "hunter2" not in out
 
 
 def test_core_never_masks_network_identifiers():

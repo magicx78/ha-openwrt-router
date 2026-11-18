@@ -39,7 +39,8 @@ All notable changes to the OpenWrt Router integration will be documented in this
   Kleinbuchstaben); alles andere darunter, auch verschachtelte Daten, bleibt maskiert.
   `client_key`, `device_key`, `router_key`, `radio_key` und weitere Namen, die anderswo
   ein Schlüssel sind, werden wieder vollständig maskiert (Sicherheitsprüfung von PR #56).
-  Zähler wie `auth_failures` zeigen Zahlen.
+  Zähler zeigen Zahlen nur, wenn ihr Name kein geheimes Wort enthält: `pin_total`,
+  `otp_total` oder `auth_failures` bleiben maskiert wie bisher, `wan_failures` ist lesbar.
 - Enterprise Core: Sicherheitsrelevante Modul-Events haben im Sicherheits-Audit eine
   eigene Quote (100 je Modul, 500 für alle Module) und verdrängen nie mehr Einträge des
   Core; ein flutendes Modul verliert seine eigenen ältesten Einträge (gezählt, einmal im

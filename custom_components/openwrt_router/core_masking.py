@@ -333,8 +333,9 @@ _IDENTIFIER_VALUE_RE: Final = re.compile(
     r"[a-z]{3}_[0-9a-f]{32}|[a-z]{3}_[0-9a-f]{16}"
     rf"|[a-z0-9][a-z0-9_.:-]{{0,{IDENTIFIER_VALUE_MAX_LENGTH - 1}}}"
 )
-# Counter names: a number under such a name is readable even if a broad
-# word hits (``auth_failures``); a string or any other value is not.
+# Counter names: a number under such a name is readable; a string or any
+# other value is not. Never for a name with a word of SECRET_WORDS
+# (``pin_total``, ``auth_failures``; review L1 of PR #56).
 COUNTER_SUFFIXES: Final = (
     "_attempts",
     "_errors",
@@ -663,10 +664,13 @@ def _identifier_str(name: str) -> bool:
 
 
 def is_counter_name(name: object) -> bool:
-    """True for a counter name (``auth_failures``): numbers stay readable.
+    """True for a counter name (``wan_failures``): numbers stay readable.
 
-    Never for exact secret names, config-manager's pattern or a secret
-    substring (``password_failures`` stays secret).
+    Never for exact secret names, config-manager's pattern, a secret
+    substring (``password_failures``) or a name with any word of
+    SECRET_WORDS (``pin_total``, ``wps_pin_attempts``, ``otp_total``,
+    ``auth_failures``): a PIN or one-time password is a number, so the
+    counter rule never lifts a secret word (review L1 of PR #56).
     """
     return isinstance(name, str) and _counter_str(name)
 
@@ -675,12 +679,15 @@ def is_counter_name(name: object) -> bool:
 def _counter_str(name: str) -> bool:
     for spelling in {name, _canonical_name(name)}:
         norm = _normalise_name(spelling)
+        words = _words(spelling.rsplit(".", 1)[-1])
         if (
             not norm.endswith(COUNTER_SUFFIXES)
             or norm in SECRET_EXACT_KEYS
             or spelling.lower() in SECRET_EXACT_KEYS
             or _matches_pattern(norm)
             or any(sub in norm for sub in SECRET_SUBSTRINGS)
+            or any(word in SECRET_WORDS for word in words)
+            or "".join(words) in SECRET_WORDS
         ):
             return False
     return True

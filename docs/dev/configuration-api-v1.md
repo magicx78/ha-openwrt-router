@@ -1439,7 +1439,7 @@ _LOGGER.debug("snapshot %s", mask_for_output(snapshot.configs))
 | Regel | Namen | Wert bleibt lesbar | Wert wird maskiert |
 |---|---|---|---|
 | Kennungen (`is_identifier_name`, ab Review M1 von PR #56) | `IDENTIFIER_KEY_NAMES`: `finding_key`, `incident_key`, `recommendation_key`, `rule_key`, `scope_key`, `sort_key`, `translation_key` (Wörter mit `_` verbunden, Ziffern bleiben: `ruleKey`, `RULE-KEY` ja, `rule_key2` nein). Sie bleiben für `is_secret_key` **geheime Namen**; nur die Walker und `redact_text` zeigen einen Wert. | nur ein String nach `is_identifier_value`: Core-ID (`xxx_<32 hex>`, `xxx_<16 hex>`) oder Slug `[a-z0-9][a-z0-9_.:-]*` mit höchstens `IDENTIFIER_VALUE_MAX_LENGTH` = 64 Zeichen, der nicht wie Schlüsselmaterial aussieht; im Freitext genau ein solches Token, danach Ende, `,`/`;` oder das nächste `name=` | alles andere: dict, Liste, Tupel (nie hineingelaufen), Zahl (eine PIN ist eine Zahl), Groß-/Kleinschreibung gemischt, Leerzeichen, Sonderzeichen, PEM, base64 ab 22, Hex ab 32; im Freitext eine Phrase bis zum Zeilenende; in escaptem JSON immer; gilt für Schlüssel, `{"key": "rule_key", "value": …}`-Datensätze und Freitext |
-| Zähler (`is_counter_name`) | Endung `COUNTER_SUFFIXES` (`_failures`, `_failed`, `_fail`, `_errors`, `_attempts`, `_retries`, `_total`), nicht exakt geheim, kein Treffer des Präzisionsmusters, kein geheimer Teilstring | Zahlen (`int`/`float`, im Freitext eine alleinstehende Zahl) | jeder andere Wert (`auth_failures="hunter2"`) |
+| Zähler (`is_counter_name`) | Endung `COUNTER_SUFFIXES` (`_failures`, `_failed`, `_fail`, `_errors`, `_attempts`, `_retries`, `_total`), nicht exakt geheim, kein Treffer des Präzisionsmusters, kein geheimer Teilstring und (ab Review L1 von PR #56) **kein Wort aus `SECRET_WORDS`** (`pin`, `pincode`, `otp`, `psk`, `auth`, `key`, `session`, `sae` …, auch zusammengeschrieben) | Zahlen (`int`/`float`, im Freitext eine alleinstehende Zahl) | jeder andere Wert; jeder Wert unter `pin_total`, `wps_pin_attempts`, `otp_total`, `auth_failures` (eine PIN oder ein Einmalpasswort ist eine Zahl) |
 
 Bewusst nicht gelistet: echte Schlüsselnamen wie `group_key`, `wpa_key`, `public_key`.
 Seit Review M1 auch nicht mehr, weil sie anderswo ein Geheimnis tragen: `client_key`
@@ -1452,8 +1452,13 @@ wie auf `main` maskiert.
 Grenze: ein Passwort aus Kleinbuchstaben und Ziffern ohne Leerzeichen (`hunter2`) unter
 einem Kennungsnamen bleibt lesbar; Kennungsnamen gehören Modul-Daten, nie
 Konfigurationswerten. In
-maskiertem, verschachteltem JSON (`\"auth_failures\": 3`) gilt weiter die alte Regel
-(maskiert).
+maskiertem, verschachteltem JSON gilt weiter die alte Regel (unter einem geheimen Namen
+maskiert).
+Folge von L1: die Zählerregel hebt keinen geheimen Namen mehr auf; sie bleibt als
+Schnittstelle bestehen und betrifft nur Namen, die ohnehin nicht geheim sind
+(`wan_failures`). `auth_failures`, `auth_errors`, `wifi_auth_failures` sind wieder wie auf
+`main` maskiert; ein Modul, das solche Zähler lesbar ausgeben will, nennt sie ohne
+geheimes Wort (z. B. `wifi_login_failures`).
 
 **Netzwerk-Kennungen.** Die Core-Maskierung maskiert MAC, IP, Hostname, SSID und BSSID
 **nicht**. Wer sie verbergen muss, nimmt seinen Modul-Schlüssel (§11.5) und
@@ -1665,7 +1670,7 @@ muss):
   `AuthorizationError` `not_admin`. Module, die diese Aufrufe für normale Benutzer anbieten,
   müssen auf Admin prüfen oder als Modul-/Systemakteur aufrufen (und dann selbst
   entscheiden, wem sie das Ergebnis zeigen).
-- (#102, eingeschränkt durch #108) Ausgabe zeigt jetzt Werte unter Kennungsnamen
+- (#102, eingeschränkt durch #108 und #110) Ausgabe zeigt jetzt Werte unter Kennungsnamen
   (`rule_key`, `scope_key`, …), die vorher `**REDACTED**` waren, aber nur in strenger
   Kennungsform. Ein Modul, das unter solchen Namen Geheimnisse ablegt, muss sie umbenennen.
 - (#108) Gegenüber dem ersten Stand dieses Zweigs: `client_key`, `device_key`,
@@ -1680,6 +1685,10 @@ muss):
   Sicherheitsring (danach fallen seine ältesten weg, gezählt); wer mehr Spur braucht, muss
   sie selbst halten oder seltener auf den Sicherheitsring schreiben. Ein Modul kann sich
   nicht `core` nennen (`register_event_prefix` ⇒ `ValueError`).
+- (#110) Zähler mit einem geheimen Wort im Namen (`auth_failures`, `pin_total`,
+  `otp_total`, …) zeigen keine Zahl mehr. Ein Modul, das einen solchen Zähler lesbar
+  ausgeben will, benennt ihn ohne Wort aus `SECRET_WORDS` (z. B. `wifi_login_failures`
+  statt `wifi_auth_failures`).
 
 ### 19.1 Änderungen auf Feld- und Signaturebene
 
@@ -1862,6 +1871,7 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 |---|---|---|
 | 108 | Maskierung (M1, §13): `IDENTIFIER_KEY_NAMES` auf `finding_key`, `incident_key`, `recommendation_key`, `rule_key`, `scope_key`, `sort_key`, `translation_key` verkleinert (entfernt mit Grund in §13); `is_secret_key` ist für Kennungsnamen wieder `True`; Erkennung ohne Ziffern-Abschneiden (`rule_key2` ist keine Kennung). Unter einem Kennungsnamen bleibt nur ein Wert nach `is_identifier_value` (neu) lesbar: Core-ID oder Slug bis `IDENTIFIER_VALUE_MAX_LENGTH` (64, neu), kein Schlüsselmaterial; dict, Liste, Zahl und jede andere Form ⇒ `**REDACTED**`, nie durchlaufen; Freitext nur ein Token, escaptes JSON immer maskiert. `is_snapshot_secret` unverändert. Vorher (B4) liefen u. a. `{"client_key": "hunter2"}` und `{"device_key": {"value": …}}` unmaskiert durch. | B (Verhalten gegenüber #102), A (`is_identifier_value`, `IDENTIFIER_VALUE_MAX_LENGTH`) |
 | 109 | Sicherheitsring (M2, §12.2): Core- und Modul-Einträge getrennt begrenzt; `SECURITY_AUDIT_MAX_EVENTS` (500) gilt nur noch für Core-Einträge, neu `SECURITY_MODULE_QUOTA` (100 je Modul), `SECURITY_MODULE_MAX_EVENTS` (500 alle Module), `core_audit.security_owner`; der Ring hält damit bis zu 1000 Einträge. Ein Modul-Event verdrängt nie einen Core-Eintrag, an der eigenen Quote nur die eigenen. Zähler `module_security_evicted`, `summary()` mit `security_core_entries`, `security_module_entries`, `security_module_total`, `security_module_evicted`; Warn-Log einmal je Modul. `register_event_prefix(..., module="core")` ⇒ `ValueError`. Store-Layout unverändert. | A, B (Verhalten: ein Modul mit mehr als 100 sicherheitsrelevanten Einträgen verliert seine ältesten statt fremder; Modulname `core` abgelehnt) |
+| 110 | Maskierung (L1, §13): `is_counter_name` ist `False`, sobald ein Wort des Namens (oder alle Wörter zusammengeschrieben) in `SECRET_WORDS` steht; `pin_total`, `wps_pin_attempts`, `otp_total`, `psk_retries`, `auth_failures`, `auth_errors`, `wifi_auth_failures` zeigen keine Zahl mehr (`**REDACTED**`, strukturiert und im Freitext). Die Zählerregel hebt damit keinen geheimen Namen mehr auf; Signatur und `COUNTER_SUFFIXES` unverändert. | B (Verhalten gegenüber #102: weniger lesbar, wie auf `main`) |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 
