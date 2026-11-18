@@ -6251,7 +6251,7 @@ class OpenWrtAPI:
         multi-line value. Imported here because config_collector imports
         this module (keeps the module graph one-way).
         """
-        from .config_snapshot import parse_uci_show
+        from .config_snapshot import UciTextTooLargeError, parse_uci_show
 
         try:
             rc, out, err = await self._config_ssh_read(
@@ -6266,7 +6266,12 @@ class OpenWrtAPI:
             ) from conn_err
         if rc != 0:
             raise _config_classify_exit(f"uci show {name}", rc, err)
-        return parse_uci_show(out.decode("utf-8", errors="replace"), name)
+        try:
+            return parse_uci_show(out.decode("utf-8", errors="replace"), name)
+        except UciTextTooLargeError as size_err:
+            raise OpenWrtConfigFetchTooLargeError(
+                f"uci show {name}: output too large"
+            ) from size_err
 
     async def config_packagelist(self) -> dict[str, str] | None:
         """Return installed packages as ``{name: version}``, None if unknown.
@@ -6682,7 +6687,9 @@ _CONFIG_GZIP_MAGIC = b"\x1f\x8b"
 _CONFIG_CHUNK_BYTES = 65536
 # Head of a non-archive answer / of stderr kept for the error class.
 _CONFIG_PEEK_BYTES = 4096
-_CONFIG_UCI_SHOW_MAX_BYTES = 4 * 1024 * 1024
+# Equals config_const.UCI_TEXT_MAX_BYTES (not imported: config_const stays
+# free of api.py and vice versa); larger output is too_large (review M6).
+_CONFIG_UCI_SHOW_MAX_BYTES = 1024 * 1024
 _CONFIG_PACKAGES_MAX_BYTES = 2 * 1024 * 1024
 _CONFIG_SSH_TEXT_TIMEOUT = 30.0
 _CONFIG_RPC_SYS_OBJECT = "rpc-sys"

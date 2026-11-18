@@ -7,6 +7,12 @@ router fields are bounded where they enter the inventory.
 
 from __future__ import annotations
 
+import gzip
+import io
+import itertools
+import random
+import shlex
+import tarfile
 import time
 from collections.abc import Callable
 from typing import Any
@@ -14,6 +20,7 @@ from typing import Any
 import pytest
 
 from custom_components.openwrt_router import config_const as cc
+from custom_components.openwrt_router.config_archive import extract_uci_texts
 from custom_components.openwrt_router.config_collector import collect_inventory
 from custom_components.openwrt_router.config_mask import (
     is_secret_name,
@@ -22,6 +29,14 @@ from custom_components.openwrt_router.config_mask import (
 )
 from custom_components.openwrt_router.config_provider import _finding_message
 from custom_components.openwrt_router.config_restore import Finding
+from custom_components.openwrt_router.config_snapshot import (
+    _Q_OUT,
+    UciTextTooLargeError,
+    _quote_state,
+    _show_words,
+    parse_uci_file,
+    parse_uci_show,
+)
 
 K = 100 * 1024
 BUDGET_S = 2.0
@@ -116,3 +131,116 @@ async def test_collect_inventory_bounds_the_package_count() -> None:
     inventory = await collect_inventory(_Api(packages), info)  # type: ignore[arg-type]
     assert inventory.packages is not None
     assert len(inventory.packages) == cc.INVENTORY_MAX_PACKAGES
+
+
+# ---------------------------------------------------------------------------
+# Review M6: a UCI text above UCI_TEXT_MAX_BYTES is never parsed
+# ---------------------------------------------------------------------------
+
+
+def _huge_uci() -> str:
+    # Hex of random bytes: compresses about 2:1, so the archive ratio
+    # check does not reject the test archive first.
+    noise = random.Random(6).randbytes(cc.UCI_TEXT_MAX_BYTES // 2 + 1).hex()
+    return "config x\n\toption a '" + noise + "'\n"
+
+
+@pytest.mark.parametrize("parse", ["file", "show"])
+def test_parsers_refuse_text_over_the_cap(parse: str) -> None:
+    text = _huge_uci()
+    if parse == "file":
+        call: Callable[[], Any] = lambda: parse_uci_file(text)
+    else:
+        show = "network.x.a='" + "b" * len(text) + "'"
+        call = lambda: parse_uci_show(show, "network")
+    started = time.perf_counter()
+    with pytest.raises(UciTextTooLargeError):
+        call()
+    assert time.perf_counter() - started < BUDGET_S
+    assert not issubclass(UciTextTooLargeError, ValueError)
+
+
+def test_extract_uci_texts_leaves_out_oversized_configs() -> None:
+    entries = {
+        "etc/config/network": b"config interface 'lan'\n",
+        "etc/config/system": b"config system\n",
+        "etc/config/firewall": _huge_uci().encode(),
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as tf:
+        for name, data in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    texts = extract_uci_texts(gzip.compress(buf.getvalue()))
+    assert sorted(texts) == ["network", "system"]
+    assert texts.oversized == ("firewall",)
+    assert "firewall" in repr(texts)
+
+
+UNCLOSED = {
+    # One quote that never closes, then many plain lines.
+    "single": "network.x.a='\n" + "b\n" * 400_000,
+    "double": 'network.x.a="\n' + "b\n" * 400_000,
+    # Every line ends in a backslash: each one continues the record.
+    "escape": "network.x.a=b\\\n" * 60_000,
+    # The first line opens a quote no later line closes, the others pair up.
+    "mixed": "network.x.a='\"\n" + 'network.x.b="\n' * 60_000,
+}
+
+
+@pytest.mark.parametrize("text", list(UNCLOSED.values()), ids=list(UNCLOSED))
+def test_parse_uci_show_with_open_quotes_is_linear(text: str) -> None:
+    assert len(text) <= cc.UCI_TEXT_MAX_BYTES
+    assert _timed(lambda: parse_uci_show(text, "network")) < BUDGET_S
+
+
+def test_parse_uci_show_keeps_multi_line_values() -> None:
+    text = (
+        "network.lan=interface\n"
+        "network.lan.descr='line one\n"
+        "line two'\n"
+        'network.lan.note="a \\"b\\"\n'
+        'c"\n'
+        "network.lan.cont=x\\\n"
+        "y\n"
+        "network.lan.broken='never closed\n"
+        "network.lan.proto='static'\n"
+    )
+    lan = parse_uci_show(text, "network")["lan"]
+    assert lan["descr"] == "line one\nline two"
+    assert lan["note"] == 'a "b"\nc'
+    assert lan["cont"] == "x\ny"
+    assert lan["proto"] == "static"
+    assert "broken" not in lan
+
+
+def test_show_unquoting_matches_shlex() -> None:
+    """The linear unquoter gives the same words as shlex.split (POSIX)."""
+    alphabet = "a'\"\\ \n\t#"
+    for length in range(5):
+        for chars in itertools.product(alphabet, repeat=length):
+            raw = "".join(chars)
+            try:
+                expected: list[str] | None = shlex.split(raw)
+            except ValueError:
+                expected = None
+            assert _show_words(raw) == expected, raw
+            if "\n" not in raw:
+                closed = _quote_state(_Q_OUT, raw) is None
+                assert closed == (expected is not None), raw
+
+
+def test_parse_uci_show_near_the_cap_is_fast() -> None:
+    value = random.Random(7).randbytes(cc.UCI_TEXT_MAX_BYTES // 2 - 64).hex()
+    text = f"network.lan=interface\nnetwork.lan.descr='{value}'\n"
+    assert len(text) <= cc.UCI_TEXT_MAX_BYTES
+    assert _timed(lambda: parse_uci_show(text, "network")) < BUDGET_S
+    assert parse_uci_show(text, "network")["lan"]["descr"] == value
+
+
+def test_parse_uci_file_near_the_cap_is_fast() -> None:
+    value = random.Random(8).randbytes(cc.UCI_TEXT_MAX_BYTES // 2 - 64).hex()
+    text = f"config interface 'lan'\n\toption descr {value}\n"
+    assert len(text) <= cc.UCI_TEXT_MAX_BYTES
+    assert _timed(lambda: parse_uci_file(text)) < BUDGET_S

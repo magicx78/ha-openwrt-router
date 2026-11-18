@@ -200,6 +200,8 @@ WARN_UCI_MISSING: Final = "uci_missing"
 WARN_UCI_FAILED: Final = "uci_failed"
 WARN_UCI_UNAVAILABLE: Final = "uci_unavailable"
 WARN_UCI_SOURCE: Final = "uci_source"
+# An etc/config file of the archive above UCI_TEXT_MAX_BYTES (review M6).
+WARN_UCI_TOO_LARGE: Final = "uci_too_large"
 WARN_UCI_ARCHIVE_MISMATCH: Final = "uci_archive_mismatch"
 
 STEP_ARCHIVE_RESTORE: Final = "archive_restore"
@@ -394,6 +396,8 @@ class _ArchiveAnalysis:
 
     report: ArchiveReport
     snapshot: UciSnapshot | None = field(repr=False)
+    # etc/config files above UCI_TEXT_MAX_BYTES, not parsed (review M6).
+    oversized: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -419,7 +423,8 @@ def _analyse_archive(
         for name, text in texts.items()
         if name in UCI_CONFIGS
     }
-    return _ArchiveAnalysis(report, build_snapshot(raw, digest))
+    oversized = tuple(name for name in texts.oversized if name in UCI_CONFIGS)
+    return _ArchiveAnalysis(report, build_snapshot(raw, digest), oversized)
 
 
 def _snapshot_hash(configs: Mapping[str, Any]) -> str:
@@ -1356,6 +1361,8 @@ class ConfigManagerProvider:
                     warnings.add(finding.code, path[len(ARCHIVE_CONFIG_PREFIX) :])
                 else:
                     warnings.add(WARN_ARCHIVE, finding.code)
+            for name in analysis.oversized:
+                warnings.add(WARN_UCI_TOO_LARGE, name)
             if live is not None:
                 uci_snapshot = _filled_from_archive(live, analysis.snapshot, warnings)
                 source = UCI_SOURCE_LIVE

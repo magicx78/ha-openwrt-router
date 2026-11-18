@@ -668,6 +668,26 @@ class TestUciGet:
         assert result["lan"]["proto"] == "static"
         assert result["@device[0]"]["ports"] == ["lan1", "lan2"]
 
+    async def test_ssh_uci_show_over_text_cap_is_too_large(self) -> None:
+        """Review M6: the parser never sees more than UCI_TEXT_MAX_BYTES."""
+        from custom_components.openwrt_router.config_const import UCI_TEXT_MAX_BYTES
+
+        api, _ = make_api()
+        api._call = AsyncMock(  # type: ignore[method-assign]
+            side_effect=OpenWrtMethodNotFoundError("rpcd ACL blocks uci/get/network")
+        )
+        line = b"network.x.y='" + b"a" * 1000 + b"'\n"
+        chunks = [line * 64] * (UCI_TEXT_MAX_BYTES // (len(line) * 64) + 2)
+        ctx, _ = patch_connect(fake_conn(FakeProc(chunks)))
+        with ctx, pytest.raises(OpenWrtConfigFetchTooLargeError):
+            await api.config_uci_get("network")
+
+    def test_uci_show_cap_equals_the_parser_cap(self) -> None:
+        from custom_components.openwrt_router import api as api_module
+        from custom_components.openwrt_router.config_const import UCI_TEXT_MAX_BYTES
+
+        assert api_module._CONFIG_UCI_SHOW_MAX_BYTES == UCI_TEXT_MAX_BYTES
+
     async def test_cached_acl_block_goes_straight_to_ssh(self) -> None:
         api, session = make_api()
         api._acl_blocked.add(("uci", "get", "network"))

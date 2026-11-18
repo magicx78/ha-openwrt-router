@@ -542,6 +542,11 @@ STREAM_CHUNK_BYTES: Final = 65536
 # shorter (board names < 64, versions < 40 characters).
 ROUTER_FIELD_MAX_CHARS: Final = 256
 INVENTORY_MAX_PACKAGES: Final = 8192
+# One UCI config text (``uci show`` output, an etc/config file of an archive)
+# above this size is never parsed but reported as too large (review M6).
+# Real configs stay far below (a large dhcp with 500 hosts is ~60 KiB).
+# api.py's _CONFIG_UCI_SHOW_MAX_BYTES must equal this value.
+UCI_TEXT_MAX_BYTES: Final = _MIB
 
 # ---------------------------------------------------------------------------
 # Drift and events (plan sections 3.3, 9.1, 8.4)

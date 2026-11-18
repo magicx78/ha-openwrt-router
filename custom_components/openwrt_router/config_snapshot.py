@@ -50,13 +50,17 @@ import hashlib
 import json
 import logging
 import re
-import shlex
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final
 
-from .config_const import SECRET_MARKER_KEY, UCI_CONFIGS, UPLINK_INTERFACE_NAMES
+from .config_const import (
+    SECRET_MARKER_KEY,
+    UCI_CONFIGS,
+    UCI_TEXT_MAX_BYTES,
+    UPLINK_INTERFACE_NAMES,
+)
 from .config_mask import is_secret_option
 
 _LOGGER = logging.getLogger(__name__)
@@ -70,6 +74,7 @@ __all__ = [
     "SECTION_IDENTITY_FIELDS",
     "UciParseResult",
     "UciSnapshot",
+    "UciTextTooLargeError",
     "build_snapshot",
     "canonical_json",
     "fingerprint_from_coordinator",
@@ -154,6 +159,14 @@ _FINGERPRINT_VERSION: Final = 1
 # ---------------------------------------------------------------------------
 
 
+class UciTextTooLargeError(Exception):
+    """A UCI text above ``UCI_TEXT_MAX_BYTES``; it was not parsed (review M6).
+
+    Not a ValueError: callers map it to the ``too_large`` error class
+    instead of treating it as a programming error.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class UciParseResult:
     """Parsed UCI text in ubus shape plus the number of skipped statements."""
@@ -194,6 +207,18 @@ def _sha256_hex(obj: Any) -> str:
 
 def _new_section(stype: str, name: str, anonymous: bool, index: int) -> dict[str, Any]:
     return {".type": stype, ".name": name, ".anonymous": anonymous, ".index": index}
+
+
+def _check_size(text: str) -> None:
+    """Refuse texts above UCI_TEXT_MAX_BYTES before any parsing (review M6).
+
+    Counts characters: a text within the byte cap never has more characters
+    than bytes, so this is never stricter than the cap on the raw bytes.
+    """
+    if len(text) > UCI_TEXT_MAX_BYTES:
+        raise UciTextTooLargeError(
+            f"UCI text of {len(text)} characters exceeds {UCI_TEXT_MAX_BYTES}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +322,7 @@ def parse_uci_file_detailed(text: str) -> UciParseResult:
     """
     if not isinstance(text, str):
         raise TypeError("UCI text must be str")
+    _check_size(text)
     sections: dict[str, dict[str, Any]] = {}
     type_counts: dict[str, int] = {}
     current: dict[str, Any] | None = None
@@ -375,12 +401,120 @@ def parse_uci_file(text: str) -> dict[str, dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+# One piece of a POSIX shell word, as ``shlex`` (POSIX mode) reads it:
+# 'single' | "double" (backslash escapes " and \ only) | \x | plain | blanks.
+# Possessive and with disjoint alternatives, so matching stays linear.
+_SHELL_PIECE_RE: Final = re.compile(
+    r"'([^']*+)'"
+    r'|"((?:[^"\\]++|\\.)*+)"'
+    r"|\\(.)"
+    r"|([^ \t\r\n'\"\\]++)"
+    r"|([ \t\r\n]++)",
+    re.DOTALL,
+)
+_DQ_ESCAPE_RE: Final = re.compile(r'\\(["\\])')
+
+
 def _show_words(raw: str) -> list[str] | None:
-    """Unquote a `uci show` value (POSIX shell quoting); None if unbalanced."""
-    try:
-        return shlex.split(raw)
-    except ValueError:
-        return None
+    """Unquote a `uci show` value (POSIX shell quoting); None if unbalanced.
+
+    Same result as ``shlex.split(raw)``, but in linear time with C-speed
+    regex steps: shlex reads character by character in Python, which took
+    seconds on a value near UCI_TEXT_MAX_BYTES (review M6).
+    """
+    words: list[str] = []
+    current: list[str] | None = None
+    pos, end = 0, len(raw)
+    while pos < end:
+        piece = _SHELL_PIECE_RE.match(raw, pos)
+        if piece is None:
+            return None  # open quote or trailing backslash
+        pos = piece.end()
+        single, double, escaped, plain, _blank = piece.groups()
+        if piece.lastindex == 5:
+            if current is not None:
+                words.append("".join(current))
+                current = None
+            continue
+        if current is None:
+            current = []
+        if single is not None:
+            current.append(single)
+        elif double is not None:
+            current.append(_DQ_ESCAPE_RE.sub(r"\1", double))
+        else:
+            current.append(escaped if escaped is not None else plain)
+    if current is not None:
+        words.append("".join(current))
+    return words
+
+
+# Shell quote state at a line start inside a `uci show` record.
+_Q_OUT: Final = 0  # unquoted; only reached after a backslash-newline
+_Q_SINGLE: Final = 1
+_Q_DOUBLE: Final = 2
+_OUT_SPECIAL_RE: Final = re.compile(r"['\"\\]")
+_DQ_SPECIAL_RE: Final = re.compile(r'["\\]')
+
+
+def _quote_state(state: int, text: str) -> int | None:
+    """Quote state after ``text`` (one line), like ``shlex`` in POSIX mode.
+
+    Returns None if the record ends with this line (unquoted, no trailing
+    backslash), else the state the next line starts in. A backslash escapes
+    the next character outside single quotes; at the line end it escapes
+    the newline.
+    """
+    pos, end = 0, len(text)
+    while True:
+        if state == _Q_SINGLE:
+            close = text.find("'", pos)
+            if close < 0:
+                return _Q_SINGLE
+            state, pos = _Q_OUT, close + 1
+            continue
+        special = (_DQ_SPECIAL_RE if state == _Q_DOUBLE else _OUT_SPECIAL_RE).search(
+            text, pos
+        )
+        if special is None:
+            return None if state == _Q_OUT else state
+        char, pos = special.group(), special.end()
+        if char == "\\":
+            if pos >= end:
+                return state  # escaped newline: the record goes on
+            pos += 1
+        elif state == _Q_DOUBLE:
+            state = _Q_OUT
+        else:
+            state = _Q_SINGLE if char == "'" else _Q_DOUBLE
+
+
+def _record_end(
+    lines: list[str], state: int, first: int, memo: dict[tuple[int, int], int]
+) -> int:
+    """Last line of a record that continues at ``first`` in ``state``; -1 if none.
+
+    ``memo`` keeps the answer per (state, line), so every line is scanned at
+    most once per state over the whole text: a value whose quote never
+    closes no longer makes the parser quadratic (review M6).
+    """
+    path: list[tuple[int, int]] = []
+    result = -1
+    k = first
+    while k < len(lines):
+        cached = memo.get((state, k))
+        if cached is not None:
+            result = cached
+            break
+        path.append((state, k))
+        after = _quote_state(state, lines[k])
+        if after is None:
+            result = k
+            break
+        state, k = after, k + 1
+    for key in path:
+        memo[key] = result
+    return result
 
 
 def parse_uci_show_detailed(text: str, config: str) -> UciParseResult:
@@ -394,8 +528,10 @@ def parse_uci_show_detailed(text: str, config: str) -> UciParseResult:
     """
     if not isinstance(text, str):
         raise TypeError("uci show text must be str")
+    _check_size(text)
     lines = text.replace("\r\n", "\n").split("\n")
     sections: dict[str, dict[str, Any]] = {}
+    memo: dict[tuple[int, int], int] = {}
     skipped = 0
     i = 0
     while i < len(lines):
@@ -408,14 +544,15 @@ def parse_uci_show_detailed(text: str, config: str) -> UciParseResult:
             skipped += 1
             i += 1
             continue
-        end = i
-        words = _show_words(match.group("value"))
-        record = line
-        while words is None and end + 1 < len(lines):
-            end += 1
-            record = f"{record}\n{lines[end]}"
-            match = _SHOW_HEAD_RE.fullmatch(record)
-            words = _show_words(match.group("value")) if match else None
+        # Find the record end with a linear quote scan first; unquoting then
+        # runs once on the whole record.
+        state = _quote_state(_Q_OUT, match.group("value"))
+        end = i if state is None else _record_end(lines, state, i + 1, memo)
+        words: list[str] | None = None
+        if end > i:
+            match = _SHOW_HEAD_RE.fullmatch("\n".join(lines[i : end + 1]))
+        if end >= 0 and match is not None:
+            words = _show_words(match.group("value"))
         if words is None or match is None:
             skipped += 1
             i += 1

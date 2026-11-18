@@ -32,7 +32,7 @@ import posixpath
 import re
 import tarfile
 import zlib
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -46,6 +46,7 @@ from .config_const import (
     ERR_TOO_LARGE,
     GZIP_MAGIC,
     STREAM_CHUNK_BYTES,
+    UCI_TEXT_MAX_BYTES,
     WARN_CONFIG_MISSING_IN_ARCHIVE,
     ArchiveLimits,
 )
@@ -213,13 +214,22 @@ class UciTexts(dict[str, str]):
     representation stops accidental logging via ``%s``/``%r``.
     """
 
-    __slots__ = ()
+    __slots__ = ("oversized",)
+
+    def __init__(
+        self, texts: Mapping[str, str] | None = None, oversized: Iterable[str] = ()
+    ) -> None:
+        super().__init__(texts or {})
+        #: Configs above UCI_TEXT_MAX_BYTES: in the archive, but not returned
+        #: and never parsed (review M6).
+        self.oversized: tuple[str, ...] = tuple(sorted(oversized))
 
     def __repr__(self) -> str:
         sizes = ", ".join(
             f"{name}: {len(text)} chars" for name, text in sorted(self.items())
         )
-        return f"<UciTexts {sizes}>"
+        over = f"; too large: {', '.join(self.oversized)}" if self.oversized else ""
+        return f"<UciTexts {sizes}{over}>"
 
     __str__ = __repr__
 
@@ -513,6 +523,7 @@ class _Scan:
         self.members: dict[str, MemberInfo] = {}
         self.symlinks: set[str] = set()
         self.texts: dict[str, bytes] = {}
+        self.oversized: set[str] = set()
 
     def add(self, tar: tarfile.TarFile, member: tarfile.TarInfo, raw: bytes) -> None:
         """Record one member; ``raw`` holds its header blocks."""
@@ -548,6 +559,10 @@ class _Scan:
             if self._declared > limits.max_uncompressed_total:
                 raise _Abort(ERR_INVALID, CODE_UNCOMPRESSED_TOO_LARGE, name)
             config = _config_name(name) if self._keep_texts else None
+            if config is not None and size > UCI_TEXT_MAX_BYTES:
+                # Hashed like every member, but never kept or parsed (M6).
+                self.oversized.add(config)
+                config = None
             digest = self._read(tar, member, size, name, keep=config)
         elif kind == MEMBER_SYMLINK:
             _check_symlink(name, member.linkname, limits)
@@ -695,18 +710,18 @@ def _failed(
 
 def _scan(
     data: bytes, limits: ArchiveLimits, *, keep_texts: bool
-) -> tuple[ArchiveReport, dict[str, bytes]]:
+) -> tuple[ArchiveReport, _Scan | None]:
     view = memoryview(data).cast("B")
     archive_sha256 = hashlib.sha256(view).hexdigest()
 
     if len(view) > limits.max_compressed:
         finding = ArchiveFinding(CODE_COMPRESSED_TOO_LARGE)
         _LOGGER.debug("Archive rejected: %s/%s", ERR_TOO_LARGE, finding.code)
-        return _failed(ERR_TOO_LARGE, finding, archive_sha256, 0), {}
+        return _failed(ERR_TOO_LARGE, finding, archive_sha256, 0), None
     if view[:2].tobytes() != GZIP_MAGIC:
         finding = ArchiveFinding(CODE_NOT_GZIP)
         _LOGGER.debug("Archive rejected: %s/%s", ERR_INVALID, finding.code)
-        return _failed(ERR_INVALID, finding, archive_sha256, 0), {}
+        return _failed(ERR_INVALID, finding, archive_sha256, 0), None
 
     ratio_cap = max(RATIO_CHECK_FLOOR_BYTES, limits.max_ratio * len(view))
     if ratio_cap < limits.max_uncompressed_total:
@@ -726,7 +741,10 @@ def _scan(
             abort.finding.code,
             stream.total_out,
         )
-        return _failed(abort.error, abort.finding, archive_sha256, stream.total_out), {}
+        return (
+            _failed(abort.error, abort.finding, archive_sha256, stream.total_out),
+            None,
+        )
 
     members = tuple(sorted(scan.members.values(), key=lambda member: member.name))
     configs = frozenset(
@@ -764,7 +782,7 @@ def _scan(
         content_hash=content_hash(members),
         uncompressed_size=stream.total_out,
     )
-    return report, scan.texts
+    return report, scan
 
 
 # ---------------------------------------------------------------------------
@@ -817,18 +835,23 @@ def extract_uci_texts(
     Runs the full ``validate_archive`` check in the same pass and raises
     ``ArchiveError`` if it fails (including ``incomplete``). Keys are config
     names (``network``), values the file text (UTF-8, invalid bytes
-    replaced). Symlinks and sub-directories are skipped.
+    replaced). Symlinks and sub-directories are skipped. Files above
+    ``UCI_TEXT_MAX_BYTES`` are left out and listed in ``oversized``.
 
     The texts hold secrets in clear text. The caller must pass them straight
     to the snapshot normalisation with a secret digest
     (``config_snapshot.normalize_uci``) and drop them; never log, store or
     return them. The returned ``UciTexts`` hides the texts from ``repr``.
     """
-    report, raw = _scan(data, limits, keep_texts=True)
-    if not report.ok:
+    report, scan = _scan(data, limits, keep_texts=True)
+    if not report.ok or scan is None:
         raise ArchiveError(report.error or ERR_INVALID, report.findings)
     return UciTexts(
-        {name: text.decode("utf-8", "replace") for name, text in sorted(raw.items())}
+        {
+            name: text.decode("utf-8", "replace")
+            for name, text in sorted(scan.texts.items())
+        },
+        scan.oversized,
     )
 
 

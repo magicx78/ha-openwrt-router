@@ -17,6 +17,7 @@ import inspect
 import io
 import json
 import logging
+import random
 import tarfile
 import time
 from collections.abc import Callable, Mapping
@@ -36,7 +37,11 @@ from custom_components.openwrt_router.api import (
     OpenWrtTimeoutError,
 )
 from custom_components.openwrt_router.config_archive import validate_archive
-from custom_components.openwrt_router.config_const import FETCH_TIMEOUTS, UCI_CONFIGS
+from custom_components.openwrt_router.config_const import (
+    FETCH_TIMEOUTS,
+    UCI_CONFIGS,
+    UCI_TEXT_MAX_BYTES,
+)
 from custom_components.openwrt_router.config_provider import (
     PROVIDER_ID,
     ConfigManagerProvider,
@@ -1790,3 +1795,41 @@ async def test_baseline_with_unreadable_config_still_sees_drift_there() -> None:
     assert report.drifted
     assert report.critical_count >= 1
     assert find_change(report.diff, "firewall", "input")
+
+
+# ---------------------------------------------------------------------------
+# Security review M6: an oversized UCI file in the archive is never parsed
+# ---------------------------------------------------------------------------
+
+
+def _oversized_firewall() -> str:
+    """FIREWALL plus a comment that pushes it over UCI_TEXT_MAX_BYTES.
+
+    Hex noise compresses about 2:1, so the archive ratio check passes.
+    """
+    noise = random.Random(6).randbytes(UCI_TEXT_MAX_BYTES // 2 + 1).hex()
+    return f"{FIREWALL}# {noise}\n"
+
+
+async def test_oversized_archive_config_is_reported_and_live_used() -> None:
+    files = {**FILES, "firewall": _oversized_firewall()}
+    archive = make_archive(files)
+    version = await collect(FakeApi(cgi=archive, ssh=archive))
+    meta = version.meta
+    assert meta.backup_type is BackupType.FULL_ARCHIVE
+    assert "uci_too_large:firewall" in meta.warnings
+    # The live read still delivers firewall; nothing from the archive text.
+    assert "firewall" in uci_doc(version)["configs"]
+    assert meta.uci_hash == (await collect()).meta.uci_hash
+
+
+async def test_oversized_archive_config_without_live_read_is_missing() -> None:
+    files = {**FILES, "firewall": _oversized_firewall()}
+    archive = make_archive(files)
+    uci = ubus_values()
+    uci["firewall"] = OpenWrtConfigFetchPermissionError("acl")
+    version = await collect(FakeApi(cgi=archive, ssh=archive, uci=uci))
+    meta = version.meta
+    assert "uci_too_large:firewall" in meta.warnings
+    assert "uci_failed:firewall" in meta.warnings
+    assert "firewall" not in uci_doc(version)["configs"]
