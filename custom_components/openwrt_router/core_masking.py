@@ -34,6 +34,19 @@ precise mode masks and more:
    (``WEPKey`` -> ``wep key``, ``key1`` -> ``key``), and the words joined
    (``api-key``).
 
+Two value-aware exceptions (follow-up B4, narrowed by review of PR #56):
+identifier names (``IDENTIFIER_KEY_NAMES``: ``rule_key``, ``scope_key`` …)
+stay secret names, but the walkers show a value under them if it is a
+strict identifier (:func:`is_identifier_value`: core id or short lower-case
+slug, no key material); anything else, also a dict or list, is masked.
+Counter names (``COUNTER_SUFFIXES``) keep a NUMBER readable unless a secret
+word is part of the name. The precise snapshot rule is unchanged
+(``option rule_key`` in a UCI diff stays masked).
+
+Network identifiers (MAC, IP, hostname, SSID, BSSID) are never masked here;
+modules that must hide them use :func:`pseudonymise_identifier` /
+:func:`pseudonymise_fields` with their module key.
+
 A change record (mapping with ``option`` and ``config``) of an option that
 is readable in that config (``READABLE_CONTEXT_OPTIONS``) keeps its values,
 so a diff stays useful; without a known config the broad rule masks.
@@ -68,6 +81,7 @@ from ipaddress import (
     IPv6Address,
     IPv6Interface,
     IPv6Network,
+    ip_address,
 )
 from pathlib import PurePath
 from typing import Any, Final
@@ -287,6 +301,50 @@ READABLE_CONTEXT_OPTIONS: Final = (
 )
 # Suffixes of counters, hashes and ids (never secret values).
 SAFE_SUFFIXES: Final = ("_count", "_hash", "_sha256", "_id", "_ids")
+# Names of identifiers that end in "key" (follow-up B4, narrowed by review
+# M1 of PR #56), compared as the name's words joined by "_" without dropping
+# digits (``ruleKey``, ``RULE-KEY`` -> ``rule_key``; ``rule_key2`` is not
+# one). They stay SECRET names for :func:`is_secret_key`; only the walkers
+# and :func:`redact_text` show a value under them, and only a strict
+# identifier value (:func:`is_identifier_value`). A name is listed only if
+# it never names a secret anywhere. Removed in M1 because they do:
+# ``client_key`` (MQTT/TLS client private key), ``device_key`` (IoT device
+# keys), ``message_key``/``msg_key`` (Signal/MTProto message keys),
+# ``router_key`` (Tor router identity key), ``entry_key`` (keystore key
+# entry), ``cache_key``/``lookup_key`` (often built from credentials),
+# ``event_key`` (webhook/event service keys), ``radio_key`` (no safe
+# meaning; modules have ``radio_id``).
+IDENTIFIER_KEY_NAMES: Final = frozenset(
+    {
+        "finding_key",
+        "incident_key",
+        "recommendation_key",
+        "rule_key",
+        "scope_key",
+        "sort_key",
+        "translation_key",
+    }
+)
+# A value under an identifier name stays readable only in one of these
+# shapes: a core id (``rtr_<32 hex>``, ``cli_<16 hex>`` …) or a short
+# lower-case slug; and never if it looks like key material.
+IDENTIFIER_VALUE_MAX_LENGTH: Final = 64
+_IDENTIFIER_VALUE_RE: Final = re.compile(
+    r"[a-z]{3}_[0-9a-f]{32}|[a-z]{3}_[0-9a-f]{16}"
+    rf"|[a-z0-9][a-z0-9_.:-]{{0,{IDENTIFIER_VALUE_MAX_LENGTH - 1}}}"
+)
+# Counter names: a number under such a name is readable; a string or any
+# other value is not. Never for a name with a word of SECRET_WORDS
+# (``pin_total``, ``auth_failures``; review L1 of PR #56).
+COUNTER_SUFFIXES: Final = (
+    "_attempts",
+    "_errors",
+    "_fail",
+    "_failed",
+    "_failures",
+    "_retries",
+    "_total",
+)
 
 # Secret wherever they appear in the normalised name.
 SECRET_SUBSTRINGS: Final = (
@@ -550,6 +608,116 @@ def _is_secret_plain_key(name: str) -> bool:
 is_secret_name = is_secret_key
 
 
+def _is_identifier_plain(name: str) -> bool:
+    """True if one spelling of ``name`` is in IDENTIFIER_KEY_NAMES.
+
+    Words keep their digits (``rule_key2`` and ``rule2_key`` are not
+    identifiers; ``key1``…``key4`` are WEP keys).
+    """
+    spaced = _CAMEL.sub(" ", name.rsplit(".", 1)[-1])
+    joined = "_".join(part.lower() for part in _SPLIT.split(spaced) if part)
+    return joined in IDENTIFIER_KEY_NAMES
+
+
+def is_identifier_name(name: object) -> bool:
+    """True for a field that names an identifier ending in "key".
+
+    Exact secret names never count; the canonical spelling (URL escapes,
+    zero-width, look-alikes) must agree, so ``rule%5Fkey`` is judged like
+    ``rule_key``. Such a name is still a secret name for
+    :func:`is_secret_key`; the walkers show a value under it only if
+    :func:`is_identifier_value` accepts it.
+    """
+    return isinstance(name, str) and bool(name.strip()) and _identifier_str(name)
+
+
+def is_identifier_value(value: object) -> bool:
+    """True if ``value`` may be shown under an identifier name.
+
+    Only a string: a core id (``rtr_<32 hex>``, ``cli_<16 hex>`` …) or a
+    lower-case slug ``[a-z0-9][a-z0-9_.:-]*`` of at most
+    IDENTIFIER_VALUE_MAX_LENGTH characters that does not look like key
+    material. Numbers (a PIN is a number), containers, mixed case, blanks
+    and symbols are not identifier values.
+    """
+    return (
+        isinstance(value, str)
+        and _IDENTIFIER_VALUE_RE.fullmatch(value) is not None
+        and (
+            _CORE_ID_RE.fullmatch(value) is not None
+            or not looks_like_key_material(value)
+        )
+    )
+
+
+@lru_cache(maxsize=4096)
+def _identifier_str(name: str) -> bool:
+    canon = _canonical_name(name)
+    for spelling in {name, canon}:
+        if (
+            spelling.lower() in SECRET_EXACT_KEYS
+            or _normalise_name(spelling) in SECRET_EXACT_KEYS
+            or not _is_identifier_plain(spelling)
+        ):
+            return False
+    return True
+
+
+def is_counter_name(name: object) -> bool:
+    """True for a counter name (``wan_failures``): numbers stay readable.
+
+    Never for exact secret names, config-manager's pattern, a secret
+    substring (``password_failures``) or a name with any word of
+    SECRET_WORDS (``pin_total``, ``wps_pin_attempts``, ``otp_total``,
+    ``auth_failures``): a PIN or one-time password is a number, so the
+    counter rule never lifts a secret word (review L1 of PR #56).
+    """
+    return isinstance(name, str) and _counter_str(name)
+
+
+@lru_cache(maxsize=4096)
+def _counter_str(name: str) -> bool:
+    for spelling in {name, _canonical_name(name)}:
+        norm = _normalise_name(spelling)
+        words = _words(spelling.rsplit(".", 1)[-1])
+        if (
+            not norm.endswith(COUNTER_SUFFIXES)
+            or norm in SECRET_EXACT_KEYS
+            or spelling.lower() in SECRET_EXACT_KEYS
+            or _matches_pattern(norm)
+            or any(sub in norm for sub in SECRET_SUBSTRINGS)
+            or any(word in SECRET_WORDS for word in words)
+            or "".join(words) in SECRET_WORDS
+        ):
+            return False
+    return True
+
+
+# Key material under an identifier name: PEM, base64/base64url of 16+ bytes,
+# 32+ hex. Core ids and word-built names are not key material.
+_KEY_MATERIAL_RE: Final = re.compile(r"[A-Za-z0-9+/_-]{22,}={0,2}|[0-9A-Fa-f]{32,}")
+_CORE_ID_RE: Final = re.compile(r"[a-z]{3}_[0-9a-f]{32}|[a-z]{3}_[0-9a-f]{16}")
+
+
+def looks_like_key_material(value: object) -> bool:
+    """True if a string (or any string in a list/tuple) may be a key."""
+    if isinstance(value, list | tuple):
+        return any(looks_like_key_material(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    if _INLINE_KEY in value:
+        return True
+    for token in re.split(r"[\s,;'\"]+", value):
+        if (
+            token
+            and _KEY_MATERIAL_RE.fullmatch(token)
+            and not _CORE_ID_RE.fullmatch(token)
+            and not _is_name(token)
+        ):
+            return True
+    return False
+
+
 def _in_context(
     rules: Iterable[SecretContextRule | ReadableContextRule],
     config: str,
@@ -742,6 +910,25 @@ _NAME_PART_RE: Final = re.compile(
 _NAME_SEP_RE: Final = re.compile(r"[/_-]+")
 
 
+# A plain number (optionally quoted) that ends at a blank or a separator.
+_NUMBER_VALUE_RE: Final = re.compile(
+    r"([\"']?)-?[0-9]{1,20}(?:\.[0-9]{1,20})?\1(?=$|[\s,;})\]])"
+)
+# The value after an identifier head in free text: one (optionally quoted)
+# token that ends the value, or is followed by "," / ";" or by the next
+# "name=" / "name:" pair. Anything else (a phrase) is masked to the end.
+_IDENTIFIER_TEXT_RE: Final = re.compile(
+    rf"(?P<q>['\"]?)(?P<tok>[^\s'\",;]{{1,{IDENTIFIER_VALUE_MAX_LENGTH}}})(?P=q)"
+    r"(?:[ \t]*\Z|[ \t]*[,;]|[ \t]+(?=[^\s=:'\"]+[ \t]*[=:]))"
+)
+
+
+def _identifier_text_value(raw: str) -> bool:
+    """True if free text after an identifier head is one identifier value."""
+    match = _IDENTIFIER_TEXT_RE.match(raw)
+    return match is not None and is_identifier_value(match.group("tok"))
+
+
 def _quoted_mask(value: str) -> str:
     """MASK, keeping surrounding quotes."""
     if value[:1] in ("'", '"') and len(value) >= 2 and value[-1] == value[0]:
@@ -760,12 +947,21 @@ def _mask_after_heads(
     out: list[str] = []
     pos = 0
     for match in head_re.finditer(text):
-        if match.start() < pos or not is_secret_key(match.group("name")):
+        if match.start() < pos:
+            continue
+        name = match.group("name")
+        if not is_secret_key(name):
             continue
         value = value_re.match(text, match.end())
         end = value.end() if value else match.end()
         if end == match.end():
             continue
+        raw = text[match.end() : end]
+        if is_identifier_name(name):
+            if _identifier_text_value(raw):
+                continue  # "rule_key=wan_in": an identifier, the rest is scanned on
+        elif is_counter_name(name) and _NUMBER_VALUE_RE.match(raw):
+            continue  # a count, the rest is scanned on
         out.append(text[pos : match.end()])
         out.append(_quoted_mask(text[match.end() : end]))
         pos = end
@@ -1053,11 +1249,26 @@ def _record_masked_keys(mapping: Mapping[Any, Any]) -> frozenset[str]:
         ) or _has_inline_key(mapping):
             masked |= _OPTION_VALUE_KEYS
     if not masked and any(key in mapping for key in _OPTION_VALUE_KEYS):
-        for name_key in _FIELD_NAME_KEYS:
-            named = mapping.get(name_key)
-            if isinstance(named, str) and is_secret_key(named):
+        # A record may name its field in several keys at once. Look at ALL of
+        # them first: one secret name masks the values, whatever the others
+        # say and in whatever order (review N1). Only when none is secret
+        # does an allowed identifier name get the strict value rule.
+        names = [
+            named
+            for named in (mapping.get(name_key) for name_key in _FIELD_NAME_KEYS)
+            if isinstance(named, str)
+        ]
+        if any(is_secret_key(n) and not is_identifier_name(n) for n in names):
+            masked |= _OPTION_VALUE_KEYS
+        elif any(is_identifier_name(n) for n in names):
+            # {"key": "rule_key", "value": …}: only strict identifier values
+            # (or None) stay readable
+            shown = all(
+                mapping.get(k) is None or is_identifier_value(mapping.get(k))
+                for k in _OPTION_VALUE_KEYS
+            )
+            if not shown:
                 masked |= _OPTION_VALUE_KEYS
-                break
     for path_key in _PATH_KEYS:
         path = mapping.get(path_key)
         if isinstance(path, str) and is_secret_path(path):
@@ -1080,8 +1291,20 @@ def _mask_mapping(
                 result[key] = mask_value(value)
                 continue
         else:
+            if (
+                key.lower() not in masked_keys
+                and is_identifier_name(key)
+                and not _is_extra(key, walk)
+            ):
+                # only a strict identifier value is shown; dicts, lists,
+                # numbers and phrases are masked, never walked into (M1)
+                result[key] = value if is_identifier_value(value) else mask_value(value)
+                continue
             if key.lower() in masked_keys or is_secret_key(key, walk.extra):
-                result[key] = mask_value(value)
+                if _readable_count(key, value, walk):
+                    result[key] = value
+                else:
+                    result[key] = mask_value(value)
                 continue
             if is_secret_path(key):
                 result[key] = _path_value(value)
@@ -1097,6 +1320,24 @@ def _mask_mapping(
                     continue
         result[key] = _mask(value, walk, stack, depth + 1)
     return result
+
+
+def _is_extra(key: str, walk: _Walk) -> bool:
+    """True if the caller named ``key`` as secret (extra_keys)."""
+    if not walk.extra:
+        return False
+    extra = {k.lower() for k in walk.extra}
+    return key.lower() in extra or _normalise_name(key) in extra
+
+
+def _readable_count(key: str, value: Any, walk: _Walk) -> bool:
+    """A number under a counter name (not an extra key) stays readable."""
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and is_counter_name(key)
+        and key.lower() not in {k.lower() for k in walk.extra}
+    )
 
 
 def _mask_sequence(obj: Any, walk: _Walk, stack: set[int], depth: int) -> Any:
@@ -1224,4 +1465,130 @@ def _pseudonymise(data: Any, salt: bytes, depth: int) -> Any:
         }
     if isinstance(data, list | tuple):
         return [_pseudonymise(value, salt, depth + 1) for value in data]
+    return data
+
+
+# --- network identifier pseudonyms (follow-up B4) -------------------------------
+
+# Core masking never hides MAC/IP/hostname/SSID/BSSID; a module that must
+# (exports, reports) replaces them with ``<prefix><16 hex>``: HMAC-SHA256
+# under the module's own key (api.async_get_module_key) over the kind and the
+# normalised value. Same key + kind + value -> same pseudonym; the kind is
+# part of the input, so one MAC as ``mac`` and as ``client`` cannot be linked.
+IDENTIFIER_PSEUDONYM_PREFIXES: Final[Mapping[str, str]] = {
+    "mac": "mac_",
+    "ip": "ipa_",
+    "hostname": "hst_",
+    "ssid": "ssd_",
+    "bssid": "bss_",
+    "client": "cli_",
+}
+IDENTIFIER_PSEUDONYM_HEX_LENGTH: Final = 16
+IDENTIFIER_INVALID: Final = "**INVALID_IDENTIFIER**"
+_IDENTIFIER_INFO: Final = b"openwrt_router/identifier/v1"
+_MAC_HEX_RE: Final = re.compile(r"[0-9a-f]{12}")
+_MAC_SHAPE_RE: Final = re.compile(
+    r"[0-9A-Fa-f]{2}(?:([:-])[0-9A-Fa-f]{2})(?:\1[0-9A-Fa-f]{2}){4}"
+    r"|[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}"
+    r"|[0-9A-Fa-f]{12}"
+)
+
+
+def _normalise_mac(value: str) -> str:
+    text = value.strip()
+    if _MAC_SHAPE_RE.fullmatch(text) is None:
+        raise ValueError("not a MAC address")
+    digits = re.sub(r"[^0-9a-f]", "", text.lower())
+    if _MAC_HEX_RE.fullmatch(digits) is None:
+        raise ValueError("not a MAC address")
+    return ":".join(digits[i : i + 2] for i in range(0, 12, 2))
+
+
+def _normalise_identifier(kind: str, value: object) -> str:
+    """Canonical form per kind; ValueError if ``value`` is not one."""
+    if not isinstance(value, str):
+        raise TypeError("identifier must be a string")
+    if kind in ("mac", "bssid", "client"):
+        return _normalise_mac(value)
+    if kind == "ip":
+        try:
+            return ip_address(value.strip()).compressed
+        except ValueError:
+            raise ValueError("not an IP address") from None
+    if kind == "hostname":
+        name = value.strip().rstrip(".").lower()
+        if not name or any(c.isspace() for c in name):
+            raise ValueError("not a hostname")
+        return name
+    # ssid: case and spaces are significant; only an empty SSID is refused
+    if not value or len(value.encode("utf-8")) > 32:
+        raise ValueError("not an SSID (1-32 bytes)")
+    return value
+
+
+def pseudonymise_identifier(kind: str, value: str, key: bytes) -> str:
+    """``<prefix><16 hex>`` for a network identifier (pure, deterministic).
+
+    ``kind``: mac, ip, hostname, ssid, bssid, client (a client is named by
+    its MAC). Normalisation: MAC/BSSID/client lower case with ``:``
+    (``AA-BB-…``, ``aabb.ccdd.eeff`` and bare hex accepted); IPv4/IPv6 in
+    the canonical compressed form; hostname lower case without a trailing
+    dot; SSID unchanged (case sensitive). ValueError for an unknown kind, a
+    value that is not of the kind, or a key shorter than 16 bytes;
+    TypeError for a value that is not a string.
+    """
+    prefix = IDENTIFIER_PSEUDONYM_PREFIXES.get(kind) if isinstance(kind, str) else None
+    if prefix is None:
+        raise ValueError("unknown identifier kind")
+    if not isinstance(key, bytes) or len(key) < SECRET_DIGEST_MIN_KEY_BYTES:
+        raise ValueError(f"key must be at least {SECRET_DIGEST_MIN_KEY_BYTES} bytes")
+    canonical = _normalise_identifier(kind, value)
+    message = b"\x00".join((_IDENTIFIER_INFO, kind.encode(), canonical.encode()))
+    digest = hmac.new(key, message, hashlib.sha256).hexdigest()
+    return prefix + digest[:IDENTIFIER_PSEUDONYM_HEX_LENGTH]
+
+
+def pseudonymise_fields(data: Any, key: bytes, fields: Mapping[str, str]) -> Any:
+    """Copy of ``data`` with the identifiers under the named fields replaced.
+
+    ``fields`` maps a field name to its kind (``{"mac": "mac", "ip": "ip"}``).
+    Walks mappings, lists and tuples (as lists) up to MAX_DEPTH (deeper
+    values become TRUNCATED); a string, or each string in a list, under a
+    named field becomes its pseudonym; one that is not of the kind becomes
+    IDENTIFIER_INVALID (never the raw value). None stays None. The input is
+    never changed.
+    """
+    for kind in fields.values():
+        if kind not in IDENTIFIER_PSEUDONYM_PREFIXES:
+            raise ValueError("unknown identifier kind")
+    if not isinstance(key, bytes) or len(key) < SECRET_DIGEST_MIN_KEY_BYTES:
+        raise ValueError(f"key must be at least {SECRET_DIGEST_MIN_KEY_BYTES} bytes")
+    return _pseudo_fields(data, key, dict(fields), 0)
+
+
+def _pseudo_one(kind: str, value: Any, key: bytes) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, list | tuple):
+        return [_pseudo_one(kind, item, key) for item in value]
+    try:
+        return pseudonymise_identifier(kind, value, key)
+    except (TypeError, ValueError):
+        return IDENTIFIER_INVALID
+
+
+def _pseudo_fields(data: Any, key: bytes, fields: dict[str, str], depth: int) -> Any:
+    if depth > MAX_DEPTH:
+        return TRUNCATED
+    if isinstance(data, Mapping):
+        out: dict[Any, Any] = {}
+        for name, value in data.items():
+            kind = fields.get(name) if isinstance(name, str) else None
+            if kind is not None:
+                out[name] = _pseudo_one(kind, value, key)
+            else:
+                out[name] = _pseudo_fields(value, key, fields, depth + 1)
+        return out
+    if isinstance(data, list | tuple):
+        return [_pseudo_fields(value, key, fields, depth + 1) for value in data]
     return data

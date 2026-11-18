@@ -1,7 +1,11 @@
 """Shared fixtures for the OpenWrt Router integration tests."""
 from __future__ import annotations
 
+import asyncio
+import asyncio.base_events
+import ipaddress
 import os
+import socket
 import sys
 import types
 from pathlib import Path
@@ -576,3 +580,162 @@ def _reset_gateway_memory(monkeypatch):
     from custom_components.openwrt_router import topology_mesh
 
     monkeypatch.setattr(topology_mesh, "_GATEWAY_MEMORY", {})
+
+
+# ---------------------------------------------------------------------------
+# No real network in the test suite
+#
+# First line: ``asyncio.open_connection`` (used by the coordinator's latency
+# probe to 8.8.8.8:53) is replaced by a stub with a FIXED result. Default: the
+# connection FAILS with an OSError, like on an offline machine, so the result
+# no longer depends on whether the machine running the tests has internet.
+# Tests that check the probe on purpose use the ``network_stub`` fixture:
+#
+#     def test_probe_ok(network_stub):
+#         network_stub.succeed()          # the probe now "connects"
+#         ...
+#         assert network_stub.calls == [("8.8.8.8", 53)]
+#
+#     network_stub.fail(TimeoutError())  # a different failure
+#
+# ``patch("asyncio.open_connection", ...)`` inside a test still works.
+#
+# Second line: any real connect to a non-loopback address (socket.connect,
+# loop.create_connection, loop.sock_connect) raises RealNetworkBlockedError
+# naming the test, and the test also fails at teardown, even if the code under
+# test swallowed the exception. Loopback and unix sockets stay allowed (the
+# asyncio self-pipe / socketpair use loopback on Windows). A test that provokes
+# a block on purpose must clear ``network_stub.violations``.
+# ---------------------------------------------------------------------------
+
+
+class RealNetworkBlockedError(RuntimeError):
+    """A test tried to open a real connection to a non-loopback address."""
+
+
+_REAL_OPEN_CONNECTION = asyncio.open_connection
+_REAL_SOCK_CONNECT = socket.socket.connect
+_REAL_SOCK_CONNECT_EX = socket.socket.connect_ex
+_REAL_CREATE_CONNECTION = asyncio.base_events.BaseEventLoop.create_connection
+_current_stub: _NetworkStub | None = None
+
+
+def _is_loopback(host: Any) -> bool:
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    if host in (None, "", "localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(str(host).split("%")[0]).is_loopback
+    except ValueError:
+        return False  # a real hostname would need DNS: not allowed
+
+
+class _NetworkStub:
+    """Fixed replacement for the outbound connection of the latency probe."""
+
+    def __init__(self, nodeid: str) -> None:
+        self.nodeid = nodeid
+        self.calls: list[tuple[Any, Any]] = []
+        self.violations: list[str] = []
+        self._make_exc: Any = self._default_exc
+
+    @staticmethod
+    def _default_exc() -> OSError:
+        return OSError(
+            "network blocked by the test suite (default probe result: failure)"
+        )
+
+    def fail(self, exc: BaseException | None = None) -> None:
+        """Make the probe fail with ``exc`` (default: the OSError above)."""
+        self._make_exc = (lambda: exc) if exc is not None else self._default_exc
+
+    def succeed(self) -> None:
+        """Make the probe connect (returns a fake reader and writer)."""
+        self._make_exc = None
+
+    async def open_connection(self, host=None, port=None, *args, **kwargs):
+        self.calls.append((host, port))
+        if _is_loopback(host):
+            return await _REAL_OPEN_CONNECTION(host, port, *args, **kwargs)
+        if self._make_exc is not None:
+            raise self._make_exc()
+        writer = MagicMock()
+        writer.wait_closed = AsyncMock()
+        return MagicMock(), writer
+
+    def block(self, what: str, addr: Any) -> None:
+        msg = (
+            f"real network access blocked in {self.nodeid}: {what} to {addr!r}. "
+            "Use the network_stub fixture or mock the call."
+        )
+        self.violations.append(msg)
+        raise RealNetworkBlockedError(msg)
+
+
+def _guard_addr(what: str, addr: Any) -> None:
+    host = addr[0] if isinstance(addr, tuple) and addr else None
+    if isinstance(addr, tuple) and addr and not _is_loopback(host):
+        if _current_stub is not None:
+            _current_stub.block(what, addr)
+
+
+def _guarded_connect(self, addr):
+    if self.family in (socket.AF_INET, socket.AF_INET6):
+        _guard_addr("socket.connect", addr)
+    return _REAL_SOCK_CONNECT(self, addr)
+
+
+def _guarded_connect_ex(self, addr):
+    if self.family in (socket.AF_INET, socket.AF_INET6):
+        _guard_addr("socket.connect_ex", addr)
+    return _REAL_SOCK_CONNECT_EX(self, addr)
+
+
+async def _guarded_create_connection(self, factory, host=None, port=None, **kw):
+    if host is not None and "sock" not in kw:
+        _guard_addr("loop.create_connection", (host, port))
+    return await _REAL_CREATE_CONNECTION(self, factory, host, port, **kw)
+
+
+def _loop_classes_with_sock_connect() -> list[type]:
+    import asyncio.selector_events as sel
+
+    classes: list[type] = [sel.BaseSelectorEventLoop]
+    import asyncio.proactor_events as pro
+
+    classes.append(pro.BaseProactorEventLoop)
+    return classes
+
+
+def _wrap_sock_connect(real):
+    async def sock_connect(self, sock, address):
+        if sock.family in (socket.AF_INET, socket.AF_INET6):
+            _guard_addr("loop.sock_connect", address)
+        return await real(self, sock, address)
+
+    return sock_connect
+
+
+@pytest.fixture(autouse=True)
+def network_stub(request, monkeypatch):
+    """Block real network access; see the block comment above."""
+    global _current_stub
+    stub = _NetworkStub(request.node.nodeid)
+    _current_stub = stub
+    monkeypatch.setattr(asyncio, "open_connection", stub.open_connection)
+    monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", _guarded_connect_ex)
+    monkeypatch.setattr(
+        asyncio.base_events.BaseEventLoop,
+        "create_connection",
+        _guarded_create_connection,
+    )
+    for cls in _loop_classes_with_sock_connect():
+        if "sock_connect" in vars(cls):
+            monkeypatch.setattr(
+                cls, "sock_connect", _wrap_sock_connect(vars(cls)["sock_connect"])
+            )
+    yield stub
+    _current_stub = None
+    assert not stub.violations, chr(10).join(stub.violations)

@@ -4,6 +4,61 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+### Added
+
+- Enterprise Core: Module bekommen einen eigenen, abgeleiteten Schlüssel
+  (`api.async_get_module_key(module, purpose)`, HKDF-SHA256 aus dem
+  Installations-Schlüssel); nur für Module mit registriertem Event-Präfix, nie in Log,
+  Diagnose oder Event. Er trennt Module gegen Versehen, nicht gegen feindlichen Code im
+  selben Prozess.
+- Enterprise Core: `pseudonymise_identifier` / `pseudonymise_fields` ersetzen MAC, IP,
+  Hostname, SSID, BSSID und Client-Kennungen durch stabile Pseudonyme (`mac_…`, `ipa_…`,
+  `hst_…`, `ssd_…`, `bss_…`, `cli_…`) unter einem Modul-Schlüssel.
+- Enterprise Core: Module können eigene Events als sicherheitsrelevant markieren
+  (Sicherheits-Audit) und eigene Event-Typen als audit-pflichtig registrieren (nie
+  zusammengefasst); `register_event_prefix` gibt einen Entferner zurück.
+- Enterprise Core: zwei neue Fehler für Module, `RateLimitedError` (`rate_limited`,
+  mit `retry_after`, wiederholbar) und `SafetyRefusedError` (`safety_refused`, mit
+  `reason`, nicht wiederholbar). Beide Fehlerklassen landen nie in gespeicherten
+  Versionsdaten.
+- Enterprise Core: neue Guard-Klasse `active` für Aktionen, die am Router oder im Netz
+  etwas tun, ohne die Konfiguration zu ändern (Scan, Ping): Benutzer brauchen Admin,
+  keine Freigabe, Audit im allgemeinen Ring, optional mit Ratenlimit je Router
+  (`rate_limited` mit `retry_after`); das Limit gilt nur für bekannte Router, eine
+  erfundene Router-ID wird abgelehnt (`unknown_router`) und kann das Limit eines echten
+  Routers nicht mehr zurücksetzen. Module können ein sensibles Lesen als
+  Admin-pflichtig für Benutzer registrieren (`sensitive_read=True`).
+- Enterprise Core: Core-Events haben fünf optionale Felder für Module:
+  `client_ref` (nur als Pseudonym `cli_…`), `confidence`, `classification`,
+  `incident_ref`, `radio_id`.
+
+### Changed
+
+- Enterprise Core, Maskierung: Nennt ein Record sein Feld in mehreren Namensfeldern
+  (`key`, `name`, `field`, `param`, `parameter`, `setting`), werden alle geprüft; ein
+  geheimer Name maskiert die Werte unabhängig von der Reihenfolge (Vertrag #114).
+- Enterprise Core: Drift-Prüfung, Restore-Probelauf und Backup-Prüfung verlangen von
+  einem Benutzer Admin-Rechte, wie schon Capture und Vergleich; die Ablehnung steht im
+  Sicherheits-Audit. Die Backup-Prüfung braucht immer einen Akteur; ohne ihn wird sie
+  abgelehnt (`actor_required`) statt ungeprüft ausgeführt (Sicherheitsprüfung von PR #56).
+- Enterprise Core: Die Maskierung zeigt Kennungen unter wenigen Namen wie `rule_key` oder
+  `translation_key`, aber nur in strenger Form (Core-ID oder kurzer Slug in
+  Kleinbuchstaben); alles andere darunter, auch verschachtelte Daten, bleibt maskiert.
+  `client_key`, `device_key`, `router_key`, `radio_key` und weitere Namen, die anderswo
+  ein Schlüssel sind, werden wieder vollständig maskiert (Sicherheitsprüfung von PR #56).
+  Zähler zeigen Zahlen nur, wenn ihr Name kein geheimes Wort enthält: `pin_total`,
+  `otp_total` oder `auth_failures` bleiben maskiert wie bisher, `wan_failures` ist lesbar.
+- Enterprise Core: Sicherheitsrelevante Modul-Events haben im Sicherheits-Audit eine
+  eigene Quote (100 je Modul, 500 für alle Module) und verdrängen nie mehr Einträge des
+  Core; ein flutendes Modul verliert seine eigenen ältesten Einträge (gezählt, einmal im
+  Log), nicht die eines anderen Moduls.
+- Enterprise Core: Das Benutzer-Pseudonym (`usr_…`) im Core-Event bleibt über Neustarts
+  gleich, sobald der Installations-Schlüssel existiert. Ohne Schlüssel ist es je Lauf
+  zufällig; das steht einmal im Log und im Zähler `bus_salt_ephemeral`.
+- Enterprise Core: Der Entwicklervertrag beschreibt jetzt, was der Code tut (Lesen über
+  den Guard, Modulnamen und Capability-Präfixe, alle reservierten Präfixe in einer
+  Tabelle, Flotten-Kennung `-`). `registry.get("-")` sagt zusätzlich `fleet: true`.
+
 ## [1.44.0] - 2026-11-18
 
 Enterprise Core: ein interner Unterbau für spätere Module (Konfigurations-Backup,
