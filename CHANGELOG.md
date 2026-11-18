@@ -37,6 +37,9 @@ All notable changes to the OpenWrt Router integration will be documented in this
 - Enterprise Core: Das Benutzer-Pseudonym (`usr_…`) im Core-Event bleibt über Neustarts
   gleich, sobald der Installations-Schlüssel existiert. Ohne Schlüssel ist es je Lauf
   zufällig; das steht einmal im Log und im Zähler `bus_salt_ephemeral`.
+- Enterprise Core: Der Entwicklervertrag beschreibt jetzt, was der Code tut (Lesen über
+  den Guard, Modulnamen und Capability-Präfixe, alle reservierten Präfixe in einer
+  Tabelle, Flotten-Kennung `-`). `registry.get("-")` sagt zusätzlich `fleet: true`.
 
 ## [1.44.0] - 2026-11-18
 

@@ -102,6 +102,9 @@ PLAN_ID_PREFIX: Final = "pln_"
 AUTHORIZATION_ID_PREFIX: Final = "wau_"
 VERIFICATION_ID_PREFIX: Final = "vac_"
 CORRELATION_ID_PREFIX: Final = "cor_"
+# Fleet-wide subject (installation_key_reset, audit entries of an unknown
+# router). Never a router id: the registry refuses it (contract §4.1).
+FLEET_ROUTER_ID: Final = "-"
 
 # HA bus event of the audit log (payload = CoreEvent.to_dict(), masked).
 # Deliberately separate from EVENT_INCIDENT: net_rules and logbook stay as is.
@@ -250,6 +253,11 @@ def is_valid_id(value: object, prefix: str) -> bool:
         and value.startswith(prefix)
         and _ID_HEX.fullmatch(value[len(prefix) :]) is not None
     )
+
+
+def is_fleet_router_id(value: object) -> bool:
+    """True for ``FLEET_ROUTER_ID`` ("-"), the fleet-wide subject."""
+    return isinstance(value, str) and value == FLEET_ROUTER_ID
 
 
 def is_sha256(value: object) -> bool:

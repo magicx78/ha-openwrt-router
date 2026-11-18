@@ -127,6 +127,26 @@ except ApiVersionError as err:
 `installation_key_id(key)` (16 hex) ist die öffentliche, nicht geheime Kennung eines
 Installations-Schlüssels (Abschnitt 11.3).
 
+### 3.1 Reservierte Präfixe und Namensräume
+
+Ein Test (`test_core_followup_b7_contract.py`) prüft, dass jede Konstante hier steht.
+
+| Präfix / Wert | Art | Wem gehört es | Konstante | Regel |
+|---|---|---|---|---|
+| `rtr_`, `bkp_`, `evt_`, `apr_`, `pln_`, `wau_`, `vac_`, `cor_` | Kennungen (§3) | Core | `*_ID_PREFIX` | nur vom Core vergeben (`cor_` auch vom Aufrufer) |
+| `-` | Flotten-Kennung (§4.1) | Core | `FLEET_ROUTER_ID` | nie eine Router-ID |
+| `usr_` | Benutzer-Pseudonym im Bus-Event (§12.1) | Core | `ACTOR_PSEUDONYM_PREFIX` | nur im Bus-Payload und in der Diagnose |
+| `mac_`, `ipa_`, `hst_`, `ssd_`, `bss_`, `cli_` | Kennungs-Pseudonyme (§13) | Modul (mit eigenem Schlüssel) | `IDENTIFIER_PSEUDONYM_PREFIXES` | `pseudonymise_identifier` |
+| `router.`, `configuration.`, `security.`, `core.` | Event-Namensräume (§12.3) | Core | `CORE_EVENT_NAMESPACES` | `emit` eines Moduls ⇒ `ValueError` |
+| `security_center.`, `net_diagnostics.`, `wifi_rf.` | Event-Präfixe bekannter Module (§17.1) | das genannte Modul | `MODULE_EVENT_PREFIXES` | kein anderes Modul registriert darunter |
+| `transport.`, `data.`, `stream.`, `pkg.` | Capability-Namensräume des Core (§5) | Core | `CORE_CAPABILITY_NAMESPACES` | kein Detektor darf sie melden |
+| `config.` | Capability-Namensraum des Providers (§5) | Provider | `CONFIG_CAPABILITY_NAMESPACE` | nur über `async_probe` |
+| `security.`, `diag.`, `rf.` | Capability-Namensräume der Module (§17.1) | `security_center`, `net_diagnostics`, `wifi_rf` | `MODULE_CAPABILITY_NAMESPACES`, `RESERVED_NAMESPACES` | Core vergibt dort nichts, außer `rf.txpowerlist`, `rf.survey`, `rf.scan` (`CORE_OWNED_MODULE_CAPABILITIES`) |
+| `log.` | geteilter Capability-Namensraum | jedes Modul (als sein eines Präfix) | `RESERVED_NAMESPACES` | Core vergibt dort nichts |
+| `<modul>.` | Aktionsnamen (§6.3) | das Modul | `register_action` | Name muss mit `<modul>.` beginnen; kein Core-Namensraum, keine `GuardedAction` |
+| `core` | Schlüssel-Besitzer (§11.5) | Core | `CORE_KEY_OWNER` | kein Modul heißt so |
+| `rebaseline:` | Präfix einer `drift_id` beim erlaubten Re-Baseline (§11.3) | Core | `REBASELINE_DRIFT_PREFIX` | nur vom Core |
+
 ## 4. Identität und Registry
 
 ```python
@@ -186,6 +206,23 @@ for cand in api.registry.adoption_candidates(new_entry_id):
 await api.registry.async_adopt(new_entry_id, cand.router_id, actor=admin_actor)
 ```
 
+### 4.1 Flotten-Kennung `-` (`FLEET_ROUTER_ID`)
+
+`FLEET_ROUTER_ID = "-"` (`core_models`, von `core_guard` re-exportiert;
+`is_fleet_router_id(value)`) steht für „die ganze Flotte“ bzw. „kein bekannter Router“:
+`installation_key_reset` wird mit `router_id = "-"` autorisiert, und eine Ablehnung für eine
+unbekannte Router- oder Versions-ID wird unter `-` auditiert (die unbekannte ID wird nicht
+wiedergegeben). `-` ist **nie** eine Router-ID:
+
+- `registry.get("-")` ⇒ `RouterNotFoundError` mit `details = {"reason":
+  "invalid_router_id", "fleet": true}` (ab B7; `fleet` fehlt bei anderen ungültigen IDs),
+  `router_id = None`. `registry.capabilities("-")` ebenso.
+- `registry.find("-")` ⇒ `None`; `registry.has_capability("-", …)` ⇒ `False`.
+- `AuditLog.events(router_id="-")` (`events(router_id="-")`) liefert genau die Einträge, die
+  mit `router_id = "-"` gespeichert sind, **nicht** die ohne Router (`router_id = None`, etwa
+  `core.store_recovered` oder Modul-Events ohne Router). Nur der Dedup-Bereich
+  (`dedup_scope`, §12.4) fasst `None` und `-` zusammen.
+
 ## 5. Capabilities
 
 `CapabilityStatus`:
@@ -237,10 +274,12 @@ Regeln:
 - Option `config_backup_enabled` aus (`OPTION_CONFIG_BACKUP_ENABLED`): alle `config.*`
   `unavailable`/`disabled`, es wird nicht geprobt.
 - `config.restore` ist in Phase 1 `unavailable`, bis der Provider es meldet (Abschnitt 16).
-- Reservierte Capability-Namensräume `security.`, `diag.`, `log.` (`RESERVED_NAMESPACES`):
-  der Core vergibt dort selbst keine Capability. Module registrieren ein Präfix
-  (Abschnitt 12.5) und melden darunter eigene Capability-Namen. Für **Event-Typen** gilt eine
-  andere Regel (Abschnitt 12.3).
+- Reservierte Capability-Namensräume `security.`, `diag.`, `rf.`, `log.`
+  (`RESERVED_NAMESPACES`, Tabelle §3.1): der Core vergibt dort selbst keine Capability,
+  außer `rf.txpowerlist`, `rf.survey`, `rf.scan` (aus der ACL). Module melden darunter eigene
+  Capability-Namen über **einen** Detektor mit **einem** Präfix
+  (`register_capability_detector`, Abschnitt 17.1). Für **Event-Typen** gilt eine andere
+  Regel (Abschnitt 12.3).
 
 ```python
 if not api.registry.has_capability(router_id, Capability.CONFIG_UCI_READ):
@@ -365,8 +404,15 @@ Regel selbst ist `policy_denial_reason(action, actor)`:
    critical-Aktion**, auch `backup`, und für ein `sensitive_read`
 7. critical und Automation ⇒ `automation_not_allowed`
 
-- **read:** keine Autorisierung. Auditiert werden nur Dry Run und Kompatibilitätsprüfung
-  (`restore_checked`); Lesen der Live-Konfiguration, Listen und Vergleiche nicht (zu häufig).
+- **read:** die Lese-Operationen des Core (Listen, Capture, Vergleich, Validierung,
+  Drift, Dry Run) rufen `authorize` **nicht** auf; sie prüfen den Akteur selbst (siehe
+  nächster Punkt). Auditiert werden davon nur Ablehnungen und Dry Run/Kompatibilitätsprüfung
+  (`restore_checked`); erfolgreiches Lesen nicht (zu häufig). Ruft ein Modul `authorize`
+  für eine `read`-Aktion auf (eigene Modulaktion), dann gilt dasselbe wie bei `mutating`:
+  der Guard prägt eine `WriteAuthorization` (im Ledger, `consume` möglich, aber nicht
+  nötig) und auditiert die Erteilung als `security.authorization_granted`
+  (Sicherheitsring, audit-pflichtig). Für häufige Modul-Lesezugriffe deshalb `authorize`
+  nur bei sensiblen Lesezugriffen (`sensitive_read=True`) verwenden.
 - **read von Konfigurationsinhalt** (`async_capture`, `async_compare`; Geheimnisse
   enthalten): ein Benutzer muss geprüfter Admin sein, sonst `AuthorizationError`
   `not_admin`, auditiert als `security.authorization_denied` (Sicherheitsring, `action`
@@ -1515,20 +1561,20 @@ except CapabilityUnavailableError:
 
 | Modul | Nutzt | Beispiel |
 |---|---|---|
-| Security Intelligence (`security-center`) | Event-Präfix `security_center.`, Capability-Präfix `security.`, `subscribe`, Sicherheitsring lesen | `register_event_prefix("security_center.", module="security_center")`; reagiert auf `security.authorization_denied` |
+| Security Intelligence (`security_center`) | Event-Präfix `security_center.`, Capability-Präfix `security.`, `subscribe`, Sicherheitsring lesen | `register_event_prefix("security_center.", module="security_center")`; reagiert auf `security.authorization_denied` |
 | Network Intelligence | `links.incident_id`, `BackupReason.INCIDENT`, Drift als Kontext (nur lesend) | Backup bei kritischem Incident: `async_create_backup(..., reason=INCIDENT, links=BackupLinks(incident_id=…))` (nie dedupliziert) |
 | Network Time Machine | `async_list_backups(since=…)`, `async_compare(ConfigRef.backup(a), ConfigRef.backup(b))`, `events(since=…)` | Zeitleiste aus Versionen und Events |
 | Firmware Lifecycle | `BackupReason.PRE_FIRMWARE_UPDATE`/`RELEASE_CHANGE`, `FirmwareInfo`, `CompatibilityInfo` | vor Update `async_create_backup`, nach Update Proben neu |
 | Self-Healing | `register_action("self_healing.<aktion>", CRITICAL, …)`, `BackupReason.PRE_CHANGE`, Korrelations-ID | Backup + Freigabe vor jedem Eingriff, alles mit einer `correlation_id` |
-| Diagnose (`net-diagnostics`) | Capability-Präfix `diag.`/`log.` | eigene Capabilities `diag.traceroute` unter registriertem Präfix |
+| Diagnose (`net_diagnostics`) | Event-Präfix `net_diagnostics.`, Capability-Präfix `diag.` **oder** `log.` (ein Detektor, ein Präfix), `active`-Aktionen mit `RateLimit` (§6.3) | `register_capability_detector("net_diagnostics", detect, prefix="diag.")` meldet `diag.traceroute`; ein Name außerhalb des Präfixes (z. B. `log.syslog`) wird verworfen und gezählt |
 
 ### 17.1 Andocken der Module (1.44.0)
 
 | Modul (`module=`) | Event-Präfix (`MODULE_EVENT_PREFIXES`) | Capability-Präfix (`MODULE_CAPABILITY_NAMESPACES`) | Core-eigene Namen darin | ACL-Stufen |
 |---|---|---|---|---|
-| `security_center` | `security_center.` | `security.` (+ `log.`) | – | später (`security.`) |
-| `net_diagnostics` | `net_diagnostics.` | `diag.` (+ `log.`) | – | später (`diag.`) |
-| `wifi_rf` | `wifi_rf.` | `rf.` (+ `log.`) | `rf.txpowerlist`, `rf.survey`, `rf.scan` (`CORE_OWNED_MODULE_CAPABILITIES`, aus der ACL) | `rf_scan`, `rf_survey` |
+| `security_center` | `security_center.` | `security.` (oder `log.`) | – | später (`security.`) |
+| `net_diagnostics` | `net_diagnostics.` | `diag.` (oder `log.`) | – | später (`diag.`) |
+| `wifi_rf` | `wifi_rf.` | `rf.` (oder `log.`) | `rf.txpowerlist`, `rf.survey`, `rf.scan` (`CORE_OWNED_MODULE_CAPABILITIES`, aus der ACL) | `rf_scan`, `rf_survey` |
 | Provider (`config-manager`) | – (der Core sendet `configuration.*`) | `config.` (nur über `async_probe`) | – | `config_backup_read` (nur mit Option) |
 
 ```python
@@ -1542,7 +1588,10 @@ unsubscribe = api.subscribe(on_event)
 
 - `detect(record, data) -> Mapping[str, CapabilityStatus]` ist synchron und macht **keine**
   I/O; er läuft nur, wenn sich die Capability-Signatur des Core oder sein eigenes
-  `signature(data)` ändert. Ein Modul hat höchstens einen Detektor.
+  `signature(data)` ändert. Ein Modul hat höchstens einen Detektor und damit **ein**
+  Präfix: sein eigener Namensraum (oder ein Präfix darunter) **oder** `log.`, nicht beides.
+  Der Modulname ist der aus `MODULE_EVENT_PREFIXES` (`net_diagnostics`, nicht
+  `net-diagnostics`); ein unbekannter Name unter einem fremden Namensraum ⇒ `ValueError`.
 - Registrieren ⇒ `ValueError` bei: Präfix ohne Punkt am Ende, Core-Namensraum
   (`transport.`, `data.`, `stream.`, `pkg.`, `config.`), fremdem Modul-Namensraum, zweitem
   Detektor desselben Moduls; `TypeError` bei Nicht-Callables.
@@ -1757,6 +1806,7 @@ Erwartungen aus 1.43 statt beide Varianten miteinander.
 | 103 | Modul-Events (B3, §12.1/§12.2/§12.5): `CoreEvent.security_relevant`, `CoreEvent.audit_mandatory` (beide `bool`, Standard `False`, in `to_dict`/`from_dict`; alte Einträge lesen sich unverändert, keine Store-Version); `emit(..., security_relevant=False)` (Audit-Log und API); `register_audit_mandatory_types(types, *, module) -> remover`; `register_event_prefix(...)` liefert einen Entferner statt `None`; Dedup nur im selben Ring; Zähler `security_relevant_module_events`, `module_mandatory_types`. Bus-Payload hat zwei neue Schlüssel. | A |
 | 104 | Fehler (B6, §14): `RateLimitedError` (`code` `rate_limited`, `ErrorClass.RATE_LIMITED`, immer retryable, `retry_after`) und `SafetyRefusedError` (`code` `safety_refused`, `ErrorClass.SAFETY_REFUSED`, nie retryable, `reason`); `NON_PERSISTED_ERROR_CLASSES`, `SAFETY_REASON_PATTERN`. Beide Klassen sind Aufruf-Klassen: `VersionMeta`/`BackupRecord` lehnen sie ab, `version_error_class` bildet sie auf `busy`/`denied` ab, keine Metadaten-Version. Ein Provider, der eine davon als `error_class` eines Datensatzes setzen wollte, bekommt `ValueError` (vorher gab es die Werte nicht). | A |
 | 105 | Guard (B5, §6.3, §12.3): `ActionClass.ACTIVE` ("aktiv, nicht ändernd"; nicht persistiert), Politik wie `mutating`, keine Freigabe, Erteilung als `core.active_action_granted` auf dem allgemeinen Ring (audit-pflichtig), Ablehnung wie bisher auf dem Sicherheitsring. `register_action(..., sensitive_read=False, rate_limit=None)` (Guard und `api.guard`); `RateLimit(max_calls, per)`, `RATE_LIMIT_MAX_CALLS`, `RATE_LIMIT_MAX_PERIOD`; Ablehnung `rate_limited` mit `AuthorizationDecision.retry_after` (neues optionales Feld, auch in `to_dict`), `core.action_rate_limited` (allgemeiner Ring, dedupliziert je Fenster), `error_for_decision` ⇒ `RateLimitedError`; `REASON_RATE_LIMITED`, `MAX_RATE_WINDOWS`. `policy_denial_reason(..., sensitive_reads=frozenset())`. Zähler `active_granted`, `rate_limited`, `rate_windows_dropped`. B6 kam vor B5, weil das Limit `RateLimitedError` braucht. | A |
+| 106 | Vertrag an Code angeglichen (B7): §6.3 beschreibt, dass `authorize` auch für `read` eine `WriteAuthorization` prägt und `security.authorization_granted` auditiert (die Core-Lesewege rufen `authorize` nicht auf); §17/§17.1 Modulnamen `security_center`/`net_diagnostics` und „ein Detektor, ein Präfix“ (`diag.` **oder** `log.`); §5 nennt `rf.` als reservierten Namensraum; neue Tabelle §3.1 (alle reservierten Präfixe, per Test vollständig); neuer §4.1. Code: `FLEET_ROUTER_ID` jetzt in `core_models` (`core_guard.FLEET_ROUTER_ID` bleibt, derselbe Wert), `is_fleet_router_id`; `registry.get("-")` ergänzt `details.fleet = true` (Grund unverändert `invalid_router_id`). | A |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 

@@ -82,7 +82,11 @@ from .core_models import (
     policy_denial_reason,
     utcnow,
 )
+from .core_models import FLEET_ROUTER_ID as _FLEET_ROUTER_ID
 from .core_models import async_verify_actor as _async_verify_actor
+
+# Re-exported: the one fleet id lives in core_models (contract §4.1).
+FLEET_ROUTER_ID = _FLEET_ROUTER_ID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,8 +106,6 @@ _APPROVAL_TYPES: Mapping[str, CoreEventType] = {
     "approved": CoreEventType.APPROVAL_APPROVED,
     "rejected": CoreEventType.APPROVAL_REJECTED,
 }
-# Fleet-wide subject (installation_key_reset).
-FLEET_ROUTER_ID = "-"
 # Open (pending or approved, not yet used) approvals: per principal and in
 # total. Above it a new request is denied (audited, reason below) instead of
 # growing the guard and the request data kept for it (security review #4).
