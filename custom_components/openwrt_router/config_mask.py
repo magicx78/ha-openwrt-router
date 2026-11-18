@@ -320,15 +320,33 @@ def _mask_mapping(mapping: Mapping[Any, Any], stack: set[int], depth: int) -> An
 
     result: dict[Any, Any] = {}
     for key, value in mapping.items():
-        if isinstance(key, str):
-            if key.lower() in masked_keys or is_secret_name(key):
+        name = _key_text(key)
+        if name is not None:
+            if name.lower() in masked_keys or is_secret_name(name):
                 result[key] = _secret_value(value)
                 continue
-            if is_secret_path(key):
+            if is_secret_path(name):
                 result[key] = _path_value(value)
                 continue
         result[key] = _mask(value, stack, depth + 1)
     return result
+
+
+def _key_text(key: Any) -> str | None:
+    """A mapping key as text for the name checks; bytes keys too (review L2)."""
+    if isinstance(key, str):
+        return key
+    if isinstance(key, (bytes, bytearray, memoryview)):
+        return bytes(key).decode("utf-8", errors="replace")
+    return None
+
+
+def _unknown(obj: Any) -> str:
+    """An object of no known shape: its redacted text, never the object."""
+    try:
+        return redact_text(str(obj))
+    except Exception:  # noqa: BLE001 - any __str__ may fail; mask instead
+        return MASK_PLACEHOLDER
 
 
 def _mask(obj: Any, stack: set[int], depth: int) -> Any:
@@ -343,7 +361,7 @@ def _mask(obj: Any, stack: set[int], depth: int) -> Any:
 
     is_dc = is_dataclass(obj) and not isinstance(obj, type)
     if not (is_dc or isinstance(obj, (Mapping, list, tuple, set, frozenset))):
-        return obj
+        return _unknown(obj)
 
     if depth > _MAX_DEPTH:
         _LOGGER.debug("mask_for_output: nesting deeper than %d masked", _MAX_DEPTH)
@@ -385,6 +403,8 @@ def mask_for_output(obj: Any) -> Any:
       their content fields.
     - Values keyed by a secret archive path are masked (sizes/flags stay).
     - bytes are always masked; every string goes through ``redact_text``.
+    - bytes keys are checked like str keys; any other object becomes its
+      redacted ``str()`` (or ``"***"`` if that fails), never itself.
     - Cycles and nesting deeper than 64 levels are masked.
     """
     return _mask(obj, set(), 0)

@@ -600,6 +600,51 @@ def test_redact_text_keeps_ordinary_messages() -> None:
     assert redact_text(msg) == msg
 
 
+@pytest.mark.parametrize("key", [b"password", b"PSK", b"wireless.w.key", b"etc/shadow"])
+def test_mask_for_output_checks_bytes_keys(key: bytes) -> None:
+    """Review L2: a bytes key is decoded and checked like a str key."""
+    out = mask_for_output({key: SECRET, b"ssid": "HomeNet"})
+    assert SECRET not in repr(out)
+    assert out[b"ssid"] == "HomeNet"
+
+
+class _Credentials:
+    """Not a dataclass, not a container: an unknown object."""
+
+    def __init__(self) -> None:
+        self.username = "root"
+        self.password = SECRET
+
+    def __repr__(self) -> str:
+        return f"_Credentials(username={self.username!r}, password={self.password!r})"
+
+
+class _Unprintable:
+    password = SECRET
+
+    def __str__(self) -> str:
+        raise RuntimeError(SECRET)
+
+    __repr__ = __str__
+
+
+@pytest.mark.parametrize("obj", [_Credentials(), _Unprintable()])
+def test_mask_for_output_never_passes_unknown_objects(obj: Any) -> None:
+    """Review L2: unknown objects become redacted text or the placeholder."""
+    for out in (mask_for_output(obj), mask_for_output({"auth": [obj]})):
+        assert SECRET not in repr(out)
+        assert obj not in (out, *_leaves(out))
+        json.dumps(out)
+
+
+def _leaves(obj: Any) -> list[Any]:
+    if isinstance(obj, dict):
+        return [leaf for value in obj.values() for leaf in _leaves(value)]
+    if isinstance(obj, (list, tuple)):
+        return [leaf for value in obj for leaf in _leaves(value)]
+    return [obj]
+
+
 def test_mask_for_output_keeps_scalar_types() -> None:
     out = mask_for_output(
         {"n": 3, "f": 1.5, "b": False, "s": "ok", "risk": cc.RISK_LOW}
