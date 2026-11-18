@@ -358,6 +358,29 @@ that Network Intelligence already evaluates. Full details:
 
 ---
 
+## Enterprise Core (since 1.44.0)
+
+An internal foundation for later modules (configuration backup, Security Center, network
+diagnostics, Wi-Fi RF). **Nothing visible changes for existing installs:** no new entity,
+no changed `unique_id`, device or entity id, no config-entry migration, and **no extra
+router call per poll**. An error in the core never fails a poll or a router's setup; it is
+logged. Details (German): [docs/enterprise-core.md](docs/enterprise-core.md).
+
+- **Stable router id** per config entry that survives IP and hostname changes and a
+  factory reset; duplicates are flagged, never merged; a replaced router is taken over only
+  by an explicit admin action.
+- **Capabilities** per router from the poll data, plus `rf.*` from the deployed rpcd ACL.
+- **Configuration API v1** for modules. No backup engine is included: all `config.*`
+  capabilities stay unavailable until a provider is installed. Option
+  `config_backup_enabled` (default off) shows up once a provider exists.
+- **Approvals** for critical actions (admin users only, single use, bound to router and
+  checksum) and an **audit log** with a separate security ring.
+- **Tiered rpcd ACL v9 as an offer only** (written only after an admin approval, with
+  backup and rollback command) and **pinned SSH** for that path: a first-seen host key
+  waits for an admin confirmation; a changed key is always refused.
+
+---
+
 ## Features
 
 ### System Monitoring

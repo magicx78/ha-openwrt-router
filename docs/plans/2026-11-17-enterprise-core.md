@@ -16,16 +16,23 @@ Dieser Plan erklärt, warum er so aussieht, und wie er eingebaut wird.
 
 ## Status
 
-- **Stand:** 2026-11-17 · **Phase:** Schritt 1 (Vertrag) fertig: Dokumente + Typmodule
-  (`core_models.py`, `core_errors.py`, `core_masking.py`) + Tests
-  (`test_core_models.py`, `test_core_masking.py`, `test_core_contract_hardening.py`).
-  Beide Nachträge, das Review (Critic) und der Abgleich mit `config-manager` sind
-  eingearbeitet (Abschnitt 2.2; Änderungsliste im Vertrag, Abschnitt 19).
-- **Noch nicht gebaut:** Registry, Guard, Audit, Versionsspeicher, ConfigurationManager,
-  Lebenszyklus, Stores. Nichts ist verdrahtet; `__init__.py`, `api.py`, `coordinator.py`,
-  `const.py` sind unverändert.
+- **Stand:** 2026-11-18 · **Version 1.44.0** (Branch `claude/enterprise-core-49ade2`,
+  nicht gemergt, kein Tag). Schritte 1–6 aus Abschnitt 8 sind gebaut und verdrahtet,
+  dazu aus Schritt 8: gestufte ACL v9 als Angebot (Verteilen über den Core mit Freigabe),
+  SSH-Host-Key-Pinning je Router mit Bestätigung statt stillem TOFU
+  (`core_security.py`), Option `config_backup_enabled` (Standard aus), `rf.*` aus der
+  verteilten ACL, Andocken von Security Center / Netzwerkdiagnose / WiFi RF
+  (Event-Präfixe, Capability-Detektoren, Guard-Aktionen, `subscribe`) und der
+  Panel-Container „Enterprise“. Die offenen Fragen Q3–Q6 des Vertrags sind entschieden
+  (Vertrag 19.4). Nutzerdoku: `docs/enterprise-core.md`.
+- **Noch nicht gebaut:** Schritt 7 (echter Provider aus `config-manager`), Restore,
+  Oberfläche für Freigaben und SSH-Pins (nur Python-API).
 - **Parallel:** Die Sitzung `config-manager` baut den Provider (Collector, UCI-Snapshots,
   Maskierung, Drift, Diff, Restore-Dry-Run) gegen diesen Vertrag.
+- **Last:** 0 zusätzliche Router-Aufrufe je Poll und beim Setup (die gestufte ACL wird
+  beim Start mit demselben `file/read` erkannt, das `ensure_acl` ohnehin macht). Router
+  nur auf Admin-Aktion: ACL-Antrag 1× `file/read`, Verteilen `file/read` + Sicherung +
+  Schreiben + rpcd-Neustart (oder ein SSH-Befehl über den Pin).
 - **Regeln:** 0 neue Router-Aufrufe je Poll, keine Routeränderung, kein Version-Bump des
   Config-Entries, nie automatisches Zusammenführen.
 
@@ -285,14 +292,16 @@ Linien:
 | `core_masking.py` | die eine Maskierung: Namen, Kontextregeln, Archivpfade, HMAC-Digest, Freitext, `mask_secrets`, `mask_for_output` (rein, ohne HA) | **gebaut** | `const` |
 | `core_errors.py` | `ErrorClass`, `ConfigApiError` + 27 Unterklassen | **gebaut** | `core_masking`, `homeassistant.exceptions` |
 | `core_models.py` | Konstanten, Enums, Dataclasses, `VerifiedActor`, `WriteAuthorization`, reine Helfer (Policy, Einlösen, Dedup, Aufbewahrung, Basis), Protocols | **gebaut** | `const`, `core_errors`, `core_masking`, `mac_utils`, `net_events.Severity` |
-| `router_identity.py` | Identität und Fingerprint aus `coordinator.data` bauen, Status bestimmen | später | `core_models` |
-| `capabilities.py` | Capability-Ableitung aus `coordinator.data`/API-Flags, Signatur, Proben-Anlass | später | `core_models` |
-| `router_registry.py` | `RouterRegistry` (Store `router_registry`, Lookup, Adoption) | später | `router_identity`, `capabilities`, `core_audit`, `core_guard` |
-| `core_guard.py` | `ActionGuard` (Akteur prüfen, Policy, Approvals im Speicher, Prägen der `WriteAuthorization`, Ledger, `consume`) | später | `core_models`, `core_audit` |
-| `core_audit.py` | zwei Audit-Ringe, Store `audit`, Dedup/Cooldown/Wiederholungszähler, Bus-Event, `events()`, `subscribe()` | später | `core_models`, `core_masking` |
-| `core_versions.py` | `VersionStore` (Index im Store `config_catalog`, Dateien, Locator-Prüfung, Sweep, Grenzen, Drift-Acks) | später | `core_models`, `core_audit` |
-| `config_api.py` | `ConfigurationManager` (Flotten-Warteschlange, Locks, Provider-Aufrufe mit `ProviderContext`, Aufbewahrung, Installations-Schlüssel und Repair-Issue) | später | alle obigen |
-| `enterprise_core.py` | Lebenszyklus: Lazy-Getter, Setup/Unload je Eintrag, Flush | später | alle obigen |
+| `router_identity.py` | Identität und Fingerprint aus `coordinator.data` bauen, Status bestimmen | **gebaut** (Teil 1) | `core_models` |
+| `capabilities.py` | Capability-Ableitung aus `coordinator.data`/API-Flags, Signatur, Proben-Anlass; `rf.*` aus der verteilten ACL (1.44) | **gebaut** | `core_models` |
+| `router_registry.py` | `RouterRegistry` (Store `router_registry`, Lookup, Adoption, Option, beobachtete ACL, Modul-Detektoren) | **gebaut** | `router_identity`, `capabilities`, `core_audit`, `core_guard` |
+| `core_guard.py` | `ActionGuard` (Akteur prüfen, Policy, Approvals im Speicher, Prägen der `WriteAuthorization`, Ledger, `consume`) | **gebaut** (Teil 2) | `core_models`, `core_audit` |
+| `core_audit.py` | zwei Audit-Ringe, Store `audit`, Dedup/Cooldown/Wiederholungszähler, Bus-Event, `events()`, `subscribe()` | **gebaut** (Teil 1) | `core_models`, `core_masking` |
+| `core_store.py` | Store-Laden mit `.bak`/Wiederaufbau, `private`/`atomic_writes` | **gebaut** | `homeassistant.helpers.storage` |
+| `version_store.py` (vorher `core_versions.py`) | `VersionStore` (Index im Store `config_catalog`, Dateien, Locator-Prüfung, Sweep, Grenzen, Drift-Acks, Archiv nach `removed/`) | **gebaut** | `core_models`, `core_audit` |
+| `core_security.py` | `SshPinRegistry` (Store `ssh_host_keys`, je Router), `SecurityActions` (ACL-Verteilen, `ssh_pin_confirm`, `ssh_pin_reset`) | **gebaut** (1.44) | `core_models`, `core_guard`, `acl_provisioning`, `api` |
+| `config_api.py` | `ConfigurationManager` (Flotten-Warteschlange, Locks, Provider-Aufrufe mit `ProviderContext`, Aufbewahrung, Installations-Schlüssel und Repair-Issue) | **gebaut** (Teil 2) | alle obigen |
+| `enterprise_core.py` | Lebenszyklus: Lazy-Getter, Setup/Unload je Eintrag, Flush, Archiv beim Entfernen | **gebaut** | alle obigen |
 
 Richtung: nur von unten nach oben; `core_models` importiert keinen Dienst. `api.py` und
 `coordinator.py` werden nur unter `TYPE_CHECKING` referenziert. Kein Modul des Cores ruft
@@ -318,7 +327,7 @@ den Router; Provider bekommen `RouterConnection.api`.
 | Maskierung | `core_masking`, die eine Implementierung | importiert `core_masking`; Secret-Digests mit dem Installations-Schlüssel |
 | Router-I/O | keine | nur über `conn.api`; neue ubus/SSH-Aufrufe kommen als Methoden in `api.py` (eiserne Regel) |
 | Locks, Warteschlange | Flotten-Warteschlange und Lock je Router um jede schreibende Operation | keine eigenen Router-Locks nötig |
-| Gestufte ACL, TOFU-SSH-Pinning, Panel-Container „Enterprise“ | später (Abschnitt 8) | hängt Untertab ein |
+| Gestufte ACL, SSH-Pinning (mit Bestätigung), Panel-Container „Enterprise“ | **gebaut** (1.44, Abschnitt 8) | hängt Untertab ein; SSH nur über `ctx.async_ssh_run_pinned` |
 
 ---
 

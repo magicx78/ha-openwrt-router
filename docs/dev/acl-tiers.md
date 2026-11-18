@@ -2,9 +2,10 @@
 
 Stand: 2026-11-18. Code: `custom_components/openwrt_router/acl_provisioning.py`
 (Block „Tiered ACL“ am Dateiende) und `api.py` (Block „Config/backup path: SSH with
-TOFU host-key pinning“ am Dateiende). Tests: `tests/test_acl_tiers.py`,
-`tests/test_ssh_hostkey_pinning.py`. Vertrag: `docs/dev/configuration-api-v1.md`
-Abschnitte 5, 6 und 18.
+TOFU host-key pinning“ am Dateiende), seit 1.44.0 `core_security.py` (Pins je Router,
+ACL-Verteilen über den Core). Tests: `tests/test_acl_tiers.py`,
+`tests/test_ssh_hostkey_pinning.py`, `tests/test_enterprise_core_v144.py`. Vertrag:
+`docs/dev/configuration-api-v1.md` Abschnitte 5, 6.3, 12.3 und 17.1.
 
 ## 1. Grundsatz
 
@@ -134,12 +135,23 @@ eine Kopie hat. Befehl und Rückweg gehören ins Änderungsprotokoll.
 `ensure_acl()` vergleicht beim Start die Datei mit v8 und **überschreibt alles andere**,
 also auch eine freigegebene gestufte ACL (Test
 `test_ensure_acl_still_replaces_a_tiered_acl_with_v8`). Deshalb gibt es
-`ensure_acl_respecting_offer(api)`: lässt jede Datei mit der Marke in Ruhe und ruft für
-alle anderen `ensure_acl()` auf (ein zusätzliches `file/read` beim Start).
+`ensure_acl_respecting_offer(api, *, observe=None)`: lässt jede Datei mit der Marke in
+Ruhe (`reason = tiered_kept`) und verhält sich für alle anderen genau wie `ensure_acl()`.
 
-Bevor ein Angebot auf einem Router verteilt werden darf, müssen `__init__.py`
-(Aufruf von `ensure_acl`) und der Repair-Schritt im Config-Flow
-(`check_and_deploy_acl`) auf `ensure_acl_respecting_offer` umgestellt sein.
+**Seit 1.44.0 umgestellt:** `__init__.py` (Setup jedes Eintrags) und der Repair-Schritt
+im Config-Flow (Checkliste) rufen `ensure_acl_respecting_offer`. Es nutzt dasselbe eine
+`file/read`, das `ensure_acl` ohnehin macht (`ensure_acl_outcome`): **kein zusätzlicher
+Router-Aufruf.** Ohne gestufte ACL sind Aufrufe und geschriebene Bytes identisch mit
+`ensure_acl` (Test `test_respecting_offer_makes_exactly_the_calls_of_ensure_acl` für v8,
+fehlend, alt, kaputt, nicht erreichbar).
+
+`observe` bekommt das `AclEnsureOutcome` (gelesener Inhalt, ob bekannt, Grund); der Core
+macht daraus `observe_deployed_acl(...)` und daraus `rf.*` (Abschnitt 5). Ein Fehler im
+Beobachter wird geloggt und ändert das Ergebnis nicht.
+
+Verteilen über den Core (statt direkt `async_deploy_acl_offer`): `ConfigurationApi`
+`async_request_acl_deploy` → Freigabe → `async_deploy_acl_offer`; Ablauf, Fehler und
+Events im Vertrag, Abschnitt 6.3 und 12.3.
 
 ## 5. Folgen des fehlenden `iwinfo scan` in der Basis
 
@@ -148,9 +160,12 @@ Bevor ein Angebot auf einem Router verteilt werden darf, müssen `__init__.py`
   `api.py`, `coordinator.py` und dem ganzen Integrationsordner).
 - Wer die Basis ohne `rf_scan` verteilt, verliert also heute nichts. Betroffen ist erst
   das künftige Modul `wifi-rf` mit `rf.scan`.
-- `capabilities.py` muss dann `rf.scan` als `unavailable` / `permission_denied` mit
-  `required_permissions=("ubus:iwinfo.scan",)` melden. Die Helfer dafür:
-  `granted_capabilities(acl)` und `missing_permissions(acl, "rf.scan")`.
+- **Seit 1.44.0** meldet `capabilities.py` `rf.txpowerlist`, `rf.survey` und `rf.scan`
+  aus der beobachteten ACL: Recht vorhanden ⇒ `available`; fehlt es ⇒ `unavailable` /
+  `permission_denied` mit `required_permissions` aus `missing_permissions(acl, name)`;
+  ACL unbekannt (noch nicht gelesen, nicht lesbar, Transportfehler) ⇒ `unknown` mit
+  Grund. Mit plain v8: `rf.scan` verfügbar, die anderen beiden `permission_denied`.
+  Gesehen wird nur die Datei der Integration, keine anderen Dateien in `acl.d`.
 
 ## 6. Spätere Stufen (`security.`, `diag.`)
 
@@ -173,7 +188,7 @@ eine zweite Pflichtstufe. Wer mehr braucht, ändert diese Regel bewusst (Review)
 Zuordnung der Capability-Präfixe: `config.` Configuration Manager, `rf.` WiFi RF,
 `diag.` Network Diagnostics, `security.` Security Center.
 
-## 7. SSH-Host-Key-Pinning (TOFU), nur Config/Backup-Pfad
+## 7. SSH-Host-Key-Pinning, nur Config/Backup-Pfad (seit 1.44.0 mit Bestätigung)
 
 Heute: der gemeinsame SSH-Weg verbindet mit `asyncssh.connect(..., known_hosts=None)`
 (`api.py:3036`, `OpenWrtAPI._asyncssh_get_connection`), prüft den Host-Key also gar
@@ -199,7 +214,27 @@ binary=False) -> PinnedSshResult`.
 - `HostKeyPin`: `algorithm`, `fingerprint` (`SHA256:…`), `public_key` (OpenSSH-Zeile),
   `host` (nur zur Info, der Pin folgt der `router_id`), `pinned_at` (ISO UTC);
   `to_dict()`/`from_dict()`.
-- `HostKeyPinStore`: zwei Koroutinen `async_load_pin()` / `async_save_pin(pin)`. Die
-  Speicherung baut der Enterprise-Core (je `router_id`). Einen bewusst neuen
-  Router-Schlüssel (Neuinstallation) übernimmt nur ein Admin über eine eigene, später zu
-  definierende Aktion (z. B. `core.ssh_pin_reset`, kritisch).
+- `HostKeyPinStore`: zwei Koroutinen `async_load_pin()` / `async_save_pin(pin)`. Wirft
+  einer davon `OpenWrtHostKeyError`, reicht `async_ssh_run_pinned` ihn unverändert durch
+  (seit 1.44.0; `async_load_pin` lehnt so **vor** dem Verbinden ab).
+
+**Seit 1.44.0: Speicher je Router und kein stilles TOFU** (`core_security.py`):
+
+- `SshPinRegistry` (Store `openwrt_router.ssh_host_keys`, `private`, `atomic_writes`,
+  `migrate_pin_store`) gibt je `router_id` einen `RouterPinStore`. Geschrieben wird nur
+  bei Pin-Ereignissen (erster Kontakt, Bestätigung, Reset), nie je Poll.
+- Regel ist eine Konstante: `SSH_PIN_FIRST_USE_POLICY = SSH_PIN_POLICY_CONFIRM`. Der erste
+  Kontakt speichert den Key als **ausstehend**, sendet `security.ssh_pin_pending` und
+  bricht mit `OpenWrtHostKeyError("pin_pending")` ab, **ohne** den Befehl auszuführen.
+  Danach lehnt jeder Aufruf vor dem Verbinden ab, bis ein Admin `ssh_pin_confirm`
+  (kritisch, gebunden an Router und Fingerprint) freigibt und einlöst.
+- Abweichender Key: immer `OpenWrtHostKeyMismatchError`, Event
+  `security.ssh_pin_mismatch` (kritisch, erwarteter und gezeigter Fingerprint), der Pin
+  bleibt unverändert.
+- Neuer Router-Key (Neuinstallation): `ssh_pin_reset` (kritisch, nur Admin), Event
+  `security.ssh_pin_reset`; der nächste Kontakt ist wieder „ausstehend“.
+- Module bekommen gepinntes SSH nur über `ProviderContext.async_ssh_run_pinned(router_id,
+  command, timeout=…, binary=…)`; das ACL-Verteilen per SSH nutzt denselben Weg.
+- Bekannte Grenze: beim allerersten Kontakt meldet sich asyncssh schon mit dem Passwort
+  an, bevor der Key bestätigt ist (der Befehl läuft nicht). Gegen einen Angreifer im
+  Netz beim ersten Kontakt schützt das nicht; ab dem Pin schon.

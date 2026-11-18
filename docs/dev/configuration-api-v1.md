@@ -7,8 +7,9 @@ Dieser Vertrag beschreibt, wie Module (zuerst `config-manager`, später Security
 Intelligence, Network Intelligence, Time Machine, Firmware Lifecycle, Self-Healing) mit dem
 Enterprise Core sprechen. Code, Docstrings und Bezeichner sind englisch, dieser Text deutsch.
 
-Stand: überarbeitet nach dem Review (Critic) und dem Abgleich mit `config-manager`. Alle
-Änderungen gegenüber Commit `5c9d248` stehen in Abschnitt 19.
+Stand: 1.44.0 (2026-11-18). Überarbeitet nach dem Review (Critic) und dem Abgleich mit
+`config-manager`. Alle Änderungen gegenüber Commit `5c9d248` stehen in Abschnitt 19, die von
+1.44.0 ab #65.
 
 ## 0. Status: was es als Code gibt und was später kommt
 
@@ -25,8 +26,12 @@ Stand: überarbeitet nach dem Review (Critic) und dem Abgleich mit `config-manag
 | Zwei Audit-Ringe, Bus-Event, Dedup | `core_audit.py` | **Code, getestet** (Teil 1) |
 | Store-Laden mit `.bak` und Wiederaufbau (gemeinsamer Helfer für Registry und Audit) | `core_store.py` | **Code, getestet** (Teil 1) |
 | Lebenszyklus, Verdrahtung in `__init__.py` (Setup, Unload, Remove; jeder Haken in eigenem try/except) | `enterprise_core.py` | **Code, getestet** (Teil 1) |
-| Option `config_backup_enabled`, Repair-Issue | `config_flow.py` | später (Teil 2) |
-| Gestufte ACL, TOFU-SSH-Pinning, Panel-Container „Enterprise“ | Abschnitt 18 | später, nur dokumentiert |
+| Option `config_backup_enabled` (Standard aus, Abschnitt 5), Repair-Issue des Installations-Schlüssels | `config_flow.py`, `router_registry.py`, `config_api.py` | **Code, getestet** (1.44.0) |
+| Gestufte ACL v9 als Angebot, Verteilen über den Core (`acl_deploy`), ACL beim Start erhalten (`ensure_acl_respecting_offer`) | `acl_provisioning.py`, `core_security.py` | **Code, getestet** (1.44.0) |
+| SSH-Host-Key-Pins je Router (Store `ssh_host_keys`), `ssh_pin_confirm`, `ssh_pin_reset`, `ProviderContext.async_ssh_run_pinned` | `core_security.py`, `api.py` | **Code, getestet** (1.44.0) |
+| `rf.*` aus der verteilten ACL; Capability-Detektoren der Module (Abschnitt 17.1) | `capabilities.py`, `router_registry.py` | **Code, getestet** (1.44.0) |
+| Panel-Container „Enterprise“ | Frontend | **Code** (1.44.0; Untertabs registrieren Module) |
+| Backup-Engine (Provider) | `config-manager` | nicht enthalten: alle `config.*` sind `unavailable`, bis ein Provider installiert ist |
 
 Alles, was „später“ ist, steht hier als **Signatur**. Die Signaturen sind als Protocols in
 `core_models.py` festgeschrieben; ein Provider oder Modul kann heute schon dagegen
@@ -305,6 +310,8 @@ actor = await api.guard.async_resolve_actor(call.context, module="config_manager
 | `adopt` | mutating | nur Admin-Benutzer | `binding_checksum(entry_id, orphan_router_id)` |
 | `acl_deploy` | **critical** | nur Admin-Benutzer | `binding_checksum(router_id, acl_checksum)` |
 | `installation_key_reset` | **critical** | nur Admin-Benutzer | `router_id = "-"` (flottenweit), `binding_checksum(last_key_id)` mit der `installation_key_id` der neuesten Version |
+| `ssh_pin_confirm` | **critical** | nur Admin-Benutzer | `binding_checksum(router_id, pending_fingerprint)` |
+| `ssh_pin_reset` | **critical** | nur Admin-Benutzer | `binding_checksum(router_id, fingerprint, "reset")` (`fingerprint` = gepinnter, sonst ausstehender Key) |
 | `<modul>.<aktion>` | bei `register_action` | bei `register_action` | frei |
 
 Tabellen im Code: `ACTION_CLASSES`, `ADMIN_USER_ONLY_ACTIONS`, `SYSTEM_ONLY_ACTIONS`. Die
@@ -330,6 +337,45 @@ Regel selbst ist `policy_denial_reason(action, actor)`:
 - Selbstfreigabe ist erlaubt: Ein Admin darf seinen eigenen Antrag freigeben
   (Ein-Admin-Haushalt). Die zweite Stufe ist eine bewusste Bestätigung, kein
   Vier-Augen-Prinzip.
+
+**Ablauf `acl_deploy` (1.44.0, `core_security.SecurityActions`):**
+
+```python
+req = await api.async_request_acl_deploy(router_id, ["rf_survey"], actor=admin)
+#   Stufen prüfen (unbekannt => ConfigApiError invalid/unknown_tier; Stufe braucht eine
+#   Option, die aus ist => AclOfferRefusedError option_disabled, auditiert), dann EIN
+#   file/read der aktuellen ACL, describe_offer, Antrag gebunden an
+#   binding_checksum(router_id, acl_checksum)
+offer = api.acl_offer(req.approval_id)       # added/removed/risks für die Anzeige
+await api.async_approve(req.approval_id, actor=admin)
+result = await api.async_deploy_acl_offer(req.approval_id, actor=admin)
+#   Lock je Router -> Autorisierung -> acl_provisioning.async_deploy_acl_offer(guard_consume)
+#   -> rpcd-Neustart abwarten, neu anmelden, ACL-Sperr-Cache leeren, beobachtete ACL
+#   setzen, Capabilities neu bewerten, Proben anstoßen (jeder Schritt einzeln, Fehler in
+#   post_step_errors) -> security.acl_deployed mit command und rollback_command
+```
+
+- SSH-Weg nur gepinnt: geht `file/write` per ubus nicht, läuft der eine SSH-Befehl über
+  `SshPinRegistry.async_run`. Ohne bestätigten Pin ⇒ `AuthorizationError` mit
+  `reason = ssh_pin_pending` (allgemein `ssh_<grund>`), Event `security.acl_deploy_failed`,
+  nichts geschrieben. Ohne Runner (direkter Aufruf von
+  `acl_provisioning.async_deploy_acl_offer` ohne `ssh_runner`) ⇒ `AclOfferRefusedError`
+  `ssh_pin_unavailable`; der gemeinsame ungeprüfte SSH-Weg schreibt nie eine angebotene
+  ACL.
+- Fehler beim Schreiben ⇒ `ConfigApiError` mit `details.reason`, `written`,
+  `rollback_command`; Transportfehler ⇒ `RouterUnavailableError`. Beides mit
+  `security.acl_deploy_failed`.
+
+**Ablauf SSH-Pin (1.44.0):** `SSH_PIN_FIRST_USE_POLICY = "confirm"` (eine Konstante). Der
+erste Kontakt speichert den Key als *ausstehend* und bricht ab
+(`OpenWrtHostKeyError("pin_pending")`, Event `security.ssh_pin_pending`); jeder weitere
+Aufruf lehnt **vor** dem Verbinden ab. `api.ssh_pin_status(router_id)` zeigt den Zustand
+(`none`/`pending`/`pinned`) und Fingerprints. `async_request_ssh_pin_confirm` (ohne
+ausstehenden Key ⇒ `conflict`/`no_pending_pin`) → Freigabe → `async_confirm_ssh_pin`;
+`async_request_ssh_pin_reset` (ohne Key ⇒ `conflict`/`no_pin`) → Freigabe →
+`async_reset_ssh_pin`. Hat sich der Key zwischen Antrag und Einlösen geändert ⇒
+`AuthorizationError` `pin_changed` (auditiert). Ein abweichender Key ist immer
+`OpenWrtHostKeyMismatchError` und genau ein `security.ssh_pin_mismatch` je Versuch.
 
 ### 6.4 Entscheidung, Freigabe, Einlösen
 
@@ -562,6 +608,12 @@ artifact_kinds)`:
 5. Gleiche `installation_key_id` wie der Kandidat. Nach einem Schlüsselwechsel legt der
    Core also immer eine neue Version an; sonst bliebe die Basis auf dem alten Schlüssel und
    jede Drift-Prüfung wäre erneut ein Re-Baseline (Schleife).
+   **(1.44.0, Urteil Q6)** Zusätzlich muss die sha256, die der **Core** über die neuen
+   Artefakte rechnet, je Art der gespeicherten sha256 des Kandidaten gleichen
+   (`should_deduplicate(..., artifact_sha256=...)`). Gleiche Provider-Hashes bei anderen
+   Bytes ⇒ neue Version, Zähler `dedup_refused_sha256`. Ein Provider, dessen Archiv
+   wechselnde Zeitstempel enthält, wird damit nie dedupliziert (gewollt: lieber eine
+   Version zu viel als eine unterdrückte).
 6. Treffer ⇒ nur `last_seen_at` wird gesetzt, `PutVersionResult(created=False)`, keine
    Dateien, kein `backup_created`-Event.
 
@@ -594,9 +646,13 @@ api.set_retention_policy(RetentionPolicy.gfs(daily=14, weekly=8, monthly=12),
                          module="config_manager")
 ```
 
-Folge des Standards: Mehrere Versionen desselben Tages werden sofort auf die neueste
-verwendbare ausgedünnt, auch manuelle (sichtbar als `configuration.retention_applied`).
-Wer das nicht will, schützt die Version (`protect`) oder setzt eine eigene Regel.
+Folge des Standards: Mehrere geplante Versionen desselben Tages werden sofort auf die
+neueste verwendbare ausgedünnt (sichtbar als `configuration.retention_applied`).
+**(1.44.0, Urteil Q3)** GFS dünnt `manual` und alle `pre_*` nie aus
+(`KeepReason.MANUAL`); sie bleiben, bis das Größenlimit oder ein Löschen sie entfernt.
+Das Größenlimit entfernt sie erst nach allen anderen und nennt sie einzeln in
+`RetentionResult.limit_deleted_manual` (alle vom Limit entfernten stehen in
+`limit_deleted`).
 
 `plan_retention(router_id, records, policy, *, now=None, max_bytes=None)`:
 
@@ -1055,7 +1111,25 @@ liest beide Ringe, `ring=AuditRing.SECURITY` nur einen.
 `security.authorization_granted`,
 `security.approval_requested`, `security.approval_approved`, `security.approval_rejected`,
 `security.approval_expired`, `core.installation_key_lost`, `core.installation_key_reset`,
-`core.store_recovered`.
+`core.store_recovered`;
+neu in 1.44.0: `security.acl_deployed`, `security.acl_deploy_failed`,
+`security.ssh_pin_pending`, `security.ssh_pin_confirmed`, `security.ssh_pin_mismatch`,
+`security.ssh_pin_reset`, `configuration.router_archived`.
+
+- 1.44.0, alle im Ring `security` und, außer `ssh_pin_pending`, audit-pflichtig:
+  - `security.acl_deployed` (Warnung): `AclDeployResult.to_dict()` (u. a. `command`,
+    `rollback_command`, `backup_path`, `transport`, `changed`, `rpcd_restarted`, Stufen,
+    Prüfsummen), dazu `approval_id` und `post_step_errors`.
+  - `security.acl_deploy_failed`: `reason`, bei Schreibfehlern `written` und
+    `rollback_command`.
+  - `security.ssh_pin_pending` (Warnung, `dedup_key` = Fingerprint): `fingerprint`,
+    `algorithm`, `first_seen`, `action = ssh_pin_confirm`.
+  - `security.ssh_pin_confirmed` (Warnung): `fingerprint`, `algorithm`, `policy`.
+  - `security.ssh_pin_mismatch` (kritisch): `reason`, `expected_fingerprint`,
+    `presented_fingerprint`.
+  - `security.ssh_pin_reset` (Warnung): `previous_state`, `previous_fingerprint`.
+  - `configuration.router_archived` (Ring `security`, Urteil Q5): `moved`, `target`
+    (`removed/<router_id>` oder `null`), `versions`; bei Fehler `moved = false`, `cause`.
 
 - `core.store_recovered` (Ring `general`, audit-pflichtig, Schwere `warning`): ein
   Core-Store (`openwrt_router.router_registry` oder `openwrt_router.audit`) war unlesbar oder
@@ -1278,32 +1352,55 @@ except CapabilityUnavailableError:
 
 | Modul | Nutzt | Beispiel |
 |---|---|---|
-| Security Intelligence (`security-center`) | Event-Präfix `security_center.`, Capability-Präfix `security.center.`, `subscribe`, Sicherheitsring lesen | `register_event_prefix("security_center.", module="security_center")`; reagiert auf `security.authorization_denied` |
+| Security Intelligence (`security-center`) | Event-Präfix `security_center.`, Capability-Präfix `security.`, `subscribe`, Sicherheitsring lesen | `register_event_prefix("security_center.", module="security_center")`; reagiert auf `security.authorization_denied` |
 | Network Intelligence | `links.incident_id`, `BackupReason.INCIDENT`, Drift als Kontext (nur lesend) | Backup bei kritischem Incident: `async_create_backup(..., reason=INCIDENT, links=BackupLinks(incident_id=…))` (nie dedupliziert) |
 | Network Time Machine | `async_list_backups(since=…)`, `async_compare(ConfigRef.backup(a), ConfigRef.backup(b))`, `events(since=…)` | Zeitleiste aus Versionen und Events |
 | Firmware Lifecycle | `BackupReason.PRE_FIRMWARE_UPDATE`/`RELEASE_CHANGE`, `FirmwareInfo`, `CompatibilityInfo` | vor Update `async_create_backup`, nach Update Proben neu |
 | Self-Healing | `register_action("self_healing.<aktion>", CRITICAL, …)`, `BackupReason.PRE_CHANGE`, Korrelations-ID | Backup + Freigabe vor jedem Eingriff, alles mit einer `correlation_id` |
 | Diagnose (`net-diagnostics`) | Capability-Präfix `diag.`/`log.` | eigene Capabilities `diag.traceroute` unter registriertem Präfix |
 
+### 17.1 Andocken der Module (1.44.0)
+
+| Modul (`module=`) | Event-Präfix (`MODULE_EVENT_PREFIXES`) | Capability-Präfix (`MODULE_CAPABILITY_NAMESPACES`) | Core-eigene Namen darin | ACL-Stufen |
+|---|---|---|---|---|
+| `security_center` | `security_center.` | `security.` (+ `log.`) | – | später (`security.`) |
+| `net_diagnostics` | `net_diagnostics.` | `diag.` (+ `log.`) | – | später (`diag.`) |
+| `wifi_rf` | `wifi_rf.` | `rf.` (+ `log.`) | `rf.txpowerlist`, `rf.survey`, `rf.scan` (`CORE_OWNED_MODULE_CAPABILITIES`, aus der ACL) | `rf_scan`, `rf_survey` |
+| Provider (`config-manager`) | – (der Core sendet `configuration.*`) | `config.` (nur über `async_probe`) | – | `config_backup_read` (nur mit Option) |
+
+```python
+api.register_event_prefix("wifi_rf.", module="wifi_rf")        # nur das eigene Präfix
+api.guard.register_action("wifi_rf.set_channel", ActionClass.CRITICAL,
+                          module="wifi_rf", admin_user_only=True)
+remove = api.register_capability_detector(
+    "wifi_rf", detect, prefix="rf.", signature=lambda data: data.get("wifi_radios"))
+unsubscribe = api.subscribe(on_event)
+```
+
+- `detect(record, data) -> Mapping[str, CapabilityStatus]` ist synchron und macht **keine**
+  I/O; er läuft nur, wenn sich die Capability-Signatur des Core oder sein eigenes
+  `signature(data)` ändert. Ein Modul hat höchstens einen Detektor.
+- Registrieren ⇒ `ValueError` bei: Präfix ohne Punkt am Ende, Core-Namensraum
+  (`transport.`, `data.`, `stream.`, `pkg.`, `config.`), fremdem Modul-Namensraum, zweitem
+  Detektor desselben Moduls; `TypeError` bei Nicht-Callables.
+- Gemeldete Namen außerhalb des Präfixes, Core-eigene Namen, Werte, die kein
+  `CapabilityStatus` sind, oder deren `capability` nicht zum Schlüssel passt, werden
+  verworfen und gezählt (`detector_entries_refused`, Warnung im Log). Eine Ausnahme im
+  Detektor zählt `detector_errors`, loggt eine Warnung und lässt den Poll unberührt.
+- Die Capability-Ansicht der Registry kann bis zum nächsten Poll nachlaufen (Urteil e):
+  ein neuer Detektor, eine Option oder eine ACL-Beobachtung setzt die Neubewertung an;
+  sichtbar wird sie beim nächsten Lesen nach dem Poll oder sofort, wo der Core selbst
+  neu bewertet (Option, ACL-Verteilen).
+
 ## 18. Später (nur dokumentiert, kein Code)
 
-- **Gestufte rpcd-ACL** in `acl_provisioning.py`, Rechte je Capability, nur angeboten, nie
-  automatisch geschrieben; Schreiben erst nach der einzelnen Freigabe des Nutzers
-  (`acl_deploy`, gebunden an Router und ACL-Prüfsumme), gekoppelt an
-  `config_backup_enabled`:
-  - `config.cgi_backup`: `"cgi-io": ["backup"]`
-  - `config.uci_read`: `uci`-Lesebereich für `network`, `wireless`, `firewall`, `dhcp`,
-    `system`, `dropbear`, `uhttpd`, `rpcd`, `ddns`, `sqm`, `usteer`, `mwan3`, `upnpd`,
-    `openvpn`
-  - `config.packagelist`: `"ubus": {"rpc-sys": ["packagelist"]}`
+Gebaut in 1.44.0 (vorher hier nur dokumentiert): gestufte rpcd-ACL als Angebot
+(`docs/dev/acl-tiers.md`), SSH-Pinning mit Bestätigung, Panel-Container „Enterprise“,
+Option `config_backup_enabled`. Offen:
 
-  Danach neue Proben. Hinweis für die UI: Diese Rechte geben dem HA-rpcd-Nutzer
-  Lesezugriff auf alle Router-Geheimnisse.
-- **TOFU-Pinning des SSH-Host-Keys**, nur für den Config-Pfad.
-- **Panel-Navigationscontainer „Enterprise“**, leer, mit Untertab-Haken für Module; erst nach
-  Merge von 1.43.0.
-- **Option `config_backup_enabled`** im Options-Flow (`const.py`, `config_flow.py`).
 - **Restore auf UCI-Ebene** mit Rollback.
+- **Oberfläche für Freigaben** (Panel/WebSocket) für Export, Löschen, `acl_deploy`,
+  `ssh_pin_confirm`, `ssh_pin_reset`; heute nur Python-API.
 
 ## 19. Vertragsänderungen seit 5c9d248
 
@@ -1421,6 +1518,23 @@ Signatur bleibt, die Regel ist neu.
 | 63 | neu: Event-Typen `configuration.storage_limit_exceeded`, `security.authorization_granted` (Audit-Pflicht: jede Guard-Entscheidung schreibt einen Eintrag). | A |
 | 64 | `core_store.create_store(..., private=False, atomic_writes=False)`: neue optionale Parameter; der Store des Installations-Schlüssels nutzt `private=True`, `atomic_writes=True`. | A |
 
+**1.44.0 (ACL-Angebot, Option, SSH-Pins, Urteile, Andocken)**
+
+| # | Änderung | Art |
+|---|---|---|
+| 65 | `__init__.py` und Config-Flow rufen `ensure_acl_respecting_offer(api, observe=…)` statt `ensure_acl`/`check_and_deploy_acl`: eine verteilte gestufte ACL bleibt über Neustarts; ohne gestufte ACL dieselben Aufrufe und Bytes wie vorher (Test). Neu `AclEnsureOutcome`, `ensure_acl_outcome`, `observe_deployed_acl`. | A, B (Verhalten: gestufte ACL wird nicht mehr auf v8 zurückgesetzt) |
+| 66 | neu: API `async_request_acl_deploy`, `acl_offer`, `async_deploy_acl_offer` (Abschnitt 6.3); `acl_provisioning.async_deploy_acl_offer(..., ssh_runner=None)`: SSH-Schreiben nur über einen gepinnten Runner, sonst `AclOfferRefusedError` `ssh_pin_unavailable` (vorher gemeinsamer ungeprüfter SSH-Weg). | A, B (Verhalten des SSH-Wegs) |
+| 67 | neu: `Capability.RF_TXPOWERLIST`/`RF_SURVEY`/`RF_SCAN`, `ACL_CAPABILITIES`, `CORE_OWNED_MODULE_CAPABILITIES`, `STRICT_CAPABILITIES`, `DeployedAclObservation`; Registry `note_deployed_acl`, `deployed_acl`. `rf.*` aus der verteilten ACL; unbekannte ACL ⇒ `unknown` mit Grund. | A |
+| 68 | Option `config_backup_enabled` (`OPTION_CONFIG_BACKUP_ENABLED`, `DEFAULT_CONFIG_BACKUP_ENABLED = False`): aus ⇒ `config.*` `disabled` (vor `no_provider`), kein Provider-Aufruf (auch keine Probe), `async_validate_backup` und `async_compare` mit gespeicherten Versionen ⇒ `CapabilityUnavailableError` `disabled` (Zähler `refused_disabled`); ACL-Stufe `config_backup_read` abgelehnt. Registry `set_config_enabled`, `config_enabled`; Manager `on_config_option_changed`. | B (Verhalten: Standard aus) |
+| 69 | neu: `SshPinRegistry`/`RouterPinStore` (Store `openwrt_router.ssh_host_keys`, privat, atomar, `migrate_pin_store`), `SSH_PIN_FIRST_USE_POLICY = "confirm"`, `GuardedAction.SSH_PIN_CONFIRM`/`SSH_PIN_RESET` (critical, nur Admin), API `ssh_pin_status`, `async_request_ssh_pin_confirm`, `async_confirm_ssh_pin`, `async_request_ssh_pin_reset`, `async_reset_ssh_pin`. | A |
+| 70 | `ProviderContext.ssh` + `ctx.async_ssh_run_pinned(router_id, command, *, timeout, binary)`; ohne Pin-Store ⇒ `AuthorizationError` `ssh_pin_unavailable`. `api.async_ssh_run_pinned` reicht `OpenWrtHostKeyError` aus `async_save_pin` unverändert durch (vorher immer `pin_save_failed`). | A, B (Verhalten der Fehlergründe) |
+| 71 | GFS dünnt `manual`/`pre_*` nicht aus: `KeepReason.MANUAL`, `GFS_KEEP_REASONS`; `RetentionResult.limit_deleted`, `limit_deleted_manual` (7.5). | B (Verhalten), A (Felder) |
+| 72 | Dedup vergleicht zusätzlich die sha256 des Core: `should_deduplicate(..., artifact_sha256=None)` (7.4); Zähler `dedup_refused_sha256`. | B (Verhalten), A (Parameter) |
+| 73 | Entfernen eines Eintrags verschiebt seine Versionen nach `removed/<router_id>/`: `VersionStore.async_archive_router`, Event `configuration.router_archived`. | B (Verhalten), A |
+| 74 | `created_at` neuer Versionen ist je Store streng monoton (+1 µs bei gleicher oder rückläufiger Uhr, Zähler `created_at_adjusted`); „neueste zuerst“ ist damit eindeutig. | Verhalten |
+| 75 | neu: Event-Typen `security.acl_deployed`, `security.acl_deploy_failed`, `security.ssh_pin_pending`, `security.ssh_pin_confirmed`, `security.ssh_pin_mismatch`, `security.ssh_pin_reset`, `configuration.router_archived` (12.3). | A |
+| 76 | neu: `register_capability_detector(module, detector, *, prefix, signature=None)` (17.1); Zähler `detector_runs`, `detector_errors`, `detector_entries_refused`. | A |
+
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 
 | # | Punkt | Entscheidung | Grund |
@@ -1467,6 +1581,16 @@ Wortliste des Reviews waren es noch 7 (`r0kh`, `r1kh`, `pincode`, `param_enc`, `
   Aktion) verbraucht sie.
 - Teil 2: Ein Schlüsselwechsel mit gleichzeitiger echter Änderung ist ein Drift; ein
   Re-Baseline gibt es nur bei vollständiger Entwarnung.
+- 1.44.0: Erster SSH-Kontakt ist kein stilles TOFU, sondern `pending` bis
+  `ssh_pin_confirm`; eine Abweichung lehnt immer ab und wird auditiert.
+- 1.44.0: Ist `config_backup_enabled` aus, meldet `config.*` `disabled`, auch ohne
+  Provider (die Option gewinnt vor `no_provider`).
+- 1.44.0: Der Schalter `config_backup_enabled` erscheint im Options-Flow nur mit
+  installiertem Provider oder solange er an ist; ohne Provider bleibt das Formular wie in
+  1.43. Er wird direkt angewandt, ohne Update-Listener und ohne Neuladen (ein Listener
+  kollidierte mit `async_update_reload_and_abort` der Reauth-Schritte; HA-Blog
+  2026-05-07, ab 2026.12 ein Fehler).
+- 1.44.0: Die Capability-Ansicht der Registry darf bis zum nächsten Poll nachlaufen.
 
 ### 19.4 Offene Fragen an den Nutzer
 
@@ -1477,13 +1601,13 @@ Wortliste des Reviews waren es noch 7 (`r0kh`, `r1kh`, `pincode`, `param_enc`, `
    `long_lived_access_token`); bei Service-Aufrufen ist er nicht unterscheidbar. Stand des
    Vertrags: jeder aktive, nicht systemgenerierte Admin-Benutzer darf freigeben, egal über
    welchen Token. Eine Einschränkung auf `normal` ginge nur für HTTP/WS-Wege.
-3. **Soll GFS manuelle und `pre_*`-Versionen vom Ausdünnen ausnehmen?** Heute bleibt am
-   selben Tag nur die neueste verwendbare Version, auch wenn die älteren manuell waren
-   (Notiz geht mit). Vorschlag: `manual` und `pre_*` für das Tagesfenster ausnehmen.
-4. **Braucht der Export `config.export`?** Heute prüft der Export nur die Freigabe, nicht
-   die Capability (er liest nur gespeicherte Bytes, kein Router-Aufruf).
-5. **Soll `async_archive_router` beim Entfernen eines Eintrags automatisch laufen?** Heute
-   bleiben die Versionen liegen, bis ein Aufrufer archiviert.
-6. **`content_hash`/`uci_hash` für den Dedup bleiben Provider-Werte.** Ein fehlerhafter
-   Provider kann damit eine neue Version unterdrücken (nur `scheduled`/`drift`). Soll der
-   Core für den Dedup zusätzlich seine eigenen sha256 vergleichen?
+3. ~~Soll GFS manuelle und `pre_*`-Versionen vom Ausdünnen ausnehmen?~~ **Entschieden
+   (1.44.0): ja**, GFS dünnt sie nie aus; das Größenlimit nennt sie, wenn es sie entfernt
+   (7.5, #71).
+4. ~~Braucht der Export `config.export`?~~ **Entschieden (1.44.0): nein**, der Export
+   bleibt nur an die Freigabe gebunden (er liest gespeicherte Bytes, kein Router-Aufruf).
+5. ~~Soll `async_archive_router` beim Entfernen eines Eintrags automatisch laufen?~~
+   **Entschieden (1.44.0): ja**, nach `removed/<router_id>/`, auditiert (#73). Offen:
+   eine spätere Adoption holt die Versionen nicht zurück.
+6. ~~Soll der Core für den Dedup zusätzlich seine eigenen sha256 vergleichen?~~
+   **Entschieden (1.44.0): ja** (7.4, #72).

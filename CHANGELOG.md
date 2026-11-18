@@ -4,6 +4,71 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.44.0] - 2026-11-18
+
+Enterprise Core: ein interner Unterbau für spätere Module (Konfigurations-Backup,
+Security Center, Netzwerkdiagnose, WiFi RF). **Für bestehende Installationen ändert
+sich nichts Sichtbares:** keine neue Entität, keine geänderte `unique_id`, keine
+geänderte Geräte- oder Entity-ID, keine neue Config-Entry-Version und **0 zusätzliche
+Router-Aufrufe je Poll**. Ein Fehler im neuen Code lässt weder einen Poll noch das
+Setup eines Eintrags scheitern, er wird geloggt. Nutzerdoku: `docs/enterprise-core.md`.
+
+### Added
+
+- **Stabile Router-ID** (`rtr_…`) je Config-Entry, unabhängig von IP und Hostname, mit
+  Flotten-Registry (Store `openwrt_router.router_registry`). Identität aus Daten, die der
+  Poll ohnehin holt: IP-Wechsel, Hostname-Wechsel und Werksreset behalten die ID;
+  gleiche Hardware in zwei Einträgen wird als *Duplikat vermutet* gemeldet, nie
+  zusammengelegt; einen getauschten oder neu angelegten Router übernimmt nur ein Admin
+  ausdrücklich (Adoption).
+- **Capability-Erkennung** je Router (`transport.*`, `data.*`, `stream.*`, `pkg.*`) aus
+  den Poll-Daten, neu bewertet nur bei Änderung. Neu in 1.44: `rf.txpowerlist`,
+  `rf.survey`, `rf.scan` aus der verteilten rpcd-ACL (mit plain v8: `rf.scan`
+  verfügbar, die anderen `permission_denied` mit den fehlenden Rechten; ACL unbekannt:
+  `unknown` mit Grund). Module können eigene Capabilities unter ihrem Präfix melden
+  (`security.`, `diag.`, `rf.`, `log.`).
+- **Configuration API v1** (`async_get_configuration_api(hass, version=1)`) für Module.
+  **Ohne Backup-Engine:** Es ist kein Provider eingebaut; alle `config.*`-Capabilities
+  bleiben `unavailable`, bis ein Provider installiert ist, und der Core ruft dafür nie
+  den Router.
+- **Option `config_backup_enabled`** (Standard aus). Aus heißt: `config.*` ist
+  `disabled`, der Provider wird nie aufgerufen, die ACL-Stufe `config_backup_read` wird
+  abgelehnt. Der Schalter erscheint in den Optionen erst, wenn ein Provider installiert
+  ist (oder solange er an ist).
+- **Freigaben (Approval-Gate):** kritische Aktionen (Export, Löschen, ACL verteilen,
+  SSH-Pin bestätigen/zurücksetzen, Schlüssel-Reset) nur für Admin-Benutzer, mit
+  Antrag, Freigabe und einmaliger, an Router und Prüfsumme gebundener Ausführung.
+- **Audit-Log** mit zwei Ringen (allgemein 1000, Sicherheit 500 Einträge, 90 Tage),
+  HA-Bus-Event, Dedup mit Wiederholungszähler; Events tragen nur IDs, Zähler und
+  Fingerprints.
+- **Versionsspeicher** für spätere Konfigurations-Backups: GFS-Aufbewahrung (7/4/6),
+  Größengrenzen, Prüfsummen, Sweep beim Start. Manuelle und `pre_*`-Versionen werden
+  nie ausgedünnt; das Größenlimit nennt sie, falls es sie entfernen muss. Dedup nur bei
+  byte-gleichen Artefakten (sha256 des Core). Beim Entfernen eines Eintrags werden
+  seine Versionen nach `removed/<router_id>/` verschoben (auditiert).
+- **Gestufte rpcd-ACL v9, nur als Angebot:** nichts wird automatisch geschrieben. Ein
+  Admin beantragt die Stufen, sieht Unterschied und Risiken, gibt frei; dann sichert der
+  Core die alte Datei, schreibt, startet rpcd neu, prüft die Capabilities neu und
+  protokolliert Befehl und Rückweg auf dem Sicherheitsring. Eine verteilte gestufte ACL
+  bleibt über HA-Neustarts erhalten (`ensure_acl_respecting_offer`, ohne zusätzlichen
+  Router-Aufruf).
+- **Gepinntes SSH** für den Config-Pfad und das ACL-Verteilen per SSH: eigener Store
+  je Router (`openwrt_router.ssh_host_keys`, privat, atomar). Kein stilles TOFU: ein
+  erstmals gesehener Host-Key wird *ausstehend*, bis ein Admin ihn bestätigt
+  (`ssh_pin_confirm`); ein abweichender Key wird immer abgelehnt und auditiert;
+  Zurücksetzen nur über `ssh_pin_reset`. Der bestehende SSH-Fallback des Polls bleibt
+  unverändert.
+- **Panel:** Navigationseintrag „Enterprise“ mit Untertab-Container; er bleibt
+  verborgen, solange kein Modul einen Tab anmeldet.
+
+### Migration
+
+Nichts zu tun. Keine ID-Änderungen; bestehende Einträge bekommen ihre Router-ID beim
+nächsten Start ohne Router-Kontakt. Neue Stores: `openwrt_router.router_registry`,
+`openwrt_router.audit`, `openwrt_router.config_catalog`,
+`openwrt_router.ssh_host_keys` (der Installations-Schlüssel
+`openwrt_router.installation_key` erst, wenn ein Provider ihn braucht).
+
 ### Fixed
 
 - **Handy: untere Leiste wieder bedienbar.** Unter 420 px lag der Kopf der

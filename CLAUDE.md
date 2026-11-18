@@ -24,7 +24,20 @@ ha-openwrt-router/
 │   ├── device_tracker.py       # WiFi Clients per MAC
 │   ├── button.py               # WiFi Reload, Update, etc.
 │   ├── diagnostics.py           # Redacted diagnostics
-│   ├── acl_provisioning.py     # Auto-Setup rpcd ACL via SSH
+│   ├── acl_provisioning.py     # rpcd ACL v8 (ensure_acl_respecting_offer) + tiered ACL v9 offer
+│   ├── enterprise_core.py      # Enterprise Core lifecycle (setup/unload/remove hooks, flush)
+│   ├── core_models.py          # Core contract: constants, enums, dataclasses, pure rules, protocols
+│   ├── core_errors.py          # ErrorClass + ConfigApiError hierarchy
+│   ├── core_masking.py         # The one secret masking (mask_secrets, mask_for_output, redact_text)
+│   ├── core_store.py           # Store helper (.bak + rebuild, private/atomic)
+│   ├── core_audit.py           # Audit log: general + security ring, bus event, dedup
+│   ├── core_guard.py           # ActionGuard: verified actors, approvals, WriteAuthorization ledger
+│   ├── core_security.py        # SSH host-key pins per router + ACL-deploy / pin approval flows
+│   ├── router_identity.py      # Router identity + fingerprint from coordinator.data
+│   ├── router_registry.py      # Stable router ids, fleet registry, adoption, capability detectors
+│   ├── capabilities.py         # Capability derivation (transport/data/stream/pkg/config/rf)
+│   ├── version_store.py        # Config version store (files, GFS retention, archive on removal)
+│   ├── config_api.py           # Configuration API v1 (ConfigurationManager, provider calls)
 │   ├── topology.py             # Per-Router topology snapshot (legacy)
 │   ├── topology_diagnostic.py  # Snapshot builder per router
 │   ├── topology_mesh.py        # Multi-router mesh aggregator + edge detection
@@ -47,9 +60,11 @@ ha-openwrt-router/
 │   ├── test_sensor.py
 │   ├── test_switch.py
 │   ├── test_topology_mesh.py   # Mesh aggregator (inter-router edges)
+│   ├── core_testkit.py / core_test_provider.py  # Enterprise Core fakes (hass, stores, provider)
+│   ├── test_enterprise_core_v144.py  # 1.44.0: ACL offer, rf caps, option, SSH pins, docking
 │   ├── test_memory_leak_v1178.py    # Heap + RSS regression checks
 │   ├── test_sshpass_security_v1179.py  # No '-p <pw>' in argv
-│   └── …                       # 448 Tests total
+│   └── …                       # 3978 Tests total (1.44.0)
 ├── scripts/                    # mock_router.py, dev_start.py, _dev_rss_sample.sh, …
 ├── .github/workflows/
 │   ├── hassfest.yaml           # HA manifest validation

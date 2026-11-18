@@ -1,10 +1,44 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-17 · Version: v1.43.0
+Stand: 2026-11-18 · Version: v1.44.0
 
 ---
 
 ## Backlog
+
+### Enterprise Core (Plan `docs/plans/2026-11-17-enterprise-core.md`, 1.44.0)
+
+Branch `claude/enterprise-core-49ade2`. Nutzerdoku: `docs/enterprise-core.md`, Vertrag:
+`docs/dev/configuration-api-v1.md`, ACL: `docs/dev/acl-tiers.md`.
+
+- [x] Stabile Router-ID, Registry, Identität, Capabilities, Audit-Log (Teil 1).
+- [x] Guard mit Freigaben, Versionsspeicher, Configuration API v1 (Teil 2).
+- [x] 1.44.0: gestufte ACL über HA-Neustarts erhalten, ACL-Angebot über den Core
+      verteilen, `rf.*` aus der verteilten ACL, Option `config_backup_enabled`
+      (Standard aus), SSH-Host-Key-Pins je Router mit Bestätigung, Urteile Q3–Q6,
+      Andocken von Security Center, Netzwerkdiagnose und WiFi RF.
+- [ ] **Oberfläche für Freigaben:** Anträge (Export, Löschen, ACL verteilen,
+      SSH-Pin bestätigen/zurücksetzen) gibt es nur über die Python-API; kein
+      Panel-Tab, kein Service, kein WebSocket-Befehl. Erst nötig, wenn ein Modul
+      sie auslöst.
+- [ ] **Backup-Engine (`config-manager`) als Provider** einbauen; bis dahin sind alle
+      `config.*` nicht verfügbar und der Schalter `config_backup_enabled` erscheint
+      nicht.
+- [ ] **`rf.*` nur aus der eigenen ACL-Datei:** Rechte aus anderen Dateien in
+      `/usr/share/rpcd/acl.d/` sieht der Core nicht (dann `permission_denied`, obwohl
+      rpcd es erlaubt).
+- [ ] **Erster gepinnter SSH-Kontakt meldet sich mit dem Passwort an**, bevor der Key
+      bestätigt ist (der Befehl läuft nicht). Prüfen, ob der Key vor der Anmeldung
+      geholt werden kann (`asyncssh.get_server_host_key`).
+- [ ] **Adoption nach dem Archivieren:** Wird ein Eintrag entfernt, liegen seine
+      Versionen unter `removed/<router_id>/`; eine spätere Adoption holt sie nicht
+      automatisch zurück.
+- [ ] **`async_reload_entry` in `__init__.py` ist toter Code** (kein Update-Listener
+      registriert). Entfernen oder dokumentieren; nie als Listener anmelden, solange
+      die Reauth-Schritte `async_update_reload_and_abort` nutzen (HA-Blog 2026-05-07,
+      ab 2026.12 ein Fehler).
+- [ ] Auf Hardware prüfen (nur lesend, mit Freigabe): Router-IDs und Capabilities
+      nach einem HA-Neustart, `rf.*` je Router.
 
 ### Client-Stabilität (Plan `docs/plans/2026-11-16-client-stability.md`, 1.42.0)
 
