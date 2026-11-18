@@ -22,9 +22,12 @@ Rules (plan 3.1 and the stage-2 task):
 * A manual confirmation makes a device ``known`` and clears its current
   indicators (the user vouched for it); new indicators count again.
 * Every manual action (confirm, rename, quarantine, release) returns a
-  :class:`TrustAction` with the acting core ``Actor``, reduced to a user
-  pseudonym (``security_model.pseudonymous_actor``, salt ``actor_salt``),
-  for the audit event; the display name never goes into it. None = refused.
+  :class:`TrustAction` with the acting core ``Actor`` without context ids
+  (``security_model.event_actor``) for the audit event: the core keeps the
+  user id in its audit store and puts its own stable pseudonym on the bus,
+  so no second pseudonym scheme exists here. Its event types are
+  ``security_model.AUDIT_MANDATORY_TYPES``. The display name never goes
+  into it. None = refused.
 
 No second client database: the input is a narrow observation Protocol (the
 fields of Client Stability ``ClientLive``); this layer keeps only trust
@@ -63,11 +66,11 @@ from .security_model import (
     SecurityEvent,
     Severity,
     clean_text,
+    event_actor,
     event_type,
     make_dedup_key,
     make_event_id,
     normalize_mac,
-    pseudonymous_actor,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -99,7 +102,7 @@ class Indicator(StrEnum):
 
     IP_CHURN = "ip_churn"
     HOSTNAME_CHANGE = "hostname_change"
-    AUTH_FAILURES = "auth_failures"
+    LOGIN_FAILURES = "login_failures"
     MULTI_AP_AUTH = "multi_ap_auth"
     ASSOC_BURST = "assoc_burst"
     PORT_SCAN = "port_scan"
@@ -388,18 +391,12 @@ class TrustBook:
         suspicious_min_indicators: int = DEFAULT_SUSPICIOUS_MIN_INDICATORS,
         max_entries: int = DEFAULT_MAX_ENTRIES,
         max_indicator_only: int | None = None,
-        actor_salt: bytes | None = None,
     ) -> None:
         """Create an empty book; all thresholds are parameters.
 
         ``max_indicator_only`` (default ``max_entries // 8``, at least 1)
-        bounds the entries known only from indicators. ``actor_salt`` (at
-        least 16 bytes; default random per book) salts the user pseudonyms
-        of manual actions.
+        bounds the entries known only from indicators.
         """
-        self._actor_salt = (
-            secrets.token_bytes(16) if actor_salt is None else bytes(actor_salt)
-        )
         self.new_period_s = float(new_period_s)
         self.ip_churn_window_s = float(ip_churn_window_s)
         self.ip_churn_min = max(2, int(ip_churn_min))
@@ -575,7 +572,7 @@ class TrustBook:
             kind=kind,
             at=float(when),  # type: ignore[arg-type]
             mac=record.mac,
-            actor=pseudonymous_actor(actor, self._actor_salt),
+            actor=event_actor(actor),
             method=method,
         )
 

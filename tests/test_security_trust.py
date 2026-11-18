@@ -8,14 +8,27 @@ import logging
 import pytest
 
 from custom_components.openwrt_router.client_history import ClientLive
-from custom_components.openwrt_router.core_masking import pseudonymise_user_id
-from custom_components.openwrt_router.core_models import Actor, ActorKind
+from custom_components.openwrt_router.core_masking import (
+    pseudonymise_user_id,
+    pseudonymise_user_ids,
+)
+from custom_components.openwrt_router.core_models import (
+    Actor,
+    ActorKind,
+    derive_core_key,
+    derive_module_key,
+)
 from custom_components.openwrt_router.security_model import (
+    AUDIT_MANDATORY_TYPES,
+    EVENT_PREFIX,
+    IDENTITY_KEY_PURPOSE,
+    MODULE_SOURCE,
     Assessment,
     DataSource,
     EventResult,
     SecCategory,
     Severity,
+    event_type,
 )
 from custom_components.openwrt_router.security_trust import (
     Indicator,
@@ -201,11 +214,12 @@ def test_manual_confirm_and_naming() -> None:
 
 
 HA_USER = "0d5a2f3b9c8e4a71b6f0e2d4c6a8b0f1"
-SALT = b"t" * 16
+INSTALLATION_KEY = b"i" * 32
+KEY = derive_module_key(INSTALLATION_KEY, MODULE_SOURCE, IDENTITY_KEY_PURPOSE)
 
 
-def test_manual_actions_carry_the_actor_only_as_pseudonym() -> None:
-    book = TrustBook(actor_salt=SALT)
+def test_manual_actions_carry_the_actor_for_the_core_only() -> None:
+    book = TrustBook()
     user = Actor(kind=ActorKind.USER, user_id=HA_USER, context_id="ctx-9")
     book.observe(live(), T0)
     proof = IsolationProof(method="vlan_isolated", verified_at=T0)
@@ -221,17 +235,22 @@ def test_manual_actions_carry_the_actor_only_as_pseudonym() -> None:
         TrustActionKind.QUARANTINED,
         TrustActionKind.RELEASED,
     ]
-    pseudonym = pseudonymise_user_id(HA_USER, SALT)
+    bus_salt = derive_core_key(INSTALLATION_KEY, "bus_pseudonym")
+    pseudonym = pseudonymise_user_id(HA_USER, bus_salt)  # the core bus pseudonym
     for action in actions:
         assert action is not None
-        assert action.actor is not None and action.actor.user_id == pseudonym
+        assert action.actor is not None and action.actor.context_id is None
         event = action.to_event(router_id=ROUTER)
         assert event.result is EventResult.SUCCESS
         assert event.category is SecCategory.DEVICE
-        core = event.to_core_event(identity_key=b"k" * 32)
-        assert core.actor is not None and core.actor.user_id == pseudonym
-        text = json.dumps(core.to_dict()) + json.dumps(event.to_dict())
-        text += repr(action) + repr(event)
+        assert event.type in AUDIT_MANDATORY_TYPES
+        core = event.to_core_event(module_key=KEY)
+        assert core.actor is not None and core.actor.user_id == HA_USER
+        assert core.security_relevant is True
+        bus = pseudonymise_user_ids(core.to_dict(), bus_salt)
+        assert bus["actor"]["user_id"] == pseudonym
+        text = json.dumps(bus) + json.dumps(event.to_dict())
+        text += json.dumps(event.redacted()) + repr(action) + repr(event)
         for secret in (HA_USER, "ctx-9", "Kids tablet"):
             assert secret not in text
     assert actions[2].to_event().severity is Severity.WARNING  # type: ignore[union-attr]
@@ -310,13 +329,13 @@ def _fake(i: int) -> str:
 def test_review_h4_suspicious_device_survives_mac_flood() -> None:
     book = TrustBook(max_entries=100)
     book.observe(live(first_seen=T0 - 10 * 86400), T0)
-    book.add_indicator(MAC, Indicator.AUTH_FAILURES, T0)
+    book.add_indicator(MAC, Indicator.LOGIN_FAILURES, T0)
     assert kinds(book.add_indicator(MAC, Indicator.PORT_SCAN, T0)) == [
         NoticeKind.SUSPICIOUS
     ]
     notices: list = []
     for i in range(500):  # forged MACs that only ever appear in indicators
-        notices += book.add_indicator(_fake(i), Indicator.AUTH_FAILURES, T0 + 1)
+        notices += book.add_indicator(_fake(i), Indicator.LOGIN_FAILURES, T0 + 1)
     assert book.state(MAC, T0 + 2) is TrustState.SUSPICIOUS
     assert len(book) <= 100
     unobserved = [m for m in (_fake(i) for i in range(500)) if book.get(m)]
@@ -340,3 +359,11 @@ def test_review_h4_full_protected_area_reports_instead_of_evicting() -> None:
     late = T0 + book.indicator_window_s + 10
     assert NoticeKind.CAPACITY not in kinds(book.observe(live(macs[4]), late))
     assert book.get(macs[4]) is not None and len(book) == 4
+
+
+def test_audit_mandatory_types_are_the_manual_actions() -> None:
+    assert AUDIT_MANDATORY_TYPES == frozenset(
+        event_type(f"trust_{kind.value}") for kind in TrustActionKind
+    )
+    assert all(t.startswith(EVENT_PREFIX) for t in AUDIT_MANDATORY_TYPES)
+    assert "actor_salt" not in TrustBook.__init__.__code__.co_varnames

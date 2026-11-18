@@ -221,7 +221,7 @@ class TestDeduper:
         rec = _rec(KeyAssigner(), "r1", T0, FAIL)
         assert deduper.filter([rec], now=T0 + 1) == [rec]
         assert deduper.filter([rec], now=T0 + 2) == []
-        assert deduper.stats().dup_key == 1
+        assert deduper.stats().dup_seen == 1
 
     def test_path_switch_mid_stream_has_no_duplicates(self):
         """Path A delivers 0..49, path B re-sends 40..49 and goes on to 59."""

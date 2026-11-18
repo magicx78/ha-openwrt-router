@@ -423,7 +423,7 @@ class DedupStats:
     """Counters of the :class:`Deduper`; no identities."""
 
     accepted: int = 0
-    dup_key: int = 0  # same key seen before
+    dup_seen: int = 0  # same key seen before
     dup_old: int = 0  # held old lines judged a re-send and dropped
     held: int = 0  # old lines held for a decision
     released: int = 0  # held lines judged new (clock jump) and passed on
@@ -674,7 +674,7 @@ class Deduper:
             self._resolve(state, out, timed_out=True, now=record.recv)
             run = None
         if record.key in state.keys:
-            self._count("dup_key")
+            self._count("dup_seen")
             if run is not None:
                 run.replay = True
             return
@@ -714,7 +714,7 @@ class Deduper:
             )
             state.run = run
         if record.key in run.keys:
-            self._count("dup_key")  # only dropped: no evidence of a re-send
+            self._count("dup_seen")  # only dropped: no evidence of a re-send
             return
         if len(run.held) >= self.max_held:
             self._count("held_overflow")
@@ -747,7 +747,7 @@ class Deduper:
         self._count("dup_old", len(run.held) - len(live))
         for record in live:
             if record.key in state.keys:
-                self._count("dup_key")
+                self._count("dup_seen")
                 continue
             state.keys[record.key] = record.recv
             if len(state.keys) > self.max_keys:

@@ -939,7 +939,7 @@ class WifiAuthRepeatDetector(_WifiDetector):
             key=key,
             client=key[1],
             severity=Severity.INFO if recovered else Severity.WARNING,
-            evidence=(f"auth_failures={failures:g}", f"connected_after={recovered}"),
+            evidence=(f"login_failures={failures:g}", f"connected_after={recovered}"),
         )
 
 
@@ -988,7 +988,7 @@ class WifiAuthManyClientsDetector(_WifiDetector):
             evidence=(
                 f"clients={clients}",
                 f"saturated={slot.distinct.saturated}",  # type: ignore[union-attr]
-                f"ni_auth_wave={waves:g}",
+                f"ni_login_wave={waves:g}",
             ),
         )
 
@@ -1182,7 +1182,7 @@ class WifiMultiApAuthDetector(_WifiDetector):
             evidence=(
                 f"aps={len(places)}",
                 f"routers={len(routers)}",
-                f"auth_failures={failures:g}",
+                f"login_failures={failures:g}",
                 "pattern=indicator",
             ),
         )
@@ -1680,7 +1680,14 @@ class VlanDriftDetector(_BaseDetector):
 
 
 def name_digest(name: str) -> str:
-    """Short digest of a domain name (counting without keeping the name)."""
+    """Short digest of a domain name (counting without keeping the name).
+
+    Own variant on purpose: it only counts distinct names in memory, is
+    never output and needs no key. The core function
+    (``core_masking.pseudonymise_identifier("hostname", ...)``) needs the
+    module key and refuses names it does not accept as a hostname; a DNS
+    query name may be anything the client asked for.
+    """
     return hashlib.blake2b(name.lower().encode("utf-8"), digest_size=8).hexdigest()
 
 

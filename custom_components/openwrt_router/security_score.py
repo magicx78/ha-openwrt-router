@@ -38,7 +38,7 @@ _LOGGER = logging.getLogger(__name__)
 
 FACTOR_INCIDENTS: Final = "active_incidents"
 FACTOR_CONFIG: Final = "critical_config_changes"
-FACTOR_AUTH: Final = "auth_failures"
+FACTOR_AUTH: Final = "login_failures"
 FACTOR_ACTIVITY: Final = "network_activity"
 FACTOR_UNKNOWN: Final = "unknown_devices"
 FACTOR_SEGMENTATION: Final = "segmentation"

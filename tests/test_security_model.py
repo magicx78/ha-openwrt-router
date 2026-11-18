@@ -4,21 +4,28 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 
 import pytest
 
 from custom_components.openwrt_router.core_masking import (
     MASK,
+    pseudonymise_identifier,
     pseudonymise_user_id,
+    pseudonymise_user_ids,
     secret_digest_factory,
 )
 from custom_components.openwrt_router.core_models import (
+    CLIENT_REF_PATTERN,
     CORE_OWNED_MODULE_CAPABILITIES,
     MODULE_CAPABILITY_NAMESPACES,
     MODULE_EVENT_PREFIXES,
+    MODULE_KEY_BYTES,
+    MODULE_KEY_PURPOSE_PATTERN,
     Actor,
     ActorKind,
+    AuditRing,
     Capability,
     CapabilityReason,
     CapabilityState,
@@ -26,12 +33,14 @@ from custom_components.openwrt_router.core_models import (
     CoreEvent,
     CoreEventType,
     default_router_id,
+    derive_core_key,
+    derive_module_key,
     is_core_event_type,
 )
 from custom_components.openwrt_router.security_model import (
     CAPABILITY_PREFIX,
     EVENT_PREFIX,
-    IDENTITY_DIGEST_DOMAIN,
+    IDENTITY_KEY_PURPOSE,
     MASK_DOMAIN,
     MASK_IP,
     MASK_MAC,
@@ -50,7 +59,9 @@ from custom_components.openwrt_router.security_model import (
     SourceStatus,
     assess,
     can_confirm,
+    check_module_key,
     clean_text,
+    event_actor,
     event_type,
     forget_router,
     forgotten_router_id,
@@ -59,10 +70,10 @@ from custom_components.openwrt_router.security_model import (
     make_event_id,
     mask_identities,
     missing_status,
-    pseudonymous_actor,
     source_status,
     status_from_capability,
     valid_router_id,
+    zone_ref,
 )
 
 ROUTER = "rtr_" + "a" * 32
@@ -74,7 +85,11 @@ DOMAIN = "evil-tracker.example.com"
 HOST = "kids-tablet"
 IDENTITIES = (MAC, MAC_NORM, IP4, IP6, DOMAIN, HOST)
 HA_USER = "0d5a2f3b9c8e4a71b6f0e2d4c6a8b0f1"  # Home Assistant user id form
-SALT = b"s" * 16
+INSTALLATION_KEY = b"i" * 32
+# What api.async_get_module_key(MODULE_SOURCE, purpose=IDENTITY_KEY_PURPOSE)
+# returns (core derivation, contract 11.5).
+KEY = derive_module_key(INSTALLATION_KEY, MODULE_SOURCE, IDENTITY_KEY_PURPOSE)
+_CODE = r"[a-z0-9][a-z0-9_.:-]*"
 
 
 def _event(**kw: object) -> SecurityEvent:
@@ -251,15 +266,74 @@ def test_to_core_event_aligns_with_contract() -> None:
     assert core.severity is Severity.WARNING
     assert core.data["incident_type"] == "sec_fw_port_scan_hint"
     assert core.data["dst_port"] == 22
-    assert "client_ref" not in core.data
+    # typed core fields instead of data (contract 19.1 #107, #103)
+    assert core.confidence == event.confidence
+    assert core.classification == Assessment.NOTICEABLE.value
+    assert core.security_relevant is True
+    assert core.audit_ring is AuditRing.SECURITY
+    for name in ("confidence", "assessment", "client_ref", "linked_incident_ids"):
+        assert name not in core.data
+    # without the module key no reference at all
+    assert core.client_ref is None
+    for name in ("src_ref", "dst_ref", "src_zone_ref", "dst_zone_ref"):
+        assert name not in core.data
     _no_identity(json.dumps(dict(core.data), default=str))
 
 
-def test_to_core_event_identity_only_as_digest() -> None:
-    core = _event().to_core_event(identity_key=b"k" * 32)
-    for ref in ("client_ref", "src_ref", "dst_ref"):
-        assert len(core.data[ref]) == 16
-    _no_identity(json.dumps(dict(core.data), default=str))
+def test_to_core_event_identities_only_as_core_pseudonyms() -> None:
+    core = _event().to_core_event(module_key=KEY)
+    assert core.client_ref == pseudonymise_identifier("client", MAC, KEY)
+    assert CLIENT_REF_PATTERN.fullmatch(core.client_ref)
+    assert core.data["src_ref"] == pseudonymise_identifier("ip", IP4, KEY)
+    assert core.data["dst_ref"] == pseudonymise_identifier("ip", IP6, KEY)
+    assert core.data["src_zone_ref"] == zone_ref("guest", KEY)
+    assert core.data["dst_zone_ref"] == zone_ref("lan", KEY)
+    assert zone_ref("guest", KEY) != zone_ref("lan", KEY)
+    # the same client in another spelling gets the same reference
+    other = _event(client=MAC_NORM).to_core_event(module_key=KEY)
+    assert other.client_ref == core.client_ref
+    # a client known by its IP only (DNS logs) is no cli_ reference
+    dns = _event(client=IP4).to_core_event(module_key=KEY)
+    assert dns.client_ref is None
+    assert dns.data["client_ip_ref"] == pseudonymise_identifier("ip", IP4, KEY)
+    _no_identity(json.dumps(core.to_dict(), default=str))
+
+
+def test_core_event_data_holds_only_ids_and_counters() -> None:
+    # contract 12.1: data carries ids and counters, never configuration
+    # values; evidence text stays in the SecurityEvent (our own store) and
+    # the core event points to it by the shared event id.
+    event = _event(
+        evidence=("zone=guest", f"host={HOST}", "attempts=4"),
+        linked_incident_ids=("inc_1", "inc 2"),
+        correlation_id=make_correlation_id("x"),
+    )
+    core = event.to_core_event(module_key=KEY)
+    assert core.event_id == event.event_id
+    assert core.data["evidence_count"] == 3
+    assert core.incident_ref == "inc_1"
+    assert core.data["linked_incidents"] == 2
+    for name, value in core.data.items():
+        assert value is None or isinstance(value, bool | int | float | str), name
+        if isinstance(value, str):
+            assert re.fullmatch(_CODE, value), (name, value)
+            assert value not in ("guest", "lan"), name
+    text = json.dumps(dict(core.data))
+    for item in ("guest", "lan", "attempts", "host=", 'evidence"', HOST):
+        assert item not in text
+    _no_identity(json.dumps(core.to_dict(), default=str))
+
+
+def test_module_key_follows_the_core_derivation() -> None:
+    assert MODULE_KEY_PURPOSE_PATTERN.fullmatch(IDENTITY_KEY_PURPOSE)
+    assert check_module_key(KEY) == KEY and len(KEY) == MODULE_KEY_BYTES
+    for bad in (b"k" * 16, b"k" * 31, b"k" * 33, b""):
+        with pytest.raises(ValueError):
+            check_module_key(bad)
+    with pytest.raises(TypeError):
+        check_module_key("k" * 32)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        _event().to_core_event(module_key=b"short")
 
 
 def test_fleet_event_has_no_router_id() -> None:
@@ -369,6 +443,7 @@ def test_merged_duplicates_map_to_core_repeat_fields() -> None:
     assert core.repeat_count == 2
     assert core.last_repeat_at == datetime.fromtimestamp(220.0, UTC)
     assert "count" not in core.data and "last_ts" not in core.data
+    assert core.data["linked_incidents"] == 0
 
 
 def test_log_path_off() -> None:
@@ -416,38 +491,46 @@ def test_valid_router_id_uses_core_format() -> None:
     assert SecurityEvent.from_dict({**_event().to_dict(), "router_id": "r1"}) is None
 
 
-def test_identity_refs_use_core_secret_digest() -> None:
-    key = bytes(range(32))
-    core = _event().to_core_event(identity_key=key)
-    digest = secret_digest_factory(key)
-    assert core.data["client_ref"] == digest(IDENTITY_DIGEST_DOMAIN + MAC_NORM)
-    assert core.data["src_ref"] == digest(IDENTITY_DIGEST_DOMAIN + IP4)
-    # the same client in another spelling gets the same reference
-    other = _event(client=MAC_NORM).to_core_event(identity_key=key)
-    assert other.data["client_ref"] == core.data["client_ref"]
-    _no_identity(json.dumps(dict(core.data), default=str))
-    with pytest.raises(ValueError):
-        _event().to_core_event(identity_key=b"short")
+def test_zone_refs_use_the_core_digest_with_the_module_key() -> None:
+    # The core has no identifier kind for a firewall zone: the zone name is
+    # an HMAC under the module key (core_masking.secret_digest_factory).
+    assert zone_ref("guest", KEY) == secret_digest_factory(KEY)(
+        "security_center/zone/guest"
+    )
+    assert zone_ref("Guest ", KEY) == zone_ref("guest", KEY)
+    assert zone_ref(None, KEY) is None and zone_ref("", KEY) is None
 
 
-def test_actor_reaches_an_event_only_as_pseudonym() -> None:
+def test_actor_reaches_the_core_unchanged_and_never_our_store() -> None:
     raw = Actor(kind=ActorKind.USER, user_id=HA_USER, context_id="ctx-1", is_admin=True)
     with pytest.raises(ValueError):
-        _event(actor=raw)
-    actor = pseudonymous_actor(raw, SALT)
+        _event(actor=raw)  # context ids are dropped first (event_actor)
+    actor = event_actor(raw)
     assert actor is not None
-    assert actor.user_id == pseudonymise_user_id(HA_USER, SALT)
+    assert actor.user_id == HA_USER and actor.is_admin is True
     assert actor.context_id is None and actor.parent_context_id is None
-    assert pseudonymous_actor(actor, SALT) == actor  # idempotent
-    assert pseudonymous_actor(None, SALT) is None
+    assert event_actor(None) is None
     event = _event(actor=actor)
-    core = event.to_core_event()
+    core = event.to_core_event(module_key=KEY)
+    # The core keeps the user id in its audit store and pseudonymises it on
+    # the bus with its stable salt: the Security Center pseudonym IS the core
+    # bus pseudonym, linkable with every other event of that user.
     assert core.actor == actor
-    assert HA_USER not in json.dumps(core.to_dict())
-    assert HA_USER not in repr(event)
-    assert SecurityEvent.from_dict(json.loads(json.dumps(event.to_dict()))) == event
-    stored = {**event.to_dict(), "actor": raw.to_dict()}
-    assert SecurityEvent.from_dict(stored).actor is None  # type: ignore[union-attr]
+    bus_salt = derive_core_key(INSTALLATION_KEY, "bus_pseudonym")
+    bus = pseudonymise_user_ids(core.to_dict(), bus_salt)
+    assert bus["actor"]["user_id"] == pseudonymise_user_id(HA_USER, bus_salt)
+    assert HA_USER not in json.dumps(bus)
+    # our own forms never hold the Home Assistant user id
+    for text in (
+        json.dumps(event.to_dict()),
+        json.dumps(event.redacted()),
+        repr(event),
+    ):
+        assert HA_USER not in text and "ctx-1" not in text
+    stored = SecurityEvent.from_dict(json.loads(json.dumps(event.to_dict())))
+    assert stored is not None and stored.actor is not None
+    assert stored.actor.user_id is None and stored.actor.kind is ActorKind.USER
+    assert SecurityEvent.from_dict({**event.to_dict(), "actor": "x"}).actor is None  # type: ignore[union-attr]
 
 
 def test_module_prefixes_come_from_the_core() -> None:

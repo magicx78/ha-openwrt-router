@@ -1030,7 +1030,7 @@ def test_review_l5_multi_ap_reset_keeps_other_routers_failures() -> None:
     assert results_events(det.evaluate(T0 + 10, st)) == []  # 2 failures left
     det.feed(sig("wifi.psk_mismatch", T0 + 11, router=R2, ap="wlan1"))
     (event,) = results_events(det.evaluate(T0 + 12, st))
-    assert "auth_failures=3" in event.evidence
+    assert "login_failures=3" in event.evidence
 
 
 def _container_size(det: Any) -> int:

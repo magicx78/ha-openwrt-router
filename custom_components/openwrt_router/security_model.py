@@ -11,12 +11,15 @@ Alignment with the core contract (section 12):
 
 * :class:`SecurityEvent` uses the field names of ``CoreEvent`` wherever the
   core has the concept (``event_id``, ``ts``, ``type``, ``severity``,
-  ``result``, ``router_id``, ``entry_id``, ``correlation_id``,
-  ``dedup_key``). ``CoreEvent.source`` names the emitting module, so the
-  data source of a finding is ``data_source``. Security-only fields
-  (client, endpoints, evidence, assessment, confidence, proof, links to
-  existing incidents) map into ``CoreEvent.data`` via
-  :meth:`SecurityEvent.to_core_event`, the contract's extension point.
+  ``result``, ``router_id``, ``entry_id``, ``actor``, ``correlation_id``,
+  ``dedup_key``, ``confidence``). ``CoreEvent.source`` names the emitting
+  module, so the data source of a finding is ``data_source``.
+  :meth:`SecurityEvent.to_core_event` fills the typed core fields
+  (``client_ref``, ``confidence``, ``classification`` = assessment,
+  ``incident_ref``, ``security_relevant``; contract 19.1 #103, #107);
+  ``CoreEvent.data`` keeps ids and counters only (contract 12.1). The
+  evidence text stays in the :class:`SecurityEvent` (our own later store);
+  the core event points to it by the shared ``event_id``.
 * ``ts`` is a float here (the pure modules never build datetimes from a
   clock); ``to_core_event`` converts it to an aware UTC datetime.
 * ``type`` is ``security_center.<name>``: module event types live outside
@@ -28,13 +31,25 @@ Alignment with the core contract (section 12):
 * ``router_id`` is a contract router id (``rtr_`` + 32 hex, checked with
   ``core_models.is_valid_id``; :func:`valid_router_id`). It stays a
   parameter: this module never reads the registry.
-* ``actor`` is a ``core_models.Actor`` that carries no Home Assistant user
-  id: :func:`pseudonymous_actor` replaces it with the core pseudonym
-  (``core_masking.pseudonymise_user_id``, ``usr_<12 hex>``) and drops the
-  context ids (the recorder links a context id to its user).
-* Client and endpoint addresses reach ``CoreEvent.data`` only as references
-  made with the core digest (``core_masking.secret_digest_factory``,
-  :func:`identity_digest`).
+* ``actor`` is a ``core_models.Actor`` without context ids
+  (:func:`event_actor`). Its user id goes to the core unchanged: the core
+  audit store keeps it and the bus carries the core pseudonym (stable per
+  installation, contract 12.1 / 19.1 #100), so the pseudonym of a Security
+  Center action is the same as in every other core event of that user. Our
+  own forms (``to_dict``, ``redacted``, ``repr``) never hold the user id.
+* Identities reach the core event only as core pseudonyms
+  (``core_masking.pseudonymise_identifier`` with the module key:
+  ``client_ref`` = ``cli_``, addresses ``ipa_``/``mac_``/``hst_``), zone
+  names only as a core digest (:func:`zone_ref`). The module key is a
+  parameter (:func:`check_module_key`); the wiring gets it with
+  ``await api.async_get_module_key(MODULE_SOURCE, purpose=IDENTITY_KEY_PURPOSE)``
+  (contract 11.5, HKDF-SHA256, ``MODULE_KEY_BYTES`` = 32 bytes).
+* Manual trust actions are audit-mandatory types
+  (:data:`AUDIT_MANDATORY_TYPES`; the wiring registers them with
+  ``api.register_audit_mandatory_types(..., module=MODULE_SOURCE)``). Every
+  Security Center event is ``security_relevant`` (security ring, at most
+  ``SECURITY_MODULE_QUOTA`` = 100 entries per module; the longer trail is
+  our own store, later).
 * ``dedup_key`` is only the discriminator; the scope is
   ``(router_id or "-", type, dedup_key)`` (contract 12.4,
   :attr:`SecurityEvent.dedup_scope`). Merged duplicates map to
@@ -62,6 +77,14 @@ reads the event, :func:`forget_router` drops the router's state from every
 holder (detectors, baselines, dedup, liveness, key assigner). The trust book
 is fleet-wide and keeps its records.
 
+Later manual reads through the core guard (note only, nothing built
+here): the core has the action class ``ActionClass.ACTIVE`` ("active, not
+changing", e.g. an on-demand nft counter read or a Wi-Fi scan) with an
+optional ``RateLimit``; a refusal comes as ``core_errors.RateLimitedError``
+(retryable, ``retry_after``) or ``core_errors.SafetyRefusedError`` (never
+retryable). Rate-limited actions need a registry router id or ``-``
+(contract 19.1 #104, #105, #113).
+
 Sensitive reads (note for the wiring stage, nothing enforced here): the
 store forms ``SecurityEvent.to_dict``, ``TrustBook.to_dict``/``get``,
 ``BaselineBook.to_dict`` and the log records hold MACs, IPs, names and
@@ -77,7 +100,7 @@ import logging
 import math
 import re
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -86,20 +109,21 @@ from typing import Any, Final, Protocol
 
 from .const import DIAGNOSTICS_TO_REDACT
 from .core_masking import (
-    ACTOR_PSEUDONYM_HEX_LENGTH,
-    ACTOR_PSEUDONYM_PREFIX,
     MASK,
     MAX_DEPTH,
     TRUNCATED,
     mask_for_output,
-    pseudonymise_user_id,
+    pseudonymise_identifier,
     secret_digest_factory,
 )
 from .core_models import (
     CORRELATION_ID_PREFIX,
+    EVENT_CLASSIFICATION_PATTERN,
     EVENT_ID_PREFIX,
     MODULE_CAPABILITY_NAMESPACES,
     MODULE_EVENT_PREFIXES,
+    MODULE_KEY_BYTES,
+    MODULE_KEY_PURPOSE_PATTERN,
     ROUTER_ID_PREFIX,
     Actor,
     Capability,
@@ -110,6 +134,7 @@ from .core_models import (
     CoreEventType,
     EventResult,
     Severity,
+    check_token,
     is_core_event_type,
     is_valid_id,
 )
@@ -126,9 +151,26 @@ MODULE_SOURCE: Final = "security_center"  # CoreEvent.source, core module name
 EVENT_PREFIX: Final = MODULE_EVENT_PREFIXES[MODULE_SOURCE]
 CAPABILITY_PREFIX: Final = f"{MODULE_CAPABILITY_NAMESPACES[MODULE_SOURCE]}center."
 INCIDENT_PREFIX: Final = "sec_"
-# Domain of the identity references (the core digest key is shared with
-# the configuration digests, so the value names its use).
-IDENTITY_DIGEST_DOMAIN: Final = "security_center/identity/"
+# Purpose of the module key for identity pseudonyms and zone digests
+# (api.async_get_module_key(MODULE_SOURCE, purpose=IDENTITY_KEY_PURPOSE)).
+IDENTITY_KEY_PURPOSE: Final = "identity"
+if (
+    MODULE_KEY_PURPOSE_PATTERN.fullmatch(IDENTITY_KEY_PURPOSE) is None
+):  # pragma: no cover
+    raise ValueError("IDENTITY_KEY_PURPOSE does not fit the core pattern")
+# Domain of the zone digests under the module key (the core has no zone kind).
+ZONE_DIGEST_DOMAIN: Final = "security_center/zone/"
+# Manual trust actions: audit-mandatory (never deduplicated) in the core.
+# One place; security_trust.TrustActionKind produces exactly these types.
+MANUAL_ACTION_NAMES: Final = (
+    "trust_confirmed",
+    "trust_renamed",
+    "trust_quarantined",
+    "trust_released",
+)
+AUDIT_MANDATORY_TYPES: Final = frozenset(
+    f"{EVENT_PREFIX}{name}" for name in MANUAL_ACTION_NAMES
+)
 
 MAX_EVIDENCE: Final = 8
 MAX_EVIDENCE_LEN: Final = 160
@@ -415,33 +457,23 @@ def valid_router_id(value: object) -> str | None:
     return value if is_valid_id(value, ROUTER_ID_PREFIX) else None  # type: ignore[return-value]
 
 
-# --- actors and identity references -------------------------------------------
-
-_PSEUDONYM_RE = re.compile(
-    rf"{re.escape(ACTOR_PSEUDONYM_PREFIX)}[0-9a-f]{{{ACTOR_PSEUDONYM_HEX_LENGTH}}}"
-)
+# --- actors, module key and identity references --------------------------------
 
 
-def is_pseudonym(value: object) -> bool:
-    """True for a core user pseudonym ``usr_<12 hex>``."""
-    return isinstance(value, str) and _PSEUDONYM_RE.fullmatch(value) is not None
+def event_actor(actor: Actor | None) -> Actor | None:
+    """Copy of ``actor`` for an event: the context ids are dropped.
 
-
-def pseudonymous_actor(actor: Actor | None, salt: bytes) -> Actor | None:
-    """Copy of ``actor`` fit for an event: no Home Assistant user id.
-
-    ``user_id`` becomes ``core_masking.pseudonymise_user_id(user_id, salt)``
-    (an existing pseudonym is kept); ``context_id`` and
-    ``parent_context_id`` are dropped, because the recorder stores the user
-    of every context. Kind, module and ``is_admin`` stay.
+    The user id stays: the core keeps it in its audit store and replaces it
+    with its own stable pseudonym on the bus (contract 12.1); doing it here
+    with another salt would break the link to the core's pseudonym.
     """
     if actor is None:
         return None
-    user = actor.user_id
-    if user is not None and not is_pseudonym(user):
-        user = pseudonymise_user_id(user, salt)
     return Actor(
-        kind=actor.kind, user_id=user, module=actor.module, is_admin=actor.is_admin
+        kind=actor.kind,
+        user_id=actor.user_id,
+        module=actor.module,
+        is_admin=actor.is_admin,
     )
 
 
@@ -450,27 +482,60 @@ def _check_actor(actor: Any) -> None:
         return
     if not isinstance(actor, Actor):
         raise TypeError("actor must be a core Actor")
-    if actor.user_id is not None and not is_pseudonym(actor.user_id):
-        raise ValueError("events carry user pseudonyms only (pseudonymous_actor)")
     if actor.context_id is not None or actor.parent_context_id is not None:
-        raise ValueError("events carry no context ids (pseudonymous_actor)")
+        raise ValueError("events carry no context ids (event_actor)")
 
 
-def identity_digest(key: bytes) -> Callable[[str], str]:
-    """Reference function for client and endpoint identities (core digest).
+def check_module_key(key: object) -> bytes:
+    """The module key as the core hands it out, else TypeError/ValueError.
 
-    ``core_masking.secret_digest_factory(key)`` (HMAC-SHA256, 16 hex, key of
-    at least 16 bytes; TypeError/ValueError otherwise) over
-    ``IDENTITY_DIGEST_DOMAIN + value``. A MAC is normalised first, other
-    values are stripped and lower-cased, so one device has one reference.
+    ``await api.async_get_module_key(MODULE_SOURCE, purpose=IDENTITY_KEY_PURPOSE)``
+    (contract 11.5: HKDF-SHA256 over the installation key, exactly
+    ``MODULE_KEY_BYTES`` bytes). This module never fetches it (no I/O).
     """
-    digest = secret_digest_factory(key)
+    if not isinstance(key, bytes):
+        raise TypeError("module key must be bytes (api.async_get_module_key)")
+    if len(key) != MODULE_KEY_BYTES:
+        raise ValueError(f"module key must be {MODULE_KEY_BYTES} bytes")
+    return key
 
-    def ref(value: str) -> str:
-        mac = normalize_mac(value)
-        return digest(IDENTITY_DIGEST_DOMAIN + (mac or value.strip().lower()))
 
-    return ref
+def _pseudonym(kind: str, value: str | None, key: bytes) -> str | None:
+    if value is None:
+        return None
+    try:
+        return pseudonymise_identifier(kind, value, key)
+    except (TypeError, ValueError):
+        return None
+
+
+def client_ref(value: str | None, key: bytes) -> str | None:
+    """``cli_<16 hex>`` for a client MAC (core pseudonym), else None."""
+    return _pseudonym("client", normalize_mac(value), key)
+
+
+def address_ref(value: str | None, key: bytes) -> str | None:
+    """Core pseudonym of an address: ``ipa_`` (IP), ``mac_`` or ``hst_``."""
+    for kind in ("ip", "mac", "hostname"):
+        ref = _pseudonym(kind, value, key)
+        if ref is not None:
+            return ref
+    return None
+
+
+def zone_ref(zone: str | None, key: bytes) -> str | None:
+    """Digest of a firewall zone name (16 hex) under the module key.
+
+    Own variant on purpose: ``core_masking.pseudonymise_identifier`` has no
+    kind for a zone (only mac, ip, hostname, ssid, bssid, client). The core
+    digest ``secret_digest_factory`` with the module key and the domain
+    ``ZONE_DIGEST_DOMAIN`` keeps the same zone equal across events and
+    hides its UCI name (contract 12.1: no configuration values in ``data``).
+    """
+    name = zone.strip().lower() if isinstance(zone, str) else ""
+    if not name:
+        return None
+    return secret_digest_factory(key)(ZONE_DIGEST_DOMAIN + name)
 
 
 # --- ids ----------------------------------------------------------------------
@@ -594,8 +659,9 @@ class SecurityEvent:
     Construction sanitises every text (control characters dropped, lengths
     and the evidence list capped). ``assessment=CONFIRMED`` without
     :func:`can_confirm` raises ValueError, so do a ``router_id`` that is not
-    a contract router id and an ``actor`` with a raw user id or a context
-    id. ``repr`` never shows the client, addresses, actor or evidence text.
+    a contract router id and an ``actor`` with a context id
+    (:func:`event_actor`). ``repr`` never shows the client, addresses, actor
+    or evidence text.
     """
 
     event_id: str
@@ -619,7 +685,7 @@ class SecurityEvent:
     linked_incident_ids: tuple[str, ...] = ()
     count: int = 1
     last_ts: float | None = None
-    actor: Actor | None = field(default=None, repr=False)  # pseudonymous only
+    actor: Actor | None = field(default=None, repr=False)  # no context ids
 
     def __post_init__(self) -> None:
         """Validate and sanitise (frozen: values are set once, here)."""
@@ -733,7 +799,12 @@ class SecurityEvent:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Store form (lossless, unmasked): never log or publish it."""
+        """Store form (unmasked): never log or publish it.
+
+        Lossless except for the actor's user id: our store never holds a
+        Home Assistant user id (the core audit entry with the same
+        ``event_id`` has it).
+        """
         return {
             "v": SCHEMA_VERSION,
             "event_id": self.event_id,
@@ -757,7 +828,7 @@ class SecurityEvent:
             "linked_incident_ids": list(self.linked_incident_ids),
             "count": self.count,
             "last_ts": self.last_ts,
-            "actor": None if self.actor is None else self.actor.to_dict(),
+            "actor": _actor_store_form(self.actor),
         }
 
     def redacted(self) -> dict[str, Any]:
@@ -770,8 +841,8 @@ class SecurityEvent:
 
         Unknown keys are ignored; optional values of a wrong type fall back
         to the defaults; a stored ``confirmed`` that does not meet the rule
-        is downgraded to ``suspicious``; an actor that is not pseudonymous
-        is dropped; an invalid router id makes the event unusable.
+        is downgraded to ``suspicious``; an unreadable actor is dropped; an
+        invalid router id makes the event unusable.
         """
         if not isinstance(data, Mapping) or any(k not in data for k in _REQUIRED):
             return None
@@ -781,38 +852,43 @@ class SecurityEvent:
             _LOGGER.debug("Skipping stored security event: %s", type(err).__name__)
             return None
 
-    def to_core_event(self, *, identity_key: bytes | None = None) -> CoreEvent:
-        """The event as a core ``CoreEvent``; security fields go to ``data``.
+    def to_core_event(self, *, module_key: bytes | None = None) -> CoreEvent:
+        """The event as a security-relevant core ``CoreEvent``.
 
-        Typed core fields: ids, time, type, severity, result, router, entry,
-        ``actor`` (pseudonymous), correlation, dedup, ``repeat_count``
-        (``count - 1``) and ``last_repeat_at``. ``data`` carries ids,
-        counters and masked evidence (the core has no typed fields for
-        them). The client and endpoint addresses appear only as references
-        made with the core digest (:func:`identity_digest` with
-        ``identity_key``, e.g. the installation key); without a key they are
-        left out.
+        Typed core fields: ids, time, type, severity, result, router,
+        entry, ``actor`` (user id as is, the core pseudonymises the bus),
+        correlation, dedup, ``repeat_count`` (``count - 1``),
+        ``last_repeat_at``, ``confidence``, ``classification`` (the
+        assessment), ``incident_ref`` (first linked incident with a valid
+        token), ``client_ref`` and ``security_relevant`` = True. ``data``
+        holds ids, codes and counters only: no evidence text (it stays in
+        this event; the reference is the shared ``event_id``), no zone name,
+        no identity. With ``module_key`` (:func:`check_module_key`) the
+        client and addresses become core pseudonyms and the zones digests;
+        without it they are left out.
         """
+        incident = next((i for i in self.linked_incident_ids if _is_token(i)), None)
         payload: dict[str, Any] = {
             "schema": SCHEMA_VERSION,
             "category": self.category.value,
             "name": self.name,
             "incident_type": self.incident_type,
             "data_source": self.data_source,
-            "assessment": self.assessment.value,
-            "confidence": self.confidence,
             "proof": self.proof,
-            "evidence": mask_identities(list(self.evidence)),
-            "linked_incident_ids": list(self.linked_incident_ids),
-            "src_zone": self.src.zone if self.src else None,
-            "dst_zone": self.dst.zone if self.dst else None,
+            "evidence_count": len(self.evidence),
+            "linked_incidents": len(self.linked_incident_ids),
             "dst_port": self.dst.port if self.dst else None,
         }
-        if identity_key is not None:
-            ref = identity_digest(identity_key)
-            payload["client_ref"] = _ref(ref, self.client)
-            payload["src_ref"] = _ref(ref, self.src and self.src.addr)
-            payload["dst_ref"] = _ref(ref, self.dst and self.dst.addr)
+        client = None
+        if module_key is not None:
+            key = check_module_key(module_key)
+            client = client_ref(self.client, key)
+            if client is None and self.client is not None:
+                payload["client_ip_ref"] = _pseudonym("ip", self.client, key)
+            payload["src_ref"] = address_ref(self.src and self.src.addr, key)
+            payload["dst_ref"] = address_ref(self.dst and self.dst.addr, key)
+            payload["src_zone_ref"] = zone_ref(self.src and self.src.zone, key)
+            payload["dst_zone_ref"] = zone_ref(self.dst and self.dst.zone, key)
         return CoreEvent(
             event_id=self.event_id,
             ts=datetime.fromtimestamp(self.ts, UTC),
@@ -832,11 +908,34 @@ class SecurityEvent:
                 else None
             ),
             data=payload,
+            security_relevant=True,
+            client_ref=client,
+            confidence=self.confidence,
+            classification=_classification(self.assessment),
+            incident_ref=incident,
         )
 
 
-def _ref(digest: Callable[[str], str], value: str | None) -> str | None:
-    return None if value is None else digest(value)
+def _is_token(value: str) -> bool:
+    try:
+        check_token("incident_ref", value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _classification(assessment: Assessment) -> str:
+    code = assessment.value
+    if EVENT_CLASSIFICATION_PATTERN.fullmatch(code) is None:  # pragma: no cover
+        raise ValueError("assessment is no core classification code")
+    return code
+
+
+def _actor_store_form(actor: Actor | None) -> dict[str, Any] | None:
+    """Actor without the user id (our store never keeps HA user ids)."""
+    if actor is None:
+        return None
+    return {**actor.to_dict(), "user_id": None}
 
 
 def _cap_evidence(items: Any) -> tuple[str, ...]:
@@ -921,15 +1020,14 @@ def _from_dict_kwargs(data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _stored_actor(value: Any) -> Actor | None:
-    """A stored pseudonymous actor; anything else is dropped (None)."""
+    """A stored actor (never with a user id); anything else is dropped."""
     if value is None:
         return None
     try:
-        actor = Actor.from_dict(value)
-        _check_actor(actor)
-    except (KeyError, TypeError, ValueError):
+        actor = event_actor(Actor.from_dict(value))
+    except (AttributeError, KeyError, TypeError, ValueError):
         return None
-    return actor
+    return None if actor is None else replace(actor, user_id=None)
 
 
 # --- source status --------------------------------------------------------------
