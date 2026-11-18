@@ -14,6 +14,7 @@ import { TopologyView } from './TopologyView';
 import { createIntelApi, fetchTopologyData, hassAccessToken, TopologyFetchError, type HassLike } from './api';
 import type { TopologyData } from './types';
 import { MOCK_DATA } from './mockData';
+import { registerEnterpriseTab } from './enterprise/registry';
 
 // ── HA Webcomponent ──────────────────────────────────────────────────────
 
@@ -269,6 +270,12 @@ if (rootEl) {
   const devContainer = document.createElement('div');
   devContainer.style.cssText = 'height:100%;display:contents';
   shadow.appendChild(devContainer);
+  // DEV/MOCK ONLY — placeholder module so the Enterprise sub-tab bar can be
+  // seen; never registered in the HA panel build path.
+  registerEnterpriseTab({
+    id: 'dev-mock', title: 'Mock-Modul (nur Dev)', order: 999,
+    component: () => <div className="view-empty">Mock-Inhalt — nur im Dev-Modus.</div>,
+  });
   createRoot(devContainer).render(
     <React.StrictMode>
       <TopologyView data={MOCK_DATA} />

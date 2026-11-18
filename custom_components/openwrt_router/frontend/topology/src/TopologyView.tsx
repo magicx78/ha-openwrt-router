@@ -36,6 +36,7 @@ import { ContextMenu, ContextMenuEntry } from './components/ContextMenu';
 import { APClientList } from './components/APClientList';
 import { GlobalFooter } from './components/GlobalFooter';
 import { DiagnoseView } from './components/DiagnoseView';
+import { EnterpriseView } from './components/EnterpriseView';
 import type { IntelApi } from './api';
 
 type SelectedEntity =
@@ -556,6 +557,7 @@ export function TopologyView({ data, intel }: Props) {
             onBack={() => setActiveTab('topology')}
           />
         )}
+        {activeTab === 'enterprise' && <EnterpriseView />}
         {activeTab === 'settings' && <SettingsView />}
         {activeTab === 'compare' && <CompareView data={data} />}
 

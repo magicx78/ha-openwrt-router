@@ -11,9 +11,10 @@ import {
   IconCompare,
   IconWiring,
   IconDiagnose,
+  IconEnterprise,
 } from './Icons';
 
-export type SidebarTab = 'topology' | 'devices' | 'clients' | 'traffic' | 'alerts' | 'diagnose' | 'compare' | 'wiring' | 'settings';
+export type SidebarTab = 'topology' | 'devices' | 'clients' | 'traffic' | 'alerts' | 'diagnose' | 'compare' | 'wiring' | 'enterprise' | 'settings';
 
 interface NavItem {
   id: SidebarTab;
@@ -46,6 +47,7 @@ export function Sidebar({ open, activeTab, warningCount, diagnoseCount, showDiag
       ? [{ id: 'diagnose' as const, label: 'Diagnose', Icon: IconDiagnose, badge: diagnoseCount && diagnoseCount > 0 ? diagnoseCount : undefined }]
       : []),
     { id: 'compare',  label: 'Vergleich',  Icon: IconCompare },
+    { id: 'enterprise', label: 'Enterprise', Icon: IconEnterprise },
     { id: 'settings', label: 'Einst.',     Icon: IconSettings },
   ];
 
