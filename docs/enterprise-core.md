@@ -11,7 +11,9 @@ jedem Router eine feste Kennung, merkt sich, was ein Router kann, prüft kritisc
 Konfigurations-Backup (`config-manager`), das Security Center, die Netzwerkdiagnose und
 WiFi RF.
 
-**Für bestehende Installationen ändert sich nichts Sichtbares:**
+**Was sich für bestehende Installationen ändert:** Core-Ereignisse
+(`openwrt_router_core_event`) erscheinen im Logbuch, beim ersten Start einmal
+`router.registered` je Router, und im Recorder. Sonst:
 
 - keine neue Entität, keine geänderte `unique_id`, keine geänderte Geräte- oder Entity-ID,
   keine neue Version des Config-Entries, nichts zu migrieren;
@@ -116,8 +118,9 @@ Für das Backup und das ACL-Schreiben per SSH merkt sich der Core je Router den 
 
 - **Erster Kontakt:** der Key wird *ausstehend* gespeichert, der Befehl läuft **nicht**.
   Event `security.ssh_pin_pending`. Bis ein Admin den Key bestätigt (`ssh_pin_confirm`),
-  wird jeder weitere Versuch abgelehnt, ohne den Router zu kontaktieren. Beim ersten
-  Kontakt meldet sich die Integration schon mit dem Passwort an.
+  wird jeder weitere Versuch abgelehnt, ohne den Router zu kontaktieren. Der erste Kontakt
+  liest nur den Host-Key über eine Verbindung ohne Zugangsdaten und endet vor der
+  Anmeldung; Passwort oder Schlüssel gehen erst an einen bestätigten Key.
 - **Abweichender Key:** immer abgelehnt, vor der Anmeldung, Event
   `security.ssh_pin_mismatch` (kritisch). Kein Rückfall auf ungeprüftes SSH.
 - **Router neu installiert:** Key mit `ssh_pin_reset` vergessen, beim nächsten Kontakt neu

@@ -7,10 +7,11 @@ All notable changes to the OpenWrt Router integration will be documented in this
 ## [1.44.0] - 2026-11-18
 
 Enterprise Core: ein interner Unterbau für spätere Module (Konfigurations-Backup,
-Security Center, Netzwerkdiagnose, WiFi RF). **Für bestehende Installationen ändert
-sich nichts Sichtbares:** keine neue Entität, keine geänderte `unique_id`, keine
-geänderte Geräte- oder Entity-ID, keine neue Config-Entry-Version und **0 zusätzliche
-Router-Aufrufe je Poll**. Ein Fehler im neuen Code lässt weder einen Poll noch das
+Security Center, Netzwerkdiagnose, WiFi RF). Keine neue Entität, keine geänderte
+`unique_id`, keine geänderte Geräte- oder Entity-ID, keine neue Config-Entry-Version und
+**0 zusätzliche Router-Aufrufe je Poll**. **Sichtbar wird:** Core-Ereignisse
+(`openwrt_router_core_event`) erscheinen im Logbuch, beim ersten Start einmal
+`router.registered` je Router, und im Recorder. Ein Fehler im neuen Code lässt weder einen Poll noch das
 Setup eines Eintrags scheitern, er wird geloggt. Nutzerdoku: `docs/enterprise-core.md`.
 
 ### Added

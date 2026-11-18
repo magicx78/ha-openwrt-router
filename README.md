@@ -361,9 +361,10 @@ that Network Intelligence already evaluates. Full details:
 ## Enterprise Core (since 1.44.0)
 
 An internal foundation for later modules (configuration backup, Security Center, network
-diagnostics, Wi-Fi RF). **Nothing visible changes for existing installs:** no new entity,
-no changed `unique_id`, device or entity id, no config-entry migration, and **no extra
-router call per poll**. An error in the core never fails a poll or a router's setup; it is
+diagnostics, Wi-Fi RF). No new entity, no changed `unique_id`, device or entity id, no
+config-entry migration, and **no extra router call per poll**. **What you will see:** core
+events (`openwrt_router_core_event`) appear in the logbook, once `router.registered` per
+router at first start, and in the recorder. An error in the core never fails a poll or a router's setup; it is
 logged. Details (German): [docs/enterprise-core.md](docs/enterprise-core.md).
 
 - **Stable router id** per config entry that survives IP and hostname changes and a

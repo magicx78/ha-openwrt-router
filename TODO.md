@@ -27,9 +27,14 @@ Branch `claude/enterprise-core-49ade2`. Nutzerdoku: `docs/enterprise-core.md`, V
 - [ ] **`rf.*` nur aus der eigenen ACL-Datei:** Rechte aus anderen Dateien in
       `/usr/share/rpcd/acl.d/` sieht der Core nicht (dann `permission_denied`, obwohl
       rpcd es erlaubt).
-- [ ] **Erster gepinnter SSH-Kontakt meldet sich mit dem Passwort an**, bevor der Key
-      bestätigt ist (der Befehl läuft nicht). Prüfen, ob der Key vor der Anmeldung
-      geholt werden kann (`asyncssh.get_server_host_key`).
+- [ ] **Gemeinsamer SSH-Pfad prüft keinen Host-Key:** der SSH-Fallback des Polls und
+      die übrigen SSH-Aufrufe außerhalb des gepinnten Wegs verbinden weiter mit
+      `known_hosts=None` (`api.py`). Der gepinnte Weg (Backup, ACL-Schreiben) meldet
+      sich seit 7c82e78 erst bei bestätigtem Key an; der erste Kontakt dort sendet
+      keine Zugangsdaten. Prüfen, ob der gemeinsame Pfad dieselben Pins nutzen kann.
+- [ ] **`npm ci` im Frontend braucht `--legacy-peer-deps`:** das Lockfile unter
+      `frontend/topology/` löst ohne den Schalter nicht auf (ERESOLVE). Liegt schon vor
+      PR #55 vor; Peer-Abhängigkeiten bereinigen, damit `npm ci` ohne Schalter läuft.
 - [ ] **Adoption nach dem Archivieren:** Wird ein Eintrag entfernt, liegen seine
       Versionen unter `removed/<router_id>/`; eine spätere Adoption holt sie nicht
       automatisch zurück.
