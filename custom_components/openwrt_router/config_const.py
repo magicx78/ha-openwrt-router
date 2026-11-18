@@ -120,6 +120,25 @@ SECRET_OPTIONS: Final[frozenset[str]] = frozenset(
         "r1kh",
         "mesh_psk",
         "nas_secret",
+        # Review C2. network: 6in4 tunnelbroker update key, raw pppd
+        # options (may carry "password …"), GRE tunnel keys, openconnect
+        # OTP secret and form fields; openvpn: static TLS keys and the
+        # PKCS#12 bundle; luci session store; generic key spellings.
+        "updatekey",
+        "pppd_options",
+        "authkey",
+        "sharedkey",
+        "privkey",
+        "otp",
+        "ikey",
+        "okey",
+        "token_secret",
+        "form_entry",
+        "tls_auth",
+        "tls_crypt",
+        "tls_crypt_v2",
+        "pkcs12",
+        "sauth",
     }
 )
 
@@ -167,9 +186,14 @@ SECRET_EXTRA_NAMES: Final[frozenset[str]] = frozenset(
 
 # Safety net for unknown names. Plan 14.1 pattern plus "pwd" and "apikey".
 # Matched with re.search against the lower-case name, "-" normalised to "_".
+# Review C2 widened it: "key" at the end of a word (also CamelCase
+# "accessKey" -> "accesskey", digits allowed: "key2") or followed by "_"
+# ("key_value"), "auth…key", "*_options" (raw daemon options such as
+# pppd_options), a standalone "otp" and "cookie" (l2tpv3 cookies).
 SECRET_OPTION_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(
-        r"(pass|secret|token|psk|private|credential|pwd|apikey|_key$|^key\d*$|pin$)"
+        r"(pass|secret|token|psk|private|credential|pwd|apikey|cookie"
+        r"|key\d*$|key_|auth\w*key|_options$|(?:^|_)otp(?:$|_)|pin$)"
     ),
 )
 
@@ -177,7 +201,9 @@ SECRET_OPTION_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
 # Applies only to the pattern, never to SECRET_OPTIONS or context names.
 # Entries are lower-case: the check runs on the normalised (lower-case) name.
 # dropbear PasswordAuth/RootPasswordAuth are on/off switches; the diff must
-# show "on -> off" because they decide whether HA can still log in.
+# show "on -> off" because they decide whether HA can still log in. The
+# rest are hostapd/wireless, dropbear, openvpn and RADIUS settings whose
+# names look like secrets (review C2, exact list).
 SECRET_OPTION_WHITELIST: Final[frozenset[str]] = frozenset(
     {
         "ft_psk_generate_local",
@@ -186,6 +212,23 @@ SECRET_OPTION_WHITELIST: Final[frozenset[str]] = frozenset(
         "key_mgmt",
         "passwordauth",
         "rootpasswordauth",
+        "maxauthtries",
+        "sae_pwe",
+        "sae_require_mfp",
+        "wpa_group_rekey",
+        "wpa_disable_eapol_key_retries",
+        "wpa_strict_rekey",
+        "auth_cache",
+        "r0_key_lifetime",
+        "auth_type",
+        "auth_nocache",
+        "key_direction",
+        "auth_server",
+        "auth_port",
+        "acct_server",
+        "acct_port",
+        "macfilter",
+        "maclist",
     }
 )
 
