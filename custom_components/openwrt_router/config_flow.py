@@ -40,8 +40,10 @@ from .const import (
     DEFAULT_USERNAME,
     DOMAIN,
     ERROR_ACL_ALREADY_CURRENT,
+    ERROR_ACL_CHECK_TRANSIENT,
     ERROR_ACL_DEPLOY_FAILED,
     ERROR_ACL_DEPLOY_NO_CHANGE,
+    ERROR_ACL_TIERED_KEPT,
     ERROR_CANNOT_CONNECT,
     ERROR_INVALID_AUTH,
     ERROR_INVALID_HOST,
@@ -53,6 +55,7 @@ from .const import (
     PROTOCOL_HTTPS,
     PROTOCOL_HTTPS_INSECURE,
 )
+from .core_models import DEFAULT_CONFIG_BACKUP_ENABLED, OPTION_CONFIG_BACKUP_ENABLED
 from .extended_sensors import async_apply_extended_wifi_sensors
 from .ssl_util import ssl_context_for_protocol
 from .topology_panel import async_update_topology_panel_access
@@ -62,6 +65,20 @@ _LOGGER = logging.getLogger(__name__)
 # Grace periods around the ACL-deploy rpcd restart (tests patch these to 0).
 _ACL_RECHECK_GRACE_S: float = 2.0
 _ACL_LOGIN_RETRY_DELAY_S: float = 1.5
+
+
+def _acl_not_written_error(reason: str | None) -> str:
+    """Form error when the ACL repair wrote nothing, by outcome reason.
+
+    ``tiered_kept``: an approved tiered ACL was left alone; ``transient``:
+    the ACL could not be read, nothing changed; anything else (``current``,
+    or no outcome seen) keeps the 1.40-1.43 message "already up to date".
+    """
+    if reason == "tiered_kept":
+        return ERROR_ACL_TIERED_KEPT
+    if reason == "transient":
+        return ERROR_ACL_CHECK_TRANSIENT
+    return ERROR_ACL_ALREADY_CURRENT
 
 
 def _validate_host(host: str) -> str | None:
@@ -133,6 +150,15 @@ class OpenWrtOptionsFlow(OptionsFlow):
                     "Could not apply the topology panel access option",
                     exc_info=True,
                 )
+            # Same pattern for config_backup_enabled (1.44.0): applied to the
+            # enterprise core directly, no update listener, no reload.
+            if OPTION_CONFIG_BACKUP_ENABLED in user_input:
+                _apply_config_backup_option(
+                    self.hass,
+                    self.config_entry,
+                    new_opts.get(OPTION_CONFIG_BACKUP_ENABLED) is True,
+                    user_id=self.context.get("user_id"),
+                )
             return self.async_create_entry(title="", data=new_opts)
 
         schema = vol.Schema(
@@ -157,7 +183,78 @@ class OpenWrtOptionsFlow(OptionsFlow):
                 ): bool,
             }
         )
+        if _offer_config_backup_option(self.hass, opts):
+            schema = schema.extend(
+                {
+                    vol.Optional(
+                        OPTION_CONFIG_BACKUP_ENABLED,
+                        default=opts.get(
+                            OPTION_CONFIG_BACKUP_ENABLED, DEFAULT_CONFIG_BACKUP_ENABLED
+                        )
+                        is True,
+                    ): bool,
+                }
+            )
         return self.async_show_form(step_id="init", data_schema=schema)
+
+
+def _offer_config_backup_option(hass: Any, opts: Any) -> bool:
+    """Show ``config_backup_enabled`` once a configuration provider exists.
+
+    Without a provider the switch has no effect (every config.* stays
+    unavailable/no_provider), so it is only offered then, or while it is
+    on (so it can always be turned off).
+    """
+    if opts.get(OPTION_CONFIG_BACKUP_ENABLED) is True:
+        return True
+    try:
+        from .enterprise_core import async_get_core
+
+        core = async_get_core(hass)
+        return core is not None and core.manager.provider_id is not None
+    except Exception:
+        _LOGGER.debug(
+            "Enterprise core not readable for the options form", exc_info=True
+        )
+        return False
+
+
+def _apply_config_backup_option(
+    hass: Any, entry: ConfigEntry, enabled: bool, *, user_id: str | None = None
+) -> None:
+    """Hand the option to the running core (logged on failure, never raises).
+
+    A change is audited by the core (security ring) with the submitting
+    user when the flow context names one (Home Assistant's options flow
+    usually does not; the event then says ``actor_known`` False).
+    """
+    try:
+        from .core_models import Actor, ActorKind
+        from .enterprise_core import async_get_core
+
+        core = async_get_core(hass)
+        if core is None:
+            _LOGGER.info(
+                "Configuration backup option for %s is applied at the next setup",
+                entry.entry_id,
+            )
+            return  # applied by ensure_entry at the next setup
+        actor = (
+            Actor(kind=ActorKind.USER, user_id=user_id)
+            if isinstance(user_id, str) and user_id
+            else None
+        )
+        rid = core.registry.router_id_for_entry(entry.entry_id)
+        if not core.registry.set_config_enabled(entry.entry_id, enabled):
+            return
+        if rid:
+            core.manager.on_config_option_changed(rid, enabled, actor=actor)
+        else:
+            core.manager.audit_config_option_changed(None, enabled, actor=actor)
+    except Exception:
+        _LOGGER.warning(
+            "Could not apply the configuration backup option", exc_info=True
+        )
 
 
 class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -318,7 +415,18 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             if user_input.get("deploy_acl"):
-                from .acl_provisioning import AclDeployError, check_and_deploy_acl
+                from .acl_provisioning import (
+                    AclDeployError,
+                    AclEnsureOutcome,
+                    ensure_acl_respecting_offer,
+                )
+
+                # why nothing was written (review finding 17): a kept
+                # tiered ACL and a failed read get their own message
+                outcome_reason: list[str] = []
+
+                def _note_outcome(outcome: AclEnsureOutcome) -> None:
+                    outcome_reason.append(outcome.reason)
 
                 session = async_get_clientsession(self.hass)
                 protocol = self._user_data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL)
@@ -333,7 +441,11 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
                 try:
                     await deploy_api.login()
-                    deployed = await check_and_deploy_acl(deploy_api)
+                    # 1.44.0: never undo an approved tiered ACL (same calls
+                    # as before when none is deployed).
+                    deployed = await ensure_acl_respecting_offer(
+                        deploy_api, observe=_note_outcome
+                    )
                 except AclDeployError:
                     _LOGGER.warning("ACL deploy to %s failed", host, exc_info=True)
                     errors["base"] = ERROR_ACL_DEPLOY_FAILED
@@ -347,8 +459,9 @@ class OpenWrtConfigFlow(ConfigFlow, domain=DOMAIN):
                     # logging in again for the re-check below.
                     await asyncio.sleep(_ACL_RECHECK_GRACE_S)
                 elif not errors:
-                    # ensure_acl found the deployed ACL already up to date.
-                    errors["base"] = ERROR_ACL_ALREADY_CURRENT
+                    errors["base"] = _acl_not_written_error(
+                        outcome_reason[-1] if outcome_reason else None
+                    )
                 # fall through → re-run capability check and re-show form
             elif user_input.get("action") != "retry":
                 title = self._board_info.get("hostname") or host

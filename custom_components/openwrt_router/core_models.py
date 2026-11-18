@@ -36,7 +36,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import Enum, StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
@@ -120,7 +120,25 @@ INSTALLATION_KEY_BYTES: Final = 32
 INSTALLATION_KEY_ID_LENGTH: Final = 16
 # Repair issue id raised when the key is lost (issue registry, later step).
 ISSUE_INSTALLATION_KEY_LOST: Final = "installation_key_lost"
+# An unreadable key file was replaced by a new key (no versions existed).
+ISSUE_INSTALLATION_KEY_REPLACED: Final = "installation_key_replaced"
 CORE_STORE_VERSION: Final = 1
+
+# Per-router SSH host-key pins of the config/backup path (1.44.0). Own store
+# (private, atomic), keyed by router_id: the pin follows the router, not
+# its address. Only the pinned path reads it; the shared SSH transport of
+# the poll keeps its known_hosts=None behaviour.
+SSH_PIN_STORE_KEY: Final = f"{DOMAIN}.ssh_host_keys"
+SSH_PIN_STORE_MINOR_VERSION: Final = 1
+# What happens with a router's FIRST host key on the pinned path:
+# "confirm" = it becomes a PENDING pin and every pinned call refuses
+#             (reason pin_pending) until an admin confirms the fingerprint
+#             with the critical guard action ssh_pin_confirm;
+# "tofu"    = trust on first use (the key is pinned at once, audited).
+# One constant on purpose: the owner decides; "confirm" until then.
+SSH_PIN_POLICY_CONFIRM: Final = "confirm"
+SSH_PIN_POLICY_TOFU: Final = "tofu"
+SSH_PIN_FIRST_USE_POLICY: Final = SSH_PIN_POLICY_CONFIRM
 
 # Version store on disk: hass.config.path(*CONFIG_BACKUP_PATH, <router_id>).
 CONFIG_BACKUP_PATH: Final = ("openwrt_router", "config_backups")
@@ -149,12 +167,36 @@ MAX_WARNINGS: Final = 50
 SNAPSHOT_FORMAT_UCI_NORMALIZED: Final = "uci_normalized"
 
 # Options-flow switch that gates all config.* capabilities and the matching
-# ACL tier (the option itself is added to const.py/config_flow.py later).
+# ACL tier. Default OFF (1.44.0): only an explicit True enables it.
 OPTION_CONFIG_BACKUP_ENABLED: Final = "config_backup_enabled"
+DEFAULT_CONFIG_BACKUP_ENABLED: Final = False
 
-# Capability / event namespaces reserved for later modules (security-center,
-# net-diagnostics). Module-defined names live below a registered prefix.
-RESERVED_NAMESPACES: Final = ("security.", "diag.", "log.")
+# Naming scheme (contract §5 / §12.3). Capability namespaces:
+# core-owned (derived from the poll) ...
+CORE_CAPABILITY_NAMESPACES: Final = ("transport.", "data.", "stream.", "pkg.")
+# ... decided by the one configuration provider (config-manager) ...
+CONFIG_CAPABILITY_NAMESPACE: Final = "config."
+# ... and reserved for modules: the core never names a capability there,
+# with ONE exception (1.44.0): rf.txpowerlist / rf.survey / rf.scan are
+# facts about the deployed rpcd ACL, which only the core knows; they are
+# listed in CORE_OWNED_MODULE_CAPABILITIES and refused for module detectors.
+# security. = Security Center, diag. = Network Diagnostics, rf. = WiFi RF,
+# log. = log sources shared by several modules.
+RESERVED_NAMESPACES: Final = ("security.", "diag.", "log.", "rf.")
+# Capability namespace of each known module (log. is shared, not owned).
+MODULE_CAPABILITY_NAMESPACES: Final[Mapping[str, str]] = MappingProxyType(
+    {"security_center": "security.", "net_diagnostics": "diag.", "wifi_rf": "rf."}
+)
+# Event prefix of each known module. A known module may only register its
+# own prefix; nobody else may register below it. Event prefixes never use a
+# core event namespace (CORE_EVENT_NAMESPACES) or a capability namespace.
+MODULE_EVENT_PREFIXES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "security_center": "security_center.",
+        "net_diagnostics": "net_diagnostics.",
+        "wifi_rf": "wifi_rf.",
+    }
+)
 
 APPROVAL_TTL: Final = timedelta(minutes=15)
 WRITE_AUTHORIZATION_TTL: Final = timedelta(minutes=5)
@@ -419,6 +461,57 @@ def _check_note(note: str | None) -> None:
         raise ValueError(f"note must be at most {NOTE_MAX_LENGTH} characters")
 
 
+# Provider-supplied metadata text (versions, board names, fetch methods).
+META_TEXT_MAX_LENGTH: Final = 128
+# Provider-supplied ids (drift_id, plan_id) and config names in reports.
+TOKEN_MAX_LENGTH: Final = 128
+TOKEN_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]*")
+
+
+def _check_meta_text(name: str, value: object) -> None:
+    """Untrusted metadata text: str, bounded, no control characters."""
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if len(value) > META_TEXT_MAX_LENGTH:
+        raise ValueError(f"{name} must be at most {META_TEXT_MAX_LENGTH} characters")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError(f"{name} must not contain control characters")
+
+
+_KEY_ID_RE: Final = re.compile(rf"[0-9a-f]{{{INSTALLATION_KEY_ID_LENGTH}}}")
+
+
+def check_key_id(value: object) -> None:
+    """``installation_key_id``: None or exactly 16 lower-case hex characters."""
+    if value is None:
+        return
+    if not isinstance(value, str) or _KEY_ID_RE.fullmatch(value) is None:
+        raise ValueError(
+            f"installation_key_id must be {INSTALLATION_KEY_ID_LENGTH} "
+            "lower-case hex characters"
+        )
+
+
+def check_token(name: str, value: object, *, optional: bool = False) -> None:
+    """Untrusted id: bounded, no path separators, no ``..``, no NUL."""
+    if value is None and optional:
+        return
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if (
+        not value
+        or len(value) > TOKEN_MAX_LENGTH
+        or ".." in value
+        or TOKEN_PATTERN.fullmatch(value) is None
+    ):
+        raise ValueError(
+            f"{name} must be 1-{TOKEN_MAX_LENGTH} characters of [A-Za-z0-9._:@-], "
+            "without '..' or path separators"
+        )
+
+
 def _check_warnings(warnings: Iterable[str]) -> tuple[str, ...]:
     """Validated tuple of warning codes (WARNING_CODE_PATTERN, MAX_WARNINGS)."""
     if isinstance(warnings, str):
@@ -542,12 +635,28 @@ class Capability(StrEnum):
     CONFIG_SSH_ROOT = "config.ssh_root"
     CONFIG_UCI_READ = "config.uci_read"  # detail: {config_name: bool}
     CONFIG_PACKAGELIST = "config.packagelist"
+    # Rights in the DEPLOYED rpcd ACL file of the integration (1.44.0): read
+    # once per entry setup by ensure_acl, never in the poll. Core-owned
+    # names inside the reserved rf. namespace (see RESERVED_NAMESPACES).
+    RF_TXPOWERLIST = "rf.txpowerlist"
+    RF_SURVEY = "rf.survey"
+    RF_SCAN = "rf.scan"
 
 
 # Capabilities the configuration provider decides (no provider: unavailable).
 CONFIG_CAPABILITIES: Final = frozenset(
     c for c in Capability if c.value.startswith("config.")
 )
+# Decided from the deployed ACL the core observed at entry setup.
+ACL_CAPABILITIES: Final = frozenset(
+    {Capability.RF_TXPOWERLIST, Capability.RF_SURVEY, Capability.RF_SCAN}
+)
+# Core-owned names inside a module namespace; a module detector may never
+# report them (refused and counted).
+CORE_OWNED_MODULE_CAPABILITIES: Final = ACL_CAPABILITIES
+# These follow their source exactly: "unknown" replaces a known state (the
+# source is a setting or a one-off observation, not a flaky poll value).
+STRICT_CAPABILITIES: Final = CONFIG_CAPABILITIES | ACL_CAPABILITIES
 # Of these, the ones found by the provider's router probe (async_probe).
 PROBED_CAPABILITIES: Final = frozenset(
     {
@@ -592,6 +701,59 @@ class CapabilityReason(StrEnum):
     DISABLED = "disabled"  # option config_backup_enabled is off
     NO_PROVIDER = "no_provider"
     PROVIDER_DECLINED = "provider_declined"
+    # config.*: a probe cannot tell without doing real work on the router
+    # (state unknown); callers may try, the first real use settles it.
+    DETERMINED_ON_FIRST_USE = "determined_on_first_use"
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class DeployedAclObservation:
+    """What the core knows about the integration's rpcd ACL file on a router.
+
+    Made from the ONE ``file/read`` ensure_acl does at entry setup (or from
+    what it wrote / what an approved offer deploy wrote); never a router
+    call of its own. ``known`` False means the file could not be read or a
+    deploy failed: the rf.* capabilities are then ``unknown`` with
+    ``reason_text`` saying why. Only this file is considered; other files in
+    rpcd's acl.d may grant more (a known blind spot, documented).
+
+    ``granted``/``missing``: sorted ``(capability, ...)`` pairs (hashable,
+    part of the capability signature).
+    """
+
+    known: bool
+    reason: str  # current | tiered | written | deploy_failed | unreadable | ...
+    kind: str | None = None  # acl_provisioning.DeployedAclKind value
+    tiers: tuple[str, ...] = ()
+    acl_checksum: str | None = None
+    granted: tuple[tuple[str, bool], ...] = ()
+    missing: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    observed_at: datetime | None = None
+
+    def is_granted(self, capability: str) -> bool | None:
+        """True/False if known, None if this observation cannot tell."""
+        if not self.known:
+            return None
+        return dict(self.granted).get(str(capability))
+
+    def missing_for(self, capability: str) -> tuple[str, ...]:
+        """Permission strings the deployed ACL lacks for ``capability``."""
+        return dict(self.missing).get(str(capability), ())
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe form (diagnostics; no ACL content)."""
+        return {
+            "known": self.known,
+            "reason": self.reason,
+            "kind": self.kind,
+            "tiers": list(self.tiers),
+            "acl_checksum": self.acl_checksum,
+            "granted": dict(self.granted),
+            "missing": {k: list(v) for k, v in self.missing},
+            "observed_at": None
+            if self.observed_at is None
+            else self.observed_at.isoformat(),
+        }
 
 
 class ActorKind(StrEnum):
@@ -633,6 +795,11 @@ class GuardedAction(StrEnum):
     ADOPT = "adopt"
     ACL_DEPLOY = "acl_deploy"
     INSTALLATION_KEY_RESET = "installation_key_reset"
+    # Host-key pins of the pinned SSH path (1.44.0): confirm a pending
+    # first-use fingerprint / drop a router's pin (both bound to router_id
+    # + fingerprint).
+    SSH_PIN_CONFIRM = "ssh_pin_confirm"
+    SSH_PIN_RESET = "ssh_pin_reset"
 
 
 ACTION_CLASSES: Final[Mapping[str, ActionClass]] = MappingProxyType(
@@ -647,6 +814,8 @@ ACTION_CLASSES: Final[Mapping[str, ActionClass]] = MappingProxyType(
         GuardedAction.RESTORE: ActionClass.CRITICAL,
         GuardedAction.ADOPT: ActionClass.MUTATING,
         GuardedAction.ACL_DEPLOY: ActionClass.CRITICAL,
+        GuardedAction.SSH_PIN_CONFIRM: ActionClass.CRITICAL,
+        GuardedAction.SSH_PIN_RESET: ActionClass.CRITICAL,
     }
 )
 # Only a verified admin USER may perform these.
@@ -658,6 +827,8 @@ ADMIN_USER_ONLY_ACTIONS: Final = frozenset(
         GuardedAction.ADOPT,
         GuardedAction.ACL_DEPLOY,
         GuardedAction.INSTALLATION_KEY_RESET,
+        GuardedAction.SSH_PIN_CONFIRM,
+        GuardedAction.SSH_PIN_RESET,
     }
 )
 # Only the core itself (ActorKind.SYSTEM) may perform these.
@@ -754,6 +925,14 @@ class ConfigRefKind(StrEnum):
     LIVE = "live"
 
 
+class DriftComparison(StrEnum):
+    """How much of the configuration a drift check could compare."""
+
+    COMPLETE = "complete"
+    PARTIAL = "partial"  # some configs could not be read/compared (listed)
+    UNKNOWN = "unknown"  # the comparison as a whole is not trustworthy
+
+
 class ChangeKind(StrEnum):
     """Kind of one configuration change in a diff."""
 
@@ -807,11 +986,20 @@ class RestoreStatus(StrEnum):
 
 
 class KeepReason(StrEnum):
-    """Why retention kept a version."""
+    """Why retention kept a version (not persisted; order = priority)."""
 
     PROTECTED = "protected"
     NEWEST_VALID = "newest_valid"
-    WITHIN_POLICY = "within_policy"
+    DAILY = "daily"  # newest usable version of one of the last N days
+    WEEKLY = "weekly"  # ... of one of the last N ISO weeks
+    MONTHLY = "monthly"  # ... of one of the last N calendar months
+    WITHIN_POLICY = "within_policy"  # max_versions / max_age rule
+    # Not usable (failed, partial, invalid): kept for diagnosis only while
+    # recent; never represents a period, never pushes a usable one out.
+    RECENT_FAILED = "recent_failed"
+    # GFS never thins a manual or pre_* version (1.44.0); only the size
+    # limit can remove one, and RetentionResult.limit_deleted_manual names it.
+    MANUAL = "manual"
 
 
 class EventResult(StrEnum):
@@ -844,6 +1032,9 @@ class CoreEventType(StrEnum):
     ROUTER_CAPABILITIES_CHANGED = "router.capabilities_changed"
     ROUTER_ORPHANED = "router.orphaned"
     ROUTER_ADOPTED = "router.adopted"
+    # Review PR #55 (additive): an orphaned record was dropped from the
+    # registry (aged out or over the cap); security ring, audit-mandatory.
+    ROUTER_FORGOTTEN = "router.forgotten"
     BACKUP_CREATED = "configuration.backup_created"
     BACKUP_FAILED = "configuration.backup_failed"
     BACKUP_RECOVERED = "configuration.backup_recovered"
@@ -856,6 +1047,9 @@ class CoreEventType(StrEnum):
     DRIFT_ACKNOWLEDGED = "configuration.drift_acknowledged"
     CHANGE_CRITICAL = "configuration.change_critical"
     CHANGE_UNKNOWN = "configuration.change_unknown"
+    # A drift check could not compare everything (comparison partial or
+    # unknown): never an all-clear (additive, part 2).
+    DRIFT_INCOMPLETE = "configuration.drift_incomplete"
     INTEGRITY_FAILED = "configuration.integrity_failed"
     RESTORE_CHECKED = "configuration.restore_checked"  # dry run / compatibility
     RESTORE_REQUESTED = "configuration.restore_requested"
@@ -864,14 +1058,40 @@ class CoreEventType(StrEnum):
     RESTORE_COMPLETED = "configuration.restore_completed"
     RESTORE_FAILED = "configuration.restore_failed"
     STORAGE_SWEPT = "configuration.storage_swept"
+    # Retention ran and the router (or the store) is still above its size
+    # limit; the next put raises StorageFullError (additive, part 2).
+    STORAGE_LIMIT_EXCEEDED = "configuration.storage_limit_exceeded"
     AUTHORIZATION_DENIED = "security.authorization_denied"
     AUTHORIZATION_CONSUMED = "security.authorization_consumed"
+    # A mutating action was authorized (additive, part 2: "authorize always
+    # writes one audit entry" needed a type for the approved case).
+    AUTHORIZATION_GRANTED = "security.authorization_granted"
     APPROVAL_REQUESTED = "security.approval_requested"
     APPROVAL_APPROVED = "security.approval_approved"
     APPROVAL_REJECTED = "security.approval_rejected"
     APPROVAL_EXPIRED = "security.approval_expired"
     INSTALLATION_KEY_LOST = "core.installation_key_lost"
     INSTALLATION_KEY_RESET = "core.installation_key_reset"
+    # Security review (1.44.0, additive): a new key was created although a
+    # key file existed (unreadable / unusable); security ring, repair issue.
+    INSTALLATION_KEY_REPLACED = "core.installation_key_replaced"
+    # A core store was unreadable, copied to .bak and rebuilt (additive, part 1:
+    # router ids are deterministic; adoption links are what can be lost).
+    STORE_RECOVERED = "core.store_recovered"
+    # 1.44.0 (additive): approved tiered-ACL deploy and its failure (data
+    # carries command and rollback_command) ...
+    ACL_DEPLOYED = "security.acl_deployed"
+    ACL_DEPLOY_FAILED = "security.acl_deploy_failed"
+    # ... host-key pins of the pinned SSH path ...
+    SSH_PIN_PENDING = "security.ssh_pin_pending"
+    SSH_PIN_CONFIRMED = "security.ssh_pin_confirmed"
+    SSH_PIN_MISMATCH = "security.ssh_pin_mismatch"
+    SSH_PIN_RESET = "security.ssh_pin_reset"
+    # ... and the version folder of a removed entry moved to removed/<id>/.
+    ROUTER_ARCHIVED = "configuration.router_archived"
+    # Security review (1.44.0, additive): the options-flow switch
+    # config_backup_enabled changed (actor, old and new value).
+    CONFIG_OPTION_CHANGED = "security.config_option_changed"
 
 
 # Namespaces of core event types. Only the core emits these (also the ones
@@ -889,9 +1109,12 @@ SECURITY_EVENT_TYPES: Final = frozenset(
     {
         CoreEventType.INSTALLATION_KEY_LOST,
         CoreEventType.INSTALLATION_KEY_RESET,
+        CoreEventType.INSTALLATION_KEY_REPLACED,
+        CoreEventType.ROUTER_ARCHIVED,
         CoreEventType.BACKUP_EXPORTED,
         CoreEventType.BACKUP_DELETED,
         CoreEventType.ROUTER_ADOPTED,
+        CoreEventType.ROUTER_FORGOTTEN,
         CoreEventType.RESTORE_REQUESTED,
         CoreEventType.RESTORE_APPROVED,
         CoreEventType.RESTORE_REJECTED,
@@ -914,14 +1137,25 @@ AUDIT_MANDATORY_EVENT_TYPES: Final = frozenset(
         CoreEventType.RESTORE_COMPLETED,
         CoreEventType.RESTORE_FAILED,
         CoreEventType.ROUTER_ADOPTED,
+        CoreEventType.ROUTER_FORGOTTEN,
         CoreEventType.AUTHORIZATION_DENIED,
         CoreEventType.AUTHORIZATION_CONSUMED,
+        CoreEventType.AUTHORIZATION_GRANTED,
         CoreEventType.APPROVAL_REQUESTED,
         CoreEventType.APPROVAL_APPROVED,
         CoreEventType.APPROVAL_REJECTED,
         CoreEventType.APPROVAL_EXPIRED,
         CoreEventType.INSTALLATION_KEY_LOST,
         CoreEventType.INSTALLATION_KEY_RESET,
+        CoreEventType.INSTALLATION_KEY_REPLACED,
+        CoreEventType.STORE_RECOVERED,
+        CoreEventType.ACL_DEPLOYED,
+        CoreEventType.ACL_DEPLOY_FAILED,
+        CoreEventType.SSH_PIN_CONFIRMED,
+        CoreEventType.SSH_PIN_MISMATCH,
+        CoreEventType.SSH_PIN_RESET,
+        CoreEventType.ROUTER_ARCHIVED,
+        CoreEventType.CONFIG_OPTION_CHANGED,
     }
 )
 
@@ -1905,6 +2139,7 @@ class BackupRecord:
     def __post_init__(self) -> None:
         """Validate ids, hashes, enums, flags, note and timestamps."""
         _set(self, "warnings", _check_warnings(self.warnings))
+        check_key_id(self.installation_key_id)
         if not is_valid_id(self.backup_id, BACKUP_ID_PREFIX):
             raise ValueError("backup_id must be bkp_<32 hex>")
         if not is_valid_id(self.router_id, ROUTER_ID_PREFIX):
@@ -2096,6 +2331,15 @@ class VersionMeta:
             if value is not None and not is_sha256(value):
                 raise ValueError(f"{name} must be 64 lower-case hex characters")
         _check_note(self.note)
+        for name in (
+            "fetch_method",
+            "openwrt_version",
+            "hardware_model",
+            "board_name",
+            "correlation_id",
+        ):
+            _check_meta_text(name, getattr(self, name))
+        check_key_id(self.installation_key_id)
         _set(self, "warnings", _check_warnings(self.warnings))
         # ok carries no error_class; partial/failed must say what failed
         # ("archive failed, uci ok" = backup_type partial, status partial,
@@ -2129,7 +2373,11 @@ def dedup_candidate(
 
 
 def should_deduplicate(
-    candidate: BackupRecord | None, meta: VersionMeta, artifact_kinds: Iterable[str]
+    candidate: BackupRecord | None,
+    meta: VersionMeta,
+    artifact_kinds: Iterable[str],
+    *,
+    artifact_sha256: Mapping[str, str] | None = None,
 ) -> bool:
     """True if a new version would only repeat ``candidate`` (dedup hit).
 
@@ -2137,10 +2385,17 @@ def should_deduplicate(
     reason is scheduled or drift; no incident link; the new status is not
     failed and equals the candidate's (partial never dedups against ok, nor
     the reverse); same backup_type and artifact kinds; equal ``content_hash``
-    when there is an archive, else equal ``uci_hash`` (both provider-made).
-    On a hit the core only moves ``last_seen_at`` and returns created=False;
+    when there is an archive, else equal ``uci_hash`` (both provider-made);
+    the same ``installation_key_id`` (a version made under another key is
+    never a repeat: its secret digests differ, and a re-baseline after a key
+    reset must store a version stamped with the new key). On a hit the core only moves ``last_seen_at`` and returns created=False;
     manual, pre_* and incident-linked versions always create, so no note or
     reason is lost.
+
+    ``artifact_sha256`` (1.44.0 ruling): the sha256 the CORE computed of
+    the new artifacts, per kind. When given, every kind must also equal the
+    candidate's stored sha256 — the provider's hashes alone no longer make
+    a repeat (byte-identical artifacts are required).
     """
     kinds = {ArtifactKind(k).value for k in artifact_kinds}
     if candidate is None or candidate.status is VersionStatus.FAILED:
@@ -2151,16 +2406,25 @@ def should_deduplicate(
         return False
     if meta.status is VersionStatus.FAILED or meta.status is not candidate.status:
         return False
+    if meta.installation_key_id != candidate.installation_key_id:
+        return False
     if (
         candidate.backup_type is not meta.backup_type
         or set(candidate.artifacts) != kinds
     ):
         return False
     if ArtifactKind.ARCHIVE.value in kinds:
-        return meta.content_hash is not None and meta.content_hash == (
+        same = meta.content_hash is not None and meta.content_hash == (
             candidate.content_hash
         )
-    return meta.uci_hash is not None and meta.uci_hash == candidate.uci_hash
+    else:
+        same = meta.uci_hash is not None and meta.uci_hash == candidate.uci_hash
+    if not same or artifact_sha256 is None:
+        return same
+    return all(
+        artifact_sha256.get(kind) == ref.sha256
+        for kind, ref in candidate.artifacts.items()
+    )
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -2202,16 +2466,29 @@ def validate_deletion(records: Sequence[BackupRecord], *, router_id: str) -> Non
 class RetentionPolicy:
     """Retention a module supplies; the core executes it (``prune``).
 
-    None means "no limit". Protected versions and the newest usable version
-    of each router are ALWAYS kept, whatever the policy says.
+    Two rule sets, never mixed:
+
+    * GFS (grandfather-father-son): keep the newest USABLE version of each
+      of the last ``daily`` calendar days, ``weekly`` ISO weeks and
+      ``monthly`` calendar months (current period included), counted in the
+      time zone of ``now``. ``None`` for a count means 0 in GFS mode.
+    * Count/age: ``max_versions`` and ``max_age`` (legacy rules).
+
+    ``max_bytes_per_router`` works with both. None means "no limit".
+    Protected versions and the newest usable version of each router are
+    ALWAYS kept, whatever the policy says. GFS together with
+    ``max_versions``/``max_age`` raises ValueError.
     """
 
     max_versions: int | None = None
     max_age: timedelta | None = None
     max_bytes_per_router: int | None = None
+    daily: int | None = None
+    weekly: int | None = None
+    monthly: int | None = None
 
     def __post_init__(self) -> None:
-        """Positive limits only."""
+        """Positive limits, non-negative GFS counts, one rule set."""
         for name in ("max_versions", "max_bytes_per_router"):
             value = getattr(self, name)
             if value is not None and (
@@ -2222,6 +2499,36 @@ class RetentionPolicy:
             not isinstance(self.max_age, timedelta) or self.max_age <= timedelta(0)
         ):
             raise ValueError("max_age must be a positive timedelta or None")
+        for name in ("daily", "weekly", "monthly"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                raise ValueError(f"{name} must be a non-negative int or None")
+        if self.uses_gfs and (self.max_versions is not None or self.max_age):
+            raise ValueError("GFS counts cannot be combined with max_versions/max_age")
+
+    @classmethod
+    def gfs(
+        cls,
+        daily: int = 7,
+        weekly: int = 4,
+        monthly: int = 6,
+        *,
+        max_bytes_per_router: int | None = None,
+    ) -> RetentionPolicy:
+        """GFS policy (default 7 daily / 4 weekly / 6 monthly)."""
+        return cls(
+            daily=daily,
+            weekly=weekly,
+            monthly=monthly,
+            max_bytes_per_router=max_bytes_per_router,
+        )
+
+    @property
+    def uses_gfs(self) -> bool:
+        """True if any GFS count is set."""
+        return any(v is not None for v in (self.daily, self.weekly, self.monthly))
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -2231,30 +2538,59 @@ class RetentionPolicy:
                 None if self.max_age is None else self.max_age.total_seconds()
             ),
             "max_bytes_per_router": self.max_bytes_per_router,
+            "daily": self.daily,
+            "weekly": self.weekly,
+            "monthly": self.monthly,
         }
+
+
+# What the core applies while no module supplied a policy.
+DEFAULT_RETENTION_POLICY: Final = RetentionPolicy.gfs()
+
+# Primary keep reason = the first in this order.
+_KEEP_ORDER: Final = tuple(KeepReason)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class RetentionResult:
     """What one retention run decided for one router; nothing is silent.
 
-    Every evaluated version is either in ``deleted`` or in ``kept`` (with
-    the reason).
+    Every evaluated version is either in ``deleted`` (oldest first) or in
+    ``kept`` with its primary reason; ``reasons`` lists all reasons of a
+    kept version. ``total_bytes`` is the size of the kept versions,
+    ``max_bytes`` the effective limit and ``over_limit`` True if the kept
+    versions still exceed it (only protected/newest-valid remain).
+    ``limit_deleted`` (1.44.0, additive): the deleted versions the policy
+    alone would have kept, removed only because of the size limit;
+    ``limit_deleted_manual`` the manual/pre_* ones among them (named on
+    purpose: GFS itself never thins those).
     """
 
     router_id: str
     evaluated_at: datetime
     deleted: tuple[str, ...] = ()
     kept: Mapping[str, KeepReason] = field(default_factory=dict)
+    reasons: Mapping[str, tuple[KeepReason, ...]] = field(default_factory=dict)
+    total_bytes: int = 0
+    max_bytes: int | None = None
+    over_limit: bool = False
+    limit_deleted: tuple[str, ...] = ()
+    limit_deleted_manual: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Coerce and freeze."""
         _set(self, "deleted", tuple(self.deleted))
+        _set(self, "limit_deleted", tuple(self.limit_deleted))
+        _set(self, "limit_deleted_manual", tuple(self.limit_deleted_manual))
         _set(
             self,
             "kept",
             MappingProxyType({k: KeepReason(v) for k, v in self.kept.items()}),
         )
+        reasons = {k: tuple(KeepReason(r) for r in v) for k, v in self.reasons.items()}
+        for version_id, reason in self.kept.items():
+            reasons.setdefault(version_id, (KeepReason(reason),))
+        _set(self, "reasons", MappingProxyType(reasons))
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -2263,7 +2599,34 @@ class RetentionResult:
             "evaluated_at": _iso(self.evaluated_at),
             "deleted": list(self.deleted),
             "kept": {k: v.value for k, v in sorted(self.kept.items())},
+            "reasons": {
+                k: [r.value for r in v] for k, v in sorted(self.reasons.items())
+            },
+            "total_bytes": self.total_bytes,
+            "max_bytes": self.max_bytes,
+            "over_limit": self.over_limit,
+            "limit_deleted": list(self.limit_deleted),
+            "limit_deleted_manual": list(self.limit_deleted_manual),
         }
+
+
+# Reasons GFS never thins (1.44.0 ruling): a user's own backup and the
+# safety copies taken before a change are kept until a size limit forces
+# a choice.
+GFS_KEEP_REASONS: Final = frozenset(
+    {
+        BackupReason.MANUAL,
+        BackupReason.PRE_FIRMWARE_UPDATE,
+        BackupReason.PRE_RESTORE,
+        BackupReason.PRE_CHANGE,
+    }
+)
+
+
+def _month_back(day: date, months: int) -> tuple[int, int]:
+    """(year, month) ``months`` calendar months before ``day``'s month."""
+    index = day.year * 12 + (day.month - 1) - months
+    return index // 12, index % 12 + 1
 
 
 def plan_retention(
@@ -2272,44 +2635,163 @@ def plan_retention(
     policy: RetentionPolicy,
     *,
     now: datetime | None = None,
+    max_bytes: int | None = None,
 ) -> RetentionResult:
     """Decide which versions of one router the core's prune run deletes.
 
-    Protected versions and the newest usable version are always kept and
-    count against the limits first; then, newest first, every other version
-    is deleted if it is older than ``max_age``, beyond ``max_versions`` or
-    would exceed ``max_bytes_per_router``.
+    ``now`` must be time-zone aware (default: UTC now); GFS periods are
+    counted in ITS time zone. ``max_bytes`` is an extra size limit (the
+    store's per-router limit); the effective limit is the smaller one.
+
+    1. Always kept: protected versions and the newest usable version.
+    2. GFS: the newest usable version of each day/week/month in the window.
+       Count/age: usable versions newest first while within ``max_age`` and
+       ``max_versions`` (protected and newest usable count first), THEN
+       unusable ones by the same rule, so a failed version never pushes a
+       usable one out.
+    3. Unusable versions never represent a period; in GFS mode they stay
+       (``recent_failed``) while inside the daily window. GFS never thins a
+       usable manual or pre_* version (``KeepReason.MANUAL``).
+    4. Over the size limit: evict kept versions except protected and newest
+       usable: unusable first, then the oldest; manual/pre_* versions only
+       after every other one; no newer version is skipped to keep an older
+       one within a group. Still over: ``over_limit``, nothing forced. Every
+       eviction is listed in ``limit_deleted`` (manual/pre_* also in
+       ``limit_deleted_manual``).
+
+    Raises ValueError for a naive ``now``, duplicate ids or a foreign router.
     """
-    now = now or utcnow()
-    ordered = sorted(records, key=lambda r: r.created_at, reverse=True)
-    if any(r.router_id != router_id for r in ordered):
-        raise ValueError("records must all belong to router_id")
-    newest_usable = next((r for r in ordered if r.usable), None)
-    kept: dict[str, KeepReason] = {}
-    for record in ordered:
+    when = now if now is not None else utcnow()
+    if not isinstance(when, datetime) or when.tzinfo is None:
+        raise ValueError("now must be a time-zone aware datetime")
+    if when.utcoffset() is None:
+        raise ValueError("now must be a time-zone aware datetime")
+    items = list(records)
+    seen: set[str] = set()
+    for record in items:
+        if record.router_id != router_id:
+            raise ValueError("records must all belong to router_id")
+        if record.backup_id in seen:
+            raise ValueError(f"duplicate version id {record.backup_id}")
+        seen.add(record.backup_id)
+    limits = [v for v in (policy.max_bytes_per_router, max_bytes) if v is not None]
+    limit = min(limits) if limits else None
+
+    tz = when.tzinfo
+    local = {r.backup_id: r.created_at.astimezone(tz) for r in items}
+    chrono = sorted(items, key=lambda r: (local[r.backup_id], r.backup_id))
+    newest_first = list(reversed(chrono))
+    newest_usable = next((r for r in newest_first if r.usable), None)
+
+    reasons: dict[str, set[KeepReason]] = {}
+
+    def keep(version_id: str, reason: KeepReason) -> None:
+        reasons.setdefault(version_id, set()).add(reason)
+
+    for record in items:
         if record.protected:
-            kept[record.backup_id] = KeepReason.PROTECTED
-        elif record is newest_usable:
-            kept[record.backup_id] = KeepReason.NEWEST_VALID
-    size = sum(r.size_bytes for r in ordered if r.backup_id in kept)
-    deleted: list[str] = []
-    for record in ordered:
-        if record.backup_id in kept:
-            continue
-        if (
-            (policy.max_age is not None and now - record.created_at > policy.max_age)
-            or (policy.max_versions is not None and len(kept) >= policy.max_versions)
-            or (
-                policy.max_bytes_per_router is not None
-                and size + record.size_bytes > policy.max_bytes_per_router
+            keep(record.backup_id, KeepReason.PROTECTED)
+    if newest_usable is not None:
+        keep(newest_usable.backup_id, KeepReason.NEWEST_VALID)
+
+    if policy.uses_gfs:
+        today = when.date()
+        days = {today - timedelta(days=k) for k in range(policy.daily or 0)}
+        weeks = {
+            (today - timedelta(weeks=k)).isocalendar()[:2]
+            for k in range(policy.weekly or 0)
+        }
+        months = {_month_back(today, k) for k in range(policy.monthly or 0)}
+        newest_day: dict[date, str] = {}
+        newest_week: dict[tuple[int, int], str] = {}
+        newest_month: dict[tuple[int, int], str] = {}
+        for record in chrono:  # later entries overwrite: newest per period
+            at = local[record.backup_id]
+            if not record.usable:
+                if at.date() in days:
+                    keep(record.backup_id, KeepReason.RECENT_FAILED)
+                continue
+            newest_day[at.date()] = record.backup_id
+            newest_week[tuple(at.isocalendar()[:2])] = record.backup_id
+            newest_month[(at.year, at.month)] = record.backup_id
+        for day, version_id in newest_day.items():
+            if day in days:
+                keep(version_id, KeepReason.DAILY)
+        for week, version_id in newest_week.items():
+            if week in weeks:
+                keep(version_id, KeepReason.WEEKLY)
+        for month, version_id in newest_month.items():
+            if month in months:
+                keep(version_id, KeepReason.MONTHLY)
+        for record in items:
+            if record.usable and record.reason in GFS_KEEP_REASONS:
+                keep(record.backup_id, KeepReason.MANUAL)
+    else:
+        count = len(reasons)
+        for usable_pass in (True, False):
+            for record in newest_first:
+                if record.backup_id in reasons or record.usable is not usable_pass:
+                    continue
+                if policy.max_age is not None and (
+                    when - record.created_at > policy.max_age
+                ):
+                    continue
+                if policy.max_versions is not None and count >= policy.max_versions:
+                    continue
+                keep(
+                    record.backup_id,
+                    KeepReason.WITHIN_POLICY
+                    if usable_pass
+                    else KeepReason.RECENT_FAILED,
+                )
+                count += 1
+
+    by_id = {r.backup_id: r for r in items}
+    total = sum(by_id[v].size_bytes for v in reasons)
+    limit_deleted: list[str] = []
+    if limit is not None and total > limit:
+        evictable = [
+            r
+            for r in chrono
+            if r.backup_id in reasons and not r.protected and r is not newest_usable
+        ]
+        # unusable first, then oldest (chrono order inside each group);
+        # versions GFS keeps for their reason (manual/pre_*) go last.
+        evictable.sort(
+            key=lambda r: (
+                KeepReason.MANUAL in reasons[r.backup_id],
+                r.usable,
+                local[r.backup_id],
+                r.backup_id,
             )
-        ):
-            deleted.append(record.backup_id)
-            continue
-        kept[record.backup_id] = KeepReason.WITHIN_POLICY
-        size += record.size_bytes
+        )
+        for record in evictable:
+            if total <= limit:
+                break
+            del reasons[record.backup_id]
+            limit_deleted.append(record.backup_id)
+            total -= record.size_bytes
+    over_limit = limit is not None and total > limit
+    limit_manual = [
+        v
+        for v in limit_deleted
+        if by_id[v].usable and by_id[v].reason in GFS_KEEP_REASONS
+    ]
+    ordered_reasons = {
+        version_id: tuple(r for r in _KEEP_ORDER if r in reasons[version_id])
+        for version_id in (r.backup_id for r in chrono if r.backup_id in reasons)
+    }
     return RetentionResult(
-        router_id=router_id, evaluated_at=now, deleted=tuple(deleted), kept=kept
+        router_id=router_id,
+        evaluated_at=when,
+        deleted=tuple(r.backup_id for r in chrono if r.backup_id not in reasons),
+        kept={k: v[0] for k, v in ordered_reasons.items()},
+        reasons=ordered_reasons,
+        total_bytes=total,
+        max_bytes=limit,
+        over_limit=over_limit,
+        limit_deleted=tuple(limit_deleted),
+        limit_deleted_manual=tuple(limit_manual),
     )
 
 
@@ -2321,6 +2803,11 @@ class SweepReport:
     partial_deleted: int = 0
     orphaned_moved: int = 0
     marked_missing: int = 0
+    # Security review 2026-11-18 (additive): symbolic links are never
+    # followed, moved or deleted, only counted; index-less files are kept
+    # (not moved to orphaned/) while the index is recovered or empty.
+    symlinks_skipped: int = 0
+    unindexed_kept: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -2329,6 +2816,8 @@ class SweepReport:
             "partial_deleted": self.partial_deleted,
             "orphaned_moved": self.orphaned_moved,
             "marked_missing": self.marked_missing,
+            "symlinks_skipped": self.symlinks_skipped,
+            "unindexed_kept": self.unindexed_kept,
         }
 
 
@@ -2353,6 +2842,7 @@ class DriftAck:
     def __post_init__(self) -> None:
         """Validate."""
         _coerce(self, "state", DriftAckState)
+        check_token("drift_id", self.drift_id)
         if not isinstance(self.ts, datetime):
             raise TypeError("ts must be a datetime")
         _require_aware(self.ts, "ts")
@@ -2623,6 +3113,11 @@ ConfigSource = BackupRecord | ConfigSnapshot
 # bytes. It only serves the versions of that call and checks sha256 against
 # the index (BackupIntegrityError on mismatch).
 ArtifactReader = Callable[[str, str], Awaitable[bytes]]
+# Pinned SSH of the core per call (1.44.0): (router_id, command, timeout_s,
+# binary) -> api.PinnedSshResult. Bound to the core's per-router host-key
+# pin store; refuses (OpenWrtHostKeyError) on a pending or mismatching pin.
+# The ONLY SSH a provider may use for config/backup work.
+PinnedSshRunner = Callable[[str, str, float, bool], Awaitable[Any]]
 
 
 @dataclass(frozen=True, kw_only=True, slots=True, eq=False)
@@ -2640,6 +3135,8 @@ class ProviderContext:
     installation_key: Callable[[], Awaitable[bytes]] = field(repr=False)
     installation_key_state: InstallationKeyState = InstallationKeyState.OK
     correlation_id: str | None = None
+    # Additive (1.44.0): pinned SSH bound to the core's host-key pin store.
+    ssh: PinnedSshRunner | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Coerce."""
@@ -2648,6 +3145,35 @@ class ProviderContext:
     async def async_get_installation_key(self) -> bytes:
         """The 32-byte installation key for HMAC secret digests."""
         return await self.installation_key()
+
+    async def async_ssh_run_pinned(
+        self,
+        router_id: str,
+        command: str,
+        *,
+        timeout: float = 60.0,
+        binary: bool = False,
+        max_output_bytes: int | None = None,
+    ) -> Any:
+        """Run one command over the pinned SSH path (never the shared one).
+
+        ``max_output_bytes`` caps stdout (default: the per-artifact limit
+        plus a margin); above it ArtifactTooLargeError (``too_large``).
+
+        Raises AuthorizationError (reason ``ssh_pin_unavailable``) when the
+        core has no pin store; the pin store's own refusals
+        (``api.OpenWrtHostKeyError``: ``pin_pending``, ``mismatch`` ...)
+        pass through unchanged.
+        """
+        if self.ssh is None:
+            raise AuthorizationError(
+                "No host-key pin store: the pinned SSH path is unavailable",
+                router_id=router_id,
+                details={"reason": "ssh_pin_unavailable"},
+            )
+        if max_output_bytes is None:
+            return await self.ssh(router_id, command, timeout, binary)
+        return await self.ssh(router_id, command, timeout, binary, max_output_bytes)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -2770,9 +3296,19 @@ class DriftReport:
 
     ``secrets_comparable=False``: the baseline's secret digests were made
     with another installation key (or the key is lost); such options are
-    NOT_COMPARABLE changes, not drift. ``rebaseline=True``: first check
-    after ``installation_key_reset``; the core stores the live state as new
-    baseline instead of reporting drift.
+    NOT_COMPARABLE changes, not drift.
+
+    ``rebaseline=True`` says "the installation key changed". It may come
+    together with real changes (``drifted=True`` / comparable changes):
+    then the report IS a drift and the core emits its events. The core
+    makes the live state the new baseline only when nothing comparable
+    changed and the comparison is complete (:attr:`rebaseline_allowed`).
+
+    ``comparison``: ``complete``, ``partial`` (``not_compared`` lists the
+    configs that could not be read or compared) or ``unknown``. Only a
+    complete comparison without drift is an all-clear (:attr:`all_clear`);
+    otherwise the core emits ``configuration.drift_incomplete`` and keeps
+    the drift dedup state.
     """
 
     router_id: str
@@ -2788,18 +3324,50 @@ class DriftReport:
     unknown_count: int = 0  # changes the provider cannot classify
     secrets_comparable: bool = True
     rebaseline: bool = False
+    comparison: DriftComparison = DriftComparison.COMPLETE
+    not_compared: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        """Coerce and validate."""
+        """Coerce and validate (provider output: untrusted)."""
         _coerce(self, "ack_state", DriftAckState, optional=True)
         _coerce(self, "baseline_rule", BaselineRule, optional=True)
+        _coerce(self, "comparison", DriftComparison)
         _set(self, "ignored_paths", tuple(self.ignored_paths))
+        if isinstance(self.not_compared, str):
+            raise TypeError("not_compared must be a sequence of config names")
+        _set(self, "not_compared", tuple(self.not_compared))
+        for name in self.not_compared:
+            check_token("not_compared entry", name)
+        check_token("drift_id", self.drift_id, optional=True)
+        if self.drifted and self.drift_id is None:
+            raise ValueError("a drift needs a drift_id")
         for name in ("critical_count", "unknown_count"):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ValueError(f"{name} must be a non-negative int")
-        if self.rebaseline and self.drifted:
-            raise ValueError("a rebaseline report is never a drift")
+        if self.comparison is DriftComparison.COMPLETE and self.not_compared:
+            raise ValueError("a complete comparison lists no not_compared configs")
+        if self.comparison is DriftComparison.PARTIAL and not self.not_compared:
+            raise ValueError("a partial comparison lists the configs not compared")
+
+    @property
+    def rebaseline_allowed(self) -> bool:
+        """Key changed and NOTHING else: complete, no drift, no real change."""
+        return (
+            self.rebaseline
+            and not self.drifted
+            and not self.diff.comparable_changes
+            and self.comparison is DriftComparison.COMPLETE
+        )
+
+    @property
+    def all_clear(self) -> bool:
+        """No drift AND everything compared (only then dedup state resets)."""
+        return (
+            not self.drifted
+            and not self.diff.comparable_changes
+            and self.comparison is DriftComparison.COMPLETE
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form with secrets masked."""
@@ -2819,18 +3387,28 @@ class DriftReport:
             "unknown_count": self.unknown_count,
             "secrets_comparable": self.secrets_comparable,
             "rebaseline": self.rebaseline,
+            "comparison": self.comparison.value,
+            "not_compared": list(self.not_compared),
         }
 
 
 def drift_event_types(report: DriftReport) -> tuple[CoreEventType, ...]:
-    """Core event types the core emits for one drift report (in order)."""
-    if report.rebaseline or not report.drifted:
+    """Core event types the core emits for one drift report (in order).
+
+    A report that says ``rebaseline`` but also carries real changes is a
+    drift; an incomplete comparison adds ``drift_incomplete``.
+    """
+    if report.rebaseline_allowed:
         return ()
-    types = [CoreEventType.DRIFT_DETECTED]
-    if report.critical_count:
-        types.append(CoreEventType.CHANGE_CRITICAL)
-    if report.unknown_count:
-        types.append(CoreEventType.CHANGE_UNKNOWN)
+    types: list[CoreEventType] = []
+    if report.drifted or report.diff.comparable_changes:
+        types.append(CoreEventType.DRIFT_DETECTED)
+        if report.critical_count:
+            types.append(CoreEventType.CHANGE_CRITICAL)
+        if report.unknown_count:
+            types.append(CoreEventType.CHANGE_UNKNOWN)
+    if report.comparison is not DriftComparison.COMPLETE:
+        types.append(CoreEventType.DRIFT_INCOMPLETE)
     return tuple(types)
 
 
@@ -2926,7 +3504,8 @@ class RestorePlan:
     instructions: tuple[str, ...] = ()  # i18n keys for a manual restore
 
     def __post_init__(self) -> None:
-        """Freeze."""
+        """Freeze; the plan id comes from the provider (untrusted)."""
+        check_token("plan_id", self.plan_id)
         for name in ("steps", "warnings", "instructions"):
             _set(self, name, tuple(getattr(self, name)))
 
@@ -3825,8 +4404,11 @@ class VersionStoreProtocol(VersionReadView, Protocol):
     async def async_sweep(self) -> SweepReport:
         """Startup cleanup: partials, index-less files, missing files."""
 
-    async def async_archive_router(self, router_id: str) -> None:
-        """Move a removed router's folder to ``removed/<router_id>/``."""
+    async def async_archive_router(
+        self, router_id: str, *, entry_id: str | None = None
+    ) -> bool:
+        """Move a removed router's folder to ``removed/<router_id>/`` (audited;
+        True if a folder was moved). Runs automatically on entry removal."""
 
 
 @runtime_checkable

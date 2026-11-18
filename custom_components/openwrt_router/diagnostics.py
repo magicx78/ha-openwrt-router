@@ -10,6 +10,7 @@ per-client lists are reduced to counts before the data is returned.
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from collections import Counter
 from typing import Any
@@ -26,6 +27,8 @@ from .const import (
     DIAGNOSTICS_TO_REDACT,
     DOMAIN,
 )
+from .core_masking import ACTOR_PSEUDONYM_PREFIX as _SHARED_PSEUDONYM_PREFIX
+from .core_masking import pseudonymise_user_ids
 from .mac_utils import is_mac
 from .net_engine import async_get_engine
 from .topology_ports import redacted_port_summary
@@ -131,6 +134,9 @@ async def async_get_config_entry_diagnostics(
         "intelligence": _intelligence_summary(hass, entry.entry_id),
         # Client stability: fleet-wide counts only (no MAC, IP or hostname).
         "client_stability": _client_stability_summary(hass),
+        # Enterprise core: registry counts, this router's record (no MAC,
+        # host or hostname) and its last audit entries; masked twice.
+        "enterprise_core": _enterprise_core_summary(hass, entry.entry_id),
         # TODO: include bandwidth statistics once the bandwidth sensor is implemented
         # TODO: include traffic statistics once implemented
     }
@@ -161,6 +167,62 @@ def _client_stability_summary(hass: HomeAssistant) -> dict[str, Any]:
     except Exception:
         _LOGGER.debug("Client stability diagnostics failed", exc_info=True)
         return {"loaded": cs.loaded, "error": True}
+
+
+ENTERPRISE_CORE_AUDIT_ENTRIES = 20
+# Actor user ids in the audit entries are replaced by a pseudonym: same user
+# -> same pseudonym inside ONE download (a fresh random salt per download),
+# never the Home Assistant user id (security review 2026-11-18, #11). The
+# helper is shared with the core bus event (core_masking owns the prefix).
+ACTOR_PSEUDONYM_PREFIX = _SHARED_PSEUDONYM_PREFIX
+
+
+def _pseudonymise_actors(
+    entries: list[dict[str, Any]], salt: bytes
+) -> list[dict[str, Any]]:
+    """Copy of ``entries`` with every ``user_id`` (actor included) replaced."""
+    return [pseudonymise_user_ids(entry, salt) for entry in entries]
+
+
+def _enterprise_core_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any]:
+    """Registry summary + last audit entries; never fails the download.
+
+    Goes through core_masking (secrets in keys and free text) and then
+    through the integration's own ``_redact`` (keys like host/mac/ip).
+    Actor user ids become per-download pseudonyms (``usr_<12 hex>``). The
+    record summary and the event data hold no MACs, hosts or hostnames
+    (only counts, flags and field names).
+    """
+    try:
+        from .core_masking import mask_for_output
+        from .enterprise_core import async_get_core
+
+        core = async_get_core(hass)
+        if core is None:
+            return {"loaded": False}
+        registry = core.registry
+        router_id = registry.router_id_for_entry(entry_id)
+        summary: dict[str, Any] = {
+            "loaded": core.loaded,
+            **core.summary(),
+            "router_record": None,
+            "audit_entries": [],
+        }
+        if router_id is not None:
+            summary["router_record"] = registry.record_summary(router_id)
+            summary["audit_entries"] = _pseudonymise_actors(
+                [
+                    event.to_dict()
+                    for event in core.audit.events(
+                        router_id=router_id, limit=ENTERPRISE_CORE_AUDIT_ENTRIES
+                    )
+                ],
+                secrets.token_bytes(16),
+            )
+        return _redact(mask_for_output(summary))
+    except Exception:
+        _LOGGER.debug("Enterprise core diagnostics failed", exc_info=True)
+        return {"loaded": False, "error": True}
 
 
 def _client_summary(clients: list[dict[str, Any]]) -> dict[str, Any]:

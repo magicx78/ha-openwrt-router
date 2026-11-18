@@ -10,6 +10,9 @@
  * 1.43: sort by AP, 7-day availability and trend; the last problem includes
  * failed authentication, association and DHCP; more AP figures; score
  * weights and class limits editable here (admin only).
+ *
+ * 1.43.1: German numbers everywhere (`num`), rates labelled per 100 h, APs
+ * in rank order, a header row and a trend cell, filters folded on a phone.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -26,11 +29,15 @@ import {
   CLASS_LABEL,
   PART_LABEL,
   STATE_LABEL,
+  activeFilterCount,
   bandLabel,
   kindText,
+  num,
   pct,
+  per100h,
   problemText,
   recommendationText,
+  trendCell,
 } from '../utils/stability';
 import { ClientStabilityDetail, Score } from './ClientStabilityDetail';
 
@@ -53,7 +60,6 @@ const SORTS: Array<{ id: string; label: string }> = [
 ];
 const PAGE = 100;
 const MIN_RELOAD_MS = 60_000;
-const TREND = { up: '↑', down: '↓', flat: '→' } as const;
 
 interface Props {
   api: IntelApi;
@@ -83,7 +89,38 @@ function useDebounced(value: string, ms: number): string {
   return out;
 }
 
+/** Column titles of the client rows (desktop only; phones show cards). */
+function HeadRow() {
+  return (
+    <div className="stab-row stab-row--head" aria-hidden="true">
+      <span>Name</span>
+      <span>Access Point</span>
+      <span>Zustand</span>
+      <span>Score</span>
+      <span>Verfügbarkeit 24 h / 7 T</span>
+      <span>Reconn. 24 h</span>
+      <span>Letztes Problem</span>
+      <span>Daten 24 h</span>
+      <span>Trend</span>
+    </div>
+  );
+}
+
+/** Trend arrow from `trend`/`trend_delta`, the fields the trend sort uses. */
+function TrendCell({ row }: { row: StabilityRow }) {
+  const t = trendCell(row.trend, row.trend_delta);
+  return (
+    <span className="stab-row__trend" title={t.text}>
+      <span className={`stab-trend stab-trend--${row.trend ?? 'none'}`} aria-hidden="true">{t.arrow}</span>
+      <span className="stab-sr">Trend: {t.text}</span>
+    </span>
+  );
+}
+
 function Row({ row, onOpen }: { row: StabilityRow; onOpen: () => void }) {
+  const problem = row.last_problem
+    ? `${formatTs(row.last_problem.ts)} · ${problemText(row.last_problem)}`
+    : row.last_disconnect ? formatTs(row.last_disconnect.ts) : 'kein Problem';
   return (
     <button type="button" className="stab-row" onClick={onOpen}>
       <span className="stab-row__name">
@@ -96,21 +133,21 @@ function Row({ row, onOpen }: { row: StabilityRow; onOpen: () => void }) {
       <span className={`stab-state stab-state--${row.state}`}>{STATE_LABEL[row.state] ?? row.state}</span>
       <span className="stab-row__score">
         <Score score={row.score} />
-        {row.trend && <span className={`stab-trend stab-trend--${row.trend}`} title="gegenüber den 24 h davor">{TREND[row.trend]}</span>}
         <span className="diag-table__meta">{CLASS_LABEL[row.class]}</span>
       </span>
       <span className="stab-row__num" title="Verfügbarkeit 24 h / 7 Tage">
         {pct(row.availability_24h)} / {pct(row.availability_7d)}
       </span>
       <span className="stab-row__num" title="Reconnects 24 h">
-        {row.reconnects_24h ?? '–'} <span className="diag-table__meta">Reconn.</span>
+        {num(row.reconnects_24h)} <span className="diag-table__meta stab-row__unit">Reconn.</span>
       </span>
-      <span className="stab-row__num diag-table__meta" title="Letztes Problem (Abbruch oder fehlgeschlagene Anmeldung, Assoziierung, DHCP)">
-        {row.last_problem
-          ? `${formatTs(row.last_problem.ts)} · ${problemText(row.last_problem)}`
-          : row.last_disconnect ? formatTs(row.last_disconnect.ts) : 'kein Problem'}
+      <span className="stab-row__num stab-row__problem diag-table__meta" title={`Letztes Problem: ${problem}`}>
+        {problem}
       </span>
-      <span className="stab-row__num diag-table__meta" title="Messabdeckung 24 h">{pct(row.coverage)} Daten</span>
+      <span className="stab-row__num diag-table__meta" title="Messabdeckung 24 h">
+        {pct(row.coverage)} <span className="stab-row__unit">Daten</span>
+      </span>
+      <TrendCell row={row} />
     </button>
   );
 }
@@ -125,6 +162,8 @@ function ClientTable({
   onOpen: (mac: string) => void;
 }) {
   const [filters, setFilters] = useState<Record<string, string>>({ sort: 'score' });
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const active = activeFilterCount(filters);
   const [search, setSearch] = useState('');
   const q = useDebounced(search.trim(), 400);
   const [table, setTable] = useState<StabilityTable | null>(null);
@@ -163,6 +202,12 @@ function ClientTable({
           Suche
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Name, MAC, IP" spellCheck={false} maxLength={64} />
         </label>
+        {/* Phone width: the six selects fold behind this toggle (CSS). */}
+        <button type="button" className="diag-btn stab-filter-toggle" aria-expanded={filtersOpen}
+          aria-controls="stab-filter-more" onClick={() => setFiltersOpen(o => !o)}>
+          Filter{active > 0 ? ` · ${active} aktiv` : ''} {filtersOpen ? '▴' : '▾'}
+        </button>
+        <div id="stab-filter-more" className={`stab-filter-more${filtersOpen ? ' open' : ''}`}>
         <label>
           Access Point
           <select value={filters.router ?? ''} onChange={set('router')}>
@@ -204,6 +249,7 @@ function ClientTable({
             {SORTS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
           </select>
         </label>
+        </div>
       </div>
       {error && <div className="diag-error">{error}</div>}
       {table && !table.enabled && (
@@ -211,11 +257,12 @@ function ClientTable({
       )}
       {table && (
         <div className="settings-info">
-          {table.total} WLAN-Clients. Kabelclients erscheinen hier nicht (keine Verbindungsdaten pro Gerät).
+          {num(table.total)} WLAN-Clients. Kabelclients erscheinen hier nicht (keine Verbindungsdaten pro Gerät).
         </div>
       )}
       {table && rows.length === 0 && !error && <div className="view-empty">Keine Clients für diese Filter.</div>}
       <div className="stab-rows">
+        {rows.length > 0 && <HeadRow />}
         {rows.map(r => <Row key={r.mac} row={r} onOpen={() => onOpen(r.mac)} />)}
       </div>
       {table?.next_cursor && (
@@ -255,23 +302,31 @@ function ApComparison({ api, tick, nameOf }: { api: IntelApi; tick: number; name
       {view && view.aps.length === 0 && <div className="view-empty">Noch keine AP-Daten.</div>}
       {view && view.aps.length > 0 && (
         <div className="settings-card">
-          <div className="settings-card__heading">Access Points (Raten je 100 Client-Stunden)</div>
+          <div className="settings-card__heading">Access Points</div>
+          <div className="settings-info">
+            Rang 1 = wenigste Abbrüche je 100 Client-Stunden. „–“: kein Rang, zu wenig Daten (unter 10 Client-Stunden).
+          </div>
           <div className="diag-table">
             {view.aps.map(a => (
               <div key={a.ap} className="diag-table__row stab-ap">
-                <span className="diag-table__name">{a.rank != null ? `${a.rank}. ` : ''}{a.name}</span>
+                <span className="diag-table__name">
+                  {a.rank != null
+                    ? <span title={`Rang ${a.rank}`}>{a.rank}. </span>
+                    : <span title="kein Rang: zu wenig Daten">– </span>}
+                  {a.name}
+                </span>
                 <span><Score score={a.stability} /></span>
                 <span className="diag-table__meta">
-                  {a.clients} Clients · {Math.round(a.client_hours)} h
-                  {a.disconnects_per_100h != null ? ` · ${a.disconnects_per_100h} Abbrüche` : ''}
-                  {a.reconnects_per_100h != null ? ` · ${a.reconnects_per_100h} Reconnects` : ''}
-                  {a.flaps_per_100h != null ? ` · ${a.flaps_per_100h} Flattern` : ''}
-                  {a.auth_fail_per_100h != null ? ` · ${a.auth_fail_per_100h} Anmeldefehler` : ''}
-                  {a.roams_in_per_100h != null ? ` · Roaming ${a.roams_in_per_100h} rein / ${a.roams_out_per_100h ?? '–'} raus` : ''}
-                  {a.rssi_mean != null ? ` · Ø ${a.rssi_mean} dBm` : ''}
+                  {num(a.clients)} Clients · {num(a.client_hours)} Client-Stunden
+                  {a.disconnects_per_100h != null ? ` · ${per100h(a.disconnects_per_100h, 'Abbrüche')}` : ''}
+                  {a.reconnects_per_100h != null ? ` · ${per100h(a.reconnects_per_100h, 'Reconnects')}` : ''}
+                  {a.flaps_per_100h != null ? ` · ${per100h(a.flaps_per_100h, 'Flattern')}` : ''}
+                  {a.auth_fail_per_100h != null ? ` · ${per100h(a.auth_fail_per_100h, 'Anmeldefehler')}` : ''}
+                  {a.roams_in_per_100h != null ? ` · Roaming ${num(a.roams_in_per_100h, 1)} rein / ${num(a.roams_out_per_100h, 1)} raus je 100 h` : ''}
+                  {a.rssi_mean != null ? ` · Ø ${num(a.rssi_mean)} dBm` : ''}
                   {a.weak_share != null ? ` · ${pct(a.weak_share)} schwaches Signal` : ''}
-                  {a.infra_disconnects ? ` · ${a.infra_disconnects} durch Infrastruktur` : ''}
-                  {a.infra_clients ? ` (${a.infra_clients} Clients)` : ''}
+                  {a.infra_disconnects ? ` · ${num(a.infra_disconnects)} Abbrüche durch Infrastruktur` : ''}
+                  {a.infra_clients ? ` (${num(a.infra_clients)} Clients)` : ''}
                 </span>
                 <span className="diag-table__meta">
                   {a.status === 'insufficient' ? 'zu wenig Daten' : a.low_basis ? 'schmale Basis' : ''}
@@ -321,7 +376,7 @@ function ScoreSettings({
 }) {
   const parts = data.limits.parts ?? Object.keys(weights);
   const names = (data.limits.classes ?? Object.keys(CLASS_LABEL)) as Array<keyof typeof CLASS_LABEL>;
-  const num = (value: string) => (value === '' ? Number.NaN : Number(value));
+  const parse = (value: string) => (value === '' ? Number.NaN : Number(value));
   return (
     <>
       <div className="settings-card__heading">Score-Gewichte (0–100)</div>
@@ -331,7 +386,7 @@ function ScoreSettings({
             <span className="diag-field__label">{PART_LABEL[p] ?? p}</span>
             <input type="number" min={0} max={100} step={1} disabled={readOnly}
               value={Number.isFinite(weights[p]) ? weights[p] : ''}
-              onChange={e => onChange({ weights: { ...weights, [p]: num(e.target.value) } })} />
+              onChange={e => onChange({ weights: { ...weights, [p]: parse(e.target.value) } })} />
           </label>
         ))}
       </div>
@@ -342,7 +397,7 @@ function ScoreSettings({
             <span className="diag-field__label">{CLASS_LABEL[names[i]] ?? `Klasse ${i + 1}`}</span>
             <input type="number" min={0} max={100} step={1} disabled={readOnly}
               value={Number.isFinite(v) ? v : ''}
-              onChange={e => onChange({ classes: classes.map((c, k) => (k === i ? num(e.target.value) : c)) })} />
+              onChange={e => onChange({ classes: classes.map((c, k) => (k === i ? parse(e.target.value) : c)) })} />
           </label>
         ))}
       </div>
@@ -402,11 +457,14 @@ function Settings({
         <span className="diag-field__def">{data.limits.store_mb_min}–{data.limits.store_mb_max}; älteste Daten werden zuerst gekürzt</span>
       </label>
       <div className="diag-kv">
-        <span>Clients: <b>{st.clients}</b></span>
-        <span>Speicher: <b>{st.store_bytes_last_save != null ? `${(st.store_bytes_last_save / 1e6).toFixed(2)} MB` : '–'}</b> von {(st.store_limit_bytes / 1e6).toFixed(0)} MB</span>
-        <span>Gekürzt: <b>{st.trimmed_for_size}</b></span>
-        <span>Sensoren für: <b>{data.settings.entity_macs.length}</b> / {data.limits.entity_max} Clients</span>
-        <span>Schlafende Geräte: <b>{data.settings.sleepy_macs.length}</b></span>
+        <span>Clients: <b>{num(st.clients)}</b></span>
+        {/* The size is known only after the first save, up to 5 min after a start. */}
+        {st.store_bytes_last_save != null
+          ? <span>Speicher: <b>{num(st.store_bytes_last_save / 1e6, 2)} MB</b> von {num(st.store_limit_bytes / 1e6)} MB</span>
+          : <span>Speicher: <b>noch nicht gespeichert</b> (Grenze {num(st.store_limit_bytes / 1e6)} MB)</span>}
+        <span>Gekürzt: <b>{num(st.trimmed_for_size)}</b></span>
+        <span>Sensoren für: <b>{num(data.settings.entity_macs.length)}</b> / {num(data.limits.entity_max)} Clients</span>
+        <span>Schlafende Geräte: <b>{num(data.settings.sleepy_macs.length)}</b></span>
       </div>
       {st.store_load_failed && <div className="diag-error">Der gespeicherte Verlauf war unlesbar; es wird neu gesammelt.</div>}
       <ScoreSettings data={data} weights={weights} classes={classes} readOnly={readOnly}

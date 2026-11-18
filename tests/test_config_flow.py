@@ -750,7 +750,7 @@ class TestChecklistStep:
             patch.object(cf_module, "async_get_clientsession", MagicMock()),
             patch.object(cf_module, "OpenWrtAPI", factory),
             patch(
-                "custom_components.openwrt_router.acl_provisioning.check_and_deploy_acl",
+                "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
                 AsyncMock(side_effect=AclDeployError("write_blocked", "denied")),
             ),
         ):
@@ -774,7 +774,7 @@ class TestChecklistStep:
             patch.object(cf_module, "async_get_clientsession", MagicMock()),
             patch.object(cf_module, "OpenWrtAPI", factory),
             patch(
-                "custom_components.openwrt_router.acl_provisioning.check_and_deploy_acl",
+                "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
                 AsyncMock(return_value=True),
             ),
         ):
@@ -801,7 +801,7 @@ class TestChecklistStep:
             patch.object(cf_module, "async_get_clientsession", MagicMock()),
             patch.object(cf_module, "OpenWrtAPI", factory),
             patch(
-                "custom_components.openwrt_router.acl_provisioning.check_and_deploy_acl",
+                "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
                 AsyncMock(return_value=False),
             ),
         ):
@@ -820,7 +820,7 @@ class TestChecklistStep:
             patch.object(cf_module, "async_get_clientsession", MagicMock()),
             patch.object(cf_module, "OpenWrtAPI", factory),
             patch(
-                "custom_components.openwrt_router.acl_provisioning.check_and_deploy_acl",
+                "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
                 AsyncMock(return_value=True),
             ),
         ):
@@ -844,7 +844,7 @@ class TestChecklistStep:
             patch.object(cf_module, "async_get_clientsession", MagicMock()),
             patch.object(cf_module, "OpenWrtAPI", factory),
             patch(
-                "custom_components.openwrt_router.acl_provisioning.check_and_deploy_acl",
+                "custom_components.openwrt_router.acl_provisioning.ensure_acl_respecting_offer",
                 AsyncMock(return_value=True),
             ),
         ):
