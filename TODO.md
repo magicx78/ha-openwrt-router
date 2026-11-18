@@ -31,6 +31,8 @@ B1–B9 auf `claude/client-stability-f9a22b`. Nutzerdoku: `docs/client-stability
       Detail-Charts, Karten-Layout unter 760 px), als Admin und Nicht-Admin;
       seit 1.43 auch Streifen 7/30 Tage, AP-Wechsel-Streifen mit Legende,
       Balken Abbrüche/Reconnects und das Formular für Gewichte/Grenzen.
+- [ ] **Kopfleiste läuft unter 420 px rechts aus dem Bild** (Panel-Statusleiste
+      mit Filtern, Suche und Schaltern; seit 1.43.1 bekannt, nicht behoben).
 - [ ] **Muster beim Stundenwechsel vorberechnen** (der Tabellenabruf mit
       1000 Clients blockiert sonst etwa 1,4 s, weil er die Stundenmuster
       aller Clients rechnet).

@@ -63,7 +63,7 @@ export function Sidebar({ open, activeTab, warningCount, diagnoseCount, showDiag
             key={id}
             className={`sidebar-item${activeTab === id ? ' active' : ''}`}
             title={!open ? label : undefined}
-            aria-label={label}
+            aria-label={badge ? `${label} (${badge})` : label}
             onClick={() => onTabChange(id)}
           >
             <span

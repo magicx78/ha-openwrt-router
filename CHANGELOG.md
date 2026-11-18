@@ -2,6 +2,24 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Handy: untere Leiste wieder bedienbar.** Unter 420 px lag der Kopf der
+  geschlossenen, leeren Detailansicht („Details ×“) über der neuen
+  Symbolleiste und fing jeden Tipp ab. Die geschlossene Detailansicht ist
+  jetzt unsichtbar und nimmt keine Tipps mehr an; geöffnet sitzt sie über
+  der Leiste. Am Desktop unverändert.
+- **Speicheranzeige nach dem Start:** bis zum ersten Speichern (bis 5 min
+  nach dem Start) steht in den Stabilitäts-Einstellungen „noch nicht
+  gespeichert“ statt „–“.
+- **Deutsche Zahlen auch in der Fußleiste** und überall, wo Datenraten und
+  Datenmengen stehen (Traffic, Detailansicht, Verbindungs-Tooltip):
+  „5,0 Mbit/s“, „8,9 GB“.
+- **Screenreader:** die Symbole der Seitenleiste nennen wieder ihre Zahl,
+  z. B. „Diagnose (3)“.
+
 ## [1.43.1] - 2026-11-17
 
 Reine Panel-Korrekturen am Tab *Diagnose → Stabilität*; keine neuen

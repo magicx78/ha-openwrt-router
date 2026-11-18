@@ -458,7 +458,10 @@ function Settings({
       </label>
       <div className="diag-kv">
         <span>Clients: <b>{num(st.clients)}</b></span>
-        <span>Speicher: <b>{st.store_bytes_last_save != null ? `${num(st.store_bytes_last_save / 1e6, 2)} MB` : '–'}</b> von {num(st.store_limit_bytes / 1e6)} MB</span>
+        {/* The size is known only after the first save, up to 5 min after a start. */}
+        {st.store_bytes_last_save != null
+          ? <span>Speicher: <b>{num(st.store_bytes_last_save / 1e6, 2)} MB</b> von {num(st.store_limit_bytes / 1e6)} MB</span>
+          : <span>Speicher: <b>noch nicht gespeichert</b> (Grenze {num(st.store_limit_bytes / 1e6)} MB)</span>}
         <span>Gekürzt: <b>{num(st.trimmed_for_size)}</b></span>
         <span>Sensoren für: <b>{num(data.settings.entity_macs.length)}</b> / {num(data.limits.entity_max)} Clients</span>
         <span>Schlafende Geräte: <b>{num(data.settings.sleepy_macs.length)}</b></span>

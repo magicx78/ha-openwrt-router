@@ -972,10 +972,17 @@
   display: flex;
   flex-direction: column;
   transform: translateX(100%);
-  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  /* Closed = hidden after the slide-out: no paint, no hit area, no focus
+     (the closed, empty "Details" header covered the phone tab bar). */
+  visibility: hidden;
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), visibility 0s linear 0.22s;
   overflow: hidden;
 }
-.detail-panel.open { transform: translateX(0); }
+.detail-panel.open {
+  transform: translateX(0);
+  visibility: visible;
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), visibility 0s;
+}
 
 .detail-panel__header {
   display: flex;
@@ -1187,6 +1194,15 @@
 }
 
 .detail-panel__handle { display: none; }
+
+/* Phone tab bar (≤ 420 px): the drawer lives in .topo-main, which ends at the
+   top of the bar, so the open sheet already sits above the bar. Closed, it
+   also moves past the bar's height, fully below the panel; the dimmer stops
+   at the sheet. */
+@media (max-width: 420px) {
+  .detail-panel:not(.open) { transform: translateY(calc(100% + var(--statusbar-h))); }
+  .topo-app:has(.detail-panel.open)::after { bottom: calc(72vh + var(--statusbar-h)); }
+}
 
 
 /* ═══════════════════════════════════════════════════════════════════════════
