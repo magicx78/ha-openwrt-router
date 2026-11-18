@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import web
@@ -30,9 +31,16 @@ from core_test_provider import (
 from core_testkit import ADMIN_ID, USER_ID, FakeDisks, user_actor
 from homeassistant.components.http import KEY_HASS_USER
 from homeassistant.helpers.http import KEY_AUTHENTICATED, KEY_HASS
+from test_acl_tiers import V8_TEXT
+from test_acl_tiers import _api as acl_api
 from yarl import URL
 
 from custom_components.openwrt_router import config_views as cv
+from custom_components.openwrt_router.acl_provisioning import (
+    RPCD_ACL_CONTENT,
+    AclEnsureOutcome,
+    observe_deployed_acl,
+)
 from custom_components.openwrt_router.const import (
     DATA_CONFIG_MANAGER,
     DEFAULT_CONFIG_BACKUP_TIME,
@@ -233,8 +241,67 @@ def fake_approval(action: str, router_id: str, **extra: Any) -> Any:
 
 
 def patch_api(monkeypatch: Any, api: Any, name: str, fn: Any) -> None:
-    """Replace a facade method (the facade has __slots__: on the class)."""
-    monkeypatch.setattr(type(api), name, lambda self, *a, **k: fn(*a, **k))
+    """Replace a facade method (the facade has __slots__: on the class).
+
+    Every call is first bound against the real method's signature, so a
+    route that calls the facade with a missing or unknown argument fails
+    here exactly like it would against the real core (contract #111: the
+    actor of ``async_validate_backup``).
+    """
+    real = inspect.signature(getattr(type(api), name))
+
+    def replacement(self: Any, *a: Any, **k: Any) -> Any:
+        real.bind(self, *a, **k)
+        return fn(*a, **k)
+
+    monkeypatch.setattr(type(api), name, replacement)
+
+
+def acl_capable(env: Any, router_id: str | None = None) -> Any:
+    """Give a router an api the core's ACL flow can read and write.
+
+    The kit's coordinator api is a plain MagicMock; the core reads the
+    current ACL through ``await api._call("file", "read", ...)`` before it
+    builds an offer.  Same helper as ``_acl_env`` in the enterprise tests.
+    """
+    rid = router_id or env.rid
+    api = acl_api(V8_TEXT)
+    api.login = AsyncMock(return_value=True)
+    api.reset_acl_blocked = MagicMock()
+    api.uses_ssh_fallback = False
+    env.coords[rid].api = api
+    env.core.security.grace_s = 0
+    env.core.security.login_retry_s = 0
+    env.core.registry.note_deployed_acl(
+        env.entry_of(rid).entry_id,
+        observe_deployed_acl(
+            AclEnsureOutcome(False, "current", True, RPCD_ACL_CONTENT)
+        ),
+    )
+    return api
+
+
+def test_patch_api_binds_against_the_real_signature(monkeypatch):
+    """A patched facade method still refuses a call the core would refuse."""
+    from custom_components.openwrt_router.config_api import ConfigurationApi
+
+    actor = inspect.signature(ConfigurationApi.async_validate_backup).parameters[
+        "actor"
+    ]
+    assert actor.kind is inspect.Parameter.KEYWORD_ONLY
+    assert actor.default is inspect.Parameter.empty  # contract #111
+
+    class Facade:
+        __slots__ = ()
+
+        async def async_validate_backup(self, backup_id: str, *, actor: Any) -> Any:
+            raise AssertionError("replaced")
+
+    api = Facade()
+    patch_api(monkeypatch, api, "async_validate_backup", lambda *a, **k: "ok")
+    with pytest.raises(TypeError):
+        api.async_validate_backup("bkp_x")
+    assert api.async_validate_backup("bkp_x", actor=ADMIN) == "ok"
 
 
 def with_fake_approvals(monkeypatch: Any, api: Any, *fakes: Any) -> None:
@@ -1372,6 +1439,7 @@ async def test_ssh_pin_routes(disks, tmp_path, monkeypatch):
 
 async def test_secret_never_in_any_response(disks, tmp_path, caplog):
     env = await cm_env(disks, tmp_path, routers=2, options=ON)
+    router_api = acl_capable(env)  # the acl-offer route reads the live ACL
     caplog.set_level("DEBUG")
     async with http(env.hass) as h:
         bid = (await backup(h, env.rid))["backup_id"]
@@ -1386,7 +1454,9 @@ async def test_secret_never_in_any_response(disks, tmp_path, caplog):
                 backup_id=bid,
                 drift_id="drift_0",
             )
-            await h.call(method_of(view), path)
+            resp = await h.call(method_of(view), path)
+            # no route may crash on the current core (a 500 is a bug here)
+            assert resp.status < 500, (route_id(view), resp.body[:300])
         await h.get(f"/routers/{env.rid}/diff", params={"from": bid})
         env.provider.fail["validate"] = ProviderError(f"{SECRET} broke")
         resp = await h.post(f"/versions/{bid}/validate")
@@ -1394,7 +1464,7 @@ async def test_secret_never_in_any_response(disks, tmp_path, caplog):
         env.provider.fail["compare"] = RuntimeError(f"{SECRET} broke")
         resp = await h.get(f"/routers/{env.rid}/diff", params={"from": bid})
         assert resp.status >= 500
-        h.assert_no_secret(ADMIN_ID, "user-plain")
+        h.assert_no_secret(ADMIN_ID, "user-plain", router_api._password)
     assert SECRET not in caplog.text
     await stop(env)
 

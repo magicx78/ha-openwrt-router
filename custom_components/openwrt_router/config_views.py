@@ -994,7 +994,10 @@ class ValidateView(_PostView):
     ) -> Any:
         record = await ctx.backup(backup_id)
         await read_body(request)
-        return version_view(await ctx.api.async_validate_backup(record.backup_id))
+        # The core requires an actor (contract #111): the admin of the request.
+        return version_view(
+            await ctx.api.async_validate_backup(record.backup_id, actor=ctx.actor)
+        )
 
 
 class ProtectView(_PostView):
