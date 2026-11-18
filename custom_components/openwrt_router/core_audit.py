@@ -67,6 +67,11 @@ _RING_SIZES: Mapping[AuditRing, int] = {
     AuditRing.GENERAL: AUDIT_MAX_EVENTS,
     AuditRing.SECURITY: SECURITY_AUDIT_MAX_EVENTS,
 }
+# Open dedup windows (security review #7): windows that have passed are
+# pruned whenever a new scope opens; above this many the oldest windows are
+# dropped (counted in stats["dedup_scopes_dropped"], logged). A dropped
+# window only means the next repeat is published again.
+MAX_DEDUP_SCOPES = 4096
 
 
 def migrate_audit_store(
@@ -122,6 +127,8 @@ class AuditLog:
             "listener_errors": 0,
             "bus_errors": 0,
             "skipped_on_load": 0,
+            "dedup_scopes_pruned": 0,
+            "dedup_scopes_dropped": 0,
         }
 
     # -- store ---------------------------------------------------------------------
@@ -288,7 +295,8 @@ class AuditLog:
             actor=actor,
             correlation_id=correlation_id,
             dedup_key=dedup_key,
-            data=dict(data or {}),
+            # masked before it is kept, persisted or published (review #6)
+            data=mask_for_output(dict(data or {})),
         )
         self._expire(ts)
         scope = event.dedup_scope
@@ -305,6 +313,7 @@ class AuditLog:
                     repeated.repeat_count,
                 )
                 return EmitResult(event=repeated, published=False, deduplicated=True)
+            self._prune_dedup(ts)
             self._dedup[scope] = (
                 event.event_id,
                 ts,
@@ -315,6 +324,29 @@ class AuditLog:
         self.schedule_save()
         published = self._publish(event)
         return EmitResult(event=event, published=published)
+
+    def _prune_dedup(self, now: datetime) -> None:
+        """Forget passed windows; keep at most MAX_DEDUP_SCOPES - 1 open."""
+        passed = [
+            scope
+            for scope, (_eid, started, cooldown) in self._dedup.items()
+            if now - started >= cooldown
+        ]
+        for scope in passed:
+            del self._dedup[scope]
+        self.stats["dedup_scopes_pruned"] += len(passed)
+        excess = len(self._dedup) - (MAX_DEDUP_SCOPES - 1)
+        if excess > 0:
+            oldest = sorted(self._dedup, key=lambda sc: self._dedup[sc][1])[:excess]
+            for scope in oldest:
+                del self._dedup[scope]
+            self.stats["dedup_scopes_dropped"] += excess
+            _LOGGER.warning(
+                "Audit dedup: %d open windows dropped (cap %d); their next "
+                "repeat is published again",
+                excess,
+                MAX_DEDUP_SCOPES,
+            )
 
     def _repeat(self, scope: tuple[str, str, str], ts: datetime) -> CoreEvent | None:
         """Bump the stored entry of ``scope`` if its window is still open."""
@@ -454,6 +486,7 @@ class AuditLog:
             "general": self.ring_size(AuditRing.GENERAL),
             "security": self.ring_size(AuditRing.SECURITY),
             "listeners": len(self._listeners),
+            "dedup_scopes": len(self._dedup),
             **self.stats,
         }
 

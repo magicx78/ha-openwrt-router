@@ -9,9 +9,13 @@ per-client lists are reduced to counts before the data is returned.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
+import secrets
 import time
 from collections import Counter
+from collections.abc import Mapping
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -167,13 +171,37 @@ def _client_stability_summary(hass: HomeAssistant) -> dict[str, Any]:
 
 
 ENTERPRISE_CORE_AUDIT_ENTRIES = 20
+# Actor user ids in the audit entries are replaced by a pseudonym: same user
+# -> same pseudonym inside ONE download (a fresh random salt per download),
+# never the Home Assistant user id (security review 2026-11-18, #11).
+ACTOR_PSEUDONYM_PREFIX = "usr_"
+
+
+def _pseudonymise_actors(
+    entries: list[dict[str, Any]], salt: bytes
+) -> list[dict[str, Any]]:
+    """Copy of ``entries`` with every ``actor.user_id`` replaced."""
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        actor = entry.get("actor") if isinstance(entry, Mapping) else None
+        if isinstance(actor, Mapping) and isinstance(actor.get("user_id"), str):
+            digest = hmac.new(
+                salt, actor["user_id"].encode("utf-8"), hashlib.sha256
+            ).hexdigest()[:12]
+            entry = {
+                **entry,
+                "actor": {**actor, "user_id": ACTOR_PSEUDONYM_PREFIX + digest},
+            }
+        out.append(entry)
+    return out
 
 
 def _enterprise_core_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any]:
     """Registry summary + last audit entries; never fails the download.
 
     Goes through core_masking (secrets in keys and free text) and then
-    through the integration's own ``_redact`` (keys like host/mac/ip). The
+    through the integration's own ``_redact`` (keys like host/mac/ip).
+    Actor user ids become per-download pseudonyms (``usr_<12 hex>``). The
     record summary and the event data hold no MACs, hosts or hostnames
     (only counts, flags and field names).
     """
@@ -194,12 +222,15 @@ def _enterprise_core_summary(hass: HomeAssistant, entry_id: str) -> dict[str, An
         }
         if router_id is not None:
             summary["router_record"] = registry.record_summary(router_id)
-            summary["audit_entries"] = [
-                event.to_dict()
-                for event in core.audit.events(
-                    router_id=router_id, limit=ENTERPRISE_CORE_AUDIT_ENTRIES
-                )
-            ]
+            summary["audit_entries"] = _pseudonymise_actors(
+                [
+                    event.to_dict()
+                    for event in core.audit.events(
+                        router_id=router_id, limit=ENTERPRISE_CORE_AUDIT_ENTRIES
+                    )
+                ],
+                secrets.token_bytes(16),
+            )
         return _redact(mask_for_output(summary))
     except Exception:
         _LOGGER.debug("Enterprise core diagnostics failed", exc_info=True)

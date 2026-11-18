@@ -30,6 +30,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import functools
 import hashlib
 import logging
 import os
@@ -77,6 +78,7 @@ from .core_models import (
     INSTALLATION_KEY_BYTES,
     INSTALLATION_KEY_STORE_KEY,
     ISSUE_INSTALLATION_KEY_LOST,
+    ISSUE_INSTALLATION_KEY_REPLACED,
     MAX_LIST_LIMIT,
     ORPHAN_SWEEP_MIN_AGE,
     PARTIAL_SUFFIX,
@@ -226,31 +228,73 @@ class _SweepFiles:
     partial_deleted: int = 0
     orphaned_moved: int = 0
     unknown_entries: int = 0
+    symlinks_skipped: int = 0
+    unindexed_kept: int = 0
     present: dict[str, set[str]] | None = None
 
 
-def _sweep_files(root: str, indexed: Mapping[str, set[str]], now: float) -> _SweepFiles:
-    """Delete partials, move old index-less files to orphaned/ (executor)."""
+def _scan(path: str) -> list[os.DirEntry[str]]:
+    """Directory entries sorted by name (no symlink is followed here)."""
+    with os.scandir(path) as entries:
+        return sorted(entries, key=lambda e: e.name)
+
+
+def _is_link(entry: os.DirEntry[str]) -> bool:
+    """Symbolic link, or a Windows junction (Python 3.12+), never followed."""
+    is_junction = getattr(entry, "is_junction", None)
+    return entry.is_symlink() or bool(is_junction and is_junction())
+
+
+def _path_is_link(path: str) -> bool:
+    is_junction = getattr(os.path, "isjunction", None)
+    return os.path.islink(path) or bool(is_junction and is_junction(path))
+
+
+def _sweep_files(
+    root: str,
+    indexed: Mapping[str, set[str]],
+    now: float,
+    *,
+    keep_unindexed: bool = False,
+) -> _SweepFiles:
+    """Delete partials, move old index-less files to orphaned/ (executor).
+
+    Symbolic links (to files or folders) are never followed, deleted or
+    moved; they are counted in ``symlinks_skipped``. ``keep_unindexed``
+    (index recovered or empty): index-less files stay where they are and
+    are counted in ``unindexed_kept`` instead of being moved.
+    """
     out = _SweepFiles(present={})
-    if not os.path.isdir(root):
+    if _path_is_link(root) or not os.path.isdir(root):
+        out.symlinks_skipped += int(_path_is_link(root))
         return out
     min_age = ORPHAN_SWEEP_MIN_AGE.total_seconds()
-    for name in sorted(os.listdir(root)):
-        path = os.path.join(root, name)
+    for top in _scan(root):
+        name = top.name
+        path = top.path
         if name in (CONFIG_BACKUP_ORPHANED_DIR, CONFIG_BACKUP_REMOVED_DIR):
             continue
-        if name.endswith(PARTIAL_SUFFIX) and os.path.isfile(path):
+        if _is_link(top):
+            out.symlinks_skipped += 1
+            continue
+        if name.endswith(PARTIAL_SUFFIX) and top.is_file(follow_symlinks=False):
             os.remove(path)
             out.partial_deleted += 1
             continue
-        if not os.path.isdir(path) or not is_valid_id(name, ROUTER_ID_PREFIX):
+        if not top.is_dir(follow_symlinks=False) or not is_valid_id(
+            name, ROUTER_ID_PREFIX
+        ):
             out.unknown_entries += 1
             continue
         known = indexed.get(name, set())
         present: set[str] = set()
-        for file_name in sorted(os.listdir(path)):
-            file_path = os.path.join(path, file_name)
-            if not os.path.isfile(file_path):
+        for item in _scan(path):
+            file_name = item.name
+            file_path = item.path
+            if _is_link(item):
+                out.symlinks_skipped += 1
+                continue
+            if not item.is_file(follow_symlinks=False):
                 out.unknown_entries += 1
                 continue
             if file_name.endswith(PARTIAL_SUFFIX):
@@ -260,7 +304,10 @@ def _sweep_files(root: str, indexed: Mapping[str, set[str]], now: float) -> _Swe
             if file_name in known:
                 present.add(file_name)
                 continue
-            if now - os.path.getmtime(file_path) < min_age:
+            if keep_unindexed:
+                out.unindexed_kept += 1
+                continue
+            if now - item.stat(follow_symlinks=False).st_mtime < min_age:
                 continue  # may belong to a put that is still running
             target_dir = os.path.join(root, CONFIG_BACKUP_ORPHANED_DIR, name)
             _ensure_dir(target_dir)
@@ -339,6 +386,13 @@ class VersionStore:
         self._key: bytes | None = None
         self._key_state = InstallationKeyState.UNINITIALISED
         self._key_lost_reported = False
+        # A key file existed but gave no usable key (review #9): a new key
+        # is then audited and raises a repair issue (hook, replaceable).
+        self._key_doc_unusable = False
+        self.key_replaced_hook: Callable[[str], None] = self._raise_key_replaced_issue
+        # The index was unreadable (review #13): when it happened (ISO), kept
+        # in the catalog; the sweep then never moves index-less files.
+        self.index_recovered_at: str | None = None
         self._root = self._resolve_root()
         self.loaded = False
         self.closed = False
@@ -369,10 +423,14 @@ class VersionStore:
             "created_at_adjusted": 0,
             "dedup_refused_sha256": 0,
             "keys_created": 0,
+            "keys_replaced": 0,
             "key_resets": 0,
             "key_lost_events": 0,
             "key_lost_already_reported": 0,
             "refused_not_ready": 0,
+            "sweep_symlinks_skipped": 0,
+            "sweep_unindexed_kept": 0,
+            "sweeps_skipped": 0,
         }
 
     def _require_loaded(self) -> None:
@@ -419,13 +477,18 @@ class VersionStore:
         loaded = await core_store.async_load_store(
             self.hass, self._catalog, CONFIG_CATALOG_STORE_KEY
         )
-        if loaded.failed:
-            self._report_recovered(backup_written=loaded.backed_up)
         self._restore(loaded.data or {})
+        if loaded.failed:
+            self.index_recovered_at = self.now().isoformat()
+            self._report_recovered(backup_written=loaded.backed_up)
+            self._schedule_save()  # keep index_recovered_at
         key_load = await core_store.async_load_store(
             self.hass, self._key_store, INSTALLATION_KEY_STORE_KEY
         )
         key = None if key_load.failed else _decode_key(key_load.data)
+        self._key_doc_unusable = key is None and (
+            key_load.failed or key_load.data is not None
+        )
         if key_load.data is not None and key is None and not key_load.failed:
             _LOGGER.warning("Installation key store has an unusable key document")
             await core_store.async_backup_store(
@@ -480,6 +543,8 @@ class VersionStore:
             if isinstance(r, str)
         }
         self._key_lost_reported = data.get("key_lost_reported") is True
+        recovered = data.get("index_recovered_at")
+        self.index_recovered_at = recovered if isinstance(recovered, str) else None
         self.stats["records_skipped_on_load"] += skipped
         self.stats["acks_skipped_on_load"] += acks_skipped
         if skipped or acks_skipped:
@@ -516,6 +581,11 @@ class VersionStore:
             },
             "rebaseline": sorted(self._rebaseline),
             "key_lost_reported": self._key_lost_reported,
+            **(
+                {"index_recovered_at": self.index_recovered_at}
+                if self.index_recovered_at
+                else {}
+            ),
         }
 
     async def _async_save(self) -> None:
@@ -653,8 +723,64 @@ class VersionStore:
             key = secrets.token_bytes(INSTALLATION_KEY_BYTES)
             await self._async_store_key(key)
             self.stats["keys_created"] += 1
-            _LOGGER.info("Enterprise core: installation key created (first use)")
+            if self._key_doc_unusable:
+                self._report_key_replaced(key)
+            else:
+                _LOGGER.info("Enterprise core: installation key created (first use)")
             return key
+
+    @property
+    def file_activity(self) -> int:
+        """Writes, deletions and moves of version files by this store."""
+        return sum(
+            self.stats[name]
+            for name in (
+                "puts",
+                "deleted",
+                "pruned",
+                "write_errors",
+                "archived_routers",
+                "archive_missing_folder",
+                "keys_created",
+                "keys_replaced",
+                "key_resets",
+            )
+        )
+
+    @property
+    def has_pending_save(self) -> bool:
+        """True while a delayed index write is scheduled."""
+        return self._save_pending
+
+    def _report_key_replaced(self, key: bytes) -> None:
+        """A key file existed but was unusable: audit + repair issue."""
+        self._key_doc_unusable = False
+        self.stats["keys_replaced"] += 1
+        key_id = installation_key_id(key)
+        _LOGGER.warning(
+            "Enterprise core: the installation key file was unreadable and has "
+            "been replaced by a new key (%s); no stored version used the old key",
+            key_id,
+        )
+        self._emit(
+            CoreEventType.INSTALLATION_KEY_REPLACED,
+            severity=Severity.WARNING,
+            result=EventResult.FAILURE,
+            data={"key_id": key_id, "store": INSTALLATION_KEY_STORE_KEY},
+        )
+        try:
+            self.key_replaced_hook(key_id)
+        except Exception:
+            _LOGGER.warning("Repair issue for the replaced key failed", exc_info=True)
+
+    def _raise_key_replaced_issue(self, key_id: str) -> None:
+        async_raise_issue(
+            self.hass,
+            ISSUE_INSTALLATION_KEY_REPLACED,
+            ISSUE_INSTALLATION_KEY_REPLACED,
+            ir.IssueSeverity.WARNING,
+            {"key_id": key_id},
+        )
 
     async def _async_store_key(self, key: bytes) -> None:
         document = {
@@ -1218,9 +1344,16 @@ class VersionStore:
         for record in self._records.values():
             names = indexed.setdefault(record.router_id, set())
             names.update(a.storage.locator for a in record.artifacts.values())
+        keep_unindexed = self.index_recovered_at is not None or not self._records
         try:
             files = await self.hass.async_add_executor_job(
-                _sweep_files, self._root, indexed, time.time()
+                functools.partial(
+                    _sweep_files,
+                    self._root,
+                    indexed,
+                    time.time(),
+                    keep_unindexed=keep_unindexed,
+                )
             )
         except OSError as err:
             raise StorageError(
@@ -1248,14 +1381,47 @@ class VersionStore:
                 await self._async_save()
         self.stats["sweeps"] += 1
         self.stats["sweep_unknown_entries"] += files.unknown_entries
+        self.stats["sweep_symlinks_skipped"] += files.symlinks_skipped
+        self.stats["sweep_unindexed_kept"] += files.unindexed_kept
         report = SweepReport(
             checked_at=now,
             partial_deleted=files.partial_deleted,
             orphaned_moved=files.orphaned_moved,
             marked_missing=len(missing),
+            symlinks_skipped=files.symlinks_skipped,
+            unindexed_kept=files.unindexed_kept,
         )
         self.last_sweep = report
-        if report.partial_deleted or report.orphaned_moved or report.marked_missing:
+        if files.symlinks_skipped:
+            _LOGGER.warning(
+                "Version store sweep: %d symbolic link(s) in the backup folder "
+                "left alone (never followed)",
+                files.symlinks_skipped,
+            )
+        if files.unindexed_kept:
+            _LOGGER.warning(
+                "Version store sweep: %d file(s) without an index entry kept in "
+                "place (index %s); rebuilding the index is not automatic",
+                files.unindexed_kept,
+                "recovered" if self.index_recovered_at else "empty",
+            )
+            self._emit(
+                CoreEventType.STORE_RECOVERED,
+                severity=Severity.WARNING,
+                result=EventResult.FAILURE,
+                data={
+                    "store": CONFIG_CATALOG_STORE_KEY,
+                    "index_state": "recovered" if self.index_recovered_at else "empty",
+                    "index_recovered_at": self.index_recovered_at,
+                    "unindexed_files_kept": files.unindexed_kept,
+                },
+            )
+        if (
+            report.partial_deleted
+            or report.orphaned_moved
+            or report.marked_missing
+            or report.symlinks_skipped
+        ):
             self._emit(
                 CoreEventType.STORAGE_SWEPT,
                 severity=Severity.WARNING if missing else Severity.INFO,
@@ -1363,6 +1529,7 @@ class VersionStore:
             "drift_acks": sum(len(a) for a in self._acks.values()),
             "rebaseline_pending": len(self._rebaseline),
             "installation_key_state": self._key_state.value,
+            "index_recovered_at": self.index_recovered_at,
             "last_sweep": None
             if self.last_sweep is None
             else self.last_sweep.to_dict(),

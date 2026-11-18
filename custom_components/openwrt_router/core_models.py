@@ -120,6 +120,8 @@ INSTALLATION_KEY_BYTES: Final = 32
 INSTALLATION_KEY_ID_LENGTH: Final = 16
 # Repair issue id raised when the key is lost (issue registry, later step).
 ISSUE_INSTALLATION_KEY_LOST: Final = "installation_key_lost"
+# An unreadable key file was replaced by a new key (no versions existed).
+ISSUE_INSTALLATION_KEY_REPLACED: Final = "installation_key_replaced"
 CORE_STORE_VERSION: Final = 1
 
 # Per-router SSH host-key pins of the config/backup path (1.44.0). Own store
@@ -1067,6 +1069,9 @@ class CoreEventType(StrEnum):
     APPROVAL_EXPIRED = "security.approval_expired"
     INSTALLATION_KEY_LOST = "core.installation_key_lost"
     INSTALLATION_KEY_RESET = "core.installation_key_reset"
+    # Security review (1.44.0, additive): a new key was created although a
+    # key file existed (unreadable / unusable); security ring, repair issue.
+    INSTALLATION_KEY_REPLACED = "core.installation_key_replaced"
     # A core store was unreadable, copied to .bak and rebuilt (additive, part 1:
     # router ids are deterministic; adoption links are what can be lost).
     STORE_RECOVERED = "core.store_recovered"
@@ -1081,6 +1086,9 @@ class CoreEventType(StrEnum):
     SSH_PIN_RESET = "security.ssh_pin_reset"
     # ... and the version folder of a removed entry moved to removed/<id>/.
     ROUTER_ARCHIVED = "configuration.router_archived"
+    # Security review (1.44.0, additive): the options-flow switch
+    # config_backup_enabled changed (actor, old and new value).
+    CONFIG_OPTION_CHANGED = "security.config_option_changed"
 
 
 # Namespaces of core event types. Only the core emits these (also the ones
@@ -1098,6 +1106,7 @@ SECURITY_EVENT_TYPES: Final = frozenset(
     {
         CoreEventType.INSTALLATION_KEY_LOST,
         CoreEventType.INSTALLATION_KEY_RESET,
+        CoreEventType.INSTALLATION_KEY_REPLACED,
         CoreEventType.ROUTER_ARCHIVED,
         CoreEventType.BACKUP_EXPORTED,
         CoreEventType.BACKUP_DELETED,
@@ -1133,6 +1142,7 @@ AUDIT_MANDATORY_EVENT_TYPES: Final = frozenset(
         CoreEventType.APPROVAL_EXPIRED,
         CoreEventType.INSTALLATION_KEY_LOST,
         CoreEventType.INSTALLATION_KEY_RESET,
+        CoreEventType.INSTALLATION_KEY_REPLACED,
         CoreEventType.STORE_RECOVERED,
         CoreEventType.ACL_DEPLOYED,
         CoreEventType.ACL_DEPLOY_FAILED,
@@ -1140,6 +1150,7 @@ AUDIT_MANDATORY_EVENT_TYPES: Final = frozenset(
         CoreEventType.SSH_PIN_MISMATCH,
         CoreEventType.SSH_PIN_RESET,
         CoreEventType.ROUTER_ARCHIVED,
+        CoreEventType.CONFIG_OPTION_CHANGED,
     }
 )
 
@@ -2787,6 +2798,11 @@ class SweepReport:
     partial_deleted: int = 0
     orphaned_moved: int = 0
     marked_missing: int = 0
+    # Security review 2026-11-18 (additive): symbolic links are never
+    # followed, moved or deleted, only counted; index-less files are kept
+    # (not moved to orphaned/) while the index is recovered or empty.
+    symlinks_skipped: int = 0
+    unindexed_kept: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form."""
@@ -2795,6 +2811,8 @@ class SweepReport:
             "partial_deleted": self.partial_deleted,
             "orphaned_moved": self.orphaned_moved,
             "marked_missing": self.marked_missing,
+            "symlinks_skipped": self.symlinks_skipped,
+            "unindexed_kept": self.unindexed_kept,
         }
 
 
@@ -3130,8 +3148,12 @@ class ProviderContext:
         *,
         timeout: float = 60.0,
         binary: bool = False,
+        max_output_bytes: int | None = None,
     ) -> Any:
         """Run one command over the pinned SSH path (never the shared one).
+
+        ``max_output_bytes`` caps stdout (default: the per-artifact limit
+        plus a margin); above it ArtifactTooLargeError (``too_large``).
 
         Raises AuthorizationError (reason ``ssh_pin_unavailable``) when the
         core has no pin store; the pin store's own refusals
@@ -3144,7 +3166,9 @@ class ProviderContext:
                 router_id=router_id,
                 details={"reason": "ssh_pin_unavailable"},
             )
-        return await self.ssh(router_id, command, timeout, binary)
+        if max_output_bytes is None:
+            return await self.ssh(router_id, command, timeout, binary)
+        return await self.ssh(router_id, command, timeout, binary, max_output_bytes)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

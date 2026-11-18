@@ -402,6 +402,8 @@ class RouterRegistry:
         self._records: dict[str, RouterRecord] = {}
         self._entry_map: dict[str, str] = {}
         self._runtime: dict[str, _Runtime] = {}
+        # last KNOWN state per router and capability (merge, finding 16)
+        self._last_known_caps: dict[str, dict[str, Any]] = {}
         self._config_provider: ConfigCapabilityProvider | None = None
         self._provider_revision = 0
         # Module capability detectors (1.44.0): module -> detector. Sync, no
@@ -1054,7 +1056,11 @@ class RouterRegistry:
             acl=runtime.acl,
         )
         fresh.update(self._run_detectors(record, data))
-        result = merge(record.capabilities, fresh)
+        result = merge(
+            record.capabilities,
+            fresh,
+            last_known=self._last_known_caps.setdefault(rid, {}),
+        )
         self.stats["capability_kept_stale"] += result.kept_stale
         self.stats["capability_first_detections"] += result.first_detections
         updates = getattr(data, "updates_available", None)

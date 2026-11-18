@@ -43,6 +43,7 @@ from .acl_provisioning import (
     async_deploy_acl_offer,
     describe_offer,
     observe_deployed_acl,
+    parse_acl_text,
 )
 from .api import (
     HostKeyPin,
@@ -51,6 +52,7 @@ from .api import (
     OpenWrtHostKeyError,
     OpenWrtHostKeyMismatchError,
     OpenWrtResponseError,
+    OpenWrtSshOutputTooLargeError,
     OpenWrtTimeoutError,
     PinnedSshResult,
     async_ssh_run_pinned,
@@ -58,6 +60,7 @@ from .api import (
 from .core_audit import CORE_SOURCE, AuditLog
 from .core_errors import (
     ApprovalInvalidError,
+    ArtifactTooLargeError,
     AuthorizationError,
     ConfigApiError,
     ErrorClass,
@@ -87,6 +90,9 @@ _LOGGER = logging.getLogger(__name__)
 # rpcd restarts after an ACL write: wait, then log in again (as __init__).
 ACL_DEPLOY_GRACE_S = 2.0
 ACL_LOGIN_RETRY_DELAY_S = 1.5
+# The ACL deploy command prints two short markers; anything near this cap
+# is not our shell chain.
+ACL_SSH_MAX_OUTPUT_BYTES = 64 * 1024
 _PIN_STATES = ("none", "pending", "pinned")
 
 
@@ -191,6 +197,9 @@ class SshPinRegistry:
         self._lock = asyncio.Lock()
         self.loaded = False
         self.closed = False
+        # unsaved changes (failed write, or a store rebuilt after a failed
+        # load); the core's release flush writes only then
+        self.dirty = False
         self.stats: dict[str, int] = {
             "load_failed": 0,
             "entries_skipped": 0,
@@ -204,6 +213,7 @@ class SshPinRegistry:
             "mismatches": 0,
             "confirmed": 0,
             "resets": 0,
+            "output_too_large": 0,
         }
 
     # -- store ---------------------------------------------------------------------
@@ -217,6 +227,7 @@ class SshPinRegistry:
         )
         if loaded.failed:
             self.stats["load_failed"] += 1
+            self.dirty = True
             self._emit(
                 CoreEventType.STORE_RECOVERED,
                 severity=Severity.WARNING,
@@ -260,7 +271,9 @@ class SshPinRegistry:
         try:
             await self._store.async_save(self._data())
             self.stats["store_writes"] += 1
+            self.dirty = False
         except Exception:
+            self.dirty = True
             self.stats["store_write_errors"] += 1
             _LOGGER.warning("SSH pin store could not be written", exc_info=True)
             raise
@@ -462,8 +475,14 @@ class SshPinRegistry:
         *,
         timeout: float = 60.0,
         binary: bool = False,
+        max_output_bytes: int | None = None,
     ) -> PinnedSshResult:
-        """``api.async_ssh_run_pinned`` with this router's pin; audits mismatches."""
+        """``api.async_ssh_run_pinned`` with this router's pin; audits mismatches.
+
+        Output above ``max_output_bytes`` (default: per-artifact limit plus
+        margin) raises ArtifactTooLargeError (``error_class`` too_large,
+        ``reason`` ssh_output_too_large), counted in ``output_too_large``.
+        """
         self.stats["pinned_calls"] += 1
         try:
             return await async_ssh_run_pinned(
@@ -472,7 +491,19 @@ class SshPinRegistry:
                 pin_store=self.store_for(router_id),
                 timeout=timeout,
                 binary=binary,
+                max_output_bytes=max_output_bytes,
             )
+        except OpenWrtSshOutputTooLargeError as err:
+            self.stats["output_too_large"] += 1
+            raise ArtifactTooLargeError(
+                "The pinned SSH command produced more output than allowed",
+                router_id=router_id,
+                details={
+                    "reason": "ssh_output_too_large",
+                    "limit_bytes": err.limit_bytes,
+                    "received_bytes": err.received_bytes,
+                },
+            ) from err
         except OpenWrtHostKeyMismatchError as err:
             if not getattr(err, "audited", False):
                 self._audit_mismatch(
@@ -608,6 +639,8 @@ class SecurityActions:
             "acl_deploy_failures": 0,
             "acl_refused_option": 0,
             "acl_post_step_errors": 0,
+            "acl_current_unparsable": 0,
+            "requests_dropped_on_expiry": 0,
             "pin_confirms": 0,
             "pin_resets": 0,
         }
@@ -620,7 +653,12 @@ class SecurityActions:
     # -- pinned SSH runners ----------------------------------------------------------
 
     async def async_ssh_run(
-        self, router_id: str, command: str, timeout: float, binary: bool
+        self,
+        router_id: str,
+        command: str,
+        timeout: float,
+        binary: bool,
+        max_output_bytes: int | None = None,
     ) -> PinnedSshResult:
         """``ProviderContext.ssh``: pinned SSH to an attached router."""
         if self.pins is None:
@@ -631,7 +669,12 @@ class SecurityActions:
             )
         api = self._api(router_id)
         return await self.pins.async_run(
-            api, router_id, command, timeout=timeout, binary=binary
+            api,
+            router_id,
+            command,
+            timeout=timeout,
+            binary=binary,
+            max_output_bytes=max_output_bytes,
         )
 
     def _api(self, router_id: str) -> Any:
@@ -705,8 +748,6 @@ class SecurityActions:
         return request.offer
 
     async def _read_current(self, router_id: str) -> Any:
-        import json
-
         from .acl_provisioning import _read_current_acl
 
         try:
@@ -717,10 +758,18 @@ class SecurityActions:
             ) from err
         if state != "present":
             return None
-        try:
-            return json.loads(text or "")
-        except ValueError:
-            return None
+        # Size limit before parsing, deep nesting caught (finding 10): a
+        # hostile file is reported (counter + log), never raised.
+        parsed, why = parse_acl_text(text)
+        if why is not None:
+            self.stats["acl_current_unparsable"] += 1
+            _LOGGER.warning(
+                "The ACL file on %s could not be parsed (%s); the offer treats "
+                "it as unreadable",
+                router_id,
+                why,
+            )
+        return parsed
 
     async def async_deploy_acl_offer(
         self, approval_id: str, *, actor: Actor
@@ -750,7 +799,11 @@ class SecurityActions:
 
                 async def runner(command: str, timeout: float) -> str | None:
                     result = await pins.async_run(
-                        api, router_id, command, timeout=timeout
+                        api,
+                        router_id,
+                        command,
+                        timeout=timeout,
+                        max_output_bytes=ACL_SSH_MAX_OUTPUT_BYTES,
                     )
                     out = result.stdout
                     return out if isinstance(out, str) else out.decode(errors="replace")
@@ -791,6 +844,11 @@ class SecurityActions:
                     router_id=router_id,
                     details={"reason": reason},
                 ) from err
+            except ArtifactTooLargeError:
+                self._deploy_failed(
+                    router_id, verified, approval_id, "ssh_output_too_large", None
+                )
+                raise
             except (
                 OpenWrtAuthError,
                 OpenWrtConnectionError,

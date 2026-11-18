@@ -69,11 +69,13 @@ from .core_guard import (
     raise_for_decision,
 )
 from .core_models import (
+    APPROVAL_TTL,
     CONFIG_CAPABILITIES,
     CORRELATION_ID_PREFIX,
     DEFAULT_LIST_LIMIT,
     DEFAULT_RETENTION_POLICY,
     FLEET_BACKUP_CONCURRENCY,
+    OPTION_CONFIG_BACKUP_ENABLED,
     ROUTER_LOCK_TIMEOUT,
     SUPPORTED_API_VERSIONS,
     SUPPORTED_PROVIDER_API_VERSIONS,
@@ -156,6 +158,10 @@ _DRIFT_EVENT_TYPES = (
 _EVENT_ID_LIST_MAX = 50
 REBASELINE_DRIFT_PREFIX = "rebaseline:"
 _ARTIFACT_KINDS = frozenset(kind.value for kind in ArtifactKind)
+# Dry-run plans waiting for async_request_restore (security review #4):
+# dropped after this long, and the oldest beyond the cap (both counted).
+RESTORE_PLAN_TTL = APPROVAL_TTL
+MAX_RESTORE_PLANS = 50
 
 
 def _ids(values: Iterable[str]) -> list[str]:
@@ -417,6 +423,7 @@ class ConfigurationManager:
         self._exports: dict[str, tuple[str, str]] = {}
         self._deletions: dict[str, tuple[str, ...]] = {}
         self._plans: dict[str, RestorePlan] = {}
+        self._plan_made: dict[str, datetime] = {}
         self._restores: dict[str, RestorePlan] = {}
         self._apis: dict[int, ConfigurationApi] = {}
         # ACL deploy + SSH pin flows (core_security.SecurityActions), set by
@@ -454,8 +461,15 @@ class ConfigurationManager:
             "deletions": 0,
             "restores": 0,
             "requests_dropped_on_close": 0,
+            "requests_dropped_on_expiry": 0,
+            "plans_expired": 0,
+            "plans_evicted": 0,
             "refused_disabled": 0,
         }
+        # Request data dies with its approval (expired, rejected, unload).
+        self._remove_approval_listener = guard.add_approval_listener(
+            self._approval_ended
+        )
 
     def now(self) -> datetime:
         """Current time (aware UTC)."""
@@ -703,17 +717,44 @@ class ConfigurationManager:
             )
 
     @callback
-    def on_config_option_changed(self, router_id: str, enabled: bool) -> None:
+    def on_config_option_changed(
+        self, router_id: str, enabled: bool, *, actor: Actor | None = None
+    ) -> None:
         """Options flow: ``config_backup_enabled`` changed for a router.
 
-        ON probes again (one provider probe, only with a provider); OFF
-        drops the stored probe results so nothing stale comes back.
+        Audited first (security ring, ``security.config_option_changed``
+        with actor, old and new value). ON probes again (one provider probe,
+        only with a provider); OFF drops the stored probe results so nothing
+        stale comes back.
         """
+        self.audit_config_option_changed(router_id, enabled, actor=actor)
         if enabled:
             self.request_probe(router_id, "config_option_enabled")
             return
         if self._probes.pop(router_id, None) is not None:
             self.registry.invalidate_capabilities()
+
+    def audit_config_option_changed(
+        self, router_id: str | None, enabled: bool, *, actor: Actor | None = None
+    ) -> None:
+        """One security-ring entry for a changed ``config_backup_enabled``.
+
+        ``actor`` None: Home Assistant did not say who submitted the options
+        form (``actor_known`` False in the data).
+        """
+        self._emit(
+            CoreEventType.CONFIG_OPTION_CHANGED,
+            router_id=router_id or "-",
+            actor=actor,
+            result=EventResult.SUCCESS,
+            data={
+                "option": OPTION_CONFIG_BACKUP_ENABLED,
+                "old": not enabled,
+                "new": bool(enabled),
+                "source": "options_flow",
+                "actor_known": actor is not None,
+            },
+        )
 
     # -- probes ----------------------------------------------------------------------
 
@@ -1469,7 +1510,14 @@ class ConfigurationManager:
                 error_class=ErrorClass.INVALID,
                 details={"operation": "prepare_restore"},
             )
+        self._prune_plans()
+        while len(self._plans) >= MAX_RESTORE_PLANS:
+            oldest = min(self._plan_made, key=self._plan_made.__getitem__)
+            self._plans.pop(oldest, None)
+            self._plan_made.pop(oldest, None)
+            self.stats["plans_evicted"] += 1
         self._plans[plan.plan_id] = plan
+        self._plan_made[plan.plan_id] = self.now()
         self._emit(
             CoreEventType.RESTORE_CHECKED,
             router_id=target_router_id,
@@ -1674,6 +1722,9 @@ class ConfigurationManager:
         record = result.record
         if not result.created:
             self.stats["backups_deduplicated"] += 1
+            if record.status is not VersionStatus.FAILED:
+                # an unchanged configuration is a successful collection too
+                self._recovered(router_id, record)
             return result
         if record.status is VersionStatus.FAILED:
             raise_from = ConfigApiError(
@@ -1754,17 +1805,55 @@ class ConfigurationManager:
             self.stats["backup_failed_events_suppressed"] += 1
 
     def _recovered(self, router_id: str, record: BackupRecord) -> None:
-        failing = self._failing.pop(router_id, None)
+        """A successful backup: end every backup_failed window of the router.
+
+        The dedup reset always covers ALL error classes (also windows
+        restored from the audit store after a restart); "was failing" comes
+        from memory and from the persisted audit entries, so a failure
+        before a restart is still followed by ``backup_recovered``.
+        """
+        failing = self._failing.pop(router_id, set()) | self._failing_in_audit(
+            router_id, record.backup_id
+        )
+        self.audit.reset_dedup(router_id, CoreEventType.BACKUP_FAILED)
         if not failing:
             return
-        for error_class in failing:
-            self.audit.reset_dedup(router_id, CoreEventType.BACKUP_FAILED, error_class)
         self._emit(
             CoreEventType.BACKUP_RECOVERED,
             router_id=router_id,
             result=EventResult.SUCCESS,
             data={"version_id": record.backup_id, "error_classes": sorted(failing)},
         )
+
+    def _failing_in_audit(self, router_id: str, version_id: str) -> set[str]:
+        """Error classes of backup_failed entries after the last success."""
+        try:
+            events = self.audit.events(
+                router_id=router_id,
+                types=(
+                    CoreEventType.BACKUP_FAILED,
+                    CoreEventType.BACKUP_RECOVERED,
+                    CoreEventType.BACKUP_CREATED,
+                ),
+            )
+        except Exception:
+            _LOGGER.debug("Audit not readable for %s", router_id, exc_info=True)
+            return set()
+        classes: set[str] = set()
+        for event in sorted(
+            events, key=lambda e: e.last_repeat_at or e.ts, reverse=True
+        ):
+            if (
+                event.type == CoreEventType.BACKUP_CREATED
+                and event.data.get("version_id") == version_id
+            ):
+                continue  # the success being handled right now
+            if event.type != CoreEventType.BACKUP_FAILED:
+                break
+            error_class = event.data.get("error_class")
+            if isinstance(error_class, str):
+                classes.add(error_class)
+        return classes
 
     # -- protect / drift ack -------------------------------------------------------------
 
@@ -2139,6 +2228,7 @@ class ConfigurationManager:
         if not isinstance(plan, RestorePlan):
             raise TypeError("plan must be a RestorePlan")
         self._require(plan.target_router_id, Capability.CONFIG_RESTORE)
+        self._prune_plans()
         known = self._plans.get(plan.plan_id)
         if known is None or known.checksum != plan.checksum:
             self.guard.audit_denial(
@@ -2278,6 +2368,35 @@ class ConfigurationManager:
             store.pop(approval_id, None)
         return decided
 
+    @callback
+    def _approval_ended(self, approval_id: str, reason: str) -> None:
+        """Guard hook: an approval expired or was rejected -> drop its data."""
+        dropped = 0
+        for store in (
+            self._exports,
+            self._deletions,
+            self._restores,
+            *self._security_stores(),
+        ):
+            if store.pop(approval_id, None) is not None:
+                dropped += 1
+        if dropped and reason == "unload":
+            self.stats["requests_dropped_on_close"] += dropped
+        elif dropped and reason != "rejected":
+            self.stats["requests_dropped_on_expiry"] += dropped
+            security = self.security
+            if security is not None:
+                security.stats["requests_dropped_on_expiry"] += dropped
+
+    def _prune_plans(self) -> None:
+        """Forget dry-run plans older than RESTORE_PLAN_TTL (counted)."""
+        limit = self.now() - RESTORE_PLAN_TTL
+        for plan_id, made in list(self._plan_made.items()):
+            if made <= limit:
+                self._plans.pop(plan_id, None)
+                del self._plan_made[plan_id]
+                self.stats["plans_expired"] += 1
+
     def _security_stores(self) -> tuple[dict[str, Any], ...]:
         security = self.security
         return () if security is None else tuple(security.request_stores)
@@ -2301,6 +2420,7 @@ class ConfigurationManager:
             return
         self.closed = True
         self._drop_provider()
+        self._remove_approval_listener()
         dropped = len(self._exports) + len(self._deletions) + len(self._restores)
         for store in self._security_stores():
             dropped += len(store)
@@ -2310,6 +2430,7 @@ class ConfigurationManager:
         self._deletions.clear()
         self._restores.clear()
         self._plans.clear()
+        self._plan_made.clear()
 
     def summary(self) -> dict[str, Any]:
         """Counters (no ids, no actors)."""

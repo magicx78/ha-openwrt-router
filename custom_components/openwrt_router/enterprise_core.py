@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from typing import Any
@@ -46,6 +47,13 @@ from .version_store import VersionStore
 
 _LOGGER = logging.getLogger(__name__)
 
+# A new core skips the startup sweep of the version store when the last
+# sweep in this HA run finished less than this long ago AND no core touched
+# a version file since (setup_retry churn, review finding 12: a router that
+# never gets past setup writes nothing, so there is nothing new to sweep).
+# The state lives in the hass.data slot, never in the released core.
+SWEEP_MIN_INTERVAL_SECONDS = 600.0
+
 
 @dataclass(slots=True)
 class _CoreSlot:
@@ -56,6 +64,11 @@ class _CoreSlot:
     flush: asyncio.Future[None] | None = None
     releases: int = 0
     stats: dict[str, int] = field(default_factory=dict)
+    # time.monotonic() of the last finished version-store sweep (only that)
+    last_sweep_at: float | None = None
+    # False as soon as a core wrote, deleted or moved a version file after
+    # that sweep (set on release / archive); a skip needs True
+    sweep_still_valid: bool = False
 
 
 def _slot(hass: HomeAssistant) -> _CoreSlot:
@@ -114,7 +127,7 @@ class EnterpriseCore:
             # unloaded and refuses every write (StorageError not_loaded).
             for name, step in (
                 ("versions", self.versions.async_load),
-                ("sweep", self.versions.async_sweep),
+                ("sweep", self._async_sweep_once),
                 ("ssh_pins", self.pins.async_load),
             ):
                 if name == "sweep" and not self.versions.loaded:
@@ -129,6 +142,30 @@ class EnterpriseCore:
                         exc_info=True,
                     )
             self.loaded = True
+
+    async def _async_sweep_once(self) -> None:
+        """Sweep the version store unless a sweep finished recently.
+
+        Skips are counted (``versions.stats["sweeps_skipped"]``) and logged.
+        """
+        slot = _slot(self.hass)
+        now = time.monotonic()
+        last = slot.last_sweep_at
+        if (
+            slot.sweep_still_valid
+            and last is not None
+            and now - last < SWEEP_MIN_INTERVAL_SECONDS
+        ):
+            self.versions.stats["sweeps_skipped"] += 1
+            _LOGGER.debug(
+                "Enterprise core: version store sweep skipped (last one %.0f s ago)",
+                now - last,
+            )
+            return
+        slot.sweep_still_valid = False
+        await self.versions.async_sweep()
+        slot.last_sweep_at = time.monotonic()
+        slot.sweep_still_valid = True
 
     @property
     def entry_ids(self) -> frozenset[str]:
@@ -184,14 +221,20 @@ class EnterpriseCore:
                     "Enterprise core: closing the %s failed", name, exc_info=True
                 )
 
-    async def async_flush(self) -> None:
-        """Write every store now (each independently)."""
-        for name, flush in (
-            ("registry", self.registry.async_flush),
-            ("versions", self.versions.async_flush),
-            ("ssh_pins", self.pins.async_flush),
-            ("audit", self.audit.async_flush),
+    async def async_flush(self, *, only_pending: bool = False) -> None:
+        """Write every store now (each independently).
+
+        ``only_pending`` (release): only stores with unsaved changes, so a
+        router stuck in setup_retry does not rewrite every store per retry.
+        """
+        for name, flush, pending in (
+            ("registry", self.registry.async_flush, self.registry.dirty),
+            ("versions", self.versions.async_flush, self.versions.has_pending_save),
+            ("ssh_pins", self.pins.async_flush, self.pins.dirty),
+            ("audit", self.audit.async_flush, self.audit.dirty),
         ):
+            if only_pending and not pending:
+                continue
             try:
                 await flush()
             except Exception:
@@ -308,6 +351,7 @@ async def _async_archive_versions(
     """
     if record is None:
         return
+    _slot(core.hass).sweep_still_valid = False  # a folder moves
     if not core.versions.loaded:
         core.load_errors["archive_skipped"] = (
             core.load_errors.get("archive_skipped", 0) + 1
@@ -337,9 +381,11 @@ async def _async_release(hass: HomeAssistant, core: EnterpriseCore) -> None:
         return
     slot.core = None
     core.close()
+    if core.versions.file_activity:
+        slot.sweep_still_valid = False
     claim = _claim(hass, slot)
     try:
-        await core.async_flush()
+        await core.async_flush(only_pending=True)
     finally:
         _release_claim(slot, claim)
         slot.releases += 1

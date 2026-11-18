@@ -73,7 +73,9 @@
       "rpcd_setup_required": "rpcd ist auf diesem Router nicht konfiguriert. Per SSH auf dem Router ausführen: opkg update && opkg install rpcd rpcd-mod-rpcsys && uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock' && uci set rpcd.@rpcd[0].timeout=30 && uci commit rpcd && service rpcd restart",
       "acl_deploy_failed": "Automatisches ACL-Deployment fehlgeschlagen — der Router hat ubus file/write abgelehnt und auch der SSH-Fallback war nicht erfolgreich. Bitte die ACL manuell mit den oben gezeigten SSH-Befehlen einspielen und erneut prüfen.",
       "acl_deploy_no_change": "Die ACL-Datei wurde geschrieben, aber die Berechtigungen haben sich nach erneuter Prüfung nicht geändert. Möglicherweise ist rpcd noch nicht fertig neu gestartet oder es fehlen Pakete — siehe Installationsbefehle oben, dann erneut versuchen.",
-      "acl_already_current": "Die ACL-Datei auf dem Router ist bereits aktuell — die fehlenden Berechtigungen haben eine andere Ursache (fehlende Pakete oder ausstehender rpcd-Neustart). Siehe Installationsbefehle oben."
+      "acl_already_current": "Die ACL-Datei auf dem Router ist bereits aktuell — die fehlenden Berechtigungen haben eine andere Ursache (fehlende Pakete oder ausstehender rpcd-Neustart). Siehe Installationsbefehle oben.",
+      "acl_tiered_kept": "Der Router hat eine neuere, gestufte Zugriffsliste (ACL). Sie wurde behalten; die alte automatische ACL wurde nicht darübergeschrieben. Rechte für neue Funktionen werden über das ACL-Angebot des Kerns vergeben.",
+      "acl_check_transient": "Der Router war für die Prüfung seiner Zugriffsliste (ACL) nicht erreichbar. Es wurde nichts geändert; versuche es erneut, wenn der Router erreichbar ist."
     },
     "abort": {
       "already_configured": "Dieser Router ist bereits konfiguriert.",
@@ -297,6 +299,10 @@
     "installation_key_lost": {
       "title": "OpenWrt Router: Installationsschlüssel verloren",
       "description": "Der Installationsschlüssel der Integration OpenWrt Router fehlt oder ist nicht lesbar, obwohl {versions} gespeicherte Konfigurationsversion(en) vorhanden sind. Der Schlüssel schützt die Geheimnis-Prüfsummen in diesen Versionen; ohne ihn lassen sich Geheimnisse in alten und neuen Versionen nicht vergleichen, Drift-Prüfungen melden daher keine geänderten Passwörter oder Schlüssel.\n\nDie Integration erzeugt nie selbst einen neuen Schlüssel. Ein Administrator muss das Zurücksetzen beantragen, ein zweiter Schritt muss es freigeben (kritische Aktion). Nach dem Zurücksetzen speichert die nächste Drift-Prüfung jedes Routers die aktuelle Konfiguration als neue Vergleichsbasis.\n\nWenn du Home Assistant aus einer Sicherung wiederhergestellt hast, prüfe zuerst, ob die Datei `.storage/openwrt_router.installation_key` darin enthalten war. Wird sie zurückgespielt und Home Assistant neu gestartet, verschwindet dieser Hinweis."
+    },
+    "installation_key_replaced": {
+      "title": "OpenWrt Router: Installationsschlüssel ersetzt",
+      "description": "Die Datei des Installationsschlüssels der Integration OpenWrt Router war nicht lesbar oder nicht verwendbar. Keine gespeicherte Konfigurationsversion hat sie benutzt, daher wurde ein neuer Schlüssel ({key_id}) erzeugt.\n\nWenn du das nicht erwartet hast, prüfe den Speicherordner von Home Assistant (`.storage/openwrt_router.installation_key`) und den Datenträger auf Schäden. Das Sicherheitsprotokoll des Kerns enthält das Ereignis `core.installation_key_replaced`.\n\nDieser Hinweis verschwindet nach dem nächsten Neustart von Home Assistant."
     },
     "lan_unreachable": {
       "title": "Kein OpenWrt-Router erreichbar",

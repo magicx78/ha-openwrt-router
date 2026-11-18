@@ -28,7 +28,7 @@ run in the poll.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -400,11 +400,27 @@ def _same(a: CapabilityStatus, b: CapabilityStatus) -> bool:
 def merge(
     previous: Mapping[str, CapabilityStatus],
     fresh: Mapping[str, CapabilityStatus],
+    *,
+    last_known: MutableMapping[str, CapabilityState] | None = None,
 ) -> MergeResult:
-    """Apply ``fresh`` to ``previous`` (see module docstring for the rules)."""
+    """Apply ``fresh`` to ``previous`` (see module docstring for the rules).
+
+    ``last_known`` (kept by the caller, updated here): the last KNOWN state
+    per capability. A strict capability that goes known -> unknown -> a
+    different known state (available -> unknown -> unavailable) is then
+    reported as a change from the last known state instead of a silent
+    first detection (security review 2026-11-18, finding 16).
+    """
     result = MergeResult(capabilities=dict(previous))
     for name, new in fresh.items():
         old = previous.get(name)
+        prior: CapabilityState | None = None
+        if last_known is not None:
+            if old is not None and old.state is not CapabilityState.UNKNOWN:
+                last_known[name] = old.state
+            prior = last_known.get(name)
+            if new.state is not CapabilityState.UNKNOWN:
+                last_known[name] = new.state
         if old is None:
             result.capabilities[name] = new
             result.first_detections += 1
@@ -421,7 +437,12 @@ def merge(
             continue
         result.capabilities[name] = new
         if not old_known and new_known:
-            result.first_detections += 1
+            if prior is not None and prior is not new.state:
+                result.changes.append(
+                    {"capability": name, "from": prior.value, "to": new.state.value}
+                )
+            else:
+                result.first_detections += 1
         elif not old_known or not new_known or old.state is new.state:
             result.updated += 1
         else:

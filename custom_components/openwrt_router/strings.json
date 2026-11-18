@@ -73,7 +73,9 @@
       "rpcd_setup_required": "rpcd is not configured on this router. SSH into the router and run: opkg update && opkg install rpcd rpcd-mod-rpcsys && uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock' && uci set rpcd.@rpcd[0].timeout=30 && uci commit rpcd && service rpcd restart",
       "acl_deploy_failed": "Automatic ACL deployment failed — the router rejected ubus file/write and the SSH fallback did not succeed. Deploy the ACL manually using the SSH commands shown above, then run the check again.",
       "acl_deploy_no_change": "The ACL file was written, but the permissions did not change after re-checking. rpcd may not have finished restarting or required packages are missing — see the install commands above, then try again.",
-      "acl_already_current": "The ACL file on the router is already up to date — the missing permissions have another cause (missing packages or a pending rpcd restart). See the install commands above."
+      "acl_already_current": "The ACL file on the router is already up to date — the missing permissions have another cause (missing packages or a pending rpcd restart). See the install commands above.",
+      "acl_tiered_kept": "The router has a newer, tiered access list (ACL). It was kept; the old automatic ACL was not written over it. Rights for new features are granted through the core's ACL offer.",
+      "acl_check_transient": "The router could not be reached to check its access list (ACL). Nothing was changed; try again when the router is reachable."
     },
     "abort": {
       "already_configured": "This router is already configured.",
@@ -297,6 +299,10 @@
     "installation_key_lost": {
       "title": "OpenWrt Router: installation key lost",
       "description": "The installation key of the OpenWrt Router integration is missing or unreadable, while {versions} stored configuration version(s) exist. The key protects the secret digests in these versions; without it, secrets in old and new versions cannot be compared, so drift checks do not report changed passwords or keys.\n\nThe integration never creates a new key on its own. An administrator has to request a key reset and a second step has to approve it (critical action). After the reset, the next drift check of every router stores the current configuration as the new baseline.\n\nIf you restored Home Assistant from a backup, check first whether the file `.storage/openwrt_router.installation_key` was part of it. Restoring that file and restarting Home Assistant clears this message."
+    },
+    "installation_key_replaced": {
+      "title": "OpenWrt Router: installation key replaced",
+      "description": "The installation key file of the OpenWrt Router integration was unreadable or unusable. No stored configuration version used it, so a new key ({key_id}) has been created.\n\nIf you did not expect this, check the Home Assistant storage folder (`.storage/openwrt_router.installation_key`) and the disk for damage. The core's security log contains the event `core.installation_key_replaced`.\n\nThis message disappears after the next restart of Home Assistant."
     },
     "lan_unreachable": {
       "title": "No OpenWrt router reachable",

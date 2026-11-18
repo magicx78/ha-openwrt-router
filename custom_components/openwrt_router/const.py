@@ -351,6 +351,10 @@ ERROR_RPCD_SETUP = "rpcd_setup_required"
 ERROR_ACL_DEPLOY_FAILED = "acl_deploy_failed"
 ERROR_ACL_DEPLOY_NO_CHANGE = "acl_deploy_no_change"
 ERROR_ACL_ALREADY_CURRENT = "acl_already_current"
+# 1.44.0: nothing written because an approved tiered ACL was kept, or
+# because the ACL could not be read (network blip) — own messages.
+ERROR_ACL_TIERED_KEPT = "acl_tiered_kept"
+ERROR_ACL_CHECK_TRANSIENT = "acl_check_transient"
 
 CLIENT_KEY_CONNECTED_SINCE = "connected_since"
 CLIENT_KEY_DHCP_EXPIRES = "dhcp_expires"
