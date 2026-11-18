@@ -671,3 +671,21 @@ STREAM_STATE_NO_PERMISSION = "no_permission"
 STREAM_STATE_NOT_FOUND = "not_found"
 STREAM_STATE_PAUSED = "paused"
 STREAM_STATE_STOPPED = "stopped"
+
+# ---------------------------------------------------------------------------
+# Enterprise core, part 1 (router identity, registry, audit; plan
+# docs/plans/2026-11-17-enterprise-core.md). Store keys, ids and event names
+# live in core_models.py; only the knobs of the stores are here.
+# ---------------------------------------------------------------------------
+# Store minor versions (major = core_models.CORE_STORE_VERSION = 1).
+ROUTER_REGISTRY_STORE_MINOR_VERSION = 1
+AUDIT_STORE_MINOR_VERSION = 1
+# Delayed writes: one pending write at a time, flushed on the last unload.
+ROUTER_REGISTRY_SAVE_DELAY_SECONDS = 30
+AUDIT_SAVE_DELAY_SECONDS = 60
+# Reference fingerprint: at most this many MACs are kept per router.
+ROUTER_FINGERPRINT_MAX_MACS = 64
+# The hostname a freshly flashed / reset OpenWrt reports.
+OPENWRT_DEFAULT_HOSTNAME = "OpenWrt"
+# Model api.get_router_info() reports when system/board is not readable.
+ROUTER_INFO_FALLBACK_MODEL = "OpenWrt Router"

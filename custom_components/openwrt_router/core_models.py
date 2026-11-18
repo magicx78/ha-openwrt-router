@@ -872,6 +872,9 @@ class CoreEventType(StrEnum):
     APPROVAL_EXPIRED = "security.approval_expired"
     INSTALLATION_KEY_LOST = "core.installation_key_lost"
     INSTALLATION_KEY_RESET = "core.installation_key_reset"
+    # A core store was unreadable, copied to .bak and rebuilt (additive, part 1:
+    # router ids are deterministic; adoption links are what can be lost).
+    STORE_RECOVERED = "core.store_recovered"
 
 
 # Namespaces of core event types. Only the core emits these (also the ones
@@ -922,6 +925,7 @@ AUDIT_MANDATORY_EVENT_TYPES: Final = frozenset(
         CoreEventType.APPROVAL_EXPIRED,
         CoreEventType.INSTALLATION_KEY_LOST,
         CoreEventType.INSTALLATION_KEY_RESET,
+        CoreEventType.STORE_RECOVERED,
     }
 )
 
