@@ -689,3 +689,13 @@ ROUTER_FINGERPRINT_MAX_MACS = 64
 OPENWRT_DEFAULT_HOSTNAME = "OpenWrt"
 # Model api.get_router_info() reports when system/board is not readable.
 ROUTER_INFO_FALLBACK_MODEL = "OpenWrt Router"
+# Enterprise core, part 2 (guard, version store, configuration API).
+CONFIG_CATALOG_STORE_MINOR_VERSION = 1
+INSTALLATION_KEY_STORE_MINOR_VERSION = 1
+# last_seen_at updates of a deduplicated backup are written delayed.
+CONFIG_CATALOG_SAVE_DELAY_SECONDS = 30
+# Provider call limits of the configuration API (seconds).
+CONFIG_PROVIDER_COLLECT_TIMEOUT_SECONDS = 180
+CONFIG_PROVIDER_CALL_TIMEOUT_SECONDS = 60
+CONFIG_PROVIDER_PROBE_TIMEOUT_SECONDS = 60
+CONFIG_PROVIDER_RESTORE_TIMEOUT_SECONDS = 300

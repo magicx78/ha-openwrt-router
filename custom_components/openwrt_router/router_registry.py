@@ -63,6 +63,7 @@ from .core_errors import (
     RouterNotFoundError,
 )
 from .core_models import (
+    CONFIG_CAPABILITIES,
     CORE_STORE_VERSION,
     OPTION_CONFIG_BACKUP_ENABLED,
     ROUTER_ID_PREFIX,
@@ -115,6 +116,12 @@ _LOGGER = logging.getLogger(__name__)
 AuthorizationConsumer = Callable[[WriteAuthorization, str, str], None]
 # (entry_id, orphan_router_id, actor) -> authorization (part 2: the guard).
 AdoptAuthorizer = Callable[[str, str, Actor], Awaitable[WriteAuthorization]]
+# (entry_id, router_id, reason) -> None; reason "setup" or "firmware_changed".
+# Called from the poll listener (sync, must not block); part 2 probes then.
+ProbeListener = Callable[[str, str, str], None]
+
+PROBE_REASON_SETUP = "setup"
+PROBE_REASON_FIRMWARE = "firmware_changed"
 
 ORPHAN_ENTRY_REMOVED = "entry_removed"
 ORPHAN_ENTRY_MISSING = "entry_missing_at_load"
@@ -339,7 +346,19 @@ class _Runtime:
     observed_macs: frozenset[str] | None = None
     polls: int = 0
     failed_polls: int = 0
+    # (router_id, firmware version) of the last probe trigger; None = attach.
+    probe_sig: tuple[str, str | None] | None = None
     stats: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class AttachedRouter:
+    """Live handles of an attached entry (core-internal, never stored)."""
+
+    router_id: str
+    entry_id: str
+    coordinator: Any
+    config_enabled: bool
 
 
 class RouterRegistry:
@@ -364,6 +383,7 @@ class RouterRegistry:
         self._provider_revision = 0
         self._adopt_authorizer: AdoptAuthorizer | None = None
         self._consume: AuthorizationConsumer = default_consume
+        self._probe_listener: ProbeListener | None = None
         self.loaded = False
         self.load_failed = False
         self.backed_up = False
@@ -390,6 +410,8 @@ class RouterRegistry:
             "id_collisions": 0,
             "device_lookups": 0,
             "device_lookup_errors": 0,
+            "probe_triggers": 0,
+            "probe_listener_errors": 0,
         }
         self.timing: dict[str, float] = {"runs": 0, "total_s": 0.0, "max_s": 0.0}
 
@@ -548,6 +570,7 @@ class RouterRegistry:
         """Detach every coordinator listener; no further writes are scheduled."""
         for entry_id in list(self._runtime):
             self.detach(entry_id)
+        self._probe_listener = None
         self._closed = True
 
     # -- entries ------------------------------------------------------------------------
@@ -677,6 +700,7 @@ class RouterRegistry:
         runtime.coordinator = coordinator
         runtime.identity_sig = None
         runtime.cap_sig = None
+        runtime.probe_sig = None
 
         @callback
         def _on_update() -> None:
@@ -814,6 +838,34 @@ class RouterRegistry:
 
         if self._records[rid].identity.device_id is None:
             self._update_device_id(rid, entry_id)
+        self._check_probe_trigger(entry_id, rid, runtime)
+
+    def _check_probe_trigger(self, entry_id: str, rid: str, runtime: _Runtime) -> None:
+        """Tell the probe listener about a new attach or a firmware change.
+
+        Tracked with or without a listener, so registering a provider later
+        does not look like a new attach; the provider side probes all
+        attached routers itself when it registers.
+        """
+        signature = (rid, self._records[rid].firmware.version)
+        previous = runtime.probe_sig
+        if signature == previous:
+            return
+        runtime.probe_sig = signature
+        reason = (
+            PROBE_REASON_FIRMWARE
+            if previous is not None and previous[0] == rid
+            else PROBE_REASON_SETUP
+        )
+        listener = self._probe_listener
+        if listener is None:
+            return
+        self.stats["probe_triggers"] += 1
+        try:
+            listener(entry_id, rid, reason)
+        except Exception:
+            self.stats["probe_listener_errors"] += 1
+            _LOGGER.warning("Probe trigger for %s failed", rid, exc_info=True)
 
     def _update_device_id(self, rid: str, entry_id: str) -> None:
         """device_id of the entry's device ``(DOMAIN, entry_id)``; read only.
@@ -1264,6 +1316,39 @@ class RouterRegistry:
         self._provider_revision += 1
 
     @callback
+    def set_probe_listener(self, listener: ProbeListener | None) -> None:
+        """Part 2: called on attach and firmware change (never per poll)."""
+        self._probe_listener = listener
+
+    def attached(self, router_id: str) -> AttachedRouter | None:
+        """Live handles of the entry bound to ``router_id`` (core-internal)."""
+        record = self._records.get(router_id)
+        if record is None or record.state is not RecordState.ACTIVE:
+            return None
+        for entry_id, rid in self._entry_map.items():
+            if rid != router_id:
+                continue
+            runtime = self._runtime.get(entry_id)
+            if runtime is None or runtime.coordinator is None:
+                return None
+            return AttachedRouter(
+                router_id=router_id,
+                entry_id=entry_id,
+                coordinator=runtime.coordinator,
+                config_enabled=runtime.config_enabled,
+            )
+        return None
+
+    def attached_router_ids(self) -> tuple[str, ...]:
+        """Router ids of all entries with a live coordinator."""
+        out = []
+        for entry_id, runtime in sorted(self._runtime.items()):
+            rid = self._entry_map.get(entry_id)
+            if rid is not None and runtime.coordinator is not None:
+                out.append(rid)
+        return tuple(out)
+
+    @callback
     def set_adopt_authorizer(self, authorizer: AdoptAuthorizer | None) -> None:
         """Part 2: the guard authorizes ``async_adopt``."""
         self._adopt_authorizer = authorizer
@@ -1278,7 +1363,15 @@ class RouterRegistry:
     # -- read side (RouterRegistryProtocol) ------------------------------------------------
 
     def get(self, router_id: str) -> RouterRecord:
-        """Record by router id; RouterNotFoundError if unknown."""
+        """Record by router id; RouterNotFoundError if unknown.
+
+        A malformed id (path parts, NUL, oversized, wrong type) is refused
+        without being echoed into the error.
+        """
+        if not is_valid_id(router_id, ROUTER_ID_PREFIX):
+            raise RouterNotFoundError(
+                "Unknown router id", details={"reason": "invalid_router_id"}
+            )
         record = self._records.get(router_id)
         if record is None:
             raise RouterNotFoundError("Unknown router id", router_id=router_id)
@@ -1320,7 +1413,12 @@ class RouterRegistry:
         return status is not None and status.available
 
     def require_capability(self, router_id: str, capability: str) -> None:
-        """Raise CapabilityUnavailableError unless available."""
+        """Raise CapabilityUnavailableError unless available.
+
+        A ``config.*`` capability in ``unknown`` + ``determined_on_first_use``
+        may be tried (a probe could not tell safely); the first real use
+        settles its status.
+        """
         record = self.get(router_id)
         name = str(capability)
         if record.state is not RecordState.ACTIVE:
@@ -1336,10 +1434,15 @@ class RouterRegistry:
                 reason=CapabilityReason.NOT_CHECKED.value,
                 router_id=router_id,
             )
-        if not status.available:
-            raise CapabilityUnavailableError(
-                capability=name, reason=str(status.reason), router_id=router_id
-            )
+        if status.available or (
+            name in CONFIG_CAPABILITIES
+            and status.state is CapabilityState.UNKNOWN
+            and str(status.reason) == CapabilityReason.DETERMINED_ON_FIRST_USE.value
+        ):
+            return
+        raise CapabilityUnavailableError(
+            capability=name, reason=str(status.reason), router_id=router_id
+        )
 
     def summary(self) -> dict[str, Any]:
         """Counts for diagnostics (no MACs, hosts or hostnames)."""

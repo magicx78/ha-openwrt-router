@@ -37,9 +37,22 @@ class CoreStore(Store[dict[str, Any]]):
         *,
         minor_version: int,
         migrate: StoreMigration,
+        private: bool = False,
+        atomic_writes: bool = False,
     ) -> None:
-        """Create the store; ``migrate`` runs inside HA's load."""
-        super().__init__(hass, version, key, minor_version=minor_version)
+        """Create the store; ``migrate`` runs inside HA's load.
+
+        ``private`` (file mode 0600) and ``atomic_writes`` are HA's own
+        ``Store`` options, used for stores that hold secrets.
+        """
+        super().__init__(
+            hass,
+            version,
+            key,
+            private=private,
+            atomic_writes=atomic_writes,
+            minor_version=minor_version,
+        )
         self._migrate = migrate
 
     async def _async_migrate_func(
@@ -56,9 +69,19 @@ def create_store(
     *,
     minor_version: int,
     migrate: StoreMigration,
+    private: bool = False,
+    atomic_writes: bool = False,
 ) -> Any:
     """Build the store (module-level so tests can swap the class)."""
-    return CoreStore(hass, version, key, minor_version=minor_version, migrate=migrate)
+    return CoreStore(
+        hass,
+        version,
+        key,
+        minor_version=minor_version,
+        migrate=migrate,
+        private=private,
+        atomic_writes=atomic_writes,
+    )
 
 
 @dataclass(slots=True)

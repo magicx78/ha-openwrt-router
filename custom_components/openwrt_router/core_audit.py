@@ -41,6 +41,8 @@ from .core_models import (
     EVENT_CORE,
     EVENT_ID_PREFIX,
     FAILURE_EVENT_COOLDOWN,
+    MODULE_EVENT_PREFIXES,
+    RESERVED_NAMESPACES,
     SECURITY_AUDIT_MAX_EVENTS,
     Actor,
     AuditRing,
@@ -220,6 +222,15 @@ class AuditLog:
             raise ValueError("event prefix must end with '.'")
         if is_core_event_type(prefix):
             raise ValueError("core event namespaces are reserved for the core")
+        if prefix.startswith(RESERVED_NAMESPACES):
+            # capability namespaces (diag., log., rf., …) are not event prefixes
+            raise ValueError(f"{prefix} is a capability namespace, not an event prefix")
+        assigned = MODULE_EVENT_PREFIXES.get(module)
+        if assigned is not None and not prefix.startswith(assigned):
+            raise ValueError(f"module {module} emits below {assigned} only")
+        for other, other_prefix in MODULE_EVENT_PREFIXES.items():
+            if other != module and prefix.startswith(other_prefix):
+                raise ValueError(f"event prefix {prefix} belongs to {other}")
         owner = self._prefixes.get(prefix)
         if owner is not None and owner != module:
             raise ValueError(f"event prefix {prefix} belongs to {owner}")

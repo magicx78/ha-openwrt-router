@@ -1,10 +1,12 @@
-"""Enterprise core, part 1: router identity, fleet registry, capabilities, audit.
+"""Enterprise core: router identity, fleet registry, audit, guard, versions.
 
 One :class:`EnterpriseCore` per HA instance, kept under the single key
 ``hass.data[DATA_ENTERPRISE_CORE]`` (``openwrt_router_enterprise_core``),
-never in a module-level singleton. It holds the :class:`RouterRegistry`
-and the :class:`AuditLog`; part 2 adds the guard, the version store and
-the ConfigurationManager next to them (see the ``# part 2`` seams).
+never in a module-level singleton. It holds the :class:`RouterRegistry`,
+the :class:`AuditLog` (part 1), the :class:`ActionGuard`, the
+:class:`VersionStore` and the :class:`ConfigurationManager` (part 2).
+Modules reach part 2 only through
+:func:`.config_api.async_get_configuration_api`.
 
 Lifecycle (wired in ``__init__.py``, each call wrapped so a core error
 never fails setup, a poll or an unload):
@@ -33,10 +35,13 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 
+from .config_api import ConfigurationManager
 from .const import DOMAIN
 from .core_audit import AuditLog
+from .core_guard import ActionGuard
 from .core_models import DATA_ENTERPRISE_CORE, RouterRecord
 from .router_registry import RouterRegistry
+from .version_store import VersionStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,7 +66,7 @@ def _slot(hass: HomeAssistant) -> _CoreSlot:
 
 
 class EnterpriseCore:
-    """Registry + audit log of all openwrt_router entries."""
+    """Registry, audit, guard, versions and config API of all entries."""
 
     def __init__(
         self, hass: HomeAssistant, *, claim: asyncio.Future[None] | None = None
@@ -70,7 +75,20 @@ class EnterpriseCore:
         self.hass = hass
         self.audit = AuditLog(hass)
         self.registry = RouterRegistry(hass, self.audit)
-        # part 2: self.guard, self.versions, self.manager
+        self.guard = ActionGuard(hass, self.audit)
+        self.versions = VersionStore(hass, self.audit, consume=self.guard.consume)
+        self.manager = ConfigurationManager(
+            hass,
+            audit=self.audit,
+            registry=self.registry,
+            guard=self.guard,
+            versions=self.versions,
+        )
+        # Adoption goes through the guard (admin user, consumed once).
+        self.registry.set_adopt_authorizer(self.manager.async_authorize_adopt)
+        self.registry.set_authorization_consumer(self.manager.consume_adopt)
+        self.registry.set_probe_listener(self.manager.on_probe_trigger)
+        self.load_errors: dict[str, int] = {}
         self._claim = claim
         self._entries: set[str] = set()
         self._unload_hooked: set[str] = set()
@@ -87,6 +105,23 @@ class EnterpriseCore:
             await self.audit.async_load()
             known = [e.entry_id for e in _domain_entries(self.hass)]
             await self.registry.async_load(known)
+            # The version store must never fail setup: on an error it stays
+            # unloaded and refuses every write (StorageError not_loaded).
+            for name, step in (
+                ("versions", self.versions.async_load),
+                ("sweep", self.versions.async_sweep),
+            ):
+                if name == "sweep" and not self.versions.loaded:
+                    continue  # counted as a "versions" load error already
+                try:
+                    await step()
+                except Exception:
+                    self.load_errors[name] = self.load_errors.get(name, 0) + 1
+                    _LOGGER.warning(
+                        "Enterprise core: version store %s failed (see load_errors)",
+                        name,
+                        exc_info=True,
+                    )
             self.loaded = True
 
     @property
@@ -126,15 +161,27 @@ class EnterpriseCore:
 
     @callback
     def close(self) -> None:
-        """Cancel listeners; schedule no more writes."""
+        """Cancel listeners and probes, drop the provider, expire approvals."""
         self.closed = True
-        self.registry.close()
-        self.audit.close()
+        for name, close in (
+            ("manager", self.manager.close),
+            ("guard", self.guard.close),
+            ("versions", self.versions.close),
+            ("registry", self.registry.close),
+            ("audit", self.audit.close),
+        ):
+            try:
+                close()
+            except Exception:
+                _LOGGER.warning(
+                    "Enterprise core: closing the %s failed", name, exc_info=True
+                )
 
     async def async_flush(self) -> None:
-        """Write both stores now (each independently)."""
+        """Write every store now (each independently)."""
         for name, flush in (
             ("registry", self.registry.async_flush),
+            ("versions", self.versions.async_flush),
             ("audit", self.audit.async_flush),
         ):
             try:
@@ -150,6 +197,10 @@ class EnterpriseCore:
             "entries": len(self._entries),
             "registry": self.registry.summary(),
             "audit": self.audit.summary(),
+            "guard": self.guard.summary(),
+            "versions": self.versions.summary(),
+            "configuration_api": self.manager.summary(),
+            "load_errors": dict(self.load_errors),
         }
 
 
