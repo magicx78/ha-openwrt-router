@@ -3,8 +3,11 @@
 Pure module: standard library only, no Home Assistant imports, no name
 resolution and no network I/O. Callers (a web API, a service, the scheduler)
 only ever pass a target *ID*; ``TargetRegistry.resolve`` turns it into a
-validated ``DiagTarget`` or a typed ``Refusal``. There is no function that
-takes a free-form host and hands it to a test without the same checks.
+checked target or a typed ``Refusal``. An IP literal comes back as a usable
+``PinnedTarget``; a hostname comes back as a ``PendingTarget`` that has no
+connectable address until ``check_resolved`` vets what it resolved to and
+returns a ``PinnedTarget``. There is no function that takes a free-form host
+and hands it to a test without the same checks.
 
 Rules in short:
 
@@ -19,7 +22,8 @@ Rules in short:
 * External targets must be globally routable and confirmed by the user;
   internal targets must lie in a configured internal network. Loopback is
   never allowed; link-local and cloud metadata addresses only when exactly
-  such a network is configured.
+  such a network is configured. Loopback and metadata *names* are refused in
+  every scope; an internal hostname must be an internal name.
 * ``check_resolved`` is the DNS-rebinding guard for addresses a hostname
   resolved to (the resolution itself happens elsewhere).
 * ``may_query`` keeps internal names away from external resolvers.
@@ -81,7 +85,16 @@ _INTERNAL_SUFFIXES = (
     "invalid",
     "example",
     "onion",
+    "alt",  # RFC 9476
+    "box",  # router names such as fritz.box
+    "ip",  # router names such as speedport.ip
 )
+# Hostnames that point at the machine itself, in every scope.
+_LOOPBACK_LABELS = frozenset(
+    {"localhost", "localhost6", "ip6-localhost", "ip6-loopback", "loopback"}
+)
+# Cloud metadata service names (metadata.google.internal, instance-data...).
+_METADATA_LABELS = frozenset({"metadata", "instance-data"})
 
 
 class TargetKind(StrEnum):
@@ -149,6 +162,7 @@ class Refusal(Enum):
     BAD_LABEL = "bad_label"
     BAD_PUNYCODE = "bad_punycode"
     INTERNAL_NAME = "internal_name"
+    NOT_INTERNAL_NAME = "not_internal_name"
     LOOPBACK = "loopback"
     LINK_LOCAL = "link_local"
     METADATA = "metadata"
@@ -668,24 +682,161 @@ def make_target(
 
 
 def check_target(target: DiagTarget, policy: ScopePolicy) -> Refusal | None:
-    """Scope rules for a target (confirmation is checked by the registry)."""
+    """Scope rules for a target (confirmation is checked by the registry).
+
+    Hostnames: loopback and metadata names are refused in every scope; an
+    external target must not have an internal name, an internal target must.
+    """
     if target.ip is not None:
         return check_address(target.ip, target.scope, policy)
-    if target.scope is TargetScope.EXTERNAL and is_internal_name(
-        target.host, policy.local_domains
-    ):
+    reason = _name_refusal(target.host)
+    if reason is not None:
+        return reason
+    internal = is_internal_name(target.host, policy.local_domains)
+    if target.scope is TargetScope.EXTERNAL and internal:
         return Refusal.INTERNAL_NAME
+    if target.scope is TargetScope.INTERNAL and not internal:
+        return Refusal.NOT_INTERNAL_NAME
     return None
 
 
-def check_resolved(
-    target: DiagTarget, addresses: Iterable[Any], policy: ScopePolicy
-) -> Refusal | None:
-    """DNS-rebinding guard: every resolved address must satisfy the scope rule.
+def _name_refusal(host: str) -> Refusal | None:
+    """Refusal for loopback and cloud-metadata hostnames, else None."""
+    first = host.split(".", 1)[0]
+    if first in _LOOPBACK_LABELS or host.endswith(".localhost"):
+        return Refusal.LOOPBACK
+    if first in _METADATA_LABELS or host == "metadata.goog":
+        return Refusal.METADATA
+    return None
 
-    ``addresses`` are strings or ``ipaddress`` objects produced by a resolver
-    elsewhere; this function performs no resolution.
+
+_ISSUER = object()
+
+
+@dataclass(frozen=True, slots=True)
+class PendingTarget:
+    """A hostname target that is NOT usable yet.
+
+    Resolve ``name`` with a resolver of ``resolver_scope`` (see ``may_query``),
+    then pass the addresses to ``check_resolved``; only the ``PinnedTarget`` it
+    returns may be connected to. There is deliberately no ``host`` or
+    ``address`` attribute. Issued by ``TargetRegistry.resolve`` only.
     """
+
+    target: DiagTarget
+    _issuer: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Refuse construction outside this module."""
+        if self._issuer is not _ISSUER or not isinstance(self.target, DiagTarget):
+            raise TypeError("PendingTarget is issued by TargetRegistry.resolve only")
+        if self.target.is_ip:
+            raise TypeError("IP literal targets are pinned directly")
+
+    @property
+    def needs_resolution(self) -> bool:
+        """Always True: resolve and vet before use."""
+        return True
+
+    @property
+    def name(self) -> str:
+        """The hostname to resolve (never to hand to a tool that resolves it)."""
+        return self.target.host
+
+    @property
+    def resolver_scope(self) -> TargetScope:
+        """Which resolver may be asked: an internal target needs an internal one."""
+        return self.target.scope
+
+    @property
+    def target_id(self) -> str:
+        """ID of the underlying target."""
+        return self.target.target_id
+
+
+@dataclass(frozen=True, slots=True)
+class PinnedTarget:
+    """A target bound to one vetted IP address: the only usable form.
+
+    Tests connect to ``host`` (the address as an argv-safe string), never to
+    the original name; ``server_name`` is only for an HTTP Host header or TLS
+    SNI. Issued by ``TargetRegistry.resolve`` (IP literals) and
+    ``check_resolved`` (hostnames) only.
+    """
+
+    target: DiagTarget
+    address: IPAddress
+    _issuer: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Refuse construction outside this module."""
+        if self._issuer is not _ISSUER or not isinstance(self.target, DiagTarget):
+            raise TypeError("PinnedTarget is issued by TargetRegistry only")
+        if not isinstance(self.address, ipaddress.IPv4Address | ipaddress.IPv6Address):
+            raise TypeError("address must be an ipaddress object")
+
+    @property
+    def needs_resolution(self) -> bool:
+        """Always False: ready to use."""
+        return False
+
+    @property
+    def host(self) -> str:
+        """The vetted address as one argv-safe string."""
+        return str(self.address)
+
+    @property
+    def server_name(self) -> str | None:
+        """Original hostname for Host/SNI, None for IP literal targets."""
+        return None if self.target.is_ip else self.target.host
+
+    @property
+    def target_id(self) -> str:
+        """ID of the underlying target."""
+        return self.target.target_id
+
+    @property
+    def kind(self) -> TargetKind:
+        """Test kind of the underlying target."""
+        return self.target.kind
+
+    @property
+    def scope(self) -> TargetScope:
+        """Scope of the underlying target."""
+        return self.target.scope
+
+    @property
+    def port(self) -> int | None:
+        """Port of the underlying target."""
+        return self.target.port
+
+
+def check_resolved(
+    pending: PendingTarget, addresses: Iterable[Any], policy: ScopePolicy
+) -> PinnedTarget | Refusal:
+    """DNS-rebinding guard: pin a pending target to a vetted address.
+
+    Every resolved address must satisfy the scope rule; the first one is
+    pinned. ``addresses`` are strings or ``ipaddress`` objects produced by a
+    resolver elsewhere; this function performs no resolution. Only a
+    ``PendingTarget`` (from ``TargetRegistry.resolve``) is accepted.
+    """
+    if not isinstance(pending, PendingTarget):
+        return Refusal.INVALID_TARGET
+    target = pending.target
+    reason = check_target(target, policy)
+    if reason is not None:
+        return reason
+    vetted = _vet_addresses(target, addresses, policy)
+    if isinstance(vetted, Refusal):
+        return vetted
+    return PinnedTarget(target, vetted, _ISSUER)
+
+
+def _vet_addresses(
+    target: DiagTarget, addresses: Iterable[Any], policy: ScopePolicy
+) -> IPAddress | Refusal:
+    """First address if every address passes the scope rule, else the refusal."""
     items = []
     for item in addresses:
         items.append(item)
@@ -693,6 +844,7 @@ def check_resolved(
             return Refusal.TOO_MANY_ADDRESSES
     if not items:
         return Refusal.RESOLVED_EMPTY
+    vetted: list[IPAddress] = []
     for item in items:
         addr = _parse_resolved(item)
         if addr is None:
@@ -707,7 +859,8 @@ def check_resolved(
                 reason.value,
             )
             return reason
-    return None
+        vetted.append(addr)
+    return vetted[0]
 
 
 def _parse_resolved(item: Any) -> IPAddress | None:
@@ -737,21 +890,32 @@ class TargetRegistry:
 
     __slots__ = ("_max", "_policy", "_targets")
 
-    def __init__(
-        self,
-        policy: ScopePolicy,
-        *,
-        max_targets: int = MAX_TARGETS,
-        _targets: Mapping[str, DiagTarget] | None = None,
-    ) -> None:
-        """Create an empty registry (``_targets`` is for internal copies)."""
+    def __init__(self, policy: ScopePolicy, *, max_targets: int = MAX_TARGETS) -> None:
+        """Create an empty registry; add targets with ``with_target``/``build``."""
         if type(max_targets) is not int or not 1 <= max_targets <= MAX_TARGETS_LIMIT:
             raise ValueError("max_targets out of range")
         if not isinstance(policy, ScopePolicy):
             raise TypeError("policy must be a ScopePolicy")
         self._policy = policy
         self._max = max_targets
-        self._targets: Mapping[str, DiagTarget] = MappingProxyType(dict(_targets or {}))
+        self._targets: Mapping[str, DiagTarget] = MappingProxyType({})
+
+    def _derive(
+        self, policy: ScopePolicy, targets: Mapping[str, DiagTarget]
+    ) -> TargetRegistry:
+        """Validated copy with other contents (the only way to fill a registry)."""
+        if not isinstance(policy, ScopePolicy):
+            raise TypeError("policy must be a ScopePolicy")
+        if len(targets) > self._max:
+            raise ValueError("too many targets")
+        for key, target in targets.items():
+            if not isinstance(target, DiagTarget) or key != target.target_id:
+                raise ValueError("target table inconsistent")
+        clone = object.__new__(TargetRegistry)
+        clone._policy = policy
+        clone._max = self._max
+        clone._targets = MappingProxyType(dict(targets))
+        return clone
 
     @classmethod
     def build(
@@ -803,20 +967,23 @@ class TargetRegistry:
         if reason is not None:
             _LOGGER.debug("Target %s refused: %s", target.target_id, reason.value)
             return reason
-        merged = {**self._targets, target.target_id: target}
-        return TargetRegistry(self._policy, max_targets=self._max, _targets=merged)
+        return self._derive(self._policy, {**self._targets, target.target_id: target})
 
     def without_target(self, target_id: str) -> TargetRegistry:
         """New registry without ``target_id`` (unchanged copy if absent)."""
         kept = {k: v for k, v in self._targets.items() if k != target_id}
-        return TargetRegistry(self._policy, max_targets=self._max, _targets=kept)
+        return self._derive(self._policy, kept)
 
     def with_policy(self, policy: ScopePolicy) -> TargetRegistry:
         """Same targets under a new policy; ``resolve`` re-checks each one."""
-        return TargetRegistry(policy, max_targets=self._max, _targets=self._targets)
+        return self._derive(policy, self._targets)
 
-    def resolve(self, target_id: Any) -> DiagTarget | Refusal:
-        """API entry point: target ID -> validated, usable target or refusal."""
+    def resolve(self, target_id: Any) -> PinnedTarget | PendingTarget | Refusal:
+        """API entry point: target ID -> checked target or refusal.
+
+        IP literal targets come back pinned (usable). Hostname targets come
+        back as ``PendingTarget``: resolve the name, then ``check_resolved``.
+        """
         if not isinstance(target_id, str) or not _ID_RE.fullmatch(target_id):
             _LOGGER.debug("Refused malformed target id %r", target_id)
             return Refusal.INVALID_ID
@@ -825,13 +992,18 @@ class TargetRegistry:
             return Refusal.UNKNOWN_TARGET
         if target.scope is TargetScope.EXTERNAL and not target.confirmed:
             return Refusal.NOT_CONFIRMED
-        return check_target(target, self._policy) or target
+        reason = check_target(target, self._policy)
+        if reason is not None:
+            return reason
+        if target.ip is not None:
+            return PinnedTarget(target, target.ip, _ISSUER)
+        return PendingTarget(target, _ISSUER)
 
     def check_resolved(
-        self, target: DiagTarget, addresses: Iterable[Any]
-    ) -> Refusal | None:
+        self, pending: PendingTarget, addresses: Iterable[Any]
+    ) -> PinnedTarget | Refusal:
         """DNS-rebinding guard under this registry's policy."""
-        return check_resolved(target, addresses, self._policy)
+        return check_resolved(pending, addresses, self._policy)
 
     def may_query(self, name: Any, resolver_scope: TargetScope) -> bool:
         """``may_query`` with this registry's local domains."""

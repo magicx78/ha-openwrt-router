@@ -19,6 +19,8 @@ from custom_components.openwrt_router.diag_targets import (
     MAX_RESOLVED_ADDRESSES,
     AddressClass,
     DiagTarget,
+    PendingTarget,
+    PinnedTarget,
     Refusal,
     ScopePolicy,
     TargetKind,
@@ -79,6 +81,19 @@ def target(host: str, scope: TargetScope = EXT, **kw: Any) -> DiagTarget:
     )
     assert isinstance(made, DiagTarget), made
     return made
+
+
+def pending(
+    host: str, scope: TargetScope = EXT, pol: ScopePolicy | None = None, **kw: Any
+) -> PendingTarget:
+    """A hostname target as handed out by ``TargetRegistry.resolve``."""
+    reg = TargetRegistry(pol or policy()).with_target(
+        target(host, scope, target_id="p", **kw)
+    )
+    assert isinstance(reg, TargetRegistry), reg
+    issued = reg.resolve("p")
+    assert isinstance(issued, PendingTarget), issued
+    return issued
 
 
 # --- named acceptance tests ---------------------------------------------------
@@ -237,7 +252,16 @@ SSRF_EXTERNAL_HOSTS: list[tuple[str, Refusal]] = [
     ("printer", Refusal.INTERNAL_NAME),
     ("x.home.arpa", Refusal.INTERNAL_NAME),
     ("db.internal", Refusal.INTERNAL_NAME),
-    ("localhost", Refusal.INTERNAL_NAME),
+    ("localhost", Refusal.LOOPBACK),
+    ("localhost.localdomain", Refusal.LOOPBACK),
+    ("ip6-localhost", Refusal.LOOPBACK),
+    ("ip6-loopback", Refusal.LOOPBACK),
+    ("a.localhost", Refusal.LOOPBACK),
+    ("metadata.google.internal", Refusal.METADATA),
+    ("metadata.goog", Refusal.METADATA),
+    ("instance-data.ec2.internal", Refusal.METADATA),
+    ("foo.alt", Refusal.INTERNAL_NAME),
+    ("speedport.ip", Refusal.INTERNAL_NAME),
     ("app.localdomain", Refusal.INTERNAL_NAME),
     ("wiki.corp.example.net", Refusal.INTERNAL_NAME),
     ("1.1.168.192.in-addr.arpa", Refusal.INTERNAL_NAME),
@@ -273,7 +297,7 @@ def test_case_23_ssrf_protection() -> None:
     assert reg.resolve("web") is Refusal.NOT_CONFIRMED
     # Internal targets need no confirmation
     nas = reg.resolve("nas")
-    assert isinstance(nas, DiagTarget) and nas.host == "192.168.1.10"
+    assert isinstance(nas, PinnedTarget) and nas.host == "192.168.1.10"
     # No confirmed external target -> no external test is possible at all
     external = [t for t in reg.entries() if t.scope is EXT]
     assert len(external) == 2
@@ -299,7 +323,8 @@ def test_case_23_ssrf_protection() -> None:
     confirmed = reg.with_target(target("1.1.1.1", target_id="cf", confirmed=True))
     assert isinstance(confirmed, TargetRegistry)
     cf = confirmed.resolve("cf")
-    assert isinstance(cf, DiagTarget) and cf.host == "1.1.1.1"
+    assert isinstance(cf, PinnedTarget) and cf.host == "1.1.1.1"
+    assert cf.needs_resolution is False and cf.server_name is None
     assert reg.resolve("cf") is Refusal.UNKNOWN_TARGET  # original unchanged
 
     # 5. Internal scope: only configured networks, loopback never.
@@ -327,8 +352,12 @@ def test_case_23_ssrf_protection() -> None:
         ScopePolicy.from_config(["::/0"])
 
     # 6. DNS rebinding guard: every resolved address must satisfy the scope.
-    web = target("example.com", target_id="web", kind=TargetKind.HTTP)
-    assert check_resolved(web, ["93.184.215.14"], pol) is None
+    web = pending("example.com", kind=TargetKind.HTTP)
+    pinned = check_resolved(web, ["93.184.215.14", "2606:2800:21f:cb07::1"], pol)
+    assert isinstance(pinned, PinnedTarget)
+    assert pinned.address == ipaddress.ip_address("93.184.215.14")
+    assert pinned.host == "93.184.215.14"  # connect here, never to the name
+    assert pinned.server_name == "example.com"  # only for Host header / SNI
     assert check_resolved(web, ["93.184.215.14", "127.0.0.1"], pol) is Refusal.LOOPBACK
     assert check_resolved(web, ["10.0.0.5"], pol) is Refusal.NOT_GLOBAL
     assert check_resolved(web, ["::ffff:169.254.169.254"], pol) is Refusal.METADATA
@@ -337,10 +366,14 @@ def test_case_23_ssrf_protection() -> None:
     assert check_resolved(web, ["fe80::1%eth0"], pol) is Refusal.RESOLVED_INVALID
     many = ["93.184.215.14"] * (MAX_RESOLVED_ADDRESSES + 1)
     assert check_resolved(web, many, pol) is Refusal.TOO_MANY_ADDRESSES
-    nas_name = target("nas.lan", INT, target_id="nasname")
-    assert check_resolved(nas_name, ["192.168.1.20"], pol) is None
+    nas_name = pending("nas.lan", INT)
+    assert isinstance(check_resolved(nas_name, ["192.168.1.20"], pol), PinnedTarget)
     assert check_resolved(nas_name, ["8.8.8.8"], pol) is Refusal.NOT_INTERNAL_NETWORK
     assert check_resolved(nas_name, ["127.0.0.1"], pol) is Refusal.LOOPBACK
+    # Only a target issued by resolve() can be pinned: a bare DiagTarget would
+    # skip the confirmation check.
+    unconfirmed = target("example.com", confirmed=False)
+    assert check_resolved(unconfirmed, ["93.184.215.14"], pol) is Refusal.INVALID_TARGET  # type: ignore[arg-type]
 
     # 7. Internal names never go to an external resolver.
     assert may_query("example.com", EXT) is True
@@ -351,6 +384,106 @@ def test_case_23_ssrf_protection() -> None:
         may_query("wiki.corp.example.net", EXT, local_domains=pol.local_domains)
         is False
     )
+
+    # 8. Internal scope hostnames (review H3): loopback and metadata names are
+    #    refused in every scope; an internal hostname must be an internal name,
+    #    so internal scope cannot be used to skip confirmation of external hosts.
+    bare = ScopePolicy.from_config([])  # no internal network configured at all
+    for host, reason in [
+        ("localhost", Refusal.LOOPBACK),
+        ("ip6-localhost", Refusal.LOOPBACK),
+        ("ip6-loopback", Refusal.LOOPBACK),
+        ("localhost.localdomain", Refusal.LOOPBACK),
+        ("localhost.lan", Refusal.LOOPBACK),
+        ("app.localhost", Refusal.LOOPBACK),
+        ("metadata.google.internal", Refusal.METADATA),
+        ("metadata", Refusal.METADATA),
+        ("instance-data.ec2.internal", Refusal.METADATA),
+        ("evil.example.com", Refusal.NOT_INTERNAL_NAME),
+        ("example.com", Refusal.NOT_INTERNAL_NAME),
+        ("router.lan", None),
+        ("nas", None),
+        ("speedport.ip", None),
+    ]:
+        made = target(host, INT, kind=TargetKind.HTTP, port=80)
+        assert check_target(made, bare) is reason, host
+        added = TargetRegistry(bare).with_target(made)
+        if reason is None:
+            assert isinstance(added, TargetRegistry), host
+        else:
+            assert added is reason, host
+    for host in ("localhost", "ip6-localhost", "localhost.localdomain"):
+        assert check_target(target(host, EXT), pol) is Refusal.LOOPBACK, host
+    assert check_target(target("metadata.google.internal", EXT), pol) is (
+        Refusal.METADATA
+    )
+    # Configured local domains count as internal names
+    assert check_target(target("wiki.corp.example.net", INT), pol) is None
+    assert check_target(target("wiki.corp.example.net", INT), bare) is (
+        Refusal.NOT_INTERNAL_NAME
+    )
+    # An accepted internal hostname is only pending; with no internal network
+    # configured, no resolved address can make it usable.
+    rt = pending("router.lan", INT, bare, kind=TargetKind.HTTP, port=80)
+    assert rt.needs_resolution is True and rt.name == "router.lan"
+    assert check_resolved(rt, ["192.168.1.1"], bare) is Refusal.NOT_INTERNAL_NETWORK
+    assert check_resolved(rt, ["127.0.0.1"], bare) is Refusal.LOOPBACK
+
+
+def test_hostname_targets_must_be_pinned_before_use() -> None:
+    """Review H3: the type system separates 'resolve first' from 'usable'."""
+    pol = policy()
+    reg = TargetRegistry(pol)
+    for tid, host, scope in (
+        ("web", "example.com", EXT),
+        ("nas", "nas.lan", INT),
+        ("lit", "192.168.1.10", INT),
+    ):
+        nxt = reg.with_target(
+            target(host, scope, target_id=tid, kind=TargetKind.HTTP, port=443)
+        )
+        assert isinstance(nxt, TargetRegistry)
+        reg = nxt
+    web = reg.resolve("web")
+    assert isinstance(web, PendingTarget)
+    assert not isinstance(web, PinnedTarget)
+    # Nothing on a pending target looks like a connectable address
+    assert not hasattr(web, "host") and not hasattr(web, "address")
+    assert web.needs_resolution is True
+    assert web.name == "example.com" and web.resolver_scope is EXT
+    pinned = reg.check_resolved(web, [ipaddress.ip_address("93.184.215.14")])
+    assert isinstance(pinned, PinnedTarget)
+    assert (pinned.host, pinned.port, pinned.kind) == ("93.184.215.14", 443, "http")
+    assert pinned.target_id == "web" and pinned.scope is EXT
+    nas = reg.resolve("nas")
+    assert isinstance(nas, PendingTarget) and nas.resolver_scope is INT
+    lit = reg.resolve("lit")
+    assert isinstance(lit, PinnedTarget) and lit.needs_resolution is False
+    # Issued types cannot be forged by callers
+    raw = target("8.8.8.8", confirmed=False)
+    with pytest.raises(TypeError):
+        PendingTarget(raw)
+    with pytest.raises(TypeError):
+        PinnedTarget(raw, ipaddress.ip_address("8.8.8.8"))
+    # A pinned target cannot be pinned again to another address
+    assert reg.check_resolved(lit, ["192.168.1.11"]) is Refusal.INVALID_TARGET  # type: ignore[arg-type]
+
+
+def test_registry_cannot_be_built_around_its_checks() -> None:
+    """Review L4: no constructor path skips the size cap and ID checks."""
+    t = make_target("a", "icmp", "external", "8.8.8.8", confirmed=True)
+    with pytest.raises(TypeError):
+        TargetRegistry(policy(), max_targets=1, _targets={"a": t, "b": t})  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    "name", ["foo.alt", "alt", "speedport.ip", "router.box", "x.y.box"]
+)
+def test_alt_box_and_ip_names_stay_internal(name: str) -> None:
+    """Review L5: RFC 9476 ``.alt`` and router names under ``.box``/``.ip``."""
+    assert is_internal_name(name) is True
+    assert may_query(name, EXT) is False
+    assert may_query(name, INT) is True
 
 
 # --- host normalisation -------------------------------------------------------
@@ -657,15 +790,16 @@ def test_registry_rechecks_on_resolve_with_a_new_policy() -> None:
     old = TargetRegistry(policy(networks=["192.168.5.0/24"]))
     reg = old.with_target(target("192.168.5.5", INT, target_id="cam"))
     assert isinstance(reg, TargetRegistry)
-    assert isinstance(reg.resolve("cam"), DiagTarget)
+    assert isinstance(reg.resolve("cam"), PinnedTarget)
     moved = reg.with_policy(policy(networks=["192.168.6.0/24"]))
     assert moved.resolve("cam") is Refusal.NOT_INTERNAL_NETWORK
 
 
 def test_registry_rebinding_and_may_query_helpers() -> None:
     reg = TargetRegistry(policy())
-    web = target("example.com", target_id="web", kind=TargetKind.HTTP, port=443)
-    assert reg.check_resolved(web, [ipaddress.ip_address("93.184.215.14")]) is None
+    web = pending("example.com", kind=TargetKind.HTTP, port=443)
+    pinned = reg.check_resolved(web, [ipaddress.ip_address("93.184.215.14")])
+    assert isinstance(pinned, PinnedTarget)
     assert reg.check_resolved(web, ["192.168.1.1"]) is Refusal.NOT_GLOBAL
     assert reg.may_query("wiki.corp.example.net", EXT) is False
     assert reg.may_query("example.com", EXT) is True
@@ -681,7 +815,7 @@ def test_refusals_do_not_echo_input_above_debug(
     secret = "198.51.100.77"
     reg.with_target(target(secret, target_id="leak"))
     reg.resolve("../" + secret)
-    check_resolved(target("example.com"), [secret], policy())
+    check_resolved(pending("example.com"), [secret], policy())
     for record in caplog.records:
         if record.levelno > logging.DEBUG:
             assert secret not in record.getMessage()
