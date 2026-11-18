@@ -83,6 +83,11 @@ UCI_CONFIGS: Final[tuple[str, ...]] = (
 # ---------------------------------------------------------------------------
 
 MASK_PLACEHOLDER: Final = "***"
+# redact_text works on at most this many characters (review H4); longer
+# text is cut first and gets the marker appended. stderr is cut at 4 KiB
+# already, so only hostile or broken input reaches the cap.
+REDACT_MAX_CHARS: Final = 65536
+REDACT_TRUNCATED: Final = " [truncated]"
 # Snapshot form of a secret value: {"secret": "<hmac16>"} (plan 3.2 point 6).
 SECRET_MARKER_KEY: Final = "secret"
 SECRET_DIGEST_LENGTH: Final = 16
@@ -193,7 +198,7 @@ SECRET_EXTRA_NAMES: Final[frozenset[str]] = frozenset(
 SECRET_OPTION_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(
         r"(pass|secret|token|psk|private|credential|pwd|apikey|cookie"
-        r"|key\d*$|key_|auth\w*key|_options$|(?:^|_)otp(?:$|_)|pin$)"
+        r"|key\d*$|key_|auth[a-z0-9_]{0,32}key|_options$|(?:^|_)otp(?:$|_)|pin$)"
     ),
 )
 
@@ -531,6 +536,12 @@ FETCH_SKIP_TTL_S: Final = 86400
 # stderr kept from SSH, only to derive the error class, never logged raw.
 STDERR_MAX_BYTES: Final = 4096
 STREAM_CHUNK_BYTES: Final = 65536
+# Router-supplied inventory fields (board name, model, release, kernel,
+# package names and versions) longer than this are dropped, not cut: a cut
+# value would pose as a real board name (review H4). Real values are far
+# shorter (board names < 64, versions < 40 characters).
+ROUTER_FIELD_MAX_CHARS: Final = 256
+INVENTORY_MAX_PACKAGES: Final = 8192
 
 # ---------------------------------------------------------------------------
 # Drift and events (plan sections 3.3, 9.1, 8.4)

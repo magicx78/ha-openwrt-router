@@ -28,6 +28,8 @@ from typing import Any, Final
 
 from .config_const import (
     MASK_PLACEHOLDER,
+    REDACT_MAX_CHARS,
+    REDACT_TRUNCATED,
     SECRET_ARCHIVE_PATHS,
     SECRET_CONTEXT_OPTIONS,
     SECRET_DIGEST_LENGTH,
@@ -172,8 +174,15 @@ def secret_digest_factory(key: bytes) -> Callable[[str], str]:
 _PEM_RE: Final = re.compile(
     r"-----BEGIN [^\r\n-]*-----.*?(?:-----END [^\r\n-]*-----|\Z)", re.DOTALL
 )
+# Linearity (review H4): every head pattern that starts with a run of name
+# characters is anchored by a lookbehind, so it can only start where such
+# a run starts. Runs are disjoint, so all attempts together scan the text
+# a bounded number of times instead of once per position.
+#
 # scheme://user:password@host
-_URL_CRED_RE: Final = re.compile(r"(\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s/:@]*):[^\s/@]*@")
+_URL_CRED_RE: Final = re.compile(
+    r"((?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]*://[^\s/:@]*):[^\s/@]*@"
+)
 _AUTH_SCHEME_RE: Final = re.compile(
     r"\b(Bearer|Basic|Digest)[ \t]+[A-Za-z0-9._~+/=\-]+", re.IGNORECASE
 )
@@ -183,6 +192,7 @@ _UCI_HEAD_RE: Final = re.compile(
     r"\b(?:option|list)[ \t]+(['\"]?)(?P<name>[A-Za-z0-9_.\-]+)\1[ \t]+"
 )
 _ASSIGN_HEAD_RE: Final = re.compile(
+    r"(?<![A-Za-z0-9_.@\[\]\-])"
     r"(?P<q>[\"']?)(?P<name>[A-Za-z0-9_.@\[\]\-]+)(?P=q)[ \t]*[=:][ \t]*"
 )
 _FLAG_HEAD_RE: Final = re.compile(
@@ -243,6 +253,10 @@ def redact_text(text: str) -> str:
         text = str(text)
     if not text:
         return text
+    if len(text) > REDACT_MAX_CHARS:
+        # Cut first, then mask: the dropped tail never leaves, and the cost
+        # stays bounded whatever the router sends (review H4).
+        text = text[:REDACT_MAX_CHARS] + REDACT_TRUNCATED
     text = _PEM_RE.sub(MASK_PLACEHOLDER, text)
     text = _URL_CRED_RE.sub(rf"\1:{MASK_PLACEHOLDER}@", text)
     text = _AUTH_SCHEME_RE.sub(rf"\1 {MASK_PLACEHOLDER}", text)

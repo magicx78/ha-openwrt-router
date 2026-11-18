@@ -54,6 +54,7 @@ from .config_collector import (
     collect_inventory,
     collect_uci,
     collect_uci_snapshot,
+    router_text,
 )
 from .config_const import (
     ARCHIVE_CONFIG_PREFIX,
@@ -537,10 +538,8 @@ def _parse_uci_document(
 
 
 def _str(value: Any) -> str | None:
-    if isinstance(value, str):
-        value = value.strip()
-        return value or None
-    return None
+    """A router_info field: non-empty, bounded string or None (review H4)."""
+    return router_text(value)
 
 
 def _inventory_document(inventory: Inventory) -> bytes:

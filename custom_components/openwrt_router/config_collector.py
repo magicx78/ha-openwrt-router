@@ -69,6 +69,8 @@ from .config_const import (
     FETCH_PACKAGELIST,
     FETCH_TIMEOUTS,
     FETCH_UCI,
+    INVENTORY_MAX_PACKAGES,
+    ROUTER_FIELD_MAX_CHARS,
     ArchiveLimits,
 )
 from .config_inventory import (
@@ -486,12 +488,31 @@ async def collect_uci_snapshot(
 # ---------------------------------------------------------------------------
 
 
-def _text(value: Any) -> str | None:
-    """A non-empty string or None (router_info fills gaps with "")."""
+def router_text(value: Any) -> str | None:
+    """A non-empty, bounded string or None (router_info fills gaps with "").
+
+    Values longer than ``ROUTER_FIELD_MAX_CHARS`` are dropped: they come
+    from the router and later run through masking and comparisons.
+    """
     if isinstance(value, str):
         value = value.strip()
+        if len(value) > ROUTER_FIELD_MAX_CHARS:
+            return None
         return value or None
     return None
+
+
+def _packages(result: Mapping[Any, Any]) -> dict[str, str | None]:
+    """Bounded package map: long names dropped, long versions unknown."""
+    packages: dict[str, str | None] = {}
+    for name, version in result.items():
+        if len(packages) >= INVENTORY_MAX_PACKAGES:
+            break
+        name_text = router_text(name)
+        if name_text is None:
+            continue
+        packages[name_text] = router_text(version)
+    return packages
 
 
 def _package_manager(version: str | None) -> str | None:
@@ -526,7 +547,7 @@ async def collect_inventory(
         raise TypeError("router_info must be a mapping")
     release = router_info.get("release")
     release = release if isinstance(release, Mapping) else {}
-    version = _text(release.get("version"))
+    version = router_text(release.get("version"))
 
     packages: dict[str, str | None] | None = None
     started = time.monotonic()
@@ -543,10 +564,7 @@ async def collect_inventory(
         )
     else:
         if isinstance(result, Mapping) and result:
-            packages = {
-                str(name): (ver if isinstance(ver, str) else None)
-                for name, ver in result.items()
-            }
+            packages = _packages(result)
         _LOGGER.debug(
             "package list: %d packages in %.1fs",
             len(packages or {}),
@@ -554,12 +572,12 @@ async def collect_inventory(
         )
 
     return Inventory(
-        board_name=_text(router_info.get("board_name")),
-        model=_text(router_info.get("model")),
+        board_name=router_text(router_info.get("board_name")),
+        model=router_text(router_info.get("model")),
         release_version=version,
-        release_revision=_text(release.get("revision")),
-        target=_text(release.get("target")),
-        kernel=_text(router_info.get("kernel")),
+        release_revision=router_text(release.get("revision")),
+        target=router_text(release.get("target")),
+        kernel=router_text(router_info.get("kernel")),
         package_manager=_package_manager(version),
         packages=packages,
         package_source=None,
