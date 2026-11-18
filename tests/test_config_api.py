@@ -884,6 +884,67 @@ class TestPackageList:
 
 
 # =====================================================================
+# config_backup_access / config_ssh_user_is_root (review M1: no sysupgrade)
+# =====================================================================
+
+
+class TestBackupAccess:
+    @pytest.mark.parametrize("allowed", [True, False])
+    async def test_asks_rpcd_for_the_cgi_io_backup_right(self, allowed: bool) -> None:
+        api, session = make_api()
+        api._call = AsyncMock(return_value={"access": allowed})  # type: ignore[method-assign]
+        ctx, connect = patch_connect(fake_conn(FakeProc([])))
+        with ctx:
+            assert await api.config_backup_access() is allowed
+        # The same check cgi-io makes before it starts sysupgrade.
+        api._call.assert_awaited_once_with(
+            "session",
+            "access",
+            {"scope": "cgi-io", "object": "backup", "function": "read"},
+        )
+        assert session.calls == []  # no cgi-backup POST
+        connect.assert_not_awaited()  # no SSH, so no sysupgrade
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            OpenWrtMethodNotFoundError("ACL blocks session/access"),
+            OpenWrtResponseError("ubus error 2"),
+            {"access": "yes"},
+            {},
+            ["access"],
+        ],
+    )
+    async def test_no_clear_answer_is_none(self, outcome: Any) -> None:
+        api, _ = make_api()
+        mock = (
+            AsyncMock(side_effect=outcome)
+            if isinstance(outcome, BaseException)
+            else AsyncMock(return_value=outcome)
+        )
+        api._call = mock  # type: ignore[method-assign]
+        assert await api.config_backup_access() is None
+
+    @pytest.mark.parametrize(
+        "exc", [OpenWrtConnectionError("down"), OpenWrtTimeoutError("slow")]
+    )
+    async def test_dead_router_propagates(self, exc: BaseException) -> None:
+        api, _ = make_api()
+        api._call = AsyncMock(side_effect=exc)  # type: ignore[method-assign]
+        with pytest.raises(type(exc)):
+            await api.config_backup_access()
+
+    @pytest.mark.parametrize(("username", "root"), [("root", True), ("admin", False)])
+    def test_ssh_user_is_root_without_a_call(self, username: str, root: bool) -> None:
+        api, session = make_api(username=username)
+        ctx, connect = patch_connect(fake_conn(FakeProc([])))
+        with ctx:
+            assert api.config_ssh_user_is_root() is root
+        assert session.calls == []
+        connect.assert_not_awaited()
+
+
+# =====================================================================
 # Secrets never reach the log
 # =====================================================================
 

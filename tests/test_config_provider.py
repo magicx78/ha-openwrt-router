@@ -204,6 +204,7 @@ FILES: dict[str, str] = {
 
 PACKAGES = {
     "base-files": "1641",
+    "cgi-io": "2024.09.13",
     "dnsmasq": "2.90-r4",
     "dropbear": "2024.86-r1",
     "firewall4": "2024.12.18",
@@ -321,7 +322,7 @@ def hang() -> Any:
 
 
 class FakeApi:
-    """The four ``config_*`` read methods of OpenWrtAPI, nothing else."""
+    """The ``config_*`` read methods of OpenWrtAPI, nothing else."""
 
     def __init__(
         self,
@@ -331,11 +332,15 @@ class FakeApi:
         ssh: Outcome = None,
         uci: Mapping[str, Outcome] | None = None,
         packages: Outcome = PACKAGES,
+        access: Outcome = True,
+        root: bool = True,
     ) -> None:
         self.cgi = make_archive(files) if cgi is None else cgi
         self.ssh = make_archive(files) if ssh is None else ssh
         self.uci = dict(ubus_values(files) if uci is None else uci)
         self.packages = packages
+        self.access = access
+        self.root = root
         self.calls: list[tuple[str, ...]] = []
         self.kwargs: list[dict[str, Any]] = []
 
@@ -369,6 +374,14 @@ class FakeApi:
     async def config_packagelist(self) -> dict[str, str] | None:
         self.calls.append(("packagelist",))
         return await self._play(self.packages)
+
+    async def config_backup_access(self) -> bool | None:
+        self.calls.append(("backup_access",))
+        return await self._play(self.access)
+
+    def config_ssh_user_is_root(self) -> bool:
+        self.calls.append(("ssh_user_is_root",))
+        return self.root
 
 
 def methods(api: FakeApi) -> list[str]:
@@ -1573,8 +1586,7 @@ async def test_execute_restore_refuses() -> None:
 
 
 async def test_probe_reports_every_config_capability() -> None:
-    too_large = OpenWrtConfigFetchTooLargeError("cap")
-    api = FakeApi(cgi=too_large, ssh=too_large)
+    api = FakeApi()
     caps = await ConfigManagerProvider().async_probe(make_conn(api), make_ctx())
     assert set(caps) == {str(c) for c in CONFIG_CAPABILITIES}
     for name, status in caps.items():
@@ -1582,7 +1594,6 @@ async def test_probe_reports_every_config_capability() -> None:
         assert status.source == "probe:config_manager"
     for name in (
         Capability.CONFIG_CGI_BACKUP,
-        Capability.CONFIG_SSH_ROOT,
         Capability.CONFIG_UCI_READ,
         Capability.CONFIG_PACKAGELIST,
         Capability.CONFIG_BACKUP,
@@ -1599,22 +1610,67 @@ async def test_probe_reports_every_config_capability() -> None:
     assert restore.reason == "provider:phase1"
     detail = caps[Capability.CONFIG_UCI_READ].detail
     assert detail["network"] is True and detail["dropbear"] is False
-    # The archive probes stop after one byte.
-    assert all(kw["max_bytes"] == 1 for kw in api.kwargs)
+    # SSH as root is only known to work after the first backup (review M1).
+    ssh = caps[Capability.CONFIG_SSH_ROOT]
+    assert ssh.state is CapabilityState.UNKNOWN
+    assert ssh.reason == CapabilityReason.NOT_PROBED
+    # No archive was fetched, so sysupgrade never ran on the router.
+    assert not {"cgi", "ssh"} & set(methods(api))
+    assert api.kwargs == []
 
 
 async def test_probe_without_archive_rights() -> None:
-    denied = OpenWrtConfigFetchPermissionError("acl")
-    api = FakeApi(cgi=denied, ssh=denied, packages=None)
+    api = FakeApi(access=False, root=False, packages=None)
     caps = await ConfigManagerProvider().async_probe(make_conn(api), make_ctx())
     cgi = caps[Capability.CONFIG_CGI_BACKUP]
     assert cgi.state is CapabilityState.UNAVAILABLE
     assert cgi.reason == CapabilityReason.PERMISSION_DENIED
     assert cgi.required_permissions
-    assert caps[Capability.CONFIG_SSH_ROOT].state is CapabilityState.UNAVAILABLE
+    ssh = caps[Capability.CONFIG_SSH_ROOT]
+    assert ssh.state is CapabilityState.UNAVAILABLE
+    assert ssh.reason == CapabilityReason.PERMISSION_DENIED
     assert caps[Capability.CONFIG_PACKAGELIST].state is CapabilityState.UNAVAILABLE
     assert caps[Capability.CONFIG_BACKUP].state is CapabilityState.AVAILABLE
     assert caps[Capability.CONFIG_RESTORE_DRY_RUN].state is CapabilityState.UNAVAILABLE
+    assert not {"cgi", "ssh"} & set(methods(api))
+
+
+@pytest.mark.parametrize(
+    ("access", "packages", "state", "reason"),
+    [
+        # rpcd gives no clear answer: unknown until the first backup.
+        (None, PACKAGES, CapabilityState.UNKNOWN, CapabilityReason.NOT_PROBED),
+        (
+            OpenWrtConfigFetchIncompleteError("odd"),
+            PACKAGES,
+            CapabilityState.UNKNOWN,
+            CapabilityReason.NOT_PROBED,
+        ),
+        # Right granted, but no package list to see cgi-io in.
+        (True, None, CapabilityState.UNKNOWN, CapabilityReason.NOT_PROBED),
+        # Right granted, package list known, cgi-io not installed.
+        (
+            True,
+            {k: v for k, v in PACKAGES.items() if k != "cgi-io"},
+            CapabilityState.UNAVAILABLE,
+            CapabilityReason.NOT_DETECTED,
+        ),
+    ],
+)
+async def test_probe_never_creates_a_backup(
+    access: Outcome, packages: Outcome, state: CapabilityState, reason: str
+) -> None:
+    """Review M1: rights and presence only; never a sysupgrade on the router."""
+    boom = AssertionError("the probe must not fetch an archive")
+    api = FakeApi(cgi=boom, ssh=boom, access=access, packages=packages)
+    caps = await ConfigManagerProvider().async_probe(make_conn(api), make_ctx())
+    cgi = caps[Capability.CONFIG_CGI_BACKUP]
+    assert (cgi.state, cgi.reason) == (state, reason)
+    assert not {"cgi", "ssh"} & set(methods(api))
+    assert "backup_access" in methods(api)
+    # Archive state unknown at best: the dry run is never claimed available.
+    dry_run = caps[Capability.CONFIG_RESTORE_DRY_RUN]
+    assert dry_run.state is not CapabilityState.AVAILABLE
 
 
 async def test_probe_of_offline_router_is_unknown() -> None:
@@ -1628,6 +1684,7 @@ async def test_probe_of_offline_router_is_unknown() -> None:
     assert caps[Capability.CONFIG_BACKUP].state is CapabilityState.UNKNOWN
     assert caps[Capability.CONFIG_VALIDATE].state is CapabilityState.AVAILABLE
     assert "cgi" not in methods(api)  # no archive probe against a dead router
+    assert "backup_access" not in methods(api)
 
 
 # ---------------------------------------------------------------------------
@@ -1680,6 +1737,8 @@ _ALLOWED_API_ATTRS = {
     "config_fetch_backup_ssh",
     "config_uci_get",
     "config_packagelist",
+    "config_backup_access",
+    "config_ssh_user_is_root",
 }
 
 

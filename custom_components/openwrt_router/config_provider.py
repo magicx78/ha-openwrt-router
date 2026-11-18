@@ -212,8 +212,11 @@ STEP_REBOOT: Final = "reboot"
 _RESERVE_AFTER_ARCHIVE: Final = 0.40
 _RESERVE_AFTER_UCI: Final = 0.10
 _RESERVE_AFTER_INVENTORY: Final = 0.02
-# The archive probes stop after this many bytes (too_large = path works).
-_PROBE_MAX_BYTES: Final = 1
+# Probe outcome "not checked here, found out by the first backup" (review M1:
+# the probe never fetches an archive, so sysupgrade never runs for it).
+_PROBE_NOT_PROBED: Final = "not_probed"
+# Package that serves /cgi-bin/cgi-backup.
+_CGI_IO_PACKAGE: Final = "cgi-io"
 # Digest put into secret markers when digests are not comparable.
 _NEUTRAL_DIGEST: Final = "-"
 
@@ -857,6 +860,8 @@ def _probe_status(
         state, reason = CapabilityState.UNAVAILABLE, CapabilityReason.NOT_DETECTED.value
     elif error_class in (ERR_UNREACHABLE, ERR_TIMEOUT):
         state, reason = CapabilityState.UNKNOWN, CapabilityReason.ROUTER_OFFLINE.value
+    elif error_class == _PROBE_NOT_PROBED:
+        state, reason = CapabilityState.UNKNOWN, CapabilityReason.NOT_PROBED.value
     else:
         state, reason = CapabilityState.UNKNOWN, f"provider:{error_class}"
     return CapabilityStatus(
@@ -1090,7 +1095,8 @@ class ConfigManagerProvider:
         self, conn: RouterConnection, ctx: ProviderContext
     ) -> Mapping[str, CapabilityStatus]:
         """Probe config.* capabilities on the router (setup, ACL redeploy,
-        firmware change; never in the poll)."""
+        firmware change; never in the poll). Reads UCI, the package list and
+        rpcd rights only: it never fetches an archive (review M1)."""
         started = time.monotonic()
         statuses = await self._bounded(
             "probe", conn.router_id, started, self._probe(conn)
@@ -1098,18 +1104,31 @@ class ConfigManagerProvider:
         _log("probe", started)
         return statuses
 
-    async def _probe_archive(
-        self, fetch: Callable[..., Awaitable[bytes]], timeout: float
+    async def _probe_cgi(
+        self, api: Any, packages: Mapping[str, Any] | None, timeout: float
     ) -> str | None:
-        """Error class of one archive path; stops after _PROBE_MAX_BYTES."""
+        """Error class of the cgi-backup path from rights and presence only.
+
+        Never fetches: a fetch makes the router run sysupgrade (review M1).
+        rpcd's ``session access`` answers for the right; the package list
+        read just before says whether cgi-io is installed. What neither
+        settles is ``_PROBE_NOT_PROBED`` (the first backup finds out).
+        """
         try:
-            await fetch(max_bytes=_PROBE_MAX_BYTES, timeout=timeout)
+            async with asyncio.timeout(timeout):
+                access = await api.config_backup_access()
         except Exception as err:
             if isinstance(err, PROGRAMMING_ERRORS):
                 raise
             error_class = classify_error(err)
-            return None if error_class == ERR_TOO_LARGE else error_class
-        return None
+            if error_class in (ERR_UNREACHABLE, ERR_TIMEOUT):
+                return error_class
+            return _PROBE_NOT_PROBED
+        if access is False:
+            return ERR_PERMISSION
+        if access is not True or packages is None:
+            return _PROBE_NOT_PROBED
+        return None if _CGI_IO_PACKAGE in packages else ERR_NOT_AVAILABLE
 
     async def _probe(self, conn: RouterConnection) -> dict[str, CapabilityStatus]:
         api = conn.api
@@ -1137,15 +1156,10 @@ class ConfigManagerProvider:
         ssh_class: str | None
         pkg_class: str | None
         if uci_class in (ERR_UNREACHABLE, ERR_TIMEOUT):
-            # Dead router: no archive probe that would only wait again.
+            # Dead router: no rights check that would only wait again.
             cgi_class = ssh_class = pkg_class = uci_class
         else:
-            cgi_class = await self._probe_archive(
-                api.config_fetch_backup_cgi, self._timeouts[FETCH_METHOD_CGI]
-            )
-            ssh_class = await self._probe_archive(
-                api.config_fetch_backup_ssh, self._timeouts[FETCH_METHOD_SSH]
-            )
+            known: Mapping[str, Any] | None = None
             try:
                 async with asyncio.timeout(self._timeouts[FETCH_PACKAGELIST]):
                     packages = await api.config_packagelist()
@@ -1156,6 +1170,15 @@ class ConfigManagerProvider:
             else:
                 has_packages = isinstance(packages, Mapping) and bool(packages)
                 pkg_class = None if has_packages else ERR_NOT_AVAILABLE
+                known = packages if has_packages else None
+            cgi_class = await self._probe_cgi(
+                api, known, self._timeouts[FETCH_PACKAGELIST]
+            )
+            # SSH: only "user is root" is known without connecting; whether
+            # SSH and sysupgrade work shows at the first SSH backup.
+            ssh_class = (
+                _PROBE_NOT_PROBED if api.config_ssh_user_is_root() else ERR_PERMISSION
+            )
 
         now = utcnow()
         uci = _probe_status(

@@ -6327,6 +6327,47 @@ class OpenWrtAPI:
         packages = _config_parse_package_output(out.decode("utf-8", errors="replace"))
         return packages or None
 
+    async def config_backup_access(self) -> bool | None:
+        """Does HA's rpcd session hold the ``cgi-io: backup`` read right?
+
+        Asks rpcd ``session access`` (scope ``cgi-io``, object ``backup``,
+        function ``read``) for the current session: the check cgi-io makes
+        before it starts ``sysupgrade --create-backup``. Read-only: no
+        archive, no sysupgrade, no SSH. uhttpd adds the session id itself.
+
+        Network calls: 1 ubus call (plus the re-login of ``_call`` on a first
+        ACL denial).
+
+        Returns:
+            True or False as rpcd answers; None if rpcd gives no clear answer
+            (``session access`` denied or unknown, error reply, no boolean).
+
+        Raises:
+            OpenWrtAuthError / OpenWrtConnectionError / OpenWrtTimeoutError:
+                from the ubus call (router not usable).
+        """
+        try:
+            result = await self._call(
+                _CONFIG_SESSION_OBJECT, _CONFIG_SESSION_ACCESS, dict(_CONFIG_BACKUP_ACL)
+            )
+        except (OpenWrtMethodNotFoundError, OpenWrtResponseError) as err:
+            _LOGGER.debug(
+                "session access on %s gave no answer (%s)",
+                self._host,
+                type(err).__name__,
+            )
+            return None
+        access = result.get("access") if isinstance(result, dict) else None
+        return access if isinstance(access, bool) else None
+
+    def config_ssh_user_is_root(self) -> bool:
+        """True if the configured user is root (SSH backups need root).
+
+        No network call: SSH reachability and login stay unknown until the
+        first SSH backup.
+        """
+        return self._username == "root"
+
     async def _config_ssh_open(self, remote_cmd: str) -> Any:
         """Open a process for ``remote_cmd`` on the shared SSH connection.
 
@@ -6694,6 +6735,11 @@ _CONFIG_PACKAGES_MAX_BYTES = 2 * 1024 * 1024
 _CONFIG_SSH_TEXT_TIMEOUT = 30.0
 _CONFIG_RPC_SYS_OBJECT = "rpc-sys"
 _CONFIG_RPC_SYS_PACKAGELIST = "packagelist"
+# rpcd's ACL check, read-only; cgi-io's main_backup asks exactly this before
+# it runs sysupgrade (review M1: the probe never creates a backup).
+_CONFIG_SESSION_OBJECT = "session"
+_CONFIG_SESSION_ACCESS = "access"
+_CONFIG_BACKUP_ACL = {"scope": "cgi-io", "object": "backup", "function": "read"}
 # UCI package name: letters, digits, "_" and "-", no leading "-" (option).
 _CONFIG_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}")
 # apk (OpenWrt >= 25) before opkg, like _UPDATE_CHECK_SCRIPT. Read-only:

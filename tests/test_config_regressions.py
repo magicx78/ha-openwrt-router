@@ -27,6 +27,9 @@ PUBLIC_METHODS = {
     "config_fetch_backup_ssh",
     "config_uci_get",
     "config_packagelist",
+    # Read-only rights checks of the capability probe (review M1).
+    "config_backup_access",
+    "config_ssh_user_is_root",
 }
 EXCEPTIONS = {
     "OpenWrtConfigFetchError",
