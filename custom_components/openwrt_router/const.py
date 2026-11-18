@@ -720,6 +720,11 @@ OPTION_CONFIG_DRIFT_CHECK = "config_drift_check"
 DEFAULT_CONFIG_DRIFT_CHECK = True
 # Runtime: one per HA instance, released after the last entry.
 CONFIG_MANAGER_MODULE = "config_manager"
+# Own event prefix: registering it is what entitles the module to its key
+# (contract §11.5); the module emits nothing below it yet.
+CONFIG_MANAGER_EVENT_PREFIX = f"{CONFIG_MANAGER_MODULE}."
+# Purpose of the module key that salts user pseudonyms in route answers.
+CONFIG_ROUTE_PSEUDONYM_PURPOSE = "route_user_pseudonym"
 DATA_CONFIG_MANAGER = f"{DOMAIN}_config_manager"
 DATA_CONFIG_VIEWS_BOUND = f"{DOMAIN}_config_views_bound"
 SIGNAL_CONFIG_MANAGER = f"{DOMAIN}_config_manager_update"

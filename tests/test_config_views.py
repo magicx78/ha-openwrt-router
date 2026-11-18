@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from config_manager_kit import ON, cm_env, drain, stop
+from config_manager_kit import ON, attach_entry, cm_env, drain, restart, stop
 from core_test_provider import (
     FakeConfigProvider,
     short_tmp_path,  # noqa: F401 - short tmp_path (Windows path limit)
@@ -35,6 +35,7 @@ from test_acl_tiers import V8_TEXT
 from test_acl_tiers import _api as acl_api
 from yarl import URL
 
+from custom_components.openwrt_router import config_manager as cm
 from custom_components.openwrt_router import config_views as cv
 from custom_components.openwrt_router.acl_provisioning import (
     RPCD_ACL_CONTENT,
@@ -42,6 +43,9 @@ from custom_components.openwrt_router.acl_provisioning import (
     observe_deployed_acl,
 )
 from custom_components.openwrt_router.const import (
+    CONFIG_MANAGER_EVENT_PREFIX,
+    CONFIG_MANAGER_MODULE,
+    CONFIG_ROUTE_PSEUDONYM_PURPOSE,
     DATA_CONFIG_MANAGER,
     DEFAULT_CONFIG_BACKUP_TIME,
 )
@@ -77,6 +81,7 @@ from custom_components.openwrt_router.core_models import (
     ConfigDiff,
     ConfigRef,
     GuardedAction,
+    derive_module_key,
     utcnow,
 )
 from custom_components.openwrt_router.topology_panel import _PANEL_VIEW_DISABLED_KEY
@@ -517,7 +522,12 @@ async def test_path_traversal_ids_never_reach_the_core(disks, tmp_path, bad):
 async def test_empty_and_odd_ids_rejected_by_the_handlers(disks, tmp_path):
     env = await cm_env(disks, tmp_path)
     ctx = cv.RequestContext(
-        hass=env.hass, runtime=env.runtime, api=env.api, actor=ADMIN, user_id=ADMIN_ID
+        hass=env.hass,
+        runtime=env.runtime,
+        api=env.api,
+        actor=ADMIN,
+        user_id=ADMIN_ID,
+        salt=await env.runtime.async_route_salt(),
     )
     for bad in ("", "../x", "rtr_/../../x", None, 5, "rtr_" + "0" * 32 + "\n"):
         with pytest.raises(cv.RequestError) as err:
@@ -1484,6 +1494,85 @@ def test_output_replaces_actors_and_pseudonymises():
     assert SECRET not in json.dumps(out)
     assert cv.output(data, salt, "other")["created_by"]["mine"] is False
     assert cv.output(data, salt, None)["created_by"]["mine"] is False
+
+
+def _salts_of_routes(monkeypatch: Any) -> list[bytes]:
+    """Every salt a route passes to ``output`` (the module key, contract #100)."""
+    seen: list[bytes] = []
+    real = cv.output
+
+    def spy(data: Any, salt: bytes, user_id: str | None) -> Any:
+        seen.append(salt)
+        return real(data, salt, user_id)
+
+    monkeypatch.setattr(cv, "output", spy)
+    return seen
+
+
+async def test_route_salt_is_the_module_key(disks, tmp_path, monkeypatch, caplog):
+    """With a key the pseudonym salt is the module key, stable over restarts."""
+    env = await cm_env(disks, tmp_path)
+    key = await env.api.async_get_installation_key()  # creates it on first use
+    assert env.api.installation_key_state == "ok"
+    assert CONFIG_MANAGER_MODULE in env.core.audit.registered_modules()
+    want = derive_module_key(key, CONFIG_MANAGER_MODULE, CONFIG_ROUTE_PSEUDONYM_PURPOSE)
+    seen = _salts_of_routes(monkeypatch)
+    caplog.set_level("DEBUG")
+    async with http(env.hass) as h:
+        assert (await h.get("/overview")).status == 200
+        assert (await h.get(f"/routers/{env.rid}/versions")).status == 200
+    assert seen and set(seen) == {want}
+    assert env.runtime.route_salt_stable is True
+    assert env.runtime.stats["route_salt_ephemeral"] == 0
+    assert want.hex() not in caplog.text and key.hex() not in caplog.text
+    ctx = cv.RequestContext(env.hass, env.runtime, env.api, ADMIN, ADMIN_ID, want)
+    assert "salt" not in repr(ctx) and want.hex() not in repr(ctx)
+    # same installation key after a restart -> same salt -> same pseudonyms
+    env = await restart(env)
+    assert await env.runtime.async_route_salt() == want
+    # the last release removes our prefix (and only ours)
+    audit = env.core.audit
+    for entry in env.entries:
+        cm.async_release_config_manager(env.hass, entry.entry_id)
+    assert CONFIG_MANAGER_MODULE not in audit.registered_modules()
+    await stop(env)
+
+
+async def test_route_salt_without_a_key_is_random_and_creates_none(
+    disks, tmp_path, caplog
+):
+    """First start: random for this run, counted, logged once, no key made."""
+    env = await cm_env(disks, tmp_path)
+    assert env.api.installation_key_state == "uninitialised"
+    caplog.set_level("INFO")
+    runtime = env.runtime
+    salt = await runtime.async_route_salt()
+    assert len(salt) == 16
+    assert await runtime.async_route_salt() is salt  # decided once per run
+    assert runtime.route_salt_stable is False
+    assert runtime.stats["route_salt_ephemeral"] == 1
+    assert env.api.installation_key_state == "uninitialised"  # nothing created
+    assert caplog.text.count("random for this run") == 1
+    assert salt.hex() not in caplog.text
+    await stop(env)
+
+
+async def test_route_salt_when_the_prefix_is_taken(disks, tmp_path):
+    """Another module holds the prefix: no module key, a random salt."""
+    env = await cm_env(disks, tmp_path, attach=False)
+    env.api.register_event_prefix(CONFIG_MANAGER_EVENT_PREFIX, module="other")
+    await env.api.async_get_installation_key()
+    for entry in env.entries:
+        await attach_entry(env, entry)
+    salt = await env.runtime.async_route_salt()
+    assert env.runtime.route_salt_stable is False
+    assert env.runtime.stats["route_salt_ephemeral"] == 1
+    assert len(salt) == 16
+    audit = env.core.audit
+    for entry in env.entries:
+        cm.async_release_config_manager(env.hass, entry.entry_id)
+    assert "other" in audit.registered_modules()  # never removed by us
+    await stop(env)
 
 
 @pytest.mark.parametrize(

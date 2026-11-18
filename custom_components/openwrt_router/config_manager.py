@@ -50,10 +50,12 @@ from .config_snapshot import fingerprint_from_coordinator
 from .const import (
     CONFIG_BACKUP_SCHEDULE_DAILY,
     CONFIG_DRIFT_VERSIONS_PER_DAY,
+    CONFIG_MANAGER_EVENT_PREFIX,
     CONFIG_MANAGER_MODULE,
     CONFIG_MANAGER_TICK_SECONDS,
     CONFIG_NOTE_MAX_LENGTH,
     CONFIG_RELEASE_CHANGE_DELAY_SECONDS,
+    CONFIG_ROUTE_PSEUDONYM_PURPOSE,
     CONFIG_STAGGER_SECONDS,
     CONFIG_STATUS_DISABLED,
     CONFIG_STATUS_FAILED,
@@ -249,8 +251,11 @@ class ConfigManagerRuntime:
         self.core = core
         self.api = api
         self.provider_factory = provider_factory or _default_provider
-        # Salt of the user pseudonyms in responses (per HA session).
-        self.salt = secrets.token_bytes(16)
+        # Salt of the user pseudonyms in route answers: the module key
+        # (contract §11.5), else random for this run (async_route_salt).
+        self._route_salt: bytes | None = None
+        self.route_salt_stable = False
+        self._unregister_prefix: Callable[[], None] | None = None
         self.now: Callable[[], datetime] = dt_util.now
         self.module_actor = Actor.for_module(CONFIG_MANAGER_MODULE)
         self.entries: dict[str, Any] = {}
@@ -280,6 +285,7 @@ class ConfigManagerRuntime:
             "drift_versions": 0,
             "refreshes": 0,
             "ticks": 0,
+            "route_salt_ephemeral": 0,
         }
 
     # -- lifecycle ---------------------------------------------------------------------
@@ -307,7 +313,55 @@ class ConfigManagerRuntime:
                 "Another configuration provider is registered; the "
                 "configuration manager stays passive"
             )
+        try:
+            self._unregister_prefix = self.api.register_event_prefix(
+                CONFIG_MANAGER_EVENT_PREFIX, module=CONFIG_MANAGER_MODULE
+            )
+        except ValueError:
+            # Another module holds the prefix: no module key, random salt.
+            _LOGGER.warning(
+                "Event prefix of the configuration manager is taken; "
+                "pseudonyms in its answers change on every restart"
+            )
         self._unsubscribe = self.api.subscribe(self._on_core_event)
+
+    async def async_route_salt(self) -> bytes:
+        """Salt of the user pseudonyms in route answers (never logged).
+
+        The module key (contract §11.5, purpose
+        ``CONFIG_ROUTE_PSEUDONYM_PURPOSE``) while the installation key is
+        ``ok``: stable over restarts, like the core's bus pseudonym. Without
+        a usable key (first start, key lost, prefix taken) a random salt for
+        the rest of this run, counted and logged once; a route never creates
+        the installation key. Decided once per runtime, so pseudonyms stay
+        the same for the whole run.
+        """
+        if self._route_salt is not None:
+            return self._route_salt
+        salt: bytes | None = None
+        reason = "prefix_unavailable"
+        if self._unregister_prefix is not None:
+            reason = str(getattr(self.api.installation_key_state, "value", "unknown"))
+            if reason == "ok":
+                try:
+                    salt = await self.api.async_get_module_key(
+                        CONFIG_MANAGER_MODULE, CONFIG_ROUTE_PSEUDONYM_PURPOSE
+                    )
+                except ConfigApiError as err:
+                    reason = str(err.details.get("reason") or err.code)
+        if self._route_salt is None:  # a concurrent call may have decided
+            if salt is None:
+                salt = secrets.token_bytes(16)
+                self.stats["route_salt_ephemeral"] += 1
+                _LOGGER.info(
+                    "Configuration manager: no module key (%s); user pseudonyms "
+                    "in its answers are random for this run",
+                    reason,
+                )
+            else:
+                self.route_salt_stable = True
+            self._route_salt = salt
+        return self._route_salt
 
     async def async_attach(self, entry: Any, coordinator: Any) -> RouterState | None:
         """Track one config entry (its router id comes from the registry)."""
@@ -378,6 +432,10 @@ class ConfigManagerRuntime:
         if self._unregister is not None:
             self._unregister()
             self._unregister = None
+        if self._unregister_prefix is not None:
+            self._unregister_prefix()
+            self._unregister_prefix = None
+        self._route_salt = None
         self.provider = None
         if self.hass.data.get(DATA_CONFIG_MANAGER) is self:
             self.hass.data.pop(DATA_CONFIG_MANAGER, None)

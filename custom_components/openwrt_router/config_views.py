@@ -13,7 +13,8 @@ that hold for every route, checked in this order before anything else:
 Inputs: ids only in their strict shape (``rtr_``/``bkp_``/``apr_`` + 32 hex,
 drift ids 1-128 of ``[A-Za-z0-9_-]``) and never used as a path; bodies at
 most 4 KB, JSON objects, unknown keys rejected. Outputs: actor fields become
-``{"kind", "mine"}``, user ids are pseudonymised with the runtime's salt and
+``{"kind", "mine"}``, user ids are pseudonymised with the module key
+(``ConfigManagerRuntime.async_route_salt``) and
 every JSON body goes through ``mask_for_output``; ``Cache-Control:
 no-store`` on every response. Error bodies are built from the error code
 (``{message, code, error_class, retryable, details}``), never from router
@@ -29,7 +30,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
@@ -543,9 +544,11 @@ class RequestContext:
     api: Any
     actor: Any
     user_id: str | None
+    # Pseudonym salt: the module key or a random salt of this run (never shown).
+    salt: bytes = field(repr=False)
 
     def out(self, data: Any) -> Any:
-        return output(data, self.runtime.salt, self.user_id)
+        return output(data, self.salt, self.user_id)
 
     def router(self, router_id: Any) -> Any:
         """The router state of a path id (400 malformed, 404 unknown)."""
@@ -703,6 +706,7 @@ class _ConfigView(HomeAssistantView):
             api=runtime.api,
             actor=actor,
             user_id=user_id,
+            salt=await runtime.async_route_salt(),
         )
 
     async def _respond(
