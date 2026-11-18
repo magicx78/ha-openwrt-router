@@ -31,9 +31,10 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ### Changed
 
-- Enterprise Core: Drift-Prüfung, Restore-Probelauf und Backup-Prüfung (mit Akteur)
-  verlangen von einem Benutzer Admin-Rechte, wie schon Capture und Vergleich; die
-  Ablehnung steht im Sicherheits-Audit.
+- Enterprise Core: Drift-Prüfung, Restore-Probelauf und Backup-Prüfung verlangen von
+  einem Benutzer Admin-Rechte, wie schon Capture und Vergleich; die Ablehnung steht im
+  Sicherheits-Audit. Die Backup-Prüfung braucht immer einen Akteur; ohne ihn wird sie
+  abgelehnt (`actor_required`) statt ungeprüft ausgeführt (Sicherheitsprüfung von PR #56).
 - Enterprise Core: Die Maskierung zeigt Kennungen unter wenigen Namen wie `rule_key` oder
   `translation_key`, aber nur in strenger Form (Core-ID oder kurzer Slug in
   Kleinbuchstaben); alles andere darunter, auch verschachtelte Daten, bleibt maskiert.

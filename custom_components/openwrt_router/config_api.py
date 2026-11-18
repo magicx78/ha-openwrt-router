@@ -171,6 +171,8 @@ READ_COMPARE = "config_compare"
 READ_VALIDATE = "config_validate"
 READ_DRIFT = "config_drift"
 READ_RESTORE_DRY_RUN = "config_restore_dry_run"
+# async_validate_backup without an Actor (review L2 of PR #56): refused.
+REASON_ACTOR_REQUIRED = "actor_required"
 # Dry-run plans waiting for async_request_restore (security review #4):
 # dropped after this long, and the oldest beyond the cap (both counted).
 RESTORE_PLAN_TTL = APPROVAL_TTL
@@ -487,7 +489,7 @@ class ConfigurationManager:
             "refused_disabled": 0,
             "module_keys_issued": 0,
             "module_keys_refused": 0,
-            "validate_without_actor": 0,
+            "validate_refused_no_actor": 0,
         }
         # Request data dies with its approval (expired, rejected, unload).
         self._remove_approval_listener = guard.add_approval_listener(
@@ -1293,23 +1295,33 @@ class ConfigurationManager:
         return self.versions.get(backup_id)
 
     async def async_validate_backup(
-        self, backup_id: str, *, actor: Actor | None = None
+        self, backup_id: str, *, actor: Actor
     ) -> BackupRecord:
         """Core sha256 check of every artifact, then the provider's check.
 
-        With ``actor`` a user must be a verified admin (checked before any
-        lookup, audited on the security ring). Without one the call is a
-        legacy call: allowed as before 1.45, counted
-        (``validate_without_actor``).
+        ``actor`` is required: ``None`` or any non-Actor raises
+        AuthorizationError ``actor_required`` (audited on the security ring,
+        counted ``validate_refused_no_actor``; review L2 of PR #56). A user
+        must be a verified admin. Both checks run before any lookup or
+        provider call.
         """
-        if actor is None:
-            self.stats["validate_without_actor"] += 1
-            _LOGGER.debug("async_validate_backup called without an actor")
-        else:
-            verified = await self._verify(actor)
-            self._require_content_reader(
-                READ_VALIDATE, self._version_router_id(backup_id), verified
+        router_id = self._version_router_id(backup_id)
+        if not isinstance(actor, Actor):
+            self.stats["validate_refused_no_actor"] += 1
+            audit_id = self.guard.audit_denial(
+                router_id, READ_VALIDATE, None, REASON_ACTOR_REQUIRED
             )
+            raise AuthorizationError(
+                "Validating a backup needs an actor",
+                router_id=router_id,
+                details={
+                    "reason": REASON_ACTOR_REQUIRED,
+                    "audit_id": audit_id,
+                    "action": READ_VALIDATE,
+                },
+            )
+        verified = await self._verify(actor)
+        self._require_content_reader(READ_VALIDATE, router_id, verified)
         provider = self._require_provider(Capability.CONFIG_VALIDATE)
         record = self.versions.get(backup_id)
         self._require_enabled(record.router_id, Capability.CONFIG_VALIDATE)
@@ -2727,9 +2739,9 @@ class ConfigurationApi:
         return await self._m.async_get_backup(backup_id)
 
     async def async_validate_backup(
-        self, backup_id: str, *, actor: Actor | None = None
+        self, backup_id: str, *, actor: Actor
     ) -> BackupRecord:
-        """Validate and store the result (with ``actor``: users must be admin)."""
+        """Validate and store the result (actor required; users must be admin)."""
         return await self._m.async_validate_backup(backup_id, actor=actor)
 
     async def async_compare(

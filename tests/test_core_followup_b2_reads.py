@@ -6,8 +6,8 @@ for ``async_validate_backup``, ``async_detect_drift`` and
 ``async_prepare_restore`` (and ``async_check_restore_compatibility`` on top
 of it), audited on the security ring, before any lookup or provider call.
 Module, system and automation actors pass. ``async_validate_backup`` takes
-the actor as a new optional keyword; without one the call is a legacy
-call: allowed as before, counted (``validate_without_actor``).
+the actor as a keyword; since review L2 of PR #56 it is required (no
+actor ⇒ ``actor_required``, see test_core_followup_l2_validate_actor).
 """
 
 from __future__ import annotations
@@ -139,14 +139,19 @@ async def test_reads_allowed(disks, tmp_path, actor):
     await stop_env(env)
 
 
-async def test_validate_legacy_call(disks, tmp_path):
-    """No actor: allowed as before, but visible as a counter."""
+async def test_validate_without_actor_refused(disks, tmp_path):
+    """Review L2 of PR #56: the legacy call without an actor is gone."""
     env = await start_env(disks, tmp_path)
     backup_id = await _version(env)
-    assert (await env.api.async_validate_backup(backup_id)).backup_id == backup_id
-    assert core_of(env.hass).manager.stats["validate_without_actor"] == 1
+    with pytest.raises(AuthorizationError) as err:
+        await env.api.async_validate_backup(backup_id, actor=None)
+    assert err.value.details["reason"] == "actor_required"
+    stats = core_of(env.hass).manager.stats
+    assert stats["validate_refused_no_actor"] == 1
+    assert "validate_without_actor" not in stats
     await env.api.async_validate_backup(backup_id, actor=ADMIN)
-    assert core_of(env.hass).manager.stats["validate_without_actor"] == 1
+    assert stats["validate_refused_no_actor"] == 1
+    assert env.provider.ops("validate") != []
     await stop_env(env)
 
 

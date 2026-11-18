@@ -233,21 +233,21 @@ async def test_case08_validate_ok_corrupt_and_missing(disks, tmp_path):
     env = await start_env(disks, tmp_path)
     _keep_all(env)
     good = (await _backup(env)).record
-    validated = await env.api.async_validate_backup(good.backup_id)
+    validated = await env.api.async_validate_backup(good.backup_id, actor=ADMIN)
     assert validated.validation.status is ValidationStatus.VALID
     assert _count(env, CoreEventType.BACKUP_VALIDATED) == 1
 
     _hostname(env, "corrupt-me")
     corrupt = (await _backup(env)).record
     _overwrite_first_byte(_file(env, corrupt, "uci"))
-    checked = await env.api.async_validate_backup(corrupt.backup_id)
+    checked = await env.api.async_validate_backup(corrupt.backup_id, actor=ADMIN)
     assert checked.validation.status is ValidationStatus.CORRUPT
     assert not checked.usable
 
     _hostname(env, "remove-me")
     missing = (await _backup(env)).record
     os.remove(_file(env, missing, "archive"))
-    checked = await env.api.async_validate_backup(missing.backup_id)
+    checked = await env.api.async_validate_backup(missing.backup_id, actor=ADMIN)
     assert checked.validation.status in (
         ValidationStatus.MISSING,
         ValidationStatus.CORRUPT,
@@ -587,7 +587,7 @@ async def test_unload_and_reload_with_a_provider(disks, tmp_path):
     assert env.versions.key_id == key_id
     listed = await env.api.async_list_backups(env.rid)
     assert [r.backup_id for r in listed] == [record.backup_id]
-    validated = await env.api.async_validate_backup(record.backup_id)
+    validated = await env.api.async_validate_backup(record.backup_id, actor=ADMIN)
     assert validated.validation.status is ValidationStatus.VALID
     with pytest.raises(ApprovalInvalidError):  # approvals never survive
         await env.api.async_export_backup(pending.approval_id, actor=ADMIN)
