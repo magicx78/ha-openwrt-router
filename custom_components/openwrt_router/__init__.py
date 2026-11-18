@@ -274,6 +274,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         "Setting up OpenWrt Router entry for %s:%s (%s)", host, port, protocol
     )
 
+    # --- Enterprise core (part 1): router id BEFORE any router contact, so an
+    # entry stuck in setup_retry still has its stable id. Never fails setup.
+    try:
+        from .enterprise_core import async_setup_entry_core
+
+        await async_setup_entry_core(hass, entry)
+    except Exception:
+        _LOGGER.warning(
+            "Enterprise core: router id assignment failed for '%s' — the "
+            "router works without it",
+            entry.title,
+            exc_info=True,
+        )
+    # --- end enterprise core
+
     # Shared aiohttp session managed by HA
     session = async_get_clientsession(hass)
 
@@ -419,6 +434,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
             exc_info=True,
         )
 
+    # --- Enterprise core (part 1): registry listener on finished polls; reads
+    # coordinator data only (no router calls). Never fails setup.
+    try:
+        from .enterprise_core import async_setup_entry_core
+
+        await async_setup_entry_core(hass, entry, coordinator)
+    except Exception:
+        _LOGGER.warning(
+            "Enterprise core: registry listener setup failed for '%s' — the "
+            "router works without it",
+            entry.title,
+            exc_info=True,
+        )
+    # --- end enterprise core
+
     # Channel conflicts are judged across all routers after every poll.
     channel_plan = async_get_channel_plan_monitor(hass)
     entry.async_on_unload(
@@ -551,6 +581,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
             _LOGGER.warning(
                 "Client stability unload raised for '%s'", entry.title, exc_info=True
             )
+        # --- Enterprise core (part 1): detach; the last entry flushes and
+        # releases the core.
+        try:
+            from .enterprise_core import async_unload_entry_core
+
+            await async_unload_entry_core(hass, entry)
+        except Exception:
+            _LOGGER.warning(
+                "Enterprise core unload raised for '%s'", entry.title, exc_info=True
+            )
+        # --- end enterprise core
 
     runtime = getattr(entry, "runtime_data", None)
     api = getattr(runtime, "api", None) if runtime is not None else None
@@ -579,6 +620,19 @@ async def async_remove_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
             entry.title,
             exc_info=True,
         )
+    # --- Enterprise core (part 1): the router record is orphaned, not deleted
+    # (history stays; it can be adopted by a new entry).
+    try:
+        from .enterprise_core import async_remove_entry_core
+
+        await async_remove_entry_core(hass, entry)
+    except Exception:
+        _LOGGER.warning(
+            "Enterprise core: could not orphan the router record of '%s'",
+            entry.title,
+            exc_info=True,
+        )
+    # --- end enterprise core
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> None:

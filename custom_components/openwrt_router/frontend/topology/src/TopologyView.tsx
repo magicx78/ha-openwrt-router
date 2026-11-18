@@ -36,6 +36,8 @@ import { ContextMenu, ContextMenuEntry } from './components/ContextMenu';
 import { APClientList } from './components/APClientList';
 import { GlobalFooter } from './components/GlobalFooter';
 import { DiagnoseView } from './components/DiagnoseView';
+import { EnterpriseView } from './components/EnterpriseView';
+import { hasEnterpriseTabs } from './enterprise/registry';
 import type { IntelApi } from './api';
 
 type SelectedEntity =
@@ -75,6 +77,10 @@ export function TopologyView({ data, intel }: Props) {
   // ── Sidebar + active tab ─────────────────────────────────────────────────
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<SidebarTab>('topology');
+  const showEnterprise = hasEnterpriseTabs();
+  useEffect(() => {
+    if (activeTab === 'enterprise' && !showEnterprise) setActiveTab('topology');
+  }, [activeTab, showEnterprise]);
   // Diagnose tab (P7): router preselected from a node's warning symbol.
   const [diagnoseRouter, setDiagnoseRouter] = useState<string | null>(null);
   const openDiagnose = useCallback((entryId?: string) => {
@@ -487,6 +493,7 @@ export function TopologyView({ data, intel }: Props) {
         warningCount={warningCount}
         diagnoseCount={diagnoseCount}
         showDiagnose={intel !== undefined}
+        showEnterprise={showEnterprise}
         onToggle={() => setSidebarOpen(o => !o)}
         onTabChange={setActiveTab}
       />
@@ -556,6 +563,7 @@ export function TopologyView({ data, intel }: Props) {
             onBack={() => setActiveTab('topology')}
           />
         )}
+        {activeTab === 'enterprise' && <EnterpriseView />}
         {activeTab === 'settings' && <SettingsView />}
         {activeTab === 'compare' && <CompareView data={data} />}
 

@@ -2,6 +2,60 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Handy: untere Leiste wieder bedienbar.** Unter 420 px lag der Kopf der
+  geschlossenen, leeren Detailansicht („Details ×“) über der neuen
+  Symbolleiste und fing jeden Tipp ab. Die geschlossene Detailansicht ist
+  jetzt unsichtbar und nimmt keine Tipps mehr an; geöffnet sitzt sie über
+  der Leiste. Am Desktop unverändert.
+- **Speicheranzeige nach dem Start:** bis zum ersten Speichern (bis 5 min
+  nach dem Start) steht in den Stabilitäts-Einstellungen „noch nicht
+  gespeichert“ statt „–“.
+- **Deutsche Zahlen auch in der Fußleiste** und überall, wo Datenraten und
+  Datenmengen stehen (Traffic, Detailansicht, Verbindungs-Tooltip):
+  „5,0 Mbit/s“, „8,9 GB“.
+- **Screenreader:** die Symbole der Seitenleiste nennen wieder ihre Zahl,
+  z. B. „Diagnose (3)“.
+- **Detailansicht am Handy:** nimmt beim Zuklappen keine Tipps mehr an und
+  bleibt bei wenig Bildschirmhöhe samt „×“ vollständig sichtbar.
+
+## [1.43.1] - 2026-11-17
+
+Reine Panel-Korrekturen am Tab *Diagnose → Stabilität*; keine neuen
+Router-Abfragen, Entitäten und Sensorwerte unverändert.
+
+### Fixed
+
+- **Deutsche Zahlen im ganzen Tab.** Alle Zahlen (Liste, Detail,
+  AP-Vergleich, Einstellungen, Empfehlungen) laufen über eine Hilfsfunktion
+  mit Dezimalkomma: aus „5.404 Abbrüche“ wird „5,4 Abbrüche/100 h“, aus
+  „Speicher: 0.11 MB“ wird „0,11 MB“. Raten haben eine Nachkommastelle und
+  die Einheit „/100 h“, Signal ganze dBm, Zähler ganze Zahlen.
+- **AP-Vergleich in Rangfolge.** Die Liste kam nach interner AP-Kennung
+  sortiert, die Rangnummer zählt aber nach den wenigsten Abbrüchen je
+  100 Client-Stunden; die Liste folgt jetzt dem Rang. APs mit zu wenig Daten
+  (unter 10 Client-Stunden) stehen danach, nach Namen sortiert, mit „–“.
+- **Einstellungen:** Score-Gewichte und Klassengrenzen überlappen am Desktop
+  nicht mehr; jedes Feld steht unter seiner Beschriftung in seiner Zelle.
+- **Client-Liste:** Kopfzeile am Desktop (Name, Access Point, Zustand,
+  Score, Verfügbarkeit 24 h / 7 Tage, Reconnects 24 h, letztes Problem,
+  Datenabdeckung, Trend) und eine eigene Trend-Spalte aus denselben Werten
+  wie die Trend-Sortierung, mit Text für Screenreader; „–“ heißt zu wenig
+  Daten. Das letzte Problem wird bei Platzmangel mit „…“ gekürzt (voller
+  Text im Tooltip) und überlappt die Nachbarspalte nicht mehr.
+- **Schmale Liste:** die Client-Liste wechselt nach ihrer eigenen Breite
+  (unter 820 px) zu Karten, auch bei offener HA-Seitenleiste oder halbem
+  Browserfenster.
+- **Reconnects ohne Abbrüche** sind kein Widerspruch: das Detail sagt jetzt
+  neben der Zahl, dass Reconnects aus dem Router-Log stammen und kurze
+  Neuanmeldungen keine Sitzung beenden.
+- **Handy:** unter 760 px liegen die sechs Filter hinter einem
+  „Filter“-Knopf (zeigt, wie viele gesetzt sind); unter 420 px wird die
+  Seitennavigation zur Leiste unten, damit *Diagnose* erreichbar bleibt.
+
 ## [1.43.0] - 2026-11-17
 
 ### Added

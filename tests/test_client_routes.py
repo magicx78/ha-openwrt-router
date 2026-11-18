@@ -391,6 +391,31 @@ async def test_ap_comparison_windows(cs: ClientStability, window: str) -> None:
     assert data["ranking"] == []
 
 
+async def test_ap_comparison_lists_aps_in_rank_order(cs: ClientStability) -> None:
+    """Rows follow the ranking (rank 1 first); unranked APs follow by name."""
+    real = client_views.ap_comparison
+
+    def reranked(*args: Any, **kwargs: Any) -> Any:
+        found = real(*args, **kwargs)
+        base = found.aps["r2"]
+        aps = {
+            "r1": replace(base, ap="r1", rank=2),
+            "r2": replace(base, ap="r2", rank=1),
+            "r3": replace(base, ap="r3", status="insufficient", rank=None),
+            "r0": replace(base, ap="r0", status="insufficient", rank=None),
+        }
+        return replace(found, aps=aps, ranking=("r2", "r1"))
+
+    names = {**NAMES, "r0": "Zimmer", "r3": "Bad"}
+    with (
+        patch.object(client_views, "ap_comparison", reranked),
+        patch.object(client_views, "_router_names", return_value=names.get),
+    ):
+        data = body(await aps(cs, window="24h"))
+    assert [row["ap"] for row in data["aps"]] == ["r2", "r1", "r3", "r0"]
+    assert [row["rank"] for row in data["aps"]] == [1, 2, None, None]
+
+
 async def test_ap_comparison_rejects_a_bad_window(cs: ClientStability) -> None:
     assert (await aps(cs, window="1h")).status == 400
 

@@ -528,6 +528,21 @@ class TestClientTracking:
 
 from datetime import datetime, UTC, timedelta as _timedelta
 
+_FIXED_NOW = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+
+
+class _FixedClock(datetime):
+    """The coordinator's ``datetime`` with a clock that stands still."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return _FIXED_NOW
+
+
+def _fixed_clock():
+    """Patch the coordinator clock so a poll takes no wall-clock time."""
+    return patch("custom_components.openwrt_router.coordinator.datetime", _FixedClock)
+
 
 class TestBandwidthRateCalculation:
     """Tests for per-interface bytes/s rate calculation in the coordinator."""
@@ -559,18 +574,19 @@ class TestBandwidthRateCalculation:
         # First poll — establishes baseline
         await coord._async_update_data()
 
-        # Manually set prev state to simulate 10s elapsed with 0 bytes
-        coord._prev_poll_time = datetime.now(UTC) - _timedelta(seconds=10)
+        # Prev state 10 s before the fixed clock, with 0 bytes
+        coord._prev_poll_time = _FIXED_NOW - _timedelta(seconds=10)
         coord._prev_interface_bytes = {"wan": {"rx_bytes": 0, "tx_bytes": 0}}
 
         api.get_network_interfaces = AsyncMock(return_value=[
             {"interface": "wan", "rx_bytes": 1000, "tx_bytes": 500, "status": "up"},
         ])
-        data = await coord._async_update_data()
+        with _fixed_clock():
+            data = await coord._async_update_data()
 
         iface = next(i for i in data.network_interfaces if i["interface"] == "wan")
-        assert iface["rx_rate"] == pytest.approx(100.0, abs=2.0)
-        assert iface["tx_rate"] == pytest.approx(50.0, abs=2.0)
+        assert iface["rx_rate"] == 100.0
+        assert iface["tx_rate"] == 50.0
 
     @pytest.mark.asyncio
     async def test_rate_unknown_on_counter_wraparound(self):
@@ -580,15 +596,16 @@ class TestBandwidthRateCalculation:
         ])
         await coord._async_update_data()
 
-        # Set prev state to simulate 10s elapsed with high bytes (so new value is lower)
-        coord._prev_poll_time = datetime.now(UTC) - _timedelta(seconds=10)
+        # Prev state 10 s before the fixed clock, with high bytes (so new value is lower)
+        coord._prev_poll_time = _FIXED_NOW - _timedelta(seconds=10)
         coord._prev_interface_bytes = {"lan": {"rx_bytes": 5000, "tx_bytes": 5000}}
 
         # Counter reset: new values lower than previous
         api.get_network_interfaces = AsyncMock(return_value=[
             {"interface": "lan", "rx_bytes": 100, "tx_bytes": 100, "status": "up"},
         ])
-        data = await coord._async_update_data()
+        with _fixed_clock():
+            data = await coord._async_update_data()
 
         iface = next(i for i in data.network_interfaces if i["interface"] == "lan")
         assert iface["rx_rate"] is None
