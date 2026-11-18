@@ -252,3 +252,38 @@ async def test_foreign_incident_version_fires_despite_drift(disks, tmp_path):
     assert runtime.stats["drift_versions"] == drift_versions
     assert state.version_count == 2
     await stop(env)
+
+
+async def test_diagnostics_block_keeps_every_field_readable(disks, tmp_path):
+    """Contract #108/#110: no field of our diagnostics block is masked.
+
+    The block now goes through the configuration manager's masker (core
+    plus bridge names). Counters, states and timestamps stay readable; the
+    salt counter of the module key is a plain number.
+    """
+    from custom_components.openwrt_router.core_masking import MASK
+    from custom_components.openwrt_router.diagnostics import _config_manager_summary
+
+    env = await cm_env(disks, tmp_path)
+    runtime = env.runtime
+    await runtime.async_backup_now(env.rid, actor=ADMIN, note="weekly check")
+    live = env.provider.live(env.rid)
+    live["firewall"] = {**live["firewall"], "changed": {"x": "1"}}
+    await runtime.async_check_drift(env.rid, actor=ADMIN)
+    await runtime.async_route_salt()
+    block = _config_manager_summary(env.hass, env.entries[0].entry_id)
+    assert MASK not in json.dumps(block, default=str), block
+    assert block["stats"]["route_salt_ephemeral"] in (0, 1)
+    assert set(block["backup"]) >= {
+        "enabled",
+        "status",
+        "error_class",
+        "running",
+        "version_count",
+        "last_backup_at",
+        "last_attempt_at",
+        "next_run_at",
+        "drift",
+    }
+    assert block["backup"]["drift"]["critical_count"] == 1
+    await stop(env)

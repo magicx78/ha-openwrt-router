@@ -240,12 +240,13 @@ def _config_manager_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any
     """Backup state of this router; never fails the download.
 
     Memory of the runtime only (no store read, no router call). Leaves out
-    notes, user ids, drift ids and every configuration value; masked and
-    redacted like the core summary.
+    notes, user ids, drift ids and every configuration value; masked with
+    the configuration manager's masker (core plus bridge names) and redacted
+    like the core summary.
     """
     try:
+        from .config_const import config_mask_for_output
         from .config_manager import async_get_runtime
-        from .core_masking import mask_for_output
 
         runtime = async_get_runtime(hass)
         if runtime is None:
@@ -282,7 +283,7 @@ def _config_manager_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any
                 if drift
                 else None,
             }
-        return _redact(mask_for_output(summary))
+        return _redact(config_mask_for_output(summary))
     except Exception as err:  # noqa: BLE001 - the download must not fail
         _LOGGER.debug(
             "Configuration manager diagnostics failed: %s", type(err).__name__

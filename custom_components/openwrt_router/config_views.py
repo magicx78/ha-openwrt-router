@@ -14,9 +14,9 @@ Inputs: ids only in their strict shape (``rtr_``/``bkp_``/``apr_`` + 32 hex,
 drift ids 1-128 of ``[A-Za-z0-9_-]``) and never used as a path; bodies at
 most 4 KB, JSON objects, unknown keys rejected. Outputs: actor fields become
 ``{"kind", "mine"}``, user ids are pseudonymised with the module key
-(``ConfigManagerRuntime.async_route_salt``) and
-every JSON body goes through ``mask_for_output``; ``Cache-Control:
-no-store`` on every response. Error bodies are built from the error code
+(``ConfigManagerRuntime.async_route_salt``) and every JSON body goes
+through ``config_mask_for_output`` (the core's ``mask_for_output`` plus the
+bridge names); ``Cache-Control: no-store`` on every response. Error bodies are built from the error code
 (``{message, code, error_class, retryable, details}``), never from router
 text. There is no route that deletes versions or executes a restore.
 
@@ -39,7 +39,12 @@ from homeassistant.components.http import KEY_HASS_USER, HomeAssistantView
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.util import dt as dt_util
 
-from .acl_provisioning import DEFAULT_TIER_REGISTRY, TIER_CONFIG_BACKUP_READ
+from .acl_provisioning import (
+    DEFAULT_TIER_REGISTRY,
+    TIER_CONFIG_BACKUP_READ,
+    AclTierError,
+)
+from .config_const import config_mask_for_output
 from .const import (
     DATA_CONFIG_VIEWS_BOUND,
     DEFAULT_CONFIG_BACKUP_TIME,
@@ -54,7 +59,7 @@ from .core_errors import (
     ProviderConflictError,
     RouterNotFoundError,
 )
-from .core_masking import mask_for_output, pseudonymise_user_ids
+from .core_masking import pseudonymise_user_ids
 from .core_models import (
     APPROVAL_TTL,
     CONFIG_CAPABILITIES,
@@ -234,7 +239,9 @@ def _replace_actors(data: Any, user_id: str | None, depth: int = 0) -> Any:
 
 def output(data: Any, salt: bytes, user_id: str | None) -> Any:
     """The last step of every JSON body: actors, pseudonyms, masking."""
-    return mask_for_output(pseudonymise_user_ids(_replace_actors(data, user_id), salt))
+    return config_mask_for_output(
+        pseudonymise_user_ids(_replace_actors(data, user_id), salt)
+    )
 
 
 def _tokens(values: Iterable[Any]) -> list[str]:
@@ -490,7 +497,7 @@ def error_response(
     headers = dict(NO_STORE)
     if code == "operation_in_progress":
         headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
-    return HomeAssistantView.json(mask_for_output(body), status, headers=headers)
+    return HomeAssistantView.json(config_mask_for_output(body), status, headers=headers)
 
 
 def status_for(err: ConfigApiError) -> int:
@@ -741,6 +748,7 @@ class _ConfigView(HomeAssistantView):
             for neutral, name in self.renames.items():
                 if neutral in body:
                     body[name] = body.pop(neutral)
+            self.restore_constants(result, body)
         return self.json(body, headers=dict(NO_STORE))
 
     async def handle(
@@ -748,6 +756,13 @@ class _ConfigView(HomeAssistantView):
     ) -> Any:
         """The route itself (after the access checks)."""
         raise NotImplementedError
+
+    def restore_constants(self, raw: Any, body: dict[str, Any]) -> None:
+        """Put back texts of the code the masker over-masked (default: none).
+
+        Only constants of this integration may come back, never a value
+        from a router, a store or a request.
+        """
 
 
 class _GetView(_ConfigView):
@@ -1304,6 +1319,46 @@ class AclOfferView(_PostView):
                 "risk_details": risks,
             },
         }
+
+    def restore_constants(self, raw: Any, body: dict[str, Any]) -> None:
+        """The tiers' fixed risk sentences, which the text masker cuts.
+
+        ``core_masking.redact_text`` reads "... ROUTER SECRETS: the backup
+        archive ..." as a ``name: value`` pair and masks the rest of the
+        sentence, so the panel would show ``**REDACTED**`` instead of the
+        warning an admin must read before approving. A risk comes back only
+        if the core's offer carried exactly the text of that tier in the
+        tier registry (code, no router data); anything else stays masked.
+        """
+        offer, raw_offer = body.get("offer"), raw.get("offer")
+        if not isinstance(offer, dict) or not isinstance(raw_offer, Mapping):
+            return
+        raw_details = raw_offer.get("risk_details")
+        details = offer.get("risk_details")
+        if not isinstance(raw_details, list) or not isinstance(details, list):
+            return
+        if len(raw_details) != len(details):
+            return
+        for raw_item, item in zip(raw_details, details, strict=True):
+            if not isinstance(raw_item, Mapping) or not isinstance(item, dict):
+                continue
+            text = _tier_risk(raw_item.get("tier_id"))
+            if text is not None and raw_item.get("risk") == text:
+                item["risk"] = text
+        offer["risks"] = [
+            item.get("risk") for item in details if isinstance(item, dict)
+        ]
+
+
+def _tier_risk(tier_id: Any) -> str | None:
+    """Risk sentence of a known tier (a code constant), else None."""
+    if not isinstance(tier_id, str):
+        return None
+    try:
+        risk = DEFAULT_TIER_REGISTRY.get(tier_id).risk
+    except AclTierError:
+        return None
+    return risk if isinstance(risk, str) else None
 
 
 class SshPinView(_PostView):

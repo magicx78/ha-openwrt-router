@@ -28,11 +28,13 @@ from core_test_provider import (
     FakeConfigProvider,
     short_tmp_path,  # noqa: F401 - short tmp_path (Windows path limit)
 )
-from core_testkit import ADMIN_ID, USER_ID, FakeDisks, user_actor
+from core_testkit import ADMIN_ID, OTHER_ADMIN_ID, USER_ID, FakeDisks, user_actor
 from homeassistant.components.http import KEY_HASS_USER
 from homeassistant.helpers.http import KEY_AUTHENTICATED, KEY_HASS
 from test_acl_tiers import V8_TEXT
 from test_acl_tiers import _api as acl_api
+from test_ssh_hostkey_pinning import KEY_A, FakeRouter, _patched
+from test_ssh_hostkey_pinning import _api as ssh_api
 from yarl import URL
 
 from custom_components.openwrt_router import config_manager as cm
@@ -42,6 +44,7 @@ from custom_components.openwrt_router.acl_provisioning import (
     AclEnsureOutcome,
     observe_deployed_acl,
 )
+from custom_components.openwrt_router.api import OpenWrtHostKeyError
 from custom_components.openwrt_router.const import (
     CONFIG_MANAGER_EVENT_PREFIX,
     CONFIG_MANAGER_MODULE,
@@ -1477,6 +1480,296 @@ async def test_secret_never_in_any_response(disks, tmp_path, caplog):
         h.assert_no_secret(ADMIN_ID, "user-plain", router_api._password)
     assert SECRET not in caplog.text
     await stop(env)
+
+
+# What the panel reads (frontend/topology/src/enterprise/config/configLogic.ts
+# parsers, configTypes.ts); top-level keys per route answer.
+FRONTEND_KEYS: dict[str, set[str]] = {
+    "overview": {"provider", "pending_approvals", "routers"},
+    "router_summary": {
+        "router_id",
+        "name",
+        "enabled",
+        "status",
+        "error_class",
+        "running",
+        "last_backup_at",
+        "versions",
+        "capability",
+        "schedule",
+        "drift",
+        "openwrt_version",
+    },
+    "router": {"router_id", "enabled", "capabilities", "ssh_pin", "acl"},
+    "version": {
+        "backup_id",
+        "router_id",
+        "created_at",
+        "last_seen_at",
+        "reason",
+        "backup_type",
+        "status",
+        "error_class",
+        "protected",
+        "created_by",
+        "openwrt_version",
+        "validation",
+        "warnings",
+        "note",
+        "artifacts",
+        "size_bytes",
+        "sha256",
+    },
+    "diff": {"from", "to", "complete", "truncated", "changes"},
+    "drift": {"state", "report", "acks"},
+    "restore": {
+        "backup_id",
+        "compatible",
+        "findings",
+        "steps",
+        "warnings",
+        "instructions",
+        "requires_reboot",
+        "expires_at",
+    },
+    "approval": {
+        "approval_id",
+        "action",
+        "router_id",
+        "subject_id",
+        "status",
+        "requested_by",
+        "expires_at",
+    },
+    "acl_offer": {"approval", "offer"},
+    "backup": {"backup_id", "created", "status"},
+    "execute": {"done"},
+}
+# The only places a mask may appear: the old/new value of a secret change.
+_DIFF_VALUE_KEYS = {"old", "new", "before", "after"}
+
+
+def masked_paths(data: Any, path: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+    """Every path whose value (or key) is the core's mask."""
+    from custom_components.openwrt_router.core_masking import MASK
+
+    found: list[tuple[Any, ...]] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if MASK in str(key):
+                found.append((*path, key))
+            found.extend(masked_paths(value, (*path, key)))
+    elif isinstance(data, list):
+        for i, value in enumerate(data):
+            found.extend(masked_paths(value, (*path, i)))
+    elif isinstance(data, str) and MASK in data:
+        found.append(path)
+    return found
+
+
+def _allowed_mask(body: Any, path: tuple[Any, ...]) -> bool:
+    """A mask under changes[i].<old|new|before|after> of a secret change."""
+    if len(path) != 3 or path[0] != "changes" or path[2] not in _DIFF_VALUE_KEYS:
+        return False
+    return body["changes"][path[1]].get("secret") is True
+
+
+async def test_every_route_succeeds_with_readable_frontend_fields(
+    disks, tmp_path, monkeypatch
+):
+    """Real core, every route R1-R20 reaches 200 (contract changes #100-#114).
+
+    Every JSON answer carries the fields the panel reads, none of them is
+    masked (only the old/new value of a secret diff change is), and no
+    plaintext secret (config value, router password, user id) goes out.
+    """
+    env = await cm_env(disks, tmp_path, routers=2, options=ON)
+    acl_router = acl_capable(env)
+    pin_rid = env.rids[1]
+    pin_router = ssh_api()
+    env.coords[pin_rid].api = pin_router
+
+    async def compare(base: Any, other: Any, ctx: Any, **_: Any) -> ConfigDiff:
+        return ConfigDiff(
+            base=base,
+            other=other,
+            compared_at=utcnow(),
+            changes=(
+                ConfigChange(
+                    kind=ChangeKind.MODIFIED,
+                    config="wireless",
+                    section="default_radio0",
+                    option="key",
+                    before=SECRET,
+                    after=SECRET + "2",
+                ),
+                ConfigChange(
+                    kind=ChangeKind.MODIFIED,
+                    config="system",
+                    section="cfg01",
+                    option="hostname",
+                    before="gw-a",
+                    after="gw-b",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(env.provider, "async_compare", compare)
+    ok: set[str] = set()
+    bodies: list[tuple[str, Any]] = []
+
+    async def call(route: str, method: str, path: str, **kw: Any) -> Any:
+        resp = await h.call(method, cv.BASE_URL + path, **kw)
+        assert resp.status == 200, (route, resp.status, resp.body[:300])
+        assert resp.headers.get("Cache-Control") == "no-store", route
+        ok.add(route)
+        if resp.headers.get("Content-Type", "").startswith("application/json"):
+            bodies.append((route, resp.data))
+            return resp.data
+        return resp
+
+    def has(keys: str, data: Any) -> None:
+        missing = FRONTEND_KEYS[keys] - set(data)
+        assert not missing, (keys, missing)
+
+    rid = env.rid
+    async with http(env.hass) as h:
+        created = await call("backup", "post", f"/routers/{rid}/backup")
+        has("backup", created)
+        bid = created["backup_id"]
+        overview = await call("overview", "get", "/overview")
+        has("overview", overview)
+        for summary in overview["routers"]:
+            has("router_summary", summary)
+        has("router", await call("router", "get", f"/routers/{rid}"))
+        versions = await call("versions", "get", f"/routers/{rid}/versions")
+        assert versions["versions"], versions
+        has("version", versions["versions"][0])
+        has("version", await call("version", "get", f"/versions/{bid}"))
+        has("version", await call("validate", "post", f"/versions/{bid}/validate"))
+        has(
+            "version",
+            await call(
+                "protect", "post", f"/versions/{bid}/protect", body={"protected": True}
+            ),
+        )
+        diff = await call("diff", "get", f"/routers/{rid}/diff?from={bid}")
+        has("diff", diff)
+        assert [c["secret"] for c in diff["changes"]] == [True, False]
+        assert diff["changes"][1]["new"] == "gw-b"  # a plain value stays readable
+        change_live(env, rid, "dropbear")
+        drift = await call("drift_check", "post", f"/routers/{rid}/drift/check")
+        has("drift", drift)
+        drift_id = drift["report"]["drift_id"]
+        has("drift", await call("drift", "get", f"/routers/{rid}/drift"))
+        has(
+            "drift",
+            await call(
+                "drift_ack",
+                "post",
+                f"/routers/{rid}/drift/{drift_id}/ack",
+                body={"state": "acknowledged", "note": "planned"},
+            ),
+        )
+        has(
+            "restore",
+            await call("restore_check", "post", f"/versions/{bid}/restore-check"),
+        )
+        # export: request, approve (second admin), download once
+        export = await call("export", "post", f"/versions/{bid}/export")
+        has("approval", export)
+        approvals = await call("approvals", "get", "/approvals")
+        assert approvals["approvals"]
+        has("approval", approvals["approvals"][0])
+        has(
+            "approval",
+            await call(
+                "approve",
+                "post",
+                f"/approvals/{export['approval_id']}/approve",
+                user=OTHER_ADMIN_ID,
+            ),
+        )
+        await call(
+            "download",
+            "post",
+            f"/approvals/{export['approval_id']}/download",
+            record=False,  # the plaintext export, tested above
+        )
+        # a second export, rejected
+        other = await call("export", "post", f"/versions/{bid}/export")
+        has(
+            "approval",
+            await call(
+                "reject",
+                "post",
+                f"/approvals/{other['approval_id']}/reject",
+                body={"reason": "not now"},
+            ),
+        )
+        # ACL offer -> approve -> execute (real core, deploy over ubus)
+        offer = await call("acl_offer", "post", f"/routers/{rid}/acl-offer")
+        has("acl_offer", offer)
+        assert {"added", "removed", "risks"} <= set(offer["offer"])
+        aid = offer["approval"]["approval_id"]
+        await call("approve", "post", f"/approvals/{aid}/approve", user=OTHER_ADMIN_ID)
+        done = await call("execute", "post", f"/approvals/{aid}/execute")
+        has("execute", done)
+        await drain(env.hass)
+        # SSH pin: first contact leaves a pending key; confirm, then reset
+        with _patched(FakeRouter(KEY_A)), pytest.raises(OpenWrtHostKeyError):
+            await env.core.manager._context().async_ssh_run_pinned(
+                pin_rid, "uci show", timeout=5
+            )
+        for op in ("confirm", "reset"):
+            req = await call("ssh_pin", "post", f"/routers/{pin_rid}/ssh-pin/{op}")
+            has("approval", req)
+            await call(
+                "approve",
+                "post",
+                f"/approvals/{req['approval_id']}/approve",
+                user=OTHER_ADMIN_ID,
+            )
+            done = await call(
+                "execute", "post", f"/approvals/{req['approval_id']}/execute"
+            )
+            has("execute", done)
+        assert env.api.ssh_pin_status(pin_rid)["state"] == "none"
+        h.assert_no_secret(
+            ADMIN_ID, OTHER_ADMIN_ID, acl_router._password, pin_router._password
+        )
+    assert ok == {route_id(v) for v in cv.CONFIG_VIEWS}
+    for route, body in bodies:
+        bad = [p for p in masked_paths(body) if not _allowed_mask(body, p)]
+        assert not bad, (route, bad)
+    await stop(env)
+
+
+def test_acl_offer_restores_only_the_registry_risk_texts():
+    """The fixed tier warning comes back; anything else stays masked."""
+    from custom_components.openwrt_router.acl_provisioning import (
+        DEFAULT_TIER_REGISTRY,
+        TIER_CONFIG_BACKUP_READ,
+    )
+    from custom_components.openwrt_router.core_masking import MASK
+
+    risk = DEFAULT_TIER_REGISTRY.get(TIER_CONFIG_BACKUP_READ).risk
+    forged = f"psk: {SECRET}"
+    details = [
+        {"tier_id": TIER_CONFIG_BACKUP_READ, "risk": risk},
+        {"tier_id": TIER_CONFIG_BACKUP_READ, "risk": risk + " extra: " + SECRET},
+        {"tier_id": "no_such_tier", "risk": forged},
+        {"tier_id": TIER_CONFIG_BACKUP_READ, "risk": forged},
+    ]
+    raw = {"offer": {"risks": [d["risk"] for d in details], "risk_details": details}}
+    body = cv.output(raw, b"0" * 16, ADMIN_ID)
+    assert MASK in body["offer"]["risks"][0]  # the core over-masks the sentence
+    cv.AclOfferView().restore_constants(raw, body)
+    risks = body["offer"]["risks"]
+    assert risks[0] == risk
+    assert [d["risk"] for d in body["offer"]["risk_details"]] == risks
+    assert all(MASK in r for r in risks[1:])
+    assert SECRET not in json.dumps(body)
 
 
 def test_output_replaces_actors_and_pseudonymises():
