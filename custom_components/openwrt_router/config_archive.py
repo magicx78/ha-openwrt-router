@@ -83,6 +83,18 @@ _DISPLAY_MAX: Final = 300
 _ZLIB_GZIP_WBITS: Final = 16 + zlib.MAX_WBITS
 _CONTROL_CHARS: Final = re.compile(r"[\x00-\x1f\x7f]")
 _SHA256_HEX: Final = re.compile(r"[0-9a-fA-F]{64}")
+# Raw header fields as every tar writes them: optional leading spaces, octal
+# digits, then spaces/NULs only. No sign, no base-256, nothing after the NUL.
+_OCTAL_FIELD: Final = re.compile(rb" *([0-7]*)[ \x00]*")
+# A pax "size" record as POSIX defines it; Python's int() would also take
+# "+97", " 97", "9_7" or non-ASCII digits, which other tars read differently.
+_PAX_DECIMAL: Final = re.compile(r"0|[1-9][0-9]{0,17}")
+# Header blocks that may precede a member, each at most once. Global pax
+# headers ("g") and Solaris "X" headers are refused: tarfile and GNU/busybox
+# tar apply them differently.
+_EXTENSION_TYPES: Final = frozenset(
+    {tarfile.XHDTYPE, tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK}
+)
 
 # Finding codes. The error class (ERR_*) says how bad it is, the code why.
 CODE_NOT_GZIP: Final = "not_gzip"
@@ -408,6 +420,73 @@ def _member_kind(member: tarfile.TarInfo) -> str:
     raise _Abort(ERR_INVALID, CODE_UNSUPPORTED_TYPE)
 
 
+def _blocks(size: int) -> int:
+    """Round a byte count up to whole tar blocks."""
+    return -(-size // _TAR_BLOCK) * _TAR_BLOCK
+
+
+def _octal(field: bytes) -> int:
+    match = _OCTAL_FIELD.fullmatch(field)
+    if match is None:
+        raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
+    return int(match.group(1) or b"0", 8)
+
+
+def _header_block(block: bytes) -> tuple[bytes, int]:
+    """Check one raw header block; return (type flag, size field)."""
+    if len(block) != _TAR_BLOCK:
+        raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
+    # Unsigned sum only (POSIX); tarfile also takes the signed variant.
+    if _octal(block[148:156]) != 256 + sum(block[:148]) + sum(block[156:]):
+        raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
+    return block[156:157], _octal(block[124:136])
+
+
+def _check_headers(raw: bytes, member: tarfile.TarInfo) -> None:
+    """Re-read the raw header blocks of ``member``; refuse any ambiguity.
+
+    ``raw`` runs from the member's first header block (``member.offset``)
+    to its data. tarfile is lenient where other tar implementations are
+    not (pax numbers through ``int()``, base-256 and signed size fields,
+    signed checksums, stacked and global pax headers). The restore runs
+    busybox or GNU tar, so every header must mean the same to all of them.
+    """
+    pos = 0
+    seen: set[bytes] = set()
+    while True:
+        kind, size = _header_block(raw[pos : pos + _TAR_BLOCK])
+        pos += _TAR_BLOCK
+        if pos >= len(raw):
+            break
+        if kind not in _EXTENSION_TYPES or kind in seen:
+            raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
+        seen.add(kind)
+        pos += _blocks(size)
+    if pos != len(raw) or size != member.size:
+        raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
+    pax = member.pax_headers
+    if not pax:
+        return
+    if tarfile.XHDTYPE not in seen or any(key.startswith("GNU.sparse.") for key in pax):
+        raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
+    if "size" in pax and not _PAX_DECIMAL.fullmatch(pax["size"]):
+        raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
+    path = pax.get("path")
+    if path is not None and (
+        tarfile.GNUTYPE_LONGNAME in seen
+        or (
+            path != member.name
+            and not (member.isdir() and path.rstrip("/") == member.name)
+        )
+    ):
+        raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
+    linkpath = pax.get("linkpath")
+    if linkpath is not None and (
+        tarfile.GNUTYPE_LONGLINK in seen or linkpath != member.linkname
+    ):
+        raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
+
+
 def _config_name(name: str) -> str | None:
     """Return the config name for ``etc/config/<name>``, else None."""
     if not name.startswith(ARCHIVE_CONFIG_PREFIX):
@@ -435,7 +514,8 @@ class _Scan:
         self.symlinks: set[str] = set()
         self.texts: dict[str, bytes] = {}
 
-    def add(self, tar: tarfile.TarFile, member: tarfile.TarInfo) -> None:
+    def add(self, tar: tarfile.TarFile, member: tarfile.TarInfo, raw: bytes) -> None:
+        """Record one member; ``raw`` holds its header blocks."""
         limits = self._limits
         self._count += 1
         if self._count > limits.max_members:
@@ -443,6 +523,7 @@ class _Scan:
         name = _check_name(member.name, limits)
         try:
             kind = _member_kind(member)
+            _check_headers(raw, member)
         except _Abort as abort:
             raise _Abort(abort.error, abort.finding.code, name or None) from None
         if not name:
@@ -549,6 +630,12 @@ def _walk(stream: _CappedGunzip, scan: _Scan) -> None:
         stream.drain()  # a broken gzip stream wins over "not a tar"
         raise _Abort(ERR_INVALID, CODE_NOT_A_TAR) from err
 
+    # "end" is where the next header must start: right after the data of the
+    # last member the check accepted. tarfile can move its own offset past
+    # bytes it never reported (a pax header that fails after the following
+    # header was read, review C1), so its offset is only trusted when it
+    # agrees with ours.
+    end = 0
     with tar:
         while True:
             try:
@@ -559,13 +646,25 @@ def _walk(stream: _CappedGunzip, scan: _Scan) -> None:
                 if tar.offset >= stream.delivered:
                     raise _Abort(ERR_INCOMPLETE, CODE_TRUNCATED_TAR) from err
                 raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER) from err
+            if tar.pax_headers:  # a global pax header was read
+                raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
             if member is None:
                 break
-            scan.add(tar, member)
+            if member.offset != end or member.offset_data <= end:
+                raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
+            raw = stream.since(end)[: member.offset_data - end]
+            scan.add(tar, member, raw)
+            end = member.offset_data
+            if member.isreg():
+                end += _blocks(member.size)
+            if tar.offset != end:
+                raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
+        if tar.offset != end:
+            raise _Abort(ERR_INVALID, CODE_BAD_TAR_HEADER)
         # tarfile stops silently at a zero block, an empty read, a cut-off
         # header or a header with a bad checksum. Only the first is a real
         # end of archive: everything from there on must be zeros.
-        trailer = stream.since(tar.offset)
+        trailer = stream.since(end)
 
     rest_count, rest_zero = stream.drain()
     length = len(trailer) + rest_count

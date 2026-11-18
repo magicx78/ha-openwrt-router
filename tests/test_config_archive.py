@@ -13,6 +13,7 @@ import gzip
 import hashlib
 import io
 import logging
+import struct
 import tarfile
 import zlib
 from collections.abc import Callable, Sequence
@@ -1094,3 +1095,226 @@ def test_with_uci_cross_check_warns_for_missing_config() -> None:
 def test_with_uci_cross_check_leaves_failed_report_alone() -> None:
     report = validate_archive(b"junk", DEFAULT_ARCHIVE_LIMITS)
     assert with_uci_cross_check(report, ["network"]) == report
+
+
+# ---------------------------------------------------------------------------
+# Parser differentials (review C1): what the check did not see as a member
+# must not exist in the byte stream.
+# ---------------------------------------------------------------------------
+
+HIDDEN_RULE = (
+    b"config rule\n\toption name 'EVIL'\n\toption src 'wan'\n"
+    b"\toption dest_port '22'\n\toption target 'ACCEPT'\n"
+)
+
+
+def _pad(data: bytes) -> bytes:
+    return data + bytes(-len(data) % 512)
+
+
+def _ustar(
+    name: str, size: int, *, kind: bytes = tarfile.REGTYPE, linkname: str = ""
+) -> bytes:
+    info = tarfile.TarInfo(name)
+    info.size = size
+    info.type = kind
+    info.linkname = linkname
+    info.mtime = 1_700_000_000
+    return info.tobuf(tarfile.USTAR_FORMAT)
+
+
+def _pax_records(fields: dict[str, str]) -> bytes:
+    out = b""
+    for key, value in fields.items():
+        body = f"{key}={value}\n".encode()
+        length = len(body) + 1
+        while len(str(length)) + 1 + len(body) != length:
+            length = len(str(length)) + 1 + len(body)
+        out += str(length).encode() + b" " + body
+    return out
+
+
+def _pax(fields: dict[str, str], kind: bytes = tarfile.XHDTYPE) -> bytes:
+    records = _pax_records(fields)
+    return _ustar("PaxHeaders/x", len(records), kind=kind) + _pad(records)
+
+
+def _rule_member(name: str = "etc/config/firewall") -> bytes:
+    return _ustar(name, len(HIDDEN_RULE)) + _pad(HIDDEN_RULE)
+
+
+def _patched(block: bytes, start: int, value: bytes, *, signed: bool = False) -> bytes:
+    """Overwrite a header field and fix the checksum (unsigned or signed sum)."""
+    buf = bytearray(block)
+    buf[start : start + len(value)] = value
+    fmt = "148b8x356b" if signed else "148B8x356B"
+    checksum = 256 + sum(struct.unpack_from(fmt, bytes(buf)))
+    buf[148:156] = b"%06o\x00 " % checksum
+    return bytes(buf)
+
+
+def _smuggled(*blocks: bytes) -> bytes:
+    """network + system, then the raw blocks, then the end-of-archive blocks."""
+    head, end = make_tar(base_entries(), fmt=tarfile.USTAR_FORMAT)
+    return gz(head[:end] + b"".join(blocks) + bytes(1024))
+
+
+def _rule_with_size_field(field: bytes, *, signed: bool = False) -> bytes:
+    header = _patched(_ustar("etc/config/firewall", 0), 124, field, signed=signed)
+    return header + _pad(HIDDEN_RULE)
+
+
+HIDDEN = [
+    pytest.param(
+        lambda: _smuggled(_pax({"size": "-5"}), _rule_member()), id="pax_size_-5"
+    ),
+    pytest.param(
+        lambda: _smuggled(_pax({"size": "-512"}), _rule_member()), id="pax_size_-512"
+    ),
+    pytest.param(
+        lambda: _smuggled(_pax({"size": "0"}), _rule_member()),
+        id="pax_size_0_with_data",
+    ),
+    pytest.param(
+        lambda: _smuggled(_pax({"size": "+97"}), _rule_member()), id="pax_size_plus"
+    ),
+    pytest.param(
+        lambda: _smuggled(_pax({"size": " 97"}), _rule_member()), id="pax_size_space"
+    ),
+    pytest.param(
+        lambda: _smuggled(_pax({"size": "9_7"}), _rule_member()),
+        id="pax_size_underscore",
+    ),
+    pytest.param(
+        lambda: _smuggled(_pax({"size": "٩٧"}), _rule_member()),
+        id="pax_size_arabic_digits",
+    ),
+    pytest.param(
+        lambda: _smuggled(_pax({"size": "1" + "0" * 30}), _rule_member()),
+        id="pax_size_huge",
+    ),
+    pytest.param(
+        lambda: _smuggled(
+            _pax({"path": "etc/config/firewall/"}), _rule_member("etc/x")
+        ),
+        id="pax_path_trailing_slash_on_file",
+    ),
+    pytest.param(
+        lambda: _smuggled(
+            _pax({"path": "etc/x", "GNU.sparse.name": "etc/config/firewall"}),
+            _rule_member("etc/y"),
+        ),
+        id="pax_gnu_sparse_name",
+    ),
+    pytest.param(
+        lambda: _smuggled(
+            _pax({"path": "etc/config/firewall"}),
+            _pax({"path": "etc/config/dhcp"}),
+            _rule_member("etc/x"),
+        ),
+        id="two_pax_headers_in_a_row",
+    ),
+    pytest.param(
+        lambda: _smuggled(
+            _pax({"path": "etc/config/firewall"}, tarfile.XGLTYPE),
+            _rule_member("etc/x"),
+        ),
+        id="global_pax_header",
+    ),
+    pytest.param(
+        lambda: _smuggled(_pax({"size": "0"}, tarfile.XGLTYPE), _rule_member("etc/x")),
+        id="global_pax_size",
+    ),
+    pytest.param(
+        lambda: _smuggled(
+            _rule_with_size_field(b"\x80" + len(HIDDEN_RULE).to_bytes(11, "big"))
+        ),
+        id="base256_size",
+    ),
+    pytest.param(
+        lambda: _smuggled(_rule_with_size_field(b"\xff" * 12)),
+        id="base256_negative_size",
+    ),
+    pytest.param(
+        lambda: _smuggled(_rule_with_size_field(b"-0000000141\x00")),
+        id="negative_octal_size",
+    ),
+    pytest.param(
+        lambda: _smuggled(_rule_with_size_field(b"+0000000141\x00")),
+        id="plus_octal_size",
+    ),
+    pytest.param(
+        lambda: _smuggled(_rule_with_size_field(b"0000000141\x00x")),
+        id="octal_size_with_garbage",
+    ),
+    pytest.param(
+        lambda: _smuggled(
+            _patched(
+                _ustar("etc/config/firewall", len(HIDDEN_RULE)),
+                99,
+                b"\xe4",
+                signed=True,
+            )
+            + _pad(HIDDEN_RULE)
+        ),
+        id="signed_checksum",
+    ),
+]
+
+
+@pytest.mark.parametrize("build", HIDDEN)
+def test_parser_differential_is_rejected(build: Callable[[], bytes]) -> None:
+    report = validate_archive(build(), DEFAULT_ARCHIVE_LIMITS)
+    assert report.ok is False, [m.name for m in report.members]
+    assert report.error == ERR_INVALID
+    assert first_code(report) in (ca.CODE_BAD_TAR_HEADER, ca.CODE_TRAILING_TAR_DATA)
+    assert report.members == ()
+    with pytest.raises(ArchiveError):
+        extract_uci_texts(build(), DEFAULT_ARCHIVE_LIMITS)
+
+
+def test_negative_pax_size_cannot_hide_a_member() -> None:
+    """The review reproduction: firewall hidden behind a pax size of -5."""
+    info = tarfile.TarInfo("etc/config/firewall")
+    info.size = len(HIDDEN_RULE)
+    info.pax_headers = {"size": "-5"}
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
+        for entry in base_entries():
+            item = tarfile.TarInfo(entry.name)
+            item.size = len(entry.data or b"")
+            tf.addfile(item, io.BytesIO(entry.data or b""))
+        tf.addfile(info, io.BytesIO(HIDDEN_RULE))
+    assert b"EVIL" in buf.getvalue()
+
+    report = validate_archive(gz(buf.getvalue()), DEFAULT_ARCHIVE_LIMITS)
+
+    assert_rejected(report, ERR_INVALID, ca.CODE_BAD_TAR_HEADER)
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        pytest.param([E("etc/" + "l" * 150, b"long name")], id="gnu_longname"),
+        pytest.param(
+            [E("etc/ln", None, type=tarfile.SYMTYPE, linkname="config/" + "x" * 120)],
+            id="gnu_longlink",
+        ),
+    ],
+)
+def test_gnu_long_names_stay_valid(entries: list[E]) -> None:
+    report = validate_archive(archive([*base_entries(), *entries]))
+    assert report.ok, report.findings
+
+
+def test_pax_names_and_octal_variants_stay_valid() -> None:
+    entries = [*base_entries(), E("etc/ünicode", b"x"), E("etc/" + "p" * 150, b"y")]
+    raw, _ = make_tar(entries, fmt=tarfile.PAX_FORMAT)
+    assert b"path=" in raw
+    assert validate_archive(gz(raw)).ok
+
+    # Space-terminated octal (old tar) and a full 12-digit field are legal.
+    for size_field in (b"     141 \x00\x00\x00", b"000000000141"):
+        report = validate_archive(_smuggled(_rule_with_size_field(size_field)))
+        assert report.ok, (size_field, report.findings)
+        assert "etc/config/firewall" in {m.name for m in report.members}
