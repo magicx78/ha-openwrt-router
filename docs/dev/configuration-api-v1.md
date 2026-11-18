@@ -20,9 +20,11 @@ Stand: überarbeitet nach dem Review (Critic) und dem Abgleich mit `config-manag
 | `async_get_configuration_api(hass, version=1)` | `config_api.py` | später |
 | `ActionGuard` (Implementierung von `ActionGuardProtocol`, mit Ledger) | `core_guard.py` | später |
 | `VersionStore` (Implementierung von `VersionStoreProtocol`) | `core_versions.py` | später |
-| `RouterRegistry`, Identität, Capability-Ableitung | `router_registry.py`, `router_identity.py`, `capabilities.py` | später |
-| Zwei Audit-Ringe, Bus-Event, Dedup | `core_audit.py` | später |
-| Lebenszyklus, Verdrahtung in `__init__.py`, Option `config_backup_enabled`, Repair-Issue | `enterprise_core.py`, `config_flow.py` | später |
+| `RouterRegistry`, Identität, Capability-Ableitung | `router_registry.py`, `router_identity.py`, `capabilities.py` | **Code, getestet** (Teil 1) |
+| Zwei Audit-Ringe, Bus-Event, Dedup | `core_audit.py` | **Code, getestet** (Teil 1) |
+| Store-Laden mit `.bak` und Wiederaufbau (gemeinsamer Helfer für Registry und Audit) | `core_store.py` | **Code, getestet** (Teil 1) |
+| Lebenszyklus, Verdrahtung in `__init__.py` (Setup, Unload, Remove; jeder Haken in eigenem try/except) | `enterprise_core.py` | **Code, getestet** (Teil 1) |
+| Option `config_backup_enabled`, Repair-Issue | `config_flow.py` | später (Teil 2) |
 | Gestufte ACL, TOFU-SSH-Pinning, Panel-Container „Enterprise“ | Abschnitt 18 | später, nur dokumentiert |
 
 Alles, was „später“ ist, steht hier als **Signatur**. Die Signaturen sind als Protocols in
@@ -958,8 +960,18 @@ liest beide Ringe, `ring=AuditRing.SECURITY` nur einen.
 `configuration.restore_failed`, `configuration.storage_swept`,
 `security.authorization_denied`, `security.authorization_consumed`,
 `security.approval_requested`, `security.approval_approved`, `security.approval_rejected`,
-`security.approval_expired`, `core.installation_key_lost`, `core.installation_key_reset`.
+`security.approval_expired`, `core.installation_key_lost`, `core.installation_key_reset`,
+`core.store_recovered`.
 
+- `core.store_recovered` (Ring `general`, audit-pflichtig, Schwere `warning`): ein
+  Core-Store (`openwrt_router.router_registry` oder `openwrt_router.audit`) war unlesbar oder
+  hatte eine unbekannte Hauptversion; die Datei wurde als `.bak` gesichert und neu
+  aufgebaut. `data`: `store`, `backup_written`, bei der Registry zusätzlich
+  `adoption_links_lost` und `lost_router_ids` (Router-IDs, deren Adoption neu gemacht
+  werden muss; aus dem Audit-Log ermittelt, nicht automatisch wiederhergestellt).
+  Sind in einem sonst lesbaren Registry-Store nur einzelne Einträge unlesbar, werden sie
+  übersprungen; das Event kommt dann mit `backup_written = false` und
+  `records_skipped` (Anzahl).
 - **Nur der Core** sendet Typen in `CORE_EVENT_NAMESPACES` (`router.`, `configuration.`,
   `security.`, `core.`; `is_core_event_type`). `emit` eines Moduls mit einem solchen Typ ⇒
   `ValueError`.
@@ -995,7 +1007,7 @@ liest beide Ringe, `ring=AuditRing.SECURITY` nur einen.
 Jede Guard-Entscheidung und jedes `consume`, dazu: manuelles Backup, Schutz an/aus, Drift
 bestätigt/bekannt, Dry Run und Kompatibilitätsprüfung (`restore_checked`), Export (wer, wann,
 welche Version, welches Artefakt), Löschen, Aufbewahrung, Adoption, Verlust und Reset des
-Installations-Schlüssels.
+Installations-Schlüssels, Wiederaufbau eines Core-Stores (`core.store_recovered`).
 
 ```python
 api.register_event_prefix("security_center.", module="security_center")
@@ -1292,6 +1304,12 @@ Signatur bleibt, die Regel ist neu.
 | 51 | `mask_secrets` maskiert mehr Namen (Obermenge), `bytes` ⇒ `**REDACTED**`, Dataclasses ⇒ maskierte dicts, Sets ⇒ sortierte Listen | B (Verhalten) |
 | 52 | `MAX_DEPTH` 32 → 64; `SECRET_SUBSTRINGS` neu zusammengesetzt (`pass` statt `password`/`passwd`/`passphrase`, dazu `apikey`, `credential`, `private`, `psk`, `pwd`); `SAFE_KEYS` erweitert | B (Konstanten) |
 | 53 | neu: `mask_for_output`, `redact_text`, `scrub_text`, `is_secret_name`, `is_secret_option`, `is_secret_path`, `secret_digest_factory`, `SECRET_OPTIONS`, `SECRET_CONTEXT_OPTIONS`, `SECRET_EXTRA_NAMES`, `SECRET_ARCHIVE_PATHS`, `SAFE_SUFFIXES`, `SECRET_MARKER_KEY`, `SECRET_DIGEST_LENGTH` | A |
+
+**Teil 1 (Registry, Identität, Capabilities, Audit)**
+
+| # | Änderung | Art |
+|---|---|---|
+| 54 | neu: Event-Typ `CoreEventType.STORE_RECOVERED` = `core.store_recovered`, in `AUDIT_MANDATORY_EVENT_TYPES` (Abschnitt 12.3). Grund: ein unlesbarer Core-Store wird neu aufgebaut; ohne eigenes Event wäre der Verlust von Adoptionen nur im Log sichtbar. | A |
 
 ### 19.2 Die 14 Punkte von `config-manager` (Abgleich zu `5c9d248`)
 
