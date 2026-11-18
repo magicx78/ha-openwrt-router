@@ -87,6 +87,37 @@ nächsten Start ohne Router-Kontakt. Neue Stores: `openwrt_router.router_registr
 - **Detailansicht am Handy:** nimmt beim Zuklappen keine Tipps mehr an und
   bleibt bei wenig Bildschirmhöhe samt „×“ vollständig sichtbar.
 
+### Security (Prüfung des Enterprise Core vor dem Release)
+
+- **ACL-Stufen:** optionale Stufen dürfen nur noch exakt freigegebene Leserechte
+  enthalten (Allowlist, keine Muster wie `*` oder `fil?`, Dateien nur lesen unter
+  `/proc/net`, `/sys/class/net`, `/sys/class/ieee80211`); das Angebot zeigt dem Admin
+  jedes Recht, nicht nur eine Prüfsumme.
+- **Gepinntes SSH:** beim ersten Kontakt geht kein Passwort an den Router, bevor der
+  Host-Key bestätigt ist; die Ausgabe ist begrenzt (Abbruch mit Meldung statt
+  unbegrenztem Speicher).
+- **Freigaben:** offene Anträge sind je Benutzer und insgesamt begrenzt; abgelaufene
+  Anträge und Restore-Pläne geben ihre Daten frei.
+- **Audit:** Daten werden vor dem Speichern maskiert (auch escaptes JSON, URL-kodierte
+  und verschleierte Namen); Dedup-Fenster begrenzt; die Option „Konfigurations-Backup“
+  wird beim Umschalten auditiert; die Diagnose zeigt Benutzer-IDs nur pseudonym.
+- **Speicher:** der Startup-Sweep folgt keinen Links/Junctions; ein ersetzter
+  Installations-Schlüssel meldet einen Reparaturhinweis; feindliches ACL-JSON vom
+  Router (zu groß, zu tief) wird gezählt statt zu werfen; Backup-Namen kollidieren
+  nicht mehr.
+
+### Fixed (Enterprise Core)
+
+- setup_retry fegt den Speicher nicht bei jedem Versuch neu; die Freigabe schreibt nur
+  geänderte Stores.
+- Ein defekter Store unter echtem HA (umbenannt zu `.corrupt.*`) gilt als
+  fehlgeschlagenes Laden; Versionsdateien bleiben liegen, solange der Index
+  wiederhergestellt wurde.
+- `backup_recovered` auch nach einem deduplizierten Erfolg und nach einem Neustart.
+- Capabilities: bekannt → unbekannt → anders bekannt meldet die Änderung.
+- Einrichtung: wurde die ACL nicht geschrieben, nennt der Fehler den Grund (gestufte
+  ACL behalten / ACL nicht lesbar / schon aktuell).
+
 ## [1.43.1] - 2026-11-17
 
 Reine Panel-Korrekturen am Tab *Diagnose → Stabilität*; keine neuen
