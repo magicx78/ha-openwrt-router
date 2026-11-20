@@ -28,7 +28,14 @@ from core_test_provider import (
     FakeConfigProvider,
     short_tmp_path,  # noqa: F401 - short tmp_path (Windows path limit)
 )
-from core_testkit import ADMIN_ID, OTHER_ADMIN_ID, USER_ID, FakeDisks, user_actor
+from core_testkit import (
+    ADMIN_ID,
+    OTHER_ADMIN_ID,
+    USER_ID,
+    FakeDisks,
+    bus_events,
+    user_actor,
+)
 from homeassistant.components.http import KEY_HASS_USER
 from homeassistant.helpers.http import KEY_AUTHENTICATED, KEY_HASS
 from test_acl_tiers import V8_TEXT
@@ -1506,6 +1513,123 @@ async def test_acl_offer_and_execute(disks, tmp_path, monkeypatch):
         assert resp.data["action"] == "acl_deploy"
         assert deployed == [approval.approval_id]
         h.assert_no_secret(ADMIN_ID)
+    await stop(env)
+
+
+ACL_EXPLAIN_FIELDS = (
+    "target_file",
+    "rights_added",
+    "rights_removed",
+    "rights_unlisted",
+    "risk_text",
+    "rollback_text",
+    "rollback_template",
+    "rollback_template_no_previous",
+)
+
+
+async def test_acl_offer_explains_rights_risk_and_way_back(disks, tmp_path):
+    """R18: rights, target file, risk and way back, readable and fixed texts."""
+    from custom_components.openwrt_router.acl_provisioning import (
+        ACL_FILE_PATH,
+        DEFAULT_TIER_REGISTRY,
+        TIER_CONFIG_BACKUP_READ,
+    )
+    from custom_components.openwrt_router.core_masking import MASK
+
+    env = await cm_env(disks, tmp_path)
+    router_api = acl_capable(env)
+    async with http(env.hass) as h:
+        resp = await h.post(f"/routers/{env.rid}/acl-offer")
+        assert resp.status == 200, resp.body
+        offer = resp.data["offer"]
+    tier = DEFAULT_TIER_REGISTRY.get(TIER_CONFIG_BACKUP_READ)
+    explain = {k: offer[k] for k in ACL_EXPLAIN_FIELDS}
+    assert MASK not in json.dumps(explain)
+    assert explain["target_file"] == ACL_FILE_PATH
+    tier_lines = {
+        r.describe()
+        for t in offer["tiers"]
+        for r in DEFAULT_TIER_REGISTRY.get(t).rights
+    }
+    assert "read cgi-io:backup" in explain["rights_added"]
+    assert "read ubus:rpc-sys.packagelist" in explain["rights_added"]
+    assert "read uci:network" in explain["rights_added"]
+    assert set(explain["rights_added"]) <= tier_lines
+    assert set(explain["rights_added"]) <= set(offer["added"])
+    assert set(explain["rights_removed"]) <= set(offer["removed"])
+    assert explain["rights_unlisted"] == len(offer["added"]) + len(
+        offer["removed"]
+    ) - len(explain["rights_added"]) - len(explain["rights_removed"])
+    assert explain["risk_text"] == tier.risk
+    assert explain["rollback_template"] == (
+        "cp -p /usr/share/rpcd/ha-openwrt-router.json.bak-<timestamp> "
+        "/usr/share/rpcd/acl.d/ha-openwrt-router.json && /etc/init.d/rpcd restart"
+    )
+    assert explain["rollback_template_no_previous"] == (
+        "rm -f /usr/share/rpcd/acl.d/ha-openwrt-router.json && /etc/init.d/rpcd restart"
+    )
+    assert "rpcd" in explain["rollback_text"]
+    text = json.dumps(explain)
+    for needle in (SECRET, ADMIN_ID, router_api._password, "192.168.1."):
+        assert needle not in text
+    await stop(env)
+
+
+def test_acl_offer_explain_drops_lines_outside_the_registry():
+    """Router-specific lines of the diff are counted, never shown."""
+    explain = cv.acl_offer_explain(
+        {
+            "added": ["read cgi-io:backup", f"read uci:{SECRET}"],
+            "removed": ["read ubus:iwinfo.scan", "write file:/etc/x.write"],
+        }
+    )
+    assert explain["rights_added"] == ["read cgi-io:backup"]
+    assert explain["rights_removed"] == ["read ubus:iwinfo.scan"]
+    assert explain["rights_unlisted"] == 2
+    assert SECRET not in json.dumps(explain)
+
+
+async def test_acl_offer_and_deploy_need_the_backup_option(disks, tmp_path):
+    """R18 and R20 refuse with "disabled" while the option is off; R2 offers
+    nothing. After an approved R20 the audit has the deploy, no raw user id."""
+    from custom_components.openwrt_router.core_models import (
+        OPTION_CONFIG_BACKUP_ENABLED,
+    )
+
+    env = await cm_env(disks, tmp_path)
+    rid = env.rid
+    acl_capable(env)
+    options = env.entry_of(rid).options
+    async with http(env.hass) as h:
+        resp = await h.get(f"/routers/{rid}")
+        assert resp.data["acl"]["offerable"] == ["config_backup_read"]
+        offer = await h.post(f"/routers/{rid}/acl-offer")
+        aid = offer.data["approval"]["approval_id"]
+        resp = await h.post(f"/approvals/{aid}/approve", user=OTHER_ADMIN_ID)
+        assert resp.status == 200, resp.body
+        options[OPTION_CONFIG_BACKUP_ENABLED] = False
+        resp = await h.get(f"/routers/{rid}")
+        assert resp.data["acl"]["offerable"] == []
+        for path in (f"/routers/{rid}/acl-offer", f"/approvals/{aid}/execute"):
+            resp = await h.post(path)
+            assert resp.status == 409, path
+            assert resp.data["code"] == "capability_unavailable"
+            assert resp.data["details"]["reason"] == "disabled"
+        deployed = env.api.events(router_id=rid, types=["security.acl_deployed"])
+        assert deployed == ()
+        options[OPTION_CONFIG_BACKUP_ENABLED] = True
+        resp = await h.post(f"/approvals/{aid}/execute")
+        assert resp.status == 200, resp.body
+        await drain(env.hass)
+        h.assert_no_secret(ADMIN_ID, OTHER_ADMIN_ID)
+    deployed = env.api.events(router_id=rid, types=["security.acl_deployed"])
+    assert len(deployed) == 1  # the audit entry (the core's store keeps the id)
+    published = bus_events(env.hass, "security.acl_deployed")
+    assert len(published) == 1  # what leaves the process: pseudonymised
+    text = json.dumps(published, default=str)
+    assert ADMIN_ID not in text and OTHER_ADMIN_ID not in text
+    assert published[0]["actor"]["kind"] == "user"
     await stop(env)
 
 

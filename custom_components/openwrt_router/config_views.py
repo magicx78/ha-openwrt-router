@@ -41,9 +41,12 @@ from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.util import dt as dt_util
 
 from .acl_provisioning import (
+    ACL_BACKUP_PREFIX,
+    ACL_FILE_PATH,
     DEFAULT_TIER_REGISTRY,
     TIER_CONFIG_BACKUP_READ,
     AclTierError,
+    _rollback_command,
 )
 from .config_const import ROUTER_BUSY_RETRY_AFTER_S, config_mask_for_output
 from .const import (
@@ -1330,6 +1333,7 @@ class AclOfferView(_PostView):
                 "acl_version": offer.get("acl_version"),
                 "risks": [r.get("risk") for r in risks if isinstance(r, Mapping)],
                 "risk_details": risks,
+                **acl_offer_explain(offer),
             },
         }
 
@@ -1361,6 +1365,65 @@ class AclOfferView(_PostView):
         offer["risks"] = [
             item.get("risk") for item in details if isinstance(item, dict)
         ]
+        # risk_text: only the registry sentence of the requested tier
+        if raw_offer.get("risk_text") == _tier_risk(TIER_CONFIG_BACKUP_READ):
+            offer["risk_text"] = raw_offer.get("risk_text")
+
+
+# Fixed rollback texts of R18 (the core's own command, with the timestamp of
+# the backup file as a placeholder: the real path exists only after R20).
+ACL_ROLLBACK_TEXT = (
+    "The deploy keeps a copy of the replaced file next to acl.d and restarts "
+    "rpcd. To undo it, copy that file back and restart rpcd (command below; "
+    "the deploy result names the exact file). Without a previous file, remove "
+    "the deployed file instead; Home Assistant puts its base file back at the "
+    "next start."
+)
+ACL_ROLLBACK_TEMPLATE = _rollback_command(f"{ACL_BACKUP_PREFIX}<timestamp>")
+ACL_ROLLBACK_TEMPLATE_NO_PREVIOUS = _rollback_command(None)
+
+
+def _registry_rights(tier_ids: Iterable[str] | None = None) -> frozenset[str]:
+    """``describe()`` lines of the registry's rights (all tiers or some)."""
+    lines: set[str] = set()
+    for tier in DEFAULT_TIER_REGISTRY.tiers():
+        if tier_ids is None or tier.tier_id in tier_ids:
+            lines.update(right.describe() for right in tier.rights)
+    return frozenset(lines)
+
+
+def acl_offer_explain(offer: Mapping[str, Any]) -> dict[str, Any]:
+    """R18's readable change, only from fixed registry texts (no router data).
+
+    ``rights_added``: lines of the offer that are rights of the offered
+    registry tiers (the base tier and config_backup_read); ``rights_removed``: lines that are rights of any registry tier;
+    ``rights_unlisted``: how many offer lines matched neither (never shown,
+    they may name router-specific entries). ``target_file``,
+    ``risk_text`` and the rollback texts are code constants.
+    """
+    added = offer.get("added")
+    removed = offer.get("removed")
+    added = added if isinstance(added, list) else []
+    removed = removed if isinstance(removed, list) else []
+    tiers = offer.get("tiers")
+    tier_ids = (
+        {t for t in tiers if isinstance(t, str)} if isinstance(tiers, list) else set()
+    )
+    tier_rights = _registry_rights(tier_ids | {TIER_CONFIG_BACKUP_READ})
+    known = _registry_rights()
+    rights_added = sorted({r for r in added if isinstance(r, str) and r in tier_rights})
+    rights_removed = sorted({r for r in removed if isinstance(r, str) and r in known})
+    unlisted = len(added) + len(removed) - len(rights_added) - len(rights_removed)
+    return {
+        "target_file": ACL_FILE_PATH,
+        "rights_added": rights_added,
+        "rights_removed": rights_removed,
+        "rights_unlisted": max(0, unlisted),
+        "risk_text": _tier_risk(TIER_CONFIG_BACKUP_READ),
+        "rollback_text": ACL_ROLLBACK_TEXT,
+        "rollback_template": ACL_ROLLBACK_TEMPLATE,
+        "rollback_template_no_previous": ACL_ROLLBACK_TEMPLATE_NO_PREVIOUS,
+    }
 
 
 def _tier_risk(tier_id: Any) -> str | None:
@@ -1421,6 +1484,8 @@ class ExecuteView(_PostView):
         action = str(approval.action)
         aid = approval.approval_id
         if action == GuardedAction.ACL_DEPLOY:
+            if not ctx.runtime.enabled(approval.router_id):
+                _disabled(approval.router_id)  # the backup option is off
             result = await ctx.api.async_deploy_acl_offer(aid, actor=ctx.actor)
         elif action == GuardedAction.SSH_PIN_CONFIRM:
             result = await ctx.api.async_confirm_ssh_pin(aid, actor=ctx.actor)
