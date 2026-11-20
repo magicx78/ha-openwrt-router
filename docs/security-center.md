@@ -82,7 +82,9 @@ Jede Erkennung hat eine Verfügbarkeit, die das Panel unter **Erkennungen** zeig
 
 - **verfügbar**: die Datenquelle liefert.
 - **eingeschränkt**: sie liefert, aber mit einer genannten Einschränkung (zum Beispiel ein
-  Router ohne Datenquelle oder ein Zielsegment, das nicht zuzuordnen ist).
+  Router ohne Datenquelle, ein Zielsegment, das nicht zuzuordnen ist, oder `rate_limited`:
+  der Syslog-Empfänger hat Zeilen wegen seiner Raten oder des vollen Puffers verworfen,
+  [Abschnitt 5](#5-log-empfang)).
 - **nicht verfügbar** mit Grund (zum Beispiel `collector_not_available`, `sender_not_allowed`,
   `no_data_yet`, `stale`). **Nie** „keine Befunde“, solange eine Quelle fehlt: fehlende Daten sind
   keine Entwarnung. `stale` heißt: seit mehr als 15 Minuten keine Zeile mehr.
@@ -139,6 +141,10 @@ Zeiten, letzte IP und letzten Hostnamen sowie Indikatoren.
 - **Auffällig** wird ein Gerät erst, wenn mindestens zwei *verschiedene* Indikatorarten
   innerhalb einer Stunde zusammenkommen (zum Beispiel Anmeldefehler an mehreren Zugangspunkten
   und eine IP-Häufung). Eine unbekannte MAC allein ist nie auffällig.
+- **Indikatoren aus Befunden** kommen nur von WLAN-Erkennungen (`wifi_auth_repeat`,
+  `wifi_multi_ap_auth`, `wifi_assoc_burst`), weil nur sie ein Gerät per MAC nennen.
+  **Firewall- und DNS-Befunde markieren kein Gerät:** ihre Logzeilen nennen eine IP-Adresse,
+  und das Center ordnet IP-Adressen keiner MAC zu.
 - **Bestätigen** (Administrator) macht ein Gerät „bekannt“ und räumt seine aktuellen
   Indikatoren; neue zählen wieder. Einen Anzeigenamen setzen darf ebenfalls nur ein
   Administrator.
@@ -188,7 +194,7 @@ Ein lokaler UDP-Listener, eine Zeile je Datagramm. Er sendet nichts und ruft kei
 | Adresse und Port | `0.0.0.0` (alle IPv4-Adressen), UDP-Port 5514 (einstellbar 1024 bis 65535). Kein IPv6. |
 | Absenderliste | Nur Absender, deren Adresse die Verwaltungsadresse eines Routers aus der Router-Registry ist (IP-Literale, **keine DNS-Auflösung**). Ist eine Adresse zwei Routern zugeordnet, gilt sie für keinen. Alles andere wird verworfen und gezählt. Die Router-Zuordnung kommt von der Liste, nie vom HOST-Feld der Zeile. |
 | Zeilenlänge | höchstens 2048 Byte; länger wird abgeschnitten und gezählt. |
-| Raten | Token-Bucket je Absender (50 Zeilen/s, Spitze 500) und gesamt (200 Zeilen/s, Spitze 2000); mehr wird verworfen und gezählt. |
+| Raten | Token-Bucket je Absender (50 Zeilen/s, Spitze 500) und gesamt (200 Zeilen/s, Spitze 2000); mehr wird verworfen und gezählt. Verliert ein Router Zeilen an eine Rate oder den vollen Puffer, gelten seine Firewall- und DNS-Erkennungen 5 Minuten nach der letzten verworfenen Zeile als **eingeschränkt** (`rate_limited`); der Sicherheitswert bekommt dieselbe Einschränkung und die Abdeckung sinkt. |
 | Puffer | höchstens 4000 Zeilen; ein voller Puffer verwirft die neuesten und zählt. Ab 500 gepufferten Zeilen wird vor dem nächsten Poll ausgewertet. |
 | Zeit | Die Zeit einer Zeile ist ihre **Empfangszeit**; der Zeitzonen-Versatz des Routers wird nicht gelernt. Eine Zeile mit einer Zeit weit in der Zukunft bekommt die Empfangszeit und verschiebt nichts. |
 | Doppelte Zeilen | Ein gemeinsamer Deduper filtert erneut gesendete Zeilen; Marken bleiben über Wechsel des Log-Wegs erhalten. |
@@ -312,7 +318,10 @@ Zugriffslogs landet; ein Query-String an diesen Routen ergibt 400.
   den Guard des Cores, jede Aktion wird auditiert.
 - **Weitere Antworten:** 410 nach dem Entladen der Integration, 503 solange kein Center läuft,
   409 `disabled` bei Schreibaktionen, solange das Center aus ist (ausgenommen das
-  Einschalten selbst).
+  Einschalten selbst), 409 `not_ready` beim Bestätigen oder Benennen eines Geräts, solange der
+  Modulschlüssel des Cores fehlt ([Abschnitt 9](#9-datenschutz)). Lehnt der Guard des Cores
+  eine Aktion ab (zum Beispiel eine abgelaufene oder schon benutzte Freigabe), antwortet die
+  Route mit 403 `authorization_denied` ohne weitere Angaben des Cores.
 - **Eingaben** werden streng geprüft: nur bekannte Schlüssel, Typen und Bereiche, höchstens
   4 KiB JSON, zu tief verschachteltes JSON ergibt 400. Fehlerantworten tragen nur eine feste
   Meldung, einen Code und höchstens Feldname und Grund.
@@ -344,6 +353,11 @@ Liefert keine Quelle Daten, ist der Wert `None` (unbekannt), **nie 0**: keine Da
 aktive und kritische Hinweise `None`, nicht 0. Die beiden Stundenzähler liegen nur im Speicher
 und beginnen nach einem Neustart von Home Assistant bei null.
 
+**Nicht bereit:** Solange der Core keinen Modulschlüssel liefert, zeichnet das Center keine
+Hinweise auf ([Abschnitt 9](#9-datenschutz)). Dann sind **alle sieben Sensoren unbekannt**
+(`None`), auch Sicherheitswert und Abdeckung, und die Übersicht meldet `ready: false` mit dem
+Grund `module_key_missing`, nie „keine Befunde“.
+
 Sicherheitswert und Abdeckung zählen nur **geladene** Router. Wird ein Router entladen oder
 entfernt, fällt er sofort aus Wert und Abdeckung heraus; seine Hinweise und Grundlinien bleiben
 gespeichert. Erst wenn der Core den Router vergisst (`router.forgotten`), löscht das Center
@@ -360,9 +374,11 @@ oder unbekannt, wird nichts gelöscht.
 - **Geschlüsselte IDs:** Hinweis-IDs (`sec_…`), Ereignis-IDs, Dedup-Marken und
   Korrelations-IDs, die gespeichert, gesendet oder ausgegeben werden, sind HMAC-Werte mit dem
   Modulschlüssel des Cores. Mit einer Liste möglicher MACs lassen sie sich ohne den Schlüssel
-  nicht zurückrechnen. Ohne Modulschlüssel nimmt das Center einen zufälligen Schlüssel je Lauf;
-  dann bekommt derselbe Befund nach einem Neustart eine neue Hinweis-ID. Ältere Speicherstände
-  mit unverschlüsselten IDs laden ohne Fehler.
+  nicht zurückrechnen. **Ohne Modulschlüssel zeichnet das Center keine Hinweise auf** und
+  schreibt keine Zeitleisten-Einträge zu Geräten; die verworfenen Befunde werden gezählt
+  (`findings_not_ready` in der Diagnose), Gerätebestätigung und -name werden mit 409
+  `not_ready` abgelehnt. Das Vertrauensbuch sieht die Geräte weiter. Ältere Speicherstände mit
+  unverschlüsselten IDs laden ohne Fehler.
 - **DNS-Namen standardmäßig aus:** Ohne `keep_dns_names` steht an einem DNS-Hinweis kein
   Klartextname.
 - **Keine HA-Benutzer-IDs** im Speicher des Centers; der Core hält sie in seinem Audit-Speicher
@@ -391,6 +407,17 @@ oder unbekannt, wird nichts gelöscht.
   Hinweis mehr, wird der **neue** Hinweis nicht gespeichert und gezählt
   (`limits.incidents_cap_dropped` in der Übersicht, `incidents_cap_dropped` in der Diagnose);
   die Zeitleiste bekommt höchstens einen Eintrag „Obergrenze erreicht“ je Stunde.
+- **Hinweise aus Logzeilen** (Firewall und DNS per Syslog, deren Absender im LAN fälschbar
+  sind) belegen **höchstens 50** der 100 Plätze. Ist diese Quote voll, macht zuerst der älteste
+  erledigte Log-Hinweis Platz; sonst wird der neue Log-Hinweis nicht gespeichert und gezählt
+  (`limits.incidents_log_quota_dropped`), mit höchstens einem Zeitleisten-Eintrag je Stunde.
+  Ist der ganze Speicher voll und kommt ein neuer Befund **nicht** aus Logzeilen, verdrängt er
+  den ältesten **offenen** Log-Hinweis (gezählt als `limits.incidents_displaced`, höchstens ein
+  Zeitleisten-Eintrag je Stunde). Bestätigte Hinweise werden nie verdrängt. Die Herkunft steht
+  am Hinweis (`from_logs`) und bleibt über einen Neustart erhalten.
+- **Bestätigte Hinweise** sammeln neue Befunde still. Kommt ein neuer Befund erst später als die
+  Frist der automatischen Erledigung (24 Stunden) nach dem letzten, bekommt die Zeitleiste einen
+  Eintrag „Erneut beobachtet“.
 - **Ereignisse über den Core:** höchstens 20 Ereignisse zu neuen oder wieder geöffneten
   Hinweisen je 10 min; weitere werden nicht gesendet, sondern gezählt
   (`limits.events_throttled`). Der Hinweis selbst wird trotzdem gespeichert.
@@ -439,8 +466,11 @@ ausdrücklicher Einzelfreigabe eines Administrators, wie beim Configuration Mana
 - **Client-Filter der Übersicht im Query:** Der Filter `client` von `/overview` (Knopf
   „Ereignisse zeigen“ eines Geräts im Panel) steht als MAC im Query-String und kann so in
   Proxy- oder Zugriffslogs landen. Die Schreib-Routen der Geräte tragen die MAC im Body.
-- **Ohne Modulschlüssel des Cores** sind die Hinweis-IDs nur innerhalb eines Laufs stabil:
-  ein Befund nach einem Neustart eröffnet einen neuen Hinweis statt den alten fortzuführen.
+- **Ohne Modulschlüssel des Cores** (Core nicht gestartet oder Installationsschlüssel nicht
+  lesbar) ist das Center „nicht bereit“: Befunde dieser Zeit werden nur gezählt, nicht als
+  Hinweis gespeichert, und gehen verloren. Sensoren sind dann unbekannt.
+- **Firewall- und DNS-Befunde markieren kein Gerät** im Vertrauensbuch (kein Nachschlagen
+  IP → MAC).
 - **Umbenannte Entity-IDs der Flotten-Sensoren** bleiben erhalten, wenn der Router-Eintrag,
   an dem sie hängen, wechselt oder gelöscht wird (geprüft mit der echten Entity-Registry von
   Home Assistant im Test, nicht in einer echten Instanz).

@@ -35,6 +35,7 @@ from test_security_center import (
     ADMIN,
     M1,
     M2,
+    MODULE_KEY,
     NO_SCHEDULE,
     RID1,
     RID2,
@@ -167,6 +168,7 @@ async def _two_routers_one_unloaded(hass: Any) -> SecurityCenter:
     center.add_entry("r2", coordinator())
     center.settings = merge_settings(center.settings, {"enabled": True})
     center.active = True
+    center._module_key = MODULE_KEY
     center._engine = object()  # NI present (statuses only check "is not None")
     center.on_poll(poll_facts("r1", T0))
     center.on_poll(poll_facts("r2", T0))
@@ -189,6 +191,7 @@ async def test_review2_h1_unloaded_router_leaves_score_and_coverage(
     control.add_entry("r1", coordinator())
     control.settings = merge_settings(control.settings, {"enabled": True})
     control.active = True
+    control._module_key = MODULE_KEY
     control._engine = object()
     for k in range(40):
         control.on_poll(poll_facts("r1", T0 + 60 * k))
@@ -327,23 +330,20 @@ async def test_review2_m2_ids_reveal_no_mac_with_the_module_key(
     await async_release_security_center(env.hass, env.entries[0].entry_id)
 
 
-async def test_review2_m2_without_module_key_ids_are_random_per_run(
+async def test_review2_m2_without_module_key_no_id_is_made(
     disks,  # noqa: F811
 ) -> None:
-    ids = []
-    for _run in range(2):
-        hass = make_hass()
-        center = await center_for(hass, "r1")
-        assert not center.module_key_available
-        center._record(auth_event(RID1), T0)
-        view = center.overview(actor=None, now=T0)
-        text = _texts(view, center._data_to_save())
-        for mac in CANDIDATES:
-            for derived in unkeyed_ids(RID1, mac):
-                assert derived not in text, mac
-        ids.append(view["incidents"][0]["id"])
-        center.close()
-    assert ids[0] != ids[1]
+    """Review 3, #6 replaced the random key per run: nothing is recorded."""
+    center = await center_for(make_hass(), "r1", module_key=None)
+    assert not center.module_key_available
+    center._record(auth_event(RID1), T0)
+    view = center.overview(actor=None, now=T0)
+    text = _texts(view, center._data_to_save())
+    for mac in CANDIDATES:
+        for derived in unkeyed_ids(RID1, mac):
+            assert derived not in text, mac
+    assert view["incidents"] == [] and view["not_ready_reason"] == "module_key_missing"
+    center.close()
 
 
 async def test_review2_m2_old_store_with_unkeyed_ids_loads(disks) -> None:  # noqa: F811
@@ -356,6 +356,7 @@ async def test_review2_m2_old_store_with_unkeyed_ids_loads(disks) -> None:  # no
     assert len(center.incidents) == 1
     center.settings = merge_settings(center.settings, {"enabled": True})
     await center.async_activate()
+    center._module_key = MODULE_KEY
     center._record(auth_event(RID1), T0)
     assert len(center.incidents) == 2
 

@@ -23,6 +23,7 @@ from test_net_entities import loaded_registry
 from test_security_center import (
     M1,
     M2,
+    MODULE_KEY,
     RID1,
     T0,
     center_for,
@@ -152,6 +153,7 @@ async def test_sensors_are_unknown_without_a_source(disks) -> None:  # noqa: F81
         assert entity.available is False and entity.native_value is None
     center.settings = merge_settings(center.settings, {"enabled": True})
     await center.async_activate()
+    center._module_key = MODULE_KEY  # ready (review 3, #6)
     center._publish(T0)
     assert center.fleet_view is None  # no router: no view at all
     center.add_entry("r1", coordinator())

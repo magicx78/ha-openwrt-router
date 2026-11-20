@@ -118,8 +118,22 @@ def coordinator(uptime: int = 5000) -> Any:
     return SimpleNamespace(data=SimpleNamespace(uptime=uptime))
 
 
-async def center_for(hass: Any, *entries: str, enabled: bool = True) -> SecurityCenter:
-    """A center with the router ids of RIDS (no core needed for them)."""
+# The module key the core hands out (the same after a restart). Without it
+# the center records no hint (review 3, #6), so the helper gives one.
+MODULE_KEY = bytes(range(32))
+
+
+async def center_for(
+    hass: Any,
+    *entries: str,
+    enabled: bool = True,
+    module_key: bytes | None = MODULE_KEY,
+) -> SecurityCenter:
+    """A center with the router ids of RIDS (no core needed for them).
+
+    ``module_key`` stands in for the core's key while no core runs; None
+    leaves the center "not ready".
+    """
     center = SecurityCenter(hass)
     center.router_id_of = RIDS.get
     hass.data[DATA_SECURITY_CENTER] = center
@@ -129,6 +143,7 @@ async def center_for(hass: Any, *entries: str, enabled: bool = True) -> Security
     if enabled:
         center.settings = merge_settings(center.settings, {"enabled": True})
         await center.async_activate()
+        center._module_key = module_key
     return center
 
 
@@ -496,11 +511,6 @@ async def test_polls_feed_the_trust_book_and_the_timeline(disks) -> None:
     )
 
 
-# The module key the core hands out is the same after a restart; without it
-# the ids are random per run (review 2, M2) and nothing merges across runs.
-MODULE_KEY = bytes(range(32))
-
-
 async def test_case18_ha_restart_persistence(disks) -> None:
     hass = make_hass()
     engine, _cs = await setup(hass, "r1")
@@ -662,8 +672,11 @@ async def test_overview_without_admin_is_masked(disks) -> None:
         assert secret not in text, secret
     assert view["admin_view"] is False
     tv = [d for d in view["devices"] if d["name_set"]]
-    assert len(tv) == 1 and tv[0]["name"] is None and tv[0]["mac"] == MASK
-    assert view["incidents"][0]["client_ref"] == MASK  # no module key: masked
+    assert len(tv) == 1 and tv[0]["name"] is None and tv[0]["mac"].startswith("cli_")
+    assert view["incidents"][0]["client_ref"].startswith("cli_")  # keyed
+    center._module_key = None  # no module key: masked, never plain
+    bare = center.overview(now=T0 + 400)
+    assert [d["mac"] for d in bare["devices"] if d["name_set"]] == [MASK]
     # unknown is never healthy: sources are reported, nothing invented
     assert view["score"]["coverage"] is not None
     assert view["subnet_map"] == {"state": "omitted", "subnets": 0}

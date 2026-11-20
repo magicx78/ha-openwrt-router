@@ -36,11 +36,21 @@ Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `doc
   Diagnose), mit höchstens einem Zeitleisten-Eintrag „Obergrenze erreicht“ je Stunde.
   Ereignisse über den Core zu neuen oder wieder geöffneten Hinweisen: höchstens 20 je
   10 min, der Rest wird gezählt (`limits.events_throttled`).
+- **Quote für Hinweise aus Logzeilen:** Firewall- und DNS-Hinweise (Syslog, Absender im LAN
+  fälschbar) belegen höchstens 50 der 100 Plätze; ist die Quote voll, wird ein neuer
+  Log-Hinweis verworfen und gezählt (`limits.incidents_log_quota_dropped`). Ist der Speicher
+  voll, verdrängt ein Befund einer anderen Quelle den ältesten offenen Log-Hinweis (gezählt als
+  `limits.incidents_displaced`, Zeitleisten-Eintrag höchstens einmal je Stunde); bestätigte
+  Hinweise bleiben. Die Herkunft (`from_logs`) übersteht einen Neustart, ältere Speicherstände
+  laden.
+- **Erneut beobachtet:** Ein neuer Befund zu einem bestätigten Hinweis, der später als 24 h
+  nach dem letzten kommt, steht als Eintrag in der Zeitleiste.
 - **Geschlüsselte IDs:** Hinweis-, Ereignis- und Korrelations-IDs sowie Dedup-Marken, die
   gespeichert, gesendet oder ausgegeben werden, sind HMAC-Werte mit dem Modulschlüssel des
-  Cores und lassen sich mit einer Liste möglicher MACs nicht zurückrechnen. Ohne
-  Modulschlüssel gilt ein zufälliger Schlüssel je Lauf. Ältere Speicherstände laden ohne
-  Fehler.
+  Cores und lassen sich mit einer Liste möglicher MACs nicht zurückrechnen. **Ohne
+  Modulschlüssel zeichnet das Center keine Hinweise auf** (Zustand „nicht bereit“, Grund
+  `module_key_missing`; Befunde nur gezählt, Gerät bestätigen und benennen ergibt 409
+  `not_ready`). Ältere Speicherstände laden ohne Fehler.
 - **Drift → Segmentierung:** eine Konfigurationsänderung in VLAN/Firewall/Interface (Bereiche
   aus dem Vergleich zweier gespeicherter Versionen, kein Router-Kontakt) ergibt genau einen
   Hinweis mit Verweis auf die Drift-ID. Ein Befund kurz nach einer Konfigurationsänderung wird
@@ -65,7 +75,10 @@ Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `doc
   4000 Einträgen begrenzen Speicher und CPU (alles gezählt). Zeilen erscheinen nie oberhalb
   von DEBUG im Log und werden nie ungefiltert gespeichert. Ein Bind-Fehler (Port belegt,
   keine Berechtigung) macht die Quelle „nicht verfügbar“ mit Grund, das Setup läuft weiter;
-  ein neuer Versuch alle 5 min aus dem Poll. Ein Wechsel des Log-Wegs schließt den Socket;
+  ein neuer Versuch alle 5 min aus dem Poll. Verliert ein Router Zeilen an eine Rate oder den
+  vollen Puffer, sind seine Firewall- und DNS-Erkennungen bis 5 min nach der letzten
+  verworfenen Zeile „eingeschränkt“ (`rate_limited`), mit Einschränkung im Sicherheitswert und
+  geringerer Abdeckung. Ein Wechsel des Log-Wegs schließt den Socket;
   erneut gesendete Zeilen filtert der gemeinsame Deduper. Grenze: UDP-Absender sind im LAN
   fälschbar, die Liste filtert Rauschen, sie authentifiziert keinen Router.
 - **HTTP-Routen (`security_views.py`)** unter `/api/openwrt_topology/security`, alle mit
@@ -77,12 +90,14 @@ Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `doc
   (`/devices/name`) tragen die MAC im Body, nie im Pfad. Strenge Prüfung von Query und
   Body (bekannte Schlüssel,
   Typen, Bereiche, höchstens 4 KiB, zu tief verschachteltes JSON ist 400); Fehler tragen nur
-  eine feste Meldung, einen Code und höchstens Feldname und Grund.
+  eine feste Meldung, einen Code und höchstens Feldname und Grund. Eine Ablehnung durch den
+  Guard des Cores ist 403 `authorization_denied` ohne Angaben des Cores.
 - **Flotten-Sensoren (`security_entities.py`):** Sicherheitswert, aktive und kritische
   Sicherheitshinweise, unbestätigte Geräte, Firewall-Protokolleinträge und WLAN-Anmeldefehler
   der letzten Stunde, Abdeckung der Erkennung. Werte nur aus dem Center (keine Router-Aufrufe,
   per Signal aktualisiert); ohne liefernde Quelle `None` (unbekannt), nie 0, auch für aktive
-  und kritische Hinweise. Wert und Abdeckung zählen nur geladene Router; die Hinweise und
+  und kritische Hinweise; ist das Center nicht bereit (kein Modulschlüssel), sind alle sieben
+  Sensoren unbekannt. Wert und Abdeckung zählen nur geladene Router; die Hinweise und
   Grundlinien eines entladenen Routers bleiben gespeichert. Die Sensoren gibt es nur bei
   eingeschaltetem Center; Ausschalten entfernt sie aus der Entity-Registry.
 - **Panel-Tab „Security Center“** unter Enterprise (neben „Konfiguration“) mit den Bereichen
@@ -99,6 +114,8 @@ Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `doc
 - **Keine neuen Router-Rechte.** Die ACL bleibt unverändert; das Security Center schreibt
   nichts auf einen Router. Den Log-Versand der Router (`log_ip`) richtet der Nutzer selbst ein
   (Befehle und Rückweg in `docs/security-center.md`).
+- **Firewall- und DNS-Befunde markieren kein Gerät** im Vertrauensbuch: ihre Logzeilen nennen
+  eine IP-Adresse, und es gibt kein Nachschlagen IP → MAC.
 - **Der Collector-Weg ist noch nicht verfügbar** (`log_path: collector` meldet „nicht
   verfügbar“). Firewall- und DNS-Erkennungen setzen den Syslog-Weg voraus; ihre Logformate sind
   an echten Geräten unbestätigt.

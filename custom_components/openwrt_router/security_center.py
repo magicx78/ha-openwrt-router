@@ -44,7 +44,6 @@ import asyncio
 import ipaddress
 import logging
 import math
-import secrets
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
@@ -78,6 +77,7 @@ from .const import (
     SEC_TIMELINE_MAX,
     SIGNAL_SECURITY_CENTER,
 )
+from .core_errors import AuthorizationError
 from .core_masking import MASK, pseudonymise_fields
 from .core_models import (
     FLEET_ROUTER_ID,
@@ -144,6 +144,7 @@ from .security_score import (
 )
 from .security_syslog import (
     REASON_NOT_STARTED,
+    REASON_RATE_LIMITED,
     SyslogReceiver,
     sender_address,
 )
@@ -174,6 +175,30 @@ TEXT_CAP_REACHED = (
     "Obergrenze erreicht: neue Hinweise werden nicht gespeichert, bis "
     "erledigte Hinweise Platz machen (offene und bestätigte bleiben)"
 )
+# Hints from log lines (review 3, #1). Syslog senders can be forged in the
+# LAN, so hints of the firewall and DNS logs get their own quota of the
+# store; when the store is full, a new hint of another source displaces the
+# oldest OPEN log hint (counted, noted once per window). Confirmed hints
+# are never displaced.
+SEC_LOG_INCIDENT_QUOTA = 50
+LOG_DATA_SOURCES: frozenset[str] = frozenset(
+    {DataSource.FIREWALL_LOG.value, DataSource.DNS_QUERY_LOG.value}
+)
+_LOG_CATEGORIES = frozenset({"firewall", "dns"})  # stores before review 3
+TEXT_LOG_QUOTA = (
+    "Obergrenze für Hinweise aus Logzeilen erreicht: neue Hinweise aus "
+    "Logzeilen werden nicht gespeichert, bis erledigte Platz machen"
+)
+TEXT_LOG_DISPLACED = (
+    "Speicher voll: ein offener Hinweis aus Logzeilen hat einem neuen "
+    "Hinweis einer anderen Quelle Platz gemacht"
+)
+TEXT_SEEN_AGAIN = "Erneut beobachtet (Hinweis ist bestätigt)"
+# Not ready (review 3, #6): no hint is recorded before the core hands out
+# the module key; counts and score are unknown until then.
+REASON_MODULE_KEY_MISSING = "module_key_missing"
+# A core AuthorizationError of the guard (review 3, #4): a refusal, no details.
+REASON_AUTHORIZATION_FAILED = "authorization_failed"
 
 # Availability of one detection in the overview.
 DETECTION_AVAILABLE = "available"
@@ -203,18 +228,13 @@ _ACTIONS = (
 EVENT_INCIDENT_STATUS = event_type("incident_status_changed")
 EVENT_SETTINGS = event_type("settings_changed")
 
-# Detector -> trust indicator of the client it names.
+# Detector -> trust indicator of the client it names. Only Wi-Fi findings
+# name a device (MAC); firewall and DNS findings name an IP address and no
+# IP is looked up to a MAC, so they mark no device (review 3, #2).
 INDICATOR_OF: Mapping[str, Indicator] = {
     "wifi_auth_repeat": Indicator.LOGIN_FAILURES,
     "wifi_multi_ap_auth": Indicator.MULTI_AP_AUTH,
     "wifi_assoc_burst": Indicator.ASSOC_BURST,
-    "fw_port_scan_hint": Indicator.PORT_SCAN,
-    "fw_mgmt_access": Indicator.MGMT_ACCESS,
-    "fw_inter_vlan": Indicator.INTER_VLAN,
-    "dns_rate": Indicator.DNS_ANOMALY,
-    "dns_nxdomain_cluster": Indicator.DNS_ANOMALY,
-    "dns_many_domains": Indicator.DNS_ANOMALY,
-    "dns_tunnel_hint": Indicator.DNS_ANOMALY,
 }
 # Plan D-REUSE: NI incident types that already cover a finding. With an
 # open linked NI incident of the counterpart type no sec_* incident is
@@ -294,12 +314,15 @@ _COUNTERS = (
     "polls",
     "polls_unmapped",
     "findings",
+    "findings_not_ready",
     "incidents_opened",
     "incidents_merged",
     "incidents_reopened",
     "incidents_resolved",
     "incidents_dropped",
     "incidents_cap_dropped",
+    "incidents_log_quota_dropped",
+    "incidents_displaced",
     "incidents_reused",
     "notices",
     "drifts_seen",
@@ -695,7 +718,7 @@ class SecurityCenter:
         self.drifts: dict[tuple[str, str], DriftNote] = {}
         self.counters: dict[str, int] = dict.fromkeys(_COUNTERS, 0)
         self.last_now: float | None = None
-        self._cap_noted: float | None = None  # memory only
+        self._noted: dict[str, float] = {}  # note kind -> time, memory only
         self._emit_times: deque[float] = deque()  # monotonic, memory only
         self.last_save_bytes: int | None = None
         # memory only
@@ -709,10 +732,9 @@ class SecurityCenter:
         self._binding = _Binding()
         self._engine: Any = None
         self._engine_unsub: Callable[[], None] | None = None
+        # Key of every id and pseudonym; without it no hint is recorded
+        # (review 3, #6: no random key per run any more).
         self._module_key: bytes | None = None
-        # Key of the ids while the core hands out no module key: random per
-        # run, never stored (review 2, M2).
-        self._run_key = secrets.token_bytes(32)
         self._drift_task: asyncio.Task[Any] | None = None
         self._drift_again = False
         self._drift_tried: float | None = None
@@ -741,6 +763,18 @@ class SecurityCenter:
     def module_key_available(self) -> bool:
         """True once the core handed out the module key."""
         return self._module_key is not None
+
+    @property
+    def ready(self) -> bool:
+        """Active with the module key: hints are recorded (review 3, #6)."""
+        return self.active and self._module_key is not None
+
+    @property
+    def not_ready_reason(self) -> str | None:
+        """Why an active center records nothing yet (None if ready or off)."""
+        if self.active and self._module_key is None:
+            return REASON_MODULE_KEY_MISSING
+        return None
 
     def _now(self) -> float:
         """Time of actions and views: never behind the wall clock.
@@ -1848,6 +1882,10 @@ class SecurityCenter:
         out: list[SecurityEvent] = []
         for notice in notices:
             self.counters["notices"] += 1
+            if self._module_key is None:
+                # Not ready: no entry with an unkeyed device reference; the
+                # trust book keeps the device (review 3, #6).
+                continue
             self._timeline(
                 notice.at,
                 "notice",
@@ -1864,12 +1902,14 @@ class SecurityCenter:
 
     # -- incidents --------------------------------------------------------------------------
 
-    @property
-    def _id_key(self) -> bytes:
-        return self._module_key if self._module_key is not None else self._run_key
-
     def _record(self, event: SecurityEvent, now: float) -> None:
-        event = sealed_event(event, self._id_key)
+        key = self._module_key
+        if key is None:
+            # Not ready: ids and device references need the module key
+            # (review 3, #6). Counted; the overview says "not ready".
+            self.counters["findings_not_ready"] += 1
+            return
+        event = sealed_event(event, key)
         counterpart = NI_COUNTERPART.get(event.name)
         if counterpart is not None:
             reused = [
@@ -1895,8 +1935,25 @@ class SecurityCenter:
         inc_id = self._by_scope.get(scope)
         inc = self.incidents.get(inc_id) if inc_id else None
         if inc is not None and inc["status"] in _ACTIVE_STATUSES:
+            previous = inc["last_seen"]
             self._merge(inc, event)
             self.counters["incidents_merged"] += 1
+            if (
+                inc["status"] == STATUS_CONFIRMED
+                and event.ts - previous > SEC_INCIDENT_AUTO_RESOLVE_SECONDS
+            ):
+                # A confirmed hint seen again after a quiet time (an open one
+                # would have been resolved by then): one entry (review 3, #5).
+                self._timeline(
+                    event.ts,
+                    "incident_seen_again",
+                    category=inc["category"],
+                    severity=event.severity,
+                    router_id=event.router_id,
+                    client=event.client,
+                    text=f"{TEXT_SEEN_AGAIN}: {inc['title']}",
+                    incident_id=inc["id"],
+                )
             return
         if inc is not None:
             self._merge(inc, event)
@@ -1915,7 +1972,11 @@ class SecurityCenter:
             )
             self._emit_event(event, inc["id"], limited=True)
             return
-        if not self._make_room():
+        from_logs = event.data_source in LOG_DATA_SOURCES
+        if from_logs and not self._make_log_room():
+            self._log_quota_reached(now)
+            return
+        if not self._make_room(now, from_logs=from_logs):
             self._cap_reached(now)
             return
         inc = self._new_incident(event, scope)
@@ -1934,7 +1995,10 @@ class SecurityCenter:
         self._emit_event(event, inc["id"], limited=True)
 
     def _new_incident(self, event: SecurityEvent, scope: str) -> dict[str, Any]:
-        inc_id = INCIDENT_PREFIX + keyed_id(self._id_key, "incident", scope, 8)
+        key = self._module_key
+        if key is None:  # _record checked it; never an unkeyed id
+            raise SecurityCenterError(REASON_MODULE_KEY_MISSING)
+        inc_id = INCIDENT_PREFIX + keyed_id(key, "incident", scope, 8)
         name = event.name
         drift_refs: list[str] = []
         hints: list[str] = []
@@ -1971,6 +2035,7 @@ class SecurityCenter:
             "linked_incident_ids": list(event.linked_incident_ids),
             "drift_refs": drift_refs,
             "correlation_id": event.correlation_id,
+            "from_logs": event.data_source in LOG_DATA_SOURCES,
             "title": TITLES.get(name, name),
             "hint": " ".join(hints),
             "resolved_at": None,
@@ -2005,37 +2070,79 @@ class SecurityCenter:
                 links.append(link)
         inc["linked_incident_ids"] = links[:16]
 
-    def _make_room(self) -> bool:
-        """Room for one new hint: evict resolved ones, oldest first.
+    def _make_room(self, now: float, *, from_logs: bool = False) -> bool:
+        """Room for one new hint.
 
-        False if the store is full of open and confirmed hints: those are
-        never evicted for a new one (review 2, M3).
+        Resolved hints go first, oldest first. With none left, a new hint
+        that does not come from log lines displaces the oldest OPEN hint
+        from log lines (review 3, #1). False if there is still no room:
+        confirmed hints and open hints of other sources are never evicted
+        for a new one (review 2, M3).
         """
         while len(self.incidents) >= SEC_INCIDENT_CAP:
             resolved = [
                 i for i in self.incidents.values() if i["status"] == STATUS_RESOLVED
             ]
+            if resolved:
+                victim = min(resolved, key=lambda i: i["last_seen"])
+                self._drop_incident(victim["id"])
+                self.counters["incidents_dropped"] += 1
+                continue
+            if from_logs:
+                return False
+            open_logs = [
+                i
+                for i in self.incidents.values()
+                if i["status"] == STATUS_OPEN and i.get("from_logs") is True
+            ]
+            if not open_logs:
+                return False
+            victim = min(open_logs, key=lambda i: i["last_seen"])
+            self._drop_incident(victim["id"])
+            self.counters["incidents_displaced"] += 1
+            self._note_once("log_displaced", now, TEXT_LOG_DISPLACED)
+        return True
+
+    def _make_log_room(self) -> bool:
+        """Room within the quota of hints from log lines (review 3, #1).
+
+        Resolved log hints go first, oldest first; False if the quota is
+        full of open and confirmed log hints (the new one is dropped).
+        """
+        while True:
+            logs = [i for i in self.incidents.values() if i.get("from_logs") is True]
+            if len(logs) < SEC_LOG_INCIDENT_QUOTA:
+                return True
+            resolved = [i for i in logs if i["status"] == STATUS_RESOLVED]
             if not resolved:
                 return False
             victim = min(resolved, key=lambda i: i["last_seen"])
             self._drop_incident(victim["id"])
             self.counters["incidents_dropped"] += 1
-        return True
 
     def _cap_reached(self, now: float) -> None:
         """A new hint found no room: count it, note it once per window."""
         self.counters["incidents_cap_dropped"] += 1
-        last = self._cap_noted
+        self._note_once("cap_reached", now, TEXT_CAP_REACHED)
+
+    def _log_quota_reached(self, now: float) -> None:
+        """A new log hint found the quota full: count it, note it once."""
+        self.counters["incidents_log_quota_dropped"] += 1
+        self._note_once("log_quota_reached", now, TEXT_LOG_QUOTA)
+
+    def _note_once(self, kind: str, now: float, text: str) -> None:
+        """One system entry of ``kind`` per SEC_CAP_NOTE_WINDOW_SECONDS."""
+        last = self._noted.get(kind)
         if last is not None and abs(now - last) < SEC_CAP_NOTE_WINDOW_SECONDS:
             return
-        self._cap_noted = now
+        self._noted[kind] = now
         self._timeline(
             now,
-            "cap_reached",
+            kind,
             category="system",
             severity=Severity.WARNING,
             router_id=None,
-            text=TEXT_CAP_REACHED,
+            text=text,
         )
         self.schedule_save()
 
@@ -2309,19 +2416,38 @@ class SecurityCenter:
                     admin_user_only=True,
                 )
             self._binding.actions_ok = True
-        if isinstance(actor, VerifiedActor):
-            verified = actor
-        elif isinstance(actor, Actor):
-            verified = await api.guard.async_verify_actor(actor)
-        else:
-            raise SecurityCenterError("actor_required", "An actor is required")
-        decision = api.guard.authorize(action, router_id, verified)
-        if not decision.approved:
+        try:
+            if isinstance(actor, VerifiedActor):
+                verified = actor
+            elif isinstance(actor, Actor):
+                verified = await api.guard.async_verify_actor(actor)
+            else:
+                raise SecurityCenterError("actor_required", "An actor is required")
+            decision = api.guard.authorize(action, router_id, verified)
+            if not decision.approved:
+                self.counters["actions_denied"] += 1
+                raise SecurityCenterError(str(decision.reason or "denied"))
+            api.guard.consume(
+                decision.authorization, action=action, router_id=router_id
+            )
+        except AuthorizationError:
+            # The guard refused (unknown user, used or expired authorization
+            # ...): a refusal, never an internal error, and no core details
+            # leave the center (review 3, #4).
             self.counters["actions_denied"] += 1
-            raise SecurityCenterError(str(decision.reason or "denied"))
-        api.guard.consume(decision.authorization, action=action, router_id=router_id)
+            raise SecurityCenterError(REASON_AUTHORIZATION_FAILED) from None
         self.counters["actions"] += 1
         return verified
+
+    async def _async_require_module_key(self) -> None:
+        """Device actions seal their events with the module key (review 3, #6)."""
+        await self._async_api()
+        if self._module_key is None:
+            await self._async_fetch_module_key()
+        if self._module_key is None:
+            raise SecurityCenterError(
+                REASON_MODULE_KEY_MISSING, "The Security Center is not ready"
+            )
 
     def _require_enabled(self) -> None:
         if not self.enabled:
@@ -2340,6 +2466,7 @@ class SecurityCenter:
         key = normalize_mac(mac)
         if key is None:
             raise SecurityCenterError("invalid_mac")
+        await self._async_require_module_key()
         verified = await self._async_authorize(
             ACTION_CONFIRM_DEVICE, FLEET_ROUTER_ID, actor
         )
@@ -2359,6 +2486,7 @@ class SecurityCenter:
             raise SecurityCenterError("invalid_mac")
         if self.trust.get(key) is None:
             raise SecurityCenterError("unknown_device")
+        await self._async_require_module_key()
         verified = await self._async_authorize(
             ACTION_SET_DEVICE_NAME, FLEET_ROUTER_ID, actor
         )
@@ -2369,7 +2497,9 @@ class SecurityCenter:
         self._action_done(action.to_event(router_id=None), "renamed", when)
 
     def _action_done(self, event: SecurityEvent, what: str, when: float) -> None:
-        event = sealed_event(event, self._id_key)
+        key = self._module_key
+        if key is not None:
+            event = sealed_event(event, key)
         self._timeline(
             when,
             "action",
@@ -2380,7 +2510,8 @@ class SecurityCenter:
             text=f"Gerät {'bestätigt' if what == 'confirmed' else 'benannt'}",
             type_=event.name,
         )
-        self._emit_event(event, None)
+        if key is not None:  # never an unkeyed id on the bus (review 3, #6)
+            self._emit_event(event, None)
         self.schedule_save()
         self._stage("publish", self._publish, when)
 
@@ -2585,9 +2716,16 @@ class SecurityCenter:
             for row in self.trust.to_dict()["records"]
         ]
         score = self._score(when, statuses, flat)
+        reason = self.not_ready_reason
+        if reason is not None:
+            # Not ready (review 3, #6): no score, never "keine Befunde".
+            score["score"] = None
+            score["reason"] = f"not ready: {reason}"
         return {
             "enabled": self.enabled,
             "active": self.active,
+            "ready": reason is None,
+            "not_ready_reason": reason,
             "admin_view": admin,
             "score": score,
             "coverage": {
@@ -2621,6 +2759,14 @@ class SecurityCenter:
             "limits": {
                 "incident_cap": SEC_INCIDENT_CAP,
                 "incidents_cap_dropped": self.counters["incidents_cap_dropped"],
+                "log_incident_quota": SEC_LOG_INCIDENT_QUOTA,
+                "log_incidents": sum(
+                    1 for i in self.incidents.values() if i.get("from_logs") is True
+                ),
+                "incidents_log_quota_dropped": self.counters[
+                    "incidents_log_quota_dropped"
+                ],
+                "incidents_displaced": self.counters["incidents_displaced"],
                 "events_throttled": self.counters["events_throttled"],
             },
         }
@@ -2645,8 +2791,24 @@ class SecurityCenter:
             view["client_ref"] = MASK
         return view
 
+    def _log_limited_routers(self) -> frozenset[str]:
+        """Current routers whose log lines the receiver lost to a limit.
+
+        Rate limits or the full buffer within the receiver's hold time
+        (``RATE_LIMITED_HOLD_S``, review 3, #8); empty off the syslog path.
+        """
+        receiver = self.syslog
+        if (
+            receiver is None
+            or not receiver.listening
+            or self.settings.get("log_path") != LogPath.SYSLOG.value
+        ):
+            return frozenset()
+        return receiver.limited_routers() & self._current_routers()
+
     def _detections(self) -> list[dict[str, Any]]:
         out = []
+        rate_limited = bool(self._log_limited_routers())
         for det in self.detectors.detectors:
             results = [r for (d, _r), r in self._results.items() if d == det.id]
             available = [r for r in results if r.available]
@@ -2671,6 +2833,17 @@ class SecurityCenter:
                 availability, reason = DETECTION_AVAILABLE, ""
             else:
                 availability, reason = DETECTION_NOT_AVAILABLE, ",".join(reasons)
+            if (
+                rate_limited
+                and availability != DETECTION_NOT_AVAILABLE
+                and any(s in LOG_DATA_SOURCES for s in det.sources)
+            ):
+                # Lines are being lost: never "available" (review 3, #8).
+                availability = DETECTION_LIMITED
+                limitations = sorted({*limitations, REASON_RATE_LIMITED})
+                reason = ",".join(
+                    sorted({*filter(None, reason.split(",")), REASON_RATE_LIMITED})
+                )
             if det.id.startswith("fw_"):
                 unconfirmed = not FORMAT_CONFIRMED[FMT_FW4]
             elif det.id.startswith("dns_"):
@@ -2758,6 +2931,19 @@ class SecurityCenter:
             )
             for factor, detectors in _FACTOR_DETECTORS.items()
         }
+        if self._log_limited_routers():
+            # Log lines lost to a limit: the log factors are partial and the
+            # coverage drops (review 3, #8).
+            log_ids = {
+                d.id
+                for d in self.detectors.detectors
+                if any(s in LOG_DATA_SOURCES for s in d.sources)
+            }
+            for factor, detectors in _FACTOR_DETECTORS.items():
+                if log_ids.intersection(detectors):
+                    limitations[factor] = sorted(
+                        {*limitations[factor], REASON_RATE_LIMITED}
+                    )
         result = compute_score(values, flat, limitations=limitations)
         out = result.to_dict()
         out["routers"] = len(statuses)
@@ -2773,6 +2959,7 @@ class SecurityCenter:
                 for s in (DataSource.FIREWALL_LOG, DataSource.DNS_QUERY_LOG)
             ],
             "receiver": receiver.status() if receiver is not None else None,
+            "rate_limited_routers": len(self._log_limited_routers()),
             "dedup": self.deduper.stats().to_dict(),
         }
 
@@ -2879,6 +3066,26 @@ class SecurityCenter:
         statuses = self._all_statuses(now)
         if not statuses:
             return None
+        reason = self.not_ready_reason
+        if reason is not None:
+            # Not ready (review 3, #6): every value unknown, never 0.
+            return {
+                "ready": False,
+                "not_ready_reason": reason,
+                "score": None,
+                "score_cap": None,
+                "score_reason": f"not ready: {reason}",
+                "coverage": None,
+                "routers": len(statuses),
+                "missing": [],
+                "stale": [],
+                "hints_active": None,
+                "hints_critical": None,
+                "unknown_devices": None,
+                "device_counts": {},
+                "firewall_events_1h": None,
+                "wifi_auth_failures_1h": None,
+            }
 
         def delivered(*sources: str) -> bool:
             return any(
@@ -2900,6 +3107,8 @@ class SecurityCenter:
             for s in (TrustState.NEW, TrustState.UNRECOGNIZED, TrustState.SUSPICIOUS)
         )
         return {
+            "ready": True,
+            "not_ready_reason": None,
             "score": score["score"],
             "score_cap": score.get("cap"),
             "score_reason": score.get("reason"),
@@ -2950,6 +3159,11 @@ class SecurityCenter:
             "drifts": len(self.drifts),
             "detector_state": self.detectors.state_size(),
             "module_key": self._module_key is not None,
+            "not_ready_reason": self.not_ready_reason,
+            "log_incidents": sum(
+                1 for i in self.incidents.values() if i.get("from_logs") is True
+            ),
+            "log_rate_limited_routers": len(self._log_limited_routers()),
             "events_registered": self._binding.events_ok,
             "last_save_bytes": self.last_save_bytes,
             "counters": dict(self.counters),
@@ -3024,6 +3238,11 @@ def _incident_from_store(item: Any) -> dict[str, Any] | None:
         "correlation_id": item.get("correlation_id")
         if isinstance(item.get("correlation_id"), str)
         else None,
+        # Origin of the hint (review 3, #1); stores before it: by category
+        # (firewall and DNS hints only ever came from log lines).
+        "from_logs": item["from_logs"]
+        if isinstance(item.get("from_logs"), bool)
+        else str(item.get("category") or "") in _LOG_CATEGORIES,
         "title": mask_identities(str(item.get("title") or "")),
         "hint": mask_identities(str(item.get("hint") or "")),
         "resolved_at": _num(item.get("resolved_at")),

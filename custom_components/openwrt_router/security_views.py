@@ -80,6 +80,7 @@ _MESSAGES: Mapping[str, str] = {
     "disabled": "The Security Center is off",
     "no_core": "The enterprise core is not running",
     "refused": "The action was refused",
+    "not_ready": "The Security Center is not ready",
     "internal": "The request failed",
 }
 
@@ -94,6 +95,10 @@ _REASONS: Mapping[str, tuple[int, str]] = {
     "no_core": (503, "no_core"),
     "not_admin": (403, "authorization_denied"),
     "actor_required": (403, "authorization_denied"),
+    # review 3: a core AuthorizationError of the guard (no core details)
+    "authorization_failed": (403, "authorization_denied"),
+    # review 3: no module key yet, nothing that needs it is done
+    "module_key_missing": (409, "not_ready"),
 }
 
 
@@ -387,6 +392,11 @@ class _SecurityView(HomeAssistantView):
 
             if isinstance(err, SecurityCenterError):
                 return error_response(center_error(err))
+            from .core_errors import AuthorizationError
+
+            if isinstance(err, AuthorizationError):
+                # Any core refusal is a 403 with a fixed body (review 3, #4).
+                return error_response(RequestError(403, "authorization_denied"))
             # Only the type: the message may carry router data.
             _LOGGER.warning(
                 "Security Center route %s failed: %s", self.name, type(err).__name__

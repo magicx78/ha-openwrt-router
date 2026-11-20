@@ -73,6 +73,11 @@ REASON_ADDRESS_UNAVAILABLE: Final = "address_not_available"
 REASON_BIND_FAILED: Final = "bind_failed"
 REASON_NOT_STARTED: Final = "receiver_not_started"
 REASON_STOPPED: Final = "receiver_stopped"
+# Lines of a router were dropped by the rate limits or the full buffer
+# within the last RATE_LIMITED_HOLD_S (review 3, #8): its log sources are
+# "limited", never "fine" while lines get lost.
+REASON_RATE_LIMITED: Final = "rate_limited"
+RATE_LIMITED_HOLD_S: Final = 300.0
 
 _IN_USE: Final = frozenset({errno.EADDRINUSE, 10048})  # 10048: WSAEADDRINUSE
 _DENIED: Final = frozenset({errno.EACCES, errno.EPERM, 10013})  # WSAEACCES
@@ -206,6 +211,8 @@ class SyslogReceiver:
         self._counts: dict[str, int] = dict.fromkeys(_COUNTER_NAMES, 0)
         self._extra: dict[str, int] = {"errors": 0, "socket_errors": 0}
         self._wake_pending = False
+        # router id -> receive time of its last line lost to a limit
+        self._limited_at: dict[str, float] = {}
 
     def __repr__(self) -> str:
         """No addresses or router ids."""
@@ -240,6 +247,25 @@ class SyslogReceiver:
         """The receiver's clock (receive times of its records)."""
         return float(self._clock())
 
+    def limited_routers(self, now: float | None = None) -> frozenset[str]:
+        """Allowed routers that lost lines to a limit in the last hold time.
+
+        Rate limits and the full buffer both count; the state decays
+        ``RATE_LIMITED_HOLD_S`` after the last lost line (receive clock).
+        """
+        when = self.now() if now is None else now
+        for router in [
+            r
+            for r, at in self._limited_at.items()
+            if not 0 <= when - at < RATE_LIMITED_HOLD_S
+        ]:
+            del self._limited_at[router]
+        allowed = set(self._senders.values())
+        return frozenset(r for r in self._limited_at if r in allowed)
+
+    def _note_limited(self, router: str, now: float) -> None:
+        self._limited_at[router] = now
+
     def set_senders(self, senders: Mapping[str, str]) -> None:
         """Replace the allowlist: address literal -> contract router id.
 
@@ -261,6 +287,9 @@ class SyslogReceiver:
         self._senders = clean
         for address in [a for a in self._buckets if a not in clean]:
             del self._buckets[address]
+        routers = set(clean.values())
+        for router in [r for r in self._limited_at if r not in routers]:
+            del self._limited_at[router]
 
     # --- LogSource ----------------------------------------------------------------
 
@@ -359,9 +388,11 @@ class SyslogReceiver:
             return
         if not self._take(address, now):
             counts["dropped_rate"] += 1
+            self._note_limited(router, now)
             return
         if len(self._buffer) >= self.limits.buffer_max:
             counts["dropped_buffer"] += 1
+            self._note_limited(router, now)
             return
         size = len(data)
         cut = size > self.limits.max_line
@@ -444,6 +475,7 @@ class SyslogReceiver:
         """Drop the key state of a forgotten router (its records stay out)."""
         self._assigner.forget_router(router)
         self._senders = {a: r for a, r in self._senders.items() if r != router}
+        self._limited_at.pop(router, None)
         self._buffer = deque(r for r in self._buffer if r.router != router)
 
     def footprint(self) -> dict[str, int]:
@@ -456,11 +488,13 @@ class SyslogReceiver:
 
 
 __all__ = [
+    "RATE_LIMITED_HOLD_S",
     "REASON_ADDRESS_UNAVAILABLE",
     "REASON_BIND_FAILED",
     "REASON_NOT_STARTED",
     "REASON_PERMISSION_DENIED",
     "REASON_PORT_IN_USE",
+    "REASON_RATE_LIMITED",
     "REASON_STOPPED",
     "SyslogLimits",
     "SyslogReceiver",
