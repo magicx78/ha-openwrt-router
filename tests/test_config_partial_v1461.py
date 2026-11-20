@@ -488,19 +488,39 @@ async def test_cgi_archive_run_then_proves_the_path() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("error", "reason"),
-    [
-        (OpenWrtConfigFetchNotAvailableError("no cgi-io"), "not_detected"),
-        (OpenWrtConfigFetchPermissionError("no right"), "permission_denied"),
-    ],
-)
-async def test_failed_cgi_run_then_shows_its_class(error: Exception, reason: str):
+async def test_failed_cgi_run_is_shown_but_the_run_keeps_asking() -> None:
+    # Re-review 2: a remembered refusal is for the display only. Once cgi-io
+    # is installed, the next run takes the archive without an HA restart.
     provider = ConfigManagerProvider()
-    api = _no_list_api(cgi=error)
+    api = _no_list_api(cgi=OpenWrtConfigFetchNotAvailableError("no cgi-io"))
     await _cgi_status(provider, api)
     await collect(api, provider=provider)
-    assert await _cgi_status(provider, api) == (CapabilityState.UNAVAILABLE, reason)
+    assert await _cgi_status(provider, api) == (
+        CapabilityState.UNAVAILABLE,
+        CapabilityReason.NOT_DETECTED,
+    )
+    assert provider.default_backup_type(router_record()) is BackupType.FULL_ARCHIVE
+    api.cgi = _no_list_api().cgi  # cgi-io installed: the archive comes
+    chosen = provider.default_backup_type(router_record())
+    version = await collect(api, provider=provider, backup_type=chosen)
+    assert version.meta.fetch_method == "cgi"
+    assert await _cgi_status(provider, api) == (
+        CapabilityState.AVAILABLE,
+        CapabilityReason.OK,
+    )
+
+
+async def test_rpcd_confirming_the_right_clears_a_permission_refusal() -> None:
+    provider = ConfigManagerProvider()
+    api = _no_list_api(cgi=OpenWrtConfigFetchPermissionError("no right"))
+    await _cgi_status(provider, api)
+    await collect(api, provider=provider)
+    # The probe's fresh "right held" wins over the remembered refusal.
+    assert await _cgi_status(provider, api) == (
+        CapabilityState.UNKNOWN,
+        CapabilityReason.NOT_PROBED,
+    )
+    assert provider.default_backup_type(router_record()) is BackupType.FULL_ARCHIVE
 
 
 def _no_cgi_io(**kwargs: Any) -> FakeApi:

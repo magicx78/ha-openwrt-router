@@ -1058,7 +1058,8 @@ class ConfigManagerProvider:
         # router id -> outcome of the last real cgi archive attempt (None =
         # delivered a valid archive; permission/not_available = refused).
         # Memory only; the probe shows it while the package list is
-        # unreadable. Not the core's first-use settling: that would also
+        # unreadable, a refusal never stops a run from asking (display
+        # only). Not the core's first-use settling: that would also
         # count an archive that came over SSH.
         self._cgi_seen: dict[str, str | None] = {}
 
@@ -1266,21 +1267,25 @@ class ConfigManagerProvider:
         api: Any,
         packages: Mapping[str, Any] | None,
         timeout: float,
-    ) -> str | None:
-        """Error class of the cgi-backup path from rights and presence only.
+    ) -> tuple[str | None, str | None]:
+        """(shown, decision) error class of the cgi-backup path.
 
-        Never fetches: a fetch makes the router run sysupgrade (review M1).
-        Available needs the right (rpcd's ``session access``) and cgi-io in
-        the package list read just before; without cgi-io it is
-        ``not_available``. Right held but the list unreadable: the outcome
-        of the last real cgi archive run on this router, else
-        ``_PROBE_NOT_PROBED`` (shown as unknown; ``_probed_backup_type``
-        still asks for the archive, so the first backup finds out). No
-        clear rpcd answer is ``_PROBE_NOT_PROBED`` too. A plain HTTP entry
-        is ``insecure_transport`` without asking rpcd.
+        From rights and presence only; never fetches: a fetch makes the
+        router run sysupgrade (review M1). Available needs the right
+        (rpcd's ``session access``) and cgi-io in the package list read
+        just before; without cgi-io it is ``not_available``. No clear rpcd
+        answer is ``_PROBE_NOT_PROBED``; a plain HTTP entry is
+        ``insecure_transport`` without asking rpcd.
+
+        Right held but the list unreadable: shown is the outcome of the last
+        real cgi archive run, else ``_PROBE_NOT_PROBED``. The decision for
+        ``_probed_backup_type`` stays ``_PROBE_NOT_PROBED`` unless that run
+        delivered: a remembered refusal never stops the run from asking
+        (cgi-io may have been installed since). rpcd confirming the right
+        drops a remembered ``permission`` refusal.
         """
         if not api.config_cgi_transport_secure():
-            return REASON_INSECURE_TRANSPORT
+            return REASON_INSECURE_TRANSPORT, REASON_INSECURE_TRANSPORT
         try:
             async with asyncio.timeout(timeout):
                 access = await api.config_backup_access()
@@ -1289,17 +1294,20 @@ class ConfigManagerProvider:
                 raise
             error_class = classify_error(err)
             if error_class in (ERR_UNREACHABLE, ERR_TIMEOUT):
-                return error_class
-            return _PROBE_NOT_PROBED
+                return error_class, error_class
+            return _PROBE_NOT_PROBED, _PROBE_NOT_PROBED
         if access is False:
-            return ERR_PERMISSION
+            return ERR_PERMISSION, ERR_PERMISSION
         if access is not True:
-            return _PROBE_NOT_PROBED
+            return _PROBE_NOT_PROBED, _PROBE_NOT_PROBED
+        if self._cgi_seen.get(router_id) == ERR_PERMISSION:
+            del self._cgi_seen[router_id]
         if packages is None:
-            return self._cgi_seen.get(router_id, _PROBE_NOT_PROBED)
+            seen = self._cgi_seen.get(router_id, _PROBE_NOT_PROBED)
+            return seen, (None if seen is None else _PROBE_NOT_PROBED)
         if _CGI_IO_PACKAGE not in packages:
-            return ERR_NOT_AVAILABLE
-        return None
+            return ERR_NOT_AVAILABLE, ERR_NOT_AVAILABLE
+        return None, None
 
     async def _probe(
         self, conn: RouterConnection, ctx: ProviderContext
@@ -1354,11 +1362,12 @@ class ConfigManagerProvider:
             )
 
         cgi_class: str | None
+        cgi_decision: str | None
         ssh_class: str | None
         pkg_class: str | None
         if uci_class in (ERR_UNREACHABLE, ERR_TIMEOUT):
             # Dead router: no rights check that would only wait again.
-            cgi_class = ssh_class = pkg_class = uci_class
+            cgi_class = cgi_decision = ssh_class = pkg_class = uci_class
         else:
             known: Mapping[str, Any] | None = None
             try:
@@ -1372,15 +1381,15 @@ class ConfigManagerProvider:
                 has_packages = isinstance(packages, Mapping) and bool(packages)
                 pkg_class = None if has_packages else ERR_NOT_AVAILABLE
                 known = packages if has_packages else None
-            cgi_class = await self._probe_cgi(
+            cgi_class, cgi_decision = await self._probe_cgi(
                 router_id, api, known, self._timeouts[FETCH_PACKAGELIST]
             )
             ssh_class = self._ssh_class(router_id, api, ctx)
         probed = _probed_backup_type(
-            api.config_cgi_transport_secure(), cgi_class, ssh_class
+            api.config_cgi_transport_secure(), cgi_decision, ssh_class
         )
         self._probed_types[router_id] = probed
-        if cgi_class is not None and ssh_class is not None:
+        if cgi_decision is not None and ssh_class is not None:
             self._probed_causes[router_id] = (cgi_class, ssh_class)
         else:
             self._probed_causes.pop(router_id, None)
