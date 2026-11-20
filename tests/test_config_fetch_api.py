@@ -39,6 +39,7 @@ from custom_components.openwrt_router.api import (
     OpenWrtConfigFetchError,
     OpenWrtConfigFetchHostKeyError,
     OpenWrtConfigFetchIncompleteError,
+    OpenWrtConfigFetchInsecureTransportError,
     OpenWrtConfigFetchNotAvailableError,
     OpenWrtConfigFetchPermissionError,
     OpenWrtConfigFetchTooLargeError,
@@ -148,7 +149,8 @@ def make_api(
     items: list[FakeResponse | BaseException] | None = None,
     *,
     username: str = "root",
-    protocol: str = "http",
+    # TLS by default: cgi-backup refuses plain HTTP (TestCgiInsecureTransport).
+    protocol: str = "https",
 ) -> tuple[OpenWrtAPI, FakeSession]:
     session = FakeSession(items or [])
     api = OpenWrtAPI(
@@ -344,6 +346,7 @@ class TestExceptions:
             OpenWrtConfigFetchTooLargeError: "too_large",
             OpenWrtConfigFetchIncompleteError: "incomplete",
             OpenWrtConfigFetchHostKeyError: "denied",
+            OpenWrtConfigFetchInsecureTransportError: "not_available",
         }
         for cls, error_class in expected.items():
             assert issubclass(cls, OpenWrtConfigFetchError)
@@ -361,7 +364,7 @@ class TestCgiBackup:
         api, session = make_api([gz_response(ARCHIVE[:1], ARCHIVE[1:50], ARCHIVE[50:])])
         assert await fetch_cgi(api) == ARCHIVE
         (call,) = session.calls
-        assert call["url"] == "http://192.0.2.1:80/cgi-bin/cgi-backup"
+        assert call["url"] == "https://192.0.2.1:80/cgi-bin/cgi-backup"
         # token only in the form body, never in the URL
         assert call["data"] == {"sessionid": TOKEN_A}
         assert TOKEN_A not in call["url"]
@@ -1149,6 +1152,41 @@ class TestPackageList:
         with ctx, pytest.raises(OpenWrtTimeoutError):
             await api.config_packagelist()
         connect.assert_not_awaited()
+
+
+class TestCgiInsecureTransport:
+    """L1: the archive (and the session token) never travel over plain HTTP."""
+
+    async def test_http_entry_sends_no_cgi_request(self) -> None:
+        api, session = make_api([gz_response(ARCHIVE)], protocol="http")
+        api._token_expires_at = 0.0  # a due token must not trigger a login either
+        login = fake_login(api, [TOKEN_B])
+        with pytest.raises(OpenWrtConfigFetchInsecureTransportError) as exc:
+            await fetch_cgi(api)
+        assert session.calls == []  # zero cgi requests
+        login.assert_not_awaited()
+        err = exc.value
+        assert isinstance(err, OpenWrtConfigFetchNotAvailableError)
+        assert err.error_class == "not_available"
+        assert err.reason == "insecure_transport"
+        assert TOKEN_A not in str(err) and TOKEN_B not in str(err)
+
+    @pytest.mark.parametrize(
+        ("protocol", "secure"),
+        [("http", False), ("https", True), ("https-insecure", True)],
+    )
+    def test_transport_secure_without_a_call(self, protocol: str, secure: bool) -> None:
+        api, session = make_api(protocol=protocol)
+        assert api.config_cgi_transport_secure() is secure
+        assert session.calls == []
+
+    @pytest.mark.parametrize("protocol", ["https", "https-insecure"])
+    async def test_https_entries_unchanged(self, protocol: str) -> None:
+        api, session = make_api([gz_response(ARCHIVE)], protocol=protocol)
+        assert await fetch_cgi(api) == ARCHIVE
+        (call,) = session.calls
+        assert call["url"] == "https://192.0.2.1:80/cgi-bin/cgi-backup"
+        assert call["data"] == {"sessionid": TOKEN_A}
 
 
 # =====================================================================

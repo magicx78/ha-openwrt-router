@@ -81,7 +81,9 @@ Eine Version besteht aus bis zu drei Dateien:
 Das Archiv holt der Manager auf dem ersten Weg, der funktioniert:
 
 1. **LuCI-Backup-Endpunkt** `cgi-backup` (Paket `cgi-io`) über denselben Host und dasselbe
-   Protokoll wie die ubus-Verbindung. Er braucht das rpcd-Recht `cgi-io: backup` (lesen).
+   Protokoll wie die ubus-Verbindung, **nur bei HTTPS**. Er braucht das rpcd-Recht
+   `cgi-io: backup` (lesen). Bei einem HTTP-Eintrag fragt der Manager diesen Weg gar nicht
+   erst an (Fähigkeit `config.cgi_backup` „nicht verfügbar“, Grund `insecure_transport`).
 2. **SSH als root**, fester Befehl `/sbin/sysupgrade --create-backup -`. Der SSH-Benutzer
    der Integration muss `root` sein; mit einem anderen Benutzer wird der Weg abgelehnt, ohne
    zu verbinden.
@@ -430,6 +432,8 @@ Das Schreiben per SSH läuft nur über den gepinnten Weg des Cores ([Abschnitt 1
 | Recht fehlt, kein root-SSH | nur UCI-Snapshot (sofern `uci` lesbar ist) |
 | nichts lesbar | Fehlerklasse `permission` |
 | `cgi-io` nicht installiert | wie „Recht fehlt“, Fehlerklasse `not_available` |
+| Eintrag nutzt HTTP, SSH-Benutzer ist `root` (gepinnt) | Archiv per SSH |
+| Eintrag nutzt HTTP, kein root-SSH | Archiv-Backup abgelehnt: Status `failed`, Fehlerklasse `not_available`, Grund `insecure_transport` |
 
 **Pakete.** Für den cgi-Weg brauchen Sie auf dem Router **`cgi-io`** und **LuCI** (die
 `cgi-backup`-Verknüpfung legt LuCI an). Die Paketliste liest `rpc-sys packagelist`
@@ -576,6 +580,11 @@ eine Gedächtnisstütze, keine Anleitung für Ihr Gerät.
     SSH-Weg aus.
   - Bevorzugen Sie trotzdem den cgi-Weg mit **HTTPS**: Der SSH-Fallback des Polls (nicht des
     Managers) prüft den Host-Key weiterhin nicht.
+- **HTTP-Einträge holen kein Archiv über `cgi-backup`.** Archiv und Sitzungs-Token gingen
+  sonst unverschlüsselt durchs Netz; der Manager weicht auf den gepinnten SSH-Weg aus und lehnt
+  das Archiv-Backup ohne ihn ab (Grund `insecure_transport` in Sensor und Übersicht). Die
+  UCI-Snapshots und die Paketliste laufen dagegen über denselben ubus-Kanal wie der übrige
+  Poll, bei HTTP also ebenfalls unverschlüsselt. **Empfohlen ist HTTPS.**
 - **Maskierung nach Feldnamen:** Geheimwerte werden an ihrem Feld- bzw. Optionsnamen
   erkannt (z. B. `key`, `password`). Wer ein Geheimnis wörtlich auch als SSID, Hostname oder
   Beschreibung verwendet, sieht es dort weiterhin im Klartext.

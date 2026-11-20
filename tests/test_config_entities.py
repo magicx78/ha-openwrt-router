@@ -18,6 +18,7 @@ from core_testkit import ADMIN_ID, FakeDisks, make_hass, router_data, user_actor
 from homeassistant.components.sensor import SensorDeviceClass
 
 from custom_components.openwrt_router import config_entities as ce
+from custom_components.openwrt_router import config_manager as cm
 from custom_components.openwrt_router.const import (
     CONFIG_BACKUP_SCHEDULE_OFF,
     CONFIG_BACKUP_STATUSES,
@@ -25,7 +26,10 @@ from custom_components.openwrt_router.const import (
     OPTION_CONFIG_BACKUP_SCHEDULE,
     SIGNAL_CONFIG_MANAGER,
 )
-from custom_components.openwrt_router.core_errors import RouterUnavailableError
+from custom_components.openwrt_router.core_errors import (
+    CapabilityUnavailableError,
+    RouterUnavailableError,
+)
 from custom_components.openwrt_router.core_models import DriftAckState
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "openwrt_router"
@@ -85,6 +89,7 @@ async def test_entities_created_with_option_off_show_disabled(disks, tmp_path):
     last, status, versions, drift = _entities(env)
     assert status.native_value == "disabled"
     assert status.extra_state_attributes["next_run_at"] is None
+    assert status.extra_state_attributes["error_reason"] is None
     assert last.native_value is None and versions.native_value == 0
     assert drift.is_on is None
     assert env.provider.calls == [] and env.router_calls() == []
@@ -120,6 +125,33 @@ async def test_status_running_and_failed(disks, tmp_path):
     await drain(env.hass)
     assert status.native_value == "failed"
     assert status.extra_state_attributes["error_class"] == "unreachable"
+    assert status.extra_state_attributes["error_reason"] is None
+    await stop(env)
+
+
+async def test_rejected_http_backup_shows_class_and_reason(
+    disks, tmp_path, monkeypatch
+):
+    """L1: no archive over plain HTTP and no SSH: failed, reason visible."""
+    env = await cm_env(disks, tmp_path, options=NO_SCHEDULE)
+    _last, status, _versions, _drift = _entities(env)
+    env.provider.fail["collect"] = CapabilityUnavailableError(
+        "config collect failed: not_available",
+        capability="config.cgi_backup",
+        reason="insecure_transport",
+    )
+    with pytest.raises(CapabilityUnavailableError):
+        await env.runtime.async_backup_now(env.rid, actor=ADMIN)
+    await drain(env.hass)
+    assert status.native_value == "failed"
+    attrs = status.extra_state_attributes
+    assert attrs["error_class"] == "not_available"
+    assert attrs["error_reason"] == "insecure_transport"
+    # A later success forgets the reason.
+    del env.provider.fail["collect"]
+    monkeypatch.setattr(cm, "MANUAL_BACKUP_MIN_GAP_S", 0)
+    await env.runtime.async_backup_now(env.rid, actor=ADMIN)
+    assert env.runtime.routers[env.rid].last_error_reason is None
     await stop(env)
 
 

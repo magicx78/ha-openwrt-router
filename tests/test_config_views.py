@@ -810,7 +810,28 @@ async def test_overview_lists_every_router(disks, tmp_path):
         )
         assert routers[env.rids[1]]["status"] == "never"
         assert routers[env.rids[1]]["drift"] is None
+        assert first["error_reason"] is None
     assert env.router_calls() == []
+    await stop(env)
+
+
+async def test_overview_shows_why_a_backup_was_rejected(disks, tmp_path):
+    """L1: a plain HTTP entry without SSH: failed, class and reason visible."""
+    env = await cm_env(disks, tmp_path)
+    env.provider.fail["collect"] = CapabilityUnavailableError(
+        "config collect failed: not_available",
+        capability="config.cgi_backup",
+        reason="insecure_transport",
+    )
+    async with http(env.hass) as h:
+        resp = await h.post(f"/routers/{env.rid}/backup")
+        assert resp.status == 409
+        assert resp.data["details"]["reason"] == "insecure_transport"
+        resp = await h.get("/overview")
+        (router,) = (r for r in resp.data["routers"] if r["router_id"] == env.rid)
+        assert router["status"] == "failed"
+        assert router["error_class"] == "not_available"
+        assert router["error_reason"] == "insecure_transport"
     await stop(env)
 
 

@@ -155,6 +155,9 @@ class RouterState:
     last_attempt_at: datetime | None = None
     last_failure_at: datetime | None = None
     last_error_class: str | None = None
+    # details.reason of our last failed run (e.g. insecure_transport); not
+    # in the core's audit entry, so unknown again after a restart
+    last_error_reason: str | None = None
     # day a missing backup right was logged and audited (once per day)
     blocked_day: date | None = None
     # --- schedule memory (section 3)
@@ -612,6 +615,13 @@ class ConfigManagerRuntime:
             return state.newest_error_class
         return None
 
+    def error_reason(self, router_id: str) -> str | None:
+        """Reason code behind a failed status (e.g. ``insecure_transport``)."""
+        state = self.routers.get(router_id)
+        if state is None or self.status(router_id) != CONFIG_STATUS_FAILED:
+            return None
+        return state.last_error_reason
+
     # -- memory from the store ---------------------------------------------------------
 
     async def _async_load_state(self, state: RouterState) -> None:
@@ -668,6 +678,7 @@ class ConfigManagerRuntime:
             state.last_error_class = (
                 error_class if isinstance(error_class, str) else None
             )
+            state.last_error_reason = None
         if state.last_attempt_at is None or newest_at > state.last_attempt_at:
             state.last_attempt_at = newest_at
 
@@ -1119,6 +1130,7 @@ class ConfigManagerRuntime:
         state.last_attempt_at = now
         state.last_failure_at = now
         state.last_error_class = error_class
+        state.last_error_reason = None
         if job.kind == JOB_SCHEDULED:
             state.last_scheduled_day = today
             state.retry_at = None
@@ -1215,12 +1227,19 @@ class ConfigManagerRuntime:
                 backup_type=backup_type,
                 note=note,
             )
-        except BaseException:
+        except BaseException as err:
             state.running = False
+            if isinstance(err, ConfigApiError) and not isinstance(
+                err, (AuthorizationError, OperationInProgressError)
+            ):
+                # The core's backup_failed carries the class, not the reason.
+                reason = err.details.get("reason")
+                state.last_error_reason = reason if isinstance(reason, str) else None
             self._notify(router_id)
             self._schedule_refresh(router_id)
             raise
         state.running = False
+        state.last_error_reason = None
         await self.async_refresh(router_id)
         return result
 

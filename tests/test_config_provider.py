@@ -31,6 +31,7 @@ from custom_components.openwrt_router.api import (
     OpenWrtAuthError,
     OpenWrtConfigFetchHostKeyError,
     OpenWrtConfigFetchIncompleteError,
+    OpenWrtConfigFetchInsecureTransportError,
     OpenWrtConfigFetchNotAvailableError,
     OpenWrtConfigFetchPermissionError,
     OpenWrtConfigFetchTooLargeError,
@@ -338,6 +339,7 @@ class FakeApi:
         packages: Outcome = PACKAGES,
         access: Outcome = True,
         root: bool = True,
+        secure: bool = True,
     ) -> None:
         self.cgi = make_archive(files) if cgi is None else cgi
         self.ssh = make_archive(files) if ssh is None else ssh
@@ -345,6 +347,8 @@ class FakeApi:
         self.packages = packages
         self.access = access
         self.root = root
+        # False = a plain HTTP entry (api.py then refuses cgi-backup, L1)
+        self.secure = secure
         self.calls: list[tuple[str, ...]] = []
         self.kwargs: list[dict[str, Any]] = []
         # The pinned runner handed in by each SSH-capable call (None = none).
@@ -363,7 +367,13 @@ class FakeApi:
     async def config_fetch_backup_cgi(self, *, max_bytes: int, timeout: float) -> bytes:
         self.calls.append(("cgi",))
         self.kwargs.append({"max_bytes": max_bytes, "timeout": timeout})
+        if not self.secure:  # like api.py: refused before any request
+            raise OpenWrtConfigFetchInsecureTransportError()
         return await self._play(self.cgi)
+
+    def config_cgi_transport_secure(self) -> bool:
+        # No network call, so not recorded in ``calls``.
+        return self.secure
 
     async def config_fetch_backup_ssh(
         self, *, max_bytes: int, timeout: float, ssh: Any = None
@@ -869,6 +879,69 @@ async def test_router_without_archive_path_gives_usable_uci_snapshot() -> None:
     # Same uci_hash as a full backup of the same configuration (dedup key).
     full = await collect(FakeApi())
     assert meta.uci_hash == full.meta.uci_hash
+
+
+# --- L1: no cgi-backup over plain HTTP --------------------------------------
+
+
+async def test_http_entry_probe_marks_cgi_backup_insecure_transport() -> None:
+    api = FakeApi(secure=False)
+    caps = await ConfigManagerProvider().async_probe(make_conn(api), make_ctx())
+    cgi = caps[Capability.CONFIG_CGI_BACKUP]
+    assert cgi.state is CapabilityState.UNAVAILABLE
+    assert cgi.reason == "provider:insecure_transport"
+    assert "backup_access" not in methods(api)  # decided without asking rpcd
+    assert "cgi" not in methods(api)
+    # The UCI snapshot over ubus stays possible (existing transport).
+    assert caps[Capability.CONFIG_BACKUP].state is CapabilityState.AVAILABLE
+
+
+async def test_http_entry_backup_runs_over_pinned_ssh() -> None:
+    api = FakeApi(secure=False)
+    version = await collect(api)
+    assert "cgi" not in methods(api)  # zero cgi requests
+    assert methods(api)[0] == "ssh"
+    meta = version.meta
+    assert meta.backup_type is BackupType.FULL_ARCHIVE
+    assert meta.status is VersionStatus.OK
+    assert meta.fetch_method == "ssh"
+
+
+@pytest.mark.parametrize(
+    "ssh",
+    [
+        OpenWrtConfigFetchPermissionError("not root"),
+        OpenWrtConfigFetchNotAvailableError("no sysupgrade"),
+    ],
+)
+async def test_http_entry_without_ssh_rejects_the_backup(ssh: BaseException) -> None:
+    api = FakeApi(secure=False, ssh=ssh)
+    with pytest.raises(CapabilityUnavailableError) as exc:
+        await collect(api)
+    err = exc.value
+    assert err.error_class is ErrorClass.NOT_AVAILABLE
+    assert err.details["capability"] == Capability.CONFIG_CGI_BACKUP.value
+    assert err.details["reason"] == "insecure_transport"
+    assert "cgi" not in methods(api)
+    assert methods(api) == ["ssh"]  # rejected before any UCI read
+
+
+async def test_https_entry_still_uses_cgi_backup() -> None:
+    api = FakeApi(secure=True)
+    version = await collect(api)
+    assert methods(api)[0] == "cgi"
+    assert version.meta.fetch_method == "cgi"
+    assert version.meta.backup_type is BackupType.FULL_ARCHIVE
+
+
+async def test_http_entry_uci_snapshot_says_why_there_is_no_archive() -> None:
+    api = FakeApi(secure=False)
+    version = await collect(api, backup_type=BackupType.UCI_SNAPSHOT)
+    assert "cgi" not in methods(api) and "ssh" not in methods(api)
+    meta = version.meta
+    assert meta.backup_type is BackupType.UCI_SNAPSHOT
+    assert meta.status is VersionStatus.OK
+    assert "archive_unavailable:insecure_transport" in meta.warnings
 
 
 async def test_uci_snapshot_request_never_asks_for_the_archive() -> None:
@@ -1761,6 +1834,7 @@ _ALLOWED_API_ATTRS = {
     "config_packagelist",
     "config_backup_access",
     "config_ssh_user_is_root",
+    "config_cgi_transport_secure",
 }
 
 

@@ -396,6 +396,10 @@ class PinnedApi:
         """rpcd ``session access`` for cgi-io backup (no SSH)."""
         return await self._api.config_backup_access()
 
+    def config_cgi_transport_secure(self) -> bool:
+        """No network call: False on a plain HTTP entry (no cgi-backup)."""
+        return bool(self._api.config_cgi_transport_secure())
+
     def config_ssh_user_is_root(self) -> bool:
         """No network call."""
         return bool(self._api.config_ssh_user_is_root())

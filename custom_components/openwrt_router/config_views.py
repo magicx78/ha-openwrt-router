@@ -831,6 +831,7 @@ def router_summary(ctx: RequestContext, state: Any) -> dict[str, Any]:
         "status": status,
         "state": status,
         "error_class": runtime.error_class(rid),
+        "error_reason": runtime.error_reason(rid),
         "running": state.running,
         "last_backup_at": _iso(state.last_backup_at),
         "last_success_at": _iso(state.last_backup_at),

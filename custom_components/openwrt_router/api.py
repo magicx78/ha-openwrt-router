@@ -6045,11 +6045,19 @@ class OpenWrtAPI:
         ``cgi-io: backup`` right and for a session rpcd no longer knows, so a
         403 triggers exactly one re-login and one repeat.
 
+        Only over TLS (``https``/``https-insecure``): the answer holds every
+        secret of the router and the request the session token. A plain
+        HTTP entry is refused before any request (no login, no POST), so the
+        fallback chain goes on with the pinned SSH path.
+
         Network calls: 1 POST; plus 1 login when the token is due, plus
-        1 login (with its session destroy) and 1 POST after a 403.
+        1 login (with its session destroy) and 1 POST after a 403. None on
+        a plain HTTP entry.
 
         Raises:
             ValueError: ``max_bytes`` or ``timeout`` not positive.
+            OpenWrtConfigFetchInsecureTransportError: plain HTTP entry
+                (``not_available``, reason ``insecure_transport``).
             OpenWrtConfigFetchPermissionError: 403 after the re-login, 401,
                 or a 200 body that says "denied".
             OpenWrtConfigFetchNotAvailableError: 404 (no LuCI / cgi-io) or a
@@ -6062,6 +6070,8 @@ class OpenWrtAPI:
             OpenWrtTimeoutError: ``timeout`` seconds passed (whole operation).
         """
         _config_check_limits(max_bytes, timeout)
+        if not self.config_cgi_transport_secure():
+            raise OpenWrtConfigFetchInsecureTransportError()
         if self._closing:
             raise OpenWrtConnectionError(
                 "OpenWrtAPI is closing – backup fetch rejected"
@@ -6090,6 +6100,15 @@ class OpenWrtAPI:
             raise OpenWrtTimeoutError(f"cgi-backup timed out after {timeout}s") from err
         _LOGGER.debug("cgi-backup on %s: %d bytes", self._host, len(data))
         return data
+
+    def config_cgi_transport_secure(self) -> bool:
+        """May cgi-backup run on this entry? True for TLS, False for HTTP.
+
+        No network call. ``https-insecure`` counts as TLS (encrypted, the
+        certificate is not checked). UCI and package reads keep using the
+        ubus channel of the poll on every protocol.
+        """
+        return self._protocol != PROTOCOL_HTTP
 
     async def _config_cgi_post(
         self, url: str, token: str, max_bytes: int, timeout: float
@@ -6710,6 +6729,23 @@ class OpenWrtConfigFetchNotAvailableError(OpenWrtConfigFetchError):
     """The source does not exist (no LuCI/cgi-io, HTTP 404, unknown config)."""
 
     error_class = "not_available"
+
+
+class OpenWrtConfigFetchInsecureTransportError(OpenWrtConfigFetchNotAvailableError):
+    """cgi-backup refused on a plain HTTP entry; nothing was sent.
+
+    ``not_available`` with ``reason`` ``insecure_transport``: the archive
+    (all router secrets) and the session token travel only over TLS.
+    """
+
+    reason = "insecure_transport"
+
+    def __init__(
+        self,
+        message: str = "cgi-backup refused: plain HTTP entry (archive only over TLS)",
+    ) -> None:
+        """Fixed text; no host, no token."""
+        super().__init__(message)
 
 
 class OpenWrtConfigFetchTooLargeError(OpenWrtConfigFetchError):

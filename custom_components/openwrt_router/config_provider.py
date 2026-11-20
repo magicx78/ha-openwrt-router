@@ -235,6 +235,9 @@ _RESERVE_AFTER_INVENTORY: Final = 0.02
 # Probe outcome "not checked here, found out by the first backup" (review M1:
 # the probe never fetches an archive, so sysupgrade never runs for it).
 _PROBE_NOT_PROBED: Final = "not_probed"
+# L1: plain HTTP entry - no cgi-backup (archive and session token only over
+# TLS). Probe class, error reason and warning item.
+REASON_INSECURE_TRANSPORT: Final = "insecure_transport"
 # Package that serves /cgi-bin/cgi-backup.
 _CGI_IO_PACKAGE: Final = "cgi-io"
 # Digest put into secret markers when digests are not comparable.
@@ -901,7 +904,9 @@ def _probe_status(
         state, reason = CapabilityState.UNKNOWN, CapabilityReason.ROUTER_OFFLINE.value
     elif error_class == _PROBE_NOT_PROBED:
         state, reason = CapabilityState.UNKNOWN, CapabilityReason.NOT_PROBED.value
-    elif error_class.startswith("ssh_") and error_class[4:] in _PIN_HARD_REFUSALS:
+    elif error_class == REASON_INSECURE_TRANSPORT or (
+        error_class.startswith("ssh_") and error_class[4:] in _PIN_HARD_REFUSALS
+    ):
         state, reason = CapabilityState.UNAVAILABLE, f"provider:{error_class}"
     else:
         state, reason = CapabilityState.UNKNOWN, f"provider:{error_class}"
@@ -1176,8 +1181,11 @@ class ConfigManagerProvider:
         Never fetches: a fetch makes the router run sysupgrade (review M1).
         rpcd's ``session access`` answers for the right; the package list
         read just before says whether cgi-io is installed. What neither
-        settles is ``_PROBE_NOT_PROBED`` (the first backup finds out).
+        settles is ``_PROBE_NOT_PROBED`` (the first backup finds out). A
+        plain HTTP entry is ``insecure_transport`` without asking rpcd.
         """
+        if not api.config_cgi_transport_secure():
+            return REASON_INSECURE_TRANSPORT
         try:
             async with asyncio.timeout(timeout):
                 access = await api.config_backup_access()
@@ -1392,19 +1400,23 @@ class ConfigManagerProvider:
         digest = secret_digest_factory(key)
         key_id = installation_key_id(key)
 
-        # 1. Archive along the chain; the check runs in the executor.
+        # 1. Archive along the chain; the check runs in the executor. A plain
+        # HTTP entry never asks cgi-backup (L1): the archive comes over the
+        # pinned SSH path or not at all.
+        secure = api.config_cgi_transport_secure()
+        chain = order if secure else tuple(m for m in order if m != FETCH_METHOD_CGI)
         fetch: ArchiveFetch | None = None
         analysis: _ArchiveAnalysis | None = None
         archive_class: str | None = None
-        archive_skipped = not order
-        if order:
+        archive_skipped = not chain
+        if chain:
             budget = deadline.budget(_RESERVE_AFTER_ARCHIVE)
             if budget > 0:
                 try:
                     async with asyncio.timeout(budget):
                         fetch = await collect_archive(
                             api,
-                            order=order,
+                            order=chain,
                             is_root=True,  # api.py refuses non-root SSH itself
                             limits=self._limits,
                             timeouts=self._capped(
@@ -1424,6 +1436,15 @@ class ConfigManagerProvider:
             elif fetch is not None:
                 archive_class, archive_skipped = _archive_failure(fetch)
         archive_ok = analysis is not None and analysis.ok
+        if order and not secure and not archive_ok and archive_skipped:
+            # An archive was asked for, cgi may not run on HTTP and SSH
+            # cannot deliver: reject (never a silent UCI-only "ok").
+            raise CapabilityUnavailableError(
+                f"config collect failed: {ERR_NOT_AVAILABLE}",
+                capability=Capability.CONFIG_CGI_BACKUP.value,
+                reason=REASON_INSECURE_TRANSPORT,
+                router_id=conn.router_id,
+            )
 
         # 2. Live UCI configs (normalized and digested right away).
         uci: UciCollection | None = None
@@ -1532,6 +1553,9 @@ class ConfigManagerProvider:
             else:
                 backup_type, status = BackupType.PARTIAL, VersionStatus.PARTIAL
                 error_class_out = ErrorClass(archive_class or ERR_INCOMPLETE)
+            if not order and not secure:
+                # UCI-only run on an HTTP entry: say why no archive exists.
+                warnings.add(WARN_ARCHIVE_UNAVAILABLE, REASON_INSECURE_TRANSPORT)
 
         artifacts: dict[str, ArtifactPayload] = {}
         if report is not None and fetch is not None and fetch.data is not None:

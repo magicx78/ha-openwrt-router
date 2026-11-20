@@ -5,7 +5,8 @@ Per router, on its device (``DeviceInfo(identifiers={(DOMAIN, entry_id)})``),
 
 * ``sensor`` last backup (timestamp of the newest usable version),
 * ``sensor`` backup status (enum: ok, partial, failed, running, disabled,
-  never; attributes ``error_class``, ``last_attempt_at``, ``next_run_at``),
+  never; attributes ``error_class``, ``error_reason``, ``last_attempt_at``,
+  ``next_run_at``),
 * ``sensor`` stored versions (diagnostic),
 * ``binary_sensor`` drift (problem: on while a drift is open).
 
@@ -203,9 +204,15 @@ class ConfigBackupStatusSensor(_ConfigEntity, SensorEntity):
         runtime = self._manager
         state = self._state
         if runtime is None or state is None:
-            return {"error_class": None, "last_attempt_at": None, "next_run_at": None}
+            return {
+                "error_class": None,
+                "error_reason": None,
+                "last_attempt_at": None,
+                "next_run_at": None,
+            }
         return {
             "error_class": runtime.error_class(state.router_id),
+            "error_reason": runtime.error_reason(state.router_id),
             "last_attempt_at": _iso(state.last_attempt_at),
             "next_run_at": _iso(runtime.next_run_at(state.router_id)),
         }

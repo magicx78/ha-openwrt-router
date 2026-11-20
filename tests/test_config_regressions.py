@@ -30,6 +30,8 @@ PUBLIC_METHODS = {
     # Read-only rights checks of the capability probe (review M1).
     "config_backup_access",
     "config_ssh_user_is_root",
+    # L1: cgi-backup only over TLS (no call)
+    "config_cgi_transport_secure",
 }
 EXCEPTIONS = {
     "OpenWrtConfigFetchError",
@@ -39,6 +41,8 @@ EXCEPTIONS = {
     "OpenWrtConfigFetchIncompleteError",
     # 1.45.0: the pinned SSH path refused (host key pending / other key)
     "OpenWrtConfigFetchHostKeyError",
+    # L1: cgi-backup refused on a plain HTTP entry
+    "OpenWrtConfigFetchInsecureTransportError",
 }
 
 
