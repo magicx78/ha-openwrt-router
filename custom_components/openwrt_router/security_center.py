@@ -41,11 +41,12 @@ the center publishes a counts-only ``fleet_view`` for the fleet sensors
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import ipaddress
 import logging
 import math
+import secrets
 import time
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -112,8 +113,10 @@ from .security_model import (
     event_type,
     forget_router,
     forgotten_router_id,
+    keyed_id,
     mask_identities,
     normalize_mac,
+    sealed_event,
     source_status,
     status_from_capability,
     valid_router_id,
@@ -158,6 +161,19 @@ STATUS_RESOLVED = "resolved"
 STATUS_CONFIRMED = "confirmed"
 INCIDENT_STATUSES = (STATUS_OPEN, STATUS_RESOLVED, STATUS_CONFIRMED)
 _ACTIVE_STATUSES = frozenset({STATUS_OPEN, STATUS_CONFIRMED})
+
+# Full store (review 2, M3): open and confirmed hints are never evicted for
+# new ones; a new hint that finds no room is dropped and counted, with at
+# most one timeline note per window. Core events of new hints are limited
+# to SEC_EVENT_BURST per SEC_EVENT_BURST_WINDOW_SECONDS (the rest counted),
+# so a flood of findings cannot fill the core's security ring.
+SEC_CAP_NOTE_WINDOW_SECONDS = 3600.0
+SEC_EVENT_BURST = 20
+SEC_EVENT_BURST_WINDOW_SECONDS = 600.0
+TEXT_CAP_REACHED = (
+    "Obergrenze erreicht: neue Hinweise werden nicht gespeichert, bis "
+    "erledigte Hinweise Platz machen (offene und bestätigte bleiben)"
+)
 
 # Availability of one detection in the overview.
 DETECTION_AVAILABLE = "available"
@@ -283,6 +299,7 @@ _COUNTERS = (
     "incidents_reopened",
     "incidents_resolved",
     "incidents_dropped",
+    "incidents_cap_dropped",
     "incidents_reused",
     "notices",
     "drifts_seen",
@@ -290,6 +307,7 @@ _COUNTERS = (
     "drifts_area_unknown",
     "events_emitted",
     "events_failed",
+    "events_throttled",
     "actions",
     "actions_denied",
     "routers_forgotten",
@@ -448,11 +466,6 @@ def _num(value: Any) -> float | None:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
-
-
-def _digest(*parts: Any) -> str:
-    text = "\x1f".join("" if p is None else str(p) for p in parts)
-    return hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()
 
 
 def _severity(value: Any) -> Severity:
@@ -682,6 +695,8 @@ class SecurityCenter:
         self.drifts: dict[tuple[str, str], DriftNote] = {}
         self.counters: dict[str, int] = dict.fromkeys(_COUNTERS, 0)
         self.last_now: float | None = None
+        self._cap_noted: float | None = None  # memory only
+        self._emit_times: deque[float] = deque()  # monotonic, memory only
         self.last_save_bytes: int | None = None
         # memory only
         self._entries: dict[str, Any] = {}  # entry id -> coordinator
@@ -695,6 +710,9 @@ class SecurityCenter:
         self._engine: Any = None
         self._engine_unsub: Callable[[], None] | None = None
         self._module_key: bytes | None = None
+        # Key of the ids while the core hands out no module key: random per
+        # run, never stored (review 2, M2).
+        self._run_key = secrets.token_bytes(32)
         self._drift_task: asyncio.Task[Any] | None = None
         self._drift_again = False
         self._drift_tried: float | None = None
@@ -725,7 +743,16 @@ class SecurityCenter:
         return self._module_key is not None
 
     def _now(self) -> float:
-        return self.last_now if self.last_now is not None else time.time()
+        """Time of actions and views: never behind the wall clock.
+
+        ``last_now`` is the time of the newest poll (NI's clock) or, after a
+        restart, of the last save; actions and views before the first poll
+        must not get that old time (review 2, N2). A poll clock ahead of the
+        wall clock is kept. Detectors use the poll's own time, not this, so
+        the clock-shift handling (``on_clock_shift``) is unchanged.
+        """
+        wall = time.time()
+        return wall if self.last_now is None else max(wall, self.last_now)
 
     # -- entries ------------------------------------------------------------------------
 
@@ -736,9 +763,28 @@ class SecurityCenter:
 
     @callback
     def remove_entry(self, entry_id: str) -> None:
-        """Forget the entry (its router data stays until router.forgotten)."""
+        """Forget the entry (its router data stays until router.forgotten).
+
+        The router leaves the source statuses, the score and the coverage at
+        once (review 2, H1); its hints, timeline and baselines stay.
+        """
+        rid = self._rid_cache.get(entry_id) if entry_id in self._entries else None
+        if rid is None and entry_id in self._entries:
+            try:
+                rid = self._rid(entry_id)
+            except Exception:  # noqa: BLE001 - unknown router: nothing to drop
+                rid = None
         self._entries.pop(entry_id, None)
         self._rid_cache.pop(entry_id, None)
+        if rid is not None and rid not in self._rid_cache.values():
+            self._drop_router_memory(rid)
+
+    def _drop_router_memory(self, rid: str) -> None:
+        """Statuses and results of a router without a loaded entry (memory)."""
+        self._seen.pop(rid, None)
+        self._statuses.pop(rid, None)
+        for key in [k for k in self._results if k[1] == rid]:
+            del self._results[key]
 
     def _registry_router_id(self, entry_id: str) -> str | None:
         api = self._binding.api
@@ -1115,6 +1161,7 @@ class SecurityCenter:
             return
         if self._binding.core is core and self._binding.api is not None:
             await self._async_fetch_module_key()
+            self._stage("forgotten routers", self._forget_unknown_routers)
             return
         self._unbind_core()
         api = await async_get_configuration_api(self.hass, 1)
@@ -1135,10 +1182,54 @@ class SecurityCenter:
             self._fail("event registration", err)
         binding.removers.append(api.subscribe(self._on_core_event))
         await self._async_fetch_module_key()
+        self._stage("forgotten routers", self._forget_unknown_routers)
+
+    def _stored_router_ids(self) -> set[str]:
+        """Router ids the center keeps state of (store sections)."""
+        rids = {i.get("router_id") for i in self.incidents.values()}
+        rids |= {t.get("router_id") for t in self.timeline}
+        rids |= {rid for rid, _drift in self.drifts}
+        rids |= set(self.deduper.to_dict().get("hwm", {}))
+        return {r for r in rids if isinstance(r, str) and valid_router_id(r)}
+
+    def _forget_unknown_routers(self) -> None:
+        """Catch up on ``router.forgotten`` the core sent before we listened.
+
+        The core forgets aged orphans while it loads (``prune_orphans``),
+        before any center subscribes, and the bus keeps nothing (review 2,
+        M1). On every bind of an active center the stored router ids are
+        compared with the registry (read only, orphaned records included);
+        what the registry no longer knows is forgotten here. Unknown is not
+        forgotten: without a loaded registry (not loaded, load failed, empty)
+        nothing is dropped.
+        """
+        if not self.active or self._closed:
+            return
+        binding = self._binding
+        core, api = binding.core, binding.api
+        if core is None or api is None or getattr(core, "loaded", False) is not True:
+            return
+        registry = getattr(core, "registry", None)
+        if (
+            getattr(registry, "loaded", False) is not True
+            or getattr(registry, "load_failed", True) is not False
+        ):
+            return
+        known = {
+            r.router_id for r in api.registry.list(include_orphaned=True) if r.router_id
+        }
+        if not known:
+            return
+        for rid in sorted(self._stored_router_ids() - known):
+            self._forget_router(rid)
 
     async def _async_fetch_module_key(self) -> None:
         binding = self._binding
         if self._module_key is not None or not binding.events_ok:
+            return
+        if not self.active:
+            # Off (e.g. an admin changes a setting): never create the
+            # installation key for it (review 2, N6).
             return
         try:
             state = binding.api.installation_key_state
@@ -1696,9 +1787,16 @@ class SecurityCenter:
             source=source, availability=Availability.NOT_AVAILABLE, reason=reason
         )
 
+    def _current_routers(self) -> set[str]:
+        """Router ids of the loaded entries (the fleet the score is about)."""
+        return {rid for rid in (self._rid(e) for e in list(self._entries)) if rid}
+
     def _all_statuses(self, now: float) -> dict[str, dict[str, SourceStatus]]:
-        routers = set(self._seen) | {n.router_id for n in self.drifts.values()}
-        routers |= {rid for rid in (self._rid(e) for e in list(self._entries)) if rid}
+        # Only routers of loaded entries count (review 2, H1): an unloaded or
+        # removed router must not keep the coverage low or the score capped.
+        routers = self._current_routers()
+        for rid in [r for r in self._statuses if r not in routers]:
+            del self._statuses[rid]
         return {rid: self._router_statuses(rid, now) for rid in sorted(routers)}
 
     @staticmethod
@@ -1766,7 +1864,12 @@ class SecurityCenter:
 
     # -- incidents --------------------------------------------------------------------------
 
+    @property
+    def _id_key(self) -> bytes:
+        return self._module_key if self._module_key is not None else self._run_key
+
     def _record(self, event: SecurityEvent, now: float) -> None:
+        event = sealed_event(event, self._id_key)
         counterpart = NI_COUNTERPART.get(event.name)
         if counterpart is not None:
             reused = [
@@ -1810,10 +1913,12 @@ class SecurityCenter:
                 text=inc["title"],
                 incident_id=inc["id"],
             )
-            self._emit_event(event, inc["id"])
+            self._emit_event(event, inc["id"], limited=True)
+            return
+        if not self._make_room():
+            self._cap_reached(now)
             return
         inc = self._new_incident(event, scope)
-        self._enforce_cap(keep=inc["id"])
         self.counters["incidents_opened"] += 1
         self._timeline(
             event.ts,
@@ -1826,10 +1931,10 @@ class SecurityCenter:
             incident_id=inc["id"],
             linked=list(inc["linked_incident_ids"]),
         )
-        self._emit_event(event, inc["id"])
+        self._emit_event(event, inc["id"], limited=True)
 
     def _new_incident(self, event: SecurityEvent, scope: str) -> dict[str, Any]:
-        inc_id = f"{INCIDENT_PREFIX}{_digest(scope)}"
+        inc_id = INCIDENT_PREFIX + keyed_id(self._id_key, "incident", scope, 8)
         name = event.name
         drift_refs: list[str] = []
         hints: list[str] = []
@@ -1900,12 +2005,50 @@ class SecurityCenter:
                 links.append(link)
         inc["linked_incident_ids"] = links[:16]
 
-    def _enforce_cap(self, keep: str | None = None) -> None:
-        """At most ``SEC_INCIDENT_CAP``: resolved, then confirmed, then oldest."""
-        order = {STATUS_RESOLVED: 0, STATUS_CONFIRMED: 1, STATUS_OPEN: 2}
+    def _make_room(self) -> bool:
+        """Room for one new hint: evict resolved ones, oldest first.
+
+        False if the store is full of open and confirmed hints: those are
+        never evicted for a new one (review 2, M3).
+        """
+        while len(self.incidents) >= SEC_INCIDENT_CAP:
+            resolved = [
+                i for i in self.incidents.values() if i["status"] == STATUS_RESOLVED
+            ]
+            if not resolved:
+                return False
+            victim = min(resolved, key=lambda i: i["last_seen"])
+            self._drop_incident(victim["id"])
+            self.counters["incidents_dropped"] += 1
+        return True
+
+    def _cap_reached(self, now: float) -> None:
+        """A new hint found no room: count it, note it once per window."""
+        self.counters["incidents_cap_dropped"] += 1
+        last = self._cap_noted
+        if last is not None and abs(now - last) < SEC_CAP_NOTE_WINDOW_SECONDS:
+            return
+        self._cap_noted = now
+        self._timeline(
+            now,
+            "cap_reached",
+            category="system",
+            severity=Severity.WARNING,
+            router_id=None,
+            text=TEXT_CAP_REACHED,
+        )
+        self.schedule_save()
+
+    def _enforce_cap(self) -> None:
+        """A loaded store above ``SEC_INCIDENT_CAP`` (cap lowered, edited file).
+
+        Resolved go first, then open, confirmed last (an administrator's
+        confirmation is kept longest); oldest first within each.
+        """
+        order = {STATUS_RESOLVED: 0, STATUS_OPEN: 1, STATUS_CONFIRMED: 2}
         while len(self.incidents) > SEC_INCIDENT_CAP:
             victim = min(
-                (i for i in self.incidents.values() if i["id"] != keep),
+                self.incidents.values(),
                 key=lambda i: (order.get(i["status"], 0), i["last_seen"]),
             )
             self._drop_incident(victim["id"])
@@ -1983,10 +2126,30 @@ class SecurityCenter:
 
     # -- events ---------------------------------------------------------------------------
 
-    def _emit_event(self, event: SecurityEvent, incident_id: str | None) -> None:
-        """One security event on the core bus (security ring), never raises."""
+    def _emit_budget(self) -> bool:
+        """True while fewer than SEC_EVENT_BURST hint events left in the window."""
+        clock = time.monotonic()
+        times = self._emit_times
+        while times and clock - times[0] >= SEC_EVENT_BURST_WINDOW_SECONDS:
+            times.popleft()
+        if len(times) >= SEC_EVENT_BURST:
+            return False
+        times.append(clock)
+        return True
+
+    def _emit_event(
+        self, event: SecurityEvent, incident_id: str | None, *, limited: bool = False
+    ) -> None:
+        """One security event on the core bus (security ring), never raises.
+
+        ``limited``: an event of a new or reopened hint (rate limited, the
+        rest counted as ``events_throttled``); manual actions are not.
+        """
         binding = self._binding
         if not self.active or binding.api is None or not binding.events_ok:
+            return
+        if limited and not self._emit_budget():
+            self.counters["events_throttled"] += 1
             return
         try:
             core = event.to_core_event(module_key=self._module_key)
@@ -2091,8 +2254,7 @@ class SecurityCenter:
         try:
             rid = self._rid_cache.get(router)
             if rid is not None:
-                self._seen.pop(rid, None)
-                self._statuses.pop(rid, None)
+                self._drop_router_memory(rid)
         except Exception as err:  # noqa: BLE001 - never fatal
             self._fail("router removed", err)
 
@@ -2207,6 +2369,7 @@ class SecurityCenter:
         self._action_done(action.to_event(router_id=None), "renamed", when)
 
     def _action_done(self, event: SecurityEvent, what: str, when: float) -> None:
+        event = sealed_event(event, self._id_key)
         self._timeline(
             when,
             "action",
@@ -2455,6 +2618,11 @@ class SecurityCenter:
                 else {"state": "omitted", "subnets": 0}
             ),
             "module_key": self._module_key is not None,
+            "limits": {
+                "incident_cap": SEC_INCIDENT_CAP,
+                "incidents_cap_dropped": self.counters["incidents_cap_dropped"],
+                "events_throttled": self.counters["events_throttled"],
+            },
         }
 
     def _client_filter(self, client: str | None, admin: bool) -> str | None:
@@ -2708,7 +2876,7 @@ class SecurityCenter:
         A count whose source no router delivers is None, never 0: no data
         is not "nothing happened".
         """
-        statuses = self._statuses or self._all_statuses(now)
+        statuses = self._all_statuses(now)
         if not statuses:
             return None
 
@@ -2723,6 +2891,9 @@ class SecurityCenter:
         flat = self._flat(statuses)
         score = self._score(now, statuses, flat)
         active = [i for i in self.incidents.values() if i["status"] in _ACTIVE_STATUSES]
+        # No usable source anywhere (coverage 0): the hint counts are not
+        # known either (review 2, N1); "keine Daten", never 0.
+        any_source = any(st.usable for per in statuses.values() for st in per.values())
         counts = self.trust.counts(now)
         unknown = sum(
             counts.get(s.value, 0)
@@ -2742,10 +2913,12 @@ class SecurityCenter:
             "stale": sorted(
                 s for s, st in flat.items() if st.availability is Availability.STALE
             ),
-            "hints_active": len(active),
+            "hints_active": len(active) if any_source else None,
             "hints_critical": sum(
                 1 for i in active if i["severity"] == Severity.CRITICAL.value
-            ),
+            )
+            if any_source
+            else None,
             "unknown_devices": unknown
             if delivered(DataSource.HOSTAPD_CLIENTS, DataSource.CLIENT_HISTORY)
             else None,

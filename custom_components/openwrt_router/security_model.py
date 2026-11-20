@@ -96,6 +96,7 @@ must require an admin user like the core does for ``config_capture`` /
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import math
 import re
@@ -160,6 +161,8 @@ if (
     raise ValueError("IDENTITY_KEY_PURPOSE does not fit the core pattern")
 # Domain of the zone digests under the module key (the core has no zone kind).
 ZONE_DIGEST_DOMAIN: Final = "security_center/zone/"
+# Domain of the keyed ids (keyed_id): incident, event, dedup, correlation.
+SEAL_DOMAIN: Final = "security_center/id/"
 # Manual trust actions: audit-mandatory (never deduplicated) in the core.
 # One place; security_trust.TrustActionKind produces exactly these types.
 MANUAL_ACTION_NAMES: Final = (
@@ -560,9 +563,43 @@ def make_dedup_key(*identity: Any) -> str:
     """Dedup discriminator (contract 12.4): a digest of the identity parts.
 
     Router and type are not part of it; they form the scope
-    (:attr:`SecurityEvent.dedup_scope`). Identities are only hashed.
+    (:attr:`SecurityEvent.dedup_scope`). Identities are only hashed, without
+    a key: this id and :func:`make_event_id` stay in memory (detector
+    dedup). Before anything is stored, sent to the core or shown, the center
+    replaces them with keyed ids (:func:`sealed_event`, review 2, M2): an
+    unkeyed digest of a MAC is reversible with a list of candidate MACs.
     """
     return _digest(identity, 8)
+
+
+def keyed_id(key: bytes, domain: str, value: Any, size: int = 16) -> str:
+    """``2*size`` hex of HMAC-SHA256 over ``value`` under ``key`` (by domain).
+
+    ``key``: the module key, or a random key of this run when the core
+    handed out none (then the id cannot be derived, and not repeated after a
+    restart either).
+    """
+    text = f"{SEAL_DOMAIN}{domain}{'' if value is None else value}"
+    digest = hmac.new(key, text.encode("utf-8"), hashlib.sha256).hexdigest()
+    return digest[: 2 * size]
+
+
+def sealed_event(event: SecurityEvent, key: bytes) -> SecurityEvent:
+    """``event`` with keyed ``event_id``, ``dedup_key`` and ``correlation_id``.
+
+    Deterministic under the same key (the same finding keeps its incident,
+    duplicates still merge); without the key none of them leads back to a
+    MAC, an address or a time.
+    """
+    cid = event.correlation_id
+    return replace(
+        event,
+        event_id=EVENT_ID_PREFIX + keyed_id(key, "event", event.event_id),
+        dedup_key=keyed_id(key, "dedup", event.dedup_key, 8),
+        correlation_id=(
+            CORRELATION_ID_PREFIX + keyed_id(key, "correlation", cid) if cid else None
+        ),
+    )
 
 
 def event_type(name: str) -> str:

@@ -8,8 +8,9 @@
  *
  * Errors become SecurityApiError(status, code, details): the server's
  * `message` is never kept. Nothing is logged or stored. Query strings carry
- * only the backend's own overview filters (including `client`); the only
- * identity in a path is the MAC of the admin device routes.
+ * only the backend's own overview filters (including `client`); no path
+ * carries an identity: the admin device routes send the MAC in the JSON
+ * body (paths end up in proxy access logs).
  */
 
 import {
@@ -75,7 +76,7 @@ function checkedIncident(id: string): string {
 
 function checkedMac(mac: string): string {
   if (!isRealMac(mac)) throw badInput('mac');
-  return enc(mac);
+  return mac;
 }
 
 /** Route paths below SECURITY_BASE. */
@@ -85,8 +86,8 @@ export const securityPaths = {
   incidentStatus: (id: string) => `incidents/${checkedIncident(id)}/status`,
   detections: () => 'detections',
   settings: () => 'settings',
-  deviceConfirm: (mac: string) => `devices/${checkedMac(mac)}/confirm`,
-  deviceName: (mac: string) => `devices/${checkedMac(mac)}/name`,
+  deviceConfirm: () => 'devices/confirm',
+  deviceName: () => 'devices/name',
 };
 
 type Method = 'GET' | 'POST';
@@ -202,10 +203,11 @@ export function createSecurityApi(getHass: () => SecurityHass | null, deps: Secu
       return inc;
     },
     confirmDevice: async (mac, name) => {
-      await json('POST', securityPaths.deviceConfirm(mac), name !== undefined ? { name } : {});
+      const body = name !== undefined ? { mac: checkedMac(mac), name } : { mac: checkedMac(mac) };
+      await json('POST', securityPaths.deviceConfirm(), body);
     },
     setDeviceName: async (mac, name) => {
-      await json('POST', securityPaths.deviceName(mac), { name });
+      await json('POST', securityPaths.deviceName(), { mac: checkedMac(mac), name });
     },
   };
 }

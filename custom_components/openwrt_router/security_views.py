@@ -11,7 +11,9 @@ the intelligence routes of ``topology_panel``:
   and the subnet map only as a count.
 * Writing (settings, confirm/name a device, incident status): HA
   administrators only (403 before the body is read); the center then asks
-  the core guard (admin users only, audited).
+  the core guard (admin users only, audited). The device routes take the
+  MAC from the JSON body, never from the path: a path ends up in the access
+  logs of proxies (review 2, N4).
 * 410 after the last entry unloaded (``_PANEL_VIEW_DISABLED_KEY``), 503
   while no center runs.
 
@@ -506,28 +508,40 @@ class SecuritySettingsView(_SecurityView):
 
 
 class SecurityDeviceConfirmView(_PostView):
-    """Mark a device as known (optionally with a display name)."""
+    """Mark a device as known (optionally with a display name).
 
-    url = f"{BASE_URL}/devices/{{mac}}/confirm"
+    Body ``{"mac": "...", "name": "..."}`` (``name`` optional).
+    """
+
+    url = f"{BASE_URL}/devices/confirm"
     name = f"{VIEW_NAME_PREFIX}device_confirm"
 
     async def handle(self, center, request, actor, admin, **match):  # type: ignore[override]
-        mac = _mac(match.get("mac"))
-        body = await read_body(request, {"name": _name})
-        await center.async_confirm_device(mac, actor=actor, name=body.get("name"))
+        if request.query:
+            raise _bad("query", "unknown_key")
+        body = await read_body(request, {"mac": _mac, "name": _name}, required=("mac",))
+        await center.async_confirm_device(
+            body["mac"], actor=actor, name=body.get("name")
+        )
         return {"confirmed": True}
 
 
 class SecurityDeviceNameView(_PostView):
-    """Set (or clear with null) a tracked device's display name."""
+    """Set (or clear with null) a tracked device's display name.
 
-    url = f"{BASE_URL}/devices/{{mac}}/name"
+    Body ``{"mac": "...", "name": "..." | null}`` (both required).
+    """
+
+    url = f"{BASE_URL}/devices/name"
     name = f"{VIEW_NAME_PREFIX}device_name"
 
     async def handle(self, center, request, actor, admin, **match):  # type: ignore[override]
-        mac = _mac(match.get("mac"))
-        body = await read_body(request, {"name": _name}, required=("name",))
-        await center.async_set_device_name(mac, body["name"], actor=actor)
+        if request.query:
+            raise _bad("query", "unknown_key")
+        body = await read_body(
+            request, {"mac": _mac, "name": _name}, required=("mac", "name")
+        )
+        await center.async_set_device_name(body["mac"], body["name"], actor=actor)
         return {"named": body["name"] is not None}
 
 

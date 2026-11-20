@@ -238,13 +238,15 @@ export function createMockSecurityApi(scenario: string): SecurityApi {
         timeline: m.timeline.filter(t => t.incident_id === found.id), now: SEC(0),
       });
     }
-    const dev = /^devices\/([^/]+)\/(confirm|name)$/.exec(path);
+    // the MAC comes in the body, like the backend (never in a path)
+    const dev = /^devices\/(confirm|name)$/.exec(path);
     if (dev && method === 'POST') {
       if (!m.admin) return err(403, 'authorization_denied');
-      const mac = decodeURIComponent(dev[1]);
+      if (typeof body.mac !== 'string') return err(400, 'invalid_request');
+      const mac = body.mac;
       const row = m.devices.find(d => d.mac === mac);
       if (!row) return err(404, 'unknown_device');
-      if (dev[2] === 'confirm') {
+      if (dev[1] === 'confirm') {
         row.state = 'known';
         row.confirmed = true;
         if (typeof body.name === 'string') row.name = body.name;

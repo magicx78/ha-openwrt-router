@@ -18,7 +18,9 @@ Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `doc
   Module `security_*` mit Daten, die die Integration schon hat: Netzwerk-Intelligenz (als
   Poll-Beobachter: WLAN-Zeilen, NI-Ereignisse, Uptime, Clients), Client-Stabilität
   (Live-Zustand für das Vertrauensbuch) und den Enterprise Core (Drift-Ereignisse,
-  `router.forgotten`, Fähigkeiten, Modulschlüssel). **Kein zusätzlicher Router-Aufruf je Poll** (Test zählt die ubus-POSTs mit und
+  `router.forgotten`, Fähigkeiten, Modulschlüssel). Vergisst der Core einen Router, bevor das
+  Center läuft, gleicht das Center beim Start mit der geladenen Router-Registry ab; eine
+  unbekannte oder nicht geladene Registry löscht nichts. **Kein zusätzlicher Router-Aufruf je Poll** (Test zählt die ubus-POSTs mit und
   ohne Center).
 - **Aus heißt aus:** ohne `enabled` liest das Center nur seinen Speicher; kein Beobachter,
   kein Listener, keine Schreibvorgänge, keine Ereignisse. NI-Vorfälle, NI-Zähler,
@@ -28,6 +30,17 @@ Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `doc
   eigene Ereignisse über den Core im Security-Ring). NI-Vorfälle werden nur per ID verknüpft,
   nie geändert oder unterdrückt; deckt ein offener NI-Vorfall einen Befund schon ab, steht nur
   ein verknüpfter Eintrag in der Zeitleiste.
+- **Obergrenze der Hinweise:** Bei 100 Hinweisen macht der älteste erledigte Platz; offene
+  und bestätigte werden nie verdrängt. Ohne erledigten Hinweis wird der neue nicht
+  gespeichert und gezählt (`limits.incidents_cap_dropped` in der Übersicht und in der
+  Diagnose), mit höchstens einem Zeitleisten-Eintrag „Obergrenze erreicht“ je Stunde.
+  Ereignisse über den Core zu neuen oder wieder geöffneten Hinweisen: höchstens 20 je
+  10 min, der Rest wird gezählt (`limits.events_throttled`).
+- **Geschlüsselte IDs:** Hinweis-, Ereignis- und Korrelations-IDs sowie Dedup-Marken, die
+  gespeichert, gesendet oder ausgegeben werden, sind HMAC-Werte mit dem Modulschlüssel des
+  Cores und lassen sich mit einer Liste möglicher MACs nicht zurückrechnen. Ohne
+  Modulschlüssel gilt ein zufälliger Schlüssel je Lauf. Ältere Speicherstände laden ohne
+  Fehler.
 - **Drift → Segmentierung:** eine Konfigurationsänderung in VLAN/Firewall/Interface (Bereiche
   aus dem Vergleich zweier gespeicherter Versionen, kein Router-Kontakt) ergibt genau einen
   Hinweis mit Verweis auf die Drift-ID. Ein Befund kurz nach einer Konfigurationsänderung wird
@@ -60,14 +73,18 @@ Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `doc
   Einstellungen lesen (Administratoren; andere Benutzer nur bei für alle geöffnetem Panel,
   dann mit Pseudonymen und der Subnetz-Zuordnung nur als Anzahl); Einstellungen ändern
   (hier wird das Center eingeschaltet), Gerät bestätigen oder benennen und Hinweis-Status
-  setzen nur für Administratoren. Strenge Prüfung von Query und Body (bekannte Schlüssel,
+  setzen nur für Administratoren. Gerät bestätigen (`/devices/confirm`) und benennen
+  (`/devices/name`) tragen die MAC im Body, nie im Pfad. Strenge Prüfung von Query und
+  Body (bekannte Schlüssel,
   Typen, Bereiche, höchstens 4 KiB, zu tief verschachteltes JSON ist 400); Fehler tragen nur
   eine feste Meldung, einen Code und höchstens Feldname und Grund.
 - **Flotten-Sensoren (`security_entities.py`):** Sicherheitswert, aktive und kritische
   Sicherheitshinweise, unbestätigte Geräte, Firewall-Protokolleinträge und WLAN-Anmeldefehler
   der letzten Stunde, Abdeckung der Erkennung. Werte nur aus dem Center (keine Router-Aufrufe,
-  per Signal aktualisiert); ohne liefernde Quelle `None` (unbekannt), nie 0. Die Sensoren gibt
-  es nur bei eingeschaltetem Center; Ausschalten entfernt sie aus der Entity-Registry.
+  per Signal aktualisiert); ohne liefernde Quelle `None` (unbekannt), nie 0, auch für aktive
+  und kritische Hinweise. Wert und Abdeckung zählen nur geladene Router; die Hinweise und
+  Grundlinien eines entladenen Routers bleiben gespeichert. Die Sensoren gibt es nur bei
+  eingeschaltetem Center; Ausschalten entfernt sie aus der Entity-Registry.
 - **Panel-Tab „Security Center“** unter Enterprise (neben „Konfiguration“) mit den Bereichen
   Übersicht, Zeitleiste, Geräte, Erkennungen und Einstellungen sowie dem Detail eines
   Hinweises. Der Tab liest nur über die Routen oben; Schreibknöpfe haben nur Administratoren.

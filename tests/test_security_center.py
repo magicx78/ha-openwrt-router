@@ -496,10 +496,16 @@ async def test_polls_feed_the_trust_book_and_the_timeline(disks) -> None:
     )
 
 
+# The module key the core hands out is the same after a restart; without it
+# the ids are random per run (review 2, M2) and nothing merges across runs.
+MODULE_KEY = bytes(range(32))
+
+
 async def test_case18_ha_restart_persistence(disks) -> None:
     hass = make_hass()
     engine, _cs = await setup(hass, "r1")
     center = await center_for(hass, "r1")
+    center._module_key = MODULE_KEY
     for payload, now in scenario_polls():
         engine.ingest("r1", payload, now, interval=60.0)
     now = T0 + 400
@@ -522,6 +528,7 @@ async def test_case18_ha_restart_persistence(disks) -> None:
 
     hass2 = make_hass()
     center2 = await center_for(hass2, "r1")
+    center2._module_key = MODULE_KEY
     assert not center2.load_failed
     assert center2.trust.to_dict() == before_trust
     assert center2.trust.get(M1).name == "Laptop"
@@ -563,7 +570,7 @@ async def test_unreadable_store_is_kept_and_the_center_starts_empty(disks) -> No
     assert center.incidents == {} and not center.enabled
 
 
-async def test_incident_cap_drops_resolved_before_open(disks) -> None:
+async def test_incident_cap_drops_resolved_then_refuses_new(disks) -> None:
     hass = make_hass()
     center = await center_for(hass, "r1")
     for k in range(SEC_INCIDENT_CAP + 5):
@@ -572,7 +579,13 @@ async def test_incident_cap_drops_resolved_before_open(disks) -> None:
             center.incidents[next(reversed(center.incidents))]["status"] = "resolved"
     assert len(center.incidents) == SEC_INCIDENT_CAP
     assert all(i["status"] == "open" for i in center.incidents.values())
-    assert center.counters["incidents_dropped"] == 5
+    # three resolved made room; open hints are never evicted for new ones
+    assert center.counters["incidents_dropped"] == 3
+    assert center.counters["incidents_cap_dropped"] == 2
+    assert not any(
+        i["detector"] in (f"wifi_assoc_burst_{SEC_INCIDENT_CAP + k}" for k in (3, 4))
+        for i in center.incidents.values()
+    )
 
 
 async def test_store_is_trimmed_to_the_size_cap(disks) -> None:

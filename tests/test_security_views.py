@@ -146,8 +146,8 @@ ROUTES: tuple[tuple[str, str], ...] = (
     ("get", "/detections"),
     ("get", "/settings"),
     ("post", "/settings"),
-    ("post", f"/devices/{M1}/confirm"),
-    ("post", f"/devices/{M1}/name"),
+    ("post", "/devices/confirm"),
+    ("post", "/devices/name"),
 )
 WRITES = [(m, p) for m, p in ROUTES if m == "post"]
 READS = [(m, p) for m, p in ROUTES if m == "get"]
@@ -314,8 +314,10 @@ async def test_bad_paths_and_unknown_ids(disks) -> None:  # noqa: F811
         assert (await h.get(f"/incidents/{INCIDENT}?x=1")).status == 400
         assert (await h.get("/detections?x=1")).status == 400
         assert (await h.get("/settings?x=1")).status == 400
-        resp = await h.post("/devices/zz:zz/confirm", body={})
+        resp = await h.post("/devices/confirm", body={"mac": "zz:zz"})
         assert resp.status == 400 and resp.data["details"]["field"] == "mac"
+        resp = await h.post("/devices/confirm?mac=x", body={"mac": M1})
+        assert resp.status == 400 and resp.data["details"]["field"] == "query"
 
 
 # Both fit in 4 KiB. Whether the parser gives up (RecursionError) or the
@@ -420,7 +422,7 @@ async def test_off_center_refuses_actions_with_409(disks) -> None:  # noqa: F811
     hass = users(make_hass())
     await seeded_center(hass, enabled=False)
     async with http(hass) as h:
-        resp = await h.post(f"/devices/{M1}/confirm", body={})
+        resp = await h.post("/devices/confirm", body={"mac": M1})
         assert resp.status == 409 and resp.data["code"] == "disabled"
         # reading the settings works while off (the switch lives there)
         resp = await h.get("/settings")
@@ -466,14 +468,17 @@ async def test_admin_writes_go_through_the_center(core_disks, tmp_path) -> None:
         center.trust.observe(
             SimpleNamespace(mac=M1, private_mac=None, ip="192.0.2.10"), T0
         )
-        resp = await h.post(f"/devices/{M1.lower()}/confirm", body={"name": "Laptop"})
+        resp = await h.post(
+            "/devices/confirm", body={"mac": M1.lower(), "name": "Laptop"}
+        )
         assert resp.status == 200 and resp.data == {"confirmed": True}
         assert center.trust.get(M1).name == "Laptop"
-        resp = await h.post(f"/devices/{M1}/name", body={"name": None})
+        resp = await h.post("/devices/name", body={"mac": M1, "name": None})
         assert resp.status == 200 and resp.data == {"named": False}
-        assert (await h.post(f"/devices/{M1}/name", body={})).status == 400
-        assert (await h.post(f"/devices/{M2}/name", body={"name": "x"})).status == 404
-        bad = await h.post(f"/devices/{M1}/name", body={"name": "a\nb"})
+        assert (await h.post("/devices/name", body={"mac": M1})).status == 400
+        unknown = await h.post("/devices/name", body={"mac": M2, "name": "x"})
+        assert unknown.status == 404
+        bad = await h.post("/devices/name", body={"mac": M1, "name": "a\nb"})
         assert bad.status == 400
 
         center._record(security_event("wifi_assoc_burst", T0, router_id=env.rid), T0)

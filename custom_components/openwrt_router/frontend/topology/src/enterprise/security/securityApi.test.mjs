@@ -26,8 +26,9 @@ test('paths stay under the security prefix and encode the ids', () => {
   assert.equal(securityPaths.settings(), 'settings');
   assert.equal(securityPaths.incident('sec_ab-1_x'), 'incidents/sec_ab-1_x');
   assert.equal(securityPaths.incidentStatus('sec_ab'), 'incidents/sec_ab/status');
-  assert.equal(securityPaths.deviceConfirm(MAC), 'devices/02%3A00%3A00%3A00%3A00%3A01/confirm');
-  assert.equal(securityPaths.deviceName(MAC), 'devices/02%3A00%3A00%3A00%3A00%3A01/name');
+  // no identity in a path: the device routes carry the MAC in the body
+  assert.equal(securityPaths.deviceConfirm(), 'devices/confirm');
+  assert.equal(securityPaths.deviceName(), 'devices/name');
 });
 
 test('the overview query carries only the backend filters and drops unusable values', () => {
@@ -82,11 +83,12 @@ test('write routes send the documented JSON bodies', async () => {
   assert.deepEqual(calls.map(c => [c.init.method, c.url.replace(SECURITY_BASE, ''), c.init.body]), [
     ['POST', '/incidents/sec_1/status', '{"status":"resolved"}'],
     ['POST', '/settings', '{"enabled":true,"log_path":"syslog","syslog_port":5514}'],
-    ['POST', '/devices/02%3A00%3A00%3A00%3A00%3A01/confirm', '{}'],
-    ['POST', '/devices/02%3A00%3A00%3A00%3A00%3A01/confirm', '{"name":"Telefon"}'],
-    ['POST', '/devices/02%3A00%3A00%3A00%3A00%3A01/name', '{"name":"Drucker"}'],
-    ['POST', '/devices/02%3A00%3A00%3A00%3A00%3A01/name', '{"name":null}'],
+    ['POST', '/devices/confirm', '{"mac":"02:00:00:00:00:01"}'],
+    ['POST', '/devices/confirm', '{"mac":"02:00:00:00:00:01","name":"Telefon"}'],
+    ['POST', '/devices/name', '{"mac":"02:00:00:00:00:01","name":"Drucker"}'],
+    ['POST', '/devices/name', '{"mac":"02:00:00:00:00:01","name":null}'],
   ]);
+  for (const c of calls) assert.ok(!c.url.includes('02:00') && !c.url.includes('02%3A'), c.url);
   assert.equal(calls[0].init.headers['Content-Type'], 'application/json');
 });
 

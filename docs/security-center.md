@@ -299,8 +299,11 @@ antworten mit `Cache-Control: no-store`. Keine Route ruft einen Router.
 | `/detections` | GET | lesen | Verfügbarkeit je Erkennung, Zustand je Router und Quelle, Log-Weg |
 | `/settings` | GET | lesen | Einstellungen (Subnetz-Zuordnung für Nicht-Administratoren nur als Anzahl) |
 | `/settings` | POST | **Administrator** | Einstellungen ändern; hier wird das Center eingeschaltet |
-| `/devices/{mac}/confirm` | POST | **Administrator** | Gerät als bekannt bestätigen (optional mit Namen) |
-| `/devices/{mac}/name` | POST | **Administrator** | Anzeigenamen setzen oder mit `null` löschen |
+| `/devices/confirm` | POST | **Administrator** | Gerät als bekannt bestätigen. Body: `{"mac": "…", "name": "…"}` (`name` optional) |
+| `/devices/name` | POST | **Administrator** | Anzeigenamen setzen oder mit `null` löschen. Body: `{"mac": "…", "name": "…" \| null}` |
+
+Die MAC steht bei den Geräte-Routen **im Body, nie im Pfad**, damit sie nicht in Proxy- oder
+Zugriffslogs landet; ein Query-String an diesen Routen ergibt 400.
 
 - **Lesen:** Administratoren; andere angemeldete Benutzer nur, solange das Topologie-Panel
   für alle Benutzer geöffnet ist (sonst 403). Nicht-Administratoren sehen Pseudonyme statt MAC,
@@ -337,8 +340,16 @@ Router-Aufrufe) und werden per Signal aktualisiert.
 
 Liefert keine Quelle Daten, ist der Wert `None` (unbekannt), **nie 0**: keine Daten heißen nicht
 „nichts passiert“. Ohne Quelle bleibt auch der Sicherheitswert unbekannt und wird nie als
-„gesund“ gezeigt. Die beiden Stundenzähler liegen nur im Speicher und beginnen nach einem
-Neustart von Home Assistant bei null.
+„gesund“ gezeigt. Das gilt auch für die beiden Hinweis-Zähler: ohne eine nutzbare Quelle sind
+aktive und kritische Hinweise `None`, nicht 0. Die beiden Stundenzähler liegen nur im Speicher
+und beginnen nach einem Neustart von Home Assistant bei null.
+
+Sicherheitswert und Abdeckung zählen nur **geladene** Router. Wird ein Router entladen oder
+entfernt, fällt er sofort aus Wert und Abdeckung heraus; seine Hinweise und Grundlinien bleiben
+gespeichert. Erst wenn der Core den Router vergisst (`router.forgotten`), löscht das Center
+auch dessen Daten. Hat der Core einen Router vergessen, bevor das Center lief, gleicht das
+Center beim Start seinen Speicher mit der Router-Registry ab; ist die Registry nicht geladen
+oder unbekannt, wird nichts gelöscht.
 
 ## 9. Datenschutz
 
@@ -346,6 +357,12 @@ Neustart von Home Assistant bei null.
   alle anderen Pseudonyme (`cli_…`) oder die Maske. Der Schlüssel für die Pseudonyme kommt vom
   Core.
 - **Maskierung auf dem Server** für Antworten, Ereignisse, Logs und Diagnose.
+- **Geschlüsselte IDs:** Hinweis-IDs (`sec_…`), Ereignis-IDs, Dedup-Marken und
+  Korrelations-IDs, die gespeichert, gesendet oder ausgegeben werden, sind HMAC-Werte mit dem
+  Modulschlüssel des Cores. Mit einer Liste möglicher MACs lassen sie sich ohne den Schlüssel
+  nicht zurückrechnen. Ohne Modulschlüssel nimmt das Center einen zufälligen Schlüssel je Lauf;
+  dann bekommt derselbe Befund nach einem Neustart eine neue Hinweis-ID. Ältere Speicherstände
+  mit unverschlüsselten IDs laden ohne Fehler.
 - **DNS-Namen standardmäßig aus:** Ohne `keep_dns_names` steht an einem DNS-Hinweis kein
   Klartextname.
 - **Keine HA-Benutzer-IDs** im Speicher des Centers; der Core hält sie in seinem Audit-Speicher
@@ -369,6 +386,14 @@ Neustart von Home Assistant bei null.
 - **Home Assistant:** Der Syslog-Empfänger hat feste Obergrenzen (Zeilenlänge, Raten, Puffer,
   [Abschnitt 5](#5-log-empfang)); zu viele Zeilen werden verworfen und gezählt, nie blockiert.
   Der Speicher ist auf 512 KB begrenzt, die Zeitleiste auf 2000 Einträge, eigene Hinweise auf 100.
+- **Obergrenze der Hinweise:** Ist sie erreicht, macht zuerst der älteste erledigte Hinweis
+  Platz. Offene und bestätigte Hinweise werden nie für neue verdrängt. Gibt es keinen erledigten
+  Hinweis mehr, wird der **neue** Hinweis nicht gespeichert und gezählt
+  (`limits.incidents_cap_dropped` in der Übersicht, `incidents_cap_dropped` in der Diagnose);
+  die Zeitleiste bekommt höchstens einen Eintrag „Obergrenze erreicht“ je Stunde.
+- **Ereignisse über den Core:** höchstens 20 Ereignisse zu neuen oder wieder geöffneten
+  Hinweisen je 10 min; weitere werden nicht gesendet, sondern gezählt
+  (`limits.events_throttled`). Der Hinweis selbst wird trotzdem gespeichert.
 - **Router bei Remote-Logging:** Das ist Ihre Änderung ([Abschnitt 6](#6-remote-logging-am-router-einschalten-macht-der-nutzer-selbst)):
   ein zusätzlicher `logread`-Prozess und je Zeile Netzverkehr; die Größenordnung ist nicht
   gemessen.
@@ -411,6 +436,14 @@ ausdrücklicher Einzelfreigabe eines Administrators, wie beim Configuration Mana
   ändert das Center nichts am Netz.
 - **Ein Ziel je Router:** Der Versand an Home Assistant verdrängt ein vorhandenes Remote-Log-Ziel
   des Routers (`log_ip`).
+- **Client-Filter der Übersicht im Query:** Der Filter `client` von `/overview` (Knopf
+  „Ereignisse zeigen“ eines Geräts im Panel) steht als MAC im Query-String und kann so in
+  Proxy- oder Zugriffslogs landen. Die Schreib-Routen der Geräte tragen die MAC im Body.
+- **Ohne Modulschlüssel des Cores** sind die Hinweis-IDs nur innerhalb eines Laufs stabil:
+  ein Befund nach einem Neustart eröffnet einen neuen Hinweis statt den alten fortzuführen.
+- **Umbenannte Entity-IDs der Flotten-Sensoren** bleiben erhalten, wenn der Router-Eintrag,
+  an dem sie hängen, wechselt oder gelöscht wird (geprüft mit der echten Entity-Registry von
+  Home Assistant im Test, nicht in einer echten Instanz).
 
 ## 13. Erweiterungen (nur dokumentiert, nicht gebaut)
 
