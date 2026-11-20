@@ -526,6 +526,26 @@ async def test_settings_post_rejects_non_json(intel: NetIntelligence) -> None:
     assert response.status == 400
 
 
+async def test_recursion_error_in_the_parser_is_400(
+    intel: NetIntelligence, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deeply nested JSON on every interpreter: the parser's RecursionError
+    (raised here on purpose, Python 3.14's parser does not) is a bad body."""
+
+    async def too_deep(_self: Any) -> Any:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(Req, "json", too_deep)
+    before = json.dumps(intel.settings, sort_keys=True)
+    response = await OpenWrtIntelSettingsView().post(Req(intel.hass))
+    assert response.status == 400
+    assert json.dumps(intel.settings, sort_keys=True) == before
+    wan = incident(intel, "wan_down")
+    response = await OpenWrtIntelIncidentView().post(Req(intel.hass), wan.id)
+    assert response.status == 400
+    assert incident(intel, "wan_down").status is IncidentStatus.ACTIVE
+
+
 def test_settings_errors_accept_the_full_defaults() -> None:
     """The panel may send back the whole object it read (fixed keys equal)."""
     assert settings_errors(DEFAULT_SETTINGS) == []

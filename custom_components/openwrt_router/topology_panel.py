@@ -283,12 +283,16 @@ class _IntelView(HomeAssistantView):
 
     @staticmethod
     async def _body(request: web.Request) -> Any:
-        """JSON body; raises ``QueryError`` when it is not JSON."""
+        """JSON body; raises ``QueryError`` when it is not JSON.
+
+        ``RecursionError``: too deeply nested for the parser (a bad body,
+        not a server error).
+        """
         from .net_query import QueryError
 
         try:
             return await request.json()
-        except ValueError:
+        except (ValueError, RecursionError):
             raise QueryError("body: JSON expected") from None
 
 
