@@ -352,7 +352,7 @@ einen Router.
 | Schlüssel (`translation_key`) | Typ | Wert |
 |---|---|---|
 | `config_last_backup` | Sensor, Zeitstempel | Zeitpunkt der neuesten brauchbaren Version |
-| `config_backup_status` | Sensor, Aufzählung | `ok`, `partial`, `failed`, `running`, `disabled`, `never`; Attribute `error_class`, `last_attempt_at`, `next_run_at` |
+| `config_backup_status` | Sensor, Aufzählung | `ok`, `partial`, `failed`, `running`, `disabled`, `never`; Attribute `error_class`, `error_reason` (Grund bei `failed`, z. B. `insecure_transport`; nach einem HA-Neustart leer), `last_attempt_at`, `next_run_at` |
 | `config_versions` | Sensor, Zähler, Kategorie „Diagnose“ | Zahl gespeicherter Versionen |
 | `config_drift` | Binärsensor, Problem | an bei offener, unbestätigter Drift; unbekannt, solange nie geprüft; Attribute `drift_id`, `critical_count`, `unknown_count`, `comparison`, `checked_at` |
 

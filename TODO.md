@@ -86,6 +86,11 @@ Branch `claude/config-manager-d9fdac`. Nutzerdoku: `docs/configuration-manager.m
       und Nicht-Admin, Desktop und Handy.
 - [ ] `docs/enterprise-core.md` an 1.45.0 anpassen („Kein Backup-Modul enthalten“, „Keine
       Oberfläche für Freigaben“).
+- [ ] **Option „zweiter Admin muss Export freigeben“.** Heute darf der Anfordernde seinen
+      eigenen Export freigeben (das Audit vermerkt die Selbstfreigabe); als Option soll eine
+      Freigabe durch einen anderen Admin erzwungen werden können.
+- [ ] **`authSig` auf GET-Routen ablehnen.** Lesende Routen sollen eine mitgeschickte
+      Signatur nicht still annehmen, sondern die Anfrage mit 400 abweisen.
 
 ### Client-Stabilität (Plan `docs/plans/2026-11-16-client-stability.md`, 1.42.0)
 
