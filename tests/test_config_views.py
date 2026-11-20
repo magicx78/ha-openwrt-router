@@ -602,13 +602,34 @@ async def test_body_is_limited_to_4_kb(disks, tmp_path):
     ids=["top_level", "in_a_field"],
 )
 async def test_deeply_nested_body_is_400_not_500(disks, tmp_path, raw):
-    """L2: nesting the JSON parser cannot follow (RecursionError) is a bad body."""
+    """L2: nesting the JSON parser cannot follow is a bad body, never a 500.
+
+    Python 3.13 raises RecursionError for this input, Python 3.14 reports a
+    plain JSON error; either way the route must answer 400.
+    """
     env = await cm_env(disks, tmp_path)
     assert len(raw) <= cv.BODY_MAX_BYTES  # inside the 4 KiB limit
-    with pytest.raises(RecursionError):
-        json.loads(raw)  # what the route met before the fix (500)
     async with http(env.hass) as h:
         resp = await h.post(f"/routers/{env.rid}/backup", raw=raw)
+        assert resp.status == 400
+        assert resp.data["code"] == "invalid_request"
+        assert resp.data["details"]["field"] == "body"
+        assert resp.data["details"]["reason"] in {"invalid_body", "not_json"}
+    assert env.provider.ops("collect") == []
+    await stop(env)
+
+
+async def test_recursion_error_in_the_parser_is_400(disks, tmp_path, monkeypatch):
+    """L2 on every interpreter: a RecursionError from the parser is a bad body."""
+    env = await cm_env(disks, tmp_path)
+
+    def too_deep(_raw):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    async with http(env.hass) as h:
+        monkeypatch.setattr(cv.json, "loads", too_deep)
+        resp = await h.post(f"/routers/{env.rid}/backup", raw=b'{"note": "x"}')
+        monkeypatch.undo()
         assert resp.status == 400
         assert resp.data["code"] == "invalid_request"
         assert resp.data["details"] == {"field": "body", "reason": "invalid_body"}
