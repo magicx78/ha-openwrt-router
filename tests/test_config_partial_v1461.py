@@ -277,18 +277,36 @@ def _with_warnings(*codes: str) -> Any:
     return hook
 
 
+# Fixed path codes the panel turns into text (PR 59 review R7): the items an
+# HTTP entry produces (cgi never asked, SSH pin pending) among them.
+_PATH_CODES = (
+    "archive_not_attempted:ssh.pin_pending",
+    "archive_not_attempted:cgi.insecure_transport",
+    "archive_not_attempted:cgi.not_probed",
+    "archive_unavailable:cgi.insecure_transport",
+    "archive_unavailable:ssh.denied",
+    "archive_unavailable:ssh.auth",
+)
+
+
 async def test_host_key_reason_reaches_the_panel_unmasked(disks, tmp_path):
     env = await cm_env(disks, tmp_path)
     env.provider.collect_hook = _with_warnings(
-        "ssh_host_key:pin_pending", "ssh_host_key:a1b2c3d4e5f6"
+        "ssh_host_key:pin_pending", "ssh_host_key:a1b2c3d4e5f6", *_PATH_CODES
     )
     async with http(env.hass) as h:
         made = await backup(h, env.rid)
         assert "ssh_host_key:pin_pending" in made["version"]["warnings"]
         one = (await h.get(f"/versions/{made['backup_id']}")).data
         listed = (await h.get(f"/routers/{env.rid}/versions")).data["versions"][0]
-        for warnings in (one["warnings"], listed["warnings"]):
+        for warnings in (
+            made["version"]["warnings"],
+            one["warnings"],
+            listed["warnings"],
+        ):
             assert "ssh_host_key:pin_pending" in warnings
+            for code in _PATH_CODES:
+                assert code in warnings, code
             # Anything outside the fixed reason codes stays masked.
             assert "ssh_host_key:a1b2c3d4e5f6" not in warnings
             assert "ssh_host_key:**REDACTED**" in warnings
