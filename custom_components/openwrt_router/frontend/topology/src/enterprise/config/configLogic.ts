@@ -170,8 +170,8 @@ export const ACTOR_LABEL: Record<string, string> = {
 export const SCHEDULE_LABEL: Record<string, string> = { daily: 'Täglich', off: 'Aus' };
 
 export const INSECURE_TRANSPORT_TEXT =
-  'Kein Archiv über HTTP: Der Router ist ohne TLS eingebunden. Archiv-Backups laufen dann nur über SSH mit '
-  + 'bestätigtem Hostkey; sonst wird nur der UCI-Snapshot gesichert. Empfohlen: Router-Eintrag auf HTTPS umstellen.';
+  'Kein Archiv über HTTP: Der Router ist ohne TLS eingebunden. Archiv-Backups laufen dann nur über SSH als root mit '
+  + 'bestätigtem Hostkey; ohne diesen Weg schlägt das Backup fehl. Empfohlen: Router-Eintrag auf HTTPS umstellen.';
 
 export const CAP_REASON_TEXT: Record<string, string> = {
   insecure_transport: INSECURE_TRANSPORT_TEXT,

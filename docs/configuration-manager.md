@@ -101,8 +101,11 @@ ein ungültiges Archiv auf dem ersten Weg führt dagegen zum zweiten Weg.
 **Router ohne Archivweg** (weder `cgi-io` noch root-SSH) bekommen nur den Snapshot: Die
 Version hat dann den Typ `uci_snapshot` und gilt als vollständig (Status `ok`), enthält aber
 **kein** Archiv. Das Panel zeigt „Nur UCI-Snapshot“; eine Wiederherstellung über LuCI oder
-`sysupgrade -r` ist damit nicht möglich. Liefert der Weg einen echten Fehler (zum Beispiel
-Zeitüberschreitung), der Snapshot aber gelingt, ist die Version `partial` mit der
+`sysupgrade -r` ist damit nicht möglich. Das gilt nur für HTTPS-Einträge: Ein **HTTP-Eintrag**
+fordert bei jedem Backup ohne festen Typ das Archiv an; ohne root-SSH schlägt das Backup fehl
+(Status `failed`, Grund `insecure_transport`) statt still nur den Snapshot zu sichern.
+
+Liefert der Archivweg einen echten Fehler (zum Beispiel Zeitüberschreitung), der Snapshot aber gelingt, ist die Version `partial` mit der
 Fehlerklasse des Archivs und zählt nicht als Bezugsbasis.
 
 Den Snapshot liest der Manager zuerst per ubus (`uci get`); verweigert rpcd das, liest er mit

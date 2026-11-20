@@ -921,6 +921,21 @@ def _probe_status(
     )
 
 
+def _probed_backup_type(
+    secure: bool, cgi_class: str | None, ssh_class: str | None
+) -> BackupType:
+    """Backup type a run gets when its caller names none (from one probe).
+
+    Plain HTTP always asks for the archive: the collect takes it over the
+    pinned SSH path or rejects the run (``insecure_transport``), never a
+    silent UCI-only "ok". TLS keeps the core's own rule: an archive when the
+    probe found an archive path available.
+    """
+    if not secure or cgi_class is None or ssh_class is None:
+        return BackupType.FULL_ARCHIVE
+    return BackupType.UCI_SNAPSHOT
+
+
 def _as(capability: str, status: CapabilityStatus) -> CapabilityStatus:
     return replace(status, capability=capability, detail={})
 
@@ -982,6 +997,9 @@ class ConfigManagerProvider:
         # router id -> reason of the last pin refusal (memory only; cleared
         # by the next pinned SSH read that runs).
         self._pin_refusals: dict[str, str] = {}
+        # router id -> backup type of a run without one, from the last probe
+        # (memory only; the core keeps only this provider's probe results).
+        self._probed_types: dict[str, BackupType] = {}
 
     @property
     def provider_id(self) -> str:
@@ -996,6 +1014,14 @@ class ConfigManagerProvider:
     def supported(self, router: RouterRecord) -> bool:
         """Cheap, synchronous pre-check (no router call)."""
         return router.state is RecordState.ACTIVE
+
+    def default_backup_type(self, record: RouterRecord) -> BackupType:
+        """The core's choice hook for a run without a backup type.
+
+        Set by the last probe; an unprobed router gets a UCI snapshot (the
+        core does not run a backup before a probe anyway).
+        """
+        return self._probed_types.get(record.router_id, BackupType.UCI_SNAPSHOT)
 
     # -- shared helpers ----------------------------------------------------
 
@@ -1277,6 +1303,9 @@ class ConfigManagerProvider:
                 api, known, self._timeouts[FETCH_PACKAGELIST]
             )
             ssh_class = self._ssh_class(router_id, api, ctx)
+        self._probed_types[router_id] = _probed_backup_type(
+            api.config_cgi_transport_secure(), cgi_class, ssh_class
+        )
 
         now = utcnow()
         uci = _probe_status(

@@ -251,6 +251,10 @@ test('insecure_transport explains HTTPS / SSH and never points to the ACL', () =
   for (const key of ['insecure_transport', 'provider:insecure_transport']) {
     assert.match(CAP_REASON_TEXT[key] ?? '', /Kein Archiv über HTTP/);
     assert.match(CAP_REASON_TEXT[key], /HTTPS/);
+    // HTTP without root SSH fails the backup; no silent UCI-only fallback.
+    assert.match(CAP_REASON_TEXT[key], /root/);
+    assert.match(CAP_REASON_TEXT[key], /schlägt das Backup fehl/);
+    assert.doesNotMatch(CAP_REASON_TEXT[key], /nur der UCI-Snapshot/);
   }
   const r = router({ status: 'failed', error_class: 'not_available', error_reason: 'insecure_transport' });
   assert.equal(r.errorReason, 'insecure_transport');
