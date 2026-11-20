@@ -344,3 +344,98 @@ class TestPersonalDataRedaction:
             "signal_max": None,
             "signal_avg": None,
         }
+
+
+# =====================================================================
+# Configuration manager block (plan 2026-11-18); more in
+# tests/test_config_diagnostics.py
+# =====================================================================
+
+class TestConfigManagerDiagnostics:
+    @pytest.mark.asyncio
+    async def test_block_present_without_runtime(self, pii_entry):
+        result = await async_get_config_entry_diagnostics(MagicMock(), pii_entry)
+        assert result["config_manager"] == {"loaded": False}
+
+
+_CM_SECRET = "S3cr3t-pa55"  # in the fake provider's live configuration
+
+
+@pytest.fixture
+def cm_disks():
+    from core_testkit import FakeDisks
+
+    with FakeDisks().patch() as fake:
+        yield fake
+
+
+@pytest.fixture
+def cm_tmp():
+    import pathlib
+    import tempfile
+
+    with tempfile.TemporaryDirectory(
+        prefix="owrt", ignore_cleanup_errors=True
+    ) as folder:
+        yield pathlib.Path(folder)
+
+
+class TestConfigManagerBlock:
+    @pytest.mark.asyncio
+    async def test_block_has_no_secret_and_no_user_id(
+        self, cm_disks, cm_tmp, mock_config_entry_with_runtime, caplog
+    ):
+        from config_manager_kit import cm_env, stop
+        from core_testkit import ADMIN_ID, user_actor
+
+        caplog.set_level("DEBUG")
+        env = await cm_env(cm_disks, cm_tmp)
+        runtime = env.runtime
+        await runtime.async_backup_now(
+            env.rid, actor=user_actor(ADMIN_ID), note="weekly check"
+        )
+        live = env.provider.live(env.rid)
+        live["firewall"] = {**live["firewall"], "changed": {"x": "1"}}
+        report = await runtime.async_check_drift(env.rid, actor=user_actor(ADMIN_ID))
+        entry = mock_config_entry_with_runtime
+        entry.entry_id = env.entries[0].entry_id
+
+        result = await async_get_config_entry_diagnostics(env.hass, entry)
+
+        block = result["config_manager"]
+        assert block["loaded"] is True
+        assert block["provider_registered"] is True
+        assert block["stats"]["drift_checks"] == 1
+        backup = block["backup"]
+        assert backup["enabled"] is True
+        assert backup["status"] == "ok"
+        assert backup["version_count"] == 1
+        assert backup["drift"]["state"] == "open"
+        assert backup["drift"]["critical_count"] == 1
+        dump = json.dumps(result, default=str)
+        assert _CM_SECRET not in dump
+        assert ADMIN_ID not in dump
+        block_dump = json.dumps(block, default=str)
+        assert "weekly check" not in block_dump
+        assert env.rid not in block_dump
+        assert report.drift_id not in block_dump
+        assert _CM_SECRET not in caplog.text
+        await stop(env)
+
+    @pytest.mark.asyncio
+    async def test_block_with_the_option_off(self, cm_disks, cm_tmp):
+        from config_manager_kit import cm_env, stop
+
+        from custom_components.openwrt_router.diagnostics import (
+            _config_manager_summary,
+        )
+
+        env = await cm_env(cm_disks, cm_tmp, options={})
+        block = _config_manager_summary(env.hass, env.entries[0].entry_id)
+        assert block["backup"]["enabled"] is False
+        assert block["backup"]["status"] == "disabled"
+        assert block["backup"]["next_run_at"] is None
+        assert block["backup"]["drift"] is None
+        assert _config_manager_summary(env.hass, "unknown")["backup"] is None
+        assert env.provider.calls == []
+        await stop(env)

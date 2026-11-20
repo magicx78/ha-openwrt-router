@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-18 · Version: v1.44.0
+Stand: 2026-11-19 · Version: v1.45.0
 
 ---
 
@@ -17,13 +17,13 @@ Branch `claude/enterprise-core-49ade2`. Nutzerdoku: `docs/enterprise-core.md`, V
       verteilen, `rf.*` aus der verteilten ACL, Option `config_backup_enabled`
       (Standard aus), SSH-Host-Key-Pins je Router mit Bestätigung, Urteile Q3–Q6,
       Andocken von Security Center, Netzwerkdiagnose und WiFi RF.
-- [ ] **Oberfläche für Freigaben:** Anträge (Export, Löschen, ACL verteilen,
-      SSH-Pin bestätigen/zurücksetzen) gibt es nur über die Python-API; kein
-      Panel-Tab, kein Service, kein WebSocket-Befehl. Erst nötig, wenn ein Modul
-      sie auslöst.
-- [ ] **Backup-Engine (`config-manager`) als Provider** einbauen; bis dahin sind alle
-      `config.*` nicht verfügbar und der Schalter `config_backup_enabled` erscheint
-      nicht.
+- [x] **Oberfläche für Freigaben** (1.45.0, nur was der Configuration Manager braucht):
+      Export, ACL-Angebot `config_backup_read` und SSH-Pin bestätigen/zurücksetzen
+      im Panel „Enterprise → Konfiguration“.
+- [ ] **Oberfläche für Freigaben für andere Module und für „Löschen“:** es gibt weiter
+      keinen Panel-Tab, Service oder WebSocket-Befehl für `delete`,
+      `installation_key_reset` und die Anträge anderer Module.
+- [x] **Backup-Engine (`config-manager`) als Provider** (1.45.0): siehe unten.
 - [ ] **`rf.*` nur aus der eigenen ACL-Datei:** Rechte aus anderen Dateien in
       `/usr/share/rpcd/acl.d/` sieht der Core nicht (dann `permission_denied`, obwohl
       rpcd es erlaubt).
@@ -49,6 +49,48 @@ Branch `claude/enterprise-core-49ade2`. Nutzerdoku: `docs/enterprise-core.md`, V
       ab 2026.12 ein Fehler).
 - [ ] Auf Hardware prüfen (nur lesend, mit Freigabe): Router-IDs und Capabilities
       nach einem HA-Neustart, `rf.*` je Router.
+
+### Configuration Manager (Pläne `docs/plans/2026-11-17-config-manager.md`, `docs/plans/2026-11-18-config-manager-integration.md`, 1.45.0)
+
+Branch `claude/config-manager-d9fdac`. Nutzerdoku: `docs/configuration-manager.md`.
+
+- [x] Phase 1: Backup (Archiv, UCI-Snapshot, Inventar), Zeitplan, Dienst
+      `openwrt_router.create_config_backup`, Versionen mit Dedup und GFS-Aufbewahrung (Core),
+      Drift mit Bereichen und Risikostufen, Diff, Restore-Prüfung, Sensoren, Panel-Tab
+      „Konfiguration“, Export mit Freigabe, Diagnose.
+- [ ] **Automatischer Restore auf UCI-Ebene mit `uci apply`-Rollback** als spätere Phase
+      (Phase 2). Phase 1 spielt nichts zurück; die Wiederherstellung bleibt manuell und ist
+      nicht automatisch umkehrbar.
+- [ ] **Verschlüsselung der Archive** auf der Platte (Phase 1 speichert im Klartext mit
+      Dateirechten `0700`/`0600`; Schutz nur über Dateirechte und HA-Backup-Verschlüsselung).
+- [ ] **Vergleich zwischen verschiedenen Routern** (Panel und Dienst vergleichen nur
+      Versionen desselben Routers).
+- [ ] **Löschen von Versionen im Panel** (heute nur die Aufbewahrung; kein Lösch-Weg für
+      Admins) und **Beschreibung nachträglich ändern**.
+- [ ] **Messung der echten Last** an Geräten: Laufzeit und Größe von `sysupgrade -b`, Last auf
+      dem Router während des Archivs, Größe des Speichers nach einigen Wochen.
+- [ ] **Dedup über byte-gleiche Dateien** (Core seit 1.44.0) mit echten Archiven prüfen; wenn
+      Archive nie byte-gleich sind, wächst der Speicher täglich. Gegebenenfalls Core-Regel
+      lockern.
+- [ ] **Größenlimit der Aufbewahrung im Core:** manuelle Versionen werden erst nach allen
+      anderen entfernt; eine geplante Version kann früher fallen als nötig
+      (`tests/test_config_retention_acceptance.py`, strikter `xfail`).
+- [ ] **Freier Platz auf dem Router** für die Restore-Prüfung lesen (`insufficient_space`
+      kann heute nie auslösen, `Inventory.free_bytes` bleibt leer).
+- [ ] **Automatische Drift-Prüfung deckt nur Poll-Daten ab** (Fingerprint); Änderungen an
+      Firewall, Dropbear und Ähnlichem ohne Poll-Spur erscheinen erst bei der manuellen Prüfung
+      oder beim Vergleich mit dem aktuellen Stand. Prüfen, ob ein seltener Lauf alle 14
+      Configs nachziehen soll.
+- [ ] **Auf Hardware prüfen** (nur lesend, mit Freigabe): Backup über `cgi-backup` und über
+      SSH, Router ohne `rpc-sys`, Router ohne `cgi-io`, Panel im echten Home Assistant als Admin
+      und Nicht-Admin, Desktop und Handy.
+- [ ] `docs/enterprise-core.md` an 1.45.0 anpassen („Kein Backup-Modul enthalten“, „Keine
+      Oberfläche für Freigaben“).
+- [ ] **Option „zweiter Admin muss Export freigeben“.** Heute darf der Anfordernde seinen
+      eigenen Export freigeben (das Audit vermerkt die Selbstfreigabe); als Option soll eine
+      Freigabe durch einen anderen Admin erzwungen werden können.
+- [ ] **`authSig` auf GET-Routen ablehnen.** Lesende Routen sollen eine mitgeschickte
+      Signatur nicht still annehmen, sondern die Anfrage mit 400 abweisen.
 
 ### Client-Stabilität (Plan `docs/plans/2026-11-16-client-stability.md`, 1.42.0)
 

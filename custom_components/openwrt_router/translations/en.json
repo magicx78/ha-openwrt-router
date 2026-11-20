@@ -7,13 +7,19 @@
           "extended_wifi_sensors": "Extended Wi-Fi sensors (radio, AP, port)",
           "topology_port_debug": "Port mapping debug data in topology snapshot",
           "topology_panel_all_users": "Show topology panel to all users",
-          "config_backup_enabled": "Configuration backup (config_backup_enabled)"
+          "config_backup_enabled": "Configuration backup (config_backup_enabled)",
+          "config_backup_schedule": "Automatic configuration backup (config_backup_schedule)",
+          "config_backup_time": "Time of the daily backup (config_backup_time)",
+          "config_drift_check": "Check for configuration changes (config_drift_check)"
         },
         "data_description": {
           "extended_wifi_sensors": "Enables all per-radio, per-SSID (AP) and per-port sensors of this router at once instead of one by one. Turning it off disables only the sensors this switch enabled; sensors you disabled yourself are never touched. Takes effect after about 30 seconds.",
           "topology_port_debug": "Include the raw per-port mapping trace (FDB/DHCP/ARP matches and assignment reasons) in the topology snapshot endpoint. HA diagnostics always stay redacted.",
           "topology_panel_all_users": "Makes the Network Topology sidebar panel and its snapshot API available to every Home Assistant user, not only administrators. The topology contains DHCP leases, ARP/switch tables, the WAN IP and DDNS details. The panel is shared by all routers: it is open to all users as soon as one router has this enabled.",
-          "config_backup_enabled": "Allows the configuration backup of this router (all config.* capabilities and the optional ACL tier 'config_backup_read'). Off by default. The switch is shown once a configuration provider (backup engine) is installed or while it is on; without a provider it has no effect. Turning it off stops every backup, probe and comparison for this router at once; stored versions stay. Warning: a backup contains ALL router secrets: /etc/shadow (password hashes of every router login, including root), private keys (SSH host keys, VPN and TLS keys) and the Wi-Fi, VPN and DDNS passwords."
+          "config_backup_enabled": "Allows the configuration backup of this router (all config.* capabilities and the optional ACL tier 'config_backup_read'). Off by default. The switch is shown once a configuration provider (backup engine) is installed or while it is on; without a provider it has no effect. Turning it off stops every backup, probe and comparison for this router at once; stored versions stay. Warning: a backup contains ALL router secrets: /etc/shadow (password hashes of every router login, including root), private keys (SSH host keys, VPN and TLS keys) and the Wi-Fi, VPN and DDNS passwords.",
+          "config_backup_schedule": "Daily: one backup per day at the time below; each router starts at its own fixed offset of up to one hour, so they never run at the same time. Off: only manual backups and drift versions. Has an effect only while the configuration backup is on.",
+          "config_backup_time": "Local time of Home Assistant. A daily run missed while Home Assistant was off is made up later the same day.",
+          "config_drift_check": "Compares the router with its last version when the polled data shows a configuration-near change (5 minutes after the change, at most once per hour). A detected change is saved as a new version (at most four per day). Off: no drift checks."
         }
       }
     }
@@ -98,6 +104,26 @@
       },
       "fleet_incident_critical": {
         "name": "Fleet critical incident"
+      },
+      "config_drift": {
+        "name": "Configuration drift",
+        "state_attributes": {
+          "drift_id": {
+            "name": "Drift ID"
+          },
+          "critical_count": {
+            "name": "Critical changes"
+          },
+          "unknown_count": {
+            "name": "Unclassified changes"
+          },
+          "comparison": {
+            "name": "Comparison"
+          },
+          "checked_at": {
+            "name": "Checked at"
+          }
+        }
       }
     },
     "sensor": {
@@ -261,6 +287,34 @@
       },
       "client_last_disconnect": {
         "name": "{client} last disconnect"
+      },
+      "config_last_backup": {
+        "name": "Last configuration backup"
+      },
+      "config_backup_status": {
+        "name": "Configuration backup status",
+        "state": {
+          "ok": "OK",
+          "partial": "Partial",
+          "failed": "Failed",
+          "running": "Running",
+          "disabled": "Disabled",
+          "never": "Never"
+        },
+        "state_attributes": {
+          "error_class": {
+            "name": "Error class"
+          },
+          "last_attempt_at": {
+            "name": "Last attempt"
+          },
+          "next_run_at": {
+            "name": "Next run"
+          }
+        }
+      },
+      "config_versions": {
+        "name": "Configuration versions"
       }
     },
     "switch": {
@@ -289,6 +343,24 @@
     },
     "update_check_running": {
       "message": "An update check is already running on this router. Wait for its result."
+    },
+    "config_backup_unknown_device": {
+      "message": "The device {device_id} is not an OpenWrt router of this integration."
+    },
+    "config_backup_disabled": {
+      "message": "The configuration backup is switched off for {router}. Turn it on in the integration options first."
+    },
+    "config_backup_not_ready": {
+      "message": "The configuration manager is not running yet. Try again once the routers are loaded."
+    },
+    "config_backup_denied": {
+      "message": "Creating a configuration backup was denied for this user."
+    },
+    "config_backup_failed": {
+      "message": "The configuration backup failed ({error_class})."
+    },
+    "config_backup_invalid_note": {
+      "message": "The note is too long or contains control characters."
     }
   },
   "issues": {
@@ -319,6 +391,30 @@
     "router_unreachable": {
       "title": "OpenWrt router {router} unreachable",
       "description": "The router {router} has not answered since {since} (error type: {error_type}).\n\nCheck power, cabling and the rpcd/uhttpd services on the router.\n\nThis message disappears automatically as soon as the router answers again."
+    }
+  },
+  "selector": {
+    "config_backup_schedule": {
+      "options": {
+        "daily": "Daily",
+        "off": "Off (manual backups only)"
+      }
+    }
+  },
+  "services": {
+    "create_config_backup": {
+      "name": "Create configuration backup",
+      "description": "Saves a new configuration version of the selected OpenWrt routers, one after another. Needs the configuration backup switched on for each router. Only a changed configuration creates a new version for scheduled runs; a manual backup is always kept.",
+      "fields": {
+        "device_id": {
+          "name": "Router",
+          "description": "One or more OpenWrt router devices of this integration."
+        },
+        "note": {
+          "name": "Note",
+          "description": "Optional note stored with the version (at most 200 characters, no control characters). Never put passwords here."
+        }
+      }
     }
   }
 }

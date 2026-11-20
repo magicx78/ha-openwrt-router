@@ -4,7 +4,98 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
-### Added
+## [1.45.0] - 2026-11-19
+
+Configuration Manager: Konfigurations-Backup für OpenWrt-Router in Home Assistant, auf dem
+Enterprise Core von 1.44.0. **Standardmäßig aus** (Option `config_backup_enabled` je Router);
+bei ausgeschaltetem Backup gibt es **0 zusätzliche Router-Aufrufe**, keine neue Datei auf der
+Platte und keine geänderte `unique_id` oder Entity-ID. Nutzerdoku: `docs/configuration-manager.md`.
+
+### Hinzugefügt
+
+- **Backups mit Versionen:** je Router ein wiederherstellbares Archiv (`sysupgrade -b`-Format,
+  über den LuCI-Endpunkt `cgi-backup`, sonst per SSH als root), ein normalisierter
+  UCI-Snapshot für Vergleiche und ein Paket- und Systeminventar. Router ohne Archivweg
+  bekommen nur den Snapshot. Dedup über den Inhalts-Hash, Aufbewahrung 7 täglich / 4
+  wöchentlich / 6 monatlich, geschützte Versionen, Prüfsummen (Core).
+- **Zeitplan:** täglicher Lauf zur eingestellten Uhrzeit mit festem Versatz je Router (bis
+  59 min), ein Lauf zurzeit (Parallelität 1), Nachholen nach HA-Start, ein Nachversuch nach
+  15 min; zusätzlich ein Backup 300 s nach einem erkannten Release-Wechsel.
+- **Drift-Erkennung:** Vergleich des aktuellen UCI-Stands mit der Bezugsversion, Bereiche
+  und Risikostufen, kritisch bei Management-IP, VLAN, Firewall, SSH-Zugriff, Uplink und
+  Web-Verwaltung; bestätigen oder als bekannt markieren, nie automatisches Zurücksetzen;
+  „nicht vergleichbar“ ist ein eigener Zustand. Automatische Prüfung nach 5 min Entprellung,
+  höchstens einmal je Stunde, höchstens 4 Drift-Versionen je Router und Tag.
+- **Diff-Ansicht:** hinzugefügt / entfernt / geändert, nach Bereich und Risiko, Geheimwerte nur
+  als „geändert“.
+- **Restore-Prüfung:** Kompatibilität (blockierend: anderes Board, anderes Switch-Modell,
+  ungültiges Archiv, falsche Prüfsumme), Vorschau und Risiken, Anleitung für die manuelle
+  Wiederherstellung und eine Prüfliste danach.
+- **Panel:** Enterprise → Konfiguration (nur Administratoren): Übersicht, Router-Detail,
+  Versionen, Drift, Vergleich, Export mit Freigabe, Zugang (SSH-Pin, ACL-Angebot).
+- **Sensoren je Router:** `config_last_backup`, `config_backup_status`, `config_versions`
+  (Diagnose) und der Binärsensor `config_drift`.
+- **Dienst `openwrt_router.create_config_backup`** (`device_id`, optional `note`) mit
+  Antwort je Router; als Schritt vor einem Firmware-Update gedacht (die Integration hat keinen
+  eigenen Update-Pfad).
+- **Optionen** `config_backup_schedule` (`daily` / `off`, Vorgabe `daily`),
+  `config_backup_time` (Vorgabe `03:30:00`) und `config_drift_check` (Vorgabe an), nur sichtbar,
+  wenn der Backup-Provider angemeldet ist oder das Backup an ist.
+- **Diagnose:** Block `config_manager` ohne Snapshots, Diffs, Notizen und Benutzer-IDs.
+
+### Sicherheit
+
+- **Nur Administratoren:** alle Routen des Managers (403 für alle anderen, auch bei offenem
+  Topologie-Panel), `Cache-Control: no-store`, Benutzer-IDs nur als Pseudonym.
+- **Maskierung auf dem Server** für Antworten, Logs, Ereignisse und Diagnose; Geheimwerte
+  stehen im Snapshot nur als gesalzene HMAC-Prüfwerte.
+- **Archivprüfung ohne Entpacken:** Pfade, Symlinks, Größen- und Verhältnisgrenzen (höchstens
+  16 MiB komprimiert, 64 MiB entpackt, 5000 Mitglieder).
+- **Export nur mit Freigabe:** Antrag, Bestätigung, genau ein Download je Freigabe (15 min
+  gültig), neu berechnete Prüfsumme vor der Auslieferung, Eintrag im Audit-Log.
+- **Ablage** unter `<HA-Konfiguration>/openwrt_router/config_backups/` (Ordner `0700`,
+  Dateien `0600`), nie unter `www`; nichts geht an externe Dienste.
+
+### Hinweise
+
+- **Standardmäßig aus.** Einschalten je Router in den Optionen (`config_backup_enabled`).
+- **Neue Router-Rechte nur auf Angebot.** Die ACL-Stufe `config_backup_read` (`cgi-io: backup`,
+  `uci`, `rpc-sys: packagelist`, alle lesend) wird nur bei eingeschaltetem Backup angeboten und
+  erst nach ausdrücklicher Einzelfreigabe eines Admins auf den Router geschrieben. **Sie gibt
+  Home Assistant Lesezugriff auf alle Geheimnisse des Routers.**
+- **Keine automatische Wiederherstellung.** Die Integration spielt nichts auf einen Router
+  zurück; die Wiederherstellung machen Sie von Hand (LuCI oder `sysupgrade -r`) und ist nicht
+  automatisch umkehrbar.
+- **Archive enthalten WLAN-Passwörter, Schlüssel und Passwort-Hashes im Klartext.** Keine eigene
+  Verschlüsselung; HA-Backups verschlüsseln.
+- Keine Migration nötig: bestehende `unique_id`s und Entity-IDs bleiben; der Manager hängt sich
+  nicht in den Poll (`coordinator.py` ist unverändert).
+
+### Sicherheit
+
+- **Host-Key-Pinning für das SSH des Managers:** Archiv per `sysupgrade`, `uci show` und
+  Paketliste laufen nur über den gepinnten SSH-Weg des Cores (erster Key ausstehend bis zur
+  Bestätigung, abweichender Key abgelehnt); Fehlerklasse `denied` mit Grund `ssh_<grund>`.
+- **Routen-Pseudonyme mit Modul-Schlüssel:** Benutzer-Pseudonyme in den Antworten der Routen
+  sind mit dem abgeleiteten Modul-Schlüssel des Cores gesalzen.
+
+### Bekannte Einschränkungen
+
+Ausführlich in `docs/configuration-manager.md`, Abschnitt 13.
+
+- SSH des Managers nur mit bestätigtem Host-Key: bis zur Bestätigung im Panel kein Archiv
+  und keine UCI-Daten per SSH.
+- Größenlimit der Aufbewahrung (Core): eine gute geplante Version kann früher fallen als nötig.
+- Dedup verlangt neben dem Inhalts-Hash byte-gleiche Dateien (Core seit 1.44.0).
+- Die Warnung „zu wenig Platz auf dem Router“ der Restore-Prüfung erscheint nicht (der freie
+  Platz wird nicht gelesen).
+- Kein Löschen im Panel, Beschreibung nur beim Anlegen, keine Vergleiche zwischen Routern,
+  Freigaben gehen bei einem HA-Neustart verloren.
+- Laufzeit und Größe eines echten `sysupgrade -b` wurden nicht an Geräten gemessen.
+
+### Nachträge zum Enterprise Core (aus PR #56, jetzt in 1.45.0)
+
+#### Added
 
 - Enterprise Core: Module bekommen einen eigenen, abgeleiteten Schlüssel
   (`api.async_get_module_key(module, purpose)`, HKDF-SHA256 aus dem
@@ -32,7 +123,7 @@ All notable changes to the OpenWrt Router integration will be documented in this
   `client_ref` (nur als Pseudonym `cli_…`), `confidence`, `classification`,
   `incident_ref`, `radio_id`.
 
-### Changed
+#### Changed
 
 - Enterprise Core, Maskierung: Nennt ein Record sein Feld in mehreren Namensfeldern
   (`key`, `name`, `field`, `param`, `parameter`, `setting`), werden alle geprüft; ein

@@ -19,6 +19,14 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNA
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+# Selectors of the configuration manager options (plan 2026-11-18, section 2)
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TimeSelector,
+)
+
 from .api import (
     OpenWrtAPI,
     OpenWrtAuthError,
@@ -32,6 +40,10 @@ from .const import (
     CONF_PROTOCOL,
     CONF_TOPOLOGY_PANEL_ALL_USERS,
     CONF_TOPOLOGY_PORT_DEBUG,
+    CONFIG_BACKUP_SCHEDULES,
+    DEFAULT_CONFIG_BACKUP_SCHEDULE,
+    DEFAULT_CONFIG_BACKUP_TIME,
+    DEFAULT_CONFIG_DRIFT_CHECK,
     DEFAULT_EXTENDED_WIFI_SENSORS,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL,
@@ -51,6 +63,9 @@ from .const import (
     ERROR_TIMEOUT,
     ERROR_UNKNOWN,
     OPT_EXTENDED_WIFI_PREEXISTING,
+    OPTION_CONFIG_BACKUP_SCHEDULE,
+    OPTION_CONFIG_BACKUP_TIME,
+    OPTION_CONFIG_DRIFT_CHECK,
     PROTOCOL_HTTP,
     PROTOCOL_HTTPS,
     PROTOCOL_HTTPS_INSECURE,
@@ -195,7 +210,38 @@ class OpenWrtOptionsFlow(OptionsFlow):
                     ): bool,
                 }
             )
+            # --- Configuration manager options (plan 2026-11-18, section 2):
+            # shown together with config_backup_enabled; read on every
+            # schedule tick, so no update listener and no reload.
+            schema = schema.extend(_config_manager_option_fields(opts))
+            # --- end configuration manager options
         return self.async_show_form(step_id="init", data_schema=schema)
+
+
+# --- Configuration manager options (plan 2026-11-18, section 2)
+def _config_manager_option_fields(opts: Any) -> dict[Any, Any]:
+    """Schedule, time and drift check of the configuration manager."""
+    schedule = opts.get(OPTION_CONFIG_BACKUP_SCHEDULE, DEFAULT_CONFIG_BACKUP_SCHEDULE)
+    if schedule not in CONFIG_BACKUP_SCHEDULES:
+        schedule = DEFAULT_CONFIG_BACKUP_SCHEDULE
+    at = opts.get(OPTION_CONFIG_BACKUP_TIME, DEFAULT_CONFIG_BACKUP_TIME)
+    if not isinstance(at, str) or not at:
+        at = DEFAULT_CONFIG_BACKUP_TIME
+    drift = opts.get(OPTION_CONFIG_DRIFT_CHECK, DEFAULT_CONFIG_DRIFT_CHECK)
+    return {
+        vol.Optional(OPTION_CONFIG_BACKUP_SCHEDULE, default=schedule): SelectSelector(
+            SelectSelectorConfig(
+                options=list(CONFIG_BACKUP_SCHEDULES),
+                mode=SelectSelectorMode.DROPDOWN,
+                translation_key=OPTION_CONFIG_BACKUP_SCHEDULE,
+            )
+        ),
+        vol.Optional(OPTION_CONFIG_BACKUP_TIME, default=at): TimeSelector(),
+        vol.Optional(OPTION_CONFIG_DRIFT_CHECK, default=drift is not False): bool,
+    }
+
+
+# --- end configuration manager options
 
 
 def _offer_config_backup_option(hass: Any, opts: Any) -> bool:
