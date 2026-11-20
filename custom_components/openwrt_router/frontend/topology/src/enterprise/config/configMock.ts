@@ -272,6 +272,14 @@ function createMockFetch(scenario: MockScenario, delayMs: number) {
           added: ['cgi-io: backup', 'rpc-sys: packagelist', 'uci: read (14 Konfigurationen)'],
           removed: [],
           risks: ['Das Archiv enthält alle Router-Geheimnisse.', 'rpcd wird einmal neu gestartet.'],
+          target_file: '/usr/share/rpcd/acl.d/ha-openwrt-router.json',
+          rights_added: ['cgi-io: backup', 'rpc-sys: packagelist'],
+          rights_removed: [],
+          rights_unlisted: 1,
+          risk_text: 'MOCK RISK: the backup archive contains all router secrets in plain text.',
+          rollback_text: 'MOCK ROLLBACK: copy the saved file back and restart rpcd.',
+          rollback_template: 'cp /usr/share/rpcd/acl.d/ha-openwrt-router.json.bak-<timestamp> /usr/share/rpcd/acl.d/ha-openwrt-router.json && /etc/init.d/rpcd restart',
+          rollback_template_no_previous: 'rm /usr/share/rpcd/acl.d/ha-openwrt-router.json && /etc/init.d/rpcd restart',
         } });
       }
       if (method === 'POST' && seg[2] === 'ssh-pin' && (seg[3] === 'confirm' || seg[3] === 'reset')) {
@@ -325,6 +333,9 @@ function createMockFetch(scenario: MockScenario, delayMs: number) {
       if (Date.parse(a.expires_at as string) <= now() && a.status !== 'used') set({ status: 'expired' });
       const cur = approvals.get(seg[1]) as Json;
       if (method === 'POST' && seg[2] === 'approve') {
+        if (cur.action === 'export' && body.acknowledge_plaintext !== true) {
+          return fail(400, 'plaintext_not_acknowledged', false, { field: 'acknowledge_plaintext', reason: 'required' });
+        }
         return cur.status === 'pending' ? respond(200, set({ status: 'approved' })) : fail(409, 'approval_invalid');
       }
       if (method === 'POST' && seg[2] === 'reject') return respond(200, set({ status: 'rejected' }));

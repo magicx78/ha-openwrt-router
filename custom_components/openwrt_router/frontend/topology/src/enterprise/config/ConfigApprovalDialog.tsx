@@ -13,6 +13,7 @@ import {
   REASON_LABEL,
   canApprove,
   canDownload,
+  exportApproveOptions,
   exportInit,
   exportReduce,
   formatRelative,
@@ -62,10 +63,11 @@ export function ConfigExportFlow({ api, version, resume, readOnly, onFinished }:
     void run(() => api.requestExport(version.backupId, artifact), approval => dispatch({ type: 'requested', approval }));
   };
   const approve = () => {
-    if (!state.approval || !canApprove(state, Date.now())) return;
+    const options = exportApproveOptions(state, Date.now());
+    if (!state.approval || !options) return;
     const id = state.approval.approvalId;
     dispatch({ type: 'approve' });
-    void run(() => api.approve(id), approval => dispatch({ type: 'approved', approval }));
+    void run(() => api.approve(id, options), approval => dispatch({ type: 'approved', approval }));
   };
   const download = () => {
     if (!state.approval || !canDownload(state, Date.now())) return;
@@ -132,7 +134,7 @@ export function ConfigExportFlow({ api, version, resume, readOnly, onFinished }:
           <label className="diag-check cfg-confirm">
             <input type="checkbox" checked={state.acknowledged}
               onChange={e => dispatch({ type: 'acknowledge', value: e.target.checked })} />
-            Ich habe verstanden, dass die Datei alle Passwörter und Schlüssel im Klartext enthält, und bewahre sie sicher auf.
+            Ich habe verstanden, dass das Archiv Passwörter, Passwort-Hashes und private Schlüssel im Klartext enthält.
           </label>
           <div className="diag-actions">
             {state.step === 'requested' && (

@@ -454,14 +454,39 @@ export function parseApprovals(raw: unknown): Approval[] {
 export function parseAclOffer(raw: unknown): { approval: Approval; offer: AclOffer } {
   const r = obj(raw) ?? {};
   const offer = obj(r.offer) ?? {};
+  const text = (v: unknown): string | null => {
+    const s = str(v);
+    return s !== null && !isMasked(s) ? s : null;
+  };
+  const targetFile = text(offer.target_file);
+  const riskText = text(offer.risk_text);
+  const rollbackText = text(offer.rollback_text);
+  const rollbackTemplate = text(offer.rollback_template);
+  const rollbackTemplateNoPrevious = text(offer.rollback_template_no_previous);
+  const lists = Array.isArray(offer.rights_added) && Array.isArray(offer.rights_removed);
   return {
     approval: parseApproval(obj(r.approval) ?? r),
     offer: {
       added: strList(offer.added ?? offer.add),
       removed: strList(offer.removed ?? offer.remove),
       risks: strList(offer.risks),
+      targetFile,
+      rightsAdded: strList(offer.rights_added),
+      rightsRemoved: strList(offer.rights_removed),
+      rightsUnlisted: Math.max(0, Math.floor(num(offer.rights_unlisted) ?? 0)),
+      riskText,
+      rollbackText,
+      rollbackTemplate,
+      rollbackTemplateNoPrevious,
+      complete: lists && targetFile !== null && riskText !== null && rollbackText !== null
+        && rollbackTemplate !== null && rollbackTemplateNoPrevious !== null,
     },
   };
+}
+
+/** Body of R15: the plaintext acknowledgement only when it was given. */
+export function approveBody(options?: { acknowledgePlaintext?: boolean }): Record<string, true> {
+  return options?.acknowledgePlaintext === true ? { acknowledge_plaintext: true } : {};
 }
 
 // ── Router state and risk ────────────────────────────────────────────────
@@ -584,7 +609,11 @@ export const ERROR_TEXT: Record<string, string> = {
   authorization_denied: 'Nur für Administratoren.',
   approval_required: 'Für diese Aktion fehlt noch die Freigabe.',
   approval_invalid: 'Die Freigabe ist abgelaufen oder schon eingelöst. Bitte neu beantragen.',
-  operation_in_progress: 'Es läuft gerade schon ein Backup. Die Ansicht fragt gleich erneut nach.',
+  operation_in_progress:
+    'Auf diesem Router läuft gerade ein anderer Vorgang (Backup, Drift- oder Live-Prüfung). Bitte gleich erneut versuchen.',
+  rate_limited: 'Zu früh nach dem letzten manuellen Lauf, bitte später erneut versuchen.',
+  plaintext_not_acknowledged:
+    'Die Freigabe des Exports braucht die ausdrückliche Bestätigung, dass das Archiv Geheimnisse im Klartext enthält.',
   version_protected: 'Die Version ist geschützt.',
   provider_conflict: 'Ein anderes Backup-Modul ist angemeldet. Diese Ansicht ist nur lesbar.',
   capability_unavailable: 'Die Funktion ist für diesen Router nicht verfügbar.',
@@ -616,6 +645,7 @@ const STATUS_TEXT: Record<number, string> = {
   410: 'Die Integration ist nicht geladen.',
   413: 'Die Anfrage ist zu groß.',
   422: 'Die Version ist nicht verwendbar.',
+  429: 'Zu früh nach dem letzten manuellen Lauf, bitte später erneut versuchen.',
   500: 'Interner Fehler im Backend.',
   502: 'Fehler beim Router.',
   503: 'Der Configuration Manager ist noch nicht bereit.',
@@ -625,12 +655,14 @@ const STATUS_TEXT: Record<number, string> = {
 
 export type ErrorKind =
   | 'forbidden' | 'gone' | 'unavailable' | 'conflict' | 'disabled' | 'capability'
-  | 'busy' | 'expired' | 'auth' | 'network' | 'other';
+  | 'busy' | 'rate_limited' | 'expired' | 'auth' | 'network' | 'other';
 
 export interface ErrorInfo {
   kind: ErrorKind;
   message: string;
   retry: boolean;
+  /** Seconds from Retry-After (busy, rate_limited); the caller may lock its button that long. */
+  retryAfter: number | null;
 }
 
 function errorKind(e: ConfigApiError): ErrorKind {
@@ -640,6 +672,7 @@ function errorKind(e: ConfigApiError): ErrorKind {
   if (e.status === 410) return 'gone';
   if (e.code === 'provider_conflict') return 'conflict';
   if (e.code === 'operation_in_progress') return 'busy';
+  if (e.code === 'rate_limited' || e.status === 429) return 'rate_limited';
   if (e.code === 'approval_invalid') return 'expired';
   if (e.code === 'capability_unavailable') return e.details.reason === 'disabled' ? 'disabled' : 'capability';
   if (e.status === 503 || e.code === 'core_not_running' || e.code === 'provider_unavailable') return 'unavailable';
@@ -651,19 +684,57 @@ export function errorInfo(err: unknown): ErrorInfo {
   if (!(err instanceof ConfigApiError)) {
     const name = (err as { name?: unknown } | null)?.name;
     if (err instanceof TypeError || name === 'AbortError' || name === 'NetworkError') {
-      return { kind: 'network', message: 'Keine Verbindung zu Home Assistant. Bitte erneut versuchen.', retry: true };
+      return { kind: 'network', message: 'Keine Verbindung zu Home Assistant. Bitte erneut versuchen.', retry: true, retryAfter: null };
     }
-    return { kind: 'other', message: 'Unerwarteter Fehler im Panel.', retry: true };
+    return { kind: 'other', message: 'Unerwarteter Fehler im Panel.', retry: true, retryAfter: null };
   }
   const kind = errorKind(err);
+  const retryAfter = err.retryAfter !== null && err.retryAfter > 0 ? Math.ceil(err.retryAfter) : null;
   let message = ERROR_TEXT[err.code] ?? (err.status !== null ? STATUS_TEXT[err.status] : undefined)
     ?? 'Die Anfrage ist fehlgeschlagen.';
   if (kind === 'disabled') message = OPTION_HINT;
-  else if (kind === 'capability' && err.details.reason) {
+  else if (kind === 'rate_limited' && retryAfter !== null) {
+    message = `Zu früh nach dem letzten manuellen Lauf, bitte in ${retryAfter} Sekunden erneut versuchen.`;
+  } else if (kind === 'capability' && err.details.reason) {
     message = `${message} Grund: ${label(CAP_REASON_TEXT, err.details.reason)}.`;
   }
-  const retry = err.retryable || ['unavailable', 'network', 'gone', 'busy'].includes(kind);
-  return { kind, message, retry };
+  // rate_limited: no retry button; the caller locks its own button for retryAfter.
+  const retry = kind !== 'rate_limited' && (err.retryable || ['unavailable', 'network', 'gone', 'busy'].includes(kind));
+  return { kind, message, retry, retryAfter };
+}
+
+/** Error classes of a failed backup that mean "the router lacks the right". */
+const ACCESS_ERROR_CLASSES = new Set(['permission', 'not_available']);
+
+export function isAccessFailure(errorClass: string | null): boolean {
+  return errorClass !== null && ACCESS_ERROR_CLASSES.has(errorClass);
+}
+
+export const ERROR_CLASS_TEXT: Record<string, string> = {
+  permission: 'Dem Router fehlt das Recht für das Backup (rpcd-ACL).',
+  not_available: 'Die Backup-Funktion ist auf dem Router nicht verfügbar – meist fehlt das Recht dafür (rpcd-ACL).',
+  unreachable: 'Der Router war nicht erreichbar.',
+  timeout: 'Zeitüberschreitung beim Router.',
+  auth: 'Die Anmeldung am Router ist fehlgeschlagen.',
+  too_large: 'Die Datei war zu groß.',
+  incomplete: 'Die Sicherung war unvollständig.',
+  invalid: 'Die Antwort des Routers war ungültig.',
+  checksum_mismatch: 'Die Prüfsumme stimmte nicht.',
+  storage_full: 'Der Speicher für Versionen ist voll.',
+  storage_error: 'Die Version konnte nicht gespeichert werden.',
+  busy: 'Auf dem Router lief gerade ein anderer Vorgang.',
+  internal: 'Interner Fehler im Backend.',
+};
+
+/** German text for a failed backup's error class; access problems point to "Zugang". */
+export function failureText(errorClass: string | null): string {
+  const base = 'Das letzte Backup ist fehlgeschlagen.';
+  if (!errorClass) return base;
+  const reason = ERROR_CLASS_TEXT[errorClass] ?? `Fehlerart: ${errorClass}.`;
+  const hint = isAccessFailure(errorClass)
+    ? ' Im Bereich „Zugang“ unten kann das ACL-Angebot angefordert und nach Freigabe auf den Router geschrieben werden.'
+    : '';
+  return `${base} ${reason}${hint}`;
 }
 
 // ── Restore texts ────────────────────────────────────────────────────────
@@ -810,6 +881,14 @@ export function isExpired(a: Approval | null, now: number): boolean {
 
 export function canApprove(s: ExportState, now: number): boolean {
   return s.step === 'requested' && s.acknowledged && s.approval?.status === 'pending' && !isExpired(s.approval, now);
+}
+
+/**
+ * R15 options of an export approval: the plaintext acknowledgement, and
+ * only once the admin ticked it. Null means "do not send the approval".
+ */
+export function exportApproveOptions(s: ExportState, now: number): { acknowledgePlaintext: true } | null {
+  return canApprove(s, now) && s.acknowledged ? { acknowledgePlaintext: true } : null;
 }
 
 export function canDownload(s: ExportState, now: number): boolean {

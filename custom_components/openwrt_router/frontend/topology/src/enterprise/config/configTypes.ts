@@ -174,6 +174,22 @@ export interface AclOffer {
   added: string[];
   removed: string[];
   risks: string[];
+  /** Fixed core texts of R18 (null in the older response form). */
+  targetFile: string | null;
+  rightsAdded: string[];
+  rightsRemoved: string[];
+  rightsUnlisted: number;
+  riskText: string | null;
+  rollbackText: string | null;
+  rollbackTemplate: string | null;
+  rollbackTemplateNoPrevious: string | null;
+  /** All texts above are present and unmasked; only then may it be approved. */
+  complete: boolean;
+}
+
+/** Options of R15; only an export approval carries the plaintext acknowledgement. */
+export interface ApproveOptions {
+  acknowledgePlaintext?: boolean;
 }
 
 export type ExportArtifact = 'archive' | 'uci' | 'inventory';
@@ -202,7 +218,7 @@ export interface ConfigApi {
   restoreCheck(backupId: string): Promise<RestorePlan>;
   requestExport(backupId: string, artifact?: ExportArtifact): Promise<Approval>;
   approvals(routerId?: string): Promise<Approval[]>;
-  approve(approvalId: string): Promise<Approval>;
+  approve(approvalId: string, options?: ApproveOptions): Promise<Approval>;
   reject(approvalId: string, reason?: string): Promise<Approval>;
   download(approvalId: string): Promise<DownloadResult>;
   aclOffer(routerId: string): Promise<{ approval: Approval; offer: AclOffer }>;

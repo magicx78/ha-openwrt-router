@@ -8,12 +8,16 @@ import {
   FINDING_TEXT,
   RESTORE_KEY_TEXT,
   WARNING_TEXT,
+  approveBody,
   archivePath,
   canApprove,
   canDownload,
   changeValueText,
   errorInfo,
+  exportApproveOptions,
   exportInit,
+  failureText,
+  isAccessFailure,
   exportReduce,
   groupChangesByArea,
   isCriticalChange,
@@ -219,6 +223,39 @@ test('errorInfo never shows the server message and classifies the state', () => 
   assert.equal(errorInfo(new ConfigApiError(502, 'router_auth_failed', true, {}, null)).retry, true);
 });
 
+test('busy names any operation on the router; rate_limited names the seconds', () => {
+  const busy = errorInfo(new ConfigApiError(409, 'operation_in_progress', true, { reason: 'router_busy' }, 30));
+  assert.equal(busy.kind, 'busy');
+  assert.match(busy.message, /anderer Vorgang \(Backup, Drift- oder Live-Prüfung\)/);
+  assert.equal(busy.retryAfter, 30);
+
+  for (const reason of ['min_gap_backup', 'min_gap_live_check']) {
+    const info = errorInfo(new ConfigApiError(429, 'rate_limited', true, { reason }, 42));
+    assert.equal(info.kind, 'rate_limited');
+    assert.equal(info.message, 'Zu früh nach dem letzten manuellen Lauf, bitte in 42 Sekunden erneut versuchen.');
+    assert.equal(info.retryAfter, 42);
+    // No retry button that would only hit the limit again.
+    assert.equal(info.retry, false);
+  }
+  const noHeader = errorInfo(new ConfigApiError(429, 'rate_limited', true, {}, null));
+  assert.equal(noHeader.retryAfter, null);
+  assert.match(noHeader.message, /später erneut/);
+  assert.match(errorInfo(new ConfigApiError(400, 'plaintext_not_acknowledged', false,
+    { field: 'acknowledge_plaintext', reason: 'required' }, null)).message, /Klartext/);
+});
+
+test('a failed backup for lack of rights points to the access section', () => {
+  for (const cls of ['permission', 'not_available']) {
+    assert.equal(isAccessFailure(cls), true);
+    assert.match(failureText(cls), /rpcd-ACL/);
+    assert.match(failureText(cls), /„Zugang“/);
+  }
+  assert.equal(isAccessFailure('unreachable'), false);
+  assert.doesNotMatch(failureText('unreachable'), /Zugang/);
+  assert.match(failureText('something_new'), /Fehlerart: something_new/);
+  assert.equal(failureText(null), 'Das letzte Backup ist fehlgeschlagen.');
+});
+
 // ── Restore texts and impact ──────────────────────────────────────────────
 
 test('every restore key, finding and warning has a text', () => {
@@ -293,6 +330,21 @@ test('export: approve and download stay locked until the plaintext warning is co
   assert.equal(s.step, 'done');
   // A used approval cannot be downloaded twice.
   assert.equal(canDownload(s, NOW), false);
+});
+
+test('export: acknowledge_plaintext is sent only after the tick', () => {
+  let s = exportReduce(exportInit(), { type: 'requested', approval: APPROVAL });
+  // No tick: nothing to send at all, and the body would carry no field.
+  assert.equal(exportApproveOptions(s, NOW), null);
+  assert.deepEqual(approveBody(undefined), {});
+  assert.deepEqual(approveBody({ acknowledgePlaintext: false }), {});
+  s = exportReduce(s, { type: 'acknowledge', value: true });
+  const options = exportApproveOptions(s, NOW);
+  assert.deepEqual(options, { acknowledgePlaintext: true });
+  assert.deepEqual(approveBody(options), { acknowledge_plaintext: true });
+  // Unticked again or expired: no approval is sent.
+  assert.equal(exportApproveOptions(exportReduce(s, { type: 'acknowledge', value: false }), NOW), null);
+  assert.equal(exportApproveOptions(s, Date.parse('2026-11-18T13:00:00Z')), null);
 });
 
 test('export: an expired or invalid approval must be requested again', () => {

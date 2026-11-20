@@ -166,6 +166,10 @@ button.cfg-rrow:focus-visible { outline: 2px solid var(--border-focus); outline-
 .cfg-caps__name { color: var(--text-primary); }
 .cfg-fingerprint { padding: 6px 8px; background: rgba(255,255,255,0.04); border-radius: var(--radius-xs); overflow-wrap: anywhere; }
 .cfg-offer { display: flex; flex-direction: column; gap: 4px; }
+.cfg-code {
+  margin: 0; padding: 8px 10px; border-radius: 6px; background: var(--surface-raised); border: 1px solid var(--border); color: var(--text-primary);
+  font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all;
+}
 
 /* Stepper */
 .cfg-stepper { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--text-muted); }

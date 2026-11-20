@@ -143,8 +143,43 @@ test('mock export follows request → approve → download and refuses a second 
   const a = await api.requestExport(versions[0].backupId, 'archive');
   assert.equal(a.status, 'pending');
   await assert.rejects(api.download(a.approvalId), err => err.code === 'approval_required');
-  await api.approve(a.approvalId);
+  // Without the plaintext acknowledgement the server refuses the export approval.
+  await assert.rejects(api.approve(a.approvalId),
+    err => err.status === 400 && err.code === 'plaintext_not_acknowledged' && err.details.reason === 'required');
+  await api.approve(a.approvalId, { acknowledgePlaintext: true });
   await api.download(a.approvalId);
   assert.equal(saved.length, 1);
   await assert.rejects(api.download(a.approvalId), err => err.code === 'approval_invalid');
+});
+
+test('R15 sends acknowledge_plaintext only when it was given', async () => {
+  const bodies = [];
+  const api = createConfigApi(() => hass(), {
+    fetch: async (_url, init) => { bodies.push(init.body); return jsonResponse(200, { approval_id: 'apr_1', status: 'approved' }); },
+  });
+  await api.approve('apr_1');
+  await api.approve('apr_1', { acknowledgePlaintext: false });
+  await api.approve('apr_1', { acknowledgePlaintext: true });
+  assert.deepEqual(bodies, ['{}', '{}', JSON.stringify({ acknowledge_plaintext: true })]);
+});
+
+test('R18 reads the fixed offer texts; an older answer is incomplete', async () => {
+  const api = createMockConfigApi('default', { delayMs: 0 });
+  const o = await api.overview();
+  const garten = o.routers.find(r => r.name === 'AP Garten');
+  const { approval, offer } = await api.aclOffer(garten.routerId);
+  assert.equal(approval.action, 'acl_deploy');
+  assert.equal(offer.complete, true);
+  assert.equal(offer.targetFile, '/usr/share/rpcd/acl.d/ha-openwrt-router.json');
+  assert.deepEqual(offer.rightsAdded, ['cgi-io: backup', 'rpc-sys: packagelist']);
+  assert.equal(offer.rightsUnlisted, 1);
+  assert.ok(offer.rollbackTemplate?.includes('rpcd restart'));
+
+  const old = createConfigApi(() => hass(), {
+    fetch: async () => jsonResponse(200, { approval: { approval_id: 'apr_9', action: 'acl_deploy', status: 'pending' },
+      offer: { added: ['x'], removed: [], risks: ['r'] } }),
+  });
+  const legacy = await old.aclOffer('rtr_1');
+  assert.equal(legacy.offer.complete, false);
+  assert.equal(legacy.offer.targetFile, null);
 });

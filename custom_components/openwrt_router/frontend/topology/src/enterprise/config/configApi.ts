@@ -12,6 +12,7 @@
 
 import {
   ConfigApiError,
+  approveBody,
   parseAclOffer,
   parseApproval,
   parseApprovals,
@@ -220,7 +221,7 @@ export function createConfigApi(getHass: () => ConfigHass | null, deps: ConfigAp
     requestExport: async (bid, artifact?: ExportArtifact) =>
       parseApproval(await post(configPaths.exportRequest(bid), artifact ? { artifact } : {})),
     approvals: async rid => parseApprovals(await json('GET', configPaths.approvals(rid))),
-    approve: async aid => parseApproval(await post(configPaths.approve(aid))),
+    approve: async (aid, options) => parseApproval(await post(configPaths.approve(aid), approveBody(options))),
     reject: async (aid, reason) => {
       const clean = reason !== undefined ? sanitizeNote(reason) : '';
       return parseApproval(await post(configPaths.reject(aid), clean ? { reason: clean } : {}));

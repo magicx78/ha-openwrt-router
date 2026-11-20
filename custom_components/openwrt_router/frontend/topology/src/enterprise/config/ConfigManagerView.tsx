@@ -21,6 +21,8 @@ import {
   SCHEDULE_LABEL,
   archivePath,
   errorInfo,
+  failureText,
+  isAccessFailure,
   formatRelative,
   formatTime,
   isDriftOpen,
@@ -163,6 +165,14 @@ function RouterDetailView({ api, summary, fleetBusy, now, readOnly, onBack, relo
     if (waiting && !fleetBusy) setWaiting(false);
   }, [waiting, fleetBusy, now]);
 
+  const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
+  useEffect(() => {
+    if (cooldownUntil === null) return undefined;
+    const t = window.setTimeout(() => setCooldownUntil(null), Math.max(0, cooldownUntil - Date.now()));
+    return () => window.clearTimeout(t);
+  }, [cooldownUntil]);
+  const coolingDown = cooldownUntil !== null;
+
   const backupNow = async () => {
     setBackupBusy(true);
     setActionError(null);
@@ -171,7 +181,10 @@ function RouterDetailView({ api, summary, fleetBusy, now, readOnly, onBack, relo
       setNote('');
       await Promise.all([load(), reloadOverview()]);
     } catch (e) {
-      if (errorInfo(e).kind === 'busy') setWaiting(true);
+      const info = errorInfo(e);
+      if (info.kind === 'busy') setWaiting(true);
+      // Too soon: lock the button until Retry-After has passed (no automatic retry).
+      if (info.kind === 'rate_limited' && info.retryAfter !== null) setCooldownUntil(Date.now() + info.retryAfter * 1000);
       setActionError(e);
     } finally {
       setBackupBusy(false);
@@ -184,7 +197,8 @@ function RouterDetailView({ api, summary, fleetBusy, now, readOnly, onBack, relo
   const accessNeeded = detail !== null && (
     summary.capability.state !== 'available'
     || detail.sshPin?.state === 'pending' || detail.sshPin?.state === 'mismatch'
-    || (detail.acl?.offerable.length ?? 0) > 0);
+    || (detail.acl?.offerable.length ?? 0) > 0
+    || isAccessFailure(summary.errorClass));
   const st = routerViewState(summary);
 
   return (
@@ -208,8 +222,8 @@ function RouterDetailView({ api, summary, fleetBusy, now, readOnly, onBack, relo
       )}
       {st === 'failed' && (
         <Notice tone="error">
-          Das letzte Backup ist fehlgeschlagen{summary.errorClass ? ` (Fehlerart: ${summary.errorClass})` : ''}.
-          <button type="button" className="diag-btn cfg-btn" disabled={backupBusy || readOnly || !enabled} onClick={() => void backupNow()}>
+          {failureText(summary.errorClass)}
+          <button type="button" className="diag-btn cfg-btn" disabled={backupBusy || coolingDown || readOnly || !enabled} onClick={() => void backupNow()}>
             Erneut versuchen
           </button>
         </Notice>
@@ -232,13 +246,13 @@ function RouterDetailView({ api, summary, fleetBusy, now, readOnly, onBack, relo
             <span className="diag-field__label">Beschreibung (optional, höchstens 200 Zeichen)</span>
             <input value={note} maxLength={200} onChange={e => setNote(e.target.value)} placeholder="z. B. vor dem Firmware-Update" />
           </label>
-          <button type="button" className="diag-btn diag-btn--primary cfg-btn" disabled={backupBusy || running || readOnly || !enabled}
+          <button type="button" className="diag-btn diag-btn--primary cfg-btn" disabled={backupBusy || running || coolingDown || readOnly || !enabled}
             onClick={() => void backupNow()}>
             Jetzt sichern
           </button>
         </div>
         {backupBusy && <Spinner text="Backup wird erstellt …" />}
-        {waiting && <Spinner text="Ein anderes Backup läuft; die Ansicht fragt alle 5 s nach (höchstens 5 min). Danach erneut sichern." />}
+        {waiting && <Spinner text="Auf dem Router läuft gerade ein anderer Vorgang; die Ansicht fragt alle 5 s nach (höchstens 5 min). Danach erneut sichern." />}
         <ErrorBox error={actionError} />
       </section>
 
@@ -246,7 +260,7 @@ function RouterDetailView({ api, summary, fleetBusy, now, readOnly, onBack, relo
         <section className="cfg-section">
           <h3 className="cfg-section__title">Zugang</h3>
           <ErrorBox error={errors.detail} onRetry={() => void load()} />
-          {detail && <ConfigAccessPanel api={api} detail={detail} approvals={approvals} readOnly={readOnly}
+          {detail && <ConfigAccessPanel api={api} detail={detail} approvals={approvals} readOnly={readOnly} enabled={enabled}
             onChanged={() => { void load(); void reloadOverview(); }} />}
         </section>
       )}

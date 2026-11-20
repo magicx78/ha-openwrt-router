@@ -19,10 +19,59 @@ import {
 } from './configLogic.ts';
 import { Badge, ErrorBox, Notice, Spinner } from './configUi';
 
+/** Rights as a list; "n weitere Zeilen" only as a count. */
+function RightsList({ title, rights, empty }: { title: string; rights: readonly string[]; empty: string }) {
+  return (
+    <>
+      <div className="cfg-subtitle">{title}</div>
+      {rights.length > 0
+        ? <ul className="cfg-list">{rights.map(x => <li key={x} className="diag-mono">{x}</li>)}</ul>
+        : <div className="cfg-hint">{empty}</div>}
+    </>
+  );
+}
+
+/** A command template as plain, selectable text (never run from here). */
+function CommandText({ title, text }: { title: string; text: string }) {
+  return (
+    <>
+      <div className="cfg-subtitle">{title}</div>
+      <pre className="cfg-code diag-mono"><code>{text}</code></pre>
+    </>
+  );
+}
+
+/** R18's fixed core texts: what is written, the risk and the way back. */
+function AclOfferDetails({ offer }: { offer: AclOffer }) {
+  return (
+    <div className="cfg-offer">
+      <div className="cfg-subtitle">Was auf den Router geschrieben wird</div>
+      <div className="diag-kv"><span>Zieldatei <span className="diag-mono">{offer.targetFile ?? '–'}</span></span></div>
+      <RightsList title="Hinzugefügte Rechte" rights={offer.rightsAdded} empty="keine" />
+      <RightsList title="Entfernte Rechte" rights={offer.rightsRemoved} empty="keine" />
+      {offer.rightsUnlisted > 0 && (
+        <div className="cfg-hint">{offer.rightsUnlisted} weitere Zeilen (nicht einzeln aufgeführt).</div>
+      )}
+      {offer.riskText && (
+        <Notice tone="error"><strong>Risiko:</strong> <span lang="en">{offer.riskText}</span></Notice>
+      )}
+      {offer.rollbackText && (
+        <>
+          <div className="cfg-subtitle">Rückweg</div>
+          <p className="cfg-hint" lang="en">{offer.rollbackText}</p>
+        </>
+      )}
+      {offer.rollbackTemplate && <CommandText title="Befehl mit gesicherter Vorgängerdatei" text={offer.rollbackTemplate} />}
+      {offer.rollbackTemplateNoPrevious && <CommandText title="Befehl ohne Vorgängerdatei" text={offer.rollbackTemplateNoPrevious} />}
+      <div className="cfg-hint">Die Befehle sind nur zum Kopieren gedacht; das Panel führt sie nicht aus.</div>
+    </div>
+  );
+}
+
 type Step = 'idle' | 'requesting' | 'requested' | 'approving' | 'approved' | 'executing' | 'done' | 'failed';
 
 /** Request → tick → approve → execute, for acl_deploy and ssh_pin_*. */
-function ApprovalAction({ api, startLabel, confirmText, executeLabel, start, resume, readOnly, onDone }: {
+function ApprovalAction({ api, startLabel, confirmText, executeLabel, start, resume, readOnly, offerRequired, onDone }: {
   api: ConfigApi;
   startLabel: string;
   confirmText: string;
@@ -30,6 +79,8 @@ function ApprovalAction({ api, startLabel, confirmText, executeLabel, start, res
   start: () => Promise<{ approval: Approval; offer?: AclOffer }>;
   resume?: Approval | null;
   readOnly: boolean;
+  /** ACL deploy: approve / execute only with a complete offer shown above. */
+  offerRequired?: boolean;
   onDone: () => void;
 }) {
   const initial: Step = resume ? (resume.status === 'approved' ? 'approved' : 'requested') : 'idle';
@@ -58,12 +109,15 @@ function ApprovalAction({ api, startLabel, confirmText, executeLabel, start, res
     setAck(false);
     setStep('requested');
   });
-  const approve = () => approval && ack && guard('approving', async () => {
+  const offerComplete = offer?.complete === true;
+  const allowed = ack && !expired && !readOnly && (!offerRequired || offerComplete);
+  // R15 without acknowledge_plaintext: that field belongs to export approvals only.
+  const approve = () => approval && allowed && guard('approving', async () => {
     const a = await api.approve(approval.approvalId);
     setApproval(a);
     setStep(a.status === 'approved' ? 'approved' : 'requested');
   });
-  const execute = () => approval && ack && approval.status === 'approved' && guard('executing', async () => {
+  const execute = () => approval && allowed && approval.status === 'approved' && guard('executing', async () => {
     await api.execute(approval.approvalId);
     setStep('done');
     onDone();
@@ -91,21 +145,12 @@ function ApprovalAction({ api, startLabel, confirmText, executeLabel, start, res
 
   return (
     <div className="cfg-stack">
-      {offer && (
-        <div className="cfg-offer">
-          {offer.added.length > 0 && (
-            <><div className="cfg-subtitle">Neue Rechte</div>
-              <ul className="cfg-list">{offer.added.map(x => <li key={x} className="diag-mono">{x}</li>)}</ul></>
-          )}
-          {offer.removed.length > 0 && (
-            <><div className="cfg-subtitle">Entfallende Rechte</div>
-              <ul className="cfg-list">{offer.removed.map(x => <li key={x} className="diag-mono">{x}</li>)}</ul></>
-          )}
-          {offer.risks.length > 0 && (
-            <><div className="cfg-subtitle">Risiken</div>
-              <ul className="cfg-list cfg-list--warn">{offer.risks.map(x => <li key={x}>{x}</li>)}</ul></>
-          )}
-        </div>
+      {offer && <AclOfferDetails offer={offer} />}
+      {offerRequired && !offerComplete && (
+        <Notice tone="warn">
+          Die Antwort des Servers enthält nicht alle Angaben zum ACL-Angebot (Zieldatei, Rechte, Risiko, Rückweg).
+          Die Freigabe ist deshalb gesperrt. Bitte die Integration aktualisieren und das Angebot neu anfordern.
+        </Notice>
       )}
       {approval && (
         <div className="diag-kv">
@@ -119,13 +164,13 @@ function ApprovalAction({ api, startLabel, confirmText, executeLabel, start, res
       </label>
       <div className="diag-actions">
         {step === 'requested' && (
-          <button type="button" className="diag-btn diag-btn--primary cfg-btn" disabled={!ack || expired || readOnly}
+          <button type="button" className="diag-btn diag-btn--primary cfg-btn" disabled={!allowed}
             onClick={() => void approve()}>
             Freigeben
           </button>
         )}
         {step === 'approved' && (
-          <button type="button" className="diag-btn diag-btn--primary cfg-btn" disabled={!ack || expired || readOnly}
+          <button type="button" className="diag-btn diag-btn--primary cfg-btn" disabled={!allowed}
             onClick={() => void execute()}>
             {executeLabel}
           </button>
@@ -137,11 +182,13 @@ function ApprovalAction({ api, startLabel, confirmText, executeLabel, start, res
   );
 }
 
-export function ConfigAccessPanel({ api, detail, approvals, readOnly, onChanged }: {
+export function ConfigAccessPanel({ api, detail, approvals, readOnly, enabled, onChanged }: {
   api: ConfigApi;
   detail: RouterDetail;
   approvals: readonly Approval[];
   readOnly: boolean;
+  /** Backup function switched on; the ACL deploy is offered only then. */
+  enabled: boolean;
   onChanged: () => void;
 }) {
   const pin = detail.sshPin;
@@ -196,7 +243,7 @@ export function ConfigAccessPanel({ api, detail, approvals, readOnly, onChanged 
         </div>
       )}
 
-      {detail.acl && detail.acl.offerable.length > 0 && (
+      {enabled && detail.acl && detail.acl.offerable.length > 0 && (
         <div className="cfg-stack">
           <div className="cfg-subtitle">rpcd-ACL</div>
           <div className="cfg-hint">
@@ -204,9 +251,9 @@ export function ConfigAccessPanel({ api, detail, approvals, readOnly, onChanged 
             {detail.acl.deployedVersion !== null && <>; verteilt ist Version {detail.acl.deployedVersion}</>}).
             Das Angebot zeigt die Änderung; nach der Freigabe schreibt Home Assistant die ACL auf den Router und startet rpcd einmal neu.
           </div>
-          <ApprovalAction api={api} readOnly={readOnly} resume={pending('acl_deploy')} onDone={onChanged}
+          <ApprovalAction api={api} readOnly={readOnly} offerRequired onDone={onChanged}
             startLabel="ACL-Angebot anfordern" executeLabel="ACL auf den Router schreiben"
-            confirmText="Ich habe neue Rechte und Risiken geprüft. Die ACL wird auf den Router geschrieben und rpcd startet einmal neu."
+            confirmText="Ich habe Zieldatei, Rechte, Risiko und Rückweg gelesen und verstanden. Die ACL wird auf den Router geschrieben und rpcd startet einmal neu."
             start={async () => api.aclOffer(detail.routerId)} />
         </div>
       )}
