@@ -37,6 +37,7 @@ from . import OpenWrtConfigEntry
 from .api import is_wan_interface
 from .channel_plan import analyze
 from .client_entities import async_setup_client_sensors
+from .config_entities import async_setup_config_sensors  # configuration manager
 from .const import (
     CLIENT_KEY_RADIO,
     CONF_EXTENDED_WIFI_SENSORS,
@@ -536,6 +537,8 @@ async def async_setup_entry(
     )
     # Client stability (B7): sensors of the selected clients, on the anchor.
     async_setup_client_sensors(hass, entry, async_add_entities)
+    # Configuration manager: backup sensors, read from its runtime only.
+    async_setup_config_sensors(hass, entry, async_add_entities)
 
     # Track which dynamic entities have already been created
     tracked_interfaces: set[str] = set()
@@ -1545,3 +1548,39 @@ class OpenWrtDhcpPoolSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEntity)
                 f"{self._entry.data['host']}:{self._entry.data['port']}"
             ),
         )
+
+
+# --- Security Center (release 1.46.0, part 2) ---
+# Seven fleet sensors (security_entities.py). The sensor platform setup
+# above stays as it is; this wrapper only offers the entry's
+# ``async_add_entities`` to the center's fleet sensors afterwards. The
+# sensors exist only while the center is on. A failure here never fails
+# the platform setup.
+from functools import wraps as _sec_wraps
+
+try:
+    from . import security_entities as _security_entities
+except Exception:  # noqa: BLE001 - the routers work without it
+    _security_entities = None  # type: ignore[assignment]
+
+_async_setup_entry_sensor_base = async_setup_entry
+
+
+@_sec_wraps(_async_setup_entry_sensor_base)
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: OpenWrtConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up the sensors, then offer to host the Security Center's sensors."""
+    await _async_setup_entry_sensor_base(hass, entry, async_add_entities)
+    if _security_entities is None:
+        return
+    try:
+        _security_entities.async_setup_security_sensors(hass, entry, async_add_entities)
+    except Exception as err:
+        _LOGGER.warning("Security Center sensors not set up (%s)", type(err).__name__)
+        _LOGGER.debug("Security Center sensor error", exc_info=err)
+
+
+# --- end Security Center

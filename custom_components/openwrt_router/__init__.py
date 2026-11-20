@@ -33,9 +33,11 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv  # configuration manager
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType  # configuration manager
 
 from .api import (
     OpenWrtAPI,
@@ -78,6 +80,14 @@ except Exception as _err:  # noqa: BLE001 - any error raised by the core import
     _enterprise_core = None  # type: ignore[assignment]
     _core_import_error = _err
 
+# --- Configuration manager (plan 2026-11-18, section 1): imported here for
+# the same reason as the core; None when the core (or it) cannot be imported.
+try:
+    from . import config_manager as _config_manager
+except Exception:  # noqa: BLE001 - the routers work without it
+    _config_manager = None  # type: ignore[assignment]
+# --- end configuration manager
+
 _LOGGER = logging.getLogger(__name__)
 
 if _core_import_error is not None:
@@ -100,6 +110,27 @@ PLATFORMS: list[Platform] = [
     Platform.BUTTON,
     Platform.BINARY_SENSOR,
 ]
+
+# --- Configuration manager (plan 2026-11-18, section 4): the action
+# openwrt_router.create_config_backup. Config entries only (no YAML); the
+# action is registered once here and stays registered across entry reloads.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration's actions (independent of config entries)."""
+    if _config_manager is not None:
+        try:
+            _config_manager.async_register_services(hass)
+        except Exception:
+            _LOGGER.warning(
+                "The configuration backup action could not be registered",
+                exc_info=True,
+            )
+    return True
+
+
+# --- end configuration manager action
 
 
 @dataclass
@@ -539,6 +570,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         )
     # --- end enterprise core
 
+    # --- Configuration manager (plan 2026-11-18, section 1): provider,
+    # schedule and drift trigger on top of the core. Memory only, no router
+    # call here; never fails setup.
+    try:
+        if _enterprise_core is not None and _config_manager is not None:
+            await _config_manager.async_setup_config_manager(hass, entry, coordinator)
+    except Exception:
+        _LOGGER.warning(
+            "Configuration manager setup failed for '%s' — the router works "
+            "without configuration backups",
+            entry.title,
+            exc_info=True,
+        )
+    # --- end configuration manager
+
     # Channel conflicts are judged across all routers after every poll.
     channel_plan = async_get_channel_plan_monitor(hass)
     entry.async_on_unload(
@@ -671,6 +717,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
             _LOGGER.warning(
                 "Client stability unload raised for '%s'", entry.title, exc_info=True
             )
+        # --- Configuration manager: release before the core lets go of the
+        # entry; the last release stops its timer and unregisters the provider.
+        try:
+            if _config_manager is not None:
+                _config_manager.async_release_config_manager(hass, entry.entry_id)
+        except Exception:
+            _LOGGER.warning(
+                "Configuration manager release raised for '%s'",
+                entry.title,
+                exc_info=True,
+            )
+        # --- end configuration manager
         # --- Enterprise core (part 1): detach; the last entry flushes and
         # releases the core.
         try:
@@ -734,3 +792,58 @@ async def async_reload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
         entry: The config entry to reload.
     """
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+# --- Security Center (release 1.46.0, part 1; plan 2026-11-17) ---
+# One fleet-wide center per HA instance (security_center.py). It is wired
+# by wrapping the two entry functions defined above, so none of their code
+# changes: the center is set up after the whole base setup (network
+# intelligence, client stability, configuration manager) and released after
+# the base unload. Off by default: then it only reads its store. Every
+# error stays here (logged without the entry title, which can be a host
+# name or an address); a setup or an unload never fails because of it.
+from functools import wraps
+
+try:
+    from . import security_center as _security_center
+except Exception:  # noqa: BLE001 - the routers work without it
+    _security_center = None  # type: ignore[assignment]
+
+_async_setup_entry_base = async_setup_entry
+_async_unload_entry_base = async_unload_entry
+
+
+# ``wraps``: name, docstring and ``__wrapped__`` of the base functions stay
+# visible (``inspect.getsource`` shows the base setup with all its hooks).
+@wraps(_async_setup_entry_base)
+async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Set up a config entry, then add it to the Security Center."""
+    ok = await _async_setup_entry_base(hass, entry)
+    # ``is not False``: a base that returns None (HA 2026.11 style) succeeded
+    if ok is not False and _security_center is not None:
+        try:
+            coordinator = getattr(entry.runtime_data, "coordinator", None)
+            await _security_center.async_setup_security_center(hass, entry, coordinator)
+        except Exception as err:
+            _LOGGER.warning(
+                "Security Center setup failed (%s); the router works without it",
+                type(err).__name__,
+            )
+            _LOGGER.debug("Security Center setup error", exc_info=err)
+    return ok
+
+
+@wraps(_async_unload_entry_base)
+async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Unload a config entry, then release it from the Security Center."""
+    unload_ok = await _async_unload_entry_base(hass, entry)
+    if unload_ok is not False and _security_center is not None:
+        try:
+            await _security_center.async_release_security_center(hass, entry.entry_id)
+        except Exception as err:
+            _LOGGER.warning("Security Center release failed (%s)", type(err).__name__)
+            _LOGGER.debug("Security Center release error", exc_info=err)
+    return unload_ok
+
+
+# --- end Security Center

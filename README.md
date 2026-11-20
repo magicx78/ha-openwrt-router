@@ -371,14 +371,82 @@ logged. Details (German): [docs/enterprise-core.md](docs/enterprise-core.md).
   factory reset; duplicates are flagged, never merged; a replaced router is taken over only
   by an explicit admin action.
 - **Capabilities** per router from the poll data, plus `rf.*` from the deployed rpcd ACL.
-- **Configuration API v1** for modules. No backup engine is included: all `config.*`
-  capabilities stay unavailable until a provider is installed. Option
-  `config_backup_enabled` (default off) shows up once a provider exists.
+- **Configuration API v1** for modules. Since 1.45.0 the
+  [Configuration Manager](#configuration-manager-since-1450) is the provider; option
+  `config_backup_enabled` (default off) switches it on per router.
 - **Approvals** for critical actions (admin users only, single use, bound to router and
   checksum) and an **audit log** with a separate security ring.
 - **Tiered rpcd ACL v9 as an offer only** (written only after an admin approval, with
   backup and rollback command) and **pinned SSH** for that path: a first-seen host key
   waits for an admin confirmation; a changed key is always refused.
+
+---
+
+## Configuration Manager (since 1.45.0)
+
+Backs up the configuration of your OpenWrt routers in Home Assistant, keeps versions, shows
+differences and detects configuration drift. **Off by default** (option
+`config_backup_enabled` per router, *Settings → Devices & services → OpenWrt Router →
+Configure*); while it is off there are **0 extra router calls**. Full guide (German):
+[docs/configuration-manager.md](docs/configuration-manager.md).
+
+- **Three artifacts per version:** the restorable archive (`sysupgrade -b` format, fetched
+  through LuCI's `cgi-backup` endpoint, otherwise over SSH as root), a normalised UCI snapshot
+  for comparison, and a package and system inventory. Routers without an archive path get the
+  snapshot only.
+- **Triggers:** a daily run (option `config_backup_time`, default 03:30, a fixed per-router
+  offset of up to one hour, one run at a time), a manual run from the panel or the action
+  `openwrt_router.create_config_backup`, a run after a detected release change, and drift
+  checks when the polled data changes (debounced, at most one per hour). The integration has
+  no update path of its own: call the action before a firmware update.
+- **Versions:** deduplicated, kept 7 daily / 4 weekly / 6 monthly, protectable; **drift**
+  with areas and risk levels (critical: management IP, VLAN, firewall, SSH access, uplink,
+  web admin), acknowledge or mark as known, never an automatic reset; a diff view that shows
+  secrets only as "changed".
+- **Panel:** *Enterprise → Konfiguration* (administrators only): overview, router detail,
+  export with approval, restore check. Entities per router: `config_last_backup`,
+  `config_backup_status`, `config_versions`, `config_drift`.
+- **No automatic restore.** The integration restores nothing; the restore check only tells
+  you what a manual restore (LuCI or `sysupgrade -r`) would do, and a restore cannot be undone
+  automatically.
+- **Security:** archives contain Wi-Fi passwords, keys and password hashes in clear text and
+  are not encrypted by the integration (stored under `openwrt_router/config_backups/` in the
+  HA config folder with restrictive file modes: encrypt your HA backups). The router right it
+  needs (`cgi-io: backup`, `uci` and `rpc-sys packagelist`, read-only) gives Home Assistant
+  read access to **all** router secrets; it is only offered, and written to the router only
+  after an explicit admin approval.
+
+---
+
+## Security Center (since 1.46.0)
+
+Turns data the integration already reads (Wi-Fi events, device list, configuration changes)
+into **hints** about unusual activity, and can optionally evaluate syslog lines your routers
+send to Home Assistant. **It only observes:** no blocking, no quarantine, no scans and no
+change to any router or firewall. **Off by default**; switch it on as an administrator under
+*Panel → Enterprise → Security Center*. While it is off there is no listener, no socket and
+nothing is written. Full guide (German): [docs/security-center.md](docs/security-center.md).
+
+- **Hints, not verdicts:** Wi-Fi authentication failures (also across access points), bursts
+  of association attempts, clustered deauthentications, new devices and unusual IP or host name
+  changes, configuration changes in VLAN, firewall or interface areas (needs the Configuration
+  Manager), and, with remote logging, blocked firewall connections and DNS patterns. Findings
+  already covered by Network Intelligence are linked, never duplicated. Each detection shows
+  whether its data source is available; firewall and DNS log formats are marked
+  "format unconfirmed" because they were not seen on real devices.
+- **No extra router calls per poll.** Remote logging is optional: *log path* `syslog` makes
+  Home Assistant listen on UDP port 5514 (IPv4, only for the routers' management addresses; UDP
+  senders can be forged, so the sender list filters noise and does not authenticate). You set
+  up the router side yourself, the integration changes nothing on a router. The collector path
+  is not available yet.
+- **Entities and panel:** seven fleet sensors (security score, active and critical hints,
+  unconfirmed devices, firewall log entries and Wi-Fi authentication failures of the last hour,
+  detection coverage), only while the center is on; unknown is `None`, never 0. The panel tab
+  shows overview, timeline, devices, detections and settings.
+- **Privacy:** only administrators see MAC, IP and host name in clear text, everyone else
+  pseudonyms; DNS names are off by default; raw log lines are never stored; diagnostics carry
+  counters only. No new router rights (no ACL change).
+- **Not tested** against real routers or a real Home Assistant instance yet.
 
 ---
 
