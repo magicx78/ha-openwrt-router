@@ -798,7 +798,8 @@ const NEXT_STEP: Record<string, string> = {
   'cgi.permission': 'Im Bereich „Zugang“ das ACL-Angebot anfordern.',
   'cgi.insecure_transport': 'Router-Eintrag auf HTTPS umstellen.',
   'cgi.not_available': 'Paket cgi-io auf dem Router installieren.',
-  'cgi.not_probed': 'Erneut sichern; der nächste Lauf prüft den Weg.',
+  'cgi.not_probed': '„Jetzt sichern“: Der Lauf fordert das Archiv an und zeigt, ob der Weg über cgi-io geht.',
+  'ssh.not_probed': '„Jetzt sichern“: Der Lauf fordert das Archiv an und zeigt, ob der Weg über SSH als root geht.',
   'cgi.unreachable': 'Später erneut sichern.',
   'cgi.timeout': 'Später erneut sichern.',
 };

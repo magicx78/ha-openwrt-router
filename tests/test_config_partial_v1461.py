@@ -19,6 +19,7 @@ from core_test_provider import (
 from core_testkit import FakeDisks
 from test_config_fetch_api import make_api
 from test_config_provider import (
+    PACKAGES,
     FakeApi,
     collect,
     every_config,
@@ -479,6 +480,54 @@ async def test_failed_cgi_run_then_shows_its_class(error: Exception, reason: str
     await _cgi_status(provider, api)
     await collect(api, provider=provider)
     assert await _cgi_status(provider, api) == (CapabilityState.UNAVAILABLE, reason)
+
+
+def _no_cgi_io(**kwargs: Any) -> FakeApi:
+    # TLS, root SSH, cgi-io not installed (the package list shows it).
+    packages = {k: v for k, v in PACKAGES.items() if k != "cgi-io"}
+    gone = OpenWrtConfigFetchNotAvailableError("no cgi-io")
+    return FakeApi(secure=True, packages=packages, cgi=gone, **kwargs)
+
+
+async def _first_run(api: FakeApi) -> Any:
+    """Probe, then one run of the type the core would pick by default."""
+    provider = ConfigManagerProvider()
+    await provider.async_probe(make_conn(api), make_ctx())
+    chosen = provider.default_backup_type(router_record())
+    return chosen, await collect(api, provider=provider, backup_type=chosen)
+
+
+async def test_unprobed_ssh_path_on_tls_asks_for_the_archive() -> None:
+    # R3: cgi-io is not installed, SSH as root is not proven yet. The first
+    # backup is what finds out, so it asks for the archive.
+    chosen, version = await _first_run(_no_cgi_io())
+    assert chosen is BackupType.FULL_ARCHIVE
+    assert version.meta.fetch_method == "ssh"
+    assert version.meta.status is VersionStatus.OK
+
+
+async def test_unprobed_ssh_path_that_cannot_deliver_keeps_the_snapshot() -> None:
+    api = _no_cgi_io(ssh=OpenWrtConfigFetchNotAvailableError("no sysupgrade"))
+    chosen, version = await _first_run(api)
+    assert chosen is BackupType.FULL_ARCHIVE
+    meta = version.meta
+    assert (meta.backup_type, meta.status) == (
+        BackupType.UCI_SNAPSHOT,
+        VersionStatus.OK,
+    )
+    assert meta.fetch_method == "uci"
+    assert not [w for w in meta.warnings if w.startswith("archive_not_attempted")]
+
+
+async def test_unprobed_ssh_path_with_a_real_failure_is_partial() -> None:
+    api = _no_cgi_io(ssh=OpenWrtConfigFetchIncompleteError("cut off"))
+    _chosen, version = await _first_run(api)
+    meta = version.meta
+    assert (meta.backup_type, meta.status) == (
+        BackupType.PARTIAL,
+        VersionStatus.PARTIAL,
+    )
+    assert meta.error_class is not None and meta.error_class.value == "incomplete"
 
 
 async def test_ssh_archive_does_not_prove_the_cgi_path() -> None:

@@ -938,12 +938,13 @@ def _probed_backup_type(
     Plain HTTP always asks for the archive: the collect takes it over the
     pinned SSH path or rejects the run (``insecure_transport``), never a
     silent UCI-only "ok". TLS: an archive when the probe found an archive
-    path available, or the cgi path ``not_probed`` (shown as unknown, but
-    the first backup is what finds out).
+    path available or left one ``not_probed`` (shown as unknown, but the
+    first backup is what finds out; if it fails, the collect keeps the UCI
+    snapshot with its honest status).
     """
-    if not secure or cgi_class is None or ssh_class is None:
+    if not secure:
         return BackupType.FULL_ARCHIVE
-    if cgi_class == _PROBE_NOT_PROBED:
+    if {cgi_class, ssh_class} & {None, _PROBE_NOT_PROBED}:
         return BackupType.FULL_ARCHIVE
     return BackupType.UCI_SNAPSHOT
 

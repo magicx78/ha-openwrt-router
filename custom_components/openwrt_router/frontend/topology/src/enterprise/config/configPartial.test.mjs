@@ -142,6 +142,19 @@ test('an incomplete run names error class, reasons and the next step once', () =
   assert.deepEqual(info.nextSteps.filter(s => s.includes('SSH-Host-Key bestätigen')).length, 1);
 });
 
+// ── PR 59 review R3: "not probed" means the next backup finds out ────────
+
+test('an unprobed path names the next backup as the step that finds out', () => {
+  for (const path of ['cgi', 'ssh']) {
+    const { nextSteps } = partialInfo('incomplete', [`archive_not_attempted:${path}.not_probed`]);
+    assert.equal(nextSteps.length, 1, path);
+    assert.match(nextSteps[0], /Jetzt sichern/);
+    assert.match(nextSteps[0], /Archiv/);
+  }
+  assert.match(partialInfo(null, ['archive_not_attempted:ssh.not_probed']).nextSteps[0], /SSH/);
+  assert.match(partialInfo(null, ['archive_not_attempted:cgi.not_probed']).nextSteps[0], /cgi-io/);
+});
+
 test('the newest version is picked by time', () => {
   const vs = [
     parseVersion({ backup_id: 'bkp_old', created_at: '2026-11-17T03:00:00+00:00', status: 'ok' }),

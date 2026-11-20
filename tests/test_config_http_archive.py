@@ -95,10 +95,26 @@ async def test_https_entry_with_cgi_backup_keeps_the_cgi_archive(disks, tmp_path
     await stop(env)
 
 
-async def test_https_entry_without_cgi_right_keeps_the_uci_snapshot(disks, tmp_path):
-    # Unchanged HTTPS behaviour: without the cgi right the core's choice is a
-    # UCI snapshot (the SSH archive path is not chosen on its own).
-    api = FakeApi(secure=True, access=False)
+async def test_https_entry_without_cgi_right_takes_the_ssh_archive(disks, tmp_path):
+    # PR 59 review R3: SSH as root is not proven by the probe, so the first
+    # backup asks for the archive and finds out.
+    no_right = OpenWrtConfigFetchPermissionError("no cgi right")
+    api = FakeApi(secure=True, access=False, cgi=no_right)
+    env = await _env(disks, tmp_path, api)
+    await env.tick()
+    [record] = await _records(env)
+    assert record.backup_type is BackupType.FULL_ARCHIVE
+    assert record.status is VersionStatus.OK
+    assert record.fetch_method == "ssh"
+    await stop(env)
+
+
+async def test_https_entry_without_any_archive_path_keeps_the_uci_snapshot(
+    disks, tmp_path
+):
+    # Without the cgi right and without root SSH the core's choice is a UCI
+    # snapshot; no archive is asked for.
+    api = FakeApi(secure=True, access=False, root=False)
     env = await _env(disks, tmp_path, api)
     await env.tick()
     [record] = await _records(env)
