@@ -20,6 +20,7 @@ import {
   ROUTER_STATE_LABEL,
   SCHEDULE_LABEL,
   archivePath,
+  backupRightsMissing,
   errorInfo,
   failureText,
   isAccessFailure,
@@ -28,6 +29,9 @@ import {
   formatTime,
   isDriftOpen,
   label,
+  lastBackupText,
+  latestVersion,
+  partialInfo,
   routerRisk,
   routerViewState,
   sanitizeNote,
@@ -202,6 +206,10 @@ function RouterDetailView({ api, summary, fleetBusy, now, readOnly, onBack, relo
     || isAccessFailure(summary.errorClass, summary.errorReason)
     || isTransportFailure(summary.errorReason));
   const st = routerViewState(summary);
+  const newest = versions ? latestVersion(versions) : null;
+  const partial = st === 'partial'
+    ? partialInfo(summary.errorClass, newest?.status === 'partial' ? newest.warnings : [])
+    : null;
 
   return (
     <div className="cfg-stack">
@@ -230,9 +238,18 @@ function RouterDetailView({ api, summary, fleetBusy, now, readOnly, onBack, relo
           </button>
         </Notice>
       )}
+      {partial && (
+        <Notice tone="warn">
+          {partial.classText}
+          {partial.reasons.length > 0 && (
+            <ul className="cfg-list">{partial.reasons.map(r => <li key={r}>{r}</li>)}</ul>
+          )}
+          {partial.nextSteps.map(s => <div key={s}><strong>Nächster Schritt:</strong> {s}</div>)}
+        </Notice>
+      )}
 
       <div className="diag-facts">
-        <Fact name="Letztes Backup" value={summary.lastBackupAt ? `${formatTime(summary.lastBackupAt)} (${formatRelative(summary.lastBackupAt, now)})` : 'noch keins'} />
+        <Fact name="Letztes Backup" value={lastBackupText(summary, now)} />
         <Fact name="Versionen" value={String(summary.versions)} />
         <Fact name="OpenWrt" value={summary.openwrtVersion ?? '–'} />
         <Fact name="Zeitplan" value={summary.schedule
@@ -263,6 +280,7 @@ function RouterDetailView({ api, summary, fleetBusy, now, readOnly, onBack, relo
           <h3 className="cfg-section__title">Zugang</h3>
           <ErrorBox error={errors.detail} onRetry={() => void load()} />
           {detail && <ConfigAccessPanel api={api} detail={detail} approvals={approvals} readOnly={readOnly} enabled={enabled}
+            rightsMissing={backupRightsMissing(detail, summary.errorClass, summary.errorReason)}
             onChanged={() => { void load(); void reloadOverview(); }} />}
         </section>
       )}

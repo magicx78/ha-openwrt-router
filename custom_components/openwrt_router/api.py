@@ -6237,8 +6237,9 @@ class OpenWrtAPI:
     ) -> dict[str, Any]:
         """Return one UCI config in the ubus ``uci get`` shape.
 
-        ubus ``uci get {config}`` first. When rpcd denies it (ACL, also the
-        cached ``_acl_blocked`` entry) or does not know it, ``uci show
+        ubus ``uci get {config}`` first. A ubus "not found" is final
+        (``OpenWrtConfigFetchNotAvailableError``, no SSH). When rpcd denies it
+        (ACL, also the cached ``_acl_blocked`` entry), ``uci show
         <config>`` over the pinned SSH runner ``ssh`` (none = no SSH), parsed
         by ``config_snapshot.parse_uci_show`` (anonymous sections as
         ``@type[n]``, multi-line quoted values kept whole, so both paths hash
@@ -6253,9 +6254,10 @@ class OpenWrtAPI:
             ValueError: Invalid config name (no call made).
             OpenWrtConfigFetchPermissionError: ubus denied and SSH not usable
                 or denied.
-            OpenWrtConfigFetchHostKeyError: ubus denied and the pin rules
-                refuse SSH.
-            OpenWrtConfigFetchNotAvailableError: Config does not exist.
+            OpenWrtConfigFetchHostKeyError: ubus denied (ACL) and the pin
+                rules refuse SSH.
+            OpenWrtConfigFetchNotAvailableError: Config does not exist (ubus
+                "not found", or ``uci show`` says so after an ACL denial).
             OpenWrtConfigFetchIncompleteError: Reply without values, or
                 ``uci show`` failed otherwise.
             OpenWrtConfigFetchTooLargeError: ``uci show`` output too large.
@@ -6263,11 +6265,23 @@ class OpenWrtAPI:
             OpenWrtResponseError: from the ubus call (no SSH attempt).
         """
         name = _config_check_name(config)
+        params = {"config": name}
         try:
-            result = await self._call(UBUS_UCI_OBJECT, UBUS_UCI_GET, {"config": name})
+            result = await self._call(UBUS_UCI_OBJECT, UBUS_UCI_GET, params)
         except OpenWrtMethodNotFoundError:
+            # _call puts an ACL denial into _acl_blocked; a ubus "not found"
+            # (status 3/4) leaves it out. rpcd answers "not found" only after
+            # its ACL checks passed, so no SSH attempt is made for it: an SSH
+            # failure must never turn an absent config into a read error.
+            if (
+                self._acl_cache_key(UBUS_UCI_OBJECT, UBUS_UCI_GET, params)
+                not in self._acl_blocked
+            ):
+                raise OpenWrtConfigFetchNotAvailableError(
+                    f"uci get {name}: config not found via ubus"
+                ) from None
             _LOGGER.debug(
-                "uci get %s on %s denied or unknown via ubus, trying SSH uci show",
+                "uci get %s on %s denied by the rpcd ACL, trying SSH uci show",
                 name,
                 self._host,
             )

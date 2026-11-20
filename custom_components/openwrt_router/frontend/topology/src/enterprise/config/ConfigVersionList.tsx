@@ -15,7 +15,6 @@ import {
   TYPE_LABEL,
   VALIDATION_LABEL,
   VERSION_STATUS_LABEL,
-  VERSION_WARNING_TEXT,
   formatBytes,
   formatTime,
   label,
@@ -23,6 +22,7 @@ import {
   restorableVersions,
   timelinePoints,
   versionActionLocks,
+  versionWarningText,
 } from './configLogic.ts';
 import { Badge, ErrorBox, Notice } from './configUi';
 
@@ -119,7 +119,7 @@ export function ConfigVersionList({ api, versions, now, readOnly, enabled, onCha
               <span role="cell" className="cfg-vrow__note">
                 {v.protected && <Badge tone="info">Geschützt</Badge>}
                 {v.note ? <span>{v.note}</span> : <span className="diag-muted">–</span>}
-                {v.warnings.map(w => <span key={w} className="diag-table__meta cfg-text-warn">{VERSION_WARNING_TEXT[w] ?? w}</span>)}
+                {v.warnings.map(w => <span key={w} className="diag-table__meta cfg-text-warn">{versionWarningText(w)}</span>)}
               </span>
               <span role="cell" className="cfg-vrow__actions">
                 <button type="button" className="diag-btn cfg-btn" disabled={working || readOnly || locks.validate || v.status === 'failed'}

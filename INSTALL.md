@@ -6,12 +6,21 @@
 
 **OpenWrt-Router** (19.07+, getestet bis 25.x) mit laufendem `rpcd` und `uhttpd`:
 
-```sh
-# OpenWrt 23.x und älter (opkg)
-opkg update && opkg install rpcd rpcd-mod-rpcsys
-# OpenWrt 24.10+/25.x (apk)
-apk update && apk add rpcd rpcd-mod-rpcsys
+**OpenWrt 24.10 und älter:**
 
+```sh
+opkg update && opkg install rpcd rpcd-mod-rpcsys
+```
+
+**OpenWrt 25.12 und neuer:**
+
+```sh
+apk update && apk add rpcd rpcd-mod-rpcsys
+```
+
+Anschließend für beide Versionen:
+
+```sh
 uci set rpcd.@rpcd[0].socket='/var/run/ubus/ubus.sock'
 uci set rpcd.@rpcd[0].timeout=30
 uci commit rpcd && service rpcd restart
@@ -19,7 +28,7 @@ uci commit rpcd && service rpcd restart
 
 Die benötigte rpcd-ACL (`/usr/share/rpcd/acl.d/ha-openwrt-router.json`) kann die
 Integration beim Setup **automatisch deployen** (Checkbox im Setup-Assistenten,
-kein SSH nötig) — Details und manuelle Alternative im [README](README.md).
+kein SSH nötig) — Details zum Fallback in der [technischen Referenz](docs/REFERENZ.md#acl-fallback-support).
 
 ## Installation über HACS (empfohlen)
 
