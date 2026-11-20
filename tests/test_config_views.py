@@ -221,6 +221,10 @@ def route_id(view_class: type) -> str:
     return view_class.name.rsplit(":", 1)[-1]
 
 
+# R15 body that approves an export (plain-text secrets acknowledged).
+ACK = {"acknowledge_plaintext": True}
+
+
 def no_min_gap(monkeypatch: Any) -> None:
     """Switch the manual minimum gaps off (tests that call routes back to back)."""
     monkeypatch.setattr(cm, "MANUAL_BACKUP_MIN_GAP_S", 0)
@@ -1363,7 +1367,7 @@ async def test_export_needs_approval_and_downloads_once(disks, tmp_path):
         resp = await h.post(f"/approvals/{aid}/download")
         assert resp.status == 409
         assert resp.data["code"] == "approval_required"
-        resp = await h.post(f"/approvals/{aid}/approve")
+        resp = await h.post(f"/approvals/{aid}/approve", body=ACK)
         assert resp.status == 200 and resp.data["status"] == "approved"
         executor_calls = env.hass.async_add_executor_job.call_count
         resp = await h.post(f"/approvals/{aid}/download", record=False)
@@ -1399,7 +1403,7 @@ async def test_archive_export_is_gzip(disks, tmp_path):
         if "archive" not in kinds:
             pytest.skip("manual backups of this provider carry no archive")
         aid = await _export(h, made["backup_id"])
-        await h.post(f"/approvals/{aid}/approve")
+        await h.post(f"/approvals/{aid}/approve", body=ACK)
         resp = await h.post(f"/approvals/{aid}/download", record=False)
         assert resp.status == 200
         assert resp.headers["Content-Type"] == "application/gzip"
@@ -1417,7 +1421,7 @@ async def test_export_checksum_mismatch_sends_no_bytes(disks, tmp_path, monkeypa
     async with http(env.hass) as h:
         bid = (await backup(h, env.rid))["backup_id"]
         aid = await _export(h, bid, "uci")
-        await h.post(f"/approvals/{aid}/approve")
+        await h.post(f"/approvals/{aid}/approve", body=ACK)
         resp = await h.post(f"/approvals/{aid}/download")
         assert resp.status == 422
         assert resp.data["code"] == "backup_integrity_failed"
@@ -1438,7 +1442,7 @@ async def test_reject_route_and_unknown_approval(disks, tmp_path):
         assert resp.status == 200
         assert resp.data["status"] == "rejected"
         assert resp.data["decided_by"] == {"kind": "user", "mine": True}
-        resp = await h.post(f"/approvals/{aid}/approve")
+        resp = await h.post(f"/approvals/{aid}/approve", body=ACK)
         assert resp.status == 409
         resp = await h.post(f"/approvals/{AID0}/approve")
         assert resp.status == 409
@@ -1455,7 +1459,7 @@ async def test_execute_refuses_exports(disks, tmp_path):
     async with http(env.hass) as h:
         bid = (await backup(h, env.rid))["backup_id"]
         aid = await _export(h, bid)
-        await h.post(f"/approvals/{aid}/approve")
+        await h.post(f"/approvals/{aid}/approve", body=ACK)
         resp = await h.post(f"/approvals/{aid}/execute")
         assert resp.status == 409
         assert resp.data["details"]["reason"] == "use_download"
@@ -1630,6 +1634,40 @@ async def test_acl_offer_and_deploy_need_the_backup_option(disks, tmp_path):
     text = json.dumps(published, default=str)
     assert ADMIN_ID not in text and OTHER_ADMIN_ID not in text
     assert published[0]["actor"]["kind"] == "user"
+    await stop(env)
+
+
+async def test_export_approval_needs_acknowledge_plaintext(disks, tmp_path, caplog):
+    """L3: R15 approves an export only with acknowledge_plaintext true."""
+    caplog.set_level("INFO", logger=cv.__name__)
+    env = await cm_env(disks, tmp_path)
+    async with http(env.hass) as h:
+        bid = (await backup(h, env.rid))["backup_id"]
+        aid = (await h.post(f"/versions/{bid}/export")).data["approval_id"]
+        for body in (None, {}, {"acknowledge_plaintext": False}):
+            resp = await h.post(f"/approvals/{aid}/approve", body=body)
+            assert resp.status == 400, body
+            assert resp.data["code"] == "plaintext_not_acknowledged"
+            assert resp.data["details"] == {
+                "field": "acknowledge_plaintext",
+                "reason": "required",
+            }
+        resp = await h.post(
+            f"/approvals/{aid}/approve", body={"acknowledge_plaintext": "yes"}
+        )
+        assert resp.status == 400 and resp.data["code"] == "invalid_request"
+        assert (await h.get("/approvals")).data["approvals"][0]["status"] == "pending"
+        resp = await h.post(f"/approvals/{aid}/approve", body=ACK)
+        assert resp.status == 200, resp.body
+        assert resp.data["status"] == "approved"
+        h.assert_no_secret(ADMIN_ID)
+    logged = [
+        r.getMessage()
+        for r in caplog.records
+        if "acknowledge_plaintext" in r.getMessage()
+    ]
+    assert logged == [f"Plaintext export {aid} approved with acknowledge_plaintext"]
+    assert all(ADMIN_ID not in r.getMessage() for r in caplog.records)
     await stop(env)
 
 
@@ -1916,6 +1954,7 @@ async def test_every_route_succeeds_with_readable_frontend_fields(
                 "approve",
                 "post",
                 f"/approvals/{export['approval_id']}/approve",
+                body=ACK,
                 user=OTHER_ADMIN_ID,
             ),
         )

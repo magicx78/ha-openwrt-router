@@ -90,6 +90,8 @@ BODY_MAX_BYTES = 4096
 LIST_LIMIT_DEFAULT = 50
 LIST_LIMIT_MAX = 200
 RETRY_AFTER_SECONDS = ROUTER_BUSY_RETRY_AFTER_S
+# R15 body field: required (true) to approve an export (plain-text secrets).
+ACK_PLAINTEXT = "acknowledge_plaintext"
 LIVE = "live"
 
 NO_STORE = {"Cache-Control": "no-store"}
@@ -184,6 +186,10 @@ _MESSAGES: dict[str, str] = {
     "storage_error": "The version storage failed",
     "integration_not_loaded": "OpenWrt Router integration not loaded",
     "invalid_request": "Invalid request",
+    "plaintext_not_acknowledged": (
+        "Approving an export needs acknowledge_plaintext: the file contains "
+        "every secret of the router in plain text"
+    ),
     "body_too_large": "The request body is too large",
     "internal": "Internal error",
 }
@@ -1228,10 +1234,24 @@ class ApproveView(_PostView):
         self, ctx: RequestContext, request: web.Request, approval_id: str = "", **_: str
     ) -> Any:
         approval = ctx.approval(approval_id)
-        await read_body(request)
-        return approval_view(
-            await ctx.api.async_approve(approval.approval_id, actor=ctx.actor)
-        )
+        body = await read_body(request, {ACK_PLAINTEXT: _bool(ACK_PLAINTEXT)})
+        export = str(approval.action) == GuardedAction.EXPORT
+        if export and body.get(ACK_PLAINTEXT) is not True:
+            # An export hands out the archive in plain text (all secrets):
+            # the approver confirms that explicitly, not by a bare click.
+            raise RequestError(
+                400,
+                "plaintext_not_acknowledged",
+                details={"field": ACK_PLAINTEXT, "reason": "required"},
+            )
+        approved = await ctx.api.async_approve(approval.approval_id, actor=ctx.actor)
+        if export:
+            # The core's approve takes no note: our own log, no user id.
+            _LOGGER.info(
+                "Plaintext export %s approved with acknowledge_plaintext",
+                approval.approval_id,
+            )
+        return approval_view(approved)
 
 
 class RejectView(_PostView):
