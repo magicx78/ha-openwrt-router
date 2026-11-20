@@ -111,6 +111,24 @@ Fehlerklasse des Archivs und zählt nicht als Bezugsbasis.
 Den Snapshot liest der Manager zuerst per ubus (`uci get`); verweigert rpcd das, liest er mit
 `uci show` per SSH.
 
+**Fehlende optionale Configs** (zum Beispiel `sqm`, `mwan3`, `upnpd`, `openvpn`, `ddns`,
+`usteer`, wenn das Paket nicht installiert ist) gelten als „nicht vorhanden“, nicht als
+Lesefehler: Sie machen eine Version weder `partial` noch erzeugen sie `uci_failed`. Das gilt
+seit 1.46.1 auch dann, wenn der SSH-Weg wegen eines noch nicht bestätigten Host-Keys gesperrt
+ist. Echte Lesefehler (rpcd verweigert die Config, abgebrochene Antwort) bleiben Fehler; ein
+unklares Ergebnis wird nie zu „ok“.
+
+**Ob der cgi-Weg geht**, entscheidet allein das rpcd-Recht `cgi-io: backup`. Die Paketliste
+zählt nur, wenn sie lesbar ist und `cgi-io` fehlt; eine unlesbare Paketliste lässt den Weg
+seit 1.46.1 nicht mehr „ungeprüft“.
+
+**Lauf ohne Archivversuch.** Fordert ein Lauf kein Archiv an, steht in der Version je Weg ein
+Grund: `archive_not_attempted:cgi.<Ursache>` und `archive_not_attempted:ssh.<Ursache>`
+(zum Beispiel `cgi.not_probed`, `ssh.pin_pending`), oder `archive_not_attempted:requested`,
+wenn nur ein UCI-Snapshot verlangt war. Den Grund aus dem Host-Key-Pinning
+(`ssh_host_key:pin_pending`, `mismatch`, …) zeigen Antworten und Panel als festen Code; der
+Fingerprint selbst steht nie in den Warnungen.
+
 ## 3. Auslöser
 
 Es gibt **einen** Takt für alle Router, alle 5 Minuten. Er rechnet nur im Speicher und
@@ -325,16 +343,24 @@ offen ist. Das Panel ist deutsch.
 Freigaben. Läuft ein Backup, fragt die Ansicht alle 5 Sekunden nach, höchstens 5 Minuten.
 
 **Router-Detail.** Kennzahlen (letztes Backup, Versionen, OpenWrt, Zeitplan, nächster Lauf,
-Archivweg: Vollarchiv, nur UCI-Snapshot, keiner), dann die Abschnitte:
+Archivweg: Vollarchiv, nur UCI-Snapshot, keiner), dann die Abschnitte. Gibt es noch keine
+brauchbare Version, aber einen unvollständigen Lauf, steht bei „Letztes Backup“
+„letzter Versuch: unvollständig, <Zeit>“. Bei „Unvollständig“ nennt ein Hinweis die Fehlerart,
+die Gründe der neuesten Version in Klartext und den nächsten Schritt (zum Beispiel
+„SSH-Host-Key bestätigen“).
 
 - **Backup jetzt**: Beschreibung (höchstens 200 Zeichen) und „Jetzt sichern“.
 - **Zugang**: Fähigkeiten, SSH-Host-Key bestätigen oder zurücksetzen, Angebot für das
   Router-Recht (nur sichtbar, wenn etwas nötig ist, [Abschnitt 9](#9-berechtigungen-auf-dem-router)).
+  „Für das Backup fehlen dem Router Leserechte“ steht nur, wenn sie wirklich fehlen (Backup
+  am Recht gescheitert, UCI nicht lesbar oder kein Archivweg mehr); läuft das Archiv, etwa per
+  SSH als root, ist das Angebot als optional beschrieben.
 - **Drift**: Zustand, Zähler (kritisch, nicht einstufbar), „Drift jetzt prüfen“,
   „Unterschiede ansehen“, „Bestätigen“, „Als bekannt markieren“.
 - **Offene Freigaben**: begonnene Exporte fortsetzen.
 - **Versionen**: Zeitleiste der letzten 30 Tage, Tabelle mit Zeit, Typ/Grund, Größe,
-  Prüfsumme (gekürzt, voller Wert beim Daraufzeigen), Prüfzustand, Beschreibung und den
+  Prüfsumme des gespeicherten Inhalts (Archiv, sonst UCI-Snapshot, sonst „–“; nie die des
+  Inventars; gekürzt, voller Wert beim Daraufzeigen), Prüfzustand, Beschreibung und den
   Aktionen **Prüfen** (Bytes gegen Prüfsumme und Struktur), **Schützen**, **Exportieren**,
   **Wiederherstellung prüfen**, **Vergleichen**.
 - **Vergleich**: [Abschnitt 6](#6-diff-ansicht).
