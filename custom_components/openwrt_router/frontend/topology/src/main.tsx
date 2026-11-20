@@ -17,6 +17,7 @@ import { MOCK_DATA } from './mockData';
 import { registerEnterpriseTab } from './enterprise/registry';
 import { bindConfigHass, installConfigMock } from './enterprise/config/register';
 import { bindSecurityHass, installSecurityMock } from './enterprise/security/register';
+import { bindDiagnosticsHass } from './enterprise/diagnostics/register';
 
 // ── HA Webcomponent ──────────────────────────────────────────────────────
 
@@ -64,6 +65,8 @@ class OpenWrtTopologyPanel extends HTMLElement {
     bindConfigHass(() => this._hass);
     // Security Center tab (Enterprise): same hass, read-only observation.
     bindSecurityHass(() => this._hass);
+    // Network Diagnostics tab (Enterprise): same hass; run and settings for admins only.
+    bindDiagnosticsHass(() => this._hass);
   }
 
   connectedCallback() {
