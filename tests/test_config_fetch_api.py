@@ -853,6 +853,16 @@ UCI_SHOW = (
 )
 
 
+def acl_block(api: OpenWrtAPI) -> AsyncMock:
+    """``_call`` denied by the rpcd ACL, remembered like the real ``_call``."""
+
+    async def call(obj: str, method: str, params: dict[str, Any]) -> Any:
+        api._acl_blocked.add(api._acl_cache_key(obj, method, params))
+        raise OpenWrtMethodNotFoundError("blocked")
+
+    return AsyncMock(side_effect=call)
+
+
 class TestUciGet:
     async def test_ubus_success(self) -> None:
         api, _ = make_api()
@@ -944,9 +954,7 @@ class TestUciGet:
 
     async def test_acl_block_without_runner_is_denied_not_unpinned(self) -> None:
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("blocked")
-        )
+        api._call = acl_block(api)  # type: ignore[method-assign]
         guard_shared_transport(api)
         ctx, connect = patch_connect(fake_conn(FakeProc([UCI_SHOW.encode()])))
         with ctx, pytest.raises(OpenWrtConfigFetchHostKeyError) as exc:
@@ -962,9 +970,7 @@ class TestUciGet:
         self, pending: bool, presented: asyncssh.SSHKey, reason: str
     ) -> None:
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("blocked")
-        )
+        api._call = acl_block(api)  # type: ignore[method-assign]
         router = FakeRouter(presented, stdout=UCI_SHOW.encode())
         runner = pinned(api, PinStore() if pending else confirmed(KEY_A))
         with _patched(router), pytest.raises(OpenWrtConfigFetchHostKeyError) as exc:
@@ -1380,9 +1386,7 @@ class TestNoUnpinnedPath:
     async def test_every_ssh_read_needs_the_runner(self) -> None:
         """Without ``ssh=`` none of the three SSH reads connects."""
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("blocked")
-        )
+        api._call = acl_block(api)  # type: ignore[method-assign]
         guard_shared_transport(api)
         ctx, connect = patch_connect(fake_conn(FakeProc([ARCHIVE])))
         with ctx:
