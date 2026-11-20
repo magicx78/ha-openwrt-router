@@ -56,6 +56,7 @@ from .config_const import (
 )
 from .config_snapshot import fingerprint_from_coordinator
 from .const import (
+    CONF_PROTOCOL,
     CONFIG_BACKUP_SCHEDULE_DAILY,
     CONFIG_DRIFT_VERSIONS_PER_DAY,
     CONFIG_MANAGER_EVENT_PREFIX,
@@ -69,7 +70,6 @@ from .const import (
     CONFIG_STATUS_FAILED,
     CONFIG_STATUS_NEVER,
     CONFIG_STATUS_RUNNING,
-    CONF_PROTOCOL,
     DATA_CONFIG_MANAGER,
     DEFAULT_CONFIG_BACKUP_SCHEDULE,
     DEFAULT_CONFIG_BACKUP_TIME,
