@@ -260,6 +260,9 @@ async def test_partial_run_without_archive_path_end_to_end(disks, tmp_path):
     assert record.status is VersionStatus.PARTIAL
     assert record.fetch_method == "uci"
     assert not [w for w in record.warnings if w.startswith("archive_not_attempted")]
+    # R6: one reason per tried path, as stored by the core.
+    assert "archive_unavailable:cgi.permission" in record.warnings
+    assert "archive_unavailable:ssh.denied" in record.warnings
     await stop(env)
 
 
@@ -541,3 +544,41 @@ async def test_ssh_archive_does_not_prove_the_cgi_path() -> None:
         CapabilityState.UNKNOWN,
         CapabilityReason.NOT_PROBED,
     )
+
+
+# -- R6: a run whose archive paths all failed names a reason per path --------
+
+
+@pytest.mark.parametrize(
+    ("cgi", "ssh", "status", "items"),
+    [
+        # Both paths fail for real: partial, one reason each.
+        (
+            OpenWrtConfigFetchIncompleteError("cut off"),
+            OpenWrtConfigFetchPermissionError("not root"),
+            VersionStatus.PARTIAL,
+            ("cgi.incomplete", "ssh.permission"),
+        ),
+        # Both paths refuse: a complete UCI snapshot, still one reason each.
+        (
+            OpenWrtConfigFetchNotAvailableError("no cgi-io"),
+            OpenWrtConfigFetchPermissionError("not root"),
+            VersionStatus.OK,
+            ("cgi.not_available", "ssh.permission"),
+        ),
+    ],
+)
+async def test_failed_archive_paths_each_name_their_reason(
+    cgi: Exception, ssh: Exception, status: VersionStatus, items: tuple[str, ...]
+) -> None:
+    meta = (await collect(FakeApi(cgi=cgi, ssh=ssh))).meta
+    assert meta.status is status
+    for item in items:
+        assert f"archive_unavailable:{item}" in meta.warnings
+
+
+async def test_http_run_names_why_cgi_was_not_tried() -> None:
+    meta = (await collect(FakeApi(secure=False, ssh=OpenWrtAuthError("no")))).meta
+    assert meta.status is VersionStatus.PARTIAL
+    assert "archive_unavailable:cgi.insecure_transport" in meta.warnings
+    assert "archive_unavailable:ssh.auth" in meta.warnings

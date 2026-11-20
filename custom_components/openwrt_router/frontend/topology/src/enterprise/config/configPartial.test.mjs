@@ -163,3 +163,30 @@ test('the newest version is picked by time', () => {
   assert.equal(latestVersion(vs)?.backupId, 'bkp_new');
   assert.equal(latestVersion([]), null);
 });
+
+// ── PR 59 review R6: a reason per failed archive path, in plain text ─────
+
+const FAILED = ['permission', 'not_available', 'insecure_transport', 'unreachable', 'timeout', 'auth', 'denied',
+  'too_large', 'incomplete', 'invalid', 'checksum_mismatch'];
+
+test('every archive_unavailable path item reads as text, never as a raw code', () => {
+  for (const path of ['cgi', 'ssh']) {
+    for (const cls of FAILED) {
+      const text = versionWarningText(`archive_unavailable:${path}.${cls}`);
+      assert.ok(!text.includes('_') && !text.includes(`${path}.`), `${path}.${cls} → ${text}`);
+      assert.match(text, path === 'cgi' ? /cgi-io/ : /SSH/);
+    }
+  }
+  assert.match(versionWarningText('archive_unavailable:cgi.not_available'), /nicht installiert/);
+  assert.match(versionWarningText('archive_unavailable:ssh.auth'), /Anmeldung/);
+  // An unknown class still hides the raw code.
+  assert.ok(!versionWarningText('archive_unavailable:ssh.something_new').includes('_'));
+});
+
+test('failed archive paths lead to their next steps', () => {
+  const { nextSteps, reasons } = partialInfo('incomplete',
+    ['archive_unavailable:cgi.permission', 'archive_unavailable:ssh.permission']);
+  assert.equal(reasons.length, 2);
+  assert.ok(nextSteps.some(s => s.includes('ACL-Angebot')), nextSteps.join(' | '));
+  assert.ok(nextSteps.some(s => s.includes('root')), nextSteps.join(' | '));
+});

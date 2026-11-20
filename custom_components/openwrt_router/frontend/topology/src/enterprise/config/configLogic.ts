@@ -791,6 +791,22 @@ const PATH_CAUSE_TEXT: Record<string, string> = {
 
 const PATH_TEXT: Record<string, string> = { cgi: 'Archiv über cgi-io', ssh: 'Archiv über SSH' };
 
+/** Error classes of an archive path that was tried (`archive_unavailable:<path>.<class>`). */
+const PATH_FAILURE_TEXT: Record<string, string> = {
+  permission: 'dem Router fehlt das Recht dafür',
+  not_available: 'auf dem Router nicht vorhanden',
+  'cgi.not_available': 'Paket cgi-io nicht installiert',
+  insecure_transport: 'Verbindung ohne TLS (HTTP)',
+  unreachable: 'Router nicht erreichbar',
+  timeout: 'Zeitüberschreitung beim Router',
+  auth: 'Anmeldung fehlgeschlagen',
+  denied: 'Zugriff verweigert',
+  too_large: 'Archiv zu groß',
+  incomplete: 'Übertragung unvollständig',
+  invalid: 'Archiv ungültig',
+  checksum_mismatch: 'Prüfsumme stimmt nicht',
+};
+
 const NEXT_STEP: Record<string, string> = {
   'ssh.pin_pending': 'SSH-Host-Key bestätigen (Bereich „Zugang“ unten).',
   'ssh.mismatch': 'SSH-Host-Key prüfen; nur nach einer Neuinstallation den gespeicherten Key vergessen (Bereich „Zugang“).',
@@ -809,12 +825,21 @@ function splitWarning(code: string): [string, string | null] {
   return at < 0 ? [code, null] : [code.slice(0, at), code.slice(at + 1)];
 }
 
-/** `ssh_host_key:pin_pending` / `archive_not_attempted:ssh.pin_pending` → path key `ssh.pin_pending`. */
+/** `ssh_host_key:pin_pending` / `archive_not_attempted:ssh.pin_pending` /
+ * `archive_unavailable:cgi.permission` → path key `ssh.pin_pending` / `cgi.permission`. */
 function pathKey(code: string): string | null {
   const [name, item] = splitWarning(code);
   if (name === 'ssh_host_key' && item) return `ssh.${item}`;
-  if (name === 'archive_not_attempted' && item && item.includes('.')) return item;
+  if ((name === 'archive_not_attempted' || name === 'archive_unavailable') && item && item.includes('.')) return item;
   return null;
+}
+
+/** `archive_unavailable:<path>.<class>`: why a tried archive path gave no archive. */
+function pathFailureText(item: string): string {
+  const [path, cls] = item.split('.', 2);
+  const way = PATH_TEXT[path] ?? 'Archiv';
+  const why = PATH_FAILURE_TEXT[item] ?? (cls ? PATH_FAILURE_TEXT[cls] : undefined);
+  return why ? `${way} fehlgeschlagen: ${why}` : `${way} fehlgeschlagen`;
 }
 
 /** German text of a version warning; never a masked value or a raw item code. */
@@ -831,6 +856,7 @@ export function versionWarningText(code: string): string {
     const why = cause ? PATH_CAUSE_TEXT[cause] : undefined;
     return why ? `${way} nicht versucht: ${why}` : `${way} nicht versucht`;
   }
+  if (name === 'archive_unavailable' && item && item.includes('.')) return pathFailureText(item);
   const base = VERSION_WARNING_TEXT[name];
   if (!base) return code;
   return item && !isMasked(item) && /^[A-Za-z0-9_.@-]+$/.test(item) ? `${base}: ${item}` : base;

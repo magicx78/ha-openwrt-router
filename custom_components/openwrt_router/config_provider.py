@@ -815,6 +815,28 @@ def _archive_failure(fetch: ArchiveFetch) -> tuple[str, bool]:
     return fetch.error_class or ERR_NOT_AVAILABLE, True
 
 
+def _path_failures(
+    order: tuple[str, ...],
+    secure: bool,
+    fetch: ArchiveFetch | None,
+    archive_class: str | None,
+) -> tuple[str, ...]:
+    """``<path>.<class>`` for each archive path of a run without a valid
+    archive (``archive_unavailable`` items, PR 59 review R6).
+
+    cgi on a plain HTTP entry is ``insecure_transport`` (never asked); a
+    path that delivered an archive that failed the check gets the class of
+    that check. Fixed codes only, never a message.
+    """
+    items: list[str] = []
+    if not secure and FETCH_METHOD_CGI in order:
+        items.append(f"{FETCH_METHOD_CGI}.{REASON_INSECURE_TRANSPORT}")
+    for attempt in fetch.attempts if fetch is not None else ():
+        error_class = attempt.error_class or archive_class or ERR_INVALID
+        items.append(f"{attempt.method}.{error_class}")
+    return tuple(items)
+
+
 def _uci_failure(uci: UciCollection) -> str:
     """Error class of a UCI read that gave no config at all."""
     if uci.error_class is not None:
@@ -1654,6 +1676,8 @@ class ConfigManagerProvider:
             else:
                 backup_type, status = BackupType.PARTIAL, VersionStatus.PARTIAL
                 error_class_out = ErrorClass(archive_class or ERR_INCOMPLETE)
+            for item in _path_failures(order, secure, fetch, archive_class):
+                warnings.add(WARN_ARCHIVE_UNAVAILABLE, item)
             if not order and not secure:
                 # UCI-only run on an HTTP entry: say why no archive exists.
                 warnings.add(WARN_ARCHIVE_UNAVAILABLE, REASON_INSECURE_TRANSPORT)
