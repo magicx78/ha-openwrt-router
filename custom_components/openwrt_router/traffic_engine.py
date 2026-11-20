@@ -22,6 +22,10 @@ One fleet-wide engine per Home Assistant instance. Phase B scope:
 * **Switchable extra calls** (``station_detail``, ``sysfs_fallback``,
   ``offload_probe``; per ``router_id``, all off by default) run through
   ``traffic_collect.ExtraCallPlanner``; the calls are ``api.py`` methods.
+* **Accounting** (Phase C, ``traffic_accounting``): every new rate gets the
+  coverage of its measuring area (offload, station counters) and the
+  duplicate-sighting rule before it is kept in ``latest``; sums only go
+  through ``sum_latest`` (one area, no overlap, named refusals).
 * **Settings** live in the core store ``TRAFFIC_COARSE_STORE_KEY`` (private,
   atomic writes); the full history store follows in Phase I.
 
@@ -36,7 +40,7 @@ import logging
 import time
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
@@ -53,6 +57,7 @@ from .const import (
     TRAFFIC_STORE_VERSION,
 )
 from .core_models import CapabilityState, CapabilityStatus, InstallationKeyState
+from .traffic_accounting import TrafficAccounting, TrafficSum, sum_rates
 from .traffic_collect import (
     CallState,
     ExtraCallPlanner,
@@ -83,6 +88,7 @@ from .traffic_const import (
     MAX_QUEUE_ROUTERS,
     MAX_SETTINGS_ROUTERS,
     MODULE_NAME,
+    NOTE_POINTS_OMITTED,
     OPT_OFFLOAD_PROBE,
     OPT_STATION_DETAIL,
     OPT_SYSFS_FALLBACK,
@@ -100,7 +106,7 @@ from .traffic_const import (
     SETTINGS_VERSION,
 )
 from .traffic_counters import BaselineBook, process_samples, router_restarted
-from .traffic_model import Quality, Rate, Source, valid_router_id
+from .traffic_model import Coverage, Quality, Rate, Source, valid_router_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -293,6 +299,7 @@ class TrafficEngine:
         self._module_key: bytes | None = None
         self._binding = _Binding()
         self.book = BaselineBook()
+        self.accounting = TrafficAccounting()
         self.planner = ExtraCallPlanner()
         self.latest: dict[str, Rate] = {}
         self.status: dict[str, RouterStatus] = {}
@@ -473,6 +480,7 @@ class TrafficEngine:
         self._snapshots.pop(rid, None)
         self._router_clock.pop(rid, None)
         self._cap_view.pop(rid, None)
+        self.accounting.drop_router(rid)
         for key in [k for k in self._denied if k[0] == rid]:
             del self._denied[key]
         self.planner.drop_router(rid)
@@ -519,6 +527,7 @@ class TrafficEngine:
         await self._async_cancel_tasks()
         self._unbind_core()
         self.book.clear()
+        self.accounting.clear()
         self.latest.clear()
         self.status.clear()
         self.offload.clear()
@@ -832,7 +841,7 @@ class TrafficEngine:
             router_restart=restart,
             stale=snapshot.stale,
         )
-        self._keep_rates(rates)
+        self._keep_rates(self._account(rid, rates))
         status = self.status.setdefault(rid, RouterStatus())
         status.devices = None if snapshot.devices is None else len(snapshot.devices)
         status.stations = None if snapshot.stations is None else len(snapshot.stations)
@@ -850,6 +859,10 @@ class TrafficEngine:
         self._maybe_prune(now)
         self._refresh_caps()
         self._plan_extras(entry_id, snapshot)
+
+    def _account(self, rid: str, rates: list[Rate]) -> list[Rate]:
+        """Phase C: every rate passes the accounting before it is kept."""
+        return self.accounting.account(rates, offload=self.offload.get(rid))
 
     def _keep_rates(self, rates: list[Rate]) -> None:
         for rate in rates:
@@ -869,6 +882,40 @@ class TrafficEngine:
     def rates_of(self, router_id: str) -> list[Rate]:
         """Latest rate per point of ``router_id`` (copies of references only)."""
         return [r for r in self.latest.values() if r.point.router_id == router_id]
+
+    def uplink_ports(self) -> dict[str, frozenset[str] | None]:
+        """Known trunk ports per router from the last snapshots (sums)."""
+        return {rid: snap.uplink_ports for rid, snap in self._snapshots.items()}
+
+    def sum_latest(self, point_ids: list[str]) -> TrafficSum:
+        """Accounting sum of the latest rates of ``point_ids`` (see Phase C).
+
+        Unknown point ids are left out and counted as ``source_missing``.
+        """
+        rates = [self.latest[p] for p in point_ids if p in self.latest]
+        result = sum_rates(rates, uplink_ports=self.uplink_ports())
+        missing = len(point_ids) - len(rates)
+        if not missing or not result.ok:
+            return result
+        omitted = dict(result.omitted_by_quality)
+        omitted[Quality.SOURCE_MISSING.value] = (
+            omitted.get(Quality.SOURCE_MISSING.value, 0) + missing
+        )
+        return replace(
+            result,
+            omitted=result.omitted + missing,
+            omitted_by_quality=omitted,
+            notes=(
+                result.notes
+                if NOTE_POINTS_OMITTED in result.notes
+                else (*result.notes, NOTE_POINTS_OMITTED)
+            ),
+            coverage=(
+                Coverage.PARTIAL
+                if result.coverage is Coverage.FULL
+                else result.coverage
+            ),
+        )
 
     # -- switchable extra calls ------------------------------------------------------------
 
@@ -982,7 +1029,8 @@ class TrafficEngine:
                 wan_device=snapshot.wan_device,
                 port_names=snapshot.port_names,
             )
-        self._keep_rates(process_samples(self.book, samples, now_mono=mono))
+        rates = process_samples(self.book, samples, now_mono=mono)
+        self._keep_rates(self._account(rid, rates))
 
     # -- output --------------------------------------------------------------------------
 
@@ -1012,6 +1060,7 @@ class TrafficEngine:
                 q.value: self.quality_counts[q.value] for q in Quality
             },
             "counters": {**dict(self.counters), **self.book.counters},
+            "accounting": self.accounting.summary(),
             "extra_calls": {
                 **self.planner.counters,
                 "blocked": dict(self.blocked_counts),

@@ -126,6 +126,52 @@ CONNTRACK_SOURCE_TABLE_SCAN: Final = "table_scan"
 SETTINGS_VERSION: Final = 1
 MAX_SETTINGS_ROUTERS: Final = 64
 
+# --- accounting (plan §3.5, Phase C) -------------------------------------------
+
+# Two station sightings of one client at different associations count as
+# "the same poll" when they lie at most this far apart.
+# Entscheidung: like client_history.roam_grace (max(2 x interval, 150 s)) at
+# the default 60 s poll; the polls of different routers are not aligned.
+SIGHTING_WINDOW_S: Final = 150.0
+# Associations remembered per client for the duplicate decision.
+MAX_ASSOC_PER_CLIENT: Final = 4
+# Clients with live sightings (bounded like the client points, x2 margin).
+MAX_SIGHTING_CLIENTS: Final = 2 * MAX_POINTS_CLIENT
+# Ports a router may name as uplinks of other routers (trunk ports).
+MAX_UPLINK_PORTS: Final = 16
+
+# Named refusals of the sum function (never a silent addition).
+SUM_NO_POINTS: Final = "no_points"
+SUM_DUPLICATE_POINT: Final = "duplicate_point"
+SUM_MIXED_SCOPES: Final = "mixed_scopes"
+SUM_STATION_PLUS_PORT: Final = "station_plus_port"
+SUM_INTERFACE_PLUS_VLAN: Final = "interface_plus_vlan"
+SUM_CLIENT_PLUS_WAN: Final = "client_plus_wan"
+SUM_BRIDGE_PLUS_PORTS: Final = "bridge_plus_ports"
+SUM_INTERFACES_OVERLAP: Final = "interfaces_overlap"
+SUM_VLAN_NETDEVS_OVERLAP: Final = "vlan_netdevs_overlap"
+SUM_WAN_SAME_ROUTER: Final = "wan_same_router"
+SUM_PORTS_OF_SEVERAL_ROUTERS: Final = "ports_of_several_routers"
+SUM_PORT_IS_UPLINK: Final = "port_is_uplink_of_counted_router"
+SUM_UPLINKS_UNKNOWN: Final = "uplinks_unknown"
+SUM_DUPLICATE_CLIENT: Final = "duplicate_client"
+SUM_NEEDS_FLOW_SOURCE: Final = "needs_flow_source"
+SUM_NO_FLEET_VLAN_TOTAL: Final = "no_fleet_vlan_total"
+# Notes a valid sum carries (limits of what it means).
+NOTE_RX_TX_SEPARATE: Final = "rx_tx_never_combined"
+NOTE_PORT_COUNTERS_UNVERIFIED: Final = "dsa_port_counters_unverified"
+NOTE_POINTS_OMITTED: Final = "points_omitted"
+NOTE_DIRECTION_MISSING: Final = "direction_missing"
+
+# Why a download/upload mapping is not given.
+DIR_AMBIGUOUS_BRIDGE: Final = "bridged_traffic_not_counted"
+DIR_PORT_ROLE_UNKNOWN: Final = "port_role_unknown"
+DIR_FLOW_DIRECTION: Final = "flow_direction_is_initiator"
+
+# Port roles (download/upload only with a known role).
+PORT_ROLE_UPLINK: Final = "uplink"
+PORT_ROLE_DOWNLINK: Final = "downlink"
+
 # --- reason codes (capabilities, readiness) ------------------------------------
 
 REASON_OK: Final = "ok"

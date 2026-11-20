@@ -52,6 +52,7 @@ from .traffic_const import (
     MAX_STATIONS_PER_REPLY,
     MAX_STATIONS_PER_ROUTER,
     MAX_SYSFS_DEVICES,
+    MAX_UPLINK_PORTS,
     VLAN_NETDEV_RE,
 )
 from .traffic_counters import as_counter, finite_time, known_uptime
@@ -157,6 +158,9 @@ class Snapshot:
     ap_interfaces: tuple[str, ...] = ()
     interface_devices: tuple[str, ...] = ()
     conntrack_count: int | None = None
+    # Ports of this router that lead to another router (topology trunk
+    # ports, names only); None when the poll carried no topology field.
+    uplink_ports: frozenset[str] | None = None
 
     @property
     def device_names(self) -> frozenset[str]:
@@ -211,6 +215,19 @@ def _port_links(port_stats: Any) -> dict[str, tuple[int | None, str | None]]:
             duplex if duplex in ("full", "half") else None,
         )
     return links
+
+
+def _uplink_ports(trunk_map: Any) -> frozenset[str] | None:
+    """Port names of the topology trunk map (its keys are hosts: not copied).
+
+    # Entscheidung: ``trunk_port_map`` (gateway port per downstream AP) is
+    # the topology's answer to "which port leads to another router"; an
+    # empty map means "none known", a missing field means "unknown".
+    """
+    if not isinstance(trunk_map, Mapping):
+        return None
+    ports = sorted({p for p in trunk_map.values() if valid_device_name(p)})
+    return frozenset(ports[:MAX_UPLINK_PORTS])
 
 
 def _names(items: Any, key: str) -> tuple[str, ...]:
@@ -304,6 +321,7 @@ def snapshot_from_data(
             getattr(data, "network_interfaces", None), "interface"
         ),
         conntrack_count=conntrack,
+        uplink_ports=_uplink_ports(getattr(data, "trunk_port_map", None)),
     )
 
 

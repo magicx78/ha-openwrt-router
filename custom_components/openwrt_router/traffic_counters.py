@@ -287,10 +287,15 @@ def delta(
     """
     point = sample.point
     source = sample.source
+    times = {
+        "mono_s": finite_time(sample.mono_s),
+        "wall_s": finite_time(sample.wall_s),
+    }
 
     def no_rate(quality: Quality, keep: Baseline | None) -> DeltaResult:
         return DeltaResult(
-            Rate(point, quality, coverage=Coverage.UNAVAILABLE, source=source), keep
+            Rate(point, quality, coverage=Coverage.UNAVAILABLE, source=source, **times),
+            keep,
         )
 
     counters = counters_of(sample)
@@ -383,6 +388,7 @@ def delta(
         coverage=coverage,
         coverage_reason=coverage_reason,
         source=source,
+        **times,
     )
     return DeltaResult(rate, fresh)
 

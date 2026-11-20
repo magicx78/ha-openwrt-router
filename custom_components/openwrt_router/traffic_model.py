@@ -323,6 +323,9 @@ class Rate:
     coverage: Coverage = Coverage.UNKNOWN
     coverage_reason: CoverageReason | None = None
     source: Source = Source.NETDEV
+    # Poll times of the sample that ended this delta (accounting, history).
+    mono_s: float | None = None
+    wall_s: float | None = None
 
     @property
     def has_rate(self) -> bool:
