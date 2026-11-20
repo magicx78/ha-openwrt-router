@@ -4,6 +4,65 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.46.2] - 2026-11-21
+
+### Behoben
+
+- **Security Center: Die Abdeckung sinkt nicht mehr, wenn eine Quelle dazukommt.** Lieferte
+  das Gateway Firewall-Zeilen, fiel die Abdeckung von 71 auf 65 % und der Deckel des
+  Sicherheitswerts von 86 auf 82. Zwei Ursachen, beide behoben:
+  - Firewall-Log und DNS-Log sind **Flotten-Quellen**: Sie gelten als verfügbar, sobald ein
+    Router wirklich Zeilen geliefert hat (nicht bloß eingetragen). Bisher zählte der
+    schlechteste Zustand aller Router, und Access Points liefern diese Zeilen nie. Übersicht
+    und Log-Pfad-Ansicht sagen jetzt „von N von M Routern“ (`coverage.fleet`,
+    `log_path.status[].routers_delivering/routers/rate_limited`) und zeigen dieselben Zahlen.
+    Ein ratenbegrenzter Lieferant bleibt „eingeschränkt“ (`rate_limited`). Alle anderen Quellen
+    behalten die Regel „schlechtester Zustand“.
+  - Einschränkungen senken die Abdeckung **monoton**: Der Abzug eines Faktors entfällt, solange
+    eine seiner erwarteten Quellen flottenweit fehlt (sie ist schon als fehlende Quelle
+    gezählt), und alle Abzüge zusammen bleiben unter einem halben Quellenanteil
+    (`LIMITATION_SHARE_CAP`). Im beobachteten Fall steigt die Abdeckung jetzt auf 79 %, der
+    Deckel auf 90.
+- **Security Center: `fw_inter_vlan` meldet nicht mehr dauerhaft `dest_zone_unknown`.**
+  fw4-Zeilen nennen die Zielzone nie, und die ausgehende Schnittstelle (`OUT=`) wurde zwar
+  gelesen, aber nicht genutzt. Die Zielzone kommt jetzt in dieser Reihenfolge aus: einer
+  konfigurierten Zuordnung Schnittstelle → Zone (gebaut, heute ohne Lieferant: der
+  Configuration Manager gibt Modulen keinen Lesezugriff auf gespeicherte Versionen), einer aus
+  den Zeilen gelernten Zuordnung (in den Ketten `in`/`forward` ist die Präfix-Zone die Zone von
+  `IN=`; begrenzt, nur im Speicher, nie über der konfigurierten, widersprüchliche Werte bleiben
+  unbekannt) und zuletzt `subnet_zones`. Zeilen der Kette `in` mit leerem `OUT=` zählen nicht
+  als Inter-VLAN. Kein zusätzlicher Router-Aufruf.
+- **Security Center: Ein privates Ziel außerhalb von `subnet_zones` gilt nicht mehr als extern.**
+  Es bleibt unbekannt (mit `dest_zone_unknown`); nur öffentliche Ziele zählen als extern.
+- **Security Center: fw4-Format bestätigt.** Zwei echte Zeilenformen (`reject … forward:` mit
+  UDP und zweitem `LEN=`, `reject … in:` mit leerem `OUT=` und ICMP) liest der Parser;
+  `FORMAT_CONFIRMED["fw4_nflog"]` ist wahr, und die Firewall-Erkennungen tragen im Panel nicht
+  mehr „Format unbestätigt“ (DNS weiterhin). Nicht belegt bleiben die Kette `out`, die Urteile
+  `drop`/`accept`, TCP-Flags und die Feldreihenfolge bei IPv6 (Fixture
+  `fw4_kernel_unbelegt.txt`).
+- **Security Center: Nach Rückkehr des Modulschlüssels wird nichts sofort automatisch
+  erledigt.** Die 24 ruhigen Stunden zählen ab dem ersten Poll mit Schlüssel (oder ab dem
+  letzten Befund, wenn der später liegt); vorher war die blinde Zeit als Ruhe gezählt. Ein
+  Start, bei dem der Schlüssel sofort da ist, ändert nichts.
+- **Security Center: Fehlende Core-Anbindung wird aus dem Poll neu versucht.** Fehlt beim
+  Start die Configuration API oder scheitert die Anmeldung der Ereignisse, versucht der Poll
+  die Anbindung alle 5 Minuten erneut, solange ein Core läuft. Eine Warnung je Zustand „nicht
+  gebunden“ (ohne Identitäten), kein Router-Aufruf, Fehler stören den Poll nie.
+- **Security Center: Geräte, die ohne Schlüssel auffällig wurden, bekommen ihren Hinweis.**
+  Beim ersten Poll mit Schlüssel holt das Center den Hinweis für jedes dann noch auffällige
+  Gerät einmal nach (nur im Speicher, höchstens 256 Geräte). Bisher sammelte das
+  Vertrauensbuch die Indikatoren weiter, der Hinweis ging aber verloren.
+- **Security Center: Reserve für Konfiguration und Geräte.** Von den 50 Plätzen der Klasse
+  „andere“ sind 10 nur für Nicht-WLAN-Quellen; WLAN-Hinweise belegen höchstens 40, eine
+  WLAN-Flut blockiert keinen Drift- oder Geräte-Hinweis mehr. Keine Verdrängung: ein neuer
+  WLAN-Hinweis bei voller Quote wird gezählt (`incidents_wifi_quota_dropped`) und einmal je
+  Stunde in der Zeitleiste vermerkt. Die Zuordnung kommt aus der Datenquelle des Detektors
+  (`from_wifi`); ältere Stände mit mehr als 40 WLAN-Hinweisen laden vollständig. Panel und
+  Diagnose zeigen den WLAN-Anteil.
+- Diagnose: `interface_zones` mit Zählern der Zuordnung (ohne Namen), `wifi_incidents`,
+  `missed_device_hints`.
+- Doku: Die Abdeckung ist der Anteil der erwarteten **Datenquellen**, nicht der Erkennungen.
+
 ## [1.46.1] - 2026-11-20
 
 Configuration Manager: Router, die als „Unvollständig“ dastanden, obwohl sie mehr können.

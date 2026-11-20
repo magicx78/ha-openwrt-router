@@ -47,7 +47,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -149,6 +149,7 @@ from .security_syslog import (
     sender_address,
 )
 from .security_trust import Indicator, NoticeKind, TrustBook, TrustNotice, TrustState
+from .security_zones import ZoneBook
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -186,9 +187,20 @@ TEXT_CAP_REACHED = (
 # never removed for a new one, and confirmed hints count in their class.
 SEC_LOG_INCIDENT_QUOTA = 50
 SEC_OTHER_INCIDENT_QUOTA = 50
+# Reserve inside the "other" class (1.46.2): 10 of its 50 places are only for
+# non-Wi-Fi sources (drift, device trust), so Wi-Fi hints get at most 40 and
+# a Wi-Fi flood (over the air) cannot block a drift or trust hint. No
+# displacement: a full Wi-Fi share drops its own new hint (counted, one
+# timeline note per window); resolved Wi-Fi hints make room, but only if that
+# is enough. The share comes from the detector's data source.
+SEC_OTHER_RESERVED_NON_WIFI = 10
+SEC_WIFI_INCIDENT_QUOTA = SEC_OTHER_INCIDENT_QUOTA - SEC_OTHER_RESERVED_NON_WIFI
 LOG_DATA_SOURCES: frozenset[str] = frozenset(
     {DataSource.FIREWALL_LOG.value, DataSource.DNS_QUERY_LOG.value}
 )
+# Fleet sources (1.46.2): available once ONE router delivers lines; only the
+# gateway logs firewall and DNS traffic, access points never do.
+FLEET_SOURCES: frozenset[str] = LOG_DATA_SOURCES
 _LOG_CATEGORIES = frozenset({"firewall", "dns"})  # stores before review 3
 TEXT_LOG_QUOTA = (
     "Obergrenze für Hinweise aus Logzeilen erreicht: neue Hinweise aus "
@@ -199,10 +211,21 @@ TEXT_OTHER_QUOTA = (
     "neue Hinweise dieser Quellen werden nicht gespeichert, bis erledigte "
     "Platz machen"
 )
+TEXT_WIFI_QUOTA = (
+    "Obergrenze für WLAN-Hinweise erreicht: neue WLAN-Hinweise werden nicht "
+    "gespeichert, bis erledigte Platz machen; 10 Plätze bleiben für "
+    "Konfiguration und Geräte frei"
+)
 TEXT_SEEN_AGAIN = "Erneut beobachtet (Hinweis ist bestätigt)"
 # Module key (review 4, #4): while an active center has none, the poll asks
 # the core again at this fixed interval (no router call; memory only).
 SEC_MODULE_KEY_RETRY_SECONDS = 300.0
+# Core binding (1.46.2): missing at start (no API, or the event registration
+# failed) -> the poll tries again at the same interval, one WARNING per state.
+SEC_CORE_RETRY_SECONDS = SEC_MODULE_KEY_RETRY_SECONDS
+# Devices that became suspicious while the key was missing: their hint is
+# caught up once the key is there (memory only, at most this many devices).
+SEC_MISSED_SUSPICIOUS_MAX = 256
 # Not ready (review 3, #6): no hint is recorded before the core hands out
 # the module key; counts and score are unknown until then.
 REASON_MODULE_KEY_MISSING = "module_key_missing"
@@ -332,6 +355,7 @@ _COUNTERS = (
     "incidents_cap_dropped",
     "incidents_log_quota_dropped",
     "incidents_other_quota_dropped",
+    "incidents_wifi_quota_dropped",
     "incidents_reused",
     "notices",
     "drifts_seen",
@@ -712,7 +736,12 @@ class SecurityCenter:
         self.settings: dict[str, Any] = default_settings()
         self.trust = TrustBook()
         self.baseline = BaselineBook()
-        self.detectors: DetectorSet = default_detectors(baseline=self.baseline)
+        # interface -> zone for fw_inter_vlan; memory only, kept across
+        # detector rebuilds (1.46.2)
+        self.zones = ZoneBook()
+        self.detectors: DetectorSet = default_detectors(
+            baseline=self.baseline, zone_book=self.zones
+        )
         self.log_source = NullLogSource()
         self.deduper = Deduper()
         # part 2: syslog receiver (None unless on and log_path "syslog")
@@ -722,6 +751,15 @@ class SecurityCenter:
         self._syslog_tried: float | None = None  # monotonic
         self._key_tried: float | None = None  # monotonic, module key retry
         self._key_warned = False  # one WARNING per "not ready" state
+        self._core_tried: float | None = None  # monotonic, core binding retry
+        self._core_warned = False  # one WARNING per "not bound" state
+        # Key return (1.46.2): a gap = active without the key; the poll time
+        # of the first housekeeping with the key again starts the quiet day
+        # of the auto-resolve. Memory only.
+        self._key_gap = False
+        self._key_since: float | None = None
+        # mac -> suspicious notice dropped while not ready (memory only)
+        self._missed: dict[str, TrustNotice] = {}
         self._fw_events = _HourCount()
         self._auth_failures = _HourCount()
         self.fleet_view: dict[str, Any] | None = None
@@ -1085,7 +1123,7 @@ class SecurityCenter:
         try:
             await self._async_bind_core()
         except Exception as err:  # noqa: BLE001 - runs without the core
-            self._fail("core binding", err)
+            self._core_failed(err)
         try:
             self._attach_engine()
         except Exception as err:  # noqa: BLE001 - runs without the engine
@@ -1206,7 +1244,9 @@ class SecurityCenter:
         if core is None or getattr(core, "closed", False):
             self._unbind_core()
             return
-        if self._binding.core is core and self._binding.api is not None:
+        self._core_tried = time.monotonic()
+        binding = self._binding
+        if binding.core is core and binding.api is not None and binding.events_ok:
             await self._async_fetch_module_key()
             self._stage("forgotten routers", self._forget_unknown_routers)
             return
@@ -1226,10 +1266,66 @@ class SecurityCenter:
             )
             binding.events_ok = True
         except (TypeError, ValueError) as err:
-            self._fail("event registration", err)
+            # Not bound: the poll tries again (1.46.2), one WARNING per state.
+            self.counters["errors"] += 1
+            _LOGGER.debug("Security Center event registration", exc_info=err)
+            self._core_missing(f"event registration {type(err).__name__}")
         binding.removers.append(api.subscribe(self._on_core_event))
+        if binding.events_ok:
+            self._core_warned = False  # a later loss warns again
         await self._async_fetch_module_key()
         self._stage("forgotten routers", self._forget_unknown_routers)
+
+    def _core_failed(self, err: BaseException) -> None:
+        """A failed core binding: counted, one WARNING per state, never raised."""
+        self.counters["errors"] += 1
+        _LOGGER.debug("Security Center core binding error", exc_info=err)
+        self._core_missing(type(err).__name__)
+
+    def _core_missing(self, reason: str) -> None:
+        """One WARNING per "not bound" state; the reason names no identity."""
+        if self._core_warned:
+            return
+        self._core_warned = True
+        _LOGGER.warning(
+            "Security Center not bound to the core (%s); nothing is recorded, "
+            "retrying every %d s",
+            reason[:64],
+            SEC_CORE_RETRY_SECONDS,
+        )
+
+    def _maybe_retry_core(self) -> None:
+        """Bind the core again from the poll at a fixed interval (1.46.2).
+
+        Only while the center is active, a core runs and the binding is
+        missing or incomplete (no API, event registration failed). No router
+        is contacted; the attempt runs as its own task, so an error never
+        reaches the poll.
+        """
+        from .enterprise_core import async_get_core
+
+        binding = self._binding
+        if not self.active or self._closed:
+            return
+        if binding.api is not None and binding.events_ok:
+            return
+        core = async_get_core(self.hass)
+        if core is None or getattr(core, "closed", False):
+            return
+        tried = self._core_tried
+        clock = time.monotonic()
+        if tried is not None and 0 <= clock - tried < SEC_CORE_RETRY_SECONDS:
+            return
+        self._core_tried = clock
+        self.hass.async_create_task(
+            self._async_retry_core(), name="openwrt_router security core"
+        )
+
+    async def _async_retry_core(self) -> None:
+        try:
+            await self._async_bind_core()
+        except Exception as err:  # noqa: BLE001 - never disturbs the poll
+            self._core_failed(err)
 
     def _stored_router_ids(self) -> set[str]:
         """Router ids the center keeps state of (store sections)."""
@@ -1299,6 +1395,7 @@ class SecurityCenter:
 
     def _key_missing(self, reason: str) -> None:
         """One WARNING per "not ready" state; the reason names no identity."""
+        self._key_gap = True
         if self._key_warned:
             return
         self._key_warned = True
@@ -1344,6 +1441,8 @@ class SecurityCenter:
     def _unbind_core(self) -> None:
         binding = self._binding
         self._binding = _Binding()
+        if self._module_key is not None:
+            self._key_gap = True  # the key is lost: its return waits a day
         self._module_key = None
         for remove in reversed(binding.removers):
             try:
@@ -1636,6 +1735,7 @@ class SecurityCenter:
         self._stage("log senders", self._refresh_senders)
         self._stage("log drain", self._drain_logs)
         self._stage("syslog retry", self._maybe_retry_syslog)
+        self._stage("core retry", self._maybe_retry_core)
         self._stage("module key retry", self._maybe_retry_module_key)
         self._stage("evaluate", self._evaluate, now)
         self._stage("housekeeping", self._housekeeping, now)
@@ -1898,7 +1998,14 @@ class SecurityCenter:
 
     @staticmethod
     def _flat(statuses: Mapping[str, Mapping[str, SourceStatus]]) -> dict[str, Any]:
-        """Worst status of every source over all routers (for the score)."""
+        """Fleet status of every source (for the score and the coverage).
+
+        The worst status over all routers, except for the fleet sources
+        (firewall and DNS log, 1.46.2): they sit at the gateway and access
+        points never deliver them, so the best status counts. A router
+        counts as delivering only after lines of that source arrived
+        (``Liveness``: never "available" by configuration or silence).
+        """
         rank = {
             Availability.AVAILABLE: 0,
             Availability.STALE: 1,
@@ -1908,8 +2015,52 @@ class SecurityCenter:
         for per_router in statuses.values():
             for source, status in per_router.items():
                 old = out.get(source)
-                if old is None or rank[status.availability] > rank[old.availability]:
+                if old is None:
                     out[source] = status
+                    continue
+                new, cur = rank[status.availability], rank[old.availability]
+                if new < cur if source in FLEET_SOURCES else new > cur:
+                    out[source] = status
+        return out
+
+    def _fleet_flat(
+        self, statuses: Mapping[str, Mapping[str, SourceStatus]]
+    ) -> dict[str, Any]:
+        """``_flat`` plus "limited": a rate-limited supplier of a fleet source.
+
+        Lines are being lost there, so the source stays available but says
+        ``rate_limited`` (review 3, #8; 1.46.2).
+        """
+        flat = self._flat(statuses)
+        limited = self._log_limited_routers()
+        for source in FLEET_SOURCES:
+            status = flat.get(source)
+            if status is None or not status.usable:
+                continue
+            if any(
+                rid in limited and (st := per.get(source)) is not None and st.usable
+                for rid, per in statuses.items()
+            ):
+                flat[source] = replace(status, reason=REASON_RATE_LIMITED)
+        return flat
+
+    def _fleet_sources(
+        self, statuses: Mapping[str, Mapping[str, SourceStatus]]
+    ) -> dict[str, dict[str, int]]:
+        """Of how many current routers each fleet source comes (N of M)."""
+        limited = self._log_limited_routers()
+        out: dict[str, dict[str, int]] = {}
+        for source in sorted(FLEET_SOURCES):
+            delivering = {
+                rid
+                for rid, per in statuses.items()
+                if (st := per.get(source)) is not None and st.usable
+            }
+            out[source] = {
+                "routers_delivering": len(delivering),
+                "routers": len(statuses),
+                "rate_limited": len(delivering & limited),
+            }
         return out
 
     # -- evaluation -------------------------------------------------------------------------
@@ -1941,15 +2092,31 @@ class SecurityCenter:
                 self._record(event, now)
 
     def _apply_notices(
-        self, notices: Iterable[TrustNotice], rid: str | None, now: float
+        self,
+        notices: Iterable[TrustNotice],
+        rid: str | None,
+        now: float,
+        *,
+        late: bool = False,
     ) -> list[SecurityEvent]:
-        """Timeline entries; a suspicious device becomes an event to record."""
+        """Timeline entries; a suspicious device becomes an event to record.
+
+        ``late``: notices caught up after the key arrived (already counted).
+        """
         out: list[SecurityEvent] = []
         for notice in notices:
-            self.counters["notices"] += 1
+            if not late:
+                self.counters["notices"] += 1
             if self._module_key is None:
                 # Not ready: no entry with an unkeyed device reference; the
-                # trust book keeps the device (review 3, #6).
+                # trust book keeps the device (review 3, #6). A suspicious
+                # device gets its hint once the key is there (1.46.2).
+                self._key_gap = True
+                if notice.kind is NoticeKind.SUSPICIOUS and notice.mac:
+                    self._missed.pop(notice.mac, None)
+                    self._missed[notice.mac] = notice
+                    while len(self._missed) > SEC_MISSED_SUSPICIOUS_MAX:
+                        del self._missed[next(iter(self._missed))]
                 continue
             self._timeline(
                 notice.at,
@@ -1973,6 +2140,7 @@ class SecurityCenter:
             # Not ready: ids and device references need the module key
             # (review 3, #6). Counted; the overview says "not ready".
             self.counters["findings_not_ready"] += 1
+            self._key_gap = True
             return
         event = sealed_event(event, key)
         counterpart = NI_COUNTERPART.get(event.name)
@@ -2045,8 +2213,12 @@ class SecurityCenter:
             )
             self._emit_event(event, inc["id"], limited=True)
             return
-        # The class comes from the detector's data source (review 4, #1).
+        # The class comes from the detector's data source (review 4, #1),
+        # and so does the Wi-Fi share of the other class (1.46.2).
         from_logs = event.data_source in LOG_DATA_SOURCES
+        if event.data_source == DataSource.WIFI_EVENTS and not self._make_wifi_room():
+            self._wifi_quota_reached(now)
+            return
         if not self._make_class_room(from_logs):
             self._quota_reached(from_logs, now)
             return
@@ -2110,6 +2282,7 @@ class SecurityCenter:
             "drift_refs": drift_refs,
             "correlation_id": event.correlation_id,
             "from_logs": event.data_source in LOG_DATA_SOURCES,
+            "from_wifi": event.data_source == DataSource.WIFI_EVENTS,
             "title": TITLES.get(name, name),
             "hint": " ".join(hints),
             "resolved_at": None,
@@ -2158,6 +2331,37 @@ class SecurityCenter:
             for i in self.incidents.values()
             if (i.get("from_logs") is True) is from_logs
         ]
+
+    def _wifi_hints(self) -> list[dict[str, Any]]:
+        """The Wi-Fi hints (a share of the other class, 1.46.2)."""
+        return [i for i in self.incidents.values() if i.get("from_wifi") is True]
+
+    def _make_wifi_room(self) -> bool:
+        """Room within ``SEC_WIFI_INCIDENT_QUOTA`` for a new Wi-Fi hint.
+
+        Resolved Wi-Fi hints go, oldest first, but only if that makes room:
+        an old store above the share (open hints) loses nothing for a hint
+        that would be dropped anyway. Open and confirmed hints never go.
+        """
+        hints = self._wifi_hints()
+        need = len(hints) - SEC_WIFI_INCIDENT_QUOTA + 1
+        if need <= 0:
+            return True
+        resolved = sorted(
+            (i for i in hints if i["status"] == STATUS_RESOLVED),
+            key=lambda i: i["last_seen"],
+        )
+        if len(resolved) < need:
+            return False
+        for victim in resolved[:need]:
+            self._drop_incident(victim["id"])
+            self.counters["incidents_dropped"] += 1
+        return True
+
+    def _wifi_quota_reached(self, now: float) -> None:
+        """A new Wi-Fi hint found its share full: count it, note it once."""
+        self.counters["incidents_wifi_quota_dropped"] += 1
+        self._note_once("wifi_quota_reached", now, TEXT_WIFI_QUOTA)
 
     def _drop_oldest_resolved(self, hints: Iterable[dict[str, Any]]) -> bool:
         resolved = [i for i in hints if i["status"] == STATUS_RESOLVED]
@@ -2259,6 +2463,26 @@ class SecurityCenter:
             self._drop_incident(victim["id"])
             self.counters["incidents_dropped"] += 1
 
+    def _catch_up_suspicious(self, now: float) -> None:
+        """Hints of devices that became suspicious while the key was missing.
+
+        Once, at the first housekeeping with the key (1.46.2): a device that
+        is still suspicious gets the hint its notice would have made; one
+        that is no longer suspicious gets none.
+        """
+        missed, self._missed = self._missed, {}
+        notices = [
+            notice
+            for mac, notice in missed.items()
+            if self.trust.state(mac, now) is TrustState.SUSPICIOUS
+        ]
+        if not notices:
+            return
+        events = self._apply_notices(notices, None, now, late=True)
+        for group in correlate(events, incidents=self._ni_refs):
+            for event in group.events:
+                self._record(event, now)
+
     def _drop_incident(self, inc_id: str) -> None:
         inc = self.incidents.pop(inc_id, None)
         if inc is not None and self._by_scope.get(inc["scope"]) == inc_id:
@@ -2266,13 +2490,26 @@ class SecurityCenter:
 
     def _housekeeping(self, now: float) -> None:
         # Without the module key nothing is recorded, so a quiet hint is not
-        # proof of calm: no auto-resolve while blind (review 4, #3).
+        # proof of calm: no auto-resolve while blind (review 4, #3), and after
+        # the key returns a hint needs a quiet day since then (1.46.2).
         blind = self._module_key is None
+        if blind:
+            self._key_gap = True
+        elif self._key_gap:
+            self._key_gap = False
+            self._key_since = now
+            self._stage("missed device hints", self._catch_up_suspicious, now)
+        if self._key_since is not None and self._key_since > now:
+            self._key_since = now  # the poll clock went back
+        since = self._key_since
         for inc in self.incidents.values():
+            quiet_from = (
+                inc["last_seen"] if since is None else max(inc["last_seen"], since)
+            )
             if (
                 not blind
                 and inc["status"] == STATUS_OPEN
-                and now - inc["last_seen"] > SEC_INCIDENT_AUTO_RESOLVE_SECONDS
+                and now - quiet_from > SEC_INCIDENT_AUTO_RESOLVE_SECONDS
             ):
                 inc["status"] = STATUS_RESOLVED
                 inc["resolved_at"] = now
@@ -2470,11 +2707,12 @@ class SecurityCenter:
     # -- settings ---------------------------------------------------------------------------
 
     def _rebuild_detectors(self) -> None:
-        """New detector set from the settings; the baseline book stays."""
+        """New detector set from the settings; baseline and zone book stay."""
         dest = self.settings.get("subnet_zones") or None
         detectors = default_detectors(
             dest_subnets=dest,
             baseline=self.baseline,
+            zone_book=self.zones,
         )
         for det in detectors.detectors:
             value = self.settings.get("thresholds", {}).get(det.id)
@@ -2500,7 +2738,7 @@ class SecurityCenter:
             try:
                 await self._async_bind_core()
             except Exception as err:  # noqa: BLE001 - refused below
-                self._fail("core binding", err)
+                self._core_failed(err)
         return self._require_api()
 
     async def _async_authorize(
@@ -2781,7 +3019,7 @@ class SecurityCenter:
         admin = _is_admin(actor)
         when = self._now() if now is None else now
         statuses = self._all_statuses(when)
-        flat = self._flat(statuses)
+        flat = self._fleet_flat(statuses)
         macs = self._macs_by_ref() if admin else None
         ref = self._client_filter(client, admin)
         min_rank = _severity(severity).rank if severity else None
@@ -2844,13 +3082,15 @@ class SecurityCenter:
                     for s, st in flat.items()
                     if st.availability is Availability.NOT_AVAILABLE
                 ),
+                # fleet sources (1.46.2): from how many current routers
+                "fleet": self._fleet_sources(statuses),
             },
             "incidents": incidents,
             "timeline": timeline,
             "devices": devices,
             "device_counts": self.trust.counts(when),
             "detections": self._detections(),
-            "log_path": self._log_path_view(when),
+            "log_path": self._log_path_view(when, statuses),
             "subnet_map": (
                 {"state": "configured", "subnets": len(self.settings["subnet_zones"])}
                 if self.settings.get("subnet_zones")
@@ -2869,6 +3109,12 @@ class SecurityCenter:
                 "other_incidents": len(self._class_hints(False)),
                 "incidents_other_quota_dropped": self.counters[
                     "incidents_other_quota_dropped"
+                ],
+                "wifi_incident_quota": SEC_WIFI_INCIDENT_QUOTA,
+                "other_reserved_non_wifi": SEC_OTHER_RESERVED_NON_WIFI,
+                "wifi_incidents": len(self._wifi_hints()),
+                "incidents_wifi_quota_dropped": self.counters[
+                    "incidents_wifi_quota_dropped"
                 ],
                 "events_throttled": self.counters["events_throttled"],
             },
@@ -3052,15 +3298,28 @@ class SecurityCenter:
         out["routers"] = len(statuses)
         return out
 
-    def _log_path_view(self, now: float) -> dict[str, Any]:
-        """Setting, fleet status of the log sources, receiver counters."""
+    def _log_path_view(
+        self,
+        now: float,
+        statuses: Mapping[str, Mapping[str, SourceStatus]] | None = None,
+    ) -> dict[str, Any]:
+        """Setting, fleet status of the log sources, receiver counters.
+
+        The status comes from the same fleet rule as the coverage list
+        (``_fleet_flat``, 1.46.2), with "N of M routers" beside it, so both
+        views always agree.
+        """
         receiver = self.syslog
+        statuses = statuses or {}
+        flat = self._fleet_flat(statuses) if statuses else {}
+        fleet = self._fleet_sources(statuses)
+        out_status = []
+        for source in (DataSource.FIREWALL_LOG, DataSource.DNS_QUERY_LOG):
+            st = flat.get(source) or self._path_status(source, now)
+            out_status.append({**st.to_dict(), **fleet[source.value]})
         return {
             "setting": self.settings.get("log_path"),
-            "status": [
-                self._path_status(s, now).to_dict()
-                for s in (DataSource.FIREWALL_LOG, DataSource.DNS_QUERY_LOG)
-            ],
+            "status": out_status,
             "receiver": receiver.status() if receiver is not None else None,
             "rate_limited_routers": len(self._log_limited_routers()),
             "dedup": self.deduper.stats().to_dict(),
@@ -3118,7 +3377,7 @@ class SecurityCenter:
                 rid: {s: st.to_dict() for s, st in sorted(per.items())}
                 for rid, per in statuses.items()
             },
-            "log_path": self._log_path_view(when),
+            "log_path": self._log_path_view(when, statuses),
         }
 
     def settings_view(self, *, admin: bool) -> dict[str, Any]:
@@ -3198,7 +3457,7 @@ class SecurityCenter:
                 if s in sources
             )
 
-        flat = self._flat(statuses)
+        flat = self._fleet_flat(statuses)
         score = self._score(now, statuses, flat)
         active = [i for i in self.incidents.values() if i["status"] in _ACTIVE_STATUSES]
         # No usable source anywhere (coverage 0): the hint counts are not
@@ -3261,10 +3520,13 @@ class SecurityCenter:
             "baselines": len(self.baseline),
             "drifts": len(self.drifts),
             "detector_state": self.detectors.state_size(),
+            "interface_zones": self.zones.stats(),
             "module_key": self._module_key is not None,
             "not_ready_reason": self.not_ready_reason,
             "log_incidents": len(self._class_hints(True)),
             "other_incidents": len(self._class_hints(False)),
+            "wifi_incidents": len(self._wifi_hints()),
+            "missed_device_hints": len(self._missed),
             "log_rate_limited_routers": len(self._log_limited_routers()),
             "events_registered": self._binding.events_ok,
             "last_save_bytes": self.last_save_bytes,
@@ -3308,6 +3570,13 @@ def _incident_from_store(item: Any) -> dict[str, Any] | None:
     router = item.get("router_id")
     if router is not None and valid_router_id(router) is None:
         return None
+    # Origin of the hint (review 3, #1); stores before it: by category
+    # (firewall and DNS hints only ever came from log lines).
+    from_logs = (
+        item["from_logs"]
+        if isinstance(item.get("from_logs"), bool)
+        else str(item.get("category") or "") in _LOG_CATEGORIES
+    )
     inc = {
         "id": inc_id[:64],
         "type": str(item.get("type") or "")[:96],
@@ -3340,11 +3609,12 @@ def _incident_from_store(item: Any) -> dict[str, Any] | None:
         "correlation_id": item.get("correlation_id")
         if isinstance(item.get("correlation_id"), str)
         else None,
-        # Origin of the hint (review 3, #1); stores before it: by category
-        # (firewall and DNS hints only ever came from log lines).
-        "from_logs": item["from_logs"]
-        if isinstance(item.get("from_logs"), bool)
-        else str(item.get("category") or "") in _LOG_CATEGORIES,
+        "from_logs": from_logs,
+        # Wi-Fi share of the other class (1.46.2); stores before it: by
+        # category (Wi-Fi hints only ever came from the Wi-Fi detectors).
+        "from_wifi": item["from_wifi"]
+        if isinstance(item.get("from_wifi"), bool)
+        else not from_logs and str(item.get("category") or "") == "wifi",
         "title": mask_identities(str(item.get("title") or "")),
         "hint": mask_identities(str(item.get("hint") or "")),
         "resolved_at": _num(item.get("resolved_at")),

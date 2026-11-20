@@ -1,0 +1,11 @@
+# fw4/nft kernel log line VARIANTS NOT SEEN on a real router (message part as
+# stored by logd). The structure seen live is in fw4_kernel.txt (1.46.2).
+# Still NICHT BELEGT, nach Upstream-Doku konstruiert: verdicts "drop" and
+# "accept", chain "out", the TCP flag fields (WINDOW RES SYN/ACK URGP) and the
+# IPv6 field order (TC HOPLIMIT FLOWLBL). They stay here so the parser keeps
+# reading them; the format flag is per format (fw4_nflog), not per variant.
+kernel: [12345.678901] drop wan in: IN=wan OUT= MAC=02:00:00:00:00:aa:02:00:00:00:00:bb:08:00 SRC=198.51.100.7 DST=203.0.113.2 LEN=60 TOS=0x00 PREC=0x00 TTL=50 ID=54321 DF PROTO=TCP SPT=40000 DPT=22 WINDOW=64240 RES=0x00 SYN URGP=0
+kernel: [12346.000001] reject guest in: IN=br-guest OUT= MAC=02:00:00:00:00:cc:02:00:00:00:00:01:08:00 SRC=192.0.2.50 DST=192.0.2.1 LEN=52 TOS=0x00 PREC=0x00 TTL=64 ID=1 DF PROTO=TCP SPT=51000 DPT=443 WINDOW=65535 RES=0x00 SYN URGP=0
+kernel: [12347.500000] reject iot forward: IN=br-iot OUT=br-lan MAC=02:00:00:00:00:dd:02:00:00:00:00:02:08:00 SRC=192.0.2.80 DST=192.0.2.20 LEN=84 TOS=0x00 PREC=0x00 TTL=63 ID=7 PROTO=ICMP TYPE=8 CODE=0 ID=1 SEQ=1
+kernel: [12348.250000] drop wan in: IN=wan OUT= MAC=02:00:00:00:00:aa:02:00:00:00:00:bb:86:dd SRC=2001:db8::7 DST=2001:db8:1::1 LEN=80 TC=0 HOPLIMIT=55 FLOWLBL=0 PROTO=UDP SPT=5353 DPT=161 LEN=40
+kernel: [12349.000000] accept lan out: IN= OUT=br-lan SRC=192.0.2.1 DST=192.0.2.20 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=9 PROTO=TCP SPT=22 DPT=50000 WINDOW=65535 RES=0x00 ACK URGP=0

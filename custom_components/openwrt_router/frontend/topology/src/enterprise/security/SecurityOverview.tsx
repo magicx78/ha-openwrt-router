@@ -10,7 +10,7 @@
  */
 
 import React from 'react';
-import type { Overview } from './securityTypes';
+import type { Coverage, Overview } from './securityTypes';
 import {
   ASSESSMENT_LABEL,
   CATEGORY_LABEL,
@@ -20,6 +20,7 @@ import {
   SEVERITY_TONE,
   STATUS_LABEL,
   STATUS_TONE,
+  coverageFleetText,
   devicesObserved,
   factorText,
   flaggedDeviceCount,
@@ -112,9 +113,9 @@ function CoverageCard({ overview }: { overview: Overview }) {
         )}
       </div>
       <div className="sec-sources">
-        <SourceGroup title="Liefern Daten" tone="ok" sources={coverage.available} empty="keine" />
-        <SourceGroup title="Veraltet" tone="warn" sources={coverage.stale} empty="keine" />
-        <SourceGroup title="Nicht verfügbar" tone="muted" sources={coverage.missing} empty="keine" />
+        <SourceGroup title="Liefern Daten" tone="ok" sources={coverage.available} coverage={coverage} empty="keine" />
+        <SourceGroup title="Veraltet" tone="warn" sources={coverage.stale} coverage={coverage} empty="keine" />
+        <SourceGroup title="Nicht verfügbar" tone="muted" sources={coverage.missing} coverage={coverage} empty="keine" />
       </div>
       {overview.logPath.setting !== null && (
         <Fact name="Log-Pfad">{label(LOG_PATH_LABEL, overview.logPath.setting)}</Fact>
@@ -141,13 +142,27 @@ function LimitsCard({ overview }: { overview: Overview }) {
   );
 }
 
-function SourceGroup({ title, tone, sources, empty }: { title: string; tone: string; sources: string[]; empty: string }) {
+function SourceGroup({ title, tone, sources, coverage, empty }: {
+  title: string; tone: string; sources: string[]; coverage: Coverage; empty: string;
+}) {
   return (
     <div className="sec-sources__group">
       <div className="cfg-subtitle">{title}</div>
       {sources.length === 0
         ? <span className="cfg-hint">{empty}</span>
-        : <div className="sec-chips">{sources.map(s => <ToneBadge key={s} tone={tone}>{sourceName(s)}</ToneBadge>)}</div>}
+        : (
+          <div className="sec-chips">
+            {sources.map(s => {
+              // Fleet sources (firewall / DNS log): honest "von N von M Routern".
+              const fleet = coverageFleetText(coverage, s);
+              return (
+                <ToneBadge key={s} tone={tone}>
+                  {sourceName(s)}{fleet ? ` (${fleet})` : ''}
+                </ToneBadge>
+              );
+            })}
+          </div>
+        )}
     </div>
   );
 }
