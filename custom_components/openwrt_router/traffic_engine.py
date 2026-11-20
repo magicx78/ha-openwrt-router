@@ -26,6 +26,12 @@ One fleet-wide engine per Home Assistant instance. Phase B scope:
   coverage of its measuring area (offload, station counters) and the
   duplicate-sighting rule before it is kept in ``latest``; sums only go
   through ``sum_latest`` (one area, no overlap, named refusals).
+* **Clients and VLANs** (Phase D, ``traffic_clients``/``traffic_vlan``):
+  while a poll is copied, each station's MAC is looked up once in the
+  client engine's history (read only, no second client database); only
+  the answer is kept. Accounted station rates feed the bounded client
+  tracker; VLAN views come from measured VLAN netdevs and show the
+  configured ports apart.
 * **Settings** live in the core store ``TRAFFIC_COARSE_STORE_KEY`` (private,
   atomic writes); the full history store follows in Phase I.
 
@@ -58,6 +64,14 @@ from .const import (
 )
 from .core_models import CapabilityState, CapabilityStatus, InstallationKeyState
 from .traffic_accounting import TrafficAccounting, TrafficSum, sum_rates
+from .traffic_clients import (
+    ClientTracker,
+    ClientTrafficView,
+    StationFacts,
+    registry_lookup,
+    registry_routers,
+    station_facts,
+)
 from .traffic_collect import (
     CallState,
     ExtraCallPlanner,
@@ -106,7 +120,17 @@ from .traffic_const import (
     SETTINGS_VERSION,
 )
 from .traffic_counters import BaselineBook, process_samples, router_restarted
-from .traffic_model import Coverage, Quality, Rate, Source, valid_router_id
+from .traffic_model import (
+    Coverage,
+    MeasurementPoint,
+    Quality,
+    Rate,
+    RegistryFacts,
+    Scope,
+    Source,
+    valid_router_id,
+)
+from .traffic_vlan import VlanView, vlan_views
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -300,6 +324,8 @@ class TrafficEngine:
         self._binding = _Binding()
         self.book = BaselineBook()
         self.accounting = TrafficAccounting()
+        self.clients = ClientTracker()
+        self._facts: dict[str, StationFacts] = {}
         self.planner = ExtraCallPlanner()
         self.latest: dict[str, Rate] = {}
         self.status: dict[str, RouterStatus] = {}
@@ -317,6 +343,8 @@ class TrafficEngine:
         self.router_id_of: Callable[[str], str | None] = self._registry_router_id
         self.clock: Callable[[], float] = time.monotonic
         self.wall: Callable[[], float] = time.time
+        # Test seam: the client history (client engine) or None.
+        self.registry_source: Callable[[], Any] = self._client_history
 
     # -- properties -------------------------------------------------------------------
 
@@ -481,6 +509,7 @@ class TrafficEngine:
         self._router_clock.pop(rid, None)
         self._cap_view.pop(rid, None)
         self.accounting.drop_router(rid)
+        self.clients.drop_router(rid)
         for key in [k for k in self._denied if k[0] == rid]:
             del self._denied[key]
         self.planner.drop_router(rid)
@@ -528,6 +557,8 @@ class TrafficEngine:
         self._unbind_core()
         self.book.clear()
         self.accounting.clear()
+        self.clients.clear()
+        self._facts.clear()
         self.latest.clear()
         self.status.clear()
         self.offload.clear()
@@ -786,9 +817,38 @@ class TrafficEngine:
             self.counters["router_id_missing"] += 1
             return
         snapshot = snapshot_from_data(
-            data, router_id=rid, module_key=self._module_key, wall_s=self.wall()
+            data,
+            router_id=rid,
+            module_key=self._module_key,
+            wall_s=self.wall(),
+            registry=self._registry_lookup(),
         )
         self._enqueue(entry_id, snapshot)
+
+    def _client_history(self) -> Any:
+        """The client engine's history while it runs and is on, else None."""
+        from .client_engine import async_get_client_engine
+
+        engine = async_get_client_engine(self.hass)
+        if engine is None:
+            return None
+        settings = getattr(engine, "settings", None)
+        if not isinstance(settings, Mapping) or settings.get("enabled") is not True:
+            return None
+        return getattr(engine, "history", None)
+
+    def _registry_lookup(self) -> Callable[[str], RegistryFacts] | None:
+        """Lookup into the client registry (None: no key or no registry)."""
+        if self._module_key is None:
+            return None
+        try:
+            history = self.registry_source()
+        except Exception as err:  # noqa: BLE001 - the registry stays optional
+            self._fail("client registry", err)
+            return None
+        if history is None:
+            return None
+        return registry_lookup(history, self._rid)
 
     def _enqueue(self, entry_id: str, snapshot: Snapshot) -> None:
         """One slot per router: a newer snapshot replaces an unprocessed one."""
@@ -841,7 +901,14 @@ class TrafficEngine:
             router_restart=restart,
             stale=snapshot.stale,
         )
-        self._keep_rates(self._account(rid, rates))
+        facts = station_facts(snapshot)
+        self._facts.update(facts)
+        accounted = self._account(rid, rates)
+        self._keep_rates(accounted)
+        self._end_associations(self.clients.observe(accounted, facts, now), now)
+        if snapshot.wired is not None:
+            self.clients.observe_wired(rid, snapshot.wired, now)
+        self.counters["wired_dropped"] += snapshot.wired_dropped
         status = self.status.setdefault(rid, RouterStatus())
         status.devices = None if snapshot.devices is None else len(snapshot.devices)
         status.stations = None if snapshot.stations is None else len(snapshot.stations)
@@ -862,7 +929,31 @@ class TrafficEngine:
 
     def _account(self, rid: str, rates: list[Rate]) -> list[Rate]:
         """Phase C: every rate passes the accounting before it is kept."""
-        return self.accounting.account(rates, offload=self.offload.get(rid))
+        return self.accounting.account(
+            rates,
+            offload=self.offload.get(rid),
+            registry_router=registry_routers(self._facts),
+        )
+
+    def _end_associations(
+        self, ended: list[tuple[str, str | None, str | None]], now: float
+    ) -> None:
+        """Roams: drop the baseline of the association a client left.
+
+        A later return to that AP then starts a new baseline (no delta
+        across the time at another AP).
+        """
+        for ref, router_id, radio_id in ended:
+            try:
+                point = MeasurementPoint(
+                    router_id, Scope.STATION, radio_id=radio_id, client_ref=ref
+                )
+            except (TypeError, ValueError):
+                continue
+            if self.book.has(point.point_id):
+                self.book.put(point, None, now)
+                self.counters["roam_baselines_dropped"] += 1
+            self.latest.pop(point.point_id, None)
 
     def _keep_rates(self, rates: list[Rate]) -> None:
         for rate in rates:
@@ -878,10 +969,47 @@ class TrafficEngine:
         self.book.prune(now)
         for pid in [p for p in self.latest if not self.book.has(p)]:
             del self.latest[pid]
+        self.clients.prune(now)
+        tracked = set(self.clients.refs())
+        self._facts = {r: f for r, f in self._facts.items() if r in tracked}
 
     def rates_of(self, router_id: str) -> list[Rate]:
         """Latest rate per point of ``router_id`` (copies of references only)."""
         return [r for r in self.latest.values() if r.point.router_id == router_id]
+
+    def port_vlans(self) -> dict[str, dict[str, tuple[int, ...]]]:
+        """Configured VLANs per port and router (last snapshots)."""
+        return {
+            rid: dict(snap.port_vlans)
+            for rid, snap in self._snapshots.items()
+            if snap.port_vlans is not None
+        }
+
+    def client_view(self, client_ref: str) -> ClientTrafficView | None:
+        """Traffic view of one tracked client (None: not tracked)."""
+        return self.clients.view(client_ref, port_vlans=self.port_vlans())
+
+    def client_views(self) -> list[ClientTrafficView]:
+        """Traffic views of every tracked client."""
+        return self.clients.views(port_vlans=self.port_vlans())
+
+    def vlan_views(self, router_id: str) -> list[VlanView]:
+        """Measured and configured VLANs of ``router_id`` (Phase D)."""
+        snapshot = self._snapshots.get(router_id)
+        wired: dict[str, str] | None = None
+        if snapshot is not None and snapshot.wired is not None:
+            wired = {
+                w.client_ref: w.port
+                for w in snapshot.wired
+                if not self.clients.is_wifi(w.client_ref)
+            }
+        return vlan_views(
+            router_id,
+            self.rates_of(router_id),
+            port_vlans=None if snapshot is None else snapshot.port_vlans,
+            wired_ports=wired,
+            has_wifi=bool(snapshot is not None and snapshot.ap_interfaces),
+        )
 
     def uplink_ports(self) -> dict[str, frozenset[str] | None]:
         """Known trunk ports per router from the last snapshots (sums)."""
@@ -1030,7 +1158,9 @@ class TrafficEngine:
                 port_names=snapshot.port_names,
             )
         rates = process_samples(self.book, samples, now_mono=mono)
-        self._keep_rates(self._account(rid, rates))
+        accounted = self._account(rid, rates)
+        self._keep_rates(accounted)
+        self._end_associations(self.clients.observe(accounted, self._facts, mono), mono)
 
     # -- output --------------------------------------------------------------------------
 
@@ -1061,6 +1191,7 @@ class TrafficEngine:
             },
             "counters": {**dict(self.counters), **self.book.counters},
             "accounting": self.accounting.summary(),
+            "clients": self.clients.summary(),
             "extra_calls": {
                 **self.planner.counters,
                 "blocked": dict(self.blocked_counts),

@@ -356,6 +356,27 @@ class Rate:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class RegistryFacts:
+    """What the client registry (client engine) said about one station.
+
+    Taken while the poll is copied (the MAC never leaves that step):
+    ``known`` - the registry tracks the client; ``state`` its live state;
+    ``router_id`` the router of its current AP (only while online or in
+    grace, None when unknown); ``band`` its band. No MAC, IP or host name.
+    """
+
+    known: bool
+    state: str | None = None
+    router_id: str | None = None
+    band: str | None = None
+
+    def __post_init__(self) -> None:
+        """Only a valid router id is kept."""
+        if self.router_id is not None and not valid_router_id(self.router_id):
+            object.__setattr__(self, "router_id", None)
+
+
 HIST_CLASSES: Final = 12
 
 

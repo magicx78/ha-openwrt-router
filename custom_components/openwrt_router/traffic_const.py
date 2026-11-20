@@ -172,6 +172,48 @@ DIR_FLOW_DIRECTION: Final = "flow_direction_is_initiator"
 PORT_ROLE_UPLINK: Final = "uplink"
 PORT_ROLE_DOWNLINK: Final = "downlink"
 
+# --- client and VLAN attribution (plan §4, Phase D) ----------------------------
+
+# Hard caps of tracked clients, separate from the infrastructure points and
+# from each other (a big bridge FDB never crowds out Wi-Fi clients).
+MAX_TRACKED_WIFI_CLIENTS: Final = MAX_POINTS_CLIENT
+MAX_TRACKED_WIRED_CLIENTS: Final = 100
+# Wired sightings (bridge FDB) copied per router and poll.
+MAX_WIRED_PER_ROUTER: Final = 256
+# Configured VLANs copied per port.
+MAX_VLANS_PER_PORT: Final = 64
+# Time windows of the client view; filled by the history store (Phase I).
+CLIENT_WINDOWS: Final = {
+    "1h": 3600,
+    "24h": 86400,
+    "7d": 7 * 86400,
+    "30d": 30 * 86400,
+}
+
+LINK_WIFI: Final = "wifi"
+LINK_WIRED: Final = "wired"
+# What a client value is: Wi-Fi traffic as the AP counted it.
+CLIENT_VALUE_KIND: Final = "wlan_traffic_at_ap"
+IDENTITY_REGISTRY: Final = "registry"
+IDENTITY_MAC_ONLY: Final = "mac_only"
+IDENTITY_UNCONFIRMED: Final = "unconfirmed"
+IDENTITY_REGISTRY_MISSING: Final = "registry_missing"
+LOCATION_REGISTRY: Final = "registry"
+LOCATION_STATION: Final = "station_counters"
+LOCATION_FDB: Final = "bridge_fdb"
+
+REASON_HISTORY_NOT_BUILT: Final = "history_not_built"
+REASON_NO_WIFI_VLAN_MAPPING: Final = "no_wifi_vlan_mapping"
+REASON_PORT_VLAN_AMBIGUOUS: Final = "port_vlan_ambiguous"
+REASON_PORT_VLAN_UNKNOWN: Final = "port_vlan_unknown"
+REASON_NO_VLAN_NETDEV: Final = "no_vlan_netdev"
+REASON_VLAN_NOT_CONFIGURED: Final = "vlan_not_configured"
+REASON_NO_CLIENT_VLAN_SOURCE: Final = "no_client_vlan_source"
+REASON_NO_RATE_YET: Final = "no_rate_yet"
+REASON_NO_COVERED_TIME: Final = "no_covered_time"
+REASON_NO_LOCATION: Final = "no_location"
+BASIS_FDB_SINGLE_VLAN_PORT: Final = "bridge_fdb_single_vlan_port"
+
 # --- reason codes (capabilities, readiness) ------------------------------------
 
 REASON_OK: Final = "ok"

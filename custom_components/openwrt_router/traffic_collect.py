@@ -29,6 +29,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+from .client_history import is_private_mac, normalize_mac
 from .core_masking import pseudonymise_identifier
 from .traffic_const import (
     BLOCK_BUSY,
@@ -53,12 +54,15 @@ from .traffic_const import (
     MAX_STATIONS_PER_ROUTER,
     MAX_SYSFS_DEVICES,
     MAX_UPLINK_PORTS,
+    MAX_VLANS_PER_PORT,
+    MAX_WIRED_PER_ROUTER,
     VLAN_NETDEV_RE,
 )
 from .traffic_counters import as_counter, finite_time, known_uptime
 from .traffic_model import (
     COUNTER_FIELDS,
     MeasurementPoint,
+    RegistryFacts,
     Sample,
     Scope,
     Source,
@@ -93,6 +97,12 @@ def vlan_id_of(device: str) -> int | None:
         return None
     vid = int(match.group(1))
     return vid if 1 <= vid <= 4094 else None
+
+
+def private_mac_of(mac: Any) -> bool | None:
+    """True for a locally administered (randomised) MAC, None if not a MAC."""
+    norm = normalize_mac(mac)
+    return None if norm is None else is_private_mac(norm)
 
 
 def client_ref_of(mac: Any, module_key: bytes) -> str | None:
@@ -130,6 +140,19 @@ class StationCounters:
     tx_bytes: int | None
     rx_packets: int | None = None
     tx_packets: int | None = None
+    # Phase D: randomised MAC (None: unknown) and what the client registry
+    # said while the poll was copied (None: registry not available).
+    private_mac: bool | None = None
+    registry: RegistryFacts | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WiredSighting:
+    """A MAC the bridge FDB placed on a physical port (no bytes, pseudonymised)."""
+
+    client_ref: str
+    port: str
+    private_mac: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +184,14 @@ class Snapshot:
     # Ports of this router that lead to another router (topology trunk
     # ports, names only); None when the poll carried no topology field.
     uplink_ports: frozenset[str] | None = None
+    # Phase D: wired sightings from the bridge FDB (None: no module key or
+    # no FDB field), how many the cap dropped, the configured VLANs per port
+    # from ``port_vlan_map`` (None: field missing) and whether the client
+    # registry was asked.
+    wired: tuple[WiredSighting, ...] | None = None
+    wired_dropped: int = 0
+    port_vlans: tuple[tuple[str, tuple[int, ...]], ...] | None = None
+    registry_available: bool = False
 
     @property
     def device_names(self) -> frozenset[str]:
@@ -239,10 +270,29 @@ def _names(items: Any, key: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def _registry_facts(
+    registry: Callable[[str], RegistryFacts] | None, mac: str
+) -> RegistryFacts | None:
+    if registry is None:
+        return None
+    try:
+        facts = registry(mac)
+    except Exception as err:  # noqa: BLE001 - a broken lookup is "not known"
+        _LOGGER.debug("Client registry lookup failed (%s)", type(err).__name__)
+        return RegistryFacts(known=False)
+    return facts if isinstance(facts, RegistryFacts) else RegistryFacts(known=False)
+
+
 def _stations_from(
-    clients: Any, module_key: bytes
+    clients: Any,
+    module_key: bytes,
+    registry: Callable[[str], RegistryFacts] | None = None,
 ) -> tuple[tuple[StationCounters, ...], int, int, int, int]:
-    """(stations, total, without bytes, dropped over the cap, invalid)."""
+    """(stations, total, without bytes, dropped over the cap, invalid).
+
+    ``registry`` (Phase D) is asked once per kept station while its MAC is
+    still at hand; only its answer (no MAC) is kept.
+    """
     out: list[StationCounters] = []
     total = without = dropped = invalid = 0
     for client in clients if isinstance(clients, list) else ():
@@ -259,14 +309,73 @@ def _stations_from(
             dropped += 1
             continue
         radio = client.get("radio")
-        ref = client_ref_of(client.get("mac"), module_key)
+        mac = client.get("mac")
+        ref = client_ref_of(mac, module_key)
         if not valid_device_name(radio) or ref is None:
             invalid += 1
             continue
         out.append(
-            StationCounters(radio_id=radio, client_ref=ref, rx_bytes=rx, tx_bytes=tx)
+            StationCounters(
+                radio_id=radio,
+                client_ref=ref,
+                rx_bytes=rx,
+                tx_bytes=tx,
+                private_mac=private_mac_of(mac),
+                registry=_registry_facts(registry, mac),
+            )
         )
     return tuple(out), total, without, dropped, invalid
+
+
+def _wired_from(
+    fdb: Any,
+    module_key: bytes,
+    port_names: frozenset[str],
+    uplinks: frozenset[str] | None,
+) -> tuple[tuple[WiredSighting, ...] | None, int, int]:
+    """(wired sightings, dropped over the cap, invalid) of the bridge FDB.
+
+    Only physical ports of this poll count; trunk ports to other routers
+    are skipped (the MACs behind them belong to those routers).
+    """
+    if not isinstance(fdb, Mapping):
+        return None, 0, 0
+    out: list[WiredSighting] = []
+    dropped = invalid = 0
+    skip = uplinks or frozenset()
+    for mac, port in fdb.items():
+        if not valid_device_name(port) or port not in port_names or port in skip:
+            continue
+        ref = client_ref_of(mac, module_key)
+        if ref is None:
+            invalid += 1
+            continue
+        if len(out) >= MAX_WIRED_PER_ROUTER:
+            dropped += 1
+            continue
+        out.append(WiredSighting(ref, port, private_mac_of(mac)))
+    return tuple(out), dropped, invalid
+
+
+def _port_vlans(raw: Any) -> tuple[tuple[str, tuple[int, ...]], ...] | None:
+    """Configured VLANs per port (``port_vlan_map``), bounded and validated."""
+    if not isinstance(raw, Mapping):
+        return None
+    out: list[tuple[str, tuple[int, ...]]] = []
+    names = sorted(n for n in raw if valid_device_name(n))
+    for name in names[:MAX_DEVICES_PER_ROUTER]:
+        vids = raw.get(name)
+        if not isinstance(vids, list | tuple):
+            continue
+        clean = sorted(
+            {
+                v
+                for v in vids
+                if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 4094
+            }
+        )
+        out.append((name, tuple(clean[:MAX_VLANS_PER_PORT])))
+    return tuple(out)
 
 
 def snapshot_from_data(
@@ -275,6 +384,7 @@ def snapshot_from_data(
     router_id: str,
     module_key: bytes | None,
     wall_s: float | None,
+    registry: Callable[[str], RegistryFacts] | None = None,
 ) -> Snapshot:
     """Copy the traffic inputs of one ``coordinator.data`` (sync, O(n)).
 
@@ -291,9 +401,19 @@ def snapshot_from_data(
         wan_device = None
     stations: tuple[StationCounters, ...] | None = None
     total = without = dropped = 0
+    uplinks = _uplink_ports(getattr(data, "trunk_port_map", None))
+    wired: tuple[WiredSighting, ...] | None = None
+    wired_dropped = 0
     if module_key is not None:
         stations, total, without, dropped, bad = _stations_from(
-            getattr(data, "clients", None), module_key
+            getattr(data, "clients", None), module_key, registry
+        )
+        invalid += bad
+        wired, wired_dropped, bad = _wired_from(
+            getattr(data, "port_fdb_map", None),
+            module_key,
+            frozenset(port_links),
+            uplinks,
         )
         invalid += bad
     else:
@@ -321,7 +441,11 @@ def snapshot_from_data(
             getattr(data, "network_interfaces", None), "interface"
         ),
         conntrack_count=conntrack,
-        uplink_ports=_uplink_ports(getattr(data, "trunk_port_map", None)),
+        uplink_ports=uplinks,
+        wired=wired,
+        wired_dropped=wired_dropped,
+        port_vlans=_port_vlans(getattr(data, "port_vlan_map", None)),
+        registry_available=registry is not None,
     )
 
 
