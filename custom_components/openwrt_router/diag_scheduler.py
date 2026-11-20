@@ -18,7 +18,8 @@ Guarantees:
 * every run has a timeout; a timed-out run is cancelled and reported as
   ``Outcome.TIMEOUT``. A job that ignores cancellation for longer than
   ``cancel_grace`` is left running as a tracked orphan (``orphaned_tasks``)
-  and its router key is freed;
+  and its router key is freed; an orphan keeps holding one of the
+  ``max_concurrent`` slots until it really ends;
 * exponential backoff (capped, optional jitter from an injected ``rand``)
   after consecutive failures or timeouts, reset on success;
 * adaptive intervals: slower while a router key is marked under load, faster
@@ -622,7 +623,9 @@ class DiagScheduler:
             self._pending.items(), key=lambda kv: (-kv[1].trigger, kv[1].seq)
         )
         for job_id, pending in order:
-            if len(self._running) >= self._cfg.max_concurrent:
+            # An orphan (a job that ignored cancellation) still runs, so it
+            # holds a concurrency slot until it really ends.
+            if len(self._running) + len(self._orphans) >= self._cfg.max_concurrent:
                 return
             job = self._jobs.get(job_id)
             if job is None or job.router_key in self._busy:
@@ -741,6 +744,7 @@ class DiagScheduler:
 
     def _drop_orphan(self, task: asyncio.Task[Any]) -> None:
         self._orphans.discard(task)
+        self._wake.set()  # its concurrency slot is free again
         if not task.cancelled() and task.exception() is not None:
             _LOGGER.debug("Orphaned diagnostic task ended with an error")
 

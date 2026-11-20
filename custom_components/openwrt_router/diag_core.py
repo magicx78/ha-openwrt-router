@@ -53,11 +53,13 @@ from .core_errors import (
 from .core_masking import (
     IDENTIFIER_INVALID,
     mask_for_output,
+    pseudonymise_fields,
     pseudonymise_identifier,
     pseudonymise_user_ids,
 )
 from .core_models import (
     CORRELATION_ID_PREFIX,
+    EVENT_CLASSIFICATION_PATTERN,
     FLEET_ROUTER_ID,
     MODULE_CAPABILITY_NAMESPACES,
     MODULE_EVENT_PREFIXES,
@@ -909,7 +911,7 @@ async def async_identifier_key(api: Any) -> bytes:
     Needs the module's event prefix registered first (core rule); never log
     or store the key.
     """
-    return await api.async_get_module_key(MODULE, IDENTIFIER_KEY_PURPOSE)
+    return await api.async_get_module_key(MODULE, purpose=IDENTIFIER_KEY_PURPOSE)
 
 
 def pseudonymise_address(value: Any, key: bytes) -> str:
@@ -928,26 +930,46 @@ def _addresses(value: Any) -> list[str]:
     return [str(item) for item in value]
 
 
+def _scalar(value: Any) -> str | None:
+    """One address as text (None stays None) for ``pseudonymise_fields``."""
+    return None if value is None else str(value)
+
+
+_GATEWAY_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
+    {"previous_gateway": "ip", "current_gateway": "ip"}
+)
+_SERVER_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
+    {"previous": "ip", "current": "ip"}
+)
+
+
 def _change_pseudonyms(finding: Finding, key: bytes) -> dict[str, Any]:
-    """Which pseudonymous gateway / servers changed (sorted, never raw)."""
+    """Which pseudonymous gateway / servers changed (sorted, never raw).
+
+    Built with the core's ``pseudonymise_fields`` (contract 13): a value
+    that is no address becomes ``IDENTIFIER_INVALID``, never the raw value.
+    """
     change = finding.change
     if change is None:
         return {}
     if finding.classification is Classification.GATEWAY_CHANGED:
-        return {
-            "previous_gateway": (
-                None
-                if change.previous is None
-                else pseudonymise_address(change.previous, key)
-            ),
-            "current_gateway": (
-                None
-                if change.current is None
-                else pseudonymise_address(change.current, key)
-            ),
-        }
-    before = {pseudonymise_address(a, key) for a in _addresses(change.previous)}
-    after = {pseudonymise_address(a, key) for a in _addresses(change.current)}
+        return pseudonymise_fields(
+            {
+                "previous_gateway": _scalar(change.previous),
+                "current_gateway": _scalar(change.current),
+            },
+            key,
+            _GATEWAY_FIELDS,
+        )
+    sides = pseudonymise_fields(
+        {
+            "previous": _addresses(change.previous),
+            "current": _addresses(change.current),
+        },
+        key,
+        _SERVER_FIELDS,
+    )
+    before, after = set(sides["previous"]), set(sides["current"])
     return {
         "previous_servers": sorted(before),
         "current_servers": sorted(after),
@@ -974,12 +996,20 @@ class DiagEvent:
     correlation_id: str | None = None
     actor: Actor | None = None
     security_relevant: bool = False
+    # Typed CoreEvent field (contract 12.1, B8): the finding classification
+    # or the cause rule, an enum code (EVENT_CLASSIFICATION_PATTERN).
+    classification: str | None = None
 
     def __post_init__(self) -> None:
         if self.event_type not in DIAG_EVENT_TYPES:
             raise ValueError("unknown diag event type")
         if not isinstance(self.security_relevant, bool):
             raise TypeError("security_relevant must be a bool")
+        if self.classification is not None and (
+            not isinstance(self.classification, str)
+            or EVENT_CLASSIFICATION_PATTERN.fullmatch(self.classification) is None
+        ):
+            raise ValueError("classification must be an event classification code")
         object.__setattr__(self, "data", MappingProxyType(plain(dict(self.data))))
 
     def emit_kwargs(self) -> dict[str, Any]:
@@ -995,6 +1025,7 @@ class DiagEvent:
             "dedup_key": self.dedup_key,
             "data": plain(dict(self.data)),
             "security_relevant": self.security_relevant,
+            "classification": self.classification,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -1008,6 +1039,7 @@ class DiagEvent:
             "correlation_id": self.correlation_id,
             "dedup_key": self.dedup_key,  # a SAFE_KEYS name: stays readable
             "security_relevant": self.security_relevant,
+            "classification": self.classification,
             "actor": None if self.actor is None else self.actor.to_dict(),
             "data": plain(dict(self.data)),
         }
@@ -1084,6 +1116,7 @@ def _change_event(
         dedup_key=None,  # each observed change is a fact of its own
         correlation_id=correlation_id,
         data=data,
+        classification=finding.classification.value,
     )
 
 
@@ -1131,6 +1164,7 @@ def finding_event(
             "link_count": len(linked),
             "link_rules": sorted({link.rule for link in linked}),
         },
+        classification=finding.classification.value,
     )
 
 
@@ -1175,6 +1209,7 @@ def cause_event(
             "link_count": len(linked),
             "evidence_count": len(cause.evidence),
         },
+        classification=cause.rule,
     )
 
 

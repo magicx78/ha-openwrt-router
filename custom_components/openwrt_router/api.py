@@ -2031,6 +2031,8 @@ class OpenWrtAPI:
             }
             if interfaces:
                 status["wan_found"] = False
+                # Network Diagnostics (1.47.0): additive, see end of file
+                _diag_add_facts(status, interfaces, None)
             return status
 
         # Extract basic info
@@ -2073,6 +2075,8 @@ class OpenWrtAPI:
                 and str(route.get("mask")) == "0"
                 for route in routes
             )
+        # Network Diagnostics (1.47.0): additive, see end of file
+        _diag_add_facts(status, interfaces, wan_iface)
         return status
 
     async def _read_wan_counters(self, device: str) -> tuple[int | None, int | None]:
@@ -7550,3 +7554,707 @@ async def _ssh_run_pinned_inner(
             stderr_truncated=stderr_cut,
         )
     raise OpenWrtAuthError(f"SSH login to {api._host} refused")
+
+
+# =============================================================================
+# --- Network Diagnostics (release 1.47.0) ------------------------------------
+# =============================================================================
+# Home-Assistant-side measurements of the ``net_diagnostics`` module
+# (diag_runtime.py) and the pure reader of the poll's interface dump. This
+# block is the only place where the module touches the network. Rules:
+#
+# * A probe accepts only a ``diag_targets.PinnedTarget`` (an address vetted by
+#   the target registry). Hostnames are resolved here (``async_diag_resolve``)
+#   and every resolved address must pass ``check_resolved`` (DNS-rebinding
+#   guard) before any connect; ``may_query`` decides whether the resolver may
+#   be asked at all.
+# * No shell, no subprocess, no raw sockets: an ICMP target is SKIPPED on the
+#   Home Assistant side (ping needs privileges HA does not have).
+# * Every probe has a hard timeout, never raises (except CancelledError and
+#   a wrong argument type) and returns one normalised ``ProbeResult``. Its
+#   evidence holds codes and numbers only, never an address, a name or a
+#   response body.
+# * Load per probe (no loss, no retry): TCP connect about 7 packets (3
+#   handshake, 4 close); DNS 2 packets (1 query, 1 answer); HTTP about 11
+#   packets (TCP plus request, response and ACKs). Resolving a hostname
+#   target adds what HA's system resolver sends (normally 2 to 4 packets).
+# * The HTTP probe asks for a no-content URL only, sends no credentials, no
+#   cookies and no body, reads the status line only and never follows a
+#   redirect (a 3xx is a FAILED result with the status code as evidence).
+#
+# Socket primitives sit in ``DiagTransport`` so tests can redirect a vetted
+# public address to a loopback server; production code uses the defaults.
+
+import secrets
+import socket
+from collections.abc import Awaitable
+from dataclasses import dataclass as _diag_dataclass
+from dataclasses import field as _diag_field
+
+from .diag_model import (
+    AddressFamily,
+    MeasurementPoint,
+    ProbeKind,
+    ProbeOutcome,
+    ProbeResult,
+    Stage,
+)
+from .diag_targets import (
+    PendingTarget,
+    PinnedTarget,
+    Refusal,
+    TargetKind,
+    TargetRegistry,
+    TargetScope,
+    normalize_host,
+)
+
+DIAG_FACTS_VERSION = 1
+DIAG_MAX_DNS_SERVERS = 8
+DIAG_TCP_TIMEOUT = 3.0
+DIAG_DNS_TIMEOUT = 2.0
+DIAG_HTTP_TIMEOUT = 5.0
+DIAG_RESOLVE_TIMEOUT = 3.0
+DIAG_HTTP_PATH = "/generate_204"
+DIAG_DNS_PORT = 53
+DIAG_HTTP_PORT = 80
+DIAG_HTTP_USER_AGENT = "HomeAssistant-OpenWrt-Diagnostics/1"
+DIAG_HTTP_MAX_STATUS_LINE = 512
+DIAG_DNS_MAX_ANSWER = 4096
+# Approximate packets per probe (no loss, no retry), for the load report.
+DIAG_PACKETS_PER_PROBE: dict[str, int] = {"tcp": 7, "dns": 2, "http": 11, "icmp": 0}
+
+# Reasons of a SKIPPED / FAILED / ERROR result (``evidence["reason"]``).
+DIAG_REASON_ICMP_NOT_ON_HA = "icmp_not_available_on_ha"
+DIAG_REASON_NO_QUERY_NAME = "no_query_name"
+DIAG_REASON_QUERY_NOT_ALLOWED = "query_not_allowed"
+DIAG_REASON_BAD_ANSWER = "bad_answer"
+DIAG_REASON_BAD_RESPONSE = "bad_response"
+DIAG_REASON_REDIRECT = "redirect_not_followed"
+DIAG_REASON_UNEXPECTED_STATUS = "unexpected_status"
+DIAG_REASON_INTERNAL = "internal_error"
+
+_DIAG_PATH_RE = re.compile(r"/[A-Za-z0-9._~/-]{0,63}")
+_DIAG_STATUS_RE = re.compile(rb"HTTP/1\.[01] ([0-9]{3})(?: [^\r\n]*)?\r?\n?")
+_DNS_QTYPES = {"A": 1, "AAAA": 28}
+_DNS_RCODES = {
+    0: ProbeOutcome.OK,
+    2: ProbeOutcome.SERVFAIL,
+    3: ProbeOutcome.NXDOMAIN,
+    5: ProbeOutcome.REFUSED,
+}
+
+
+# --- poll facts (pure) ------------------------------------------------------------
+
+
+def _diag_ip(value: Any) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    if not isinstance(value, str) or "%" in value:
+        return None
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def _diag_is_loopback_iface(iface: dict[str, Any]) -> bool:
+    device = iface.get("l3_device") or iface.get("device")
+    return iface.get("interface") == "loopback" or device == "lo"
+
+
+def _diag_default_routes(iface: dict[str, Any]) -> Iterator[tuple[int, Any]]:
+    """``(ip version, next hop)`` of each default route on the top level."""
+    routes = iface.get("route")
+    if not isinstance(routes, list):
+        return
+    for route in routes:
+        if not isinstance(route, dict) or str(route.get("mask")) != "0":
+            continue
+        target = route.get("target")
+        if target == "0.0.0.0":
+            yield 4, route.get("nexthop")
+        elif target == "::":
+            yield 6, route.get("nexthop")
+
+
+def _diag_gateway(nexthop: Any, version: int) -> dict[str, str] | None:
+    addr = _diag_ip(nexthop)
+    if addr is None or addr.version != version or addr.is_unspecified:
+        return None  # point-to-point link (pppoe) or no next hop
+    return {"address": str(addr)}
+
+
+def diag_interface_facts(interfaces: Any, wan_iface: Any = None) -> dict[str, Any]:
+    """Diagnosis facts from ``network.interface dump`` (pure, never raises).
+
+    Reads the top level of each interface only (``inactive`` is ignored: it
+    lists what netifd would configure, not what is active). Kept next to the
+    WAN status as ``wan_status["diag_facts"]``; absent means unknown (SSH
+    fallback, dump failed). Addresses sit under ``"address"`` keys so the
+    diagnostics redaction removes them.
+
+    Returns:
+        {
+            "version": 1,
+            "interfaces": int,          # without loopback
+            "interfaces_up": int,
+            "ipv4_default_route": bool,
+            "ipv6_default_route": bool,
+            "ipv4_gateway": {"address": str} | None,   # next hop
+            "ipv6_gateway": {"address": str} | None,
+            "dns_servers": [{"address": str}, ...],    # up interfaces, <= 8
+            "ipv6_global_address": bool,
+        }
+    """
+    items = (
+        [i for i in interfaces if isinstance(i, dict)]
+        if isinstance(interfaces, list)
+        else []
+    )
+    items = [i for i in items if not _diag_is_loopback_iface(i)]
+    up = [i for i in items if i.get("up") is True]
+    # the WAN interface first: its default route and resolvers count first
+    ordered = sorted(up, key=lambda i: i is not wan_iface)
+    has_route = {4: False, 6: False}
+    gateway: dict[int, dict[str, str] | None] = {4: None, 6: None}
+    servers: list[dict[str, str]] = []
+    seen: set[str] = set()
+    global_v6 = False
+    for iface in ordered:
+        for version, nexthop in _diag_default_routes(iface):
+            has_route[version] = True
+            if gateway[version] is None:
+                gateway[version] = _diag_gateway(nexthop, version)
+        dns = iface.get("dns-server")
+        for raw in dns if isinstance(dns, list) else ():
+            addr = _diag_ip(raw)
+            if addr is None or str(addr) in seen:
+                continue
+            if len(servers) < DIAG_MAX_DNS_SERVERS:
+                seen.add(str(addr))
+                servers.append({"address": str(addr)})
+        v6 = iface.get("ipv6-address")
+        for entry in v6 if isinstance(v6, list) else ():
+            addr = _diag_ip(entry.get("address") if isinstance(entry, dict) else None)
+            if addr is not None and addr.version == 6 and addr.is_global:
+                global_v6 = True
+    return {
+        "version": DIAG_FACTS_VERSION,
+        "interfaces": len(items),
+        "interfaces_up": len(up),
+        "ipv4_default_route": has_route[4],
+        "ipv6_default_route": has_route[6],
+        "ipv4_gateway": gateway[4],
+        "ipv6_gateway": gateway[6],
+        "dns_servers": servers,
+        "ipv6_global_address": global_v6,
+    }
+
+
+def _diag_add_facts(status: dict[str, Any], interfaces: Any, wan_iface: Any) -> None:
+    """Add ``status["diag_facts"]`` (new key only; never fails the poll).
+
+    Called by ``get_wan_status`` after every existing field is set; no
+    existing key is read or changed. Left out when the facts cannot be
+    derived (absent = unknown).
+    """
+    try:
+        status["diag_facts"] = diag_interface_facts(interfaces, wan_iface)
+    except Exception as err:  # noqa: BLE001 - diagnosis facts are optional
+        _LOGGER.debug("Diagnosis facts not derived (%s)", type(err).__name__)
+
+
+# --- transport ----------------------------------------------------------------------
+
+
+async def _diag_getaddrinfo(host: str, port: int) -> list[Any]:
+    loop = asyncio.get_running_loop()
+    return await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+
+
+class _DiagDatagram(asyncio.DatagramProtocol):
+    """One answer on a connected UDP socket (the kernel drops other senders)."""
+
+    def __init__(self, future: asyncio.Future[bytes]) -> None:
+        self._future = future
+
+    def datagram_received(self, data: bytes, addr: Any) -> None:
+        if not self._future.done():
+            self._future.set_result(data)
+
+    def error_received(self, exc: Exception) -> None:
+        if not self._future.done():
+            self._future.set_exception(exc)
+
+
+async def _diag_exchange_datagram(
+    host: str, port: int, payload: bytes, timeout: float
+) -> bytes:
+    """Send one datagram, wait for one answer (no retry)."""
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[bytes] = loop.create_future()
+    transport, _ = await loop.create_datagram_endpoint(
+        lambda: _DiagDatagram(future), remote_addr=(host, port)
+    )
+    try:
+        transport.sendto(payload)
+        return await asyncio.wait_for(future, timeout)
+    finally:
+        transport.close()
+
+
+@_diag_dataclass(frozen=True)
+class DiagTransport:
+    """Socket primitives of the probes; tests replace them (loopback)."""
+
+    open_connection: Callable[..., Awaitable[Any]] = _diag_field(
+        default=asyncio.open_connection
+    )
+    exchange_datagram: Callable[[str, int, bytes, float], Awaitable[bytes]] = (
+        _diag_field(default=_diag_exchange_datagram)
+    )
+    getaddrinfo: Callable[[str, int], Awaitable[list[Any]]] = _diag_field(
+        default=_diag_getaddrinfo
+    )
+    monotonic: Callable[[], float] = _diag_field(default=time.monotonic)
+    wall: Callable[[], float] = _diag_field(default=time.time)
+
+
+DIAG_DEFAULT_TRANSPORT = DiagTransport()
+
+
+# --- resolution ---------------------------------------------------------------------
+
+
+async def async_diag_resolve(
+    registry: TargetRegistry,
+    target_id: str,
+    *,
+    resolver_scope: TargetScope = TargetScope.EXTERNAL,
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+    timeout: float = DIAG_RESOLVE_TIMEOUT,
+) -> PinnedTarget | Refusal:
+    """Target id -> usable ``PinnedTarget`` or the refusal (never raises).
+
+    An IP literal is pinned by the registry without any packet. A hostname
+    is resolved with Home Assistant's system resolver, whose scope the
+    caller states (``resolver_scope``; external unless an admin declared it
+    internal): ``may_query`` must allow asking it, and ``check_resolved``
+    must accept every address before one is pinned. A failed resolution is
+    ``Refusal.RESOLVED_EMPTY``.
+    """
+    resolved = registry.resolve(target_id)
+    if not isinstance(resolved, PendingTarget):
+        return resolved
+    if not registry.may_query(resolved.name, resolver_scope):
+        return Refusal.INTERNAL_NAME
+    try:
+        infos = await asyncio.wait_for(
+            transport.getaddrinfo(resolved.name, 0), timeout=timeout
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # noqa: BLE001 - gaierror, timeout, ...
+        _LOGGER.debug(
+            "Diagnosis target %s did not resolve (%s)",
+            resolved.target_id,
+            type(err).__name__,
+        )
+        return Refusal.RESOLVED_EMPTY
+    addresses: list[str] = []
+    for info in infos or ():
+        try:
+            address = str(info[4][0])
+        except (IndexError, TypeError, KeyError):
+            return Refusal.RESOLVED_INVALID
+        if address not in addresses:
+            addresses.append(address)
+    return registry.check_resolved(resolved, addresses)
+
+
+# --- probes -------------------------------------------------------------------------
+
+
+def _diag_family(target: PinnedTarget) -> AddressFamily:
+    return AddressFamily.IPV4 if target.address.version == 4 else AddressFamily.IPV6
+
+
+def _diag_check_target(target: Any, kinds: tuple[TargetKind, ...]) -> PinnedTarget:
+    if not isinstance(target, PinnedTarget):
+        raise TypeError("diagnosis probes accept a PinnedTarget only")
+    if target.kind not in kinds:
+        raise ValueError("probe does not fit the target kind")
+    return target
+
+
+def _diag_ms(seconds: float) -> float:
+    return round(max(0.0, seconds) * 1000.0, 3)
+
+
+@_diag_dataclass(frozen=True)
+class _DiagRun:
+    """What every result of one probe call shares."""
+
+    target: PinnedTarget
+    kind: ProbeKind
+    stage: Stage
+    subject: str | None
+    via: frozenset[Stage]
+    transport: DiagTransport
+    timestamp: float
+    started: float
+
+    @classmethod
+    def begin(
+        cls,
+        target: PinnedTarget,
+        kind: ProbeKind,
+        stage: Stage,
+        subject: str | None,
+        via: frozenset[Stage],
+        transport: DiagTransport,
+    ) -> _DiagRun:
+        return cls(
+            target,
+            kind,
+            stage,
+            subject,
+            frozenset(via),
+            transport,
+            transport.wall(),
+            transport.monotonic(),
+        )
+
+    def elapsed(self) -> float:
+        return self.transport.monotonic() - self.started
+
+    def result(
+        self,
+        outcome: ProbeOutcome,
+        *,
+        rtt_s: float | None = None,
+        sent: int | None = None,
+        received: int | None = None,
+        evidence: dict[str, Any] | None = None,
+    ) -> ProbeResult:
+        return ProbeResult(
+            point=MeasurementPoint.ha(),
+            target_id=self.target.target_id,
+            kind=self.kind,
+            stage=self.stage,
+            family=_diag_family(self.target),
+            outcome=outcome,
+            timestamp=self.timestamp,
+            duration_ms=_diag_ms(self.elapsed()),
+            rtt_ms=None if rtt_s is None else _diag_ms(rtt_s),
+            sent=sent,
+            received=received,
+            via=self.via,
+            subject=self.subject,
+            evidence=evidence or {},
+        )
+
+    def failure(self, err: BaseException, **evidence: Any) -> ProbeResult:
+        """Result of a failed connect / exchange."""
+        if isinstance(err, TimeoutError):
+            outcome, received, reason = ProbeOutcome.TIMEOUT, 0, "timeout"
+        elif isinstance(err, ConnectionRefusedError):
+            # an RST (or ICMP port unreachable) came back: the host answered
+            outcome, received, reason = ProbeOutcome.REFUSED, 1, "connection_refused"
+        elif isinstance(err, OSError):
+            outcome, received = ProbeOutcome.FAILED, 0
+            reason = f"os_error_{err.errno or 0}"
+        else:
+            outcome, received, reason = ProbeOutcome.ERROR, 0, DIAG_REASON_INTERNAL
+        return self.result(
+            outcome, sent=1, received=received, evidence={"reason": reason, **evidence}
+        )
+
+
+async def _diag_close(writer: Any) -> None:
+    with contextlib.suppress(Exception):
+        writer.close()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+
+
+async def async_diag_tcp_probe(
+    target: PinnedTarget,
+    *,
+    stage: Stage,
+    subject: str | None = None,
+    via: frozenset[Stage] = frozenset(),
+    timeout: float = DIAG_TCP_TIMEOUT,
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+) -> ProbeResult:
+    """TCP connect to the pinned address and port, then close (~7 packets)."""
+    pinned = _diag_check_target(target, (TargetKind.TCP,))
+    run = _DiagRun.begin(pinned, ProbeKind.TCP, stage, subject, via, transport)
+    try:
+        _reader, writer = await asyncio.wait_for(
+            transport.open_connection(pinned.host, pinned.port), timeout=timeout
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # noqa: BLE001 - every failure is a result
+        return run.failure(err)
+    rtt = run.elapsed()
+    await _diag_close(writer)
+    return run.result(ProbeOutcome.OK, rtt_s=rtt, sent=1, received=1)
+
+
+def diag_dns_query(qname: str, qtype: str, query_id: int) -> bytes:
+    """Wire form of one recursive DNS query (RFC 1035), no EDNS."""
+    header = struct.pack("!HHHHHH", query_id & 0xFFFF, 0x0100, 1, 0, 0, 0)
+    labels = b"".join(
+        bytes([len(label)]) + label.encode("ascii") for label in qname.split(".")
+    )
+    return header + labels + b"\x00" + struct.pack("!HH", _DNS_QTYPES[qtype], 1)
+
+
+def diag_dns_answer(data: bytes, query_id: int) -> tuple[int, int] | None:
+    """``(rcode, answer count)`` of an answer to ``query_id``, else None."""
+    if not isinstance(data, bytes | bytearray):
+        return None
+    if len(data) < 12 or len(data) > DIAG_DNS_MAX_ANSWER:
+        return None
+    ident, flags, _qd, ancount, _ns, _ar = struct.unpack("!HHHHHH", data[:12])
+    if ident != query_id or not flags & 0x8000:  # not our id, or not a response
+        return None
+    return flags & 0x000F, ancount
+
+
+async def async_diag_dns_probe(
+    target: PinnedTarget,
+    *,
+    query_name: str | None,
+    may_query: Callable[[Any, TargetScope], bool],
+    stage: Stage = Stage.DNS,
+    qtype: str = "A",
+    subject: str | None = None,
+    via: frozenset[Stage] = frozenset(),
+    timeout: float = DIAG_DNS_TIMEOUT,
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+) -> ProbeResult:
+    """One UDP query to the pinned resolver, no retry (2 packets).
+
+    ``may_query`` (``TargetRegistry.may_query``) must allow asking a resolver
+    of the target's scope for ``query_name``; otherwise nothing is sent and
+    the result is SKIPPED. Answer codes: NOERROR -> OK (also without
+    records), NXDOMAIN, SERVFAIL, REFUSED; any other code -> ERROR.
+    """
+    pinned = _diag_check_target(target, (TargetKind.DNS,))
+    run = _DiagRun.begin(pinned, ProbeKind.DNS, stage, subject, via, transport)
+    name = normalize_host(query_name) if query_name else None
+    if not isinstance(name, str):
+        return run.result(
+            ProbeOutcome.SKIPPED, evidence={"reason": DIAG_REASON_NO_QUERY_NAME}
+        )
+    if qtype not in _DNS_QTYPES or not may_query(name, pinned.scope):
+        return run.result(
+            ProbeOutcome.SKIPPED, evidence={"reason": DIAG_REASON_QUERY_NOT_ALLOWED}
+        )
+    query_id = secrets.randbits(16)
+    payload = diag_dns_query(name, qtype, query_id)
+    try:
+        data = await asyncio.wait_for(
+            transport.exchange_datagram(
+                pinned.host, pinned.port or DIAG_DNS_PORT, payload, timeout
+            ),
+            timeout=timeout,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # noqa: BLE001 - every failure is a result
+        return run.failure(err, qtype=qtype)
+    rtt = run.elapsed()
+    answer = diag_dns_answer(data, query_id)
+    if answer is None:
+        return run.result(
+            ProbeOutcome.ERROR,
+            rtt_s=rtt,
+            sent=1,
+            received=1,
+            evidence={"reason": DIAG_REASON_BAD_ANSWER, "qtype": qtype},
+        )
+    rcode, count = answer
+    return run.result(
+        _DNS_RCODES.get(rcode, ProbeOutcome.ERROR),
+        rtt_s=rtt,
+        sent=1,
+        received=1,
+        evidence={"rcode": rcode, "answers": count, "qtype": qtype},
+    )
+
+
+def diag_http_request(target: PinnedTarget, path: str) -> bytes:
+    """GET of a no-content URL: no credentials, no cookies, no body."""
+    if not isinstance(path, str) or not _DIAG_PATH_RE.fullmatch(path):
+        raise ValueError("invalid no-content path")
+    host = target.server_name or (
+        f"[{target.host}]" if target.address.version == 6 else target.host
+    )
+    port = target.port or DIAG_HTTP_PORT
+    if port != DIAG_HTTP_PORT:
+        host = f"{host}:{port}"
+    return (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"User-Agent: {DIAG_HTTP_USER_AGENT}\r\n"
+        "Accept: */*\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+
+
+async def _diag_http_status(
+    run: _DiagRun, reader: Any, writer: Any, request: bytes, deadline: float
+) -> bytes:
+    writer.write(request)
+    await asyncio.wait_for(writer.drain(), timeout=max(0.0, deadline - run.elapsed()))
+    return await asyncio.wait_for(
+        reader.readuntil(b"\n"), timeout=max(0.0, deadline - run.elapsed())
+    )
+
+
+async def async_diag_http_probe(
+    target: PinnedTarget,
+    *,
+    stage: Stage,
+    path: str = DIAG_HTTP_PATH,
+    subject: str | None = None,
+    via: frozenset[Stage] = frozenset(),
+    timeout: float = DIAG_HTTP_TIMEOUT,
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+) -> ProbeResult:
+    """Plain-HTTP GET of a no-content URL on the pinned address (~11 packets).
+
+    204 -> OK. Anything else is FAILED with the status code as evidence; a
+    redirect is never followed. Only the status line is read.
+    """
+    pinned = _diag_check_target(target, (TargetKind.HTTP,))
+    request = diag_http_request(pinned, path)
+    run = _DiagRun.begin(pinned, ProbeKind.HTTP, stage, subject, via, transport)
+    try:
+        reader, writer = await asyncio.wait_for(
+            transport.open_connection(pinned.host, pinned.port or DIAG_HTTP_PORT),
+            timeout=timeout,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # noqa: BLE001 - every failure is a result
+        return run.failure(err)
+    rtt = run.elapsed()
+    try:
+        line = await _diag_http_status(run, reader, writer, request, timeout)
+    except asyncio.CancelledError:
+        await _diag_close(writer)
+        raise
+    except (asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+        await _diag_close(writer)
+        return run.result(
+            ProbeOutcome.FAILED,
+            rtt_s=rtt,
+            sent=1,
+            received=0,
+            evidence={"reason": DIAG_REASON_BAD_RESPONSE},
+        )
+    except Exception as err:  # noqa: BLE001 - every failure is a result
+        await _diag_close(writer)
+        return run.failure(err)
+    await _diag_close(writer)
+    match = _DIAG_STATUS_RE.fullmatch(bytes(line[:DIAG_HTTP_MAX_STATUS_LINE]))
+    if match is None:
+        return run.result(
+            ProbeOutcome.FAILED,
+            rtt_s=rtt,
+            sent=1,
+            received=1,
+            evidence={"reason": DIAG_REASON_BAD_RESPONSE},
+        )
+    status = int(match.group(1))
+    if status == 204:
+        return run.result(
+            ProbeOutcome.OK, rtt_s=rtt, sent=1, received=1, evidence={"status": status}
+        )
+    reason = (
+        DIAG_REASON_REDIRECT if 300 <= status < 400 else DIAG_REASON_UNEXPECTED_STATUS
+    )
+    return run.result(
+        ProbeOutcome.FAILED,
+        rtt_s=rtt,
+        sent=1,
+        received=1,
+        evidence={"status": status, "reason": reason},
+    )
+
+
+_DIAG_PROBE_KIND = {
+    TargetKind.ICMP: ProbeKind.ICMP,
+    TargetKind.DNS: ProbeKind.DNS,
+    TargetKind.TCP: ProbeKind.TCP,
+    TargetKind.HTTP: ProbeKind.HTTP,
+}
+
+
+def diag_skipped_probe(
+    target: PinnedTarget,
+    *,
+    stage: Stage,
+    reason: str,
+    subject: str | None = None,
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+) -> ProbeResult:
+    """SKIPPED result without any packet (ICMP on HA, a refusal, ...)."""
+    pinned = _diag_check_target(target, tuple(TargetKind))
+    run = _DiagRun.begin(
+        pinned, _DIAG_PROBE_KIND[pinned.kind], stage, subject, frozenset(), transport
+    )
+    return run.result(ProbeOutcome.SKIPPED, evidence={"reason": reason})
+
+
+async def async_diag_probe(
+    target: PinnedTarget,
+    *,
+    stage: Stage,
+    may_query: Callable[[Any, TargetScope], bool],
+    query_name: str | None = None,
+    http_path: str = DIAG_HTTP_PATH,
+    subject: str | None = None,
+    via: frozenset[Stage] = frozenset(),
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+) -> ProbeResult:
+    """The probe that fits the target kind (ICMP: SKIPPED, no packet)."""
+    pinned = _diag_check_target(target, tuple(TargetKind))
+    if pinned.kind is TargetKind.TCP:
+        return await async_diag_tcp_probe(
+            pinned, stage=stage, subject=subject, via=via, transport=transport
+        )
+    if pinned.kind is TargetKind.DNS:
+        return await async_diag_dns_probe(
+            pinned,
+            query_name=query_name,
+            may_query=may_query,
+            stage=stage,
+            subject=subject,
+            via=via,
+            transport=transport,
+        )
+    if pinned.kind is TargetKind.HTTP:
+        return await async_diag_http_probe(
+            pinned,
+            stage=stage,
+            path=http_path,
+            subject=subject,
+            via=via,
+            transport=transport,
+        )
+    return diag_skipped_probe(
+        pinned,
+        stage=stage,
+        reason=DIAG_REASON_ICMP_NOT_ON_HA,
+        subject=subject,
+        transport=transport,
+    )
+
+
+# --- end Network Diagnostics
