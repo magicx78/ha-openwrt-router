@@ -1,0 +1,130 @@
+/* Security Center tab (enterprise/security). Only what the Configuration
+   Manager's stylesheet (config.css, injected next to this one) and
+   topology.css do not already provide. Uses the panel's variables.
+   Narrow layout: one column, 40 px buttons, long values wrap, nothing makes
+   the page scroll sideways. */
+
+.sec { min-width: 0; }
+.sec p { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text-primary); overflow-wrap: anywhere; }
+.sec .sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.sec-unknown { color: var(--text-secondary); font-style: italic; font-weight: 400; }
+.sec-ident { overflow-wrap: anywhere; word-break: break-all; }
+
+/* Tones (never green for unknown: `muted` is the unknown tone) */
+.sec-tone-ok { color: var(--green); }
+.sec-tone-info { color: #93c5fd; }
+.sec-tone-warn { color: var(--amber); }
+.sec-tone-critical { color: var(--red); }
+.sec-tone-muted { color: var(--text-secondary); }
+
+/* Section switch */
+.sec-nav { display: flex; flex-wrap: wrap; gap: 6px; }
+.sec-nav__btn {
+  min-height: 32px; padding: 4px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-secondary);
+  font: inherit; font-size: 12.5px; font-weight: 600;
+}
+.sec-nav__btn:hover { color: var(--text-primary); border-color: var(--border-hover); }
+.sec-nav__btn.active { color: var(--text-primary); background: var(--blue-dim); border-color: rgba(59, 130, 246, 0.5); }
+.sec-nav__btn:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; }
+
+/* Off state */
+.sec-off p + p { margin-top: 2px; }
+.sec-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+/* Score */
+.sec-score { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
+.sec-score__value { font-size: 40px; line-height: 1; font-weight: 700; font-variant-numeric: tabular-nums; }
+.sec-score__value--text { font-size: 18px; line-height: 1.3; }
+.sec-score__max { font-size: 14px; font-weight: 400; color: var(--text-secondary); }
+.sec-score__text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; overflow-wrap: anywhere; }
+
+/* Details / factors */
+.sec-details { font-size: 12.5px; }
+.sec-details > summary { cursor: pointer; color: var(--text-secondary); padding: 4px 0; }
+.sec-details > summary:hover { color: var(--text-primary); }
+.sec-factors { list-style: none; display: flex; flex-direction: column; gap: 4px; padding: 4px 0 0; }
+.sec-factor { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 8px; border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03); overflow-wrap: anywhere; }
+.sec-factor__name { color: var(--text-primary); min-width: 0; }
+.sec-factor__note { flex-basis: 100%; }
+
+/* KPI tiles */
+.sec-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.sec-kpi {
+  display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; min-width: 0;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface);
+}
+.sec-kpi__name { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.sec-kpi__value { font-size: 26px; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; color: var(--text-primary); overflow-wrap: anywhere; }
+.sec-kpi__value .sec-unknown { font-size: 15px; }
+.sec-kpi__sub { font-size: 11.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
+
+/* Coverage */
+.sec-coverage { display: flex; align-items: center; gap: 10px; }
+.sec-bar { flex: 1 1 auto; min-width: 0; height: 10px; border-radius: 999px; background: rgba(255, 255, 255, 0.07); overflow: hidden; }
+.sec-bar__fill { height: 100%; background: var(--blue); border-radius: 999px; }
+.sec-coverage__pct { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.sec-sources { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px 14px; }
+.sec-sources__group { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.sec-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.cfg-badge { white-space: normal; }
+
+/* Rows (findings, events, devices, detections) */
+.sec-rows { list-style: none; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.sec-row {
+  display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; min-width: 0;
+  border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03); font-size: 12.5px;
+}
+.sec-row__main { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.sec-row__title { color: var(--text-primary); font-weight: 600; min-width: 0; overflow-wrap: anywhere; flex: 1 1 200px; }
+.sec-row__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; color: var(--text-secondary); font-size: 11.5px; min-width: 0; overflow-wrap: anywhere; }
+.sec-row__action { align-self: flex-start; }
+.sec-edit { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
+
+/* Facts */
+.sec-fact { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 12.5px; align-items: baseline; }
+.sec-fact__name { color: var(--text-muted); min-width: 150px; }
+.sec-fact__value { color: var(--text-primary); min-width: 0; overflow-wrap: anywhere; }
+
+/* Lists of evidence / sources */
+.sec-evidence { list-style: none; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.sec-evidence li { padding: 4px 8px; border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.04); overflow-wrap: anywhere; word-break: break-word; }
+.sec-sources-list { list-style: none; display: flex; flex-direction: column; gap: 4px; padding-top: 4px; }
+.sec-source { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12.5px; overflow-wrap: anywhere; }
+.sec-source__name { color: var(--text-primary); min-width: 0; }
+
+/* Incident head */
+.sec-incident__head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.sec-incident__title { margin: 0; font-size: 15px; font-weight: 700; color: var(--text-primary); flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+
+/* Filters and form fields */
+.sec-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.sec-filters__state { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.sec-chip-btn { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+.sec-field { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--text-secondary); min-width: 0; }
+.sec-field select, .sec-field input[type='text'] {
+  width: 100%; min-width: 0; min-height: 32px; padding: 4px 8px; font: inherit; font-size: 13px;
+  color: var(--text-primary); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-xs);
+}
+.sec-field select:focus-visible, .sec-field input:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; }
+.sec-fieldset { border: none; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.sec-radio { align-items: flex-start; line-height: 1.45; }
+.sec-radio input { margin-top: 3px; width: 16px; height: 16px; flex-shrink: 0; }
+.sec-radio__title { color: var(--text-primary); }
+.sec-radio__help { display: block; }
+.sec-radio--off { opacity: 0.7; }
+
+@media (max-width: 600px) {
+  .sec-nav__btn { min-height: 40px; flex: 1 1 auto; }
+  .sec-filters { grid-template-columns: 1fr; }
+  .sec-field select, .sec-field input[type='text'] { min-height: 40px; }
+  .sec-fact__name { min-width: 0; flex-basis: 100%; }
+  .sec-row__action { width: 100%; }
+  .sec-actions .cfg-btn { flex: 1 1 calc(50% - 6px); }
+  .sec-radio input { width: 20px; height: 20px; }
+  .sec-score__value { font-size: 34px; }
+  .sec-sources { grid-template-columns: 1fr; }
+}
