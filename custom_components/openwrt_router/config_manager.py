@@ -603,6 +603,41 @@ class ConfigManagerRuntime:
         self._drift_from_events(state, events)
         # Drifts seen before the restart get no further automatic version.
         state.drift_versioned |= state.drift_ids
+        self._failure_from_audit(state)
+
+    def _failure_from_audit(self, state: RouterState) -> None:
+        """Newest failed attempt from the audit (survives an HA restart).
+
+        A repeated failure is one deduplicated audit entry; its newest time is
+        ``last_repeat_at``. ``status()`` reports failed only while that time
+        is newer than the newest version.
+        """
+        try:
+            events = self.api.events(
+                router_id=state.router_id,
+                types=[str(CoreEventType.BACKUP_FAILED)],
+                limit=20,
+            )
+        except Exception:  # noqa: BLE001 - audit not readable: no failure known
+            _LOGGER.debug("Audit of %s not readable", state.router_id)
+            return
+        newest: Any = None
+        newest_at: datetime | None = None
+        for event in events:
+            when = getattr(event, "last_repeat_at", None) or getattr(event, "ts", None)
+            if isinstance(when, datetime) and (newest_at is None or when > newest_at):
+                newest, newest_at = event, when
+        if newest is None or newest_at is None:
+            return
+        if state.last_failure_at is None or newest_at > state.last_failure_at:
+            data = getattr(newest, "data", None) or {}
+            error_class = data.get("error_class")
+            state.last_failure_at = newest_at
+            state.last_error_class = (
+                error_class if isinstance(error_class, str) else None
+            )
+        if state.last_attempt_at is None or newest_at > state.last_attempt_at:
+            state.last_attempt_at = newest_at
 
     def _drift_from_events(self, state: RouterState, events: Iterable[Any]) -> None:
         """Drift summary from the newest detection and its acknowledgement.

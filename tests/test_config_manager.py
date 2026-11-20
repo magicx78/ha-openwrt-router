@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import timedelta
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -39,9 +40,11 @@ from core_testkit import (
 from homeassistant.util import dt as dt_util
 
 from custom_components.openwrt_router import config_manager as cm
+from custom_components.openwrt_router import core_audit
 from custom_components.openwrt_router.const import (
     CONFIG_BACKUP_SCHEDULE_OFF,
     CONFIG_STATUS_DISABLED,
+    CONFIG_STATUS_FAILED,
     CONFIG_STATUS_NEVER,
     CONFIG_STATUS_OK,
     DATA_CONFIG_MANAGER,
@@ -228,6 +231,44 @@ async def test_memory_rebuilt_from_the_store(disks, tmp_path):
     assert state.newest_ok_release == "24.10.2"
     assert env.runtime.status(env.rid) == CONFIG_STATUS_OK
     assert env.router_calls() == []
+    await stop(env)
+
+
+async def test_failure_after_the_last_version_survives_a_restart(disks, tmp_path):
+    """H1: a failed attempt newer than the newest version stays "failed"."""
+    env = await cm_env(disks, tmp_path)
+    with patch.object(core_audit, "utcnow", env.clock.utc):  # audit on test time
+        await _failure_then_restart(env)
+
+
+async def _failure_then_restart(env: Any) -> None:
+    await env.api.async_create_backup(env.rid, reason=BackupReason.MANUAL, actor=ADMIN)
+    env.clock.advance(hours=1)
+    env.provider.fail["collect"] = RouterUnavailableError("offline")
+    with pytest.raises(RouterUnavailableError):
+        await env.api.async_create_backup(
+            env.rid, reason=BackupReason.MANUAL, actor=ADMIN
+        )
+    env.clock.advance(minutes=5)
+    with pytest.raises(RouterUnavailableError):  # deduplicated repeat
+        await env.api.async_create_backup(
+            env.rid, reason=BackupReason.MANUAL, actor=ADMIN
+        )
+    del env.provider.fail["collect"]
+    assert env.runtime.status(env.rid) == CONFIG_STATUS_FAILED
+    env = await restart(env)
+    state = env.runtime.routers[env.rid]
+    assert env.runtime.status(env.rid) == CONFIG_STATUS_FAILED
+    assert env.runtime.error_class(env.rid) == "unreachable"
+    assert state.last_failure_at == env.clock.utc()
+    assert state.last_attempt_at == env.clock.utc()
+    # a newer version ends the failed state again
+    env.clock.advance(minutes=5)
+    await env.api.async_create_backup(env.rid, reason=BackupReason.MANUAL, actor=ADMIN)
+    await drain(env.hass)
+    assert env.runtime.status(env.rid) == CONFIG_STATUS_OK
+    env = await restart(env)
+    assert env.runtime.status(env.rid) == CONFIG_STATUS_OK
     await stop(env)
 
 
