@@ -950,7 +950,9 @@ async def test_uci_snapshot_request_never_asks_for_the_archive() -> None:
     assert "cgi" not in methods(api) and "ssh" not in methods(api)
     assert version.meta.backup_type is BackupType.UCI_SNAPSHOT
     assert version.meta.status is VersionStatus.OK
-    assert not any(w.startswith("archive_") for w in version.meta.warnings)
+    # No archive failure is claimed; 1.46.1 only says none was attempted.
+    archive = [w for w in version.meta.warnings if w.startswith("archive_")]
+    assert archive and all(w.startswith("archive_not_attempted:") for w in archive)
 
     api = FakeApi()
     await collect(api, fetch_method="uci")

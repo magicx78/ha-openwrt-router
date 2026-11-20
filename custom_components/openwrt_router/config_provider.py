@@ -204,6 +204,11 @@ REASON_NO_ARCHIVE: Final = "provider:no_archive"
 
 # VersionMeta warning codes (``<code>:<item>``, WARNING_CODE_PATTERN).
 WARN_ARCHIVE_UNAVAILABLE: Final = "archive_unavailable"
+# The run asked for no archive at all (1.46.1): ``requested`` when an archive
+# path was available, else one ``<path>.<probe cause>`` item per path
+# (e.g. ``cgi.not_probed``, ``ssh.pin_pending``).
+WARN_ARCHIVE_NOT_ATTEMPTED: Final = "archive_not_attempted"
+NOT_ATTEMPTED_REQUESTED: Final = "requested"
 WARN_ARCHIVE: Final = "archive_warning"
 WARN_UCI_MISSING: Final = "uci_missing"
 WARN_UCI_FAILED: Final = "uci_failed"
@@ -936,6 +941,23 @@ def _probed_backup_type(
     return BackupType.UCI_SNAPSHOT
 
 
+def _not_attempted_items(
+    probed: BackupType | None, causes: tuple[str, str] | None
+) -> tuple[str, ...]:
+    """Items of ``archive_not_attempted`` for a run that asked for no archive.
+
+    ``probed`` / ``causes``: the last probe's backup type and its probe
+    classes of the cgi and SSH path (None: not probed since start).
+    """
+    if probed is BackupType.FULL_ARCHIVE:
+        return (NOT_ATTEMPTED_REQUESTED,)
+    cgi, ssh = causes or (_PROBE_NOT_PROBED, _PROBE_NOT_PROBED)
+    return (
+        f"{FETCH_METHOD_CGI}.{cgi}",
+        f"{FETCH_METHOD_SSH}.{ssh.removeprefix('ssh_')}",
+    )
+
+
 def _as(capability: str, status: CapabilityStatus) -> CapabilityStatus:
     return replace(status, capability=capability, detail={})
 
@@ -1000,6 +1022,9 @@ class ConfigManagerProvider:
         # router id -> backup type of a run without one, from the last probe
         # (memory only; the core keeps only this provider's probe results).
         self._probed_types: dict[str, BackupType] = {}
+        # router id -> probe classes (cgi, ssh) when no archive path was
+        # available (memory only; named in ``archive_not_attempted``).
+        self._probed_causes: dict[str, tuple[str, str]] = {}
 
     @property
     def provider_id(self) -> str:
@@ -1308,9 +1333,14 @@ class ConfigManagerProvider:
                 api, known, self._timeouts[FETCH_PACKAGELIST]
             )
             ssh_class = self._ssh_class(router_id, api, ctx)
-        self._probed_types[router_id] = _probed_backup_type(
+        probed = _probed_backup_type(
             api.config_cgi_transport_secure(), cgi_class, ssh_class
         )
+        self._probed_types[router_id] = probed
+        if cgi_class is not None and ssh_class is not None:
+            self._probed_causes[router_id] = (cgi_class, ssh_class)
+        else:
+            self._probed_causes.pop(router_id, None)
 
         now = utcnow()
         uci = _probe_status(
@@ -1590,6 +1620,13 @@ class ConfigManagerProvider:
             if not order and not secure:
                 # UCI-only run on an HTTP entry: say why no archive exists.
                 warnings.add(WARN_ARCHIVE_UNAVAILABLE, REASON_INSECURE_TRANSPORT)
+            if not order:
+                # No archive was asked for: say why, per path (1.46.1).
+                for item in _not_attempted_items(
+                    self._probed_types.get(conn.router_id),
+                    self._probed_causes.get(conn.router_id),
+                ):
+                    warnings.add(WARN_ARCHIVE_NOT_ATTEMPTED, item)
 
         artifacts: dict[str, ArtifactPayload] = {}
         if report is not None and fetch is not None and fetch.data is not None:

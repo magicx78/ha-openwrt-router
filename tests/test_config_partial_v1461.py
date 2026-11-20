@@ -21,8 +21,11 @@ from test_config_provider import (
     FakeApi,
     collect,
     every_config,
+    make_conn,
+    make_ctx,
     methods,
     router_info,
+    router_record,
     ubus_values,
 )
 
@@ -190,3 +193,48 @@ async def test_unknown_read_outcome_stays_a_failure(error: Exception) -> None:
     version = await collect(api)
     assert version.meta.status is VersionStatus.PARTIAL
     assert "uci_failed:sqm" in version.meta.warnings
+
+
+# -- point 2: a run without an archive path says why -------------------------
+
+
+async def test_uci_only_run_names_the_cause_per_archive_path() -> None:
+    provider = ConfigManagerProvider()
+    api = FakeApi(access=False, root=False)
+    await provider.async_probe(make_conn(api), make_ctx())
+    record = router_record()
+    assert provider.default_backup_type(record) is BackupType.UCI_SNAPSHOT
+    version = await collect(api, provider=provider, backup_type=BackupType.UCI_SNAPSHOT)
+    warnings = version.meta.warnings
+    assert "archive_not_attempted:cgi.permission" in warnings
+    assert "archive_not_attempted:ssh.permission" in warnings
+
+
+async def test_unprobed_router_says_not_probed_per_path() -> None:
+    version = await collect(FakeApi(), backup_type=BackupType.UCI_SNAPSHOT)
+    warnings = version.meta.warnings
+    assert "archive_not_attempted:cgi.not_probed" in warnings
+    assert "archive_not_attempted:ssh.not_probed" in warnings
+
+
+async def test_requested_snapshot_with_an_archive_path_says_requested() -> None:
+    provider = ConfigManagerProvider()
+    api = FakeApi()
+    await provider.async_probe(make_conn(api), make_ctx())
+    version = await collect(api, provider=provider, backup_type=BackupType.UCI_SNAPSHOT)
+    assert "archive_not_attempted:requested" in version.meta.warnings
+
+
+async def test_partial_run_without_archive_path_end_to_end(disks, tmp_path):
+    # The field case after point 1 and 3: rpcd gives no clear answer on the
+    # cgi right, the rpcd config is denied, the SSH pin is pending.
+    uci = {**ubus_values(), "rpcd": OpenWrtConfigFetchHostKeyError("pin_pending", "x")}
+    api = FakeApi(secure=True, root=True, packages=None, access=None, uci=uci)
+    env = await _env(disks, tmp_path, api)
+    await env.tick()
+    [record] = await _records(env)
+    assert record.status is VersionStatus.PARTIAL
+    assert record.fetch_method == "uci"
+    assert "archive_not_attempted:cgi.not_probed" in record.warnings
+    assert "archive_not_attempted:ssh.not_probed" in record.warnings
+    await stop(env)
