@@ -33,6 +33,7 @@ from custom_components.openwrt_router.security_model import (
     source_status,
 )
 from custom_components.openwrt_router.security_rules import (
+    DRIFT_KIND,
     DetectorSet,
     DistinctWindow,
     DnsManyDomainsDetector,
@@ -550,9 +551,14 @@ def test_default_detectors_share_one_baseline() -> None:
 def test_case09_vlan_drift_needs_drift_input() -> None:
     det = VlanDriftDetector()
     drift = [
-        Rec(R1, T0, "config.drift", {"area": "firewall.forwarding", "critical": True})
+        Rec(
+            R1,
+            T0,
+            DRIFT_KIND,
+            {"drift_id": "d1", "areas": ["firewall"], "critical": True},
+        )
     ]
-    drift.append(Rec(R1, T0, "config.drift", {"area": "system.ntp"}))
+    drift.append(Rec(R1, T0, DRIFT_KIND, {"drift_id": "d2", "areas": ["system"]}))
     no_drift = statuses(
         R1, sources=[s for s in ALL_SOURCES if s != DataSource.CONFIG_DRIFT]
     )
@@ -732,8 +738,8 @@ def test_no_rule_silently_suppresses_another_alarm() -> None:
     found = run(deauth, signals, T0 + 5, statuses(R1))
     drift = VlanDriftDetector()
     areas = [
-        Rec(R1, T0, "config.drift", {"area": a})
-        for a in ("firewall.zone", "network.vlan")
+        Rec(R1, T0, DRIFT_KIND, {"drift_id": f"d-{a}", "areas": [a]})
+        for a in ("firewall", "vlan")
     ]
     found += run(drift, areas, T0 + 5, statuses(R1))
     assert len(found) == 4
@@ -991,13 +997,13 @@ def test_review_m2_distinct_aps_and_areas_stay_separate() -> None:
     events = results_events(deauth.evaluate(T0 + 5, statuses(R1, now=T0 + 5)))
     assert len(dedup_events(events)) == 2
     drift = VlanDriftDetector()
-    for area in ("firewall.zone", "network.vlan"):
+    for area in ("firewall", "vlan"):
         drift.feed(
             Rec(
                 R1,
                 T0,
-                "config.drift",
-                {"area": area, "critical": area == "network.vlan"},
+                DRIFT_KIND,
+                {"drift_id": f"d-{area}", "areas": [area], "critical": area == "vlan"},
             )
         )
     events = results_events(drift.evaluate(T0 + 5, statuses(R1, now=T0 + 5)))

@@ -28,6 +28,7 @@ from custom_components.openwrt_router.security_model import (
     source_status,
 )
 from custom_components.openwrt_router.security_rules import (
+    DRIFT_KIND,
     DetectorResult,
     WifiSignal,
     default_detectors,
@@ -112,8 +113,8 @@ def _events() -> list[tuple[str, SecurityEvent]]:
             {
                 "router": R1,
                 "ts": T0,
-                "kind": "config.drift",
-                "fields": {"area": "firewall.zone", "critical": True},
+                "kind": DRIFT_KIND,
+                "fields": {"drift_id": "d1", "areas": ["firewall"], "critical": True},
             }
         ]
     )

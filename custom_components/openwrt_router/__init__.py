@@ -792,3 +792,58 @@ async def async_reload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
         entry: The config entry to reload.
     """
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+# --- Security Center (release 1.46.0, part 1; plan 2026-11-17) ---
+# One fleet-wide center per HA instance (security_center.py). It is wired
+# by wrapping the two entry functions defined above, so none of their code
+# changes: the center is set up after the whole base setup (network
+# intelligence, client stability, configuration manager) and released after
+# the base unload. Off by default: then it only reads its store. Every
+# error stays here (logged without the entry title, which can be a host
+# name or an address); a setup or an unload never fails because of it.
+from functools import wraps
+
+try:
+    from . import security_center as _security_center
+except Exception:  # noqa: BLE001 - the routers work without it
+    _security_center = None  # type: ignore[assignment]
+
+_async_setup_entry_base = async_setup_entry
+_async_unload_entry_base = async_unload_entry
+
+
+# ``wraps``: name, docstring and ``__wrapped__`` of the base functions stay
+# visible (``inspect.getsource`` shows the base setup with all its hooks).
+@wraps(_async_setup_entry_base)
+async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Set up a config entry, then add it to the Security Center."""
+    ok = await _async_setup_entry_base(hass, entry)
+    # ``is not False``: a base that returns None (HA 2026.11 style) succeeded
+    if ok is not False and _security_center is not None:
+        try:
+            coordinator = getattr(entry.runtime_data, "coordinator", None)
+            await _security_center.async_setup_security_center(hass, entry, coordinator)
+        except Exception as err:
+            _LOGGER.warning(
+                "Security Center setup failed (%s); the router works without it",
+                type(err).__name__,
+            )
+            _LOGGER.debug("Security Center setup error", exc_info=err)
+    return ok
+
+
+@wraps(_async_unload_entry_base)
+async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Unload a config entry, then release it from the Security Center."""
+    unload_ok = await _async_unload_entry_base(hass, entry)
+    if unload_ok is not False and _security_center is not None:
+        try:
+            await _security_center.async_release_security_center(hass, entry.entry_id)
+        except Exception as err:
+            _LOGGER.warning("Security Center release failed (%s)", type(err).__name__)
+            _LOGGER.debug("Security Center release error", exc_info=err)
+    return unload_ok
+
+
+# --- end Security Center

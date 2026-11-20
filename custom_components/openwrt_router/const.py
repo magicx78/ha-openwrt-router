@@ -761,3 +761,32 @@ CONFIG_BACKUP_STATUSES = (
     CONFIG_STATUS_NEVER,
 )
 # --- end configuration manager wiring
+
+# --- Security Center ---
+# Release 1.46.0 part 1 (plan docs/plans/2026-11-17-security-center.md):
+# one fleet-wide center per HA instance, default off. Store like client
+# stability: own HA Store, size cap, delayed save, flush on the last unload.
+SEC_STORE_KEY = f"{DOMAIN}.security_center"
+SEC_STORE_VERSION = 1
+SEC_STORE_MINOR_VERSION = 1
+SEC_STORE_MAX_BYTES = 512 * 1024
+SEC_SAVE_DELAY_SECONDS = 60
+# Port of the later syslog receiver (part 2); only stored and validated here.
+SEC_DEFAULT_SYSLOG_PORT = 5514
+# Own incidents (sec_*): at most this many, resolved ones are dropped first.
+SEC_INCIDENT_CAP = 100
+# Timeline: at most this many entries, none older than this many days.
+SEC_TIMELINE_MAX = 2000
+SEC_TIMELINE_DAYS = 14
+# An open incident without a new finding for this long is resolved.
+SEC_INCIDENT_AUTO_RESOLVE_SECONDS = 86400
+# A drift whose configuration areas are still unknown after this long is
+# fed as "areas unknown" (limitation, never "nothing changed").
+SEC_DRIFT_RESOLVE_WINDOW_SECONDS = 3600
+# Pending drift areas are looked up again at most this often from polls.
+SEC_DRIFT_RETRY_SECONDS = 60
+# Example E: a configuration change at most this long before a new finding
+# of the same router is linked to it as a hint (no causality claim).
+SEC_DRIFT_HINT_WINDOW_SECONDS = 3600
+DATA_SECURITY_CENTER = f"{DOMAIN}_security_center"
+# --- end Security Center

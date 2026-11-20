@@ -4,6 +4,38 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+### Hinzugefügt (1.46.0, Teil 1: Security Center – Verdrahtung)
+
+- **Security Center (`security_center.py`), standardmäßig aus.** Ein Center je HA-Instanz
+  verbindet die reinen Module `security_*` mit Daten, die die Integration schon hat:
+  Netzwerk-Intelligenz (als Poll-Beobachter: WLAN-Zeilen, NI-Ereignisse, Uptime, Clients),
+  Client-Stabilität (Live-Zustand für das Vertrauensbuch) und den Enterprise Core
+  (Drift-Ereignisse, `router.forgotten`, Fähigkeiten, Modulschlüssel). **Kein zusätzlicher
+  Router-Aufruf je Poll** (Test zählt die ubus-POSTs mit und ohne Center).
+- **Aus heißt aus:** ohne `enabled` liest das Center nur seinen Speicher; kein Beobachter,
+  kein Listener, keine Schreibvorgänge, keine Ereignisse. NI-Vorfälle, NI-Zähler,
+  Health-Score und Client-Stabilität sind mit inaktivem und aktivem Center identisch
+  (Regressionstest mit drei Durchläufen).
+- **Eigene `sec_*`-Hinweise** (offen / erledigt / bestätigt, höchstens 100, eigene Zähler,
+  eigene Ereignisse über den Core im Security-Ring). NI-Vorfälle werden nur per ID verknüpft,
+  nie geändert oder unterdrückt; deckt ein offener NI-Vorfall einen Befund schon ab, steht nur
+  ein verknüpfter Eintrag in der Zeitleiste.
+- **Drift → Segmentierung:** eine Konfigurationsänderung in VLAN/Firewall/Interface (Bereiche
+  aus dem Vergleich zweier gespeicherter Versionen, kein Router-Kontakt) ergibt genau einen
+  Hinweis mit Verweis auf die Drift-ID. Ein Befund kurz nach einer Konfigurationsänderung wird
+  nur zeitlich verknüpft, ohne Ursachenbehauptung.
+- **Speicher** (`.storage/openwrt_router.security_center`, höchstens 512 KB, verzögertes
+  Schreiben, beim Entladen sofort; beschädigte Abschnitte starten leer, ein unlesbarer Speicher
+  bleibt als `.bak`): Einstellungen, Vertrauensbuch, Baselines, maskierte Hinweise, Zeitleiste
+  (2000 Einträge / 14 Tage), Dedup-Marken. Keine HA-Benutzer-IDs.
+- **Manuelle Aktionen** (Gerät bestätigen, Namen setzen, Hinweis-Status, Einstellungen) nur für
+  Administratoren über den Core-Guard, jede auditiert. Keine Quarantäne in Teil 1.
+- **Übersicht:** Score mit Faktoren und Abdeckung (ohne Quelle `None`, nie „gesund“),
+  Hinweise, Zeitleiste mit Filtern, Geräteliste, Verfügbarkeit je Erkennung (verfügbar /
+  eingeschränkt / nicht verfügbar mit Grund, „Format unbestätigt“ für Firewall- und DNS-Logs).
+  Klartext nur für Administratoren, sonst Pseudonyme. Syslog- und Collector-Weg melden in
+  Teil 1 „nicht verfügbar“ mit Grund.
+
 ## [1.45.0] - 2026-11-19
 
 Configuration Manager: Konfigurations-Backup für OpenWrt-Router in Home Assistant, auf dem

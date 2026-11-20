@@ -1593,28 +1593,39 @@ class FirewallInterVlanDetector(_LogDetector):
         )
 
 
-DRIFT_KIND: Final = "config.drift"
-# Configuration areas whose change can affect segmentation (prefix match).
-SEGMENTATION_AREAS: Final = (
-    "firewall.zone",
-    "firewall.forwarding",
-    "firewall.rule",
-    "network.vlan",
-    "network.bridge-vlan",
-    "network.device",
-    "network.interface",
-    "wireless.wifi-iface",
-)
+# Drift records (Security Center 1.46.0): one record per core drift event
+# ``configuration.drift_detected`` (contract §12, ``CoreEventType``). The
+# core event carries ids and counters only (``drift_id``, ``changes``,
+# ``critical_count``, ``unknown_count``, ``baseline_version_id``, ...), no
+# configuration area. The Security Center adds the areas of the change from
+# the Configuration API (stored versions compared, no router call):
+# ``ConfigChange.area`` values of ``config_diff.Area``.
+DRIFT_KIND: Final = "configuration.drift_detected"
+# config_diff.Area values whose change can affect segmentation: VLANs and
+# bridge VLANs, firewall zones/forwardings/rules, interfaces (device and
+# bridge membership). WLAN (SSID/key/network) is left out: most of its
+# changes do not touch segmentation, and an ``interface`` change covers a
+# Wi-Fi network moved to another interface.
+SEGMENTATION_AREAS: Final = ("vlan", "firewall", "interface")
+# Limitation: a drift record whose areas could not be determined (no stored
+# version to compare, Configuration API refused): never "no finding".
+DRIFT_AREA_UNKNOWN: Final = "drift_area_unknown"
+_MAX_DRIFT_ID_LEN: Final = 128
 
 
 class VlanDriftDetector(_BaseDetector):
     """Segmentation-relevant configuration changes (drift events, parameter).
 
-    Input: drift records of the later config-drift component in the same
-    narrow shape as log records (``router``, ``ts``, ``kind`` =
-    ``config.drift``, ``fields`` with ``area`` and ``critical``). Without
-    the ``config.drift`` capability the result is ``not_available``; this
-    module never reads the configuration itself.
+    Input: drift records in the narrow record shape (``router`` = contract
+    router id, ``ts``, optional ``recv``, ``kind`` = :data:`DRIFT_KIND`)
+    with ``fields``: ``drift_id`` (the core's dedup key of the drift),
+    ``areas`` (list of ``config_diff.Area`` values; None = not known) and
+    ``critical`` (the core event reported ``critical_count > 0``). One drift
+    gives at most one finding (key = router, drift id); a drift without
+    known areas is counted as limitation :data:`DRIFT_AREA_UNKNOWN`, never
+    as "nothing changed". Without the ``config.drift`` capability the result
+    is ``not_available``; this module never reads the configuration itself.
+    The finding is a configuration change, never an attack.
     """
 
     id = "vlan_segmentation_drift"
@@ -1633,13 +1644,13 @@ class VlanDriftDetector(_BaseDetector):
         **kw: Any,
     ) -> None:
         super().__init__(window_s=window_s, threshold=threshold, **kw)
-        self.areas = tuple(areas)
+        self.areas = frozenset(a.lower() for a in areas)
 
     def _new_slot(self) -> _Slot:
         slot = _Slot()
         slot.count = WindowCounter(
             self.window_s, max_ahead_s=self.max_ahead_s
-        )  # all relevant changes
+        )  # segmentation-relevant drift records of this drift id
         slot.extra = WindowCounter(
             self.window_s, max_ahead_s=self.max_ahead_s
         )  # critical ones
@@ -1650,14 +1661,29 @@ class VlanDriftDetector(_BaseDetector):
             return
         router = _record_router(item)
         ts = _get(item, "ts")
-        area = _text(_field(item, "area"), 48).lower()
-        if router is None or not _is_num(ts) or not area.startswith(self.areas):
+        drift_id = _text(_field(item, "drift_id"), _MAX_DRIFT_ID_LEN)
+        if router is None or not _is_num(ts) or not drift_id:
             return
         when = self._accept_ts(float(ts), _get(item, "recv"))
-        slot = self._slot((router, area))
+        raw = _field(item, "areas")
+        if not isinstance(raw, list | tuple):
+            self._note_loss(router, DRIFT_AREA_UNKNOWN, when)
+            return
+        areas = sorted({_text(a, 32).lower() for a in raw if a} & self.areas)
+        if not areas:
+            return
+        slot = self._slot((router, drift_id))
+        slot.examples = areas  # the relevant areas of this drift (no values)
         slot.count.add(when)  # type: ignore[union-attr]
         if _field(item, "critical") is True:
             slot.extra.add(when)  # type: ignore[union-attr]
+
+    def _limits(self, router: str, now: float) -> tuple[str | None, int]:
+        limitation, lost = super()._limits(router, now)
+        win = self._loss.get((router, DRIFT_AREA_UNKNOWN))
+        if win is not None and win.count(now) > 0:
+            limitation = join_limitations(limitation, DRIFT_AREA_UNKNOWN)
+        return limitation, lost
 
     def _check(
         self, key: tuple[str, ...], slot: _Slot, now: float
@@ -1672,9 +1698,9 @@ class VlanDriftDetector(_BaseDetector):
             key=key,
             severity=Severity.WARNING if critical else Severity.INFO,
             evidence=(
-                f"area={key[1]}",
-                f"changes={changes:g}",
-                f"critical={critical:g}",
+                f"drift_id={key[1]}",
+                f"areas={'+'.join(slot.examples)}",
+                f"critical={bool(critical)}",
             ),
         )
 
@@ -2034,7 +2060,8 @@ class DetectorSet:
                 det.feed(record)
 
     def feed_drift(self, records: Iterable[Any]) -> None:
-        """Feed config-drift records (from the later drift component)."""
+        """Feed drift records (:data:`DRIFT_KIND`, built by the Security
+        Center from the core's ``configuration.drift_detected`` events)."""
         drift = [d for d in self.detectors if d.input_kind == "drift"]
         for record in records:
             if self._foreign(record):

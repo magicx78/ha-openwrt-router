@@ -26,6 +26,7 @@ from custom_components.openwrt_router.security_model import (
     source_status,
 )
 from custom_components.openwrt_router.security_rules import (
+    DRIFT_KIND,
     DetectorSet,
     WifiSignal,
     default_detectors,
@@ -92,7 +93,7 @@ def _feed_router(dset: DetectorSet, router: str) -> None:
             _log(router, T0 + i, "dns.query", client="192.0.2.10", name=f"h{i}.org")
         )
     dset.feed_records(records)
-    dset.feed_drift([_log(router, T0, "config.drift", area="firewall.zone")])
+    dset.feed_drift([_log(router, T0, DRIFT_KIND, drift_id="d1", areas=["firewall"])])
     dset.note_uptime(router, 1000.0)
 
 
@@ -171,7 +172,7 @@ def test_log_path_state_forgets_one_router_and_keeps_the_other() -> None:
 def test_records_with_a_foreign_router_id_are_counted_not_stored() -> None:
     dset = default_detectors()
     dset.feed_records([_log("r1", T0, "fw.drop", zone="guest")])
-    dset.feed_drift([_log("entry-1", T0, "config.drift", area="firewall.zone")])
+    dset.feed_drift([_log("entry-1", T0, DRIFT_KIND, drift_id="d1", areas=["vlan"])])
     assert dset.feed_wifi([{"router": "r1", "ts": T0, "kind": "wifi.deauth"}]) == 0
     assert dset.invalid_router == 3
     assert dset.state_size() == 0
