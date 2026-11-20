@@ -11,20 +11,33 @@ Keine neue Vertragsangabe, keine Änderung am Core, Maskierung unverändert.
 
 ### Behoben
 
-- **cgi-Archiv trotz unlesbarer Paketliste.** Ob der cgi-Weg geht, entscheidet allein das
-  rpcd-Recht `cgi-io: backup`; die Paketliste zählt nur, wenn sie lesbar ist und `cgi-io`
-  fehlt. Vorher blieb der Weg „ungeprüft“ und der Lauf sicherte nur UCI.
-- **Fehlende optionale UCI-Configs** (`sqm`, `mwan3`, `upnpd`, `openvpn`, `ddns`, `usteer` …)
-  sind „nicht vorhanden“, nicht `uci_failed` und machen keine Version `partial`. Ursache: ubus
-  meldet „nicht gefunden“, der SSH-Ersatzweg war wegen des noch nicht bestätigten Host-Keys
-  gesperrt, und diese Sperre ersetzte die Antwort. Echte Lesefehler (rpcd-ACL verweigert)
-  bleiben Fehler, Unklares wird nie „ok“.
+- **Das erste Backup klärt den Archivweg.** Lässt die Prüfung bei einem HTTPS-Eintrag den
+  cgi- oder den SSH-Weg „ungeprüft“ (`not_probed`), fordert ein Lauf ohne festen Typ das
+  Archiv an. Gelingt es nicht, bleibt der UCI-Snapshot: `uci_snapshot`/`ok`, wenn jeder Weg
+  „nicht vorhanden“ oder „keine Rechte“ meldet, sonst `partial`. Vorher sicherte so ein Lauf
+  still nur UCI.
+- **cgi-Archiv trotz unlesbarer Paketliste.** Mit dem rpcd-Recht `cgi-io: backup`, aber
+  unlesbarer Paketliste fragt der Lauf das Archiv an; die Fähigkeit `config.cgi_backup` zeigt
+  dabei „noch nicht geprüft“, nicht „verfügbar“. Erst ein echter cgi-Archivlauf belegt sie
+  (Archiv erhalten: verfügbar; abgelehnt: dessen Grund), sichtbar ab der nächsten Prüfung.
+  Ein Archiv über SSH zählt dafür nicht.
+- **Fehlende optionale UCI-Configs** (`sqm`, `mwan3`, `upnpd`, `openvpn`, `ddns`, `usteer`,
+  `firewall`, `dhcp`, `wireless` …) sind „nicht vorhanden“, nicht `uci_failed` und machen
+  keine Version `partial`. Ursache: ubus meldet „nicht gefunden“, der SSH-Ersatzweg war wegen
+  des noch nicht bestätigten Host-Keys gesperrt, und diese Sperre ersetzte die Antwort. Ein
+  „nicht gefunden“ von ubus geht jetzt gar nicht mehr zu SSH; nur eine echte ACL-Sperre
+  nimmt den Ersatzweg und bleibt ein Fehler, wenn er scheitert. `network` und `system` gibt
+  es auf jedem OpenWrt-Router: Fehlen sie, ist der Lauf `partial` (`incomplete`).
 - **Lauf ohne Archivversuch** nennt den Grund je Weg: `archive_not_attempted:cgi.<Ursache>`,
   `archive_not_attempted:ssh.<Ursache>` oder `archive_not_attempted:requested`.
+- **Lauf mit gescheitertem Archiv** nennt den Grund je versuchtem Weg:
+  `archive_unavailable:<Weg>.<Fehlerklasse>` (bei HTTP zusätzlich
+  `archive_unavailable:cgi.insecure_transport`); das Panel zeigt sie in Klartext.
 - **Host-Key-Grund sichtbar.** `ssh_host_key:<Grund>` erscheint als fester Code statt
   `**REDACTED**`; nur die festen Gründe des Cores kommen zurück, alles andere bleibt maskiert.
 - **Panel „Unvollständig“** zeigt Fehlerart, Gründe in Klartext und den nächsten Schritt
-  (zum Beispiel „SSH-Host-Key bestätigen“).
+  (zum Beispiel „SSH-Host-Key bestätigen“; bei einem ungeprüften Weg „Jetzt sichern“, weil
+  dieser Lauf das Archiv anfordert).
 - **Panel „Prüfsumme“** zeigt die Prüfsumme des gespeicherten Inhalts (Archiv, sonst
   UCI-Snapshot) oder „–“, nie mehr die des Inventars, die auf allen Routern gleich aussah.
 - **Panel „Leserechte fehlen“** nur noch, wenn sie wirklich fehlen; läuft das Archiv (etwa
@@ -36,7 +49,9 @@ Keine neue Vertragsangabe, keine Änderung am Core, Maskierung unverändert.
 
 - Neu: `tests/test_config_partial_v1461.py` (End-to-End Runtime → Core → echter Provider,
   nur die Router-API ist ein Fake), Panel-Tests `configPartial.test.mjs`; der Pin-Speicher für
-  SSH-Host-Keys trennt Router strikt nach Router-ID (Test, keine Code-Änderung).
+  SSH-Host-Keys trennt Router strikt nach Router-ID (Test, keine Code-Änderung). Die festen
+  Weg-Codes (`archive_not_attempted:…`, `archive_unavailable:…`) kommen unmaskiert durch
+  (Test, keine Code-Änderung).
 
 ## [1.46.0] - 2026-11-20
 

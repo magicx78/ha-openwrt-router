@@ -108,19 +108,38 @@ fordert bei jedem Backup ohne festen Typ das Archiv an; ohne root-SSH schlägt d
 Liefert der Archivweg einen echten Fehler (zum Beispiel Zeitüberschreitung), der Snapshot aber gelingt, ist die Version `partial` mit der
 Fehlerklasse des Archivs und zählt nicht als Bezugsbasis.
 
-Den Snapshot liest der Manager zuerst per ubus (`uci get`); verweigert rpcd das, liest er mit
-`uci show` per SSH.
+**Das erste Backup klärt den Archivweg.** Die Prüfung ruft nie ein Archiv ab (das würde auf
+dem Router `sysupgrade` starten). Ob SSH als root ein Archiv liefert, zeigt sich deshalb erst
+beim ersten Backup; ebenso der cgi-Weg, wenn rpcd keine klare Antwort gibt oder die Paketliste
+unlesbar ist. Bleibt ein Weg so „ungeprüft“ (`not_probed`), fordert ein Lauf ohne festen Typ
+auch bei HTTPS das Archiv an. Gelingt es nicht, bleibt der UCI-Snapshot: `uci_snapshot` mit
+Status `ok`, wenn jeder Weg „nicht vorhanden“ oder „keine Rechte“ meldet, sonst `partial`.
+Fordert ein Lauf das Archiv an und bekommt keins, steht je versuchtem Weg ein Grund in der
+Version: `archive_unavailable:<Weg>.<Fehlerklasse>`, zum Beispiel `archive_unavailable:cgi.permission`
+oder `archive_unavailable:ssh.auth`; bei einem HTTP-Eintrag zusätzlich
+`archive_unavailable:cgi.insecure_transport`.
+
+Den Snapshot liest der Manager zuerst per ubus (`uci get`); verweigert die rpcd-ACL das,
+liest er mit `uci show` per SSH. Meldet ubus dagegen „nicht gefunden“, ist das endgültig: Die
+Config fehlt auf dem Router, ein SSH-Versuch findet nicht statt.
 
 **Fehlende optionale Configs** (zum Beispiel `sqm`, `mwan3`, `upnpd`, `openvpn`, `ddns`,
-`usteer`, wenn das Paket nicht installiert ist) gelten als „nicht vorhanden“, nicht als
+`usteer`, wenn das Paket nicht installiert ist, auf einem Access Point ohne Funk oder ohne
+eigene Dienste auch `wireless`, `firewall` und `dhcp`) gelten als „nicht vorhanden“, nicht als
 Lesefehler: Sie machen eine Version weder `partial` noch erzeugen sie `uci_failed`. Das gilt
 seit 1.46.1 auch dann, wenn der SSH-Weg wegen eines noch nicht bestätigten Host-Keys gesperrt
-ist. Echte Lesefehler (rpcd verweigert die Config, abgebrochene Antwort) bleiben Fehler; ein
-unklares Ergebnis wird nie zu „ok“.
+ist. **`network` und `system`** gibt es auf jedem OpenWrt-Router; fehlen sie, ist der Lauf
+`partial` (Fehlerklasse `incomplete`). Echte Lesefehler (rpcd verweigert die Config,
+abgebrochene Antwort) bleiben Fehler; ein unklares Ergebnis wird nie zu „ok“.
 
-**Ob der cgi-Weg geht**, entscheidet allein das rpcd-Recht `cgi-io: backup`. Die Paketliste
-zählt nur, wenn sie lesbar ist und `cgi-io` fehlt; eine unlesbare Paketliste lässt den Weg
-seit 1.46.1 nicht mehr „ungeprüft“.
+**Ob der cgi-Weg geht**, zeigt die Fähigkeit `config.cgi_backup`: „verfügbar“ nur mit dem
+rpcd-Recht `cgi-io: backup` und `cgi-io` in der Paketliste, „nicht verfügbar“ ohne das Recht
+oder wenn die lesbare Paketliste kein `cgi-io` enthält. Ist das Recht da, die Paketliste aber
+unlesbar, bleibt sie „noch nicht geprüft“, bis ein echter cgi-Archivlauf sie belegt (Archiv
+erhalten: verfügbar; abgelehnt: dessen Grund; sichtbar ab der nächsten Prüfung, also nach
+Einbinden, Firmware-Wechsel, Einschalten der Option oder ACL-Neuverteilung). Ein Archiv über
+SSH belegt den cgi-Weg nicht. Unabhängig von der Anzeige fragt der Lauf in diesem Fall das
+Archiv an (siehe oben).
 
 **Lauf ohne Archivversuch.** Fordert ein Lauf kein Archiv an, steht in der Version je Weg ein
 Grund: `archive_not_attempted:cgi.<Ursache>` und `archive_not_attempted:ssh.<Ursache>`
@@ -346,8 +365,10 @@ Freigaben. Läuft ein Backup, fragt die Ansicht alle 5 Sekunden nach, höchstens
 Archivweg: Vollarchiv, nur UCI-Snapshot, keiner), dann die Abschnitte. Gibt es noch keine
 brauchbare Version, aber einen unvollständigen Lauf, steht bei „Letztes Backup“
 „letzter Versuch: unvollständig, <Zeit>“. Bei „Unvollständig“ nennt ein Hinweis die Fehlerart,
-die Gründe der neuesten Version in Klartext und den nächsten Schritt (zum Beispiel
-„SSH-Host-Key bestätigen“).
+die Gründe der neuesten Version in Klartext (auch je gescheitertem Archivweg, etwa „Archiv über
+SSH fehlgeschlagen: Anmeldung fehlgeschlagen“) und den nächsten Schritt (zum Beispiel
+„SSH-Host-Key bestätigen“; bei einem ungeprüften Weg „Jetzt sichern“, weil dieser Lauf das
+Archiv anfordert).
 
 - **Backup jetzt**: Beschreibung (höchstens 200 Zeichen) und „Jetzt sichern“.
 - **Zugang**: Fähigkeiten, SSH-Host-Key bestätigen oder zurücksetzen, Angebot für das
