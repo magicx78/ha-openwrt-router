@@ -823,3 +823,19 @@ UID_FLEET_SECURITY_WIFI_AUTH_FAILURES = (
 )
 UID_FLEET_SECURITY_COVERAGE = f"{FLEET_UID_PREFIX}security_coverage"
 # --- end Security Center part 2
+# --- Traffic Analytics (Phase 5) ---
+# Plan docs/plans/2026-11-20-traffic-analytics-bauplan.md (§5, §11): store
+# keys, signals and unique-id prefixes only; limits live in traffic_const.py.
+# Default off: without "enabled" nothing is written, emitted or called.
+TRAFFIC_FINE_STORE_KEY = f"{DOMAIN}.traffic_fine"
+TRAFFIC_COARSE_STORE_KEY = f"{DOMAIN}.traffic_coarse"
+TRAFFIC_STORE_VERSION = 1
+TRAFFIC_STORE_MINOR_VERSION = 1
+TRAFFIC_FINE_STORE_MAX_BYTES = 2 * 1024 * 1024
+TRAFFIC_COARSE_STORE_MAX_BYTES = 2 * 1024 * 1024
+DATA_TRAFFIC_ANALYTICS = f"{DOMAIN}_traffic_analytics"
+DATA_TRAFFIC_VIEWS_BOUND = f"{DOMAIN}_traffic_views_bound"
+SIGNAL_TRAFFIC_ANALYTICS = f"{DOMAIN}_traffic_analytics_updated"
+UID_FLEET_TRAFFIC_ANOMALIES = f"{FLEET_UID_PREFIX}traffic_anomalies"
+UID_FLEET_TRAFFIC_COVERAGE = f"{FLEET_UID_PREFIX}traffic_coverage"
+# --- Ende Traffic Analytics ---

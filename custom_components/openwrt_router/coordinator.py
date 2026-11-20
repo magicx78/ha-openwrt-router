@@ -168,6 +168,68 @@ def _as_counter(value: Any) -> int | None:
     return None
 
 
+# --- Traffic Analytics (Phase 5) ---
+# Netdevs copied per poll for traffic analytics, and the fields of each.
+TRAFFIC_MAX_DEVICES = 64
+_TRAFFIC_COUNTER_KEYS = (
+    "rx_bytes",
+    "tx_bytes",
+    "rx_packets",
+    "tx_packets",
+    "rx_errors",
+    "tx_errors",
+    "rx_dropped",
+    "tx_dropped",
+)
+
+
+def _traffic_counter(value: Any) -> int | None:
+    """A raw counter as delivered (int >= 0, not bool), else None."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def traffic_device_counters(
+    device_status: Any,
+) -> dict[str, dict[str, Any]] | None:
+    """Plain copy of the counters in a ``network.device status`` reply.
+
+    At most TRAFFIC_MAX_DEVICES netdevs (sorted by name); every missing or
+    non-counter value is None (never 0). None when the reply holds no
+    device (call failed or not allowed). The coordinator knows no traffic
+    types: the copy is plain dicts of ints, bools and short strings.
+    """
+    if not isinstance(device_status, dict) or not device_status:
+        return None
+    out: dict[str, dict[str, Any]] = {}
+    names = sorted(n for n in device_status if isinstance(n, str) and len(n) <= 15)
+    for name in names[:TRAFFIC_MAX_DEVICES]:
+        dev = device_status.get(name)
+        if not isinstance(dev, dict):
+            continue
+        stats = dev.get("statistics")
+        stats = stats if isinstance(stats, dict) else {}
+        entry: dict[str, Any] = {
+            key: _traffic_counter(stats.get(key)) for key in _TRAFFIC_COUNTER_KEYS
+        }
+        speed = dev.get("speed")
+        entry["speed"] = (
+            speed
+            if (isinstance(speed, str) and len(speed) <= 16)
+            or (isinstance(speed, int) and not isinstance(speed, bool))
+            else None
+        )
+        for key in ("up", "carrier"):
+            value = dev.get(key)
+            entry[key] = value if isinstance(value, bool) else None
+        out[name] = entry
+    return out or None
+
+
+# --- Ende Traffic Analytics ---
+
+
 def calc_memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
     """Return RAM pressure derived from ubus ``system info`` memory stats.
 
@@ -424,6 +486,16 @@ class OpenWrtCoordinatorData:
         self.usteer_connected: dict[str, tuple[str, ...]] | None = None
         # True wenn network_interfaces / port_vlan_map aus dem Cache stammen (Router offline)
         self.vlans_stale: bool = False
+        # --- Traffic Analytics (Phase 5) ---
+        # Raw counters of this poll's ``network.device status`` reply per
+        # netdev (bytes, packets, errors, drops, speed, up, carrier; at most
+        # TRAFFIC_MAX_DEVICES, a missing value stays None), the monotonic
+        # time of that read, and where the conntrack count came from
+        # ("count_file" / "table_scan" / None). Never in as_dict.
+        self.device_counters: dict[str, dict[str, Any]] | None = None
+        self.counters_sampled_mono: float | None = None
+        self.active_connections_source: str | None = None
+        # --- Ende Traffic Analytics ---
         # Connectivity health tracking (used by binary_sensor / sensor platform)
         self.error_type: str | None = None
         self.consecutive_failures: int = 0
@@ -599,6 +671,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
         # never run the package manager) and a lock against parallel checks.
         self._package_updates: dict[str, Any] | None = None
         self._package_check_lock = asyncio.Lock()
+        # --- Traffic Analytics (Phase 5) ---
+        # True while a poll runs: optional extra router calls of other
+        # modules wait for it (one ubus session, never next to the poll).
+        self.poll_running: bool = False
+        # --- Ende Traffic Analytics ---
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator interface
@@ -665,9 +742,15 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             ConfigEntryAuthFailed: Credentials are invalid (triggers re-auth flow).
             UpdateFailed: Any other error that prevents data retrieval.
         """
+        # --- Traffic Analytics (Phase 5) ---
+        self.poll_running = True
+        # --- Ende Traffic Analytics ---
         try:
             return await self._async_poll()
         finally:
+            # --- Traffic Analytics (Phase 5) ---
+            self.poll_running = False
+            # --- Ende Traffic Analytics ---
             # The API keeps one SSH connection open for the duration of a poll
             # (fallback paths, LLDP). Release it when the poll is over — also
             # after a failure — so the router does not hold an idle session
@@ -862,6 +945,18 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching device status: %s", err)
                 device_status = {}
+            # --- Traffic Analytics (Phase 5) ---
+            # Copy of the raw counters (the reply itself is not kept) and the
+            # time of the read, measured here and not in a listener (E4).
+            try:
+                data.device_counters = traffic_device_counters(device_status)
+                if data.device_counters is not None:
+                    data.counters_sampled_mono = time.monotonic()
+            except Exception as err:  # noqa: BLE001 - never fails the poll
+                _LOGGER.debug("Traffic counter copy failed (%s)", type(err).__name__)
+                data.device_counters = None
+                data.counters_sampled_mono = None
+            # --- Ende Traffic Analytics ---
 
             try:
                 data.network_interfaces = await self.api.get_network_interfaces(
@@ -1095,6 +1190,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Error fetching active connections: %s", err)
                 data.active_connections = 0
+            # --- Traffic Analytics (Phase 5) ---
+            # Only the count file is a real count; 0 after an error is not.
+            conntrack_source = getattr(self.api, "last_conntrack_count_source", None)
+            data.active_connections_source = (
+                conntrack_source if isinstance(conntrack_source, str) else None
+            )
+            # --- Ende Traffic Analytics ---
 
             # --- Service status (dnsmasq, firewall, etc.) ---
             if self.data and self.data.features.get(FEATURE_HAS_SERVICES, False):

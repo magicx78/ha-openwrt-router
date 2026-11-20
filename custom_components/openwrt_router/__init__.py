@@ -847,3 +847,53 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
 
 
 # --- end Security Center
+
+
+# --- Traffic Analytics (Phase 5) ---
+# One fleet-wide engine per HA instance (traffic_engine.py), wired like the
+# Security Center: by wrapping the two entry functions above, so none of
+# their code changes. Set up after everything else, released after the
+# base unload. Off by default: then it only reads its settings and adds no
+# coordinator listener at all. Every error stays here and is
+# logged by type only; a setup or an unload never fails because of it.
+try:
+    from . import traffic_engine as _traffic_engine
+except Exception:  # noqa: BLE001 - the routers work without it
+    _traffic_engine = None  # type: ignore[assignment]
+
+_async_setup_entry_security = async_setup_entry
+_async_unload_entry_security = async_unload_entry
+
+
+@wraps(_async_setup_entry_security)
+async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Set up a config entry, then add it to traffic analytics."""
+    ok = await _async_setup_entry_security(hass, entry)
+    if ok is not False and _traffic_engine is not None:
+        try:
+            coordinator = getattr(entry.runtime_data, "coordinator", None)
+            if coordinator is not None:
+                await _traffic_engine.async_setup_traffic(hass, entry, coordinator)
+        except Exception as err:
+            _LOGGER.warning(
+                "Traffic analytics setup failed (%s); the router works without it",
+                type(err).__name__,
+            )
+            _LOGGER.debug("Traffic analytics setup error", exc_info=err)
+    return ok
+
+
+@wraps(_async_unload_entry_security)
+async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Unload a config entry, then release it from traffic analytics."""
+    unload_ok = await _async_unload_entry_security(hass, entry)
+    if unload_ok is not False and _traffic_engine is not None:
+        try:
+            await _traffic_engine.async_release_traffic(hass, entry.entry_id)
+        except Exception as err:
+            _LOGGER.warning("Traffic analytics release failed (%s)", type(err).__name__)
+            _LOGGER.debug("Traffic analytics release error", exc_info=err)
+    return unload_ok
+
+
+# --- Ende Traffic Analytics ---

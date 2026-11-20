@@ -1308,6 +1308,13 @@ class OpenWrtAPI:
         # bump leaves the timestamp cleared, so the next poll rebuilds.
         self._bridge_port_map_gen: int = 0
 
+        # --- Traffic Analytics (Phase 5) ---
+        # Where the last get_active_connections() count came from:
+        # "count_file" (nf_conntrack_count), "table_scan" (fallback over the
+        # whole table) or None (no count; the method then returns 0).
+        self.last_conntrack_count_source: str | None = None
+        # --- Ende Traffic Analytics ---
+
     @property
     def uses_ssh_fallback(self) -> bool:
         """True if any API call fell back to SSH in the last poll cycle."""
@@ -4852,6 +4859,9 @@ class OpenWrtAPI:
         Returns:
             Count of active connections (int).
         """
+        # --- Traffic Analytics (Phase 5) ---
+        self.last_conntrack_count_source = None
+        # --- Ende Traffic Analytics ---
         # Fast path: single-number file (preferred, much smaller read)
         try:
             result = await self._call(
@@ -4861,6 +4871,9 @@ class OpenWrtAPI:
             )
             data: str = result.get("data", "").strip()
             if data.isdigit():
+                # --- Traffic Analytics (Phase 5) ---
+                self.last_conntrack_count_source = "count_file"
+                # --- Ende Traffic Analytics ---
                 return int(data)
         except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError):
             pass
@@ -4874,6 +4887,9 @@ class OpenWrtAPI:
             )
             data = result.get("data", "")
             if data:
+                # --- Traffic Analytics (Phase 5) ---
+                self.last_conntrack_count_source = "table_scan"
+                # --- Ende Traffic Analytics ---
                 return sum(1 for line in data.splitlines() if line.strip())
         except (
             OpenWrtResponseError,
@@ -6027,6 +6043,178 @@ class OpenWrtAPI:
                 f"ubus stream {obj}: unexpected content type {content_type!r}"
             )
         return stream_error_from_payload(payload, obj)
+
+    # --- Traffic Analytics (Phase 5) ---
+    # Three optional, switchable reads (plan 2026-11-20, §6.2). Each one is
+    # bounded here, at the network boundary: validated netdev names only
+    # (never a path from input), a fixed number of calls, a hard timeout and
+    # a reply size cap. They never use SSH and never exec anything. The
+    # caller (traffic_collect.ExtraCallPlanner) decides when they may run.
+
+    @staticmethod
+    def _traffic_names(names: Iterable[str], limit: int) -> tuple[str, ...]:
+        """Validated netdev names; ValueError before any router call."""
+        from .traffic_model import valid_device_name
+
+        out = tuple(names)
+        if not out or len(out) > limit:
+            raise ValueError(f"between 1 and {limit} device names required")
+        for name in out:
+            # valid_device_name: 1-15 of [A-Za-z0-9._@-], no "..", not "."
+            if not valid_device_name(name) or "/" in name:
+                raise ValueError("invalid device name")
+        if len(set(out)) != len(out):
+            raise ValueError("duplicate device names")
+        return out
+
+    @staticmethod
+    def _traffic_reply_size(result: Any) -> int:
+        """Size of a decoded reply as compact JSON (bytes)."""
+        return len(
+            json.dumps(result, separators=(",", ":"), default=str).encode("utf-8")
+        )
+
+    async def async_traffic_station_detail(
+        self, ap_interfaces: Iterable[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """``iwinfo assoclist`` per AP interface (option ``station_detail``).
+
+        At most MAX_AP_INTERFACES interfaces and MAX_STATIONS_PER_REPLY
+        stations per reply, the whole read within EXTRA_CALL_TIMEOUT_S; a
+        reply over STATION_REPLY_MAX_BYTES raises OpenWrtResponseError.
+        Returns ``{ifname: [{mac, rx_bytes, tx_bytes, rx_packets,
+        tx_packets}]}``; a missing counter is None. The MAC is handed to the
+        caller only to be pseudonymised at once (never stored).
+
+        Raises:
+            ValueError: invalid, duplicate or too many names (no call made).
+        """
+        from .traffic_const import (
+            EXTRA_CALL_TIMEOUT_S,
+            MAX_AP_INTERFACES,
+            MAX_STATIONS_PER_REPLY,
+            STATION_REPLY_MAX_BYTES,
+        )
+
+        names = self._traffic_names(ap_interfaces, MAX_AP_INTERFACES)
+        out: dict[str, list[dict[str, Any]]] = {}
+        async with asyncio.timeout(EXTRA_CALL_TIMEOUT_S):
+            for ifname in names:
+                result = await self._call(
+                    UBUS_IWINFO_OBJECT, UBUS_IWINFO_ASSOCLIST, {"device": ifname}
+                )
+                if self._traffic_reply_size(result) > STATION_REPLY_MAX_BYTES:
+                    raise OpenWrtResponseError("station detail reply too large")
+                entries = result.get("results") if isinstance(result, dict) else None
+                stations: list[dict[str, Any]] = []
+                for entry in entries if isinstance(entries, list) else ():
+                    if len(stations) >= MAX_STATIONS_PER_REPLY:
+                        break
+                    if not isinstance(entry, dict):
+                        continue
+                    mac = entry.get("mac")
+                    if not isinstance(mac, str) or not mac:
+                        continue
+                    rx = entry.get("rx") if isinstance(entry.get("rx"), dict) else {}
+                    tx = entry.get("tx") if isinstance(entry.get("tx"), dict) else {}
+                    stations.append(
+                        {
+                            "mac": mac,
+                            "rx_bytes": _counter(rx.get("bytes")),
+                            "tx_bytes": _counter(tx.get("bytes")),
+                            "rx_packets": _counter(rx.get("packets")),
+                            "tx_packets": _counter(tx.get("packets")),
+                        }
+                    )
+                out[ifname] = stations
+        return out
+
+    async def async_traffic_sysfs_counters(
+        self, devices: Iterable[str]
+    ) -> dict[str, dict[str, int | None]]:
+        """``file read /sys/class/net/<dev>/statistics/<counter>`` (option
+        ``sysfs_fallback``) for netdevs that ``network.device`` does not list.
+
+        At most MAX_SYSFS_DEVICES devices x the eight fixed counter files,
+        the whole read within EXTRA_CALL_TIMEOUT_S, each reply at most
+        SYSFS_REPLY_MAX_BYTES. A file that does not exist or is not allowed
+        gives None (unknown, never 0). Returns ``{device: {counter: int|None}}``.
+
+        Raises:
+            ValueError: invalid, duplicate or too many names (no call made).
+        """
+        from .traffic_const import (
+            EXTRA_CALL_TIMEOUT_S,
+            MAX_SYSFS_DEVICES,
+            SYSFS_COUNTER_FILES,
+            SYSFS_REPLY_MAX_BYTES,
+        )
+
+        names = self._traffic_names(devices, MAX_SYSFS_DEVICES)
+        out: dict[str, dict[str, int | None]] = {}
+        async with asyncio.timeout(EXTRA_CALL_TIMEOUT_S):
+            for dev in names:
+                values: dict[str, int | None] = {}
+                for counter in SYSFS_COUNTER_FILES:
+                    path = f"/sys/class/net/{dev}/statistics/{counter}"
+                    try:
+                        result = await self._call(
+                            UBUS_FILE_OBJECT, UBUS_FILE_READ, {"path": path}
+                        )
+                    except OpenWrtMethodNotFoundError:
+                        values[counter] = None
+                        continue
+                    if self._traffic_reply_size(result) > SYSFS_REPLY_MAX_BYTES:
+                        raise OpenWrtResponseError("sysfs counter reply too large")
+                    raw = result.get("data") if isinstance(result, dict) else None
+                    values[counter] = _as_byte_counter(raw)
+                out[dev] = values
+        return out
+
+    async def async_traffic_offload_state(self) -> dict[str, bool | None]:
+        """``uci get firewall`` defaults: flow offloading (option ``offload_probe``).
+
+        One call; a reply over OFFLOAD_REPLY_MAX_BYTES is dropped
+        (OpenWrtResponseError). Only ``flow_offloading`` and
+        ``flow_offloading_hw`` are read; nothing else of the firewall config
+        leaves this method. ``None`` when the router has no ``defaults``
+        section; an option missing from it is False (the fw4 default is off).
+        """
+        from .traffic_const import EXTRA_CALL_TIMEOUT_S, OFFLOAD_REPLY_MAX_BYTES
+
+        async with asyncio.timeout(EXTRA_CALL_TIMEOUT_S):
+            result = await self._call(
+                UBUS_UCI_OBJECT,
+                UBUS_UCI_GET,
+                {"config": "firewall", "type": "defaults"},
+            )
+        if self._traffic_reply_size(result) > OFFLOAD_REPLY_MAX_BYTES:
+            raise OpenWrtResponseError("firewall defaults reply too large")
+        values = result.get("values") if isinstance(result, dict) else None
+        section: dict[str, Any] | None = None
+        for candidate in values.values() if isinstance(values, dict) else ():
+            if isinstance(candidate, dict) and candidate.get(".type") == "defaults":
+                section = candidate
+                break
+        if section is None:
+            return {"flow_offloading": None, "flow_offloading_hw": None}
+
+        def flag(name: str) -> bool | None:
+            value = section.get(name)
+            if value is None:
+                return False
+            if value in ("1", 1, True, "on", "yes", "true"):
+                return True
+            if value in ("0", 0, False, "off", "no", "false"):
+                return False
+            return None
+
+        return {
+            "flow_offloading": flag("flow_offloading"),
+            "flow_offloading_hw": flag("flow_offloading_hw"),
+        }
+
+    # --- Ende Traffic Analytics ---
 
     # --- Configuration Manager (config_*) ---
     # Rarely called (about once a day per router), never from the poll. No
