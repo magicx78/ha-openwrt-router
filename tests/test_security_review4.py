@@ -26,7 +26,13 @@ from test_security_center import (
     sec_disk,
 )
 from test_security_review2 import auth_event, poll_facts
-from test_security_review3 import forged, keyed_center, log_hints, wifi_hint
+from test_security_review3 import (
+    forged,
+    keyed_center,
+    log_hints,
+    other_hint,
+    wifi_hint,
+)
 
 from custom_components.openwrt_router import security_center as sc
 from custom_components.openwrt_router.const import (
@@ -64,7 +70,7 @@ async def test_review4_1a_syslog_flood_leaves_room_for_wifi_hints(
     assert center.counters["incidents_log_quota_dropped"] == 300 - QUOTA
     assert len(kinds(center, "log_quota_reached")) == 1  # once per window
     for n in range(QUOTA):
-        center._record(wifi_hint(n, T0 + 400 + n), T0 + 400 + n)
+        center._record(other_hint(n, T0 + 400 + n), T0 + 400 + n)
     assert len(other_hints(center)) == QUOTA
     assert len(center.incidents) == SEC_INCIDENT_CAP
     assert center.counters["incidents_other_quota_dropped"] == 0
@@ -79,9 +85,10 @@ async def test_review4_1b_wifi_flood_neither_displaces_nor_blocks_firewall_hints
     for i in range(10):
         center._record(forged(i, T0 + i), T0 + i)
     firewall = {i["id"] for i in log_hints(center)}
-    # 100 Wi-Fi findings with invented addresses (over the air)
+    # 100 findings of the other class: 40 Wi-Fi (their share since 1.46.2,
+    # test_security_low1462) and drift
     for n in range(100):
-        center._record(wifi_hint(n, T0 + 100 + n), T0 + 100 + n)
+        center._record(other_hint(n, T0 + 100 + n), T0 + 100 + n)
     assert firewall <= set(center.incidents)  # open firewall hints stand
     assert all(center.incidents[i]["status"] == "open" for i in firewall)
     assert len(other_hints(center)) == QUOTA
@@ -115,7 +122,7 @@ async def test_review4_1c_resolved_hints_make_room_within_their_class_only(
 ) -> None:
     center = await keyed_center(make_hass(), "r1")
     for n in range(QUOTA):
-        center._record(wifi_hint(n, T0 + n), T0 + n)
+        center._record(other_hint(n, T0 + n), T0 + n)
     for i in range(QUOTA):
         center._record(forged(i, T0 + 100 + i), T0 + 100 + i)
     ordered = sorted(other_hints(center), key=lambda i: i["last_seen"])
@@ -125,13 +132,13 @@ async def test_review4_1c_resolved_hints_make_room_within_their_class_only(
         inc["status"] = "confirmed"  # confirmed hints count in their class
     resolved_log = min(log_hints(center), key=lambda i: i["last_seen"])
     resolved_log["status"] = "resolved"
-    center._record(wifi_hint(500, T0 + 900), T0 + 900)
+    center._record(other_hint(500, T0 + 900), T0 + 900)
     assert ordered[0]["id"] not in center.incidents  # oldest resolved first
     assert ordered[1]["id"] in center.incidents
-    center._record(wifi_hint(501, T0 + 901), T0 + 901)
+    center._record(other_hint(501, T0 + 901), T0 + 901)
     assert ordered[1]["id"] not in center.incidents
     before = set(center.incidents)
-    center._record(wifi_hint(502, T0 + 902), T0 + 902)
+    center._record(other_hint(502, T0 + 902), T0 + 902)
     assert set(center.incidents) == before  # open and confirmed stay
     assert center.counters["incidents_other_quota_dropped"] == 1
     # the resolved log hint was not touched by the other class
@@ -171,7 +178,7 @@ async def test_review4_1d_old_store_over_a_quota_loads_without_deleting(
     assert len(other_hints(center)) == 70
     assert all(i["status"] == "open" for i in center.incidents.values())
     # the full class takes no new hint; nothing open is removed
-    center._record(wifi_hint(900, T0 + 900), T0 + 900)
+    center._record(other_hint(900, T0 + 900), T0 + 900)
     assert center.counters["incidents_other_quota_dropped"] == 1
     assert len(center.incidents) == 100
     # the store is full: a log hint waits until the other class heals
@@ -272,6 +279,9 @@ async def test_review4_3_no_auto_resolve_without_module_key(
     assert kinds(center, "incident_resolved") == []
     center._module_key = MODULE_KEY
     center._housekeeping(late + 120)
+    # 1.46.2: quiet for a day since the key returned, not since last_seen
+    assert inc["status"] == "open"
+    center._housekeeping(late + 120 + SEC_INCIDENT_AUTO_RESOLVE_SECONDS + 60)
     assert inc["status"] == "resolved"
     assert len(kinds(center, "incident_resolved")) == 1
 

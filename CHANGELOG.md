@@ -4,6 +4,8 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.46.2] - 2026-11-20
+
 ### Behoben
 
 - **Security Center: Die Abdeckung sinkt nicht mehr, wenn eine Quelle dazukommt.** Lieferte
@@ -38,7 +40,27 @@ All notable changes to the OpenWrt Router integration will be documented in this
   mehr „Format unbestätigt“ (DNS weiterhin). Nicht belegt bleiben die Kette `out`, die Urteile
   `drop`/`accept`, TCP-Flags und die Feldreihenfolge bei IPv6 (Fixture
   `fw4_kernel_unbelegt.txt`).
-- Diagnose: `interface_zones` mit Zählern der Zuordnung (ohne Namen).
+- **Security Center: Nach Rückkehr des Modulschlüssels wird nichts sofort automatisch
+  erledigt.** Die 24 ruhigen Stunden zählen ab dem ersten Poll mit Schlüssel (oder ab dem
+  letzten Befund, wenn der später liegt); vorher war die blinde Zeit als Ruhe gezählt. Ein
+  Start, bei dem der Schlüssel sofort da ist, ändert nichts.
+- **Security Center: Fehlende Core-Anbindung wird aus dem Poll neu versucht.** Fehlt beim
+  Start die Configuration API oder scheitert die Anmeldung der Ereignisse, versucht der Poll
+  die Anbindung alle 5 Minuten erneut, solange ein Core läuft. Eine Warnung je Zustand „nicht
+  gebunden“ (ohne Identitäten), kein Router-Aufruf, Fehler stören den Poll nie.
+- **Security Center: Geräte, die ohne Schlüssel auffällig wurden, bekommen ihren Hinweis.**
+  Beim ersten Poll mit Schlüssel holt das Center den Hinweis für jedes dann noch auffällige
+  Gerät einmal nach (nur im Speicher, höchstens 256 Geräte). Bisher sammelte das
+  Vertrauensbuch die Indikatoren weiter, der Hinweis ging aber verloren.
+- **Security Center: Reserve für Konfiguration und Geräte.** Von den 50 Plätzen der Klasse
+  „andere“ sind 10 nur für Nicht-WLAN-Quellen; WLAN-Hinweise belegen höchstens 40, eine
+  WLAN-Flut blockiert keinen Drift- oder Geräte-Hinweis mehr. Keine Verdrängung: ein neuer
+  WLAN-Hinweis bei voller Quote wird gezählt (`incidents_wifi_quota_dropped`) und einmal je
+  Stunde in der Zeitleiste vermerkt. Die Zuordnung kommt aus der Datenquelle des Detektors
+  (`from_wifi`); ältere Stände mit mehr als 40 WLAN-Hinweisen laden vollständig. Panel und
+  Diagnose zeigen den WLAN-Anteil.
+- Diagnose: `interface_zones` mit Zählern der Zuordnung (ohne Namen), `wifi_incidents`,
+  `missed_device_hints`.
 - Doku: Die Abdeckung ist der Anteil der erwarteten **Datenquellen**, nicht der Erkennungen.
 
 ## [1.46.0] - 2026-11-20

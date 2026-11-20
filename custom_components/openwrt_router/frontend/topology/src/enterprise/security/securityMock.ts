@@ -199,7 +199,9 @@ function build(scenario: string) {
       log_incidents: incidents.filter(i => i.from_logs === true).length,
       incidents_log_quota_dropped: noHints ? 0 : 12, other_incident_quota: 50,
       other_incidents: incidents.filter(i => i.from_logs !== true).length,
-      incidents_other_quota_dropped: 0, events_throttled: 0,
+      incidents_other_quota_dropped: 0, wifi_incident_quota: 40, other_reserved_non_wifi: 10,
+      wifi_incidents: incidents.filter(i => i.from_logs !== true && i.category === 'wifi').length,
+      incidents_wifi_quota_dropped: 0, events_throttled: 0,
     },
   });
 

@@ -174,6 +174,12 @@ export interface Limits {
   otherIncidentQuota: number | null;
   otherIncidents: number | null;
   incidentsOtherQuotaDropped: number | null;
+  /** Of the other class at most this many may be Wi-Fi hints (1.46.2: 40 of 50). */
+  wifiIncidentQuota: number | null;
+  /** Places of the other class kept for non-Wi-Fi hints (drift, devices). */
+  otherReservedNonWifi: number | null;
+  wifiIncidents: number | null;
+  incidentsWifiQuotaDropped: number | null;
   eventsThrottled: number | null;
 }
 

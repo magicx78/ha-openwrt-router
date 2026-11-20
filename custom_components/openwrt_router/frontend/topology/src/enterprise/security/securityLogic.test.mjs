@@ -456,7 +456,8 @@ test('review4 panel: the store limits parse per class; unknown values stay unkno
   assert.deepEqual(o.limits, {
     incidentCap: 100, incidentsCapDropped: 0, logIncidentQuota: 50, logIncidents: 50,
     incidentsLogQuotaDropped: 7, otherIncidentQuota: 50, otherIncidents: 12,
-    incidentsOtherQuotaDropped: 2, eventsThrottled: null,
+    incidentsOtherQuotaDropped: 2, wifiIncidentQuota: null, otherReservedNonWifi: null,
+    wifiIncidents: null, incidentsWifiQuotaDropped: null, eventsThrottled: null,
   });
   const lines = limitLines(o.limits);
   assert.ok(lines.some(l => /Logzeilen/.test(l.name) && l.value === '50 von höchstens 50' && l.tone === 'warn'));
@@ -467,6 +468,24 @@ test('review4 panel: the store limits parse per class; unknown values stay unkno
   assert.ok(lines.some(l => /Obergrenze/.test(l.name) && l.value === '0' && l.tone === 'muted'));
   assert.ok(!lines.some(l => /[Gg]edrosselt/.test(l.name))); // unknown: not shown as 0
   assert.deepEqual(limitLines(parseOverview({}).limits), []);
+});
+
+test('low4 panel: the Wi-Fi share of the other class and its reserve are shown (1.46.2)', () => {
+  const o = parseOverview({ limits: {
+    other_incident_quota: 50, other_incidents: 42, wifi_incident_quota: 40, other_reserved_non_wifi: 10,
+    wifi_incidents: 40, incidents_wifi_quota_dropped: 60,
+  } });
+  assert.equal(o.limits.wifiIncidentQuota, 40);
+  assert.equal(o.limits.otherReservedNonWifi, 10);
+  const lines = limitLines(o.limits);
+  const share = lines.find(l => /^Davon WLAN/.test(l.name));
+  assert.ok(share && share.value === '40 von höchstens 40' && share.tone === 'warn');
+  assert.match(share.name, /10 Plätze bleiben für Konfiguration und Geräte/);
+  assert.ok(lines.some(l => /WLAN-Quote voll/.test(l.name) && l.value === '60' && l.tone === 'warn'));
+  // unknown stays unknown: no share line without the backend values
+  assert.ok(!limitLines(parseOverview({ limits: { other_incident_quota: 50, other_incidents: 1 } }).limits)
+    .some(l => /WLAN-Quote|Davon WLAN/.test(l.name)));
+  assert.equal(TIMELINE_KIND_LABEL.wifi_quota_reached, 'Quote für WLAN-Hinweise erreicht');
 });
 
 test('review3 panel: rate_limited is a German limitation; the log path counts limited routers', () => {
@@ -487,7 +506,7 @@ test('review3 panel: rate_limited is a German limitation; the log path counts li
 });
 
 test('review3 panel: every timeline kind of the backend has a German label (drift guard)', () => {
-  for (const k of ['log_quota_reached', 'other_quota_reached', 'incident_seen_again', 'cap_reached']) {
+  for (const k of ['log_quota_reached', 'other_quota_reached', 'wifi_quota_reached', 'incident_seen_again', 'cap_reached']) {
     assert.ok(TIMELINE_KIND_LABEL[k] && TIMELINE_KIND_LABEL[k] !== k, k);
   }
   const py = join(here, '..', '..', '..', '..', 'security_center.py');

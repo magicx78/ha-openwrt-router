@@ -70,7 +70,7 @@ except ImportError:  # pragma: no cover - older HA cores keyed the app by str
 _LOGGER = logging.getLogger(__name__)
 
 # Cache-busting query for the bundle URL — bump on every frontend rebuild.
-_PANEL_VERSION = "20261120-security-center4"
+_PANEL_VERSION = "20261120-security-center5"
 # Master flag: set ONLY after every registration step completed.  Until then,
 # a partial setup must still allow re-entry to register the missing pieces.
 _PANEL_REGISTERED_KEY = f"{DOMAIN}_panel_registered"

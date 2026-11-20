@@ -225,6 +225,7 @@ export const TIMELINE_KIND_LABEL: Record<string, string> = {
   cap_reached: 'Obergrenze der Hinweise erreicht',
   log_quota_reached: 'Quote für Hinweise aus Logzeilen erreicht',
   other_quota_reached: 'Quote für Hinweise aus WLAN, Konfiguration und Geräten erreicht',
+  wifi_quota_reached: 'Quote für WLAN-Hinweise erreicht',
 };
 
 export const TRUST_LABEL: Record<string, string> = {
@@ -594,6 +595,10 @@ function parseLimits(v: unknown): Limits {
     otherIncidentQuota: num(o.other_incident_quota),
     otherIncidents: num(o.other_incidents),
     incidentsOtherQuotaDropped: num(o.incidents_other_quota_dropped),
+    wifiIncidentQuota: num(o.wifi_incident_quota),
+    otherReservedNonWifi: num(o.other_reserved_non_wifi),
+    wifiIncidents: num(o.wifi_incidents),
+    incidentsWifiQuotaDropped: num(o.incidents_wifi_quota_dropped),
     eventsThrottled: num(o.events_throttled),
   };
 }
@@ -750,6 +755,9 @@ export function limitLines(l: Limits): LimitLine[] {
   count('Nicht gespeichert, Log-Quote voll', l.incidentsLogQuotaDropped);
   quota('Gespeicherte Hinweise aus WLAN, Konfiguration und Geräten', l.otherIncidents, l.otherIncidentQuota);
   count('Nicht gespeichert, Quote für WLAN, Konfiguration und Geräte voll', l.incidentsOtherQuotaDropped);
+  const reserve = l.otherReservedNonWifi !== null ? ` (${fmt(l.otherReservedNonWifi)} Plätze bleiben für Konfiguration und Geräte)` : '';
+  quota(`Davon WLAN-Hinweise${reserve}`, l.wifiIncidents, l.wifiIncidentQuota);
+  count('Nicht gespeichert, WLAN-Quote voll', l.incidentsWifiQuotaDropped);
   count(l.incidentCap !== null ? `Nicht gespeichert, Obergrenze von ${fmt(l.incidentCap)} erreicht` : 'Nicht gespeichert, Obergrenze erreicht', l.incidentsCapDropped);
   count('Gedrosselte Meldungen an den Enterprise Core', l.eventsThrottled);
   return out;

@@ -432,8 +432,11 @@ oder unbekannt, wird nichts gelöscht.
   schreibt keine Zeitleisten-Einträge zu Geräten; die verworfenen Befunde werden gezählt
   (`findings_not_ready` in der Diagnose), Gerätebestätigung und -name werden mit 409
   `not_ready` abgelehnt. Das Vertrauensbuch sieht die Geräte weiter, nimmt aber keine
-  Indikatoren aus Befunden an, und offene Hinweise werden nicht automatisch erledigt. Ältere
-  Speicherstände mit unverschlüsselten IDs laden ohne Fehler.
+  Indikatoren aus Befunden an, und offene Hinweise werden nicht automatisch erledigt. Wird ein
+  Gerät in dieser Zeit aus eigenen Beobachtungen (IP- und Hostname-Wechsel) auffällig, bekommt es
+  seinen Hinweis beim ersten Poll mit Schlüssel, sofern es dann noch auffällig ist (gemerkt nur im
+  Speicher, höchstens 256 Geräte). Ältere Speicherstände mit unverschlüsselten IDs laden ohne
+  Fehler.
 - **Keine DNS-Namen im Klartext:** An einem DNS-Hinweis steht kein Klartextname, und es gibt
   keine Einstellung dafür. Ein älterer Speicherstand mit dem früheren Schlüssel
   `keep_dns_names` lädt ohne Fehler; der Schlüssel wird verworfen. Die Settings-Route lehnt ihn
@@ -459,7 +462,7 @@ oder unbekannt, wird nichts gelöscht.
 - **Home Assistant:** Der Syslog-Empfänger hat feste Obergrenzen (Zeilenlänge, Raten, Puffer,
   [Abschnitt 5](#5-log-empfang)); zu viele Zeilen werden verworfen und gezählt, nie blockiert.
   Der Speicher ist auf 512 KB begrenzt, die Zeitleiste auf 2000 Einträge, eigene Hinweise auf 100
-  (zwei Quoten zu je 50, siehe unten).
+  (zwei Quoten zu je 50, davon höchstens 40 WLAN-Hinweise, siehe unten).
 - **Zwei feste Quoten statt Verdrängung:** Die 100 Plätze teilen sich in zwei Klassen, die sich
   nie gegenseitig verdrängen. **Höchstens 50** Hinweise kommen vom Syslog-Empfänger (Firewall
   und DNS; die Absender sind per UDP im LAN fälschbar), **höchstens 50** aus allen anderen
@@ -472,6 +475,17 @@ oder unbekannt, wird nichts gelöscht.
   `limits.incidents_other_quota_dropped`, gleichnamig in der Diagnose), mit höchstens einem
   Zeitleisten-Eintrag je Klasse und Stunde. Die andere Klasse bleibt unberührt. Die Herkunft
   steht am Hinweis (`from_logs`) und bleibt über einen Neustart erhalten.
+- **Reserve für Konfiguration und Geräte (1.46.2):** Von den 50 Plätzen der Klasse „andere“ sind
+  **10 nur für Nicht-WLAN-Quellen** (Konfigurationsänderung, Vertrauensbuch); WLAN-Hinweise
+  belegen also **höchstens 40**. Eine WLAN-Flut blockiert so keinen Drift- oder Geräte-Hinweis.
+  Nicht-WLAN-Hinweise dürfen alle 50 Plätze nutzen. Es wird nichts verdrängt: Ist der WLAN-Anteil
+  voll, machen erledigte WLAN-Hinweise Platz (älteste zuerst, nur wenn das reicht); sonst wird
+  nur der neue WLAN-Hinweis nicht gespeichert und gezählt (`limits.incidents_wifi_quota_dropped`,
+  gleichnamig in der Diagnose; Zeitleiste „Quote für WLAN-Hinweise erreicht“ höchstens einmal je
+  Stunde). Die Zuordnung folgt aus der Datenquelle des Detektors (`from_wifi` am Hinweis; ältere
+  Stände: nach Kategorie). Ältere Stände mit mehr als 40 WLAN-Hinweisen laden vollständig, es
+  wird nichts gelöscht. Das Panel zeigt den Anteil unter den Speichergrenzen
+  („Davon WLAN-Hinweise“).
 - **Ältere Speicherstände** mit mehr als 50 Hinweisen einer Klasse laden vollständig; gelöscht
   wird nichts, der Bestand heilt sich, sobald Hinweise erledigt sind. Bis dahin kann die
   Gesamtgrenze von 100 erreicht sein: dann macht ein erledigter Hinweis Platz (zuerst aus der
@@ -490,7 +504,10 @@ oder unbekannt, wird nichts gelöscht.
   Zeit des Centers, nicht an der Zeit aus der Logzeile; der Zeitpunkt steht am Hinweis und
   bleibt über einen Neustart erhalten). Steigt die Schwere, gibt es immer einen Eintrag.
 - **Ohne Modulschlüssel** erledigt das Center keine Hinweise automatisch: es sieht dann nichts,
-  und Ruhe wäre kein Beleg.
+  und Ruhe wäre kein Beleg. **Nach Rückkehr des Schlüssels** (1.46.2) zählen die 24 ruhigen
+  Stunden erst ab dem ersten Poll mit Schlüssel (oder ab dem letzten Befund, wenn der später
+  liegt). Der Zeitpunkt steht nur im Speicher; ein Start, bei dem der Schlüssel sofort da ist,
+  gilt nicht als Rückkehr.
 - **Ereignisse über den Core:** höchstens 20 Ereignisse zu neuen oder wieder geöffneten
   Hinweisen je 10 min; weitere werden nicht gesendet, sondern gezählt
   (`limits.events_throttled`). Der Hinweis selbst wird trotzdem gespeichert.
@@ -552,8 +569,12 @@ ausdrücklicher Einzelfreigabe eines Administrators, wie beim Configuration Mana
   damit derselbe Befund nach Eintreffen des Schlüssels den Zustandswechsel und seinen Hinweis
   auslöst. Sensoren sind dann unbekannt. Ist der Core gebunden, fragt der Poll alle **5 Minuten**
   erneut nach dem Schlüssel (kein Router-Aufruf); das Log bekommt dazu **eine** Warnung je
-  „nicht bereit“-Zustand, ohne MAC, IP oder Hostnamen. Ist der Core gar nicht gebunden, versucht
-  das Center es erst wieder beim nächsten Einrichten eines Eintrags oder einer Aktion.
+  „nicht bereit“-Zustand, ohne MAC, IP oder Hostnamen. Fehlt die Anbindung an den Core beim Start
+  (keine Configuration API oder Anmeldung der Ereignisse gescheitert), versucht der Poll sie im
+  selben Abstand von **5 Minuten** erneut (1.46.2), solange ein Core läuft; kein Router-Aufruf,
+  ein Fehler stört den Poll nie, und das Log bekommt **eine** Warnung je Zustand „nicht
+  gebunden“. Läuft gar kein Core, versucht das Center es beim nächsten Einrichten eines Eintrags,
+  einer Aktion oder sobald ein Core läuft.
 - **Firewall- und DNS-Befunde markieren kein Gerät** im Vertrauensbuch (kein Nachschlagen
   IP → MAC).
 - **Umbenannte Entity-IDs der Flotten-Sensoren** bleiben erhalten, wenn der Router-Eintrag,

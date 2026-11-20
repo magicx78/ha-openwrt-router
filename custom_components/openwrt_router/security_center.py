@@ -187,6 +187,14 @@ TEXT_CAP_REACHED = (
 # never removed for a new one, and confirmed hints count in their class.
 SEC_LOG_INCIDENT_QUOTA = 50
 SEC_OTHER_INCIDENT_QUOTA = 50
+# Reserve inside the "other" class (1.46.2): 10 of its 50 places are only for
+# non-Wi-Fi sources (drift, device trust), so Wi-Fi hints get at most 40 and
+# a Wi-Fi flood (over the air) cannot block a drift or trust hint. No
+# displacement: a full Wi-Fi share drops its own new hint (counted, one
+# timeline note per window); resolved Wi-Fi hints make room, but only if that
+# is enough. The share comes from the detector's data source.
+SEC_OTHER_RESERVED_NON_WIFI = 10
+SEC_WIFI_INCIDENT_QUOTA = SEC_OTHER_INCIDENT_QUOTA - SEC_OTHER_RESERVED_NON_WIFI
 LOG_DATA_SOURCES: frozenset[str] = frozenset(
     {DataSource.FIREWALL_LOG.value, DataSource.DNS_QUERY_LOG.value}
 )
@@ -203,10 +211,21 @@ TEXT_OTHER_QUOTA = (
     "neue Hinweise dieser Quellen werden nicht gespeichert, bis erledigte "
     "Platz machen"
 )
+TEXT_WIFI_QUOTA = (
+    "Obergrenze für WLAN-Hinweise erreicht: neue WLAN-Hinweise werden nicht "
+    "gespeichert, bis erledigte Platz machen; 10 Plätze bleiben für "
+    "Konfiguration und Geräte frei"
+)
 TEXT_SEEN_AGAIN = "Erneut beobachtet (Hinweis ist bestätigt)"
 # Module key (review 4, #4): while an active center has none, the poll asks
 # the core again at this fixed interval (no router call; memory only).
 SEC_MODULE_KEY_RETRY_SECONDS = 300.0
+# Core binding (1.46.2): missing at start (no API, or the event registration
+# failed) -> the poll tries again at the same interval, one WARNING per state.
+SEC_CORE_RETRY_SECONDS = SEC_MODULE_KEY_RETRY_SECONDS
+# Devices that became suspicious while the key was missing: their hint is
+# caught up once the key is there (memory only, at most this many devices).
+SEC_MISSED_SUSPICIOUS_MAX = 256
 # Not ready (review 3, #6): no hint is recorded before the core hands out
 # the module key; counts and score are unknown until then.
 REASON_MODULE_KEY_MISSING = "module_key_missing"
@@ -336,6 +355,7 @@ _COUNTERS = (
     "incidents_cap_dropped",
     "incidents_log_quota_dropped",
     "incidents_other_quota_dropped",
+    "incidents_wifi_quota_dropped",
     "incidents_reused",
     "notices",
     "drifts_seen",
@@ -731,6 +751,15 @@ class SecurityCenter:
         self._syslog_tried: float | None = None  # monotonic
         self._key_tried: float | None = None  # monotonic, module key retry
         self._key_warned = False  # one WARNING per "not ready" state
+        self._core_tried: float | None = None  # monotonic, core binding retry
+        self._core_warned = False  # one WARNING per "not bound" state
+        # Key return (1.46.2): a gap = active without the key; the poll time
+        # of the first housekeeping with the key again starts the quiet day
+        # of the auto-resolve. Memory only.
+        self._key_gap = False
+        self._key_since: float | None = None
+        # mac -> suspicious notice dropped while not ready (memory only)
+        self._missed: dict[str, TrustNotice] = {}
         self._fw_events = _HourCount()
         self._auth_failures = _HourCount()
         self.fleet_view: dict[str, Any] | None = None
@@ -1094,7 +1123,7 @@ class SecurityCenter:
         try:
             await self._async_bind_core()
         except Exception as err:  # noqa: BLE001 - runs without the core
-            self._fail("core binding", err)
+            self._core_failed(err)
         try:
             self._attach_engine()
         except Exception as err:  # noqa: BLE001 - runs without the engine
@@ -1215,7 +1244,9 @@ class SecurityCenter:
         if core is None or getattr(core, "closed", False):
             self._unbind_core()
             return
-        if self._binding.core is core and self._binding.api is not None:
+        self._core_tried = time.monotonic()
+        binding = self._binding
+        if binding.core is core and binding.api is not None and binding.events_ok:
             await self._async_fetch_module_key()
             self._stage("forgotten routers", self._forget_unknown_routers)
             return
@@ -1235,10 +1266,66 @@ class SecurityCenter:
             )
             binding.events_ok = True
         except (TypeError, ValueError) as err:
-            self._fail("event registration", err)
+            # Not bound: the poll tries again (1.46.2), one WARNING per state.
+            self.counters["errors"] += 1
+            _LOGGER.debug("Security Center event registration", exc_info=err)
+            self._core_missing(f"event registration {type(err).__name__}")
         binding.removers.append(api.subscribe(self._on_core_event))
+        if binding.events_ok:
+            self._core_warned = False  # a later loss warns again
         await self._async_fetch_module_key()
         self._stage("forgotten routers", self._forget_unknown_routers)
+
+    def _core_failed(self, err: BaseException) -> None:
+        """A failed core binding: counted, one WARNING per state, never raised."""
+        self.counters["errors"] += 1
+        _LOGGER.debug("Security Center core binding error", exc_info=err)
+        self._core_missing(type(err).__name__)
+
+    def _core_missing(self, reason: str) -> None:
+        """One WARNING per "not bound" state; the reason names no identity."""
+        if self._core_warned:
+            return
+        self._core_warned = True
+        _LOGGER.warning(
+            "Security Center not bound to the core (%s); nothing is recorded, "
+            "retrying every %d s",
+            reason[:64],
+            SEC_CORE_RETRY_SECONDS,
+        )
+
+    def _maybe_retry_core(self) -> None:
+        """Bind the core again from the poll at a fixed interval (1.46.2).
+
+        Only while the center is active, a core runs and the binding is
+        missing or incomplete (no API, event registration failed). No router
+        is contacted; the attempt runs as its own task, so an error never
+        reaches the poll.
+        """
+        from .enterprise_core import async_get_core
+
+        binding = self._binding
+        if not self.active or self._closed:
+            return
+        if binding.api is not None and binding.events_ok:
+            return
+        core = async_get_core(self.hass)
+        if core is None or getattr(core, "closed", False):
+            return
+        tried = self._core_tried
+        clock = time.monotonic()
+        if tried is not None and 0 <= clock - tried < SEC_CORE_RETRY_SECONDS:
+            return
+        self._core_tried = clock
+        self.hass.async_create_task(
+            self._async_retry_core(), name="openwrt_router security core"
+        )
+
+    async def _async_retry_core(self) -> None:
+        try:
+            await self._async_bind_core()
+        except Exception as err:  # noqa: BLE001 - never disturbs the poll
+            self._core_failed(err)
 
     def _stored_router_ids(self) -> set[str]:
         """Router ids the center keeps state of (store sections)."""
@@ -1308,6 +1395,7 @@ class SecurityCenter:
 
     def _key_missing(self, reason: str) -> None:
         """One WARNING per "not ready" state; the reason names no identity."""
+        self._key_gap = True
         if self._key_warned:
             return
         self._key_warned = True
@@ -1353,6 +1441,8 @@ class SecurityCenter:
     def _unbind_core(self) -> None:
         binding = self._binding
         self._binding = _Binding()
+        if self._module_key is not None:
+            self._key_gap = True  # the key is lost: its return waits a day
         self._module_key = None
         for remove in reversed(binding.removers):
             try:
@@ -1645,6 +1735,7 @@ class SecurityCenter:
         self._stage("log senders", self._refresh_senders)
         self._stage("log drain", self._drain_logs)
         self._stage("syslog retry", self._maybe_retry_syslog)
+        self._stage("core retry", self._maybe_retry_core)
         self._stage("module key retry", self._maybe_retry_module_key)
         self._stage("evaluate", self._evaluate, now)
         self._stage("housekeeping", self._housekeeping, now)
@@ -2001,15 +2092,31 @@ class SecurityCenter:
                 self._record(event, now)
 
     def _apply_notices(
-        self, notices: Iterable[TrustNotice], rid: str | None, now: float
+        self,
+        notices: Iterable[TrustNotice],
+        rid: str | None,
+        now: float,
+        *,
+        late: bool = False,
     ) -> list[SecurityEvent]:
-        """Timeline entries; a suspicious device becomes an event to record."""
+        """Timeline entries; a suspicious device becomes an event to record.
+
+        ``late``: notices caught up after the key arrived (already counted).
+        """
         out: list[SecurityEvent] = []
         for notice in notices:
-            self.counters["notices"] += 1
+            if not late:
+                self.counters["notices"] += 1
             if self._module_key is None:
                 # Not ready: no entry with an unkeyed device reference; the
-                # trust book keeps the device (review 3, #6).
+                # trust book keeps the device (review 3, #6). A suspicious
+                # device gets its hint once the key is there (1.46.2).
+                self._key_gap = True
+                if notice.kind is NoticeKind.SUSPICIOUS and notice.mac:
+                    self._missed.pop(notice.mac, None)
+                    self._missed[notice.mac] = notice
+                    while len(self._missed) > SEC_MISSED_SUSPICIOUS_MAX:
+                        del self._missed[next(iter(self._missed))]
                 continue
             self._timeline(
                 notice.at,
@@ -2033,6 +2140,7 @@ class SecurityCenter:
             # Not ready: ids and device references need the module key
             # (review 3, #6). Counted; the overview says "not ready".
             self.counters["findings_not_ready"] += 1
+            self._key_gap = True
             return
         event = sealed_event(event, key)
         counterpart = NI_COUNTERPART.get(event.name)
@@ -2105,8 +2213,12 @@ class SecurityCenter:
             )
             self._emit_event(event, inc["id"], limited=True)
             return
-        # The class comes from the detector's data source (review 4, #1).
+        # The class comes from the detector's data source (review 4, #1),
+        # and so does the Wi-Fi share of the other class (1.46.2).
         from_logs = event.data_source in LOG_DATA_SOURCES
+        if event.data_source == DataSource.WIFI_EVENTS and not self._make_wifi_room():
+            self._wifi_quota_reached(now)
+            return
         if not self._make_class_room(from_logs):
             self._quota_reached(from_logs, now)
             return
@@ -2170,6 +2282,7 @@ class SecurityCenter:
             "drift_refs": drift_refs,
             "correlation_id": event.correlation_id,
             "from_logs": event.data_source in LOG_DATA_SOURCES,
+            "from_wifi": event.data_source == DataSource.WIFI_EVENTS,
             "title": TITLES.get(name, name),
             "hint": " ".join(hints),
             "resolved_at": None,
@@ -2218,6 +2331,37 @@ class SecurityCenter:
             for i in self.incidents.values()
             if (i.get("from_logs") is True) is from_logs
         ]
+
+    def _wifi_hints(self) -> list[dict[str, Any]]:
+        """The Wi-Fi hints (a share of the other class, 1.46.2)."""
+        return [i for i in self.incidents.values() if i.get("from_wifi") is True]
+
+    def _make_wifi_room(self) -> bool:
+        """Room within ``SEC_WIFI_INCIDENT_QUOTA`` for a new Wi-Fi hint.
+
+        Resolved Wi-Fi hints go, oldest first, but only if that makes room:
+        an old store above the share (open hints) loses nothing for a hint
+        that would be dropped anyway. Open and confirmed hints never go.
+        """
+        hints = self._wifi_hints()
+        need = len(hints) - SEC_WIFI_INCIDENT_QUOTA + 1
+        if need <= 0:
+            return True
+        resolved = sorted(
+            (i for i in hints if i["status"] == STATUS_RESOLVED),
+            key=lambda i: i["last_seen"],
+        )
+        if len(resolved) < need:
+            return False
+        for victim in resolved[:need]:
+            self._drop_incident(victim["id"])
+            self.counters["incidents_dropped"] += 1
+        return True
+
+    def _wifi_quota_reached(self, now: float) -> None:
+        """A new Wi-Fi hint found its share full: count it, note it once."""
+        self.counters["incidents_wifi_quota_dropped"] += 1
+        self._note_once("wifi_quota_reached", now, TEXT_WIFI_QUOTA)
 
     def _drop_oldest_resolved(self, hints: Iterable[dict[str, Any]]) -> bool:
         resolved = [i for i in hints if i["status"] == STATUS_RESOLVED]
@@ -2319,6 +2463,26 @@ class SecurityCenter:
             self._drop_incident(victim["id"])
             self.counters["incidents_dropped"] += 1
 
+    def _catch_up_suspicious(self, now: float) -> None:
+        """Hints of devices that became suspicious while the key was missing.
+
+        Once, at the first housekeeping with the key (1.46.2): a device that
+        is still suspicious gets the hint its notice would have made; one
+        that is no longer suspicious gets none.
+        """
+        missed, self._missed = self._missed, {}
+        notices = [
+            notice
+            for mac, notice in missed.items()
+            if self.trust.state(mac, now) is TrustState.SUSPICIOUS
+        ]
+        if not notices:
+            return
+        events = self._apply_notices(notices, None, now, late=True)
+        for group in correlate(events, incidents=self._ni_refs):
+            for event in group.events:
+                self._record(event, now)
+
     def _drop_incident(self, inc_id: str) -> None:
         inc = self.incidents.pop(inc_id, None)
         if inc is not None and self._by_scope.get(inc["scope"]) == inc_id:
@@ -2326,13 +2490,26 @@ class SecurityCenter:
 
     def _housekeeping(self, now: float) -> None:
         # Without the module key nothing is recorded, so a quiet hint is not
-        # proof of calm: no auto-resolve while blind (review 4, #3).
+        # proof of calm: no auto-resolve while blind (review 4, #3), and after
+        # the key returns a hint needs a quiet day since then (1.46.2).
         blind = self._module_key is None
+        if blind:
+            self._key_gap = True
+        elif self._key_gap:
+            self._key_gap = False
+            self._key_since = now
+            self._stage("missed device hints", self._catch_up_suspicious, now)
+        if self._key_since is not None and self._key_since > now:
+            self._key_since = now  # the poll clock went back
+        since = self._key_since
         for inc in self.incidents.values():
+            quiet_from = (
+                inc["last_seen"] if since is None else max(inc["last_seen"], since)
+            )
             if (
                 not blind
                 and inc["status"] == STATUS_OPEN
-                and now - inc["last_seen"] > SEC_INCIDENT_AUTO_RESOLVE_SECONDS
+                and now - quiet_from > SEC_INCIDENT_AUTO_RESOLVE_SECONDS
             ):
                 inc["status"] = STATUS_RESOLVED
                 inc["resolved_at"] = now
@@ -2561,7 +2738,7 @@ class SecurityCenter:
             try:
                 await self._async_bind_core()
             except Exception as err:  # noqa: BLE001 - refused below
-                self._fail("core binding", err)
+                self._core_failed(err)
         return self._require_api()
 
     async def _async_authorize(
@@ -2932,6 +3109,12 @@ class SecurityCenter:
                 "other_incidents": len(self._class_hints(False)),
                 "incidents_other_quota_dropped": self.counters[
                     "incidents_other_quota_dropped"
+                ],
+                "wifi_incident_quota": SEC_WIFI_INCIDENT_QUOTA,
+                "other_reserved_non_wifi": SEC_OTHER_RESERVED_NON_WIFI,
+                "wifi_incidents": len(self._wifi_hints()),
+                "incidents_wifi_quota_dropped": self.counters[
+                    "incidents_wifi_quota_dropped"
                 ],
                 "events_throttled": self.counters["events_throttled"],
             },
@@ -3342,6 +3525,8 @@ class SecurityCenter:
             "not_ready_reason": self.not_ready_reason,
             "log_incidents": len(self._class_hints(True)),
             "other_incidents": len(self._class_hints(False)),
+            "wifi_incidents": len(self._wifi_hints()),
+            "missed_device_hints": len(self._missed),
             "log_rate_limited_routers": len(self._log_limited_routers()),
             "events_registered": self._binding.events_ok,
             "last_save_bytes": self.last_save_bytes,
@@ -3385,6 +3570,13 @@ def _incident_from_store(item: Any) -> dict[str, Any] | None:
     router = item.get("router_id")
     if router is not None and valid_router_id(router) is None:
         return None
+    # Origin of the hint (review 3, #1); stores before it: by category
+    # (firewall and DNS hints only ever came from log lines).
+    from_logs = (
+        item["from_logs"]
+        if isinstance(item.get("from_logs"), bool)
+        else str(item.get("category") or "") in _LOG_CATEGORIES
+    )
     inc = {
         "id": inc_id[:64],
         "type": str(item.get("type") or "")[:96],
@@ -3417,11 +3609,12 @@ def _incident_from_store(item: Any) -> dict[str, Any] | None:
         "correlation_id": item.get("correlation_id")
         if isinstance(item.get("correlation_id"), str)
         else None,
-        # Origin of the hint (review 3, #1); stores before it: by category
-        # (firewall and DNS hints only ever came from log lines).
-        "from_logs": item["from_logs"]
-        if isinstance(item.get("from_logs"), bool)
-        else str(item.get("category") or "") in _LOG_CATEGORIES,
+        "from_logs": from_logs,
+        # Wi-Fi share of the other class (1.46.2); stores before it: by
+        # category (Wi-Fi hints only ever came from the Wi-Fi detectors).
+        "from_wifi": item["from_wifi"]
+        if isinstance(item.get("from_wifi"), bool)
+        else not from_logs and str(item.get("category") or "") == "wifi",
         "title": mask_identities(str(item.get("title") or "")),
         "hint": mask_identities(str(item.get("hint") or "")),
         "resolved_at": _num(item.get("resolved_at")),
