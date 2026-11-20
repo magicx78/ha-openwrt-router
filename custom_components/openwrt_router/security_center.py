@@ -28,6 +28,14 @@ Default off: without ``enabled`` the center only reads its store. It
 registers no observer and no listener, writes nothing and emits nothing.
 Every entry point catches its own errors (logged without identities) so a
 poll, a core event or a setup never fails because of the center.
+
+Part 2: the syslog receiver (``security_syslog``) runs only while the center
+is on and ``log_path`` is ``syslog``; its records pass the ``Deduper`` (one
+for all paths, marks kept across path changes) before the detectors see
+them, and ``Liveness`` turns them into the firewall/DNS log source states.
+The sender allowlist comes from the core's router registry. After each poll
+the center publishes a counts-only ``fleet_view`` for the fleet sensors
+(``security_entities``) and signals ``SIGNAL_SECURITY_CENTER``.
 """
 
 from __future__ import annotations
@@ -51,6 +59,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import (
     DATA_SECURITY_CENTER,
+    SEC_COUNT_WINDOW_SECONDS,
     SEC_DEFAULT_SYSLOG_PORT,
     SEC_DRIFT_HINT_WINDOW_SECONDS,
     SEC_DRIFT_RESOLVE_WINDOW_SECONDS,
@@ -62,8 +71,11 @@ from .const import (
     SEC_STORE_MAX_BYTES,
     SEC_STORE_MINOR_VERSION,
     SEC_STORE_VERSION,
+    SEC_SYSLOG_BUFFER_MAX,
+    SEC_SYSLOG_RETRY_SECONDS,
     SEC_TIMELINE_DAYS,
     SEC_TIMELINE_MAX,
+    SIGNAL_SECURITY_CENTER,
 )
 from .core_masking import MASK, pseudonymise_fields
 from .core_models import (
@@ -81,7 +93,7 @@ from .core_models import (
 )
 from .security_baseline import BaselineBook
 from .security_logfmt import FMT_DNS_QUERY, FMT_DNS_REPLY, FMT_FW4, FORMAT_CONFIRMED
-from .security_logsrc import Deduper, NullLogSource
+from .security_logsrc import KIND_SOURCES, Deduper, Liveness, NullLogSource
 from .security_model import (
     AUDIT_MANDATORY_TYPES,
     EVENT_PREFIX,
@@ -107,6 +119,7 @@ from .security_model import (
     valid_router_id,
 )
 from .security_rules import (
+    AUTH_FAIL_KINDS,
     DRIFT_KIND,
     DetectorResult,
     DetectorSet,
@@ -126,7 +139,12 @@ from .security_score import (
     compute_score,
     incident_load,
 )
-from .security_trust import Indicator, NoticeKind, TrustBook, TrustNotice
+from .security_syslog import (
+    REASON_NOT_STARTED,
+    SyslogReceiver,
+    sender_address,
+)
+from .security_trust import Indicator, NoticeKind, TrustBook, TrustNotice, TrustState
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -146,9 +164,12 @@ DETECTION_AVAILABLE = "available"
 DETECTION_NOT_AVAILABLE = "not_available"
 DETECTION_LIMITED = "limited"
 
-# Reasons of the off-router log path (part 2 builds the receivers).
-REASON_SYSLOG_PART2 = "syslog_receiver_not_built"
+# Reasons of the off-router log path. The syslog receiver adds its own
+# (``security_syslog.REASON_*``: port in use, permission denied, ...).
 REASON_COLLECTOR = "collector_not_available"
+# The router's management address is no IP literal, or no router sends from
+# it: its lines cannot be told apart from foreign ones, so none are taken.
+REASON_SENDER_UNKNOWN = "sender_not_allowed"
 REASON_NO_CORE = "no_core"
 REASON_NO_ENGINE = "no_engine"
 
@@ -275,7 +296,46 @@ _COUNTERS = (
     "errors",
     "load_errors",
     "store_trimmed",
+    "log_records",
+    "syslog_starts",
 )
+
+
+class _HourCount:
+    """Count per minute over the last ``SEC_COUNT_WINDOW_SECONDS`` (memory only).
+
+    At most one bucket per minute of the window, so the size stays bounded
+    whatever the input rate; times outside the window are not counted.
+    """
+
+    __slots__ = ("_buckets",)
+
+    def __init__(self) -> None:
+        self._buckets: dict[int, int] = {}
+
+    def add(self, ts: float, now: float, n: int = 1) -> None:
+        if (
+            n <= 0
+            or not math.isfinite(ts)
+            or not 0 <= now - ts < SEC_COUNT_WINDOW_SECONDS
+        ):
+            return
+        minute = int(ts // 60)
+        self._buckets[minute] = self._buckets.get(minute, 0) + n
+        self._prune(now)
+
+    def total(self, now: float) -> int:
+        self._prune(now)
+        return sum(self._buckets.values())
+
+    def _prune(self, now: float) -> None:
+        oldest = int((now - SEC_COUNT_WINDOW_SECONDS) // 60)
+        newest = int(now // 60)
+        for minute in [m for m in self._buckets if m <= oldest or m > newest]:
+            del self._buckets[minute]
+
+    def clear(self) -> None:
+        self._buckets.clear()
 
 
 class SecurityCenterError(HomeAssistantError):
@@ -522,7 +582,17 @@ async def async_setup_security_center(
     center.add_entry(entry.entry_id, coordinator)
     if center.enabled:
         await center.async_activate()
+        center._stage("publish", center._publish, center._now())
+    # part 2: HTTP routes (once per HA run) and the fleet sensors
+    center._stage("http routes", _register_views, hass)
+    center._sync_entities()
     return center
+
+
+def _register_views(hass: HomeAssistant) -> None:
+    from .security_views import async_register_security_views
+
+    async_register_security_views(hass)
 
 
 async def async_release_security_center(hass: HomeAssistant, entry_id: str) -> None:
@@ -531,7 +601,16 @@ async def async_release_security_center(hass: HomeAssistant, entry_id: str) -> N
     if center is None:
         return
     center.remove_entry(entry_id)
+    try:
+        from .security_entities import async_entry_unloaded
+
+        # the fleet sensors move to another entry if this one hosted them
+        async_entry_unloaded(hass, entry_id, last=not center.entry_count)
+    except Exception as err:  # noqa: BLE001 - the unload goes on
+        center._fail("sensor release", err)
     if center.entry_count:
+        if center.syslog is not None:
+            center._stage("log senders", center._refresh_senders)
         return
     hass.data.pop(DATA_SECURITY_CENTER, None)
     center.close()
@@ -589,6 +668,14 @@ class SecurityCenter:
         self.detectors: DetectorSet = default_detectors(baseline=self.baseline)
         self.log_source = NullLogSource()
         self.deduper = Deduper()
+        # part 2: syslog receiver (None unless on and log_path "syslog")
+        self.liveness = Liveness()
+        self.syslog: SyslogReceiver | None = None
+        self._syslog_port: int | None = None
+        self._syslog_tried: float | None = None  # monotonic
+        self._fw_events = _HourCount()
+        self._auth_failures = _HourCount()
+        self.fleet_view: dict[str, Any] | None = None
         self.incidents: dict[str, dict[str, Any]] = {}
         self._by_scope: dict[str, str] = {}
         self.timeline: list[dict[str, Any]] = []
@@ -613,9 +700,12 @@ class SecurityCenter:
         self._drift_tried: float | None = None
         self._core_now: float | None = None
         self.active = False
-        # Test seams: entry id -> contract router id; drift note -> areas.
+        # Test seams: entry id -> contract router id; drift note -> areas;
+        # management address -> router id (allowlist); receiver factory.
         self.router_id_of: Callable[[str], str | None] = self._registry_router_id
         self.drift_areas_of: Callable[[DriftNote], Any] = self._async_drift_areas
+        self.senders_of: Callable[[], Mapping[str, str]] = self._registry_senders
+        self.syslog_factory: Callable[..., SyslogReceiver] = SyslogReceiver
 
     # -- properties ---------------------------------------------------------------
 
@@ -658,6 +748,31 @@ class SecurityCenter:
             return valid_router_id(api.registry.get_by_entry(entry_id).router_id)
         except Exception:  # noqa: BLE001 - unknown entry: no router id yet
             return None
+
+    def _registry_senders(self) -> dict[str, str]:
+        """Allowlist of the syslog receiver: management address -> router id.
+
+        Only routers of loaded entries whose management host is an IP
+        literal (no DNS lookup); without the core the list is empty.
+        """
+        api = self._binding.api
+        if api is None:
+            return {}
+        out: dict[str, str] = {}
+        ambiguous: set[str] = set()
+        for record in api.registry.list():
+            if record.entry_id not in self._entries:
+                continue
+            rid = valid_router_id(record.router_id)
+            address = sender_address(getattr(record.connection, "host", None))
+            if rid is None or address is None:
+                continue
+            if out.get(address, rid) != rid:
+                ambiguous.add(address)  # two routers, one address: neither
+            out[address] = rid
+        for address in ambiguous:
+            del out[address]
+        return out
 
     def _rid(self, entry_id: str) -> str | None:
         rid = self._rid_cache.get(entry_id)
@@ -882,6 +997,113 @@ class SecurityCenter:
             self._attach_engine()
         except Exception as err:  # noqa: BLE001 - runs without the engine
             self._fail("engine binding", err)
+        await self.async_sync_log_source()
+
+    # -- syslog receiver (part 2) -------------------------------------------------------
+
+    def _wants_syslog(self) -> bool:
+        return (
+            self.active
+            and not self._closed
+            and self.enabled
+            and self.settings.get("log_path") == LogPath.SYSLOG.value
+        )
+
+    async def async_sync_log_source(self) -> None:
+        """Start, keep, restart or stop the receiver to match the settings.
+
+        Binds only while the center is on and ``log_path`` is ``syslog``;
+        otherwise no socket exists. Never raises: a bind error leaves a
+        receiver that is not listening and says why.
+        """
+        try:
+            await self._async_sync_log_source()
+        except Exception as err:  # noqa: BLE001 - never fails a setup
+            self._fail("syslog receiver", err)
+
+    async def _async_sync_log_source(self) -> None:
+        want = self._wants_syslog()
+        port = self.settings.get("syslog_port", SEC_DEFAULT_SYSLOG_PORT)
+        receiver = self.syslog
+        if receiver is not None and (
+            not want or self._syslog_port != port or not receiver.listening
+        ):
+            self._stop_syslog()
+            receiver = None
+        if not want:
+            return
+        if receiver is not None:
+            self._refresh_senders()
+            return
+        receiver = self.syslog_factory(port=port, on_backlog=self._on_log_backlog)
+        self.syslog = receiver
+        self._syslog_port = port
+        self._syslog_tried = time.monotonic()
+        self.counters["syslog_starts"] += 1
+        self._refresh_senders()
+        await receiver.async_start()
+        if self.syslog is not receiver:  # stopped while binding
+            receiver.close()
+
+    def _stop_syslog(self) -> None:
+        """Take what is buffered, then close the socket (no socket stays)."""
+        receiver = self.syslog
+        self.syslog = None
+        self._syslog_port = None
+        if receiver is None:
+            return
+        try:
+            self._drain_from(receiver)
+        except Exception as err:  # noqa: BLE001 - closing goes on
+            self._fail("log drain", err)
+        receiver.close()
+
+    def _refresh_senders(self) -> None:
+        receiver = self.syslog
+        if receiver is not None:
+            receiver.set_senders(self.senders_of())
+
+    def _on_log_backlog(self) -> None:
+        """The receiver's buffer fills up: drain before the next poll."""
+        if self.active and not self._closed:
+            self._stage("log drain", self._drain_logs)
+
+    def _drain_logs(self) -> None:
+        receiver = self.syslog
+        if receiver is not None:
+            self._drain_from(receiver)
+
+    def _drain_from(self, receiver: SyslogReceiver) -> None:
+        """Receiver -> Deduper -> Liveness, detectors and the hour counts."""
+        records = receiver.drain(SEC_SYSLOG_BUFFER_MAX)
+        now = receiver.now()
+        fresh = self.deduper.filter(records, now)  # also releases held runs
+        if not fresh:
+            return
+        self.liveness.observe(fresh)
+        self.detectors.feed_records(fresh)
+        self.counters["log_records"] += len(fresh)
+        blocked = sum(
+            1
+            for r in fresh
+            if r.kind in KIND_SOURCES
+            and KIND_SOURCES[r.kind] == DataSource.FIREWALL_LOG.value
+            and r.fields.get("ts_future") is not True
+        )
+        self._fw_events.add(now, now, blocked)
+
+    def _maybe_retry_syslog(self) -> None:
+        """A receiver that could not bind is tried again now and then."""
+        receiver = self.syslog
+        if receiver is None or receiver.listening or not self._wants_syslog():
+            return
+        tried = self._syslog_tried
+        if tried is not None and time.monotonic() - tried < SEC_SYSLOG_RETRY_SECONDS:
+            return
+        self._syslog_tried = time.monotonic()
+        self.hass.async_create_task(
+            self.async_sync_log_source(), name="openwrt_router security syslog"
+        )
 
     async def _async_bind_core(self) -> None:
         from .config_api import async_get_configuration_api
@@ -961,13 +1183,20 @@ class SecurityCenter:
 
     @callback
     def deactivate(self) -> None:
-        """Stop observing and listening (data stays)."""
+        """Stop observing and listening (data stays); no socket stays bound."""
         self.active = False
+        try:
+            self._stop_syslog()
+        except Exception as err:  # noqa: BLE001 - deactivation goes on
+            self._fail("syslog stop", err)
         self._detach_engine()
         self._unbind_core()
         if self._drift_task is not None and not self._drift_task.done():
             self._drift_task.cancel()
         self._drift_task = None
+        if self.fleet_view is not None:
+            self.fleet_view = None
+            self._signal()
 
     @callback
     def close(self) -> None:
@@ -1217,8 +1446,12 @@ class SecurityCenter:
         self._stage("wifi feed", self._feed_wifi, rid, facts)
         self._stage("trust", self._observe_clients, rid, facts, now)
         self._stage("ni incidents", self._read_ni, now)
+        self._stage("log senders", self._refresh_senders)
+        self._stage("log drain", self._drain_logs)
+        self._stage("syslog retry", self._maybe_retry_syslog)
         self._stage("evaluate", self._evaluate, now)
         self._stage("housekeeping", self._housekeeping, now)
+        self._stage("publish", self._publish, now)
         if any(n.state == "pending" for n in self.drifts.values()) and (
             self._drift_tried is None
             or now - self._drift_tried >= SEC_DRIFT_RETRY_SECONDS
@@ -1269,6 +1502,17 @@ class SecurityCenter:
             return mac is None or normalize_mac(mac) not in excluded
 
         self.detectors.feed_wifi([i for i in items if wanted(i)], router_id=rid)
+        # Fleet sensor: failed Wi-Fi authentications of the fresh lines only
+        # (each line is in exactly one poll; stored events would repeat).
+        now = float(facts.now)
+        failures = sum(
+            1
+            for line in facts.wifi_lines
+            if f"{getattr(line, 'category', '')}.{getattr(line, 'kind', '')}"
+            in AUTH_FAIL_KINDS
+            and wanted(line)
+        )
+        self._auth_failures.add(now, now, failures)
 
     def _client_stability(self) -> Any:
         from .client_engine import async_get_client_engine
@@ -1360,7 +1604,7 @@ class SecurityCenter:
         out[DataSource.HOSTAPD_CLIENTS] = self._hostapd_status(rid, now, seen)
         out[DataSource.CONFIG_DRIFT] = self._drift_status(rid, now)
         for source in (DataSource.FIREWALL_LOG, DataSource.DNS_QUERY_LOG):
-            out[source] = self._path_status(source, now)
+            out[source] = self._path_status(source, now, rid)
         self._statuses[rid] = out
         return out
 
@@ -1409,14 +1653,45 @@ class SecurityCenter:
             DataSource.CONFIG_DRIFT, now=now, last_ok=now, enabled=checking
         )
 
-    def _path_status(self, source: str, now: float) -> SourceStatus:
+    def _path_status(
+        self, source: str, now: float, rid: str | None = None
+    ) -> SourceStatus:
+        """Status of a log-path source of one router (``rid``) or the fleet.
+
+        Syslog: not available while the receiver does not listen (with its
+        reason) or the router is not on the allowlist; otherwise by the
+        receive time of the newest record of that source (never "fine" by
+        silence: ``no_data_yet`` until one arrived, ``stale`` later).
+        """
         path = self.settings.get("log_path", LogPath.OFF.value)
-        if path == LogPath.SYSLOG.value:
-            reason = REASON_SYSLOG_PART2
-        elif path == LogPath.COLLECTOR.value:
-            reason = REASON_COLLECTOR
-        else:
+        if path == LogPath.COLLECTOR.value:
+            return self._not_available(source, REASON_COLLECTOR)
+        if path != LogPath.SYSLOG.value:
             return self.log_source.status(source, now=now)
+        receiver = self.syslog
+        if receiver is None and not self.active:
+            return self.log_source.status(source, now=now)  # off: "disabled"
+        if receiver is None or not receiver.listening:
+            reason = receiver.reason if receiver is not None else None
+            return self._not_available(source, reason or REASON_NOT_STARTED)
+        if rid is not None:
+            if rid not in receiver.router_ids:
+                return self._not_available(source, REASON_SENDER_UNKNOWN)
+            return self.liveness.status(rid, source, now=now)
+        times = [
+            t
+            for r in receiver.router_ids
+            if (t := self.liveness.last_ok(r, source)) is not None
+        ]
+        return source_status(
+            source,
+            now=now,
+            last_ok=max(times) if times else None,
+            stale_after_s=self.liveness.stale_after_s,
+        )
+
+    @staticmethod
+    def _not_available(source: str, reason: str) -> SourceStatus:
         return SourceStatus(
             source=source, availability=Availability.NOT_AVAILABLE, reason=reason
         )
@@ -1770,7 +2045,10 @@ class SecurityCenter:
 
     def _forget_router(self, rid: str) -> None:
         """Core ``router.forgotten``: drop every piece of that router's state."""
-        forget_router(rid, (self.detectors, self.deduper))
+        holders: list[Any] = [self.detectors, self.deduper, self.liveness]
+        if self.syslog is not None:
+            holders.append(self.syslog)
+        forget_router(rid, tuple(holders))
         for key in [k for k in self.drifts if k[0] == rid]:
             del self.drifts[key]
         for inc_id in [
@@ -1941,6 +2219,7 @@ class SecurityCenter:
         )
         self._emit_event(event, None)
         self.schedule_save()
+        self._stage("publish", self._publish, when)
 
     async def async_set_incident_status(
         self, incident_id: str, status: str, *, actor: Any, now: float | None = None
@@ -1980,6 +2259,7 @@ class SecurityCenter:
             incident_id=incident_id,
         )
         self.schedule_save()
+        self._stage("publish", self._publish, when)
         return self._incident_view(inc, admin=True, macs=None)
 
     async def async_update_settings(
@@ -2019,7 +2299,12 @@ class SecurityCenter:
         if not new["enabled"]:
             # off again (or still off): no listener, no observer stays bound
             self.deactivate()
+        else:
+            # log path or port changed: (re)bind or close the receiver
+            await self.async_sync_log_source()
+            self._stage("publish", self._publish, self._now())
         self._schedule_save_now()
+        self._sync_entities()
         return dict(self.settings)
 
     # -- overview -----------------------------------------------------------------------
@@ -2163,13 +2448,7 @@ class SecurityCenter:
             "devices": devices,
             "device_counts": self.trust.counts(when),
             "detections": self._detections(),
-            "log_path": {
-                "setting": self.settings.get("log_path"),
-                "status": [
-                    self._path_status(s, when).to_dict()
-                    for s in (DataSource.FIREWALL_LOG, DataSource.DNS_QUERY_LOG)
-                ],
-            },
+            "log_path": self._log_path_view(when),
             "subnet_map": (
                 {"state": "configured", "subnets": len(self.settings["subnet_zones"])}
                 if self.settings.get("subnet_zones")
@@ -2316,6 +2595,169 @@ class SecurityCenter:
         out["routers"] = len(statuses)
         return out
 
+    def _log_path_view(self, now: float) -> dict[str, Any]:
+        """Setting, fleet status of the log sources, receiver counters."""
+        receiver = self.syslog
+        return {
+            "setting": self.settings.get("log_path"),
+            "status": [
+                self._path_status(s, now).to_dict()
+                for s in (DataSource.FIREWALL_LOG, DataSource.DNS_QUERY_LOG)
+            ],
+            "receiver": receiver.status() if receiver is not None else None,
+            "dedup": self.deduper.stats().to_dict(),
+        }
+
+    # -- views of the HTTP routes (part 2) ------------------------------------------
+
+    async def async_viewer(self, actor: Any) -> Any:
+        """The actor for reading: verified by the core guard while on.
+
+        Plain identities need a fresh verified admin user; without the core
+        (or while off: nothing is bound then) the unverified actor is
+        returned and the output stays pseudonymised.
+        """
+        if not self.active or self._binding.api is None:
+            return actor
+        try:
+            return await self._binding.api.guard.async_verify_actor(actor)
+        except Exception as err:  # noqa: BLE001 - unverified: pseudonyms
+            _LOGGER.debug(
+                "Security Center: viewer not verified (%s)", type(err).__name__
+            )
+            return actor
+
+    def incident_detail(
+        self, incident_id: str, *, actor: Any = None, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """One own incident with its timeline entries; None if unknown."""
+        inc = self.incidents.get(incident_id)
+        if inc is None:
+            return None
+        admin = _is_admin(actor)
+        macs = self._macs_by_ref() if admin else None
+        when = self._now() if now is None else now
+        return {
+            "admin_view": admin,
+            "incident": self._incident_view(inc, admin=admin, macs=macs),
+            "timeline": [
+                self._timeline_view(t, admin=admin, macs=macs)
+                for t in reversed(self.timeline)
+                if t.get("incident_id") == incident_id
+            ][:200],
+            "now": when,
+        }
+
+    def detections_view(self, now: float | None = None) -> dict[str, Any]:
+        """Availability of every detection and of the log path (no identities)."""
+        when = self._now() if now is None else now
+        statuses = self._all_statuses(when)
+        return {
+            "enabled": self.enabled,
+            "active": self.active,
+            "detections": self._detections(),
+            "sources": {
+                rid: {s: st.to_dict() for s, st in sorted(per.items())}
+                for rid, per in statuses.items()
+            },
+            "log_path": self._log_path_view(when),
+        }
+
+    def settings_view(self, *, admin: bool) -> dict[str, Any]:
+        """Settings; for non-admins the subnet map only as a count."""
+        settings = dict(self.settings)
+        settings["thresholds"] = dict(settings.get("thresholds") or {})
+        zones = dict(settings.get("subnet_zones") or {})
+        settings["subnet_zones"] = zones if admin else {}
+        receiver = self.syslog
+        return {
+            "settings": settings,
+            "subnet_zone_count": len(zones),
+            "active": self.active,
+            "can_edit": admin,
+            "receiver": receiver.status() if receiver is not None else None,
+        }
+
+    # -- fleet sensors (part 2) -----------------------------------------------------
+
+    def _publish(self, now: float) -> None:
+        """Rebuild ``fleet_view`` and tell the sensors."""
+        self.fleet_view = self._fleet_view(now) if self.active else None
+        self._signal()
+
+    def _signal(self) -> None:
+        try:
+            from homeassistant.helpers.dispatcher import async_dispatcher_send
+
+            async_dispatcher_send(self.hass, SIGNAL_SECURITY_CENTER)
+        except Exception as err:  # noqa: BLE001 - the sensors catch up later
+            _LOGGER.debug("Security Center: no sensor update (%s)", type(err).__name__)
+
+    def _sync_entities(self) -> None:
+        """Create or remove the fleet sensors to match ``enabled``."""
+        try:
+            from .security_entities import async_sync_security_entities
+
+            async_sync_security_entities(self.hass)
+        except Exception as err:  # noqa: BLE001 - never fails a setup or action
+            self._fail("sensor sync", err)
+
+    def _fleet_view(self, now: float) -> dict[str, Any] | None:
+        """Counts for the fleet sensors; None (unknown) before any router.
+
+        A count whose source no router delivers is None, never 0: no data
+        is not "nothing happened".
+        """
+        statuses = self._statuses or self._all_statuses(now)
+        if not statuses:
+            return None
+
+        def delivered(*sources: str) -> bool:
+            return any(
+                st.usable
+                for per in statuses.values()
+                for s, st in per.items()
+                if s in sources
+            )
+
+        flat = self._flat(statuses)
+        score = self._score(now, statuses, flat)
+        active = [i for i in self.incidents.values() if i["status"] in _ACTIVE_STATUSES]
+        counts = self.trust.counts(now)
+        unknown = sum(
+            counts.get(s.value, 0)
+            for s in (TrustState.NEW, TrustState.UNRECOGNIZED, TrustState.SUSPICIOUS)
+        )
+        return {
+            "score": score["score"],
+            "score_cap": score.get("cap"),
+            "score_reason": score.get("reason"),
+            "coverage": score["coverage"],
+            "routers": len(statuses),
+            "missing": sorted(
+                s
+                for s, st in flat.items()
+                if st.availability is Availability.NOT_AVAILABLE
+            ),
+            "stale": sorted(
+                s for s, st in flat.items() if st.availability is Availability.STALE
+            ),
+            "hints_active": len(active),
+            "hints_critical": sum(
+                1 for i in active if i["severity"] == Severity.CRITICAL.value
+            ),
+            "unknown_devices": unknown
+            if delivered(DataSource.HOSTAPD_CLIENTS, DataSource.CLIENT_HISTORY)
+            else None,
+            "device_counts": counts,
+            "firewall_events_1h": self._fw_events.total(self.syslog.now())
+            if self.syslog is not None and delivered(DataSource.FIREWALL_LOG)
+            else None,
+            "wifi_auth_failures_1h": self._auth_failures.total(now)
+            if delivered(DataSource.WIFI_EVENTS)
+            else None,
+        }
+
     def diagnostics(self) -> dict[str, Any]:
         """Counts only (no identities)."""
         return {
@@ -2338,6 +2780,22 @@ class SecurityCenter:
             "events_registered": self._binding.events_ok,
             "last_save_bytes": self.last_save_bytes,
             "counters": dict(self.counters),
+            "log_path": self.settings.get("log_path"),
+            "syslog": (
+                {
+                    k: v
+                    for k, v in self.syslog.status().items()
+                    if k in ("listening", "reason", "port", "senders", "buffered")
+                }
+                | {
+                    "stats": self.syslog.stats().to_dict(),
+                    "footprint": self.syslog.footprint(),
+                }
+                if self.syslog is not None
+                else None
+            ),
+            "dedup": self.deduper.stats().to_dict() | self.deduper.footprint(),
+            "fleet_view": self.fleet_view is not None,
         }
 
 

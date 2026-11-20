@@ -771,7 +771,7 @@ SEC_STORE_VERSION = 1
 SEC_STORE_MINOR_VERSION = 1
 SEC_STORE_MAX_BYTES = 512 * 1024
 SEC_SAVE_DELAY_SECONDS = 60
-# Port of the later syslog receiver (part 2); only stored and validated here.
+# Default UDP port of the syslog receiver (security_syslog.py, part 2).
 SEC_DEFAULT_SYSLOG_PORT = 5514
 # Own incidents (sec_*): at most this many, resolved ones are dropped first.
 SEC_INCIDENT_CAP = 100
@@ -790,3 +790,36 @@ SEC_DRIFT_RETRY_SECONDS = 60
 SEC_DRIFT_HINT_WINDOW_SECONDS = 3600
 DATA_SECURITY_CENTER = f"{DOMAIN}_security_center"
 # --- end Security Center
+# --- Security Center part 2 ---
+# Release 1.46.0 part 2: syslog receiver (path A), HTTP routes, fleet
+# sensors. Syslog lines are foreign, forgeable input (UDP from the LAN):
+# every limit below drops and counts, nothing is buffered without a cap.
+# The receiver listens on all IPv4 addresses (routers send to HA's LAN IP);
+# only senders whose address is a router's management address are taken.
+SEC_SYSLOG_BIND_HOST = "0.0.0.0"
+# Records waiting for the center; more are dropped (``dropped_buffer``).
+SEC_SYSLOG_BUFFER_MAX = 4000
+# Buffered records that make the center drain before the next poll.
+SEC_SYSLOG_DRAIN_AT = 500
+# Token buckets (lines per second, burst): per sender and in total.
+SEC_SYSLOG_SENDER_RATE = 50.0
+SEC_SYSLOG_SENDER_BURST = 500
+SEC_SYSLOG_TOTAL_RATE = 200.0
+SEC_SYSLOG_TOTAL_BURST = 2000
+# A receiver that could not listen is tried again at most this often.
+SEC_SYSLOG_RETRY_SECONDS = 300
+# Window of the "last hour" counters of the fleet sensors.
+SEC_COUNT_WINDOW_SECONDS = 3600
+SIGNAL_SECURITY_CENTER = f"{DOMAIN}_security_center_updated"
+DATA_SECURITY_VIEWS_BOUND = f"{DOMAIN}_security_views_bound"
+DATA_SECURITY_ENTITIES = f"{DOMAIN}_security_entities"
+UID_FLEET_SECURITY_SCORE = f"{FLEET_UID_PREFIX}security_score"
+UID_FLEET_SECURITY_HINTS_ACTIVE = f"{FLEET_UID_PREFIX}security_hints_active"
+UID_FLEET_SECURITY_HINTS_CRITICAL = f"{FLEET_UID_PREFIX}security_hints_critical"
+UID_FLEET_SECURITY_UNKNOWN_DEVICES = f"{FLEET_UID_PREFIX}security_unknown_devices"
+UID_FLEET_SECURITY_FIREWALL_EVENTS = f"{FLEET_UID_PREFIX}security_firewall_events_1h"
+UID_FLEET_SECURITY_WIFI_AUTH_FAILURES = (
+    f"{FLEET_UID_PREFIX}security_wifi_auth_failures_1h"
+)
+UID_FLEET_SECURITY_COVERAGE = f"{FLEET_UID_PREFIX}security_coverage"
+# --- end Security Center part 2

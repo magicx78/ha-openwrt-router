@@ -40,6 +40,7 @@ from custom_components.openwrt_router import (
     net_engine,
     net_query,
     security_center,
+    security_syslog,
 )
 from custom_components.openwrt_router.const import (
     CONFIG_BACKUP_SCHEDULE_OFF,
@@ -673,7 +674,8 @@ async def test_log_paths_report_why_they_are_not_available(disks) -> None:
     center = await center_for(hass, "r1")
     for path, reason in (
         ("off", "disabled"),
-        ("syslog", security_center.REASON_SYSLOG_PART2),
+        # settings set directly: no receiver was started (part 2 binds it)
+        ("syslog", security_syslog.REASON_NOT_STARTED),
         ("collector", security_center.REASON_COLLECTOR),
     ):
         center.settings = merge_settings(center.settings, {"log_path": path})

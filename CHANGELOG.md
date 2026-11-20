@@ -36,6 +36,36 @@ All notable changes to the OpenWrt Router integration will be documented in this
   Klartext nur für Administratoren, sonst Pseudonyme. Syslog- und Collector-Weg melden in
   Teil 1 „nicht verfügbar“ mit Grund.
 
+### Hinzugefügt (1.46.0, Teil 2: Syslog-Empfänger, HTTP-Routen, Flotten-Sensoren, Diagnose)
+
+- **Syslog-Empfänger (`security_syslog.py`):** lokaler UDP-Listener (Standardport 5514) für
+  das Remote-Log der Router (`logd` `log_ip`/`log_port`). Er bindet **nur**, wenn das Center
+  an ist und der Log-Weg `syslog` gewählt ist; sonst gibt es keinen Socket. Absender nur aus
+  der Router-Registry (IP-Literale der Verwaltungsadressen, keine DNS-Auflösung, mehrdeutige
+  Adressen ausgeschlossen); fremde Absender werden verworfen und gezählt. Zeilen über 2048 Byte
+  werden abgeschnitten, Token-Buckets je Absender und gesamt sowie ein Puffer mit höchstens
+  4000 Einträgen begrenzen Speicher und CPU (alles gezählt). Zeilen erscheinen nie oberhalb
+  von DEBUG im Log und werden nie ungefiltert gespeichert. Ein Bind-Fehler (Port belegt,
+  keine Berechtigung) macht die Quelle „nicht verfügbar“ mit Grund, das Setup läuft weiter;
+  ein neuer Versuch alle 5 min aus dem Poll. Ein Wechsel des Log-Wegs schließt den Socket;
+  erneut gesendete Zeilen filtert der gemeinsame Deduper. Grenze: UDP-Absender sind im LAN
+  fälschbar, die Liste filtert Rauschen, sie authentifiziert keinen Router.
+- **HTTP-Routen (`security_views.py`)** unter `/api/openwrt_topology/security`, alle mit
+  Anmeldung: Übersicht (mit Filtern), Hinweis-Details, Verfügbarkeit der Erkennungen und
+  Einstellungen lesen (Administratoren; andere Benutzer nur bei für alle geöffnetem Panel,
+  dann mit Pseudonymen und der Subnetz-Zuordnung nur als Anzahl); Einstellungen ändern
+  (hier wird das Center eingeschaltet), Gerät bestätigen oder benennen und Hinweis-Status
+  setzen nur für Administratoren. Strenge Prüfung von Query und Body (bekannte Schlüssel,
+  Typen, Bereiche, höchstens 4 KiB, zu tief verschachteltes JSON ist 400); Fehler tragen nur
+  eine feste Meldung, einen Code und höchstens Feldname und Grund.
+- **Flotten-Sensoren (`security_entities.py`):** Sicherheitswert, aktive und kritische
+  Sicherheitshinweise, unbestätigte Geräte, Firewall-Protokolleinträge und WLAN-Anmeldefehler
+  der letzten Stunde, Abdeckung der Erkennung. Werte nur aus dem Center (keine Router-Aufrufe,
+  per Signal aktualisiert); ohne liefernde Quelle `None` (unbekannt), nie 0. Die Sensoren gibt
+  es nur bei eingeschaltetem Center; Ausschalten entfernt sie aus der Entity-Registry.
+- **Diagnose:** neuer Block `security_center` am Ende (nur Zähler, Zustände und Gründe;
+  maskiert und geschwärzt, keine MAC, Adresse, Hostname, Benutzer-ID oder Schlüssel).
+
 ## [1.45.0] - 2026-11-19
 
 Configuration Manager: Konfigurations-Backup für OpenWrt-Router in Home Assistant, auf dem
