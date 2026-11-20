@@ -18,6 +18,7 @@ import {
   detectionNotes,
   detectionTitle,
   detectionTone,
+  fleetText,
   formatRelativeTs,
   formatTs,
   label,
@@ -29,12 +30,15 @@ import {
 import { ErrorBox, Fact, Notice, SectionBox, Skeleton, ToneBadge, Unknown, useResource } from './securityUi';
 
 function SourceLine({ s, now }: { s: SourceStatus; now: number }) {
+  // Fleet status of the log path: the same "von N von M Routern" as the coverage list.
+  const fleet = fleetText(s.fleet);
   return (
     <li className="sec-source">
       <span className="sec-source__name">{sourceName(s.source)}</span>
       <ToneBadge tone={SOURCE_AVAILABILITY_TONE[s.availability] ?? 'muted'}>
         {SOURCE_AVAILABILITY_LABEL[s.availability] ?? 'Unbekannt'}
       </ToneBadge>
+      {fleet && <span className="cfg-hint">{fleet}</span>}
       {s.reason && s.reason !== 'ok' && <span className="cfg-hint">{reasonText([s.reason])}</span>}
       {s.lastOk !== null && <span className="cfg-hint" title={formatTs(s.lastOk)}>zuletzt Daten {formatRelativeTs(s.lastOk, now)}</span>}
     </li>

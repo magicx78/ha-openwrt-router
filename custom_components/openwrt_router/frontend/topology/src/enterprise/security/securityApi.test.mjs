@@ -194,6 +194,17 @@ test('mock scenario default: score, coverage, findings, devices and detections p
   assert.equal(detail.timeline.length, 2);
 });
 
+test('cov mock: the log path and the coverage list carry the same fleet counts', async () => {
+  const api = createMockSecurityApi('default');
+  const o = await api.overview();
+  const d = await api.detections();
+  for (const s of o.logPath.status) {
+    assert.deepEqual(s.fleet, o.coverage.fleet[s.source], s.source);
+  }
+  assert.deepEqual(d.logPath.status.map(s => s.fleet), o.logPath.status.map(s => s.fleet));
+  assert.equal(o.coverage.fleet['security.center.firewall_log'].routers, 2);
+});
+
 test('mock scenario empty: no rating possible and nothing counted as healthy', async () => {
   const o = await createMockSecurityApi('empty').overview();
   assert.equal(o.score.score, null);

@@ -4,6 +4,25 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+### Behoben
+
+- **Security Center: Die Abdeckung sinkt nicht mehr, wenn eine Quelle dazukommt.** Lieferte
+  das Gateway Firewall-Zeilen, fiel die Abdeckung von 71 auf 65 % und der Deckel des
+  Sicherheitswerts von 86 auf 82. Zwei Ursachen, beide behoben:
+  - Firewall-Log und DNS-Log sind **Flotten-Quellen**: Sie gelten als verfügbar, sobald ein
+    Router wirklich Zeilen geliefert hat (nicht bloß eingetragen). Bisher zählte der
+    schlechteste Zustand aller Router, und Access Points liefern diese Zeilen nie. Übersicht
+    und Log-Pfad-Ansicht sagen jetzt „von N von M Routern“ (`coverage.fleet`,
+    `log_path.status[].routers_delivering/routers/rate_limited`) und zeigen dieselben Zahlen.
+    Ein ratenbegrenzter Lieferant bleibt „eingeschränkt“ (`rate_limited`). Alle anderen Quellen
+    behalten die Regel „schlechtester Zustand“.
+  - Einschränkungen senken die Abdeckung **monoton**: Der Abzug eines Faktors entfällt, solange
+    eine seiner erwarteten Quellen flottenweit fehlt (sie ist schon als fehlende Quelle
+    gezählt), und alle Abzüge zusammen bleiben unter einem halben Quellenanteil
+    (`LIMITATION_SHARE_CAP`). Im beobachteten Fall steigt die Abdeckung jetzt auf 79 %, der
+    Deckel auf 90.
+- Doku: Die Abdeckung ist der Anteil der erwarteten **Datenquellen**, nicht der Erkennungen.
+
 ## [1.46.0] - 2026-11-20
 
 Security Center: eine Beobachtungsschicht für das Netz auf dem Enterprise Core von 1.44.0 und

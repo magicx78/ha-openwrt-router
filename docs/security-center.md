@@ -193,7 +193,7 @@ Ein lokaler UDP-Listener, eine Zeile je Datagramm. Er sendet nichts und ruft kei
 | Adresse und Port | `0.0.0.0` (alle IPv4-Adressen), UDP-Port 5514 (einstellbar 1024 bis 65535). Kein IPv6. |
 | Absenderliste | Nur Absender, deren Adresse die Verwaltungsadresse eines Routers aus der Router-Registry ist (IP-Literale, **keine DNS-Auflösung**). Ist eine Adresse zwei Routern zugeordnet, gilt sie für keinen. Alles andere wird verworfen und gezählt. Die Router-Zuordnung kommt von der Liste, nie vom HOST-Feld der Zeile. |
 | Zeilenlänge | höchstens 2048 Byte; länger wird abgeschnitten und gezählt. |
-| Raten | Token-Bucket je Absender (50 Zeilen/s, Spitze 500) und gesamt (200 Zeilen/s, Spitze 2000); mehr wird verworfen und gezählt. Verliert ein Router Zeilen an eine Rate oder den vollen Puffer, gelten seine Firewall- und DNS-Erkennungen 5 Minuten nach der letzten verworfenen Zeile als **eingeschränkt** (`rate_limited`); der Sicherheitswert bekommt dieselbe Einschränkung und die Abdeckung sinkt. |
+| Raten | Token-Bucket je Absender (50 Zeilen/s, Spitze 500) und gesamt (200 Zeilen/s, Spitze 2000); mehr wird verworfen und gezählt. Verliert ein Router Zeilen an eine Rate oder den vollen Puffer, gelten seine Firewall- und DNS-Erkennungen 5 Minuten nach der letzten verworfenen Zeile als **eingeschränkt** (`rate_limited`); der Sicherheitswert bekommt dieselbe Einschränkung, und die Abdeckung sinkt, solange die übrigen Quellen des Faktors liefern (Regel in [Abschnitt 8](#8-flotten-sensoren)). |
 | Puffer | höchstens 4000 Zeilen; ein voller Puffer verwirft die neuesten und zählt. Ab 500 gepufferten Zeilen wird vor dem nächsten Poll ausgewertet. |
 | Zeit | Die Zeit einer Zeile ist ihre **Empfangszeit**; der Zeitzonen-Versatz des Routers wird nicht gelernt. Eine Zeile mit einer Zeit weit in der Zukunft bekommt die Empfangszeit und verschiebt nichts. |
 | Doppelte Zeilen | Ein gemeinsamer Deduper filtert erneut gesendete Zeilen; Marken bleiben über Wechsel des Log-Wegs erhalten. |
@@ -346,13 +346,39 @@ Router-Aufrufe) und werden per Signal aktualisiert.
 | Unconfirmed devices (all routers) | Geräte, die nicht bestätigt sind (neu, unbekannt, auffällig) |
 | Firewall log entries, last hour (all routers) | blockierte Firewall-Protokollzeilen der letzten Stunde |
 | Wi-Fi authentication failures, last hour (all routers) | WLAN-Anmeldefehler der letzten Stunde |
-| Security detection coverage (all routers) | Anteil der Erkennungen mit liefernder Quelle, in Prozent |
+| Security detection coverage (all routers) | Anteil der erwarteten **Datenquellen**, die liefern, in Prozent (nicht der Anteil der Erkennungen) |
 
 Liefert keine Quelle Daten, ist der Wert `None` (unbekannt), **nie 0**: keine Daten heißen nicht
 „nichts passiert“. Ohne Quelle bleibt auch der Sicherheitswert unbekannt und wird nie als
 „gesund“ gezeigt. Das gilt auch für die beiden Hinweis-Zähler: ohne eine nutzbare Quelle sind
 aktive und kritische Hinweise `None`, nicht 0. Die beiden Stundenzähler liegen nur im Speicher
 und beginnen nach einem Neustart von Home Assistant bei null.
+
+**So entsteht die Abdeckung (ab 1.46.2):**
+
+- Sie ist der Anteil der sieben erwarteten Datenquellen (Vorfälle der Netzwerk-Intelligenz,
+  WLAN-Ereignisse, WLAN-Clients, Geräteverlauf, Konfigurationsabweichungen, Firewall-Log,
+  DNS-Log), die flottenweit liefern, abgerundet auf ganze Prozent. Eine Quelle zählt je
+  Quelle, nicht je Erkennung.
+- **Flotten-Quellen:** Firewall-Log und DNS-Log schreibt nur das Gateway; Access Points liefern
+  sie nie. Diese beiden Quellen gelten deshalb als verfügbar, sobald **ein** Router wirklich
+  Zeilen dieser Quelle geliefert hat (bloß eingetragen oder still reicht nicht). Panel und
+  Übersicht sagen dazu ehrlich „von N von M Routern“ (`coverage.fleet` und die Felder
+  `routers_delivering`, `routers`, `rate_limited` in `log_path.status`); Abdeckungsliste und
+  Log-Pfad-Ansicht nutzen dieselbe Regel und zeigen dieselben Zahlen. Verliert ein liefernder
+  Router Zeilen an die Ratenbegrenzung, bleibt die Quelle verfügbar, trägt aber den Grund
+  `rate_limited` und gilt als **eingeschränkt**.
+- Alle anderen Quellen gelten nur als verfügbar, wenn **jeder** geladene Router sie liefert
+  (schlechtester Zustand zählt).
+- **Einschränkungen** (zum Beispiel `dest_zone_unknown`, `rate_limited`) senken die Abdeckung um
+  den halben Gewichtsanteil des betroffenen Faktors, aber monoton: Der Abzug eines Faktors entfällt,
+  solange eine seiner erwarteten Quellen flottenweit nicht nutzbar ist (diese Lücke ist schon
+  als fehlende Quelle gezählt), und alle Abzüge zusammen bleiben unter einem halben
+  Quellenanteil (`LIMITATION_SHARE_CAP`, bei sieben Quellen höchstens 7,14 Punkte). Kommt eine
+  Quelle hinzu, auch mit einer Einschränkung, sinken Abdeckung und Deckel des Sicherheitswerts
+  deshalb nie.
+- Der Deckel des Sicherheitswerts folgt der Abdeckung: unter 100 % Abdeckung höchstens
+  `50 + Abdeckung / 2` (gerundet, höchstens 99).
 
 **Nicht bereit:** Solange der Core keinen Modulschlüssel liefert, zeichnet das Center keine
 Hinweise auf ([Abschnitt 9](#9-datenschutz)). Dann sind **alle sieben Sensoren unbekannt**

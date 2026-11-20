@@ -21,6 +21,7 @@ import type {
   DetectionsView,
   Device,
   DeviceCounts,
+  FleetSource,
   Incident,
   IncidentDetail,
   IncidentStatus,
@@ -426,7 +427,28 @@ function parseCoverage(v: unknown): Coverage {
     available: strList(o.available),
     stale: strList(o.stale),
     missing: strList(o.missing),
+    fleet: parseFleetMap(o.fleet),
   };
+}
+
+/** N of M of a fleet source; null if neither count was sent (unknown). */
+function parseFleet(o: Obj): FleetSource | null {
+  const fleet = {
+    routersDelivering: num(o.routers_delivering),
+    routers: num(o.routers),
+    rateLimited: num(o.rate_limited),
+  };
+  return fleet.routersDelivering === null && fleet.routers === null ? null : fleet;
+}
+
+function parseFleetMap(v: unknown): Record<string, FleetSource> {
+  const out: Record<string, FleetSource> = {};
+  for (const [source, raw] of Object.entries(obj(v) ?? {})) {
+    const o = obj(raw);
+    const fleet = o ? parseFleet(o) : null;
+    if (source && fleet) out[source] = fleet;
+  }
+  return out;
 }
 
 export function parseIncident(v: unknown): Incident | null {
@@ -532,6 +554,7 @@ function parseSourceStatus(o: Obj): SourceStatus | null {
     availability: str(o.availability) ?? 'unknown',
     reason: str(o.reason),
     lastOk: num(o.last_ok),
+    fleet: parseFleet(o),
   };
 }
 
@@ -738,6 +761,28 @@ export function rateLimitedText(routers: number | null): string | null {
   const who = routers === 1 ? 'einem Router' : `${fmt(routers)} Routern`;
   return `Von ${who} wurden Logzeilen wegen der Ratenbegrenzung verworfen. Firewall- und DNS-Erkennungen sind `
     + 'bis 5 Minuten nach der letzten verworfenen Zeile eingeschränkt.';
+}
+
+/**
+ * "von N von M Routern" of a fleet source (firewall / DNS log, 1.46.2), plus
+ * "eingeschränkt" while a delivering router loses lines to the rate limit.
+ * null when the counts are unknown: never guessed.
+ */
+export function fleetText(f: FleetSource | null | undefined): string | null {
+  if (!f || f.routers === null || f.routersDelivering === null || f.routers <= 0) return null;
+  const m = f.routers === 1 ? '1 Router' : `${fmt(f.routers)} Routern`;
+  const n = f.routersDelivering <= 0
+    ? (f.routers === 1 ? 'von keinem Router' : `von keinem der ${fmt(f.routers)} Router`)
+    : `von ${fmt(f.routersDelivering)} von ${m}`;
+  if (f.rateLimited !== null && f.rateLimited > 0) {
+    return `${n}, eingeschränkt: Ratenbegrenzung bei ${f.rateLimited === 1 ? 'einem Router' : `${fmt(f.rateLimited)} Routern`}`;
+  }
+  return n;
+}
+
+/** Fleet text of one source of the coverage list (null for other sources). */
+export function coverageFleetText(coverage: Coverage, source: string): string | null {
+  return fleetText(coverage.fleet[source]);
 }
 
 function fmt(n: number): string {

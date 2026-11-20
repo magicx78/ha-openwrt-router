@@ -148,10 +148,19 @@ function build(scenario: string) {
     },
   };
 
+  // Fleet sources (1.46.2): N of M routers, the same numbers in the log path and the coverage list.
+  const fleet = (): Json => ({
+    'security.center.dns_query_log': { routers_delivering: 0, routers: empty ? 0 : 2, rate_limited: 0 },
+    'security.center.firewall_log': { routers_delivering: 0, routers: empty ? 0 : 2, rate_limited: 0 },
+  });
   const logPath = (): Json => ({
     setting: settings.log_path,
-    status: [src('security.center.firewall_log', 'not_available', settings.log_path === 'syslog' ? 'no_data_yet' : 'disabled', null),
-      src('security.center.dns_query_log', 'not_available', settings.log_path === 'syslog' ? 'no_data_yet' : 'disabled', null)],
+    status: [
+      { ...src('security.center.firewall_log', 'not_available', settings.log_path === 'syslog' ? 'no_data_yet' : 'disabled', null),
+        ...(fleet()['security.center.firewall_log'] as Json) },
+      { ...src('security.center.dns_query_log', 'not_available', settings.log_path === 'syslog' ? 'no_data_yet' : 'disabled', null),
+        ...(fleet()['security.center.dns_query_log'] as Json) },
+    ],
     receiver: settings.log_path === 'syslog' ? { listening: true, reason: null, port: settings.syslog_port, senders: 1 } : null,
     rate_limited_routers: 0,
   });
@@ -174,8 +183,8 @@ function build(scenario: string) {
         ],
       },
     coverage: empty
-      ? { value: 0, available: [], stale: [], missing: ['security.center.wifi_events', 'data.hostapd_clients', 'config.drift', 'security.center.firewall_log', 'security.center.dns_query_log'] }
-      : { value: 57, available: ['security.center.wifi_events', 'data.hostapd_clients', 'config.drift'], stale: ['security.center.client_history'], missing: ['security.center.firewall_log', 'security.center.dns_query_log'] },
+      ? { value: 0, available: [], stale: [], missing: ['security.center.wifi_events', 'data.hostapd_clients', 'config.drift', 'security.center.firewall_log', 'security.center.dns_query_log'], fleet: fleet() }
+      : { value: 57, available: ['security.center.wifi_events', 'data.hostapd_clients', 'config.drift'], stale: ['security.center.client_history'], missing: ['security.center.firewall_log', 'security.center.dns_query_log'], fleet: fleet() },
     incidents: incidents.map(i => admin ? { ...i, client: i.client_ref ? '02:00:00:00:00:02' : null, client_name: null } : { ...i }),
     timeline,
     devices: devices.map(view),

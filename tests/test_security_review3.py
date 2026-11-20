@@ -427,7 +427,10 @@ async def test_review3_8_rate_limited_log_lines_limit_the_detections(
     assert det["availability"] == "limited"
     assert "rate_limited" in det["reason"] and "rate_limited" in det["limitations"]
     assert "rate_limited" in activity(busy)["limitations"]
-    assert busy["coverage"]["value"] < calm["coverage"]["value"]
+    # 1.46.2: no extra deduction while the factor's DNS source is missing
+    # fleet-wide (the gap is counted once); the drop with all sources is
+    # in test_cov_ratelimit_supplier_stays_limited
+    assert busy["coverage"]["value"] <= calm["coverage"]["value"]
     assert busy["log_path"]["rate_limited_routers"] == 1
     view = center.detections_view(now=NOV18 + 1)
     assert fw_detection(view)["availability"] == "limited"

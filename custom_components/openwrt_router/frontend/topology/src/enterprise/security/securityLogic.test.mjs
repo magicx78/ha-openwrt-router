@@ -12,6 +12,7 @@ import {
   SecurityApiError,
   TIMELINE_KIND_LABEL,
   buildSettingsUpdate,
+  coverageFleetText,
   detectionNotes,
   detectorSource,
   devicesObserved,
@@ -20,6 +21,7 @@ import {
   factorText,
   filtersAreDefault,
   flaggedDeviceCount,
+  fleetText,
   formatRelativeTs,
   formatTs,
   incidentCounts,
@@ -514,4 +516,50 @@ test('review3 panel: 409 not_ready and the guard refusal (403) get their own und
 test('review3 panel: from_logs is a strict flag on incidents', () => {
   const o = parseOverview({ incidents: [{ id: 'sec_1', from_logs: true }, { id: 'sec_2', from_logs: 'yes' }, { id: 'sec_3' }] });
   assert.deepEqual(o.incidents.map(i => i.fromLogs), [true, false, false]);
+});
+
+test('cov panel: fleet sources say "von N von M Routern"; unknown stays unknown', () => {
+  assert.equal(fleetText({ routersDelivering: 1, routers: 2, rateLimited: 0 }), 'von 1 von 2 Routern');
+  assert.equal(fleetText({ routersDelivering: 1, routers: 1, rateLimited: 0 }), 'von 1 von 1 Router');
+  assert.equal(fleetText({ routersDelivering: 0, routers: 2, rateLimited: 0 }), 'von keinem der 2 Router');
+  assert.equal(fleetText({ routersDelivering: 0, routers: 1, rateLimited: null }), 'von keinem Router');
+  // a rate-limited supplier stays "eingeschränkt"
+  assert.match(fleetText({ routersDelivering: 1, routers: 2, rateLimited: 1 }), /^von 1 von 2 Routern, eingeschränkt/);
+  // unknown counts are never guessed
+  assert.equal(fleetText({ routersDelivering: null, routers: 2, rateLimited: 0 }), null);
+  assert.equal(fleetText({ routersDelivering: 1, routers: 0, rateLimited: 0 }), null);
+  assert.equal(fleetText(null), null);
+  assert.equal(fleetText(undefined), null);
+  const o = parseOverview({ coverage: { fleet: { a: { routers_delivering: 'x', routers: 'y' }, b: 3 } } });
+  assert.deepEqual(o.coverage.fleet, {});
+  assert.deepEqual(parseOverview({}).coverage.fleet, {});
+});
+
+test('cov panel: the log path view and the coverage list show the same N of M', () => {
+  const FW = 'security.center.firewall_log';
+  const DNS = 'security.center.dns_query_log';
+  const o = parseOverview({
+    coverage: {
+      value: 85, available: [FW], stale: [], missing: [DNS],
+      fleet: {
+        [FW]: { routers_delivering: 1, routers: 2, rate_limited: 0 },
+        [DNS]: { routers_delivering: 0, routers: 2, rate_limited: 0 },
+      },
+    },
+    log_path: {
+      setting: 'syslog', receiver: null, rate_limited_routers: 0,
+      status: [
+        { source: FW, availability: 'available', reason: 'ok', last_ok: 1, routers_delivering: 1, routers: 2, rate_limited: 0 },
+        { source: DNS, availability: 'not_available', reason: 'no_data_yet', last_ok: null, routers_delivering: 0, routers: 2, rate_limited: 0 },
+      ],
+    },
+  });
+  for (const s of o.logPath.status) {
+    assert.equal(fleetText(s.fleet), coverageFleetText(o.coverage, s.source), s.source);
+  }
+  assert.equal(coverageFleetText(o.coverage, FW), 'von 1 von 2 Routern');
+  assert.equal(coverageFleetText(o.coverage, 'config.drift'), null); // worst-status sources: no N of M
+  // per-router statuses carry no fleet counts
+  const d = parseDetectionsView({ sources: { r1: { [FW]: { source: FW, availability: 'not_available', reason: 'sender_unknown' } } } });
+  assert.equal(d.sources.r1[0].fleet, null);
 });

@@ -47,7 +47,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -189,6 +189,9 @@ SEC_OTHER_INCIDENT_QUOTA = 50
 LOG_DATA_SOURCES: frozenset[str] = frozenset(
     {DataSource.FIREWALL_LOG.value, DataSource.DNS_QUERY_LOG.value}
 )
+# Fleet sources (1.46.2): available once ONE router delivers lines; only the
+# gateway logs firewall and DNS traffic, access points never do.
+FLEET_SOURCES: frozenset[str] = LOG_DATA_SOURCES
 _LOG_CATEGORIES = frozenset({"firewall", "dns"})  # stores before review 3
 TEXT_LOG_QUOTA = (
     "Obergrenze für Hinweise aus Logzeilen erreicht: neue Hinweise aus "
@@ -1898,7 +1901,14 @@ class SecurityCenter:
 
     @staticmethod
     def _flat(statuses: Mapping[str, Mapping[str, SourceStatus]]) -> dict[str, Any]:
-        """Worst status of every source over all routers (for the score)."""
+        """Fleet status of every source (for the score and the coverage).
+
+        The worst status over all routers, except for the fleet sources
+        (firewall and DNS log, 1.46.2): they sit at the gateway and access
+        points never deliver them, so the best status counts. A router
+        counts as delivering only after lines of that source arrived
+        (``Liveness``: never "available" by configuration or silence).
+        """
         rank = {
             Availability.AVAILABLE: 0,
             Availability.STALE: 1,
@@ -1908,8 +1918,52 @@ class SecurityCenter:
         for per_router in statuses.values():
             for source, status in per_router.items():
                 old = out.get(source)
-                if old is None or rank[status.availability] > rank[old.availability]:
+                if old is None:
                     out[source] = status
+                    continue
+                new, cur = rank[status.availability], rank[old.availability]
+                if new < cur if source in FLEET_SOURCES else new > cur:
+                    out[source] = status
+        return out
+
+    def _fleet_flat(
+        self, statuses: Mapping[str, Mapping[str, SourceStatus]]
+    ) -> dict[str, Any]:
+        """``_flat`` plus "limited": a rate-limited supplier of a fleet source.
+
+        Lines are being lost there, so the source stays available but says
+        ``rate_limited`` (review 3, #8; 1.46.2).
+        """
+        flat = self._flat(statuses)
+        limited = self._log_limited_routers()
+        for source in FLEET_SOURCES:
+            status = flat.get(source)
+            if status is None or not status.usable:
+                continue
+            if any(
+                rid in limited and (st := per.get(source)) is not None and st.usable
+                for rid, per in statuses.items()
+            ):
+                flat[source] = replace(status, reason=REASON_RATE_LIMITED)
+        return flat
+
+    def _fleet_sources(
+        self, statuses: Mapping[str, Mapping[str, SourceStatus]]
+    ) -> dict[str, dict[str, int]]:
+        """Of how many current routers each fleet source comes (N of M)."""
+        limited = self._log_limited_routers()
+        out: dict[str, dict[str, int]] = {}
+        for source in sorted(FLEET_SOURCES):
+            delivering = {
+                rid
+                for rid, per in statuses.items()
+                if (st := per.get(source)) is not None and st.usable
+            }
+            out[source] = {
+                "routers_delivering": len(delivering),
+                "routers": len(statuses),
+                "rate_limited": len(delivering & limited),
+            }
         return out
 
     # -- evaluation -------------------------------------------------------------------------
@@ -2781,7 +2835,7 @@ class SecurityCenter:
         admin = _is_admin(actor)
         when = self._now() if now is None else now
         statuses = self._all_statuses(when)
-        flat = self._flat(statuses)
+        flat = self._fleet_flat(statuses)
         macs = self._macs_by_ref() if admin else None
         ref = self._client_filter(client, admin)
         min_rank = _severity(severity).rank if severity else None
@@ -2844,13 +2898,15 @@ class SecurityCenter:
                     for s, st in flat.items()
                     if st.availability is Availability.NOT_AVAILABLE
                 ),
+                # fleet sources (1.46.2): from how many current routers
+                "fleet": self._fleet_sources(statuses),
             },
             "incidents": incidents,
             "timeline": timeline,
             "devices": devices,
             "device_counts": self.trust.counts(when),
             "detections": self._detections(),
-            "log_path": self._log_path_view(when),
+            "log_path": self._log_path_view(when, statuses),
             "subnet_map": (
                 {"state": "configured", "subnets": len(self.settings["subnet_zones"])}
                 if self.settings.get("subnet_zones")
@@ -3052,15 +3108,28 @@ class SecurityCenter:
         out["routers"] = len(statuses)
         return out
 
-    def _log_path_view(self, now: float) -> dict[str, Any]:
-        """Setting, fleet status of the log sources, receiver counters."""
+    def _log_path_view(
+        self,
+        now: float,
+        statuses: Mapping[str, Mapping[str, SourceStatus]] | None = None,
+    ) -> dict[str, Any]:
+        """Setting, fleet status of the log sources, receiver counters.
+
+        The status comes from the same fleet rule as the coverage list
+        (``_fleet_flat``, 1.46.2), with "N of M routers" beside it, so both
+        views always agree.
+        """
         receiver = self.syslog
+        statuses = statuses or {}
+        flat = self._fleet_flat(statuses) if statuses else {}
+        fleet = self._fleet_sources(statuses)
+        out_status = []
+        for source in (DataSource.FIREWALL_LOG, DataSource.DNS_QUERY_LOG):
+            st = flat.get(source) or self._path_status(source, now)
+            out_status.append({**st.to_dict(), **fleet[source.value]})
         return {
             "setting": self.settings.get("log_path"),
-            "status": [
-                self._path_status(s, now).to_dict()
-                for s in (DataSource.FIREWALL_LOG, DataSource.DNS_QUERY_LOG)
-            ],
+            "status": out_status,
             "receiver": receiver.status() if receiver is not None else None,
             "rate_limited_routers": len(self._log_limited_routers()),
             "dedup": self.deduper.stats().to_dict(),
@@ -3118,7 +3187,7 @@ class SecurityCenter:
                 rid: {s: st.to_dict() for s, st in sorted(per.items())}
                 for rid, per in statuses.items()
             },
-            "log_path": self._log_path_view(when),
+            "log_path": self._log_path_view(when, statuses),
         }
 
     def settings_view(self, *, admin: bool) -> dict[str, Any]:
@@ -3198,7 +3267,7 @@ class SecurityCenter:
                 if s in sources
             )
 
-        flat = self._flat(statuses)
+        flat = self._fleet_flat(statuses)
         score = self._score(now, statuses, flat)
         active = [i for i in self.incidents.values() if i["status"] in _ACTIVE_STATUSES]
         # No usable source anywhere (coverage 0): the hint counts are not
