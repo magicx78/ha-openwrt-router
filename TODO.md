@@ -248,8 +248,7 @@ Alles lesend, Installation und HA-Neustart nur nach OK.
 - [ ] **Befund 14:** `uci_section` im Pfad `network.wireless status` (netifd
       liefert `section` neben `ifname`). Ein Fix ändert die `unique_id` der
       WLAN-Schalter betroffener Router – braucht eine eigene Entscheidung.
-- [ ] **GitHub-Repo-Beschreibung** ohne Versionsnummer (HACS zeigt „v1.4.0“) –
-      nur mit OK.
+- [x] **GitHub-Repo-Beschreibung** ohne fest eingetragene Versionsnummer aktualisiert.
 
 ### HA-Modernisierung (Folgearbeiten aus dem Kompatibilitäts-Review 2026-07)
 
