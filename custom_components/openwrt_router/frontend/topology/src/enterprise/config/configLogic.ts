@@ -252,6 +252,7 @@ function parseRouterSummary(r: Obj): RouterSummary | null {
     errorReason: str(r.error_reason),
     running: r.running === true,
     lastBackupAt: str(r.last_backup_at),
+    lastAttemptAt: str(r.last_attempt_at),
     versions: num(r.versions) ?? 0,
     capability: parseCapability(r.capability),
     schedule: sched
@@ -303,7 +304,9 @@ export function parseVersion(raw: unknown): Version {
   const val = obj(v.validation) ?? {};
   const by = obj(v.created_by);
   const sizes = artifacts.map(a => a.sizeBytes).filter((n): n is number => n !== null);
-  const main = artifacts.find(a => a.kind === 'archive') ?? artifacts[0];
+  // Checksum of the saved content: the archive, else the UCI snapshot. Never
+  // the inventory: it is alike on many routers and faked equal versions (1.46.1).
+  const main = artifacts.find(a => a.kind === 'archive') ?? artifacts.find(a => a.kind === 'uci');
   return {
     backupId: str(v.backup_id) ?? '',
     routerId: str(v.router_id) ?? '',
@@ -759,6 +762,98 @@ export function failureText(errorClass: string | null, errorReason: string | nul
   return `${base} ${reason}${hint}`;
 }
 
+// ── Incomplete runs: warning items in plain text (1.46.1) ────────────────
+
+/** Host-key reasons of the core (warning `ssh_host_key:<reason>`, item `ssh.<reason>`). */
+const HOST_KEY_TEXT: Record<string, string> = {
+  pin_pending: 'SSH-Host-Key noch nicht bestätigt',
+  pin_refused: 'SSH-Host-Key abgelehnt',
+  mismatch: 'SSH-Host-Key weicht vom gespeicherten ab',
+  algorithm_unavailable: 'der gespeicherte Schlüsseltyp wird nicht mehr angeboten',
+  pin_invalid: 'gespeicherter SSH-Host-Key ist unlesbar',
+  pin_save_failed: 'SSH-Host-Key konnte nicht gespeichert werden',
+  pin_store_unavailable: 'Speicher für SSH-Host-Keys nicht verfügbar',
+  pin_unavailable: 'kein SSH-Weg (kein Speicher für Host-Keys)',
+  no_host_key: 'der Router zeigt keinen SSH-Host-Key',
+  refused: 'SSH-Zugriff abgelehnt',
+};
+
+/** Probe causes of an archive path that was not tried (`archive_not_attempted:<path>.<cause>`). */
+const PATH_CAUSE_TEXT: Record<string, string> = {
+  ...HOST_KEY_TEXT,
+  not_probed: 'noch nicht geprüft',
+  permission: 'dem Router fehlt das Recht dafür',
+  not_available: 'Paket cgi-io nicht installiert',
+  insecure_transport: 'Verbindung ohne TLS (HTTP)',
+  unreachable: 'Router nicht erreichbar',
+  timeout: 'Zeitüberschreitung beim Router',
+};
+
+const PATH_TEXT: Record<string, string> = { cgi: 'Archiv über cgi-io', ssh: 'Archiv über SSH' };
+
+const NEXT_STEP: Record<string, string> = {
+  'ssh.pin_pending': 'SSH-Host-Key bestätigen (Bereich „Zugang“ unten).',
+  'ssh.mismatch': 'SSH-Host-Key prüfen; nur nach einer Neuinstallation den gespeicherten Key vergessen (Bereich „Zugang“).',
+  'ssh.permission': 'Für ein Archiv über SSH den Router mit dem Benutzer root einbinden.',
+  'cgi.permission': 'Im Bereich „Zugang“ das ACL-Angebot anfordern.',
+  'cgi.insecure_transport': 'Router-Eintrag auf HTTPS umstellen.',
+  'cgi.not_available': 'Paket cgi-io auf dem Router installieren.',
+  'cgi.not_probed': 'Erneut sichern; der nächste Lauf prüft den Weg.',
+  'cgi.unreachable': 'Später erneut sichern.',
+  'cgi.timeout': 'Später erneut sichern.',
+};
+
+function splitWarning(code: string): [string, string | null] {
+  const at = code.indexOf(':');
+  return at < 0 ? [code, null] : [code.slice(0, at), code.slice(at + 1)];
+}
+
+/** `ssh_host_key:pin_pending` / `archive_not_attempted:ssh.pin_pending` → path key `ssh.pin_pending`. */
+function pathKey(code: string): string | null {
+  const [name, item] = splitWarning(code);
+  if (name === 'ssh_host_key' && item) return `ssh.${item}`;
+  if (name === 'archive_not_attempted' && item && item.includes('.')) return item;
+  return null;
+}
+
+/** German text of a version warning; never a masked value or a raw item code. */
+export function versionWarningText(code: string): string {
+  const [name, item] = splitWarning(code);
+  if (name === 'ssh_host_key') {
+    const reason = item ? HOST_KEY_TEXT[item] : undefined;
+    return reason ? `SSH nicht genutzt: ${reason}` : 'SSH nicht genutzt (Host-Key)';
+  }
+  if (name === 'archive_not_attempted') {
+    if (item === 'requested') return 'Kein Archiv angefordert (nur UCI-Snapshot verlangt)';
+    const [path, cause] = (item ?? '').split('.', 2);
+    const way = PATH_TEXT[path] ?? 'Archiv';
+    const why = cause ? PATH_CAUSE_TEXT[cause] : undefined;
+    return why ? `${way} nicht versucht: ${why}` : `${way} nicht versucht`;
+  }
+  const base = VERSION_WARNING_TEXT[name];
+  if (!base) return code;
+  return item && !isMasked(item) && /^[A-Za-z0-9_.@-]+$/.test(item) ? `${base}: ${item}` : base;
+}
+
+export interface PartialInfo {
+  classText: string;
+  reasons: string[];
+  nextSteps: string[];
+}
+
+/** Error class, reasons and next steps of an incomplete run (status "Unvollständig"). */
+export function partialInfo(errorClass: string | null, warnings: readonly string[]): PartialInfo {
+  const base = 'Das letzte Backup ist unvollständig.';
+  const cls = errorClass ? ` ${ERROR_CLASS_TEXT[errorClass] ?? `Fehlerart: ${errorClass}.`}` : '';
+  const steps = warnings.map(pathKey).map(k => (k ? NEXT_STEP[k] : undefined))
+    .filter((s): s is string => s !== undefined);
+  return {
+    classText: `${base}${cls}`,
+    reasons: [...new Set(warnings.map(versionWarningText))],
+    nextSteps: [...new Set(steps)],
+  };
+}
+
 // ── Restore texts ────────────────────────────────────────────────────────
 
 export const RESTORE_KEY_TEXT: Record<string, string> = {
@@ -1090,6 +1185,35 @@ export function timelinePoints(versions: readonly Version[], now: number, days =
     if (!Number.isFinite(t) || now - t > span || t > now) return [];
     return [{ backupId: v.backupId, pos: 1 - (now - t) / span, status: v.status, reason: v.reason, createdAt: v.createdAt }];
   });
+}
+
+/** Newest version by creation time; null for none. */
+export function latestVersion(versions: readonly Version[]): Version | null {
+  const at = (v: Version) => (v.createdAt ? Date.parse(v.createdAt) : NaN);
+  return versions.reduce<Version | null>((best, v) => {
+    if (best === null) return v;
+    const t = at(v);
+    return Number.isFinite(t) && !(at(best) >= t) ? v : best;
+  }, null);
+}
+
+/** "Letztes Backup" fact: the last usable backup, else the last incomplete attempt. */
+export function lastBackupText(r: RouterSummary, now: number): string {
+  if (r.lastBackupAt) return `${formatTime(r.lastBackupAt)} (${formatRelative(r.lastBackupAt, now)})`;
+  if (r.status === 'partial' && r.lastAttemptAt) return `letzter Versuch: unvollständig, ${formatTime(r.lastAttemptAt)}`;
+  return 'noch keins';
+}
+
+/**
+ * The router really lacks read rights for the backup: the last run failed
+ * for them, UCI is not readable, or no archive path is left and one of them
+ * was refused for rights. A working archive (e.g. SSH as root) is enough.
+ */
+export function backupRightsMissing(d: RouterDetail, errorClass: string | null, errorReason: string | null): boolean {
+  if (isAccessFailure(errorClass, errorReason)) return true;
+  const denied = (name: string) => d.capabilities[name]?.reason === 'permission_denied';
+  if (denied('config.uci_read')) return true;
+  return archivePath(d) !== 'archive' && (denied('config.cgi_backup') || denied('config.ssh_root'));
 }
 
 /** While a backup runs the view re-reads every 5 s, for at most 5 min (plan 8). */
