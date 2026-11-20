@@ -4,6 +4,40 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.46.1] - 2026-11-20
+
+Configuration Manager: Router, die als „Unvollständig“ dastanden, obwohl sie mehr können.
+Keine neue Vertragsangabe, keine Änderung am Core, Maskierung unverändert.
+
+### Behoben
+
+- **cgi-Archiv trotz unlesbarer Paketliste.** Ob der cgi-Weg geht, entscheidet allein das
+  rpcd-Recht `cgi-io: backup`; die Paketliste zählt nur, wenn sie lesbar ist und `cgi-io`
+  fehlt. Vorher blieb der Weg „ungeprüft“ und der Lauf sicherte nur UCI.
+- **Fehlende optionale UCI-Configs** (`sqm`, `mwan3`, `upnpd`, `openvpn`, `ddns`, `usteer` …)
+  sind „nicht vorhanden“, nicht `uci_failed` und machen keine Version `partial`. Ursache: ubus
+  meldet „nicht gefunden“, der SSH-Ersatzweg war wegen des noch nicht bestätigten Host-Keys
+  gesperrt, und diese Sperre ersetzte die Antwort. Echte Lesefehler (rpcd-ACL verweigert)
+  bleiben Fehler, Unklares wird nie „ok“.
+- **Lauf ohne Archivversuch** nennt den Grund je Weg: `archive_not_attempted:cgi.<Ursache>`,
+  `archive_not_attempted:ssh.<Ursache>` oder `archive_not_attempted:requested`.
+- **Host-Key-Grund sichtbar.** `ssh_host_key:<Grund>` erscheint als fester Code statt
+  `**REDACTED**`; nur die festen Gründe des Cores kommen zurück, alles andere bleibt maskiert.
+- **Panel „Unvollständig“** zeigt Fehlerart, Gründe in Klartext und den nächsten Schritt
+  (zum Beispiel „SSH-Host-Key bestätigen“).
+- **Panel „Prüfsumme“** zeigt die Prüfsumme des gespeicherten Inhalts (Archiv, sonst
+  UCI-Snapshot) oder „–“, nie mehr die des Inventars, die auf allen Routern gleich aussah.
+- **Panel „Leserechte fehlen“** nur noch, wenn sie wirklich fehlen; läuft das Archiv (etwa
+  als root per SSH), ist das ACL-Angebot als optional beschrieben.
+- **Panel „Letztes Backup“** zeigt „letzter Versuch: unvollständig, <Zeit>“ statt „noch keins“,
+  wenn es nur unvollständige Läufe gibt.
+
+### Tests
+
+- Neu: `tests/test_config_partial_v1461.py` (End-to-End Runtime → Core → echter Provider,
+  nur die Router-API ist ein Fake), Panel-Tests `configPartial.test.mjs`; der Pin-Speicher für
+  SSH-Host-Keys trennt Router strikt nach Router-ID (Test, keine Code-Änderung).
+
 ## [1.46.0] - 2026-11-20
 
 Security Center: eine Beobachtungsschicht für das Netz auf dem Enterprise Core von 1.44.0 und
