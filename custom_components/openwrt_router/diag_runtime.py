@@ -41,10 +41,12 @@ import re
 import time
 from collections import deque
 from collections.abc import Callable, Coroutine, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any, Final
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .api import (
     DIAG_DEFAULT_TRANSPORT,
@@ -58,6 +60,9 @@ from .api import (
 )
 from .const import (
     DATA_NET_DIAGNOSTICS,
+    DIAG_CONFIG_NOTES_MAX,
+    DIAG_CONTEXT_CACHE_SECONDS,
+    DIAG_CONTEXT_WINDOW_SECONDS,
     DIAG_DEFAULT_INTERVAL_SECONDS,
     DIAG_LOSS_ROUNDS,
     DIAG_MAX_INTERVAL_SECONDS,
@@ -65,6 +70,7 @@ from .const import (
     DIAG_MIN_INTERVAL_SECONDS,
     DIAG_MODULE_KEY_RETRY_SECONDS,
     DIAG_SETTLE_SECONDS,
+    SIGNAL_NET_DIAGNOSTICS,
 )
 from .core_errors import AuthorizationError, ConfigApiError, ErrorClass
 from .core_guard import error_for_decision
@@ -73,6 +79,7 @@ from .core_models import (
     ROUTER_ID_PREFIX,
     ActionClass,
     Actor,
+    CoreEventType,
     InstallationKeyState,
     VerifiedActor,
     is_valid_id,
@@ -93,9 +100,18 @@ from .diag_chain import (
     evaluate_chain,
     gateway_change,
 )
+from .diag_context import (
+    ConfigChange,
+    FindingContext,
+    SecurityIncident,
+    SourceState,
+    SourceView,
+    context_for,
+)
 from .diag_core import (
     ACTION_RUN_MANUAL,
     EXEC_KINDS,
+    HA_POINT_KEY,
     HA_PROBE_KINDS,
     KIND_HA_DNS,
     KIND_HA_HTTP,
@@ -104,9 +120,11 @@ from .diag_core import (
     DiagRouterFacts,
     async_identifier_key,
     authorize_manual_run,
+    authorize_sensitive_read,
     correlation_events,
     error_for_refusal,
     error_for_run_request,
+    finding_output,
     forget_plan,
     forgotten_router_id,
     manual_run_event,
@@ -118,6 +136,7 @@ from .diag_core import (
 )
 from .diag_model import (
     AddressFamily,
+    Basis,
     Classification,
     Finding,
     MeasurementPoint,
@@ -125,6 +144,7 @@ from .diag_model import (
     ProbeOutcome,
     ProbeResult,
     Stage,
+    StageState,
 )
 from .diag_scheduler import (
     DiagJob,
@@ -133,7 +153,7 @@ from .diag_scheduler import (
     SchedulerConfig,
 )
 from .diag_score import COMP_WAN, Reading, ScoreInputs, compute_score
-from .diag_stats import Sample, SeriesKey
+from .diag_stats import WINDOWS, Sample, SeriesKey
 from .diag_store import (
     GAP_HA_RESTART,
     GAP_ROUTER_RESTART,
@@ -151,6 +171,16 @@ from .diag_targets import (
     make_target,
     normalize_host,
 )
+from .net_events import Category as NiCategory
+from .net_events import Severity as NiSeverity
+from .net_events import Source as NiSource
+from .net_rules import (
+    DIAG_DNS_SERVER_CHANGED_KIND,
+    DIAG_DNS_SERVER_CHANGED_TYPE,
+    DIAG_GATEWAY_CHANGED_KIND,
+    DIAG_GATEWAY_CHANGED_TYPE,
+)
+from .net_rules import Finding as NiFinding
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -473,6 +503,10 @@ def chain_facts(wan: Mapping[str, Any], facts: Mapping[str, Any]) -> ChainFacts:
     interface_up = None
     if isinstance(total, int) and isinstance(up, int) and total > 0:
         interface_up = up > 0
+    # part 2: a LAN interface that should be up and is down fails the fact
+    # (direct evidence); absent key: the part 1 rule above alone
+    if interface_up and down_interfaces(facts):
+        interface_up = False
     route4 = facts.get("ipv4_default_route")
     route6 = facts.get("ipv6_default_route")
     route4 = route4 if isinstance(route4, bool) else None
@@ -489,6 +523,18 @@ def chain_facts(wan: Mapping[str, Any], facts: Mapping[str, Any]) -> ChainFacts:
         ipv4_configured=True,
         ipv6_configured=facts.get("ipv6_global_address") is True or route6 is True,
     )
+
+
+def down_interfaces(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The ``down_interfaces`` of the facts (name and vlan flag only)."""
+    raw = facts.get("down_interfaces")
+    if not isinstance(raw, list):
+        return []
+    return [
+        {"name": str(item.get("name"))[:32], "vlan": item.get("vlan") is True}
+        for item in raw[:16]
+        if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+    ]
 
 
 def _address(value: Any) -> str | None:
@@ -592,6 +638,12 @@ class _RouterState:
     settling: bool = False
     wan_applicable: bool | None = None
     dhcp_pools: list[dict[str, Any]] = field(default_factory=list)
+    # part 2: since when the current finding holds, the LAN interfaces that
+    # are down, and the change findings the NI finding source computed for
+    # this poll's data (taken over by the poll observer, never twice)
+    finding_at: float | None = None
+    down: list[dict[str, Any]] = field(default_factory=list)
+    pending: tuple[Any, list[Finding]] | None = None
 
 
 # =============================================================================
@@ -622,6 +674,15 @@ async def async_setup_net_diagnostics(
     diag.add_entry(entry.entry_id, coordinator)
     if diag.enabled:
         await diag.async_activate()
+    # part 2: routes (registered once, answer "off" while off) and entities
+    # (created while on, removed from the registry while off)
+    try:
+        from .diag_views import async_register_diag_views
+
+        async_register_diag_views(hass)
+    except Exception as err:  # noqa: BLE001 - the module works without them
+        diag._fail("routes", err)
+    await diag._async_sync_entities()
     return diag
 
 
@@ -631,6 +692,12 @@ async def async_release_net_diagnostics(hass: HomeAssistant, entry_id: str) -> N
     if diag is None:
         return
     diag.remove_entry(entry_id)
+    try:
+        from .diag_entities import async_entry_released
+
+        await async_entry_released(hass, entry_id, last=not diag.entry_count)
+    except Exception as err:  # noqa: BLE001 - the release goes on
+        diag._fail("entities", err)
     if diag.entry_count:
         return
     hass.data.pop(DATA_NET_DIAGNOSTICS, None)
@@ -668,9 +735,25 @@ class NetDiagnostics:
         self._ha_finding: Finding | None = None
         self._ha_sent: tuple[Any, ...] | None = None
         self._ha_last: dict[str, Any] | None = None
+        # part 2: last HA round per probe, when the HA finding began, the
+        # NI finding source, context sources, the entity view
+        self._ha_probes: list[dict[str, Any]] = []
+        self._ha_finding_at: float | None = None
+        self._source_unsub: Callable[[], None] | None = None
+        self._config_notes: dict[tuple[str, str], dict[str, Any]] = {}
+        self._config_since: float | None = None
+        self._drift_task: asyncio.Task[None] | None = None
+        self._drift_again = False
+        self._security_cache: dict[str, tuple[float, int, SourceView]] = {}
+        self.view: dict[str, Any] | None = None
+        self.loaded = False
         # Test seams: entry id -> core router id, probe transport, clocks,
         # scheduler limits and the factory of its loop task.
         self.router_id_of: Callable[[str], str | None] = self._registry_router_id
+        # part 2 seams: context sources (read only) and the drift areas
+        self.config_runtime_of: Callable[[], Any] = self._config_runtime
+        self.security_center_of: Callable[[], Any] = self._security_center
+        self.drift_areas_of: Callable[[dict[str, Any]], Any] = self._async_drift_areas
         self.transport: DiagTransport = DIAG_DEFAULT_TRANSPORT
         self.clock: Callable[[], float] = time.time
         self.scheduler_config = SchedulerConfig()
@@ -757,6 +840,7 @@ class NetDiagnostics:
         """Read the store once (tolerant) and build the target registry."""
         await self.store.async_load()
         self._rebuild_registry()
+        self.loaded = True
 
     def _rebuild_registry(self) -> None:
         self.registry, self.refused_targets = build_registry(self.settings)
@@ -785,6 +869,7 @@ class NetDiagnostics:
             self._fail("scheduler", err)
         self._stage("restart gap", self._apply_ha_restart)
         self._save()
+        self._publish()
 
     def _apply_ha_restart(self) -> None:
         """HA restart: the downtime since the last save is a gap (once)."""
@@ -804,8 +889,15 @@ class NetDiagnostics:
         scheduler, self.scheduler = self.scheduler, None
         self._periodic_interval = None
         self._manual_plan = None
+        drift, self._drift_task = self._drift_task, None
+        if drift is not None and not drift.done():
+            drift.cancel()
+        self._config_notes.clear()
+        self._config_since = None
+        self._security_cache.clear()
         if scheduler is not None:
             await scheduler.async_stop()
+        self._publish()
 
     async def async_close(self) -> None:
         """Stop for good; no delayed write is scheduled after this."""
@@ -844,6 +936,7 @@ class NetDiagnostics:
         except (TypeError, ValueError) as err:
             self._fail("core registration", err)
         binding.removers.append(api.subscribe(self._on_core_event))
+        self._config_since = self.clock()
         await self._async_fetch_module_key()
         self._stage("forgotten routers", self._forget_unknown_routers)
 
@@ -925,6 +1018,8 @@ class NetDiagnostics:
             rid = forgotten_router_id(event)
             if rid is not None:
                 self._forget_router(rid)
+                return
+            self._config_event(event)
         except Exception as err:  # noqa: BLE001 - the core isolates us too
             self._fail("core event", err)
 
@@ -965,6 +1060,9 @@ class NetDiagnostics:
         self._routers.pop(rid, None)
         for entry_id in [e for e, r in self._rid_cache.items() if r == rid]:
             del self._rid_cache[entry_id]
+        for key in [k for k in self._config_notes if k[0] == rid]:
+            del self._config_notes[key]
+        self._security_cache.pop(rid, None)
         self.store.schedule_save(enabled=True, force=True)
 
     # -- engine -----------------------------------------------------------------------
@@ -979,8 +1077,17 @@ class NetDiagnostics:
         if engine is not None:
             self._engine = engine
             self._engine_unsub = engine.add_poll_observer(self)
+            from .net_engine import add_finding_source
+
+            self._source_unsub = add_finding_source(engine, self.ni_findings)
 
     def _detach_engine(self) -> None:
+        source, self._source_unsub = self._source_unsub, None
+        if source is not None:
+            try:
+                source()
+            except Exception:
+                _LOGGER.debug("Network diagnostics: source unsub raised", exc_info=True)
         unsub, self._engine_unsub = self._engine_unsub, None
         self._engine = None
         if unsub is not None:
@@ -1019,6 +1126,7 @@ class NetDiagnostics:
         self._stage("dhcp", self._take_dhcp, state, data)
         self._stage("fold", self.store.history.fold, now)
         self._save()
+        self._publish()
 
     def _check_restart(
         self, rid: str, state: _RouterState, data: Any, now: float
@@ -1110,8 +1218,15 @@ class NetDiagnostics:
             return
         point = point_for(rid)
         finding = classify(evaluate_chain(point, (), chain_facts(wan, facts)))
-        changes = self._changes(point, state, facts)
+        pending, state.pending = state.pending, None
+        if pending is not None and pending[0] is data:
+            changes = pending[1]  # already computed for NI (same poll)
+        else:
+            changes = self._changes(point, state, facts)
+        if state.finding is None or _signature(state.finding) != _signature(finding):
+            state.finding_at = state.last_poll
         state.finding = finding
+        state.down = down_interfaces(facts)
         state.state, state.reason = _finding_state(finding)
         if state.settling and finding.is_problem:
             state.state = R_STATE_SETTLING
@@ -1130,7 +1245,12 @@ class NetDiagnostics:
             state.sent = signature
 
     def _changes(
-        self, point: MeasurementPoint, state: _RouterState, facts: Mapping[str, Any]
+        self,
+        point: MeasurementPoint,
+        state: _RouterState,
+        facts: Mapping[str, Any],
+        *,
+        settling: bool | None = None,
     ) -> list[Finding]:
         """Gateway / DNS server changes against the previous poll (memory).
 
@@ -1139,7 +1259,7 @@ class NetDiagnostics:
         restart is no change, one that really changed is reported once.
         """
         found: list[Finding] = []
-        if state.settling:
+        if state.settling if settling is None else settling:
             return found
         for family, name in (
             (AddressFamily.IPV4, "ipv4_gateway"),
@@ -1155,7 +1275,10 @@ class NetDiagnostics:
                 found.append(change)
             state.gateway[family] = current
         servers = _servers(facts)
-        if servers is not None:
+        # part 2: no server at all (WAN down, its resolvers gone with it) is
+        # no "change" of the servers: like a missing next hop the memory is
+        # kept, a set that comes back the same is no change (case 27)
+        if servers:
             change = dns_server_change(point, state.dns, servers)
             if change is not None:
                 found.append(change)
@@ -1370,8 +1493,23 @@ class NetDiagnostics:
         now = max((p.timestamp for p in probes), default=self.clock())
         self.store.history.fold(now)
         self._ha_last = {"ts": now, "probes": len(probes)}
+        self._ha_probes = [
+            {
+                "target_id": p.target_id,
+                "kind": p.kind.value,
+                "stage": p.stage.value,
+                "outcome": p.outcome.value,
+                "rtt_ms": p.rtt_ms,
+                "ts": p.timestamp,
+            }
+            for p in probes
+        ]
         if probes:
             finding = classify(evaluate_chain(MeasurementPoint.ha(), probes))
+            if self._ha_finding is None or _signature(self._ha_finding) != _signature(
+                finding
+            ):
+                self._ha_finding_at = now
             self._ha_finding = finding
             signature = _signature(finding)
             if signature != self._ha_sent and (
@@ -1379,6 +1517,7 @@ class NetDiagnostics:
             ):
                 self._ha_sent = signature
         self.store.schedule_save(enabled=self.enabled)
+        self._publish()
 
     # -- guarded actions ----------------------------------------------------------------
 
@@ -1466,6 +1605,8 @@ class NetDiagnostics:
         if not self.active:
             self._unbind_core()
         self.store.schedule_save(enabled=True, force=True)
+        self._publish()
+        await self._async_sync_entities()
         return self.settings_view()
 
     def _manual_targets(self, target_ids: Iterable[str] | None) -> list[str]:
@@ -1780,3 +1921,712 @@ class NetDiagnostics:
             "store": self.store.status(),
             "counters": dict(self.counters),
         }
+
+    # =========================================================================
+    # Part 2: NI change incidents, context sources, entity view, route views
+    # =========================================================================
+
+    # -- NI finding source (gateway / DNS server changed) -------------------------
+
+    def ni_findings(self, entry_id: str, data: Any, now: float) -> list[Any]:
+        """Change findings of this poll as NI findings; never raises.
+
+        NI calls this in ``ingest`` before its machine step (the poll
+        observer runs only after it). The changes are computed once here:
+        the poll observer takes the same findings over for its core events.
+        """
+        if not self.active or self._closed:
+            return []
+        try:
+            return self._ni_findings(entry_id, data)
+        except Exception as err:  # noqa: BLE001 - the poll goes on
+            self._fail("change incidents", err)
+            return []
+
+    def _ni_findings(self, entry_id: str, data: Any) -> list[Any]:
+        rid = self._rid(entry_id)
+        coordinator = self._entries.get(entry_id)
+        if rid is None or getattr(coordinator, "last_update_success", True) is False:
+            return []
+        wan = getattr(data, "wan_status", None)
+        facts = wan.get("diag_facts") if isinstance(wan, Mapping) else None
+        if not isinstance(facts, Mapping):
+            return []
+        state = self._routers.setdefault(rid, _RouterState())
+        uptime = getattr(data, "uptime", None)
+        settling = state.settling
+        if (
+            isinstance(uptime, int | float)
+            and not isinstance(uptime, bool)
+            and uptime > 0
+        ):
+            settling = uptime < DIAG_SETTLE_SECONDS
+        changes = self._changes(point_for(rid), state, facts, settling=settling)
+        state.pending = (data, changes)
+        return ni_change_findings(entry_id, changes)
+
+    # -- context sources (read only) ----------------------------------------------
+
+    def _config_runtime(self) -> Any:
+        from .config_manager import async_get_runtime
+
+        return async_get_runtime(self.hass)
+
+    def _security_center(self) -> Any:
+        from .security_center import async_get_security_center
+
+        return async_get_security_center(self.hass)
+
+    def _config_event(self, event: Any) -> None:
+        """Drift / critical change / new version of the Configuration Manager."""
+        kind = str(getattr(event, "type", ""))
+        if kind not in _CONFIG_EVENT_TYPES:
+            return
+        rid = getattr(event, "router_id", None)
+        if not isinstance(rid, str) or not is_valid_id(rid, ROUTER_ID_PREFIX):
+            return
+        if kind == CoreEventType.BACKUP_CREATED.value:
+            if any(
+                n["router_id"] == rid and n["state"] == "pending"
+                for n in self._config_notes.values()
+            ):
+                self._schedule_drift_resolution()
+            return
+        data = getattr(event, "data", None)
+        data = data if isinstance(data, Mapping) else {}
+        drift_id = data.get("drift_id") or getattr(event, "dedup_key", None)
+        if not isinstance(drift_id, str) or not drift_id:
+            return
+        ts = _event_ts(getattr(event, "ts", None))
+        critical = kind == CoreEventType.CHANGE_CRITICAL.value or (
+            isinstance(data.get("critical_count"), int) and data["critical_count"] > 0
+        )
+        key = (rid, drift_id[:128])
+        note = self._config_notes.get(key)
+        if note is None:
+            baseline = data.get("baseline_version_id")
+            self._config_notes[key] = {
+                "router_id": rid,
+                "ref": drift_id[:128],
+                "ts": self.clock() if ts is None else ts,
+                "baseline": baseline if isinstance(baseline, str) else None,
+                "areas": None,
+                "state": "pending",
+                "critical": critical,
+            }
+            while len(self._config_notes) > DIAG_CONFIG_NOTES_MAX:
+                notes = self._config_notes
+                del notes[min(notes, key=lambda k: notes[k]["ts"])]
+        elif critical:
+            note["critical"] = True
+        self._schedule_drift_resolution()
+
+    def _schedule_drift_resolution(self) -> None:
+        if self._drift_task is not None and not self._drift_task.done():
+            self._drift_again = True
+            return
+        self._drift_again = False
+        self._drift_task = self.hass.async_create_task(
+            self._async_resolve_drifts(), name="openwrt_router diag drift areas"
+        )
+
+    async def _async_resolve_drifts(self) -> None:
+        """Look up the configuration areas of pending drifts (no router call)."""
+        await asyncio.sleep(0)  # never inside the core's emit
+        try:
+            while True:
+                self._drift_again = False
+                await self._async_resolve_pending()
+                if not self._drift_again or not self.active:
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - never fails anything
+            self._fail("drift areas", err)
+
+    async def _async_resolve_pending(self) -> None:
+        now = self.clock()
+        pending = [n for n in self._config_notes.values() if n["state"] == "pending"]
+        for note in pending[:8]:
+            areas = None
+            if note["baseline"] is not None:
+                try:
+                    areas = await self.drift_areas_of(note)
+                except Exception as err:  # noqa: BLE001 - areas stay unknown
+                    _LOGGER.debug(
+                        "Network diagnostics: drift areas not readable (%s)",
+                        type(err).__name__,
+                    )
+            if areas is not None:
+                note["areas"] = sorted({str(a)[:32] for a in areas})
+                note["state"] = "resolved"
+            elif (
+                note["baseline"] is None
+                or now - note["ts"] > 2 * DIAG_CONTEXT_WINDOW_SECONDS
+            ):
+                note["state"] = "unknown"
+
+    async def _async_drift_areas(self, note: Mapping[str, Any]) -> list[str] | None:
+        """Areas of a drift from two stored versions (public core API only).
+
+        Same reading as the Security Center: the drift's baseline version
+        against the first version stored or last seen after it. None while
+        there is none yet, or while a change has no area and none of the
+        context areas is among them.
+        """
+        from .core_models import ConfigRef
+
+        api = self._binding.api
+        if api is None:
+            return None
+        records = list(await api.async_list_backups(note["router_id"], limit=20))
+        base = next((r for r in records if r.backup_id == note["baseline"]), None)
+        base_ts = _event_ts(getattr(base, "created_at", None)) if base else None
+        if base_ts is None:
+            return None
+        candidates = []
+        for record in records:
+            stamps = (
+                _event_ts(getattr(record, "created_at", None)),
+                _event_ts(getattr(record, "last_seen_at", None)),
+            )
+            when = max((t for t in stamps if t is not None), default=None)
+            if (
+                when is None
+                or when <= base_ts
+                or record.backup_id == note["baseline"]
+                or not getattr(record, "usable", True)
+            ):
+                continue
+            candidates.append((when, record.backup_id))
+        if not candidates:
+            return None
+        diff = await api.async_compare(
+            ConfigRef.backup(str(note["baseline"])),
+            ConfigRef.backup(min(candidates)[1]),
+            actor=Actor.for_module(MODULE),
+        )
+        changes = getattr(diff, "comparable_changes", None)
+        if changes is None:
+            changes = getattr(diff, "changes", ())
+        areas = {c.area for c in changes if isinstance(c.area, str) and c.area}
+        unknown = any(not (isinstance(c.area, str) and c.area) for c in changes)
+        if unknown and not areas & _CONTEXT_AREAS:
+            return None
+        return sorted(areas)
+
+    def _config_view(self, rid: str) -> SourceView:
+        try:
+            runtime = self.config_runtime_of()
+        except Exception:  # noqa: BLE001 - treated as missing
+            runtime = None
+        if runtime is None:
+            return SourceView.unavailable(
+                SourceState.MISSING, "configuration_manager_not_running"
+            )
+        try:
+            on = runtime.drift_check_enabled(rid) is True
+        except Exception:  # noqa: BLE001 - unknown router: not checked
+            on = False
+        if not on:
+            return SourceView.unavailable(SourceState.DISABLED, "drift_check_off")
+        if self._binding.api is None or self._config_since is None:
+            return SourceView.unavailable(SourceState.NOT_READY, "core_unavailable")
+        items = tuple(
+            ConfigChange(
+                router_id=note["router_id"],
+                at=float(note["ts"]),
+                ref=note["ref"],
+                areas=tuple(note["areas"]) if note["state"] == "resolved" else None,
+                critical=bool(note["critical"]),
+            )
+            for note in self._config_notes.values()
+            if note["router_id"] == rid
+        )
+        return SourceView(SourceState.READY, since=self._config_since, items=items)
+
+    def _security_view(self, rid: str, at: float) -> SourceView:
+        try:
+            center = self.security_center_of()
+        except Exception:  # noqa: BLE001 - treated as missing
+            center = None
+        if center is None:
+            return SourceView.unavailable(
+                SourceState.MISSING, "security_center_not_running"
+            )
+        if getattr(center, "enabled", False) is not True:
+            return SourceView.unavailable(SourceState.DISABLED, "security_center_off")
+        if getattr(center, "ready", False) is not True:
+            reason = getattr(center, "not_ready_reason", None)
+            return SourceView.unavailable(
+                SourceState.NOT_READY,
+                reason if isinstance(reason, str) else "not_ready",
+            )
+        now = self.clock()
+        cached = self._security_cache.get(rid)
+        if (
+            cached is not None
+            and cached[1] == int(at)
+            and 0 <= now - cached[0] < DIAG_CONTEXT_CACHE_SECONDS
+        ):
+            return cached[2]
+        overview = center.overview(
+            since=at - DIAG_CONTEXT_WINDOW_SECONDS, router_id=rid, limit=20
+        )
+        incidents = []
+        for item in (overview or {}).get("incidents") or ():
+            ts = item.get("last_seen") if isinstance(item, Mapping) else None
+            if isinstance(ts, bool) or not isinstance(ts, int | float):
+                continue
+            incidents.append(
+                SecurityIncident(
+                    router_id=item.get("router_id"),
+                    at=float(ts),
+                    incident_id=str(item.get("id"))[:64],
+                    type=str(item.get("type"))[:48],
+                    category=str(item.get("category"))[:32],
+                    severity=str(item.get("severity"))[:16],
+                )
+            )
+        # DECIDED: the center keeps its incidents in its own store, so a
+        # ready center covers the whole window.
+        view = SourceView(
+            SourceState.READY,
+            since=at - DIAG_CONTEXT_WINDOW_SECONDS,
+            items=tuple(incidents),
+        )
+        self._security_cache[rid] = (now, int(at), view)
+        return view
+
+    def router_context(self, rid: str) -> FindingContext | None:
+        """Context of the router's current finding (None without a finding)."""
+        state = self._routers.get(rid)
+        if state is None or state.finding is None:
+            return None
+        at = state.finding_at or state.last_poll or self.clock()
+        extra = ("interface_down_vlan",) if any(d["vlan"] for d in state.down) else ()
+        return context_for(
+            state.finding,
+            rid,
+            at,
+            config=self._config_view(rid),
+            security=self._security_view(rid, at),
+            window=float(DIAG_CONTEXT_WINDOW_SECONDS),
+            extra_evidence=extra,
+        )
+
+    # -- entity view ------------------------------------------------------------------
+
+    def _publish(self) -> None:
+        """Rebuild the entity view and tell the entities (never raises)."""
+        try:
+            on = self.enabled and self.active and not self._closed
+            self.view = self._build_view() if on else None
+        except Exception as err:  # noqa: BLE001 - the entities go unknown
+            self._fail("entity view", err)
+            self.view = None
+        try:
+            async_dispatcher_send(self.hass, SIGNAL_NET_DIAGNOSTICS)
+        except Exception:
+            _LOGGER.debug("Network diagnostics: dispatch failed", exc_info=True)
+
+    def entries_by_router(self) -> dict[str, str]:
+        """Core router id -> entry id of every mapped entry."""
+        return {rid: entry for entry, rid in self._rid_cache.items()}
+
+    def _gateway(self, state: _RouterState, router_state: str) -> dict[str, Any]:
+        """Next-hop reachability from a DIRECT gateway-stage measurement only."""
+        if router_state == R_STATE_UNKNOWN or state.finding is None:
+            return {"state": None, "reason": REASON_NO_DATA_YET}
+        chain = state.finding.chain
+        if chain is not None:
+            for family in (AddressFamily.IPV4, AddressFamily.IPV6):
+                try:
+                    stage = chain.stage(Stage.GATEWAY, family)
+                except KeyError:
+                    continue
+                if stage.measured and stage.basis == Basis.DIRECT:
+                    return {
+                        "state": stage.state == StageState.HEALTHY,
+                        "reason": stage.state.value,
+                        "family": family.value,
+                    }
+        # passive facts know the next hop, not whether it answers
+        return {
+            "state": None,
+            "reason": "not_measured",
+            "next_hop_known": bool(state.gateway),
+            "router_probes": REASON_NO_EXECUTOR,
+        }
+
+    def _ha_rtt(self, kinds: frozenset[str], wall: float) -> float | None:
+        """Mean round trip of the last HA round (None if none or stale)."""
+        last = self._ha_last
+        if not last or not self._ha_probes:
+            return None
+        interval = float(self.settings.get("interval_s") or 0)
+        if wall - float(last["ts"]) > max(3600.0, STALE_INTERVALS * interval):
+            return None
+        rtts = [
+            float(p["rtt_ms"])
+            for p in self._ha_probes
+            if p["kind"] in kinds
+            and p["outcome"] in _ANSWERED
+            and isinstance(p["rtt_ms"], int | float)
+            and not isinstance(p["rtt_ms"], bool)
+        ]
+        return round(sum(rtts) / len(rtts), 1) if rtts else None
+
+    def _ha_loss(self, wall: float) -> float | None:
+        """Loss of the HA internet series over 24 h (None without samples)."""
+        answered = lost = 0
+        history = self.store.history
+        for key in history.series_keys():
+            if key.point != HA_POINT_KEY or key.kind not in _INTERNET_KINDS:
+                continue
+            day = (history.summaries(key, now=wall) or {}).get("24h")
+            if day is not None:
+                answered += day.answered
+                lost += day.lost
+        total = answered + lost
+        return None if total == 0 else round(100.0 * lost / total, 1)
+
+    def _build_view(self) -> dict[str, Any]:
+        wall = self.clock()
+        scores: list[float] = []
+        coverages: list[float] = []
+        low = False
+        known = 0
+        problems: dict[str, int] = {}
+        gateways: dict[str, dict[str, Any]] = {}
+        for rid, state in self._routers.items():
+            view = self._router_view(rid, state, wall)
+            score = view.get("score") or {}
+            unknown = view["state"] == R_STATE_UNKNOWN
+            cov = score.get("coverage")
+            usable_cov = isinstance(cov, int | float) and not unknown
+            coverages.append(float(cov) if usable_cov else 0.0)
+            if unknown:
+                low = True
+            else:
+                known += 1
+                value = score.get("score")
+                if isinstance(value, int | float):
+                    scores.append(float(value))
+                else:
+                    low = True
+            low = low or score.get("low_confidence") is True
+            if view["state"] == R_STATE_PROBLEM and state.finding is not None:
+                name = state.finding.classification.value
+                problems[name] = problems.get(name, 0) + 1
+            gateways[rid] = self._gateway(state, view["state"])
+        ha_state = self._ha_view(wall)["state"]
+        if ha_state == R_STATE_PROBLEM and self._ha_finding is not None:
+            name = self._ha_finding.classification.value
+            problems[name] = problems.get(name, 0) + 1
+        routers = len(self._routers)
+        return {
+            "score": min(scores) if scores else None,
+            "score_coverage": round(sum(coverages) / routers, 2) if routers else None,
+            "low_confidence": low or not scores,
+            "routers": routers,
+            "routers_scored": len(scores),
+            "routers_unknown": routers - known,
+            "coverage": round(100 * sum(coverages) / routers) if routers else None,
+            "ha_state": ha_state,
+            "findings_active": sum(problems.values())
+            if known or ha_state != R_STATE_UNKNOWN
+            else None,
+            "findings_by_classification": dict(sorted(problems.items())),
+            "ha_latency_ms": self._ha_rtt(_INTERNET_KINDS, wall),
+            "ha_loss_pct": self._ha_loss(wall),
+            "dns_ms": self._ha_rtt(_DNS_KINDS, wall),
+            "ha_measured_at": None if not self._ha_last else self._ha_last["ts"],
+            "gateways": gateways,
+        }
+
+    async def _async_sync_entities(self) -> None:
+        try:
+            from .diag_entities import async_sync_diag_entities
+
+            await async_sync_diag_entities(self.hass)
+        except Exception as err:  # noqa: BLE001 - the module works without them
+            self._fail("entities", err)
+
+    # -- route views (ids and codes only: no address, host or domain) ---------------
+
+    @staticmethod
+    def _chain(finding: Finding | None) -> list[dict[str, Any]] | None:
+        chain = None if finding is None else finding.chain
+        if chain is None:
+            return None
+        return [
+            {
+                "stage": s.stage.value,
+                "family": s.family.value,
+                "state": s.state.value,
+                "basis": s.basis.value,
+            }
+            for s in chain.stages
+        ]
+
+    def overview(self) -> dict[str, Any]:
+        """Score, coverage, active findings, chains, last run (brief, masked)."""
+        state, reasons = self._module_state()
+        if state == STATE_OFF:
+            return {
+                "state": STATE_OFF,
+                "reasons": reasons,
+                "enabled": self.enabled,
+                "fleet": None,
+                "routers": None,
+                "ha": None,
+                "last_run": None,
+            }
+        wall = self.clock()
+        view = self.view if self.view is not None else self._build_view()
+        routers: dict[str, Any] = {}
+        for rid, rstate in self._routers.items():
+            rv = self._router_view(rid, rstate, wall)
+            routers[rid] = {
+                "state": rv["state"],
+                "reason": rv["reason"],
+                "settling": rv["settling"],
+                "score": rv["score"],
+                "restarts_24h": rv["restarts_24h"],
+                "finding": None
+                if rstate.finding is None
+                else finding_output(rstate.finding, admin=False),
+                "chain": self._chain(rstate.finding),
+                "down_interfaces": len(rstate.down),
+                "gateway": view["gateways"].get(rid),
+            }
+        ha = self._ha_view(wall)
+        return {
+            "state": state,
+            "reasons": reasons,
+            "enabled": True,
+            "fleet": {k: v for k, v in view.items() if k != "gateways"},
+            "routers": routers,
+            "ha": {
+                "state": ha["state"],
+                "reason": ha["reason"],
+                "finding": None
+                if self._ha_finding is None
+                else finding_output(self._ha_finding, admin=False),
+                "chain": self._chain(self._ha_finding),
+            },
+            "last_run": dict(self._ha_last) if self._ha_last else None,
+        }
+
+    def history_view(self) -> dict[str, Any]:
+        """The four windows (1h/24h/7d/30d) of every series (ids only)."""
+        state, reasons = self._module_state()
+        if state == STATE_OFF:
+            return {"state": STATE_OFF, "reasons": reasons, "series": None}
+        wall = self.clock()
+        history = self.store.history
+        series = []
+        for key in history.series_keys():
+            interval = None
+            if key.point != HA_POINT_KEY:
+                router = self._routers.get(key.point)
+                interval = router.interval if router is not None else None
+            summaries = history.summaries(key, now=wall, interval_s=interval) or {}
+            series.append(
+                {
+                    "point": key.point,
+                    "target_id": key.target,
+                    "kind": key.kind,
+                    "family": key.family,
+                    "windows": {
+                        name: None if summary is None else asdict(summary)
+                        for name, summary in summaries.items()
+                    },
+                }
+            )
+        return {
+            "state": state,
+            "reasons": reasons,
+            "windows": list(WINDOWS),
+            "series": series,
+            "gaps": len(history.gaps),
+        }
+
+    async def async_detail(
+        self, router_id: str | None, *, actor: Any, admin: bool
+    ) -> dict[str, Any]:
+        """One finding with its context; detail only after the sensitive read.
+
+        Non-admins get the brief, masked finding and the context states; an
+        admin gets the detail when the core's sensitive read approves it
+        (granted and denied reads are audited by the core).
+        """
+        state, reasons = self._module_state()
+        if state == STATE_OFF:
+            return {"state": STATE_OFF, "reasons": reasons, "finding": None}
+        if router_id is None:
+            finding = self._ha_finding
+            context = None
+        else:
+            rstate = self._routers.get(router_id)
+            if rstate is None and router_id not in self.entries_by_router():
+                raise ConfigApiError(
+                    "Unknown router",
+                    error_class=ErrorClass.NOT_FOUND,
+                    details={"reason": "unknown_router"},
+                )
+            # a mapped router that was not polled yet has no finding
+            finding = None if rstate is None else rstate.finding
+            context = self.router_context(router_id)
+        out: dict[str, Any] = {
+            "state": state,
+            "reasons": reasons,
+            "router_id": router_id,
+            "detail": "brief",
+            "finding": None
+            if finding is None
+            else finding_output(finding, admin=False),
+            "context": None if context is None else _brief_context(context.to_dict()),
+        }
+        if not admin:
+            return out
+        try:
+            api = await self._async_api()
+        except ConfigApiError:
+            out["detail"] = REASON_CORE_UNAVAILABLE  # no sensitive read
+            return out
+        verified = await self._async_verify(api, actor)
+        if not authorize_sensitive_read(api.guard, verified, router_id):
+            out["detail"] = "denied"
+            return out
+        out["detail"] = "full"
+        if finding is not None:
+            out["finding"] = finding_output(finding, admin=True, key=self._module_key)
+        if context is not None:
+            out["context"] = context.to_dict()
+        if router_id is not None:
+            rstate = self._routers.get(router_id)
+            down = () if rstate is None else rstate.down
+            out["down_interfaces"] = [dict(d) for d in down]
+        else:
+            out["probes"] = [dict(p) for p in self._ha_probes]
+        return out
+
+
+# =============================================================================
+# Part 2 helpers
+# =============================================================================
+
+_CONFIG_EVENT_TYPES: Final = frozenset(
+    {
+        CoreEventType.DRIFT_DETECTED.value,
+        CoreEventType.CHANGE_CRITICAL.value,
+        CoreEventType.BACKUP_CREATED.value,
+    }
+)
+# areas a drift with partly unknown areas must name to count as known
+_CONTEXT_AREAS: Final = frozenset(
+    {"vlan", "interface", "routing", "firewall", "dns", "dhcp"}
+)
+_INTERNET_KINDS: Final = frozenset({ProbeKind.TCP.value, ProbeKind.HTTP.value})
+_DNS_KINDS: Final = frozenset({ProbeKind.DNS.value})
+# a DNS answer "no such name" is still an answer with a round trip
+_ANSWERED: Final = frozenset({ProbeOutcome.OK.value, ProbeOutcome.NXDOMAIN.value})
+
+
+def _event_ts(value: Any) -> float | None:
+    """Epoch seconds of a core time value (datetime, ISO text or number)."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value).timestamp()
+        except ValueError:
+            return None
+    stamp = getattr(value, "timestamp", None)
+    if callable(stamp):
+        try:
+            return float(stamp())
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return None
+
+
+def _brief_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Context for a non-admin: states and hypotheses, no change or
+    incident ids."""
+
+    def brief(links: Any) -> Any:
+        if links is None:
+            return None
+        return [
+            {
+                "source": link["source"],
+                "cause_class": link["cause_class"],
+                "hypothesis": link["hypothesis"],
+                "minutes_before": link["minutes_before"],
+                "area": link["area"],
+            }
+            for link in links
+        ]
+
+    config, security = context["configuration"], context["security"]
+    return {
+        "classification": context["classification"],
+        "cause_class": context["cause_class"],
+        "configuration": {
+            "state": config["state"],
+            "reason": config["reason"],
+            "changes": brief(config["changes"]),
+        },
+        "security": {
+            "state": security["state"],
+            "reason": security["reason"],
+            "incidents": brief(security["incidents"]),
+        },
+        "hypotheses": list(context["hypotheses"]),
+    }
+
+
+def ni_change_findings(entry_id: str, changes: Iterable[Finding]) -> list[Any]:
+    """NI findings (``net_rules`` DIAG_CHANGE_*) of the diag change findings.
+
+    Scope: the entry's router (``scope_key`` = entry id, like
+    ``wan_ip_changed``). No address: the family, and for DNS the number of
+    servers only.
+    """
+    out: list[Any] = []
+    for change in changes:
+        family = "any" if change.family is None else change.family.value
+        if change.classification is Classification.GATEWAY_CHANGED:
+            out.append(
+                NiFinding(
+                    kind=DIAG_GATEWAY_CHANGED_KIND,
+                    category=NiCategory.WAN,
+                    source=NiSource.NETIFD,
+                    rule=DIAG_GATEWAY_CHANGED_TYPE,
+                    scope_key=entry_id,
+                    event=True,
+                    severity=NiSeverity.INFO,
+                    params={"family": family},
+                )
+            )
+        elif change.classification is Classification.DNS_SERVER_CHANGED:
+            current = None if change.change is None else change.change.current
+            count = len(current) if isinstance(current, tuple | list) else None
+            out.append(
+                NiFinding(
+                    kind=DIAG_DNS_SERVER_CHANGED_KIND,
+                    category=NiCategory.DNS,
+                    source=NiSource.NETIFD,
+                    rule=DIAG_DNS_SERVER_CHANGED_TYPE,
+                    scope_key=entry_id,
+                    event=True,
+                    severity=NiSeverity.INFO,
+                    params={"servers": count},
+                )
+            )
+    return out

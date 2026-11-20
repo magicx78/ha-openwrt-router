@@ -403,3 +403,67 @@ async def async_get_config_entry_diagnostics(
 
 
 # --- end Security Center
+
+# --- Network Diagnostics (release 1.47.0, part 2) ---
+# The fleet-wide module's status as a last block ("network_diagnostics"):
+# states, reasons, router ids, target ids and counters only. The new address
+# fields of the poll (next hop, DNS servers in ``wan_status.diag_facts``) are
+# already covered by the shared exact key "address"; this block adds a
+# second, own redaction pass over them and over the new block (the shared
+# DIAGNOSTICS_TO_REDACT list is NOT edited). A failure here never fails the
+# download.
+_async_get_config_entry_diagnostics_sc = async_get_config_entry_diagnostics
+
+DIAG_REDACT_KEYS = frozenset(
+    {
+        "address",
+        "dns_servers",
+        "gateway",
+        "host",
+        "hosts",
+        "internal_networks",
+        "ipv4_gateway",
+        "ipv6_gateway",
+        "local_domains",
+        "next_hop",
+        "dns_query_name",
+        "http_path",
+    }
+)
+
+
+def _net_diagnostics_summary(hass: HomeAssistant) -> dict[str, Any]:
+    """Network diagnostics status; never fails the download."""
+    try:
+        from .core_masking import mask_for_output
+        from .diag_runtime import async_get_net_diagnostics
+
+        diag = async_get_net_diagnostics(hass)
+        if diag is None:
+            return {"loaded": False}
+        status = diag.status()
+        status.pop("ha", None)  # per-series detail is in the routes
+        return _redact(async_redact_data(mask_for_output(status), DIAG_REDACT_KEYS))
+    except Exception as err:  # noqa: BLE001 - the download must not fail
+        _LOGGER.debug("Network diagnostics summary failed: %s", type(err).__name__)
+        return {"loaded": False, "error": True}
+
+
+@_sec_wraps(_async_get_config_entry_diagnostics_sc)
+async def async_get_config_entry_diagnostics(
+    hass: HomeAssistant,
+    entry: OpenWrtConfigEntry,
+) -> dict[str, Any]:
+    """Diagnostics of the entry plus the network diagnostics block."""
+    diagnostics = await _async_get_config_entry_diagnostics_sc(hass, entry)
+    try:
+        wan = diagnostics["coordinator"]["data"].get("wan_status")
+        if isinstance(wan, dict) and isinstance(wan.get("diag_facts"), dict):
+            wan["diag_facts"] = async_redact_data(wan["diag_facts"], DIAG_REDACT_KEYS)
+    except (KeyError, TypeError, AttributeError):
+        pass  # no poll data yet
+    diagnostics["network_diagnostics"] = _net_diagnostics_summary(hass)
+    return diagnostics
+
+
+# --- end Network Diagnostics

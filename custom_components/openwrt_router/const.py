@@ -856,4 +856,25 @@ DIAG_LOSS_ROUNDS = 3
 # The module key is asked for again at most this often while missing.
 DIAG_MODULE_KEY_RETRY_SECONDS = 300
 DATA_NET_DIAGNOSTICS = f"{DOMAIN}_net_diagnostics"
+# Part 2 (diag_views.py, diag_entities.py, diag_context.py): routes, the
+# bounded entity set (six fleet sensors, one gateway sensor per router that
+# already has a device) and the context of a finding.
+SIGNAL_NET_DIAGNOSTICS = f"{DOMAIN}_net_diagnostics_updated"
+DATA_DIAG_VIEWS_BOUND = f"{DOMAIN}_diag_views_bound"
+DATA_DIAG_ENTITIES = f"{DOMAIN}_diag_entities"
+UID_FLEET_DIAG_SCORE = f"{FLEET_UID_PREFIX}diag_quality_score"
+UID_FLEET_DIAG_COVERAGE = f"{FLEET_UID_PREFIX}diag_monitoring_coverage"
+UID_FLEET_DIAG_FINDINGS = f"{FLEET_UID_PREFIX}diag_findings_active"
+UID_FLEET_DIAG_LATENCY = f"{FLEET_UID_PREFIX}diag_ha_internet_latency"
+UID_FLEET_DIAG_LOSS = f"{FLEET_UID_PREFIX}diag_ha_internet_loss"
+UID_FLEET_DIAG_DNS = f"{FLEET_UID_PREFIX}diag_dns_response_time"
+# Per router (on the router's existing device): ``<entry_id><suffix>``.
+DIAG_GATEWAY_UID_SUFFIX = "_diag_gateway_reachable"
+# Context of a finding: configuration changes / security incidents of the
+# same router this long before (or, detected late, after) the finding.
+DIAG_CONTEXT_WINDOW_SECONDS = 1800
+# Drift notes kept in memory for the context (oldest dropped first).
+DIAG_CONFIG_NOTES_MAX = 64
+# The Security Center overview is read at most this often per router.
+DIAG_CONTEXT_CACHE_SECONDS = 60
 # --- end Network Diagnostics

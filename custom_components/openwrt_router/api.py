@@ -7759,9 +7759,83 @@ def _diag_add_facts(status: dict[str, Any], interfaces: Any, wan_iface: Any) -> 
     derived (absent = unknown).
     """
     try:
-        status["diag_facts"] = diag_interface_facts(interfaces, wan_iface)
+        facts = diag_interface_facts(interfaces, wan_iface)
+        # part 2: LAN interfaces that should be up and are not (new key)
+        facts["down_interfaces"] = diag_down_interfaces(interfaces, wan_iface)
+        status["diag_facts"] = facts
     except Exception as err:  # noqa: BLE001 - diagnosis facts are optional
         _LOGGER.debug("Diagnosis facts not derived (%s)", type(err).__name__)
+
+
+# Protocols of uplinks and tunnels: their state is the WAN stage's business
+# (or none of ours), never a LAN interface down.
+_DIAG_UPLINK_PROTOS = frozenset(
+    {
+        "dhcp",
+        "dhcpv6",
+        "pppoe",
+        "pppoa",
+        "ppp",
+        "3g",
+        "qmi",
+        "ncm",
+        "mbim",
+        "modemmanager",
+        "6in4",
+        "6to4",
+        "6rd",
+        "dslite",
+        "map",
+        "wireguard",
+        "openvpn",
+        "l2tp",
+        "pptp",
+        "vti",
+        "gre",
+        "gretap",
+        "vxlan",
+        "xfrm",
+    }
+)
+DIAG_MAX_DOWN_INTERFACES = 16
+_DIAG_IFNAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,32}")
+
+
+def diag_down_interfaces(
+    interfaces: Any, wan_iface: Any = None
+) -> list[dict[str, Any]]:
+    """LAN interfaces that netifd should bring up but are down (pure).
+
+    Counted: not loopback, not the WAN interface, no uplink or tunnel
+    protocol, ``autostart`` not False and ``up`` not True. ``vlan`` marks an
+    interface on a VLAN device (``eth0.20``, ``br-lan.20``) or named like
+    one. Names only (logical interface names, no address), at most 16.
+    """
+    items = (
+        [i for i in interfaces if isinstance(i, dict)]
+        if isinstance(interfaces, list)
+        else []
+    )
+    out: list[dict[str, Any]] = []
+    for iface in items:
+        name = iface.get("interface")
+        if (
+            iface is wan_iface
+            or _diag_is_loopback_iface(iface)
+            or not isinstance(name, str)
+            or not _DIAG_IFNAME_RE.fullmatch(name)
+            or name.startswith("wan")
+            or iface.get("up") is True
+            or iface.get("autostart") is False
+            or str(iface.get("proto") or "").lower() in _DIAG_UPLINK_PROTOS
+        ):
+            continue
+        device = iface.get("l3_device") or iface.get("device") or ""
+        vlan = (isinstance(device, str) and "." in device) or "vlan" in name.lower()
+        out.append({"name": name, "vlan": bool(vlan)})
+        if len(out) >= DIAG_MAX_DOWN_INTERFACES:
+            break
+    return out
 
 
 # --- transport ----------------------------------------------------------------------
