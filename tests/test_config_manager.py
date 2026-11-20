@@ -55,7 +55,12 @@ from custom_components.openwrt_router.core_errors import (
     OperationInProgressError,
     RouterUnavailableError,
 )
-from custom_components.openwrt_router.core_models import BackupReason, BackupType
+from custom_components.openwrt_router.core_models import (
+    BackupReason,
+    BackupType,
+    Capability,
+    CapabilityState,
+)
 
 ADMIN = user_actor(ADMIN_ID)
 
@@ -404,6 +409,44 @@ async def test_retryable_failure_retried_once_after_900s(disks, tmp_path):
     await env.tick()
     assert len(_collected(env)) == 3
     assert len(await _records(env)) == 1
+    await stop(env)
+
+
+@pytest.mark.parametrize(
+    ("reason", "error_class"),
+    [("permission_denied", "permission"), ("not_detected", "not_available")],
+)
+async def test_missing_backup_right_is_a_problem_not_ok(
+    disks, tmp_path, caplog, reason, error_class
+):
+    """H2: a scheduled run without the backup right shows failed, once a day."""
+    provider = FakeConfigProvider()
+    provider.probe_states[Capability.CONFIG_BACKUP] = (
+        CapabilityState.UNAVAILABLE,
+        reason,
+    )
+    env = await cm_env(disks, tmp_path, provider=provider)
+    with patch.object(core_audit, "utcnow", env.clock.utc):
+        await env.tick()
+        assert _collected(env) == []
+        assert env.runtime.status(env.rid) == CONFIG_STATUS_FAILED
+        assert env.runtime.error_class(env.rid) == error_class
+        state = env.runtime.routers[env.rid]
+        assert state.last_attempt_at == env.clock.local()
+        assert state.last_scheduled_day == env.runtime._today_slot(env.rid)
+        blocked = bus_events(env.hass, "config_manager.backup_blocked")
+        assert len(blocked) == 1
+        assert blocked[0]["data"]["error_class"] == error_class
+        logged = [r for r in caplog.records if "backup right" in r.getMessage()]
+        assert len(logged) == 1
+        env.clock.advance(hours=2)
+        await env.tick()  # same day: no second log, no second event
+        assert len(bus_events(env.hass, "config_manager.backup_blocked")) == 1
+        assert len([r for r in caplog.records if "backup right" in r.getMessage()]) == 1
+        env = await restart(env)
+        assert env.runtime.status(env.rid) == CONFIG_STATUS_FAILED
+        assert env.runtime.error_class(env.rid) == error_class
+        assert env.router_calls() == []
     await stop(env)
 
 

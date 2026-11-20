@@ -76,6 +76,7 @@ from .core_errors import (
     AuthorizationError,
     BackupNotFoundError,
     ConfigApiError,
+    ErrorClass,
     OperationInProgressError,
     ProviderConflictError,
     RouterNotFoundError,
@@ -92,6 +93,7 @@ from .core_models import (
     CoreEvent,
     CoreEventType,
     DriftReport,
+    EventResult,
     PutVersionResult,
     async_actor_from_context,
 )
@@ -106,6 +108,13 @@ _EVENT_TYPES = frozenset(
         "security.config_option_changed",
     }
 )
+
+# Own audit type: the backup right is missing (once per router and day).
+EVENT_BACKUP_BLOCKED = f"{CONFIG_MANAGER_EVENT_PREFIX}backup_blocked"
+# _backup_blocker(): wait for a later tick (lock held, nothing known yet).
+BLOCK_BUSY = "busy"
+# Severity of the own audit entry (net_events.Severity value; not imported).
+_SEVERITY_WARNING = "warning"
 
 ProviderFactory = Callable[[HomeAssistant], Any]
 
@@ -134,6 +143,8 @@ class RouterState:
     last_attempt_at: datetime | None = None
     last_failure_at: datetime | None = None
     last_error_class: str | None = None
+    # day a missing backup right was logged and audited (once per day)
+    blocked_day: date | None = None
     # --- schedule memory (section 3)
     last_scheduled_day: date | None = None
     retry_at: datetime | None = None
@@ -281,6 +292,7 @@ class ConfigManagerRuntime:
             "runs_started": 0,
             "runs_failed": 0,
             "runs_deferred": 0,
+            "runs_blocked": 0,
             "drift_checks": 0,
             "drift_versions": 0,
             "refreshes": 0,
@@ -615,7 +627,7 @@ class ConfigManagerRuntime:
         try:
             events = self.api.events(
                 router_id=state.router_id,
-                types=[str(CoreEventType.BACKUP_FAILED)],
+                types=[str(CoreEventType.BACKUP_FAILED), EVENT_BACKUP_BLOCKED],
                 limit=20,
             )
         except Exception:  # noqa: BLE001 - audit not readable: no failure known
@@ -985,18 +997,73 @@ class ConfigManagerRuntime:
                 if self._current is job:
                     self._current = None
 
-    def _backup_possible(self, router_id: str) -> bool:
-        """No router lock held and config.backup usable (no router call)."""
+    def _backup_blocker(self, router_id: str) -> str | None:
+        """Why a run cannot start now (no router call); None = it can.
+
+        ``busy``: a router lock is held or the capability is not readable
+        (again at a later tick). ``permission`` / ``not_available``: the
+        provider reported config.backup unavailable - a problem the status
+        shows instead of "ok".
+        """
         try:
             if self.core.manager.locked(router_id):
-                return False
+                return BLOCK_BUSY
             status = self.api.capability(router_id, "config.backup")
         except ConfigApiError:
-            return False
-        return status.available or (
+            return BLOCK_BUSY
+        if status.available or (
             status.state is CapabilityState.UNKNOWN
             and str(status.reason) == CapabilityReason.DETERMINED_ON_FIRST_USE.value
+        ):
+            return None
+        if status.state is not CapabilityState.UNAVAILABLE:
+            return BLOCK_BUSY  # unknown / not probed yet: decided later
+        if str(status.reason) == CapabilityReason.PERMISSION_DENIED.value:
+            return str(ErrorClass.PERMISSION)
+        return str(ErrorClass.NOT_AVAILABLE)
+
+    def _backup_possible(self, router_id: str) -> bool:
+        """No router lock held and config.backup usable (no router call)."""
+        return self._backup_blocker(router_id) is None
+
+    def _mark_blocked(self, state: RouterState, job: _Job, error_class: str) -> None:
+        """The backup right is missing: failed status, the day counts as tried.
+
+        Logged and audited (``config_manager.backup_blocked``) at most once
+        per router and slot day; the status shows it until a version exists.
+        """
+        now = self.now()
+        today = self._today_slot(state.router_id)
+        state.last_attempt_at = now
+        state.last_failure_at = now
+        state.last_error_class = error_class
+        if job.kind == JOB_SCHEDULED:
+            state.last_scheduled_day = today
+            state.retry_at = None
+        else:
+            state.release_done.add(job.release or "")
+        self.stats["runs_blocked"] += 1
+        self._notify(state.router_id)
+        if state.blocked_day == today:
+            return
+        state.blocked_day = today
+        _LOGGER.warning(
+            "Configuration backup of %s skipped: the backup right is missing (%s)",
+            state.router_id,
+            error_class,
         )
+        try:
+            self.api.emit(
+                EVENT_BACKUP_BLOCKED,
+                source=CONFIG_MANAGER_MODULE,
+                router_id=state.router_id,
+                severity=_SEVERITY_WARNING,  # type: ignore[arg-type]
+                result=EventResult.FAILURE,
+                dedup_key=error_class,
+                data={"error_class": error_class, "job": job.kind},
+            )
+        except Exception:  # noqa: BLE001 - the audit is optional here
+            _LOGGER.debug("backup_blocked of %s not audited", state.router_id)
 
     async def _async_run_job(self, job: _Job) -> None:
         state = self.routers.get(job.router_id)
@@ -1005,8 +1072,12 @@ class ConfigManagerRuntime:
         if job.kind == JOB_DRIFT:
             await self._async_auto_drift(state)
             return
-        if not self._backup_possible(job.router_id):
+        blocker = self._backup_blocker(job.router_id)
+        if blocker == BLOCK_BUSY:
             self.stats["runs_deferred"] += 1  # again at a later tick
+            return
+        if blocker is not None:
+            self._mark_blocked(state, job, blocker)
             return
         scheduled = job.kind == JOB_SCHEDULED
         today = self._today_slot(job.router_id)
