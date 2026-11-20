@@ -71,12 +71,20 @@ Platte und keine geänderte `unique_id` oder Entity-ID. Nutzerdoku: `docs/config
 - Keine Migration nötig: bestehende `unique_id`s und Entity-IDs bleiben; der Manager hängt sich
   nicht in den Poll (`coordinator.py` ist unverändert).
 
+### Sicherheit
+
+- **Host-Key-Pinning für das SSH des Managers:** Archiv per `sysupgrade`, `uci show` und
+  Paketliste laufen nur über den gepinnten SSH-Weg des Cores (erster Key ausstehend bis zur
+  Bestätigung, abweichender Key abgelehnt); Fehlerklasse `denied` mit Grund `ssh_<grund>`.
+- **Routen-Pseudonyme mit Modul-Schlüssel:** Benutzer-Pseudonyme in den Antworten der Routen
+  sind mit dem abgeleiteten Modul-Schlüssel des Cores gesalzen.
+
 ### Bekannte Einschränkungen
 
 Ausführlich in `docs/configuration-manager.md`, Abschnitt 13.
 
-- Das SSH-Fallback des Managers (Archiv, `uci show`, Paketliste) prüft den Host-Key nicht
-  (gemeinsame SSH-Verbindung); gepinnt ist nur der Weg des Cores (ACL-Verteilung).
+- SSH des Managers nur mit bestätigtem Host-Key: bis zur Bestätigung im Panel kein Archiv
+  und keine UCI-Daten per SSH.
 - Größenlimit der Aufbewahrung (Core): eine gute geplante Version kann früher fallen als nötig.
 - Dedup verlangt neben dem Inhalts-Hash byte-gleiche Dateien (Core seit 1.44.0).
 - Die Warnung „zu wenig Platz auf dem Router“ der Restore-Prüfung erscheint nicht (der freie

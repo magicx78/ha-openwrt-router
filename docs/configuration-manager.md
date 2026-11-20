@@ -351,10 +351,14 @@ einen Router.
 
 Die Namen sind „Last configuration backup“, „Configuration backup status“, „Configuration
 versions“ und „Configuration drift“ (deutsch entsprechend). Statuswerte: `failed` heißt, der
-letzte Versuch scheiterte nach dem letzten Erfolg; `partial` heißt, die neueste Version ist unvollständig
+letzte Versuch scheiterte nach dem letzten Erfolg (auch nach einem HA-Neustart, aus dem
+Audit des Cores); fehlt dem Router das Backup-Recht, zeigt ein geplanter Lauf ebenfalls
+`failed` mit `error_class` `permission` bzw. `not_available` statt still `ok`; `partial` heißt, die neueste Version ist unvollständig
 (zum Beispiel nur der Snapshot nach einem Archivfehler); `never` heißt noch keine Version; `disabled` Backup aus.
 
-**Ereignisse.** Der Manager sendet **keine eigenen Ereignisse**. Er hört auf die Ereignisse
+**Ereignisse.** Der Manager sendet ein eigenes Ereignis: `config_manager.backup_blocked`
+(höchstens einmal je Router und Tag, `data.error_class` `permission` oder `not_available`),
+wenn ein geplanter Lauf am fehlenden Backup-Recht scheitert. Er hört auf die Ereignisse
 des Cores (Bus-Ereignis `openwrt_router_core_event`, Typ im Feld `type`) mit dem Präfix
 `configuration.`, `router.adopted` und `security.config_option_changed`, um Sensoren
 aktuell zu halten. Die Core-Typen, die er auslöst oder mitliest:
@@ -555,17 +559,26 @@ eine Gedächtnisstütze, keine Anleitung für Ihr Gerät.
   entpackt, 16 MiB je Datei, 5000 Mitglieder, Verhältnis höchstens 200:1 (ab 1 MiB entpackt),
   Namen höchstens 255 Zeichen. Es müssen `network` und `system` darin sein, sonst
   `incomplete`.
-- **SSH-Host-Key-Pinning, ehrlich:** Der Core liefert gepinntes SSH (der erste gesehene Key
-  ist *ausstehend*, bis ein Admin ihn bestätigt; ein abweichender Key wird immer abgelehnt;
-  Zurücksetzen nur ausdrücklich). Es gilt für das **Schreiben der ACL** und den gepinnten
-  Weg des Cores. **Die SSH-Zugriffe des Managers selbst (Archiv per `sysupgrade`, `uci show`
-  und Paketliste) laufen über die gemeinsame SSH-Verbindung der Integration, die den Host-Key
-  nicht prüft** (`known_hosts=None`, wie der SSH-Fallback des Polls). Wer im LAN zwischen Home
-  Assistant und Router sitzt, könnte dort das SSH-Passwort abgreifen oder ein gefälschtes
-  Archiv liefern, das in sich gültig ist. Bevorzugen Sie den cgi-Weg mit **HTTPS** und
-  nutzen Sie den SSH-Rückfall nur in einem vertrauenswürdigen Netz. Das Panel zeigt zwar
-  den Pin-Zustand und erlaubt Bestätigen/Zurücksetzen, schützt damit aber diesen SSH-Weg
-  nicht (siehe [Abschnitt 13](#13-bekannte-einschränkungen)).
+- **SSH-Host-Key-Pinning:** Jeder SSH-Zugriff des Managers (Archiv per `sysupgrade`,
+  `uci show` und Paketliste) läuft über den gepinnten Weg des Cores, ebenso das Schreiben der
+  ACL. Es gibt keinen ungeprüften SSH-Weg des Managers mehr.
+  - **Erster Kontakt:** Der Core liest nur den Host-Key (ohne Anmeldung) und legt ihn als
+    *ausstehend* ab. Der Lauf bricht mit der Fehlerklasse `denied` ab (Grund
+    `ssh_pin_pending`); der Router bekommt dabei kein Passwort. Ein Admin bestätigt den Key im
+    Panel unter „Zugang“ (Freigabe, dann Ausführen); erst danach liest der Manager per SSH.
+  - **Abweichender Key:** wird immer abgelehnt (`denied`, Grund `ssh_mismatch`), der Core
+    protokolliert das. Ein Key-Wechsel (z. B. nach einer Wiederherstellung oder einem
+    Neuaufsetzen) wird nur durch ausdrückliches Zurücksetzen im Panel übernommen.
+  - **Ohne Pin-Speicher des Cores** gibt es keinen SSH-Weg (`denied`, Grund
+    `ssh_pin_unavailable`); dann bleibt nur der cgi-Weg.
+  - Nach der ersten Ablehnung versucht ein Lauf keine weiteren SSH-Verbindungen. `denied`
+    zählt nicht als „Weg fehlt“: der Manager weicht deshalb nicht still auf einen anderen
+    SSH-Weg aus.
+  - Bevorzugen Sie trotzdem den cgi-Weg mit **HTTPS**: Der SSH-Fallback des Polls (nicht des
+    Managers) prüft den Host-Key weiterhin nicht.
+- **Maskierung nach Feldnamen:** Geheimwerte werden an ihrem Feld- bzw. Optionsnamen
+  erkannt (z. B. `key`, `password`). Wer ein Geheimnis wörtlich auch als SSID, Hostname oder
+  Beschreibung verwendet, sieht es dort weiterhin im Klartext.
 - **Installations-Schlüssel:** Die HMAC-Prüfwerte der Geheimwerte im Snapshot hängen am
   Schlüssel `.storage/openwrt_router.installation_key`. Geht er verloren, lassen sich Geheimwerte
   alter und neuer Versionen nicht mehr vergleichen (Reparatur-Hinweis, Neuanlage nur durch
@@ -596,6 +609,18 @@ Zahlen aus dem Code gezählt (Router-Aufrufe je Router; die Anmeldung zählt nic
   Config statt ein ubus-Aufruf).
 - Läufe gehen immer einzeln; eine Operation hat höchstens 180 s Gesamtzeit (cgi 60 s,
   SSH 120 s je Archiv).
+- **Eine Sperre je Router:** Jeder Router-Zugriff des Managers (Zeitplan, Release-Wechsel,
+  automatische Drift-Prüfung, Dienst, Backup-Route, Drift-Prüfung, Vergleich mit dem aktuellen
+  Stand und Restore-Prüfung) hält die Sperre seines Routers und danach den einen Lauf-Platz der
+  ganzen Flotte (Parallelität 1). Ist der Router oder der Platz belegt, antworten die Routen
+  sofort mit **409** `operation_in_progress` (`details.reason` = `router_busy`) und
+  `Retry-After: 30`; Dienst und Zeitplan warten bzw. nehmen den nächsten Takt.
+- **Mindestabstand 60 s je Router:** zwischen zwei manuellen Backups (Route und Dienst) und
+  zwischen zwei manuellen Live-Prüfungen (Drift-Prüfung, Vergleich mit dem aktuellen Stand,
+  Restore-Prüfung; sie teilen sich einen Abstand). Früher gibt es **429** `rate_limited` mit
+  `details.reason` = `min_gap_backup` bzw. `min_gap_live_check` und `Retry-After` = restliche
+  Sekunden; der Dienst meldet den Router als fehlgeschlagen (`error_class` `rate_limited`).
+  Abgelehnte Aufrufe zählen nicht für den Abstand.
 - **Home Assistant:** Ein Archiv (höchstens 16 MiB) und seine Prüfung liegen kurz im
   Arbeitsspeicher; die Prüfung läuft im Executor, nicht im Event-Loop. Auf der Platte
   braucht jeder Router bis zu 50 MiB (insgesamt 250 MiB).
@@ -633,7 +658,11 @@ und Größenangaben oben sind Grenzwerte aus dem Code, keine Messwerte.
   vorgesehen, aber der Manager liest den freien Platz nicht aus; sie erscheint derzeit nicht.
 - **Größenlimit der Aufbewahrung (Core):** Eine gute geplante Version kann früher fallen als
   nötig ([Abschnitt 4](#4-versionen-dedup-und-aufbewahrung); als Test festgehalten).
-- **SSH ohne Host-Key-Prüfung** im Weg des Managers ([Abschnitt 11](#11-sicherheitshinweise-und-schutzgrenzen)).
+- **SSH des Managers nur mit bestätigtem Host-Key:** Bis ein Admin den Key bestätigt hat,
+  gibt es kein Archiv und keine UCI-Daten per SSH
+  ([Abschnitt 11](#11-sicherheitshinweise-und-schutzgrenzen)).
+- **Geheimnis als SSID oder Hostname** bleibt sichtbar (Maskierung nach Feldnamen,
+  [Abschnitt 11](#11-sicherheitshinweise-und-schutzgrenzen)).
 - **Automatische Drift-Prüfung** nur bei Änderungen, die der Fingerprint zeigt
   ([Abschnitt 5](#5-drift-erkennung)).
 - **Dedup braucht byte-gleiche Dateien** ([Abschnitt 4](#4-versionen-dedup-und-aufbewahrung)).

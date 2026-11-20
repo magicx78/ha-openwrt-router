@@ -69,10 +69,6 @@ Branch `claude/config-manager-d9fdac`. Nutzerdoku: `docs/configuration-manager.m
       Admins) und **Beschreibung nachträglich ändern**.
 - [ ] **Messung der echten Last** an Geräten: Laufzeit und Größe von `sysupgrade -b`, Last auf
       dem Router während des Archivs, Größe des Speichers nach einigen Wochen.
-- [ ] **SSH-Weg des Managers ohne Host-Key-Prüfung:** Archiv per `sysupgrade`, `uci show` und
-      Paketliste laufen über die gemeinsame SSH-Verbindung (`known_hosts=None`, `api.py`
-      `_config_ssh_open`); gepinnt ist nur der Weg des Cores. Auf `async_ssh_run_pinned`
-      umstellen oder den SSH-Weg nur mit bestätigtem Pin erlauben.
 - [ ] **Dedup über byte-gleiche Dateien** (Core seit 1.44.0) mit echten Archiven prüfen; wenn
       Archive nie byte-gleich sind, wächst der Speicher täglich. Gegebenenfalls Core-Regel
       lockern.
