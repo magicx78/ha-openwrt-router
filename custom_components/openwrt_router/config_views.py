@@ -558,6 +558,25 @@ def _disabled(
     )
 
 
+# Reason code of a plain HTTP entry (config_provider.REASON_INSECURE_TRANSPORT).
+REASON_INSECURE_TRANSPORT = "insecure_transport"
+
+
+def _refuse_acl_on_http(runtime: Any, router_id: str) -> None:
+    """L1: no backup tier (``cgi-io: backup``) for a plain HTTP entry.
+
+    The right is useless there (no cgi-backup over HTTP) and would belong to
+    a session whose token travels unencrypted. The tier is refused whole: a
+    variant without that right is not in the tier registry.
+    """
+    if not runtime.cgi_transport_secure(router_id):
+        raise CapabilityUnavailableError(
+            capability=Capability.CONFIG_CGI_BACKUP.value,
+            reason=REASON_INSECURE_TRANSPORT,
+            router_id=router_id,
+        )
+
+
 # -- request context and validation -------------------------------------------------
 
 
@@ -974,7 +993,7 @@ class RouterView(_GetView):
                 for tier in DEFAULT_TIER_REGISTRY.offerable(ctx.runtime.options(rid))
                 if tier.tier_id == TIER_CONFIG_BACKUP_READ
             ]
-            if enabled
+            if enabled and ctx.runtime.cgi_transport_secure(rid)
             else []
         )
         return {
@@ -1390,6 +1409,7 @@ class AclOfferView(_PostView):
     ) -> Any:
         state = ctx.router(router_id)
         await read_body(request)
+        _refuse_acl_on_http(ctx.runtime, state.router_id)
         approval = await ctx.api.async_request_acl_deploy(
             state.router_id, [TIER_CONFIG_BACKUP_READ], actor=ctx.actor
         )
@@ -1557,6 +1577,8 @@ class ExecuteView(_PostView):
         action = str(approval.action)
         aid = approval.approval_id
         if action == GuardedAction.ACL_DEPLOY:
+            # R18 offers only the backup tier: never written on plain HTTP.
+            _refuse_acl_on_http(ctx.runtime, approval.router_id)
             result = await ctx.api.async_deploy_acl_offer(aid, actor=ctx.actor)
         elif action == GuardedAction.SSH_PIN_CONFIRM:
             result = await ctx.api.async_confirm_ssh_pin(aid, actor=ctx.actor)

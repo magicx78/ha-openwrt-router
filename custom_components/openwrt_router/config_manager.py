@@ -69,14 +69,17 @@ from .const import (
     CONFIG_STATUS_FAILED,
     CONFIG_STATUS_NEVER,
     CONFIG_STATUS_RUNNING,
+    CONF_PROTOCOL,
     DATA_CONFIG_MANAGER,
     DEFAULT_CONFIG_BACKUP_SCHEDULE,
     DEFAULT_CONFIG_BACKUP_TIME,
     DEFAULT_CONFIG_DRIFT_CHECK,
+    DEFAULT_PROTOCOL,
     DOMAIN,
     OPTION_CONFIG_BACKUP_SCHEDULE,
     OPTION_CONFIG_BACKUP_TIME,
     OPTION_CONFIG_DRIFT_CHECK,
+    PROTOCOL_HTTP,
     SERVICE_CREATE_CONFIG_BACKUP,
     SIGNAL_CONFIG_MANAGER,
 )
@@ -530,6 +533,18 @@ class ConfigManagerRuntime:
         state = self.routers.get(router_id)
         entry = self.entries.get(state.entry_id) if state is not None else None
         return getattr(entry, "options", None) or {}
+
+    def cgi_transport_secure(self, router_id: str) -> bool:
+        """False when the router's entry talks plain HTTP.
+
+        Same rule as ``api.config_cgi_transport_secure`` (only ``http`` is
+        insecure), read from the entry the api was built from, so the api
+        object is not touched. An unknown router keeps the TLS behaviour.
+        """
+        state = self.routers.get(router_id)
+        entry = self.entries.get(state.entry_id) if state is not None else None
+        data = getattr(entry, "data", None) or {}
+        return data.get(CONF_PROTOCOL, DEFAULT_PROTOCOL) != PROTOCOL_HTTP
 
     def enabled(self, router_id: str) -> bool:
         """``config_backup_enabled`` of the router's entry (default OFF)."""

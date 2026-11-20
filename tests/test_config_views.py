@@ -53,6 +53,7 @@ from custom_components.openwrt_router.acl_provisioning import (
 )
 from custom_components.openwrt_router.api import OpenWrtHostKeyError
 from custom_components.openwrt_router.const import (
+    CONF_PROTOCOL,
     CONFIG_MANAGER_EVENT_PREFIX,
     CONFIG_MANAGER_MODULE,
     CONFIG_ROUTE_PSEUDONYM_PURPOSE,
@@ -1804,6 +1805,42 @@ async def test_acl_offer_and_deploy_need_the_backup_option(disks, tmp_path):
     text = json.dumps(published, default=str)
     assert ADMIN_ID not in text and OTHER_ADMIN_ID not in text
     assert published[0]["actor"]["kind"] == "user"
+    await stop(env)
+
+
+async def test_http_entry_gets_no_acl_offer_with_the_backup_right(disks, tmp_path):
+    """L1 for the ACL: on a plain HTTP entry ``cgi-io: backup`` is useless
+    and its session token travels unencrypted. R2 offers no tier, R18
+    refuses (``insecure_transport``) and R20 writes nothing, also for an
+    offer approved while the entry still used TLS. HTTPS stays as it was."""
+    env = await cm_env(disks, tmp_path)
+    rid = env.rid
+    router_api = acl_capable(env)
+    entry_data = env.entry_of(rid).data
+    assert entry_data[CONF_PROTOCOL] == "https"
+    async with http(env.hass) as h:
+        resp = await h.get(f"/routers/{rid}")
+        assert resp.data["acl"]["offerable"] == ["config_backup_read"]
+        offer = await h.post(f"/routers/{rid}/acl-offer")
+        assert offer.status == 200, offer.body
+        assert "read cgi-io:backup" in offer.data["offer"]["rights_added"]
+        aid = offer.data["approval"]["approval_id"]
+        resp = await h.post(f"/approvals/{aid}/approve", user=OTHER_ADMIN_ID)
+        assert resp.status == 200, resp.body
+
+        entry_data[CONF_PROTOCOL] = "http"  # the entry now talks plain HTTP
+        resp = await h.get(f"/routers/{rid}")
+        assert resp.data["acl"]["offerable"] == []
+        for path in (f"/routers/{rid}/acl-offer", f"/approvals/{aid}/execute"):
+            resp = await h.post(path)
+            assert resp.status == 409, (path, resp.body)
+            assert resp.data["code"] == "capability_unavailable"
+            assert resp.data["details"]["reason"] == "insecure_transport"
+            assert resp.data["details"]["capability"] == "config.cgi_backup"
+        await drain(env.hass)
+    written = [c for c in router_api._call.await_args_list if c.args[1] == "write"]
+    assert written == []
+    assert env.api.events(router_id=rid, types=["security.acl_deployed"]) == ()
     await stop(env)
 
 

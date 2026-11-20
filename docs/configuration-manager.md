@@ -421,7 +421,10 @@ braucht die ACL-Stufe `config_backup_read` mit diesen rpcd-Rechten (alle nur **l
 
 **Nur auf Angebot, nie automatisch.** Die Stufe wird nur angeboten, wenn `config_backup_enabled`
 am Router an ist. Auf den Router wird sie erst nach einer ausdrücklichen Einzelfreigabe
-geschrieben. Der Ablauf im Panel, Abschnitt „Zugang“:
+geschrieben. **Nicht bei HTTP-Einträgen:** Dort nützt `cgi-io: backup` nichts und gehörte zu
+einer Sitzung, deren Token unverschlüsselt läuft. Das Panel bietet die Stufe dann nicht an;
+Angebot und Ausführen werden abgelehnt (`capability_unavailable`, Grund `insecure_transport`),
+auch für eine Freigabe, die noch unter HTTPS erteilt wurde. Der Ablauf im Panel, Abschnitt „Zugang“:
 
 1. Angebot beantragen. Das Panel zeigt neue und entfallende Rechte sowie die Risiken.
 2. Haken setzen („verstanden“) und freigeben. Ein Admin darf seinen eigenen Antrag freigeben;
