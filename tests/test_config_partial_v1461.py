@@ -380,3 +380,33 @@ async def test_acl_denied_config_with_refused_ssh_login_stays_an_error() -> None
     with pytest.raises(OpenWrtConfigFetchPermissionError):
         await api.config_uci_get("rpcd", ssh=ssh)
     assert ssh.calls == ["uci show rpcd"]
+
+
+# -- R1: network and system must exist; other absent configs are fine ---------
+
+
+def _snapshot_run(**absent: Exception) -> Any:
+    uci = {**ubus_values(), "rpcd": {}, **absent}
+    api = FakeApi(uci=uci, cgi=OpenWrtConfigFetchPermissionError("no right"))
+    api.ssh = OpenWrtConfigFetchPermissionError("no ssh")
+    return collect(api)
+
+
+@pytest.mark.parametrize("name", ["network", "system"])
+async def test_absent_required_config_makes_the_run_incomplete(name: str) -> None:
+    gone = OpenWrtConfigFetchNotAvailableError(f"uci get {name}: absent")
+    meta = (await _snapshot_run(**{name: gone})).meta
+    assert meta.status is VersionStatus.PARTIAL
+    assert meta.error_class is not None and meta.error_class.value == "incomplete"
+    assert f"uci_missing:{name}" in meta.warnings
+
+
+async def test_access_point_without_firewall_dhcp_wireless_stays_ok() -> None:
+    # A wired-only access point may lack all three packages' configs.
+    absent = {
+        name: OpenWrtConfigFetchNotAvailableError(f"uci get {name}: absent")
+        for name in ("firewall", "dhcp", "wireless")
+    }
+    meta = (await _snapshot_run(**absent)).meta
+    assert meta.backup_type is BackupType.UCI_SNAPSHOT
+    assert meta.status is VersionStatus.OK

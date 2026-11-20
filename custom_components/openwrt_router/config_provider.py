@@ -65,6 +65,7 @@ from .config_collector import (
 )
 from .config_const import (
     ARCHIVE_CONFIG_PREFIX,
+    ARCHIVE_REQUIRED_CONFIGS,
     CHAIN_SKIP_ERRORS,
     DEFAULT_ARCHIVE_LIMITS,
     ERR_AUTH,
@@ -829,14 +830,17 @@ def _uci_gap(uci: UciCollection | None, uci_stop: str | None) -> str | None:
 
     None when every config was read or reported not_available (absent on
     the router). An abort (unreachable/timeout/auth) gives its own class,
-    single unreadable configs give ``incomplete``.
+    single unreadable configs give ``incomplete``. ``network`` and
+    ``system`` (ARCHIVE_REQUIRED_CONFIGS) exist on every OpenWrt router:
+    absent means the read is not trustworthy, so ``incomplete`` too.
     """
     if uci_stop is not None:
         return uci_stop
     if uci is None:
         return ERR_INCOMPLETE
     if uci.not_tried or any(
-        error_class != ERR_NOT_AVAILABLE for _name, error_class in uci.failed
+        error_class != ERR_NOT_AVAILABLE or name in ARCHIVE_REQUIRED_CONFIGS
+        for name, error_class in uci.failed
     ):
         return ERR_INCOMPLETE
     return None
