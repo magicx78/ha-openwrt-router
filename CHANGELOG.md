@@ -4,14 +4,22 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
-### Hinzugefügt (1.46.0, Teil 1: Security Center – Verdrahtung)
+## [1.46.0] - 2026-11-20
 
-- **Security Center (`security_center.py`), standardmäßig aus.** Ein Center je HA-Instanz
-  verbindet die reinen Module `security_*` mit Daten, die die Integration schon hat:
-  Netzwerk-Intelligenz (als Poll-Beobachter: WLAN-Zeilen, NI-Ereignisse, Uptime, Clients),
-  Client-Stabilität (Live-Zustand für das Vertrauensbuch) und den Enterprise Core
-  (Drift-Ereignisse, `router.forgotten`, Fähigkeiten, Modulschlüssel). **Kein zusätzlicher
-  Router-Aufruf je Poll** (Test zählt die ubus-POSTs mit und ohne Center).
+Security Center: eine Beobachtungsschicht für das Netz auf dem Enterprise Core von 1.44.0 und
+den Modulen Netzwerk-Intelligenz, Client-Stabilität und Configuration Manager. Es **beobachtet
+nur**: keine Sperren, keine Quarantäne, keine Scans, keine Firewall-Änderung. **Standardmäßig
+aus**; ausgeschaltet gibt es keinen Beobachter, keinen Listener, keinen Socket und keine
+Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `docs/security-center.md`.
+
+### Hinzugefügt
+
+- **Security Center (`security_center.py`).** Ein Center je HA-Instanz verbindet die reinen
+  Module `security_*` mit Daten, die die Integration schon hat: Netzwerk-Intelligenz (als
+  Poll-Beobachter: WLAN-Zeilen, NI-Ereignisse, Uptime, Clients), Client-Stabilität
+  (Live-Zustand für das Vertrauensbuch) und den Enterprise Core (Drift-Ereignisse,
+  `router.forgotten`, Fähigkeiten, Modulschlüssel). **Kein zusätzlicher Router-Aufruf je Poll** (Test zählt die ubus-POSTs mit und
+  ohne Center).
 - **Aus heißt aus:** ohne `enabled` liest das Center nur seinen Speicher; kein Beobachter,
   kein Listener, keine Schreibvorgänge, keine Ereignisse. NI-Vorfälle, NI-Zähler,
   Health-Score und Client-Stabilität sind mit inaktivem und aktivem Center identisch
@@ -29,15 +37,12 @@ All notable changes to the OpenWrt Router integration will be documented in this
   bleibt als `.bak`): Einstellungen, Vertrauensbuch, Baselines, maskierte Hinweise, Zeitleiste
   (2000 Einträge / 14 Tage), Dedup-Marken. Keine HA-Benutzer-IDs.
 - **Manuelle Aktionen** (Gerät bestätigen, Namen setzen, Hinweis-Status, Einstellungen) nur für
-  Administratoren über den Core-Guard, jede auditiert. Keine Quarantäne in Teil 1.
+  Administratoren über den Core-Guard, jede auditiert. Keine Quarantäne.
 - **Übersicht:** Score mit Faktoren und Abdeckung (ohne Quelle `None`, nie „gesund“),
   Hinweise, Zeitleiste mit Filtern, Geräteliste, Verfügbarkeit je Erkennung (verfügbar /
   eingeschränkt / nicht verfügbar mit Grund, „Format unbestätigt“ für Firewall- und DNS-Logs).
-  Klartext nur für Administratoren, sonst Pseudonyme. Syslog- und Collector-Weg melden in
-  Teil 1 „nicht verfügbar“ mit Grund.
-
-### Hinzugefügt (1.46.0, Teil 2: Syslog-Empfänger, HTTP-Routen, Flotten-Sensoren, Diagnose)
-
+  Klartext nur für Administratoren, sonst Pseudonyme. Der Collector-Weg meldet „nicht
+  verfügbar“ mit Grund.
 - **Syslog-Empfänger (`security_syslog.py`):** lokaler UDP-Listener (Standardport 5514) für
   das Remote-Log der Router (`logd` `log_ip`/`log_port`). Er bindet **nur**, wenn das Center
   an ist und der Log-Weg `syslog` gewählt ist; sonst gibt es keinen Socket. Absender nur aus
@@ -63,8 +68,25 @@ All notable changes to the OpenWrt Router integration will be documented in this
   der letzten Stunde, Abdeckung der Erkennung. Werte nur aus dem Center (keine Router-Aufrufe,
   per Signal aktualisiert); ohne liefernde Quelle `None` (unbekannt), nie 0. Die Sensoren gibt
   es nur bei eingeschaltetem Center; Ausschalten entfernt sie aus der Entity-Registry.
+- **Panel-Tab „Security Center“** unter Enterprise (neben „Konfiguration“) mit den Bereichen
+  Übersicht, Zeitleiste, Geräte, Erkennungen und Einstellungen sowie dem Detail eines
+  Hinweises. Der Tab liest nur über die Routen oben; Schreibknöpfe haben nur Administratoren.
+  Bei ausgeschaltetem Center erklärt er, was das Center tut und nicht tut.
 - **Diagnose:** neuer Block `security_center` am Ende (nur Zähler, Zustände und Gründe;
   maskiert und geschwärzt, keine MAC, Adresse, Hostname, Benutzer-ID oder Schlüssel).
+
+### Hinweise
+
+- **Standardmäßig aus.** Einschalten im Panel unter Enterprise → Security Center (nur
+  Administratoren). Es gibt keinen Optionsdialog und keinen Dienst dafür.
+- **Keine neuen Router-Rechte.** Die ACL bleibt unverändert; das Security Center schreibt
+  nichts auf einen Router. Den Log-Versand der Router (`log_ip`) richtet der Nutzer selbst ein
+  (Befehle und Rückweg in `docs/security-center.md`).
+- **Der Collector-Weg ist noch nicht verfügbar** (`log_path: collector` meldet „nicht
+  verfügbar“). Firewall- und DNS-Erkennungen setzen den Syslog-Weg voraus; ihre Logformate sind
+  an echten Geräten unbestätigt.
+- **Nicht getestet** gegen echte Router oder eine echte Home-Assistant-Instanz; die Tests
+  laufen ohne Geräte.
 
 ## [1.45.0] - 2026-11-19
 

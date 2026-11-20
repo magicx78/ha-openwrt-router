@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-19 · Version: v1.45.0
+Stand: 2026-11-20 · Version: v1.46.0
 
 ---
 
@@ -91,6 +91,31 @@ Branch `claude/config-manager-d9fdac`. Nutzerdoku: `docs/configuration-manager.m
       Freigabe durch einen anderen Admin erzwungen werden können.
 - [ ] **`authSig` auf GET-Routen ablehnen.** Lesende Routen sollen eine mitgeschickte
       Signatur nicht still annehmen, sondern die Anfrage mit 400 abweisen.
+
+### Security Center (Plan `docs/plans/2026-11-17-security-center.md`, 1.46.0)
+
+Branch `claude/security-center-6fdcdd`. Nutzerdoku: `docs/security-center.md`.
+
+- [x] Center, Vertrauensbuch, Erkennungen (WLAN, Firewall, DNS, Konfiguration), Syslog-Weg A,
+      Routen, Flotten-Sensoren, Diagnose, Panel-Tab (1.46.0).
+- [ ] **Collector (Weg B)** bauen: `log_path: collector` meldet heute „nicht verfügbar“.
+- [ ] **Quellen der Gruppe b mit ACL:** Conntrack-Maximum, nft-Zähler, `/proc/net/snmp`,
+      dnsmasq-Metriken, IPv6-Nachbarn, WLAN-Scan, `uci get firewall`; Rechte über die gestufte
+      Core-ACL anbieten (nicht in 1.46.0 gebaut).
+- [ ] **Bind-Adresse des Syslog-Empfängers einstellbar** (heute fest `0.0.0.0`, nur IPv4).
+- [ ] **Absender mit Hostname:** Router, die mit Hostnamen statt IP eingetragen sind, kommen
+      nicht auf die Absenderliste (kein DNS-Lookup).
+- [ ] **Zeitzonen-Offset des Routers lernen:** heute ist die Logzeit die Empfangszeit.
+- [ ] **Router-Namen in der Security-API:** der Tab zeigt Router als gekürzte ID.
+- [ ] **Markierung in der Topologie** (betroffene Router und Geräte) bauen.
+- [ ] **Logformate an echten Geräten bestätigen** (nur lesend, mit Freigabe): fw4-Logfelder,
+      dnsmasq-Abfragezeile, Kopf der logd-Remote-Zeile, dropbear-Fehlzeile; danach
+      `FORMAT_CONFIRMED` anpassen. Offen auch: Port 5514 auf HA OS, Panel im echten Home
+      Assistant als Admin und Nicht-Admin.
+- [ ] **Nicht angebundene Erkennungen** aus dem Plan: Admin-Anmeldefehler (dropbear), MAC-Spoofing-
+      und Verkehrs-Indikator, ungewöhnliche Verbindungszeiten, Rogue-AP-Indikator.
+- [ ] **`fw_mgmt_access` ohne Verwaltungsadressen:** das Center übergibt keine `mgmt_addrs`;
+      heute zählen nur die Zielports.
 
 ### Client-Stabilität (Plan `docs/plans/2026-11-16-client-stability.md`, 1.42.0)
 
