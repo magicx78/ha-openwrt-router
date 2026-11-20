@@ -91,6 +91,12 @@ Branch `claude/config-manager-d9fdac`. Nutzerdoku: `docs/configuration-manager.m
       Freigabe durch einen anderen Admin erzwungen werden können.
 - [ ] **`authSig` auf GET-Routen ablehnen.** Lesende Routen sollen eine mitgeschickte
       Signatur nicht still annehmen, sondern die Anfrage mit 400 abweisen.
+- [ ] **Ausgang des SSH-Archivwegs merken** (PR 59, Nachprüfung). Root auf HTTPS, `cgi-io`
+      fehlt, SSH-Port von Home Assistant aus zu: Jeder Tageslauf fordert das Archiv an und
+      endet unvollständig (`unreachable`/`timeout`), bis die nächste Probe läuft. Wie beim
+      cgi-Weg (`_cgi_seen`) den echten Ausgang des SSH-Wegs merken, damit Anzeige
+      (`config.ssh_root`) und Lauf-Entscheidung früher nachziehen. Seit 1.46.1 nennt das
+      Panel den SSH-Weg und den nächsten Schritt ehrlich.
 
 ### Security Center (Plan `docs/plans/2026-11-17-security-center.md`, 1.46.0)
 

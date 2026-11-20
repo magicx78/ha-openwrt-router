@@ -796,6 +796,8 @@ const PATH_FAILURE_TEXT: Record<string, string> = {
   permission: 'dem Router fehlt das Recht dafür',
   not_available: 'auf dem Router nicht vorhanden',
   'cgi.not_available': 'Paket cgi-io nicht installiert',
+  'ssh.unreachable': 'SSH (Port 22) nicht erreichbar',
+  'ssh.timeout': 'SSH (Port 22) antwortet nicht rechtzeitig',
   insecure_transport: 'Verbindung ohne TLS (HTTP)',
   unreachable: 'Router nicht erreichbar',
   timeout: 'Zeitüberschreitung beim Router',
@@ -806,6 +808,9 @@ const PATH_FAILURE_TEXT: Record<string, string> = {
   invalid: 'Archiv ungültig',
   checksum_mismatch: 'Prüfsumme stimmt nicht',
 };
+
+const SSH_PORT_STEP =
+  'SSH (Port 22) ist von Home Assistant aus nicht erreichbar: auf dem Router freigeben oder das Paket cgi-io installieren.';
 
 const NEXT_STEP: Record<string, string> = {
   'ssh.pin_pending': 'SSH-Host-Key bestätigen (Bereich „Zugang“ unten).',
@@ -818,7 +823,23 @@ const NEXT_STEP: Record<string, string> = {
   'ssh.not_probed': '„Jetzt sichern“: Der Lauf fordert das Archiv an und zeigt, ob der Weg über SSH als root geht.',
   'cgi.unreachable': 'Später erneut sichern.',
   'cgi.timeout': 'Später erneut sichern.',
+  'ssh.unreachable': SSH_PORT_STEP,
+  'ssh.timeout': SSH_PORT_STEP,
 };
+
+/** Error class text when the class came from the SSH archive path, not from the router as a whole. */
+const SSH_PATH_CLASS_TEXT: Record<string, string> = {
+  unreachable: 'Der Archivweg über SSH (Port 22) war nicht erreichbar; der Router selbst hat geantwortet.',
+  timeout: 'Der Archivweg über SSH (Port 22) hat nicht rechtzeitig geantwortet; der Router selbst hat geantwortet.',
+};
+
+/** Text for the run's error class; an SSH-only class never reads as "router offline". */
+function partialClassText(errorClass: string, warnings: readonly string[]): string {
+  const fromSsh = warnings.includes(`archive_unavailable:ssh.${errorClass}`)
+    && !warnings.some(w => w.startsWith('uci_unavailable'));
+  const sshText = fromSsh ? SSH_PATH_CLASS_TEXT[errorClass] : undefined;
+  return sshText ?? ERROR_CLASS_TEXT[errorClass] ?? `Fehlerart: ${errorClass}.`;
+}
 
 function splitWarning(code: string): [string, string | null] {
   const at = code.indexOf(':');
@@ -871,7 +892,7 @@ export interface PartialInfo {
 /** Error class, reasons and next steps of an incomplete run (status "Unvollständig"). */
 export function partialInfo(errorClass: string | null, warnings: readonly string[]): PartialInfo {
   const base = 'Das letzte Backup ist unvollständig.';
-  const cls = errorClass ? ` ${ERROR_CLASS_TEXT[errorClass] ?? `Fehlerart: ${errorClass}.`}` : '';
+  const cls = errorClass ? ` ${partialClassText(errorClass, warnings)}` : '';
   const steps = warnings.map(pathKey).map(k => (k ? NEXT_STEP[k] : undefined))
     .filter((s): s is string => s !== undefined);
   return {

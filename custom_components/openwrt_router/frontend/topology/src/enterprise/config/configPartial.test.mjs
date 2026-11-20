@@ -190,3 +190,23 @@ test('failed archive paths lead to their next steps', () => {
   assert.ok(nextSteps.some(s => s.includes('ACL-Angebot')), nextSteps.join(' | '));
   assert.ok(nextSteps.some(s => s.includes('root')), nextSteps.join(' | '));
 });
+
+// ── PR 59 re-review 1: an SSH path that does not answer is not "router offline" ─
+
+test('an unreachable SSH archive path is named as such, with a next step', () => {
+  for (const cls of ['unreachable', 'timeout']) {
+    const info = partialInfo(cls, ['archive_unavailable:cgi.not_available', `archive_unavailable:ssh.${cls}`]);
+    const all = [info.classText, ...info.reasons].join(' | ');
+    assert.ok(!all.includes('Router war nicht erreichbar') && !all.includes('Router nicht erreichbar'), all);
+    assert.ok(!all.includes('Zeitüberschreitung beim Router'), all);
+    assert.match(info.classText, /SSH/);
+    assert.ok(info.nextSteps.some(s => s.includes('Port 22') && s.includes('cgi-io')), info.nextSteps.join(' | '));
+  }
+});
+
+test('a router that really did not answer keeps the general text', () => {
+  const info = partialInfo('unreachable', ['uci_unavailable:unreachable']);
+  assert.match(info.classText, /Router war nicht erreichbar/);
+  const cgi = partialInfo('timeout', ['archive_unavailable:cgi.timeout']);
+  assert.match(cgi.classText, /Zeitüberschreitung beim Router/);
+});

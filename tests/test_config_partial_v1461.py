@@ -600,3 +600,25 @@ async def test_http_run_names_why_cgi_was_not_tried() -> None:
     assert meta.status is VersionStatus.PARTIAL
     assert "archive_unavailable:cgi.insecure_transport" in meta.warnings
     assert "archive_unavailable:ssh.auth" in meta.warnings
+
+
+# -- re-review 1: SSH port closed is the SSH path's class, named per path -----
+
+
+@pytest.mark.parametrize(
+    ("error", "cls"),
+    [
+        (OpenWrtConnectionError("port closed"), "unreachable"),
+        (OpenWrtTimeoutError("no answer"), "timeout"),
+    ],
+)
+async def test_closed_ssh_port_names_the_ssh_path(error: Exception, cls: str) -> None:
+    # Root on HTTPS, cgi-io missing, SSH port closed: the run stays partial
+    # (decided), and the class is marked as the SSH path's, not the router's.
+    _chosen, version = await _first_run(_no_cgi_io(ssh=error))
+    meta = version.meta
+    assert meta.status is VersionStatus.PARTIAL
+    assert meta.error_class is not None and meta.error_class.value == cls
+    assert f"archive_unavailable:ssh.{cls}" in meta.warnings
+    assert "archive_unavailable:cgi.not_available" in meta.warnings
+    assert not [w for w in meta.warnings if w.startswith("uci_unavailable")]
