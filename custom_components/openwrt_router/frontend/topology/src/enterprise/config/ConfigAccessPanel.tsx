@@ -182,13 +182,15 @@ function ApprovalAction({ api, startLabel, confirmText, executeLabel, start, res
   );
 }
 
-export function ConfigAccessPanel({ api, detail, approvals, readOnly, enabled, onChanged }: {
+export function ConfigAccessPanel({ api, detail, approvals, readOnly, enabled, rightsMissing, onChanged }: {
   api: ConfigApi;
   detail: RouterDetail;
   approvals: readonly Approval[];
   readOnly: boolean;
   /** Backup function switched on; the ACL deploy is offered only then. */
   enabled: boolean;
+  /** The router really lacks read rights for the backup (backupRightsMissing). */
+  rightsMissing: boolean;
   onChanged: () => void;
 }) {
   const pin = detail.sshPin;
@@ -247,7 +249,8 @@ export function ConfigAccessPanel({ api, detail, approvals, readOnly, enabled, o
         <div className="cfg-stack">
           <div className="cfg-subtitle">rpcd-ACL</div>
           <div className="cfg-hint">
-            Für das Backup fehlen dem Router Leserechte (Stufe <span className="diag-mono">{detail.acl.offerable.join(', ')}</span>
+            {rightsMissing ? 'Für das Backup fehlen dem Router Leserechte' : 'Das Backup läuft mit den vorhandenen Rechten; optional sind Leserechte'}
+            {' '}(Stufe <span className="diag-mono">{detail.acl.offerable.join(', ')}</span>
             {detail.acl.deployedVersion !== null && <>; verteilt ist Version {detail.acl.deployedVersion}</>}).
             Das Angebot zeigt die Änderung; nach der Freigabe schreibt Home Assistant die ACL auf den Router und startet rpcd einmal neu.
           </div>
