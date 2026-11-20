@@ -661,6 +661,10 @@ async def read_body(
             data = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
             raise _bad("body", "not_json") from None
+        except RecursionError:
+            # Nesting deeper than the parser follows ("[" * 4000 fits in
+            # 4 KiB): a bad body, not a server error.
+            raise _bad("body", "invalid_body") from None
     if not isinstance(data, dict):
         raise _bad("body", "not_an_object")
     if any(key not in fields for key in data):

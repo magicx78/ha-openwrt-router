@@ -597,6 +597,26 @@ async def test_body_is_limited_to_4_kb(disks, tmp_path):
 
 
 @pytest.mark.parametrize(
+    "raw",
+    [b"[" * 4000, b'{"note": ' + b"[" * 4000],
+    ids=["top_level", "in_a_field"],
+)
+async def test_deeply_nested_body_is_400_not_500(disks, tmp_path, raw):
+    """L2: nesting the JSON parser cannot follow (RecursionError) is a bad body."""
+    env = await cm_env(disks, tmp_path)
+    assert len(raw) <= cv.BODY_MAX_BYTES  # inside the 4 KiB limit
+    with pytest.raises(RecursionError):
+        json.loads(raw)  # what the route met before the fix (500)
+    async with http(env.hass) as h:
+        resp = await h.post(f"/routers/{env.rid}/backup", raw=raw)
+        assert resp.status == 400
+        assert resp.data["code"] == "invalid_request"
+        assert resp.data["details"] == {"field": "body", "reason": "invalid_body"}
+    assert env.provider.ops("collect") == []
+    await stop(env)
+
+
+@pytest.mark.parametrize(
     ("raw", "reason"),
     [
         (b'{"note": "a", "extra": 1}', "unknown_key"),
