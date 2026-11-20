@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_FILTERS,
   DETECTION_LABEL,
+  STATUS_CONFIRM,
   SecurityApiError,
+  TIMELINE_KIND_LABEL,
   buildSettingsUpdate,
   detectionNotes,
   detectorSource,
@@ -23,11 +25,14 @@ import {
   incidentCounts,
   isLogSource,
   isRealMac,
+  limitLines,
+  notReadyText,
   parseDetectionsView,
   parseIncidentDetail,
   parseOverview,
   parseSettingsView,
   portError,
+  rateLimitedText,
   reasonText,
   routerIds,
   sanitizeName,
@@ -35,6 +40,7 @@ import {
   scoreView,
   shortId,
   sortDevices,
+  statusStep,
   toOverviewFilters,
   unknownDeviceCount,
 } from './securityLogic.ts';
@@ -137,7 +143,7 @@ test('detections: reason tokens are split, flags are strict booleans', () => {
 });
 
 test('settings view: counts of maps, can_edit strict, unknown receiver stays null', () => {
-  const v = parseSettingsView({ settings: { enabled: true, log_path: 'off', syslog_port: 5514, keep_dns_names: false, thresholds: { dns_rate: 50 }, subnet_zones: {} }, subnet_zone_count: 3, active: true, can_edit: true });
+  const v = parseSettingsView({ settings: { enabled: true, log_path: 'off', syslog_port: 5514, thresholds: { dns_rate: 50 }, subnet_zones: {} }, subnet_zone_count: 3, active: true, can_edit: true });
   assert.equal(v.settings.thresholdCount, 1);
   assert.equal(v.settings.zoneCount, 0);
   assert.equal(v.subnetZoneCount, 3);
@@ -332,13 +338,12 @@ test('router ids come from incidents, timeline and detection sources, sorted and
 
 // ── Settings form ────────────────────────────────────────────────────────
 
-const SETTINGS = { enabled: true, logPath: 'off', syslogPort: 5514, keepDnsNames: false, thresholdCount: 0, zoneCount: 0 };
+const SETTINGS = { enabled: true, logPath: 'off', syslogPort: 5514, thresholdCount: 0, zoneCount: 0 };
 
 test('settings update sends only the changed fields', () => {
   const draft = draftFromSettings(SETTINGS);
   assert.deepEqual(buildSettingsUpdate(SETTINGS, draft), { update: {}, error: null });
   assert.deepEqual(buildSettingsUpdate(SETTINGS, { ...draft, enabled: false }).update, { enabled: false });
-  assert.deepEqual(buildSettingsUpdate(SETTINGS, { ...draft, keepDnsNames: true }).update, { keep_dns_names: true });
   assert.deepEqual(buildSettingsUpdate(SETTINGS, { ...draft, logPath: 'syslog' }).update, { log_path: 'syslog' });
   assert.deepEqual(buildSettingsUpdate(SETTINGS, { ...draft, logPath: 'syslog', syslogPort: '6514' }).update, { log_path: 'syslog', syslog_port: 6514 });
 });
@@ -349,7 +354,7 @@ test('the collector can never be sent', () => {
   assert.match(r.error, /Collector/);
   // already set to collector elsewhere: saving other fields does not resend it
   const cur = { ...SETTINGS, logPath: 'collector' };
-  assert.deepEqual(buildSettingsUpdate(cur, { ...draftFromSettings(cur), keepDnsNames: true }), { update: { keep_dns_names: true }, error: null });
+  assert.deepEqual(buildSettingsUpdate(cur, { ...draftFromSettings(cur), enabled: false }), { update: { enabled: false }, error: null });
 });
 
 test('the syslog port is checked (1024-65535) only while syslog is chosen', () => {
@@ -383,4 +388,126 @@ test('the user-facing texts never say "Angriff" or "Einbruch" as a verdict', () 
     const noComments = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     assert.doesNotMatch(noComments, /\b(Angriff|Angriffe|Einbruch|Einbrüche|Hacker|gehackt)\b/i, name);
   }
+});
+
+// ── Review 3 of PR 58 ────────────────────────────────────────────────────
+
+test('review3_3: the removed DNS-name option is gone from types, form and texts', () => {
+  const v = parseSettingsView({ settings: { enabled: true, log_path: 'off', syslog_port: 5514, keep_dns_names: true, thresholds: {}, subnet_zones: {} } });
+  assert.equal('keepDnsNames' in v.settings, false);
+  const draft = draftFromSettings(v.settings);
+  assert.equal('keepDnsNames' in draft, false);
+  // even a stale draft field is never sent
+  assert.deepEqual(buildSettingsUpdate(v.settings, { ...draft, keepDnsNames: true }), { update: {}, error: null });
+  for (const [name, text] of SRC) {
+    assert.doesNotMatch(text, /keep_?dns_?names/i, name);
+    assert.doesNotMatch(text, /DNS-Namen behalten/, name);
+  }
+});
+
+test('review3_7: a status change sends nothing until it is confirmed', () => {
+  const chosen = statusStep('open', null, { kind: 'choose', status: 'resolved' });
+  assert.deepEqual(chosen, { pending: 'resolved', send: null });
+  assert.deepEqual(statusStep('open', chosen.pending, { kind: 'cancel' }), { pending: null, send: null });
+  assert.deepEqual(statusStep('open', chosen.pending, { kind: 'confirm' }), { pending: 'resolved', send: 'resolved' });
+  // the current status, an unknown one, or a confirm without a choice: nothing
+  assert.deepEqual(statusStep('resolved', null, { kind: 'choose', status: 'resolved' }), { pending: null, send: null });
+  assert.deepEqual(statusStep('open', null, { kind: 'choose', status: 'deleted' }), { pending: null, send: null });
+  assert.deepEqual(statusStep('open', null, { kind: 'confirm' }), { pending: null, send: null });
+  assert.deepEqual(statusStep('resolved', 'resolved', { kind: 'confirm' }), { pending: null, send: null });
+  for (const s of ['open', 'confirmed', 'resolved']) assert.ok(STATUS_CONFIRM[s], s);
+  assert.match(STATUS_CONFIRM.resolved, /erledigt/);
+  // the incident view goes through the step: no button sends a status directly
+  const view = SRC.find(([n]) => n === 'SecurityIncident.tsx')[1];
+  assert.match(view, /statusStep\(/);
+  assert.doesNotMatch(view, /onClick=\{\(\) => void setStatus\(/);
+});
+
+test('review3 panel: "nicht bereit" is shown as such, never as "no findings" and never green', () => {
+  const o = parseOverview({
+    enabled: true, active: true, ready: false, not_ready_reason: 'module_key_missing',
+    score: { score: null, coverage: 80, cap: 100, reason: 'not ready: module_key_missing' }, incidents: [],
+  });
+  assert.equal(o.ready, false);
+  assert.equal(o.notReadyReason, 'module_key_missing');
+  const v = scoreView(o.score, o.ready);
+  assert.equal(v.known, false);
+  assert.equal(v.headline, 'Nicht bereit');
+  assert.equal(v.tone, 'muted');
+  assert.doesNotMatch(v.note, /keine (aktiven )?Hinweise/i);
+  assert.match(notReadyText(o.notReadyReason), /nicht bereit/i);
+  assert.match(notReadyText(o.notReadyReason), /Enterprise Core/);
+  assert.match(notReadyText('something_new'), /nicht bereit/i);
+  assert.match(scoreReasonText(o.score.reason), /Schlüssel/);
+  assert.equal(parseOverview({ ready: true }).ready, true);
+  assert.equal(parseOverview({}).ready, false); // unknown is not "ready"
+  assert.equal(parseOverview({}).notReadyReason, null);
+  assert.equal(scoreView({ score: 90, coverage: 100, cap: 100, reason: null, factors: [], routers: 1 }, true).tone, 'ok');
+});
+
+test('review3 panel: the store limits parse; unknown values stay unknown', () => {
+  const o = parseOverview({ limits: {
+    incident_cap: 100, incidents_cap_dropped: 0, log_incident_quota: 50, log_incidents: 50,
+    incidents_log_quota_dropped: 7, incidents_displaced: 2, events_throttled: 'x',
+  } });
+  assert.deepEqual(o.limits, {
+    incidentCap: 100, incidentsCapDropped: 0, logIncidentQuota: 50, logIncidents: 50,
+    incidentsLogQuotaDropped: 7, incidentsDisplaced: 2, eventsThrottled: null,
+  });
+  const lines = limitLines(o.limits);
+  assert.ok(lines.some(l => l.value === '50 von höchstens 50' && l.tone === 'warn'));
+  assert.ok(lines.some(l => /Log-Quote/.test(l.name) && l.value === '7' && l.tone === 'warn'));
+  assert.ok(lines.some(l => /[Vv]erdrängt/.test(l.name) && l.value === '2'));
+  assert.ok(lines.some(l => /Obergrenze/.test(l.name) && l.value === '0' && l.tone === 'muted'));
+  assert.ok(!lines.some(l => /[Gg]edrosselt/.test(l.name))); // unknown: not shown as 0
+  assert.deepEqual(limitLines(parseOverview({}).limits), []);
+});
+
+test('review3 panel: rate_limited is a German limitation; the log path counts limited routers', () => {
+  const v = parseDetectionsView({
+    detections: [{ id: 'fw_blocked', availability: 'limited', reason: 'rate_limited', limitations: ['rate_limited'] }],
+    log_path: { setting: 'syslog', status: [], receiver: null, rate_limited_routers: 2 },
+  });
+  assert.equal(v.logPath.rateLimitedRouters, 2);
+  assert.match(detectionNotes(v.detections[0])[0], /verworfen/);
+  assert.match(reasonText(['rate_limited']), /verworfen/);
+  assert.equal(parseDetectionsView({ log_path: {} }).logPath.rateLimitedRouters, null);
+  assert.equal(parseOverview({ log_path: { rate_limited_routers: 'x' } }).logPath.rateLimitedRouters, null);
+  assert.match(rateLimitedText(1), /einem Router/);
+  assert.match(rateLimitedText(2), /2 Routern/);
+  assert.match(rateLimitedText(2), /5 Minuten/);
+  assert.equal(rateLimitedText(0), null);
+  assert.equal(rateLimitedText(null), null);
+});
+
+test('review3 panel: every timeline kind of the backend has a German label (drift guard)', () => {
+  for (const k of ['log_quota_reached', 'log_displaced', 'incident_seen_again', 'cap_reached']) {
+    assert.ok(TIMELINE_KIND_LABEL[k] && TIMELINE_KIND_LABEL[k] !== k, k);
+  }
+  const py = join(here, '..', '..', '..', '..', 'security_center.py');
+  if (!existsSync(py)) return;
+  const src = readFileSync(py, 'utf8');
+  const kinds = new Set([
+    ...[...src.matchAll(/_note_once\(\s*"([a-z_]+)"/g)].map(m => m[1]),
+    ...[...src.matchAll(/self\._timeline\(\s*[^,()]+,\s*"([a-z_]+)"/g)].map(m => m[1]),
+  ]);
+  assert.ok(kinds.size >= 8, [...kinds].join(','));
+  for (const k of kinds) assert.ok(TIMELINE_KIND_LABEL[k], `label for ${k}`);
+});
+
+test('review3 panel: 409 not_ready and the guard refusal (403) get their own understandable texts', () => {
+  const nr = errorInfo(new SecurityApiError(409, 'not_ready'));
+  assert.equal(nr.kind, 'not_ready');
+  assert.match(nr.message, /nicht bereit/);
+  assert.equal(nr.retry, true);
+  assert.equal(errorInfo(new SecurityApiError(409, 'disabled')).kind, 'disabled');
+  const guard = errorInfo(new SecurityApiError(403, 'authorization_denied', { reason: 'authorization_failed' }));
+  assert.equal(guard.kind, 'forbidden');
+  assert.match(guard.message, /abgelehnt/);
+  assert.match(errorInfo(new SecurityApiError(403, 'authorization_denied')).message, /Administratoren/);
+});
+
+test('review3 panel: from_logs is a strict flag on incidents', () => {
+  const o = parseOverview({ incidents: [{ id: 'sec_1', from_logs: true }, { id: 'sec_2', from_logs: 'yes' }, { id: 'sec_3' }] });
+  assert.deepEqual(o.incidents.map(i => i.fromLogs), [true, false, false]);
 });

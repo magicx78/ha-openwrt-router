@@ -7,6 +7,7 @@
  * behind `import.meta.env.DEV`, so it is not part of the built bundle.
  *
  * Scenarios (?securitymock=<name>): default, nonadmin, off, empty,
+ * notready (no module key: nothing recorded, device actions 409),
  * forbidden, gone, unavailable. All data is invented: MACs 02:00:00:…,
  * RFC 5737 addresses, example.org host names, no real routers or users.
  */
@@ -14,7 +15,10 @@
 import { createSecurityApi } from './securityApi.ts';
 import type { SecurityApi, SecurityHass } from './securityTypes';
 
-export const MOCK_SCENARIOS = ['default', 'nonadmin', 'off', 'empty', 'forbidden', 'gone', 'unavailable'] as const;
+export const MOCK_SCENARIOS = ['default', 'nonadmin', 'off', 'empty', 'notready', 'forbidden', 'gone', 'unavailable'] as const;
+
+/** The keys the settings route accepts; anything else is a 400 like the backend. */
+const SETTINGS_KEYS: ReadonlySet<string> = new Set(['enabled', 'log_path', 'syslog_port', 'thresholds', 'subnet_zones']);
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
 
 type Json = Record<string, unknown>;
@@ -38,12 +42,15 @@ interface DeviceRow extends Json { mac: string; state: string }
 function build(scenario: string) {
   const admin = scenario !== 'nonadmin';
   const settings: Json = {
-    enabled: scenario !== 'off', log_path: 'off', syslog_port: 5514, keep_dns_names: false,
+    enabled: scenario !== 'off', log_path: 'off', syslog_port: 5514,
     thresholds: {}, subnet_zones: scenario === 'default' ? { '192.0.2.0/24': 'lan', '198.51.100.0/24': 'iot' } : {},
   };
+  // not ready: the center runs but records nothing (no module key of the core)
+  const notReady = scenario === 'notready';
   const empty = scenario === 'empty';
+  const noHints = empty || notReady;
 
-  const incidents: Json[] = empty ? [] : [
+  const incidents: Json[] = noHints ? [] : [
     {
       id: 'sec_0001aa', type: 'sec_wifi_auth_repeat', detector: 'wifi_auth_repeat', event_id: 'evt_1',
       category: 'wifi', severity: 'warning', assessment: 'noticeable', status: 'open', router_id: RID_A,
@@ -51,7 +58,7 @@ function build(scenario: string) {
       evidence: ['window_s=300', 'login_failures=9', 'connected_after=False'],
       linked_incident_ids: ['inc_demo_roaming_1'], drift_refs: [],
       title: 'Wiederholte WLAN-Anmeldefehler eines Geräts',
-      hint: 'Hinweis zur Prüfung; kein Beleg für eine Ursache.', resolved_at: null,
+      hint: 'Hinweis zur Prüfung; kein Beleg für eine Ursache.', resolved_at: null, from_logs: false,
     },
     {
       id: 'sec_0002bb', type: 'sec_vlan_segmentation_drift', detector: 'vlan_segmentation_drift', event_id: 'evt_2',
@@ -61,7 +68,7 @@ function build(scenario: string) {
       linked_incident_ids: [], drift_refs: ['drift_demo_1'],
       title: 'Segmentierungsrelevante Konfigurationsänderung',
       hint: 'Konfigurationsänderung in einem segmentierungsrelevanten Bereich (firewall, vlan). Bitte prüfen, ob die Änderung geplant war.',
-      resolved_at: null,
+      resolved_at: null, from_logs: false,
     },
     {
       id: 'sec_0003cc', type: 'sec_wifi_assoc_burst', detector: 'wifi_assoc_burst', event_id: 'evt_3',
@@ -69,14 +76,23 @@ function build(scenario: string) {
       client_ref: 'cli_demo_tablet', has_client: true, first_seen: SEC(50 * HOUR), last_seen: SEC(49 * HOUR), count: 3,
       evidence: ['attempts=12'], linked_incident_ids: [], drift_refs: [],
       title: 'Auffällig viele WLAN-Verbindungsversuche', hint: 'Hinweis zur Prüfung; kein Beleg für eine Ursache.',
-      resolved_at: SEC(48 * HOUR),
+      resolved_at: SEC(48 * HOUR), from_logs: false,
+    },
+    {
+      id: 'sec_0004dd', type: 'sec_fw_mgmt_access', detector: 'fw_mgmt_access', event_id: 'evt_4',
+      category: 'firewall', severity: 'warning', assessment: 'noticeable', status: 'resolved', router_id: RID_B,
+      client_ref: null, has_client: false, first_seen: SEC(80 * HOUR), last_seen: SEC(79 * HOUR), count: 4,
+      evidence: ['dst_port=22', 'attempts=31'], linked_incident_ids: [], drift_refs: [],
+      title: 'Zugriffsversuche auf die Router-Verwaltung', hint: 'Hinweis aus Logzeilen; Logzeilen können gefälscht sein.',
+      resolved_at: SEC(70 * HOUR), from_logs: true,
     },
   ];
-  const timeline: Json[] = empty ? [] : [
+  const timeline: Json[] = noHints ? [] : [
     { ts: SEC(12 * MIN), kind: 'incident_reopened', category: 'wifi', severity: 'warning', router_id: RID_A, client_ref: 'cli_demo_phone', has_client: true, incident_id: 'sec_0001aa', type: null, drift_id: null, linked: [], text: 'Wiederholte WLAN-Anmeldefehler eines Geräts' },
     { ts: SEC(40 * MIN), kind: 'notice', category: 'device', severity: 'info', router_id: RID_A, client_ref: 'cli_demo_guest', has_client: true, incident_id: null, type: 'trust_new_device', drift_id: null, linked: [], text: 'Neues Gerät' },
     { ts: SEC(3 * HOUR), kind: 'incident_opened', category: 'wifi', severity: 'warning', router_id: RID_A, client_ref: 'cli_demo_phone', has_client: true, incident_id: 'sec_0001aa', type: null, drift_id: null, linked: ['inc_demo_roaming_1'], text: 'Wiederholte WLAN-Anmeldefehler eines Geräts' },
     { ts: SEC(25 * HOUR), kind: 'drift', category: 'config', severity: 'warning', router_id: RID_B, client_ref: null, has_client: false, incident_id: null, type: null, drift_id: 'drift_demo_1', linked: [], text: 'Konfigurationsänderung erkannt' },
+    { ts: SEC(78 * HOUR), kind: 'log_quota_reached', category: 'system', severity: 'warning', router_id: null, client_ref: null, has_client: false, incident_id: null, type: null, drift_id: null, linked: [], text: 'Quote für Hinweise aus Logzeilen erreicht: weitere werden nur gezählt' },
   ];
   const devices: DeviceRow[] = empty ? [] : [
     { mac: '02:00:00:00:00:01', ip: '192.0.2.21', hostname: 'phone.example.org', name: 'Telefon Demo', state: 'known', first_seen: SEC(90 * 24 * HOUR), last_seen: SEC(5 * MIN), private_mac: true, confirmed: true, observed: true, indicators: [] },
@@ -137,11 +153,15 @@ function build(scenario: string) {
     status: [src('security.center.firewall_log', 'not_available', settings.log_path === 'syslog' ? 'no_data_yet' : 'disabled', null),
       src('security.center.dns_query_log', 'not_available', settings.log_path === 'syslog' ? 'no_data_yet' : 'disabled', null)],
     receiver: settings.log_path === 'syslog' ? { listening: true, reason: null, port: settings.syslog_port, senders: 1 } : null,
+    rate_limited_routers: 0,
   });
 
   const overview = (): Json => ({
     enabled: settings.enabled, active: settings.enabled === true, admin_view: admin,
-    score: empty
+    ready: !notReady, not_ready_reason: notReady ? 'module_key_missing' : null,
+    score: notReady
+      ? { score: null, coverage: 57, cap: 79, reason: 'not ready: module_key_missing', factors: [], routers: 2 }
+      : empty
       ? { score: null, coverage: 0, cap: 0, reason: 'unknown: no usable data source', factors: [], routers: 0 }
       : {
         score: 78, coverage: 57, cap: 79, reason: 'capped at 79: partial coverage', routers: 2,
@@ -163,7 +183,12 @@ function build(scenario: string) {
     detections,
     log_path: logPath(),
     subnet_map: { state: 'configured', subnets: Object.keys(settings.subnet_zones as Json).length },
-    module_key: true,
+    module_key: !notReady,
+    limits: {
+      incident_cap: 100, incidents_cap_dropped: 0, log_incident_quota: 50,
+      log_incidents: incidents.filter(i => i.from_logs === true).length,
+      incidents_log_quota_dropped: noHints ? 0 : 12, incidents_displaced: 0, events_throttled: 0,
+    },
   });
 
   const settingsView = (): Json => ({
@@ -173,7 +198,7 @@ function build(scenario: string) {
     receiver: settings.log_path === 'syslog' ? { listening: true, reason: null, port: settings.syslog_port, senders: 1 } : null,
   });
 
-  return { admin, settings, incidents, timeline, devices, detections, overview, settingsView, sourcesFor, logPath };
+  return { admin, notReady, settings, incidents, timeline, devices, detections, overview, settingsView, sourcesFor, logPath };
 }
 
 const json = (status: number, body: unknown) =>
@@ -218,6 +243,9 @@ export function createMockSecurityApi(scenario: string): SecurityApi {
     if (path === 'settings') {
       if (method === 'POST') {
         if (!m.admin) return err(403, 'authorization_denied');
+        if (Object.keys(body).some(k => !SETTINGS_KEYS.has(k))) {
+          return json(400, { message: 'masked', code: 'invalid_request', details: { field: 'body', reason: 'unknown_key' } });
+        }
         if ('log_path' in body && body.log_path === 'collector') return err(400, 'invalid_request');
         Object.assign(m.settings, body);
       }
@@ -243,6 +271,7 @@ export function createMockSecurityApi(scenario: string): SecurityApi {
     if (dev && method === 'POST') {
       if (!m.admin) return err(403, 'authorization_denied');
       if (typeof body.mac !== 'string') return err(400, 'invalid_request');
+      if (m.notReady) return err(409, 'not_ready');
       const mac = body.mac;
       const row = m.devices.find(d => d.mac === mac);
       if (!row) return err(404, 'unknown_device');

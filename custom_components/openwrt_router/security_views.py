@@ -273,7 +273,6 @@ SETTINGS_FIELDS: Mapping[str, Callable[[Any], Any]] = {
     "enabled": _bool("enabled"),
     "log_path": _choice("log_path", _LOG_PATHS),
     "syslog_port": _port,
-    "keep_dns_names": _bool("keep_dns_names"),
     "thresholds": _thresholds,
     "subnet_zones": _zones,
 }

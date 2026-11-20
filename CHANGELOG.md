@@ -103,7 +103,9 @@ Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `doc
 - **Panel-Tab „Security Center“** unter Enterprise (neben „Konfiguration“) mit den Bereichen
   Übersicht, Zeitleiste, Geräte, Erkennungen und Einstellungen sowie dem Detail eines
   Hinweises. Der Tab liest nur über die Routen oben; Schreibknöpfe haben nur Administratoren.
-  Bei ausgeschaltetem Center erklärt er, was das Center tut und nicht tut.
+  Bei ausgeschaltetem Center erklärt er, was das Center tut und nicht tut. Gerät bestätigen und
+  Hinweis-Status setzen fragen vor dem Senden einmal nach; ohne Modulschlüssel zeigt der Tab
+  „Nicht bereit“, nie „keine Befunde“.
 - **Diagnose:** neuer Block `security_center` am Ende (nur Zähler, Zustände und Gründe;
   maskiert und geschwärzt, keine MAC, Adresse, Hostname, Benutzer-ID oder Schlüssel).
 
@@ -116,6 +118,8 @@ Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `doc
   (Befehle und Rückweg in `docs/security-center.md`).
 - **Firewall- und DNS-Befunde markieren kein Gerät** im Vertrauensbuch: ihre Logzeilen nennen
   eine IP-Adresse, und es gibt kein Nachschlagen IP → MAC.
+- **Keine DNS-Namen im Klartext** an DNS-Hinweisen; eine Einstellung dafür gibt es nicht (die
+  frühere Option `keep_dns_names` ist entfernt, ein Speicherstand mit ihr lädt weiter).
 - **Der Collector-Weg ist noch nicht verfügbar** (`log_path: collector` meldet „nicht
   verfügbar“). Firewall- und DNS-Erkennungen setzen den Syslog-Weg voraus; ihre Logformate sind
   an echten Geräten unbestätigt.

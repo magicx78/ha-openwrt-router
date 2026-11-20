@@ -76,6 +76,8 @@ export interface Incident {
   title: string | null;
   hint: string | null;
   resolvedAt: number | null;
+  /** The finding came from log lines (firewall / DNS via syslog), which can be forged. */
+  fromLogs: boolean;
 }
 
 export interface TimelineEntry {
@@ -140,6 +142,20 @@ export interface LogPathView {
   setting: string | null;
   status: SourceStatus[];
   receiver: Receiver | null;
+  /** Routers whose lines were recently dropped by the rate limit (detections "eingeschränkt"). */
+  rateLimitedRouters: number | null;
+}
+
+/** Store limits of the hints (counters only; null = not sent). */
+export interface Limits {
+  incidentCap: number | null;
+  incidentsCapDropped: number | null;
+  /** At most this many stored hints may come from log lines. */
+  logIncidentQuota: number | null;
+  logIncidents: number | null;
+  incidentsLogQuotaDropped: number | null;
+  incidentsDisplaced: number | null;
+  eventsThrottled: number | null;
 }
 
 export interface DeviceCounts {
@@ -153,6 +169,10 @@ export interface DeviceCounts {
 export interface Overview {
   enabled: boolean;
   active: boolean;
+  /** false = no hints are recorded (e.g. the core's module key is missing); unknown counts as false. */
+  ready: boolean;
+  /** Reason token while not ready (`module_key_missing`). */
+  notReadyReason: string | null;
   adminView: boolean;
   score: Score;
   coverage: Coverage;
@@ -164,6 +184,7 @@ export interface Overview {
   logPath: LogPathView;
   /** Number of subnet->zone entries; null when the server did not say. */
   subnetZones: number | null;
+  limits: Limits;
 }
 
 export interface IncidentDetail {
@@ -186,7 +207,6 @@ export interface Settings {
   enabled: boolean;
   logPath: string | null;
   syslogPort: number | null;
-  keepDnsNames: boolean;
   thresholdCount: number;
   zoneCount: number;
 }
@@ -204,7 +224,6 @@ export interface SettingsUpdate {
   enabled?: boolean;
   log_path?: 'off' | 'syslog';
   syslog_port?: number;
-  keep_dns_names?: boolean;
 }
 
 /** Filters of the overview (all optional; unset = not sent). */

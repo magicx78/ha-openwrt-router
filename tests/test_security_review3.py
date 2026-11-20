@@ -1,8 +1,9 @@
-"""Security Center: fixes of the independent review of PR 58 (part A, backend).
+"""Security Center: fixes of the independent review of PR 58.
 
-One block per finding (1, 2, 4, 5, 6, 8). Every test started red against
-98882e1. No Home Assistant instance, no router: the center runs on
-in-memory stores, the core on FakeDisks, the syslog receiver on loopback.
+One block per finding (1, 2, 4, 5, 6, 8 against 98882e1; 3 against 4fd871d;
+7 lives in the panel tests). Every test started red. No Home Assistant
+instance, no router: the center runs on in-memory stores, the core on
+FakeDisks, the syslog receiver on loopback.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import voluptuous as vol
 from config_manager_kit import cm_env, stop
 from core_test_provider import (
     short_tmp_path,  # noqa: F401 - short tmp_path (Windows path limit)
@@ -41,6 +43,7 @@ from custom_components.openwrt_router.security_center import (
     INDICATOR_OF,
     SecurityCenterError,
     async_release_security_center,
+    default_settings,
     merge_settings,
 )
 from custom_components.openwrt_router.security_entities import SENSORS
@@ -59,6 +62,7 @@ from custom_components.openwrt_router.security_trust import (
     TrustNotice,
     TrustState,
 )
+from custom_components.openwrt_router.security_views import SETTINGS_FIELDS
 
 LOG_QUOTA = 50  # decided: at most 50 of the 100 hints come from log lines
 
@@ -185,6 +189,42 @@ def test_review3_2_firewall_and_dns_findings_mark_no_device() -> None:
     assert not any(k.startswith(("fw_", "dns_")) for k in INDICATOR_OF)
 
 
+# --- 3: the option keep_dns_names is gone ---------------------------------------------
+
+
+async def test_review3_3_keep_dns_names_is_removed(disks) -> None:  # noqa: F811
+    assert "keep_dns_names" not in default_settings()
+    assert "keep_dns_names" not in SETTINGS_FIELDS
+    with pytest.raises(vol.Invalid):
+        merge_settings(default_settings(), {"keep_dns_names": True})
+    hass = users(make_hass())
+    center = await keyed_center(hass, "r1")
+    before = dict(center.settings)
+    with pytest.raises(SecurityCenterError) as caught:
+        await center.async_update_settings({"keep_dns_names": True}, actor=ADMIN)
+    assert caught.value.reason == "invalid_settings"
+    async with http(hass) as h:
+        resp = await h.post("/settings", body={"keep_dns_names": False})
+    assert resp.status == 400
+    assert resp.data["details"]["reason"] == "unknown_key"
+    assert center.settings == before
+    # a store from before still loads; the key is dropped, the rest stays
+    stored = center._data_to_save()
+    stored["settings"] = {
+        **stored["settings"],
+        "keep_dns_names": True,
+        "thresholds": {"dns_rate": 77},
+    }
+    sec_disk(disks).data = stored
+    again = await keyed_center(users(make_hass()), "r1")
+    assert "keep_dns_names" not in again.settings
+    assert again.settings["thresholds"] == {"dns_rate": 77}
+    assert "keep_dns_names" not in again.settings_view(admin=True)["settings"]
+    assert "keep_dns_names" not in again._data_to_save()["settings"]
+    dns = [d for d in again.detectors.detectors if d.id.startswith("dns_")]
+    assert dns and all(d.keep_names is False for d in dns)
+
+
 # --- 4: a core AuthorizationError is a 403 --------------------------------------------
 
 
@@ -203,10 +243,10 @@ async def test_review3_4_guard_authorization_error_is_403(
     mock = AsyncMock(side_effect=error) if where == "verify" else None
     with patch.object(guard, target, mock or _raiser(error)):
         with pytest.raises(SecurityCenterError) as caught:
-            await center.async_update_settings({"keep_dns_names": True}, actor=ADMIN)
+            await center.async_update_settings({"syslog_port": 5515}, actor=ADMIN)
         assert caught.value.reason == "authorization_failed"
         async with http(hass) as h:
-            resp = await h.post("/settings", body={"keep_dns_names": True})
+            resp = await h.post("/settings", body={"syslog_port": 5515})
         assert resp.status == 403
         assert resp.data["code"] == "authorization_denied"
         assert resp.data["details"] == {"reason": "authorization_failed"}

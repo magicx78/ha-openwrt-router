@@ -211,7 +211,7 @@ def test_every_setting_defaults_to_off() -> None:
     settings = default_settings()
     assert settings["enabled"] is False
     assert settings["log_path"] == "off"
-    assert settings["keep_dns_names"] is False
+    assert "keep_dns_names" not in settings
     assert settings["syslog_port"] == 5514
     assert settings["thresholds"] == {} and settings["subnet_zones"] == {}
 

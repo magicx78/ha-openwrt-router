@@ -23,6 +23,8 @@ import type {
   DeviceCounts,
   Incident,
   IncidentDetail,
+  IncidentStatus,
+  Limits,
   LogPathView,
   Overview,
   OverviewFilters,
@@ -88,7 +90,7 @@ export class SecurityApiError extends Error {
 }
 
 export type ErrorKind =
-  | 'forbidden' | 'disabled' | 'gone' | 'unavailable' | 'not_found' | 'invalid'
+  | 'forbidden' | 'disabled' | 'not_ready' | 'gone' | 'unavailable' | 'not_found' | 'invalid'
   | 'too_large' | 'session' | 'network' | 'other';
 
 export interface ErrorInfo {
@@ -108,8 +110,12 @@ export const ERROR_TEXT: Record<string, string> = {
   disabled: 'Das Security Center ist ausgeschaltet.',
   no_core: 'Der Enterprise Core läuft nicht.',
   refused: 'Die Aktion wurde abgelehnt.',
+  not_ready: 'Das Security Center ist noch nicht bereit: der Schlüssel des Enterprise Core fehlt. Bitte später erneut versuchen.',
   internal: 'Der Server konnte die Anfrage nicht verarbeiten.',
 };
+
+/** 403 from the core's guard (expired or already used approval), not a missing admin right. */
+const GUARD_REFUSED = 'Der Enterprise Core hat die Aktion abgelehnt (zum Beispiel eine abgelaufene Freigabe). Bitte erneut versuchen.';
 
 export function errorInfo(err: unknown): ErrorInfo {
   if (!(err instanceof SecurityApiError)) {
@@ -126,10 +132,12 @@ export function errorInfo(err: unknown): ErrorInfo {
     case 401:
       return { kind: 'session', message: 'Die Sitzung ist abgelaufen. Bitte die Seite neu laden.', retry: false };
     case 403:
+      if (err.details.reason === 'authorization_failed') return { kind: 'forbidden', message: GUARD_REFUSED, retry: false };
       return { kind: 'forbidden', message: known ?? ERROR_TEXT.authorization_denied, retry: false };
     case 404:
       return { kind: 'not_found', message: known ?? 'Nicht gefunden.', retry: false };
     case 409:
+      if (err.code === 'not_ready') return { kind: 'not_ready', message: ERROR_TEXT.not_ready, retry: true };
       return { kind: 'disabled', message: ERROR_TEXT.disabled, retry: false };
     case 410:
       return { kind: 'gone', message: ERROR_TEXT.integration_not_loaded, retry: true };
@@ -161,6 +169,40 @@ export const STATUS_HELP: Record<string, string> = {
   resolved: 'Der Hinweis ist erledigt. Er öffnet sich wieder, wenn sich der Indikator wiederholt.',
 };
 
+/** The question of the confirmation step before a status is sent. */
+export const STATUS_CONFIRM: Record<IncidentStatus, string> = {
+  open: 'Hinweis wieder öffnen? Er zählt dann wieder als aktiver Hinweis.',
+  confirmed: 'Hinweis als geprüft bestätigen? Er bleibt aktiv, bis er erledigt ist.',
+  resolved: 'Hinweis als erledigt markieren? Er zählt dann nicht mehr als aktiv und öffnet sich wieder, wenn sich der Indikator wiederholt.',
+};
+
+const INCIDENT_STATUSES: readonly string[] = ['open', 'confirmed', 'resolved'];
+
+export type StatusEvent =
+  | { kind: 'choose'; status: string }
+  | { kind: 'confirm' }
+  | { kind: 'cancel' };
+
+export interface StatusStep {
+  /** The status waiting for confirmation (null = no question shown). */
+  pending: IncidentStatus | null;
+  /** The status to send now; only ever set by a confirm. */
+  send: IncidentStatus | null;
+}
+
+/**
+ * Status change in two steps, like the device form: choosing a status only
+ * asks; nothing is sent until the question is confirmed.
+ */
+export function statusStep(current: string | null, pending: IncidentStatus | null, ev: StatusEvent): StatusStep {
+  if (ev.kind === 'choose') {
+    if (!INCIDENT_STATUSES.includes(ev.status) || ev.status === current) return { pending: null, send: null };
+    return { pending: ev.status as IncidentStatus, send: null };
+  }
+  if (ev.kind === 'confirm' && pending !== null && pending !== current) return { pending, send: pending };
+  return { pending: null, send: null };
+}
+
 /** How the finding is classified. Hypothesis wording: never "Angriff". */
 export const ASSESSMENT_LABEL: Record<string, string> = {
   normal: 'Unauffällig',
@@ -178,6 +220,10 @@ export const TIMELINE_KIND_LABEL: Record<string, string> = {
   notice: 'Gerätehinweis',
   action: 'Manuelle Aktion',
   status: 'Status geändert',
+  incident_seen_again: 'Bestätigter Hinweis erneut beobachtet',
+  cap_reached: 'Obergrenze der Hinweise erreicht',
+  log_quota_reached: 'Quote für Hinweise aus Logzeilen erreicht',
+  log_displaced: 'Hinweis aus Logzeilen verdrängt',
 };
 
 export const TRUST_LABEL: Record<string, string> = {
@@ -290,6 +336,8 @@ export const REASON_TEXT: Record<string, string> = {
   baseline_capacity: 'Speichergrenze der Vergleichswerte erreicht',
   dest_zone_unknown: 'Zielzone unbekannt: Verbindungen zwischen Segmenten sind nicht vollständig bewertbar',
   drift_area_unknown: 'Bereich der Änderung unbekannt',
+  rate_limited: 'Logzeilen wurden wegen der Ratenbegrenzung verworfen: die Erkennung ist unvollständig',
+  module_key_missing: 'Schlüssel des Enterprise Core fehlt',
 };
 
 export const LOG_PATH_LABEL: Record<string, string> = {
@@ -407,6 +455,7 @@ export function parseIncident(v: unknown): Incident | null {
     title: str(o.title),
     hint: str(o.hint),
     resolvedAt: num(o.resolved_at),
+    fromLogs: o.from_logs === true,
   };
 }
 
@@ -507,6 +556,20 @@ function parseLogPath(v: unknown): LogPathView {
     setting: str(o.setting),
     status: parseSourceList(o.status),
     receiver: parseReceiver(o.receiver),
+    rateLimitedRouters: num(o.rate_limited_routers),
+  };
+}
+
+function parseLimits(v: unknown): Limits {
+  const o = obj(v) ?? {};
+  return {
+    incidentCap: num(o.incident_cap),
+    incidentsCapDropped: num(o.incidents_cap_dropped),
+    logIncidentQuota: num(o.log_incident_quota),
+    logIncidents: num(o.log_incidents),
+    incidentsLogQuotaDropped: num(o.incidents_log_quota_dropped),
+    incidentsDisplaced: num(o.incidents_displaced),
+    eventsThrottled: num(o.events_throttled),
   };
 }
 
@@ -516,6 +579,8 @@ export function parseOverview(v: unknown): Overview {
   return {
     enabled: o.enabled === true,
     active: o.active === true,
+    ready: o.ready === true,
+    notReadyReason: str(o.not_ready_reason),
     adminView: o.admin_view === true,
     score: parseScore(o.score),
     coverage: parseCoverage(o.coverage),
@@ -526,6 +591,7 @@ export function parseOverview(v: unknown): Overview {
     detections: parseDetections(o.detections),
     logPath: parseLogPath(o.log_path),
     subnetZones: subnet ? num(subnet.subnets) : null,
+    limits: parseLimits(o.limits),
   };
 }
 
@@ -562,7 +628,6 @@ export function parseSettingsView(v: unknown): SettingsView {
     enabled: s.enabled === true,
     logPath: str(s.log_path),
     syslogPort: num(s.syslog_port),
-    keepDnsNames: s.keep_dns_names === true,
     thresholdCount: Object.keys(obj(s.thresholds) ?? {}).length,
     zoneCount: Object.keys(obj(s.subnet_zones) ?? {}).length,
   };
@@ -590,9 +655,16 @@ export interface ScoreView {
 /**
  * Score card text and tone. null -> "keine Bewertung möglich" (muted, never
  * green). Green only with full coverage; below it the score is capped by the
- * backend and shown neutral (blue) at best.
+ * backend and shown neutral (blue) at best. Not ready (`ready` false): no
+ * score, "Nicht bereit" in the unknown tone, never "keine Befunde".
  */
-export function scoreView(score: Score): ScoreView {
+export function scoreView(score: Score, ready = true): ScoreView {
+  if (!ready) {
+    return {
+      known: false, value: null, tone: 'muted', headline: 'Nicht bereit',
+      note: 'Solange es nicht bereit ist, zeichnet das Security Center nichts auf. Das heißt nicht, dass alles in Ordnung ist.',
+    };
+  }
   if (score.score === null) {
     return {
       known: false, value: null, tone: 'muted', headline: 'Keine Bewertung möglich',
@@ -622,7 +694,48 @@ export function scoreReasonText(reason: string | null): string | null {
   m = /^capped at (\d+): a factor is not assessable/.exec(reason);
   if (m) return `Auf ${m[1]} begrenzt: mindestens ein Faktor ist nicht bewertbar.`;
   if (reason.startsWith('unknown')) return 'Keine nutzbare Datenquelle.';
+  if (reason.startsWith('not ready')) return 'Nicht bereit: der Schlüssel des Enterprise Core fehlt.';
   return null;
+}
+
+/** Why the center records nothing right now (state "nicht bereit"). */
+export function notReadyText(reason: string | null): string {
+  if (reason === 'module_key_missing') {
+    return 'Das Security Center ist nicht bereit: der Schlüssel des Enterprise Core fehlt (Core nicht gestartet oder '
+      + 'Installationsschlüssel nicht lesbar). Bis dahin werden keine Hinweise aufgezeichnet; Zahlen und Bewertung sind '
+      + 'unbekannt. Das ist kein Zeichen, dass alles in Ordnung ist.';
+  }
+  return 'Das Security Center ist nicht bereit. Bis dahin werden keine Hinweise aufgezeichnet; Zahlen und Bewertung sind unbekannt.';
+}
+
+export interface LimitLine { name: string; value: string; tone: Tone }
+
+/** Store limits as rows; an unknown value is left out, never shown as 0. Neutral tone at 0, never green. */
+export function limitLines(l: Limits): LimitLine[] {
+  const out: LimitLine[] = [];
+  const count = (name: string, n: number | null) => {
+    if (n !== null) out.push({ name, value: fmt(n), tone: n > 0 ? 'warn' : 'muted' });
+  };
+  if (l.logIncidents !== null && l.logIncidentQuota !== null) {
+    out.push({
+      name: 'Gespeicherte Hinweise aus Logzeilen',
+      value: `${fmt(l.logIncidents)} von höchstens ${fmt(l.logIncidentQuota)}`,
+      tone: l.logIncidents >= l.logIncidentQuota ? 'warn' : 'muted',
+    });
+  }
+  count('Nicht gespeichert, Log-Quote voll', l.incidentsLogQuotaDropped);
+  count('Verdrängte Hinweise aus Logzeilen', l.incidentsDisplaced);
+  count(l.incidentCap !== null ? `Nicht gespeichert, Obergrenze von ${fmt(l.incidentCap)} erreicht` : 'Nicht gespeichert, Obergrenze erreicht', l.incidentsCapDropped);
+  count('Gedrosselte Meldungen an den Enterprise Core', l.eventsThrottled);
+  return out;
+}
+
+/** Notice for routers whose log lines were dropped by the rate limit (null = none / unknown). */
+export function rateLimitedText(routers: number | null): string | null {
+  if (routers === null || routers <= 0) return null;
+  const who = routers === 1 ? 'einem Router' : `${fmt(routers)} Routern`;
+  return `Von ${who} wurden Logzeilen wegen der Ratenbegrenzung verworfen. Firewall- und DNS-Erkennungen sind `
+    + 'bis 5 Minuten nach der letzten verworfenen Zeile eingeschränkt.';
 }
 
 function fmt(n: number): string {
@@ -808,7 +921,6 @@ export interface SettingsDraft {
   enabled: boolean;
   logPath: string;
   syslogPort: string;
-  keepDnsNames: boolean;
 }
 
 export const PORT_MIN = 1024;
@@ -819,7 +931,6 @@ export function draftFromSettings(s: Settings): SettingsDraft {
     enabled: s.enabled,
     logPath: s.logPath ?? 'off',
     syslogPort: s.syslogPort !== null ? String(s.syslogPort) : '',
-    keepDnsNames: s.keepDnsNames,
   };
 }
 
@@ -852,6 +963,5 @@ export function buildSettingsUpdate(current: Settings, draft: SettingsDraft): Up
     if (bad) return { update: {}, error: bad };
     if (Number(port) !== current.syslogPort) update.syslog_port = Number(port);
   }
-  if (draft.keepDnsNames !== current.keepDnsNames) update.keep_dns_names = draft.keepDnsNames;
   return { update, error: null };
 }

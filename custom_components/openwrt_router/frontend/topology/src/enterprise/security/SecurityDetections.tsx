@@ -21,6 +21,7 @@ import {
   formatRelativeTs,
   formatTs,
   label,
+  rateLimitedText,
   reasonText,
   shortId,
   sourceName,
@@ -42,6 +43,7 @@ function SourceLine({ s, now }: { s: SourceStatus; now: number }) {
 
 function LogPathCard({ view, now }: { view: LogPathView; now: number }) {
   const r = view.receiver;
+  const limited = rateLimitedText(view.rateLimitedRouters);
   return (
     <SectionBox
       title="Log-Pfad"
@@ -57,6 +59,7 @@ function LogPathCard({ view, now }: { view: LogPathView; now: number }) {
               : <>hört nicht{r.reason ? `: ${reasonText([r.reason])}` : ''}</>}
         </Fact>
       )}
+      {limited && <Notice tone="warn">{limited}</Notice>}
       {view.status.length > 0 && <ul className="sec-sources-list">{view.status.map(s => <SourceLine key={s.source} s={s} now={now} />)}</ul>}
     </SectionBox>
   );

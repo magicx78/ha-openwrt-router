@@ -9,13 +9,14 @@
  * as plain text.
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import type { IncidentStatus, SecurityApi } from './securityTypes';
 import {
   ASSESSMENT_LABEL,
   CATEGORY_LABEL,
   SEVERITY_LABEL,
   SEVERITY_TONE,
+  STATUS_CONFIRM,
   STATUS_HELP,
   STATUS_LABEL,
   STATUS_TONE,
@@ -31,6 +32,8 @@ import {
   label,
   shortId,
   sourceName,
+  statusStep,
+  type StatusEvent,
 } from './securityLogic.ts';
 import { ErrorBox, Fact, Notice, SectionBox, Skeleton, ToneBadge, useAction, useResource } from './securityUi';
 
@@ -47,13 +50,23 @@ export function SecurityIncident({ api, id, isAdmin, now, onBack, onChanged }: {
   const detail = useResource(() => api.incident(id), true, id);
   const detections = useResource(() => api.detections(), true, id);
   const action = useAction();
+  // Status in two steps like the device form: a click only asks (review 3, #7).
+  const [pending, setPending] = useState<IncidentStatus | null>(null);
 
   const setStatus = async (status: IncidentStatus) => {
     const ok = await action.run(async () => { await api.setIncidentStatus(id, status); });
     if (ok) {
+      setPending(null);
       detail.reload();
       onChanged();
     }
+  };
+
+  const step = (current: string | null, ev: StatusEvent) => {
+    const next = statusStep(current, pending, ev);
+    if (ev.kind !== 'confirm') action.clear();
+    setPending(next.pending);
+    if (next.send !== null) void setStatus(next.send);
   };
 
   const back = (
@@ -83,6 +96,7 @@ export function SecurityIncident({ api, id, isAdmin, now, onBack, onChanged }: {
       <div className="sec-incident__head">
         <ToneBadge tone={SEVERITY_TONE[inc.severity ?? ''] ?? 'muted'}>{label(SEVERITY_LABEL, inc.severity)}</ToneBadge>
         <ToneBadge tone={STATUS_TONE[inc.status ?? ''] ?? 'muted'}>{label(STATUS_LABEL, inc.status)}</ToneBadge>
+        {inc.fromLogs && <ToneBadge tone="muted">aus Logzeilen</ToneBadge>}
         <h3 className="sec-incident__title">{inc.title ?? inc.detector ?? inc.id}</h3>
       </div>
       {detail.error !== null && <ErrorBox error={detail.error} onRetry={detail.reload} />}
@@ -113,7 +127,7 @@ export function SecurityIncident({ api, id, isAdmin, now, onBack, onChanged }: {
         <Fact name="Datenquelle">
           {source ? sourceName(source) : 'unbekannt'}
         </Fact>
-        {isLogSource(source) && (
+        {(inc.fromLogs || isLogSource(source)) && (
           <div className="cfg-hint">Die Quelle sind Logzeilen. Logzeilen können gefälscht sein, darum bleibt dieser Hinweis eine Hypothese.</div>
         )}
         {detections.data !== null && det === null && (
@@ -181,15 +195,35 @@ export function SecurityIncident({ api, id, isAdmin, now, onBack, onChanged }: {
                   type="button"
                   className={`diag-btn cfg-btn${inc.status === s ? ' diag-btn--primary' : ''}`}
                   aria-pressed={inc.status === s}
-                  disabled={action.busy || inc.status === s}
-                  onClick={() => void setStatus(s)}
+                  disabled={action.busy || inc.status === s || pending !== null}
+                  onClick={() => step(inc.status, { kind: 'choose', status: s })}
                 >
                   {label(STATUS_LABEL, s)}
                 </button>
               ))}
             </div>
             {inc.status && STATUS_HELP[inc.status] && <div className="cfg-hint">{STATUS_HELP[inc.status]}</div>}
-            {action.error !== null && <ErrorBox error={action.error} />}
+            {pending !== null ? (
+              <form
+                className="sec-edit"
+                aria-label="Status ändern bestätigen"
+                onSubmit={e => { e.preventDefault(); step(inc.status, { kind: 'confirm' }); }}
+              >
+                <div className="cfg-hint">{STATUS_CONFIRM[pending]}</div>
+                <div className="sec-actions">
+                  <button type="submit" className="diag-btn diag-btn--primary cfg-btn" disabled={action.busy}>
+                    {action.busy ? 'Speichert…' : `„${label(STATUS_LABEL, pending)}“ setzen`}
+                  </button>
+                  <button type="button" className="diag-btn cfg-btn" disabled={action.busy}
+                    onClick={() => step(inc.status, { kind: 'cancel' })}>
+                    Abbrechen
+                  </button>
+                </div>
+                {action.error !== null && <ErrorBox error={action.error} />}
+              </form>
+            ) : (
+              action.error !== null && <ErrorBox error={action.error} />
+            )}
           </>
         ) : (
           <div className="cfg-hint">Den Status kann nur ein Administrator ändern. Aktuell: {label(STATUS_LABEL, inc.status)}.</div>

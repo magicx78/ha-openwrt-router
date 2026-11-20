@@ -116,6 +116,11 @@ Branch `claude/security-center-6fdcdd`. Nutzerdoku: `docs/security-center.md`.
       und Verkehrs-Indikator, ungewöhnliche Verbindungszeiten, Rogue-AP-Indikator.
 - [ ] **`fw_mgmt_access` ohne Verwaltungsadressen:** das Center übergibt keine `mgmt_addrs`;
       heute zählen nur die Zielports.
+- [ ] **Idee: DNS-Namen optional behalten.** Die Option `keep_dns_names` wurde in 1.46.0
+      entfernt, weil sie nicht wirkte. Eine spätere Version könnte Abfragenamen als Beispiel an
+      DNS-Hinweisen behalten. Datenschutzfolgen vorher klären: Namen verraten Surfverhalten,
+      landen im Speicher, in der Zeitleiste und auf dem Core-Bus; nur für Administratoren,
+      gekürzt, mit eigener Speicherfrist und Doku-Hinweis.
 
 ### Client-Stabilität (Plan `docs/plans/2026-11-16-client-stability.md`, 1.42.0)
 

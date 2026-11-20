@@ -62,8 +62,9 @@ export function SecurityDevices({ api, overview, isAdmin, now, onChanged, onShow
   const action = useAction();
   const devices = sortDevices(overview.devices);
   const observed = devicesObserved(overview.coverage);
-  // Writing needs a real MAC, which the server only sends in the admin view.
-  const canEdit = isAdmin && overview.adminView;
+  // Writing needs a real MAC, which the server only sends in the admin view,
+  // and the core's module key (not ready: the server answers 409 not_ready).
+  const canEdit = isAdmin && overview.adminView && overview.ready;
 
   const submit = async () => {
     if (!edit) return;
@@ -107,6 +108,11 @@ export function SecurityDevices({ api, overview, isAdmin, now, onChanged, onShow
       {isAdmin && !overview.adminView && (
         <Notice tone="warn">
           Die Klartext-Ansicht ist gerade nicht verfügbar (Prüfung des Administrators nicht möglich). Bestätigen und Benennen sind deshalb gesperrt.
+        </Notice>
+      )}
+      {isAdmin && overview.adminView && !overview.ready && (
+        <Notice tone="warn">
+          Das Security Center ist nicht bereit (Schlüssel des Enterprise Core fehlt). Bestätigen und Benennen sind bis dahin gesperrt.
         </Notice>
       )}
 

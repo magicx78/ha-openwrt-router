@@ -72,7 +72,6 @@ ausgeschaltet“ und erklärt, was es tut.
 | `enabled` | Schalter | aus | Gesamtschalter. Wirkt sofort, ohne Neuladen. |
 | `log_path` | `off` / `syslog` / `collector` | `off` | Woher ausgelagerte Router-Logs kommen. Es ist höchstens ein Weg aktiv ([Abschnitt 5](#5-log-empfang)). `collector` ist **noch nicht verfügbar**. |
 | `syslog_port` | 1024 bis 65535 | 5514 | UDP-Port des Syslog-Empfängers. |
-| `keep_dns_names` | Schalter | aus | Nur dann dürfen DNS-Namen im Klartext als Beispiel an einem Hinweis stehen ([Abschnitt 9](#9-datenschutz)). |
 | `thresholds` | je Erkennung ein Schwellwert | leer (Vorgaben der Erkennung) | Schwellwerte einzelner Erkennungen (höchstens 32 Einträge, nur bekannte Erkennungs-IDs). |
 | `subnet_zones` | Zuordnung Subnetz → Zonenname | leer | Hilft `fw_inter_vlan`, das Zielsegment einer Verbindung zu erkennen ([Abschnitt 3](#3-erkennungen)). |
 
@@ -328,7 +327,9 @@ Zugriffslogs landet; ein Query-String an diesen Routen ergibt 400.
 
 Das Panel zeigt den Tab **Enterprise → Security Center** jedem angemeldeten Benutzer; das
 Backend entscheidet, was er sieht. Schreibknöpfe haben nur Administratoren. Router erscheinen
-im Tab als gekürzte ID, nicht mit Namen.
+im Tab als gekürzte ID, nicht mit Namen. Gerät bestätigen und einen Hinweis-Status setzen
+fragen im Panel einmal nach („Wirklich …?“), bevor eine Anfrage gesendet wird. Ist das Center
+nicht bereit (`module_key_missing`), zeigt der Tab „Nicht bereit“ statt eines Werts.
 
 ## 8. Flotten-Sensoren
 
@@ -379,8 +380,10 @@ oder unbekannt, wird nichts gelöscht.
   (`findings_not_ready` in der Diagnose), Gerätebestätigung und -name werden mit 409
   `not_ready` abgelehnt. Das Vertrauensbuch sieht die Geräte weiter. Ältere Speicherstände mit
   unverschlüsselten IDs laden ohne Fehler.
-- **DNS-Namen standardmäßig aus:** Ohne `keep_dns_names` steht an einem DNS-Hinweis kein
-  Klartextname.
+- **Keine DNS-Namen im Klartext:** An einem DNS-Hinweis steht kein Klartextname, und es gibt
+  keine Einstellung dafür. Ein älterer Speicherstand mit dem früheren Schlüssel
+  `keep_dns_names` lädt ohne Fehler; der Schlüssel wird verworfen. Die Settings-Route lehnt ihn
+  als unbekannten Schlüssel mit 400 ab.
 - **Keine HA-Benutzer-IDs** im Speicher des Centers; der Core hält sie in seinem Audit-Speicher
   und stellt ein eigenes Pseudonym auf den Bus.
 - **Keine Rohzeilen:** Syslog-Zeilen werden nie ungefiltert gespeichert und nie oberhalb von

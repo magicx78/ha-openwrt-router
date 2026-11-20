@@ -14,7 +14,7 @@ import React, { useMemo, useState } from 'react';
 import configCSS from '../config/config.css?inline';
 import securityCSS from './security.css?inline';
 import type { SecurityApi } from './securityTypes';
-import { DEFAULT_FILTERS, errorInfo, routerIds, type TimelineFilters } from './securityLogic.ts';
+import { DEFAULT_FILTERS, errorInfo, notReadyText, routerIds, type TimelineFilters } from './securityLogic.ts';
 import { ErrorBox, Notice, Skeleton, useAction, useResource } from './securityUi';
 import { SecurityOverview } from './SecurityOverview';
 import { SecurityTimeline } from './SecurityTimeline';
@@ -61,7 +61,7 @@ function OffState({ admin, api, onEnabled }: { admin: boolean; api: SecurityApi;
             </button>
           </div>
           {action.error !== null && <ErrorBox error={action.error} />}
-          <div className="cfg-hint">Log-Pfad und Datenschutz-Optionen stellen Sie danach unter „Einstellungen“ ein. Standardmäßig ist alles zurückhaltend eingestellt.</div>
+          <div className="cfg-hint">Den Log-Pfad stellen Sie danach unter „Einstellungen“ ein. Standardmäßig ist alles zurückhaltend eingestellt.</div>
         </>
       ) : (
         <Notice tone="info">Nur ein Administrator kann das Security Center einschalten.</Notice>
@@ -113,6 +113,11 @@ export function SecurityCenterView({ api, isAdmin }: { api: SecurityApi; isAdmin
         {!overview.active && (
           <Notice tone="warn">
             Das Security Center ist eingeschaltet, aber noch nicht aktiv. Angaben können fehlen oder unvollständig sein.
+          </Notice>
+        )}
+        {overview.active && !overview.ready && (
+          <Notice tone="warn">
+            <strong>Nicht bereit.</strong> {notReadyText(overview.notReadyReason)}
           </Notice>
         )}
         {section === 'overview' && <SecurityOverview overview={overview} now={now} onOpenIncident={setIncidentId} />}

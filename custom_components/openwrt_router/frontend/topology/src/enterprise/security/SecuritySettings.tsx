@@ -1,6 +1,6 @@
 /**
- * SecuritySettings — on/off, log path, syslog port, DNS names (administrators
- * edit; everyone else sees the values read-only).
+ * SecuritySettings — on/off, log path, syslog port (administrators edit;
+ * everyone else sees the values read-only).
  *
  * Only changed fields are sent. The collector is shown but cannot be chosen
  * ("noch nicht verfügbar"). Thresholds and subnet zones are not edited here.
@@ -134,22 +134,6 @@ export function SecuritySettings({ api, rev, onChanged }: { api: SecurityApi; re
                   : `hört nicht${receiver.reason ? `: ${reasonText([receiver.reason])}` : ''}`}
             </Fact>
           )}
-        </SectionBox>
-
-        <SectionBox title="Datenschutz">
-          <label className="diag-check cfg-confirm">
-            <input
-              type="checkbox"
-              checked={draft.keepDnsNames}
-              disabled={!canEdit || action.busy}
-              onChange={e => patch({ keepDnsNames: e.target.checked })}
-            />
-            <span>
-              DNS-Namen behalten (Standard: aus). Ist die Option aus, werden aus DNS-Anfragen nur Zähler ausgewertet.
-              Eingeschaltet können Domain-Namen in Belegen auftauchen. Sie zeigen, welche Seiten Geräte aufrufen.
-              Nur einschalten, wenn das gewollt ist.
-            </span>
-          </label>
         </SectionBox>
 
         <SectionBox title="Weitere Einstellungen">

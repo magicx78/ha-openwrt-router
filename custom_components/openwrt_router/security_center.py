@@ -397,7 +397,6 @@ def default_settings() -> dict[str, Any]:
         "enabled": False,
         "log_path": LogPath.OFF.value,
         "syslog_port": SEC_DEFAULT_SYSLOG_PORT,
-        "keep_dns_names": False,
         "thresholds": {},
         "subnet_zones": {},
     }
@@ -451,7 +450,6 @@ SETTINGS_SCHEMA = vol.Schema(
         vol.Required("syslog_port"): vol.All(
             vol.Coerce(int), vol.Range(min=1024, max=65535)
         ),
-        vol.Required("keep_dns_names"): bool,
         vol.Required("thresholds"): _threshold_map,
         vol.Required("subnet_zones"): _zone_map,
     },
@@ -467,7 +465,11 @@ def merge_settings(current: Mapping[str, Any], update: Any) -> dict[str, Any]:
 
 
 def settings_from_store(raw: Any) -> dict[str, Any]:
-    """Stored settings, every unusable value back at its default."""
+    """Stored settings, every unusable value back at its default.
+
+    Keys that are no longer settings (``keep_dns_names`` before 1.46.0) are
+    dropped: only the default keys are read.
+    """
     settings = default_settings()
     if not isinstance(raw, Mapping):
         return settings
@@ -2371,7 +2373,6 @@ class SecurityCenter:
         """New detector set from the settings; the baseline book stays."""
         dest = self.settings.get("subnet_zones") or None
         detectors = default_detectors(
-            keep_names=self.settings.get("keep_dns_names") is True,
             dest_subnets=dest,
             baseline=self.baseline,
         )
@@ -2575,7 +2576,7 @@ class SecurityCenter:
         old = self.settings
         self.settings = new
         changed = sorted(k for k in new if new[k] != old.get(k))
-        if any(k in changed for k in ("thresholds", "subnet_zones", "keep_dns_names")):
+        if any(k in changed for k in ("thresholds", "subnet_zones")):
             self._rebuild_detectors()
         if new["enabled"] and not self.active:
             await self.async_activate()

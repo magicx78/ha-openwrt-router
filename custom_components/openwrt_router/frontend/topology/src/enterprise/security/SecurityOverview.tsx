@@ -4,7 +4,9 @@
  *
  * Unknown is never shown as healthy: a null score is "Keine Bewertung
  * möglich", counts that cannot be trusted are "unbekannt", and "no findings"
- * is accompanied by the coverage so it is not read as "all clear".
+ * is accompanied by the coverage so it is not read as "all clear". Not ready
+ * (no module key: nothing is recorded) is "Nicht bereit", never "keine
+ * Hinweise" and never green.
  */
 
 import React from 'react';
@@ -25,6 +27,8 @@ import {
   incidentCounts,
   isActiveIncident,
   label,
+  limitLines,
+  rateLimitedText,
   reasonText,
   scoreReasonText,
   scoreView,
@@ -47,7 +51,7 @@ function Kpi({ name, value, sub, tone }: { name: string; value: React.ReactNode;
 }
 
 function ScoreCard({ overview }: { overview: Overview }) {
-  const view = scoreView(overview.score);
+  const view = scoreView(overview.score, overview.ready);
   const reason = scoreReasonText(overview.score.reason);
   return (
     <SectionBox title="Sicherheits-Bewertung">
@@ -115,6 +119,24 @@ function CoverageCard({ overview }: { overview: Overview }) {
       {overview.logPath.setting !== null && (
         <Fact name="Log-Pfad">{label(LOG_PATH_LABEL, overview.logPath.setting)}</Fact>
       )}
+      {rateLimitedText(overview.logPath.rateLimitedRouters) && (
+        <div className="cfg-notice cfg-notice--warn">{rateLimitedText(overview.logPath.rateLimitedRouters)}</div>
+      )}
+    </SectionBox>
+  );
+}
+
+function LimitsCard({ overview }: { overview: Overview }) {
+  const lines = limitLines(overview.limits);
+  if (lines.length === 0) return null;
+  return (
+    <SectionBox
+      title="Speichergrenzen der Hinweise"
+      hint="Hinweise aus Logzeilen (Firewall, DNS) belegen höchstens einen Teil der Plätze, weil Logzeilen im Netz gefälscht werden können. Gezählt wird, was deshalb nicht gespeichert oder verdrängt wurde."
+    >
+      {lines.map(l => (
+        <Fact key={l.name} name={l.name}><span className={`sec-tone-${l.tone}`}>{l.value}</span></Fact>
+      ))}
     </SectionBox>
   );
 }
@@ -136,6 +158,8 @@ export function SecurityOverview({ overview, now, onOpenIncident }: {
   onOpenIncident: (id: string) => void;
 }) {
   const counts = incidentCounts(overview.incidents);
+  // Not ready: nothing is recorded, so counts of hints say nothing (never 0 / "keine").
+  const notReady = !overview.ready;
   const observed = devicesObserved(overview.coverage);
   const unknownDevices = observed ? unknownDeviceCount(overview.deviceCounts) : null;
   const flagged = observed ? flaggedDeviceCount(overview.deviceCounts) : null;
@@ -154,13 +178,13 @@ export function SecurityOverview({ overview, now, onOpenIncident }: {
       <div className="sec-kpis">
         <Kpi
           name="Aktive Hinweise"
-          value={counts.active === 0 && noData ? <Unknown text="keine Daten" /> : counts.active}
-          sub={incomplete ? 'bei unvollständiger Überwachung' : undefined}
+          value={notReady ? <Unknown text="nicht bereit" /> : counts.active === 0 && noData ? <Unknown text="keine Daten" /> : counts.active}
+          sub={!notReady && incomplete ? 'bei unvollständiger Überwachung' : undefined}
         />
         <Kpi
           name="Davon kritisch"
-          value={counts.critical === 0 && noData ? <Unknown text="keine Daten" /> : counts.critical}
-          tone={counts.critical > 0 ? 'critical' : undefined}
+          value={notReady ? <Unknown text="nicht bereit" /> : counts.critical === 0 && noData ? <Unknown text="keine Daten" /> : counts.critical}
+          tone={!notReady && counts.critical > 0 ? 'critical' : undefined}
         />
         <Kpi
           name="Unbekannte Geräte"
@@ -169,7 +193,7 @@ export function SecurityOverview({ overview, now, onOpenIncident }: {
           tone={flagged !== null && flagged > 0 ? 'critical' : undefined}
         />
       </div>
-      {incomplete && counts.active === 0 && (
+      {!notReady && incomplete && counts.active === 0 && (
         <div className="cfg-notice cfg-notice--info">
           Es liegen keine aktiven Hinweise vor, die Überwachung ist aber nicht vollständig. Das ist kein Beleg dafür, dass nichts passiert.
         </div>
@@ -178,7 +202,9 @@ export function SecurityOverview({ overview, now, onOpenIncident }: {
       <CoverageCard overview={overview} />
 
       <SectionBox title="Aktuelle Hinweise">
-        {active.length === 0 ? (
+        {notReady && active.length === 0 ? (
+          <div className="cfg-hint">Nicht bereit: zurzeit werden keine Befunde aufgezeichnet. Das ist keine Entwarnung.</div>
+        ) : active.length === 0 ? (
           <div className="cfg-hint">Keine aktiven Hinweise{resolved > 0 ? ` (${resolved} erledigt)` : ''}.</div>
         ) : (
           <ul className="sec-rows">
@@ -190,6 +216,7 @@ export function SecurityOverview({ overview, now, onOpenIncident }: {
                 </div>
                 <div className="sec-row__meta">
                   <ToneBadge tone={STATUS_TONE[i.status ?? ''] ?? 'muted'}>{label(STATUS_LABEL, i.status)}</ToneBadge>
+                  {i.fromLogs && <ToneBadge tone="muted">aus Logzeilen</ToneBadge>}
                   <span>{label(CATEGORY_LABEL, i.category)}</span>
                   {i.assessment && <span>{label(ASSESSMENT_LABEL, i.assessment)}</span>}
                   {i.routerId && <span className="diag-mono">{shortId(i.routerId)}</span>}
@@ -206,6 +233,8 @@ export function SecurityOverview({ overview, now, onOpenIncident }: {
           <div className="cfg-hint">{active.length - MAX_LISTED} weitere Hinweise: siehe Zeitleiste.</div>
         )}
       </SectionBox>
+
+      <LimitsCard overview={overview} />
     </div>
   );
 }

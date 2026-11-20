@@ -184,7 +184,7 @@ test('mock scenario default: score, coverage, findings, devices and detections p
   assert.equal(o.adminView, true);
   assert.equal(o.score.score, 78);
   assert.equal(o.score.factors.find(f => f.id === 'network_activity').deduction, null);
-  assert.equal(o.incidents.length, 3);
+  assert.equal(o.incidents.length, 4);
   assert.equal(o.devices.find(d => d.state === 'suspicious').indicators.length, 2);
   assert.ok(o.detections.some(d => d.formatUnconfirmed));
   const d = await api.detections();
@@ -240,4 +240,38 @@ test('every mock scenario name is accepted and the error scenarios map to their 
     if (kinds[name]) await assert.rejects(api.overview(), e => errorInfo(e).kind === kinds[name], name);
     else assert.equal(typeof (await api.overview()).enabled, 'boolean', name);
   }
+});
+
+// ── Review 3 of PR 58 ────────────────────────────────────────────────────
+
+test('review3_3: the mock refuses the removed DNS-name option like the backend (400 unknown_key)', async () => {
+  const api = createMockSecurityApi('default');
+  await assert.rejects(api.updateSettings({ keep_dns_names: true }),
+    e => e instanceof SecurityApiError && e.status === 400 && e.details.reason === 'unknown_key');
+  const s = await api.settings();
+  assert.equal('keepDnsNames' in s.settings, false);
+});
+
+test('review3 panel: mock notready says "nicht bereit" and refuses device actions with 409 not_ready', async () => {
+  assert.ok(MOCK_SCENARIOS.includes('notready'));
+  const api = createMockSecurityApi('notready');
+  const o = await api.overview();
+  assert.equal(o.enabled, true);
+  assert.equal(o.ready, false);
+  assert.equal(o.notReadyReason, 'module_key_missing');
+  assert.equal(o.score.score, null);
+  await assert.rejects(api.confirmDevice(MAC), e => e.status === 409 && e.code === 'not_ready' && errorInfo(e).kind === 'not_ready');
+  await assert.rejects(api.setDeviceName(MAC, 'x'), e => errorInfo(e).kind === 'not_ready');
+});
+
+test('review3 panel: the default mock is ready and carries limits, from_logs and the rate-limit count', async () => {
+  const api = createMockSecurityApi('default');
+  const o = await api.overview();
+  assert.equal(o.ready, true);
+  assert.equal(o.limits.logIncidentQuota, 50);
+  assert.ok(o.incidents.some(i => i.fromLogs));
+  assert.ok(o.timeline.some(t => t.kind === 'log_quota_reached'));
+  assert.equal(typeof o.logPath.rateLimitedRouters, 'number');
+  const d = await api.detections();
+  assert.equal(typeof d.logPath.rateLimitedRouters, 'number');
 });
