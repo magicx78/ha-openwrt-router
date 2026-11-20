@@ -118,8 +118,9 @@ function build(scenario: string) {
       reason: empty ? 'no_router' : '', missing: [], limitations: id === 'wifi_deauth_cluster' ? [] : [], learning: id === 'wifi_assoc_burst', format_unconfirmed: false,
     })),
     ...(['fw_blocked', 'fw_port_scan_hint', 'fw_mgmt_access', 'fw_inter_vlan'] as const).map(id => ({
+      // fw4 confirmed live in 1.46.2: no "Format unbestätigt" mark any more
       id, description: id, availability: 'not_available', reason: 'disabled', missing: ['security.center.firewall_log'],
-      limitations: [], learning: false, format_unconfirmed: true,
+      limitations: [], learning: false, format_unconfirmed: false,
     })),
     { id: 'vlan_segmentation_drift', description: 'drift', availability: empty ? 'not_available' : 'available', reason: empty ? 'no_router' : '', missing: [], limitations: [], learning: false, format_unconfirmed: false },
     ...(['dns_rate', 'dns_nxdomain_cluster', 'dns_many_domains', 'dns_tunnel_hint'] as const).map(id => ({

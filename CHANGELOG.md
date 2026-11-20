@@ -21,6 +21,24 @@ All notable changes to the OpenWrt Router integration will be documented in this
     gezählt), und alle Abzüge zusammen bleiben unter einem halben Quellenanteil
     (`LIMITATION_SHARE_CAP`). Im beobachteten Fall steigt die Abdeckung jetzt auf 79 %, der
     Deckel auf 90.
+- **Security Center: `fw_inter_vlan` meldet nicht mehr dauerhaft `dest_zone_unknown`.**
+  fw4-Zeilen nennen die Zielzone nie, und die ausgehende Schnittstelle (`OUT=`) wurde zwar
+  gelesen, aber nicht genutzt. Die Zielzone kommt jetzt in dieser Reihenfolge aus: einer
+  konfigurierten Zuordnung Schnittstelle → Zone (gebaut, heute ohne Lieferant: der
+  Configuration Manager gibt Modulen keinen Lesezugriff auf gespeicherte Versionen), einer aus
+  den Zeilen gelernten Zuordnung (in den Ketten `in`/`forward` ist die Präfix-Zone die Zone von
+  `IN=`; begrenzt, nur im Speicher, nie über der konfigurierten, widersprüchliche Werte bleiben
+  unbekannt) und zuletzt `subnet_zones`. Zeilen der Kette `in` mit leerem `OUT=` zählen nicht
+  als Inter-VLAN. Kein zusätzlicher Router-Aufruf.
+- **Security Center: Ein privates Ziel außerhalb von `subnet_zones` gilt nicht mehr als extern.**
+  Es bleibt unbekannt (mit `dest_zone_unknown`); nur öffentliche Ziele zählen als extern.
+- **Security Center: fw4-Format bestätigt.** Zwei echte Zeilenformen (`reject … forward:` mit
+  UDP und zweitem `LEN=`, `reject … in:` mit leerem `OUT=` und ICMP) liest der Parser;
+  `FORMAT_CONFIRMED["fw4_nflog"]` ist wahr, und die Firewall-Erkennungen tragen im Panel nicht
+  mehr „Format unbestätigt“ (DNS weiterhin). Nicht belegt bleiben die Kette `out`, die Urteile
+  `drop`/`accept`, TCP-Flags und die Feldreihenfolge bei IPv6 (Fixture
+  `fw4_kernel_unbelegt.txt`).
+- Diagnose: `interface_zones` mit Zählern der Zuordnung (ohne Namen).
 - Doku: Die Abdeckung ist der Anteil der erwarteten **Datenquellen**, nicht der Erkennungen.
 
 ## [1.46.0] - 2026-11-20

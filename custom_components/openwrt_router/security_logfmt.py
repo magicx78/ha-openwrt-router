@@ -17,10 +17,15 @@ Formats and their evidence (details: ``tests/fixtures/security/README.md``):
   (``tests/test_log_parser.py``). dropbear ``Password auth succeeded`` and
   ``Pubkey auth succeeded … with <type> key SHA256:<fp> from …``: seen live
   2026-11-18 on four routers (WR3000, FRITZ!Repeater 3000, 1750E).
-* fw4 netfilter fields after the log prefix, dnsmasq ``--log-queries=extra``
-  lines and the dropbear failure lines: **not confirmed**, built from the
-  upstream formats (firewall logging and ``logqueries`` were off, no failed
-  SSH login was in the checked lines). Their records carry
+* fw4 kernel lines ``reject <zone> forward|in: IN= OUT= MAC= SRC= DST= LEN=
+  … PROTO= [SPT= DPT=|TYPE= CODE=] …``: seen live (1.46.2), the ``reject``
+  verdict in the chains ``forward`` and ``in``, IPv4, UDP and ICMP, an empty
+  ``OUT=`` in the chain ``in`` and a second ``LEN=`` (UDP length). Not seen
+  yet: the chain ``out``, the verdicts ``drop``/``accept``, TCP flags and the
+  IPv6 field order; they parse with the same rules.
+* dnsmasq ``--log-queries=extra`` lines and the dropbear failure lines:
+  **not confirmed**, built from the upstream formats (``logqueries`` was
+  off, no failed SSH login was in the checked lines). Their records carry
   ``fields["unconfirmed"] = True``.
 
 Every recognised record has ``fields["fmt"]`` (format id, see
@@ -85,7 +90,7 @@ FMT_LOG_PARSER: Final = "log_parser"
 # (plan 4.9). Replace the fixture and flip the flag once a line is seen live.
 FORMAT_CONFIRMED: Final[Mapping[str, bool]] = MappingProxyType(
     {
-        FMT_FW4: False,
+        FMT_FW4: True,  # seen live 1.46.2 (reject, forward + in, IPv4)
         FMT_DNS_QUERY: False,
         FMT_DNS_REPLY: False,
         FMT_SSH_BAD_PASSWORD: False,
@@ -447,11 +452,13 @@ def parse_fw4(body: str) -> tuple[str, dict[str, Any]] | None:
 
     Prefix ``<verdict> <zone> in|out: `` or ``<policy> <zone> forward: ``
     (fw4 ``zone-verdict.uc``), optionally behind ``[<uptime>]``, then the
-    netfilter fields (``IN= OUT= SRC= DST= PROTO= SPT= DPT=`` …, format
-    unconfirmed). Fields: ``zone`` (zone of the log rule), ``dest_zone``
-    (always None: the line does not name it), ``dir``, ``src``, ``dst``,
-    ``proto`` (lower case), ``spt``/``dpt`` (int or None), ``in_if``,
-    ``out_if``. None without SRC and DST.
+    netfilter fields (``IN= OUT= MAC= SRC= DST= LEN= … PROTO= SPT= DPT=``,
+    seen live 1.46.2; the first of a repeated key counts, so the second
+    ``LEN=`` of UDP is ignored; ICMP has no ports). Fields: ``zone`` (zone
+    of the log rule; in the chains ``in``/``forward`` the zone of ``IN=``),
+    ``dest_zone`` (always None: the line does not name it), ``dir``,
+    ``src``, ``dst``, ``proto`` (lower case), ``spt``/``dpt`` (int or None),
+    ``in_if``, ``out_if`` (None when empty). None without SRC and DST.
     """
     stamp = _KTIME_RE.match(body)
     if stamp:

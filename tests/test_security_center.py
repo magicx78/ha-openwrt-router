@@ -685,7 +685,8 @@ async def test_overview_without_admin_is_masked(disks) -> None:
     assert view["subnet_map"] == {"state": "omitted", "subnets": 0}
     fw = {d["id"]: d for d in view["detections"]}
     assert fw["fw_port_scan_hint"]["availability"] == "not_available"
-    assert fw["fw_port_scan_hint"]["format_unconfirmed"] is True
+    # fw4 seen live (1.46.2); the dnsmasq formats are still unconfirmed
+    assert fw["fw_port_scan_hint"]["format_unconfirmed"] is False
     assert fw["dns_rate"]["format_unconfirmed"] is True
     assert fw["wifi_auth_repeat"]["format_unconfirmed"] is False
 

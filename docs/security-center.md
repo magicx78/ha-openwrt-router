@@ -73,7 +73,7 @@ ausgeschaltet“ und erklärt, was es tut.
 | `log_path` | `off` / `syslog` / `collector` | `off` | Woher ausgelagerte Router-Logs kommen. Es ist höchstens ein Weg aktiv ([Abschnitt 5](#5-log-empfang)). `collector` ist **noch nicht verfügbar**. |
 | `syslog_port` | 1024 bis 65535 | 5514 | UDP-Port des Syslog-Empfängers. |
 | `thresholds` | je Erkennung ein Schwellwert | leer (Vorgaben der Erkennung) | Schwellwerte einzelner Erkennungen (höchstens 32 Einträge, nur bekannte Erkennungs-IDs). |
-| `subnet_zones` | Zuordnung Subnetz → Zonenname | leer | Hilft `fw_inter_vlan`, das Zielsegment einer Verbindung zu erkennen ([Abschnitt 3](#3-erkennungen)). |
+| `subnet_zones` | Zuordnung Subnetz → Zonenname | leer | Hilft `fw_inter_vlan`, das Zielsegment einer Verbindung zu erkennen, wenn die Schnittstellen-Zuordnung es nicht kennt ([Abschnitt 3](#3-erkennungen)). |
 
 ## 3. Erkennungen
 
@@ -89,7 +89,8 @@ Jede Erkennung hat eine Verfügbarkeit, die das Panel unter **Erkennungen** zeig
   keine Entwarnung. `stale` heißt: seit mehr als 15 Minuten keine Zeile mehr.
 - **Format unbestätigt**: Der Parser kennt das Zeilenformat nur aus Quellcode und
   Beschreibung, es wurde an einem echten Gerät nicht gesehen ([Abschnitt 12](#12-bekannte-einschränkungen)).
-  Das Panel markiert so alle Firewall- und DNS-Erkennungen.
+  Das Panel markiert so die DNS-Erkennungen. Das fw4-Format ist seit 1.46.2 an echten Zeilen
+  bestätigt; die Firewall-Erkennungen tragen die Marke nicht mehr.
 
 ### WLAN (Quelle: Router-Log und Ereignisse der Netzwerk-Intelligenz, ohne neuen Abruf)
 
@@ -101,14 +102,40 @@ Jede Erkennung hat eine Verfügbarkeit, die das Panel unter **Erkennungen** zeig
 | `wifi_deauth_cluster` | gehäufte Abmeldungen | Indikator; Gegenstück: `wifi_mass_disconnect`. Gefälschte Abmelde-Frames Dritter sieht das Log eines Zugangspunkts nicht. |
 | `wifi_multi_ap_auth` | Anmeldefehler eines Geräts an mehreren Zugangspunkten | Braucht mindestens zwei Router mit Daten. |
 
-### Firewall (Quelle: Firewall-Protokoll per Syslog; **Format unbestätigt**)
+### Firewall (Quelle: Firewall-Protokoll per Syslog; Format bestätigt seit 1.46.2)
 
 | Erkennung | Was sie meldet | Voraussetzung und Grenze |
 |---|---|---|
 | `fw_blocked` | ungewöhnlich viele blockierte Verbindungen (gegen eine gelernte Grundlinie) | Der Router muss Verwerfen/Ablehnen loggen ([Abschnitt 6](#6-remote-logging-am-router-einschalten-macht-der-nutzer-selbst)). |
 | `fw_port_scan_hint` | Hinweis auf eine Port-Abfrage | Nur ein Indikator. |
 | `fw_mgmt_access` | wiederholt blockierte Zugriffe aus beobachteten Zonen (`guest`, `iot`) auf Verwaltungs-Ports | Prüft Zielports (22, 23, 80, 443, 8080, 8443); Verwaltungsadressen werden vom Center nicht übergeben. |
-| `fw_inter_vlan` | wiederholt blockierte Verbindungen zwischen Netzsegmenten | fw4-Zeilen nennen die Zielzone nicht. Ohne `subnet_zones` sind solche Zeilen „nicht zuzuordnen“; die Erkennung meldet dann die Einschränkung `dest_zone_unknown`, statt zu raten. |
+| `fw_inter_vlan` | wiederholt blockierte Verbindungen zwischen Netzsegmenten | fw4-Zeilen nennen die Zielzone nicht, nur die ausgehende Schnittstelle (`OUT=`). Die Zielzone wird in dieser Reihenfolge bestimmt (siehe unten). Ist sie nicht zu bestimmen, ist die Zeile „nicht zuzuordnen“; die Erkennung meldet dann die Einschränkung `dest_zone_unknown`, statt zu raten. |
+
+**Zielzone von `fw_inter_vlan` (1.46.2).** Erste Stufe, die etwas weiß, gewinnt:
+
+1. **Konfigurierte Zuordnung** Schnittstelle → Zone. Vorgesehen für die Konfiguration aus dem
+   Configuration Manager; **heute ohne Lieferant**: dessen öffentliche Schnittstelle gibt einem
+   Modul keinen Lesezugriff auf den Inhalt gespeicherter Versionen. Die Stufe ist gebaut, bleibt
+   aber leer.
+2. **Aus den Zeilen gelernt:** In den Ketten `in` und `forward` nennt der Präfix
+   (`reject <zone> forward:`) die Zone der Schnittstelle `IN=`. Das Center merkt sich je Router
+   Schnittstelle → Zone. Nur Zeilen zugelassener Absender kommen an. Eine gelernte Zuordnung
+   überschreibt nie Stufe 1. Wird eine Schnittstelle innerhalb von 7 Tagen in zwei Zonen gesehen,
+   gilt sie als **mehrdeutig** (unbekannt, keine Mehrheitsentscheidung), bis die andere Zone
+   7 Tage nicht mehr gesehen wurde. Grenzen: 64 Schnittstellen je Router (neue werden dann
+   abgewiesen, alte nicht verdrängt), 4 Zonen je Schnittstelle, 64 Router. Nur im Speicher:
+   nach einem Neustart von Home Assistant wird neu gelernt, bis dahin bleibt die Einschränkung.
+   Ein Router-Neustart behält sie, ein vergessener Router verliert sie.
+3. **`subnet_zones`** aus den Einstellungen (längstes Präfix). Eine Zieladresse außerhalb aller
+   Einträge zählt nur als extern, wenn sie öffentlich ist; eine private (RFC 1918, 100.64/10,
+   Link-Local, Loopback, ULA) bleibt unbekannt, damit eine lückenhafte Liste keine Versuche in ein
+   nicht eingetragenes Segment verdeckt.
+
+Zeilen der Kette `in` (Ziel ist der Router selbst, `OUT=` leer) sind keine Inter-VLAN-Zeilen und
+zählen auch nicht als „nicht zuzuordnen“. Eine `forward`-Zeile mit leerem oder unbekanntem
+`OUT=` geht an Stufe 3 und ist sonst nicht zuzuordnen. Gleiche Quell- und Zielzone ist kein
+Befund. Da UDP-Absender fälschbar sind, kann eine gefälschte erste Zeile eine falsche Zone
+anlernen; eine spätere echte Zeile macht die Schnittstelle mehrdeutig.
 
 ### Konfiguration (Quelle: Drift-Ereignisse des Configuration Managers)
 
@@ -169,7 +196,7 @@ Stand dieser Tabelle ist der gebaute Stand 1.46.0, nicht der Plan.
 | Router-Uptime | a | genutzt (setzt Fenster dieses Routers zurück) | – |
 | Vorfälle der Netzwerk-Intelligenz | a | nur Verknüpfung, lesend | – |
 | Konfigurationsänderung (Drift, Core) | b | genutzt | Configuration Manager: Backup und Drift-Prüfung an |
-| Firewall-Log (`fw4` mit `log`) | c | genutzt über Syslog (Weg A) | Router-Logging und Syslog; Format unbestätigt |
+| Firewall-Log (`fw4` mit `log`) | c | genutzt über Syslog (Weg A) | Router-Logging und Syslog; Format bestätigt (1.46.2: `reject`, Ketten `forward`/`in`, IPv4) |
 | DNS-Abfrage-Log (dnsmasq `logqueries`) | c | genutzt über Syslog (Weg A) | Router-Logging und Syslog; Format unbestätigt |
 | Admin-Anmeldungen (dropbear) | a | **keine Erkennung**; der Parser kennt die Erfolgszeilen (live gesehen), die Fehlzeile ist unbestätigt | – |
 | DHCP-Leases, ARP-Tabelle, Bridge-FDB | a | nicht direkt gelesen (IP und Hostname kommen über die Clients des Polls) | – |
@@ -489,11 +516,18 @@ ausdrücklicher Einzelfreigabe eines Administrators, wie beim Configuration Mana
   Firewall- und DNS-Quellen melden `sender_not_allowed`.
 - **Logzeit = Empfangszeit.** Der Zeitzonen-Versatz des Routers wird nicht gelernt.
 - **UDP-Absender sind fälschbar;** die Liste authentifiziert keinen Router.
-- **Logformate unbestätigt an echten Geräten:** die fw4-Logfelder, die dnsmasq-Abfragezeile,
-  der Kopf der logd-Remote-Zeile und die dropbear-Fehlzeile. Live gesehen wurden nur die
-  dropbear-Erfolgs-, Verbindungs- und Ende-Zeilen (lokale Form). Die Firewall- und
-  DNS-Erkennungen laufen mit Platzhalterformaten und sind im Panel als „Format unbestätigt“
-  markiert. Bis zur Bestätigung ist ein Ausbleiben von Hinweisen kein Beleg.
+- **Logformate unbestätigt an echten Geräten:** die dnsmasq-Abfragezeile, der Kopf der
+  logd-Remote-Zeile und die dropbear-Fehlzeile. Live gesehen wurden die dropbear-Erfolgs-,
+  Verbindungs- und Ende-Zeilen (lokale Form) und seit 1.46.2 die fw4-Zeilen (`reject` in den
+  Ketten `forward` und `in`, IPv4, UDP und ICMP). Bei fw4 **nicht belegt**: die Kette `out`, die
+  Urteile `drop` und `accept`, TCP-Flags und die Feldreihenfolge bei IPv6; der Parser liest sie
+  nach denselben Regeln. Die DNS-Erkennungen laufen mit Platzhalterformaten und sind im Panel
+  als „Format unbestätigt“ markiert. Bis zur Bestätigung ist ein Ausbleiben von Hinweisen kein
+  Beleg.
+- **Zielzone von `fw_inter_vlan`:** Die Zuordnung aus der Router-Konfiguration ist nicht
+  angebunden (kein Lesezugriff für Module); gelernt wird aus den Zeilen, nur im Speicher. Nach
+  einem Neustart von Home Assistant bleibt `dest_zone_unknown`, bis wieder Zeilen der Kette
+  `in` oder `forward` aus dem Zielsegment kamen.
 - **Port 5514 auf Home Assistant OS ist ungeprüft** ([Abschnitt 5](#5-log-empfang)).
 - **Ohne Backups des Configuration Managers keine Drift-Erkennung** (`vlan_segmentation_drift`
   meldet dann „nicht verfügbar“).

@@ -149,6 +149,7 @@ from .security_syslog import (
     sender_address,
 )
 from .security_trust import Indicator, NoticeKind, TrustBook, TrustNotice, TrustState
+from .security_zones import ZoneBook
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -715,7 +716,12 @@ class SecurityCenter:
         self.settings: dict[str, Any] = default_settings()
         self.trust = TrustBook()
         self.baseline = BaselineBook()
-        self.detectors: DetectorSet = default_detectors(baseline=self.baseline)
+        # interface -> zone for fw_inter_vlan; memory only, kept across
+        # detector rebuilds (1.46.2)
+        self.zones = ZoneBook()
+        self.detectors: DetectorSet = default_detectors(
+            baseline=self.baseline, zone_book=self.zones
+        )
         self.log_source = NullLogSource()
         self.deduper = Deduper()
         # part 2: syslog receiver (None unless on and log_path "syslog")
@@ -2524,11 +2530,12 @@ class SecurityCenter:
     # -- settings ---------------------------------------------------------------------------
 
     def _rebuild_detectors(self) -> None:
-        """New detector set from the settings; the baseline book stays."""
+        """New detector set from the settings; baseline and zone book stay."""
         dest = self.settings.get("subnet_zones") or None
         detectors = default_detectors(
             dest_subnets=dest,
             baseline=self.baseline,
+            zone_book=self.zones,
         )
         for det in detectors.detectors:
             value = self.settings.get("thresholds", {}).get(det.id)
@@ -3330,6 +3337,7 @@ class SecurityCenter:
             "baselines": len(self.baseline),
             "drifts": len(self.drifts),
             "detector_state": self.detectors.state_size(),
+            "interface_zones": self.zones.stats(),
             "module_key": self._module_key is not None,
             "not_ready_reason": self.not_ready_reason,
             "log_incidents": len(self._class_hints(True)),

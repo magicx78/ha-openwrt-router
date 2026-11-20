@@ -61,6 +61,7 @@ from .security_model import (
     normalize_mac,
     valid_router_id,
 )
+from .security_zones import ZoneBook
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1210,6 +1211,33 @@ def _text(value: Any, max_len: int = 64) -> str:
     )
 
 
+# Private destinations (1.46.2): outside the subnet map they stay unknown,
+# never "external". Documentation ranges are not listed (no real traffic).
+_PRIVATE_NETS: Final = tuple(
+    ipaddress.ip_network(net)
+    for net in (
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "::/128",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    )
+)
+
+
+def _is_private(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True for a non-public destination (IPv4-mapped IPv6 as IPv4)."""
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return any(addr.version == net.version and addr in net for net in _PRIVATE_NETS)
+
+
 def _port_of(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -1439,13 +1467,23 @@ class FirewallInterVlanDetector(_LogDetector):
 
     fw4 log lines never name the destination zone (``dest_zone`` None), so a
     blocked forward alone could just as well be lan to wan. A record counts
-    only with a known destination zone: from the record, or from
-    ``dest_subnets`` (caller-supplied ``{"192.168.1.0/24": "lan", ...}``,
-    longest prefix wins; a destination outside every listed subnet is
-    external, not inter-VLAN). Otherwise the record is *unattributable*: it
-    is counted, never guessed, and the result carries
-    ``limitation="dest_zone_unknown"`` so that "no finding" is not mistaken
-    for "all clear".
+    only with a known destination zone, in this order (1.46.2):
+
+    1. a zone in the record itself;
+    2. the zone of the ``OUT=`` interface from ``zone_book``
+       (``security_zones.ZoneBook``: configured first, then learned from the
+       ``in``/``forward`` lines, whose prefix zone is the zone of ``IN=``);
+    3. ``dest_subnets`` (caller-supplied ``{"192.168.1.0/24": "lan", ...}``,
+       longest prefix wins). A destination outside every listed subnet is
+       external only if its address is public; a private one (RFC 1918,
+       shared, link-local, loopback, ULA) stays unknown, so an incomplete
+       map never hides attempts into an unlisted segment.
+
+    Otherwise the record is *unattributable*: it is counted, never guessed,
+    and the result carries ``limitation="dest_zone_unknown"`` so that "no
+    finding" is not mistaken for "all clear". Lines of the chain ``in``
+    (target is the router itself, ``OUT=`` empty) are no inter-VLAN lines.
+    A destination zone equal to the source zone is no finding.
     """
 
     id = "fw_inter_vlan"
@@ -1463,10 +1501,14 @@ class FirewallInterVlanDetector(_LogDetector):
         wan_zones: Iterable[str] = ("wan", "wan6"),
         allowed_pairs: Iterable[tuple[str, str]] = (),
         dest_subnets: Mapping[str, str] | None = None,
+        zone_book: ZoneBook | None = None,
         **kw: Any,
     ) -> None:
         super().__init__(window_s=window_s, threshold=threshold, **kw)
         self.wan_zones = frozenset(wan_zones)
+        # Shared with the caller so that a rebuilt detector set keeps what
+        # was learned (it is no window state: not reset with the router).
+        self.zones = zone_book if zone_book is not None else ZoneBook()
         self.allowed_pairs = frozenset(tuple(p) for p in allowed_pairs)
         # ValueError on a malformed subnet: a configuration error of the caller.
         self.dest_subnets = tuple(
@@ -1481,11 +1523,14 @@ class FirewallInterVlanDetector(_LogDetector):
         )
         self._meta: dict[str, _Slot] = {}
 
-    def _dest_zone(self, record: Any) -> str | None:
+    def _dest_zone(self, router: str, record: Any, ts: float) -> str | None:
         """Destination zone; ``""`` = external, None = not determinable."""
         given = _field(record, "dest_zone") or _field(record, "dst_zone")
         if given:
             return _text(given, 32)
+        known = self.zones.zone_of(router, _field(record, "out_if"), ts)
+        if known is not None:
+            return known
         if not self.dest_subnets:
             return None
         try:
@@ -1495,7 +1540,7 @@ class FirewallInterVlanDetector(_LogDetector):
         for net, zone in self.dest_subnets:
             if addr.version == net.version and addr in net:
                 return zone
-        return ""
+        return None if _is_private(addr) else ""
 
     def _meta_slot(self, router: str) -> _Slot | None:
         slot = self._meta.get(router)
@@ -1515,12 +1560,17 @@ class FirewallInterVlanDetector(_LogDetector):
         return slot
 
     def _feed(self, router: str, ts: float, record: Any) -> None:
-        if _text(_field(record, "dir"), 16).lower() != "forward":
-            return
+        direction = _text(_field(record, "dir"), 16).lower()
         zone = _text(_field(record, "zone"), 32)
+        if direction in ("in", "forward") and zone:
+            # The prefix zone of these chains is the zone of IN= (weak:
+            # never over a configured zone, conflicts stay unknown).
+            self.zones.learn(router, _field(record, "in_if"), zone, ts)
+        if direction != "forward":
+            return
         if not zone or zone in self.wan_zones:
             return
-        dest_zone = self._dest_zone(record)
+        dest_zone = self._dest_zone(router, record, ts)
         meta = self._meta_slot(router)
         if meta is None:
             return
@@ -1541,9 +1591,10 @@ class FirewallInterVlanDetector(_LogDetector):
         """Like every detector, plus the honest limitation per router.
 
         Limited when unattributable forwards are in the window, or when
-        there is no subnet map and no record with a destination zone was
-        seen (the detector then cannot see inter-VLAN traffic at all). A
-        capacity limitation of the base class is kept.
+        there is no subnet map, no interface zone is known for the router
+        and no record with a destination zone was seen (the detector then
+        cannot see inter-VLAN traffic at all). A capacity limitation of the
+        base class is kept.
         """
         out = []
         for result in super().evaluate(now, statuses):
@@ -1553,7 +1604,10 @@ class FirewallInterVlanDetector(_LogDetector):
             meta = self._meta.get(result.router_id or "")
             unknown = int(meta.extra.count(now)) if meta else 0  # type: ignore[union-attr]
             known = meta.count.count(now) if meta else 0  # type: ignore[union-attr]
-            limited = unknown > 0 or (not self.dest_subnets and known <= 0)
+            blind = not self.dest_subnets and not self.zones.knows(
+                result.router_id or "", now
+            )
+            limited = unknown > 0 or (blind and known <= 0)
             out.append(
                 replace(
                     result,
@@ -1568,6 +1622,11 @@ class FirewallInterVlanDetector(_LogDetector):
     def reset_router(self, router_id: str) -> None:
         super().reset_router(router_id)
         self._meta.pop(router_id, None)
+
+    def forget_router(self, router_id: str) -> None:
+        """Also its interface zones (a restart keeps them)."""
+        super().forget_router(router_id)
+        self.zones.forget(router_id)
 
     def state_size(self) -> int:
         return super().state_size() + sum(s.size() for s in self._meta.values())
@@ -2126,11 +2185,13 @@ def default_detectors(
     dest_subnets: Mapping[str, str] | None = None,
     max_keys: int = DEFAULT_MAX_KEYS,
     baseline: BaselineBook | None = None,
+    zone_book: ZoneBook | None = None,
 ) -> DetectorSet:
     """All stage-2 detectors with their documented default thresholds.
 
     Exactly one ``BaselineBook`` (``baseline`` or a new one) is shared by
-    every baseline detector.
+    every baseline detector; ``zone_book`` (or a new one) goes to
+    ``fw_inter_vlan``.
     """
     kw: dict[str, Any] = {"max_keys": max_keys}
     book = baseline if baseline is not None else BaselineBook()
@@ -2149,7 +2210,9 @@ def default_detectors(
                 mgmt_ports=mgmt_ports,
                 **kw,
             ),
-            FirewallInterVlanDetector(dest_subnets=dest_subnets, **kw),
+            FirewallInterVlanDetector(
+                dest_subnets=dest_subnets, zone_book=zone_book, **kw
+            ),
             VlanDriftDetector(**kw),
             DnsRateDetector(keep_names=keep_names, baseline=book, **kw),
             DnsNxdomainDetector(keep_names=keep_names, **kw),

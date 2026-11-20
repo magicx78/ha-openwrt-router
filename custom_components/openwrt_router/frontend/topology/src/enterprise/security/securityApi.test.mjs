@@ -187,6 +187,10 @@ test('mock scenario default: score, coverage, findings, devices and detections p
   assert.equal(o.incidents.length, 4);
   assert.equal(o.devices.find(d => d.state === 'suspicious').indicators.length, 2);
   assert.ok(o.detections.some(d => d.formatUnconfirmed));
+  // fw4 confirmed (1.46.2): the mark stays only for the dnsmasq formats
+  const marked = o.detections.filter(d => d.formatUnconfirmed).map(d => d.id);
+  assert.ok(marked.length > 0 && marked.every(id => id.startsWith('dns_')));
+  assert.ok(o.detections.filter(d => d.id.startsWith('fw_')).every(d => !d.formatUnconfirmed));
   const d = await api.detections();
   assert.ok(Object.keys(d.sources).length === 2);
   const detail = await api.incident('sec_0001aa');
