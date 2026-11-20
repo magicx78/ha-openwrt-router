@@ -549,7 +549,9 @@ def _capability_state(api: Any, err: CapabilityUnavailableError) -> str:
     return "unavailable"
 
 
-def _disabled(router_id: str, capability: str = Capability.CONFIG_BACKUP) -> None:
+def _disabled(
+    router_id: str | None, capability: str = Capability.CONFIG_BACKUP
+) -> None:
     """The option is off: refuse before the core or a router is asked."""
     raise CapabilityUnavailableError(
         capability=str(capability), reason="disabled", router_id=router_id
@@ -704,6 +706,12 @@ class _ConfigView(HomeAssistantView):
     requires_auth = True
     # POST routes act through the provider: refused while another holds it.
     acts = False
+    # With the router's backup option off a route answers "disabled" before
+    # its handler runs (``_gate``), unless it only reads stored data or
+    # memory (the exceptions set True; listed with reasons in the tests).
+    readable_when_disabled: ClassVar[bool] = False
+    # Capability named in that "disabled" answer.
+    capability: ClassVar[str] = Capability.CONFIG_BACKUP.value
     # Top-level keys the masker redacts by their name although the value
     # is masked on its own (``ssh_pin``: "pin"): masked under the neutral
     # name, renamed afterwards.
@@ -743,6 +751,7 @@ class _ConfigView(HomeAssistantView):
         ctx: RequestContext | None = None
         try:
             ctx = await self._context(request)
+            await self._gate(ctx, match)
             result = await self.handle(ctx, request, **match)
         except RequestError as err:
             return error_response(
@@ -771,6 +780,29 @@ class _ConfigView(HomeAssistantView):
                     body[name] = body.pop(neutral)
             self.restore_constants(result, body)
         return self.json(body, headers=dict(NO_STORE))
+
+    async def _gate(self, ctx: RequestContext, match: Mapping[str, str]) -> None:
+        """The one place the backup option is checked for every route.
+
+        The route's router comes from its path: ``router_id`` directly, a
+        ``backup_id`` or ``approval_id`` through an index lookup (no write,
+        no provider, no router). Option off: ``CapabilityUnavailableError``
+        with reason ``disabled`` before the handler, so before any core
+        action or router call.
+        """
+        if self.readable_when_disabled:
+            return
+        router_id: str | None
+        if "router_id" in match:
+            router_id = ctx.router(match["router_id"]).router_id
+        elif "backup_id" in match:
+            router_id = (await ctx.backup(match["backup_id"])).router_id
+        elif "approval_id" in match:
+            router_id = ctx.approval(match["approval_id"]).router_id
+        else:
+            router_id = None
+        if router_id is None or not ctx.runtime.enabled(router_id):
+            _disabled(router_id, self.capability)
 
     async def handle(
         self, ctx: RequestContext, request: web.Request, **match: str
@@ -898,6 +930,8 @@ async def drift_state(
 class OverviewView(_GetView):
     """R1: every router of ours, its state and the open panel approvals."""
 
+    readable_when_disabled = True  # the disabled state itself (memory)
+
     url = f"{BASE_URL}/overview"
     name = f"{VIEW_NAME_PREFIX}overview"
 
@@ -917,6 +951,8 @@ class OverviewView(_GetView):
 
 class RouterView(_GetView):
     """R2: capabilities, SSH pin and the ACL offer state of one router."""
+
+    readable_when_disabled = True  # capabilities, the disabled state (memory)
 
     url = BASE_URL + "/routers/{router_id}"
     name = f"{VIEW_NAME_PREFIX}router"
@@ -965,6 +1001,8 @@ class RouterView(_GetView):
 class VersionsView(_GetView):
     """R3: versions of one router, newest first."""
 
+    readable_when_disabled = True  # stored versions (store index)
+
     url = BASE_URL + "/routers/{router_id}/versions"
     name = f"{VIEW_NAME_PREFIX}versions"
 
@@ -990,6 +1028,8 @@ class VersionsView(_GetView):
 class VersionView(_GetView):
     """R4: one version with its artifacts (kind, size, sha256)."""
 
+    readable_when_disabled = True  # one stored version (store index)
+
     url = BASE_URL + "/versions/{backup_id}"
     name = f"{VIEW_NAME_PREFIX}version"
 
@@ -1010,8 +1050,6 @@ class BackupView(_PostView):
     ) -> Any:
         state = ctx.router(router_id)
         body = await read_body(request, {"note": _note("note")})
-        if not ctx.runtime.enabled(state.router_id):
-            _disabled(state.router_id)
         result = await ctx.runtime.async_backup_now(
             state.router_id, actor=ctx.actor, note=body.get("note"), wait=False
         )
@@ -1026,6 +1064,8 @@ class BackupView(_PostView):
 
 class ValidateView(_PostView):
     """R6: check the stored bytes and the provider's validation."""
+
+    capability = Capability.CONFIG_VALIDATE.value
 
     url = BASE_URL + "/versions/{backup_id}/validate"
     name = f"{VIEW_NAME_PREFIX}validate"
@@ -1063,6 +1103,8 @@ class ProtectView(_PostView):
 
 class DiffView(_GetView):
     """R8: compare two versions of the router or a version with live."""
+
+    readable_when_disabled = True  # stored versions; a live diff is refused in handle
 
     url = BASE_URL + "/routers/{router_id}/diff"
     name = f"{VIEW_NAME_PREFIX}diff"
@@ -1113,6 +1155,8 @@ async def _diff_ref(
 class DriftView(_GetView):
     """R9: the last drift result (memory) and the acknowledgements."""
 
+    readable_when_disabled = True  # last drift result (memory)
+
     url = BASE_URL + "/routers/{router_id}/drift"
     name = f"{VIEW_NAME_PREFIX}drift"
 
@@ -1125,6 +1169,8 @@ class DriftView(_GetView):
 class DriftCheckView(_PostView):
     """R10: check the drift now (an admin's wish: no hourly limit)."""
 
+    capability = Capability.CONFIG_DRIFT.value
+
     url = BASE_URL + "/routers/{router_id}/drift/check"
     name = f"{VIEW_NAME_PREFIX}drift_check"
 
@@ -1133,14 +1179,14 @@ class DriftCheckView(_PostView):
     ) -> Any:
         state = ctx.router(router_id)
         await read_body(request)
-        if not ctx.runtime.enabled(state.router_id):
-            _disabled(state.router_id, Capability.CONFIG_DRIFT)
         await ctx.runtime.async_check_drift(state.router_id, actor=ctx.actor)
         return await drift_state(ctx, state)
 
 
 class DriftAckView(_PostView):
     """R11: acknowledge a drift or mark it as known."""
+
+    capability = Capability.CONFIG_DRIFT.value
 
     url = BASE_URL + "/routers/{router_id}/drift/{drift_id}/ack"
     name = f"{VIEW_NAME_PREFIX}drift_ack"
@@ -1161,10 +1207,6 @@ class DriftAckView(_PostView):
             {"state": _choice("state", _ACK_STATES), "note": _note("note")},
             required=("state",),
         )
-        if body["state"] == DriftAckState.KNOWN and not ctx.runtime.enabled(
-            state.router_id
-        ):
-            _disabled(state.router_id, Capability.CONFIG_DRIFT)
         ack = await ctx.api.async_acknowledge_drift(
             state.router_id,
             drift_id,
@@ -1178,6 +1220,8 @@ class DriftAckView(_PostView):
 class RestoreCheckView(_PostView):
     """R12: dry run of a restore; findings, manual steps, checklist."""
 
+    capability = Capability.CONFIG_RESTORE_DRY_RUN.value
+
     url = BASE_URL + "/versions/{backup_id}/restore-check"
     name = f"{VIEW_NAME_PREFIX}restore_check"
 
@@ -1189,8 +1233,6 @@ class RestoreCheckView(_PostView):
         target = ctx.runtime.routers.get(record.router_id)
         if target is None:
             raise RouterNotFoundError("Router not loaded", router_id=record.router_id)
-        if not ctx.runtime.enabled(target.router_id):
-            _disabled(target.router_id, Capability.CONFIG_RESTORE_DRY_RUN)
         async with ctx.runtime.async_live_access(target.router_id):
             plan = await ctx.api.async_prepare_restore(
                 record.backup_id, target.router_id, actor=ctx.actor
@@ -1200,6 +1242,8 @@ class RestoreCheckView(_PostView):
 
 class ExportView(_PostView):
     """R13: ask to export one artifact (a critical action: approval)."""
+
+    capability = Capability.CONFIG_EXPORT.value
 
     url = BASE_URL + "/versions/{backup_id}/export"
     name = f"{VIEW_NAME_PREFIX}export"
@@ -1219,6 +1263,8 @@ class ExportView(_PostView):
 
 class ApprovalsView(_GetView):
     """R14: open requests of the panel's actions (optionally one router)."""
+
+    readable_when_disabled = True  # open requests, so they can be rejected
 
     url = f"{BASE_URL}/approvals"
     name = f"{VIEW_NAME_PREFIX}approvals"
@@ -1262,6 +1308,8 @@ class ApproveView(_PostView):
 class RejectView(_PostView):
     """R16: reject a request."""
 
+    readable_when_disabled = True  # rejecting only takes a right away
+
     url = BASE_URL + "/approvals/{approval_id}/reject"
     name = f"{VIEW_NAME_PREFIX}reject"
 
@@ -1279,6 +1327,8 @@ class RejectView(_PostView):
 
 class DownloadView(_PostView):
     """R17: redeem an approved export once; the file, never JSON."""
+
+    capability = Capability.CONFIG_EXPORT.value
 
     url = BASE_URL + "/approvals/{approval_id}/download"
     name = f"{VIEW_NAME_PREFIX}download"
@@ -1340,8 +1390,6 @@ class AclOfferView(_PostView):
     ) -> Any:
         state = ctx.router(router_id)
         await read_body(request)
-        if not ctx.runtime.enabled(state.router_id):
-            _disabled(state.router_id)
         approval = await ctx.api.async_request_acl_deploy(
             state.router_id, [TIER_CONFIG_BACKUP_READ], actor=ctx.actor
         )
@@ -1509,8 +1557,6 @@ class ExecuteView(_PostView):
         action = str(approval.action)
         aid = approval.approval_id
         if action == GuardedAction.ACL_DEPLOY:
-            if not ctx.runtime.enabled(approval.router_id):
-                _disabled(approval.router_id)  # the backup option is off
             result = await ctx.api.async_deploy_acl_offer(aid, actor=ctx.actor)
         elif action == GuardedAction.SSH_PIN_CONFIRM:
             result = await ctx.api.async_confirm_ssh_pin(aid, actor=ctx.actor)

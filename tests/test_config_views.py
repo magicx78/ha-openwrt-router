@@ -1123,6 +1123,114 @@ async def test_option_off_routes_answer_disabled_without_router_calls(
     await stop(env)
 
 
+# Routes that stay usable with the backup option off, and why. Every other
+# route of CONFIG_VIEWS answers "disabled" before the core acts (L4).
+READABLE_WHEN_DISABLED = {
+    "overview": "shows the disabled state itself (runtime memory only)",
+    "router": "shows capabilities and the disabled state; offers no ACL",
+    "versions": "stored versions stay listable (store index, no router)",
+    "version": "one stored version (store index, no router)",
+    "diff": "two stored versions (store only); a live diff is refused inside",
+    "drift": "the last drift result from runtime memory",
+    "approvals": "open requests stay visible, so they can be rejected",
+    "reject": "rejecting only takes a right away (cleanup after switching off)",
+}
+# Lookups the central check needs to find the router of a version or an
+# approval: index reads, no write, no provider, no router.
+GATE_LOOKUPS = {"async_get_backup", "get_approval"}
+
+
+def spy_core(monkeypatch: Any, api: Any) -> list[str]:
+    """Record every public facade call except the gate's lookups."""
+    calls: list[str] = []
+    for name, member in inspect.getmembers(type(api), inspect.isfunction):
+        if name.startswith("_") or name in GATE_LOOKUPS:
+            continue
+
+        def spy(self: Any, *a: Any, _name: str = name, _real: Any = member, **k: Any):
+            calls.append(_name)
+            return _real(self, *a, **k)
+
+        monkeypatch.setattr(type(api), name, spy)
+    return calls
+
+
+async def test_every_route_answers_disabled_when_the_option_is_off(
+    disks, tmp_path, monkeypatch
+):
+    """L4: one central check; read-only exceptions are listed with a reason."""
+    no_min_gap(monkeypatch)
+    env = await cm_env(disks, tmp_path, options=ON)
+    rid = env.rid
+    async with http(env.hass) as h:
+        bid = (await backup(h, rid))["backup_id"]
+        bid2 = (await backup(h, rid))["backup_id"]
+        exports = []
+        for _ in range(3):
+            resp = await h.post(f"/versions/{bid}/export")
+            assert resp.status == 200, resp.body
+            exports.append(resp.data["approval_id"])
+        approved, pending, to_reject = exports
+        resp = await h.post(
+            f"/approvals/{approved}/approve", body=ACK, user=OTHER_ADMIN_ID
+        )
+        assert resp.status == 200, resp.body
+
+        # The option goes off (as after saving the options).
+        monkeypatch.setattr(env.runtime, "enabled", lambda router_id: False)
+        provider_calls = list(env.provider.calls)
+        core_calls = spy_core(monkeypatch, env.api)
+        routes: dict[str, tuple[str, str, Any]] = {
+            "overview": ("get", "/overview", None),
+            "router": ("get", f"/routers/{rid}", None),
+            "versions": ("get", f"/routers/{rid}/versions", None),
+            "version": ("get", f"/versions/{bid}", None),
+            "backup": ("post", f"/routers/{rid}/backup", None),
+            "validate": ("post", f"/versions/{bid}/validate", None),
+            "protect": ("post", f"/versions/{bid}/protect", {"protected": True}),
+            "diff": ("get", f"/routers/{rid}/diff?from={bid}&to={bid2}", None),
+            "drift": ("get", f"/routers/{rid}/drift", None),
+            "drift_check": ("post", f"/routers/{rid}/drift/check", None),
+            "drift_ack": (
+                "post",
+                f"/routers/{rid}/drift/drift_1/ack",
+                {"state": "acknowledged"},
+            ),
+            "restore_check": ("post", f"/versions/{bid}/restore-check", None),
+            "export": ("post", f"/versions/{bid}/export", None),
+            "approvals": ("get", "/approvals", None),
+            "approve": ("post", f"/approvals/{pending}/approve", ACK),
+            "reject": ("post", f"/approvals/{to_reject}/reject", {"reason": "off"}),
+            "download": ("post", f"/approvals/{approved}/download", None),
+            "acl_offer": ("post", f"/routers/{rid}/acl-offer", None),
+            "ssh_pin": ("post", f"/routers/{rid}/ssh-pin/confirm", None),
+            "execute": ("post", f"/approvals/{approved}/execute", None),
+        }
+        assert set(routes) == {route_id(v) for v in cv.CONFIG_VIEWS}
+        assert set(READABLE_WHEN_DISABLED) < set(routes)
+        for route, (method, path, body) in routes.items():
+            if route in READABLE_WHEN_DISABLED:
+                continue
+            resp = await h.call(method, cv.BASE_URL + path, body=body)
+            assert resp.status == 409, (route, resp.status, resp.body[:200])
+            assert resp.data["code"] == "capability_unavailable", route
+            assert resp.data["details"]["reason"] == "disabled", route
+            assert resp.data["details"]["state"] == "disabled", route
+            assert core_calls == [], (route, core_calls)
+        assert env.provider.calls == provider_calls
+        assert env.router_calls() == []
+        # The exceptions stay usable (and say "disabled" where they show state).
+        for route in READABLE_WHEN_DISABLED:
+            method, path, body = routes[route]
+            resp = await h.call(method, cv.BASE_URL + path, body=body)
+            assert resp.status == 200, (route, resp.status, resp.body[:200])
+        resp = await h.get(f"/routers/{rid}/diff", params={"from": bid})
+        assert resp.status == 409  # live diff: refused inside the route
+        assert resp.data["details"]["reason"] == "disabled"
+    assert env.router_calls() == []
+    await stop(env)
+
+
 # ---------------------------------------------------------------------------
 # R8: diff
 # ---------------------------------------------------------------------------

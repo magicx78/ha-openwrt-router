@@ -44,7 +44,12 @@ nicht vom Manager.
 
 **Standardmäßig AUS.** Solange der Schalter nicht gesetzt ist, ruft der Manager keinen
 Router, legt nichts auf der Platte an und zeigt im Panel nur „ausgeschaltet“. Die Sensoren
-gibt es trotzdem (Status `disabled`).
+gibt es trotzdem (Status `disabled`). Jede handelnde Route des Panels (Backup, Prüfen,
+Schützen, Drift prüfen oder bestätigen, Restore-Prüfung, Export anfordern, freigeben und
+herunterladen, ACL-Angebot, SSH-Pin, Ausführen) antwortet dann mit `disabled`, bevor der Core
+etwas tut. Lesbar bleiben nur Übersicht, Router-Ansicht, gespeicherte Versionen, der Vergleich
+zweier gespeicherter Versionen, der letzte Drift-Stand und offene Anfragen; ablehnen lässt
+sich eine offene Anfrage weiterhin.
 
 ### Einschalten
 
