@@ -364,3 +364,42 @@ def _is_sensitive_key(key: str) -> bool:
     """
     key_lower = key.lower()
     return any(sensitive in key_lower for sensitive in DIAGNOSTICS_REDACT_KEYS)
+
+
+# --- Security Center (release 1.46.0, part 2) ---
+# The fleet-wide center's counters as a last block ("security_center"):
+# counts, states and reasons only (no MAC, address, host name, user id or
+# key), masked by the core masker and redacted like the other blocks. The
+# function above stays as it is; a failure here never fails the download.
+from functools import wraps as _sec_wraps
+
+_async_get_config_entry_diagnostics_base = async_get_config_entry_diagnostics
+
+
+def _security_center_summary(hass: HomeAssistant) -> dict[str, Any]:
+    """Security Center counters; never fails the download."""
+    try:
+        from .core_masking import mask_for_output
+        from .security_center import async_get_security_center
+
+        center = async_get_security_center(hass)
+        if center is None:
+            return {"loaded": False}
+        return _redact(mask_for_output(center.diagnostics()))
+    except Exception as err:  # noqa: BLE001 - the download must not fail
+        _LOGGER.debug("Security Center diagnostics failed: %s", type(err).__name__)
+        return {"loaded": False, "error": True}
+
+
+@_sec_wraps(_async_get_config_entry_diagnostics_base)
+async def async_get_config_entry_diagnostics(
+    hass: HomeAssistant,
+    entry: OpenWrtConfigEntry,
+) -> dict[str, Any]:
+    """Diagnostics of the entry plus the Security Center block."""
+    diagnostics = await _async_get_config_entry_diagnostics_base(hass, entry)
+    diagnostics["security_center"] = _security_center_summary(hass)
+    return diagnostics
+
+
+# --- end Security Center

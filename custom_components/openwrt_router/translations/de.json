@@ -315,6 +315,27 @@
       },
       "config_versions": {
         "name": "Konfigurationsversionen"
+      },
+      "fleet_security_score": {
+        "name": "Sicherheitswert (alle Router)"
+      },
+      "fleet_security_hints_active": {
+        "name": "Aktive Sicherheitshinweise (alle Router)"
+      },
+      "fleet_security_hints_critical": {
+        "name": "Kritische Sicherheitshinweise (alle Router)"
+      },
+      "fleet_security_unknown_devices": {
+        "name": "Unbestätigte Geräte (alle Router)"
+      },
+      "fleet_security_firewall_events_1h": {
+        "name": "Firewall-Protokolleinträge, letzte Stunde (alle Router)"
+      },
+      "fleet_security_wifi_auth_failures_1h": {
+        "name": "WLAN-Anmeldefehler, letzte Stunde (alle Router)"
+      },
+      "fleet_security_coverage": {
+        "name": "Abdeckung der Sicherheitserkennung (alle Router)"
       }
     },
     "switch": {

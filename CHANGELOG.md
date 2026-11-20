@@ -4,6 +4,133 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.46.0] - 2026-11-20
+
+Security Center: eine Beobachtungsschicht für das Netz auf dem Enterprise Core von 1.44.0 und
+den Modulen Netzwerk-Intelligenz, Client-Stabilität und Configuration Manager. Es **beobachtet
+nur**: keine Sperren, keine Quarantäne, keine Scans, keine Firewall-Änderung. **Standardmäßig
+aus**; ausgeschaltet gibt es keinen Beobachter, keinen Listener, keinen Socket und keine
+Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `docs/security-center.md`.
+
+### Hinzugefügt
+
+- **Security Center (`security_center.py`).** Ein Center je HA-Instanz verbindet die reinen
+  Module `security_*` mit Daten, die die Integration schon hat: Netzwerk-Intelligenz (als
+  Poll-Beobachter: WLAN-Zeilen, NI-Ereignisse, Uptime, Clients), Client-Stabilität
+  (Live-Zustand für das Vertrauensbuch) und den Enterprise Core (Drift-Ereignisse,
+  `router.forgotten`, Fähigkeiten, Modulschlüssel). Vergisst der Core einen Router, bevor das
+  Center läuft, gleicht das Center beim Start mit der geladenen Router-Registry ab; eine
+  unbekannte oder nicht geladene Registry löscht nichts. **Kein zusätzlicher Router-Aufruf je Poll** (Test zählt die ubus-POSTs mit und
+  ohne Center).
+- **Aus heißt aus:** ohne `enabled` liest das Center nur seinen Speicher; kein Beobachter,
+  kein Listener, keine Schreibvorgänge, keine Ereignisse. NI-Vorfälle, NI-Zähler,
+  Health-Score und Client-Stabilität sind mit inaktivem und aktivem Center identisch
+  (Regressionstest mit drei Durchläufen).
+- **Eigene `sec_*`-Hinweise** (offen / erledigt / bestätigt, höchstens 100, eigene Zähler,
+  eigene Ereignisse über den Core im Security-Ring). NI-Vorfälle werden nur per ID verknüpft,
+  nie geändert oder unterdrückt; deckt ein offener NI-Vorfall einen Befund schon ab, steht nur
+  ein verknüpfter Eintrag in der Zeitleiste.
+- **Obergrenze der Hinweise:** höchstens 100, aufgeteilt in **zwei feste Quoten ohne
+  Verdrängung zwischen ihnen:** höchstens 50 Hinweise vom Syslog-Empfänger (Firewall, DNS;
+  Absender per UDP im LAN fälschbar) und höchstens 50 aus allen anderen Quellen (WLAN,
+  Konfigurationsänderung, Vertrauensbuch; WLAN-Befunde lassen sich über Funk auslösen). Die
+  Klasse folgt aus der Datenquelle des Detektors, nie aus dem Zeileninhalt. In einer vollen
+  Klasse macht der älteste erledigte Hinweis dieser Klasse Platz; offene und bestätigte werden
+  nie entfernt, bestätigte zählen mit. Sonst wird nur der neue Hinweis dieser Klasse verworfen
+  und gezählt (`limits.incidents_log_quota_dropped` bzw. `limits.incidents_other_quota_dropped`,
+  je Klasse höchstens ein Zeitleisten-Eintrag je Stunde); die andere Klasse bleibt unberührt.
+  Ältere Speicherstände mit mehr als 50 in einer Klasse laden vollständig und heilen sich, wenn
+  Hinweise erledigt werden; bis dahin zählt `limits.incidents_cap_dropped`, was an der
+  Gesamtgrenze scheitert. Die Herkunft (`from_logs`) übersteht einen Neustart. Ereignisse über
+  den Core zu neuen oder wieder geöffneten Hinweisen: höchstens 20 je 10 min, der Rest wird
+  gezählt (`limits.events_throttled`).
+- **Erneut beobachtet:** Ein neuer Befund zu einem bestätigten Hinweis, der später als 24 h
+  nach dem letzten kommt, steht als Eintrag in der Zeitleiste, höchstens einmal je Hinweis und
+  24 h (Zeitpunkt am Hinweis, übersteht einen Neustart); steigt die Schwere, immer.
+- **Geschlüsselte IDs:** Hinweis-, Ereignis- und Korrelations-IDs sowie Dedup-Marken, die
+  gespeichert, gesendet oder ausgegeben werden, sind HMAC-Werte mit dem Modulschlüssel des
+  Cores und lassen sich mit einer Liste möglicher MACs nicht zurückrechnen. **Ohne
+  Modulschlüssel zeichnet das Center keine Hinweise auf** (Zustand „nicht bereit“, Grund
+  `module_key_missing`; Befunde nur gezählt, Gerät bestätigen und benennen ergibt 409
+  `not_ready`). Solange setzen Befunde keinen Indikator im Vertrauensbuch und offene Hinweise
+  werden nicht automatisch erledigt. Der Poll fragt den gebundenen Core alle 5 Minuten erneut
+  nach dem Schlüssel (kein Router-Aufruf), mit einer Warnung je „nicht bereit“-Zustand ohne
+  Identitäten. Ältere Speicherstände laden ohne Fehler.
+- **Drift → Segmentierung:** eine Konfigurationsänderung in VLAN/Firewall/Interface (Bereiche
+  aus dem Vergleich zweier gespeicherter Versionen, kein Router-Kontakt) ergibt genau einen
+  Hinweis mit Verweis auf die Drift-ID. Ein Befund kurz nach einer Konfigurationsänderung wird
+  nur zeitlich verknüpft, ohne Ursachenbehauptung.
+- **Speicher** (`.storage/openwrt_router.security_center`, höchstens 512 KB, verzögertes
+  Schreiben, beim Entladen sofort; beschädigte Abschnitte starten leer, ein unlesbarer Speicher
+  bleibt als `.bak`): Einstellungen, Vertrauensbuch, Baselines, maskierte Hinweise, Zeitleiste
+  (2000 Einträge / 14 Tage), Dedup-Marken. Keine HA-Benutzer-IDs.
+- **Manuelle Aktionen** (Gerät bestätigen, Namen setzen, Hinweis-Status, Einstellungen) nur für
+  Administratoren über den Core-Guard, jede auditiert. Keine Quarantäne.
+- **Übersicht:** Score mit Faktoren und Abdeckung (ohne Quelle `None`, nie „gesund“),
+  Hinweise, Zeitleiste mit Filtern, Geräteliste, Verfügbarkeit je Erkennung (verfügbar /
+  eingeschränkt / nicht verfügbar mit Grund, „Format unbestätigt“ für Firewall- und DNS-Logs).
+  Klartext nur für Administratoren, sonst Pseudonyme. Der Collector-Weg meldet „nicht
+  verfügbar“ mit Grund.
+- **Syslog-Empfänger (`security_syslog.py`):** lokaler UDP-Listener (Standardport 5514) für
+  das Remote-Log der Router (`logd` `log_ip`/`log_port`). Er bindet **nur**, wenn das Center
+  an ist und der Log-Weg `syslog` gewählt ist; sonst gibt es keinen Socket. Absender nur aus
+  der Router-Registry (IP-Literale der Verwaltungsadressen, keine DNS-Auflösung, mehrdeutige
+  Adressen ausgeschlossen); fremde Absender werden verworfen und gezählt. Zeilen über 2048 Byte
+  werden abgeschnitten, Token-Buckets je Absender und gesamt sowie ein Puffer mit höchstens
+  4000 Einträgen begrenzen Speicher und CPU (alles gezählt). Zeilen erscheinen nie oberhalb
+  von DEBUG im Log und werden nie ungefiltert gespeichert. Ein Bind-Fehler (Port belegt,
+  keine Berechtigung) macht die Quelle „nicht verfügbar“ mit Grund, das Setup läuft weiter;
+  ein neuer Versuch alle 5 min aus dem Poll. Verliert ein Router Zeilen an eine Rate oder den
+  vollen Puffer, sind seine Firewall- und DNS-Erkennungen bis 5 min nach der letzten
+  verworfenen Zeile „eingeschränkt“ (`rate_limited`), mit Einschränkung im Sicherheitswert und
+  geringerer Abdeckung. Ein Wechsel des Log-Wegs schließt den Socket;
+  erneut gesendete Zeilen filtert der gemeinsame Deduper. Grenze: UDP-Absender sind im LAN
+  fälschbar, die Liste filtert Rauschen, sie authentifiziert keinen Router.
+- **HTTP-Routen (`security_views.py`)** unter `/api/openwrt_topology/security`, alle mit
+  Anmeldung: Übersicht (mit Filtern), Hinweis-Details, Verfügbarkeit der Erkennungen und
+  Einstellungen lesen (Administratoren; andere Benutzer nur bei für alle geöffnetem Panel,
+  dann mit Pseudonymen und der Subnetz-Zuordnung nur als Anzahl); Einstellungen ändern
+  (hier wird das Center eingeschaltet), Gerät bestätigen oder benennen und Hinweis-Status
+  setzen nur für Administratoren. Gerät bestätigen (`/devices/confirm`) und benennen
+  (`/devices/name`) tragen die MAC im Body, nie im Pfad. Strenge Prüfung von Query und
+  Body (bekannte Schlüssel,
+  Typen, Bereiche, höchstens 4 KiB, zu tief verschachteltes JSON ist 400); Fehler tragen nur
+  eine feste Meldung, einen Code und höchstens Feldname und Grund. Eine Ablehnung durch den
+  Guard des Cores ist 403 `authorization_denied` ohne Angaben des Cores.
+- **Flotten-Sensoren (`security_entities.py`):** Sicherheitswert, aktive und kritische
+  Sicherheitshinweise, unbestätigte Geräte, Firewall-Protokolleinträge und WLAN-Anmeldefehler
+  der letzten Stunde, Abdeckung der Erkennung. Werte nur aus dem Center (keine Router-Aufrufe,
+  per Signal aktualisiert); ohne liefernde Quelle `None` (unbekannt), nie 0, auch für aktive
+  und kritische Hinweise; ist das Center nicht bereit (kein Modulschlüssel), sind alle sieben
+  Sensoren unbekannt. Wert und Abdeckung zählen nur geladene Router; die Hinweise und
+  Grundlinien eines entladenen Routers bleiben gespeichert. Die Sensoren gibt es nur bei
+  eingeschaltetem Center; Ausschalten entfernt sie aus der Entity-Registry.
+- **Panel-Tab „Security Center“** unter Enterprise (neben „Konfiguration“) mit den Bereichen
+  Übersicht, Zeitleiste, Geräte, Erkennungen und Einstellungen sowie dem Detail eines
+  Hinweises. Der Tab liest nur über die Routen oben; Schreibknöpfe haben nur Administratoren.
+  Bei ausgeschaltetem Center erklärt er, was das Center tut und nicht tut. Gerät bestätigen und
+  Hinweis-Status setzen fragen vor dem Senden einmal nach; ohne Modulschlüssel zeigt der Tab
+  „Nicht bereit“, nie „keine Befunde“.
+- **Diagnose:** neuer Block `security_center` am Ende (nur Zähler, Zustände und Gründe;
+  maskiert und geschwärzt, keine MAC, Adresse, Hostname, Benutzer-ID oder Schlüssel).
+
+### Hinweise
+
+- **Standardmäßig aus.** Einschalten im Panel unter Enterprise → Security Center (nur
+  Administratoren). Es gibt keinen Optionsdialog und keinen Dienst dafür.
+- **Keine neuen Router-Rechte.** Die ACL bleibt unverändert; das Security Center schreibt
+  nichts auf einen Router. Den Log-Versand der Router (`log_ip`) richtet der Nutzer selbst ein
+  (Befehle und Rückweg in `docs/security-center.md`).
+- **Firewall- und DNS-Befunde markieren kein Gerät** im Vertrauensbuch: ihre Logzeilen nennen
+  eine IP-Adresse, und es gibt kein Nachschlagen IP → MAC.
+- **Keine DNS-Namen im Klartext** an DNS-Hinweisen; eine Einstellung dafür gibt es nicht (die
+  frühere Option `keep_dns_names` ist entfernt, ein Speicherstand mit ihr lädt weiter).
+- **Der Collector-Weg ist noch nicht verfügbar** (`log_path: collector` meldet „nicht
+  verfügbar“). Firewall- und DNS-Erkennungen setzen den Syslog-Weg voraus; ihre Logformate sind
+  an echten Geräten unbestätigt.
+- **Nicht getestet** gegen echte Router oder eine echte Home-Assistant-Instanz; die Tests
+  laufen ohne Geräte.
+
 ## [1.45.0] - 2026-11-19
 
 Configuration Manager: Konfigurations-Backup für OpenWrt-Router in Home Assistant, auf dem

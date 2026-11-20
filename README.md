@@ -418,6 +418,38 @@ Configure*); while it is off there are **0 extra router calls**. Full guide (Ger
 
 ---
 
+## Security Center (since 1.46.0)
+
+Turns data the integration already reads (Wi-Fi events, device list, configuration changes)
+into **hints** about unusual activity, and can optionally evaluate syslog lines your routers
+send to Home Assistant. **It only observes:** no blocking, no quarantine, no scans and no
+change to any router or firewall. **Off by default**; switch it on as an administrator under
+*Panel → Enterprise → Security Center*. While it is off there is no listener, no socket and
+nothing is written. Full guide (German): [docs/security-center.md](docs/security-center.md).
+
+- **Hints, not verdicts:** Wi-Fi authentication failures (also across access points), bursts
+  of association attempts, clustered deauthentications, new devices and unusual IP or host name
+  changes, configuration changes in VLAN, firewall or interface areas (needs the Configuration
+  Manager), and, with remote logging, blocked firewall connections and DNS patterns. Findings
+  already covered by Network Intelligence are linked, never duplicated. Each detection shows
+  whether its data source is available; firewall and DNS log formats are marked
+  "format unconfirmed" because they were not seen on real devices.
+- **No extra router calls per poll.** Remote logging is optional: *log path* `syslog` makes
+  Home Assistant listen on UDP port 5514 (IPv4, only for the routers' management addresses; UDP
+  senders can be forged, so the sender list filters noise and does not authenticate). You set
+  up the router side yourself, the integration changes nothing on a router. The collector path
+  is not available yet.
+- **Entities and panel:** seven fleet sensors (security score, active and critical hints,
+  unconfirmed devices, firewall log entries and Wi-Fi authentication failures of the last hour,
+  detection coverage), only while the center is on; unknown is `None`, never 0. The panel tab
+  shows overview, timeline, devices, detections and settings.
+- **Privacy:** only administrators see MAC, IP and host name in clear text, everyone else
+  pseudonyms; DNS names are off by default; raw log lines are never stored; diagnostics carry
+  counters only. No new router rights (no ACL change).
+- **Not tested** against real routers or a real Home Assistant instance yet.
+
+---
+
 ## Features
 
 ### System Monitoring
