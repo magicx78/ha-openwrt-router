@@ -1,0 +1,13 @@
+create_config_backup:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: openwrt_router
+          multiple: true
+    note:
+      required: false
+      example: "Before the VLAN change"
+      selector:
+        text:

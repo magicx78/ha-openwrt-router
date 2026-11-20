@@ -7,13 +7,19 @@
           "extended_wifi_sensors": "Erweiterte WLAN-Sensoren (Funk, AP, Port)",
           "topology_port_debug": "Port-Zuordnungs-Debugdaten im Topology-Snapshot",
           "topology_panel_all_users": "Topologie-Panel allen Benutzern anzeigen",
-          "config_backup_enabled": "Konfigurations-Backup (config_backup_enabled)"
+          "config_backup_enabled": "Konfigurations-Backup (config_backup_enabled)",
+          "config_backup_schedule": "Automatisches Konfigurations-Backup (config_backup_schedule)",
+          "config_backup_time": "Uhrzeit des täglichen Backups (config_backup_time)",
+          "config_drift_check": "Auf Konfigurationsänderungen prüfen (config_drift_check)"
         },
         "data_description": {
           "extended_wifi_sensors": "Schaltet alle Sensoren pro Funkmodul, pro SSID (AP) und pro Port dieses Routers auf einmal ein statt einzeln. Ausschalten deaktiviert nur die Sensoren, die dieser Schalter eingeschaltet hat; selbst deaktivierte Sensoren bleiben unberührt. Wirksam nach etwa 30 Sekunden.",
           "topology_port_debug": "Rohe Port-Zuordnungsdaten (FDB/DHCP/ARP-Treffer und Zuordnungsgründe) im Topology-Snapshot-Endpoint mitliefern. HA-Diagnostics bleiben immer redacted.",
           "topology_panel_all_users": "Macht das Seitenleisten-Panel „Network Topology“ und seine Snapshot-API für alle Home-Assistant-Benutzer verfügbar, nicht nur für Administratoren. Die Topologie enthält DHCP-Leases, ARP-/Switch-Tabellen, die WAN-IP und DDNS-Angaben. Das Panel gilt für alle Router gemeinsam: Es ist für alle Benutzer offen, sobald ein Router diese Option aktiviert hat.",
-          "config_backup_enabled": "Erlaubt das Konfigurations-Backup dieses Routers (alle config.*-Fähigkeiten und die optionale ACL-Stufe „config_backup_read“). Standardmäßig aus. Der Schalter erscheint, sobald ein Konfigurations-Provider (Backup-Engine) installiert ist oder solange er an ist; ohne Provider hat er keine Wirkung. Ausschalten stoppt sofort jedes Backup, jede Prüfung und jeden Vergleich für diesen Router; gespeicherte Versionen bleiben. Achtung: Ein Backup enthält ALLE Router-Geheimnisse: /etc/shadow (Passwort-Hashes aller Router-Logins, auch root), private Schlüssel (SSH-Host-Keys, VPN- und TLS-Schlüssel) sowie die WLAN-, VPN- und DDNS-Passwörter."
+          "config_backup_enabled": "Erlaubt das Konfigurations-Backup dieses Routers (alle config.*-Fähigkeiten und die optionale ACL-Stufe „config_backup_read“). Standardmäßig aus. Der Schalter erscheint, sobald ein Konfigurations-Provider (Backup-Engine) installiert ist oder solange er an ist; ohne Provider hat er keine Wirkung. Ausschalten stoppt sofort jedes Backup, jede Prüfung und jeden Vergleich für diesen Router; gespeicherte Versionen bleiben. Achtung: Ein Backup enthält ALLE Router-Geheimnisse: /etc/shadow (Passwort-Hashes aller Router-Logins, auch root), private Schlüssel (SSH-Host-Keys, VPN- und TLS-Schlüssel) sowie die WLAN-, VPN- und DDNS-Passwörter.",
+          "config_backup_schedule": "Täglich: ein Backup pro Tag zur unten gewählten Uhrzeit; jeder Router startet mit seinem eigenen festen Versatz von bis zu einer Stunde, so laufen nie alle gleichzeitig. Aus: nur manuelle Backups und Drift-Versionen. Wirkt nur, solange das Konfigurations-Backup eingeschaltet ist.",
+          "config_backup_time": "Ortszeit von Home Assistant. Ein täglicher Lauf, der verpasst wurde, weil Home Assistant aus war, wird am selben Tag nachgeholt.",
+          "config_drift_check": "Vergleicht den Router mit seiner letzten Version, wenn die abgefragten Daten eine konfigurationsnahe Änderung zeigen (5 Minuten nach der Änderung, höchstens einmal pro Stunde). Eine erkannte Änderung wird als neue Version gespeichert (höchstens vier pro Tag). Aus: keine Drift-Prüfung."
         }
       }
     }
@@ -98,6 +104,26 @@
       },
       "fleet_incident_critical": {
         "name": "Kritischer Incident (alle Router)"
+      },
+      "config_drift": {
+        "name": "Konfigurationsabweichung",
+        "state_attributes": {
+          "drift_id": {
+            "name": "Abweichungs-ID"
+          },
+          "critical_count": {
+            "name": "Kritische Änderungen"
+          },
+          "unknown_count": {
+            "name": "Nicht eingeordnete Änderungen"
+          },
+          "comparison": {
+            "name": "Vergleich"
+          },
+          "checked_at": {
+            "name": "Geprüft am"
+          }
+        }
       }
     },
     "sensor": {
@@ -261,6 +287,34 @@
       },
       "client_last_disconnect": {
         "name": "{client} letzter Verbindungsabbruch"
+      },
+      "config_last_backup": {
+        "name": "Letztes Konfigurations-Backup"
+      },
+      "config_backup_status": {
+        "name": "Status Konfigurations-Backup",
+        "state": {
+          "ok": "OK",
+          "partial": "Unvollständig",
+          "failed": "Fehlgeschlagen",
+          "running": "Läuft",
+          "disabled": "Ausgeschaltet",
+          "never": "Noch nie"
+        },
+        "state_attributes": {
+          "error_class": {
+            "name": "Fehlerklasse"
+          },
+          "last_attempt_at": {
+            "name": "Letzter Versuch"
+          },
+          "next_run_at": {
+            "name": "Nächster Lauf"
+          }
+        }
+      },
+      "config_versions": {
+        "name": "Konfigurationsversionen"
       }
     },
     "switch": {
@@ -289,6 +343,24 @@
     },
     "update_check_running": {
       "message": "Auf diesem Router läuft bereits eine Update-Suche. Bitte warte auf ihr Ergebnis."
+    },
+    "config_backup_unknown_device": {
+      "message": "Das Gerät {device_id} ist kein OpenWrt-Router dieser Integration."
+    },
+    "config_backup_disabled": {
+      "message": "Das Konfigurations-Backup ist für {router} ausgeschaltet. Bitte zuerst in den Optionen der Integration einschalten."
+    },
+    "config_backup_not_ready": {
+      "message": "Der Konfigurations-Manager läuft noch nicht. Bitte erneut versuchen, sobald die Router geladen sind."
+    },
+    "config_backup_denied": {
+      "message": "Das Erstellen eines Konfigurations-Backups wurde für diesen Benutzer abgelehnt."
+    },
+    "config_backup_failed": {
+      "message": "Das Konfigurations-Backup ist fehlgeschlagen ({error_class})."
+    },
+    "config_backup_invalid_note": {
+      "message": "Die Notiz ist zu lang oder enthält Steuerzeichen."
     }
   },
   "issues": {
@@ -319,6 +391,30 @@
     "router_unreachable": {
       "title": "OpenWrt-Router {router} nicht erreichbar",
       "description": "Der Router {router} antwortet seit {since} nicht mehr (Fehlertyp: {error_type}).\n\nPrüfe Stromversorgung, Verkabelung und die Dienste rpcd/uhttpd auf dem Router.\n\nDieser Hinweis verschwindet automatisch, sobald der Router wieder antwortet."
+    }
+  },
+  "selector": {
+    "config_backup_schedule": {
+      "options": {
+        "daily": "Täglich",
+        "off": "Aus (nur manuelle Backups)"
+      }
+    }
+  },
+  "services": {
+    "create_config_backup": {
+      "name": "Konfigurations-Backup erstellen",
+      "description": "Speichert eine neue Konfigurationsversion der gewählten OpenWrt-Router, einen nach dem anderen. Setzt voraus, dass das Konfigurations-Backup für jeden Router eingeschaltet ist. Bei geplanten Läufen entsteht nur bei geänderter Konfiguration eine neue Version; ein manuelles Backup wird immer behalten.",
+      "fields": {
+        "device_id": {
+          "name": "Router",
+          "description": "Ein oder mehrere OpenWrt-Router-Geräte dieser Integration."
+        },
+        "note": {
+          "name": "Notiz",
+          "description": "Optionale Notiz zur Version (höchstens 200 Zeichen, keine Steuerzeichen). Niemals Passwörter eintragen."
+        }
+      }
     }
   }
 }

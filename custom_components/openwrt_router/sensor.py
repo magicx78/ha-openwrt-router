@@ -37,6 +37,7 @@ from . import OpenWrtConfigEntry
 from .api import is_wan_interface
 from .channel_plan import analyze
 from .client_entities import async_setup_client_sensors
+from .config_entities import async_setup_config_sensors  # configuration manager
 from .const import (
     CLIENT_KEY_RADIO,
     CONF_EXTENDED_WIFI_SENSORS,
@@ -536,6 +537,8 @@ async def async_setup_entry(
     )
     # Client stability (B7): sensors of the selected clients, on the anchor.
     async_setup_client_sensors(hass, entry, async_add_entities)
+    # Configuration manager: backup sensors, read from its runtime only.
+    async_setup_config_sensors(hass, entry, async_add_entities)
 
     # Track which dynamic entities have already been created
     tracked_interfaces: set[str] = set()

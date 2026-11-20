@@ -33,9 +33,11 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv  # configuration manager
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType  # configuration manager
 
 from .api import (
     OpenWrtAPI,
@@ -78,6 +80,14 @@ except Exception as _err:  # noqa: BLE001 - any error raised by the core import
     _enterprise_core = None  # type: ignore[assignment]
     _core_import_error = _err
 
+# --- Configuration manager (plan 2026-11-18, section 1): imported here for
+# the same reason as the core; None when the core (or it) cannot be imported.
+try:
+    from . import config_manager as _config_manager
+except Exception:  # noqa: BLE001 - the routers work without it
+    _config_manager = None  # type: ignore[assignment]
+# --- end configuration manager
+
 _LOGGER = logging.getLogger(__name__)
 
 if _core_import_error is not None:
@@ -100,6 +110,27 @@ PLATFORMS: list[Platform] = [
     Platform.BUTTON,
     Platform.BINARY_SENSOR,
 ]
+
+# --- Configuration manager (plan 2026-11-18, section 4): the action
+# openwrt_router.create_config_backup. Config entries only (no YAML); the
+# action is registered once here and stays registered across entry reloads.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration's actions (independent of config entries)."""
+    if _config_manager is not None:
+        try:
+            _config_manager.async_register_services(hass)
+        except Exception:
+            _LOGGER.warning(
+                "The configuration backup action could not be registered",
+                exc_info=True,
+            )
+    return True
+
+
+# --- end configuration manager action
 
 
 @dataclass
@@ -539,6 +570,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         )
     # --- end enterprise core
 
+    # --- Configuration manager (plan 2026-11-18, section 1): provider,
+    # schedule and drift trigger on top of the core. Memory only, no router
+    # call here; never fails setup.
+    try:
+        if _enterprise_core is not None and _config_manager is not None:
+            await _config_manager.async_setup_config_manager(hass, entry, coordinator)
+    except Exception:
+        _LOGGER.warning(
+            "Configuration manager setup failed for '%s' — the router works "
+            "without configuration backups",
+            entry.title,
+            exc_info=True,
+        )
+    # --- end configuration manager
+
     # Channel conflicts are judged across all routers after every poll.
     channel_plan = async_get_channel_plan_monitor(hass)
     entry.async_on_unload(
@@ -671,6 +717,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
             _LOGGER.warning(
                 "Client stability unload raised for '%s'", entry.title, exc_info=True
             )
+        # --- Configuration manager: release before the core lets go of the
+        # entry; the last release stops its timer and unregisters the provider.
+        try:
+            if _config_manager is not None:
+                _config_manager.async_release_config_manager(hass, entry.entry_id)
+        except Exception:
+            _LOGGER.warning(
+                "Configuration manager release raised for '%s'",
+                entry.title,
+                exc_info=True,
+            )
+        # --- end configuration manager
         # --- Enterprise core (part 1): detach; the last entry flushes and
         # releases the core.
         try:

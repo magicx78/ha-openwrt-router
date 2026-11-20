@@ -70,7 +70,7 @@ except ImportError:  # pragma: no cover - older HA cores keyed the app by str
 _LOGGER = logging.getLogger(__name__)
 
 # Cache-busting query for the bundle URL — bump on every frontend rebuild.
-_PANEL_VERSION = "20261118-enterprise-nav2"
+_PANEL_VERSION = "20261120-config-manager4"
 # Master flag: set ONLY after every registration step completed.  Until then,
 # a partial setup must still allow re-entry to register the missing pieces.
 _PANEL_REGISTERED_KEY = f"{DOMAIN}_panel_registered"
@@ -283,12 +283,16 @@ class _IntelView(HomeAssistantView):
 
     @staticmethod
     async def _body(request: web.Request) -> Any:
-        """JSON body; raises ``QueryError`` when it is not JSON."""
+        """JSON body; raises ``QueryError`` when it is not JSON.
+
+        ``RecursionError``: too deeply nested for the parser (a bad body,
+        not a server error).
+        """
         from .net_query import QueryError
 
         try:
             return await request.json()
-        except ValueError:
+        except (ValueError, RecursionError):
             raise QueryError("body: JSON expected") from None
 
 
