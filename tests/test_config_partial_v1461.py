@@ -269,3 +269,67 @@ async def test_host_key_reason_reaches_the_panel_unmasked(disks, tmp_path):
             assert "ssh_host_key:a1b2c3d4e5f6" not in warnings
             assert "ssh_host_key:**REDACTED**" in warnings
     await stop(env)
+
+
+# -- point 8: the SSH host-key pin store is strictly per router ID -----------
+
+
+async def _ssh_run(env: Any, rid: str, router: Any) -> Any:
+    from test_ssh_hostkey_pinning import _patched
+
+    ctx = env.manager._context()
+    with _patched(router):
+        return await ctx.async_ssh_run_pinned(rid, "uci show", timeout=5)
+
+
+async def test_ssh_pin_store_keeps_each_router_apart(disks, tmp_path):
+    # Two routers on the SAME (invented) host string with different keys:
+    # the pin follows the router ID, never the host or another router.
+    from core_test_provider import approve_as, restart, start_env, stop_env
+    from core_testkit import ADMIN_ID, OTHER_ADMIN_ID, user_actor
+    from test_ssh_hostkey_pinning import KEY_A, KEY_B, FakeRouter
+    from test_ssh_hostkey_pinning import _api as ssh_api
+
+    from custom_components.openwrt_router.api import OpenWrtHostKeyMismatchError
+
+    env = await start_env(disks, tmp_path, routers=2)
+    rid_a, rid_b = env.rids
+    for rid in env.rids:
+        env.coords[rid].api = ssh_api()
+    fp_a, fp_b = (k.get_fingerprint("sha256") for k in (KEY_A, KEY_B))
+
+    for rid, key in ((rid_a, KEY_A), (rid_b, KEY_B)):
+        with pytest.raises(OpenWrtHostKeyError) as err:
+            await _ssh_run(env, rid, FakeRouter(key))
+        assert err.value.reason == "pin_pending"
+    assert env.api.ssh_pin_status(rid_a)["pending_fingerprint"] == fp_a
+    assert env.api.ssh_pin_status(rid_b)["pending_fingerprint"] == fp_b
+
+    # Confirming A pins A only; B stays pending with its own key.
+    approval = await env.api.async_request_ssh_pin_confirm(
+        rid_a, actor=user_actor(ADMIN_ID)
+    )
+    await approve_as(env, approval.approval_id, OTHER_ADMIN_ID)
+    await env.api.async_confirm_ssh_pin(
+        approval.approval_id, actor=user_actor(ADMIN_ID)
+    )
+    assert env.api.ssh_pin_status(rid_a)["state"] == "pinned"
+    assert env.api.ssh_pin_status(rid_a)["fingerprint"] == fp_a
+    assert env.api.ssh_pin_status(rid_b)["state"] == "pending"
+    assert env.api.ssh_pin_status(rid_b)["fingerprint"] is None
+
+    # A runs with its key; A's pin is no pass for B, B's key no pass for A.
+    assert (await _ssh_run(env, rid_a, FakeRouter(KEY_A))).pinned_now is False
+    with pytest.raises(OpenWrtHostKeyError) as err:
+        await _ssh_run(env, rid_b, FakeRouter(KEY_A))
+    assert err.value.reason in ("pin_pending", "mismatch")
+    with pytest.raises(OpenWrtHostKeyMismatchError):
+        await _ssh_run(env, rid_a, FakeRouter(KEY_B))
+    assert env.api.ssh_pin_status(rid_b)["pending_fingerprint"] == fp_b
+
+    # Still apart after a restart (one store, one entry per router ID).
+    env = await restart(env)
+    assert env.api.ssh_pin_status(rid_a)["fingerprint"] == fp_a
+    assert env.api.ssh_pin_status(rid_b)["state"] == "pending"
+    assert env.api.ssh_pin_status(rid_b)["pending_fingerprint"] == fp_b
+    await stop_env(env)
