@@ -7,6 +7,7 @@ test_config_http_archive). All names, hosts and keys are invented.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -28,6 +29,7 @@ from test_config_provider import (
     router_record,
     ubus_values,
 )
+from test_config_views import backup, http
 
 from custom_components.openwrt_router.api import (
     OpenWrtConfigFetchHostKeyError,
@@ -237,4 +239,33 @@ async def test_partial_run_without_archive_path_end_to_end(disks, tmp_path):
     assert record.fetch_method == "uci"
     assert "archive_not_attempted:cgi.not_probed" in record.warnings
     assert "archive_not_attempted:ssh.not_probed" in record.warnings
+    await stop(env)
+
+
+# -- point 4: the host-key reason is a fixed code, not a secret ---------------
+
+
+def _with_warnings(*codes: str) -> Any:
+    def hook(collected: Any) -> Any:
+        meta = replace(collected.meta, warnings=(*collected.meta.warnings, *codes))
+        return replace(collected, meta=meta)
+
+    return hook
+
+
+async def test_host_key_reason_reaches_the_panel_unmasked(disks, tmp_path):
+    env = await cm_env(disks, tmp_path)
+    env.provider.collect_hook = _with_warnings(
+        "ssh_host_key:pin_pending", "ssh_host_key:a1b2c3d4e5f6"
+    )
+    async with http(env.hass) as h:
+        made = await backup(h, env.rid)
+        assert "ssh_host_key:pin_pending" in made["version"]["warnings"]
+        one = (await h.get(f"/versions/{made['backup_id']}")).data
+        listed = (await h.get(f"/routers/{env.rid}/versions")).data["versions"][0]
+        for warnings in (one["warnings"], listed["warnings"]):
+            assert "ssh_host_key:pin_pending" in warnings
+            # Anything outside the fixed reason codes stays masked.
+            assert "ssh_host_key:a1b2c3d4e5f6" not in warnings
+            assert "ssh_host_key:**REDACTED**" in warnings
     await stop(env)
