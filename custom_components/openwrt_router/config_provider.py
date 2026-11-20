@@ -937,10 +937,13 @@ def _probed_backup_type(
 
     Plain HTTP always asks for the archive: the collect takes it over the
     pinned SSH path or rejects the run (``insecure_transport``), never a
-    silent UCI-only "ok". TLS keeps the core's own rule: an archive when the
-    probe found an archive path available.
+    silent UCI-only "ok". TLS: an archive when the probe found an archive
+    path available, or the cgi path ``not_probed`` (shown as unknown, but
+    the first backup is what finds out).
     """
     if not secure or cgi_class is None or ssh_class is None:
+        return BackupType.FULL_ARCHIVE
+    if cgi_class == _PROBE_NOT_PROBED:
         return BackupType.FULL_ARCHIVE
     return BackupType.UCI_SNAPSHOT
 
@@ -1029,6 +1032,12 @@ class ConfigManagerProvider:
         # router id -> probe classes (cgi, ssh) when no archive path was
         # available (memory only; named in ``archive_not_attempted``).
         self._probed_causes: dict[str, tuple[str, str]] = {}
+        # router id -> outcome of the last real cgi archive attempt (None =
+        # delivered a valid archive; permission/not_available = refused).
+        # Memory only; the probe shows it while the package list is
+        # unreadable. Not the core's first-use settling: that would also
+        # count an archive that came over SSH.
+        self._cgi_seen: dict[str, str | None] = {}
 
     @property
     def provider_id(self) -> str:
@@ -1229,18 +1238,23 @@ class ConfigManagerProvider:
         return statuses
 
     async def _probe_cgi(
-        self, api: Any, packages: Mapping[str, Any] | None, timeout: float
+        self,
+        router_id: str,
+        api: Any,
+        packages: Mapping[str, Any] | None,
+        timeout: float,
     ) -> str | None:
         """Error class of the cgi-backup path from rights and presence only.
 
         Never fetches: a fetch makes the router run sysupgrade (review M1).
-        rpcd's ``session access`` decides: the right held means available.
-        The package list read just before only counts as negative evidence:
-        a readable list without cgi-io gives ``not_available``; an
-        unreadable list changes nothing (1.46.1: it used to leave the path
-        ``not_probed``, so no run ever asked for an archive). No clear rpcd
-        answer is ``_PROBE_NOT_PROBED`` (the first backup finds out). A
-        plain HTTP entry is ``insecure_transport`` without asking rpcd.
+        Available needs the right (rpcd's ``session access``) and cgi-io in
+        the package list read just before; without cgi-io it is
+        ``not_available``. Right held but the list unreadable: the outcome
+        of the last real cgi archive run on this router, else
+        ``_PROBE_NOT_PROBED`` (shown as unknown; ``_probed_backup_type``
+        still asks for the archive, so the first backup finds out). No
+        clear rpcd answer is ``_PROBE_NOT_PROBED`` too. A plain HTTP entry
+        is ``insecure_transport`` without asking rpcd.
         """
         if not api.config_cgi_transport_secure():
             return REASON_INSECURE_TRANSPORT
@@ -1258,7 +1272,9 @@ class ConfigManagerProvider:
             return ERR_PERMISSION
         if access is not True:
             return _PROBE_NOT_PROBED
-        if packages is not None and _CGI_IO_PACKAGE not in packages:
+        if packages is None:
+            return self._cgi_seen.get(router_id, _PROBE_NOT_PROBED)
+        if _CGI_IO_PACKAGE not in packages:
             return ERR_NOT_AVAILABLE
         return None
 
@@ -1334,7 +1350,7 @@ class ConfigManagerProvider:
                 pkg_class = None if has_packages else ERR_NOT_AVAILABLE
                 known = packages if has_packages else None
             cgi_class = await self._probe_cgi(
-                api, known, self._timeouts[FETCH_PACKAGELIST]
+                router_id, api, known, self._timeouts[FETCH_PACKAGELIST]
             )
             ssh_class = self._ssh_class(router_id, api, ctx)
         probed = _probed_backup_type(
@@ -1441,6 +1457,20 @@ class ConfigManagerProvider:
         )
         return version
 
+    def _remember_cgi(self, router_id: str, fetch: ArchiveFetch, ok: bool) -> None:
+        """Keep what a real cgi archive attempt proved for the next probe.
+
+        Only clear answers count: a valid archive over cgi (available) or a
+        refusal (permission/not_available). Anything else proves nothing.
+        """
+        for attempt in fetch.attempts:
+            if attempt.method != FETCH_METHOD_CGI:
+                continue
+            if attempt.error_class is None and ok and fetch.method == FETCH_METHOD_CGI:
+                self._cgi_seen[router_id] = None
+            elif attempt.error_class in CHAIN_SKIP_ERRORS:
+                self._cgi_seen[router_id] = attempt.error_class
+
     async def _collect(
         self,
         conn: RouterConnection,
@@ -1504,6 +1534,8 @@ class ConfigManagerProvider:
             elif fetch is not None:
                 archive_class, archive_skipped = _archive_failure(fetch)
         archive_ok = analysis is not None and analysis.ok
+        if fetch is not None:
+            self._remember_cgi(conn.router_id, fetch, archive_ok)
         if order and not secure and not archive_ok and archive_skipped:
             # An archive was asked for, cgi may not run on HTTP and SSH
             # cannot deliver: reject (never a silent UCI-only "ok").

@@ -1743,9 +1743,9 @@ async def test_probe_without_archive_rights() -> None:
             CapabilityState.UNKNOWN,
             CapabilityReason.NOT_PROBED,
         ),
-        # Right granted, no package list: the right decides (1.46.1; it used
-        # to stay not_probed, so no run ever asked for an archive).
-        (True, None, CapabilityState.AVAILABLE, CapabilityReason.OK),
+        # Right granted, no package list: presence unknown, so not shown as
+        # available (the run still asks for the archive, PR 59 review R2).
+        (True, None, CapabilityState.UNKNOWN, CapabilityReason.NOT_PROBED),
         # Right granted, package list known, cgi-io not installed.
         (
             True,

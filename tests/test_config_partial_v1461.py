@@ -49,7 +49,13 @@ from custom_components.openwrt_router.config_collector import (
 )
 from custom_components.openwrt_router.config_provider import ConfigManagerProvider
 from custom_components.openwrt_router.const import CONFIG_STATUS_OK
-from custom_components.openwrt_router.core_models import BackupType, VersionStatus
+from custom_components.openwrt_router.core_models import (
+    BackupType,
+    Capability,
+    CapabilityReason,
+    CapabilityState,
+    VersionStatus,
+)
 
 
 @pytest.fixture
@@ -232,16 +238,27 @@ async def test_requested_snapshot_with_an_archive_path_says_requested() -> None:
 
 async def test_partial_run_without_archive_path_end_to_end(disks, tmp_path):
     # The field case after point 1 and 3: rpcd gives no clear answer on the
-    # cgi right, the rpcd config is denied, the SSH pin is pending.
-    uci = {**ubus_values(), "rpcd": OpenWrtConfigFetchHostKeyError("pin_pending", "x")}
-    api = FakeApi(secure=True, root=True, packages=None, access=None, uci=uci)
+    # cgi right, the rpcd config is denied, the SSH pin is pending. The first
+    # backup finds out (PR 59 review R2/R3): it asks for the archive, both
+    # paths fail, the UCI snapshot stays with an honest partial status.
+    pending = OpenWrtConfigFetchHostKeyError("pin_pending", "x")
+    uci = {**ubus_values(), "rpcd": pending}
+    api = FakeApi(
+        secure=True,
+        root=True,
+        packages=None,
+        access=None,
+        uci=uci,
+        cgi=OpenWrtConfigFetchPermissionError("no right"),
+        ssh=pending,
+    )
     env = await _env(disks, tmp_path, api)
     await env.tick()
     [record] = await _records(env)
+    assert {"cgi", "ssh"} <= set(methods(api))
     assert record.status is VersionStatus.PARTIAL
     assert record.fetch_method == "uci"
-    assert "archive_not_attempted:cgi.not_probed" in record.warnings
-    assert "archive_not_attempted:ssh.not_probed" in record.warnings
+    assert not [w for w in record.warnings if w.startswith("archive_not_attempted")]
     await stop(env)
 
 
@@ -410,3 +427,68 @@ async def test_access_point_without_firewall_dhcp_wireless_stays_ok() -> None:
     meta = (await _snapshot_run(**absent)).meta
     assert meta.backup_type is BackupType.UCI_SNAPSHOT
     assert meta.status is VersionStatus.OK
+
+
+# -- R2: "right held, presence unknown" asks for the archive, shows unknown ----
+
+
+async def _cgi_status(provider: ConfigManagerProvider, api: FakeApi) -> Any:
+    caps = await provider.async_probe(make_conn(api), make_ctx())
+    status = caps[Capability.CONFIG_CGI_BACKUP]
+    return status.state, status.reason
+
+
+def _no_list_api(**kwargs: Any) -> FakeApi:
+    # TLS, cgi right held, package list unreadable, SSH user not root.
+    return FakeApi(secure=True, root=False, packages=None, access=True, **kwargs)
+
+
+async def test_right_without_package_list_shows_not_probed_and_asks() -> None:
+    provider = ConfigManagerProvider()
+    api = _no_list_api()
+    assert await _cgi_status(provider, api) == (
+        CapabilityState.UNKNOWN,
+        CapabilityReason.NOT_PROBED,
+    )
+    # The decision is separate from what is shown: the run asks for it.
+    assert provider.default_backup_type(router_record()) is BackupType.FULL_ARCHIVE
+
+
+async def test_cgi_archive_run_then_proves_the_path() -> None:
+    provider = ConfigManagerProvider()
+    api = _no_list_api()
+    await _cgi_status(provider, api)
+    version = await collect(api, provider=provider)
+    assert version.meta.fetch_method == "cgi"
+    assert await _cgi_status(provider, api) == (
+        CapabilityState.AVAILABLE,
+        CapabilityReason.OK,
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (OpenWrtConfigFetchNotAvailableError("no cgi-io"), "not_detected"),
+        (OpenWrtConfigFetchPermissionError("no right"), "permission_denied"),
+    ],
+)
+async def test_failed_cgi_run_then_shows_its_class(error: Exception, reason: str):
+    provider = ConfigManagerProvider()
+    api = _no_list_api(cgi=error)
+    await _cgi_status(provider, api)
+    await collect(api, provider=provider)
+    assert await _cgi_status(provider, api) == (CapabilityState.UNAVAILABLE, reason)
+
+
+async def test_ssh_archive_does_not_prove_the_cgi_path() -> None:
+    provider = ConfigManagerProvider()
+    cut = OpenWrtConfigFetchIncompleteError("cut off")
+    api = FakeApi(secure=True, packages=None, access=True, cgi=cut)
+    await _cgi_status(provider, api)
+    version = await collect(api, provider=provider)
+    assert version.meta.fetch_method == "ssh"
+    assert await _cgi_status(provider, api) == (
+        CapabilityState.UNKNOWN,
+        CapabilityReason.NOT_PROBED,
+    )
