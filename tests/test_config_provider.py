@@ -1741,8 +1741,9 @@ async def test_probe_without_archive_rights() -> None:
             CapabilityState.UNKNOWN,
             CapabilityReason.NOT_PROBED,
         ),
-        # Right granted, but no package list to see cgi-io in.
-        (True, None, CapabilityState.UNKNOWN, CapabilityReason.NOT_PROBED),
+        # Right granted, no package list: the right decides (1.46.1; it used
+        # to stay not_probed, so no run ever asked for an archive).
+        (True, None, CapabilityState.AVAILABLE, CapabilityReason.OK),
         # Right granted, package list known, cgi-io not installed.
         (
             True,
@@ -1765,7 +1766,8 @@ async def test_probe_never_creates_a_backup(
     assert "backup_access" in methods(api)
     # Archive state unknown at best: the dry run is never claimed available.
     dry_run = caps[Capability.CONFIG_RESTORE_DRY_RUN]
-    assert dry_run.state is not CapabilityState.AVAILABLE
+    if state is not CapabilityState.AVAILABLE:
+        assert dry_run.state is not CapabilityState.AVAILABLE
 
 
 async def test_probe_of_offline_router_is_unknown() -> None:

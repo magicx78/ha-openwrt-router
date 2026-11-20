@@ -1205,9 +1205,12 @@ class ConfigManagerProvider:
         """Error class of the cgi-backup path from rights and presence only.
 
         Never fetches: a fetch makes the router run sysupgrade (review M1).
-        rpcd's ``session access`` answers for the right; the package list
-        read just before says whether cgi-io is installed. What neither
-        settles is ``_PROBE_NOT_PROBED`` (the first backup finds out). A
+        rpcd's ``session access`` decides: the right held means available.
+        The package list read just before only counts as negative evidence:
+        a readable list without cgi-io gives ``not_available``; an
+        unreadable list changes nothing (1.46.1: it used to leave the path
+        ``not_probed``, so no run ever asked for an archive). No clear rpcd
+        answer is ``_PROBE_NOT_PROBED`` (the first backup finds out). A
         plain HTTP entry is ``insecure_transport`` without asking rpcd.
         """
         if not api.config_cgi_transport_secure():
@@ -1224,9 +1227,11 @@ class ConfigManagerProvider:
             return _PROBE_NOT_PROBED
         if access is False:
             return ERR_PERMISSION
-        if access is not True or packages is None:
+        if access is not True:
             return _PROBE_NOT_PROBED
-        return None if _CGI_IO_PACKAGE in packages else ERR_NOT_AVAILABLE
+        if packages is not None and _CGI_IO_PACKAGE not in packages:
+            return ERR_NOT_AVAILABLE
+        return None
 
     async def _probe(
         self, conn: RouterConnection, ctx: ProviderContext
