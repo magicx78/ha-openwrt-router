@@ -117,7 +117,14 @@ Status `ok`, wenn jeder Weg „nicht vorhanden“ oder „keine Rechte“ meldet
 Fordert ein Lauf das Archiv an und bekommt keins, steht je versuchtem Weg ein Grund in der
 Version: `archive_unavailable:<Weg>.<Fehlerklasse>`, zum Beispiel `archive_unavailable:cgi.permission`
 oder `archive_unavailable:ssh.auth`; bei einem HTTP-Eintrag zusätzlich
-`archive_unavailable:cgi.insecure_transport`.
+`archive_unavailable:cgi.insecure_transport`. Läuft die Zeit für das Archiv als Ganzes ab,
+bevor die Kette antwortet, bekommt jeder Weg der Kette `<Weg>.timeout`.
+
+**SSH-Port zu.** Ist bei einem root-Eintrag über HTTPS ohne `cgi-io` der SSH-Port 22 von Home
+Assistant aus nicht erreichbar, endet jeder Lauf `partial` mit `unreachable` oder `timeout`,
+bis die nächste Prüfung läuft. Das Panel nennt dann den SSH-Weg (der Router selbst hat
+geantwortet) und als nächsten Schritt: SSH für Home Assistant freigeben oder `cgi-io`
+installieren.
 
 Den Snapshot liest der Manager zuerst per ubus (`uci get`); verweigert die rpcd-ACL das,
 liest er mit `uci show` per SSH. Meldet ubus dagegen „nicht gefunden“, ist das endgültig: Die
@@ -139,7 +146,9 @@ unlesbar, bleibt sie „noch nicht geprüft“, bis ein echter cgi-Archivlauf si
 erhalten: verfügbar; abgelehnt: dessen Grund; sichtbar ab der nächsten Prüfung, also nach
 Einbinden, Firmware-Wechsel, Einschalten der Option oder ACL-Neuverteilung). Ein Archiv über
 SSH belegt den cgi-Weg nicht. Unabhängig von der Anzeige fragt der Lauf in diesem Fall das
-Archiv an (siehe oben).
+Archiv an (siehe oben), auch nach einer gemerkten Ablehnung: Wird `cgi-io` nachinstalliert,
+nimmt der nächste Lauf das Archiv ohne HA-Neustart. Bestätigt rpcd bei einer Prüfung das
+Recht, entfällt eine gemerkte Rechte-Ablehnung.
 
 **Lauf ohne Archivversuch.** Fordert ein Lauf kein Archiv an, steht in der Version je Weg ein
 Grund: `archive_not_attempted:cgi.<Ursache>` und `archive_not_attempted:ssh.<Ursache>`

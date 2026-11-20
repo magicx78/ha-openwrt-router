@@ -20,7 +20,9 @@ Keine neue Vertragsangabe, keine Änderung am Core, Maskierung unverändert.
   unlesbarer Paketliste fragt der Lauf das Archiv an; die Fähigkeit `config.cgi_backup` zeigt
   dabei „noch nicht geprüft“, nicht „verfügbar“. Erst ein echter cgi-Archivlauf belegt sie
   (Archiv erhalten: verfügbar; abgelehnt: dessen Grund), sichtbar ab der nächsten Prüfung.
-  Ein Archiv über SSH zählt dafür nicht.
+  Ein Archiv über SSH zählt dafür nicht. Eine gemerkte Ablehnung gilt nur für die Anzeige:
+  Der Lauf fragt das Archiv weiter an, nach dem Installieren von `cgi-io` also ohne
+  HA-Neustart; bestätigt rpcd das Recht, entfällt eine gemerkte Rechte-Ablehnung.
 - **Fehlende optionale UCI-Configs** (`sqm`, `mwan3`, `upnpd`, `openvpn`, `ddns`, `usteer`,
   `firewall`, `dhcp`, `wireless` …) sind „nicht vorhanden“, nicht `uci_failed` und machen
   keine Version `partial`. Ursache: ubus meldet „nicht gefunden“, der SSH-Ersatzweg war wegen
@@ -32,7 +34,12 @@ Keine neue Vertragsangabe, keine Änderung am Core, Maskierung unverändert.
   `archive_not_attempted:ssh.<Ursache>` oder `archive_not_attempted:requested`.
 - **Lauf mit gescheitertem Archiv** nennt den Grund je versuchtem Weg:
   `archive_unavailable:<Weg>.<Fehlerklasse>` (bei HTTP zusätzlich
-  `archive_unavailable:cgi.insecure_transport`); das Panel zeigt sie in Klartext.
+  `archive_unavailable:cgi.insecure_transport`); läuft die Zeit für das Archiv als Ganzes ab,
+  bekommt jeder Weg der Kette `<Weg>.timeout`. Das Panel zeigt sie in Klartext.
+- **SSH-Port zu ist nicht „Router nicht erreichbar“.** Root auf HTTPS, `cgi-io` fehlt, SSH
+  (Port 22) von Home Assistant aus nicht erreichbar: Der Lauf bleibt `partial`
+  (`unreachable`/`timeout`), aber das Panel nennt den SSH-Weg statt „Der Router war nicht
+  erreichbar“ und als nächsten Schritt, SSH freizugeben oder `cgi-io` zu installieren.
 - **Host-Key-Grund sichtbar.** `ssh_host_key:<Grund>` erscheint als fester Code statt
   `**REDACTED**`; nur die festen Gründe des Cores kommen zurück, alles andere bleibt maskiert.
 - **Panel „Unvollständig“** zeigt Fehlerart, Gründe in Klartext und den nächsten Schritt
