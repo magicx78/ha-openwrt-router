@@ -214,7 +214,9 @@ def test_timing_and_error_constants() -> None:
         "checksum_mismatch",
         "storage_full",
         "storage_error",
+        "denied",  # pinned SSH refused (host key pending / other key)
     }
+    assert cc.ERR_DENIED not in cc.CHAIN_SKIP_ERRORS  # never skipped for 24 h
     assert len(cc.ERROR_CLASSES) == len(set(cc.ERROR_CLASSES))
 
 

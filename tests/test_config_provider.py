@@ -29,14 +29,17 @@ import pytest
 from custom_components.openwrt_router import config_provider as cp
 from custom_components.openwrt_router.api import (
     OpenWrtAuthError,
+    OpenWrtConfigFetchHostKeyError,
     OpenWrtConfigFetchIncompleteError,
     OpenWrtConfigFetchNotAvailableError,
     OpenWrtConfigFetchPermissionError,
     OpenWrtConfigFetchTooLargeError,
     OpenWrtConnectionError,
+    OpenWrtHostKeyError,
     OpenWrtTimeoutError,
 )
 from custom_components.openwrt_router.config_archive import validate_archive
+from custom_components.openwrt_router.config_collector import PinnedSsh
 from custom_components.openwrt_router.config_const import (
     FETCH_TIMEOUTS,
     UCI_CONFIGS,
@@ -50,6 +53,7 @@ from custom_components.openwrt_router.config_provider import (
 from custom_components.openwrt_router.config_snapshot import parse_uci_file
 from custom_components.openwrt_router.core_errors import (
     ArtifactTooLargeError,
+    AuthorizationError,
     BackupIncompleteError,
     BackupIntegrityError,
     BackupNotFoundError,
@@ -343,6 +347,8 @@ class FakeApi:
         self.root = root
         self.calls: list[tuple[str, ...]] = []
         self.kwargs: list[dict[str, Any]] = []
+        # The pinned runner handed in by each SSH-capable call (None = none).
+        self.runners: list[Any] = []
 
     async def _play(self, outcome: Outcome) -> Any:
         await asyncio.sleep(0)
@@ -359,20 +365,25 @@ class FakeApi:
         self.kwargs.append({"max_bytes": max_bytes, "timeout": timeout})
         return await self._play(self.cgi)
 
-    async def config_fetch_backup_ssh(self, *, max_bytes: int, timeout: float) -> bytes:
+    async def config_fetch_backup_ssh(
+        self, *, max_bytes: int, timeout: float, ssh: Any = None
+    ) -> bytes:
         self.calls.append(("ssh",))
+        self.runners.append(ssh)
         self.kwargs.append({"max_bytes": max_bytes, "timeout": timeout})
         return await self._play(self.ssh)
 
-    async def config_uci_get(self, config: str) -> dict[str, Any]:
+    async def config_uci_get(self, config: str, *, ssh: Any = None) -> dict[str, Any]:
         self.calls.append(("uci", config))
+        self.runners.append(ssh)
         outcome = self.uci.get(
             config, OpenWrtConfigFetchNotAvailableError(f"uci get {config}: no such")
         )
         return await self._play(outcome)
 
-    async def config_packagelist(self) -> dict[str, str] | None:
+    async def config_packagelist(self, *, ssh: Any = None) -> dict[str, str] | None:
         self.calls.append(("packagelist",))
+        self.runners.append(ssh)
         return await self._play(self.packages)
 
     async def config_backup_access(self) -> bool | None:
@@ -517,6 +528,13 @@ class Store:
         )
 
 
+_NO_SSH: Any = object()
+
+
+async def _unexpected_ssh(*_args: Any) -> Any:
+    raise AssertionError("no pinned SSH call expected")
+
+
 def make_ctx(
     store: Store | None = None,
     *,
@@ -524,7 +542,10 @@ def make_ctx(
     lost: bool = False,
     verify: bool = True,
     registry: FakeRegistry | None = None,
+    ssh: Any = _NO_SSH,
 ) -> ProviderContext:
+    """``ssh``: the core's pinned runner (default: one that must not run,
+    FakeApi never calls it; None = the core has no pin store)."""
     store = store if store is not None else Store()
 
     async def read(version_id: str, kind: str) -> bytes:
@@ -551,6 +572,7 @@ def make_ctx(
         installation_key_state=(
             InstallationKeyState.LOST if lost else InstallationKeyState.OK
         ),
+        ssh=_unexpected_ssh if ssh is _NO_SSH else ssh,
     )
 
 
@@ -1968,3 +1990,61 @@ async def test_unreadable_config_after_key_reset_is_no_rebaseline() -> None:
     )
     assert report.drifted and not report.rebaseline
     assert report.unknown_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# Pinned SSH (the core's runner is the only SSH path)
+# ---------------------------------------------------------------------------
+
+
+async def test_probe_without_pin_store_reports_ssh_unavailable() -> None:
+    caps = await ConfigManagerProvider().async_probe(
+        make_conn(FakeApi()), make_ctx(ssh=None)
+    )
+    ssh = caps[Capability.CONFIG_SSH_ROOT]
+    assert ssh.state is CapabilityState.UNAVAILABLE
+    assert "ssh_pin_unavailable" in str(ssh.reason)
+
+
+class _PinCtx:
+    """Fake ProviderContext: counts calls, raises ``exc``."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+        self.calls = 0
+
+    async def async_ssh_run_pinned(self, *_args: Any, **_kwargs: Any) -> Any:
+        self.calls += 1
+        raise self.exc
+
+
+async def test_pinned_ssh_short_circuits_after_first_refusal() -> None:
+    ctx = _PinCtx(OpenWrtHostKeyError("pin_pending", "pending"))
+    runner = PinnedSsh(ctx, ROUTER_A)
+    with pytest.raises(OpenWrtHostKeyError):
+        await runner("uci show network", 5.0, 1024)
+    with pytest.raises(OpenWrtConfigFetchHostKeyError) as err:
+        await runner("uci show wireless", 5.0, 1024)
+    assert ctx.calls == 1
+    assert runner.refused == "pin_pending"
+    assert err.value.reason == "pin_pending"
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected", "refused"),
+    [
+        (ArtifactTooLargeError("cap"), OpenWrtConfigFetchTooLargeError, None),
+        (
+            AuthorizationError("x", details={"reason": "ssh_pin_unavailable"}),
+            OpenWrtConfigFetchHostKeyError,
+            "pin_unavailable",
+        ),
+    ],
+)
+async def test_pinned_ssh_maps_core_errors(
+    exc: BaseException, expected: type[BaseException], refused: str | None
+) -> None:
+    runner = PinnedSsh(_PinCtx(exc), ROUTER_A)
+    with pytest.raises(expected):
+        await runner("uci show network", 5.0, 1024)
+    assert runner.refused == refused

@@ -4,6 +4,14 @@ No network: a fake aiohttp session replays the answers of uhttpd/cgi-io
 (``cgi-backup``) and a fake asyncssh connection replays remote processes
 (``sysupgrade --create-backup -``, ``uci show``, apk/opkg). The ubus side of
 ``config_uci_get``/``config_packagelist`` is a patched ``_call``.
+
+SSH runs only over the core's PINNED path (``ssh=``): the tests build that
+runner from the real ``api.async_ssh_run_pinned`` with an in-memory pin
+store (:func:`pinned`). The SSH tests of the 1.45.0 manager that fixed the
+old shared, unverified transport (known_hosts=None, shared connection,
+kill on overflow) were changed deliberately; see the test names in
+TestSshBackup. Handshake behaviour (pending / mismatch before any login)
+uses the fake router of test_ssh_hostkey_pinning.
 """
 
 from __future__ import annotations
@@ -19,19 +27,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import asyncssh
 import pytest
+from test_ssh_hostkey_pinning import KEY_A, KEY_B, KEY_ECDSA, FakeRouter, _patched
 
 from custom_components.openwrt_router.api import (
+    PINNED_SSH_STDERR_MAX_BYTES,
+    ConfigSshRunner,
+    HostKeyPin,
+    HostKeyPinStore,
     OpenWrtAPI,
     OpenWrtAuthError,
     OpenWrtConfigFetchError,
+    OpenWrtConfigFetchHostKeyError,
     OpenWrtConfigFetchIncompleteError,
     OpenWrtConfigFetchNotAvailableError,
     OpenWrtConfigFetchPermissionError,
     OpenWrtConfigFetchTooLargeError,
     OpenWrtConnectionError,
+    OpenWrtHostKeyError,
     OpenWrtMethodNotFoundError,
     OpenWrtResponseError,
     OpenWrtTimeoutError,
+    async_ssh_run_pinned,
 )
 
 TOKEN_A = "a1" * 16
@@ -220,8 +236,10 @@ class FakeProc:
 
 
 def fake_conn(proc: FakeProc | None = None, *, open_exc: BaseException | None = None):
+    """An authenticated connection to the router with host key KEY_A."""
     conn = MagicMock()
     conn.is_closed = MagicMock(return_value=False)
+    conn.get_server_host_key = MagicMock(return_value=KEY_A)
     if open_exc is not None:
         conn.create_process = AsyncMock(side_effect=open_exc)
     else:
@@ -245,9 +263,70 @@ def remote_cmd(conn: Any) -> str:
     return conn.create_process.await_args.args[0]
 
 
+class PinStore(HostKeyPinStore):
+    """The core's pin rules in small (core_security.RouterPinStore).
+
+    ``confirm`` (the core's policy): a first-seen key is recorded as pending
+    and refused; while it is pending every call refuses before connecting.
+    ``tofu``: the first-seen key is pinned at once.
+    """
+
+    def __init__(self, pin: HostKeyPin | None = None, *, policy: str = "confirm"):
+        self.pin = pin
+        self.pending: HostKeyPin | None = None
+        self.policy = policy
+        self.loads = 0
+
+    async def async_load_pin(self) -> HostKeyPin | None:
+        self.loads += 1
+        if self.pin is None and self.pending is not None:
+            raise OpenWrtHostKeyError("pin_pending", "first-seen key awaits confirm")
+        return self.pin
+
+    async def async_save_pin(self, pin: HostKeyPin) -> None:
+        if self.policy == "tofu":
+            self.pin = pin
+            return
+        self.pending = pin
+        raise OpenWrtHostKeyError("pin_pending", "first-seen key awaits confirm")
+
+
+def confirmed(key: asyncssh.SSHKey = KEY_A) -> PinStore:
+    return PinStore(HostKeyPin.from_key(key, "192.0.2.1"))
+
+
+def pinned(api: OpenWrtAPI, store: HostKeyPinStore | None = None) -> ConfigSshRunner:
+    """The provider's runner, built on the real pinned path of the core."""
+    pin_store = confirmed() if store is None else store
+
+    async def run(command: str, timeout: float, max_bytes: int) -> Any:
+        return await async_ssh_run_pinned(
+            api,
+            command,
+            pin_store=pin_store,
+            timeout=timeout,
+            binary=True,
+            max_output_bytes=max_bytes,
+        )
+
+    return run
+
+
+def guard_shared_transport(api: OpenWrtAPI) -> None:
+    """Fail loudly if anything touches the shared, unverified transport."""
+    api._asyncssh_run = AsyncMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("unpinned transport")
+    )
+    api._asyncssh_get_connection = AsyncMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("shared connection")
+    )
+
+
 async def fetch_ssh(api: OpenWrtAPI, **kw: Any) -> bytes:
     kw.setdefault("max_bytes", 1_000_000)
     kw.setdefault("timeout", 5.0)
+    kw.setdefault("ssh", pinned(api))
+    guard_shared_transport(api)
     return await api.config_fetch_backup_ssh(**kw)
 
 
@@ -264,6 +343,7 @@ class TestExceptions:
             OpenWrtConfigFetchNotAvailableError: "not_available",
             OpenWrtConfigFetchTooLargeError: "too_large",
             OpenWrtConfigFetchIncompleteError: "incomplete",
+            OpenWrtConfigFetchHostKeyError: "denied",
         }
         for cls, error_class in expected.items():
             assert issubclass(cls, OpenWrtConfigFetchError)
@@ -489,6 +569,8 @@ class TestCgiBackup:
 
 class TestSshBackup:
     async def test_success_returns_archive_with_fixed_command(self) -> None:
+        """Changed deliberately (pinning): the pinned connection trusts KEY_A
+        only (was: known_hosts=None on the shared transport)."""
         proc = FakeProc([ARCHIVE[:20], ARCHIVE[20:]], [b"Saving config files...\n"])
         conn = fake_conn(proc)
         ctx, connect = patch_connect(conn)
@@ -497,11 +579,15 @@ class TestSshBackup:
             assert await fetch_ssh(api) == ARCHIVE
         assert remote_cmd(conn) == "/sbin/sysupgrade --create-backup -"
         assert conn.create_process.await_args.kwargs["encoding"] is None
-        assert connect.await_args.kwargs["password"] == PASSWORD
+        kwargs = connect.await_args.kwargs
+        assert kwargs["password"] == PASSWORD
         assert PASSWORD not in remote_cmd(conn)
-        # host-key handling of the shared transport is unchanged (pinning: enterprise-core)
-        assert connect.await_args.kwargs["known_hosts"] is None
-        assert api._ssh_inflight == 0
+        trusted, ca, revoked = kwargs["known_hosts"]
+        assert [k.public_data for k in trusted] == [KEY_A.public_data]
+        assert (ca, revoked) == ([], [])
+        # own connection, closed afterwards; the shared one is never opened
+        conn.close.assert_called_once()
+        assert api._ssh_conn is None and api._ssh_inflight == 0
 
     async def test_non_root_refused_without_connecting(self) -> None:
         ctx, connect = patch_connect(fake_conn(FakeProc([ARCHIVE])))
@@ -509,6 +595,74 @@ class TestSshBackup:
         with ctx, pytest.raises(OpenWrtConfigFetchPermissionError):
             await fetch_ssh(api)
         connect.assert_not_awaited()
+
+    async def test_without_pinned_runner_refuses_without_connecting(self) -> None:
+        """No pin store / no runner: the SSH path does not exist (no fallback)."""
+        ctx, connect = patch_connect(fake_conn(FakeProc([ARCHIVE])))
+        api, _ = make_api()
+        with ctx, pytest.raises(OpenWrtConfigFetchHostKeyError) as exc:
+            await fetch_ssh(api, ssh=None)
+        assert exc.value.reason == "pin_unavailable"
+        assert exc.value.error_class == "denied"
+        connect.assert_not_awaited()
+
+    async def test_first_contact_reads_key_without_login_and_stays_pending(
+        self,
+    ) -> None:
+        """Core rule (policy confirm): key recorded as pending, no credential,
+        no command; the next call refuses before connecting."""
+        store = PinStore()
+        router = FakeRouter(KEY_A, stdout=ARCHIVE)
+        api, _ = make_api()
+        with _patched(router), pytest.raises(OpenWrtConfigFetchHostKeyError) as exc:
+            await fetch_ssh(api, ssh=pinned(api, store))
+        assert exc.value.reason == "pin_pending"
+        assert router.auth_attempts == [] and router.conns == []
+        assert router.connect_kwargs[0]["password"] is None
+        assert store.pending is not None
+        assert store.pending.fingerprint == KEY_A.get_fingerprint("sha256")
+        with _patched(router), pytest.raises(OpenWrtConfigFetchHostKeyError) as again:
+            await fetch_ssh(api, ssh=pinned(api, store))
+        assert again.value.reason == "pin_pending"
+        assert len(router.connect_kwargs) == 1  # refused before connecting
+
+    async def test_first_contact_under_tofu_pins_then_logs_in(self) -> None:
+        """Core rule (policy tofu): pinned at once, a second, pinned
+        connection logs in and runs the command."""
+        store = PinStore(policy="tofu")
+        router = FakeRouter(KEY_A, stdout=ARCHIVE)
+        api, _ = make_api()
+        with _patched(router):
+            assert await fetch_ssh(api, ssh=pinned(api, store)) == ARCHIVE
+        assert store.pin is not None
+        assert router.auth_attempts == [PASSWORD]  # only the pinned connection
+        assert router.connect_kwargs[0]["password"] is None
+
+    async def test_confirmed_pin_runs_the_command(self) -> None:
+        router = FakeRouter(KEY_A, stdout=ARCHIVE)
+        api, _ = make_api()
+        with _patched(router):
+            assert await fetch_ssh(api, ssh=pinned(api, confirmed())) == ARCHIVE
+        assert router.auth_attempts == [PASSWORD]
+        assert len(router.processes) == 1
+
+    @pytest.mark.parametrize(
+        ("presented", "reason"),
+        [(KEY_B, "mismatch"), (KEY_ECDSA, "algorithm_unavailable")],
+    )
+    async def test_other_host_key_sends_no_credential_and_fetches_nothing(
+        self, presented: asyncssh.SSHKey, reason: str
+    ) -> None:
+        router = FakeRouter(presented, stdout=ARCHIVE)
+        api, _ = make_api()
+        with _patched(router), pytest.raises(OpenWrtConfigFetchHostKeyError) as exc:
+            await fetch_ssh(api, ssh=pinned(api, confirmed(KEY_A)))
+        assert exc.value.reason == reason
+        assert exc.value.error_class == "denied"
+        assert router.auth_attempts == []  # refused in the handshake
+        assert router.processes == []  # nothing ran, nothing fetched
+        assert len(router.connect_kwargs) == 1  # no retry, no unpinned path
+        assert api._ssh_conn is None
 
     @pytest.mark.parametrize("exit_status", [1, 127, 255, None])
     async def test_nonzero_or_missing_exit_is_incomplete(
@@ -535,26 +689,61 @@ class TestSshBackup:
         with ctx, pytest.raises(OpenWrtConfigFetchIncompleteError):
             await fetch_ssh(api)
 
-    async def test_size_cap_kills_process_without_reading_everything(self) -> None:
+    async def test_size_cap_closes_process_without_reading_everything(self) -> None:
+        """Changed deliberately: the core's capped read closes the channel
+        (was: kill() on the shared transport); the cap is still ours."""
         chunks = [ARCHIVE[:4]] + [b"\x00" * 1000] * 100
         proc = FakeProc(chunks)
-        ctx, _ = patch_connect(fake_conn(proc))
+        conn = fake_conn(proc)
+        ctx, _ = patch_connect(conn)
         api, _ = make_api()
         with ctx, pytest.raises(OpenWrtConfigFetchTooLargeError):
             await fetch_ssh(api, max_bytes=5000)
         assert proc.stdout.reads < proc.stdout.total
-        assert proc.killed and proc.closed
-        assert api._ssh_inflight == 0
+        assert proc.closed
+        conn.close.assert_called_once()
 
-    async def test_stderr_read_in_bounded_pieces(self) -> None:
+    async def test_runner_gets_our_cap_and_timeout(self) -> None:
+        seen: list[tuple[str, float, int]] = []
+
+        async def runner(command: str, timeout: float, max_bytes: int) -> Any:
+            seen.append((command, timeout, max_bytes))
+            return MagicMock(exit_status=0, stdout=ARCHIVE, stderr=b"")
+
+        api, _ = make_api()
+        assert await fetch_ssh(api, ssh=runner, max_bytes=16 * 1024 * 1024) == ARCHIVE
+        assert seen == [("/sbin/sysupgrade --create-backup -", 5.0, 16 * 1024 * 1024)]
+
+    async def test_runner_output_over_cap_is_too_large(self) -> None:
+        """Defence in depth: a runner that ignored the cap is still refused."""
+
+        async def runner(command: str, timeout: float, max_bytes: int) -> Any:
+            return MagicMock(exit_status=0, stdout=ARCHIVE * 10, stderr=b"")
+
+        api, _ = make_api()
+        with pytest.raises(OpenWrtConfigFetchTooLargeError):
+            await fetch_ssh(api, ssh=runner, max_bytes=len(ARCHIVE))
+
+    async def test_stderr_capped_at_4k_and_drained(self) -> None:
+        """Changed deliberately (was test_stderr_read_in_bounded_pieces): the
+        core reads stderr to EOF and keeps 4 KiB."""
         proc = FakeProc([ARCHIVE], [b"e" * 4096, b"e" * 4096, b"e" * 10])
         ctx, _ = patch_connect(fake_conn(proc))
         api, _ = make_api()
+        guard_shared_transport(api)
         with ctx:
-            assert await fetch_ssh(api) == ARCHIVE
-        assert proc.stderr.sizes and all(0 < n <= 4096 for n in proc.stderr.sizes)
+            rc, out, err = await api._config_ssh_read(
+                "/sbin/sysupgrade --create-backup -",
+                pinned(api),
+                max_bytes=1_000_000,
+                timeout=5.0,
+            )
+        assert (rc, out) == (0, ARCHIVE)
+        assert len(err) <= PINNED_SSH_STDERR_MAX_BYTES
+        assert proc.stderr.reads == 3  # drained, the channel never stalls
 
-    async def test_timeout_kills_process(self) -> None:
+    async def test_timeout_closes_process(self) -> None:
+        """Renamed (was test_timeout_kills_process): closed, not killed."""
         proc = FakeProc([ARCHIVE[:10]], block=True)
         ctx, _ = patch_connect(fake_conn(proc))
         api, _ = make_api()
@@ -563,9 +752,20 @@ class TestSshBackup:
         assert proc.closed
         assert api._ssh_inflight == 0
 
-    async def test_cancel_kills_process_and_propagates(self) -> None:
+    async def test_hanging_connect_hits_the_deadline(self) -> None:
+        router = FakeRouter(KEY_A, stdout=ARCHIVE, connect_delay=5.0)
+        api, _ = make_api()
+        started = time.monotonic()
+        with _patched(router), pytest.raises(OpenWrtTimeoutError):
+            await fetch_ssh(api, timeout=0.05)
+        assert time.monotonic() - started < 2.0
+        assert router.auth_attempts == []
+
+    async def test_cancel_closes_process_and_propagates(self) -> None:
+        """Renamed (was test_cancel_kills_process_and_propagates)."""
         proc = FakeProc([ARCHIVE[:10]], block=True)
-        ctx, _ = patch_connect(fake_conn(proc))
+        conn = fake_conn(proc)
+        ctx, _ = patch_connect(conn)
         api, _ = make_api()
         with ctx:
             task = asyncio.create_task(fetch_ssh(api, timeout=30))
@@ -575,6 +775,7 @@ class TestSshBackup:
             with pytest.raises(asyncio.CancelledError):
                 await task
         assert proc.closed
+        conn.close.assert_called_once()
         assert api._ssh_inflight == 0
 
     async def test_connect_failure_is_connection_error(self) -> None:
@@ -599,6 +800,8 @@ class TestSshBackup:
             await fetch_ssh(api)
         assert connect.await_count == 2
         assert connect.await_args_list[1].kwargs["password"] is None
+        # the pinned path never changes the shared transport's state
+        assert api._ssh_use_key is False
 
     async def test_key_auth_after_password_denied(self) -> None:
         proc = FakeProc([ARCHIVE])
@@ -610,15 +813,21 @@ class TestSshBackup:
             assert await fetch_ssh(api) == ARCHIVE
         assert connect.await_args_list[1].kwargs["password"] is None
 
-    async def test_reuses_open_connection(self) -> None:
+    async def test_never_uses_the_shared_connection(self) -> None:
+        """Changed deliberately (was test_reuses_open_connection): an open
+        shared connection is ignored; the pinned path opens its own."""
+        shared = MagicMock()
+        shared.create_process = AsyncMock(side_effect=AssertionError("shared conn"))
         proc = FakeProc([ARCHIVE])
-        conn = fake_conn(proc)
-        ctx, connect = patch_connect(conn)
+        own = fake_conn(proc)
+        ctx, connect = patch_connect(own)
         api, _ = make_api()
-        api._ssh_conn = conn
+        api._ssh_conn = shared
         with ctx:
             assert await fetch_ssh(api) == ARCHIVE
-        connect.assert_not_awaited()
+        connect.assert_awaited_once()
+        shared.create_process.assert_not_awaited()
+        assert api._ssh_conn is shared  # untouched
 
 
 # =====================================================================
@@ -661,8 +870,9 @@ class TestUciGet:
         )
         conn = fake_conn(FakeProc([UCI_SHOW.encode()]))
         ctx, _ = patch_connect(conn)
+        guard_shared_transport(api)
         with ctx:
-            result = await api.config_uci_get("network")
+            result = await api.config_uci_get("network", ssh=pinned(api))
         assert remote_cmd(conn) == "uci show network"
         assert result["lan"][".type"] == "interface"
         assert result["lan"]["proto"] == "static"
@@ -678,9 +888,11 @@ class TestUciGet:
         )
         line = b"network.x.y='" + b"a" * 1000 + b"'\n"
         chunks = [line * 64] * (UCI_TEXT_MAX_BYTES // (len(line) * 64) + 2)
-        ctx, _ = patch_connect(fake_conn(FakeProc(chunks)))
+        proc = FakeProc(chunks)
+        ctx, _ = patch_connect(fake_conn(proc))
         with ctx, pytest.raises(OpenWrtConfigFetchTooLargeError):
-            await api.config_uci_get("network")
+            await api.config_uci_get("network", ssh=pinned(api))
+        assert proc.stdout.reads < proc.stdout.total  # stopped at the cap
 
     def test_uci_show_cap_equals_the_parser_cap(self) -> None:
         from custom_components.openwrt_router import api as api_module
@@ -694,7 +906,7 @@ class TestUciGet:
         conn = fake_conn(FakeProc([UCI_SHOW.encode()]))
         ctx, _ = patch_connect(conn)
         with ctx:
-            result = await api.config_uci_get("network")
+            result = await api.config_uci_get("network", ssh=pinned(api))
         assert session.calls == []  # no ubus request at all
         assert "lan" in result
 
@@ -705,7 +917,7 @@ class TestUciGet:
         )
         ctx, _ = patch_connect(side_effect=OSError("Connection refused"))
         with ctx, pytest.raises(OpenWrtConfigFetchPermissionError):
-            await api.config_uci_get("network")
+            await api.config_uci_get("network", ssh=pinned(api))
 
     async def test_missing_config_via_ssh_is_not_available(self) -> None:
         api, _ = make_api()
@@ -715,7 +927,7 @@ class TestUciGet:
         proc = FakeProc([], [b"uci: Entry not found\n"], exit_status=1)
         ctx, _ = patch_connect(fake_conn(proc))
         with ctx, pytest.raises(OpenWrtConfigFetchNotAvailableError):
-            await api.config_uci_get("sqm")
+            await api.config_uci_get("sqm", ssh=pinned(api))
 
     async def test_ssh_other_failure_is_incomplete(self) -> None:
         api, _ = make_api()
@@ -725,7 +937,37 @@ class TestUciGet:
         proc = FakeProc([], [b"uci: I/O error\n"], exit_status=1)
         ctx, _ = patch_connect(fake_conn(proc))
         with ctx, pytest.raises(OpenWrtConfigFetchIncompleteError):
+            await api.config_uci_get("network", ssh=pinned(api))
+
+    async def test_acl_block_without_runner_is_denied_not_unpinned(self) -> None:
+        api, _ = make_api()
+        api._call = AsyncMock(  # type: ignore[method-assign]
+            side_effect=OpenWrtMethodNotFoundError("blocked")
+        )
+        guard_shared_transport(api)
+        ctx, connect = patch_connect(fake_conn(FakeProc([UCI_SHOW.encode()])))
+        with ctx, pytest.raises(OpenWrtConfigFetchHostKeyError) as exc:
             await api.config_uci_get("network")
+        assert exc.value.reason == "pin_unavailable"
+        connect.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("pending", "presented", "reason"),
+        [(False, KEY_B, "mismatch"), (True, KEY_A, "pin_pending")],
+    )
+    async def test_acl_block_with_refused_pin_sends_no_credential(
+        self, pending: bool, presented: asyncssh.SSHKey, reason: str
+    ) -> None:
+        api, _ = make_api()
+        api._call = AsyncMock(  # type: ignore[method-assign]
+            side_effect=OpenWrtMethodNotFoundError("blocked")
+        )
+        router = FakeRouter(presented, stdout=UCI_SHOW.encode())
+        runner = pinned(api, PinStore() if pending else confirmed(KEY_A))
+        with _patched(router), pytest.raises(OpenWrtConfigFetchHostKeyError) as exc:
+            await api.config_uci_get("network", ssh=runner)
+        assert exc.value.reason == reason and exc.value.error_class == "denied"
+        assert router.auth_attempts == [] and router.processes == []
 
     async def test_ubus_connection_error_propagates_without_ssh(self) -> None:
         api, _ = make_api()
@@ -817,7 +1059,7 @@ class TestPackageList:
         conn = fake_conn(FakeProc([APK_LIST.encode()]))
         ctx, _ = patch_connect(conn)
         with ctx:
-            assert await api.config_packagelist() == {
+            assert await api.config_packagelist(ssh=pinned(api)) == {
                 "busybox": "1.37.0-r2",
                 "libpcre2-8": "10.42-r1",
             }
@@ -831,7 +1073,7 @@ class TestPackageList:
         )
         ctx, _ = patch_connect(fake_conn(FakeProc([OPKG_LIST.encode()])))
         with ctx:
-            assert await api.config_packagelist() == {
+            assert await api.config_packagelist(ssh=pinned(api)) == {
                 "busybox": "1.36.1-1",
                 "kmod-nft-core": "6.6.73-1",
             }
@@ -841,7 +1083,7 @@ class TestPackageList:
         api._call = AsyncMock(return_value={"packages": {}})  # type: ignore[method-assign]
         ctx, _ = patch_connect(fake_conn(FakeProc([OPKG_LIST.encode()])))
         with ctx:
-            assert await api.config_packagelist() == {
+            assert await api.config_packagelist(ssh=pinned(api)) == {
                 "busybox": "1.36.1-1",
                 "kmod-nft-core": "6.6.73-1",
             }
@@ -861,7 +1103,7 @@ class TestPackageList:
         )
         ctx, _ = patch_connect(fake_conn(proc))
         with ctx:
-            assert await api.config_packagelist() is None
+            assert await api.config_packagelist(ssh=pinned(api)) is None
 
     async def test_ssh_unusable_returns_none(self) -> None:
         api, _ = make_api()
@@ -870,7 +1112,33 @@ class TestPackageList:
         )
         ctx, _ = patch_connect(side_effect=OSError("refused"))
         with ctx:
-            assert await api.config_packagelist() is None
+            assert await api.config_packagelist(ssh=pinned(api)) is None
+
+    async def test_ssh_package_list_is_capped(self) -> None:
+        api, _ = make_api()
+        api._call = AsyncMock(  # type: ignore[method-assign]
+            side_effect=OpenWrtMethodNotFoundError("no rpc-sys")
+        )
+        proc = FakeProc([b"@@pm=apk\n" + b"x" * 65536] * 40)  # > 2 MiB
+        ctx, _ = patch_connect(fake_conn(proc))
+        with ctx:
+            assert await api.config_packagelist(ssh=pinned(api)) is None
+        assert proc.stdout.reads < proc.stdout.total and proc.closed
+
+    @pytest.mark.parametrize("runner_given", [False, True])
+    async def test_refused_pin_returns_none_without_credentials(
+        self, runner_given: bool
+    ) -> None:
+        api, _ = make_api()
+        api._call = AsyncMock(  # type: ignore[method-assign]
+            side_effect=OpenWrtMethodNotFoundError("no rpc-sys")
+        )
+        guard_shared_transport(api)
+        router = FakeRouter(KEY_B, stdout=APK_LIST.encode())
+        runner = pinned(api, confirmed(KEY_A)) if runner_given else None
+        with _patched(router):
+            assert await api.config_packagelist(ssh=runner) is None
+        assert router.auth_attempts == [] and router.processes == []
 
     async def test_ubus_connection_error_propagates(self) -> None:
         api, _ = make_api()
@@ -986,8 +1254,17 @@ class TestNoSecretsInLog:
         )
         ctx, _ = patch_connect(fake_conn(FakeProc([], [STDERR_SECRET], exit_status=1)))
         with ctx, pytest.raises(OpenWrtConfigFetchError) as exc:
-            await api.config_uci_get("network")
+            await api.config_uci_get("network", ssh=pinned(api))
         messages.append(str(exc.value))
+
+        # ssh: pending first contact and other key (no login, nothing ran)
+        for store, presented in ((PinStore(), KEY_A), (confirmed(KEY_A), KEY_B)):
+            api, _ = make_api()
+            router = FakeRouter(presented, stdout=ARCHIVE, stderr=STDERR_SECRET)
+            with _patched(router), pytest.raises(OpenWrtConfigFetchError) as exc:
+                await fetch_ssh(api, ssh=pinned(api, store))
+            messages.append(str(exc.value))
+            assert router.auth_attempts == []
 
         text = caplog.text + "\n".join(messages)
         for secret in (
@@ -1001,3 +1278,79 @@ class TestNoSecretsInLog:
             "x1f",
         ):
             assert secret not in text, secret
+
+
+# =====================================================================
+# No unpinned path (source check of our two api.py blocks)
+# =====================================================================
+
+_BLOCK_START = "# --- Configuration Manager (config_*) ---"
+_BLOCK_END = "# --- end Configuration Manager ---"
+# What the shared, unverified transport is made of; none of it may appear.
+_UNPINNED = frozenset(
+    {
+        "_asyncssh_get_connection",
+        "_asyncssh_run",
+        "_run_ssh",
+        "_ssh_conn",
+        "_ssh_inflight",
+        "create_process",
+        "connect",
+    }
+)
+
+
+def _config_blocks() -> list[str]:
+    from pathlib import Path
+
+    from custom_components.openwrt_router import api as api_module
+
+    text = Path(api_module.__file__).read_text(encoding="utf-8")
+    blocks: list[str] = []
+    pos = 0
+    while (found := text.find(_BLOCK_START, pos)) != -1:
+        start = text.rfind("\n", 0, found) + 1  # whole line: dedent works
+        end = text.index(_BLOCK_END, found)
+        blocks.append(text[start:end])
+        pos = end + len(_BLOCK_END)
+    return blocks
+
+
+class TestNoUnpinnedPath:
+    def test_two_blocks_found(self) -> None:
+        assert len(_config_blocks()) == 2
+
+    def test_blocks_never_reach_the_shared_transport(self) -> None:
+        import ast
+        import textwrap
+
+        for block in _config_blocks():
+            tree = ast.parse(textwrap.dedent(block))
+            names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+            names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+            keywords = {
+                k.arg
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Call)
+                for k in n.keywords
+            }
+            assert not names & _UNPINNED, names & _UNPINNED
+            assert "known_hosts" not in keywords
+            # SSH only through the runner handed in (``ssh(...)``)
+            assert "asyncssh.connect" not in block
+
+    async def test_every_ssh_read_needs_the_runner(self) -> None:
+        """Without ``ssh=`` none of the three SSH reads connects."""
+        api, _ = make_api()
+        api._call = AsyncMock(  # type: ignore[method-assign]
+            side_effect=OpenWrtMethodNotFoundError("blocked")
+        )
+        guard_shared_transport(api)
+        ctx, connect = patch_connect(fake_conn(FakeProc([ARCHIVE])))
+        with ctx:
+            with pytest.raises(OpenWrtConfigFetchHostKeyError):
+                await api.config_fetch_backup_ssh(max_bytes=1000, timeout=1.0)
+            with pytest.raises(OpenWrtConfigFetchHostKeyError):
+                await api.config_uci_get("network")
+            assert await api.config_packagelist() is None
+        connect.assert_not_awaited()

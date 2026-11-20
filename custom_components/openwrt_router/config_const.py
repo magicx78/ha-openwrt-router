@@ -711,6 +711,10 @@ ERR_INVALID: Final = "invalid"
 ERR_CHECKSUM_MISMATCH: Final = "checksum_mismatch"
 ERR_STORAGE_FULL: Final = "storage_full"
 ERR_STORAGE_ERROR: Final = "storage_error"
+# Not in the plan: the pinned SSH path refused (first-seen host key pending,
+# other key, no pin store). The core's class for a refused call; never
+# skipped for FETCH_SKIP_TTL_S (an admin may confirm the key at any time).
+ERR_DENIED: Final = "denied"
 
 ERROR_CLASSES: Final[tuple[str, ...]] = (
     ERR_UNREACHABLE,
@@ -724,6 +728,7 @@ ERROR_CLASSES: Final[tuple[str, ...]] = (
     ERR_CHECKSUM_MISMATCH,
     ERR_STORAGE_FULL,
     ERR_STORAGE_ERROR,
+    ERR_DENIED,
 )
 
 # Errors that end the fetch chain at once (plan 2.3): the next method would

@@ -37,6 +37,8 @@ EXCEPTIONS = {
     "OpenWrtConfigFetchNotAvailableError",
     "OpenWrtConfigFetchTooLargeError",
     "OpenWrtConfigFetchIncompleteError",
+    # 1.45.0: the pinned SSH path refused (host key pending / other key)
+    "OpenWrtConfigFetchHostKeyError",
 }
 
 

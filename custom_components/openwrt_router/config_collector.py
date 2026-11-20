@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -46,7 +47,10 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 from .api import (
     OpenWrtAuthError,
     OpenWrtConfigFetchError,
+    OpenWrtConfigFetchHostKeyError,
+    OpenWrtConfigFetchTooLargeError,
     OpenWrtConnectionError,
+    OpenWrtHostKeyError,
     OpenWrtMethodNotFoundError,
     OpenWrtTimeoutError,
 )
@@ -55,6 +59,7 @@ from .config_const import (
     CHAIN_SKIP_ERRORS,
     DEFAULT_ARCHIVE_LIMITS,
     ERR_AUTH,
+    ERR_DENIED,
     ERR_INCOMPLETE,
     ERR_INVALID,
     ERR_NOT_AVAILABLE,
@@ -91,6 +96,8 @@ __all__ = [
     "ArchiveFetch",
     "FetchAttempt",
     "FetchMethod",
+    "PinnedApi",
+    "PinnedSsh",
     "UciCollection",
     "UciFetch",
     "classify_error",
@@ -262,6 +269,136 @@ def classify_error(err: BaseException) -> str:
     if isinstance(err, OpenWrtMethodNotFoundError):
         return ERR_NOT_AVAILABLE
     return ERR_INVALID
+
+
+# ---------------------------------------------------------------------------
+# Pinned SSH (the only SSH path of the configuration manager)
+# ---------------------------------------------------------------------------
+
+_PIN_REASON_RE: Final = re.compile(r"[a-z0-9_]{1,64}")
+_PIN_REASON_FALLBACK: Final = "refused"
+
+
+def _pin_reason(value: Any) -> str:
+    """The core's host-key reason without ``ssh_`` prefix, safe as code item."""
+    text = value if isinstance(value, str) else ""
+    text = text.removeprefix("ssh_")
+    return text if _PIN_REASON_RE.fullmatch(text) else _PIN_REASON_FALLBACK
+
+
+class PinnedSsh:
+    """The core's pinned SSH runner of one router, bound for ONE operation.
+
+    api.py calls it as ``ConfigSshRunner`` ``(command, timeout_s,
+    max_bytes)``; it runs ``ProviderContext.async_ssh_run_pinned`` (binary
+    stdout, ``max_output_bytes=max_bytes``), which ends in the core's
+    ``SshPinRegistry.async_run`` -> ``api.async_ssh_run_pinned``. There is
+    no other SSH path: without a pin store the core refuses
+    (``ssh_pin_unavailable``) and so does this runner.
+
+    After the first refusal of the pin rules every further SSH read of the
+    same operation fails with the same reason WITHOUT connecting again (one
+    pending record or mismatch audit per operation, not one per config).
+    ``refused`` holds that reason, ``ran`` whether a pinned command ran.
+    """
+
+    __slots__ = ("_ctx", "_router_id", "ran", "refused")
+
+    def __init__(self, ctx: Any, router_id: str) -> None:
+        """Bind ``ctx`` (a core ProviderContext) to ``router_id``."""
+        self._ctx = ctx
+        self._router_id = router_id
+        self.refused: str | None = None
+        self.ran = False
+
+    async def __call__(self, command: str, timeout: float, max_bytes: int) -> Any:
+        """Run ``command`` pinned; map the core's refusals for api.py."""
+        if self.refused is not None:
+            raise OpenWrtConfigFetchHostKeyError(
+                self.refused, "pinned SSH refused earlier in this operation"
+            )
+        try:
+            result = await self._ctx.async_ssh_run_pinned(
+                self._router_id,
+                command,
+                timeout=timeout,
+                binary=True,
+                max_output_bytes=max_bytes,
+            )
+        except OpenWrtHostKeyError as err:
+            # pin_pending, mismatch, ... (mismatch already audited by the core)
+            self.refused = _pin_reason(err.reason)
+            raise
+        except (OpenWrtConfigFetchError, OpenWrtConnectionError, OpenWrtTimeoutError):
+            raise
+        except Exception as err:
+            # The core's own errors (ConfigApiError: error_class + details),
+            # matched by shape: this module never imports the core.
+            core_class = getattr(err, "error_class", None)
+            details = getattr(err, "details", None)
+            if isinstance(err, PROGRAMMING_ERRORS) or not isinstance(details, Mapping):
+                raise
+            if str(core_class) == ERR_TOO_LARGE:
+                # The core's cap tripped (reason ssh_output_too_large).
+                raise OpenWrtConfigFetchTooLargeError(
+                    f"pinned SSH output exceeds {max_bytes} bytes"
+                ) from err
+            if str(core_class) == ERR_DENIED:
+                # No pin store (ssh_pin_unavailable): the SSH path does not exist.
+                self.refused = _pin_reason(details.get("reason"))
+                raise OpenWrtConfigFetchHostKeyError(
+                    self.refused, "pinned SSH path unavailable"
+                ) from err
+            # e.g. RouterUnavailableError: the entry has no API right now.
+            raise OpenWrtConnectionError(
+                f"pinned SSH not usable ({type(err).__name__})"
+            ) from err
+        self.ran = True
+        return result
+
+
+class PinnedApi:
+    """``RouterConnection.api`` as the collector sees it in one operation.
+
+    Forwards the ``config_*`` read methods and hands every one that may use
+    SSH the operation's :class:`PinnedSsh` (``ssh=``), so no SSH read can
+    bypass the pin rules.
+    """
+
+    __slots__ = ("_api", "ssh")
+
+    def __init__(self, api: Any, ssh: PinnedSsh) -> None:
+        """Wrap ``api`` for one operation."""
+        self._api = api
+        self.ssh = ssh
+
+    async def config_fetch_backup_cgi(self, *, max_bytes: int, timeout: float) -> bytes:
+        """cgi-backup (HTTP, no SSH)."""
+        return await self._api.config_fetch_backup_cgi(
+            max_bytes=max_bytes, timeout=timeout
+        )
+
+    async def config_fetch_backup_ssh(self, *, max_bytes: int, timeout: float) -> bytes:
+        """sysupgrade archive over the pinned path."""
+        return await self._api.config_fetch_backup_ssh(
+            max_bytes=max_bytes, timeout=timeout, ssh=self.ssh
+        )
+
+    async def config_uci_get(self, config: str) -> dict[str, Any]:
+        """ubus ``uci get``, else ``uci show`` over the pinned path."""
+        return await self._api.config_uci_get(config, ssh=self.ssh)
+
+    async def config_packagelist(self) -> dict[str, str] | None:
+        """rpc-sys package list, else apk/opkg over the pinned path."""
+        return await self._api.config_packagelist(ssh=self.ssh)
+
+    async def config_backup_access(self) -> bool | None:
+        """rpcd ``session access`` for cgi-io backup (no SSH)."""
+        return await self._api.config_backup_access()
+
+    def config_ssh_user_is_root(self) -> bool:
+        """No network call."""
+        return bool(self._api.config_ssh_user_is_root())
 
 
 # ---------------------------------------------------------------------------

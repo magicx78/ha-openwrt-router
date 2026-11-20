@@ -7,8 +7,12 @@ docs/dev/configuration-api-v1.md, sections 10 and 11.
 on top of the config-manager engine (collector, archive check, snapshot,
 diff, restore dry run):
 
-- It reads from the router only through the four ``config_*`` read methods
-  of the entry's existing ``OpenWrtAPI`` (``RouterConnection.api``).
+- It reads from the router only through the ``config_*`` read methods of
+  the entry's existing ``OpenWrtAPI`` (``RouterConnection.api``). Every SSH
+  read among them (archive via sysupgrade, ``uci show``, package list) runs
+  over the core's PINNED path, ``ProviderContext.async_ssh_run_pinned``
+  (``config_collector.PinnedSsh``): host key checked before any credential
+  is sent, never the shared, unverified transport.
 - It returns artifacts and metadata. It never stores, exports or deletes
   bytes, never fires events, never calls the guard and never writes to a
   router: ``config.restore`` is unavailable in phase 1.
@@ -19,9 +23,10 @@ diff, restore dry run):
 - Log lines carry the operation, fetch method, error class, duration and
   size only.
 
-The provider keeps no state between calls, so one instance serves every
-router. Every router call of one operation shares the deadline
-``FETCH_TIMEOUTS["job"]``.
+One instance serves every router. Between calls it keeps only small
+in-memory facts per router id (never on disk, gone on restart): the last
+refusal of the pin rules (for the probe). Every router call of one
+operation shares the deadline ``FETCH_TIMEOUTS["job"]``.
 """
 
 from __future__ import annotations
@@ -48,6 +53,8 @@ from .config_archive import (
 from .config_collector import (
     PROGRAMMING_ERRORS,
     ArchiveFetch,
+    PinnedApi,
+    PinnedSsh,
     UciCollection,
     classify_error,
     collect_archive,
@@ -62,6 +69,7 @@ from .config_const import (
     DEFAULT_ARCHIVE_LIMITS,
     ERR_AUTH,
     ERR_CHECKSUM_MISMATCH,
+    ERR_DENIED,
     ERR_INCOMPLETE,
     ERR_INVALID,
     ERR_NOT_AVAILABLE,
@@ -204,6 +212,17 @@ WARN_UCI_SOURCE: Final = "uci_source"
 # An etc/config file of the archive above UCI_TEXT_MAX_BYTES (review M6).
 WARN_UCI_TOO_LARGE: Final = "uci_too_large"
 WARN_UCI_ARCHIVE_MISMATCH: Final = "uci_archive_mismatch"
+# The pin rules refused SSH in this run (``ssh_host_key:<core reason>``,
+# e.g. pin_pending, mismatch): no SSH read ran, no credential was sent.
+WARN_SSH_HOST_KEY: Final = "ssh_host_key"
+
+# Core host-key reasons that make the probe report config.ssh_root
+# unavailable: no pin store, or the router shows another / no usable key.
+# Every other refusal (first-seen key pending, ...) leaves it unknown: an
+# admin confirmation can clear it at any time.
+_PIN_HARD_REFUSALS: Final = frozenset(
+    {"pin_unavailable", "mismatch", "algorithm_unavailable"}
+)
 
 STEP_ARCHIVE_RESTORE: Final = "archive_restore"
 STEP_REBOOT: Final = "reboot"
@@ -299,11 +318,15 @@ def error_for_class(
     router_id: str | None,
     operation: str,
     capability: str = Capability.CONFIG_BACKUP.value,
+    reason: str | None = None,
 ) -> ConfigApiError:
     """Return the Configuration API error for a collector error class.
 
-    ``not_available`` names ``capability``; ``invalid`` and unknown classes
-    become ``ProviderError``. The message holds the operation and the class
+    ``not_available`` names ``capability``; ``invalid``, ``denied`` and
+    unknown classes become ``ProviderError`` (``denied``: the pinned SSH
+    path refused; never ``AuthorizationError``, which means "this user may
+    not"). ``reason`` goes to ``details["reason"]`` (e.g.
+    ``ssh_pin_pending``). The message holds the operation and the class
     only, never router data.
     """
     message = f"config {operation} failed: {error_class}"
@@ -315,6 +338,8 @@ def error_for_class(
             router_id=router_id,
         )
     details = {"operation": operation}
+    if reason is not None:
+        details["reason"] = reason
     error_type = _ERRORS.get(error_class)
     if error_type is not None:
         return error_type(message, router_id=router_id, details=details)
@@ -735,6 +760,19 @@ def _restore_steps(archive_sha256: str) -> tuple[RestoreStep, ...]:
 # ---------------------------------------------------------------------------
 
 
+def _refusal(pinned: PinnedApi) -> str | None:
+    """Reason of the pin rules' refusal in this operation, if any."""
+    return pinned.ssh.refused
+
+
+def _denied_reason(error_class: str, pinned: PinnedApi) -> str | None:
+    """``ssh_<core reason>`` for a ``denied`` outcome caused by the pin rules."""
+    refused = _refusal(pinned)
+    if error_class == ERR_DENIED and refused is not None:
+        return f"ssh_{refused}"
+    return None
+
+
 def _archive_order(request: CollectRequest) -> tuple[str, ...]:
     """Archive methods to try, preferred first; () = UCI snapshot only."""
     method = request.fetch_method
@@ -863,6 +901,8 @@ def _probe_status(
         state, reason = CapabilityState.UNKNOWN, CapabilityReason.ROUTER_OFFLINE.value
     elif error_class == _PROBE_NOT_PROBED:
         state, reason = CapabilityState.UNKNOWN, CapabilityReason.NOT_PROBED.value
+    elif error_class.startswith("ssh_") and error_class[4:] in _PIN_HARD_REFUSALS:
+        state, reason = CapabilityState.UNAVAILABLE, f"provider:{error_class}"
     else:
         state, reason = CapabilityState.UNKNOWN, f"provider:{error_class}"
     return CapabilityStatus(
@@ -919,7 +959,7 @@ class ConfigManagerProvider:
         timeouts: Mapping[str, float] | None = None,
         limits: ArchiveLimits = DEFAULT_ARCHIVE_LIMITS,
     ) -> None:
-        """Keep the executor owner, timeouts and archive limits; no state."""
+        """Keep the executor owner, timeouts and archive limits."""
         merged = {**FETCH_TIMEOUTS, **(timeouts or {})}
         for name, value in merged.items():
             if (
@@ -934,6 +974,9 @@ class ConfigManagerProvider:
             {name: float(value) for name, value in merged.items()}
         )
         self._limits = limits
+        # router id -> reason of the last pin refusal (memory only; cleared
+        # by the next pinned SSH read that runs).
+        self._pin_refusals: dict[str, str] = {}
 
     @property
     def provider_id(self) -> str:
@@ -989,22 +1032,42 @@ class ConfigManagerProvider:
         record = ctx.registry.find(conn.router_id)
         return _info_from_record(record) if record is not None else {}
 
+    def _pinned(self, conn: RouterConnection, ctx: ProviderContext) -> PinnedApi:
+        """``conn.api`` for one operation, SSH bound to the pinned path."""
+        return PinnedApi(conn.api, PinnedSsh(ctx, conn.router_id))
+
+    def _settle_pin(self, router_id: str, pinned: PinnedApi) -> None:
+        """Remember a refusal of this operation; a pinned run clears it."""
+        if pinned.ssh.refused is not None:
+            self._pin_refusals[router_id] = pinned.ssh.refused
+        elif pinned.ssh.ran:
+            self._pin_refusals.pop(router_id, None)
+
     async def _live_uci(
         self,
         conn: RouterConnection,
+        ctx: ProviderContext,
         digest: Callable[[str], str],
         operation: str,
         configs: Sequence[str] = UCI_CONFIGS,
+        api: PinnedApi | None = None,
     ) -> UciCollection:
-        uci = await collect_uci_snapshot(
-            conn.api, configs, digest, timeouts=self._timeouts
-        )
+        """Live UCI read; ``api`` shares one operation's pinned runner."""
+        api = api or self._pinned(conn, ctx)
+        try:
+            uci = await collect_uci_snapshot(
+                api, configs, digest, timeouts=self._timeouts
+            )
+        finally:
+            self._settle_pin(conn.router_id, api)
         if not uci.snapshot.configs:
+            error_class = _uci_failure(uci)
             raise error_for_class(
-                _uci_failure(uci),
+                error_class,
                 router_id=conn.router_id,
                 operation=operation,
                 capability=Capability.CONFIG_UCI_READ.value,
+                reason=_denied_reason(error_class, api),
             )
         return uci
 
@@ -1100,7 +1163,7 @@ class ConfigManagerProvider:
         rpcd rights only: it never fetches an archive (review M1)."""
         started = time.monotonic()
         statuses = await self._bounded(
-            "probe", conn.router_id, started, self._probe(conn)
+            "probe", conn.router_id, started, self._probe(conn, ctx)
         )
         _log("probe", started)
         return statuses
@@ -1131,8 +1194,38 @@ class ConfigManagerProvider:
             return _PROBE_NOT_PROBED
         return None if _CGI_IO_PACKAGE in packages else ERR_NOT_AVAILABLE
 
-    async def _probe(self, conn: RouterConnection) -> dict[str, CapabilityStatus]:
-        api = conn.api
+    async def _probe(
+        self, conn: RouterConnection, ctx: ProviderContext
+    ) -> dict[str, CapabilityStatus]:
+        api = self._pinned(conn, ctx)
+        try:
+            return await self._probe_with(conn.router_id, api, ctx)
+        finally:
+            self._settle_pin(conn.router_id, api)
+
+    def _ssh_class(
+        self, router_id: str, api: PinnedApi, ctx: ProviderContext
+    ) -> str | None:
+        """Probe class of config.ssh_root without connecting for it.
+
+        Only "user is root" and the pin state are known without an SSH
+        login; whether SSH and sysupgrade work shows at the first SSH
+        backup. Pin state: no pin store, or a refusal seen in this probe or
+        remembered from the last operation, gives ``ssh_<reason>`` (see
+        ``_PIN_HARD_REFUSALS`` for unavailable vs unknown).
+        """
+        if not api.config_ssh_user_is_root():
+            return ERR_PERMISSION
+        if ctx.ssh is None:
+            return "ssh_pin_unavailable"
+        refused = _refusal(api) or self._pin_refusals.get(router_id)
+        if refused is not None:
+            return f"ssh_{refused}"
+        return _PROBE_NOT_PROBED
+
+    async def _probe_with(
+        self, router_id: str, api: PinnedApi, ctx: ProviderContext
+    ) -> dict[str, CapabilityStatus]:
         fetch = await collect_uci(api, UCI_CONFIGS, timeouts=self._timeouts)
         readable = {
             name: fetch.raw.get(name) is not None
@@ -1175,11 +1268,7 @@ class ConfigManagerProvider:
             cgi_class = await self._probe_cgi(
                 api, known, self._timeouts[FETCH_PACKAGELIST]
             )
-            # SSH: only "user is root" is known without connecting; whether
-            # SSH and sysupgrade work shows at the first SSH backup.
-            ssh_class = (
-                _PROBE_NOT_PROBED if api.config_ssh_user_is_root() else ERR_PERMISSION
-            )
+            ssh_class = self._ssh_class(router_id, api, ctx)
 
         now = utcnow()
         uci = _probe_status(
@@ -1234,7 +1323,7 @@ class ConfigManagerProvider:
             "capture",
             conn.router_id,
             started,
-            self._live_uci(conn, secret_digest_factory(key), "capture", configs),
+            self._live_uci(conn, ctx, secret_digest_factory(key), "capture", configs),
         )
         info = self._router_info(conn, ctx)
         release = info.get("release")
@@ -1284,8 +1373,22 @@ class ConfigManagerProvider:
         key: bytes,
         order: tuple[str, ...],
     ) -> CollectedVersion:
+        api = self._pinned(conn, ctx)
+        try:
+            return await self._collect_with(conn, request, ctx, key, order, api)
+        finally:
+            self._settle_pin(conn.router_id, api)
+
+    async def _collect_with(
+        self,
+        conn: RouterConnection,
+        request: CollectRequest,
+        ctx: ProviderContext,
+        key: bytes,
+        order: tuple[str, ...],
+        api: PinnedApi,
+    ) -> CollectedVersion:
         deadline = _Deadline(self._timeouts[FETCH_JOB])
-        api = conn.api
         digest = secret_digest_factory(key)
         key_id = installation_key_id(key)
 
@@ -1344,10 +1447,14 @@ class ConfigManagerProvider:
         live = uci.snapshot if uci is not None and uci.snapshot.configs else None
 
         if not archive_ok and live is None:
+            error_class = _collect_failure(
+                uci, uci_stop, archive_class, archive_skipped
+            )
             raise error_for_class(
-                _collect_failure(uci, uci_stop, archive_class, archive_skipped),
+                error_class,
                 router_id=conn.router_id,
                 operation="collect",
+                reason=_denied_reason(error_class, api),
             )
 
         # 3. Inventory: router_info plus the package list.
@@ -1362,6 +1469,9 @@ class ConfigManagerProvider:
 
         # 4. Outcome, warnings, artifacts.
         warnings = _Warnings()
+        refused = _refusal(api)
+        if refused is not None:
+            warnings.add(WARN_SSH_HOST_KEY, refused)
         if uci is not None:
             for name, error_class in uci.failed:
                 missing = error_class == ERR_NOT_AVAILABLE
@@ -1672,7 +1782,7 @@ class ConfigManagerProvider:
         digest: Callable[[str], str],
     ) -> tuple[UciSnapshot, str | None, UciSnapshot]:
         base, base_key = await self._record_snapshot(baseline, ctx)
-        live = await self._live_uci(conn, digest, "drift")
+        live = await self._live_uci(conn, ctx, digest, "drift")
         return base, base_key, live.snapshot
 
     # -- restore -----------------------------------------------------------
@@ -1775,10 +1885,14 @@ class ConfigManagerProvider:
             digest,
         )
         source = await self._source_inventory(record, ctx)
-        current = await self._live_uci(conn, digest, "restore_dry_run")
-        target_inventory = await collect_inventory(
-            conn.api, self._router_info(conn, ctx), timeouts=self._timeouts
-        )
+        api = self._pinned(conn, ctx)
+        current = await self._live_uci(conn, ctx, digest, "restore_dry_run", api=api)
+        try:
+            target_inventory = await collect_inventory(
+                api, self._router_info(conn, ctx), timeouts=self._timeouts
+            )
+        finally:
+            self._settle_pin(conn.router_id, api)
         return analysis, source, current.snapshot, target_inventory
 
     async def async_execute_restore(

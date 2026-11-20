@@ -793,7 +793,7 @@ async def test_uci_acl_block_uses_ssh_uci_show() -> None:
     )
     ssh_commands: list[str] = []
 
-    async def ssh_read(cmd: str, **_kw: Any) -> tuple[int, bytes, bytes]:
+    async def ssh_read(cmd: str, _ssh: Any, **_kw: Any) -> tuple[int, bytes, bytes]:
         ssh_commands.append(cmd)
         return 0, SHOW[cmd.split()[-1]].encode(), b""
 

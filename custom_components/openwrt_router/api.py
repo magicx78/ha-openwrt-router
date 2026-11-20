@@ -6032,7 +6032,9 @@ class OpenWrtAPI:
     # Rarely called (about once a day per router), never from the poll. No
     # retries except the one re-login of an expired session. Archive bytes,
     # session token and remote stderr are never logged; error texts carry only
-    # the error class, HTTP status / exit code and lengths.
+    # the error class, HTTP status / exit code and lengths. SSH only through
+    # the core's pinned runner (``ssh=``, see _config_ssh_read): never the
+    # shared transport with known_hosts=None, never an unpinned fallback.
 
     async def config_fetch_backup_cgi(self, *, max_bytes: int, timeout: float) -> bytes:
         """Fetch the ``sysupgrade -b`` archive through LuCI's ``cgi-backup``.
@@ -6158,24 +6160,34 @@ class OpenWrtAPI:
             raise _config_classify_body(bytes(buf), resp.content_type or "")
         return bytes(buf)
 
-    async def config_fetch_backup_ssh(self, *, max_bytes: int, timeout: float) -> bytes:
-        """Fetch the ``sysupgrade -b`` archive over SSH (root only).
+    async def config_fetch_backup_ssh(
+        self,
+        *,
+        max_bytes: int,
+        timeout: float,
+        ssh: ConfigSshRunner | None = None,
+    ) -> bytes:
+        """Fetch the ``sysupgrade -b`` archive over the PINNED SSH path (root).
 
-        Runs the fixed command ``/sbin/sysupgrade --create-backup -`` on the
-        shared asyncssh connection and reads stdout with a hard cap of
-        ``max_bytes`` (``_asyncssh_run`` buffers without limit, so it is not
-        used). The archive holds /etc/shadow and the host keys, which only
-        root can read, so a non-root SSH user is refused without connecting.
+        Runs the fixed command ``/sbin/sysupgrade --create-backup -`` through
+        ``ssh`` (the core's pinned runner, see ``_config_ssh_read``) with a
+        hard stdout cap of ``max_bytes``. Without ``ssh`` the SSH path is not
+        used at all (there is no unpinned fallback). The archive holds
+        /etc/shadow and the host keys, which only root can read, so a
+        non-root SSH user is refused without connecting.
 
-        Network calls: 1 SSH channel (on the open connection, else 1 connect;
-        1 more connect when password auth is refused and key auth is tried).
+        Network calls: what the pinned runner does (1 connection; 1 more
+        when password auth is refused and key auth is tried; on first
+        contact 1 connection without credentials that only reads the key).
 
         Raises:
             ValueError: ``max_bytes`` or ``timeout`` not positive.
             OpenWrtConfigFetchPermissionError: SSH user is not root, or SSH
                 login refused for password and key.
+            OpenWrtConfigFetchHostKeyError: the pin rules refuse (first-seen
+                key pending, other key, no pin store / no runner).
             OpenWrtConfigFetchTooLargeError: More than ``max_bytes``; the
-                remote process is killed and the channel closed.
+                channel is closed.
             OpenWrtConfigFetchIncompleteError: Exit code != 0, no exit code,
                 empty or non-gzip output.
             OpenWrtConnectionError: SSH not reachable / API closing.
@@ -6187,7 +6199,7 @@ class OpenWrtAPI:
                 "SSH backup needs the root user (archive contains root-only files)"
             )
         rc, out, err = await self._config_ssh_read(
-            _CONFIG_SSH_BACKUP_CMD, max_bytes=max_bytes, timeout=timeout
+            _CONFIG_SSH_BACKUP_CMD, ssh, max_bytes=max_bytes, timeout=timeout
         )
         if rc != 0:
             raise OpenWrtConfigFetchIncompleteError(
@@ -6201,24 +6213,29 @@ class OpenWrtAPI:
         _LOGGER.debug("SSH backup on %s: %d bytes", self._host, len(out))
         return out
 
-    async def config_uci_get(self, config: str) -> dict[str, Any]:
+    async def config_uci_get(
+        self, config: str, *, ssh: ConfigSshRunner | None = None
+    ) -> dict[str, Any]:
         """Return one UCI config in the ubus ``uci get`` shape.
 
         ubus ``uci get {config}`` first. When rpcd denies it (ACL, also the
-        cached ``_acl_blocked`` entry) or does not know it, SSH
-        ``uci show <config>`` parsed by ``config_snapshot.parse_uci_show``
-        (anonymous sections as ``@type[n]``, multi-line quoted values kept
-        whole, so both paths hash alike). ``config`` is checked against
+        cached ``_acl_blocked`` entry) or does not know it, ``uci show
+        <config>`` over the pinned SSH runner ``ssh`` (none = no SSH), parsed
+        by ``config_snapshot.parse_uci_show`` (anonymous sections as
+        ``@type[n]``, multi-line quoted values kept whole, so both paths hash
+        alike). ``config`` is checked against
         ``^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$`` before any call and passed
         through ``shlex.quote``.
 
         Network calls: 1 ubus call (plus the re-login of ``_call`` on a first
-        ACL denial); on fallback 1 SSH channel.
+        ACL denial); on fallback 1 pinned SSH command.
 
         Raises:
             ValueError: Invalid config name (no call made).
             OpenWrtConfigFetchPermissionError: ubus denied and SSH not usable
                 or denied.
+            OpenWrtConfigFetchHostKeyError: ubus denied and the pin rules
+                refuse SSH.
             OpenWrtConfigFetchNotAvailableError: Config does not exist.
             OpenWrtConfigFetchIncompleteError: Reply without values, or
                 ``uci show`` failed otherwise.
@@ -6235,7 +6252,7 @@ class OpenWrtAPI:
                 name,
                 self._host,
             )
-            return await self._config_uci_show_ssh(name)
+            return await self._config_uci_show_ssh(name, ssh)
         values = result.get("values") if isinstance(result, dict) else None
         if not isinstance(values, dict):
             raise OpenWrtConfigFetchIncompleteError(
@@ -6243,8 +6260,10 @@ class OpenWrtAPI:
             )
         return values
 
-    async def _config_uci_show_ssh(self, name: str) -> dict[str, Any]:
-        """Read one config with ``uci show`` over SSH (``name`` is validated).
+    async def _config_uci_show_ssh(
+        self, name: str, ssh: ConfigSshRunner | None
+    ) -> dict[str, Any]:
+        """Read one config with ``uci show`` over pinned SSH (``name`` valid).
 
         Parsed by ``config_snapshot.parse_uci_show``, not the poll's
         ``_parse_uci_show``: that one keeps only the first line of a
@@ -6256,6 +6275,7 @@ class OpenWrtAPI:
         try:
             rc, out, err = await self._config_ssh_read(
                 f"uci show {shlex.quote(name)}",
+                ssh,
                 max_bytes=_CONFIG_UCI_SHOW_MAX_BYTES,
                 timeout=_CONFIG_SSH_TEXT_TIMEOUT,
             )
@@ -6273,16 +6293,19 @@ class OpenWrtAPI:
                 f"uci show {name}: output too large"
             ) from size_err
 
-    async def config_packagelist(self) -> dict[str, str] | None:
+    async def config_packagelist(
+        self, *, ssh: ConfigSshRunner | None = None
+    ) -> dict[str, str] | None:
         """Return installed packages as ``{name: version}``, None if unknown.
 
         ubus ``rpc-sys packagelist {"all": true}`` first (rpcd-mod-rpcsys,
-        reads the apk or opkg database); otherwise over SSH ``apk list -I``
-        (OpenWrt >= 25) or ``opkg list-installed``. Never raises for a
-        missing source: None means no package list could be read.
+        reads the apk or opkg database); otherwise ``apk list -I`` (OpenWrt
+        >= 25) or ``opkg list-installed`` over the pinned SSH runner ``ssh``
+        (none = no SSH). Never raises for a missing source or a refused SSH
+        path: None means no package list could be read.
 
         Network calls: 1 ubus call (plus the re-login of ``_call`` on a first
-        ACL denial); on fallback 1 SSH channel.
+        ACL denial); on fallback 1 pinned SSH command.
 
         Raises:
             OpenWrtAuthError / OpenWrtConnectionError / OpenWrtTimeoutError:
@@ -6302,13 +6325,16 @@ class OpenWrtAPI:
             packages = _config_packages_from_rpc(result)
             if packages:
                 return packages
-        return await self._config_packagelist_ssh()
+        return await self._config_packagelist_ssh(ssh)
 
-    async def _config_packagelist_ssh(self) -> dict[str, str] | None:
-        """Read the package list over SSH with apk or opkg, None on failure."""
+    async def _config_packagelist_ssh(
+        self, ssh: ConfigSshRunner | None
+    ) -> dict[str, str] | None:
+        """Read the package list over pinned SSH (apk or opkg), None on failure."""
         try:
             rc, out, _err = await self._config_ssh_read(
                 _CONFIG_PACKAGES_SCRIPT,
+                ssh,
                 max_bytes=_CONFIG_PACKAGES_MAX_BYTES,
                 timeout=_CONFIG_SSH_TEXT_TIMEOUT,
             )
@@ -6368,42 +6394,34 @@ class OpenWrtAPI:
         """
         return self._username == "root"
 
-    async def _config_ssh_open(self, remote_cmd: str) -> Any:
-        """Open a process for ``remote_cmd`` on the shared SSH connection.
-
-        Same auth order as ``_asyncssh_run``: password first, key auth after
-        ``PermissionDenied`` (``_ssh_use_key``). Host keys: the shared
-        transport connects with ``known_hosts=None``; TOFU pinning for this
-        path is added by enterprise-core in that transport.
-        """
-        for _attempt in range(2):
-            password = None if self._ssh_use_key else self._password
-            try:
-                conn = await self._asyncssh_get_connection(password)
-            except asyncssh.PermissionDenied:
-                if not self._ssh_use_key:
-                    _LOGGER.debug("SSH password-auth denied, switching to key-auth")
-                    self._ssh_use_key = True
-                    continue
-                break
-            return await conn.create_process(
-                remote_cmd, encoding=None, stdin=asyncssh.DEVNULL
-            )
-        raise OpenWrtConfigFetchPermissionError("SSH login denied")
-
     async def _config_ssh_read(
-        self, remote_cmd: str, *, max_bytes: int, timeout: float
+        self,
+        remote_cmd: str,
+        ssh: ConfigSshRunner | None,
+        *,
+        max_bytes: int,
+        timeout: float,
     ) -> tuple[int | None, bytes, bytes]:
-        """Run a fixed command over SSH and read its stdout bounded.
+        """Run a fixed command over the PINNED SSH path and read it bounded.
 
-        Returns ``(exit status or None, stdout, first <= 4 KiB of stderr)``.
-        stdout is read in 64 KiB pieces; more than ``max_bytes`` kills the
-        remote process and closes the channel. stderr is drained in 4 KiB
-        pieces so the channel never stalls; only its first piece is kept
-        (for the error class, never logged). On timeout, error or
-        cancellation the process is killed and the channel closed.
+        ``ssh`` is the core's pinned runner for this router
+        (``ProviderContext.async_ssh_run_pinned`` bound by the provider,
+        which ends in ``api.async_ssh_run_pinned``): own connection per call,
+        host key checked in the handshake before any credential is sent,
+        stdout capped at ``max_bytes`` while reading (the run is aborted
+        above it), stderr capped at 4 KiB, the whole run bounded by
+        ``timeout``, process and connection closed on error, timeout and
+        cancellation. This method never opens SSH itself and never falls
+        back to the shared, unverified transport: without ``ssh`` it refuses.
+
+        Returns ``(exit status, stdout, first <= 4 KiB of stderr)``; stderr
+        is only used for the error class and never logged.
 
         Raises:
+            OpenWrtConfigFetchHostKeyError: no runner, or the pin rules
+                refuse (``reason`` of the core: ``pin_pending``,
+                ``mismatch``, ``algorithm_unavailable``, ``pin_invalid``,
+                ``pin_unavailable`` ...). No credentials were sent.
             OpenWrtConfigFetchTooLargeError: stdout over ``max_bytes``.
             OpenWrtConfigFetchPermissionError: SSH login refused.
             OpenWrtConnectionError: SSH not reachable / API closing.
@@ -6411,58 +6429,44 @@ class OpenWrtAPI:
         """
         if self._closing:
             raise OpenWrtConnectionError("OpenWrtAPI is closing – SSH read rejected")
-        proc: Any = None
-        drain: asyncio.Task[bytes] | None = None
-        finished = False
-        timed_out = False
-        self._ssh_inflight += 1
+        if ssh is None:
+            raise OpenWrtConfigFetchHostKeyError(
+                "pin_unavailable", "no pinned SSH runner: the SSH path is not used"
+            )
         try:
-            try:
-                async with asyncio.timeout(timeout):
-                    proc = await self._config_ssh_open(remote_cmd)
-                    drain = asyncio.ensure_future(_config_drain_stderr(proc.stderr))
-                    out = bytearray()
-                    while chunk := await proc.stdout.read(_CONFIG_CHUNK_BYTES):
-                        if len(out) + len(chunk) > max_bytes:
-                            raise OpenWrtConfigFetchTooLargeError(
-                                f"SSH output exceeds {max_bytes} bytes "
-                                f"(stopped at {len(out) + len(chunk)} bytes)"
-                            )
-                        out += chunk
-                    stderr_head = await drain
-                    await proc.wait_closed()
-                    finished = True
-            except TimeoutError as err:
-                # MUST precede the OSError catch — TimeoutError subclasses OSError.
-                timed_out = True
-                raise OpenWrtTimeoutError(
-                    f"SSH command timed out after {timeout}s"
-                ) from err
-            except asyncssh.PermissionDenied as err:
-                raise OpenWrtConfigFetchPermissionError("SSH login denied") from err
-            except (OSError, asyncssh.Error) as err:
-                raise OpenWrtConnectionError(
-                    f"SSH to {self._host} failed ({type(err).__name__})"
-                ) from err
-            return proc.exit_status, bytes(out), stderr_head
-        finally:
-            if drain is not None:
-                if not drain.done():
-                    drain.cancel()
-                elif not drain.cancelled():
-                    drain.exception()  # mark a failed drain as retrieved
-            if proc is not None and not finished:
-                with contextlib.suppress(Exception):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    proc.close()
-            self._ssh_inflight -= 1
-            if timed_out:
-                # Like _asyncssh_run: start the next command on a clean connection.
-                await self._asyncssh_request_release()
-            elif self._ssh_inflight == 0 and self._ssh_release_pending:
-                self._ssh_release_pending = False
-                await self._asyncssh_drop_connection()
+            async with asyncio.timeout(timeout):
+                result = await ssh(remote_cmd, timeout, max_bytes)
+        except TimeoutError as err:
+            # MUST precede the OSError catch — TimeoutError subclasses OSError.
+            raise OpenWrtTimeoutError(
+                f"SSH command timed out after {timeout}s"
+            ) from err
+        except (OpenWrtConfigFetchError, OpenWrtConnectionError, OpenWrtTimeoutError):
+            raise
+        except OpenWrtHostKeyError as err:
+            raise OpenWrtConfigFetchHostKeyError(
+                err.reason, f"pinned SSH refused ({err.reason})"
+            ) from err
+        except OpenWrtSshOutputTooLargeError as err:
+            raise OpenWrtConfigFetchTooLargeError(
+                f"SSH output exceeds {max_bytes} bytes"
+            ) from err
+        except OpenWrtAuthError as err:
+            # Never the reauth flow: a refused SSH login is a missing right.
+            raise OpenWrtConfigFetchPermissionError("SSH login denied") from err
+        except (OSError, asyncssh.Error) as err:
+            raise OpenWrtConnectionError(
+                f"SSH to {self._host} failed ({type(err).__name__})"
+            ) from err
+        out = result.stdout
+        if isinstance(out, str):  # a runner that ignored binary=True
+            out = out.encode("utf-8", errors="surrogateescape")
+        if len(out) > max_bytes:  # defence in depth: the runner caps already
+            raise OpenWrtConfigFetchTooLargeError(
+                f"SSH output exceeds {max_bytes} bytes (stopped at {len(out)} bytes)"
+            )
+        stderr = result.stderr if isinstance(result.stderr, bytes) else b""
+        return result.exit_status, bytes(out), stderr[:_CONFIG_PEEK_BYTES]
 
     # --- end Configuration Manager ---
 
@@ -6720,6 +6724,33 @@ class OpenWrtConfigFetchIncompleteError(OpenWrtConfigFetchError):
     error_class = "incomplete"
 
 
+class OpenWrtConfigFetchHostKeyError(OpenWrtConfigFetchError):
+    """The pinned SSH path refused: no SSH command ran, no credential was sent.
+
+    ``error_class`` ``denied`` (the core's class for a refused call; its ACL
+    deploy reports the same case as ``denied`` with reason ``ssh_<reason>``).
+    ``reason`` is the core's host-key reason (``pin_pending``, ``mismatch``,
+    ``algorithm_unavailable``, ``pin_invalid``, ``pin_store_unavailable``,
+    ``pin_unavailable`` = no pinned runner / no pin store ...). Never a
+    retry on the unpinned transport.
+    """
+
+    error_class = "denied"
+
+    def __init__(self, reason: str, message: str) -> None:
+        """Remember the core's reason (no fingerprints, no host)."""
+        super().__init__(message)
+        self.reason = reason
+
+
+# Pinned SSH runner of the config path: (command, timeout_s, max_stdout_bytes)
+# -> awaitable of an ``api.PinnedSshResult`` (binary stdout). The provider
+# binds it to ``ProviderContext.async_ssh_run_pinned`` of one router; it may
+# raise OpenWrtHostKeyError, OpenWrtSshOutputTooLargeError, OpenWrtAuthError,
+# OpenWrtTimeoutError, OpenWrtConnectionError or an OpenWrtConfigFetchError.
+ConfigSshRunner = Callable[[str, float, int], Any]
+
+
 # cgi-io selects its mode by argv[0]; LuCI links /www/cgi-bin/cgi-backup to it.
 _CONFIG_CGI_BACKUP_PATH = "/cgi-bin/cgi-backup"
 # Fixed command, no user input (same call as cgi-io's main_backup).
@@ -6841,15 +6872,6 @@ def _config_classify_exit(
     if b"denied" in lowered:
         return OpenWrtConfigFetchPermissionError(message)
     return OpenWrtConfigFetchIncompleteError(message)
-
-
-async def _config_drain_stderr(reader: Any) -> bytes:
-    """Read stderr to EOF in 4 KiB pieces; keep only the first piece."""
-    head = b""
-    while chunk := await reader.read(_CONFIG_PEEK_BYTES):
-        if not head:
-            head = bytes(chunk[:_CONFIG_PEEK_BYTES])
-    return head
 
 
 def _config_packages_from_rpc(result: Any) -> dict[str, str]:
