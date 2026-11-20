@@ -1820,6 +1820,29 @@ async def test_export_approval_needs_acknowledge_plaintext(disks, tmp_path, capl
     await stop(env)
 
 
+async def test_audit_marks_a_self_approved_export(disks, tmp_path):
+    """Self-approval stays allowed (TODO: option "second admin"); the audit says so."""
+    env = await cm_env(disks, tmp_path)
+    async with http(env.hass) as h:
+        bid = (await backup(h, env.rid))["backup_id"]
+        own = (await h.post(f"/versions/{bid}/export")).data["approval_id"]
+        other = (await h.post(f"/versions/{bid}/export")).data["approval_id"]
+        resp = await h.post(f"/approvals/{own}/approve", body=ACK)
+        assert resp.status == 200, resp.body
+        resp = await h.post(
+            f"/approvals/{other}/approve", body=ACK, user=OTHER_ADMIN_ID
+        )
+        assert resp.status == 200, resp.body
+    approved = {
+        e.data["approval_id"]: e.data
+        for e in env.api.events(types=["security.approval_approved"])
+    }
+    assert approved[own]["action"] == "export"
+    assert approved[own]["self_approved"] is True
+    assert approved[other]["self_approved"] is False
+    await stop(env)
+
+
 async def test_ssh_pin_routes(disks, tmp_path, monkeypatch):
     env = await cm_env(disks, tmp_path)
     confirm = fake_approval(GuardedAction.SSH_PIN_CONFIRM, env.rid)
