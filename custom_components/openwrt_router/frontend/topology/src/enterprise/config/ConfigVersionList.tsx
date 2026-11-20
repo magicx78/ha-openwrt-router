@@ -10,6 +10,7 @@ import React, { useState } from 'react';
 import type { ConfigApi, Version } from './configTypes';
 import {
   ACTOR_LABEL,
+  OPTION_HINT,
   REASON_LABEL,
   TYPE_LABEL,
   VALIDATION_LABEL,
@@ -21,8 +22,9 @@ import {
   shortHash,
   restorableVersions,
   timelinePoints,
+  versionActionLocks,
 } from './configLogic.ts';
-import { Badge, ErrorBox } from './configUi';
+import { Badge, ErrorBox, Notice } from './configUi';
 
 const VALIDATION_TONE: Record<string, string> = {
   ok: 'ok', valid: 'ok', unverified: 'muted', invalid: 'critical', corrupt: 'critical', missing: 'critical',
@@ -58,6 +60,8 @@ export function ConfigVersionList({ api, versions, now, readOnly, enabled, onCha
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<{ id: string; error: unknown } | null>(null);
   const restorable = new Set(restorableVersions(versions).map(v => v.backupId));
+  const locks = versionActionLocks({ enabled });
+  const offTitle = enabled ? undefined : OPTION_HINT;
 
   const act = async (v: Version, fn: () => Promise<Version>) => {
     setBusy(v.backupId);
@@ -74,6 +78,9 @@ export function ConfigVersionList({ api, versions, now, readOnly, enabled, onCha
   return (
     <div className="cfg-stack">
       <Timeline versions={versions} now={now} />
+      {!enabled && (
+        <Notice tone="info">Prüfen, Schützen, Export und Wiederherstellen sind gesperrt. {OPTION_HINT}</Notice>
+      )}
       <div className="cfg-versions" role="table" aria-label="Versionen">
         <div className="cfg-vrow cfg-vrow--head" role="row">
           <span role="columnheader">Zeit</span>
@@ -115,17 +122,17 @@ export function ConfigVersionList({ api, versions, now, readOnly, enabled, onCha
                 {v.warnings.map(w => <span key={w} className="diag-table__meta cfg-text-warn">{VERSION_WARNING_TEXT[w] ?? w}</span>)}
               </span>
               <span role="cell" className="cfg-vrow__actions">
-                <button type="button" className="diag-btn cfg-btn" disabled={working || readOnly || v.status === 'failed'}
-                  onClick={() => void act(v, () => api.validate(v.backupId))}>
+                <button type="button" className="diag-btn cfg-btn" disabled={working || readOnly || locks.validate || v.status === 'failed'}
+                  title={offTitle} onClick={() => void act(v, () => api.validate(v.backupId))}>
                   Prüfen
                 </button>
-                <button type="button" className="diag-btn cfg-btn" disabled={working || readOnly}
-                  aria-pressed={v.protected}
+                <button type="button" className="diag-btn cfg-btn" disabled={working || readOnly || locks.protect}
+                  aria-pressed={v.protected} title={offTitle}
                   onClick={() => void act(v, () => api.protect(v.backupId, !v.protected))}>
                   {v.protected ? 'Schutz aufheben' : 'Schützen'}
                 </button>
-                <button type="button" className="diag-btn cfg-btn" disabled={working || v.status === 'failed' || v.artifacts.length === 0}
-                  onClick={() => onExport(v)}>
+                <button type="button" className="diag-btn cfg-btn" disabled={working || locks.export || v.status === 'failed' || v.artifacts.length === 0}
+                  title={offTitle} onClick={() => onExport(v)}>
                   Export
                 </button>
                 <button type="button" className="diag-btn cfg-btn" disabled={working || !restorable.has(v.backupId) || !enabled}

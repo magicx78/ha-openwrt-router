@@ -169,7 +169,13 @@ export const ACTOR_LABEL: Record<string, string> = {
 
 export const SCHEDULE_LABEL: Record<string, string> = { daily: 'Täglich', off: 'Aus' };
 
+export const INSECURE_TRANSPORT_TEXT =
+  'Kein Archiv über HTTP: Der Router ist ohne TLS eingebunden. Archiv-Backups laufen dann nur über SSH mit '
+  + 'bestätigtem Hostkey; sonst wird nur der UCI-Snapshot gesichert. Empfohlen: Router-Eintrag auf HTTPS umstellen.';
+
 export const CAP_REASON_TEXT: Record<string, string> = {
+  insecure_transport: INSECURE_TRANSPORT_TEXT,
+  'provider:insecure_transport': INSECURE_TRANSPORT_TEXT,
   ok: 'verfügbar',
   no_data_yet: 'noch keine Daten',
   not_checked: 'noch nicht geprüft',
@@ -243,6 +249,7 @@ function parseRouterSummary(r: Obj): RouterSummary | null {
     enabled: r.enabled === true,
     status: str(r.status) ?? 'never',
     errorClass: str(r.error_class),
+    errorReason: str(r.error_reason),
     running: r.running === true,
     lastBackupAt: str(r.last_backup_at),
     versions: num(r.versions) ?? 0,
@@ -632,6 +639,7 @@ export const ERROR_TEXT: Record<string, string> = {
   storage_full: 'Der Speicher für Versionen ist voll.',
   storage_error: 'Fehler beim Speichern der Version.',
   internal: 'Interner Fehler im Backend.',
+  invalid_request: 'Die Anfrage war ungültig.',
   no_token: 'Für den Download fehlt das Zugangstoken. Bitte die Seite neu laden.',
   not_connected: 'Keine Verbindung zu Home Assistant.',
 };
@@ -706,8 +714,19 @@ export function errorInfo(err: unknown): ErrorInfo {
 /** Error classes of a failed backup that mean "the router lacks the right". */
 const ACCESS_ERROR_CLASSES = new Set(['permission', 'not_available']);
 
-export function isAccessFailure(errorClass: string | null): boolean {
-  return errorClass !== null && ACCESS_ERROR_CLASSES.has(errorClass);
+/** The entry talks plain HTTP: no archive over it (not a missing right). */
+export function isTransportFailure(reason: string | null | undefined): boolean {
+  return reason === 'insecure_transport';
+}
+
+/** Validate, protect and export answer 409 (disabled) while the option is off: lock them up front. */
+export function versionActionLocks(s: { enabled: boolean }): { validate: boolean; protect: boolean; export: boolean } {
+  const locked = !s.enabled;
+  return { validate: locked, protect: locked, export: locked };
+}
+
+export function isAccessFailure(errorClass: string | null, reason: string | null = null): boolean {
+  return errorClass !== null && ACCESS_ERROR_CLASSES.has(errorClass) && !isTransportFailure(reason);
 }
 
 export const ERROR_CLASS_TEXT: Record<string, string> = {
@@ -727,11 +746,14 @@ export const ERROR_CLASS_TEXT: Record<string, string> = {
 };
 
 /** German text for a failed backup's error class; access problems point to "Zugang". */
-export function failureText(errorClass: string | null): string {
+export function failureText(errorClass: string | null, errorReason: string | null = null): string {
   const base = 'Das letzte Backup ist fehlgeschlagen.';
+  if (isTransportFailure(errorReason)) {
+    return `${base} ${INSECURE_TRANSPORT_TEXT} Den SSH-Host-Key bestätigt man im Bereich „Zugang“ unten.`;
+  }
   if (!errorClass) return base;
   const reason = ERROR_CLASS_TEXT[errorClass] ?? `Fehlerart: ${errorClass}.`;
-  const hint = isAccessFailure(errorClass)
+  const hint = isAccessFailure(errorClass, errorReason)
     ? ' Im Bereich „Zugang“ unten kann das ACL-Angebot angefordert und nach Freigabe auf den Router geschrieben werden.'
     : '';
   return `${base} ${reason}${hint}`;

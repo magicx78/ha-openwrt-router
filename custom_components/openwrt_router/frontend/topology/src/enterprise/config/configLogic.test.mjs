@@ -18,6 +18,9 @@ import {
   exportInit,
   failureText,
   isAccessFailure,
+  isTransportFailure,
+  versionActionLocks,
+  CAP_REASON_TEXT,
   exportReduce,
   groupChangesByArea,
   isCriticalChange,
@@ -242,6 +245,35 @@ test('busy names any operation on the router; rate_limited names the seconds', (
   assert.match(noHeader.message, /später erneut/);
   assert.match(errorInfo(new ConfigApiError(400, 'plaintext_not_acknowledged', false,
     { field: 'acknowledge_plaintext', reason: 'required' }, null)).message, /Klartext/);
+});
+
+test('insecure_transport explains HTTPS / SSH and never points to the ACL', () => {
+  for (const key of ['insecure_transport', 'provider:insecure_transport']) {
+    assert.match(CAP_REASON_TEXT[key] ?? '', /Kein Archiv über HTTP/);
+    assert.match(CAP_REASON_TEXT[key], /HTTPS/);
+  }
+  const r = router({ status: 'failed', error_class: 'not_available', error_reason: 'insecure_transport' });
+  assert.equal(r.errorReason, 'insecure_transport');
+  assert.equal(router({ status: 'failed', error_class: 'not_available' }).errorReason, null);
+  assert.equal(isAccessFailure('not_available', 'insecure_transport'), false);
+  assert.equal(isTransportFailure('insecure_transport'), true);
+  assert.equal(isTransportFailure(null), false);
+  const text = failureText('not_available', 'insecure_transport');
+  assert.match(text, /Kein Archiv über HTTP/);
+  assert.match(text, /SSH/);
+  assert.doesNotMatch(text, /rpcd-ACL|ACL-Angebot/);
+  // Older answers without error_reason keep the ACL hint.
+  assert.match(failureText('not_available', null), /ACL-Angebot/);
+});
+
+test('invalid_request has a German text', () => {
+  assert.equal(ERROR_TEXT.invalid_request, 'Die Anfrage war ungültig.');
+  assert.equal(errorInfo(new ConfigApiError(400, 'invalid_request', false, {}, null)).message, 'Die Anfrage war ungültig.');
+});
+
+test('version actions that change something are locked while the option is off', () => {
+  assert.deepEqual(versionActionLocks({ enabled: false }), { validate: true, protect: true, export: true });
+  assert.deepEqual(versionActionLocks({ enabled: true }), { validate: false, protect: false, export: false });
 });
 
 test('a failed backup for lack of rights points to the access section', () => {

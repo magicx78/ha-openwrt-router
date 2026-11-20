@@ -23,6 +23,7 @@ import {
   errorInfo,
   failureText,
   isAccessFailure,
+  isTransportFailure,
   formatRelative,
   formatTime,
   isDriftOpen,
@@ -198,7 +199,8 @@ function RouterDetailView({ api, summary, fleetBusy, now, readOnly, onBack, relo
     summary.capability.state !== 'available'
     || detail.sshPin?.state === 'pending' || detail.sshPin?.state === 'mismatch'
     || (detail.acl?.offerable.length ?? 0) > 0
-    || isAccessFailure(summary.errorClass));
+    || isAccessFailure(summary.errorClass, summary.errorReason)
+    || isTransportFailure(summary.errorReason));
   const st = routerViewState(summary);
 
   return (
@@ -222,7 +224,7 @@ function RouterDetailView({ api, summary, fleetBusy, now, readOnly, onBack, relo
       )}
       {st === 'failed' && (
         <Notice tone="error">
-          {failureText(summary.errorClass)}
+          {failureText(summary.errorClass, summary.errorReason)}
           <button type="button" className="diag-btn cfg-btn" disabled={backupBusy || coolingDown || readOnly || !enabled} onClick={() => void backupNow()}>
             Erneut versuchen
           </button>

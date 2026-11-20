@@ -43,6 +43,8 @@ export interface RouterSummary {
   enabled: boolean;
   status: string; // ok | partial | failed | running | disabled | never
   errorClass: string | null;
+  /** details.reason of the last failure, e.g. insecure_transport (optional in older answers). */
+  errorReason: string | null;
   running: boolean;
   lastBackupAt: string | null;
   versions: number;
