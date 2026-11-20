@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -44,7 +45,7 @@ from .acl_provisioning import (
     TIER_CONFIG_BACKUP_READ,
     AclTierError,
 )
-from .config_const import config_mask_for_output
+from .config_const import ROUTER_BUSY_RETRY_AFTER_S, config_mask_for_output
 from .const import (
     DATA_CONFIG_VIEWS_BOUND,
     DEFAULT_CONFIG_BACKUP_TIME,
@@ -85,7 +86,7 @@ VIEW_NAME_PREFIX = "api:openwrt_topology:config:"
 BODY_MAX_BYTES = 4096
 LIST_LIMIT_DEFAULT = 50
 LIST_LIMIT_MAX = 200
-RETRY_AFTER_SECONDS = 30
+RETRY_AFTER_SECONDS = ROUTER_BUSY_RETRY_AFTER_S
 LIVE = "live"
 
 NO_STORE = {"Cache-Control": "no-store"}
@@ -117,6 +118,7 @@ _STATUS_BY_CODE: dict[str, int] = {
     "approval_required": 409,
     "approval_invalid": 409,
     "operation_in_progress": 409,
+    "rate_limited": 429,
     "version_protected": 409,
     "provider_conflict": 409,
     "capability_unavailable": 409,
@@ -159,6 +161,7 @@ _MESSAGES: dict[str, str] = {
     "approval_required": "This action needs an approval first",
     "approval_invalid": "The approval is not valid (expired, used or unknown)",
     "operation_in_progress": "Another configuration operation is running",
+    "rate_limited": "Too soon after the last manual run, try again later",
     "version_protected": "The version is protected",
     "provider_conflict": "Another configuration provider is registered",
     "capability_unavailable": "Not available for this router",
@@ -486,7 +489,9 @@ def error_response(
     error_class: str,
     retryable: bool,
     details: Mapping[str, Any] | None = None,
+    retry_after: float | None = None,
 ) -> web.Response:
+    """The masked error body; 409 busy and 429 carry ``Retry-After``."""
     body = {
         "message": _MESSAGES.get(code, _DEFAULT_MESSAGE),
         "code": code,
@@ -497,6 +502,8 @@ def error_response(
     headers = dict(NO_STORE)
     if code == "operation_in_progress":
         headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
+    elif code == "rate_limited" and retry_after is not None:
+        headers["Retry-After"] = str(max(1, math.ceil(retry_after)))
     return HomeAssistantView.json(config_mask_for_output(body), status, headers=headers)
 
 
@@ -518,6 +525,7 @@ def api_error_response(err: ConfigApiError, api: Any = None) -> web.Response:
         error_class=err.error_class.value,
         retryable=err.retryable,
         details=details,
+        retry_after=getattr(err, "retry_after", None),
     )
 
 
@@ -1056,9 +1064,13 @@ class DiffView(_GetView):
             raise _bad("to")
         base, base_id = await _diff_ref(ctx, rid, from_raw, "from")
         other, other_id = await _diff_ref(ctx, rid, to_raw, "to")
-        if LIVE in (base_id, other_id) and not ctx.runtime.enabled(rid):
-            _disabled(rid, Capability.CONFIG_DIFF)
-        diff = await ctx.api.async_compare(base, other, actor=ctx.actor)
+        if LIVE in (base_id, other_id):
+            if not ctx.runtime.enabled(rid):
+                _disabled(rid, Capability.CONFIG_DIFF)
+            async with ctx.runtime.async_live_access(rid):
+                diff = await ctx.api.async_compare(base, other, actor=ctx.actor)
+        else:
+            diff = await ctx.api.async_compare(base, other, actor=ctx.actor)
         data = diff.to_dict()
         return {
             "from": base_id,
@@ -1165,9 +1177,10 @@ class RestoreCheckView(_PostView):
             raise RouterNotFoundError("Router not loaded", router_id=record.router_id)
         if not ctx.runtime.enabled(target.router_id):
             _disabled(target.router_id, Capability.CONFIG_RESTORE_DRY_RUN)
-        plan = await ctx.api.async_prepare_restore(
-            record.backup_id, target.router_id, actor=ctx.actor
-        )
+        async with ctx.runtime.async_live_access(target.router_id):
+            plan = await ctx.api.async_prepare_restore(
+                record.backup_id, target.router_id, actor=ctx.actor
+            )
         return restore_view(plan)
 
 

@@ -22,9 +22,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import secrets
 import unicodedata
-from collections.abc import Callable, Coroutine, Iterable
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Any
@@ -45,7 +47,13 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
-from .config_const import DRIFT_DEBOUNCE_S, DRIFT_MIN_INTERVAL_S, FETCH_RETRY_DELAY_S
+from .config_const import (
+    DRIFT_DEBOUNCE_S,
+    DRIFT_MIN_INTERVAL_S,
+    FETCH_RETRY_DELAY_S,
+    MANUAL_BACKUP_MIN_GAP_S,
+    MANUAL_LIVE_CHECK_MIN_GAP_S,
+)
 from .config_snapshot import fingerprint_from_coordinator
 from .const import (
     CONFIG_BACKUP_SCHEDULE_DAILY,
@@ -79,6 +87,7 @@ from .core_errors import (
     ErrorClass,
     OperationInProgressError,
     ProviderConflictError,
+    RateLimitedError,
     RouterNotFoundError,
 )
 from .core_models import (
@@ -113,6 +122,9 @@ _EVENT_TYPES = frozenset(
 EVENT_BACKUP_BLOCKED = f"{CONFIG_MANAGER_EVENT_PREFIX}backup_blocked"
 # _backup_blocker(): wait for a later tick (lock held, nothing known yet).
 BLOCK_BUSY = "busy"
+# _router_access(manual=...): kinds with their own minimum gap.
+MANUAL_BACKUP = "backup"
+MANUAL_LIVE = "live_check"
 # Severity of the own audit entry (net_events.Severity value; not imported).
 _SEVERITY_WARNING = "warning"
 
@@ -281,9 +293,17 @@ class ConfigManagerRuntime:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._refresh_pending: set[str] = set()
         self._unsub_tick: Callable[[], None] | None = None
-        # One run at a time on our side (scheduled, drift and manual); the
-        # core's fleet semaphore enforces the same (FLEET_BACKUP_CONCURRENCY).
+        # Router access of this module: one lock per router (strictly serial
+        # per router) and, inside it, one fleet slot (parallelism 1), always
+        # taken in that order. Scheduled, drift and manual runs, the service
+        # and the live routes all go through _router_access(). The core never
+        # waits on these locks (the provider the core calls takes none), so
+        # holding them across a core call cannot deadlock with the core's own
+        # backup queue.
+        self._router_locks: dict[str, asyncio.Lock] = {}
         self._run_lock = asyncio.Lock()
+        # (router_id, kind) -> start of the last manual backup / live check
+        self._manual_at: dict[tuple[str, str], datetime] = {}
         self._queue: list[_Job] = []
         self._queued: set[tuple[str, str]] = set()
         self._worker: asyncio.Task[Any] | None = None
@@ -976,12 +996,74 @@ class ConfigManagerRuntime:
             self._current = None
             self._ensure_worker()  # the others continue in a new worker
 
+    # -- router access (one lock per router, fleet parallelism 1) ---------------------
+
+    def _router_lock(self, router_id: str) -> asyncio.Lock:
+        lock = self._router_locks.get(router_id)
+        if lock is None:
+            lock = self._router_locks[router_id] = asyncio.Lock()
+        return lock
+
+    def router_busy(self, router_id: str) -> bool:
+        """True while a run of ours holds the router or the fleet slot."""
+        return self._router_lock(router_id).locked() or self._run_lock.locked()
+
+    def _check_gap(self, router_id: str, kind: str) -> None:
+        """RateLimitedError while the last manual ``kind`` is too recent."""
+        gap = (
+            MANUAL_BACKUP_MIN_GAP_S
+            if kind == MANUAL_BACKUP
+            else MANUAL_LIVE_CHECK_MIN_GAP_S
+        )
+        last = self._manual_at.get((router_id, kind))
+        if last is None:
+            return
+        elapsed = (self.now() - last).total_seconds()
+        if 0 <= elapsed < gap:
+            raise RateLimitedError(
+                "Too soon after the last manual run",
+                retry_after=max(1, math.ceil(gap - elapsed)),
+                router_id=router_id,
+                details={"reason": f"min_gap_{kind}"},
+            )
+
+    @asynccontextmanager
+    async def _router_access(
+        self, router_id: str, *, wait: bool, manual: str | None = None
+    ) -> AsyncIterator[None]:
+        """Hold the router's lock, then the fleet slot.
+
+        ``wait`` False: busy -> OperationInProgressError at once (route: 409
+        + Retry-After). ``manual`` (MANUAL_BACKUP / MANUAL_LIVE): the minimum
+        gap applies (RateLimitedError, route: 429 + Retry-After); the start
+        counts once both locks are held, whatever the outcome.
+        """
+        if manual is not None:
+            self._check_gap(router_id, manual)
+        if not wait and self.router_busy(router_id):
+            raise OperationInProgressError(
+                "The router is busy with another configuration run",
+                router_id=router_id,
+                details={"reason": "router_busy"},
+            )
+        async with self._router_lock(router_id), self._run_lock:
+            if manual is not None:
+                self._check_gap(router_id, manual)  # a waiting caller came late
+                self._manual_at[(router_id, manual)] = self.now()
+            yield
+
+    @asynccontextmanager
+    async def async_live_access(self, router_id: str) -> AsyncIterator[None]:
+        """A manual live check (R8 live, R12): no waiting, minimum gap."""
+        async with self._router_access(router_id, wait=False, manual=MANUAL_LIVE):
+            yield
+
     async def _async_work(self) -> None:
         while self._queue and not self.closed:
             job = self._queue.pop(0)
             self._current = job
             try:
-                async with self._run_lock:
+                async with self._router_access(job.router_id, wait=True):
                     await self._async_run_job(job)
             except asyncio.CancelledError:
                 raise
@@ -1153,16 +1235,13 @@ class ConfigManagerRuntime:
         """A manual version (service, route R5); the core guard decides.
 
         ``wait`` False: another run of ours -> OperationInProgressError at
-        once (route: 409 + Retry-After). The service waits its turn.
+        once (route: 409 + Retry-After). The service waits its turn. Both
+        keep MANUAL_BACKUP_MIN_GAP_S per router (RateLimitedError, 429).
         """
         state = self.routers.get(router_id)
         if state is None:
             raise RouterNotFoundError("Unknown router", router_id=router_id)
-        if not wait and self._run_lock.locked():
-            raise OperationInProgressError(
-                "Another configuration backup is running", router_id=router_id
-            )
-        async with self._run_lock:
+        async with self._router_access(router_id, wait=wait, manual=MANUAL_BACKUP):
             return await self._async_backup(
                 state, reason=BackupReason.MANUAL, actor=actor, note=note
             )
@@ -1170,7 +1249,12 @@ class ConfigManagerRuntime:
     # -- drift -------------------------------------------------------------------------
 
     async def async_check_drift(self, router_id: str, *, actor: Actor) -> DriftReport:
-        """One drift check (read-only in the core; route R10, auto trigger)."""
+        """A manual drift check (route R10): no waiting, minimum gap."""
+        async with self._router_access(router_id, wait=False, manual=MANUAL_LIVE):
+            return await self._async_drift_check(router_id, actor=actor)
+
+    async def _async_drift_check(self, router_id: str, *, actor: Actor) -> DriftReport:
+        """One drift check (read-only in the core); the caller holds the router."""
         self.stats["drift_checks"] += 1
         report = await self.api.async_detect_drift(router_id, actor=actor)
         state = self.routers.get(router_id)
@@ -1210,7 +1294,7 @@ class ConfigManagerRuntime:
         state.fp_changed_at = None
         state.last_drift_at = self.now()
         try:
-            report = await self.async_check_drift(router_id, actor=self.module_actor)
+            report = await self._async_drift_check(router_id, actor=self.module_actor)
         except BackupNotFoundError:
             return  # no baseline: wait for the daily run
         except ConfigApiError as err:

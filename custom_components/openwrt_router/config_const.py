@@ -670,6 +670,13 @@ FETCH_TIMEOUTS: Final = MappingProxyType(
     }
 )
 FETCH_RETRY_DELAY_S: Final = 900
+# Manual router work of the manager (routes and service): one manual
+# backup (R5 / service) and one manual live check (R8 live, R10, R12) per
+# router at most every this many seconds; earlier -> 429 + Retry-After.
+MANUAL_BACKUP_MIN_GAP_S: Final = 60
+MANUAL_LIVE_CHECK_MIN_GAP_S: Final = 60
+# Retry-After of a 409 while the router (or the fleet slot) is busy.
+ROUTER_BUSY_RETRY_AFTER_S: Final = 30
 # A path that answered not_available/permission is skipped this long.
 FETCH_SKIP_TTL_S: Final = 86400
 # stderr kept from SSH, only to derive the error class, never logged raw.

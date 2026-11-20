@@ -214,6 +214,12 @@ def route_id(view_class: type) -> str:
     return view_class.name.rsplit(":", 1)[-1]
 
 
+def no_min_gap(monkeypatch: Any) -> None:
+    """Switch the manual minimum gaps off (tests that call routes back to back)."""
+    monkeypatch.setattr(cm, "MANUAL_BACKUP_MIN_GAP_S", 0)
+    monkeypatch.setattr(cm, "MANUAL_LIVE_CHECK_MIN_GAP_S", 0)
+
+
 async def backup(h: Http, rid: str, **body: Any) -> dict[str, Any]:
     resp = await h.post(f"/routers/{rid}/backup", body=body or None)
     assert resp.status == 200, resp.body
@@ -884,6 +890,7 @@ async def test_backup_route_manual_always_creates(disks, tmp_path):
         first = await backup(h, env.rid)
         assert first["created"] is True and first["status"] == "ok"
         assert first["version"]["reason"] == "manual"
+        env.clock.advance(seconds=61)  # the minimum gap of manual backups
         again = await backup(h, env.rid, note="second")
         assert again["created"] is True
         assert again["backup_id"] != first["backup_id"]
@@ -910,6 +917,99 @@ async def test_backup_route_while_running_is_409_with_retry_after(disks, tmp_pat
         gate.set()
         assert (await running)["created"] is True
         assert (await backup(h, env.rids[1]))["created"] is True
+    await stop(env)
+
+
+async def test_manual_backup_min_gap_is_429_with_retry_after(disks, tmp_path):
+    """H3: one manual backup per router and minute (R5); others unaffected."""
+    env = await cm_env(disks, tmp_path, routers=2)
+    async with http(env.hass) as h:
+        await backup(h, env.rids[0])
+        env.clock.advance(seconds=20)
+        resp = await h.post(f"/routers/{env.rids[0]}/backup")
+        assert resp.status == 429
+        assert resp.data["code"] == "rate_limited"
+        assert resp.data["error_class"] == "rate_limited"
+        assert resp.data["retryable"] is True
+        assert resp.data["details"] == {"reason": "min_gap_backup"}
+        assert resp.headers["Retry-After"] == "40"
+        assert (await backup(h, env.rids[1]))["created"] is True  # other router
+        env.clock.advance(seconds=41)
+        assert (await backup(h, env.rids[0]))["created"] is True
+    assert len(env.provider.ops("collect")) == 3
+    await stop(env)
+
+
+async def test_manual_live_checks_share_one_min_gap(disks, tmp_path):
+    """H3: R10, R8 live and R12 share the live-check gap; R8 without live not."""
+    env = await cm_env(disks, tmp_path)
+    rid = env.rid
+    async with http(env.hass) as h:
+        bid = (await backup(h, rid))["backup_id"]
+        assert (await h.post(f"/routers/{rid}/drift/check")).status == 200
+        env.clock.advance(seconds=10)
+        for method, path, params in (
+            ("get", f"/routers/{rid}/diff", {"from": bid}),
+            ("post", f"/versions/{bid}/restore-check", None),
+            ("post", f"/routers/{rid}/drift/check", None),
+        ):
+            if params is None:
+                resp = await h.call(method, cv.BASE_URL + path)
+            else:
+                resp = await h.get(path, params=params)
+            assert resp.status == 429, path
+            assert resp.data["details"] == {"reason": "min_gap_live_check"}
+            assert resp.headers["Retry-After"] == "50"
+        resp = await h.get(f"/routers/{rid}/diff", params={"from": bid, "to": bid})
+        assert resp.status == 200  # two stored versions: no router access
+        env.clock.advance(seconds=51)
+        resp = await h.get(f"/routers/{rid}/diff", params={"from": bid})
+        assert resp.status == 200
+    await stop(env)
+
+
+async def test_live_check_while_the_router_is_busy_is_409(disks, tmp_path):
+    """H3: a live check never waits behind a run of the same router."""
+    env = await cm_env(disks, tmp_path)
+    rid = env.rid
+    gate = asyncio.Event()
+    env.provider.gates["collect"] = gate
+    async with http(env.hass) as h:
+        running = asyncio.ensure_future(backup(h, rid))
+        await env.provider.entered.setdefault("collect", asyncio.Event()).wait()
+        assert env.runtime.router_busy(rid)
+        resp = await h.post(f"/routers/{rid}/drift/check")
+        assert resp.status == 409
+        assert resp.data["code"] == "operation_in_progress"
+        assert resp.data["details"] == {"reason": "router_busy"}
+        assert resp.headers["Retry-After"] == "30"
+        assert env.provider.ops("detect_drift") == []
+        gate.set()
+        await running
+        assert not env.runtime.router_busy(rid)
+        # the refused check did not count for the gap
+        assert (await h.post(f"/routers/{rid}/drift/check")).status == 200
+    await stop(env)
+
+
+async def test_service_waits_for_the_router_lock_and_runs_serially(disks, tmp_path):
+    """H3: the service waits its turn (no 409); one router run at a time."""
+    env = await cm_env(disks, tmp_path, routers=2)
+    gate = asyncio.Event()
+    env.provider.gates["collect"] = gate
+    runtime = env.runtime
+    first = asyncio.ensure_future(runtime.async_backup_now(env.rids[0], actor=ADMIN))
+    await env.provider.entered.setdefault("collect", asyncio.Event()).wait()
+    second = asyncio.ensure_future(
+        runtime.async_backup_now(env.rids[1], actor=ADMIN, wait=True)
+    )
+    await asyncio.sleep(0)
+    assert not second.done()
+    gate.set()
+    await first
+    await second
+    assert env.provider.max_active == 1
+    assert [rid for _op, rid in env.provider.ops("collect")] == env.rids
     await stop(env)
 
 
@@ -1067,6 +1167,7 @@ async def test_drift_check_and_acknowledge(disks, tmp_path):
         assert resp.status == 200
         assert resp.data["state"] == "clean" and resp.data["open"] is False
         change_live(env, env.rid, "dropbear")
+        env.clock.advance(seconds=61)  # the minimum gap of manual live checks
         resp = await h.post(f"/routers/{env.rid}/drift/check")
         report = resp.data["report"]
         assert resp.data["state"] == "open" and resp.data["open"] is True
@@ -1108,6 +1209,7 @@ async def test_connection_loss_after_restore_gives_checklist_only(disks, tmp_pat
             f"{SECRET} lost 192.168.1.1"
         )
         env.provider.fail["collect"] = RouterUnavailableError(f"{SECRET} lost")
+        env.clock.advance(seconds=61)  # the minimum gap of manual runs
         resp = await h.post(f"/routers/{env.rid}/drift/check")
         assert resp.status == 503
         assert resp.data["code"] == "router_unavailable"
@@ -1118,6 +1220,7 @@ async def test_connection_loss_after_restore_gives_checklist_only(disks, tmp_pat
         assert (await h.get("/overview")).status == 200
         assert (await h.get(f"/routers/{env.rid}/versions")).data["count"] == 1
         env.provider.fail.pop("detect_drift")
+        env.clock.advance(seconds=61)
         resp = await h.post(f"/versions/{bid}/restore-check")
         assert resp.status == 200
         h.assert_no_secret("192.168.1.1")
@@ -1450,7 +1553,8 @@ async def test_ssh_pin_routes(disks, tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_secret_never_in_any_response(disks, tmp_path, caplog):
+async def test_secret_never_in_any_response(disks, tmp_path, caplog, monkeypatch):
+    no_min_gap(monkeypatch)  # every route is called back to back
     env = await cm_env(disks, tmp_path, routers=2, options=ON)
     router_api = acl_capable(env)  # the acl-offer route reads the live ACL
     caplog.set_level("DEBUG")
@@ -1577,6 +1681,7 @@ def _allowed_mask(body: Any, path: tuple[Any, ...]) -> bool:
 async def test_every_route_succeeds_with_readable_frontend_fields(
     disks, tmp_path, monkeypatch
 ):
+    no_min_gap(monkeypatch)  # every route is called back to back
     """Real core, every route R1-R20 reaches 200 (contract changes #100-#114).
 
     Every JSON answer carries the fields the panel reads, none of them is
