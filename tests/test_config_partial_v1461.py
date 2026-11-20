@@ -32,12 +32,15 @@ from test_config_provider import (
 from test_config_views import backup, http
 
 from custom_components.openwrt_router.api import (
+    OpenWrtAuthError,
     OpenWrtConfigFetchHostKeyError,
     OpenWrtConfigFetchIncompleteError,
     OpenWrtConfigFetchNotAvailableError,
     OpenWrtConfigFetchPermissionError,
+    OpenWrtConnectionError,
     OpenWrtHostKeyError,
     OpenWrtMethodNotFoundError,
+    OpenWrtTimeoutError,
 )
 from custom_components.openwrt_router.config_collector import (
     PinnedApi,
@@ -333,3 +336,47 @@ async def test_ssh_pin_store_keeps_each_router_apart(disks, tmp_path):
     assert env.api.ssh_pin_status(rid_b)["state"] == "pending"
     assert env.api.ssh_pin_status(rid_b)["pending_fingerprint"] == fp_b
     await stop_env(env)
+
+
+# == Review follow-up (PR 59) ===============================================
+
+# -- R4: rpcd's "not found" stands; no SSH attempt can overwrite it -----------
+
+
+def _runner(error: Exception) -> Any:
+    """Pinned SSH runner that records its calls and fails with ``error``."""
+    calls: list[str] = []
+
+    async def run(cmd: str, *_args: Any) -> Any:
+        calls.append(cmd)
+        raise error
+
+    run.calls = calls  # type: ignore[attr-defined]
+    return run
+
+
+_SSH_FAILURES = [
+    OpenWrtAuthError("login refused"),
+    OpenWrtConnectionError("port closed"),
+    OpenWrtTimeoutError("no answer"),
+    OpenWrtHostKeyError("pin_pending", "first-seen key"),
+]
+
+
+@pytest.mark.parametrize("error", _SSH_FAILURES, ids=type)
+async def test_not_found_config_never_tries_ssh(error: Exception) -> None:
+    api, _ = make_api()
+    _ubus(api, existing={}, acl_denied=set())
+    ssh = _runner(error)
+    with pytest.raises(OpenWrtConfigFetchNotAvailableError):
+        await api.config_uci_get("sqm", ssh=ssh)
+    assert ssh.calls == []
+
+
+async def test_acl_denied_config_with_refused_ssh_login_stays_an_error() -> None:
+    api, _ = make_api()
+    _ubus(api, existing={}, acl_denied={"rpcd"})
+    ssh = _runner(OpenWrtAuthError("login refused"))
+    with pytest.raises(OpenWrtConfigFetchPermissionError):
+        await api.config_uci_get("rpcd", ssh=ssh)
+    assert ssh.calls == ["uci show rpcd"]
