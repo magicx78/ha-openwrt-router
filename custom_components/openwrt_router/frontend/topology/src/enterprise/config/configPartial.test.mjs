@@ -210,3 +210,14 @@ test('a router that really did not answer keeps the general text', () => {
   const cgi = partialInfo('timeout', ['archive_unavailable:cgi.timeout']);
   assert.match(cgi.classText, /Zeitüberschreitung beim Router/);
 });
+
+// ── PR 59 re-review 3: the archive budget ran out on every path ───────────
+
+test('a spent archive budget reads per path, without blaming the SSH port', () => {
+  const info = partialInfo('timeout', ['archive_unavailable:cgi.timeout', 'archive_unavailable:ssh.timeout']);
+  assert.equal(info.reasons.length, 2);
+  assert.ok(info.reasons.every(r => !r.includes('_') && r.includes('fehlgeschlagen')), info.reasons.join(' | '));
+  assert.match(info.classText, /Zeitüberschreitung beim Router/);
+  assert.ok(!info.nextSteps.some(s => s.includes('Port 22')), info.nextSteps.join(' | '));
+  assert.ok(info.nextSteps.includes('Später erneut sichern.'), info.nextSteps.join(' | '));
+});

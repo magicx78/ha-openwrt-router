@@ -826,12 +826,19 @@ def _path_failures(
 
     cgi on a plain HTTP entry is ``insecure_transport`` (never asked); a
     path that delivered an archive that failed the check gets the class of
-    that check. Fixed codes only, never a message.
+    that check. When the archive phase's own budget ran out (no chain
+    result), every path of the chain gets ``timeout``. Fixed codes only,
+    never a message.
     """
     items: list[str] = []
     if not secure and FETCH_METHOD_CGI in order:
         items.append(f"{FETCH_METHOD_CGI}.{REASON_INSECURE_TRANSPORT}")
-    for attempt in fetch.attempts if fetch is not None else ():
+    if fetch is None:
+        if archive_class == ERR_TIMEOUT:
+            chain = (m for m in order if secure or m != FETCH_METHOD_CGI)
+            items.extend(f"{method}.{ERR_TIMEOUT}" for method in chain)
+        return tuple(items)
+    for attempt in fetch.attempts:
         error_class = attempt.error_class or archive_class or ERR_INVALID
         items.append(f"{attempt.method}.{error_class}")
     return tuple(items)

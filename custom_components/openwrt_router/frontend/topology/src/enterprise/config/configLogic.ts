@@ -833,12 +833,26 @@ const SSH_PATH_CLASS_TEXT: Record<string, string> = {
   timeout: 'Der Archivweg über SSH (Port 22) hat nicht rechtzeitig geantwortet; der Router selbst hat geantwortet.',
 };
 
+/** True when only the SSH archive path hit `cls` (UCI read fine, cgi not the same class). */
+function onlySshHit(cls: string, warnings: readonly string[]): boolean {
+  return warnings.includes(`archive_unavailable:ssh.${cls}`)
+    && !warnings.includes(`archive_unavailable:cgi.${cls}`)
+    && !warnings.some(w => w.startsWith('uci_unavailable'));
+}
+
 /** Text for the run's error class; an SSH-only class never reads as "router offline". */
 function partialClassText(errorClass: string, warnings: readonly string[]): string {
-  const fromSsh = warnings.includes(`archive_unavailable:ssh.${errorClass}`)
-    && !warnings.some(w => w.startsWith('uci_unavailable'));
-  const sshText = fromSsh ? SSH_PATH_CLASS_TEXT[errorClass] : undefined;
+  const sshText = onlySshHit(errorClass, warnings) ? SSH_PATH_CLASS_TEXT[errorClass] : undefined;
   return sshText ?? ERROR_CLASS_TEXT[errorClass] ?? `Fehlerart: ${errorClass}.`;
+}
+
+/** Next step of one warning; the SSH-port step only when the SSH path alone did not answer. */
+function nextStepOf(code: string, warnings: readonly string[]): string | undefined {
+  const key = pathKey(code);
+  if (!key) return undefined;
+  const [path, cls] = key.split('.', 2);
+  if (path === 'ssh' && cls in SSH_PATH_CLASS_TEXT && !onlySshHit(cls, warnings)) return 'Später erneut sichern.';
+  return NEXT_STEP[key];
 }
 
 function splitWarning(code: string): [string, string | null] {
@@ -893,7 +907,7 @@ export interface PartialInfo {
 export function partialInfo(errorClass: string | null, warnings: readonly string[]): PartialInfo {
   const base = 'Das letzte Backup ist unvollständig.';
   const cls = errorClass ? ` ${partialClassText(errorClass, warnings)}` : '';
-  const steps = warnings.map(pathKey).map(k => (k ? NEXT_STEP[k] : undefined))
+  const steps = warnings.map(w => nextStepOf(w, warnings))
     .filter((s): s is string => s !== undefined);
   return {
     classText: `${base}${cls}`,

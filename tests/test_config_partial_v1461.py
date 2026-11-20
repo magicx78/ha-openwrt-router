@@ -7,6 +7,7 @@ test_config_http_archive). All names, hosts and keys are invented.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -32,6 +33,7 @@ from test_config_provider import (
 )
 from test_config_views import backup, http
 
+from custom_components.openwrt_router import config_provider
 from custom_components.openwrt_router.api import (
     OpenWrtAuthError,
     OpenWrtConfigFetchHostKeyError,
@@ -642,3 +644,30 @@ async def test_closed_ssh_port_names_the_ssh_path(error: Exception, cls: str) ->
     assert f"archive_unavailable:ssh.{cls}" in meta.warnings
     assert "archive_unavailable:cgi.not_available" in meta.warnings
     assert not [w for w in meta.warnings if w.startswith("uci_unavailable")]
+
+
+# -- re-review 3: the archive's whole budget ran out: a reason per path ------
+
+
+async def _never_done(*_args: Any, **_kwargs: Any) -> Any:
+    await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize(
+    ("secure", "items"),
+    [
+        (True, ("cgi.timeout", "ssh.timeout")),
+        (False, ("cgi.insecure_transport", "ssh.timeout")),
+    ],
+)
+async def test_spent_archive_budget_names_each_path(
+    monkeypatch: pytest.MonkeyPatch, secure: bool, items: tuple[str, ...]
+) -> None:
+    # The archive phase's own deadline ends before the chain returns.
+    monkeypatch.setattr(config_provider, "collect_archive", _never_done)
+    provider = ConfigManagerProvider(timeouts={"job": 0.6})
+    meta = (await collect(FakeApi(secure=secure), provider=provider)).meta
+    assert meta.status is VersionStatus.PARTIAL
+    assert meta.error_class is not None and meta.error_class.value == "timeout"
+    for item in items:
+        assert f"archive_unavailable:{item}" in meta.warnings
