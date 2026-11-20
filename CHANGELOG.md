@@ -30,27 +30,32 @@ Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `doc
   eigene Ereignisse über den Core im Security-Ring). NI-Vorfälle werden nur per ID verknüpft,
   nie geändert oder unterdrückt; deckt ein offener NI-Vorfall einen Befund schon ab, steht nur
   ein verknüpfter Eintrag in der Zeitleiste.
-- **Obergrenze der Hinweise:** Bei 100 Hinweisen macht der älteste erledigte Platz; offene
-  und bestätigte werden nie verdrängt. Ohne erledigten Hinweis wird der neue nicht
-  gespeichert und gezählt (`limits.incidents_cap_dropped` in der Übersicht und in der
-  Diagnose), mit höchstens einem Zeitleisten-Eintrag „Obergrenze erreicht“ je Stunde.
-  Ereignisse über den Core zu neuen oder wieder geöffneten Hinweisen: höchstens 20 je
-  10 min, der Rest wird gezählt (`limits.events_throttled`).
-- **Quote für Hinweise aus Logzeilen:** Firewall- und DNS-Hinweise (Syslog, Absender im LAN
-  fälschbar) belegen höchstens 50 der 100 Plätze; ist die Quote voll, wird ein neuer
-  Log-Hinweis verworfen und gezählt (`limits.incidents_log_quota_dropped`). Ist der Speicher
-  voll, verdrängt ein Befund einer anderen Quelle den ältesten offenen Log-Hinweis (gezählt als
-  `limits.incidents_displaced`, Zeitleisten-Eintrag höchstens einmal je Stunde); bestätigte
-  Hinweise bleiben. Die Herkunft (`from_logs`) übersteht einen Neustart, ältere Speicherstände
-  laden.
+- **Obergrenze der Hinweise:** höchstens 100, aufgeteilt in **zwei feste Quoten ohne
+  Verdrängung zwischen ihnen:** höchstens 50 Hinweise vom Syslog-Empfänger (Firewall, DNS;
+  Absender per UDP im LAN fälschbar) und höchstens 50 aus allen anderen Quellen (WLAN,
+  Konfigurationsänderung, Vertrauensbuch; WLAN-Befunde lassen sich über Funk auslösen). Die
+  Klasse folgt aus der Datenquelle des Detektors, nie aus dem Zeileninhalt. In einer vollen
+  Klasse macht der älteste erledigte Hinweis dieser Klasse Platz; offene und bestätigte werden
+  nie entfernt, bestätigte zählen mit. Sonst wird nur der neue Hinweis dieser Klasse verworfen
+  und gezählt (`limits.incidents_log_quota_dropped` bzw. `limits.incidents_other_quota_dropped`,
+  je Klasse höchstens ein Zeitleisten-Eintrag je Stunde); die andere Klasse bleibt unberührt.
+  Ältere Speicherstände mit mehr als 50 in einer Klasse laden vollständig und heilen sich, wenn
+  Hinweise erledigt werden; bis dahin zählt `limits.incidents_cap_dropped`, was an der
+  Gesamtgrenze scheitert. Die Herkunft (`from_logs`) übersteht einen Neustart. Ereignisse über
+  den Core zu neuen oder wieder geöffneten Hinweisen: höchstens 20 je 10 min, der Rest wird
+  gezählt (`limits.events_throttled`).
 - **Erneut beobachtet:** Ein neuer Befund zu einem bestätigten Hinweis, der später als 24 h
-  nach dem letzten kommt, steht als Eintrag in der Zeitleiste.
+  nach dem letzten kommt, steht als Eintrag in der Zeitleiste, höchstens einmal je Hinweis und
+  24 h (Zeitpunkt am Hinweis, übersteht einen Neustart); steigt die Schwere, immer.
 - **Geschlüsselte IDs:** Hinweis-, Ereignis- und Korrelations-IDs sowie Dedup-Marken, die
   gespeichert, gesendet oder ausgegeben werden, sind HMAC-Werte mit dem Modulschlüssel des
   Cores und lassen sich mit einer Liste möglicher MACs nicht zurückrechnen. **Ohne
   Modulschlüssel zeichnet das Center keine Hinweise auf** (Zustand „nicht bereit“, Grund
   `module_key_missing`; Befunde nur gezählt, Gerät bestätigen und benennen ergibt 409
-  `not_ready`). Ältere Speicherstände laden ohne Fehler.
+  `not_ready`). Solange setzen Befunde keinen Indikator im Vertrauensbuch und offene Hinweise
+  werden nicht automatisch erledigt. Der Poll fragt den gebundenen Core alle 5 Minuten erneut
+  nach dem Schlüssel (kein Router-Aufruf), mit einer Warnung je „nicht bereit“-Zustand ohne
+  Identitäten. Ältere Speicherstände laden ohne Fehler.
 - **Drift → Segmentierung:** eine Konfigurationsänderung in VLAN/Firewall/Interface (Bereiche
   aus dem Vergleich zweier gespeicherter Versionen, kein Router-Kontakt) ergibt genau einen
   Hinweis mit Verweis auf die Drift-ID. Ein Befund kurz nach einer Konfigurationsänderung wird

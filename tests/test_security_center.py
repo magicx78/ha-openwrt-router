@@ -581,19 +581,22 @@ async def test_unreadable_store_is_kept_and_the_center_starts_empty(disks) -> No
 
 
 async def test_incident_cap_drops_resolved_then_refuses_new(disks) -> None:
+    # Hints of sources other than the syslog receiver fill their own quota
+    # (review 4, #1: 50 of the SEC_INCIDENT_CAP places).
+    quota = security_center.SEC_OTHER_INCIDENT_QUOTA
     hass = make_hass()
     center = await center_for(hass, "r1")
-    for k in range(SEC_INCIDENT_CAP + 5):
+    for k in range(quota + 5):
         center._record(security_event(f"wifi_assoc_burst_{k}", T0 + k), T0 + k)
         if k < 3:
             center.incidents[next(reversed(center.incidents))]["status"] = "resolved"
-    assert len(center.incidents) == SEC_INCIDENT_CAP
+    assert len(center.incidents) == quota < SEC_INCIDENT_CAP
     assert all(i["status"] == "open" for i in center.incidents.values())
     # three resolved made room; open hints are never evicted for new ones
     assert center.counters["incidents_dropped"] == 3
-    assert center.counters["incidents_cap_dropped"] == 2
+    assert center.counters["incidents_other_quota_dropped"] == 2
     assert not any(
-        i["detector"] in (f"wifi_assoc_burst_{SEC_INCIDENT_CAP + k}" for k in (3, 4))
+        i["detector"] in (f"wifi_assoc_burst_{quota + k}" for k in (3, 4))
         for i in center.incidents.values()
     )
 

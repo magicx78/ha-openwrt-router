@@ -378,8 +378,9 @@ oder unbekannt, wird nichts gelöscht.
   nicht zurückrechnen. **Ohne Modulschlüssel zeichnet das Center keine Hinweise auf** und
   schreibt keine Zeitleisten-Einträge zu Geräten; die verworfenen Befunde werden gezählt
   (`findings_not_ready` in der Diagnose), Gerätebestätigung und -name werden mit 409
-  `not_ready` abgelehnt. Das Vertrauensbuch sieht die Geräte weiter. Ältere Speicherstände mit
-  unverschlüsselten IDs laden ohne Fehler.
+  `not_ready` abgelehnt. Das Vertrauensbuch sieht die Geräte weiter, nimmt aber keine
+  Indikatoren aus Befunden an, und offene Hinweise werden nicht automatisch erledigt. Ältere
+  Speicherstände mit unverschlüsselten IDs laden ohne Fehler.
 - **Keine DNS-Namen im Klartext:** An einem DNS-Hinweis steht kein Klartextname, und es gibt
   keine Einstellung dafür. Ein älterer Speicherstand mit dem früheren Schlüssel
   `keep_dns_names` lädt ohne Fehler; der Schlüssel wird verworfen. Die Settings-Route lehnt ihn
@@ -404,23 +405,39 @@ oder unbekannt, wird nichts gelöscht.
 - **Ausgeschaltet:** 0 Router-Aufrufe, kein Socket, keine Schreibvorgänge.
 - **Home Assistant:** Der Syslog-Empfänger hat feste Obergrenzen (Zeilenlänge, Raten, Puffer,
   [Abschnitt 5](#5-log-empfang)); zu viele Zeilen werden verworfen und gezählt, nie blockiert.
-  Der Speicher ist auf 512 KB begrenzt, die Zeitleiste auf 2000 Einträge, eigene Hinweise auf 100.
-- **Obergrenze der Hinweise:** Ist sie erreicht, macht zuerst der älteste erledigte Hinweis
-  Platz. Offene und bestätigte Hinweise werden nie für neue verdrängt. Gibt es keinen erledigten
-  Hinweis mehr, wird der **neue** Hinweis nicht gespeichert und gezählt
-  (`limits.incidents_cap_dropped` in der Übersicht, `incidents_cap_dropped` in der Diagnose);
-  die Zeitleiste bekommt höchstens einen Eintrag „Obergrenze erreicht“ je Stunde.
-- **Hinweise aus Logzeilen** (Firewall und DNS per Syslog, deren Absender im LAN fälschbar
-  sind) belegen **höchstens 50** der 100 Plätze. Ist diese Quote voll, macht zuerst der älteste
-  erledigte Log-Hinweis Platz; sonst wird der neue Log-Hinweis nicht gespeichert und gezählt
-  (`limits.incidents_log_quota_dropped`), mit höchstens einem Zeitleisten-Eintrag je Stunde.
-  Ist der ganze Speicher voll und kommt ein neuer Befund **nicht** aus Logzeilen, verdrängt er
-  den ältesten **offenen** Log-Hinweis (gezählt als `limits.incidents_displaced`, höchstens ein
-  Zeitleisten-Eintrag je Stunde). Bestätigte Hinweise werden nie verdrängt. Die Herkunft steht
-  am Hinweis (`from_logs`) und bleibt über einen Neustart erhalten.
+  Der Speicher ist auf 512 KB begrenzt, die Zeitleiste auf 2000 Einträge, eigene Hinweise auf 100
+  (zwei Quoten zu je 50, siehe unten).
+- **Zwei feste Quoten statt Verdrängung:** Die 100 Plätze teilen sich in zwei Klassen, die sich
+  nie gegenseitig verdrängen. **Höchstens 50** Hinweise kommen vom Syslog-Empfänger (Firewall
+  und DNS; die Absender sind per UDP im LAN fälschbar), **höchstens 50** aus allen anderen
+  Quellen (WLAN, Konfigurationsänderung, Vertrauensbuch; WLAN-Befunde lassen sich über Funk mit
+  erfundenen Adressen auslösen). Die Klasse folgt aus der Datenquelle des Detektors, nie aus
+  dem Inhalt einer Zeile. Ist eine Quote voll, macht zuerst der älteste **erledigte** Hinweis
+  derselben Klasse Platz; offene und bestätigte werden nie für neue entfernt, und bestätigte
+  zählen in ihrer Klasse mit. Gibt es keinen erledigten mehr, wird nur der **neue** Hinweis
+  dieser Klasse nicht gespeichert und gezählt (`limits.incidents_log_quota_dropped` bzw.
+  `limits.incidents_other_quota_dropped`, gleichnamig in der Diagnose), mit höchstens einem
+  Zeitleisten-Eintrag je Klasse und Stunde. Die andere Klasse bleibt unberührt. Die Herkunft
+  steht am Hinweis (`from_logs`) und bleibt über einen Neustart erhalten.
+- **Ältere Speicherstände** mit mehr als 50 Hinweisen einer Klasse laden vollständig; gelöscht
+  wird nichts, der Bestand heilt sich, sobald Hinweise erledigt sind. Bis dahin kann die
+  Gesamtgrenze von 100 erreicht sein: dann macht ein erledigter Hinweis Platz (zuerst aus der
+  übervollen Klasse), sonst wird der neue Hinweis nicht gespeichert und als
+  `limits.incidents_cap_dropped` gezählt (Zeitleiste: „Obergrenze erreicht“, höchstens einmal je
+  Stunde). Nur ein Stand mit **mehr als 100** Hinweisen wird beim Laden gekürzt: erledigte
+  zuerst, dann offene, bestätigte zuletzt, jeweils zuerst aus einer übervollen Klasse und die
+  ältesten zuerst.
+- **Speichergrenze 512 KB:** Wird sie beim Schreiben überschritten, kürzt das Center in dieser
+  Reihenfolge die Zeitleiste, dann erledigte Hinweise, dann die Grundlinien, dann die ältesten
+  nicht bestätigten Geräte. Offene und bestätigte Hinweise werden dafür nie gelöscht; reicht das
+  nicht, wird der Stand trotzdem geschrieben und eine Warnung protokolliert (`store_trimmed`).
 - **Bestätigte Hinweise** sammeln neue Befunde still. Kommt ein neuer Befund erst später als die
   Frist der automatischen Erledigung (24 Stunden) nach dem letzten, bekommt die Zeitleiste einen
-  Eintrag „Erneut beobachtet“.
+  Eintrag „Erneut beobachtet“, **höchstens einen je Hinweis und 24 Stunden** (gemessen an der
+  Zeit des Centers, nicht an der Zeit aus der Logzeile; der Zeitpunkt steht am Hinweis und
+  bleibt über einen Neustart erhalten). Steigt die Schwere, gibt es immer einen Eintrag.
+- **Ohne Modulschlüssel** erledigt das Center keine Hinweise automatisch: es sieht dann nichts,
+  und Ruhe wäre kein Beleg.
 - **Ereignisse über den Core:** höchstens 20 Ereignisse zu neuen oder wieder geöffneten
   Hinweisen je 10 min; weitere werden nicht gesendet, sondern gezählt
   (`limits.events_throttled`). Der Hinweis selbst wird trotzdem gespeichert.
@@ -471,7 +488,12 @@ ausdrücklicher Einzelfreigabe eines Administrators, wie beim Configuration Mana
   Proxy- oder Zugriffslogs landen. Die Schreib-Routen der Geräte tragen die MAC im Body.
 - **Ohne Modulschlüssel des Cores** (Core nicht gestartet oder Installationsschlüssel nicht
   lesbar) ist das Center „nicht bereit“: Befunde dieser Zeit werden nur gezählt, nicht als
-  Hinweis gespeichert, und gehen verloren. Sensoren sind dann unbekannt.
+  Hinweis gespeichert, und gehen verloren. Sie setzen auch keinen Indikator im Vertrauensbuch,
+  damit derselbe Befund nach Eintreffen des Schlüssels den Zustandswechsel und seinen Hinweis
+  auslöst. Sensoren sind dann unbekannt. Ist der Core gebunden, fragt der Poll alle **5 Minuten**
+  erneut nach dem Schlüssel (kein Router-Aufruf); das Log bekommt dazu **eine** Warnung je
+  „nicht bereit“-Zustand, ohne MAC, IP oder Hostnamen. Ist der Core gar nicht gebunden, versucht
+  das Center es erst wieder beim nächsten Einrichten eines Eintrags oder einer Aktion.
 - **Firewall- und DNS-Befunde markieren kein Gerät** im Vertrauensbuch (kein Nachschlagen
   IP → MAC).
 - **Umbenannte Entity-IDs der Flotten-Sensoren** bleiben erhalten, wenn der Router-Eintrag,

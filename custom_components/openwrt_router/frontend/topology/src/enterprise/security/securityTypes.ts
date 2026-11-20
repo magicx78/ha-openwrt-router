@@ -150,11 +150,14 @@ export interface LogPathView {
 export interface Limits {
   incidentCap: number | null;
   incidentsCapDropped: number | null;
-  /** At most this many stored hints may come from log lines. */
+  /** At most this many stored hints may come from log lines (syslog receiver). */
   logIncidentQuota: number | null;
   logIncidents: number | null;
   incidentsLogQuotaDropped: number | null;
-  incidentsDisplaced: number | null;
+  /** At most this many stored hints may come from all other sources (Wi-Fi, drift, devices). */
+  otherIncidentQuota: number | null;
+  otherIncidents: number | null;
+  incidentsOtherQuotaDropped: number | null;
   eventsThrottled: number | null;
 }
 

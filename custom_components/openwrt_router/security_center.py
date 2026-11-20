@@ -175,12 +175,17 @@ TEXT_CAP_REACHED = (
     "Obergrenze erreicht: neue Hinweise werden nicht gespeichert, bis "
     "erledigte Hinweise Platz machen (offene und bestätigte bleiben)"
 )
-# Hints from log lines (review 3, #1). Syslog senders can be forged in the
-# LAN, so hints of the firewall and DNS logs get their own quota of the
-# store; when the store is full, a new hint of another source displaces the
-# oldest OPEN log hint (counted, noted once per window). Confirmed hints
-# are never displaced.
+# Two fixed quotas of the store (review 4, #1; replaces the displacement of
+# review 3). Hints from the syslog receiver (firewall and DNS logs; senders
+# can be forged by UDP in the LAN) and hints of all other sources (Wi-Fi,
+# drift, device trust ...; Wi-Fi findings can be caused over the air) each
+# get at most 50 places. A full class drops its own new hint (counted, one
+# timeline note per window); the other class is never touched. The class
+# comes from the detector's data source, never from line content. Within a
+# class resolved hints make room, oldest first; open and confirmed hints are
+# never removed for a new one, and confirmed hints count in their class.
 SEC_LOG_INCIDENT_QUOTA = 50
+SEC_OTHER_INCIDENT_QUOTA = 50
 LOG_DATA_SOURCES: frozenset[str] = frozenset(
     {DataSource.FIREWALL_LOG.value, DataSource.DNS_QUERY_LOG.value}
 )
@@ -189,11 +194,15 @@ TEXT_LOG_QUOTA = (
     "Obergrenze für Hinweise aus Logzeilen erreicht: neue Hinweise aus "
     "Logzeilen werden nicht gespeichert, bis erledigte Platz machen"
 )
-TEXT_LOG_DISPLACED = (
-    "Speicher voll: ein offener Hinweis aus Logzeilen hat einem neuen "
-    "Hinweis einer anderen Quelle Platz gemacht"
+TEXT_OTHER_QUOTA = (
+    "Obergrenze für Hinweise aus WLAN, Konfiguration und Geräten erreicht: "
+    "neue Hinweise dieser Quellen werden nicht gespeichert, bis erledigte "
+    "Platz machen"
 )
 TEXT_SEEN_AGAIN = "Erneut beobachtet (Hinweis ist bestätigt)"
+# Module key (review 4, #4): while an active center has none, the poll asks
+# the core again at this fixed interval (no router call; memory only).
+SEC_MODULE_KEY_RETRY_SECONDS = 300.0
 # Not ready (review 3, #6): no hint is recorded before the core hands out
 # the module key; counts and score are unknown until then.
 REASON_MODULE_KEY_MISSING = "module_key_missing"
@@ -322,7 +331,7 @@ _COUNTERS = (
     "incidents_dropped",
     "incidents_cap_dropped",
     "incidents_log_quota_dropped",
-    "incidents_displaced",
+    "incidents_other_quota_dropped",
     "incidents_reused",
     "notices",
     "drifts_seen",
@@ -711,6 +720,8 @@ class SecurityCenter:
         self.syslog: SyslogReceiver | None = None
         self._syslog_port: int | None = None
         self._syslog_tried: float | None = None  # monotonic
+        self._key_tried: float | None = None  # monotonic, module key retry
+        self._key_warned = False  # one WARNING per "not ready" state
         self._fw_events = _HourCount()
         self._auth_failures = _HourCount()
         self.fleet_view: dict[str, Any] | None = None
@@ -1267,12 +1278,14 @@ class SecurityCenter:
             # Off (e.g. an admin changes a setting): never create the
             # installation key for it (review 2, N6).
             return
+        self._key_tried = time.monotonic()
         try:
             state = binding.api.installation_key_state
             if state not in (
                 InstallationKeyState.OK,
                 InstallationKeyState.UNINITIALISED,
             ):
+                self._key_missing(f"key state {getattr(state, 'value', state)}")
                 return
             key = await binding.api.async_get_module_key(
                 MODULE_SOURCE, purpose=IDENTITY_KEY_PURPOSE
@@ -1280,6 +1293,53 @@ class SecurityCenter:
             self._module_key = check_module_key(key)
         except Exception as err:  # noqa: BLE001 - pseudonyms then become MASK
             _LOGGER.debug("Security Center: no module key (%s)", type(err).__name__)
+            self._key_missing(type(err).__name__)
+            return
+        self._key_warned = False  # a later loss of the key warns again
+
+    def _key_missing(self, reason: str) -> None:
+        """One WARNING per "not ready" state; the reason names no identity."""
+        if self._key_warned:
+            return
+        self._key_warned = True
+        _LOGGER.warning(
+            "Security Center not ready: no module key from the core (%s); "
+            "nothing is recorded, retrying every %d s",
+            reason[:64],
+            SEC_MODULE_KEY_RETRY_SECONDS,
+        )
+
+    def _maybe_retry_module_key(self) -> None:
+        """Ask the core again for the module key at a fixed interval (review 4, #4).
+
+        Only while the center is active, bound to the core and without a
+        key; no router is contacted. The attempt runs as its own task, so
+        an error never reaches the poll.
+        """
+        binding = self._binding
+        if (
+            self._module_key is not None
+            or not self.active
+            or self._closed
+            or binding.api is None
+            or not binding.events_ok
+        ):
+            return
+        tried = self._key_tried
+        clock = time.monotonic()
+        if tried is not None and 0 <= clock - tried < SEC_MODULE_KEY_RETRY_SECONDS:
+            return
+        self._key_tried = clock
+        self.hass.async_create_task(
+            self._async_retry_module_key(), name="openwrt_router security key"
+        )
+
+    async def _async_retry_module_key(self) -> None:
+        try:
+            await self._async_fetch_module_key()
+        except Exception as err:  # noqa: BLE001 - never disturbs the poll
+            _LOGGER.debug("Security Center: key retry (%s)", type(err).__name__)
+            self._key_missing(type(err).__name__)
 
     def _unbind_core(self) -> None:
         binding = self._binding
@@ -1576,6 +1636,7 @@ class SecurityCenter:
         self._stage("log senders", self._refresh_senders)
         self._stage("log drain", self._drain_logs)
         self._stage("syslog retry", self._maybe_retry_syslog)
+        self._stage("module key retry", self._maybe_retry_module_key)
         self._stage("evaluate", self._evaluate, now)
         self._stage("housekeeping", self._housekeeping, now)
         self._stage("publish", self._publish, now)
@@ -1869,7 +1930,9 @@ class SecurityCenter:
         extra: list[SecurityEvent] = []
         for event in events:
             indicator = INDICATOR_OF.get(event.name)
-            if indicator is not None and event.client:
+            if indicator is not None and event.client and self._module_key is not None:
+                # Not ready: no indicator, so the state change and its hint
+                # still happen once the key is there (review 4, #5).
                 notices = self.trust.add_indicator(event.client, indicator, now)
                 extra.extend(self._apply_notices(notices, event.router_id, now))
         groups = correlate([*events, *extra], incidents=self._ni_refs)
@@ -1938,14 +2001,22 @@ class SecurityCenter:
         inc = self.incidents.get(inc_id) if inc_id else None
         if inc is not None and inc["status"] in _ACTIVE_STATUSES:
             previous = inc["last_seen"]
+            rose = event.severity.rank > _severity(inc["severity"]).rank
             self._merge(inc, event)
             self.counters["incidents_merged"] += 1
-            if (
-                inc["status"] == STATUS_CONFIRMED
-                and event.ts - previous > SEC_INCIDENT_AUTO_RESOLVE_SECONDS
+            if inc["status"] == STATUS_CONFIRMED and (
+                rose
+                or (
+                    event.ts - previous > SEC_INCIDENT_AUTO_RESOLVE_SECONDS
+                    and self._seen_again_free(inc, now)
+                )
             ):
                 # A confirmed hint seen again after a quiet time (an open one
-                # would have been resolved by then): one entry (review 3, #5).
+                # would have been resolved by then): one entry (review 3, #5),
+                # at most one per window and hint (event times come from log
+                # lines and can jump); a rising severity always gets one
+                # (review 4, #2).
+                inc["seen_again_at"] = now
                 self._timeline(
                     event.ts,
                     "incident_seen_again",
@@ -1974,11 +2045,12 @@ class SecurityCenter:
             )
             self._emit_event(event, inc["id"], limited=True)
             return
+        # The class comes from the detector's data source (review 4, #1).
         from_logs = event.data_source in LOG_DATA_SOURCES
-        if from_logs and not self._make_log_room():
-            self._log_quota_reached(now)
+        if not self._make_class_room(from_logs):
+            self._quota_reached(from_logs, now)
             return
-        if not self._make_room(now, from_logs=from_logs):
+        if not self._make_room(from_logs):
             self._cap_reached(now)
             return
         inc = self._new_incident(event, scope)
@@ -2041,6 +2113,7 @@ class SecurityCenter:
             "title": TITLES.get(name, name),
             "hint": " ".join(hints),
             "resolved_at": None,
+            "seen_again_at": None,
         }
         self.incidents[inc_id] = inc
         self._by_scope[scope] = inc_id
@@ -2072,65 +2145,73 @@ class SecurityCenter:
                 links.append(link)
         inc["linked_incident_ids"] = links[:16]
 
-    def _make_room(self, now: float, *, from_logs: bool = False) -> bool:
-        """Room for one new hint.
+    @staticmethod
+    def _seen_again_free(inc: Mapping[str, Any], now: float) -> bool:
+        """True if the hint had no "seen again" entry within the window."""
+        last = _num(inc.get("seen_again_at"))
+        return last is None or abs(now - last) >= SEC_INCIDENT_AUTO_RESOLVE_SECONDS
 
-        Resolved hints go first, oldest first. With none left, a new hint
-        that does not come from log lines displaces the oldest OPEN hint
-        from log lines (review 3, #1). False if there is still no room:
-        confirmed hints and open hints of other sources are never evicted
-        for a new one (review 2, M3).
-        """
-        while len(self.incidents) >= SEC_INCIDENT_CAP:
-            resolved = [
-                i for i in self.incidents.values() if i["status"] == STATUS_RESOLVED
-            ]
-            if resolved:
-                victim = min(resolved, key=lambda i: i["last_seen"])
-                self._drop_incident(victim["id"])
-                self.counters["incidents_dropped"] += 1
-                continue
-            if from_logs:
-                return False
-            open_logs = [
-                i
-                for i in self.incidents.values()
-                if i["status"] == STATUS_OPEN and i.get("from_logs") is True
-            ]
-            if not open_logs:
-                return False
-            victim = min(open_logs, key=lambda i: i["last_seen"])
-            self._drop_incident(victim["id"])
-            self.counters["incidents_displaced"] += 1
-            self._note_once("log_displaced", now, TEXT_LOG_DISPLACED)
+    def _class_hints(self, from_logs: bool) -> list[dict[str, Any]]:
+        """The hints of one class (syslog receiver or all other sources)."""
+        return [
+            i
+            for i in self.incidents.values()
+            if (i.get("from_logs") is True) is from_logs
+        ]
+
+    def _drop_oldest_resolved(self, hints: Iterable[dict[str, Any]]) -> bool:
+        resolved = [i for i in hints if i["status"] == STATUS_RESOLVED]
+        if not resolved:
+            return False
+        victim = min(resolved, key=lambda i: i["last_seen"])
+        self._drop_incident(victim["id"])
+        self.counters["incidents_dropped"] += 1
         return True
 
-    def _make_log_room(self) -> bool:
-        """Room within the quota of hints from log lines (review 3, #1).
+    def _make_class_room(self, from_logs: bool) -> bool:
+        """Room within the quota of the new hint's class (review 4, #1).
 
-        Resolved log hints go first, oldest first; False if the quota is
-        full of open and confirmed log hints (the new one is dropped).
+        Resolved hints of the class go first, oldest first; False if the
+        class is full of open and confirmed hints (the new one is dropped).
+        The other class is never touched.
         """
-        while True:
-            logs = [i for i in self.incidents.values() if i.get("from_logs") is True]
-            if len(logs) < SEC_LOG_INCIDENT_QUOTA:
-                return True
-            resolved = [i for i in logs if i["status"] == STATUS_RESOLVED]
-            if not resolved:
+        quota = SEC_LOG_INCIDENT_QUOTA if from_logs else SEC_OTHER_INCIDENT_QUOTA
+        while len(hints := self._class_hints(from_logs)) >= quota:
+            if not self._drop_oldest_resolved(hints):
                 return False
-            victim = min(resolved, key=lambda i: i["last_seen"])
-            self._drop_incident(victim["id"])
-            self.counters["incidents_dropped"] += 1
+        return True
+
+    def _make_room(self, from_logs: bool) -> bool:
+        """Room within ``SEC_INCIDENT_CAP`` (only tight after an old store).
+
+        A store from before the quotas may hold more than its quota in one
+        class; nothing open or confirmed is deleted for that, it heals as
+        those hints are resolved. Until then resolved hints make room, those
+        of the other class first (it can only be above its quota here),
+        oldest first; False if there is none (review 2, M3: open and
+        confirmed hints are never evicted).
+        """
+        while len(self.incidents) >= SEC_INCIDENT_CAP:
+            if not (
+                self._drop_oldest_resolved(self._class_hints(not from_logs))
+                or self._drop_oldest_resolved(self._class_hints(from_logs))
+            ):
+                return False
+        return True
 
     def _cap_reached(self, now: float) -> None:
         """A new hint found no room: count it, note it once per window."""
         self.counters["incidents_cap_dropped"] += 1
         self._note_once("cap_reached", now, TEXT_CAP_REACHED)
 
-    def _log_quota_reached(self, now: float) -> None:
-        """A new log hint found the quota full: count it, note it once."""
-        self.counters["incidents_log_quota_dropped"] += 1
-        self._note_once("log_quota_reached", now, TEXT_LOG_QUOTA)
+    def _quota_reached(self, from_logs: bool, now: float) -> None:
+        """A new hint found its class full: count it, note it once per window."""
+        if from_logs:
+            self.counters["incidents_log_quota_dropped"] += 1
+            self._note_once("log_quota_reached", now, TEXT_LOG_QUOTA)
+        else:
+            self.counters["incidents_other_quota_dropped"] += 1
+            self._note_once("other_quota_reached", now, TEXT_OTHER_QUOTA)
 
     def _note_once(self, kind: str, now: float, text: str) -> None:
         """One system entry of ``kind`` per SEC_CAP_NOTE_WINDOW_SECONDS."""
@@ -2151,14 +2232,29 @@ class SecurityCenter:
     def _enforce_cap(self) -> None:
         """A loaded store above ``SEC_INCIDENT_CAP`` (cap lowered, edited file).
 
-        Resolved go first, then open, confirmed last (an administrator's
-        confirmation is kept longest); oldest first within each.
+        Only above the total cap: a store with more than its quota in one
+        class but within the cap keeps every hint (review 4, #1). Above it
+        resolved go first, then open, confirmed last (an administrator's
+        confirmation is kept longest); within each, hints of a class above
+        its quota first, then oldest first.
         """
         order = {STATUS_RESOLVED: 0, STATUS_OPEN: 1, STATUS_CONFIRMED: 2}
         while len(self.incidents) > SEC_INCIDENT_CAP:
+            over = {
+                flag
+                for flag, quota in (
+                    (True, SEC_LOG_INCIDENT_QUOTA),
+                    (False, SEC_OTHER_INCIDENT_QUOTA),
+                )
+                if len(self._class_hints(flag)) > quota
+            }
             victim = min(
                 self.incidents.values(),
-                key=lambda i: (order.get(i["status"], 0), i["last_seen"]),
+                key=lambda i: (
+                    order.get(i["status"], 0),
+                    (i.get("from_logs") is True) not in over,
+                    i["last_seen"],
+                ),
             )
             self._drop_incident(victim["id"])
             self.counters["incidents_dropped"] += 1
@@ -2169,9 +2265,13 @@ class SecurityCenter:
             del self._by_scope[inc["scope"]]
 
     def _housekeeping(self, now: float) -> None:
+        # Without the module key nothing is recorded, so a quiet hint is not
+        # proof of calm: no auto-resolve while blind (review 4, #3).
+        blind = self._module_key is None
         for inc in self.incidents.values():
             if (
-                inc["status"] == STATUS_OPEN
+                not blind
+                and inc["status"] == STATUS_OPEN
                 and now - inc["last_seen"] > SEC_INCIDENT_AUTO_RESOLVE_SECONDS
             ):
                 inc["status"] = STATUS_RESOLVED
@@ -2343,7 +2443,7 @@ class SecurityCenter:
             return
         try:
             for inc in self.incidents.values():
-                for key in ("first_seen", "last_seen", "resolved_at"):
+                for key in ("first_seen", "last_seen", "resolved_at", "seen_again_at"):
                     if _num(inc.get(key)) is not None:
                         inc[key] = inc[key] + delta
             for entry in self.timeline:
@@ -2761,13 +2861,15 @@ class SecurityCenter:
                 "incident_cap": SEC_INCIDENT_CAP,
                 "incidents_cap_dropped": self.counters["incidents_cap_dropped"],
                 "log_incident_quota": SEC_LOG_INCIDENT_QUOTA,
-                "log_incidents": sum(
-                    1 for i in self.incidents.values() if i.get("from_logs") is True
-                ),
+                "log_incidents": len(self._class_hints(True)),
                 "incidents_log_quota_dropped": self.counters[
                     "incidents_log_quota_dropped"
                 ],
-                "incidents_displaced": self.counters["incidents_displaced"],
+                "other_incident_quota": SEC_OTHER_INCIDENT_QUOTA,
+                "other_incidents": len(self._class_hints(False)),
+                "incidents_other_quota_dropped": self.counters[
+                    "incidents_other_quota_dropped"
+                ],
                 "events_throttled": self.counters["events_throttled"],
             },
         }
@@ -3161,9 +3263,8 @@ class SecurityCenter:
             "detector_state": self.detectors.state_size(),
             "module_key": self._module_key is not None,
             "not_ready_reason": self.not_ready_reason,
-            "log_incidents": sum(
-                1 for i in self.incidents.values() if i.get("from_logs") is True
-            ),
+            "log_incidents": len(self._class_hints(True)),
+            "other_incidents": len(self._class_hints(False)),
             "log_rate_limited_routers": len(self._log_limited_routers()),
             "events_registered": self._binding.events_ok,
             "last_save_bytes": self.last_save_bytes,
@@ -3247,6 +3348,9 @@ def _incident_from_store(item: Any) -> dict[str, Any] | None:
         "title": mask_identities(str(item.get("title") or "")),
         "hint": mask_identities(str(item.get("hint") or "")),
         "resolved_at": _num(item.get("resolved_at")),
+        # Time of the last "seen again" entry (review 4, #2); older stores
+        # have none.
+        "seen_again_at": _num(item.get("seen_again_at")),
     }
     return inc
 

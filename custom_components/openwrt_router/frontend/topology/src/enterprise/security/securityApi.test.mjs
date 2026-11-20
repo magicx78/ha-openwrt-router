@@ -269,6 +269,8 @@ test('review3 panel: the default mock is ready and carries limits, from_logs and
   const o = await api.overview();
   assert.equal(o.ready, true);
   assert.equal(o.limits.logIncidentQuota, 50);
+  assert.equal(o.limits.otherIncidentQuota, 50);
+  assert.equal(o.limits.otherIncidents, o.incidents.filter(i => !i.fromLogs).length);
   assert.ok(o.incidents.some(i => i.fromLogs));
   assert.ok(o.timeline.some(t => t.kind === 'log_quota_reached'));
   assert.equal(typeof o.logPath.rateLimitedRouters, 'number');

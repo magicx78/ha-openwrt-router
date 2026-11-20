@@ -223,7 +223,7 @@ export const TIMELINE_KIND_LABEL: Record<string, string> = {
   incident_seen_again: 'Bestätigter Hinweis erneut beobachtet',
   cap_reached: 'Obergrenze der Hinweise erreicht',
   log_quota_reached: 'Quote für Hinweise aus Logzeilen erreicht',
-  log_displaced: 'Hinweis aus Logzeilen verdrängt',
+  other_quota_reached: 'Quote für Hinweise aus WLAN, Konfiguration und Geräten erreicht',
 };
 
 export const TRUST_LABEL: Record<string, string> = {
@@ -568,7 +568,9 @@ function parseLimits(v: unknown): Limits {
     logIncidentQuota: num(o.log_incident_quota),
     logIncidents: num(o.log_incidents),
     incidentsLogQuotaDropped: num(o.incidents_log_quota_dropped),
-    incidentsDisplaced: num(o.incidents_displaced),
+    otherIncidentQuota: num(o.other_incident_quota),
+    otherIncidents: num(o.other_incidents),
+    incidentsOtherQuotaDropped: num(o.incidents_other_quota_dropped),
     eventsThrottled: num(o.events_throttled),
   };
 }
@@ -716,15 +718,15 @@ export function limitLines(l: Limits): LimitLine[] {
   const count = (name: string, n: number | null) => {
     if (n !== null) out.push({ name, value: fmt(n), tone: n > 0 ? 'warn' : 'muted' });
   };
-  if (l.logIncidents !== null && l.logIncidentQuota !== null) {
-    out.push({
-      name: 'Gespeicherte Hinweise aus Logzeilen',
-      value: `${fmt(l.logIncidents)} von höchstens ${fmt(l.logIncidentQuota)}`,
-      tone: l.logIncidents >= l.logIncidentQuota ? 'warn' : 'muted',
-    });
-  }
+  const quota = (name: string, n: number | null, max: number | null) => {
+    if (n !== null && max !== null) {
+      out.push({ name, value: `${fmt(n)} von höchstens ${fmt(max)}`, tone: n >= max ? 'warn' : 'muted' });
+    }
+  };
+  quota('Gespeicherte Hinweise aus Logzeilen', l.logIncidents, l.logIncidentQuota);
   count('Nicht gespeichert, Log-Quote voll', l.incidentsLogQuotaDropped);
-  count('Verdrängte Hinweise aus Logzeilen', l.incidentsDisplaced);
+  quota('Gespeicherte Hinweise aus WLAN, Konfiguration und Geräten', l.otherIncidents, l.otherIncidentQuota);
+  count('Nicht gespeichert, Quote für WLAN, Konfiguration und Geräte voll', l.incidentsOtherQuotaDropped);
   count(l.incidentCap !== null ? `Nicht gespeichert, Obergrenze von ${fmt(l.incidentCap)} erreicht` : 'Nicht gespeichert, Obergrenze erreicht', l.incidentsCapDropped);
   count('Gedrosselte Meldungen an den Enterprise Core', l.eventsThrottled);
   return out;

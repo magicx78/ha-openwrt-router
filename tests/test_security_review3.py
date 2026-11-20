@@ -115,30 +115,23 @@ async def test_review3_1_forged_log_lines_cannot_crowd_out_wifi_hints(
         center._record(wifi_hint(n, T0 + 400 + n), T0 + 400 + n)
     assert len(center.incidents) == SEC_INCIDENT_CAP
     assert center.counters["incidents_cap_dropped"] == 0
-    # ... and when the store is full, the oldest OPEN log hint makes room
-    oldest = min(log_hints(center), key=lambda i: i["last_seen"])
-    center._record(wifi_hint(999, T0 + 600), T0 + 600)
-    assert oldest["id"] not in center.incidents
-    assert len(log_hints(center)) == LOG_QUOTA - 1
-    assert center.counters["incidents_displaced"] == 1
-    center._record(wifi_hint(998, T0 + 601), T0 + 601)
-    assert center.counters["incidents_displaced"] == 2
-    displaced = [t for t in center.timeline if t["kind"] == "log_displaced"]
-    assert len(displaced) == 1  # limited like the cap note
-    # confirmed hints are never displaced: the new one is dropped instead
-    for inc in log_hints(center):
-        inc["status"] = "confirmed"
+    # ... and a full class of other sources displaces no log hint any more
+    # (review 4, #1 replaces the displacement): the new hint is dropped
     before = set(center.incidents)
-    center._record(wifi_hint(997, T0 + 602), T0 + 602)
+    center._record(wifi_hint(999, T0 + 600), T0 + 600)
+    center._record(wifi_hint(998, T0 + 601), T0 + 601)
     assert set(center.incidents) == before
-    assert center.counters["incidents_cap_dropped"] == 1
+    assert len(log_hints(center)) == LOG_QUOTA
+    assert center.counters["incidents_other_quota_dropped"] == 2
+    notes = [t for t in center.timeline if t["kind"] == "other_quota_reached"]
+    assert len(notes) == 1  # limited like the cap note
     # visible in the overview and the diagnostics
     limits = center.overview(actor=None, now=T0 + 700)["limits"]
     assert limits["log_incident_quota"] == LOG_QUOTA
     assert limits["incidents_log_quota_dropped"] == 300 - LOG_QUOTA
-    assert limits["incidents_displaced"] == 2
+    assert limits["incidents_other_quota_dropped"] == 2
     counters = center.diagnostics()["counters"]
-    assert counters["incidents_displaced"] == 2
+    assert counters["incidents_other_quota_dropped"] == 2
     assert counters["incidents_log_quota_dropped"] == 300 - LOG_QUOTA
 
 

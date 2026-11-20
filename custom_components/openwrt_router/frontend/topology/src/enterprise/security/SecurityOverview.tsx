@@ -132,7 +132,7 @@ function LimitsCard({ overview }: { overview: Overview }) {
   return (
     <SectionBox
       title="Speichergrenzen der Hinweise"
-      hint="Hinweise aus Logzeilen (Firewall, DNS) belegen höchstens einen Teil der Plätze, weil Logzeilen im Netz gefälscht werden können. Gezählt wird, was deshalb nicht gespeichert oder verdrängt wurde."
+      hint="Hinweise aus Logzeilen (Firewall, DNS) und Hinweise aus allen anderen Quellen (WLAN, Konfiguration, Geräte) haben je eine feste Zahl von Plätzen, weil sich beide von außen auslösen lassen. Ist eine Quote voll, wird nur der neue Hinweis dieser Quelle nicht gespeichert und gezählt; die andere bleibt unberührt."
     >
       {lines.map(l => (
         <Fact key={l.name} name={l.name}><span className={`sec-tone-${l.tone}`}>{l.value}</span></Fact>

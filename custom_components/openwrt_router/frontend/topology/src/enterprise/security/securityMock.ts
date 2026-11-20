@@ -187,7 +187,9 @@ function build(scenario: string) {
     limits: {
       incident_cap: 100, incidents_cap_dropped: 0, log_incident_quota: 50,
       log_incidents: incidents.filter(i => i.from_logs === true).length,
-      incidents_log_quota_dropped: noHints ? 0 : 12, incidents_displaced: 0, events_throttled: 0,
+      incidents_log_quota_dropped: noHints ? 0 : 12, other_incident_quota: 50,
+      other_incidents: incidents.filter(i => i.from_logs !== true).length,
+      incidents_other_quota_dropped: 0, events_throttled: 0,
     },
   });
 

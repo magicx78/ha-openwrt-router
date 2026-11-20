@@ -445,19 +445,23 @@ test('review3 panel: "nicht bereit" is shown as such, never as "no findings" and
   assert.equal(scoreView({ score: 90, coverage: 100, cap: 100, reason: null, factors: [], routers: 1 }, true).tone, 'ok');
 });
 
-test('review3 panel: the store limits parse; unknown values stay unknown', () => {
+test('review4 panel: the store limits parse per class; unknown values stay unknown', () => {
   const o = parseOverview({ limits: {
     incident_cap: 100, incidents_cap_dropped: 0, log_incident_quota: 50, log_incidents: 50,
-    incidents_log_quota_dropped: 7, incidents_displaced: 2, events_throttled: 'x',
+    incidents_log_quota_dropped: 7, other_incident_quota: 50, other_incidents: 12,
+    incidents_other_quota_dropped: 2, incidents_displaced: 9, events_throttled: 'x',
   } });
   assert.deepEqual(o.limits, {
     incidentCap: 100, incidentsCapDropped: 0, logIncidentQuota: 50, logIncidents: 50,
-    incidentsLogQuotaDropped: 7, incidentsDisplaced: 2, eventsThrottled: null,
+    incidentsLogQuotaDropped: 7, otherIncidentQuota: 50, otherIncidents: 12,
+    incidentsOtherQuotaDropped: 2, eventsThrottled: null,
   });
   const lines = limitLines(o.limits);
-  assert.ok(lines.some(l => l.value === '50 von höchstens 50' && l.tone === 'warn'));
+  assert.ok(lines.some(l => /Logzeilen/.test(l.name) && l.value === '50 von höchstens 50' && l.tone === 'warn'));
   assert.ok(lines.some(l => /Log-Quote/.test(l.name) && l.value === '7' && l.tone === 'warn'));
-  assert.ok(lines.some(l => /[Vv]erdrängt/.test(l.name) && l.value === '2'));
+  assert.ok(lines.some(l => /^Gespeicherte.*WLAN/.test(l.name) && l.value === '12 von höchstens 50' && l.tone === 'muted'));
+  assert.ok(lines.some(l => /^Nicht gespeichert.*WLAN/.test(l.name) && l.value === '2' && l.tone === 'warn'));
+  assert.ok(!lines.some(l => /[Vv]erdrängt/.test(l.name))); // displacement is gone (review 4)
   assert.ok(lines.some(l => /Obergrenze/.test(l.name) && l.value === '0' && l.tone === 'muted'));
   assert.ok(!lines.some(l => /[Gg]edrosselt/.test(l.name))); // unknown: not shown as 0
   assert.deepEqual(limitLines(parseOverview({}).limits), []);
@@ -481,7 +485,7 @@ test('review3 panel: rate_limited is a German limitation; the log path counts li
 });
 
 test('review3 panel: every timeline kind of the backend has a German label (drift guard)', () => {
-  for (const k of ['log_quota_reached', 'log_displaced', 'incident_seen_again', 'cap_reached']) {
+  for (const k of ['log_quota_reached', 'other_quota_reached', 'incident_seen_again', 'cap_reached']) {
     assert.ok(TIMELINE_KIND_LABEL[k] && TIMELINE_KIND_LABEL[k] !== k, k);
   }
   const py = join(here, '..', '..', '..', '..', 'security_center.py');

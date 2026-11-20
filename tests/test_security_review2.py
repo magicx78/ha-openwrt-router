@@ -58,6 +58,9 @@ from custom_components.openwrt_router.const import (
 from custom_components.openwrt_router.router_identity import router_id_for_entry
 from custom_components.openwrt_router.router_registry import ORPHAN_RETENTION_DAYS
 from custom_components.openwrt_router.security_center import (
+    SEC_OTHER_INCIDENT_QUOTA as OTHER_QUOTA,
+)
+from custom_components.openwrt_router.security_center import (
     SecurityCenter,
     async_release_security_center,
     async_setup_security_center,
@@ -367,43 +370,46 @@ async def test_review2_m2_old_store_with_unkeyed_ids_loads(disks) -> None:  # no
 async def test_review2_m3_full_store_keeps_confirmed_and_open_hints(
     disks,  # noqa: F811
 ) -> None:
+    # fw_event carries no log data source: its class is "other sources",
+    # whose quota (review 4, #1) is the full store here.
     center = await center_for(make_hass(), "r1")
     center._record(auth_event(RID1), T0)
     (confirmed,) = list(center.incidents)
     center.incidents[confirmed]["status"] = "confirmed"
-    for i in range(SEC_INCIDENT_CAP - 1):
+    for i in range(OTHER_QUOTA - 1):
         center._record(fw_event(i, T0 + 1 + i), T0 + 1 + i)
-    assert len(center.incidents) == SEC_INCIDENT_CAP
+    assert len(center.incidents) == OTHER_QUOTA < SEC_INCIDENT_CAP
     before = set(center.incidents)
     for i in range(1000, 1005):
         center._record(fw_event(i, T0 + 200 + i), T0 + 200 + i)
     assert set(center.incidents) == before  # the NEW hints were dropped
-    assert center.counters["incidents_cap_dropped"] == 5
+    assert center.counters["incidents_other_quota_dropped"] == 5
     assert center.counters["incidents_dropped"] == 0
-    notes = [t for t in center.timeline if t["kind"] == "cap_reached"]
-    assert len(notes) == 1 and "Obergrenze erreicht" in notes[0]["text"]
+    notes = [t for t in center.timeline if t["kind"] == "other_quota_reached"]
+    assert len(notes) == 1 and "Obergrenze" in notes[0]["text"]
     overview = center.overview(actor=None, now=T0 + 1300)
-    assert overview["limits"]["incidents_cap_dropped"] == 5
-    assert center.diagnostics()["counters"]["incidents_cap_dropped"] == 5
+    assert overview["limits"]["incidents_other_quota_dropped"] == 5
+    assert center.diagnostics()["counters"]["incidents_other_quota_dropped"] == 5
     # a later window gets one more note
     center._record(fw_event(2000, T0 + 9000), T0 + 9000)
-    assert len([t for t in center.timeline if t["kind"] == "cap_reached"]) == 2
+    notes = [t for t in center.timeline if t["kind"] == "other_quota_reached"]
+    assert len(notes) == 2
 
 
 async def test_review2_m3_resolved_hints_make_room_oldest_first(
     disks,  # noqa: F811
 ) -> None:
     center = await center_for(make_hass(), "r1")
-    for i in range(SEC_INCIDENT_CAP):
+    for i in range(OTHER_QUOTA):
         center._record(fw_event(i, T0 + i), T0 + i)
     ids = sorted(center.incidents, key=lambda k: center.incidents[k]["last_seen"])
     for inc_id in ids[5:7]:
         center.incidents[inc_id]["status"] = "resolved"
     center._record(fw_event(500, T0 + 600), T0 + 600)
     assert ids[5] not in center.incidents and ids[6] in center.incidents
-    assert len(center.incidents) == SEC_INCIDENT_CAP
+    assert len(center.incidents) == OTHER_QUOTA
     assert center.counters["incidents_dropped"] == 1
-    assert center.counters["incidents_cap_dropped"] == 0
+    assert center.counters["incidents_other_quota_dropped"] == 0
 
 
 async def test_review2_m3_core_emits_of_new_hints_are_limited(
