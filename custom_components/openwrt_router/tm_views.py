@@ -1,8 +1,11 @@
 """Network Time Machine: the HTTP routes (GET only).
 
 ``GET /api/openwrt_router/enterprise/timemachine/timeline`` (Phase A, own
-index since Phases B/C) and ``GET …/timemachine/sessions`` (Phase C, client
-sessions; administrators only, also while the panel is open to all).
+index since Phases B/C), ``GET …/timemachine/sessions`` (Phase C, client
+sessions; administrators only, also while the panel is open to all) and,
+since 1.52.0, ``GET …/timemachine/state`` and ``…/compare`` (Phase D,
+``tm_state``; like the timeline) and ``GET …/timemachine/export`` (Phase E,
+``tm_export``; administrators only, audited, an attachment).
 
 Checks in the order of the sister routes (``traffic_views``, ``rf_views``):
 403 for no user or a non-admin while the panel is not open to all users
@@ -26,6 +29,7 @@ from homeassistant.core import HomeAssistant, callback
 
 from .const import DATA_TIME_MACHINE_STATS, DATA_TIME_MACHINE_VIEWS_BOUND
 from .security_views import NO_STORE, RequestError, error_response, read_body
+from .tm_export import EXPORT_QUERY_KEYS, ExportRefused, async_export
 from .tm_query import (
     QUERY_KEYS,
     QUERY_VALUE_MAX,
@@ -38,6 +42,14 @@ from .tm_query import (
     parse_sessions_query,
     sessions_page,
     time_machine_enabled,
+)
+from .tm_state import (
+    COMPARE_QUERY_KEYS,
+    STATE_QUERY_KEYS,
+    async_compare,
+    async_state,
+    parse_compare_query,
+    parse_state_query,
 )
 from .topology_panel import _PANEL_VIEW_DISABLED_KEY, _panel_open_to_all
 
@@ -91,8 +103,13 @@ class TimeMachineTimelineView(HomeAssistantView):
                 raise RequestError(410, "integration_not_loaded")
             await read_body(request, {})  # a GET takes no body
             now = time.time()
+            raw = _query(request)
+            if "client" in raw and not admin:
+                # 1.52.0: a client filter is for administrators; refused
+                # before the value is looked at (it reveals nothing)
+                raise _bad("client", "admin_only")
             try:
-                query = parse_query(_query(request), now)
+                query = parse_query(raw, now)
             except QueryError as err:
                 raise _bad(err.field, err.reason) from None
             if not time_machine_enabled(hass):
@@ -147,9 +164,123 @@ class TimeMachineSessionsView(HomeAssistantView):
         return self.json(body, headers=dict(NO_STORE))
 
 
+def _reader(request: web.Request) -> tuple[HomeAssistant, bool]:
+    """The rights of the timeline: 403 for no user or a non-admin while the
+    panel is not open to all, then 410 while the panel view is disabled."""
+    hass: HomeAssistant = request.app[KEY_HASS]
+    user = request.get(KEY_HASS_USER)
+    admin = user is not None and getattr(user, "is_admin", False) is True
+    if user is None or (not admin and not _panel_open_to_all(hass)):
+        raise RequestError(403, "authorization_denied")
+    if hass.data.get(_PANEL_VIEW_DISABLED_KEY):
+        raise RequestError(410, "integration_not_loaded")
+    return hass, admin
+
+
+def _failed(name: str, err: Exception) -> web.StreamResponse:
+    # Only the type: the message may carry router data.
+    _LOGGER.warning("Time Machine route %s failed: %s", name, type(err).__name__)
+    _LOGGER.debug("Time Machine route error", exc_info=err)
+    return error_response(RequestError(500, "internal"))
+
+
+class TimeMachineStateView(HomeAssistantView):
+    """The state at one moment (Phase D, ``tm_state``)."""
+
+    url = f"{BASE_URL}/state"
+    name = f"{VIEW_NAME_PREFIX}state"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.StreamResponse:
+        """Read (no body, strict query)."""
+        try:
+            hass, admin = _reader(request)
+            await read_body(request, {})
+            now = time.time()
+            try:
+                query = parse_state_query(
+                    _query(request, STATE_QUERY_KEYS), now, admin=admin
+                )
+            except QueryError as err:
+                raise _bad(err.field, err.reason) from None
+            body = await async_state(hass, query, admin=admin, now=now)
+        except RequestError as err:
+            return error_response(err)
+        except Exception as err:  # noqa: BLE001 - logged by type, a 500
+            return _failed(self.name, err)
+        return self.json(body, headers=dict(NO_STORE))
+
+
+class TimeMachineCompareView(HomeAssistantView):
+    """Two moments side by side (Phase D, ``tm_state``)."""
+
+    url = f"{BASE_URL}/compare"
+    name = f"{VIEW_NAME_PREFIX}compare"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.StreamResponse:
+        """Read (no body, strict query)."""
+        try:
+            hass, admin = _reader(request)
+            await read_body(request, {})
+            now = time.time()
+            try:
+                query = parse_compare_query(_query(request, COMPARE_QUERY_KEYS), now)
+            except QueryError as err:
+                raise _bad(err.field, err.reason) from None
+            body = await async_compare(hass, query, admin=admin, now=now)
+        except RequestError as err:
+            return error_response(err)
+        except Exception as err:  # noqa: BLE001 - logged by type, a 500
+            return _failed(self.name, err)
+        return self.json(body, headers=dict(NO_STORE))
+
+
+class TimeMachineExportView(HomeAssistantView):
+    """The marks of one window as a file (Phase E, administrators only)."""
+
+    url = f"{BASE_URL}/export"
+    name = f"{VIEW_NAME_PREFIX}export"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.StreamResponse:
+        """Read (no body, strict query); 403 for every non-admin."""
+        try:
+            hass: HomeAssistant = request.app[KEY_HASS]
+            user = request.get(KEY_HASS_USER)
+            if user is None or getattr(user, "is_admin", False) is not True:
+                raise RequestError(403, "authorization_denied")
+            if hass.data.get(_PANEL_VIEW_DISABLED_KEY):
+                raise RequestError(410, "integration_not_loaded")
+            await read_body(request, {})
+            now = time.time()
+            try:
+                query = parse_query(_query(request, EXPORT_QUERY_KEYS), now)
+            except QueryError as err:
+                raise _bad(err.field, err.reason) from None
+            try:
+                body = await async_export(
+                    hass, query, now=now, user_id=getattr(user, "id", None)
+                )
+            except ExportRefused:
+                raise RequestError(503, "refused", reason="audit_unavailable") from None
+        except RequestError as err:
+            return error_response(err)
+        except Exception as err:  # noqa: BLE001 - logged by type, a 500
+            return _failed(self.name, err)
+        headers = dict(NO_STORE)
+        headers["Content-Disposition"] = (
+            'attachment; filename="openwrt-router-time-machine.json"'
+        )
+        return self.json(body, headers=headers)
+
+
 TIME_MACHINE_VIEWS: tuple[type[HomeAssistantView], ...] = (
     TimeMachineTimelineView,
     TimeMachineSessionsView,
+    TimeMachineStateView,
+    TimeMachineCompareView,
+    TimeMachineExportView,
 )
 
 

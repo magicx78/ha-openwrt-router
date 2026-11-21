@@ -50,6 +50,7 @@ import asyncio
 import functools
 import itertools
 import logging
+import math
 import time
 from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable, Mapping
@@ -104,7 +105,13 @@ from .rf_incidents import RfIncidentFeed
 from .rf_models import CapabilityState
 from .rf_privacy import client_ref, mask_rf_output, rf_key_request
 from .rf_recommend import Recommendation
-from .rf_store import SERIES_HEALTH, SERIES_ROAMS, RfStore
+from .rf_store import (
+    SERIES,
+    SERIES_HEALTH,
+    SERIES_ROAMS,
+    SERIES_UTILIZATION,
+    RfStore,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -253,6 +260,20 @@ def _number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     return float(value)
+
+
+# ``RfCenter.window_at`` (1.52.0): at most 14 days of hourly buckets.
+WINDOW_AT_MAX_S = 14 * 86400
+
+
+def _finite_window(start: Any, end: Any) -> bool:
+    """Both bounds finite numbers, ``0 < end - start <= WINDOW_AT_MAX_S``."""
+    for value in (start, end):
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return False
+        if not math.isfinite(value):
+            return False
+    return 0 < end - start <= WINDOW_AT_MAX_S
 
 
 def _utc(ts: float) -> datetime:
@@ -986,6 +1007,76 @@ class RfCenter:
                 "interfaces": sorted(asked.intersection(result.radio.devices)),
             }
         return out
+
+    def window_at(
+        self,
+        router_id: str,
+        start: float,
+        end: float,
+        series: str = SERIES_UTILIZATION,
+    ) -> dict[str, dict[str, Any]]:
+        """``radio_id`` -> the hourly buckets of ``series`` that begin in
+        ``[start, end)``, summed (1.52.0, Time Machine plan §5.4).
+
+        Read only from the stored hourly history (no router call, no state
+        change); the hour that is still being collected is not in it yet.
+        ``band`` is the radio's band from the last evaluation (None when the
+        radio is no longer evaluated). At most ``WINDOW_AT_MAX_S``; empty
+        while off or not ready, for an unknown series or odd bounds.
+        """
+        if self.status != STATUS_READY or not isinstance(router_id, str):
+            return {}
+        if series not in SERIES or not _finite_window(start, end):
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for ref, history in list(self.store.radios.items()):
+            if ref.router_id != router_id:
+                continue
+            count = invalid = buckets = 0
+            total = 0.0
+            low: float | None = None
+            high: float | None = None
+            for bucket_start, agg in list(history.hourly.get(series, {}).items()):
+                if not start <= bucket_start < end:
+                    continue
+                buckets += 1
+                count += agg.count
+                invalid += agg.invalid
+                total += agg.total
+                if agg.minimum is not None:
+                    low = agg.minimum if low is None else min(low, agg.minimum)
+                if agg.maximum is not None:
+                    high = agg.maximum if high is None else max(high, agg.maximum)
+            result = self.results.get(ref)
+            out[ref.radio_id] = {
+                "v": READ_API_VERSION,
+                "router_id": ref.router_id,
+                "radio_id": ref.radio_id,
+                "band": result.radio.band if result is not None else None,
+                "series": series,
+                "start": float(start),
+                "end": float(end),
+                "state": READ_STATE_MEASURED if count else READ_STATE_UNKNOWN,
+                "reason": None if count else READ_REASON_NOT_MEASURED,
+                "buckets": buckets,
+                "count": count,
+                "invalid": invalid,
+                "mean": round(total / count, 3) if count else None,
+                "minimum": low,
+                "maximum": high,
+            }
+        return out
+
+    def client_ref_for_mac(self, mac: Any) -> str | None:
+        """WiFi RF's own ``client_ref`` of a MAC, in process only (1.52.0,
+        Time Machine Phase E; read only). None without the module key or for
+        something that is no MAC."""
+        if self.module_key is None or not isinstance(mac, str):
+            return None
+        try:
+            return client_ref(mac, self.module_key)
+        except (TypeError, ValueError):
+            return None
 
     def client_retry_rates(
         self, router_id: str, window_s: float

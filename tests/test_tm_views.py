@@ -599,10 +599,14 @@ async def test_setup_registers_the_route_once_and_never_fails() -> None:
     ):
         assert await integration.async_setup_entry(hass, entry) is True
         assert await integration.async_setup_entry(hass, entry) is True
-        assert hass.http.register_view.call_count == 2  # timeline + sessions
+        # timeline + sessions; since 1.52.0 also state, compare and export
+        assert hass.http.register_view.call_count == 5
         assert hass.data[DATA_TIME_MACHINE_VIEWS_BOUND] == {
             tm_views.TimeMachineTimelineView.name,
             tm_views.TimeMachineSessionsView.name,
+            tm_views.TimeMachineStateView.name,
+            tm_views.TimeMachineCompareView.name,
+            tm_views.TimeMachineExportView.name,
         }
         broken = MagicMock()
         broken.data = {}

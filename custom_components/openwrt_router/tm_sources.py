@@ -47,6 +47,21 @@ while Client Stability still knows the client. Source texts (Security
 Center only) go through the core masking and the identity masking; all
 other marks carry fixed codes (``title_key``) and numbers only.
 
+Phase E (1.52.0): for administrators with the client switch on, an entry
+of the Security Center, Traffic Analytics or WiFi RF that names a client
+(``client_ref`` with that module's own key) is attributed to the Time
+Machine's client (``client`` ``tmc_…``) by :class:`ClientResolver`: each
+module's in-process "pseudonym for MAC" function is applied to the MACs the
+client recorder knows right now, never by comparing ``cli_…`` values of two
+modules. Nothing of it is cached between requests (a forgotten client is
+gone at once). An entry that cannot be attributed stays left out and
+counted.
+
+Phase F (1.52.0): :func:`jump_target` says which Enterprise tab (and which
+object) a mark's ``ref`` leads to; ``JUMP_TARGETS`` lists every
+``ref.module`` / ``ref.type`` the backend produces (the target of
+``core_audit`` / ``event`` depends on the mark's kind, ``KIND_TABS``).
+
 Every failure of a source stays inside its own result: a source that
 raises, takes too long or answers in an unexpected shape reports
 ``unreadable`` with a fixed reason and never breaks the answer.
@@ -636,6 +651,179 @@ def _audit_concerns_client(event: CoreEvent) -> bool:
     return event.client_ref is not None or any(k in data for k in _CLIENT_KEYS)
 
 
+# --- client attribution across modules (Phase E, 1.52.0) --------------------------------
+
+# Modules whose entries carry a ``client_ref`` made with their own key, and
+# the ``CoreEvent.source`` they write.
+CLIENT_MODULES: Final = ("security_center", "traffic_analytics", "wifi_rf")
+
+
+def module_pseudonym(hass: HomeAssistant, module: str) -> Callable[[Any], Any] | None:
+    """The in-process "pseudonym for MAC" function of a running module."""
+    if module == "security_center":
+        from .security_center import async_get_security_center
+
+        center = async_get_security_center(hass)
+        return None if center is None else center.client_ref_for_mac
+    if module == "traffic_analytics":
+        from .traffic_correlate import async_get_traffic_read_api
+
+        api = async_get_traffic_read_api(hass)
+        return None if api is None else api.client_ref_for_mac
+    if module == "wifi_rf":
+        from .rf_center import async_get_rf_center
+
+        center = async_get_rf_center(hass)
+        return None if center is None else center.client_ref_for_mac
+    return None
+
+
+_AMBIGUOUS: Final = ""
+
+
+class ClientResolver:
+    """``client_ref`` of a module -> the Time Machine client (16 hex).
+
+    Built for one request from the MACs the client recorder holds in memory
+    (open sessions plus the recently seen, ``tm_clients.MACS_RECENT_MAX``):
+    per module one table ``module pseudonym -> tmc``, made with that
+    module's own function. Two MACs with the same module pseudonym are
+    ambiguous and resolve to nothing. Never stored, never logged.
+    """
+
+    def __init__(self, hass: HomeAssistant, recorder: Any) -> None:
+        """Take the recorder's MACs now (a copy; nothing is kept after)."""
+        self._hass = hass
+        self._recorder = recorder
+        self._macs = list(getattr(recorder, "_macs", {}).items())
+        self._tables: dict[str, dict[str, str]] = {}
+
+    def _table(self, module: str) -> dict[str, str]:
+        table = self._tables.get(module)
+        if table is not None:
+            return table
+        table = {}
+        func = module_pseudonym(self._hass, module)
+        for hexed, mac in self._macs if func is not None else ():
+            try:
+                value = func(mac)
+            except Exception:  # noqa: BLE001 - a module that fails resolves nothing
+                value = None
+            if not isinstance(value, str) or not value:
+                continue
+            if table.get(value, hexed) != hexed:
+                table[value] = _AMBIGUOUS
+            else:
+                table[value] = hexed
+        self._tables[module] = table
+        return table
+
+    def resolve(self, module: Any, client_ref: Any) -> str | None:
+        """The client (16 hex) or None (unknown module, not attributable)."""
+        if module not in CLIENT_MODULES or not isinstance(client_ref, str):
+            return None
+        hexed = self._table(module).get(client_ref)
+        return hexed or None
+
+    def name(self, hexed: str) -> str | None:
+        """The current host name, exactly as on the own client marks."""
+        return self._recorder.name_of(hexed)
+
+
+def client_resolver(hass: HomeAssistant, req: ReadRequest) -> ClientResolver | None:
+    """A resolver for administrators while client histories are recorded."""
+    if not req.admin:
+        return None
+    from .tm_engine import async_get_time_machine
+
+    engine = async_get_time_machine(hass)
+    recorder = getattr(engine, "recorder", None) if engine is not None else None
+    if (
+        engine is None
+        or engine.loaded is not True
+        or not engine.clients_wanted
+        or recorder is None
+        or not recorder.attached
+    ):
+        return None
+    return ClientResolver(hass, recorder)
+
+
+def _attribute(mark: dict[str, Any], resolver: ClientResolver, hexed: str) -> None:
+    mark["client"] = f"tmc_{hexed}"
+    mark["client_name"] = resolver.name(hexed)
+
+
+# --- jump targets (Phase F, 1.52.0) ---------------------------------------------------
+
+TAB_CONFIG: Final = "config"
+TAB_SECURITY: Final = "security"
+TAB_DIAGNOSTICS: Final = "diagnostics"
+TAB_TRAFFIC: Final = "traffic"
+TAB_WIFI: Final = "wifi"
+TAB_TIME_MACHINE: Final = "timemachine"
+# Kind of a ``core_audit`` / ``event`` mark -> tab (kinds of no tab: none).
+KIND_TABS: Final[Mapping[str, str]] = {
+    "config_event": TAB_CONFIG,
+    "config_drift": TAB_CONFIG,
+    "security_incident": TAB_SECURITY,
+    "security_event": TAB_SECURITY,
+    "rf_event": TAB_WIFI,
+    "diag_finding": TAB_DIAGNOSTICS,
+    "traffic_anomaly": TAB_TRAFFIC,
+}
+_BY_KIND: Final = "by_kind"
+# Every (ref.module, ref.type) the backend produces -> tab, ``by_kind``
+# (``KIND_TABS``) or None: no Enterprise tab shows it (Network Intelligence
+# lives in the panel's own views, outside the Enterprise tabs).
+JUMP_TARGETS: Final[Mapping[tuple[str, str | None], str | None]] = {
+    ("core_audit", "event"): _BY_KIND,
+    ("core_audit", "drift"): TAB_CONFIG,
+    ("config_manager", "version"): TAB_CONFIG,
+    ("network_intelligence", "event"): None,
+    ("network_intelligence", "incident"): None,
+    ("security_center", "incident"): TAB_SECURITY,
+    ("security_center", "drift"): TAB_SECURITY,
+    ("security_center", "timeline"): TAB_SECURITY,
+    ("time_machine", "mark"): TAB_TIME_MACHINE,
+}
+# What the object id of a target names (None: the tab itself).
+_OBJECT: Final[Mapping[tuple[str, str | None], str | None]] = {
+    ("core_audit", "event"): "audit_event",
+    ("core_audit", "drift"): "audit_event",
+    ("config_manager", "version"): "version",
+    ("security_center", "incident"): "incident",
+    ("security_center", "drift"): "drift",
+    ("security_center", "timeline"): None,
+    ("time_machine", "mark"): None,
+}
+
+
+def jump_target(
+    ref: Mapping[str, Any] | None, kind: str | None = None
+) -> dict[str, Any] | None:
+    """Where a mark's ``ref`` leads: ``{"tab", "object_type", "object_id",
+    "version_id"}``, or None (no Enterprise tab, or an unknown ref)."""
+    if not isinstance(ref, Mapping):
+        return None
+    key = (ref.get("module"), ref.get("type"))
+    tab = JUMP_TARGETS.get(key)  # type: ignore[call-overload]
+    if tab == _BY_KIND:
+        tab = KIND_TABS.get(kind or "")
+    if tab is None:
+        return None
+    object_type = _OBJECT.get(key)  # type: ignore[call-overload]
+    object_id = ref.get("id") if object_type is not None else None
+    if key == ("config_manager", "version"):
+        object_id = ref.get("version_id")
+    return {
+        "tab": tab,
+        "object_type": object_type if object_id is not None else None,
+        "object_id": object_id,
+        "version_id": ref.get("version_id"),
+    }
+
+
 async def read_core_audit(
     hass: HomeAssistant, req: ReadRequest, routers: RouterMap, deadline: float
 ) -> SourceResult:
@@ -674,40 +862,51 @@ async def read_core_audit(
                 unreachable = True
     marks: list[dict[str, Any]] = []
     omitted = 0
+    resolver = client_resolver(hass, req)
     for event in events.values():
         _check(deadline)
         ts = epoch(event.ts)
         if not _in_window(ts, req):
             continue
+        hexed: str | None = None
         if _audit_concerns_client(event):
-            omitted += 1
-            continue
+            # Phase E: attributed through the module's own pseudonym
+            # function, else left out and counted
+            hexed = (
+                resolver.resolve(event.source, event.client_ref)
+                if resolver is not None
+                else None
+            )
+            if hexed is None:
+                omitted += 1
+                continue
         kind = audit_kind(str(event.type))
         data = event.data if isinstance(event.data, Mapping) else {}
         params = params_of(data, _AUDIT_PARAMS)
         if event.repeat_count:
             params["repeat_count"] = int(event.repeat_count)
         version_id = data.get("baseline_version_id") or data.get("version_id")
-        marks.append(
-            make_mark(
-                source=SOURCE_CORE_AUDIT,
-                source_id=event.event_id,
-                ts=ts,
-                kind=kind,
-                severity=event.severity,
-                router_id=event.router_id,
-                routers=routers,
-                fleet=event.router_id is None,
-                code=token(str(event.type)),
-                params=params,
-                ref=ref_of(
-                    "core_audit",
-                    "drift" if kind == "config_drift" else "event",
-                    event.event_id,
-                    version_id,
-                ),
-            )
+        mark = make_mark(
+            source=SOURCE_CORE_AUDIT,
+            source_id=event.event_id,
+            ts=ts,
+            kind=kind,
+            severity=event.severity,
+            router_id=event.router_id,
+            routers=routers,
+            fleet=event.router_id is None,
+            code=token(str(event.type)),
+            params=params,
+            ref=ref_of(
+                "core_audit",
+                "drift" if kind == "config_drift" else "event",
+                event.event_id,
+                version_id,
+            ),
         )
+        if hexed is not None and resolver is not None:
+            _attribute(mark, resolver, hexed)
+        marks.append(mark)
     result = _finish(SOURCE_CORE_AUDIT, marks, omitted, truncated)
     result.edge = max(edges) if edges else None
     result.unreachable = unreachable
@@ -1023,6 +1222,7 @@ async def read_security_timeline(
     read: list[float] = []
     omitted = 0
     occurrences: dict[str, int] = {}
+    resolver = client_resolver(hass, req)
     for row in reversed(rows):  # oldest first: stable occurrence numbers
         _check(deadline)
         if not isinstance(row, Mapping):
@@ -1033,9 +1233,17 @@ async def read_security_timeline(
         if not _in_window(ts, req):
             continue
         read.append(ms_floor(float(ts)))
+        hexed: str | None = None
         if row.get("has_client") or row.get("client_ref"):
-            omitted += 1
-            continue
+            # Phase E: the row's client_ref is the Security Center's own
+            hexed = (
+                resolver.resolve("security_center", row.get("client_ref"))
+                if resolver is not None
+                else None
+            )
+            if hexed is None:
+                omitted += 1
+                continue
         router_id = row.get("router_id")
         router_id = router_id if isinstance(router_id, str) else None
         incident_id, drift_id = row.get("incident_id"), row.get("drift_id")
@@ -1053,22 +1261,23 @@ async def read_security_timeline(
             ref = ref_of("security_center", "drift", drift_id)
         else:
             ref = ref_of("security_center", "timeline")
-        marks.append(
-            make_mark(
-                source=SOURCE_SECURITY_TIMELINE,
-                source_id=base,
-                variant=str(nth),
-                ts=ts,
-                kind=mapped,
-                severity=row.get("severity"),
-                router_id=router_id,
-                routers=routers,
-                fleet=router_id is None,
-                code=code,
-                text=masked_text(row.get("text")),
-                ref=ref,
-            )
+        mark = make_mark(
+            source=SOURCE_SECURITY_TIMELINE,
+            source_id=base,
+            variant=str(nth),
+            ts=ts,
+            kind=mapped,
+            severity=row.get("severity"),
+            router_id=router_id,
+            routers=routers,
+            fleet=router_id is None,
+            code=code,
+            text=masked_text(row.get("text")),
+            ref=ref,
         )
+        if hexed is not None and resolver is not None:
+            _attribute(mark, resolver, hexed)
+        marks.append(mark)
     return _finish(
         SOURCE_SECURITY_TIMELINE,
         marks,

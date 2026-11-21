@@ -27,6 +27,14 @@ goes first and is counted (an open interval only when its quota holds
 nothing else, ``evicted_open``); per client and UTC day at most 200 new marks, the
 rest is folded into one ``client_flapping`` mark with a counter. Updates of
 an existing mark (closing an interval) are never capped.
+
+**Lost marks** (1.52.0, Phase D): ``MarkIndex.lost`` holds per quota the
+latest moment a mark that is gone without the retention reached (its end,
+or for an open interval the newest time the index knew): evicted marks,
+marks trimmed for the size limit, the marks of a removed router and cleared
+histories. ``tm_state`` answers "unknown" up to it instead of reconstructing
+a state from an incomplete list. Pruned marks (older than the retention)
+are not counted: the retention bound covers them.
 """
 
 from __future__ import annotations
@@ -391,6 +399,9 @@ class MarkIndex:
         self._flap: dict[tuple[str, int], int] = {}
         self._refs: dict[tuple[str, str], int] = {}
         self.counters: dict[str, int] = dict.fromkeys(COUNTER_NAMES, 0)
+        # 1.52.0: per quota, up to when marks are gone (see the module doc)
+        self.lost: dict[str, float] = {}
+        self._newest = -math.inf  # the latest start or end of any mark
         self.changed = False
         # marks changed since the store last packed them (its row cache)
         self.touched: set[int] = set()
@@ -419,6 +430,7 @@ class MarkIndex:
 
     def _insert(self, mark: Mark) -> None:
         quota = mark.quota
+        self._newest = max(self._newest, mark.last_ts)
         self.marks[mark.seq] = mark
         if mark.is_open:
             self._open[quota].add(mark.seq)
@@ -428,6 +440,32 @@ class MarkIndex:
         if mark.ref is not None:
             self._refs[mark.ref] = mark.seq
         self.next_seq = max(self.next_seq, mark.seq + 1)
+
+    def note_lost(self, marks: Iterable[Mark], now: float | None = None) -> None:
+        """Marks gone before their retention: raise ``lost`` of their quota
+        to their end (an open one: ``now``, else the newest known time)."""
+        for mark in marks:
+            if mark.is_open:
+                upto = max(mark.ts, self._newest, now if now is not None else mark.ts)
+            else:
+                upto = mark.last_ts
+            quota = mark.quota
+            if upto > self.lost.get(quota, -math.inf):
+                self.lost[quota] = upto
+                self.changed = True
+
+    def restore_lost(self, raw: Any) -> None:
+        """``lost`` as stored (known quotas, finite numbers only)."""
+        if not isinstance(raw, Mapping):
+            return
+        for quota, value in raw.items():
+            if (
+                quota in QUOTAS
+                and isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            ):
+                self.lost[quota] = max(self.lost.get(quota, -math.inf), float(value))
 
     def restore(self, marks: Iterable[Mark]) -> None:
         """Marks read from the store (no counting, quotas enforced)."""
@@ -460,7 +498,9 @@ class MarkIndex:
                 self.counters["evicted_open"] += 1
             else:
                 return
-            self._delete(seq)
+            gone = self._delete(seq)
+            if gone is not None:
+                self.note_lost((gone,))
             self.counters[f"evicted_{quota}"] += 1
 
     def add(
@@ -569,6 +609,7 @@ class MarkIndex:
             return False
         mark.end = max(mark.ts, to_ms(end) / 1000)
         mark.end_state = state
+        self._newest = max(self._newest, mark.end)
         quota = mark.quota
         self._open[quota].discard(mark.seq)
         heapq.heappush(self._heaps[quota], (mark.ts, mark.seq))
@@ -644,16 +685,32 @@ class MarkIndex:
         self.counters["forgotten"] += dropped
         return dropped
 
-    def forget_router(self, router: str) -> int:
-        """Delete every mark of a removed router (also as a roam peer)."""
-        dropped = self.remove_where(
-            lambda m: m.router != router and router not in (m.peers or ())
-        )
+    def forget_router(self, router: str, now: float | None = None) -> int:
+        """Delete every mark of a removed router (also as a roam peer).
+
+        Marks of other routers that name it as a peer (an uplink change, a
+        roam) go too: their quota counts as ``lost`` up to them (1.52.0).
+        """
+        doomed = [
+            m
+            for m in self.marks.values()
+            if m.router == router or router in (m.peers or ())
+        ]
+        self.note_lost((m for m in doomed if m.router != router), now)
+        seqs = {m.seq for m in doomed}
+        dropped = self.remove_where(lambda m: m.seq not in seqs)
         self.counters["router_removed"] += dropped
         return dropped
 
-    def clear(self, *, clients_only: bool) -> int:
-        """Delete all client marks, or all marks."""
+    def clear(self, *, clients_only: bool, now: float | None = None) -> int:
+        """Delete all client marks, or all marks (``lost`` up to ``now``)."""
+        doomed = [
+            m for m in self.marks.values() if not clients_only or m.client is not None
+        ]
+        self.note_lost(doomed, now)
+        if now is not None and doomed:
+            for quota in {m.quota for m in doomed}:
+                self.lost[quota] = max(self.lost.get(quota, -math.inf), now)
         if clients_only:
             dropped = self.remove_where(lambda m: m.client is None)
         else:

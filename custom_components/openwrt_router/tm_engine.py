@@ -71,6 +71,8 @@ from .tm_store import (
     STOP_HA,
     STOP_UNLOADED,
     TimeMachineStore,
+    pack_radios,
+    unpack_radios,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -81,6 +83,9 @@ TICK_S: Final = 300.0
 HEARTBEAT_S: Final = 900.0
 _PSEUDONYM: Final = re.compile(r"tmc_[0-9a-f]{16}")
 CLOCK_JUMP_S: Final = 300.0  # plan §5.4
+# 1.52.0: a followed stretch gets a new base from the current state once
+# its base is this old (tm_state needs every mark after a base)
+REBASE_S: Final = 86_400.0
 GAP_MIN_S: Final = 120.0  # an observation gap shorter than this is dropped
 UNLOAD_GAP_MIN_S: Final = 600.0
 # When the integration was set up in this HA run (``async_setup``; review
@@ -148,22 +153,6 @@ def radio_keys(radios: list[Any]) -> dict[str, tuple[int, int, str]]:
     for band, items in by_band.items():
         for i, radio in enumerate(sorted(items, key=lambda r: r.phy)):
             out[f"{band}{i}"] = (int(radio.channel), int(radio.width), radio.phy)
-    return out
-
-
-def pack_radios(radios: Mapping[str, tuple[int, int]]) -> str:
-    """``5g0=36/80+2.4g0=6/20`` (store form, sorted)."""
-    return "+".join(f"{k}={c}/{w}" for k, (c, w) in sorted(radios.items()))
-
-
-def unpack_radios(raw: str) -> dict[str, tuple[int, int]]:
-    """Inverse of :func:`pack_radios`; odd parts are skipped."""
-    out: dict[str, tuple[int, int]] = {}
-    for part in raw.split("+") if raw else []:
-        key, _, value = part.partition("=")
-        chan, _, width = value.partition("/")
-        if key and chan.isdigit() and width.isdigit():
-            out[key] = (int(chan), int(width))
     return out
 
 
@@ -255,6 +244,9 @@ class TimeMachine:
                 code="store_recovered",
             )
         saved_at = result.saved_at
+        # 1.52.0: nothing was followed after the last write of the last run
+        self.store.seen_close_all(saved_at if saved_at is not None else now)
+        self.store.clients_until(saved_at if saved_at is not None else now)
         if saved_at is not None:
             self.store.cover_until(saved_at)
             self._close_all_open(saved_at, END_UNKNOWN)
@@ -393,6 +385,8 @@ class TimeMachine:
         self.closed = True
         if self.loaded:
             self.store.cover_until(now)
+            self.store.seen_close_all(now)
+            self.store.clients_until(now)
             await self.store.async_flush(reason)
         if reason == STOP_DISABLED:
             # the client histories are deleted: no old copy keeps them (K4)
@@ -405,6 +399,8 @@ class TimeMachine:
         now = self.clock()
         self.store.stop_reason = STOP_HA
         self.store.cover_until(now)
+        self.store.seen_close_all(now)
+        self.store.clients_until(now)
         self.store.schedule(0)
 
     # -- core binding ------------------------------------------------------------------
@@ -478,6 +474,34 @@ class TimeMachine:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Time Machine event not emitted (%s)", type(err).__name__)
 
+    def emit_checked(
+        self, event_type: str, *, data: Any = None, user_id: str | None = None
+    ) -> bool:
+        """One own audit event on the security ring (codes and counts only)
+        that must be written (1.52.0, the export): False when there is no
+        core or the audit log refused it."""
+        if self._api is None:
+            return False
+        try:
+            from .core_models import Actor, ActorKind
+
+            actor = (
+                Actor(kind=ActorKind.USER, user_id=user_id)
+                if isinstance(user_id, str) and user_id
+                else None
+            )
+            self._api.emit(
+                event_type,
+                source=MODULE,
+                data=dict(data or {}),
+                actor=actor,
+                security_relevant=True,
+            )
+        except Exception as err:  # noqa: BLE001 - the caller refuses then
+            _LOGGER.warning("Time Machine event not written (%s)", type(err).__name__)
+            return False
+        return True
+
     @callback
     def _on_audit(self, event: Any) -> None:
         """A published audit entry: a reference mark for REF_KINDS."""
@@ -533,7 +557,8 @@ class TimeMachine:
         await self.async_sync_clients()
 
     def _drop_clients(self) -> int:
-        dropped = self.index.clear(clients_only=True)
+        dropped = self.index.clear(clients_only=True, now=self.clock())
+        self.store.clients_cov = []  # what was recorded is gone (1.52.0)
         return dropped
 
     async def async_sync_clients(self) -> None:
@@ -604,9 +629,10 @@ class TimeMachine:
             return
         if router.unsub is not None:
             router.unsub()
+        now = self.clock()
+        self.store.seen_close(router.router_id, now)
         if not close:
             return
-        now = self.clock()
         for seq in (router.gap_seq, *router.radio_down.values()):
             self.index.close(seq, now, END_UNKNOWN)
         self.index.close(self._outage_seq.pop(entry_id, None), now, END_UNKNOWN)
@@ -719,6 +745,9 @@ class TimeMachine:
         if rid is None:
             return False
         index = self.index
+        # 1.52.0: the router is followed (a stretch of ``seen``) from its
+        # first poll on, failed or not
+        self.store.seen_open(rid, now)
         if not coordinator.last_update_success:
             if router.gap_seq is None and router.entry_id not in self._outage_seq:
                 mark = index.add(
@@ -749,6 +778,7 @@ class TimeMachine:
         changed |= self._radios(router, rid, data, state, now)
         changed |= self._fingerprint(router, rid, data, state, now)
         changed |= self._topology(router, rid, state, now)
+        changed |= self._rebase(router, rid, state, now)
         dumped = state.dump()
         if self.store.state.get(rid) != dumped:
             self.store.state[rid] = dumped
@@ -773,6 +803,7 @@ class TimeMachine:
         }
         index = self.index
         changed = False
+        silent = False  # a radio appeared without a mark (1.52.0)
         last = (getattr(data, "dfs", None) or {}).get("last_event")
         for key, (chan, width, phy) in current.items():
             before = state.radios.get(key)
@@ -780,6 +811,7 @@ class TimeMachine:
                 width = before[1]  # unknown width: keep the previous one
             router.missing.pop(key, None)
             seq = router.radio_down.pop(key, None)
+            silent |= before is None and seq is None
             if seq is not None:
                 mark = index.get(seq)
                 if _ends(index, mark, now):
@@ -838,7 +870,41 @@ class TimeMachine:
                 del state.radios[key]
                 router.missing.pop(key, None)
                 changed = True
+        self._seen_radios(rid, state, now, silent)
         return changed
+
+    def _seen_radios(
+        self, rid: str, state: RouterState, now: float, silent: bool
+    ) -> None:
+        """The radio base of the followed stretch (1.52.0): the first poll
+        with radios sets it; a radio that appeared without a mark later
+        starts a new stretch, so every stretch is complete by its marks."""
+        seg = self.store.seen_current(rid)
+        if seg is not None and seg.radios_at is not None and silent:
+            seg = self.store.seen_split(rid, now)
+        if seg is not None and seg.radios_at is None:
+            seg.radios_at, seg.radios = now, dict(state.radios)
+
+    def _rebase(
+        self, router: _Router, rid: str, state: RouterState, now: float
+    ) -> bool:
+        """A followed stretch whose base is ``REBASE_S`` old starts anew from
+        the state after this poll (1.52.0): the marks a stretch needs never
+        reach the 14-day pruning. Not while a radio is missing or off or an
+        uplink / role change is still being debounced (the new base would
+        hide it)."""
+        seg = self.store.seen_current(rid)
+        if seg is None or seg.radios_at is None or now - seg.radios_at < REBASE_S:
+            return False
+        if router.missing or router.radio_down:
+            return False
+        if seg.topo_at is not None and router.uplink.candidate != (
+            f"{state.parent}|{state.role}"
+        ):
+            return False
+        seg = self.store.seen_split(rid, now)
+        seg.radios_at, seg.radios = now, dict(state.radios)
+        return True
 
     def _fingerprint(
         self, router: _Router, rid: str, data: Any, state: RouterState, now: float
@@ -898,6 +964,11 @@ class TimeMachine:
                     code="gateway" if role == "g" else "node",
                 )
             state.role = role
+            changed = True
+        seg = self.store.seen_current(rid)
+        if seg is not None and seg.topo_at is None:
+            # 1.52.0: the first settled uplink and role of the stretch
+            seg.topo_at, seg.parent, seg.role = now, state.parent, state.role
             changed = True
         return changed
 
@@ -1115,8 +1186,9 @@ async def async_purge_clients(hass: HomeAssistant) -> int:
     await store.async_remove_copies()
     if result.failed:
         return 0
-    dropped = store.index.clear(clients_only=True)
+    dropped = store.index.clear(clients_only=True, now=store.clock())
     if dropped:
+        store.clients_cov = []
         await store.async_flush(result.stop or STOP_DISABLED)
     return dropped
 
@@ -1131,8 +1203,9 @@ async def async_remove_router(hass: HomeAssistant, router_id: str | None) -> int
         engine = async_get_time_machine(hass)
         if engine is not None and engine.loaded and not engine.closed:
             store = engine.store
-            dropped = engine.index.forget_router(router_id)
+            dropped = engine.index.forget_router(router_id, engine.clock())
             store.state.pop(router_id, None)
+            store.seen.pop(router_id, None)
             if dropped:
                 store.schedule(0)
         else:
@@ -1140,8 +1213,9 @@ async def async_remove_router(hass: HomeAssistant, router_id: str | None) -> int
             result = await store.async_load()
             if result.failed:
                 return 0
-            dropped = store.index.forget_router(router_id)
+            dropped = store.index.forget_router(router_id, store.clock())
             had_state = store.state.pop(router_id, None) is not None
+            had_state |= store.seen.pop(router_id, None) is not None
             if dropped or had_state:
                 await store.async_flush(result.stop or STOP_DISABLED)
         # The .bak / .corrupt.* copies stay (review K-b): router ids are no
@@ -1227,11 +1301,14 @@ async def async_clear_history(
         raise _service_error("time_machine_off")
     now = engine.clock()
     if clients_only:
-        deleted = engine.index.clear(clients_only=True)
+        deleted = engine.index.clear(clients_only=True, now=now)
+        engine.store.clients_cov = [[now, None]] if _recording(engine) else []
     else:
-        deleted = engine.index.clear(clients_only=False)
+        deleted = engine.index.clear(clients_only=False, now=now)
         engine.store.checkpoints.clear()
         engine.store.coverage = [[now, None]]
+        engine.store.seen_restart(now)
+        engine.store.clients_cov = [[now, None]] if _recording(engine) else []
         engine._outage_seq.clear()
         engine._lan_seq = None
         for router in engine.routers.values():
@@ -1253,6 +1330,10 @@ async def async_clear_history(
     engine.store.schedule(0)
     await engine.store.async_remove_copies()
     return {"deleted": deleted}
+
+
+def _recording(engine: TimeMachine) -> bool:
+    return engine.recorder is not None and engine.recorder.attached
 
 
 @callback
@@ -1311,6 +1392,7 @@ def async_register_time_machine_services(hass: HomeAssistant) -> None:
 __all__ = [
     "DEBOUNCE_POLLS",
     "GAP_MIN_S",
+    "REBASE_S",
     "TICK_S",
     "RouterState",
     "TimeMachine",

@@ -2725,6 +2725,19 @@ class SecurityCenter:
             return None
         return client_ref(mac, self._module_key)
 
+    def client_ref_for_mac(self, mac: Any) -> str | None:
+        """The Security Center's own ``client_ref`` of a MAC, in process only
+        (1.52.0, Time Machine Phase E): the caller attributes entries of this
+        module to a client without comparing pseudonyms of other modules.
+        Read only (no state changes); None without the module key or for
+        something that is no MAC."""
+        if not isinstance(mac, str):
+            return None
+        try:
+            return self._client_ref(mac)
+        except (TypeError, ValueError):
+            return None
+
     def _timeline(
         self,
         ts: float,

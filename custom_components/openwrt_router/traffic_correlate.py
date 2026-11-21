@@ -1996,6 +1996,11 @@ class SecurityIndicators:
 # --- read API for other modules ----------------------------------------------------------------
 
 
+# ``TrafficReadApi.window_at`` (1.52.0): the hour tier, at most 14 days.
+WINDOW_AT_RES_S = 3600
+WINDOW_AT_MAX_S = 14 * 86400
+
+
 def window_dict(window: SeriesWindow | None, point: MeasurementPoint) -> dict[str, Any]:
     """Totals, mean/peak rates and coverage of one window (plain dict)."""
     from .traffic_accounting import direction_map
@@ -2128,6 +2133,54 @@ class TrafficReadApi:
         return window_dict(
             source.window(point_id, seconds, end=self._engine.wall()), point
         )
+
+    def window_at(self, point_id: str, start: float, end: float) -> dict[str, Any]:
+        """Totals and coverage of one point over ``[start, end)`` (1.52.0).
+
+        Like :meth:`window` with a fixed beginning and end instead of a
+        named window ending now (Time Machine, plan §5.4): read only from the
+        hour tier (no router call, no state change). ``end - start`` is at
+        most ``WINDOW_AT_MAX_S``; bounds outside that or not finite are
+        ``unknown_window``.
+        """
+        state = self.status()
+        base = {"v": READ_API_VERSION, "point_id": point_id}
+        if state["state"] == "off":
+            return {**base, "state": "unavailable", "reason": REASON_DISABLED}
+        if (
+            isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, int | float)
+            or not isinstance(end, int | float)
+            or not math.isfinite(start)
+            or not math.isfinite(end)
+            or not 0 < end - start <= WINDOW_AT_MAX_S
+        ):
+            return {**base, "state": "unavailable", "reason": REASON_UNKNOWN_WINDOW}
+        if not valid_point_id(point_id):
+            return {**base, "state": "unavailable", "reason": REASON_UNKNOWN_POINT}
+        source = self._engine.history_source
+        point = next((p for p in source.points() if p.point_id == point_id), None)
+        if point is None:
+            return {**base, "state": "unavailable", "reason": REASON_UNKNOWN_POINT}
+        window_s = math.ceil(end - start)
+        return window_dict(
+            source.window(
+                point_id, window_s, end=float(end), resolution_s=WINDOW_AT_RES_S
+            ),
+            point,
+        )
+
+    def client_ref_for_mac(self, mac: Any) -> str | None:
+        """Traffic Analytics' own ``client_ref`` of a MAC, in process only
+        (1.52.0, Time Machine Phase E; read only). None while off, without
+        the module key or for something that is no MAC."""
+        key = getattr(self._engine, "_module_key", None)
+        if self._off() or not isinstance(key, bytes):
+            return None
+        from .traffic_collect import client_ref_of
+
+        return client_ref_of(mac, key)
 
     def router_window(self, router_id: str, window: str = "1h") -> dict[str, Any]:
         """The WAN points of a router over a window (plus the point count)."""
