@@ -41,7 +41,9 @@ from .rf_models import (
 _LOGGER = logging.getLogger(__name__)
 
 # Longest gap between two survey samples that still gives a meaningful share.
-# Startwert, nicht kalibriert: 10 polls at the 60 s default interval.
+# Startwert, nicht kalibriert: 10 polls at the 60 s default interval. The RF
+# center passes the larger of this and its staleness limit (2 x read interval
+# + one poll, 1.49.3), so long read intervals still give a share.
 DEFAULT_MAX_GAP_S = 600.0
 # Minimum on-channel time between two samples (ms). Below this a share is
 # dominated by counter granularity. Startwert, nicht kalibriert.

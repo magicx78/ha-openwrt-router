@@ -107,3 +107,29 @@ def test_r4_retry_high_needs_enough_coverage() -> None:
     assert _retry(result(RETRY_MIN_COVERAGE)) is not None
     assert _retry(result(0.1)) is None  # one client of ten says nothing of the radio
     assert _retry(result(None)) is None
+
+
+# --- R3: the allowed sample gap follows the real read interval -----------------------
+
+STATUS_A = load("hostapd_get_status_mt76_a.json")
+STATUS_B = load("hostapd_get_status_mt76_b.json")
+
+
+@pytest.mark.parametrize("every", [10, 30, 60])
+async def test_r3_utilization_is_measured_at_long_read_intervals(disk, every) -> None:
+    coordinator = FakeCoordinator()
+    center, clock, reader = await new_center(
+        rf_hass(), (entry("e1", options("get_status", every=every)), coordinator)
+    )
+    reader.answers[("get_status", "phy1-ap0")] = STATUS_A
+    uptime = 1000
+    await poll(center, coordinator, poll_data(uptime=uptime))
+    reader.answers[("get_status", "phy1-ap0")] = STATUS_B
+    for _ in range(every):  # a poll takes a little longer than 60 s
+        clock.advance(61)
+        uptime += 61
+        await poll(center, coordinator, poll_data(uptime=uptime))
+    assert len(reader.calls) == 2
+    (result,) = center.results.values()
+    util = result.metrics["utilization"]
+    assert util.is_measured, result.utilization.reason

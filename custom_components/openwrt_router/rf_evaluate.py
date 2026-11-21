@@ -146,6 +146,7 @@ from .rf_spectrum import (
     txpowers_from_txpowerlist,
 )
 from .rf_utilization import (
+    DEFAULT_MAX_GAP_S,
     SurveySample,
     UnknownReason,
     UtilizationResult,
@@ -405,6 +406,7 @@ def _read_source(
     radio: RadioInput,
     now: float,
     source: str,
+    max_gap_s: float = DEFAULT_MAX_GAP_S,
 ) -> None:
     if sample is None:
         memory.result = UtilizationResult(
@@ -415,7 +417,9 @@ def _read_source(
         )
         memory.noise = None
     else:
-        memory.result = utilization_from_delta(memory.sample, sample)
+        memory.result = utilization_from_delta(
+            memory.sample, sample, max_gap_s=max_gap_s
+        )
         memory.sample = sample
         memory.noise = sample.noise
     memory.at = now
@@ -426,18 +430,22 @@ def _update_counters(memory: RadioMemory, radio: RadioInput, poll: PollInput) ->
     device = radio.primary
     if device is None:
         return False
+    # The allowed gap between two samples follows the real read interval
+    # (1.49.3): with a fixed 600 s, wifi_rf_every_n_polls >= 10 (reads every
+    # 600 s plus the poll time) left the utilization unknown for good.
+    gap = max(DEFAULT_MAX_GAP_S, poll.max_age_s)
     status = poll.answers.get((RF_KIND_GET_STATUS, device))
     if status is not None:
         bss = bss_load_from_get_status(status)
         sample = bss.as_sample(radio.radio_id, poll.now, poll.uptime) if bss else None
-        _read_source(memory.status, sample, radio, poll.now, SOURCE_HOSTAPD_STATUS)
+        _read_source(memory.status, sample, radio, poll.now, SOURCE_HOSTAPD_STATUS, gap)
     survey = poll.answers.get((RF_KIND_SURVEY, device))
     if survey is not None:
         samples = survey_samples_from_iwinfo(
             survey, radio.radio_id, poll.now, poll.uptime, mhz=radio.mhz
         )
         sample = samples[0] if samples and radio.mhz else None
-        _read_source(memory.survey, sample, radio, poll.now, SOURCE_IWINFO_SURVEY)
+        _read_source(memory.survey, sample, radio, poll.now, SOURCE_IWINFO_SURVEY, gap)
     kind = _util_kind(poll.kinds)
     if kind is None:
         return False
