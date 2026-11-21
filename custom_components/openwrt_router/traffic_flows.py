@@ -1,7 +1,8 @@
 """Flow records and bounded conntrack snapshots (task §8; plan §5, §8; Phase E).
 
-Pure processing only: the HTTP entry for an external collector is Phase K,
-and nothing here calls a router (no conntrack dump, no new ubus call).
+Pure processing only: the HTTP entry for an external collector is
+``traffic_collector`` (Phase K), and nothing here calls a router (no
+conntrack dump, no new ubus call).
 
 **Collector flows** (:func:`normalise_collector_flow`): one record of the
 ``traffic.collector.v1`` schema (plan §8), kind ``flow`` only, becomes a
@@ -656,6 +657,27 @@ class FlowStore:
         self._total += 1
         self.counters["accepted_flows"] += 1
         self._aggregate(record)
+        return True
+
+    def can_take(
+        self, records: Iterable[FlowRecord], *, origin: str, now: float
+    ) -> bool:
+        """True if ``add`` would keep every one of ``records`` (no refusal).
+
+        Used by the collector intake so a call is kept completely or not at
+        all; a full feed dropping its own oldest record is no refusal.
+        """
+        self.prune(now)
+        sizes = {feed: len(q) for feed, q in self._feeds.items()}
+        total = self._total
+        for record in records:
+            feed = self.feed_of(origin, record.router_id)
+            if sizes.get(feed, 0) >= self._max_feed:
+                continue
+            if total >= self._max_total:
+                return False
+            sizes[feed] = sizes.get(feed, 0) + 1
+            total += 1
         return True
 
     def add_collector(
