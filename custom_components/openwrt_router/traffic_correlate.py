@@ -67,6 +67,7 @@ import hmac
 import logging
 import math
 import re
+import time
 from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -278,14 +279,14 @@ def _summary(raw: Any) -> dict[str, float] | None:
 class DiagnosticsAdapter:
     """Reads latency and packet loss per router from Network Diagnostics.
 
-    Vorläufig, an Branch-Stand ``b226259`` (origin/claude/net-diagnostics-
-    f989ed) ausgerichtet: ``hass.data[const.DATA_NET_DIAGNOSTICS]`` holds a
-    ``diag_runtime.NetDiagnostics`` whose ``history_view()`` (L2422-2454)
-    returns ``{"state": "off"|"not_ready"|"ready", "reasons": [...],
+    Ausgerichtet an main 1.48.0 (geprüft gegen den gemergten Code):
+    ``hass.data[const.DATA_NET_DIAGNOSTICS]`` holds a
+    ``diag_runtime.NetDiagnostics`` whose ``history_view()`` returns
+    ``{"state": "off"|"not_ready"|"ready", "reasons": [...],
     "windows": ["1h","24h","7d","30d"], "series": [{"point": <router_id or
     "ha">, "target_id", "kind": "icmp"|"tcp"|"http"|"dns"|"fact", "family",
     "windows": {"1h": LatencySummary|None, ...}}]}`` with the fields of
-    ``diag_stats.LatencySummary`` (L237-252: ``answered``, ``lost``,
+    ``diag_stats.LatencySummary`` (``answered``, ``lost``,
     ``coverage``, ``mean_ms``, ``loss_pct``, ...). Nothing of that module is
     imported; a different shape is ``not_ready``/``interface_mismatch``.
     """
@@ -393,7 +394,7 @@ class DiagnosticsAdapter:
 
 
 class WifiRfLike(Protocol):
-    """What the adapter expects from a WiFi RF center (wish W6)."""
+    """The read API wished from the WiFi RF center (W6; not on main yet)."""
 
     def radio_utilization(
         self, router_id: str, window_s: int
@@ -420,18 +421,26 @@ class RfFacts:
 
 
 class WifiRfAdapter:
-    """Reads airtime and retransmissions per router from a WiFi RF center.
+    """Reads airtime and retransmissions per router from the WiFi RF center.
 
-    Vorläufig, an Branch-Stand ``fddb6cf`` (origin/claude/wifi-rf-48d270)
-    ausgerichtet: there the RF modules are pure ("not wired up yet") and no
-    center object exists in ``hass.data[const.DATA_WIFI_RF_CENTER]``
-    (const.py L854). The data shapes follow that branch:
-    ``rf_utilization.UtilizationSummary.as_dict()`` (L487-511: ``mean``,
-    ``peak``, ``valid_count``, ``coverage``, ``sustained_overload``) per
-    radio and ``rf_models.Metric.as_dict()`` (L112-143: ``value``,
-    ``state``) for the retry rate of ``rf_clients`` per client. The two
-    method names are this module's proposal (wish W6); a center without
-    them is ``not_ready``/``interface_mismatch``.
+    Ausgerichtet an main 1.48.0 (``rf_center.RfCenter`` in
+    ``hass.data[const.DATA_WIFI_RF_CENTER]``). The center has no read API
+    for other modules yet (wish W6: ``radio_utilization`` /
+    ``client_retry_rates``). Until it has, the adapter reads the same public
+    evaluation state ``wifi_rf_entities`` reads:
+
+    * ``status`` (``off`` / ``not_ready`` / ``ready``) and
+      ``not_ready_reasons()``;
+    * ``results``: ``RadioRef -> RadioResult`` of the latest poll, with
+      ``summary`` (``rf_utilization.UtilizationSummary`` of the center's
+      fixed one-hour window: ``mean``, ``valid_count``,
+      ``sustained_overload``), ``assessments`` (each with ``retry_rate``,
+      an ``rf_models.Metric``) and ``measured_at``.
+
+    Only counts leave the adapter: no MAC, no client identity. Results older
+    than the requested window are ignored. A center that offers the W6
+    methods is read through them instead. Any other shape is
+    ``not_ready``/``interface_mismatch``; nothing of WiFi RF is imported.
     """
 
     def __init__(self, lookup: Callable[[], Any]) -> None:
@@ -443,6 +452,12 @@ class WifiRfAdapter:
         self.counters[f"{state}:{reason}"] += 1
         return SourceStatus(SRC_WIFI_RF, state, reason)
 
+    @staticmethod
+    def _has_w6(center: Any) -> bool:
+        return callable(getattr(center, "radio_utilization", None)) and callable(
+            getattr(center, "client_retry_rates", None)
+        )
+
     def module(self) -> tuple[SourceStatus, Any]:
         """Module state and the center (None unless it looks usable)."""
         try:
@@ -452,13 +467,71 @@ class WifiRfAdapter:
             return self._status(SOURCE_NOT_READY, REASON_LOOKUP_FAILED), None
         if center is None:
             return self._status(SOURCE_MODULE_MISSING, REASON_MODULE_NOT_LOADED), None
-        if not callable(getattr(center, "radio_utilization", None)) or not callable(
-            getattr(center, "client_retry_rates", None)
-        ):
-            return self._status(SOURCE_NOT_READY, REASON_INTERFACE_MISMATCH), None
-        if getattr(center, "enabled", True) is False:
-            return self._status(SOURCE_NOT_READY, REASON_MODULE_DISABLED), None
+        try:
+            if self._has_w6(center):
+                if getattr(center, "enabled", True) is False:
+                    return self._status(SOURCE_NOT_READY, REASON_MODULE_DISABLED), None
+                return SourceStatus(SRC_WIFI_RF, SOURCE_READY), center
+            state = getattr(center, "status", None)
+            if not isinstance(state, str) or not isinstance(
+                getattr(center, "results", None), Mapping
+            ):
+                return self._status(SOURCE_NOT_READY, REASON_INTERFACE_MISMATCH), None
+            if state == "off":
+                return self._status(SOURCE_NOT_READY, REASON_MODULE_DISABLED), None
+            if state == "not_ready":
+                read = getattr(center, "not_ready_reasons", None)
+                reasons = read() if callable(read) else None
+                first = reasons[0] if isinstance(reasons, list) and reasons else None
+                reason = first if isinstance(first, str) else REASON_UNKNOWN_STATE
+                return self._status(SOURCE_NOT_READY, reason[:64]), None
+            if state != "ready":
+                return self._status(SOURCE_NOT_READY, REASON_UNKNOWN_STATE), None
+        except Exception as err:  # noqa: BLE001 - optional module
+            _LOGGER.debug("WiFi RF state failed (%s)", type(err).__name__)
+            return self._status(SOURCE_NOT_READY, REASON_READ_FAILED), None
         return SourceStatus(SRC_WIFI_RF, SOURCE_READY), center
+
+    @staticmethod
+    def _from_results(
+        center: Any, router_id: str, window_s: int
+    ) -> tuple[dict[str, Mapping[str, Any]], list[Mapping[str, Any]]]:
+        """Radio summaries and retry metrics of ``router_id`` (no identities)."""
+        clock = getattr(center, "clock", None)
+        now = clock() if callable(clock) else time.time()
+        oldest = (now - window_s) if isinstance(now, int | float) else None
+        radios: dict[str, Mapping[str, Any]] = {}
+        retries: list[Mapping[str, Any]] = []
+        for res in list(center.results.values()):
+            ref = res.ref
+            if getattr(ref, "router_id", None) != router_id:
+                continue
+            radio_id = getattr(ref, "radio_id", None)
+            at = _num(getattr(res, "measured_at", None))
+            if not isinstance(radio_id, str) or at is None:
+                continue
+            if oldest is not None and at < oldest:
+                continue
+            util = res.summary
+            radios[radio_id] = (
+                {}
+                if util is None
+                else {
+                    "mean": getattr(util, "mean", None),
+                    "valid_count": getattr(util, "valid_count", None),
+                    "sustained_overload": getattr(util, "sustained_overload", None),
+                }
+            )
+            for assessment in res.assessments or ():
+                metric = assessment.retry_rate
+                state = getattr(metric, "state", None)
+                retries.append(
+                    {
+                        "value": getattr(metric, "value", None),
+                        "state": getattr(state, "value", state),
+                    }
+                )
+        return radios, retries
 
     def facts(
         self, router_id: str, window_s: int = CORR_WINDOW_S
@@ -468,13 +541,24 @@ class WifiRfAdapter:
         if center is None:
             return status, None
         try:
-            radios = center.radio_utilization(router_id, window_s)
-            retries = center.client_retry_rates(router_id, window_s)
+            if self._has_w6(center):
+                radios = center.radio_utilization(router_id, window_s)
+                by_ref = center.client_retry_rates(router_id, window_s)
+                if not isinstance(radios, Mapping) or not isinstance(by_ref, Mapping):
+                    return (
+                        self._status(SOURCE_NOT_READY, REASON_INTERFACE_MISMATCH),
+                        None,
+                    )
+                retries = [
+                    m
+                    for ref, m in by_ref.items()
+                    if valid_client_ref(ref) and isinstance(m, Mapping)
+                ]
+            else:
+                radios, retries = self._from_results(center, router_id, window_s)
         except Exception as err:  # noqa: BLE001 - optional module
             _LOGGER.debug("WiFi RF read failed (%s)", type(err).__name__)
             return self._status(SOURCE_NOT_READY, REASON_READ_FAILED), None
-        if not isinstance(radios, Mapping) or not isinstance(retries, Mapping):
-            return self._status(SOURCE_NOT_READY, REASON_INTERFACE_MISMATCH), None
         busiest: tuple[float, str] | None = None
         overload = False
         for radio_id, summary in radios.items():
@@ -489,9 +573,7 @@ class WifiRfAdapter:
             if busiest is None or mean > busiest[0]:
                 busiest = (mean, radio_id[:32])
         measured = high = 0
-        for ref, metric in retries.items():
-            if not valid_client_ref(ref) or not isinstance(metric, Mapping):
-                continue
+        for metric in retries:
             value = _num(metric.get("value"))
             if metric.get("state") != "measured" or value is None:
                 continue

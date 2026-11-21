@@ -188,7 +188,7 @@ def drop_rates(point: MeasurementPoint, drops: int, *, n: int = 12) -> list[Rate
 
 
 def summary(**kw: Any) -> dict[str, Any]:
-    """A ``diag_stats.LatencySummary`` dict (branch b226259, L237)."""
+    """A ``diag_stats.LatencySummary`` dict (main 1.48.0)."""
     out = {
         "answered": 60,
         "lost": 0,
@@ -254,7 +254,7 @@ def diag_view(hour: dict[str, Any], week: dict[str, Any] | None = None) -> dict:
 
 
 class FakeRf:
-    """Test double of a WiFi RF center (shapes of branch fddb6cf)."""
+    """Test double of a WiFi RF center (the W6 read API; see test_traffic_rf_adapter for main)."""
 
     def __init__(
         self,
@@ -272,7 +272,7 @@ class FakeRf:
 
 
 def util(mean: float, valid: int = 12, overload: bool = False) -> dict[str, Any]:
-    """``rf_utilization.UtilizationSummary.as_dict()`` (branch fddb6cf L487)."""
+    """``rf_utilization.UtilizationSummary.as_dict()`` (main 1.48.0)."""
     return {
         "current": mean,
         "mean": mean,
@@ -286,7 +286,7 @@ def util(mean: float, valid: int = 12, overload: bool = False) -> dict[str, Any]
 
 
 def metric(value: float | None, state: str = "measured") -> dict[str, Any]:
-    """``rf_models.Metric.as_dict()`` (branch fddb6cf L112)."""
+    """``rf_models.Metric.as_dict()`` (main 1.48.0)."""
     return {"value": value, "state": state, "source": "iw", "measured_at": NOW}
 
 

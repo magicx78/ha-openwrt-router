@@ -451,10 +451,9 @@ TREND_METHOD: Final = "theil_sen_daily_mean"
 
 # --- correlation (Phase H, task §12, §13; plan §10) ------------------------------------
 
-# hass.data keys of the optional modules (not on main; looked up at run time).
-# Fundstelle: const.DATA_NET_DIAGNOSTICS on origin/claude/net-diagnostics-f989ed
-# (b226259, const.py L858) and const.DATA_WIFI_RF_CENTER on
-# origin/claude/wifi-rf-48d270 (fddb6cf, const.py L854).
+# hass.data keys of the optional modules, looked up at run time. Equal to
+# const.DATA_NET_DIAGNOSTICS and const.DATA_WIFI_RF_CENTER (main 1.48.0; kept
+# as literals so this module stays free of HA imports, a test pins them).
 DIAG_DATA_KEY: Final = "openwrt_router_net_diagnostics"
 WIFI_RF_DATA_KEY: Final = "openwrt_router_wifi_rf_center"
 
@@ -478,7 +477,7 @@ DIAG_MIN_SAMPLES: Final = 6
 DIAG_MIN_COVERAGE: Final = 0.5
 DIAG_LATENCY_KINDS: Final = frozenset({"icmp", "tcp", "http"})
 # WiFi RF: same raise level as rf_correlate.high_pct / NI wifi_channel_busy,
-# retry level as rf_clients.ClientThresholds.retry_high (branch fddb6cf).
+# retry level as rf_clients.ClientThresholds.retry_high (main 1.48.0).
 AIRTIME_HIGH_PCT: Final = 70.0
 RF_MIN_VALID: Final = 6
 RETRY_HIGH_RATE: Final = 0.25
