@@ -694,8 +694,9 @@ class TestChannelPlanWiring:
         ):
             assert await async_setup_entry(hass, entry) is True
 
-        listener = mock_coordinator.async_add_listener.call_args.args[0]
-        listener()
+        # every poll listener of the entry (channel plan, WiFi RF since 1.48.0)
+        for call in mock_coordinator.async_add_listener.call_args_list:
+            call.args[0]()
         monitor.evaluate.assert_called_once_with("test_entry_id", mock_coordinator)
 
         callbacks = [c.args[0] for c in entry.async_on_unload.call_args_list]

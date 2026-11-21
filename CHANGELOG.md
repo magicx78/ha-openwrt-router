@@ -4,6 +4,39 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+### Hinzugefügt
+
+- **WiFi RF Intelligence (1.48.0, Teil 1: Backend).** Funkbild je Radio aus den
+  vorhandenen Poll-Daten (Rauschen, Sendeleistung, Kanalbreite, Signal je Client,
+  Airtime) und optionalen Zusatzabfragen. **Alles ist standardmäßig aus**: Ohne den Schalter
+  `wifi_rf_enabled` (je Router in den Optionen) macht ein Poll exakt dieselben Router-Aufrufe
+  wie vorher (Test zählt die ubus-Aufrufe mit RF an und aus).
+  - Zusatzabfragen, je ein eigener Schalter, alle aus und alle begrenzt (alle N Polls,
+    Standard 5, mindestens 300 s je Router und Radio, eine Abfrage je Art zur Zeit,
+    Zeitlimit je Runde): `hostapd get_status` (Kanalauslastung aus der Differenz der
+    Zähler `airtime.time`/`time_busy`, nicht aus dem Byte `utilization`), `iwinfo assoclist`
+    (Retry-Rate aus der Zählerdifferenz), `iwinfo freqlist`/`txpowerlist` (nur bei Start und
+    nach Kanal- oder Länderwechsel) und `iwinfo survey`; `txpowerlist` und `survey` nur mit
+    der passenden Core-Fähigkeit. Last bei 5 Polls: etwa
+    +11 % WLAN-Aufrufe (get_status und assoclist zusammen, rund 15 B/s je Router); Survey
+    weitere +14 %. Auf dem FRITZ!WLAN Repeater 1750E (54 MB RAM) kann ein ath10k-Survey bis
+    3 s dauern — dort Survey aus lassen.
+  - Keine neuen ACL-Rechte: Ein fehlendes Recht heißt „nicht unterstützt“ mit Grund, nie ein
+    Poll-Fehler. Kein Scan (bleibt „nicht unterstützt“).
+  - Nur lesende Routen unter `/api/openwrt_router/enterprise/wifi/`: `overview`, `radios`,
+    `channel_map`, `timeline?window=1h|24h|7d|30d`, `roaming`, `recommendations`. Anmeldung
+    nötig; Administratoren (Nicht-Admins nur bei freigegebenem Topologie-Panel, ohne
+    Roaming-Verlauf); der Roaming-Verlauf einmal je Panel-Sitzung über den Core-Guard.
+    RF aus oder nicht bereit ergibt Status `off`/`not_ready`, nie einen Fehler.
+  - Ohne Modulschlüssel, Router-ID oder Quelle: „nicht bereit“, keine Bewertung und kein
+    „alles gut“. Unbekannte Werte bleiben unbekannt, nie 0. Ein voller Kanal ist nur ein
+    Hinweis.
+  - Ereignisse im allgemeinen Core-Ring nur bei Änderung (gemessene Kanalkonflikte, anhaltend
+    hohe Auslastung, neue/erledigte Empfehlungen; die erste Auswertung nach dem Start ist
+    die Basis). `router.forgotten` löscht alle RF-Daten des Routers; Entladen schreibt den
+    Verlauf sofort.
+  - Diagnose: neuer Block `wifi_rf` (nur Zähler, Zustände und Gründe, maskiert).
+
 ## [1.46.2] - 2026-11-21
 
 ### Behoben

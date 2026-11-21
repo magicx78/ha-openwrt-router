@@ -403,3 +403,39 @@ async def async_get_config_entry_diagnostics(
 
 
 # --- end Security Center
+
+
+# --- WiFi RF Intelligence (release 1.48.0, part 1) ---
+# The fleet-wide RF center's counters as one more block ("wifi_rf"): counts,
+# states, reasons and the switches only (no router id, radio name, MAC,
+# SSID or key), masked by the RF masker and redacted like the other blocks.
+# A failure here never fails the download.
+_async_get_config_entry_diagnostics_sec = async_get_config_entry_diagnostics
+
+
+def _wifi_rf_summary(hass: HomeAssistant) -> dict[str, Any]:
+    """WiFi RF center counters; never fails the download."""
+    try:
+        from .rf_center import async_get_rf_center
+
+        center = async_get_rf_center(hass)
+        if center is None:
+            return {"loaded": False}
+        return _redact(center.mask(center.diagnostics()))
+    except Exception as err:  # noqa: BLE001 - the download must not fail
+        _LOGGER.debug("WiFi RF diagnostics failed: %s", type(err).__name__)
+        return {"loaded": False, "error": True}
+
+
+@_sec_wraps(_async_get_config_entry_diagnostics_sec)
+async def async_get_config_entry_diagnostics(
+    hass: HomeAssistant,
+    entry: OpenWrtConfigEntry,
+) -> dict[str, Any]:
+    """Diagnostics of the entry plus the WiFi RF block."""
+    diagnostics = await _async_get_config_entry_diagnostics_sec(hass, entry)
+    diagnostics["wifi_rf"] = _wifi_rf_summary(hass)
+    return diagnostics
+
+
+# --- end WiFi RF Intelligence
