@@ -231,6 +231,18 @@ SECURITY_AUDIT_MAX_EVENTS: Final = 500
 SECURITY_MODULE_QUOTA: Final = 100
 SECURITY_MODULE_MAX_EVENTS: Final = 500
 AUDIT_RETENTION_DAYS: Final = 90
+# General ring: a guaranteed share per owner (core or module). It is a floor,
+# not a cap: while the ring has room anyone may write more. Only when it is
+# full does the oldest entry of an owner above its share go, so a loud module
+# never pushes out entries of an owner below its share. 100 per module equals
+# SECURITY_MODULE_QUOTA and covers six modules (config_manager,
+# net_diagnostics, security_center, wifi_rf, traffic_analytics and one more);
+# the core keeps the rest (400): its fleet-wide entries (routers, backups,
+# approvals, configuration) are the trail diagnostics rely on. The shares add
+# up to AUDIT_MAX_EVENTS, which stays the hard limit of the ring.
+AUDIT_MODULE_SHARE: Final = 100
+AUDIT_SHARED_MODULES: Final = 6
+AUDIT_CORE_SHARE: Final = AUDIT_MAX_EVENTS - AUDIT_SHARED_MODULES * AUDIT_MODULE_SHARE
 DEFAULT_LIST_LIMIT: Final = 50
 MAX_LIST_LIMIT: Final = 500
 
@@ -4864,7 +4876,11 @@ class ConfigurationApiProtocol(Protocol):
         ring: AuditRing | None = None,
         limit: int = DEFAULT_LIST_LIMIT,
     ) -> tuple[CoreEvent, ...]:
-        """Audit entries from both rings (or one), newest first."""
+        """Audit entries from both rings (or one), oldest first.
+
+        ``limit`` keeps the newest ``limit`` entries, still oldest first, so
+        ``[-1]`` is the newest entry.
+        """
 
     def subscribe(self, listener: CoreEventListener) -> Callable[[], None]:
         """Listen to published events; returns an unsubscribe callback."""

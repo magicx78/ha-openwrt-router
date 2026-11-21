@@ -21,7 +21,8 @@
           "traffic_station_detail": "WLAN-Client-Zähler aus iwinfo (traffic_station_detail)",
           "traffic_sysfs_fallback": "Schnittstellen-Zähler aus sysfs als Ersatz (traffic_sysfs_fallback)",
           "traffic_offload_probe": "Flow-Offloading einmal prüfen (traffic_offload_probe)",
-          "traffic_history_profile": "Tiefe des Traffic-Verlaufs (traffic_history_profile)"
+          "traffic_history_profile": "Tiefe des Traffic-Verlaufs (traffic_history_profile)",
+          "time_machine_enabled": "Network Time Machine für alle Router (time_machine_enabled)"
         },
         "data_description": {
           "extended_wifi_sensors": "Schaltet alle Sensoren pro Funkmodul, pro SSID (AP) und pro Port dieses Routers auf einmal ein statt einzeln. Ausschalten deaktiviert nur die Sensoren, die dieser Schalter eingeschaltet hat; selbst deaktivierte Sensoren bleiben unberührt. Wirksam nach etwa 30 Sekunden.",
@@ -41,7 +42,8 @@
           "traffic_station_detail": "Liest iwinfo assoclist je Access-Point-Schnittstelle höchstens alle 5 Minuten, um Client-Zähler zu ergänzen, die in der normalen Abfrage fehlen. Braucht traffic_enabled und den Modulschlüssel des Enterprise-Kerns.",
           "traffic_sysfs_fallback": "Liest Schnittstellen-Zähler aus /sys/class/net höchstens alle 5 Minuten, nur für Schnittstellen, die die normale Abfrage nicht liefert. Braucht traffic_enabled.",
           "traffic_offload_probe": "Liest die Firewall-Einstellung für Flow-Offloading (uci get) alle 6 Stunden, weil ausgelagerter Verkehr manche Zähler umgeht. Braucht traffic_enabled.",
-          "traffic_history_profile": "Kompakt (Standard): 5-Minuten-Werte für 6 Stunden, stündlich für 14 Tage, täglich für 31 Tage, kein Client-Verlauf auf der Platte. Standard: 5-Minuten-Werte für 1 Tag, stündlich für 14 Tage, täglich für 90 Tage, Client-Verlauf bleibt (täglich für 30 Tage); braucht mehr Speicher. Es gilt das tiefste Profil unter den Routern mit eingeschalteter Traffic-Analyse, für die ganze Flotte."
+          "traffic_history_profile": "Kompakt (Standard): 5-Minuten-Werte für 6 Stunden, stündlich für 14 Tage, täglich für 31 Tage, kein Client-Verlauf auf der Platte. Standard: 5-Minuten-Werte für 1 Tag, stündlich für 14 Tage, täglich für 90 Tage, Client-Verlauf bleibt (täglich für 30 Tage); braucht mehr Speicher. Es gilt das tiefste Profil unter den Routern mit eingeschalteter Traffic-Analyse, für die ganze Flotte.",
+          "time_machine_enabled": "Ein Schalter für die ganze Flotte: hier umgeschaltet gilt er für jeden Router. Zeigt vergangene Ereignisse der vorhandenen Module (Audit-Protokoll, Konfigurationsversionen, Netzwerk-Intelligenz, Security Center) auf einer Zeitleiste im Panel. Standardmäßig aus. Liest nur, was diese Module ohnehin speichern: keine zusätzliche Router-Abfrage, kein eigener Speicher. In dieser Version keine Client-Ereignisse; MAC-Adressen, IP-Adressen, Hostnamen und SSIDs werden nie angezeigt. Benutzer ohne Administratorrechte sehen nur Infrastruktur und Störungen, und nur solange das Panel für alle Benutzer geöffnet ist."
         }
       }
     }

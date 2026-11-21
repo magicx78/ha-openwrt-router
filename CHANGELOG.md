@@ -4,6 +4,91 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.50.0] - 2026-11-21
+
+Network Time Machine, Phase A: eine Zeitleiste, die die Ereignisse vorhandener Module auf eine
+Achse legt, als Lese-Schnittstelle und als Enterprise-Tab „Zeitreise“. **Standardmäßig aus,
+ein Schalter für alle Router.** Kein eigener Speicher, kein zusätzlicher Router-Aufruf (Test
+vergleicht die Aufrufe zweier Polls mit Time Machine an und aus), kein Listener, keine
+Hintergrundaufgabe, keine Entitäten und keine Client-Marken. Entwicklerdoku:
+`docs/time-machine.md`. Panel-Version `20261121-timemachine2`.
+
+### Hinzugefügt
+
+- **Route `GET /api/openwrt_router/enterprise/timemachine/timeline`.** Liest bei jeder Anfrage
+  Audit-Log des Enterprise Core, Konfigurationsversionen, Ereignisse und Vorfälle von Network
+  Intelligence und die Zeitleiste des Security Center über deren öffentliche Lesefunktionen,
+  rechnet sie in Marken um und gibt sie neueste zuerst zurück. Abfrage `from`, `until`
+  (halboffen, Standard 24 h, höchstens 14 Tage), `source`, `router_id`, `kind`,
+  `min_severity`, `limit` (Standard 200, höchstens 500); jeder Schlüssel höchstens einmal,
+  unbekannte werden abgelehnt (400 ohne Echo). Jede Quelle wird bis zur Kapazität ihres
+  Speichers ganz gelesen (Ausnahme: Konfigurationsversionen, 500), Rechte, Filter und
+  Seitengröße wendet die Zusammenführung an. Blättern über `next_until` auf einem
+  Millisekunden-Raster, ohne Marken desselben Zeitstempels zu teilen, ohne Doppel und ohne
+  Lücken; eine gekürzte Quelle hält die Seite an ihrer Kante an, ist nie `empty` und sagt
+  `cut` (`next_page` / `unreachable`). Je Quelle Zustand (`ok`, `empty`, `off`,
+  `unreadable`) mit festem Grund und Zeitbudget von 2 s (in den Schleifen des Adapters
+  geprüft); eine fehlerhafte Quelle macht die Antwort `partial`, nie die ganze Anfrage
+  kaputt. Administratoren sehen alles; andere
+  Benutzer nur bei freigegebenem Topologie-Panel und dann nur Infrastruktur, Funk, Topologie
+  und Störungen, ohne Audit-Log und Konfigurationsversionen; Zustand, Zahl und ältester
+  Zeitpunkt je Quelle gelten nach den Rechten. Keine MAC- oder IP-Adressen,
+  Hostnamen, SSIDs oder WLAN-Netdev-Namen in Antworten, Logs oder Diagnosedaten; Ereignisse
+  eines einzelnen Clients werden weggelassen und nur für Administratoren gezählt
+  (`omitted_client_marks`, für andere Benutzer 0).
+- **Enterprise-Tab „Zeitreise“** (nach Traffic Analytics). Zeitfenster 1 Stunde, 24 Stunden,
+  7 oder 14 Tage; Filter nach Quelle, Schwere und Router, dazu Art-Chips, die nur die
+  geladenen Marken filtern („x von y Marken“). Je Quelle ein Zustand in Worten („12 Marken“,
+  „leer“, „aus“ mit Grund, „Quelle nicht lesbar“ mit Grund, „gekürzt“, „Älteres nicht
+  abrufbar“); Quellen, die nur
+  Administratoren lesen dürfen, sind für andere Benutzer gesperrt. Marken neueste zuerst nach
+  Kalendertagen in Ortszeit (Heute, Gestern, Wochentag mit Datum), mit Uhrzeit (UTC-Zeit im
+  Tooltip), Schwere als Punkt und Wort, Art, deutschem Titel für jeden Code, den das Backend
+  erzeugen kann (Test), Kennzahlen, Router und Quelle. „Ältere laden“ blättert über
+  `next_until`; ein Abschnitt mit nur ausgeblendeten Einträgen sagt das und bietet „Ältere
+  laden“ an. Aktualisiert sich nur bei sichtbarem Tab höchstens alle 60 s; eine
+  Aktualisierung während „Ältere laden“ lässt keine geladenen Marken verschwinden. Unter der
+  Breite einer Zeile werden Marken zu Karten, ohne seitliches Scrollen bis 360 px.
+- **Option „Network Time Machine für alle Router“** (`time_machine_enabled`, aus) in den
+  Router-Optionen; Speichern schreibt den Wert in alle Router-Einträge und lässt deren übrige
+  Optionen unverändert. Aus antwortet die Route `status: off` und liest keine Quelle; der
+  Tab zeigt dann nur den Hinweis mit dem Weg zum Schalter.
+- **Diagnose-Block `time_machine`**: Schalter, Grenzen, Zustand und Markenzahl je Quelle der
+  letzten 24 h und Zähler der Anfragen; nichts Persönliches. Aus nur `{"enabled": false}`.
+
+### Behoben
+
+- **Konfigurationsmanager:** Nach einem HA-Neustart zeigte die Drift-Zusammenfassung den
+  ältesten statt den neuesten Audit-Eintrag.
+- **Audit-Protokoll:** Ein gesprächiges Modul verdrängt auf dem allgemeinen Ring keine
+  Einträge anderer mehr. Jeder Besitzer hat einen festen Anteil (Core 400, je Modul 100);
+  verdrängt wird zuerst der älteste Eintrag eines Besitzers über seinem Anteil. Verdrängte
+  Einträge werden gezählt (`evicted_general`, je Besitzer `general_evicted`).
+- **Enterprise Core:** Die Beschreibung von `events` stimmt wieder: Einträge kommen vom
+  ältesten zum neuesten, `limit` behält die neuesten.
+
+### Bekannte Grenzen
+
+- Die Zeitleiste liest nur, was die Module selbst behalten. Ausfälle und Kanalwechsel vor
+  einem HA-Neustart fehlen deshalb, bis Phase B einen eigenen Verlauf bringt.
+- Keine Client-Marken; Ereignisse einzelner Clients werden nur gezählt.
+- Konfigurationsänderungen erscheinen nur als Anzahl und Referenz, ohne Inhalt.
+- Mehr Marken mit demselben Zeitstempel (Millisekunde) als `limit` werden abgeschnitten
+  (`truncated`).
+- Konfigurationsversionen: höchstens 500 je Anfrage und ohne `until`; liegen mehr als 500
+  zwischen `from` und jetzt, sind die älteren nicht erreichbar (`cut: unreachable`).
+- Das Zeitbudget von 2 s unterbricht die synchronen Lesefunktionen der Quellmodule nicht;
+  es greift erst in den Schleifen des Adapters.
+- Modulschlüssel des Enterprise Core werden weiterhin nur nach Namen vergeben.
+- Nur mit Tests und Mocks geprüft, nicht auf Routern und nicht in einer laufenden HA-Instanz.
+  Den Tab hat die Prüfung vor dem Merge headless in Firefox mit Testantworten bei 360, 768 und
+  1280 px angesehen, auch nach den Korrekturen (Kontrast gesperrter Chips, Kartenansicht ab
+  860 px, Quellspalte).
+- Network-Intelligence-Vorfälle: Bei mehr als 500 offenen Vorfällen liegt der Speicher über der
+  Lesegrenze; die übrigen fehlen dann und die Quelle sagt `cut: unreachable`.
+- Bringt eine Aktualisierung mehr neue Marken als eine Seite, beginnt die Liste im Tab neu;
+  zuvor nachgeladene ältere Seiten müssen erneut geladen werden.
+
 ## [1.49.4] - 2026-11-21
 
 Behebt die fehlenden Traffic-Sensoren am Gateway und kleine Restpunkte nach 1.49.3:

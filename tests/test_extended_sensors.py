@@ -140,6 +140,8 @@ class TestOptionsFlow:
             "traffic_sysfs_fallback",
             "traffic_offload_probe",
             "traffic_history_profile",
+            # Network Time Machine (Phase A): one fleet switch, off by default.
+            "time_machine_enabled",
         }
 
     @pytest.mark.asyncio

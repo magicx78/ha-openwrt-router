@@ -90,6 +90,19 @@ Zeigt den Verkehr über WAN, Ports, Schnittstellen, VLANs und WLAN-Clients, mit 
 
 ➡️ [Zu Traffic Analytics](https://github.com/magicx78/ha-openwrt-router/blob/main/docs/traffic-analytics.md)
 
+### 🕰️ Zeitreise (Network Time Machine, ab 1.50.0)
+
+Legt die Ereignisse der vorhandenen Module auf eine Zeitleiste (Panel-Tab „Zeitreise“): Audit-Log, Konfigurationsversionen, Ereignisse und Vorfälle von Network Intelligence und die Zeitleiste des Security Center, neueste zuerst und nach Tagen geordnet.
+
+- **Einschalten** mit einem Schalter für alle Router in den Integrationsoptionen („Network Time Machine für alle Router“, `time_machine_enabled`, standardmäßig aus).
+- **Kein eigener Speicher, kein zusätzlicher Router-Aufruf**: Phase A liest bei jeder Anfrage nur, was die Module ohnehin behalten. Keine Entitäten, keine Hintergrundaufgabe.
+- **Filter**: Zeitfenster (1 Stunde bis 14 Tage), Quelle, Schwere, Router und Art; „Ältere laden“ blättert zurück.
+- **Rechte**: Administratoren sehen alles; andere Benutzer nur bei freigegebenem Panel und ohne Audit-Log und Konfiguration.
+- **Datenschutz**: keine MAC, keine IP, kein Hostname. Ereignisse einzelner Clients werden weggelassen und für Administratoren nur gezählt.
+- **Grenzen**: Ausfälle und Kanalwechsel vor einem HA-Neustart fehlen bis Phase B; Konfigurationsänderungen nur als Anzahl. Noch nicht an echten Routern und nicht im Browser geprüft.
+
+➡️ [Zur Time Machine](https://github.com/magicx78/ha-openwrt-router/blob/main/docs/time-machine.md)
+
 ## `03 /` Installation
 
 **Voraussetzungen**
@@ -115,7 +128,7 @@ Eine manuelle Installation ist ebenfalls möglich. Routervorbereitung, Berechtig
 > [!NOTE]
 > **Aktiv in Entwicklung.** Viele Funktionen aus unserer TODO-Liste sind bereits umgesetzt. Gleichzeitig gibt es offene Punkte, weitere Ideen und Tests auf echter Hardware, an denen wir arbeiten.
 
-**Bereits umgesetzt:** Topologie-Panel, Network Intelligence, Client-Stabilität sowie die ersten Versionen von Configuration Manager, Security Center, Network Diagnostics und Traffic Analytics.
+**Bereits umgesetzt:** Topologie-Panel, Network Intelligence, Client-Stabilität sowie die ersten Versionen von Configuration Manager, Security Center, Network Diagnostics, Traffic Analytics und Zeitreise (Phase A).
 
 **Daran arbeiten wir unter anderem:** weitere Hardware- und Frontend-Tests, Verbesserungen bei Sicherheit und Zuverlässigkeit sowie zusätzliche Funktionen. Ein automatischer Restore und die Verschlüsselung lokaler Konfigurationsarchive stehen noch aus.
 

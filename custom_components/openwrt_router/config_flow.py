@@ -66,6 +66,7 @@ from .const import (
     OPTION_CONFIG_BACKUP_SCHEDULE,
     OPTION_CONFIG_BACKUP_TIME,
     OPTION_CONFIG_DRIFT_CHECK,
+    OPTION_TIME_MACHINE_ENABLED,
     PROTOCOL_HTTP,
     PROTOCOL_HTTPS,
     PROTOCOL_HTTPS_INSECURE,
@@ -183,6 +184,14 @@ class OpenWrtOptionsFlow(OptionsFlow):
                     self.hass, self.config_entry.entry_id, new_opts
                 )
             # --- end Traffic Analytics
+            # --- Network Time Machine (Phase A): ONE switch for the fleet.
+            # The value is written through to every other router entry, so
+            # all entries agree; no update listener, no reload, never raises.
+            if OPTION_TIME_MACHINE_ENABLED in user_input:
+                on = new_opts.get(OPTION_TIME_MACHINE_ENABLED) is True
+                new_opts[OPTION_TIME_MACHINE_ENABLED] = on
+                _write_time_machine_through(self.hass, self.config_entry, on)
+            # --- end Network Time Machine
             return self.async_create_entry(title="", data=new_opts)
 
         schema = vol.Schema(
@@ -231,7 +240,55 @@ class OpenWrtOptionsFlow(OptionsFlow):
         # --- Traffic Analytics (Phase K): always offered, off by default.
         schema = schema.extend(_traffic_option_fields(opts))
         # --- end Traffic Analytics
+        # --- Network Time Machine (Phase A): always offered, off by default;
+        # the form shows the fleet state (on while any router has it on).
+        schema = schema.extend(_time_machine_option_fields(self.hass, opts))
+        # --- end Network Time Machine
         return self.async_show_form(step_id="init", data_schema=schema)
+
+
+# --- Network Time Machine (Phase A) ---
+def _time_machine_option_fields(hass: Any, opts: Any) -> dict[Any, Any]:
+    """The fleet-wide switch; its default is the fleet state."""
+    try:
+        from .tm_query import time_machine_enabled
+
+        on = time_machine_enabled(hass)
+    except Exception:  # noqa: BLE001 - the form never fails because of it
+        on = False
+    on = on or opts.get(OPTION_TIME_MACHINE_ENABLED) is True
+    return {vol.Optional(OPTION_TIME_MACHINE_ENABLED, default=on): bool}
+
+
+def _write_time_machine_through(hass: Any, entry: Any, on: bool) -> None:
+    """Give every other router entry the same switch value (one fleet switch).
+
+    Only entries whose value differs are updated, with all their other
+    options kept. Errors are logged by type only and never stop the form.
+    """
+    try:
+        entries = hass.config_entries.async_entries(DOMAIN)
+    except Exception:  # noqa: BLE001
+        return
+    if not isinstance(entries, list):
+        return
+    for other in entries:
+        if other.entry_id == entry.entry_id:
+            continue
+        options = dict(getattr(other, "options", None) or {})
+        if (options.get(OPTION_TIME_MACHINE_ENABLED) is True) == on:
+            continue
+        options[OPTION_TIME_MACHINE_ENABLED] = on
+        try:
+            hass.config_entries.async_update_entry(other, options=options)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Time Machine switch not written to another router (%s)",
+                type(err).__name__,
+            )
+
+
+# --- end Network Time Machine
 
 
 # --- Configuration manager options (plan 2026-11-18, section 2)

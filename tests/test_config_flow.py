@@ -417,6 +417,8 @@ class TestNoSwitchOrFritzboxSteps:
             "traffic_sysfs_fallback",
             "traffic_offload_probe",
             "traffic_history_profile",
+            # Network Time Machine (Phase A): one fleet switch, off by default.
+            "time_machine_enabled",
         }
         assert not any("fritzbox" in k for k in keys)
 

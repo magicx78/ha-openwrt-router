@@ -1,10 +1,35 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-21 · Version: v1.49.4
+Stand: 2026-11-21 · Version: v1.50.0
 
 ---
 
 ## Backlog
+
+### Network Time Machine (Plan `docs/plans/2026-11-21-network-time-machine.md`, 1.50.0)
+
+Entwicklerdoku: `docs/time-machine.md`.
+
+- [x] **Phase A** Leseschicht: Route `…/enterprise/timemachine/timeline`, ein Schalter für alle
+      Router, Diagnose-Block, Enterprise-Tab „Zeitreise“ (1.50.0).
+- [ ] **Phase B** Eigener Index: Marken für Ausfälle, HA-Lücken, Kanal/DFS, Uplink und
+      Fingerabdruck, Verweis-Marken für Störungen und Konfiguration, Kontrollpunkte.
+- [ ] **Phase C** Client-Sitzungen über 24 h hinaus, mit eigenem Schalter, Rechten und
+      „Client vergessen“.
+- [ ] **Phase D** „Zustand zum Zeitpunkt T“ und Vergleich zweier Zeitpunkte.
+- [ ] **Phase E** Client-Marken der Module demselben Client zuordnen (nie über `cli_`-Werte);
+      Export.
+- [ ] **Phase F** Sprünge in die Fach-Tabs (`ref` verlinken), Link aus der Topologie,
+      Browser-Prüfung 360/768/1280 px hell/dunkel.
+- [ ] **Bekannte Grenzen von Phase A:** liest nur, was die Module behalten (Ausfälle und
+      Kanalwechsel vor einem HA-Neustart fehlen bis Phase B); keine Client-Marken;
+      Konfigurationsänderungen nur als Anzahl und Referenz; mehr Marken mit demselben
+      Zeitstempel als `limit` werden abgeschnitten; Konfigurationsversionen höchstens 500
+      und ohne `until` (ältere dann `cut: unreachable`); das Zeitbudget unterbricht die
+      synchronen Lesefunktionen der Module nicht; Modulschlüssel des Core nur nach Namen
+      vergeben.
+- [ ] **Im Browser und in einer echten Instanz prüfen** (Tab „Zeitreise“ bei 360/768/1280 px,
+      hell/dunkel; Rechte als Nicht-Admin). Bisher nur Tests mit Mocks und Render-Tests.
 
 ### Bekannte Grenzen aus 1.49.4
 

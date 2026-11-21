@@ -25,10 +25,10 @@ import logging
 import math
 import secrets
 import unicodedata
-from collections.abc import AsyncIterator, Callable, Coroutine, Iterable
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 import voluptuous as vol
@@ -201,6 +201,15 @@ def _parse_time(value: Any) -> time:
 # Drift summary states besides the DriftAckState values.
 DRIFT_OPEN = "open"
 DRIFT_CLEAR = "clear"
+
+
+def _event_time(event: Any) -> datetime:
+    """Newest time of an audit entry (a deduplicated repeat moves it)."""
+    for name in ("last_repeat_at", "ts"):
+        when = getattr(event, name, None)
+        if isinstance(when, datetime):
+            return when
+    return datetime.min.replace(tzinfo=UTC)
 
 
 def _drift_summary(
@@ -698,38 +707,43 @@ class ConfigManagerRuntime:
             state.last_attempt_at = newest_at
 
     def _drift_from_events(self, state: RouterState, events: Iterable[Any]) -> None:
-        """Drift summary from the newest detection and its acknowledgement.
+        """Drift summary from the newest detection and its newest acknowledgement.
 
-        Acknowledgements count regardless of their position in the audit (a
-        drift id, once acknowledged, stays acknowledged in the core).
+        ``api.events`` returns entries oldest first; the position is not
+        relied on: the entry time decides (``last_repeat_at`` of a
+        deduplicated repeat, else ``ts``), equal times keep the list order
+        (later = newer, as the core sorts). Acknowledgements count regardless
+        of their position relative to the detection (a drift id, once
+        acknowledged, stays acknowledged in the core); the newest one per
+        drift id gives the state. ``state.drift_ids`` gets every drift id.
         """
-        events = list(events)  # newest first
+        ordered = sorted(
+            enumerate(events), key=lambda item: (_event_time(item[1]), item[0])
+        )
         acks: dict[str, str] = {}
-        for event in events:
+        newest: tuple[str, Any, Mapping[str, Any]] | None = None
+        for _index, event in ordered:  # oldest first: later entries overwrite
             data = getattr(event, "data", None) or {}
             drift_id = data.get("drift_id")
-            if isinstance(drift_id, str) and str(event.type) == str(
-                CoreEventType.DRIFT_ACKNOWLEDGED
-            ):
-                acks.setdefault(drift_id, str(data.get("state") or "acknowledged"))
-        for event in events:
-            data = getattr(event, "data", None) or {}
-            drift_id = data.get("drift_id")
-            if not isinstance(drift_id, str) or str(event.type) != str(
-                CoreEventType.DRIFT_DETECTED
-            ):
+            if not isinstance(drift_id, str):
                 continue
-            state.drift_ids.add(drift_id)
-            if state.drift is None:
-                state.drift = _drift_summary(
-                    drift_id=drift_id,
-                    state=acks.get(drift_id, DRIFT_OPEN),
-                    critical_count=data.get("critical_count"),
-                    unknown_count=data.get("unknown_count"),
-                    comparison=data.get("comparison"),
-                    baseline_backup_id=data.get("baseline_version_id"),
-                    checked_at=event.ts,
-                )
+            event_type = str(getattr(event, "type", ""))
+            if event_type == str(CoreEventType.DRIFT_ACKNOWLEDGED):
+                acks[drift_id] = str(data.get("state") or "acknowledged")
+            elif event_type == str(CoreEventType.DRIFT_DETECTED):
+                state.drift_ids.add(drift_id)
+                newest = (drift_id, event, data)
+        if newest is not None and state.drift is None:
+            drift_id, event, data = newest
+            state.drift = _drift_summary(
+                drift_id=drift_id,
+                state=acks.get(drift_id, DRIFT_OPEN),
+                critical_count=data.get("critical_count"),
+                unknown_count=data.get("unknown_count"),
+                comparison=data.get("comparison"),
+                baseline_backup_id=data.get("baseline_version_id"),
+                checked_at=event.ts,
+            )
 
     async def async_refresh(self, router_id: str) -> None:
         """Re-read the router's versions from the store (no router call)."""
