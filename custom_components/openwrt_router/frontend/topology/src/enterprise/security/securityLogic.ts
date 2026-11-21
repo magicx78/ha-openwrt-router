@@ -21,6 +21,7 @@ import type {
   DetectionsView,
   Device,
   DeviceCounts,
+  FleetSource,
   Incident,
   IncidentDetail,
   IncidentStatus,
@@ -224,6 +225,7 @@ export const TIMELINE_KIND_LABEL: Record<string, string> = {
   cap_reached: 'Obergrenze der Hinweise erreicht',
   log_quota_reached: 'Quote für Hinweise aus Logzeilen erreicht',
   other_quota_reached: 'Quote für Hinweise aus WLAN, Konfiguration und Geräten erreicht',
+  wifi_quota_reached: 'Quote für WLAN-Hinweise erreicht',
 };
 
 export const TRUST_LABEL: Record<string, string> = {
@@ -426,7 +428,28 @@ function parseCoverage(v: unknown): Coverage {
     available: strList(o.available),
     stale: strList(o.stale),
     missing: strList(o.missing),
+    fleet: parseFleetMap(o.fleet),
   };
+}
+
+/** N of M of a fleet source; null if neither count was sent (unknown). */
+function parseFleet(o: Obj): FleetSource | null {
+  const fleet = {
+    routersDelivering: num(o.routers_delivering),
+    routers: num(o.routers),
+    rateLimited: num(o.rate_limited),
+  };
+  return fleet.routersDelivering === null && fleet.routers === null ? null : fleet;
+}
+
+function parseFleetMap(v: unknown): Record<string, FleetSource> {
+  const out: Record<string, FleetSource> = {};
+  for (const [source, raw] of Object.entries(obj(v) ?? {})) {
+    const o = obj(raw);
+    const fleet = o ? parseFleet(o) : null;
+    if (source && fleet) out[source] = fleet;
+  }
+  return out;
 }
 
 export function parseIncident(v: unknown): Incident | null {
@@ -532,6 +555,7 @@ function parseSourceStatus(o: Obj): SourceStatus | null {
     availability: str(o.availability) ?? 'unknown',
     reason: str(o.reason),
     lastOk: num(o.last_ok),
+    fleet: parseFleet(o),
   };
 }
 
@@ -571,6 +595,10 @@ function parseLimits(v: unknown): Limits {
     otherIncidentQuota: num(o.other_incident_quota),
     otherIncidents: num(o.other_incidents),
     incidentsOtherQuotaDropped: num(o.incidents_other_quota_dropped),
+    wifiIncidentQuota: num(o.wifi_incident_quota),
+    otherReservedNonWifi: num(o.other_reserved_non_wifi),
+    wifiIncidents: num(o.wifi_incidents),
+    incidentsWifiQuotaDropped: num(o.incidents_wifi_quota_dropped),
     eventsThrottled: num(o.events_throttled),
   };
 }
@@ -727,6 +755,9 @@ export function limitLines(l: Limits): LimitLine[] {
   count('Nicht gespeichert, Log-Quote voll', l.incidentsLogQuotaDropped);
   quota('Gespeicherte Hinweise aus WLAN, Konfiguration und Geräten', l.otherIncidents, l.otherIncidentQuota);
   count('Nicht gespeichert, Quote für WLAN, Konfiguration und Geräte voll', l.incidentsOtherQuotaDropped);
+  const reserve = l.otherReservedNonWifi !== null ? ` (${fmt(l.otherReservedNonWifi)} Plätze bleiben für Konfiguration und Geräte)` : '';
+  quota(`Davon WLAN-Hinweise${reserve}`, l.wifiIncidents, l.wifiIncidentQuota);
+  count('Nicht gespeichert, WLAN-Quote voll', l.incidentsWifiQuotaDropped);
   count(l.incidentCap !== null ? `Nicht gespeichert, Obergrenze von ${fmt(l.incidentCap)} erreicht` : 'Nicht gespeichert, Obergrenze erreicht', l.incidentsCapDropped);
   count('Gedrosselte Meldungen an den Enterprise Core', l.eventsThrottled);
   return out;
@@ -738,6 +769,28 @@ export function rateLimitedText(routers: number | null): string | null {
   const who = routers === 1 ? 'einem Router' : `${fmt(routers)} Routern`;
   return `Von ${who} wurden Logzeilen wegen der Ratenbegrenzung verworfen. Firewall- und DNS-Erkennungen sind `
     + 'bis 5 Minuten nach der letzten verworfenen Zeile eingeschränkt.';
+}
+
+/**
+ * "von N von M Routern" of a fleet source (firewall / DNS log, 1.46.2), plus
+ * "eingeschränkt" while a delivering router loses lines to the rate limit.
+ * null when the counts are unknown: never guessed.
+ */
+export function fleetText(f: FleetSource | null | undefined): string | null {
+  if (!f || f.routers === null || f.routersDelivering === null || f.routers <= 0) return null;
+  const m = f.routers === 1 ? '1 Router' : `${fmt(f.routers)} Routern`;
+  const n = f.routersDelivering <= 0
+    ? (f.routers === 1 ? 'von keinem Router' : `von keinem der ${fmt(f.routers)} Router`)
+    : `von ${fmt(f.routersDelivering)} von ${m}`;
+  if (f.rateLimited !== null && f.rateLimited > 0) {
+    return `${n}, eingeschränkt: Ratenbegrenzung bei ${f.rateLimited === 1 ? 'einem Router' : `${fmt(f.rateLimited)} Routern`}`;
+  }
+  return n;
+}
+
+/** Fleet text of one source of the coverage list (null for other sources). */
+export function coverageFleetText(coverage: Coverage, source: string): string | null {
+  return fleetText(coverage.fleet[source]);
 }
 
 function fmt(n: number): string {

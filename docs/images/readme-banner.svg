@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" role="img" aria-labelledby="title desc">
+  <title id="title">OpenWrt Router für Home Assistant</title>
+  <desc id="desc">Dunkles Banner mit neongrünem Netzwerkmotiv.</desc>
+  <defs>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse"><path d="M48 0H0V48" fill="none" stroke="#aaff00" stroke-opacity=".075"/></pattern>
+    <radialGradient id="glow"><stop stop-color="#aaff00" stop-opacity=".12"/><stop offset="1" stop-color="#aaff00" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="1200" height="340" rx="4" fill="#060412"/>
+  <rect width="1200" height="340" fill="url(#grid)"/>
+  <circle cx="980" cy="140" r="240" fill="url(#glow)"/>
+  <path d="M0 0H1200M0 339H1200" stroke="#aaff00" stroke-opacity=".35"/>
+  <text x="60" y="60" fill="#aaff00" font-family="Consolas,monospace" font-size="14" letter-spacing="4">OPEN SOURCE  /  HOME ASSISTANT  /  OPENWRT</text>
+  <text x="57" y="145" fill="#ffffff" font-family="Arial,sans-serif" font-weight="bold" font-size="66" letter-spacing="3">OPENWRT</text>
+  <text x="57" y="218" fill="#aaff00" font-family="Arial,sans-serif" font-weight="bold" font-size="66" letter-spacing="3">ROUTER</text>
+  <text x="60" y="271" fill="#c2d6b7" font-family="Consolas,monospace" font-size="17" letter-spacing="1">DEIN NETZWERK. DEIN HOME ASSISTANT.</text>
+  <path d="M850 111 960 68 1069 111 1069 226 960 271 850 226Z" fill="#0b1409" stroke="#aaff00" stroke-opacity=".55" stroke-width="2"/>
+  <path d="M960 68v89m-110-46 110 46 109-46M960 157v114" fill="none" stroke="#aaff00" stroke-opacity=".45" stroke-width="2"/>
+  <circle cx="960" cy="157" r="12" fill="#aaff00"/><circle cx="850" cy="111" r="6" fill="#00ffaa"/><circle cx="1069" cy="111" r="6" fill="#ff0088"/><circle cx="960" cy="271" r="6" fill="#aaff00"/>
+  <text x="60" y="313" fill="#71846b" font-family="Consolas,monospace" font-size="10" letter-spacing="3">BUILDING  /  LEARNING  /  TOGETHER</text>
+</svg>

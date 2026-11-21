@@ -130,8 +130,32 @@ class TestFixtures:
         results = [_parse(line.data, truncated=line.truncated) for line in lines]
         assert all(r.record is not None for r in results)
 
-    def test_fw4_lines(self):
+    def test_fw4_conf_real_lines_parse(self):
+        """The two line structures seen on a real router (1.46.2): a
+        ``forward`` line with a second ``LEN=`` and an ``in`` line with ICMP
+        (``TYPE``/``CODE``, no ports) and an empty ``OUT=``."""
         recs = [_record(line) for line in _lines("fw4_kernel.txt")]
+        assert [r.kind for r in recs] == ["fw.reject", "fw.reject"]
+        fwd = recs[0].fields
+        assert (fwd["zone"], fwd["dir"]) == ("lab", "forward")
+        assert (fwd["in_if"], fwd["out_if"]) == ("br-lan.7", "br-lan.2")
+        assert (fwd["src"], fwd["dst"]) == ("192.0.2.80", "192.0.2.20")
+        assert fwd["proto"] == "udp" and (fwd["spt"], fwd["dpt"]) == (40000, 1900)
+        assert isinstance(fwd["dpt"], int)
+        assert fwd["dest_zone"] is None  # fw4 never names it
+        icmp = recs[1].fields
+        assert (icmp["zone"], icmp["dir"]) == ("guest", "in")
+        assert icmp["in_if"] == "br-lan.5" and icmp["out_if"] is None
+        assert icmp["proto"] == "icmp" and (icmp["spt"], icmp["dpt"]) == (None, None)
+        # format seen live: no "unconfirmed" marker any more
+        assert not any(r.unconfirmed for r in recs)
+        assert all(r.fields["fmt"] == "fw4_nflog" for r in recs)
+        assert all(r.proc == "kernel" for r in recs)
+
+    def test_fw4_unbelegt_variants_still_parse(self):
+        """Variants not seen live (chain ``out``, ``drop``/``accept``, TCP
+        flags, IPv6 field order) keep parsing; README names them."""
+        recs = [_record(line) for line in _lines("fw4_kernel_unbelegt.txt")]
         assert [r.kind for r in recs] == [
             "fw.drop",
             "fw.reject",
@@ -144,15 +168,13 @@ class TestFixtures:
         assert first["src"] == "198.51.100.7" and first["dst"] == "203.0.113.2"
         assert first["proto"] == "tcp"
         assert first["dpt"] == 22 and first["spt"] == 40000
-        assert isinstance(first["dpt"], int)
         assert first["in_if"] == "wan" and first["out_if"] is None
-        assert first["dest_zone"] is None
         fwd = recs[2].fields
         assert fwd["dir"] == "forward" and fwd["zone"] == "iot"
         assert fwd["proto"] == "icmp" and fwd["dpt"] is None
         assert recs[3].fields["src"] == "2001:db8::7"
-        assert all(r.unconfirmed and r.fields["fmt"] == "fw4_nflog" for r in recs)
-        assert all(r.proc == "kernel" for r in recs)
+        assert recs[4].fields["dir"] == "out" and recs[4].fields["out_if"] == "br-lan"
+        assert all(r.fields["fmt"] == "fw4_nflog" for r in recs)
 
     def test_dnsmasq_lines(self):
         recs = [_record(line) for line in _lines("dnsmasq_query.txt")]
@@ -220,8 +242,8 @@ class TestFixtures:
 
     def test_confirmation_table(self):
         unconfirmed = {k for k, v in FORMAT_CONFIRMED.items() if not v}
+        assert FORMAT_CONFIRMED["fw4_nflog"] is True  # seen live (1.46.2)
         assert unconfirmed == {
-            "fw4_nflog",
             "dnsmasq_query",
             "dnsmasq_reply",
             "dropbear_bad_password",
@@ -486,7 +508,7 @@ DET_ROUTER = "rtr_" + "d" * 32
 
 class TestDetectorHandOver:
     def test_fw4_records_reach_port_scan_indicator(self):
-        template = _lines("fw4_kernel.txt")[1]  # reject guest in: … DPT=443
+        template = _lines("fw4_kernel_unbelegt.txt")[1]  # reject guest in: … DPT=443
         assigner = KeyAssigner()
         records = [
             _parse(
@@ -514,7 +536,7 @@ class TestDetectorHandOver:
         # one guest line hits port 443 on the router: management indicator
         mgmt_all = [
             _parse(HEAD + line, router=DET_ROUTER).record
-            for line in _lines("fw4_kernel.txt")
+            for line in _lines("fw4_kernel_unbelegt.txt")
         ]
         mgmt_set = DetectorSet([FirewallMgmtAccessDetector(threshold=1)])
         mgmt_set.feed_records(mgmt_all)

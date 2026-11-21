@@ -256,6 +256,60 @@ def output(data: Any, salt: bytes, user_id: str | None) -> Any:
     )
 
 
+# Version warning ``ssh_host_key:<reason>`` (config_provider.WARN_SSH_HOST_KEY)
+# with the core's fixed host-key reasons (config_collector._pin_reason). The
+# text masker reads it as a ``name: value`` pair ("key") and masks the reason;
+# exactly these codes come back. Fingerprints are never a warning item.
+_HOST_KEY_WARNINGS = frozenset(
+    f"ssh_host_key:{reason}"
+    for reason in (
+        "pin_pending",
+        "pin_refused",
+        "mismatch",
+        "algorithm_unavailable",
+        "pin_invalid",
+        "pin_save_failed",
+        "pin_store_unavailable",
+        "pin_unavailable",
+        "no_host_key",
+        "refused",
+    )
+)
+
+
+def restore_warning_codes(raw: Any, body: Any, depth: int = 0) -> None:
+    """Put fixed host-key warning codes back that the masker cut (1.46.1).
+
+    Walks the unmasked ``raw`` result and the masked ``body`` side by side;
+    in every ``warnings`` list an item comes back only if the unmasked item
+    is one of ``_HOST_KEY_WARNINGS``. Everything else stays masked.
+    """
+    if depth > 8:
+        return
+    if isinstance(raw, Mapping) and isinstance(body, dict):
+        for key, value in body.items():
+            raw_value = raw.get(key)
+            if (
+                key == "warnings"
+                and isinstance(value, list)
+                and isinstance(raw_value, list | tuple)
+                and len(value) == len(raw_value)
+            ):
+                body[key] = [
+                    old if isinstance(old, str) and old in _HOST_KEY_WARNINGS else new
+                    for old, new in zip(raw_value, value, strict=True)
+                ]
+            else:
+                restore_warning_codes(raw_value, value, depth + 1)
+    elif (
+        isinstance(raw, list | tuple)
+        and isinstance(body, list)
+        and len(raw) == len(body)
+    ):
+        for old, new in zip(raw, body, strict=True):
+            restore_warning_codes(old, new, depth + 1)
+
+
 def _tokens(values: Iterable[Any]) -> list[str]:
     """Machine codes only (free text is dropped)."""
     return [v for v in values if isinstance(v, str) and _TOKEN.fullmatch(v)]
@@ -797,6 +851,7 @@ class _ConfigView(HomeAssistantView):
             for neutral, name in self.renames.items():
                 if neutral in body:
                     body[name] = body.pop(neutral)
+            restore_warning_codes(result, body)
             self.restore_constants(result, body)
         return self.json(body, headers=dict(NO_STORE))
 

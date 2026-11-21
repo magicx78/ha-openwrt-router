@@ -773,6 +773,16 @@ async def test_collect_uci_snapshot_hides_raw_data() -> None:
         assert value not in text
 
 
+def _acl_denied(api: Any) -> AsyncMock:
+    """rpcd ACL denial, remembered in ``_acl_blocked`` like the real ``_call``."""
+
+    async def call(obj: str, method: str, params: dict[str, Any]) -> Any:
+        api._acl_blocked.add(api._acl_cache_key(obj, method, params))
+        raise OpenWrtMethodNotFoundError("Access denied")
+
+    return AsyncMock(side_effect=call)
+
+
 async def test_uci_acl_block_uses_ssh_uci_show() -> None:
     """Real api: ubus denied -> SSH `uci show` -> same snapshot hash as ubus."""
     ubus = ubus_values()
@@ -788,9 +798,7 @@ async def test_uci_acl_block_uses_ssh_uci_show() -> None:
     )
 
     blocked = real_api()
-    blocked._call = AsyncMock(  # type: ignore[method-assign]
-        side_effect=OpenWrtMethodNotFoundError("Access denied")
-    )
+    blocked._call = _acl_denied(blocked)  # type: ignore[method-assign]
     ssh_commands: list[str] = []
 
     async def ssh_read(cmd: str, _ssh: Any, **_kw: Any) -> tuple[int, bytes, bytes]:
@@ -839,9 +847,7 @@ async def test_api_uci_show_fallback_multiline_value_matches_ubus() -> None:
         }
     }
     blocked = real_api()
-    blocked._call = AsyncMock(  # type: ignore[method-assign]
-        side_effect=OpenWrtMethodNotFoundError("Access denied")
-    )
+    blocked._call = _acl_denied(blocked)  # type: ignore[method-assign]
     blocked._config_ssh_read = AsyncMock(  # type: ignore[method-assign]
         return_value=(0, show.encode(), b"")
     )

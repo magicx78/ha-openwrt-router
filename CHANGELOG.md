@@ -132,6 +132,121 @@ Router-Rechte.** Nutzerdoku: `docs/network-diagnostics.md`.
 - **Nicht getestet** gegen echte Router, echte Ziele oder eine echte Home-Assistant-Instanz;
   die Tests laufen ohne Geräte und ohne Netz.
 
+## [1.46.2] - 2026-11-21
+
+### Behoben
+
+- **Security Center: Die Abdeckung sinkt nicht mehr, wenn eine Quelle dazukommt.** Lieferte
+  das Gateway Firewall-Zeilen, fiel die Abdeckung von 71 auf 65 % und der Deckel des
+  Sicherheitswerts von 86 auf 82. Zwei Ursachen, beide behoben:
+  - Firewall-Log und DNS-Log sind **Flotten-Quellen**: Sie gelten als verfügbar, sobald ein
+    Router wirklich Zeilen geliefert hat (nicht bloß eingetragen). Bisher zählte der
+    schlechteste Zustand aller Router, und Access Points liefern diese Zeilen nie. Übersicht
+    und Log-Pfad-Ansicht sagen jetzt „von N von M Routern“ (`coverage.fleet`,
+    `log_path.status[].routers_delivering/routers/rate_limited`) und zeigen dieselben Zahlen.
+    Ein ratenbegrenzter Lieferant bleibt „eingeschränkt“ (`rate_limited`). Alle anderen Quellen
+    behalten die Regel „schlechtester Zustand“.
+  - Einschränkungen senken die Abdeckung **monoton**: Der Abzug eines Faktors entfällt, solange
+    eine seiner erwarteten Quellen flottenweit fehlt (sie ist schon als fehlende Quelle
+    gezählt), und alle Abzüge zusammen bleiben unter einem halben Quellenanteil
+    (`LIMITATION_SHARE_CAP`). Im beobachteten Fall steigt die Abdeckung jetzt auf 79 %, der
+    Deckel auf 90.
+- **Security Center: `fw_inter_vlan` meldet nicht mehr dauerhaft `dest_zone_unknown`.**
+  fw4-Zeilen nennen die Zielzone nie, und die ausgehende Schnittstelle (`OUT=`) wurde zwar
+  gelesen, aber nicht genutzt. Die Zielzone kommt jetzt in dieser Reihenfolge aus: einer
+  konfigurierten Zuordnung Schnittstelle → Zone (gebaut, heute ohne Lieferant: der
+  Configuration Manager gibt Modulen keinen Lesezugriff auf gespeicherte Versionen), einer aus
+  den Zeilen gelernten Zuordnung (in den Ketten `in`/`forward` ist die Präfix-Zone die Zone von
+  `IN=`; begrenzt, nur im Speicher, nie über der konfigurierten, widersprüchliche Werte bleiben
+  unbekannt) und zuletzt `subnet_zones`. Zeilen der Kette `in` mit leerem `OUT=` zählen nicht
+  als Inter-VLAN. Kein zusätzlicher Router-Aufruf.
+- **Security Center: Ein privates Ziel außerhalb von `subnet_zones` gilt nicht mehr als extern.**
+  Es bleibt unbekannt (mit `dest_zone_unknown`); nur öffentliche Ziele zählen als extern.
+- **Security Center: fw4-Format bestätigt.** Zwei echte Zeilenformen (`reject … forward:` mit
+  UDP und zweitem `LEN=`, `reject … in:` mit leerem `OUT=` und ICMP) liest der Parser;
+  `FORMAT_CONFIRMED["fw4_nflog"]` ist wahr, und die Firewall-Erkennungen tragen im Panel nicht
+  mehr „Format unbestätigt“ (DNS weiterhin). Nicht belegt bleiben die Kette `out`, die Urteile
+  `drop`/`accept`, TCP-Flags und die Feldreihenfolge bei IPv6 (Fixture
+  `fw4_kernel_unbelegt.txt`).
+- **Security Center: Nach Rückkehr des Modulschlüssels wird nichts sofort automatisch
+  erledigt.** Die 24 ruhigen Stunden zählen ab dem ersten Poll mit Schlüssel (oder ab dem
+  letzten Befund, wenn der später liegt); vorher war die blinde Zeit als Ruhe gezählt. Ein
+  Start, bei dem der Schlüssel sofort da ist, ändert nichts.
+- **Security Center: Fehlende Core-Anbindung wird aus dem Poll neu versucht.** Fehlt beim
+  Start die Configuration API oder scheitert die Anmeldung der Ereignisse, versucht der Poll
+  die Anbindung alle 5 Minuten erneut, solange ein Core läuft. Eine Warnung je Zustand „nicht
+  gebunden“ (ohne Identitäten), kein Router-Aufruf, Fehler stören den Poll nie.
+- **Security Center: Geräte, die ohne Schlüssel auffällig wurden, bekommen ihren Hinweis.**
+  Beim ersten Poll mit Schlüssel holt das Center den Hinweis für jedes dann noch auffällige
+  Gerät einmal nach (nur im Speicher, höchstens 256 Geräte). Bisher sammelte das
+  Vertrauensbuch die Indikatoren weiter, der Hinweis ging aber verloren.
+- **Security Center: Reserve für Konfiguration und Geräte.** Von den 50 Plätzen der Klasse
+  „andere“ sind 10 nur für Nicht-WLAN-Quellen; WLAN-Hinweise belegen höchstens 40, eine
+  WLAN-Flut blockiert keinen Drift- oder Geräte-Hinweis mehr. Keine Verdrängung: ein neuer
+  WLAN-Hinweis bei voller Quote wird gezählt (`incidents_wifi_quota_dropped`) und einmal je
+  Stunde in der Zeitleiste vermerkt. Die Zuordnung kommt aus der Datenquelle des Detektors
+  (`from_wifi`); ältere Stände mit mehr als 40 WLAN-Hinweisen laden vollständig. Panel und
+  Diagnose zeigen den WLAN-Anteil.
+- Diagnose: `interface_zones` mit Zählern der Zuordnung (ohne Namen), `wifi_incidents`,
+  `missed_device_hints`.
+- Doku: Die Abdeckung ist der Anteil der erwarteten **Datenquellen**, nicht der Erkennungen.
+
+## [1.46.1] - 2026-11-20
+
+Configuration Manager: Router, die als „Unvollständig“ dastanden, obwohl sie mehr können.
+Keine neue Vertragsangabe, keine Änderung am Core, Maskierung unverändert.
+
+### Behoben
+
+- **Das erste Backup klärt den Archivweg.** Lässt die Prüfung bei einem HTTPS-Eintrag den
+  cgi- oder den SSH-Weg „ungeprüft“ (`not_probed`), fordert ein Lauf ohne festen Typ das
+  Archiv an. Gelingt es nicht, bleibt der UCI-Snapshot: `uci_snapshot`/`ok`, wenn jeder Weg
+  „nicht vorhanden“ oder „keine Rechte“ meldet, sonst `partial`. Vorher sicherte so ein Lauf
+  still nur UCI.
+- **cgi-Archiv trotz unlesbarer Paketliste.** Mit dem rpcd-Recht `cgi-io: backup`, aber
+  unlesbarer Paketliste fragt der Lauf das Archiv an; die Fähigkeit `config.cgi_backup` zeigt
+  dabei „noch nicht geprüft“, nicht „verfügbar“. Erst ein echter cgi-Archivlauf belegt sie
+  (Archiv erhalten: verfügbar; abgelehnt: dessen Grund), sichtbar ab der nächsten Prüfung.
+  Ein Archiv über SSH zählt dafür nicht. Eine gemerkte Ablehnung gilt nur für die Anzeige:
+  Der Lauf fragt das Archiv weiter an, nach dem Installieren von `cgi-io` also ohne
+  HA-Neustart; bestätigt rpcd das Recht, entfällt eine gemerkte Rechte-Ablehnung.
+- **Fehlende optionale UCI-Configs** (`sqm`, `mwan3`, `upnpd`, `openvpn`, `ddns`, `usteer`,
+  `firewall`, `dhcp`, `wireless` …) sind „nicht vorhanden“, nicht `uci_failed` und machen
+  keine Version `partial`. Ursache: ubus meldet „nicht gefunden“, der SSH-Ersatzweg war wegen
+  des noch nicht bestätigten Host-Keys gesperrt, und diese Sperre ersetzte die Antwort. Ein
+  „nicht gefunden“ von ubus geht jetzt gar nicht mehr zu SSH; nur eine echte ACL-Sperre
+  nimmt den Ersatzweg und bleibt ein Fehler, wenn er scheitert. `network` und `system` gibt
+  es auf jedem OpenWrt-Router: Fehlen sie, ist der Lauf `partial` (`incomplete`).
+- **Lauf ohne Archivversuch** nennt den Grund je Weg: `archive_not_attempted:cgi.<Ursache>`,
+  `archive_not_attempted:ssh.<Ursache>` oder `archive_not_attempted:requested`.
+- **Lauf mit gescheitertem Archiv** nennt den Grund je versuchtem Weg:
+  `archive_unavailable:<Weg>.<Fehlerklasse>` (bei HTTP zusätzlich
+  `archive_unavailable:cgi.insecure_transport`); läuft die Zeit für das Archiv als Ganzes ab,
+  bekommt jeder Weg der Kette `<Weg>.timeout`. Das Panel zeigt sie in Klartext.
+- **SSH-Port zu ist nicht „Router nicht erreichbar“.** Root auf HTTPS, `cgi-io` fehlt, SSH
+  (Port 22) von Home Assistant aus nicht erreichbar: Der Lauf bleibt `partial`
+  (`unreachable`/`timeout`), aber das Panel nennt den SSH-Weg statt „Der Router war nicht
+  erreichbar“ und als nächsten Schritt, SSH freizugeben oder `cgi-io` zu installieren.
+- **Host-Key-Grund sichtbar.** `ssh_host_key:<Grund>` erscheint als fester Code statt
+  `**REDACTED**`; nur die festen Gründe des Cores kommen zurück, alles andere bleibt maskiert.
+- **Panel „Unvollständig“** zeigt Fehlerart, Gründe in Klartext und den nächsten Schritt
+  (zum Beispiel „SSH-Host-Key bestätigen“; bei einem ungeprüften Weg „Jetzt sichern“, weil
+  dieser Lauf das Archiv anfordert).
+- **Panel „Prüfsumme“** zeigt die Prüfsumme des gespeicherten Inhalts (Archiv, sonst
+  UCI-Snapshot) oder „–“, nie mehr die des Inventars, die auf allen Routern gleich aussah.
+- **Panel „Leserechte fehlen“** nur noch, wenn sie wirklich fehlen; läuft das Archiv (etwa
+  als root per SSH), ist das ACL-Angebot als optional beschrieben.
+- **Panel „Letztes Backup“** zeigt „letzter Versuch: unvollständig, <Zeit>“ statt „noch keins“,
+  wenn es nur unvollständige Läufe gibt.
+
+### Tests
+
+- Neu: `tests/test_config_partial_v1461.py` (End-to-End Runtime → Core → echter Provider,
+  nur die Router-API ist ein Fake), Panel-Tests `configPartial.test.mjs`; der Pin-Speicher für
+  SSH-Host-Keys trennt Router strikt nach Router-ID (Test, keine Code-Änderung). Die festen
+  Weg-Codes (`archive_not_attempted:…`, `archive_unavailable:…`) kommen unmaskiert durch
+  (Test, keine Code-Änderung).
+
 ## [1.46.0] - 2026-11-20
 
 Security Center: eine Beobachtungsschicht für das Netz auf dem Enterprise Core von 1.44.0 und
