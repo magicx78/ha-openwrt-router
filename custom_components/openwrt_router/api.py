@@ -910,6 +910,17 @@ def _sysfs_net_names(listing: dict[str, Any]) -> list[str]:
     return names
 
 
+def _valid_netdev_name(value: Any) -> bool:
+    """True for a kernel netdev name (1-15 of ``[A-Za-z0-9._@-]``, no "..").
+
+    The rule of the traffic module (``traffic_model.valid_device_name``),
+    imported lazily as in ``OpenWrtAPI._traffic_names``.
+    """
+    from .traffic_model import valid_device_name
+
+    return valid_device_name(value)
+
+
 def wan_interface_tier(name: str, proto: str = "") -> int | None:
     """Rank a netifd interface as a WAN candidate; None means "not a WAN".
 
@@ -2014,6 +2025,9 @@ class OpenWrtAPI:
                 "rx_bytes": int or None,
                 "tx_bytes": int or None,
                 "wan_found": bool,  # absent when unknown (empty dump, SSH)
+                "default_route": bool,  # absent when netifd sent no routes
+                "l3_device": str,  # netifd's L3 netdev; only while up
+                "diag_facts": {...},  # absent when unknown, always last
             }
         """
         # Get basic network status
@@ -2127,6 +2141,13 @@ class OpenWrtAPI:
                 and str(route.get("mask")) == "0"
                 for route in routes
             )
+        # netifd's L3 netdev of the WAN ("wan", "pppoe-wan", "wwan0"): the
+        # WAN measuring point of Traffic Analytics. New key only; netifd sends
+        # it while the interface is up, absent means unknown (down, SSH
+        # fallback), never the port or the logical name as a guess.
+        l3_device = wan_iface.get("l3_device")
+        if wan_iface.get("up") and _valid_netdev_name(l3_device):
+            status["l3_device"] = l3_device
         # Network Diagnostics (1.47.0): additive, see end of file
         _diag_add_facts(status, interfaces, wan_iface)
         return status
