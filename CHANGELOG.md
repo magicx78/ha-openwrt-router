@@ -4,6 +4,32 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+### Hinzugefügt
+
+- **Traffic Analytics (Teil J: Dashboard und Topologie).** Nur lesende Routen unter
+  `/api/openwrt_topology/traffic/`: `overview`, `points`, `series?point_id=…&window=1h|24h|7d|30d|90d`
+  (höchstens 500 Werte), `talkers`, `clients`, `vlans`, `capacity`, `anomalies`,
+  `recommendations`, `evidence/{ref}` sowie für Administratoren `flows` und `settings`.
+  Rechte und Fehler wie bei WiFi RF und der Netzwerkdiagnose (Anmeldung nötig;
+  Administratoren, andere Benutzer nur bei freigegebenem Topologie-Panel). Ist das Modul
+  aus, antwortet jede Route `status: off` ohne Router-Aufruf und ohne Zugriff auf den
+  Verlauf. Nur Pseudonyme, keine MAC-Adressen und keine Gerätenamen.
+- **Enterprise-Tab „Traffic Analytics“** mit Übersicht, Verlauf, Top Talkers,
+  Clients & VLANs, Anomalien, Kapazität (mit möglichen Engpässen) und für Administratoren
+  Flows. Lädt nur, solange der Tab sichtbar ist, höchstens alle 60 s. Unbekanntes steht als
+  „—“ mit Grund da, nie als 0; Datenqualität und Gründe nicht liefernder Quellen
+  (z. B. WiFi RF, Security Center) sind sichtbar. Tageswerte sind UTC-Tage und werden in
+  Ortszeit beschriftet. Ein Schalter zum Einschalten folgt später.
+- **Topologie:** Läuft Traffic Analytics, tragen Router-Knoten WAN- und Port-Raten samt
+  Auslastung und Abdeckung, Router-Uplinks die gemessene Port-Rate beider Seiten. Ist das
+  Modul aus, bleibt der Topologie-Snapshot unverändert.
+
+### Geändert
+
+- **Traffic Analytics, Verlauf im Profil „standard“:** Stundenwerte der Infrastruktur
+  bleiben 14 statt 7 Tage. Die Grenzen gelten jetzt je Profil und Speicherdatei; jede Datei
+  bleibt unter 2 MiB.
+
 ## [1.48.0] - 2026-11-21
 
 WiFi RF Intelligence: Funkbild je Radio (Kanalauslastung, Grundrauschen, Retry-Rate, Signal je
