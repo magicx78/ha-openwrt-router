@@ -43,14 +43,17 @@ fit the bounded flow store at once is refused as a whole (503
 ``store_full``). Nothing is ever taken in part. Every refusal is counted;
 refusals of the authorisation (wrong user, collector off, plain HTTP) are
 also reported as the core event ``traffic_analytics.collector_rejected``
-(``security_relevant``), at most ``EVENT_BUDGET_PER_HOUR`` per hour.
+(``security_relevant``), at most ``EVENT_BUDGET_PER_HOUR`` per hour for each
+reason and user (at most ``MAX_EVENT_KEYS`` such budgets at once).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
+import os
 from collections import Counter, deque
 from collections.abc import Callable, Mapping
 from typing import Any, Final
@@ -75,7 +78,11 @@ MAX_DEPTH: Final = 4
 MAX_STRING: Final = 64
 NAME_MAX: Final = 32
 MIN_INTERVAL_S: Final = 10.0
+# Security events per hour and per (reason, user): one signed-in user that
+# keeps knocking cannot use up the budget of a real failed attempt (T4).
 EVENT_BUDGET_PER_HOUR: Final = 10
+# Budget keys held at once (hard bound of the bookkeeping).
+MAX_EVENT_KEYS: Final = 64
 MAX_REJECTED_LISTED: Final = 50
 EVENT_REJECTED: Final = "traffic_analytics.collector_rejected"
 ENVELOPE_FIELDS: Final = frozenset({"schema", "collector", "sent_at", "records"})
@@ -248,7 +255,10 @@ class CollectorIntake:
         self.counters: Counter[str] = Counter()
         self._last_call: float | None = None
         self.last_accepted_wall: float | None = None
-        self._events: deque[float] = deque()
+        # (reason, user pseudonym) -> event times of the last hour
+        self._events: dict[tuple[str, str], deque[float]] = {}
+        # per-run salt: the budget keys are pseudonyms, never a user id
+        self._salt = os.urandom(16)
         # ConfigurationApi.emit while the core is bound (None: not published)
         self.emit: Callable[..., Any] | None = None
 
@@ -275,18 +285,46 @@ class CollectorIntake:
         self.counters[f"rejected_{reason}"] += 1
         self.counters["rejected_records"] += records
 
-    def auth_refused(self, reason: str, now_wall: float) -> None:
-        """Count a refused authorisation and report it (budgeted event)."""
-        self.refused(reason)
-        while self._events and now_wall - self._events[0] > 3600:
-            self._events.popleft()
-        if len(self._events) >= EVENT_BUDGET_PER_HOUR:
+    def _budget_key(self, reason: str, user_id: Any) -> tuple[str, str]:
+        user = user_id if isinstance(user_id, str) else ""
+        digest = hashlib.blake2s(user.encode(), key=self._salt, digest_size=8)
+        return reason, digest.hexdigest()
+
+    def _within_budget(self, key: tuple[str, str], now_wall: float) -> bool:
+        """True if ``key`` may send one more event this hour (not booked)."""
+        for other in list(self._events):
+            times = self._events[other]
+            while times and now_wall - times[0] > 3600:
+                times.popleft()
+            if not times:
+                del self._events[other]
+        times = self._events.get(key)
+        if times is None:
+            if len(self._events) >= MAX_EVENT_KEYS:
+                self.counters["events_keys_full"] += 1
+                return False
+            return True
+        if len(times) >= EVENT_BUDGET_PER_HOUR:
             self.counters["events_over_budget"] += 1
+            return False
+        return True
+
+    def auth_refused(
+        self, reason: str, now_wall: float, *, user_id: Any = None
+    ) -> None:
+        """Count a refused authorisation and report it (budgeted event).
+
+        The budget is kept per reason and per user (``user_id`` only as a
+        salted pseudonym in memory, never in the event or the counters).
+        """
+        self.refused(reason)
+        key = self._budget_key(reason, user_id)
+        if not self._within_budget(key, now_wall):
             return
         if self.emit is None:
             self.counters["events_not_published"] += 1
             return
-        self._events.append(now_wall)
+        self._events.setdefault(key, deque()).append(now_wall)
         try:
             from .net_events import Severity
 

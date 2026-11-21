@@ -11,7 +11,8 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from core_testkit import FakeDisks, drain
+import test_traffic_views as tv_tests
+from core_testkit import USER_ID, FakeDisks, drain
 from test_traffic_engine import (
     RID,
     RID2,
@@ -286,3 +287,54 @@ async def test_wan_rate_over_the_netdev_cap_and_omitted_is_visible(
         "reason": REASON_DEVICES_OMITTED,
     }
     assert engine.counters["devices_omitted"] == 2 * status.devices_omitted
+
+
+# --- T4: one noisy user cannot use up the event budget of the others -------------------
+
+
+def test_event_budget_is_per_reason_and_user() -> None:
+    sent: list[dict[str, Any]] = []
+    intake = tc.CollectorIntake()
+    intake.emit = lambda _event, **kw: sent.append(kw)
+    for i in range(30):  # a signed-in non-collector user, again and again
+        intake.auth_refused(tc.REJECT_AUTH, FLOW_NOW + i, user_id="user-a")
+    assert len(sent) == tc.EVENT_BUDGET_PER_HOUR
+    # a real failed attempt of someone else still reaches the Security Center
+    intake.auth_refused(tc.REJECT_AUTH, FLOW_NOW + 40, user_id="user-b")
+    intake.auth_refused(tc.REJECT_TRANSPORT, FLOW_NOW + 41, user_id="user-a")
+    assert len(sent) == tc.EVENT_BUDGET_PER_HOUR + 2
+    assert intake.counters["events_over_budget"] == 20
+    # no user id in the event or the counters
+    assert "user-a" not in repr(sent) and "user-a" not in repr(intake.counters)
+
+
+def test_event_bookkeeping_is_bounded() -> None:
+    intake = tc.CollectorIntake()
+    intake.emit = lambda _event, **_kw: None
+    for n in range(tc.MAX_EVENT_KEYS + 100):
+        intake.auth_refused(tc.REJECT_AUTH, FLOW_NOW, user_id=f"user-{n}")
+    assert len(intake._events) <= tc.MAX_EVENT_KEYS
+    assert intake.counters["events_keys_full"] == 100
+    # an hour later the old keys are gone and new ones fit again
+    intake.auth_refused(tc.REJECT_AUTH, FLOW_NOW + 3700, user_id="user-new")
+    assert intake.counters["events_published"] == tc.MAX_EVENT_KEYS + 1
+    assert len(intake._events) == 1
+
+
+async def test_route_books_the_budget_per_user(disks: FakeDisks) -> None:
+    """Over HTTP: 15 refusals of a plain user, then the collector user over
+    plain HTTP: that refusal is still published."""
+    hass, engine = await tv_tests.collector_on(disks)
+    sent: list[dict[str, Any]] = []
+    engine.collector.emit = lambda _event, **kw: sent.append(kw)
+    async with tv_tests.http(hass) as h:
+        for _ in range(15):
+            resp = await tv_tests.ingest(
+                h, tv_tests.envelope(engine.wall()), user=USER_ID
+            )
+            assert resp.status == 403
+        assert len(sent) == tc.EVENT_BUDGET_PER_HOUR
+        resp = await tv_tests.ingest(h, tv_tests.envelope(engine.wall()), https=False)
+        assert resp.data["code"] == "insecure_transport"
+    assert len(sent) == tc.EVENT_BUDGET_PER_HOUR + 1
+    assert sent[-1]["data"] == {"reason": tc.REJECT_TRANSPORT}

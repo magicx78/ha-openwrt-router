@@ -613,17 +613,23 @@ class TrafficCollectorIngestView(HomeAssistantView):
                 raise RequestError(409, "disabled")
             wall = engine.wall()
             if not engine.collector_enabled:
-                engine.collector.auth_refused(REJECT_COLLECTOR_OFF, wall)
+                engine.collector.auth_refused(
+                    REJECT_COLLECTOR_OFF, wall, user_id=getattr(user, "id", None)
+                )
                 raise RequestError(403, "authorization_denied")
             if (
                 not engine.is_collector_user(getattr(user, "id", None))
                 or getattr(user, "is_admin", False) is not False
                 or getattr(user, "is_active", True) is not True
             ):
-                engine.collector.auth_refused(REJECT_AUTH, wall)
+                engine.collector.auth_refused(
+                    REJECT_AUTH, wall, user_id=getattr(user, "id", None)
+                )
                 raise RequestError(403, "authorization_denied")
             if not request.secure:
-                engine.collector.auth_refused(REJECT_TRANSPORT, wall)
+                engine.collector.auth_refused(
+                    REJECT_TRANSPORT, wall, user_id=getattr(user, "id", None)
+                )
                 raise RequestError(403, "insecure_transport")
             engine.collector.check_rate(engine.clock())
             raw = await _read_limited(request, INGEST_MAX_BYTES)
