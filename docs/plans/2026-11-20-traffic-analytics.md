@@ -1,4 +1,14 @@
-# Auftrag des Nutzers (2026-11-20), unverändert im Inhalt
+# Auftrag des Nutzers (2026-11-20), unverändert im Inhalt · umgesetzt in 1.49.0
+
+## Status
+
+- **Stand:** 2026-11-21 · **Phase:** A–L gebaut (Bestandsaufnahme, Modell, Sammlung, Verlauf, Auffälligkeiten, Kapazität, Flows, Collector, Routen, Panel-Tab mit Einstellungen, Sensoren, Leistungs- und Qualitätstests), Version 1.49.0 im Branch, noch nicht veröffentlicht
+- **Branch/PR:** `claude/traffic-analytics-d7ae50` · noch kein PR (öffnet der Master)
+- **Erledigt:** alle Phasen aus dem Bauplan; Schalter je Router in den Integrationsoptionen, Profile `compact` (Standard) und `standard` mit stündlichen Werten für 14 Tage; Collector-Eingang `traffic.collector.v1` (nur Flows, alles oder nichts, nur HTTPS, eigener Nicht-Admin-Benutzer); Einstellungsformular im Tab mit Route `GET collector/users` (Benutzer nur als `usr_…`); Nutzerdoku `docs/traffic-analytics.md`. Nachweis nur durch automatische Tests ohne Geräte (Backend-Suite auf Python 3.13 und 3.14, Frontend-Logik- und Render-Tests, Leistungstests mit gemessenen Zahlen in der Nutzerdoku §7)
+- **Abweichungen:** der Schalter liegt im Optionsdialog, `config_flow.py` ist dafür geändert (Bauplan §1.5 und §12.9 sahen das nicht vor); Collector-Aggregate (`client_aggregate`, `interface_aggregate`) werden mit `kind_not_supported` abgelehnt; Auffälligkeiten gehen als Kern-Ereignisse hinaus, nicht als NI-Vorfälle (W1 fehlt); Security Center wertet die Hinweise nicht aus (W2 fehlt)
+- **Nicht getan:** nichts am echten Router oder in einer echten Home-Assistant-Instanz geprüft (Bauplan §12 Risiken 1, 2 und 11 offen); Tab nicht im Browser angesehen, auch nicht bei 360 px Breite; Wünsche W1–W8 an andere Module; conntrack-Ersatzweg in `api.get_active_connections` ohne Obergrenze (Risiko 3, Frage F2) unverändert
+- **Blocker:** keine
+- **Nächster Schritt:** PR für 1.49.0 prüfen und öffnen (Master); danach lesende Prüfung am Gerät (nur mit Freigabe) und Ansicht des Tabs bei 360 px; Wünsche W1–W8 mit den Modulen klären
 
 Claude Code – Phase 5: Enterprise Advanced Traffic Analytics & Network Flow Intelligence
 Repository: https://github.com/magicx78/ha-openwrt-router
