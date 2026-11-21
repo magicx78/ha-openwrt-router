@@ -406,9 +406,13 @@ async def async_sync_diag_entities(hass: HomeAssistant) -> None:
         _remove_from_registry(hass)
         return
     if hosts.unsub is None:
-        hosts.unsub = async_dispatcher_connect(
-            hass, SIGNAL_NET_DIAGNOSTICS, lambda: _on_update(hass)
-        )
+
+        @callback
+        def _receiver() -> None:
+            # @callback: HA runs it on the loop (a lambda is an executor job)
+            _on_update(hass)
+
+        hosts.unsub = async_dispatcher_connect(hass, SIGNAL_NET_DIAGNOSTICS, _receiver)
     sensors = _platforms(hass, SENSOR_DOMAIN)
     if sensors and (hosts.anchor is None or hosts.anchor not in sensors):
         anchor = min(sensors)
@@ -455,7 +459,13 @@ def _on_update(hass: HomeAssistant) -> None:
         finally:
             hosts.syncing = False
 
-    hass.async_create_task(run(), name="openwrt_router diag entities")
+    job = run()
+    try:
+        hass.async_create_task(job, name="openwrt_router diag entities")
+    except Exception:
+        hosts.syncing = False  # never stuck: the next signal tries again
+        job.close()
+        raise
 
 
 def _remove_from_registry(hass: HomeAssistant) -> None:
