@@ -298,6 +298,9 @@ FLOW_TTL_S: Final = 3600.0
 FLOW_TTL_MIN_S: Final = 60.0
 FLOW_TTL_MAX_S: Final = 24 * 3600.0
 MAX_FLOW_QUERY: Final = 200
+# Feeds (origin x router) remembered at once, records or only "last seen"
+# (a collector with ever new router ids must not grow memory, review T2).
+MAX_FLOW_FEEDS: Final = 256
 # Collector record rules (plan §8).
 FLOW_MAX_STRING: Final = 64
 FLOW_MAX_FUTURE_S: Final = 300.0

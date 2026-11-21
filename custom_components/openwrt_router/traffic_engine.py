@@ -1204,11 +1204,20 @@ class TrafficEngine:
         """One collector call (all or nothing, see ``traffic_collector``)."""
         before = self._collector_view()
         answer = self.collector.ingest(
-            raw, now_wall=self.wall(), module_key=self._module_key, flows=self.flows
+            raw,
+            now_wall=self.wall(),
+            module_key=self._module_key,
+            flows=self.flows,
+            known_routers=self._routers_on(),
         )
         if self._collector_view() != before:
             self._refresh_caps()
         return answer
+
+    def _routers_on(self) -> frozenset[str]:
+        """Router ids of the loaded entries with traffic on."""
+        rids = (self._rid(e) for e, s in self._entries.items() if s.options.enabled)
+        return frozenset(r for r in rids if r is not None)
 
     def flow_query(
         self,

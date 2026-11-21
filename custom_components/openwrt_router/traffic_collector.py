@@ -37,7 +37,8 @@ and not older than 24 h.
 
 **All or nothing.** A call is checked completely before anything is kept:
 one invalid record rejects the whole call (400 ``records_rejected`` with
-``index`` and a fixed reason per refused record), and a call that would not
+``index`` and a fixed reason per refused record; a ``router_id`` of no
+loaded router with traffic on is ``unknown_router``), and a call that would not
 fit the bounded flow store at once is refused as a whole (503
 ``store_full``). Nothing is ever taken in part. Every refusal is counted;
 refusals of the authorisation (wrong user, collector off, plain HTTP) are
@@ -100,6 +101,8 @@ REJECT_AUTH: Final = "authorization_denied"
 REJECT_TRANSPORT: Final = "insecure_transport"
 REJECT_RATE: Final = "rate_limited"
 REJECT_COLLECTOR_OFF: Final = "collector_off"
+# per record: a router id of no loaded router with traffic on (review T2)
+REJECT_UNKNOWN_ROUTER: Final = "unknown_router"
 
 # state of the collector source (panel, capability)
 STATE_OFF: Final = "off"
@@ -199,9 +202,18 @@ def parse_envelope(raw: bytes, *, now: float) -> list[Any]:
 
 
 def validate_records(
-    records: list[Any], *, now: float, module_key: bytes | None
+    records: list[Any],
+    *,
+    now: float,
+    module_key: bytes | None,
+    known_routers: frozenset[str] | None = None,
 ) -> list[FlowRecord]:
-    """Every record as a FlowRecord, or one refusal for the whole call."""
+    """Every record as a FlowRecord, or one refusal for the whole call.
+
+    ``known_routers``: the router ids a record may name (the loaded routers
+    with traffic on); a record without router id stays allowed. None: no
+    check (pure tests of the schema).
+    """
     out: list[FlowRecord] = []
     rejected: list[tuple[int, str]] = []
     for index, raw in enumerate(records):
@@ -209,11 +221,20 @@ def validate_records(
             rejected.append((index, REJECT_KIND_NOT_SUPPORTED))
             continue
         try:
-            out.append(normalise_collector_flow(raw, now=now, module_key=module_key))
+            flow = normalise_collector_flow(raw, now=now, module_key=module_key)
         except FlowRejected as err:
             rejected.append((index, err.reason))
         except (TypeError, ValueError):
             rejected.append((index, REJECT_BAD_FIELD))
+        else:
+            if (
+                known_routers is not None
+                and flow.router_id is not None
+                and flow.router_id not in known_routers
+            ):
+                rejected.append((index, REJECT_UNKNOWN_ROUTER))
+            else:
+                out.append(flow)
     if rejected:
         raise CollectorRejected(400, REJECT_RECORDS, rejected=rejected)
     return out
@@ -293,6 +314,7 @@ class CollectorIntake:
         now_wall: float,
         module_key: bytes | None,
         flows: FlowStore,
+        known_routers: frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Check and keep one call (all or nothing); the answer body."""
         try:
@@ -301,9 +323,17 @@ class CollectorIntake:
             self.refused(err.reason)
             raise
         try:
-            parsed = validate_records(records, now=now_wall, module_key=module_key)
+            parsed = validate_records(
+                records,
+                now=now_wall,
+                module_key=module_key,
+                known_routers=known_routers,
+            )
         except CollectorRejected as err:
             self.refused(err.reason, records=len(records))
+            unknown = sum(1 for _i, r in err.rejected if r == REJECT_UNKNOWN_ROUTER)
+            if unknown:
+                self.counters["rejected_records_unknown_router"] += unknown
             raise
         if not flows.can_take(parsed, origin=FEED_COLLECTOR, now=now_wall):
             self.refused(REJECT_STORE_FULL, records=len(parsed))
