@@ -4,11 +4,14 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
-Network Time Machine, Phase A: eine Lese-Schnittstelle, die die Ereignisse vorhandener Module
-auf eine Zeitachse legt. **Standardmäßig aus, ein Schalter für die ganze Flotte.** Kein
-eigener Speicher, keine zusätzlichen Router-Aufrufe (Test vergleicht die Aufrufe zweier Polls
-mit Time Machine an und aus), kein Listener, keine Hintergrundaufgabe, keine Entitäten, noch
-kein Panel. Entwicklerdoku: `docs/time-machine.md`.
+## [1.50.0] - 2026-11-21
+
+Network Time Machine, Phase A: eine Zeitleiste, die die Ereignisse vorhandener Module auf eine
+Achse legt, als Lese-Schnittstelle und als Enterprise-Tab „Zeitreise“. **Standardmäßig aus,
+ein Schalter für alle Router.** Kein eigener Speicher, kein zusätzlicher Router-Aufruf (Test
+vergleicht die Aufrufe zweier Polls mit Time Machine an und aus), kein Listener, keine
+Hintergrundaufgabe, keine Entitäten und keine Client-Marken. Entwicklerdoku:
+`docs/time-machine.md`. Panel-Version `20261121-timemachine1`.
 
 ### Hinzugefügt
 
@@ -21,26 +24,52 @@ kein Panel. Entwicklerdoku: `docs/time-machine.md`.
   unbekannte werden abgelehnt (400 ohne Echo). Blättern über `next_until`, ohne Marken
   desselben Zeitstempels zu teilen. Je Quelle Zustand (`ok`, `empty`, `off`, `unreadable`)
   mit festem Grund, Lesegrenze und Zeitbudget von 2 s; eine fehlerhafte Quelle macht die
-  Antwort `partial`, nie die ganze Anfrage kaputt.
-- **Rechte.** Administratoren sehen alles; andere Benutzer nur bei freigegebenem
-  Topologie-Panel und dann nur Infrastruktur, Funk, Topologie und Störungen. Audit-Log und
-  Konfigurationsversionen sind admin-only.
-- **Datenschutz.** Keine MAC- oder IP-Adressen, Hostnamen, SSIDs oder WLAN-Netdev-Namen in
-  Antworten, Logs oder Diagnosedaten; Router als `router_id` und Anzeigename. Ereignisse eines
-  einzelnen Clients werden weggelassen und nur gezählt (`omitted_client_marks`). Die Time
-  Machine holt keinen Modulschlüssel eines anderen Moduls.
+  Antwort `partial`, nie die ganze Anfrage kaputt. Administratoren sehen alles; andere
+  Benutzer nur bei freigegebenem Topologie-Panel und dann nur Infrastruktur, Funk, Topologie
+  und Störungen, ohne Audit-Log und Konfigurationsversionen. Keine MAC- oder IP-Adressen,
+  Hostnamen, SSIDs oder WLAN-Netdev-Namen in Antworten, Logs oder Diagnosedaten; Ereignisse
+  eines einzelnen Clients werden weggelassen und nur für Administratoren gezählt
+  (`omitted_client_marks`, für andere Benutzer 0).
+- **Enterprise-Tab „Zeitreise“** (nach Traffic Analytics). Zeitfenster 1 Stunde, 24 Stunden,
+  7 oder 14 Tage; Filter nach Quelle, Schwere und Router, dazu Art-Chips, die nur die
+  geladenen Marken filtern („x von y Marken“). Je Quelle ein Zustand in Worten („12 Marken“,
+  „leer“, „aus“ mit Grund, „Quelle nicht lesbar“ mit Grund, „gekürzt“); Quellen, die nur
+  Administratoren lesen dürfen, sind für andere Benutzer gesperrt. Marken neueste zuerst nach
+  Kalendertagen in Ortszeit (Heute, Gestern, Wochentag mit Datum), mit Uhrzeit (UTC-Zeit im
+  Tooltip), Schwere als Punkt und Wort, Art, deutschem Titel für jeden Code, den das Backend
+  erzeugen kann (Test), Kennzahlen, Router und Quelle. „Ältere laden“ blättert über
+  `next_until`. Aktualisiert sich nur bei sichtbarem Tab höchstens alle 60 s. Unter der
+  Breite einer Zeile werden Marken zu Karten, ohne seitliches Scrollen bis 360 px.
 - **Option „Network Time Machine für alle Router“** (`time_machine_enabled`, aus) in den
   Router-Optionen; Speichern schreibt den Wert in alle Router-Einträge und lässt deren übrige
-  Optionen unverändert. Aus antwortet die Route `status: off` und liest keine Quelle.
+  Optionen unverändert. Aus antwortet die Route `status: off` und liest keine Quelle; der
+  Tab zeigt dann nur den Hinweis mit dem Weg zum Schalter.
 - **Diagnose-Block `time_machine`**: Schalter, Grenzen, Zustand und Markenzahl je Quelle der
   letzten 24 h und Zähler der Anfragen; nichts Persönliches. Aus nur `{"enabled": false}`.
 
+### Behoben
+
+- **Konfigurationsmanager:** Nach einem HA-Neustart zeigte die Drift-Zusammenfassung den
+  ältesten statt den neuesten Audit-Eintrag.
+- **Audit-Protokoll:** Ein gesprächiges Modul verdrängt auf dem allgemeinen Ring keine
+  Einträge anderer mehr. Jeder Besitzer hat einen festen Anteil (Core 400, je Modul 100);
+  verdrängt wird zuerst der älteste Eintrag eines Besitzers über seinem Anteil. Verdrängte
+  Einträge werden gezählt (`evicted_general`, je Besitzer `general_evicted`).
+- **Enterprise Core:** Die Beschreibung von `events` stimmt wieder: Einträge kommen vom
+  ältesten zum neuesten, `limit` behält die neuesten.
+
 ### Bekannte Grenzen
 
+- Die Zeitleiste liest nur, was die Module selbst behalten. Ausfälle und Kanalwechsel vor
+  einem HA-Neustart fehlen deshalb, bis Phase B einen eigenen Verlauf bringt.
+- Keine Client-Marken; Ereignisse einzelner Clients werden nur gezählt.
+- Konfigurationsänderungen erscheinen nur als Anzahl und Referenz, ohne Inhalt.
 - Mehr Marken mit demselben Zeitstempel als `limit` werden abgeschnitten (`truncated`).
 - Das Audit-Log hat keine Obergrenze `until`; bei Fenstern weit in der Vergangenheit können
   neuere Einträge die Lesegrenze von 500 je Ring aufbrauchen.
-- Nur mit Tests und Mocks geprüft, nicht auf Routern oder in einer laufenden HA-Instanz.
+- Modulschlüssel des Enterprise Core werden weiterhin nur nach Namen vergeben.
+- Nur mit Tests und Mocks geprüft, nicht auf Routern, in einer laufenden HA-Instanz oder im
+  Browser.
 
 ## [1.49.4] - 2026-11-21
 

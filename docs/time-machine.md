@@ -1,10 +1,11 @@
-# Network Time Machine (Phase A: Lese-Schnittstelle)
+# Network Time Machine (Phase A: Lese-Schnittstelle und Tab „Zeitreise“, ab 1.50.0)
 
-<!-- Entwicklerdoku zu Phase A (noch nicht veröffentlicht, kein Panel). Keine IPs, MACs,
+<!-- Entwicklerdoku zu Phase A (1.50.0). Keine IPs, MACs,
      Hostnamen echter Geräte, Passwörter oder Tokens; Router-Kennungen im Beispiel sind
      Platzhalter. Aussagen sind am Code gelesen (tm_sources.py, tm_query.py, tm_views.py,
-     config_flow.py, diagnostics.py) und mit den Tests tests/test_tm_*.py geprüft, nicht an
-     Geräten oder einer HA-Instanz ausgeführt. Messwerte aus
+     config_flow.py, diagnostics.py, frontend/topology/src/enterprise/timemachine/) und mit den
+     Tests tests/test_tm_*.py und timemachine/*.test.mjs geprüft, nicht an Geräten, in einer
+     HA-Instanz oder im Browser ausgeführt. Messwerte aus
      tests/test_tm_views.py::test_response_time_with_filled_sources auf der Entwicklungs-VM
      (Python 3.13, Mocks), Stand 2026-11-21. Plan: docs/plans/2026-11-21-network-time-machine.md. -->
 
@@ -23,6 +24,7 @@
 11. [Diagnosedaten](#11-diagnosedaten)
 12. [Leistung](#12-leistung)
 13. [Bekannte Grenzen und was nicht geprüft ist](#13-bekannte-grenzen-und-was-nicht-geprüft-ist)
+14. [Tab „Zeitreise“](#14-tab-zeitreise)
 
 ---
 
@@ -39,9 +41,9 @@ Phase A hat
 - **keinen eigenen Speicher** (kein Store, keine Datei, nur Zähler im Arbeitsspeicher),
 - **keine zusätzlichen Router-Aufrufe** und keine neuen Router-Rechte,
 - **keinen Listener, keinen Timer, keine Hintergrundaufgabe**, keine HA-Ereignisse,
-- **keine Entitäten** und **kein Panel** (das Panel kommt später),
+- **keine Entitäten**; das Panel zeigt die Zeitleiste im Enterprise-Tab „Zeitreise“ (Abschnitt 14),
 - **keine Client-Marken**: Ereignisse, die einen einzelnen Client betreffen, werden weggelassen
-  und nur gezählt (`omitted_client_marks`).
+  und nur gezählt (`omitted_client_marks`, nur für Administratoren; für andere Benutzer 0).
 
 Ausfälle, Kanalwechsel und Uplink-Wechsel, die die Time Machine selbst aus `coordinator.data`
 erkennen soll, kommen erst mit Phase B (die Arten sind schon vergeben, Abschnitt 6).
@@ -167,7 +169,7 @@ Das Fenster ist halboffen `[from, until)`, höchstens **14 Tage** lang und darf 
 | `window` | das geprüfte Fenster; bei `off` beide `null` |
 | `marks` | die Marken dieser Seite, neueste zuerst |
 | `sources` | je angefragter Quelle ein Eintrag (Reihenfolge wie Abschnitt 3); bei `off` leer |
-| `omitted_client_marks` | Zahl der weggelassenen Client-Ereignisse aller Quellen im Fenster |
+| `omitted_client_marks` | Zahl der weggelassenen Client-Ereignisse aller Quellen im Fenster; für Nicht-Admins immer 0 (die Zahl verriete Aktivität in Quellen und Gruppen, die sie nicht sehen) |
 | `truncated` | `true`, wenn es ältere Marken im Fenster gibt, die nicht auf dieser Seite stehen |
 | `next_until` | `until` der nächsten Seite oder `null` |
 
@@ -267,7 +269,7 @@ Zuordnung der Quellen:
 | `core_audit`, `config_versions` | ja | `off` / `admin_only` | – | – |
 | `ni_events`, `ni_incidents`, `security_timeline` | alle Gruppen | nur `infrastructure`, `radio`, `topology`, `disruption` | – | – |
 | Konfigurationsmarken (Bereich, Zahl der Änderungen, `bkp_…`) | ja | nein | – | – |
-| Client-Ereignisse | nur gezählt | nur gezählt | – | – |
+| Client-Ereignisse | nur gezählt | weggelassen, `omitted_client_marks` = 0 | – | – |
 
 „Panel für alle Benutzer“ ist die bestehende Option `topology_panel_all_users`. Reihenfolge der
 Prüfungen: Anmeldung (401) → Recht (403) → Integration geladen (410) → Body (400) → Abfrage
@@ -337,9 +339,72 @@ Entwicklungs-VM, nicht auf einer HA-Instanz.
   (`truncated: true`), der Rest dieses Zeitstempels fehlt auf der nächsten Seite.
 - Das Audit-Log kennt kein `until`: Bei einem Fenster weit in der Vergangenheit können neuere
   Einträge die Lesegrenze von 500 je Ring aufbrauchen.
-- Der Ring `general` des Audit-Logs hat keine Quote je Modul; ein lautes Modul kann ältere
-  Einträge verdrängen (Plan §3.1). Was dort fehlt, fehlt auch in der Time Machine.
+- Was die Module nicht behalten, fehlt auch in der Time Machine: Der Ring `general` des
+  Audit-Logs hat seit 1.50.0 feste Anteile (Core 400, je Modul 100), verdrängt aber weiterhin
+  den ältesten Eintrag eines Besitzers über seinem Anteil (`general_evicted`). Ausfälle und
+  Kanalwechsel vor einem HA-Neustart fehlen bis Phase B.
+- Modulschlüssel des Enterprise Core werden nur nach Namen vergeben.
 - Drift-Einträge des Audit-Logs tragen keinen Bereich; Bereich und Diff zeigt der
   Configuration Manager.
 - Nicht auf echten Routern und nicht in einer laufenden HA-Instanz geprüft; alle Aussagen
   stammen aus Tests mit Mocks.
+
+## 14. Tab „Zeitreise“
+
+Enterprise-Tab nach Traffic Analytics (`order` 60), Code in
+`frontend/topology/src/enterprise/timemachine/`. Er liest nur die Route aus Abschnitt 4 und
+fügt der Antwort nichts hinzu; Phase A verlinkt `ref` nicht, es gibt keinen Export und keinen
+„Zustand zum Zeitpunkt“.
+
+- **Kopf:** Überschrift, „Aktualisieren“, Einleitung und „Stand TT.MM.JJ, HH:MM“ aus
+  `generated_at` in Ortszeit.
+- **Filter** (umbrechend): Zeitfenster 1 Stunde / 24 Stunden (Standard) / 7 Tage / 14 Tage;
+  Quellen (alle an; eine Quelle mit `off`/`admin_only` ist ausgegraut, „nur für
+  Administratoren“, nicht wählbar und wird trotzdem angefragt, damit ihr Zustand sichtbar
+  bleibt); Schwere Alle / ab Warnung / nur kritisch; Router („Alle Router“ und die Router der
+  geladenen Marken). Diese vier lösen eine neue Anfrage mit `from` und `until` aus; Antworten
+  zu alten Filtern werden verworfen. Die Art-Chips filtern nur die geladenen Marken
+  („x von y Marken“).
+- **Quellen:** je Quelle ein Pill in Worten („12 Marken“, „leer“, „aus · Grund“, „Quelle nicht
+  lesbar · Grund“, Zusatz „gekürzt“), nie grün. Bei `partial` steht darüber „Mindestens eine
+  Quelle war nicht lesbar; die Zeitleiste ist unvollständig.“
+- **Hinweis** bei `omitted_client_marks` > 0: „N client-bezogene Ereignisse sind ausgeblendet.
+  Client-Verläufe kommen mit einem eigenen Schalter in einer späteren Version.“
+- **Zeitleiste:** neueste zuerst, nach Kalendertag in Ortszeit (Heute, Gestern, „Wochentag,
+  TT.MM.JJJJ“), je Marke Uhrzeit (UTC-ISO im `title`), Schwere als Punkt und Wort (Info nie in
+  Warnfarbe), Art, Titel, Kennzahlen (nur bekannte Schlüssel), Router („alle Router“ bei
+  `fleet`) und Quelle; „abgeleitet“ bei `derived`. Doppelte `id` werden entfernt. „Ältere
+  laden“ fragt mit `until=next_until`; `truncated` ohne `next_until` zeigt „Weitere Marken im
+  Zeitfenster wurden gekürzt; Zeitfenster oder Filter enger wählen.“
+- **Zustände:** aus („Die Zeitreise ist ausgeschaltet.“ mit dem Weg zum Schalter, ohne Filter
+  und Liste); lädt (leiser Hinweis, die alte Liste bleibt); 401/403 „Keine Berechtigung für die
+  Zeitreise.“; 410 „Die Integration wurde entladen.“; 5xx und Netzwerk „Die Zeitleiste konnte
+  nicht geladen werden.“ mit „Erneut versuchen“; 400 „Ungültige Filterkombination.“ mit dem
+  Feldnamen, nie mit der Eingabe; leer „Keine Marken im gewählten Zeitfenster.“
+- **Abruf:** nur bei sichtbarem Tab und sichtbarer Seite, automatisch höchstens alle 60 s und
+  nur die erste Seite; neue Marken kommen nach vorn, geladene ältere Seiten bleiben. Ist die
+  Time Machine aus, nur beim Öffnen und bei „Aktualisieren“.
+- **Schmale Breite:** unter der Breite einer Zeile wird jede Marke zur Karte (Container Query):
+  Zeit, Schwere, Art / Titel / Kennzahlen / Router, Quelle. Kein seitliches Scrollen bis
+  360 px; Chips und Knöpfe unter 600 px 40 px hoch wie in den anderen Tabs.
+
+### 14.1 Titel und Rückfall
+
+`tmTexts.ts` hat für jeden `title_key`, den das Backend erzeugen kann, einen deutschen Titel
+(259 Schlüssel, 1.50.0). `tests/test_tm_panel_texts_v1500.py` sammelt die Schlüssel aus den
+Konstanten der Quellmodule und schlägt fehl, wenn einer fehlt. Bei Vorfällen setzt der Tab
+„Vorfall eröffnet:“ oder „Vorfall behoben:“ davor, weil `title_key` das nicht trägt.
+
+Rückfall, wenn ein Schlüssel fehlt (etwa eine neue Art einer späteren Version oder ein Code,
+den der Test nicht sammelt): der Server-`text` (MAC und IP maskiert), sonst „Code
+<title_key>“, sonst „Code unbekannt“. Nicht vom Test gesammelt (NOT_COVERED im Test):
+Audit-Typen von Modulen, die es noch nicht gibt, oder aus einer neueren gespeicherten Version;
+NI-Arten eines neueren Log-Parsers oder von Ereignissen einer älteren Version; Vorfalltypen
+einer älteren gespeicherten Version (Regel inzwischen entfernt); später hinzugefügte Arten
+des Security Center. Sie fallen auf diese Regel zurück.
+
+### 14.2 Testdaten
+
+`tmFixture.json` ist eine echte Antwort der Route (Admin, zwei Seiten, leer, `partial`,
+Nicht-Admin, aus, 400), geschrieben von `tests/test_tm_panel_fixture_v1500.py` mit erfundenen
+Werten; der Test schreibt sie neu und vergleicht (`TM_WRITE_FIXTURE=1` schreibt die Datei).
