@@ -1223,6 +1223,10 @@ class OpenWrtAPI:
         # iwinfo info per device read by get_ap_interface_details() in this
         # poll; get_sta_interface_details() takes it once (1.48.0 fix).
         self._iwinfo_info_seen: dict[str, dict[str, Any]] = {}
+        # True only while WiFi RF (option wifi_rf_enabled) is on; set by the
+        # coordinator before each poll. Off, the STA detection makes the
+        # 1.47.1 calls (1.49.2); on, it asks iwinfo per device (1.48.0).
+        self.wifi_rf_sta_detail: bool = False
         # Kernel AP ifnames the radios reported on the previous call; an
         # ifname that newly appears and is not in the cache triggers one
         # re-discovery (not one per poll when it is never discoverable).
@@ -2255,7 +2259,12 @@ class OpenWrtAPI:
                 self._wifi_method = None
         if self._wifi_method == "iwinfo":
             try:
-                result = await self._iwinfo_info_by_device()
+                # 1.49.2: the 1.47.1 call again, on purpose. rpcd answers it
+                # with "Invalid argument" (no device), so a real router falls
+                # back to UCI, whose section names are the Wi-Fi switch
+                # unique_ids. Asking per device (1.48.0-1.49.1) succeeded and
+                # turned those unique_ids into kernel ifnames (duplicates).
+                result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
                 return self._parse_iwinfo_info(result)
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                 self._wifi_method = None
@@ -2277,7 +2286,8 @@ class OpenWrtAPI:
             )
 
         try:
-            result = await self._iwinfo_info_by_device()
+            # Same 1.47.1 call as the fast path above (switch identity).
+            result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
             parsed = self._parse_iwinfo_info(result)
             if parsed:
                 self._wifi_method = "iwinfo"
@@ -2529,11 +2539,16 @@ class OpenWrtAPI:
         # --- Step 1: iwinfo enumeration ----------------------------------
         candidates: list[tuple[str, dict[str, Any]]] = []
         try:
-            # Reuse the per-device answers of get_ap_interface_details() of
-            # this poll (one-shot); only without them enumerate the devices.
-            info_all, self._iwinfo_info_seen = self._iwinfo_info_seen, {}
-            if not info_all:
-                info_all = await self._iwinfo_info_by_device()
+            # The answers of get_ap_interface_details() are one-shot.
+            seen, self._iwinfo_info_seen = self._iwinfo_info_seen, {}
+            if self.wifi_rf_sta_detail:
+                # WiFi RF on (1.48.0): reuse the per-device answers of this
+                # poll; only without them enumerate the devices.
+                info_all = seen or await self._iwinfo_info_by_device()
+            else:
+                # WiFi RF off: exactly the 1.47.1 call (rpcd answers it with
+                # "Invalid argument", then the UCI fallback below runs).
+                info_all = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
             if isinstance(info_all, dict):
                 for ifname, iface_data in info_all.items():
                     if not isinstance(iface_data, dict):
@@ -2611,6 +2626,10 @@ class OpenWrtAPI:
 
     async def _iwinfo_info_by_device(self) -> dict[str, Any]:
         """``iwinfo info`` of every wireless device, keyed by device name.
+
+        Since 1.49.2 only the STA detection uses it, and only with WiFi RF on
+        (``wifi_rf_sta_detail``); get_wifi_status() makes the 1.47.1 call
+        again so that the Wi-Fi switches keep their UCI-section unique_ids.
 
         rpcd's iwinfo plugin needs a ``device``: ``iwinfo info {}`` answers
         UBUS_STATUS_INVALID_ARGUMENT ("Invalid argument"). So the devices are
