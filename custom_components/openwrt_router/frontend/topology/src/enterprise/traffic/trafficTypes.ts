@@ -418,11 +418,71 @@ export interface TrafficApi {
   recommendations(): Promise<Recommendations>;
   /** Administrators only (403 otherwise). */
   flows(): Promise<FlowsView>;
+  /** Administrators only: the settings (router options read only, fleet settings). */
+  settings(): Promise<SettingsView>;
+  /** Administrators only: users that may be chosen as the collector (no user id). */
+  collectorUsers(): Promise<CollectorUsers>;
+  /** Administrators only: POST /settings; resolves with the settings the server stored. */
+  updateSettings(update: SettingsUpdate): Promise<SettingsView>;
+}
+
+// ── Settings (Phase L form) ──────────────────────────────────────────────
+
+export interface CollectorSettings {
+  enabled: boolean;
+  userConfigured: boolean;
+  state: string | null;
+  schema: string | null;
+  path: string | null;
+}
+
+export interface RouterSettings {
+  routerId: string;
+  enabled: boolean | null;
+  historyProfile: string | null;
+}
+
+export interface SettingsView extends Base {
+  enabled: boolean | null;
+  routersEnabled: number | null;
+  historyProfile: string | null;
+  routers: RouterSettings[];
+  clientSensors: string[];
+  clientSensorsMax: number;
+  collector: CollectorSettings;
+  writable: boolean;
+}
+
+export interface CollectorUser {
+  /** usr_<16 hex>, valid for this HA run; never the HA user id. */
+  userRef: string;
+  name: string;
+  selected: boolean;
+}
+
+export interface CollectorUsers extends Base {
+  users: CollectorUser[];
+  selectedListed: boolean;
+  userConfigured: boolean;
+}
+
+/** Body of POST /settings (each key optional). */
+export interface SettingsUpdate {
+  collector?: { enabled?: boolean; user_ref?: string };
+  client_sensors?: string[];
+}
+
+/** What the form edits; nothing of it counts as stored before the server says so. */
+export interface SettingsDraft {
+  collectorEnabled: boolean;
+  /** '' = no user chosen in the list. */
+  userRef: string;
+  clientSensors: string[];
 }
 
 export interface TrafficHass {
-  /** The tab only reads: GET is the one method it ever uses. */
-  callApi<T>(method: 'GET', path: string, parameters?: Record<string, unknown>): Promise<T>;
+  /** GET for every view; POST only for the settings form (administrators). */
+  callApi<T>(method: 'GET' | 'POST', path: string, parameters?: Record<string, unknown>): Promise<T>;
   user?: { is_admin?: boolean };
   auth?: {
     data?: { access_token?: string };

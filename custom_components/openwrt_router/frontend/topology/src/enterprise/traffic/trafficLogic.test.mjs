@@ -18,11 +18,13 @@ test('tab identity: order 50 under Enterprise, after WiFi (40)', () => {
   assert.equal(TAB_ORDER, 50);
 });
 
-test('the sections are the Phase J views; Flows only for administrators', () => {
+test('the sections are the Phase J views; Flows and Einstellungen only for administrators', () => {
   assert.deepEqual(SECTIONS.map(s => s.title),
-    ['Übersicht', 'Verlauf', 'Top Talkers', 'Clients & VLANs', 'Anomalien', 'Kapazität', 'Flows']);
-  assert.ok(!sectionsFor(false).some(s => s.id === 'flows'));
-  assert.ok(sectionsFor(true).some(s => s.id === 'flows'));
+    ['Übersicht', 'Verlauf', 'Top Talkers', 'Clients & VLANs', 'Anomalien', 'Kapazität', 'Flows', 'Einstellungen']);
+  for (const id of ['flows', 'settings']) {
+    assert.ok(!sectionsFor(false).some(s => s.id === id), id);
+    assert.ok(sectionsFor(true).some(s => s.id === id), id);
+  }
 });
 
 test('polling: never faster than 60 s and only while visible', () => {

@@ -30,6 +30,8 @@ import type {
   ClientList,
   ClientRow,
   CoverageLevel,
+  CollectorUser,
+  CollectorUsers,
   CoverageSummary,
   Finding,
   FlowRow,
@@ -46,6 +48,9 @@ import type {
   Series,
   SeriesBucket,
   SeriesQuery,
+  SettingsDraft,
+  SettingsUpdate,
+  SettingsView,
   SourceState,
   TalkerList,
   TalkerQuery,
@@ -68,7 +73,7 @@ export const TAB_TITLE = 'Traffic Analytics';
 /** After Konfiguration (10), Security (20), Diagnose (30) and WiFi (40). */
 export const TAB_ORDER = 50;
 
-export type SectionId = 'overview' | 'history' | 'talkers' | 'clients' | 'anomalies' | 'capacity' | 'flows';
+export type SectionId = 'overview' | 'history' | 'talkers' | 'clients' | 'anomalies' | 'capacity' | 'flows' | 'settings';
 export const SECTIONS: readonly { id: SectionId; title: string; adminOnly?: boolean }[] = [
   { id: 'overview', title: 'Übersicht' },
   { id: 'history', title: 'Verlauf' },
@@ -77,6 +82,7 @@ export const SECTIONS: readonly { id: SectionId; title: string; adminOnly?: bool
   { id: 'anomalies', title: 'Anomalien' },
   { id: 'capacity', title: 'Kapazität' },
   { id: 'flows', title: 'Flows', adminOnly: true },
+  { id: 'settings', title: 'Einstellungen', adminOnly: true },
 ];
 
 export function sectionsFor(admin: boolean): { id: SectionId; title: string }[] {
@@ -578,6 +584,151 @@ export function parseFlows(v: unknown): FlowsView {
     rows: objList(o?.rows, FLOW_ROWS_MAX).map(parseFlowRow),
     complete: typeof o?.complete === 'boolean' ? o.complete : null,
   };
+}
+
+// ── Settings (Phase L form) ──────────────────────────────────────────────
+
+export const CLIENT_SENSORS_MAX = 20;
+const CLIENT_REF_RE = /^cli_[0-9a-f]{16}$/;
+const USER_REF_RE = /^usr_[0-9a-f]{16}$/;
+
+export function isClientRef(v: unknown): v is string {
+  return typeof v === 'string' && CLIENT_REF_RE.test(v);
+}
+export function isUserRef(v: unknown): v is string {
+  return typeof v === 'string' && USER_REF_RE.test(v);
+}
+
+export function parseSettings(v: unknown): SettingsView {
+  const o = obj(v);
+  const c = obj(o?.collector);
+  const routers = obj(o?.routers) ?? {};
+  const max = n(o?.client_sensors_max);
+  return {
+    ...base(o),
+    enabled: typeof o?.enabled === 'boolean' ? o.enabled : null,
+    routersEnabled: n(o?.routers_enabled),
+    historyProfile: str(o?.history_profile),
+    routers: Object.entries(routers).slice(0, 64).map(([routerId, r]) => {
+      const ro = obj(r);
+      return {
+        routerId,
+        enabled: typeof ro?.enabled === 'boolean' ? ro.enabled : null,
+        historyProfile: str(ro?.history_profile),
+      };
+    }),
+    clientSensors: strList(o?.client_sensors).filter(isClientRef),
+    clientSensorsMax: max !== null && max >= 0 && max <= CLIENT_SENSORS_MAX ? max : CLIENT_SENSORS_MAX,
+    collector: {
+      enabled: c?.enabled === true,
+      userConfigured: c?.user_configured === true,
+      state: str(c?.state),
+      schema: str(c?.schema),
+      path: str(c?.path),
+    },
+    writable: o?.writable === true,
+  };
+}
+
+export function parseCollectorUsers(v: unknown): CollectorUsers {
+  const o = obj(v);
+  const users: CollectorUser[] = objList(o?.users, 100)
+    .filter(u => isUserRef(u.user_ref))
+    .map(u => ({ userRef: u.user_ref as string, name: scrub(str(u.name) ?? '').slice(0, 64), selected: u.selected === true }));
+  return {
+    ...base(o),
+    users,
+    selectedListed: o?.selected_listed === true,
+    userConfigured: o?.user_configured === true,
+  };
+}
+
+/** A user as shown: the display name, or a short form of the reference. */
+export function userLabel(u: CollectorUser): string {
+  return u.name || `Benutzer ${u.userRef.slice(4, 10)}`;
+}
+
+/** The form's starting point: what the server stored. */
+export function settingsDraft(view: SettingsView, users: CollectorUsers | null): SettingsDraft {
+  return {
+    collectorEnabled: view.collector.enabled,
+    userRef: users?.users.find(u => u.selected)?.userRef ?? '',
+    clientSensors: [...view.clientSensors].sort(),
+  };
+}
+
+/** Toggle one client in the draft; never more than `max`. */
+export function toggleClientSensor(draft: SettingsDraft, ref: string, on: boolean, max = CLIENT_SENSORS_MAX): SettingsDraft {
+  if (!isClientRef(ref)) return draft;
+  const has = draft.clientSensors.includes(ref);
+  if (on && !has) {
+    if (draft.clientSensors.length >= max) return draft;
+    return { ...draft, clientSensors: [...draft.clientSensors, ref].sort() };
+  }
+  if (!on && has) return { ...draft, clientSensors: draft.clientSensors.filter(r => r !== ref) };
+  return draft;
+}
+
+/** Only the changed keys; an error text instead when the draft cannot be sent. */
+export function buildSettingsUpdate(
+  view: SettingsView,
+  users: CollectorUsers | null,
+  draft: SettingsDraft,
+): { update: SettingsUpdate; error: string | null } {
+  const update: SettingsUpdate = {};
+  const storedRef = users?.users.find(u => u.selected)?.userRef ?? '';
+  const collector: { enabled?: boolean; user_ref?: string } = {};
+  if (draft.userRef !== '' && draft.userRef !== storedRef) {
+    if (!isUserRef(draft.userRef)) return { update: {}, error: 'Der gewählte Benutzer ist ungültig.' };
+    collector.user_ref = draft.userRef;
+  }
+  if (draft.collectorEnabled !== view.collector.enabled) collector.enabled = draft.collectorEnabled;
+  if (Object.keys(collector).length) {
+    const hasUser = draft.userRef !== '' || view.collector.userConfigured;
+    if (draft.collectorEnabled && !hasUser) {
+      return { update: {}, error: 'Bitte zuerst einen Benutzer für den Collector wählen.' };
+    }
+    update.collector = collector;
+  }
+  const want = [...new Set(draft.clientSensors)].sort();
+  if (want.length > view.clientSensorsMax) {
+    return { update: {}, error: `Höchstens ${view.clientSensorsMax} Clients können Sensoren bekommen.` };
+  }
+  if (!want.every(isClientRef)) return { update: {}, error: 'Die Client-Auswahl ist ungültig.' };
+  const stored = [...view.clientSensors].sort();
+  if (want.length !== stored.length || want.some((r, i) => r !== stored[i])) update.client_sensors = want;
+  return { update, error: null };
+}
+
+const SETTINGS_REASON_TEXT: Record<string, string> = {
+  user_unknown: 'Dieser Benutzer ist nicht (mehr) wählbar. Bitte die Liste neu laden und erneut wählen.',
+  user_is_admin: 'Ein Administrator kann nicht der Collector sein. Bitte einen eigenen Benutzer ohne Admin-Rechte anlegen.',
+  user_inactive: 'Dieser Benutzer ist deaktiviert.',
+  user_system: 'Ein System-Benutzer kann nicht der Collector sein.',
+  user_ref: 'Der gewählte Benutzer ist ungültig.',
+  user_id_and_ref: 'Der gewählte Benutzer ist ungültig.',
+  collector_user_missing: 'Bitte zuerst einen Benutzer für den Collector wählen.',
+  collector_user: 'Der gewählte Benutzer ist ungültig.',
+  client_sensors_too_many: `Höchstens ${CLIENT_SENSORS_MAX} Clients können Sensoren bekommen.`,
+  client_sensors: 'Die Client-Auswahl ist ungültig.',
+  client_ref: 'Die Client-Auswahl ist ungültig.',
+  empty: 'Es gibt keine Änderung zum Speichern.',
+};
+
+/** Why a save failed, in words; nothing counts as saved. */
+export function settingsErrorText(err: unknown): string {
+  if (err instanceof TrafficApiError) {
+    if (err.status === 409) {
+      return 'Nicht gespeichert: Traffic Analytics ist aus. Die Einstellungen lassen sich erst speichern, wenn das Modul an mindestens einem Router eingeschaltet ist.';
+    }
+    if (err.status === 413) return 'Nicht gespeichert: die Anfrage ist zu groß.';
+    if (err.status === 403) return 'Nicht gespeichert: nur ein Administrator darf diese Einstellungen ändern.';
+    if (err.status === 400) {
+      const known = err.details.reason ? SETTINGS_REASON_TEXT[err.details.reason] : undefined;
+      return `Nicht gespeichert: ${known ?? 'der Server hat die Eingabe nicht angenommen.'}`;
+    }
+  }
+  return `Nicht gespeichert: ${errorInfo(err).message}`;
 }
 
 /** Endpoint of a flow as shown: a pseudonym (ipa_…) and a port, never an address. */

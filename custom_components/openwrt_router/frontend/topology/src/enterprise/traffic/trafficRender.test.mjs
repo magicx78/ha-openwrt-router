@@ -40,6 +40,7 @@ before(async () => {
         "export { AnomalyView } from './TrafficAnomalies';",
         "export { CapacityCards, RecommendationsView } from './TrafficCapacity';",
         "export { FlowsBody } from './TrafficFlows';",
+        "export { SettingsForm, RouterSettingsFacts, TrafficSettings } from './TrafficSettings';",
         "export { TrafficAnalyticsView } from './TrafficAnalyticsView';",
         "export { getEnterpriseTabs } from '../registry';",
         "export { bindConfigHass } from '../config/register';",
@@ -206,4 +207,62 @@ test('narrow layout: the stylesheet keeps 360 px without sideways scrolling', ()
   // the grid column floor fits a 360 px screen minus the panel padding
   const floor = Number(/minmax\((\d+)px/.exec(css)[1]);
   assert.ok(floor <= 300, floor);
+});
+
+// ── Settings form (Phase L, administrators only) ─────────────────────────
+
+const settingsForm = (over = {}, sel = null, props = {}) => html(h(M.SettingsForm, {
+  view: M.parseSettings(S.settings(over)),
+  users: M.parseCollectorUsers(S.collectorUsers(sel)),
+  clients: M.parseClients(S.clients()),
+  onSave: async () => {},
+  ...props,
+}));
+
+test('the settings form offers the collector user by name and the clients by pseudonym only', () => {
+  const out = settingsForm({ client_sensors: [S.CLI2] }, S.USR1);
+  assert.match(out, /Externer Collector/);
+  assert.match(out, /<option value="usr_5{16}" selected="">Collector<\/option>/);
+  assert.match(out, /Client c0ffee/);
+  assert.match(out, /Client beef00 <span class="wifi-muted">· derzeit nicht erfasst/); // chosen, not seen now
+  assert.match(out, /Client-Sensoren \(1 von 20\)/);
+  for (const secret of S.PLANTED) assert.ok(!out.includes(secret), secret);
+  assert.doesNotMatch(out, /[0-9a-f]{32}/); // no HA user id, no raw id of any kind
+  assert.doesNotMatch(out, /Gespeichert/); // nothing is shown as saved before the route confirms
+  assert.match(out, /<button type="submit"[^>]*disabled=""[^>]*>Speichern/); // no change, nothing to send
+});
+
+test('while the module cannot store, the form is locked and says why', () => {
+  const out = settingsForm({ writable: false });
+  assert.match(out, /Speichern geht erst, wenn Traffic Analytics an mindestens einem Router läuft/);
+  assert.match(out, /<input type="checkbox" disabled=""/);
+});
+
+test('no choosable user and a stored user that vanished are both explained', () => {
+  const none = html(h(M.SettingsForm, {
+    view: M.parseSettings(S.settings({ collector: { ...S.settings().collector, user_configured: true } })),
+    users: M.parseCollectorUsers({ ...S.collectorUsers(), users: [], user_configured: true, selected_listed: false }),
+    clients: M.parseClients({ ...S.clients(), clients: [] }),
+    onSave: async () => {},
+  }));
+  assert.match(none, /keinen wählbaren Benutzer/);
+  assert.match(none, /nicht mehr wählbar/);
+  assert.match(none, /eingetragener Benutzer bleibt/);
+  assert.match(none, /noch kein Client erfasst/);
+});
+
+test('router switches are shown read only with the way to the options flow', () => {
+  const out = html(h(M.RouterSettingsFacts, { view: M.parseSettings(S.settings()) }));
+  assert.match(out, /1 von 2 Routern/);
+  assert.match(out, /compact \(Standard\)/);
+  assert.match(out, /Integrationsoptionen/);
+  assert.doesNotMatch(out, /<input/);
+});
+
+test('non-administrators get no settings section; the tab never loads it for them', () => {
+  const seen = [];
+  const spy = new Proxy({}, { get: (_t, key) => () => { seen.push(key); return new Promise(() => {}); } });
+  html(h(M.TrafficAnalyticsView, { api: spy, isAdmin: () => false }));
+  assert.ok(!seen.includes('settings') && !seen.includes('collectorUsers') && !seen.includes('updateSettings'));
+  assert.ok(!M.sectionsFor(false).some(s => s.id === 'settings'));
 });

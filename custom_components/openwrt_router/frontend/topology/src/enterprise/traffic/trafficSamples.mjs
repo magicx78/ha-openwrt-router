@@ -227,3 +227,34 @@ export function flowsWithRows() {
     sources: [{ source: 'collector', state: 'available', reason: null }],
   };
 }
+
+// ── Settings form (Phase L) ──────────────────────────────────────────────
+
+export const USR1 = 'usr_' + '5'.repeat(16);
+export const USR2 = 'usr_' + '6'.repeat(16);
+export const CLI2 = 'cli_' + 'beef'.padEnd(16, '0');
+
+export function settings(over = {}) {
+  return {
+    ...base(), enabled: true,
+    switch: { where: 'options_flow', option: 'traffic_enabled', profile_option: 'traffic_history_profile', per_router: true },
+    routers_enabled: 1, history_profile: 'compact',
+    routers: { [RID1]: { enabled: true, history_profile: 'compact', station_detail: false }, [RID2]: { enabled: false, history_profile: 'standard' } },
+    client_sensors: [], client_sensors_max: 20,
+    collector: { enabled: false, user_configured: false, state: 'off', schema: 'traffic.collector.v1', path: '/api/openwrt_topology/traffic/collector/ingest', limits: {} },
+    writable: true, writable_keys: ['client_sensors', 'collector'],
+    ...over,
+  };
+}
+
+export function collectorUsers(selected = null) {
+  return {
+    ...base(),
+    users: [
+      { user_ref: USR1, name: 'Collector', selected: selected === USR1 },
+      { user_ref: USR2, name: `feeder ${PLANTED_MAC}`, selected: selected === USR2 },
+    ],
+    selected_listed: selected !== null,
+    user_configured: selected !== null,
+  };
+}

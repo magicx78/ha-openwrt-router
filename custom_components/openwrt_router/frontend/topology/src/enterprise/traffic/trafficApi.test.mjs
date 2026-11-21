@@ -18,10 +18,11 @@ function jsonResponse(status, body) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
-test('the routes are the read routes of the backend; no write, no settings', () => {
+test('the routes are the read routes of the backend plus the settings and the collector users', () => {
   assert.equal(TRAFFIC_BASE, '/api/openwrt_topology/traffic');
   assert.deepEqual(Object.values(trafficPaths).sort(), [
-    'anomalies', 'capacity', 'clients', 'flows', 'overview', 'points', 'recommendations', 'series', 'talkers', 'vlans',
+    'anomalies', 'capacity', 'clients', 'collector/users', 'flows', 'overview', 'points', 'recommendations', 'series',
+    'settings', 'talkers', 'vlans',
   ]);
 });
 

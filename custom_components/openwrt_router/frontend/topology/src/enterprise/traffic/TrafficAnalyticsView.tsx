@@ -2,7 +2,7 @@
  * TrafficAnalyticsView — Enterprise sub-tab "Traffic Analytics".
  *
  * Sections: Übersicht, Verlauf, Top Talkers, Clients & VLANs, Anomalien,
- * Kapazität and (administrators) Flows. The component is mounted only
+ * Kapazität and (administrators) Flows and Einstellungen. The component is mounted only
  * while its tab is shown; each section loads its own route while it is
  * shown, at most every 60 s and only while the page is visible;
  * "Aktualisieren" reloads at once. Each section sits in its own error
@@ -23,6 +23,7 @@ import { TrafficClients } from './TrafficClients';
 import { TrafficAnomalies } from './TrafficAnomalies';
 import { TrafficCapacity } from './TrafficCapacity';
 import { TrafficFlows } from './TrafficFlows';
+import { TrafficSettings } from './TrafficSettings';
 
 export function TrafficAnalyticsView({ api, isAdmin }: { api: TrafficApi; isAdmin: () => boolean }) {
   const admin = isAdmin();
@@ -48,6 +49,7 @@ export function TrafficAnalyticsView({ api, isAdmin }: { api: TrafficApi; isAdmi
       case 'anomalies': return <TrafficAnomalies api={api} rev={rev} />;
       case 'capacity': return <TrafficCapacity api={api} rev={rev} />;
       case 'flows': return <TrafficFlows api={api} rev={rev} />;
+      case 'settings': return admin ? <TrafficSettings api={api} rev={rev} /> : null;
       default: return null;
     }
   })();
