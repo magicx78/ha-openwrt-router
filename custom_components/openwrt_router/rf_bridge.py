@@ -19,8 +19,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.core import HomeAssistant
-
 from .channel_plan import PairEvidence, Radio
 from .rf_conflicts import DEFAULT_THRESHOLDS, ConflictKind, ConflictStatus
 from .rf_models import CapabilityState, Metric
@@ -38,13 +36,13 @@ REASON_LOW = "measured_low"
 REASON_ERROR = "error"
 
 
-def _center(hass: HomeAssistant) -> Any:
+def _center(hass: Any) -> Any:
     from .rf_center import async_get_rf_center
 
     return async_get_rf_center(hass)
 
 
-def channel_plan_evidence_of(hass: HomeAssistant) -> PairEvidence | None:
+def channel_plan_evidence_of(hass: Any) -> PairEvidence | None:
     """The pair callback for ``channel_plan.analyze``; None while RF is off."""
     center = _center(hass)
     if center is None or not center.enabled:

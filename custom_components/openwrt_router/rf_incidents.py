@@ -36,8 +36,6 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-from homeassistant.core import HomeAssistant
-
 from .net_events import Category, Severity, Source
 from .net_rules import Finding
 from .rf_conflicts import ConflictStatus
@@ -58,7 +56,7 @@ _HELD_MAX: Final = 512
 
 @dataclass(frozen=True)
 class _Candidate:
-    key: tuple[Any, ...]
+    ident: tuple[Any, ...]
     kind: str
     subject: dict[str, Any]
     params: dict[str, Any]
@@ -77,7 +75,7 @@ class RfIncidentFeed:
 
     # -- engine -------------------------------------------------------------------
 
-    def attach(self, hass: HomeAssistant) -> None:
+    def attach(self, hass: Any) -> None:
         """Register at the running NI engine (again after it was replaced)."""
         from .net_engine import add_finding_source, async_get_engine
 
@@ -115,7 +113,7 @@ class RfIncidentFeed:
         if router_id is None:
             self._active.pop(entry_id, None)
             return []
-        found = {c.key: c for c in candidates(self.center, router_id)}
+        found = {c.ident: c for c in candidates(self.center, router_id)}
         before = self._active.get(entry_id, frozenset())
         self._active[entry_id] = frozenset(found)
         out: list[Finding] = []
@@ -192,7 +190,7 @@ def _busy(result: Any) -> _Candidate | None:
         return None
     metric = result.metrics.get("utilization")
     return _Candidate(
-        key=(RF_BUSY_KIND, result.ref),
+        ident=(RF_BUSY_KIND, result.ref),
         kind=RF_BUSY_KIND,
         subject=_subject(result),
         params={
@@ -211,7 +209,7 @@ def _retry(result: Any) -> _Candidate | None:
     if rate is None or rate < threshold:
         return None
     return _Candidate(
-        key=(RF_RETRY_KIND, result.ref),
+        ident=(RF_RETRY_KIND, result.ref),
         kind=RF_RETRY_KIND,
         subject=_subject(result),
         params={
@@ -231,7 +229,7 @@ def _conflicts(center: Any, results: dict[Any, Any]) -> Iterable[_Candidate]:
         for ref in own:
             result = results[ref]
             yield _Candidate(
-                key=(RF_CONFLICT_KIND, ref, conflict.kind.value, conflict.members),
+                ident=(RF_CONFLICT_KIND, ref, conflict.kind.value, conflict.members),
                 kind=RF_CONFLICT_KIND,
                 subject=_subject(result),
                 params={

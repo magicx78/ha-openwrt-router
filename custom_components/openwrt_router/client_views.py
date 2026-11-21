@@ -76,6 +76,7 @@ from .client_history import (
 )
 from .const import CLIENT_ENTITY_MAX
 from .net_query import QueryError
+from .rf_client_link import rf_hint_for_client
 from .topology_panel import _INTEL_URL, _IntelView, _NameOf, _router_names
 
 _LOGGER = logging.getLogger(__name__)
@@ -667,6 +668,9 @@ def _live(cs: ClientStability, live: ClientLive, name_of: _NameOf) -> dict[str, 
         "first_seen": live.first_seen,
         "last_seen": live.last_seen,
         "last_disconnect": _last_disconnect(live.last_disconnect),
+        # WiFi RF 1.48.0 part 2 (Q5): a busy channel near the last
+        # disconnect, as a hint only (no cause, no score effect); None off
+        "rf_hint": rf_hint_for_client(cs.hass, live),
         "hostname": live.hostname,
         "ip": live.ip,
         "private_mac": live.private_mac,

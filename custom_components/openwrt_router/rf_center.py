@@ -48,6 +48,7 @@ from . import api as api_module
 from .const import DATA_WIFI_RF_CENTER, SCAN_INTERVAL_SECONDS
 from .core_models import FLEET_ROUTER_ID, InstallationKeyState
 from .rf_capabilities import RF_MODULE, capability_detector
+from .rf_client_link import client_facts_lookup
 from .rf_collector import (
     RadioPlanInput,
     RfCollector,
@@ -57,6 +58,7 @@ from .rf_collector import (
     options_from_entry,
 )
 from .rf_evaluate import (
+    SIGNAL_WINDOW_S,
     FleetResult,
     PollInput,
     RadioInput,
@@ -746,6 +748,14 @@ class RfCenter:
             uptime=uptime,
             max_age_s=interval * 2 + SCAN_INTERVAL_SECONDS,
             interval_s=interval,
+            history=self.stage(
+                "client history",
+                client_facts_lookup,
+                self.hass,
+                state.entry_id,
+                now,
+                SIGNAL_WINDOW_S,
+            ),
         )
         for gone in set(state.radios) - {r.radio_id for r in radios}:
             del state.radios[gone]

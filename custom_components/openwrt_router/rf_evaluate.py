@@ -386,6 +386,9 @@ class PollInput:
     uptime: float | None
     max_age_s: float
     interval_s: float
+    # Part 2 (Q5): per-MAC facts of the Client Stability history
+    # (``rf_client_link.ClientHistoryFacts``); None without the history.
+    history: Callable[[str], Any] | None = None
 
 
 def _error(poll: PollInput, kind: str, device: str | None) -> CapabilityState | None:
@@ -613,6 +616,7 @@ def _assessments(
     for mac in macs[:CLIENTS_PER_RADIO_MAX]:
         mean, low, stddev, weak, samples = _signal_stats(memory.signals.get(mac, ()))
         packets, retries, failed = _tx_counters(memory, mac, poll)
+        facts = poll.history(mac) if poll.history is not None else None
         window = ClientRfWindow(
             client_mac=mac,
             radio=ref,
@@ -624,12 +628,12 @@ def _assessments(
             rssi_stddev=stddev,
             weak_share=weak,
             noise=noise,
-            rate_tx_mean=None,
+            rate_tx_mean=getattr(facts, "rate_tx_mean", None),
             rate_tx_trend=None,
             tx_packets=packets,
             tx_retries=retries,
             tx_failed=failed,
-            disconnects=None,
+            disconnects=getattr(facts, "disconnects", None),
             disconnects_weak=None,
             mobility=None,
             demand=None,
