@@ -405,6 +405,8 @@ def snapshot_from_data(
     port_stats = getattr(data, "port_stats", None)
     port_links = _port_links(port_stats)
     wan = getattr(data, "wan_status", None)
+    # set by ``get_wan_status`` from netifd while the WAN is up (absent: no
+    # WAN point this poll; before the fix after 1.49.3 it was never set)
     wan_device = wan.get("l3_device") if isinstance(wan, Mapping) else None
     if not valid_device_name(wan_device):
         wan_device = None
