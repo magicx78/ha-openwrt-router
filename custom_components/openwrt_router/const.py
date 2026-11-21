@@ -921,4 +921,17 @@ WIFI_RF_MAX_DAILY_BUCKETS = 31 + 1  # per radio and series
 # Raw points (memory only, for the 1 h window) per radio and series.
 WIFI_RF_MAX_RAW_POINTS = 240
 WIFI_RF_MAX_STORE_BYTES = 2_000_000
+# Part 2 (wifi_rf_entities.py): a bounded entity set, pushed by SIGNAL_WIFI_RF.
+# Fleet: three sensors (no device). Per router with RF on and an existing
+# device: AP RF health, plus three sensors per radio for at most
+# WIFI_RF_RADIO_ENTITIES_MAX radios. Never one entity per client or per
+# foreign network. Unique ids: fleet ``UID_FLEET_WIFI_RF_*``, router
+# ``<entry_id>_wifi_rf_ap_health``, radio ``<entry_id>_wifi_rf_<radio>_<metric>``.
+SIGNAL_WIFI_RF = f"{DOMAIN}_wifi_rf_updated"
+DATA_WIFI_RF_ENTITIES = f"{DOMAIN}_wifi_rf_entities"
+UID_FLEET_WIFI_RF_HEALTH = f"{FLEET_UID_PREFIX}wifi_rf_health_score"
+UID_FLEET_WIFI_RF_ROAMING = f"{FLEET_UID_PREFIX}wifi_rf_roaming_problems"
+UID_FLEET_WIFI_RF_RECOMMENDATIONS = f"{FLEET_UID_PREFIX}wifi_rf_recommendations"
+WIFI_RF_UID_INFIX = "_wifi_rf_"
+WIFI_RF_RADIO_ENTITIES_MAX = 4  # radios per router (tri-band plus one spare)
 # --- end WiFi RF Intelligence

@@ -930,6 +930,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
                 type(err).__name__,
             )
             _LOGGER.debug("WiFi RF setup error", exc_info=err)
+        # Part 2: the bounded entity set (created only for routers with RF on)
+        try:
+            from .wifi_rf_entities import async_sync_rf_entities
+
+            await async_sync_rf_entities(hass)
+        except Exception as err:
+            _LOGGER.warning(
+                "WiFi RF entities not set up (%s); the router works without them",
+                type(err).__name__,
+            )
+            _LOGGER.debug("WiFi RF entities error", exc_info=err)
     return ok
 
 
@@ -943,6 +954,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
         except Exception as err:
             _LOGGER.warning("WiFi RF release failed (%s)", type(err).__name__)
             _LOGGER.debug("WiFi RF release error", exc_info=err)
+        try:
+            from .wifi_rf_entities import async_entry_released
+
+            last = _rf_center.async_get_rf_center(hass) is None
+            await async_entry_released(hass, entry.entry_id, last=last)
+        except Exception as err:
+            _LOGGER.warning("WiFi RF entities release failed (%s)", type(err).__name__)
+            _LOGGER.debug("WiFi RF entities release error", exc_info=err)
     return unload_ok
 
 

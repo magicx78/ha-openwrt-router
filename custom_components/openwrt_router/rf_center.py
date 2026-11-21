@@ -42,10 +42,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
 from . import api as api_module
-from .const import DATA_WIFI_RF_CENTER, SCAN_INTERVAL_SECONDS
+from .const import DATA_WIFI_RF_CENTER, SCAN_INTERVAL_SECONDS, SIGNAL_WIFI_RF
 from .core_models import FLEET_ROUTER_ID, InstallationKeyState
 from .rf_capabilities import RF_MODULE, capability_detector
 from .rf_client_link import client_facts_lookup
@@ -808,6 +809,8 @@ class RfCenter:
         self.fleet = evaluate_fleet(list(self.results.values()))
         self._cap_version += 1
         self.stage("events", self._emit_events, now)
+        # Part 2: the entities (wifi_rf_entities.py) update on this signal.
+        self.stage("entity update", async_dispatcher_send, self.hass, SIGNAL_WIFI_RF)
 
     def _record(
         self,

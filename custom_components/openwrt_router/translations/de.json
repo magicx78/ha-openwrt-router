@@ -369,6 +369,27 @@
       },
       "fleet_diag_dns_response_time": {
         "name": "DNS-Antwortzeit"
+      },
+      "fleet_wifi_rf_health_score": {
+        "name": "WLAN-Gesundheit (alle Router)"
+      },
+      "fleet_wifi_rf_roaming_problems": {
+        "name": "Aktive WLAN-Roaming-Probleme (alle Router)"
+      },
+      "fleet_wifi_rf_recommendations": {
+        "name": "WLAN-Kanalempfehlungen (alle Router)"
+      },
+      "wifi_rf_ap_health": {
+        "name": "AP-Funkgesundheit"
+      },
+      "wifi_rf_channel_utilization": {
+        "name": "Kanalauslastung {radio}"
+      },
+      "wifi_rf_noise_floor": {
+        "name": "Grundrauschen {radio}"
+      },
+      "wifi_rf_retry_rate": {
+        "name": "WLAN-Wiederholungsrate {radio}"
       }
     },
     "switch": {
