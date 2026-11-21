@@ -31,7 +31,7 @@
           "wifi_rf_assoclist": "Reads iwinfo assoclist once per access-point interface every N polls for retries, failed frames and connection time of clients. About 0.9 KB per connected client. Needs wifi_rf_enabled.",
           "wifi_rf_lists_at_start": "Reads the allowed channels and TX power steps of each radio once at start and again only after a channel or country change, never in the regular poll. About 2-4 KB per radio. Needs wifi_rf_enabled.",
           "wifi_rf_survey": "Later stage: reads iwinfo survey every N polls only after a capability check passed. The current router ACL does not grant this read; without the right it stays 'not ready' and nothing else is affected. On ath10k radios a survey can block the driver for up to 3 seconds. Needs wifi_rf_enabled.",
-          "wifi_rf_every_n_polls": "Cadence of the extra reads above (1-60, default 5). With the 60-second poll, 5 means every 5 minutes. The reads pause while the router is throttled or on the SSH fallback. Small routers like the FRITZ!WLAN Repeater 1750E (54 MB RAM) should keep 5 or more."
+          "wifi_rf_every_n_polls": "Cadence of the extra reads above (1-60, default 5). With the 60-second poll, 5 means every 5 minutes; a smaller N never reads more often than every 5 minutes per radio. The reads pause while the router is throttled or on the SSH fallback. Small routers like the FRITZ!WLAN Repeater 1750E (54 MB RAM) should keep 5 or more."
         }
       }
     }

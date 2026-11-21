@@ -844,9 +844,10 @@ WIFI_RF_SWITCH_OPTIONS = (
 DEFAULT_WIFI_RF_EVERY_N_POLLS = 5
 WIFI_RF_EVERY_N_POLLS_MIN = 1
 WIFI_RF_EVERY_N_POLLS_MAX = 60
-# Extra calls of one kind never run more often than this per router and
-# radio, whatever N says (a 1-poll cadence at a 60 s poll stays at 60 s).
-WIFI_RF_MIN_FETCH_INTERVAL_S = 55.0
+# Extra periodic reads never run more often than rf_guard's
+# POLL_READ_MIN_INTERVAL_S (300 s) per router, radio and kind, whatever N
+# says; this much poll jitter is tolerated below that floor.
+WIFI_RF_FLOOR_TOLERANCE_S = 5.0
 # Overall time limit of one round of extra calls of one router.
 WIFI_RF_ROUND_TIMEOUT_S = 20.0
 # Capability probes after an error back off up to this long.

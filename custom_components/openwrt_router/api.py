@@ -2324,6 +2324,9 @@ class OpenWrtAPI:
                     "noise": info.get("noise"),
                     "quality": info.get("quality"),
                     "quality_max": info.get("quality_max"),
+                    # WiFi RF Intelligence (1.48.0): already in this answer.
+                    "country": info.get("country"),
+                    "txpower_offset": info.get("txpower_offset"),
                 }
             )
             _LOGGER.debug(
@@ -2798,6 +2801,10 @@ class OpenWrtAPI:
                     # live). Momentary values only, see plan 2.12.
                     rate = sta.get("rate")
                     rate = rate if isinstance(rate, dict) else {}
+                    # WiFi RF Intelligence (1.48.0): cumulative airtime (us)
+                    # of this answer, for the airtime share per radio.
+                    airtime = sta.get("airtime")
+                    airtime = airtime if isinstance(airtime, dict) else {}
                     clients.append(
                         {
                             CLIENT_KEY_MAC: mac,
@@ -2813,6 +2820,8 @@ class OpenWrtAPI:
                             or sta.get("tx_bytes"),
                             "rx_rate": rate.get("rx"),
                             "tx_rate": rate.get("tx"),
+                            "airtime_rx": airtime.get("rx"),
+                            "airtime_tx": airtime.get("tx"),
                         }
                     )
                 _LOGGER.debug(
@@ -7602,3 +7611,143 @@ async def _ssh_run_pinned_inner(
             stderr_truncated=stderr_cut,
         )
     raise OpenWrtAuthError(f"SSH login to {api._host} refused")
+
+
+# --- WiFi RF Intelligence (1.48.0) ---
+# The extra RF reads. Each is switched on separately in the options (all off
+# by default) and scheduled by rf_collector.RfCollector: every N polls, a
+# floor per radio, one fetch per kind and router at a time, a time limit per
+# round. Read-only and bounded; there is no scan here and no other kind can
+# be asked for. Module functions on purpose: nothing in OpenWrtAPI changes.
+
+RF_KIND_GET_STATUS = "get_status"  # hostapd.<if> get_status (one AP if per radio)
+RF_KIND_ASSOCLIST = "assoclist"  # iwinfo assoclist (per AP interface)
+RF_KIND_FREQLIST = "freqlist"  # iwinfo freqlist (setup / after a change)
+RF_KIND_TXPOWERLIST = "txpowerlist"  # iwinfo txpowerlist (setup / after a change)
+RF_KIND_SURVEY = "survey"  # iwinfo survey (later stage, capability gated)
+RF_KINDS = (
+    RF_KIND_GET_STATUS,
+    RF_KIND_ASSOCLIST,
+    RF_KIND_FREQLIST,
+    RF_KIND_TXPOWERLIST,
+    RF_KIND_SURVEY,
+)
+# Kernel interface names as iwinfo/hostapd use them (phy0-ap0, wlan1, ...).
+_RF_DEVICE_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+# List answers are cut here (a radio lists < 100 channels, an AP seldom has
+# more clients); the cut is reported in ``_truncated``, never silent.
+RF_MAX_LIST_ENTRIES = 256
+
+RF_REASON_PERMISSION = "permission_denied"
+RF_REASON_NOT_FOUND = "method_not_found"
+RF_REASON_INVALID_ARGUMENT = "invalid_argument"
+RF_REASON_TIMEOUT = "timeout"
+RF_REASON_UNREACHABLE = "unreachable"
+RF_REASON_AUTH = "auth_failed"
+RF_REASON_RESPONSE = "response_error"
+RF_REASON_INVALID_DEVICE = "invalid_device"
+
+
+class RfReadError(Exception):
+    """An RF read failed; ``unsupported`` says a retry will not help.
+
+    ``reason`` is one of the ``RF_REASON_*`` codes, never router text.
+    Method not found, permission denied and invalid argument are answers of
+    the router about the read itself (unsupported: no retry storm); timeouts
+    and transport errors are transient (unreachable, retried with backoff).
+    """
+
+    def __init__(self, reason: str, *, unsupported: bool) -> None:
+        """Error with a reason code."""
+        super().__init__(reason)
+        self.reason = reason
+        self.unsupported = unsupported
+
+
+def rf_read_error(err: BaseException) -> RfReadError:
+    """Classify an error of ``OpenWrtAPI._call`` for the capability state."""
+    text = str(err).lower()
+    if isinstance(err, OpenWrtMethodNotFoundError):
+        if "acl" in text or "access denied" in text or "not permitted" in text:
+            return RfReadError(RF_REASON_PERMISSION, unsupported=True)
+        return RfReadError(RF_REASON_NOT_FOUND, unsupported=True)
+    if isinstance(err, OpenWrtAuthError):
+        return RfReadError(RF_REASON_AUTH, unsupported=False)
+    if isinstance(err, OpenWrtTimeoutError):
+        return RfReadError(RF_REASON_TIMEOUT, unsupported=False)
+    if isinstance(err, OpenWrtConnectionError):
+        return RfReadError(RF_REASON_UNREACHABLE, unsupported=False)
+    if isinstance(err, OpenWrtResponseError) and text.startswith("ubus error 2 "):
+        # UBUS_STATUS_INVALID_ARGUMENT: the driver/rpcd cannot do it here.
+        return RfReadError(RF_REASON_INVALID_ARGUMENT, unsupported=True)
+    return RfReadError(RF_REASON_RESPONSE, unsupported=False)
+
+
+def _rf_bounded(result: Any) -> dict[str, Any]:
+    """The answer as a dict with list results cut to RF_MAX_LIST_ENTRIES."""
+    if not isinstance(result, dict):
+        return {}
+    entries = result.get("results")
+    if isinstance(entries, list) and len(entries) > RF_MAX_LIST_ENTRIES:
+        return {
+            **result,
+            "results": entries[:RF_MAX_LIST_ENTRIES],
+            "_truncated": len(entries) - RF_MAX_LIST_ENTRIES,
+        }
+    return dict(result)
+
+
+async def async_rf_read(api: OpenWrtAPI, kind: str, device: str) -> dict[str, Any]:
+    """One RF read of ``kind`` for one kernel interface ``device``.
+
+    Network calls: exactly one ubus call (plus the re-login ``_call`` makes
+    on a first ACL denial). Raises :class:`RfReadError` for every failure
+    and ValueError for a kind that is not an RF read (there is no scan).
+    """
+    if kind not in RF_KINDS:
+        raise ValueError(f"not an RF read: {kind!r}")
+    if not isinstance(device, str) or not _RF_DEVICE_RE.match(device):
+        raise RfReadError(RF_REASON_INVALID_DEVICE, unsupported=True)
+    if kind == RF_KIND_GET_STATUS:
+        obj, method, params = f"hostapd.{device}", "get_status", {}
+    else:
+        obj, method, params = UBUS_IWINFO_OBJECT, kind, {"device": device}
+    try:
+        result = await api._call(obj, method, params)
+    except (
+        OpenWrtMethodNotFoundError,
+        OpenWrtAuthError,
+        OpenWrtTimeoutError,
+        OpenWrtConnectionError,
+        OpenWrtResponseError,
+    ) as err:
+        raise rf_read_error(err) from None
+    return _rf_bounded(result)
+
+
+async def async_rf_get_status(api: OpenWrtAPI, device: str) -> dict[str, Any]:
+    """``hostapd.<device> get_status`` (airtime counters, channel, DFS)."""
+    return await async_rf_read(api, RF_KIND_GET_STATUS, device)
+
+
+async def async_rf_assoclist(api: OpenWrtAPI, device: str) -> dict[str, Any]:
+    """``iwinfo assoclist`` of one AP interface (retries, failed, times)."""
+    return await async_rf_read(api, RF_KIND_ASSOCLIST, device)
+
+
+async def async_rf_freqlist(api: OpenWrtAPI, device: str) -> dict[str, Any]:
+    """``iwinfo freqlist`` of one radio (allowed channels, flags)."""
+    return await async_rf_read(api, RF_KIND_FREQLIST, device)
+
+
+async def async_rf_txpowerlist(api: OpenWrtAPI, device: str) -> dict[str, Any]:
+    """``iwinfo txpowerlist`` of one radio (power steps)."""
+    return await async_rf_read(api, RF_KIND_TXPOWERLIST, device)
+
+
+async def async_rf_survey(api: OpenWrtAPI, device: str) -> dict[str, Any]:
+    """``iwinfo survey`` of one radio (later stage, capability gated)."""
+    return await async_rf_read(api, RF_KIND_SURVEY, device)
+
+
+# --- end WiFi RF Intelligence

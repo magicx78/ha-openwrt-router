@@ -31,7 +31,7 @@
           "wifi_rf_assoclist": "Liest alle N Abfragen einmal pro Access-Point-Schnittstelle iwinfo assoclist für Wiederholungen, fehlgeschlagene Pakete und Verbindungsdauer der Clients. Etwa 0,9 KB pro verbundenem Client. Wirkt nur mit wifi_rf_enabled.",
           "wifi_rf_lists_at_start": "Liest die erlaubten Kanäle und Sendeleistungsstufen jedes Funkmoduls einmal beim Start und danach nur nach einem Kanal- oder Länderwechsel, nie in der normalen Abfrage. Etwa 2-4 KB pro Funkmodul. Wirkt nur mit wifi_rf_enabled.",
           "wifi_rf_survey": "Spätere Stufe: liest alle N Abfragen iwinfo survey, aber erst nach bestandener Fähigkeitsprüfung. Die aktuelle Router-ACL erlaubt diese Abfrage nicht; ohne das Recht bleibt sie „nicht bereit“, sonst ändert sich nichts. Auf ath10k-Funkmodulen kann ein Survey den Treiber bis zu 3 Sekunden blockieren. Wirkt nur mit wifi_rf_enabled.",
-          "wifi_rf_every_n_polls": "Takt der zusätzlichen Abfragen oben (1-60, Standard 5). Bei der 60-Sekunden-Abfrage heißt 5 alle 5 Minuten. Die Abfragen pausieren, solange der Router gedrosselt ist oder über den SSH-Rückfall läuft. Kleine Router wie der FRITZ!WLAN Repeater 1750E (54 MB RAM) sollten bei 5 oder mehr bleiben."
+          "wifi_rf_every_n_polls": "Takt der zusätzlichen Abfragen oben (1-60, Standard 5). Bei der 60-Sekunden-Abfrage heißt 5 alle 5 Minuten; ein kleineres N liest pro Funkmodul trotzdem höchstens alle 5 Minuten. Die Abfragen pausieren, solange der Router gedrosselt ist oder über den SSH-Rückfall läuft. Kleine Router wie der FRITZ!WLAN Repeater 1750E (54 MB RAM) sollten bei 5 oder mehr bleiben."
         }
       }
     }
