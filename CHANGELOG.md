@@ -12,7 +12,7 @@ echten Browser angesehen (Firefox, 360 / 768 / 1280 px, helles und dunkles
 Home-Assistant-Design, Beispieldaten). Keine neuen Router-Rechte, kein zusätzlicher
 Router-Aufruf bei ausgeschalteten Modulen; mit WiFi RF aus macht ein Poll weiter genau die
 Router-Aufrufe von 1.47.1 (Hotfix 1.49.2 unverändert). Panel-Version
-`20261121-traffic3`.
+`20261121-review1`.
 
 ### Geändertes Verhalten, das Nutzer bemerken
 
