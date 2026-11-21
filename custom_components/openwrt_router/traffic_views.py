@@ -636,7 +636,7 @@ class TrafficCollectorIngestView(HomeAssistantView):
             if raw is None:
                 engine.collector.refused(REJECT_BODY_TOO_LARGE)
                 raise RequestError(413, "body_too_large")
-            answer = engine.ingest_collector(raw)
+            answer = engine.ingest_collector(raw, user_id=getattr(user, "id", None))
         except RequestError as err:
             return error_response(err)
         except CollectorRejected as err:

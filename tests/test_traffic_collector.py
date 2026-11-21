@@ -146,8 +146,11 @@ def test_a_call_that_does_not_fit_is_refused_as_a_whole() -> None:
     intake = tc.CollectorIntake()
     intake.ingest(body(record(), record()), now_wall=NOW, module_key=KEY, flows=flows)
     with pytest.raises(tc.CollectorRejected) as err:
-        intake.ingest(
-            body(record(), record()), now_wall=NOW, module_key=KEY, flows=flows
+        intake.ingest(  # another call (sent_at), not a repeat of the first
+            body(record(), record(), sent_at=NOW + 1),
+            now_wall=NOW,
+            module_key=KEY,
+            flows=flows,
         )
     assert err.value.status == 503 and err.value.reason == "store_full"
     assert len(flows) == 2  # nothing of the second call

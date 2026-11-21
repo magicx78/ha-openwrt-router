@@ -1204,7 +1204,7 @@ class TrafficEngine:
             enabled=True, now_wall=self.wall(), ttl_s=self.flows.ttl_s
         )
 
-    def ingest_collector(self, raw: bytes) -> dict[str, Any]:
+    def ingest_collector(self, raw: bytes, *, user_id: Any = None) -> dict[str, Any]:
         """One collector call (all or nothing, see ``traffic_collector``)."""
         before = self._collector_view()
         answer = self.collector.ingest(
@@ -1213,6 +1213,7 @@ class TrafficEngine:
             module_key=self._module_key,
             flows=self.flows,
             known_routers=self._routers_on(),
+            user_id=user_id,
         )
         if self._collector_view() != before:
             self._refresh_caps()

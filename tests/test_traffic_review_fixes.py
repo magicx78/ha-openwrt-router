@@ -338,3 +338,59 @@ async def test_route_books_the_budget_per_user(disks: FakeDisks) -> None:
         assert resp.data["code"] == "insecure_transport"
     assert len(sent) == tc.EVENT_BUDGET_PER_HOUR + 1
     assert sent[-1]["data"] == {"reason": tc.REJECT_TRANSPORT}
+
+
+# --- T5: a call sent twice is kept once ------------------------------------------------
+
+
+def test_repeated_call_is_confirmed_once_and_not_counted_twice() -> None:
+    intake, flows = tc.CollectorIntake(), FlowStore()
+    raw = envelope(flow_record(RID), flow_record(RID, dst_port=80))
+    first = intake.ingest(
+        raw, now_wall=FLOW_NOW, module_key=FLOW_KEY, flows=flows, user_id="c"
+    )
+    # the same call again (e.g. a retry after a timeout), whitespace aside
+    again = intake.ingest(
+        json.dumps(json.loads(raw), indent=2).encode(),
+        now_wall=FLOW_NOW + 30,
+        module_key=FLOW_KEY,
+        flows=flows,
+        user_id="c",
+    )
+    assert again == first  # idempotent: the same answer
+    assert len(flows) == 2
+    assert intake.counters["accepted_calls"] == 1
+    assert intake.counters["accepted_records"] == 2
+    assert intake.counters["duplicate_calls"] == 1
+    # another sent_at is another call
+    intake.ingest(
+        envelope(flow_record(RID), sent_at=FLOW_NOW + 1),
+        now_wall=FLOW_NOW + 40,
+        module_key=FLOW_KEY,
+        flows=flows,
+        user_id="c",
+    )
+    assert len(flows) == 3
+
+
+def test_refused_call_is_not_remembered() -> None:
+    intake = tc.CollectorIntake()
+    raw = envelope(flow_record(RID))
+    full = FlowStore(max_total=0)
+    with pytest.raises(tc.CollectorRejected):
+        intake.ingest(raw, now_wall=FLOW_NOW, module_key=FLOW_KEY, flows=full)
+    flows = FlowStore()
+    answer = intake.ingest(raw, now_wall=FLOW_NOW, module_key=FLOW_KEY, flows=flows)
+    assert answer["accepted"] == 1 and len(flows) == 1
+
+
+def test_call_ids_are_bounded() -> None:
+    intake, flows = tc.CollectorIntake(), FlowStore(max_total=100_000)
+    for n in range(tc.MAX_CALL_IDS + 50):
+        intake.ingest(
+            envelope(flow_record(RID), sent_at=FLOW_NOW - n),
+            now_wall=FLOW_NOW,
+            module_key=FLOW_KEY,
+            flows=flows,
+        )
+    assert len(intake._call_ids) == tc.MAX_CALL_IDS

@@ -40,7 +40,10 @@ one invalid record rejects the whole call (400 ``records_rejected`` with
 ``index`` and a fixed reason per refused record; a ``router_id`` of no
 loaded router with traffic on is ``unknown_router``), and a call that would not
 fit the bounded flow store at once is refused as a whole (503
-``store_full``). Nothing is ever taken in part. Every refusal is counted;
+``store_full``). Nothing is ever taken in part. A call sent again after it
+was accepted (same user, ``sent_at`` and records; the last
+``MAX_CALL_IDS`` calls are remembered) gets the first answer again and is
+not kept twice. Every refusal is counted;
 refusals of the authorisation (wrong user, collector off, plain HTTP) are
 also reported as the core event ``traffic_analytics.collector_rejected``
 (``security_relevant``), at most ``EVENT_BUDGET_PER_HOUR`` per hour for each
@@ -54,7 +57,7 @@ import json
 import logging
 import math
 import os
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
@@ -83,6 +86,9 @@ MIN_INTERVAL_S: Final = 10.0
 EVENT_BUDGET_PER_HOUR: Final = 10
 # Budget keys held at once (hard bound of the bookkeeping).
 MAX_EVENT_KEYS: Final = 64
+# Ids of accepted calls remembered (user, sent_at, records): a call sent
+# again is confirmed with the first answer and not kept twice (T5).
+MAX_CALL_IDS: Final = 512
 MAX_REJECTED_LISTED: Final = 50
 EVENT_REJECTED: Final = "traffic_analytics.collector_rejected"
 ENVELOPE_FIELDS: Final = frozenset({"schema", "collector", "sent_at", "records"})
@@ -173,6 +179,11 @@ def parse_envelope(raw: bytes, *, now: float) -> list[Any]:
 
     Raises :class:`CollectorRejected` (400) with a fixed reason.
     """
+    return _parse_envelope(raw, now=now)[0]
+
+
+def _parse_envelope(raw: bytes, *, now: float) -> tuple[list[Any], float]:
+    """(raw records, sent_at) of the checked envelope (see parse_envelope)."""
     try:
         data = json.loads(raw)
     except (ValueError, UnicodeDecodeError):
@@ -205,7 +216,7 @@ def parse_envelope(raw: bytes, *, now: float) -> list[Any]:
         raise CollectorRejected(400, REJECT_RECORDS_MISSING)
     if len(records) > MAX_RECORDS:
         raise CollectorRejected(400, REJECT_TOO_MANY)
-    return records
+    return records, float(data["sent_at"])
 
 
 def validate_records(
@@ -259,6 +270,8 @@ class CollectorIntake:
         self._events: dict[tuple[str, str], deque[float]] = {}
         # per-run salt: the budget keys are pseudonyms, never a user id
         self._salt = os.urandom(16)
+        # call id -> answer of the accepted call (bounded, oldest out first)
+        self._call_ids: OrderedDict[bytes, dict[str, Any]] = OrderedDict()
         # ConfigurationApi.emit while the core is bound (None: not published)
         self.emit: Callable[..., Any] | None = None
 
@@ -267,6 +280,7 @@ class CollectorIntake:
         self._last_call = None
         self.last_accepted_wall = None
         self._events.clear()
+        self._call_ids.clear()
 
     # -- checks ------------------------------------------------------------------------
 
@@ -353,13 +367,24 @@ class CollectorIntake:
         module_key: bytes | None,
         flows: FlowStore,
         known_routers: frozenset[str] | None = None,
+        user_id: Any = None,
     ) -> dict[str, Any]:
-        """Check and keep one call (all or nothing); the answer body."""
+        """Check and keep one call (all or nothing); the answer body.
+
+        A call already accepted (same user, ``sent_at`` and records, e.g. a
+        retry after a timeout) is confirmed with its first answer and not
+        kept again (``duplicate_calls``).
+        """
         try:
-            records = parse_envelope(raw, now=now_wall)
+            records, sent_at = _parse_envelope(raw, now=now_wall)
         except CollectorRejected as err:
             self.refused(err.reason)
             raise
+        call_id = self._call_id(user_id, sent_at, records)
+        known = self._call_ids.get(call_id)
+        if known is not None:
+            self.counters["duplicate_calls"] += 1
+            return dict(known)
         try:
             parsed = validate_records(
                 records,
@@ -381,7 +406,21 @@ class CollectorIntake:
         self.counters["accepted_calls"] += 1
         self.counters["accepted_records"] += len(parsed)
         self.last_accepted_wall = now_wall
-        return {"v": 1, "schema": SCHEMA_V1, "accepted": len(parsed), "rejected": []}
+        answer = {"v": 1, "schema": SCHEMA_V1, "accepted": len(parsed), "rejected": []}
+        self._call_ids[call_id] = answer
+        while len(self._call_ids) > MAX_CALL_IDS:
+            self._call_ids.popitem(last=False)
+        return dict(answer)
+
+    def _call_id(self, user_id: Any, sent_at: float, records: list[Any]) -> bytes:
+        """Salted hash of user, ``sent_at`` and the records (canonical JSON)."""
+        digest = hashlib.blake2s(key=self._salt, digest_size=16)
+        user = user_id if isinstance(user_id, str) else ""
+        digest.update(user.encode() + b"\0" + repr(sent_at).encode() + b"\0")
+        digest.update(
+            json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
+        )
+        return digest.digest()
 
     def state(self, *, enabled: bool, now_wall: float, ttl_s: float) -> str:
         """``off`` / ``waiting`` (nothing yet) / ``receiving`` / ``silent``."""
