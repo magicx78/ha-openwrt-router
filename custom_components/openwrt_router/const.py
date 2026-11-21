@@ -858,8 +858,10 @@ WIFI_RF_STORE_KEY = f"{DOMAIN}.wifi_rf"
 WIFI_RF_STORE_VERSION = 1
 WIFI_RF_SAVE_DELAY_SECONDS = 300
 # Hard store limits: each series has its own quota, nothing is evicted.
-WIFI_RF_MAX_RADIOS = 64
-WIFI_RF_MAX_HOURLY_BUCKETS = 8 * 24  # per radio and series (8 days)
-WIFI_RF_MAX_DAILY_BUCKETS = 31  # per radio and series
+WIFI_RF_MAX_RADIOS = 32  # the fleet of 2026-11 has 13 radios
+WIFI_RF_MAX_HOURLY_BUCKETS = 8 * 24 + 2  # per radio and series (8 days)
+WIFI_RF_MAX_DAILY_BUCKETS = 31 + 1  # per radio and series
+# Raw points (memory only, for the 1 h window) per radio and series.
+WIFI_RF_MAX_RAW_POINTS = 240
 WIFI_RF_MAX_STORE_BYTES = 2_000_000
 # --- end WiFi RF Intelligence
