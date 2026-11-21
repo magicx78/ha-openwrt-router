@@ -1,11 +1,11 @@
-# Network Time Machine (Phase A ab 1.50.0; Phasen B und C: eigener Verlauf und Client-Sessions, unveröffentlicht)
+# Network Time Machine (Phase A ab 1.50.0; Phasen B und C ab 1.51.0: eigener Verlauf und Client-Sessions)
 
-<!-- Entwicklerdoku zu Phase A (1.50.0) und den Phasen B/C (Branch feature/time-machine-b, geplant
-     als 1.51.0; Abschnitte 15–19, additiv in den Abschnitten davor). Phasen B/C sind am Code von
+<!-- Entwicklerdoku zu Phase A (1.50.0) und den Phasen B/C (1.51.0,
+     Branch feature/time-machine-b; Abschnitte 15–19, additiv in den Abschnitten davor). Phasen B/C sind am Code von
      tm_marks.py, tm_store.py, tm_engine.py, tm_clients.py gelesen und mit
      tests/test_tm_index_v1510.py, test_tm_clients_v1510.py, test_tm_query_v1510.py geprüft
      (Mocks, FakeDisks, ein Test schreibt eine echte Datei mit HAs Store); nicht auf Routern,
-     nicht in einer HA-Instanz, nicht im Panel. Keine IPs, MACs,
+     nicht in einer HA-Instanz; der Tab von 1.51.0 nur mit node-Tests, nicht im Browser. Keine IPs, MACs,
      Hostnamen echter Geräte, Passwörter oder Tokens; Router-Kennungen im Beispiel sind
      Platzhalter. Aussagen sind am Code gelesen (tm_sources.py, tm_query.py, tm_views.py,
      config_flow.py, diagnostics.py, frontend/topology/src/enterprise/timemachine/) und mit den
@@ -35,7 +35,7 @@
 16. [Phase C: Client-Sessions](#16-phase-c-client-sessions)
 17. [Doppelte zwischen Quellen](#17-doppelte-zwischen-quellen)
 18. [Aktionen](#18-aktionen)
-19. [Was das Panel für B/C braucht](#19-was-das-panel-für-bc-braucht)
+19. [Panel für B/C (1.51.0)](#19-panel-für-bc-1510)
 
 ---
 
@@ -249,8 +249,9 @@ Marken gibt, die er nicht sehen darf, noch wann sie liegen.
 | `client` | nur `tm_clients`: Pseudonym `tmc_` + 16 hex, sonst `null` |
 | `client_name` | nur `tm_clients`, nur Admins: aktueller Hostname, solange Client-Stabilität den Client kennt, sonst `null`; nie gespeichert |
 | `peers` | `{"before": {router_id, router_name} \| null, "after": …}` bei `uplink_changed` (Elternrouter vorher/nachher) und `client_roam` (von/nach), sonst `null` |
+| `spans_in` | seit 1.51.0: `true` bei einer Intervall-Marke des eigenen Verlaufs, die **vor** `from` begann und ins Fenster reicht (offen oder mit `end` ≥ `from`); `ts` ist dann ihr Anfang vor dem Fenster. Sonst `false` (auch bei allen Phase-A-Quellen) |
 
-Alle sechs Felder sind **additiv**, `v` bleibt `1`. `title_key` eigener Marken ist
+Alle sieben Felder sind **additiv**, `v` bleibt `1`. `title_key` eigener Marken ist
 `<source>.<kind>` (z. B. `tm_index.router_down`), der von Verweisen der des Audit-Eintrags
 (`core_audit.<type>`).
 
@@ -352,6 +353,25 @@ Fensters, behält die Seite sie, und was davon nicht gelesen wurde, fehlt (`trun
 
 Liegt `next_until` am oder vor `from`, ist es `null`.
 
+**Intervalle, die ins Fenster reichen (`spans_in`, 1.51.0).** Eine Intervall-Marke von
+`tm_index` oder `tm_clients`, die vor `from` begann und offen ist oder mit `end` ≥ `from`
+endet, gehört zum Fenster (Überlappung). Regel beim Blättern:
+
+- Die Menge dieser Marken hängt nur von `from` ab, nicht von `until`: jede Seite desselben
+  Fensters liest dieselbe Menge.
+- Sie sortieren nach ihrem Anfang, also **unter** allen Marken des Fensters. Darum stehen sie
+  nur auf der **letzten** Seite, der Seite, deren Lauf bis `from` reicht. Eine frühere Seite
+  endet mit `next_until` über `from` und kann sie nicht erreichen.
+- Hat eine gekürzte Quelle ihre Kante noch über `from`, bleiben sie auf dieser Seite weg; sie
+  kommen mit der Seite, die bis `from` liest.
+- Damit erscheint jede genau **einmal**, ohne Doppel und ohne Endlosschleife: `next_until`
+  sinkt mit jeder Seite, und unter `from` gibt es keine nächste Seite.
+- Passen mehr von ihnen auf die letzte Seite als `limit`, endet sie mit `truncated: true` und
+  `next_until: null` (das nächste Fenster wäre leer); der Rest fehlt.
+
+Ein Fenster mit einer Seite (der Standard des Tabs, 200 Marken) zeigt sie sofort. Tests:
+`tests/test_tm_overlap_v1510.py`.
+
 ## 9. Fehler
 
 Fehler haben die Form `{"message", "code", "details": {"field", "reason"}}` und
@@ -440,7 +460,9 @@ Antwortzeit **nicht neu gemessen**.
 - Nicht auf echten Routern und nicht in einer laufenden HA-Instanz geprüft; alle Aussagen
   stammen aus Tests mit Mocks. Den Tab hat die Prüfung vor dem Merge headless in Firefox mit
   der Testantwort angesehen; die danach geänderten Stile (Abschnitt 14: gesperrte Chips,
-  Karten ab 860 px, Quellspalte, mittige Chips) sind nur durch Tests geprüft.
+  Karten ab 860 px, Quellspalte, mittige Chips) sind nur durch Tests geprüft. Der Tab von
+  1.51.0 (Abschnitt 14.3) ist **in keinem Browser angesehen**, nur mit node-Tests
+  (Logik, serverseitiges Rendern, Stylesheet-Prüfungen) geprüft.
 
 ## 14. Tab „Zeitreise“
 
@@ -465,7 +487,9 @@ fügt der Antwort nichts hinzu; Phase A verlinkt `ref` nicht, es gibt keinen Exp
   Quelle war nicht lesbar; die Zeitleiste ist unvollständig.“
 - **Hinweis** bei `omitted_client_marks` > 0 (der Tab prüft die Rolle nicht selbst; er verlässt
   sich darauf, dass der Server Nicht-Admins 0 schickt): „N client-bezogene Ereignisse sind ausgeblendet.
-  Client-Verläufe kommen mit einem eigenen Schalter in einer späteren Version.“
+  Client-Verläufe lassen sich in den Optionen einschalten.“ (der zweite Satz seit 1.51.0 nur,
+  wenn `tm_clients` `clients_off` meldet; den Satz „… in einer späteren Version“ gibt es nicht
+  mehr).
 - **Zeitleiste:** neueste zuerst, nach Kalendertag in Ortszeit (Heute, Gestern, „Wochentag,
   TT.MM.JJJJ“), je Marke Uhrzeit (UTC-ISO im `title`), Schwere als Punkt und Wort (Info nie in
   Warnfarbe), Art, Titel, Kennzahlen (nur bekannte Schlüssel), Router („alle Router“ bei
@@ -498,7 +522,11 @@ fügt der Antwort nichts hinzu; Phase A verlinkt `ref` nicht, es gibt keinen Exp
 ### 14.1 Titel und Rückfall
 
 `tmTexts.ts` hat für jeden `title_key`, den das Backend erzeugen kann, einen deutschen Titel
-(259 Schlüssel, 1.50.0). `tests/test_tm_panel_texts_v1500.py` sammelt die Schlüssel aus den
+(259 Schlüssel in 1.50.0, dazu 32 für `tm_index.*` und `tm_clients.*` in 1.51.0, davon 12
+Varianten `<title_key>.<code>`, die der Tab bei den eigenen Quellen zuerst nachschlägt).
+`tests/test_tm_panel_texts_v1510.py` sammelt die Arten, Codes und Kennzahlen aus
+`tm_engine.py`, `tm_clients.py` und `tm_marks.py` und schlägt fehl, wenn ein Titel oder Text
+fehlt oder eine Variante einen Code nennt, den das Backend nie schreibt. `tests/test_tm_panel_texts_v1500.py` sammelt die Schlüssel aus den
 Konstanten der Quellmodule und schlägt fehl, wenn einer fehlt. Bei Vorfällen setzt der Tab
 „Vorfall eröffnet:“ oder „Vorfall behoben:“ davor, weil `title_key` das nicht trägt.
 
@@ -515,6 +543,54 @@ des Security Center. Sie fallen auf diese Regel zurück.
 `tmFixture.json` ist eine echte Antwort der Route (Admin, zwei Seiten, leer, `partial`,
 Nicht-Admin, aus, 400), geschrieben von `tests/test_tm_panel_fixture_v1500.py` mit erfundenen
 Werten; der Test schreibt sie neu und vergleicht (`TM_WRITE_FIXTURE=1` schreibt die Datei).
+`tmFixtureClients.json` (1.51.0, `tests/test_tm_panel_fixture_v1510.py`) hält die Antworten
+der Phasen B/C aus **einer** Welt mit drei Routern: Zeitleiste (ein offener Ausfall und eine
+offene Session von vor dem Fenster, ein Wechsel von Router 1 nach Router 2, ein Ausfall mit
+Ende), erste Seite mit `limit`, Nicht-Admin, `clients_off`, und die Sessions-Antworten (`ok`,
+zwei Seiten, ein Client, leer, `unavailable`, `clients_off`, `off`, 403, 400). Der Test prüft,
+dass keine MAC, IP, kein Hostname des Modells und kein Geheimnis in einer Antwort steht.
+
+### 14.3 Neu im Tab in 1.51.0
+
+- **Quellen:** Chips und Pills „Eigener Verlauf“ (`tm_index`), „Verweise“ (`tm_refs`),
+  „Client-Verläufe“ (`tm_clients`); die beiden letzten für Nicht-Admins gesperrt. Pill bei
+  `clients_off` „Client-Verläufe: aus · in den Optionen einschalten“; bei `duplicates` > 0 der
+  Zusatz „· n doppelt“ mit dem Tooltip „n doppelt ausgeblendet“. Über den Pills „Quellen“, nach
+  „Ältere laden“ „Quellen (neueste Seite)“ (die Pills zählen die erste Seite).
+- **Intervalle:** zweite Zeile „Dauer 4 min 12 s“ (`closed`), „seit 14:03, noch offen“
+  (`open`; an einem anderen Tag mit Datum), „Ende unbekannt“ (`unknown`). Marken mit
+  `spans_in` (und jede Marke vor `from`) stehen oben im Block „Läuft seit vor dem
+  Zeitfenster“ mit Datum und Uhrzeit des Anfangs; jede Marke nur einmal.
+- **Clients:** „Client <client_name>“ mit dem Namen vom Server, sonst „Client ·a1ce4d“ (die
+  letzten sechs Zeichen des Pseudonyms); nie eine MAC. Wechsel „von Router 1 nach Router 2“
+  aus `peers`. Art-Chip „Clients“.
+- **Neubeginn:** beginnt die Liste neu, weil eine Aktualisierung die geladenen älteren Seiten
+  nicht erreicht, steht „Viele neue Einträge: Die Liste beginnt neu. Ältere bei Bedarf erneut
+  laden.“ mit „Ausblenden“, bis der Nutzer es schließt.
+- **Ansicht „Client-Sitzungen“** (nur Admins: `hass.user.is_admin`; Nicht-Admins sehen den
+  Umschalter nicht, die Route antwortet ihnen 403): Umschalter „Zeitleiste | Client-Sitzungen“
+  oben im Tab, Zustand im Tab (kein URL-Wechsel; beide Listen bleiben beim Umschalten
+  erhalten). Zeitfenster-Chips, Router-Auswahl und „Client“ („Alle Clients“ und die Clients
+  der geladenen Sitzungen). Liste nach Beginn absteigend, nach Tagen gruppiert; je Zeile
+  Beginn, „Dauer …“ / „noch verbunden“ / „Ende unbekannt“, Client, Router, Band („2,4 GHz“,
+  „5 GHz“, „6 GHz“), „n Wechsel“ bei `params.roam` > 0. Unter 700 px Containerbreite Karten.
+  „Ältere laden“ über `next_until`; `truncated` ohne `next_until` zeigt den Kürzungshinweis.
+  Zustände: `off` (Box wie die Zeitleiste), `clients_off` („Client-Verläufe sind
+  ausgeschaltet.“, der Weg in die Optionen und „Gespeichert werden Pseudonyme, keine
+  MAC-Adressen, IP-Adressen oder Hostnamen. Abgeschlossene Sitzungen werden nach 14 Tagen
+  gelöscht.“ — „abgeschlossene“, weil offene Intervalle nicht gekürzt werden, Abschnitt
+  15.7), `unavailable` („Client-Sitzungen sind noch nicht verfügbar. Grund: …“ in Worten),
+  leer, 403 „Keine Berechtigung für die Client-Sitzungen (nur Administratoren).“, 410, 5xx mit
+  „Erneut versuchen“, 400 mit dem Feldnamen. „Aufzeichnung läuft“ / „Aufzeichnung pausiert …“
+  aus `recording`.
+- **Abruf:** nur die sichtbare Ansicht lädt und fragt nach, höchstens alle 60 s, bei
+  `off`/`clients_off` der Sitzungen gar nicht automatisch; veraltete Antworten werden
+  verworfen, und eine Liste, die sich nicht lückenlos anschließen lässt, beginnt neu (wie die
+  Zeitleiste).
+- **Nicht im Tab:** keine Knöpfe für „Client vergessen“ oder „Verlauf löschen“, kein „Zustand
+  zum Zeitpunkt“, kein Export, keine Sprünge in andere Tabs.
+- Tests: `tmSessions.test.mjs` (Logik), `tmRender.test.mjs` (Darstellung aus
+  `tmFixtureClients.json`), `tmLayout.test.mjs` (Raster, Karten).
 
 ## 15. Phase B: eigener Verlauf
 
@@ -623,14 +699,27 @@ werden gelöscht**, ein letztes Schreiben mit `stop: disabled`, alle Listener ab
 Infrastruktur-Marken bleiben in der Datei und werden beim nächsten Einschalten nach der
 Aufbewahrung gekürzt.
 
+Was genau gelöscht wird (1.51.0, unabhängig vom Schalter „Client-Verläufe“): jede Marke mit
+einem Client-Pseudonym (`client_session`, `client_roam`, `client_disconnect`,
+`client_flapping`) sowie die Tageszähler und Flatter-Zähler der Clients im Speicher. Wann:
+sofort beim Speichern des Optionen-Dialogs, ohne Neuladen. Läuft der Verlauf, schreibt
+`async_stop` die Datei sofort; läuft er nicht (etwa kein Router geladen), liest
+`async_purge_clients` die Datei einmal und schreibt sie nur, wenn Client-Marken darin waren.
+Es bleiben: Ausfälle, Lücken, Änderungen, Verweise, `tm_forgot_client`/`tm_cleared` (ohne
+Client), Checkpoints und Abdeckung. Der Optionen-Dialog sagt das (de/en). Tests:
+`test_switching_off_deletes_the_clients_and_keeps_the_infrastructure`,
+`test_switching_off_without_a_running_engine_deletes_the_clients`,
+`test_nothing_is_trimmed_while_the_time_machine_is_off` in `tests/test_tm_overlap_v1510.py`.
+
 ### 15.7 Grenzen (Phase B)
 
-- Eine Intervall-Marke steht in der Zeitleiste nur zu ihrem **Anfang**: Ein Ausfall, der vor
-  `from` begann und ins Fenster reicht, erscheint im Fenster nicht (die Sessions-Abfrage
-  nutzt dagegen die Überlappung).
+- Seit 1.51.0 erscheint eine Intervall-Marke, die vor `from` begann und ins Fenster reicht,
+  mit `spans_in: true` (Abschnitt 8); bei mehr solchen Marken als `limit` fehlt der Rest.
 - Offene Intervalle werden nicht nach 14 Tagen gekürzt.
-- Solange die Time Machine aus ist, wird nichts gekürzt; die Datei bleibt, bis sie wieder
-  eingeschaltet wird oder „Verlauf löschen“ läuft.
+- **Solange die Time Machine aus ist, wird nichts gekürzt** (bekannte Grenze, gewollt): Es
+  läuft kein Takt, der die Datei liest. Die Infrastruktur-Marken bleiben, bis die Time Machine
+  wieder eingeschaltet wird (dann sofort auf 14 Tage gekürzt) oder „Verlauf löschen“ läuft.
+  Client-Marken gibt es dann nicht mehr (Abschnitt 15.6).
 - Uplink und Rolle nur, solange Network Intelligence läuft; ohne Funkdaten in
   `ap_interfaces` kein Kanalwechsel; sind alle Funkmodule aus (leerer Poll), entsteht kein
   `radio_down`.
@@ -653,6 +742,8 @@ Ohne ihn wird **nichts** Client-Bezogenes gespeichert. **Ausschalten löscht all
 aus Arbeitsspeicher und Datei, sofort geschrieben (`test_client_switch_off_deletes_the_client_history`);
 ist die Time Machine schon aus, liest der Dialog die Datei einmal und schreibt sie nur, wenn
 Client-Marken darin waren (`test_time_machine_off_deletes_clients_and_purge_when_already_off`).
+Seit 1.51.0 löscht auch **das Ausschalten der Time Machine** alle Client-Marken, selbst wenn
+dieser Schalter an bleibt (Abschnitt 15.6).
 
 ### 16.2 Marken
 
@@ -807,33 +898,9 @@ registriert, bei ausgeschalteter Time Machine Fehler `time_machine_off`.
 
 Tests: `test_forget_action_and_client_stability_exclusion`, `test_clear_history_action`.
 
-## 19. Was das Panel für B/C braucht
+## 19. Panel für B/C (1.51.0)
 
-Das Panel ist in diesem Stand **nicht** geändert (`_PANEL_VERSION` unverändert). Der heutige
-Tab zeigt die neuen Quellen als Pills und die neuen Marken mit dem Rückfall „Code
-<title_key>“. `tests/test_tm_panel_fixture_v1500.py` ist wegen der additiven Felder rot und
-wird erst mit dem Panel neu geschrieben.
-
-Für ein späteres Panel:
-
-- **Quellen-Pills:** `tm_index` „Eigener Verlauf“, `tm_refs` „Verweise (Audit)“, `tm_clients`
-  „Client-Verläufe“; Grund `clients_off` „Client-Verläufe sind ausgeschaltet“; `duplicates` > 0
-  als Zusatz „n doppelt ausgeblendet“.
-- **Intervalle:** `end` / `end_state` als Dauer („seit 12 min“ bei `open`, „Ende unbekannt“ bei
-  `unknown`), `derived` als „abgeleitet“.
-- **Titel** für `tm_index.*`, `tm_clients.*` und die Codes, z. B. `router_down` „Router nicht
-  erreichbar“, `ha_gap` „Home Assistant war aus“ (`unclean`: „… nicht sauber beendet“),
-  `observation_gap` „Keine Daten“, `channel_changed` „Kanal gewechselt“ (`dfs`: „Kanal
-  gewechselt (Radar)“), `radio_down` „Funkmodul fehlt“, `config_fingerprint_changed`
-  „Konfiguration verändert“, `uplink_changed` „Uplink gewechselt“, `router_role_changed`
-  „Rolle gewechselt“, `clock_shift` „Uhr verstellt“, `tm_started` „Zeitreise gestartet“,
-  `tm_disabled` „Zeitreise ausgeschaltet“, `tm_store_recovered` „Verlauf neu begonnen
-  (Datei beschädigt)“, `tm_forgot_client` „Client vergessen“, `tm_cleared` „Verlauf
-  gelöscht“, `client_session` „Verbunden“, `client_roam` „Gewechselt“, `client_disconnect`
-  „Getrennt“, `client_flapping` „Sehr viele Wechsel (zusammengefasst)“.
-- **Peers:** „von Router 1 nach Router 2“.
-- **Clients** (nur Admins): `client_name` oder sonst das Pseudonym gekürzt; eine Sessions-Ansicht
-  über `/sessions` mit Filter `client`, Zustände `ok` (mit „Aufzeichnung läuft“ /
-  „Aufzeichnung pausiert“ aus `recording`), `clients_off` „Client-Verläufe sind
-  ausgeschaltet“, `unavailable` „Noch nicht bereit“, `off`.
-- Hinweis zu `omitted_client_marks` ohne den Satz „kommen in einer späteren Version“.
+Das Panel ist mit 1.51.0 nachgezogen (Abschnitt 14.3, `_PANEL_VERSION` `20261121-timemachine3`).
+Es liest nur die Routen `timeline` und `sessions` und fügt nichts hinzu. Offen für eine spätere
+Version: „Zustand zum Zeitpunkt“ aus den Checkpoints, Export, Sprünge über `ref` in die
+Quell-Tabs, Bedienelemente für die Aktionen aus Abschnitt 18.
