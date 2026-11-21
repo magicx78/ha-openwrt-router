@@ -4,6 +4,36 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.49.2] - 2026-11-21
+
+Die Enterprise-Tabs zum ersten Mal in einem echten Browser angesehen (Firefox, 360 / 768 /
+1280 px, helles und dunkles Home-Assistant-Design, Beispieldaten). Nur Darstellung, keine
+Änderung an Daten, Routern oder Rechten. Panel-Version `20261121-browsercheck1`.
+
+### Behoben
+
+- **Configuration Manager: Router- und Versionsliste liefen bei 768 und 1024 px aus dem
+  Bild.** Die Tabellen brauchen 718 bzw. 824 px, wurden aber erst unter 600 px zu Karten;
+  dazwischen waren die Schaltflächen „Prüfen“, „Export“, „Wiederherstellen …“ abgeschnitten
+  und die Seite scrollte seitlich. Karten jetzt bis 840 px Listenbreite.
+- **Helles Home-Assistant-Design: helle Auswahlfelder, Häkchen und Optionsfelder im dunklen
+  Panel.** Das Panel ist immer dunkel und sagt das dem Browser jetzt (`color-scheme: dark`);
+  betrifft die Einstellungen von Traffic Analytics, Netzwerkdiagnose und Security Center.
+  Das Auswahlfeld „Benutzer des Collectors“ ist gestaltet wie die übrigen.
+- **Traffic Analytics, Verlauf: Werte brachen mitten in der Zahl um** („40,0 / GB“) ab
+  600 px Breite; der Wert bleibt jetzt ganz und rutscht bei Bedarf unter die Bezeichnung.
+- **Traffic Analytics, Anomalien: beobachteter, üblicher Wert und Schwelle ohne Einheit**
+  („90.000.000“). Jetzt in Mbit/s, bei Datenmengen-Kandidaten in Bytes; unbekannte Arten
+  bleiben eine bloße Zahl.
+- **Traffic Analytics, Kapazität: die Schwelle eines Befunds ohne Einheit** („Schwelle 80,0“
+  neben „92,5 %“). Jetzt mit derselben Einheit wie der Wert.
+- **Diagramme: die Skala reicht vom niedrigsten bis zum höchsten Wert, beschriftet war nur
+  das obere Ende** (Traffic-Verlauf) bzw. stand „min.“ oben rechts neben dem höchsten Punkt
+  (WiFi RF-Zeitverlauf). „niedrigster Wert“ / „min.“ steht jetzt unter der Linie.
+- **Lesbarkeit: Bezeichnungen in den Enterprise-Tabs** (z. B. „Download jetzt“, Tabellenköpfe)
+  hatten etwa 2,5:1 Kontrast; jetzt etwa 5:1.
+- **Enterprise-Untertabs auf dem Handy 31 px hoch**; jetzt 40 px wie die übrigen Schaltflächen.
+
 ## [1.49.1] - 2026-11-21
 
 Folgeaufträge zu den Enterprise-Paketen: Schnittstellen zwischen WiFi RF, Traffic Analytics
