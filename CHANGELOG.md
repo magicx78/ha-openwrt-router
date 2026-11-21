@@ -4,6 +4,43 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.49.1] - 2026-11-21
+
+Folgeaufträge zu den Enterprise-Paketen: Schnittstellen zwischen WiFi RF, Traffic Analytics
+und Security Center, ein begrenzter conntrack-Ersatzweg, `npm ci` und MAC-Schwärzung.
+Keine neuen Router-Aufrufe, keine neuen Router-Rechte.
+
+### Hinzugefügt
+
+- **WiFi RF: Leseschnittstelle für andere Module (Wunsch W6).**
+  `RfCenter.radio_utilization(router_id, window_s, interfaces=())` und
+  `RfCenter.client_retry_rates(router_id, window_s)` lesen nur die letzte Auswertung (kein
+  Router-Aufruf). Radio-Kennung ist Router-ID + UCI-Radioname, Clients nur als
+  `client_ref`; jeder Wert trägt `measured_at`, Unbekanntes ist `None` mit Grund. Wer
+  AP-Schnittstellennamen schon kennt, bekommt je Radio nur die eigenen davon zurück.
+  Traffic Analytics liest WiFi RF nur noch darüber und nennt im Engpass-Befund je Radio
+  Airtime, Wiederholungen und die zugehörigen Stations-Messpunkte.
+- **Security Center nimmt Traffic-Hinweise an (Wunsch W2).** `traffic_analytics.indicator`
+  wird streng geprüft und als Zeitleisten-Eintrag mit `evidence_ref` gespeichert, höchstens
+  20 je Stunde, jede Referenz einmal. Nie allein ein Vorfall, kein Vertrauensindikator
+  (verschiedene Pseudonyme, W3). Traffic zeigt den Zustand der Anbindung jetzt ehrlich
+  („bereit“, „aus“ oder „nicht geladen“) statt fest „nicht angebunden“.
+
+### Behoben
+
+- **conntrack-Ersatzweg begrenzt (Traffic F2, Risiko 3).** Ohne Zähldatei las
+  `get_active_connections` die ganze Tabelle `/proc/net/nf_conntrack` ohne Grenze. Jetzt
+  höchstens 5 s, 256 KiB und 2048 Einträge; ein abgeschnittenes Ergebnis ist als Untergrenze
+  markiert. Der Sensor „Aktive Verbindungen“ und Network Intelligence werten einen solchen
+  Wert als unbekannt statt als zu kleine Zahl.
+- **Security Center: MAC-Adressen in Freitext** als 12 Hex-Ziffern oder in Punktform blieben
+  lesbar, auch direkt an einem Unterstrich. Jetzt werden alle vier Schreibweisen geschwärzt
+  (wie in WiFi RF, dort bestand die Lücke nicht).
+- **Panel: `npm ci` läuft wieder.** `vite-plugin-css-injected-by-js` zurück auf 4.0.1 (5.0.0
+  verlangt vite 8). Das gebaute Bundle ist unverändert.
+- Tests: Das Testarchiv der Wiederherstellungsprüfung ist jetzt bytegleich über mehrere
+  Aufrufe (fester gzip-Zeitstempel); ein CI-Lauf war daran einmal gescheitert.
+
 ## [1.49.0] - 2026-11-21
 
 Traffic Analytics: Verkehr je Router über WAN, Ports, Schnittstellen, VLANs und WLAN-Clients,

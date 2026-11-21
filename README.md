@@ -85,6 +85,7 @@ Zeigt den Verkehr über WAN, Ports, Schnittstellen, VLANs und WLAN-Clients, mit 
 - **Verlauf**: Profil `compact` (Standard) oder `standard`, beide mit stündlichen Werten für 14 Tage. Gemessen: zusammen ca. 1,7 MB (`compact`) bzw. 3,3 MB (`standard`) auf der Platte für eine Testflotte mit 6 Routern.
 - **Externer Collector** (optional): schickt Flows über HTTPS mit einem eigenen Benutzer ohne Admin-Rechte und langlebigem Token. Home Assistant ruft keinen Collector auf. Zusammengefasste Collector-Werte werden in dieser Version abgelehnt.
 - **Datenschutz**: Clients, Router und Benutzer erscheinen nur als Pseudonym, auch für Administratoren. Keine MAC, kein Hostname und keine IP in Entitäten, Log oder Diagnose.
+- **Zusammenspiel** (ab 1.49.1): Engpass-Befunde nennen je Funk-Radio Airtime und Wiederholungen aus WiFi RF; das Security Center trägt Traffic-Hinweise in seine Zeitleiste ein (nie allein ein Vorfall).
 - **Grenzen**: Client-Zähler am AP sind kein Internetverbrauch. Noch nicht an echten Routern und nicht im Browser geprüft.
 
 ➡️ [Zu Traffic Analytics](https://github.com/magicx78/ha-openwrt-router/blob/main/docs/traffic-analytics.md)
