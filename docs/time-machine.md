@@ -136,6 +136,8 @@ höchstens 96 Zeichen, unbekannte Schlüssel werden abgelehnt.
 | `kind` | eine Art aus Abschnitt 6 | – | nur diese Art |
 | `min_severity` | `info` / `warning` / `critical` | – | ab diesem Schweregrad |
 | `limit` | 1 … 500 | 200 | Marken je Seite |
+| `cursor` | `<ms>` oder `<ms>:<id>` (`ms`: Epoch-Millisekunden, `id`: `tmm_` + 16 hex) | – | seit 1.51.0: wo die Seite beginnt, aus `next_cursor` der vorigen Seite; nur mit demselben `from`/`until`; muss im Fenster liegen, sonst `out_of_range` (Abschnitt 8) |
+| `spans` | `0` / `1` | `0` | seit 1.51.0: `1` liefert die Intervalle, die vor `from` begannen und ins Fenster reichen, im eigenen Feld `spanning` (Abschnitt 8) |
 
 Das Fenster ist halboffen `[from, until)`, höchstens **14 Tage** lang und darf nicht leer sein.
 
@@ -190,7 +192,10 @@ Das Fenster ist halboffen `[from, until)`, höchstens **14 Tage** lang und darf 
   ],
   "omitted_client_marks": 1,
   "truncated": true,
-  "next_until": 1795003741.0
+  "next_until": 1795003741.0,
+  "next_cursor": "1795003741000",
+  "spanning": [],
+  "spanning_truncated": false
 }
 ```
 
@@ -208,7 +213,10 @@ Das Fenster ist halboffen `[from, until)`, höchstens **14 Tage** lang und darf 
 | `sources` | je angefragter Quelle ein Eintrag (Reihenfolge wie Abschnitt 3); bei `off` leer |
 | `omitted_client_marks` | Zahl der weggelassenen Client-Ereignisse aller Quellen im Fenster; für Nicht-Admins immer 0 (die Zahl verriete Aktivität in Quellen und Gruppen, die sie nicht sehen) |
 | `truncated` | `true`, wenn es ältere Marken im Fenster gibt, die nicht auf dieser Seite stehen |
-| `next_until` | `until` der nächsten Seite oder `null` |
+| `next_until` | `until` der nächsten Seite oder `null` (Abschnitt 8; für Clients vor 1.51.0) |
+| `next_cursor` | seit 1.51.0: `cursor` der nächsten Seite oder `null`; mit demselben Fenster zurückschicken (Abschnitt 8) |
+| `spanning` | seit 1.51.0: nur mit `spans=1` gefüllt, sonst `[]`: Intervalle, die vor `from` begannen und ins Fenster reichen (`spans_in: true`), neuester Anfang zuerst, höchstens 200, **nicht** auf `limit` angerechnet, gleiche Rechte und Filter wie `marks` |
+| `spanning_truncated` | seit 1.51.0: `true`, wenn mehr als 200 solche Intervalle da sind (der Rest fehlt) |
 
 ### 5.2 Eintrag in `sources`
 
@@ -334,43 +342,55 @@ Prüfungen: Anmeldung (401) → Recht (403) → Integration geladen (410) → Bo
 
 ## 8. Blättern
 
-Die Marken sind nach `ts` absteigend und bei gleichem `ts` nach `id` sortiert. Hat eine Seite
-mehr Marken als `limit`, endet sie vor dem ältesten Zeitstempel, damit Marken mit **demselben
-Zeitstempel nie auf zwei Seiten verteilt** werden; `next_until` ist dann der älteste
-Zeitstempel der Seite. Die nächste Seite fragt mit `until=<next_until>` und demselben `from`.
-Weil Marken und Fenstergrenzen auf demselben Millisekunden-Raster liegen, kommt keine Marke
-doppelt und keine geht an der Grenze verloren.
+Die Marken sind nach `ts` absteigend und bei gleichem `ts` nach `id` sortiert.
+
+**Mit Cursor (seit 1.51.0, empfohlen).** Jede Antwort mit weiteren Marken nennt
+`next_cursor`; die nächste Seite fragt mit `cursor=<next_cursor>` und **demselben** `from` und
+`until`. Der Cursor ist eine Stelle in der Sortierung: `<ms>` heißt „alles älter als diese
+Millisekunde“, `<ms>:<id>` „in dieser Millisekunde nach dieser `id`, dann älter“. Damit
+kommt jede Marke genau einmal, auch wenn **eine Millisekunde mehr Marken als `limit`** hält
+(etwa Hunderte Client-Sitzungen, die beim Einschalten zugleich beginnen): die Seite wird
+dann in der Millisekunde geteilt und der Cursor trägt die `id`. `next_cursor: null` beendet
+den Lauf.
+
+**Ohne Cursor (Clients vor 1.51.0).** Hat eine Seite mehr Marken als `limit`, endet sie vor
+dem ältesten Zeitstempel, damit Marken mit **demselben Zeitstempel nie auf zwei Seiten
+verteilt** werden; `next_until` ist dann der älteste Zeitstempel der Seite. Die nächste Seite
+fragt mit `until=<next_until>` und demselben `from`. Hält eine einzige Millisekunde mehr
+Marken als `limit`, kann `next_until` sie nicht teilen: Die Seite zeigt `limit` davon und
+`truncated: true`, der Rest dieser Millisekunde ist über `next_until` nicht erreichbar (nur
+über `next_cursor`).
 
 Wurde die Lesung einer Quelle gekürzt (`truncated`), ist sie nur oberhalb ihrer **Kante**
 vollständig, des ältesten gelesenen Eintrags im Fenster (weggelassene Client-Einträge
 eingeschlossen). Die Seite behält dann nur Marken nach der Millisekunde der Kante, und
-`next_until` ist die Millisekunde danach: Die nächste Seite liest die Millisekunde der Kante
-ganz, Marken desselben Zeitstempels bleiben zusammen. `next_until` steht auch dann, wenn die
-Seite **keine einzige Marke** enthält (etwa weil die gelesenen Einträge nur Client-Ereignisse
-waren); die Quelle ist dann nicht `empty`, sondern `ok` mit `cut: next_page`. Bei mehreren
-gekürzten Quellen gilt die jüngste Kante. Ist die Millisekunde der Kante die letzte des
-Fensters, behält die Seite sie, und was davon nicht gelesen wurde, fehlt (`truncated: true`).
+`next_until` ist die Millisekunde danach (`next_cursor` entsprechend `<ms>` dieser
+Millisekunde danach): Die nächste Seite liest die Millisekunde der Kante ganz. Beide stehen
+auch dann, wenn die Seite **keine einzige Marke** enthält (etwa weil die gelesenen Einträge nur
+Client-Ereignisse waren); die Quelle ist dann nicht `empty`, sondern `ok` mit
+`cut: next_page`. Bei mehreren gekürzten Quellen gilt die jüngste Kante. Ist die Millisekunde
+der Kante die letzte des Fensters, behält die Seite sie, und was davon nicht gelesen wurde,
+fehlt (`truncated: true`).
 
 Liegt `next_until` am oder vor `from`, ist es `null`.
 
-**Intervalle, die ins Fenster reichen (`spans_in`, 1.51.0).** Eine Intervall-Marke von
+**Intervalle, die ins Fenster reichen (`spans`, 1.51.0).** Eine Intervall-Marke von
 `tm_index` oder `tm_clients`, die vor `from` begann und offen ist oder mit `end` ≥ `from`
-endet, gehört zum Fenster (Überlappung). Regel beim Blättern:
+endet, gehört zum Fenster (Überlappung), steht aber **nie** in `marks`:
 
-- Die Menge dieser Marken hängt nur von `from` ab, nicht von `until`: jede Seite desselben
-  Fensters liest dieselbe Menge.
-- Sie sortieren nach ihrem Anfang, also **unter** allen Marken des Fensters. Darum stehen sie
-  nur auf der **letzten** Seite, der Seite, deren Lauf bis `from` reicht. Eine frühere Seite
-  endet mit `next_until` über `from` und kann sie nicht erreichen.
-- Hat eine gekürzte Quelle ihre Kante noch über `from`, bleiben sie auf dieser Seite weg; sie
-  kommen mit der Seite, die bis `from` liest.
-- Damit erscheint jede genau **einmal**, ohne Doppel und ohne Endlosschleife: `next_until`
-  sinkt mit jeder Seite, und unter `from` gibt es keine nächste Seite.
-- Passen mehr von ihnen auf die letzte Seite als `limit`, endet sie mit `truncated: true` und
-  `next_until: null` (das nächste Fenster wäre leer); der Rest fehlt.
+- Nur mit `spans=1` kommt sie, im eigenen Feld `spanning` (mit `spans_in: true`), neuester
+  Anfang zuerst, höchstens 200 (`spanning_truncated`), nicht auf `limit` angerechnet, mit
+  denselben Rechten und Filtern (`router_id`, `kind`, `min_severity`) wie `marks`.
+- Ohne `spans` (oder `spans=0`) ist `spanning` immer `[]`. Ein Client fragt `spans=1` auf der
+  ersten Seite (und beim Aktualisieren) und blättert danach ohne `spans`: so kommt jede genau
+  einmal, gleich auf der ersten Seite, egal wie viele Marken das Fenster hält.
+- Ein Client vor 1.51.0 schickt kein `spans` und sieht sie nicht mehr (bis 1.51.0-Entwicklung
+  standen sie auf der letzten Seite); `v` bleibt 1.
 
-Ein Fenster mit einer Seite (der Standard des Tabs, 200 Marken) zeigt sie sofort. Tests:
-`tests/test_tm_overlap_v1510.py`.
+Tests: `tests/test_tm_overlap_v1510.py`,
+`test_s4_an_old_open_outage_comes_with_spans_on_the_first_page`,
+`test_s3_250_resumed_sessions_of_one_start_page_without_loss` (beide in
+`tests/test_tm_review_v1510.py`).
 
 ## 9. Fehler
 
@@ -430,16 +450,26 @@ Gemessen mit gefüllten Quellen (Audit 1000 Einträge, 36 Versionen, Security-Ce
 13 Tage, `limit=500`, jede Quelle ganz gelesen: **51–78 ms** über HTTP, davon **47–74 ms** Lesen
 und Zusammenführen (drei Läufe); Antwort **209 KB** mit 498 Marken. Der Test verlangt
 großzügig unter 2 s. Gemessen mit Mocks auf der Entwicklungs-VM (Python 3.13), nicht auf einer
-HA-Instanz. Mit den drei Quellen der Phasen B/C (ganz gelesen, bis 15000 Marken) ist die
-Antwortzeit **nicht neu gemessen**.
+HA-Instanz.
+
+Mit vollem eigenem Verlauf (1.51.0, Review K6; 3000 Kanalwechsel, 2000 Verweise, 10000
+Client-Sitzungen, sechs Router, Admin, alle drei eigenen Quellen ganz gelesen, je 7 Läufe,
+Median): **48 ms** gesamt für eine Zeitleisten-Seite (`limit` 200 oder 500); die längste
+Strecke ohne Rückgabe an die Ereignisschleife sank von **28 ms** auf **5 ms**, weil eine
+Quelle des eigenen Verlaufs nach je 1000 Marken (`INDEX_YIELD_EVERY`) abgibt
+(`test_k6_a_full_client_quota_yields_to_the_event_loop`). Einzelne Läufe erreichen 60 ms in
+einem Stück (Speicherbereinigung oder das Sortieren aller Marken in `merge`). Sitzungen
+(`limit` 500): Median **3–5 ms**. Nicht umgesetzt: nur die Seite in Wörterbücher wandeln. Das
+Entfernen der Doppel, die Rechte, die Filter und der Zustand jeder Quelle (`ok`/`empty` nach
+den Rechten) brauchen alle Marken des Fensters; eine vorzeitig abgeschnittene eigene Quelle
+würde in jeder Antwort als gekürzt (`cut: next_page`) erscheinen und das Blättern ändern.
 
 ## 13. Bekannte Grenzen und was nicht geprüft ist
 
-- Mehr Marken mit **demselben Zeitstempel** (Millisekunde) als `limit`: die Seite wird dort
-  abgeschnitten (`truncated: true`), der Rest dieses Zeitstempels fehlt auf der nächsten Seite.
-  Ebenso, wenn die letzte Millisekunde eines Fensters mehr Einträge einer Quelle hält, als sie
-  in einer Lesung liefert (Abschnitt 8); mit den heutigen Lesegrenzen nur bei den
-  Konfigurationsversionen denkbar.
+- Wenn die letzte Millisekunde eines Fensters mehr Einträge einer Quelle hält, als sie in
+  einer Lesung liefert, fehlt der Rest (Abschnitt 8); mit den heutigen Lesegrenzen nur bei
+  den Konfigurationsversionen denkbar. (Mehr Marken in einer Millisekunde als `limit` gehen
+  seit 1.51.0 über `next_cursor` nicht mehr verloren.)
 - **Konfigurationsversionen** werden höchstens 500 je Anfrage gelesen, und
   `async_list_backups` kennt kein `until`: Liegen mehr als 500 Versionen zwischen `from` und
   jetzt, sind die älteren im Fenster nicht erreichbar; die Quelle meldet dann
@@ -613,20 +643,22 @@ Datei, atomares Schreiben, Migrationsfunktion). Inhalt:
 | `coverage` | Zeiträume, in denen der Verlauf lief (höchstens 64); Grundlage für Abschnitt 17 |
 | `checkpoints` | Tages- (höchstens 31) und Start-Checkpoints (höchstens 16): je Router nur `u`, Fingerabdruck-Hash, Eltern-Router |
 | `state` | je Router letzter Fingerabdruck-Hash (16 hex), Funk (`5g0=36/80`), Eltern-Router, Rolle, damit eine Änderung während eines Neustarts erkannt wird |
-| `counters` | Zähler (Abschnitt 11) |
+
+Die Zähler (Abschnitt 11) stehen **nicht** in der Datei; sie zählen ab dem Start des Prozesses.
 
 Jedes Feld einer Zeile wird beim Lesen gegen ein Muster geprüft; eine kaputte Zeile wird
 übersprungen und gezählt, nie die ganze Datei (`test_bad_rows_are_skipped_not_the_file`).
-Eine unlesbare, fremde oder **neuere** Datei bleibt als `.bak` liegen, der Verlauf beginnt leer
+Eine unlesbare, fremde oder **neuere** Datei bleibt als `.bak` (bzw. HAs `.corrupt.<Zeit>`)
+liegen, der Verlauf beginnt leer
 mit der Marke `tm_store_recovered` und dem Audit-Eintrag `time_machine.store_recovered`
 (`test_broken_store_starts_empty_with_a_copy_and_a_mark`,
 `test_newer_store_version_is_kept_as_bak`).
 
 **Schreiben:** nie im Ereignisweg. Eine Änderung stellt **ein** verzögertes Schreiben nach
-120 s an (`async_delay_save`, weitere Änderungen hängen sich daran,
+300 s an (`async_delay_save`, weitere Änderungen hängen sich daran,
 `test_writes_are_delayed_and_bundled`); ohne Änderung alle 900 s ein Lebenszeichen
 (`test_heartbeat_write_every_15_minutes_without_changes`), damit `saved_at` nach einem Absturz
-nur etwa 15 min (plus die 120 s Verzögerung) vor dem Ende liegt. Sofort (ohne Verzögerung)
+nur etwa 15 min (plus die 300 s Verzögerung) vor dem Ende liegt. Sofort (ohne Verzögerung)
 wird geschrieben nach „Client vergessen“, „Verlauf löschen“, Client-Schalter aus und beim
 HA-Stopp; beim Ausschalten und nach dem letzten Router direkt. Das Packen der Zeilen ist
 zwischengespeichert: neu gepackt wird nur eine geänderte Marke.
@@ -639,9 +671,9 @@ zwischengespeichert: neu gepackt wird nur eine geänderte Marke.
 | Kontingent Infrastruktur | 3000 | Gruppen `infrastructure`, `radio`, `topology`, `time_machine` |
 | Kontingent Verweise | 2000 | Gruppen `configuration`, `disruption`, `security`, `administration` (auch `config_fingerprint_changed`) |
 | Kontingent Clients | 10000 | Gruppe `clients` |
-| gesamt | 15000 | Summe; ein Kontingent verdrängt **nie** ein anderes, innerhalb eines Kontingents fällt die älteste Marke zuerst (Zähler `evicted_<kontingent>`; `test_quotas_never_evict_each_other_and_count`) |
+| gesamt | 15000 | Summe; ein Kontingent verdrängt **nie** ein anderes, innerhalb eines Kontingents fällt die älteste **geschlossene** Marke zuerst (Zähler `evicted_<kontingent>`; `test_quotas_never_evict_each_other_and_count`). Offene Intervalle (laufender Ausfall, laufende Sitzung) fallen erst, wenn sonst nichts mehr im Kontingent ist, dann das älteste zuerst (Zähler `evicted_open`); ihr späteres Ende bucht trotzdem eine ehrliche Marke (`router_up` ohne `duration_s`), der Zustand der Besitzer bleibt sauber (1.51.0, Review S2; `test_s2_*` in `tests/test_tm_review_v1510.py`) |
 | je Client und UTC-Tag | 200 neue Marken | darüber zählt eine Marke `client_flapping` (Zahl `suppressed`, Ende = letzter unterdrückter Zeitpunkt; `test_one_client_storm_is_folded_per_day`, über den echten Weg `test_a_flapping_client_never_fills_the_store`) |
-| Datei | 2 500 000 Byte | genaue Länge je Zeile; darüber wird **in einem Durchgang** auf 5 % unter die Grenze gekürzt, zuerst älteste Client-, dann Verweis-, dann Infrastruktur-Marken; bleibt es darüber, wird nicht geschrieben und die letzte gute Datei bleibt (`save_over_size`; `test_size_limit_trims_clients_first_in_one_pass`) |
+| Datei | 2 500 000 Byte | genaue Länge je Zeile; darüber wird **in einem Durchgang** auf 5 % unter die Grenze gekürzt, zuerst älteste Client-, dann Verweis-, dann Infrastruktur-Marken, in jeder Gruppe offene Intervalle zuletzt; bleibt es darüber, wird nicht geschrieben und die letzte gute Datei bleibt (`save_over_size`; `test_size_limit_trims_clients_first_in_one_pass`) |
 
 Gemessen: ein voller Speicher mit 15000 Marken (3000 Kanalwechsel mit sechs Zahlen, 2000
 Verweise, 10000 Sessions) ist **1 626 305 Byte** groß (`test_a_full_store_stays_under_the_limit`,
@@ -711,10 +743,26 @@ Client), Checkpoints und Abdeckung. Der Optionen-Dialog sagt das (de/en). Tests:
 `test_switching_off_without_a_running_engine_deletes_the_clients`,
 `test_nothing_is_trimmed_while_the_time_machine_is_off` in `tests/test_tm_overlap_v1510.py`.
 
+**Alte Kopien (1.51.0, Review K4).** Nach jedem Löschen von Client-Daten (Client-Schalter aus,
+Time Machine aus, „Client vergessen“, „Verlauf löschen“, `async_purge_clients`) löscht die
+Time Machine auch die Kopien `<datei>.bak` und `<datei>.corrupt.*` ihrer Datei (im Executor;
+Zähler `copies_removed`), damit keine alte Kopie die gelöschten Clients behält. Eine solche
+Kopie ist danach für die Wiederherstellung verloren. Tests:
+`test_k4_purge_deletes_the_old_copies_of_a_real_file` (echte Datei über HAs Store),
+`test_k4_every_client_delete_removes_the_copies`.
+
+**Router entfernt (1.51.0, Review K4).** `async_remove_entry` gibt die `router_id` des
+entfernten Routers (aus dem Enterprise Core) an `tm_engine.async_remove_router`: Alle Marken
+dieses Routers (auch als Peer eines Roamings) und sein `state` werden gelöscht, wie bei der
+Network Intelligence. Läuft kein Verlauf, wird die Datei einmal gelesen und nur geschrieben,
+wenn sich etwas ändert. Tests: `test_k4_removing_a_router_removes_its_marks`,
+`test_k4_async_remove_entry_hands_the_router_to_the_time_machine`.
+
 ### 15.7 Grenzen (Phase B)
 
-- Seit 1.51.0 erscheint eine Intervall-Marke, die vor `from` begann und ins Fenster reicht,
-  mit `spans_in: true` (Abschnitt 8); bei mehr solchen Marken als `limit` fehlt der Rest.
+- Intervalle, die vor `from` begannen und ins Fenster reichen, kommen nur mit `spans=1` im
+  Feld `spanning` (Abschnitt 8), höchstens 200; darüber fehlt der Rest
+  (`spanning_truncated: true`).
 - Offene Intervalle werden nicht nach 14 Tagen gekürzt.
 - **Solange die Time Machine aus ist, wird nichts gekürzt** (bekannte Grenze, gewollt): Es
   läuft kein Takt, der die Datei liest. Die Infrastruktur-Marken bleiben, bis die Time Machine
@@ -724,7 +772,15 @@ Client), Checkpoints und Abdeckung. Der Optionen-Dialog sagt das (de/en). Tests:
   `ap_interfaces` kein Kanalwechsel; sind alle Funkmodule aus (leerer Poll), entsteht kein
   `radio_down`.
 - Nicht rückwirkend: Was vor dem Einschalten geschah, steht nur in den Phase-A-Quellen.
-- Nach einem Absturz ist der Beginn der HA-Lücke nur auf etwa 15–17 min genau (`derived`).
+- Nach einem Absturz ist der Beginn der HA-Lücke nur auf etwa 15–20 min genau (`derived`;
+  Lebenszeichen alle 15 min plus 300 s Schreibverzögerung).
+- **HA lief, aber kein Router war geladen** (alle beim Start unerreichbar, Review K10): Die
+  HA-Lücke endet beim Einrichten der Integration in diesem HA-Lauf (`async_setup`), der Rest
+  bis zum Start des Verlaufs ist eine `observation_gap` mit Code `unloaded`, wenn er mindestens
+  600 s dauert (darunter bleibt eine HA-Lücke bis zum Start). Ein LAN-Ausfall in dieser Zeit
+  wird nicht erkannt: Ohne geladenen Router gibt es keinen Ausfall-Melder. Wird die
+  Integration erst nach dem HA-Start installiert, zählt die Zeit davor ebenfalls als
+  HA-Lücke. Tests: `test_k10_*` in `tests/test_tm_review_v1510.py`.
 
 ## 16. Phase C: Client-Sessions
 
@@ -758,7 +814,11 @@ Ist ein Router zeitweise nicht erreichbar, liefert er keine Client-Liste; die Cl
 bucht dann eine Lücke (`gaps` + 1) und **keine Trennung**
 (`test_unreachable_router_invents_no_disconnect`). HA-Neustart mitten in einer Session: die
 Session endet bei `saved_at` mit `unknown`, beim Start beginnt eine neue mit `resumed`
-(`test_restart_mid_session_ends_unknown_and_resumes`). Roaming über Router hinweg:
+(`test_restart_mid_session_ends_unknown_and_resumes`). Eine `resumed`-Session beginnt seit
+1.51.0 beim Sitzungsbeginn, den die Client-Stabilität kennt, wenn er in die Laufzeit des
+Verlaufs fällt (etwa beim Einschalten der Client-Verläufe); sonst beim Anhängen
+(`test_s3_resumed_sessions_keep_the_start_client_stability_knows`). Vorher begannen alle
+beim selben Zeitpunkt (Review S3). Roaming über Router hinweg:
 `test_session_roam_and_disconnect_across_routers`.
 
 ### 16.3 Pseudonym und Name
@@ -766,6 +826,10 @@ Session endet bei `saved_at` mit `unknown`, beim Start beginnt eine neue mit `re
 `client` ist `tmc_` + 16 hex, HMAC der MAC mit dem eigenen Modulschlüssel der Time Machine;
 gespeichert werden nur die 16 hex. `client_name` liest der Server bei jeder Antwort aus der
 Client-Stabilität, nur für Admins und nur solange sie den Client kennt; gespeichert wird er nie.
+Dafür hält der Prozess im Arbeitsspeicher Pseudonym → MAC, begrenzt (Review K9): jeder Client
+mit offener Session plus die 512 zuletzt gesehenen anderen (`MACS_RECENT_MAX`); für ältere
+ist `client_name` `null`, bis sie wieder einen Übergang haben
+(`test_k9_the_mac_table_keeps_open_clients_and_a_bounded_rest`).
 
 ### 16.4 Route `GET /api/openwrt_router/enterprise/timemachine/sessions`
 
@@ -778,10 +842,13 @@ Abfrage wie in Abschnitt 4 (400 ohne Echo, unbekannte Schlüssel abgelehnt).
 | `client` | `tmc_` + 16 hex | – | nur dieser Client |
 | `router_id` | `rtr_` + 32 hex | – | nur Sessions an diesem Router |
 | `limit` | 1 … 500 | 200 | Sessions je Seite |
+| `cursor` | wie Abschnitt 4 | – | seit 1.51.0: aus `next_cursor`; darf auch vor `from` liegen (Sessions, die vorher begannen), nie nach `until` |
 
 Eine Session gehört zum Fenster, wenn sie vor `until` begann und offen ist oder bei/nach `from`
-endete (Überlappung). Sortiert nach Beginn absteigend; Blättern über `next_until` wie in
-Abschnitt 8 auf dem Beginn: eine Seite teilt Sessions mit demselben Beginn nicht.
+endete (Überlappung). Sortiert nach Beginn absteigend, bei gleichem Beginn nach `id`.
+Blättern über `next_cursor` wie in Abschnitt 8 (teilt auch einen Beginn, den mehr Sessions als
+`limit` teilen, und erreicht Sessions, die vor `from` begannen); `next_until` bleibt für
+ältere Clients (teilt Sessions mit demselben Beginn nicht und endet am `from`).
 
 ```json
 {
@@ -807,7 +874,8 @@ Abschnitt 8 auf dem Beginn: eine Seite teilt Sessions mit demselben Beginn nicht
     }
   ],
   "truncated": true,
-  "next_until": 1800000180.0
+  "next_until": 1800000180.0,
+  "next_cursor": "1800000180000:tmm_85926e9581ae53c0"
 }
 ```
 
@@ -820,7 +888,9 @@ Abschnitt 8 auf dem Beginn: eine Seite teilt Sessions mit demselben Beginn nicht
 | `clients_off` | Client-Schalter aus; keine Sessions |
 | `unavailable` | an, aber nicht bereit: `reason` `not_running` oder `not_loaded` |
 
-Test: `test_sessions_route_rights_errors_and_paging`.
+Tests: `test_sessions_route_rights_errors_and_paging`,
+`test_s3_250_resumed_sessions_of_one_start_page_without_loss` (250 Sessions mit demselben
+Beginn und 30 weitere, `limit` 200: 280 von 280 über `/sessions` und `/timeline`).
 
 ### 16.5 Timeline-Beispiel (Ausschnitt)
 
@@ -862,9 +932,12 @@ weggelassen werden. Die Marken aus `tm_clients` zählen dort nicht.
 
 - Sessions gibt es nur, solange die Client-Stabilität läuft; wird sie neu eingerichtet, hängt
   sich die Time Machine beim nächsten Takt (höchstens 5 min) wieder an.
-- Mehr Sessions mit **demselben Beginn** als `limit`: der Rest dieses Beginns fehlt. Mehr
-  überlappende Sessions als `limit`, deren Beginn vor `from` liegt: `truncated: true` ohne
-  `next_until` (das nächste Fenster wäre leer).
+- Ohne `cursor` (Clients vor 1.51.0): mehr Sessions mit **demselben Beginn** als `limit`
+  oder mehr überlappende Sessions als `limit`, deren Beginn vor `from` liegt, sind über
+  `next_until` nicht erreichbar (`truncated: true`); mit `next_cursor` kommt jede.
+- „Client vergessen“ für einen gerade verbundenen Client: Die Time Machine zeichnet ihn ab
+  seinem nächsten Übergang wieder auf (Review K5): eine neue Session beim nächsten Verbinden
+  oder Router-Wechsel; trennt er sich vorher, entsteht nur die Trennungsmarke.
 - „Client vergessen“ löscht nur im Verlauf der Time Machine, nicht in Client-Stabilität,
   Network Intelligence, Security Center, Traffic, WiFi RF oder im HA-Recorder (die Antwort
   nennt sie in `not_deleted_in`).
@@ -878,11 +951,27 @@ Vor den Rechten entfernt und je Quelle in `duplicates` gezählt:
 1. **Audit gewinnt über `tm_refs`.** Ein Verweis mit derselben Audit-ID wie ein gelesener
    Eintrag von `core_audit` fällt weg. Erst wenn der Audit-Ring den Eintrag verdrängt hat,
    erscheint der Verweis (`test_the_audit_wins_over_its_reference_until_it_is_gone`).
-2. **`tm_index` gewinnt über `ni_events`** bei `router_down`, `router_up`, `lan_down`,
-   `lan_up`, `channel_changed`, `uplink_changed`, wenn deren Zeitpunkt in einem Zeitraum liegt,
-   in dem der eigene Verlauf lief (`coverage`): der eigene Verlauf hat sie als Intervall mit
-   Ende. Außerhalb dieser Zeiträume bleiben die NI-Ereignisse; ist `tm_index` nicht lesbar,
-   wird nichts entfernt (`test_the_index_wins_over_ni_events_while_it_was_live`).
+2. **`tm_index` gewinnt über das gleiche NI-Ereignis** (1.51.0, Review S1). Ein Ereignis von
+   `ni_events` mit der Art `router_down`, `router_up`, `lan_down`, `lan_up` oder
+   `channel_changed` fällt nur weg, wenn `tm_index` (im Fenster oder als Intervall, das
+   hineinreicht) eine Marke **derselben Art und desselben Routers** (Flotten-Marken: beide
+   ohne Router) **in zeitlicher Nähe** hält, `NI_MATCH_S` = 180 s:
+   - ein „down“ liegt im Intervall des eigenen Ausfalls (ab 180 s vor seinem Beginn bis 180 s
+     nach seinem Ende; offen: ohne Ende). Begründung: Beide folgen demselben Ausfall-Melder;
+     das eigene Intervall beginnt bei der ersten Störung, NI meldet erst nach zwei weiteren
+     fehlgeschlagenen Polls und der Wartezeit (längstes Poll-Intervall + 30 s), also je nach
+     Poll-Intervall Minuten später. 180 s sind drei normale Polls (60 s) oder ein Poll mit
+     Reserve bei 120 s (CPU-Last);
+   - ein „up“ liegt höchstens 180 s neben einem eigenen „up“ oder dem Ende des eigenen
+     Intervalls (beide melden dasselbe `report_up`);
+   - ein Kanalwechsel liegt höchstens 180 s neben einem eigenen Kanalwechsel desselben
+     Routers (ein Poll-Intervall bis 300 s im SSH-Fallback ist nicht abgedeckt: dann bleiben
+     beide, lieber doppelt als verloren).
+   Im Zweifel bleibt das NI-Ereignis: andere Arten (auch `uplink_changed` aus `lan.uplink`,
+   ein Port-Ereignis, das der eigene Verlauf nicht kennt), ein anderer Router, kein passendes
+   eigenes Intervall, ein Ereignis ohne Router, ein nicht lesbares `tm_index`. Tests:
+   `test_the_index_wins_over_the_same_ni_event_only`, `test_s1_*` in
+   `tests/test_tm_review_v1510.py` (eigener Verlauf über den echten Ausfall-Melder).
 
 Andere Quellen werden nicht verglichen.
 
@@ -893,10 +982,15 @@ registriert, bei ausgeschalteter Time Machine Fehler `time_machine_off`.
 
 | Aktion | Felder | Antwort | Wirkung |
 |---|---|---|---|
-| `openwrt_router.time_machine_forget_client` | `mac` | `{"deleted": n, "not_deleted_in": [...]}` | löscht alle Marken dieses Clients, Marke `tm_forgot_client` (ohne Client), Audit `time_machine.client_forgotten`, sofort geschrieben; Fehler `time_machine_invalid_mac`, `time_machine_no_key` |
+| `openwrt_router.time_machine_forget_client` | genau eines von `mac` oder `client` (`tmc_` + 16 hex, seit 1.51.0) | `{"deleted": n, "not_deleted_in": [...]}` | löscht alle Marken dieses Clients, Marke `tm_forgot_client` (ohne Client), Audit `time_machine.client_forgotten`, sofort geschrieben, alte Kopien der Datei gelöscht (Abschnitt 15.6); ein gerade verbundener Client wird ab seinem nächsten Übergang wieder aufgezeichnet (Abschnitt 16.6); Fehler `time_machine_mac_or_client` (keines oder beide), `time_machine_invalid_mac`, `time_machine_invalid_client`, `time_machine_no_key` |
 | `openwrt_router.time_machine_clear_history` | `clients_only` (bool) | `{"deleted": n}` | löscht die Client-Marken oder den ganzen eigenen Verlauf (auch Checkpoints, Abdeckung beginnt neu), Marke `tm_cleared`, Audit `time_machine.history_cleared`, sofort geschrieben |
 
-Tests: `test_forget_action_and_client_stability_exclusion`, `test_clear_history_action`.
+Die Time Machine speichert die MAC nicht; Home Assistant selbst kann einen Aktionsaufruf mit
+seinen Daten aber in Protokoll oder Recorder behalten. Wer das vermeiden will, nimmt das
+Pseudonym (`client`), das Tab und `/sessions` zeigen (Review K2; die Feldtexte sagen es).
+
+Tests: `test_forget_action_and_client_stability_exclusion`, `test_clear_history_action`,
+`test_k2_forget_takes_the_pseudonym_and_exactly_one_of_both`.
 
 ## 19. Panel für B/C (1.51.0)
 

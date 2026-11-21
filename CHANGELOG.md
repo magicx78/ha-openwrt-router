@@ -7,8 +7,16 @@ All notable changes to the OpenWrt Router integration will be documented in this
 Network Time Machine, Phasen B und C: Die Zeitreise hat einen **eigenen Verlauf, der
 HA-Neustarts übersteht**, und **Client-Verläufe hinter einem eigenen Schalter**, der
 standardmäßig aus ist. Weiterhin ist die ganze Time Machine **standardmäßig aus**; wer
-nichts einschaltet, merkt vom Update nichts (kein Store, kein Listener, keine Aufgabe, kein
-Router-Aufruf, keine Entität; Test). **Kein zusätzlicher Router-Aufruf:** Der Verlauf entsteht
+nichts einschaltet, bekommt keinen Store-Schreibvorgang, keinen Listener, keine Aufgabe, keinen
+Router-Aufruf und keine Entität (Test). Sichtbar ändert sich trotzdem: zwei neue Aktionen
+(„Client vergessen“, „Verlauf löschen“; bei ausgeschalteter Time Machine antworten sie mit
+einem Fehler), ein Kästchen mehr im Optionen-Dialog („Client-Verläufe“), und beim Speichern
+des Optionen-Dialogs bei ausgeschalteter Time Machine sowie beim Entfernen eines Routers wird
+die Datei `.storage/openwrt_router.time_machine` einmal gelesen (geschrieben nur, wenn sie
+Client- bzw. Router-Marken enthält; ohne Datei wird nichts geschrieben). **Wer die Time Machine
+schon in 1.50.0 eingeschaltet hat, bekommt mit dem Update automatisch den dauerhaften Verlauf
+auf der Festplatte:** Datei `.storage/openwrt_router.time_machine`, höchstens 2,5 MB, 14 Tage,
+ohne Client-Verläufe (deren Schalter ist aus). **Kein zusätzlicher Router-Aufruf:** Der Verlauf entsteht
 nur aus den Coordinator-Daten und den Ereignissen vorhandener Module (Test vergleicht die
 Aufrufliste zweier Polls mit allem an und allem aus). Gespeichert werden feste Codes, Zahlen,
 Router-Kennungen `rtr_…`, Zeitpunkte und bei Clients ein Pseudonym `tmc_…`; **nicht**
@@ -25,22 +33,31 @@ Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine3`.
   Ende, Beobachtungslücken, HA-Lücken (sauber/unsauber), Kanal- und DFS-Wechseln, fehlenden
   Funkmodulen, Uplink- und Rollenwechseln, Änderungen des Konfigurations-Fingerabdrucks,
   Verweisen auf Audit-Einträge (bleiben sichtbar, wenn der Audit-Ring sie verdrängt hat),
-  Uhrsprüngen und täglichen Checkpoints. Verzögertes, gebündeltes Schreiben; eine kaputte oder
-  neuere Datei bleibt als `.bak`, offene Intervalle enden nach einem Neustart als „Ende
-  unbekannt“.
+  Uhrsprüngen und täglichen Checkpoints. Verzögertes, gebündeltes Schreiben (höchstens alle
+  5 min, plus ein Lebenszeichen alle 15 min); eine kaputte oder neuere Datei bleibt als `.bak`,
+  offene Intervalle enden nach einem Neustart als „Ende unbekannt“. Ein voller Speicher
+  verdrängt zuerst abgeschlossene Marken, laufende Ausfälle und Sitzungen zuletzt.
 - **Client-Verläufe (Phase C)** hinter dem eigenen Schalter `time_machine_clients`
   (Standard aus, einer für alle Router): Sitzungen je Client mit Router, Band, Wechseln und
   Trennungen aus der Client-Stabilität. Hostname nur für Administratoren und nur, solange die
   Client-Stabilität den Client kennt (nie gespeichert); über 200 Marken je Client und Tag
   wird zusammengefasst. **Ausschalten löscht alle gespeicherten Client-Verläufe sofort.**
 - **Route `GET …/enterprise/timemachine/sessions`** (nur Administratoren): Sitzungen, die ein
-  Fenster überlappen, Filter `client`, `router_id`, Blättern über `next_until`.
+  Fenster überlappen, Filter `client`, `router_id`, Blättern über `cursor`/`next_cursor`
+  (`next_until` für ältere Clients).
+- **Blättern mit Cursor** (Zeitleiste und Sitzungen, additiv): Parameter `cursor`, Feld
+  `next_cursor` (`<ms>` oder `<ms>:<id>`, mit demselben Fenster zurückschicken). Damit geht
+  auch dann nichts verloren, wenn eine Millisekunde mehr Marken als `limit` hält (z. B.
+  Hunderte Sitzungen, die beim Einschalten zugleich beginnen; Test: 280 von 280 bei `limit`
+  200). Ohne Cursor bleibt `next_until` wie in 1.50.0 und sagt dann ehrlich `truncated: true`.
 - **Zeitleiste:** neue Quellen `tm_index`, `tm_refs` (nur Admins), `tm_clients` (nur Admins);
   additive Felder je Marke `code`, `end`, `end_state`, `client`, `client_name`, `peers`,
   `spans_in` und je Quelle `duplicates`; Grund `clients_off`. Intervalle, die vor dem Fenster
-  begannen und hineinreichen, gehören dazu (`spans_in: true`) und erscheinen beim Blättern
-  genau einmal, auf der letzten Seite. Doppelte werden entfernt: das Audit gewinnt über
-  seinen Verweis, der eigene Verlauf über gleiche NI-Ereignisse, solange er lief. `v` bleibt 1.
+  begannen und hineinreichen, kommen nur mit dem neuen Parameter `spans=1` im eigenen Feld
+  `spanning` (höchstens 200, `spanning_truncated`, nicht auf `limit` angerechnet), sonst nie.
+  Doppelte werden entfernt: das Audit gewinnt über seinen Verweis; ein NI-Ereignis fällt nur
+  weg, wenn der eigene Verlauf dieselbe Art am selben Router in zeitlicher Nähe (180 s, bei
+  Ausfällen das ganze Intervall) hält; im Zweifel bleibt es. `v` bleibt 1.
 - **Tab „Zeitreise“:** Quellen „Eigener Verlauf“, „Verweise“, „Client-Verläufe“ (die beiden
   letzten für Nicht-Admins gesperrt), Zusatz „· n doppelt“; Dauer von Intervallen („Dauer
   4 min 12 s“, „seit 14:03, noch offen“, „Ende unbekannt“) und ein eigener Block „Läuft seit
@@ -53,9 +70,14 @@ Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine3`.
   noch nicht verfügbar, leer, Fehler). Hinweis „Viele neue Einträge: Die Liste beginnt neu.“,
   wenn eine Aktualisierung die geladenen älteren Seiten nicht erreicht, und „Quellen
   (neueste Seite)“ nach „Ältere laden“.
-- **Aktionen** `openwrt_router.time_machine_forget_client` (`mac`) und
-  `openwrt_router.time_machine_clear_history` (`clients_only`), nur für Administratoren; der
-  Tab bietet sie nicht an.
+- **Aktionen** `openwrt_router.time_machine_forget_client` (genau eines von `mac` oder dem
+  Pseudonym `client`; mit dem Pseudonym landet keine MAC in HAs eigenem Protokoll oder
+  Recorder) und `openwrt_router.time_machine_clear_history` (`clients_only`), nur für
+  Administratoren; der Tab bietet sie nicht an. Ein gerade verbundener Client wird nach dem
+  Vergessen ab seinem nächsten Verbinden oder Wechsel wieder aufgezeichnet. Nach jedem
+  Löschen von Client-Daten werden auch die Kopien `.bak`/`.corrupt.*` der Datei gelöscht.
+- **Router entfernen** löscht seine Marken aus dem eigenen Verlauf (wie bei der Network
+  Intelligence).
 - Diagnose: Schalter, Zähler und Grenzen des eigenen Verlaufs.
 
 ### Geändert
@@ -82,13 +104,15 @@ Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine3`.
   Änderungen bleibt in der Datei, bis sie wieder eingeschaltet wird (dann sofort auf 14 Tage
   gekürzt) oder „Verlauf löschen“ läuft.
 - Offene Intervalle werden nicht nach 14 Tagen gekürzt.
-- Mehr Intervalle, die ins Fenster reichen, als `limit`: der Rest fehlt (`truncated: true`
-  ohne `next_until`). Ebenso bei Sitzungen.
+- Mehr als 200 Intervalle, die ins Fenster reichen: der Rest fehlt (`spanning_truncated`).
+- Waren beim HA-Start alle Router unerreichbar, endet die HA-Lücke beim Einrichten der
+  Integration; die Zeit bis zum ersten geladenen Router ist eine Beobachtungslücke
+  (`unloaded`), ein LAN-Ausfall darin wird nicht erkannt.
 - Nicht rückwirkend: Was vor dem Einschalten geschah, steht nur in den Phase-A-Quellen.
 - Client-Sitzungen nur, solange die Client-Stabilität läuft; Hostnamen nur aus ihr.
 - „Client vergessen“ löscht nur im Verlauf der Time Machine, nicht in anderen Modulen oder im
   HA-Recorder.
-- Nach einem Absturz ist der Beginn der HA-Lücke nur auf etwa 15–17 min genau.
+- Nach einem Absturz ist der Beginn der HA-Lücke nur auf etwa 15–20 min genau.
 - **Nicht an einer echten Instanz und nicht auf Routern geprüft**; alle Aussagen stammen aus
   Tests mit Mocks. Der Tab von 1.51.0 ist in keinem Browser angesehen, nur mit node-Tests
   (Logik, serverseitiges Rendern, Stylesheet).
