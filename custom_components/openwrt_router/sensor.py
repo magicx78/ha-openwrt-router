@@ -451,7 +451,12 @@ SENSOR_DESCRIPTIONS: tuple[OpenWrtSensorEntityDescription, ...] = (
         translation_key="active_connections",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:lan-connect",
-        value_fn=lambda data: data.active_connections,
+        # A cut-off conntrack table read is a lower bound: unknown (1.49.1).
+        value_fn=lambda data: (
+            None
+            if getattr(data, "active_connections_complete", None) is False
+            else data.active_connections
+        ),
     ),
     OpenWrtSensorEntityDescription(
         key=SUFFIX_LOG_STATUS,

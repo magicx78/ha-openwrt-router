@@ -47,6 +47,17 @@ SESSION_REFRESH_MARGIN_SECONDS = 60
 # supplemented by luci-rpc getHostHints.
 ARP_READ_TRUNCATION_BYTES = 4000
 
+# Fallback of api.get_active_connections over /proc/net/nf_conntrack (1.49.1,
+# Traffic Analytics F2 / risk 3): bounded in time, bytes and counted lines.
+# A read of rpcd's procfs size (CONNTRACK_READ_TRUNCATION_BYTES, see above),
+# a cut last line or a cap reached makes the count a lower bound
+# (api.last_conntrack_count_complete is False). Same file/read call as
+# before (no file/exec, whose large output leaks rpcd memory; no new ACL).
+CONNTRACK_TABLE_TIMEOUT_S = 5.0
+CONNTRACK_TABLE_MAX_BYTES = 256 * 1024
+CONNTRACK_TABLE_MAX_LINES = 2048
+CONNTRACK_READ_TRUNCATION_BYTES = ARP_READ_TRUNCATION_BYTES
+
 # Server-side rpcd session timeout requested at login.
 # Must be comfortably larger than the client refresh interval
 # (SESSION_LIFETIME_SECONDS) so a session never expires mid-poll, but small

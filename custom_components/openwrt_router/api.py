@@ -41,6 +41,10 @@ from .const import (
     CONFIDENCE_HIGH,
     CONFIDENCE_MEDIUM,
     CONNECTION_TYPE_WIRELESS,
+    CONNTRACK_READ_TRUNCATION_BYTES,
+    CONNTRACK_TABLE_MAX_BYTES,
+    CONNTRACK_TABLE_MAX_LINES,
+    CONNTRACK_TABLE_TIMEOUT_S,
     DEFAULT_PROTOCOL,
     DEFAULT_SESSION_ID,
     DEFAULT_TIMEOUT,
@@ -992,6 +996,32 @@ def _parse_proc_net_arp(raw: str) -> dict[str, str]:
     return {mac: rank[2] for mac, rank in candidates.items()}
 
 
+def _count_conntrack_lines(raw: str) -> tuple[int, bool]:
+    """(entries, complete) of a ``/proc/net/nf_conntrack`` read, bounded.
+
+    At most CONNTRACK_TABLE_MAX_BYTES are looked at and at most
+    CONNTRACK_TABLE_MAX_LINES entries counted. Not complete: a cap reached, a
+    reply of rpcd's procfs read size (CONNTRACK_READ_TRUNCATION_BYTES) or a
+    cut last line; the count is then only a lower bound.
+    """
+    complete = len(raw) < CONNTRACK_READ_TRUNCATION_BYTES and raw.endswith("\n")
+    if len(raw) > CONNTRACK_TABLE_MAX_BYTES:
+        raw = raw[:CONNTRACK_TABLE_MAX_BYTES]
+        complete = False
+    count = 0
+    start = 0
+    while start < len(raw):
+        end = raw.find("\n", start)
+        if end < 0:
+            end = len(raw)
+        if raw[start:end].strip():
+            if count >= CONNTRACK_TABLE_MAX_LINES:
+                return count, False
+            count += 1
+        start = end + 1
+    return count, complete
+
+
 def _arp_read_truncated(raw: str) -> bool:
     """Return True if an rpcd ``file read`` of /proc/net/arp looks cut off.
 
@@ -1317,6 +1347,9 @@ class OpenWrtAPI:
         # whole table) or None (no count; the method then returns 0).
         self.last_conntrack_count_source: str | None = None
         # --- Ende Traffic Analytics ---
+        # Whether that count is the full number (True), a lower bound of a
+        # cut-off table read (False) or no count (None); 1.49.1.
+        self.last_conntrack_count_complete: bool | None = None
 
     @property
     def uses_ssh_fallback(self) -> bool:
@@ -4903,9 +4936,14 @@ class OpenWrtAPI:
 
         Tries two paths in order:
         1. /proc/sys/net/netfilter/nf_conntrack_count  — single integer, OpenWrt 21+
-        2. /proc/net/nf_conntrack                      — full table, count non-empty lines
+        2. /proc/net/nf_conntrack                      — the table, count non-empty
+           lines; bounded (CONNTRACK_TABLE_TIMEOUT_S, CONNTRACK_TABLE_MAX_BYTES,
+           CONNTRACK_TABLE_MAX_LINES, see ``_count_conntrack_lines``)
 
         Returns 0 if neither path is readable (module not loaded or ACL blocked).
+        ``last_conntrack_count_complete`` tells the callers whether the number
+        is the full count (True), a lower bound of a cut-off table read
+        (False) or no count at all (None).
 
         Returns:
             Count of active connections (int).
@@ -4913,6 +4951,7 @@ class OpenWrtAPI:
         # --- Traffic Analytics (Phase 5) ---
         self.last_conntrack_count_source = None
         # --- Ende Traffic Analytics ---
+        self.last_conntrack_count_complete = None
         # Fast path: single-number file (preferred, much smaller read)
         try:
             result = await self._call(
@@ -4925,23 +4964,29 @@ class OpenWrtAPI:
                 # --- Traffic Analytics (Phase 5) ---
                 self.last_conntrack_count_source = "count_file"
                 # --- Ende Traffic Analytics ---
+                self.last_conntrack_count_complete = True
                 return int(data)
         except (OpenWrtResponseError, OpenWrtTimeoutError, OpenWrtMethodNotFoundError):
             pass
 
-        # Fallback: full conntrack table, count non-empty lines
+        # Fallback: the conntrack table, bounded in time, bytes and lines
         try:
-            result = await self._call(
-                "file",
-                "read",
-                {"path": "/proc/net/nf_conntrack"},
-            )
-            data = result.get("data", "")
-            if data:
+            async with asyncio.timeout(CONNTRACK_TABLE_TIMEOUT_S):
+                result = await self._call(
+                    "file",
+                    "read",
+                    {"path": "/proc/net/nf_conntrack"},
+                )
+            data = result.get("data", "") if isinstance(result, dict) else ""
+            if isinstance(data, str) and data:
+                count, complete = _count_conntrack_lines(data)
                 # --- Traffic Analytics (Phase 5) ---
                 self.last_conntrack_count_source = "table_scan"
                 # --- Ende Traffic Analytics ---
-                return sum(1 for line in data.splitlines() if line.strip())
+                self.last_conntrack_count_complete = complete
+                return count
+        except TimeoutError:
+            _LOGGER.debug("nf_conntrack table read took too long; no count")
         except (
             OpenWrtResponseError,
             OpenWrtTimeoutError,

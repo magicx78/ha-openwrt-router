@@ -496,6 +496,9 @@ class OpenWrtCoordinatorData:
         self.counters_sampled_mono: float | None = None
         self.active_connections_source: str | None = None
         # --- Ende Traffic Analytics ---
+        # False: active_connections is only a lower bound (cut-off conntrack
+        # table read); True: the full count; None: no count. Never in as_dict.
+        self.active_connections_complete: bool | None = None
         # Connectivity health tracking (used by binary_sensor / sensor platform)
         self.error_type: str | None = None
         self.consecutive_failures: int = 0
@@ -1197,6 +1200,11 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 conntrack_source if isinstance(conntrack_source, str) else None
             )
             # --- Ende Traffic Analytics ---
+            # A cut-off table read is a lower bound, not the count (1.49.1).
+            complete = getattr(self.api, "last_conntrack_count_complete", None)
+            data.active_connections_complete = (
+                complete if isinstance(complete, bool) else None
+            )
 
             # --- Service status (dnsmasq, firewall, etc.) ---
             if self.data and self.data.features.get(FEATURE_HAS_SERVICES, False):

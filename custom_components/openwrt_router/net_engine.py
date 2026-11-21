@@ -2306,7 +2306,7 @@ def infra_snapshot(
 
     Coordinator defaults that stand for "not measured" become None:
     uptime 0 (then CPU and memory are not trusted either, they come from
-    the same call), conntrack 0, empty port and pool lists, LLDP with a
+    the same call), conntrack 0 or a cut-off count, empty port and pool lists, LLDP with a
     status other than ok/no_neighbors, the WAN unless ``wan_found``, and
     an empty map of our own service actions.
     """
@@ -2316,6 +2316,8 @@ def infra_snapshot(
     clock = (getattr(data, "localtime", None), getattr(data, "localtime_at", None))
     clock_ok = _finite(clock[0]) and _finite(clock[1])
     conntrack = getattr(data, "active_connections", None)
+    if getattr(data, "active_connections_complete", None) is False:
+        conntrack = None  # a cut-off table read: a lower bound, no count
     services = getattr(data, "service_instances", None)
     wan = getattr(data, "wan_status", None)
     if not (isinstance(wan, dict) and wan.get("wan_found") is True):
