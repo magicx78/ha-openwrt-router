@@ -161,7 +161,12 @@ from .traffic_correlate import (
     TrafficReadApi,
     WifiRfAdapter,
 )
-from .traffic_counters import BaselineBook, process_samples, router_restarted
+from .traffic_counters import (
+    BaselineBook,
+    finite_time,
+    process_samples,
+    router_restarted,
+)
 from .traffic_flows import FlowStore
 from .traffic_history import PROFILES, TrafficHistory
 from .traffic_model import (
@@ -1273,19 +1278,28 @@ class TrafficEngine:
         if slot is None or not slot.options.enabled:
             return
         now = self.clock()
-        slot.poll_end_mono = now
-        self._maybe_retry_key(now)
         coordinator = slot.coordinator
         if getattr(coordinator, "last_update_success", True) is not True:
+            slot.poll_end_mono = now
+            self._maybe_retry_key(now)
             self.counters["polls_failed"] += 1
             return
         data = getattr(coordinator, "data", None)
         if data is None:
+            slot.poll_end_mono = now
             return
         rid = self._rid(entry_id)
         if rid is None:
             self.counters["router_id_missing"] += 1
             return
+        if self._repeated(rid, data):
+            # A listener call without a new poll (e.g. after the package
+            # update check): the same counters at the same sample time give
+            # no rate, so nothing is processed, planned or signalled.
+            self.counters["repeated_snapshots"] += 1
+            return
+        slot.poll_end_mono = now
+        self._maybe_retry_key(now)
         snapshot = snapshot_from_data(
             data,
             router_id=rid,
@@ -1294,6 +1308,21 @@ class TrafficEngine:
             registry=self._registry_lookup(),
         )
         self._enqueue(entry_id, snapshot)
+
+    def _repeated(self, rid: str, data: Any) -> bool:
+        """True if ``data`` carries the sample time already taken for ``rid``.
+
+        The time of the counter read is set in the poll itself (E4), so an
+        unchanged ``counters_sampled_mono`` means no new poll has run.
+        """
+        mono = finite_time(getattr(data, "counters_sampled_mono", None))
+        if mono is None:
+            return False
+        queued = self._queue.get(rid)
+        if queued is not None and queued[1].mono_s == mono:
+            return True
+        prev = self._router_clock.get(rid)
+        return prev is not None and prev[0] == mono
 
     def _client_history(self) -> Any:
         """The client engine's history while it runs and is on, else None."""
@@ -1429,15 +1458,21 @@ class TrafficEngine:
             self.latest.pop(point.point_id, None)
 
     def _keep_rates(self, rates: list[Rate]) -> None:
+        kept: list[Rate] = []
         for rate in rates:
             self.quality_counts[rate.quality.value] += 1
+            if rate.quality is Quality.TIME_NOT_ADVANCING:
+                # No time passed (or none is known): nothing was measured, so
+                # the last rate stays and the series gets no quality bit.
+                continue
+            kept.append(rate)
             pid = rate.point.point_id
             if self.book.has(pid):
                 self.latest[pid] = rate
                 if rate.has_rate and rate.point.scope in _TOTAL_SCOPES:
                     self._add_totals(rate)
             self.series.add_rate(rate)
-        self.correlator.observe_rates(rates)
+        self.correlator.observe_rates(kept)
 
     def _add_totals(self, rate: Rate) -> None:
         """Bytes (RX+TX, only when both are known) and error deltas."""
