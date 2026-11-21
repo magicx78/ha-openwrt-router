@@ -70,6 +70,7 @@ ROUTES = (
     "/flows",
     "/evidence/{evidence_ref}",
     "/settings",
+    "/collector/users",
     "/collector/ingest",
 )
 READ_ROUTES = ROUTES[:-1]
@@ -78,7 +79,7 @@ GET_PATHS = tuple(
 )  # concrete paths
 COLLECTOR_ID = "c" * 32  # a plain (non-admin) user for the collector
 ADMIN_HEX_ID = "a" * 32
-ADMIN_ONLY = ("/flows", "/settings")
+ADMIN_ONLY = ("/flows", "/settings", "/collector/users")
 POINT = "tpt_" + "0" * 16
 QUERY = {"/series": {"point_id": POINT, "window": "1h"}}
 # No MAC, host name or AP netdev name may leave the module.
@@ -628,6 +629,144 @@ async def test_settings_post_stores_and_answers_without_the_user_id(disks) -> No
     assert engine.collector_enabled and engine.is_collector_user(COLLECTOR_ID)
     assert list(engine.client_sensor_refs) == [ref]
     assert TRAFFIC_COARSE_STORE_KEY in disks.options
+
+
+# --- Phase L: collector users and ``user_ref`` --------------------------------------
+
+
+def named_users(hass: Any) -> Any:
+    """collector_users plus names and ``hass.auth.async_get_users``."""
+    collector_users(hass)
+    names = {COLLECTOR_ID: "Collector", "f" * 32: "  b-feeder  "}
+    from core_testkit import add_user
+
+    add_user(hass, "f" * 32, admin=False)
+    for uid, user in hass.users.items():
+        user.name = names.get(uid, "x" * 80)
+    hass.auth.async_get_users = AsyncMock(side_effect=lambda: list(hass.users.values()))
+    return hass
+
+
+async def test_collector_users_lists_only_choosable_users_without_ids(disks) -> None:
+    hass, engine, _c = await seeded(disks)
+    named_users(hass)
+    async with http(hass) as h:
+        resp = await h.get("/collector/users")
+        assert resp.status == 200, resp.data
+        assert resp.headers["Cache-Control"] == "no-store"
+        rows = resp.data["users"]
+        # active, not admin, not system generated, with a 32-hex id; by name
+        assert [r["name"] for r in rows] == ["b-feeder", "Collector"]
+        assert all(re_user_ref(r["user_ref"]) for r in rows)
+        assert len({r["user_ref"] for r in rows}) == 2
+        assert [r["selected"] for r in rows] == [False, False]
+        assert resp.data["user_configured"] is False
+        for uid in hass.users:
+            assert uid not in resp.body.decode()
+        # the same run gives the same reference
+        again = await h.get("/collector/users")
+        assert again.data["users"] == rows
+        # non-admins never, even with an open panel
+        hass.data[_PANEL_ACCESS_KEY] = {"e1": True}
+        assert (await h.get("/collector/users", user=USER_ID)).status == 403
+        assert (await h.get("/collector/users", params={"x": "1"})).status == 400
+    assert engine.collector_enabled is False
+
+
+def re_user_ref(value: Any) -> bool:
+    import re
+
+    return (
+        isinstance(value, str) and re.fullmatch(r"usr_[0-9a-f]{16}", value) is not None
+    )
+
+
+async def test_collector_users_while_off_reads_no_user(disks) -> None:
+    hass, _engine, _c = await seeded(disks, on=False)
+    named_users(hass)
+    async with http(hass) as h:
+        resp = await h.get("/collector/users")
+        assert resp.status == 200 and resp.data["status"] == "off"
+        assert resp.data["users"] == []
+    hass.auth.async_get_users.assert_not_called()
+
+
+async def test_settings_post_takes_the_user_ref_and_marks_it_selected(disks) -> None:
+    hass, engine, _c = await seeded(disks)
+    named_users(hass)
+    async with http(hass) as h:
+        rows = (await h.get("/collector/users")).data["users"]
+        ref = next(r["user_ref"] for r in rows if r["name"] == "Collector")
+        resp = await h.call(
+            "post", "/settings", json={"collector": {"enabled": True, "user_ref": ref}}
+        )
+        assert resp.status == 200, resp.data
+        assert resp.data["collector"] == {
+            **resp.data["collector"],
+            "enabled": True,
+            "user_configured": True,
+        }
+        listed = (await h.get("/collector/users")).data
+        assert [r["selected"] for r in listed["users"]] == [False, True]
+        assert listed["selected_listed"] is True
+        h.assert_no_secret(COLLECTOR_ID)
+        # switching off keeps the user; a null reference clears it
+        resp = await h.call(
+            "post",
+            "/settings",
+            json={"collector": {"enabled": False, "user_ref": None}},
+        )
+        assert resp.status == 400  # null is not a reference
+        resp = await h.call("post", "/settings", json={"collector": {"enabled": False}})
+        assert resp.status == 200 and resp.data["collector"]["enabled"] is False
+    await drain(hass)
+    assert engine.is_collector_user(COLLECTOR_ID) is False  # off: nobody may push
+    assert engine.settings["collector"]["user_id"] == COLLECTOR_ID
+
+
+@pytest.mark.parametrize(
+    ("collector", "reason"),
+    [
+        ({"enabled": True, "user_ref": "usr_" + "0" * 16}, "user_unknown"),
+        ({"enabled": True, "user_ref": "cli_" + "0" * 16}, "user_ref"),
+        ({"enabled": True, "user_ref": 5}, "user_ref"),
+        ({"user_ref": "usr_" + "0" * 16, "user_id": COLLECTOR_ID}, "user_id_and_ref"),
+    ],
+)
+async def test_settings_post_refuses_unknown_or_bad_user_refs(
+    disks, collector, reason
+) -> None:
+    hass, engine, _c = await seeded(disks)
+    named_users(hass)
+    before = json.dumps(engine.settings, sort_keys=True)
+    async with http(hass) as h:
+        resp = await h.call("post", "/settings", json={"collector": collector})
+        assert resp.status == 400, resp.data
+        assert resp.data["details"] == {"field": "collector", "reason": reason}
+    assert json.dumps(engine.settings, sort_keys=True) == before
+
+
+async def test_a_reference_of_an_admin_or_inactive_user_is_never_resolved(
+    disks,
+) -> None:
+    hass, _engine, _c = await seeded(disks)
+    named_users(hass)
+    for uid in (ADMIN_HEX_ID, "d" * 32, "e" * 32):
+        ref = tv.user_ref(hass, uid)
+        async with http(hass) as h:
+            resp = await h.call(
+                "post",
+                "/settings",
+                json={"collector": {"enabled": True, "user_ref": ref}},
+            )
+            assert resp.status == 400
+            assert resp.data["details"]["reason"] == "user_unknown"
+
+
+def test_user_refs_depend_on_a_random_key_per_run() -> None:
+    a, b = core_make_hass(), core_make_hass()
+    assert tv.user_ref(a, COLLECTOR_ID) == tv.user_ref(a, COLLECTOR_ID)
+    assert tv.user_ref(a, COLLECTOR_ID) != tv.user_ref(b, COLLECTOR_ID)
 
 
 # --- Phase K: collector intake -------------------------------------------------------

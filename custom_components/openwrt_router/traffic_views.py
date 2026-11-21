@@ -13,6 +13,13 @@ and ``settings`` (GET). Phase K adds two writing routes:
 * ``POST collector/ingest``: the external collector (``traffic_collector``),
   only for the one configured non-admin user, only over HTTPS.
 
+Phase L adds ``GET collector/users`` (administrators only) for the settings
+form of the panel: the users that may be chosen as the collector (active,
+not an administrator, not system generated), each with its display name and
+a ``usr_<16 hex>`` reference that ``POST settings`` takes as
+``collector.user_ref``. The reference is keyed by a random key of this HA
+run, so no HA user id ever leaves a route.
+
 Order of the checks (the plumbing of ``rf_views`` / ``security_views``):
 
 1. a logged-in HA user (``requires_auth``: 401 from HA itself);
@@ -36,8 +43,11 @@ is logged. No route talks to a router.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import re
+import secrets
 from collections.abc import Mapping
 from typing import Any
 
@@ -81,7 +91,13 @@ DEFAULT_ANOMALY_LIMIT = 50
 MAX_FLOW_LIMIT = 200
 _TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 _USER_ID = re.compile(r"[0-9a-f]{32}")
+_USER_REF = re.compile(r"usr_[0-9a-f]{16}")
 CLIENT_SENSORS_MAX = 20
+COLLECTOR_USERS_PATH = "/collector/users"
+COLLECTOR_USERS_MAX = 100
+USER_NAME_MAX = 64
+# hass.data key of the per-run key behind the ``usr_`` references.
+_USER_REF_KEY = "openwrt_router_traffic_user_ref_key"
 
 _MESSAGES: Mapping[str, str] = {
     "invalid_request": "The request is not valid",
@@ -193,7 +209,7 @@ class _TrafficView(HomeAssistantView):
                 body = await self.handle_write(hass, engine, request)
             else:
                 await read_body(request, {})  # a GET takes no body
-                body = self.handle(engine, request, match)
+                body = await self.handle_async(hass, engine, request, match)
         except RequestError as err:
             return error_response(err)
         except TrafficSettingsError as err:
@@ -214,6 +230,16 @@ class _TrafficView(HomeAssistantView):
     ) -> Any:
         """The route itself (after the access checks)."""
         raise NotImplementedError
+
+    async def handle_async(
+        self,
+        hass: HomeAssistant,
+        engine: Any,
+        request: web.Request,
+        match: Mapping[str, str],
+    ) -> Any:
+        """A reading route that awaits (default: the plain ``handle``)."""
+        return self.handle(engine, request, match)
 
     async def handle_write(
         self, hass: HomeAssistant, engine: Any, request: web.Request
@@ -389,16 +415,70 @@ class TrafficEvidenceView(_TrafficView):
 
 
 def _collector_field(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) - {"enabled", "user_id"}:
+    if not isinstance(value, dict) or set(value) - {"enabled", "user_id", "user_ref"}:
         raise _bad("collector")
     if "enabled" in value and not isinstance(value["enabled"], bool):
         raise _bad("collector", "enabled")
+    if "user_id" in value and "user_ref" in value:
+        raise _bad("collector", "user_id_and_ref")
     user_id = value.get("user_id")
     if user_id is not None and (
         not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id)
     ):
         raise _bad("collector", "user_id")
+    user_ref = value.get("user_ref")
+    if "user_ref" in value and (
+        not isinstance(user_ref, str) or not _USER_REF.fullmatch(user_ref)
+    ):
+        raise _bad("collector", "user_ref")
     return dict(value)
+
+
+def user_ref(hass: HomeAssistant, user_id: str) -> str:
+    """``usr_<16 hex>`` for a HA user id, keyed by a random key of this run."""
+    key = hass.data.get(_USER_REF_KEY)
+    if not isinstance(key, bytes):
+        key = hass.data[_USER_REF_KEY] = secrets.token_bytes(32)
+    digest = hmac.new(
+        key, b"traffic_collector_user\x00" + user_id.encode(), hashlib.sha256
+    ).hexdigest()
+    return "usr_" + digest[:16]
+
+
+def _collector_candidate(user: Any) -> bool:
+    return (
+        isinstance(getattr(user, "id", None), str)
+        and _USER_ID.fullmatch(user.id) is not None
+        and getattr(user, "is_active", False) is True
+        and getattr(user, "is_admin", True) is False
+        and getattr(user, "system_generated", True) is False
+    )
+
+
+async def _collector_candidates(hass: HomeAssistant) -> list[Any]:
+    """Users that may be the collector, by display name (at most 100)."""
+    try:
+        found = await hass.auth.async_get_users()
+    except Exception:  # noqa: BLE001 - unreadable users: nobody to choose
+        return []
+    users = [u for u in found or () if _collector_candidate(u)]
+    users.sort(key=lambda u: (str(getattr(u, "name", "") or "").casefold(), u.id))
+    return users[:COLLECTOR_USERS_MAX]
+
+
+def _display_name(user: Any) -> str:
+    name = getattr(user, "name", None)
+    if not isinstance(name, str) or not name.strip():
+        return ""
+    return name.strip()[:USER_NAME_MAX]
+
+
+async def _resolve_user_ref(hass: HomeAssistant, ref: str) -> str:
+    """The user id behind a ``usr_`` reference of the user list (400 if none)."""
+    for user in await _collector_candidates(hass):
+        if hmac.compare_digest(user_ref(hass, user.id), ref):
+            return str(user.id)
+    raise _bad("collector", "user_unknown")
 
 
 def _client_sensors_field(value: Any) -> list[str]:
@@ -436,7 +516,8 @@ class TrafficSettingsView(_TrafficView):
 
     Body ``{"collector": {"enabled": bool, "user_id": "<32 hex>"|null},
     "client_sensors": ["cli_..."]}`` (each key optional, at most 4 KiB,
-    depth 3, unknown keys 400).
+    depth 3, unknown keys 400). Instead of ``user_id`` the collector may
+    name ``user_ref`` (``usr_<16 hex>`` from ``GET collector/users``).
     """
 
     url = f"{BASE_URL}/settings"
@@ -458,11 +539,45 @@ class TrafficSettingsView(_TrafficView):
         update = await read_body(request, SETTINGS_FIELDS)
         if not update:
             raise _bad("body", "empty")
+        collector = update.get("collector")
+        if isinstance(collector, dict) and "user_ref" in collector:
+            collector["user_id"] = await _resolve_user_ref(
+                hass, collector.pop("user_ref")
+            )
         user_id = (update.get("collector") or {}).get("user_id")
         if user_id is not None:
             await _check_collector_user(hass, user_id)
         await engine.async_update_settings(update)
         return out.settings(engine)
+
+
+class TrafficCollectorUsersView(_TrafficView):
+    """Users an administrator may choose as the collector (no user id)."""
+
+    url = BASE_URL + COLLECTOR_USERS_PATH
+    name = f"{VIEW_NAME_PREFIX}collector_users"
+    admin_only = True
+
+    async def handle_async(self, hass, engine, request, match):  # type: ignore[override]
+        _query(request, frozenset())
+        if out.is_off(engine):
+            return out.off_answer(engine, users=[])
+        configured = (engine.settings.get("collector") or {}).get("user_id")
+        users = await _collector_candidates(hass)
+        rows = [
+            {
+                "user_ref": user_ref(hass, u.id),
+                "name": _display_name(u),
+                "selected": u.id == configured,
+            }
+            for u in users
+        ]
+        return {
+            **out.off_answer(engine),  # the status envelope (v, status, reasons)
+            "users": rows,
+            "selected_listed": any(r["selected"] for r in rows),
+            "user_configured": configured is not None,
+        }
 
 
 class TrafficCollectorIngestView(HomeAssistantView):
@@ -561,6 +676,7 @@ TRAFFIC_VIEWS: tuple[type[HomeAssistantView], ...] = (
     TrafficFlowsView,
     TrafficEvidenceView,
     TrafficSettingsView,
+    TrafficCollectorUsersView,
     TrafficCollectorIngestView,
 )
 
