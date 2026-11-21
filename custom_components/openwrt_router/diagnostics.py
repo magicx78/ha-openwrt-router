@@ -223,7 +223,7 @@ def _enterprise_core_summary(hass: HomeAssistant, entry_id: str) -> dict[str, An
                 ],
                 secrets.token_bytes(16),
             )
-        return _redact(mask_for_output(summary))
+        return _redact(mask_for_output(summary, macs=True))
     except Exception:
         _LOGGER.debug("Enterprise core diagnostics failed", exc_info=True)
         return {"loaded": False, "error": True}
@@ -283,7 +283,7 @@ def _config_manager_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any
                 if drift
                 else None,
             }
-        return _redact(config_mask_for_output(summary))
+        return _redact(config_mask_for_output(summary, macs=True))
     except Exception as err:  # noqa: BLE001 - the download must not fail
         _LOGGER.debug(
             "Configuration manager diagnostics failed: %s", type(err).__name__
@@ -443,7 +443,9 @@ def _net_diagnostics_summary(hass: HomeAssistant) -> dict[str, Any]:
             return {"loaded": False}
         status = diag.status()
         status.pop("ha", None)  # per-series detail is in the routes
-        return _redact(async_redact_data(mask_for_output(status), DIAG_REDACT_KEYS))
+        return _redact(
+            async_redact_data(mask_for_output(status, macs=True), DIAG_REDACT_KEYS)
+        )
     except Exception as err:  # noqa: BLE001 - the download must not fail
         _LOGGER.debug("Network diagnostics summary failed: %s", type(err).__name__)
         return {"loaded": False, "error": True}

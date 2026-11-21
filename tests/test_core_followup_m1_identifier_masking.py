@@ -189,8 +189,10 @@ def test_strict_identifier_values_readable(name, value):
     assert mask_for_output({"key": name, "value": value})["value"] == value
     # (an unquoted "name=<id>" run of 32+ characters is one opaque token for
     # the long-token rule and stays masked as before; ": " and quotes keep it)
-    assert redact_text(f"{name}: {value}") == f"{name}: {value}"
-    assert redact_text(f"{name}='{value}'") == f"{name}='{value}'"
+    # 1.49.4: free text masks a MAC (structured output above keeps it)
+    shown = MASK if value == "aa:bb:cc:dd:ee:ff" else value
+    assert redact_text(f"{name}: {value}") == f"{name}: {shown}"
+    assert redact_text(f"{name}='{value}'") == f"{name}='{shown}'"
 
 
 @pytest.mark.parametrize("value", MASKED_VALUES, ids=repr)

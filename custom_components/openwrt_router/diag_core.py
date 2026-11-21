@@ -1325,8 +1325,14 @@ def _renamed(value: Any) -> Any:
     return value
 
 
+def _output(data: Any, keys: Iterable[str] = ()) -> Any:
+    """``mask_for_output`` with MACs masked: diag output never shows one
+    (router text in reasons, sources or errors may carry one, 1.49.4)."""
+    return mask_for_output(data, extra_keys=tuple(keys), macs=True)
+
+
 def _masked(data: Any, keys: Iterable[str] = OUTPUT_MASK_KEYS) -> Any:
-    return mask_for_output(_renamed(plain(data)), extra_keys=tuple(keys))
+    return _output(_renamed(plain(data)), keys)
 
 
 def _brief_finding(finding: Finding) -> dict[str, Any]:
@@ -1356,7 +1362,7 @@ def finding_output(
     module ``key`` replaced by their pseudonyms; never shown raw.
     """
     if not admin:
-        return mask_for_output(_brief_finding(finding))
+        return _output(_brief_finding(finding))
     data = finding.to_dict()
     data["router_id"] = router_id_for(finding.point)
     keys: tuple[str, ...] = OUTPUT_MASK_KEYS
@@ -1385,7 +1391,7 @@ def correlation_output(
     causes = (
         [_masked(cause.to_dict()) for cause in result.causes]
         if admin
-        else [mask_for_output(_brief_cause(cause)) for cause in result.causes]
+        else [_output(_brief_cause(cause)) for cause in result.causes]
     )
     return {
         "findings": [finding_output(f, admin=admin, key=key) for f in result.findings],
@@ -1408,12 +1414,12 @@ def log_safe(data: Any) -> Any:
 def actor_output(actor: Any, salt: bytes) -> dict[str, Any]:
     """Masked actor (``Actor`` or ``VerifiedActor``) with the user id
     replaced by its ``usr_`` pseudonym."""
-    return mask_for_output(pseudonymise_user_ids(actor.to_dict(), salt))
+    return _output(pseudonymise_user_ids(actor.to_dict(), salt))
 
 
 def event_output(event: DiagEvent, salt: bytes) -> dict[str, Any]:
     """Masked, pseudonymised view of a module event (diagnostics, logs)."""
-    return mask_for_output(pseudonymise_user_ids(_renamed(event.to_dict()), salt))
+    return _output(pseudonymise_user_ids(_renamed(event.to_dict()), salt))
 
 
 # =============================================================================

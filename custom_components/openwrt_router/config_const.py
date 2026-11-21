@@ -301,13 +301,16 @@ def is_config_secret_name(name: object) -> bool:
     return is_secret_key(name) or _is_bridge_name(name)
 
 
-def config_mask_for_output(data: Any) -> Any:
+def config_mask_for_output(data: Any, *, macs: bool = False) -> Any:
     """:func:`core_masking.mask_for_output` with the bridge's names on top.
 
     The last barrier before HTTP responses, logs and events of the
-    configuration manager. Never mutates ``data``.
+    configuration manager. Never mutates ``data``. MACs stay by default:
+    diffs and archives name sections by MAC (``@host{"mac":"…"}``) and an
+    admin compares and restores them; ``macs=True`` (the diagnostics
+    download) masks MACs in every string.
     """
-    return mask_for_output(_bridge(data, set(), 0))
+    return mask_for_output(_bridge(data, set(), 0), macs=macs)
 
 
 # Free-text heads after which a value follows (UCI file line, assignment /
@@ -369,6 +372,7 @@ def config_redact_text(text: object) -> str:
     ikey '…'``, ``okey=…``, ``--form-entry …``) are masked to the end of the
     line, and so is the rest of a line after a value the core masked. The
     core already cut the text to its length limit, so this stays linear.
+    MAC addresses are masked by the core (1.49.4).
     """
     out = redact_text(text)
     for head_re in _TEXT_HEAD_RES:

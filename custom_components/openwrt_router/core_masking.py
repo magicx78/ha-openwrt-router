@@ -43,9 +43,11 @@ Counter names (``COUNTER_SUFFIXES``) keep a NUMBER readable unless a secret
 word is part of the name. The precise snapshot rule is unchanged
 (``option rule_key`` in a UCI diff stays masked).
 
-Network identifiers (MAC, IP, hostname, SSID, BSSID) are never masked here;
-modules that must hide them use :func:`pseudonymise_identifier` /
-:func:`pseudonymise_fields` with their module key.
+Network identifiers (MAC, IP, hostname, SSID, BSSID) in structured data are
+not masked here; modules that must hide them use
+:func:`pseudonymise_identifier` / :func:`pseudonymise_fields` with their
+module key. MACs in free text (:func:`redact_text`, :func:`scrub_text`,
+``mask_for_output(..., macs=True)``) are masked since 1.49.4.
 
 A change record (mapping with ``option`` and ``config``) of an option that
 is readable in that config (``READABLE_CONTEXT_OPTIONS``) keeps its values,
@@ -1084,7 +1086,48 @@ def _mask_long_token(match: re.Match[str]) -> str:
     return MASK
 
 
-def redact_text(text: object) -> str:
+# MACs in free text (1.49.4; the Security Center's pattern of 1.49.3, moved
+# here so the Core, the configuration manager, network diagnostics and the
+# Security Center share one). Colon, dash, Cisco dots and bare 12 hex (the
+# forms of mac_utils.is_mac), also glued to "_" or a non-hex letter. The hex
+# lookarounds keep longer hex runs (ids, pseudonyms, digests) intact. The
+# bare and the dotted form need at least one hex letter a-f
+# (``bytes=123456789012``, phone numbers, ``202611211530`` and
+# ``2026.1121.1530`` are no MACs), and the space-separated form
+# (``AA BB CC DD EE FF``, also with a letter) is masked when it is not part
+# of a longer run of hex pairs (a hex dump). Lookaheads are bounded: linear.
+_HEX: Final = "[0-9A-Fa-f]"
+MAC_IN_TEXT_RE: Final = re.compile(
+    r"(?<![0-9A-Fa-f:-])(?:"
+    rf"{_HEX}{{2}}(?::{_HEX}{{2}}){{5}}"
+    rf"|{_HEX}{{2}}(?:-{_HEX}{{2}}){{5}}"
+    rf"|(?=[0-9.]{{0,13}}[A-Fa-f]){_HEX}{{4}}(?:\.{_HEX}{{4}}){{2}}"
+    rf"|(?=[0-9]{{0,11}}[A-Fa-f]){_HEX}{{12}}"
+    r")(?![0-9A-Fa-f:-])"
+    rf"|(?<!{_HEX}{{2}} )(?<![0-9A-Fa-f:-])"
+    rf"(?=[0-9 ]{{0,16}}[A-Fa-f]){_HEX}{{2}}(?: {_HEX}{{2}}){{5}}"
+    rf"(?![0-9A-Fa-f:-])(?! {_HEX}{{2}}(?![0-9A-Za-z]))"
+)
+# ``usr_<12 hex>`` (user pseudonyms) and other ``<abc>_<12 hex>`` core ids
+# look like a bare MAC glued to "_"; the core keeps them readable.
+_ID_HEAD_RE: Final = re.compile(r"(?<![A-Za-z0-9])[a-z]{3}_\Z")
+
+
+def _mask_mac(match: re.Match[str]) -> str:
+    start = match.start()
+    if len(match.group(0)) == 12 and _ID_HEAD_RE.search(
+        match.string, max(0, start - 5), start
+    ):
+        return match.group(0)
+    return MASK
+
+
+def mask_macs(text: str) -> str:
+    """``text`` with every MAC address (:data:`MAC_IN_TEXT_RE`) masked."""
+    return MAC_IN_TEXT_RE.sub(_mask_mac, text)
+
+
+def redact_text(text: object, *, macs: bool = True) -> str:
     """Remove secrets from free text (messages, stderr, log lines).
 
     Covers PEM blocks, URL credentials, Authorization schemes, UCI lines
@@ -1097,16 +1140,21 @@ def redact_text(text: object) -> str:
     crypt hashes, base64 32-byte keys, 32-hex session tokens and other
     opaque runs of 32+ characters.
     ``<prefix>_<32 hex>`` ids, hex hashes and word-built names (archive
-    paths, hostnames) are kept. Text longer than MAX_TEXT_LENGTH is cut and
-    ends with TRUNCATED. Runtime is linear in the length.
+    paths, hostnames) are kept. MAC addresses (:data:`MAC_IN_TEXT_RE`) are
+    masked too unless ``macs`` is False (1.49.4; :func:`mask_for_output`
+    passes False for strings of structured data unless asked). Text longer
+    than MAX_TEXT_LENGTH is cut and ends with TRUNCATED. Runtime is linear
+    in the length.
     """
     if not isinstance(text, str):
         text = str(text)
     if not text:
         return text
     if len(text) <= MAX_TEXT_LENGTH:
-        return _redact(text)
-    return _redact(_cut(text)) + TRUNCATED
+        out = _redact(text)
+        return mask_macs(out) if macs else out
+    out = _redact(_cut(text))
+    return (mask_macs(out) if macs else out) + TRUNCATED
 
 
 def _cut(text: str) -> str:
@@ -1219,6 +1267,7 @@ class _Walk:
 
     extra: frozenset[str]
     redact_strings: bool
+    macs: bool = False
 
 
 def _has_inline_key(mapping: Mapping[Any, Any]) -> bool:
@@ -1315,7 +1364,9 @@ def _mask_mapping(
                     # ids and hashes stay readable in their strict shapes;
                     # anything else there is free text (review 2026-11-18)
                     result[key] = (
-                        value if _STRICT_ID_RE.fullmatch(value) else redact_text(value)
+                        value
+                        if _STRICT_ID_RE.fullmatch(value)
+                        else redact_text(value, macs=walk.macs)
                     )
                     continue
         result[key] = _mask(value, walk, stack, depth + 1)
@@ -1368,7 +1419,7 @@ def _mask(obj: Any, walk: _Walk, stack: set[int], depth: int) -> Any:
     if obj is None or isinstance(obj, bool | int | float | Enum):
         return obj
     if isinstance(obj, str):
-        return redact_text(obj) if walk.redact_strings else obj
+        return redact_text(obj, macs=walk.macs) if walk.redact_strings else obj
     if isinstance(obj, bytes | bytearray | memoryview):
         return MASK
     if isinstance(obj, BaseException):
@@ -1411,15 +1462,21 @@ def mask_secrets(data: Any, *, extra_keys: Iterable[str] = ()) -> Any:
     return _mask(data, walk, set(), 0)
 
 
-def mask_for_output(data: Any, *, extra_keys: Iterable[str] = ()) -> Any:
+def mask_for_output(
+    data: Any, *, extra_keys: Iterable[str] = (), macs: bool = False
+) -> Any:
     """Like :func:`mask_secrets`, and every string goes through redact_text.
 
     The last barrier before HTTP responses, logs and events. Strings under
     id/hash keys (``*_id``, ``*_ids``, ``*_hash``, ``sha256``) stay only in
     a strict id/hash shape, otherwise they are redacted like any text; sets
-    and namedtuples keep their type.
+    and namedtuples keep their type. MACs in strings are kept unless
+    ``macs`` is True: structured output names network identifiers on
+    purpose (a config diff names a ``dhcp`` host by its MAC); outputs
+    without such content (network diagnostics, the diagnostics download)
+    pass True. Exception texts always lose their MACs.
     """
-    walk = _Walk(extra=frozenset(extra_keys), redact_strings=True)
+    walk = _Walk(extra=frozenset(extra_keys), redact_strings=True, macs=macs)
     return _mask(data, walk, set(), 0)
 
 

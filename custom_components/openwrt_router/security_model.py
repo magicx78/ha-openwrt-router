@@ -110,6 +110,7 @@ from typing import Any, Final, Protocol
 
 from .const import DIAGNOSTICS_TO_REDACT
 from .core_masking import (
+    MAC_IN_TEXT_RE,
     MASK,
     MAX_DEPTH,
     TRUNCATED,
@@ -337,26 +338,9 @@ LOG_DERIVED_SOURCES: Final = frozenset(
 
 # --- text hygiene and masking ------------------------------------------------
 
-# MACs in free text: colon, dash, Cisco dots and bare 12 hex (the forms of
-# mac_utils.is_mac), also glued to "_" or a non-hex letter (1.49.1). The hex
-# lookarounds keep longer hex runs (ids, pseudonyms, digests) intact.
-# 1.49.3: the bare and the dotted form need at least one hex letter a-f
-# (``bytes=123456789012``, phone numbers, ``202611211530`` and
-# ``2026.1121.1530`` are no MACs), and the space-separated form
-# (``AA BB CC DD EE FF``, also with a letter) is masked when it is not part
-# of a longer run of hex pairs (a hex dump). Lookaheads are bounded: linear.
-_HEX = "[0-9A-Fa-f]"
-_MAC_RE = re.compile(
-    r"(?<![0-9A-Fa-f:-])(?:"
-    rf"{_HEX}{{2}}(?::{_HEX}{{2}}){{5}}"
-    rf"|{_HEX}{{2}}(?:-{_HEX}{{2}}){{5}}"
-    rf"|(?=[0-9.]{{0,13}}[A-Fa-f]){_HEX}{{4}}(?:\.{_HEX}{{4}}){{2}}"
-    rf"|(?=[0-9]{{0,11}}[A-Fa-f]){_HEX}{{12}}"
-    r")(?![0-9A-Fa-f:-])"
-    rf"|(?<!{_HEX}{{2}} )(?<![0-9A-Fa-f:-])"
-    rf"(?=[0-9 ]{{0,16}}[A-Fa-f]){_HEX}{{2}}(?: {_HEX}{{2}}){{5}}"
-    rf"(?![0-9A-Fa-f:-])(?! {_HEX}{{2}}(?![0-9A-Za-z]))"
-)
+# MACs in free text: the shared pattern of the core (moved there in 1.49.4,
+# unchanged; see core_masking.MAC_IN_TEXT_RE for the forms it covers).
+_MAC_RE = MAC_IN_TEXT_RE
 _IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 _IPV6_RE = re.compile(r"(?<![\w:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])")
 _DOMAIN_RE = re.compile(
