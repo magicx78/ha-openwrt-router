@@ -19,16 +19,43 @@ All notable changes to the OpenWrt Router integration will be documented in this
   Flows. Lädt nur, solange der Tab sichtbar ist, höchstens alle 60 s. Unbekanntes steht als
   „—“ mit Grund da, nie als 0; Datenqualität und Gründe nicht liefernder Quellen
   (z. B. WiFi RF, Security Center) sind sichtbar. Tageswerte sind UTC-Tage und werden in
-  Ortszeit beschriftet. Ein Schalter zum Einschalten folgt später.
+  Ortszeit beschriftet. Der Hinweis bei ausgeschaltetem Modul nennt jetzt den Schalter.
 - **Topologie:** Läuft Traffic Analytics, tragen Router-Knoten WAN- und Port-Raten samt
   Auslastung und Abdeckung, Router-Uplinks die gemessene Port-Rate beider Seiten. Ist das
   Modul aus, bleibt der Topologie-Snapshot unverändert.
+- **Traffic Analytics (Teil K): Schalter je Router.** In den Router-Optionen
+  (Konfigurieren) `traffic_enabled`, standardmäßig aus, dazu die Zusatzabfragen
+  `traffic_station_detail`, `traffic_sysfs_fallback`, `traffic_offload_probe` (je einzeln,
+  aus) und das Verlaufsprofil `traffic_history_profile` (`compact` vorgegeben, `standard`
+  wählbar; es gilt das tiefste Profil der eingeschalteten Router). Wirkt sofort, ohne
+  Neuladen; die übrigen Optionen bleiben erhalten. Solange kein Router eingeschaltet ist,
+  gibt es keinen Router-Aufruf, keinen Speicherzugriff und keine Entität.
+- **Traffic-Sensoren (Teil K).** Je Gateway WAN-Download- und -Upload-Rate, WAN-Verkehr
+  gesamt und WAN-Spitzenbandbreite (24 h, aus 5-Minuten-Werten); je Router am Uplink die
+  Auslastung (nur mit bekannter Link-Geschwindigkeit) sowie Empfangs- und Sendefehler
+  (Diagnose, standardmäßig deaktiviert); für die Flotte aktive Traffic-Auffälligkeiten und
+  die Abdeckung der Messung. Optional bis zu 20 Client-Sensoren „WLAN-Verkehr am AP“, nur
+  für ausgewählte Clients. Unbekanntes ist „unbekannt“, nie 0. Ausschalten entfernt die
+  Traffic-Entitäten des Routers aus der Registry, der Verlauf bleibt.
+- **Traffic-Einstellungen schreiben (Teil K):** `POST …/traffic/settings`, nur für
+  Administratoren und nur bei laufendem Modul, für den Flow-Collector und die
+  Client-Sensoren. Strenge Prüfung, ungültige Eingaben ändern nichts.
+- **Optionale Collector-Schnittstelle (Teil K):** `POST …/traffic/collector/ingest`, Schema
+  `traffic.collector.v1`, standardmäßig aus. Nur der eingetragene Home-Assistant-Benutzer
+  ohne Administratorrechte mit Long-Lived-Token und nur über HTTPS; höchstens 256 KiB,
+  500 Einträge und ein Aufruf je 10 s. Ein ungültiger oder zu großer Aufruf wird ganz
+  abgelehnt und gezählt, nie teilweise übernommen. Der Flows-Bereich zeigt die
+  Collector-Daten, sonst weiter den ehrlichen Hinweis.
+- **Diagnose:** Block `traffic_analytics` mit Schalter, Zählern, Speichergrößen und
+  Capability-Zuständen; keine MAC, IP, Client-Kennung oder Collector-Benutzer.
 
 ### Geändert
 
 - **Traffic Analytics, Verlauf im Profil „standard“:** Stundenwerte der Infrastruktur
   bleiben 14 statt 7 Tage. Die Grenzen gelten jetzt je Profil und Speicherdatei; jede Datei
   bleibt unter 2 MiB.
+- **Traffic Analytics, Einschalten:** Der frühere flottenweite Schalter im Speicher wird
+  nicht mehr gelesen; es zählt nur noch die Router-Option `traffic_enabled`.
 
 ## [1.48.0] - 2026-11-21
 
