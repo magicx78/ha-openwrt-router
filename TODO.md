@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-21 · Version: v1.47.0
+Stand: 2026-11-21 · Version: v1.49.0
 
 ---
 
@@ -97,6 +97,36 @@ Branch `claude/config-manager-d9fdac`. Nutzerdoku: `docs/configuration-manager.m
       cgi-Weg (`_cgi_seen`) den echten Ausgang des SSH-Wegs merken, damit Anzeige
       (`config.ssh_root`) und Lauf-Entscheidung früher nachziehen. Seit 1.46.1 nennt das
       Panel den SSH-Weg und den nächsten Schritt ehrlich.
+
+### Traffic Analytics (Plan `docs/plans/2026-11-20-traffic-analytics.md`, 1.49.0)
+
+Branch `claude/traffic-analytics-d7ae50`. Nutzerdoku: `docs/traffic-analytics.md`, Bauplan:
+`docs/plans/2026-11-20-traffic-analytics-bauplan.md`.
+
+- [x] Phasen A–L: Messmodell, Sammlung aus der vorhandenen Abfrage, Verlauf mit Profilen
+      `compact`/`standard`, Auffälligkeiten, Kapazität, Flows aus einem externen Collector,
+      Routen, Panel-Tab mit Einstellungen, Sensoren, Diagnose, Leistungs- und Qualitätstests
+      (1.49.0).
+- [ ] **An echten Routern prüfen** (nur lesend, mit Freigabe; Bauplan §12 Risiken 1, 2, 11):
+      WAN- und Bridge-Zähler bei Hardware-Offload, DSA-Port-Zähler bei hardware-geschaltetem
+      Verkehr, Richtung und Bitbreite der hostapd-Stationszähler, tatsächliche Schreiblast
+      der beiden Profile.
+- [ ] **Panel im echten Browser prüfen**, auch bei 360 px Breite, als Admin und Nicht-Admin.
+- [ ] **Collector-Aggregate** (`client_aggregate`, `interface_aggregate`) annehmen: braucht
+      eine eigene Collector-Zeitreihe neben der eigenen Messung; heute `kind_not_supported`.
+- [ ] **W1** NI: öffentliche Schnittstelle für Kandidaten, damit Traffic-Auffälligkeiten
+      NI-Vorfälle werden (heute nur Kern-Ereignisse).
+- [ ] **W2** Security Center: `traffic_analytics.indicator` als Indikatorquelle annehmen.
+- [ ] **W3** Core: gemeinsames Client-Pseudonym über Module (heute ergibt dieselbe MAC in
+      Traffic und Security verschiedene `cli_…`).
+- [ ] **W4** Core: `traffic_analytics` und `traffic.` als Namensräume reservieren.
+- [ ] **W5** Core: Quote je Modul im Audit-Ring.
+- [ ] **W6** WiFi RF: lesende API je Station und Radio, verbindliche `radio_id` (heute trägt
+      ein Funk-Messpunkt den Schnittstellennamen).
+- [ ] **W7** Netzwerkdiagnose: Latenz/Verlust je Router für die Korrelation.
+- [ ] **W8** `client_engine`: kabelgebundene Clients (heute nur WLAN).
+- [ ] **Außerhalb des Pakets:** der conntrack-Ersatzweg von `api.get_active_connections`
+      liest ohne Obergrenze (Bauplan §12 Risiko 3, Frage F2); nicht in 1.49.0 geändert.
 
 ### Security Center (Plan `docs/plans/2026-11-17-security-center.md`, 1.46.0)
 
