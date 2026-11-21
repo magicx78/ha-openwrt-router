@@ -288,3 +288,60 @@ REASON_SHARE_REFERENCE_NOT_FULL: Final = "share_reference_not_fully_covered"
 REASON_SHARE_REFERENCE_ZERO: Final = "share_reference_zero"
 REASON_POINTS_DROPPED: Final = "points_dropped_by_quota"
 REASON_POINTS_OMITTED: Final = "points_omitted"
+
+# --- flows and conntrack snapshots (Phase E, task §8; plan §5, §8) -------------------
+
+# Flow records in RAM: in total, per feed (router x origin), and how long.
+MAX_FLOWS_TOTAL: Final = 2000
+MAX_FLOWS_PER_FEED: Final = 500
+FLOW_TTL_S: Final = 3600.0
+FLOW_TTL_MIN_S: Final = 60.0
+FLOW_TTL_MAX_S: Final = 24 * 3600.0
+MAX_FLOW_QUERY: Final = 200
+# Collector record rules (plan §8).
+FLOW_MAX_STRING: Final = 64
+FLOW_MAX_FUTURE_S: Final = 300.0
+FLOW_MAX_AGE_S: Final = 24 * 3600.0
+FLOW_MAX_SPAN_S: Final = 3600.0
+FLOW_PROTOCOLS: Final = ("tcp", "udp", "icmp", "other")
+# Bounded conntrack snapshot (delivered by a collector; never read here).
+MAX_SNAPSHOT_ENTRIES: Final = 2000
+MAX_SNAPSHOT_LINE: Final = 512
+# Aggregates kept for later storage (anonymised: client_ref x proto x class).
+MAX_FLOW_AGGREGATES: Final = 1000
+
+FEED_COLLECTOR: Final = "collector_flow"
+FEED_CONNTRACK: Final = "conntrack_snapshot"
+
+FLOW_STATE_NO_SOURCE: Final = "no_flow_source"
+FLOW_STATE_READY: Final = "ready"
+FLOW_STATE_NOT_READY: Final = "not_ready"
+FLOW_STATE_SILENT: Final = "source_silent"
+
+REJECT_NOT_OBJECT: Final = "not_an_object"
+REJECT_UNKNOWN_FIELD: Final = "unknown_field"
+REJECT_NOT_FLOW: Final = "not_a_flow_record"
+REJECT_BAD_FIELD: Final = "invalid_field"
+REJECT_FUTURE: Final = "timestamp_in_future"
+REJECT_TOO_OLD: Final = "timestamp_too_old"
+REJECT_SPAN: Final = "window_too_long"
+REJECT_KEY_MISSING: Final = "module_key_missing"
+REASON_SNAPSHOT_NOT_HISTORY: Final = "snapshot_is_not_flow_history"
+REASON_SNAPSHOT_TRUNCATED: Final = "snapshot_truncated"
+REASON_NAT_SEEN: Final = "nat_rewrites_addresses"
+REASON_ACCT_OFF: Final = "conntrack_accounting_off"
+REASON_INVISIBLE_IS_UNKNOWN: Final = "not_seen_is_unknown_not_absent"
+REASON_EMPTY_IS_NOT_NO_TRAFFIC: Final = "empty_list_is_not_no_traffic"
+REASON_FLOW_SOURCE_SILENT: Final = "flow_source_silent"
+
+# --- protocol visibility (task §9) -------------------------------------------------
+
+PROTO_BASIS_PORT: Final = "port_heuristic"
+PROTO_BASIS_IP: Final = "ip_protocol"
+PROTO_BASIS_NONE: Final = "none"
+ACCURACY_LOW: Final = "low"
+ACCURACY_MEDIUM: Final = "medium"
+ACCURACY_NONE: Final = "none"
+PROTO_UNKNOWN: Final = "unknown"
+NOTE_PORT_IS_NO_PROOF: Final = "port_does_not_prove_application"
+NOTE_TLS_NOT_ATTRIBUTED: Final = "tls_not_attributed_to_an_application"
