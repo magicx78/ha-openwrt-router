@@ -899,3 +899,70 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
 
 
 # --- end Network Diagnostics
+
+
+# --- WiFi RF Intelligence (release 1.48.0, part 1) ---
+# One fleet-wide center per HA instance (rf_center.py), wired like the
+# Security Center above: the setup and unload wrappers run after the base
+# (and the Security Center) and never fail them. The center listens to the
+# entry's polls; with RF off (the default, per entry) it makes no router
+# call at all and only reads its history store.
+try:
+    from . import rf_center as _rf_center
+except Exception:  # noqa: BLE001 - the routers work without it
+    _rf_center = None  # type: ignore[assignment]
+
+_async_setup_entry_sec = async_setup_entry
+_async_unload_entry_sec = async_unload_entry
+
+
+@wraps(_async_setup_entry_sec)
+async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Set up a config entry, then add it to the WiFi RF center."""
+    ok = await _async_setup_entry_sec(hass, entry)
+    if ok is not False and _rf_center is not None:
+        try:
+            coordinator = getattr(entry.runtime_data, "coordinator", None)
+            await _rf_center.async_setup_rf_center(hass, entry, coordinator)
+        except Exception as err:
+            _LOGGER.warning(
+                "WiFi RF setup failed (%s); the router works without it",
+                type(err).__name__,
+            )
+            _LOGGER.debug("WiFi RF setup error", exc_info=err)
+        # Part 2: the bounded entity set (created only for routers with RF on)
+        try:
+            from .wifi_rf_entities import async_sync_rf_entities
+
+            await async_sync_rf_entities(hass)
+        except Exception as err:
+            _LOGGER.warning(
+                "WiFi RF entities not set up (%s); the router works without them",
+                type(err).__name__,
+            )
+            _LOGGER.debug("WiFi RF entities error", exc_info=err)
+    return ok
+
+
+@wraps(_async_unload_entry_sec)
+async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Unload a config entry, then release it from the WiFi RF center."""
+    unload_ok = await _async_unload_entry_sec(hass, entry)
+    if unload_ok is not False and _rf_center is not None:
+        try:
+            await _rf_center.async_release_rf_center(hass, entry.entry_id)
+        except Exception as err:
+            _LOGGER.warning("WiFi RF release failed (%s)", type(err).__name__)
+            _LOGGER.debug("WiFi RF release error", exc_info=err)
+        try:
+            from .wifi_rf_entities import async_entry_released
+
+            last = _rf_center.async_get_rf_center(hass) is None
+            await async_entry_released(hass, entry.entry_id, last=last)
+        except Exception as err:
+            _LOGGER.warning("WiFi RF entities release failed (%s)", type(err).__name__)
+            _LOGGER.debug("WiFi RF entities release error", exc_info=err)
+    return unload_ok
+
+
+# --- end WiFi RF Intelligence

@@ -786,7 +786,7 @@ async def test_client_stability_adds_no_router_calls() -> None:
                 "auth": True,
                 "assoc": True,
                 "authorized": True,
-                "rate": {"rx": 433300, "tx": 866700},
+                "rate": {"rx": 43_330_000, "tx": 86_670_000},  # kbit/s x 100
                 "signal": -60,
             }
         },

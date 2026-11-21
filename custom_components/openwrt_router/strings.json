@@ -10,7 +10,13 @@
           "config_backup_enabled": "Configuration backup (config_backup_enabled)",
           "config_backup_schedule": "Automatic configuration backup (config_backup_schedule)",
           "config_backup_time": "Time of the daily backup (config_backup_time)",
-          "config_drift_check": "Check for configuration changes (config_drift_check)"
+          "config_drift_check": "Check for configuration changes (config_drift_check)",
+          "wifi_rf_enabled": "WiFi RF analysis (wifi_rf_enabled)",
+          "wifi_rf_get_status": "Channel utilization from hostapd (wifi_rf_get_status)",
+          "wifi_rf_assoclist": "Client retry counters from iwinfo (wifi_rf_assoclist)",
+          "wifi_rf_lists_at_start": "Channel and TX power limits at start (wifi_rf_lists_at_start)",
+          "wifi_rf_survey": "Channel survey, later stage (wifi_rf_survey)",
+          "wifi_rf_every_n_polls": "Extra RF reads every N polls (wifi_rf_every_n_polls)"
         },
         "data_description": {
           "extended_wifi_sensors": "Enables all per-radio, per-SSID (AP) and per-port sensors of this router at once instead of one by one. Turning it off disables only the sensors this switch enabled; sensors you disabled yourself are never touched. Takes effect after about 30 seconds.",
@@ -19,7 +25,13 @@
           "config_backup_enabled": "Allows the configuration backup of this router (all config.* capabilities and the optional ACL tier 'config_backup_read'). Off by default. The switch is shown once a configuration provider (backup engine) is installed or while it is on; without a provider it has no effect. Turning it off stops every backup, probe and comparison for this router at once; stored versions stay. Warning: a backup contains ALL router secrets: /etc/shadow (password hashes of every router login, including root), private keys (SSH host keys, VPN and TLS keys) and the Wi-Fi, VPN and DDNS passwords.",
           "config_backup_schedule": "Daily: one backup per day at the time below; each router starts at its own fixed offset of up to one hour, so they never run at the same time. Off: only manual backups and drift versions. Has an effect only while the configuration backup is on.",
           "config_backup_time": "Local time of Home Assistant. A daily run missed while Home Assistant was off is made up later the same day.",
-          "config_drift_check": "Compares the router with its last version when the polled data shows a configuration-near change (5 minutes after the change, at most once per hour). A detected change is saved as a new version (at most four per day). Off: no drift checks."
+          "config_drift_check": "Compares the router with its last version when the polled data shows a configuration-near change (5 minutes after the change, at most once per hour). A detected change is saved as a new version (at most four per day). Off: no drift checks.",
+          "wifi_rf_enabled": "Evaluates the Wi-Fi radios of this router (utilization, noise, conflicts, client quality, recommendations). Off by default. On its own it uses only the data the integration already polls and adds no router call; each extra read below has its own switch. Nothing is ever changed on the router and no scan is started.",
+          "wifi_rf_get_status": "Reads hostapd get_status once per radio every N polls to compute the real channel utilization from busy-time counters. About 0.5 KB per radio and read. Needs wifi_rf_enabled.",
+          "wifi_rf_assoclist": "Reads iwinfo assoclist once per access-point interface every N polls for retries, failed frames and connection time of clients. About 0.9 KB per connected client. Needs wifi_rf_enabled.",
+          "wifi_rf_lists_at_start": "Reads the allowed channels and TX power steps of each radio once at start and again only after a channel or country change, never in the regular poll. About 2-4 KB per radio. Needs wifi_rf_enabled.",
+          "wifi_rf_survey": "Later stage: reads iwinfo survey every N polls only after a capability check passed. The current router ACL does not grant this read; without the right it stays 'not ready' and nothing else is affected. On ath10k radios a survey can block the driver for up to 3 seconds. Needs wifi_rf_enabled.",
+          "wifi_rf_every_n_polls": "Cadence of the extra reads above (1-60, default 5). With the 60-second poll, 5 means every 5 minutes; a smaller N never reads more often than every 5 minutes per radio. The reads pause while the router is throttled or on the SSH fallback. Small routers like the FRITZ!WLAN Repeater 1750E (54 MB RAM) should keep 5 or more."
         }
       }
     }
@@ -357,6 +369,27 @@
       },
       "fleet_diag_dns_response_time": {
         "name": "DNS response time"
+      },
+      "fleet_wifi_rf_health_score": {
+        "name": "Wi-Fi health score (all routers)"
+      },
+      "fleet_wifi_rf_roaming_problems": {
+        "name": "Active Wi-Fi roaming problems (all routers)"
+      },
+      "fleet_wifi_rf_recommendations": {
+        "name": "Wi-Fi channel optimization recommendations (all routers)"
+      },
+      "wifi_rf_ap_health": {
+        "name": "AP RF health"
+      },
+      "wifi_rf_channel_utilization": {
+        "name": "Channel utilization {radio}"
+      },
+      "wifi_rf_noise_floor": {
+        "name": "Noise floor {radio}"
+      },
+      "wifi_rf_retry_rate": {
+        "name": "Wi-Fi retry rate {radio}"
       }
     },
     "switch": {

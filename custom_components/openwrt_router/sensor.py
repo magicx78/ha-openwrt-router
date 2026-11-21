@@ -94,7 +94,7 @@ from .const import (
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator, OpenWrtCoordinatorData
-from .fleet import collect_radios, radios_of
+from .fleet import collect_radios, radios_of, rf_pair_evidence
 from .net_entities import async_setup_sensors as async_setup_intel_sensors
 from .topology_entities import setup_topology_entities
 
@@ -1453,7 +1453,8 @@ class OpenWrtChannelPlanSensor(CoordinatorEntity[OpenWrtCoordinator], SensorEnti
         radios += radios_of(entry_id, self._entry.title, self.coordinator)
         findings = [
             {key: value for key, value in finding.items() if key != "entry_ids"}
-            for finding in analyze(radios)
+            # WiFi RF on: pair findings carry ``rf_status`` (1.48.0, part 2)
+            for finding in analyze(radios, rf=rf_pair_evidence(hass))
             if entry_id in finding["entry_ids"]
         ]
         own = [r.as_attr() for r in radios if r.entry_id == entry_id]

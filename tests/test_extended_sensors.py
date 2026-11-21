@@ -127,6 +127,13 @@ class TestOptionsFlow:
             CONF_EXTENDED_WIFI_SENSORS,
             CONF_TOPOLOGY_PORT_DEBUG,
             CONF_TOPOLOGY_PANEL_ALL_USERS,
+            # WiFi RF Intelligence (1.48.0): always offered, all off.
+            "wifi_rf_enabled",
+            "wifi_rf_get_status",
+            "wifi_rf_assoclist",
+            "wifi_rf_lists_at_start",
+            "wifi_rf_survey",
+            "wifi_rf_every_n_polls",
         }
 
     @pytest.mark.asyncio

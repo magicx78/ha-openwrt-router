@@ -1,0 +1,93 @@
+{
+  "_comment": "synthetisch, Struktur nach Live-Prüfung 2026-11-18",
+  "results": [
+    {
+      "mac": "02:00:00:00:02:01",
+      "signal": -61,
+      "signal_avg": -60,
+      "noise": -92,
+      "inactive": 340,
+      "connected_time": 7200,
+      "thr": 0,
+      "authorized": true,
+      "authenticated": true,
+      "preamble": "long",
+      "wme": true,
+      "mfp": true,
+      "tdls": false,
+      "rx": {
+        "drop_misc": 0,
+        "packets": 90000,
+        "bytes": 40000000,
+        "ht": false,
+        "vht": true,
+        "he": false,
+        "eht": false,
+        "mhz": 80,
+        "rate": 866700,
+        "mcs": 9,
+        "nss": 2,
+        "short_gi": true
+      },
+      "tx": {
+        "failed": 5400,
+        "retries": 4100,
+        "packets": 150000,
+        "bytes": 120000000,
+        "ht": false,
+        "vht": true,
+        "he": false,
+        "eht": false,
+        "mhz": 80,
+        "rate": 780000,
+        "mcs": 8,
+        "nss": 2,
+        "short_gi": true
+      }
+    },
+    {
+      "mac": "02:00:00:00:02:02",
+      "signal": -61,
+      "signal_avg": -60,
+      "noise": -92,
+      "inactive": 340,
+      "connected_time": 310,
+      "thr": 0,
+      "authorized": true,
+      "authenticated": true,
+      "preamble": "long",
+      "wme": true,
+      "mfp": true,
+      "tdls": false,
+      "rx": {
+        "drop_misc": 0,
+        "packets": 90000,
+        "bytes": 40000000,
+        "ht": false,
+        "vht": true,
+        "he": false,
+        "eht": false,
+        "mhz": 80,
+        "rate": 866700,
+        "mcs": 9,
+        "nss": 2,
+        "short_gi": true
+      },
+      "tx": {
+        "failed": 0,
+        "retries": 0,
+        "packets": 12000,
+        "bytes": 120000000,
+        "ht": false,
+        "vht": true,
+        "he": false,
+        "eht": false,
+        "mhz": 80,
+        "rate": 780000,
+        "mcs": 8,
+        "nss": 2,
+        "short_gi": true
+      }
+    }
+  ]
+}

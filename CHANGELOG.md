@@ -4,6 +4,103 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.48.0] - 2026-11-21
+
+WiFi RF Intelligence: Funkbild je Radio (Kanalauslastung, Grundrauschen, Retry-Rate, Signal je
+Client, Kanalkonflikte, Roaming, Kanalempfehlungen) aus den vorhandenen Poll-Daten und
+optionalen, begrenzten Zusatzabfragen. Baut auf dem Enterprise Core von 1.44.0 auf.
+**Standardmäßig aus**; ohne den Schalter macht ein Poll exakt dieselben Router-Aufrufe wie
+vorher. **Kein Scan, keine neuen Router-Rechte, nur lesende Routen.**
+
+### Hinzugefügt
+
+- **WiFi RF Intelligence (Teil 1: Backend).** Funkbild je Radio aus den
+  vorhandenen Poll-Daten (Rauschen, Sendeleistung, Kanalbreite, Signal je Client,
+  Airtime) und optionalen Zusatzabfragen. **Alles ist standardmäßig aus**: Ohne den Schalter
+  `wifi_rf_enabled` (je Router in den Optionen) macht ein Poll exakt dieselben Router-Aufrufe
+  wie vorher (Test zählt die ubus-Aufrufe mit RF an und aus).
+  - Zusatzabfragen, je ein eigener Schalter, alle aus und alle begrenzt (alle N Polls,
+    Standard 5, mindestens 300 s je Router und Radio, eine Abfrage je Art zur Zeit,
+    Zeitlimit je Runde): `hostapd get_status` (Kanalauslastung aus der Differenz der
+    Zähler `airtime.time`/`time_busy`, nicht aus dem Byte `utilization`), `iwinfo assoclist`
+    (Retry-Rate aus der Zählerdifferenz), `iwinfo freqlist`/`txpowerlist` (nur bei Start und
+    nach Kanal- oder Länderwechsel) und `iwinfo survey`; `txpowerlist` und `survey` nur mit
+    der passenden Core-Fähigkeit. Last bei 5 Polls: etwa
+    +11 % WLAN-Aufrufe (get_status und assoclist zusammen, rund 15 B/s je Router); Survey
+    weitere +14 %. Auf dem FRITZ!WLAN Repeater 1750E (54 MB RAM) kann ein ath10k-Survey bis
+    3 s dauern — dort Survey aus lassen.
+  - Keine neuen ACL-Rechte: Ein fehlendes Recht heißt „nicht unterstützt“ mit Grund, nie ein
+    Poll-Fehler. Kein Scan (bleibt „nicht unterstützt“).
+  - Nur lesende Routen unter `/api/openwrt_router/enterprise/wifi/`: `overview`, `radios`,
+    `channel_map`, `timeline?window=1h|24h|7d|30d`, `roaming`, `recommendations`. Anmeldung
+    nötig; Administratoren (Nicht-Admins nur bei freigegebenem Topologie-Panel, ohne
+    Roaming-Verlauf); der Roaming-Verlauf einmal je Panel-Sitzung über den Core-Guard.
+    RF aus oder nicht bereit ergibt Status `off`/`not_ready`, nie einen Fehler.
+  - Ohne Modulschlüssel, Router-ID oder Quelle: „nicht bereit“, keine Bewertung und kein
+    „alles gut“. Unbekannte Werte bleiben unbekannt, nie 0. Ein voller Kanal ist nur ein
+    Hinweis.
+  - Ereignisse im allgemeinen Core-Ring nur bei Änderung (gemessene Kanalkonflikte, anhaltend
+    hohe Auslastung, neue/erledigte Empfehlungen; die erste Auswertung nach dem Start ist
+    die Basis). `router.forgotten` löscht alle RF-Daten des Routers; Entladen schreibt den
+    Verlauf sofort.
+  - Diagnose: neuer Block `wifi_rf` (nur Zähler, Zustände und Gründe, maskiert).
+- **WiFi RF Intelligence (Teil 2: Anbindung).** Mit RF aus ändert sich nichts
+  (Tests vergleichen Befunde, Reparaturhinweise, Vorfälle, Scores und Entitäten mit RF an
+  und aus).
+  - Kanalplan: Eine Überlappung zweier Router-Radios im selben Kanal bleibt ein Befund. Sie
+    wird nur dann zum Hinweis herabgestuft (kein Reparaturhinweis), wenn RF auf beiden Radios
+    eine niedrige Auslastung **gemessen** hat und keinen Konflikt sieht. Unbekannt,
+    nicht bereit, nicht überwacht oder ausgelastet: der Befund bleibt, wie er war.
+    Attribut `rf_status` mit Grund und Messwerten.
+  - Network Intelligence: gemessene Kanalkonflikte, anhaltend hohe Auslastung und hohe
+    Retry-Rate gehen als reine WLAN-Ereignisse (`rf.channel_conflict`, `rf.channel_busy`,
+    `rf.retry_high`) über die vorhandene Befundquelle ein. Sie öffnen, unterdrücken oder
+    entschuldigen keinen Vorfall und ändern keinen Score. Sie kommen nur bei einer Änderung,
+    höchstens 6 je Poll, derselbe Befund erst nach einer Stunde wieder. Keine Änderung in `net_*`.
+  - Client Stability: RF liest den vorhandenen Client-Verlauf (Disconnects, mittlere
+    TX-Rate) für die RF-Client-Bewertung; die zusätzliche Quelle senkt nie eine Bewertung
+    (Eigenschaftstest). Die Client-Ansicht
+    bekommt einen reinen Hinweis `rf_hint` (Radio stark ausgelastet um den Zeitpunkt). Der
+    Client-Stability-Score bleibt unverändert.
+  - Entitäten (nur mit RF an und nur auf vorhandenen Router-Geräten, RF aus: nicht angelegt
+    und aus der Registry entfernt): WLAN-Gesundheit, aktive Roaming-Probleme und
+    Kanalempfehlungen (alle Router), AP-Funkgesundheit je Router, Kanalauslastung (%),
+    Grundrauschen (dBm) und Retry-Rate (%) je Radio, höchstens 4 Radios je Router.
+    Unbekannt bleibt „unbekannt“, nie 0. Attribute ohne MAC, SSID oder BSSID und nicht
+    aufgezeichnet. Keine eigene Airtime-Entität (derselbe Zähler wie die Kanalauslastung).
+    Ein Fehler darin lässt das Setup nie scheitern.
+- **WiFi RF Intelligence (Teil 3: Panel).** Neuer Tab „WiFi Intelligence“ unter Enterprise
+  (nach „Konfiguration“, „Security Center“ und „Netzwerkdiagnose“) mit sechs Ansichten:
+  Übersicht, Radios, Kanalkarte, RF-Verlauf (einfaches SVG, Fenster 1 h / 24 h / 7 d / 30 d),
+  Roaming und Empfehlungen. Der Tab liest nur über die Routen aus Teil 1 (nur GET, keine
+  Schalt- oder Übernehmen-Knöpfe) und fragt höchstens alle 60 s ab, und nur solange er
+  sichtbar ist. Unbekannte Werte erscheinen als „—“, nie als 0. Der Roaming-Verlauf je Client
+  ist nur für Administratoren und erst nach einer Freigabe je Sitzung sichtbar. Das
+  Frontend-Bundle ist neu gebaut (Panel-Version `20261121-wifi-rf1`).
+
+### Behoben
+
+- **WiFi RF: Entitäten von Routern, deren Gerät erst nach dem Setup erscheint, werden angelegt.**
+  Der Empfänger des Signals `openwrt_router_wifi_rf_updated` war, wie in 1.47.1 bei der
+  Netzwerkdiagnose, eine Lambda ohne `@callback` und lief deshalb in einem Worker-Thread, wo
+  `hass.async_create_task` scheitert; der Merker „Abgleich läuft“ blieb dann gesetzt. Der
+  Empfänger ist jetzt eine `@callback`-Funktion; kann die Aufgabe nicht starten, wird der
+  Merker zurückgesetzt. Der Fehler betraf nur den unveröffentlichten Stand dieses Pakets.
+- Tests: `tests/test_wifi_rf_dispatcher_thread.py` schickt das Signal durch den echten
+  Dispatcher von Home Assistant und prüft Thread, angelegte Entitäten und Merker.
+
+### Bekannte Grenzen
+
+- **Kein Scan.** Nachbarnetze und fremde Kanäle bleiben „nicht unterstützt“; die
+  Scan-Prüfungen S1–S5 des Plans (`docs/plans/2026-11-17-wifi-rf.md`, Abschnitt 7.2) sind
+  nicht ausgeführt.
+- **Nicht an echten Geräten geprüft.** Die Router-Antworten der Tests haben die Feldstruktur aus
+  den lesenden Prüfungen vom 2026-11-18, aber erfundene Werte; die fertige Integration lief
+  weder gegen echte Router noch in einer echten Home-Assistant-Instanz.
+- **Der Tab ist nicht im Browser angesehen**, auch nicht bei 360 px Breite; geprüft sind nur
+  Logik- und Render-Tests ohne Browser.
+- **Schwellen sind begründete Annahmen**, nicht an echten Daten abgestimmt.
+
 ## [1.47.1] - 2026-11-21
 
 ### Behoben

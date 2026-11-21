@@ -116,7 +116,8 @@ INFRA_WINDOW_S = 300.0
 # Roots on a port: ``routers`` is the port's owner, not the routers behind it.
 _PORT_ROOTS = frozenset({"lan_port_flap", "lan_uplink_down"})
 _OPEN = (IncidentStatus.ACTIVE, IncidentStatus.ACKNOWLEDGED)
-# hostapd ``rate`` values are in 100 kbit/s
+# hostapd ``rate`` values are kbit/s x 100 (nl80211 kbit/s, ubus adds x100),
+# so this divisor yields kbit/s; 866.7 Mbit/s arrives as 86_670_000
 _RATE_DIVISOR = 100
 # A down line without a reason takes the reason of the line just before it
 # (``deauthenticated due to inactivity`` + ``AP-STA-DISCONNECTED``).

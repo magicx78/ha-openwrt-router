@@ -16,11 +16,19 @@ The first three are conflicts (Repairs issue), ``dfs`` is informational.
 A radio that also carries a STA/mesh uplink (repeater, 802.11s) has to share
 its partner's channel, so pairs with such a backhaul radio are never
 reported as same_channel/overlap.
+
+WiFi RF (release 1.48.0, part 2): ``analyze(radios, rf=...)`` takes an
+optional callback that returns the measured evidence of a
+same_channel/overlap pair; it is added to the finding as ``rf_status``.
+Without the callback (RF off) the findings are exactly the same as before.
+A finding is only taken off the Repairs issue when ``rf_status`` says
+``downgraded`` (see :func:`rf_downgraded`).
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +53,8 @@ FINDING_DFS = "dfs"
 CONFLICT_TYPES = frozenset(
     {FINDING_SAME_CHANNEL, FINDING_OVERLAP, FINDING_NON_STANDARD_24}
 )
+# WiFi RF evidence of a pair finding (release 1.48.0, part 2).
+RF_STATUS = "rf_status"
 _TYPE_ORDER = (
     FINDING_SAME_CHANNEL,
     FINDING_OVERLAP,
@@ -115,6 +125,10 @@ class Radio:
         if self.backhaul:
             attr["backhaul"] = True
         return attr
+
+
+# (first, second) in finding order -> evidence dict, or None (no evidence).
+PairEvidence = Callable[[Radio, Radio], Mapping[str, Any] | None]
 
 
 def channel_to_mhz(band: str, channel: float) -> float:
@@ -235,12 +249,16 @@ def radios_from_ap_interfaces(
     return list(radios.values())
 
 
-def analyze(radios: list[Radio]) -> list[dict[str, Any]]:
+def analyze(
+    radios: list[Radio], rf: PairEvidence | None = None
+) -> list[dict[str, Any]]:
     """Return all channel plan findings for the given radios.
 
     Each finding: ``{"type", "band", "radios": [attr dicts], "entry_ids"}``.
     Pairs are only compared within a band and never with themselves; two
     SSIDs on one radio are a single Radio and therefore never a finding.
+    ``rf`` (WiFi RF on) adds ``rf_status`` to same_channel/overlap findings
+    for which it returns evidence; nothing else changes.
     """
     findings: list[dict[str, Any]] = []
     for radio in radios:
@@ -258,12 +276,12 @@ def analyze(radios: list[Radio]) -> list[dict[str, Any]]:
             if a.backhaul or b.backhaul:
                 continue
             if a.channel == b.channel:
-                findings.append(_finding(FINDING_SAME_CHANNEL, [a, b]))
+                findings.append(_pair_finding(FINDING_SAME_CHANNEL, a, b, rf))
                 continue
             a_low, a_high = a.span_mhz()
             b_low, b_high = b.span_mhz()
             if max(a_low, b_low) < min(a_high, b_high):
-                findings.append(_finding(FINDING_OVERLAP, [a, b]))
+                findings.append(_pair_finding(FINDING_OVERLAP, a, b, rf))
 
     findings.sort(
         key=lambda f: (
@@ -283,6 +301,23 @@ def format_finding(finding: dict[str, Any]) -> str:
     )
     band = _BAND_LABELS.get(finding["band"], finding["band"])
     return f"{finding['type']} ({band}): {radios}"
+
+
+def rf_downgraded(finding: Mapping[str, Any]) -> bool:
+    """True only when WiFi RF measured the pair harmless (Repair -> info)."""
+    status = finding.get(RF_STATUS)
+    return isinstance(status, Mapping) and status.get("downgraded") is True
+
+
+def _pair_finding(
+    kind: str, a: Radio, b: Radio, rf: PairEvidence | None
+) -> dict[str, Any]:
+    finding = _finding(kind, [a, b])
+    if rf is None:
+        return finding
+    first, second = sorted((a, b), key=lambda r: (r.router, r.phy))
+    status = rf(first, second)
+    return finding if status is None else {**finding, RF_STATUS: dict(status)}
 
 
 def _finding(kind: str, radios: list[Radio]) -> dict[str, Any]:
