@@ -6,11 +6,127 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [1.49.3] - 2026-11-21
 
-Die Enterprise-Tabs zum ersten Mal in einem echten Browser angesehen (Firefox, 360 / 768 /
-1280 px, helles und dunkles Home-Assistant-Design, Beispieldaten). Nur Darstellung, keine
-Änderung an Daten, Routern oder Rechten. Panel-Version `20261121-browsercheck1`.
+Korrekturen aus unabhängigen Prüfungen von WiFi RF, der Folgeliste 1.49.1, Netzwerkdiagnose,
+Security Center und Configuration Manager, dazu die Enterprise-Tabs zum ersten Mal in einem
+echten Browser angesehen (Firefox, 360 / 768 / 1280 px, helles und dunkles
+Home-Assistant-Design, Beispieldaten). Keine neuen Router-Rechte, kein zusätzlicher
+Router-Aufruf bei ausgeschalteten Modulen; mit WiFi RF aus macht ein Poll weiter genau die
+Router-Aufrufe von 1.47.1 (Hotfix 1.49.2 unverändert). Panel-Version
+`20261121-browsercheck2`.
+
+### Geändertes Verhalten, das Nutzer bemerken
+
+- **Netzwerkdiagnose: Qualitätswert von Access Points ohne WAN-Messung jetzt „unbekannt“**
+  statt 100 (siehe unten). Der Flottenwert stützt sich nur noch auf bewertete Router.
+- **Sensor „Aktive Verbindungen“ zeigt „unbekannt“ statt 0**, wenn es keine Zahl gibt
+  (Zeitüberschreitung, keine Quelle lesbar), und öfter „unbekannt“ bei Routern ohne
+  `nf_conntrack_count`, weil abgeschnittene Tabellen jetzt erkannt werden.
+- **Configuration Manager:** bei einer SSH-Zeitüberschreitung ein anderer nächster Schritt.
 
 ### Behoben
+
+#### WiFi RF
+
+- **Hängende Zusatzabfrage blockierte die übrigen dauerhaft.** Wurde eine Lesung vom
+  20-s-Rundenlimit abgebrochen, bekam sie weder Erfolgszeit noch Wartezeit, und der
+  Fehlerzähler stieg nicht: `freqlist`/`txpowerlist` wurden bei jedem Poll neu angefragt
+  (weder „alle N Polls“ noch 300 s noch Backoff), und weil die Reihenfolge fest war, kam
+  ein später Abruf wie `get_status` nie dran (in einer Prüfung 12 Polls lang). Ein Abbruch
+  durch das Rundenlimit zählt jetzt als vorübergehender Fehler (Backoff 300 s, 600 s, …,
+  höchstens 1 h), auch für die Einrichtungs-Abfragen, und jede Runde beginnt ein Ziel
+  später. Betraf Router mit WiFi RF an, deren Antwort auf eine Zusatzabfrage hängt — gerade
+  kleine Geräte, die durch die Wiederholung zusätzlich belastet wurden.
+- **Start löschte RF-Entitäten eingeschalteter Router.** Die RF-Entitäten werden nach dem
+  Setup jedes Eintrags abgeglichen; „an“ kannte dabei nur die bis dahin eingerichteten
+  Einträge. War der erste ein Router mit RF aus, entfernte der Abgleich ALLE
+  RF-Registry-Einträge, auch die eines danach eingerichteten Routers mit RF an (ebenso beim
+  Neuladen eines Eintrags); Bereich, Name und Einstellungen dieser Entitäten gingen
+  verloren. Jetzt zählt der Schalter jedes Eintrags der Integration: alles wird nur
+  entfernt, wenn RF überall aus ist, sonst nur die Entitäten der Router mit eigenem
+  Schalter aus. Netzwerkdiagnose und Security Center haben einen modulweiten Schalter und
+  waren nicht betroffen.
+- **Kanalauslastung ab `wifi_rf_every_n_polls` ≥ 10 dauerhaft „unbekannt“.** Der erlaubte
+  Abstand zweier Messungen war fest 600 s, gelesen wird aber alle `max(300, N × 60 s)` plus
+  Pollzeit. Der Abstand folgt jetzt dem tatsächlichen Leseintervall.
+- **Retry-Rate je Radio systematisch zu hoch, falsches `rf.retry_high`.** Weil mt76 mit WED
+  für alle Clients 0 Retries meldet, galt jede 0 als unbekannt; saubere Clients fielen aus
+  dem paketgewichteten Mittel (9 saubere Clients und einer mit 30 % ergaben 30 % statt
+  3 %). Hat ein Client desselben Radios im Fenster Retries > 0, zählt der Treiber
+  nachweislich, und die 0 der anderen ist eine echte 0 (auch in der Lese-Schnittstelle
+  `client_retry_rates`). Nur Nullen bleiben unbekannt. `rf.retry_high` braucht zusätzlich
+  mindestens die Hälfte der Clients des Radios gemessen.
+- **Lese-Schnittstelle `radio_utilization` stürzte bei `interfaces=None` ab** (TypeError)
+  und prüfte bei vielen ungültigen oder doppelten Namen jeden einzelnen. None und
+  Nicht-Listen gelten als keine Namen, höchstens 256 Einträge werden angesehen.
+
+#### Netzwerkdiagnose
+
+- **Router ohne WAN-Messung bekam den Qualitätswert 100.** Ohne WAN-Komponente und ohne
+  Proben stützte sich der Wert nur auf „0 Neustarts“: 100,0 bei rund 7 % Abdeckung, nur als
+  „geringe Aussagekraft“ markiert. Betraf vor allem Access Points (in einer typischen Flotte
+  fünf von sechs Routern). Jetzt nach dem Muster des Security Centers: unter 25 %
+  Abdeckung kein Wert („unbekannt“), darüber höchstens `50 + 50 × Abdeckung`, unter voller
+  Abdeckung höchstens 99. Auch Router mit Teilabdeckung zeigen dadurch etwas niedrigere
+  Werte (60 % Abdeckung: höchstens 80).
+- **Abgelehnter manueller Lauf verbrauchte einen Platz im Ratenlimit.** Der Guard zählte den
+  Lauf schon bei der Freigabe, der Scheduler wurde erst danach gefragt; lehnte er ab (Lauf
+  schon in der Warteschlange, eigenes Limit), war der Platz trotzdem weg. Der Scheduler
+  antwortet jetzt zuerst.
+- **Signal-Empfänger der Entitäten blieb nach dem Ausschalten verbunden.** Er wird jetzt
+  getrennt und beim Einschalten neu verbunden.
+
+#### Security Center
+
+- **Zwölfstellige Dezimalzahlen wurden als MAC geschwärzt** (`bytes=123456789012`,
+  Telefonnummern, `202611211530`, `2026.1121.1530` wurden zu `<MAC>`). Die Form ohne
+  Trennzeichen und die Punkt-Form werden nur noch mit mindestens einem Hex-Buchstaben a–f
+  geschwärzt; die Schreibweise mit Leerzeichen (`AA BB CC DD EE FF`) wird jetzt auch
+  geschwärzt, außer als Teil eines längeren Hex-Dumps. Folge: eine MAC aus lauter Ziffern
+  ohne Trennzeichen (`001122334455`) bleibt in Freitext sichtbar.
+- **Traffic-Hinweise konnten die Zeitleiste verdrängen.** Bis zu 20 je Stunde über 14 Tage
+  sind 6720 Einträge bei einem Limit von 2000. Traffic-Notizen haben jetzt eine eigene
+  Obergrenze von 500 (älteste weicht zuerst) und machen bei vollem Speicher zuerst Platz;
+  ein echter Sicherheitseintrag wird nie von einer Traffic-Notiz verdrängt.
+- **Erledigte WLAN-Hinweise gingen für nichts verloren.** Mit einem alten Speicherstand mit
+  mehr als 50 offenen Nicht-WLAN-Hinweisen in der Klasse „andere“ löschte ein neuer
+  WLAN-Hinweis erledigte WLAN-Hinweise, um dann selbst an der vollen Klasse zu scheitern
+  (im Test nachgestellt). Alle drei Grenzen werden jetzt zuerst berechnet, gelöscht wird nur,
+  wenn der neue Hinweis bleibt.
+
+#### Folgeliste 1.49.1 (aktive Verbindungen)
+
+- **Abgeschnittene conntrack-Tabelle galt oft als vollständig.** rpcd liest procfs mit einem
+  `read()` von 4096 Byte, der Kernel liefert nur ganze Zeilen (190–340 Byte), die Antwort
+  endet also auf einem Zeilenumbruch und ist oft kürzer als 4000 Byte; in einer Probe galt
+  eine abgeschnittene Tabelle in 1170 von 2000 Fällen als vollständig. Jetzt gilt eine
+  Antwort ab 3496 Byte (4096 minus angenommene längste Zeile von 600 Byte) als
+  abgeschnitten. Betraf Router ohne `/proc/sys/net/netfilter/nf_conntrack_count`.
+- **Nach der 5-s-Zeitüberschreitung zeigte der Sensor 0.** Auch wenn keiner der beiden Wege
+  lesbar war. Nur eine vollständige Zahl ist jetzt ein Wert, sonst „unbekannt“ (Sensor und
+  Network Intelligence).
+
+#### Traffic Analytics
+
+<!-- TRAFFIC-ZEILEN -->
+
+#### Configuration Manager
+
+- **Falscher nächster Schritt.** Eine SSH-Zeitüberschreitung (umfasst Verbindung,
+  Archivbau und Übertragung) meldete „SSH (Port 22) nicht erreichbar“, obwohl der Port offen
+  war; jetzt „SSH antwortet zu langsam oder das Archiv ist zu groß; später erneut
+  versuchen“. Bei einem HTTP-Eintrag empfahl der Schritt „oder das Paket cgi-io
+  installieren“, obwohl cgi-io dort ohnehin abgelehnt wird; der Hinweis entfällt dann.
+
+#### Panel
+
+- **Große Byte-Werte als „987.654,3 GB“.** Die Byte-Anzeigen kennen jetzt TB (die
+  Archivgröße im Configuration Manager auch GB).
+- **Netzwerkdiagnose zeigte die volle Router-ID** (`rtr_aaaa11112222`), die anderen Tabs das
+  Kürzel; jetzt „Router aaaa11“ wie dort.
+- **Verlauf der Netzwerkdiagnose scrollte bei schmaler Breite** in seinem Rahmen; unter
+  560 px Breite wird jede Zeile zur Karte (Container-Query wie im Configuration Manager).
+
+#### Darstellung (Browser-Prüfung)
 
 - **Configuration Manager: Router- und Versionsliste liefen bei 768 und 1024 px aus dem
   Bild.** Die Tabellen brauchen 718 bzw. 824 px, wurden aber erst unter 600 px zu Karten;

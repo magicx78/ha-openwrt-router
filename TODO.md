@@ -129,7 +129,19 @@ Branch `claude/traffic-analytics-d7ae50`. Nutzerdoku: `docs/traffic-analytics.md
       Vertrauensindikator zählen; braucht W3 (heute nur Zeitleisten-Eintrag, 1.49.1).
 - [ ] **conntrack-Ersatzweg am Gerät prüfen** (nur lesend, mit Freigabe): wie viel rpcd von
       `/proc/net/nf_conntrack` liefert; seit 1.49.1 begrenzt, ein abgeschnittener Wert gilt
-      als unbekannt.
+      als unbekannt. Seit 1.49.3 gilt eine Antwort ab 3496 Byte als abgeschnitten (4096 minus
+      angenommene längste Zeile von 600 Byte): die längste echte Zeile (mit Labels, Zone,
+      secctx) messen und `CONNTRACK_LINE_MAX_BYTES` bestätigen.
+
+### WiFi RF (1.48.0, Nachprüfung 1.49.3)
+
+- [ ] **Retry-Zählung an echter Hardware bestätigen** (nur lesend, mit Freigabe): seit 1.49.3
+      gilt eine 0 als echte 0, sobald ein Client desselben Radios im Fenster Retries > 0
+      hatte; `rf.retry_high` braucht mindestens 50 % der Clients gemessen (Startwerte). An
+      mt76 mit und ohne WED prüfen, ob ein Radio mit WED nie Retries > 0 meldet.
+- [ ] **Dieselbe „0 heißt unbekannt“-Regel in `rf_clients._retries_unverified`** (mt76 ohne
+      bekannten WED-Zustand) liegt außerhalb von `rf_evaluate`; heute ohne Wirkung, weil
+      `rf_evaluate` keinen Treiber übergibt. Bei einer Treiber-Erkennung gemeinsam regeln.
 
 ### Security Center (Plan `docs/plans/2026-11-17-security-center.md`, 1.46.0)
 
@@ -165,6 +177,10 @@ Branch `claude/security-center-6fdcdd`. Nutzerdoku: `docs/security-center.md`.
 
 Branch `claude/net-diagnostics-f989ed`. Nutzerdoku: `docs/network-diagnostics.md`.
 
+- [ ] **Qualitätswert der Access Points:** seit 1.49.3 „unbekannt“ unter 25 % Abdeckung (ein AP
+      ohne WAN und ohne Proben hat rund 7 %). Für eine echte Bewertung brauchen APs eigene
+      Messungen (z. B. Gateway-Erreichbarkeit vom AP aus); Grenze 25 % und Deckel
+      `50 + 50 × Abdeckung` sind Startwerte.
 - [x] Laufzeit (aus / nicht bereit / bereit), Messungen von Home Assistant (TCP, DNS, HTTP) gegen
       bestätigte Ziele mit SSRF-Schutz, Kette Router → Gateway → WAN → Internet → DNS,
       Ursachenklassen, Statistik, Baselines, Netzqualitätswert mit Abdeckung, begrenzter
