@@ -229,6 +229,8 @@ REASON_PAUSED: Final = "paused_after_failures"
 REASON_PERMISSION_DENIED: Final = "permission_denied"
 REASON_NOT_CONFIGURED: Final = "not_configured"
 REASON_COVERED_ELSEWHERE: Final = "covered_by_other_module"
+# netdev counters available, but some netdevs over the cap were left out
+REASON_DEVICES_OMITTED: Final = "devices_omitted_over_cap"
 # Why a due extra call did not run (planner).
 BLOCK_DISABLED: Final = "disabled"
 BLOCK_NOT_DUE: Final = "not_due"

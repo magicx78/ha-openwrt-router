@@ -15,18 +15,28 @@ from core_testkit import FakeDisks, drain
 from test_traffic_engine import (
     RID,
     RID2,
+    counters,
     enabled,
     make_hass,
+    poll_data,
     start,
     two_polls,
 )
 
 from custom_components.openwrt_router import traffic_collector as tc
+from custom_components.openwrt_router.coordinator import (
+    TRAFFIC_MAX_DEVICES,
+    traffic_device_counters,
+    traffic_devices_omitted,
+)
 from custom_components.openwrt_router.traffic_const import (
+    CAP_NETDEV_COUNTERS,
     FEED_COLLECTOR,
     FLOW_STATE_SILENT,
+    MAX_DEVICES_PER_ROUTER,
     MAX_FLOW_FEEDS,
     OPT_OFFLOAD_PROBE,
+    REASON_DEVICES_OMITTED,
 )
 from custom_components.openwrt_router.traffic_flows import (
     FlowStore,
@@ -217,3 +227,62 @@ async def test_engine_checks_collector_router_ids_against_routers_on(
     assert err.value.rejected == [(0, tc.REJECT_UNKNOWN_ROUTER)]
     rec["router_id"] = RID
     assert engine.ingest_collector(envelope(rec, sent_at=now))["accepted"] == 1
+
+
+# --- T3: over the netdev cap the WAN counter stays ------------------------------------
+
+
+def many_devices(n: int) -> dict[str, Any]:
+    """``network.device status`` with ``n`` netdevs sorted before ``wan``."""
+    reply: dict[str, Any] = {
+        f"eth{i:02d}": {"statistics": {"rx_bytes": i, "tx_bytes": i}} for i in range(n)
+    }
+    for name in ("wan", "wan6", "pppoe-wan"):
+        reply[name] = {"statistics": {"rx_bytes": 1, "tx_bytes": 2}}
+    return reply
+
+
+def test_coordinator_copy_keeps_wan_and_uplinks_over_the_cap() -> None:
+    reply = many_devices(80)
+    out = traffic_device_counters(reply, first=("eth79", "wan"))
+    assert out is not None and len(out) == TRAFFIC_MAX_DEVICES
+    assert {"wan", "wan6", "pppoe-wan", "eth79"} <= set(out)
+    assert traffic_devices_omitted(reply) == 83 - TRAFFIC_MAX_DEVICES
+    assert traffic_devices_omitted(many_devices(10)) == 0
+    # under the cap nothing changes
+    assert set(traffic_device_counters(many_devices(10)) or {}) == set(many_devices(10))
+
+
+async def test_wan_rate_over_the_netdev_cap_and_omitted_is_visible(
+    disks: FakeDisks,
+) -> None:
+    hass = make_hass()
+    enabled(disks)
+    engine, coord = await start(hass)
+
+    def data(mono: float, wan: tuple[int, int]) -> Any:
+        d = poll_data(mono, wan)
+        d.device_counters = {
+            **{f"eth{i:02d}": counters(i, i) for i in range(70)},
+            "wan": counters(*wan),
+        }
+        d.device_counters_omitted = 9  # the coordinator cut nine more
+        return d
+
+    coord.poll(data=data(100.0, (1_000, 500)))
+    await drain(hass)
+    engine.clock.t += 10
+    coord.poll(data=data(110.0, (1_251_000, 125_500)))
+    await drain(hass)
+    wan = engine.wan_point(RID)
+    assert wan is not None
+    assert engine.latest[wan.point_id].rx_bps == 1_000_000.0
+    status = engine.status[RID]
+    assert status.devices == MAX_DEVICES_PER_ROUTER
+    assert status.devices_omitted == 9 + 71 - MAX_DEVICES_PER_ROUTER
+    caps = engine.capabilities(RID)
+    assert caps[CAP_NETDEV_COUNTERS] == {
+        "state": "available",
+        "reason": REASON_DEVICES_OMITTED,
+    }
+    assert engine.counters["devices_omitted"] == 2 * status.devices_omitted

@@ -138,6 +138,7 @@ from .traffic_const import (
     OPT_STATION_DETAIL,
     OPT_SYSFS_FALLBACK,
     REASON_CORE_MISSING,
+    REASON_DEVICES_OMITTED,
     REASON_DISABLED,
     REASON_FLOW_SOURCE_SILENT,
     REASON_MODULE_KEY_MISSING,
@@ -393,6 +394,7 @@ class RouterStatus:
     """Per-router facts of the last processed snapshot (counts only)."""
 
     devices: int | None = None  # None: no netdev counters (source missing)
+    devices_omitted: int = 0  # netdevs left out by the cap (WAN kept first)
     stations: int | None = None  # None: not ready (no module key)
     stations_total: int = 0
     stations_without_bytes: int = 0
@@ -1132,6 +1134,8 @@ class TrafficEngine:
             netdev = (CAP_NETDEV_COUNTERS, unknown, REASON_NO_DATA_YET)
         elif status.devices is None:
             netdev = (CAP_NETDEV_COUNTERS, unavail, REASON_SOURCE_MISSING)
+        elif status.devices_omitted:
+            netdev = (CAP_NETDEV_COUNTERS, avail, REASON_DEVICES_OMITTED)
         else:
             netdev = (CAP_NETDEV_COUNTERS, avail, REASON_OK)
         if self._module_key is None:
@@ -1420,6 +1424,8 @@ class TrafficEngine:
         self.counters["wired_dropped"] += snapshot.wired_dropped
         status = self.status.setdefault(rid, RouterStatus())
         status.devices = None if snapshot.devices is None else len(snapshot.devices)
+        status.devices_omitted = snapshot.devices_omitted
+        self.counters["devices_omitted"] += snapshot.devices_omitted
         status.stations = None if snapshot.stations is None else len(snapshot.stations)
         status.stations_total = snapshot.stations_total
         status.stations_without_bytes = snapshot.stations_without_bytes
