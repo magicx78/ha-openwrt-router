@@ -241,4 +241,7 @@ test('netdevs over the cap: count per router and a German reason (1.49.3)', asyn
   assert.match(reasonText('dropped_feeds'), /Flow-Quellen/);
   raw.drops = { dropped_feeds: 2, dropped_snapshots: 0 };
   assert.deepEqual(parseOverview(raw).drops, [{ code: 'dropped_feeds', count: 2 }]);
+  // 1.49.4: the two counters of the review have German texts, never "Code …"
+  assert.match(reasonText('dropped_snapshots'), /Router-Abfragen/);
+  assert.match(reasonText('stations_dropped'), /WLAN-Stationen/);
 });
