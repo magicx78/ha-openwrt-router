@@ -1,3 +1,5 @@
+import type { RouterTraffic, UplinkTraffic } from './enterprise/traffic/trafficTopology';
+
 // ── Domain types ──────────────────────────────────────────────────────────
 
 export interface RouterEvent {
@@ -98,6 +100,8 @@ export interface Gateway {
   entryId?: string;
   /** Open root incidents by severity (warning symbol on the node, P7). */
   incidents?: IncidentCounts;
+  /** Traffic Analytics values; absent while the module is off. */
+  traffic?: RouterTraffic;
 }
 
 /** WAN throughput averaged between two coordinator polls. */
@@ -196,6 +200,10 @@ export interface AccessPoint {
   entryId?: string;
   /** Open root incidents by severity (warning symbol on the node, P7). */
   incidents?: IncidentCounts;
+  /** Traffic Analytics values; absent while the module is off. */
+  traffic?: RouterTraffic;
+  /** Traffic measured on the router-uplink ports; absent while off. */
+  uplinkTraffic?: UplinkTraffic;
 }
 
 export interface Client {

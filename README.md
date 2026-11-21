@@ -40,6 +40,7 @@
 | 🗂️ **Konfiguration** | Optionale Backups, Versionsvergleich und Erkennung von Änderungen. |
 | 🛡️ **Security Center** | Optionale, beobachtende Sicherheitshinweise für das Netzwerk. |
 | 🔎 **Network Diagnostics** | Optionale Prüfung der Kette Router, Gateway, WAN, Internet und DNS (Panel: „Netzwerkdiagnose“). |
+| 📈 **Traffic Analytics** | Optionale Verkehrsanalyse je Router: WAN, Ports, VLANs, WLAN-Clients (nur als Pseudonym), Verlauf und Auffälligkeiten. |
 
 Welche Daten verfügbar sind, hängt unter anderem vom Router, seinen Berechtigungen und der Einrichtung ab.
 
@@ -75,6 +76,19 @@ Prüft die Kette Router → Gateway → WAN → Internet → DNS und nennt je Gl
 
 ➡️ [Zur Netzwerkdiagnose](https://github.com/magicx78/ha-openwrt-router/blob/main/docs/network-diagnostics.md)
 
+### 📈 Traffic Analytics (ab 1.49.0)
+
+Zeigt den Verkehr über WAN, Ports, Schnittstellen, VLANs und WLAN-Clients, mit Verlauf, Top Talkers, Auffälligkeiten und Uplink-Auslastung (Panel-Tab „Traffic Analytics“). Die Zahlen kommen aus den Zählern, die die Integration ohnehin abfragt; es gibt keine Paketanalyse und keine DNS- oder Webadressen.
+
+- **Einschalten je Router** in den Integrationsoptionen (`traffic_enabled`, standardmäßig aus). Ausgeschaltet gibt es keinen Speicher und keine Entität. Drei Zusatzabfragen (iwinfo, sysfs, Flow-Offloading) haben eigene Schalter; neue Router-Rechte braucht keine davon.
+- **Sensoren**: WAN-Download, WAN-Upload, WAN-Verkehr gesamt und Spitze (24 h) am Gateway, Uplink-Auslastung und -Fehler je Router, zwei Flottensensoren, optional bis zu 20 Client-Sensoren „WLAN-Verkehr am AP“.
+- **Verlauf**: Profil `compact` (Standard) oder `standard`, beide mit stündlichen Werten für 14 Tage. Gemessen: zusammen ca. 1,7 MB (`compact`) bzw. 3,3 MB (`standard`) auf der Platte für eine Testflotte mit 6 Routern.
+- **Externer Collector** (optional): schickt Flows über HTTPS mit einem eigenen Benutzer ohne Admin-Rechte und langlebigem Token. Home Assistant ruft keinen Collector auf. Zusammengefasste Collector-Werte werden in dieser Version abgelehnt.
+- **Datenschutz**: Clients, Router und Benutzer erscheinen nur als Pseudonym, auch für Administratoren. Keine MAC, kein Hostname und keine IP in Entitäten, Log oder Diagnose.
+- **Grenzen**: Client-Zähler am AP sind kein Internetverbrauch. Noch nicht an echten Routern und nicht im Browser geprüft.
+
+➡️ [Zu Traffic Analytics](https://github.com/magicx78/ha-openwrt-router/blob/main/docs/traffic-analytics.md)
+
 ## `03 /` Installation
 
 **Voraussetzungen**
@@ -100,7 +114,7 @@ Eine manuelle Installation ist ebenfalls möglich. Routervorbereitung, Berechtig
 > [!NOTE]
 > **Aktiv in Entwicklung.** Viele Funktionen aus unserer TODO-Liste sind bereits umgesetzt. Gleichzeitig gibt es offene Punkte, weitere Ideen und Tests auf echter Hardware, an denen wir arbeiten.
 
-**Bereits umgesetzt:** Topologie-Panel, Network Intelligence, Client-Stabilität sowie die ersten Versionen von Configuration Manager, Security Center und Network Diagnostics.
+**Bereits umgesetzt:** Topologie-Panel, Network Intelligence, Client-Stabilität sowie die ersten Versionen von Configuration Manager, Security Center, Network Diagnostics und Traffic Analytics.
 
 **Daran arbeiten wir unter anderem:** weitere Hardware- und Frontend-Tests, Verbesserungen bei Sicherheit und Zuverlässigkeit sowie zusätzliche Funktionen. Ein automatischer Restore und die Verschlüsselung lokaler Konfigurationsarchive stehen noch aus.
 

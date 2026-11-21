@@ -16,7 +16,12 @@
           "wifi_rf_assoclist": "Wiederholungszähler der Clients aus iwinfo (wifi_rf_assoclist)",
           "wifi_rf_lists_at_start": "Kanal- und Sendeleistungsgrenzen beim Start (wifi_rf_lists_at_start)",
           "wifi_rf_survey": "Kanal-Survey, spätere Stufe (wifi_rf_survey)",
-          "wifi_rf_every_n_polls": "Zusätzliche Funk-Abfragen alle N Abfragen (wifi_rf_every_n_polls)"
+          "wifi_rf_every_n_polls": "Zusätzliche Funk-Abfragen alle N Abfragen (wifi_rf_every_n_polls)",
+          "traffic_enabled": "Traffic-Analyse (traffic_enabled)",
+          "traffic_station_detail": "WLAN-Client-Zähler aus iwinfo (traffic_station_detail)",
+          "traffic_sysfs_fallback": "Schnittstellen-Zähler aus sysfs als Ersatz (traffic_sysfs_fallback)",
+          "traffic_offload_probe": "Flow-Offloading einmal prüfen (traffic_offload_probe)",
+          "traffic_history_profile": "Tiefe des Traffic-Verlaufs (traffic_history_profile)"
         },
         "data_description": {
           "extended_wifi_sensors": "Schaltet alle Sensoren pro Funkmodul, pro SSID (AP) und pro Port dieses Routers auf einmal ein statt einzeln. Ausschalten deaktiviert nur die Sensoren, die dieser Schalter eingeschaltet hat; selbst deaktivierte Sensoren bleiben unberührt. Wirksam nach etwa 30 Sekunden.",
@@ -31,7 +36,12 @@
           "wifi_rf_assoclist": "Liest alle N Abfragen einmal pro Access-Point-Schnittstelle iwinfo assoclist für Wiederholungen, fehlgeschlagene Pakete und Verbindungsdauer der Clients. Etwa 0,9 KB pro verbundenem Client. Wirkt nur mit wifi_rf_enabled.",
           "wifi_rf_lists_at_start": "Liest die erlaubten Kanäle und Sendeleistungsstufen jedes Funkmoduls einmal beim Start und danach nur nach einem Kanal- oder Länderwechsel, nie in der normalen Abfrage. Etwa 2-4 KB pro Funkmodul. Wirkt nur mit wifi_rf_enabled.",
           "wifi_rf_survey": "Spätere Stufe: liest alle N Abfragen iwinfo survey, aber erst nach bestandener Fähigkeitsprüfung. Die aktuelle Router-ACL erlaubt diese Abfrage nicht; ohne das Recht bleibt sie „nicht bereit“, sonst ändert sich nichts. Auf ath10k-Funkmodulen kann ein Survey den Treiber bis zu 3 Sekunden blockieren. Wirkt nur mit wifi_rf_enabled.",
-          "wifi_rf_every_n_polls": "Takt der zusätzlichen Abfragen oben (1-60, Standard 5). Bei der 60-Sekunden-Abfrage heißt 5 alle 5 Minuten; ein kleineres N liest pro Funkmodul trotzdem höchstens alle 5 Minuten. Die Abfragen pausieren, solange der Router gedrosselt ist oder über den SSH-Rückfall läuft. Kleine Router wie der FRITZ!WLAN Repeater 1750E (54 MB RAM) sollten bei 5 oder mehr bleiben."
+          "wifi_rf_every_n_polls": "Takt der zusätzlichen Abfragen oben (1-60, Standard 5). Bei der 60-Sekunden-Abfrage heißt 5 alle 5 Minuten; ein kleineres N liest pro Funkmodul trotzdem höchstens alle 5 Minuten. Die Abfragen pausieren, solange der Router gedrosselt ist oder über den SSH-Rückfall läuft. Kleine Router wie der FRITZ!WLAN Repeater 1750E (54 MB RAM) sollten bei 5 oder mehr bleiben.",
+          "traffic_enabled": "Misst den Verkehr dieses Routers (WAN, Ports, Schnittstellen, VLANs, WLAN-Clients) aus den Zählern, die die Integration ohnehin abfragt, zeigt ihn im Tab Traffic Analytics und legt die Traffic-Sensoren an. Standardmäßig aus. Clients erscheinen nur als Pseudonym, nie mit MAC-Adresse oder Hostname. Ausschalten entfernt die Traffic-Entitäten dieses Routers; der gespeicherte Verlauf bleibt erhalten. Jede zusätzliche Abfrage unten hat einen eigenen Schalter.",
+          "traffic_station_detail": "Liest iwinfo assoclist je Access-Point-Schnittstelle höchstens alle 5 Minuten, um Client-Zähler zu ergänzen, die in der normalen Abfrage fehlen. Braucht traffic_enabled und den Modulschlüssel des Enterprise-Kerns.",
+          "traffic_sysfs_fallback": "Liest Schnittstellen-Zähler aus /sys/class/net höchstens alle 5 Minuten, nur für Schnittstellen, die die normale Abfrage nicht liefert. Braucht traffic_enabled.",
+          "traffic_offload_probe": "Liest die Firewall-Einstellung für Flow-Offloading (uci get) alle 6 Stunden, weil ausgelagerter Verkehr manche Zähler umgeht. Braucht traffic_enabled.",
+          "traffic_history_profile": "Kompakt (Standard): 5-Minuten-Werte für 6 Stunden, stündlich für 14 Tage, täglich für 31 Tage, kein Client-Verlauf auf der Platte. Standard: 5-Minuten-Werte für 1 Tag, stündlich für 14 Tage, täglich für 90 Tage, Client-Verlauf bleibt (täglich für 30 Tage); braucht mehr Speicher. Es gilt das tiefste Profil unter den Routern mit eingeschalteter Traffic-Analyse, für die ganze Flotte."
         }
       }
     }
@@ -390,6 +400,39 @@
       },
       "wifi_rf_retry_rate": {
         "name": "WLAN-Wiederholungsrate {radio}"
+      },
+      "fleet_traffic_anomalies": {
+        "name": "Aktive Traffic-Auffälligkeiten (alle Router)"
+      },
+      "fleet_traffic_coverage": {
+        "name": "Abdeckung der Traffic-Messung (alle Router)"
+      },
+      "traffic_wan_download": {
+        "name": "WAN-Download-Rate"
+      },
+      "traffic_wan_upload": {
+        "name": "WAN-Upload-Rate"
+      },
+      "traffic_wan_total": {
+        "name": "WAN-Verkehr gesamt"
+      },
+      "traffic_wan_peak": {
+        "name": "WAN-Spitzenbandbreite (24 h)"
+      },
+      "traffic_uplink_utilization": {
+        "name": "Uplink-Auslastung"
+      },
+      "traffic_uplink_rx_errors": {
+        "name": "Uplink-Empfangsfehler"
+      },
+      "traffic_uplink_tx_errors": {
+        "name": "Uplink-Sendefehler"
+      },
+      "traffic_client_down": {
+        "name": "WLAN-Verkehr am AP, Download {client}"
+      },
+      "traffic_client_up": {
+        "name": "WLAN-Verkehr am AP, Upload {client}"
       }
     },
     "switch": {
@@ -473,6 +516,12 @@
       "options": {
         "daily": "Täglich",
         "off": "Aus (nur manuelle Backups)"
+      }
+    },
+    "traffic_history_profile": {
+      "options": {
+        "compact": "Kompakt (Standard)",
+        "standard": "Standard (tieferer Verlauf)"
       }
     }
   },

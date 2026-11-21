@@ -70,7 +70,7 @@ except ImportError:  # pragma: no cover - older HA cores keyed the app by str
 _LOGGER = logging.getLogger(__name__)
 
 # Cache-busting query for the bundle URL — bump on every frontend rebuild.
-_PANEL_VERSION = "20261121-wifi-rf1"
+_PANEL_VERSION = "20261121-traffic3"
 # Master flag: set ONLY after every registration step completed.  Until then,
 # a partial setup must still allow re-entry to register the missing pieces.
 _PANEL_REGISTERED_KEY = f"{DOMAIN}_panel_registered"
@@ -175,7 +175,22 @@ class OpenWrtMeshSnapshotView(HomeAssistantView):
             body = _empty_snapshot()
             body["meta"]["error"] = f"snapshot build failed ({type(err).__name__})"
             return self.json(body, status_code=500)
+        snapshot = _with_traffic(hass, snapshot)
         return self.json(snapshot)
+
+
+def _with_traffic(hass: HomeAssistant, snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Traffic values on the snapshot; untouched while Traffic Analytics is off.
+
+    A failure never costs the topology: the snapshot is served without them.
+    """
+    try:
+        from .traffic_topology import annotate_snapshot
+
+        return annotate_snapshot(hass, snapshot)
+    except Exception as err:  # noqa: BLE001 - the topology must not fail on traffic
+        _LOGGER.debug("Traffic annotation skipped: %s", type(err).__name__)
+        return snapshot
 
 
 _INTEL_URL = "/api/openwrt_topology/intelligence"

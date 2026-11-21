@@ -43,6 +43,7 @@ import type {
   StabilityWindow,
 } from './types';
 import { clientDisplayName, clientVendor } from './utils/clientName';
+import { parseRouterTraffic, parseUplinkTraffic, type UplinkTraffic } from './enterprise/traffic/trafficTopology';
 
 // ── Raw snapshot types ───────────────────────────────────────────────────
 
@@ -700,6 +701,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     topologySnapshots: (gwAttr.topology_snapshots as TopologySnapshot[] | undefined) ?? [],
     entryId: (gwAttr.entry_id as string | undefined) || undefined,
     incidents: adaptIncidentCounts(gwAttr.incidents),
+    traffic: parseRouterTraffic(gwAttr),
   };
 
   // AP nodes = all router nodes that are not the gateway
@@ -716,6 +718,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
     vlanTags?: number[];
     lldp?: LldpUplink;
     stale: boolean;
+    traffic?: UplinkTraffic;
   }>();
   for (const edge of interRouterEdges) {
     const apId = edge.to;
@@ -760,6 +763,7 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       vlanTags,
       lldp,
       stale: edge.stale === true,
+      traffic: isRouterUplink ? parseUplinkTraffic(edge.attributes) : undefined,
     });
   }
 
@@ -822,6 +826,8 @@ export function adaptSnapshot(snap: Snapshot): TopologyData {
       uplinkStale: uplink?.stale || undefined,
       entryId: (n.attributes?.entry_id as string | undefined) || undefined,
       incidents: adaptIncidentCounts(n.attributes?.incidents),
+      traffic: parseRouterTraffic(n.attributes),
+      uplinkTraffic: uplink?.traffic,
     };
   });
 

@@ -19,6 +19,7 @@ import { bindConfigHass, installConfigMock } from './enterprise/config/register'
 import { bindSecurityHass, installSecurityMock } from './enterprise/security/register';
 import { bindDiagnosticsHass } from './enterprise/diagnostics/register';
 import { bindWifiHass } from './enterprise/wifi/register';
+import { bindTrafficHass } from './enterprise/traffic/register';
 
 // ── HA Webcomponent ──────────────────────────────────────────────────────
 
@@ -70,6 +71,8 @@ class OpenWrtTopologyPanel extends HTMLElement {
     bindDiagnosticsHass(() => this._hass);
     // WiFi Intelligence tab (Enterprise): same hass; observes and recommends only.
     bindWifiHass(() => this._hass);
+    // Traffic Analytics tab (Enterprise): same hass; reads only, flows for admins.
+    bindTrafficHass(() => this._hass);
   }
 
   connectedCallback() {

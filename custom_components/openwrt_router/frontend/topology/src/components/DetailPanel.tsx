@@ -16,6 +16,7 @@ import { formatConnectedSince, formatLeaseExpiry, safeHttpUrl } from '../api';
 import { shortName, deviceLabel, CONFIDENCE_LABEL, isWanPort } from './PortStrip';
 import { formatBitRate, formatBytes } from '../utils/format';
 import { STALE_HINT, parallelLinkLabel } from '../utils/hints';
+import { routerTrafficRows, uplinkTrafficRows, type RouterTraffic, type UplinkTraffic } from '../enterprise/traffic/trafficTopology';
 
 type SelectedEntity =
   | { type: 'gateway'; data: Gateway }
@@ -61,6 +62,19 @@ export function DetailPanel({ entity, onClose, actions, accessPoints = [] }: Pro
         {entity?.type === 'client'  && <ClientDetail data={entity.data} apName={entity.apName} actions={actions} />}
         {entity?.type === 'port'    && <PortDetail data={entity.data} routerName={entity.routerName} actions={actions} />}
       </div>
+    </div>
+  );
+}
+
+// ── Traffic Analytics (only while the module runs) ────────────────────────
+
+function TrafficSection({ traffic, uplink }: { traffic?: RouterTraffic; uplink?: UplinkTraffic }) {
+  const rows = [...routerTrafficRows(traffic), ...uplinkTrafficRows(uplink)];
+  if (rows.length === 0) return null;
+  return (
+    <div className="detail-section">
+      <div className="detail-section__heading">Traffic Analytics</div>
+      {rows.map(r => <Row key={r.label} label={r.label} value={r.value} />)}
     </div>
   );
 }
@@ -134,6 +148,8 @@ function GatewayDetail({ data, actions, accessPoints }: { data: Gateway; actions
           <SsidList ssids={data.ssids!} />
         </div>
       )}
+
+      <TrafficSection traffic={data.traffic} />
 
       {(data.portStats ?? []).length > 0 && (
         <div className="detail-section">
@@ -298,6 +314,7 @@ function APDetail({ data, clients, actions }: { data: AccessPoint; clients: Clie
       {data.lldpUplink && (
         <LldpSection lldp={data.lldpUplink} />
       )}
+      <TrafficSection traffic={data.traffic} uplink={data.uplinkTraffic} />
       {(data.ssids ?? []).length > 0 && (
         <div className="detail-section">
           <div className="detail-section__heading">WLAN-Netze</div>
