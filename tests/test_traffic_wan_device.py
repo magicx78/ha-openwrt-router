@@ -43,7 +43,10 @@ from custom_components.openwrt_router.coordinator import (
     traffic_device_counters,
     traffic_first_devices,
 )
-from custom_components.openwrt_router.traffic_collect import snapshot_from_data
+from custom_components.openwrt_router.traffic_collect import (
+    snapshot_from_data,
+    sysfs_candidates,
+)
 from custom_components.openwrt_router.traffic_model import Scope
 
 KEY = bytes(range(32))
@@ -233,6 +236,17 @@ async def test_real_poll_fills_the_traffic_snapshot() -> None:
     assert snap.wired is not None  # bridge FDB with the module key
     assert snap.stations == ()  # hostapd answered, no station associated
     assert snap.conntrack_count == 12  # count file
+
+
+async def test_sysfs_fallback_never_reads_a_logical_interface_name() -> None:
+    """``wan6`` is pending (no ``l3_device``): the interface list carries the
+    logical name, which is no netdev; ``lo`` is up and has no Q1 counters."""
+    _first, data = await real_polls()
+    rows = {r["logical_name"]: r for r in data.network_interfaces}
+    assert rows["wan6"]["interface"] == "wan6" and rows["wan6"]["status"] == "down"
+    snap = snapshot_from_data(data, router_id=RID, module_key=KEY, wall_s=1.0)
+    assert "wan6" not in snap.interface_devices
+    assert sysfs_candidates(snap) == ("lo",)
 
 
 # --- the whole way to the entities ---------------------------------------------------
