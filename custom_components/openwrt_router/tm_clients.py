@@ -43,6 +43,9 @@ _LOGGER = logging.getLogger(__name__)
 CLIENT_PREFIX: Final = "tmc_"
 TS_SKEW_MAX_S: Final = 86_400.0
 _ONLINE: Final = frozenset({"online", "grace"})
+# Pseudonym -> MAC (memory only, for the host name): every client with an
+# open session plus this many recently seen others (review K9).
+MACS_RECENT_MAX: Final = 512
 _BAND_NUM: Final = {"2.4g": 2.4, "5g": 5, "6g": 6}
 
 
@@ -63,7 +66,8 @@ class ClientRecorder:
         self.attached_to: Any = None
         self._remove: Any = None
         self._open: dict[str, int] = {}  # pseudonym hex -> open session seq
-        self._macs: dict[str, str] = {}  # memory only: pseudonym hex -> MAC
+        # memory only: pseudonym hex -> MAC, oldest first (bounded, K9)
+        self._macs: dict[str, str] = {}
         self.counters: dict[str, int] = {"transitions": 0, "skipped": 0}
         for mark in engine.index.open_marks():
             if mark.kind == "client_session" and mark.client is not None:
@@ -110,13 +114,13 @@ class ClientRecorder:
             client = self.pseudonym(mac)
             if client is None:
                 continue
-            self._macs[client] = mac
+            self._remember(client, mac)
             live = history.live(mac)
             if live is None or live.state not in _ONLINE or client in self._open:
                 continue
             self._open_session(
                 client,
-                now,
+                self._resume_start(live, now),
                 self.engine.router_id(live.ap),
                 live.band,
                 resumed=True,
@@ -124,7 +128,36 @@ class ClientRecorder:
             )
         self.engine.store.schedule()
 
+    def _resume_start(self, live: Any, now: float) -> float:
+        """Start of a session already running when the recording begins.
+
+        Client Stability's own start when it knows it and it lies while the
+        Time Machine was running; else ``now``. Before 1.51.0 every resumed
+        session began at ``now``: hundreds shared one millisecond (review S3).
+        """
+        start = getattr(live, "session_start", None)
+        if (
+            getattr(live, "session_start_known", False) is True
+            and isinstance(start, int | float)
+            and not isinstance(start, bool)
+            and math.isfinite(start)
+            and self.engine._live_from <= start <= now
+        ):
+            return float(start)
+        return now
+
     # -- identity ------------------------------------------------------------------------
+
+    def _remember(self, client: str, mac: str) -> None:
+        """Keep the MAC of a client seen now; forget the oldest closed ones."""
+        macs = self._macs
+        macs.pop(client, None)
+        macs[client] = mac
+        extra = len(macs) - len(self._open) - MACS_RECENT_MAX
+        if extra <= 0:
+            return
+        for old in [c for c in macs if c not in self._open][:extra]:
+            del macs[old]
 
     def pseudonym(self, mac: Any) -> str | None:
         """16 hex of ``tmc_…`` (None for something that is no MAC)."""
@@ -208,7 +241,7 @@ class ClientRecorder:
             self.counters["skipped"] += 1
             return
         self.counters["transitions"] += 1
-        self._macs[client] = mac
+        self._remember(client, mac)
         index = self.engine.index
         ts = self._ts(tr.ts)
         router = self.engine.router_id(tr.ap)
@@ -281,6 +314,14 @@ class ClientRecorder:
         client = self.pseudonym(mac)
         if client is None:
             return 0
+        return self.forget_client(client)
+
+    def forget_client(self, client: str) -> int:
+        """The forget service by pseudonym (16 hex): every mark (count).
+
+        A client still connected is recorded again from its next transition
+        (a new session at its next connect or move, review K5).
+        """
         self._open.pop(client, None)
         self._macs.pop(client, None)
         return self.engine.index.forget_client(client)

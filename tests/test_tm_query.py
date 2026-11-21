@@ -177,6 +177,10 @@ def test_merge_sorts_newest_first_and_counts_per_source() -> None:
         "omitted_client_marks",
         "truncated",
         "next_until",
+        # additive (1.51.0)
+        "next_cursor",
+        "spanning",
+        "spanning_truncated",
     }
 
 

@@ -9,9 +9,12 @@ versioned answer (``v`` 1, see ``docs/time-machine.md``):
   rounded up to the millisecond grid of the marks (``tm_sources.ms_floor``);
   24 h by default, 14 days at most;
 * marks are sorted newest first, ties by mark id (stable);
-* a page holds at most ``limit`` marks and never splits marks of the same
-  timestamp (unless one timestamp alone holds more): ``next_until`` is the
-  ``until`` of the next page;
+* a page holds at most ``limit`` marks. ``next_cursor`` (1.51.0, review S3)
+  is the position after the page's last mark (``<ms>`` or ``<ms>:<id>``);
+  sent back as ``cursor`` with the same window it continues there, also
+  inside one millisecond. ``next_until`` (for older clients) never splits
+  marks of the same timestamp (unless one timestamp alone holds more; the
+  rest of it is then reachable over the cursor only);
 * a source whose read was cut bounds the page: it is complete only above
   its ``edge`` (the oldest read entry of the window, client entries
   included). The page keeps the marks after the edge's millisecond and
@@ -38,22 +41,23 @@ are dropped before the rights and counted per source (``duplicates``):
 
 * an audit entry is shown by ``core_audit`` while the audit still holds it;
   its reference mark in ``tm_refs`` (same audit id) is dropped;
-* outage, reachability, channel and uplink events of ``ni_events``
-  (``COVERED_NI_KINDS``) inside a time the own index was live are dropped:
-  ``tm_index`` has them as intervals with their end.
+* an outage, reachability or channel event of ``ni_events``
+  (``COVERED_NI_KINDS``) is dropped only when ``tm_index`` holds a mark of
+  the same meaning for the same router close in time (``NI_MATCH_S``; an
+  NI "down" inside the index's outage interval). Everything else stays.
 
 Intervals of the own index that began before ``from`` and reach into the
-window (open, or ended at or after ``from``) belong to it (1.51.0,
-``spans_in: true``). They sort by their start like every mark, so they lie
-below the window's marks and come on the last page only, the one whose
-walk reaches ``from``; every page of the walk reads the same set (it does
-not depend on ``until``), so each comes exactly once. A page cut among them
-ends the walk (``next_until`` would lie before ``from``) with
-``truncated: true``.
+window (open, or ended at or after ``from``) belong to it (1.51.0, review
+S4) but are never in ``marks``: only with ``spans=1`` they come in the
+field ``spanning`` (``spans_in: true``), newest start first, at most
+``SPANNING_MAX`` (``spanning_truncated``), not counted against ``limit``,
+under the same rights and filters. A client asks ``spans=1`` on its first
+page and pages on without it, so each comes once.
 
 Client sessions have their own query (:func:`parse_sessions_query`,
 :func:`sessions_page`, administrators only): sessions that overlap the
-window, newest start first, paged on the start like the timeline.
+window, newest start first (ties by id), paged like the timeline
+(``next_cursor``, and ``next_until`` on the start for older clients).
 """
 
 from __future__ import annotations
@@ -63,7 +67,7 @@ import logging
 import math
 import re
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -111,12 +115,28 @@ DEFAULT_LIMIT: Final = 200
 MAX_LIMIT: Final = 500
 TIME_MAX: Final = 4_102_444_800.0  # 2100-01-01
 QUERY_KEYS: Final = frozenset(
-    {"from", "until", "source", "router_id", "kind", "min_severity", "limit"}
+    {
+        "from",
+        "until",
+        "source",
+        "router_id",
+        "kind",
+        "min_severity",
+        "limit",
+        # additive (1.51.0, review S3/S4)
+        "cursor",
+        "spans",
+    }
 )
+# Intervals reaching into the window, at most this many (``spanning``).
+SPANNING_MAX: Final = 200
 QUERY_VALUE_MAX: Final = 96
 
 _TIME = re.compile(r"[0-9]{1,10}(?:\.[0-9]{1,6})?")
 _INT = re.compile(r"[0-9]{1,4}")
+# ``cursor``: ``<ms>`` (everything older than that millisecond) or
+# ``<ms>:<mark id>`` (that millisecond after the id, then everything older).
+_CURSOR = re.compile(r"([0-9]{1,13})(?::(tmm_[0-9a-f]{16}))?")
 _ROUTER_ID = re.compile(r"rtr_[0-9a-f]{32}")
 
 
@@ -141,6 +161,10 @@ class Query:
     kind: str | None = None
     min_severity: str | None = None
     limit: int = DEFAULT_LIMIT
+    # additive (1.51.0): continue after this position (ms, mark id or None)
+    cursor: tuple[int, str | None] | None = None
+    # additive (1.51.0): also answer the intervals reaching into the window
+    spans: bool = False
 
 
 @dataclass(slots=True)
@@ -184,6 +208,39 @@ def _time(query: Mapping[str, str], name: str) -> float | None:
     if value > TIME_MAX:
         raise QueryError(name, "out_of_range")
     return value
+
+
+def _cursor(raw: str | None) -> tuple[int, str | None] | None:
+    if raw is None:
+        return None
+    match = _CURSOR.fullmatch(raw)
+    if match is None:
+        raise QueryError("cursor")
+    return int(match.group(1)), match.group(2)
+
+
+def cursor_of(ts: float, mark_id: str | None = None) -> str:
+    """The ``cursor`` value of a position (``next_cursor``)."""
+    ms = round(ts * 1000)
+    return f"{ms}:{mark_id}" if mark_id else str(ms)
+
+
+def _after(ts: float, mark_id: str, cursor: tuple[int, str | None] | None) -> bool:
+    """Lies the item after ``cursor`` in the order newest first, then id?"""
+    if cursor is None:
+        return True
+    ms, cid = cursor
+    own = round(ts * 1000)
+    return own < ms or (cid is not None and own == ms and mark_id > cid)
+
+
+def _spans(query: Mapping[str, str]) -> bool:
+    raw = query.get("spans")
+    if raw is None:
+        return False
+    if raw not in ("0", "1"):
+        raise QueryError("spans")
+    return raw == "1"
 
 
 def parse_query(query: Mapping[str, str], now: float) -> Query:
@@ -233,7 +290,20 @@ def parse_query(query: Mapping[str, str], now: float) -> Query:
         if not _INT.fullmatch(raw_limit) or not 1 <= int(raw_limit) <= MAX_LIMIT:
             raise QueryError("limit", "out_of_range")
         limit = int(raw_limit)
-    return Query(since, until, sources, router_id, kind, min_severity, limit)
+    cursor = _cursor(query.get("cursor"))
+    if cursor is not None and not since * 1000 <= cursor[0] <= until * 1000:
+        raise QueryError("cursor", "out_of_range")
+    return Query(
+        since,
+        until,
+        sources,
+        router_id,
+        kind,
+        min_severity,
+        limit,
+        cursor,
+        _spans(query),
+    )
 
 
 # --- answer -----------------------------------------------------------------------------
@@ -251,6 +321,9 @@ def off_body(now: float) -> dict[str, Any]:
         "omitted_client_marks": 0,
         "truncated": False,
         "next_until": None,
+        "next_cursor": None,
+        "spanning": [],
+        "spanning_truncated": False,
     }
 
 
@@ -278,18 +351,47 @@ def _edge(result: SourceResult) -> float | None:
     return result.edge if result.edge is not None else result.oldest
 
 
-# NI event kinds the own index records itself (as intervals) while it is live.
+# NI events with the same meaning as a mark of the own index (review S1,
+# 1.51.0). ``lan.uplink`` (an uplink *port* without link) is shown as
+# ``uplink_changed`` but means something else than the index's change of the
+# parent router: never a double.
 COVERED_NI_KINDS: Final = frozenset(
-    {
-        "router_down",
-        "router_up",
-        "lan_down",
-        "lan_up",
-        "channel_changed",
-        "uplink_changed",
-    }
+    {"router_down", "router_up", "lan_down", "lan_up", "channel_changed"}
 )
+# Index intervals an NI event of this kind lies in (start, or end for "up").
+_DOWN_OF: Final = {"router_up": "router_down", "lan_up": "lan_down"}
+# How far apart the two sides of one event may lie (seconds). Both follow
+# the same outage tracker and the same polls: the index's outage starts at
+# the first failed poll and NI's event follows the report (two more failed
+# polls and the settle time later), so an NI "down" is matched against the
+# whole index interval; "up" comes from the same tracker call on both sides;
+# a channel change is seen by the index at the next poll after the router's
+# log time. 180 s = three regular polls (60 s), or one poll plus margin at
+# 120 s (CPU load); at 300 s (SSH fallback) a channel change may stay
+# double. In doubt the NI event stays: rather twice than lost.
+NI_MATCH_S: Final = 180.0
 _READ: Final = (STATE_OK, STATE_EMPTY)
+
+
+def _ni_double(mark: Mapping[str, Any], spans: Mapping[tuple[str, Any], list]) -> bool:
+    """Does the own index hold the same event (meaning, router, time)?"""
+    kind, router, ts = mark["kind"], mark["router_id"], mark["ts"]
+    if kind not in COVERED_NI_KINDS or (router is None and not mark["fleet"]):
+        return False
+    if kind in ("router_down", "lan_down"):
+        return any(
+            start - NI_MATCH_S <= ts <= (math.inf if end is None else end + NI_MATCH_S)
+            for start, end in spans.get((kind, router), ())
+        )
+    if any(
+        abs(start - ts) <= NI_MATCH_S for start, _e in spans.get((kind, router), ())
+    ):
+        return True
+    down = _DOWN_OF.get(kind)
+    return down is not None and any(
+        end is not None and abs(end - ts) <= NI_MATCH_S
+        for _s, end in spans.get((down, router), ())
+    )
 
 
 def drop_duplicates(results: list[SourceResult]) -> None:
@@ -305,14 +407,12 @@ def drop_duplicates(results: list[SourceResult]) -> None:
     index = by_source.get(SOURCE_TM_INDEX)
     ni = by_source.get(SOURCE_NI_EVENTS)
     if index is not None and ni is not None and index.state in _READ:
-        spans = index.coverage
-
-        def covered(mark: Mapping[str, Any]) -> bool:
-            return mark["kind"] in COVERED_NI_KINDS and any(
-                start <= mark["ts"] <= end for start, end in spans
-            )
-
-        keep = [m for m in ni.marks if not covered(m)]
+        spans: dict[tuple[str, Any], list[tuple[float, float | None]]] = {}
+        for m in (*index.marks, *index.spanning):
+            if m["kind"] in COVERED_NI_KINDS:
+                end = m["end"] if m["end_state"] != "open" else None
+                spans.setdefault((m["kind"], m["router_id"]), []).append((m["ts"], end))
+        keep = [m for m in ni.marks if not _ni_double(m, spans)]
         ni.duplicates += len(ni.marks) - len(keep)
         ni.marks = keep
 
@@ -334,33 +434,38 @@ def merge(
             after = ms_next(edge)
             bounds.append(after if after < query.until else edge)
     cutoff = max(bounds) if bounds else None
-    # Intervals that began before the window and reach into it (``spans_in``,
-    # 1.51.0) sort by their start, below every mark of the window: they come
-    # on the last page only, the one whose walk reaches ``from`` (a cut
-    # source keeps them off every page before it).
-    spans_ok = cutoff is None or cutoff <= query.since
     marks = [
         m
         for r in results
         for m in r.marks
-        if (
-            (spans_ok if m.get("spans_in") else cutoff is None or m["ts"] >= cutoff)
-            and _visible(m, query, admin)
-        )
+        if (cutoff is None or m["ts"] >= cutoff)
+        and _after(m["ts"], m["id"], query.cursor)
+        and _visible(m, query, admin)
     ]
     marks.sort(key=lambda m: (-m["ts"], m["id"]))
     next_until = cutoff
+    # below a cut source's edge (nothing left when it is the window's start)
+    next_cursor = (
+        cursor_of(cutoff) if cutoff is not None and cutoff > query.since else None
+    )
     truncated = cutoff is not None or any(r.truncated for r in results)
     if len(marks) > query.limit:
         page = marks[: query.limit]
         boundary = page[-1]["ts"]
         whole = [m for m in page if m["ts"] > boundary]
-        # one timestamp with more marks than ``limit`` is cut (flagged)
+        # Without a cursor a page keeps a millisecond together (next_until);
+        # one millisecond with more marks than ``limit`` is cut there, and
+        # ``next_cursor`` goes on inside it (review S3).
         marks = whole or page
         next_until = marks[-1]["ts"]
+        next_cursor = cursor_of(marks[-1]["ts"], marks[-1]["id"])
         truncated = True
     if next_until is not None and next_until <= query.since:
         next_until = None
+    spanning: list[dict[str, Any]] = []
+    if query.spans:
+        spanning = [m for r in results for m in r.spanning if _visible(m, query, admin)]
+        spanning.sort(key=lambda m: (-m["ts"], m["id"]))
     on_page: dict[str, list[dict[str, Any]]] = {}
     for mark in marks:
         on_page.setdefault(mark["source"], []).append(mark)
@@ -370,13 +475,14 @@ def merge(
         state = r.state
         if state in (STATE_OK, STATE_EMPTY):
             # after the rights (K2); a cut source is never "empty" (S1)
-            allowed = any(_allowed(m, admin) for m in r.marks)
+            shown = (*r.marks, *r.spanning) if query.spans else r.marks
+            allowed = any(_allowed(m, admin) for m in shown)
             state = STATE_OK if allowed or r.truncated else STATE_EMPTY
         cut = None
         if r.truncated:
             if _edge(r) is None:
                 cut = CUT_UNREACHABLE
-            elif next_until is not None:
+            elif next_until is not None or next_cursor is not None:
                 cut = CUT_NEXT_PAGE
         sources.append(
             {
@@ -408,6 +514,13 @@ def merge(
         "omitted_client_marks": sum(r.omitted_client for r in results) if admin else 0,
         "truncated": truncated,
         "next_until": next_until,
+        # additive (1.51.0, review S3): where the next page starts, also
+        # inside one millisecond; send it back as ``cursor`` with the same
+        # window
+        "next_cursor": next_cursor,
+        # additive (1.51.0, review S4): only with ``spans=1``
+        "spanning": spanning[:SPANNING_MAX],
+        "spanning_truncated": len(spanning) > SPANNING_MAX,
     }
 
 
@@ -423,7 +536,12 @@ async def async_timeline(
     """Read the requested sources (one at a time) and merge them."""
     started = time.monotonic()
     routers = build_router_map(hass)
-    req = ReadRequest(query.since, query.until, admin, now)
+    until = query.until
+    if query.cursor is not None:
+        # read what lies at or before the cursor's millisecond
+        ms, cid = query.cursor
+        until = min(until, (ms + (1 if cid else 0)) / 1000)
+    req = ReadRequest(query.since, until, admin, now)
     results: list[SourceResult] = []
     for source in query.sources:
         results.append(
@@ -445,7 +563,9 @@ async def async_timeline(
 
 STATUS_CLIENTS_OFF: Final = "clients_off"
 STATUS_UNAVAILABLE: Final = "unavailable"
-SESSION_QUERY_KEYS: Final = frozenset({"from", "until", "client", "router_id", "limit"})
+SESSION_QUERY_KEYS: Final = frozenset(
+    {"from", "until", "client", "router_id", "limit", "cursor"}
+)
 _CLIENT = re.compile(r"tmc_[0-9a-f]{16}")
 
 
@@ -458,6 +578,8 @@ class SessionQuery:
     client: str | None = None
     router_id: str | None = None
     limit: int = DEFAULT_LIMIT
+    # additive (1.51.0, review S3): as in :class:`Query`
+    cursor: tuple[int, str | None] | None = None
 
 
 def parse_sessions_query(query: Mapping[str, str], now: float) -> SessionQuery:
@@ -468,8 +590,17 @@ def parse_sessions_query(query: Mapping[str, str], now: float) -> SessionQuery:
     client = query.get("client")
     if client is not None and not _CLIENT.fullmatch(client):
         raise QueryError("client")
-    base = parse_query({k: v for k, v in query.items() if k != "client"}, now)
-    return SessionQuery(base.since, base.until, client, base.router_id, base.limit)
+    base = parse_query(
+        {k: v for k, v in query.items() if k not in ("client", "cursor")}, now
+    )
+    # Sessions that began before ``from`` belong to the window too: the
+    # cursor may lie before it, never after ``until``.
+    cursor = _cursor(query.get("cursor"))
+    if cursor is not None and cursor[0] > base.until * 1000:
+        raise QueryError("cursor", "out_of_range")
+    return SessionQuery(
+        base.since, base.until, client, base.router_id, base.limit, cursor
+    )
 
 
 def sessions_body(
@@ -494,7 +625,46 @@ def sessions_body(
         "sessions": [],
         "truncated": False,
         "next_until": None,
+        "next_cursor": None,
     }
+
+
+def _newest_first(
+    marks: list[Any],
+    cursor: tuple[int, str | None] | None,
+    id_of: Callable[[Any], str],
+) -> list[tuple[Any, str | None]]:
+    """Stored marks after ``cursor``, newest first, ties by id.
+
+    The id (a hash) is computed only where the order or the cursor needs it:
+    for marks sharing a millisecond (review K6: 10000 sessions otherwise
+    cost ~7 ms of hashing on the event loop).
+    """
+    out: list[tuple[Any, str | None]] = []
+    for mark in marks:
+        if cursor is not None:
+            own = round(mark.ts * 1000)
+            if own > cursor[0]:
+                continue
+            if own == cursor[0]:
+                mark_id = id_of(mark)
+                if cursor[1] is None or mark_id <= cursor[1]:
+                    continue
+                out.append((mark, mark_id))
+                continue
+        out.append((mark, None))
+    out.sort(key=lambda p: -p[0].ts)
+    i = 0
+    while i < len(out):
+        j = i + 1
+        while j < len(out) and out[j][0].ts == out[i][0].ts:
+            j += 1
+        if j - i > 1:
+            tied = [(m, mid or id_of(m)) for m, mid in out[i:j]]
+            tied.sort(key=lambda p: p[1])
+            out[i:j] = tied
+        i = j
+    return out
 
 
 def sessions_page(
@@ -504,7 +674,12 @@ def sessions_page(
     route checks that). Newest start first; a page never splits sessions
     of the same start (unless one start alone holds more)."""
     from .tm_engine import async_get_time_machine
-    from .tm_sources import REASON_NOT_LOADED, REASON_NOT_RUNNING, index_mark
+    from .tm_sources import (
+        REASON_NOT_LOADED,
+        REASON_NOT_RUNNING,
+        index_mark,
+        stored_mark_id,
+    )
 
     if not time_machine_enabled(hass):
         return sessions_body(STATUS_OFF, now)
@@ -518,23 +693,31 @@ def sessions_page(
         return sessions_body(STATUS_CLIENTS_OFF, now, query)
     routers = build_router_map(hass)
     client = query.client[4:] if query.client else None
-    found = engine.index.sessions(
-        query.since, query.until, client=client, router=query.router_id
+    found = _newest_first(
+        engine.index.sessions(
+            query.since, query.until, client=client, router=query.router_id
+        ),
+        query.cursor,
+        stored_mark_id,
     )
-    found.sort(key=lambda m: (-m.ts, m.seq))
     next_until = None
+    next_cursor = None
     truncated = False
     if len(found) > query.limit:
         page = found[: query.limit]
-        boundary = page[-1].ts
-        whole = [m for m in page if m.ts > boundary]
+        boundary = page[-1][0].ts
+        whole = [p for p in page if p[0].ts > boundary]
+        # as the timeline: next_until keeps a start together, next_cursor
+        # goes on inside one start too (review S3)
         found = whole or page
-        next_until = found[-1].ts
+        last, last_id = found[-1]
+        next_until = last.ts
+        next_cursor = cursor_of(last.ts, last_id or stored_mark_id(last))
         truncated = True
         if next_until <= query.since:
             next_until = None
     sessions = []
-    for mark in found:
+    for mark, _id in found:
         item = index_mark(
             mark,
             routers,
@@ -559,6 +742,7 @@ def sessions_page(
     body["sessions"] = sessions
     body["truncated"] = truncated
     body["next_until"] = next_until
+    body["next_cursor"] = next_cursor
     return body
 
 

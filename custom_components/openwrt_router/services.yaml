@@ -15,8 +15,13 @@ create_config_backup:
 time_machine_forget_client:
   fields:
     mac:
-      required: true
+      required: false
       example: "aa:bb:cc:dd:ee:ff"
+      selector:
+        text:
+    client:
+      required: false
+      example: "tmc_0123456789abcdef"
       selector:
         text:
 

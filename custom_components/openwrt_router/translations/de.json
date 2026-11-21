@@ -44,7 +44,7 @@
           "traffic_sysfs_fallback": "Liest Schnittstellen-Zähler aus /sys/class/net höchstens alle 5 Minuten, nur für Schnittstellen, die die normale Abfrage nicht liefert. Braucht traffic_enabled.",
           "traffic_offload_probe": "Liest die Firewall-Einstellung für Flow-Offloading (uci get) alle 6 Stunden, weil ausgelagerter Verkehr manche Zähler umgeht. Braucht traffic_enabled.",
           "traffic_history_profile": "Kompakt (Standard): 5-Minuten-Werte für 6 Stunden, stündlich für 14 Tage, täglich für 31 Tage, kein Client-Verlauf auf der Platte. Standard: 5-Minuten-Werte für 1 Tag, stündlich für 14 Tage, täglich für 90 Tage, Client-Verlauf bleibt (täglich für 30 Tage); braucht mehr Speicher. Es gilt das tiefste Profil unter den Routern mit eingeschalteter Traffic-Analyse, für die ganze Flotte.",
-          "time_machine_enabled": "Ein Schalter für die ganze Flotte: hier umgeschaltet gilt er für jeden Router. Zeigt vergangene Ereignisse auf einer Zeitleiste im Panel: die der vorhandenen Module (Audit-Protokoll, Konfigurationsversionen, Netzwerk-Intelligenz, Security Center) und einen eigenen Verlauf von Ausfällen, Lücken, Funk-, Uplink- und Konfigurationsänderungen, 14 Tage lang in einem eigenen Speicher (höchstens 15000 Marken, 2,5 MB). Standardmäßig aus. Keine zusätzliche Router-Abfrage. MAC-Adressen, IP-Adressen, Hostnamen und SSIDs werden nie gespeichert oder angezeigt. Benutzer ohne Administratorrechte sehen nur Infrastruktur und Störungen, und nur solange das Panel für alle Benutzer geöffnet ist. Ausschalten beendet die Aufzeichnung und löscht sofort alle gespeicherten Client-Verläufe, auch wenn der Schalter für Client-Verläufe an bleibt. Der Verlauf von Ausfällen, Lücken und Änderungen bleibt gespeichert; solange die Time Machine aus ist, wird er nicht gekürzt, erst nach dem nächsten Einschalten wieder auf 14 Tage.",
+          "time_machine_enabled": "Ein Schalter für die ganze Flotte: hier umgeschaltet gilt er für jeden Router. Zeigt vergangene Ereignisse auf einer Zeitleiste im Panel: die der vorhandenen Module (Audit-Protokoll, Konfigurationsversionen, Netzwerk-Intelligenz, Security Center) und einen eigenen Verlauf von Ausfällen, Lücken, Funk-, Uplink- und Konfigurationsänderungen, 14 Tage lang in einem eigenen Speicher (höchstens 15000 Marken, 2,5 MB). Standardmäßig aus. Keine zusätzliche Router-Abfrage. MAC-Adressen, IP-Adressen, Hostnamen und SSIDs werden nie gespeichert; MAC-Adressen, IP-Adressen und SSIDs werden nie angezeigt. Einen Hostnamen sehen nur Administratoren, nur bei eingeschalteten Client-Verläufen und nur, solange Client-Stabilität den Client noch kennt. Benutzer ohne Administratorrechte sehen nur Infrastruktur und Störungen, und nur solange das Panel für alle Benutzer geöffnet ist. Ausschalten beendet die Aufzeichnung und löscht sofort alle gespeicherten Client-Verläufe, auch wenn der Schalter für Client-Verläufe an bleibt. Der Verlauf von Ausfällen, Lücken und Änderungen bleibt gespeichert; solange die Time Machine aus ist, wird er nicht gekürzt, erst nach dem nächsten Einschalten wieder auf 14 Tage.",
           "time_machine_clients": "Eigener Schalter, einer für die ganze Flotte, standardmäßig aus; wirkt nur, solange die Time Machine an ist und Client-Stabilität läuft. Zeichnet 14 Tage lang auf, welcher Client wann mit welchem Router und Band verbunden war, Roaming und Trennungen. Clients werden nur als Pseudonym (tmc_…) gespeichert, nie mit MAC, IP-Adresse, Hostname oder SSID; höchstens 200 Marken je Client und Tag. Nur Administratoren sehen Client-Verläufe; der aktuelle Hostname wird ihnen gezeigt, solange Client-Stabilität den Client noch kennt. Ausschalten löscht alle gespeicherten Client-Verläufe."
         }
       }
@@ -492,6 +492,12 @@
     },
     "time_machine_no_key": {
       "message": "Die Time Machine hat gerade keinen Schlüssel für Client-Pseudonyme; bitte später erneut versuchen."
+    },
+    "time_machine_mac_or_client": {
+      "message": "Entweder die MAC-Adresse oder das Pseudonym des Clients angeben, nicht beides."
+    },
+    "time_machine_invalid_client": {
+      "message": "Das ist kein gültiges Client-Pseudonym (tmc_ und 16 Hex-Ziffern)."
     }
   },
   "issues": {
@@ -555,11 +561,15 @@
     },
     "time_machine_forget_client": {
       "name": "Time Machine: Client vergessen",
-      "description": "Löscht alle Time-Machine-Marken eines Clients (nur Administratoren). Andere Module behalten ihre eigenen Client-Daten; die Antwort nennt sie.",
+      "description": "Löscht alle Time-Machine-Marken eines Clients (nur Administratoren). MAC-Adresse oder Pseudonym angeben, genau eines von beiden. Ein gerade verbundener Client wird ab seinem nächsten Verbinden oder Wechsel wieder aufgezeichnet. Andere Module behalten ihre eigenen Client-Daten; die Antwort nennt sie.",
       "fields": {
         "mac": {
           "name": "MAC-Adresse",
-          "description": "MAC-Adresse des Clients. Sie dient nur dazu, das Pseudonym zu finden, und wird nicht gespeichert."
+          "description": "MAC-Adresse des Clients. Die Time Machine nutzt sie nur, um das Pseudonym zu finden, und speichert sie nicht; Home Assistant selbst kann den Aktionsaufruf mit der MAC aber in seinem Protokoll oder Recorder behalten. Mit dem Pseudonym lässt sich das vermeiden."
+        },
+        "client": {
+          "name": "Pseudonym",
+          "description": "Pseudonym des Clients, wie die Time Machine es zeigt (tmc_ und 16 Hex-Ziffern). Es wird keine MAC-Adresse eingegeben."
         }
       }
     },

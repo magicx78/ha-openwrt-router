@@ -102,19 +102,19 @@ def _mark(source: str, kind: str, ts: float) -> dict[str, Any]:
     )
 
 
-def test_the_index_wins_over_ni_events_while_it_was_live() -> None:
-    index = SourceResult(
-        "tm_index", "ok", marks=[_mark("tm_index", "router_down", T0 + 50)]
-    )
-    index.coverage = [(T0, T0 + 100)]
+def test_the_index_wins_over_the_same_ni_event_only() -> None:
+    """Review S1: same meaning, same router, close in time (else it stays)."""
+    down = _mark("tm_index", "router_down", T0 + 50)
+    down.update(end=T0 + 1000, end_state="closed")
+    index = SourceResult("tm_index", "ok", marks=[down])
 
     def ni_result() -> SourceResult:
         return SourceResult(
             "ni_events",
             "ok",
             marks=[
-                _mark("ni_events", "router_down", T0 + 50),  # double: dropped
-                _mark("ni_events", "router_down", T0 + 200),  # index not live then
+                _mark("ni_events", "router_down", T0 + 260),  # inside: dropped
+                _mark("ni_events", "router_down", T0 + 2000),  # after its end
                 _mark("ni_events", "wan_event", T0 + 60),  # the index has none
             ],
         )
@@ -122,14 +122,14 @@ def test_the_index_wins_over_ni_events_while_it_was_live() -> None:
     ni = ni_result()
     body = tm_query.merge(
         [ni, index],
-        tm_query.Query(T0, T0 + 300, sources=("ni_events", "tm_index")),
+        tm_query.Query(T0, T0 + 3000, sources=("ni_events", "tm_index")),
         admin=False,
-        now=T0 + 300,
+        now=T0 + 3000,
     )
     by_id = {s["id"]: s for s in body["sources"]}
     assert by_id["ni_events"]["duplicates"] == 1 and by_id["ni_events"]["count"] == 2
     assert [(m["source"], m["ts"]) for m in body["marks"]] == [
-        ("ni_events", T0 + 200),
+        ("ni_events", T0 + 2000),
         ("ni_events", T0 + 60),
         ("tm_index", T0 + 50),
     ]
@@ -137,9 +137,9 @@ def test_the_index_wins_over_ni_events_while_it_was_live() -> None:
     index.state = "unreadable"
     body = tm_query.merge(
         [ni_result(), index],
-        tm_query.Query(T0, T0 + 300, sources=("ni_events", "tm_index")),
+        tm_query.Query(T0, T0 + 3000, sources=("ni_events", "tm_index")),
         admin=True,
-        now=T0 + 300,
+        now=T0 + 3000,
     )
     assert {s["id"]: s["duplicates"] for s in body["sources"]}["ni_events"] == 0
     assert len([m for m in body["marks"] if m["source"] == "ni_events"]) == 3

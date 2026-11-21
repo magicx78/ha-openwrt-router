@@ -2,13 +2,15 @@
 
 An interval of the own index (outage, client session, …) belongs to the
 timeline window when it overlaps it, not only when it begins in it (the
-sessions route did that already). Rule (``tm_query`` module doc): such a
-mark ``spans_in``; it sorts by its start, below every mark of the window,
-and comes on the last page of the window only (the page whose walk reaches
-``from``). Every page reads the same set, so a walk shows each exactly once
-and ends. Marks come through the real write paths (``tm_index_kit``: the
-real outage tracker, the engine's listeners; Phase C through the real
-Client Stability of ``test_tm_clients_v1510``).
+sessions route did that already). Rule after the review before the merge
+(S4, ``tm_query`` module doc): such a mark ``spans_in``; it never stands in
+``marks`` and never counts against ``limit``; the server answers it only
+with ``spans=1``, in ``spanning`` (newest start first, at most
+``SPANNING_MAX``, ``spanning_truncated``), the same on every page that asks
+for it. The panel asks on the first page only. Marks come through the real
+write paths (``tm_index_kit``: the real outage tracker, the engine's
+listeners; Phase C through the real Client Stability of
+``test_tm_clients_v1510``).
 
 Also here: what switching the Time Machine off deletes and keeps.
 """
@@ -16,7 +18,9 @@ Also here: what switching the Time Machine off deletes and keeps.
 # ruff: noqa: F811  (pytest fixtures imported from test_client_engine)
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from core_testkit import FakeDisks
@@ -52,23 +56,24 @@ def query(since: float, until: float, **kw: Any) -> tm_query.Query:
 async def walk(
     hass: Any, q: tm_query.Query, *, admin: bool = True, now: float, pages: int = 50
 ) -> list[dict[str, Any]]:
-    """Every page of one window, ``until = next_until`` like the tab."""
+    """Every page of one window like the tab: ``spans=1`` on the first page
+    only, then ``cursor = next_cursor`` with the same window."""
     out = []
+    q = dataclasses.replace(q, spans=True)
     for _ in range(pages):
         body = await tm_query.async_timeline(hass, q, admin=admin, now=now)
         out.append(body)
-        if body["next_until"] is None:
+        if body["next_cursor"] is None:
             return out
-        assert body["next_until"] < q.until, "no progress"
-        q = tm_query.Query(
-            q.since, body["next_until"], q.sources, q.router_id, q.kind,
-            q.min_severity, q.limit,
-        )  # fmt: skip
+        q = dataclasses.replace(
+            q, cursor=tm_query._cursor(body["next_cursor"]), spans=False
+        )
     raise AssertionError("the walk does not end")
 
 
 def spans(body: dict[str, Any]) -> list[dict[str, Any]]:
-    return [m for m in body["marks"] if m["spans_in"]]
+    assert not [m for m in body["marks"] if m["spans_in"]], "spanning in marks"
+    return body["spanning"]
 
 
 # --- overlap ------------------------------------------------------------------------------
@@ -80,16 +85,20 @@ async def test_an_open_outage_that_began_before_the_window_is_shown(disks) -> No
         w.down("r1")  # at T0, still open
         w.clock.advance(2 * HOUR)
         now = w.clock.t
+        window = (T0 + HOUR, now + 1)
         body = await tm_query.async_timeline(
-            w.hass, query(T0 + HOUR, now + 1), admin=True, now=now
+            w.hass, query(*window, spans=True), admin=True, now=now
+        )
+        plain = await tm_query.async_timeline(
+            w.hass, query(*window), admin=True, now=now
         )
         user = await tm_query.async_timeline(
-            w.hass, query(T0 + HOUR, now + 1), admin=False, now=now
+            w.hass, query(*window, spans=True), admin=False, now=now
         )
         other = await tm_query.async_timeline(
-            w.hass, query(T0 + HOUR, now + 1, router_id=R2), admin=True, now=now
+            w.hass, query(*window, router_id=R2, spans=True), admin=True, now=now
         )
-    [down] = body["marks"]
+    [down] = spans(body)
     assert (down["kind"], down["ts"], down["end"], down["end_state"]) == (
         "router_down",
         T0,
@@ -97,12 +106,15 @@ async def test_an_open_outage_that_began_before_the_window_is_shown(disks) -> No
         "open",
     )
     assert down["spans_in"] is True and down["router_id"] == R1
-    assert body["next_until"] is None
+    assert body["marks"] == [] and body["next_until"] is None
+    assert body["spanning_truncated"] is False
+    # without spans=1: never
+    assert plain["marks"] == [] and plain["spanning"] == []
     # infrastructure: a non-admin sees it as well; filters apply as to every mark
-    assert [m["id"] for m in user["marks"]] == [down["id"]]
-    assert other["marks"] == []
+    assert [m["id"] for m in spans(user)] == [down["id"]]
+    assert spans(other) == []
     src = {s["id"]: s for s in body["sources"]}["tm_index"]
-    assert (src["state"], src["count"], src["oldest"]) == ("ok", 1, T0)
+    assert (src["state"], src["count"], src["oldest"]) == ("ok", 0, None)
 
 
 async def test_a_closed_outage_counts_while_it_overlaps_the_window(disks) -> None:
@@ -115,13 +127,13 @@ async def test_a_closed_outage_counts_while_it_overlaps_the_window(disks) -> Non
         w.clock.advance(2 * HOUR)
         now = w.clock.t
         inside = await tm_query.async_timeline(
-            w.hass, query(T0 + 600, now), admin=True, now=now
+            w.hass, query(T0 + 600, now, spans=True), admin=True, now=now
         )
         at_end = await tm_query.async_timeline(
-            w.hass, query(T0 + 1800, now), admin=True, now=now
+            w.hass, query(T0 + 1800, now, spans=True), admin=True, now=now
         )
         after = await tm_query.async_timeline(
-            w.hass, query(T0 + 1800.001, now), admin=True, now=now
+            w.hass, query(T0 + 1800.001, now, spans=True), admin=True, now=now
         )
     [down] = spans(inside)
     assert (down["kind"], down["end_state"], down["end"]) == (
@@ -129,15 +141,13 @@ async def test_a_closed_outage_counts_while_it_overlaps_the_window(disks) -> Non
         "closed",
         pytest.approx(T0 + 1800),
     )
-    # the up mark at the end is an ordinary mark of the window, newest first
-    assert [m["kind"] for m in inside["marks"]] == ["router_up", "router_down"]
+    # the up mark at the end is an ordinary mark of the window
+    assert [m["kind"] for m in inside["marks"]] == ["router_up"]
     assert [m["kind"] for m in spans(at_end)] == ["router_down"]  # ends at from
     assert spans(after) == []  # ended before the window
-    # never a mark of the window flagged, never a point mark spanning in
-    assert all(m["spans_in"] is False for m in inside["marks"] if m["ts"] >= T0 + 600)
 
 
-async def test_paging_shows_each_spanning_mark_once_on_the_last_page(disks) -> None:
+async def test_paging_shows_each_spanning_mark_once_on_the_first_page(disks) -> None:
     with world(disks, routers=3) as w:
         await w.start()
         w.down("r1")  # T0, open: spans into the window
@@ -162,15 +172,13 @@ async def test_paging_shows_each_spanning_mark_once_on_the_last_page(disks) -> N
     ids = [m["id"] for p in pages for m in p["marks"]]
     assert len(ids) == len(set(ids)), "a mark came twice"
     assert set(ids) == {m["id"] for m in whole["marks"]}
-    # only the last page carries them, below every mark of the window
-    assert all(not spans(p) for p in pages[:-1])
-    last = pages[-1]["marks"]
-    assert [m["router_id"] for m in spans(pages[-1])] == [R3, R1]
-    assert [m["spans_in"] for m in last][-2:] == [True, True]
-    assert pages[-1]["truncated"] is False or pages[-1]["next_until"] is None
+    # only the first page carries them (the walk asks there only)
+    assert [m["router_id"] for m in spans(pages[0])] == [R3, R1]
+    assert all(spans(p) == [] for p in pages[1:])
+    assert pages[-1]["next_cursor"] is None
 
 
-def test_a_cut_source_keeps_spanning_marks_off_the_pages_before_the_last() -> None:
+def test_a_cut_source_never_holds_back_the_spanning_marks() -> None:
     routers = tm_sources.RouterMap({}, {R1: "Router 1"})
     since, until = T0, T0 + HOUR
 
@@ -191,22 +199,17 @@ def test_a_cut_source_keeps_spanning_marks_off_the_pages_before_the_last() -> No
         "ni_events", "ok", marks=[newer, edge], truncated=True,
         edge=T0 + 1800, oldest=T0 + 1800,
     )  # fmt: skip
-    index = tm_sources.SourceResult("tm_index", "ok", marks=[span])
+    index = tm_sources.SourceResult("tm_index", "ok", spanning=[span])
     first = tm_query.merge(
-        [index, ni], tm_query.Query(since, until), admin=True, now=until
+        [index, ni], tm_query.Query(since, until, spans=True), admin=True, now=until
     )
     assert [m["id"] for m in first["marks"]] == [newer["id"]]
+    assert [m["id"] for m in first["spanning"]] == [span["id"]]
     assert first["next_until"] == tm_sources.ms_next(T0 + 1800)
-    # the next page reads the edge's millisecond whole, the source is not cut
-    ni2 = tm_sources.SourceResult("ni_events", "ok", marks=[edge])
-    index2 = tm_sources.SourceResult("tm_index", "ok", marks=[span])
-    q2 = tm_query.Query(since, first["next_until"])
-    second = tm_query.merge([index2, ni2], q2, admin=True, now=until)
-    assert [m["id"] for m in second["marks"]] == [edge["id"], span["id"]]
-    assert second["next_until"] is None
+    assert first["next_cursor"] == tm_query.cursor_of(tm_sources.ms_next(T0 + 1800))
 
 
-async def test_more_spanning_marks_than_a_page_end_the_walk_flagged(disks) -> None:
+async def test_more_spanning_marks_than_the_cap_are_flagged(disks) -> None:
     with world(disks, routers=3) as w:
         await w.start()
         for entry in ("r1", "r2"):
@@ -214,11 +217,12 @@ async def test_more_spanning_marks_than_a_page_end_the_walk_flagged(disks) -> No
             w.clock.advance(60)
         w.clock.advance(HOUR)
         now = w.clock.t
-        pages = await walk(w.hass, query(now - 60, now, limit=1), now=now)
-    # one page: the cut falls among marks that began before ``from``
-    [page] = pages
-    assert len(page["marks"]) == 1 and page["marks"][0]["spans_in"] is True
-    assert page["truncated"] is True and page["next_until"] is None
+        with patch.object(tm_query, "SPANNING_MAX", 1):
+            [page] = await walk(w.hass, query(now - 60, now, limit=1), now=now)
+    # not on ``limit``: the window is empty, one of two spanning marks shown
+    assert page["marks"] == [] and page["truncated"] is False
+    assert [m["router_id"] for m in page["spanning"]] == [R2]
+    assert page["spanning_truncated"] is True
 
 
 async def test_a_client_session_that_began_before_the_window_spans_in(
@@ -231,11 +235,15 @@ async def test_a_client_session_that_began_before_the_window_spans_in(
         for _ in range(60):  # an hour later, still connected
             step(w, [M1], [])
         body = await tm_query.async_timeline(
-            w.hass, query(w.t - 600, w.t), admin=True, now=w.t
+            w.hass, query(w.t - 600, w.t, spans=True), admin=True, now=w.t
         )
-    [session] = [m for m in body["marks"] if m["kind"] == "client_session"]
+        user = await tm_query.async_timeline(
+            w.hass, query(w.t - 600, w.t, spans=True), admin=False, now=w.t
+        )
+    [session] = [m for m in spans(body) if m["kind"] == "client_session"]
     assert session["spans_in"] is True and session["end_state"] == "open"
     assert session["ts"] == pytest.approx(start)
+    assert not [m for m in spans(user) if m["group"] == "clients"]
 
 
 # --- switching off ---------------------------------------------------------------------

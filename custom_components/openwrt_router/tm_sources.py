@@ -292,6 +292,10 @@ class SourceResult:
     duplicates: int = 0
     # ``tm_index`` only: when the own index was live ([start, end] pairs).
     coverage: list[tuple[float, float]] = field(default_factory=list)
+    # Own index only (1.51.0, review S4): intervals that began before the
+    # window and reach into it; never part of ``marks`` (``tm_query`` shows
+    # them in ``spanning`` with ``spans=1`` only, and uses them for doubles).
+    spanning: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SourceOff(Exception):
@@ -515,8 +519,8 @@ def make_mark(
         "client_name": None,
         "peers": None,
         # additive (1.51.0): an interval of the own index that began before
-        # the window and reaches into it (``tm_query.merge`` puts it on the
-        # last page of the window, below every mark of the window)
+        # the window and reaches into it (only in ``spanning``, with
+        # ``spans=1``; review S4)
         "spans_in": False,
     }
 
@@ -1093,6 +1097,17 @@ def _peer(router_id: str | None, routers: RouterMap) -> dict[str, Any] | None:
     return {"router_id": router_id, "router_name": routers.name_of(router_id)}
 
 
+def _stored_source_id(mark: Any) -> str:
+    if mark.ref is not None:
+        return f"{mark.ref[0]}:{mark.ref[1]}"
+    return f"m{mark.seq}"
+
+
+def stored_mark_id(mark: Any) -> str:
+    """The timeline ``id`` of a stored mark (what :func:`index_mark` gives)."""
+    return mark_id(mark.source, _stored_source_id(mark))
+
+
 def index_mark(
     mark: Any, routers: RouterMap, *, client_name: str | None = None
 ) -> dict[str, Any]:
@@ -1104,18 +1119,16 @@ def index_mark(
     ``ref``, so it reads like the original.
     """
     source = mark.source
+    source_id = _stored_source_id(mark)
     if mark.ref is not None:
-        ref_type, ref_id = mark.ref
         ref = ref_of(
             "core_audit",
             "drift" if mark.kind == "config_drift" else "event",
-            ref_id,
+            mark.ref[1],
         )
-        source_id = f"{ref_type}:{ref_id}"
         title_key = f"core_audit.{mark.code or 'unknown'}"
     else:
-        ref = ref_of("time_machine", "mark", f"m{mark.seq}")
-        source_id = f"m{mark.seq}"
+        ref = ref_of("time_machine", "mark", source_id)
         title_key = f"{source}.{mark.kind}"
     out = make_mark(
         source=source,
@@ -1145,26 +1158,38 @@ def index_mark(
     return out
 
 
-def _index_marks(
+# Marks turned into timeline marks between two yields to the event loop
+# (review K6: a full client quota is ~10000 marks, ~30 ms in one piece).
+INDEX_YIELD_EVERY: Final = 1000
+
+
+async def _index_marks(
     engine: Any,
     source: str,
     req: ReadRequest,
     routers: RouterMap,
     deadline: float,
     names: Callable[[str | None], str | None] | None = None,
-) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+) -> SourceResult:
+    """Marks of the window plus the intervals reaching into it (apart)."""
     index = engine.index
-    found = [(m, False) for m in index.window(source, req.since, req.until)]
-    found += [(m, True) for m in index.spanning_in(source, req.since)]
-    for i, (mark, spans_in) in enumerate(found):
+    parts: list[list[dict[str, Any]]] = [[], []]
+    found = [(m, 0) for m in index.window(source, req.since, req.until)]
+    found += [(m, 1) for m in index.spanning_in(source, req.since)]
+    for i, (mark, part) in enumerate(found):
         if i % 500 == 0:
             _check(deadline)
+        if i and i % INDEX_YIELD_EVERY == 0:
+            # the list is taken: a mark added or closed meanwhile does not
+            # change this answer's set (a closed one may show its end)
+            await asyncio.sleep(0)
         name = names(mark.client) if names is not None and mark.client else None
         item = index_mark(mark, routers, client_name=name)
-        item["spans_in"] = spans_in
-        out.append(item)
-    return out
+        item["spans_in"] = part == 1
+        parts[part].append(item)
+    result = _finish(source, parts[0], 0, False)
+    result.spanning = parts[1]
+    return result
 
 
 async def read_tm_index(
@@ -1172,8 +1197,7 @@ async def read_tm_index(
 ) -> SourceResult:
     """Own marks of the window (rights per group in ``tm_query``)."""
     engine = _tm_engine(hass)
-    marks = _index_marks(engine, SOURCE_TM_INDEX, req, routers, deadline)
-    result = _finish(SOURCE_TM_INDEX, marks, 0, False)
+    result = await _index_marks(engine, SOURCE_TM_INDEX, req, routers, deadline)
     result.coverage = [
         (float(start), float(end) if end is not None else req.now)
         for start, end in engine.store.coverage
@@ -1189,8 +1213,7 @@ async def read_tm_refs(
     if not req.admin:
         raise SourceOff(REASON_ADMIN_ONLY)
     engine = _tm_engine(hass)
-    marks = _index_marks(engine, SOURCE_TM_REFS, req, routers, deadline)
-    return _finish(SOURCE_TM_REFS, marks, 0, False)
+    return await _index_marks(engine, SOURCE_TM_REFS, req, routers, deadline)
 
 
 async def read_tm_clients(
@@ -1204,8 +1227,7 @@ async def read_tm_clients(
         raise SourceOff(REASON_CLIENTS_OFF)
     recorder = engine.recorder
     names = recorder.name_of if recorder is not None else None
-    marks = _index_marks(engine, SOURCE_TM_CLIENTS, req, routers, deadline, names)
-    return _finish(SOURCE_TM_CLIENTS, marks, 0, False)
+    return await _index_marks(engine, SOURCE_TM_CLIENTS, req, routers, deadline, names)
 
 
 READERS: Final[Mapping[str, ReadFn]] = {

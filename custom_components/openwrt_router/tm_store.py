@@ -68,7 +68,9 @@ STORE_MAX_BYTES: Final = 2_500_000  # plan §5.5
 TRIM_HEADROOM: Final = 0.05  # a trim goes 5 % below the limit
 # Bytes HA's indented JSON adds per row: six spaces, two quotes, comma, newline.
 ROW_OVERHEAD: Final = 10
-SAVE_DELAY_S: Final = 120.0
+# Changes are bundled for 5 min (review K1: fewer writes on SD cards; a crash
+# loses at most this plus the heartbeat, see docs §15.1).
+SAVE_DELAY_S: Final = 300.0
 COVERAGE_MAX: Final = 64
 CHECKPOINTS_DAY_MAX: Final = 31
 CHECKPOINTS_START_MAX: Final = 16
@@ -88,6 +90,7 @@ _COUNTERS: Final = (
     "save_over_size",
     "load_failed",
     "trimmed_rows",
+    "copies_removed",
 )
 
 
@@ -266,14 +269,15 @@ class TimeMachineStore:
 
     def _trim(self, excess: int) -> int:
         """Drop the oldest marks (clients, then references, then
-        infrastructure) worth ``excess`` bytes; one pass."""
+        infrastructure) worth ``excess`` bytes; one pass. Closed marks go
+        first, open intervals last (review S2)."""
         dropped: set[int] = set()
         for quota in TRIM_ORDER:
             if excess <= 0:
                 break
             for mark in sorted(
                 (m for m in self.index.marks.values() if m.quota == quota),
-                key=lambda m: (m.ts, m.seq),
+                key=lambda m: (m.is_open, m.ts, m.seq),
             ):
                 if excess <= 0:
                     break
@@ -341,6 +345,24 @@ class TimeMachineStore:
             return
         self._pending = True
         self._store.async_delay_save(self.payload, delay)
+
+    async def async_remove_copies(self) -> int:
+        """Delete the ``.bak`` / ``.corrupt.*`` copies of the file (review
+        K4: after client data was deleted no old copy keeps it)."""
+        store = self._store or core_store.create_store(
+            self.hass,
+            TIME_MACHINE_STORE_VERSION,
+            TIME_MACHINE_STORE_KEY,
+            minor_version=TIME_MACHINE_STORE_MINOR_VERSION,
+            migrate=_migrate,
+            private=True,
+            atomic_writes=True,
+        )
+        removed = await core_store.async_remove_copies(
+            self.hass, store, TIME_MACHINE_STORE_KEY
+        )
+        self.counters["copies_removed"] += removed
+        return removed
 
     async def async_flush(self, stop: str | None = None) -> None:
         """Write now (switched off, last router gone); never raises."""

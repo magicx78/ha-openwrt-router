@@ -22,8 +22,9 @@ that does not parse is skipped and counted, never the whole file.
 
 **Bounds** (plan §5.5, retention 14 days per F1): three quotas that never
 evict each other (infrastructure 3000, references 2000, clients 10000;
-together the total of 15000), the oldest mark *of the same quota* goes
-first and is counted; per client and UTC day at most 200 new marks, the
+together the total of 15000), the oldest closed mark *of the same quota*
+goes first and is counted (an open interval only when its quota holds
+nothing else, ``evicted_open``); per client and UTC day at most 200 new marks, the
 rest is folded into one ``client_flapping`` mark with a counter. Updates of
 an existing mark (closing an interval) are never capped.
 """
@@ -348,11 +349,13 @@ COUNTER_NAMES: Final = (
     "evicted_infrastructure",
     "evicted_references",
     "evicted_clients",
+    "evicted_open",
     "pruned",
     "client_day_capped",
     "bad_marks",
     "forgotten",
     "cleared",
+    "router_removed",
 )
 
 
@@ -376,7 +379,12 @@ class MarkIndex:
         self.client_day_cap = client_day_cap
         self.marks: dict[int, Mark] = {}
         self.next_seq = 1
+        # Eviction order (review S2, 1.51.0): the heaps hold the closed marks
+        # (and point marks) only; open intervals wait in ``_open`` and join
+        # their heap when they are closed. An open interval is evicted only
+        # when its quota holds nothing else.
         self._heaps: dict[str, list[tuple[float, int]]] = {q: [] for q in QUOTAS}
+        self._open: dict[str, set[int]] = {q: set() for q in QUOTAS}
         self._count: dict[str, int] = dict.fromkeys(QUOTAS, 0)
         # client marks created per (client, UTC day) and the flapping mark
         self._day: dict[tuple[str, int], int] = {}
@@ -412,7 +420,10 @@ class MarkIndex:
     def _insert(self, mark: Mark) -> None:
         quota = mark.quota
         self.marks[mark.seq] = mark
-        heapq.heappush(self._heaps[quota], (mark.ts, mark.seq))
+        if mark.is_open:
+            self._open[quota].add(mark.seq)
+        else:
+            heapq.heappush(self._heaps[quota], (mark.ts, mark.seq))
         self._count[quota] += 1
         if mark.ref is not None:
             self._refs[mark.ref] = mark.seq
@@ -433,13 +444,22 @@ class MarkIndex:
                 self._flap[(mark.client, int(mark.ts // DAY_S))] = mark.seq
 
     def _make_room(self, quota: str) -> None:
-        """Evict the oldest marks of ``quota`` until one more fits."""
+        """Evict the oldest marks of ``quota`` until one more fits: closed
+        marks first, an open interval only when nothing else is left (its
+        owner sees it gone and books the end without it)."""
         heap = self._heaps[quota]
-        while self._count[quota] >= self.quotas[quota] and heap:
-            _ts, seq = heapq.heappop(heap)
-            mark = self.marks.get(seq)
-            if mark is None or mark.quota != quota:
-                continue  # stale heap entry
+        opened = self._open[quota]
+        while self._count[quota] >= self.quotas[quota]:
+            if heap:
+                _ts, seq = heapq.heappop(heap)
+                mark = self.marks.get(seq)
+                if mark is None or mark.quota != quota or mark.is_open:
+                    continue  # stale heap entry
+            elif opened:
+                seq = min(opened, key=lambda s: (self.marks[s].ts, s))
+                self.counters["evicted_open"] += 1
+            else:
+                return
             self._delete(seq)
             self.counters[f"evicted_{quota}"] += 1
 
@@ -549,6 +569,9 @@ class MarkIndex:
             return False
         mark.end = max(mark.ts, to_ms(end) / 1000)
         mark.end_state = state
+        quota = mark.quota
+        self._open[quota].discard(mark.seq)
+        heapq.heappush(self._heaps[quota], (mark.ts, mark.seq))
         self.touched.add(mark.seq)
         self.changed = True
         return True
@@ -575,6 +598,7 @@ class MarkIndex:
         if mark is None:
             return None
         self._count[mark.quota] -= 1
+        self._open[mark.quota].discard(seq)
         if mark.ref is not None and self._refs.get(mark.ref) == seq:
             del self._refs[mark.ref]
         self.changed = True
@@ -585,7 +609,9 @@ class MarkIndex:
         heap = self._heaps[quota]
         if len(heap) > 2 * self._count[quota] + 64:
             self._heaps[quota] = [
-                (m.ts, m.seq) for m in self.marks.values() if m.quota == quota
+                (m.ts, m.seq)
+                for m in self.marks.values()
+                if m.quota == quota and not m.is_open
             ]
             heapq.heapify(self._heaps[quota])
 
@@ -616,6 +642,14 @@ class MarkIndex:
             for key in [k for k in table if k[0] == client]:
                 del table[key]
         self.counters["forgotten"] += dropped
+        return dropped
+
+    def forget_router(self, router: str) -> int:
+        """Delete every mark of a removed router (also as a roam peer)."""
+        dropped = self.remove_where(
+            lambda m: m.router != router and router not in (m.peers or ())
+        )
+        self.counters["router_removed"] += dropped
         return dropped
 
     def clear(self, *, clients_only: bool) -> int:

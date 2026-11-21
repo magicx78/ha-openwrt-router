@@ -330,6 +330,10 @@ async def test_off_answers_off_and_reads_registers_and_stores_nothing(
         "omitted_client_marks": 0,
         "truncated": False,
         "next_until": None,
+        # additive (1.51.0)
+        "next_cursor": None,
+        "spanning": [],
+        "spanning_truncated": False,
     }
     assert plain.data["status"] == "off"
     hass.data.pop(_PANEL_ACCESS_KEY)

@@ -131,8 +131,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # Network Time Machine (Phases B/C): the two admin actions; they answer
     # with an error while the Time Machine is off.
     try:
-        from .tm_engine import async_register_time_machine_services
+        from .tm_engine import async_register_time_machine_services, note_ha_start
 
+        note_ha_start(hass)
         async_register_time_machine_services(hass)
     except Exception as err:  # noqa: BLE001 - the routers work without it
         _LOGGER.warning(
@@ -793,9 +794,10 @@ async def async_remove_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
         )
     # --- Enterprise core (part 1): the router record is orphaned, not deleted
     # (history stays; it can be adopted by a new entry).
+    router_id = None
     try:
         if _enterprise_core is not None:
-            await _enterprise_core.async_remove_entry_core(hass, entry)
+            router_id = await _enterprise_core.async_remove_entry_core(hass, entry)
     except Exception:
         _LOGGER.warning(
             "Enterprise core: could not orphan the router record of '%s'",
@@ -803,6 +805,17 @@ async def async_remove_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
             exc_info=True,
         )
     # --- end enterprise core
+    # --- Network Time Machine (1.51.0): the router's own marks go too
+    try:
+        from .tm_engine import async_remove_router
+
+        await async_remove_router(hass, router_id)
+    except Exception:
+        _LOGGER.warning(
+            "Could not remove the Time Machine marks of '%s'",
+            entry.title,
+            exc_info=True,
+        )
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> None:

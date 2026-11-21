@@ -185,3 +185,40 @@ async def async_backup_store(hass: HomeAssistant, store: Any, key: str) -> bool:
             path,
         )
     return copied
+
+
+def _remove_copies(path: Any) -> int:
+    """Delete ``<path>.bak`` and every ``<path>.corrupt.*`` (executor)."""
+    if not isinstance(path, str) or not path:
+        return 0
+    directory, base = os.path.split(path)
+    try:
+        names = os.listdir(directory or ".")
+    except OSError:
+        return 0
+    removed = 0
+    for name in names:
+        if name == base + ".bak" or name.startswith(base + CORRUPT_INFIX):
+            try:
+                os.remove(os.path.join(directory, name))
+            except FileNotFoundError:
+                continue
+            removed += 1
+    return removed
+
+
+async def async_remove_copies(hass: HomeAssistant, store: Any, key: str) -> int:
+    """Delete the ``.bak`` / ``.corrupt.*`` copies of a store (count).
+
+    For data the user asked to delete: an old copy must not keep it
+    (Time Machine review K4). Never raises.
+    """
+    try:
+        return int(
+            await hass.async_add_executor_job(
+                _remove_copies, getattr(store, "path", None)
+            )
+        )
+    except Exception:
+        _LOGGER.warning("Store %s: its old copies were not deleted", key, exc_info=True)
+        return 0

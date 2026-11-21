@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -61,6 +62,7 @@ from .tm_marks import (
     END_UNKNOWN,
     REF_KINDS,
     RETENTION_S,
+    MarkIndex,
     to_ms,
     valid_router_id,
 )
@@ -77,9 +79,13 @@ MODULE: Final = "time_machine"
 EVENT_PREFIX: Final = "time_machine."
 TICK_S: Final = 300.0
 HEARTBEAT_S: Final = 900.0
+_PSEUDONYM: Final = re.compile(r"tmc_[0-9a-f]{16}")
 CLOCK_JUMP_S: Final = 300.0  # plan §5.4
 GAP_MIN_S: Final = 120.0  # an observation gap shorter than this is dropped
 UNLOAD_GAP_MIN_S: Final = 600.0
+# When the integration was set up in this HA run (``async_setup``; review
+# K10): the end of an HA gap even if no router could be loaded at first.
+DATA_HA_STARTED: Final = "openwrt_router_time_machine_ha_started"
 DEBOUNCE_POLLS: Final = 2
 CHECKPOINT_MAX: Final = 4000
 
@@ -323,15 +329,36 @@ class TimeMachine:
         else:
             # ``stop``: HA shut down cleanly; None: the last heartbeat before
             # an unclean end (its start is then only known to HEARTBEAT_S).
+            # HA itself may have run long before the first router loaded
+            # (all unreachable at the start, K10): the HA gap ends at HA's
+            # start, the rest is an observation gap ``unloaded``.
+            started = self.hass.data.get(DATA_HA_STARTED)
+            end = now
+            if (
+                isinstance(started, float)
+                and saved_at <= started
+                and now - started >= UNLOAD_GAP_MIN_S
+            ):
+                end = started
+                index.add(
+                    ts=started,
+                    kind="observation_gap",
+                    router=None,
+                    severity="info",
+                    code="unloaded",
+                    end=now,
+                    end_state=END_CLOSED,
+                    params={"gap_s": round(now - started)},
+                )
             index.add(
                 ts=saved_at,
                 kind="ha_gap",
                 router=None,
                 severity="info" if stop == STOP_HA else "warning",
                 code="restart" if stop == STOP_HA else "unclean",
-                end=now,
+                end=end,
                 end_state=END_CLOSED,
-                params={"gap_s": round(gap), "clean": stop == STOP_HA},
+                params={"gap_s": round(end - saved_at), "clean": stop == STOP_HA},
                 derived=stop != STOP_HA,
             )
 
@@ -367,6 +394,9 @@ class TimeMachine:
         if self.loaded:
             self.store.cover_until(now)
             await self.store.async_flush(reason)
+        if reason == STOP_DISABLED:
+            # the client histories are deleted: no old copy keeps them (K4)
+            await self.store.async_remove_copies()
         self.store.closed = True
 
     @callback
@@ -498,6 +528,7 @@ class TimeMachine:
             await self.async_detach_clients()
             if self._drop_clients():
                 self.store.schedule(0)
+            await self.store.async_remove_copies()
             return
         await self.async_sync_clients()
 
@@ -616,13 +647,13 @@ class TimeMachine:
         elif fleet_since is None and self._lan_seq is not None:
             mark = index.get(self._lan_seq)
             self._lan_seq = None
-            if mark is not None and index.close(mark.seq, now):
+            if _ends(index, mark, now):
                 index.add(
                     ts=now,
                     kind="lan_up",
                     router=None,
                     code="lan_reachable",
-                    params={"duration_s": round(now - mark.ts)},
+                    params=_duration(mark, now),
                 )
             changed = True
         for entry_id, outage in view.down.items():
@@ -651,13 +682,13 @@ class TimeMachine:
         for entry_id in [e for e in self._outage_seq if e not in view.down]:
             seq = self._outage_seq.pop(entry_id)
             mark = index.get(seq)
-            if mark is not None and index.close(seq, now):
+            if _ends(index, mark, now):
                 index.add(
                     ts=now,
                     kind="router_up",
-                    router=mark.router,
+                    router=mark.router if mark else self.router_id(entry_id),
                     code="reachable",
-                    params={"duration_s": round(now - mark.ts)},
+                    params=_duration(mark, now),
                 )
             changed = True
         if changed:
@@ -751,13 +782,13 @@ class TimeMachine:
             seq = router.radio_down.pop(key, None)
             if seq is not None:
                 mark = index.get(seq)
-                if mark is not None and index.close(seq, now):
+                if _ends(index, mark, now):
                     index.add(
                         ts=now,
                         kind="radio_up",
                         router=rid,
                         code="radio_on",
-                        params={"duration_s": round(now - mark.ts), "channel": chan},
+                        params={**_duration(mark, now), "channel": chan},
                     )
                 changed = True
             if before is not None and before != (chan, width):
@@ -954,6 +985,22 @@ class TimeMachine:
         }
 
 
+def _ends(index: MarkIndex, mark: Any, now: float) -> bool:
+    """Close an outage-like interval; True when its end is to be booked.
+
+    A mark evicted while open (only when its quota held nothing else,
+    review S2) still gets its end mark, without a duration: no hanging
+    reference, no invented start.
+    """
+    if mark is None:
+        return True
+    return index.close(mark.seq, now)
+
+
+def _duration(mark: Any, now: float) -> dict[str, int]:
+    return {} if mark is None else {"duration_s": round(now - mark.ts)}
+
+
 def _band_num(key: str) -> int | float:
     """``2.4g0`` -> 2.4, ``5g1`` -> 5, ``6g0`` -> 6."""
     head = key.split("g", 1)[0]
@@ -1064,12 +1111,43 @@ async def async_purge_clients(hass: HomeAssistant) -> int:
     write only if there were any)."""
     store = TimeMachineStore(hass)
     result = await store.async_load()
+    # an unreadable file is left alone; its old copies go either way (K4)
+    await store.async_remove_copies()
     if result.failed:
         return 0
     dropped = store.index.clear(clients_only=True)
     if dropped:
         await store.async_flush(result.stop or STOP_DISABLED)
     return dropped
+
+
+async def async_remove_router(hass: HomeAssistant, router_id: str | None) -> int:
+    """A router was removed from HA: delete its marks (review K4, like the
+    network intelligence does). The running engine drops them; without one
+    the file is edited (one read, one write only if there were any)."""
+    if not router_id:
+        return 0
+    async with _lock(hass):
+        engine = async_get_time_machine(hass)
+        if engine is not None and engine.loaded and not engine.closed:
+            store = engine.store
+            dropped = engine.index.forget_router(router_id)
+            store.state.pop(router_id, None)
+            if dropped:
+                store.schedule(0)
+        else:
+            store = TimeMachineStore(hass)
+            result = await store.async_load()
+            if result.failed:
+                return 0
+            dropped = store.index.forget_router(router_id)
+            had_state = store.state.pop(router_id, None) is not None
+            if dropped or had_state:
+                await store.async_flush(result.stop or STOP_DISABLED)
+        if dropped:
+            # an old copy may still hold the router's client sessions
+            await store.async_remove_copies()
+        return dropped
 
 
 # --- actions (administrators only) ------------------------------------------------
@@ -1092,28 +1170,38 @@ def _service_error(key: str) -> Exception:
     return ServiceValidationError(translation_domain=DOMAIN, translation_key=key)
 
 
-async def async_forget_client(hass: HomeAssistant, mac: Any) -> dict[str, Any]:
-    """Delete every mark of one client (by MAC; the MAC is not kept)."""
+async def async_forget_client(
+    hass: HomeAssistant, mac: Any = None, client: Any = None
+) -> dict[str, Any]:
+    """Delete every mark of one client, by MAC (not kept) or by its
+    pseudonym ``tmc_…`` (review K2: exactly one of both)."""
     from homeassistant.exceptions import HomeAssistantError
 
     from .core_masking import pseudonymise_identifier
 
+    if (mac is None) == (client is None):
+        raise _service_error("time_machine_mac_or_client")
     engine = async_get_time_machine(hass)
     if engine is None or not engine.loaded:
         raise _service_error("time_machine_off")
-    key = await engine.async_module_key()
-    if key is None:
-        raise HomeAssistantError(
-            translation_domain=DOMAIN, translation_key="time_machine_no_key"
-        )
-    try:
-        client = pseudonymise_identifier("client", mac, key)[4:]
-    except (TypeError, ValueError):
-        raise _service_error("time_machine_invalid_mac") from None
-    if engine.recorder is not None:
-        deleted = engine.recorder.forget_mac(mac)
+    if client is not None:
+        if not isinstance(client, str) or not _PSEUDONYM.fullmatch(client):
+            raise _service_error("time_machine_invalid_client")
+        hexed = client[4:]
     else:
-        deleted = engine.index.forget_client(client)
+        key = await engine.async_module_key()
+        if key is None:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="time_machine_no_key"
+            )
+        try:
+            hexed = pseudonymise_identifier("client", mac, key)[4:]
+        except (TypeError, ValueError):
+            raise _service_error("time_machine_invalid_mac") from None
+    if engine.recorder is not None:
+        deleted = engine.recorder.forget_client(hexed)
+    else:
+        deleted = engine.index.forget_client(hexed)
     now = engine.clock()
     engine.index.add(
         ts=now,
@@ -1124,6 +1212,7 @@ async def async_forget_client(hass: HomeAssistant, mac: Any) -> dict[str, Any]:
     )
     engine.emit("time_machine.client_forgotten", data={"deleted": deleted})
     engine.store.schedule(0)
+    await engine.store.async_remove_copies()
     return {"deleted": deleted, "not_deleted_in": list(NOT_FORGOTTEN_IN)}
 
 
@@ -1160,7 +1249,15 @@ async def async_clear_history(
         data={"deleted": deleted, "clients_only": clients_only},
     )
     engine.store.schedule(0)
+    await engine.store.async_remove_copies()
     return {"deleted": deleted}
+
+
+@callback
+def note_ha_start(hass: HomeAssistant) -> None:
+    """``async_setup``: remember when this HA run set the integration up
+    (one float in ``hass.data``; nothing else happens while it is off)."""
+    hass.data.setdefault(DATA_HA_STARTED, time.time())
 
 
 @callback
@@ -1177,7 +1274,9 @@ def async_register_time_machine_services(hass: HomeAssistant) -> None:
         return
 
     async def _forget(call: ServiceCall) -> dict[str, Any]:
-        return await async_forget_client(hass, call.data["mac"])
+        return await async_forget_client(
+            hass, call.data.get("mac"), call.data.get("client")
+        )
 
     async def _clear(call: ServiceCall) -> dict[str, Any]:
         return await async_clear_history(hass, call.data["clients_only"])
@@ -1187,8 +1286,14 @@ def async_register_time_machine_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_TIME_MACHINE_FORGET_CLIENT,
         _forget,
+        # exactly one of both (checked in async_forget_client, review K2)
         schema=vol.Schema(
-            {vol.Required("mac"): vol.All(cv.string, vol.Length(max=64))}
+            {
+                vol.Exclusive("mac", "client"): vol.All(cv.string, vol.Length(max=64)),
+                vol.Exclusive("client", "client"): vol.All(
+                    cv.string, vol.Length(max=20)
+                ),
+            }
         ),
         supports_response=SupportsResponse.OPTIONAL,
     )
@@ -1215,6 +1320,8 @@ __all__ = [
     "async_purge_clients",
     "async_register_time_machine_services",
     "async_release_time_machine",
+    "async_remove_router",
     "async_setup_time_machine",
     "fleet_option",
+    "note_ha_start",
 ]

@@ -357,8 +357,11 @@ async def async_unload_entry_core(hass: HomeAssistant, entry: ConfigEntry) -> No
     await _async_release(hass, core)
 
 
-async def async_remove_entry_core(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Orphan the removed entry's record (kept with its history)."""
+async def async_remove_entry_core(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> str | None:
+    """Orphan the removed entry's record (kept with its history); returns
+    its router id (None without one) for the Time Machine (1.51.0)."""
     if not isinstance(hass.data, dict):
         raise TypeError("hass.data is not a dict; enterprise core not started")
     while True:
@@ -371,7 +374,7 @@ async def async_remove_entry_core(hass: HomeAssistant, entry: ConfigEntry) -> No
             core.forget_entry(entry.entry_id)
             record = await core.registry.async_orphan_entry(entry.entry_id)
             await _async_archive_versions(core, record, entry.entry_id)
-            return
+            return record.router_id if record is not None else None
     # No core running (last entry already unloaded): edit the stores with a
     # temporary core under a claim, so a racing setup loads after the write.
     slot = _slot(hass)
@@ -385,6 +388,7 @@ async def async_remove_entry_core(hass: HomeAssistant, entry: ConfigEntry) -> No
         await temp.async_flush()
     finally:
         _release_claim(slot, claim)
+    return record.router_id if record is not None else None
 
 
 async def _async_archive_versions(
