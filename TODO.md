@@ -116,17 +116,20 @@ Branch `claude/traffic-analytics-d7ae50`. Nutzerdoku: `docs/traffic-analytics.md
       eine eigene Collector-Zeitreihe neben der eigenen Messung; heute `kind_not_supported`.
 - [ ] **W1** NI: öffentliche Schnittstelle für Kandidaten, damit Traffic-Auffälligkeiten
       NI-Vorfälle werden (heute nur Kern-Ereignisse).
-- [ ] **W2** Security Center: `traffic_analytics.indicator` als Indikatorquelle annehmen.
 - [ ] **W3** Core: gemeinsames Client-Pseudonym über Module (heute ergibt dieselbe MAC in
       Traffic und Security verschiedene `cli_…`).
 - [ ] **W4** Core: `traffic_analytics` und `traffic.` als Namensräume reservieren.
 - [ ] **W5** Core: Quote je Modul im Audit-Ring.
-- [ ] **W6** WiFi RF: lesende API je Station und Radio, verbindliche `radio_id` (heute trägt
-      ein Funk-Messpunkt den Schnittstellennamen).
+- [ ] **W6 (Rest)** WiFi RF: lesende API je Station für die Byte-Zähler (`AssocCounters`),
+      damit Traffic kein eigenes `iwinfo assoclist` braucht. Airtime je Radio, Retry-Rate je
+      Client und die Radio-Kennung gibt es seit 1.49.1.
 - [ ] **W7** Netzwerkdiagnose: Latenz/Verlust je Router für die Korrelation.
 - [ ] **W8** `client_engine`: kabelgebundene Clients (heute nur WLAN).
-- [ ] **Außerhalb des Pakets:** der conntrack-Ersatzweg von `api.get_active_connections`
-      liest ohne Obergrenze (Bauplan §12 Risiko 3, Frage F2); nicht in 1.49.0 geändert.
+- [ ] **W2 (Rest)** Security Center: Traffic-Hinweise einem Gerät zuordnen und als
+      Vertrauensindikator zählen; braucht W3 (heute nur Zeitleisten-Eintrag, 1.49.1).
+- [ ] **conntrack-Ersatzweg am Gerät prüfen** (nur lesend, mit Freigabe): wie viel rpcd von
+      `/proc/net/nf_conntrack` liefert; seit 1.49.1 begrenzt, ein abgeschnittener Wert gilt
+      als unbekannt.
 
 ### Security Center (Plan `docs/plans/2026-11-17-security-center.md`, 1.46.0)
 

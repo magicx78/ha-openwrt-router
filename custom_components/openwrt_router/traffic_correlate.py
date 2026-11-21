@@ -48,9 +48,12 @@ candidate with the module key). The evidence (point, window, bucket excerpt
 of the hour before) is kept in a bounded book (100 entries, every discard
 counted) and resolved by :meth:`EvidenceBook.resolve`. Indicators that need
 a flow source say ``unavailable``/``needs_flow_source``. A traffic anomaly
-is a statistical deviation and never called an attack; the Security Center
-does not take these events yet (wish W2), so its state is
-``not_connected``. Traffic never suppresses or deduplicates events of
+is a statistical deviation and never called an attack. The Security Center
+takes these events as timeline notes with the ``evidence_ref`` (wish W2,
+1.49.1); the link state is read at run time from the center
+(``accepts_traffic_indicators``): ``ready`` while it takes them,
+``not_ready``/``module_disabled`` while it is off, ``module_missing``
+without it. Traffic never suppresses or deduplicates events of
 another module: it only emits its own, with its own dedup keys.
 
 **Read API** (:class:`TrafficReadApi`, version 1): plain dicts with
@@ -67,7 +70,6 @@ import hmac
 import logging
 import math
 import re
-import time
 from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -394,17 +396,64 @@ class DiagnosticsAdapter:
 
 
 class WifiRfLike(Protocol):
-    """The read API wished from the WiFi RF center (W6; not on main yet)."""
+    """The WiFi RF read API (W6, ``rf_center.RfCenter``, version 1)."""
+
+    status: str
 
     def radio_utilization(
-        self, router_id: str, window_s: int
+        self, router_id: str, window_s: float, interfaces: Iterable[str] = ()
     ) -> Mapping[str, Mapping[str, Any]]:
-        """radio_id -> ``UtilizationSummary.as_dict()``."""
+        """radio_id -> utilization entry (``measured_at``, ``interfaces``)."""
 
     def client_retry_rates(
-        self, router_id: str, window_s: int
+        self, router_id: str, window_s: float
     ) -> Mapping[str, Mapping[str, Any]]:
-        """client_ref -> ``Metric.as_dict()`` of the retry rate."""
+        """client_ref -> retry rate entry (``radio_id``, ``measured_at``)."""
+
+
+# Station point ids named per radio at most (the count is always complete).
+MAX_RF_POINT_IDS = 16
+
+
+@dataclass(frozen=True, slots=True)
+class RadioRfFacts:
+    """Airtime and retransmissions of one radio, linked to traffic points.
+
+    ``radio_id`` is WiFi RF's radio identity (UCI radio name, unique with
+    the router id); ``point_ids`` are the traffic station points measured
+    at the radio's AP interfaces (pseudonyms only, at most
+    :data:`MAX_RF_POINT_IDS`; ``points_linked`` is the full count).
+    """
+
+    radio_id: str
+    band: str | None
+    state: str
+    reason: str | None
+    measured_at: float | None
+    airtime_mean_pct: float | None
+    airtime_high: bool | None
+    sustained_overload: bool | None
+    clients_measured: int
+    clients_high_retry: int
+    point_ids: tuple[str, ...] = ()
+    points_linked: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Plain dict (pseudonyms and figures only)."""
+        return {
+            "radio_id": self.radio_id,
+            "band": self.band,
+            "state": self.state,
+            "reason": self.reason,
+            "measured_at": self.measured_at,
+            "airtime_mean_pct": self.airtime_mean_pct,
+            "airtime_high": self.airtime_high,
+            "sustained_overload": self.sustained_overload,
+            "clients_measured": self.clients_measured,
+            "clients_high_retry": self.clients_high_retry,
+            "point_ids": list(self.point_ids),
+            "points_linked": self.points_linked,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,29 +467,31 @@ class RfFacts:
     clients_measured: int
     clients_high_retry: int
     retries_high: bool | None
+    per_radio: tuple[RadioRfFacts, ...] = ()
+
+
+def _short(value: Any) -> str | None:
+    return value[:32] if isinstance(value, str) and value else None
 
 
 class WifiRfAdapter:
-    """Reads airtime and retransmissions per router from the WiFi RF center.
+    """Reads airtime and retransmissions per radio from the WiFi RF center.
 
-    Ausgerichtet an main 1.48.0 (``rf_center.RfCenter`` in
-    ``hass.data[const.DATA_WIFI_RF_CENTER]``). The center has no read API
-    for other modules yet (wish W6: ``radio_utilization`` /
-    ``client_retry_rates``). Until it has, the adapter reads the same public
-    evaluation state ``wifi_rf_entities`` reads:
+    Uses the center's read API (W6, ``rf_center.RfCenter`` in
+    ``hass.data[const.DATA_WIFI_RF_CENTER]``): ``status`` /
+    ``not_ready_reasons()`` for the module state, ``radio_utilization`` and
+    ``client_retry_rates`` for the figures. Both only read the center's last
+    evaluation: no extra router call.
 
-    * ``status`` (``off`` / ``not_ready`` / ``ready``) and
-      ``not_ready_reasons()``;
-    * ``results``: ``RadioRef -> RadioResult`` of the latest poll, with
-      ``summary`` (``rf_utilization.UtilizationSummary`` of the center's
-      fixed one-hour window: ``mean``, ``valid_count``,
-      ``sustained_overload``), ``assessments`` (each with ``retry_rate``,
-      an ``rf_models.Metric``) and ``measured_at``.
+    **Link to traffic points.** Traffic station points carry the AP
+    interface name they were measured at. The adapter hands these names to
+    ``radio_utilization`` (``interfaces``); the center answers per radio
+    with the names that belong to it, so every radio gets the ids of its
+    station points. Only pseudonyms (``point_id``, ``client_ref``) and RF's
+    radio id leave the adapter; no interface name, no MAC.
 
-    Only counts leave the adapter: no MAC, no client identity. Results older
-    than the requested window are ignored. A center that offers the W6
-    methods is read through them instead. Any other shape is
-    ``not_ready``/``interface_mismatch``; nothing of WiFi RF is imported.
+    A center without the read API is ``not_ready``/``interface_mismatch``;
+    nothing of WiFi RF is imported.
     """
 
     def __init__(self, lookup: Callable[[], Any]) -> None:
@@ -468,14 +519,14 @@ class WifiRfAdapter:
         if center is None:
             return self._status(SOURCE_MODULE_MISSING, REASON_MODULE_NOT_LOADED), None
         try:
-            if self._has_w6(center):
+            if not self._has_w6(center):
+                return self._status(SOURCE_NOT_READY, REASON_INTERFACE_MISMATCH), None
+            state = getattr(center, "status", None)
+            if state is None:  # no state to read: the switch alone
                 if getattr(center, "enabled", True) is False:
                     return self._status(SOURCE_NOT_READY, REASON_MODULE_DISABLED), None
                 return SourceStatus(SRC_WIFI_RF, SOURCE_READY), center
-            state = getattr(center, "status", None)
-            if not isinstance(state, str) or not isinstance(
-                getattr(center, "results", None), Mapping
-            ):
+            if not isinstance(state, str):
                 return self._status(SOURCE_NOT_READY, REASON_INTERFACE_MISMATCH), None
             if state == "off":
                 return self._status(SOURCE_NOT_READY, REASON_MODULE_DISABLED), None
@@ -493,85 +544,22 @@ class WifiRfAdapter:
         return SourceStatus(SRC_WIFI_RF, SOURCE_READY), center
 
     @staticmethod
-    def _from_results(
-        center: Any, router_id: str, window_s: int
-    ) -> tuple[dict[str, Mapping[str, Any]], list[Mapping[str, Any]]]:
-        """Radio summaries and retry metrics of ``router_id`` (no identities)."""
-        clock = getattr(center, "clock", None)
-        now = clock() if callable(clock) else time.time()
-        oldest = (now - window_s) if isinstance(now, int | float) else None
-        radios: dict[str, Mapping[str, Any]] = {}
-        retries: list[Mapping[str, Any]] = []
-        for res in list(center.results.values()):
-            ref = res.ref
-            if getattr(ref, "router_id", None) != router_id:
-                continue
-            radio_id = getattr(ref, "radio_id", None)
-            at = _num(getattr(res, "measured_at", None))
-            if not isinstance(radio_id, str) or at is None:
-                continue
-            if oldest is not None and at < oldest:
-                continue
-            util = res.summary
-            radios[radio_id] = (
-                {}
-                if util is None
-                else {
-                    "mean": getattr(util, "mean", None),
-                    "valid_count": getattr(util, "valid_count", None),
-                    "sustained_overload": getattr(util, "sustained_overload", None),
-                }
+    def _radio(
+        radio_id: str,
+        entry: Mapping[str, Any],
+        retries: Sequence[Mapping[str, Any]],
+        interfaces: Mapping[str, Sequence[str]],
+    ) -> RadioRfFacts:
+        mean = _num(entry.get("mean"))
+        valid = _num(entry.get("valid_count")) or 0
+        overload = entry.get("sustained_overload")
+        overload = overload if isinstance(overload, bool) else None
+        usable = mean is not None and valid >= RF_MIN_VALID
+        airtime_high: bool | None = None
+        if usable or overload is True:
+            airtime_high = overload is True or (
+                mean is not None and mean >= AIRTIME_HIGH_PCT
             )
-            for assessment in res.assessments or ():
-                metric = assessment.retry_rate
-                state = getattr(metric, "state", None)
-                retries.append(
-                    {
-                        "value": getattr(metric, "value", None),
-                        "state": getattr(state, "value", state),
-                    }
-                )
-        return radios, retries
-
-    def facts(
-        self, router_id: str, window_s: int = CORR_WINDOW_S
-    ) -> tuple[SourceStatus, RfFacts | None]:
-        """Airtime/retries of ``router_id`` over ``window_s``."""
-        status, center = self.module()
-        if center is None:
-            return status, None
-        try:
-            if self._has_w6(center):
-                radios = center.radio_utilization(router_id, window_s)
-                by_ref = center.client_retry_rates(router_id, window_s)
-                if not isinstance(radios, Mapping) or not isinstance(by_ref, Mapping):
-                    return (
-                        self._status(SOURCE_NOT_READY, REASON_INTERFACE_MISMATCH),
-                        None,
-                    )
-                retries = [
-                    m
-                    for ref, m in by_ref.items()
-                    if valid_client_ref(ref) and isinstance(m, Mapping)
-                ]
-            else:
-                radios, retries = self._from_results(center, router_id, window_s)
-        except Exception as err:  # noqa: BLE001 - optional module
-            _LOGGER.debug("WiFi RF read failed (%s)", type(err).__name__)
-            return self._status(SOURCE_NOT_READY, REASON_READ_FAILED), None
-        busiest: tuple[float, str] | None = None
-        overload = False
-        for radio_id, summary in radios.items():
-            if not isinstance(summary, Mapping) or not isinstance(radio_id, str):
-                continue
-            mean = _num(summary.get("mean"))
-            valid = _num(summary.get("valid_count")) or 0
-            if summary.get("sustained_overload") is True:
-                overload = True
-            if mean is None or valid < RF_MIN_VALID:
-                continue
-            if busiest is None or mean > busiest[0]:
-                busiest = (mean, radio_id[:32])
         measured = high = 0
         for metric in retries:
             value = _num(metric.get("value"))
@@ -580,6 +568,83 @@ class WifiRfAdapter:
             measured += 1
             if value >= RETRY_HIGH_RATE:
                 high += 1
+        points: list[str] = []
+        for name in entry.get("interfaces") or ():
+            for pid in interfaces.get(name, ()) if isinstance(name, str) else ():
+                if valid_point_id(pid) and pid not in points:
+                    points.append(pid)
+        points.sort()
+        state = entry.get("state")
+        reason = entry.get("reason")
+        if mean is not None and not usable and reason is None:
+            reason = REASON_TOO_FEW_SAMPLES
+        return RadioRfFacts(
+            radio_id=radio_id[:32],
+            band=_short(entry.get("band")),
+            state=_short(state) or "unknown",
+            reason=_short(reason),
+            measured_at=_num(entry.get("measured_at")),
+            airtime_mean_pct=round(mean, 2) if usable and mean is not None else None,
+            airtime_high=airtime_high,
+            sustained_overload=overload,
+            clients_measured=measured,
+            clients_high_retry=high,
+            point_ids=tuple(points[:MAX_RF_POINT_IDS]),
+            points_linked=len(points),
+        )
+
+    def facts(
+        self,
+        router_id: str,
+        window_s: int = CORR_WINDOW_S,
+        interfaces: Mapping[str, Sequence[str]] | None = None,
+    ) -> tuple[SourceStatus, RfFacts | None]:
+        """Airtime/retries of ``router_id`` over ``window_s``, per radio.
+
+        ``interfaces``: AP interface name -> traffic station point ids of
+        this router (for the link; the names never leave the adapter).
+        """
+        status, center = self.module()
+        if center is None:
+            return status, None
+        links = interfaces or {}
+        try:
+            radios = center.radio_utilization(router_id, window_s, sorted(links))
+            by_ref = center.client_retry_rates(router_id, window_s)
+            if not isinstance(radios, Mapping) or not isinstance(by_ref, Mapping):
+                return (
+                    self._status(SOURCE_NOT_READY, REASON_INTERFACE_MISMATCH),
+                    None,
+                )
+            retries: dict[str | None, list[Mapping[str, Any]]] = {}
+            for ref, metric in by_ref.items():
+                if valid_client_ref(ref) and isinstance(metric, Mapping):
+                    radio = metric.get("radio_id")
+                    key = radio if isinstance(radio, str) and radio in radios else None
+                    retries.setdefault(key, []).append(metric)
+            per_radio = tuple(
+                self._radio(rid, entry, retries.get(rid, ()), links)
+                for rid, entry in sorted(radios.items())
+                if isinstance(rid, str) and isinstance(entry, Mapping)
+            )
+        except Exception as err:  # noqa: BLE001 - optional module
+            _LOGGER.debug("WiFi RF read failed (%s)", type(err).__name__)
+            return self._status(SOURCE_NOT_READY, REASON_READ_FAILED), None
+        busiest: tuple[float, str] | None = None
+        overload = False
+        for radio in per_radio:
+            if radio.sustained_overload is True:
+                overload = True
+            mean = radio.airtime_mean_pct
+            if mean is not None and (busiest is None or mean > busiest[0]):
+                busiest = (mean, radio.radio_id)
+        unassigned = WifiRfAdapter._radio("", {}, retries.get(None, ()), {})
+        measured = unassigned.clients_measured + sum(
+            r.clients_measured for r in per_radio
+        )
+        high = unassigned.clients_high_retry + sum(
+            r.clients_high_retry for r in per_radio
+        )
         if busiest is None and not overload and measured == 0:
             return self._status(SOURCE_NO_DATA, REASON_TOO_FEW_SAMPLES), None
         airtime_high: bool | None = None
@@ -588,16 +653,35 @@ class WifiRfAdapter:
                 busiest is not None and busiest[0] >= AIRTIME_HIGH_PCT
             )
         return SourceStatus(SRC_WIFI_RF, SOURCE_READY), RfFacts(
-            radios=len(radios),
+            radios=len(per_radio),
             busiest_radio=None if busiest is None else busiest[1],
-            airtime_mean_pct=None if busiest is None else round(busiest[0], 2),
+            airtime_mean_pct=None if busiest is None else busiest[0],
             airtime_high=airtime_high,
             clients_measured=measured,
             clients_high_retry=high,
             retries_high=None
             if measured == 0
             else high >= 1 and high / measured >= RETRY_HIGH_SHARE,
+            per_radio=per_radio,
         )
+
+
+def _station_interfaces(
+    points: Iterable[MeasurementPoint],
+) -> dict[str, dict[str, list[str]]]:
+    """router_id -> AP interface name -> station point ids (for the RF link)."""
+    out: dict[str, dict[str, list[str]]] = {}
+    for point in points:
+        if (
+            point.scope is not Scope.STATION
+            or point.router_id is None
+            or point.radio_id is None
+        ):
+            continue
+        out.setdefault(point.router_id, {}).setdefault(point.radio_id, []).append(
+            point.point_id
+        )
+    return out
 
 
 # --- findings --------------------------------------------------------------------------------
@@ -1170,8 +1254,9 @@ class TrafficCorrelator:
                 findings.append(finding)
         rf_statuses: list[SourceStatus] = []
         if wifi_rf is not None:
+            stations = _station_interfaces(source.points())
             for rid in routers:
-                status, facts = wifi_rf.facts(rid)
+                status, facts = wifi_rf.facts(rid, interfaces=stations.get(rid))
                 rf_statuses.append(status)
                 if facts is not None:
                     found = self._rf_finding(rid, facts, now, status)
@@ -1366,7 +1451,11 @@ class TrafficCorrelator:
                     start=start,
                     end=end,
                     source=SRC_WIFI_RF,
-                    detail={"radio_id": facts.busiest_radio, "radios": facts.radios},
+                    detail={
+                        "radio_id": facts.busiest_radio,
+                        "radios": facts.radios,
+                        "per_radio": [r.to_dict() for r in facts.per_radio],
+                    },
                 )
             )
         if facts.retries_high is not None:
@@ -1687,9 +1776,17 @@ def indicator_availability(
 class SecurityIndicators:
     """Turns open volume candidates into indicator events with evidence."""
 
-    def __init__(self, emit: Callable[..., Any] | None = None) -> None:
-        """Publisher over ``emit`` (``ConfigurationApi.emit``; None: unbound)."""
+    def __init__(
+        self,
+        emit: Callable[..., Any] | None = None,
+        security: Callable[[], Any] | None = None,
+    ) -> None:
+        """Publisher over ``emit`` (``ConfigurationApi.emit``; None: unbound).
+
+        ``security`` looks up the Security Center (None: not loaded).
+        """
         self.emit = emit
+        self.security = security
         self.evidence = EvidenceBook()
         self._indicated: OrderedDict[str, str] = OrderedDict()
         self._hour: deque[float] = deque()
@@ -1703,6 +1800,26 @@ class SecurityIndicators:
                 key_ready=False,
             )
         )
+
+    def security_status(self) -> SourceStatus:
+        """Whether the Security Center takes the indicators now (W2)."""
+        try:
+            center = None if self.security is None else self.security()
+            if center is None:
+                return SourceStatus(
+                    SRC_SECURITY, SOURCE_MODULE_MISSING, REASON_MODULE_NOT_LOADED
+                )
+            accepts = getattr(center, "accepts_traffic_indicators", None)
+            if not isinstance(accepts, bool):
+                return SourceStatus(
+                    SRC_SECURITY, SOURCE_NOT_CONNECTED, REASON_NO_INDICATOR_INTAKE
+                )
+        except Exception as err:  # noqa: BLE001 - optional module
+            _LOGGER.debug("Security Center lookup failed (%s)", type(err).__name__)
+            return SourceStatus(SRC_SECURITY, SOURCE_NOT_READY, REASON_LOOKUP_FAILED)
+        if not accepts:
+            return SourceStatus(SRC_SECURITY, SOURCE_NOT_READY, REASON_MODULE_DISABLED)
+        return SourceStatus(SRC_SECURITY, SOURCE_READY)
 
     def _budget(self, point_id: str, indicator: str, now: float) -> bool:
         while self._hour and now - self._hour[0] >= 3600:
@@ -1828,11 +1945,12 @@ class SecurityIndicators:
                     "window_s": candidate.window_s,
                     "coverage": candidate.coverage.value,
                     "wording": INDICATOR_WORDING,
-                    "security_center": SOURCE_NOT_CONNECTED,
+                    "security_center": self.security_status().state,
                 },
                 # Entscheidung: not security_relevant - a statistical
                 # deviation must not crowd real security events out of the
-                # core's security ring; the Security Center has no intake yet.
+                # core's security ring; the Security Center gets every core
+                # event through ``subscribe`` anyway (W2).
                 security_relevant=False,
                 client_ref=candidate.client_ref,
                 confidence=candidate.confidence,
@@ -1868,9 +1986,7 @@ class SecurityIndicators:
             "published": self.counters["published"],
             "not_published": self.counters["not_published"],
             "not_published_reason": REASON_NOT_PUBLISHED if self.emit is None else None,
-            "security_center": SourceStatus(
-                SRC_SECURITY, SOURCE_NOT_CONNECTED, REASON_NO_INDICATOR_INTAKE
-            ).to_dict(),
+            "security_center": self.security_status().to_dict(),
             "indicators": {k: dict(v) for k, v in self.last_availability.items()},
             **dict(self.counters),
             **dict(self.evidence.counters),

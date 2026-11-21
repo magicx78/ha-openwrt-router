@@ -458,6 +458,7 @@ TREND_METHOD: Final = "theil_sen_daily_mean"
 # as literals so this module stays free of HA imports, a test pins them).
 DIAG_DATA_KEY: Final = "openwrt_router_net_diagnostics"
 WIFI_RF_DATA_KEY: Final = "openwrt_router_wifi_rf_center"
+SECURITY_DATA_KEY: Final = "openwrt_router_security_center"
 
 # Observation window of the bottleneck narrowing (recent hour, 5-min buckets).
 CORR_WINDOW_S: Final = 3600

@@ -414,8 +414,14 @@ verfügbar mit dem Grund `permission_denied`. Die Grundmessung läuft weiter.
 - Client-Zähler am AP sind kein Internetverbrauch.
 - Ohne bekannte Linkgeschwindigkeit gibt es keine Auslastung, nur Raten.
 - Auffälligkeiten erscheinen als Kern-Ereignisse und im Tab. Network Intelligence legt
-  daraus noch keine eigenen Vorfälle an, und das Security Center wertet die
-  Traffic-Hinweise noch nicht aus.
-- Funk-Messpunkte tragen noch den Schnittstellennamen als Kennung, nicht die Radio-ID des
-  WiFi-RF-Moduls.
+  daraus noch keine eigenen Vorfälle an.
+- Das Security Center nimmt die Traffic-Hinweise seit 1.49.1 als Eintrag in seiner Zeitleiste
+  (mit `evidence_ref`) an, höchstens 20 je Stunde. Ein Hinweis wird dort nie allein ein
+  Vorfall und zählt nicht für die Vertrauensstufe eines Geräts, weil dieselbe MAC in beiden
+  Modulen verschiedene Pseudonyme hat. Die Quelle „Security Center“ zeigt „bereit“, solange
+  das Security Center eingeschaltet und mit dem Kern verbunden ist, sonst den Grund.
+- Funk-Messpunkte tragen intern den Schnittstellennamen. Seit 1.49.1 ordnet WiFi RF über
+  seine Leseschnittstelle jedem Radio (Router-ID + UCI-Radioname) die Stations-Messpunkte zu;
+  die Korrelation nennt je Radio Airtime, Wiederholungen und die zugehörigen Punkt-IDs. Der
+  Schnittstellenname verlässt dabei keines der beiden Module.
 - Zusammengefasste Collector-Werte werden abgelehnt (Abschnitt 8.6).

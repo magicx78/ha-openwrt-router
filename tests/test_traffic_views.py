@@ -392,7 +392,7 @@ async def test_overview_contract_and_unknown_is_none(disks) -> None:
     assert data["wan_total"]["coverage"] == "partial"
     assert data["history"]["day_boundary"] == "utc"
     states = {s["module"]: s for s in data["correlation_sources"]}
-    assert states["security_center"]["state"] == "not_connected"
+    assert states["security_center"]["state"] == "module_missing"  # not loaded
     assert states["wifi_rf"]["state"] in {"module_missing", "not_ready"}
     flow = {s["source"]: s for s in data["flow_sources"]}
     assert flow["collector"]["state"] == "unavailable"

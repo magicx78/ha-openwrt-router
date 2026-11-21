@@ -337,8 +337,16 @@ LOG_DERIVED_SOURCES: Final = frozenset(
 
 # --- text hygiene and masking ------------------------------------------------
 
+# MACs in free text: colon, dash, Cisco dots and bare 12 hex (the forms of
+# mac_utils.is_mac), also glued to "_" or a non-hex letter (1.49.1). The hex
+# lookarounds keep longer hex runs (ids, pseudonyms, digests) intact.
 _MAC_RE = re.compile(
-    r"(?<![0-9A-Fa-f:-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![0-9A-Fa-f:-])"
+    r"(?<![0-9A-Fa-f:-])(?:"
+    r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}"
+    r"|[0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){5}"
+    r"|[0-9A-Fa-f]{4}(?:\.[0-9A-Fa-f]{4}){2}"
+    r"|[0-9A-Fa-f]{12}"
+    r")(?![0-9A-Fa-f:-])"
 )
 _IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 _IPV6_RE = re.compile(r"(?<![\w:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])")

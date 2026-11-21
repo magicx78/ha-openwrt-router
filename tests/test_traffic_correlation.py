@@ -261,7 +261,7 @@ def diag_view(hour: dict[str, Any], week: dict[str, Any] | None = None) -> dict:
 
 
 class FakeRf:
-    """Test double of a WiFi RF center (the W6 read API; see test_traffic_rf_adapter for main)."""
+    """Test double of the WiFi RF read API (W6; the real one: test_traffic_rf_adapter)."""
 
     def __init__(
         self,
@@ -271,7 +271,9 @@ class FakeRf:
         self.radios = radios
         self.retries = retries or {}
 
-    def radio_utilization(self, router_id: str, window_s: int) -> dict:
+    def radio_utilization(
+        self, router_id: str, window_s: int, interfaces: Any = ()
+    ) -> dict:
         return self.radios if router_id == RID else {}
 
     def client_retry_rates(self, router_id: str, window_s: int) -> dict:
@@ -781,7 +783,7 @@ def test_open_volume_candidate_becomes_indicator_with_evidence() -> None:
     assert kwargs["client_ref"] == REF
     assert kwargs["data"]["evidence_ref"] == refs[0]
     assert kwargs["data"]["indicator"] == IND_UNUSUAL_VOLUME
-    assert kwargs["data"]["security_center"] == SOURCE_NOT_CONNECTED
+    assert kwargs["data"]["security_center"] == SOURCE_MODULE_MISSING  # no lookup
     assert kwargs["dedup_key"] == f"{CLIENT.point_id}:{IND_UNUSUAL_VOLUME}"
     evidence = ind.evidence.resolve(refs[0])
     assert evidence is not None
@@ -836,7 +838,7 @@ def test_flow_indicators_unavailable_without_flow_source() -> None:
     states = ind.summary()["indicators"]
     assert states[IND_OUTBOUND]["state"] == "learning"
     assert states[IND_CONNECTION_RATE]["state"] == "covered_by_network_intelligence"
-    assert ind.summary()["security_center"]["state"] == SOURCE_NOT_CONNECTED
+    assert ind.summary()["security_center"]["state"] == SOURCE_MODULE_MISSING
 
 
 def test_only_open_volume_candidates_are_indicators() -> None:
