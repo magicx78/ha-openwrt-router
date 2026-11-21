@@ -261,6 +261,12 @@ Regeln:
   unberührt.
 - **Geringe Aussagekraft** (`low_confidence`), wenn die Abdeckung unter 0,5 liegt, die
   Beobachtung kürzer als 1 h ist oder es keinen Wert gibt. Der Wert wird trotzdem gezeigt.
+- **Abdeckung deckelt den Wert** (seit 1.49.3, nach dem Muster des Security Centers): unter
+  einer Abdeckung von 0,25 gibt es **keinen** Wert (`None`, „unbekannt“); darüber höchstens
+  `50 + 50 × Abdeckung`, unter voller Abdeckung höchstens 99, 100 nur bei voller Abdeckung.
+  Vorher bekam ein Access Point ohne WAN-Messung und ohne Proben, gestützt nur auf
+  „0 Neustarts“ (Abdeckung rund 7 %), den Wert 100. Solche Router zählen jetzt als nicht
+  bewertet und fließen nicht in den Flottenwert ein.
 - **Gesamtnetz:** gewichteter Mittelwert der gemessenen Router (Gewicht 1), aber höchstens 25
   Punkte über dem schlechtesten Mitglied, das nicht gering aussagekräftig ist: ein schlechter
   Router versteckt sich nicht hinter guten. Ein nicht gemessenes Mitglied senkt die Abdeckung,

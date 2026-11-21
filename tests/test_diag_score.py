@@ -213,8 +213,9 @@ def test_case_17_missing_measurements_lower_coverage_not_score() -> None:
     assert comp(partial, COMP_WAN).status == STATUS_UNKNOWN
     assert comp(partial, COMP_WAN).score is None
     assert comp(partial, COMP_DNS).status == STATUS_UNKNOWN
-    # (20*80 + 15*80 + 10*85 + 10*80 + 5*100) / 60: the missing parts add nothing
-    assert partial.score == pytest.approx(82.5)
+    # (20*80 + 15*80 + 10*85 + 10*80 + 5*100) / 60 = 82.5: the missing parts add
+    # nothing; since 1.49.3 the coverage caps it (50 + 50 * 0.6 = 80)
+    assert partial.score == pytest.approx(80.0)
     assert partial.coverage == pytest.approx(0.6)
     assert partial.low_confidence is False
 
@@ -224,7 +225,8 @@ def test_case_17_missing_measurements_lower_coverage_not_score() -> None:
             latency=Reading(50.0), jitter=Reading(10.0), observation_seconds=DAY_S
         )
     )
-    assert thin.score == pytest.approx((15 * 80 + 10 * 85) / 25)
+    # mean (15*80 + 10*85) / 25 = 82, capped at 50 + 50 * 0.25 (1.49.3)
+    assert thin.score == pytest.approx(62.5)
     assert thin.coverage == pytest.approx(0.25)
     assert thin.coverage < MIN_COVERAGE and thin.low_confidence is True
 
