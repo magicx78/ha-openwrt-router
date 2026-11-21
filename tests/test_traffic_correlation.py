@@ -783,7 +783,7 @@ def test_open_volume_candidate_becomes_indicator_with_evidence() -> None:
     assert kwargs["client_ref"] == REF
     assert kwargs["data"]["evidence_ref"] == refs[0]
     assert kwargs["data"]["indicator"] == IND_UNUSUAL_VOLUME
-    assert kwargs["data"]["security_center"] == SOURCE_NOT_CONNECTED
+    assert kwargs["data"]["security_center"] == SOURCE_MODULE_MISSING  # no lookup
     assert kwargs["dedup_key"] == f"{CLIENT.point_id}:{IND_UNUSUAL_VOLUME}"
     evidence = ind.evidence.resolve(refs[0])
     assert evidence is not None
@@ -838,7 +838,7 @@ def test_flow_indicators_unavailable_without_flow_source() -> None:
     states = ind.summary()["indicators"]
     assert states[IND_OUTBOUND]["state"] == "learning"
     assert states[IND_CONNECTION_RATE]["state"] == "covered_by_network_intelligence"
-    assert ind.summary()["security_center"]["state"] == SOURCE_NOT_CONNECTED
+    assert ind.summary()["security_center"]["state"] == SOURCE_MODULE_MISSING
 
 
 def test_only_open_volume_candidates_are_indicators() -> None:

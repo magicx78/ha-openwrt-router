@@ -149,6 +149,7 @@ from .traffic_const import (
     REASON_PAUSED,
     REASON_PERMISSION_DENIED,
     REASON_SOURCE_MISSING,
+    SECURITY_DATA_KEY,
     SETTINGS_VERSION,
     WIFI_RF_DATA_KEY,
 )
@@ -508,7 +509,9 @@ class TrafficEngine:
         self._last_anomaly_wall: float | None = None
         # Phase H: correlation, security indicators, read API.
         self.correlator = TrafficCorrelator()
-        self.indicators = SecurityIndicators()
+        self.indicators = SecurityIndicators(
+            security=partial(self._optional, SECURITY_DATA_KEY)
+        )
         self.read_api = TrafficReadApi(self)
         # Phase K: optional external collector (push intake, RAM flow store).
         self.flows = FlowStore()

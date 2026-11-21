@@ -48,9 +48,12 @@ candidate with the module key). The evidence (point, window, bucket excerpt
 of the hour before) is kept in a bounded book (100 entries, every discard
 counted) and resolved by :meth:`EvidenceBook.resolve`. Indicators that need
 a flow source say ``unavailable``/``needs_flow_source``. A traffic anomaly
-is a statistical deviation and never called an attack; the Security Center
-does not take these events yet (wish W2), so its state is
-``not_connected``. Traffic never suppresses or deduplicates events of
+is a statistical deviation and never called an attack. The Security Center
+takes these events as timeline notes with the ``evidence_ref`` (wish W2,
+1.49.1); the link state is read at run time from the center
+(``accepts_traffic_indicators``): ``ready`` while it takes them,
+``not_ready``/``module_disabled`` while it is off, ``module_missing``
+without it. Traffic never suppresses or deduplicates events of
 another module: it only emits its own, with its own dedup keys.
 
 **Read API** (:class:`TrafficReadApi`, version 1): plain dicts with
@@ -1773,9 +1776,17 @@ def indicator_availability(
 class SecurityIndicators:
     """Turns open volume candidates into indicator events with evidence."""
 
-    def __init__(self, emit: Callable[..., Any] | None = None) -> None:
-        """Publisher over ``emit`` (``ConfigurationApi.emit``; None: unbound)."""
+    def __init__(
+        self,
+        emit: Callable[..., Any] | None = None,
+        security: Callable[[], Any] | None = None,
+    ) -> None:
+        """Publisher over ``emit`` (``ConfigurationApi.emit``; None: unbound).
+
+        ``security`` looks up the Security Center (None: not loaded).
+        """
         self.emit = emit
+        self.security = security
         self.evidence = EvidenceBook()
         self._indicated: OrderedDict[str, str] = OrderedDict()
         self._hour: deque[float] = deque()
@@ -1789,6 +1800,26 @@ class SecurityIndicators:
                 key_ready=False,
             )
         )
+
+    def security_status(self) -> SourceStatus:
+        """Whether the Security Center takes the indicators now (W2)."""
+        try:
+            center = None if self.security is None else self.security()
+            if center is None:
+                return SourceStatus(
+                    SRC_SECURITY, SOURCE_MODULE_MISSING, REASON_MODULE_NOT_LOADED
+                )
+            accepts = getattr(center, "accepts_traffic_indicators", None)
+            if not isinstance(accepts, bool):
+                return SourceStatus(
+                    SRC_SECURITY, SOURCE_NOT_CONNECTED, REASON_NO_INDICATOR_INTAKE
+                )
+        except Exception as err:  # noqa: BLE001 - optional module
+            _LOGGER.debug("Security Center lookup failed (%s)", type(err).__name__)
+            return SourceStatus(SRC_SECURITY, SOURCE_NOT_READY, REASON_LOOKUP_FAILED)
+        if not accepts:
+            return SourceStatus(SRC_SECURITY, SOURCE_NOT_READY, REASON_MODULE_DISABLED)
+        return SourceStatus(SRC_SECURITY, SOURCE_READY)
 
     def _budget(self, point_id: str, indicator: str, now: float) -> bool:
         while self._hour and now - self._hour[0] >= 3600:
@@ -1914,11 +1945,12 @@ class SecurityIndicators:
                     "window_s": candidate.window_s,
                     "coverage": candidate.coverage.value,
                     "wording": INDICATOR_WORDING,
-                    "security_center": SOURCE_NOT_CONNECTED,
+                    "security_center": self.security_status().state,
                 },
                 # Entscheidung: not security_relevant - a statistical
                 # deviation must not crowd real security events out of the
-                # core's security ring; the Security Center has no intake yet.
+                # core's security ring; the Security Center gets every core
+                # event through ``subscribe`` anyway (W2).
                 security_relevant=False,
                 client_ref=candidate.client_ref,
                 confidence=candidate.confidence,
@@ -1954,9 +1986,7 @@ class SecurityIndicators:
             "published": self.counters["published"],
             "not_published": self.counters["not_published"],
             "not_published_reason": REASON_NOT_PUBLISHED if self.emit is None else None,
-            "security_center": SourceStatus(
-                SRC_SECURITY, SOURCE_NOT_CONNECTED, REASON_NO_INDICATOR_INTAKE
-            ).to_dict(),
+            "security_center": self.security_status().to_dict(),
             "indicators": {k: dict(v) for k, v in self.last_availability.items()},
             **dict(self.counters),
             **dict(self.evidence.counters),

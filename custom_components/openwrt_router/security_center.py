@@ -13,11 +13,23 @@ Inputs (all read-only):
   the trust book. NI incidents are read with ``machine.peek()`` and only
   ever *linked* by their id (``correlate``), never changed or suppressed.
 * Enterprise core: core events through ``api.subscribe`` (drift,
-  ``router.forgotten``, new backup versions), capabilities through the
+  ``router.forgotten``, new backup versions, Traffic Analytics indicators),
+  capabilities through the
   registry and ``api.capability``, the module key through
   ``api.async_get_module_key``. The configuration areas of a drift come
   from comparing two *stored* versions (``api.async_compare`` with the
   module actor): no router contact.
+
+Traffic Analytics indicators (wish W2, 1.49.1): ``traffic_analytics.indicator``
+core events (schema v1) are checked strictly (:func:`traffic_indicator_hint`)
+and become one ``traffic_indicator`` timeline note each, with the
+``evidence_ref`` Traffic resolves. Limits: at most
+:data:`SEC_TRAFFIC_PER_HOUR` per hour (the rest counted), each evidence
+reference once. A traffic indicator is a statistical deviation: it never
+opens an incident and, as it names no device the center knows (Traffic's
+``client_ref`` is keyed with Traffic's own module key, wish W3), it does not
+count as a device trust indicator either; its ``client_ref`` and point id are
+not kept.
 
 Outputs: own ``sec_*`` incidents (own counters, cap 100), a timeline,
 events on the core bus only through ``api.emit`` (security ring), and a
@@ -44,6 +56,7 @@ import asyncio
 import ipaddress
 import logging
 import math
+import re
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
@@ -194,6 +207,29 @@ SEC_OTHER_INCIDENT_QUOTA = 50
 # timeline note per window); resolved Wi-Fi hints make room, but only if that
 # is enough. The share comes from the detector's data source.
 SEC_OTHER_RESERVED_NON_WIFI = 10
+# Traffic Analytics indicators (W2): accepted per hour at most, evidence
+# references remembered for the "once only" rule (memory only).
+TRAFFIC_EVENT_TYPE = "traffic_analytics.indicator"
+TRAFFIC_EVENT_SOURCE = "traffic_analytics"
+TRAFFIC_SCHEMA_VERSION = 1
+TRAFFIC_INDICATORS: frozenset[str] = frozenset(
+    {
+        "unusual_outbound_connections",
+        "unusual_traffic_volume",
+        "new_communication_destinations",
+        "changed_protocol_distribution",
+        "unusual_inter_vlan_traffic",
+        "suspicious_connection_rate",
+    }
+)
+TRAFFIC_COVERAGES: frozenset[str] = frozenset(
+    {"full", "partial", "estimated", "unavailable", "unknown"}
+)
+SEC_TRAFFIC_PER_HOUR = 20
+SEC_TRAFFIC_REFS_MAX = 200
+TEXT_TRAFFIC_INDICATOR = (
+    "Traffic-Auffälligkeit (statistische Abweichung, kein Beleg für einen Angriff)"
+)
 SEC_WIFI_INCIDENT_QUOTA = SEC_OTHER_INCIDENT_QUOTA - SEC_OTHER_RESERVED_NON_WIFI
 LOG_DATA_SOURCES: frozenset[str] = frozenset(
     {DataSource.FIREWALL_LOG.value, DataSource.DNS_QUERY_LOG.value}
@@ -372,6 +408,10 @@ _COUNTERS = (
     "store_trimmed",
     "log_records",
     "syslog_starts",
+    "traffic_indicators",
+    "traffic_indicators_invalid",
+    "traffic_indicators_limited",
+    "traffic_indicators_duplicate",
 )
 
 
@@ -524,6 +564,72 @@ def _num(value: Any) -> float | None:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+_EVIDENCE_REF = re.compile(r"evr_[0-9a-f]{16}")
+_TRAFFIC_KIND = re.compile(r"[a-z0-9_]{1,48}")
+
+
+def traffic_indicator_hint(event: Any) -> dict[str, Any] | None:
+    """The checked content of a Traffic indicator event (None: refused).
+
+    Schema v1 of ``traffic_analytics.indicator``: source and type exact,
+    a contract router id, a known indicator name, an ``evr_`` evidence
+    reference, a short kind token, finite numbers or None. Only these fields
+    are kept: no ``client_ref``, no point id, no free text.
+    """
+    if getattr(event, "source", None) != TRAFFIC_EVENT_SOURCE:
+        return None
+    if str(getattr(event, "type", "")) != TRAFFIC_EVENT_TYPE:
+        return None
+    rid = valid_router_id(getattr(event, "router_id", None))
+    ts = _ts(getattr(event, "ts", None))
+    data = getattr(event, "data", None)
+    if rid is None or ts is None or not isinstance(data, Mapping):
+        return None
+    version = data.get("v")
+    if isinstance(version, bool) or version != TRAFFIC_SCHEMA_VERSION:
+        return None
+    indicator, ref, kind = (
+        data.get("indicator"),
+        data.get("evidence_ref"),
+        data.get("kind"),
+    )
+    if indicator not in TRAFFIC_INDICATORS:
+        return None
+    if not isinstance(ref, str) or _EVIDENCE_REF.fullmatch(ref) is None:
+        return None
+    if not isinstance(kind, str) or _TRAFFIC_KIND.fullmatch(kind) is None:
+        return None
+    numbers: dict[str, float | None] = {}
+    for name in ("observed", "threshold"):
+        raw = data.get(name)
+        if raw is not None and _num(raw) is None:
+            return None
+        numbers[name] = _num(raw)
+    window = data.get("window_s")
+    if window is not None and (
+        _num(window) is None or not 0 < float(window) <= 30 * 86400
+    ):
+        return None
+    coverage = data.get("coverage")
+    if coverage is not None and coverage not in TRAFFIC_COVERAGES:
+        return None
+    confidence = _num(getattr(event, "confidence", None))
+    if confidence is not None and not 0.0 <= confidence <= 1.0:
+        confidence = None
+    return {
+        "ts": ts,
+        "router_id": rid,
+        "indicator": indicator,
+        "evidence_ref": ref,
+        "kind": kind,
+        "observed": numbers["observed"],
+        "threshold": numbers["threshold"],
+        "window_s": None if window is None else float(window),
+        "coverage": coverage,
+        "confidence": confidence,
+    }
 
 
 def _severity(value: Any) -> Severity:
@@ -771,6 +877,10 @@ class SecurityCenter:
         self.last_now: float | None = None
         self._noted: dict[str, float] = {}  # note kind -> time, memory only
         self._emit_times: deque[float] = deque()  # monotonic, memory only
+        # Traffic indicators (W2): accept times (monotonic) and the evidence
+        # references already taken; memory only.
+        self._traffic_times: deque[float] = deque()
+        self._traffic_refs: dict[str, None] = {}
         self.last_save_bytes: int | None = None
         # memory only
         self._entries: dict[str, Any] = {}  # entry id -> coordinator
@@ -1492,12 +1602,21 @@ class SecurityCenter:
 
     # -- core events ------------------------------------------------------------------------
 
+    @property
+    def accepts_traffic_indicators(self) -> bool:
+        """True while Traffic Analytics indicators reach the center (W2)."""
+        return self.active and not self._closed and self._binding.api is not None
+
+    @callback
     def _on_core_event(self, event: CoreEvent) -> None:
         """Core listener (sync, short); never raises."""
         if not self.active or self._closed:
             return
         try:
             if event.source == MODULE_SOURCE:
+                return
+            if str(event.type) == TRAFFIC_EVENT_TYPE:
+                self._note_traffic_indicator(event)
                 return
             ts = _ts(event.ts)
             if ts is not None:
@@ -1521,6 +1640,45 @@ class SecurityCenter:
                     self._schedule_drift_resolution()
         except Exception as err:  # noqa: BLE001 - the core isolates us too
             self._fail("core event", err)
+
+    def _note_traffic_indicator(self, event: CoreEvent) -> None:
+        """One Traffic indicator: a timeline note with its evidence_ref (W2).
+
+        Never an incident and no device trust indicator (see the module
+        docstring); refused, over the hourly limit or seen before, it is only
+        counted.
+        """
+        hint = traffic_indicator_hint(event)
+        if hint is None:
+            self.counters["traffic_indicators_invalid"] += 1
+            return
+        ref = hint["evidence_ref"]
+        if ref in self._traffic_refs:
+            self.counters["traffic_indicators_duplicate"] += 1
+            return
+        clock = time.monotonic()
+        times = self._traffic_times
+        while times and clock - times[0] >= 3600.0:
+            times.popleft()
+        if len(times) >= SEC_TRAFFIC_PER_HOUR:
+            self.counters["traffic_indicators_limited"] += 1
+            return
+        times.append(clock)
+        self._traffic_refs[ref] = None
+        while len(self._traffic_refs) > SEC_TRAFFIC_REFS_MAX:
+            del self._traffic_refs[next(iter(self._traffic_refs))]
+        self.counters["traffic_indicators"] += 1
+        self._timeline(
+            hint["ts"],
+            "traffic_indicator",
+            category="system",
+            severity=Severity.INFO,
+            router_id=hint["router_id"],
+            text=TEXT_TRAFFIC_INDICATOR,
+            type_=hint["indicator"],
+            evidence_ref=ref,
+        )
+        self.schedule_save()
 
     def _note_drift(self, event: CoreEvent, kind: str, ts: float | None) -> None:
         rid = valid_router_id(event.router_id)
@@ -2551,6 +2709,7 @@ class SecurityCenter:
         type_: str | None = None,
         drift_id: str | None = None,
         linked: Iterable[str] = (),
+        evidence_ref: str | None = None,
     ) -> None:
         entry = {
             "ts": ts,
@@ -2566,6 +2725,8 @@ class SecurityCenter:
             "linked": list(linked)[:16],
             "text": text,
         }
+        if evidence_ref is not None:
+            entry["evidence_ref"] = evidence_ref
         self.timeline.append(entry)
         if len(self.timeline) > SEC_TIMELINE_MAX:
             del self.timeline[: len(self.timeline) - SEC_TIMELINE_MAX]
