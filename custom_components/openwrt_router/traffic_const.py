@@ -409,3 +409,42 @@ REASON_NOT_PUBLISHED: Final = "core_events_not_bound"
 
 EVENT_ANOMALY_STARTED: Final = "traffic_analytics.anomaly_started"
 EVENT_ANOMALY_ENDED: Final = "traffic_analytics.anomaly_ended"
+
+# --- capacity planning (Phase G, task §11; plan §5 P95) --------------------------------
+
+CAPACITY_WINDOW_S: Final = 7 * 86400
+TREND_LOOKBACK_S: Final = 90 * 86400
+# P95 needs at least this many usable buckets (nearest rank, no interpolation).
+P95_MIN_POINTS: Final = 20
+P95_QUANTILE: Final = 0.95
+# Finest resolution with an exact P95 (coarser buckets: marked estimated).
+P95_EXACT_RESOLUTION_S: Final = 300
+# Utilisation levels in percent of the link.
+APPROACHING_PCT: Final = 70.0
+NEAR_CAPACITY_PCT: Final = 80.0
+HIGH_P95_PCT: Final = 90.0
+# A recurring bottleneck: near capacity for this many consecutive buckets on
+# at least this many distinct days.
+NEAR_MIN_BUCKETS: Final = 2
+RECURRING_MIN_DAYS: Final = 2
+# Trend: daily means over at least this many days and this share of the span.
+TREND_MIN_DAYS: Final = 14
+TREND_MIN_COVERAGE: Final = 0.7
+TREND_MAX_CONFIDENCE: Final = 0.8
+TREND_HORIZON_DAYS: Final = 365.0
+MAX_CAPACITY_ROWS: Final = 160
+
+CAP_STATE_INSUFFICIENT: Final = "insufficient_data"
+CAP_STATE_NO_LINK: Final = "no_link_speed"
+CAP_STATE_HEADROOM: Final = "headroom"
+CAP_STATE_APPROACHING: Final = "approaching_capacity"
+CAP_STATE_POSSIBLE_BOTTLENECK: Final = "possible_bottleneck"
+CAP_STATE_POSSIBLE_UPLINK_BOTTLENECK: Final = "possible_uplink_bottleneck"
+REASON_NO_LINK_SPEED: Final = "link_speed_unknown"
+REASON_HALF_DUPLEX_SHARED: Final = "half_duplex_rx_tx_share_the_link"
+REASON_TREND_TOO_SHORT: Final = "trend_series_too_short"
+REASON_TREND_LOW_COVERAGE: Final = "trend_series_low_coverage"
+REASON_BEYOND_HORIZON: Final = "beyond_forecast_horizon"
+REASON_NOT_RISING: Final = "trend_not_rising"
+REASON_P95_FROM_COARSE: Final = "p95_from_coarse_buckets"
+TREND_METHOD: Final = "theil_sen_daily_mean"

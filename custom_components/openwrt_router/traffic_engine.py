@@ -40,6 +40,9 @@ One fleet-wide engine per Home Assistant instance. Phase B scope:
   ``ANOMALY_EVAL_EVERY_S`` the detector evaluates the ring and publishes
   start/end as core events (when the event prefix is bound); there is no
   incident life cycle here (``incident_engine: not_connected``, wish W1).
+* **Capacity** (Phase G, ``traffic_capacity``): ``capacity`` reads the ring
+  with the link speed and duplex of the latest poll (unknown speed: no
+  utilisation, never an assumed value).
 * **Settings** live in the core store ``TRAFFIC_COARSE_STORE_KEY`` (private,
   atomic writes); the full history store follows in Phase I.
 
@@ -73,6 +76,7 @@ from .const import (
 from .core_models import CapabilityState, CapabilityStatus, InstallationKeyState
 from .traffic_accounting import TrafficAccounting, TrafficSum, sum_rates
 from .traffic_anomaly import AnomalyDetector
+from .traffic_capacity import CapacityRow, LinkFacts, capacity_rows
 from .traffic_clients import (
     ClientTracker,
     ClientTrafficView,
@@ -1062,6 +1066,28 @@ class TrafficEngine:
             port_vlans=None if snapshot is None else snapshot.port_vlans,
             wired_ports=wired,
             has_wifi=bool(snapshot is not None and snapshot.ap_interfaces),
+        )
+
+    def link_facts(self) -> dict[str, LinkFacts]:
+        """Link speed and duplex per point from the latest snapshots."""
+        out: dict[str, LinkFacts] = {}
+        for snapshot in self._snapshots.values():
+            for sample in samples_from_snapshot(snapshot):
+                if sample.link_mbps is not None or sample.duplex is not None:
+                    out[sample.point.point_id] = LinkFacts(
+                        sample.link_mbps, sample.duplex
+                    )
+        return out
+
+    def capacity(self, router_id: str | None = None) -> list[CapacityRow]:
+        """Capacity rows (Phase G) over the history ring."""
+        return capacity_rows(
+            self.series,
+            end=self.wall(),
+            links=self.link_facts(),
+            router_id=router_id,
+            uplink_ports=self.uplink_ports(),
+            tz=self.anomalies.clock.tz,
         )
 
     def uplink_ports(self) -> dict[str, frozenset[str] | None]:
