@@ -62,7 +62,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Final
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, callback
@@ -88,6 +88,7 @@ from .const import (
     SEC_SYSLOG_RETRY_SECONDS,
     SEC_TIMELINE_DAYS,
     SEC_TIMELINE_MAX,
+    SEC_TIMELINE_TRAFFIC_MAX,
     SIGNAL_SECURITY_CENTER,
 )
 from .core_errors import AuthorizationError
@@ -820,6 +821,32 @@ def _backup_file(path: Any) -> bool:
     return backup(path)
 
 
+KIND_TRAFFIC_NOTE: Final = "traffic_indicator"
+
+
+def _trim_timeline(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply both timeline caps (1.49.3), oldest first, order kept.
+
+    Traffic notes: at most SEC_TIMELINE_TRAFFIC_MAX. All entries: at most
+    SEC_TIMELINE_MAX, and the room is made by Traffic notes first, so a
+    Traffic note never displaces a security entry.
+    """
+    traffic = sum(1 for t in rows if t.get("kind") == KIND_TRAFFIC_NOTE)
+    drop_traffic = max(0, traffic - SEC_TIMELINE_TRAFFIC_MAX)
+    over = len(rows) - drop_traffic - SEC_TIMELINE_MAX
+    if over > 0:
+        drop_traffic = min(traffic, drop_traffic + over)
+    if drop_traffic:
+        kept = []
+        for row in rows:
+            if drop_traffic and row.get("kind") == KIND_TRAFFIC_NOTE:
+                drop_traffic -= 1
+                continue
+            kept.append(row)
+        rows = kept
+    return rows[-SEC_TIMELINE_MAX:] if len(rows) > SEC_TIMELINE_MAX else rows
+
+
 class SecurityCenter:
     """Fleet-wide Security Center: detectors, trust book, incidents, store."""
 
@@ -1115,7 +1142,7 @@ class SecurityCenter:
             for row in (raw if isinstance(raw, list) else ())
             if isinstance(row, Mapping) and _num(row.get("ts")) is not None
         ]
-        self.timeline = rows[-SEC_TIMELINE_MAX:]
+        self.timeline = _trim_timeline(rows)
 
     def _restore_drifts(self, raw: Any) -> None:
         for item in raw if isinstance(raw, list) else ():
@@ -1670,7 +1697,7 @@ class SecurityCenter:
         self.counters["traffic_indicators"] += 1
         self._timeline(
             hint["ts"],
-            "traffic_indicator",
+            KIND_TRAFFIC_NOTE,
             category="system",
             severity=Severity.INFO,
             router_id=hint["router_id"],
@@ -2683,7 +2710,7 @@ class SecurityCenter:
                     client_ref=inc.get("client_ref"),
                 )
         cut = now - SEC_TIMELINE_DAYS * _DAY
-        self.timeline = [t for t in self.timeline if t["ts"] >= cut][-SEC_TIMELINE_MAX:]
+        self.timeline = _trim_timeline([t for t in self.timeline if t["ts"] >= cut])
         for key in [k for k, n in self.drifts.items() if now - n.ts > 2 * _DAY]:
             del self.drifts[key]
 
@@ -2728,8 +2755,8 @@ class SecurityCenter:
         if evidence_ref is not None:
             entry["evidence_ref"] = evidence_ref
         self.timeline.append(entry)
-        if len(self.timeline) > SEC_TIMELINE_MAX:
-            del self.timeline[: len(self.timeline) - SEC_TIMELINE_MAX]
+        if kind == KIND_TRAFFIC_NOTE or len(self.timeline) > SEC_TIMELINE_MAX:
+            self.timeline = _trim_timeline(self.timeline)
 
     # -- events ---------------------------------------------------------------------------
 

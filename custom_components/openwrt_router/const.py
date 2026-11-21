@@ -797,6 +797,11 @@ SEC_INCIDENT_CAP = 100
 # Timeline: at most this many entries, none older than this many days.
 SEC_TIMELINE_MAX = 2000
 SEC_TIMELINE_DAYS = 14
+# Traffic Analytics notes (``traffic_indicator``) in that timeline: at most
+# this many, the oldest goes first (1.49.3). At 20 per hour over 14 days they
+# could reach 6720 and push every security entry out; they never displace a
+# security entry, on overflow they make room first.
+SEC_TIMELINE_TRAFFIC_MAX = 500
 # An open incident without a new finding for this long is resolved.
 SEC_INCIDENT_AUTO_RESOLVE_SECONDS = 86400
 # A drift whose configuration areas are still unknown after this long is
