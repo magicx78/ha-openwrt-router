@@ -90,7 +90,8 @@ Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine4`.
   Vergessen ab seinem nächsten Verbinden oder Wechsel wieder aufgezeichnet. Nach jedem
   Löschen von Client-Daten werden auch die Kopien `.bak`/`.corrupt.*` der Datei gelöscht.
 - **Router entfernen** löscht seine Marken aus dem eigenen Verlauf (wie bei der Network
-  Intelligence).
+  Intelligence); alte Kopien `.bak`/`.corrupt.*` der Datei bleiben dabei für eine
+  Wiederherstellung liegen und können Marken des entfernten Routers enthalten.
 - Diagnose: Schalter, Zähler und Grenzen des eigenen Verlaufs.
 
 ### Geändert

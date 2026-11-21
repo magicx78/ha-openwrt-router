@@ -296,6 +296,9 @@ class SourceResult:
     # window and reach into it; never part of ``marks`` (``tm_query`` shows
     # them in ``spanning`` with ``spans=1`` only, and uses them for doubles).
     spanning: list[dict[str, Any]] = field(default_factory=list)
+    # ``tm_index`` on a later page only (review K-a): its marks just after
+    # the cursor (already on the page before), read only to find doubles.
+    lookahead: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SourceOff(Exception):

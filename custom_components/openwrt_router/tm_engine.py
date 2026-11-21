@@ -1144,9 +1144,9 @@ async def async_remove_router(hass: HomeAssistant, router_id: str | None) -> int
             had_state = store.state.pop(router_id, None) is not None
             if dropped or had_state:
                 await store.async_flush(result.stop or STOP_DISABLED)
-        if dropped:
-            # an old copy may still hold the router's client sessions
-            await store.async_remove_copies()
+        # The .bak / .corrupt.* copies stay (review K-b): router ids are no
+        # personal data, and a copy of an unreadable or newer file (a
+        # downgrade) holds every other router's history for a recovery.
         return dropped
 
 
@@ -1179,6 +1179,8 @@ async def async_forget_client(
 
     from .core_masking import pseudonymise_identifier
 
+    mac = None if mac == "" else mac  # an empty form field is no input
+    client = None if client == "" else client
     if (mac is None) == (client is None):
         raise _service_error("time_machine_mac_or_client")
     engine = async_get_time_machine(hass)
@@ -1286,13 +1288,12 @@ def async_register_time_machine_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_TIME_MACHINE_FORGET_CLIENT,
         _forget,
-        # exactly one of both (checked in async_forget_client, review K2)
+        # both optional: "exactly one" is answered by async_forget_client
+        # with the translated error, never voluptuous' text (review K-c)
         schema=vol.Schema(
             {
-                vol.Exclusive("mac", "client"): vol.All(cv.string, vol.Length(max=64)),
-                vol.Exclusive("client", "client"): vol.All(
-                    cv.string, vol.Length(max=20)
-                ),
+                vol.Optional("mac"): vol.All(cv.string, vol.Length(max=64)),
+                vol.Optional("client"): vol.All(cv.string, vol.Length(max=64)),
             }
         ),
         supports_response=SupportsResponse.OPTIONAL,

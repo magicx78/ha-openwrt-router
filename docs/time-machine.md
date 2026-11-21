@@ -786,11 +786,12 @@ Client), Checkpoints und Abdeckung. Der Optionen-Dialog sagt das (de/en). Tests:
 `test_switching_off_without_a_running_engine_deletes_the_clients`,
 `test_nothing_is_trimmed_while_the_time_machine_is_off` in `tests/test_tm_overlap_v1510.py`.
 
-**Alte Kopien (1.51.0, Review K4).** Nach jedem Löschen von Client-Daten (Client-Schalter aus,
-Time Machine aus, „Client vergessen“, „Verlauf löschen“, `async_purge_clients`) löscht die
-Time Machine auch die Kopien `<datei>.bak` und `<datei>.corrupt.*` ihrer Datei (im Executor;
-Zähler `copies_removed`), damit keine alte Kopie die gelöschten Clients behält. Eine solche
-Kopie ist danach für die Wiederherstellung verloren. Tests:
+**Alte Kopien (1.51.0, Review K4, K-b).** Nur bei den vier Client-Löschungen
+(Client-Schalter aus, Time Machine aus — mit laufendem Verlauf oder über
+`async_purge_clients` —, „Client vergessen“, „Verlauf löschen“) löscht die Time Machine auch
+die Kopien `<datei>.bak` und `<datei>.corrupt.*` ihrer Datei (im Executor; Zähler
+`copies_removed`), damit keine alte Kopie die gelöschten Clients behält. Eine solche Kopie
+ist danach für die Wiederherstellung verloren. Tests:
 `test_k4_purge_deletes_the_old_copies_of_a_real_file` (echte Datei über HAs Store),
 `test_k4_every_client_delete_removes_the_copies`.
 
@@ -798,7 +799,12 @@ Kopie ist danach für die Wiederherstellung verloren. Tests:
 entfernten Routers (aus dem Enterprise Core) an `tm_engine.async_remove_router`: Alle Marken
 dieses Routers (auch als Peer eines Roamings) und sein `state` werden gelöscht, wie bei der
 Network Intelligence. Läuft kein Verlauf, wird die Datei einmal gelesen und nur geschrieben,
-wenn sich etwas ändert. Tests: `test_k4_removing_a_router_removes_its_marks`,
+wenn sich etwas ändert. Die Kopien `.bak`/`.corrupt.*` bleiben dabei **liegen** (Review K-b):
+Router-Kennungen sind keine Personendaten, und die Kopie einer unlesbaren oder neueren Datei
+(etwa nach einem Downgrade) hält den Verlauf aller anderen Router für eine Wiederherstellung.
+In solchen alten Kopien können darum Marken eines entfernten Routers stehen bleiben. Tests:
+`test_k4_removing_a_router_removes_its_marks`,
+`test_kb_removing_a_router_keeps_the_copy_of_a_newer_file` (echte Datei),
 `test_k4_async_remove_entry_hands_the_router_to_the_time_machine`.
 
 ### 15.7 Grenzen (Phase B)
@@ -1016,6 +1022,33 @@ Vor den Rechten entfernt und je Quelle in `duplicates` gezählt:
    `test_the_index_wins_over_the_same_ni_event_only`, `test_s1_*` in
    `tests/test_tm_review_v1510.py` (eigener Verlauf über den echten Ausfall-Melder).
 
+   **Aufwand (Review M1).** Die eigenen Marken werden je (Art, Router) einmal sortiert
+   (`tm_query._OwnSpans`); jedes NI-Ereignis prüft per `bisect` nur die Nachbarn: bei „down“
+   das Präfix-Maximum der Obergrenzen aller Intervalle, die früh genug beginnen (Intervalle
+   eines Routers dürfen sich überlappen, etwa nach einem Uhrsprung oder einem verdrängten
+   offenen Intervall; die Regel bleibt exakt dieselbe), sonst die beiden nächsten Werte.
+   Gemessen (ein flatternder Router, 3000 eigene Marken, 3000 NI-Ereignisse, Aufbau der
+   Prüfung, je drei Läufe): `drop_duplicates` vorher 143–168 ms, längster Block ohne Abgabe
+   143–154 ms; nachher 2–3 ms und 4–5 ms. Verglichene Werte: 4 501 500 linear, 6 000 jetzt.
+   Tests: `test_m1_the_fast_rule_decides_like_the_linear_one` (40 Zufallsdaten-Sätze gegen
+   die alte lineare Regel, die im Test bleibt, mit Grenzfällen genau bei ±180 s, offenen
+   Intervallen, mehreren Routern und Flotten-Marken), `test_m1_overlapping_and_open_intervals_of_one_router`,
+   `test_m1_a_flapping_router_costs_log_n_comparisons_per_event` (zählt Vergleiche, keine Zeit).
+
+   **Über Seitengrenzen (Review K-a).** Auf einer Folgeseite (`cursor`) liest die Zeitleiste
+   `tm_index` für die Doppel-Prüfung bis `NI_MATCH_S` über den Cursor hinaus (Feld
+   `lookahead` der Lesung); angezeigt wird weiter nur bis zum Cursor. So bleibt ein
+   NI-Ereignis nicht auf Seite 2 stehen, wenn die eigene, etwas jüngere Marke auf Seite 1 lag.
+   Betroffen waren Kanalwechsel **und** „up“ (beide Seiten können bis 180 s auseinander
+   liegen); ein „down“ nicht, denn dessen eigenes Intervall beginnt vor dem NI-Ereignis und
+   liegt damit auf derselben oder einer späteren Seite (offene und hineinreichende Intervalle
+   werden auf jeder Seite gelesen). An den Fenstergrenzen gilt das bewusst nicht: Liegt die
+   eigene Marke nach `until` oder vor `from`, gehört sie nicht zu diesem Fenster, und das
+   NI-Ereignis ist dort der einzige Eintrag des Ereignisses; jedes Fenster ist für sich
+   vollständig (in zwei angrenzenden Fenstern kann dasselbe Ereignis je einmal stehen).
+   Test: `test_ka_a_double_split_by_a_page_boundary_is_shown_once` (Kanalwechsel und „up“,
+   alle Seiten mit `limit` 3 gegen eine Seite).
+
 Andere Quellen werden nicht verglichen.
 
 ## 18. Aktionen
@@ -1025,7 +1058,7 @@ registriert, bei ausgeschalteter Time Machine Fehler `time_machine_off`.
 
 | Aktion | Felder | Antwort | Wirkung |
 |---|---|---|---|
-| `openwrt_router.time_machine_forget_client` | genau eines von `mac` oder `client` (`tmc_` + 16 hex, seit 1.51.0) | `{"deleted": n, "not_deleted_in": [...]}` | löscht alle Marken dieses Clients, Marke `tm_forgot_client` (ohne Client), Audit `time_machine.client_forgotten`, sofort geschrieben, alte Kopien der Datei gelöscht (Abschnitt 15.6); ein gerade verbundener Client wird ab seinem nächsten Übergang wieder aufgezeichnet (Abschnitt 16.6); Fehler `time_machine_mac_or_client` (keines oder beide), `time_machine_invalid_mac`, `time_machine_invalid_client`, `time_machine_no_key` |
+| `openwrt_router.time_machine_forget_client` | `mac` und `client` (`tmc_` + 16 hex, seit 1.51.0) sind im Schema beide optional; genau eines muss gesetzt sein (ein leeres Feld zählt als nicht gesetzt), sonst antwortet die Aktion mit dem übersetzten Fehler `time_machine_mac_or_client`, ohne die Eingabe zu wiederholen (Review K-c) | `{"deleted": n, "not_deleted_in": [...]}` | löscht alle Marken dieses Clients, Marke `tm_forgot_client` (ohne Client), Audit `time_machine.client_forgotten`, sofort geschrieben, alte Kopien der Datei gelöscht (Abschnitt 15.6); ein gerade verbundener Client wird ab seinem nächsten Übergang wieder aufgezeichnet (Abschnitt 16.6); Fehler `time_machine_mac_or_client` (keines oder beide), `time_machine_invalid_mac`, `time_machine_invalid_client`, `time_machine_no_key` |
 | `openwrt_router.time_machine_clear_history` | `clients_only` (bool) | `{"deleted": n}` | löscht die Client-Marken oder den ganzen eigenen Verlauf (auch Checkpoints, Abdeckung beginnt neu), Marke `tm_cleared`, Audit `time_machine.history_cleared`, sofort geschrieben |
 
 Die Time Machine speichert die MAC nicht; Home Assistant selbst kann einen Aktionsaufruf mit
@@ -1033,7 +1066,9 @@ seinen Daten aber in Protokoll oder Recorder behalten. Wer das vermeiden will, n
 Pseudonym (`client`), das Tab und `/sessions` zeigen (Review K2; die Feldtexte sagen es).
 
 Tests: `test_forget_action_and_client_stability_exclusion`, `test_clear_history_action`,
-`test_k2_forget_takes_the_pseudonym_and_exactly_one_of_both`.
+`test_k2_forget_takes_the_pseudonym_and_exactly_one_of_both`,
+`test_kc_forget_over_the_real_action_answers_translated` (echter Dienstaufruf über HAs
+Dienst-Registry: keines, beide, leeres Feld, nur `mac`, nur `client`, ungültiges Pseudonym).
 
 ## 19. Panel für B/C (1.51.0)
 

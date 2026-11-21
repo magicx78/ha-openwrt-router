@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
 import time
 from pathlib import Path
@@ -20,7 +21,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import voluptuous as vol
 from core_testkit import ADMIN_ID, FakeDisks, add_users
 from homeassistant.exceptions import ServiceValidationError
 from test_client_engine import M1, M2, client, data, disk, setup  # noqa: F401
@@ -370,8 +370,8 @@ async def test_k2_forget_takes_the_pseudonym_and_exactly_one_of_both(
             step(w, [M1, M2], [])
         tmc1 = "tmc_" + w.engine.recorder.pseudonym(M1)
         schema = forget_schema(w.hass)
-        with pytest.raises(vol.Invalid):
-            schema({"mac": M1, "client": tmc1})
+        # both pass the schema: the function answers in the user's language
+        assert schema({"mac": M1, "client": tmc1}) == {"mac": M1, "client": tmc1}
         assert schema({"client": tmc1}) == {"client": tmc1}
         for bad in ({}, {"mac": M1, "client": tmc1}):
             with pytest.raises(ServiceValidationError) as err:
@@ -388,6 +388,66 @@ async def test_k2_forget_takes_the_pseudonym_and_exactly_one_of_both(
         step(w, [M2], [M1])
         [again] = [m for m in sessions_of(w) if m.client == tmc1[4:]]
         assert again.is_open and again.router == R2
+
+
+async def test_kc_forget_over_the_real_action_answers_translated(tmp_path) -> None:
+    """Review K-c: a real HA service call; neither or both is the translated
+    error ``time_machine_mac_or_client``, the input is never repeated."""
+    from homeassistant.core import HomeAssistant
+
+    from custom_components.openwrt_router.core_masking import (
+        pseudonymise_identifier,
+    )
+    from custom_components.openwrt_router.tm_marks import MarkIndex
+
+    hass = HomeAssistant(str(tmp_path))
+    index = MarkIndex()
+    key = b"k" * 32
+    mine = pseudonymise_identifier("client", M1, key)[4:]
+    index.add(ts=T0, kind="client_roam", router=R1, client=mine, code="roam")
+    engine = SimpleNamespace(
+        loaded=True,
+        recorder=None,
+        index=index,
+        clock=lambda: T0 + 60,
+        emit=MagicMock(),
+        store=SimpleNamespace(
+            schedule=MagicMock(), async_remove_copies=AsyncMock(return_value=0)
+        ),
+    )
+
+    async def module_key() -> bytes:
+        return key
+
+    engine.async_module_key = module_key
+    try:
+        tm_engine.async_register_time_machine_services(hass)
+
+        async def call(data: dict[str, Any]) -> Any:
+            return await hass.services.async_call(
+                "openwrt_router",
+                "time_machine_forget_client",
+                data,
+                blocking=True,
+                return_response=True,
+            )
+
+        with patch.object(tm_engine, "async_get_time_machine", lambda _h: engine):
+            for data in ({}, {"mac": M1, "client": "tmc_" + mine}, {"mac": ""}):
+                with pytest.raises(ServiceValidationError) as err:
+                    await call(data)
+                assert err.value.translation_key == "time_machine_mac_or_client"
+                assert M1 not in f"{err.value} {err.value.args!r}"
+            with pytest.raises(ServiceValidationError) as err:
+                await call({"client": "tmc_not_a_pseudonym"})
+            assert err.value.translation_key == "time_machine_invalid_client"
+            assert "not_a_pseudonym" not in f"{err.value} {err.value.args!r}"
+            assert (await call({"mac": M1}))["deleted"] == 1
+            index.add(ts=T0, kind="client_roam", router=R1, client=mine, code="roam")
+            assert (await call({"client": "tmc_" + mine}))["deleted"] == 1
+        assert len(index) == 2  # the two tm_forgot_client marks, no client
+    finally:
+        await hass.async_stop(force=True)
 
 
 async def test_k2_the_texts_say_mac_or_pseudonym_and_the_recorder() -> None:
@@ -473,7 +533,11 @@ async def test_k4_every_client_delete_removes_the_copies(disks, disk, how) -> No
 
 
 async def test_k4_removing_a_router_removes_its_marks(disks) -> None:
-    with world(disks, routers=3) as w:
+    removed: list[Any] = []
+    with (
+        world(disks, routers=3) as w,
+        patch.object(core_store, "_remove_copies", removed.append),
+    ):
         engine = await w.start()
         w.down("r1")
         w.down("r2")
@@ -486,6 +550,37 @@ async def test_k4_removing_a_router_removes_its_marks(disks) -> None:
         w.hass.data.pop(tm_engine.DATA_TIME_MACHINE_ENGINE, None)
         assert await tm_engine.async_remove_router(w.hass, R2) >= 1
         assert not [r for r in w.stored["marks"] if "|router_down|" in r]
+        # review K-b: the old copies stay (router ids are no personal data)
+        assert removed == []
+
+
+async def test_kb_removing_a_router_keeps_the_copy_of_a_newer_file(tmp_path) -> None:
+    """A downgrade left the newer file as a copy: removing a router must not
+    delete the other routers' history in it (review K-b)."""
+    from homeassistant.core import HomeAssistant
+
+    hass = HomeAssistant(str(tmp_path))
+    try:
+        store = tm_store.TimeMachineStore(hass)
+        await store.async_load()
+        now = time.time()
+        for router in (R1, R2):
+            store.index.add(
+                ts=now,
+                kind="router_down",
+                router=router,
+                code="timeout",
+                end_state="open",
+            )
+        await store.async_flush(STOP_DISABLED)
+        path = store._store.path
+        shutil.copyfile(path, path + ".bak")
+        assert await tm_engine.async_remove_router(hass, R1) == 1
+        assert os.path.isfile(path + ".bak")
+        copy = json.loads(Path(path + ".bak").read_text(encoding="utf-8"))
+        assert len(copy["data"]["marks"]) == 2  # R2's history is still there
+    finally:
+        await hass.async_stop(force=True)
 
 
 async def test_k4_async_remove_entry_hands_the_router_to_the_time_machine(
@@ -591,3 +686,199 @@ async def test_k6_a_full_client_quota_yields_to_the_event_loop(disks) -> None:
             )
         assert result.state == "ok" and len(result.marks) == 2500
         assert len(sleeps) >= 2  # one slice of 1000 marks at a time
+
+
+# --- M1: the double test is the old rule, in O(log n) -------------------------------
+
+
+def linear_rule(mark: dict[str, Any], own: list[dict[str, Any]]) -> bool:
+    """The rule of f0a1930 (linear scan), kept here as the reference."""
+    match = tm_query.NI_MATCH_S
+    spans: dict[tuple[str, Any], list[tuple[float, float | None]]] = {}
+    for m in own:
+        if m["kind"] in tm_query.COVERED_NI_KINDS:
+            end = m["end"] if m["end_state"] != "open" else None
+            spans.setdefault((m["kind"], m["router_id"]), []).append((m["ts"], end))
+    kind, router, ts = mark["kind"], mark["router_id"], mark["ts"]
+    if kind not in tm_query.COVERED_NI_KINDS or (router is None and not mark["fleet"]):
+        return False
+    if kind in ("router_down", "lan_down"):
+        return any(
+            start - match <= ts <= (float("inf") if end is None else end + match)
+            for start, end in spans.get((kind, router), ())
+        )
+    if any(abs(start - ts) <= match for start, _e in spans.get((kind, router), ())):
+        return True
+    down = {"router_up": "router_down", "lan_up": "lan_down"}.get(kind)
+    return down is not None and any(
+        end is not None and abs(end - ts) <= match
+        for _s, end in spans.get((down, router), ())
+    )
+
+
+def own_mark(kind: str, router: str | None, ts: float, end: float | None) -> dict:
+    return {
+        "kind": kind,
+        "router_id": router,
+        "ts": ts,
+        "end": end,
+        "end_state": "open" if end is None else "closed",
+    }
+
+
+def ni_mark(kind: str, router: str | None, ts: float) -> dict:
+    return {"kind": kind, "router_id": router, "ts": ts, "fleet": router is None}
+
+
+KINDS = ("router_down", "router_up", "lan_down", "lan_up", "channel_changed")
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_m1_the_fast_rule_decides_like_the_linear_one(seed: int) -> None:
+    rnd = random.Random(seed)
+    routers = [R1, R2, R3, None]
+    base = 1_800_000_000.0
+    own: list[dict[str, Any]] = []
+    for _ in range(rnd.choice([0, 1, 5, 60, 300])):
+        kind = rnd.choice(KINDS)
+        router = None if kind.startswith("lan") else rnd.choice(routers[:3])
+        ts = base + round(rnd.uniform(0, 20000), 3)
+        end = None
+        if kind.endswith("down") and rnd.random() > 0.15:  # some stay open
+            end = ts + round(rnd.choice([0, 1, 60, 179.999, 180, 900]), 3)
+        own.append(own_mark(kind, router, ts, end))
+    probes = []
+    for _ in range(400):
+        kind = rnd.choice((*KINDS, "uplink_changed", "wan_event"))
+        router = rnd.choice(routers)
+        if own and rnd.random() < 0.7:  # right at the borders of own marks
+            o = rnd.choice(own)
+            point = (
+                o["end"] if (o["end"] is not None and rnd.random() < 0.5) else o["ts"]
+            )
+            ts = point + rnd.choice(
+                [-180.001, -180, -179.999, 0, 179.999, 180, 180.001]
+            )
+        else:
+            ts = base + round(rnd.uniform(-500, 21000), 3)
+        probes.append(ni_mark(kind, router, ts))
+    fast = tm_query._OwnSpans(own)
+    for probe in probes:
+        assert fast.holds(probe) == linear_rule(probe, own), (probe, seed)
+
+
+def test_m1_overlapping_and_open_intervals_of_one_router() -> None:
+    base = 1_800_000_000.0
+    own = [
+        own_mark("router_down", R1, base, None),  # open, then a later one
+        own_mark("router_down", R1, base + 5000, base + 5060),
+        own_mark("router_down", R2, base, base + 10000),
+        own_mark("router_down", R2, base + 100, base + 200),  # inside the first
+    ]
+    fast = tm_query._OwnSpans(own)
+    for router, ts in ((R1, base + 9000), (R2, base + 9000), (R2, base + 10180)):
+        probe = ni_mark("router_down", router, ts)
+        assert fast.holds(probe) is True is linear_rule(probe, own)
+    probe = ni_mark("router_down", R2, base + 10180.001)
+    assert fast.holds(probe) is False is linear_rule(probe, own)
+
+
+def test_m1_a_flapping_router_costs_log_n_comparisons_per_event() -> None:
+    """3000 own marks of one router, 3000 NI events: counted, not timed."""
+    base = 1_800_000_000.0
+    own = []
+    for i in range(1500):
+        start = base + i * 800
+        own.append(own_mark("router_down", R1, start, start + 60))
+        own.append(own_mark("router_up", R1, start + 60, None))
+    events = [
+        ni_mark(
+            "router_down" if i % 2 == 0 else "router_up",
+            R1,
+            base + (i // 2) * 800 + (400 if i % 4 < 2 else 30),
+        )
+        for i in range(3000)
+    ]
+    fast = tm_query._OwnSpans(own)
+    decided = [fast.holds(e) for e in events]
+    assert decided[:300] == [linear_rule(e, own) for e in events[:300]]
+    assert sum(decided) == 1500  # the 30 s ones are doubles, the 400 s ones not
+    # at most four values compared per event (two neighbours, two lists);
+    # the linear scan compared up to 1500 per event
+    assert fast.checks <= 4 * 2 * len(events)
+
+
+async def test_m1_drop_duplicates_uses_the_fast_index(disks) -> None:
+    with world(disks, routers=2) as w:
+        await w.start()
+        w.clock.advance(60)
+        w.down("r1")
+        w.clock.advance(600)
+        w.up("r1")
+        now = w.clock.t + 1
+        [down] = w.marks("router_down")
+        made: list[Any] = []
+        real = tm_query._OwnSpans
+
+        def spy(marks: Any) -> Any:
+            made.append(real(marks))
+            return made[-1]
+
+        with patch.object(tm_query, "_OwnSpans", spy):
+            body = await timeline_with(
+                w, [ni_event(w, "system.router_unreachable", down.ts + 150, R1)], now
+            )
+        assert duplicates(body) == 1 and len(made) == 1 and made[0].checks == 1
+
+
+# --- K-a: a channel change never shows twice across a page boundary -----------------
+
+
+def ni_reader(events: list[dict[str, Any]]) -> Any:
+    async def read(_hass: Any, req: Any, _routers: Any, _deadline: float) -> Any:
+        marks = [m for m in events if req.since <= m["ts"] < req.until]
+        return tm_sources._finish("ni_events", marks, 0, False)
+
+    return read
+
+
+async def walk_pages(w: Any, params: dict[str, str], now: float, readers: Any) -> list:
+    seen: list[tuple[str, str, float]] = []
+    page = dict(params)
+    for _ in range(20):
+        query = tm_query.parse_query(page, now)
+        body = await tm_query.async_timeline(
+            w.hass, query, admin=True, now=now, readers=readers
+        )
+        seen += [(m["source"], m["kind"], m["ts"]) for m in body["marks"]]
+        if body["next_cursor"] is None:
+            return seen
+        page = {**params, "cursor": body["next_cursor"]}
+    raise AssertionError("no end")
+
+
+@pytest.mark.parametrize("kind", ["dfs.new_channel", "system.router_reachable"])
+async def test_ka_a_double_split_by_a_page_boundary_is_shown_once(disks, kind) -> None:
+    with world(disks, routers=2) as w:
+        engine = await w.start()
+        w.clock.advance(3600)
+        now = w.clock.t
+        t_ni = now - 1000
+        own = "channel_changed" if kind.startswith("dfs") else "router_up"
+        code = "channel" if own == "channel_changed" else "reachable"
+        engine.index.add(ts=t_ni + 60, kind=own, router=R1, code=code)
+        for offset in (50, 30, -30):  # other marks: a page of 3 ends between
+            engine.index.add(ts=t_ni + offset, kind="router_up", router=R2, code=code)
+        readers = {
+            "ni_events": ni_reader([ni_event(w, kind, t_ni, R1)])  # NI is older
+        }
+        params = {
+            "from": str(int(now - 3000)),
+            "until": str(int(now + 1)),
+            "source": "ni_events,tm_index",
+        }
+        whole = await walk_pages(w, {**params, "limit": "500"}, now, readers)
+        paged = await walk_pages(w, {**params, "limit": "3"}, now, readers)
+        assert sorted(paged) == sorted(whole)
+        r1 = [s for s in paged if s[2] in (t_ni, t_ni + 60)]
+        assert r1 == [("tm_index", own, t_ni + 60)]  # once, the own mark

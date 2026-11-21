@@ -63,6 +63,7 @@ window, newest start first (ties by id), paged like the timeline
 from __future__ import annotations
 
 import asyncio
+import bisect
 import logging
 import math
 import re
@@ -360,6 +361,7 @@ COVERED_NI_KINDS: Final = frozenset(
 )
 # Index intervals an NI event of this kind lies in (start, or end for "up").
 _DOWN_OF: Final = {"router_up": "router_down", "lan_up": "lan_down"}
+_DOWN_KINDS: Final = frozenset({"router_down", "lan_down"})
 # How far apart the two sides of one event may lie (seconds). Both follow
 # the same outage tracker and the same polls: the index's outage starts at
 # the first failed poll and NI's event follows the report (two more failed
@@ -373,25 +375,82 @@ NI_MATCH_S: Final = 180.0
 _READ: Final = (STATE_OK, STATE_EMPTY)
 
 
-def _ni_double(mark: Mapping[str, Any], spans: Mapping[tuple[str, Any], list]) -> bool:
-    """Does the own index hold the same event (meaning, router, time)?"""
-    kind, router, ts = mark["kind"], mark["router_id"], mark["ts"]
-    if kind not in COVERED_NI_KINDS or (router is None and not mark["fleet"]):
+class _OwnSpans:
+    """The own index's marks of ``COVERED_NI_KINDS`` per (kind, router),
+    sorted once, so each NI event is decided in O(log n) (review M1; the
+    linear scan was quadratic: 3000 x 3000 marks blocked the loop ~150 ms).
+
+    The decision is exactly the rule of the module doc, with the same float
+    expressions: a "down" lies in ``[start - NI_MATCH_S, end + NI_MATCH_S]``
+    of an own interval (open: no end); an "up" or a channel change lies
+    within ``NI_MATCH_S`` of an own mark of the kind, an "up" also of the
+    end of an own "down" interval. Intervals of one router may overlap (a
+    clock shift, an evicted open one): the "down" test takes the largest
+    upper bound of all intervals that begin early enough (prefix maximum),
+    not only the latest one. ``checks`` counts the values compared.
+    """
+
+    __slots__ = ("_ends", "_lows", "_peaks", "_starts", "checks")
+
+    def __init__(self, marks: Iterable[Mapping[str, Any]]) -> None:
+        raw: dict[tuple[str, Any], list[tuple[float, float | None]]] = {}
+        for m in marks:
+            if m["kind"] in COVERED_NI_KINDS:
+                end = m["end"] if m["end_state"] != "open" else None
+                raw.setdefault((m["kind"], m["router_id"]), []).append((m["ts"], end))
+        self._starts: dict[tuple[str, Any], list[float]] = {}
+        self._lows: dict[tuple[str, Any], list[float]] = {}
+        self._peaks: dict[tuple[str, Any], list[float]] = {}
+        self._ends: dict[tuple[str, Any], list[float]] = {}
+        for key, spans in raw.items():
+            self._starts[key] = sorted(start for start, _e in spans)
+            if key[0] in _DOWN_KINDS:
+                pairs = sorted(
+                    (
+                        start - NI_MATCH_S,
+                        math.inf if end is None else end + NI_MATCH_S,
+                    )
+                    for start, end in spans
+                )
+                self._lows[key] = [low for low, _h in pairs]
+                peaks, top = [], -math.inf
+                for _low, high in pairs:
+                    top = max(top, high)
+                    peaks.append(top)
+                self._peaks[key] = peaks
+                self._ends[key] = sorted(end for _s, end in spans if end is not None)
+        self.checks = 0
+
+    def _near(self, values: list[float] | None, ts: float) -> bool:
+        """Is a value within NI_MATCH_S of ``ts``? Only the two neighbours of
+        ``ts`` can be (``abs(v - ts)`` grows away from ``ts``)."""
+        if not values:
+            return False
+        i = bisect.bisect_left(values, ts)
+        for j in (i - 1, i):
+            if 0 <= j < len(values):
+                self.checks += 1
+                if abs(values[j] - ts) <= NI_MATCH_S:
+                    return True
         return False
-    if kind in ("router_down", "lan_down"):
-        return any(
-            start - NI_MATCH_S <= ts <= (math.inf if end is None else end + NI_MATCH_S)
-            for start, end in spans.get((kind, router), ())
-        )
-    if any(
-        abs(start - ts) <= NI_MATCH_S for start, _e in spans.get((kind, router), ())
-    ):
-        return True
-    down = _DOWN_OF.get(kind)
-    return down is not None and any(
-        end is not None and abs(end - ts) <= NI_MATCH_S
-        for _s, end in spans.get((down, router), ())
-    )
+
+    def holds(self, mark: Mapping[str, Any]) -> bool:
+        """Does the own index hold the same event (meaning, router, time)?"""
+        kind, router, ts = mark["kind"], mark["router_id"], mark["ts"]
+        if kind not in COVERED_NI_KINDS or (router is None and not mark["fleet"]):
+            return False
+        key = (kind, router)
+        if kind in _DOWN_KINDS:
+            lows = self._lows.get(key)
+            if not lows:
+                return False
+            i = bisect.bisect_right(lows, ts)  # intervals with low <= ts
+            self.checks += 1
+            return i > 0 and ts <= self._peaks[key][i - 1]
+        if self._near(self._starts.get(key), ts):
+            return True
+        down = _DOWN_OF.get(kind)
+        return down is not None and self._near(self._ends.get((down, router)), ts)
 
 
 def drop_duplicates(results: list[SourceResult]) -> None:
@@ -407,12 +466,8 @@ def drop_duplicates(results: list[SourceResult]) -> None:
     index = by_source.get(SOURCE_TM_INDEX)
     ni = by_source.get(SOURCE_NI_EVENTS)
     if index is not None and ni is not None and index.state in _READ:
-        spans: dict[tuple[str, Any], list[tuple[float, float | None]]] = {}
-        for m in (*index.marks, *index.spanning):
-            if m["kind"] in COVERED_NI_KINDS:
-                end = m["end"] if m["end_state"] != "open" else None
-                spans.setdefault((m["kind"], m["router_id"]), []).append((m["ts"], end))
-        keep = [m for m in ni.marks if not _ni_double(m, spans)]
+        own = _OwnSpans((*index.marks, *index.spanning, *index.lookahead))
+        keep = [m for m in ni.marks if not own.holds(m)]
         ni.duplicates += len(ni.marks) - len(keep)
         ni.marks = keep
 
@@ -544,9 +599,23 @@ async def async_timeline(
     req = ReadRequest(query.since, until, admin, now)
     results: list[SourceResult] = []
     for source in query.sources:
-        results.append(
-            await async_read_source(hass, source, req, routers, readers=readers)
-        )
+        if source == SOURCE_TM_INDEX and until < query.until:
+            # A later page (review K-a): an own mark up to NI_MATCH_S after
+            # the cursor (shown on the page before) still makes an NI event
+            # of this page a double; it is read for that only.
+            wide = ReadRequest(
+                query.since, min(query.until, until + NI_MATCH_S), admin, now
+            )
+            result = await async_read_source(
+                hass, source, wide, routers, readers=readers
+            )
+            result.lookahead = [m for m in result.marks if m["ts"] >= until]
+            result.marks = [m for m in result.marks if m["ts"] < until]
+        else:
+            result = await async_read_source(
+                hass, source, req, routers, readers=readers
+            )
+        results.append(result)
         await asyncio.sleep(0)  # let the loop breathe between sources
     body = merge(results, query, admin=admin, now=now)
     if stats is not None:
