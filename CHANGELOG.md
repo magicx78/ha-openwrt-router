@@ -81,9 +81,13 @@ Hintergrundaufgabe, keine Entitäten und keine Client-Marken. Entwicklerdoku:
   es greift erst in den Schleifen des Adapters.
 - Modulschlüssel des Enterprise Core werden weiterhin nur nach Namen vergeben.
 - Nur mit Tests und Mocks geprüft, nicht auf Routern und nicht in einer laufenden HA-Instanz.
-  Den Tab hat die Prüfung vor dem Merge headless in Firefox mit der Testantwort angesehen; die
-  danach geänderten Stile (Kontrast gesperrter Chips, Kartenansicht ab 860 px, Quellspalte)
-  sind nur durch Tests geprüft.
+  Den Tab hat die Prüfung vor dem Merge headless in Firefox mit Testantworten bei 360, 768 und
+  1280 px angesehen, auch nach den Korrekturen (Kontrast gesperrter Chips, Kartenansicht ab
+  860 px, Quellspalte).
+- Network-Intelligence-Vorfälle: Bei mehr als 500 offenen Vorfällen liegt der Speicher über der
+  Lesegrenze; die übrigen fehlen dann und die Quelle sagt `cut: unreachable`.
+- Bringt eine Aktualisierung mehr neue Marken als eine Seite, beginnt die Liste im Tab neu;
+  zuvor nachgeladene ältere Seiten müssen erneut geladen werden.
 
 ## [1.49.4] - 2026-11-21
 
