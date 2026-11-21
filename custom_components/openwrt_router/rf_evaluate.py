@@ -588,18 +588,42 @@ def _signal_stats(
     return mean, min(values), stddev, weak, len(values)
 
 
+def _assoc_fresh(memory: RadioMemory, poll: PollInput) -> bool:
+    return (
+        RF_KIND_ASSOCLIST in poll.kinds
+        and memory.assoc_at is not None
+        and poll.now - memory.assoc_at <= poll.max_age_s
+    )
+
+
+def _counts_retries(memory: RadioMemory, macs: Sequence[str], poll: PollInput) -> bool:
+    """True when a client of this radio had retries > 0 in the window.
+
+    Then the driver demonstrably counts retries, so a 0 of another client on
+    the same radio is a real 0 (1.49.3).
+    """
+    if not _assoc_fresh(memory, poll):
+        return False
+    for mac in macs:
+        retries = memory.assoc_delta.get(mac, (None, None, None))[1]
+        if isinstance(retries, int) and retries > 0:
+            return True
+    return False
+
+
 def _tx_counters(
-    memory: RadioMemory, mac: str, poll: PollInput
+    memory: RadioMemory, mac: str, poll: PollInput, *, counts_retries: bool = False
 ) -> tuple[int | None, int | None, int | None]:
-    if RF_KIND_ASSOCLIST not in poll.kinds or memory.assoc_at is None:
-        return None, None, None
-    if poll.now - memory.assoc_at > poll.max_age_s:
+    if not _assoc_fresh(memory, poll):
         return None, None, None
     packets, retries, failed = memory.assoc_delta.get(mac, (None, None, None))
     # DECIDED: the driver is not in the poll data, and mt76 with WED reports
     # 0 retries for everything. A 0 from an unknown driver is unknown, not a
-    # perfect link (rf_clients treats an mt76 0 the same way).
-    if retries == 0:
+    # perfect link (rf_clients treats an mt76 0 the same way) -- unless
+    # another client of the same radio had retries in the window (1.49.3):
+    # dropping the clean clients made the packet-weighted radio rate far too
+    # high (9 clean + 1 client at 30 % gave 30 % instead of 3 %).
+    if retries == 0 and not counts_retries:
         retries = None
     return packets, retries, failed
 
@@ -613,9 +637,13 @@ def _assessments(
     poll: PollInput,
 ) -> list[ClientAssessment]:
     out = []
-    for mac in macs[:CLIENTS_PER_RADIO_MAX]:
+    counted = macs[:CLIENTS_PER_RADIO_MAX]
+    counts = _counts_retries(memory, counted, poll)
+    for mac in counted:
         mean, low, stddev, weak, samples = _signal_stats(memory.signals.get(mac, ()))
-        packets, retries, failed = _tx_counters(memory, mac, poll)
+        packets, retries, failed = _tx_counters(
+            memory, mac, poll, counts_retries=counts
+        )
         facts = poll.history(mac) if poll.history is not None else None
         window = ClientRfWindow(
             client_mac=mac,
