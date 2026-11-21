@@ -4,6 +4,44 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+Network Time Machine, Phase A: eine Lese-Schnittstelle, die die Ereignisse vorhandener Module
+auf eine Zeitachse legt. **Standardmäßig aus, ein Schalter für die ganze Flotte.** Kein
+eigener Speicher, keine zusätzlichen Router-Aufrufe (Test vergleicht die Aufrufe zweier Polls
+mit Time Machine an und aus), kein Listener, keine Hintergrundaufgabe, keine Entitäten, noch
+kein Panel. Entwicklerdoku: `docs/time-machine.md`.
+
+### Hinzugefügt
+
+- **Route `GET /api/openwrt_router/enterprise/timemachine/timeline`.** Liest bei jeder Anfrage
+  Audit-Log des Enterprise Core, Konfigurationsversionen, Ereignisse und Vorfälle von Network
+  Intelligence und die Zeitleiste des Security Center über deren öffentliche Lesefunktionen,
+  rechnet sie in Marken um und gibt sie neueste zuerst zurück. Abfrage `from`, `until`
+  (halboffen, Standard 24 h, höchstens 14 Tage), `source`, `router_id`, `kind`,
+  `min_severity`, `limit` (Standard 200, höchstens 500); jeder Schlüssel höchstens einmal,
+  unbekannte werden abgelehnt (400 ohne Echo). Blättern über `next_until`, ohne Marken
+  desselben Zeitstempels zu teilen. Je Quelle Zustand (`ok`, `empty`, `off`, `unreadable`)
+  mit festem Grund, Lesegrenze und Zeitbudget von 2 s; eine fehlerhafte Quelle macht die
+  Antwort `partial`, nie die ganze Anfrage kaputt.
+- **Rechte.** Administratoren sehen alles; andere Benutzer nur bei freigegebenem
+  Topologie-Panel und dann nur Infrastruktur, Funk, Topologie und Störungen. Audit-Log und
+  Konfigurationsversionen sind admin-only.
+- **Datenschutz.** Keine MAC- oder IP-Adressen, Hostnamen, SSIDs oder WLAN-Netdev-Namen in
+  Antworten, Logs oder Diagnosedaten; Router als `router_id` und Anzeigename. Ereignisse eines
+  einzelnen Clients werden weggelassen und nur gezählt (`omitted_client_marks`). Die Time
+  Machine holt keinen Modulschlüssel eines anderen Moduls.
+- **Option „Network Time Machine für alle Router“** (`time_machine_enabled`, aus) in den
+  Router-Optionen; Speichern schreibt den Wert in alle Router-Einträge und lässt deren übrige
+  Optionen unverändert. Aus antwortet die Route `status: off` und liest keine Quelle.
+- **Diagnose-Block `time_machine`**: Schalter, Grenzen, Zustand und Markenzahl je Quelle der
+  letzten 24 h und Zähler der Anfragen; nichts Persönliches. Aus nur `{"enabled": false}`.
+
+### Bekannte Grenzen
+
+- Mehr Marken mit demselben Zeitstempel als `limit` werden abgeschnitten (`truncated`).
+- Das Audit-Log hat keine Obergrenze `until`; bei Fenstern weit in der Vergangenheit können
+  neuere Einträge die Lesegrenze von 500 je Ring aufbrauchen.
+- Nur mit Tests und Mocks geprüft, nicht auf Routern oder in einer laufenden HA-Instanz.
+
 ## [1.49.4] - 2026-11-21
 
 Behebt die fehlenden Traffic-Sensoren am Gateway und kleine Restpunkte nach 1.49.3:
