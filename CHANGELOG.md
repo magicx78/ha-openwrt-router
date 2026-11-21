@@ -4,9 +4,17 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.48.0] - 2026-11-21
+
+WiFi RF Intelligence: Funkbild je Radio (Kanalauslastung, Grundrauschen, Retry-Rate, Signal je
+Client, Kanalkonflikte, Roaming, Kanalempfehlungen) aus den vorhandenen Poll-Daten und
+optionalen, begrenzten Zusatzabfragen. Baut auf dem Enterprise Core von 1.44.0 auf.
+**Standardmäßig aus**; ohne den Schalter macht ein Poll exakt dieselben Router-Aufrufe wie
+vorher. **Kein Scan, keine neuen Router-Rechte, nur lesende Routen.**
+
 ### Hinzugefügt
 
-- **WiFi RF Intelligence (1.48.0, Teil 1: Backend).** Funkbild je Radio aus den
+- **WiFi RF Intelligence (Teil 1: Backend).** Funkbild je Radio aus den
   vorhandenen Poll-Daten (Rauschen, Sendeleistung, Kanalbreite, Signal je Client,
   Airtime) und optionalen Zusatzabfragen. **Alles ist standardmäßig aus**: Ohne den Schalter
   `wifi_rf_enabled` (je Router in den Optionen) macht ein Poll exakt dieselben Router-Aufrufe
@@ -36,7 +44,7 @@ All notable changes to the OpenWrt Router integration will be documented in this
     die Basis). `router.forgotten` löscht alle RF-Daten des Routers; Entladen schreibt den
     Verlauf sofort.
   - Diagnose: neuer Block `wifi_rf` (nur Zähler, Zustände und Gründe, maskiert).
-- **WiFi RF Intelligence (1.48.0, Teil 2: Anbindung).** Mit RF aus ändert sich nichts
+- **WiFi RF Intelligence (Teil 2: Anbindung).** Mit RF aus ändert sich nichts
   (Tests vergleichen Befunde, Reparaturhinweise, Vorfälle, Scores und Entitäten mit RF an
   und aus).
   - Kanalplan: Eine Überlappung zweier Router-Radios im selben Kanal bleibt ein Befund. Sie
@@ -61,6 +69,37 @@ All notable changes to the OpenWrt Router integration will be documented in this
     Unbekannt bleibt „unbekannt“, nie 0. Attribute ohne MAC, SSID oder BSSID und nicht
     aufgezeichnet. Keine eigene Airtime-Entität (derselbe Zähler wie die Kanalauslastung).
     Ein Fehler darin lässt das Setup nie scheitern.
+- **WiFi RF Intelligence (Teil 3: Panel).** Neuer Tab „WiFi Intelligence“ unter Enterprise
+  (nach „Konfiguration“, „Security Center“ und „Netzwerkdiagnose“) mit sechs Ansichten:
+  Übersicht, Radios, Kanalkarte, RF-Verlauf (einfaches SVG, Fenster 1 h / 24 h / 7 d / 30 d),
+  Roaming und Empfehlungen. Der Tab liest nur über die Routen aus Teil 1 (nur GET, keine
+  Schalt- oder Übernehmen-Knöpfe) und fragt höchstens alle 60 s ab, und nur solange er
+  sichtbar ist. Unbekannte Werte erscheinen als „—“, nie als 0. Der Roaming-Verlauf je Client
+  ist nur für Administratoren und erst nach einer Freigabe je Sitzung sichtbar. Das
+  Frontend-Bundle ist neu gebaut (Panel-Version `20261121-wifi-rf1`).
+
+### Behoben
+
+- **WiFi RF: Entitäten von Routern, deren Gerät erst nach dem Setup erscheint, werden angelegt.**
+  Der Empfänger des Signals `openwrt_router_wifi_rf_updated` war, wie in 1.47.1 bei der
+  Netzwerkdiagnose, eine Lambda ohne `@callback` und lief deshalb in einem Worker-Thread, wo
+  `hass.async_create_task` scheitert; der Merker „Abgleich läuft“ blieb dann gesetzt. Der
+  Empfänger ist jetzt eine `@callback`-Funktion; kann die Aufgabe nicht starten, wird der
+  Merker zurückgesetzt. Der Fehler betraf nur den unveröffentlichten Stand dieses Pakets.
+- Tests: `tests/test_wifi_rf_dispatcher_thread.py` schickt das Signal durch den echten
+  Dispatcher von Home Assistant und prüft Thread, angelegte Entitäten und Merker.
+
+### Bekannte Grenzen
+
+- **Kein Scan.** Nachbarnetze und fremde Kanäle bleiben „nicht unterstützt“; die
+  Scan-Prüfungen S1–S5 des Plans (`docs/plans/2026-11-17-wifi-rf.md`, Abschnitt 7.2) sind
+  nicht ausgeführt.
+- **Nicht an echten Geräten geprüft.** Die Router-Antworten der Tests haben die Feldstruktur aus
+  den lesenden Prüfungen vom 2026-11-18, aber erfundene Werte; die fertige Integration lief
+  weder gegen echte Router noch in einer echten Home-Assistant-Instanz.
+- **Der Tab ist nicht im Browser angesehen**, auch nicht bei 360 px Breite; geprüft sind nur
+  Logik- und Render-Tests ohne Browser.
+- **Schwellen sind begründete Annahmen**, nicht an echten Daten abgestimmt.
 
 ## [1.47.1] - 2026-11-21
 
