@@ -301,6 +301,9 @@ Felder eines Flows:
 - Zeiten höchstens 300 s in der Zukunft und höchstens 24 h alt.
 - Flows bleiben standardmäßig 1 Stunde im Arbeitsspeicher, höchstens 500 je Quelle und
   2000 insgesamt. Sie werden nicht auf die Platte geschrieben.
+- Höchstens 256 Flow-Quellen (Herkunft je Router) gleichzeitig. Eine stille Quelle wird
+  nach der Aufbewahrungszeit vergessen; eine neue Quelle über der Grenze verdrängt die am
+  längsten stille samt ihren Flows (Zähler `dropped_feeds`).
 
 **Alles oder nichts:** Ein ungültiger Flow lehnt den ganzen Aufruf ab. Passt ein Aufruf
 nicht vollständig in den Flow-Speicher, wird er als Ganzes abgelehnt (503 `store_full`).
@@ -341,11 +344,23 @@ Zugriff abgelehnt: `{"message": "…", "code": "…", "details": {…}}`.
 
 Gründe je Flow: `unknown_field`, `not_a_flow_record`, `invalid_field`,
 `timestamp_in_future`, `timestamp_too_old`, `window_too_long`, `module_key_missing`
-(der Enterprise-Kern hat noch keinen Schlüssel für Pseudonyme) und `kind_not_supported`.
+(der Enterprise-Kern hat noch keinen Schlüssel für Pseudonyme), `kind_not_supported` und
+`unknown_router`: Die `router_id` gehört zu keinem geladenen Router mit eingeschalteter
+Analyse. Flows ohne `router_id` bleiben erlaubt.
+
+**Wiederholter Aufruf:** Wird ein schon angenommener Aufruf erneut gesendet (z. B. nach
+einem Timeout), bestätigt ihn das Modul mit der ersten Antwort und übernimmt die Flows
+nicht noch einmal (Zähler `duplicate_calls`). Erkannt wird er an Benutzer, `sent_at` und
+Inhalt der Flows; gemerkt werden die letzten 512 angenommenen Aufrufe, danach gilt eine
+Wiederholung als neuer Aufruf. Auch die Wiederholung muss die Grenze von einem Aufruf je
+10 Sekunden einhalten (sonst 429).
 
 Abgelehnte Zugriffe (Collector aus, falscher Benutzer, HTTP) meldet das Modul zusätzlich
 als sicherheitsrelevantes Kern-Ereignis `traffic_analytics.collector_rejected`, höchstens
-10 je Stunde.
+10 je Stunde **je Grund und Benutzer** (der Benutzer nur als gesalzenes Pseudonym im
+Arbeitsspeicher, nie im Ereignis). Ein Benutzer, der die Route wiederholt aufruft, kann
+so die Meldungen anderer Fehlversuche nicht verdrängen. Höchstens 64 solcher Budgets
+gelten gleichzeitig; darüber wird nur gezählt, nicht gemeldet.
 
 ### 8.6 Was nicht geht
 
