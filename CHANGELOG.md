@@ -36,6 +36,31 @@ All notable changes to the OpenWrt Router integration will be documented in this
     die Basis). `router.forgotten` löscht alle RF-Daten des Routers; Entladen schreibt den
     Verlauf sofort.
   - Diagnose: neuer Block `wifi_rf` (nur Zähler, Zustände und Gründe, maskiert).
+- **WiFi RF Intelligence (1.48.0, Teil 2: Anbindung).** Mit RF aus ändert sich nichts
+  (Tests vergleichen Befunde, Reparaturhinweise, Vorfälle, Scores und Entitäten mit RF an
+  und aus).
+  - Kanalplan: Eine Überlappung zweier Router-Radios im selben Kanal bleibt ein Befund. Sie
+    wird nur dann zum Hinweis herabgestuft (kein Reparaturhinweis), wenn RF auf beiden Radios
+    eine niedrige Auslastung **gemessen** hat und keinen Konflikt sieht. Unbekannt,
+    nicht bereit, nicht überwacht oder ausgelastet: der Befund bleibt, wie er war.
+    Attribut `rf_status` mit Grund und Messwerten.
+  - Network Intelligence: gemessene Kanalkonflikte, anhaltend hohe Auslastung und hohe
+    Retry-Rate gehen als reine WLAN-Ereignisse (`rf.channel_conflict`, `rf.channel_busy`,
+    `rf.retry_high`) über die vorhandene Befundquelle ein. Sie öffnen, unterdrücken oder
+    entschuldigen keinen Vorfall und ändern keinen Score. Sie kommen nur bei einer Änderung,
+    höchstens 6 je Poll, derselbe Befund erst nach einer Stunde wieder. Keine Änderung in `net_*`.
+  - Client Stability: RF liest den vorhandenen Client-Verlauf (Disconnects, mittlere
+    TX-Rate) für die RF-Client-Bewertung; die zusätzliche Quelle senkt nie eine Bewertung
+    (Eigenschaftstest). Die Client-Ansicht
+    bekommt einen reinen Hinweis `rf_hint` (Radio stark ausgelastet um den Zeitpunkt). Der
+    Client-Stability-Score bleibt unverändert.
+  - Entitäten (nur mit RF an und nur auf vorhandenen Router-Geräten, RF aus: nicht angelegt
+    und aus der Registry entfernt): WLAN-Gesundheit, aktive Roaming-Probleme und
+    Kanalempfehlungen (alle Router), AP-Funkgesundheit je Router, Kanalauslastung (%),
+    Grundrauschen (dBm) und Retry-Rate (%) je Radio, höchstens 4 Radios je Router.
+    Unbekannt bleibt „unbekannt“, nie 0. Attribute ohne MAC, SSID oder BSSID und nicht
+    aufgezeichnet. Keine eigene Airtime-Entität (derselbe Zähler wie die Kanalauslastung).
+    Ein Fehler darin lässt das Setup nie scheitern.
 
 ## [1.47.0] - 2026-11-21
 
