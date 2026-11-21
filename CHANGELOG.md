@@ -21,12 +21,18 @@ Hintergrundaufgabe, keine Entitäten und keine Client-Marken. Entwicklerdoku:
   rechnet sie in Marken um und gibt sie neueste zuerst zurück. Abfrage `from`, `until`
   (halboffen, Standard 24 h, höchstens 14 Tage), `source`, `router_id`, `kind`,
   `min_severity`, `limit` (Standard 200, höchstens 500); jeder Schlüssel höchstens einmal,
-  unbekannte werden abgelehnt (400 ohne Echo). Blättern über `next_until`, ohne Marken
-  desselben Zeitstempels zu teilen. Je Quelle Zustand (`ok`, `empty`, `off`, `unreadable`)
-  mit festem Grund, Lesegrenze und Zeitbudget von 2 s; eine fehlerhafte Quelle macht die
-  Antwort `partial`, nie die ganze Anfrage kaputt. Administratoren sehen alles; andere
+  unbekannte werden abgelehnt (400 ohne Echo). Jede Quelle wird bis zur Kapazität ihres
+  Speichers ganz gelesen (Ausnahme: Konfigurationsversionen, 500), Rechte, Filter und
+  Seitengröße wendet die Zusammenführung an. Blättern über `next_until` auf einem
+  Millisekunden-Raster, ohne Marken desselben Zeitstempels zu teilen, ohne Doppel und ohne
+  Lücken; eine gekürzte Quelle hält die Seite an ihrer Kante an, ist nie `empty` und sagt
+  `cut` (`next_page` / `unreachable`). Je Quelle Zustand (`ok`, `empty`, `off`,
+  `unreadable`) mit festem Grund und Zeitbudget von 2 s (in den Schleifen des Adapters
+  geprüft); eine fehlerhafte Quelle macht die Antwort `partial`, nie die ganze Anfrage
+  kaputt. Administratoren sehen alles; andere
   Benutzer nur bei freigegebenem Topologie-Panel und dann nur Infrastruktur, Funk, Topologie
-  und Störungen, ohne Audit-Log und Konfigurationsversionen. Keine MAC- oder IP-Adressen,
+  und Störungen, ohne Audit-Log und Konfigurationsversionen; Zustand, Zahl und ältester
+  Zeitpunkt je Quelle gelten nach den Rechten. Keine MAC- oder IP-Adressen,
   Hostnamen, SSIDs oder WLAN-Netdev-Namen in Antworten, Logs oder Diagnosedaten; Ereignisse
   eines einzelnen Clients werden weggelassen und nur für Administratoren gezählt
   (`omitted_client_marks`, für andere Benutzer 0).
@@ -64,9 +70,12 @@ Hintergrundaufgabe, keine Entitäten und keine Client-Marken. Entwicklerdoku:
   einem HA-Neustart fehlen deshalb, bis Phase B einen eigenen Verlauf bringt.
 - Keine Client-Marken; Ereignisse einzelner Clients werden nur gezählt.
 - Konfigurationsänderungen erscheinen nur als Anzahl und Referenz, ohne Inhalt.
-- Mehr Marken mit demselben Zeitstempel als `limit` werden abgeschnitten (`truncated`).
-- Das Audit-Log hat keine Obergrenze `until`; bei Fenstern weit in der Vergangenheit können
-  neuere Einträge die Lesegrenze von 500 je Ring aufbrauchen.
+- Mehr Marken mit demselben Zeitstempel (Millisekunde) als `limit` werden abgeschnitten
+  (`truncated`).
+- Konfigurationsversionen: höchstens 500 je Anfrage und ohne `until`; liegen mehr als 500
+  zwischen `from` und jetzt, sind die älteren nicht erreichbar (`cut: unreachable`).
+- Das Zeitbudget von 2 s unterbricht die synchronen Lesefunktionen der Quellmodule nicht;
+  es greift erst in den Schleifen des Adapters.
 - Modulschlüssel des Enterprise Core werden weiterhin nur nach Namen vergeben.
 - Nur mit Tests und Mocks geprüft, nicht auf Routern, in einer laufenden HA-Instanz oder im
   Browser.

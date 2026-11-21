@@ -24,8 +24,10 @@ Entwicklerdoku: `docs/time-machine.md`.
 - [ ] **Bekannte Grenzen von Phase A:** liest nur, was die Module behalten (Ausfälle und
       Kanalwechsel vor einem HA-Neustart fehlen bis Phase B); keine Client-Marken;
       Konfigurationsänderungen nur als Anzahl und Referenz; mehr Marken mit demselben
-      Zeitstempel als `limit` werden abgeschnitten; Audit-Log ohne Obergrenze `until`;
-      Modulschlüssel des Core nur nach Namen vergeben.
+      Zeitstempel als `limit` werden abgeschnitten; Konfigurationsversionen höchstens 500
+      und ohne `until` (ältere dann `cut: unreachable`); das Zeitbudget unterbricht die
+      synchronen Lesefunktionen der Module nicht; Modulschlüssel des Core nur nach Namen
+      vergeben.
 - [ ] **Im Browser und in einer echten Instanz prüfen** (Tab „Zeitreise“ bei 360/768/1280 px,
       hell/dunkel; Rechte als Nicht-Admin). Bisher nur Tests mit Mocks und Render-Tests.
 

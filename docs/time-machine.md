@@ -65,17 +65,30 @@ Ausgeschaltet antwortet die Route mit `status: "off"` und liest **keine** Quelle
 
 ## 3. Quellen
 
-| `id` | liest | Lesegrenze je Anfrage | Admin-only | Hinweise |
+| `id` | liest | Lesegrenze je Anfrage (Speicher fasst) | Admin-only | Hinweise |
 |---|---|---|---|---|
-| `core_audit` | Audit-Log beider Ringe (`general`, `security`) über `ConfigurationApi.events(since, ring, limit)` | 500 je Ring | ja | `events` kennt kein `until`, das Fenster schneidet der Adapter zu |
-| `config_versions` | Konfigurationsversionen über `ConfigurationApi.async_list_backups(since, limit)` | 500 | ja | `off/module_off`, wenn kein Router die Konfigurationssicherung eingeschaltet hat |
-| `ni_events` | Ereignisse von Network Intelligence über `net_query.events_page` | 500 | nein | Ereignis-ID trägt die `entry_id` und wird nicht ausgegeben |
-| `ni_incidents` | Vorfälle von Network Intelligence über `net_query.incidents_page` | 200 | nein | je Vorfall bis zu drei Marken: eröffnet, wieder eröffnet, behoben |
-| `security_timeline` | Zeitleiste des Security Center über `overview(actor=None, …)` (die maskierte Sicht) | 500 | nein | `off/module_off`, wenn das Security Center aus ist |
+| `core_audit` | Audit-Log beider Ringe (`general`, `security`) über `ConfigurationApi.events(since, ring, limit)` | 1001 je Ring (1000 / 500) | ja | `events` kennt kein `until`; jeder Ring wird ganz gelesen und vom Adapter auf das Fenster zugeschnitten |
+| `config_versions` | Konfigurationsversionen über `ConfigurationApi.async_list_backups(since, limit)` | 500 (unbegrenzt) | ja | `off/module_off`, wenn kein Router die Konfigurationssicherung eingeschaltet hat; kein `until` (Abschnitt 13) |
+| `ni_events` | Ereignisse von Network Intelligence über `net_query.events_page` | 3001 (3000) | nein | Ereignis-ID trägt die `entry_id` und wird nicht ausgegeben |
+| `ni_incidents` | Vorfälle von Network Intelligence über `net_query.incidents_page` | 501 (500) | nein | je Vorfall bis zu drei Marken: eröffnet, wieder eröffnet, behoben; `incidents_page` sortiert nach Status und Schwere ohne Zeitfilter, deshalb liest der Adapter alle Vorfälle und filtert selbst nach Zeit |
+| `security_timeline` | Zeitleiste des Security Center über `overview(actor=None, …)` (die maskierte Sicht) | 2001 (2000) | nein | `off/module_off`, wenn das Security Center aus ist |
 
-Jede Quelle hat ein **Zeitbudget von 2 s**; überschreitet sie es, ist sie `unreadable/timeout`.
-Eine Quelle liefert höchstens **500 Marken** in die Zusammenführung. Die Quellen werden
-nacheinander gelesen, zwischen ihnen gibt die Route die Ereignisschleife frei.
+Bis auf die Konfigurationsversionen liegt jede Lesegrenze über dem, was der Speicher der
+Quelle fasst: Eine Lesung ist vollständig, Client-Einträge oder ein anderer Ring können sie
+nicht aufbrauchen. Erreicht eine Lesung ihre Grenze doch, ist die Quelle gekürzt
+(Abschnitt 8).
+
+Jede Quelle hat ein **Zeitbudget von 2 s**: eine `asyncio`-Frist um ihre `await`s und eine
+Frist, die in den Schleifen des Adapters geprüft wird. Die synchronen Lesefunktionen der
+Quellmodule (`events`, `events_page`, `incidents_page`, `overview`) werden dabei **nicht
+unterbrochen**; überschreitet eine Quelle die Frist, merkt der Adapter das erst danach in
+seiner Schleife und meldet `unreadable/timeout`. Rechte, Filter und die Seitengröße wendet die
+Zusammenführung an, nicht die Quelle. Die Quellen werden nacheinander gelesen, zwischen ihnen
+gibt die Route die Ereignisschleife frei.
+
+**Zeitraster:** `ts` einer Marke ist der Zeitpunkt der Quelle, auf die Millisekunde
+**abgerundet**. Die Fensterprüfung nutzt diesen Wert, und `from`/`until` der Anfrage werden auf
+die Millisekunde **aufgerundet**; so liegt jede Marke in genau einem Seitenfenster.
 
 Interne Zustände der Quellmodule (`core.loaded`, `core.closed`, `core.registry`,
 `engine.loaded`, `center.enabled`) liest nur `tm_sources.py`; ein Vertragstest hält diese
@@ -92,7 +105,7 @@ höchstens 96 Zeichen, unbekannte Schlüssel werden abgelehnt.
 
 | Parameter | Format | Standard | Bedeutung |
 |---|---|---|---|
-| `from` | Epoch-Sekunden (bis 6 Nachkommastellen) | `until` − 24 h | Fensteranfang, eingeschlossen |
+| `from` | Epoch-Sekunden (bis 6 Nachkommastellen; auf die Millisekunde aufgerundet) | `until` − 24 h | Fensteranfang, eingeschlossen |
 | `until` | Epoch-Sekunden | jetzt (nächste volle Sekunde) | Fensterende, **ausgeschlossen** |
 | `source` | Komma-Liste der Quellen-IDs aus Abschnitt 3 | alle | jede ID höchstens einmal |
 | `router_id` | `rtr_` + 32 hex | – | nur Marken genau dieses Routers (Flotten-Marken nicht) |
@@ -145,11 +158,11 @@ Das Fenster ist halboffen `[from, until)`, höchstens **14 Tage** lang und darf 
     }
   ],
   "sources": [
-    {"id": "core_audit", "state": "ok", "reason": null, "count": 0, "oldest": 1795003200.0, "truncated": false},
-    {"id": "config_versions", "state": "ok", "reason": null, "count": 0, "oldest": 1795003200.0, "truncated": false},
-    {"id": "ni_events", "state": "ok", "reason": null, "count": 1, "oldest": 1795003561.0, "truncated": false},
-    {"id": "ni_incidents", "state": "ok", "reason": null, "count": 1, "oldest": 1795003561.0, "truncated": false},
-    {"id": "security_timeline", "state": "ok", "reason": null, "count": 0, "oldest": 1795003501.0, "truncated": false}
+    {"id": "core_audit", "state": "ok", "reason": null, "count": 0, "oldest": null, "truncated": false, "cut": null},
+    {"id": "config_versions", "state": "ok", "reason": null, "count": 0, "oldest": null, "truncated": false, "cut": null},
+    {"id": "ni_events", "state": "ok", "reason": null, "count": 1, "oldest": 1795003801.0, "truncated": false, "cut": null},
+    {"id": "ni_incidents", "state": "ok", "reason": null, "count": 1, "oldest": 1795003801.0, "truncated": false, "cut": null},
+    {"id": "security_timeline", "state": "ok", "reason": null, "count": 0, "oldest": null, "truncated": false, "cut": null}
   ],
   "omitted_client_marks": 1,
   "truncated": true,
@@ -181,15 +194,19 @@ Das Fenster ist halboffen `[from, until)`, höchstens **14 Tage** lang und darf 
 | `state` | `ok`, `empty`, `off`, `unreadable` |
 | `reason` | fester Grund bei `off` / `unreadable`, sonst `null` (Abschnitt 6.4) |
 | `count` | Marken dieser Quelle **auf dieser Seite** |
-| `oldest` | Zeitpunkt der ältesten Marke dieser Quelle im Fenster, vor den Filtern der Anfrage; `null` ohne Marken |
-| `truncated` | die Quelle hat ihre Lesegrenze erreicht |
+| `oldest` | Zeitpunkt der ältesten Marke dieser Quelle **auf dieser Seite**; `null` ohne Marken |
+| `truncated` | die Lesung der Quelle hat ihre Lesegrenze erreicht |
+| `cut` | nur bei `truncated`: `next_page` (ältere Einträge des Fensters kommen mit `next_until`) oder `unreachable` (ältere Einträge des Fensters sind nicht lesbar, Abschnitt 13); sonst `null`. Seit 1.50.0, additiv |
+
+`state`, `count` und `oldest` gelten **nach den Rechten**: Ein Nicht-Admin erfährt weder, dass es
+Marken gibt, die er nicht sehen darf, noch wann sie liegen.
 
 ### 5.3 Eine Marke
 
 | Feld | Bedeutung |
 |---|---|
 | `id` | `tmm_` + 16 hex, stabil für dasselbe Quell-Ereignis |
-| `ts` | Zeitpunkt, Epoch-Sekunden UTC (3 Nachkommastellen) |
+| `ts` | Zeitpunkt, Epoch-Sekunden UTC, auf die Millisekunde abgerundet |
 | `source` | Quellen-ID |
 | `kind`, `group` | Art und Gruppe (Abschnitt 6) |
 | `severity` | `info`, `warning`, `critical` |
@@ -244,8 +261,8 @@ Zuordnung der Quellen:
 
 | `state` | Bedeutung |
 |---|---|
-| `ok` | gelesen, mindestens eine Marke im Fenster |
-| `empty` | gelesen, keine Marke im Fenster (auch wenn dort nur Client-Ereignisse lagen) |
+| `ok` | gelesen, mindestens eine für diesen Benutzer sichtbare Marke im Fenster, **oder** die Lesung wurde gekürzt (`truncated`; eine gekürzte Quelle ist nie `empty`) |
+| `empty` | vollständig gelesen, keine für diesen Benutzer sichtbare Marke im Fenster (auch wenn dort nur Client-Ereignisse oder Marken anderer Gruppen lagen) |
 | `off` | ausgeschaltet oder für diesen Benutzer nicht sichtbar (kein Fehler) |
 | `unreadable` | konnte nicht gelesen werden; die übrigen Quellen werden trotzdem geliefert, `status` ist `partial` |
 
@@ -257,7 +274,7 @@ Zuordnung der Quellen:
 | `module_off` | `off` | Quellmodul ausgeschaltet |
 | `not_running` | `unreadable` | Quellmodul nicht eingerichtet |
 | `not_loaded` | `unreadable` | eingerichtet, Speicher noch nicht gelesen |
-| `timeout` | `unreadable` | Zeitbudget von 2 s überschritten |
+| `timeout` | `unreadable` | Zeitbudget von 2 s überschritten (geprüft in den Schleifen des Adapters, Abschnitt 3) |
 | `error` | `unreadable` | die Lesefunktion hat einen Fehler geworfen |
 | `bad_format` | `unreadable` | Antwort in unerwarteter Form |
 
@@ -281,10 +298,18 @@ Die Marken sind nach `ts` absteigend und bei gleichem `ts` nach `id` sortiert. H
 mehr Marken als `limit`, endet sie vor dem ältesten Zeitstempel, damit Marken mit **demselben
 Zeitstempel nie auf zwei Seiten verteilt** werden; `next_until` ist dann der älteste
 Zeitstempel der Seite. Die nächste Seite fragt mit `until=<next_until>` und demselben `from`.
+Weil Marken und Fenstergrenzen auf demselben Millisekunden-Raster liegen, kommt keine Marke
+doppelt und keine geht an der Grenze verloren.
 
-Hat eine Quelle ihre Lesegrenze erreicht, ist sie nur bis zu ihrem ältesten gelesenen Eintrag
-vollständig: Die Seite endet dort (`truncated: true`, `next_until` = dieser Zeitpunkt), damit
-keine Lücke entsteht.
+Wurde die Lesung einer Quelle gekürzt (`truncated`), ist sie nur oberhalb ihrer **Kante**
+vollständig, des ältesten gelesenen Eintrags im Fenster (weggelassene Client-Einträge
+eingeschlossen). Die Seite behält dann nur Marken nach der Millisekunde der Kante, und
+`next_until` ist die Millisekunde danach: Die nächste Seite liest die Millisekunde der Kante
+ganz, Marken desselben Zeitstempels bleiben zusammen. `next_until` steht auch dann, wenn die
+Seite **keine einzige Marke** enthält (etwa weil die gelesenen Einträge nur Client-Ereignisse
+waren); die Quelle ist dann nicht `empty`, sondern `ok` mit `cut: next_page`. Bei mehreren
+gekürzten Quellen gilt die jüngste Kante. Ist die Millisekunde der Kante die letzte des
+Fensters, behält die Seite sie, und was davon nicht gelesen wurde, fehlt (`truncated: true`).
 
 Liegt `next_until` am oder vor `from`, ist es `null`.
 
@@ -299,6 +324,7 @@ Fehler haben die Form `{"message", "code", "details": {"field", "reason"}}` und
 | 401 | – | nicht angemeldet (HA) |
 | 403 | `authorization_denied` | kein Admin und Panel nicht für alle offen |
 | 410 | `integration_not_loaded` | Integration entladen |
+| 413 | `body_too_large` | ein Body über 4 KiB (ein `GET` hat keinen Body; Prüfung des gemeinsamen Body-Lesers) |
 | 500 | `internal` | unerwarteter Fehler; im Log steht nur der Fehlertyp |
 
 ## 10. Datenschutz
@@ -318,8 +344,8 @@ Der Diagnose-Download jedes Routers enthält den Block `time_machine`:
 
 - aus: `{"enabled": false}`; keine Quelle wird gelesen.
 - an: `enabled`, `entry_enabled` (Option dieses Eintrags), `api_version`, `window_s` (86400),
-  `limits` (Standard- und Höchstfenster, Standard- und Höchstlimit, Marken je Quelle,
-  Zeitbudget), `sources` (je Quelle `state`, `reason`, `count`, `truncated`,
+  `limits` (Standard- und Höchstfenster, Standard- und Höchstlimit, Marken einer Quelle je
+  Seite, Zeitbudget), `sources` (je Quelle `state`, `reason`, `count`, `truncated`,
   `omitted_client_marks` der letzten 24 h, gelesen wie ein Admin; die Marken selbst werden
   verworfen) und `counters` (Zahl der Anfragen, `unreadable` je Quelle, Dauer und Markenzahl
   der letzten Anfrage; nur im Arbeitsspeicher).
@@ -329,16 +355,24 @@ Der Diagnose-Download jedes Routers enthält den Block `time_machine`:
 
 Gemessen mit gefüllten Quellen (Audit 1000 Einträge, 36 Versionen, Security-Center-Zeitleiste
 2000 Einträge, Network Intelligence 200 WAN-Wechsel und 150 Client-Ereignisse), Fenster
-13 Tage, `limit=500`: **24 ms** über HTTP, davon **17 ms** Lesen und Zusammenführen; Antwort
-**207 KB** mit 494 Marken. Der Test verlangt großzügig unter 2 s. Gemessen mit Mocks auf der
-Entwicklungs-VM, nicht auf einer HA-Instanz.
+13 Tage, `limit=500`, jede Quelle ganz gelesen: **51–78 ms** über HTTP, davon **47–74 ms** Lesen
+und Zusammenführen (drei Läufe); Antwort **209 KB** mit 498 Marken. Der Test verlangt
+großzügig unter 2 s. Gemessen mit Mocks auf der Entwicklungs-VM (Python 3.13), nicht auf einer
+HA-Instanz.
 
 ## 13. Bekannte Grenzen und was nicht geprüft ist
 
-- Mehr Marken mit **demselben Zeitstempel** als `limit`: die Seite wird dort abgeschnitten
-  (`truncated: true`), der Rest dieses Zeitstempels fehlt auf der nächsten Seite.
-- Das Audit-Log kennt kein `until`: Bei einem Fenster weit in der Vergangenheit können neuere
-  Einträge die Lesegrenze von 500 je Ring aufbrauchen.
+- Mehr Marken mit **demselben Zeitstempel** (Millisekunde) als `limit`: die Seite wird dort
+  abgeschnitten (`truncated: true`), der Rest dieses Zeitstempels fehlt auf der nächsten Seite.
+  Ebenso, wenn die letzte Millisekunde eines Fensters mehr Einträge einer Quelle hält, als sie
+  in einer Lesung liefert (Abschnitt 8); mit den heutigen Lesegrenzen nur bei den
+  Konfigurationsversionen denkbar.
+- **Konfigurationsversionen** werden höchstens 500 je Anfrage gelesen, und
+  `async_list_backups` kennt kein `until`: Liegen mehr als 500 Versionen zwischen `from` und
+  jetzt, sind die älteren im Fenster nicht erreichbar; die Quelle meldet dann
+  `truncated: true` mit `cut: unreachable` und ist nie `empty`.
+- `truncated` einer Quelle gilt vor den Rechten. Bei den Quellen, die Nicht-Admins sehen, liegt
+  die Lesegrenze über der Kapazität des Speichers; das Feld ist für sie daher immer `false`.
 - Was die Module nicht behalten, fehlt auch in der Time Machine: Der Ring `general` des
   Audit-Logs hat seit 1.50.0 feste Anteile (Core 400, je Modul 100), verdrängt aber weiterhin
   den ältesten Eintrag eines Besitzers über seinem Anteil (`general_evicted`). Ausfälle und
@@ -346,6 +380,8 @@ Entwicklungs-VM, nicht auf einer HA-Instanz.
 - Modulschlüssel des Enterprise Core werden nur nach Namen vergeben.
 - Drift-Einträge des Audit-Logs tragen keinen Bereich; Bereich und Diff zeigt der
   Configuration Manager.
+- Die synchronen Lesefunktionen der Quellmodule werden vom Zeitbudget nicht unterbrochen
+  (Abschnitt 3).
 - Nicht auf echten Routern und nicht in einer laufenden HA-Instanz geprüft; alle Aussagen
   stammen aus Tests mit Mocks.
 
