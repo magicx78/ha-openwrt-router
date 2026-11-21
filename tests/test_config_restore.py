@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import gzip
 import hashlib
 import io
 import json
@@ -230,9 +231,11 @@ def make_archive(texts: dict[str, str], files: dict[str, bytes] | None = None) -
     """A tar.gz shaped like `sysupgrade -b` output.
 
     ``files`` are the non-UCI members (default: only ``etc/shadow``).
+    Deterministic: the tar is packed with a fixed gzip mtime, so two calls
+    give the same bytes even across a second boundary.
     """
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.GNU_FORMAT) as tf:
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as tf:
         members = {f"etc/config/{name}": text.encode() for name, text in texts.items()}
         members.update({"etc/shadow": SHADOW} if files is None else files)
         for name, data in members.items():
@@ -241,7 +244,18 @@ def make_archive(texts: dict[str, str], files: dict[str, bytes] | None = None) -
             info.mtime = 1_700_000_000
             info.mode = 0o600
             tf.addfile(info, io.BytesIO(data))
-    return buf.getvalue()
+    return gzip.compress(buf.getvalue(), mtime=0)
+
+
+def test_make_archive_is_byte_identical_across_a_clock_tick(monkeypatch) -> None:
+    """Two calls give the same bytes even when the clock moves (CI flake)."""
+    import time
+
+    monkeypatch.setattr(time, "time", lambda: 1_800_000_000.0)
+    first = make_archive({"network": "config interface 'lan'\n"})
+    monkeypatch.setattr(time, "time", lambda: 1_800_000_007.0)
+    second = make_archive({"network": "config interface 'lan'\n"})
+    assert first == second
 
 
 def snapshot(texts: dict[str, str]) -> UciSnapshot:
