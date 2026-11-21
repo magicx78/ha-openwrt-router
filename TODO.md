@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-21 · Version: v1.49.0
+Stand: 2026-11-21 · Version: v1.49.4
 
 ---
 
@@ -40,6 +40,12 @@ Branch `claude/enterprise-core-49ade2`. Nutzerdoku: `docs/enterprise-core.md`, V
 - [ ] **`npm ci` im Frontend braucht `--legacy-peer-deps`:** das Lockfile unter
       `frontend/topology/` löst ohne den Schalter nicht auf (ERESOLVE). Liegt schon vor
       PR #55 vor; Peer-Abhängigkeiten bereinigen, damit `npm ci` ohne Schalter läuft.
+      1.49.4: lokal lief `npm ci` mit npm 11.19.1 ohne Schalter durch (vor und nach dem
+      Entfernen von `vite-plugin-css-injected-by-js`); mit der CI-npm-Version bestätigen.
+- [ ] **Ein MAC-Muster für alle Module:** seit 1.49.4 nutzen Core, Configuration Manager,
+      Netzwerkdiagnose und Security Center `core_masking.MAC_IN_TEXT_RE`; WiFi RF
+      (`rf_privacy._MAC_IN_TEXT`, ohne Buchstabenregel und ohne Leerzeichen-Form) und
+      Traffic haben noch eigene Muster. Angleichen, wenn deren Tests es tragen.
 - [ ] **Adoption nach dem Archivieren:** Wird ein Eintrag entfernt, liegen seine
       Versionen unter `removed/<router_id>/`; eine spätere Adoption holt sie nicht
       automatisch zurück.
@@ -132,6 +138,10 @@ Branch `claude/traffic-analytics-d7ae50`. Nutzerdoku: `docs/traffic-analytics.md
       als unbekannt. Seit 1.49.3 gilt eine Antwort ab 3496 Byte als abgeschnitten (4096 minus
       angenommene längste Zeile von 600 Byte): die längste echte Zeile (mit Labels, Zone,
       secctx) messen und `CONNTRACK_LINE_MAX_BYTES` bestätigen.
+- [ ] **„Verworfen“-Zeile trennen:** `rolled_buckets`, `replaced_client_points` und
+      `expired_points` stehen in `overview()["drops"]`, sind aber keine Verluste (Verdichtung,
+      Ersatz, Ablauf). Seit 1.49.4 hat jeder Schlüssel einen deutschen Text
+      (`tests/test_traffic_drop_texts_v1494.py`); eigene Zeile oder Hinweis erwägen.
 
 ### WiFi RF (1.48.0, Nachprüfung 1.49.3)
 
@@ -407,6 +417,10 @@ Alles lesend, Installation und HA-Neustart nur nach OK.
 
 ## Erledigt (Auszug — Details in CHANGELOG.md)
 
+- [x] v1.49.4 — MACs in freiem Text (Core, Configuration Manager, Netzwerkdiagnose,
+      Diagnose-Download) geschwärzt, deutsche Texte für alle Traffic-Verwurfszähler,
+      unbenutztes Vite-Plugin entfernt, unique_ids aller Entitäten eines Routers
+      festgeschrieben
 - [x] v1.38.x — CPU-Last pro Kern + rpcd-ACL v7, Kanal aus dem `config`-Block,
       AP-Interfaces im SSH-Fallback, WAN-Sensoren auf Routern ohne WAN
       standardmäßig aus, Panel ohne OUI-Hersteller bei privaten MACs,

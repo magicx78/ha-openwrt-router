@@ -4,6 +4,49 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.49.4] - 2026-11-21
+
+Kleine Restpunkte nach 1.49.3: MAC-Adressen in freiem Text, fehlende deutsche Texte im
+Traffic-Tab, ein unbenutztes Frontend-Paket und ein Test, der die unique_ids aller Entitäten
+festhält. Keine neuen Router-Rechte, keine geänderten Router-Aufrufe, keine geänderten
+unique_ids. Panel-Version `20261121-review2`.
+
+### Geändertes Verhalten, das Nutzer bemerken
+
+- **MAC-Adressen in Meldungen werden geschwärzt.** Freitext des Enterprise Core
+  (Fehlermeldungen, Gründe, Hinweise, Beschreibungen), Texte des Configuration Managers,
+  alle Ausgaben der Netzwerkdiagnose und der Diagnose-Download zeigen statt einer MAC
+  `**REDACTED**`. Diffs, Archive und Admin-Ansichten des Configuration Managers zeigen MACs
+  weiter, weil sie dort der Inhalt sind (z. B. `@host{"mac":…}` in einem Diff).
+
+### Behoben
+
+- **MAC-Adressen in freiem Text blieben lesbar** in `redact_text`/`scrub_text` (Core),
+  `config_redact_text` (Configuration Manager) und den Ausgaben der Netzwerkdiagnose
+  (`log_safe`, Befunde, Ursachen, Ereignisse). Alle nutzen jetzt ein gemeinsames Muster,
+  `core_masking.MAC_IN_TEXT_RE`: das geprüfte Muster des Security Centers aus 1.49.3
+  (Doppelpunkt, Bindestrich, Punkt, ohne Trenner, mit Leerzeichen; ohne Trenner und mit
+  Punkt nur mit mindestens einem Hex-Buchstaben; linear). Das Security Center nutzt es
+  unverändert weiter. 12-stellige Zahlen, Zeitstempel, Telefonnummern, Hashes, Core-IDs und
+  Pseudonyme (auch `usr_` + 12 Hex) bleiben lesbar. `mask_for_output` und
+  `config_mask_for_output` schwärzen MACs in strukturierten Daten nur auf Wunsch
+  (`macs=True`).
+- **Traffic-Tab: „Verworfen“ zeigte „Code dropped_snapshots“ und „Code stations_dropped“.**
+  Auch die übrigen Zähler derselben Zeile (`late_rates`, `dropped_points_*`,
+  `store_trimmed_*` usw.) hatten keinen deutschen Text. Jetzt hat jeder Zähler, den die
+  Übersicht liefern kann, einen Text; ein Test nimmt die Schlüssel von einer laufenden
+  Engine und schlägt fehl, wenn künftig einer ohne Text dazukommt.
+
+### Intern
+
+- **`vite-plugin-css-injected-by-js` entfernt.** `vite.config.ts` lädt es nicht; das gebaute
+  Bundle ist byte-gleich.
+- **Test gegen wechselnde unique_ids.** Alle Entitäten eines Routers (Sensoren, Schalter,
+  Device Tracker, Buttons, Binärsensoren; Enterprise-Module und WiFi RF aus) werden mit dem
+  rpcd-getreuen Router-Modell aus 1.49.2 angelegt; ihre 64 unique_ids müssen der
+  eingecheckten Liste gleichen (dieselbe Liste wie mit 1.49.3).
+- `CLAUDE.md` auf den Stand 1.49.4 gebracht.
+
 ## [1.49.3] - 2026-11-21
 
 Korrekturen aus unabhängigen Prüfungen von WiFi RF, der Folgeliste 1.49.1, Netzwerkdiagnose,
