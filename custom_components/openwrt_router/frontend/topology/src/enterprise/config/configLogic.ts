@@ -811,6 +811,12 @@ const PATH_FAILURE_TEXT: Record<string, string> = {
 
 const SSH_PORT_STEP =
   'SSH (Port 22) ist von Home Assistant aus nicht erreichbar: auf dem Router freigeben oder das Paket cgi-io installieren.';
+/** 1.49.3: on a plain HTTP entry cgi-io is refused anyway (archive only over TLS). */
+const SSH_PORT_STEP_HTTP =
+  'SSH (Port 22) ist von Home Assistant aus nicht erreichbar: auf dem Router freigeben.';
+/** 1.49.3: ssh.timeout covers connection, archive build and transfer, not just the port. */
+const SSH_SLOW_STEP =
+  'SSH antwortet zu langsam oder das Archiv ist zu groß; später erneut versuchen.';
 
 const NEXT_STEP: Record<string, string> = {
   'ssh.pin_pending': 'SSH-Host-Key bestätigen (Bereich „Zugang“ unten).',
@@ -824,13 +830,13 @@ const NEXT_STEP: Record<string, string> = {
   'cgi.unreachable': 'Später erneut sichern.',
   'cgi.timeout': 'Später erneut sichern.',
   'ssh.unreachable': SSH_PORT_STEP,
-  'ssh.timeout': SSH_PORT_STEP,
+  'ssh.timeout': SSH_SLOW_STEP,
 };
 
 /** Error class text when the class came from the SSH archive path, not from the router as a whole. */
 const SSH_PATH_CLASS_TEXT: Record<string, string> = {
   unreachable: 'Der Archivweg über SSH (Port 22) war nicht erreichbar; der Router selbst hat geantwortet.',
-  timeout: 'Der Archivweg über SSH (Port 22) hat nicht rechtzeitig geantwortet; der Router selbst hat geantwortet.',
+  timeout: 'Der Archivweg über SSH hat nicht rechtzeitig geantwortet (Verbindung, Archivbau oder Übertragung); der Router selbst hat geantwortet.',
 };
 
 /** True when only the SSH archive path hit `cls` (UCI read fine, cgi not the same class). */
@@ -852,6 +858,7 @@ function nextStepOf(code: string, warnings: readonly string[]): string | undefin
   if (!key) return undefined;
   const [path, cls] = key.split('.', 2);
   if (path === 'ssh' && cls in SSH_PATH_CLASS_TEXT && !onlySshHit(cls, warnings)) return 'Später erneut sichern.';
+  if (key === 'ssh.unreachable' && warnings.some(w => pathKey(w) === 'cgi.insecure_transport')) return SSH_PORT_STEP_HTTP;
   return NEXT_STEP[key];
 }
 

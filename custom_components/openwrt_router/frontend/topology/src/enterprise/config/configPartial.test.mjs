@@ -200,7 +200,11 @@ test('an unreachable SSH archive path is named as such, with a next step', () =>
     assert.ok(!all.includes('Router war nicht erreichbar') && !all.includes('Router nicht erreichbar'), all);
     assert.ok(!all.includes('Zeitüberschreitung beim Router'), all);
     assert.match(info.classText, /SSH/);
-    assert.ok(info.nextSteps.some(s => s.includes('Port 22') && s.includes('cgi-io')), info.nextSteps.join(' | '));
+    // 1.49.3: a timeout is a slow archive (own text), only "unreachable" names the port
+    const port = cls === 'unreachable'
+      ? (s => s.includes('Port 22') && s.includes('cgi-io'))
+      : (s => s.includes('zu langsam'));
+    assert.ok(info.nextSteps.some(port), info.nextSteps.join(' | '));
   }
 });
 
@@ -220,4 +224,23 @@ test('a spent archive budget reads per path, without blaming the SSH port', () =
   assert.match(info.classText, /Zeitüberschreitung beim Router/);
   assert.ok(!info.nextSteps.some(s => s.includes('Port 22')), info.nextSteps.join(' | '));
   assert.ok(info.nextSteps.includes('Später erneut sichern.'), info.nextSteps.join(' | '));
+});
+
+// ── 1.49.3 review C1: the next step names the real cause ───────────────────
+
+test('an SSH timeout is a slow archive, not a closed port', () => {
+  const info = partialInfo('timeout', ['archive_unavailable:cgi.not_available', 'archive_unavailable:ssh.timeout']);
+  const all = [info.classText, ...info.nextSteps].join(' | ');
+  assert.ok(!info.nextSteps.some(s => s.includes('nicht erreichbar')), all);
+  assert.ok(info.nextSteps.some(s => s.includes('zu langsam') && s.includes('später erneut')), all);
+});
+
+test('an HTTP entry is never told to install cgi-io', () => {
+  for (const item of ['archive_unavailable:cgi.insecure_transport', 'archive_not_attempted:cgi.insecure_transport']) {
+    const info = partialInfo('unreachable', [item, 'archive_unavailable:ssh.unreachable']);
+    const all = info.nextSteps.join(' | ');
+    assert.ok(info.nextSteps.some(s => s.includes('Port 22')), all);
+    assert.ok(!all.includes('cgi-io installieren'), all);
+    assert.ok(info.nextSteps.some(s => s.includes('HTTPS')), all);
+  }
 });
