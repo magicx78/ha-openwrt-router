@@ -94,7 +94,7 @@
 .dg-details > summary { cursor: pointer; color: var(--text-primary); font-weight: 600; padding: 4px 0; }
 .dg-series { display: flex; flex-direction: column; gap: 4px; padding: 4px 0 10px; min-width: 0; }
 .dg-series__title { font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
-.dg-table-wrap { overflow-x: auto; max-width: 100%; }
+.dg-table-wrap { overflow-x: auto; max-width: 100%; container: dghist / inline-size; }
 .dg-table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
 .dg-table th, .dg-table td { padding: 4px 8px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .dg-table thead th { color: var(--text-muted); font-weight: 600; font-size: 11px; }
@@ -129,4 +129,15 @@
   .dg-chain { flex-direction: column; gap: 14px; }
   .dg-chip { min-width: 0; }
   .dg-chip:not(:last-child)::after { content: '\2193'; right: auto; left: 50%; top: auto; bottom: -15px; transform: translateX(-50%); }
+}
+
+/* Narrow history (1.49.3): below the width the six columns need, each window
+   is a card with labelled values (the Config Manager's container pattern). */
+@container dghist (max-width: 560px) {
+  .dg-table thead { display: none; }
+  .dg-table, .dg-table tbody { display: block; }
+  .dg-table tr { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .dg-table th[scope='row'] { grid-column: 1 / -1; border-bottom: none; padding: 0 0 2px; font-weight: 600; }
+  .dg-table td { display: flex; justify-content: space-between; gap: 6px; border-bottom: none; padding: 0; white-space: normal; }
+  .dg-table td::before { content: attr(data-label); color: var(--text-muted); }
 }

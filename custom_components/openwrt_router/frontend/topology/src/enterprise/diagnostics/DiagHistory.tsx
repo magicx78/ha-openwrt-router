@@ -17,6 +17,9 @@ function seriesTitle(s: HistorySeries): string {
     .filter(Boolean).join(' · ');
 }
 
+/** Value columns; each cell carries its name for the narrow card layout (1.49.3). */
+const COLUMNS = ['Latenz (Mittel)', 'Jitter', 'Verlust', 'Lücken', 'Abdeckung'] as const;
+
 function SeriesTable({ series, windows }: { series: HistorySeries; windows: string[] }) {
   const title = seriesTitle(series);
   return (
@@ -26,8 +29,8 @@ function SeriesTable({ series, windows }: { series: HistorySeries; windows: stri
         <table className="dg-table" aria-label={`Verlauf ${title}`}>
           <thead>
             <tr>
-              <th scope="col">Zeitraum</th><th scope="col">Latenz (Mittel)</th><th scope="col">Jitter</th>
-              <th scope="col">Verlust</th><th scope="col">Lücken</th><th scope="col">Abdeckung</th>
+              <th scope="col">Zeitraum</th>
+              {COLUMNS.map(c => <th key={c} scope="col">{c}</th>)}
             </tr>
           </thead>
           <tbody>
@@ -35,7 +38,7 @@ function SeriesTable({ series, windows }: { series: HistorySeries; windows: stri
               <tr key={r.window}>
                 <th scope="row">{label(WINDOW_LABEL, r.window)}</th>
                 {[r.latency, r.jitter, r.loss, r.gaps, r.coverage].map((v, i) => (
-                  <td key={i}>{v === NO_VALUE ? <span className="dg-unknown" title="nicht gemessen">{v}</span> : v}</td>
+                  <td key={i} data-label={COLUMNS[i]}>{v === NO_VALUE ? <span className="dg-unknown" title="nicht gemessen">{v}</span> : v}</td>
                 ))}
               </tr>
             ))}
