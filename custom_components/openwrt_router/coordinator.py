@@ -205,16 +205,15 @@ def _traffic_wan_like(name: str) -> bool:
 
 
 def traffic_first_devices(wan_status: Any, trunk_port_map: Any) -> list[str]:
-    """Netdevs the copy takes before all others: the WAN ``l3_device`` and
-    ``device`` of this poll, then the uplink ports of the last topology map
-    (``trunk_port_map`` values; the ports only, never the hosts)."""
+    """Netdevs the copy takes before all others: the WAN ``l3_device`` of
+    this poll (``get_wan_status`` has no ``device`` key), then the uplink
+    ports of the last topology map (``trunk_port_map`` values; the ports
+    only, never the hosts)."""
     out: list[str] = []
     if isinstance(wan_status, dict):
-        out.extend(
-            v
-            for v in (wan_status.get("l3_device"), wan_status.get("device"))
-            if isinstance(v, str)
-        )
+        l3_device = wan_status.get("l3_device")
+        if isinstance(l3_device, str):
+            out.append(l3_device)
     if isinstance(trunk_port_map, dict):
         out.extend(sorted(v for v in trunk_port_map.values() if isinstance(v, str)))
     return out

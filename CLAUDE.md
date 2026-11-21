@@ -6,6 +6,7 @@ Home Assistant custom integration für OpenWrt Router via ubus/rpcd JSON-RPC.
 GitHub: https://github.com/magicx78/ha-openwrt-router
 Domain: `openwrt_router`
 HACS: Custom Repository (Ziel: Default Store)
+Stand: Version 1.49.4 (2026-11-21)
 
 ## Projektstruktur
 
@@ -29,13 +30,21 @@ ha-openwrt-router/
 │   ├── topology_diagnostic.py  # Snapshot builder per router
 │   ├── topology_mesh.py        # Multi-router mesh aggregator + edge detection
 │   ├── topology_entities.py    # Topology-related entities
-│   ├── topology_panel.py       # Sidebar panel registration + API view
+│   ├── topology_panel.py       # Sidebar panel registration + API view (_PANEL_VERSION)
+│   │   # Enterprise-Module (je Option ein/aus):
+│   ├── enterprise_core.py, core_*.py     # Core: Router-Identität, Registry, Audit, Guard, Maskierung (core_masking)
+│   ├── config_*.py             # Config Manager: Backups, Diff, Restore (config_manager, config_provider, config_views)
+│   ├── security_*.py           # Security Center (security_center, security_model, security_rules, security_views)
+│   ├── diag_*.py               # Netzwerkdiagnose (diag_runtime, diag_core, diag_chain, diag_views)
+│   ├── rf_*.py, wifi_rf_entities.py  # WiFi RF Intelligence (rf_center, rf_collector, rf_privacy, rf_views)
+│   ├── traffic_*.py            # Traffic Analytics (traffic_engine, traffic_output, traffic_views)
+│   ├── net_*.py                # Network Intelligence (net_engine, net_rules, net_query)
 │   ├── strings.json            # UI Strings
 │   ├── translations/en.json
 │   ├── brand/                  # icon.png + icon.svg (für HACS Validation)
 │   └── frontend/               # React/TS Topology Panel
-│       ├── dist/topology-bundle.js   # Built bundle (341 kB)
-│       └── topology/src/             # Vite project (App, components/, utils/)
+│       ├── dist/topology-bundle.js   # Built bundle (~813 kB), eingecheckt
+│       └── topology/src/             # Vite project (App, components/, utils/, enterprise/)
 ├── tests/
 │   ├── conftest.py
 │   ├── test_api.py             # ubus + SSH-Fallback
@@ -49,12 +58,15 @@ ha-openwrt-router/
 │   ├── test_topology_mesh.py   # Mesh aggregator (inter-router edges)
 │   ├── test_memory_leak_v1178.py    # Heap + RSS regression checks
 │   ├── test_sshpass_security_v1179.py  # No '-p <pw>' in argv
-│   └── …                       # 448 Tests total
+│   ├── test_wifi_switch_ids_v1492.py   # rpcd-getreues Router-Modell + Aufrufliste 1.47.1
+│   ├── test_unique_ids_snapshot_v1494.py  # 130 unique_ids eines Gateways (Grenzen im Docstring)
+│   ├── full_router_kit.py      # Gateway-Modell: volle ubus-Poll-Daten + rpcd-getreues WLAN
+│   └── …                       # rund 8 850 Tests (1.49.4)
 ├── scripts/                    # mock_router.py, dev_start.py, _dev_rss_sample.sh, …
 ├── .github/workflows/
 │   ├── hassfest.yaml           # HA manifest validation
 │   ├── hacs.yaml               # HACS validation
-│   ├── tests.yaml              # ruff check + ruff format + pytest (3.12, 3.13)
+│   ├── tests.yaml              # ruff check + ruff format + pytest (3.13, 3.14)
 │   ├── ha-compat.yaml          # HA version compatibility matrix
 │   └── release.yaml            # Auto release on main push (gated: tests + hassfest)
 ├── brand/                      # Repo-Root brand assets (Original)
@@ -112,6 +124,27 @@ Wichtige ubus-Calls:
 - `UpdateFailed` in `_async_update_data` werfen, nie schlucken
 - `@dataclass(frozen=True)` für EntityDescription
 - Defensive: `data.get("key")` statt `data["key"]` in Entity-Properties
+- Empfänger an `async_dispatcher_connect` sind `@callback`-Funktionen oder
+  Coroutinen, nie ein Lambda.
+
+## Lehren aus 1.49.x
+
+- Änderungen an Router-Aufrufen in `api.py` oder an unique_ids brauchen einen
+  Test gegen die aufgezeichnete Aufrufliste bzw. die unique_ids des vorigen
+  Release-Stands (`tests/test_wifi_switch_ids_v1492.py`,
+  `tests/test_unique_ids_snapshot_v1494.py`).
+- `tests/test_unique_ids_snapshot_v1494.py` hält 130 unique_ids eines Gateways fest
+  (Modell `tests/full_router_kit.py`, zwei Polls ohne SSH): 109 bei ausgeschalteten
+  Enterprise-Modulen (statische, WAN-, Schnittstellen-, Port-, AP- und DHCP-Pool-Sensoren,
+  WLAN- und Dienst-Schalter, Device Tracker, Buttons, Binärsensoren), 12 WLAN-unique_ids
+  des iwinfo-Wegs (Schalter nach ifname, Rausch-/Signal-Sensoren), 9 mit Traffic. Nicht
+  abgedeckt: WiFi RF, Netzwerkdiagnose, Security Center, Configuration Manager, Network
+  Intelligence, Client-Stabilität, Traffic-Client-Sensoren, `…_hwmode`, WLAN über
+  `network.wireless`/SSH. Neue Entitätsarten dort ergänzen.
+- Das Test-Router-Modell verhält sich wie echtes rpcd: `iwinfo info {}` ohne
+  `device` → Status 2 (Invalid argument), kein `network.wireless`.
+- Frontend neu gebaut → `_PANEL_VERSION` auf einen nie ausgelieferten Wert
+  setzen, sonst behalten Browser das alte Bundle.
 
 ## Geplante Features
 

@@ -280,6 +280,22 @@ def _names(items: Any, key: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def _up_interface_devices(interfaces: Any) -> tuple[str, ...]:
+    """L3 netdevs of the interfaces that are up (``network_interfaces``).
+
+    ``get_network_interfaces`` puts the logical name (``wan6``) into
+    ``interface`` when netifd sends no ``l3_device``, which it does for an
+    interface that is not up: no netdev, so the sysfs fallback must not
+    read ``/sys/class/net/<logical name>`` (8 file reads, all "not found").
+    """
+    up = [
+        item
+        for item in (interfaces if isinstance(interfaces, list) else ())
+        if isinstance(item, Mapping) and item.get("status") == "up"
+    ]
+    return _names(up, "interface")
+
+
 def _registry_facts(
     registry: Callable[[str], RegistryFacts] | None, mac: str
 ) -> RegistryFacts | None:
@@ -405,6 +421,8 @@ def snapshot_from_data(
     port_stats = getattr(data, "port_stats", None)
     port_links = _port_links(port_stats)
     wan = getattr(data, "wan_status", None)
+    # set by ``get_wan_status`` from netifd while the WAN is up (absent: no
+    # WAN point this poll; before the fix after 1.49.3 it was never set)
     wan_device = wan.get("l3_device") if isinstance(wan, Mapping) else None
     if not valid_device_name(wan_device):
         wan_device = None
@@ -454,8 +472,8 @@ def snapshot_from_data(
         stations_dropped=dropped,
         invalid_items=invalid,
         ap_interfaces=_names(getattr(data, "ap_interfaces", None), "ifname"),
-        interface_devices=_names(
-            getattr(data, "network_interfaces", None), "interface"
+        interface_devices=_up_interface_devices(
+            getattr(data, "network_interfaces", None)
         ),
         conntrack_count=conntrack,
         uplink_ports=uplinks,

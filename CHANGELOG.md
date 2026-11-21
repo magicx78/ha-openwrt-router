@@ -4,6 +4,93 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.49.4] - 2026-11-21
+
+Behebt die fehlenden Traffic-Sensoren am Gateway und kleine Restpunkte nach 1.49.3:
+MAC-Adressen in freiem Text, fehlende deutsche Texte im Traffic-Tab, ein unbenutztes
+Frontend-Paket und ein Test, der die unique_ids eines Gateways festhält. Keine neuen
+Router-Rechte. Bei ausgeschaltetem Traffic-Modul macht ein Poll dieselben Router-Aufrufe wie
+1.49.3; mit eingeschalteter Traffic-Option `traffic_sysfs_fallback` entfallen Lesezugriffe für
+inaktive Schnittstellen (unter „Behoben“). Keine bestehende unique_id geändert (für die im
+Test abgedeckten Entitäten mit 1.49.3 abgeglichen); mit eingeschaltetem Traffic entstehen am
+Gateway die Router-Sensoren neu. Panel-Version `20261121-review2`.
+
+### Geändertes Verhalten, das Nutzer bemerken
+
+- **MAC-Adressen in Meldungen werden geschwärzt.** Freitext des Enterprise Core
+  (Fehlermeldungen, Gründe, Hinweise, Beschreibungen), Texte des Configuration Managers und
+  alle Ausgaben der Netzwerkdiagnose zeigen statt einer MAC `**REDACTED**`; im
+  Diagnose-Download gilt das für die Blöcke Core, Configuration Manager und
+  Netzwerkdiagnose. Diffs, Archive und Admin-Ansichten des Configuration Managers zeigen MACs
+  weiter, weil sie dort der Inhalt sind (z. B. `@host{"mac":…}` in einem Diff).
+
+### Behoben
+
+- **Traffic Analytics: Das Gateway bekommt jetzt seine Router-Sensoren** (WAN Download, Upload,
+  Summe und Spitze, Uplink-Auslastung und Uplink-Fehler). `wan_status` gab das WAN-Gerät von netifd
+  (`l3_device`) nicht weiter, deshalb fehlte an echten Routern der WAN-Messpunkt; die Testdaten
+  enthielten das Feld von Hand. Gefunden bei der ersten Prüfung an einer echten Installation. Kein
+  zusätzlicher Router-Aufruf, keine bestehende unique_id geändert.
+- **Traffic Analytics: Die sysfs-Ausweichabfrage liest nur noch Geräte von aktiven Schnittstellen.**
+  Vorher las sie für eine inaktive Schnittstelle (z. B. `wan6`) acht nicht vorhandene Dateien und
+  zählte das als `source_missing`.
+- **MAC-Adressen in freiem Text blieben lesbar** in `redact_text`/`scrub_text` (Core),
+  `config_redact_text` (Configuration Manager) und den Ausgaben der Netzwerkdiagnose
+  (`log_safe`, Befunde, Ursachen, Ereignisse). Alle nutzen jetzt ein gemeinsames Muster,
+  `core_masking.MAC_IN_TEXT_RE`: das geprüfte Muster des Security Centers aus 1.49.3
+  (Doppelpunkt, Bindestrich, Punkt, ohne Trenner, mit Leerzeichen; ohne Trenner und mit
+  Punkt nur mit mindestens einem Hex-Buchstaben; linear). Das Security Center nutzt es
+  unverändert weiter. 12-stellige Zahlen, Zeitstempel, Telefonnummern, Hashes, Core-IDs und
+  Pseudonyme (auch `usr_` + 12 Hex) bleiben lesbar. `mask_for_output` und
+  `config_mask_for_output` schwärzen MACs in strukturierten Daten nur auf Wunsch
+  (`macs=True`).
+- **Traffic-Tab: „Verworfen“ zeigte „Code dropped_snapshots“ und „Code stations_dropped“.**
+  Auch die übrigen Zähler derselben Zeile (`late_rates`, `dropped_points_*`,
+  `store_trimmed_*` usw.) hatten keinen deutschen Text. Jetzt hat jeder Zähler, den die
+  Übersicht liefern kann, einen Text; ein Test nimmt die Schlüssel von einer laufenden
+  Engine und schlägt fehl, wenn künftig einer ohne Text dazukommt.
+
+### Intern
+
+- **`vite-plugin-css-injected-by-js` entfernt.** `vite.config.ts` lädt es nicht; das gebaute
+  Bundle ist byte-gleich.
+- **Test gegen wechselnde unique_ids** (`tests/test_unique_ids_snapshot_v1494.py`, Modell in
+  `tests/full_router_kit.py`). Ein Gateway mit vollständigen Poll-Daten über ubus
+  (Schnittstellen, Ports, DHCP-Pool, Dienste, ein WLAN-Client) und rpcd-getreuem WLAN wird
+  zweimal ohne SSH-Ausweichweg abgefragt; danach legen alle Plattformen ihre Entitäten an.
+  Festgehalten sind 130 unique_ids: 109 Entitäten bei ausgeschalteten Enterprise-Modulen
+  (92 Sensoren, darunter 16 Schnittstellen-, 8 Port-, 32 AP- und 1 DHCP-Pool-Sensor, auch
+  die deaktiviert angelegten; 7 Schalter, 1 Device Tracker, 6 Buttons, 3 Binärsensoren),
+  12 WLAN-unique_ids des iwinfo-Wegs (Schalter nach Schnittstellenname, Rausch- und
+  Signal-Sensoren) und 9 bei eingeschaltetem Traffic (7 Router-, 2 Flotten-Sensoren). Die
+  Option „erweiterte WLAN-Sensoren“ ändert keine unique_id. Ohne den Traffic-Teil liefert
+  der Stand 1.49.3 dieselben Listen; dort entstehen am Gateway mit Traffic nur die zwei
+  Flotten-Sensoren. Je eine geänderte unique_id für Port-, Schnittstellen-, DHCP-Pool-,
+  Radio- und AP-Sensor, WLAN-Schalter und Traffic-Sensor macht den Test rot. Nicht
+  abgedeckt: WiFi RF, Netzwerkdiagnose, Security Center, Configuration Manager, Network
+  Intelligence und Client-Stabilität, Traffic-Client-Sensoren und Traffic an Routern ohne
+  WAN, `…_hwmode`-Sensoren, WLAN-Schalter über `network.wireless` und SSH.
+- `CLAUDE.md` auf den Stand 1.49.4 gebracht.
+
+### Bekannte Grenzen
+
+- **WAN-Wechsel.** Der Traffic-WAN-Messpunkt hängt am WAN-Gerät des einzelnen Polls.
+  Wechselt das WAN-Gerät (Failover mit mwan3, LTE-Ausweichweg, `wan` ↔ `wwan0`), beginnt die
+  Summe „WAN gesamt“ neu und springt bei der Rückkehr zurück. Home Assistant kann den
+  Rücksprung eines `TOTAL_INCREASING`-Sensors als Verbrauch zählen (aus dem Code abgeleitet,
+  nicht in Home Assistant gemessen), und die Übersicht zeigt bis zu 24 Stunden zwei
+  WAN-Zeilen. An Routern mit einem festen WAN-Gerät tritt das nicht auf.
+- **Uplink-Erkennung.** `trunk_port_map` enthält jeden Host mit ARP- oder FDB-Eintrag, nicht
+  nur Router. Traffic hält deshalb jeden LAN-Port mit einem bekannten Host für einen Uplink,
+  überspringt kabelgebundene Client-Zuordnungen an diesen Ports, und Access Points bekommen
+  meist „Uplink unbekannt“.
+- **MAC-Schwärzung in Freitext** (Core, Configuration Manager, Netzwerkdiagnose) trifft selten
+  auch anderes: Teile einer ULID, Zahlenfolgen in Bindestrich- oder Doppelpunkt-Form
+  (`26-11-21-15-30-00`), `commit abcdef123456`, Teile eines SSH-Fingerprints. Eine MAC direkt
+  hinter einem Bindestrich (`esp-a1b2c3d4e5f6`) wird nicht geschwärzt.
+- **Nicht an echten Routern geprüft:** ob `network.device status` bei PPPoE oder LTE das
+  WAN-Gerät (`pppoe-wan`, `wwan0`) auflistet.
+
 ## [1.49.3] - 2026-11-21
 
 Korrekturen aus unabhängigen Prüfungen von WiFi RF, der Folgeliste 1.49.1, Netzwerkdiagnose,

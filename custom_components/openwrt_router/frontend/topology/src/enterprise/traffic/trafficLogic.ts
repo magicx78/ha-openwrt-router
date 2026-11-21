@@ -886,6 +886,22 @@ export const REASON_TEXT: Record<string, string> = {
   half_duplex_rx_tx_share_the_link: 'Halbduplex: rx und tx teilen sich den Link',
   devices_omitted_over_cap: `Mehr als ${DEVICES_PER_ROUTER_MAX} Netzwerkgeräte: nicht alle gemessen`,
   dropped_feeds: 'Flow-Quellen über der Obergrenze verdrängt',
+  // discard counters of the overview ("Verworfen"), 1.49.4
+  dropped_snapshots: 'Router-Abfragen nicht ausgewertet (neuere ersetzt oder Warteschlange voll)',
+  stations_dropped: 'WLAN-Stationen über der Obergrenze nicht gemessen',
+  dropped_points_infra: 'Infrastruktur-Messpunkte über der Obergrenze verworfen',
+  dropped_points_client: 'Client-Messpunkte über der Obergrenze verworfen',
+  replaced_client_points: 'inaktive Client-Messpunkte ersetzt',
+  late_rates: 'verspätete Messwerte verworfen',
+  rates_without_wall: 'Messwerte ohne Uhrzeit verworfen',
+  rates_not_kept: 'Messwerte nicht gespeichert',
+  late_after_rollup: 'Messwerte nach der Verdichtung eingetroffen',
+  rolled_buckets: 'Zeitabschnitte in den Langzeitverlauf verdichtet',
+  expired_points: 'abgelaufene Messpunkte entfernt',
+  load_invalid: 'ungültige gespeicherte Einträge übersprungen',
+  store_trimmed_infra: 'Infrastruktur-Verlauf beim Speichern gekürzt',
+  store_trimmed_client: 'Client-Verlauf beim Speichern gekürzt',
+  store_trimmed_rest: 'übriger Verlauf beim Speichern gekürzt',
 };
 
 /** "Mehr als 64 Netzwerkgeräte: N nicht gemessen", or null when none was left out. */
