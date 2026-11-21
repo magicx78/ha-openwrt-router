@@ -4,8 +4,9 @@
      Hostnamen echter Geräte, Passwörter oder Tokens; Router-Kennungen im Beispiel sind
      Platzhalter. Aussagen sind am Code gelesen (tm_sources.py, tm_query.py, tm_views.py,
      config_flow.py, diagnostics.py, frontend/topology/src/enterprise/timemachine/) und mit den
-     Tests tests/test_tm_*.py und timemachine/*.test.mjs geprüft, nicht an Geräten, in einer
-     HA-Instanz oder im Browser ausgeführt. Messwerte aus
+     Tests tests/test_tm_*.py und timemachine/*.test.mjs geprüft, nicht an Geräten oder in einer
+     HA-Instanz ausgeführt; den Tab hat nur die Prüfung vor dem Merge headless im Browser
+     angesehen (Abschnitt 14). Messwerte aus
      tests/test_tm_views.py::test_response_time_with_filled_sources auf der Entwicklungs-VM
      (Python 3.13, Mocks), Stand 2026-11-21. Plan: docs/plans/2026-11-21-network-time-machine.md. -->
 
@@ -383,7 +384,9 @@ HA-Instanz.
 - Die synchronen Lesefunktionen der Quellmodule werden vom Zeitbudget nicht unterbrochen
   (Abschnitt 3).
 - Nicht auf echten Routern und nicht in einer laufenden HA-Instanz geprüft; alle Aussagen
-  stammen aus Tests mit Mocks.
+  stammen aus Tests mit Mocks. Den Tab hat die Prüfung vor dem Merge headless in Firefox mit
+  der Testantwort angesehen; die danach geänderten Stile (Abschnitt 14: gesperrte Chips,
+  Karten ab 860 px, Quellspalte, mittige Chips) sind nur durch Tests geprüft.
 
 ## 14. Tab „Zeitreise“
 
@@ -402,27 +405,41 @@ fügt der Antwort nichts hinzu; Phase A verlinkt `ref` nicht, es gibt keinen Exp
   zu alten Filtern werden verworfen. Die Art-Chips filtern nur die geladenen Marken
   („x von y Marken“).
 - **Quellen:** je Quelle ein Pill in Worten („12 Marken“, „leer“, „aus · Grund“, „Quelle nicht
-  lesbar · Grund“, Zusatz „gekürzt“), nie grün. Bei `partial` steht darüber „Mindestens eine
+  lesbar · Grund“, Zusatz „gekürzt“ bzw. bei `cut: unreachable` „gekürzt, Älteres nicht
+  abrufbar“), nie grün. Eine gekürzte Quelle ohne Marke auf der Seite zeigt „0 Marken ·
+  gekürzt“, nie „leer“. Bei `partial` steht darüber „Mindestens eine
   Quelle war nicht lesbar; die Zeitleiste ist unvollständig.“
-- **Hinweis** bei `omitted_client_marks` > 0: „N client-bezogene Ereignisse sind ausgeblendet.
+- **Hinweis** bei `omitted_client_marks` > 0 (der Tab prüft die Rolle nicht selbst; er verlässt
+  sich darauf, dass der Server Nicht-Admins 0 schickt): „N client-bezogene Ereignisse sind ausgeblendet.
   Client-Verläufe kommen mit einem eigenen Schalter in einer späteren Version.“
 - **Zeitleiste:** neueste zuerst, nach Kalendertag in Ortszeit (Heute, Gestern, „Wochentag,
   TT.MM.JJJJ“), je Marke Uhrzeit (UTC-ISO im `title`), Schwere als Punkt und Wort (Info nie in
   Warnfarbe), Art, Titel, Kennzahlen (nur bekannte Schlüssel), Router („alle Router“ bei
   `fleet`) und Quelle; „abgeleitet“ bei `derived`. Doppelte `id` werden entfernt. „Ältere
   laden“ fragt mit `until=next_until`; `truncated` ohne `next_until` zeigt „Weitere Marken im
-  Zeitfenster wurden gekürzt; Zeitfenster oder Filter enger wählen.“
+  Zeitfenster wurden gekürzt; Zeitfenster oder Filter enger wählen.“ Eine Seite ohne Marken,
+  aber mit `next_until` (der Abschnitt hält nur ausgeblendete Client-Einträge), zeigt „In
+  diesem Abschnitt gibt es nur ausgeblendete Einträge. Ältere laden, um weiter
+  zurückzugehen.“ und „Ältere laden“, nie „Keine Marken im gewählten Zeitfenster.“
 - **Zustände:** aus („Die Zeitreise ist ausgeschaltet.“ mit dem Weg zum Schalter, ohne Filter
   und Liste); lädt (leiser Hinweis, die alte Liste bleibt); 401/403 „Keine Berechtigung für die
   Zeitreise.“; 410 „Die Integration wurde entladen.“; 5xx und Netzwerk „Die Zeitleiste konnte
   nicht geladen werden.“ mit „Erneut versuchen“; 400 „Ungültige Filterkombination.“ mit dem
   Feldnamen, nie mit der Eingabe; leer „Keine Marken im gewählten Zeitfenster.“
 - **Abruf:** nur bei sichtbarem Tab und sichtbarer Seite, automatisch höchstens alle 60 s und
-  nur die erste Seite; neue Marken kommen nach vorn, geladene ältere Seiten bleiben. Ist die
+  nur die erste Seite; neue Marken kommen nach vorn, geladene ältere Seiten bleiben, auch wenn die
+  Aktualisierung antwortet, während „Ältere laden“ läuft. Reicht die neue erste Seite nicht
+  bis an die geladene Liste (mehr neue Marken als eine Seite), beginnt die Liste neu und eine
+  laufende ältere Seite wird verworfen; eine Lücke in der Mitte entsteht nie. Ist die
   Time Machine aus, nur beim Öffnen und bei „Aktualisieren“.
-- **Schmale Breite:** unter der Breite einer Zeile wird jede Marke zur Karte (Container Query):
-  Zeit, Schwere, Art / Titel / Kennzahlen / Router, Quelle. Kein seitliches Scrollen bis
-  360 px; Chips und Knöpfe unter 600 px 40 px hoch wie in den anderen Tabs.
+- **Schmale Breite:** ist die Liste höchstens 860 px breit, wird jede Marke zur Karte
+  (Container Query): Zeit, Schwere, Art / Titel / Kennzahlen / Router, Quelle. Die Quellspalte
+  der Zeilenansicht ist 11em breit, damit „Netzwerk-Ereignisse“ nicht umbricht. Kein
+  seitliches Scrollen bis 360 px; Chips und Knöpfe unter 600 px 40 px hoch wie in den anderen
+  Tabs, Chip-Text dort mittig.
+- **Gesperrte Chips:** gestrichelter Rand, Text in `--text-muted` (50 % Weiß im Tab) ohne
+  Deckkraft-Abschwächung, Zusatz „nur für Administratoren“ in `--text-secondary`; auf dem
+  Chip-Hintergrund `#0c1225` 5,29:1 bzw. 6,17:1 (`tmLayout.test.mjs`).
 
 ### 14.1 Titel und Rückfall
 

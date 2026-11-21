@@ -11,7 +11,7 @@ Achse legt, als Lese-Schnittstelle und als Enterprise-Tab „Zeitreise“. **Sta
 ein Schalter für alle Router.** Kein eigener Speicher, kein zusätzlicher Router-Aufruf (Test
 vergleicht die Aufrufe zweier Polls mit Time Machine an und aus), kein Listener, keine
 Hintergrundaufgabe, keine Entitäten und keine Client-Marken. Entwicklerdoku:
-`docs/time-machine.md`. Panel-Version `20261121-timemachine1`.
+`docs/time-machine.md`. Panel-Version `20261121-timemachine2`.
 
 ### Hinzugefügt
 
@@ -39,12 +39,15 @@ Hintergrundaufgabe, keine Entitäten und keine Client-Marken. Entwicklerdoku:
 - **Enterprise-Tab „Zeitreise“** (nach Traffic Analytics). Zeitfenster 1 Stunde, 24 Stunden,
   7 oder 14 Tage; Filter nach Quelle, Schwere und Router, dazu Art-Chips, die nur die
   geladenen Marken filtern („x von y Marken“). Je Quelle ein Zustand in Worten („12 Marken“,
-  „leer“, „aus“ mit Grund, „Quelle nicht lesbar“ mit Grund, „gekürzt“); Quellen, die nur
+  „leer“, „aus“ mit Grund, „Quelle nicht lesbar“ mit Grund, „gekürzt“, „Älteres nicht
+  abrufbar“); Quellen, die nur
   Administratoren lesen dürfen, sind für andere Benutzer gesperrt. Marken neueste zuerst nach
   Kalendertagen in Ortszeit (Heute, Gestern, Wochentag mit Datum), mit Uhrzeit (UTC-Zeit im
   Tooltip), Schwere als Punkt und Wort, Art, deutschem Titel für jeden Code, den das Backend
   erzeugen kann (Test), Kennzahlen, Router und Quelle. „Ältere laden“ blättert über
-  `next_until`. Aktualisiert sich nur bei sichtbarem Tab höchstens alle 60 s. Unter der
+  `next_until`; ein Abschnitt mit nur ausgeblendeten Einträgen sagt das und bietet „Ältere
+  laden“ an. Aktualisiert sich nur bei sichtbarem Tab höchstens alle 60 s; eine
+  Aktualisierung während „Ältere laden“ lässt keine geladenen Marken verschwinden. Unter der
   Breite einer Zeile werden Marken zu Karten, ohne seitliches Scrollen bis 360 px.
 - **Option „Network Time Machine für alle Router“** (`time_machine_enabled`, aus) in den
   Router-Optionen; Speichern schreibt den Wert in alle Router-Einträge und lässt deren übrige
@@ -77,8 +80,10 @@ Hintergrundaufgabe, keine Entitäten und keine Client-Marken. Entwicklerdoku:
 - Das Zeitbudget von 2 s unterbricht die synchronen Lesefunktionen der Quellmodule nicht;
   es greift erst in den Schleifen des Adapters.
 - Modulschlüssel des Enterprise Core werden weiterhin nur nach Namen vergeben.
-- Nur mit Tests und Mocks geprüft, nicht auf Routern, in einer laufenden HA-Instanz oder im
-  Browser.
+- Nur mit Tests und Mocks geprüft, nicht auf Routern und nicht in einer laufenden HA-Instanz.
+  Den Tab hat die Prüfung vor dem Merge headless in Firefox mit der Testantwort angesehen; die
+  danach geänderten Stile (Kontrast gesperrter Chips, Kartenansicht ab 860 px, Quellspalte)
+  sind nur durch Tests geprüft.
 
 ## [1.49.4] - 2026-11-21
 
