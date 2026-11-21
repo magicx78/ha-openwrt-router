@@ -4,8 +4,28 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.49.0] - 2026-11-21
+
+Traffic Analytics: Verkehr je Router über WAN, Ports, Schnittstellen, VLANs und WLAN-Clients,
+mit Verlauf, Top Talkers, Auffälligkeiten, Kapazität und optionalen Flows eines externen
+Collectors. Baut auf dem Enterprise Core von 1.44.0 auf. **Standardmäßig aus, je Router**;
+ohne den Schalter macht ein Poll exakt dieselben Router-Aufrufe wie vorher (Test vergleicht
+die ubus-Aufrufe ohne Modul, mit Modul aus und mit Modul an). **Keine Paketanalyse, keine
+neuen Router-Rechte, Clients nur als Pseudonym.** Nutzerdoku: `docs/traffic-analytics.md`.
+
 ### Hinzugefügt
 
+- **Traffic Analytics (Teile B–I: Backend).** Zählerverarbeitung mit Lücken-, Neustart-
+  und 32-Bit-Überlauferkennung, Messbereiche mit Abdeckung je Messpunkt (`full`, `partial`,
+  `estimated`, `unavailable`, `unknown`) und Schutz gegen Doppelzählung, Zuordnung der
+  WLAN-Clients samt Roaming, VLAN-Sicht, Top Talkers, Flow-Speicher nur im Arbeitsspeicher
+  (höchstens 2000), Auffälligkeiten mit robusten Baselines, Kapazität mit P95 und
+  vorsichtigen Trends, Korrelation und Sicherheitshinweise als Kern-Ereignisse. Verlauf in
+  zwei begrenzten Speicherdateien (`traffic_fine`, `traffic_coarse`, je höchstens 2 MiB).
+  Drei optionale Zusatzabfragen mit eigenem Schalter, alle aus und begrenzt:
+  `iwinfo assoclist` und sysfs-Zähler höchstens alle 5 Minuten, `uci get firewall`
+  (Flow-Offloading) alle 6 Stunden. Alle nutzen vorhandene Rechte; fehlt eines, meldet
+  die Analyse `permission_denied` und misst ohne diese Abfrage weiter.
 - **Traffic Analytics (Teil J: Dashboard und Topologie).** Nur lesende Routen unter
   `/api/openwrt_topology/traffic/`: `overview`, `points`, `series?point_id=…&window=1h|24h|7d|30d|90d`
   (höchstens 500 Werte), `talkers`, `clients`, `vlans`, `capacity`, `anomalies`,
@@ -48,14 +68,51 @@ All notable changes to the OpenWrt Router integration will be documented in this
   Collector-Daten, sonst weiter den ehrlichen Hinweis.
 - **Diagnose:** Block `traffic_analytics` mit Schalter, Zählern, Speichergrößen und
   Capability-Zuständen; keine MAC, IP, Client-Kennung oder Collector-Benutzer.
+- **Einstellungen im Tab „Traffic Analytics“ (Teil L, nur Administratoren).** Zeigt je
+  Router, ob die Analyse läuft und mit welchem Profil (geändert wird weiter in den
+  Integrationsoptionen). Schaltet den Collector-Eingang, wählt seinen Benutzer und bis zu
+  20 Clients für Client-Sensoren. Gesendet werden nur geänderte Werte; „Gespeichert.“
+  erscheint erst nach der Antwort von Home Assistant, eine Ablehnung nennt den Grund.
+- **Route `GET …/traffic/collector/users`** (nur Administratoren): wählbare Benutzer für den
+  Collector (aktiv, kein Admin, nicht vom System angelegt) mit Anzeigename und einer
+  Referenz `usr_…`, die bei jedem Start neu verschlüsselt ist. `POST …/traffic/settings`
+  nimmt `collector.user_ref`; keine Route gibt eine Benutzer-ID heraus.
+- **Leistungs- und Qualitätstests (Teil L):** Router-Aufrufe je Abfrage, Zeit je Abfrage und
+  Flottenrunde, Spitzensensor, Flow-Speicher bei 2000 Einträgen, Collector-Aufruf mit 500
+  Flows, Zeit und Größe jeder Leseroute, Speicherwachstum über 10 Stunden; kein Lambda am
+  Dispatcher; keine MAC, IP, AP-Schnittstelle, Benutzer-ID oder Token im Log auf DEBUG-Stufe.
+  Die gemessenen Zahlen stehen in der Nutzerdoku.
 
-### Geändert
+### Behoben
 
-- **Traffic Analytics, Verlauf im Profil „standard“:** Stundenwerte der Infrastruktur
-  bleiben 14 statt 7 Tage. Die Grenzen gelten jetzt je Profil und Speicherdatei; jede Datei
-  bleibt unter 2 MiB.
-- **Traffic Analytics, Einschalten:** Der frühere flottenweite Schalter im Speicher wird
-  nicht mehr gelesen; es zählt nur noch die Router-Option `traffic_enabled`.
+Betraf nur den unveröffentlichten Stand im Branch:
+
+- Verlauf im Profil „standard“ hielt Stundenwerte der Infrastruktur nur 7 statt 14 Tage.
+  Die Grenzen gelten jetzt je Profil und Speicherdatei; jede Datei bleibt unter 2 MiB.
+- Der frühere flottenweite Schalter im Speicher wird nicht mehr gelesen; es zählt nur noch
+  die Router-Option `traffic_enabled`.
+- Die Route `series` überschrieb den Status und die Gründe des Moduls mit denen des
+  Zeitfensters (z. B. zeigte `not_ready` Gründe des Verlaufs); die stehen jetzt in
+  `window_reasons`.
+- Die Anbindungen an WiFi RF und die Netzwerkdiagnose passen zu deren Schnittstellen in
+  1.48.0.
+
+### Bekannte Grenzen
+
+- Nicht an echten Routern geprüft: Zähler bei Hardware-Offload, DSA-Port-Zähler und das
+  Verhalten der hostapd-Stationszähler sind Annahmen; bis zur Messung steht die Abdeckung
+  dort auf `partial`.
+- Der Tab ist nicht in einem echten Browser und nicht bei 360 px Breite angesehen worden.
+- Collector-Aggregate (`client_aggregate`, `interface_aggregate`) werden mit
+  `kind_not_supported` abgelehnt; der Collector liefert nur Flows.
+- Client-Zähler am Access Point sind kein Internetverbrauch.
+- Auffälligkeiten werden keine Vorfälle in Network Intelligence, und das Security Center
+  wertet die Traffic-Hinweise noch nicht aus (fehlende Schnittstellen dort).
+- Dieselbe MAC ergibt in Traffic Analytics und Security Center verschiedene Pseudonyme.
+- Funk-Messpunkte tragen noch den Schnittstellennamen als Kennung, nicht die Radio-ID von
+  WiFi RF.
+- Der conntrack-Ersatzweg von `get_active_connections` liest weiter ohne Obergrenze
+  (unverändert, außerhalb dieses Moduls).
 
 ## [1.48.0] - 2026-11-21
 
