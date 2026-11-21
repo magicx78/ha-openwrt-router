@@ -374,6 +374,9 @@ async def test_non_admin_with_an_open_panel_sees_infrastructure_and_disruptions(
     assert groups and groups <= tm_sources.NON_ADMIN_GROUPS
     assert not [m for m in resp.data["marks"] if m["kind"].startswith("config_")]
     assert len(resp.data["marks"]) < len(admin.data["marks"])
+    # 1.50.0: the count of left-out client entries is for administrators only
+    assert admin.data["omitted_client_marks"] >= 1
+    assert resp.data["omitted_client_marks"] == 0
     await close(world)
 
 

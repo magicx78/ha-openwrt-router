@@ -19,7 +19,8 @@ Rights (plan §6, F4/F5): administrators see every mark of Phase A. Other
 users (only while the panel is open to all; the route checks that) see the
 groups ``NON_ADMIN_GROUPS``; the core audit and the configuration versions
 are not read for them (``off`` / ``admin_only``). Client marks do not exist
-in Phase A: the sources' client entries are only counted.
+in Phase A: the sources' client entries are only counted, and only
+administrators get that count (``omitted_client_marks`` is 0 for others).
 """
 
 from __future__ import annotations
@@ -271,7 +272,10 @@ def merge(
         "window": {"from": query.since, "until": query.until},
         "marks": marks,
         "sources": sources,
-        "omitted_client_marks": sum(r.omitted_client for r in results),
+        # The count of left-out client entries is for administrators only
+        # (1.50.0): a non-admin learns nothing about clients, not even how
+        # many there were.
+        "omitted_client_marks": sum(r.omitted_client for r in results) if admin else 0,
         "truncated": truncated,
         "next_until": next_until,
     }

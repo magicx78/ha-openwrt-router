@@ -180,6 +180,17 @@ def test_merge_sorts_newest_first_and_counts_per_source() -> None:
     }
 
 
+def test_only_administrators_get_the_count_of_left_out_client_entries() -> None:
+    """1.50.0: a non-admin gets 0, also when client entries were left out."""
+    a = result("ni_events", [mark(1, NOW - 50)], omitted=2)
+    b = result("ni_incidents", [], omitted=1)
+    admin = tq.merge([a, b], q(), admin=True, now=NOW)
+    plain = tq.merge([a, b], q(), admin=False, now=NOW)
+    assert admin["omitted_client_marks"] == 3
+    assert plain["omitted_client_marks"] == 0
+    assert set(plain) == set(admin)
+
+
 def test_ties_are_ordered_by_mark_id() -> None:
     marks = [mark(n, NOW - 5) for n in range(6)]
     body = tq.merge([result("ni_events", marks)], q(), admin=True, now=NOW)
