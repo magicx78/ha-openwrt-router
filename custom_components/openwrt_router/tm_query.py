@@ -42,6 +42,15 @@ are dropped before the rights and counted per source (``duplicates``):
   (``COVERED_NI_KINDS``) inside a time the own index was live are dropped:
   ``tm_index`` has them as intervals with their end.
 
+Intervals of the own index that began before ``from`` and reach into the
+window (open, or ended at or after ``from``) belong to it (1.51.0,
+``spans_in: true``). They sort by their start like every mark, so they lie
+below the window's marks and come on the last page only, the one whose
+walk reaches ``from``; every page of the walk reads the same set (it does
+not depend on ``until``), so each comes exactly once. A page cut among them
+ends the walk (``next_until`` would lie before ``from``) with
+``truncated: true``.
+
 Client sessions have their own query (:func:`parse_sessions_query`,
 :func:`sessions_page`, administrators only): sessions that overlap the
 window, newest start first, paged on the start like the timeline.
@@ -325,11 +334,19 @@ def merge(
             after = ms_next(edge)
             bounds.append(after if after < query.until else edge)
     cutoff = max(bounds) if bounds else None
+    # Intervals that began before the window and reach into it (``spans_in``,
+    # 1.51.0) sort by their start, below every mark of the window: they come
+    # on the last page only, the one whose walk reaches ``from`` (a cut
+    # source keeps them off every page before it).
+    spans_ok = cutoff is None or cutoff <= query.since
     marks = [
         m
         for r in results
         for m in r.marks
-        if (cutoff is None or m["ts"] >= cutoff) and _visible(m, query, admin)
+        if (
+            (spans_ok if m.get("spans_in") else cutoff is None or m["ts"] >= cutoff)
+            and _visible(m, query, admin)
+        )
     ]
     marks.sort(key=lambda m: (-m["ts"], m["id"]))
     next_until = cutoff

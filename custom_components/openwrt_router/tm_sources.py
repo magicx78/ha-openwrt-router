@@ -514,6 +514,10 @@ def make_mark(
         "client": None,
         "client_name": None,
         "peers": None,
+        # additive (1.51.0): an interval of the own index that began before
+        # the window and reaches into it (``tm_query.merge`` puts it on the
+        # last page of the window, below every mark of the window)
+        "spans_in": False,
     }
 
 
@@ -1150,11 +1154,16 @@ def _index_marks(
     names: Callable[[str | None], str | None] | None = None,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for i, mark in enumerate(engine.index.window(source, req.since, req.until)):
+    index = engine.index
+    found = [(m, False) for m in index.window(source, req.since, req.until)]
+    found += [(m, True) for m in index.spanning_in(source, req.since)]
+    for i, (mark, spans_in) in enumerate(found):
         if i % 500 == 0:
             _check(deadline)
         name = names(mark.client) if names is not None and mark.client else None
-        out.append(index_mark(mark, routers, client_name=name))
+        item = index_mark(mark, routers, client_name=name)
+        item["spans_in"] = spans_in
+        out.append(item)
     return out
 
 

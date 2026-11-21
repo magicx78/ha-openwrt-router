@@ -1040,10 +1040,12 @@ async def async_apply_time_machine_options(
         async with _lock(hass):
             engine = async_get_time_machine(hass)
             if not on:
+                # Off deletes the client histories, whatever the client
+                # switch says; the infrastructure history stays (1.51.0).
                 if engine is not None:
                     hass.data.pop(DATA_TIME_MACHINE_ENGINE, None)
                     await engine.async_stop(STOP_DISABLED)
-                elif not clients:
+                else:
                     await async_purge_clients(hass)
                 return
             if engine is None:
@@ -1057,8 +1059,9 @@ async def async_apply_time_machine_options(
 
 
 async def async_purge_clients(hass: HomeAssistant) -> int:
-    """Client switch off while the Time Machine is off: delete the stored
-    client marks now (one read, one write only if there were any)."""
+    """No engine runs (the Time Machine is off, or switched off while no
+    router was loaded): delete the stored client marks now (one read, one
+    write only if there were any)."""
     store = TimeMachineStore(hass)
     result = await store.async_load()
     if result.failed:

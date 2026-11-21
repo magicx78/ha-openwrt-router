@@ -107,6 +107,8 @@ MARK_KEYS = {
     "client",
     "client_name",
     "peers",
+    # additive in 1.51.0: False on the Phase A sources
+    "spans_in",
 }
 REF_KEYS = {"module", "type", "id", "version_id"}
 

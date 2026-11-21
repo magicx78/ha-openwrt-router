@@ -639,6 +639,22 @@ class MarkIndex:
             if since <= m.ts < until and m.source == source
         ]
 
+    def spanning_in(self, source: str, since: float) -> list[Mark]:
+        """Intervals of ``source`` that began before ``since`` and reach
+        into the window: open, or ended at or after ``since`` (unsorted).
+
+        The same for every page of one window (it does not depend on
+        ``until``), so ``tm_query.merge`` can put them on exactly one page.
+        """
+        return [
+            m
+            for m in self.marks.values()
+            if m.source == source
+            and m.ts < since
+            and m.end_state is not None
+            and (m.is_open or (m.end is not None and m.end >= since))
+        ]
+
     def sessions(
         self,
         since: float,
