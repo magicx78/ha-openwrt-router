@@ -267,7 +267,7 @@ test('non-administrators get no settings section; the tab never loads it for the
   assert.ok(!M.sectionsFor(false).some(s => s.id === 'settings'));
 });
 
-// ── Browser check 1.49.2 ─────────────────────────────────────────────────
+// ── Browser check 1.49.3 ─────────────────────────────────────────────────
 
 test('anomaly values carry their unit: rates for spikes, bytes for volumes, bare for unknown kinds', () => {
   const out = html(h(M.AnomalyView, { list: M.parseAnomalies(S.anomalies()) }));

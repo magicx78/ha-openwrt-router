@@ -4,7 +4,7 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
-## [1.49.2] - 2026-11-21
+## [1.49.3] - 2026-11-21
 
 Die Enterprise-Tabs zum ersten Mal in einem echten Browser angesehen (Firefox, 360 / 768 /
 1280 px, helles und dunkles Home-Assistant-Design, Beispieldaten). Nur Darstellung, keine

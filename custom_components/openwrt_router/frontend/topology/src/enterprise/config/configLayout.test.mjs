@@ -1,4 +1,4 @@
-// Layout rules found in the browser check (1.49.2): stylesheet checks in the
+// Layout rules found in the browser check (1.49.3): stylesheet checks in the
 // style of the render tests, for config.css (shared by all Enterprise tabs)
 // and the Enterprise block of topology.css.
 import { test } from 'node:test';
