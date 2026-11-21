@@ -109,3 +109,32 @@ def test_the_fixture_titles_are_all_in_the_table() -> None:
         for m in answer["body"].get("marks", [])
     }
     assert keys and keys <= set(table), sorted(keys - set(table))
+
+
+def _unavailable_reasons() -> set[str]:
+    """The reasons ``sessions_page`` sends with status "unavailable".
+
+    It is the only place that builds an "unavailable" answer
+    (``sessions_body(STATUS_UNAVAILABLE, …, reason=…)``); the names it uses
+    are read from its source and resolved in ``tm_sources``.
+    """
+    from custom_components.openwrt_router import tm_query
+
+    module = inspect.getsource(tm_query)
+    builders = re.findall(r"sessions_body\(STATUS_UNAVAILABLE[^)]*\)", module)
+    assert builders == ["sessions_body(STATUS_UNAVAILABLE, now, query, reason=reason)"]
+    src = inspect.getsource(tm_query.sessions_page)
+    names = set(re.findall(r"\b(REASON_[A-Z_]+)\b", src))
+    assert names == {"REASON_NOT_RUNNING", "REASON_NOT_LOADED"}, names
+    return {getattr(tm_sources, n) for n in names}
+
+
+def test_every_unavailable_reason_of_the_sessions_route_has_a_text() -> None:
+    reasons = _unavailable_reasons()
+    assert reasons == {"not_running", "not_loaded"}
+    table = _table("UNAVAILABLE_TEXT")
+    assert set(table) == reasons, (
+        "UNAVAILABLE_TEXT names exactly the reasons the route sends"
+    )
+    for key, text in table.items():
+        assert text.endswith(".") and "_" not in text, (key, text)

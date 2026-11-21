@@ -153,3 +153,56 @@ test('the view switch and the restart notice wrap like the rest', () => {
   assert.ok(tsx.includes('className="tm-chips tm-views"'));
   assert.match(rule('.tm-chips'), /flex-wrap: wrap;/);
 });
+
+// ── 1.51.0 browser review ─────────────────────────────────────────────────
+// (The effective flex of the view switch is checked on the rendered markup
+// in tmRender.test.mjs: "no item of a column flex box gets a fixed flex-basis".)
+
+test('sessions: the band column holds "Band unbekannt" without breaking inside a word', () => {
+  const cols = /grid-template-columns: ([^;]+);/.exec(rule('.tm-session'))[1];
+  assert.equal(cols, '5em 9.5em minmax(0, 1fr) 9em 7em 6em');
+  const band = Number(/([\d.]+)em [\d.]+em$/.exec(cols)[1]);
+  assert.ok(band >= 7, `band column ${band}em`);
+  // .tm breaks anywhere (no sideways scroll); the band cell breaks between words only
+  assert.match(rule('.tm'), /overflow-wrap: anywhere;/);
+  assert.match(rule('.tm-session__band'), /overflow-wrap: normal;/);
+  assert.ok(css.indexOf('.tm-session__band { overflow-wrap: normal; }') > css.indexOf('.tm {'));
+  // the longer word "unbekannt" (9 letters, at most 0.62em each in 12.5 px) fits the 7em column
+  assert.ok(9 * 0.62 < band);
+});
+
+test('focus inside the tab: a ring of at least 3:1 on the chip background, other tabs untouched', () => {
+  const hex = s => [1, 3, 5].map(i => parseInt(s.slice(i, i + 2), 16));
+  const ratio = (fg, bg) => { const [a, b] = [lum(fg), lum(bg)].sort((x, y) => y - x); return (a + 0.05) / (b + 0.05); };
+  const m = /((?:\.tm [^{,]+:focus-visible,?\s*)+)\{ outline: 2px solid (#[0-9a-f]{6}); outline-offset: 2px; \}/.exec(css);
+  assert.ok(m, 'focus rule of the tab');
+  const sels = m[1].split(',').map(s => s.trim()).filter(Boolean);
+  assert.deepEqual(sels, ['.tm .tm-chip:focus-visible', '.tm .tm-field select:focus-visible', '.tm .cfg-btn:focus-visible']);
+  const ring = ratio(hex(m[2]), CHIP_BG);
+  assert.equal(m[2], '#60a5fa');
+  assert.equal(ring.toFixed(2), '7.32');
+  assert.ok(ring >= 3);
+  // before: the shared --border-focus, rgba(59, 130, 246, 0.5) over the chip background
+  assert.match(panelCss, /--border-focus:\s+rgba\(59, 130, 246, 0\.5\);/);
+  const old = ratio([59, 130, 246].map((c, i) => 0.5 * c + 0.5 * CHIP_BG[i]), CHIP_BG);
+  assert.equal(old.toFixed(2), '2.16');
+  // it wins over the shared rules by specificity (3 classes or 2 + element against 2), whatever the order
+  assert.match(wifiCss, /\.wifi-nav__btn:focus-visible \{ outline: 2px solid var\(--border-focus\);/);
+  assert.match(wifiCss, /\.wifi-field select:focus-visible \{ outline: 2px solid var\(--border-focus\);/);
+  // every :focus-visible rule of this stylesheet is scoped to the tab root
+  for (const [, sel] of css.matchAll(/([^{}\n]*:focus-visible)/g)) assert.match(sel.trim(), /^\.tm /, sel);
+  // the shared focus rules of the other tabs still use the shared colour
+  for (const [, sel, val] of (cfgCss + wifiCss).matchAll(/([^{}\n]*:focus-visible) \{ outline: 2px solid ([^;]+);/g)) assert.equal(val, 'var(--border-focus)', sel);
+});
+
+test('sessions: a long router name takes at most two lines in a row, all of it in a card', () => {
+  const r = rule('.tm-session__router');
+  assert.match(r, /display: -webkit-box;/);
+  assert.match(r, /-webkit-box-orient: vertical;/);
+  assert.match(r, /-webkit-line-clamp: 2;/);
+  assert.match(r, /overflow: hidden;/);
+  const m = /@container tmsessions \(max-width: (\d+)px\) \{([\s\S]*?)\n\}/.exec(css);
+  assert.match(m[2], /\.tm-session__router \{ display: block; -webkit-line-clamp: unset; line-clamp: none; overflow: visible; \}/);
+  // the whole name stays reachable in the title
+  assert.match(tsx, /<span className="tm-session__router" title=\{router\}>\{router\}<\/span>/);
+});

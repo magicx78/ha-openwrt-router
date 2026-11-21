@@ -23,7 +23,9 @@
 import { num } from '../../utils/format.ts';
 import { durationText, scrub } from '../traffic/trafficLogic.ts';
 import { DASH, POLL_MIN_MS, pollDelay, routerLabel, shouldFetch } from '../wifi/wifiLogic.ts';
-import { GROUP_TEXT, PARAM_ONE, PARAM_TEXT, REASON_TEXT, SEVERITY_TEXT, SOURCE_TEXT, STATE_TEXT, TITLE_TEXT } from './tmTexts.ts';
+import {
+  GROUP_TEXT, PARAM_ONE, PARAM_TEXT, REASON_TEXT, SEVERITY_TEXT, SOURCE_TEXT, STATE_TEXT, TITLE_TEXT, UNAVAILABLE_TEXT,
+} from './tmTexts.ts';
 import type {
   EndState, Filters, Mark, Peer, Session, SessionFilters, SessionQuery, SessionsAnswer, Severity, SourceInfo, Timeline,
   TimelineQuery, Tone,
@@ -50,6 +52,8 @@ export const NO_SOURCE_TEXT = 'Keine Quelle gewählt. Mindestens eine Quelle ein
 export const LOADING_TEXT = 'Zeitleiste wird geladen …';
 /** Heading of the block of intervals that began before the window (1.51.0). */
 export const SPANS_TITLE = 'Läuft seit vor dem Zeitfenster';
+/** Under the block when the server sent only part of it (spanning_truncated). */
+export const SPANS_CUT_TEXT = 'Weitere laufen seit vor dem Zeitfenster; Zeitfenster oder Filter enger wählen.';
 /** The list started anew after a refresh brought more than a page (dismissable). */
 export const RESTART_TEXT = 'Viele neue Einträge: Die Liste beginnt neu. Ältere bei Bedarf erneut laden.';
 export const SOURCES_TITLE = 'Quellen';
@@ -86,6 +90,8 @@ const ROUTER_ID_RE = /^rtr_[0-9a-f]{32}$/;
 const KEY_RE = /^[a-z0-9_.]{1,200}$/;
 const MARK_ID_RE = /^tmm_[0-9a-f]{16}$/;
 const CLIENT_RE = /^tmc_[0-9a-f]{16}$/;
+/** A position of the server's order (1.51.0): "<ms>" or "<ms>:tmm_<16 hex>". */
+const CURSOR_RE = /^(\d{1,16})(?::(tmm_[0-9a-f]{16}))?$/;
 const END_STATES: readonly EndState[] = ['open', 'closed', 'unknown'];
 
 // ── Parser ───────────────────────────────────────────────────────────────
@@ -199,8 +205,21 @@ export function parseTimeline(v: unknown): Timeline {
     sources,
     omittedClientMarks: Math.max(0, fin(b.omitted_client_marks) ?? 0),
     truncated: b.truncated === true,
-    nextUntil: fin(b.next_until),
+    nextCursor: cursorOf(b.next_cursor),
+    spanning: dedupe(Array.isArray(b.spanning) ? b.spanning.map(parseMark).filter((m): m is Mark => m !== null) : []),
+    spanningTruncated: b.spanning_truncated === true,
   };
+}
+
+/** A cursor of the server, or null (never anything else is sent back). */
+export function cursorOf(v: unknown): string | null {
+  return typeof v === 'string' && CURSOR_RE.test(v) ? v : null;
+}
+
+/** [ms, id] of a cursor; id null for "<ms>" (everything older than ms). */
+export function cursorPos(c: string): [number, string | null] {
+  const m = CURSOR_RE.exec(c);
+  return m ? [Number(m[1]), m[2] ?? null] : [Number.NaN, null];
 }
 
 // ── Query ────────────────────────────────────────────────────────────────
@@ -225,12 +244,18 @@ export function firstQuery(f: Filters, nowMs: number, disabled: readonly string[
     sources: picked.length === SOURCE_IDS.length ? null : picked,
     minSeverity: f.severity === 'all' ? null : f.severity,
     routerId: f.routerId && ROUTER_ID_RE.test(f.routerId) ? f.routerId : null,
+    spans: true,
+    cursor: null,
   };
 }
 
-/** The next older page: same filters and `from`, `until` = the server's next_until. */
-export function olderQuery(first: TimelineQuery, from: number | null, nextUntil: number): TimelineQuery {
-  return { ...first, from: from ?? first.from, until: nextUntil };
+/**
+ * The next older page: the same window and filters as the page that gave
+ * the cursor (the server checks the cursor against that window), the
+ * cursor, and no spans (the block came with the first page).
+ */
+export function olderQuery(base: TimelineQuery, cursor: string): TimelineQuery {
+  return { ...base, spans: false, cursor };
 }
 
 function epochText(x: number): string {
@@ -245,6 +270,8 @@ export function queryString(q: TimelineQuery): string {
   if (q.sources) p.set('source', q.sources.filter(s => SOURCE_IDS.includes(s)).join(','));
   if (q.routerId && ROUTER_ID_RE.test(q.routerId)) p.set('router_id', q.routerId);
   if (q.minSeverity && SEVERITIES.includes(q.minSeverity)) p.set('min_severity', q.minSeverity);
+  if (q.spans) p.set('spans', '1');
+  if (q.cursor && CURSOR_RE.test(q.cursor)) p.set('cursor', q.cursor);
   return p.toString();
 }
 
@@ -288,7 +315,11 @@ export interface ListState {
   marks: Mark[];
   /** Older pages were appended. */
   older: boolean;
-  nextUntil: number | null;
+  /** Where the next older page starts, and the query (window, filters) it belongs to. */
+  nextCursor: string | null;
+  cursorQuery: TimelineQuery | null;
+  /** Upper end (until, epoch s) of what the list covers without a gap. */
+  topUntil: number | null;
   truncated: boolean;
   loading: boolean;
   loadingMore: boolean;
@@ -299,15 +330,15 @@ export interface ListState {
 }
 
 export const LIST_INIT: ListState = {
-  gen: 0, firstSeq: 0, moreSeq: 0, head: null, marks: [], older: false, nextUntil: null, truncated: false,
-  loading: false, loadingMore: false, error: null, moreError: null, restarted: false,
+  gen: 0, firstSeq: 0, moreSeq: 0, head: null, marks: [], older: false, nextCursor: null, cursorQuery: null,
+  topUntil: null, truncated: false, loading: false, loadingMore: false, error: null, moreError: null, restarted: false,
 };
 
 export type ListAction =
   | { type: 'filters' }
   | { type: 'dismiss' }
   | { type: 'start'; seq: number; more: boolean }
-  | { type: 'first'; gen: number; seq: number; answer: Timeline }
+  | { type: 'first'; gen: number; seq: number; answer: Timeline; query: TimelineQuery }
   | { type: 'older'; gen: number; seq: number; answer: Timeline }
   | { type: 'fail'; gen: number; seq: number; more: boolean; error: unknown };
 
@@ -316,19 +347,23 @@ export type ListAction =
  * empties the list; an answer of an older generation or an older request is
  * dropped, so a stale answer never overwrites a newer one. A new first page
  * replaces the list, or — when older pages are loaded or one is being loaded —
- * puts its marks in front of them (deduplicated) and keeps their next_until.
- * It goes in front only when it reaches the list (it ends at or below the
- * newest loaded mark or the end of the previous first page); otherwise it
- * starts the list anew and drops a pending older page, so the list never
- * has a silent gap (review K3); `restarted` then says so until dismissed.
- * Marks that fell out of the moved window stay while they are intervals
- * reaching into it (1.51.0).
+ * puts its marks in front of them (deduplicated) and keeps their cursor and
+ * the query that cursor belongs to. It goes in front only when it reaches the
+ * list (`reaches`); otherwise it starts the list anew and drops a pending
+ * older page, so the list never has a silent gap (review K3); `restarted`
+ * then says so until dismissed. The block of intervals from before the
+ * window (`head.spanning`) comes with every first page and stays while older
+ * pages are loaded.
  */
 export function listReducer(s: ListState, a: ListAction): ListState {
   switch (a.type) {
     case 'filters':
-      // loading at once: the empty list of a new filter is never shown as "no marks"
-      return { ...LIST_INIT, gen: s.gen + 1, firstSeq: s.firstSeq, moreSeq: s.moreSeq, head: s.head, loading: true };
+      // loading at once: the empty list of a new filter is never shown as "no marks";
+      // the block of the old filters goes with its list
+      return {
+        ...LIST_INIT, gen: s.gen + 1, firstSeq: s.firstSeq, moreSeq: s.moreSeq, loading: true,
+        head: s.head && { ...s.head, spanning: [], spanningTruncated: false },
+      };
     case 'dismiss':
       return s.restarted ? { ...s, restarted: false } : s;
     case 'start':
@@ -339,26 +374,31 @@ export function listReducer(s: ListState, a: ListAction): ListState {
       if (a.gen !== s.gen || a.seq !== s.firstSeq) return s;
       const t = a.answer;
       if (t.status === 'off') {
-        return { ...s, head: t, marks: [], older: false, nextUntil: null, truncated: false, loading: false, error: null };
-      }
-      const kept = s.older || s.loadingMore;
-      if (!kept || !reaches(t.nextUntil, s.marks, s.head?.until ?? null)) {
-        const stop = s.loadingMore ? { moreSeq: -1, loadingMore: false, moreError: null } : {};
         return {
-          ...s, ...stop, head: t, marks: t.marks, older: false, nextUntil: t.nextUntil, truncated: t.truncated,
-          loading: false, error: null, restarted: kept || s.restarted,
+          ...s, head: t, marks: [], older: false, nextCursor: null, cursorQuery: null, topUntil: null, truncated: false,
+          loading: false, error: null,
         };
       }
-      const from = t.from ?? -Infinity;
-      const marks = mergeMarks(t.marks, s.marks).filter(m => m.ts >= from || reachesInto(m, from));
-      return { ...s, head: t, marks, loading: false, error: null };
+      const kept = s.older || s.loadingMore;
+      if (!kept || !reaches(t.nextCursor, s.topUntil)) {
+        const stop = s.loadingMore ? { moreSeq: -1, loadingMore: false, moreError: null } : {};
+        return {
+          ...s, ...stop, head: t, marks: t.marks, older: false, nextCursor: t.nextCursor, cursorQuery: a.query,
+          topUntil: a.query.until, truncated: t.truncated, loading: false, error: null, restarted: kept || s.restarted,
+        };
+      }
+      // joined: the older pages keep their cursor and window; marks that left the window go
+      const from = t.from ?? a.query.from;
+      const marks = mergeMarks(t.marks, s.marks).filter(m => m.ts >= from);
+      return { ...s, head: t, marks, topUntil: a.query.until, loading: false, error: null };
     }
     case 'older': {
       if (a.gen !== s.gen || a.seq !== s.moreSeq) return s;
       const t = a.answer;
+      const from = s.head?.from ?? -Infinity;
       return {
-        ...s, marks: mergeMarks(s.marks, t.marks), older: true, nextUntil: t.nextUntil, truncated: t.truncated,
-        loadingMore: false, moreError: null,
+        ...s, marks: mergeMarks(s.marks, t.marks.filter(m => m.ts >= from)), older: true, nextCursor: t.nextCursor,
+        truncated: t.truncated, loadingMore: false, moreError: null,
       };
     }
     case 'fail':
@@ -369,24 +409,29 @@ export function listReducer(s: ListState, a: ListAction): ListState {
   }
 }
 
-/** A first page reaches the loaded list: nothing lies between the two. */
-function reaches(nextUntil: number | null, items: readonly { ts: number }[], headUntil: number | null): boolean {
-  if (nextUntil === null) return true;
-  const top = Math.max(items.length ? items[0].ts : -Infinity, headUntil ?? -Infinity);
-  return nextUntil <= top;
+/**
+ * A new first page reaches the loaded list when nothing lies between them.
+ * The page holds everything from its `until` down to its `next_cursor`; the
+ * loaded list holds everything below `topUntil` (the `until` of the first
+ * page it was built on; `until` is exclusive) down to its own cursor. The
+ * two join when the page's cursor is not above `topUntil`: a cursor "<ms>"
+ * (all older than ms still to come) joins at ms <= topUntil; a cursor
+ * "<ms>:<id>" (more marks of that very millisecond still to come) joins only
+ * at ms < topUntil, because the rest of that millisecond lies at or above
+ * `topUntil` and is in neither list. A page without a cursor covers the
+ * whole window and always joins.
+ */
+export function reaches(nextCursor: string | null, topUntil: number | null): boolean {
+  if (nextCursor === null) return true;
+  if (topUntil === null) return false;
+  const [ms, id] = cursorPos(nextCursor);
+  const top = Math.round(topUntil * 1000);
+  return id === null ? ms <= top : ms < top;
 }
 
 /** An interval that began before `from` and is open or ended at or after it. */
 export function reachesInto(m: { ts: number; end: number | null; endState: EndState | null }, from: number): boolean {
   return m.ts < from && (m.endState === 'open' || (m.endState !== null && m.end !== null && m.end >= from));
-}
-
-/** Marks shown in the block "Läuft seit vor dem Zeitfenster" and the rest, both newest first. */
-export function splitSpans(marks: readonly Mark[], from: number | null): { spans: Mark[]; rest: Mark[] } {
-  const spans: Mark[] = [];
-  const rest: Mark[] = [];
-  for (const m of marks) (m.spansIn || (from !== null && m.ts < from) ? spans : rest).push(m);
-  return { spans, rest };
 }
 
 /** Automatic reload of the first page: visible page, at most every 60 s, never while off. */
@@ -464,7 +509,7 @@ export function parseSessions(v: unknown): SessionsAnswer {
     recording: b.recording === true,
     sessions: dedupeSessions(items),
     truncated: b.truncated === true,
-    nextUntil: fin(b.next_until),
+    nextCursor: cursorOf(b.next_cursor),
   };
 }
 
@@ -475,11 +520,13 @@ export function firstSessionQuery(f: SessionFilters, nowMs: number): SessionQuer
     until,
     client: f.client && CLIENT_RE.test(f.client) ? f.client : null,
     routerId: f.routerId && ROUTER_ID_RE.test(f.routerId) ? f.routerId : null,
+    cursor: null,
   };
 }
 
-export function olderSessionQuery(first: SessionQuery, from: number | null, nextUntil: number): SessionQuery {
-  return { ...first, from: from ?? first.from, until: nextUntil };
+/** The next older page of sessions: the same window and filters, the cursor. */
+export function olderSessionQuery(base: SessionQuery, cursor: string): SessionQuery {
+  return { ...base, cursor };
 }
 
 /** Query string of …/sessions in a fixed order from checked values only. */
@@ -489,6 +536,7 @@ export function sessionQueryString(q: SessionQuery): string {
   p.set('until', epochText(q.until));
   if (q.client && CLIENT_RE.test(q.client)) p.set('client', q.client);
   if (q.routerId && ROUTER_ID_RE.test(q.routerId)) p.set('router_id', q.routerId);
+  if (q.cursor && CURSOR_RE.test(q.cursor)) p.set('cursor', q.cursor);
   return p.toString();
 }
 
@@ -503,7 +551,9 @@ export interface SessionListState {
   head: SessionsAnswer | null;
   sessions: Session[];
   older: boolean;
-  nextUntil: number | null;
+  nextCursor: string | null;
+  cursorQuery: SessionQuery | null;
+  topUntil: number | null;
   truncated: boolean;
   loading: boolean;
   loadingMore: boolean;
@@ -513,7 +563,8 @@ export interface SessionListState {
 }
 
 export const SESSION_LIST_INIT: SessionListState = {
-  gen: 0, firstSeq: 0, moreSeq: 0, head: null, sessions: [], older: false, nextUntil: null, truncated: false,
+  gen: 0, firstSeq: 0, moreSeq: 0, head: null, sessions: [], older: false, nextCursor: null, cursorQuery: null,
+  topUntil: null, truncated: false,
   loading: false, loadingMore: false, error: null, moreError: null, restarted: false,
 };
 
@@ -521,7 +572,7 @@ export type SessionListAction =
   | { type: 'filters' }
   | { type: 'dismiss' }
   | { type: 'start'; seq: number; more: boolean }
-  | { type: 'first'; gen: number; seq: number; answer: SessionsAnswer }
+  | { type: 'first'; gen: number; seq: number; answer: SessionsAnswer; query: SessionQuery }
   | { type: 'older'; gen: number; seq: number; answer: SessionsAnswer }
   | { type: 'fail'; gen: number; seq: number; more: boolean; error: unknown };
 
@@ -541,27 +592,27 @@ export function sessionReducer(s: SessionListState, a: SessionListAction): Sessi
       const t = a.answer;
       if (t.status !== 'ok') {
         return {
-          ...s, head: t, sessions: [], older: false, nextUntil: null, truncated: false, loading: false, error: null,
-          loadingMore: false, moreSeq: s.loadingMore ? -1 : s.moreSeq,
+          ...s, head: t, sessions: [], older: false, nextCursor: null, cursorQuery: null, topUntil: null, truncated: false,
+          loading: false, error: null, loadingMore: false, moreSeq: s.loadingMore ? -1 : s.moreSeq,
         };
       }
       const kept = s.older || s.loadingMore;
-      if (!kept || !reaches(t.nextUntil, s.sessions, s.head?.until ?? null)) {
+      if (!kept || !reaches(t.nextCursor, s.topUntil)) {
         const stop = s.loadingMore ? { moreSeq: -1, loadingMore: false, moreError: null } : {};
         return {
-          ...s, ...stop, head: t, sessions: t.sessions, older: false, nextUntil: t.nextUntil, truncated: t.truncated,
-          loading: false, error: null, restarted: kept || s.restarted,
+          ...s, ...stop, head: t, sessions: t.sessions, older: false, nextCursor: t.nextCursor, cursorQuery: a.query,
+          topUntil: a.query.until, truncated: t.truncated, loading: false, error: null, restarted: kept || s.restarted,
         };
       }
-      const from = t.from ?? -Infinity;
+      const from = t.from ?? a.query.from;
       const sessions = dedupeSessions([...t.sessions, ...s.sessions]).filter(x => x.ts >= from || reachesInto(x, from));
-      return { ...s, head: t, sessions, loading: false, error: null };
+      return { ...s, head: t, sessions, topUntil: a.query.until, loading: false, error: null };
     }
     case 'older': {
       if (a.gen !== s.gen || a.seq !== s.moreSeq) return s;
       const t = a.answer;
       return {
-        ...s, sessions: dedupeSessions([...s.sessions, ...t.sessions]), older: true, nextUntil: t.nextUntil,
+        ...s, sessions: dedupeSessions([...s.sessions, ...t.sessions]), older: true, nextCursor: t.nextCursor,
         truncated: t.truncated, loadingMore: false, moreError: null,
       };
     }
@@ -636,8 +687,10 @@ export function sessionDays(items: readonly Session[], nowMs: number): { key: st
   return out;
 }
 
+/** Why the sessions are not available, by the reasons the route sends (tmTexts.UNAVAILABLE_TEXT). */
 export function unavailableText(reason: string | null): string {
-  return `${UNAVAILABLE_TITLE} Grund: ${reasonText(reason)}.`;
+  const why = reason ? UNAVAILABLE_TEXT[reason] : undefined;
+  return `${UNAVAILABLE_TITLE} ${why ?? 'Grund unbekannt.'}`;
 }
 
 // ── Group filter (client side) ───────────────────────────────────────────
@@ -798,9 +851,33 @@ export function peersText(m: Pick<Mark, 'peers'>): string | null {
   return p.before ? `von ${peerText(p.before)}` : null;
 }
 
-/** The second line of a mark: client, peers, duration and numbers, in this order. */
-export function detailText(m: Mark, nowMs: number): string | null {
-  const parts = [clientText(m), peersText(m), intervalText(m, nowMs), paramsText(m.params)].filter((x): x is string => !!x);
+/**
+ * The duration of a mark in the block "Läuft seit vor dem Zeitfenster": its
+ * start already stands in the time column, so an open one says how long it
+ * has run ("noch offen, bisher 2 Tage 3 Std."), a closed one its duration.
+ */
+export function spanText(m: Pick<Mark, 'ts' | 'end' | 'endState'>, nowMs: number): string | null {
+  if (m.endState === 'open') return `noch offen, bisher ${exactDuration(nowMs / 1000 - m.ts)}`;
+  return intervalText(m, nowMs);
+}
+
+/** The full pseudonym for the title of a client label ("tmc_…"), nothing else; null without one. */
+export function clientTitle(client: string | null): string | null {
+  return client && CLIENT_RE.test(client) ? client : null;
+}
+
+/**
+ * The second line of a mark: client, peers, duration and numbers, in this
+ * order. `client: false` leaves the client out (the row shows it as its own
+ * label with the pseudonym as title); `inBlock` uses spanText.
+ */
+export function detailText(m: Mark, nowMs: number, opts: { client?: boolean; inBlock?: boolean } = {}): string | null {
+  const parts = [
+    opts.client === false ? null : clientText(m),
+    peersText(m),
+    opts.inBlock ? spanText(m, nowMs) : intervalText(m, nowMs),
+    paramsText(m.params),
+  ].filter((x): x is string => !!x);
   return parts.length ? parts.join(' · ') : null;
 }
 
@@ -960,6 +1037,7 @@ export class TmApiError extends Error {
 const FIELD_TEXT: Record<string, string> = {
   from: 'Zeitfenster', until: 'Zeitfenster', window: 'Zeitfenster', source: 'Quelle', router_id: 'Router',
   kind: 'Art', min_severity: 'Schwere', limit: 'Seitengröße', query: 'Abfrage', body: 'Anfrage', client: 'Client',
+  cursor: 'Blätterstelle', spans: 'Abfrage',
 };
 
 export interface ErrorInfo {
@@ -986,6 +1064,16 @@ export function errorInfo(err: unknown, of: 'timeline' | 'sessions' = 'timeline'
     case 410:
       return { kind: 'gone', message: 'Die Integration wurde entladen.', retry: false };
     case 400: {
+      if (err.details.field === 'cursor') {
+        // only an older page sends a cursor: the list moved on, a refresh starts it anew
+        return {
+          kind: 'invalid',
+          message: err.details.reason === 'out_of_range'
+            ? 'Die Stelle zum Weiterblättern liegt nicht mehr im Zeitfenster. Bitte „Aktualisieren“.'
+            : 'Ungültige Stelle zum Weiterblättern. Bitte „Aktualisieren“.',
+          retry: false,
+        };
+      }
       const field = err.details.field ? FIELD_TEXT[err.details.field] ?? 'unbekannt' : null;
       return { kind: 'invalid', message: `Ungültige Filterkombination.${field ? ` Feld: ${field}.` : ''}`, retry: false };
     }

@@ -101,7 +101,7 @@ Legt die Ereignisse der vorhandenen Module auf eine Zeitleiste (Panel-Tab „Zei
 - **Filter**: Zeitfenster (1 Stunde bis 14 Tage), Quelle, Schwere, Router und Art; „Ältere laden“ blättert zurück.
 - **Rechte**: Administratoren sehen alles; andere Benutzer nur bei freigegebenem Panel und ohne Audit-Log, Konfiguration, Verweise und Client-Verläufe.
 - **Datenschutz**: keine MAC, keine IP, kein Hostname gespeichert. Hostnamen zeigt nur die Ansicht für Administratoren, solange die Client-Stabilität den Client kennt.
-- **Grenzen**: nicht rückwirkend; solange die Time Machine aus ist, wird nichts gekürzt; Konfigurationsänderungen nur als Anzahl. Noch nicht an echten Routern, nicht in einer echten Instanz und nicht im Browser geprüft.
+- **Grenzen**: nicht rückwirkend; solange die Time Machine aus ist, wird nichts gekürzt; Konfigurationsänderungen nur als Anzahl. Noch nicht an echten Routern und nicht in einer echten Instanz geprüft; der Tab wurde headless in Firefox angesehen.
 
 ➡️ [Zur Time Machine](https://github.com/magicx78/ha-openwrt-router/blob/main/docs/time-machine.md)
 

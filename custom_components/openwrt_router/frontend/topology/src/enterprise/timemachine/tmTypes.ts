@@ -70,7 +70,12 @@ export interface Timeline {
   sources: SourceInfo[];
   omittedClientMarks: number;
   truncated: boolean;
-  nextUntil: number | null;
+  /** Where the next older page starts (`cursor`), null at the end (1.51.0). */
+  nextCursor: string | null;
+  /** Intervals that began before `from` and reach into the window; only on a first page (`spans=1`). */
+  spanning: Mark[];
+  /** More of them than the server sends (200). */
+  spanningTruncated: boolean;
 }
 
 /** One client session of GET …/sessions (administrators only). */
@@ -100,7 +105,7 @@ export interface SessionsAnswer {
   recording: boolean;
   sessions: Session[];
   truncated: boolean;
-  nextUntil: number | null;
+  nextCursor: string | null;
 }
 
 export interface SessionFilters {
@@ -114,6 +119,8 @@ export interface SessionQuery {
   until: number;
   client: string | null;
   routerId: string | null;
+  /** Older pages: the previous answer's next_cursor, same window and filters. */
+  cursor: string | null;
 }
 
 /** What the filter bar asks the server for (the group chips filter locally). */
@@ -131,6 +138,10 @@ export interface TimelineQuery {
   sources: readonly string[] | null;
   minSeverity: Severity | null;
   routerId: string | null;
+  /** First page and refreshes: ask for the intervals reaching into the window (`spans=1`). */
+  spans: boolean;
+  /** Older pages: the previous answer's next_cursor, same window and filters, no spans. */
+  cursor: string | null;
 }
 
 export interface TmHass {

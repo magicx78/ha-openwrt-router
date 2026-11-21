@@ -490,9 +490,10 @@ würde in jeder Antwort als gekürzt (`cut: next_page`) erscheinen und das Blät
 - Nicht auf echten Routern und nicht in einer laufenden HA-Instanz geprüft; alle Aussagen
   stammen aus Tests mit Mocks. Den Tab hat die Prüfung vor dem Merge headless in Firefox mit
   der Testantwort angesehen; die danach geänderten Stile (Abschnitt 14: gesperrte Chips,
-  Karten ab 860 px, Quellspalte, mittige Chips) sind nur durch Tests geprüft. Der Tab von
-  1.51.0 (Abschnitt 14.3) ist **in keinem Browser angesehen**, nur mit node-Tests
-  (Logik, serverseitiges Rendern, Stylesheet-Prüfungen) geprüft.
+  Karten ab 860 px, Quellspalte, mittige Chips) sind nur durch Tests geprüft. Den Tab von
+  1.51.0 (Abschnitt 14.3) hat die Prüfung vor dem Merge headless in Firefox bei 360, 768 und
+  1280 px angesehen; die daraus folgenden Korrekturen (Abschnitt 14.3, „Nach der
+  Browser-Prüfung“) sind durch node-Tests geprüft.
 
 ## 14. Tab „Zeitreise“
 
@@ -524,7 +525,8 @@ fügt der Antwort nichts hinzu; Phase A verlinkt `ref` nicht, es gibt keinen Exp
   TT.MM.JJJJ“), je Marke Uhrzeit (UTC-ISO im `title`), Schwere als Punkt und Wort (Info nie in
   Warnfarbe), Art, Titel, Kennzahlen (nur bekannte Schlüssel), Router („alle Router“ bei
   `fleet`) und Quelle; „abgeleitet“ bei `derived`. Doppelte `id` werden entfernt. „Ältere
-  laden“ fragt mit `until=next_until`; `truncated` ohne `next_until` zeigt „Weitere Marken im
+  laden“ fragt mit `until=next_until` (seit 1.51.0 mit `cursor=<next_cursor>`, Abschnitt
+  14.3); `truncated` ohne `next_until` zeigt „Weitere Marken im
   Zeitfenster wurden gekürzt; Zeitfenster oder Filter enger wählen.“ Eine Seite ohne Marken,
   aber mit `next_until` (der Abschnitt hält nur ausgeblendete Client-Einträge), zeigt „In
   diesem Abschnitt gibt es nur ausgeblendete Einträge. Ältere laden, um weiter
@@ -588,11 +590,38 @@ dass keine MAC, IP, kein Hostname des Modells und kein Geheimnis in einer Antwor
   Zusatz „· n doppelt“ mit dem Tooltip „n doppelt ausgeblendet“. Über den Pills „Quellen“, nach
   „Ältere laden“ „Quellen (neueste Seite)“ (die Pills zählen die erste Seite).
 - **Intervalle:** zweite Zeile „Dauer 4 min 12 s“ (`closed`), „seit 14:03, noch offen“
-  (`open`; an einem anderen Tag mit Datum), „Ende unbekannt“ (`unknown`). Marken mit
-  `spans_in` (und jede Marke vor `from`) stehen oben im Block „Läuft seit vor dem
-  Zeitfenster“ mit Datum und Uhrzeit des Anfangs; jede Marke nur einmal.
+  (`open`; an einem anderen Tag mit Datum), „Ende unbekannt“ (`unknown`).
+- **Block „Läuft seit vor dem Zeitfenster“:** Die erste Seite (auch jede Aktualisierung und
+  jeder Neubeginn) fragt mit `spans=1`; der Block zeigt genau das Feld `spanning` dieser
+  Antwort (`marks` enthält solche Intervalle nie). Erste Zeile Datum und Uhrzeit des Beginns,
+  zweite Zeile die bisherige Dauer: „noch offen, bisher 2 Tage 3 Std.“ (`open`, gerechnet bis
+  jetzt), „Dauer …“ (`closed`), „Ende unbekannt“ (`unknown`). Bei `spanning_truncated` steht
+  darunter „Weitere laufen seit vor dem Zeitfenster; Zeitfenster oder Filter enger wählen.“
+  Der Block bleibt beim Nachladen älterer Seiten stehen und wird nur durch eine neue erste
+  Seite ersetzt; Filter wechseln leert ihn. Die Zähler („n von m Marken“) zählen ihn mit, die
+  Quell-Pills nicht (sie kommen vom Server und zählen `marks`).
+- **Blättern mit Cursor** (Zeitleiste und Sitzungen): „Ältere laden“ schickt dasselbe
+  Fenster und dieselben Filter wie die erste Seite plus `cursor=<next_cursor>` (ohne
+  `spans`), bis `next_cursor` `null` ist; `until=next_until` wird nicht mehr benutzt. Der
+  Cursor gehört zu der Abfrage, mit der er kam (`cursorQuery` im Zustand). Ein abgelehnter
+  Cursor (400, Feld `cursor`, Grund `out_of_range` bzw. `invalid`) erscheint als „Die Stelle
+  zum Weiterblättern liegt nicht mehr im Zeitfenster. Bitte „Aktualisieren“.“ bzw.
+  „Ungültige Stelle zum Weiterblättern. …“, ohne „Erneut versuchen“ (derselbe Cursor würde
+  wieder abgelehnt).
+- **Anschluss nach einer Aktualisierung** (`reaches` in `tmLogic.ts`): Eine neue erste Seite
+  wird nur vor die geladenen älteren Seiten gesetzt, wenn ihr Ende die geladene Liste
+  erreicht. Ihr `next_cursor` muss dafür bis an das `until` der ersten Seite reichen, auf der
+  die Liste aufgebaut wurde (exklusiv, in ms): ein Cursor `<ms>` schließt an, wenn
+  `ms` ≤ dieses `until`, ein Cursor `<ms>:<id>` nur, wenn `ms` < `until` (sonst fehlen
+  Marken derselben Millisekunde dazwischen). Kein `next_cursor` (die Seite ist vollständig)
+  schließt immer an. Sonst beginnt die Liste neu (Hinweis unten), nie mit stiller Lücke.
+  Beim Anschluss gelten Fenster und Cursor der älteren Seiten weiter; Marken, die vor dem
+  neuen `from` liegen, fallen weg. Veraltete Antworten (älteres `seq`, andere Filter-Generation)
+  werden verworfen.
 - **Clients:** „Client <client_name>“ mit dem Namen vom Server, sonst „Client ·a1ce4d“ (die
-  letzten sechs Zeichen des Pseudonyms); nie eine MAC. Wechsel „von Router 1 nach Router 2“
+  letzten sechs Zeichen des Pseudonyms); nie eine MAC. Das Attribut `title` der Kurzform
+  trägt das volle Pseudonym `tmc_…` und nur das (für `time_machine_forget_client` mit
+  `client`). Wechsel „von Router 1 nach Router 2“
   aus `peers`. Art-Chip „Clients“.
 - **Neubeginn:** beginnt die Liste neu, weil eine Aktualisierung die geladenen älteren Seiten
   nicht erreicht, steht „Viele neue Einträge: Die Liste beginnt neu. Ältere bei Bedarf erneut
@@ -603,13 +632,19 @@ dass keine MAC, IP, kein Hostname des Modells und kein Geheimnis in einer Antwor
   erhalten). Zeitfenster-Chips, Router-Auswahl und „Client“ („Alle Clients“ und die Clients
   der geladenen Sitzungen). Liste nach Beginn absteigend, nach Tagen gruppiert; je Zeile
   Beginn, „Dauer …“ / „noch verbunden“ / „Ende unbekannt“, Client, Router, Band („2,4 GHz“,
-  „5 GHz“, „6 GHz“), „n Wechsel“ bei `params.roam` > 0. Unter 700 px Containerbreite Karten.
-  „Ältere laden“ über `next_until`; `truncated` ohne `next_until` zeigt den Kürzungshinweis.
+  „5 GHz“, „6 GHz“; Spalte 7em, umbrochen wird nur zwischen Wörtern), „n Wechsel“ bei
+  `params.roam` > 0. Lange Routernamen in der Zeile höchstens zwei Zeilen
+  (`-webkit-line-clamp: 2`, voller Name im `title`), in Karten ganz. Unter 700 px
+  Containerbreite Karten. „Ältere laden“ über `cursor`/`next_cursor`; `truncated` ohne
+  `next_cursor` zeigt den Kürzungshinweis.
   Zustände: `off` (Box wie die Zeitleiste), `clients_off` („Client-Verläufe sind
   ausgeschaltet.“, der Weg in die Optionen und „Gespeichert werden Pseudonyme, keine
   MAC-Adressen, IP-Adressen oder Hostnamen. Abgeschlossene Sitzungen werden nach 14 Tagen
   gelöscht.“ — „abgeschlossene“, weil offene Intervalle nicht gekürzt werden, Abschnitt
-  15.7), `unavailable` („Client-Sitzungen sind noch nicht verfügbar. Grund: …“ in Worten),
+  15.7), `unavailable` („Client-Sitzungen sind noch nicht verfügbar.“ und der Grund:
+  `not_running` „Die Aufzeichnung läuft gerade nicht.“, `not_loaded` „Der gespeicherte
+  Verlauf wird noch geladen.“, sonst „Grund unbekannt.“; ein Test hält die Gründe der Route
+  und `UNAVAILABLE_TEXT` gleich),
   leer, 403 „Keine Berechtigung für die Client-Sitzungen (nur Administratoren).“, 410, 5xx mit
   „Erneut versuchen“, 400 mit dem Feldnamen. „Aufzeichnung läuft“ / „Aufzeichnung pausiert …“
   aus `recording`.
@@ -619,8 +654,16 @@ dass keine MAC, IP, kein Hostname des Modells und kein Geheimnis in einer Antwor
   Zeitleiste).
 - **Nicht im Tab:** keine Knöpfe für „Client vergessen“ oder „Verlauf löschen“, kein „Zustand
   zum Zeitpunkt“, kein Export, keine Sprünge in andere Tabs.
-- Tests: `tmSessions.test.mjs` (Logik), `tmRender.test.mjs` (Darstellung aus
-  `tmFixtureClients.json`), `tmLayout.test.mjs` (Raster, Karten).
+- **Nach der Browser-Prüfung** (vor dem Merge von 1.51.0): Der Umschalter stand im
+  Spalten-Flex `.cfg` und erbte von `.tm-chips` `flex: 1 1 260px`, wurde also 260 px hoch;
+  `.tm-chips.tm-views { flex: 0 0 auto; }` behebt das. Fokusrahmen nur im Tab
+  (`.tm …:focus-visible`, `#60a5fa`, 7,32:1 auf `#0c1225`; vorher `--border-focus` 2,16:1);
+  die anderen Tabs bleiben unverändert.
+- Tests: `tmSessions.test.mjs` (Logik), `tmLogic.test.mjs` (Cursor, Anschluss),
+  `tmRender.test.mjs` (Darstellung aus `tmFixtureClients.json`, dazu eine kleine Kaskade über
+  die geladenen Stylesheets, die für jedes Element in einem Spalten-Flex die wirksame
+  `flex-basis` prüft), `tmLayout.test.mjs` (Raster, Karten, Bandspalte, Fokuskontrast,
+  Zeilenbegrenzung).
 
 ## 15. Phase B: eigener Verlauf
 
@@ -994,7 +1037,7 @@ Tests: `test_forget_action_and_client_stability_exclusion`, `test_clear_history_
 
 ## 19. Panel für B/C (1.51.0)
 
-Das Panel ist mit 1.51.0 nachgezogen (Abschnitt 14.3, `_PANEL_VERSION` `20261121-timemachine3`).
+Das Panel ist mit 1.51.0 nachgezogen (Abschnitt 14.3, `_PANEL_VERSION` `20261121-timemachine4`).
 Es liest nur die Routen `timeline` und `sessions` und fügt nichts hinzu. Offen für eine spätere
 Version: „Zustand zum Zeitpunkt“ aus den Checkpoints, Export, Sprünge über `ref` in die
 Quell-Tabs, Bedienelemente für die Aktionen aus Abschnitt 18.

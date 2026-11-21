@@ -700,7 +700,10 @@
    ],
    "omitted_client_marks": 1,
    "truncated": false,
-   "next_until": null
+   "next_until": null,
+   "next_cursor": null,
+   "spanning": [],
+   "spanning_truncated": false
   }
  },
  "admin_page1": {
@@ -944,7 +947,10 @@
    ],
    "omitted_client_marks": 1,
    "truncated": true,
-   "next_until": 1795003621.0
+   "next_until": 1795003621.0,
+   "next_cursor": "1795003621000:tmm_82a95bd3136d2c0e",
+   "spanning": [],
+   "spanning_truncated": false
   }
  },
  "admin_page2": {
@@ -955,7 +961,7 @@
    "generated_at": 1795010701.0,
    "window": {
     "from": 1794999901.0,
-    "until": 1795003621.0
+    "until": 1795089901.0
    },
    "marks": [
     {
@@ -1104,7 +1110,10 @@
    ],
    "omitted_client_marks": 0,
    "truncated": true,
-   "next_until": 1795003561.0
+   "next_until": 1795003561.0,
+   "next_cursor": "1795003561000:tmm_c25b8d5c6c3caa4a",
+   "spanning": [],
+   "spanning_truncated": false
   }
  },
  "empty": {
@@ -1202,7 +1211,10 @@
    ],
    "omitted_client_marks": 0,
    "truncated": false,
-   "next_until": null
+   "next_until": null,
+   "next_cursor": null,
+   "spanning": [],
+   "spanning_truncated": false
   }
  },
  "partial": {
@@ -1850,7 +1862,10 @@
    ],
    "omitted_client_marks": 1,
    "truncated": false,
-   "next_until": null
+   "next_until": null,
+   "next_cursor": null,
+   "spanning": [],
+   "spanning_truncated": false
   }
  },
  "partial_empty": {
@@ -1948,7 +1963,10 @@
    ],
    "omitted_client_marks": 0,
    "truncated": false,
-   "next_until": null
+   "next_until": null,
+   "next_cursor": null,
+   "spanning": [],
+   "spanning_truncated": false
   }
  },
  "bad_request": {
@@ -2292,7 +2310,10 @@
    ],
    "omitted_client_marks": 0,
    "truncated": false,
-   "next_until": null
+   "next_until": null,
+   "next_cursor": null,
+   "spanning": [],
+   "spanning_truncated": false
   }
  },
  "off": {
@@ -2309,7 +2330,10 @@
    "sources": [],
    "omitted_client_marks": 0,
    "truncated": false,
-   "next_until": null
+   "next_until": null,
+   "next_cursor": null,
+   "spanning": [],
+   "spanning_truncated": false
   }
  }
 }

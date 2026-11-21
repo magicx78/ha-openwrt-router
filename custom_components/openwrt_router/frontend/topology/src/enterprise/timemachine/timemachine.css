@@ -13,7 +13,11 @@
 .tm-loading { padding: 4px 0; }
 .tm-off { flex-direction: column; align-items: flex-start; }
 .tm-restart { flex-wrap: wrap; gap: 8px; }
-.tm-views { flex: 0 1 auto; }
+/* The view switch is a .tm-chips row directly in the column flex box .cfg,
+   where a flex-basis becomes a height: never the 260px of .tm-chips there
+   (1.51.0 review: the switch was 260 px tall). Higher specificity than
+   .tm-chips, so the order of the rules does not matter. */
+.tm-chips.tm-views { flex: 0 0 auto; }
 
 /* Filter bar */
 .tm-filters { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -30,7 +34,12 @@
   max-width: 100%; min-width: 0; min-height: 32px; padding: 4px 8px; font: inherit; font-size: 13px;
   color: var(--text-primary); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-xs);
 }
-.tm-field select:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; }
+/* Focus inside this tab only: #60a5fa on the chip background #0c1225 is
+   7.3:1 (the shared --border-focus, 50 % of #3b82f6, is 2.2:1);
+   checked in tmLayout.test.mjs. The other tabs keep theirs. */
+.tm .tm-chip:focus-visible,
+.tm .tm-field select:focus-visible,
+.tm .cfg-btn:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
 
 /* Sources row */
 .tm-sources-box { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -70,14 +79,20 @@
 .tm-sessions { display: flex; flex-direction: column; gap: 10px; min-width: 0; container: tmsessions / inline-size; }
 .tm-session {
   display: grid; align-items: baseline; gap: 4px 12px; padding: 7px 10px; min-width: 0;
-  grid-template-columns: 5em 9.5em minmax(0, 1fr) 9em 5em 6em;
+  grid-template-columns: 5em 9.5em minmax(0, 1fr) 9em 7em 6em;
   border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03); font-size: 12.5px;
 }
 .tm-session > * { min-width: 0; }
 .tm-session__time { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
 .tm-session__client { display: inline-flex; flex-wrap: wrap; gap: 4px; color: var(--text-primary); font-weight: 600; }
 .tm-session__dur, .tm-session__band, .tm-session__roam { color: var(--text-secondary); }
-.tm-session__router { color: var(--text-primary); }
+/* "Band unbekannt" breaks between its words only, never inside one */
+.tm-session__band { overflow-wrap: normal; }
+/* A long router name takes at most two lines in a row (full name in title) */
+.tm-session__router {
+  color: var(--text-primary); display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
 
 .tm-more { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
@@ -96,6 +111,8 @@
 @container tmsessions (max-width: 700px) {
   .tm-session { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; padding: 8px 10px; }
   .tm-session__client { flex: 1 1 100%; }
+  /* cards: the router name wraps in full again */
+  .tm-session__router { display: block; -webkit-line-clamp: unset; line-clamp: none; overflow: visible; }
 }
 
 @media (max-width: 600px) {

@@ -13,7 +13,7 @@ import {
   CUT_TEXT, DEFAULT_FILTERS, LIST_INIT, SOURCE_IDS, TAB_ID, TAB_ORDER, TAB_TITLE, TmApiError,
   adminOnlySources, countText, dayGroups, dayLabel, dedupe, errorInfo, filterKey, firstQuery, groupsOf, isFallbackTitle,
   clientsOff, isoUtc, listReducer, mergeMarks, olderQuery, omittedText, paramsText, parseTimeline, queryString, rememberRouters,
-  routerOptions, routerText, severityView, shouldPoll, sourcePill, standText, timeText, titleOf, visibleMarks,
+  reaches, routerOptions, routerText, severityView, shouldPoll, sourcePill, standText, timeText, titleOf, visibleMarks,
 } from './tmLogic.ts';
 import { TITLE_TEXT } from './tmTexts.ts';
 
@@ -23,6 +23,8 @@ const body = name => F[name].body;
 const T = name => parseTimeline(body(name));
 
 const NOW_MS = Date.UTC(2026, 10, 21, 12, 0, 0);
+// the query an answer belongs to (its window; the reducer keeps it for the cursor)
+const qOf = a => ({ from: a.from, until: a.until, sources: null, minSeverity: null, routerId: null, spans: true, cursor: null });
 
 test('tab identity: "Zeitreise", order 60 under Enterprise, after Traffic (50)', () => {
   assert.equal(TAB_ID, 'timemachine');
@@ -80,7 +82,9 @@ test('first query: both ends of the window, all sources as default', () => {
   assert.equal(q.until - q.from, 86_400);
   assert.equal(q.until, Math.floor(NOW_MS / 1000) + 1);
   assert.equal(q.sources, null);
-  assert.equal(queryString(q), `from=${q.from}&until=${q.until}`);
+  // the first page asks for the intervals reaching into the window (1.51.0)
+  assert.equal(queryString(q), `from=${q.from}&until=${q.until}&spans=1`);
+  assert.equal(q.cursor, null);
   const week = firstQuery({ ...DEFAULT_FILTERS, window: '14d' }, NOW_MS);
   assert.equal(week.until - week.from, 14 * 86_400);
 });
@@ -92,7 +96,7 @@ test('source, severity and router reach the query; sources hidden for the user a
   assert.equal(q.minSeverity, 'warning');
   assert.equal(
     queryString(q),
-    `from=${q.from}&until=${q.until}&source=core_audit%2Cconfig_versions%2Cni_incidents%2Csecurity_timeline%2Ctm_index%2Ctm_refs%2Ctm_clients&router_id=${rid}&min_severity=warning`,
+    `from=${q.from}&until=${q.until}&source=core_audit%2Cconfig_versions%2Cni_incidents%2Csecurity_timeline%2Ctm_index%2Ctm_refs%2Ctm_clients&router_id=${rid}&min_severity=warning&spans=1`,
   );
   // an invalid router id is never sent
   assert.equal(firstQuery({ ...DEFAULT_FILTERS, routerId: '192.0.2.1' }, NOW_MS).routerId, null);
@@ -104,14 +108,19 @@ test('no selectable source left: no request', () => {
   assert.equal(firstQuery({ ...DEFAULT_FILTERS, sourcesOff: ['ni_events', 'ni_incidents', 'security_timeline', 'tm_index'] }, NOW_MS, userOff), null);
 });
 
-test('older page: same filters and from, until = next_until', () => {
+test('older page: the same window and filters, the cursor, no spans', () => {
   const first = firstQuery({ ...DEFAULT_FILTERS, severity: 'critical' }, NOW_MS);
   const page1 = T('admin_page1');
-  const q = olderQuery(first, page1.from, page1.nextUntil);
-  assert.equal(q.from, page1.from);
-  assert.equal(q.until, page1.nextUntil);
+  assert.match(page1.nextCursor, /^\d+:tmm_[0-9a-f]{16}$/);
+  const q = olderQuery(first, page1.nextCursor);
+  assert.equal(q.from, first.from);
+  assert.equal(q.until, first.until); // never until=next_until (it loses marks of one millisecond)
   assert.equal(q.minSeverity, 'critical');
-  assert.match(queryString(q), new RegExp(`until=${page1.nextUntil}&min_severity=critical$`));
+  assert.equal(q.spans, false);
+  assert.equal(queryString(q), `from=${q.from}&until=${q.until}&min_severity=critical&cursor=${encodeURIComponent(page1.nextCursor)}`);
+  // a cursor of another shape is never sent
+  assert.ok(!queryString({ ...q, cursor: '1&x=1' }).includes('cursor'));
+  assert.equal(parseTimeline({ next_cursor: 'abc' }).nextCursor, null);
 });
 
 test('the filter key changes with what the server is asked, not with the order of sources', () => {
@@ -127,10 +136,11 @@ function start(s, seq, more = false) {
   return listReducer(s, { type: 'start', seq, more });
 }
 
-test('loading older pages with next_until appends them, deduplicated', () => {
+test('loading older pages with the cursor appends them, deduplicated', () => {
   let s = start(LIST_INIT, 1);
-  s = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: T('admin_page1') });
-  assert.equal(s.nextUntil, T('admin_page1').nextUntil);
+  s = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: T('admin_page1'), query: qOf(T('admin_page1')) });
+  assert.equal(s.nextCursor, T('admin_page1').nextCursor);
+  assert.deepEqual(s.cursorQuery, qOf(T('admin_page1')));
   assert.equal(s.older, false);
   s = start(s, 2, true);
   const page2 = T('admin_page2');
@@ -138,67 +148,111 @@ test('loading older pages with next_until appends them, deduplicated', () => {
   const ids = s.marks.map(m => m.id);
   assert.equal(new Set(ids).size, ids.length);
   assert.equal(ids.length, T('admin_page1').marks.length + page2.marks.length);
-  assert.equal(s.nextUntil, page2.nextUntil);
+  assert.equal(s.nextCursor, page2.nextCursor);
   assert.equal(s.older, true);
   // the whole answer holds every mark of both pages
   const all = new Set(T('admin').marks.map(m => m.id));
   assert.ok(ids.every(id => all.has(id)));
 });
 
-test('a new first page with older pages loaded goes in front and keeps their next_until', () => {
+test('a new first page with older pages loaded goes in front and keeps their cursor and its window', () => {
   let s = start(LIST_INIT, 1);
-  s = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: T('admin_page1') });
+  s = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: T('admin_page1'), query: qOf(T('admin_page1')) });
   s = listReducer(start(s, 2, true), { type: 'older', gen: 0, seq: 2, answer: T('admin_page2') });
   const before = s.marks.length;
-  const keep = s.nextUntil;
-  s = listReducer(start(s, 3), { type: 'first', gen: 0, seq: 3, answer: T('admin_page1') });
+  const keep = s.nextCursor;
+  const keepQ = s.cursorQuery;
+  s = listReducer(start(s, 3), { type: 'first', gen: 0, seq: 3, answer: T('admin_page1'), query: qOf(T('admin_page1')) });
   assert.equal(s.marks.length, before); // the same marks again: nothing doubled
-  assert.equal(s.nextUntil, keep);
+  assert.equal(s.nextCursor, keep);
+  assert.equal(s.cursorQuery, keepQ);
   // without older pages a new first page replaces the list
-  let p = listReducer(start(LIST_INIT, 1), { type: 'first', gen: 0, seq: 1, answer: T('admin') });
-  p = listReducer(start(p, 2), { type: 'first', gen: 0, seq: 2, answer: T('empty') });
+  let p = listReducer(start(LIST_INIT, 1), { type: 'first', gen: 0, seq: 1, answer: T('admin'), query: qOf(T('admin')) });
+  p = listReducer(start(p, 2), { type: 'first', gen: 0, seq: 2, answer: T('empty'), query: qOf(T('empty')) });
   assert.deepEqual(p.marks, []);
 });
 
-// K3 (review 1.50.0): a 60-s refresh that answers while "Ältere laden" runs.
+// K3 (review 1.50.0), with the cursor of 1.51.0: a 60-s refresh that answers while "Ältere laden" runs.
 const rm = (id, ts) => ({ ...T('admin').marks[0], id, ts });
-const page = (marks, nextUntil, until = 1000) => ({
+const page = (marks, nextCursor, until = 1000) => ({
   status: 'ok', generatedAt: until, from: 0, until, marks, sources: [], omittedClientMarks: 0,
-  truncated: nextUntil !== null, nextUntil,
+  truncated: nextCursor !== null, nextCursor, spanning: [], spanningTruncated: false,
 });
+const first = (s, seq, answer) => listReducer(s, { type: 'first', gen: 0, seq, answer, query: qOf(answer) });
+const ID = 'tmm_' + '0'.repeat(16);
 
 test('a refresh during "Ältere laden" never drops the marks in between', () => {
-  let s = start(LIST_INIT, 1);
-  s = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: page([rm('a', 100), rm('b', 99), rm('c', 98)], 98) });
-  s = start(s, 2, true); // "Ältere laden" (until = 98)
+  let s = first(start(LIST_INIT, 1), 1, page([rm('a', 100), rm('b', 99), rm('c', 98)], '98000', 101));
+  s = start(s, 2, true); // "Ältere laden" (cursor 98000, window of the first page)
   s = start(s, 3); // the poll starts meanwhile; three new marks came in
-  s = listReducer(s, { type: 'first', gen: 0, seq: 3, answer: page([rm('x', 103), rm('y', 102), rm('z', 101)], 101) });
-  assert.equal(s.nextUntil, 98); // still where the pending older page continues
-  s = listReducer(s, { type: 'older', gen: 0, seq: 2, answer: page([rm('d', 97), rm('e', 96), rm('f', 95)], 95) });
+  s = first(s, 3, page([rm('x', 103), rm('y', 102), rm('z', 101)], '101000', 104));
+  assert.equal(s.nextCursor, '98000'); // still where the pending older page continues
+  assert.equal(s.cursorQuery.until, 101); // ... in the window the cursor belongs to
+  assert.equal(s.topUntil, 104);
+  s = listReducer(s, { type: 'older', gen: 0, seq: 2, answer: page([rm('d', 97), rm('e', 96), rm('f', 95)], '95000', 101) });
   assert.deepEqual(s.marks.map(m => m.id), ['x', 'y', 'z', 'a', 'b', 'c', 'd', 'e', 'f']);
-  assert.equal(s.nextUntil, 95);
+  assert.equal(s.nextCursor, '95000');
 });
 
 test('a refresh that does not reach the loaded list starts it anew, never with a gap', () => {
-  // loaded: 100..95 (head until 101); the refresh covers only 300..198
-  let s = start(LIST_INIT, 1);
-  s = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: page([rm('a', 100), rm('b', 99), rm('c', 98)], 98, 101) });
-  s = listReducer(start(s, 2, true), { type: 'older', gen: 0, seq: 2, answer: page([rm('d', 97)], 95, 101) });
+  // loaded: 100..95 (first page until 101); the refresh covers only 300..198
+  let s = first(start(LIST_INIT, 1), 1, page([rm('a', 100), rm('b', 99), rm('c', 98)], '98000', 101));
+  s = listReducer(start(s, 2, true), { type: 'older', gen: 0, seq: 2, answer: page([rm('d', 97)], '95000', 101) });
   s = start(s, 3, true); // another older page in flight
   s = start(s, 4);
-  s = listReducer(s, { type: 'first', gen: 0, seq: 4, answer: page([rm('x', 200), rm('y', 199), rm('z', 198)], 198, 300) });
+  s = first(s, 4, page([rm('x', 200), rm('y', 199), rm('z', 198)], '198000', 300));
   assert.deepEqual(s.marks.map(m => m.id), ['x', 'y', 'z']);
-  assert.equal(s.nextUntil, 198);
+  assert.equal(s.nextCursor, '198000');
+  assert.equal(s.cursorQuery.until, 300);
   assert.equal(s.older, false);
   assert.equal(s.loadingMore, false);
+  assert.equal(s.restarted, true);
   // the older page of the old list is dropped, it would leave a gap
   assert.equal(listReducer(s, { type: 'older', gen: 0, seq: 3, answer: page([rm('e', 94)], null, 101) }), s);
 });
 
+test('reaches: where a new first page joins the loaded list (cursor against the top until)', () => {
+  // the loaded list covers everything below until 101 s (101000 ms, exclusive)
+  assert.equal(reaches(null, 101), true); // the page holds the whole window
+  assert.equal(reaches('101000', 101), true); // all >= 101000 on the page, all < 101000 loaded
+  assert.equal(reaches('100500:' + ID, 101), true);
+  assert.equal(reaches('101001', 101), false); // 101000 itself is in neither list
+  // more marks of 101000 ms are still to come and lie at the top: a gap
+  assert.equal(reaches('101000:' + ID, 101), false);
+  assert.equal(reaches('98000', null), false);
+  // the same as a list: a refresh whose page ends inside the top millisecond restarts
+  let s = first(start(LIST_INIT, 1), 1, page([rm('a', 100)], '100000', 101));
+  s = listReducer(start(s, 2, true), { type: 'older', gen: 0, seq: 2, answer: page([rm('b', 99)], '99000', 101) });
+  s = first(start(s, 3), 3, page([rm('x', 101)], '101000:' + ID, 102));
+  assert.equal(s.restarted, true);
+  assert.deepEqual(s.marks.map(m => m.id), ['x']);
+});
+
+test('marks that left the moved window go; older answers outside it are dropped too', () => {
+  let s = first(start(LIST_INIT, 1), 1, { ...page([rm('a', 100), rm('b', 99)], '99000', 101), from: 50 });
+  s = listReducer(start(s, 2, true), { type: 'older', gen: 0, seq: 2, answer: page([rm('c', 60)], '60000', 101) });
+  s = first(start(s, 3), 3, { ...page([rm('x', 103)], '101000', 104), from: 70 });
+  assert.deepEqual(s.marks.map(m => m.id), ['x', 'a', 'b']);
+  s = listReducer(start(s, 4, true), { type: 'older', gen: 0, seq: 4, answer: page([rm('d', 65), rm('e', 75)], null, 101) });
+  assert.deepEqual(s.marks.map(m => m.id), ['x', 'a', 'b', 'e']);
+});
+
+test('the block from before the window comes with each first page and stays while older pages load', () => {
+  const span = { ...rm('s', 10), spansIn: true };
+  let s = first(start(LIST_INIT, 1), 1, { ...page([rm('a', 100)], '100000', 101), spanning: [span] });
+  s = listReducer(start(s, 2, true), { type: 'older', gen: 0, seq: 2, answer: page([rm('b', 99)], null, 101) });
+  assert.deepEqual(s.head.spanning.map(m => m.id), ['s']);
+  s = first(start(s, 3), 3, { ...page([rm('a', 100)], '100000', 102), spanning: [] });
+  assert.deepEqual(s.head.spanning, []);
+  // a filter change takes the old block away with the old list
+  const f = listReducer({ ...s, head: { ...s.head, spanning: [span] } }, { type: 'filters' });
+  assert.deepEqual(f.head.spanning, []);
+});
+
 test('a stale answer never overwrites a newer one', () => {
   let s = start(start(LIST_INIT, 1), 2);
-  s = listReducer(s, { type: 'first', gen: 0, seq: 2, answer: T('empty') });
-  const late = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: T('admin') });
+  s = listReducer(s, { type: 'first', gen: 0, seq: 2, answer: T('empty'), query: qOf(T('empty')) });
+  const late = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: T('admin'), query: qOf(T('admin')) });
   assert.equal(late, s);
   const lateError = listReducer(s, { type: 'fail', gen: 0, seq: 1, more: false, error: new Error('x') });
   assert.equal(lateError.error, null);
@@ -206,7 +260,7 @@ test('a stale answer never overwrites a newer one', () => {
 
 test('a filter change drops answers of the old filters and starts loading', () => {
   let s = start(LIST_INIT, 1);
-  s = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: T('admin') });
+  s = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: T('admin'), query: qOf(T('admin')) });
   s = start(s, 2, true);
   s = listReducer(s, { type: 'filters' });
   assert.equal(s.gen, 1);
@@ -214,21 +268,21 @@ test('a filter change drops answers of the old filters and starts loading', () =
   assert.equal(s.loading, true);
   assert.equal(listReducer(s, { type: 'older', gen: 0, seq: 2, answer: T('admin_page2') }), s);
   s = start(s, 3);
-  assert.equal(listReducer(s, { type: 'first', gen: 0, seq: 3, answer: T('admin') }), s);
-  s = listReducer(s, { type: 'first', gen: 1, seq: 3, answer: T('user') });
+  assert.equal(listReducer(s, { type: 'first', gen: 0, seq: 3, answer: T('admin'), query: qOf(T('admin')) }), s);
+  s = listReducer(s, { type: 'first', gen: 1, seq: 3, answer: T('user'), query: qOf(T('user')) });
   assert.equal(s.marks.length, T('user').marks.length);
 });
 
 test('an error keeps the last list on screen', () => {
-  let s = listReducer(start(LIST_INIT, 1), { type: 'first', gen: 0, seq: 1, answer: T('admin') });
+  let s = listReducer(start(LIST_INIT, 1), { type: 'first', gen: 0, seq: 1, answer: T('admin'), query: qOf(T('admin')) });
   s = listReducer(start(s, 2), { type: 'fail', gen: 0, seq: 2, more: false, error: new TmApiError(500, 'internal') });
   assert.equal(s.marks.length, T('admin').marks.length);
   assert.ok(s.error instanceof TmApiError);
 });
 
 test('off empties the list', () => {
-  let s = listReducer(start(LIST_INIT, 1), { type: 'first', gen: 0, seq: 1, answer: T('admin') });
-  s = listReducer(start(s, 2), { type: 'first', gen: 0, seq: 2, answer: T('off') });
+  let s = listReducer(start(LIST_INIT, 1), { type: 'first', gen: 0, seq: 1, answer: T('admin'), query: qOf(T('admin')) });
+  s = listReducer(start(s, 2), { type: 'first', gen: 0, seq: 2, answer: T('off'), query: qOf(T('off')) });
   assert.deepEqual(s.marks, []);
   assert.equal(s.head.status, 'off');
 });

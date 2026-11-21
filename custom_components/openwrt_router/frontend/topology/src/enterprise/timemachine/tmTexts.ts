@@ -351,6 +351,17 @@ export const REASON_TEXT: Record<string, string> = {
   'clients_off': 'in den Optionen einschalten',
 };
 
+/**
+ * Why the client sessions are not available (status "unavailable" of
+ * GET …/sessions; the reasons tm_query.sessions_page sends, checked by
+ * tests/test_tm_panel_texts_v1510.py). Whole sentences after "Client-Sitzungen
+ * sind noch nicht verfügbar.".
+ */
+export const UNAVAILABLE_TEXT: Record<string, string> = {
+  'not_running': 'Die Aufzeichnung läuft gerade nicht.',
+  'not_loaded': 'Der gespeicherte Verlauf wird noch geladen.',
+};
+
 /** Groups of the kinds (tm_sources.KIND_GROUP values). */
 export const GROUP_TEXT: Record<string, string> = {
   'infrastructure': 'Infrastruktur',

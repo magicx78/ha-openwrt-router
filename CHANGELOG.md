@@ -24,7 +24,7 @@ gespeichert werden MAC- und IP-Adressen, Hostnamen, SSIDs, Netdev-Namen und frei
 Grenzen: 14 Tage Aufbewahrung, Kontingente Infrastruktur 3000 / Verweise 2000 / Clients
 10000 Marken, die einander nie verdrängen, höchstens 200 Marken je Client und Tag, Datei
 höchstens 2,5 MB (voller Speicher gemessen 1,63 MB). Entwicklerdoku: `docs/time-machine.md`,
-Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine3`.
+Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine4`.
 
 ### Hinzugefügt
 
@@ -60,16 +60,29 @@ Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine3`.
   Ausfällen das ganze Intervall) hält; im Zweifel bleibt es. `v` bleibt 1.
 - **Tab „Zeitreise“:** Quellen „Eigener Verlauf“, „Verweise“, „Client-Verläufe“ (die beiden
   letzten für Nicht-Admins gesperrt), Zusatz „· n doppelt“; Dauer von Intervallen („Dauer
-  4 min 12 s“, „seit 14:03, noch offen“, „Ende unbekannt“) und ein eigener Block „Läuft seit
-  vor dem Zeitfenster“; Titel für alle Arten des eigenen Verlaufs (32 neue, Test); Clients als
-  „Client <Name>“ oder „Client ·a1ce4d“, nie als MAC; Wechsel „von Router 1 nach Router 2“;
-  Art-Chip „Clients“. Neue Ansicht **„Client-Sitzungen“** nur für Administratoren
-  (Umschalter „Zeitleiste | Client-Sitzungen“): Zeitfenster, Router und Client wählbar, nach
-  Tagen gruppiert, Beginn, Dauer bzw. „noch verbunden“, Client, Router, Band und Wechsel,
-  Karten bei schmaler Breite, „Ältere laden“, alle Zustände (aus, Client-Verläufe aus,
-  noch nicht verfügbar, leer, Fehler). Hinweis „Viele neue Einträge: Die Liste beginnt neu.“,
+  4 min 12 s“, „seit 14:03, noch offen“, „Ende unbekannt“). Die erste Seite fragt mit
+  `spans=1`; was vor dem Fenster begann und noch hineinreicht (`spanning`), steht oben im
+  eigenen Block **„Läuft seit vor dem Zeitfenster“** mit Datum und Uhrzeit des Beginns und
+  der bisherigen Dauer („noch offen, bisher 2 Tage 3 Std.“, „Dauer …“, „Ende unbekannt“);
+  bei `spanning_truncated` der Satz „Weitere laufen seit vor dem Zeitfenster; Zeitfenster
+  oder Filter enger wählen.“ Der Block bleibt beim Nachladen stehen und wird nur von einer
+  neuen ersten Seite ersetzt. **„Ältere laden“** blättert mit `cursor=<next_cursor>` im
+  selben Fenster und mit denselben Filtern (ohne `spans`), bis `next_cursor` fehlt; nie mehr
+  über `until=next_until`. Ein abgelehnter Cursor (400, Feld `cursor`) erscheint als „Die
+  Stelle zum Weiterblättern liegt nicht mehr im Zeitfenster. Bitte „Aktualisieren“.“
+  Titel für alle Arten des eigenen Verlaufs (32 neue, Test); Clients als „Client <Name>“ oder
+  „Client ·a1ce4d“, nie als MAC, das volle Pseudonym `tmc_…` steht im Tooltip (für „Client
+  vergessen“ mit `client`); Wechsel „von Router 1 nach Router 2“; Art-Chip „Clients“. Neue
+  Ansicht **„Client-Sitzungen“** nur für Administratoren (Umschalter „Zeitleiste |
+  Client-Sitzungen“): Zeitfenster, Router und Client wählbar, nach Tagen gruppiert, Beginn,
+  Dauer bzw. „noch verbunden“, Client, Router (lange Namen in der Zeile höchstens zwei Zeilen,
+  voller Name im Tooltip, in Karten ganz), Band und Wechsel, Karten bei schmaler Breite,
+  „Ältere laden“ (ebenfalls mit Cursor), alle Zustände (aus, Client-Verläufe aus, nicht
+  verfügbar mit Grund „Die Aufzeichnung läuft gerade nicht.“ bzw. „Der gespeicherte Verlauf
+  wird noch geladen.“, leer, Fehler). Hinweis „Viele neue Einträge: Die Liste beginnt neu.“,
   wenn eine Aktualisierung die geladenen älteren Seiten nicht erreicht, und „Quellen
-  (neueste Seite)“ nach „Ältere laden“.
+  (neueste Seite)“ nach „Ältere laden“. Im Tab ein eigener, deutlich sichtbarer Fokusrahmen
+  (7,3:1 auf dem Chip-Hintergrund, Test); die anderen Tabs bleiben unverändert.
 - **Aktionen** `openwrt_router.time_machine_forget_client` (genau eines von `mac` oder dem
   Pseudonym `client`; mit dem Pseudonym landet keine MAC in HAs eigenem Protokoll oder
   Recorder) und `openwrt_router.time_machine_clear_history` (`clients_only`), nur für
@@ -114,8 +127,11 @@ Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine3`.
   HA-Recorder.
 - Nach einem Absturz ist der Beginn der HA-Lücke nur auf etwa 15–20 min genau.
 - **Nicht an einer echten Instanz und nicht auf Routern geprüft**; alle Aussagen stammen aus
-  Tests mit Mocks. Der Tab von 1.51.0 ist in keinem Browser angesehen, nur mit node-Tests
-  (Logik, serverseitiges Rendern, Stylesheet).
+  Tests mit Mocks. Der Tab wurde vor dem Merge headless in Firefox bei 360, 768 und 1280 px
+  geprüft; dazu node-Tests (Logik, serverseitiges Rendern, Stylesheet und wirksame
+  Flex-Regeln).
+- TODO(Koordinator): hier eintragen, welche späteren Teile des Tabs nur durch Tests belegt
+  und nicht im Browser angesehen sind.
 
 ## [1.50.0] - 2026-11-21
 

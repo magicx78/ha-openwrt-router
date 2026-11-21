@@ -33,18 +33,18 @@ import tmCSS from './timemachine.css?inline';
 import {
   CLIENTS_OFF_HOW, CLIENTS_OFF_TITLE, CLIENTS_PRIVACY, CUT_TEXT, DEFAULT_FILTERS, DEFAULT_SESSION_FILTERS, EMPTY_TEXT,
   HIDDEN_ONLY_TEXT, INTRO, LIST_INIT, LOADING_TEXT, NO_SOURCE_TEXT, OFF_HOW, OFF_TITLE, PARTIAL_TEXT, POLL_MIN_MS,
-  RECORDING_OFF, RECORDING_ON, RESTART_TEXT, SESSIONS_CUT_TEXT, SESSIONS_EMPTY_TEXT, SESSIONS_LOADING_TEXT,
+  RECORDING_OFF, RECORDING_ON, RESTART_TEXT, SPANS_CUT_TEXT, SESSIONS_CUT_TEXT, SESSIONS_EMPTY_TEXT, SESSIONS_LOADING_TEXT,
   SESSIONS_VIEW_TITLE, SESSION_LIST_INIT, SEVERITY_FILTERS, SOURCES_NEWEST, SOURCES_TITLE, SOURCE_IDS, SPANS_TITLE,
   TAB_TITLE, TIMELINE_VIEW_TITLE, WINDOWS,
-  adminOnlySources, bandText, clientLabel, clientOptions, clientsOff, countText, dayGroups, detailText, errorInfo,
+  adminOnlySources, bandText, clientLabel, clientOptions, clientTitle, clientsOff, countText, dayGroups, detailText, errorInfo,
   filterKey, firstQuery, firstSessionQuery, groupText, groupsOf, isoUtc, listReducer, olderQuery, olderSessionQuery,
   omittedText, rememberClients, rememberRouters, rememberSessionRouters, roamText, routerOptionLabel, routerOptions,
   routerText, sessionDays, sessionDurationText, sessionFilterKey, sessionReducer, severityView, shouldPoll,
-  shouldPollSessions, sourcePill, sourceText, splitSpans, standText, startText, timeText, titleOf, unavailableText,
+  shouldPollSessions, sourcePill, sourceText, standText, startText, timeText, titleOf, unavailableText,
   visibleMarks,
   type ClientNames, type ListState, type RouterNames, type SessionListState,
 } from './tmLogic.ts';
-import type { Filters, Mark, Session, SessionFilters, SessionQuery, TimelineQuery, TmApi } from './tmTypes';
+import type { Filters, Mark, Session, SessionFilters, TmApi } from './tmTypes';
 
 const CHECK_MS = Math.min(15_000, POLL_MIN_MS);
 
@@ -156,9 +156,15 @@ function SourceRow({ state }: { state: ListState }) {
   );
 }
 
+function ClientLabel({ client, name }: { client: string | null; name: string | null }) {
+  // the full pseudonym as title: an administrator can copy it for the forget service
+  return <span className="tm-client" title={clientTitle(client) ?? undefined}>{clientLabel(client, name)}</span>;
+}
+
 function MarkRow({ m, nowMs, start = false }: { m: Mark; nowMs: number; start?: boolean }) {
   const sev = severityView(m.severity);
-  const detail = detailText(m, nowMs);
+  const detail = detailText(m, nowMs, { client: false, inBlock: start });
+  const hasClient = !!(m.client || m.clientName);
   const iso = isoUtc(m.ts);
   return (
     <li className="tm-mark" data-source={m.source}>
@@ -172,7 +178,13 @@ function MarkRow({ m, nowMs, start = false }: { m: Mark; nowMs: number; start?: 
       </span>
       <span className="tm-mark__main">
         <span className="tm-mark__title">{titleOf(m)}</span>
-        {detail && <span className="tm-mark__params">{detail}</span>}
+        {(detail || hasClient) && (
+          <span className="tm-mark__params">
+            {hasClient && <ClientLabel client={m.client} name={m.clientName} />}
+            {hasClient && detail && ' · '}
+            {detail}
+          </span>
+        )}
       </span>
       <span className="tm-mark__router">{routerText(m)}</span>
       <span className="tm-mark__source">{sourceText(m.source)}</span>
@@ -283,12 +295,15 @@ export function TimeMachineScreen({ state, filters, hidden, routers, nowMs, view
   const off = head?.status === 'off';
   const adminOnly = adminOnlySources(head);
   const noSource = !off && firstQuery(filters, nowMs, adminOnly) === null;
-  const groups = [...groupsOf(state.marks), ...hidden.filter(g => !state.marks.some(m => m.group === g))];
+  const spanning = head && !off ? head.spanning : [];
+  const all = [...spanning, ...state.marks];
+  const groups = [...groupsOf(all), ...hidden.filter(g => !all.some(m => m.group === g))];
   const shown = visibleMarks(state.marks, hidden);
+  const shownSpans = visibleMarks(spanning, hidden);
   const omitted = head && !off ? omittedText(head.omittedClientMarks, clientsOff(head)) : null;
-  const firstLoad = head === null || (state.loading && !state.marks.length && !off);
+  const firstLoad = head === null || (state.loading && !all.length && !off);
   // a page without marks that goes on: only left-out entries in this part (review S1)
-  const hiddenOnly = !state.marks.length && state.nextUntil !== null;
+  const hiddenOnly = !state.marks.length && state.nextCursor !== null;
 
   const body = (() => {
     if (head === null) {
@@ -306,27 +321,32 @@ export function TimeMachineScreen({ state, filters, hidden, routers, nowMs, view
     return (
       <>
         <FilterBar filters={filters} adminOnly={adminOnly} routers={routers} groups={groups} hidden={hidden}
-          shown={shown.length} total={state.marks.length} onFilters={onFilters} onToggleGroup={onToggleGroup} />
+          shown={shown.length + shownSpans.length} total={all.length} onFilters={onFilters} onToggleGroup={onToggleGroup} />
         {state.error !== null && <ErrorBox error={state.error} onRetry={onRefresh} />}
         {state.restarted && <RestartNotice onDismiss={onDismiss ?? (() => {})} />}
         {head.status === 'partial' && <div className="cfg-notice cfg-notice--warn" role="note">{PARTIAL_TEXT}</div>}
         <SourceRow state={state} />
         {omitted && <div className="cfg-hint tm-omitted" role="note">{omitted}</div>}
         {noSource && <div className="cfg-hint" role="note">{NO_SOURCE_TEXT}</div>}
-        {state.loading && state.marks.length > 0 && !noSource && <Spinner text={LOADING_TEXT} />}
+        {state.loading && all.length > 0 && !noSource && <Spinner text={LOADING_TEXT} />}
         {noSource ? null : firstLoad
           ? <Spinner text={LOADING_TEXT} />
-          : hiddenOnly
-            ? <div className="cfg-empty tm-empty tm-hidden-only">{HIDDEN_ONLY_TEXT}</div>
-            : <TimelineList marks={shown} total={state.marks.length} from={head.from} nowMs={nowMs} />}
+          : (
+            <>
+              <SpansBlock marks={shownSpans} cut={head.spanningTruncated} nowMs={nowMs} />
+              {hiddenOnly
+                ? <div className="cfg-empty tm-empty tm-hidden-only">{HIDDEN_ONLY_TEXT}</div>
+                : <TimelineList marks={shown} total={state.marks.length} spans={spanning.length} nowMs={nowMs} />}
+            </>
+          )}
         {state.moreError !== null && <ErrorBox error={state.moreError} onRetry={onMore} />}
-        {!noSource && !firstLoad && state.nextUntil !== null && (
+        {!noSource && !firstLoad && state.nextCursor !== null && (
           <div className="tm-more">
             <button type="button" className="diag-btn cfg-btn" disabled={state.loadingMore} onClick={onMore}>Ältere laden</button>
             {state.loadingMore && <span className="cfg-spinner"><span className="cfg-spinner__dot" />lädt …</span>}
           </div>
         )}
-        {!noSource && state.nextUntil === null && state.truncated && <div className="cfg-hint tm-cut" role="note">{CUT_TEXT}</div>}
+        {!noSource && state.nextCursor === null && state.truncated && <div className="cfg-hint tm-cut" role="note">{CUT_TEXT}</div>}
       </>
     );
   })();
@@ -338,22 +358,31 @@ export function TimeMachineScreen({ state, filters, hidden, routers, nowMs, view
   );
 }
 
-function TimelineList({ marks, total, from, nowMs }: { marks: readonly Mark[]; total: number; from: number | null; nowMs: number }) {
+/** Intervals that began before the window (the first page's `spanning`), on top, start as date and time. */
+function SpansBlock({ marks, cut, nowMs }: { marks: readonly Mark[]; cut: boolean; nowMs: number }) {
+  if (!marks.length && !cut) return null;
+  return (
+    <section className="tm-day tm-spans" aria-label={SPANS_TITLE}>
+      <h3 className="cfg-subtitle tm-day__title">{SPANS_TITLE}</h3>
+      {marks.length > 0 && (
+        <ol className="tm-rows">
+          {marks.map(m => <MarkRow key={m.id} m={m} nowMs={nowMs} start />)}
+        </ol>
+      )}
+      {cut && <div className="cfg-hint tm-spans-cut" role="note">{SPANS_CUT_TEXT}</div>}
+    </section>
+  );
+}
+
+function TimelineList({ marks, total, spans, nowMs }: { marks: readonly Mark[]; total: number; spans: number; nowMs: number }) {
   if (!marks.length) {
-    return <div className="cfg-empty tm-empty">{total ? 'Keine Marken der gewählten Arten.' : EMPTY_TEXT}</div>;
+    // the block above alone: no "no marks" line under running intervals
+    if (!total && spans) return null;
+    return <div className="cfg-empty tm-empty">{total || spans ? 'Keine Marken der gewählten Arten.' : EMPTY_TEXT}</div>;
   }
-  const { spans, rest } = splitSpans(marks, from);
   return (
     <div className="tm-list">
-      {spans.length > 0 && (
-        <section className="tm-day tm-spans" aria-label={SPANS_TITLE}>
-          <h3 className="cfg-subtitle tm-day__title">{SPANS_TITLE}</h3>
-          <ol className="tm-rows">
-            {spans.map(m => <MarkRow key={m.id} m={m} nowMs={nowMs} start />)}
-          </ol>
-        </section>
-      )}
-      {dayGroups(rest, nowMs).map(day => (
+      {dayGroups(marks, nowMs).map(day => (
         <section key={day.key} className="tm-day" aria-label={day.label}>
           <h3 className="cfg-subtitle tm-day__title">{day.label}</h3>
           <ol className="tm-rows">
@@ -371,15 +400,16 @@ function SessionRow({ x }: { x: Session }) {
   const iso = isoUtc(x.ts);
   const band = bandText(x.band);
   const roam = roamText(x.params);
+  const router = routerText({ fleet: false, routerId: x.routerId, routerName: x.routerName });
   return (
     <li className="tm-session" data-end={x.endState ?? 'none'}>
       <time className="tm-session__time" dateTime={iso} title={iso}>{timeText(x.ts)}</time>
       <span className="tm-session__dur">{sessionDurationText(x)}</span>
       <span className="tm-session__client">
-        {clientLabel(x.client, x.clientName)}
+        <ClientLabel client={x.client} name={x.clientName} />
         {x.derived && <span className="cfg-badge cfg-badge--info">abgeleitet</span>}
       </span>
-      <span className="tm-session__router">{routerText({ fleet: false, routerId: x.routerId, routerName: x.routerName })}</span>
+      <span className="tm-session__router" title={router}>{router}</span>
       <span className="tm-session__band">{band ?? 'Band unbekannt'}</span>
       <span className="tm-session__roam">{roam ?? ''}</span>
     </li>
@@ -466,13 +496,13 @@ export function SessionsScreen({ state, filters, routers, clients, nowMs, viewSw
               </div>
             )}
         {state.moreError !== null && <ErrorBox of="sessions" error={state.moreError} onRetry={onMore} />}
-        {!firstLoad && state.nextUntil !== null && (
+        {!firstLoad && state.nextCursor !== null && (
           <div className="tm-more">
             <button type="button" className="diag-btn cfg-btn" disabled={state.loadingMore} onClick={onMore}>Ältere laden</button>
             {state.loadingMore && <span className="cfg-spinner"><span className="cfg-spinner__dot" />lädt …</span>}
           </div>
         )}
-        {state.nextUntil === null && state.truncated && <div className="cfg-hint tm-cut" role="note">{SESSIONS_CUT_TEXT}</div>}
+        {state.nextCursor === null && state.truncated && <div className="cfg-hint tm-cut" role="note">{SESSIONS_CUT_TEXT}</div>}
       </>
     );
   })();
@@ -500,7 +530,6 @@ export function TimelineContainer({ api, active, viewSwitch }: { api: TmApi; act
   activeRef.current = active;
   const seq = useRef(0);
   const lastMs = useRef<number | null>(null);
-  const firstQ = useRef<TimelineQuery | null>(null);
 
   const loadFirst = useCallback(() => {
     const s = stateRef.current;
@@ -508,20 +537,19 @@ export function TimelineContainer({ api, active, viewSwitch }: { api: TmApi; act
     if (q === null) return;
     const n = ++seq.current;
     const gen = s.gen;
-    firstQ.current = q;
     lastMs.current = Date.now();
     dispatch({ type: 'start', seq: n, more: false });
     api.timeline(q).then(
-      answer => dispatch({ type: 'first', gen, seq: n, answer }),
+      answer => dispatch({ type: 'first', gen, seq: n, answer, query: q }),
       error => dispatch({ type: 'fail', gen, seq: n, more: false, error }),
     );
   }, [api]);
 
   const loadMore = useCallback(() => {
     const s = stateRef.current;
-    const base = firstQ.current;
-    if (base === null || s.nextUntil === null) return;
-    const q = olderQuery(base, s.head?.from ?? null, s.nextUntil);
+    // the cursor belongs to the window it came with (the server checks it against that)
+    if (s.cursorQuery === null || s.nextCursor === null) return;
+    const q = olderQuery(s.cursorQuery, s.nextCursor);
     const n = ++seq.current;
     const gen = s.gen;
     dispatch({ type: 'start', seq: n, more: true });
@@ -596,27 +624,24 @@ export function SessionsContainer({ api, active, viewSwitch }: { api: TmApi; act
   activeRef.current = active;
   const seq = useRef(0);
   const lastMs = useRef<number | null>(null);
-  const firstQ = useRef<SessionQuery | null>(null);
 
   const loadFirst = useCallback(() => {
     const s = stateRef.current;
     const q = firstSessionQuery(filtersRef.current, Date.now());
     const n = ++seq.current;
     const gen = s.gen;
-    firstQ.current = q;
     lastMs.current = Date.now();
     dispatch({ type: 'start', seq: n, more: false });
     api.sessions(q).then(
-      answer => dispatch({ type: 'first', gen, seq: n, answer }),
+      answer => dispatch({ type: 'first', gen, seq: n, answer, query: q }),
       error => dispatch({ type: 'fail', gen, seq: n, more: false, error }),
     );
   }, [api]);
 
   const loadMore = useCallback(() => {
     const s = stateRef.current;
-    const base = firstQ.current;
-    if (base === null || s.nextUntil === null) return;
-    const q = olderSessionQuery(base, s.head?.from ?? null, s.nextUntil);
+    if (s.cursorQuery === null || s.nextCursor === null) return;
+    const q = olderSessionQuery(s.cursorQuery, s.nextCursor);
     const n = ++seq.current;
     const gen = s.gen;
     dispatch({ type: 'start', seq: n, more: true });

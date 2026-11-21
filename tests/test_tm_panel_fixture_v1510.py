@@ -8,9 +8,13 @@ this test builds three routers with the real outage tracker, the real
 Network Intelligence and Client Stability and the Time Machine with its
 client switch on (``tm_index_kit``, ``test_tm_clients_v1510``), asks the
 real routes ``GET .../timemachine/timeline`` and ``.../sessions`` as an
-administrator and as a user, with a small page, a client filter, a refused
-query, an empty window, with the client switch off, while not running and
-while switched off, and compares the answers with the checked-in file.
+administrator and as a user, as the tab asks since 1.51.0 (first pages with
+``spans=1``, older pages with ``cursor``), with a small page, a block of
+intervals cut (``SPANNING_MAX`` lowered to 1, the only patch of the route),
+a cursor out of the window, a client filter, a refused query, an empty
+window, with the client switch off, while not running, while its store is
+not loaded and while switched off, and compares the answers with the
+checked-in file.
 
 The route's clock is the test clock; mark ids and pseudonyms are
 repeatable (fixed module key). All values are invented: locally
@@ -38,7 +42,7 @@ from test_client_engine import M1, M2, client, data, disk, setup  # noqa: F401
 from test_tm_views import http
 from tm_index_kit import SECRETS, T0, world
 
-from custom_components.openwrt_router import tm_views
+from custom_components.openwrt_router import tm_query, tm_views
 from custom_components.openwrt_router.const import (
     DATA_TIME_MACHINE_ENGINE,
     OPTION_TIME_MACHINE_ENABLED,
@@ -119,25 +123,40 @@ async def build(disks: Any) -> tuple[dict[str, Any], list[bytes]]:
         window = {"from": str(int(since)), "until": str(int(now + 1))}
         past = {"from": str(int(T0 - 3 * 86_400)), "until": str(int(T0 - 86_400))}
         tl = {**window, "source": INDEX}
+        # first pages as the tab asks them since 1.51.0 (spans=1), older
+        # pages with the cursor and without spans
+        tls = {**tl, "spans": "1"}
         out: dict[str, Any] = {}
         with patch.object(tm_views.time, "time", return_value=now):
             async with http(w.hass) as h:
-                out["timeline"] = await fetch(h, "/timeline", ADMIN_ID, tl)
-                out["timeline_page1"] = await fetch(
-                    h, "/timeline", ADMIN_ID, {**tl, "limit": "4"}
+                out["timeline"] = await fetch(h, "/timeline", ADMIN_ID, tls)
+                tl1 = await fetch(h, "/timeline", ADMIN_ID, {**tls, "limit": "4"})
+                out["timeline_page1"] = tl1
+                cursor = tl1["body"]["next_cursor"]
+                assert cursor is not None
+                out["timeline_page2"] = await fetch(
+                    h, "/timeline", ADMIN_ID, {**tl, "limit": "4", "cursor": cursor}
+                )
+                # more intervals before the window than the block holds
+                with patch.object(tm_query, "SPANNING_MAX", 1):
+                    out["timeline_spans_cut"] = await fetch(
+                        h, "/timeline", ADMIN_ID, tls
+                    )
+                out["timeline_bad_cursor"] = await fetch(
+                    h, "/timeline", ADMIN_ID, {**tl, "cursor": "1000"}
                 )
                 w.hass.data[_PANEL_ACCESS_KEY] = {"r1": True}
-                out["timeline_user"] = await fetch(h, "/timeline", USER_ID, tl)
+                out["timeline_user"] = await fetch(h, "/timeline", USER_ID, tls)
                 out["sessions_user"] = await fetch(h, "/sessions", USER_ID, window)
                 w.hass.data.pop(_PANEL_ACCESS_KEY)
                 out["sessions"] = await fetch(h, "/sessions", ADMIN_ID, window)
                 page = {**window, "limit": "2"}
                 first = await fetch(h, "/sessions", ADMIN_ID, page)
                 out["sessions_page1"] = first
-                until = first["body"]["next_until"]
-                assert until is not None
+                cursor = first["body"]["next_cursor"]
+                assert cursor is not None
                 out["sessions_page2"] = await fetch(
-                    h, "/sessions", ADMIN_ID, {**page, "until": str(until)}
+                    h, "/sessions", ADMIN_ID, {**page, "cursor": cursor}
                 )
                 one = out["sessions"]["body"]["sessions"][0]["client"]
                 out["sessions_client"] = await fetch(
@@ -152,11 +171,16 @@ async def build(disks: Any) -> tuple[dict[str, Any], list[bytes]]:
                     h, "/sessions", ADMIN_ID, window
                 )
                 w.hass.data[DATA_TIME_MACHINE_ENGINE] = engine
+                engine.loaded = False
+                out["sessions_not_loaded"] = await fetch(
+                    h, "/sessions", ADMIN_ID, window
+                )
+                engine.loaded = True
                 await engine.async_set_clients(False)
                 out["sessions_clients_off"] = await fetch(
                     h, "/sessions", ADMIN_ID, window
                 )
-                out["timeline_clients_off"] = await fetch(h, "/timeline", ADMIN_ID, tl)
+                out["timeline_clients_off"] = await fetch(h, "/timeline", ADMIN_ID, tls)
                 for entry in w.entries:
                     entry.options[OPTION_TIME_MACHINE_ENABLED] = False
                 out["sessions_off"] = await fetch(h, "/sessions", ADMIN_ID, window)
@@ -179,16 +203,32 @@ async def test_the_clients_fixture_is_the_real_route_answer(disks, disk) -> None
     # the scenarios the frontend tests rely on
     assert {"client_session", "client_roam", "client_disconnect"} <= kinds
     assert {"router_down", "router_up"} <= kinds
-    spans = [m for m in marks if m["spans_in"]]
+    # intervals from before the window come in ``spanning``, never in ``marks``
+    assert not [m for m in marks if m["spans_in"]]
+    spans = tl["spanning"]
+    assert all(m["spans_in"] for m in spans)
     assert {m["kind"] for m in spans} == {"router_down", "client_session"}
-    assert {m["end_state"] for m in marks if m["end_state"]} >= {"open", "closed"}
+    assert tl["spanning_truncated"] is False
+    assert {m["end_state"] for m in marks + spans if m["end_state"]} >= {
+        "open",
+        "closed",
+    }
     roam = next(m for m in marks if m["kind"] == "client_roam")
     assert roam["peers"]["before"]["router_name"] == "Router 1"
     assert roam["peers"]["after"]["router_name"] == "Router 2"
-    assert NAME in {m["client_name"] for m in marks}
+    assert NAME in {m["client_name"] for m in marks + spans}
     assert None in {m["client_name"] for m in marks if m["client"]}
-    assert doc["timeline_page1"]["body"]["next_until"] is not None
-    assert not [m for m in doc["timeline_page1"]["body"]["marks"] if m["spans_in"]]
+    page1 = doc["timeline_page1"]["body"]
+    page2 = doc["timeline_page2"]["body"]
+    assert page1["next_cursor"] is not None and page1["spanning"] == spans
+    assert page2["spanning"] == [] and page2["next_cursor"] is None
+    ids = [m["id"] for m in page1["marks"] + page2["marks"]]
+    assert ids == [m["id"] for m in marks]  # every mark once, in order
+    cut = doc["timeline_spans_cut"]["body"]
+    assert cut["spanning_truncated"] is True and len(cut["spanning"]) == 1
+    bad = doc["timeline_bad_cursor"]
+    assert bad["status"] == 400
+    assert bad["body"]["details"] == {"field": "cursor", "reason": "out_of_range"}
     user = {s["id"]: s for s in doc["timeline_user"]["body"]["sources"]}
     assert user["tm_clients"]["reason"] == user["tm_refs"]["reason"] == "admin_only"
     assert doc["sessions_user"]["status"] == 403
@@ -200,6 +240,9 @@ async def test_the_clients_fixture_is_the_real_route_answer(disks, disk) -> None
     assert doc["sessions_empty"]["body"]["sessions"] == []
     assert doc["sessions_bad_request"]["status"] == 400
     assert doc["sessions_unavailable"]["body"]["status"] == "unavailable"
+    assert doc["sessions_unavailable"]["body"]["reason"] == "not_running"
+    assert doc["sessions_not_loaded"]["body"]["reason"] == "not_loaded"
+    assert doc["sessions_page2"]["body"]["next_cursor"] is None
     assert doc["sessions_clients_off"]["body"]["status"] == "clients_off"
     off = {s["id"]: s for s in doc["timeline_clients_off"]["body"]["sources"]}
     assert (off["tm_clients"]["state"], off["tm_clients"]["reason"]) == (
