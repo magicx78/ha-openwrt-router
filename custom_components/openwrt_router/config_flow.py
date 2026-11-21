@@ -66,6 +66,7 @@ from .const import (
     OPTION_CONFIG_BACKUP_SCHEDULE,
     OPTION_CONFIG_BACKUP_TIME,
     OPTION_CONFIG_DRIFT_CHECK,
+    OPTION_TIME_MACHINE_CLIENTS,
     OPTION_TIME_MACHINE_ENABLED,
     PROTOCOL_HTTP,
     PROTOCOL_HTTPS,
@@ -191,6 +192,25 @@ class OpenWrtOptionsFlow(OptionsFlow):
                 on = new_opts.get(OPTION_TIME_MACHINE_ENABLED) is True
                 new_opts[OPTION_TIME_MACHINE_ENABLED] = on
                 _write_time_machine_through(self.hass, self.config_entry, on)
+            # Phases B/C: the separate client switch (also one for the fleet),
+            # then the running index follows both switches (no reload).
+            if OPTION_TIME_MACHINE_CLIENTS in user_input:
+                clients = new_opts.get(OPTION_TIME_MACHINE_CLIENTS) is True
+                new_opts[OPTION_TIME_MACHINE_CLIENTS] = clients
+                _write_time_machine_through(
+                    self.hass, self.config_entry, clients, OPTION_TIME_MACHINE_CLIENTS
+                )
+            if (
+                OPTION_TIME_MACHINE_ENABLED in user_input
+                or OPTION_TIME_MACHINE_CLIENTS in user_input
+            ):
+                from .tm_engine import async_apply_time_machine_options
+
+                await async_apply_time_machine_options(
+                    self.hass,
+                    on=new_opts.get(OPTION_TIME_MACHINE_ENABLED) is True,
+                    clients=new_opts.get(OPTION_TIME_MACHINE_CLIENTS) is True,
+                )
             # --- end Network Time Machine
             return self.async_create_entry(title="", data=new_opts)
 
@@ -257,10 +277,23 @@ def _time_machine_option_fields(hass: Any, opts: Any) -> dict[Any, Any]:
     except Exception:  # noqa: BLE001 - the form never fails because of it
         on = False
     on = on or opts.get(OPTION_TIME_MACHINE_ENABLED) is True
-    return {vol.Optional(OPTION_TIME_MACHINE_ENABLED, default=on): bool}
+    try:
+        from .tm_engine import fleet_option
+
+        clients = fleet_option(hass, OPTION_TIME_MACHINE_CLIENTS)
+    except Exception:  # noqa: BLE001
+        clients = False
+    clients = clients or opts.get(OPTION_TIME_MACHINE_CLIENTS) is True
+    return {
+        vol.Optional(OPTION_TIME_MACHINE_ENABLED, default=on): bool,
+        # Phase C: client histories, own switch, off by default (F3)
+        vol.Optional(OPTION_TIME_MACHINE_CLIENTS, default=clients): bool,
+    }
 
 
-def _write_time_machine_through(hass: Any, entry: Any, on: bool) -> None:
+def _write_time_machine_through(
+    hass: Any, entry: Any, on: bool, key: str = OPTION_TIME_MACHINE_ENABLED
+) -> None:
     """Give every other router entry the same switch value (one fleet switch).
 
     Only entries whose value differs are updated, with all their other
@@ -276,9 +309,9 @@ def _write_time_machine_through(hass: Any, entry: Any, on: bool) -> None:
         if other.entry_id == entry.entry_id:
             continue
         options = dict(getattr(other, "options", None) or {})
-        if (options.get(OPTION_TIME_MACHINE_ENABLED) is True) == on:
+        if (options.get(key) is True) == on:
             continue
-        options[OPTION_TIME_MACHINE_ENABLED] = on
+        options[key] = on
         try:
             hass.config_entries.async_update_entry(other, options=options)
         except Exception as err:  # noqa: BLE001

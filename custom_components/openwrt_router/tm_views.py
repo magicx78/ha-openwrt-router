@@ -1,6 +1,8 @@
-"""Network Time Machine, Phase A: the HTTP route (GET only).
+"""Network Time Machine: the HTTP routes (GET only).
 
-``GET /api/openwrt_router/enterprise/timemachine/timeline``
+``GET /api/openwrt_router/enterprise/timemachine/timeline`` (Phase A, own
+index since Phases B/C) and ``GET …/timemachine/sessions`` (Phase C, client
+sessions; administrators only, also while the panel is open to all).
 
 Checks in the order of the sister routes (``traffic_views``, ``rf_views``):
 403 for no user or a non-admin while the panel is not open to all users
@@ -27,11 +29,14 @@ from .security_views import NO_STORE, RequestError, error_response, read_body
 from .tm_query import (
     QUERY_KEYS,
     QUERY_VALUE_MAX,
+    SESSION_QUERY_KEYS,
     QueryError,
     Stats,
     async_timeline,
     off_body,
     parse_query,
+    parse_sessions_query,
+    sessions_page,
     time_machine_enabled,
 )
 from .topology_panel import _PANEL_VIEW_DISABLED_KEY, _panel_open_to_all
@@ -46,11 +51,11 @@ def _bad(field: str, reason: str = "invalid") -> RequestError:
     return RequestError(400, "invalid_request", field=field, reason=reason)
 
 
-def _query(request: web.Request) -> dict[str, str]:
+def _query(request: web.Request, keys: frozenset[str] = QUERY_KEYS) -> dict[str, str]:
     """Known keys only, each once, short values."""
     found: dict[str, str] = {}
     for key, value in request.query.items():
-        if key not in QUERY_KEYS:
+        if key not in keys:
             raise _bad("query", "unknown_key")
         if key in found:
             raise _bad(key, "repeated")
@@ -108,7 +113,44 @@ class TimeMachineTimelineView(HomeAssistantView):
         return self.json(body, headers=dict(NO_STORE))
 
 
-TIME_MACHINE_VIEWS: tuple[type[HomeAssistantView], ...] = (TimeMachineTimelineView,)
+class TimeMachineSessionsView(HomeAssistantView):
+    """Client sessions of one window (administrators only)."""
+
+    url = f"{BASE_URL}/sessions"
+    name = f"{VIEW_NAME_PREFIX}sessions"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.StreamResponse:
+        """Read (no body, strict query); 403 for every non-admin."""
+        try:
+            hass: HomeAssistant = request.app[KEY_HASS]
+            user = request.get(KEY_HASS_USER)
+            if user is None or getattr(user, "is_admin", False) is not True:
+                raise RequestError(403, "authorization_denied")
+            if hass.data.get(_PANEL_VIEW_DISABLED_KEY):
+                raise RequestError(410, "integration_not_loaded")
+            await read_body(request, {})
+            now = time.time()
+            try:
+                query = parse_sessions_query(_query(request, SESSION_QUERY_KEYS), now)
+            except QueryError as err:
+                raise _bad(err.field, err.reason) from None
+            body = sessions_page(hass, query, now=now)
+        except RequestError as err:
+            return error_response(err)
+        except Exception as err:
+            _LOGGER.warning(
+                "Time Machine route %s failed: %s", self.name, type(err).__name__
+            )
+            _LOGGER.debug("Time Machine route error", exc_info=err)
+            return error_response(RequestError(500, "internal"))
+        return self.json(body, headers=dict(NO_STORE))
+
+
+TIME_MACHINE_VIEWS: tuple[type[HomeAssistantView], ...] = (
+    TimeMachineTimelineView,
+    TimeMachineSessionsView,
+)
 
 
 @callback

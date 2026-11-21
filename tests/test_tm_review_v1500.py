@@ -312,6 +312,7 @@ async def test_k2_a_non_admin_learns_nothing_of_marks_he_cannot_see(
                 "oldest": None,
                 "truncated": False,
                 "cut": None,
+                "duplicates": 0,
             }
             assert only["truncated"] is False and only["next_until"] is None
             assert oldest is None or oldest > hidden_at + 1

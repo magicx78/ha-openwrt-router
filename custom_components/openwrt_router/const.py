@@ -1014,4 +1014,16 @@ OPTION_TIME_MACHINE_ENABLED = "time_machine_enabled"
 DEFAULT_TIME_MACHINE_ENABLED = False
 DATA_TIME_MACHINE_VIEWS_BOUND = f"{DOMAIN}_time_machine_views_bound"
 DATA_TIME_MACHINE_STATS = f"{DOMAIN}_time_machine_stats"  # memory only
+# Phase B/C (own index, tm_store / tm_engine / tm_clients): created only
+# while the Time Machine is on. Client histories have their own switch,
+# also off by default and also written through to every router entry; it
+# has an effect only while the Time Machine itself is on.
+OPTION_TIME_MACHINE_CLIENTS = "time_machine_clients"
+DEFAULT_TIME_MACHINE_CLIENTS = False
+DATA_TIME_MACHINE_ENGINE = f"{DOMAIN}_time_machine_engine"
+TIME_MACHINE_STORE_KEY = f"{DOMAIN}.time_machine"
+TIME_MACHINE_STORE_VERSION = 1
+TIME_MACHINE_STORE_MINOR_VERSION = 1
+SERVICE_TIME_MACHINE_FORGET_CLIENT = "time_machine_forget_client"
+SERVICE_TIME_MACHINE_CLEAR = "time_machine_clear_history"
 # --- Ende Network Time Machine ---

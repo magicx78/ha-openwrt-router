@@ -75,7 +75,7 @@ def test_defaults_are_24_hours_up_to_now_and_every_source() -> None:
     query = parse_query({}, NOW)
     assert query.until == 1_795_000_001.0
     assert query.until - query.since == 86_400
-    assert query.sources == src.SOURCE_IDS
+    assert query.sources == src.ALL_SOURCE_IDS
     assert (query.router_id, query.kind, query.min_severity) == (None, None, None)
     assert query.limit == 200
 
@@ -288,6 +288,7 @@ def test_an_unreadable_source_makes_the_answer_partial() -> None:
         "oldest": None,
         "truncated": False,
         "cut": None,
+        "duplicates": 0,
     }
 
 

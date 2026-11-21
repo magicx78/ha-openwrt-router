@@ -242,7 +242,16 @@ async def test_async_setup_registers_the_action():
     hass = MagicMock()
     hass.services.has_service = MagicMock(return_value=False)
     assert await integration.async_setup(hass, {}) is True
-    assert hass.services.async_register.call_count == 1
+    # the config backup action plus the two Time Machine actions (1.51.0)
+    names = [c.args[1] for c in hass.services.async_register.call_args_list]
+    assert names.count(SERVICE_CREATE_CONFIG_BACKUP) == 1
+    assert sorted(names) == sorted(
+        [
+            SERVICE_CREATE_CONFIG_BACKUP,
+            "time_machine_clear_history",
+            "time_machine_forget_client",
+        ]
+    )
     assert integration.CONFIG_SCHEMA is not None
 
 

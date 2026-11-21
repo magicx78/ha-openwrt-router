@@ -573,7 +573,13 @@ async def _async_time_machine_summary(
     try:
         from collections.abc import Mapping
 
-        from .const import DATA_TIME_MACHINE_STATS, OPTION_TIME_MACHINE_ENABLED
+        from .const import (
+            DATA_TIME_MACHINE_STATS,
+            OPTION_TIME_MACHINE_CLIENTS,
+            OPTION_TIME_MACHINE_ENABLED,
+        )
+        from .tm_engine import async_get_time_machine, fleet_option
+        from .tm_marks import CLIENT_DAY_CAP, MAX_MARKS, QUOTAS, RETENTION_S
         from .tm_query import (
             API_VERSION,
             DEFAULT_LIMIT,
@@ -584,9 +590,8 @@ async def _async_time_machine_summary(
             time_machine_enabled,
         )
         from .tm_sources import (
+            ALL_SOURCE_IDS,
             SOURCE_BUDGET_S,
-            SOURCE_IDS,
-            SOURCE_MARK_CAP,
             ReadRequest,
             async_read_source,
             build_router_map,
@@ -599,7 +604,7 @@ async def _async_time_machine_summary(
         req = ReadRequest(now - DEFAULT_WINDOW_S, now, True, now)
         routers = build_router_map(hass)
         sources: dict[str, Any] = {}
-        for source in SOURCE_IDS:
+        for source in ALL_SOURCE_IDS:
             result = await async_read_source(hass, source, req, routers)
             sources[source] = {
                 "state": result.state,
@@ -608,6 +613,11 @@ async def _async_time_machine_summary(
                 "truncated": result.truncated,
                 "omitted_client_marks": result.omitted_client,
             }
+        engine = async_get_time_machine(hass)
+        # counts and sizes only: no mark, no id, no pseudonym
+        index = engine.stats() if engine is not None else {"loaded": False}
+        if engine is not None and engine.recorder is not None:
+            index["clients"] = engine.recorder.stats()
         stats = hass.data.get(DATA_TIME_MACHINE_STATS)
         if not isinstance(stats, Stats):
             stats = Stats()
@@ -616,6 +626,9 @@ async def _async_time_machine_summary(
                 "enabled": True,
                 "entry_enabled": isinstance(options, Mapping)
                 and options.get(OPTION_TIME_MACHINE_ENABLED) is True,
+                "clients_enabled": fleet_option(hass, OPTION_TIME_MACHINE_CLIENTS),
+                "entry_clients_enabled": isinstance(options, Mapping)
+                and options.get(OPTION_TIME_MACHINE_CLIENTS) is True,
                 "api_version": API_VERSION,
                 "window_s": DEFAULT_WINDOW_S,
                 "limits": {
@@ -623,10 +636,14 @@ async def _async_time_machine_summary(
                     "max_window_s": MAX_WINDOW_S,
                     "default_limit": DEFAULT_LIMIT,
                     "max_limit": MAX_LIMIT,
-                    "source_mark_cap": SOURCE_MARK_CAP,
                     "source_budget_s": SOURCE_BUDGET_S,
+                    "retention_s": RETENTION_S,
+                    "max_marks": MAX_MARKS,
+                    "quotas": dict(QUOTAS),
+                    "client_day_cap": CLIENT_DAY_CAP,
                 },
                 "sources": sources,
+                "index": index,
                 "counters": stats.as_dict(),
             }
         )
