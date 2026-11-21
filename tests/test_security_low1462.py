@@ -361,3 +361,29 @@ async def test_low_4_old_store_above_40_wifi_hints_keeps_them_all(
     assert center.counters["incidents_wifi_quota_dropped"] == 1
     center._record(drift(1, T0 + 901), T0 + 901)
     assert len(center.incidents) == 46
+
+
+# --- 1.49.3 review S1: no resolved Wi-Fi hint goes for a hint dropped anyway ------
+
+
+async def test_s1_wifi_room_is_not_made_when_the_class_is_full_of_open_hints(
+    disks,  # noqa: F811
+) -> None:
+    center = await keyed_center(make_hass(), "r1")
+    for n in range(WIFI_QUOTA):
+        center._record(wifi(n, T0 + n), T0 + n)
+    resolved = min(wifi_hints(center), key=lambda i: i["last_seen"])
+    resolved["status"] = "resolved"
+    center._record(drift(1, T0 + 100), T0 + 100)
+    (template,) = [i for i in other(center) if not i["from_wifi"]]
+    # an old store: 55 open non-Wi-Fi hints in the "other" class
+    for n in range(55):
+        item = copy.deepcopy(template)
+        item["id"] = f"sec_old{n:05x}"
+        item["scope"] = f"{item['scope']}|old{n}"
+        center.incidents[item["id"]] = item
+    before = set(center.incidents)
+    center._record(wifi(900, T0 + 900), T0 + 900)
+    assert resolved["id"] in center.incidents  # nothing lost for nothing
+    assert set(center.incidents) == before  # the new hint was dropped
+    assert center.counters["incidents_other_quota_dropped"] == 1
