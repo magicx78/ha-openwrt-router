@@ -136,6 +136,9 @@
             "name": "Checked at"
           }
         }
+      },
+      "diag_gateway_reachable": {
+        "name": "Gateway reachable"
       }
     },
     "sensor": {
@@ -348,6 +351,24 @@
       },
       "fleet_security_coverage": {
         "name": "Security detection coverage (all routers)"
+      },
+      "fleet_diag_quality_score": {
+        "name": "Network quality score (all routers)"
+      },
+      "fleet_diag_monitoring_coverage": {
+        "name": "Network monitoring coverage (all routers)"
+      },
+      "fleet_diag_findings_active": {
+        "name": "Active network diagnostics findings"
+      },
+      "fleet_diag_ha_internet_latency": {
+        "name": "Home Assistant internet latency"
+      },
+      "fleet_diag_ha_internet_loss": {
+        "name": "Home Assistant internet loss (24 h)"
+      },
+      "fleet_diag_dns_response_time": {
+        "name": "DNS response time"
       }
     },
     "switch": {

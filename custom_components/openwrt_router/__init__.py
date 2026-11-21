@@ -849,6 +849,58 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
 # --- end Security Center
 
 
+# --- Network Diagnostics (release 1.47.0, part 1) ---
+# One fleet-wide module per HA instance (diag_runtime.py), wired exactly like
+# the Security Center above: the two entry functions are wrapped once more,
+# so no existing code changes. Set up after the whole base setup (and after
+# the Security Center), released after the base unload. Off by default: then
+# it only reads its store (no router call, no packet). Every error stays here
+# and is logged with the exception type only; a setup or an unload never
+# fails because of it.
+try:
+    from . import diag_runtime as _diag_runtime
+except Exception:  # noqa: BLE001 - the routers work without it
+    _diag_runtime = None  # type: ignore[assignment]
+
+_async_setup_entry_sc = async_setup_entry
+_async_unload_entry_sc = async_unload_entry
+
+
+@wraps(_async_setup_entry_sc)
+async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Set up a config entry, then add it to the network diagnostics."""
+    ok = await _async_setup_entry_sc(hass, entry)
+    if ok is not False and _diag_runtime is not None:
+        try:
+            coordinator = getattr(entry.runtime_data, "coordinator", None)
+            await _diag_runtime.async_setup_net_diagnostics(hass, entry, coordinator)
+        except Exception as err:
+            _LOGGER.warning(
+                "Network diagnostics setup failed (%s); the router works without it",
+                type(err).__name__,
+            )
+            _LOGGER.debug("Network diagnostics setup error", exc_info=err)
+    return ok
+
+
+@wraps(_async_unload_entry_sc)
+async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Unload a config entry, then release it from the network diagnostics."""
+    unload_ok = await _async_unload_entry_sc(hass, entry)
+    if unload_ok is not False and _diag_runtime is not None:
+        try:
+            await _diag_runtime.async_release_net_diagnostics(hass, entry.entry_id)
+        except Exception as err:
+            _LOGGER.warning(
+                "Network diagnostics release failed (%s)", type(err).__name__
+            )
+            _LOGGER.debug("Network diagnostics release error", exc_info=err)
+    return unload_ok
+
+
+# --- end Network Diagnostics
+
+
 # --- WiFi RF Intelligence (release 1.48.0, part 1) ---
 # One fleet-wide center per HA instance (rf_center.py), wired like the
 # Security Center above: the setup and unload wrappers run after the base

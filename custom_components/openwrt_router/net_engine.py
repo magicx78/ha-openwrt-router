@@ -854,6 +854,9 @@ class NetIntelligence:
         wifi_findings = detect_wifi(self._wifi, wifi, now, entry_id, thresholds)
         stored += self._store_findings(entry_id, wifi_findings, now, evidence)
         evidence.extend(self._wifi_holds(entry_id, now, context))
+        # --- Network Diagnostics (release 1.47.0, part 2) ---
+        stored += _diag_source_findings(self, entry_id, data, now, evidence)
+        # --- end Network Diagnostics
         stored += self._run_machine(now, evidence)
         self._prune(now)
         if stored or self._log_marks.get(entry_id) != mark_before:
@@ -2545,3 +2548,55 @@ def _load_marks(raw: Any) -> dict[str, dict[str, int]]:
         if clean:
             out[router] = clean
     return out
+
+
+# --- Network Diagnostics (release 1.47.0, part 2) ---
+# Extra finding sources of one poll (the network diagnostics run time feeds
+# its gateway / DNS server change findings, ``net_rules`` DIAG_CHANGE_*).
+# Called in ``ingest`` before the machine step, with the poll's data only
+# (no router call). Without a source (module off) nothing changes. A source
+# that raises is skipped (WARNING with the exception type only).
+_DIAG_SOURCES_ATTR = "_diag_finding_sources"
+
+
+def add_finding_source(
+    engine: NetIntelligence,
+    source: Callable[[str, Any, float], Iterable[Finding]],
+) -> Callable[[], None]:
+    """Add ``source(entry_id, data, now)``; returns the remover."""
+    sources: list[Any] = engine.__dict__.setdefault(_DIAG_SOURCES_ATTR, [])
+    sources.append(source)
+
+    def remove() -> None:
+        if source in sources:
+            sources.remove(source)
+
+    return remove
+
+
+def _diag_source_findings(
+    engine: NetIntelligence,
+    entry_id: str,
+    data: Any,
+    now: float,
+    evidence: list[Evidence],
+) -> int:
+    """Store the findings of every source; return the stored events."""
+    sources = engine.__dict__.get(_DIAG_SOURCES_ATTR)
+    if not sources:
+        return 0
+    stored = 0
+    for source in tuple(sources):
+        try:
+            found = [f for f in source(entry_id, data, now) if isinstance(f, Finding)]
+        except Exception as err:  # noqa: BLE001 - a source never breaks a poll
+            _LOGGER.warning(
+                "A network intelligence finding source failed (%s)",
+                type(err).__name__,
+            )
+            continue
+        stored += engine._store_findings(entry_id, found, now, evidence)
+    return stored
+
+
+# --- end Network Diagnostics
