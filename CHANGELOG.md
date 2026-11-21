@@ -4,6 +4,22 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.47.1] - 2026-11-21
+
+### Behoben
+
+- **Netzwerkdiagnose: Gateway-Sensoren von Routern, die ihre ID erst nach dem Setup bekommen,
+  werden wieder angelegt.** Der Empfänger des Signals `openwrt_router_net_diagnostics_updated`
+  war eine Lambda ohne `@callback`; Home Assistant führte ihn deshalb in einem Worker-Thread
+  aus. Dort rief er `hass.async_create_task` auf, was nach einem HA-Neustart einmal als ERROR
+  im Log stand („calls hass.async_create_task from a thread other than the event loop“). Der
+  Sensor fehlte dann, und weil der Merker „Abgleich läuft“ gesetzt blieb, versuchte es auch
+  kein späteres Signal mehr. Der Empfänger ist jetzt eine `@callback`-Funktion und läuft in der
+  Ereignisschleife; kann die Aufgabe nicht starten, wird der Merker zurückgesetzt, sodass das
+  nächste Signal es erneut versucht.
+- Tests: `tests/test_diag_dispatcher_thread.py` schickt das Signal durch den echten Dispatcher
+  von Home Assistant und prüft Thread, angelegten Sensor und Merker.
+
 ## [1.47.0] - 2026-11-21
 
 Netzwerkdiagnose („Network Diagnostics“): prüft die Kette Router → Gateway → WAN → Internet →
