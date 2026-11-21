@@ -324,9 +324,23 @@ async def async_setup_traffic(
         hass.data[DATA_TRAFFIC_ANALYTICS] = engine
     await engine.async_load()
     engine.add_entry(entry.entry_id, coordinator)
+    _register_views(hass)
     if engine.enabled and not engine.active:
         await engine.async_activate()
     return engine
+
+
+def _register_views(hass: HomeAssistant) -> None:
+    """Bind the read-only dashboard routes once (also while the module is off)."""
+    if getattr(hass, "http", None) is None:
+        return
+    try:
+        from .traffic_views import async_register_traffic_views
+
+        async_register_traffic_views(hass)
+    except Exception as err:
+        _LOGGER.warning("Traffic routes not bound (%s)", type(err).__name__)
+        _LOGGER.debug("Traffic routes error", exc_info=err)
 
 
 async def async_release_traffic(hass: HomeAssistant, entry_id: str) -> None:
