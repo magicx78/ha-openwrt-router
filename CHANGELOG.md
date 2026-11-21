@@ -7,7 +7,7 @@ All notable changes to the OpenWrt Router integration will be documented in this
 ## [1.49.3] - 2026-11-21
 
 Korrekturen aus unabhängigen Prüfungen von WiFi RF, der Folgeliste 1.49.1, Netzwerkdiagnose,
-Security Center und Configuration Manager, dazu die Enterprise-Tabs zum ersten Mal in einem
+Security Center, Traffic Analytics und Configuration Manager, dazu die Enterprise-Tabs zum ersten Mal in einem
 echten Browser angesehen (Firefox, 360 / 768 / 1280 px, helles und dunkles
 Home-Assistant-Design, Beispieldaten). Keine neuen Router-Rechte, kein zusätzlicher
 Router-Aufruf bei ausgeschalteten Modulen; mit WiFi RF aus macht ein Poll weiter genau die
@@ -22,6 +22,8 @@ Router-Aufrufe von 1.47.1 (Hotfix 1.49.2 unverändert). Panel-Version
   (Zeitüberschreitung, keine Quelle lesbar), und öfter „unbekannt“ bei Routern ohne
   `nf_conntrack_count`, weil abgeschnittene Tabellen jetzt erkannt werden.
 - **Configuration Manager:** bei einer SSH-Zeitüberschreitung ein anderer nächster Schritt.
+- **Traffic Analytics:** Bei Polls ohne neue Zählerabfrage bleibt der letzte gültige
+  Traffic-Wert stehen, bis er regulär veraltet.
 
 ### Behoben
 
@@ -107,7 +109,29 @@ Router-Aufrufe von 1.47.1 (Hotfix 1.49.2 unverändert). Panel-Version
 
 #### Traffic Analytics
 
-<!-- TRAFFIC-ZEILEN -->
+- **Ruft die Integration die Listener ohne neue Abfrage auf (z. B. nach der
+  Paket-Update-Prüfung), bleiben die aktuellen Raten erhalten.** Bisher waren WAN-Sensoren
+  und Topologie-Werte bis zur nächsten Abfrage leer, im 5-Minuten-Verlauf stand ein falsches
+  Qualitätskennzeichen, und Zusatzabfragen liefen außerhalb des Abfragetakts.
+- **Der Flow-Speicher vergisst stille Quellen nach der Aufbewahrungszeit und merkt sich
+  höchstens 256 Quellen.** Ein Collector darf nur noch Router-IDs geladener Router mit
+  eingeschalteter Analyse senden (sonst `unknown_router`). Ein fehlerhafter Collector kann
+  den Speicher so nicht mehr unbegrenzt füllen.
+- **Router mit mehr als 64 Netzwerkgeräten verlieren den WAN-Zähler nicht mehr.** WAN-Gerät
+  und Uplink-Ports werden zuerst übernommen; weggelassene Geräte werden gezählt und als
+  Abdeckungsgrund angezeigt.
+- **Abgelehnte Collector-Zugriffe haben ein eigenes Meldebudget je Grund und Benutzer.** Ein
+  angemeldeter Benutzer, der die Route wiederholt aufruft, kann echte Fehlversuche nicht
+  mehr aus dem Security Center verdrängen.
+- **Ein doppelt gesendeter Collector-Aufruf (z. B. nach einem Timeout) wird mit der ersten
+  Antwort bestätigt und nicht doppelt gezählt.**
+- **Nach einem harten Absturz werden Stunden- und Tageswerte nicht mehr doppelt gezählt (bis
+  zu 30 Minuten).** Die Verdichtungsmarke steht jetzt auch im groben Speicher; vorhandene
+  Dateien bleiben lesbar.
+- **Ist der erste Schreibvorgang nach dem Start zu groß, bleibt der gespeicherte
+  5-Minuten-Verlauf erhalten, statt geleert zu werden.**
+- **Schreibvorgänge über einem Speicherbudget kürzen in einem Durchgang statt in bis zu
+  acht.** Die Event-Loop ist dabei rund halb so lang blockiert.
 
 #### Configuration Manager
 
@@ -125,6 +149,10 @@ Router-Aufrufe von 1.47.1 (Hotfix 1.49.2 unverändert). Panel-Version
   Kürzel; jetzt „Router aaaa11“ wie dort.
 - **Verlauf der Netzwerkdiagnose scrollte bei schmaler Breite** in seinem Rahmen; unter
   560 px Breite wird jede Zeile zur Karte (Container-Query wie im Configuration Manager).
+- **Traffic Analytics, Router: weggelassene Netzwerkgeräte waren nicht zu sehen.** Die
+  Router-Zeile nennt jetzt „Mehr als 64 Netzwerkgeräte: N nicht gemessen“ (neues Feld
+  `devices_omitted` der Übersicht), der Abdeckungsgrund `devices_omitted_over_cap` hat einen
+  deutschen Text, und „Verworfen“ zählt auch verdrängte Flow-Quellen (`dropped_feeds`).
 
 #### Darstellung (Browser-Prüfung)
 
