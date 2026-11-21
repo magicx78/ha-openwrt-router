@@ -18,6 +18,7 @@
  *    errors map from status / code; unknown tokens are shown as unknown.
  */
 
+import { routerLabel } from '../wifi/wifiLogic.ts';
 import type {
   ChainStage,
   Finding,
@@ -709,6 +710,12 @@ export function historyRows(series: HistorySeries, windows: readonly string[] = 
       coverage: formatCoverage(s?.coverage),
     };
   });
+}
+
+/** Display name of a measurement point: the same short router name as the
+ * other Enterprise tabs ("Router aaaa11"), never the full router id (1.49.3). */
+export function pointName(point: string): string {
+  return point === 'ha' ? 'Home Assistant' : routerLabel(point);
 }
 
 /** Series grouped by measurement point ('ha' first, then routers by id). */

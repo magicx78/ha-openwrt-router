@@ -6,7 +6,7 @@
 
 import React from 'react';
 import type { DiagApi, HistorySeries, HistoryView } from './diagnosticsTypes';
-import { NO_VALUE, groupByPoint, historyRows, label, moduleView } from './diagnosticsLogic.ts';
+import { NO_VALUE, groupByPoint, historyRows, label, moduleView, pointName } from './diagnosticsLogic.ts';
 import { ErrorBox, Notice, SectionBox, Skeleton, Unknown, useResource } from './diagUi';
 
 const WINDOW_LABEL: Record<string, string> = { '1h': '1 Std.', '24h': '24 Std.', '7d': '7 Tage', '30d': '30 Tage' };
@@ -63,7 +63,7 @@ export function DiagHistory({ api, rev }: { api: DiagApi; rev: number }) {
         {groups.length === 0 && <Unknown text="Noch keine Messreihen vorhanden" />}
         {groups.map((g, i) => (
           <details key={g.point} className="dg-details" open={i === 0}>
-            <summary>{g.point === 'ha' ? 'Home Assistant' : `Router ${g.point}`} ({g.series.length})</summary>
+            <summary>{pointName(g.point)} ({g.series.length})</summary>
             {g.series.map(s => <SeriesTable key={`${s.targetId}|${s.kind}|${s.family}`} series={s} windows={view.windows} />)}
           </details>
         ))}

@@ -11,7 +11,7 @@ import React from 'react';
 import type { Overview, PointView } from './diagnosticsTypes';
 import {
   chainChips, findingView, formatAge, formatMs, formatPct, formatTs, moduleView, pointScoreView,
-  pointStateView, scoreView,
+  pointName, pointStateView, scoreView,
 } from './diagnosticsLogic.ts';
 import { ChainRow, Fact, SectionBox, ToneBadge, Unknown } from './diagUi';
 
@@ -26,7 +26,7 @@ function Kpi({ name, tone, children, sub }: { name: string; tone?: string; child
 }
 
 function PointCard({ point }: { point: PointView }) {
-  const name = point.kind === 'ha' ? 'Home Assistant' : `Router ${point.id}`;
+  const name = point.kind === 'ha' ? 'Home Assistant' : pointName(point.id);
   const state = pointStateView(point);
   const finding = findingView(point.finding);
   const score = point.kind === 'router' ? pointScoreView(point.score) : null;
