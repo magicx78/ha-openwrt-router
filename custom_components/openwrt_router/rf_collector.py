@@ -19,7 +19,9 @@ Rules (plan 2026-11-17 §8, task decisions):
 * Errors: method not found / permission denied / invalid argument make the
   target ``unsupported`` and it is asked again only after
   ``WIFI_RF_PROBE_BACKOFF_MAX_S``; transient errors back off exponentially
-  from the floor. No retry storm, nothing raised to the poll.
+  from the floor. No retry storm, nothing raised to the poll. A read cut by
+  the round time limit counts as such a transient error (1.49.3), and the
+  start of each round rotates so no target can starve the later ones.
 * Survey and txpowerlist need the Core capability (``rf.survey`` /
   ``rf.txpowerlist``, facts of the deployed ACL) to be available; otherwise
   they are not asked and stay "not ready" with the Core's reason.
@@ -304,15 +306,36 @@ class RfCollector:
         result = RoundResult(taken_at=wall_clock())
         if not targets:
             return result
-        self.counters["rounds"] += 1
         keys = list_bases or {}
+        # Rotate the start of the round (1.49.3): with a fixed order a target
+        # that keeps hitting the time limit early blocked the later ones.
+        start = self.counters["rounds"] % len(targets)
+        ordered = [*targets[start:], *targets[:start]]
+        self.counters["rounds"] += 1
+        current: Target | None = None
         try:
             async with asyncio.timeout(self.round_timeout_s):
-                for target in targets:
+                for target in ordered:
+                    current = target
                     await self._one(target, read, result, keys.get(target.radio_id))
+                current = None
         except TimeoutError:
             result.timed_out = True
             self.counters["rounds_timed_out"] += 1
+            if current is not None:
+                # The read in flight was cut: a transient failure (1.49.3),
+                # so it backs off like a timeout of the read itself instead of
+                # being asked again on every poll.
+                key = (current.kind, current.device)
+                if key not in result.answers and key not in result.errors:
+                    state = self.targets.setdefault(key, TargetState())
+                    started = state.last_at
+                    self.counters["read_errors"] += 1
+                    self._failed(
+                        state,
+                        RfReadError(REASON_ROUND_TIMEOUT, unsupported=False),
+                        self._clock() if started is None else started,
+                    )
             for target in targets:
                 key = (target.kind, target.device)
                 if key not in result.answers and key not in result.errors:

@@ -226,3 +226,19 @@ test('errors map from status and code, never from server text', () => {
   assert.equal(e.retry, true);
   assert.doesNotMatch(e.message, /internal/);
 });
+
+test('netdevs over the cap: count per router and a German reason (1.49.3)', async () => {
+  const L = await import('./trafficLogic.ts');
+  const raw = S.overviewReady();
+  raw.routers[0].devices_omitted = 17;
+  const o = parseOverview(raw);
+  assert.equal(o.routers[0].devicesOmitted, 17);
+  assert.equal(parseOverview(S.overviewReady()).routers[0].devicesOmitted, null); // older backend
+  assert.equal(L.devicesOmittedText(17), 'Mehr als 64 Netzwerkgeräte: 17 nicht gemessen');
+  assert.equal(L.devicesOmittedText(1234), 'Mehr als 64 Netzwerkgeräte: 1.234 nicht gemessen');
+  for (const none of [0, null, undefined, -1, Number.NaN]) assert.equal(L.devicesOmittedText(none), null);
+  assert.equal(reasonText('devices_omitted_over_cap'), 'Mehr als 64 Netzwerkgeräte: nicht alle gemessen');
+  assert.match(reasonText('dropped_feeds'), /Flow-Quellen/);
+  raw.drops = { dropped_feeds: 2, dropped_snapshots: 0 };
+  assert.deepEqual(parseOverview(raw).drops, [{ code: 'dropped_feeds', count: 2 }]);
+});

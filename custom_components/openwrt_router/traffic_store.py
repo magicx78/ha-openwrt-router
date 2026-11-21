@@ -58,9 +58,10 @@ from .traffic_const import (
     HISTORY_PART_CLIENT,
     HISTORY_PART_INFRA,
     HISTORY_PART_REST,
+    HISTORY_TRIM_HEADROOM,
     HISTORY_TRIM_ROUNDS,
 )
-from .traffic_history import STORE_COARSE, STORE_FINE, TrafficHistory
+from .traffic_history import RING_KEYS, STORE_COARSE, STORE_FINE, TrafficHistory
 from .traffic_series import INFRA_SCOPES
 
 _LOGGER = logging.getLogger(__name__)
@@ -165,6 +166,7 @@ class TrafficStore:
         """
         fine_section: Any = None
         stored_baselines: Any = None
+        loaded: dict[str, Any] | None = None
         try:
             if self._fine is None:
                 self._fine = core_store.create_store(
@@ -184,6 +186,8 @@ class TrafficStore:
             data = result.data or {}
             fine_section = data.get("history")
             stored_baselines = data.get("baselines")
+            if isinstance(result.data, dict) and result.data:
+                loaded = result.data
         except Exception as err:  # noqa: BLE001 - start without the fine tier
             self.counters["load_failed_fine"] += 1
             _LOGGER.warning(
@@ -197,7 +201,9 @@ class TrafficStore:
             _LOGGER.debug("Traffic baselines not restored (%s)", type(err).__name__)
         self.history = history
         self.baselines = baselines
-        self._last_fine = None
+        # The file as read counts as the last good payload: a first write
+        # over the size limit keeps it instead of writing {} (review T7).
+        self._last_fine = loaded
         return invalid
 
     # -- payloads ------------------------------------------------------------------------
@@ -228,8 +234,23 @@ class TrafficStore:
                 buckets = self.history.bucket_count(store, part)
                 if buckets <= 0:
                     continue
-                per = size / buckets
-                drop = min(buckets, math.ceil((size - budgets.get(part, 0)) / per) + 1)
+                # Bytes per bucket without the fixed bytes of each point (its
+                # identity and marks): with them the estimate trims too little
+                # and every round rebuilds the whole export (review T8).
+                fixed = store_bytes(
+                    store,
+                    {
+                        pid: {k: v for k, v in e.items() if k not in RING_KEYS}
+                        for pid, e in points.items()
+                    },
+                )
+                # The oldest buckets (trimmed first) can be smaller than the
+                # mean, so the mean counts as 10 % less; and the part goes to a
+                # little below its budget: otherwise further rounds (each one
+                # rebuilding the export) and the next writes trim again.
+                per = max(1.0, 0.9 * (size - fixed) / buckets)
+                target = budgets.get(part, 0) * (1.0 - HISTORY_TRIM_HEADROOM)
+                drop = min(buckets, math.ceil((size - target) / per) + 1)
                 if self.history.trim_oldest(store, part, drop):
                     over = True
             if not over:

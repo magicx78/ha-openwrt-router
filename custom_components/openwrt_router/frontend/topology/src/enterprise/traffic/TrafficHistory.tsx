@@ -35,6 +35,8 @@ export function SeriesLine({ chart, utcDays, up = false }: { chart: SeriesChart;
         ))}
         {line.dots.map((d, i) => <circle key={i} className={`wifi-chart__dot${up ? ' trf-chart__dot--up' : ''}`} cx={d.x} cy={d.y} r="1.6" />)}
       </svg>
+      {/* The line spans lowest..highest value, not 0..highest: name the bottom too. */}
+      <div className="wifi-chart__axis wifi-chart__axis--min"><span>niedrigster Wert {fmtBytes(line.min)}</span></div>
       <div className="wifi-chart__axis"><span>{bucketLabel(first, utcDays)}</span><span>{bucketLabel(last, utcDays)}</span></div>
     </li>
   );

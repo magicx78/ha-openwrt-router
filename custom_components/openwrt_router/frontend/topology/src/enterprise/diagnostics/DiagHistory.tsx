@@ -6,7 +6,7 @@
 
 import React from 'react';
 import type { DiagApi, HistorySeries, HistoryView } from './diagnosticsTypes';
-import { NO_VALUE, groupByPoint, historyRows, label, moduleView } from './diagnosticsLogic.ts';
+import { NO_VALUE, groupByPoint, historyRows, label, moduleView, pointName } from './diagnosticsLogic.ts';
 import { ErrorBox, Notice, SectionBox, Skeleton, Unknown, useResource } from './diagUi';
 
 const WINDOW_LABEL: Record<string, string> = { '1h': '1 Std.', '24h': '24 Std.', '7d': '7 Tage', '30d': '30 Tage' };
@@ -17,6 +17,9 @@ function seriesTitle(s: HistorySeries): string {
     .filter(Boolean).join(' · ');
 }
 
+/** Value columns; each cell carries its name for the narrow card layout (1.49.3). */
+const COLUMNS = ['Latenz (Mittel)', 'Jitter', 'Verlust', 'Lücken', 'Abdeckung'] as const;
+
 function SeriesTable({ series, windows }: { series: HistorySeries; windows: string[] }) {
   const title = seriesTitle(series);
   return (
@@ -26,8 +29,8 @@ function SeriesTable({ series, windows }: { series: HistorySeries; windows: stri
         <table className="dg-table" aria-label={`Verlauf ${title}`}>
           <thead>
             <tr>
-              <th scope="col">Zeitraum</th><th scope="col">Latenz (Mittel)</th><th scope="col">Jitter</th>
-              <th scope="col">Verlust</th><th scope="col">Lücken</th><th scope="col">Abdeckung</th>
+              <th scope="col">Zeitraum</th>
+              {COLUMNS.map(c => <th key={c} scope="col">{c}</th>)}
             </tr>
           </thead>
           <tbody>
@@ -35,7 +38,7 @@ function SeriesTable({ series, windows }: { series: HistorySeries; windows: stri
               <tr key={r.window}>
                 <th scope="row">{label(WINDOW_LABEL, r.window)}</th>
                 {[r.latency, r.jitter, r.loss, r.gaps, r.coverage].map((v, i) => (
-                  <td key={i}>{v === NO_VALUE ? <span className="dg-unknown" title="nicht gemessen">{v}</span> : v}</td>
+                  <td key={i} data-label={COLUMNS[i]}>{v === NO_VALUE ? <span className="dg-unknown" title="nicht gemessen">{v}</span> : v}</td>
                 ))}
               </tr>
             ))}
@@ -63,7 +66,7 @@ export function DiagHistory({ api, rev }: { api: DiagApi; rev: number }) {
         {groups.length === 0 && <Unknown text="Noch keine Messreihen vorhanden" />}
         {groups.map((g, i) => (
           <details key={g.point} className="dg-details" open={i === 0}>
-            <summary>{g.point === 'ha' ? 'Home Assistant' : `Router ${g.point}`} ({g.series.length})</summary>
+            <summary>{pointName(g.point)} ({g.series.length})</summary>
             {g.series.map(s => <SeriesTable key={`${s.targetId}|${s.kind}|${s.family}`} series={s} windows={view.windows} />)}
           </details>
         ))}

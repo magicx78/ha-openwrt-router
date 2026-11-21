@@ -497,6 +497,7 @@ def mock_coordinator_data():
         "usage_percent": 7.8,
     }
     data.active_connections = 42
+    data.active_connections_complete = True
     data.features = {
         FEATURE_HAS_IWINFO: True,
         FEATURE_HAS_5GHZ: True,

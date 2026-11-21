@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import itertools
 import logging
 import time
 from collections import OrderedDict, deque
@@ -256,6 +257,28 @@ def _number(value: Any) -> float | None:
 
 def _utc(ts: float) -> datetime:
     return datetime.fromtimestamp(ts, UTC)
+
+
+def _asked_interfaces(interfaces: Any) -> set[str]:
+    """Valid interface names of a read call, bounded (1.49.3).
+
+    None, a string or anything not iterable is no list (no TypeError); at
+    most ``4 x READ_INTERFACES_MAX`` items are looked at, so many invalid or
+    duplicate names cannot keep the loop running.
+    """
+    if interfaces is None or isinstance(interfaces, str | bytes):
+        return set()
+    try:
+        items = iter(interfaces)
+    except TypeError:
+        return set()
+    asked: set[str] = set()
+    for name in itertools.islice(items, 4 * READ_INTERFACES_MAX):
+        if len(asked) >= READ_INTERFACES_MAX:
+            break
+        if isinstance(name, str) and 0 < len(name) <= 64:
+            asked.add(name)
+    return asked
 
 
 class RfCenter:
@@ -930,12 +953,7 @@ class RfCenter:
         oldest = self._readable(router_id, window_s)
         if oldest is None:
             return {}
-        asked: set[str] = set()
-        for name in interfaces if not isinstance(interfaces, str) else ():
-            if len(asked) >= READ_INTERFACES_MAX:
-                break
-            if isinstance(name, str) and 0 < len(name) <= 64:
-                asked.add(name)
+        asked = _asked_interfaces(interfaces)
         out: dict[str, dict[str, Any]] = {}
         for ref, result in list(self.results.items()):
             if ref.router_id != router_id:

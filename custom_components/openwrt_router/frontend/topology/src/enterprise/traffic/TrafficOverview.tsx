@@ -7,7 +7,7 @@
 import React from 'react';
 import type { InterfaceRow, Overview, RateRow, TalkerList } from './trafficTypes';
 import {
-  DASH, FAMILY_LABEL, OFF_HINT, UNKNOWN_RULE, clientLabel, fmtBytes, fmtCount, fmtPct, formatTs, overviewTiles,
+  DASH, FAMILY_LABEL, OFF_HINT, UNKNOWN_RULE, clientLabel, devicesOmittedText, fmtBytes, fmtCount, fmtPct, formatTs, overviewTiles,
   pointLabel, rateParts, reasonText, reasonsText, routerName, sourceStateView, statusView, talkerValue, utcDayNote,
   windowFacts,
 } from './trafficLogic.ts';
@@ -163,6 +163,9 @@ export function TrafficOverview({ overview: o }: { overview: Overview }) {
                 <span>Schnittstellen {fmtCount(r.devices)}</span>
                 <span>WLAN-Stationen {fmtCount(r.stations)}</span>
                 <span>Conntrack {fmtCount(r.conntrackCount)}</span>
+                {devicesOmittedText(r.devicesOmitted) && (
+                  <span className="wifi-muted">{devicesOmittedText(r.devicesOmitted)}</span>
+                )}
               </li>
             ))}
           </ul>

@@ -146,6 +146,7 @@ from .rf_spectrum import (
     txpowers_from_txpowerlist,
 )
 from .rf_utilization import (
+    DEFAULT_MAX_GAP_S,
     SurveySample,
     UnknownReason,
     UtilizationResult,
@@ -405,6 +406,7 @@ def _read_source(
     radio: RadioInput,
     now: float,
     source: str,
+    max_gap_s: float = DEFAULT_MAX_GAP_S,
 ) -> None:
     if sample is None:
         memory.result = UtilizationResult(
@@ -415,7 +417,9 @@ def _read_source(
         )
         memory.noise = None
     else:
-        memory.result = utilization_from_delta(memory.sample, sample)
+        memory.result = utilization_from_delta(
+            memory.sample, sample, max_gap_s=max_gap_s
+        )
         memory.sample = sample
         memory.noise = sample.noise
     memory.at = now
@@ -426,18 +430,22 @@ def _update_counters(memory: RadioMemory, radio: RadioInput, poll: PollInput) ->
     device = radio.primary
     if device is None:
         return False
+    # The allowed gap between two samples follows the real read interval
+    # (1.49.3): with a fixed 600 s, wifi_rf_every_n_polls >= 10 (reads every
+    # 600 s plus the poll time) left the utilization unknown for good.
+    gap = max(DEFAULT_MAX_GAP_S, poll.max_age_s)
     status = poll.answers.get((RF_KIND_GET_STATUS, device))
     if status is not None:
         bss = bss_load_from_get_status(status)
         sample = bss.as_sample(radio.radio_id, poll.now, poll.uptime) if bss else None
-        _read_source(memory.status, sample, radio, poll.now, SOURCE_HOSTAPD_STATUS)
+        _read_source(memory.status, sample, radio, poll.now, SOURCE_HOSTAPD_STATUS, gap)
     survey = poll.answers.get((RF_KIND_SURVEY, device))
     if survey is not None:
         samples = survey_samples_from_iwinfo(
             survey, radio.radio_id, poll.now, poll.uptime, mhz=radio.mhz
         )
         sample = samples[0] if samples and radio.mhz else None
-        _read_source(memory.survey, sample, radio, poll.now, SOURCE_IWINFO_SURVEY)
+        _read_source(memory.survey, sample, radio, poll.now, SOURCE_IWINFO_SURVEY, gap)
     kind = _util_kind(poll.kinds)
     if kind is None:
         return False
@@ -588,18 +596,42 @@ def _signal_stats(
     return mean, min(values), stddev, weak, len(values)
 
 
+def _assoc_fresh(memory: RadioMemory, poll: PollInput) -> bool:
+    return (
+        RF_KIND_ASSOCLIST in poll.kinds
+        and memory.assoc_at is not None
+        and poll.now - memory.assoc_at <= poll.max_age_s
+    )
+
+
+def _counts_retries(memory: RadioMemory, macs: Sequence[str], poll: PollInput) -> bool:
+    """True when a client of this radio had retries > 0 in the window.
+
+    Then the driver demonstrably counts retries, so a 0 of another client on
+    the same radio is a real 0 (1.49.3).
+    """
+    if not _assoc_fresh(memory, poll):
+        return False
+    for mac in macs:
+        retries = memory.assoc_delta.get(mac, (None, None, None))[1]
+        if isinstance(retries, int) and retries > 0:
+            return True
+    return False
+
+
 def _tx_counters(
-    memory: RadioMemory, mac: str, poll: PollInput
+    memory: RadioMemory, mac: str, poll: PollInput, *, counts_retries: bool = False
 ) -> tuple[int | None, int | None, int | None]:
-    if RF_KIND_ASSOCLIST not in poll.kinds or memory.assoc_at is None:
-        return None, None, None
-    if poll.now - memory.assoc_at > poll.max_age_s:
+    if not _assoc_fresh(memory, poll):
         return None, None, None
     packets, retries, failed = memory.assoc_delta.get(mac, (None, None, None))
     # DECIDED: the driver is not in the poll data, and mt76 with WED reports
     # 0 retries for everything. A 0 from an unknown driver is unknown, not a
-    # perfect link (rf_clients treats an mt76 0 the same way).
-    if retries == 0:
+    # perfect link (rf_clients treats an mt76 0 the same way) -- unless
+    # another client of the same radio had retries in the window (1.49.3):
+    # dropping the clean clients made the packet-weighted radio rate far too
+    # high (9 clean + 1 client at 30 % gave 30 % instead of 3 %).
+    if retries == 0 and not counts_retries:
         retries = None
     return packets, retries, failed
 
@@ -613,9 +645,13 @@ def _assessments(
     poll: PollInput,
 ) -> list[ClientAssessment]:
     out = []
-    for mac in macs[:CLIENTS_PER_RADIO_MAX]:
+    counted = macs[:CLIENTS_PER_RADIO_MAX]
+    counts = _counts_retries(memory, counted, poll)
+    for mac in counted:
         mean, low, stddev, weak, samples = _signal_stats(memory.signals.get(mac, ()))
-        packets, retries, failed = _tx_counters(memory, mac, poll)
+        packets, retries, failed = _tx_counters(
+            memory, mac, poll, counts_retries=counts
+        )
         facts = poll.history(mac) if poll.history is not None else None
         window = ClientRfWindow(
             client_mac=mac,

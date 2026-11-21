@@ -86,6 +86,7 @@ from custom_components.openwrt_router.diag_scheduler import (
     DiagJob,
     Outcome,
     RequestStatus,
+    RunRequest,
 )
 from custom_components.openwrt_router.diag_stats import Sample, SeriesKey
 from custom_components.openwrt_router.diag_store import (
@@ -1059,3 +1060,35 @@ def test_diag_events_carry_the_classification_code() -> None:
         kwargs = event.emit_kwargs()
         assert kwargs["classification"] == event.classification
         assert event.classification is not None
+
+
+# --- 1.49.3 review D3: a run the scheduler refuses costs no rate-limit slot ---
+
+
+async def test_d3_refused_manual_runs_do_not_spend_the_guard_limit(
+    disk, core_disks, tmp_path
+) -> None:
+    env = await cm_env(core_disks, tmp_path, options={})
+    diag = await core_diag(env, enabled=True)
+    await diag.async_update_settings(
+        {"targets": [target("t1", "tcp", 443)]}, actor=ADMIN
+    )
+    diag.transport = loopback({}, [])
+    limit = diag.scheduler_config.rate_limit.max_runs
+    real = diag.scheduler.request_run
+    real_refusal = diag.scheduler.refusal
+
+    def queued(*_a: object, **_k: object) -> RunRequest:
+        return RunRequest(RequestStatus.REFUSED_ALREADY_QUEUED)
+
+    # the scheduler says "already queued" (both ways of asking it)
+    diag.scheduler.request_run = queued
+    diag.scheduler.refusal = queued
+    for _ in range(limit + 1):
+        with pytest.raises(ConfigApiError):
+            await diag.async_run_manual(actor=ADMIN)
+    diag.scheduler.request_run = real
+    diag.scheduler.refusal = real_refusal
+    result = await diag.async_run_manual(actor=ADMIN)  # the guard still has room
+    assert result["status"]
+    await release_all(env)

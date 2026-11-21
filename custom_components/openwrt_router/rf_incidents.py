@@ -12,7 +12,8 @@ What goes in, per router and radio, as an observed Wi-Fi event
 - ``rf.channel_busy``: channel utilization sustained high
   (``UtilizationSummary.sustained_overload``);
 - ``rf.retry_high``: the radio's freshly measured retry rate at or above
-  ``LoadThresholds.high_retry_rate``.
+  ``LoadThresholds.high_retry_rate``, with at least ``RETRY_MIN_COVERAGE``
+  of its clients measured (1.49.3).
 
 Events only: no incident type, no rule, no root. So they never open,
 raise, suppress or excuse anything, never change a score (the NI health
@@ -50,6 +51,9 @@ RF_RETRY_KIND: Final = "rf.retry_high"
 RF_EVENT_KINDS: Final = frozenset({RF_CONFLICT_KIND, RF_BUSY_KIND, RF_RETRY_KIND})
 RF_EVENTS_PER_POLL_MAX: Final = 6
 RF_REPEAT_HOLD_S: Final = 3600.0
+# rf.retry_high only when at least this share of the radio's clients has a
+# measured retry rate (1.49.3): a rate of one client in ten is no radio rate.
+RETRY_MIN_COVERAGE: Final = 0.5
 # Keys remembered for the repeat hold (oldest go first beyond this).
 _HELD_MAX: Final = 512
 
@@ -208,6 +212,11 @@ def _retry(result: Any) -> _Candidate | None:
     threshold = DEFAULT_LOAD_THRESHOLDS.high_retry_rate
     if rate is None or rate < threshold:
         return None
+    summary = getattr(result, "client_summary", None)
+    if summary is not None:
+        coverage = getattr(summary, "retry_coverage", None)
+        if not isinstance(coverage, int | float) or coverage < RETRY_MIN_COVERAGE:
+            return None
     return _Candidate(
         ident=(RF_RETRY_KIND, result.ref),
         kind=RF_RETRY_KIND,

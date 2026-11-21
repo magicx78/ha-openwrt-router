@@ -7,7 +7,7 @@
 import React from 'react';
 import type { AnomalyList, TrafficApi } from './trafficTypes';
 import {
-  DASH, FAMILY_LABEL, anomalyKindText, anomalyStateView, clientLabel, durationText, fmtNum, fmtShare, formatTs,
+  FAMILY_LABEL, anomalyKindText, anomalyStateView, anomalyValueText, clientLabel, durationText, fmtShare, formatTs,
   reasonText, routerName, sourceStateView,
 } from './trafficLogic.ts';
 import { CoverageBadge, Fact, Loaded, SectionBox, ShownBadge, Unknown, usePolled } from './trafficUi';
@@ -28,7 +28,7 @@ export function AnomalyView({ list }: { list: AnomalyList }) {
                 </div>
                 <Fact name="Wo">{routerName(a.routerId)}{a.clientRef ? ` · ${clientLabel(a.clientRef)}` : ''}</Fact>
                 <Fact name="Beobachtet / üblich / Schwelle">
-                  {a.observed === null ? DASH : fmtNum(a.observed, 0)} / {a.baselineMedian === null ? DASH : fmtNum(a.baselineMedian, 0)} / {a.threshold === null ? DASH : fmtNum(a.threshold, 0)}
+                  {anomalyValueText(a.kind, a.observed)} / {anomalyValueText(a.kind, a.baselineMedian)} / {anomalyValueText(a.kind, a.threshold)}
                 </Fact>
                 <Fact name="Fenster">{durationText(a.windowS)}</Fact>
                 <Fact name="Sicherheit">{fmtShare(a.confidence)}</Fact>

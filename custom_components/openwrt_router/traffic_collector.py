@@ -37,20 +37,27 @@ and not older than 24 h.
 
 **All or nothing.** A call is checked completely before anything is kept:
 one invalid record rejects the whole call (400 ``records_rejected`` with
-``index`` and a fixed reason per refused record), and a call that would not
+``index`` and a fixed reason per refused record; a ``router_id`` of no
+loaded router with traffic on is ``unknown_router``), and a call that would not
 fit the bounded flow store at once is refused as a whole (503
-``store_full``). Nothing is ever taken in part. Every refusal is counted;
+``store_full``). Nothing is ever taken in part. A call sent again after it
+was accepted (same user, ``sent_at`` and records; the last
+``MAX_CALL_IDS`` calls are remembered) gets the first answer again and is
+not kept twice. Every refusal is counted;
 refusals of the authorisation (wrong user, collector off, plain HTTP) are
 also reported as the core event ``traffic_analytics.collector_rejected``
-(``security_relevant``), at most ``EVENT_BUDGET_PER_HOUR`` per hour.
+(``security_relevant``), at most ``EVENT_BUDGET_PER_HOUR`` per hour for each
+reason and user (at most ``MAX_EVENT_KEYS`` such budgets at once).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
-from collections import Counter, deque
+import os
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
@@ -74,7 +81,14 @@ MAX_DEPTH: Final = 4
 MAX_STRING: Final = 64
 NAME_MAX: Final = 32
 MIN_INTERVAL_S: Final = 10.0
+# Security events per hour and per (reason, user): one signed-in user that
+# keeps knocking cannot use up the budget of a real failed attempt (T4).
 EVENT_BUDGET_PER_HOUR: Final = 10
+# Budget keys held at once (hard bound of the bookkeeping).
+MAX_EVENT_KEYS: Final = 64
+# Ids of accepted calls remembered (user, sent_at, records): a call sent
+# again is confirmed with the first answer and not kept twice (T5).
+MAX_CALL_IDS: Final = 512
 MAX_REJECTED_LISTED: Final = 50
 EVENT_REJECTED: Final = "traffic_analytics.collector_rejected"
 ENVELOPE_FIELDS: Final = frozenset({"schema", "collector", "sent_at", "records"})
@@ -100,6 +114,8 @@ REJECT_AUTH: Final = "authorization_denied"
 REJECT_TRANSPORT: Final = "insecure_transport"
 REJECT_RATE: Final = "rate_limited"
 REJECT_COLLECTOR_OFF: Final = "collector_off"
+# per record: a router id of no loaded router with traffic on (review T2)
+REJECT_UNKNOWN_ROUTER: Final = "unknown_router"
 
 # state of the collector source (panel, capability)
 STATE_OFF: Final = "off"
@@ -163,6 +179,11 @@ def parse_envelope(raw: bytes, *, now: float) -> list[Any]:
 
     Raises :class:`CollectorRejected` (400) with a fixed reason.
     """
+    return _parse_envelope(raw, now=now)[0]
+
+
+def _parse_envelope(raw: bytes, *, now: float) -> tuple[list[Any], float]:
+    """(raw records, sent_at) of the checked envelope (see parse_envelope)."""
     try:
         data = json.loads(raw)
     except (ValueError, UnicodeDecodeError):
@@ -195,13 +216,22 @@ def parse_envelope(raw: bytes, *, now: float) -> list[Any]:
         raise CollectorRejected(400, REJECT_RECORDS_MISSING)
     if len(records) > MAX_RECORDS:
         raise CollectorRejected(400, REJECT_TOO_MANY)
-    return records
+    return records, float(data["sent_at"])
 
 
 def validate_records(
-    records: list[Any], *, now: float, module_key: bytes | None
+    records: list[Any],
+    *,
+    now: float,
+    module_key: bytes | None,
+    known_routers: frozenset[str] | None = None,
 ) -> list[FlowRecord]:
-    """Every record as a FlowRecord, or one refusal for the whole call."""
+    """Every record as a FlowRecord, or one refusal for the whole call.
+
+    ``known_routers``: the router ids a record may name (the loaded routers
+    with traffic on); a record without router id stays allowed. None: no
+    check (pure tests of the schema).
+    """
     out: list[FlowRecord] = []
     rejected: list[tuple[int, str]] = []
     for index, raw in enumerate(records):
@@ -209,11 +239,20 @@ def validate_records(
             rejected.append((index, REJECT_KIND_NOT_SUPPORTED))
             continue
         try:
-            out.append(normalise_collector_flow(raw, now=now, module_key=module_key))
+            flow = normalise_collector_flow(raw, now=now, module_key=module_key)
         except FlowRejected as err:
             rejected.append((index, err.reason))
         except (TypeError, ValueError):
             rejected.append((index, REJECT_BAD_FIELD))
+        else:
+            if (
+                known_routers is not None
+                and flow.router_id is not None
+                and flow.router_id not in known_routers
+            ):
+                rejected.append((index, REJECT_UNKNOWN_ROUTER))
+            else:
+                out.append(flow)
     if rejected:
         raise CollectorRejected(400, REJECT_RECORDS, rejected=rejected)
     return out
@@ -227,7 +266,12 @@ class CollectorIntake:
         self.counters: Counter[str] = Counter()
         self._last_call: float | None = None
         self.last_accepted_wall: float | None = None
-        self._events: deque[float] = deque()
+        # (reason, user pseudonym) -> event times of the last hour
+        self._events: dict[tuple[str, str], deque[float]] = {}
+        # per-run salt: the budget keys are pseudonyms, never a user id
+        self._salt = os.urandom(16)
+        # call id -> answer of the accepted call (bounded, oldest out first)
+        self._call_ids: OrderedDict[bytes, dict[str, Any]] = OrderedDict()
         # ConfigurationApi.emit while the core is bound (None: not published)
         self.emit: Callable[..., Any] | None = None
 
@@ -236,6 +280,7 @@ class CollectorIntake:
         self._last_call = None
         self.last_accepted_wall = None
         self._events.clear()
+        self._call_ids.clear()
 
     # -- checks ------------------------------------------------------------------------
 
@@ -254,18 +299,46 @@ class CollectorIntake:
         self.counters[f"rejected_{reason}"] += 1
         self.counters["rejected_records"] += records
 
-    def auth_refused(self, reason: str, now_wall: float) -> None:
-        """Count a refused authorisation and report it (budgeted event)."""
-        self.refused(reason)
-        while self._events and now_wall - self._events[0] > 3600:
-            self._events.popleft()
-        if len(self._events) >= EVENT_BUDGET_PER_HOUR:
+    def _budget_key(self, reason: str, user_id: Any) -> tuple[str, str]:
+        user = user_id if isinstance(user_id, str) else ""
+        digest = hashlib.blake2s(user.encode(), key=self._salt, digest_size=8)
+        return reason, digest.hexdigest()
+
+    def _within_budget(self, key: tuple[str, str], now_wall: float) -> bool:
+        """True if ``key`` may send one more event this hour (not booked)."""
+        for other in list(self._events):
+            times = self._events[other]
+            while times and now_wall - times[0] > 3600:
+                times.popleft()
+            if not times:
+                del self._events[other]
+        times = self._events.get(key)
+        if times is None:
+            if len(self._events) >= MAX_EVENT_KEYS:
+                self.counters["events_keys_full"] += 1
+                return False
+            return True
+        if len(times) >= EVENT_BUDGET_PER_HOUR:
             self.counters["events_over_budget"] += 1
+            return False
+        return True
+
+    def auth_refused(
+        self, reason: str, now_wall: float, *, user_id: Any = None
+    ) -> None:
+        """Count a refused authorisation and report it (budgeted event).
+
+        The budget is kept per reason and per user (``user_id`` only as a
+        salted pseudonym in memory, never in the event or the counters).
+        """
+        self.refused(reason)
+        key = self._budget_key(reason, user_id)
+        if not self._within_budget(key, now_wall):
             return
         if self.emit is None:
             self.counters["events_not_published"] += 1
             return
-        self._events.append(now_wall)
+        self._events.setdefault(key, deque()).append(now_wall)
         try:
             from .net_events import Severity
 
@@ -293,17 +366,37 @@ class CollectorIntake:
         now_wall: float,
         module_key: bytes | None,
         flows: FlowStore,
+        known_routers: frozenset[str] | None = None,
+        user_id: Any = None,
     ) -> dict[str, Any]:
-        """Check and keep one call (all or nothing); the answer body."""
+        """Check and keep one call (all or nothing); the answer body.
+
+        A call already accepted (same user, ``sent_at`` and records, e.g. a
+        retry after a timeout) is confirmed with its first answer and not
+        kept again (``duplicate_calls``).
+        """
         try:
-            records = parse_envelope(raw, now=now_wall)
+            records, sent_at = _parse_envelope(raw, now=now_wall)
         except CollectorRejected as err:
             self.refused(err.reason)
             raise
+        call_id = self._call_id(user_id, sent_at, records)
+        known = self._call_ids.get(call_id)
+        if known is not None:
+            self.counters["duplicate_calls"] += 1
+            return dict(known)
         try:
-            parsed = validate_records(records, now=now_wall, module_key=module_key)
+            parsed = validate_records(
+                records,
+                now=now_wall,
+                module_key=module_key,
+                known_routers=known_routers,
+            )
         except CollectorRejected as err:
             self.refused(err.reason, records=len(records))
+            unknown = sum(1 for _i, r in err.rejected if r == REJECT_UNKNOWN_ROUTER)
+            if unknown:
+                self.counters["rejected_records_unknown_router"] += unknown
             raise
         if not flows.can_take(parsed, origin=FEED_COLLECTOR, now=now_wall):
             self.refused(REJECT_STORE_FULL, records=len(parsed))
@@ -313,7 +406,21 @@ class CollectorIntake:
         self.counters["accepted_calls"] += 1
         self.counters["accepted_records"] += len(parsed)
         self.last_accepted_wall = now_wall
-        return {"v": 1, "schema": SCHEMA_V1, "accepted": len(parsed), "rejected": []}
+        answer = {"v": 1, "schema": SCHEMA_V1, "accepted": len(parsed), "rejected": []}
+        self._call_ids[call_id] = answer
+        while len(self._call_ids) > MAX_CALL_IDS:
+            self._call_ids.popitem(last=False)
+        return dict(answer)
+
+    def _call_id(self, user_id: Any, sent_at: float, records: list[Any]) -> bytes:
+        """Salted hash of user, ``sent_at`` and the records (canonical JSON)."""
+        digest = hashlib.blake2s(key=self._salt, digest_size=16)
+        user = user_id if isinstance(user_id, str) else ""
+        digest.update(user.encode() + b"\0" + repr(sent_at).encode() + b"\0")
+        digest.update(
+            json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
+        )
+        return digest.digest()
 
     def state(self, *, enabled: bool, now_wall: float, ttl_s: float) -> str:
         """``off`` / ``waiting`` (nothing yet) / ``receiving`` / ``silent``."""

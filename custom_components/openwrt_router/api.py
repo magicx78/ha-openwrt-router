@@ -1001,10 +1001,15 @@ def _count_conntrack_lines(raw: str) -> tuple[int, bool]:
 
     At most CONNTRACK_TABLE_MAX_BYTES are looked at and at most
     CONNTRACK_TABLE_MAX_LINES entries counted. Not complete: a cap reached, a
-    reply of rpcd's procfs read size (CONNTRACK_READ_TRUNCATION_BYTES) or a
-    cut last line; the count is then only a lower bound.
+    reply so close to rpcd's procfs read size that another line might not
+    have fitted (CONNTRACK_READ_TRUNCATION_BYTES, see const.py) or a cut last
+    line; the count is then only a lower bound.
     """
-    complete = len(raw) < CONNTRACK_READ_TRUNCATION_BYTES and raw.endswith("\n")
+    complete = (
+        len(raw) < CONNTRACK_READ_TRUNCATION_BYTES
+        and len(raw.encode("utf-8", "replace")) < CONNTRACK_READ_TRUNCATION_BYTES
+        and raw.endswith("\n")
+    )
     if len(raw) > CONNTRACK_TABLE_MAX_BYTES:
         raw = raw[:CONNTRACK_TABLE_MAX_BYTES]
         complete = False
@@ -4959,7 +4964,9 @@ class OpenWrtAPI:
            lines; bounded (CONNTRACK_TABLE_TIMEOUT_S, CONNTRACK_TABLE_MAX_BYTES,
            CONNTRACK_TABLE_MAX_LINES, see ``_count_conntrack_lines``)
 
-        Returns 0 if neither path is readable (module not loaded or ACL blocked).
+        Returns 0 if neither path is readable (module not loaded or ACL blocked)
+        or the table read timed out; ``last_conntrack_count_complete`` is then
+        None and the callers show "unknown", not 0 (1.49.3).
         ``last_conntrack_count_complete`` tells the callers whether the number
         is the full count (True), a lower bound of a cut-off table read
         (False) or no count at all (None).

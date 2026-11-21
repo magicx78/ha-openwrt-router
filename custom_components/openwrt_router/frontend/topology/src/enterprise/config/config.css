@@ -1,12 +1,16 @@
 /* Configuration Manager tab (enterprise/config). Injected as <style> by
    ConfigManagerView; uses the panel's variables from .topo-app.
    Narrow layout: the router and version lists are size containers, so their
-   rows turn into cards below 600 px of the LIST's width (HA sidebar open,
-   half-screen window); below 600 px of window width everything is one
+   rows turn into cards below 840 px of the LIST's width (the narrowest the
+   router and version columns fit in: 718 / 824 px; HA sidebar open,
+   half-screen window, tablet); below 600 px of window width everything is one
    column with 40 px buttons. No ancestor of the modal is a container (a
    containment context would trap position: fixed). */
 
 .cfg { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+/* Labels and table heads use --text-muted; the panel's 28 % white is about
+   2.5:1 on the cards. Inside the Enterprise tabs it is 50 % (about 5:1). */
+.cfg { --text-muted: rgba(255, 255, 255, 0.5); }
 .cfg-stack { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .cfg-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cfg-header__refresh { margin-left: auto; }
@@ -199,7 +203,7 @@ button.cfg-rrow:focus-visible { outline: 2px solid var(--border-focus); outline-
 .cfg-modal__body { padding: 12px 14px 16px; }
 
 /* Narrow lists: rows become cards */
-@container cfgrows (max-width: 600px) {
+@container cfgrows (max-width: 840px) {
   .cfg-rrow, .cfg-vrow { grid-template-columns: 1fr; gap: 4px; padding: 10px; }
   .cfg-rrow > span, .cfg-vrow > span { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
   .cfg-rrow--head, .cfg-vrow--head { display: none; }

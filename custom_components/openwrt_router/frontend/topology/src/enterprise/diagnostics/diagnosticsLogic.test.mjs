@@ -492,3 +492,12 @@ test('settings update carries only changed, valid fields the backend accepts', (
   const keys = Object.keys(buildSettingsUpdate(s, { ...d, enabled: false, periodic: true, intervalS: '90', haResolverInternal: true }).update);
   assert.deepEqual(keys.sort(), ['enabled', 'ha_resolver_internal', 'interval_s', 'periodic']);
 });
+
+// 1.49.3 browser check P2: the same short router name as in the other tabs.
+test('a router point reads "Router aaaa11", never the full id', async () => {
+  const { pointName } = await import('./diagnosticsLogic.ts');
+  const { routerLabel } = await import('../wifi/wifiLogic.ts');
+  assert.equal(pointName('rtr_aaaa11112222'), 'Router aaaa11');
+  assert.equal(pointName('rtr_aaaa11112222'), routerLabel('rtr_aaaa11112222'));
+  assert.equal(pointName('ha'), 'Home Assistant');
+});

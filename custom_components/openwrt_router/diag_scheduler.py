@@ -453,17 +453,12 @@ class DiagScheduler:
         await self._cancel_tasks([self._detach(jid) for jid in ids])
         return len(ids)
 
-    def request_run(
-        self, job_id: str, *, trigger: Trigger = Trigger.MANUAL
-    ) -> RunRequest:
-        """Ask for an extra run now (manual or event-triggered).
+    def refusal(self, job_id: str) -> RunRequest | None:
+        """The refusal ``request_run`` would answer now, else None (no change).
 
-        Refusals are returned, never raised. An accepted request reserves a
-        rate-limit slot (it is charged when the run starts); a pending
-        periodic run of the same job is upgraded instead of duplicated.
+        Lets a caller check before it spends anything of its own (1.49.3:
+        the manual run charged the guard's rate limit even when refused).
         """
-        if trigger is Trigger.PERIODIC:
-            raise ValueError("periodic runs are scheduled, not requested")
         if self._stopped:
             return RunRequest(RequestStatus.REFUSED_STOPPED)
         job = self._jobs.get(job_id)
@@ -478,6 +473,23 @@ class DiagScheduler:
         if wait is not None:
             _LOGGER.debug("Run of %s refused by rate limit (%.0f s)", job_id, wait)
             return RunRequest(RequestStatus.REFUSED_RATE_LIMIT, retry_after=wait)
+        return None
+
+    def request_run(
+        self, job_id: str, *, trigger: Trigger = Trigger.MANUAL
+    ) -> RunRequest:
+        """Ask for an extra run now (manual or event-triggered).
+
+        Refusals are returned, never raised. An accepted request reserves a
+        rate-limit slot (it is charged when the run starts); a pending
+        periodic run of the same job is upgraded instead of duplicated.
+        """
+        if trigger is Trigger.PERIODIC:
+            raise ValueError("periodic runs are scheduled, not requested")
+        refusal = self.refusal(job_id)
+        if refusal is not None:
+            return refusal
+        current = self._pending.get(job_id)
         completion: asyncio.Future[RunResult] = (
             asyncio.get_running_loop().create_future()
         )

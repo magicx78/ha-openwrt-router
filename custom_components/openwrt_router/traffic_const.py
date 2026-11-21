@@ -229,6 +229,8 @@ REASON_PAUSED: Final = "paused_after_failures"
 REASON_PERMISSION_DENIED: Final = "permission_denied"
 REASON_NOT_CONFIGURED: Final = "not_configured"
 REASON_COVERED_ELSEWHERE: Final = "covered_by_other_module"
+# netdev counters available, but some netdevs over the cap were left out
+REASON_DEVICES_OMITTED: Final = "devices_omitted_over_cap"
 # Why a due extra call did not run (planner).
 BLOCK_DISABLED: Final = "disabled"
 BLOCK_NOT_DUE: Final = "not_due"
@@ -298,6 +300,9 @@ FLOW_TTL_S: Final = 3600.0
 FLOW_TTL_MIN_S: Final = 60.0
 FLOW_TTL_MAX_S: Final = 24 * 3600.0
 MAX_FLOW_QUERY: Final = 200
+# Feeds (origin x router) remembered at once, records or only "last seen"
+# (a collector with ever new router ids must not grow memory, review T2).
+MAX_FLOW_FEEDS: Final = 256
 # Collector record rules (plan §8).
 FLOW_MAX_STRING: Final = 64
 FLOW_MAX_FUTURE_S: Final = 300.0
@@ -659,3 +664,6 @@ HISTORY_BUDGETS: Final = {
 }
 # Trimming a part over budget runs at most this many rounds per save.
 HISTORY_TRIM_ROUNDS: Final = 8
+# A part over budget is trimmed to this share below its budget (review T8:
+# one rebuild of the export instead of several, and not on every write).
+HISTORY_TRIM_HEADROOM: Final = 0.05

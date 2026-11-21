@@ -29,6 +29,7 @@ export function formatBitRate(bps: number | null | undefined): string {
 /** Format a byte counter with decimal (SI) units. */
 export function formatBytes(bytes: number | null | undefined): string {
   if (bytes == null || !Number.isFinite(bytes)) return '—';
+  if (bytes >= 1e12) return `${num(bytes / 1e12, 1)} TB`;
   if (bytes >= 1e9) return `${num(bytes / 1e9, 1)} GB`;
   if (bytes >= 1e6) return `${num(bytes / 1e6, 1)} MB`;
   if (bytes >= 1e3) return `${num(bytes / 1e3)} KB`;

@@ -50,6 +50,11 @@ Rules
 * ``low_confidence`` when ``coverage < MIN_COVERAGE`` (0.5) or the
   observation is shorter than ``MIN_OBSERVATION_S`` (1 h), or there is no
   score at all. The score is still shown.
+* Coverage bounds the score (1.49.3, after the Security Center's
+  ``score_cap``): below ``MIN_SCORE_COVERAGE`` (0.25) the score is ``None``
+  (an access point measured only by "0 restarts" got 100 at 7 % coverage);
+  above it the score is at most :func:`coverage_cap` = ``50 + 50 x
+  coverage``, at most 99 below full coverage, 100 only at full coverage.
 
 Aggregation
 -----------
@@ -120,6 +125,8 @@ DNS_RESPONSE_POINTS: Points = (
 RESTART_POINTS: Points = ((0.0, 100.0), (1.0, 70.0), (3.0, 30.0), (5.0, 0.0))
 
 MIN_COVERAGE = 0.5
+MIN_SCORE_COVERAGE = 0.25
+MAX_PARTIAL_SCORE = 99.0
 MIN_OBSERVATION_S = 3600.0
 NETWORK_WORST_MARGIN = 25.0
 
@@ -297,6 +304,13 @@ def _aggregate(parts: tuple[ComponentResult, ...], observed: float) -> ScoreResu
     )
 
 
+def coverage_cap(coverage: float) -> float:
+    """Highest score allowed at ``coverage`` (0-1; 100 only at full coverage)."""
+    if coverage >= 1.0 - 1e-9:
+        return 100.0
+    return min(MAX_PARTIAL_SCORE, round(50.0 + 50.0 * max(0.0, coverage), 1))
+
+
 def compute_score(inputs: ScoreInputs) -> ScoreResult:
     """Network Quality Score of one scope (router, WAN connection, segment)."""
     parts = tuple(
@@ -306,7 +320,20 @@ def compute_score(inputs: ScoreInputs) -> ScoreResult:
     observed = (
         inputs.observation_seconds if any(p.score is not None for p in parts) else 0.0
     )
-    return _aggregate(parts, observed)
+    result = _aggregate(parts, observed)
+    if result.score is None:
+        return result
+    if result.coverage < MIN_SCORE_COVERAGE:
+        score: float | None = None
+    else:
+        score = min(result.score, coverage_cap(result.coverage))
+    return ScoreResult(
+        score=score,
+        coverage=result.coverage,
+        observation_seconds=result.observation_seconds,
+        low_confidence=_low_confidence(score, result.coverage, observed),
+        components=result.components,
+    )
 
 
 def combine_scores(

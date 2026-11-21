@@ -172,6 +172,8 @@ class Snapshot:
     stale: bool
     wan_device: str | None
     devices: tuple[DeviceCounters, ...] | None
+    # netdevs left out by the caps (coordinator copy and MAX_DEVICES_PER_ROUTER)
+    devices_omitted: int = 0
     port_names: frozenset[str] = frozenset()
     stations: tuple[StationCounters, ...] | None = None
     stations_total: int = 0
@@ -204,13 +206,21 @@ def _bool_or_none(value: Any) -> bool | None:
 
 
 def _devices_from(
-    raw: Any, port_links: Mapping[str, tuple[int | None, str | None]]
-) -> tuple[tuple[DeviceCounters, ...] | None, int]:
+    raw: Any,
+    port_links: Mapping[str, tuple[int | None, str | None]],
+    first: tuple[str | None, ...] = (),
+) -> tuple[tuple[DeviceCounters, ...] | None, int, int]:
+    """(devices, invalid, omitted): at most MAX_DEVICES_PER_ROUTER netdevs,
+    the names in ``first`` (WAN device, uplink ports) before the rest, so the
+    cap never drops the WAN counter; ``omitted`` counts the ones left out."""
     if not isinstance(raw, Mapping) or not raw:
-        return None, 0
+        return None, 0, 0
     out: list[DeviceCounters] = []
     invalid = 0
-    for name in sorted(n for n in raw if isinstance(n, str))[:MAX_DEVICES_PER_ROUTER]:
+    names = sorted(n for n in raw if isinstance(n, str))
+    order = list(dict.fromkeys([*(n for n in first if n in raw), *names]))
+    omitted = max(0, len(order) - MAX_DEVICES_PER_ROUTER)
+    for name in order[:MAX_DEVICES_PER_ROUTER]:
         dev = raw.get(name)
         if not valid_device_name(name) or not isinstance(dev, Mapping):
             invalid += 1
@@ -226,7 +236,7 @@ def _devices_from(
                 carrier=_bool_or_none(dev.get("carrier")),
             )
         )
-    return tuple(out), invalid
+    return tuple(out), invalid, omitted
 
 
 def _port_links(port_stats: Any) -> dict[str, tuple[int | None, str | None]]:
@@ -394,14 +404,20 @@ def snapshot_from_data(
     """
     port_stats = getattr(data, "port_stats", None)
     port_links = _port_links(port_stats)
-    devices, invalid = _devices_from(getattr(data, "device_counters", None), port_links)
     wan = getattr(data, "wan_status", None)
     wan_device = wan.get("l3_device") if isinstance(wan, Mapping) else None
     if not valid_device_name(wan_device):
         wan_device = None
+    uplinks = _uplink_ports(getattr(data, "trunk_port_map", None))
+    devices, invalid, omitted = _devices_from(
+        getattr(data, "device_counters", None),
+        port_links,
+        (wan_device, *sorted(uplinks or ())),
+    )
+    if devices is not None:
+        omitted += as_counter(getattr(data, "device_counters_omitted", 0)) or 0
     stations: tuple[StationCounters, ...] | None = None
     total = without = dropped = 0
-    uplinks = _uplink_ports(getattr(data, "trunk_port_map", None))
     wired: tuple[WiredSighting, ...] | None = None
     wired_dropped = 0
     if module_key is not None:
@@ -430,6 +446,7 @@ def snapshot_from_data(
         stale=getattr(data, "vlans_stale", False) is True,
         wan_device=wan_device,
         devices=devices,
+        devices_omitted=omitted,
         port_names=frozenset(port_links),
         stations=stations,
         stations_total=total,

@@ -15,6 +15,11 @@
 .trf-days { list-style: none; display: flex; flex-direction: column; gap: 2px; padding: 0; margin: 0; min-width: 0; }
 .trf-day { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 12px; min-width: 0; }
 .trf-day__ts { color: var(--text-secondary); flex: 1 1 200px; min-width: 0; }
+/* Facts in grid cells: a 170 px name column left ~50 px for the value, so
+   "40,0 GB" broke inside the number. The value keeps its width and moves
+   under the name when the cell is too narrow. */
+.trf-grid .wifi-fact__name { min-width: 0; }
+.trf-grid .wifi-fact__value { flex: 1 1 auto; }
 
 @media (max-width: 600px) {
   .trf-grid { grid-template-columns: 1fr; }
@@ -25,7 +30,11 @@
 .trf-check { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; line-height: 1.45; min-width: 0; }
 .trf-check input { margin-top: 3px; width: 16px; height: 16px; flex-shrink: 0; }
 .trf-field { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--text-secondary); min-width: 0; }
-.trf-field select { max-width: 100%; min-height: 32px; }
+.trf-field select {
+  max-width: 100%; min-height: 32px; padding: 4px 8px; font: inherit; font-size: 13px;
+  color: var(--text-primary); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-xs);
+}
+.trf-field select:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; }
 .trf-checks { list-style: none; display: flex; flex-direction: column; gap: 4px; padding: 0; margin: 0; min-width: 0; }
 .trf-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 

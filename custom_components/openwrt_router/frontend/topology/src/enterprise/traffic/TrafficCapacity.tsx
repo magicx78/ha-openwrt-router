@@ -9,7 +9,7 @@ import React from 'react';
 import type { CapacityList, CapacityRow, Finding, Recommendations, TrafficApi } from './trafficTypes';
 import {
   CAUSE_TEXT, DASH, INDICATOR_TEXT, RECOMMENDATION_TEXT, VERDICT_TEXT, assessmentView, capacityStateView, codeText,
-  durationText, fmtCount, fmtNum, fmtPct, fmtRate, fmtShare, pointLabel, reasonText, reasonsText, routerName, trendText,
+  durationText, fmtCount, fmtNum, fmtPct, fmtRate, fmtShare, pointLabel, reasonText, reasonsText, routerName, trendText, unitSuffix,
 } from './trafficLogic.ts';
 import { Fact, Loaded, SectionBox, ShownBadge, SourceList, Unknown, V, usePolled } from './trafficUi';
 
@@ -63,8 +63,8 @@ function FindingCard({ f }: { f: Finding }) {
           {f.observations.map((o, i) => (
             <li key={`${o.indicator}-${i}`} className="wifi-row">
               <span className="wifi-row__title">{codeText(INDICATOR_TEXT, o.indicator)}</span>
-              <span>{o.value === null ? <Unknown text={DASH} /> : fmtNum(o.value, 1)}{o.unit ? ` ${o.unit === 'pct' ? '%' : o.unit}` : ''}</span>
-              {o.threshold !== null && <span className="wifi-muted">Schwelle {fmtNum(o.threshold, 1)}</span>}
+              <span>{o.value === null ? <Unknown text={DASH} /> : fmtNum(o.value, 1)}{unitSuffix(o.unit)}</span>
+              {o.threshold !== null && <span className="wifi-muted">Schwelle {fmtNum(o.threshold, 1)}{unitSuffix(o.unit)}</span>}
               {o.elevated && <ShownBadge shown={{ label: 'erhöht', tone: 'warn' }} />}
             </li>
           ))}

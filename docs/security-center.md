@@ -462,7 +462,11 @@ oder unbekannt, wird nichts gelöscht.
 - **Home Assistant:** Der Syslog-Empfänger hat feste Obergrenzen (Zeilenlänge, Raten, Puffer,
   [Abschnitt 5](#5-log-empfang)); zu viele Zeilen werden verworfen und gezählt, nie blockiert.
   Der Speicher ist auf 512 KB begrenzt, die Zeitleiste auf 2000 Einträge, eigene Hinweise auf 100
-  (zwei Quoten zu je 50, davon höchstens 40 WLAN-Hinweise, siehe unten).
+  (zwei Quoten zu je 50, davon höchstens 40 WLAN-Hinweise, siehe unten). Traffic-Notizen
+  (`traffic_indicator`) haben in der Zeitleiste eine eigene Obergrenze von 500 und machen bei
+  voller Zeitleiste zuerst Platz; ein Sicherheitseintrag wird nie von ihnen verdrängt (1.49.3).
+  Für einen neuen Hinweis werden alle Grenzen zuerst berechnet; erledigte Hinweise werden nur
+  gelöscht, wenn der neue Hinweis bleibt (1.49.3).
 - **Zwei feste Quoten statt Verdrängung:** Die 100 Plätze teilen sich in zwei Klassen, die sich
   nie gegenseitig verdrängen. **Höchstens 50** Hinweise kommen vom Syslog-Empfänger (Firewall
   und DNS; die Absender sind per UDP im LAN fälschbar), **höchstens 50** aus allen anderen

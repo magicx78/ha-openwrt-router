@@ -1862,6 +1862,21 @@ class NetDiagnostics:
                 self.counters["manual_refused"] += 1
                 self._emit_manual(verified, "refused_target", kinds, cid)
                 raise error_for_refusal(checked)
+        scheduler = self.scheduler
+        if scheduler is None:
+            raise self._not_available(
+                REASON_SCHEDULER_NOT_RUNNING, "The diagnosis scheduler is not running"
+            )
+        # Ask the scheduler first (1.49.3): the guard records a grant in its
+        # rate limit, so a run the scheduler then refused used to spend a
+        # slot. No await from here to request_run: the answer stays valid.
+        refused = scheduler.refusal(JOB_MANUAL)
+        if refused is not None:
+            self.counters["manual_refused"] += 1
+            self._emit_manual(verified, refused.status.value, kinds, cid)
+            raise error_for_run_request(refused) or self._not_available(
+                "no_completion", "No run"
+            )
         decision = authorize_manual_run(api.guard, verified, None, correlation_id=cid)
         if not decision.approved:
             self.counters["manual_refused"] += 1
@@ -1872,11 +1887,6 @@ class NetDiagnostics:
             action=ACTION_RUN_MANUAL.name,
             router_id=FLEET_ROUTER_ID,
         )
-        scheduler = self.scheduler
-        if scheduler is None:
-            raise self._not_available(
-                REASON_SCHEDULER_NOT_RUNNING, "The diagnosis scheduler is not running"
-            )
         request = scheduler.request_run(JOB_MANUAL)
         error = error_for_run_request(request)
         if error is not None or request.completion is None:

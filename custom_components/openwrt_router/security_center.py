@@ -62,7 +62,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Final
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, callback
@@ -88,6 +88,7 @@ from .const import (
     SEC_SYSLOG_RETRY_SECONDS,
     SEC_TIMELINE_DAYS,
     SEC_TIMELINE_MAX,
+    SEC_TIMELINE_TRAFFIC_MAX,
     SIGNAL_SECURITY_CENTER,
 )
 from .core_errors import AuthorizationError
@@ -820,6 +821,36 @@ def _backup_file(path: Any) -> bool:
     return backup(path)
 
 
+KIND_TRAFFIC_NOTE: Final = "traffic_indicator"
+# What blocks a new hint (SecurityCenter._plan_room).
+_ROOM_WIFI: Final = "wifi_quota"
+_ROOM_CLASS: Final = "class_quota"
+_ROOM_CAP: Final = "cap"
+
+
+def _trim_timeline(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply both timeline caps (1.49.3), oldest first, order kept.
+
+    Traffic notes: at most SEC_TIMELINE_TRAFFIC_MAX. All entries: at most
+    SEC_TIMELINE_MAX, and the room is made by Traffic notes first, so a
+    Traffic note never displaces a security entry.
+    """
+    traffic = sum(1 for t in rows if t.get("kind") == KIND_TRAFFIC_NOTE)
+    drop_traffic = max(0, traffic - SEC_TIMELINE_TRAFFIC_MAX)
+    over = len(rows) - drop_traffic - SEC_TIMELINE_MAX
+    if over > 0:
+        drop_traffic = min(traffic, drop_traffic + over)
+    if drop_traffic:
+        kept = []
+        for row in rows:
+            if drop_traffic and row.get("kind") == KIND_TRAFFIC_NOTE:
+                drop_traffic -= 1
+                continue
+            kept.append(row)
+        rows = kept
+    return rows[-SEC_TIMELINE_MAX:] if len(rows) > SEC_TIMELINE_MAX else rows
+
+
 class SecurityCenter:
     """Fleet-wide Security Center: detectors, trust book, incidents, store."""
 
@@ -1115,7 +1146,7 @@ class SecurityCenter:
             for row in (raw if isinstance(raw, list) else ())
             if isinstance(row, Mapping) and _num(row.get("ts")) is not None
         ]
-        self.timeline = rows[-SEC_TIMELINE_MAX:]
+        self.timeline = _trim_timeline(rows)
 
     def _restore_drifts(self, raw: Any) -> None:
         for item in raw if isinstance(raw, list) else ():
@@ -1670,7 +1701,7 @@ class SecurityCenter:
         self.counters["traffic_indicators"] += 1
         self._timeline(
             hint["ts"],
-            "traffic_indicator",
+            KIND_TRAFFIC_NOTE,
             category="system",
             severity=Severity.INFO,
             router_id=hint["router_id"],
@@ -2374,15 +2405,24 @@ class SecurityCenter:
         # The class comes from the detector's data source (review 4, #1),
         # and so does the Wi-Fi share of the other class (1.46.2).
         from_logs = event.data_source in LOG_DATA_SOURCES
-        if event.data_source == DataSource.WIFI_EVENTS and not self._make_wifi_room():
+        # 1.49.3: all three checks are computed first and hints are deleted
+        # only when the new one is kept; before, the Wi-Fi share could drop
+        # resolved Wi-Fi hints for a hint the full class then refused.
+        blocked, victims = self._plan_room(
+            event.data_source == DataSource.WIFI_EVENTS, from_logs
+        )
+        if blocked == _ROOM_WIFI:
             self._wifi_quota_reached(now)
             return
-        if not self._make_class_room(from_logs):
+        if blocked == _ROOM_CLASS:
             self._quota_reached(from_logs, now)
             return
-        if not self._make_room(from_logs):
+        if blocked == _ROOM_CAP:
             self._cap_reached(now)
             return
+        for victim in victims:
+            self._drop_incident(victim)
+            self.counters["incidents_dropped"] += 1
         inc = self._new_incident(event, scope)
         self.counters["incidents_opened"] += 1
         self._timeline(
@@ -2494,72 +2534,63 @@ class SecurityCenter:
         """The Wi-Fi hints (a share of the other class, 1.46.2)."""
         return [i for i in self.incidents.values() if i.get("from_wifi") is True]
 
-    def _make_wifi_room(self) -> bool:
-        """Room within ``SEC_WIFI_INCIDENT_QUOTA`` for a new Wi-Fi hint.
+    def _plan_room(self, wifi: bool, from_logs: bool) -> tuple[str | None, list[str]]:
+        """Which resolved hints must go for a new hint, or which limit blocks it.
 
-        Resolved Wi-Fi hints go, oldest first, but only if that makes room:
-        an old store above the share (open hints) loses nothing for a hint
-        that would be dropped anyway. Open and confirmed hints never go.
+        Nothing is deleted here. Returns (None, victims in order) when the
+        new hint fits, else (``_ROOM_WIFI`` / ``_ROOM_CLASS`` / ``_ROOM_CAP``,
+        []). The three rules, in this order:
+
+        * Wi-Fi share (``SEC_WIFI_INCIDENT_QUOTA``): resolved Wi-Fi hints go,
+          oldest first, but only if that makes room -- an old store above the
+          share (open hints) loses nothing for a hint that would be dropped.
+        * Class quota (review 4, #1): resolved hints of the new hint's class
+          go, oldest first; blocked if the class is full of open and
+          confirmed hints. The other class is never touched.
+        * ``SEC_INCIDENT_CAP`` (only tight after an old store): resolved
+          hints make room, those of the other class first (it can only be
+          above its quota here); open and confirmed hints never go (review 2,
+          M3).
         """
-        hints = self._wifi_hints()
-        need = len(hints) - SEC_WIFI_INCIDENT_QUOTA + 1
-        if need <= 0:
+        gone: list[str] = []
+
+        def alive(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [i for i in rows if i["id"] not in gone]
+
+        def take_oldest_resolved(rows: Iterable[dict[str, Any]]) -> bool:
+            resolved = [i for i in alive(rows) if i["status"] == STATUS_RESOLVED]
+            if not resolved:
+                return False
+            gone.append(min(resolved, key=lambda i: i["last_seen"])["id"])
             return True
-        resolved = sorted(
-            (i for i in hints if i["status"] == STATUS_RESOLVED),
-            key=lambda i: i["last_seen"],
-        )
-        if len(resolved) < need:
-            return False
-        for victim in resolved[:need]:
-            self._drop_incident(victim["id"])
-            self.counters["incidents_dropped"] += 1
-        return True
+
+        if wifi:
+            hints = self._wifi_hints()
+            need = len(hints) - SEC_WIFI_INCIDENT_QUOTA + 1
+            if need > 0:
+                resolved = sorted(
+                    (i for i in hints if i["status"] == STATUS_RESOLVED),
+                    key=lambda i: i["last_seen"],
+                )
+                if len(resolved) < need:
+                    return _ROOM_WIFI, []
+                gone.extend(i["id"] for i in resolved[:need])
+        quota = SEC_LOG_INCIDENT_QUOTA if from_logs else SEC_OTHER_INCIDENT_QUOTA
+        while len(alive(self._class_hints(from_logs))) >= quota:
+            if not take_oldest_resolved(self._class_hints(from_logs)):
+                return _ROOM_CLASS, []
+        while len(self.incidents) - len(gone) >= SEC_INCIDENT_CAP:
+            if not (
+                take_oldest_resolved(self._class_hints(not from_logs))
+                or take_oldest_resolved(self._class_hints(from_logs))
+            ):
+                return _ROOM_CAP, []
+        return None, gone
 
     def _wifi_quota_reached(self, now: float) -> None:
         """A new Wi-Fi hint found its share full: count it, note it once."""
         self.counters["incidents_wifi_quota_dropped"] += 1
         self._note_once("wifi_quota_reached", now, TEXT_WIFI_QUOTA)
-
-    def _drop_oldest_resolved(self, hints: Iterable[dict[str, Any]]) -> bool:
-        resolved = [i for i in hints if i["status"] == STATUS_RESOLVED]
-        if not resolved:
-            return False
-        victim = min(resolved, key=lambda i: i["last_seen"])
-        self._drop_incident(victim["id"])
-        self.counters["incidents_dropped"] += 1
-        return True
-
-    def _make_class_room(self, from_logs: bool) -> bool:
-        """Room within the quota of the new hint's class (review 4, #1).
-
-        Resolved hints of the class go first, oldest first; False if the
-        class is full of open and confirmed hints (the new one is dropped).
-        The other class is never touched.
-        """
-        quota = SEC_LOG_INCIDENT_QUOTA if from_logs else SEC_OTHER_INCIDENT_QUOTA
-        while len(hints := self._class_hints(from_logs)) >= quota:
-            if not self._drop_oldest_resolved(hints):
-                return False
-        return True
-
-    def _make_room(self, from_logs: bool) -> bool:
-        """Room within ``SEC_INCIDENT_CAP`` (only tight after an old store).
-
-        A store from before the quotas may hold more than its quota in one
-        class; nothing open or confirmed is deleted for that, it heals as
-        those hints are resolved. Until then resolved hints make room, those
-        of the other class first (it can only be above its quota here),
-        oldest first; False if there is none (review 2, M3: open and
-        confirmed hints are never evicted).
-        """
-        while len(self.incidents) >= SEC_INCIDENT_CAP:
-            if not (
-                self._drop_oldest_resolved(self._class_hints(not from_logs))
-                or self._drop_oldest_resolved(self._class_hints(from_logs))
-            ):
-                return False
-        return True
 
     def _cap_reached(self, now: float) -> None:
         """A new hint found no room: count it, note it once per window."""
@@ -2683,7 +2714,7 @@ class SecurityCenter:
                     client_ref=inc.get("client_ref"),
                 )
         cut = now - SEC_TIMELINE_DAYS * _DAY
-        self.timeline = [t for t in self.timeline if t["ts"] >= cut][-SEC_TIMELINE_MAX:]
+        self.timeline = _trim_timeline([t for t in self.timeline if t["ts"] >= cut])
         for key in [k for k, n in self.drifts.items() if now - n.ts > 2 * _DAY]:
             del self.drifts[key]
 
@@ -2728,8 +2759,8 @@ class SecurityCenter:
         if evidence_ref is not None:
             entry["evidence_ref"] = evidence_ref
         self.timeline.append(entry)
-        if len(self.timeline) > SEC_TIMELINE_MAX:
-            del self.timeline[: len(self.timeline) - SEC_TIMELINE_MAX]
+        if kind == KIND_TRAFFIC_NOTE or len(self.timeline) > SEC_TIMELINE_MAX:
+            self.timeline = _trim_timeline(self.timeline)
 
     # -- events ---------------------------------------------------------------------------
 

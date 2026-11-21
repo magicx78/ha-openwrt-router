@@ -49,14 +49,22 @@ ARP_READ_TRUNCATION_BYTES = 4000
 
 # Fallback of api.get_active_connections over /proc/net/nf_conntrack (1.49.1,
 # Traffic Analytics F2 / risk 3): bounded in time, bytes and counted lines.
-# A read of rpcd's procfs size (CONNTRACK_READ_TRUNCATION_BYTES, see above),
+# A read near rpcd's procfs size (CONNTRACK_READ_TRUNCATION_BYTES, below),
 # a cut last line or a cap reached makes the count a lower bound
 # (api.last_conntrack_count_complete is False). Same file/read call as
 # before (no file/exec, whose large output leaks rpcd memory; no new ACL).
 CONNTRACK_TABLE_TIMEOUT_S = 5.0
 CONNTRACK_TABLE_MAX_BYTES = 256 * 1024
 CONNTRACK_TABLE_MAX_LINES = 2048
-CONNTRACK_READ_TRUNCATION_BYTES = ARP_READ_TRUNCATION_BYTES
+# rpcd reads a procfs file with one read() of 4096 bytes and the kernel hands
+# out whole conntrack lines only (190-340 bytes each, more with labels, zone
+# or secctx), so a cut table ends on a newline and is often well below 4000
+# bytes (1.49.3 review: 1170 of 2000 cut tables passed the old check). A reply
+# is cut once it is so large that one more line might not have fitted:
+# 4096 minus the longest line we assume (600 bytes) = 3496 bytes.
+CONNTRACK_RPCD_READ_BYTES = 4096
+CONNTRACK_LINE_MAX_BYTES = 600
+CONNTRACK_READ_TRUNCATION_BYTES = CONNTRACK_RPCD_READ_BYTES - CONNTRACK_LINE_MAX_BYTES
 
 # Server-side rpcd session timeout requested at login.
 # Must be comfortably larger than the client refresh interval
@@ -789,6 +797,11 @@ SEC_INCIDENT_CAP = 100
 # Timeline: at most this many entries, none older than this many days.
 SEC_TIMELINE_MAX = 2000
 SEC_TIMELINE_DAYS = 14
+# Traffic Analytics notes (``traffic_indicator``) in that timeline: at most
+# this many, the oldest goes first (1.49.3). At 20 per hour over 14 days they
+# could reach 6720 and push every security entry out; they never displace a
+# security entry, on overflow they make room first.
+SEC_TIMELINE_TRAFFIC_MAX = 500
 # An open incident without a new finding for this long is resolved.
 SEC_INCIDENT_AUTO_RESOLVE_SECONDS = 86400
 # A drift whose configuration areas are still unknown after this long is
