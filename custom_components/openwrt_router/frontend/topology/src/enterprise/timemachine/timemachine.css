@@ -1,0 +1,75 @@
+/* "Zeitreise" tab (enterprise/timemachine). Builds on config.css and
+   wifi.css (both injected next to this one); only what they lack is here.
+   No own colour scheme: severities use the panel's status colours (info
+   blue, warning amber, critical red); an empty list is neutral, never green.
+   Narrow layout down to 360 px: the filter bar wraps (never scrolls
+   sideways), and below the width a timeline row needs, every mark becomes a
+   card (container query, the Network Diagnostics history pattern). */
+
+.tm { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.tm .cfg-badge { white-space: normal; }
+.tm-stand { color: var(--text-muted); }
+.tm-loading { padding: 4px 0; }
+.tm-off { flex-direction: column; align-items: flex-start; }
+
+/* Filter bar */
+.tm-filters { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.tm-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.tm-filter__name { flex: 0 0 6.5em; font-size: 11.5px; color: var(--text-secondary); }
+.tm-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; flex: 1 1 260px; }
+.tm-chip { max-width: 100%; white-space: normal; text-align: left; }
+.tm-chip:disabled { cursor: not-allowed; opacity: 0.55; border-style: dashed; }
+.tm-chip__note { font-weight: 500; color: var(--text-muted); }
+.tm-count { font-size: 12px; color: var(--text-secondary); }
+.tm-field select {
+  max-width: 100%; min-width: 0; min-height: 32px; padding: 4px 8px; font: inherit; font-size: 13px;
+  color: var(--text-primary); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-xs);
+}
+.tm-field select:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; }
+
+/* Sources row */
+.tm-sources { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 0; margin: 0; min-width: 0; }
+.tm-pill { font-weight: 500; }
+.tm-pill__name { font-weight: 700; }
+
+/* Timeline */
+.tm-list { display: flex; flex-direction: column; gap: 10px; min-width: 0; container: tmlist / inline-size; }
+.tm-day { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.tm-day__title { margin: 0; }
+.tm-rows { list-style: none; display: flex; flex-direction: column; gap: 4px; padding: 0; margin: 0; min-width: 0; }
+.tm-mark {
+  display: grid; align-items: baseline; gap: 4px 12px; padding: 7px 10px; min-width: 0;
+  grid-template-columns: 5em 6.5em 8.5em minmax(0, 1fr) 9em 9.5em;
+  border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03); font-size: 12.5px;
+}
+.tm-mark > * { min-width: 0; }
+.tm-mark__time { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.tm-mark__group { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.tm-mark__main { display: flex; flex-direction: column; gap: 1px; }
+.tm-mark__title { color: var(--text-primary); font-weight: 600; }
+.tm-mark__params { color: var(--text-secondary); font-size: 12px; }
+.tm-mark__router { color: var(--text-primary); }
+.tm-mark__source { color: var(--text-secondary); }
+.tm-sev { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; }
+.tm-sev__dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: currentColor; }
+.tm-sev--info { color: #93c5fd; }
+.tm-sev--warn { color: var(--amber); }
+.tm-sev--critical { color: var(--red); }
+.tm-more { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+/* Narrow (below the six columns' width): each mark is a card. Line 1 time,
+   severity and group; line 2 title; line 3 parameters; line 4 router and
+   source. */
+@container tmlist (max-width: 720px) {
+  .tm-mark { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; padding: 8px 10px; }
+  .tm-mark__main { flex: 1 1 100%; gap: 3px; }
+  .tm-mark__router { flex: 0 1 auto; }
+  .tm-mark__source { flex: 1 1 auto; }
+}
+
+@media (max-width: 600px) {
+  .tm-filter__name { flex-basis: 100%; }
+  .tm-chip { min-height: 40px; flex: 1 1 auto; }
+  .tm-field select { min-height: 40px; width: 100%; }
+  .tm-more .cfg-btn { flex: 1 1 100%; min-height: 40px; }
+}

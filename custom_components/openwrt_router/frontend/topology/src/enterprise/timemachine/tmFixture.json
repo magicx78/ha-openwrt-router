@@ -1,0 +1,1608 @@
+{
+ "admin": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "generated_at": 1795010701.0,
+   "window": {
+    "from": 1794999901.0,
+    "until": 1795089901.0
+   },
+   "marks": [
+    {
+     "id": "tmm_147bf5963cd339c7",
+     "ts": 1795003801.0,
+     "source": "ni_incidents",
+     "kind": "incident_opened",
+     "group": "disruption",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_incidents.wan_down",
+     "text": null,
+     "params": {
+      "affected": 0,
+      "occurrences": 3,
+      "reopen_count": 2,
+      "children": 0
+     },
+     "ref": {
+      "module": "network_intelligence",
+      "type": "incident",
+      "id": "inc-1",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_d11287620d5851c9",
+     "ts": 1795003801.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_f179c3c59ddab343",
+     "ts": 1795003741.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.up",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_63266eeb30470ab8",
+     "ts": 1795003681.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_82a95bd3136d2c0e",
+     "ts": 1795003621.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.up",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_83f80868f6a7a771",
+     "ts": 1795003561.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_c25b8d5c6c3caa4a",
+     "ts": 1795003561.0,
+     "source": "ni_incidents",
+     "kind": "incident_opened",
+     "group": "disruption",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_incidents.wan_down",
+     "text": null,
+     "params": {
+      "affected": 0,
+      "occurrences": 3,
+      "reopen_count": 2,
+      "children": 0
+     },
+     "ref": {
+      "module": "network_intelligence",
+      "type": "incident",
+      "id": "inc-1",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_0fe69e867c642243",
+     "ts": 1795003501.0,
+     "source": "security_timeline",
+     "kind": "security_incident",
+     "group": "disruption",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "security_timeline.incident_opened",
+     "text": "Segmentierungsrelevante Konfigurationsänderung",
+     "params": {},
+     "ref": {
+      "module": "security_center",
+      "type": "incident",
+      "id": "sec_30b1c9a2da783d8f",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_1bffe31d38070b4c",
+     "ts": 1795003501.0,
+     "source": "core_audit",
+     "kind": "config_drift",
+     "group": "configuration",
+     "severity": "warning",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.configuration.drift_detected",
+     "text": null,
+     "params": {
+      "changes": 1,
+      "critical_count": 0,
+      "unknown_count": 0,
+      "not_compared_count": 0
+     },
+     "ref": {
+      "module": "core_audit",
+      "type": "drift",
+      "id": "evt_0000000000000000000000000000000b",
+      "version_id": "bkp_00000000000000000000000000000007"
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_3af7933a663196ab",
+     "ts": 1795003501.0,
+     "source": "core_audit",
+     "kind": "config_event",
+     "group": "configuration",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.configuration.backup_created",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000012",
+      "version_id": "bkp_00000000000000000000000000000011"
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_4bbbf0bebb0a9c24",
+     "ts": 1795003501.0,
+     "source": "core_audit",
+     "kind": "security_event",
+     "group": "security",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.security.authorization_granted",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_0000000000000000000000000000000f",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_4eeda24523159dd9",
+     "ts": 1795003501.0,
+     "source": "security_timeline",
+     "kind": "config_drift",
+     "group": "configuration",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "security_timeline.drift",
+     "text": "Konfigurationsänderung erkannt",
+     "params": {},
+     "ref": {
+      "module": "security_center",
+      "type": "drift",
+      "id": "drift_242f0429fddcdfed",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_6808677733657618",
+     "ts": 1795003501.0,
+     "source": "config_versions",
+     "kind": "config_version",
+     "group": "configuration",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "config_versions.drift.ok",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "config_manager",
+      "type": "version",
+      "id": "bkp_00000000000000000000000000000011",
+      "version_id": "bkp_00000000000000000000000000000011"
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_6bf747759baa2656",
+     "ts": 1795003501.0,
+     "source": "core_audit",
+     "kind": "security_event",
+     "group": "security",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.security.authorization_consumed",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000010",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_b8efd31c0c419c35",
+     "ts": 1795003501.0,
+     "source": "core_audit",
+     "kind": "security_incident",
+     "group": "disruption",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.security_center.vlan_segmentation_drift",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000014",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_40a0bd74a2e26cad",
+     "ts": 1795003200.0,
+     "source": "core_audit",
+     "kind": "registry_event",
+     "group": "administration",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.router.capabilities_changed",
+     "text": null,
+     "params": {
+      "changes": 10
+     },
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000009",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_56121c514881b083",
+     "ts": 1795003200.0,
+     "source": "core_audit",
+     "kind": "config_event",
+     "group": "configuration",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.configuration.backup_created",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000008",
+      "version_id": "bkp_00000000000000000000000000000007"
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_819d1367c5ecbd65",
+     "ts": 1795003200.0,
+     "source": "config_versions",
+     "kind": "config_version",
+     "group": "configuration",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "config_versions.manual.ok",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "config_manager",
+      "type": "version",
+      "id": "bkp_00000000000000000000000000000007",
+      "version_id": "bkp_00000000000000000000000000000007"
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_9bf906d558de7904",
+     "ts": 1795003200.0,
+     "source": "core_audit",
+     "kind": "security_event",
+     "group": "security",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.security.authorization_granted",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000005",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_c494760d98df3f2c",
+     "ts": 1795003200.0,
+     "source": "core_audit",
+     "kind": "security_event",
+     "group": "security",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.security.authorization_consumed",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000006",
+      "version_id": null
+     },
+     "derived": false
+    }
+   ],
+   "sources": [
+    {
+     "id": "core_audit",
+     "state": "ok",
+     "reason": null,
+     "count": 9,
+     "oldest": 1795003200.0,
+     "truncated": false
+    },
+    {
+     "id": "config_versions",
+     "state": "ok",
+     "reason": null,
+     "count": 2,
+     "oldest": 1795003200.0,
+     "truncated": false
+    },
+    {
+     "id": "ni_events",
+     "state": "ok",
+     "reason": null,
+     "count": 5,
+     "oldest": 1795003561.0,
+     "truncated": false
+    },
+    {
+     "id": "ni_incidents",
+     "state": "ok",
+     "reason": null,
+     "count": 2,
+     "oldest": 1795003561.0,
+     "truncated": false
+    },
+    {
+     "id": "security_timeline",
+     "state": "ok",
+     "reason": null,
+     "count": 2,
+     "oldest": 1795003501.0,
+     "truncated": false
+    }
+   ],
+   "omitted_client_marks": 1,
+   "truncated": false,
+   "next_until": null
+  }
+ },
+ "admin_page1": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "generated_at": 1795010701.0,
+   "window": {
+    "from": 1794999901.0,
+    "until": 1795089901.0
+   },
+   "marks": [
+    {
+     "id": "tmm_147bf5963cd339c7",
+     "ts": 1795003801.0,
+     "source": "ni_incidents",
+     "kind": "incident_opened",
+     "group": "disruption",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_incidents.wan_down",
+     "text": null,
+     "params": {
+      "affected": 0,
+      "occurrences": 3,
+      "reopen_count": 2,
+      "children": 0
+     },
+     "ref": {
+      "module": "network_intelligence",
+      "type": "incident",
+      "id": "inc-1",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_d11287620d5851c9",
+     "ts": 1795003801.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_f179c3c59ddab343",
+     "ts": 1795003741.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.up",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_63266eeb30470ab8",
+     "ts": 1795003681.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_82a95bd3136d2c0e",
+     "ts": 1795003621.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.up",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    }
+   ],
+   "sources": [
+    {
+     "id": "core_audit",
+     "state": "ok",
+     "reason": null,
+     "count": 0,
+     "oldest": 1795003200.0,
+     "truncated": false
+    },
+    {
+     "id": "config_versions",
+     "state": "ok",
+     "reason": null,
+     "count": 0,
+     "oldest": 1795003200.0,
+     "truncated": false
+    },
+    {
+     "id": "ni_events",
+     "state": "ok",
+     "reason": null,
+     "count": 4,
+     "oldest": 1795003561.0,
+     "truncated": false
+    },
+    {
+     "id": "ni_incidents",
+     "state": "ok",
+     "reason": null,
+     "count": 1,
+     "oldest": 1795003561.0,
+     "truncated": false
+    },
+    {
+     "id": "security_timeline",
+     "state": "ok",
+     "reason": null,
+     "count": 0,
+     "oldest": 1795003501.0,
+     "truncated": false
+    }
+   ],
+   "omitted_client_marks": 1,
+   "truncated": true,
+   "next_until": 1795003621.0
+  }
+ },
+ "admin_page2": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "generated_at": 1795010701.0,
+   "window": {
+    "from": 1794999901.0,
+    "until": 1795003621.0
+   },
+   "marks": [
+    {
+     "id": "tmm_83f80868f6a7a771",
+     "ts": 1795003561.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_c25b8d5c6c3caa4a",
+     "ts": 1795003561.0,
+     "source": "ni_incidents",
+     "kind": "incident_opened",
+     "group": "disruption",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_incidents.wan_down",
+     "text": null,
+     "params": {
+      "affected": 0,
+      "occurrences": 3,
+      "reopen_count": 2,
+      "children": 0
+     },
+     "ref": {
+      "module": "network_intelligence",
+      "type": "incident",
+      "id": "inc-1",
+      "version_id": null
+     },
+     "derived": false
+    }
+   ],
+   "sources": [
+    {
+     "id": "core_audit",
+     "state": "ok",
+     "reason": null,
+     "count": 0,
+     "oldest": 1795003200.0,
+     "truncated": false
+    },
+    {
+     "id": "config_versions",
+     "state": "ok",
+     "reason": null,
+     "count": 0,
+     "oldest": 1795003200.0,
+     "truncated": false
+    },
+    {
+     "id": "ni_events",
+     "state": "ok",
+     "reason": null,
+     "count": 1,
+     "oldest": 1795003561.0,
+     "truncated": false
+    },
+    {
+     "id": "ni_incidents",
+     "state": "ok",
+     "reason": null,
+     "count": 1,
+     "oldest": 1795003561.0,
+     "truncated": false
+    },
+    {
+     "id": "security_timeline",
+     "state": "ok",
+     "reason": null,
+     "count": 0,
+     "oldest": 1795003501.0,
+     "truncated": false
+    }
+   ],
+   "omitted_client_marks": 0,
+   "truncated": true,
+   "next_until": 1795003561.0
+  }
+ },
+ "empty": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "generated_at": 1795010701.0,
+   "window": {
+    "from": 1794139501.0,
+    "until": 1794225901.0
+   },
+   "marks": [],
+   "sources": [
+    {
+     "id": "core_audit",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    },
+    {
+     "id": "config_versions",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    },
+    {
+     "id": "ni_events",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    },
+    {
+     "id": "ni_incidents",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    },
+    {
+     "id": "security_timeline",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    }
+   ],
+   "omitted_client_marks": 0,
+   "truncated": false,
+   "next_until": null
+  }
+ },
+ "partial": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "partial",
+   "generated_at": 1795010701.0,
+   "window": {
+    "from": 1794999901.0,
+    "until": 1795089901.0
+   },
+   "marks": [
+    {
+     "id": "tmm_147bf5963cd339c7",
+     "ts": 1795003801.0,
+     "source": "ni_incidents",
+     "kind": "incident_opened",
+     "group": "disruption",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_incidents.wan_down",
+     "text": null,
+     "params": {
+      "affected": 0,
+      "occurrences": 3,
+      "reopen_count": 2,
+      "children": 0
+     },
+     "ref": {
+      "module": "network_intelligence",
+      "type": "incident",
+      "id": "inc-1",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_d11287620d5851c9",
+     "ts": 1795003801.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_f179c3c59ddab343",
+     "ts": 1795003741.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.up",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_63266eeb30470ab8",
+     "ts": 1795003681.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_82a95bd3136d2c0e",
+     "ts": 1795003621.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.up",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_83f80868f6a7a771",
+     "ts": 1795003561.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_c25b8d5c6c3caa4a",
+     "ts": 1795003561.0,
+     "source": "ni_incidents",
+     "kind": "incident_opened",
+     "group": "disruption",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_incidents.wan_down",
+     "text": null,
+     "params": {
+      "affected": 0,
+      "occurrences": 3,
+      "reopen_count": 2,
+      "children": 0
+     },
+     "ref": {
+      "module": "network_intelligence",
+      "type": "incident",
+      "id": "inc-1",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_1bffe31d38070b4c",
+     "ts": 1795003501.0,
+     "source": "core_audit",
+     "kind": "config_drift",
+     "group": "configuration",
+     "severity": "warning",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.configuration.drift_detected",
+     "text": null,
+     "params": {
+      "changes": 1,
+      "critical_count": 0,
+      "unknown_count": 0,
+      "not_compared_count": 0
+     },
+     "ref": {
+      "module": "core_audit",
+      "type": "drift",
+      "id": "evt_0000000000000000000000000000000b",
+      "version_id": "bkp_00000000000000000000000000000007"
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_3af7933a663196ab",
+     "ts": 1795003501.0,
+     "source": "core_audit",
+     "kind": "config_event",
+     "group": "configuration",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.configuration.backup_created",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000012",
+      "version_id": "bkp_00000000000000000000000000000011"
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_4bbbf0bebb0a9c24",
+     "ts": 1795003501.0,
+     "source": "core_audit",
+     "kind": "security_event",
+     "group": "security",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.security.authorization_granted",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_0000000000000000000000000000000f",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_6808677733657618",
+     "ts": 1795003501.0,
+     "source": "config_versions",
+     "kind": "config_version",
+     "group": "configuration",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "config_versions.drift.ok",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "config_manager",
+      "type": "version",
+      "id": "bkp_00000000000000000000000000000011",
+      "version_id": "bkp_00000000000000000000000000000011"
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_6bf747759baa2656",
+     "ts": 1795003501.0,
+     "source": "core_audit",
+     "kind": "security_event",
+     "group": "security",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.security.authorization_consumed",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000010",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_b8efd31c0c419c35",
+     "ts": 1795003501.0,
+     "source": "core_audit",
+     "kind": "security_incident",
+     "group": "disruption",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.security_center.vlan_segmentation_drift",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000014",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_40a0bd74a2e26cad",
+     "ts": 1795003200.0,
+     "source": "core_audit",
+     "kind": "registry_event",
+     "group": "administration",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.router.capabilities_changed",
+     "text": null,
+     "params": {
+      "changes": 10
+     },
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000009",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_56121c514881b083",
+     "ts": 1795003200.0,
+     "source": "core_audit",
+     "kind": "config_event",
+     "group": "configuration",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.configuration.backup_created",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000008",
+      "version_id": "bkp_00000000000000000000000000000007"
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_819d1367c5ecbd65",
+     "ts": 1795003200.0,
+     "source": "config_versions",
+     "kind": "config_version",
+     "group": "configuration",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "config_versions.manual.ok",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "config_manager",
+      "type": "version",
+      "id": "bkp_00000000000000000000000000000007",
+      "version_id": "bkp_00000000000000000000000000000007"
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_9bf906d558de7904",
+     "ts": 1795003200.0,
+     "source": "core_audit",
+     "kind": "security_event",
+     "group": "security",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.security.authorization_granted",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000005",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_c494760d98df3f2c",
+     "ts": 1795003200.0,
+     "source": "core_audit",
+     "kind": "security_event",
+     "group": "security",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "core_audit.security.authorization_consumed",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "core_audit",
+      "type": "event",
+      "id": "evt_00000000000000000000000000000006",
+      "version_id": null
+     },
+     "derived": false
+    }
+   ],
+   "sources": [
+    {
+     "id": "core_audit",
+     "state": "ok",
+     "reason": null,
+     "count": 9,
+     "oldest": 1795003200.0,
+     "truncated": false
+    },
+    {
+     "id": "config_versions",
+     "state": "ok",
+     "reason": null,
+     "count": 2,
+     "oldest": 1795003200.0,
+     "truncated": false
+    },
+    {
+     "id": "ni_events",
+     "state": "ok",
+     "reason": null,
+     "count": 5,
+     "oldest": 1795003561.0,
+     "truncated": false
+    },
+    {
+     "id": "ni_incidents",
+     "state": "ok",
+     "reason": null,
+     "count": 2,
+     "oldest": 1795003561.0,
+     "truncated": false
+    },
+    {
+     "id": "security_timeline",
+     "state": "unreadable",
+     "reason": "error",
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    }
+   ],
+   "omitted_client_marks": 1,
+   "truncated": false,
+   "next_until": null
+  }
+ },
+ "partial_empty": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "partial",
+   "generated_at": 1795010701.0,
+   "window": {
+    "from": 1794139501.0,
+    "until": 1794225901.0
+   },
+   "marks": [],
+   "sources": [
+    {
+     "id": "core_audit",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    },
+    {
+     "id": "config_versions",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    },
+    {
+     "id": "ni_events",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    },
+    {
+     "id": "ni_incidents",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    },
+    {
+     "id": "security_timeline",
+     "state": "unreadable",
+     "reason": "error",
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    }
+   ],
+   "omitted_client_marks": 0,
+   "truncated": false,
+   "next_until": null
+  }
+ },
+ "bad_request": {
+  "status": 400,
+  "body": {
+   "message": "The request is not valid",
+   "code": "invalid_request",
+   "details": {
+    "field": "kind",
+    "reason": "unknown"
+   }
+  }
+ },
+ "user": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "generated_at": 1795010701.0,
+   "window": {
+    "from": 1794999901.0,
+    "until": 1795089901.0
+   },
+   "marks": [
+    {
+     "id": "tmm_147bf5963cd339c7",
+     "ts": 1795003801.0,
+     "source": "ni_incidents",
+     "kind": "incident_opened",
+     "group": "disruption",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_incidents.wan_down",
+     "text": null,
+     "params": {
+      "affected": 0,
+      "occurrences": 3,
+      "reopen_count": 2,
+      "children": 0
+     },
+     "ref": {
+      "module": "network_intelligence",
+      "type": "incident",
+      "id": "inc-1",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_d11287620d5851c9",
+     "ts": 1795003801.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_f179c3c59ddab343",
+     "ts": 1795003741.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.up",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_63266eeb30470ab8",
+     "ts": 1795003681.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_82a95bd3136d2c0e",
+     "ts": 1795003621.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.up",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_83f80868f6a7a771",
+     "ts": 1795003561.0,
+     "source": "ni_events",
+     "kind": "wan_event",
+     "group": "infrastructure",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_events.wan.down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "network_intelligence",
+      "type": "event",
+      "id": null,
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_c25b8d5c6c3caa4a",
+     "ts": 1795003561.0,
+     "source": "ni_incidents",
+     "kind": "incident_opened",
+     "group": "disruption",
+     "severity": "critical",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "ni_incidents.wan_down",
+     "text": null,
+     "params": {
+      "affected": 0,
+      "occurrences": 3,
+      "reopen_count": 2,
+      "children": 0
+     },
+     "ref": {
+      "module": "network_intelligence",
+      "type": "incident",
+      "id": "inc-1",
+      "version_id": null
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_0fe69e867c642243",
+     "ts": 1795003501.0,
+     "source": "security_timeline",
+     "kind": "security_incident",
+     "group": "disruption",
+     "severity": "info",
+     "router_id": "rtr_6ba53924ad345c0185f36fe5f554130d",
+     "router_name": "Router e1",
+     "fleet": false,
+     "title_key": "security_timeline.incident_opened",
+     "text": "Segmentierungsrelevante Konfigurationsänderung",
+     "params": {},
+     "ref": {
+      "module": "security_center",
+      "type": "incident",
+      "id": "sec_30b1c9a2da783d8f",
+      "version_id": null
+     },
+     "derived": false
+    }
+   ],
+   "sources": [
+    {
+     "id": "core_audit",
+     "state": "off",
+     "reason": "admin_only",
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    },
+    {
+     "id": "config_versions",
+     "state": "off",
+     "reason": "admin_only",
+     "count": 0,
+     "oldest": null,
+     "truncated": false
+    },
+    {
+     "id": "ni_events",
+     "state": "ok",
+     "reason": null,
+     "count": 5,
+     "oldest": 1795003561.0,
+     "truncated": false
+    },
+    {
+     "id": "ni_incidents",
+     "state": "ok",
+     "reason": null,
+     "count": 2,
+     "oldest": 1795003561.0,
+     "truncated": false
+    },
+    {
+     "id": "security_timeline",
+     "state": "ok",
+     "reason": null,
+     "count": 1,
+     "oldest": 1795003501.0,
+     "truncated": false
+    }
+   ],
+   "omitted_client_marks": 0,
+   "truncated": false,
+   "next_until": null
+  }
+ },
+ "off": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "off",
+   "generated_at": 1795010701.0,
+   "window": {
+    "from": null,
+    "until": null
+   },
+   "marks": [],
+   "sources": [],
+   "omitted_client_marks": 0,
+   "truncated": false,
+   "next_until": null
+  }
+ }
+}
