@@ -37,9 +37,9 @@ function Chart({ radio, series }: { radio: TimelineRadio; series: string }) {
         <Unknown text={`${DASH} keine Daten in diesem Fenster`} />
       ) : (
         <>
+          {/* max. above the line's top edge, min. below its bottom edge (the scale is min..max). */}
           <div className="wifi-chart__axis">
             <span>max. {line.max === null ? DASH : fmtValue(line.max, info.kind)}</span>
-            <span>min. {line.min === null ? DASH : fmtValue(line.min, info.kind)}</span>
           </div>
           <svg className="wifi-chart__svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={name}>
             <rect x="0" y="0" width={W} height={H} className="wifi-chart__bg" />
@@ -48,6 +48,9 @@ function Chart({ radio, series }: { radio: TimelineRadio; series: string }) {
             ))}
             {line.dots.map((d, i) => <circle key={`d${i}`} cx={d.x} cy={d.y} r="1.8" className="wifi-chart__dot" />)}
           </svg>
+          <div className="wifi-chart__axis wifi-chart__axis--min">
+            <span>min. {line.min === null ? DASH : fmtValue(line.min, info.kind)}</span>
+          </div>
           <div className="wifi-chart__axis">
             <span>{formatTs(first)}</span>
             <span>{formatTs(last)}</span>

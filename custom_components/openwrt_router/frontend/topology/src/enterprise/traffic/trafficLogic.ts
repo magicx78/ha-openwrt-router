@@ -1096,6 +1096,22 @@ export function anomalyKindText(kind: string): string {
   return `Code ${scrub(kind)}`;
 }
 
+/** Unit of an anomaly's observed / usual / threshold values (traffic_anomaly.py):
+ *  `<dir>_volume` compares daily byte volumes, every other traffic kind a rate
+ *  in bit/s. An unknown kind keeps the bare number (no guessed unit). */
+export function anomalyValueText(kind: string, value: number | null): string {
+  if (value === null) return DASH;
+  const dir = /^(download|upload|rx|tx)_(.+)$/.exec(kind);
+  if (dir && dir[2] === 'volume') return fmtBytes(value);
+  if (dir && ['spike', 'night_activity', 'sustained_high', 'drop', 'bursts'].includes(dir[2])) return fmtRate(value);
+  return fmtNum(value, 0);
+}
+
+/** " %", " ms" … after an observation value or its threshold; '' without a unit. */
+export function unitSuffix(unit: string | null): string {
+  return unit ? ` ${unit === 'pct' ? '%' : unit}` : '';
+}
+
 export const FAMILY_LABEL: Record<string, string> = {
   spikes: 'Spitzen', sustained_high: 'Dauerlast', sudden_drop: 'Plötzlicher Abfall', night_activity: 'Nachtaktivität',
   repeated_bursts: 'Wiederholte Spitzen', client_volume: 'Datenmenge je Client', connection_rate: 'Verbindungsrate',

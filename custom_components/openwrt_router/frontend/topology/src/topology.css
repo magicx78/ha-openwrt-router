@@ -63,6 +63,9 @@
   flex-direction: row;   /* sidebar | main */
   background: var(--bg);
   color: var(--text-primary);
+  /* The panel is always dark: native controls (select, checkbox, radio,
+     scrollbars) must not follow a light Home Assistant theme. */
+  color-scheme: dark;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   position: relative;  /* detail-panel anchors here */
@@ -4017,6 +4020,11 @@ button.diag-table__row:hover { background: var(--surface-hover); }
 .ent-tab:hover { color: var(--text-primary); }
 .ent-tab:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
 .ent-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+
+@media (max-width: 600px) {
+  /* Touch target like the other 40 px buttons of the Enterprise tabs. */
+  .ent-tab { min-height: 40px; }
+}
 
 @media (max-width: 420px) {
   .ent.topo-view { padding: 12px 10px; }

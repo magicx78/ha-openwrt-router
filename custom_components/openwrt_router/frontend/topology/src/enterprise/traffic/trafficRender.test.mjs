@@ -266,3 +266,36 @@ test('non-administrators get no settings section; the tab never loads it for the
   assert.ok(!seen.includes('settings') && !seen.includes('collectorUsers') && !seen.includes('updateSettings'));
   assert.ok(!M.sectionsFor(false).some(s => s.id === 'settings'));
 });
+
+// ── Browser check 1.49.2 ─────────────────────────────────────────────────
+
+test('anomaly values carry their unit: rates for spikes, bytes for volumes, bare for unknown kinds', () => {
+  const out = html(h(M.AnomalyView, { list: M.parseAnomalies(S.anomalies()) }));
+  assert.match(out, /90,0 Mbit\/s \/ 10,0 Mbit\/s \/ 40,0 Mbit\/s/);
+  assert.doesNotMatch(out, /90\.000\.000/);
+  assert.equal(M.anomalyValueText('download_volume', 2_000_000_000), M.fmtBytes(2_000_000_000));
+  for (const k of ['upload_spike', 'rx_night_activity', 'tx_sustained_high', 'download_drop', 'upload_bursts']) {
+    assert.equal(M.anomalyValueText(k, 1_000_000), M.fmtRate(1_000_000), k);
+  }
+  assert.equal(M.anomalyValueText('connection_rate', 1234), M.fmtNum(1234, 0));
+  assert.equal(M.anomalyValueText('download_spike', null), M.DASH);
+});
+
+test('a finding threshold has the same unit as its value', () => {
+  const out = html(h(M.RecommendationsView, { data: M.parseRecommendations(S.recommendations()) }));
+  assert.match(out, /Schwelle 80,0 %/);
+  assert.match(out, /Schwelle 50,0 ms/);
+});
+
+test('the history chart names its lowest value too (the scale is not zero based)', () => {
+  const out = html(h(M.SeriesView, { series: M.parseSeries(S.seriesHours()) }));
+  assert.match(out, /höchster Wert/);
+  assert.match(out, /class="wifi-chart__axis wifi-chart__axis--min"><span>niedrigster Wert /);
+});
+
+test('grid facts keep values whole; the collector select is styled like the others', () => {
+  const css = readFileSync(join(here, 'traffic.css'), 'utf8');
+  assert.match(css, /\.trf-grid \.wifi-fact__name \{ min-width: 0; \}/);
+  assert.match(css, /\.trf-grid \.wifi-fact__value \{ flex: 1 1 auto; \}/);
+  assert.match(css, /\.trf-field select \{[^}]*background: var\(--surface-raised\)[^}]*color: var\(--text-primary\)|\.trf-field select \{[^}]*color: var\(--text-primary\)[^}]*background: var\(--surface-raised\)/);
+});

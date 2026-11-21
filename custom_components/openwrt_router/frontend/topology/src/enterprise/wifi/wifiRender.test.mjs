@@ -230,3 +230,16 @@ test('narrow layout: the stylesheet keeps 360 px without sideways scrolling', ()
   assert.match(css, /\.wifi \{[^}]*min-width: 0/);
   assert.doesNotMatch(css, /min-width: (3[7-9]\d|[4-9]\d\d|\d{4,})px/); // nothing wider than 360 px is forced
 });
+
+// ── Browser check 1.49.2 ─────────────────────────────────────────────────
+
+test('timeline: max. sits above the line, min. below it (not next to the highest point)', () => {
+  const out = html(h(M.WifiTimelineChart, { timeline: M.parseTimeline(S.timelineReady()), series: 'utilization' }));
+  const svg = out.indexOf('<svg');
+  const max = out.indexOf('max. ');
+  const min = out.indexOf('min. ');
+  assert.ok(max !== -1 && min !== -1);
+  assert.ok(max < svg, 'max. before the chart');
+  assert.ok(min > out.indexOf('</svg>'), 'min. after the chart');
+  assert.match(out, /class="wifi-chart__axis wifi-chart__axis--min"><span>min\. /);
+});
