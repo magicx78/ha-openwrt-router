@@ -455,7 +455,8 @@
      "reason": null,
      "count": 9,
      "oldest": 1795003200.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "config_versions",
@@ -463,7 +464,8 @@
      "reason": null,
      "count": 2,
      "oldest": 1795003200.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_events",
@@ -471,7 +473,8 @@
      "reason": null,
      "count": 5,
      "oldest": 1795003561.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_incidents",
@@ -479,7 +482,8 @@
      "reason": null,
      "count": 2,
      "oldest": 1795003561.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "security_timeline",
@@ -487,7 +491,8 @@
      "reason": null,
      "count": 2,
      "oldest": 1795003501.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     }
    ],
    "omitted_client_marks": 1,
@@ -623,40 +628,45 @@
      "state": "ok",
      "reason": null,
      "count": 0,
-     "oldest": 1795003200.0,
-     "truncated": false
+     "oldest": null,
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "config_versions",
      "state": "ok",
      "reason": null,
      "count": 0,
-     "oldest": 1795003200.0,
-     "truncated": false
+     "oldest": null,
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_events",
      "state": "ok",
      "reason": null,
      "count": 4,
-     "oldest": 1795003561.0,
-     "truncated": false
+     "oldest": 1795003621.0,
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_incidents",
      "state": "ok",
      "reason": null,
      "count": 1,
-     "oldest": 1795003561.0,
-     "truncated": false
+     "oldest": 1795003801.0,
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "security_timeline",
      "state": "ok",
      "reason": null,
      "count": 0,
-     "oldest": 1795003501.0,
-     "truncated": false
+     "oldest": null,
+     "truncated": false,
+     "cut": null
     }
    ],
    "omitted_client_marks": 1,
@@ -729,16 +739,18 @@
      "state": "ok",
      "reason": null,
      "count": 0,
-     "oldest": 1795003200.0,
-     "truncated": false
+     "oldest": null,
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "config_versions",
      "state": "ok",
      "reason": null,
      "count": 0,
-     "oldest": 1795003200.0,
-     "truncated": false
+     "oldest": null,
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_events",
@@ -746,7 +758,8 @@
      "reason": null,
      "count": 1,
      "oldest": 1795003561.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_incidents",
@@ -754,15 +767,17 @@
      "reason": null,
      "count": 1,
      "oldest": 1795003561.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "security_timeline",
      "state": "ok",
      "reason": null,
      "count": 0,
-     "oldest": 1795003501.0,
-     "truncated": false
+     "oldest": null,
+     "truncated": false,
+     "cut": null
     }
    ],
    "omitted_client_marks": 0,
@@ -788,7 +803,8 @@
      "reason": null,
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "config_versions",
@@ -796,7 +812,8 @@
      "reason": null,
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_events",
@@ -804,7 +821,8 @@
      "reason": null,
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_incidents",
@@ -812,7 +830,8 @@
      "reason": null,
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "security_timeline",
@@ -820,7 +839,8 @@
      "reason": null,
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     }
    ],
    "omitted_client_marks": 0,
@@ -1242,7 +1262,8 @@
      "reason": null,
      "count": 9,
      "oldest": 1795003200.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "config_versions",
@@ -1250,7 +1271,8 @@
      "reason": null,
      "count": 2,
      "oldest": 1795003200.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_events",
@@ -1258,7 +1280,8 @@
      "reason": null,
      "count": 5,
      "oldest": 1795003561.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_incidents",
@@ -1266,7 +1289,8 @@
      "reason": null,
      "count": 2,
      "oldest": 1795003561.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "security_timeline",
@@ -1274,7 +1298,8 @@
      "reason": "error",
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     }
    ],
    "omitted_client_marks": 1,
@@ -1300,7 +1325,8 @@
      "reason": null,
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "config_versions",
@@ -1308,7 +1334,8 @@
      "reason": null,
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_events",
@@ -1316,7 +1343,8 @@
      "reason": null,
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_incidents",
@@ -1324,7 +1352,8 @@
      "reason": null,
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "security_timeline",
@@ -1332,7 +1361,8 @@
      "reason": "error",
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     }
    ],
    "omitted_client_marks": 0,
@@ -1548,7 +1578,8 @@
      "reason": "admin_only",
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "config_versions",
@@ -1556,7 +1587,8 @@
      "reason": "admin_only",
      "count": 0,
      "oldest": null,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_events",
@@ -1564,7 +1596,8 @@
      "reason": null,
      "count": 5,
      "oldest": 1795003561.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "ni_incidents",
@@ -1572,7 +1605,8 @@
      "reason": null,
      "count": 2,
      "oldest": 1795003561.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     },
     {
      "id": "security_timeline",
@@ -1580,7 +1614,8 @@
      "reason": null,
      "count": 1,
      "oldest": 1795003501.0,
-     "truncated": false
+     "truncated": false,
+     "cut": null
     }
    ],
    "omitted_client_marks": 0,

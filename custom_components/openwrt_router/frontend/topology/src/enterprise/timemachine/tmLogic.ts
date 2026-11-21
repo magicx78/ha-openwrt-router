@@ -42,6 +42,8 @@ export const EMPTY_TEXT = 'Keine Marken im gewählten Zeitfenster.';
 export const CUT_TEXT = 'Weitere Marken im Zeitfenster wurden gekürzt; Zeitfenster oder Filter enger wählen.';
 export const NO_SOURCE_TEXT = 'Keine Quelle gewählt. Mindestens eine Quelle einschalten.';
 export const LOADING_TEXT = 'Zeitleiste wird geladen …';
+/** A page without marks that goes on (only left-out entries in this part of the window). */
+export const HIDDEN_ONLY_TEXT = 'In diesem Abschnitt gibt es nur ausgeblendete Einträge. Ältere laden, um weiter zurückzugehen.';
 
 export const SOURCE_IDS: readonly string[] = ['core_audit', 'config_versions', 'ni_events', 'ni_incidents', 'security_timeline'];
 export const SEVERITIES: readonly Severity[] = ['info', 'warning', 'critical'];
@@ -130,6 +132,7 @@ function parseSource(v: unknown): SourceInfo | null {
     count: fin(s.count) ?? 0,
     oldest: fin(s.oldest),
     truncated: s.truncated === true,
+    cut: str(s.cut),
   };
 }
 
@@ -260,8 +263,12 @@ export type ListAction =
  * One step of the loaded list. A filter change starts a new generation and
  * empties the list; an answer of an older generation or an older request is
  * dropped, so a stale answer never overwrites a newer one. A new first page
- * replaces the list, or — when older pages are loaded — puts its marks in
- * front of them (deduplicated) and keeps their next_until.
+ * replaces the list, or — when older pages are loaded or one is being loaded —
+ * puts its marks in front of them (deduplicated) and keeps their next_until.
+ * It goes in front only when it reaches the list (it ends at or below the
+ * newest loaded mark or the end of the previous first page); otherwise it
+ * starts the list anew and drops a pending older page, so the list never
+ * has a silent gap (review K3).
  */
 export function listReducer(s: ListState, a: ListAction): ListState {
   switch (a.type) {
@@ -278,8 +285,12 @@ export function listReducer(s: ListState, a: ListAction): ListState {
       if (t.status === 'off') {
         return { ...s, head: t, marks: [], older: false, nextUntil: null, truncated: false, loading: false, error: null };
       }
-      if (!s.older) {
-        return { ...s, head: t, marks: t.marks, nextUntil: t.nextUntil, truncated: t.truncated, loading: false, error: null };
+      if (!(s.older || s.loadingMore) || !reaches(t, s)) {
+        const stop = s.loadingMore ? { moreSeq: -1, loadingMore: false, moreError: null } : {};
+        return {
+          ...s, ...stop, head: t, marks: t.marks, older: false, nextUntil: t.nextUntil, truncated: t.truncated,
+          loading: false, error: null,
+        };
       }
       const from = t.from ?? -Infinity;
       const marks = mergeMarks(t.marks, s.marks).filter(m => m.ts >= from);
@@ -299,6 +310,13 @@ export function listReducer(s: ListState, a: ListAction): ListState {
     default:
       return s;
   }
+}
+
+/** A first page reaches the loaded list: nothing lies between the two. */
+function reaches(t: Timeline, s: ListState): boolean {
+  if (t.nextUntil === null) return true;
+  const top = Math.max(s.marks.length ? s.marks[0].ts : -Infinity, s.head?.until ?? -Infinity);
+  return t.nextUntil <= top;
 }
 
 /** Automatic reload of the first page: visible page, at most every 60 s, never while off. */
@@ -414,7 +432,9 @@ export function reasonText(reason: string | null): string {
 export function sourcePill(s: SourceInfo): { name: string; text: string; tone: Tone } {
   let text: string;
   let tone: Tone = 'muted';
-  switch (s.state) {
+  // a cut source is never "empty": what lies below its cut is not read yet
+  const state = s.state === 'empty' && s.truncated ? 'ok' : s.state;
+  switch (state) {
     case 'ok':
       text = `${num(s.count)} ${s.count === 1 ? 'Marke' : 'Marken'}`;
       tone = 'info';
@@ -432,7 +452,7 @@ export function sourcePill(s: SourceInfo): { name: string; text: string; tone: T
     default:
       text = 'Zustand unbekannt';
   }
-  if (s.truncated) text += ' · gekürzt';
+  if (s.truncated) text += s.cut === 'unreachable' ? ' · gekürzt, Älteres nicht abrufbar' : ' · gekürzt';
   return { name: sourceText(s.id), text, tone };
 }
 
@@ -441,6 +461,9 @@ export function adminOnlySources(head: Timeline | null): string[] {
   return (head?.sources ?? []).filter(s => s.state === 'off' && s.reason === 'admin_only').map(s => s.id);
 }
 
+// Relies on the server sending omitted_client_marks = 0 to non-admins
+// (tm_query.merge: only administrators get that count); the tab does not
+// check the user's role here itself.
 export function omittedText(n: number): string | null {
   if (!(n > 0)) return null;
   const what = n === 1 ? 'client-bezogenes Ereignis ist' : 'client-bezogene Ereignisse sind';

@@ -31,8 +31,11 @@ export interface SourceInfo {
   state: string;
   reason: string | null;
   count: number;
+  /** Oldest mark of this source on this page (after the rights filter). */
   oldest: number | null;
   truncated: boolean;
+  /** Where a cut read goes on: 'next_page', 'unreachable' or null (not cut). */
+  cut: string | null;
 }
 
 export interface Timeline {

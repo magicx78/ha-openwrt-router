@@ -19,7 +19,7 @@ import configCSS from '../config/config.css?inline';
 import wifiCSS from '../wifi/wifi.css?inline';
 import tmCSS from './timemachine.css?inline';
 import {
-  CUT_TEXT, DEFAULT_FILTERS, EMPTY_TEXT, INTRO, LIST_INIT, LOADING_TEXT, NO_SOURCE_TEXT, OFF_HOW, OFF_TITLE, PARTIAL_TEXT,
+  CUT_TEXT, DEFAULT_FILTERS, EMPTY_TEXT, HIDDEN_ONLY_TEXT, INTRO, LIST_INIT, LOADING_TEXT, NO_SOURCE_TEXT, OFF_HOW, OFF_TITLE, PARTIAL_TEXT,
   POLL_MIN_MS, SEVERITY_FILTERS, SOURCE_IDS, TAB_TITLE, WINDOWS,
   adminOnlySources, countText, dayGroups, errorInfo, filterKey, firstQuery, groupText, groupsOf, isoUtc, listReducer,
   olderQuery, omittedText, paramsText, rememberRouters, routerOptionLabel, routerOptions, routerText, severityView,
@@ -206,6 +206,8 @@ export function TimeMachineScreen({ state, filters, hidden, routers, nowMs, onFi
   const shown = visibleMarks(state.marks, hidden);
   const omitted = head && !off ? omittedText(head.omittedClientMarks) : null;
   const firstLoad = head === null || (state.loading && !state.marks.length && !off);
+  // a page without marks that goes on: only left-out entries in this part (review S1)
+  const hiddenOnly = !state.marks.length && state.nextUntil !== null;
 
   const body = (() => {
     if (head === null) {
@@ -234,9 +236,11 @@ export function TimeMachineScreen({ state, filters, hidden, routers, nowMs, onFi
         )}
         {noSource ? null : firstLoad
           ? <div className="cfg-spinner tm-loading" aria-busy="true"><span className="cfg-spinner__dot" />{LOADING_TEXT}</div>
-          : <TimelineList marks={shown} total={state.marks.length} nowMs={nowMs} />}
+          : hiddenOnly
+            ? <div className="cfg-empty tm-empty tm-hidden-only">{HIDDEN_ONLY_TEXT}</div>
+            : <TimelineList marks={shown} total={state.marks.length} nowMs={nowMs} />}
         {state.moreError !== null && <ErrorBox error={state.moreError} onRetry={onMore} />}
-        {!noSource && state.nextUntil !== null && state.marks.length > 0 && (
+        {!noSource && !firstLoad && state.nextUntil !== null && (
           <div className="tm-more">
             <button type="button" className="diag-btn cfg-btn" disabled={state.loadingMore} onClick={onMore}>Ältere laden</button>
             {state.loadingMore && <span className="cfg-spinner"><span className="cfg-spinner__dot" />lädt …</span>}

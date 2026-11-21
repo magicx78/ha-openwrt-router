@@ -221,6 +221,30 @@ test('older pages: "Ältere laden" while there is a next_until, then the cut hin
   assert.ok(!text(html).includes('Ältere laden'));
 });
 
+test('a page with only left-out entries is not "empty": the hint and "Ältere laden" (review S1)', () => {
+  // the shape of a real first page (admin_page1); its part of the window holds client entries only
+  const b = structuredClone(F.admin_page1.body);
+  b.marks = [];
+  b.omitted_client_marks = 3;
+  b.sources = b.sources.map(src => src.id === 'ni_events'
+    ? { ...src, state: 'ok', count: 0, oldest: null, truncated: true, cut: 'next_page' }
+    : { ...src, count: 0, oldest: null });
+  let s = M.listReducer(M.LIST_INIT, { type: 'start', seq: 1, more: false });
+  s = M.listReducer(s, { type: 'first', gen: 0, seq: 1, answer: M.parseTimeline(b) });
+  const html = screen(s);
+  const t = text(html);
+  assert.ok(t.includes(M.HIDDEN_ONLY_TEXT));
+  assert.equal(M.HIDDEN_ONLY_TEXT, 'In diesem Abschnitt gibt es nur ausgeblendete Einträge. Ältere laden, um weiter zurückzugehen.');
+  assert.ok(!t.includes(M.EMPTY_TEXT));
+  assert.match(html, /<button[^>]*>Ältere laden<\/button>/);
+  assert.ok(t.includes('Netzwerk-Ereignisse: 0 Marken · gekürzt'));
+  assert.ok(!t.includes('Netzwerk-Ereignisse: leer'));
+  assert.ok(t.includes('3 client-bezogene Ereignisse sind ausgeblendet.'));
+  // an unreachable rest says so in its pill
+  const u = M.sourcePill({ id: 'config_versions', state: 'ok', reason: null, count: 0, oldest: null, truncated: true, cut: 'unreachable' });
+  assert.equal(u.text, '0 Marken · gekürzt, Älteres nicht abrufbar');
+});
+
 test('loading again keeps the old list on screen', () => {
   const state = loaded('admin', { loading: true });
   const html = screen(state);

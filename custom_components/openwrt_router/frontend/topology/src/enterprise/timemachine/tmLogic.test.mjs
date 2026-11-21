@@ -160,6 +160,41 @@ test('a new first page with older pages loaded goes in front and keeps their nex
   assert.deepEqual(p.marks, []);
 });
 
+// K3 (review 1.50.0): a 60-s refresh that answers while "Ältere laden" runs.
+const rm = (id, ts) => ({ ...T('admin').marks[0], id, ts });
+const page = (marks, nextUntil, until = 1000) => ({
+  status: 'ok', generatedAt: until, from: 0, until, marks, sources: [], omittedClientMarks: 0,
+  truncated: nextUntil !== null, nextUntil,
+});
+
+test('a refresh during "Ältere laden" never drops the marks in between', () => {
+  let s = start(LIST_INIT, 1);
+  s = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: page([rm('a', 100), rm('b', 99), rm('c', 98)], 98) });
+  s = start(s, 2, true); // "Ältere laden" (until = 98)
+  s = start(s, 3); // the poll starts meanwhile; three new marks came in
+  s = listReducer(s, { type: 'first', gen: 0, seq: 3, answer: page([rm('x', 103), rm('y', 102), rm('z', 101)], 101) });
+  assert.equal(s.nextUntil, 98); // still where the pending older page continues
+  s = listReducer(s, { type: 'older', gen: 0, seq: 2, answer: page([rm('d', 97), rm('e', 96), rm('f', 95)], 95) });
+  assert.deepEqual(s.marks.map(m => m.id), ['x', 'y', 'z', 'a', 'b', 'c', 'd', 'e', 'f']);
+  assert.equal(s.nextUntil, 95);
+});
+
+test('a refresh that does not reach the loaded list starts it anew, never with a gap', () => {
+  // loaded: 100..95 (head until 101); the refresh covers only 300..198
+  let s = start(LIST_INIT, 1);
+  s = listReducer(s, { type: 'first', gen: 0, seq: 1, answer: page([rm('a', 100), rm('b', 99), rm('c', 98)], 98, 101) });
+  s = listReducer(start(s, 2, true), { type: 'older', gen: 0, seq: 2, answer: page([rm('d', 97)], 95, 101) });
+  s = start(s, 3, true); // another older page in flight
+  s = start(s, 4);
+  s = listReducer(s, { type: 'first', gen: 0, seq: 4, answer: page([rm('x', 200), rm('y', 199), rm('z', 198)], 198, 300) });
+  assert.deepEqual(s.marks.map(m => m.id), ['x', 'y', 'z']);
+  assert.equal(s.nextUntil, 198);
+  assert.equal(s.older, false);
+  assert.equal(s.loadingMore, false);
+  // the older page of the old list is dropped, it would leave a gap
+  assert.equal(listReducer(s, { type: 'older', gen: 0, seq: 3, answer: page([rm('e', 94)], null, 101) }), s);
+});
+
 test('a stale answer never overwrites a newer one', () => {
   let s = start(start(LIST_INIT, 1), 2);
   s = listReducer(s, { type: 'first', gen: 0, seq: 2, answer: T('empty') });
