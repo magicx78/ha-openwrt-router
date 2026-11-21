@@ -1,0 +1,132 @@
+/* Network Diagnostics tab (enterprise/diagnostics). Only what the Configuration
+   Manager's stylesheet (config.css, injected next to this one) and topology.css
+   do not already provide. Uses the panel's variables.
+   Rule: unknown / not measured is grey and italic (`.dg-unknown`, tone `muted`),
+   never green. Narrow layout: one column, 40 px buttons, long values wrap,
+   nothing makes the page scroll sideways. */
+
+.dg { min-width: 0; }
+.dg .dg-p { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text-primary); overflow-wrap: anywhere; }
+.dg-sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.dg-unknown { color: var(--text-secondary); font-style: italic; font-weight: 400; }
+.dg-muted { color: var(--text-secondary); font-size: 11.5px; overflow-wrap: anywhere; }
+
+/* Tones (`muted` is the unknown tone) */
+.dg-tone-ok { color: var(--green); }
+.dg-tone-info { color: #93c5fd; }
+.dg-tone-warn { color: var(--amber); }
+.dg-tone-critical { color: var(--red); }
+.dg-tone-muted { color: var(--text-secondary); }
+
+/* Section switch */
+.dg-nav { display: flex; flex-wrap: wrap; gap: 6px; }
+.dg-nav__btn {
+  min-height: 32px; padding: 4px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-secondary);
+  font: inherit; font-size: 12.5px; font-weight: 600;
+}
+.dg-nav__btn:hover { color: var(--text-primary); border-color: var(--border-hover); }
+.dg-nav__btn.active { color: var(--text-primary); background: var(--blue-dim); border-color: rgba(59, 130, 246, 0.5); }
+.dg-nav__btn:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; }
+
+.dg-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+/* KPI tiles */
+.dg-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
+.dg-kpi {
+  display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; min-width: 0;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface);
+}
+.dg-kpi__name { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.dg-kpi__value { font-size: 24px; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; color: var(--text-primary); overflow-wrap: anywhere; }
+.dg-kpi__value .dg-unknown { font-size: 15px; }
+.dg-kpi__max { font-size: 12px; font-weight: 400; color: var(--text-secondary); }
+.dg-kpi__sub { font-size: 11.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
+
+/* Facts */
+.dg-fact { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 12.5px; align-items: baseline; }
+.dg-fact__name { color: var(--text-muted); min-width: 170px; }
+.dg-fact__value { color: var(--text-primary); min-width: 0; overflow-wrap: anywhere; }
+
+/* Measurement points and their chain */
+.dg-points { list-style: none; display: flex; flex-direction: column; gap: 10px; padding: 0; margin: 0; min-width: 0; }
+.dg-point {
+  display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; min-width: 0;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: rgba(255, 255, 255, 0.02);
+}
+.dg-point__head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.dg-point__name { font-size: 13px; font-weight: 700; color: var(--text-primary); overflow-wrap: anywhere; }
+.dg-point__meta { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 11.5px; color: var(--text-secondary); }
+.dg-finding { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12.5px; min-width: 0; }
+.dg-finding__rec { flex-basis: 100%; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.cfg-badge { white-space: normal; }
+
+.dg-chain { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 22px; padding: 0; margin: 0; min-width: 0; }
+.dg-chip {
+  position: relative; display: flex; flex-direction: column; gap: 1px; min-width: 96px; max-width: 100%;
+  padding: 5px 9px; border-radius: var(--radius-xs); border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04); font-size: 12px;
+}
+.dg-chip:not(:last-child)::after {
+  content: '\2192'; position: absolute; right: -17px; top: 50%; transform: translateY(-50%);
+  color: var(--text-muted); font-size: 13px;
+}
+.dg-chip__name { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.dg-chip__state { font-weight: 600; overflow-wrap: anywhere; }
+.dg-chip__detail { font-size: 10.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.dg-chip--ok { border-color: rgba(34, 197, 94, 0.45); background: var(--green-dim); }
+.dg-chip--ok .dg-chip__state { color: var(--green); }
+.dg-chip--warn { border-color: rgba(245, 158, 11, 0.5); background: var(--amber-dim); }
+.dg-chip--warn .dg-chip__state { color: var(--amber); }
+.dg-chip--critical { border-color: rgba(239, 68, 68, 0.5); background: var(--red-dim); }
+.dg-chip--critical .dg-chip__state { color: var(--red); }
+/* unknown: neutral and dashed; not applicable: neutral and dotted */
+.dg-chip--muted { color: var(--text-secondary); }
+.dg-chip--muted .dg-chip__state { color: var(--text-secondary); font-style: italic; font-weight: 500; }
+.dg-chip--unknown { border-style: dashed; }
+.dg-chip--not_applicable { border-style: dotted; opacity: 0.8; }
+
+/* History */
+.dg-details { font-size: 12.5px; min-width: 0; }
+.dg-details > summary { cursor: pointer; color: var(--text-primary); font-weight: 600; padding: 4px 0; }
+.dg-series { display: flex; flex-direction: column; gap: 4px; padding: 4px 0 10px; min-width: 0; }
+.dg-series__title { font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.dg-table-wrap { overflow-x: auto; max-width: 100%; }
+.dg-table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+.dg-table th, .dg-table td { padding: 4px 8px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.dg-table thead th { color: var(--text-muted); font-weight: 600; font-size: 11px; }
+.dg-table th[scope='row'], .dg-table thead th:first-child { text-align: left; color: var(--text-primary); }
+
+/* Rows and form fields */
+.dg-rows { list-style: none; display: flex; flex-direction: column; gap: 4px; padding: 0; margin: 0; min-width: 0; }
+.dg-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 7px 10px; min-width: 0;
+  border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03); font-size: 12.5px;
+}
+.dg-row__title { color: var(--text-primary); font-weight: 600; min-width: 0; overflow-wrap: anywhere; flex: 1 1 140px; }
+.dg-fieldset { border: none; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.dg-target { align-items: flex-start; line-height: 1.45; }
+.dg-target input { margin-top: 3px; width: 16px; height: 16px; flex-shrink: 0; }
+.dg-target__id { color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+.dg-target--off { opacity: 0.75; }
+.dg-field { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--text-secondary); min-width: 0; }
+.dg-field input[type='text'] {
+  width: 100%; max-width: 220px; min-width: 0; min-height: 32px; padding: 4px 8px; font: inherit; font-size: 13px;
+  color: var(--text-primary); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-xs);
+}
+.dg-field input:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; }
+
+@media (max-width: 600px) {
+  .dg-nav__btn { min-height: 40px; flex: 1 1 auto; }
+  .dg-fact__name { min-width: 0; flex-basis: 100%; }
+  .dg-actions .cfg-btn { flex: 1 1 calc(50% - 6px); }
+  .dg-target input { width: 20px; height: 20px; }
+  .dg-field input[type='text'] { min-height: 40px; max-width: none; }
+  .dg-kpis { grid-template-columns: 1fr 1fr; }
+  .dg-chain { flex-direction: column; gap: 14px; }
+  .dg-chip { min-width: 0; }
+  .dg-chip:not(:last-child)::after { content: '\2193'; right: auto; left: 50%; top: auto; bottom: -15px; transform: translateX(-50%); }
+}

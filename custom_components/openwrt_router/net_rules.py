@@ -5783,3 +5783,90 @@ def fleet_score(
             p *= _ACK_FACTOR
         penalty += p * float(weights.get(area, 0)) / total_w
     return round(max(0.0, num / den - penalty)), round(coverage, 2)
+
+
+# --- Network Diagnostics (release 1.47.0, part 2) ---
+# Two incident types fed by the network diagnostics run time (diag_runtime)
+# from its change findings of a poll: the router's next hop (gateway)
+# changed, the set of its DNS servers changed. Additive only: no existing
+# rule, threshold key, root tier or link changes for any other type.
+#
+# * Rules: fixed event rules here (info, no cooldown), NOT in
+#   DEFAULT_SETTINGS (its threshold keys are frozen; the types are not
+#   user-tunable). ``AlarmMachine._rule`` falls back to them only for these
+#   two types and only when the settings have no rule of that name.
+# * Never roots: not in ROOT_TIERS, so they adopt and silence nothing.
+# * Adopted only where a technical dependency exists, on the SAME router:
+#   - ``wan_down`` of that router (a WAN reconnect brings a new DHCP lease:
+#     next hop and resolvers may change with it);
+#   - ``router_unreachable`` / ``system_reboot`` of that router (after a
+#     restart or an outage the router renews its leases), by the existing
+#     own-router rule;
+#   - ``lan_unreachable`` keeps adopting everything in its window
+#     (unchanged existing behaviour; the fleet outage of HA's LAN is a
+#     cause for everything observed then).
+#   Never by a root of another router (also not a router "behind" it, an
+#   uplink or port root, a radio or mass-disconnect root), and their events
+#   are not taken by ``wan_down`` of another router (DNS events of other
+#   types still are, as before).
+DIAG_GATEWAY_CHANGED_TYPE = "wan_gateway_changed"
+DIAG_DNS_SERVER_CHANGED_TYPE = "dns_server_changed"
+DIAG_GATEWAY_CHANGED_KIND = "wan.gateway_changed"
+DIAG_DNS_SERVER_CHANGED_KIND = "dns.server_changed"
+DIAG_CHANGE_TYPES = frozenset({DIAG_GATEWAY_CHANGED_TYPE, DIAG_DNS_SERVER_CHANGED_TYPE})
+DIAG_CHANGE_KINDS = frozenset({DIAG_GATEWAY_CHANGED_KIND, DIAG_DNS_SERVER_CHANGED_KIND})
+DIAG_CHANGE_RULES: dict[str, dict[str, Any]] = {
+    DIAG_GATEWAY_CHANGED_TYPE: _event(0, "info"),
+    DIAG_DNS_SERVER_CHANGED_TYPE: _event(0, "info"),
+}
+_DIAG_SAME_ROUTER_ROOTS = frozenset({"wan_down", "router_unreachable", "system_reboot"})
+
+_diag_rule_base = AlarmMachine._rule
+_diag_incident_link_base = _incident_link
+_diag_event_link_base = _event_link
+
+
+def _diag_rule(self: AlarmMachine, type_: str) -> dict[str, Any] | None:
+    """The settings' rule; the fixed rule for the two change types."""
+    rule = _diag_rule_base(self, type_)
+    if rule is None and type_ in DIAG_CHANGE_RULES:
+        return dict(DIAG_CHANGE_RULES[type_])
+    return rule
+
+
+def _diag_change_link(view: _RootView, router: str | None) -> bool | None:
+    """Link of a change incident/event to a root other than lan_unreachable."""
+    root = view.inc
+    if root.type not in _DIAG_SAME_ROUTER_ROOTS or not router:
+        return None
+    if root.type == "wan_down":
+        return True if router == root.scope_key else None
+    return True if router == view.router else None
+
+
+def _incident_link(  # type: ignore[no-redef]
+    view: _RootView, child: Incident, ctx: _LinkContext, at: float
+) -> bool | None:
+    """``_incident_link`` with the same-router rule for the change types."""
+    if child.type not in DIAG_CHANGE_TYPES or view.inc.type == "lan_unreachable":
+        return _diag_incident_link_base(view, child, ctx, at)
+    if _tier(view.inc.type) >= _tier(child.type):
+        return None
+    if view.inc.type in _ROUTER_ROOTS and at < view.inc.first_seen:
+        return None  # a change from before the outage is no follow-up (M2)
+    return _diag_change_link(view, child.scope_key)
+
+
+def _event_link(  # type: ignore[no-redef]
+    view: _RootView, event: NetEvent, ctx: _LinkContext
+) -> bool | None:
+    """``_event_link`` with the same-router rule for the change kinds."""
+    if event.kind not in DIAG_CHANGE_KINDS or view.inc.type == "lan_unreachable":
+        return _diag_event_link_base(view, event, ctx)
+    if view.inc.type in _ROUTER_ROOTS and event.ts < view.inc.first_seen:
+        return None
+    return _diag_change_link(view, event.router)
+
+
+AlarmMachine._rule = _diag_rule  # type: ignore[method-assign]
+# --- end Network Diagnostics

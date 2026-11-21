@@ -823,3 +823,59 @@ UID_FLEET_SECURITY_WIFI_AUTH_FAILURES = (
 )
 UID_FLEET_SECURITY_COVERAGE = f"{FLEET_UID_PREFIX}security_coverage"
 # --- end Security Center part 2
+# --- Network Diagnostics ---
+# Release 1.47.0 part 1 (diag_runtime.py / diag_store.py): one fleet-wide
+# engine per HA instance, default off. Off: no router call, no packet, no
+# write. On: passive evaluation of the poll; active HA probes only as a
+# manual run by an admin or, if an admin enabled it, periodically against
+# confirmed targets.
+DIAG_STORE_KEY = f"{DOMAIN}.net_diagnostics"
+DIAG_STORE_VERSION = 1
+DIAG_STORE_MINOR_VERSION = 1
+DIAG_SAVE_DELAY_SECONDS = 60
+# Periodic HA probe round (only with periodic probing on and confirmed
+# targets); the scheduler's minimum interval is 60 s.
+DIAG_DEFAULT_INTERVAL_SECONDS = 300
+DIAG_MIN_INTERVAL_SECONDS = 60
+DIAG_MAX_INTERVAL_SECONDS = 86400
+# History bounds (diag_store): router measurement points, series of the HA
+# point and of each router point (separate quotas: one never evicts or
+# starves another), hour and day buckets per series, restart gap records.
+DIAG_MAX_POINTS = 64
+DIAG_MAX_SERIES_HA = 32
+DIAG_MAX_SERIES_PER_ROUTER = 8
+DIAG_MAX_HOUR_BUCKETS = 7 * 24 + 1
+DIAG_MAX_DAY_BUCKETS = 31
+DIAG_MAX_GAP_RECORDS = 64
+# Targets an admin may configure (diag_targets allows up to 64).
+DIAG_MAX_TARGETS = 16
+# A router with less uptime than this was just restarted: findings settle.
+DIAG_SETTLE_SECONDS = 300
+# Loss baselines are fed the loss over this many rounds.
+DIAG_LOSS_ROUNDS = 3
+# The module key is asked for again at most this often while missing.
+DIAG_MODULE_KEY_RETRY_SECONDS = 300
+DATA_NET_DIAGNOSTICS = f"{DOMAIN}_net_diagnostics"
+# Part 2 (diag_views.py, diag_entities.py, diag_context.py): routes, the
+# bounded entity set (six fleet sensors, one gateway sensor per router that
+# already has a device) and the context of a finding.
+SIGNAL_NET_DIAGNOSTICS = f"{DOMAIN}_net_diagnostics_updated"
+DATA_DIAG_VIEWS_BOUND = f"{DOMAIN}_diag_views_bound"
+DATA_DIAG_ENTITIES = f"{DOMAIN}_diag_entities"
+UID_FLEET_DIAG_SCORE = f"{FLEET_UID_PREFIX}diag_quality_score"
+UID_FLEET_DIAG_COVERAGE = f"{FLEET_UID_PREFIX}diag_monitoring_coverage"
+UID_FLEET_DIAG_FINDINGS = f"{FLEET_UID_PREFIX}diag_findings_active"
+UID_FLEET_DIAG_LATENCY = f"{FLEET_UID_PREFIX}diag_ha_internet_latency"
+UID_FLEET_DIAG_LOSS = f"{FLEET_UID_PREFIX}diag_ha_internet_loss"
+UID_FLEET_DIAG_DNS = f"{FLEET_UID_PREFIX}diag_dns_response_time"
+# Per router (on the router's existing device): ``<entry_id><suffix>``.
+DIAG_GATEWAY_UID_SUFFIX = "_diag_gateway_reachable"
+# Context of a finding: configuration changes / security incidents of the
+# same router this long before (or, detected late, after) the finding.
+DIAG_CONTEXT_WINDOW_SECONDS = 1800
+# Drift notes kept in memory for the context, per router (its oldest is
+# dropped first, counted; the router's context is then "partial").
+DIAG_CONFIG_NOTES_PER_ROUTER = 16
+# The Security Center overview is read at most this often per router.
+DIAG_CONTEXT_CACHE_SECONDS = 60
+# --- end Network Diagnostics

@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-20 · Version: v1.46.0
+Stand: 2026-11-21 · Version: v1.47.0
 
 ---
 
@@ -127,6 +127,32 @@ Branch `claude/security-center-6fdcdd`. Nutzerdoku: `docs/security-center.md`.
       DNS-Hinweisen behalten. Datenschutzfolgen vorher klären: Namen verraten Surfverhalten,
       landen im Speicher, in der Zeitleiste und auf dem Core-Bus; nur für Administratoren,
       gekürzt, mit eigener Speicherfrist und Doku-Hinweis.
+
+### Network Diagnostics / Netzwerkdiagnose (Plan `docs/plans/2026-11-17-net-diagnostics.md`, 1.47.0)
+
+Branch `claude/net-diagnostics-f989ed`. Nutzerdoku: `docs/network-diagnostics.md`.
+
+- [x] Laufzeit (aus / nicht bereit / bereit), Messungen von Home Assistant (TCP, DNS, HTTP) gegen
+      bestätigte Ziele mit SSRF-Schutz, Kette Router → Gateway → WAN → Internet → DNS,
+      Ursachenklassen, Statistik, Baselines, Netzqualitätswert mit Abdeckung, begrenzter
+      Verlaufsspeicher, Routen, 6 Flotten-Sensoren und ein Gateway-Binärsensor je Router,
+      Vorfälle `wan_gateway_changed` und `dns_server_changed`, Kontext aus Configuration Manager
+      und Security Center, Panel-Tab, Diagnose-Block (1.47.0).
+- [ ] **Router-seitige Tests** (Ping, `nslookup`, `traceroute` auf dem Router): heute nur
+      Schnittstelle und Fähigkeitsprüfung, kein Ausführer und kein ACL-Recht; braucht eine
+      gestufte Core-ACL mit Einzelfreigabe.
+- [ ] **Ansicht für die Detail-Route** (`/details`) im Panel.
+- [ ] **Ziele und Bereichslisten im Panel bearbeiten:** heute nur Anzeige, Änderung über die
+      Route `settings`.
+- [ ] **Schwellen an echten Daten abstimmen:** Gewichte und Punktetabellen des Werts,
+      Baseline-Schwellen und Lernzeit sind begründete Annahmen.
+- [ ] **Jitter-Baseline speisen:** der Baustein existiert, die Laufzeit nutzt ihn nicht.
+- [ ] **Gateway-Glied messen:** der Binärsensor „Gateway erreichbar“ ist ohne Router-Messung
+      unbekannt (`not_measured`).
+- [ ] **TCP-Messung des Coordinators zu `8.8.8.8:53` (`ping_ms`) bereinigen**, eigener PR; sie ist
+      unverändert und nicht Teil der Last der Netzwerkdiagnose.
+- [ ] **Live-Prüfung gegen echte Router, Ziele und eine echte Home-Assistant-Instanz** (nur mit
+      Freigabe); bisher laufen die Tests ohne Geräte und ohne Netz.
 
 ### Client-Stabilität (Plan `docs/plans/2026-11-16-client-stability.md`, 1.42.0)
 

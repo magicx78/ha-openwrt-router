@@ -4,6 +4,136 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.47.0] - 2026-11-21
+
+Netzwerkdiagnose („Network Diagnostics“): prüft die Kette Router → Gateway → WAN → Internet →
+DNS und sagt je Glied, ob es gesund, beeinträchtigt, ausgefallen oder **unbekannt** ist. Sie
+baut auf dem Enterprise Core von 1.44.0 auf und nutzt Daten, die die Integration ohnehin liest,
+dazu Messungen von Home Assistant aus gegen Ziele, die ein Administrator bestätigt hat.
+**Standardmäßig aus**; ausgeschaltet gibt es keinen Beobachter, keine Messung, keinen Socket und
+keine Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll** in dieser Version. Jede
+aktive Diagnose läuft erst nach einer ausdrücklichen Handlung eines Administrators (manueller
+Lauf oder eingeschaltete regelmäßige Messung mit bestätigten Zielen). **Keine neuen
+Router-Rechte.** Nutzerdoku: `docs/network-diagnostics.md`.
+
+### Hinzugefügt
+
+- **Laufzeit (`diag_runtime.py`).** Ein Modul je HA-Instanz, angedockt wie das Security Center
+  (nach dem Setup eines Eintrags, nach dem Entladen freigegeben; ein Fehler darin lässt weder
+  Setup noch Entladen scheitern). Zustand `off` / `not_ready` / `ready`; `not_ready` und
+  unbekannte Werte tragen immer einen Grund (zum Beispiel `module_key_missing`,
+  `core_unavailable`, `interface_dump_missing`, `no_confirmed_target`), nie „gesund“. Der
+  passive Teil wertet je Poll die Daten aus, die der Poll ohnehin lieferte: den WAN-Status und
+  neue, nur gelesene Fakten aus dem schon vorhandenen `network.interface dump` (Standardroute,
+  nächster Hop, DNS-Server, aktive Schnittstellen). Der Dump wird dafür **nicht** noch einmal
+  geholt.
+- **Messungen von Home Assistant (`api.py`, Block „Network Diagnostics“).** TCP-Verbindung,
+  DNS-Abfrage (A) und HTTP-Abruf einer „no content“-URL, nur gegen **vom Administrator
+  eingerichtete Ziele und nur per ID**: externe Ziele müssen bestätigt sein, interne müssen in
+  einem konfigurierten internen Netz liegen, die regelmäßige Messung nimmt nur bestätigte Ziele.
+  Es gibt keine Funktion, die einen freien Host annimmt. Schutz vor SSRF
+  (`diag_targets.py`): nur IP-Literale und Hostnamen nach RFC 1123 (keine URLs, Ports, Zahlen-
+  tricks), externe Ziele müssen global routbar und bestätigt sein, interne Ziele müssen in einem
+  konfigurierten internen Netz liegen, Loopback nie, Link-Local und Metadaten-Adressen nur bei
+  genau dafür konfiguriertem Netz; was ein Hostname auflöst, wird vor dem Verbinden erneut
+  geprüft (Schutz vor DNS-Rebinding), interne Namen gehen nie an einen externen Namensserver;
+  der HTTP-Abruf sendet keine Zugangsdaten, keine Cookies, keinen Body und folgt keiner
+  Weiterleitung. Jede Messung hat eine feste Zeitgrenze und liefert ein normiertes Ergebnis mit
+  Codes und Zahlen, nie mit Adresse oder Antworttext. Ein ICMP-Ziel wird auf der HA-Seite
+  übersprungen (kein Ping ohne Rechte).
+- **Kette und Zustände (`diag_chain.py`, `diag_model.py`).** Je Glied und Adressfamilie
+  `Healthy` / `Degraded` / `Failed` / `Unknown` / `NotApplicable`. „Kein Fehler erkannt“ gibt es
+  nur, wenn jedes anwendbare Glied direkt gemessen wurde; sonst „teilweise gemessen“ mit der
+  Liste der unbekannten Glieder. Das Internet-Glied fällt nur aus, wenn mindestens zwei
+  verschiedene Referenzziele in derselben Runde hart scheitern; ein einzelnes scheiterndes Ziel
+  ist höchstens beeinträchtigt. Eine Messung von Home Assistant gilt nur dann als indirekter
+  Beleg für einen Router, wenn sie ausdrücklich diesen Router nennt; sie bestätigt nie eine
+  Ursache und zählt nie als Abdeckung.
+- **Ursachenklassen (`diag_causes.py`).** `confirmed` / `probable` / `possible` / `unknown`.
+  Bestätigt braucht eine direkte Messung am Ort der Ursache; dieselbe Auffälligkeit an mehreren
+  Routern ergibt höchstens `probable`. Gemeinsame Ursachen (zentraler Internetzugang, Pfad eines
+  Segments, gemeinsamer Namensserver) verknüpfen nur Router, die technisch davon abhängen, und
+  nur Befunde desselben Glieds und derselben Adressfamilie. Verknüpfungen verbergen oder ändern
+  keinen Befund.
+- **Statistik, Baselines, Wert (`diag_stats.py`, `diag_baseline.py`, `diag_score.py`).**
+  Mittel, Jitter, Verlust und Abdeckung je Reihe in den Fenstern 1 h, 24 h, 7 d und 30 d;
+  Lücken (keine Messung, Neustart, WAN-Ausfall während ein Router anläuft) fließen nie als
+  Verlust ein; eine Antwort (REFUSED, SERVFAIL, HTTP außer 204) ist kein Verlust. Baselines (EWMA mit
+  Hysterese) lernen nur Werte unterhalb der Austrittsschwelle und frieren bei einer Störung
+  ein; langsame Drift über mehrere Tage wird getrennt erkannt. Netzqualitätswert 0 bis 100 aus sieben
+  gewichteten Komponenten **mit Abdeckung und „geringe Aussagekraft“**; Komponenten ohne Daten
+  gelten als unbekannt und nie als perfekt, ein Netz ohne Daten hat keinen Wert.
+- **Begrenzter Verlaufsspeicher (`diag_store.py`).** `.storage/openwrt_router.net_diagnostics`,
+  verzögertes Schreiben, beim Entladen sofort. Eigene Quoten: höchstens 64 Router-Messpunkte,
+  32 Reihen für Home Assistant, 8 Reihen je Router, 169 Stunden- und 31 Tages-Buckets je
+  Reihe, 64 Neustart-Lücken. Jede Quote ist getrennt: ein voller Messpunkt verdrängt keinen
+  anderen. **Jedes Verwerfen wird gezählt** und im Status gezeigt. Ein Neustart von Home
+  Assistant oder eines Routers ist eine Lücke, kein Verlust. Reihen ohne Buckets und Reihen
+  entfernter Ziele geben ihren Quotenplatz frei (gezählt). Beschädigte Teile starten leer,
+  ein unlesbarer Speicher bleibt als `.bak`.
+- **HTTP-Routen (`diag_views.py`)** unter `/api/openwrt_topology/diagnostics`: `overview`,
+  `history`, `details`, `settings` (lesen und ändern) und `run`. Alle mit Anmeldung. Reihenfolge
+  der Prüfungen: Benutzer und Administrator, dann Panel-Zugriff, dann geladene Integration,
+  dann laufendes Modul, dann (nur `run`) eingeschaltetes Modul, **erst danach Query und Body**.
+  Einstellungen ändern und `run` nur für Administratoren, `run` zusätzlich über den Guard des
+  Cores (aktive Aktion, Rate-Limit, Audit). Body höchstens 8 KiB und höchstens Tiefe 3, nur
+  bekannte Schlüssel; Ziele nur über ihre ID. Fehler tragen nur eine feste Meldung, einen Code
+  und höchstens Feldname und Grund: 400 ungültig, 403 nicht erlaubt, 404 unbekanntes Ziel oder
+  unbekannter Router, 409 aus / belegt / Konflikt, 410 Integration entladen, 413 Body zu groß,
+  422 Ziel abgelehnt, 429 Rate-Limit (mit `Retry-After`), 503 Modul oder Core läuft nicht.
+- **Entitäten (`diag_entities.py`).** Sechs Flotten-Sensoren (Netzqualität, Überwachungs-
+  abdeckung, aktive Befunde, Home-Assistant-Internet-Latenz, -Verlust (24 h), DNS-Antwortzeit)
+  und je Router, der schon ein Gerät hat, ein Binärsensor „Gateway erreichbar“; höchstens
+  6 + N Entitäten, nie eine je Ziel. Es gibt sie nur bei eingeschaltetem Modul; Ausschalten
+  entfernt sie aus der Entity-Registry. Ohne Daten ist der Wert `None` (unbekannt), nie 0.
+- **Zwei Vorfallstypen der Netzwerk-Intelligenz (`net_rules.py`, `net_engine.py`).**
+  `wan_gateway_changed` (nächster Hop eines Routers hat gewechselt) und `dns_server_changed`
+  (die Menge seiner DNS-Server hat gewechselt), beide Schwere „info“, ohne Cooldown, nie
+  Wurzel. Sie werden nur von Ursachen **desselben Routers** übernommen: `wan_down` dieses
+  Routers sowie `router_unreachable` und `system_reboot` dieses Routers (nur wenn die
+  Änderung nach Beginn des Ausfalls liegt); `lan_unreachable` übernimmt wie bisher alles in
+  seinem Fenster. Eine Wurzel eines anderen Routers übernimmt sie nie, und `wan_down` eines
+  anderen Routers nimmt ihre Ereignisse nicht mit. Die bestehende Korrelation, die Schwellen
+  (`DEFAULT_SETTINGS`) und die Wurzelränge bleiben unverändert.
+- **Kontext eines Befunds (`diag_context.py`).** Konfigurationsänderungen (Configuration
+  Manager) und Vorfälle des Security Centers **desselben Routers** im Fenster von 30 min
+  werden als Kontext verknüpft, höchstens `probable` und nie stärker als der Befund selbst;
+  nur Bereiche, die die Klasse technisch erklären können (ein fehlender Standardweg ist ein
+  Routing-Problem, keine VLAN-Änderung). Fehlt eine Quelle oder ist sie aus, steht
+  `context_unavailable` mit Grund, nie „keine Änderung“.
+- **Panel-Tab „Netzwerkdiagnose“** unter Enterprise (nach „Konfiguration“ und „Security
+  Center“): Übersicht, Verlauf, für Administratoren manuelle Diagnose und Einstellungen. Der
+  Tab liest nur über die Routen oben; ausgeschaltet erklärt er, was das Modul tut, ohne
+  Wert. Das Frontend-Bundle ist neu gebaut.
+- **Diagnose-Download:** neuer Block `network_diagnostics` (Zustände, Gründe, Router- und
+  Ziel-IDs, Zähler; ohne Adresse, Host oder Domain). Die neuen Adressfelder des Polls
+  (`wan_status.diag_facts`) werden zusätzlich geschwärzt; die gemeinsame Schlüsselliste
+  `DIAGNOSTICS_TO_REDACT` bleibt unverändert.
+
+### Bekannte Grenzen
+
+- **Keine Tests auf dem Router.** Ping, `nslookup` und `traceroute` auf dem Router gibt es in
+  dieser Version nicht. Vorhanden sind nur die Schnittstelle dafür und die Prüfung, ob ein
+  Router es könnte; es gibt keinen Ausführer und **kein ACL-Recht**, das es erlauben würde.
+  Der Status meldet `router_probes: not_available` (`no_executor`).
+- **Kein externes Ziel ist voreingestellt.** Ohne bestätigte Ziele wird nichts Externes
+  gemessen; Internet- und DNS-Glied bleiben dann unbekannt. Aus dem Poll allein kommen nur
+  Router-, WAN- und Routenfakten. Das Gateway-Glied eines Routers ließe sich nur mit einer
+  Messung am Router direkt messen; deshalb ist der Binärsensor „Gateway erreichbar“ in dieser
+  Version unbekannt (Grund `not_measured`).
+- **Die Detail-Route hat noch keine Ansicht im Panel** (`details` ist nur über HTTP lesbar).
+- **Ziele und Bereichslisten sind im Panel nur lesbar.** Sie enthalten Rechnernamen und
+  Adressen und werden über die Route `settings` geändert, nicht im Panel.
+- **Schwellen sind begründete Annahmen, nicht an echten Daten abgestimmt:** Gewichte und
+  Punktetabellen des Werts, Schwellen und Lernzeit der Baselines.
+- **Die bestehende TCP-Messung des Coordinators bleibt unverändert:** je Poll und Router eine
+  Verbindung von Home Assistant zu `8.8.8.8:53` (`ping_ms`). Ihre Bereinigung folgt in einem
+  eigenen PR; sie gehört nicht zur Netzwerkdiagnose und ist in deren Last nicht enthalten.
+- **Die Jitter-Basislinie** ist als Baustein vorhanden, wird von der Laufzeit aber noch nicht
+  gespeist; Jitter steht nur in den Fenster-Zahlen und im Wert.
+- **Nicht getestet** gegen echte Router, echte Ziele oder eine echte Home-Assistant-Instanz;
+  die Tests laufen ohne Geräte und ohne Netz.
+
 ## [1.46.2] - 2026-11-21
 
 ### Behoben

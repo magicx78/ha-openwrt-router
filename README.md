@@ -39,6 +39,7 @@
 | 🩺 **Netzwerkdiagnose** | Ereignisse, Vorfälle und Health-Scores helfen bei der Fehlersuche. |
 | 🗂️ **Konfiguration** | Optionale Backups, Versionsvergleich und Erkennung von Änderungen. |
 | 🛡️ **Security Center** | Optionale, beobachtende Sicherheitshinweise für das Netzwerk. |
+| 🔎 **Network Diagnostics** | Optionale Prüfung der Kette Router, Gateway, WAN, Internet und DNS (Panel: „Netzwerkdiagnose“). |
 
 Welche Daten verfügbar sind, hängt unter anderem vom Router, seinen Berechtigungen und der Einrichtung ab.
 
@@ -68,6 +69,12 @@ Das optionale Security Center sammelt und bewertet Sicherheitshinweise. Es ist s
 
 ➡️ [Zum Security Center](https://github.com/magicx78/ha-openwrt-router/blob/main/docs/security-center.md)
 
+### 🔎 Network Diagnostics (Netzwerkdiagnose, ab 1.47.0)
+
+Prüft die Kette Router → Gateway → WAN → Internet → DNS und nennt je Glied „gesund“, „beeinträchtigt“, „ausgefallen“ oder „unbekannt“; fehlende Daten gelten nie als gesund. Das Modul ist standardmäßig ausgeschaltet; dann gibt es keine Messung und keine Schreibvorgänge. Es macht keinen zusätzlichen Router-Aufruf je Poll und braucht keine neuen Router-Rechte. Gemessen wird nur von Home Assistant aus (TCP, DNS, HTTP) gegen Ziele, die ein Administrator einrichtet; Tests auf dem Router gibt es noch nicht.
+
+➡️ [Zur Netzwerkdiagnose](https://github.com/magicx78/ha-openwrt-router/blob/main/docs/network-diagnostics.md)
+
 ## `03 /` Installation
 
 **Voraussetzungen**
@@ -93,7 +100,7 @@ Eine manuelle Installation ist ebenfalls möglich. Routervorbereitung, Berechtig
 > [!NOTE]
 > **Aktiv in Entwicklung.** Viele Funktionen aus unserer TODO-Liste sind bereits umgesetzt. Gleichzeitig gibt es offene Punkte, weitere Ideen und Tests auf echter Hardware, an denen wir arbeiten.
 
-**Bereits umgesetzt:** Topologie-Panel, Network Intelligence, Client-Stabilität sowie die ersten Versionen von Configuration Manager und Security Center.
+**Bereits umgesetzt:** Topologie-Panel, Network Intelligence, Client-Stabilität sowie die ersten Versionen von Configuration Manager, Security Center und Network Diagnostics.
 
 **Daran arbeiten wir unter anderem:** weitere Hardware- und Frontend-Tests, Verbesserungen bei Sicherheit und Zuverlässigkeit sowie zusätzliche Funktionen. Ein automatischer Restore und die Verschlüsselung lokaler Konfigurationsarchive stehen noch aus.
 
