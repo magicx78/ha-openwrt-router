@@ -133,3 +133,32 @@ async def test_r3_utilization_is_measured_at_long_read_intervals(disk, every) ->
     (result,) = center.results.values()
     util = result.metrics["utilization"]
     assert util.is_measured, result.utilization.reason
+
+
+# --- R5: the read API tolerates odd ``interfaces`` and bounds the loop ---------------
+
+
+async def test_r5_radio_utilization_tolerates_none_and_bounds_the_names(disk) -> None:
+    import itertools
+
+    from custom_components.openwrt_router.rf_center import READ_INTERFACES_MAX
+
+    coordinator = FakeCoordinator()
+    center, _clock, reader = await new_center(
+        rf_hass(), (entry("e1", options("get_status")), coordinator)
+    )
+    reader.answers[("get_status", "phy1-ap0")] = STATUS_A
+    await poll(center, coordinator, poll_data(uptime=1000))
+    (ref,) = center.results
+    rid = ref.router_id
+    assert center.radio_utilization(rid, 3600, None)  # no TypeError
+    assert center.radio_utilization(rid, 3600, 42)  # not iterable: ignored
+    looked: list[int] = []
+
+    def endless():
+        for i in itertools.count():
+            looked.append(i)
+            yield ""  # invalid, never counted as asked
+
+    center.radio_utilization(rid, 3600, endless())
+    assert len(looked) <= 4 * READ_INTERFACES_MAX + 1
