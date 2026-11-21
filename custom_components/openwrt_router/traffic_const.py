@@ -345,3 +345,67 @@ ACCURACY_NONE: Final = "none"
 PROTO_UNKNOWN: Final = "unknown"
 NOTE_PORT_IS_NO_PROOF: Final = "port_does_not_prove_application"
 NOTE_TLS_NOT_ATTRIBUTED: Final = "tls_not_attributed_to_an_application"
+
+# --- anomaly candidates (Phase F, task §10; plan §5, §10) -----------------------------
+
+# Baselines: robust median / MAD per weekday class and hour.
+BASELINE_LOOKBACK_S: Final = 28 * 86400
+BASELINE_MIN_DAYS: Final = 3
+BASELINE_MIN_VALUES: Final = 6
+MAD_SCALE: Final = 1.4826
+# Spread floor: never narrower than this (bit/s) or this share of the median.
+SPREAD_MIN_BPS: Final = 100_000.0
+SPREAD_REL_FLOOR: Final = 0.1
+# Thresholds in spreads above the median: raise, clear (hysteresis).
+K_RAISE: Final = 6.0
+K_CLEAR: Final = 3.0
+K_SUSTAINED: Final = 3.0
+K_SUSTAINED_CLEAR: Final = 2.0
+# Minimum duration in complete buckets.
+SPIKE_MIN_BUCKETS: Final = 2
+SUSTAINED_MIN_BUCKETS: Final = 6
+DROP_MIN_BUCKETS: Final = 3
+# Sudden drop: at most this share of a median of at least DROP_MIN_MEDIAN_BPS.
+DROP_RATIO: Final = 0.2
+DROP_MIN_MEDIAN_BPS: Final = 1_000_000.0
+# Repeated short bursts within the recent hour.
+BURST_MIN_COUNT: Final = 4
+RECENT_WINDOW_S: Final = 3600
+# Local hours (0-23) counted as night.
+NIGHT_HOURS: Final = frozenset(range(6))
+# Unusual daily volume of one client.
+VOLUME_MIN_DAYS: Final = 5
+VOLUME_MIN_BYTES: Final = 50_000_000
+VOLUME_RATIO: Final = 2.0
+# Brakes against alarm floods.
+CANDIDATE_DEBOUNCE_S: Final = 1800.0
+BUDGET_PER_HOUR: Final = 30
+BUDGET_POINT_PER_HOUR: Final = 2
+BUDGET_POINT_KIND_S: Final = 6 * 3600.0
+# Candidate memory: 100 entries, separate quotas (open/ended vs suppressed).
+MAX_CANDIDATES: Final = 100
+MAX_CANDIDATES_SUPPRESSED: Final = 20
+MAX_SUPPRESSION_RULES: Final = 32
+ANOMALY_EVAL_EVERY_S: Final = 300.0
+# Confidence of a candidate never reaches certainty.
+MAX_CONFIDENCE: Final = 0.9
+
+ANOMALY_STATE_LEARNING: Final = "learning"
+ANOMALY_STATE_ACTIVE: Final = "active"
+ANOMALY_STATE_UNAVAILABLE: Final = "unavailable"
+ANOMALY_STATE_COVERED_BY_NI: Final = "covered_by_network_intelligence"
+
+SUPPRESSED_RULE: Final = "suppression_rule"
+SUPPRESSED_BUDGET_HOUR: Final = "budget_per_hour"
+SUPPRESSED_BUDGET_POINT: Final = "budget_per_point_hour"
+SUPPRESSED_BUDGET_POINT_KIND: Final = "budget_per_point_and_kind"
+SUPPRESSED_STORE_FULL: Final = "candidate_store_full"
+
+REASON_CONNTRACK_NOT_COUNT_FILE: Final = "conntrack_source_not_count_file"
+REASON_FLOW_HISTORY_NOT_BUILT: Final = "flow_history_not_built"
+REASON_NI_RULE: Final = "network_intelligence_rule"
+REASON_NO_CANDIDATE_API: Final = "net_engine_has_no_candidate_api"
+REASON_NOT_PUBLISHED: Final = "core_events_not_bound"
+
+EVENT_ANOMALY_STARTED: Final = "traffic_analytics.anomaly_started"
+EVENT_ANOMALY_ENDED: Final = "traffic_analytics.anomaly_ended"

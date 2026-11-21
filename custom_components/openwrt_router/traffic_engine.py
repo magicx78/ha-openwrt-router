@@ -36,6 +36,10 @@ One fleet-wide engine per Home Assistant instance. Phase B scope:
   also fill a bounded in-memory bucket ring (``series``) behind the
   ``BucketSource`` interface that the history store replaces in Phase I;
   top talkers (``talkers``) read only through it.
+* **Anomaly candidates** (Phase F, ``traffic_anomaly``): at most every
+  ``ANOMALY_EVAL_EVERY_S`` the detector evaluates the ring and publishes
+  start/end as core events (when the event prefix is bound); there is no
+  incident life cycle here (``incident_engine: not_connected``, wish W1).
 * **Settings** live in the core store ``TRAFFIC_COARSE_STORE_KEY`` (private,
   atomic writes); the full history store follows in Phase I.
 
@@ -68,6 +72,7 @@ from .const import (
 )
 from .core_models import CapabilityState, CapabilityStatus, InstallationKeyState
 from .traffic_accounting import TrafficAccounting, TrafficSum, sum_rates
+from .traffic_anomaly import AnomalyDetector
 from .traffic_clients import (
     ClientTracker,
     ClientTrafficView,
@@ -94,12 +99,14 @@ from .traffic_collect import (
     sysfs_samples,
 )
 from .traffic_const import (
+    ANOMALY_EVAL_EVERY_S,
     CAP_FLOW_COLLECTOR,
     CAP_NETDEV_COUNTERS,
     CAP_OFFLOAD_STATE,
     CAP_STATION_COUNTERS,
     CAP_STATION_DETAIL,
     CAPABILITY_PREFIX,
+    CONNTRACK_SOURCE_COUNT_FILE,
     EVENT_PREFIX,
     EXTRA_OPTIONS,
     IDENTITY_KEY_PURPOSE,
@@ -145,6 +152,16 @@ MODULE_KEY_RETRY_S = 300.0
 # Baselines and latest rates are pruned at most this often.
 PRUNE_EVERY_S = 300.0
 _STATUS_SOURCE = "traffic_analytics"
+
+
+def _local_tz() -> Any:
+    """Home Assistant's time zone (local hours of the baselines), else UTC."""
+    try:
+        from homeassistant.util import dt as dt_util
+
+        return dt_util.get_default_time_zone()
+    except Exception:  # noqa: BLE001 - UTC is a safe fallback
+        return UTC
 
 
 # --- settings ------------------------------------------------------------------------------
@@ -333,6 +350,8 @@ class TrafficEngine:
         self.clients = ClientTracker()
         self.series = MemoryBucketRing()
         self.talkers = TalkerBoard(self.series)
+        self.anomalies = AnomalyDetector(self.series, tz=_local_tz())
+        self._last_anomaly_wall: float | None = None
         self._facts: dict[str, StationFacts] = {}
         self.planner = ExtraCallPlanner()
         self.latest: dict[str, Rate] = {}
@@ -518,6 +537,7 @@ class TrafficEngine:
         self._cap_view.pop(rid, None)
         self.accounting.drop_router(rid)
         self.clients.drop_router(rid)
+        self.anomalies.drop_router(rid)
         self.series.drop_router(rid)
         for key in [k for k in self._denied if k[0] == rid]:
             del self._denied[key]
@@ -568,6 +588,8 @@ class TrafficEngine:
         self.accounting.clear()
         self.clients.clear()
         self.series.clear()
+        self.anomalies.clear()
+        self._last_anomaly_wall = None
         self._facts.clear()
         self.latest.clear()
         self.status.clear()
@@ -626,6 +648,7 @@ class TrafficEngine:
                 api.register_event_prefix(EVENT_PREFIX, module=MODULE_NAME)
             )
             binding.events_ok = True
+            self.anomalies.publisher.emit = api.emit
         except (TypeError, ValueError) as err:
             self._fail("event prefix registration", err)
         try:
@@ -645,6 +668,7 @@ class TrafficEngine:
     def _unbind_core(self) -> None:
         binding, self._binding = self._binding, _Binding()
         self._module_key = None
+        self.anomalies.publisher.emit = None
         for remove in reversed(binding.removers):
             try:
                 remove()
@@ -934,6 +958,7 @@ class TrafficEngine:
             self.counters["stale_polls"] += 1
         self._snapshots[rid] = snapshot
         self._maybe_prune(now)
+        self._maybe_evaluate_anomalies()
         self._refresh_caps()
         self._plan_extras(entry_id, snapshot)
 
@@ -983,6 +1008,23 @@ class TrafficEngine:
         self.clients.prune(now)
         tracked = set(self.clients.refs())
         self._facts = {r: f for r, f in self._facts.items() if r in tracked}
+
+    def _maybe_evaluate_anomalies(self) -> None:
+        """Phase F: evaluate the ring at most every ANOMALY_EVAL_EVERY_S."""
+        wall = self.wall()
+        last = self._last_anomaly_wall
+        if last is not None and 0 <= wall - last < ANOMALY_EVAL_EVERY_S:
+            return
+        self._last_anomaly_wall = wall
+        sources = {
+            rid: CONNTRACK_SOURCE_COUNT_FILE
+            for rid, status in self.status.items()
+            if status.conntrack_count is not None
+        }
+        try:
+            self.anomalies.evaluate(wall, conntrack_sources=sources)
+        except Exception as err:  # noqa: BLE001 - never disturbs processing
+            self._fail("anomaly evaluation", err)
 
     def rates_of(self, router_id: str) -> list[Rate]:
         """Latest rate per point of ``router_id`` (copies of references only)."""
@@ -1204,6 +1246,7 @@ class TrafficEngine:
             "accounting": self.accounting.summary(),
             "clients": self.clients.summary(),
             "series": self.series.summary(),
+            "anomalies": self.anomalies.summary(),
             "extra_calls": {
                 **self.planner.counters,
                 "blocked": dict(self.blocked_counts),
