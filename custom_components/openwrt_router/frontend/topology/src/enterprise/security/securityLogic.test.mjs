@@ -12,6 +12,7 @@ import {
   SecurityApiError,
   TIMELINE_KIND_LABEL,
   buildSettingsUpdate,
+  coverageFleetText,
   detectionNotes,
   detectorSource,
   devicesObserved,
@@ -20,6 +21,7 @@ import {
   factorText,
   filtersAreDefault,
   flaggedDeviceCount,
+  fleetText,
   formatRelativeTs,
   formatTs,
   incidentCounts,
@@ -454,7 +456,8 @@ test('review4 panel: the store limits parse per class; unknown values stay unkno
   assert.deepEqual(o.limits, {
     incidentCap: 100, incidentsCapDropped: 0, logIncidentQuota: 50, logIncidents: 50,
     incidentsLogQuotaDropped: 7, otherIncidentQuota: 50, otherIncidents: 12,
-    incidentsOtherQuotaDropped: 2, eventsThrottled: null,
+    incidentsOtherQuotaDropped: 2, wifiIncidentQuota: null, otherReservedNonWifi: null,
+    wifiIncidents: null, incidentsWifiQuotaDropped: null, eventsThrottled: null,
   });
   const lines = limitLines(o.limits);
   assert.ok(lines.some(l => /Logzeilen/.test(l.name) && l.value === '50 von höchstens 50' && l.tone === 'warn'));
@@ -465,6 +468,24 @@ test('review4 panel: the store limits parse per class; unknown values stay unkno
   assert.ok(lines.some(l => /Obergrenze/.test(l.name) && l.value === '0' && l.tone === 'muted'));
   assert.ok(!lines.some(l => /[Gg]edrosselt/.test(l.name))); // unknown: not shown as 0
   assert.deepEqual(limitLines(parseOverview({}).limits), []);
+});
+
+test('low4 panel: the Wi-Fi share of the other class and its reserve are shown (1.46.2)', () => {
+  const o = parseOverview({ limits: {
+    other_incident_quota: 50, other_incidents: 42, wifi_incident_quota: 40, other_reserved_non_wifi: 10,
+    wifi_incidents: 40, incidents_wifi_quota_dropped: 60,
+  } });
+  assert.equal(o.limits.wifiIncidentQuota, 40);
+  assert.equal(o.limits.otherReservedNonWifi, 10);
+  const lines = limitLines(o.limits);
+  const share = lines.find(l => /^Davon WLAN/.test(l.name));
+  assert.ok(share && share.value === '40 von höchstens 40' && share.tone === 'warn');
+  assert.match(share.name, /10 Plätze bleiben für Konfiguration und Geräte/);
+  assert.ok(lines.some(l => /WLAN-Quote voll/.test(l.name) && l.value === '60' && l.tone === 'warn'));
+  // unknown stays unknown: no share line without the backend values
+  assert.ok(!limitLines(parseOverview({ limits: { other_incident_quota: 50, other_incidents: 1 } }).limits)
+    .some(l => /WLAN-Quote|Davon WLAN/.test(l.name)));
+  assert.equal(TIMELINE_KIND_LABEL.wifi_quota_reached, 'Quote für WLAN-Hinweise erreicht');
 });
 
 test('review3 panel: rate_limited is a German limitation; the log path counts limited routers', () => {
@@ -485,7 +506,7 @@ test('review3 panel: rate_limited is a German limitation; the log path counts li
 });
 
 test('review3 panel: every timeline kind of the backend has a German label (drift guard)', () => {
-  for (const k of ['log_quota_reached', 'other_quota_reached', 'incident_seen_again', 'cap_reached']) {
+  for (const k of ['log_quota_reached', 'other_quota_reached', 'wifi_quota_reached', 'incident_seen_again', 'cap_reached']) {
     assert.ok(TIMELINE_KIND_LABEL[k] && TIMELINE_KIND_LABEL[k] !== k, k);
   }
   const py = join(here, '..', '..', '..', '..', 'security_center.py');
@@ -514,4 +535,50 @@ test('review3 panel: 409 not_ready and the guard refusal (403) get their own und
 test('review3 panel: from_logs is a strict flag on incidents', () => {
   const o = parseOverview({ incidents: [{ id: 'sec_1', from_logs: true }, { id: 'sec_2', from_logs: 'yes' }, { id: 'sec_3' }] });
   assert.deepEqual(o.incidents.map(i => i.fromLogs), [true, false, false]);
+});
+
+test('cov panel: fleet sources say "von N von M Routern"; unknown stays unknown', () => {
+  assert.equal(fleetText({ routersDelivering: 1, routers: 2, rateLimited: 0 }), 'von 1 von 2 Routern');
+  assert.equal(fleetText({ routersDelivering: 1, routers: 1, rateLimited: 0 }), 'von 1 von 1 Router');
+  assert.equal(fleetText({ routersDelivering: 0, routers: 2, rateLimited: 0 }), 'von keinem der 2 Router');
+  assert.equal(fleetText({ routersDelivering: 0, routers: 1, rateLimited: null }), 'von keinem Router');
+  // a rate-limited supplier stays "eingeschränkt"
+  assert.match(fleetText({ routersDelivering: 1, routers: 2, rateLimited: 1 }), /^von 1 von 2 Routern, eingeschränkt/);
+  // unknown counts are never guessed
+  assert.equal(fleetText({ routersDelivering: null, routers: 2, rateLimited: 0 }), null);
+  assert.equal(fleetText({ routersDelivering: 1, routers: 0, rateLimited: 0 }), null);
+  assert.equal(fleetText(null), null);
+  assert.equal(fleetText(undefined), null);
+  const o = parseOverview({ coverage: { fleet: { a: { routers_delivering: 'x', routers: 'y' }, b: 3 } } });
+  assert.deepEqual(o.coverage.fleet, {});
+  assert.deepEqual(parseOverview({}).coverage.fleet, {});
+});
+
+test('cov panel: the log path view and the coverage list show the same N of M', () => {
+  const FW = 'security.center.firewall_log';
+  const DNS = 'security.center.dns_query_log';
+  const o = parseOverview({
+    coverage: {
+      value: 85, available: [FW], stale: [], missing: [DNS],
+      fleet: {
+        [FW]: { routers_delivering: 1, routers: 2, rate_limited: 0 },
+        [DNS]: { routers_delivering: 0, routers: 2, rate_limited: 0 },
+      },
+    },
+    log_path: {
+      setting: 'syslog', receiver: null, rate_limited_routers: 0,
+      status: [
+        { source: FW, availability: 'available', reason: 'ok', last_ok: 1, routers_delivering: 1, routers: 2, rate_limited: 0 },
+        { source: DNS, availability: 'not_available', reason: 'no_data_yet', last_ok: null, routers_delivering: 0, routers: 2, rate_limited: 0 },
+      ],
+    },
+  });
+  for (const s of o.logPath.status) {
+    assert.equal(fleetText(s.fleet), coverageFleetText(o.coverage, s.source), s.source);
+  }
+  assert.equal(coverageFleetText(o.coverage, FW), 'von 1 von 2 Routern');
+  assert.equal(coverageFleetText(o.coverage, 'config.drift'), null); // worst-status sources: no N of M
+  // per-router statuses carry no fleet counts
+  const d = parseDetectionsView({ sources: { r1: { [FW]: { source: FW, availability: 'not_available', reason: 'sender_unknown' } } } });
+  assert.equal(d.sources.r1[0].fleet, null);
 });

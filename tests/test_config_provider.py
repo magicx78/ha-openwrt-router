@@ -950,7 +950,9 @@ async def test_uci_snapshot_request_never_asks_for_the_archive() -> None:
     assert "cgi" not in methods(api) and "ssh" not in methods(api)
     assert version.meta.backup_type is BackupType.UCI_SNAPSHOT
     assert version.meta.status is VersionStatus.OK
-    assert not any(w.startswith("archive_") for w in version.meta.warnings)
+    # No archive failure is claimed; 1.46.1 only says none was attempted.
+    archive = [w for w in version.meta.warnings if w.startswith("archive_")]
+    assert archive and all(w.startswith("archive_not_attempted:") for w in archive)
 
     api = FakeApi()
     await collect(api, fetch_method="uci")
@@ -1730,42 +1732,50 @@ async def test_probe_without_archive_rights() -> None:
     assert not {"cgi", "ssh"} & set(methods(api))
 
 
+_UNKNOWN = (CapabilityState.UNKNOWN, CapabilityReason.NOT_PROBED)
+
+
 @pytest.mark.parametrize(
-    ("access", "packages", "state", "reason"),
+    ("access", "packages", "shown", "asks"),
     [
-        # rpcd gives no clear answer: unknown until the first backup.
-        (None, PACKAGES, CapabilityState.UNKNOWN, CapabilityReason.NOT_PROBED),
-        (
-            OpenWrtConfigFetchIncompleteError("odd"),
-            PACKAGES,
-            CapabilityState.UNKNOWN,
-            CapabilityReason.NOT_PROBED,
-        ),
-        # Right granted, but no package list to see cgi-io in.
-        (True, None, CapabilityState.UNKNOWN, CapabilityReason.NOT_PROBED),
+        # rpcd gives no clear answer: unknown; the first backup finds out.
+        (None, PACKAGES, _UNKNOWN, True),
+        (OpenWrtConfigFetchIncompleteError("odd"), PACKAGES, _UNKNOWN, True),
+        # Right granted, no package list: presence unknown, so never shown
+        # as available, but the run still asks for the archive (PR 59 R2).
+        (True, None, _UNKNOWN, True),
         # Right granted, package list known, cgi-io not installed.
         (
             True,
             {k: v for k, v in PACKAGES.items() if k != "cgi-io"},
-            CapabilityState.UNAVAILABLE,
-            CapabilityReason.NOT_DETECTED,
+            (CapabilityState.UNAVAILABLE, CapabilityReason.NOT_DETECTED),
+            False,
         ),
     ],
 )
 async def test_probe_never_creates_a_backup(
-    access: Outcome, packages: Outcome, state: CapabilityState, reason: str
+    access: Outcome, packages: Outcome, shown: tuple[Any, str], asks: bool
 ) -> None:
-    """Review M1: rights and presence only; never a sysupgrade on the router."""
+    """Review M1: rights and presence only; never a sysupgrade on the router.
+
+    What is shown and what the run does are separate: the cgi path is never
+    shown available without evidence, yet an unclear one is asked for. The
+    SSH user is not root, so only the cgi path decides.
+    """
     boom = AssertionError("the probe must not fetch an archive")
-    api = FakeApi(cgi=boom, ssh=boom, access=access, packages=packages)
-    caps = await ConfigManagerProvider().async_probe(make_conn(api), make_ctx())
+    api = FakeApi(cgi=boom, ssh=boom, access=access, packages=packages, root=False)
+    provider = ConfigManagerProvider()
+    caps = await provider.async_probe(make_conn(api), make_ctx())
     cgi = caps[Capability.CONFIG_CGI_BACKUP]
-    assert (cgi.state, cgi.reason) == (state, reason)
+    assert (cgi.state, cgi.reason) == shown
     assert not {"cgi", "ssh"} & set(methods(api))
     assert "backup_access" in methods(api)
-    # Archive state unknown at best: the dry run is never claimed available.
-    dry_run = caps[Capability.CONFIG_RESTORE_DRY_RUN]
-    assert dry_run.state is not CapabilityState.AVAILABLE
+    archive = BackupType.FULL_ARCHIVE if asks else BackupType.UCI_SNAPSHOT
+    assert provider.default_backup_type(router_record()) is archive
+    # No archive proven by a probe: the dry run is never claimed available.
+    assert (
+        caps[Capability.CONFIG_RESTORE_DRY_RUN].state is not CapabilityState.AVAILABLE
+    )
 
 
 async def test_probe_of_offline_router_is_unknown() -> None:

@@ -19,7 +19,12 @@ English reason. Hard rules (plan 2):
   ``dest_zone_unknown`` or ``capacity``) or when an "any source" factor
   misses one of its expected sources. Its reason always says so ("none
   (partial: ...)", never a plain "none"), and a limitation lowers the
-  coverage by half the factor's share of the weights.
+  coverage by half the factor's share of the weights;
+* limitations never make the coverage drop when a source arrives (1.46.2):
+  a factor's limitation costs nothing while one of its expected sources is
+  not usable (the missing source is already counted in full), and all
+  limitations together cost less than one source share
+  (``LIMITATION_SHARE_CAP`` of ``100 / len(expected)``).
 
 No clock, no I/O: inputs are counts and :class:`SourceStatus` values.
 """
@@ -46,6 +51,10 @@ FACTOR_COVERAGE: Final = "detection_coverage"
 
 PERFECT_SCORE: Final = 100
 MAX_PARTIAL_SCORE: Final = 99
+# All limitations together cost at most this fraction of one source share
+# (1.46.2): a source that arrives with a limitation always raises the
+# coverage, so neither coverage nor cap can drop.
+LIMITATION_SHARE_CAP: Final = 0.5
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -362,7 +371,7 @@ def compute_score(
     expected = frozenset(expected)
     cov = monitoring_coverage(statuses, expected, stale_credit=stale_credit)
     limits = {r.id: _limits_of(limitations, r.id) for r in rules}
-    coverage = _limited_coverage(cov.coverage, rules, limits, statuses)
+    coverage = _limited_coverage(cov.coverage, rules, limits, statuses, expected)
     cap = score_cap(coverage)
     filled = {**values, FACTOR_COVERAGE: float(100 - coverage)}
     factors = tuple(
@@ -401,14 +410,32 @@ def _limited_coverage(
     rules: tuple[FactorRule, ...],
     limits: Mapping[str, tuple[str, ...]],
     statuses: Mapping[str, SourceStatus],
+    expected: frozenset[str] = DEFAULT_EXPECTED_SOURCES,
 ) -> int:
-    """Coverage minus half the weight share of every limited factor."""
+    """Coverage minus half the weight share of every limited factor.
+
+    Monotonic (1.46.2): a limited factor costs nothing while one of its
+    expected sources is not usable (that gap is already counted as a
+    missing source), and the total is capped below one source share, so a
+    source that arrives with a limitation never lowers the coverage.
+    """
     weights = sum(r.weight for r in rules if r.id != FACTOR_COVERAGE)
-    if weights <= 0:
+    if weights <= 0 or not expected:
         return coverage
-    share = sum(
-        r.weight
-        for r in rules
-        if r.id != FACTOR_COVERAGE and limits.get(r.id) and r.assessable(statuses)
+
+    def counts(rule: FactorRule) -> bool:
+        if rule.id == FACTOR_COVERAGE or not limits.get(rule.id):
+            return False
+        if not rule.assessable(statuses):
+            return False
+        return all(
+            (st := statuses.get(s)) is not None and st.usable
+            for s in rule.sources & expected
+        )
+
+    share = sum(r.weight for r in rules if counts(r))
+    deduction = min(
+        100.0 * 0.5 * share / weights,
+        LIMITATION_SHARE_CAP * 100.0 / len(expected),
     )
-    return max(0, math.floor(coverage - 100.0 * 0.5 * share / weights))
+    return max(0, math.floor(coverage - deduction))

@@ -1,0 +1,62 @@
+{
+  "_comment": "synthetisch, Struktur nach Live-Prüfung 2026-11-18",
+  "phy": "phy1",
+  "ssid": "example-ssid",
+  "bssid": "02:00:00:00:01:01",
+  "country": "00",
+  "mode": "Master",
+  "channel": 36,
+  "center_chan1": 42,
+  "frequency": 5180,
+  "frequency_offset": 0,
+  "txpower": 20,
+  "txpower_offset": 0,
+  "quality": 45,
+  "quality_max": 70,
+  "signal": -65,
+  "noise": -92,
+  "bitrate": 1200900,
+  "encryption": {
+    "enabled": true,
+    "wpa": [
+      2,
+      3
+    ],
+    "authentication": [
+      "psk",
+      "sae"
+    ],
+    "ciphers": [
+      "ccmp"
+    ]
+  },
+  "htmodes": [
+    "HT20",
+    "HT40",
+    "VHT20",
+    "VHT40",
+    "VHT80",
+    "VHT160",
+    "HE20",
+    "HE40",
+    "HE80",
+    "HE160"
+  ],
+  "hwmodes": [
+    "ac",
+    "ax",
+    "n"
+  ],
+  "hwmodes_text": "802.11ac/ax/n",
+  "hwmode": "ax",
+  "htmode": "HE80",
+  "hardware": {
+    "id": [
+      5315,
+      30997,
+      5315,
+      30997
+    ],
+    "name": "MediaTek MT7981"
+  }
+}

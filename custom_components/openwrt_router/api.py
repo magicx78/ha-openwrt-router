@@ -1190,6 +1190,9 @@ class OpenWrtAPI:
         # after a Wi-Fi change made through this integration.
         self._hostapd_ifaces: list[str] | None = None
         self._hostapd_ifaces_at: float = 0.0
+        # iwinfo info per device read by get_ap_interface_details() in this
+        # poll; get_sta_interface_details() takes it once (1.48.0 fix).
+        self._iwinfo_info_seen: dict[str, dict[str, Any]] = {}
         # Kernel AP ifnames the radios reported on the previous call; an
         # ifname that newly appears and is not in the cache triggers one
         # re-discovery (not one per poll when it is never discoverable).
@@ -2038,6 +2041,8 @@ class OpenWrtAPI:
             }
             if interfaces:
                 status["wan_found"] = False
+                # Network Diagnostics (1.47.0): additive, see end of file
+                _diag_add_facts(status, interfaces, None)
             return status
 
         # Extract basic info
@@ -2080,6 +2085,8 @@ class OpenWrtAPI:
                 and str(route.get("mask")) == "0"
                 for route in routes
             )
+        # Network Diagnostics (1.47.0): additive, see end of file
+        _diag_add_facts(status, interfaces, wan_iface)
         return status
 
     async def _read_wan_counters(self, device: str) -> tuple[int | None, int | None]:
@@ -2215,7 +2222,7 @@ class OpenWrtAPI:
                 self._wifi_method = None
         if self._wifi_method == "iwinfo":
             try:
-                result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
+                result = await self._iwinfo_info_by_device()
                 return self._parse_iwinfo_info(result)
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                 self._wifi_method = None
@@ -2237,7 +2244,7 @@ class OpenWrtAPI:
             )
 
         try:
-            result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
+            result = await self._iwinfo_info_by_device()
             parsed = self._parse_iwinfo_info(result)
             if parsed:
                 self._wifi_method = "iwinfo"
@@ -2289,6 +2296,9 @@ class OpenWrtAPI:
             List of dicts, one per discovered AP interface.
         """
         result: list[dict[str, Any]] = []
+        # Per-device answers of this poll, reused once by the STA detection.
+        seen: dict[str, dict[str, Any]] = {}
+        self._iwinfo_info_seen = seen
 
         # Primary path: iwinfo per-device (requires hostapd iface discovery)
         ifnames: list[str] = self._hostapd_ifaces or []
@@ -2300,6 +2310,8 @@ class OpenWrtAPI:
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                 _LOGGER.debug("iwinfo/info unavailable for %s", ifname)
                 continue
+            if isinstance(info, dict):
+                seen[ifname] = info
 
             band = self._detect_band(ifname, info)
             ssid: str = info.get("ssid", "")
@@ -2323,6 +2335,9 @@ class OpenWrtAPI:
                     "noise": info.get("noise"),
                     "quality": info.get("quality"),
                     "quality_max": info.get("quality_max"),
+                    # WiFi RF Intelligence (1.48.0): already in this answer.
+                    "country": info.get("country"),
+                    "txpower_offset": info.get("txpower_offset"),
                 }
             )
             _LOGGER.debug(
@@ -2481,7 +2496,11 @@ class OpenWrtAPI:
         # --- Step 1: iwinfo enumeration ----------------------------------
         candidates: list[tuple[str, dict[str, Any]]] = []
         try:
-            info_all = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
+            # Reuse the per-device answers of get_ap_interface_details() of
+            # this poll (one-shot); only without them enumerate the devices.
+            info_all, self._iwinfo_info_seen = self._iwinfo_info_seen, {}
+            if not info_all:
+                info_all = await self._iwinfo_info_by_device()
             if isinstance(info_all, dict):
                 for ifname, iface_data in info_all.items():
                     if not isinstance(iface_data, dict):
@@ -2555,6 +2574,32 @@ class OpenWrtAPI:
                 "STA interfaces (UCI fallback): %s",
                 [(r["ifname"], r["mode"]) for r in result],
             )
+        return result
+
+    async def _iwinfo_info_by_device(self) -> dict[str, Any]:
+        """``iwinfo info`` of every wireless device, keyed by device name.
+
+        rpcd's iwinfo plugin needs a ``device``: ``iwinfo info {}`` answers
+        UBUS_STATUS_INVALID_ARGUMENT ("Invalid argument"). So the devices are
+        enumerated with ``iwinfo devices`` and asked one by one; a device that
+        fails is skipped. MethodNotFound/response errors of the enumeration
+        propagate like the old single call did.
+        """
+        listing = await self._call(UBUS_IWINFO_OBJECT, "devices", {})
+        devices = listing.get("devices") if isinstance(listing, dict) else None
+        result: dict[str, Any] = {}
+        for device in devices if isinstance(devices, list) else []:
+            if not isinstance(device, str) or not device:
+                continue
+            try:
+                info = await self._call(
+                    UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {"device": device}
+                )
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                _LOGGER.debug("iwinfo/info unavailable for %s", device)
+                continue
+            if isinstance(info, dict):
+                result[device] = info
         return result
 
     async def get_connected_clients(
@@ -2767,6 +2812,10 @@ class OpenWrtAPI:
                     # live). Momentary values only, see plan 2.12.
                     rate = sta.get("rate")
                     rate = rate if isinstance(rate, dict) else {}
+                    # WiFi RF Intelligence (1.48.0): cumulative airtime (us)
+                    # of this answer, for the airtime share per radio.
+                    airtime = sta.get("airtime")
+                    airtime = airtime if isinstance(airtime, dict) else {}
                     clients.append(
                         {
                             CLIENT_KEY_MAC: mac,
@@ -2782,6 +2831,8 @@ class OpenWrtAPI:
                             or sta.get("tx_bytes"),
                             "rx_rate": rate.get("rx"),
                             "tx_rate": rate.get("tx"),
+                            "airtime_rx": airtime.get("rx"),
+                            "airtime_tx": airtime.get("tx"),
                         }
                     )
                 _LOGGER.debug(
@@ -6425,8 +6476,9 @@ class OpenWrtAPI:
     ) -> dict[str, Any]:
         """Return one UCI config in the ubus ``uci get`` shape.
 
-        ubus ``uci get {config}`` first. When rpcd denies it (ACL, also the
-        cached ``_acl_blocked`` entry) or does not know it, ``uci show
+        ubus ``uci get {config}`` first. A ubus "not found" is final
+        (``OpenWrtConfigFetchNotAvailableError``, no SSH). When rpcd denies it
+        (ACL, also the cached ``_acl_blocked`` entry), ``uci show
         <config>`` over the pinned SSH runner ``ssh`` (none = no SSH), parsed
         by ``config_snapshot.parse_uci_show`` (anonymous sections as
         ``@type[n]``, multi-line quoted values kept whole, so both paths hash
@@ -6441,9 +6493,10 @@ class OpenWrtAPI:
             ValueError: Invalid config name (no call made).
             OpenWrtConfigFetchPermissionError: ubus denied and SSH not usable
                 or denied.
-            OpenWrtConfigFetchHostKeyError: ubus denied and the pin rules
-                refuse SSH.
-            OpenWrtConfigFetchNotAvailableError: Config does not exist.
+            OpenWrtConfigFetchHostKeyError: ubus denied (ACL) and the pin
+                rules refuse SSH.
+            OpenWrtConfigFetchNotAvailableError: Config does not exist (ubus
+                "not found", or ``uci show`` says so after an ACL denial).
             OpenWrtConfigFetchIncompleteError: Reply without values, or
                 ``uci show`` failed otherwise.
             OpenWrtConfigFetchTooLargeError: ``uci show`` output too large.
@@ -6451,11 +6504,23 @@ class OpenWrtAPI:
             OpenWrtResponseError: from the ubus call (no SSH attempt).
         """
         name = _config_check_name(config)
+        params = {"config": name}
         try:
-            result = await self._call(UBUS_UCI_OBJECT, UBUS_UCI_GET, {"config": name})
+            result = await self._call(UBUS_UCI_OBJECT, UBUS_UCI_GET, params)
         except OpenWrtMethodNotFoundError:
+            # _call puts an ACL denial into _acl_blocked; a ubus "not found"
+            # (status 3/4) leaves it out. rpcd answers "not found" only after
+            # its ACL checks passed, so no SSH attempt is made for it: an SSH
+            # failure must never turn an absent config into a read error.
+            if (
+                self._acl_cache_key(UBUS_UCI_OBJECT, UBUS_UCI_GET, params)
+                not in self._acl_blocked
+            ):
+                raise OpenWrtConfigFetchNotAvailableError(
+                    f"uci get {name}: config not found via ubus"
+                ) from None
             _LOGGER.debug(
-                "uci get %s on %s denied or unknown via ubus, trying SSH uci show",
+                "uci get %s on %s denied by the rpcd ACL, trying SSH uci show",
                 name,
                 self._host,
             )
@@ -7738,3 +7803,921 @@ async def _ssh_run_pinned_inner(
             stderr_truncated=stderr_cut,
         )
     raise OpenWrtAuthError(f"SSH login to {api._host} refused")
+
+
+# =============================================================================
+# --- Network Diagnostics (release 1.47.0) ------------------------------------
+# =============================================================================
+# Home-Assistant-side measurements of the ``net_diagnostics`` module
+# (diag_runtime.py) and the pure reader of the poll's interface dump. This
+# block is the only place where the module touches the network. Rules:
+#
+# * A probe accepts only a ``diag_targets.PinnedTarget`` (an address vetted by
+#   the target registry). Hostnames are resolved here (``async_diag_resolve``)
+#   and every resolved address must pass ``check_resolved`` (DNS-rebinding
+#   guard) before any connect; ``may_query`` decides whether the resolver may
+#   be asked at all.
+# * No shell, no subprocess, no raw sockets: an ICMP target is SKIPPED on the
+#   Home Assistant side (ping needs privileges HA does not have).
+# * Every probe has a hard timeout, never raises (except CancelledError and
+#   a wrong argument type) and returns one normalised ``ProbeResult``. Its
+#   evidence holds codes and numbers only, never an address, a name or a
+#   response body.
+# * Load per probe (no loss, no retry): TCP connect about 7 packets (3
+#   handshake, 4 close); DNS 2 packets (1 query, 1 answer); HTTP about 11
+#   packets (TCP plus request, response and ACKs). Resolving a hostname
+#   target adds what HA's system resolver sends (normally 2 to 4 packets).
+# * The HTTP probe asks for a no-content URL only, sends no credentials, no
+#   cookies and no body, reads the status line only and never follows a
+#   redirect (a 3xx is a FAILED result with the status code as evidence).
+#
+# Socket primitives sit in ``DiagTransport`` so tests can redirect a vetted
+# public address to a loopback server; production code uses the defaults.
+
+import secrets
+import socket
+from collections.abc import Awaitable
+from dataclasses import dataclass as _diag_dataclass
+from dataclasses import field as _diag_field
+
+from .diag_model import (
+    AddressFamily,
+    MeasurementPoint,
+    ProbeKind,
+    ProbeOutcome,
+    ProbeResult,
+    Stage,
+)
+from .diag_targets import (
+    PendingTarget,
+    PinnedTarget,
+    Refusal,
+    TargetKind,
+    TargetRegistry,
+    TargetScope,
+    normalize_host,
+)
+
+DIAG_FACTS_VERSION = 1
+DIAG_MAX_DNS_SERVERS = 8
+DIAG_TCP_TIMEOUT = 3.0
+DIAG_DNS_TIMEOUT = 2.0
+DIAG_HTTP_TIMEOUT = 5.0
+DIAG_RESOLVE_TIMEOUT = 3.0
+DIAG_HTTP_PATH = "/generate_204"
+DIAG_DNS_PORT = 53
+DIAG_HTTP_PORT = 80
+DIAG_HTTP_USER_AGENT = "HomeAssistant-OpenWrt-Diagnostics/1"
+DIAG_HTTP_MAX_STATUS_LINE = 512
+DIAG_DNS_MAX_ANSWER = 4096
+# Approximate packets per probe (no loss, no retry), for the load report.
+DIAG_PACKETS_PER_PROBE: dict[str, int] = {"tcp": 7, "dns": 2, "http": 11, "icmp": 0}
+
+# Reasons of a SKIPPED / FAILED / ERROR result (``evidence["reason"]``).
+DIAG_REASON_ICMP_NOT_ON_HA = "icmp_not_available_on_ha"
+DIAG_REASON_NO_QUERY_NAME = "no_query_name"
+DIAG_REASON_QUERY_NOT_ALLOWED = "query_not_allowed"
+DIAG_REASON_BAD_ANSWER = "bad_answer"
+DIAG_REASON_BAD_RESPONSE = "bad_response"
+DIAG_REASON_REDIRECT = "redirect_not_followed"
+DIAG_REASON_UNEXPECTED_STATUS = "unexpected_status"
+DIAG_REASON_INTERNAL = "internal_error"
+
+_DIAG_PATH_RE = re.compile(r"/[A-Za-z0-9._~/-]{0,63}")
+_DIAG_STATUS_RE = re.compile(rb"HTTP/1\.[01] ([0-9]{3})(?: [^\r\n]*)?\r?\n?")
+_DNS_QTYPES = {"A": 1, "AAAA": 28}
+_DNS_RCODES = {
+    0: ProbeOutcome.OK,
+    2: ProbeOutcome.SERVFAIL,
+    3: ProbeOutcome.NXDOMAIN,
+    5: ProbeOutcome.REFUSED,
+}
+
+
+# --- poll facts (pure) ------------------------------------------------------------
+
+
+def _diag_ip(value: Any) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    if not isinstance(value, str) or "%" in value:
+        return None
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def _diag_is_loopback_iface(iface: dict[str, Any]) -> bool:
+    device = iface.get("l3_device") or iface.get("device")
+    return iface.get("interface") == "loopback" or device == "lo"
+
+
+def _diag_default_routes(iface: dict[str, Any]) -> Iterator[tuple[int, Any]]:
+    """``(ip version, next hop)`` of each default route on the top level."""
+    routes = iface.get("route")
+    if not isinstance(routes, list):
+        return
+    for route in routes:
+        if not isinstance(route, dict) or str(route.get("mask")) != "0":
+            continue
+        target = route.get("target")
+        if target == "0.0.0.0":
+            yield 4, route.get("nexthop")
+        elif target == "::":
+            yield 6, route.get("nexthop")
+
+
+def _diag_gateway(nexthop: Any, version: int) -> dict[str, str] | None:
+    addr = _diag_ip(nexthop)
+    if addr is None or addr.version != version or addr.is_unspecified:
+        return None  # point-to-point link (pppoe) or no next hop
+    return {"address": str(addr)}
+
+
+def diag_interface_facts(interfaces: Any, wan_iface: Any = None) -> dict[str, Any]:
+    """Diagnosis facts from ``network.interface dump`` (pure, never raises).
+
+    Reads the top level of each interface only (``inactive`` is ignored: it
+    lists what netifd would configure, not what is active). Kept next to the
+    WAN status as ``wan_status["diag_facts"]``; absent means unknown (SSH
+    fallback, dump failed). Addresses sit under ``"address"`` keys so the
+    diagnostics redaction removes them.
+
+    Returns:
+        {
+            "version": 1,
+            "interfaces": int,          # without loopback
+            "interfaces_up": int,
+            "ipv4_default_route": bool,
+            "ipv6_default_route": bool,
+            "ipv4_gateway": {"address": str} | None,   # next hop
+            "ipv6_gateway": {"address": str} | None,
+            "dns_servers": [{"address": str}, ...],    # up interfaces, <= 8
+            "ipv6_global_address": bool,
+        }
+    """
+    items = (
+        [i for i in interfaces if isinstance(i, dict)]
+        if isinstance(interfaces, list)
+        else []
+    )
+    items = [i for i in items if not _diag_is_loopback_iface(i)]
+    up = [i for i in items if i.get("up") is True]
+    # the WAN interface first: its default route and resolvers count first
+    ordered = sorted(up, key=lambda i: i is not wan_iface)
+    has_route = {4: False, 6: False}
+    gateway: dict[int, dict[str, str] | None] = {4: None, 6: None}
+    servers: list[dict[str, str]] = []
+    seen: set[str] = set()
+    global_v6 = False
+    for iface in ordered:
+        for version, nexthop in _diag_default_routes(iface):
+            has_route[version] = True
+            if gateway[version] is None:
+                gateway[version] = _diag_gateway(nexthop, version)
+        dns = iface.get("dns-server")
+        for raw in dns if isinstance(dns, list) else ():
+            addr = _diag_ip(raw)
+            if addr is None or str(addr) in seen:
+                continue
+            if len(servers) < DIAG_MAX_DNS_SERVERS:
+                seen.add(str(addr))
+                servers.append({"address": str(addr)})
+        v6 = iface.get("ipv6-address")
+        for entry in v6 if isinstance(v6, list) else ():
+            addr = _diag_ip(entry.get("address") if isinstance(entry, dict) else None)
+            if addr is not None and addr.version == 6 and addr.is_global:
+                global_v6 = True
+    return {
+        "version": DIAG_FACTS_VERSION,
+        "interfaces": len(items),
+        "interfaces_up": len(up),
+        "ipv4_default_route": has_route[4],
+        "ipv6_default_route": has_route[6],
+        "ipv4_gateway": gateway[4],
+        "ipv6_gateway": gateway[6],
+        "dns_servers": servers,
+        "ipv6_global_address": global_v6,
+    }
+
+
+def _diag_add_facts(status: dict[str, Any], interfaces: Any, wan_iface: Any) -> None:
+    """Add ``status["diag_facts"]`` (new key only; never fails the poll).
+
+    Called by ``get_wan_status`` after every existing field is set; no
+    existing key is read or changed. Left out when the facts cannot be
+    derived (absent = unknown).
+    """
+    try:
+        facts = diag_interface_facts(interfaces, wan_iface)
+        # part 2: LAN interfaces that should be up and are not (new key)
+        facts["down_interfaces"] = diag_down_interfaces(interfaces, wan_iface)
+        status["diag_facts"] = facts
+    except Exception as err:  # noqa: BLE001 - diagnosis facts are optional
+        _LOGGER.debug("Diagnosis facts not derived (%s)", type(err).__name__)
+
+
+# Protocols of uplinks and tunnels: their state is the WAN stage's business
+# (or none of ours), never a LAN interface down.
+_DIAG_UPLINK_PROTOS = frozenset(
+    {
+        "dhcp",
+        "dhcpv6",
+        "pppoe",
+        "pppoa",
+        "ppp",
+        "3g",
+        "qmi",
+        "ncm",
+        "mbim",
+        "modemmanager",
+        "6in4",
+        "6to4",
+        "6rd",
+        "dslite",
+        "map",
+        "wireguard",
+        "openvpn",
+        "l2tp",
+        "pptp",
+        "vti",
+        "gre",
+        "gretap",
+        "vxlan",
+        "xfrm",
+    }
+)
+DIAG_MAX_DOWN_INTERFACES = 16
+_DIAG_IFNAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,32}")
+
+
+def diag_down_interfaces(
+    interfaces: Any, wan_iface: Any = None
+) -> list[dict[str, Any]]:
+    """LAN interfaces that netifd should bring up but are down (pure).
+
+    Counted: not loopback, not the WAN interface, no uplink or tunnel
+    protocol, ``autostart`` not False and ``up`` not True. ``vlan`` marks an
+    interface on a VLAN device (``eth0.20``, ``br-lan.20``) or named like
+    one. Names only (logical interface names, no address), at most 16.
+    """
+    items = (
+        [i for i in interfaces if isinstance(i, dict)]
+        if isinstance(interfaces, list)
+        else []
+    )
+    out: list[dict[str, Any]] = []
+    for iface in items:
+        name = iface.get("interface")
+        if (
+            iface is wan_iface
+            or _diag_is_loopback_iface(iface)
+            or not isinstance(name, str)
+            or not _DIAG_IFNAME_RE.fullmatch(name)
+            or name.startswith("wan")
+            or iface.get("up") is True
+            or iface.get("autostart") is False
+            or str(iface.get("proto") or "").lower() in _DIAG_UPLINK_PROTOS
+        ):
+            continue
+        device = iface.get("l3_device") or iface.get("device") or ""
+        vlan = (isinstance(device, str) and "." in device) or "vlan" in name.lower()
+        out.append({"name": name, "vlan": bool(vlan)})
+        if len(out) >= DIAG_MAX_DOWN_INTERFACES:
+            break
+    return out
+
+
+# --- transport ----------------------------------------------------------------------
+
+
+async def _diag_getaddrinfo(host: str, port: int) -> list[Any]:
+    loop = asyncio.get_running_loop()
+    return await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+
+
+class _DiagDatagram(asyncio.DatagramProtocol):
+    """One answer on a connected UDP socket (the kernel drops other senders)."""
+
+    def __init__(self, future: asyncio.Future[bytes]) -> None:
+        self._future = future
+
+    def datagram_received(self, data: bytes, addr: Any) -> None:
+        if not self._future.done():
+            self._future.set_result(data)
+
+    def error_received(self, exc: Exception) -> None:
+        if not self._future.done():
+            self._future.set_exception(exc)
+
+
+async def _diag_exchange_datagram(
+    host: str, port: int, payload: bytes, timeout: float
+) -> bytes:
+    """Send one datagram, wait for one answer (no retry)."""
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[bytes] = loop.create_future()
+    transport, _ = await loop.create_datagram_endpoint(
+        lambda: _DiagDatagram(future), remote_addr=(host, port)
+    )
+    try:
+        transport.sendto(payload)
+        return await asyncio.wait_for(future, timeout)
+    finally:
+        transport.close()
+
+
+@_diag_dataclass(frozen=True)
+class DiagTransport:
+    """Socket primitives of the probes; tests replace them (loopback)."""
+
+    open_connection: Callable[..., Awaitable[Any]] = _diag_field(
+        default=asyncio.open_connection
+    )
+    exchange_datagram: Callable[[str, int, bytes, float], Awaitable[bytes]] = (
+        _diag_field(default=_diag_exchange_datagram)
+    )
+    getaddrinfo: Callable[[str, int], Awaitable[list[Any]]] = _diag_field(
+        default=_diag_getaddrinfo
+    )
+    monotonic: Callable[[], float] = _diag_field(default=time.monotonic)
+    wall: Callable[[], float] = _diag_field(default=time.time)
+
+
+DIAG_DEFAULT_TRANSPORT = DiagTransport()
+
+
+# --- resolution ---------------------------------------------------------------------
+
+
+async def async_diag_resolve(
+    registry: TargetRegistry,
+    target_id: str,
+    *,
+    resolver_scope: TargetScope = TargetScope.EXTERNAL,
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+    timeout: float = DIAG_RESOLVE_TIMEOUT,
+) -> PinnedTarget | Refusal:
+    """Target id -> usable ``PinnedTarget`` or the refusal (never raises).
+
+    An IP literal is pinned by the registry without any packet. A hostname
+    is resolved with Home Assistant's system resolver, whose scope the
+    caller states (``resolver_scope``; external unless an admin declared it
+    internal): ``may_query`` must allow asking it, and ``check_resolved``
+    must accept every address before one is pinned. A failed resolution is
+    ``Refusal.RESOLVED_EMPTY``.
+    """
+    resolved = registry.resolve(target_id)
+    if not isinstance(resolved, PendingTarget):
+        return resolved
+    if not registry.may_query(resolved.name, resolver_scope):
+        return Refusal.INTERNAL_NAME
+    try:
+        infos = await asyncio.wait_for(
+            transport.getaddrinfo(resolved.name, 0), timeout=timeout
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # noqa: BLE001 - gaierror, timeout, ...
+        _LOGGER.debug(
+            "Diagnosis target %s did not resolve (%s)",
+            resolved.target_id,
+            type(err).__name__,
+        )
+        return Refusal.RESOLVED_EMPTY
+    addresses: list[str] = []
+    for info in infos or ():
+        try:
+            address = str(info[4][0])
+        except (IndexError, TypeError, KeyError):
+            return Refusal.RESOLVED_INVALID
+        if address not in addresses:
+            addresses.append(address)
+    return registry.check_resolved(resolved, addresses)
+
+
+# --- probes -------------------------------------------------------------------------
+
+
+def _diag_family(target: PinnedTarget) -> AddressFamily:
+    return AddressFamily.IPV4 if target.address.version == 4 else AddressFamily.IPV6
+
+
+def _diag_check_target(target: Any, kinds: tuple[TargetKind, ...]) -> PinnedTarget:
+    if not isinstance(target, PinnedTarget):
+        raise TypeError("diagnosis probes accept a PinnedTarget only")
+    if target.kind not in kinds:
+        raise ValueError("probe does not fit the target kind")
+    return target
+
+
+def _diag_ms(seconds: float) -> float:
+    return round(max(0.0, seconds) * 1000.0, 3)
+
+
+@_diag_dataclass(frozen=True)
+class _DiagRun:
+    """What every result of one probe call shares."""
+
+    target: PinnedTarget
+    kind: ProbeKind
+    stage: Stage
+    subject: str | None
+    via: frozenset[Stage]
+    transport: DiagTransport
+    timestamp: float
+    started: float
+
+    @classmethod
+    def begin(
+        cls,
+        target: PinnedTarget,
+        kind: ProbeKind,
+        stage: Stage,
+        subject: str | None,
+        via: frozenset[Stage],
+        transport: DiagTransport,
+    ) -> _DiagRun:
+        return cls(
+            target,
+            kind,
+            stage,
+            subject,
+            frozenset(via),
+            transport,
+            transport.wall(),
+            transport.monotonic(),
+        )
+
+    def elapsed(self) -> float:
+        return self.transport.monotonic() - self.started
+
+    def result(
+        self,
+        outcome: ProbeOutcome,
+        *,
+        rtt_s: float | None = None,
+        sent: int | None = None,
+        received: int | None = None,
+        evidence: dict[str, Any] | None = None,
+    ) -> ProbeResult:
+        return ProbeResult(
+            point=MeasurementPoint.ha(),
+            target_id=self.target.target_id,
+            kind=self.kind,
+            stage=self.stage,
+            family=_diag_family(self.target),
+            outcome=outcome,
+            timestamp=self.timestamp,
+            duration_ms=_diag_ms(self.elapsed()),
+            rtt_ms=None if rtt_s is None else _diag_ms(rtt_s),
+            sent=sent,
+            received=received,
+            via=self.via,
+            subject=self.subject,
+            evidence=evidence or {},
+        )
+
+    def failure(self, err: BaseException, **evidence: Any) -> ProbeResult:
+        """Result of a failed connect / exchange."""
+        if isinstance(err, TimeoutError):
+            outcome, received, reason = ProbeOutcome.TIMEOUT, 0, "timeout"
+        elif isinstance(err, ConnectionRefusedError):
+            # an RST (or ICMP port unreachable) came back: the host answered
+            outcome, received, reason = ProbeOutcome.REFUSED, 1, "connection_refused"
+        elif isinstance(err, OSError):
+            outcome, received = ProbeOutcome.FAILED, 0
+            reason = f"os_error_{err.errno or 0}"
+        else:
+            outcome, received, reason = ProbeOutcome.ERROR, 0, DIAG_REASON_INTERNAL
+        return self.result(
+            outcome, sent=1, received=received, evidence={"reason": reason, **evidence}
+        )
+
+
+async def _diag_close(writer: Any) -> None:
+    with contextlib.suppress(Exception):
+        writer.close()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+
+
+async def async_diag_tcp_probe(
+    target: PinnedTarget,
+    *,
+    stage: Stage,
+    subject: str | None = None,
+    via: frozenset[Stage] = frozenset(),
+    timeout: float = DIAG_TCP_TIMEOUT,
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+) -> ProbeResult:
+    """TCP connect to the pinned address and port, then close (~7 packets)."""
+    pinned = _diag_check_target(target, (TargetKind.TCP,))
+    run = _DiagRun.begin(pinned, ProbeKind.TCP, stage, subject, via, transport)
+    try:
+        _reader, writer = await asyncio.wait_for(
+            transport.open_connection(pinned.host, pinned.port), timeout=timeout
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # noqa: BLE001 - every failure is a result
+        return run.failure(err)
+    rtt = run.elapsed()
+    await _diag_close(writer)
+    return run.result(ProbeOutcome.OK, rtt_s=rtt, sent=1, received=1)
+
+
+def diag_dns_query(qname: str, qtype: str, query_id: int) -> bytes:
+    """Wire form of one recursive DNS query (RFC 1035), no EDNS."""
+    header = struct.pack("!HHHHHH", query_id & 0xFFFF, 0x0100, 1, 0, 0, 0)
+    labels = b"".join(
+        bytes([len(label)]) + label.encode("ascii") for label in qname.split(".")
+    )
+    return header + labels + b"\x00" + struct.pack("!HH", _DNS_QTYPES[qtype], 1)
+
+
+def diag_dns_answer(data: bytes, query_id: int) -> tuple[int, int] | None:
+    """``(rcode, answer count)`` of an answer to ``query_id``, else None."""
+    if not isinstance(data, bytes | bytearray):
+        return None
+    if len(data) < 12 or len(data) > DIAG_DNS_MAX_ANSWER:
+        return None
+    ident, flags, _qd, ancount, _ns, _ar = struct.unpack("!HHHHHH", data[:12])
+    if ident != query_id or not flags & 0x8000:  # not our id, or not a response
+        return None
+    return flags & 0x000F, ancount
+
+
+async def async_diag_dns_probe(
+    target: PinnedTarget,
+    *,
+    query_name: str | None,
+    may_query: Callable[[Any, TargetScope], bool],
+    stage: Stage = Stage.DNS,
+    qtype: str = "A",
+    subject: str | None = None,
+    via: frozenset[Stage] = frozenset(),
+    timeout: float = DIAG_DNS_TIMEOUT,
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+) -> ProbeResult:
+    """One UDP query to the pinned resolver, no retry (2 packets).
+
+    ``may_query`` (``TargetRegistry.may_query``) must allow asking a resolver
+    of the target's scope for ``query_name``; otherwise nothing is sent and
+    the result is SKIPPED. Answer codes: NOERROR -> OK (also without
+    records), NXDOMAIN, SERVFAIL, REFUSED; any other code -> ERROR.
+    """
+    pinned = _diag_check_target(target, (TargetKind.DNS,))
+    run = _DiagRun.begin(pinned, ProbeKind.DNS, stage, subject, via, transport)
+    name = normalize_host(query_name) if query_name else None
+    if not isinstance(name, str):
+        return run.result(
+            ProbeOutcome.SKIPPED, evidence={"reason": DIAG_REASON_NO_QUERY_NAME}
+        )
+    if qtype not in _DNS_QTYPES or not may_query(name, pinned.scope):
+        return run.result(
+            ProbeOutcome.SKIPPED, evidence={"reason": DIAG_REASON_QUERY_NOT_ALLOWED}
+        )
+    query_id = secrets.randbits(16)
+    payload = diag_dns_query(name, qtype, query_id)
+    try:
+        data = await asyncio.wait_for(
+            transport.exchange_datagram(
+                pinned.host, pinned.port or DIAG_DNS_PORT, payload, timeout
+            ),
+            timeout=timeout,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # noqa: BLE001 - every failure is a result
+        return run.failure(err, qtype=qtype)
+    rtt = run.elapsed()
+    answer = diag_dns_answer(data, query_id)
+    if answer is None:
+        return run.result(
+            ProbeOutcome.ERROR,
+            rtt_s=rtt,
+            sent=1,
+            received=1,
+            evidence={"reason": DIAG_REASON_BAD_ANSWER, "qtype": qtype},
+        )
+    rcode, count = answer
+    return run.result(
+        _DNS_RCODES.get(rcode, ProbeOutcome.ERROR),
+        rtt_s=rtt,
+        sent=1,
+        received=1,
+        evidence={"rcode": rcode, "answers": count, "qtype": qtype},
+    )
+
+
+def diag_http_request(target: PinnedTarget, path: str) -> bytes:
+    """GET of a no-content URL: no credentials, no cookies, no body."""
+    if not isinstance(path, str) or not _DIAG_PATH_RE.fullmatch(path):
+        raise ValueError("invalid no-content path")
+    host = target.server_name or (
+        f"[{target.host}]" if target.address.version == 6 else target.host
+    )
+    port = target.port or DIAG_HTTP_PORT
+    if port != DIAG_HTTP_PORT:
+        host = f"{host}:{port}"
+    return (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"User-Agent: {DIAG_HTTP_USER_AGENT}\r\n"
+        "Accept: */*\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+
+
+async def _diag_http_status(
+    run: _DiagRun, reader: Any, writer: Any, request: bytes, deadline: float
+) -> bytes:
+    writer.write(request)
+    await asyncio.wait_for(writer.drain(), timeout=max(0.0, deadline - run.elapsed()))
+    return await asyncio.wait_for(
+        reader.readuntil(b"\n"), timeout=max(0.0, deadline - run.elapsed())
+    )
+
+
+async def async_diag_http_probe(
+    target: PinnedTarget,
+    *,
+    stage: Stage,
+    path: str = DIAG_HTTP_PATH,
+    subject: str | None = None,
+    via: frozenset[Stage] = frozenset(),
+    timeout: float = DIAG_HTTP_TIMEOUT,
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+) -> ProbeResult:
+    """Plain-HTTP GET of a no-content URL on the pinned address (~11 packets).
+
+    204 -> OK. Anything else is FAILED with the status code as evidence; a
+    redirect is never followed. Only the status line is read.
+    """
+    pinned = _diag_check_target(target, (TargetKind.HTTP,))
+    request = diag_http_request(pinned, path)
+    run = _DiagRun.begin(pinned, ProbeKind.HTTP, stage, subject, via, transport)
+    try:
+        reader, writer = await asyncio.wait_for(
+            transport.open_connection(pinned.host, pinned.port or DIAG_HTTP_PORT),
+            timeout=timeout,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # noqa: BLE001 - every failure is a result
+        return run.failure(err)
+    rtt = run.elapsed()
+    try:
+        line = await _diag_http_status(run, reader, writer, request, timeout)
+    except asyncio.CancelledError:
+        await _diag_close(writer)
+        raise
+    except (asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+        await _diag_close(writer)
+        return run.result(
+            ProbeOutcome.FAILED,
+            rtt_s=rtt,
+            sent=1,
+            received=0,
+            evidence={"reason": DIAG_REASON_BAD_RESPONSE},
+        )
+    except Exception as err:  # noqa: BLE001 - every failure is a result
+        await _diag_close(writer)
+        return run.failure(err)
+    await _diag_close(writer)
+    match = _DIAG_STATUS_RE.fullmatch(bytes(line[:DIAG_HTTP_MAX_STATUS_LINE]))
+    if match is None:
+        return run.result(
+            ProbeOutcome.FAILED,
+            rtt_s=rtt,
+            sent=1,
+            received=1,
+            evidence={"reason": DIAG_REASON_BAD_RESPONSE},
+        )
+    status = int(match.group(1))
+    if status == 204:
+        return run.result(
+            ProbeOutcome.OK, rtt_s=rtt, sent=1, received=1, evidence={"status": status}
+        )
+    reason = (
+        DIAG_REASON_REDIRECT if 300 <= status < 400 else DIAG_REASON_UNEXPECTED_STATUS
+    )
+    return run.result(
+        ProbeOutcome.FAILED,
+        rtt_s=rtt,
+        sent=1,
+        received=1,
+        evidence={"status": status, "reason": reason},
+    )
+
+
+_DIAG_PROBE_KIND = {
+    TargetKind.ICMP: ProbeKind.ICMP,
+    TargetKind.DNS: ProbeKind.DNS,
+    TargetKind.TCP: ProbeKind.TCP,
+    TargetKind.HTTP: ProbeKind.HTTP,
+}
+
+
+def diag_skipped_probe(
+    target: PinnedTarget,
+    *,
+    stage: Stage,
+    reason: str,
+    subject: str | None = None,
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+) -> ProbeResult:
+    """SKIPPED result without any packet (ICMP on HA, a refusal, ...)."""
+    pinned = _diag_check_target(target, tuple(TargetKind))
+    run = _DiagRun.begin(
+        pinned, _DIAG_PROBE_KIND[pinned.kind], stage, subject, frozenset(), transport
+    )
+    return run.result(ProbeOutcome.SKIPPED, evidence={"reason": reason})
+
+
+async def async_diag_probe(
+    target: PinnedTarget,
+    *,
+    stage: Stage,
+    may_query: Callable[[Any, TargetScope], bool],
+    query_name: str | None = None,
+    http_path: str = DIAG_HTTP_PATH,
+    subject: str | None = None,
+    via: frozenset[Stage] = frozenset(),
+    transport: DiagTransport = DIAG_DEFAULT_TRANSPORT,
+) -> ProbeResult:
+    """The probe that fits the target kind (ICMP: SKIPPED, no packet)."""
+    pinned = _diag_check_target(target, tuple(TargetKind))
+    if pinned.kind is TargetKind.TCP:
+        return await async_diag_tcp_probe(
+            pinned, stage=stage, subject=subject, via=via, transport=transport
+        )
+    if pinned.kind is TargetKind.DNS:
+        return await async_diag_dns_probe(
+            pinned,
+            query_name=query_name,
+            may_query=may_query,
+            stage=stage,
+            subject=subject,
+            via=via,
+            transport=transport,
+        )
+    if pinned.kind is TargetKind.HTTP:
+        return await async_diag_http_probe(
+            pinned,
+            stage=stage,
+            path=http_path,
+            subject=subject,
+            via=via,
+            transport=transport,
+        )
+    return diag_skipped_probe(
+        pinned,
+        stage=stage,
+        reason=DIAG_REASON_ICMP_NOT_ON_HA,
+        subject=subject,
+        transport=transport,
+    )
+
+
+# --- end Network Diagnostics
+
+
+# --- WiFi RF Intelligence (1.48.0) ---
+# The extra RF reads. Each is switched on separately in the options (all off
+# by default) and scheduled by rf_collector.RfCollector: every N polls, a
+# floor per radio, one fetch per kind and router at a time, a time limit per
+# round. Read-only and bounded; there is no scan here and no other kind can
+# be asked for. Module functions on purpose: nothing in OpenWrtAPI changes.
+
+RF_KIND_GET_STATUS = "get_status"  # hostapd.<if> get_status (one AP if per radio)
+RF_KIND_ASSOCLIST = "assoclist"  # iwinfo assoclist (per AP interface)
+RF_KIND_FREQLIST = "freqlist"  # iwinfo freqlist (setup / after a change)
+RF_KIND_TXPOWERLIST = "txpowerlist"  # iwinfo txpowerlist (setup / after a change)
+RF_KIND_SURVEY = "survey"  # iwinfo survey (later stage, capability gated)
+RF_KINDS = (
+    RF_KIND_GET_STATUS,
+    RF_KIND_ASSOCLIST,
+    RF_KIND_FREQLIST,
+    RF_KIND_TXPOWERLIST,
+    RF_KIND_SURVEY,
+)
+# Kernel interface names as iwinfo/hostapd use them (phy0-ap0, wlan1, ...).
+_RF_DEVICE_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+# List answers are cut here (a radio lists < 100 channels, an AP seldom has
+# more clients); the cut is reported in ``_truncated``, never silent.
+RF_MAX_LIST_ENTRIES = 256
+
+RF_REASON_PERMISSION = "permission_denied"
+RF_REASON_NOT_FOUND = "method_not_found"
+RF_REASON_INVALID_ARGUMENT = "invalid_argument"
+RF_REASON_TIMEOUT = "timeout"
+RF_REASON_UNREACHABLE = "unreachable"
+RF_REASON_AUTH = "auth_failed"
+RF_REASON_RESPONSE = "response_error"
+RF_REASON_INVALID_DEVICE = "invalid_device"
+
+
+class RfReadError(Exception):
+    """An RF read failed; ``unsupported`` says a retry will not help.
+
+    ``reason`` is one of the ``RF_REASON_*`` codes, never router text.
+    Method not found, permission denied and invalid argument are answers of
+    the router about the read itself (unsupported: no retry storm); timeouts
+    and transport errors are transient (unreachable, retried with backoff).
+    """
+
+    def __init__(self, reason: str, *, unsupported: bool) -> None:
+        """Error with a reason code."""
+        super().__init__(reason)
+        self.reason = reason
+        self.unsupported = unsupported
+
+
+def rf_read_error(err: BaseException) -> RfReadError:
+    """Classify an error of ``OpenWrtAPI._call`` for the capability state."""
+    text = str(err).lower()
+    if isinstance(err, OpenWrtMethodNotFoundError):
+        if "acl" in text or "access denied" in text or "not permitted" in text:
+            return RfReadError(RF_REASON_PERMISSION, unsupported=True)
+        return RfReadError(RF_REASON_NOT_FOUND, unsupported=True)
+    if isinstance(err, OpenWrtAuthError):
+        return RfReadError(RF_REASON_AUTH, unsupported=False)
+    if isinstance(err, OpenWrtTimeoutError):
+        return RfReadError(RF_REASON_TIMEOUT, unsupported=False)
+    if isinstance(err, OpenWrtConnectionError):
+        return RfReadError(RF_REASON_UNREACHABLE, unsupported=False)
+    if isinstance(err, OpenWrtResponseError) and text.startswith("ubus error 2 "):
+        # UBUS_STATUS_INVALID_ARGUMENT: the driver/rpcd cannot do it here.
+        return RfReadError(RF_REASON_INVALID_ARGUMENT, unsupported=True)
+    return RfReadError(RF_REASON_RESPONSE, unsupported=False)
+
+
+def _rf_bounded(result: Any) -> dict[str, Any]:
+    """The answer as a dict with list results cut to RF_MAX_LIST_ENTRIES."""
+    if not isinstance(result, dict):
+        return {}
+    entries = result.get("results")
+    if isinstance(entries, list) and len(entries) > RF_MAX_LIST_ENTRIES:
+        return {
+            **result,
+            "results": entries[:RF_MAX_LIST_ENTRIES],
+            "_truncated": len(entries) - RF_MAX_LIST_ENTRIES,
+        }
+    return dict(result)
+
+
+async def async_rf_read(api: OpenWrtAPI, kind: str, device: str) -> dict[str, Any]:
+    """One RF read of ``kind`` for one kernel interface ``device``.
+
+    Network calls: exactly one ubus call (plus the re-login ``_call`` makes
+    on a first ACL denial). Raises :class:`RfReadError` for every failure
+    and ValueError for a kind that is not an RF read (there is no scan).
+    """
+    if kind not in RF_KINDS:
+        raise ValueError(f"not an RF read: {kind!r}")
+    if not isinstance(device, str) or not _RF_DEVICE_RE.match(device):
+        raise RfReadError(RF_REASON_INVALID_DEVICE, unsupported=True)
+    if kind == RF_KIND_GET_STATUS:
+        obj, method, params = f"hostapd.{device}", "get_status", {}
+    else:
+        obj, method, params = UBUS_IWINFO_OBJECT, kind, {"device": device}
+    try:
+        result = await api._call(obj, method, params)
+    except (
+        OpenWrtMethodNotFoundError,
+        OpenWrtAuthError,
+        OpenWrtTimeoutError,
+        OpenWrtConnectionError,
+        OpenWrtResponseError,
+    ) as err:
+        raise rf_read_error(err) from None
+    return _rf_bounded(result)
+
+
+async def async_rf_get_status(api: OpenWrtAPI, device: str) -> dict[str, Any]:
+    """``hostapd.<device> get_status`` (airtime counters, channel, DFS)."""
+    return await async_rf_read(api, RF_KIND_GET_STATUS, device)
+
+
+async def async_rf_assoclist(api: OpenWrtAPI, device: str) -> dict[str, Any]:
+    """``iwinfo assoclist`` of one AP interface (retries, failed, times)."""
+    return await async_rf_read(api, RF_KIND_ASSOCLIST, device)
+
+
+async def async_rf_freqlist(api: OpenWrtAPI, device: str) -> dict[str, Any]:
+    """``iwinfo freqlist`` of one radio (allowed channels, flags)."""
+    return await async_rf_read(api, RF_KIND_FREQLIST, device)
+
+
+async def async_rf_txpowerlist(api: OpenWrtAPI, device: str) -> dict[str, Any]:
+    """``iwinfo txpowerlist`` of one radio (power steps)."""
+    return await async_rf_read(api, RF_KIND_TXPOWERLIST, device)
+
+
+async def async_rf_survey(api: OpenWrtAPI, device: str) -> dict[str, Any]:
+    """``iwinfo survey`` of one radio (later stage, capability gated)."""
+    return await async_rf_read(api, RF_KIND_SURVEY, device)
+
+
+# --- end WiFi RF Intelligence

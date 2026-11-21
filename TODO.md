@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-20 · Version: v1.46.0
+Stand: 2026-11-21 · Version: v1.47.0
 
 ---
 
@@ -91,6 +91,12 @@ Branch `claude/config-manager-d9fdac`. Nutzerdoku: `docs/configuration-manager.m
       Freigabe durch einen anderen Admin erzwungen werden können.
 - [ ] **`authSig` auf GET-Routen ablehnen.** Lesende Routen sollen eine mitgeschickte
       Signatur nicht still annehmen, sondern die Anfrage mit 400 abweisen.
+- [ ] **Ausgang des SSH-Archivwegs merken** (PR 59, Nachprüfung). Root auf HTTPS, `cgi-io`
+      fehlt, SSH-Port von Home Assistant aus zu: Jeder Tageslauf fordert das Archiv an und
+      endet unvollständig (`unreachable`/`timeout`), bis die nächste Probe läuft. Wie beim
+      cgi-Weg (`_cgi_seen`) den echten Ausgang des SSH-Wegs merken, damit Anzeige
+      (`config.ssh_root`) und Lauf-Entscheidung früher nachziehen. Seit 1.46.1 nennt das
+      Panel den SSH-Weg und den nächsten Schritt ehrlich.
 
 ### Security Center (Plan `docs/plans/2026-11-17-security-center.md`, 1.46.0)
 
@@ -121,6 +127,32 @@ Branch `claude/security-center-6fdcdd`. Nutzerdoku: `docs/security-center.md`.
       DNS-Hinweisen behalten. Datenschutzfolgen vorher klären: Namen verraten Surfverhalten,
       landen im Speicher, in der Zeitleiste und auf dem Core-Bus; nur für Administratoren,
       gekürzt, mit eigener Speicherfrist und Doku-Hinweis.
+
+### Network Diagnostics / Netzwerkdiagnose (Plan `docs/plans/2026-11-17-net-diagnostics.md`, 1.47.0)
+
+Branch `claude/net-diagnostics-f989ed`. Nutzerdoku: `docs/network-diagnostics.md`.
+
+- [x] Laufzeit (aus / nicht bereit / bereit), Messungen von Home Assistant (TCP, DNS, HTTP) gegen
+      bestätigte Ziele mit SSRF-Schutz, Kette Router → Gateway → WAN → Internet → DNS,
+      Ursachenklassen, Statistik, Baselines, Netzqualitätswert mit Abdeckung, begrenzter
+      Verlaufsspeicher, Routen, 6 Flotten-Sensoren und ein Gateway-Binärsensor je Router,
+      Vorfälle `wan_gateway_changed` und `dns_server_changed`, Kontext aus Configuration Manager
+      und Security Center, Panel-Tab, Diagnose-Block (1.47.0).
+- [ ] **Router-seitige Tests** (Ping, `nslookup`, `traceroute` auf dem Router): heute nur
+      Schnittstelle und Fähigkeitsprüfung, kein Ausführer und kein ACL-Recht; braucht eine
+      gestufte Core-ACL mit Einzelfreigabe.
+- [ ] **Ansicht für die Detail-Route** (`/details`) im Panel.
+- [ ] **Ziele und Bereichslisten im Panel bearbeiten:** heute nur Anzeige, Änderung über die
+      Route `settings`.
+- [ ] **Schwellen an echten Daten abstimmen:** Gewichte und Punktetabellen des Werts,
+      Baseline-Schwellen und Lernzeit sind begründete Annahmen.
+- [ ] **Jitter-Baseline speisen:** der Baustein existiert, die Laufzeit nutzt ihn nicht.
+- [ ] **Gateway-Glied messen:** der Binärsensor „Gateway erreichbar“ ist ohne Router-Messung
+      unbekannt (`not_measured`).
+- [ ] **TCP-Messung des Coordinators zu `8.8.8.8:53` (`ping_ms`) bereinigen**, eigener PR; sie ist
+      unverändert und nicht Teil der Last der Netzwerkdiagnose.
+- [ ] **Live-Prüfung gegen echte Router, Ziele und eine echte Home-Assistant-Instanz** (nur mit
+      Freigabe); bisher laufen die Tests ohne Geräte und ohne Netz.
 
 ### Client-Stabilität (Plan `docs/plans/2026-11-16-client-stability.md`, 1.42.0)
 
@@ -159,6 +191,13 @@ B1–B9 auf `claude/client-stability-f9a22b`. Nutzerdoku: `docs/client-stability
 - [ ] **`infra` je Radio statt je Router** bei `wifi_radio_change`: heute
       markiert ein Kanalwechsel 300 s lang den ganzen Router. Braucht in
       `client_history.py` eine `infra`-Zuordnung je Router und Radio.
+      1.48.0 Teil 2 (WiFi RF) hat das geprüft und NICHT gebaut (offene
+      Frage): Logzeilen kennen ihr Interface (Phy sauber), aber ein Client,
+      der nur aus der Liste verschwindet, kennt in `client_history` nur sein
+      Band, nicht die Phy; bei zwei Radios im selben Band ist Band→Phy nicht
+      eindeutig. Nur die Logzeilen zu verfeinern, würde denselben Abbruch je
+      nach Quelle verschieden einstufen. Dafür müsste `ClientObs` die Phy
+      mitführen.
 - [ ] **Gastclients früher entfernen** (gesamt online < 1 h, seit 7 d weg;
       private MACs ohne Wiederkehr nach 7 d) – geplant in 4.2, nicht gebaut;
       heute erst nach `retention_days` oder beim Kürzen.
@@ -248,8 +287,7 @@ Alles lesend, Installation und HA-Neustart nur nach OK.
 - [ ] **Befund 14:** `uci_section` im Pfad `network.wireless status` (netifd
       liefert `section` neben `ifname`). Ein Fix ändert die `unique_id` der
       WLAN-Schalter betroffener Router – braucht eine eigene Entscheidung.
-- [ ] **GitHub-Repo-Beschreibung** ohne Versionsnummer (HACS zeigt „v1.4.0“) –
-      nur mit OK.
+- [x] **GitHub-Repo-Beschreibung** ohne fest eingetragene Versionsnummer aktualisiert.
 
 ### HA-Modernisierung (Folgearbeiten aus dem Kompatibilitäts-Review 2026-07)
 

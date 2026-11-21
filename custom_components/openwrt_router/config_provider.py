@@ -65,6 +65,7 @@ from .config_collector import (
 )
 from .config_const import (
     ARCHIVE_CONFIG_PREFIX,
+    ARCHIVE_REQUIRED_CONFIGS,
     CHAIN_SKIP_ERRORS,
     DEFAULT_ARCHIVE_LIMITS,
     ERR_AUTH,
@@ -204,6 +205,11 @@ REASON_NO_ARCHIVE: Final = "provider:no_archive"
 
 # VersionMeta warning codes (``<code>:<item>``, WARNING_CODE_PATTERN).
 WARN_ARCHIVE_UNAVAILABLE: Final = "archive_unavailable"
+# The run asked for no archive at all (1.46.1): ``requested`` when an archive
+# path was available, else one ``<path>.<probe cause>`` item per path
+# (e.g. ``cgi.not_probed``, ``ssh.pin_pending``).
+WARN_ARCHIVE_NOT_ATTEMPTED: Final = "archive_not_attempted"
+NOT_ATTEMPTED_REQUESTED: Final = "requested"
 WARN_ARCHIVE: Final = "archive_warning"
 WARN_UCI_MISSING: Final = "uci_missing"
 WARN_UCI_FAILED: Final = "uci_failed"
@@ -809,6 +815,35 @@ def _archive_failure(fetch: ArchiveFetch) -> tuple[str, bool]:
     return fetch.error_class or ERR_NOT_AVAILABLE, True
 
 
+def _path_failures(
+    order: tuple[str, ...],
+    secure: bool,
+    fetch: ArchiveFetch | None,
+    archive_class: str | None,
+) -> tuple[str, ...]:
+    """``<path>.<class>`` for each archive path of a run without a valid
+    archive (``archive_unavailable`` items, PR 59 review R6).
+
+    cgi on a plain HTTP entry is ``insecure_transport`` (never asked); a
+    path that delivered an archive that failed the check gets the class of
+    that check. When the archive phase's own budget ran out (no chain
+    result), every path of the chain gets ``timeout``. Fixed codes only,
+    never a message.
+    """
+    items: list[str] = []
+    if not secure and FETCH_METHOD_CGI in order:
+        items.append(f"{FETCH_METHOD_CGI}.{REASON_INSECURE_TRANSPORT}")
+    if fetch is None:
+        if archive_class == ERR_TIMEOUT:
+            chain = (m for m in order if secure or m != FETCH_METHOD_CGI)
+            items.extend(f"{method}.{ERR_TIMEOUT}" for method in chain)
+        return tuple(items)
+    for attempt in fetch.attempts:
+        error_class = attempt.error_class or archive_class or ERR_INVALID
+        items.append(f"{attempt.method}.{error_class}")
+    return tuple(items)
+
+
 def _uci_failure(uci: UciCollection) -> str:
     """Error class of a UCI read that gave no config at all."""
     if uci.error_class is not None:
@@ -824,14 +859,17 @@ def _uci_gap(uci: UciCollection | None, uci_stop: str | None) -> str | None:
 
     None when every config was read or reported not_available (absent on
     the router). An abort (unreachable/timeout/auth) gives its own class,
-    single unreadable configs give ``incomplete``.
+    single unreadable configs give ``incomplete``. ``network`` and
+    ``system`` (ARCHIVE_REQUIRED_CONFIGS) exist on every OpenWrt router:
+    absent means the read is not trustworthy, so ``incomplete`` too.
     """
     if uci_stop is not None:
         return uci_stop
     if uci is None:
         return ERR_INCOMPLETE
     if uci.not_tried or any(
-        error_class != ERR_NOT_AVAILABLE for _name, error_class in uci.failed
+        error_class != ERR_NOT_AVAILABLE or name in ARCHIVE_REQUIRED_CONFIGS
+        for name, error_class in uci.failed
     ):
         return ERR_INCOMPLETE
     return None
@@ -928,12 +966,33 @@ def _probed_backup_type(
 
     Plain HTTP always asks for the archive: the collect takes it over the
     pinned SSH path or rejects the run (``insecure_transport``), never a
-    silent UCI-only "ok". TLS keeps the core's own rule: an archive when the
-    probe found an archive path available.
+    silent UCI-only "ok". TLS: an archive when the probe found an archive
+    path available or left one ``not_probed`` (shown as unknown, but the
+    first backup is what finds out; if it fails, the collect keeps the UCI
+    snapshot with its honest status).
     """
-    if not secure or cgi_class is None or ssh_class is None:
+    if not secure:
+        return BackupType.FULL_ARCHIVE
+    if {cgi_class, ssh_class} & {None, _PROBE_NOT_PROBED}:
         return BackupType.FULL_ARCHIVE
     return BackupType.UCI_SNAPSHOT
+
+
+def _not_attempted_items(
+    probed: BackupType | None, causes: tuple[str, str] | None
+) -> tuple[str, ...]:
+    """Items of ``archive_not_attempted`` for a run that asked for no archive.
+
+    ``probed`` / ``causes``: the last probe's backup type and its probe
+    classes of the cgi and SSH path (None: not probed since start).
+    """
+    if probed is BackupType.FULL_ARCHIVE:
+        return (NOT_ATTEMPTED_REQUESTED,)
+    cgi, ssh = causes or (_PROBE_NOT_PROBED, _PROBE_NOT_PROBED)
+    return (
+        f"{FETCH_METHOD_CGI}.{cgi}",
+        f"{FETCH_METHOD_SSH}.{ssh.removeprefix('ssh_')}",
+    )
 
 
 def _as(capability: str, status: CapabilityStatus) -> CapabilityStatus:
@@ -1000,6 +1059,16 @@ class ConfigManagerProvider:
         # router id -> backup type of a run without one, from the last probe
         # (memory only; the core keeps only this provider's probe results).
         self._probed_types: dict[str, BackupType] = {}
+        # router id -> probe classes (cgi, ssh) when no archive path was
+        # available (memory only; named in ``archive_not_attempted``).
+        self._probed_causes: dict[str, tuple[str, str]] = {}
+        # router id -> outcome of the last real cgi archive attempt (None =
+        # delivered a valid archive; permission/not_available = refused).
+        # Memory only; the probe shows it while the package list is
+        # unreadable, a refusal never stops a run from asking (display
+        # only). Not the core's first-use settling: that would also
+        # count an archive that came over SSH.
+        self._cgi_seen: dict[str, str | None] = {}
 
     @property
     def provider_id(self) -> str:
@@ -1200,18 +1269,30 @@ class ConfigManagerProvider:
         return statuses
 
     async def _probe_cgi(
-        self, api: Any, packages: Mapping[str, Any] | None, timeout: float
-    ) -> str | None:
-        """Error class of the cgi-backup path from rights and presence only.
+        self,
+        router_id: str,
+        api: Any,
+        packages: Mapping[str, Any] | None,
+        timeout: float,
+    ) -> tuple[str | None, str | None]:
+        """(shown, decision) error class of the cgi-backup path.
 
-        Never fetches: a fetch makes the router run sysupgrade (review M1).
-        rpcd's ``session access`` answers for the right; the package list
-        read just before says whether cgi-io is installed. What neither
-        settles is ``_PROBE_NOT_PROBED`` (the first backup finds out). A
-        plain HTTP entry is ``insecure_transport`` without asking rpcd.
+        From rights and presence only; never fetches: a fetch makes the
+        router run sysupgrade (review M1). Available needs the right
+        (rpcd's ``session access``) and cgi-io in the package list read
+        just before; without cgi-io it is ``not_available``. No clear rpcd
+        answer is ``_PROBE_NOT_PROBED``; a plain HTTP entry is
+        ``insecure_transport`` without asking rpcd.
+
+        Right held but the list unreadable: shown is the outcome of the last
+        real cgi archive run, else ``_PROBE_NOT_PROBED``. The decision for
+        ``_probed_backup_type`` stays ``_PROBE_NOT_PROBED`` unless that run
+        delivered: a remembered refusal never stops the run from asking
+        (cgi-io may have been installed since). rpcd confirming the right
+        drops a remembered ``permission`` refusal.
         """
         if not api.config_cgi_transport_secure():
-            return REASON_INSECURE_TRANSPORT
+            return REASON_INSECURE_TRANSPORT, REASON_INSECURE_TRANSPORT
         try:
             async with asyncio.timeout(timeout):
                 access = await api.config_backup_access()
@@ -1220,13 +1301,20 @@ class ConfigManagerProvider:
                 raise
             error_class = classify_error(err)
             if error_class in (ERR_UNREACHABLE, ERR_TIMEOUT):
-                return error_class
-            return _PROBE_NOT_PROBED
+                return error_class, error_class
+            return _PROBE_NOT_PROBED, _PROBE_NOT_PROBED
         if access is False:
-            return ERR_PERMISSION
-        if access is not True or packages is None:
-            return _PROBE_NOT_PROBED
-        return None if _CGI_IO_PACKAGE in packages else ERR_NOT_AVAILABLE
+            return ERR_PERMISSION, ERR_PERMISSION
+        if access is not True:
+            return _PROBE_NOT_PROBED, _PROBE_NOT_PROBED
+        if self._cgi_seen.get(router_id) == ERR_PERMISSION:
+            del self._cgi_seen[router_id]
+        if packages is None:
+            seen = self._cgi_seen.get(router_id, _PROBE_NOT_PROBED)
+            return seen, (None if seen is None else _PROBE_NOT_PROBED)
+        if _CGI_IO_PACKAGE not in packages:
+            return ERR_NOT_AVAILABLE, ERR_NOT_AVAILABLE
+        return None, None
 
     async def _probe(
         self, conn: RouterConnection, ctx: ProviderContext
@@ -1281,11 +1369,12 @@ class ConfigManagerProvider:
             )
 
         cgi_class: str | None
+        cgi_decision: str | None
         ssh_class: str | None
         pkg_class: str | None
         if uci_class in (ERR_UNREACHABLE, ERR_TIMEOUT):
             # Dead router: no rights check that would only wait again.
-            cgi_class = ssh_class = pkg_class = uci_class
+            cgi_class = cgi_decision = ssh_class = pkg_class = uci_class
         else:
             known: Mapping[str, Any] | None = None
             try:
@@ -1299,13 +1388,18 @@ class ConfigManagerProvider:
                 has_packages = isinstance(packages, Mapping) and bool(packages)
                 pkg_class = None if has_packages else ERR_NOT_AVAILABLE
                 known = packages if has_packages else None
-            cgi_class = await self._probe_cgi(
-                api, known, self._timeouts[FETCH_PACKAGELIST]
+            cgi_class, cgi_decision = await self._probe_cgi(
+                router_id, api, known, self._timeouts[FETCH_PACKAGELIST]
             )
             ssh_class = self._ssh_class(router_id, api, ctx)
-        self._probed_types[router_id] = _probed_backup_type(
-            api.config_cgi_transport_secure(), cgi_class, ssh_class
+        probed = _probed_backup_type(
+            api.config_cgi_transport_secure(), cgi_decision, ssh_class
         )
+        self._probed_types[router_id] = probed
+        if cgi_decision is not None and ssh_class is not None:
+            self._probed_causes[router_id] = (cgi_class, ssh_class)
+        else:
+            self._probed_causes.pop(router_id, None)
 
         now = utcnow()
         uci = _probe_status(
@@ -1402,6 +1496,20 @@ class ConfigManagerProvider:
         )
         return version
 
+    def _remember_cgi(self, router_id: str, fetch: ArchiveFetch, ok: bool) -> None:
+        """Keep what a real cgi archive attempt proved for the next probe.
+
+        Only clear answers count: a valid archive over cgi (available) or a
+        refusal (permission/not_available). Anything else proves nothing.
+        """
+        for attempt in fetch.attempts:
+            if attempt.method != FETCH_METHOD_CGI:
+                continue
+            if attempt.error_class is None and ok and fetch.method == FETCH_METHOD_CGI:
+                self._cgi_seen[router_id] = None
+            elif attempt.error_class in CHAIN_SKIP_ERRORS:
+                self._cgi_seen[router_id] = attempt.error_class
+
     async def _collect(
         self,
         conn: RouterConnection,
@@ -1465,6 +1573,8 @@ class ConfigManagerProvider:
             elif fetch is not None:
                 archive_class, archive_skipped = _archive_failure(fetch)
         archive_ok = analysis is not None and analysis.ok
+        if fetch is not None:
+            self._remember_cgi(conn.router_id, fetch, archive_ok)
         if order and not secure and not archive_ok and archive_skipped:
             # An archive was asked for, cgi may not run on HTTP and SSH
             # cannot deliver: reject (never a silent UCI-only "ok").
@@ -1582,9 +1692,18 @@ class ConfigManagerProvider:
             else:
                 backup_type, status = BackupType.PARTIAL, VersionStatus.PARTIAL
                 error_class_out = ErrorClass(archive_class or ERR_INCOMPLETE)
+            for item in _path_failures(order, secure, fetch, archive_class):
+                warnings.add(WARN_ARCHIVE_UNAVAILABLE, item)
             if not order and not secure:
                 # UCI-only run on an HTTP entry: say why no archive exists.
                 warnings.add(WARN_ARCHIVE_UNAVAILABLE, REASON_INSECURE_TRANSPORT)
+            if not order:
+                # No archive was asked for: say why, per path (1.46.1).
+                for item in _not_attempted_items(
+                    self._probed_types.get(conn.router_id),
+                    self._probed_causes.get(conn.router_id),
+                ):
+                    warnings.add(WARN_ARCHIVE_NOT_ATTEMPTED, item)
 
         artifacts: dict[str, ArtifactPayload] = {}
         if report is not None and fetch is not None and fetch.data is not None:

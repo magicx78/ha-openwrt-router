@@ -940,7 +940,7 @@ async def test_engine_adds_no_router_calls() -> None:
                 "bytes": {"rx": 1000, "tx": 2000},
                 "packets": {"rx": 10, "tx": 20},
                 "airtime": {"rx": 5, "tx": 6},
-                "rate": {"rx": 433300, "tx": 866700},
+                "rate": {"rx": 43_330_000, "tx": 86_670_000},  # kbit/s x 100
                 "signal": -80,
             }
         },

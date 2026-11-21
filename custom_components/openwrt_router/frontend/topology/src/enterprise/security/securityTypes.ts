@@ -45,11 +45,25 @@ export interface Score {
   routers: number | null;
 }
 
+/**
+ * Fleet source (firewall / DNS log, 1.46.2): available once ONE router
+ * delivered lines; says from how many of the current routers (N of M).
+ * null = not sent / wrongly typed (unknown, never 0).
+ */
+export interface FleetSource {
+  routersDelivering: number | null;
+  routers: number | null;
+  /** Delivering routers whose lines were recently dropped by the rate limit. */
+  rateLimited: number | null;
+}
+
 export interface Coverage {
   value: number | null;
   available: string[];
   stale: string[];
   missing: string[];
+  /** Per fleet source (keyed by source id); other sources are not in here. */
+  fleet: Record<string, FleetSource>;
 }
 
 export interface Incident {
@@ -129,6 +143,8 @@ export interface SourceStatus {
   availability: string;
   reason: string | null;
   lastOk: number | null;
+  /** Only on the fleet status of the log path (N of M routers); null per router. */
+  fleet: FleetSource | null;
 }
 
 export interface Receiver {
@@ -158,6 +174,12 @@ export interface Limits {
   otherIncidentQuota: number | null;
   otherIncidents: number | null;
   incidentsOtherQuotaDropped: number | null;
+  /** Of the other class at most this many may be Wi-Fi hints (1.46.2: 40 of 50). */
+  wifiIncidentQuota: number | null;
+  /** Places of the other class kept for non-Wi-Fi hints (drift, devices). */
+  otherReservedNonWifi: number | null;
+  wifiIncidents: number | null;
+  incidentsWifiQuotaDropped: number | null;
   eventsThrottled: number | null;
 }
 

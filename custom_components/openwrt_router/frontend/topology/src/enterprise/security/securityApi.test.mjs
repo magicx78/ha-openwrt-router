@@ -187,11 +187,26 @@ test('mock scenario default: score, coverage, findings, devices and detections p
   assert.equal(o.incidents.length, 4);
   assert.equal(o.devices.find(d => d.state === 'suspicious').indicators.length, 2);
   assert.ok(o.detections.some(d => d.formatUnconfirmed));
+  // fw4 confirmed (1.46.2): the mark stays only for the dnsmasq formats
+  const marked = o.detections.filter(d => d.formatUnconfirmed).map(d => d.id);
+  assert.ok(marked.length > 0 && marked.every(id => id.startsWith('dns_')));
+  assert.ok(o.detections.filter(d => d.id.startsWith('fw_')).every(d => !d.formatUnconfirmed));
   const d = await api.detections();
   assert.ok(Object.keys(d.sources).length === 2);
   const detail = await api.incident('sec_0001aa');
   assert.equal(detail.incident.linkedIncidentIds[0], 'inc_demo_roaming_1');
   assert.equal(detail.timeline.length, 2);
+});
+
+test('cov mock: the log path and the coverage list carry the same fleet counts', async () => {
+  const api = createMockSecurityApi('default');
+  const o = await api.overview();
+  const d = await api.detections();
+  for (const s of o.logPath.status) {
+    assert.deepEqual(s.fleet, o.coverage.fleet[s.source], s.source);
+  }
+  assert.deepEqual(d.logPath.status.map(s => s.fleet), o.logPath.status.map(s => s.fleet));
+  assert.equal(o.coverage.fleet['security.center.firewall_log'].routers, 2);
 });
 
 test('mock scenario empty: no rating possible and nothing counted as healthy', async () => {

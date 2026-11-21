@@ -849,9 +849,129 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
 # --- end Security Center
 
 
+# --- Network Diagnostics (release 1.47.0, part 1) ---
+# One fleet-wide module per HA instance (diag_runtime.py), wired exactly like
+# the Security Center above: the two entry functions are wrapped once more,
+# so no existing code changes. Set up after the whole base setup (and after
+# the Security Center), released after the base unload. Off by default: then
+# it only reads its store (no router call, no packet). Every error stays here
+# and is logged with the exception type only; a setup or an unload never
+# fails because of it.
+try:
+    from . import diag_runtime as _diag_runtime
+except Exception:  # noqa: BLE001 - the routers work without it
+    _diag_runtime = None  # type: ignore[assignment]
+
+_async_setup_entry_sc = async_setup_entry
+_async_unload_entry_sc = async_unload_entry
+
+
+@wraps(_async_setup_entry_sc)
+async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Set up a config entry, then add it to the network diagnostics."""
+    ok = await _async_setup_entry_sc(hass, entry)
+    if ok is not False and _diag_runtime is not None:
+        try:
+            coordinator = getattr(entry.runtime_data, "coordinator", None)
+            await _diag_runtime.async_setup_net_diagnostics(hass, entry, coordinator)
+        except Exception as err:
+            _LOGGER.warning(
+                "Network diagnostics setup failed (%s); the router works without it",
+                type(err).__name__,
+            )
+            _LOGGER.debug("Network diagnostics setup error", exc_info=err)
+    return ok
+
+
+@wraps(_async_unload_entry_sc)
+async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Unload a config entry, then release it from the network diagnostics."""
+    unload_ok = await _async_unload_entry_sc(hass, entry)
+    if unload_ok is not False and _diag_runtime is not None:
+        try:
+            await _diag_runtime.async_release_net_diagnostics(hass, entry.entry_id)
+        except Exception as err:
+            _LOGGER.warning(
+                "Network diagnostics release failed (%s)", type(err).__name__
+            )
+            _LOGGER.debug("Network diagnostics release error", exc_info=err)
+    return unload_ok
+
+
+# --- end Network Diagnostics
+
+
+# --- WiFi RF Intelligence (release 1.48.0, part 1) ---
+# One fleet-wide center per HA instance (rf_center.py), wired like the
+# Security Center above: the setup and unload wrappers run after the base
+# (and the Security Center) and never fail them. The center listens to the
+# entry's polls; with RF off (the default, per entry) it makes no router
+# call at all and only reads its history store.
+try:
+    from . import rf_center as _rf_center
+except Exception:  # noqa: BLE001 - the routers work without it
+    _rf_center = None  # type: ignore[assignment]
+
+_async_setup_entry_sec = async_setup_entry
+_async_unload_entry_sec = async_unload_entry
+
+
+@wraps(_async_setup_entry_sec)
+async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Set up a config entry, then add it to the WiFi RF center."""
+    ok = await _async_setup_entry_sec(hass, entry)
+    if ok is not False and _rf_center is not None:
+        try:
+            coordinator = getattr(entry.runtime_data, "coordinator", None)
+            await _rf_center.async_setup_rf_center(hass, entry, coordinator)
+        except Exception as err:
+            _LOGGER.warning(
+                "WiFi RF setup failed (%s); the router works without it",
+                type(err).__name__,
+            )
+            _LOGGER.debug("WiFi RF setup error", exc_info=err)
+        # Part 2: the bounded entity set (created only for routers with RF on)
+        try:
+            from .wifi_rf_entities import async_sync_rf_entities
+
+            await async_sync_rf_entities(hass)
+        except Exception as err:
+            _LOGGER.warning(
+                "WiFi RF entities not set up (%s); the router works without them",
+                type(err).__name__,
+            )
+            _LOGGER.debug("WiFi RF entities error", exc_info=err)
+    return ok
+
+
+@wraps(_async_unload_entry_sec)
+async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Unload a config entry, then release it from the WiFi RF center."""
+    unload_ok = await _async_unload_entry_sec(hass, entry)
+    if unload_ok is not False and _rf_center is not None:
+        try:
+            await _rf_center.async_release_rf_center(hass, entry.entry_id)
+        except Exception as err:
+            _LOGGER.warning("WiFi RF release failed (%s)", type(err).__name__)
+            _LOGGER.debug("WiFi RF release error", exc_info=err)
+        try:
+            from .wifi_rf_entities import async_entry_released
+
+            last = _rf_center.async_get_rf_center(hass) is None
+            await async_entry_released(hass, entry.entry_id, last=last)
+        except Exception as err:
+            _LOGGER.warning("WiFi RF entities release failed (%s)", type(err).__name__)
+            _LOGGER.debug("WiFi RF entities release error", exc_info=err)
+    return unload_ok
+
+
+# --- end WiFi RF Intelligence
+
+
 # --- Traffic Analytics (Phase 5) ---
 # One fleet-wide engine per HA instance (traffic_engine.py), wired like the
-# Security Center: by wrapping the two entry functions above, so none of
+# Security Center: by wrapping the two entry functions above (after the
+# Network Diagnostics and WiFi RF wrappers), so none of
 # their code changes. Set up after everything else, released after the
 # base unload. Off by default: then it only reads its settings and adds no
 # coordinator listener at all. Every error stays here and is
@@ -861,14 +981,14 @@ try:
 except Exception:  # noqa: BLE001 - the routers work without it
     _traffic_engine = None  # type: ignore[assignment]
 
-_async_setup_entry_security = async_setup_entry
-_async_unload_entry_security = async_unload_entry
+_async_setup_entry_rf = async_setup_entry
+_async_unload_entry_rf = async_unload_entry
 
 
-@wraps(_async_setup_entry_security)
+@wraps(_async_setup_entry_rf)
 async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
     """Set up a config entry, then add it to traffic analytics."""
-    ok = await _async_setup_entry_security(hass, entry)
+    ok = await _async_setup_entry_rf(hass, entry)
     if ok is not False and _traffic_engine is not None:
         try:
             coordinator = getattr(entry.runtime_data, "coordinator", None)
@@ -883,10 +1003,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
     return ok
 
 
-@wraps(_async_unload_entry_security)
+@wraps(_async_unload_entry_rf)
 async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
     """Unload a config entry, then release it from traffic analytics."""
-    unload_ok = await _async_unload_entry_security(hass, entry)
+    unload_ok = await _async_unload_entry_rf(hass, entry)
     if unload_ok is not False and _traffic_engine is not None:
         try:
             await _traffic_engine.async_release_traffic(hass, entry.entry_id)

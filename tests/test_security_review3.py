@@ -51,6 +51,7 @@ from custom_components.openwrt_router.security_model import SecurityEvent
 from custom_components.openwrt_router.security_rules import (
     DnsRateDetector,
     FirewallMgmtAccessDetector,
+    VlanDriftDetector,
     default_detectors,
 )
 from custom_components.openwrt_router.security_syslog import (
@@ -92,6 +93,22 @@ def wifi_hint(n: int, ts: float) -> SecurityEvent:
     return auth_event(RID1, mac=f"02:00:5e:20:{n // 256:02x}:{n % 256:02x}", now=ts)
 
 
+def other_hint(n: int, ts: float) -> SecurityEvent:
+    """A hint of the "other" class: Wi-Fi up to its share (40), then drift.
+
+    Since 1.46.2 only 40 of the 50 places take Wi-Fi hints; filling the class
+    needs non-Wi-Fi hints too (``test_security_low1462``).
+    """
+    if n < 40:
+        return wifi_hint(n, ts)
+    return VlanDriftDetector()._event(
+        router_id=RID1,
+        now=ts,
+        key=(RID1, f"drf_{n}", "vlan"),
+        evidence=(f"drift_id=drf_{n}", "areas=vlan"),
+    )
+
+
 def log_hints(center: Any) -> list[dict[str, Any]]:
     return [i for i in center.incidents.values() if i.get("from_logs") is True]
 
@@ -110,16 +127,16 @@ async def test_review3_1_forged_log_lines_cannot_crowd_out_wifi_hints(
     assert center.counters["incidents_log_quota_dropped"] == 300 - LOG_QUOTA
     notes = [t for t in center.timeline if t["kind"] == "log_quota_reached"]
     assert len(notes) == 1  # once per window
-    # real Wi-Fi findings still find room ...
+    # real Wi-Fi (and drift) findings still find room ...
     for n in range(SEC_INCIDENT_CAP - LOG_QUOTA):
-        center._record(wifi_hint(n, T0 + 400 + n), T0 + 400 + n)
+        center._record(other_hint(n, T0 + 400 + n), T0 + 400 + n)
     assert len(center.incidents) == SEC_INCIDENT_CAP
     assert center.counters["incidents_cap_dropped"] == 0
     # ... and a full class of other sources displaces no log hint any more
     # (review 4, #1 replaces the displacement): the new hint is dropped
     before = set(center.incidents)
-    center._record(wifi_hint(999, T0 + 600), T0 + 600)
-    center._record(wifi_hint(998, T0 + 601), T0 + 601)
+    center._record(other_hint(999, T0 + 600), T0 + 600)
+    center._record(other_hint(998, T0 + 601), T0 + 601)
     assert set(center.incidents) == before
     assert len(log_hints(center)) == LOG_QUOTA
     assert center.counters["incidents_other_quota_dropped"] == 2
@@ -427,7 +444,10 @@ async def test_review3_8_rate_limited_log_lines_limit_the_detections(
     assert det["availability"] == "limited"
     assert "rate_limited" in det["reason"] and "rate_limited" in det["limitations"]
     assert "rate_limited" in activity(busy)["limitations"]
-    assert busy["coverage"]["value"] < calm["coverage"]["value"]
+    # 1.46.2: no extra deduction while the factor's DNS source is missing
+    # fleet-wide (the gap is counted once); the drop with all sources is
+    # in test_cov_ratelimit_supplier_stays_limited
+    assert busy["coverage"]["value"] <= calm["coverage"]["value"]
     assert busy["log_path"]["rate_limited_routers"] == 1
     view = center.detections_view(now=NOV18 + 1)
     assert fw_detection(view)["availability"] == "limited"

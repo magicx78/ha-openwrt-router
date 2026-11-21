@@ -47,6 +47,8 @@ export interface RouterSummary {
   errorReason: string | null;
   running: boolean;
   lastBackupAt: string | null;
+  /** Start of the last run, whatever its outcome (server field last_attempt_at). */
+  lastAttemptAt: string | null;
   versions: number;
   capability: Capability;
   schedule: { mode: string; time: string | null; nextRunAt: string | null } | null;

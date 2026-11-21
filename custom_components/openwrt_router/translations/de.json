@@ -10,7 +10,13 @@
           "config_backup_enabled": "Konfigurations-Backup (config_backup_enabled)",
           "config_backup_schedule": "Automatisches Konfigurations-Backup (config_backup_schedule)",
           "config_backup_time": "Uhrzeit des täglichen Backups (config_backup_time)",
-          "config_drift_check": "Auf Konfigurationsänderungen prüfen (config_drift_check)"
+          "config_drift_check": "Auf Konfigurationsänderungen prüfen (config_drift_check)",
+          "wifi_rf_enabled": "WLAN-Funkanalyse (wifi_rf_enabled)",
+          "wifi_rf_get_status": "Kanalauslastung aus hostapd (wifi_rf_get_status)",
+          "wifi_rf_assoclist": "Wiederholungszähler der Clients aus iwinfo (wifi_rf_assoclist)",
+          "wifi_rf_lists_at_start": "Kanal- und Sendeleistungsgrenzen beim Start (wifi_rf_lists_at_start)",
+          "wifi_rf_survey": "Kanal-Survey, spätere Stufe (wifi_rf_survey)",
+          "wifi_rf_every_n_polls": "Zusätzliche Funk-Abfragen alle N Abfragen (wifi_rf_every_n_polls)"
         },
         "data_description": {
           "extended_wifi_sensors": "Schaltet alle Sensoren pro Funkmodul, pro SSID (AP) und pro Port dieses Routers auf einmal ein statt einzeln. Ausschalten deaktiviert nur die Sensoren, die dieser Schalter eingeschaltet hat; selbst deaktivierte Sensoren bleiben unberührt. Wirksam nach etwa 30 Sekunden.",
@@ -19,7 +25,13 @@
           "config_backup_enabled": "Erlaubt das Konfigurations-Backup dieses Routers (alle config.*-Fähigkeiten und die optionale ACL-Stufe „config_backup_read“). Standardmäßig aus. Der Schalter erscheint, sobald ein Konfigurations-Provider (Backup-Engine) installiert ist oder solange er an ist; ohne Provider hat er keine Wirkung. Ausschalten stoppt sofort jedes Backup, jede Prüfung und jeden Vergleich für diesen Router; gespeicherte Versionen bleiben. Achtung: Ein Backup enthält ALLE Router-Geheimnisse: /etc/shadow (Passwort-Hashes aller Router-Logins, auch root), private Schlüssel (SSH-Host-Keys, VPN- und TLS-Schlüssel) sowie die WLAN-, VPN- und DDNS-Passwörter.",
           "config_backup_schedule": "Täglich: ein Backup pro Tag zur unten gewählten Uhrzeit; jeder Router startet mit seinem eigenen festen Versatz von bis zu einer Stunde, so laufen nie alle gleichzeitig. Aus: nur manuelle Backups und Drift-Versionen. Wirkt nur, solange das Konfigurations-Backup eingeschaltet ist.",
           "config_backup_time": "Ortszeit von Home Assistant. Ein täglicher Lauf, der verpasst wurde, weil Home Assistant aus war, wird am selben Tag nachgeholt.",
-          "config_drift_check": "Vergleicht den Router mit seiner letzten Version, wenn die abgefragten Daten eine konfigurationsnahe Änderung zeigen (5 Minuten nach der Änderung, höchstens einmal pro Stunde). Eine erkannte Änderung wird als neue Version gespeichert (höchstens vier pro Tag). Aus: keine Drift-Prüfung."
+          "config_drift_check": "Vergleicht den Router mit seiner letzten Version, wenn die abgefragten Daten eine konfigurationsnahe Änderung zeigen (5 Minuten nach der Änderung, höchstens einmal pro Stunde). Eine erkannte Änderung wird als neue Version gespeichert (höchstens vier pro Tag). Aus: keine Drift-Prüfung.",
+          "wifi_rf_enabled": "Wertet die WLAN-Funkmodule dieses Routers aus (Auslastung, Rauschen, Konflikte, Client-Qualität, Empfehlungen). Standardmäßig aus. Allein nutzt es nur die Daten, die die Integration ohnehin abfragt, und schickt keine zusätzliche Anfrage an den Router; jede zusätzliche Abfrage unten hat einen eigenen Schalter. Am Router wird nie etwas geändert und kein Scan gestartet.",
+          "wifi_rf_get_status": "Liest alle N Abfragen einmal pro Funkmodul hostapd get_status, um die echte Kanalauslastung aus den Belegt-Zählern zu berechnen. Etwa 0,5 KB pro Funkmodul und Abfrage. Wirkt nur mit wifi_rf_enabled.",
+          "wifi_rf_assoclist": "Liest alle N Abfragen einmal pro Access-Point-Schnittstelle iwinfo assoclist für Wiederholungen, fehlgeschlagene Pakete und Verbindungsdauer der Clients. Etwa 0,9 KB pro verbundenem Client. Wirkt nur mit wifi_rf_enabled.",
+          "wifi_rf_lists_at_start": "Liest die erlaubten Kanäle und Sendeleistungsstufen jedes Funkmoduls einmal beim Start und danach nur nach einem Kanal- oder Länderwechsel, nie in der normalen Abfrage. Etwa 2-4 KB pro Funkmodul. Wirkt nur mit wifi_rf_enabled.",
+          "wifi_rf_survey": "Spätere Stufe: liest alle N Abfragen iwinfo survey, aber erst nach bestandener Fähigkeitsprüfung. Die aktuelle Router-ACL erlaubt diese Abfrage nicht; ohne das Recht bleibt sie „nicht bereit“, sonst ändert sich nichts. Auf ath10k-Funkmodulen kann ein Survey den Treiber bis zu 3 Sekunden blockieren. Wirkt nur mit wifi_rf_enabled.",
+          "wifi_rf_every_n_polls": "Takt der zusätzlichen Abfragen oben (1-60, Standard 5). Bei der 60-Sekunden-Abfrage heißt 5 alle 5 Minuten; ein kleineres N liest pro Funkmodul trotzdem höchstens alle 5 Minuten. Die Abfragen pausieren, solange der Router gedrosselt ist oder über den SSH-Rückfall läuft. Kleine Router wie der FRITZ!WLAN Repeater 1750E (54 MB RAM) sollten bei 5 oder mehr bleiben."
         }
       }
     }
@@ -124,6 +136,9 @@
             "name": "Geprüft am"
           }
         }
+      },
+      "diag_gateway_reachable": {
+        "name": "Gateway erreichbar"
       }
     },
     "sensor": {
@@ -336,6 +351,45 @@
       },
       "fleet_security_coverage": {
         "name": "Abdeckung der Sicherheitserkennung (alle Router)"
+      },
+      "fleet_diag_quality_score": {
+        "name": "Netzqualität (alle Router)"
+      },
+      "fleet_diag_monitoring_coverage": {
+        "name": "Netz-Überwachungsabdeckung (alle Router)"
+      },
+      "fleet_diag_findings_active": {
+        "name": "Aktive Netzdiagnose-Befunde"
+      },
+      "fleet_diag_ha_internet_latency": {
+        "name": "Home Assistant Internet-Latenz"
+      },
+      "fleet_diag_ha_internet_loss": {
+        "name": "Home Assistant Internet-Verlust (24 h)"
+      },
+      "fleet_diag_dns_response_time": {
+        "name": "DNS-Antwortzeit"
+      },
+      "fleet_wifi_rf_health_score": {
+        "name": "WLAN-Gesundheit (alle Router)"
+      },
+      "fleet_wifi_rf_roaming_problems": {
+        "name": "Aktive WLAN-Roaming-Probleme (alle Router)"
+      },
+      "fleet_wifi_rf_recommendations": {
+        "name": "WLAN-Kanalempfehlungen (alle Router)"
+      },
+      "wifi_rf_ap_health": {
+        "name": "AP-Funkgesundheit"
+      },
+      "wifi_rf_channel_utilization": {
+        "name": "Kanalauslastung {radio}"
+      },
+      "wifi_rf_noise_floor": {
+        "name": "Grundrauschen {radio}"
+      },
+      "wifi_rf_retry_rate": {
+        "name": "WLAN-Wiederholungsrate {radio}"
       }
     },
     "switch": {

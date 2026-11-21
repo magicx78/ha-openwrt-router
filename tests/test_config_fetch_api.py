@@ -853,6 +853,16 @@ UCI_SHOW = (
 )
 
 
+def acl_block(api: OpenWrtAPI) -> AsyncMock:
+    """``_call`` denied by the rpcd ACL, remembered like the real ``_call``."""
+
+    async def call(obj: str, method: str, params: dict[str, Any]) -> Any:
+        api._acl_blocked.add(api._acl_cache_key(obj, method, params))
+        raise OpenWrtMethodNotFoundError("blocked")
+
+    return AsyncMock(side_effect=call)
+
+
 class TestUciGet:
     async def test_ubus_success(self) -> None:
         api, _ = make_api()
@@ -868,9 +878,9 @@ class TestUciGet:
 
     async def test_acl_block_falls_back_to_ssh_uci_show(self) -> None:
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("rpcd ACL blocks uci/get/network")
-        )
+        # ACL denial as the real _call leaves it (review PR 59: a ubus
+        # "not found" never goes to SSH).
+        api._call = acl_block(api)  # type: ignore[method-assign]
         conn = fake_conn(FakeProc([UCI_SHOW.encode()]))
         ctx, _ = patch_connect(conn)
         guard_shared_transport(api)
@@ -886,9 +896,9 @@ class TestUciGet:
         from custom_components.openwrt_router.config_const import UCI_TEXT_MAX_BYTES
 
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("rpcd ACL blocks uci/get/network")
-        )
+        # ACL denial as the real _call leaves it (review PR 59: a ubus
+        # "not found" never goes to SSH).
+        api._call = acl_block(api)  # type: ignore[method-assign]
         line = b"network.x.y='" + b"a" * 1000 + b"'\n"
         chunks = [line * 64] * (UCI_TEXT_MAX_BYTES // (len(line) * 64) + 2)
         proc = FakeProc(chunks)
@@ -915,18 +925,17 @@ class TestUciGet:
 
     async def test_acl_block_without_usable_ssh_is_permission(self) -> None:
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("blocked")
-        )
+        # ACL denial as the real _call leaves it (review PR 59: a ubus
+        # "not found" never goes to SSH).
+        api._call = acl_block(api)  # type: ignore[method-assign]
         ctx, _ = patch_connect(side_effect=OSError("Connection refused"))
         with ctx, pytest.raises(OpenWrtConfigFetchPermissionError):
             await api.config_uci_get("network", ssh=pinned(api))
 
     async def test_missing_config_via_ssh_is_not_available(self) -> None:
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("not found")
-        )
+        # After an ACL denial, ``uci show`` itself says "not found".
+        api._call = acl_block(api)  # type: ignore[method-assign]
         proc = FakeProc([], [b"uci: Entry not found\n"], exit_status=1)
         ctx, _ = patch_connect(fake_conn(proc))
         with ctx, pytest.raises(OpenWrtConfigFetchNotAvailableError):
@@ -934,9 +943,9 @@ class TestUciGet:
 
     async def test_ssh_other_failure_is_incomplete(self) -> None:
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("blocked")
-        )
+        # ACL denial as the real _call leaves it (review PR 59: a ubus
+        # "not found" never goes to SSH).
+        api._call = acl_block(api)  # type: ignore[method-assign]
         proc = FakeProc([], [b"uci: I/O error\n"], exit_status=1)
         ctx, _ = patch_connect(fake_conn(proc))
         with ctx, pytest.raises(OpenWrtConfigFetchIncompleteError):
@@ -944,9 +953,7 @@ class TestUciGet:
 
     async def test_acl_block_without_runner_is_denied_not_unpinned(self) -> None:
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("blocked")
-        )
+        api._call = acl_block(api)  # type: ignore[method-assign]
         guard_shared_transport(api)
         ctx, connect = patch_connect(fake_conn(FakeProc([UCI_SHOW.encode()])))
         with ctx, pytest.raises(OpenWrtConfigFetchHostKeyError) as exc:
@@ -962,9 +969,7 @@ class TestUciGet:
         self, pending: bool, presented: asyncssh.SSHKey, reason: str
     ) -> None:
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("blocked")
-        )
+        api._call = acl_block(api)  # type: ignore[method-assign]
         router = FakeRouter(presented, stdout=UCI_SHOW.encode())
         runner = pinned(api, PinStore() if pending else confirmed(KEY_A))
         with _patched(router), pytest.raises(OpenWrtConfigFetchHostKeyError) as exc:
@@ -1287,9 +1292,9 @@ class TestNoSecretsInLog:
             with ctx, contextlib.suppress(OpenWrtConfigFetchError):
                 await fetch_ssh(api)
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("blocked")
-        )
+        # ACL denial as the real _call leaves it (review PR 59: a ubus
+        # "not found" never goes to SSH).
+        api._call = acl_block(api)  # type: ignore[method-assign]
         ctx, _ = patch_connect(fake_conn(FakeProc([], [STDERR_SECRET], exit_status=1)))
         with ctx, pytest.raises(OpenWrtConfigFetchError) as exc:
             await api.config_uci_get("network", ssh=pinned(api))
@@ -1380,9 +1385,7 @@ class TestNoUnpinnedPath:
     async def test_every_ssh_read_needs_the_runner(self) -> None:
         """Without ``ssh=`` none of the three SSH reads connects."""
         api, _ = make_api()
-        api._call = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OpenWrtMethodNotFoundError("blocked")
-        )
+        api._call = acl_block(api)  # type: ignore[method-assign]
         guard_shared_transport(api)
         ctx, connect = patch_connect(fake_conn(FakeProc([ARCHIVE])))
         with ctx:

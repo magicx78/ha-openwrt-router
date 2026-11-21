@@ -4,6 +4,364 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.48.0] - 2026-11-21
+
+WiFi RF Intelligence: Funkbild je Radio (Kanalauslastung, Grundrauschen, Retry-Rate, Signal je
+Client, Kanalkonflikte, Roaming, Kanalempfehlungen) aus den vorhandenen Poll-Daten und
+optionalen, begrenzten Zusatzabfragen. Baut auf dem Enterprise Core von 1.44.0 auf.
+**Standardmäßig aus**; ohne den Schalter macht ein Poll exakt dieselben Router-Aufrufe wie
+vorher. **Kein Scan, keine neuen Router-Rechte, nur lesende Routen.**
+
+### Hinzugefügt
+
+- **WiFi RF Intelligence (Teil 1: Backend).** Funkbild je Radio aus den
+  vorhandenen Poll-Daten (Rauschen, Sendeleistung, Kanalbreite, Signal je Client,
+  Airtime) und optionalen Zusatzabfragen. **Alles ist standardmäßig aus**: Ohne den Schalter
+  `wifi_rf_enabled` (je Router in den Optionen) macht ein Poll exakt dieselben Router-Aufrufe
+  wie vorher (Test zählt die ubus-Aufrufe mit RF an und aus).
+  - Zusatzabfragen, je ein eigener Schalter, alle aus und alle begrenzt (alle N Polls,
+    Standard 5, mindestens 300 s je Router und Radio, eine Abfrage je Art zur Zeit,
+    Zeitlimit je Runde): `hostapd get_status` (Kanalauslastung aus der Differenz der
+    Zähler `airtime.time`/`time_busy`, nicht aus dem Byte `utilization`), `iwinfo assoclist`
+    (Retry-Rate aus der Zählerdifferenz), `iwinfo freqlist`/`txpowerlist` (nur bei Start und
+    nach Kanal- oder Länderwechsel) und `iwinfo survey`; `txpowerlist` und `survey` nur mit
+    der passenden Core-Fähigkeit. Last bei 5 Polls: etwa
+    +11 % WLAN-Aufrufe (get_status und assoclist zusammen, rund 15 B/s je Router); Survey
+    weitere +14 %. Auf dem FRITZ!WLAN Repeater 1750E (54 MB RAM) kann ein ath10k-Survey bis
+    3 s dauern — dort Survey aus lassen.
+  - Keine neuen ACL-Rechte: Ein fehlendes Recht heißt „nicht unterstützt“ mit Grund, nie ein
+    Poll-Fehler. Kein Scan (bleibt „nicht unterstützt“).
+  - Nur lesende Routen unter `/api/openwrt_router/enterprise/wifi/`: `overview`, `radios`,
+    `channel_map`, `timeline?window=1h|24h|7d|30d`, `roaming`, `recommendations`. Anmeldung
+    nötig; Administratoren (Nicht-Admins nur bei freigegebenem Topologie-Panel, ohne
+    Roaming-Verlauf); der Roaming-Verlauf einmal je Panel-Sitzung über den Core-Guard.
+    RF aus oder nicht bereit ergibt Status `off`/`not_ready`, nie einen Fehler.
+  - Ohne Modulschlüssel, Router-ID oder Quelle: „nicht bereit“, keine Bewertung und kein
+    „alles gut“. Unbekannte Werte bleiben unbekannt, nie 0. Ein voller Kanal ist nur ein
+    Hinweis.
+  - Ereignisse im allgemeinen Core-Ring nur bei Änderung (gemessene Kanalkonflikte, anhaltend
+    hohe Auslastung, neue/erledigte Empfehlungen; die erste Auswertung nach dem Start ist
+    die Basis). `router.forgotten` löscht alle RF-Daten des Routers; Entladen schreibt den
+    Verlauf sofort.
+  - Diagnose: neuer Block `wifi_rf` (nur Zähler, Zustände und Gründe, maskiert).
+- **WiFi RF Intelligence (Teil 2: Anbindung).** Mit RF aus ändert sich nichts
+  (Tests vergleichen Befunde, Reparaturhinweise, Vorfälle, Scores und Entitäten mit RF an
+  und aus).
+  - Kanalplan: Eine Überlappung zweier Router-Radios im selben Kanal bleibt ein Befund. Sie
+    wird nur dann zum Hinweis herabgestuft (kein Reparaturhinweis), wenn RF auf beiden Radios
+    eine niedrige Auslastung **gemessen** hat und keinen Konflikt sieht. Unbekannt,
+    nicht bereit, nicht überwacht oder ausgelastet: der Befund bleibt, wie er war.
+    Attribut `rf_status` mit Grund und Messwerten.
+  - Network Intelligence: gemessene Kanalkonflikte, anhaltend hohe Auslastung und hohe
+    Retry-Rate gehen als reine WLAN-Ereignisse (`rf.channel_conflict`, `rf.channel_busy`,
+    `rf.retry_high`) über die vorhandene Befundquelle ein. Sie öffnen, unterdrücken oder
+    entschuldigen keinen Vorfall und ändern keinen Score. Sie kommen nur bei einer Änderung,
+    höchstens 6 je Poll, derselbe Befund erst nach einer Stunde wieder. Keine Änderung in `net_*`.
+  - Client Stability: RF liest den vorhandenen Client-Verlauf (Disconnects, mittlere
+    TX-Rate) für die RF-Client-Bewertung; die zusätzliche Quelle senkt nie eine Bewertung
+    (Eigenschaftstest). Die Client-Ansicht
+    bekommt einen reinen Hinweis `rf_hint` (Radio stark ausgelastet um den Zeitpunkt). Der
+    Client-Stability-Score bleibt unverändert.
+  - Entitäten (nur mit RF an und nur auf vorhandenen Router-Geräten, RF aus: nicht angelegt
+    und aus der Registry entfernt): WLAN-Gesundheit, aktive Roaming-Probleme und
+    Kanalempfehlungen (alle Router), AP-Funkgesundheit je Router, Kanalauslastung (%),
+    Grundrauschen (dBm) und Retry-Rate (%) je Radio, höchstens 4 Radios je Router.
+    Unbekannt bleibt „unbekannt“, nie 0. Attribute ohne MAC, SSID oder BSSID und nicht
+    aufgezeichnet. Keine eigene Airtime-Entität (derselbe Zähler wie die Kanalauslastung).
+    Ein Fehler darin lässt das Setup nie scheitern.
+- **WiFi RF Intelligence (Teil 3: Panel).** Neuer Tab „WiFi Intelligence“ unter Enterprise
+  (nach „Konfiguration“, „Security Center“ und „Netzwerkdiagnose“) mit sechs Ansichten:
+  Übersicht, Radios, Kanalkarte, RF-Verlauf (einfaches SVG, Fenster 1 h / 24 h / 7 d / 30 d),
+  Roaming und Empfehlungen. Der Tab liest nur über die Routen aus Teil 1 (nur GET, keine
+  Schalt- oder Übernehmen-Knöpfe) und fragt höchstens alle 60 s ab, und nur solange er
+  sichtbar ist. Unbekannte Werte erscheinen als „—“, nie als 0. Der Roaming-Verlauf je Client
+  ist nur für Administratoren und erst nach einer Freigabe je Sitzung sichtbar. Das
+  Frontend-Bundle ist neu gebaut (Panel-Version `20261121-wifi-rf1`).
+
+### Behoben
+
+- **WiFi RF: Entitäten von Routern, deren Gerät erst nach dem Setup erscheint, werden angelegt.**
+  Der Empfänger des Signals `openwrt_router_wifi_rf_updated` war, wie in 1.47.1 bei der
+  Netzwerkdiagnose, eine Lambda ohne `@callback` und lief deshalb in einem Worker-Thread, wo
+  `hass.async_create_task` scheitert; der Merker „Abgleich läuft“ blieb dann gesetzt. Der
+  Empfänger ist jetzt eine `@callback`-Funktion; kann die Aufgabe nicht starten, wird der
+  Merker zurückgesetzt. Der Fehler betraf nur den unveröffentlichten Stand dieses Pakets.
+- Tests: `tests/test_wifi_rf_dispatcher_thread.py` schickt das Signal durch den echten
+  Dispatcher von Home Assistant und prüft Thread, angelegte Entitäten und Merker.
+
+### Bekannte Grenzen
+
+- **Kein Scan.** Nachbarnetze und fremde Kanäle bleiben „nicht unterstützt“; die
+  Scan-Prüfungen S1–S5 des Plans (`docs/plans/2026-11-17-wifi-rf.md`, Abschnitt 7.2) sind
+  nicht ausgeführt.
+- **Nicht an echten Geräten geprüft.** Die Router-Antworten der Tests haben die Feldstruktur aus
+  den lesenden Prüfungen vom 2026-11-18, aber erfundene Werte; die fertige Integration lief
+  weder gegen echte Router noch in einer echten Home-Assistant-Instanz.
+- **Der Tab ist nicht im Browser angesehen**, auch nicht bei 360 px Breite; geprüft sind nur
+  Logik- und Render-Tests ohne Browser.
+- **Schwellen sind begründete Annahmen**, nicht an echten Daten abgestimmt.
+
+## [1.47.1] - 2026-11-21
+
+### Behoben
+
+- **Netzwerkdiagnose: Gateway-Sensoren von Routern, die ihre ID erst nach dem Setup bekommen,
+  werden wieder angelegt.** Der Empfänger des Signals `openwrt_router_net_diagnostics_updated`
+  war eine Lambda ohne `@callback`; Home Assistant führte ihn deshalb in einem Worker-Thread
+  aus. Dort rief er `hass.async_create_task` auf, was nach einem HA-Neustart einmal als ERROR
+  im Log stand („calls hass.async_create_task from a thread other than the event loop“). Der
+  Sensor fehlte dann, und weil der Merker „Abgleich läuft“ gesetzt blieb, versuchte es auch
+  kein späteres Signal mehr. Der Empfänger ist jetzt eine `@callback`-Funktion und läuft in der
+  Ereignisschleife; kann die Aufgabe nicht starten, wird der Merker zurückgesetzt, sodass das
+  nächste Signal es erneut versucht.
+- Tests: `tests/test_diag_dispatcher_thread.py` schickt das Signal durch den echten Dispatcher
+  von Home Assistant und prüft Thread, angelegten Sensor und Merker.
+
+## [1.47.0] - 2026-11-21
+
+Netzwerkdiagnose („Network Diagnostics“): prüft die Kette Router → Gateway → WAN → Internet →
+DNS und sagt je Glied, ob es gesund, beeinträchtigt, ausgefallen oder **unbekannt** ist. Sie
+baut auf dem Enterprise Core von 1.44.0 auf und nutzt Daten, die die Integration ohnehin liest,
+dazu Messungen von Home Assistant aus gegen Ziele, die ein Administrator bestätigt hat.
+**Standardmäßig aus**; ausgeschaltet gibt es keinen Beobachter, keine Messung, keinen Socket und
+keine Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll** in dieser Version. Jede
+aktive Diagnose läuft erst nach einer ausdrücklichen Handlung eines Administrators (manueller
+Lauf oder eingeschaltete regelmäßige Messung mit bestätigten Zielen). **Keine neuen
+Router-Rechte.** Nutzerdoku: `docs/network-diagnostics.md`.
+
+### Hinzugefügt
+
+- **Laufzeit (`diag_runtime.py`).** Ein Modul je HA-Instanz, angedockt wie das Security Center
+  (nach dem Setup eines Eintrags, nach dem Entladen freigegeben; ein Fehler darin lässt weder
+  Setup noch Entladen scheitern). Zustand `off` / `not_ready` / `ready`; `not_ready` und
+  unbekannte Werte tragen immer einen Grund (zum Beispiel `module_key_missing`,
+  `core_unavailable`, `interface_dump_missing`, `no_confirmed_target`), nie „gesund“. Der
+  passive Teil wertet je Poll die Daten aus, die der Poll ohnehin lieferte: den WAN-Status und
+  neue, nur gelesene Fakten aus dem schon vorhandenen `network.interface dump` (Standardroute,
+  nächster Hop, DNS-Server, aktive Schnittstellen). Der Dump wird dafür **nicht** noch einmal
+  geholt.
+- **Messungen von Home Assistant (`api.py`, Block „Network Diagnostics“).** TCP-Verbindung,
+  DNS-Abfrage (A) und HTTP-Abruf einer „no content“-URL, nur gegen **vom Administrator
+  eingerichtete Ziele und nur per ID**: externe Ziele müssen bestätigt sein, interne müssen in
+  einem konfigurierten internen Netz liegen, die regelmäßige Messung nimmt nur bestätigte Ziele.
+  Es gibt keine Funktion, die einen freien Host annimmt. Schutz vor SSRF
+  (`diag_targets.py`): nur IP-Literale und Hostnamen nach RFC 1123 (keine URLs, Ports, Zahlen-
+  tricks), externe Ziele müssen global routbar und bestätigt sein, interne Ziele müssen in einem
+  konfigurierten internen Netz liegen, Loopback nie, Link-Local und Metadaten-Adressen nur bei
+  genau dafür konfiguriertem Netz; was ein Hostname auflöst, wird vor dem Verbinden erneut
+  geprüft (Schutz vor DNS-Rebinding), interne Namen gehen nie an einen externen Namensserver;
+  der HTTP-Abruf sendet keine Zugangsdaten, keine Cookies, keinen Body und folgt keiner
+  Weiterleitung. Jede Messung hat eine feste Zeitgrenze und liefert ein normiertes Ergebnis mit
+  Codes und Zahlen, nie mit Adresse oder Antworttext. Ein ICMP-Ziel wird auf der HA-Seite
+  übersprungen (kein Ping ohne Rechte).
+- **Kette und Zustände (`diag_chain.py`, `diag_model.py`).** Je Glied und Adressfamilie
+  `Healthy` / `Degraded` / `Failed` / `Unknown` / `NotApplicable`. „Kein Fehler erkannt“ gibt es
+  nur, wenn jedes anwendbare Glied direkt gemessen wurde; sonst „teilweise gemessen“ mit der
+  Liste der unbekannten Glieder. Das Internet-Glied fällt nur aus, wenn mindestens zwei
+  verschiedene Referenzziele in derselben Runde hart scheitern; ein einzelnes scheiterndes Ziel
+  ist höchstens beeinträchtigt. Eine Messung von Home Assistant gilt nur dann als indirekter
+  Beleg für einen Router, wenn sie ausdrücklich diesen Router nennt; sie bestätigt nie eine
+  Ursache und zählt nie als Abdeckung.
+- **Ursachenklassen (`diag_causes.py`).** `confirmed` / `probable` / `possible` / `unknown`.
+  Bestätigt braucht eine direkte Messung am Ort der Ursache; dieselbe Auffälligkeit an mehreren
+  Routern ergibt höchstens `probable`. Gemeinsame Ursachen (zentraler Internetzugang, Pfad eines
+  Segments, gemeinsamer Namensserver) verknüpfen nur Router, die technisch davon abhängen, und
+  nur Befunde desselben Glieds und derselben Adressfamilie. Verknüpfungen verbergen oder ändern
+  keinen Befund.
+- **Statistik, Baselines, Wert (`diag_stats.py`, `diag_baseline.py`, `diag_score.py`).**
+  Mittel, Jitter, Verlust und Abdeckung je Reihe in den Fenstern 1 h, 24 h, 7 d und 30 d;
+  Lücken (keine Messung, Neustart, WAN-Ausfall während ein Router anläuft) fließen nie als
+  Verlust ein; eine Antwort (REFUSED, SERVFAIL, HTTP außer 204) ist kein Verlust. Baselines (EWMA mit
+  Hysterese) lernen nur Werte unterhalb der Austrittsschwelle und frieren bei einer Störung
+  ein; langsame Drift über mehrere Tage wird getrennt erkannt. Netzqualitätswert 0 bis 100 aus sieben
+  gewichteten Komponenten **mit Abdeckung und „geringe Aussagekraft“**; Komponenten ohne Daten
+  gelten als unbekannt und nie als perfekt, ein Netz ohne Daten hat keinen Wert.
+- **Begrenzter Verlaufsspeicher (`diag_store.py`).** `.storage/openwrt_router.net_diagnostics`,
+  verzögertes Schreiben, beim Entladen sofort. Eigene Quoten: höchstens 64 Router-Messpunkte,
+  32 Reihen für Home Assistant, 8 Reihen je Router, 169 Stunden- und 31 Tages-Buckets je
+  Reihe, 64 Neustart-Lücken. Jede Quote ist getrennt: ein voller Messpunkt verdrängt keinen
+  anderen. **Jedes Verwerfen wird gezählt** und im Status gezeigt. Ein Neustart von Home
+  Assistant oder eines Routers ist eine Lücke, kein Verlust. Reihen ohne Buckets und Reihen
+  entfernter Ziele geben ihren Quotenplatz frei (gezählt). Beschädigte Teile starten leer,
+  ein unlesbarer Speicher bleibt als `.bak`.
+- **HTTP-Routen (`diag_views.py`)** unter `/api/openwrt_topology/diagnostics`: `overview`,
+  `history`, `details`, `settings` (lesen und ändern) und `run`. Alle mit Anmeldung. Reihenfolge
+  der Prüfungen: Benutzer und Administrator, dann Panel-Zugriff, dann geladene Integration,
+  dann laufendes Modul, dann (nur `run`) eingeschaltetes Modul, **erst danach Query und Body**.
+  Einstellungen ändern und `run` nur für Administratoren, `run` zusätzlich über den Guard des
+  Cores (aktive Aktion, Rate-Limit, Audit). Body höchstens 8 KiB und höchstens Tiefe 3, nur
+  bekannte Schlüssel; Ziele nur über ihre ID. Fehler tragen nur eine feste Meldung, einen Code
+  und höchstens Feldname und Grund: 400 ungültig, 403 nicht erlaubt, 404 unbekanntes Ziel oder
+  unbekannter Router, 409 aus / belegt / Konflikt, 410 Integration entladen, 413 Body zu groß,
+  422 Ziel abgelehnt, 429 Rate-Limit (mit `Retry-After`), 503 Modul oder Core läuft nicht.
+- **Entitäten (`diag_entities.py`).** Sechs Flotten-Sensoren (Netzqualität, Überwachungs-
+  abdeckung, aktive Befunde, Home-Assistant-Internet-Latenz, -Verlust (24 h), DNS-Antwortzeit)
+  und je Router, der schon ein Gerät hat, ein Binärsensor „Gateway erreichbar“; höchstens
+  6 + N Entitäten, nie eine je Ziel. Es gibt sie nur bei eingeschaltetem Modul; Ausschalten
+  entfernt sie aus der Entity-Registry. Ohne Daten ist der Wert `None` (unbekannt), nie 0.
+- **Zwei Vorfallstypen der Netzwerk-Intelligenz (`net_rules.py`, `net_engine.py`).**
+  `wan_gateway_changed` (nächster Hop eines Routers hat gewechselt) und `dns_server_changed`
+  (die Menge seiner DNS-Server hat gewechselt), beide Schwere „info“, ohne Cooldown, nie
+  Wurzel. Sie werden nur von Ursachen **desselben Routers** übernommen: `wan_down` dieses
+  Routers sowie `router_unreachable` und `system_reboot` dieses Routers (nur wenn die
+  Änderung nach Beginn des Ausfalls liegt); `lan_unreachable` übernimmt wie bisher alles in
+  seinem Fenster. Eine Wurzel eines anderen Routers übernimmt sie nie, und `wan_down` eines
+  anderen Routers nimmt ihre Ereignisse nicht mit. Die bestehende Korrelation, die Schwellen
+  (`DEFAULT_SETTINGS`) und die Wurzelränge bleiben unverändert.
+- **Kontext eines Befunds (`diag_context.py`).** Konfigurationsänderungen (Configuration
+  Manager) und Vorfälle des Security Centers **desselben Routers** im Fenster von 30 min
+  werden als Kontext verknüpft, höchstens `probable` und nie stärker als der Befund selbst;
+  nur Bereiche, die die Klasse technisch erklären können (ein fehlender Standardweg ist ein
+  Routing-Problem, keine VLAN-Änderung). Fehlt eine Quelle oder ist sie aus, steht
+  `context_unavailable` mit Grund, nie „keine Änderung“.
+- **Panel-Tab „Netzwerkdiagnose“** unter Enterprise (nach „Konfiguration“ und „Security
+  Center“): Übersicht, Verlauf, für Administratoren manuelle Diagnose und Einstellungen. Der
+  Tab liest nur über die Routen oben; ausgeschaltet erklärt er, was das Modul tut, ohne
+  Wert. Das Frontend-Bundle ist neu gebaut.
+- **Diagnose-Download:** neuer Block `network_diagnostics` (Zustände, Gründe, Router- und
+  Ziel-IDs, Zähler; ohne Adresse, Host oder Domain). Die neuen Adressfelder des Polls
+  (`wan_status.diag_facts`) werden zusätzlich geschwärzt; die gemeinsame Schlüsselliste
+  `DIAGNOSTICS_TO_REDACT` bleibt unverändert.
+
+### Bekannte Grenzen
+
+- **Keine Tests auf dem Router.** Ping, `nslookup` und `traceroute` auf dem Router gibt es in
+  dieser Version nicht. Vorhanden sind nur die Schnittstelle dafür und die Prüfung, ob ein
+  Router es könnte; es gibt keinen Ausführer und **kein ACL-Recht**, das es erlauben würde.
+  Der Status meldet `router_probes: not_available` (`no_executor`).
+- **Kein externes Ziel ist voreingestellt.** Ohne bestätigte Ziele wird nichts Externes
+  gemessen; Internet- und DNS-Glied bleiben dann unbekannt. Aus dem Poll allein kommen nur
+  Router-, WAN- und Routenfakten. Das Gateway-Glied eines Routers ließe sich nur mit einer
+  Messung am Router direkt messen; deshalb ist der Binärsensor „Gateway erreichbar“ in dieser
+  Version unbekannt (Grund `not_measured`).
+- **Die Detail-Route hat noch keine Ansicht im Panel** (`details` ist nur über HTTP lesbar).
+- **Ziele und Bereichslisten sind im Panel nur lesbar.** Sie enthalten Rechnernamen und
+  Adressen und werden über die Route `settings` geändert, nicht im Panel.
+- **Schwellen sind begründete Annahmen, nicht an echten Daten abgestimmt:** Gewichte und
+  Punktetabellen des Werts, Schwellen und Lernzeit der Baselines.
+- **Die bestehende TCP-Messung des Coordinators bleibt unverändert:** je Poll und Router eine
+  Verbindung von Home Assistant zu `8.8.8.8:53` (`ping_ms`). Ihre Bereinigung folgt in einem
+  eigenen PR; sie gehört nicht zur Netzwerkdiagnose und ist in deren Last nicht enthalten.
+- **Die Jitter-Basislinie** ist als Baustein vorhanden, wird von der Laufzeit aber noch nicht
+  gespeist; Jitter steht nur in den Fenster-Zahlen und im Wert.
+- **Nicht getestet** gegen echte Router, echte Ziele oder eine echte Home-Assistant-Instanz;
+  die Tests laufen ohne Geräte und ohne Netz.
+
+## [1.46.2] - 2026-11-21
+
+### Behoben
+
+- **Security Center: Die Abdeckung sinkt nicht mehr, wenn eine Quelle dazukommt.** Lieferte
+  das Gateway Firewall-Zeilen, fiel die Abdeckung von 71 auf 65 % und der Deckel des
+  Sicherheitswerts von 86 auf 82. Zwei Ursachen, beide behoben:
+  - Firewall-Log und DNS-Log sind **Flotten-Quellen**: Sie gelten als verfügbar, sobald ein
+    Router wirklich Zeilen geliefert hat (nicht bloß eingetragen). Bisher zählte der
+    schlechteste Zustand aller Router, und Access Points liefern diese Zeilen nie. Übersicht
+    und Log-Pfad-Ansicht sagen jetzt „von N von M Routern“ (`coverage.fleet`,
+    `log_path.status[].routers_delivering/routers/rate_limited`) und zeigen dieselben Zahlen.
+    Ein ratenbegrenzter Lieferant bleibt „eingeschränkt“ (`rate_limited`). Alle anderen Quellen
+    behalten die Regel „schlechtester Zustand“.
+  - Einschränkungen senken die Abdeckung **monoton**: Der Abzug eines Faktors entfällt, solange
+    eine seiner erwarteten Quellen flottenweit fehlt (sie ist schon als fehlende Quelle
+    gezählt), und alle Abzüge zusammen bleiben unter einem halben Quellenanteil
+    (`LIMITATION_SHARE_CAP`). Im beobachteten Fall steigt die Abdeckung jetzt auf 79 %, der
+    Deckel auf 90.
+- **Security Center: `fw_inter_vlan` meldet nicht mehr dauerhaft `dest_zone_unknown`.**
+  fw4-Zeilen nennen die Zielzone nie, und die ausgehende Schnittstelle (`OUT=`) wurde zwar
+  gelesen, aber nicht genutzt. Die Zielzone kommt jetzt in dieser Reihenfolge aus: einer
+  konfigurierten Zuordnung Schnittstelle → Zone (gebaut, heute ohne Lieferant: der
+  Configuration Manager gibt Modulen keinen Lesezugriff auf gespeicherte Versionen), einer aus
+  den Zeilen gelernten Zuordnung (in den Ketten `in`/`forward` ist die Präfix-Zone die Zone von
+  `IN=`; begrenzt, nur im Speicher, nie über der konfigurierten, widersprüchliche Werte bleiben
+  unbekannt) und zuletzt `subnet_zones`. Zeilen der Kette `in` mit leerem `OUT=` zählen nicht
+  als Inter-VLAN. Kein zusätzlicher Router-Aufruf.
+- **Security Center: Ein privates Ziel außerhalb von `subnet_zones` gilt nicht mehr als extern.**
+  Es bleibt unbekannt (mit `dest_zone_unknown`); nur öffentliche Ziele zählen als extern.
+- **Security Center: fw4-Format bestätigt.** Zwei echte Zeilenformen (`reject … forward:` mit
+  UDP und zweitem `LEN=`, `reject … in:` mit leerem `OUT=` und ICMP) liest der Parser;
+  `FORMAT_CONFIRMED["fw4_nflog"]` ist wahr, und die Firewall-Erkennungen tragen im Panel nicht
+  mehr „Format unbestätigt“ (DNS weiterhin). Nicht belegt bleiben die Kette `out`, die Urteile
+  `drop`/`accept`, TCP-Flags und die Feldreihenfolge bei IPv6 (Fixture
+  `fw4_kernel_unbelegt.txt`).
+- **Security Center: Nach Rückkehr des Modulschlüssels wird nichts sofort automatisch
+  erledigt.** Die 24 ruhigen Stunden zählen ab dem ersten Poll mit Schlüssel (oder ab dem
+  letzten Befund, wenn der später liegt); vorher war die blinde Zeit als Ruhe gezählt. Ein
+  Start, bei dem der Schlüssel sofort da ist, ändert nichts.
+- **Security Center: Fehlende Core-Anbindung wird aus dem Poll neu versucht.** Fehlt beim
+  Start die Configuration API oder scheitert die Anmeldung der Ereignisse, versucht der Poll
+  die Anbindung alle 5 Minuten erneut, solange ein Core läuft. Eine Warnung je Zustand „nicht
+  gebunden“ (ohne Identitäten), kein Router-Aufruf, Fehler stören den Poll nie.
+- **Security Center: Geräte, die ohne Schlüssel auffällig wurden, bekommen ihren Hinweis.**
+  Beim ersten Poll mit Schlüssel holt das Center den Hinweis für jedes dann noch auffällige
+  Gerät einmal nach (nur im Speicher, höchstens 256 Geräte). Bisher sammelte das
+  Vertrauensbuch die Indikatoren weiter, der Hinweis ging aber verloren.
+- **Security Center: Reserve für Konfiguration und Geräte.** Von den 50 Plätzen der Klasse
+  „andere“ sind 10 nur für Nicht-WLAN-Quellen; WLAN-Hinweise belegen höchstens 40, eine
+  WLAN-Flut blockiert keinen Drift- oder Geräte-Hinweis mehr. Keine Verdrängung: ein neuer
+  WLAN-Hinweis bei voller Quote wird gezählt (`incidents_wifi_quota_dropped`) und einmal je
+  Stunde in der Zeitleiste vermerkt. Die Zuordnung kommt aus der Datenquelle des Detektors
+  (`from_wifi`); ältere Stände mit mehr als 40 WLAN-Hinweisen laden vollständig. Panel und
+  Diagnose zeigen den WLAN-Anteil.
+- Diagnose: `interface_zones` mit Zählern der Zuordnung (ohne Namen), `wifi_incidents`,
+  `missed_device_hints`.
+- Doku: Die Abdeckung ist der Anteil der erwarteten **Datenquellen**, nicht der Erkennungen.
+
+## [1.46.1] - 2026-11-20
+
+Configuration Manager: Router, die als „Unvollständig“ dastanden, obwohl sie mehr können.
+Keine neue Vertragsangabe, keine Änderung am Core, Maskierung unverändert.
+
+### Behoben
+
+- **Das erste Backup klärt den Archivweg.** Lässt die Prüfung bei einem HTTPS-Eintrag den
+  cgi- oder den SSH-Weg „ungeprüft“ (`not_probed`), fordert ein Lauf ohne festen Typ das
+  Archiv an. Gelingt es nicht, bleibt der UCI-Snapshot: `uci_snapshot`/`ok`, wenn jeder Weg
+  „nicht vorhanden“ oder „keine Rechte“ meldet, sonst `partial`. Vorher sicherte so ein Lauf
+  still nur UCI.
+- **cgi-Archiv trotz unlesbarer Paketliste.** Mit dem rpcd-Recht `cgi-io: backup`, aber
+  unlesbarer Paketliste fragt der Lauf das Archiv an; die Fähigkeit `config.cgi_backup` zeigt
+  dabei „noch nicht geprüft“, nicht „verfügbar“. Erst ein echter cgi-Archivlauf belegt sie
+  (Archiv erhalten: verfügbar; abgelehnt: dessen Grund), sichtbar ab der nächsten Prüfung.
+  Ein Archiv über SSH zählt dafür nicht. Eine gemerkte Ablehnung gilt nur für die Anzeige:
+  Der Lauf fragt das Archiv weiter an, nach dem Installieren von `cgi-io` also ohne
+  HA-Neustart; bestätigt rpcd das Recht, entfällt eine gemerkte Rechte-Ablehnung.
+- **Fehlende optionale UCI-Configs** (`sqm`, `mwan3`, `upnpd`, `openvpn`, `ddns`, `usteer`,
+  `firewall`, `dhcp`, `wireless` …) sind „nicht vorhanden“, nicht `uci_failed` und machen
+  keine Version `partial`. Ursache: ubus meldet „nicht gefunden“, der SSH-Ersatzweg war wegen
+  des noch nicht bestätigten Host-Keys gesperrt, und diese Sperre ersetzte die Antwort. Ein
+  „nicht gefunden“ von ubus geht jetzt gar nicht mehr zu SSH; nur eine echte ACL-Sperre
+  nimmt den Ersatzweg und bleibt ein Fehler, wenn er scheitert. `network` und `system` gibt
+  es auf jedem OpenWrt-Router: Fehlen sie, ist der Lauf `partial` (`incomplete`).
+- **Lauf ohne Archivversuch** nennt den Grund je Weg: `archive_not_attempted:cgi.<Ursache>`,
+  `archive_not_attempted:ssh.<Ursache>` oder `archive_not_attempted:requested`.
+- **Lauf mit gescheitertem Archiv** nennt den Grund je versuchtem Weg:
+  `archive_unavailable:<Weg>.<Fehlerklasse>` (bei HTTP zusätzlich
+  `archive_unavailable:cgi.insecure_transport`); läuft die Zeit für das Archiv als Ganzes ab,
+  bekommt jeder Weg der Kette `<Weg>.timeout`. Das Panel zeigt sie in Klartext.
+- **SSH-Port zu ist nicht „Router nicht erreichbar“.** Root auf HTTPS, `cgi-io` fehlt, SSH
+  (Port 22) von Home Assistant aus nicht erreichbar: Der Lauf bleibt `partial`
+  (`unreachable`/`timeout`), aber das Panel nennt den SSH-Weg statt „Der Router war nicht
+  erreichbar“ und als nächsten Schritt, SSH freizugeben oder `cgi-io` zu installieren.
+- **Host-Key-Grund sichtbar.** `ssh_host_key:<Grund>` erscheint als fester Code statt
+  `**REDACTED**`; nur die festen Gründe des Cores kommen zurück, alles andere bleibt maskiert.
+- **Panel „Unvollständig“** zeigt Fehlerart, Gründe in Klartext und den nächsten Schritt
+  (zum Beispiel „SSH-Host-Key bestätigen“; bei einem ungeprüften Weg „Jetzt sichern“, weil
+  dieser Lauf das Archiv anfordert).
+- **Panel „Prüfsumme“** zeigt die Prüfsumme des gespeicherten Inhalts (Archiv, sonst
+  UCI-Snapshot) oder „–“, nie mehr die des Inventars, die auf allen Routern gleich aussah.
+- **Panel „Leserechte fehlen“** nur noch, wenn sie wirklich fehlen; läuft das Archiv (etwa
+  als root per SSH), ist das ACL-Angebot als optional beschrieben.
+- **Panel „Letztes Backup“** zeigt „letzter Versuch: unvollständig, <Zeit>“ statt „noch keins“,
+  wenn es nur unvollständige Läufe gibt.
+
+### Tests
+
+- Neu: `tests/test_config_partial_v1461.py` (End-to-End Runtime → Core → echter Provider,
+  nur die Router-API ist ein Fake), Panel-Tests `configPartial.test.mjs`; der Pin-Speicher für
+  SSH-Host-Keys trennt Router strikt nach Router-ID (Test, keine Code-Änderung). Die festen
+  Weg-Codes (`archive_not_attempted:…`, `archive_unavailable:…`) kommen unmaskiert durch
+  (Test, keine Code-Änderung).
+
 ## [1.46.0] - 2026-11-20
 
 Security Center: eine Beobachtungsschicht für das Netz auf dem Enterprise Core von 1.44.0 und

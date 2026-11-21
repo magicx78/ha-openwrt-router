@@ -1,0 +1,125 @@
+{
+  "_comment": "synthetisch, Struktur nach Live-Prüfung 2026-11-18",
+  "results": [
+    {
+      "band": 5,
+      "channel": 36,
+      "mhz": 5180,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 40,
+      "mhz": 5200,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 44,
+      "mhz": 5220,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 48,
+      "mhz": 5240,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 52,
+      "mhz": 5260,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 56,
+      "mhz": 5280,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 60,
+      "mhz": 5300,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 64,
+      "mhz": 5320,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 149,
+      "mhz": 5745,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": true
+    },
+    {
+      "band": 5,
+      "channel": 153,
+      "mhz": 5765,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 157,
+      "mhz": 5785,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": false
+    },
+    {
+      "band": 5,
+      "channel": 161,
+      "mhz": 5805,
+      "restricted": true,
+      "flags": [
+        "no_ir"
+      ],
+      "active": false
+    }
+  ]
+}

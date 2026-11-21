@@ -517,7 +517,7 @@ def test_inter_vlan_without_dest_zone_is_unattributable() -> None:
     (result,) = mapped.evaluate(now, st)
     assert result.limitation is None and result.unattributed == 0
     (event,) = result.events
-    assert event.src is not None and event.src.zone == "iot"
+    assert event.src is not None and event.src.zone == "lab"
     assert event.dst is not None and event.dst.zone == "lan"
 
     external = FirewallInterVlanDetector(dest_subnets={"192.0.2.128/25": "guest"})

@@ -1,0 +1,57 @@
+{
+  "_comment": "synthetisch, Struktur nach Live-Prüfung 2026-11-18",
+  "freq": 5180,
+  "clients": {
+    "02:00:00:00:02:01": {
+      "auth": true,
+      "assoc": true,
+      "authorized": true,
+      "preauth": false,
+      "wds": false,
+      "wmm": true,
+      "ht": true,
+      "vht": true,
+      "he": false,
+      "wps": false,
+      "mfp": true,
+      "mbo": false,
+      "rrm": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "extended_capabilities": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        64
+      ],
+      "aid": 1,
+      "signature": "wifi4|probe:0,1|assoc:0,1",
+      "bytes": {
+        "rx": 40000000,
+        "tx": 120000000
+      },
+      "airtime": {
+        "rx": 4000000,
+        "tx": 9000000
+      },
+      "packets": {
+        "rx": 90000,
+        "tx": 150000
+      },
+      "rate": {
+        "rx": 86670000,
+        "tx": 11700000
+      },
+      "signal": -61,
+      "capabilities": {}
+    }
+  }
+}

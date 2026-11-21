@@ -37,10 +37,12 @@ from homeassistant.util import dt as dt_util
 
 from .channel_plan import (
     CONFLICT_TYPES,
+    PairEvidence,
     Radio,
     analyze,
     format_finding,
     radios_from_ap_interfaces,
+    rf_downgraded,
 )
 from .client_stability import iface_band
 from .const import DOMAIN, ERROR_TYPE_AUTH, EVENT_OUTAGE
@@ -411,6 +413,22 @@ def collect_radios(hass: HomeAssistant) -> list[Radio]:
 
 
 @callback
+def rf_pair_evidence(hass: HomeAssistant) -> PairEvidence | None:
+    """WiFi RF evidence for channel plan pairs; None while RF is off.
+
+    Release 1.48.0, part 2 (``rf_bridge``). Off, or on any error, the
+    channel plan runs exactly as before (no evidence, no downgrade).
+    """
+    try:
+        from .rf_bridge import channel_plan_evidence_of
+
+        return channel_plan_evidence_of(hass)
+    except Exception as err:  # noqa: BLE001 - the plan works without RF
+        _LOGGER.debug("Wi-Fi channel plan: no RF evidence (%s)", type(err).__name__)
+        return None
+
+
+@callback
 def dhcp_context(
     hass: HomeAssistant,
 ) -> tuple[frozenset[str], frozenset[str], frozenset[str]] | None:
@@ -547,8 +565,11 @@ class ChannelPlanMonitor:
             self._clear()
 
     def _conflicts(self) -> list[dict[str, Any]]:
+        # WiFi RF on: a pair measured harmless on all its radios is info only
+        # (rf_downgraded); RF off, rf_pair_evidence is None: as before.
+        findings = analyze(collect_radios(self.hass), rf=rf_pair_evidence(self.hass))
         return [
-            f for f in analyze(collect_radios(self.hass)) if f["type"] in CONFLICT_TYPES
+            f for f in findings if f["type"] in CONFLICT_TYPES and not rf_downgraded(f)
         ]
 
     @callback

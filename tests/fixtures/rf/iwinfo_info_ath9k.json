@@ -1,0 +1,49 @@
+{
+  "_comment": "synthetisch, Struktur nach Live-Prüfung 2026-11-18",
+  "phy": "phy1",
+  "ssid": "example-ssid",
+  "bssid": "02:00:00:00:01:02",
+  "country": "00",
+  "mode": "Master",
+  "channel": 6,
+  "center_chan1": 6,
+  "frequency": 2437,
+  "txpower": 18,
+  "quality_max": 70,
+  "noise": -95,
+  "encryption": {
+    "enabled": true,
+    "wpa": [
+      2,
+      3
+    ],
+    "authentication": [
+      "psk",
+      "sae"
+    ],
+    "ciphers": [
+      "ccmp"
+    ]
+  },
+  "htmodes": [
+    "HT20",
+    "HT40"
+  ],
+  "hwmodes": [
+    "b",
+    "g",
+    "n"
+  ],
+  "hwmodes_text": "802.11bgn",
+  "hwmode": "n",
+  "htmode": "HT20",
+  "hardware": {
+    "id": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "name": "Generic MAC80211"
+  }
+}

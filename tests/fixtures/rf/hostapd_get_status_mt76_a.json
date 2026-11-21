@@ -1,0 +1,31 @@
+{
+  "_comment": "synthetisch, Struktur nach Live-Prüfung 2026-11-18",
+  "driver": "nl80211",
+  "status": "ENABLED",
+  "bssid": "02:00:00:00:01:01",
+  "ssid": "example-ssid",
+  "freq": 5180,
+  "channel": 36,
+  "op_class": 128,
+  "beacon_interval": 100,
+  "bss_color": 1,
+  "phy": "phy1",
+  "rrm": {
+    "neighbor_report_tx": 0
+  },
+  "wnm": {
+    "bss_transition_query_rx": 0,
+    "bss_transition_request_tx": 0,
+    "bss_transition_response_rx": 0
+  },
+  "airtime": {
+    "time": 200000000,
+    "time_busy": 60000000,
+    "utilization": 255
+  },
+  "dfs": {
+    "cac_seconds": 60,
+    "cac_active": false,
+    "cac_seconds_left": 0
+  }
+}

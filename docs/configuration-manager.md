@@ -108,8 +108,54 @@ fordert bei jedem Backup ohne festen Typ das Archiv an; ohne root-SSH schlägt d
 Liefert der Archivweg einen echten Fehler (zum Beispiel Zeitüberschreitung), der Snapshot aber gelingt, ist die Version `partial` mit der
 Fehlerklasse des Archivs und zählt nicht als Bezugsbasis.
 
-Den Snapshot liest der Manager zuerst per ubus (`uci get`); verweigert rpcd das, liest er mit
-`uci show` per SSH.
+**Das erste Backup klärt den Archivweg.** Die Prüfung ruft nie ein Archiv ab (das würde auf
+dem Router `sysupgrade` starten). Ob SSH als root ein Archiv liefert, zeigt sich deshalb erst
+beim ersten Backup; ebenso der cgi-Weg, wenn rpcd keine klare Antwort gibt oder die Paketliste
+unlesbar ist. Bleibt ein Weg so „ungeprüft“ (`not_probed`), fordert ein Lauf ohne festen Typ
+auch bei HTTPS das Archiv an. Gelingt es nicht, bleibt der UCI-Snapshot: `uci_snapshot` mit
+Status `ok`, wenn jeder Weg „nicht vorhanden“ oder „keine Rechte“ meldet, sonst `partial`.
+Fordert ein Lauf das Archiv an und bekommt keins, steht je versuchtem Weg ein Grund in der
+Version: `archive_unavailable:<Weg>.<Fehlerklasse>`, zum Beispiel `archive_unavailable:cgi.permission`
+oder `archive_unavailable:ssh.auth`; bei einem HTTP-Eintrag zusätzlich
+`archive_unavailable:cgi.insecure_transport`. Läuft die Zeit für das Archiv als Ganzes ab,
+bevor die Kette antwortet, bekommt jeder Weg der Kette `<Weg>.timeout`.
+
+**SSH-Port zu.** Ist bei einem root-Eintrag über HTTPS ohne `cgi-io` der SSH-Port 22 von Home
+Assistant aus nicht erreichbar, endet jeder Lauf `partial` mit `unreachable` oder `timeout`,
+bis die nächste Prüfung läuft. Das Panel nennt dann den SSH-Weg (der Router selbst hat
+geantwortet) und als nächsten Schritt: SSH für Home Assistant freigeben oder `cgi-io`
+installieren.
+
+Den Snapshot liest der Manager zuerst per ubus (`uci get`); verweigert die rpcd-ACL das,
+liest er mit `uci show` per SSH. Meldet ubus dagegen „nicht gefunden“, ist das endgültig: Die
+Config fehlt auf dem Router, ein SSH-Versuch findet nicht statt.
+
+**Fehlende optionale Configs** (zum Beispiel `sqm`, `mwan3`, `upnpd`, `openvpn`, `ddns`,
+`usteer`, wenn das Paket nicht installiert ist, auf einem Access Point ohne Funk oder ohne
+eigene Dienste auch `wireless`, `firewall` und `dhcp`) gelten als „nicht vorhanden“, nicht als
+Lesefehler: Sie machen eine Version weder `partial` noch erzeugen sie `uci_failed`. Das gilt
+seit 1.46.1 auch dann, wenn der SSH-Weg wegen eines noch nicht bestätigten Host-Keys gesperrt
+ist. **`network` und `system`** gibt es auf jedem OpenWrt-Router; fehlen sie, ist der Lauf
+`partial` (Fehlerklasse `incomplete`). Echte Lesefehler (rpcd verweigert die Config,
+abgebrochene Antwort) bleiben Fehler; ein unklares Ergebnis wird nie zu „ok“.
+
+**Ob der cgi-Weg geht**, zeigt die Fähigkeit `config.cgi_backup`: „verfügbar“ nur mit dem
+rpcd-Recht `cgi-io: backup` und `cgi-io` in der Paketliste, „nicht verfügbar“ ohne das Recht
+oder wenn die lesbare Paketliste kein `cgi-io` enthält. Ist das Recht da, die Paketliste aber
+unlesbar, bleibt sie „noch nicht geprüft“, bis ein echter cgi-Archivlauf sie belegt (Archiv
+erhalten: verfügbar; abgelehnt: dessen Grund; sichtbar ab der nächsten Prüfung, also nach
+Einbinden, Firmware-Wechsel, Einschalten der Option oder ACL-Neuverteilung). Ein Archiv über
+SSH belegt den cgi-Weg nicht. Unabhängig von der Anzeige fragt der Lauf in diesem Fall das
+Archiv an (siehe oben), auch nach einer gemerkten Ablehnung: Wird `cgi-io` nachinstalliert,
+nimmt der nächste Lauf das Archiv ohne HA-Neustart. Bestätigt rpcd bei einer Prüfung das
+Recht, entfällt eine gemerkte Rechte-Ablehnung.
+
+**Lauf ohne Archivversuch.** Fordert ein Lauf kein Archiv an, steht in der Version je Weg ein
+Grund: `archive_not_attempted:cgi.<Ursache>` und `archive_not_attempted:ssh.<Ursache>`
+(zum Beispiel `cgi.not_probed`, `ssh.pin_pending`), oder `archive_not_attempted:requested`,
+wenn nur ein UCI-Snapshot verlangt war. Den Grund aus dem Host-Key-Pinning
+(`ssh_host_key:pin_pending`, `mismatch`, …) zeigen Antworten und Panel als festen Code; der
+Fingerprint selbst steht nie in den Warnungen.
 
 ## 3. Auslöser
 
@@ -325,16 +371,26 @@ offen ist. Das Panel ist deutsch.
 Freigaben. Läuft ein Backup, fragt die Ansicht alle 5 Sekunden nach, höchstens 5 Minuten.
 
 **Router-Detail.** Kennzahlen (letztes Backup, Versionen, OpenWrt, Zeitplan, nächster Lauf,
-Archivweg: Vollarchiv, nur UCI-Snapshot, keiner), dann die Abschnitte:
+Archivweg: Vollarchiv, nur UCI-Snapshot, keiner), dann die Abschnitte. Gibt es noch keine
+brauchbare Version, aber einen unvollständigen Lauf, steht bei „Letztes Backup“
+„letzter Versuch: unvollständig, <Zeit>“. Bei „Unvollständig“ nennt ein Hinweis die Fehlerart,
+die Gründe der neuesten Version in Klartext (auch je gescheitertem Archivweg, etwa „Archiv über
+SSH fehlgeschlagen: Anmeldung fehlgeschlagen“) und den nächsten Schritt (zum Beispiel
+„SSH-Host-Key bestätigen“; bei einem ungeprüften Weg „Jetzt sichern“, weil dieser Lauf das
+Archiv anfordert).
 
 - **Backup jetzt**: Beschreibung (höchstens 200 Zeichen) und „Jetzt sichern“.
 - **Zugang**: Fähigkeiten, SSH-Host-Key bestätigen oder zurücksetzen, Angebot für das
   Router-Recht (nur sichtbar, wenn etwas nötig ist, [Abschnitt 9](#9-berechtigungen-auf-dem-router)).
+  „Für das Backup fehlen dem Router Leserechte“ steht nur, wenn sie wirklich fehlen (Backup
+  am Recht gescheitert, UCI nicht lesbar oder kein Archivweg mehr); läuft das Archiv, etwa per
+  SSH als root, ist das Angebot als optional beschrieben.
 - **Drift**: Zustand, Zähler (kritisch, nicht einstufbar), „Drift jetzt prüfen“,
   „Unterschiede ansehen“, „Bestätigen“, „Als bekannt markieren“.
 - **Offene Freigaben**: begonnene Exporte fortsetzen.
 - **Versionen**: Zeitleiste der letzten 30 Tage, Tabelle mit Zeit, Typ/Grund, Größe,
-  Prüfsumme (gekürzt, voller Wert beim Daraufzeigen), Prüfzustand, Beschreibung und den
+  Prüfsumme des gespeicherten Inhalts (Archiv, sonst UCI-Snapshot, sonst „–“; nie die des
+  Inventars; gekürzt, voller Wert beim Daraufzeigen), Prüfzustand, Beschreibung und den
   Aktionen **Prüfen** (Bytes gegen Prüfsumme und Struktur), **Schützen**, **Exportieren**,
   **Wiederherstellung prüfen**, **Vergleichen**.
 - **Vergleich**: [Abschnitt 6](#6-diff-ansicht).
