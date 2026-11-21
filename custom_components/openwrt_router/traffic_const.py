@@ -616,22 +616,44 @@ HISTORY_FORMAT_VERSION: Final = 1
 # or released, and at Home Assistant's final write (HA Store does that).
 HISTORY_FINE_SAVE_DELAY_S: Final = 1800
 HISTORY_COARSE_SAVE_DELAY_S: Final = 300
-# Store part budgets in bytes of the written file (plan §5 quotas). Compact
-# keeps no client history on disk, so its client share goes to the
-# infrastructure part. Over a budget the oldest buckets of that part go.
+# Store part budgets in bytes of the written file (plan §5 quotas), per profile
+# and store file. Compact keeps no client history on disk, so its client share
+# goes to the infrastructure part. Over a budget the oldest buckets of that
+# part go. The "rest" part (counter states) only exists in the fine store; the
+# coarse store carries the settings besides the history (a few KiB). The
+# parts of one store add up to well below its 2 MiB limit.
+# Korrektur 2026-11-21: standard keeps hourly infrastructure values 14 days
+# (like compact); at full retention the coarse store of the plan's reference
+# fleet (6 routers, ~100 infrastructure points, 150 clients) needs ~1.57 MB
+# infrastructure + ~0.41 MB client (scripts/traffic_history_sim.py 92 900),
+# so the coarse store gets its own split.
 HISTORY_PART_INFRA: Final = "infra"
 HISTORY_PART_CLIENT: Final = "client"
 HISTORY_PART_REST: Final = "rest"
 HISTORY_BUDGETS: Final = {
     HISTORY_PROFILE_COMPACT: {
-        HISTORY_PART_INFRA: 1_900_000,
-        HISTORY_PART_CLIENT: 0,
-        HISTORY_PART_REST: 100_000,
+        "fine": {
+            HISTORY_PART_INFRA: 1_900_000,
+            HISTORY_PART_CLIENT: 0,
+            HISTORY_PART_REST: 100_000,
+        },
+        "coarse": {
+            HISTORY_PART_INFRA: 1_900_000,
+            HISTORY_PART_CLIENT: 0,
+            HISTORY_PART_REST: 0,
+        },
     },
     HISTORY_PROFILE_STANDARD: {
-        HISTORY_PART_INFRA: 1_300_000,
-        HISTORY_PART_CLIENT: 600_000,
-        HISTORY_PART_REST: 100_000,
+        "fine": {
+            HISTORY_PART_INFRA: 1_300_000,
+            HISTORY_PART_CLIENT: 600_000,
+            HISTORY_PART_REST: 100_000,
+        },
+        "coarse": {
+            HISTORY_PART_INFRA: 1_620_000,
+            HISTORY_PART_CLIENT: 440_000,
+            HISTORY_PART_REST: 0,
+        },
     },
 }
 # Trimming a part over budget runs at most this many rounds per save.

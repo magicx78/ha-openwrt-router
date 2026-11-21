@@ -12,6 +12,7 @@ Plus the 30-day simulation (plan §5 size estimate). No router, no network.
 from __future__ import annotations
 
 import json
+import math
 import time
 from typing import Any
 
@@ -20,6 +21,7 @@ from core_testkit import FakeDisks
 from core_testkit import make_hass as core_make_hass
 from homeassistant.helpers.json import prepare_save_json
 
+from custom_components.openwrt_router import traffic_store
 from custom_components.openwrt_router.const import (
     TRAFFIC_COARSE_STORE_KEY,
     TRAFFIC_COARSE_STORE_MAX_BYTES,
@@ -27,6 +29,7 @@ from custom_components.openwrt_router.const import (
     TRAFFIC_FINE_STORE_MAX_BYTES,
 )
 from custom_components.openwrt_router.traffic_const import (
+    HISTORY_BUDGETS,
     HISTORY_COARSE_SAVE_DELAY_S,
     HISTORY_FINE_SAVE_DELAY_S,
     HISTORY_MAX_QUERY_POINTS,
@@ -111,8 +114,11 @@ def test_profiles_follow_the_decisions() -> None:
     assert compact.infra.fine_s == 6 * 3600
     assert compact.infra.day_s >= 30 * DAY
     assert compact.persist_clients is False  # "nur Infrastruktur" on disk
-    # standard: plan §5 table
-    assert standard.infra.fine_s == DAY and standard.infra.hour_s == 7 * DAY
+    # standard: plan §5 table; Korrektur 2026-11-21: hourly values 14 days
+    # (standard never keeps less than compact)
+    assert standard.infra.fine_s == DAY and standard.infra.hour_s == 14 * DAY
+    for res in (300, 3600, DAY):
+        assert standard.infra.retention(res) >= compact.infra.retention(res)
     assert standard.infra.day_s == 90 * DAY
     assert standard.client.fine_s == 6 * 3600 and standard.client.hour_s == 2 * DAY
     assert standard.client.day_s == 30 * DAY and standard.persist_clients
@@ -534,7 +540,6 @@ async def test_store_from_before_phase_i_is_read(disks: FakeDisks) -> None:
 
 
 async def test_profile_setting_and_part_budgets(disks: FakeDisks, monkeypatch) -> None:
-    from custom_components.openwrt_router import traffic_store
 
     hass = core_make_hass()
     engine, coord = await _engine(hass)
@@ -549,9 +554,8 @@ async def test_profile_setting_and_part_budgets(disks: FakeDisks, monkeypatch) -
     with pytest.raises(ValueError):
         await engine.async_update_settings({"history_profile": "huge"})
     await _run_polls(engine, coord, hass, 120)
-    tiny = {
-        HISTORY_PROFILE_STANDARD: {"infra": 700, "client": 1_000, "rest": 10},
-    }
+    part = {"infra": 700, "client": 1_000, "rest": 10}
+    tiny = {HISTORY_PROFILE_STANDARD: {"fine": part, "coarse": part}}
     monkeypatch.setattr(traffic_store, "HISTORY_BUDGETS", tiny)
     payload = engine.store.fine_payload()
     wan = payload["history"]["points"]
@@ -633,6 +637,41 @@ def simulate(
     }
 
 
+def projected_full_bytes(hist: TrafficHistory) -> dict[str, dict[str, int]]:
+    """Bytes per store part once every tier is full (from the measured state).
+
+    Bytes per held bucket (point identity included, so an upper bound while
+    buckets are still missing) times the fixed bucket count of the part at
+    full retention, plus 2 % for the longer numbers of daily sums (a 92-day
+    run of this fleet ends 1.1 % above the plain projection).
+    """
+    prof = hist.profile
+    out: dict[str, dict[str, int]] = {}
+    for store, export, tiers in (
+        ("fine", hist.export_fine, (300,)),
+        ("coarse", hist.export_coarse, (3600, DAY)),
+    ):
+        section = export()
+        out[store] = {}
+        for part, limits in (
+            (HISTORY_PART_INFRA, prof.infra),
+            (HISTORY_PART_CLIENT, prof.client),
+        ):
+            entries = {
+                k: e
+                for k, e in section["points"].items()
+                if traffic_store._part_of(e) == part
+            }
+            held = hist.bucket_count(store, part)
+            if not entries or not held:
+                out[store][part] = 0
+                continue
+            size = traffic_store.store_bytes(store, entries)
+            full = len(entries) * sum(limits.max_buckets(r) for r in tiers)
+            out[store][part] = math.ceil(size / held * max(full, held) * 1.02)
+    return out
+
+
 @pytest.mark.parametrize("profile", [HISTORY_PROFILE_COMPACT, HISTORY_PROFILE_STANDARD])
 def test_thirty_day_simulation_stays_bounded(profile: str) -> None:
     hist = TrafficHistory(profile=profile)
@@ -661,6 +700,18 @@ def test_thirty_day_simulation_stays_bounded(profile: str) -> None:
     assert month.time_coverage > 0.95
     week = hist.window(wan.point_id, 7 * DAY, end=end)
     assert week.resolution_s == 3600 and week.time_coverage > 0.95
+    # at full retention (90 days in standard) every part stays inside its
+    # budget, and the budgets of one store add up to below its limit
+    full = projected_full_bytes(hist)
+    print("FULL RETENTION", json.dumps(full))
+    budgets = HISTORY_BUDGETS[profile]
+    for store, limit in (
+        ("fine", TRAFFIC_FINE_STORE_MAX_BYTES),
+        ("coarse", TRAFFIC_COARSE_STORE_MAX_BYTES),
+    ):
+        for part, need in full[store].items():
+            assert need <= budgets[store][part], (store, part, need)
+        assert sum(budgets[store].values()) + 16 * 1024 < limit
     # no unbounded growth: 10 more days add only daily buckets up to their cap
     more = simulate(hist, 30, 10)
     assert more["buckets_fine"] == out["buckets_fine"]

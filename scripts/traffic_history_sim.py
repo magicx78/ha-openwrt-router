@@ -7,6 +7,10 @@ store files exactly as Home Assistant writes them, run time.
 
     python scripts/traffic_history_sim.py [days] [step_s]
 
+``92 900`` is the CI variant (15-minute rates as in the test) at full
+retention: the 90-day tier of the standard profile is full, so the printed
+coarse bytes are the steady state.
+
 Needs the test environment (Home Assistant installed); no router, no
 network, nothing is written.
 """

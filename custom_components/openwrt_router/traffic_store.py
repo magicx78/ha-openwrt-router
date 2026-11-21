@@ -19,8 +19,8 @@ store at most every ``HISTORY_FINE_SAVE_DELAY_S``, the coarse store
 ``HISTORY_COARSE_SAVE_DELAY_S`` after an hour bucket was completed.
 
 **Size.** Each written section is measured exactly as HA writes it
-(``prepare_save_json``). A part over its budget (``HISTORY_BUDGETS``:
-infrastructure / client / rest) loses its oldest buckets until it fits
+(``prepare_save_json``). A part over its budget (``HISTORY_BUDGETS`` per
+profile and store: infrastructure / client / rest) loses its oldest buckets until it fits
 (``store_trimmed_<part>``); the rest of the fine store (counter states) is
 left out over its budget. A payload still over the store limit is not
 written; the last good one is kept (``save_over_size``).
@@ -201,14 +201,15 @@ class TrafficStore:
 
     # -- payloads ------------------------------------------------------------------------
 
-    def _budgets(self) -> dict[str, int]:
+    def _budgets(self, store: str) -> dict[str, int]:
         name = self.history.profile.name if self.history is not None else ""
-        return dict(HISTORY_BUDGETS.get(name) or HISTORY_BUDGETS["compact"])
+        profile = HISTORY_BUDGETS.get(name) or HISTORY_BUDGETS["compact"]
+        return dict(profile.get(store) or {})
 
     def _fit(self, store: str, build: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         """The section of ``store``, trimmed part by part to the budgets."""
         assert self.history is not None
-        budgets = self._budgets()
+        budgets = self._budgets(store)
         section = build()
         for _round in range(HISTORY_TRIM_ROUNDS):
             over = False
@@ -221,13 +222,13 @@ class TrafficStore:
                 if not points:
                     continue
                 size = store_bytes(store, points)
-                if size <= budgets[part]:
+                if size <= budgets.get(part, 0):
                     continue
                 buckets = self.history.bucket_count(store, part)
                 if buckets <= 0:
                     continue
                 per = size / buckets
-                drop = min(buckets, math.ceil((size - budgets[part]) / per) + 1)
+                drop = min(buckets, math.ceil((size - budgets.get(part, 0)) / per) + 1)
                 if self.history.trim_oldest(store, part, drop):
                     over = True
             if not over:
@@ -246,7 +247,7 @@ class TrafficStore:
         if self.baselines is not None:
             states = self.baselines()
             rest = store_bytes(STORE_FINE, states)
-            if rest <= self._budgets()[HISTORY_PART_REST]:
+            if rest <= self._budgets(STORE_FINE).get(HISTORY_PART_REST, 0):
                 payload["baselines"] = states
             else:
                 self.history.count_trimmed(HISTORY_PART_REST, len(states))

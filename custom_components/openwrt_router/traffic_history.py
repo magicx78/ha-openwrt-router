@@ -160,10 +160,11 @@ PROFILES: Mapping[str, HistoryProfile] = {
         client=TierLimits(6 * _H, 2 * _D, 0),
         persist_clients=False,
     ),
-    # Plan §5 table.
+    # Plan §5 table; Korrektur 2026-11-21: hourly infrastructure values 14 days
+    # as in compact (standard must not keep less).
     HISTORY_PROFILE_STANDARD: HistoryProfile(
         HISTORY_PROFILE_STANDARD,
-        infra=TierLimits(1 * _D, 7 * _D, 90 * _D),
+        infra=TierLimits(1 * _D, 14 * _D, 90 * _D),
         client=TierLimits(6 * _H, 2 * _D, 30 * _D),
         persist_clients=True,
     ),
