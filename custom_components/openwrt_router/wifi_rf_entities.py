@@ -36,7 +36,7 @@ the next poll (no reload). An error here never fails an entry's setup.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,6 +57,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from .const import (
     DATA_WIFI_RF_ENTITIES,
     DOMAIN,
+    OPTION_WIFI_RF_ENABLED,
     SIGNAL_WIFI_RF,
     UID_FLEET_WIFI_RF_HEALTH,
     UID_FLEET_WIFI_RF_RECOMMENDATIONS,
@@ -526,6 +527,24 @@ def _wanted(hass: HomeAssistant, center: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _entry_switches(hass: HomeAssistant) -> dict[str, bool] | None:
+    """Entry -> ``wifi_rf_enabled`` of every config entry of the domain.
+
+    Read from the options of all entries, not only the ones already set up
+    (read only; None when the entries cannot be listed).
+    """
+    try:
+        entries = hass.config_entries.async_entries(DOMAIN)
+        return {
+            e.entry_id: isinstance(opts := getattr(e, "options", None), Mapping)
+            and opts.get(OPTION_WIFI_RF_ENABLED) is True
+            for e in entries
+            if isinstance(getattr(e, "entry_id", None), str)
+        }
+    except Exception:  # noqa: BLE001 - unknown: remove nothing
+        return None
+
+
 async def async_sync_rf_entities(hass: HomeAssistant) -> None:
     """Create the set for routers with RF on; remove it where RF is off.
 
@@ -551,7 +570,17 @@ async def async_sync_rf_entities(hass: HomeAssistant) -> None:
     if not center.enabled:
         hosts.anchor = None
         hosts.created.clear()
-        _remove_all(hass)
+        switches = _entry_switches(hass)
+        if switches is None:
+            return  # entries unknown: remove nothing
+        if not any(switches.values()):
+            _remove_all(hass)
+            return
+        # 1.49.3: the center only knows the entries set up so far; an entry
+        # with RF on that is set up later keeps its entries (and the fleet set).
+        for entry_id, on in switches.items():
+            if not on:
+                _remove_router(hass, entry_id)
         return
     sensors = _sensor_platforms(hass)
     if sensors and (hosts.anchor is None or hosts.anchor not in sensors):
