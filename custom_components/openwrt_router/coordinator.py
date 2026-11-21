@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -184,6 +184,11 @@ _TRAFFIC_COUNTER_KEYS = (
 )
 
 
+# Netdev names that carry WAN traffic on OpenWrt (kept first, over the cap).
+_TRAFFIC_WAN_NAMES = frozenset({"wan", "wan6", "wwan", "wwan0"})
+_TRAFFIC_WAN_PREFIXES = ("pppoe-", "pppoa-", "wan.", "3g-", "wwan")
+
+
 def _traffic_counter(value: Any) -> int | None:
     """A raw counter as delivered (int >= 0, not bool), else None."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -191,12 +196,48 @@ def _traffic_counter(value: Any) -> int | None:
     return value
 
 
+def _traffic_device_names(device_status: dict[str, Any]) -> list[str]:
+    return [n for n in device_status if isinstance(n, str) and len(n) <= 15]
+
+
+def _traffic_wan_like(name: str) -> bool:
+    return name in _TRAFFIC_WAN_NAMES or name.startswith(_TRAFFIC_WAN_PREFIXES)
+
+
+def traffic_first_devices(wan_status: Any, trunk_port_map: Any) -> list[str]:
+    """Netdevs the copy takes before all others: the WAN ``l3_device`` and
+    ``device`` of this poll, then the uplink ports of the last topology map
+    (``trunk_port_map`` values; the ports only, never the hosts)."""
+    out: list[str] = []
+    if isinstance(wan_status, dict):
+        out.extend(
+            v
+            for v in (wan_status.get("l3_device"), wan_status.get("device"))
+            if isinstance(v, str)
+        )
+    if isinstance(trunk_port_map, dict):
+        out.extend(sorted(v for v in trunk_port_map.values() if isinstance(v, str)))
+    return out
+
+
+def traffic_devices_omitted(device_status: Any) -> int:
+    """Netdevs of the reply that the TRAFFIC_MAX_DEVICES cap leaves out."""
+    if not isinstance(device_status, dict):
+        return 0
+    return max(0, len(_traffic_device_names(device_status)) - TRAFFIC_MAX_DEVICES)
+
+
 def traffic_device_counters(
     device_status: Any,
+    *,
+    first: Iterable[Any] = (),
 ) -> dict[str, dict[str, Any]] | None:
     """Plain copy of the counters in a ``network.device status`` reply.
 
-    At most TRAFFIC_MAX_DEVICES netdevs (sorted by name); every missing or
+    At most TRAFFIC_MAX_DEVICES netdevs: first the names in ``first`` (the
+    WAN ``l3_device``, uplink ports), then WAN-like names (``wan``,
+    ``wan6``, ``pppoe-*``, ...), then the rest sorted by name, so a large
+    router never loses its WAN counter to the cap. Every missing or
     non-counter value is None (never 0). None when the reply holds no
     device (call failed or not allowed). The coordinator knows no traffic
     types: the copy is plain dicts of ints, bools and short strings.
@@ -204,8 +245,14 @@ def traffic_device_counters(
     if not isinstance(device_status, dict) or not device_status:
         return None
     out: dict[str, dict[str, Any]] = {}
-    names = sorted(n for n in device_status if isinstance(n, str) and len(n) <= 15)
-    for name in names[:TRAFFIC_MAX_DEVICES]:
+    names = sorted(_traffic_device_names(device_status))
+    wanted = [
+        n for n in first if isinstance(n, str) and len(n) <= 15 and n in device_status
+    ]
+    order = dict.fromkeys(
+        [*wanted, *(n for n in names if _traffic_wan_like(n)), *names]
+    )
+    for name in list(order)[:TRAFFIC_MAX_DEVICES]:
         dev = device_status.get(name)
         if not isinstance(dev, dict):
             continue
@@ -494,6 +541,8 @@ class OpenWrtCoordinatorData:
         # time of that read, and where the conntrack count came from
         # ("count_file" / "table_scan" / None). Never in as_dict.
         self.device_counters: dict[str, dict[str, Any]] | None = None
+        # netdevs of that reply left out by the cap (WAN and uplinks first)
+        self.device_counters_omitted: int = 0
         self.counters_sampled_mono: float | None = None
         self.active_connections_source: str | None = None
         # --- Ende Traffic Analytics ---
@@ -960,12 +1009,19 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
             # Copy of the raw counters (the reply itself is not kept) and the
             # time of the read, measured here and not in a listener (E4).
             try:
-                data.device_counters = traffic_device_counters(device_status)
+                data.device_counters = traffic_device_counters(
+                    device_status,
+                    first=traffic_first_devices(
+                        data.wan_status, getattr(self.data, "trunk_port_map", None)
+                    ),
+                )
+                data.device_counters_omitted = traffic_devices_omitted(device_status)
                 if data.device_counters is not None:
                     data.counters_sampled_mono = time.monotonic()
             except Exception as err:  # noqa: BLE001 - never fails the poll
                 _LOGGER.debug("Traffic counter copy failed (%s)", type(err).__name__)
                 data.device_counters = None
+                data.device_counters_omitted = 0
                 data.counters_sampled_mono = None
             # --- Ende Traffic Analytics ---
 

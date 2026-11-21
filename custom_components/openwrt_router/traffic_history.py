@@ -94,6 +94,8 @@ RESOLUTIONS = (HIST_FINE_S, *COARSE_RESOLUTIONS)
 STORE_FINE = "fine"
 STORE_COARSE = "coarse"
 _TIER_KEY = {HIST_FINE_S: "f", HIST_HOUR_S: "h", HIST_DAY_S: "d"}
+# Keys of a stored point entry that hold buckets (the rest is fixed per point).
+RING_KEYS = frozenset(_TIER_KEY.values())
 _COLUMNS = ("rx", "tx", "rxp", "txp", "cov", "samples", "mask")
 _INT_COLUMNS = frozenset({"rx", "tx", "samples", "mask"})
 # Token of an unknown value in a stored column (never 0).
@@ -740,6 +742,14 @@ class TrafficHistory(MemoryBucketRing):
                 if tier.first_start is not None and len(tier):
                     entry[_TIER_KEY[res]] = _encode_ring(tier)
             if len(entry) > 1:
+                # Roll-up mark here too (review T6): after a hard crash the
+                # two stores can be of different times; this mark says what
+                # these tiers hold, so on load it wins over the fine one (no
+                # fine bucket added twice, none lost). Older readers ignore
+                # the key (format version unchanged).
+                rolled = self._rolled.get(pid)
+                if rolled is not None:
+                    entry["ru"] = rolled
                 points[pid] = entry
         return {
             "v": HISTORY_FORMAT_VERSION,
@@ -821,6 +831,11 @@ class TrafficHistory(MemoryBucketRing):
                     setattr(ring, name, getattr(decoded, name))
             return True
         ok = True
+        rolled = entry.get("ru")
+        if isinstance(rolled, int) and not isinstance(rolled, bool):
+            # the tiers hold exactly the fine buckets before their own mark
+            # (a coarse file from before the fix has none: the fine mark stays)
+            self._rolled[pid] = rolled
         for res in COARSE_RESOLUTIONS:
             raw = entry.get(_TIER_KEY[res])
             size = limits.max_buckets(res)
@@ -859,6 +874,7 @@ class TrafficHistory(MemoryBucketRing):
 
 __all__ = [
     "PROFILES",
+    "RING_KEYS",
     "STORE_COARSE",
     "STORE_FINE",
     "HistoryProfile",

@@ -138,6 +138,7 @@ from .traffic_const import (
     OPT_STATION_DETAIL,
     OPT_SYSFS_FALLBACK,
     REASON_CORE_MISSING,
+    REASON_DEVICES_OMITTED,
     REASON_DISABLED,
     REASON_FLOW_SOURCE_SILENT,
     REASON_MODULE_KEY_MISSING,
@@ -161,7 +162,12 @@ from .traffic_correlate import (
     TrafficReadApi,
     WifiRfAdapter,
 )
-from .traffic_counters import BaselineBook, process_samples, router_restarted
+from .traffic_counters import (
+    BaselineBook,
+    finite_time,
+    process_samples,
+    router_restarted,
+)
 from .traffic_flows import FlowStore
 from .traffic_history import PROFILES, TrafficHistory
 from .traffic_model import (
@@ -388,6 +394,7 @@ class RouterStatus:
     """Per-router facts of the last processed snapshot (counts only)."""
 
     devices: int | None = None  # None: no netdev counters (source missing)
+    devices_omitted: int = 0  # netdevs left out by the cap (WAN kept first)
     stations: int | None = None  # None: not ready (no module key)
     stations_total: int = 0
     stations_without_bytes: int = 0
@@ -1127,6 +1134,8 @@ class TrafficEngine:
             netdev = (CAP_NETDEV_COUNTERS, unknown, REASON_NO_DATA_YET)
         elif status.devices is None:
             netdev = (CAP_NETDEV_COUNTERS, unavail, REASON_SOURCE_MISSING)
+        elif status.devices_omitted:
+            netdev = (CAP_NETDEV_COUNTERS, avail, REASON_DEVICES_OMITTED)
         else:
             netdev = (CAP_NETDEV_COUNTERS, avail, REASON_OK)
         if self._module_key is None:
@@ -1195,15 +1204,25 @@ class TrafficEngine:
             enabled=True, now_wall=self.wall(), ttl_s=self.flows.ttl_s
         )
 
-    def ingest_collector(self, raw: bytes) -> dict[str, Any]:
+    def ingest_collector(self, raw: bytes, *, user_id: Any = None) -> dict[str, Any]:
         """One collector call (all or nothing, see ``traffic_collector``)."""
         before = self._collector_view()
         answer = self.collector.ingest(
-            raw, now_wall=self.wall(), module_key=self._module_key, flows=self.flows
+            raw,
+            now_wall=self.wall(),
+            module_key=self._module_key,
+            flows=self.flows,
+            known_routers=self._routers_on(),
+            user_id=user_id,
         )
         if self._collector_view() != before:
             self._refresh_caps()
         return answer
+
+    def _routers_on(self) -> frozenset[str]:
+        """Router ids of the loaded entries with traffic on."""
+        rids = (self._rid(e) for e, s in self._entries.items() if s.options.enabled)
+        return frozenset(r for r in rids if r is not None)
 
     def flow_query(
         self,
@@ -1273,19 +1292,28 @@ class TrafficEngine:
         if slot is None or not slot.options.enabled:
             return
         now = self.clock()
-        slot.poll_end_mono = now
-        self._maybe_retry_key(now)
         coordinator = slot.coordinator
         if getattr(coordinator, "last_update_success", True) is not True:
+            slot.poll_end_mono = now
+            self._maybe_retry_key(now)
             self.counters["polls_failed"] += 1
             return
         data = getattr(coordinator, "data", None)
         if data is None:
+            slot.poll_end_mono = now
             return
         rid = self._rid(entry_id)
         if rid is None:
             self.counters["router_id_missing"] += 1
             return
+        if self._repeated(rid, data):
+            # A listener call without a new poll (e.g. after the package
+            # update check): the same counters at the same sample time give
+            # no rate, so nothing is processed, planned or signalled.
+            self.counters["repeated_snapshots"] += 1
+            return
+        slot.poll_end_mono = now
+        self._maybe_retry_key(now)
         snapshot = snapshot_from_data(
             data,
             router_id=rid,
@@ -1294,6 +1322,21 @@ class TrafficEngine:
             registry=self._registry_lookup(),
         )
         self._enqueue(entry_id, snapshot)
+
+    def _repeated(self, rid: str, data: Any) -> bool:
+        """True if ``data`` carries the sample time already taken for ``rid``.
+
+        The time of the counter read is set in the poll itself (E4), so an
+        unchanged ``counters_sampled_mono`` means no new poll has run.
+        """
+        mono = finite_time(getattr(data, "counters_sampled_mono", None))
+        if mono is None:
+            return False
+        queued = self._queue.get(rid)
+        if queued is not None and queued[1].mono_s == mono:
+            return True
+        prev = self._router_clock.get(rid)
+        return prev is not None and prev[0] == mono
 
     def _client_history(self) -> Any:
         """The client engine's history while it runs and is on, else None."""
@@ -1382,6 +1425,8 @@ class TrafficEngine:
         self.counters["wired_dropped"] += snapshot.wired_dropped
         status = self.status.setdefault(rid, RouterStatus())
         status.devices = None if snapshot.devices is None else len(snapshot.devices)
+        status.devices_omitted = snapshot.devices_omitted
+        self.counters["devices_omitted"] += snapshot.devices_omitted
         status.stations = None if snapshot.stations is None else len(snapshot.stations)
         status.stations_total = snapshot.stations_total
         status.stations_without_bytes = snapshot.stations_without_bytes
@@ -1429,15 +1474,21 @@ class TrafficEngine:
             self.latest.pop(point.point_id, None)
 
     def _keep_rates(self, rates: list[Rate]) -> None:
+        kept: list[Rate] = []
         for rate in rates:
             self.quality_counts[rate.quality.value] += 1
+            if rate.quality is Quality.TIME_NOT_ADVANCING:
+                # No time passed (or none is known): nothing was measured, so
+                # the last rate stays and the series gets no quality bit.
+                continue
+            kept.append(rate)
             pid = rate.point.point_id
             if self.book.has(pid):
                 self.latest[pid] = rate
                 if rate.has_rate and rate.point.scope in _TOTAL_SCOPES:
                     self._add_totals(rate)
             self.series.add_rate(rate)
-        self.correlator.observe_rates(rates)
+        self.correlator.observe_rates(kept)
 
     def _add_totals(self, rate: Rate) -> None:
         """Bytes (RX+TX, only when both are known) and error deltas."""

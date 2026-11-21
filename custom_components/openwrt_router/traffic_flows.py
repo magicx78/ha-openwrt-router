@@ -67,6 +67,7 @@ from .traffic_const import (
     FLOW_TTL_MIN_S,
     FLOW_TTL_S,
     MAX_FLOW_AGGREGATES,
+    MAX_FLOW_FEEDS,
     MAX_FLOW_QUERY,
     MAX_FLOWS_PER_FEED,
     MAX_FLOWS_TOTAL,
@@ -606,7 +607,10 @@ class FlowStore:
         self._max_feed = max_per_feed
         self.ttl_s = self._clamp_ttl(ttl_s)
         self._feeds: dict[str, deque[_Entry]] = {}
+        # Last record time per feed, bounded (MAX_FLOW_FEEDS) and pruned
+        # with the TTL; ``_had_source`` keeps "silent" after the prune.
         self._last_seen: dict[str, float] = {}
+        self._had_source = False
         self._total = 0
         self._aggregates: OrderedDict[tuple[str | None, str, str], list[int]] = (
             OrderedDict()
@@ -642,7 +646,7 @@ class FlowStore:
         """Keep one record; False when the store is full (counted)."""
         feed = self.feed_of(origin, record.router_id)
         self.prune(now)
-        self._last_seen[feed] = now
+        self._seen(feed, now)
         queue = self._feeds.get(feed)
         if queue is not None and len(queue) >= self._max_feed:
             queue.popleft()
@@ -708,9 +712,22 @@ class FlowStore:
         kept = 0
         for record in evaluation.records:
             kept += self.add(record, origin=FEED_CONNTRACK, now=now)
-        self._last_seen[self.feed_of(FEED_CONNTRACK, evaluation.router_id)] = now
+        self._seen(self.feed_of(FEED_CONNTRACK, evaluation.router_id), now)
         self.counters["snapshots"] += 1
         return kept
+
+    def _seen(self, feed: str, now: float) -> None:
+        """Note a sign of life of ``feed``; a new feed over the bound
+        pushes out the one heard from longest ago (with its records)."""
+        self._had_source = True
+        if feed not in self._last_seen and len(self._last_seen) >= MAX_FLOW_FEEDS:
+            oldest = min(self._last_seen, key=self._last_seen.__getitem__)
+            del self._last_seen[oldest]
+            queue = self._feeds.pop(oldest, None)
+            if queue is not None:
+                self._total -= len(queue)
+            self.counters["dropped_feeds"] += 1
+        self._last_seen[feed] = now
 
     def _aggregate(self, record: FlowRecord) -> None:
         """Anonymised aggregate: client_ref x proto x heuristic class (no IP)."""
@@ -739,6 +756,9 @@ class FlowStore:
                 gone += 1
             if not queue:
                 del self._feeds[feed]
+        for feed in [f for f, t in self._last_seen.items() if t < cutoff]:
+            if feed not in self._feeds:
+                del self._last_seen[feed]
         self._total -= gone
         self.counters["expired_flows"] += gone
         return gone
@@ -747,6 +767,7 @@ class FlowStore:
         """Forget every record and aggregate (counters stay)."""
         self._feeds.clear()
         self._last_seen.clear()
+        self._had_source = False
         self._aggregates.clear()
         self._total = 0
 
@@ -756,7 +777,7 @@ class FlowStore:
         """``no_flow_source`` / ``source_silent`` / ``not_ready`` / ``ready``."""
         self.prune(now)
         live = [f for f, t in self._last_seen.items() if now - t <= self.ttl_s]
-        if not self._last_seen:
+        if not self._had_source:
             return FlowSourceState(
                 FLOW_STATE_NO_SOURCE,
                 CoverageReason.NEEDS_FLOW_SOURCE.value,
