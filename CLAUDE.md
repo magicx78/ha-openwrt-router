@@ -59,7 +59,8 @@ ha-openwrt-router/
 │   ├── test_memory_leak_v1178.py    # Heap + RSS regression checks
 │   ├── test_sshpass_security_v1179.py  # No '-p <pw>' in argv
 │   ├── test_wifi_switch_ids_v1492.py   # rpcd-getreues Router-Modell + Aufrufliste 1.47.1
-│   ├── test_unique_ids_snapshot_v1494.py  # unique_ids aller Entitäten eines Routers
+│   ├── test_unique_ids_snapshot_v1494.py  # 130 unique_ids eines Gateways (Grenzen im Docstring)
+│   ├── full_router_kit.py      # Gateway-Modell: volle ubus-Poll-Daten + rpcd-getreues WLAN
 │   └── …                       # rund 8 850 Tests (1.49.4)
 ├── scripts/                    # mock_router.py, dev_start.py, _dev_rss_sample.sh, …
 ├── .github/workflows/
@@ -132,6 +133,14 @@ Wichtige ubus-Calls:
   Test gegen die aufgezeichnete Aufrufliste bzw. die unique_ids des vorigen
   Release-Stands (`tests/test_wifi_switch_ids_v1492.py`,
   `tests/test_unique_ids_snapshot_v1494.py`).
+- `tests/test_unique_ids_snapshot_v1494.py` hält 130 unique_ids eines Gateways fest
+  (Modell `tests/full_router_kit.py`, zwei Polls ohne SSH): 109 bei ausgeschalteten
+  Enterprise-Modulen (statische, WAN-, Schnittstellen-, Port-, AP- und DHCP-Pool-Sensoren,
+  WLAN- und Dienst-Schalter, Device Tracker, Buttons, Binärsensoren), 12 WLAN-unique_ids
+  des iwinfo-Wegs (Schalter nach ifname, Rausch-/Signal-Sensoren), 9 mit Traffic. Nicht
+  abgedeckt: WiFi RF, Netzwerkdiagnose, Security Center, Configuration Manager, Network
+  Intelligence, Client-Stabilität, Traffic-Client-Sensoren, `…_hwmode`, WLAN über
+  `network.wireless`/SSH. Neue Entitätsarten dort ergänzen.
 - Das Test-Router-Modell verhält sich wie echtes rpcd: `iwinfo info {}` ohne
   `device` → Status 2 (Invalid argument), kein `network.wireless`.
 - Frontend neu gebaut → `_PANEL_VERSION` auf einen nie ausgelieferten Wert

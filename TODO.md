@@ -6,6 +6,27 @@ Stand: 2026-11-21 · Version: v1.49.4
 
 ## Backlog
 
+### Bekannte Grenzen aus 1.49.4
+
+- [ ] **Traffic bei WAN-Wechsel:** Der WAN-Messpunkt hängt am WAN-Gerät des einzelnen Polls.
+      Wechselt das WAN-Gerät (Failover mit mwan3, LTE-Ausweichweg, `wan` ↔ `wwan0`), beginnt
+      „WAN gesamt“ neu und springt bei der Rückkehr zurück; Home Assistant kann den Rücksprung
+      eines `TOTAL_INCREASING`-Sensors als Verbrauch zählen (abgeleitet, nicht in HA
+      gemessen), und die Übersicht zeigt bis zu 24 Stunden zwei WAN-Zeilen. Feste WAN-Geräte
+      sind nicht betroffen. Stellen: `traffic_collect.py` (`wan_device` aus `l3_device`),
+      `traffic_engine.wan_point`/`_add_totals`, `traffic_entities._wan_total`.
+- [ ] **Traffic-Uplink-Erkennung:** `trunk_port_map` enthält jeden Host mit ARP-/FDB-Eintrag,
+      nicht nur Router; jeder LAN-Port mit bekanntem Host gilt als Uplink, kabelgebundene
+      Client-Zuordnungen an diesen Ports entfallen, Access Points bekommen meist „Uplink
+      unbekannt“.
+- [ ] **MAC-Schwärzung in Freitext** (Core, Configuration Manager, Netzwerkdiagnose) trifft
+      selten auch anderes: Teile einer ULID, Zahlenfolgen in Bindestrich- oder
+      Doppelpunkt-Form (`26-11-21-15-30-00`), `commit abcdef123456`, Teile eines
+      SSH-Fingerprints. Eine MAC direkt hinter einem Bindestrich (`esp-a1b2c3d4e5f6`) wird
+      nicht geschwärzt.
+- [ ] **An echten Routern prüfen** (nur lesend, mit Freigabe): ob `network.device status` bei
+      PPPoE/LTE das WAN-Gerät (`pppoe-wan`, `wwan0`) auflistet.
+
 ### Enterprise Core (Plan `docs/plans/2026-11-17-enterprise-core.md`, 1.44.0)
 
 Branch `claude/enterprise-core-49ade2`. Nutzerdoku: `docs/enterprise-core.md`, Vertrag:
@@ -417,10 +438,11 @@ Alles lesend, Installation und HA-Neustart nur nach OK.
 
 ## Erledigt (Auszug — Details in CHANGELOG.md)
 
-- [x] v1.49.4 — MACs in freiem Text (Core, Configuration Manager, Netzwerkdiagnose,
-      Diagnose-Download) geschwärzt, deutsche Texte für alle Traffic-Verwurfszähler,
-      unbenutztes Vite-Plugin entfernt, unique_ids aller Entitäten eines Routers
-      festgeschrieben
+- [x] v1.49.4 — Traffic-Router-Sensoren am Gateway (WAN-Gerät aus netifd), sysfs-Ausweg
+      nur für aktive Schnittstellen, MACs in freiem Text (Core, Configuration Manager,
+      Netzwerkdiagnose; im Diagnose-Download deren Blöcke) geschwärzt, deutsche Texte für
+      alle Traffic-Verwurfszähler, unbenutztes Vite-Plugin entfernt, 130 unique_ids eines
+      Gateways festgeschrieben (Grenzen im Test-Docstring)
 - [x] v1.38.x — CPU-Last pro Kern + rpcd-ACL v7, Kanal aus dem `config`-Block,
       AP-Interfaces im SSH-Fallback, WAN-Sensoren auf Routern ohne WAN
       standardmäßig aus, Panel ohne OUI-Hersteller bei privaten MACs,
