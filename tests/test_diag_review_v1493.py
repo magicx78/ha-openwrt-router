@@ -61,3 +61,32 @@ def test_d1_full_coverage_can_reach_100():
     assert coverage_cap(1.0) == 100
     assert coverage_cap(0.5) == 75
     assert coverage_cap(0.99) == 99
+
+
+# --- D2: switching off disconnects the signal receiver -----------------------------
+
+
+async def test_d2_off_disconnects_the_signal_receiver() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from core_testkit import make_hass
+
+    from custom_components.openwrt_router import diag_entities as de
+
+    hass = make_hass()
+    diag = SimpleNamespace(loaded=True, enabled=True, entries_by_router=dict)
+    unsub = MagicMock()
+    with (
+        patch.object(de, "_diag", lambda _h: diag),
+        patch.object(de, "async_dispatcher_connect", MagicMock(return_value=unsub)),
+        patch.object(de, "platforms_of", lambda _h: []),
+        patch.object(de, "_remove_from_registry", lambda _h: None),
+    ):
+        await de.async_sync_diag_entities(hass)
+        hosts = de._hosts(hass)
+        assert hosts.unsub is unsub
+        diag.enabled = False
+        await de.async_sync_diag_entities(hass)
+    unsub.assert_called_once_with()
+    assert hosts.unsub is None

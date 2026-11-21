@@ -403,6 +403,10 @@ async def async_sync_diag_entities(hass: HomeAssistant) -> None:
     if not diag.enabled:
         hosts.anchor = None
         hosts.gateways.clear()
+        if hosts.unsub is not None:
+            # 1.49.3: the receiver stayed connected after switching off.
+            hosts.unsub()
+            hosts.unsub = None
         _remove_from_registry(hass)
         return
     if hosts.unsub is None:
