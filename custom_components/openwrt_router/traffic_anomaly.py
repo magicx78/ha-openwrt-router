@@ -75,6 +75,7 @@ from .traffic_const import (
     BASELINE_LOOKBACK_S,
     BASELINE_MIN_DAYS,
     BASELINE_MIN_VALUES,
+    BASELINE_RESOLUTION_S,
     BUDGET_PER_HOUR,
     BUDGET_POINT_KIND_S,
     BUDGET_POINT_PER_HOUR,
@@ -959,8 +960,13 @@ class AnomalyDetector:
         cached = self._baselines.get(point.point_id)
         if cached is not None and cached.built_hour == hour:
             return cached
+        # Phase I: the hour tier (a 28-day window would pick daily buckets,
+        # which have no hour slot); a single-resolution source ignores it.
         window = self.source.window(
-            point.point_id, BASELINE_LOOKBACK_S, end=now - RECENT_WINDOW_S
+            point.point_id,
+            BASELINE_LOOKBACK_S,
+            end=now - RECENT_WINDOW_S,
+            resolution_s=BASELINE_RESOLUTION_S,
         )
         buckets = () if window is None else window.buckets
         baseline = build_baseline(buckets, self.clock, hour)

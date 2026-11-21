@@ -18,7 +18,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from core_testkit import make_hass
+from core_testkit import FakeDisks, make_hass
 
 from custom_components.openwrt_router.const import (
     DATA_TRAFFIC_ANALYTICS,
@@ -115,6 +115,13 @@ MBIT = 1_000_000.0
 
 
 # --- helpers ---------------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _disks():
+    """Engines here activate: their history store runs on FakeDisks."""
+    with FakeDisks().patch() as fake:
+        yield fake
 
 
 def bucket(i: int, rx_bps: float, *, covered: float = 300.0, mask: int = 0) -> Bucket:

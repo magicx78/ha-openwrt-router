@@ -64,6 +64,7 @@ from .traffic_model import (
     Sample,
     Scope,
     Source,
+    point_from_dict,
     valid_point_id,
 )
 
@@ -401,6 +402,7 @@ class _Entry:
     baseline: Baseline
     router_id: str | None
     seen_mono: float
+    point: MeasurementPoint | None = None
 
 
 class BaselineBook:
@@ -508,7 +510,7 @@ class BaselineBook:
             return
         entry = table.get(pid)
         if entry is None:
-            table[pid] = _Entry(baseline, point.router_id, now_mono)
+            table[pid] = _Entry(baseline, point.router_id, now_mono, point)
             if not client:
                 self._per_router[point.router_id] = (
                     self._per_router.get(point.router_id, 0) + 1
@@ -516,6 +518,7 @@ class BaselineBook:
             return
         entry.baseline = baseline
         entry.seen_mono = now_mono
+        entry.point = point
 
     def _remove(self, pid: str) -> None:
         if self._client.pop(pid, None) is not None:
@@ -553,6 +556,45 @@ class BaselineBook:
         for pid in gone:
             self._remove(pid)
         return len(gone)
+
+    def export(self) -> list[dict[str, Any]]:
+        """Stored form of every baseline with its point (rule 8, plan §5)."""
+        out: list[dict[str, Any]] = []
+        for table in (self._infra, self._client):
+            for pid in sorted(table):
+                entry = table[pid]
+                if entry.point is None:
+                    continue
+                out.append(
+                    {
+                        "point": entry.point.to_dict(),
+                        "baseline": entry.baseline.to_dict(),
+                    }
+                )
+        return out
+
+    def restore(self, items: Any, *, now_mono: float) -> int:
+        """Take stored baselines after an HA restart; returns how many.
+
+        Each comes back with ``restored=True`` (no monotonic time), so the
+        first delta needs rule 8 (uptime and wall time agree). Unusable
+        items and points the quotas refuse are skipped; never raises.
+        """
+        if not isinstance(items, list):
+            return 0
+        restored = 0
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            point = point_from_dict(item.get("point"))
+            baseline = Baseline.from_dict(item.get("baseline"))
+            if point is None or baseline is None or baseline.point_id != point.point_id:
+                continue
+            if self.has(point.point_id) or not self.admit(point, now_mono):
+                continue
+            self.put(point, baseline, now_mono)
+            restored += 1
+        return restored
 
     def clear(self) -> None:
         """Forget everything (module switched off); the counters stay."""

@@ -350,6 +350,8 @@ NOTE_TLS_NOT_ATTRIBUTED: Final = "tls_not_attributed_to_an_application"
 
 # Baselines: robust median / MAD per weekday class and hour.
 BASELINE_LOOKBACK_S: Final = 28 * 86400
+# Baselines read the hour tier of the history store (Phase I).
+BASELINE_RESOLUTION_S: Final = 3600
 BASELINE_MIN_DAYS: Final = 3
 BASELINE_MIN_VALUES: Final = 6
 MAD_SCALE: Final = 1.4826
@@ -590,3 +592,47 @@ READ_WINDOWS: Final = {
     "30d": 30 * 86400,
     "90d": 90 * 86400,
 }
+
+# --- history store (Phase I, task §14; plan §5) ----------------------------------------
+
+HIST_FINE_S: Final = 300
+HIST_HOUR_S: Final = 3600
+HIST_DAY_S: Final = 86400
+HISTORY_PROFILE_COMPACT: Final = "compact"
+HISTORY_PROFILE_STANDARD: Final = "standard"
+# F3 (plan §14.1): compact is the default, standard can be chosen.
+DEFAULT_HISTORY_PROFILE: Final = HISTORY_PROFILE_COMPACT
+# A fine bucket is rolled up into its hour and (UTC) day once it ended this
+# long ago: rates span at most the 900 s gap limit, so it cannot change any
+# more. Rates that still reach a rolled bucket are counted, never re-rolled.
+HISTORY_ROLLUP_DELAY_S: Final = 900
+# Query limit per series (like rf_aggregate.MAX_POINTS, plan §5 "Abfragen").
+HISTORY_MAX_QUERY_POINTS: Final = 500
+# Store file format inside the HA store wrapper (its own version, so a newer
+# or broken history section is ignored instead of failing the setup).
+HISTORY_FORMAT_VERSION: Final = 1
+# Write throttling (plan §5): fine store at most every 30 min, coarse store
+# 300 s after an hour bucket was completed; both at once when switched off
+# or released, and at Home Assistant's final write (HA Store does that).
+HISTORY_FINE_SAVE_DELAY_S: Final = 1800
+HISTORY_COARSE_SAVE_DELAY_S: Final = 300
+# Store part budgets in bytes of the written file (plan §5 quotas). Compact
+# keeps no client history on disk, so its client share goes to the
+# infrastructure part. Over a budget the oldest buckets of that part go.
+HISTORY_PART_INFRA: Final = "infra"
+HISTORY_PART_CLIENT: Final = "client"
+HISTORY_PART_REST: Final = "rest"
+HISTORY_BUDGETS: Final = {
+    HISTORY_PROFILE_COMPACT: {
+        HISTORY_PART_INFRA: 1_900_000,
+        HISTORY_PART_CLIENT: 0,
+        HISTORY_PART_REST: 100_000,
+    },
+    HISTORY_PROFILE_STANDARD: {
+        HISTORY_PART_INFRA: 1_300_000,
+        HISTORY_PART_CLIENT: 600_000,
+        HISTORY_PART_REST: 100_000,
+    },
+}
+# Trimming a part over budget runs at most this many rounds per save.
+HISTORY_TRIM_ROUNDS: Final = 8

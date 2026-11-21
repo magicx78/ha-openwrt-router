@@ -1,7 +1,8 @@
 """History read interface of Traffic Analytics and its interim memory ring.
 
 Plan 2026-11-20 §3.3, §5. The durable history store (buckets, compaction,
-retention) is Phase I. Top talkers, anomalies and capacity (Phases E-G)
+retention) is ``traffic_history.TrafficHistory`` (Phase I), which extends
+the ring below. Top talkers, anomalies and capacity (Phases E-G)
 read only through :class:`BucketSource`, the same pattern as
 ``traffic_clients.ClientWindowSource``. Until the store exists
 :class:`MemoryBucketRing` fills the interface from accounted rates, bounded
@@ -150,9 +151,19 @@ class BucketSource(Protocol):
         """Every point the source holds data for (sorted by ``point_id``)."""
 
     def window(
-        self, point_id: str, window_s: int, *, end: float
+        self,
+        point_id: str,
+        window_s: int,
+        *,
+        end: float,
+        resolution_s: int | None = None,
     ) -> SeriesWindow | None:
-        """Buckets of ``point_id`` in the window ending at ``end`` (None: unknown)."""
+        """Buckets of ``point_id`` in the window ending at ``end`` (None: unknown).
+
+        ``resolution_s`` asks for one tier (Phase I: 300, 3600 or 86400); a
+        source without it answers with the resolution it has. Without it
+        the source picks the resolution from the window.
+        """
 
     def dropped(self) -> Mapping[str, int]:
         """Visible discard counters."""
@@ -169,7 +180,12 @@ class NoHistory:
         return ()
 
     def window(
-        self, point_id: str, window_s: int, *, end: float
+        self,
+        point_id: str,
+        window_s: int,
+        *,
+        end: float,
+        resolution_s: int | None = None,
     ) -> SeriesWindow | None:
         """Always None (``history_not_built``)."""
         return None
@@ -387,9 +403,17 @@ class MemoryBucketRing:
         return len(self._rings)
 
     def window(
-        self, point_id: str, window_s: int, *, end: float
+        self,
+        point_id: str,
+        window_s: int,
+        *,
+        end: float,
+        resolution_s: int | None = None,
     ) -> SeriesWindow | None:
-        """See :meth:`BucketSource.window` (None for an unknown point)."""
+        """See :meth:`BucketSource.window` (None for an unknown point).
+
+        The ring has one resolution; ``resolution_s`` is accepted and ignored.
+        """
         ring = self._rings.get(point_id)
         if ring is None or window_s <= 0:
             return None

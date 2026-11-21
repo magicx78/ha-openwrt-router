@@ -64,15 +64,11 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
 
-from . import core_store
 from .const import (
     DATA_TRAFFIC_ANALYTICS,
     EVENT_INCIDENT,
     SCAN_INTERVAL_SECONDS,
     SIGNAL_TRAFFIC_ANALYTICS,
-    TRAFFIC_COARSE_STORE_KEY,
-    TRAFFIC_STORE_MINOR_VERSION,
-    TRAFFIC_STORE_VERSION,
 )
 from .core_models import CapabilityState, CapabilityStatus, InstallationKeyState
 from .traffic_accounting import TrafficAccounting, TrafficSum, sum_rates
@@ -112,10 +108,12 @@ from .traffic_const import (
     CAP_STATION_DETAIL,
     CAPABILITY_PREFIX,
     CONNTRACK_SOURCE_COUNT_FILE,
+    DEFAULT_HISTORY_PROFILE,
     DIAG_DATA_KEY,
     EVENT_PREFIX,
     EXTRA_OPTIONS,
     IDENTITY_KEY_PURPOSE,
+    MAX_INTERVAL_S,
     MAX_QUEUE_ROUTERS,
     MAX_SETTINGS_ROUTERS,
     MODULE_NAME,
@@ -146,6 +144,7 @@ from .traffic_correlate import (
     WifiRfAdapter,
 )
 from .traffic_counters import BaselineBook, process_samples, router_restarted
+from .traffic_history import PROFILES, TrafficHistory
 from .traffic_model import (
     Coverage,
     MeasurementPoint,
@@ -156,7 +155,7 @@ from .traffic_model import (
     Source,
     valid_router_id,
 )
-from .traffic_series import MemoryBucketRing
+from .traffic_store import TrafficStore
 from .traffic_talkers import TalkerBoard
 from .traffic_vlan import VlanView, vlan_views
 
@@ -219,7 +218,7 @@ def merge_settings(current: Mapping[str, Any], update: Any) -> dict[str, Any]:
     """
     if not isinstance(update, Mapping):
         raise TypeError("settings must be an object")
-    unknown = set(update) - {"enabled", "routers"}
+    unknown = set(update) - {"enabled", "routers", "history_profile"}
     if unknown:
         raise ValueError("unknown setting")
     merged = settings_from_store(current)
@@ -227,6 +226,10 @@ def merge_settings(current: Mapping[str, Any], update: Any) -> dict[str, Any]:
         if not isinstance(update["enabled"], bool):
             raise ValueError("enabled must be true or false")
         merged["enabled"] = update["enabled"]
+    if "history_profile" in update:
+        if update["history_profile"] not in PROFILES:
+            raise ValueError("unknown history profile")
+        merged["history_profile"] = update["history_profile"]
     if "routers" in update:
         routers = update["routers"]
         if not isinstance(routers, Mapping):
@@ -244,6 +247,9 @@ def merge_settings(current: Mapping[str, Any], update: Any) -> dict[str, Any]:
     merged["routers"] = {
         rid: opts for rid, opts in merged["routers"].items() if any(opts.values())
     }
+    # the default profile carries nothing: not stored
+    if merged.get("history_profile") == DEFAULT_HISTORY_PROFILE:
+        del merged["history_profile"]
     return merged
 
 
@@ -253,6 +259,9 @@ def settings_from_store(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         return out
     out["enabled"] = raw.get("enabled") is True
+    profile = raw.get("history_profile")
+    if profile in PROFILES and profile != DEFAULT_HISTORY_PROFILE:
+        out["history_profile"] = profile
     routers = raw.get("routers")
     for rid, options in routers.items() if isinstance(routers, Mapping) else ():
         if len(out["routers"]) >= MAX_SETTINGS_ROUTERS:
@@ -260,11 +269,6 @@ def settings_from_store(raw: Any) -> dict[str, Any]:
         if valid_router_id(rid):
             out["routers"][rid] = _router_options(options, strict=False)
     return out
-
-
-def _migrate_store(old_major: int, old_minor: int, data: Any) -> dict[str, Any]:
-    """Store migration (version 1 is the first one): keep what is a dict."""
-    return dict(data) if isinstance(data, Mapping) else {}
 
 
 # --- engine -------------------------------------------------------------------------------
@@ -343,7 +347,11 @@ class TrafficEngine:
     def __init__(self, hass: HomeAssistant) -> None:
         """Empty, off; ``async_load`` reads the settings."""
         self.hass = hass
-        self._store: Any = None
+        self.store = TrafficStore(hass)
+        self._history_bound = False
+        # Counter states of unloaded routers, kept for the next store write
+        # only (rule 8 accepts at most a 900 s gap; older ones are useless).
+        self._parked: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self.loaded = False
         self.load_failed = False
@@ -363,7 +371,7 @@ class TrafficEngine:
         self.book = BaselineBook()
         self.accounting = TrafficAccounting()
         self.clients = ClientTracker()
-        self.series = MemoryBucketRing()
+        self.series = TrafficHistory()
         self.talkers = TalkerBoard(self.series)
         self.anomalies = AnomalyDetector(self.series, tz=_local_tz())
         self._last_anomaly_wall: float | None = None
@@ -464,38 +472,69 @@ class TrafficEngine:
     # -- store ------------------------------------------------------------------------------
 
     async def async_load(self) -> None:
-        """Read the settings once (nothing is written here)."""
+        """Read the settings once (nothing is written, no fine store opened)."""
         async with self._lock:
             if self.loaded:
                 return
             try:
-                self._store = core_store.create_store(
-                    self.hass,
-                    TRAFFIC_STORE_VERSION,
-                    TRAFFIC_COARSE_STORE_KEY,
-                    minor_version=TRAFFIC_STORE_MINOR_VERSION,
-                    migrate=_migrate_store,
-                    private=True,
-                    atomic_writes=True,
-                )
-                result = await core_store.async_load_store(
-                    self.hass, self._store, TRAFFIC_COARSE_STORE_KEY
-                )
+                data, failed = await self.store.async_load_coarse()
             except Exception as err:  # noqa: BLE001 - start off, never fail setup
                 self._fail("store load", err)
                 self.load_failed = True
                 self.loaded = True
                 return
-            self.load_failed = result.failed
-            data = result.data or {}
+            self.load_failed = failed
             self.settings = settings_from_store(data.get("settings"))
+            self.series.set_profile(self.history_profile)
             self.loaded = True
 
+    @property
+    def history_profile(self) -> str:
+        """The ``history_profile`` setting (compact unless chosen)."""
+        return self.settings.get("history_profile", DEFAULT_HISTORY_PROFILE)
+
     async def _async_save(self) -> None:
-        if self._store is None:
-            return
-        await self._store.async_save({"settings": self.settings})
+        await self.store.async_save_settings(self.settings)
         self.counters["store_writes"] += 1
+
+    async def _async_bind_history(self) -> None:
+        """Module on: read the history stores once per activation."""
+        if self._history_bound:
+            return
+        self._history_bound = True
+        self.series.set_profile(self.history_profile)
+        invalid = await self.store.async_bind(
+            self.series,
+            baselines=self._baseline_export,
+            restore=lambda items: self.book.restore(items, now_mono=self.clock()),
+        )
+        if invalid:
+            self.counters["history_invalid_entries"] += invalid
+
+    def _baseline_export(self) -> list[dict[str, Any]]:
+        """Counter states for the fine store: the book plus parked ones."""
+        items = self.book.export()
+        held = {i["baseline"]["point_id"] for i in items}
+        oldest = self.wall() - MAX_INTERVAL_S
+        for pid, item in list(self._parked.items()):
+            wall = item["baseline"].get("wall_s")
+            if pid in held or not isinstance(wall, int | float) or wall < oldest:
+                del self._parked[pid]
+                continue
+            items.append(item)
+        return items
+
+    async def _async_unbind_history(self) -> None:
+        """Module off / released: write both stores (kept), free the memory."""
+        if not self._history_bound:
+            return
+        self._history_bound = False
+        try:
+            self.series.compact(self.wall())
+        except Exception as err:  # noqa: BLE001 - write what is there
+            self._fail("history compact", err)
+        await self.store.async_unbind()
+        self._parked.clear()
 
     async def async_update_settings(self, update: Any) -> dict[str, Any]:
         """Apply a settings change (admin only; the caller checks the user).
@@ -506,6 +545,7 @@ class TrafficEngine:
         new = merge_settings(self.settings, update)
         async with self._lock:
             self.settings = new
+            self.series.set_profile(self.history_profile)
             await self._async_save()
         if self.enabled and not self.active and self._entries:
             await self.async_activate()
@@ -560,6 +600,10 @@ class TrafficEngine:
 
     def _drop_router(self, rid: str) -> None:
         self._queue.pop(rid, None)
+        if self._history_bound:
+            for item in self.book.export():
+                if item["point"].get("router_id") == rid:
+                    self._parked[item["baseline"]["point_id"]] = item
         self.book.drop_router(rid)
         for pid in [p for p, r in self.latest.items() if r.point.router_id == rid]:
             del self.latest[pid]
@@ -607,6 +651,10 @@ class TrafficEngine:
             await self._async_bind_core()
         except Exception as err:  # noqa: BLE001 - "not ready", never raises
             self._fail("core binding", err)
+        try:
+            await self._async_bind_history()
+        except Exception as err:  # noqa: BLE001 - runs without the stored history
+            self._fail("history load", err)
         for entry_id, slot in self._entries.items():
             self._subscribe(entry_id, slot)
         self._listen_incidents()
@@ -654,6 +702,10 @@ class TrafficEngine:
         self._stop_incidents()
         self._queue.clear()
         await self._async_cancel_tasks()
+        try:
+            await self._async_unbind_history()
+        except Exception as err:  # noqa: BLE001 - HA's final write retries
+            self._fail("history write", err)
         self._unbind_core()
         self.book.clear()
         self.accounting.clear()
@@ -1034,6 +1086,7 @@ class TrafficEngine:
             self.counters["stale_polls"] += 1
         self._snapshots[rid] = snapshot
         self._maybe_prune(now)
+        self._persist_history()
         self._maybe_evaluate_anomalies()
         self._refresh_caps()
         self._plan_extras(entry_id, snapshot)
@@ -1074,6 +1127,13 @@ class TrafficEngine:
                 self.latest[pid] = rate
             self.series.add_rate(rate)
         self.correlator.observe_rates(rates)
+
+    def _persist_history(self) -> None:
+        """Phase I: roll, apply retention, arm the throttled store writes."""
+        if not self._history_bound:
+            return
+        coarse = self.series.compact(self.wall())
+        self.store.schedule(coarse=coarse)
 
     def _maybe_prune(self, now: float) -> None:
         if self._last_prune is not None and 0 <= now - self._last_prune < PRUNE_EVERY_S:
@@ -1369,6 +1429,7 @@ class TrafficEngine:
             "accounting": self.accounting.summary(),
             "clients": self.clients.summary(),
             "series": self.series.summary(),
+            "history_store": self.store.stats(),
             "anomalies": self.anomalies.summary(),
             "correlation": self.correlator.summary(),
             "indicators": self.indicators.summary(),

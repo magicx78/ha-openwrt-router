@@ -399,4 +399,7 @@ def test_engine_feeds_the_ring_and_exposes_talkers() -> None:
     out = engine.talkers.rank_window(Scope.WAN, "5m", "download", end=END_1)
     assert out.rows[0].observed_bytes == 4_000
     engine._drop_router(RIDS[0])
+    # Phase I: an entry unload keeps the history (evidence survives a reload)
+    assert engine.summary()["series"]["points_infra"] == 1
+    engine.series.forget_router(RIDS[0])
     assert engine.summary()["series"]["points_infra"] == 0

@@ -17,6 +17,7 @@ import hashlib
 import logging
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Final
@@ -227,6 +228,30 @@ class MeasurementPoint:
             "radio_id": self.radio_id,
             "client_ref": self.client_ref,
         }
+
+
+def point_from_dict(raw: Any) -> MeasurementPoint | None:
+    """A point from its ``to_dict`` form (None: not a valid point).
+
+    A ``point_id`` in ``raw`` must match the one derived from the fields.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        point = MeasurementPoint(
+            raw.get("router_id"),
+            Scope(raw.get("scope")),
+            device=raw.get("device"),
+            vlan_id=raw.get("vlan_id"),
+            radio_id=raw.get("radio_id"),
+            client_ref=raw.get("client_ref"),
+        )
+    except (TypeError, ValueError):
+        return None
+    stored = raw.get("point_id")
+    if stored is not None and stored != point.point_id:
+        return None
+    return point
 
 
 def point_id_of(point: MeasurementPoint) -> str:
