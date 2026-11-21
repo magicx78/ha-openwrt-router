@@ -7,6 +7,7 @@ Assistant instance, no router, no network.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -537,3 +538,67 @@ async def test_over_size_coarse_write_right_after_start_keeps_the_stored_history
     monkeypatch.setattr(traffic_store, "TRAFFIC_COARSE_STORE_MAX_BYTES", 10)
     payload = engine2.store.coarse_payload()
     assert payload["history"] == stored["history"]
+
+
+# --- T8: a store write rebuilds the export at most twice --------------------------------
+# Measured on the reference fleet (6 routers, 102 infrastructure points, 150
+# clients, standard profile, 92 days, dev VM): a write without trimming
+# 23-42 ms (the export is nearly all of it; the JSON measuring is cheap), the
+# first write over a part budget (budgets at 60 %) 61/87 ms fine/coarse with
+# 2 builds (before: 118/226 ms with 4-6 builds); the writes after it 23-25 ms.
+
+
+def test_write_over_budget_rebuilds_the_export_at_most_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hist = TrafficHistory(profile="standard")
+    th_tests.simulate(hist, 0, 2)
+    store = traffic_store.TrafficStore(core_make_hass())
+    store.history = hist
+    store.baselines = list
+    builds = {"n": 0}
+    for name in ("export_fine", "export_coarse"):
+        original = getattr(hist, name)
+
+        def counted(original: Any = original) -> dict[str, Any]:
+            builds["n"] += 1
+            return original()
+
+        monkeypatch.setattr(hist, name, counted)
+    full = {
+        part: traffic_store.store_bytes(
+            "fine",
+            {
+                k: e
+                for k, e in hist.export_fine()["points"].items()
+                if traffic_store._part_of(e) == part
+            },
+        )
+        for part in ("infra", "client")
+    }
+    builds["n"] = 0
+    tight = {
+        "standard": {
+            "fine": {"infra": full["infra"] // 2, "client": full["client"] // 2},
+            "coarse": {"infra": 10**9, "client": 10**9},
+        }
+    }
+    monkeypatch.setattr(traffic_store, "HISTORY_BUDGETS", tight)
+    started = time.perf_counter()
+    payload = store.fine_payload()
+    elapsed = time.perf_counter() - started
+    assert builds["n"] <= 2
+    for part in ("infra", "client"):
+        size = traffic_store.store_bytes(
+            "fine",
+            {
+                k: e
+                for k, e in payload["history"]["points"].items()
+                if traffic_store._part_of(e) == part
+            },
+        )
+        assert size <= tight["standard"]["fine"][part]
+    builds["n"] = 0
+    store.fine_payload()  # the next write: under budget, one build
+    assert builds["n"] == 1
+    assert elapsed < 2.0  # generous: a small fleet, any machine

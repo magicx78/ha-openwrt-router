@@ -94,6 +94,8 @@ RESOLUTIONS = (HIST_FINE_S, *COARSE_RESOLUTIONS)
 STORE_FINE = "fine"
 STORE_COARSE = "coarse"
 _TIER_KEY = {HIST_FINE_S: "f", HIST_HOUR_S: "h", HIST_DAY_S: "d"}
+# Keys of a stored point entry that hold buckets (the rest is fixed per point).
+RING_KEYS = frozenset(_TIER_KEY.values())
 _COLUMNS = ("rx", "tx", "rxp", "txp", "cov", "samples", "mask")
 _INT_COLUMNS = frozenset({"rx", "tx", "samples", "mask"})
 # Token of an unknown value in a stored column (never 0).
@@ -872,6 +874,7 @@ class TrafficHistory(MemoryBucketRing):
 
 __all__ = [
     "PROFILES",
+    "RING_KEYS",
     "STORE_COARSE",
     "STORE_FINE",
     "HistoryProfile",

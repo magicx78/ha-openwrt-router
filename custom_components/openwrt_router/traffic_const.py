@@ -664,3 +664,6 @@ HISTORY_BUDGETS: Final = {
 }
 # Trimming a part over budget runs at most this many rounds per save.
 HISTORY_TRIM_ROUNDS: Final = 8
+# A part over budget is trimmed to this share below its budget (review T8:
+# one rebuild of the export instead of several, and not on every write).
+HISTORY_TRIM_HEADROOM: Final = 0.05
