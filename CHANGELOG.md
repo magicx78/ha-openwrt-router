@@ -4,6 +4,52 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.49.2] - 2026-11-21
+
+Dringende Korrektur: Seit 1.48.0 hatten die WLAN-Schalter eine andere unique_id. Keine neuen
+Router-Rechte.
+
+### Behoben
+
+- **WLAN-Schalter verdoppelt seit 1.48.0.** 1.48.0 fragte in `get_wifi_status` `iwinfo info`
+  je Gerät (`iwinfo devices` und dann jedes Gerät) statt wie vorher `iwinfo info {}`. Den
+  alten Aufruf lehnt rpcd ab („Invalid argument“), deshalb las die Integration die WLANs
+  bis 1.47.1 aus der UCI-Konfiguration. Der neue Aufruf gelang, und die WLANs kamen ohne
+  UCI-Sektion. Dadurch bekam jeder WLAN-Schalter statt `<entry_id>_wifi_ssid_<UCI-Sektion>`
+  (z. B. `…_lan_5g`) die unique_id `<entry_id>_wifi_ssid_<Schnittstelle>` (z. B.
+  `…_phy1-ap0`). Home Assistant legte beim ersten Start mit 1.48.0 neue Schalter neben die
+  alten (z. B. `switch.…_5_ghz_2`, teils mit anderem Namen); die alten wurden
+  „nicht verfügbar“. Außerdem zeigten die neuen Schalter immer „an“ (auch abgeschaltete
+  WLANs fehlten), STA-Schnittstellen (Uplink) erschienen als Schalter, es entstanden neue
+  Rauschen/Signal-Sensoren je Schnittstelle (`…_radio_<Schnittstelle>_noise|signal`), und
+  jeder Poll machte 1 + N zusätzliche iwinfo-Aufrufe. Betroffen sind Router, deren WLANs bis
+  1.47.1 aus der UCI-Konfiguration gelesen wurden (Schalter-unique_id mit UCI-Sektion);
+  beobachtet auf OpenWrt 25.12.
+  - 1.49.2 macht wieder den Aufruf von 1.47.1. Die Schalter haben wieder ihre alten
+    unique_ids; die alten Einträge mit Bereich, Namen und Einstellungen werden wieder
+    benutzt, Zustand und Schalten (welche UCI-Sektion) sind wie in 1.47.1.
+  - Mit WiFi RF aus macht ein Poll wieder genau die Router-Aufrufe von 1.47.1 (Test
+    vergleicht die vollständige Aufrufliste mit der von 1.47.1). Die Aussage im Abschnitt
+    1.48.0, ohne den Schalter mache ein Poll „exakt dieselben Router-Aufrufe wie vorher“,
+    stimmte nicht: der Test dort verglich nur RF an mit RF aus, nicht mit 1.47.1, und lief
+    gegen ein Router-Modell, das `iwinfo info {}` beantwortet.
+  - Mit WiFi RF an liest nur die Uplink-Erkennung (STA) iwinfo je Gerät wie in 1.48.0
+    (Uplink mit eigener MAC); die Schalter sind auch dann die alten.
+  - **Aufräumen:** Beim Start entfernt 1.49.2 einmalig die unter 1.48.0–1.49.1 neu
+    angelegten Doppelten (Schalter und Rauschen/Signal-Sensoren mit Schnittstellennamen
+    wie `phy1-ap0`, `wlan0` als Schlüssel). Nur Einträge dieses Routers und dieser
+    Integration, nur wenn der WLAN-Abruf beim Start gelang und alle WLANs eine UCI-Sektion
+    haben, nur wenn der Original-Schalter noch existiert, nie ein Eintrag, dessen Schlüssel
+    eine UCI-Sektion oder Schnittstelle des Routers ist, und nur Einträge, die am oder nach
+    dem 21.11.2026 angelegt wurden. Router, deren Schalter schon vor 1.48.0 einen
+    Schnittstellennamen als Schlüssel hatten, bleiben unberührt. Im Log steht auf INFO,
+    wie viele Einträge entfernt wurden.
+  - **Bitte selbst prüfen:** Automationen, Skripte und Dashboards, die in der Zwischenzeit
+    auf die neuen Schalter (meist mit `_2` am Ende) umgestellt wurden, zeigen nach dem
+    Update ins Leere und müssen zurück auf die alten entity_ids. Wurde ein alter Schalter
+    gelöscht, bleibt sein Doppelter stehen (nicht verfügbar) und kann von Hand gelöscht
+    werden.
+
 ## [1.49.1] - 2026-11-21
 
 Folgeaufträge zu den Enterprise-Paketen: Schnittstellen zwischen WiFi RF, Traffic Analytics
