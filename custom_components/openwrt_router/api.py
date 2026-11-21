@@ -1190,6 +1190,9 @@ class OpenWrtAPI:
         # after a Wi-Fi change made through this integration.
         self._hostapd_ifaces: list[str] | None = None
         self._hostapd_ifaces_at: float = 0.0
+        # iwinfo info per device read by get_ap_interface_details() in this
+        # poll; get_sta_interface_details() takes it once (1.48.0 fix).
+        self._iwinfo_info_seen: dict[str, dict[str, Any]] = {}
         # Kernel AP ifnames the radios reported on the previous call; an
         # ifname that newly appears and is not in the cache triggers one
         # re-discovery (not one per poll when it is never discoverable).
@@ -2208,7 +2211,7 @@ class OpenWrtAPI:
                 self._wifi_method = None
         if self._wifi_method == "iwinfo":
             try:
-                result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
+                result = await self._iwinfo_info_by_device()
                 return self._parse_iwinfo_info(result)
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                 self._wifi_method = None
@@ -2230,7 +2233,7 @@ class OpenWrtAPI:
             )
 
         try:
-            result = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
+            result = await self._iwinfo_info_by_device()
             parsed = self._parse_iwinfo_info(result)
             if parsed:
                 self._wifi_method = "iwinfo"
@@ -2282,6 +2285,9 @@ class OpenWrtAPI:
             List of dicts, one per discovered AP interface.
         """
         result: list[dict[str, Any]] = []
+        # Per-device answers of this poll, reused once by the STA detection.
+        seen: dict[str, dict[str, Any]] = {}
+        self._iwinfo_info_seen = seen
 
         # Primary path: iwinfo per-device (requires hostapd iface discovery)
         ifnames: list[str] = self._hostapd_ifaces or []
@@ -2293,6 +2299,8 @@ class OpenWrtAPI:
             except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
                 _LOGGER.debug("iwinfo/info unavailable for %s", ifname)
                 continue
+            if isinstance(info, dict):
+                seen[ifname] = info
 
             band = self._detect_band(ifname, info)
             ssid: str = info.get("ssid", "")
@@ -2474,7 +2482,11 @@ class OpenWrtAPI:
         # --- Step 1: iwinfo enumeration ----------------------------------
         candidates: list[tuple[str, dict[str, Any]]] = []
         try:
-            info_all = await self._call(UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {})
+            # Reuse the per-device answers of get_ap_interface_details() of
+            # this poll (one-shot); only without them enumerate the devices.
+            info_all, self._iwinfo_info_seen = self._iwinfo_info_seen, {}
+            if not info_all:
+                info_all = await self._iwinfo_info_by_device()
             if isinstance(info_all, dict):
                 for ifname, iface_data in info_all.items():
                     if not isinstance(iface_data, dict):
@@ -2548,6 +2560,32 @@ class OpenWrtAPI:
                 "STA interfaces (UCI fallback): %s",
                 [(r["ifname"], r["mode"]) for r in result],
             )
+        return result
+
+    async def _iwinfo_info_by_device(self) -> dict[str, Any]:
+        """``iwinfo info`` of every wireless device, keyed by device name.
+
+        rpcd's iwinfo plugin needs a ``device``: ``iwinfo info {}`` answers
+        UBUS_STATUS_INVALID_ARGUMENT ("Invalid argument"). So the devices are
+        enumerated with ``iwinfo devices`` and asked one by one; a device that
+        fails is skipped. MethodNotFound/response errors of the enumeration
+        propagate like the old single call did.
+        """
+        listing = await self._call(UBUS_IWINFO_OBJECT, "devices", {})
+        devices = listing.get("devices") if isinstance(listing, dict) else None
+        result: dict[str, Any] = {}
+        for device in devices if isinstance(devices, list) else []:
+            if not isinstance(device, str) or not device:
+                continue
+            try:
+                info = await self._call(
+                    UBUS_IWINFO_OBJECT, UBUS_IWINFO_INFO, {"device": device}
+                )
+            except (OpenWrtMethodNotFoundError, OpenWrtResponseError):
+                _LOGGER.debug("iwinfo/info unavailable for %s", device)
+                continue
+            if isinstance(info, dict):
+                result[device] = info
         return result
 
     async def get_connected_clients(
