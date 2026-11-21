@@ -448,3 +448,146 @@ REASON_BEYOND_HORIZON: Final = "beyond_forecast_horizon"
 REASON_NOT_RISING: Final = "trend_not_rising"
 REASON_P95_FROM_COARSE: Final = "p95_from_coarse_buckets"
 TREND_METHOD: Final = "theil_sen_daily_mean"
+
+# --- correlation (Phase H, task §12, §13; plan §10) ------------------------------------
+
+# hass.data keys of the optional modules (not on main; looked up at run time).
+# Fundstelle: const.DATA_NET_DIAGNOSTICS on origin/claude/net-diagnostics-f989ed
+# (b226259, const.py L858) and const.DATA_WIFI_RF_CENTER on
+# origin/claude/wifi-rf-48d270 (fddb6cf, const.py L854).
+DIAG_DATA_KEY: Final = "openwrt_router_net_diagnostics"
+WIFI_RF_DATA_KEY: Final = "openwrt_router_wifi_rf_center"
+
+# Observation window of the bottleneck narrowing (recent hour, 5-min buckets).
+CORR_WINDOW_S: Final = 3600
+# Utilisation is judged only with this many usable buckets in the window.
+CORR_MIN_BUCKETS: Final = 6
+# "Dauerhaft hoch": at least this share of usable buckets at >= HIGH_UTIL_PCT.
+HIGH_UTIL_PCT: Final = NEAR_CAPACITY_PCT
+HIGH_UTIL_SHARE: Final = 0.5
+# Interface counters in the window (Startwerte, nicht kalibriert).
+DROP_MIN_COUNT: Final = 10
+DROP_MIN_RATIO: Final = 0.001
+ERROR_MIN_COUNT: Final = 10
+# Path quality from Network Diagnostics (Startwerte, nicht kalibriert):
+# elevated latency = 1 h mean >= 2 x the 7 d mean and >= 20 ms above it.
+LATENCY_ELEVATED_FACTOR: Final = 2.0
+LATENCY_ELEVATED_MIN_MS: Final = 20.0
+LOSS_ELEVATED_PCT: Final = 2.0
+DIAG_MIN_SAMPLES: Final = 6
+DIAG_MIN_COVERAGE: Final = 0.5
+DIAG_LATENCY_KINDS: Final = frozenset({"icmp", "tcp", "http"})
+# WiFi RF: same raise level as rf_correlate.high_pct / NI wifi_channel_busy,
+# retry level as rf_clients.ClientThresholds.retry_high (branch fddb6cf).
+AIRTIME_HIGH_PCT: Final = 70.0
+RF_MIN_VALID: Final = 6
+RETRY_HIGH_RATE: Final = 0.25
+RETRY_HIGH_SHARE: Final = 0.25
+# Recommendations need this data base (else none, with the reason).
+RECOMMEND_MIN_BUCKETS: Final = 9
+RECOMMEND_MIN_COVERAGE: Final = 0.7
+RECOMMEND_MIN_FAMILIES: Final = 1
+CORR_BASE_CONFIDENCE: Final = 0.3
+CORR_FAMILY_CONFIDENCE: Final = 0.2
+CORR_MAX_CONFIDENCE: Final = 0.8
+# Bounded memory of the correlator.
+MAX_CORR_POINTS: Final = MAX_POINTS_INFRA_TOTAL
+MAX_QUALITY_SAMPLES: Final = 64
+MAX_LINK_DEVICES: Final = MAX_POINTS_INFRA_TOTAL
+MAX_LINK_SAMPLES: Final = 64
+MAX_NI_NOTES: Final = 100
+# NI incident types that mean a connection failure (net_rules.py names).
+CONNECTIVITY_INCIDENT_TYPES: Final = frozenset(
+    {
+        "router_unreachable",
+        "lan_unreachable",
+        "lan_uplink_down",
+        "uplink_down",
+        "uplink_lost",
+        "wan_down",
+        "wan_unstable",
+    }
+)
+
+SRC_TRAFFIC: Final = "traffic_analytics"
+SRC_DIAG: Final = "net_diagnostics"
+SRC_WIFI_RF: Final = "wifi_rf"
+SRC_NI: Final = "network_intelligence"
+SRC_SECURITY: Final = "security_center"
+SOURCE_READY: Final = "ready"
+SOURCE_MODULE_MISSING: Final = "module_missing"
+SOURCE_NOT_READY: Final = "not_ready"
+SOURCE_NO_DATA: Final = "no_data"
+SOURCE_NOT_CONNECTED: Final = "not_connected"
+
+REASON_MODULE_NOT_LOADED: Final = "module_not_loaded"
+REASON_LOOKUP_FAILED: Final = "lookup_failed"
+REASON_INTERFACE_MISMATCH: Final = "interface_mismatch"
+REASON_READ_FAILED: Final = "read_failed"
+REASON_MODULE_DISABLED: Final = "module_disabled"
+REASON_UNKNOWN_STATE: Final = "unknown_module_state"
+REASON_NO_ROUTER_SERIES: Final = "no_series_for_router"
+REASON_TOO_FEW_SAMPLES: Final = "too_few_samples"
+REASON_NO_REFERENCE: Final = "no_reference_window"
+REASON_NO_COUNTER_DATA: Final = "no_counter_data"
+REASON_NO_LINK_DATA: Final = "no_link_state_data"
+REASON_NOT_LISTENING: Final = "incident_events_not_bound"
+REASON_NO_INDICATOR_INTAKE: Final = "security_center_has_no_traffic_indicator_intake"
+REASON_SINGLE_INDICATOR: Final = "single_indicator_only"
+REASON_NOT_A_BOTTLENECK_ALONE: Final = "high_bandwidth_alone_proves_no_bottleneck"
+
+ASSESS_HIGH_UTIL: Final = "high_utilization_observed"
+ASSESS_BOTTLENECK: Final = "possible_bottleneck"
+ASSESS_UPLINK_BOTTLENECK: Final = "possible_uplink_bottleneck"
+ASSESS_LINK_QUALITY: Final = "possible_link_quality_issue"
+ASSESS_WIFI_CONGESTION: Final = "possible_wifi_congestion"
+ASSESS_WIFI_SINGLE: Final = "wifi_rf_indicator_observed"
+
+VERDICT_FINDINGS: Final = "findings_present"
+VERDICT_NOTHING_IN_COVERED: Final = "nothing_detected_in_covered_data"
+VERDICT_INSUFFICIENT: Final = "insufficient_data"
+
+# Security indicators (task §13): events with a stable evidence_ref.
+EVENT_INDICATOR: Final = "traffic_analytics.indicator"
+IND_UNUSUAL_VOLUME: Final = "unusual_traffic_volume"
+IND_OUTBOUND: Final = "unusual_outbound_connections"
+IND_NEW_DESTINATIONS: Final = "new_communication_destinations"
+IND_PROTOCOL_MIX: Final = "changed_protocol_distribution"
+IND_INTER_VLAN: Final = "unusual_inter_vlan_traffic"
+IND_CONNECTION_RATE: Final = "suspicious_connection_rate"
+INDICATORS: Final = (
+    IND_OUTBOUND,
+    IND_UNUSUAL_VOLUME,
+    IND_NEW_DESTINATIONS,
+    IND_PROTOCOL_MIX,
+    IND_INTER_VLAN,
+    IND_CONNECTION_RATE,
+)
+# Anomaly kinds (suffix) that become an "unusual volume" indicator.
+VOLUME_INDICATOR_KINDS: Final = (
+    "_volume",
+    "_spike",
+    "_sustained_high",
+    "_night_activity",
+)
+INDICATOR_CLASSIFICATION: Final = "traffic_indicator"
+INDICATOR_WORDING: Final = "traffic_deviation_not_an_attack"
+INDICATOR_BUDGET_PER_HOUR: Final = 10
+INDICATOR_POINT_KIND_S: Final = 6 * 3600.0
+EVIDENCE_PREFIX: Final = "evr_"
+EVIDENCE_HEX: Final = 16
+MAX_EVIDENCE: Final = 100
+# Evidence excerpt: the hour before the candidate opened (finest buckets).
+EVIDENCE_EXCERPT_S: Final = 3600
+MAX_EVIDENCE_ROWS: Final = 30
+
+# Read API for other modules (acceptance criterion 11).
+READ_API_VERSION: Final = 1
+READ_WINDOWS: Final = {
+    "5m": 300,
+    "1h": 3600,
+    "24h": 86400,
+    "7d": 7 * 86400,
+    "30d": 30 * 86400,
+    "90d": 90 * 86400,
+}

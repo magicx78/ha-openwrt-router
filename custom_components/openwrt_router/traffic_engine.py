@@ -67,6 +67,7 @@ from homeassistant.core import HomeAssistant, callback
 from . import core_store
 from .const import (
     DATA_TRAFFIC_ANALYTICS,
+    EVENT_INCIDENT,
     SCAN_INTERVAL_SECONDS,
     SIGNAL_TRAFFIC_ANALYTICS,
     TRAFFIC_COARSE_STORE_KEY,
@@ -111,6 +112,7 @@ from .traffic_const import (
     CAP_STATION_DETAIL,
     CAPABILITY_PREFIX,
     CONNTRACK_SOURCE_COUNT_FILE,
+    DIAG_DATA_KEY,
     EVENT_PREFIX,
     EXTRA_OPTIONS,
     IDENTITY_KEY_PURPOSE,
@@ -133,6 +135,15 @@ from .traffic_const import (
     REASON_PERMISSION_DENIED,
     REASON_SOURCE_MISSING,
     SETTINGS_VERSION,
+    WIFI_RF_DATA_KEY,
+)
+from .traffic_correlate import (
+    CorrelationReport,
+    DiagnosticsAdapter,
+    SecurityIndicators,
+    TrafficCorrelator,
+    TrafficReadApi,
+    WifiRfAdapter,
 )
 from .traffic_counters import BaselineBook, process_samples, router_restarted
 from .traffic_model import (
@@ -356,6 +367,14 @@ class TrafficEngine:
         self.talkers = TalkerBoard(self.series)
         self.anomalies = AnomalyDetector(self.series, tz=_local_tz())
         self._last_anomaly_wall: float | None = None
+        # Phase H: correlation, security indicators, read API.
+        self.correlator = TrafficCorrelator()
+        self.indicators = SecurityIndicators()
+        self.read_api = TrafficReadApi(self)
+        self._ni_unsub: Callable[[], Any] | None = None
+        # Test seams: optional modules, looked up at run time (never imported).
+        self.diagnostics = DiagnosticsAdapter(partial(self._optional, DIAG_DATA_KEY))
+        self.wifi_rf = WifiRfAdapter(partial(self._optional, WIFI_RF_DATA_KEY))
         self._facts: dict[str, StationFacts] = {}
         self.planner = ExtraCallPlanner()
         self.latest: dict[str, Rate] = {}
@@ -419,6 +438,16 @@ class TrafficEngine:
         """The three extra-call options of ``router_id`` (default all off)."""
         stored = self.settings.get("routers", {}).get(router_id)
         return {**default_router_options(), **(stored or {})}
+
+    def _optional(self, key: str) -> Any:
+        """An optional module object from ``hass.data`` (None: not loaded)."""
+        data = getattr(self.hass, "data", None)
+        return data.get(key) if isinstance(data, dict) else None
+
+    @property
+    def history_source(self) -> Any:
+        """The bucket source every reader uses (``BucketSource``)."""
+        return self.series
 
     # -- errors -------------------------------------------------------------------------
 
@@ -543,6 +572,8 @@ class TrafficEngine:
         self.clients.drop_router(rid)
         self.anomalies.drop_router(rid)
         self.series.drop_router(rid)
+        self.correlator.drop_router(rid)
+        self.indicators.drop_router(rid)
         for key in [k for k in self._denied if k[0] == rid]:
             del self._denied[key]
         self.planner.drop_router(rid)
@@ -578,13 +609,49 @@ class TrafficEngine:
             self._fail("core binding", err)
         for entry_id, slot in self._entries.items():
             self._subscribe(entry_id, slot)
+        self._listen_incidents()
         self._refresh_caps()
+
+    def _listen_incidents(self) -> None:
+        """Read NI incident events while active (ids and types only)."""
+        if self._ni_unsub is not None:
+            return
+        try:
+            self._ni_unsub = self.hass.bus.async_listen(
+                EVENT_INCIDENT, self._on_incident
+            )
+        except Exception as err:  # noqa: BLE001 - NI stays "not connected"
+            self._fail("incident listener", err)
+            return
+        self.correlator.ni_listening = True
+
+    def _stop_incidents(self) -> None:
+        unsub, self._ni_unsub = self._ni_unsub, None
+        self.correlator.ni_listening = False
+        if unsub is None:
+            return
+        try:
+            unsub()
+        except Exception as err:  # noqa: BLE001 - already removed
+            _LOGGER.debug("Incident listener removal raised (%s)", type(err).__name__)
+
+    @callback
+    def _on_incident(self, event: Any) -> None:
+        if not self.active:
+            return
+        try:
+            self.correlator.observe_incident(
+                getattr(event, "data", None), self._rid, self.wall()
+            )
+        except Exception as err:  # noqa: BLE001 - never disturbs NI
+            self._fail("incident note", err)
 
     async def async_deactivate(self) -> None:
         """Switch off: no listener, no task, no core binding, no memory."""
         self.active = False
         for slot in self._entries.values():
             self._unsubscribe(slot)
+        self._stop_incidents()
         self._queue.clear()
         await self._async_cancel_tasks()
         self._unbind_core()
@@ -593,6 +660,8 @@ class TrafficEngine:
         self.clients.clear()
         self.series.clear()
         self.anomalies.clear()
+        self.correlator.clear()
+        self.indicators.clear()
         self._last_anomaly_wall = None
         self._facts.clear()
         self.latest.clear()
@@ -653,6 +722,7 @@ class TrafficEngine:
             )
             binding.events_ok = True
             self.anomalies.publisher.emit = api.emit
+            self.indicators.emit = api.emit
         except (TypeError, ValueError) as err:
             self._fail("event prefix registration", err)
         try:
@@ -673,6 +743,7 @@ class TrafficEngine:
         binding, self._binding = self._binding, _Binding()
         self._module_key = None
         self.anomalies.publisher.emit = None
+        self.indicators.emit = None
         for remove in reversed(binding.removers):
             try:
                 remove()
@@ -943,6 +1014,7 @@ class TrafficEngine:
         self._facts.update(facts)
         accounted = self._account(rid, rates)
         self._keep_rates(accounted)
+        self.correlator.observe_links(rid, snapshot.devices, snapshot.wall_s)
         self._end_associations(self.clients.observe(accounted, facts, now), now)
         if snapshot.wired is not None:
             self.clients.observe_wired(rid, snapshot.wired, now)
@@ -1001,6 +1073,7 @@ class TrafficEngine:
             if self.book.has(pid):
                 self.latest[pid] = rate
             self.series.add_rate(rate)
+        self.correlator.observe_rates(rates)
 
     def _maybe_prune(self, now: float) -> None:
         if self._last_prune is not None and 0 <= now - self._last_prune < PRUNE_EVERY_S:
@@ -1029,6 +1102,18 @@ class TrafficEngine:
             self.anomalies.evaluate(wall, conntrack_sources=sources)
         except Exception as err:  # noqa: BLE001 - never disturbs processing
             self._fail("anomaly evaluation", err)
+            return
+        try:
+            self.indicators.evaluate(
+                list(self.anomalies.book.open.values()),
+                self.history_source,
+                now=wall,
+                key=self._module_key,
+                conntrack_sources=sources,
+                has_points=bool(self.history_source.points()),
+            )
+        except Exception as err:  # noqa: BLE001 - never disturbs processing
+            self._fail("indicator evaluation", err)
 
     def rates_of(self, router_id: str) -> list[Rate]:
         """Latest rate per point of ``router_id`` (copies of references only)."""
@@ -1088,6 +1173,18 @@ class TrafficEngine:
             router_id=router_id,
             uplink_ports=self.uplink_ports(),
             tz=self.anomalies.clock.tz,
+        )
+
+    def congestion(self, router_id: str | None = None) -> CorrelationReport:
+        """Bottleneck narrowing over the last hour (Phase H)."""
+        return self.correlator.evaluate(
+            self.history_source,
+            now=self.wall(),
+            links=self.link_facts(),
+            uplink_ports=self.uplink_ports(),
+            diagnostics=self.diagnostics,
+            wifi_rf=self.wifi_rf,
+            router_id=router_id,
         )
 
     def uplink_ports(self) -> dict[str, frozenset[str] | None]:
@@ -1273,6 +1370,8 @@ class TrafficEngine:
             "clients": self.clients.summary(),
             "series": self.series.summary(),
             "anomalies": self.anomalies.summary(),
+            "correlation": self.correlator.summary(),
+            "indicators": self.indicators.summary(),
             "extra_calls": {
                 **self.planner.counters,
                 "blocked": dict(self.blocked_counts),
