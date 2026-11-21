@@ -7,8 +7,9 @@ Pattern of the other enterprise modules: ``core_store.create_store``
 never fails), a delayed save, an explicit flush when the module is switched
 off or the last entry goes, and HA's own final write at shutdown.
 
-* ``openwrt_router.traffic_coarse``: the settings (read at every setup,
-  also while off) and the hourly/daily history.
+* ``openwrt_router.traffic_coarse``: the fleet settings and the
+  hourly/daily history. Read once at the first activation (Phase K: the
+  switch is a router option, so nothing is read while traffic is off).
 * ``openwrt_router.traffic_fine``: the 5-minute history and the last
   counter state per point (rule 8 of ``traffic_counters``). It is opened
   only once the module is on: while off no fine store exists at all.
