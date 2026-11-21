@@ -7,6 +7,7 @@ import React from 'react';
 import { EdgeLayout, TopologyData } from '../types';
 import { formatBitRate } from '../utils/format';
 import { STALE_HINT, parallelLinkLabel } from '../utils/hints';
+import { uplinkTrafficRows } from '../enterprise/traffic/trafficTopology';
 
 interface Props {
   edgeId: string;
@@ -115,6 +116,7 @@ export function EdgeTooltip({ edgeId, x, y, edges, data }: Props) {
       rows.push({ label: '⚠ Konflikt', value: 'LLDP-Port weicht von Bridge-FDB ab' });
     }
     if (ap?.clientCount != null) rows.push({ label: 'Clients', value: String(ap.clientCount) });
+    rows.push(...uplinkTrafficRows(ap?.uplinkTraffic)); // only while Traffic Analytics runs
 
   } else {
     // ap-mesh (parent-AP → child-AP edge)

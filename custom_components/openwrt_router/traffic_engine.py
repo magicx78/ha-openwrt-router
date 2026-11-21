@@ -646,6 +646,12 @@ class TrafficEngine:
             return None
         return rid if valid_router_id(rid) else None
 
+    def router_id_for_entry(self, entry_id: str) -> str | None:
+        """Core router id of a loaded entry (None if unknown or not loaded)."""
+        if entry_id not in self._entries:
+            return None
+        return self._rid(entry_id)
+
     def _rid(self, entry_id: str) -> str | None:
         rid = self._rid_cache.get(entry_id)
         if rid is None:
