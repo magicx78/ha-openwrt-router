@@ -32,6 +32,10 @@ One fleet-wide engine per Home Assistant instance. Phase B scope:
   the answer is kept. Accounted station rates feed the bounded client
   tracker; VLAN views come from measured VLAN netdevs and show the
   configured ports apart.
+* **History interface** (Phase E, ``traffic_series``): accounted rates
+  also fill a bounded in-memory bucket ring (``series``) behind the
+  ``BucketSource`` interface that the history store replaces in Phase I;
+  top talkers (``talkers``) read only through it.
 * **Settings** live in the core store ``TRAFFIC_COARSE_STORE_KEY`` (private,
   atomic writes); the full history store follows in Phase I.
 
@@ -130,6 +134,8 @@ from .traffic_model import (
     Source,
     valid_router_id,
 )
+from .traffic_series import MemoryBucketRing
+from .traffic_talkers import TalkerBoard
 from .traffic_vlan import VlanView, vlan_views
 
 _LOGGER = logging.getLogger(__name__)
@@ -325,6 +331,8 @@ class TrafficEngine:
         self.book = BaselineBook()
         self.accounting = TrafficAccounting()
         self.clients = ClientTracker()
+        self.series = MemoryBucketRing()
+        self.talkers = TalkerBoard(self.series)
         self._facts: dict[str, StationFacts] = {}
         self.planner = ExtraCallPlanner()
         self.latest: dict[str, Rate] = {}
@@ -510,6 +518,7 @@ class TrafficEngine:
         self._cap_view.pop(rid, None)
         self.accounting.drop_router(rid)
         self.clients.drop_router(rid)
+        self.series.drop_router(rid)
         for key in [k for k in self._denied if k[0] == rid]:
             del self._denied[key]
         self.planner.drop_router(rid)
@@ -558,6 +567,7 @@ class TrafficEngine:
         self.book.clear()
         self.accounting.clear()
         self.clients.clear()
+        self.series.clear()
         self._facts.clear()
         self.latest.clear()
         self.status.clear()
@@ -961,6 +971,7 @@ class TrafficEngine:
             pid = rate.point.point_id
             if self.book.has(pid):
                 self.latest[pid] = rate
+            self.series.add_rate(rate)
 
     def _maybe_prune(self, now: float) -> None:
         if self._last_prune is not None and 0 <= now - self._last_prune < PRUNE_EVERY_S:
@@ -1192,6 +1203,7 @@ class TrafficEngine:
             "counters": {**dict(self.counters), **self.book.counters},
             "accounting": self.accounting.summary(),
             "clients": self.clients.summary(),
+            "series": self.series.summary(),
             "extra_calls": {
                 **self.planner.counters,
                 "blocked": dict(self.blocked_counts),

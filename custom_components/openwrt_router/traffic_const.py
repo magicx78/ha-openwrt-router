@@ -240,3 +240,51 @@ BLOCK_SSH_FALLBACK: Final = "ssh_fallback"
 BLOCK_BUSY: Final = "router_busy"
 BLOCK_COVERED: Final = "covered_elsewhere"
 BLOCK_NOTHING_TO_DO: Final = "nothing_to_do"
+
+# --- history read interface and memory ring (Phase E; store in Phase I) ----------
+
+# Resolution of the in-memory ring (the "fine" tier of plan §5).
+SERIES_RESOLUTION_S: Final = 300
+# Buckets kept per point: infrastructure 24 h, clients 6 h (plan §5 "fein").
+SERIES_MAX_BUCKETS_INFRA: Final = 288
+SERIES_MAX_BUCKETS_CLIENT: Final = 72
+# A window counts as fully covered in time from this share on.
+FULL_TIME_COVERAGE: Final = 0.95
+# A bucket below this coverage is "lückenhaft" (plan §3.3).
+GAPPY_BELOW: Final = 0.5
+
+REASON_BEYOND_RETENTION: Final = "window_beyond_retention"
+REASON_HISTORY_SHORT: Final = "history_shorter_than_window"
+REASON_TIME_PARTIAL: Final = "time_coverage_incomplete"
+REASON_UNKNOWN_POINT: Final = "unknown_point"
+REASON_INSUFFICIENT_DATA: Final = "insufficient_data"
+
+# --- top talkers (Phase E, task §6) ------------------------------------------------
+
+TALKER_WINDOWS: Final = {
+    "5m": 300,
+    "1h": 3600,
+    "24h": 86400,
+    "7d": 7 * 86400,
+    "30d": 30 * 86400,
+}
+DEFAULT_TALKERS: Final = 10
+MAX_TALKERS: Final = 50
+# Ranked results kept in the cache of the talker board.
+TALKER_CACHE_SIZE: Final = 32
+# Recurring peaks: a bucket is a peak when its peak rate is at least this
+# multiple of the median average rate of the window and above the floor.
+PEAK_FACTOR: Final = 3.0
+PEAK_MIN_BPS: Final = 1_000_000.0
+PEAK_MIN_BUCKETS: Final = 12
+
+TALKER_DIRECTIONS: Final = ("download", "upload", "rx", "tx")
+REASON_SCOPE_NOT_RANKED: Final = "scope_not_ranked"
+REASON_USE_CLIENT_SCOPE: Final = "station_counts_per_association_use_client"
+REASON_NO_DATA_FOR_WINDOW: Final = "no_data_for_window"
+REASON_UNKNOWN_WINDOW: Final = "unknown_window"
+REASON_UNKNOWN_DIRECTION: Final = "unknown_direction"
+REASON_SHARE_REFERENCE_NOT_FULL: Final = "share_reference_not_fully_covered"
+REASON_SHARE_REFERENCE_ZERO: Final = "share_reference_zero"
+REASON_POINTS_DROPPED: Final = "points_dropped_by_quota"
+REASON_POINTS_OMITTED: Final = "points_omitted"

@@ -159,9 +159,25 @@ def test_as_dict_does_not_carry_traffic_fields() -> None:
         assert name not in plain.as_dict()
 
 
+# Frozen wall clock for the as_dict comparison. Cause of the one failure at
+# midnight: the coordinator stamps ``cpu_history`` with ``int(time.time())``
+# (coordinator.py, not traffic code). The two polls run one after another,
+# so whenever a wall-clock second boundary fell between them (midnight was
+# one of them) the stamps differed by 1 s. Freezing the clock makes the
+# comparison independent of the time of day.
+FROZEN_WALL = 1_795_000_000.0
+
+
+async def test_cpu_history_stamp_is_the_wall_clock_second() -> None:
+    with patch("time.time", return_value=FROZEN_WALL + 0.9):
+        _, coord, _ = await _run_polls("absent", polls=1)
+    assert [p["ts"] for p in coord.data.as_dict()["cpu_history"]] == [int(FROZEN_WALL)]
+
+
 async def test_polled_as_dict_is_the_same_with_traffic_on() -> None:
-    _, coord_absent, _ = await _run_polls("absent", polls=1)
-    _, coord_on, _ = await _run_polls("on", polls=1)
+    with patch("time.time", return_value=FROZEN_WALL):
+        _, coord_absent, _ = await _run_polls("absent", polls=1)
+        _, coord_on, _ = await _run_polls("on", polls=1)
     a, b = coord_absent.data.as_dict(), coord_on.data.as_dict()
     assert set(a) == set(b)
     for name in TRAFFIC_FIELDS:
