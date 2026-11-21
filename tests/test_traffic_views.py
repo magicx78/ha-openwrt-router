@@ -1,4 +1,4 @@
-"""HTTP routes of Traffic Analytics (Phase J): traffic_views + traffic_output.
+"""HTTP routes of Traffic Analytics (Phases J, K): traffic_views + traffic_output.
 
 Task §21 areas 28 (dashboard data contracts) and 32 (privacy and access).
 A real aiohttp application with HA's own view plumbing (401 without login)
@@ -28,6 +28,7 @@ from test_traffic_engine import (
     MAC1,
     MAC2,
     RID,
+    _reset_pending,  # noqa: F401 - autouse fixture
     enabled,
     poll_data,
     start,
@@ -69,10 +70,14 @@ ROUTES = (
     "/flows",
     "/evidence/{evidence_ref}",
     "/settings",
+    "/collector/ingest",
 )
+READ_ROUTES = ROUTES[:-1]
 GET_PATHS = tuple(
-    p.replace("{evidence_ref}", "evr_" + "a" * 16) for p in ROUTES
+    p.replace("{evidence_ref}", "evr_" + "a" * 16) for p in READ_ROUTES
 )  # concrete paths
+COLLECTOR_ID = "c" * 32  # a plain (non-admin) user for the collector
+ADMIN_HEX_ID = "a" * 32
 ADMIN_ONLY = ("/flows", "/settings")
 POINT = "tpt_" + "0" * 16
 QUERY = {"/series": {"point_id": POINT, "window": "1h"}}
@@ -98,6 +103,8 @@ def _auth_middleware(hass: Any) -> Any:
     @web.middleware
     async def middleware(request: web.Request, handler: Any) -> Any:
         user_id = request.headers.get("X-Test-User")
+        if request.headers.get("X-Test-Https"):
+            request = request.clone(scheme="https")
         if user_id:
             request[KEY_AUTHENTICATED] = True
             request[KEY_HASS_USER] = hass.users.get(user_id)
@@ -121,6 +128,7 @@ class Http:
         **kwargs: Any,
     ) -> Any:
         headers = {"X-Test-User": user} if user else {}
+        headers.update(kwargs.pop("headers", None) or {})
         if params is None:
             params = QUERY.get(path)
         resp = await self.client.request(
@@ -168,17 +176,25 @@ async def seeded(disks: FakeDisks, *, on: bool = True) -> tuple[Any, Any, Any]:
 # --- routes -----------------------------------------------------------------------------
 
 
-def test_every_route_is_listed_once_needs_auth_and_only_reads() -> None:
+WRITES = {"/settings": "post", "/collector/ingest": "post"}
+
+
+def test_every_route_is_listed_once_needs_auth_and_writes_only_where_known() -> None:
     names = [v.name for v in tv.TRAFFIC_VIEWS]
     assert len(names) == len(set(names)) == len(ROUTES)
     assert {v.url for v in tv.TRAFFIC_VIEWS} == {tv.BASE_URL + p for p in ROUTES}
     for view in tv.TRAFFIC_VIEWS:
         assert view.requires_auth is True
+        path = view.url.removeprefix(tv.BASE_URL)
         for method in ("post", "put", "patch", "delete"):
-            assert not hasattr(view, method), (view.name, method)
-    assert {v.url for v in tv.TRAFFIC_VIEWS if v.admin_only} == {
+            assert hasattr(view, method) == (WRITES.get(path) == method), (
+                view.name,
+                method,
+            )
+    assert {v.url for v in tv.TRAFFIC_VIEWS if getattr(v, "admin_only", False)} == {
         tv.BASE_URL + p for p in ADMIN_ONLY
     }
+    assert not hasattr(tv.TrafficCollectorIngestView, "get")
 
 
 async def test_no_route_answers_without_login(disks) -> None:
@@ -188,12 +204,15 @@ async def test_no_route_answers_without_login(disks) -> None:
             assert (await h.get(path, user=None)).status == 401, path
 
 
-async def test_writes_have_no_route(disks) -> None:
+async def test_only_settings_and_the_intake_take_writes(disks) -> None:
     hass, _engine, _c = await seeded(disks)
     async with http(hass) as h:
         for path in GET_PATHS:
+            if path == "/settings":
+                continue
             assert (await h.call("post", path, json={})).status == 405, path
-        assert (await h.get("/collector/ingest")).status == 404
+        assert (await h.get("/collector/ingest")).status == 405
+        assert (await h.call("put", "/settings", json={})).status == 405
 
 
 async def test_non_admin_is_403_before_the_switch_and_the_body(disks) -> None:
@@ -442,8 +461,10 @@ async def test_series_points_talkers_and_lists(disks) -> None:
         )
         assert "empty_is_not_no_traffic" in flows.data["notes"]
         settings = await h.get("/settings")
-        assert settings.data["enabled"] is True and settings.data["writable"] is False
+        assert settings.data["enabled"] is True and settings.data["writable"] is True
         assert settings.data["history_profile"] == "compact"
+        assert settings.data["switch"]["option"] == "traffic_enabled"
+        assert settings.data["collector"]["enabled"] is False
     h.assert_no_secret(*SECRETS)
 
 
@@ -486,3 +507,296 @@ async def test_setup_binds_the_routes_even_while_off(disks) -> None:
     hass.http = MagicMock()
     await start(hass)
     assert hass.http.register_view.call_count == len(tv.TRAFFIC_VIEWS)
+
+
+# --- Phase K: POST settings ----------------------------------------------------------
+
+
+def collector_users(hass: Any) -> Any:
+    from core_testkit import add_user
+
+    add_user(hass, COLLECTOR_ID, admin=False)
+    add_user(hass, ADMIN_HEX_ID, admin=True)
+    add_user(hass, "d" * 32, admin=False, active=False)
+    add_user(hass, "e" * 32, admin=False, system_generated=True)
+    return hass
+
+
+async def test_settings_post_is_admin_only_before_the_body(disks) -> None:
+    hass, engine, _c = await seeded(disks)
+    with patch.object(tv, "read_body", AsyncMock(side_effect=AssertionError)):
+        async with http(hass) as h:
+            resp = await h.call(
+                "post", "/settings", user=USER_ID, json={"client_sensors": []}
+            )
+            assert resp.status == 403 and resp.data["code"] == "authorization_denied"
+            assert (await h.call("post", "/settings", user=None, json={})).status == 401
+    hass.data[_PANEL_ACCESS_KEY] = {"e1": True}  # an open panel changes nothing
+    async with http(hass) as h:
+        resp = await h.call("post", "/settings", user=USER_ID, json={})
+        assert resp.status == 403
+    assert engine.settings["collector"]["enabled"] is False
+
+
+async def test_settings_post_while_off_is_409_and_touches_no_store(disks) -> None:
+    hass, _engine, _c = await seeded(disks, on=False)
+    async with http(hass) as h:
+        resp = await h.call("post", "/settings", json={"client_sensors": []})
+        assert resp.status == 409 and resp.data["code"] == "disabled"
+        assert "Security Center" not in resp.body.decode()
+    assert TRAFFIC_COARSE_STORE_KEY not in disks.options
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"enabled": True},
+        {"collector": {"enabled": "yes"}},
+        {"collector": {"enabled": True, "token": "x"}},
+        {"collector": {"user_id": "user-plain"}},
+        {"collector": {"enabled": True}},  # on without a user
+        {"client_sensors": ["aa:bb:cc:dd:ee:ff"]},
+        {"client_sensors": "cli_x"},
+        {"client_sensors": ["cli_" + "0" * 16] * 21},
+        {"history_profile": "standard"},
+    ],
+)
+async def test_settings_post_refuses_invalid_input_and_keeps_the_settings(
+    disks, body
+) -> None:
+    hass, engine, _c = await seeded(disks)
+    before = json.dumps(engine.settings, sort_keys=True)
+    async with http(hass) as h:
+        resp = await h.call("post", "/settings", json=body)
+        assert resp.status == 400, resp.data
+        assert resp.data["code"] == "invalid_request"
+    assert json.dumps(engine.settings, sort_keys=True) == before
+
+
+async def test_settings_post_refuses_non_json_and_large_bodies(disks) -> None:
+    hass, _engine, _c = await seeded(disks)
+    async with http(hass) as h:
+        assert (await h.call("post", "/settings", data=b"{nope")).status == 400
+        big = b'{"client_sensors": ["' + b"x" * 5000 + b'"]}'
+        assert (await h.call("post", "/settings", data=big)).status in (400, 413)
+
+
+@pytest.mark.parametrize(
+    ("user_id", "reason"),
+    [
+        ("b" * 32, "user_unknown"),
+        (ADMIN_HEX_ID, "user_is_admin"),
+        ("d" * 32, "user_inactive"),
+        ("e" * 32, "user_system"),
+    ],
+)
+async def test_settings_post_checks_the_collector_user(disks, user_id, reason) -> None:
+    hass, engine, _c = await seeded(disks)
+    collector_users(hass)
+    async with http(hass) as h:
+        resp = await h.call(
+            "post",
+            "/settings",
+            json={"collector": {"enabled": True, "user_id": user_id}},
+        )
+        assert resp.status == 400 and resp.data["details"]["reason"] == reason
+    assert engine.collector_enabled is False
+
+
+async def test_settings_post_stores_and_answers_without_the_user_id(disks) -> None:
+    hass, engine, _c = await seeded(disks)
+    collector_users(hass)
+    ref = "cli_" + "1" * 16
+    async with http(hass) as h:
+        resp = await h.call(
+            "post",
+            "/settings",
+            json={
+                "collector": {"enabled": True, "user_id": COLLECTOR_ID},
+                "client_sensors": [ref, ref],
+            },
+        )
+        assert resp.status == 200, resp.data
+        assert resp.data["collector"]["enabled"] is True
+        assert resp.data["collector"]["user_configured"] is True
+        assert resp.data["client_sensors"] == [ref]
+        assert COLLECTOR_ID not in resp.body.decode()
+        again = await h.get("/settings")
+        assert COLLECTOR_ID not in again.body.decode()
+    await drain(hass)
+    assert engine.collector_enabled and engine.is_collector_user(COLLECTOR_ID)
+    assert list(engine.client_sensor_refs) == [ref]
+    assert TRAFFIC_COARSE_STORE_KEY in disks.options
+
+
+# --- Phase K: collector intake -------------------------------------------------------
+
+
+def envelope(now: float, **over: Any) -> dict[str, Any]:
+    record = {
+        "kind": "flow",
+        "router_id": RID,
+        "window": {"start": now - 60, "end": now},
+        "direction": "orig",
+        "proto": "tcp",
+        "src": "192.0.2.10",
+        "dst": "198.51.100.5",
+        "src_port": 50000,
+        "dst_port": 443,
+        "client_mac": MAC1,
+        "bytes": 1200,
+        "packets": 10,
+        "observation": "observed",
+    }
+    body: dict[str, Any] = {
+        "schema": "traffic.collector.v1",
+        "collector": "edge-1",
+        "sent_at": now,
+        "records": [record],
+    }
+    body.update(over)
+    return body
+
+
+async def collector_on(disks) -> tuple[Any, Any]:
+    hass, engine, _c = await seeded(disks)
+    collector_users(hass)
+    await engine.async_update_settings(
+        {"collector": {"enabled": True, "user_id": COLLECTOR_ID}}
+    )
+    engine._module_key = bytes(range(32))  # what the core hands out
+    return hass, engine
+
+
+async def ingest(h: Http, body: Any, *, user: str = COLLECTOR_ID, https=True) -> Any:
+    headers = {"X-Test-Https": "1"} if https else {}
+    kwargs: dict[str, Any] = (
+        {"data": body} if isinstance(body, bytes) else {"json": body}
+    )
+    return await h.call(
+        "post", "/collector/ingest", user=user, headers=headers, **kwargs
+    )
+
+
+async def test_intake_off_by_default_answers_like_a_switched_off_module(disks) -> None:
+    hass, engine, _c = await seeded(disks, on=False)
+    collector_users(hass)
+    async with http(hass) as h:
+        resp = await ingest(h, envelope(engine.wall()))
+        assert resp.status == 409 and resp.data["code"] == "disabled"
+    hass, engine, _c = await seeded(disks)
+    collector_users(hass)
+    async with http(hass) as h:
+        resp = await ingest(h, envelope(engine.wall()))
+        assert resp.status == 403 and resp.data["code"] == "authorization_denied"
+    assert engine.collector.counters["rejected_collector_off"] == 1
+    assert len(engine.flows) == 0
+
+
+async def test_intake_takes_only_the_collector_user_over_https(disks) -> None:
+    hass, engine = await collector_on(disks)
+    async with http(hass) as h:
+        for user in (USER_ID, ADMIN_ID, ADMIN_HEX_ID):
+            resp = await ingest(h, envelope(engine.wall()), user=user)
+            assert resp.status == 403, user
+        hass.users[COLLECTOR_ID].is_admin = True  # promoted later: refused
+        assert (await ingest(h, envelope(engine.wall()))).status == 403
+        hass.users[COLLECTOR_ID].is_admin = False
+        resp = await ingest(h, envelope(engine.wall()), https=False)
+        assert resp.status == 403 and resp.data["code"] == "insecure_transport"
+        assert len(engine.flows) == 0
+        resp = await ingest(h, envelope(engine.wall()))
+        assert resp.status == 200, resp.data
+        assert resp.data == {
+            "v": 1,
+            "schema": "traffic.collector.v1",
+            "accepted": 1,
+            "rejected": [],
+        }
+        retry = await ingest(h, envelope(engine.wall()))
+        assert retry.status == 429 and int(retry.headers["Retry-After"]) >= 1
+        flows = await h.get("/flows")
+        assert flows.status == 200
+        assert flows.data["source"]["state"] == "ready"
+        assert len(flows.data["rows"]) == 1
+    h.assert_no_secret(MAC1, MAC1.upper(), COLLECTOR_ID)
+    assert engine.collector.counters["accepted_records"] == 1
+
+
+async def test_intake_is_all_or_nothing(disks) -> None:
+    hass, engine = await collector_on(disks)
+    now = engine.wall()
+    good = envelope(now)["records"][0]
+    bad = {**good, "proto": "icmp6x"}
+
+    async def fresh(body: Any) -> Any:
+        engine.collector._last_call = None  # past the rate gate
+        return await ingest(h, body)
+
+    async with http(hass) as h:
+        resp = await fresh(envelope(now, records=[good, bad, good]))
+        assert resp.status == 400 and resp.data["code"] == "records_rejected"
+        assert resp.data["accepted"] == 0
+        assert resp.data["rejected"] == [{"index": 1, "reason": "invalid_field"}]
+        for body in (
+            b"not json",
+            envelope(now, schema="traffic.collector.v2"),
+            envelope(now, extra=1),
+            envelope(now, records=[good] * 501),
+        ):
+            resp = await fresh(body)
+            assert resp.status == 400, (
+                resp.data,
+                body if isinstance(body, bytes) else "",
+            )
+        resp = await fresh(b"x" * (256 * 1024 + 1))
+        assert resp.status == 413
+    assert len(engine.flows) == 0
+    assert engine.collector.counters["accepted_calls"] == 0
+
+
+# --- Phase K: diagnostics -------------------------------------------------------------
+
+
+async def test_diagnostics_block_off_reads_nothing(disks) -> None:
+    from custom_components.openwrt_router import diagnostics
+
+    hass, _engine, _c = await seeded(disks, on=False)
+    with patch.object(out, "status_of", MagicMock(side_effect=AssertionError)):
+        block = diagnostics._traffic_summary(hass, "e1")
+    assert block == {"loaded": True, "entry_enabled": False, "active": False}
+    assert TRAFFIC_COARSE_STORE_KEY not in disks.options
+    assert diagnostics._traffic_summary(core_make_hass(), "e1") == {"loaded": False}
+
+
+async def test_diagnostics_block_has_counts_and_no_identities(disks) -> None:
+    from custom_components.openwrt_router import diagnostics
+
+    hass, engine = await collector_on(disks)
+    await engine.async_update_settings({"client_sensors": ["cli_" + "1" * 16]})
+    block = diagnostics._traffic_summary(hass, "e1")
+    assert block["entry_enabled"] is True and block["active"] is True
+    assert block["collector"]["enabled"] is True
+    assert block["client_sensors"] == 1
+    assert "history_store" in block and "capabilities" in block
+    text = json.dumps(block, default=str)
+    for needle in (*SECRETS, COLLECTOR_ID, "cli_" + "1" * 16):
+        assert needle not in text, needle
+
+
+async def test_diagnostics_wrapper_adds_the_block_and_never_fails(disks) -> None:
+    from custom_components.openwrt_router import diagnostics
+
+    hass, engine, _c = await seeded(disks)
+    entry = SimpleNamespace(entry_id="e1")
+    with patch.object(
+        diagnostics,
+        "_async_get_config_entry_diagnostics_rf",
+        AsyncMock(return_value={"base": 1}),
+    ):
+        result = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+        assert result["base"] == 1 and result["traffic_analytics"]["active"] is True
+        with patch.object(engine, "summary", MagicMock(side_effect=RuntimeError)):
+            result = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+    assert result["traffic_analytics"] == {"loaded": False, "error": True}

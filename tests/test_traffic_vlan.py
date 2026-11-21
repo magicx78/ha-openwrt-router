@@ -327,7 +327,9 @@ async def test_engine_vlan_views(disks: FakeDisks) -> None:
     coord = FakeCoordinator(poll(100.0, 1))
     coord.update_interval = timedelta(seconds=60)
     coord.poll_running = False
-    await async_setup_traffic(hass, FakeEntry("e1"), coord)
+    await async_setup_traffic(
+        hass, FakeEntry("e1", options={"traffic_enabled": True}), coord
+    )
     engine._module_key = KEY
     assert engine.vlan_views(RID2) == []  # unknown router: nothing invented
     coord.poll(data=poll(100.0, 1))

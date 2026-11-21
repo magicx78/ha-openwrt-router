@@ -16,7 +16,12 @@
           "wifi_rf_assoclist": "Client retry counters from iwinfo (wifi_rf_assoclist)",
           "wifi_rf_lists_at_start": "Channel and TX power limits at start (wifi_rf_lists_at_start)",
           "wifi_rf_survey": "Channel survey, later stage (wifi_rf_survey)",
-          "wifi_rf_every_n_polls": "Extra RF reads every N polls (wifi_rf_every_n_polls)"
+          "wifi_rf_every_n_polls": "Extra RF reads every N polls (wifi_rf_every_n_polls)",
+          "traffic_enabled": "Traffic analytics (traffic_enabled)",
+          "traffic_station_detail": "Wi-Fi client counters from iwinfo (traffic_station_detail)",
+          "traffic_sysfs_fallback": "Interface counters from sysfs as fallback (traffic_sysfs_fallback)",
+          "traffic_offload_probe": "Check flow offloading once (traffic_offload_probe)",
+          "traffic_history_profile": "Traffic history depth (traffic_history_profile)"
         },
         "data_description": {
           "extended_wifi_sensors": "Enables all per-radio, per-SSID (AP) and per-port sensors of this router at once instead of one by one. Turning it off disables only the sensors this switch enabled; sensors you disabled yourself are never touched. Takes effect after about 30 seconds.",
@@ -31,7 +36,12 @@
           "wifi_rf_assoclist": "Reads iwinfo assoclist once per access-point interface every N polls for retries, failed frames and connection time of clients. About 0.9 KB per connected client. Needs wifi_rf_enabled.",
           "wifi_rf_lists_at_start": "Reads the allowed channels and TX power steps of each radio once at start and again only after a channel or country change, never in the regular poll. About 2-4 KB per radio. Needs wifi_rf_enabled.",
           "wifi_rf_survey": "Later stage: reads iwinfo survey every N polls only after a capability check passed. The current router ACL does not grant this read; without the right it stays 'not ready' and nothing else is affected. On ath10k radios a survey can block the driver for up to 3 seconds. Needs wifi_rf_enabled.",
-          "wifi_rf_every_n_polls": "Cadence of the extra reads above (1-60, default 5). With the 60-second poll, 5 means every 5 minutes; a smaller N never reads more often than every 5 minutes per radio. The reads pause while the router is throttled or on the SSH fallback. Small routers like the FRITZ!WLAN Repeater 1750E (54 MB RAM) should keep 5 or more."
+          "wifi_rf_every_n_polls": "Cadence of the extra reads above (1-60, default 5). With the 60-second poll, 5 means every 5 minutes; a smaller N never reads more often than every 5 minutes per radio. The reads pause while the router is throttled or on the SSH fallback. Small routers like the FRITZ!WLAN Repeater 1750E (54 MB RAM) should keep 5 or more.",
+          "traffic_enabled": "Measures the traffic of this router (WAN, ports, interfaces, VLANs, Wi-Fi clients) from the counters the integration already polls, shows it in the Traffic Analytics tab and adds the traffic sensors. Off by default. Clients appear only as pseudonyms, never with MAC address or host name. Switching off removes the traffic entities of this router; the stored history is kept. Each extra read below has its own switch.",
+          "traffic_station_detail": "Reads iwinfo assoclist per access-point interface at most every 5 minutes to fill in client counters the regular poll lacks. Needs traffic_enabled and the module key of the enterprise core.",
+          "traffic_sysfs_fallback": "Reads interface counters from /sys/class/net at most every 5 minutes, only for interfaces the regular poll does not list. Needs traffic_enabled.",
+          "traffic_offload_probe": "Reads the firewall flow offloading setting (uci get) every 6 hours, because offloaded traffic bypasses some counters. Needs traffic_enabled.",
+          "traffic_history_profile": "Compact (default): 5-minute values for 6 hours, hourly for 14 days, daily for 31 days, no client history on disk. Standard: 5-minute values for 1 day, daily for 90 days, client history kept (daily for 30 days); needs more storage. The deepest profile among the routers with traffic on applies to the whole fleet."
         }
       }
     }
@@ -390,6 +400,39 @@
       },
       "wifi_rf_retry_rate": {
         "name": "Wi-Fi retry rate {radio}"
+      },
+      "fleet_traffic_anomalies": {
+        "name": "Active traffic anomalies (all routers)"
+      },
+      "fleet_traffic_coverage": {
+        "name": "Traffic monitoring coverage (all routers)"
+      },
+      "traffic_wan_download": {
+        "name": "WAN download rate"
+      },
+      "traffic_wan_upload": {
+        "name": "WAN upload rate"
+      },
+      "traffic_wan_total": {
+        "name": "WAN traffic total"
+      },
+      "traffic_wan_peak": {
+        "name": "Peak WAN bandwidth (24 h)"
+      },
+      "traffic_uplink_utilization": {
+        "name": "Uplink utilization"
+      },
+      "traffic_uplink_rx_errors": {
+        "name": "Uplink receive errors"
+      },
+      "traffic_uplink_tx_errors": {
+        "name": "Uplink transmit errors"
+      },
+      "traffic_client_down": {
+        "name": "Wi-Fi traffic at the AP, download {client}"
+      },
+      "traffic_client_up": {
+        "name": "Wi-Fi traffic at the AP, upload {client}"
       }
     },
     "switch": {
@@ -473,6 +516,12 @@
       "options": {
         "daily": "Daily",
         "off": "Off (manual backups only)"
+      }
+    },
+    "traffic_history_profile": {
+      "options": {
+        "compact": "Compact (default)",
+        "standard": "Standard (deeper history)"
       }
     }
   },

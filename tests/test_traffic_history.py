@@ -381,7 +381,7 @@ class _Clock:
         return self.t
 
 
-async def _engine(hass: Any, *, wall0: float = float(T0)) -> Any:
+async def _engine(hass: Any, *, wall0: float = float(T0), on: bool = False) -> Any:
     from core_testkit import FakeCoordinator, FakeEntry
 
     from custom_components.openwrt_router.const import DATA_TRAFFIC_ANALYTICS
@@ -400,7 +400,8 @@ async def _engine(hass: Any, *, wall0: float = float(T0)) -> Any:
 
     coord.update_interval = timedelta(seconds=60)
     coord.poll_running = False
-    await async_setup_traffic(hass, FakeEntry("e1"), coord)
+    options = {"traffic_enabled": True} if on else {}
+    await async_setup_traffic(hass, FakeEntry("e1", options=options), coord)
     return engine, coord
 
 
@@ -455,8 +456,7 @@ async def test_history_survives_a_restart_and_writes_are_throttled(
     disks: FakeDisks,
 ) -> None:
     hass = core_make_hass()
-    _store_settings(disks, {"v": 1, "enabled": True, "routers": {}})
-    engine, coord = await _engine(hass)
+    engine, coord = await _engine(hass, on=True)
     await _run_polls(engine, coord, hass, 90)  # 1.5 h
     fine, coarse = disks[TRAFFIC_FINE_STORE_KEY], disks[TRAFFIC_COARSE_STORE_KEY]
     # one pending delayed write per store at most, with the planned delays
@@ -472,7 +472,7 @@ async def test_history_survives_a_restart_and_writes_are_throttled(
 
     await async_release_traffic(hass, "e1")
     hass2 = core_make_hass()
-    engine2, _coord2 = await _engine(hass2)
+    engine2, _coord2 = await _engine(hass2, on=True)
     after = engine2.series.window(wan.point_id, 7 * DAY, end=end)
     assert after.buckets == before.buckets
     assert engine2.store.counters["baselines_restored"] == 1
@@ -481,21 +481,31 @@ async def test_history_survives_a_restart_and_writes_are_throttled(
 
 async def test_switching_off_writes_and_keeps_the_history(disks: FakeDisks) -> None:
     hass = core_make_hass()
+    from custom_components.openwrt_router.traffic_engine import (
+        async_apply_traffic_options,
+    )
+
     engine, coord = await _engine(hass)
-    await engine.async_update_settings({"enabled": True})
+    await async_apply_traffic_options(hass, "e1", {"traffic_enabled": True})
     await _run_polls(engine, coord, hass, 30)
-    await engine.async_update_settings({"enabled": False})
+    await async_apply_traffic_options(hass, "e1", {"traffic_enabled": False})
     assert engine.series.points() == ()  # memory freed
     fine = disks[TRAFFIC_FINE_STORE_KEY].data["data"]
     coarse = disks[TRAFFIC_COARSE_STORE_KEY].data["data"]
     assert fine["history"]["points"]  # written, not deleted
-    assert coarse["settings"]["enabled"] is False
-    # a later settings change while off keeps the stored history unchanged
-    stored = coarse["history"]
-    await engine.async_update_settings({"routers": {}})
-    assert disks[TRAFFIC_COARSE_STORE_KEY].data["data"]["history"] == stored
+    assert coarse["history"]
+    # while off nothing touches the stores
+    saves = (
+        len(disks[TRAFFIC_FINE_STORE_KEY].saves),
+        len(disks[TRAFFIC_COARSE_STORE_KEY].saves),
+    )
+    coord.poll()
+    assert saves == (
+        len(disks[TRAFFIC_FINE_STORE_KEY].saves),
+        len(disks[TRAFFIC_COARSE_STORE_KEY].saves),
+    )
     # switching on again brings it back
-    await engine.async_update_settings({"enabled": True})
+    await async_apply_traffic_options(hass, "e1", {"traffic_enabled": True})
     assert engine.series.points() != ()
 
 
@@ -507,7 +517,7 @@ async def test_broken_or_foreign_history_never_fails_the_setup(
     history = {"v": 1, "points": {"x": 1}}
     if damage == "future":
         history = {"v": 99, "points": {}}
-    _store_settings(disks, {"v": 1, "enabled": True, "routers": {}}, history)
+    _store_settings(disks, {"v": 1, "routers": {}}, history)
     fine = disks[TRAFFIC_FINE_STORE_KEY]
     if damage == "load_error":
         fine.data = {"version": 1, "minor_version": 1, "key": "k", "data": {}}
@@ -522,7 +532,7 @@ async def test_broken_or_foreign_history_never_fails_the_setup(
             "key": "k",
             "data": {"history": "garbage", "baselines": {"x": 1}},
         }
-    engine, coord = await _engine(hass)
+    engine, coord = await _engine(hass, on=True)
     assert engine.active and coord.listener_count == 1
     assert engine.series.points() == ()
     await _run_polls(engine, coord, hass, 3)
@@ -535,24 +545,28 @@ async def test_store_from_before_phase_i_is_read(disks: FakeDisks) -> None:
     """Phases B-H wrote only the settings: no history section at all."""
     hass = core_make_hass()
     _store_settings(disks, {"v": 1, "enabled": True, "routers": {}})
-    engine, _coord = await _engine(hass)
+    engine, _coord = await _engine(hass, on=True)
     assert engine.active and engine.counters["history_invalid_entries"] == 0
 
 
 async def test_profile_setting_and_part_budgets(disks: FakeDisks, monkeypatch) -> None:
 
     hass = core_make_hass()
+    from custom_components.openwrt_router.traffic_engine import (
+        async_apply_traffic_options,
+    )
+
     engine, coord = await _engine(hass)
-    await engine.async_update_settings(
-        {"enabled": True, "history_profile": HISTORY_PROFILE_STANDARD}
+    await async_apply_traffic_options(
+        hass,
+        "e1",
+        {"traffic_enabled": True, "traffic_history_profile": HISTORY_PROFILE_STANDARD},
     )
     assert engine.series.profile.name == HISTORY_PROFILE_STANDARD
-    assert (
-        disks[TRAFFIC_COARSE_STORE_KEY].data["data"]["settings"]["history_profile"]
-        == HISTORY_PROFILE_STANDARD
-    )
-    with pytest.raises(ValueError):
-        await engine.async_update_settings({"history_profile": "huge"})
+    # the profile is a router option, never a stored setting
+    assert "history_profile" not in (
+        disks[TRAFFIC_COARSE_STORE_KEY].data or {"data": {}}
+    )["data"].get("settings", {})
     await _run_polls(engine, coord, hass, 120)
     part = {"infra": 700, "client": 1_000, "rest": 10}
     tiny = {HISTORY_PROFILE_STANDARD: {"fine": part, "coarse": part}}

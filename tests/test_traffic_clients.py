@@ -182,7 +182,9 @@ async def start(
         coord = FakeCoordinator(poll(100.0, 1))
         coord.update_interval = timedelta(seconds=60)
         coord.poll_running = False
-        await async_setup_traffic(hass, FakeEntry(entry_id), coord)
+        await async_setup_traffic(
+            hass, FakeEntry(entry_id, options={"traffic_enabled": True}), coord
+        )
         coords.append(coord)
     engine._module_key = KEY
     return engine, coords

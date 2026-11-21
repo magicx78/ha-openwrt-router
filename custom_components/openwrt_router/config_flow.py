@@ -174,6 +174,15 @@ class OpenWrtOptionsFlow(OptionsFlow):
                     new_opts.get(OPTION_CONFIG_BACKUP_ENABLED) is True,
                     user_id=self.context.get("user_id"),
                 )
+            # --- Traffic Analytics (Phase K): applied to the fleet engine
+            # directly (no update listener, no reload); never raises.
+            if any(key in user_input for key in _TRAFFIC_OPTION_KEYS):
+                from .traffic_engine import async_apply_traffic_options
+
+                await async_apply_traffic_options(
+                    self.hass, self.config_entry.entry_id, new_opts
+                )
+            # --- end Traffic Analytics
             return self.async_create_entry(title="", data=new_opts)
 
         schema = vol.Schema(
@@ -219,6 +228,9 @@ class OpenWrtOptionsFlow(OptionsFlow):
         # default; read on every poll, so no update listener and no reload.
         schema = schema.extend(_wifi_rf_option_fields(opts))
         # --- end WiFi RF Intelligence
+        # --- Traffic Analytics (Phase K): always offered, off by default.
+        schema = schema.extend(_traffic_option_fields(opts))
+        # --- end Traffic Analytics
         return self.async_show_form(step_id="init", data_schema=schema)
 
 
@@ -278,6 +290,47 @@ def _wifi_rf_option_fields(opts: Any) -> dict[Any, Any]:
 
 
 # --- end WiFi RF Intelligence
+
+
+# --- Traffic Analytics (Phase K) ---
+def _traffic_keys() -> tuple[str, ...]:
+    from .const import OPTION_TRAFFIC_HISTORY_PROFILE, TRAFFIC_SWITCH_OPTIONS
+
+    return (*TRAFFIC_SWITCH_OPTIONS, OPTION_TRAFFIC_HISTORY_PROFILE)
+
+
+_TRAFFIC_OPTION_KEYS = _traffic_keys()
+
+
+def _traffic_option_fields(opts: Any) -> dict[Any, Any]:
+    """Switch, extra-call switches and history profile; odd values fall back."""
+    from .const import (
+        DEFAULT_TRAFFIC_HISTORY_PROFILE,
+        OPTION_TRAFFIC_HISTORY_PROFILE,
+        TRAFFIC_HISTORY_PROFILES,
+        TRAFFIC_SWITCH_OPTIONS,
+    )
+
+    fields: dict[Any, Any] = {
+        vol.Optional(key, default=opts.get(key) is True): bool
+        for key in TRAFFIC_SWITCH_OPTIONS
+    }
+    profile = opts.get(OPTION_TRAFFIC_HISTORY_PROFILE, DEFAULT_TRAFFIC_HISTORY_PROFILE)
+    if profile not in TRAFFIC_HISTORY_PROFILES:
+        profile = DEFAULT_TRAFFIC_HISTORY_PROFILE
+    fields[vol.Optional(OPTION_TRAFFIC_HISTORY_PROFILE, default=profile)] = (
+        SelectSelector(
+            SelectSelectorConfig(
+                options=list(TRAFFIC_HISTORY_PROFILES),
+                mode=SelectSelectorMode.DROPDOWN,
+                translation_key=OPTION_TRAFFIC_HISTORY_PROFILE,
+            )
+        )
+    )
+    return fields
+
+
+# --- end Traffic Analytics
 
 
 def _offer_config_backup_option(hass: Any, opts: Any) -> bool:

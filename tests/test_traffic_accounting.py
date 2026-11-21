@@ -596,7 +596,9 @@ async def start_two(hass: Any, disks: FakeDisks) -> tuple[TrafficEngine, Any, An
         coord = FakeCoordinator(poll(100.0, 1))
         coord.update_interval = timedelta(seconds=60)
         coord.poll_running = False
-        await async_setup_traffic(hass, FakeEntry(entry_id), coord)
+        await async_setup_traffic(
+            hass, FakeEntry(entry_id, options={"traffic_enabled": True}), coord
+        )
         coords.append(coord)
     assert async_get_traffic_engine(hass) is engine
     return engine, coords[0], coords[1]

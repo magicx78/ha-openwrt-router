@@ -952,4 +952,29 @@ DATA_TRAFFIC_VIEWS_BOUND = f"{DOMAIN}_traffic_views_bound"
 SIGNAL_TRAFFIC_ANALYTICS = f"{DOMAIN}_traffic_analytics_updated"
 UID_FLEET_TRAFFIC_ANOMALIES = f"{FLEET_UID_PREFIX}traffic_anomalies"
 UID_FLEET_TRAFFIC_COVERAGE = f"{FLEET_UID_PREFIX}traffic_coverage"
+# Phase K: the switch is an option per router (options flow, like WiFi RF);
+# saving it needs no reload. Off (default) on every router: no listener, no
+# store access, no entity, no router call. The module runs while at least
+# one router has it on.
+OPTION_TRAFFIC_ENABLED = "traffic_enabled"
+OPTION_TRAFFIC_HISTORY_PROFILE = "traffic_history_profile"
+OPTION_TRAFFIC_STATION_DETAIL = "traffic_station_detail"  # iwinfo assoclist
+OPTION_TRAFFIC_SYSFS_FALLBACK = "traffic_sysfs_fallback"  # file read sysfs
+OPTION_TRAFFIC_OFFLOAD_PROBE = "traffic_offload_probe"  # uci get firewall
+TRAFFIC_SWITCH_OPTIONS = (
+    OPTION_TRAFFIC_ENABLED,
+    OPTION_TRAFFIC_STATION_DETAIL,
+    OPTION_TRAFFIC_SYSFS_FALLBACK,
+    OPTION_TRAFFIC_OFFLOAD_PROBE,
+)
+TRAFFIC_HISTORY_PROFILES = ("compact", "standard")
+DEFAULT_TRAFFIC_HISTORY_PROFILE = "compact"
+# Entities (traffic_entities.py), pushed by SIGNAL_TRAFFIC_ANALYTICS. Router
+# sensors: ``<entry_id>_traffic_<key>``; optional client sensors (at most
+# TRAFFIC_CLIENT_SENSORS_MAX clients, chosen in the panel settings):
+# ``openwrt_router_fleet_traffic_client_<client_ref>_<down|up>``.
+DATA_TRAFFIC_ENTITIES = f"{DOMAIN}_traffic_entities"
+TRAFFIC_UID_INFIX = "_traffic_"
+UID_FLEET_TRAFFIC_CLIENT_PREFIX = f"{FLEET_UID_PREFIX}traffic_client_"
+TRAFFIC_CLIENT_SENSORS_MAX = 20
 # --- Ende Traffic Analytics ---

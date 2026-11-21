@@ -503,3 +503,51 @@ async def async_get_config_entry_diagnostics(
 
 
 # --- end WiFi RF Intelligence
+
+
+# --- Traffic Analytics (Phase 5) ---
+# The fleet-wide traffic engine as one more block ("traffic_analytics"):
+# switch, counts, quota and drop counters, store sizes and this router's
+# capability states (Bauplan §11). No MAC, IP, host name, client id or
+# collector user id; redacted like the other blocks. Off: only the switch
+# state (nothing else is read). A failure here never fails the download.
+_async_get_config_entry_diagnostics_rf = async_get_config_entry_diagnostics
+
+
+def _traffic_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any]:
+    """Traffic engine counters; never fails the download."""
+    try:
+        from .traffic_engine import async_get_traffic_engine
+
+        engine = async_get_traffic_engine(hass)
+        if engine is None:
+            return {"loaded": False}
+        block: dict[str, Any] = {
+            "loaded": True,
+            "entry_enabled": engine.entry_enabled(entry_id),
+        }
+        if not engine.active:
+            block["active"] = False
+            return block
+        block.update(engine.summary())
+        router_id = engine.router_id_for_entry(entry_id)
+        if router_id is not None and engine.entry_enabled(entry_id):
+            block["capabilities"] = engine.capabilities(router_id)
+        return _redact(block)
+    except Exception as err:  # noqa: BLE001 - the download must not fail
+        _LOGGER.debug("Traffic diagnostics failed: %s", type(err).__name__)
+        return {"loaded": False, "error": True}
+
+
+@_sec_wraps(_async_get_config_entry_diagnostics_rf)
+async def async_get_config_entry_diagnostics(
+    hass: HomeAssistant,
+    entry: OpenWrtConfigEntry,
+) -> dict[str, Any]:
+    """Diagnostics of the entry plus the Traffic Analytics block."""
+    diagnostics = await _async_get_config_entry_diagnostics_rf(hass, entry)
+    diagnostics["traffic_analytics"] = _traffic_summary(hass, entry.entry_id)
+    return diagnostics
+
+
+# --- Ende Traffic Analytics ---

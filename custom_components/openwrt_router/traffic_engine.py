@@ -6,10 +6,12 @@ One fleet-wide engine per Home Assistant instance. Phase B scope:
   listener per entry while active), ``async_release_traffic`` removes it;
   after the last entry the engine stops (tasks cancelled and awaited,
   listeners removed).
-* **Default off.** While ``enabled`` is not set no listener is added (and
-  a listener still called returns at once): no snapshot, no store write,
-  no entity, no event, no router call and no core registration. Only the
-  settings store is read at setup.
+* **Default off, per router** (Phase K). The switch is the router option
+  ``traffic_enabled`` (options flow, applied without a reload by
+  ``async_apply_traffic_options``). A router with it off gets no listener
+  (and a listener still called returns at once). While no router has it
+  on: no snapshot, no store access at all, no entity, no event, no router
+  call and no core registration.
 * **Queue with backpressure.** The listener copies the poll's traffic
   fields synchronously (``traffic_collect.snapshot_from_data``) into a
   queue with one slot per router: a newer snapshot replaces an unprocessed
@@ -43,8 +45,12 @@ One fleet-wide engine per Home Assistant instance. Phase B scope:
 * **Capacity** (Phase G, ``traffic_capacity``): ``capacity`` reads the ring
   with the link speed and duplex of the latest poll (unknown speed: no
   utilisation, never an assumed value).
-* **Settings** live in the core store ``TRAFFIC_COARSE_STORE_KEY`` (private,
-  atomic writes); the full history store follows in Phase I.
+* **Settings.** Per router (options flow): ``traffic_enabled``,
+  ``traffic_history_profile`` and the three extra-call switches. Fleet-wide
+  (``/settings``, administrators, only while on): the optional collector
+  and the optional client sensors, in the core store
+  ``TRAFFIC_COARSE_STORE_KEY`` (private, atomic writes), read at the first
+  activation.
 
 Every entry point catches its own errors and logs only the error type: a
 poll, a setup or an unload never fails because of traffic analytics.
@@ -54,6 +60,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Mapping
@@ -67,8 +74,14 @@ from homeassistant.core import HomeAssistant, callback
 from .const import (
     DATA_TRAFFIC_ANALYTICS,
     EVENT_INCIDENT,
+    OPTION_TRAFFIC_ENABLED,
+    OPTION_TRAFFIC_HISTORY_PROFILE,
+    OPTION_TRAFFIC_OFFLOAD_PROBE,
+    OPTION_TRAFFIC_STATION_DETAIL,
+    OPTION_TRAFFIC_SYSFS_FALLBACK,
     SCAN_INTERVAL_SECONDS,
     SIGNAL_TRAFFIC_ANALYTICS,
+    TRAFFIC_CLIENT_SENSORS_MAX,
 )
 from .core_models import CapabilityState, CapabilityStatus, InstallationKeyState
 from .traffic_accounting import TrafficAccounting, TrafficSum, sum_rates
@@ -90,6 +103,7 @@ from .traffic_collect import (
     PollState,
     Snapshot,
     detail_candidates,
+    device_point,
     estimated_uptime,
     offload_from_reply,
     samples_from_snapshot,
@@ -99,6 +113,7 @@ from .traffic_collect import (
     sysfs_candidates,
     sysfs_samples,
 )
+from .traffic_collector import CollectorIntake
 from .traffic_const import (
     ANOMALY_EVAL_EVERY_S,
     CAP_FLOW_COLLECTOR,
@@ -112,10 +127,11 @@ from .traffic_const import (
     DIAG_DATA_KEY,
     EVENT_PREFIX,
     EXTRA_OPTIONS,
+    HISTORY_PROFILE_STANDARD,
     IDENTITY_KEY_PURPOSE,
+    MAX_FLOW_QUERY,
     MAX_INTERVAL_S,
     MAX_QUEUE_ROUTERS,
-    MAX_SETTINGS_ROUTERS,
     MODULE_NAME,
     NOTE_POINTS_OMITTED,
     OPT_OFFLOAD_PROBE,
@@ -123,6 +139,7 @@ from .traffic_const import (
     OPT_SYSFS_FALLBACK,
     REASON_CORE_MISSING,
     REASON_DISABLED,
+    REASON_FLOW_SOURCE_SILENT,
     REASON_MODULE_KEY_MISSING,
     REASON_NO_DATA_YET,
     REASON_NO_STATIONS,
@@ -144,6 +161,7 @@ from .traffic_correlate import (
     WifiRfAdapter,
 )
 from .traffic_counters import BaselineBook, process_samples, router_restarted
+from .traffic_flows import FlowStore
 from .traffic_history import PROFILES, TrafficHistory
 from .traffic_model import (
     Coverage,
@@ -153,6 +171,7 @@ from .traffic_model import (
     RegistryFacts,
     Scope,
     Source,
+    valid_client_ref,
     valid_router_id,
 )
 from .traffic_store import TrafficStore
@@ -161,11 +180,14 @@ from .traffic_vlan import VlanView, vlan_views
 
 _LOGGER = logging.getLogger(__name__)
 
+# Scopes whose valid deltas are summed for the sensors (bytes, errors).
+_TOTAL_SCOPES = frozenset({Scope.WAN, Scope.PORT, Scope.INTERFACE})
 # The module key is asked for again at most this often while it is missing.
 MODULE_KEY_RETRY_S = 300.0
 # Baselines and latest rates are pruned at most this often.
 PRUNE_EVERY_S = 300.0
 _STATUS_SOURCE = "traffic_analytics"
+_USER_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 
 def _local_tz() -> Any:
@@ -178,7 +200,46 @@ def _local_tz() -> Any:
         return UTC
 
 
-# --- settings ------------------------------------------------------------------------------
+# --- options (per router, options flow) and settings (fleet, store) ------------------
+
+
+# options flow key -> engine name of the three switchable extra calls
+EXTRA_OPTION_KEYS: Mapping[str, str] = {
+    OPT_STATION_DETAIL: OPTION_TRAFFIC_STATION_DETAIL,
+    OPT_SYSFS_FALLBACK: OPTION_TRAFFIC_SYSFS_FALLBACK,
+    OPT_OFFLOAD_PROBE: OPTION_TRAFFIC_OFFLOAD_PROBE,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class TrafficOptions:
+    """The traffic options of one router (config entry options)."""
+
+    enabled: bool = False
+    history_profile: str = DEFAULT_HISTORY_PROFILE
+    extras: tuple[tuple[str, bool], ...] = tuple((o, False) for o in EXTRA_OPTIONS)
+
+    def extra(self) -> dict[str, bool]:
+        """The three extra-call switches (all off while traffic is off)."""
+        return {k: v and self.enabled for k, v in self.extras}
+
+
+def options_from_entry(options: Any) -> TrafficOptions:
+    """Read an entry's traffic options; only a real True switches on.
+
+    An unknown history profile falls back to ``compact`` (never an error).
+    """
+    opts = options if isinstance(options, Mapping) else {}
+    profile = opts.get(OPTION_TRAFFIC_HISTORY_PROFILE, DEFAULT_HISTORY_PROFILE)
+    if profile not in PROFILES:
+        profile = DEFAULT_HISTORY_PROFILE
+    return TrafficOptions(
+        enabled=opts.get(OPTION_TRAFFIC_ENABLED) is True,
+        history_profile=profile,
+        extras=tuple(
+            (name, opts.get(key) is True) for name, key in EXTRA_OPTION_KEYS.items()
+        ),
+    )
 
 
 def default_router_options() -> dict[str, bool]:
@@ -186,88 +247,114 @@ def default_router_options() -> dict[str, bool]:
     return dict.fromkeys(EXTRA_OPTIONS, False)
 
 
+class TrafficSettingsError(ValueError):
+    """A refused settings change; ``reason`` is a fixed token."""
+
+    def __init__(self, reason: str) -> None:
+        """Refusal with a fixed reason (no value from the request)."""
+        super().__init__(reason)
+        self.reason = reason
+
+
 def default_settings() -> dict[str, Any]:
-    """Module off, no router options."""
-    return {"v": SETTINGS_VERSION, "enabled": False, "routers": {}}
+    """Fleet settings: no collector, no client sensor."""
+    return {
+        "v": SETTINGS_VERSION,
+        "collector": {"enabled": False, "user_id": None},
+        "client_sensors": [],
+    }
 
 
-def _router_options(raw: Any, *, strict: bool) -> dict[str, bool]:
-    out = default_router_options()
+def valid_user_id(value: Any) -> bool:
+    """True for a Home Assistant user id (32 lower-case hex characters)."""
+    return isinstance(value, str) and _USER_ID_RE.fullmatch(value) is not None
+
+
+def _client_sensors(raw: Any, *, strict: bool) -> list[str]:
+    if not isinstance(raw, list | tuple):
+        if strict:
+            raise TrafficSettingsError("client_sensors")
+        return []
+    out: list[str] = []
+    for ref in raw:
+        if not valid_client_ref(ref):
+            if strict:
+                raise TrafficSettingsError("client_sensors")
+            continue
+        if ref not in out:
+            out.append(ref)
+    if len(out) > TRAFFIC_CLIENT_SENSORS_MAX:
+        if strict:
+            raise TrafficSettingsError("client_sensors_too_many")
+        out = out[:TRAFFIC_CLIENT_SENSORS_MAX]
+    return sorted(out)
+
+
+def _collector(raw: Any, base: Mapping[str, Any], *, strict: bool) -> dict[str, Any]:
+    out = {"enabled": base.get("enabled") is True, "user_id": base.get("user_id")}
     if not isinstance(raw, Mapping):
         if strict:
-            raise ValueError("router options must be an object")
-        return out
+            raise TrafficSettingsError("collector")
+        return {"enabled": False, "user_id": None}
     for key, value in raw.items():
-        if key not in out:
-            if strict:
-                raise ValueError("unknown router option")
-            continue
-        if not isinstance(value, bool):
-            if strict:
-                raise ValueError("router options must be true or false")
-            continue
-        out[key] = value
+        if key == "enabled":
+            if not isinstance(value, bool):
+                if strict:
+                    raise TrafficSettingsError("collector")
+                continue
+            out["enabled"] = value
+        elif key == "user_id":
+            if value is not None and not valid_user_id(value):
+                if strict:
+                    raise TrafficSettingsError("collector_user")
+                continue
+            out["user_id"] = value
+        elif strict:
+            raise TrafficSettingsError("collector")
+    if out["enabled"] and out["user_id"] is None:
+        if strict:
+            raise TrafficSettingsError("collector_user_missing")
+        out["enabled"] = False
     return out
 
 
 def merge_settings(current: Mapping[str, Any], update: Any) -> dict[str, Any]:
-    """``current`` with ``update`` applied; ValueError/TypeError if invalid.
+    """``current`` with ``update`` applied; TrafficSettingsError if invalid.
 
-    ``update`` may set ``enabled`` (bool) and per ``router_id`` the three
-    options (partial objects merge). At most MAX_SETTINGS_ROUTERS routers.
+    ``update`` may set ``collector`` (``enabled``, ``user_id``; partial
+    objects merge) and ``client_sensors`` (the full list, at most
+    TRAFFIC_CLIENT_SENSORS_MAX ``cli_`` pseudonyms). Nothing else: the
+    switch and the history profile are router options (options flow).
     """
     if not isinstance(update, Mapping):
-        raise TypeError("settings must be an object")
-    unknown = set(update) - {"enabled", "routers", "history_profile"}
-    if unknown:
-        raise ValueError("unknown setting")
+        raise TrafficSettingsError("not_an_object")
+    if set(update) - {"collector", "client_sensors"}:
+        raise TrafficSettingsError("unknown_setting")
     merged = settings_from_store(current)
-    if "enabled" in update:
-        if not isinstance(update["enabled"], bool):
-            raise ValueError("enabled must be true or false")
-        merged["enabled"] = update["enabled"]
-    if "history_profile" in update:
-        if update["history_profile"] not in PROFILES:
-            raise ValueError("unknown history profile")
-        merged["history_profile"] = update["history_profile"]
-    if "routers" in update:
-        routers = update["routers"]
-        if not isinstance(routers, Mapping):
-            raise ValueError("routers must be an object")
-        for rid, options in routers.items():
-            if not valid_router_id(rid):
-                raise ValueError("invalid router_id")
-            base = merged["routers"].get(rid, default_router_options())
-            new = _router_options(options, strict=True)
-            given = {k: new[k] for k in options}
-            merged["routers"][rid] = {**base, **given}
-        if len(merged["routers"]) > MAX_SETTINGS_ROUTERS:
-            raise ValueError("too many routers")
-    # routers with every option off carry nothing: not stored
-    merged["routers"] = {
-        rid: opts for rid, opts in merged["routers"].items() if any(opts.values())
-    }
-    # the default profile carries nothing: not stored
-    if merged.get("history_profile") == DEFAULT_HISTORY_PROFILE:
-        del merged["history_profile"]
+    if "collector" in update:
+        merged["collector"] = _collector(
+            update["collector"], merged["collector"], strict=True
+        )
+    if "client_sensors" in update:
+        merged["client_sensors"] = _client_sensors(
+            update["client_sensors"], strict=True
+        )
     return merged
 
 
 def settings_from_store(raw: Any) -> dict[str, Any]:
-    """Tolerant read of stored settings; anything broken falls back to off."""
+    """Tolerant read of stored settings; anything broken falls back to off.
+
+    Keys of the Phase B-J layout (``enabled``, ``routers``,
+    ``history_profile``) are ignored: the switch is a router option now.
+    """
     out = default_settings()
     if not isinstance(raw, Mapping):
         return out
-    out["enabled"] = raw.get("enabled") is True
-    profile = raw.get("history_profile")
-    if profile in PROFILES and profile != DEFAULT_HISTORY_PROFILE:
-        out["history_profile"] = profile
-    routers = raw.get("routers")
-    for rid, options in routers.items() if isinstance(routers, Mapping) else ():
-        if len(out["routers"]) >= MAX_SETTINGS_ROUTERS:
-            break
-        if valid_router_id(rid):
-            out["routers"][rid] = _router_options(options, strict=False)
+    collector = raw.get("collector")
+    if collector is not None:
+        out["collector"] = _collector(collector, out["collector"], strict=False)
+    out["client_sensors"] = _client_sensors(raw.get("client_sensors"), strict=False)
     return out
 
 
@@ -279,6 +366,7 @@ class _Slot:
     """One loaded entry: its coordinator and listener (memory only)."""
 
     coordinator: Any
+    options: TrafficOptions = field(default_factory=TrafficOptions)
     unsub: Callable[[], None] | None = None
     poll_end_mono: float | None = None
 
@@ -317,21 +405,49 @@ def async_get_traffic_engine(hass: HomeAssistant) -> TrafficEngine | None:
 async def async_setup_traffic(
     hass: HomeAssistant, entry: Any, coordinator: Any
 ) -> TrafficEngine:
-    """Create/load the engine once and add ``entry`` (one listener)."""
+    """Create the engine once and add ``entry`` with its traffic options.
+
+    Only a router with ``traffic_enabled`` gets a listener; while no router
+    has it on, nothing else happens (no store access, no core binding).
+    """
     engine = async_get_traffic_engine(hass)
     if engine is None:
         engine = TrafficEngine(hass)
         hass.data[DATA_TRAFFIC_ANALYTICS] = engine
     await engine.async_load()
-    engine.add_entry(entry.entry_id, coordinator)
+    engine.add_entry(
+        entry.entry_id,
+        coordinator,
+        options_from_entry(getattr(entry, "options", None)),
+    )
     _register_views(hass)
     if engine.enabled and not engine.active:
         await engine.async_activate()
+    elif engine.active:
+        engine.apply_profile()
     return engine
 
 
+async def async_apply_traffic_options(
+    hass: HomeAssistant, entry_id: str, options: Any
+) -> None:
+    """The options flow saved ``options`` of ``entry_id``: apply them now.
+
+    No reload and no update listener (pattern of the configuration backup
+    option). Never raises; an engine that is not loaded reads the options
+    at the next setup.
+    """
+    engine = async_get_traffic_engine(hass)
+    if engine is None:
+        return
+    try:
+        await engine.async_apply_options(entry_id, options_from_entry(options))
+    except Exception as err:  # noqa: BLE001 - the options are saved anyway
+        engine._fail("options change", err)
+
+
 def _register_views(hass: HomeAssistant) -> None:
-    """Bind the read-only dashboard routes once (also while the module is off)."""
+    """Bind the dashboard routes and the collector intake once (also while the module is off)."""
     if getattr(hass, "http", None) is None:
         return
     try:
@@ -368,6 +484,7 @@ class TrafficEngine:
         self._parked: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self.loaded = False
+        self._store_loaded = False
         self.load_failed = False
         self.settings: dict[str, Any] = default_settings()
         self.active = False
@@ -393,6 +510,9 @@ class TrafficEngine:
         self.correlator = TrafficCorrelator()
         self.indicators = SecurityIndicators()
         self.read_api = TrafficReadApi(self)
+        # Phase K: optional external collector (push intake, RAM flow store).
+        self.flows = FlowStore()
+        self.collector = CollectorIntake()
         self._ni_unsub: Callable[[], Any] | None = None
         # Test seams: optional modules, looked up at run time (never imported).
         self.diagnostics = DiagnosticsAdapter(partial(self._optional, DIAG_DATA_KEY))
@@ -400,6 +520,9 @@ class TrafficEngine:
         self._facts: dict[str, StationFacts] = {}
         self.planner = ExtraCallPlanner()
         self.latest: dict[str, Rate] = {}
+        # Phase K: sums of valid deltas per WAN / port / interface point since
+        # the module went on (sensors; never estimated across a gap).
+        self.totals: dict[str, dict[str, int | None]] = {}
         self.status: dict[str, RouterStatus] = {}
         self.offload: dict[str, OffloadState] = {}
         self._denied: dict[tuple[str, str], bool] = {}
@@ -422,8 +545,28 @@ class TrafficEngine:
 
     @property
     def enabled(self) -> bool:
-        """The ``enabled`` setting."""
-        return self.settings.get("enabled") is True
+        """True while at least one loaded router has ``traffic_enabled`` on."""
+        return any(slot.options.enabled for slot in self._entries.values())
+
+    @property
+    def entry_ids(self) -> list[str]:
+        """Loaded entry ids (sorted)."""
+        return sorted(self._entries)
+
+    @property
+    def enabled_entries(self) -> list[str]:
+        """Entry ids with traffic on (sorted)."""
+        return sorted(e for e, s in self._entries.items() if s.options.enabled)
+
+    def entry_enabled(self, entry_id: str) -> bool:
+        """True if ``entry_id`` is loaded and has traffic on."""
+        slot = self._entries.get(entry_id)
+        return slot is not None and slot.options.enabled
+
+    def entry_options(self, entry_id: str) -> TrafficOptions | None:
+        """The traffic options of a loaded entry (None: not loaded)."""
+        slot = self._entries.get(entry_id)
+        return None if slot is None else slot.options
 
     @property
     def entry_count(self) -> int:
@@ -458,8 +601,10 @@ class TrafficEngine:
 
     def router_options(self, router_id: str) -> dict[str, bool]:
         """The three extra-call options of ``router_id`` (default all off)."""
-        stored = self.settings.get("routers", {}).get(router_id)
-        return {**default_router_options(), **(stored or {})}
+        for entry_id, slot in self._entries.items():
+            if self._rid_cache.get(entry_id) == router_id:
+                return slot.options.extra()
+        return default_router_options()
 
     def _optional(self, key: str) -> Any:
         """An optional module object from ``hass.data`` (None: not loaded)."""
@@ -486,26 +631,50 @@ class TrafficEngine:
     # -- store ------------------------------------------------------------------------------
 
     async def async_load(self) -> None:
-        """Read the settings once (nothing is written, no fine store opened)."""
+        """Mark the engine set up; the store is not touched here.
+
+        The switch is a router option, so nothing has to be read while
+        traffic is off. The coarse store (fleet settings and history) is
+        read once at the first activation (``_async_load_store``).
+        """
+        self.loaded = True
+
+    async def _async_load_store(self) -> None:
+        """Module on: read the fleet settings and the coarse store once."""
         async with self._lock:
-            if self.loaded:
+            if self._store_loaded:
                 return
+            self._store_loaded = True
             try:
                 data, failed = await self.store.async_load_coarse()
-            except Exception as err:  # noqa: BLE001 - start off, never fail setup
+            except Exception as err:  # noqa: BLE001 - runs with default settings
                 self._fail("store load", err)
                 self.load_failed = True
-                self.loaded = True
                 return
             self.load_failed = failed
             self.settings = settings_from_store(data.get("settings"))
-            self.series.set_profile(self.history_profile)
-            self.loaded = True
 
     @property
     def history_profile(self) -> str:
-        """The ``history_profile`` setting (compact unless chosen)."""
-        return self.settings.get("history_profile", DEFAULT_HISTORY_PROFILE)
+        """``standard`` if any router with traffic on chose it, else ``compact``.
+
+        The history is fleet-wide (one store pair), so the larger profile
+        of the routers that are on applies.
+        """
+        chosen = {
+            s.options.history_profile
+            for s in self._entries.values()
+            if s.options.enabled
+        }
+        return (
+            HISTORY_PROFILE_STANDARD
+            if HISTORY_PROFILE_STANDARD in chosen
+            else DEFAULT_HISTORY_PROFILE
+        )
+
+    def apply_profile(self) -> None:
+        """Hand the effective profile to the history (trims on a downgrade)."""
+        self.series.set_profile(self.history_profile)
 
     async def _async_save(self) -> None:
         await self.store.async_save_settings(self.settings)
@@ -551,44 +720,77 @@ class TrafficEngine:
         self._parked.clear()
 
     async def async_update_settings(self, update: Any) -> dict[str, Any]:
-        """Apply a settings change (admin only; the caller checks the user).
+        """Apply a fleet settings change (admin only; the caller checks the user).
 
-        ValueError for an invalid update (nothing changes then). Writes the
-        store at once (atomic) and switches the engine on or off.
+        Only while the module runs (``disabled`` otherwise: no store access
+        while off). TrafficSettingsError for an invalid update (nothing
+        changes then). Writes the coarse store at once (atomic).
         """
+        if not self.active:
+            raise TrafficSettingsError("disabled")
         new = merge_settings(self.settings, update)
         async with self._lock:
             self.settings = new
-            self.series.set_profile(self.history_profile)
             await self._async_save()
-        if self.enabled and not self.active and self._entries:
+        self._refresh_caps()
+        self._signal()
+        return settings_from_store(self.settings)
+
+    @property
+    def client_sensor_refs(self) -> list[str]:
+        """Clients chosen for sensors (empty while off)."""
+        if not self.active:
+            return []
+        return list(self.settings.get("client_sensors") or [])
+
+    async def async_apply_options(self, entry_id: str, options: TrafficOptions) -> None:
+        """New traffic options of a loaded entry (options flow, no reload)."""
+        slot = self._entries.get(entry_id)
+        if slot is None or self.closed:
+            return
+        was_on = slot.options.enabled
+        slot.options = options
+        if options.enabled and not self.active:
             await self.async_activate()
         elif not self.enabled and self.active:
             await self.async_deactivate()
-        else:
+        elif self.active:
+            if options.enabled:
+                self._subscribe(entry_id, slot)
+            elif was_on:
+                self._unsubscribe(slot)
+                rid = self._rid_cache.get(entry_id)
+                if rid is not None:
+                    self._drop_router(rid)
+            self.apply_profile()
             self._refresh_caps()
-        return settings_from_store(self.settings)
+        self._signal()
 
     # -- entries ------------------------------------------------------------------------
 
     @callback
-    def add_entry(self, entry_id: str, coordinator: Any) -> None:
-        """Remember the coordinator; listen to its polls while active.
+    def add_entry(
+        self,
+        entry_id: str,
+        coordinator: Any,
+        options: TrafficOptions | None = None,
+    ) -> None:
+        """Remember the coordinator; listen to its polls while it is on.
 
         # Entscheidung: while off no listener is added at all (stricter than
         # plan §1, which allows one that returns at once); switching on
-        # adds one per entry, switching off removes them again.
+        # adds one per router with traffic on, switching off removes it.
         """
         old = self._entries.pop(entry_id, None)
         if old is not None:
             self._unsubscribe(old)
-        slot = _Slot(coordinator)
+        slot = _Slot(coordinator, options or TrafficOptions())
         self._entries[entry_id] = slot
         if self.active:
             self._subscribe(entry_id, slot)
 
     def _subscribe(self, entry_id: str, slot: _Slot) -> None:
-        if slot.unsub is None:
+        if slot.unsub is None and slot.options.enabled:
             slot.unsub = slot.coordinator.async_add_listener(
                 partial(self._on_poll, entry_id)
             )
@@ -622,6 +824,8 @@ class TrafficEngine:
         for pid in [p for p, r in self.latest.items() if r.point.router_id == rid]:
             del self.latest[pid]
         self.status.pop(rid, None)
+        for pid in [p for p in self.totals if p not in self.latest]:
+            del self.totals[pid]
         self.offload.pop(rid, None)
         self._snapshots.pop(rid, None)
         self._router_clock.pop(rid, None)
@@ -667,6 +871,8 @@ class TrafficEngine:
         if self.active or self.closed:
             return
         self.active = True
+        await self._async_load_store()
+        self.apply_profile()
         try:
             await self._async_bind_core()
         except Exception as err:  # noqa: BLE001 - "not ready", never raises
@@ -734,6 +940,9 @@ class TrafficEngine:
         self.anomalies.clear()
         self.correlator.clear()
         self.indicators.clear()
+        self.flows.clear()
+        self.collector.clear()
+        self.totals.clear()
         self._last_anomaly_wall = None
         self._facts.clear()
         self.latest.clear()
@@ -795,6 +1004,7 @@ class TrafficEngine:
             binding.events_ok = True
             self.anomalies.publisher.emit = api.emit
             self.indicators.emit = api.emit
+            self.collector.emit = api.emit
         except (TypeError, ValueError) as err:
             self._fail("event prefix registration", err)
         try:
@@ -816,6 +1026,7 @@ class TrafficEngine:
         self._module_key = None
         self.anomalies.publisher.emit = None
         self.indicators.emit = None
+        self.collector.emit = None
         for remove in reversed(binding.removers):
             try:
                 remove()
@@ -931,7 +1142,82 @@ class TrafficEngine:
             station,
             self._option_view(rid, OPT_STATION_DETAIL, CAP_STATION_DETAIL, options),
             self._option_view(rid, OPT_OFFLOAD_PROBE, CAP_OFFLOAD_STATE, options),
-            (CAP_FLOW_COLLECTOR, unavail, REASON_NOT_CONFIGURED),
+            self._collector_view(),
+        )
+
+    def _collector_view(self) -> tuple[str, CapabilityState, str]:
+        if not self.collector_enabled:
+            return (
+                CAP_FLOW_COLLECTOR,
+                CapabilityState.UNAVAILABLE,
+                REASON_NOT_CONFIGURED,
+            )
+        state = self.collector_state
+        if state == "receiving":
+            return (CAP_FLOW_COLLECTOR, CapabilityState.AVAILABLE, REASON_OK)
+        if state == "silent":
+            return (
+                CAP_FLOW_COLLECTOR,
+                CapabilityState.UNKNOWN,
+                REASON_FLOW_SOURCE_SILENT,
+            )
+        return (CAP_FLOW_COLLECTOR, CapabilityState.UNKNOWN, REASON_NO_DATA_YET)
+
+    # -- collector (Phase K) -------------------------------------------------------------
+
+    @property
+    def collector_enabled(self) -> bool:
+        """True while on, switched on in the settings and with a user."""
+        collector = self.settings.get("collector") or {}
+        return (
+            self.active
+            and collector.get("enabled") is True
+            and valid_user_id(collector.get("user_id"))
+        )
+
+    def is_collector_user(self, user_id: Any) -> bool:
+        """True if ``user_id`` is the configured collector user (and it is on)."""
+        if not self.collector_enabled or not isinstance(user_id, str):
+            return False
+        return user_id == (self.settings.get("collector") or {}).get("user_id")
+
+    @property
+    def collector_state(self) -> str:
+        """``off`` / ``waiting`` / ``receiving`` / ``silent``."""
+        enabled = self.collector_enabled
+        if not enabled or self.collector.last_accepted_wall is None:
+            # No clock read needed: off or nothing received yet.
+            return self.collector.state(enabled=enabled, now_wall=0.0, ttl_s=0.0)
+        return self.collector.state(
+            enabled=True, now_wall=self.wall(), ttl_s=self.flows.ttl_s
+        )
+
+    def ingest_collector(self, raw: bytes) -> dict[str, Any]:
+        """One collector call (all or nothing, see ``traffic_collector``)."""
+        before = self._collector_view()
+        answer = self.collector.ingest(
+            raw, now_wall=self.wall(), module_key=self._module_key, flows=self.flows
+        )
+        if self._collector_view() != before:
+            self._refresh_caps()
+        return answer
+
+    def flow_query(
+        self,
+        *,
+        router_id: str | None = None,
+        client_ref: str | None = None,
+        proto: str | None = None,
+        limit: int = MAX_FLOW_QUERY,
+    ) -> Any:
+        """Pseudonymised flow rows of the collector (``FlowQuery``)."""
+        return self.flows.query(
+            self.wall(),
+            module_key=self._module_key,
+            router_id=router_id,
+            client_ref=client_ref,
+            proto=proto,
+            limit=limit,
         )
 
     def _option_view(
@@ -981,7 +1267,7 @@ class TrafficEngine:
 
     def _take_snapshot(self, entry_id: str) -> None:
         slot = self._entries.get(entry_id)
-        if slot is None:
+        if slot is None or not slot.options.enabled:
             return
         now = self.clock()
         slot.poll_end_mono = now
@@ -1145,8 +1431,70 @@ class TrafficEngine:
             pid = rate.point.point_id
             if self.book.has(pid):
                 self.latest[pid] = rate
+                if rate.has_rate and rate.point.scope in _TOTAL_SCOPES:
+                    self._add_totals(rate)
             self.series.add_rate(rate)
         self.correlator.observe_rates(rates)
+
+    def _add_totals(self, rate: Rate) -> None:
+        """Bytes (RX+TX, only when both are known) and error deltas."""
+        totals = self.totals.setdefault(
+            rate.point.point_id, {"bytes": None, "rx_errors": None, "tx_errors": None}
+        )
+        if rate.rx_delta is not None and rate.tx_delta is not None:
+            totals["bytes"] = (totals["bytes"] or 0) + rate.rx_delta + rate.tx_delta
+        else:
+            self.counters["totals_incomplete"] += 1
+        for key, delta in (
+            ("rx_errors", rate.rx_errors_delta),
+            ("tx_errors", rate.tx_errors_delta),
+        ):
+            if delta is not None:
+                totals[key] = (totals[key] or 0) + delta
+
+    # -- sensor facts (Phase K, read only) ---------------------------------------------
+
+    def wan_point(self, router_id: str) -> MeasurementPoint | None:
+        """The WAN point of a router that measured WAN traffic (else None)."""
+        snapshot = self._snapshots.get(router_id)
+        if snapshot is None or snapshot.wan_device is None:
+            return None
+        point = device_point(
+            router_id,
+            snapshot.wan_device,
+            wan_device=snapshot.wan_device,
+            port_names=snapshot.port_names,
+        )
+        rate = self.latest.get(point.point_id)
+        return point if rate is not None and rate.has_rate else None
+
+    def uplink_point(self, router_id: str) -> tuple[MeasurementPoint | None, str]:
+        """The uplink of a router and how it was chosen.
+
+        The WAN point of a gateway (``wan``); else the one trunk port of the
+        topology (``lan_uplink``). Several or no trunk ports: None
+        (``uplink_unknown``); nothing is guessed.
+        """
+        snapshot = self._snapshots.get(router_id)
+        if snapshot is None:
+            return None, REASON_NO_DATA_YET
+        wan = self.wan_point(router_id)
+        if wan is not None:
+            return wan, "wan"
+        ports = snapshot.uplink_ports
+        if ports is not None and len(ports) == 1:
+            name = next(iter(ports))
+            try:
+                point = device_point(
+                    router_id,
+                    name,
+                    wan_device=snapshot.wan_device,
+                    port_names=snapshot.port_names,
+                )
+            except (TypeError, ValueError):
+                return None, "uplink_unknown"
+            return point, "lan_uplink"
+        return None, "uplink_unknown"
 
     def _persist_history(self) -> None:
         """Phase I: roll, apply retention, arm the throttled store writes."""
@@ -1163,6 +1511,7 @@ class TrafficEngine:
         for pid in [p for p in self.latest if not self.book.has(p)]:
             del self.latest[pid]
         self.clients.prune(now)
+        self.flows.prune(self.wall())
         tracked = set(self.clients.refs())
         self._facts = {r: f for r, f in self._facts.items() if r in tracked}
 
@@ -1432,6 +1781,8 @@ class TrafficEngine:
         """Counts only (diagnostics, panel): no MAC, IP, host or client id."""
         return {
             "enabled": self.enabled,
+            "entries_enabled": len(self.enabled_entries),
+            "history_profile": self.history_profile,
             "active": self.active,
             "ready": self.ready,
             "not_ready_reason": self.not_ready_reason,
@@ -1453,6 +1804,13 @@ class TrafficEngine:
             "anomalies": self.anomalies.summary(),
             "correlation": self.correlator.summary(),
             "indicators": self.indicators.summary(),
+            "collector": {
+                **self.collector.summary(),
+                "enabled": self.collector_enabled,
+                "state": self.collector_state,
+            },
+            "flows": self.flows.summary(),
+            "client_sensors": len(self.client_sensor_refs),
             "extra_calls": {
                 **self.planner.counters,
                 "blocked": dict(self.blocked_counts),

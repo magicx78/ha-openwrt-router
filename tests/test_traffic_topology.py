@@ -18,6 +18,7 @@ import pytest
 from core_testkit import FakeDisks
 from core_testkit import make_hass as core_make_hass
 from test_traffic_engine import enabled, start, two_polls
+from test_traffic_engine import _reset_pending  # noqa: F401 - autouse fixture
 
 from custom_components.openwrt_router import traffic_topology as tt
 from custom_components.openwrt_router.const import DATA_TRAFFIC_ANALYTICS

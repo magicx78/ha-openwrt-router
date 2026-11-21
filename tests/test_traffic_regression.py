@@ -81,7 +81,11 @@ async def _run_polls(mode: str, polls: int = 3) -> tuple[int, Any, Any]:
             engine = TrafficEngine(hass)
             hass.data[DATA_TRAFFIC_ANALYTICS] = engine
             engine.router_id_of = {"e1": RID}.get
-            await async_setup_traffic(hass, FakeEntry("e1"), coord)
+            await async_setup_traffic(
+                hass,
+                FakeEntry("e1", options={"traffic_enabled": mode == "on"}),
+                coord,
+            )
         model._MODE["empty_tables"] = False
         with (
             patch(

@@ -33,12 +33,28 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .const import (
+    OPTION_TRAFFIC_ENABLED,
+    OPTION_TRAFFIC_HISTORY_PROFILE,
+    TRAFFIC_CLIENT_SENSORS_MAX,
+)
 from .traffic_accounting import direction_map
+from .traffic_collector import (
+    INGEST_PATH,
+    SCHEMA_V1,
+    STATE_OFF,
+    STATE_RECEIVING,
+    STATE_SILENT,
+    STATE_WAITING,
+)
+from .traffic_collector import limits as collector_limits
 from .traffic_const import (
     HISTORY_MAX_QUERY_POINTS,
+    MAX_FLOW_QUERY,
     MAX_TALKERS,
     READ_API_VERSION,
     READ_WINDOWS,
+    REASON_FLOW_SOURCE_SILENT,
     TALKER_DIRECTIONS,
     TALKER_WINDOWS,
 )
@@ -66,7 +82,6 @@ REASON_DISABLED = "disabled"
 REASON_LINK_UNKNOWN = "link_speed_unknown"
 REASON_NO_FLOW_SOURCE = "needs_flow_source"
 REASON_NOT_OFFERED = "not_offered_unbounded"
-REASON_COLLECTOR_NOT_BUILT = "collector_interface_not_built"
 REASON_NO_RATE = "no_rate_yet"
 
 
@@ -177,17 +192,29 @@ def correlation_sources(engine: Any) -> list[dict[str, Any]]:
     return [s for s in out if s is not None]
 
 
+def _collector_source(engine: Any) -> dict[str, Any]:
+    """State of the external collector (Phase K): off unless an admin set it up."""
+    state = getattr(engine, "collector_state", STATE_OFF)
+    if state == STATE_RECEIVING:
+        return {"source": "collector", "state": "available", "reason": None}
+    if state == STATE_SILENT:
+        return {
+            "source": "collector",
+            "state": "unknown",
+            "reason": REASON_FLOW_SOURCE_SILENT,
+        }
+    if state == STATE_WAITING:
+        return {"source": "collector", "state": "unknown", "reason": "no_data_yet"}
+    return {"source": "collector", "state": "unavailable", "reason": "collector_off"}
+
+
 def flow_sources(engine: Any) -> list[dict[str, Any]]:
-    """Flow sources: none in this build (collector: Phase K; snapshots: unbounded)."""
+    """Flow sources: the optional collector (Phase K); snapshots are not offered."""
     conntrack = [
         rid for rid, st in engine.status.items() if st.conntrack_count is not None
     ]
     return [
-        {
-            "source": "collector",
-            "state": "unavailable",
-            "reason": REASON_COLLECTOR_NOT_BUILT,
-        },
+        _collector_source(engine),
         {
             "source": "conntrack_snapshot",
             "state": "unavailable",
@@ -564,14 +591,32 @@ def recommendations(engine: Any, *, router_id: str | None = None) -> dict[str, A
     return {**report, **_base(engine)}
 
 
-def flows(engine: Any) -> dict[str, Any]:
-    """Flow explorer: no flow source exists in this build (empty is not "none")."""
+def flows(
+    engine: Any,
+    *,
+    router_id: str | None = None,
+    client_ref: str | None = None,
+    proto: str | None = None,
+    limit: int = MAX_FLOW_QUERY,
+) -> dict[str, Any]:
+    """Flow explorer: collector rows if there are any (empty is not "none")."""
     if is_off(engine):
         return off_answer(engine, rows=[])
-    store = getattr(engine, "flows", None)
-    if store is not None and callable(getattr(store, "query", None)):
-        # A later flow source (Phase K) answers here; nothing is invented.
-        return {**_base(engine), **store.query().to_dict()}  # pragma: no cover
+    if getattr(engine, "collector_state", STATE_OFF) in (STATE_RECEIVING, STATE_SILENT):
+        found = engine.flow_query(
+            router_id=router_id, client_ref=client_ref, proto=proto, limit=limit
+        ).to_dict()
+        return {
+            **_base(engine),
+            **found,
+            "filters": {
+                "router_id": router_id,
+                "client_ref": client_ref,
+                "proto": proto,
+                "limit": limit,
+            },
+            "sources": flow_sources(engine),
+        }
     return {
         **_base(engine),
         "source": {
@@ -598,16 +643,50 @@ def evidence(engine: Any, *, evidence_ref: str) -> dict[str, Any] | None:
 
 
 def settings(engine: Any) -> dict[str, Any]:
-    """The module settings, read only (the switch is a later route)."""
+    """The settings: router options (read only here) and the fleet settings.
+
+    The switch, the history profile and the extra calls are router options
+    of the options flow (``traffic_enabled`` ...). The fleet settings
+    (collector, client sensors) are written by ``POST /settings`` while the
+    module runs. The collector user is never shown, only whether one is set.
+    """
     current = engine.settings
+    routers: dict[str, Any] = {}
+    for entry_id in engine.entry_ids:
+        rid = engine.router_id_for_entry(entry_id)
+        opts = engine.entry_options(entry_id)
+        if rid is None or opts is None:
+            continue
+        routers[rid] = {
+            "enabled": opts.enabled,
+            "history_profile": opts.history_profile,
+            **opts.extra(),
+        }
+    collector = current.get("collector") or {}
     return {
         **_base(engine),
-        "enabled": current.get("enabled") is True,
-        "history_profile": engine.history_profile,
-        "routers": {
-            rid: dict(opts) for rid, opts in sorted(current.get("routers", {}).items())
+        "enabled": engine.enabled,
+        "switch": {
+            "where": "options_flow",
+            "option": OPTION_TRAFFIC_ENABLED,
+            "profile_option": OPTION_TRAFFIC_HISTORY_PROFILE,
+            "per_router": True,
         },
-        "writable": False,
+        "routers_enabled": len(engine.enabled_entries),
+        "history_profile": engine.history_profile,
+        "routers": dict(sorted(routers.items())),
+        "client_sensors": list(current.get("client_sensors") or []),
+        "client_sensors_max": TRAFFIC_CLIENT_SENSORS_MAX,
+        "collector": {
+            "enabled": collector.get("enabled") is True,
+            "user_configured": collector.get("user_id") is not None,
+            "state": getattr(engine, "collector_state", STATE_OFF),
+            "schema": SCHEMA_V1,
+            "path": "/api/openwrt_topology/traffic" + INGEST_PATH,
+            "limits": collector_limits(),
+        },
+        "writable": bool(engine.active),
+        "writable_keys": ["client_sensors", "collector"] if engine.active else [],
     }
 
 

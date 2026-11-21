@@ -411,6 +411,12 @@ class TestNoSwitchOrFritzboxSteps:
             "wifi_rf_lists_at_start",
             "wifi_rf_survey",
             "wifi_rf_every_n_polls",
+            # Traffic Analytics (Phase K): always offered, off by default.
+            "traffic_enabled",
+            "traffic_station_detail",
+            "traffic_sysfs_fallback",
+            "traffic_offload_probe",
+            "traffic_history_profile",
         }
         assert not any("fritzbox" in k for k in keys)
 

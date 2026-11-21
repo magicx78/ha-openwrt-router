@@ -29,6 +29,8 @@ from core_testkit import make_hass as core_make_hass
 from custom_components.openwrt_router.api import OpenWrtMethodNotFoundError
 from custom_components.openwrt_router.const import (
     DATA_TRAFFIC_ANALYTICS,
+    OPTION_TRAFFIC_ENABLED,
+    OPTION_TRAFFIC_HISTORY_PROFILE,
     TRAFFIC_COARSE_STORE_KEY,
 )
 from custom_components.openwrt_router.core_masking import pseudonymise_identifier
@@ -59,12 +61,16 @@ from custom_components.openwrt_router.traffic_const import (
     REASON_PERMISSION_DENIED,
 )
 from custom_components.openwrt_router.traffic_engine import (
+    EXTRA_OPTION_KEYS,
     TrafficEngine,
+    TrafficSettingsError,
+    async_apply_traffic_options,
     async_get_traffic_engine,
     async_release_traffic,
     async_setup_traffic,
     default_settings,
     merge_settings,
+    options_from_entry,
     settings_from_store,
 )
 from custom_components.openwrt_router.traffic_model import (
@@ -173,12 +179,41 @@ async def start(
     coord = coord or FakeCoordinator(poll_data(100.0))
     coord.update_interval = timedelta(seconds=60)
     coord.poll_running = False
-    await async_setup_traffic(hass, FakeEntry(entry_id), coord)
+    rid = engine.router_id_of(entry_id)
+    await async_setup_traffic(
+        hass, FakeEntry(entry_id, options=entry_options(rid)), coord
+    )
     return engine, coord
 
 
+# Options the next ``start`` gives its entry (set by ``enabled``).
+_PENDING: dict[str, Any] = {}
+
+
+@pytest.fixture(autouse=True)
+def _reset_pending():
+    _PENDING.clear()
+    yield
+    _PENDING.clear()
+
+
+def option_map(on: bool = True, extras: dict[str, bool] | None = None) -> dict:
+    """Config entry options of one router (traffic switch and extra calls)."""
+    out: dict[str, Any] = {OPTION_TRAFFIC_ENABLED: on}
+    for name, value in (extras or {}).items():
+        out[EXTRA_OPTION_KEYS[name]] = value
+    return out
+
+
+def entry_options(rid: str | None) -> dict[str, Any]:
+    if not _PENDING:
+        return {}
+    return option_map(True, _PENDING["routers"].get(rid))
+
+
 def enabled(disks: FakeDisks, routers: dict[str, Any] | None = None) -> None:
-    store_settings(disks, {"v": 1, "enabled": True, "routers": routers or {}})
+    """Traffic on for the entries started next (extra calls per router id)."""
+    _PENDING["routers"] = dict(routers or {})
 
 
 async def two_polls(engine: TrafficEngine, coord: FakeCoordinator, hass: Any) -> None:
@@ -205,11 +240,10 @@ async def test_off_adds_no_listener_and_creates_nothing(disks: FakeDisks) -> Non
     assert hass.tasks == [] and not hass.async_create_task.called
     assert engine.status == {} and len(engine.book) == 0
     assert engine.counters == {}
-    assert disks[TRAFFIC_COARSE_STORE_KEY].saves == []  # only read, never written
-    assert disks.options[TRAFFIC_COARSE_STORE_KEY] == {
-        "private": True,
-        "atomic_writes": True,
-    }
+    # off: the store is neither read nor written (Phase K: the switch is an
+    # entry option, so nothing has to be loaded)
+    assert TRAFFIC_COARSE_STORE_KEY not in disks.options
+    assert engine.loaded
     assert coord.router_calls() == []
     assert hass.fired == []
     assert engine.not_ready_reason is None and not engine.module_key_available
@@ -219,31 +253,70 @@ async def test_off_adds_no_listener_and_creates_nothing(disks: FakeDisks) -> Non
 @pytest.mark.parametrize(
     "stored",
     [
+        {"v": 1, "enabled": True, "routers": {}},  # the Phase B-J switch
         {"enabled": "yes", "routers": {}},
-        {"enabled": 1},
         {"routers": {RID: {"offload_probe": True}}},
         "garbage",
         None,
     ],
 )
-async def test_broken_or_partial_settings_stay_off(
-    disks: FakeDisks, stored: Any
-) -> None:
+async def test_stored_settings_never_switch_on(disks: FakeDisks, stored: Any) -> None:
+    """Only the entry option switches on; an old stored ``enabled`` does not."""
     hass = make_hass()
     store_settings(disks, stored)
     engine, coord = await start(hass)
     assert not engine.active
     assert coord.listener_count == 0
+    assert disks[TRAFFIC_COARSE_STORE_KEY].saves == []
 
 
-async def test_unreadable_store_starts_off_and_never_fails_setup(
+@pytest.mark.parametrize(
+    "options",
+    [
+        {OPTION_TRAFFIC_ENABLED: "yes"},
+        {OPTION_TRAFFIC_ENABLED: 1},
+        {"traffic_offload_probe": True},  # an extra call alone is not the switch
+        {},
+        None,
+    ],
+)
+def test_odd_entry_options_stay_off(options: Any) -> None:
+    opts = options_from_entry(options)
+    assert opts.enabled is False
+    assert opts.history_profile == "compact"
+    assert not any(opts.extra().values())
+
+
+def test_entry_options_read_profile_and_extras() -> None:
+    opts = options_from_entry(
+        {
+            OPTION_TRAFFIC_ENABLED: True,
+            OPTION_TRAFFIC_HISTORY_PROFILE: "standard",
+            "traffic_station_detail": True,
+        }
+    )
+    assert opts.enabled and opts.history_profile == "standard"
+    assert opts.extra() == {
+        OPT_STATION_DETAIL: True,
+        OPT_SYSFS_FALLBACK: False,
+        OPT_OFFLOAD_PROBE: False,
+    }
+    odd = options_from_entry(
+        {OPTION_TRAFFIC_ENABLED: True, OPTION_TRAFFIC_HISTORY_PROFILE: "huge"}
+    )
+    assert odd.history_profile == "compact"
+
+
+async def test_unreadable_store_runs_with_defaults_and_never_fails_setup(
     disks: FakeDisks,
 ) -> None:
     hass = make_hass()
     disks[TRAFFIC_COARSE_STORE_KEY].load_error = OSError("disk")
+    enabled(disks)
     engine, coord = await start(hass)
-    assert engine.load_failed and not engine.active
-    assert coord.listener_count == 0
+    assert engine.load_failed and engine.active
+    assert coord.listener_count == 1
+    assert engine.settings == default_settings()
 
 
 # --- on: snapshots and rates ------------------------------------------------------------------
@@ -591,77 +664,143 @@ async def test_sysfs_fallback_reads_only_devices_without_counters(
 # --- settings -----------------------------------------------------------------------------------
 
 
+CLIENT_A = "cli_" + "a" * 16
+CLIENT_B = "cli_" + "b" * 16
+USER = "0123456789abcdef0123456789abcdef"
+
+
 @pytest.mark.parametrize(
     "update",
     [
-        {"enabled": "yes"},
+        {"enabled": True},  # the switch is an entry option now
+        {"history_profile": "standard"},
+        {"routers": {}},
         {"other": True},
-        {"routers": []},
-        {"routers": {"rtr_x": {OPT_OFFLOAD_PROBE: True}}},
-        {"routers": {RID: {"exec": True}}},
-        {"routers": {RID: {OPT_OFFLOAD_PROBE: 1}}},
-        {"routers": {RID: True}},
-        {
-            "routers": {
-                "rtr_" + f"{i:032x}": {OPT_OFFLOAD_PROBE: True} for i in range(65)
-            }
-        },
+        {"collector": True},
+        {"collector": {"enabled": "yes", "user_id": USER}},
+        {"collector": {"enabled": True}},  # no user: refused
+        {"collector": {"user_id": "Admin"}},
+        {"collector": {"user_id": USER, "token": "x"}},
+        {"client_sensors": "cli_x"},
+        {"client_sensors": ["aa:bb:cc:dd:ee:ff"]},  # never a MAC
+        {"client_sensors": [f"cli_{i:016x}" for i in range(21)]},
+        None,
     ],
 )
 def test_invalid_settings_are_refused(update: Any) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(TrafficSettingsError):
         merge_settings(default_settings(), update)
 
 
-def test_settings_merge_and_drop_routers_without_options() -> None:
-    merged = merge_settings(
-        default_settings(),
-        {"enabled": True, "routers": {RID: {OPT_OFFLOAD_PROBE: True}}},
-    )
-    merged = merge_settings(merged, {"routers": {RID: {OPT_SYSFS_FALLBACK: True}}})
-    assert merged["routers"][RID] == {
-        OPT_STATION_DETAIL: False,
-        OPT_SYSFS_FALLBACK: True,
-        OPT_OFFLOAD_PROBE: True,
-    }
-    merged = merge_settings(
-        merged,
-        {"routers": {RID: {OPT_SYSFS_FALLBACK: False, OPT_OFFLOAD_PROBE: False}}},
-    )
-    assert merged["routers"] == {}
-    with pytest.raises(TypeError):
-        merge_settings(default_settings(), None)
+def test_settings_merge_collector_and_client_sensors() -> None:
+    merged = merge_settings(default_settings(), {"collector": {"user_id": USER}})
+    assert merged["collector"] == {"enabled": False, "user_id": USER}
+    merged = merge_settings(merged, {"collector": {"enabled": True}})
+    assert merged["collector"] == {"enabled": True, "user_id": USER}
+    merged = merge_settings(merged, {"client_sensors": [CLIENT_B, CLIENT_A, CLIENT_B]})
+    assert merged["client_sensors"] == [CLIENT_A, CLIENT_B]
+    merged = merge_settings(merged, {"client_sensors": []})
+    assert merged["client_sensors"] == []
+    # tolerant read: broken parts fall back to off
     assert (
-        settings_from_store({"enabled": True, "routers": {"bad": {}}})["routers"] == {}
+        settings_from_store(
+            {"collector": {"enabled": True, "user_id": None}, "client_sensors": ["x"]}
+        )
+        == default_settings()
     )
+    assert settings_from_store("garbage") == default_settings()
+
+
+async def test_fleet_settings_only_while_on(disks: FakeDisks) -> None:
+    hass = make_hass()
+    engine, coord = await start(hass)
+    with pytest.raises(TrafficSettingsError) as err:
+        await engine.async_update_settings({"client_sensors": [CLIENT_A]})
+    assert err.value.reason == "disabled"
+    assert TRAFFIC_COARSE_STORE_KEY not in disks.options  # off: no store access
+    assert not engine.active and coord.listener_count == 0
 
 
 async def test_invalid_update_changes_nothing(disks: FakeDisks) -> None:
     hass = make_hass()
-    engine, coord = await start(hass)
-    with pytest.raises(ValueError):
-        await engine.async_update_settings({"enabled": "on"})
+    enabled(disks)
+    engine, _coord = await start(hass)
+    with pytest.raises(TrafficSettingsError):
+        await engine.async_update_settings({"client_sensors": ["bad"]})
     assert disks[TRAFFIC_COARSE_STORE_KEY].saves == []
-    assert not engine.active and coord.listener_count == 0
+    assert engine.settings == default_settings()
 
 
-async def test_switching_on_and_off(disks: FakeDisks) -> None:
+async def test_switching_on_and_off_through_the_options(disks: FakeDisks) -> None:
     hass = make_hass()
     engine, coord = await start(hass)
-    await engine.async_update_settings({"enabled": True})
+    await async_apply_traffic_options(hass, "e1", {OPTION_TRAFFIC_ENABLED: True})
     assert engine.active and coord.listener_count == 1
-    assert disks[TRAFFIC_COARSE_STORE_KEY].saves[-1] == {
-        "settings": {"v": 1, "enabled": True, "routers": {}}
-    }
     await two_polls(engine, coord, hass)
     assert len(engine.book) == 2
+    await engine.async_update_settings({"client_sensors": [CLIENT_A]})
+    assert disks[TRAFFIC_COARSE_STORE_KEY].saves[-1]["settings"] == {
+        "v": 1,
+        "collector": {"enabled": False, "user_id": None},
+        "client_sensors": [CLIENT_A],
+    }
 
-    await engine.async_update_settings({"enabled": False})
+    await async_apply_traffic_options(hass, "e1", {OPTION_TRAFFIC_ENABLED: False})
     assert not engine.active and coord.listener_count == 0
     assert len(engine.book) == 0 and engine.latest == {} and engine.status == {}
-    assert disks[TRAFFIC_COARSE_STORE_KEY].saves[-1]["settings"]["enabled"] is False
     coord.poll(data=poll_data(200.0))
     assert engine.queue_length == 0
+    # switching off keeps the fleet settings (written, not deleted)
+    assert disks[TRAFFIC_COARSE_STORE_KEY].saves[-1]["settings"]["client_sensors"] == [
+        CLIENT_A
+    ]
+
+
+async def test_one_router_off_keeps_the_other_on(disks: FakeDisks) -> None:
+    hass = make_hass()
+    enabled(disks)
+    rids = {"e1": RID, "e2": RID2}
+    engine, coord1 = await start(hass, rids=rids)
+    _, coord2 = await start(hass, entry_id="e2", coord=FakeCoordinator(poll_data(1.0)))
+    coord1.poll(data=poll_data(100.0))
+    coord2.poll(data=poll_data(100.0))
+    await drain(hass)
+    assert set(engine.status) == {RID, RID2}
+
+    await async_apply_traffic_options(hass, "e1", {OPTION_TRAFFIC_ENABLED: False})
+    assert engine.active and engine.enabled_entries == ["e2"]
+    assert coord1.listener_count == 0 and coord2.listener_count == 1
+    assert set(engine.status) == {RID2}
+    coord1.poll(data=poll_data(200.0))
+    assert engine.queue_length == 0
+    # unknown entry: nothing happens
+    await async_apply_traffic_options(hass, "e9", {OPTION_TRAFFIC_ENABLED: True})
+    assert engine.enabled_entries == ["e2"]
+
+
+async def test_history_profile_is_the_largest_of_the_routers_on(
+    disks: FakeDisks,
+) -> None:
+    hass = make_hass()
+    enabled(disks)
+    engine, _ = await start(hass, rids={"e1": RID, "e2": RID2})
+    await start(hass, entry_id="e2", coord=FakeCoordinator(poll_data(1.0)))
+    assert engine.history_profile == "compact"
+    await async_apply_traffic_options(
+        hass,
+        "e2",
+        {OPTION_TRAFFIC_ENABLED: True, OPTION_TRAFFIC_HISTORY_PROFILE: "standard"},
+    )
+    assert engine.history_profile == "standard"
+    assert engine.series.profile.name == "standard"
+    # a router that is off does not count
+    await async_apply_traffic_options(
+        hass,
+        "e2",
+        {OPTION_TRAFFIC_ENABLED: False, OPTION_TRAFFIC_HISTORY_PROFILE: "standard"},
+    )
+    assert engine.history_profile == "compact"
+    assert engine.series.profile.name == "compact"
 
 
 # --- shutdown -------------------------------------------------------------------------------------
@@ -737,9 +876,9 @@ async def test_end_to_end_with_the_real_core(disks: FakeDisks) -> None:
     core_listeners = coord.listener_count
     engine = await async_setup_traffic(hass, entry, coord)
     assert coord.listener_count == core_listeners  # off: nothing added
-    assert disks[TRAFFIC_COARSE_STORE_KEY].saves == []
+    assert TRAFFIC_COARSE_STORE_KEY not in disks.options
 
-    await engine.async_update_settings({"enabled": True})
+    await async_apply_traffic_options(hass, "e1", {OPTION_TRAFFIC_ENABLED: True})
     assert engine.ready, engine.not_ready_reason
     assert engine.module_key_available
     assert coord.listener_count == core_listeners + 1
