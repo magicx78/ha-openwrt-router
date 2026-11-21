@@ -21,6 +21,14 @@ unique_ids. Panel-Version `20261121-review2`.
 
 ### Behoben
 
+- **Traffic Analytics: Das Gateway bekommt jetzt seine Router-Sensoren** (WAN Download, Upload,
+  Summe und Spitze, Uplink-Auslastung und Uplink-Fehler). `wan_status` gab das WAN-Gerät von netifd
+  (`l3_device`) nicht weiter, deshalb fehlte an echten Routern der WAN-Messpunkt; die Testdaten
+  enthielten das Feld von Hand. Gefunden bei der ersten Prüfung an einer echten Installation. Kein
+  zusätzlicher Router-Aufruf, keine bestehende unique_id geändert.
+- **Traffic Analytics: Die sysfs-Ausweichabfrage liest nur noch Geräte von aktiven Schnittstellen.**
+  Vorher las sie für eine inaktive Schnittstelle (z. B. `wan6`) acht nicht vorhandene Dateien und
+  zählte das als `source_missing`.
 - **MAC-Adressen in freiem Text blieben lesbar** in `redact_text`/`scrub_text` (Core),
   `config_redact_text` (Configuration Manager) und den Ausgaben der Netzwerkdiagnose
   (`log_safe`, Befunde, Ursachen, Ereignisse). Alle nutzen jetzt ein gemeinsames Muster,
