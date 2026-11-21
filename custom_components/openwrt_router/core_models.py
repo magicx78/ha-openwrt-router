@@ -4876,7 +4876,11 @@ class ConfigurationApiProtocol(Protocol):
         ring: AuditRing | None = None,
         limit: int = DEFAULT_LIST_LIMIT,
     ) -> tuple[CoreEvent, ...]:
-        """Audit entries from both rings (or one), newest first."""
+        """Audit entries from both rings (or one), oldest first.
+
+        ``limit`` keeps the newest ``limit`` entries, still oldest first, so
+        ``[-1]`` is the newest entry.
+        """
 
     def subscribe(self, listener: CoreEventListener) -> Callable[[], None]:
         """Listen to published events; returns an unsubscribe callback."""

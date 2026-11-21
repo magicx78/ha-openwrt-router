@@ -2975,7 +2975,11 @@ class ConfigurationApi:
         ring: AuditRing | None = None,
         limit: int = DEFAULT_LIST_LIMIT,
     ) -> tuple[CoreEvent, ...]:
-        """Audit entries, newest first."""
+        """Audit entries, oldest first; ``limit`` keeps the newest.
+
+        ``limit`` returns the newest ``limit`` entries, still oldest first,
+        so ``[-1]`` is the newest one (see ``AuditLog.events``).
+        """
         return self._m.audit.events(
             router_id=router_id, types=types, since=since, ring=ring, limit=limit
         )
