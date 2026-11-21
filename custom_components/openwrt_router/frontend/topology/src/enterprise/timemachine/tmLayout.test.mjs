@@ -115,3 +115,41 @@ test('text only: no innerHTML anywhere in the tab', () => {
     assert.doesNotMatch(src, /dangerouslySetInnerHTML|innerHTML|insertAdjacentHTML/, f);
   }
 });
+
+// ── 1.51.0: the block before the window and the client sessions ─────────
+
+test('the block before the window gives the time column room for date and time', () => {
+  const cols = /grid-template-columns: ([^;]+);/.exec(rule('.tm-spans .tm-mark'))[1];
+  assert.match(cols, /^9\.5em /, '"21.11.2026, 14:03" in 12.5 px');
+  assert.match(cols, /minmax\(0, 1fr\)/);
+  // in the card layout the time is a flex item again (no grid columns)
+  const m = /@container tmlist \(max-width: (\d+)px\) \{([\s\S]*?)\n\}/.exec(css);
+  assert.match(m[2], /\.tm-mark \{[^}]*display: flex;/);
+  const em = [...cols.matchAll(/([\d.]+)em/g)].reduce((s, x) => s + Number(x[1]), 0);
+  assert.ok(em * 12.5 + 5 * 12 + 20 < BREAKPOINT - 60, `fixed columns ${em}em leave room for the title`);
+});
+
+test('sessions: a size container of their own; below its width every session is a wrapping card', () => {
+  assert.match(rule('.tm-sessions'), /container: tmsessions \/ inline-size;/);
+  const row = rule('.tm-session');
+  assert.match(row, /minmax\(0, 1fr\)/);
+  assert.match(rule('.tm-session > *'), /min-width: 0;/);
+  const m = /@container tmsessions \(max-width: (\d+)px\) \{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(m, 'container rule present');
+  const cols = /grid-template-columns: ([^;]+);/.exec(row)[1];
+  const em = [...cols.matchAll(/([\d.]+)em/g)].reduce((s, x) => s + Number(x[1]), 0);
+  assert.ok(em * 12.5 + 5 * 12 + 20 < Number(m[1]) - 100, `fixed columns ${em}em below the card width ${m[1]} px`);
+  assert.match(m[2], /\.tm-session \{[^}]*display: flex;[^}]*flex-wrap: wrap;/);
+  assert.match(m[2], /\.tm-session__client \{[^}]*flex: 1 1 100%;/);
+  // markup order: start, duration, client, router, band, changes
+  const order = ['tm-session__time', 'tm-session__dur', 'tm-session__client', 'tm-session__router', 'tm-session__band', 'tm-session__roam'];
+  const at = order.map(c => tsx.indexOf(`"${c}"`));
+  assert.ok(at.every(i => i > 0), 'all parts in the markup');
+  assert.deepEqual([...at].sort((a, b) => a - b), at);
+});
+
+test('the view switch and the restart notice wrap like the rest', () => {
+  assert.match(rule('.tm-restart'), /flex-wrap: wrap;/);
+  assert.ok(tsx.includes('className="tm-chips tm-views"'));
+  assert.match(rule('.tm-chips'), /flex-wrap: wrap;/);
+});

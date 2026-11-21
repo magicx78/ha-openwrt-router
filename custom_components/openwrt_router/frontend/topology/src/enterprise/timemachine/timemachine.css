@@ -4,13 +4,16 @@
    blue, warning amber, critical red); an empty list is neutral, never green.
    Narrow layout down to 360 px: the filter bar wraps (never scrolls
    sideways), and below the width a timeline row needs, every mark becomes a
-   card (container query, the Network Diagnostics history pattern). */
+   card (container query, the Network Diagnostics history pattern). The
+   client sessions (1.51.0) follow the same pattern with their own container. */
 
 .tm { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .tm .cfg-badge { white-space: normal; }
 .tm-stand { color: var(--text-muted); }
 .tm-loading { padding: 4px 0; }
 .tm-off { flex-direction: column; align-items: flex-start; }
+.tm-restart { flex-wrap: wrap; gap: 8px; }
+.tm-views { flex: 0 1 auto; }
 
 /* Filter bar */
 .tm-filters { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -30,6 +33,9 @@
 .tm-field select:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; }
 
 /* Sources row */
+.tm-sources-box { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.tm-sources__title { margin: 0; }
+.tm-sources__newest { font-weight: 500; color: var(--text-secondary); }
 .tm-sources { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 0; margin: 0; min-width: 0; }
 .tm-pill { font-weight: 500; }
 .tm-pill__name { font-weight: 700; }
@@ -57,6 +63,22 @@
 .tm-sev--info { color: #93c5fd; }
 .tm-sev--warn { color: var(--amber); }
 .tm-sev--critical { color: var(--red); }
+/* Marks that began before the window: the time column holds date and time */
+.tm-spans .tm-mark { grid-template-columns: 9.5em 6.5em 8.5em minmax(0, 1fr) 9em 11em; }
+
+/* Client sessions: start, duration, client, router, band, changes */
+.tm-sessions { display: flex; flex-direction: column; gap: 10px; min-width: 0; container: tmsessions / inline-size; }
+.tm-session {
+  display: grid; align-items: baseline; gap: 4px 12px; padding: 7px 10px; min-width: 0;
+  grid-template-columns: 5em 9.5em minmax(0, 1fr) 9em 5em 6em;
+  border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03); font-size: 12.5px;
+}
+.tm-session > * { min-width: 0; }
+.tm-session__time { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.tm-session__client { display: inline-flex; flex-wrap: wrap; gap: 4px; color: var(--text-primary); font-weight: 600; }
+.tm-session__dur, .tm-session__band, .tm-session__roam { color: var(--text-secondary); }
+.tm-session__router { color: var(--text-primary); }
+
 .tm-more { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
 /* Narrow (below the six columns' width): each mark is a card. Line 1 time,
@@ -67,6 +89,13 @@
   .tm-mark__main { flex: 1 1 100%; gap: 3px; }
   .tm-mark__router { flex: 0 1 auto; }
   .tm-mark__source { flex: 1 1 auto; }
+}
+
+/* Narrow: each session is a card. Line 1 start and duration; line 2 client;
+   line 3 router, band and changes. */
+@container tmsessions (max-width: 700px) {
+  .tm-session { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; padding: 8px 10px; }
+  .tm-session__client { flex: 1 1 100%; }
 }
 
 @media (max-width: 600px) {

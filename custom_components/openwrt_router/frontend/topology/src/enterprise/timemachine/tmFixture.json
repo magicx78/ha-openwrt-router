@@ -34,7 +34,14 @@
       "id": "inc-1",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan_down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_d11287620d5851c9",
@@ -55,7 +62,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_f179c3c59ddab343",
@@ -76,7 +90,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.up",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_63266eeb30470ab8",
@@ -97,7 +118,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_82a95bd3136d2c0e",
@@ -118,7 +146,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.up",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_83f80868f6a7a771",
@@ -139,7 +174,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_c25b8d5c6c3caa4a",
@@ -165,7 +207,14 @@
       "id": "inc-1",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan_down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_0fe69e867c642243",
@@ -186,7 +235,14 @@
       "id": "sec_30b1c9a2da783d8f",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "incident_opened",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_1bffe31d38070b4c",
@@ -212,7 +268,42 @@
       "id": "evt_0000000000000000000000000000000b",
       "version_id": "bkp_00000000000000000000000000000007"
      },
-     "derived": false
+     "derived": false,
+     "code": "configuration.drift_detected",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_2f351df69136b8a2",
+     "ts": 1795003501.0,
+     "source": "tm_index",
+     "kind": "tm_started",
+     "group": "time_machine",
+     "severity": "info",
+     "router_id": null,
+     "router_name": null,
+     "fleet": true,
+     "title_key": "tm_index.tm_started",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m1",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "first_start",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_3af7933a663196ab",
@@ -233,7 +324,14 @@
       "id": "evt_00000000000000000000000000000012",
       "version_id": "bkp_00000000000000000000000000000011"
      },
-     "derived": false
+     "derived": false,
+     "code": "configuration.backup_created",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_4bbbf0bebb0a9c24",
@@ -254,7 +352,14 @@
       "id": "evt_0000000000000000000000000000000f",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "security.authorization_granted",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_4eeda24523159dd9",
@@ -275,7 +380,14 @@
       "id": "drift_242f0429fddcdfed",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "drift",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_6808677733657618",
@@ -296,7 +408,14 @@
       "id": "bkp_00000000000000000000000000000011",
       "version_id": "bkp_00000000000000000000000000000011"
      },
-     "derived": false
+     "derived": false,
+     "code": "drift.ok",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_6bf747759baa2656",
@@ -317,7 +436,14 @@
       "id": "evt_00000000000000000000000000000010",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "security.authorization_consumed",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_b8efd31c0c419c35",
@@ -338,7 +464,14 @@
       "id": "evt_00000000000000000000000000000014",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "security_center.vlan_segmentation_drift",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_40a0bd74a2e26cad",
@@ -361,7 +494,14 @@
       "id": "evt_00000000000000000000000000000009",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "router.capabilities_changed",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_56121c514881b083",
@@ -382,7 +522,14 @@
       "id": "evt_00000000000000000000000000000008",
       "version_id": "bkp_00000000000000000000000000000007"
      },
-     "derived": false
+     "derived": false,
+     "code": "configuration.backup_created",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_819d1367c5ecbd65",
@@ -403,7 +550,14 @@
       "id": "bkp_00000000000000000000000000000007",
       "version_id": "bkp_00000000000000000000000000000007"
      },
-     "derived": false
+     "derived": false,
+     "code": "manual.ok",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_9bf906d558de7904",
@@ -424,7 +578,14 @@
       "id": "evt_00000000000000000000000000000005",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "security.authorization_granted",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_c494760d98df3f2c",
@@ -445,7 +606,14 @@
       "id": "evt_00000000000000000000000000000006",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "security.authorization_consumed",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     }
    ],
    "sources": [
@@ -456,7 +624,8 @@
      "count": 9,
      "oldest": 1795003200.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "config_versions",
@@ -465,7 +634,8 @@
      "count": 2,
      "oldest": 1795003200.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_events",
@@ -474,7 +644,8 @@
      "count": 5,
      "oldest": 1795003561.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_incidents",
@@ -483,7 +654,8 @@
      "count": 2,
      "oldest": 1795003561.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "security_timeline",
@@ -492,7 +664,38 @@
      "count": 2,
      "oldest": 1795003501.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_index",
+     "state": "ok",
+     "reason": null,
+     "count": 1,
+     "oldest": 1795003501.0,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "off",
+     "reason": "clients_off",
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
     }
    ],
    "omitted_client_marks": 1,
@@ -535,7 +738,14 @@
       "id": "inc-1",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan_down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_d11287620d5851c9",
@@ -556,7 +766,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_f179c3c59ddab343",
@@ -577,7 +794,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.up",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_63266eeb30470ab8",
@@ -598,7 +822,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_82a95bd3136d2c0e",
@@ -619,7 +850,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.up",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     }
    ],
    "sources": [
@@ -630,7 +868,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "config_versions",
@@ -639,7 +878,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_events",
@@ -648,7 +888,8 @@
      "count": 4,
      "oldest": 1795003621.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_incidents",
@@ -657,7 +898,8 @@
      "count": 1,
      "oldest": 1795003801.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "security_timeline",
@@ -666,7 +908,38 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_index",
+     "state": "ok",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "off",
+     "reason": "clients_off",
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
     }
    ],
    "omitted_client_marks": 1,
@@ -704,7 +977,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_c25b8d5c6c3caa4a",
@@ -730,7 +1010,14 @@
       "id": "inc-1",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan_down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     }
    ],
    "sources": [
@@ -741,7 +1028,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "config_versions",
@@ -750,7 +1038,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_events",
@@ -759,7 +1048,8 @@
      "count": 1,
      "oldest": 1795003561.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_incidents",
@@ -768,7 +1058,8 @@
      "count": 1,
      "oldest": 1795003561.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "security_timeline",
@@ -777,7 +1068,38 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_index",
+     "state": "ok",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "off",
+     "reason": "clients_off",
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
     }
    ],
    "omitted_client_marks": 0,
@@ -804,7 +1126,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "config_versions",
@@ -813,7 +1136,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_events",
@@ -822,7 +1146,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_incidents",
@@ -831,7 +1156,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "security_timeline",
@@ -840,7 +1166,38 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_index",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "off",
+     "reason": "clients_off",
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
     }
    ],
    "omitted_client_marks": 0,
@@ -883,7 +1240,14 @@
       "id": "inc-1",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan_down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_d11287620d5851c9",
@@ -904,7 +1268,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_f179c3c59ddab343",
@@ -925,7 +1296,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.up",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_63266eeb30470ab8",
@@ -946,7 +1324,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_82a95bd3136d2c0e",
@@ -967,7 +1352,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.up",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_83f80868f6a7a771",
@@ -988,7 +1380,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_c25b8d5c6c3caa4a",
@@ -1014,7 +1413,14 @@
       "id": "inc-1",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan_down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_1bffe31d38070b4c",
@@ -1040,7 +1446,42 @@
       "id": "evt_0000000000000000000000000000000b",
       "version_id": "bkp_00000000000000000000000000000007"
      },
-     "derived": false
+     "derived": false,
+     "code": "configuration.drift_detected",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_2f351df69136b8a2",
+     "ts": 1795003501.0,
+     "source": "tm_index",
+     "kind": "tm_started",
+     "group": "time_machine",
+     "severity": "info",
+     "router_id": null,
+     "router_name": null,
+     "fleet": true,
+     "title_key": "tm_index.tm_started",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m1",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "first_start",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_3af7933a663196ab",
@@ -1061,7 +1502,14 @@
       "id": "evt_00000000000000000000000000000012",
       "version_id": "bkp_00000000000000000000000000000011"
      },
-     "derived": false
+     "derived": false,
+     "code": "configuration.backup_created",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_4bbbf0bebb0a9c24",
@@ -1082,7 +1530,14 @@
       "id": "evt_0000000000000000000000000000000f",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "security.authorization_granted",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_6808677733657618",
@@ -1103,7 +1558,14 @@
       "id": "bkp_00000000000000000000000000000011",
       "version_id": "bkp_00000000000000000000000000000011"
      },
-     "derived": false
+     "derived": false,
+     "code": "drift.ok",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_6bf747759baa2656",
@@ -1124,7 +1586,14 @@
       "id": "evt_00000000000000000000000000000010",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "security.authorization_consumed",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_b8efd31c0c419c35",
@@ -1145,7 +1614,14 @@
       "id": "evt_00000000000000000000000000000014",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "security_center.vlan_segmentation_drift",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_40a0bd74a2e26cad",
@@ -1168,7 +1644,14 @@
       "id": "evt_00000000000000000000000000000009",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "router.capabilities_changed",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_56121c514881b083",
@@ -1189,7 +1672,14 @@
       "id": "evt_00000000000000000000000000000008",
       "version_id": "bkp_00000000000000000000000000000007"
      },
-     "derived": false
+     "derived": false,
+     "code": "configuration.backup_created",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_819d1367c5ecbd65",
@@ -1210,7 +1700,14 @@
       "id": "bkp_00000000000000000000000000000007",
       "version_id": "bkp_00000000000000000000000000000007"
      },
-     "derived": false
+     "derived": false,
+     "code": "manual.ok",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_9bf906d558de7904",
@@ -1231,7 +1728,14 @@
       "id": "evt_00000000000000000000000000000005",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "security.authorization_granted",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_c494760d98df3f2c",
@@ -1252,7 +1756,14 @@
       "id": "evt_00000000000000000000000000000006",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "security.authorization_consumed",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     }
    ],
    "sources": [
@@ -1263,7 +1774,8 @@
      "count": 9,
      "oldest": 1795003200.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "config_versions",
@@ -1272,7 +1784,8 @@
      "count": 2,
      "oldest": 1795003200.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_events",
@@ -1281,7 +1794,8 @@
      "count": 5,
      "oldest": 1795003561.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_incidents",
@@ -1290,7 +1804,8 @@
      "count": 2,
      "oldest": 1795003561.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "security_timeline",
@@ -1299,7 +1814,38 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_index",
+     "state": "ok",
+     "reason": null,
+     "count": 1,
+     "oldest": 1795003501.0,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "off",
+     "reason": "clients_off",
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
     }
    ],
    "omitted_client_marks": 1,
@@ -1326,7 +1872,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "config_versions",
@@ -1335,7 +1882,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_events",
@@ -1344,7 +1892,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_incidents",
@@ -1353,7 +1902,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "security_timeline",
@@ -1362,7 +1912,38 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_index",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "off",
+     "reason": "clients_off",
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
     }
    ],
    "omitted_client_marks": 0,
@@ -1416,7 +1997,14 @@
       "id": "inc-1",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan_down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_d11287620d5851c9",
@@ -1437,7 +2025,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_f179c3c59ddab343",
@@ -1458,7 +2053,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.up",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_63266eeb30470ab8",
@@ -1479,7 +2081,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_82a95bd3136d2c0e",
@@ -1500,7 +2109,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.up",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_83f80868f6a7a771",
@@ -1521,7 +2137,14 @@
       "id": null,
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan.down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_c25b8d5c6c3caa4a",
@@ -1547,7 +2170,14 @@
       "id": "inc-1",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "wan_down",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     },
     {
      "id": "tmm_0fe69e867c642243",
@@ -1568,7 +2198,14 @@
       "id": "sec_30b1c9a2da783d8f",
       "version_id": null
      },
-     "derived": false
+     "derived": false,
+     "code": "incident_opened",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
     }
    ],
    "sources": [
@@ -1579,7 +2216,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "config_versions",
@@ -1588,7 +2226,8 @@
      "count": 0,
      "oldest": null,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_events",
@@ -1597,7 +2236,8 @@
      "count": 5,
      "oldest": 1795003561.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "ni_incidents",
@@ -1606,7 +2246,8 @@
      "count": 2,
      "oldest": 1795003561.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
     },
     {
      "id": "security_timeline",
@@ -1615,7 +2256,38 @@
      "count": 1,
      "oldest": 1795003501.0,
      "truncated": false,
-     "cut": null
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_index",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "off",
+     "reason": "admin_only",
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "off",
+     "reason": "admin_only",
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
     }
    ],
    "omitted_client_marks": 0,

@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import {
   CUT_TEXT, DEFAULT_FILTERS, LIST_INIT, SOURCE_IDS, TAB_ID, TAB_ORDER, TAB_TITLE, TmApiError,
   adminOnlySources, countText, dayGroups, dayLabel, dedupe, errorInfo, filterKey, firstQuery, groupsOf, isFallbackTitle,
-  isoUtc, listReducer, mergeMarks, olderQuery, omittedText, paramsText, parseTimeline, queryString, rememberRouters,
+  clientsOff, isoUtc, listReducer, mergeMarks, olderQuery, omittedText, paramsText, parseTimeline, queryString, rememberRouters,
   routerOptions, routerText, severityView, shouldPoll, sourcePill, standText, timeText, titleOf, visibleMarks,
 } from './tmLogic.ts';
 import { TITLE_TEXT } from './tmTexts.ts';
@@ -42,7 +42,7 @@ test('parser keeps the answer, newest first, ties by id', () => {
   assert.equal(t.marks.length, body('admin').marks.length);
   assert.deepEqual(t.marks.map(m => m.id), body('admin').marks.map(m => m.id));
   assert.equal(t.omittedClientMarks, 1);
-  assert.equal(t.sources.length, 5);
+  assert.equal(t.sources.length, 8); // five of Phase A, three of the own index (1.51.0)
   for (let i = 1; i < t.marks.length; i++) {
     const [a, b] = [t.marks[i - 1], t.marks[i]];
     assert.ok(a.ts > b.ts || (a.ts === b.ts && a.id < b.id));
@@ -88,11 +88,11 @@ test('first query: both ends of the window, all sources as default', () => {
 test('source, severity and router reach the query; sources hidden for the user are kept', () => {
   const rid = 'rtr_' + 'a'.repeat(32);
   const q = firstQuery({ window: '1h', sourcesOff: ['ni_events', 'core_audit'], severity: 'warning', routerId: rid }, NOW_MS, ['core_audit']);
-  assert.deepEqual(q.sources, ['core_audit', 'config_versions', 'ni_incidents', 'security_timeline']);
+  assert.deepEqual(q.sources, ['core_audit', 'config_versions', 'ni_incidents', 'security_timeline', 'tm_index', 'tm_refs', 'tm_clients']);
   assert.equal(q.minSeverity, 'warning');
   assert.equal(
     queryString(q),
-    `from=${q.from}&until=${q.until}&source=core_audit%2Cconfig_versions%2Cni_incidents%2Csecurity_timeline&router_id=${rid}&min_severity=warning`,
+    `from=${q.from}&until=${q.until}&source=core_audit%2Cconfig_versions%2Cni_incidents%2Csecurity_timeline%2Ctm_index%2Ctm_refs%2Ctm_clients&router_id=${rid}&min_severity=warning`,
   );
   // an invalid router id is never sent
   assert.equal(firstQuery({ ...DEFAULT_FILTERS, routerId: '192.0.2.1' }, NOW_MS).routerId, null);
@@ -100,8 +100,8 @@ test('source, severity and router reach the query; sources hidden for the user a
 
 test('no selectable source left: no request', () => {
   assert.equal(firstQuery({ ...DEFAULT_FILTERS, sourcesOff: [...SOURCE_IDS] }, NOW_MS), null);
-  const userOff = ['core_audit', 'config_versions'];
-  assert.equal(firstQuery({ ...DEFAULT_FILTERS, sourcesOff: ['ni_events', 'ni_incidents', 'security_timeline'] }, NOW_MS, userOff), null);
+  const userOff = ['core_audit', 'config_versions', 'tm_refs', 'tm_clients'];
+  assert.equal(firstQuery({ ...DEFAULT_FILTERS, sourcesOff: ['ni_events', 'ni_incidents', 'security_timeline', 'tm_index'] }, NOW_MS, userOff), null);
 });
 
 test('older page: same filters and from, until = next_until', () => {
@@ -246,7 +246,7 @@ test('polling: at most every 60 s, only while visible, never while off', () => {
 test('the group chips filter the loaded marks only, with a counter', () => {
   const marks = T('admin').marks;
   const groups = groupsOf(marks);
-  assert.deepEqual(groups, ['infrastructure', 'configuration', 'disruption', 'security', 'administration']);
+  assert.deepEqual(groups, ['infrastructure', 'configuration', 'disruption', 'security', 'administration', 'time_machine']);
   const shown = visibleMarks(marks, ['configuration']);
   assert.ok(shown.length < marks.length && shown.every(m => m.group !== 'configuration'));
   assert.equal(countText(shown.length, marks.length), `${shown.length} von ${marks.length} Marken`);
@@ -311,8 +311,12 @@ test('severity: dot and word; info never in a warning colour', () => {
 
 test('source pills say their state in words and are never green', () => {
   const pills = name => T(name).sources.map(sourcePill);
-  for (const p of pills('admin')) assert.match(p.text, /^\d+ Marken?$/);
-  assert.ok(pills('empty').every(p => p.text === 'leer' && p.tone === 'muted'));
+  for (const p of pills('admin')) {
+    if (p.name === 'Verweise') assert.equal(p.text, 'leer'); // no audit entry since the start
+    else if (p.name === 'Client-Verläufe') assert.equal(p.text, 'aus · in den Optionen einschalten');
+    else assert.match(p.text, /^\d+ Marken?$/);
+  }
+  assert.ok(pills('empty').filter(p => p.name !== 'Client-Verläufe').every(p => p.text === 'leer' && p.tone === 'muted'));
   const sec = pills('partial').find(p => p.name === 'Security Center');
   assert.deepEqual(sec, { name: 'Security Center', text: 'Quelle nicht lesbar · Fehler', tone: 'warn' });
   const audit = pills('user').find(p => p.name === 'Audit');
@@ -326,13 +330,16 @@ test('source pills say their state in words and are never green', () => {
 });
 
 test('sources the server reports as admin_only are not selectable', () => {
-  assert.deepEqual(adminOnlySources(T('user')), ['core_audit', 'config_versions']);
+  assert.deepEqual(adminOnlySources(T('user')), ['core_audit', 'config_versions', 'tm_refs', 'tm_clients']);
   assert.deepEqual(adminOnlySources(T('admin')), []);
 });
 
 test('hint about left-out client events only when there are some', () => {
-  assert.equal(omittedText(T('admin').omittedClientMarks),
-    '1 client-bezogenes Ereignis ist ausgeblendet. Client-Verläufe kommen mit einem eigenen Schalter in einer späteren Version.');
+  // 1.51.0: no "later version" any more; with the client switch off, how to switch it on
+  assert.equal(omittedText(T('admin').omittedClientMarks), '1 client-bezogenes Ereignis ist ausgeblendet.');
+  assert.ok(clientsOff(T('admin')));
+  assert.equal(omittedText(T('admin').omittedClientMarks, clientsOff(T('admin'))),
+    '1 client-bezogenes Ereignis ist ausgeblendet. Client-Verläufe lassen sich in den Optionen einschalten.');
   assert.match(omittedText(3), /^3 client-bezogene Ereignisse sind ausgeblendet\./);
   assert.equal(omittedText(T('user').omittedClientMarks), null);
   assert.equal(omittedText(0), null);

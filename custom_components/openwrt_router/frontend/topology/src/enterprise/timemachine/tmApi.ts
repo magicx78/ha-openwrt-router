@@ -1,5 +1,6 @@
 /**
- * tmApi.ts — client of GET /api/openwrt_router/enterprise/timemachine/timeline.
+ * tmApi.ts — client of GET /api/openwrt_router/enterprise/timemachine/timeline
+ * and …/sessions (client sessions, administrators only; 403 for others).
  *
  * Same pattern as trafficApi.ts: Bearer fetch on the same origin (HA's token
  * from hass.auth); a 401 is retried once after a token refresh; without a
@@ -8,11 +9,11 @@
  *
  * Errors become TmApiError(status, code, details): the server's `message`
  * is never kept. The query string is built only from checked values
- * (tmLogic.queryString).
+ * (tmLogic.queryString, tmLogic.sessionQueryString).
  */
 
-import { TmApiError, parseTimeline, queryString } from './tmLogic.ts';
-import type { TimelineQuery, TmApi, TmHass } from './tmTypes';
+import { TmApiError, parseSessions, parseTimeline, queryString, sessionQueryString } from './tmLogic.ts';
+import type { SessionQuery, TimelineQuery, TmApi, TmHass } from './tmTypes';
 
 export const TM_BASE = '/api/openwrt_router/enterprise/timemachine';
 const CALL_API_BASE = 'openwrt_router/enterprise/timemachine';
@@ -95,5 +96,6 @@ export function createTmApi(getHass: () => TmHass | null, deps: TmApiDeps = {}):
 
   return {
     timeline: async (q: TimelineQuery) => parseTimeline(await get(`timeline?${queryString(q)}`)),
+    sessions: async (q: SessionQuery) => parseSessions(await get(`sessions?${sessionQueryString(q)}`)),
   };
 }

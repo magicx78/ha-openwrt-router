@@ -1,8 +1,9 @@
 // Render tests of the "Zeitreise" tab (node:test). The views are bundled
 // once with esbuild (Vite's own bundler, already in node_modules; no new
 // dependency) and rendered with react-dom/server. The answers are real route
-// answers from tmFixture.json (tests/test_tm_panel_fixture_v1500.py,
-// invented values only).
+// answers from tmFixture.json (tests/test_tm_panel_fixture_v1500.py) and
+// tmFixtureClients.json (tests/test_tm_panel_fixture_v1510.py), invented
+// values only.
 process.env.TZ = 'Europe/Berlin';
 
 import { test, before } from 'node:test';
@@ -18,6 +19,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../../..');
 const outFile = join(root, 'node_modules/.cache/tm-render-test/bundle.mjs');
 const F = JSON.parse(readFileSync(join(here, 'tmFixture.json'), 'utf8'));
+// Phases B/C from one world of three routers (tests/test_tm_panel_fixture_v1510.py)
+const FC = JSON.parse(readFileSync(join(here, 'tmFixtureClients.json'), 'utf8'));
 
 const inlineCss = {
   name: 'inline-css',
@@ -34,7 +37,7 @@ before(async () => {
     stdin: {
       contents: [
         "export * from './tmLogic.ts';",
-        "export { TimeMachineScreen, FilterBar, TimeMachineView } from './TimeMachineView';",
+        "export { TimeMachineScreen, FilterBar, TimeMachineView, SessionsScreen, ViewSwitch } from './TimeMachineView';",
         "export { getEnterpriseTabs } from '../registry';",
         "export { bindConfigHass } from '../config/register';",
         "export { bindSecurityHass } from '../security/register';",
@@ -296,4 +299,192 @@ test('the container renders its first-load state without touching the network', 
   const never = { timeline: () => new Promise(() => {}) };
   const html = renderToStaticMarkup(h(M.TimeMachineView, { api: never }));
   assert.ok(text(html).includes(M.LOADING_TEXT));
+});
+
+// ── 1.51.0: own history, intervals, clients, sessions ───────────────────
+
+const FC_NOW = FC.timeline.body.generated_at * 1000;
+
+function loadedC(name, { pages = [] } = {}) {
+  let s = M.listReducer(M.LIST_INIT, { type: 'start', seq: 1, more: false });
+  s = M.listReducer(s, { type: 'first', gen: 0, seq: 1, answer: M.parseTimeline(FC[name].body) });
+  pages.forEach((p, i) => {
+    s = M.listReducer(s, { type: 'start', seq: i + 2, more: true });
+    s = M.listReducer(s, { type: 'older', gen: 0, seq: i + 2, answer: M.parseTimeline(FC[p].body) });
+  });
+  return s;
+}
+function screenC(state, extra = {}) {
+  return renderToStaticMarkup(h(M.TimeMachineScreen, {
+    state, filters: M.DEFAULT_FILTERS, hidden: [], routers: M.rememberRouters({}, state.marks), nowMs: FC_NOW,
+    onFilters: noop, onToggleGroup: noop, onRefresh: noop, onMore: noop, onDismiss: noop, ...extra,
+  })).replace(/<style>[\s\S]*?<\/style>/g, '');
+}
+
+function apiError(name) {
+  const { status, body } = FC[name];
+  return new M.TmApiError(status, body.code, body.details ?? {});
+}
+function sessionsState(name, { pages = [], error = null } = {}) {
+  let s = M.sessionReducer(M.SESSION_LIST_INIT, { type: 'start', seq: 1, more: false });
+  if (error) return M.sessionReducer(s, { type: 'fail', gen: 0, seq: 1, more: false, error });
+  s = M.sessionReducer(s, { type: 'first', gen: 0, seq: 1, answer: M.parseSessions(FC[name].body) });
+  pages.forEach((p, i) => {
+    s = M.sessionReducer(s, { type: 'start', seq: i + 2, more: true });
+    s = M.sessionReducer(s, { type: 'older', gen: 0, seq: i + 2, answer: M.parseSessions(FC[p].body) });
+  });
+  return s;
+}
+function sessions(state, extra = {}) {
+  return renderToStaticMarkup(h(M.SessionsScreen, {
+    state, filters: M.DEFAULT_SESSION_FILTERS, routers: M.rememberSessionRouters({}, state.sessions),
+    clients: M.rememberClients({}, state.sessions), nowMs: FC_NOW,
+    onFilters: noop, onRefresh: noop, onMore: noop, onDismiss: noop, ...extra,
+  })).replace(/<style>[\s\S]*?<\/style>/g, '');
+}
+
+test('own history: titles, durations, client labels and the roaming text', () => {
+  const html = screenC(loadedC('timeline'));
+  const t = text(html);
+  for (const w of ['Eigener Verlauf: 3', 'Verweise: leer', 'Client-Verläufe: 5', 'Router wieder erreichbar', 'Router nicht erreichbar',
+    'Dauer 5 min', 'Gewechselt', 'von Router 1 nach Router 2', 'Client ·a1ce4d', 'Client tablet-kueche', 'Verbunden', 'Getrennt',
+    'per Zeitablauf erkannt', '1 Wechsel', 'seit 09:01, noch offen', 'Eigener Verlauf', 'Clients']) assert.ok(t.includes(w), w);
+  // a pseudonym is never shown whole, and nothing private is generated
+  assert.ok(!t.includes('tmc_f3e24c9bafa1ce4d'));
+  assert.doesNotMatch(t, PRIVATE);
+  assert.ok(!html.includes('dangerouslySetInnerHTML'));
+  // no fallback title for any mark of the own index or the client histories
+  for (const m of M.parseTimeline(FC.timeline.body).marks) assert.ok(!M.titleOf(m).startsWith('Ereignis'), m.code);
+});
+
+test('marks that began before the window stand in their own block on top, with date and time', () => {
+  const state = loadedC('timeline');
+  const html = screenC(state);
+  const t = text(html);
+  const at = t.indexOf(M.SPANS_TITLE);
+  assert.ok(at > 0);
+  assert.ok(at < t.indexOf('Heute'), 'block above the days');
+  const block = /<section class="tm-day tm-spans"[\s\S]*?<\/section>/.exec(html)[0];
+  assert.equal(count(block, 'class="tm-mark"'), 2);
+  const spans = state.marks.filter(m => m.spansIn);
+  assert.equal(spans.length, 2);
+  for (const m of spans) assert.ok(text(block).includes(M.startText(m.ts)), m.id);
+  assert.match(text(block), /seit \d\d\.\d\d\., \d\d:\d\d, noch offen|seit \d\d:\d\d, noch offen/);
+  // every mark once: 9 in the answer, 2 in the block, 6 below
+  assert.equal(count(html, 'class="tm-mark"'), state.marks.length);
+});
+
+test('a non-admin answer: references and client histories locked, no block of clients', () => {
+  const html = screenC(loadedC('timeline_user'));
+  for (const name of ['Verweise', 'Client-Verläufe']) {
+    assert.match(html, new RegExp(`disabled=""[^>]*>${name}<span class="tm-chip__note"> · nur für Administratoren`), name);
+  }
+  assert.ok(!text(html).includes('Client ·'));
+});
+
+test('client histories off: the pill says how to switch them on', () => {
+  const t = text(screenC(loadedC('timeline_clients_off')));
+  assert.ok(t.includes('Client-Verläufe: aus · in den Optionen einschalten'));
+  assert.ok(!t.includes('späteren Version'));
+});
+
+test('doubles: the pill says "n doppelt" and its title says what happened', () => {
+  const body = structuredClone(FC.timeline.body);
+  body.sources.find(s => s.id === 'tm_index').duplicates = 2;
+  const state = M.listReducer(M.listReducer(M.LIST_INIT, { type: 'start', seq: 1, more: false }),
+    { type: 'first', gen: 0, seq: 1, answer: M.parseTimeline(body) });
+  const html = screenC(state);
+  assert.match(html, /title="2 doppelt ausgeblendet"[^>]*><span class="tm-pill__name">Eigener Verlauf<\/span>: 3 Marken · 2 doppelt/);
+});
+
+test('after "Ältere laden" the sources heading says "(neueste Seite)"', () => {
+  assert.ok(!text(screenC(loadedC('timeline_page1'))).includes(M.SOURCES_NEWEST));
+  const t = text(screenC(loadedC('timeline_page1', { pages: ['timeline'] })));
+  assert.ok(t.includes(`${M.SOURCES_TITLE} ${M.SOURCES_NEWEST}`));
+});
+
+test('a restarted list shows the notice with a button to dismiss it', () => {
+  const state = { ...loadedC('timeline'), restarted: true };
+  const html = screenC(state);
+  assert.ok(text(html).includes(M.RESTART_TEXT));
+  assert.match(html, /tm-restart[\s\S]*?>Ausblenden<\/button>/);
+  assert.ok(!text(screenC(M.listReducer(state, { type: 'dismiss' }))).includes(M.RESTART_TEXT));
+});
+
+test('the view switch: administrators see both chips, everyone else none', () => {
+  const api = { timeline: () => new Promise(noop), sessions: () => new Promise(noop) };
+  const admin = renderToStaticMarkup(h(M.TimeMachineView, { api, isAdmin: true }));
+  assert.match(admin, /aria-pressed="true"[^>]*>Zeitleiste<\/button>/);
+  assert.match(admin, /aria-pressed="false"[^>]*>Client-Sitzungen<\/button>/);
+  const bare = props => renderToStaticMarkup(h(M.TimeMachineView, props)).replace(/<style>[\s\S]*?<\/style>/g, '');
+  assert.ok(bare({ api, isAdmin: true }).includes('tm-views'));
+  for (const html of [bare({ api, isAdmin: false }), bare({ api })]) {
+    assert.ok(!html.includes('Client-Sitzungen'));
+    assert.ok(!html.includes('tm-views'));
+  }
+});
+
+test('sessions: days, start, duration, client, router, band and changes', () => {
+  const state = sessionsState('sessions');
+  const html = sessions(state, { viewSwitch: h(M.ViewSwitch, { view: 'sessions', onView: noop }) });
+  const t = text(html);
+  assert.equal(count(html, 'class="tm-session"'), 3);
+  for (const w of ['Zeitleiste', 'Client-Sitzungen', 'Zeitfenster', 'Alle Router', 'Alle Clients', 'Client ·a1ce4d', 'Client tablet-kueche',
+    'Router 1', 'Router 2', '5 GHz', 'Dauer 1 min', 'Dauer 3 min', 'noch verbunden', '1 Wechsel', M.RECORDING_ON, 'Heute']) assert.ok(t.includes(w), w);
+  assert.match(html, /aria-pressed="true"[^>]*>Client-Sitzungen<\/button>/);
+  // newest start first
+  const starts = [...html.matchAll(/class="tm-session__time" dateTime="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(starts, [...starts].sort().reverse());
+  assert.ok(!t.includes('tmc_'));
+  assert.doesNotMatch(t, PRIVATE);
+  assert.ok(!t.includes('Ältere laden'));
+  // the client select names each client by its label only
+  assert.match(html, /<option value="tmc_11154ea545af3e29">Client tablet-kueche<\/option>/);
+});
+
+test('sessions: "Ältere laden" while next_until is set; a cut without it says so', () => {
+  const first = sessionsState('sessions_page1');
+  assert.ok(text(sessions(first)).includes('Ältere laden'));
+  const both = sessionsState('sessions_page1', { pages: ['sessions_page2'] });
+  assert.equal(count(sessions(both), 'class="tm-session"'), 3);
+  assert.ok(!text(sessions(both)).includes('Ältere laden'));
+  const cut = { ...both, truncated: true };
+  assert.ok(text(sessions(cut)).includes(M.SESSIONS_CUT_TEXT));
+});
+
+test('sessions: off, client histories off, unavailable and empty', () => {
+  const off = text(sessions(sessionsState('sessions_off')));
+  assert.ok(off.includes(M.OFF_TITLE) && off.includes(M.OFF_HOW));
+  const coff = sessions(sessionsState('sessions_clients_off'));
+  for (const w of [M.CLIENTS_OFF_TITLE, M.CLIENTS_OFF_HOW, M.CLIENTS_PRIVACY]) assert.ok(text(coff).includes(w), w);
+  assert.ok(!coff.includes('tm-filters'));
+  const un = text(sessions(sessionsState('sessions_unavailable')));
+  assert.ok(un.includes(M.UNAVAILABLE_TITLE));
+  assert.ok(un.includes('Grund:'));
+  assert.ok(!un.includes('not_running'));
+  const empty = text(sessions(sessionsState('sessions_empty')));
+  assert.ok(empty.includes(M.SESSIONS_EMPTY_TEXT));
+  assert.ok(!/[✓✔]/.test(empty));
+});
+
+test('sessions: 403, 410, 5xx and 400 in plain words, never the server text', () => {
+  const forbidden = text(sessions(sessionsState(null, { error: apiError('sessions_user') })));
+  assert.ok(forbidden.includes('Keine Berechtigung für die Client-Sitzungen'));
+  assert.ok(!forbidden.includes('administrators only'));
+  const bad = text(sessions(sessionsState(null, { error: apiError('sessions_bad_request') })));
+  assert.ok(bad.includes('Ungültige Filterkombination. Feld: Client.'));
+  const gone = text(sessions(sessionsState(null, { error: new M.TmApiError(410, 'gone') })));
+  assert.ok(gone.includes('Die Integration wurde entladen.'));
+  const failed = sessions(sessionsState(null, { error: new M.TmApiError(503, 'x') }));
+  assert.ok(text(failed).includes(M.SESSIONS_FAILED_TEXT));
+  assert.ok(failed.includes('Erneut versuchen'));
+});
+
+test('sessions: the first load is a spinner, a running reload keeps the list', () => {
+  const start = M.sessionReducer(M.SESSION_LIST_INIT, { type: 'start', seq: 1, more: false });
+  assert.ok(text(sessions(start)).includes(M.SESSIONS_LOADING_TEXT));
+  const again = M.sessionReducer(sessionsState('sessions'), { type: 'start', seq: 5, more: false });
+  const html = sessions(again);
+  assert.equal(count(html, 'class="tm-session"'), 3);
+  assert.ok(text(html).includes(M.SESSIONS_LOADING_TEXT));
 });
