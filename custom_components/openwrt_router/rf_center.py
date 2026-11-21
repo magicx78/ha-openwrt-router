@@ -80,6 +80,7 @@ from .rf_events import (
 )
 from .rf_guard import POLL_READ_MIN_INTERVAL_S, register_rf_actions, rf_policy_denial
 from .rf_identity import RadioRef, require_router_id
+from .rf_incidents import RfIncidentFeed
 from .rf_models import CapabilityState
 from .rf_privacy import client_ref, mask_rf_output, rf_key_request
 from .rf_recommend import Recommendation
@@ -268,6 +269,8 @@ class RfCenter:
         )
         self.read: Callable[..., Any] = api_module.async_rf_read
         self.auto_bind = True
+        # Part 2: measured RF findings as Network Intelligence events.
+        self.incident_feed = RfIncidentFeed(self)
 
     # -- status ------------------------------------------------------------------------
 
@@ -372,6 +375,7 @@ class RfCenter:
         if self._bind_task is not None and not self._bind_task.done():
             self._bind_task.cancel()
         self._unbind_core()
+        self.stage("incident feed", self.incident_feed.detach)
 
     async def async_wait_rounds(self) -> None:
         """Wait for the running RF rounds (tests and diagnostics)."""
@@ -608,6 +612,7 @@ class RfCenter:
             return
         self.counters["polls"] += 1
         self._maybe_bind()
+        self.stage("incident feed", self.incident_feed.attach, self.hass)
         data = getattr(coordinator, "data", None)
         if data is None:
             return

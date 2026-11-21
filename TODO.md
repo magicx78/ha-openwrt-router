@@ -191,6 +191,13 @@ B1–B9 auf `claude/client-stability-f9a22b`. Nutzerdoku: `docs/client-stability
 - [ ] **`infra` je Radio statt je Router** bei `wifi_radio_change`: heute
       markiert ein Kanalwechsel 300 s lang den ganzen Router. Braucht in
       `client_history.py` eine `infra`-Zuordnung je Router und Radio.
+      1.48.0 Teil 2 (WiFi RF) hat das geprüft und NICHT gebaut (offene
+      Frage): Logzeilen kennen ihr Interface (Phy sauber), aber ein Client,
+      der nur aus der Liste verschwindet, kennt in `client_history` nur sein
+      Band, nicht die Phy; bei zwei Radios im selben Band ist Band→Phy nicht
+      eindeutig. Nur die Logzeilen zu verfeinern, würde denselben Abbruch je
+      nach Quelle verschieden einstufen. Dafür müsste `ClientObs` die Phy
+      mitführen.
 - [ ] **Gastclients früher entfernen** (gesamt online < 1 h, seit 7 d weg;
       private MACs ohne Wiederkehr nach 7 d) – geplant in 4.2, nicht gebaut;
       heute erst nach `retention_days` oder beim Kürzen.
