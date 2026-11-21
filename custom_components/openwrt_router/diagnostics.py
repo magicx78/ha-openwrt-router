@@ -137,6 +137,10 @@ async def async_get_config_entry_diagnostics(
         # Enterprise core: registry counts, this router's record (no MAC,
         # host or hostname) and its last audit entries; masked twice.
         "enterprise_core": _enterprise_core_summary(hass, entry.entry_id),
+        # --- configuration manager (plan 2026-11-18) ---------------------------
+        # State and counters only: no note, no user id, no configuration.
+        "config_manager": _config_manager_summary(hass, entry.entry_id),
+        # --- end configuration manager -----------------------------------------
         # TODO: include bandwidth statistics once the bandwidth sensor is implemented
         # TODO: include traffic statistics once implemented
     }
@@ -225,6 +229,71 @@ def _enterprise_core_summary(hass: HomeAssistant, entry_id: str) -> dict[str, An
         return {"loaded": False, "error": True}
 
 
+# --- configuration manager (plan 2026-11-18) -----------------------------------------
+
+
+def _iso_or_none(value: Any) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else None
+
+
+def _config_manager_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any]:
+    """Backup state of this router; never fails the download.
+
+    Memory of the runtime only (no store read, no router call). Leaves out
+    notes, user ids, drift ids and every configuration value; masked with
+    the configuration manager's masker (core plus bridge names) and redacted
+    like the core summary.
+    """
+    try:
+        from .config_const import config_mask_for_output
+        from .config_manager import async_get_runtime
+
+        runtime = async_get_runtime(hass)
+        if runtime is None:
+            return {"loaded": False}
+        summary: dict[str, Any] = {
+            "loaded": True,
+            "provider_registered": runtime.provider_registered,
+            "provider_conflict": runtime.provider_conflict,
+            "stats": dict(runtime.stats),
+            "backup": None,
+        }
+        state = runtime.state_for_entry(entry_id)
+        if state is not None:
+            rid = state.router_id
+            drift = state.drift or {}
+            summary["backup"] = {
+                "enabled": runtime.enabled(rid),
+                "schedule_daily": runtime.schedule_daily(rid),
+                "drift_check": runtime.drift_check_enabled(rid),
+                "status": runtime.status(rid),
+                "error_class": runtime.error_class(rid),
+                "running": state.running,
+                "version_count": state.version_count,
+                "last_backup_at": _iso_or_none(state.last_backup_at),
+                "last_attempt_at": _iso_or_none(state.last_attempt_at),
+                "next_run_at": _iso_or_none(runtime.next_run_at(rid)),
+                "drift": {
+                    "state": drift.get("state"),
+                    "critical_count": drift.get("critical_count"),
+                    "unknown_count": drift.get("unknown_count"),
+                    "comparison": drift.get("comparison"),
+                    "checked_at": _iso_or_none(drift.get("checked_at")),
+                }
+                if drift
+                else None,
+            }
+        return _redact(config_mask_for_output(summary))
+    except Exception as err:  # noqa: BLE001 - the download must not fail
+        _LOGGER.debug(
+            "Configuration manager diagnostics failed: %s", type(err).__name__
+        )
+        return {"loaded": False, "error": True}
+
+
+# --- end configuration manager -------------------------------------------------------
+
+
 def _client_summary(clients: list[dict[str, Any]]) -> dict[str, Any]:
     """Reduce the client list to counts and signal aggregates.
 
@@ -295,3 +364,42 @@ def _is_sensitive_key(key: str) -> bool:
     """
     key_lower = key.lower()
     return any(sensitive in key_lower for sensitive in DIAGNOSTICS_REDACT_KEYS)
+
+
+# --- Security Center (release 1.46.0, part 2) ---
+# The fleet-wide center's counters as a last block ("security_center"):
+# counts, states and reasons only (no MAC, address, host name, user id or
+# key), masked by the core masker and redacted like the other blocks. The
+# function above stays as it is; a failure here never fails the download.
+from functools import wraps as _sec_wraps
+
+_async_get_config_entry_diagnostics_base = async_get_config_entry_diagnostics
+
+
+def _security_center_summary(hass: HomeAssistant) -> dict[str, Any]:
+    """Security Center counters; never fails the download."""
+    try:
+        from .core_masking import mask_for_output
+        from .security_center import async_get_security_center
+
+        center = async_get_security_center(hass)
+        if center is None:
+            return {"loaded": False}
+        return _redact(mask_for_output(center.diagnostics()))
+    except Exception as err:  # noqa: BLE001 - the download must not fail
+        _LOGGER.debug("Security Center diagnostics failed: %s", type(err).__name__)
+        return {"loaded": False, "error": True}
+
+
+@_sec_wraps(_async_get_config_entry_diagnostics_base)
+async def async_get_config_entry_diagnostics(
+    hass: HomeAssistant,
+    entry: OpenWrtConfigEntry,
+) -> dict[str, Any]:
+    """Diagnostics of the entry plus the Security Center block."""
+    diagnostics = await _async_get_config_entry_diagnostics_base(hass, entry)
+    diagnostics["security_center"] = _security_center_summary(hass)
+    return diagnostics
+
+
+# --- end Security Center

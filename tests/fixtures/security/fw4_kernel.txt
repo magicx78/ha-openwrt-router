@@ -1,0 +1,12 @@
+# fw4/nft kernel log lines (message part as stored by logd).
+# BELEGT (1.46.2): both structures were seen on a real router through the
+# syslog receiver; the receiver parsed them. Values here are invented
+# (RFC 5737 addresses, 02:00:00 MACs, interface and zone names, ports, ids);
+# only the field order, separators and empty fields follow the seen lines.
+# Line 1: chain "forward", second "LEN=" (UDP header length) after DPT.
+# Line 2: chain "in", empty "OUT=", ICMP with TYPE/CODE and no ports. The
+# fields between LEN= and PROTO= were elided in the hand-over ("..") and are
+# filled in kernel nf_log order (TOS PREC TTL ID [DF]); likewise the ICMP
+# "ID= SEQ=" tail. Variants not seen live: fw4_kernel_unbelegt.txt.
+kernel: [12345.678901] reject lab forward: IN=br-lan.7 OUT=br-lan.2 MAC=02:00:00:00:00:aa:02:00:00:00:00:30:08:00 SRC=192.0.2.80 DST=192.0.2.20 LEN=120 TOS=0x00 PREC=0x00 TTL=63 ID=4242 PROTO=UDP SPT=40000 DPT=1900 LEN=100
+kernel: [12346.000001] reject guest in: IN=br-lan.5 OUT= MAC=02:00:00:00:00:bb:02:00:00:00:00:40:08:00 SRC=192.0.2.50 DST=192.0.2.1 LEN=84 TOS=0x00 PREC=0x00 TTL=64 ID=1 DF PROTO=ICMP TYPE=8 CODE=0 ID=7 SEQ=1

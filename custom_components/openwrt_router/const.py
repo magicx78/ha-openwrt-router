@@ -703,3 +703,123 @@ CONFIG_PROVIDER_COLLECT_TIMEOUT_SECONDS = 180
 CONFIG_PROVIDER_CALL_TIMEOUT_SECONDS = 60
 CONFIG_PROVIDER_PROBE_TIMEOUT_SECONDS = 60
 CONFIG_PROVIDER_RESTORE_TIMEOUT_SECONDS = 300
+
+# ---------------------------------------------------------------------------
+# Configuration manager wiring (plan docs/plans/2026-11-18-config-manager-
+# integration.md, sections 2-7). The option config_backup_enabled itself
+# lives in core_models (OPTION_CONFIG_BACKUP_ENABLED, default OFF).
+# ---------------------------------------------------------------------------
+OPTION_CONFIG_BACKUP_SCHEDULE = "config_backup_schedule"
+CONFIG_BACKUP_SCHEDULE_DAILY = "daily"
+CONFIG_BACKUP_SCHEDULE_OFF = "off"
+CONFIG_BACKUP_SCHEDULES = (CONFIG_BACKUP_SCHEDULE_DAILY, CONFIG_BACKUP_SCHEDULE_OFF)
+DEFAULT_CONFIG_BACKUP_SCHEDULE = CONFIG_BACKUP_SCHEDULE_DAILY
+OPTION_CONFIG_BACKUP_TIME = "config_backup_time"  # local time, "HH:MM:SS"
+DEFAULT_CONFIG_BACKUP_TIME = "03:30:00"
+OPTION_CONFIG_DRIFT_CHECK = "config_drift_check"
+DEFAULT_CONFIG_DRIFT_CHECK = True
+# Runtime: one per HA instance, released after the last entry.
+CONFIG_MANAGER_MODULE = "config_manager"
+# Own event prefix: registering it is what entitles the module to its key
+# (contract §11.5); the module emits config_manager.backup_blocked below it.
+CONFIG_MANAGER_EVENT_PREFIX = f"{CONFIG_MANAGER_MODULE}."
+# Purpose of the module key that salts user pseudonyms in route answers.
+CONFIG_ROUTE_PSEUDONYM_PURPOSE = "route_user_pseudonym"
+DATA_CONFIG_MANAGER = f"{DOMAIN}_config_manager"
+DATA_CONFIG_VIEWS_BOUND = f"{DOMAIN}_config_views_bound"
+SIGNAL_CONFIG_MANAGER = f"{DOMAIN}_config_manager_update"
+# Schedule tick (memory only; router contact only when a run is due).
+CONFIG_MANAGER_TICK_SECONDS = 300
+# Daily run: per-router offset in [0, CONFIG_STAGGER_SECONDS) after the time.
+CONFIG_STAGGER_SECONDS = 3600
+# Release change: wait this long after the first sighting of a new release.
+CONFIG_RELEASE_CHANGE_DELAY_SECONDS = 300
+# Drift: at most this many automatic drift versions per router and day.
+CONFIG_DRIFT_VERSIONS_PER_DAY = 4
+# Versions read at start to rebuild the memory of the schedule.
+CONFIG_MANAGER_HISTORY_LIMIT = 20
+# Service create_config_backup.
+SERVICE_CREATE_CONFIG_BACKUP = "create_config_backup"
+CONFIG_NOTE_MAX_LENGTH = 200
+# Entities (unique_id f"{router_id}_{suffix}").
+SUFFIX_CONFIG_LAST_BACKUP = "config_last_backup"
+SUFFIX_CONFIG_BACKUP_STATUS = "config_backup_status"
+SUFFIX_CONFIG_VERSIONS = "config_versions"
+SUFFIX_CONFIG_DRIFT = "config_drift"
+CONFIG_STATUS_OK = "ok"
+CONFIG_STATUS_PARTIAL = "partial"
+CONFIG_STATUS_FAILED = "failed"
+CONFIG_STATUS_RUNNING = "running"
+CONFIG_STATUS_DISABLED = "disabled"
+CONFIG_STATUS_NEVER = "never"
+CONFIG_BACKUP_STATUSES = (
+    CONFIG_STATUS_OK,
+    CONFIG_STATUS_PARTIAL,
+    CONFIG_STATUS_FAILED,
+    CONFIG_STATUS_RUNNING,
+    CONFIG_STATUS_DISABLED,
+    CONFIG_STATUS_NEVER,
+)
+# --- end configuration manager wiring
+
+# --- Security Center ---
+# Release 1.46.0 part 1 (plan docs/plans/2026-11-17-security-center.md):
+# one fleet-wide center per HA instance, default off. Store like client
+# stability: own HA Store, size cap, delayed save, flush on the last unload.
+SEC_STORE_KEY = f"{DOMAIN}.security_center"
+SEC_STORE_VERSION = 1
+SEC_STORE_MINOR_VERSION = 1
+SEC_STORE_MAX_BYTES = 512 * 1024
+SEC_SAVE_DELAY_SECONDS = 60
+# Default UDP port of the syslog receiver (security_syslog.py, part 2).
+SEC_DEFAULT_SYSLOG_PORT = 5514
+# Own incidents (sec_*): at most this many, resolved ones are dropped first.
+SEC_INCIDENT_CAP = 100
+# Timeline: at most this many entries, none older than this many days.
+SEC_TIMELINE_MAX = 2000
+SEC_TIMELINE_DAYS = 14
+# An open incident without a new finding for this long is resolved.
+SEC_INCIDENT_AUTO_RESOLVE_SECONDS = 86400
+# A drift whose configuration areas are still unknown after this long is
+# fed as "areas unknown" (limitation, never "nothing changed").
+SEC_DRIFT_RESOLVE_WINDOW_SECONDS = 3600
+# Pending drift areas are looked up again at most this often from polls.
+SEC_DRIFT_RETRY_SECONDS = 60
+# Example E: a configuration change at most this long before a new finding
+# of the same router is linked to it as a hint (no causality claim).
+SEC_DRIFT_HINT_WINDOW_SECONDS = 3600
+DATA_SECURITY_CENTER = f"{DOMAIN}_security_center"
+# --- end Security Center
+# --- Security Center part 2 ---
+# Release 1.46.0 part 2: syslog receiver (path A), HTTP routes, fleet
+# sensors. Syslog lines are foreign, forgeable input (UDP from the LAN):
+# every limit below drops and counts, nothing is buffered without a cap.
+# The receiver listens on all IPv4 addresses (routers send to HA's LAN IP);
+# only senders whose address is a router's management address are taken.
+SEC_SYSLOG_BIND_HOST = "0.0.0.0"
+# Records waiting for the center; more are dropped (``dropped_buffer``).
+SEC_SYSLOG_BUFFER_MAX = 4000
+# Buffered records that make the center drain before the next poll.
+SEC_SYSLOG_DRAIN_AT = 500
+# Token buckets (lines per second, burst): per sender and in total.
+SEC_SYSLOG_SENDER_RATE = 50.0
+SEC_SYSLOG_SENDER_BURST = 500
+SEC_SYSLOG_TOTAL_RATE = 200.0
+SEC_SYSLOG_TOTAL_BURST = 2000
+# A receiver that could not listen is tried again at most this often.
+SEC_SYSLOG_RETRY_SECONDS = 300
+# Window of the "last hour" counters of the fleet sensors.
+SEC_COUNT_WINDOW_SECONDS = 3600
+SIGNAL_SECURITY_CENTER = f"{DOMAIN}_security_center_updated"
+DATA_SECURITY_VIEWS_BOUND = f"{DOMAIN}_security_views_bound"
+DATA_SECURITY_ENTITIES = f"{DOMAIN}_security_entities"
+UID_FLEET_SECURITY_SCORE = f"{FLEET_UID_PREFIX}security_score"
+UID_FLEET_SECURITY_HINTS_ACTIVE = f"{FLEET_UID_PREFIX}security_hints_active"
+UID_FLEET_SECURITY_HINTS_CRITICAL = f"{FLEET_UID_PREFIX}security_hints_critical"
+UID_FLEET_SECURITY_UNKNOWN_DEVICES = f"{FLEET_UID_PREFIX}security_unknown_devices"
+UID_FLEET_SECURITY_FIREWALL_EVENTS = f"{FLEET_UID_PREFIX}security_firewall_events_1h"
+UID_FLEET_SECURITY_WIFI_AUTH_FAILURES = (
+    f"{FLEET_UID_PREFIX}security_wifi_auth_failures_1h"
+)
+UID_FLEET_SECURITY_COVERAGE = f"{FLEET_UID_PREFIX}security_coverage"
+# --- end Security Center part 2

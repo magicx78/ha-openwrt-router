@@ -1,0 +1,6 @@
+# dropbear failed SSH logins (message part as stored by logd).
+# NICHT BELEGT, nach Upstream-Doku konstruiert (dropbear svr-authpasswd.c,
+# svr-auth.c). Placeholders only.
+dropbear[3001]: Bad password attempt for 'root' from 198.51.100.23:51515
+dropbear[3002]: Login attempt for nonexistent user from 198.51.100.24:40404
+dropbear[3003]: Login attempt for nonexistent user 'admin' from 2001:db8::24:40405

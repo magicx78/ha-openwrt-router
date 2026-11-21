@@ -15,6 +15,8 @@ import { createIntelApi, fetchTopologyData, hassAccessToken, TopologyFetchError,
 import type { TopologyData } from './types';
 import { MOCK_DATA } from './mockData';
 import { registerEnterpriseTab } from './enterprise/registry';
+import { bindConfigHass, installConfigMock } from './enterprise/config/register';
+import { bindSecurityHass, installSecurityMock } from './enterprise/security/register';
 
 // ── HA Webcomponent ──────────────────────────────────────────────────────
 
@@ -55,6 +57,14 @@ class OpenWrtTopologyPanel extends HTMLElement {
       this._resume();
     }
   };
+
+  constructor() {
+    super();
+    // Configuration Manager tab (Enterprise): its client reads the same hass.
+    bindConfigHass(() => this._hass);
+    // Security Center tab (Enterprise): same hass, read-only observation.
+    bindSecurityHass(() => this._hass);
+  }
 
   connectedCallback() {
     this.style.display = 'block';
@@ -277,6 +287,23 @@ if (rootEl) {
     id: 'dev-mock', title: 'Mock-Modul (nur Dev)', order: 999,
     component: () => <div className="view-empty">Mock-Inhalt — nur im Dev-Modus.</div>,
   });
+  // DEV ONLY — ?configmock[=scenario] runs the Configuration Manager tab on
+  // the in-memory mock backend. The import sits behind import.meta.env.DEV,
+  // so the production build drops it (and the mock) completely.
+  const devParams = new URLSearchParams(location.search);
+  if (import.meta.env.DEV && devParams.has('configmock')) {
+    void import('./enterprise/config/configMock').then(m => {
+      installConfigMock(() => m.MOCK_HASS, m.createMockConfigApi(devParams.get('configmock') || 'default'));
+    });
+  }
+  // DEV ONLY — ?securitymock[=scenario] runs the Security Center tab on the
+  // in-memory mock backend (invented data); dropped from the production build.
+  if (import.meta.env.DEV && devParams.has('securitymock')) {
+    void import('./enterprise/security/securityMock').then(m => {
+      const scenario = devParams.get('securitymock') || 'default';
+      installSecurityMock(() => m.mockHass(scenario), m.createMockSecurityApi(scenario));
+    });
+  }
   createRoot(devContainer).render(
     <React.StrictMode>
       <TopologyView data={MOCK_DATA} />

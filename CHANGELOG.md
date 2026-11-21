@@ -4,7 +4,340 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
-### Added
+## [1.46.2] - 2026-11-21
+
+### Behoben
+
+- **Security Center: Die Abdeckung sinkt nicht mehr, wenn eine Quelle dazukommt.** Lieferte
+  das Gateway Firewall-Zeilen, fiel die Abdeckung von 71 auf 65 % und der Deckel des
+  Sicherheitswerts von 86 auf 82. Zwei Ursachen, beide behoben:
+  - Firewall-Log und DNS-Log sind **Flotten-Quellen**: Sie gelten als verfügbar, sobald ein
+    Router wirklich Zeilen geliefert hat (nicht bloß eingetragen). Bisher zählte der
+    schlechteste Zustand aller Router, und Access Points liefern diese Zeilen nie. Übersicht
+    und Log-Pfad-Ansicht sagen jetzt „von N von M Routern“ (`coverage.fleet`,
+    `log_path.status[].routers_delivering/routers/rate_limited`) und zeigen dieselben Zahlen.
+    Ein ratenbegrenzter Lieferant bleibt „eingeschränkt“ (`rate_limited`). Alle anderen Quellen
+    behalten die Regel „schlechtester Zustand“.
+  - Einschränkungen senken die Abdeckung **monoton**: Der Abzug eines Faktors entfällt, solange
+    eine seiner erwarteten Quellen flottenweit fehlt (sie ist schon als fehlende Quelle
+    gezählt), und alle Abzüge zusammen bleiben unter einem halben Quellenanteil
+    (`LIMITATION_SHARE_CAP`). Im beobachteten Fall steigt die Abdeckung jetzt auf 79 %, der
+    Deckel auf 90.
+- **Security Center: `fw_inter_vlan` meldet nicht mehr dauerhaft `dest_zone_unknown`.**
+  fw4-Zeilen nennen die Zielzone nie, und die ausgehende Schnittstelle (`OUT=`) wurde zwar
+  gelesen, aber nicht genutzt. Die Zielzone kommt jetzt in dieser Reihenfolge aus: einer
+  konfigurierten Zuordnung Schnittstelle → Zone (gebaut, heute ohne Lieferant: der
+  Configuration Manager gibt Modulen keinen Lesezugriff auf gespeicherte Versionen), einer aus
+  den Zeilen gelernten Zuordnung (in den Ketten `in`/`forward` ist die Präfix-Zone die Zone von
+  `IN=`; begrenzt, nur im Speicher, nie über der konfigurierten, widersprüchliche Werte bleiben
+  unbekannt) und zuletzt `subnet_zones`. Zeilen der Kette `in` mit leerem `OUT=` zählen nicht
+  als Inter-VLAN. Kein zusätzlicher Router-Aufruf.
+- **Security Center: Ein privates Ziel außerhalb von `subnet_zones` gilt nicht mehr als extern.**
+  Es bleibt unbekannt (mit `dest_zone_unknown`); nur öffentliche Ziele zählen als extern.
+- **Security Center: fw4-Format bestätigt.** Zwei echte Zeilenformen (`reject … forward:` mit
+  UDP und zweitem `LEN=`, `reject … in:` mit leerem `OUT=` und ICMP) liest der Parser;
+  `FORMAT_CONFIRMED["fw4_nflog"]` ist wahr, und die Firewall-Erkennungen tragen im Panel nicht
+  mehr „Format unbestätigt“ (DNS weiterhin). Nicht belegt bleiben die Kette `out`, die Urteile
+  `drop`/`accept`, TCP-Flags und die Feldreihenfolge bei IPv6 (Fixture
+  `fw4_kernel_unbelegt.txt`).
+- **Security Center: Nach Rückkehr des Modulschlüssels wird nichts sofort automatisch
+  erledigt.** Die 24 ruhigen Stunden zählen ab dem ersten Poll mit Schlüssel (oder ab dem
+  letzten Befund, wenn der später liegt); vorher war die blinde Zeit als Ruhe gezählt. Ein
+  Start, bei dem der Schlüssel sofort da ist, ändert nichts.
+- **Security Center: Fehlende Core-Anbindung wird aus dem Poll neu versucht.** Fehlt beim
+  Start die Configuration API oder scheitert die Anmeldung der Ereignisse, versucht der Poll
+  die Anbindung alle 5 Minuten erneut, solange ein Core läuft. Eine Warnung je Zustand „nicht
+  gebunden“ (ohne Identitäten), kein Router-Aufruf, Fehler stören den Poll nie.
+- **Security Center: Geräte, die ohne Schlüssel auffällig wurden, bekommen ihren Hinweis.**
+  Beim ersten Poll mit Schlüssel holt das Center den Hinweis für jedes dann noch auffällige
+  Gerät einmal nach (nur im Speicher, höchstens 256 Geräte). Bisher sammelte das
+  Vertrauensbuch die Indikatoren weiter, der Hinweis ging aber verloren.
+- **Security Center: Reserve für Konfiguration und Geräte.** Von den 50 Plätzen der Klasse
+  „andere“ sind 10 nur für Nicht-WLAN-Quellen; WLAN-Hinweise belegen höchstens 40, eine
+  WLAN-Flut blockiert keinen Drift- oder Geräte-Hinweis mehr. Keine Verdrängung: ein neuer
+  WLAN-Hinweis bei voller Quote wird gezählt (`incidents_wifi_quota_dropped`) und einmal je
+  Stunde in der Zeitleiste vermerkt. Die Zuordnung kommt aus der Datenquelle des Detektors
+  (`from_wifi`); ältere Stände mit mehr als 40 WLAN-Hinweisen laden vollständig. Panel und
+  Diagnose zeigen den WLAN-Anteil.
+- Diagnose: `interface_zones` mit Zählern der Zuordnung (ohne Namen), `wifi_incidents`,
+  `missed_device_hints`.
+- Doku: Die Abdeckung ist der Anteil der erwarteten **Datenquellen**, nicht der Erkennungen.
+
+## [1.46.1] - 2026-11-20
+
+Configuration Manager: Router, die als „Unvollständig“ dastanden, obwohl sie mehr können.
+Keine neue Vertragsangabe, keine Änderung am Core, Maskierung unverändert.
+
+### Behoben
+
+- **Das erste Backup klärt den Archivweg.** Lässt die Prüfung bei einem HTTPS-Eintrag den
+  cgi- oder den SSH-Weg „ungeprüft“ (`not_probed`), fordert ein Lauf ohne festen Typ das
+  Archiv an. Gelingt es nicht, bleibt der UCI-Snapshot: `uci_snapshot`/`ok`, wenn jeder Weg
+  „nicht vorhanden“ oder „keine Rechte“ meldet, sonst `partial`. Vorher sicherte so ein Lauf
+  still nur UCI.
+- **cgi-Archiv trotz unlesbarer Paketliste.** Mit dem rpcd-Recht `cgi-io: backup`, aber
+  unlesbarer Paketliste fragt der Lauf das Archiv an; die Fähigkeit `config.cgi_backup` zeigt
+  dabei „noch nicht geprüft“, nicht „verfügbar“. Erst ein echter cgi-Archivlauf belegt sie
+  (Archiv erhalten: verfügbar; abgelehnt: dessen Grund), sichtbar ab der nächsten Prüfung.
+  Ein Archiv über SSH zählt dafür nicht. Eine gemerkte Ablehnung gilt nur für die Anzeige:
+  Der Lauf fragt das Archiv weiter an, nach dem Installieren von `cgi-io` also ohne
+  HA-Neustart; bestätigt rpcd das Recht, entfällt eine gemerkte Rechte-Ablehnung.
+- **Fehlende optionale UCI-Configs** (`sqm`, `mwan3`, `upnpd`, `openvpn`, `ddns`, `usteer`,
+  `firewall`, `dhcp`, `wireless` …) sind „nicht vorhanden“, nicht `uci_failed` und machen
+  keine Version `partial`. Ursache: ubus meldet „nicht gefunden“, der SSH-Ersatzweg war wegen
+  des noch nicht bestätigten Host-Keys gesperrt, und diese Sperre ersetzte die Antwort. Ein
+  „nicht gefunden“ von ubus geht jetzt gar nicht mehr zu SSH; nur eine echte ACL-Sperre
+  nimmt den Ersatzweg und bleibt ein Fehler, wenn er scheitert. `network` und `system` gibt
+  es auf jedem OpenWrt-Router: Fehlen sie, ist der Lauf `partial` (`incomplete`).
+- **Lauf ohne Archivversuch** nennt den Grund je Weg: `archive_not_attempted:cgi.<Ursache>`,
+  `archive_not_attempted:ssh.<Ursache>` oder `archive_not_attempted:requested`.
+- **Lauf mit gescheitertem Archiv** nennt den Grund je versuchtem Weg:
+  `archive_unavailable:<Weg>.<Fehlerklasse>` (bei HTTP zusätzlich
+  `archive_unavailable:cgi.insecure_transport`); läuft die Zeit für das Archiv als Ganzes ab,
+  bekommt jeder Weg der Kette `<Weg>.timeout`. Das Panel zeigt sie in Klartext.
+- **SSH-Port zu ist nicht „Router nicht erreichbar“.** Root auf HTTPS, `cgi-io` fehlt, SSH
+  (Port 22) von Home Assistant aus nicht erreichbar: Der Lauf bleibt `partial`
+  (`unreachable`/`timeout`), aber das Panel nennt den SSH-Weg statt „Der Router war nicht
+  erreichbar“ und als nächsten Schritt, SSH freizugeben oder `cgi-io` zu installieren.
+- **Host-Key-Grund sichtbar.** `ssh_host_key:<Grund>` erscheint als fester Code statt
+  `**REDACTED**`; nur die festen Gründe des Cores kommen zurück, alles andere bleibt maskiert.
+- **Panel „Unvollständig“** zeigt Fehlerart, Gründe in Klartext und den nächsten Schritt
+  (zum Beispiel „SSH-Host-Key bestätigen“; bei einem ungeprüften Weg „Jetzt sichern“, weil
+  dieser Lauf das Archiv anfordert).
+- **Panel „Prüfsumme“** zeigt die Prüfsumme des gespeicherten Inhalts (Archiv, sonst
+  UCI-Snapshot) oder „–“, nie mehr die des Inventars, die auf allen Routern gleich aussah.
+- **Panel „Leserechte fehlen“** nur noch, wenn sie wirklich fehlen; läuft das Archiv (etwa
+  als root per SSH), ist das ACL-Angebot als optional beschrieben.
+- **Panel „Letztes Backup“** zeigt „letzter Versuch: unvollständig, <Zeit>“ statt „noch keins“,
+  wenn es nur unvollständige Läufe gibt.
+
+### Tests
+
+- Neu: `tests/test_config_partial_v1461.py` (End-to-End Runtime → Core → echter Provider,
+  nur die Router-API ist ein Fake), Panel-Tests `configPartial.test.mjs`; der Pin-Speicher für
+  SSH-Host-Keys trennt Router strikt nach Router-ID (Test, keine Code-Änderung). Die festen
+  Weg-Codes (`archive_not_attempted:…`, `archive_unavailable:…`) kommen unmaskiert durch
+  (Test, keine Code-Änderung).
+
+## [1.46.0] - 2026-11-20
+
+Security Center: eine Beobachtungsschicht für das Netz auf dem Enterprise Core von 1.44.0 und
+den Modulen Netzwerk-Intelligenz, Client-Stabilität und Configuration Manager. Es **beobachtet
+nur**: keine Sperren, keine Quarantäne, keine Scans, keine Firewall-Änderung. **Standardmäßig
+aus**; ausgeschaltet gibt es keinen Beobachter, keinen Listener, keinen Socket und keine
+Schreibvorgänge. **Kein zusätzlicher Router-Aufruf je Poll.** Nutzerdoku: `docs/security-center.md`.
+
+### Hinzugefügt
+
+- **Security Center (`security_center.py`).** Ein Center je HA-Instanz verbindet die reinen
+  Module `security_*` mit Daten, die die Integration schon hat: Netzwerk-Intelligenz (als
+  Poll-Beobachter: WLAN-Zeilen, NI-Ereignisse, Uptime, Clients), Client-Stabilität
+  (Live-Zustand für das Vertrauensbuch) und den Enterprise Core (Drift-Ereignisse,
+  `router.forgotten`, Fähigkeiten, Modulschlüssel). Vergisst der Core einen Router, bevor das
+  Center läuft, gleicht das Center beim Start mit der geladenen Router-Registry ab; eine
+  unbekannte oder nicht geladene Registry löscht nichts. **Kein zusätzlicher Router-Aufruf je Poll** (Test zählt die ubus-POSTs mit und
+  ohne Center).
+- **Aus heißt aus:** ohne `enabled` liest das Center nur seinen Speicher; kein Beobachter,
+  kein Listener, keine Schreibvorgänge, keine Ereignisse. NI-Vorfälle, NI-Zähler,
+  Health-Score und Client-Stabilität sind mit inaktivem und aktivem Center identisch
+  (Regressionstest mit drei Durchläufen).
+- **Eigene `sec_*`-Hinweise** (offen / erledigt / bestätigt, höchstens 100, eigene Zähler,
+  eigene Ereignisse über den Core im Security-Ring). NI-Vorfälle werden nur per ID verknüpft,
+  nie geändert oder unterdrückt; deckt ein offener NI-Vorfall einen Befund schon ab, steht nur
+  ein verknüpfter Eintrag in der Zeitleiste.
+- **Obergrenze der Hinweise:** höchstens 100, aufgeteilt in **zwei feste Quoten ohne
+  Verdrängung zwischen ihnen:** höchstens 50 Hinweise vom Syslog-Empfänger (Firewall, DNS;
+  Absender per UDP im LAN fälschbar) und höchstens 50 aus allen anderen Quellen (WLAN,
+  Konfigurationsänderung, Vertrauensbuch; WLAN-Befunde lassen sich über Funk auslösen). Die
+  Klasse folgt aus der Datenquelle des Detektors, nie aus dem Zeileninhalt. In einer vollen
+  Klasse macht der älteste erledigte Hinweis dieser Klasse Platz; offene und bestätigte werden
+  nie entfernt, bestätigte zählen mit. Sonst wird nur der neue Hinweis dieser Klasse verworfen
+  und gezählt (`limits.incidents_log_quota_dropped` bzw. `limits.incidents_other_quota_dropped`,
+  je Klasse höchstens ein Zeitleisten-Eintrag je Stunde); die andere Klasse bleibt unberührt.
+  Ältere Speicherstände mit mehr als 50 in einer Klasse laden vollständig und heilen sich, wenn
+  Hinweise erledigt werden; bis dahin zählt `limits.incidents_cap_dropped`, was an der
+  Gesamtgrenze scheitert. Die Herkunft (`from_logs`) übersteht einen Neustart. Ereignisse über
+  den Core zu neuen oder wieder geöffneten Hinweisen: höchstens 20 je 10 min, der Rest wird
+  gezählt (`limits.events_throttled`).
+- **Erneut beobachtet:** Ein neuer Befund zu einem bestätigten Hinweis, der später als 24 h
+  nach dem letzten kommt, steht als Eintrag in der Zeitleiste, höchstens einmal je Hinweis und
+  24 h (Zeitpunkt am Hinweis, übersteht einen Neustart); steigt die Schwere, immer.
+- **Geschlüsselte IDs:** Hinweis-, Ereignis- und Korrelations-IDs sowie Dedup-Marken, die
+  gespeichert, gesendet oder ausgegeben werden, sind HMAC-Werte mit dem Modulschlüssel des
+  Cores und lassen sich mit einer Liste möglicher MACs nicht zurückrechnen. **Ohne
+  Modulschlüssel zeichnet das Center keine Hinweise auf** (Zustand „nicht bereit“, Grund
+  `module_key_missing`; Befunde nur gezählt, Gerät bestätigen und benennen ergibt 409
+  `not_ready`). Solange setzen Befunde keinen Indikator im Vertrauensbuch und offene Hinweise
+  werden nicht automatisch erledigt. Der Poll fragt den gebundenen Core alle 5 Minuten erneut
+  nach dem Schlüssel (kein Router-Aufruf), mit einer Warnung je „nicht bereit“-Zustand ohne
+  Identitäten. Ältere Speicherstände laden ohne Fehler.
+- **Drift → Segmentierung:** eine Konfigurationsänderung in VLAN/Firewall/Interface (Bereiche
+  aus dem Vergleich zweier gespeicherter Versionen, kein Router-Kontakt) ergibt genau einen
+  Hinweis mit Verweis auf die Drift-ID. Ein Befund kurz nach einer Konfigurationsänderung wird
+  nur zeitlich verknüpft, ohne Ursachenbehauptung.
+- **Speicher** (`.storage/openwrt_router.security_center`, höchstens 512 KB, verzögertes
+  Schreiben, beim Entladen sofort; beschädigte Abschnitte starten leer, ein unlesbarer Speicher
+  bleibt als `.bak`): Einstellungen, Vertrauensbuch, Baselines, maskierte Hinweise, Zeitleiste
+  (2000 Einträge / 14 Tage), Dedup-Marken. Keine HA-Benutzer-IDs.
+- **Manuelle Aktionen** (Gerät bestätigen, Namen setzen, Hinweis-Status, Einstellungen) nur für
+  Administratoren über den Core-Guard, jede auditiert. Keine Quarantäne.
+- **Übersicht:** Score mit Faktoren und Abdeckung (ohne Quelle `None`, nie „gesund“),
+  Hinweise, Zeitleiste mit Filtern, Geräteliste, Verfügbarkeit je Erkennung (verfügbar /
+  eingeschränkt / nicht verfügbar mit Grund, „Format unbestätigt“ für Firewall- und DNS-Logs).
+  Klartext nur für Administratoren, sonst Pseudonyme. Der Collector-Weg meldet „nicht
+  verfügbar“ mit Grund.
+- **Syslog-Empfänger (`security_syslog.py`):** lokaler UDP-Listener (Standardport 5514) für
+  das Remote-Log der Router (`logd` `log_ip`/`log_port`). Er bindet **nur**, wenn das Center
+  an ist und der Log-Weg `syslog` gewählt ist; sonst gibt es keinen Socket. Absender nur aus
+  der Router-Registry (IP-Literale der Verwaltungsadressen, keine DNS-Auflösung, mehrdeutige
+  Adressen ausgeschlossen); fremde Absender werden verworfen und gezählt. Zeilen über 2048 Byte
+  werden abgeschnitten, Token-Buckets je Absender und gesamt sowie ein Puffer mit höchstens
+  4000 Einträgen begrenzen Speicher und CPU (alles gezählt). Zeilen erscheinen nie oberhalb
+  von DEBUG im Log und werden nie ungefiltert gespeichert. Ein Bind-Fehler (Port belegt,
+  keine Berechtigung) macht die Quelle „nicht verfügbar“ mit Grund, das Setup läuft weiter;
+  ein neuer Versuch alle 5 min aus dem Poll. Verliert ein Router Zeilen an eine Rate oder den
+  vollen Puffer, sind seine Firewall- und DNS-Erkennungen bis 5 min nach der letzten
+  verworfenen Zeile „eingeschränkt“ (`rate_limited`), mit Einschränkung im Sicherheitswert und
+  geringerer Abdeckung. Ein Wechsel des Log-Wegs schließt den Socket;
+  erneut gesendete Zeilen filtert der gemeinsame Deduper. Grenze: UDP-Absender sind im LAN
+  fälschbar, die Liste filtert Rauschen, sie authentifiziert keinen Router.
+- **HTTP-Routen (`security_views.py`)** unter `/api/openwrt_topology/security`, alle mit
+  Anmeldung: Übersicht (mit Filtern), Hinweis-Details, Verfügbarkeit der Erkennungen und
+  Einstellungen lesen (Administratoren; andere Benutzer nur bei für alle geöffnetem Panel,
+  dann mit Pseudonymen und der Subnetz-Zuordnung nur als Anzahl); Einstellungen ändern
+  (hier wird das Center eingeschaltet), Gerät bestätigen oder benennen und Hinweis-Status
+  setzen nur für Administratoren. Gerät bestätigen (`/devices/confirm`) und benennen
+  (`/devices/name`) tragen die MAC im Body, nie im Pfad. Strenge Prüfung von Query und
+  Body (bekannte Schlüssel,
+  Typen, Bereiche, höchstens 4 KiB, zu tief verschachteltes JSON ist 400); Fehler tragen nur
+  eine feste Meldung, einen Code und höchstens Feldname und Grund. Eine Ablehnung durch den
+  Guard des Cores ist 403 `authorization_denied` ohne Angaben des Cores.
+- **Flotten-Sensoren (`security_entities.py`):** Sicherheitswert, aktive und kritische
+  Sicherheitshinweise, unbestätigte Geräte, Firewall-Protokolleinträge und WLAN-Anmeldefehler
+  der letzten Stunde, Abdeckung der Erkennung. Werte nur aus dem Center (keine Router-Aufrufe,
+  per Signal aktualisiert); ohne liefernde Quelle `None` (unbekannt), nie 0, auch für aktive
+  und kritische Hinweise; ist das Center nicht bereit (kein Modulschlüssel), sind alle sieben
+  Sensoren unbekannt. Wert und Abdeckung zählen nur geladene Router; die Hinweise und
+  Grundlinien eines entladenen Routers bleiben gespeichert. Die Sensoren gibt es nur bei
+  eingeschaltetem Center; Ausschalten entfernt sie aus der Entity-Registry.
+- **Panel-Tab „Security Center“** unter Enterprise (neben „Konfiguration“) mit den Bereichen
+  Übersicht, Zeitleiste, Geräte, Erkennungen und Einstellungen sowie dem Detail eines
+  Hinweises. Der Tab liest nur über die Routen oben; Schreibknöpfe haben nur Administratoren.
+  Bei ausgeschaltetem Center erklärt er, was das Center tut und nicht tut. Gerät bestätigen und
+  Hinweis-Status setzen fragen vor dem Senden einmal nach; ohne Modulschlüssel zeigt der Tab
+  „Nicht bereit“, nie „keine Befunde“.
+- **Diagnose:** neuer Block `security_center` am Ende (nur Zähler, Zustände und Gründe;
+  maskiert und geschwärzt, keine MAC, Adresse, Hostname, Benutzer-ID oder Schlüssel).
+
+### Hinweise
+
+- **Standardmäßig aus.** Einschalten im Panel unter Enterprise → Security Center (nur
+  Administratoren). Es gibt keinen Optionsdialog und keinen Dienst dafür.
+- **Keine neuen Router-Rechte.** Die ACL bleibt unverändert; das Security Center schreibt
+  nichts auf einen Router. Den Log-Versand der Router (`log_ip`) richtet der Nutzer selbst ein
+  (Befehle und Rückweg in `docs/security-center.md`).
+- **Firewall- und DNS-Befunde markieren kein Gerät** im Vertrauensbuch: ihre Logzeilen nennen
+  eine IP-Adresse, und es gibt kein Nachschlagen IP → MAC.
+- **Keine DNS-Namen im Klartext** an DNS-Hinweisen; eine Einstellung dafür gibt es nicht (die
+  frühere Option `keep_dns_names` ist entfernt, ein Speicherstand mit ihr lädt weiter).
+- **Der Collector-Weg ist noch nicht verfügbar** (`log_path: collector` meldet „nicht
+  verfügbar“). Firewall- und DNS-Erkennungen setzen den Syslog-Weg voraus; ihre Logformate sind
+  an echten Geräten unbestätigt.
+- **Nicht getestet** gegen echte Router oder eine echte Home-Assistant-Instanz; die Tests
+  laufen ohne Geräte.
+
+## [1.45.0] - 2026-11-19
+
+Configuration Manager: Konfigurations-Backup für OpenWrt-Router in Home Assistant, auf dem
+Enterprise Core von 1.44.0. **Standardmäßig aus** (Option `config_backup_enabled` je Router);
+bei ausgeschaltetem Backup gibt es **0 zusätzliche Router-Aufrufe**, keine neue Datei auf der
+Platte und keine geänderte `unique_id` oder Entity-ID. Nutzerdoku: `docs/configuration-manager.md`.
+
+### Hinzugefügt
+
+- **Backups mit Versionen:** je Router ein wiederherstellbares Archiv (`sysupgrade -b`-Format,
+  über den LuCI-Endpunkt `cgi-backup`, sonst per SSH als root), ein normalisierter
+  UCI-Snapshot für Vergleiche und ein Paket- und Systeminventar. Router ohne Archivweg
+  bekommen nur den Snapshot. Dedup über den Inhalts-Hash, Aufbewahrung 7 täglich / 4
+  wöchentlich / 6 monatlich, geschützte Versionen, Prüfsummen (Core).
+- **Zeitplan:** täglicher Lauf zur eingestellten Uhrzeit mit festem Versatz je Router (bis
+  59 min), ein Lauf zurzeit (Parallelität 1), Nachholen nach HA-Start, ein Nachversuch nach
+  15 min; zusätzlich ein Backup 300 s nach einem erkannten Release-Wechsel.
+- **Drift-Erkennung:** Vergleich des aktuellen UCI-Stands mit der Bezugsversion, Bereiche
+  und Risikostufen, kritisch bei Management-IP, VLAN, Firewall, SSH-Zugriff, Uplink und
+  Web-Verwaltung; bestätigen oder als bekannt markieren, nie automatisches Zurücksetzen;
+  „nicht vergleichbar“ ist ein eigener Zustand. Automatische Prüfung nach 5 min Entprellung,
+  höchstens einmal je Stunde, höchstens 4 Drift-Versionen je Router und Tag.
+- **Diff-Ansicht:** hinzugefügt / entfernt / geändert, nach Bereich und Risiko, Geheimwerte nur
+  als „geändert“.
+- **Restore-Prüfung:** Kompatibilität (blockierend: anderes Board, anderes Switch-Modell,
+  ungültiges Archiv, falsche Prüfsumme), Vorschau und Risiken, Anleitung für die manuelle
+  Wiederherstellung und eine Prüfliste danach.
+- **Panel:** Enterprise → Konfiguration (nur Administratoren): Übersicht, Router-Detail,
+  Versionen, Drift, Vergleich, Export mit Freigabe, Zugang (SSH-Pin, ACL-Angebot).
+- **Sensoren je Router:** `config_last_backup`, `config_backup_status`, `config_versions`
+  (Diagnose) und der Binärsensor `config_drift`.
+- **Dienst `openwrt_router.create_config_backup`** (`device_id`, optional `note`) mit
+  Antwort je Router; als Schritt vor einem Firmware-Update gedacht (die Integration hat keinen
+  eigenen Update-Pfad).
+- **Optionen** `config_backup_schedule` (`daily` / `off`, Vorgabe `daily`),
+  `config_backup_time` (Vorgabe `03:30:00`) und `config_drift_check` (Vorgabe an), nur sichtbar,
+  wenn der Backup-Provider angemeldet ist oder das Backup an ist.
+- **Diagnose:** Block `config_manager` ohne Snapshots, Diffs, Notizen und Benutzer-IDs.
+
+### Sicherheit
+
+- **Nur Administratoren:** alle Routen des Managers (403 für alle anderen, auch bei offenem
+  Topologie-Panel), `Cache-Control: no-store`, Benutzer-IDs nur als Pseudonym.
+- **Maskierung auf dem Server** für Antworten, Logs, Ereignisse und Diagnose; Geheimwerte
+  stehen im Snapshot nur als gesalzene HMAC-Prüfwerte.
+- **Archivprüfung ohne Entpacken:** Pfade, Symlinks, Größen- und Verhältnisgrenzen (höchstens
+  16 MiB komprimiert, 64 MiB entpackt, 5000 Mitglieder).
+- **Export nur mit Freigabe:** Antrag, Bestätigung, genau ein Download je Freigabe (15 min
+  gültig), neu berechnete Prüfsumme vor der Auslieferung, Eintrag im Audit-Log.
+- **Ablage** unter `<HA-Konfiguration>/openwrt_router/config_backups/` (Ordner `0700`,
+  Dateien `0600`), nie unter `www`; nichts geht an externe Dienste.
+
+### Hinweise
+
+- **Standardmäßig aus.** Einschalten je Router in den Optionen (`config_backup_enabled`).
+- **Neue Router-Rechte nur auf Angebot.** Die ACL-Stufe `config_backup_read` (`cgi-io: backup`,
+  `uci`, `rpc-sys: packagelist`, alle lesend) wird nur bei eingeschaltetem Backup angeboten und
+  erst nach ausdrücklicher Einzelfreigabe eines Admins auf den Router geschrieben. **Sie gibt
+  Home Assistant Lesezugriff auf alle Geheimnisse des Routers.**
+- **Keine automatische Wiederherstellung.** Die Integration spielt nichts auf einen Router
+  zurück; die Wiederherstellung machen Sie von Hand (LuCI oder `sysupgrade -r`) und ist nicht
+  automatisch umkehrbar.
+- **Archive enthalten WLAN-Passwörter, Schlüssel und Passwort-Hashes im Klartext.** Keine eigene
+  Verschlüsselung; HA-Backups verschlüsseln.
+- Keine Migration nötig: bestehende `unique_id`s und Entity-IDs bleiben; der Manager hängt sich
+  nicht in den Poll (`coordinator.py` ist unverändert).
+
+### Sicherheit
+
+- **Host-Key-Pinning für das SSH des Managers:** Archiv per `sysupgrade`, `uci show` und
+  Paketliste laufen nur über den gepinnten SSH-Weg des Cores (erster Key ausstehend bis zur
+  Bestätigung, abweichender Key abgelehnt); Fehlerklasse `denied` mit Grund `ssh_<grund>`.
+- **Routen-Pseudonyme mit Modul-Schlüssel:** Benutzer-Pseudonyme in den Antworten der Routen
+  sind mit dem abgeleiteten Modul-Schlüssel des Cores gesalzen.
+
+### Bekannte Einschränkungen
+
+Ausführlich in `docs/configuration-manager.md`, Abschnitt 13.
+
+- SSH des Managers nur mit bestätigtem Host-Key: bis zur Bestätigung im Panel kein Archiv
+  und keine UCI-Daten per SSH.
+- Größenlimit der Aufbewahrung (Core): eine gute geplante Version kann früher fallen als nötig.
+- Dedup verlangt neben dem Inhalts-Hash byte-gleiche Dateien (Core seit 1.44.0).
+- Die Warnung „zu wenig Platz auf dem Router“ der Restore-Prüfung erscheint nicht (der freie
+  Platz wird nicht gelesen).
+- Kein Löschen im Panel, Beschreibung nur beim Anlegen, keine Vergleiche zwischen Routern,
+  Freigaben gehen bei einem HA-Neustart verloren.
+- Laufzeit und Größe eines echten `sysupgrade -b` wurden nicht an Geräten gemessen.
+
+### Nachträge zum Enterprise Core (aus PR #56, jetzt in 1.45.0)
+
+#### Added
 
 - Enterprise Core: Module bekommen einen eigenen, abgeleiteten Schlüssel
   (`api.async_get_module_key(module, purpose)`, HKDF-SHA256 aus dem
@@ -32,7 +365,7 @@ All notable changes to the OpenWrt Router integration will be documented in this
   `client_ref` (nur als Pseudonym `cli_…`), `confidence`, `classification`,
   `incident_ref`, `radio_id`.
 
-### Changed
+#### Changed
 
 - Enterprise Core, Maskierung: Nennt ein Record sein Feld in mehreren Namensfeldern
   (`key`, `name`, `field`, `param`, `parameter`, `setting`), werden alle geprüft; ein

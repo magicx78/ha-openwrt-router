@@ -150,8 +150,12 @@ SSH-Pins) werden immer einzeln geschrieben.
 
 ## Grenzen
 
-- Kein Backup-Modul enthalten; ohne es sind alle `config.*` nicht verfügbar.
-- Keine Oberfläche für Freigaben und SSH-Pins (nur Modul-Schnittstelle).
+- Der Core selbst enthält kein Backup-Modul; das liefert der Configuration Manager
+  (seit 1.45.0, siehe [configuration-manager.md](configuration-manager.md)). Ist er aus,
+  sind alle `config.*` nicht verfügbar.
+- Freigaben und SSH-Pins bedient das Panel „Enterprise → Konfiguration“ des Configuration
+  Managers (siehe [configuration-manager.md](configuration-manager.md)); der Core selbst
+  bringt keine eigene Oberfläche mit.
 - `rf.*` sieht nur die ACL-Datei der Integration, keine anderen Dateien in
   `/usr/share/rpcd/acl.d/`.
 - Klartext-Backups auf der HA-Platte: Schutz nur über Dateirechte und die

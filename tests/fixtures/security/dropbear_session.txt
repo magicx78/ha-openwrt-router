@@ -1,0 +1,11 @@
+# Two dropbear sessions in the order logread shows them (message part).
+# belegt am 2026-11-18 auf gateway (WR3000, 25.12.1), ap2 (WR3000, 25.12.1),
+# ap5 (FRITZ!Repeater 3000, 25.12.6) und ap6 (1750E, 25.12.2).
+# Severity seen: "Child connection" and "Exit" lines authpriv.info (PRI 86),
+# "auth succeeded" lines authpriv.notice (PRI 85).
+# Structure copied, values invented (README.md).
+dropbear[2601]: Child connection from 192.0.2.5:64010
+dropbear[2601]: Password auth succeeded for 'root' from 192.0.2.5:64010
+dropbear[2601]: Exit (root) from <192.0.2.5:64010>: Disconnect received
+dropbear[2602]: Child connection from 192.0.2.5:64011
+dropbear[2602]: Pubkey auth succeeded for 'root' with ssh-ed25519 key SHA256:EXAMPLE+example/EXAMPLE+example/EXAMPLE+exa from 192.0.2.5:64011

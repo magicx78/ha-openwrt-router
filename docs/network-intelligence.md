@@ -9,7 +9,7 @@ It adds **no router calls**: no extra ubus requests, no SSH commands and no ACL 
 reads fields of answers the coordinator already fetches (system info, ports, WAN status, DHCP,
 Wi-Fi clients, LLDP and the router log via `log read`, rpcd ACL v6 or newer).
 
-A short overview lives in the [README](../README.md#network-intelligence); this page has the
+A short overview lives in the [technical reference](REFERENZ.md#network-intelligence); this page has the
 details.
 
 ---

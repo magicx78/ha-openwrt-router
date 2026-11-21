@@ -1,0 +1,10 @@
+# dnsmasq --log-queries=extra lines (message part as stored by logd).
+# Switch belegt (dnsmasq.init); line form NICHT BELEGT, nach Upstream-Doku
+# konstruiert (dnsmasq cache.c, log_query). Placeholders only.
+dnsmasq[2345]: 41 192.0.2.10/53124 query[A] www.example.org from 192.0.2.10
+dnsmasq[2345]: 41 192.0.2.10/53124 forwarded www.example.org to 198.51.100.53
+dnsmasq[2345]: 41 192.0.2.10/53124 reply www.example.org is 203.0.113.5
+dnsmasq[2345]: 42 192.0.2.11/40001 query[AAAA] missing.example.org from 192.0.2.11
+dnsmasq[2345]: 42 192.0.2.11/40001 reply missing.example.org is NXDOMAIN
+dnsmasq[2345]: 43 192.0.2.11/40002 cached www.example.com is NODATA-IPv6
+dnsmasq[2345]: query[A] plain.example.org from 192.0.2.12
