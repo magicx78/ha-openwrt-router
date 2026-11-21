@@ -41,7 +41,7 @@
           "traffic_station_detail": "Reads iwinfo assoclist per access-point interface at most every 5 minutes to fill in client counters the regular poll lacks. Needs traffic_enabled and the module key of the enterprise core.",
           "traffic_sysfs_fallback": "Reads interface counters from /sys/class/net at most every 5 minutes, only for interfaces the regular poll does not list. Needs traffic_enabled.",
           "traffic_offload_probe": "Reads the firewall flow offloading setting (uci get) every 6 hours, because offloaded traffic bypasses some counters. Needs traffic_enabled.",
-          "traffic_history_profile": "Compact (default): 5-minute values for 6 hours, hourly for 14 days, daily for 31 days, no client history on disk. Standard: 5-minute values for 1 day, daily for 90 days, client history kept (daily for 30 days); needs more storage. The deepest profile among the routers with traffic on applies to the whole fleet."
+          "traffic_history_profile": "Compact (default): 5-minute values for 6 hours, hourly for 14 days, daily for 31 days, no client history on disk. Standard: 5-minute values for 1 day, hourly for 14 days, daily for 90 days, client history kept (daily for 30 days); needs more storage. The deepest profile among the routers with traffic on applies to the whole fleet."
         }
       }
     }

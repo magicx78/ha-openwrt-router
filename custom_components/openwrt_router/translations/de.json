@@ -41,7 +41,7 @@
           "traffic_station_detail": "Liest iwinfo assoclist je Access-Point-Schnittstelle höchstens alle 5 Minuten, um Client-Zähler zu ergänzen, die in der normalen Abfrage fehlen. Braucht traffic_enabled und den Modulschlüssel des Enterprise-Kerns.",
           "traffic_sysfs_fallback": "Liest Schnittstellen-Zähler aus /sys/class/net höchstens alle 5 Minuten, nur für Schnittstellen, die die normale Abfrage nicht liefert. Braucht traffic_enabled.",
           "traffic_offload_probe": "Liest die Firewall-Einstellung für Flow-Offloading (uci get) alle 6 Stunden, weil ausgelagerter Verkehr manche Zähler umgeht. Braucht traffic_enabled.",
-          "traffic_history_profile": "Kompakt (Standard): 5-Minuten-Werte für 6 Stunden, stündlich für 14 Tage, täglich für 31 Tage, kein Client-Verlauf auf der Platte. Standard: 5-Minuten-Werte für 1 Tag, täglich für 90 Tage, Client-Verlauf bleibt (täglich für 30 Tage); braucht mehr Speicher. Es gilt das tiefste Profil unter den Routern mit eingeschalteter Traffic-Analyse, für die ganze Flotte."
+          "traffic_history_profile": "Kompakt (Standard): 5-Minuten-Werte für 6 Stunden, stündlich für 14 Tage, täglich für 31 Tage, kein Client-Verlauf auf der Platte. Standard: 5-Minuten-Werte für 1 Tag, stündlich für 14 Tage, täglich für 90 Tage, Client-Verlauf bleibt (täglich für 30 Tage); braucht mehr Speicher. Es gilt das tiefste Profil unter den Routern mit eingeschalteter Traffic-Analyse, für die ganze Flotte."
         }
       }
     }
