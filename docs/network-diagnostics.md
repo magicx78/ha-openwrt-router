@@ -74,7 +74,14 @@ Lese-Routen antworten mit `{"state": "off", …}`.
 Eingeschaltet ist der Zustand `ready` oder `not_ready` mit Gründen (zum Beispiel
 `module_key_missing`, `core_unavailable`, `events_not_registered`, `engine_unavailable`,
 `scheduler_not_running`). Ein Router ohne Daten ist `unknown` mit Grund (`no_data_yet`,
-`stale`, `poll_failed`, `interface_dump_missing`, `router_id_unknown`).
+`stale`, `poll_failed`, `interface_dump_missing`, `router_id_unknown`). `poll_failed` liest das
+Modul live am Coordinator (letzter Poll fehlgeschlagen), nicht erst aus einem neuen Poll. Ist ein
+Router `unknown`, liefern Übersicht und Detail für ihn **keine Kette und keinen Befund** (`null`,
+die Oberfläche zeigt alle Glieder unbekannt), nie den letzten gesunden Stand.
+
+Der HA-Messpunkt veraltet nach `max(3600 s, 3 × interval_s)`: danach sind Zustand, Kette, Befund
+und die Zahl aktiver Befunde für ihn unbekannt (Grund `stale`). Eine Runde ohne jede Messung
+setzt seinen Befund auf unbekannt; auch ein manueller Lauf gibt dann keinen alten Befund zurück.
 
 Eingeschaltet, aber ohne Ziele und ohne regelmäßige Messung, wertet das Modul nur die Polls aus
 und sendet **kein Paket**. Aktiv gemessen wird erst nach einer ausdrücklichen Handlung eines
@@ -107,7 +114,12 @@ Regeln für Ziele (`diag_targets.py`):
   Metadaten-Adressen nur, wenn genau dafür ein Netz konfiguriert ist.
 - Ein Hostname wird erst aufgelöst, dann prüft die Registry **jede** aufgelöste Adresse erneut
   (Schutz vor DNS-Rebinding). Interne Namen gehen nie an einen als extern geltenden
-  Namensserver.
+  Namensserver. Ist `ha_resolver_internal` aus, ist ein internes Hostname-Ziel im Status
+  unbrauchbar (Grund `internal_name`).
+- Scheitert das Auflösen eines bestätigten Hostname-Ziels (keine oder ungültige Adresse), zählt
+  das als **gescheiterte Beobachtung des DNS-Glieds** am HA-Messpunkt (ohne Verlaufsprobe, nie
+  das Internet-Glied). Ein einzelner gescheiterter Name neben beantworteten macht das Glied nur
+  beeinträchtigt; scheitern alle, ist es ein DNS-Problem.
 - Die **regelmäßige** Runde nimmt nur bestätigte Ziele. Ein **manueller** Lauf nimmt die
   angegebenen Ziel-IDs (ohne Angabe alle nicht-ICMP-Ziele); ein abgelehntes Ziel wird mit
   Grund gemeldet, ohne Paket.
@@ -208,7 +220,9 @@ Folgen daraus:
 
 Je Reihe (Messpunkt, Ziel-ID, Art, Adressfamilie) Stunden- und Tages-Buckets. Ein Probe-Ergebnis
 ist `answered`, `lost` oder `gap` (keine Messung: Neustart, Wartung, Messweg selbst
-abgelaufen). `Verlust % = lost / (answered + lost) × 100`; Lücken zählen nie in den Nenner,
+abgelaufen). Eine **Antwort ist kein Verlust**: REFUSED, SERVFAIL oder ein HTTP-Status außer
+204 zählen als beantwortet (mit Antwortzeit); der Fehler bleibt in der Bewertung des Glieds.
+Verlust ist nur eine ausgebliebene Antwort. `Verlust % = lost / (answered + lost) × 100`; Lücken zählen nie in den Nenner,
 sie senken nur die **Abdeckung** `(answered + lost) / erwartet`. Ohne Messung sind alle Zahlen
 `None`.
 
@@ -306,7 +320,12 @@ vorhandenen Reihen und alle anderen Messpunkte laufen weiter; ein weiterer Route
 abgelehnt, bekannte werden nie verdrängt. **Jedes Verwerfen wird gezählt** (`points_refused`,
 `series_refused`, `samples_out_of_order`, `hours_dropped`, `days_dropped`, `gaps_dropped`, …)
 und im Status gezeigt. Eine Probe, die älter ist als die neueste ihrer Reihe, wird verworfen und
-gezählt. Ein Neustart ist eine **Lücke**, nie ein Verlust.
+gezählt. Ein Neustart ist eine **Lücke**, nie ein Verlust; auch ein WAN-Ausfall, solange der
+Router nach einem Neustart noch anläuft, ist eine Lücke.
+
+Eine Reihe ohne Buckets nach der Aufbewahrung wird gelöscht und gibt ihren Quotenplatz frei
+(`series_expired`). Wird ein Ziel aus den Einstellungen entfernt, werden seine HA-Reihen,
+Baselines und Runden-Fenster gelöscht (`series_removed`).
 
 ## 8. Zusatzlast
 
@@ -322,8 +341,10 @@ Alle Zahlen sind Näherungen ohne Paketverlust und ohne Wiederholung. Sie stehen
 | Auflösen eines Hostnamens (nur bei Hostname-Zielen) | etwa 2 bis 4 (Resolver von Home Assistant) | 0 |
 
 Zeitgrenzen je Messung: TCP 3 s, DNS 2 s, HTTP 5 s, Auflösen 3 s. Eine Runde misst
-**nacheinander** (nie zwei Pakete gleichzeitig); ihre Zeitgrenze beträgt 138 s
-(`16 × 8 + 10`).
+**nacheinander** (nie zwei Pakete gleichzeitig); ihre Zeitgrenze beträgt 154 s
+(`16 × (3 + 5 + 1) + 10`: je Ziel Auflösen, die längste Messung und 1 s für das Schließen).
+Läuft sie doch ab, bleiben die schon gemessenen Ziele erhalten, der Rest ist ungemessen
+(`rounds_partial`).
 
 **Formel** (regelmäßige Messung, nur Home Assistant):
 
@@ -477,8 +498,11 @@ Managers (Drift, kritische Änderung, Backup) und Vorfälle des Security Centers
 
 - Es zählen nur Änderungen **desselben Routers** im Fenster von 1800 s (30 min) vor dem Befund;
   eine Drift, die bis zu 1800 s danach erkannt wird, kann vorher geschehen sein und ist höchstens
-  `possible`. Höchstens 16 Verknüpfungen je Befund; der Speicher für Drift-Notizen hält 64,
-  die Übersicht des Security Centers wird höchstens alle 60 s je Router gelesen.
+  `possible`. Höchstens 16 Verknüpfungen je Befund; der Speicher für Drift-Notizen hält 16 je
+  Router (die älteste fällt zuerst, gezählt als `config_notes_dropped` unter `limits` im
+  Status). Nach einem Verwerfen ist der Konfigurationskontext dieses Routers `partial` (Grund
+  `config_notes_dropped`), nicht vollständig. Die Übersicht des Security Centers wird höchstens
+  alle 60 s je Router gelesen.
 - Ein Kontext ist höchstens `probable` und nie stärker als der Befund selbst; er hebt dessen
   Ursachenklasse nie an. Nur Bereiche, die die Klasse technisch erklären können, zählen (ein
   fehlender Standardweg ist ein Routing-Problem, keine VLAN- oder Firewall-Änderung).

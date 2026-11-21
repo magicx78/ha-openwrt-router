@@ -50,17 +50,21 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .api import (
     DIAG_DEFAULT_TRANSPORT,
+    DIAG_DNS_TIMEOUT,
     DIAG_HTTP_PATH,
+    DIAG_HTTP_TIMEOUT,
     DIAG_PACKETS_PER_PROBE,
     DIAG_REASON_ICMP_NOT_ON_HA,
     DIAG_REASON_INTERNAL,
+    DIAG_RESOLVE_TIMEOUT,
+    DIAG_TCP_TIMEOUT,
     DiagTransport,
     async_diag_probe,
     async_diag_resolve,
 )
 from .const import (
     DATA_NET_DIAGNOSTICS,
-    DIAG_CONFIG_NOTES_MAX,
+    DIAG_CONFIG_NOTES_PER_ROUTER,
     DIAG_CONTEXT_CACHE_SECONDS,
     DIAG_CONTEXT_WINDOW_SECONDS,
     DIAG_DEFAULT_INTERVAL_SECONDS,
@@ -124,6 +128,7 @@ from .diag_core import (
     correlation_events,
     error_for_refusal,
     error_for_run_request,
+    finding_event,
     finding_output,
     forget_plan,
     forgotten_router_id,
@@ -189,8 +194,21 @@ _LOGGER = logging.getLogger(__name__)
 JOB_MANUAL: Final = "ha_manual"
 JOB_PERIODIC: Final = "ha_periodic"
 JOB_KIND: Final = "ha_probe"
-# Worst case of one round: every target resolves (3 s) and probes (5 s).
-RUN_TIMEOUT_SECONDS: Final = float(DIAG_MAX_TARGETS * 8 + 10)
+# api.py's ``_diag_close`` waits at most this long for a closed connection.
+_DIAG_CLOSE_SECONDS: Final = 1.0
+# Worst case of one round (review L6): every target resolves (3 s), probes
+# with the longest timeout (HTTP 5 s) and closes (1 s), plus 10 s margin.
+RUN_TIMEOUT_SECONDS: Final = float(
+    DIAG_MAX_TARGETS
+    * (
+        DIAG_RESOLVE_TIMEOUT
+        + max(DIAG_TCP_TIMEOUT, DIAG_DNS_TIMEOUT, DIAG_HTTP_TIMEOUT)
+        + _DIAG_CLOSE_SECONDS
+    )
+    + 10
+)
+# HA findings older than this are unknown (also the HA sensors), review M1.
+HA_STALE_MIN_SECONDS: Final = 3600.0
 # A router poll older than this many intervals (at least 10 min) is stale.
 STALE_INTERVALS: Final = 3
 STALE_MIN_SECONDS: Final = 600.0
@@ -248,7 +266,17 @@ _COUNTERS: Final = (
     "router_restarts",
     "clock_shifts",
     "baselines_out_of_order",
+    # review fixes (1.47.0 part 5)
+    "events_failed",
+    "resolutions_failed",
+    "rounds_partial",
+    "config_notes_dropped",
 )
+# A failed lookup of a confirmed host name (resolver gave nothing usable).
+_RESOLUTION_FAILURES: Final = frozenset(
+    {Refusal.RESOLVED_EMPTY, Refusal.RESOLVED_INVALID}
+)
+REASON_CONFIG_NOTES_DROPPED: Final = "config_notes_dropped"
 
 _TARGET_KINDS: Final[Mapping[TargetKind, str]] = {
     TargetKind.TCP: KIND_HA_TCP,
@@ -554,7 +582,10 @@ def probe_sample(probe: ProbeResult) -> Sample:
     """Statistics sample of one probe: answered, lost or a gap.
 
     Answered: OK, or NXDOMAIN (the resolver works), with an rtt. A gap:
-    nothing measured (SKIPPED, an internal error). Everything else is lost.
+    nothing measured (SKIPPED, an internal error). Any other reply (a
+    REFUSED connection, SERVFAIL / REFUSED, an HTTP status other than 204)
+    is no packet loss either: answered, with its rtt (or the time until the
+    reply); the failure stays in the stage evaluation. Lost: no answer.
     """
     ts = probe.timestamp
     if probe.outcome in (ProbeOutcome.OK, ProbeOutcome.NXDOMAIN) and (
@@ -566,7 +597,29 @@ def probe_sample(probe: ProbeResult) -> Sample:
         and probe.evidence.get("reason") == DIAG_REASON_INTERNAL
     ):
         return Sample.gap(ts)
+    if probe.received is not None and probe.received > 0:
+        rtt = probe.rtt_ms if probe.rtt_ms is not None else probe.duration_ms
+        return Sample.gap(ts) if rtt is None else Sample.answered(ts, rtt)
     return Sample.lost(ts)
+
+
+def _lookup(target_id: str, *, ok: bool, ts: float) -> ProbeResult:
+    """A host-name lookup of HA's resolver as a DNS-stage observation.
+
+    Direct evidence for HA's resolver path only (DNS stage, no family
+    beyond IPv4 asked, no samples): one failed name among answered ones
+    degrades the stage, only failing lookups fail it.
+    """
+    return ProbeResult(
+        point=MeasurementPoint.ha(),
+        target_id=target_id,
+        kind=ProbeKind.DNS,
+        stage=Stage.DNS,
+        family=AddressFamily.IPV4,
+        outcome=ProbeOutcome.OK if ok else ProbeOutcome.FAILED,
+        timestamp=ts,
+        evidence={"lookup": True},
+    )
 
 
 def _finding_brief(finding: Finding | None) -> dict[str, Any] | None:
@@ -741,6 +794,10 @@ class NetDiagnostics:
         self._ha_finding_at: float | None = None
         self._source_unsub: Callable[[], None] | None = None
         self._config_notes: dict[tuple[str, str], dict[str, Any]] = {}
+        # router id -> time of the newest drift note dropped (cap per router)
+        self._config_dropped: dict[str, float] = {}
+        # coordinator listeners (a failed poll republishes the view, H1)
+        self._listeners: dict[str, Callable[[], None]] = {}
         self._config_since: float | None = None
         self._drift_task: asyncio.Task[None] | None = None
         self._drift_again = False
@@ -785,12 +842,65 @@ class NetDiagnostics:
 
     @callback
     def add_entry(self, entry_id: str, coordinator: Any) -> None:
-        """Remember the entry's coordinator (its data is read on a poll)."""
+        """Remember the entry's coordinator (its data is read on a poll).
+
+        A failed update notifies the coordinator's listeners with the same
+        data, which NI drops as a repeat: the listener here rebuilds the
+        view then, so the router turns unknown at once (review H1). It
+        reads ``last_update_success`` only; nothing is fetched. It listens
+        only while the module is active (off means no work).
+        """
         self._entries[entry_id] = coordinator
+        self._unlisten(entry_id)
+        if self.active and not self._closed:
+            self._listen(entry_id)
+
+    def _listen(self, entry_id: str) -> None:
+        coordinator = self._entries.get(entry_id)
+        if coordinator is None or entry_id in self._listeners:
+            return
+        add = getattr(coordinator, "async_add_listener", None)
+        if callable(add):
+            try:
+                remove = add(self._on_coordinator_update)
+            except Exception as err:  # noqa: BLE001 - the poll path still works
+                self._fail("coordinator listener", err)
+            else:
+                if callable(remove):
+                    self._listeners[entry_id] = remove
+
+    def _unlisten(self, entry_id: str) -> None:
+        remove = self._listeners.pop(entry_id, None)
+        if remove is not None:
+            try:
+                remove()
+            except Exception:  # noqa: BLE001 - already gone
+                _LOGGER.debug("Network diagnostics: listener already removed")
+
+    @callback
+    def _on_coordinator_update(self) -> None:
+        """Republish after a failed update (the view reads the flag live)."""
+        if not self.active or self._closed:
+            return
+        if any(
+            getattr(c, "last_update_success", True) is False
+            for c in self._entries.values()
+        ):
+            self._publish()
+
+    def _poll_failed(self, rid: str) -> bool:
+        """The coordinator of ``rid`` failed its last update (read live)."""
+        for entry_id, cached in self._rid_cache.items():
+            if cached == rid:
+                coordinator = self._entries.get(entry_id)
+                if getattr(coordinator, "last_update_success", True) is False:
+                    return True
+        return False
 
     @callback
     def remove_entry(self, entry_id: str) -> None:
         """Forget the entry; its history stays until ``router.forgotten``."""
+        self._unlisten(entry_id)
         rid = self._rid_cache.pop(entry_id, None)
         self._entries.pop(entry_id, None)
         if rid is not None and rid not in self._rid_cache.values():
@@ -855,6 +965,8 @@ class NetDiagnostics:
         if self._closed or not self.enabled:
             return
         self.active = True
+        for entry_id in list(self._entries):
+            self._listen(entry_id)
         try:
             await self._async_bind_core()
         except Exception as err:  # noqa: BLE001 - runs without the core
@@ -884,6 +996,8 @@ class NetDiagnostics:
     async def async_deactivate(self) -> None:
         """Stop observing, probing and listening (data stays)."""
         self.active = False
+        for entry_id in list(self._listeners):
+            self._unlisten(entry_id)
         self._detach_engine()
         self._unbind_core()
         scheduler, self.scheduler = self.scheduler, None
@@ -893,6 +1007,7 @@ class NetDiagnostics:
         if drift is not None and not drift.done():
             drift.cancel()
         self._config_notes.clear()
+        self._config_dropped.clear()
         self._config_since = None
         self._security_cache.clear()
         if scheduler is not None:
@@ -1062,6 +1177,7 @@ class NetDiagnostics:
             del self._rid_cache[entry_id]
         for key in [k for k in self._config_notes if k[0] == rid]:
             del self._config_notes[key]
+        self._config_dropped.pop(rid, None)
         self._security_cache.pop(rid, None)
         self.store.schedule_save(enabled=True, force=True)
 
@@ -1165,6 +1281,9 @@ class NetDiagnostics:
             sample = Sample.gap(now)
         elif wan.get("connected") is True:
             sample = Sample.answered(now, 0.0)
+        elif state.settling:
+            # a restarting router brings its WAN up late: no WAN loss (M3)
+            sample = Sample.gap(now)
         else:
             sample = Sample.lost(now)
         self._record(key, sample, latency=False)
@@ -1241,8 +1360,10 @@ class NetDiagnostics:
             elif not state.settling:
                 send_finding = True
                 emit.insert(0, finding)
-        if emit and self._emit_findings(emit) and send_finding:
-            state.sent = signature
+        if emit:
+            done = self._emit_findings(emit)
+            if send_finding and done is not None and 0 in done:
+                state.sent = signature
 
     def _changes(
         self,
@@ -1314,18 +1435,41 @@ class NetDiagnostics:
 
     def _emit_findings(
         self, findings: Iterable[Finding], correlation_id: str | None = None
-    ) -> bool:
-        """Emit the events of one correlated round; False when not ready."""
+    ) -> set[int] | None:
+        """Emit the events of one correlated round.
+
+        Returns the indices of the findings whose event went out (or that
+        have none); None when the core is not ready. An emit that raises
+        stops the round there (counted): what went out before stays sent,
+        so the next poll does not send it again (review L5).
+        """
         api, key = self._binding.api, self._module_key
         if api is None or key is None or not self._binding.events_ok:
             self.counters["events_not_ready"] += 1
-            return False
+            return None
         result = correlate(tuple(findings), {})
         cid = correlation_id or new_correlation_id()
-        for event in correlation_events(result, correlation_id=cid, key=key):
-            api.emit(**event.emit_kwargs())
-            self.counters["events"] += 1
-        return True
+        events = correlation_events(result, correlation_id=cid, key=key)
+        # the finding events come first, in finding order (None: no event)
+        owners = [
+            index
+            for index, finding in enumerate(result.findings)
+            if finding_event(
+                finding, links=result.links_for(index), correlation_id=cid, key=key
+            )
+            is not None
+        ]
+        done = set(range(len(result.findings))) - set(owners)
+        try:
+            for number, event in enumerate(events):
+                api.emit(**event.emit_kwargs())
+                self.counters["events"] += 1
+                if number < len(owners):
+                    done.add(owners[number])
+        except Exception as err:  # noqa: BLE001 - the rest goes next time
+            self.counters["events_failed"] += 1
+            self._fail("events", err)
+        return done
 
     def _emit_manual(
         self,
@@ -1447,32 +1591,54 @@ class NetDiagnostics:
             else TargetScope.EXTERNAL
         )
         probes: list[ProbeResult] = []
+        lookups: list[ProbeResult] = []
         refused: list[dict[str, str]] = []
-        for target_id in target_ids:
-            pinned = await async_diag_resolve(
-                registry, target_id, resolver_scope=scope, transport=self.transport
-            )
-            if isinstance(pinned, Refusal):
-                self.counters["targets_refused"] += 1
-                refused.append({"id": target_id, "reason": refusal_reason(pinned)})
-                continue
-            probe = await async_diag_probe(
-                pinned,
-                stage=self._target_stage(target_id, pinned.kind),
-                may_query=registry.may_query,
-                query_name=self.settings.get("dns_query_name"),
-                http_path=self.settings.get("http_path") or DIAG_HTTP_PATH,
-                transport=self.transport,
-            )
-            probes.append(probe)
-            self.counters["probes"] += 1
-            self.counters["probe_packets"] += DIAG_PACKETS_PER_PROBE.get(
-                pinned.kind.value, 0
-            )
+        names = {t.target_id: t for t in registry.entries() if not t.is_ip}
+        try:
+            for target_id in target_ids:
+                pinned = await async_diag_resolve(
+                    registry, target_id, resolver_scope=scope, transport=self.transport
+                )
+                if isinstance(pinned, Refusal):
+                    self.counters["targets_refused"] += 1
+                    refused.append({"id": target_id, "reason": refusal_reason(pinned)})
+                    target = names.get(target_id)
+                    if pinned in _RESOLUTION_FAILURES and target is not None:
+                        # H2: a failed lookup of a confirmed host name is a
+                        # failed DNS observation of HA's resolver path
+                        self.counters["resolutions_failed"] += 1
+                        lookups.append(_lookup(target_id, ok=False, ts=self.clock()))
+                    continue
+                if target_id in names:
+                    lookups.append(_lookup(target_id, ok=True, ts=self.clock()))
+                probe = await async_diag_probe(
+                    pinned,
+                    stage=self._target_stage(target_id, pinned.kind),
+                    may_query=registry.may_query,
+                    query_name=self.settings.get("dns_query_name"),
+                    http_path=self.settings.get("http_path") or DIAG_HTTP_PATH,
+                    transport=self.transport,
+                )
+                probes.append(probe)
+                self.counters["probes"] += 1
+                self.counters["probe_packets"] += DIAG_PACKETS_PER_PROBE.get(
+                    pinned.kind.value, 0
+                )
+        except asyncio.CancelledError:
+            # L6: a timeout keeps what was measured, the rest is unmeasured
+            if not self._closed:
+                self.counters["rounds_partial"] += 1
+                self._stage(
+                    "ha round", self._apply_ha_round, probes, correlation_id, lookups
+                )
+            raise
         self.counters["rounds"] += 1
-        self._stage("ha round", self._apply_ha_round, probes, correlation_id)
+        self._stage("ha round", self._apply_ha_round, probes, correlation_id, lookups)
         return {
             "probes": len(probes),
+            "lookups_failed": sum(
+                1 for p in lookups if p.outcome is not ProbeOutcome.OK
+            ),
             "refused": refused,
             "results": [
                 {
@@ -1486,7 +1652,16 @@ class NetDiagnostics:
             ],
         }
 
-    def _apply_ha_round(self, probes: list[ProbeResult], correlation_id: str) -> None:
+    def _apply_ha_round(
+        self,
+        probes: list[ProbeResult],
+        correlation_id: str,
+        lookups: Iterable[ProbeResult] = (),
+    ) -> None:
+        """One HA round: samples of the probes, the HA chain of probes plus
+        host-name lookups (DNS stage only, no samples). A round with no
+        measurement at all makes the HA finding unknown (review H2)."""
+        lookups = list(lookups)
         for probe in probes:
             key = series_key(None, probe.target_id, probe.kind, probe.family or "any")
             self._record(key, probe_sample(probe), latency=True)
@@ -1504,18 +1679,38 @@ class NetDiagnostics:
             }
             for p in probes
         ]
-        if probes:
-            finding = classify(evaluate_chain(MeasurementPoint.ha(), probes))
+        self._ha_probes += [
+            {
+                "target_id": p.target_id,
+                "kind": p.kind.value,
+                "stage": p.stage.value,
+                "outcome": p.outcome.value,
+                "rtt_ms": None,
+                "ts": p.timestamp,
+                "lookup": True,
+            }
+            for p in lookups
+            if p.outcome is not ProbeOutcome.OK
+        ]
+        measured = [*probes, *lookups]
+        if measured:
+            finding = classify(evaluate_chain(MeasurementPoint.ha(), measured))
             if self._ha_finding is None or _signature(self._ha_finding) != _signature(
                 finding
             ):
                 self._ha_finding_at = now
             self._ha_finding = finding
             signature = _signature(finding)
-            if signature != self._ha_sent and (
-                not finding.is_problem or self._emit_findings([finding], correlation_id)
-            ):
-                self._ha_sent = signature
+            if signature != self._ha_sent:
+                done = None
+                if finding.is_problem:
+                    done = self._emit_findings([finding], correlation_id)
+                if not finding.is_problem or (done is not None and 0 in done):
+                    self._ha_sent = signature
+        else:
+            # nothing measured: never the old finding (H2)
+            self._ha_finding = None
+            self._ha_finding_at = now
         self.store.schedule_save(enabled=self.enabled)
         self._publish()
 
@@ -1592,6 +1787,7 @@ class NetDiagnostics:
             raise
         self.store.settings = new
         self._rebuild_registry()
+        self._drop_removed_targets()
         self.counters["settings_changes"] += 1
         if new["enabled"] and not self.active:
             await self.async_activate()
@@ -1608,6 +1804,15 @@ class NetDiagnostics:
         self._publish()
         await self._async_sync_entities()
         return self.settings_view()
+
+    def _drop_removed_targets(self) -> None:
+        """HA series, baselines and loss rounds of targets that are gone (M2)."""
+        ids = {str(t.get("id")) for t in self.settings.get("targets") or ()}
+        self.store.history.drop_ha_targets(ids)
+        for key in [
+            k for k in self._rounds if k.point == HA_POINT_KEY and k.target not in ids
+        ]:
+            del self._rounds[key]
 
     def _manual_targets(self, target_ids: Iterable[str] | None) -> list[str]:
         if target_ids is None:
@@ -1767,7 +1972,12 @@ class NetDiagnostics:
             view.update(state=R_STATE_UNKNOWN, reason=REASON_NO_DATA_YET)
         elif wall - last > limit:
             view.update(state=R_STATE_UNKNOWN, reason=REASON_STALE)
-        view["finding"] = _finding_brief(state.finding)
+        elif self._poll_failed(rid):
+            # H1: read live; a failed poll never reaches on_poll (NI dedup)
+            view.update(state=R_STATE_UNKNOWN, reason=REASON_POLL_FAILED)
+        # unknown: no finding (and no chain) at all, never an old one
+        known = view["state"] != R_STATE_UNKNOWN
+        view["finding"] = _finding_brief(state.finding) if known else None
         view["settling"] = state.settling
         view["dhcp_pools"] = [dict(p) for p in state.dhcp_pools]
         now = last if last is not None else wall
@@ -1813,13 +2023,13 @@ class NetDiagnostics:
                 }
             )
         usable = [
-            t
-            for t in self.registry.entries()
-            if t.kind is not TargetKind.ICMP
-            and (t.confirmed or t.scope is TargetScope.INTERNAL)
+            t for t in self.registry.entries() if self._target_unusable(t) is None
         ]
-        if self._ha_finding is not None:
-            state, reason = _finding_state(self._ha_finding)
+        finding = self._ha_current(wall)
+        if finding is not None:
+            state, reason = _finding_state(finding)
+        elif self._ha_finding is not None:
+            state, reason = R_STATE_UNKNOWN, REASON_STALE
         elif not usable:
             state, reason = R_STATE_UNKNOWN, REASON_NO_CONFIRMED_TARGET
         else:
@@ -1827,10 +2037,38 @@ class NetDiagnostics:
         return {
             "state": state,
             "reason": reason,
-            "finding": _finding_brief(self._ha_finding),
+            "finding": _finding_brief(finding),
             "last_round": dict(self._ha_last) if self._ha_last else None,
             "series": series,
         }
+
+    def _ha_limit(self) -> float:
+        interval = float(self.settings.get("interval_s") or 0)
+        return max(HA_STALE_MIN_SECONDS, STALE_INTERVALS * interval)
+
+    def _ha_current(self, wall: float) -> Finding | None:
+        """The HA finding while it is fresh; older is unknown (M1)."""
+        last = self._ha_last
+        if self._ha_finding is None or not last:
+            return None
+        if wall - float(last["ts"]) > self._ha_limit():
+            return None
+        return self._ha_finding
+
+    def _target_unusable(self, target: Any) -> str | None:
+        """Why a target cannot be measured from HA now (None: it can)."""
+        if target.kind is TargetKind.ICMP:
+            return DIAG_REASON_ICMP_NOT_ON_HA
+        if not (target.confirmed or target.scope is TargetScope.INTERNAL):
+            return refusal_reason(Refusal.NOT_CONFIRMED)
+        if (
+            target.scope is TargetScope.INTERNAL
+            and not target.is_ip
+            and self.settings.get("ha_resolver_internal") is not True
+        ):
+            # L3: the run asks the external resolver and refuses the name
+            return refusal_reason(Refusal.INTERNAL_NAME)
+        return None
 
     def load(self) -> dict[str, Any]:
         """What the module sends: per round, per day, HA and per router."""
@@ -1873,16 +2111,17 @@ class NetDiagnostics:
             e for e in self._entries if e not in self._rid_cache and self.active
         ]
         refused = {tid: refusal_reason(r) for tid, r in self.refused_targets}
+        entries = {t.target_id: t for t in self.registry.entries()}
         targets = []
         for raw in self.settings.get("targets") or ():
             tid = str(raw.get("id"))
-            usable = tid not in refused and (
-                raw.get("scope") == TargetScope.INTERNAL.value
-                or raw.get("confirmed") is True
-            )
             reason = refused.get(tid)
-            if reason is None and not usable:
+            entry = entries.get(tid)
+            if reason is None and entry is not None:
+                reason = self._target_unusable(entry)
+            elif reason is None:
                 reason = refusal_reason(Refusal.NOT_CONFIRMED)
+            usable = reason is None
             if raw.get("kind") == TargetKind.ICMP.value:
                 usable, reason = False, DIAG_REASON_ICMP_NOT_ON_HA
             targets.append(
@@ -1914,6 +2153,12 @@ class NetDiagnostics:
                 "kinds": list(EXEC_KINDS),
             },
             "load": self.load(),
+            "limits": {
+                "config_notes_per_router": DIAG_CONFIG_NOTES_PER_ROUTER,
+                "config_notes_dropped": self.counters["config_notes_dropped"],
+                "routers_with_dropped_notes": len(self._config_dropped),
+                "run_timeout_s": RUN_TIMEOUT_SECONDS,
+            },
             "scheduler": {
                 "running": scheduler is not None and scheduler.running,
                 "orphaned_tasks": 0 if scheduler is None else scheduler.orphaned_tasks,
@@ -2014,9 +2259,16 @@ class NetDiagnostics:
                 "state": "pending",
                 "critical": critical,
             }
-            while len(self._config_notes) > DIAG_CONFIG_NOTES_MAX:
-                notes = self._config_notes
-                del notes[min(notes, key=lambda k: notes[k]["ts"])]
+            notes = self._config_notes
+            mine = [k for k in notes if k[0] == rid]
+            while len(mine) > DIAG_CONFIG_NOTES_PER_ROUTER:
+                oldest = min(mine, key=lambda k: notes[k]["ts"])
+                dropped = float(notes.pop(oldest)["ts"])
+                mine.remove(oldest)
+                self.counters["config_notes_dropped"] += 1
+                self._config_dropped[rid] = max(
+                    dropped, self._config_dropped.get(rid, dropped)
+                )
         elif critical:
             note["critical"] = True
         self._schedule_drift_resolution()
@@ -2143,6 +2395,18 @@ class NetDiagnostics:
             for note in self._config_notes.values()
             if note["router_id"] == rid
         )
+        dropped = self._config_dropped.get(rid)
+        if dropped is not None and self.clock() - dropped <= (
+            2 * DIAG_CONTEXT_WINDOW_SECONDS
+        ):
+            # M4: notes of this router were dropped: what is left is used,
+            # but the context is only partial
+            return SourceView(
+                SourceState.PARTIAL,
+                reason=REASON_CONFIG_NOTES_DROPPED,
+                since=self._config_since,
+                items=items,
+            )
         return SourceView(SourceState.READY, since=self._config_since, items=items)
 
     def _security_view(self, rid: str, at: float) -> SourceView:
@@ -2264,8 +2528,7 @@ class NetDiagnostics:
         last = self._ha_last
         if not last or not self._ha_probes:
             return None
-        interval = float(self.settings.get("interval_s") or 0)
-        if wall - float(last["ts"]) > max(3600.0, STALE_INTERVALS * interval):
+        if wall - float(last["ts"]) > self._ha_limit():
             return None
         rtts = [
             float(p["rtt_ms"])
@@ -2388,20 +2651,23 @@ class NetDiagnostics:
         routers: dict[str, Any] = {}
         for rid, rstate in self._routers.items():
             rv = self._router_view(rid, rstate, wall)
+            shown = None if rv["state"] == R_STATE_UNKNOWN else rstate.finding
             routers[rid] = {
                 "state": rv["state"],
                 "reason": rv["reason"],
                 "settling": rv["settling"],
                 "score": rv["score"],
                 "restarts_24h": rv["restarts_24h"],
+                # unknown / stale / poll failed: neither finding nor chain
                 "finding": None
-                if rstate.finding is None
-                else finding_output(rstate.finding, admin=False),
-                "chain": self._chain(rstate.finding),
+                if shown is None
+                else finding_output(shown, admin=False),
+                "chain": self._chain(shown),
                 "down_interfaces": len(rstate.down),
                 "gateway": view["gateways"].get(rid),
             }
         ha = self._ha_view(wall)
+        ha_finding = self._ha_current(wall)
         return {
             "state": state,
             "reasons": reasons,
@@ -2412,9 +2678,9 @@ class NetDiagnostics:
                 "state": ha["state"],
                 "reason": ha["reason"],
                 "finding": None
-                if self._ha_finding is None
-                else finding_output(self._ha_finding, admin=False),
-                "chain": self._chain(self._ha_finding),
+                if ha_finding is None
+                else finding_output(ha_finding, admin=False),
+                "chain": self._chain(ha_finding),
             },
             "last_run": dict(self._ha_last) if self._ha_last else None,
         }
@@ -2465,8 +2731,9 @@ class NetDiagnostics:
         state, reasons = self._module_state()
         if state == STATE_OFF:
             return {"state": STATE_OFF, "reasons": reasons, "finding": None}
+        wall = self.clock()
         if router_id is None:
-            finding = self._ha_finding
+            finding = self._ha_current(wall)
             context = None
         else:
             rstate = self._routers.get(router_id)
@@ -2476,9 +2743,15 @@ class NetDiagnostics:
                     error_class=ErrorClass.NOT_FOUND,
                     details={"reason": "unknown_router"},
                 )
-            # a mapped router that was not polled yet has no finding
-            finding = None if rstate is None else rstate.finding
-            context = self.router_context(router_id)
+            # a mapped router that was not polled yet, or whose state is
+            # unknown (stale, poll failed), has no finding and no context
+            known = (
+                rstate is not None
+                and self._router_view(router_id, rstate, wall)["state"]
+                != R_STATE_UNKNOWN
+            )
+            finding = rstate.finding if known and rstate is not None else None
+            context = self.router_context(router_id) if known else None
         out: dict[str, Any] = {
             "state": state,
             "reasons": reasons,

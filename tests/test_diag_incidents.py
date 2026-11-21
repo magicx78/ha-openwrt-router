@@ -11,6 +11,7 @@ addresses documentation values. No network, no Home Assistant.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 from test_client_engine import data as ni_data
@@ -37,6 +38,7 @@ from test_net_correlation import (
 )
 from test_net_engine import make_hass
 
+from custom_components.openwrt_router.diag_core import EVENT_GATEWAY_CHANGED
 from custom_components.openwrt_router.diag_model import (
     AddressFamily,
     ChangeRecord,
@@ -231,29 +233,47 @@ async def test_engine_opens_the_change_incident_from_a_poll(
     disk,  # noqa: F811
     ni_disks,  # noqa: F811
 ) -> None:
+    """One poll -> exactly one NI incident and one core change event.
+
+    The coordinator holds the data NI ingests (as in HA), so the NI finding
+    source and the poll observer see the same poll: the change is computed
+    once and taken over, never reported twice (review L1).
+    """
     hass = make_hass()
     engine, _cs = await ni_setup(hass, "r1")
     diag = await make_diag(hass, "r1")
-    engine.ingest("r1", ni_data([], uptime=5000, wan_status=wan_status()), T0, 60.0)
+    emitted: list[str] = []
+    diag._binding.api = SimpleNamespace(
+        emit=lambda **kw: emitted.append(kw["event_type"])
+    )
+    diag._binding.events_ok = True
+    diag._module_key = bytes(range(32))
+    coord = diag._entries["r1"]
+
+    def ingest(uptime: int, gw: str, at: float) -> None:
+        coord.data = ni_data([], uptime=uptime, wan_status=wan_status(gw=gw))
+        engine.ingest("r1", coord.data, at, 60.0)
+
+    ingest(5000, "192.0.2.1", T0)
     assert not [i for i in engine.machine.incidents() if i.type in DIAG_CHANGE_TYPES]
-    changed = wan_status(gw="192.0.2.2")
-    engine.ingest("r1", ni_data([], uptime=5060, wan_status=changed), T0 + 60, 60.0)
+    assert emitted == []
+    ingest(5060, "192.0.2.2", T0 + 60)
     [inc] = [i for i in engine.machine.incidents() if i.type == GW_CHANGED]
     assert inc.scope_key == "r1" and inc.parent_id is None
+    assert emitted.count(EVENT_GATEWAY_CHANGED) == 1
     kinds = [e.kind for e in engine.ring]
     assert kinds.count(DIAG_GATEWAY_CHANGED_KIND) == 1
     stored = json.dumps([e.params for e in engine.ring], default=str)
     assert "192.0.2.2" not in stored and "192.0.2.1" not in stored
-    # the poll observer took the same change over (one core-side change)
-    assert diag._routers[RID1].pending is None
-    # a router that restarts settles first: no change incident
-    engine.ingest(
-        "r1",
-        ni_data([], uptime=30, wan_status=wan_status(gw="192.0.2.3")),
-        T0 + 120,
-        60.0,
-    )
+    # the same poll again (a coordinator repeat): nothing new anywhere
+    engine.ingest("r1", coord.data, T0 + 90, 60.0)
+    assert emitted.count(EVENT_GATEWAY_CHANGED) == 1
+    assert [e.kind for e in engine.ring].count(DIAG_GATEWAY_CHANGED_KIND) == 1
+    # a router that restarts settles first: no change incident, no event
+    ingest(30, "192.0.2.3", T0 + 120)
     assert len([i for i in engine.machine.incidents() if i.type == GW_CHANGED]) == 1
+    assert emitted.count(EVENT_GATEWAY_CHANGED) == 1
+    diag._binding.api = None
     await async_release_net_diagnostics(hass, "r1")
     # released: the source is gone, a change opens nothing new
     engine.ingest(

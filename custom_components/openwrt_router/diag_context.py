@@ -66,6 +66,9 @@ class SourceState(StrEnum):
     MISSING = "missing"
     DISABLED = "disabled"
     NOT_READY = "not_ready"
+    # listening, but items were dropped (bounded memory): what is left is
+    # used, the context is "partial" with the source's reason
+    PARTIAL = "partial"
 
 
 @dataclass(frozen=True)
@@ -242,6 +245,8 @@ class FindingContext:
 
 
 def _source_state(view: SourceView, start: float) -> tuple[str, str | None]:
+    if view.state is SourceState.PARTIAL:
+        return CONTEXT_PARTIAL, view.reason or view.state.value
     if view.state is not SourceState.READY:
         return CONTEXT_UNAVAILABLE, view.reason or view.state.value
     if view.since is None or view.since > start:

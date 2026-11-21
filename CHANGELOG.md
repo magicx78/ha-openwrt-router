@@ -57,7 +57,8 @@ Router-Rechte.** Nutzerdoku: `docs/network-diagnostics.md`.
   keinen Befund.
 - **Statistik, Baselines, Wert (`diag_stats.py`, `diag_baseline.py`, `diag_score.py`).**
   Mittel, Jitter, Verlust und Abdeckung je Reihe in den Fenstern 1 h, 24 h, 7 d und 30 d;
-  Lücken (keine Messung, Neustart) fließen nie als Verlust ein. Baselines (EWMA mit
+  Lücken (keine Messung, Neustart, WAN-Ausfall während ein Router anläuft) fließen nie als
+  Verlust ein; eine Antwort (REFUSED, SERVFAIL, HTTP außer 204) ist kein Verlust. Baselines (EWMA mit
   Hysterese) lernen nur Werte unterhalb der Austrittsschwelle und frieren bei einer Störung
   ein; langsame Drift über mehrere Tage wird getrennt erkannt. Netzqualitätswert 0 bis 100 aus sieben
   gewichteten Komponenten **mit Abdeckung und „geringe Aussagekraft“**; Komponenten ohne Daten
@@ -67,7 +68,8 @@ Router-Rechte.** Nutzerdoku: `docs/network-diagnostics.md`.
   32 Reihen für Home Assistant, 8 Reihen je Router, 169 Stunden- und 31 Tages-Buckets je
   Reihe, 64 Neustart-Lücken. Jede Quote ist getrennt: ein voller Messpunkt verdrängt keinen
   anderen. **Jedes Verwerfen wird gezählt** und im Status gezeigt. Ein Neustart von Home
-  Assistant oder eines Routers ist eine Lücke, kein Verlust. Beschädigte Teile starten leer,
+  Assistant oder eines Routers ist eine Lücke, kein Verlust. Reihen ohne Buckets und Reihen
+  entfernter Ziele geben ihren Quotenplatz frei (gezählt). Beschädigte Teile starten leer,
   ein unlesbarer Speicher bleibt als `.bak`.
 - **HTTP-Routen (`diag_views.py`)** unter `/api/openwrt_topology/diagnostics`: `overview`,
   `history`, `details`, `settings` (lesen und ändern) und `run`. Alle mit Anmeldung. Reihenfolge

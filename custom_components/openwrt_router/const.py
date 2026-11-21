@@ -873,8 +873,9 @@ DIAG_GATEWAY_UID_SUFFIX = "_diag_gateway_reachable"
 # Context of a finding: configuration changes / security incidents of the
 # same router this long before (or, detected late, after) the finding.
 DIAG_CONTEXT_WINDOW_SECONDS = 1800
-# Drift notes kept in memory for the context (oldest dropped first).
-DIAG_CONFIG_NOTES_MAX = 64
+# Drift notes kept in memory for the context, per router (its oldest is
+# dropped first, counted; the router's context is then "partial").
+DIAG_CONFIG_NOTES_PER_ROUTER = 16
 # The Security Center overview is read at most this often per router.
 DIAG_CONTEXT_CACHE_SECONDS = 60
 # --- end Network Diagnostics

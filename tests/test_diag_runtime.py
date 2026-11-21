@@ -558,6 +558,9 @@ async def test_case_18_router_restart_runtime(disk) -> None:
     assert view["restarts_24h"] == 1
     assert view["score"] is not None
     assert diag.counters["events_not_ready"] == 0
+    # review M3: the WAN down while settling is a gap, no WAN loss
+    summary = history.summaries(wan_key(), now=T0 + 240)["1h"]
+    assert summary.lost == 0 and summary.loss_pct == 0.0
     poll(diag, "r1", T0 + 600, uptime=450)
     assert diag.status()["routers"][RID1]["settling"] is False
     await diag.async_close()

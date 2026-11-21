@@ -48,7 +48,7 @@ import asyncio
 import logging
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import fields as dc_fields
 from typing import Any
 
@@ -135,6 +135,9 @@ COUNTERS: tuple[str, ...] = (
     "routers_damaged",
     "sections_damaged",
     "routers_forgotten",
+    # 1.47.0 review: quota slots given back
+    "series_expired",  # no bucket left after the retention
+    "series_removed",  # HA series of a target id that no longer exists
 )
 
 
@@ -352,8 +355,13 @@ class DiagHistory:
             self.counters["days_dropped"] += excess
 
     def fold(self, now: float) -> None:
-        """Fold completed hours into days and apply the retention."""
-        for history in self.series.values():
+        """Fold completed hours into days and apply the retention.
+
+        A series without any bucket left gives its quota slot back (with
+        its baselines); counted as ``series_expired``.
+        """
+        empty: list[SeriesKey] = []
+        for key, history in self.series.items():
             self._fold_series(history, now)
             hours, days = prune_history(
                 history.hours,
@@ -363,6 +371,37 @@ class DiagHistory:
                 day_retention_s=DAY_RETENTION_S,
             )
             history.hours, history.days = list(hours), list(days)
+            if not history.hours and not history.days:
+                empty.append(key)
+        if empty:
+            self._drop_series(empty)
+            self.counters["series_expired"] += len(empty)
+
+    def _drop_series(self, keys: Iterable[SeriesKey]) -> None:
+        gone = set(keys)
+        for key in gone:
+            self.series.pop(key, None)
+        for item in [i for i in self.baselines if i[0] in gone]:
+            del self.baselines[item]
+
+    def drop_ha_targets(self, keep: Iterable[str]) -> list[SeriesKey]:
+        """Drop the HA series (and baselines) of target ids not in ``keep``."""
+        wanted = set(keep)
+        gone = [
+            k for k in self.series if k.point == HA_POINT_KEY and k.target not in wanted
+        ]
+        gone += [
+            item[0]
+            for item in self.baselines
+            if item[0].point == HA_POINT_KEY
+            and item[0].target not in wanted
+            and item[0] not in gone
+        ]
+        gone = list(dict.fromkeys(gone))
+        if gone:
+            self._drop_series(gone)
+            self.counters["series_removed"] += len(gone)
+        return gone
 
     def summaries(
         self,
