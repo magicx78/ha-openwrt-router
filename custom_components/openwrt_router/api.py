@@ -4964,7 +4964,9 @@ class OpenWrtAPI:
            lines; bounded (CONNTRACK_TABLE_TIMEOUT_S, CONNTRACK_TABLE_MAX_BYTES,
            CONNTRACK_TABLE_MAX_LINES, see ``_count_conntrack_lines``)
 
-        Returns 0 if neither path is readable (module not loaded or ACL blocked).
+        Returns 0 if neither path is readable (module not loaded or ACL blocked)
+        or the table read timed out; ``last_conntrack_count_complete`` is then
+        None and the callers show "unknown", not 0 (1.49.3).
         ``last_conntrack_count_complete`` tells the callers whether the number
         is the full count (True), a lower bound of a cut-off table read
         (False) or no count at all (None).

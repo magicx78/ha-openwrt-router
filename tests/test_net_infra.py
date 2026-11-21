@@ -905,6 +905,7 @@ def test_snapshot_reads_measured_values() -> None:
             localtime=1,
             localtime_at=2.0,
             active_connections=50,
+            active_connections_complete=True,
             service_instances={"dnsmasq": {}},
             port_stats=[port()],
             wan_status=wan(),

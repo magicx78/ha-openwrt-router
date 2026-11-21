@@ -153,3 +153,9 @@ async def test_f1_a_read_with_room_for_another_line_is_complete() -> None:
     assert await api.get_active_connections() == 20
     assert api.last_conntrack_count_complete is True
 
+
+def test_f2_no_count_is_unknown_for_the_sensor_and_ni_not_zero() -> None:
+    """A timed-out or unreadable table gave 0 (complete None) to the sensor."""
+    none = SimpleNamespace(active_connections=0, active_connections_complete=None)
+    assert _sensor_value(none) is None
+    assert infra_snapshot(none).conntrack is None

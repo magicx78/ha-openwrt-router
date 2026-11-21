@@ -2316,8 +2316,8 @@ def infra_snapshot(
     clock = (getattr(data, "localtime", None), getattr(data, "localtime_at", None))
     clock_ok = _finite(clock[0]) and _finite(clock[1])
     conntrack = getattr(data, "active_connections", None)
-    if getattr(data, "active_connections_complete", None) is False:
-        conntrack = None  # a cut-off table read: a lower bound, no count
+    if getattr(data, "active_connections_complete", None) is not True:
+        conntrack = None  # cut off (a lower bound) or no count at all (1.49.3)
     services = getattr(data, "service_instances", None)
     wan = getattr(data, "wan_status", None)
     if not (isinstance(wan, dict) and wan.get("wan_found") is True):
