@@ -1194,9 +1194,11 @@ export function formatRelative(iso: string | null, now: number): string {
 
 export function formatBytes(n: number | null): string {
   if (n === null) return '–';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toLocaleString('de-DE', { maximumFractionDigits: 1 })} KB`;
-  return `${(n / 1024 / 1024).toLocaleString('de-DE', { maximumFractionDigits: 1 })} MB`;
+  const steps: [number, string][] = [[1024 ** 4, 'TB'], [1024 ** 3, 'GB'], [1024 ** 2, 'MB'], [1024, 'KB']];
+  for (const [size, unit] of steps) {
+    if (n >= size) return `${(n / size).toLocaleString('de-DE', { maximumFractionDigits: 1 })} ${unit}`;
+  }
+  return `${n} B`;
 }
 
 export function shortHash(h: string | null): string {
