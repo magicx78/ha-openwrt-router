@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "node --test \"src/enterprise/config/*.test.mjs\" \"src/enterprise/security/*.test.mjs\" \"src/enterprise/diagnostics/*.test.mjs\""
+    "test": "node --test \"src/enterprise/config/*.test.mjs\" \"src/enterprise/security/*.test.mjs\" \"src/enterprise/diagnostics/*.test.mjs\" \"src/enterprise/wifi/*.test.mjs\""
   },
   "dependencies": {
     "react": "^18.3.1",

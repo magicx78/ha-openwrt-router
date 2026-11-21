@@ -364,3 +364,44 @@ test('no new chart library: the timeline is plain SVG', () => {
   assert.match(chart, /<svg/);
   assert.match(chart, /<polyline/);
 });
+
+// ── Roaming approval (403 path) ──────────────────────────────────────────
+
+test('roaming details: nothing loads before the tick and the confirm; a 403 ends in "Admin nötig"', async () => {
+  const { APPROVAL_INIT, approvalReduce, mayLoadDetails } = await import('./wifiLogic.ts');
+  let s = APPROVAL_INIT;
+  assert.equal(mayLoadDetails(true, s), false);
+  s = approvalReduce(s, { type: 'open' });
+  assert.equal(s.step, 'confirm');
+  assert.equal(approvalReduce(s, { type: 'submit' }).step, 'confirm'); // no tick, no request
+  assert.equal(mayLoadDetails(true, s), false);
+  s = approvalReduce(s, { type: 'ack', value: true });
+  s = approvalReduce(s, { type: 'submit' });
+  assert.equal(s.step, 'loading');
+  assert.equal(mayLoadDetails(true, s), true);
+  assert.equal(mayLoadDetails(false, s), false); // never for a non-admin
+  const ok = approvalReduce(s, { type: 'loaded' });
+  assert.equal(ok.step, 'approved');
+  const refused = approvalReduce(ok, { type: 'failed', error: new WifiApiError(403, 'authorization_denied') });
+  assert.equal(refused.step, 'refused');
+  assert.equal(mayLoadDetails(true, refused), false);
+  assert.match(errorInfo(refused.error).message, /Admin nötig/);
+  const down = approvalReduce(s, { type: 'failed', error: new WifiApiError(503, 'no_core') });
+  assert.equal(down.step, 'failed');
+  // after a refusal a new attempt starts with an unticked dialog
+  const again = approvalReduce(refused, { type: 'open' });
+  assert.deepEqual([again.step, again.ack], ['confirm', false]);
+  assert.equal(approvalReduce(again, { type: 'cancel' }).step, 'idle');
+});
+
+test('overview counts: without an evaluated radio the backend zeros are unknown', async () => {
+  const { overviewCounts } = await import('./wifiLogic.ts');
+  const nr = overviewCounts(parseOverview(S.overviewNotReady()));
+  assert.equal(nr[0].text, '0'); // "0 radios evaluated" is itself a fact
+  for (const c of nr.slice(1)) {
+    assert.equal(c.known, false, c.name);
+    assert.ok(c.text.startsWith(DASH));
+  }
+  const ok = overviewCounts(parseOverview(S.overviewReady()));
+  assert.deepEqual(ok.map(c => c.text), ['3', '12', '1', '0', '2']);
+});

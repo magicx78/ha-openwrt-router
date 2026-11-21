@@ -502,7 +502,7 @@ export const REASON_TEXT: Record<string, string> = {
   router_restart: 'der Router wurde neu gestartet',
   no_evaluation: 'noch keine Auswertung',
   // router state and reads (rf_center / rf_collector)
-  ok: 'in Ordnung',
+  ok: 'liefert Daten',
   no_data: 'noch keine Daten',
   not_ready: 'nicht bereit',
   source_unreachable: 'Quelle nicht erreichbar',
@@ -1012,4 +1012,79 @@ export function roamingSummary(view: RadiosView): { roams: SumView; problemClien
     flagged: sumOf(r.map(x => x.clients.flagged)),
     weak: sumOf(r.map(x => x.clients.weak)),
   };
+}
+
+// ── Roaming details: admin approval per panel session ────────────────────
+
+/**
+ * idle → confirm (dialog with an explicit tick) → loading (the one GET that
+ * makes the backend ask the Core guard) → approved; a 403 ends in refused
+ * ("Admin nötig"), any other error in failed. Nothing is fetched before the
+ * tick and the confirm click.
+ */
+export type ApprovalStep = 'idle' | 'confirm' | 'loading' | 'approved' | 'refused' | 'failed';
+
+export interface ApprovalState {
+  step: ApprovalStep;
+  ack: boolean;
+  error: unknown;
+}
+
+export type ApprovalEvent =
+  | { type: 'open' }
+  | { type: 'ack'; value: boolean }
+  | { type: 'cancel' }
+  | { type: 'submit' }
+  | { type: 'loaded' }
+  | { type: 'failed'; error: unknown }
+  | { type: 'reset' };
+
+export const APPROVAL_INIT: ApprovalState = { step: 'idle', ack: false, error: null };
+
+export function approvalReduce(s: ApprovalState, e: ApprovalEvent): ApprovalState {
+  switch (e.type) {
+    case 'open':
+      return s.step === 'idle' || s.step === 'refused' || s.step === 'failed' ? { step: 'confirm', ack: false, error: null } : s;
+    case 'ack':
+      return s.step === 'confirm' ? { ...s, ack: e.value } : s;
+    case 'cancel':
+      return s.step === 'confirm' ? APPROVAL_INIT : s;
+    case 'submit':
+      return s.step === 'confirm' && s.ack ? { ...s, step: 'loading' } : s;
+    case 'loaded':
+      return s.step === 'loading' || s.step === 'approved' ? { step: 'approved', ack: true, error: null } : s;
+    case 'failed':
+      if (s.step !== 'loading' && s.step !== 'approved') return s;
+      return { step: errorInfo(e.error).kind === 'forbidden' ? 'refused' : 'failed', ack: false, error: e.error };
+    case 'reset':
+      return APPROVAL_INIT;
+    default:
+      return s;
+  }
+}
+
+/** Details may be requested: only an approved state of an admin session. */
+export function mayLoadDetails(admin: boolean, s: ApprovalState): boolean {
+  return admin && (s.step === 'loading' || s.step === 'approved');
+}
+
+// ── Overview counts ──────────────────────────────────────────────────────
+
+/**
+ * The backend sends 0 conflicts / recommendations / clients when no radio
+ * was evaluated; without a radio those are unknown, not 0.
+ */
+export function overviewCounts(o: Overview): { name: string; text: string; known: boolean }[] {
+  const evaluated = o.counts.radios !== null && o.counts.radios > 0;
+  const c = (name: string, v: number | null, needsRadios = true) => {
+    const known = v !== null && (!needsRadios || evaluated);
+    return { name, text: known ? fmtNum(v, 0) : `${DASH} keine Daten`, known };
+  };
+  return [
+    c('Ausgewertete Radios', o.counts.radios, false),
+    c('Clients', o.counts.clients),
+    c('Kanalkonflikte', o.counts.conflicts),
+    c('davon gemessen', o.counts.conflictsMeasured),
+    c('Empfehlungen', o.counts.recommendations),
+  ];
 }
