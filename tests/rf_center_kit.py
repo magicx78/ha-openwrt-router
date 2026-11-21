@@ -228,3 +228,41 @@ async def poll(center: RfCenter, coordinator: FakeCoordinator, data: Any) -> Non
     """One poll: the listener fires, then the RF round (if any) finishes."""
     coordinator.poll(data)
     await center.async_wait_rounds()
+
+
+# --- measured scenario (read API, W6) ---------------------------------------------------
+
+
+def busy_status(step: int, busy_pct: float = 80.0) -> dict[str, Any]:
+    """hostapd get_status after ``step`` reads: ``busy_pct`` of the airtime busy."""
+    out = load("hostapd_get_status_mt76_a.json")
+    out["airtime"]["time"] += step * 300_000
+    out["airtime"]["time_busy"] += int(step * 300_000 * busy_pct / 100)
+    return out
+
+
+def assoc(step: int) -> dict[str, Any]:
+    """The mt76 assoclist after ``step`` polls: 1000 packets, 300 retries each."""
+    out = load("iwinfo_assoclist_mt76.json")
+    for station in out["results"]:
+        station["tx"]["packets"] += step * 1000
+        station["tx"]["retries"] += step * 300
+    return out
+
+
+async def measured_center(polls: int = 10) -> tuple[RfCenter, Reader]:
+    """A ready center whose radio1 (``phy1-ap0``) is 80 % busy, retries 0.3."""
+    coordinator = FakeCoordinator()
+    center, clock, reader = await new_center(
+        rf_hass(), (entry("e1", options("get_status", "assoclist")), coordinator)
+    )
+    clients = [client(MAC_A), client(MAC_B)]
+    for step in range(polls):
+        reader.answers[("get_status", "phy1-ap0")] = busy_status(step)
+        reader.answers[("assoclist", "phy1-ap0")] = assoc(step)
+        await poll(
+            center, coordinator, poll_data(uptime=1000 + 300 * step, clients=clients)
+        )
+        clock.advance(300)  # the read floor of the extra reads
+    reader.calls.clear()
+    return center, reader

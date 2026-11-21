@@ -261,7 +261,7 @@ def diag_view(hour: dict[str, Any], week: dict[str, Any] | None = None) -> dict:
 
 
 class FakeRf:
-    """Test double of a WiFi RF center (the W6 read API; see test_traffic_rf_adapter for main)."""
+    """Test double of the WiFi RF read API (W6; the real one: test_traffic_rf_adapter)."""
 
     def __init__(
         self,
@@ -271,7 +271,9 @@ class FakeRf:
         self.radios = radios
         self.retries = retries or {}
 
-    def radio_utilization(self, router_id: str, window_s: int) -> dict:
+    def radio_utilization(
+        self, router_id: str, window_s: int, interfaces: Any = ()
+    ) -> dict:
         return self.radios if router_id == RID else {}
 
     def client_retry_rates(self, router_id: str, window_s: int) -> dict:

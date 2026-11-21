@@ -27,6 +27,21 @@ Rules:
   panel session; the policy (``rf_guard.rf_policy_denial``) is checked
   before every read.
 * No network access here: router reads go through ``api.py`` only.
+
+**Read API for other modules** (wish W6 of Traffic Analytics, version
+:data:`READ_API_VERSION`): :meth:`RfCenter.radio_utilization` and
+:meth:`RfCenter.client_retry_rates`. Both only read what the last
+evaluation already holds (no router call, no store access) and return plain
+dicts. The radio identity is ``(router_id, radio_id)`` with the UCI radio
+name (:class:`rf_identity.RadioRef`), never a kernel interface name. To link
+a radio with points of another module that know their AP interface name,
+the caller passes the names it already has (``interfaces``); an entry lists
+only those of them that belong to the radio, so RF never reveals an AP name
+the caller did not know. Clients appear as ``client_ref`` only (Core
+pseudonym with the ``wifi_rf`` module key), never as a MAC. Every value
+carries its ``measured_at``; unknown is ``None`` with a ``reason``, never 0.
+Off or not ready, both return an empty dict (the caller reads ``status``
+and ``not_ready_reasons()`` for the why).
 """
 
 from __future__ import annotations
@@ -36,7 +51,7 @@ import functools
 import logging
 import time
 from collections import OrderedDict, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -60,6 +75,7 @@ from .rf_collector import (
 )
 from .rf_evaluate import (
     SIGNAL_WINDOW_S,
+    UTIL_WINDOW_S,
     FleetResult,
     PollInput,
     RadioInput,
@@ -118,6 +134,14 @@ CLIENTS_TRACKED_MAX = 2048
 EVENTS_PER_EVALUATION_MAX = 20
 MODULE_KEY_MIN_BYTES = 32
 _FLUSH_KEY = f"{DATA_WIFI_RF_CENTER}_flush"
+# Read API for other modules (W6, see the module docstring).
+READ_API_VERSION = 1
+READ_INTERFACES_MAX = 64
+READ_STATE_MEASURED = "measured"
+READ_STATE_UNKNOWN = "unknown"
+READ_REASON_STALE = "older_than_window"
+READ_REASON_NOT_MEASURED = "utilization_not_measured"
+READ_REASON_NO_VALID_SAMPLE = "no_valid_sample"
 _COUNTERS = (
     "polls",
     "polls_off",
@@ -876,6 +900,124 @@ class RfCenter:
     def roam_count(self, ref: RadioRef, now: float, window_s: float = 3600.0) -> int:
         """Roams onto a radio in the last ``window_s`` (no client identity)."""
         return sum(1 for ts in self._roam_times.get(ref, ()) if now - ts <= window_s)
+
+    # -- read API for other modules (W6) ------------------------------------------------
+
+    def _readable(self, router_id: Any, window_s: Any) -> float | None:
+        """Oldest accepted ``measured_at`` (None: nothing to read)."""
+        if self.status != STATUS_READY:
+            return None
+        if not isinstance(router_id, str) or isinstance(window_s, bool):
+            return None
+        if not isinstance(window_s, int | float) or window_s <= 0:
+            return None
+        return self.clock() - float(window_s)
+
+    def radio_utilization(
+        self, router_id: str, window_s: float, interfaces: Iterable[str] = ()
+    ) -> dict[str, dict[str, Any]]:
+        """``radio_id`` -> channel utilization of each radio of ``router_id``.
+
+        Read only, from the last evaluation (no router call). The figures are
+        those of RF's own window (``window_s`` in the entry, one hour);
+        ``window_s`` here is the maximum age of the evaluation that is still
+        accepted, an older one is ``unknown``/``older_than_window``.
+        ``interfaces``: AP interface names the caller already knows (at most
+        :data:`READ_INTERFACES_MAX`); each entry lists those of them that
+        belong to the radio under ``interfaces``, nothing else. Empty while
+        off or not ready.
+        """
+        oldest = self._readable(router_id, window_s)
+        if oldest is None:
+            return {}
+        asked: set[str] = set()
+        for name in interfaces if not isinstance(interfaces, str) else ():
+            if len(asked) >= READ_INTERFACES_MAX:
+                break
+            if isinstance(name, str) and 0 < len(name) <= 64:
+                asked.add(name)
+        out: dict[str, dict[str, Any]] = {}
+        for ref, result in list(self.results.items()):
+            if ref.router_id != router_id:
+                continue
+            fresh = result.measured_at >= oldest
+            summary = result.summary if fresh else None
+            reason: str | None = None
+            if not fresh:
+                reason = READ_REASON_STALE
+            elif summary is None:
+                reason = READ_REASON_NOT_MEASURED
+            elif summary.mean is None and summary.sustained_overload is None:
+                reason = READ_REASON_NO_VALID_SAMPLE
+            known = summary is not None and reason is None
+            out[ref.radio_id] = {
+                "v": READ_API_VERSION,
+                "router_id": ref.router_id,
+                "radio_id": ref.radio_id,
+                "band": result.radio.band,
+                "state": READ_STATE_MEASURED if known else READ_STATE_UNKNOWN,
+                "reason": reason,
+                "measured_at": result.measured_at,
+                "window_s": UTIL_WINDOW_S,
+                "current": summary.current if known else None,
+                "mean": summary.mean if known else None,
+                "peak": summary.peak if known else None,
+                "valid_count": summary.valid_count if known else None,
+                "coverage": summary.coverage if known else None,
+                "sustained_overload": summary.sustained_overload if known else None,
+                "interfaces": sorted(asked.intersection(result.radio.devices)),
+            }
+        return out
+
+    def client_retry_rates(
+        self, router_id: str, window_s: float
+    ) -> dict[str, dict[str, Any]]:
+        """``client_ref`` -> retry rate (retries per sent packet) of ``router_id``.
+
+        Read only, from the last evaluation (no router call). ``client_ref``
+        is the Core pseudonym with the ``wifi_rf`` module key (no MAC);
+        ``radio_id`` names the radio the client was on. ``value`` is set only
+        for a fresh measurement, otherwise None with ``reason`` (the metric
+        state, or ``older_than_window``). A client seen on two radios keeps
+        the newer entry. Empty while off or not ready.
+        """
+        oldest = self._readable(router_id, window_s)
+        key = self.module_key
+        if oldest is None or key is None:
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for ref, result in list(self.results.items()):
+            if ref.router_id != router_id:
+                continue
+            fresh = result.measured_at >= oldest
+            for assessment in result.assessments:
+                if len(out) >= CLIENTS_TRACKED_MAX:
+                    return out
+                try:
+                    pseudonym = client_ref(assessment.client_mac, key)
+                except ValueError:
+                    continue
+                metric = assessment.retry_rate
+                measured = fresh and metric.is_measured
+                at = metric.measured_at
+                if at is None:
+                    at = result.measured_at
+                before = out.get(pseudonym)
+                if before is not None and before["measured_at"] >= at:
+                    continue
+                out[pseudonym] = {
+                    "v": READ_API_VERSION,
+                    "router_id": ref.router_id,
+                    "radio_id": ref.radio_id,
+                    "value": metric.value if measured else None,
+                    "state": metric.state.value if fresh else READ_STATE_UNKNOWN,
+                    "source": metric.source,
+                    "reason": None
+                    if measured
+                    else (metric.state.value if fresh else READ_REASON_STALE),
+                    "measured_at": at,
+                }
+        return out
 
     # -- events ------------------------------------------------------------------------------
 

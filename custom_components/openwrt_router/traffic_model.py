@@ -31,7 +31,8 @@ POINT_ID_HEX: Final = 16
 _ROUTER_ID_RE: Final = re.compile(r"rtr_[0-9a-f]{32}")
 _CLIENT_REF_RE: Final = re.compile(r"cli_[0-9a-f]{16}")
 _POINT_ID_RE: Final = re.compile(r"tpt_[0-9a-f]{16}")
-_RADIO_ID_RE: Final = DEVICE_NAME_RE  # E7: AP netdev name until W6
+# E7: AP netdev name; the link to WiFi RF goes through its read API (W6).
+_RADIO_ID_RE: Final = DEVICE_NAME_RE
 
 
 class Scope(StrEnum):
