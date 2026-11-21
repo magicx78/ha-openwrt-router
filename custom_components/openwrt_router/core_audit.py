@@ -17,6 +17,12 @@ after a failure).
 Every suppression is counted (``stats``): deduplicated repeats, entries
 pushed out of a full ring, entries dropped by retention, failing listeners
 and bus errors.
+
+Both rings keep entries per owner (the core or a module, by type, see
+:func:`security_owner`): the security ring caps core and module entries
+separately (review M2); the general ring guarantees each owner a share
+(``AUDIT_CORE_SHARE``, ``AUDIT_MODULE_SHARE``) and, when full, drops the
+oldest entry of an owner above its share.
 """
 
 from __future__ import annotations
@@ -36,7 +42,9 @@ from . import core_store
 from .const import AUDIT_SAVE_DELAY_SECONDS, AUDIT_STORE_MINOR_VERSION
 from .core_masking import mask_for_output, pseudonymise_user_ids
 from .core_models import (
+    AUDIT_CORE_SHARE,
     AUDIT_MAX_EVENTS,
+    AUDIT_MODULE_SHARE,
     AUDIT_RETENTION_DAYS,
     AUDIT_STORE_KEY,
     CORE_STORE_VERSION,
@@ -66,10 +74,6 @@ _LOGGER = logging.getLogger(__name__)
 # ``source`` of every event the core emits itself.
 CORE_SOURCE = "core"
 RETENTION = timedelta(days=AUDIT_RETENTION_DAYS)
-_RING_SIZES: Mapping[AuditRing, int] = {
-    AuditRing.GENERAL: AUDIT_MAX_EVENTS,
-    AuditRing.SECURITY: SECURITY_AUDIT_MAX_EVENTS,
-}
 # Open dedup windows (security review #7): windows that have passed are
 # pruned whenever a new scope opens; above this many the oldest windows are
 # dropped (counted in stats["dedup_scopes_dropped"], logged). A dropped
@@ -78,12 +82,17 @@ MAX_DEDUP_SCOPES = 4096
 
 
 def security_owner(event: CoreEvent) -> str:
-    """Who an entry of the security ring belongs to (review M2).
+    """Who an audit entry belongs to (review M2; both rings).
 
     By type, not by ``source``: only the core emits core types, so a module
     can never make its entries count as core entries.
     """
     return CORE_SOURCE if is_core_event_type(event.type) else event.source
+
+
+def general_share(owner: str) -> int:
+    """Guaranteed entries of ``owner`` on the general ring (see core_models)."""
+    return AUDIT_CORE_SHARE if owner == CORE_SOURCE else AUDIT_MODULE_SHARE
 
 
 def migrate_audit_store(
@@ -136,6 +145,10 @@ class AuditLog:
         self._security_counts: dict[str, int] = {}
         self._module_evicted: dict[str, int] = {}
         self._module_evict_warned: set[str] = set()
+        # general ring: entries per owner and entries dropped per owner
+        # (core included) when the full ring made room
+        self._general_counts: dict[str, int] = {}
+        self._general_evicted: dict[str, int] = {}
         self.loaded = False
         self.load_failed = False
         self.backed_up = False
@@ -231,20 +244,20 @@ class AuditLog:
                     continue
                 items.append(event)
             items.sort(key=lambda e: e.ts)
+            # replayed through the same quotas as new entries (M2); stores
+            # written before the quotas have the same layout. On the general
+            # ring nothing goes while it is not full: an owner above its
+            # share in an old store loses entries only as new ones arrive.
+            self._rings[ring] = deque()
             if ring is AuditRing.SECURITY:
-                # replayed through the same quotas as new entries (M2); a
-                # store written before M2 has the same layout
-                self._rings[ring] = deque()
                 self._security_counts = {}
                 for event in items:
                     self._append_security(event)
-                items = list(self._rings[ring])
             else:
-                size = _RING_SIZES[ring]
-                if len(items) > size:
-                    self.stats[f"evicted_{ring.value}"] += len(items) - size
-                    items = items[-size:]
-                self._rings[ring] = deque(items)
+                self._general_counts = {}
+                for event in items:
+                    self._append_general(event)
+            items = list(self._rings[ring])
             for event in items:
                 scope = event.dedup_scope
                 if scope is not None:
@@ -543,15 +556,46 @@ class AuditLog:
         return None
 
     def _append(self, event: CoreEvent) -> None:
-        ring_name = event.audit_ring
-        if ring_name is AuditRing.SECURITY:
+        if event.audit_ring is AuditRing.SECURITY:
             self._append_security(event)
-            return
-        ring = self._rings[ring_name]
-        if len(ring) >= _RING_SIZES[ring_name]:
-            ring.popleft()
-            self.stats[f"evicted_{ring_name.value}"] += 1
+        else:
+            self._append_general(event)
+
+    def _append_general(self, event: CoreEvent) -> None:
+        """General ring: a guaranteed share per owner, hard total.
+
+        While the ring has room nothing goes. When it is full
+        (AUDIT_MAX_EVENTS), the oldest entry of an owner above its share
+        (general_share, the new entry counted) goes, so an owner at or below
+        its share never loses an entry to another one. Only when more modules
+        write than the shares cover (AUDIT_SHARED_MODULES) can nobody be above
+        his share; then, as on the security ring, the module with the most
+        entries loses its oldest one, never the core. Every dropped entry is
+        counted (``evicted_general``, per owner in ``general_evicted``).
+        """
+        owner = security_owner(event)
+        counts = self._general_counts
+        ring = self._rings[AuditRing.GENERAL]
+        if len(ring) >= AUDIT_MAX_EVENTS:
+            after = dict(counts)
+            after[owner] = after.get(owner, 0) + 1
+            victims = {o for o, c in after.items() if c > general_share(o)}
+            if not victims:
+                largest = max(
+                    (c for o, c in after.items() if o != CORE_SOURCE), default=0
+                )
+                victims = {
+                    o for o, c in after.items() if o != CORE_SOURCE and c == largest
+                }
+            dropped = self._evict_owner(AuditRing.GENERAL, counts, victims)
+            if dropped is None:  # defensive: counts out of step with the ring
+                dropped = security_owner(ring[0])
+                ring.popleft()
+                self._count_down(counts, dropped)
+            self.stats["evicted_general"] += 1
+            self._general_evicted[dropped] = self._general_evicted.get(dropped, 0) + 1
         ring.append(event)
+        counts[owner] = counts.get(owner, 0) + 1
 
     def _append_security(self, event: CoreEvent) -> None:
         """Security ring: core and module entries have separate quotas (M2).
@@ -590,21 +634,28 @@ class AuditLog:
 
     def _evict_security(self, owners: set[str]) -> str | None:
         """Drop the oldest security entry of one of ``owners``; its owner."""
-        ring = self._rings[AuditRing.SECURITY]
+        return self._evict_owner(AuditRing.SECURITY, self._security_counts, owners)
+
+    def _evict_owner(
+        self, ring_name: AuditRing, counts: dict[str, int], owners: set[str]
+    ) -> str | None:
+        """Drop the oldest entry of one of ``owners`` from a ring; its owner."""
+        ring = self._rings[ring_name]
         for index, stored in enumerate(ring):
             owner = security_owner(stored)
             if owner in owners:
                 del ring[index]
-                self._count_down(owner)
+                self._count_down(counts, owner)
                 return owner
         return None
 
-    def _count_down(self, owner: str) -> None:
-        left = self._security_counts.get(owner, 0) - 1
+    @staticmethod
+    def _count_down(counts: dict[str, int], owner: str) -> None:
+        left = counts.get(owner, 0) - 1
         if left > 0:
-            self._security_counts[owner] = left
+            counts[owner] = left
         else:
-            self._security_counts.pop(owner, None)
+            counts.pop(owner, None)
 
     def _note_module_evicted(self, module: str) -> None:
         self.stats["module_security_evicted"] += 1
@@ -628,8 +679,12 @@ class AuditLog:
             while ring and ring[0].ts < cutoff:
                 expired = ring.popleft()
                 self.stats["expired"] += 1
-                if name is AuditRing.SECURITY:
-                    self._count_down(security_owner(expired))
+                counts = (
+                    self._security_counts
+                    if name is AuditRing.SECURITY
+                    else self._general_counts
+                )
+                self._count_down(counts, security_owner(expired))
 
     def _publish(self, event: CoreEvent) -> bool:
         # The bus event reaches the recorder and the logbook: user ids go
@@ -750,6 +805,13 @@ class AuditLog:
             },
             "security_module_total": self._module_total(),
             "security_module_evicted": dict(sorted(self._module_evicted.items())),
+            "general_core_entries": self._general_counts.get(CORE_SOURCE, 0),
+            "general_module_entries": {
+                m: c
+                for m, c in sorted(self._general_counts.items())
+                if m != CORE_SOURCE
+            },
+            "general_evicted": dict(sorted(self._general_evicted.items())),
             **self.stats,
         }
 
