@@ -11,3 +11,24 @@ create_config_backup:
       example: "Before the VLAN change"
       selector:
         text:
+
+time_machine_forget_client:
+  fields:
+    mac:
+      required: false
+      example: "aa:bb:cc:dd:ee:ff"
+      selector:
+        text:
+    client:
+      required: false
+      example: "tmc_0123456789abcdef"
+      selector:
+        text:
+
+time_machine_clear_history:
+  fields:
+    clients_only:
+      required: false
+      default: false
+      selector:
+        boolean:

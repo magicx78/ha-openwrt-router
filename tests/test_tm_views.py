@@ -43,6 +43,7 @@ import custom_components.openwrt_router as integration
 from custom_components.openwrt_router import net_engine, tm_query, tm_sources, tm_views
 from custom_components.openwrt_router.config_api import ConfigurationApi
 from custom_components.openwrt_router.const import (
+    DATA_TIME_MACHINE_ENGINE,
     DATA_TIME_MACHINE_STATS,
     DATA_TIME_MACHINE_VIEWS_BOUND,
     OPTION_TIME_MACHINE_ENABLED,
@@ -57,6 +58,7 @@ from custom_components.openwrt_router.net_engine import async_get_net_intelligen
 from custom_components.openwrt_router.security_center import (
     async_release_security_center,
 )
+from custom_components.openwrt_router.tm_engine import TimeMachine
 from custom_components.openwrt_router.topology_panel import (
     _PANEL_ACCESS_KEY,
     _PANEL_VIEW_DISABLED_KEY,
@@ -169,7 +171,14 @@ async def full_env(core_disks: Any, tmp_path: Any, *, on: bool = True) -> Any:
     flap_wan(engine, start, 6)
     wrong_keys(engine, start + 400, 1)
     env.entries[0].options[OPTION_TIME_MACHINE_ENABLED] = on
-    return SimpleNamespace(env=env, center=center, engine=engine, start=start)
+    # 1.51.0: switched on, the own index runs as after a setup (its marks
+    # carry the scenario's clock)
+    tm = None
+    if on:
+        tm = TimeMachine(env.hass, clock=lambda: env.clock.utc().timestamp())
+        env.hass.data[DATA_TIME_MACHINE_ENGINE] = tm
+        await tm.async_start(clients=False)
+    return SimpleNamespace(env=env, center=center, engine=engine, start=start, tm=tm)
 
 
 def around(world: Any, days: float = 1.0) -> dict[str, str]:
@@ -180,6 +189,9 @@ def around(world: Any, days: float = 1.0) -> dict[str, str]:
 
 
 async def close(world: Any) -> None:
+    if getattr(world, "tm", None) is not None:
+        world.env.hass.data.pop(DATA_TIME_MACHINE_ENGINE, None)
+        await world.tm.async_stop("unloaded")
     await stop(world.env)
     await async_release_security_center(world.env.hass, world.env.entries[0].entry_id)
 
@@ -196,7 +208,7 @@ def listeners(world: Any) -> tuple[int, ...]:
 
 
 def test_one_get_route_that_needs_a_login() -> None:
-    [view] = tm_views.TIME_MACHINE_VIEWS
+    view = tm_views.TIME_MACHINE_VIEWS[0]  # 1.51.0: the sessions route follows
     assert view.url == "/api/openwrt_router/enterprise/timemachine/timeline"
     assert view.name == "api:openwrt_router:enterprise:timemachine:timeline"
     assert view.requires_auth is True
@@ -318,6 +330,10 @@ async def test_off_answers_off_and_reads_registers_and_stores_nothing(
         "omitted_client_marks": 0,
         "truncated": False,
         "next_until": None,
+        # additive (1.51.0)
+        "next_cursor": None,
+        "spanning": [],
+        "spanning_truncated": False,
     }
     assert plain.data["status"] == "off"
     hass.data.pop(_PANEL_ACCESS_KEY)
@@ -346,13 +362,20 @@ async def test_admin_gets_every_source_merged_and_private(core_disks, tmp_path) 
     body = resp.data
     assert body["v"] == 1 and body["status"] == "ok"
     states = {s["id"]: s["state"] for s in body["sources"]}
-    assert states == dict.fromkeys(tm_sources.SOURCE_IDS, "ok")
+    assert states == {
+        **dict.fromkeys(tm_sources.SOURCE_IDS, "ok"),
+        # 1.51.0: the own index (its start mark), no audit entry since its
+        # start, client histories off
+        "tm_index": "ok",
+        "tm_refs": "empty",
+        "tm_clients": "off",
+    }
     kinds = {m["kind"] for m in body["marks"]}
     assert {"config_drift", "config_version", "config_event", "wan_event"} <= kinds
     assert body["omitted_client_marks"] >= 1  # the client with the wrong key
     assert {s["id"]: s["count"] for s in body["sources"]} == {
         src: sum(1 for m in body["marks"] if m["source"] == src)
-        for src in tm_sources.SOURCE_IDS
+        for src in tm_sources.ALL_SOURCE_IDS
     }
     routers = {m["router_id"] for m in body["marks"]} - {None}
     assert routers == {world.env.rid}
@@ -576,9 +599,10 @@ async def test_setup_registers_the_route_once_and_never_fails() -> None:
     ):
         assert await integration.async_setup_entry(hass, entry) is True
         assert await integration.async_setup_entry(hass, entry) is True
-        assert hass.http.register_view.call_count == 1
+        assert hass.http.register_view.call_count == 2  # timeline + sessions
         assert hass.data[DATA_TIME_MACHINE_VIEWS_BOUND] == {
-            tm_views.TimeMachineTimelineView.name
+            tm_views.TimeMachineTimelineView.name,
+            tm_views.TimeMachineSessionsView.name,
         }
         broken = MagicMock()
         broken.data = {}

@@ -879,6 +879,11 @@ class NetIntelligence:
             )
         return stored
 
+    @property
+    def topology(self) -> Topology:
+        """The current router tree (read-only; Network Time Machine)."""
+        return self._topology
+
     # -- poll observers (client stability) ------------------------------------------
 
     def add_poll_observer(self, observer: PollObserver) -> Callable[[], None]:

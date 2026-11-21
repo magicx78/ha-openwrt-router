@@ -217,14 +217,15 @@ def test_the_texts_are_plain_sentences_without_codes() -> None:
 
 
 def test_states_reasons_groups_sources_and_severities_have_texts() -> None:
-    assert set(_table("SOURCE_TEXT")) == set(tm_sources.SOURCE_IDS)
+    # 1.51.0: the own index's sources and the reason clients_off joined the tables
+    assert set(_table("SOURCE_TEXT")) == set(tm_sources.ALL_SOURCE_IDS)
     assert set(_table("STATE_TEXT")) == {
         tm_sources.STATE_OK,
         tm_sources.STATE_EMPTY,
         tm_sources.STATE_OFF,
         tm_sources.STATE_UNREADABLE,
     }
-    assert set(_table("REASON_TEXT")) == set(tm_sources.REASONS)
+    assert set(_table("REASON_TEXT")) == set(tm_sources.ALL_REASONS)
     assert set(_table("GROUP_TEXT")) == set(tm_sources.KIND_GROUP.values())
     assert set(_table("SEVERITY_TEXT")) == set(tm_sources.SEVERITIES)
 

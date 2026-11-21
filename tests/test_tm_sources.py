@@ -100,6 +100,15 @@ MARK_KEYS = {
     "params",
     "ref",
     "derived",
+    # additive in 1.51.0 (Phases B/C): None on the Phase A sources
+    "code",
+    "end",
+    "end_state",
+    "client",
+    "client_name",
+    "peers",
+    # additive in 1.51.0: False on the Phase A sources
+    "spans_in",
 }
 REF_KEYS = {"module", "type", "id", "version_id"}
 
@@ -153,7 +162,7 @@ def test_vocabulary_is_fixed_and_consistent() -> None:
         "ni_incidents",
         "security_timeline",
     )
-    assert set(src.READERS) == set(src.SOURCE_IDS)
+    assert set(src.READERS) == set(src.ALL_SOURCE_IDS)
     assert src.SEVERITIES == ("info", "warning", "critical")
     assert len(set(src.KINDS)) == len(src.KINDS)
     groups = set(src.KIND_GROUP.values())

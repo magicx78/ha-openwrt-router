@@ -4,13 +4,20 @@
    blue, warning amber, critical red); an empty list is neutral, never green.
    Narrow layout down to 360 px: the filter bar wraps (never scrolls
    sideways), and below the width a timeline row needs, every mark becomes a
-   card (container query, the Network Diagnostics history pattern). */
+   card (container query, the Network Diagnostics history pattern). The
+   client sessions (1.51.0) follow the same pattern with their own container. */
 
 .tm { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .tm .cfg-badge { white-space: normal; }
 .tm-stand { color: var(--text-muted); }
 .tm-loading { padding: 4px 0; }
 .tm-off { flex-direction: column; align-items: flex-start; }
+.tm-restart { flex-wrap: wrap; gap: 8px; }
+/* The view switch is a .tm-chips row directly in the column flex box .cfg,
+   where a flex-basis becomes a height: never the 260px of .tm-chips there
+   (1.51.0 review: the switch was 260 px tall). Higher specificity than
+   .tm-chips, so the order of the rules does not matter. */
+.tm-chips.tm-views { flex: 0 0 auto; }
 
 /* Filter bar */
 .tm-filters { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -27,15 +34,27 @@
   max-width: 100%; min-width: 0; min-height: 32px; padding: 4px 8px; font: inherit; font-size: 13px;
   color: var(--text-primary); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-xs);
 }
-.tm-field select:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; }
+/* Focus inside this tab only: #60a5fa on the chip background #0c1225 is
+   7.3:1 (the shared --border-focus, 50 % of #3b82f6, is 2.2:1);
+   checked in tmLayout.test.mjs. The other tabs keep theirs. */
+.tm .tm-chip:focus-visible,
+.tm .tm-field select:focus-visible,
+.tm .cfg-btn:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
 
 /* Sources row */
+.tm-sources-box { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.tm-sources__title { margin: 0; }
+.tm-sources__newest { font-weight: 500; color: var(--text-secondary); }
 .tm-sources { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 0; margin: 0; min-width: 0; }
 .tm-pill { font-weight: 500; }
 .tm-pill__name { font-weight: 700; }
 
 /* Timeline */
-.tm-list { display: flex; flex-direction: column; gap: 10px; min-width: 0; container: tmlist / inline-size; }
+/* One size container around the block before the window and the list, so
+   that both turn into cards (1.51.0 browser review: the block sat outside
+   the container and kept its six columns at 360 px). */
+.tm-timeline { display: flex; flex-direction: column; gap: 10px; min-width: 0; container: tmlist / inline-size; }
+.tm-list { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .tm-day { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .tm-day__title { margin: 0; }
 .tm-rows { list-style: none; display: flex; flex-direction: column; gap: 4px; padding: 0; margin: 0; min-width: 0; }
@@ -57,16 +76,60 @@
 .tm-sev--info { color: #93c5fd; }
 .tm-sev--warn { color: var(--amber); }
 .tm-sev--critical { color: var(--red); }
+/* Marks that began before the window: the time column holds date and time
+   (9.5em, 4.5em = 56.25 px more than the list). Their cards start earlier
+   (920 px) so that the title column at the last row width is never
+   narrower than the list's: list 861 - 20 - 60 - 500 = 281 px, block
+   921 - 20 - 60 - 556.25 = 284.75 px (12.5 px font; tmLayout.test.mjs). */
+.tm-spans .tm-mark { grid-template-columns: 9.5em 6.5em 8.5em minmax(0, 1fr) 9em 11em; }
+
+/* Client sessions: start, duration, client, router, band, changes */
+.tm-sessions { display: flex; flex-direction: column; gap: 10px; min-width: 0; container: tmsessions / inline-size; }
+.tm-session {
+  display: grid; align-items: baseline; gap: 4px 12px; padding: 7px 10px; min-width: 0;
+  grid-template-columns: 5em 9.5em minmax(0, 1fr) 9em 8.5em 6em;
+  border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03); font-size: 12.5px;
+}
+.tm-session > * { min-width: 0; }
+.tm-session__time { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.tm-session__client { display: inline-flex; flex-wrap: wrap; gap: 4px; color: var(--text-primary); font-weight: 600; }
+.tm-session__dur, .tm-session__band, .tm-session__roam { color: var(--text-secondary); }
+/* "Band unbekannt" (102.9 px in 12.5 px) stays on one line in its 8.5em
+   (106.25 px) column; the cards below let it wrap again */
+.tm-session__band { overflow-wrap: normal; white-space: nowrap; }
+/* A long router name takes at most two lines in a row (full name in title) */
+.tm-session__router {
+  color: var(--text-primary); display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
+
 .tm-more { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
 /* Narrow (below the six columns' width): each mark is a card. Line 1 time,
    severity and group; line 2 title; line 3 parameters; line 4 router and
    source. */
+@container tmlist (max-width: 920px) {
+  .tm-spans .tm-mark { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; padding: 8px 10px; }
+  .tm-spans .tm-mark__main { flex: 1 1 100%; gap: 3px; }
+  .tm-spans .tm-mark__router { flex: 0 1 auto; }
+  .tm-spans .tm-mark__source { flex: 1 1 auto; }
+}
+
 @container tmlist (max-width: 860px) {
   .tm-mark { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; padding: 8px 10px; }
   .tm-mark__main { flex: 1 1 100%; gap: 3px; }
   .tm-mark__router { flex: 0 1 auto; }
   .tm-mark__source { flex: 1 1 auto; }
+}
+
+/* Narrow: each session is a card. Line 1 start and duration; line 2 client;
+   line 3 router, band and changes. */
+@container tmsessions (max-width: 700px) {
+  .tm-session { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; padding: 8px 10px; }
+  .tm-session__client { flex: 1 1 100%; }
+  /* cards: the router name wraps in full again */
+  .tm-session__router { display: block; -webkit-line-clamp: unset; line-clamp: none; overflow: visible; }
+  .tm-session__band { white-space: normal; }
 }
 
 @media (max-width: 600px) {

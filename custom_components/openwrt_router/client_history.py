@@ -55,7 +55,7 @@ import logging
 import math
 import re
 from collections import deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 
@@ -777,6 +777,11 @@ class ClientHistory:
         self._mark: int | None = None
         # start of a fleet-wide blind window (no fresh list) during an ingest
         self._blind_from: float | None = None
+        # Optional observers (Network Time Machine, Phase C): told about each
+        # new transition and each forgotten MAC. None (the default) changes
+        # nothing; an observer's error is logged and never reaches the history.
+        self.on_transition: Callable[[str, Transition, str | None], None] | None = None
+        self.on_forget: Callable[[str], None] | None = None
 
     # --- reading -------------------------------------------------------------
 
@@ -943,7 +948,15 @@ class ClientHistory:
     def forget(self, mac: str) -> bool:
         """Drop all history of one MAC (exclusion, user request)."""
         key = normalize_mac(mac)
-        return key is not None and self._clients.pop(key, None) is not None
+        gone = key is not None and self._clients.pop(key, None) is not None
+        if gone and self.on_forget is not None:
+            try:
+                self.on_forget(key)
+            except Exception as err:  # noqa: BLE001 - an observer never breaks it
+                _LOGGER.warning(
+                    "client history observer failed: %s", type(err).__name__
+                )
+        return gone
 
     def remove_router(self, router: str) -> None:
         """Forget a router's client list; its clients become a gap next poll."""
@@ -1622,9 +1635,15 @@ class ClientHistory:
             return hint
         return max(found)[1]
 
-    @staticmethod
-    def _transition(c: _Client, tr: Transition) -> None:
+    def _transition(self, c: _Client, tr: Transition) -> None:
         c.transitions.append(tr)
+        if self.on_transition is not None:
+            try:
+                self.on_transition(c.mac, tr, c.band)
+            except Exception as err:  # noqa: BLE001 - an observer never breaks it
+                _LOGGER.warning(
+                    "client history observer failed: %s", type(err).__name__
+                )
 
     # --- persistence ---------------------------------------------------------------
 

@@ -2,7 +2,136 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
-## [Unreleased]
+## [1.51.0] - 2026-11-21
+
+Network Time Machine, Phasen B und C: Die Zeitreise hat einen **eigenen Verlauf, der
+HA-Neustarts übersteht**, und **Client-Verläufe hinter einem eigenen Schalter**, der
+standardmäßig aus ist. Weiterhin ist die ganze Time Machine **standardmäßig aus**; wer
+nichts einschaltet, bekommt keinen Store-Schreibvorgang, keinen Listener, keine Aufgabe, keinen
+Router-Aufruf und keine Entität (Test). Sichtbar ändert sich trotzdem: zwei neue Aktionen
+(„Client vergessen“, „Verlauf löschen“; bei ausgeschalteter Time Machine antworten sie mit
+einem Fehler), ein Kästchen mehr im Optionen-Dialog („Client-Verläufe“), und beim Speichern
+des Optionen-Dialogs bei ausgeschalteter Time Machine sowie beim Entfernen eines Routers wird
+die Datei `.storage/openwrt_router.time_machine` einmal gelesen (geschrieben nur, wenn sie
+Client- bzw. Router-Marken enthält; ohne Datei wird nichts geschrieben). **Wer die Time Machine
+schon in 1.50.0 eingeschaltet hat, bekommt mit dem Update automatisch den dauerhaften Verlauf
+auf der Festplatte:** Datei `.storage/openwrt_router.time_machine`, höchstens 2,5 MB, 14 Tage,
+ohne Client-Verläufe (deren Schalter ist aus). **Kein zusätzlicher Router-Aufruf:** Der Verlauf entsteht
+nur aus den Coordinator-Daten und den Ereignissen vorhandener Module (Test vergleicht die
+Aufrufliste zweier Polls mit allem an und allem aus). Gespeichert werden feste Codes, Zahlen,
+Router-Kennungen `rtr_…`, Zeitpunkte und bei Clients ein Pseudonym `tmc_…`; **nicht**
+gespeichert werden MAC- und IP-Adressen, Hostnamen, SSIDs, Netdev-Namen und freie Texte.
+Grenzen: 14 Tage Aufbewahrung, Kontingente Infrastruktur 3000 / Verweise 2000 / Clients
+10000 Marken, die einander nie verdrängen, höchstens 200 Marken je Client und Tag, Datei
+höchstens 2,5 MB (voller Speicher gemessen 1,63 MB). Entwicklerdoku: `docs/time-machine.md`,
+Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine5`.
+
+### Hinzugefügt
+
+- **Eigener Verlauf (Phase B).** Bei eingeschalteter Time Machine ein eigener Speicher
+  `openwrt_router.time_machine` mit Router-Ausfällen und Flottenausfällen als Intervall mit
+  Ende, Beobachtungslücken, HA-Lücken (sauber/unsauber), Kanal- und DFS-Wechseln, fehlenden
+  Funkmodulen, Uplink- und Rollenwechseln, Änderungen des Konfigurations-Fingerabdrucks,
+  Verweisen auf Audit-Einträge (bleiben sichtbar, wenn der Audit-Ring sie verdrängt hat),
+  Uhrsprüngen und täglichen Checkpoints. Verzögertes, gebündeltes Schreiben (höchstens alle
+  5 min, plus ein Lebenszeichen alle 15 min); eine kaputte oder neuere Datei bleibt als `.bak`,
+  offene Intervalle enden nach einem Neustart als „Ende unbekannt“. Ein voller Speicher
+  verdrängt zuerst abgeschlossene Marken, laufende Ausfälle und Sitzungen zuletzt.
+- **Client-Verläufe (Phase C)** hinter dem eigenen Schalter `time_machine_clients`
+  (Standard aus, einer für alle Router): Sitzungen je Client mit Router, Band, Wechseln und
+  Trennungen aus der Client-Stabilität. Hostname nur für Administratoren und nur, solange die
+  Client-Stabilität den Client kennt (nie gespeichert); über 200 Marken je Client und Tag
+  wird zusammengefasst. **Ausschalten löscht alle gespeicherten Client-Verläufe sofort.**
+- **Route `GET …/enterprise/timemachine/sessions`** (nur Administratoren): Sitzungen, die ein
+  Fenster überlappen, Filter `client`, `router_id`, Blättern über `cursor`/`next_cursor`
+  (`next_until` für ältere Clients).
+- **Blättern mit Cursor** (Zeitleiste und Sitzungen, additiv): Parameter `cursor`, Feld
+  `next_cursor` (`<ms>` oder `<ms>:<id>`, mit demselben Fenster zurückschicken). Damit geht
+  auch dann nichts verloren, wenn eine Millisekunde mehr Marken als `limit` hält (z. B.
+  Hunderte Sitzungen, die beim Einschalten zugleich beginnen; Test: 280 von 280 bei `limit`
+  200). Ohne Cursor bleibt `next_until` wie in 1.50.0 und sagt dann ehrlich `truncated: true`.
+- **Zeitleiste:** neue Quellen `tm_index`, `tm_refs` (nur Admins), `tm_clients` (nur Admins);
+  additive Felder je Marke `code`, `end`, `end_state`, `client`, `client_name`, `peers`,
+  `spans_in` und je Quelle `duplicates`; Grund `clients_off`. Intervalle, die vor dem Fenster
+  begannen und hineinreichen, kommen nur mit dem neuen Parameter `spans=1` im eigenen Feld
+  `spanning` (höchstens 200, `spanning_truncated`, nicht auf `limit` angerechnet), sonst nie.
+  Doppelte werden entfernt: das Audit gewinnt über seinen Verweis; ein NI-Ereignis fällt nur
+  weg, wenn der eigene Verlauf dieselbe Art am selben Router in zeitlicher Nähe (180 s, bei
+  Ausfällen das ganze Intervall) hält; im Zweifel bleibt es. `v` bleibt 1.
+- **Tab „Zeitreise“:** Quellen „Eigener Verlauf“, „Verweise“, „Client-Verläufe“ (die beiden
+  letzten für Nicht-Admins gesperrt), Zusatz „· n doppelt“; Dauer von Intervallen („Dauer
+  4 min 12 s“, „seit 14:03, noch offen“, „Ende unbekannt“). Die erste Seite fragt mit
+  `spans=1`; was vor dem Fenster begann und noch hineinreicht (`spanning`), steht oben im
+  eigenen Block **„Läuft seit vor dem Zeitfenster“** mit Datum und Uhrzeit des Beginns und
+  der bisherigen Dauer („noch offen, bisher 2 Tage 3 Std.“, „Dauer …“, „Ende unbekannt“);
+  bei `spanning_truncated` der Satz „Weitere laufen seit vor dem Zeitfenster; Zeitfenster
+  oder Filter enger wählen.“ Der Block bleibt beim Nachladen stehen und wird nur von einer
+  neuen ersten Seite ersetzt; bei schmaler Liste wird er wie die Liste zu Karten. **„Ältere laden“** blättert mit `cursor=<next_cursor>` im
+  selben Fenster und mit denselben Filtern (ohne `spans`), bis `next_cursor` fehlt; nie mehr
+  über `until=next_until`. Ein abgelehnter Cursor (400, Feld `cursor`) erscheint als „Die
+  Stelle zum Weiterblättern liegt nicht mehr im Zeitfenster. Bitte „Aktualisieren“.“;
+  „Ältere laden“ ist dann ausgeblendet, bis eine neue erste Seite geladen ist.
+  Titel für alle Arten des eigenen Verlaufs (32 neue, Test); Clients als „Client <Name>“ oder
+  „Client ·a1ce4d“, nie als MAC, das volle Pseudonym `tmc_…` steht im Tooltip (für „Client
+  vergessen“ mit `client`); Wechsel „von Router 1 nach Router 2“; Art-Chip „Clients“. Neue
+  Ansicht **„Client-Sitzungen“** nur für Administratoren (Umschalter „Zeitleiste |
+  Client-Sitzungen“): Zeitfenster, Router und Client wählbar, nach Tagen gruppiert, Beginn,
+  Dauer bzw. „noch verbunden“, Client, Router (lange Namen in der Zeile höchstens zwei Zeilen,
+  voller Name im Tooltip, in Karten ganz), Band und Wechsel, Karten bei schmaler Breite,
+  „Ältere laden“ (ebenfalls mit Cursor), alle Zustände (aus, Client-Verläufe aus, nicht
+  verfügbar mit Grund „Die Aufzeichnung läuft gerade nicht.“ bzw. „Der gespeicherte Verlauf
+  wird noch geladen.“, leer, Fehler). Hinweis „Viele neue Einträge: Die Liste beginnt neu.“,
+  wenn eine Aktualisierung die geladenen älteren Seiten nicht erreicht, und „Quellen
+  (neueste Seite)“ nach „Ältere laden“. Im Tab ein eigener, deutlich sichtbarer Fokusrahmen
+  (7,3:1 auf dem Chip-Hintergrund, Test); die anderen Tabs bleiben unverändert.
+- **Aktionen** `openwrt_router.time_machine_forget_client` (genau eines von `mac` oder dem
+  Pseudonym `client`; mit dem Pseudonym landet keine MAC in HAs eigenem Protokoll oder
+  Recorder) und `openwrt_router.time_machine_clear_history` (`clients_only`), nur für
+  Administratoren; der Tab bietet sie nicht an. Ein gerade verbundener Client wird nach dem
+  Vergessen ab seinem nächsten Verbinden oder Wechsel wieder aufgezeichnet. Nach jedem
+  Löschen von Client-Daten werden auch die Kopien `.bak`/`.corrupt.*` der Datei gelöscht.
+- **Router entfernen** löscht seine Marken aus dem eigenen Verlauf (wie bei der Network
+  Intelligence); alte Kopien `.bak`/`.corrupt.*` der Datei bleiben dabei für eine
+  Wiederherstellung liegen und können Marken des entfernten Routers enthalten.
+- Diagnose: Schalter, Zähler und Grenzen des eigenen Verlaufs.
+
+### Geändert
+
+- **Ausschalten der Time Machine löscht die Client-Verläufe**, auch wenn der Schalter
+  „Client-Verläufe“ an bleibt und auch, wenn gerade kein Verlauf läuft (vorher blieben sie dann
+  in der Datei). Gelöscht werden alle Marken mit Client-Pseudonym; Ausfälle, Lücken,
+  Änderungen, Verweise und Checkpoints bleiben. Der Optionen-Dialog sagt das (de/en).
+- **Lesegrenze der NI-Vorfälle:** an die tatsächliche Zahl gespeicherter Vorfälle gebunden;
+  sie werden ganz gelesen, auch wenn mehr aktive und bestätigte Vorfälle gespeichert sind als
+  die Obergrenze für behobene (Test).
+- Tab: der Hinweis zu ausgeblendeten Client-Ereignissen verspricht keine „spätere Version“
+  mehr, sondern nennt bei ausgeschalteten Client-Verläufen den Weg in die Optionen.
+- `client_engine.py` / `client_history.py`: Beobachter für Übergänge und Vergessen
+  (`add_transition_listener`); ohne Beobachter unverändert, mit Beobachter gleiche Buchungen
+  (Test), Fehler eines Beobachters erreichen die Historie nicht.
+- `net_engine.py`: schreibgeschützte Eigenschaft `topology`.
+- Die wirkungslose Konstante `SOURCE_MARK_CAP` und ihr Diagnosewert `source_mark_cap` sind
+  entfernt.
+
+### Bekannte Grenzen
+
+- **Solange die Time Machine aus ist, wird nichts gekürzt:** Der Verlauf von Ausfällen und
+  Änderungen bleibt in der Datei, bis sie wieder eingeschaltet wird (dann sofort auf 14 Tage
+  gekürzt) oder „Verlauf löschen“ läuft.
+- Offene Intervalle werden nicht nach 14 Tagen gekürzt.
+- Mehr als 200 Intervalle, die ins Fenster reichen: der Rest fehlt (`spanning_truncated`).
+- Waren beim HA-Start alle Router unerreichbar, endet die HA-Lücke beim Einrichten der
+  Integration; die Zeit bis zum ersten geladenen Router ist eine Beobachtungslücke
+  (`unloaded`), ein LAN-Ausfall darin wird nicht erkannt.
+- Nicht rückwirkend: Was vor dem Einschalten geschah, steht nur in den Phase-A-Quellen.
+- Client-Sitzungen nur, solange die Client-Stabilität läuft; Hostnamen nur aus ihr.
+- „Client vergessen“ löscht nur im Verlauf der Time Machine, nicht in anderen Modulen oder im
+  HA-Recorder.
+- Nach einem Absturz ist der Beginn der HA-Lücke nur auf etwa 15–20 min genau.
+- **Nicht an einer echten Instanz und nicht auf Routern geprüft**; alle Aussagen stammen aus
+  Tests mit Mocks. Der Tab wurde vor dem Merge dreimal headless in Firefox bei 360, 768 und
+  1280 px geprüft (dunkles Thema, Testserver mit nachgebildeten Antworten); das helle Thema
+  und eine echte Instanz nicht.
 
 ## [1.50.0] - 2026-11-21
 

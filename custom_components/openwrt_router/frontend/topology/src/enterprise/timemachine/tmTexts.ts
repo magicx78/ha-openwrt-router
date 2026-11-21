@@ -1,9 +1,11 @@
 /**
  * tmTexts.ts — German texts of the "Zeitreise" tab (Network Time Machine).
  *
- * TITLE_TEXT holds a text for every `title_key` the backend of Phase A can
- * produce (tm_sources.py). tests/test_tm_panel_texts_v1500.py collects the
- * keys from the backend itself and fails when one has no text here.
+ * TITLE_TEXT holds a text for every `title_key` the backend can produce
+ * (tm_sources.py; the own index of 1.51.0 in tm_engine.py, tm_clients.py and
+ * tm_marks.py). tests/test_tm_panel_texts_v1500.py and …_v1510.py collect
+ * the keys from the backend itself and fail when one has no text here. A
+ * key of the own index may carry a code variant (`<key>.<code>`).
  *
  * Fallback rule (titleOf in tmLogic.ts): a key without an entry shows the
  * server's `text` (only the Security Center sends one, already masked), else
@@ -281,15 +283,52 @@ export const TITLE_TEXT: Record<string, string> = {
   'security_timeline.traffic_indicator.unusual_traffic_volume': 'Ungewöhnliche Verkehrsmenge',
   'security_timeline.unknown': 'Eintrag des Security Center',
   'security_timeline.wifi_quota_reached': 'Anteil für WLAN-Hinweise ausgeschöpft',
+  // Eigener Verlauf (1.51.0): Schlüssel <Quelle>.<Art>, mit Code-Varianten
+  // <Quelle>.<Art>.<Code> (titleOf nimmt die Variante zuerst)
+  'tm_clients.client_disconnect': 'Getrennt',
+  'tm_clients.client_flapping': 'Sehr viele Wechsel (zusammengefasst)',
+  'tm_clients.client_roam': 'Gewechselt',
+  'tm_clients.client_session': 'Verbunden',
+  'tm_index.channel_changed': 'Kanal gewechselt',
+  'tm_index.channel_changed.dfs': 'Kanal gewechselt (Radar)',
+  'tm_index.clock_shift': 'Uhr verstellt',
+  'tm_index.clock_shift.backwards': 'Uhr zurückgestellt',
+  'tm_index.clock_shift.forwards': 'Uhr vorgestellt',
+  'tm_index.config_fingerprint_changed': 'Konfiguration verändert',
+  'tm_index.ha_gap': 'Home Assistant war aus',
+  'tm_index.ha_gap.unclean': 'Home Assistant war aus, nicht sauber beendet',
+  'tm_index.lan_down': 'Kein Router erreichbar',
+  'tm_index.lan_up': 'Router wieder erreichbar (ganzes Netz)',
+  'tm_index.observation_gap': 'Keine Daten',
+  'tm_index.observation_gap.unloaded': 'Keine Daten (Integration entladen)',
+  'tm_index.radio_down': 'Funkmodul fehlt',
+  'tm_index.radio_up': 'Funkmodul wieder da',
+  'tm_index.router_down': 'Router nicht erreichbar',
+  'tm_index.router_role_changed': 'Rolle gewechselt',
+  'tm_index.router_role_changed.gateway': 'Rolle gewechselt: Gateway',
+  'tm_index.router_role_changed.node': 'Rolle gewechselt: Knoten',
+  'tm_index.router_up': 'Router wieder erreichbar',
+  'tm_index.tm_cleared': 'Verlauf gelöscht',
+  'tm_index.tm_cleared.clients': 'Client-Verläufe gelöscht',
+  'tm_index.tm_disabled': 'Zeitreise ausgeschaltet',
+  'tm_index.tm_forgot_client': 'Client vergessen',
+  'tm_index.tm_started': 'Zeitreise gestartet',
+  'tm_index.tm_started.switched_on': 'Zeitreise eingeschaltet',
+  'tm_index.tm_store_recovered': 'Verlauf neu begonnen (Datei beschädigt)',
+  'tm_index.uplink_changed': 'Uplink gewechselt',
+  'tm_index.uplink_changed.uplink_lost': 'Uplink verloren',
 };
 
-/** Display names of the five sources (tm_sources.SOURCE_IDS). */
+/** Display names of the sources (tm_sources.ALL_SOURCE_IDS). */
 export const SOURCE_TEXT: Record<string, string> = {
   'core_audit': 'Audit',
   'config_versions': 'Konfiguration',
   'ni_events': 'Netzwerk-Ereignisse',
   'ni_incidents': 'Vorfälle',
   'security_timeline': 'Security Center',
+  'tm_index': 'Eigener Verlauf',
+  'tm_refs': 'Verweise',
+  'tm_clients': 'Client-Verläufe',
 };
 
 /** State of a source (shown as text, never as colour alone). */
@@ -309,6 +348,18 @@ export const REASON_TEXT: Record<string, string> = {
   'timeout': 'Zeitüberschreitung',
   'error': 'Fehler',
   'bad_format': 'unerwartetes Format',
+  'clients_off': 'in den Optionen einschalten',
+};
+
+/**
+ * Why the client sessions are not available (status "unavailable" of
+ * GET …/sessions; the reasons tm_query.sessions_page sends, checked by
+ * tests/test_tm_panel_texts_v1510.py). Whole sentences after "Client-Sitzungen
+ * sind noch nicht verfügbar.".
+ */
+export const UNAVAILABLE_TEXT: Record<string, string> = {
+  'not_running': 'Die Aufzeichnung läuft gerade nicht.',
+  'not_loaded': 'Der gespeicherte Verlauf wird noch geladen.',
 };
 
 /** Groups of the kinds (tm_sources.KIND_GROUP values). */
@@ -351,6 +402,25 @@ export const PARAM_TEXT: Record<string, string> = {
   'frequency': '{n} MHz',
   'gap_s': 'Lücke von {d}',
   'missed': '{n} Protokollzeilen verpasst',
+  // eigener Verlauf (1.51.0); {D} genaue Dauer, {g} Band, {to} Wert von *_to
+  'band': '{g}',
+  'channel_from': 'Kanal {n} → {to}',
+  'channel_to': 'Kanal {n}',
+  'width_from': 'Breite {n} → {to} MHz',
+  'width_to': 'Breite {n} MHz',
+  'dfs': 'wegen Radar',
+  'duration_s': 'Dauer {D}',
+  'off_s': 'vorher {D} aus',
+  'shift_s': 'um {D}',
+  'clean': 'sauber beendet',
+  'deleted': '{n} gelöscht',
+  'timed': 'per Zeitablauf erkannt',
+  'resumed': 'nach Neustart fortgesetzt',
+  'roam': '{n} Wechsel',
+  'gaps': '{n} Lücken',
+  'blips': '{n} kurze Aussetzer',
+  'suppressed': '{n} zusammengefasst',
+  'cap': 'Grenze {n} je Tag',
 };
 
 export const PARAM_ONE: Record<string, string> = {
@@ -361,4 +431,8 @@ export const PARAM_ONE: Record<string, string> = {
   'affected': '1 Gerät betroffen',
   'children': '1 Folgeereignis',
   'missed': '1 Protokollzeile verpasst',
+  'roam': '1 Wechsel',
+  'gaps': '1 Lücke',
+  'blips': '1 kurzer Aussetzer',
+  'deleted': '1 gelöscht',
 };

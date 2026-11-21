@@ -541,6 +541,9 @@ class ClientStability:
         self._memory_from: float | None = None
         self.last_save_bytes: int | None = None
         self.trimmed = 0
+        # Observers of the history's transitions (Network Time Machine,
+        # Phase C); none by default, so the history runs without hooks.
+        self._transition_listeners: list[Any] = []
 
     # -- store ------------------------------------------------------------------------
 
@@ -584,6 +587,43 @@ class ClientStability:
             stored.get("history"), self.settings["retention_days"]
         )
         self._ssid = ssids_from_store(stored.get("ssids"), self.history)
+        self._wire_history()
+
+    # -- transition observers (Time Machine, Phase C) --------------------------------
+
+    def add_transition_listener(self, listener: Any) -> Callable[[], None]:
+        """Tell ``listener.transition(mac, tr, band)`` about every new
+        transition and ``listener.forgot(mac)`` about every forgotten MAC
+        (sync, short); returns the remover. Read-only: the history books
+        exactly as without a listener."""
+        self._transition_listeners.append(listener)
+        self._wire_history()
+
+        def remove() -> None:
+            if listener in self._transition_listeners:
+                self._transition_listeners.remove(listener)
+            self._wire_history()
+
+        return remove
+
+    def _wire_history(self) -> None:
+        on = bool(self._transition_listeners)
+        self.history.on_transition = self._tell_transition if on else None
+        self.history.on_forget = self._tell_forget if on else None
+
+    def _tell_transition(self, mac: str, tr: Any, band: str | None) -> None:
+        for listener in tuple(self._transition_listeners):
+            try:
+                listener.transition(mac, tr, band)
+            except Exception as err:  # noqa: BLE001 - never breaks the history
+                _LOGGER.warning("transition listener failed (%s)", type(err).__name__)
+
+    def _tell_forget(self, mac: str) -> None:
+        for listener in tuple(self._transition_listeners):
+            try:
+                listener.forgot(mac)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("transition listener failed (%s)", type(err).__name__)
 
     async def _async_backup(self) -> None:
         path = getattr(self._store, "path", None)

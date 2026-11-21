@@ -22,7 +22,8 @@
           "traffic_sysfs_fallback": "Interface counters from sysfs as fallback (traffic_sysfs_fallback)",
           "traffic_offload_probe": "Check flow offloading once (traffic_offload_probe)",
           "traffic_history_profile": "Traffic history depth (traffic_history_profile)",
-          "time_machine_enabled": "Network Time Machine for all routers (time_machine_enabled)"
+          "time_machine_enabled": "Network Time Machine for all routers (time_machine_enabled)",
+          "time_machine_clients": "Client histories in the Time Machine (time_machine_clients)"
         },
         "data_description": {
           "extended_wifi_sensors": "Enables all per-radio, per-SSID (AP) and per-port sensors of this router at once instead of one by one. Turning it off disables only the sensors this switch enabled; sensors you disabled yourself are never touched. Takes effect after about 30 seconds.",
@@ -43,7 +44,8 @@
           "traffic_sysfs_fallback": "Reads interface counters from /sys/class/net at most every 5 minutes, only for interfaces the regular poll does not list. Needs traffic_enabled.",
           "traffic_offload_probe": "Reads the firewall flow offloading setting (uci get) every 6 hours, because offloaded traffic bypasses some counters. Needs traffic_enabled.",
           "traffic_history_profile": "Compact (default): 5-minute values for 6 hours, hourly for 14 days, daily for 31 days, no client history on disk. Standard: 5-minute values for 1 day, hourly for 14 days, daily for 90 days, client history kept (daily for 30 days); needs more storage. The deepest profile among the routers with traffic on applies to the whole fleet.",
-          "time_machine_enabled": "One switch for the whole fleet: switching it here switches it for every router. Shows past events of the existing modules (audit log, configuration versions, network intelligence, Security Center) on one timeline in the panel. Off by default. It only reads what these modules already keep: no extra router call, nothing stored of its own. No client events in this version; MAC addresses, IP addresses, host names and SSIDs are never shown. Users who are not administrators see infrastructure and disruptions only, and only while the panel is open to all users."
+          "time_machine_enabled": "One switch for the whole fleet: switching it here switches it for every router. Shows past events on one timeline in the panel: those the existing modules keep (audit log, configuration versions, network intelligence, Security Center) and its own history of outages, gaps, radio, uplink and configuration changes, kept for 14 days in a store of its own (at most 15000 marks, 2.5 MB). Off by default. No extra router call. MAC addresses, IP addresses, host names and SSIDs are never stored; MAC addresses, IP addresses and SSIDs are never shown. A host name is shown only to administrators, only with client histories on, and only while Client Stability still knows the client. Users who are not administrators see infrastructure and disruptions only, and only while the panel is open to all users. Switching it off stops recording and deletes all stored client histories at once, even if the client history switch stays on. The history of outages, gaps and changes stays stored; while the Time Machine is off it is not trimmed, only after the next switch-on again to 14 days.",
+          "time_machine_clients": "Separate switch, one for the whole fleet, off by default; only works while the Time Machine is on and Client Stability runs. Records which client was connected when, to which router and band, roaming and disconnects, for 14 days. Clients are stored only as pseudonyms (tmc_…), never with MAC, IP address, host name or SSID; at most 200 marks per client and day. Only administrators see client histories; the current host name is shown to them while Client Stability still knows the client. Switching this off deletes all stored client histories."
         }
       }
     }
@@ -481,6 +483,21 @@
     },
     "config_backup_invalid_note": {
       "message": "The note is too long or contains control characters."
+    },
+    "time_machine_off": {
+      "message": "The Network Time Machine is switched off."
+    },
+    "time_machine_invalid_mac": {
+      "message": "That is not a valid MAC address."
+    },
+    "time_machine_no_key": {
+      "message": "The Time Machine has no key for client pseudonyms right now; try again later."
+    },
+    "time_machine_mac_or_client": {
+      "message": "Give either the MAC address or the pseudonym of the client, not both."
+    },
+    "time_machine_invalid_client": {
+      "message": "That is not a valid client pseudonym (tmc_ followed by 16 hex digits)."
     }
   },
   "issues": {
@@ -539,6 +556,30 @@
         "note": {
           "name": "Note",
           "description": "Optional note stored with the version (at most 200 characters, no control characters). Never put passwords here."
+        }
+      }
+    },
+    "time_machine_forget_client": {
+      "name": "Time Machine: forget a client",
+      "description": "Deletes every Time Machine mark of one client (administrators only). Give the MAC address or the pseudonym, exactly one of both. A client that is connected right now is recorded again from its next connect or move. Other modules keep their own client data; the answer lists them.",
+      "fields": {
+        "mac": {
+          "name": "MAC address",
+          "description": "MAC address of the client. The Time Machine only uses it to find the pseudonym and does not store it, but Home Assistant itself may keep the action call with the MAC in its log or recorder. Use the pseudonym to avoid that."
+        },
+        "client": {
+          "name": "Pseudonym",
+          "description": "Pseudonym of the client as the Time Machine shows it (tmc_ followed by 16 hex digits). No MAC address leaves your input."
+        }
+      }
+    },
+    "time_machine_clear_history": {
+      "name": "Time Machine: clear history",
+      "description": "Deletes the Time Machine's own history (administrators only). The other modules keep theirs.",
+      "fields": {
+        "clients_only": {
+          "name": "Client histories only",
+          "description": "Delete only the client histories and keep outages, radio and configuration marks."
         }
       }
     }

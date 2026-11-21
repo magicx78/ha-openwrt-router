@@ -1,6 +1,11 @@
-# Network Time Machine (Phase A: Lese-Schnittstelle und Tab „Zeitreise“, ab 1.50.0)
+# Network Time Machine (Phase A ab 1.50.0; Phasen B und C ab 1.51.0: eigener Verlauf und Client-Sessions)
 
-<!-- Entwicklerdoku zu Phase A (1.50.0). Keine IPs, MACs,
+<!-- Entwicklerdoku zu Phase A (1.50.0) und den Phasen B/C (1.51.0,
+     Branch feature/time-machine-b; Abschnitte 15–19, additiv in den Abschnitten davor). Phasen B/C sind am Code von
+     tm_marks.py, tm_store.py, tm_engine.py, tm_clients.py gelesen und mit
+     tests/test_tm_index_v1510.py, test_tm_clients_v1510.py, test_tm_query_v1510.py geprüft
+     (Mocks, FakeDisks, ein Test schreibt eine echte Datei mit HAs Store); nicht auf Routern,
+     nicht in einer HA-Instanz; der Tab von 1.51.0 nur mit node-Tests, nicht im Browser. Keine IPs, MACs,
      Hostnamen echter Geräte, Passwörter oder Tokens; Router-Kennungen im Beispiel sind
      Platzhalter. Aussagen sind am Code gelesen (tm_sources.py, tm_query.py, tm_views.py,
      config_flow.py, diagnostics.py, frontend/topology/src/enterprise/timemachine/) und mit den
@@ -26,6 +31,11 @@
 12. [Leistung](#12-leistung)
 13. [Bekannte Grenzen und was nicht geprüft ist](#13-bekannte-grenzen-und-was-nicht-geprüft-ist)
 14. [Tab „Zeitreise“](#14-tab-zeitreise)
+15. [Phase B: eigener Verlauf](#15-phase-b-eigener-verlauf)
+16. [Phase C: Client-Sessions](#16-phase-c-client-sessions)
+17. [Doppelte zwischen Quellen](#17-doppelte-zwischen-quellen)
+18. [Aktionen](#18-aktionen)
+19. [Panel für B/C (1.51.0)](#19-panel-für-bc-1510)
 
 ---
 
@@ -47,7 +57,11 @@ Phase A hat
   und nur gezählt (`omitted_client_marks`, nur für Administratoren; für andere Benutzer 0).
 
 Ausfälle, Kanalwechsel und Uplink-Wechsel, die die Time Machine selbst aus `coordinator.data`
-erkennen soll, kommen erst mit Phase B (die Arten sind schon vergeben, Abschnitt 6).
+erkennt, bringt Phase B mit einem **eigenen Speicher**, Client-Sessions bringt Phase C hinter
+einem **eigenen Schalter** (Abschnitte 15–19). Die Aussagen oben gelten weiter für die fünf
+Phase-A-Quellen; ist die Time Machine aus, gilt der ganze Abschnitt unverändert (kein Store,
+kein Listener, keine Aufgabe, kein Router-Aufruf, keine Entität; Test
+`test_off_by_default_nothing_is_created`).
 
 ## 2. Einschalten
 
@@ -64,6 +78,11 @@ In den Optionen eines beliebigen Routers: **„Network Time Machine für alle Ro
 
 Ausgeschaltet antwortet die Route mit `status: "off"` und liest **keine** Quelle.
 
+Seit Phase B startet das Einschalten den eigenen Verlauf sofort (ohne Neuladen), das Ausschalten
+beendet ihn, schreibt ihn ein letztes Mal und **löscht dabei die Client-Marken**
+(Abschnitt 15.6). Der zweite Schalter **„Client-Verläufe in der Time Machine“**
+(`time_machine_clients`, Standard **aus**) arbeitet genauso flottenweit (Abschnitt 16.1).
+
 ## 3. Quellen
 
 | `id` | liest | Lesegrenze je Anfrage (Speicher fasst) | Admin-only | Hinweise |
@@ -71,11 +90,15 @@ Ausgeschaltet antwortet die Route mit `status: "off"` und liest **keine** Quelle
 | `core_audit` | Audit-Log beider Ringe (`general`, `security`) über `ConfigurationApi.events(since, ring, limit)` | 1001 je Ring (1000 / 500) | ja | `events` kennt kein `until`; jeder Ring wird ganz gelesen und vom Adapter auf das Fenster zugeschnitten |
 | `config_versions` | Konfigurationsversionen über `ConfigurationApi.async_list_backups(since, limit)` | 500 (unbegrenzt) | ja | `off/module_off`, wenn kein Router die Konfigurationssicherung eingeschaltet hat; kein `until` (Abschnitt 13) |
 | `ni_events` | Ereignisse von Network Intelligence über `net_query.events_page` | 3001 (3000) | nein | Ereignis-ID trägt die `entry_id` und wird nicht ausgegeben |
-| `ni_incidents` | Vorfälle von Network Intelligence über `net_query.incidents_page` | 501 (500) | nein | je Vorfall bis zu drei Marken: eröffnet, wieder eröffnet, behoben; `incidents_page` sortiert nach Status und Schwere ohne Zeitfilter, deshalb liest der Adapter alle Vorfälle und filtert selbst nach Zeit |
+| `ni_incidents` | Vorfälle von Network Intelligence über `net_query.incidents_page` | Zahl der gespeicherten Vorfälle + 1, mindestens 501 (500 behobene; aktive und bestätigte werden nie gekürzt, der Speicher kann mehr halten) | nein | je Vorfall bis zu drei Marken: eröffnet, wieder eröffnet, behoben; `incidents_page` sortiert nach Status und Schwere ohne Zeitfilter, deshalb liest der Adapter alle Vorfälle und filtert selbst nach Zeit |
 | `security_timeline` | Zeitleiste des Security Center über `overview(actor=None, …)` (die maskierte Sicht) | 2001 (2000) | nein | `off/module_off`, wenn das Security Center aus ist |
+| `tm_index` | eigener Verlauf (Phase B): Ausfälle, Lücken, Funk, Topologie, Konfigurations-Fingerabdruck, eigene Marken | ganz (höchstens 15000 Marken) | nein (Gruppen wie unten) | `unreadable/not_running`, wenn die Time Machine eingeschaltet ist, aber noch kein Router geladen hat; nie gekürzt |
+| `tm_refs` | Verweise auf Audit-Einträge (Phase B, Abschnitt 15.3) | ganz | ja | erscheint nur, wenn der Audit-Eintrag selbst nicht mehr gelesen wird (Abschnitt 17) |
+| `tm_clients` | Client-Marken (Phase C) | ganz | ja | `off/clients_off`, solange der Client-Schalter aus ist |
 
 Bis auf die Konfigurationsversionen liegt jede Lesegrenze über dem, was der Speicher der
-Quelle fasst: Eine Lesung ist vollständig, Client-Einträge oder ein anderer Ring können sie
+Quelle fasst (bei den Vorfällen an die tatsächliche Zahl gebunden, Test
+`test_more_active_incidents_than_the_cap_are_read_whole`): Eine Lesung ist vollständig, Client-Einträge oder ein anderer Ring können sie
 nicht aufbrauchen. Erreicht eine Lesung ihre Grenze doch, ist die Quelle gekürzt
 (Abschnitt 8).
 
@@ -108,11 +131,13 @@ höchstens 96 Zeichen, unbekannte Schlüssel werden abgelehnt.
 |---|---|---|---|
 | `from` | Epoch-Sekunden (bis 6 Nachkommastellen; auf die Millisekunde aufgerundet) | `until` − 24 h | Fensteranfang, eingeschlossen |
 | `until` | Epoch-Sekunden | jetzt (nächste volle Sekunde) | Fensterende, **ausgeschlossen** |
-| `source` | Komma-Liste der Quellen-IDs aus Abschnitt 3 | alle | jede ID höchstens einmal |
+| `source` | Komma-Liste der Quellen-IDs aus Abschnitt 3 (seit Phase B auch `tm_index`, `tm_refs`, `tm_clients`) | alle acht | jede ID höchstens einmal |
 | `router_id` | `rtr_` + 32 hex | – | nur Marken genau dieses Routers (Flotten-Marken nicht) |
 | `kind` | eine Art aus Abschnitt 6 | – | nur diese Art |
 | `min_severity` | `info` / `warning` / `critical` | – | ab diesem Schweregrad |
 | `limit` | 1 … 500 | 200 | Marken je Seite |
+| `cursor` | `<ms>` oder `<ms>:<id>` (`ms`: Epoch-Millisekunden, `id`: `tmm_` + 16 hex) | – | seit 1.51.0: wo die Seite beginnt, aus `next_cursor` der vorigen Seite; nur mit demselben `from`/`until`; muss im Fenster liegen, sonst `out_of_range` (Abschnitt 8) |
+| `spans` | `0` / `1` | `0` | seit 1.51.0: `1` liefert die Intervalle, die vor `from` begannen und ins Fenster reichen, im eigenen Feld `spanning` (Abschnitt 8) |
 
 Das Fenster ist halboffen `[from, until)`, höchstens **14 Tage** lang und darf nicht leer sein.
 
@@ -167,7 +192,10 @@ Das Fenster ist halboffen `[from, until)`, höchstens **14 Tage** lang und darf 
   ],
   "omitted_client_marks": 1,
   "truncated": true,
-  "next_until": 1795003741.0
+  "next_until": 1795003741.0,
+  "next_cursor": "1795003741000",
+  "spanning": [],
+  "spanning_truncated": false
 }
 ```
 
@@ -185,7 +213,10 @@ Das Fenster ist halboffen `[from, until)`, höchstens **14 Tage** lang und darf 
 | `sources` | je angefragter Quelle ein Eintrag (Reihenfolge wie Abschnitt 3); bei `off` leer |
 | `omitted_client_marks` | Zahl der weggelassenen Client-Ereignisse aller Quellen im Fenster; für Nicht-Admins immer 0 (die Zahl verriete Aktivität in Quellen und Gruppen, die sie nicht sehen) |
 | `truncated` | `true`, wenn es ältere Marken im Fenster gibt, die nicht auf dieser Seite stehen |
-| `next_until` | `until` der nächsten Seite oder `null` |
+| `next_until` | `until` der nächsten Seite oder `null` (Abschnitt 8; für Clients vor 1.51.0) |
+| `next_cursor` | seit 1.51.0: `cursor` der nächsten Seite oder `null`; mit demselben Fenster zurückschicken (Abschnitt 8) |
+| `spanning` | seit 1.51.0: nur mit `spans=1` gefüllt, sonst `[]`: Intervalle, die vor `from` begannen und ins Fenster reichen (`spans_in: true`), neuester Anfang zuerst, höchstens 200, **nicht** auf `limit` angerechnet, gleiche Rechte und Filter wie `marks` |
+| `spanning_truncated` | seit 1.51.0: `true`, wenn mehr als 200 solche Intervalle da sind (der Rest fehlt) |
 
 ### 5.2 Eintrag in `sources`
 
@@ -198,6 +229,7 @@ Das Fenster ist halboffen `[from, until)`, höchstens **14 Tage** lang und darf 
 | `oldest` | Zeitpunkt der ältesten Marke dieser Quelle **auf dieser Seite**; `null` ohne Marken |
 | `truncated` | die Lesung der Quelle hat ihre Lesegrenze erreicht |
 | `cut` | nur bei `truncated`: `next_page` (ältere Einträge des Fensters kommen mit `next_until`) oder `unreachable` (ältere Einträge des Fensters sind nicht lesbar, Abschnitt 13); sonst `null`. Seit 1.50.0, additiv |
+| `duplicates` | seit Phase B, additiv: Marken dieser Quelle, die als Doppel einer anderen Quelle weggelassen wurden (Abschnitt 17), **vor** den Rechten gezählt; nur ein Zähler, keine Zeitpunkte |
 
 `state`, `count` und `oldest` gelten **nach den Rechten**: Ein Nicht-Admin erfährt weder, dass es
 Marken gibt, die er nicht sehen darf, noch wann sie liegen.
@@ -218,7 +250,18 @@ Marken gibt, die er nicht sehen darf, noch wann sie liegen.
 | `text` | nur bei `security_timeline`: der maskierte Text des Security Center, sonst `null` |
 | `params` | höchstens 8 Zahlen (z. B. `changes`, `critical_count`, `repeat_count`, `channel`, `occurrences`) |
 | `ref` | Verweis in die Quelle: `module`, `type`, `id`, `version_id` (z. B. `bkp_…` bei Versionen und Drift) |
-| `derived` | in Phase A immer `false` |
+| `derived` | `true`, wenn der Zeitpunkt erschlossen und nicht beobachtet ist (Phase B/C, z. B. Lücke nach unsauberem Ende, Ausfall von vor dem Start); Phase-A-Quellen immer `false` |
+| `code` | seit Phase B, an **jeder** Marke: fester Code der eigenen Marke (z. B. `timeout`, `dfs`, `restart`), bei Phase-A-Quellen `null` |
+| `end` | Ende eines Intervalls (Epoch-Sekunden) oder `null` (offen bzw. keine Intervall-Art) |
+| `end_state` | `open`, `closed`, `unknown` (Ende nicht beobachtet, z. B. HA-Neustart) bzw. `null` bei Punkt-Marken |
+| `client` | nur `tm_clients`: Pseudonym `tmc_` + 16 hex, sonst `null` |
+| `client_name` | nur `tm_clients`, nur Admins: aktueller Hostname, solange Client-Stabilität den Client kennt, sonst `null`; nie gespeichert |
+| `peers` | `{"before": {router_id, router_name} \| null, "after": …}` bei `uplink_changed` (Elternrouter vorher/nachher) und `client_roam` (von/nach), sonst `null` |
+| `spans_in` | seit 1.51.0: `true` bei einer Intervall-Marke des eigenen Verlaufs, die **vor** `from` begann und ins Fenster reicht (offen oder mit `end` ≥ `from`); `ts` ist dann ihr Anfang vor dem Fenster. Sonst `false` (auch bei allen Phase-A-Quellen) |
+
+Alle sieben Felder sind **additiv**, `v` bleibt `1`. `title_key` eigener Marken ist
+`<source>.<kind>` (z. B. `tm_index.router_down`), der von Verweisen der des Audit-Eintrags
+(`core_audit.<type>`).
 
 ## 6. Arten, Gruppen, Schweregrade, Zustände
 
@@ -226,15 +269,15 @@ Marken gibt, die er nicht sehen darf, noch wann sie liegen.
 
 | Gruppe | Arten (in Phase A erzeugt) | vergeben für später |
 |---|---|---|
-| `infrastructure` | `router_down`, `router_up`, `lan_down`, `lan_up`, `observation_gap`, `wan_event`, `port_event`, `system_event` | `ha_gap` |
-| `radio` | `channel_changed`, `dfs_event`, `rf_event` | `radio_down`, `radio_up` |
-| `topology` | `uplink_changed` | `router_role_changed` |
-| `configuration` | `config_version`, `config_drift`, `config_event` | `config_fingerprint_changed` |
+| `infrastructure` | `router_down`, `router_up`, `lan_down`, `lan_up`, `observation_gap`, `wan_event`, `port_event`, `system_event`; Phase B: `ha_gap` | – |
+| `radio` | `channel_changed`, `dfs_event`, `rf_event`; Phase B: `radio_down`, `radio_up` | – |
+| `topology` | `uplink_changed`; Phase B: `router_role_changed` | – |
+| `configuration` | `config_version`, `config_drift`, `config_event`; Phase B: `config_fingerprint_changed` | – |
 | `disruption` | `incident_opened`, `incident_resolved`, `security_incident`, `diag_finding`, `traffic_anomaly`, `net_event` | – |
 | `security` | `security_event` | – |
 | `administration` | `registry_event`, `core_event`, `audit_event` | – |
-| `clients` | – | `client_session`, `client_roam`, `client_disconnect` |
-| `time_machine` | – | `tm_started`, `tm_disabled`, `tm_store_recovered`, `tm_forgot_client`, `tm_exported` |
+| `clients` | Phase C: `client_session`, `client_roam`, `client_disconnect`, `client_flapping` | – |
+| `time_machine` | Phase B: `tm_started`, `tm_disabled`, `tm_store_recovered`, `tm_forgot_client`, `tm_cleared`, `clock_shift` | `tm_exported` |
 
 Zuordnung der Quellen:
 
@@ -278,6 +321,7 @@ Zuordnung der Quellen:
 | `timeout` | `unreadable` | Zeitbudget von 2 s überschritten (geprüft in den Schleifen des Adapters, Abschnitt 3) |
 | `error` | `unreadable` | die Lesefunktion hat einen Fehler geworfen |
 | `bad_format` | `unreadable` | Antwort in unerwarteter Form |
+| `clients_off` | `off` | nur `tm_clients`: der Client-Schalter ist aus (seit Phase B, additiv) |
 
 ## 7. Rechte
 
@@ -287,7 +331,10 @@ Zuordnung der Quellen:
 | `core_audit`, `config_versions` | ja | `off` / `admin_only` | – | – |
 | `ni_events`, `ni_incidents`, `security_timeline` | alle Gruppen | nur `infrastructure`, `radio`, `topology`, `disruption` | – | – |
 | Konfigurationsmarken (Bereich, Zahl der Änderungen, `bkp_…`) | ja | nein | – | – |
-| Client-Ereignisse | nur gezählt | weggelassen, `omitted_client_marks` = 0 | – | – |
+| Client-Ereignisse der Phase-A-Quellen | nur gezählt | weggelassen, `omitted_client_marks` = 0 | – | – |
+| `tm_index` | alle Gruppen | nur `infrastructure`, `radio`, `topology`, `disruption` (keine Konfigurations-Fingerabdrücke, keine eigenen Marken) | – | – |
+| `tm_refs`, `tm_clients`, `client_name` | ja | `off` / `admin_only` | – | – |
+| Route `…/timemachine/sessions` | 200 | **403** | 403 | 401 |
 
 „Panel für alle Benutzer“ ist die bestehende Option `topology_panel_all_users`. Reihenfolge der
 Prüfungen: Anmeldung (401) → Recht (403) → Integration geladen (410) → Body (400) → Abfrage
@@ -295,24 +342,55 @@ Prüfungen: Anmeldung (401) → Recht (403) → Integration geladen (410) → Bo
 
 ## 8. Blättern
 
-Die Marken sind nach `ts` absteigend und bei gleichem `ts` nach `id` sortiert. Hat eine Seite
-mehr Marken als `limit`, endet sie vor dem ältesten Zeitstempel, damit Marken mit **demselben
-Zeitstempel nie auf zwei Seiten verteilt** werden; `next_until` ist dann der älteste
-Zeitstempel der Seite. Die nächste Seite fragt mit `until=<next_until>` und demselben `from`.
-Weil Marken und Fenstergrenzen auf demselben Millisekunden-Raster liegen, kommt keine Marke
-doppelt und keine geht an der Grenze verloren.
+Die Marken sind nach `ts` absteigend und bei gleichem `ts` nach `id` sortiert.
+
+**Mit Cursor (seit 1.51.0, empfohlen).** Jede Antwort mit weiteren Marken nennt
+`next_cursor`; die nächste Seite fragt mit `cursor=<next_cursor>` und **demselben** `from` und
+`until`. Der Cursor ist eine Stelle in der Sortierung: `<ms>` heißt „alles älter als diese
+Millisekunde“, `<ms>:<id>` „in dieser Millisekunde nach dieser `id`, dann älter“. Damit
+kommt jede Marke genau einmal, auch wenn **eine Millisekunde mehr Marken als `limit`** hält
+(etwa Hunderte Client-Sitzungen, die beim Einschalten zugleich beginnen): die Seite wird
+dann in der Millisekunde geteilt und der Cursor trägt die `id`. `next_cursor: null` beendet
+den Lauf.
+
+**Ohne Cursor (Clients vor 1.51.0).** Hat eine Seite mehr Marken als `limit`, endet sie vor
+dem ältesten Zeitstempel, damit Marken mit **demselben Zeitstempel nie auf zwei Seiten
+verteilt** werden; `next_until` ist dann der älteste Zeitstempel der Seite. Die nächste Seite
+fragt mit `until=<next_until>` und demselben `from`. Hält eine einzige Millisekunde mehr
+Marken als `limit`, kann `next_until` sie nicht teilen: Die Seite zeigt `limit` davon und
+`truncated: true`, der Rest dieser Millisekunde ist über `next_until` nicht erreichbar (nur
+über `next_cursor`).
 
 Wurde die Lesung einer Quelle gekürzt (`truncated`), ist sie nur oberhalb ihrer **Kante**
 vollständig, des ältesten gelesenen Eintrags im Fenster (weggelassene Client-Einträge
 eingeschlossen). Die Seite behält dann nur Marken nach der Millisekunde der Kante, und
-`next_until` ist die Millisekunde danach: Die nächste Seite liest die Millisekunde der Kante
-ganz, Marken desselben Zeitstempels bleiben zusammen. `next_until` steht auch dann, wenn die
-Seite **keine einzige Marke** enthält (etwa weil die gelesenen Einträge nur Client-Ereignisse
-waren); die Quelle ist dann nicht `empty`, sondern `ok` mit `cut: next_page`. Bei mehreren
-gekürzten Quellen gilt die jüngste Kante. Ist die Millisekunde der Kante die letzte des
-Fensters, behält die Seite sie, und was davon nicht gelesen wurde, fehlt (`truncated: true`).
+`next_until` ist die Millisekunde danach (`next_cursor` entsprechend `<ms>` dieser
+Millisekunde danach): Die nächste Seite liest die Millisekunde der Kante ganz. Beide stehen
+auch dann, wenn die Seite **keine einzige Marke** enthält (etwa weil die gelesenen Einträge nur
+Client-Ereignisse waren); die Quelle ist dann nicht `empty`, sondern `ok` mit
+`cut: next_page`. Bei mehreren gekürzten Quellen gilt die jüngste Kante. Ist die Millisekunde
+der Kante die letzte des Fensters, behält die Seite sie, und was davon nicht gelesen wurde,
+fehlt (`truncated: true`).
 
 Liegt `next_until` am oder vor `from`, ist es `null`.
+
+**Intervalle, die ins Fenster reichen (`spans`, 1.51.0).** Eine Intervall-Marke von
+`tm_index` oder `tm_clients`, die vor `from` begann und offen ist oder mit `end` ≥ `from`
+endet, gehört zum Fenster (Überlappung), steht aber **nie** in `marks`:
+
+- Nur mit `spans=1` kommt sie, im eigenen Feld `spanning` (mit `spans_in: true`), neuester
+  Anfang zuerst, höchstens 200 (`spanning_truncated`), nicht auf `limit` angerechnet, mit
+  denselben Rechten und Filtern (`router_id`, `kind`, `min_severity`) wie `marks`.
+- Ohne `spans` (oder `spans=0`) ist `spanning` immer `[]`. Ein Client fragt `spans=1` auf der
+  ersten Seite (und beim Aktualisieren) und blättert danach ohne `spans`: so kommt jede genau
+  einmal, gleich auf der ersten Seite, egal wie viele Marken das Fenster hält.
+- Ein Client vor 1.51.0 schickt kein `spans` und sieht sie nicht mehr (bis 1.51.0-Entwicklung
+  standen sie auf der letzten Seite); `v` bleibt 1.
+
+Tests: `tests/test_tm_overlap_v1510.py`,
+`test_s4_an_old_open_outage_comes_with_spans_on_the_first_page`,
+`test_s3_250_resumed_sessions_of_one_start_page_without_loss` (beide in
+`tests/test_tm_review_v1510.py`).
 
 ## 9. Fehler
 
@@ -334,9 +412,14 @@ Fehler haben die Form `{"message", "code", "details": {"field", "reason"}}` und
   SSIDs oder WLAN-Netdev-Namen**. Router erscheinen als `router_id` und Anzeigename.
 - Texte (`text`) kommen nur aus der maskierten Sicht des Security Center und laufen zusätzlich
   durch die Maskierung des Core.
-- Die Time Machine holt sich **keinen** Modulschlüssel eines anderen Moduls
-  (`async_get_module_key` wird nie aufgerufen, Test) und verknüpft keine `cli_`-Pseudonyme
-  verschiedener Module.
+- Die Time Machine holt sich **keinen** Modulschlüssel eines anderen Moduls und verknüpft keine
+  `cli_`-Pseudonyme verschiedener Module. Seit Phase C holt sie nur ihren **eigenen**
+  Schlüssel (`time_machine` / `pseudonym`), und nur bei eingeschaltetem Client-Schalter oder
+  für die Aktion „Client vergessen“; ihr Pseudonym `tmc_…` ist mit keinem anderen Modul
+  verknüpfbar.
+- Der eigene Speicher (Abschnitt 15) und die Antworten enthalten Clients nur als Pseudonym;
+  Hostnamen werden nie gespeichert (Abschnitt 16.3). Test `test_store_holds_pseudonyms_only`
+  und `test_real_file_has_no_identifiers_and_the_measured_size` (echte Datei).
 - Alle Antworten haben `Cache-Control: no-store`.
 
 ## 11. Diagnosedaten
@@ -345,12 +428,20 @@ Der Diagnose-Download jedes Routers enthält den Block `time_machine`:
 
 - aus: `{"enabled": false}`; keine Quelle wird gelesen.
 - an: `enabled`, `entry_enabled` (Option dieses Eintrags), `api_version`, `window_s` (86400),
-  `limits` (Standard- und Höchstfenster, Standard- und Höchstlimit, Marken einer Quelle je
-  Seite, Zeitbudget), `sources` (je Quelle `state`, `reason`, `count`, `truncated`,
+  `limits` (Standard- und Höchstfenster, Standard- und Höchstlimit, Zeitbudget; die
+  wirkungslose Grenze „Marken einer Quelle je Seite“ ist seit Phase B entfernt), `sources` (je Quelle `state`, `reason`, `count`, `truncated`,
   `omitted_client_marks` der letzten 24 h, gelesen wie ein Admin; die Marken selbst werden
   verworfen) und `counters` (Zahl der Anfragen, `unreadable` je Quelle, Dauer und Markenzahl
   der letzten Anfrage; nur im Arbeitsspeicher).
 - Ein Fehler im Block lässt den Download nie scheitern: `{"loaded": false, "error": true}`.
+- Seit Phase B zusätzlich: `clients_enabled` (Client-Schalter der Flotte),
+  `entry_clients_enabled` (Option dieses Eintrags), in `limits` `retention_s` (1209600),
+  `max_marks` (15000), `quotas` und `client_day_cap` (200; `source_mark_cap` entfällt), in
+  `sources` auch die drei neuen Quellen, und `index`: die Zähler des eigenen Verlaufs (Marken
+  je Kontingent, offene Intervalle, Zahl der Clients, verdrängte, gekürzte, gedeckelte,
+  vergessene, gelöschte und kaputte Marken; Bytes der letzten Datei, Grenze, Abdeckung,
+  Checkpoints, Schreibzähler; Zähler des Client-Rekorders). Nur Zahlen, keine IDs, keine
+  Pseudonyme.
 
 ## 12. Leistung
 
@@ -361,13 +452,24 @@ und Zusammenführen (drei Läufe); Antwort **209 KB** mit 498 Marken. Der Test v
 großzügig unter 2 s. Gemessen mit Mocks auf der Entwicklungs-VM (Python 3.13), nicht auf einer
 HA-Instanz.
 
+Mit vollem eigenem Verlauf (1.51.0, Review K6; 3000 Kanalwechsel, 2000 Verweise, 10000
+Client-Sitzungen, sechs Router, Admin, alle drei eigenen Quellen ganz gelesen, je 7 Läufe,
+Median): **48 ms** gesamt für eine Zeitleisten-Seite (`limit` 200 oder 500); die längste
+Strecke ohne Rückgabe an die Ereignisschleife sank von **28 ms** auf **5 ms**, weil eine
+Quelle des eigenen Verlaufs nach je 1000 Marken (`INDEX_YIELD_EVERY`) abgibt
+(`test_k6_a_full_client_quota_yields_to_the_event_loop`). Einzelne Läufe erreichen 60 ms in
+einem Stück (Speicherbereinigung oder das Sortieren aller Marken in `merge`). Sitzungen
+(`limit` 500): Median **3–5 ms**. Nicht umgesetzt: nur die Seite in Wörterbücher wandeln. Das
+Entfernen der Doppel, die Rechte, die Filter und der Zustand jeder Quelle (`ok`/`empty` nach
+den Rechten) brauchen alle Marken des Fensters; eine vorzeitig abgeschnittene eigene Quelle
+würde in jeder Antwort als gekürzt (`cut: next_page`) erscheinen und das Blättern ändern.
+
 ## 13. Bekannte Grenzen und was nicht geprüft ist
 
-- Mehr Marken mit **demselben Zeitstempel** (Millisekunde) als `limit`: die Seite wird dort
-  abgeschnitten (`truncated: true`), der Rest dieses Zeitstempels fehlt auf der nächsten Seite.
-  Ebenso, wenn die letzte Millisekunde eines Fensters mehr Einträge einer Quelle hält, als sie
-  in einer Lesung liefert (Abschnitt 8); mit den heutigen Lesegrenzen nur bei den
-  Konfigurationsversionen denkbar.
+- Wenn die letzte Millisekunde eines Fensters mehr Einträge einer Quelle hält, als sie in
+  einer Lesung liefert, fehlt der Rest (Abschnitt 8); mit den heutigen Lesegrenzen nur bei
+  den Konfigurationsversionen denkbar. (Mehr Marken in einer Millisekunde als `limit` gehen
+  seit 1.51.0 über `next_cursor` nicht mehr verloren.)
 - **Konfigurationsversionen** werden höchstens 500 je Anfrage gelesen, und
   `async_list_backups` kennt kein `until`: Liegen mehr als 500 Versionen zwischen `from` und
   jetzt, sind die älteren im Fenster nicht erreichbar; die Quelle meldet dann
@@ -377,16 +479,21 @@ HA-Instanz.
 - Was die Module nicht behalten, fehlt auch in der Time Machine: Der Ring `general` des
   Audit-Logs hat seit 1.50.0 feste Anteile (Core 400, je Modul 100), verdrängt aber weiterhin
   den ältesten Eintrag eines Besitzers über seinem Anteil (`general_evicted`). Ausfälle und
-  Kanalwechsel vor einem HA-Neustart fehlen bis Phase B.
+  Kanalwechsel vor einem HA-Neustart fehlt in Phase A; Phase B hält sie im eigenen Verlauf
+  (ab dem Einschalten, nicht rückwirkend).
 - Modulschlüssel des Enterprise Core werden nur nach Namen vergeben.
 - Drift-Einträge des Audit-Logs tragen keinen Bereich; Bereich und Diff zeigt der
   Configuration Manager.
 - Die synchronen Lesefunktionen der Quellmodule werden vom Zeitbudget nicht unterbrochen
   (Abschnitt 3).
+- Grenzen der Phasen B/C: Abschnitt 15.7 und 16.6.
 - Nicht auf echten Routern und nicht in einer laufenden HA-Instanz geprüft; alle Aussagen
   stammen aus Tests mit Mocks. Den Tab hat die Prüfung vor dem Merge headless in Firefox mit
   der Testantwort angesehen; die danach geänderten Stile (Abschnitt 14: gesperrte Chips,
-  Karten ab 860 px, Quellspalte, mittige Chips) sind nur durch Tests geprüft.
+  Karten ab 860 px, Quellspalte, mittige Chips) sind nur durch Tests geprüft. Den Tab von
+  1.51.0 (Abschnitt 14.3) hat die Prüfung vor dem Merge headless in Firefox bei 360, 768 und
+  1280 px angesehen; die daraus folgenden Korrekturen (Abschnitt 14.3, „Nach der
+  Browser-Prüfung“) sind durch node-Tests geprüft.
 
 ## 14. Tab „Zeitreise“
 
@@ -411,12 +518,15 @@ fügt der Antwort nichts hinzu; Phase A verlinkt `ref` nicht, es gibt keinen Exp
   Quelle war nicht lesbar; die Zeitleiste ist unvollständig.“
 - **Hinweis** bei `omitted_client_marks` > 0 (der Tab prüft die Rolle nicht selbst; er verlässt
   sich darauf, dass der Server Nicht-Admins 0 schickt): „N client-bezogene Ereignisse sind ausgeblendet.
-  Client-Verläufe kommen mit einem eigenen Schalter in einer späteren Version.“
+  Client-Verläufe lassen sich in den Optionen einschalten.“ (der zweite Satz seit 1.51.0 nur,
+  wenn `tm_clients` `clients_off` meldet; den Satz „… in einer späteren Version“ gibt es nicht
+  mehr).
 - **Zeitleiste:** neueste zuerst, nach Kalendertag in Ortszeit (Heute, Gestern, „Wochentag,
   TT.MM.JJJJ“), je Marke Uhrzeit (UTC-ISO im `title`), Schwere als Punkt und Wort (Info nie in
   Warnfarbe), Art, Titel, Kennzahlen (nur bekannte Schlüssel), Router („alle Router“ bei
   `fleet`) und Quelle; „abgeleitet“ bei `derived`. Doppelte `id` werden entfernt. „Ältere
-  laden“ fragt mit `until=next_until`; `truncated` ohne `next_until` zeigt „Weitere Marken im
+  laden“ fragt mit `until=next_until` (seit 1.51.0 mit `cursor=<next_cursor>`, Abschnitt
+  14.3); `truncated` ohne `next_until` zeigt „Weitere Marken im
   Zeitfenster wurden gekürzt; Zeitfenster oder Filter enger wählen.“ Eine Seite ohne Marken,
   aber mit `next_until` (der Abschnitt hält nur ausgeblendete Client-Einträge), zeigt „In
   diesem Abschnitt gibt es nur ausgeblendete Einträge. Ältere laden, um weiter
@@ -444,7 +554,11 @@ fügt der Antwort nichts hinzu; Phase A verlinkt `ref` nicht, es gibt keinen Exp
 ### 14.1 Titel und Rückfall
 
 `tmTexts.ts` hat für jeden `title_key`, den das Backend erzeugen kann, einen deutschen Titel
-(259 Schlüssel, 1.50.0). `tests/test_tm_panel_texts_v1500.py` sammelt die Schlüssel aus den
+(259 Schlüssel in 1.50.0, dazu 32 für `tm_index.*` und `tm_clients.*` in 1.51.0, davon 12
+Varianten `<title_key>.<code>`, die der Tab bei den eigenen Quellen zuerst nachschlägt).
+`tests/test_tm_panel_texts_v1510.py` sammelt die Arten, Codes und Kennzahlen aus
+`tm_engine.py`, `tm_clients.py` und `tm_marks.py` und schlägt fehl, wenn ein Titel oder Text
+fehlt oder eine Variante einen Code nennt, den das Backend nie schreibt. `tests/test_tm_panel_texts_v1500.py` sammelt die Schlüssel aus den
 Konstanten der Quellmodule und schlägt fehl, wenn einer fehlt. Bei Vorfällen setzt der Tab
 „Vorfall eröffnet:“ oder „Vorfall behoben:“ davor, weil `title_key` das nicht trägt.
 
@@ -461,3 +575,513 @@ des Security Center. Sie fallen auf diese Regel zurück.
 `tmFixture.json` ist eine echte Antwort der Route (Admin, zwei Seiten, leer, `partial`,
 Nicht-Admin, aus, 400), geschrieben von `tests/test_tm_panel_fixture_v1500.py` mit erfundenen
 Werten; der Test schreibt sie neu und vergleicht (`TM_WRITE_FIXTURE=1` schreibt die Datei).
+`tmFixtureClients.json` (1.51.0, `tests/test_tm_panel_fixture_v1510.py`) hält die Antworten
+der Phasen B/C aus **einer** Welt mit drei Routern: Zeitleiste (ein offener Ausfall und eine
+offene Session von vor dem Fenster, ein Wechsel von Router 1 nach Router 2, ein Ausfall mit
+Ende), erste Seite mit `limit`, Nicht-Admin, `clients_off`, und die Sessions-Antworten (`ok`,
+zwei Seiten, ein Client, leer, `unavailable`, `clients_off`, `off`, 403, 400). Der Test prüft,
+dass keine MAC, IP, kein Hostname des Modells und kein Geheimnis in einer Antwort steht.
+
+### 14.3 Neu im Tab in 1.51.0
+
+- **Quellen:** Chips und Pills „Eigener Verlauf“ (`tm_index`), „Verweise“ (`tm_refs`),
+  „Client-Verläufe“ (`tm_clients`); die beiden letzten für Nicht-Admins gesperrt. Pill bei
+  `clients_off` „Client-Verläufe: aus · in den Optionen einschalten“; bei `duplicates` > 0 der
+  Zusatz „· n doppelt“ mit dem Tooltip „n doppelt ausgeblendet“. Über den Pills „Quellen“, nach
+  „Ältere laden“ „Quellen (neueste Seite)“ (die Pills zählen die erste Seite).
+- **Intervalle:** zweite Zeile „Dauer 4 min 12 s“ (`closed`), „seit 14:03, noch offen“
+  (`open`; an einem anderen Tag mit Datum), „Ende unbekannt“ (`unknown`).
+- **Block „Läuft seit vor dem Zeitfenster“:** Die erste Seite (auch jede Aktualisierung und
+  jeder Neubeginn) fragt mit `spans=1`; der Block zeigt genau das Feld `spanning` dieser
+  Antwort (`marks` enthält solche Intervalle nie). Erste Zeile Datum und Uhrzeit des Beginns,
+  zweite Zeile die bisherige Dauer: „noch offen, bisher 2 Tage 3 Std.“ (`open`, gerechnet bis
+  jetzt), „Dauer …“ (`closed`), „Ende unbekannt“ (`unknown`). Bei `spanning_truncated` steht
+  darunter „Weitere laufen seit vor dem Zeitfenster; Zeitfenster oder Filter enger wählen.“
+  Der Block bleibt beim Nachladen älterer Seiten stehen und wird nur durch eine neue erste
+  Seite ersetzt; Filter wechseln leert ihn. Block und Liste stehen in einem gemeinsamen
+  Größen-Container `.tm-timeline` (`tmlist`); der Block wird schon unter 920 px Breite zu
+  Karten (die Liste unter 860 px), weil seine Zeitspalte 4,5em breiter ist: am letzten
+  Zeilen-Kipppunkt ist seine Titelspalte 284,75 px, die der Liste 281 px. Die Zähler („n von m Marken“) zählen ihn mit, die
+  Quell-Pills nicht (sie kommen vom Server und zählen `marks`).
+- **Blättern mit Cursor** (Zeitleiste und Sitzungen): „Ältere laden“ schickt dasselbe
+  Fenster und dieselben Filter wie die erste Seite plus `cursor=<next_cursor>` (ohne
+  `spans`), bis `next_cursor` `null` ist; `until=next_until` wird nicht mehr benutzt. Der
+  Cursor gehört zu der Abfrage, mit der er kam (`cursorQuery` im Zustand). Ein abgelehnter
+  Cursor (400, Feld `cursor`, Grund `out_of_range` bzw. `invalid`) erscheint als „Die Stelle
+  zum Weiterblättern liegt nicht mehr im Zeitfenster. Bitte „Aktualisieren“.“ bzw.
+  „Ungültige Stelle zum Weiterblättern. …“, ohne „Erneut versuchen“; auch „Ältere laden“ ist
+  dann ausgeblendet (`cursorRefused`), bis eine neue erste Seite (Aktualisieren oder der
+  60-s-Abruf) die Liste neu beginnt, ohne Hinweis „Die Liste beginnt neu“ (derselbe Cursor
+  würde wieder abgelehnt).
+- **Anschluss nach einer Aktualisierung** (`reaches` in `tmLogic.ts`): Eine neue erste Seite
+  wird nur vor die geladenen älteren Seiten gesetzt, wenn ihr Ende die geladene Liste
+  erreicht. Ihr `next_cursor` muss dafür bis an das `until` der ersten Seite reichen, auf der
+  die Liste aufgebaut wurde (exklusiv, in ms): ein Cursor `<ms>` schließt an, wenn
+  `ms` ≤ dieses `until`, ein Cursor `<ms>:<id>` nur, wenn `ms` < `until` (sonst fehlen
+  Marken derselben Millisekunde dazwischen). Kein `next_cursor` (die Seite ist vollständig)
+  schließt immer an. Sonst beginnt die Liste neu (Hinweis unten), nie mit stiller Lücke.
+  Beim Anschluss gelten Fenster und Cursor der älteren Seiten weiter; Marken, die vor dem
+  neuen `from` liegen, fallen weg. Veraltete Antworten (älteres `seq`, andere Filter-Generation)
+  werden verworfen.
+- **Clients:** „Client <client_name>“ mit dem Namen vom Server, sonst „Client ·a1ce4d“ (die
+  letzten sechs Zeichen des Pseudonyms); nie eine MAC. Das Attribut `title` der Kurzform
+  trägt das volle Pseudonym `tmc_…` und nur das (für `time_machine_forget_client` mit
+  `client`). Wechsel „von Router 1 nach Router 2“
+  aus `peers`. Art-Chip „Clients“.
+- **Neubeginn:** beginnt die Liste neu, weil eine Aktualisierung die geladenen älteren Seiten
+  nicht erreicht, steht „Viele neue Einträge: Die Liste beginnt neu. Ältere bei Bedarf erneut
+  laden.“ mit „Ausblenden“, bis der Nutzer es schließt.
+- **Ansicht „Client-Sitzungen“** (nur Admins: `hass.user.is_admin`; Nicht-Admins sehen den
+  Umschalter nicht, die Route antwortet ihnen 403): Umschalter „Zeitleiste | Client-Sitzungen“
+  oben im Tab, Zustand im Tab (kein URL-Wechsel; beide Listen bleiben beim Umschalten
+  erhalten). Zeitfenster-Chips, Router-Auswahl und „Client“ („Alle Clients“ und die Clients
+  der geladenen Sitzungen). Liste nach Beginn absteigend, nach Tagen gruppiert; je Zeile
+  Beginn, „Dauer …“ / „noch verbunden“ / „Ende unbekannt“, Client, Router, Band („2,4 GHz“,
+  „5 GHz“, „6 GHz“; Spalte 8.5em, in der Zeile ohne Umbruch, „Band unbekannt“ braucht
+  102,9 px von 106,25 px; in Karten wieder mit Umbruch), „n Wechsel“ bei
+  `params.roam` > 0. Lange Routernamen in der Zeile höchstens zwei Zeilen
+  (`-webkit-line-clamp: 2`, voller Name im `title`), in Karten ganz. Unter 700 px
+  Containerbreite Karten. „Ältere laden“ über `cursor`/`next_cursor`; `truncated` ohne
+  `next_cursor` zeigt den Kürzungshinweis.
+  Zustände: `off` (Box wie die Zeitleiste), `clients_off` („Client-Verläufe sind
+  ausgeschaltet.“, der Weg in die Optionen und „Gespeichert werden Pseudonyme, keine
+  MAC-Adressen, IP-Adressen oder Hostnamen. Abgeschlossene Sitzungen werden nach 14 Tagen
+  gelöscht.“ — „abgeschlossene“, weil offene Intervalle nicht gekürzt werden, Abschnitt
+  15.7), `unavailable` („Client-Sitzungen sind noch nicht verfügbar.“ und der Grund:
+  `not_running` „Die Aufzeichnung läuft gerade nicht.“, `not_loaded` „Der gespeicherte
+  Verlauf wird noch geladen.“, sonst „Grund unbekannt.“; ein Test hält die Gründe der Route
+  und `UNAVAILABLE_TEXT` gleich),
+  leer, 403 „Keine Berechtigung für die Client-Sitzungen (nur Administratoren).“, 410, 5xx mit
+  „Erneut versuchen“, 400 mit dem Feldnamen. „Aufzeichnung läuft“ / „Aufzeichnung pausiert …“
+  aus `recording`.
+- **Abruf:** nur die sichtbare Ansicht lädt und fragt nach, höchstens alle 60 s, bei
+  `off`/`clients_off` der Sitzungen gar nicht automatisch; veraltete Antworten werden
+  verworfen, und eine Liste, die sich nicht lückenlos anschließen lässt, beginnt neu (wie die
+  Zeitleiste).
+- **Nicht im Tab:** keine Knöpfe für „Client vergessen“ oder „Verlauf löschen“, kein „Zustand
+  zum Zeitpunkt“, kein Export, keine Sprünge in andere Tabs.
+- **Nach der Browser-Prüfung** (vor dem Merge von 1.51.0): Der Umschalter stand im
+  Spalten-Flex `.cfg` und erbte von `.tm-chips` `flex: 1 1 260px`, wurde also 260 px hoch;
+  `.tm-chips.tm-views { flex: 0 0 auto; }` behebt das. Zweite Prüfung: Der Block vor dem
+  Fenster lag neben dem Container `tmlist` und behielt bei 360 px sein Sechs-Spalten-Raster
+  (Titelspalte 0 px); jetzt im gemeinsamen Container (oben). Fokusrahmen nur im Tab
+  (`.tm …:focus-visible`, `#60a5fa`, 7,32:1 auf `#0c1225`; vorher `--border-focus` 2,16:1);
+  die anderen Tabs bleiben unverändert.
+- Tests: `tmSessions.test.mjs` (Logik), `tmLogic.test.mjs` (Cursor, Anschluss),
+  `tmRender.test.mjs` (Darstellung aus `tmFixtureClients.json`, dazu eine kleine Kaskade über
+  die geladenen Stylesheets, die für jedes Element in einem Spalten-Flex die wirksame
+  `flex-basis` prüft und für jede Regel in `@container <name>`, dass ihre Elemente einen
+  Vorfahren mit diesem Container-Namen haben), `tmLayout.test.mjs` (Raster, Karten, Bandspalte, Fokuskontrast,
+  Zeilenbegrenzung).
+
+## 15. Phase B: eigener Verlauf
+
+Code: `tm_marks.py` (Modell, Kontingente, gepackte Zeile; ohne HA), `tm_store.py` (HA-Store),
+`tm_engine.py` (Signale, Lebenszyklus, Aktionen). Er läuft nur, solange die Time Machine an ist
+und mindestens ein Router geladen ist; **eine** Instanz für die ganze Flotte.
+
+### 15.1 Speicher
+
+Store `openwrt_router.time_machine`, Version 1.1, über `core_store.create_store` (private
+Datei, atomares Schreiben, Migrationsfunktion). Inhalt:
+
+| Schlüssel | Inhalt |
+|---|---|
+| `saved_at` | Zeitpunkt des Schreibens |
+| `stop` | warum mit diesem Schreiben aufgehört wurde: `stop` (HA fährt herunter), `disabled` (ausgeschaltet), `unloaded` (letzter Router entladen) oder `null` (laufend) |
+| `routers` | Tabelle der `router_id`s; die Marken verweisen per Index darauf |
+| `marks` | eine Zeile je Marke, 13 Felder mit `\|` getrennt: Nummer, Zeit (ms), Art, Router, Schwere, Code, Ende (ms), Endzustand, Client-Pseudonym (16 hex), Zahlen, Verweis (`audit/<id>`), Peers, abgeleitet |
+| `next_seq` | nächste Markennummer (stabile `tmm_`-IDs) |
+| `coverage` | Zeiträume, in denen der Verlauf lief (höchstens 64); Grundlage für Abschnitt 17 |
+| `checkpoints` | Tages- (höchstens 31) und Start-Checkpoints (höchstens 16): je Router nur `u`, Fingerabdruck-Hash, Eltern-Router |
+| `state` | je Router letzter Fingerabdruck-Hash (16 hex), Funk (`5g0=36/80`), Eltern-Router, Rolle, damit eine Änderung während eines Neustarts erkannt wird |
+
+Die Zähler (Abschnitt 11) stehen **nicht** in der Datei; sie zählen ab dem Start des Prozesses.
+
+Jedes Feld einer Zeile wird beim Lesen gegen ein Muster geprüft; eine kaputte Zeile wird
+übersprungen und gezählt, nie die ganze Datei (`test_bad_rows_are_skipped_not_the_file`).
+Eine unlesbare, fremde oder **neuere** Datei bleibt als `.bak` (bzw. HAs `.corrupt.<Zeit>`)
+liegen, der Verlauf beginnt leer
+mit der Marke `tm_store_recovered` und dem Audit-Eintrag `time_machine.store_recovered`
+(`test_broken_store_starts_empty_with_a_copy_and_a_mark`,
+`test_newer_store_version_is_kept_as_bak`).
+
+**Schreiben:** nie im Ereignisweg. Eine Änderung stellt **ein** verzögertes Schreiben nach
+300 s an (`async_delay_save`, weitere Änderungen hängen sich daran,
+`test_writes_are_delayed_and_bundled`); ohne Änderung alle 900 s ein Lebenszeichen
+(`test_heartbeat_write_every_15_minutes_without_changes`), damit `saved_at` nach einem Absturz
+nur etwa 15 min (plus die 300 s Verzögerung) vor dem Ende liegt. Sofort (ohne Verzögerung)
+wird geschrieben nach „Client vergessen“, „Verlauf löschen“, Client-Schalter aus und beim
+HA-Stopp; beim Ausschalten und nach dem letzten Router direkt. Das Packen der Zeilen ist
+zwischengespeichert: neu gepackt wird nur eine geänderte Marke.
+
+### 15.2 Obergrenzen
+
+| Grenze | Wert | Verhalten |
+|---|---|---|
+| Aufbewahrung | 14 Tage | eine **geschlossene** Marke fällt weg, wenn ihr Ende (bzw. Zeitpunkt) älter ist; offene bleiben (`test_retention_drops_closed_marks_after_14_days`) |
+| Kontingent Infrastruktur | 3000 | Gruppen `infrastructure`, `radio`, `topology`, `time_machine` |
+| Kontingent Verweise | 2000 | Gruppen `configuration`, `disruption`, `security`, `administration` (auch `config_fingerprint_changed`) |
+| Kontingent Clients | 10000 | Gruppe `clients` |
+| gesamt | 15000 | Summe; ein Kontingent verdrängt **nie** ein anderes, innerhalb eines Kontingents fällt die älteste **geschlossene** Marke zuerst (Zähler `evicted_<kontingent>`; `test_quotas_never_evict_each_other_and_count`). Offene Intervalle (laufender Ausfall, laufende Sitzung) fallen erst, wenn sonst nichts mehr im Kontingent ist, dann das älteste zuerst (Zähler `evicted_open`); ihr späteres Ende bucht trotzdem eine ehrliche Marke (`router_up` ohne `duration_s`), der Zustand der Besitzer bleibt sauber (1.51.0, Review S2; `test_s2_*` in `tests/test_tm_review_v1510.py`) |
+| je Client und UTC-Tag | 200 neue Marken | darüber zählt eine Marke `client_flapping` (Zahl `suppressed`, Ende = letzter unterdrückter Zeitpunkt; `test_one_client_storm_is_folded_per_day`, über den echten Weg `test_a_flapping_client_never_fills_the_store`) |
+| Datei | 2 500 000 Byte | genaue Länge je Zeile; darüber wird **in einem Durchgang** auf 5 % unter die Grenze gekürzt, zuerst älteste Client-, dann Verweis-, dann Infrastruktur-Marken, in jeder Gruppe offene Intervalle zuletzt; bleibt es darüber, wird nicht geschrieben und die letzte gute Datei bleibt (`save_over_size`; `test_size_limit_trims_clients_first_in_one_pass`) |
+
+Gemessen: ein voller Speicher mit 15000 Marken (3000 Kanalwechsel mit sechs Zahlen, 2000
+Verweise, 10000 Sessions) ist **1 626 305 Byte** groß (`test_a_full_store_stays_under_the_limit`,
+FakeDisks mit HAs eigener JSON-Serialisierung, eingerückt wie HA schreibt).
+
+### 15.3 Signale
+
+Alles kommt aus Daten, die ohnehin da sind: kein zusätzlicher Router-Aufruf
+(`test_two_polls_make_the_same_router_calls_with_everything_on`: die Aufrufliste zweier Polls
+mit Time Machine, Client-Schalter, Client-Stabilität und Network Intelligence an gleicht der mit
+allem aus).
+
+| Art | Quelle | Regel |
+|---|---|---|
+| `router_down` / `router_up` | `FleetOutageTracker` (Listener) | Intervall ab dem Ausfallbeginn des Trackers, sobald er den Ausfall meldet (Code = Fehlerart, z. B. `timeout`); `router_up` mit `duration_s`. Eine offene Beobachtungslücke desselben Routers wird ersetzt |
+| `lan_down` / `lan_up` | `FleetOutageTracker` | ganze Flotte nicht erreichbar: ein Intervall (`fleet`), `critical` |
+| `observation_gap` | Coordinator-Listener | Poll fehlgeschlagen, aber (noch) kein gemeldeter Ausfall: offenes Intervall `poll_failed`; unter 120 s wird es verworfen (`test_observation_gaps_short_ones_are_dropped`); `unloaded`, wenn alle Router länger als 600 s entladen waren |
+| `ha_gap` | Start | HA war aus: von `saved_at` bis zum Start; `restart` (`info`) nach sauberem Stopp, `unclean` (`warning`, `derived`) nach Absturz |
+| `channel_changed` | `ap_interfaces` der Coordinator-Daten | je Funkmodul (`{band}{nr}`) Kanal oder Breite anders als zuvor; Zahlen `band`, `channel_from/to`, `width_from/to`, `dfs`; `warning` mit Code `dfs`, wenn `dfs.last_event` der Daten zum neuen Kanal passt |
+| `radio_down` / `radio_up` | dieselben Daten | Funkmodul in zwei Polls hintereinander nicht mehr gemeldet; Beginn = erster fehlender Poll |
+| `config_fingerprint_changed` | `config_snapshot.fingerprint_from_coordinator` | Hash (16 hex) zwei Polls gleich und anders als der vorige; nur mit vorigem Wert |
+| `uplink_changed`, `router_role_changed` | Topologie von Network Intelligence (nur lesend) | Eltern-Router bzw. Rolle Gateway/Knoten zwei Polls gleich und anders; gemerkte (nicht gesehene) Kanten zählen nicht; `peers` vorher/nachher |
+| Verweise (`tm_refs`) | Audit-Log des Enterprise Core (Abonnement) | jeder veröffentlichte Eintrag der Arten `config_drift`, `config_event`, `rf_event`, `diag_finding`, `traffic_anomaly`, `security_incident`, der keinen Client betrifft: Verweis mit Audit-ID, Code = Audit-Typ, Zahlen wie beim Audit-Adapter |
+| `clock_shift` | Uhr | Wanduhr springt zwischen zwei Takten (300 s) um mehr als 300 s gegenüber der monotonen Uhr, oder beim Start liegt `saved_at` mehr als 300 s in der Zukunft; dann **kein** `ha_gap` (`test_clock_backwards_and_jumps_are_marked_not_gaps`) |
+| `tm_started` / `tm_disabled` | Schalter | `first_start`, `switched_on` (mit `off_s`), `switched_off` |
+
+Unterdrückt (Entprellung): Fingerabdruck, Uplink und Rolle brauchen zwei gleiche Polls;
+`radio_down` zwei fehlende; ein Poll ganz ohne Funkmodule wird für Kanal und Funk ignoriert.
+Takt alle 300 s: Aufbewahrung, Checkpoint um lokale Mitternacht, Lebenszeichen.
+
+### 15.4 Robustheit
+
+| Fall | Verhalten | Test |
+|---|---|---|
+| HA-Neustart | offene Intervalle enden bei `saved_at` mit `end_state: unknown`, `ha_gap` von `saved_at` bis Start | `test_restart_closes_open_intervals_and_marks_the_ha_gap` |
+| Absturz | wie oben, `ha_gap` `unclean`, `derived` | `test_crash_leaves_an_unclean_derived_gap` |
+| Router nach dem Start noch als ausgefallen gemeldet | neues `router_down` ab Start, `derived` (kein überlappendes Doppel) | im Neustart-Test |
+| Uhr rückwärts | `clock_shift`, keine erfundene Lücke | `test_clock_backwards_and_jumps_are_marked_not_gaps` |
+| Router entfernt / deaktiviert | seine offenen Intervalle enden `unknown` | `test_removed_router_ends_its_intervals_as_unknown` |
+| aus und wieder an | `tm_disabled`, offene Intervalle `unknown`, beim Einschalten `tm_started switched_on` | `test_switched_off_and_on_again` |
+| kaputte / neuere Datei, kaputte Zeile | Abschnitt 15.1 | dort genannt |
+| Listener, Takt, HA-Stopp-Listener | existieren nur, solange die Time Machine läuft | `test_ha_stop_listener_and_tick_exist_only_while_on` |
+
+### 15.5 Checkpoints
+
+Täglich um lokale Mitternacht und bei jedem Start ein Checkpoint
+`<ts>|day|<rtr>:u=1,fp=<16 hex>,p=<rtr>;…` (bzw. `|start|`): nur Codes und Hashes
+(`test_daily_checkpoint_carries_codes_only`). Phase B liest sie nicht aus; sie sind für den
+späteren „Zustand zum Zeitpunkt“ vorgesehen.
+
+### 15.6 Ausschalten
+
+Time Machine aus: offene Intervalle enden `unknown`, Marke `tm_disabled`, **alle Client-Marken
+werden gelöscht**, ein letztes Schreiben mit `stop: disabled`, alle Listener ab. Die
+Infrastruktur-Marken bleiben in der Datei und werden beim nächsten Einschalten nach der
+Aufbewahrung gekürzt.
+
+Was genau gelöscht wird (1.51.0, unabhängig vom Schalter „Client-Verläufe“): jede Marke mit
+einem Client-Pseudonym (`client_session`, `client_roam`, `client_disconnect`,
+`client_flapping`) sowie die Tageszähler und Flatter-Zähler der Clients im Speicher. Wann:
+sofort beim Speichern des Optionen-Dialogs, ohne Neuladen. Läuft der Verlauf, schreibt
+`async_stop` die Datei sofort; läuft er nicht (etwa kein Router geladen), liest
+`async_purge_clients` die Datei einmal und schreibt sie nur, wenn Client-Marken darin waren.
+Es bleiben: Ausfälle, Lücken, Änderungen, Verweise, `tm_forgot_client`/`tm_cleared` (ohne
+Client), Checkpoints und Abdeckung. Der Optionen-Dialog sagt das (de/en). Tests:
+`test_switching_off_deletes_the_clients_and_keeps_the_infrastructure`,
+`test_switching_off_without_a_running_engine_deletes_the_clients`,
+`test_nothing_is_trimmed_while_the_time_machine_is_off` in `tests/test_tm_overlap_v1510.py`.
+
+**Alte Kopien (1.51.0, Review K4, K-b).** Nur bei den vier Client-Löschungen
+(Client-Schalter aus, Time Machine aus — mit laufendem Verlauf oder über
+`async_purge_clients` —, „Client vergessen“, „Verlauf löschen“) löscht die Time Machine auch
+die Kopien `<datei>.bak` und `<datei>.corrupt.*` ihrer Datei (im Executor; Zähler
+`copies_removed`), damit keine alte Kopie die gelöschten Clients behält. Eine solche Kopie
+ist danach für die Wiederherstellung verloren. Tests:
+`test_k4_purge_deletes_the_old_copies_of_a_real_file` (echte Datei über HAs Store),
+`test_k4_every_client_delete_removes_the_copies`.
+
+**Router entfernt (1.51.0, Review K4).** `async_remove_entry` gibt die `router_id` des
+entfernten Routers (aus dem Enterprise Core) an `tm_engine.async_remove_router`: Alle Marken
+dieses Routers (auch als Peer eines Roamings) und sein `state` werden gelöscht, wie bei der
+Network Intelligence. Läuft kein Verlauf, wird die Datei einmal gelesen und nur geschrieben,
+wenn sich etwas ändert. Die Kopien `.bak`/`.corrupt.*` bleiben dabei **liegen** (Review K-b):
+Router-Kennungen sind keine Personendaten, und die Kopie einer unlesbaren oder neueren Datei
+(etwa nach einem Downgrade) hält den Verlauf aller anderen Router für eine Wiederherstellung.
+In solchen alten Kopien können darum Marken eines entfernten Routers stehen bleiben. Tests:
+`test_k4_removing_a_router_removes_its_marks`,
+`test_kb_removing_a_router_keeps_the_copy_of_a_newer_file` (echte Datei),
+`test_k4_async_remove_entry_hands_the_router_to_the_time_machine`.
+
+### 15.7 Grenzen (Phase B)
+
+- Intervalle, die vor `from` begannen und ins Fenster reichen, kommen nur mit `spans=1` im
+  Feld `spanning` (Abschnitt 8), höchstens 200; darüber fehlt der Rest
+  (`spanning_truncated: true`).
+- Offene Intervalle werden nicht nach 14 Tagen gekürzt.
+- **Solange die Time Machine aus ist, wird nichts gekürzt** (bekannte Grenze, gewollt): Es
+  läuft kein Takt, der die Datei liest. Die Infrastruktur-Marken bleiben, bis die Time Machine
+  wieder eingeschaltet wird (dann sofort auf 14 Tage gekürzt) oder „Verlauf löschen“ läuft.
+  Client-Marken gibt es dann nicht mehr (Abschnitt 15.6).
+- Uplink und Rolle nur, solange Network Intelligence läuft; ohne Funkdaten in
+  `ap_interfaces` kein Kanalwechsel; sind alle Funkmodule aus (leerer Poll), entsteht kein
+  `radio_down`.
+- Nicht rückwirkend: Was vor dem Einschalten geschah, steht nur in den Phase-A-Quellen.
+- Nach einem Absturz ist der Beginn der HA-Lücke nur auf etwa 15–20 min genau (`derived`;
+  Lebenszeichen alle 15 min plus 300 s Schreibverzögerung).
+- **HA lief, aber kein Router war geladen** (alle beim Start unerreichbar, Review K10): Die
+  HA-Lücke endet beim Einrichten der Integration in diesem HA-Lauf (`async_setup`), der Rest
+  bis zum Start des Verlaufs ist eine `observation_gap` mit Code `unloaded`, wenn er mindestens
+  600 s dauert (darunter bleibt eine HA-Lücke bis zum Start). Ein LAN-Ausfall in dieser Zeit
+  wird nicht erkannt: Ohne geladenen Router gibt es keinen Ausfall-Melder. Wird die
+  Integration erst nach dem HA-Start installiert, zählt die Zeit davor ebenfalls als
+  HA-Lücke. Tests: `test_k10_*` in `tests/test_tm_review_v1510.py`.
+
+## 16. Phase C: Client-Sessions
+
+Code: `tm_clients.py`. Beobachtet die Übergänge der **Client-Stabilität**
+(`ClientStability.add_transition_listener`, neu in `client_engine.py`; die Buchungen der
+Client-Stabilität bleiben gleich, Test `test_client_stability_books_the_same_with_a_listener`);
+kein eigener Abruf.
+
+### 16.1 Schalter
+
+`time_machine_clients` in den Optionen jedes Routers, Standard **aus**, ein Schalter für die
+ganze Flotte (wie `time_machine_enabled` auf alle Einträge geschrieben, an, sobald ein Eintrag
+`true` hat). Er wirkt nur, solange die Time Machine an ist und die Client-Stabilität läuft.
+Ohne ihn wird **nichts** Client-Bezogenes gespeichert. **Ausschalten löscht alle Client-Marken**
+aus Arbeitsspeicher und Datei, sofort geschrieben (`test_client_switch_off_deletes_the_client_history`);
+ist die Time Machine schon aus, liest der Dialog die Datei einmal und schreibt sie nur, wenn
+Client-Marken darin waren (`test_time_machine_off_deletes_clients_and_purge_when_already_off`).
+Seit 1.51.0 löscht auch **das Ausschalten der Time Machine** alle Client-Marken, selbst wenn
+dieser Schalter an bleibt (Abschnitt 15.6).
+
+### 16.2 Marken
+
+| Art | wann | Felder |
+|---|---|---|
+| `client_session` | Client verbunden (START), nach Roaming (MOVE) oder beim Anhängen für einen schon verbundenen Client (`resumed: 1`, `derived`) | Intervall; `band` (2.4/5/6), `roam`, `resumed`, `gaps`, `blips`; Ende `closed` bei beobachteter Trennung, sonst `unknown` |
+| `client_roam` | Wechsel des Routers | `peers` von/nach, Code `roam` |
+| `client_disconnect` | Trennung (END) | Code = Trennungsklasse der Client-Stabilität, `timed` |
+| `client_flapping` | über 200 Marken eines Clients am Tag | `suppressed`, `cap` |
+
+Ist ein Router zeitweise nicht erreichbar, liefert er keine Client-Liste; die Client-Stabilität
+bucht dann eine Lücke (`gaps` + 1) und **keine Trennung**
+(`test_unreachable_router_invents_no_disconnect`). HA-Neustart mitten in einer Session: die
+Session endet bei `saved_at` mit `unknown`, beim Start beginnt eine neue mit `resumed`
+(`test_restart_mid_session_ends_unknown_and_resumes`). Eine `resumed`-Session beginnt seit
+1.51.0 beim Sitzungsbeginn, den die Client-Stabilität kennt, wenn er in die Laufzeit des
+Verlaufs fällt (etwa beim Einschalten der Client-Verläufe); sonst beim Anhängen
+(`test_s3_resumed_sessions_keep_the_start_client_stability_knows`). Vorher begannen alle
+beim selben Zeitpunkt (Review S3). Roaming über Router hinweg:
+`test_session_roam_and_disconnect_across_routers`.
+
+### 16.3 Pseudonym und Name
+
+`client` ist `tmc_` + 16 hex, HMAC der MAC mit dem eigenen Modulschlüssel der Time Machine;
+gespeichert werden nur die 16 hex. `client_name` liest der Server bei jeder Antwort aus der
+Client-Stabilität, nur für Admins und nur solange sie den Client kennt; gespeichert wird er nie.
+Dafür hält der Prozess im Arbeitsspeicher Pseudonym → MAC, begrenzt (Review K9): jeder Client
+mit offener Session plus die 512 zuletzt gesehenen anderen (`MACS_RECENT_MAX`); für ältere
+ist `client_name` `null`, bis sie wieder einen Übergang haben
+(`test_k9_the_mac_table_keeps_open_clients_and_a_bounded_rest`).
+
+### 16.4 Route `GET /api/openwrt_router/enterprise/timemachine/sessions`
+
+Nur Administratoren (jeder andere Benutzer 403, auch bei offenem Panel), kein Body, strenge
+Abfrage wie in Abschnitt 4 (400 ohne Echo, unbekannte Schlüssel abgelehnt).
+
+| Parameter | Format | Standard | Bedeutung |
+|---|---|---|---|
+| `from`, `until` | wie Abschnitt 4 | 24 h bis jetzt | Fenster `[from, until)`, höchstens 14 Tage |
+| `client` | `tmc_` + 16 hex | – | nur dieser Client |
+| `router_id` | `rtr_` + 32 hex | – | nur Sessions an diesem Router |
+| `limit` | 1 … 500 | 200 | Sessions je Seite |
+| `cursor` | wie Abschnitt 4 | – | seit 1.51.0: aus `next_cursor`; darf auch vor `from` liegen (Sessions, die vorher begannen), nie nach `until` |
+
+Eine Session gehört zum Fenster, wenn sie vor `until` begann und offen ist oder bei/nach `from`
+endete (Überlappung). Sortiert nach Beginn absteigend, bei gleichem Beginn nach `id`.
+Blättern über `next_cursor` wie in Abschnitt 8 (teilt auch einen Beginn, den mehr Sessions als
+`limit` teilen, und erreicht Sessions, die vor `from` begannen); `next_until` bleibt für
+ältere Clients (teilt Sessions mit demselben Beginn nicht und endet am `from`).
+
+```json
+{
+  "v": 1,
+  "status": "ok",
+  "reason": null,
+  "generated_at": 1795290689.754,
+  "window": {"from": 1799997480.0, "until": 1800001140.0},
+  "recording": true,
+  "sessions": [
+    {
+      "id": "tmm_85926e9581ae53c0",
+      "client": "tmc_f3e24c9bafa1ce4d",
+      "client_name": null,
+      "router_id": "rtr_22222222222222222222222222222222",
+      "router_name": "Router 2",
+      "start": 1800000180.0,
+      "end": 1800000240.0,
+      "end_state": "closed",
+      "band": 5,
+      "params": {"band": 5, "roam": 1},
+      "derived": false
+    }
+  ],
+  "truncated": true,
+  "next_until": 1800000180.0,
+  "next_cursor": "1800000180000:tmm_85926e9581ae53c0"
+}
+```
+
+(Testantwort mit `limit=1`, Kennungen erfunden)
+
+| `status` | Bedeutung |
+|---|---|
+| `ok` | gelesen; `recording` sagt, ob gerade aufgezeichnet wird (Client-Stabilität angebunden) |
+| `off` | Time Machine aus; `window` `null` |
+| `clients_off` | Client-Schalter aus; keine Sessions |
+| `unavailable` | an, aber nicht bereit: `reason` `not_running` oder `not_loaded` |
+
+Tests: `test_sessions_route_rights_errors_and_paging`,
+`test_s3_250_resumed_sessions_of_one_start_page_without_loss` (250 Sessions mit demselben
+Beginn und 30 weitere, `limit` 200: 280 von 280 über `/sessions` und `/timeline`).
+
+### 16.5 Timeline-Beispiel (Ausschnitt)
+
+```json
+{
+  "id": "tmm_4df64109bab3f96a",
+  "ts": 1800000180.0,
+  "source": "tm_clients",
+  "kind": "client_roam",
+  "group": "clients",
+  "severity": "info",
+  "router_id": "rtr_22222222222222222222222222222222",
+  "router_name": "Router 2",
+  "fleet": false,
+  "title_key": "tm_clients.client_roam",
+  "text": null,
+  "params": {},
+  "ref": {"module": "time_machine", "type": "mark", "id": "m3", "version_id": null},
+  "derived": false,
+  "code": "roam",
+  "end": null,
+  "end_state": null,
+  "client": "tmc_f3e24c9bafa1ce4d",
+  "client_name": null,
+  "peers": {
+    "before": {"router_id": "rtr_11111111111111111111111111111111", "router_name": "Router 1"},
+    "after": {"router_id": "rtr_22222222222222222222222222222222", "router_name": "Router 2"}
+  }
+}
+```
+
+Quelleneintrag: `{"id": "tm_clients", "state": "ok", "reason": null, "count": 4, "oldest":
+1800000000.0, "truncated": false, "cut": null, "duplicates": 0}`.
+
+`omitted_client_marks` behält seine Bedeutung: Client-Einträge der **Phase-A-Quellen**, die
+weggelassen werden. Die Marken aus `tm_clients` zählen dort nicht.
+
+### 16.6 Grenzen (Phase C)
+
+- Sessions gibt es nur, solange die Client-Stabilität läuft; wird sie neu eingerichtet, hängt
+  sich die Time Machine beim nächsten Takt (höchstens 5 min) wieder an.
+- Ohne `cursor` (Clients vor 1.51.0): mehr Sessions mit **demselben Beginn** als `limit`
+  oder mehr überlappende Sessions als `limit`, deren Beginn vor `from` liegt, sind über
+  `next_until` nicht erreichbar (`truncated: true`); mit `next_cursor` kommt jede.
+- „Client vergessen“ für einen gerade verbundenen Client: Die Time Machine zeichnet ihn ab
+  seinem nächsten Übergang wieder auf (Review K5): eine neue Session beim nächsten Verbinden
+  oder Router-Wechsel; trennt er sich vorher, entsteht nur die Trennungsmarke.
+- „Client vergessen“ löscht nur im Verlauf der Time Machine, nicht in Client-Stabilität,
+  Network Intelligence, Security Center, Traffic, WiFi RF oder im HA-Recorder (die Antwort
+  nennt sie in `not_deleted_in`).
+- Der Hostname kommt allein aus der Client-Stabilität; kennt sie den Client nicht mehr, ist
+  `client_name` `null`.
+
+## 17. Doppelte zwischen Quellen
+
+Vor den Rechten entfernt und je Quelle in `duplicates` gezählt:
+
+1. **Audit gewinnt über `tm_refs`.** Ein Verweis mit derselben Audit-ID wie ein gelesener
+   Eintrag von `core_audit` fällt weg. Erst wenn der Audit-Ring den Eintrag verdrängt hat,
+   erscheint der Verweis (`test_the_audit_wins_over_its_reference_until_it_is_gone`).
+2. **`tm_index` gewinnt über das gleiche NI-Ereignis** (1.51.0, Review S1). Ein Ereignis von
+   `ni_events` mit der Art `router_down`, `router_up`, `lan_down`, `lan_up` oder
+   `channel_changed` fällt nur weg, wenn `tm_index` (im Fenster oder als Intervall, das
+   hineinreicht) eine Marke **derselben Art und desselben Routers** (Flotten-Marken: beide
+   ohne Router) **in zeitlicher Nähe** hält, `NI_MATCH_S` = 180 s:
+   - ein „down“ liegt im Intervall des eigenen Ausfalls (ab 180 s vor seinem Beginn bis 180 s
+     nach seinem Ende; offen: ohne Ende). Begründung: Beide folgen demselben Ausfall-Melder;
+     das eigene Intervall beginnt bei der ersten Störung, NI meldet erst nach zwei weiteren
+     fehlgeschlagenen Polls und der Wartezeit (längstes Poll-Intervall + 30 s), also je nach
+     Poll-Intervall Minuten später. 180 s sind drei normale Polls (60 s) oder ein Poll mit
+     Reserve bei 120 s (CPU-Last);
+   - ein „up“ liegt höchstens 180 s neben einem eigenen „up“ oder dem Ende des eigenen
+     Intervalls (beide melden dasselbe `report_up`);
+   - ein Kanalwechsel liegt höchstens 180 s neben einem eigenen Kanalwechsel desselben
+     Routers (ein Poll-Intervall bis 300 s im SSH-Fallback ist nicht abgedeckt: dann bleiben
+     beide, lieber doppelt als verloren).
+   Im Zweifel bleibt das NI-Ereignis: andere Arten (auch `uplink_changed` aus `lan.uplink`,
+   ein Port-Ereignis, das der eigene Verlauf nicht kennt), ein anderer Router, kein passendes
+   eigenes Intervall, ein Ereignis ohne Router, ein nicht lesbares `tm_index`. Tests:
+   `test_the_index_wins_over_the_same_ni_event_only`, `test_s1_*` in
+   `tests/test_tm_review_v1510.py` (eigener Verlauf über den echten Ausfall-Melder).
+
+   **Aufwand (Review M1).** Die eigenen Marken werden je (Art, Router) einmal sortiert
+   (`tm_query._OwnSpans`); jedes NI-Ereignis prüft per `bisect` nur die Nachbarn: bei „down“
+   das Präfix-Maximum der Obergrenzen aller Intervalle, die früh genug beginnen (Intervalle
+   eines Routers dürfen sich überlappen, etwa nach einem Uhrsprung oder einem verdrängten
+   offenen Intervall; die Regel bleibt exakt dieselbe), sonst die beiden nächsten Werte.
+   Gemessen (ein flatternder Router, 3000 eigene Marken, 3000 NI-Ereignisse, Aufbau der
+   Prüfung, je drei Läufe): `drop_duplicates` vorher 143–168 ms, längster Block ohne Abgabe
+   143–154 ms; nachher 2–3 ms und 4–5 ms. Verglichene Werte: 4 501 500 linear, 6 000 jetzt.
+   Tests: `test_m1_the_fast_rule_decides_like_the_linear_one` (40 Zufallsdaten-Sätze gegen
+   die alte lineare Regel, die im Test bleibt, mit Grenzfällen genau bei ±180 s, offenen
+   Intervallen, mehreren Routern und Flotten-Marken), `test_m1_overlapping_and_open_intervals_of_one_router`,
+   `test_m1_a_flapping_router_costs_log_n_comparisons_per_event` (zählt Vergleiche, keine Zeit).
+
+   **Über Seitengrenzen (Review K-a).** Auf einer Folgeseite (`cursor`) liest die Zeitleiste
+   `tm_index` für die Doppel-Prüfung bis `NI_MATCH_S` über den Cursor hinaus (Feld
+   `lookahead` der Lesung); angezeigt wird weiter nur bis zum Cursor. So bleibt ein
+   NI-Ereignis nicht auf Seite 2 stehen, wenn die eigene, etwas jüngere Marke auf Seite 1 lag.
+   Betroffen waren Kanalwechsel **und** „up“ (beide Seiten können bis 180 s auseinander
+   liegen); ein „down“ nicht, denn dessen eigenes Intervall beginnt vor dem NI-Ereignis und
+   liegt damit auf derselben oder einer späteren Seite (offene und hineinreichende Intervalle
+   werden auf jeder Seite gelesen). An den Fenstergrenzen gilt das bewusst nicht: Liegt die
+   eigene Marke nach `until` oder vor `from`, gehört sie nicht zu diesem Fenster, und das
+   NI-Ereignis ist dort der einzige Eintrag des Ereignisses; jedes Fenster ist für sich
+   vollständig (in zwei angrenzenden Fenstern kann dasselbe Ereignis je einmal stehen).
+   Test: `test_ka_a_double_split_by_a_page_boundary_is_shown_once` (Kanalwechsel und „up“,
+   alle Seiten mit `limit` 3 gegen eine Seite).
+
+Andere Quellen werden nicht verglichen.
+
+## 18. Aktionen
+
+Beide nur für Administratoren (`async_register_admin_service`), mit Antwort; immer
+registriert, bei ausgeschalteter Time Machine Fehler `time_machine_off`.
+
+| Aktion | Felder | Antwort | Wirkung |
+|---|---|---|---|
+| `openwrt_router.time_machine_forget_client` | `mac` und `client` (`tmc_` + 16 hex, seit 1.51.0) sind im Schema beide optional; genau eines muss gesetzt sein (ein leeres Feld zählt als nicht gesetzt), sonst antwortet die Aktion mit dem übersetzten Fehler `time_machine_mac_or_client`, ohne die Eingabe zu wiederholen (Review K-c) | `{"deleted": n, "not_deleted_in": [...]}` | löscht alle Marken dieses Clients, Marke `tm_forgot_client` (ohne Client), Audit `time_machine.client_forgotten`, sofort geschrieben, alte Kopien der Datei gelöscht (Abschnitt 15.6); ein gerade verbundener Client wird ab seinem nächsten Übergang wieder aufgezeichnet (Abschnitt 16.6); Fehler `time_machine_mac_or_client` (keines oder beide), `time_machine_invalid_mac`, `time_machine_invalid_client`, `time_machine_no_key` |
+| `openwrt_router.time_machine_clear_history` | `clients_only` (bool) | `{"deleted": n}` | löscht die Client-Marken oder den ganzen eigenen Verlauf (auch Checkpoints, Abdeckung beginnt neu), Marke `tm_cleared`, Audit `time_machine.history_cleared`, sofort geschrieben |
+
+Die Time Machine speichert die MAC nicht; Home Assistant selbst kann einen Aktionsaufruf mit
+seinen Daten aber in Protokoll oder Recorder behalten. Wer das vermeiden will, nimmt das
+Pseudonym (`client`), das Tab und `/sessions` zeigen (Review K2; die Feldtexte sagen es).
+
+Tests: `test_forget_action_and_client_stability_exclusion`, `test_clear_history_action`,
+`test_k2_forget_takes_the_pseudonym_and_exactly_one_of_both`,
+`test_kc_forget_over_the_real_action_answers_translated` (echter Dienstaufruf über HAs
+Dienst-Registry: keines, beide, leeres Feld, nur `mac`, nur `client`, ungültiges Pseudonym).
+
+## 19. Panel für B/C (1.51.0)
+
+Das Panel ist mit 1.51.0 nachgezogen (Abschnitt 14.3, `_PANEL_VERSION` `20261121-timemachine5`).
+Es liest nur die Routen `timeline` und `sessions` und fügt nichts hinzu. Offen für eine spätere
+Version: „Zustand zum Zeitpunkt“ aus den Checkpoints, Export, Sprünge über `ref` in die
+Quell-Tabs, Bedienelemente für die Aktionen aus Abschnitt 18.

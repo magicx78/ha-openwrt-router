@@ -6,7 +6,7 @@ Home Assistant custom integration für OpenWrt Router via ubus/rpcd JSON-RPC.
 GitHub: https://github.com/magicx78/ha-openwrt-router
 Domain: `openwrt_router`
 HACS: Custom Repository (Ziel: Default Store)
-Stand: Version 1.50.0 (2026-11-21)
+Stand: Version 1.51.0 (2026-11-21)
 
 ## Projektstruktur
 
@@ -39,7 +39,7 @@ ha-openwrt-router/
 │   ├── rf_*.py, wifi_rf_entities.py  # WiFi RF Intelligence (rf_center, rf_collector, rf_privacy, rf_views)
 │   ├── traffic_*.py            # Traffic Analytics (traffic_engine, traffic_output, traffic_views)
 │   ├── net_*.py                # Network Intelligence (net_engine, net_rules, net_query)
-│   ├── tm_*.py                 # Network Time Machine Phase A (tm_sources, tm_query, tm_views); Tab „Zeitreise“ in frontend/…/enterprise/timemachine
+│   ├── tm_*.py                 # Network Time Machine: Phase A (tm_sources, tm_query, tm_views), eigener Verlauf B/C (tm_marks, tm_store, tm_engine, tm_clients); Tab „Zeitreise“ in frontend/…/enterprise/timemachine
 │   ├── strings.json            # UI Strings
 │   ├── translations/en.json
 │   ├── brand/                  # icon.png + icon.svg (für HACS Validation)
@@ -62,7 +62,7 @@ ha-openwrt-router/
 │   ├── test_wifi_switch_ids_v1492.py   # rpcd-getreues Router-Modell + Aufrufliste 1.47.1
 │   ├── test_unique_ids_snapshot_v1494.py  # 130 unique_ids eines Gateways (Grenzen im Docstring)
 │   ├── full_router_kit.py      # Gateway-Modell: volle ubus-Poll-Daten + rpcd-getreues WLAN
-│   └── …                       # rund 8 900 Tests (1.50.0)
+│   └── …                       # rund 9 070 Tests (1.51.0)
 ├── scripts/                    # mock_router.py, dev_start.py, _dev_rss_sample.sh, …
 ├── .github/workflows/
 │   ├── hassfest.yaml           # HA manifest validation

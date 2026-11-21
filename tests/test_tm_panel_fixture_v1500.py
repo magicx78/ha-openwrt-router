@@ -46,7 +46,7 @@ FIXTURE = (
     / "custom_components/openwrt_router/frontend/topology/src/enterprise/timemachine"
     / "tmFixture.json"
 )
-PAGE = 6  # small page: the first one is cut and has a next_until
+PAGE = 6  # small page: the first one is cut and has a next_cursor
 
 
 @pytest.fixture
@@ -76,24 +76,29 @@ async def build(disks: Any, tmp_path: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     with patch.object(tm_views.time, "time", return_value=world.start + 7200):
         async with http(hass) as h:
-            out["admin"] = _answer(await h.get(params=window))
-            page1 = await h.get(params={**window, "limit": str(PAGE)})
+            # as the tab asks since 1.51.0: first pages with spans=1, older
+            # pages with the cursor and without spans
+            first = {**window, "spans": "1"}
+            out["admin"] = _answer(await h.get(params=first))
+            page1 = await h.get(params={**first, "limit": str(PAGE)})
             out["admin_page1"] = _answer(page1)
-            until = page1.data["next_until"]
-            assert until is not None
+            cursor = page1.data["next_cursor"]
+            assert cursor is not None
             out["admin_page2"] = _answer(
-                await h.get(params={**window, "limit": str(PAGE), "until": str(until)})
+                await h.get(params={**window, "limit": str(PAGE), "cursor": cursor})
             )
-            out["empty"] = _answer(await h.get(params=past))
+            out["empty"] = _answer(await h.get(params={**past, "spans": "1"}))
             with patch.object(world.center, "overview", side_effect=RuntimeError):
-                out["partial"] = _answer(await h.get(params=window))
-                out["partial_empty"] = _answer(await h.get(params=past))
+                out["partial"] = _answer(await h.get(params=first))
+                out["partial_empty"] = _answer(
+                    await h.get(params={**past, "spans": "1"})
+                )
             out["bad_request"] = _answer(await h.get(params={"kind": "nope"}))
             hass.data[_PANEL_ACCESS_KEY] = {"e1": True}
-            out["user"] = _answer(await h.get(user=USER_ID, params=window))
+            out["user"] = _answer(await h.get(user=USER_ID, params=first))
             hass.data.pop(_PANEL_ACCESS_KEY)
             world.env.entries[0].options[OPTION_TIME_MACHINE_ENABLED] = False
-            out["off"] = _answer(await h.get(params=window))
+            out["off"] = _answer(await h.get(params=first))
             h.assert_private()
     await close(world)
     return out
@@ -109,6 +114,7 @@ async def test_the_tab_fixture_is_the_real_route_answer(disks, tmp_path) -> None
     assert doc["admin"]["body"]["status"] == "ok"
     assert doc["admin"]["body"]["omitted_client_marks"] >= 1
     assert doc["admin_page1"]["body"]["truncated"] is True
+    assert doc["admin_page1"]["body"]["next_cursor"] is not None
     assert doc["partial"]["body"]["status"] == "partial"
     assert doc["partial_empty"]["body"]["marks"] == []
     assert doc["empty"]["body"]["marks"] == []

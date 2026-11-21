@@ -1,10 +1,15 @@
-"""Network Time Machine, Phase A: one read adapter per source.
+"""Network Time Machine: one read adapter per source.
 
-Plan ``docs/plans/2026-11-21-network-time-machine.md`` §4 variant (b),
-Phase A: a pure read layer over modules that already keep history. No own
-store, no router call, no listener, no background task: every adapter reads
-the source's public read function once per request and turns its entries
-into timeline marks (§5.1).
+Plan ``docs/plans/2026-11-21-network-time-machine.md`` §4 variant (b).
+Phase A: a pure read layer over modules that already keep history; every
+adapter reads the source's public read function once per request and turns
+its entries into timeline marks (§5.1). Phases B/C add three sources that
+read the Time Machine's own index (``tm_engine`` / ``tm_store``; no router
+call either): ``tm_index`` (outages, gaps, radios, topology, configuration
+fingerprint, own marks), ``tm_refs`` (references to audit entries,
+administrators only) and ``tm_clients`` (client sessions, administrators
+only, only while the client switch is on). They are read whole (the index
+holds at most 15000 marks), so they are never cut.
 
 Sources and their read functions:
 
@@ -16,9 +21,11 @@ Sources and their read functions:
   first, no ``until`` either; read limit 500).
 * ``ni_events`` / ``ni_incidents``: ``net_query.events_page`` and
   ``net_query.incidents_page``, the functions behind the Network
-  Intelligence routes, each with a limit above the store's capacity.
+  Intelligence routes. Events with a limit above the ring's capacity.
   Incidents come in status/severity order without a time filter: they are
-  all read and filtered by time here.
+  all read (the limit is the number stored plus one: active and
+  acknowledged incidents are never pruned, so the store can hold more than
+  ``MAX_INCIDENTS``) and filtered by time here.
 * ``security_timeline``: ``SecurityCenter.overview`` with the masked
   (non-admin) view; only its ``timeline`` is used (read limit above its
   capacity).
@@ -33,8 +40,10 @@ included): above it the source is complete.
 Privacy (plan §6, F3/F4/F5): a mark carries no MAC, IP, host name, SSID or
 WLAN netdev name. Routers appear only as the contract ``router_id`` plus the
 entry title the sister modules show (dropped when it is an address). An
-entry that concerns a client is left out and only counted
-(``omitted_client``): Phase A has no client switch. Source texts (Security
+entry of a Phase A source that concerns a client is left out and only
+counted (``omitted_client``). Client marks exist only in ``tm_clients``:
+the pseudonym ``tmc_…`` and, for administrators, the current host name
+while Client Stability still knows the client. Source texts (Security
 Center only) go through the core masking and the identity masking; all
 other marks carry fixed codes (``title_key``) and numbers only.
 
@@ -91,6 +100,12 @@ SOURCE_IDS: Final = (
     SOURCE_NI_INCIDENTS,
     SOURCE_SECURITY_TIMELINE,
 )
+# Phases B/C: the own index (ids as in ``tm_marks``).
+SOURCE_TM_INDEX: Final = "tm_index"
+SOURCE_TM_REFS: Final = "tm_refs"
+SOURCE_TM_CLIENTS: Final = "tm_clients"
+INDEX_SOURCE_IDS: Final = (SOURCE_TM_INDEX, SOURCE_TM_REFS, SOURCE_TM_CLIENTS)
+ALL_SOURCE_IDS: Final = SOURCE_IDS + INDEX_SOURCE_IDS
 
 STATE_OK: Final = "ok"
 STATE_EMPTY: Final = "empty"
@@ -105,6 +120,7 @@ REASON_ERROR: Final = "error"  # the read function raised
 REASON_BAD_FORMAT: Final = "bad_format"  # an answer of an unexpected shape
 REASON_MODULE_OFF: Final = "module_off"  # the source module is switched off
 REASON_ADMIN_ONLY: Final = "admin_only"  # not shown to this (non-admin) user
+REASON_CLIENTS_OFF: Final = "clients_off"  # the client switch is off (tm_clients)
 REASONS: Final = (
     REASON_NOT_RUNNING,
     REASON_NOT_LOADED,
@@ -114,6 +130,9 @@ REASONS: Final = (
     REASON_MODULE_OFF,
     REASON_ADMIN_ONLY,
 )
+# Phases B/C (the panel of 1.50.0 has texts for REASONS only).
+INDEX_REASONS: Final = (REASON_CLIENTS_OFF,)
+ALL_REASONS: Final = REASONS + INDEX_REASONS
 
 SEVERITIES: Final = ("info", "warning", "critical")
 SEVERITY_RANK: Final = {name: rank for rank, name in enumerate(SEVERITIES)}
@@ -177,6 +196,11 @@ KIND_GROUP: Final[Mapping[str, str]] = {
     "tm_store_recovered": GROUP_TIME_MACHINE,
     "tm_forgot_client": GROUP_TIME_MACHINE,
     "tm_exported": GROUP_TIME_MACHINE,
+    # added in Phase B/C (additive): a jump of the system clock, and the
+    # summary of one client's marks over its daily cap
+    "clock_shift": GROUP_TIME_MACHINE,
+    "client_flapping": GROUP_CLIENTS,
+    "tm_cleared": GROUP_TIME_MACHINE,  # the history was cleared (action)
 }
 KINDS: Final = tuple(KIND_GROUP)
 # What a non-admin sees while the panel is open to all users (F4):
@@ -196,8 +220,6 @@ VERSIONS_READ_LIMIT: Final = MAX_LIST_LIMIT
 NI_EVENTS_READ_LIMIT: Final = NI_MAX_EVENTS + 1
 NI_INCIDENTS_READ_LIMIT: Final = NI_MAX_INCIDENTS + 1
 SECURITY_READ_LIMIT: Final = SEC_TIMELINE_MAX + 1
-# Marks of one source on one page at most (a page holds MAX_LIMIT = 500).
-SOURCE_MARK_CAP: Final = 500
 # Time budget of one source (seconds): an asyncio timeout around its awaits
 # plus a monotonic deadline checked inside its own loops. A synchronous read
 # function of a source module is not interrupted; the deadline is checked
@@ -266,6 +288,17 @@ class SourceResult:
     # Older entries of the window cannot be read at all (no ``until`` in the
     # read function, or a read without time order).
     unreachable: bool = False
+    # Marks dropped as doubles of another source (``tm_query.merge``).
+    duplicates: int = 0
+    # ``tm_index`` only: when the own index was live ([start, end] pairs).
+    coverage: list[tuple[float, float]] = field(default_factory=list)
+    # Own index only (1.51.0, review S4): intervals that began before the
+    # window and reach into it; never part of ``marks`` (``tm_query`` shows
+    # them in ``spanning`` with ``spans=1`` only, and uses them for doubles).
+    spanning: list[dict[str, Any]] = field(default_factory=list)
+    # ``tm_index`` on a later page only (review K-a): its marks just after
+    # the cursor (already on the page before), read only to find doubles.
+    lookahead: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SourceOff(Exception):
@@ -481,6 +514,17 @@ def make_mark(
         "params": dict(params or {}),
         "ref": dict(ref),
         "derived": False,
+        # additive (Phases B/C); set on marks of the own index only
+        "code": code,
+        "end": None,
+        "end_state": None,
+        "client": None,
+        "client_name": None,
+        "peers": None,
+        # additive (1.51.0): an interval of the own index that began before
+        # the window and reaches into it (only in ``spanning``, with
+        # ``spans=1``; review S4)
+        "spans_in": False,
     }
 
 
@@ -859,10 +903,17 @@ async def read_ni_incidents(
     from .net_query import engine_now, incidents_page
 
     engine = _ni_engine(hass)
+    # Active and acknowledged incidents are never pruned (``prune_incidents``),
+    # so the store may hold more than MAX_INCIDENTS: the limit follows the
+    # number stored, one above it (1.51.0, review N1).
+    try:
+        stored = len(engine.machine.peek())
+    except Exception:  # noqa: BLE001 - a broken machine is a bad answer
+        raise SourceUnreadable(REASON_BAD_FORMAT) from None
     page = incidents_page(
         engine,
         _no_name,
-        {"limit": NI_INCIDENTS_READ_LIMIT},
+        {"limit": max(NI_INCIDENTS_READ_LIMIT, stored + 1)},
         engine_now(engine, req.now),
     )
     incidents = page.get("incidents") if isinstance(page, Mapping) else None
@@ -1029,12 +1080,168 @@ async def read_security_timeline(
 
 # --- runner -----------------------------------------------------------------------------
 
+# --- the own index (Phases B/C) ---------------------------------------------------------
+
+
+def _tm_engine(hass: HomeAssistant) -> Any:
+    from .tm_engine import async_get_time_machine
+
+    engine = async_get_time_machine(hass)
+    if engine is None:
+        raise SourceUnreadable(REASON_NOT_RUNNING)
+    if engine.loaded is not True:
+        raise SourceUnreadable(REASON_NOT_LOADED)
+    return engine
+
+
+def _peer(router_id: str | None, routers: RouterMap) -> dict[str, Any] | None:
+    if router_id is None:
+        return None
+    return {"router_id": router_id, "router_name": routers.name_of(router_id)}
+
+
+def _stored_source_id(mark: Any) -> str:
+    if mark.ref is not None:
+        return f"{mark.ref[0]}:{mark.ref[1]}"
+    return f"m{mark.seq}"
+
+
+def stored_mark_id(mark: Any) -> str:
+    """The timeline ``id`` of a stored mark (what :func:`index_mark` gives)."""
+    return mark_id(mark.source, _stored_source_id(mark))
+
+
+def index_mark(
+    mark: Any, routers: RouterMap, *, client_name: str | None = None
+) -> dict[str, Any]:
+    """One stored mark (``tm_marks.Mark``) as a timeline mark.
+
+    ``title_key`` is ``<source>.<kind>`` (the code, e.g. the error type of an
+    outage, is the extra field ``code``); a reference mark keeps the key of
+    the audit entry it points to (``core_audit.<event type>``) and its
+    ``ref``, so it reads like the original.
+    """
+    source = mark.source
+    source_id = _stored_source_id(mark)
+    if mark.ref is not None:
+        ref = ref_of(
+            "core_audit",
+            "drift" if mark.kind == "config_drift" else "event",
+            mark.ref[1],
+        )
+        title_key = f"core_audit.{mark.code or 'unknown'}"
+    else:
+        ref = ref_of("time_machine", "mark", source_id)
+        title_key = f"{source}.{mark.kind}"
+    out = make_mark(
+        source=source,
+        source_id=source_id,
+        ts=mark.ts,
+        kind=mark.kind,
+        severity=mark.severity,
+        router_id=mark.router,
+        routers=routers,
+        fleet=mark.router is None,
+        code=mark.code,
+        params=mark.params,
+        ref=ref,
+    )
+    out["title_key"] = title_key
+    out["derived"] = bool(mark.derived)
+    out["end"] = mark.end
+    out["end_state"] = mark.end_state
+    if mark.client is not None:
+        out["client"] = f"tmc_{mark.client}"
+        out["client_name"] = client_name
+    if mark.peers is not None:
+        out["peers"] = {
+            "before": _peer(mark.peers[0], routers),
+            "after": _peer(mark.peers[1], routers),
+        }
+    return out
+
+
+# Marks turned into timeline marks between two yields to the event loop
+# (review K6: a full client quota is ~10000 marks, ~30 ms in one piece).
+INDEX_YIELD_EVERY: Final = 1000
+
+
+async def _index_marks(
+    engine: Any,
+    source: str,
+    req: ReadRequest,
+    routers: RouterMap,
+    deadline: float,
+    names: Callable[[str | None], str | None] | None = None,
+) -> SourceResult:
+    """Marks of the window plus the intervals reaching into it (apart)."""
+    index = engine.index
+    parts: list[list[dict[str, Any]]] = [[], []]
+    found = [(m, 0) for m in index.window(source, req.since, req.until)]
+    found += [(m, 1) for m in index.spanning_in(source, req.since)]
+    for i, (mark, part) in enumerate(found):
+        if i % 500 == 0:
+            _check(deadline)
+        if i and i % INDEX_YIELD_EVERY == 0:
+            # the list is taken: a mark added or closed meanwhile does not
+            # change this answer's set (a closed one may show its end)
+            await asyncio.sleep(0)
+        name = names(mark.client) if names is not None and mark.client else None
+        item = index_mark(mark, routers, client_name=name)
+        item["spans_in"] = part == 1
+        parts[part].append(item)
+    result = _finish(source, parts[0], 0, False)
+    result.spanning = parts[1]
+    return result
+
+
+async def read_tm_index(
+    hass: HomeAssistant, req: ReadRequest, routers: RouterMap, deadline: float
+) -> SourceResult:
+    """Own marks of the window (rights per group in ``tm_query``)."""
+    engine = _tm_engine(hass)
+    result = await _index_marks(engine, SOURCE_TM_INDEX, req, routers, deadline)
+    result.coverage = [
+        (float(start), float(end) if end is not None else req.now)
+        for start, end in engine.store.coverage
+        if start is not None
+    ]
+    return result
+
+
+async def read_tm_refs(
+    hass: HomeAssistant, req: ReadRequest, routers: RouterMap, deadline: float
+) -> SourceResult:
+    """Reference marks of audit entries (administrators only, like the audit)."""
+    if not req.admin:
+        raise SourceOff(REASON_ADMIN_ONLY)
+    engine = _tm_engine(hass)
+    return await _index_marks(engine, SOURCE_TM_REFS, req, routers, deadline)
+
+
+async def read_tm_clients(
+    hass: HomeAssistant, req: ReadRequest, routers: RouterMap, deadline: float
+) -> SourceResult:
+    """Client marks (administrators only, only with the client switch on)."""
+    if not req.admin:
+        raise SourceOff(REASON_ADMIN_ONLY)
+    engine = _tm_engine(hass)
+    if not engine.clients_wanted:
+        raise SourceOff(REASON_CLIENTS_OFF)
+    recorder = engine.recorder
+    names = recorder.name_of if recorder is not None else None
+    return await _index_marks(engine, SOURCE_TM_CLIENTS, req, routers, deadline, names)
+
+
 READERS: Final[Mapping[str, ReadFn]] = {
     SOURCE_CORE_AUDIT: read_core_audit,
     SOURCE_CONFIG_VERSIONS: read_config_versions,
     SOURCE_NI_EVENTS: read_ni_events,
     SOURCE_NI_INCIDENTS: read_ni_incidents,
     SOURCE_SECURITY_TIMELINE: read_security_timeline,
+    SOURCE_TM_INDEX: read_tm_index,
+    SOURCE_TM_REFS: read_tm_refs,
+    SOURCE_TM_CLIENTS: read_tm_clients,
 }
 
 
@@ -1048,7 +1255,7 @@ async def async_read_source(
     readers: Mapping[str, ReadFn] | None = None,
 ) -> SourceResult:
     """Read one source; every failure becomes ``unreadable`` with a fixed reason."""
-    reader = (readers or READERS)[source]
+    reader = (readers or {}).get(source) or READERS[source]
     deadline = time.monotonic() + budget
     try:
         async with asyncio.timeout(budget):

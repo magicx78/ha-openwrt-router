@@ -404,6 +404,8 @@ class TestNoSwitchOrFritzboxSteps:
             "extended_wifi_sensors",
             "topology_port_debug",
             "topology_panel_all_users",
+            # Network Time Machine client histories (1.51.0): own switch, off.
+            "time_machine_clients",
             # WiFi RF Intelligence (1.48.0): always offered, all off.
             "wifi_rf_enabled",
             "wifi_rf_get_status",

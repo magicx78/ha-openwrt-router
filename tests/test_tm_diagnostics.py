@@ -96,6 +96,10 @@ async def test_on_shows_states_counts_and_limits_and_nothing_personal(
         "limits",
         "sources",
         "counters",
+        # 1.51.0: client switch and the own index (counts only)
+        "clients_enabled",
+        "entry_clients_enabled",
+        "index",
     }
     assert block["enabled"] is True and block["entry_enabled"] is True
     assert block["api_version"] == 1 and block["window_s"] == 86_400.0
@@ -104,12 +108,21 @@ async def test_on_shows_states_counts_and_limits_and_nothing_personal(
         "max_window_s": 14 * 86_400.0,
         "default_limit": 200,
         "max_limit": 500,
-        "source_mark_cap": 500,
         "source_budget_s": 2.0,
+        "retention_s": 14 * 86_400.0,
+        "max_marks": 15000,
+        "quotas": {"infrastructure": 3000, "references": 2000, "clients": 10000},
+        "client_day_cap": 200,
     }
     sources = block["sources"]
-    assert list(sources) == list(tm_sources.SOURCE_IDS)
-    for item in sources.values():
+    assert list(sources) == list(tm_sources.ALL_SOURCE_IDS)
+    assert (sources["tm_clients"]["state"], sources["tm_clients"]["reason"]) == (
+        "off",
+        "clients_off",
+    )
+    assert block["index"]["loaded"] is True and block["index"]["routers"] == 0
+    for source in tm_sources.SOURCE_IDS:
+        item = sources[source]
         assert set(item) == {
             "state",
             "reason",

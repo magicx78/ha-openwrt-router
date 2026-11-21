@@ -128,6 +128,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 "The configuration backup action could not be registered",
                 exc_info=True,
             )
+    # Network Time Machine (Phases B/C): the two admin actions; they answer
+    # with an error while the Time Machine is off.
+    try:
+        from .tm_engine import async_register_time_machine_services, note_ha_start
+
+        note_ha_start(hass)
+        async_register_time_machine_services(hass)
+    except Exception as err:  # noqa: BLE001 - the routers work without it
+        _LOGGER.warning(
+            "The Time Machine actions could not be registered (%s)",
+            type(err).__name__,
+        )
     return True
 
 
@@ -782,9 +794,10 @@ async def async_remove_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
         )
     # --- Enterprise core (part 1): the router record is orphaned, not deleted
     # (history stays; it can be adopted by a new entry).
+    router_id = None
     try:
         if _enterprise_core is not None:
-            await _enterprise_core.async_remove_entry_core(hass, entry)
+            router_id = await _enterprise_core.async_remove_entry_core(hass, entry)
     except Exception:
         _LOGGER.warning(
             "Enterprise core: could not orphan the router record of '%s'",
@@ -792,6 +805,17 @@ async def async_remove_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
             exc_info=True,
         )
     # --- end enterprise core
+    # --- Network Time Machine (1.51.0): the router's own marks go too
+    try:
+        from .tm_engine import async_remove_router
+
+        await async_remove_router(hass, router_id)
+    except Exception:
+        _LOGGER.warning(
+            "Could not remove the Time Machine marks of '%s'",
+            entry.title,
+            exc_info=True,
+        )
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> None:
@@ -1044,19 +1068,22 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
 # --- Ende Traffic Analytics ---
 
 
-# --- Network Time Machine (Phase A) ---
-# A pure read layer (tm_sources, tm_query, tm_views), wired like the modules
-# above by wrapping the setup: it only registers its GET route, once per HA
-# instance (off, the default, the route answers ``status: off``). It adds no
-# coordinator listener, no store, no task and no entity, so there is nothing
-# to release on unload. Every error stays here and is logged by type only;
-# a setup never fails because of it.
+# --- Network Time Machine (Phases A-C) ---
+# Phase A: the read layer (tm_sources, tm_query, tm_views); its GET routes
+# are registered once per HA instance (off, the default, they say so).
+# Phases B/C: the own index (tm_engine, tm_store, tm_clients) is created
+# only while the fleet switch is on; off it adds no store, no listener, no
+# task and no entity. Every error stays here and is logged by type only; a
+# setup never fails because of it.
 try:
+    from . import tm_engine as _tm_engine
     from . import tm_views as _tm_views
 except Exception:  # noqa: BLE001 - the routers work without it
     _tm_views = None  # type: ignore[assignment]
+    _tm_engine = None  # type: ignore[assignment]
 
 _async_setup_entry_traffic = async_setup_entry
+_async_unload_entry_traffic = async_unload_entry
 
 
 @wraps(_async_setup_entry_traffic)
@@ -1072,7 +1099,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
                 type(err).__name__,
             )
             _LOGGER.debug("Time Machine route setup error", exc_info=err)
+    if ok is not False and _tm_engine is not None:
+        try:
+            await _tm_engine.async_setup_time_machine(hass, entry)
+        except Exception as err:
+            _LOGGER.warning(
+                "Time Machine setup failed (%s); the router works without it",
+                type(err).__name__,
+            )
+            _LOGGER.debug("Time Machine setup error", exc_info=err)
     return ok
+
+
+@wraps(_async_unload_entry_traffic)
+async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Unload a config entry, then release it from the Time Machine."""
+    unload_ok = await _async_unload_entry_traffic(hass, entry)
+    if unload_ok is not False and _tm_engine is not None:
+        try:
+            await _tm_engine.async_release_time_machine(hass, entry.entry_id)
+        except Exception as err:
+            _LOGGER.warning("Time Machine release failed (%s)", type(err).__name__)
+            _LOGGER.debug("Time Machine release error", exc_info=err)
+    return unload_ok
 
 
 # --- Ende Network Time Machine ---

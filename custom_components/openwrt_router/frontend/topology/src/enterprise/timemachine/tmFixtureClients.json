@@ -1,0 +1,1522 @@
+{
+ "timeline": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "marks": [
+    {
+     "id": "tmm_55d012a7ecb9e8f5",
+     "ts": 1800001920.0,
+     "source": "tm_index",
+     "kind": "router_up",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_index.router_up",
+     "text": null,
+     "params": {
+      "duration_s": 300
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m9",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "reachable",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_516cbfd64bfed514",
+     "ts": 1800001620.0,
+     "source": "tm_index",
+     "kind": "router_down",
+     "group": "infrastructure",
+     "severity": "warning",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_index.router_down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m8",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "timeout",
+     "end": 1800001920.0,
+     "end_state": "closed",
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_75a3b00d429b53fe",
+     "ts": 1800000840.0,
+     "source": "tm_clients",
+     "kind": "client_disconnect",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_clients.client_disconnect",
+     "text": null,
+     "params": {
+      "timed": 1
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m7",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "unknown",
+     "end": null,
+     "end_state": null,
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_ae471cb5ff939bb9",
+     "ts": 1800000780.0,
+     "source": "tm_clients",
+     "kind": "client_roam",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_clients.client_roam",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m5",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "roam",
+     "end": null,
+     "end_state": null,
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": {
+      "before": {
+       "router_id": "rtr_11111111111111111111111111111111",
+       "router_name": "Router 1"
+      },
+      "after": {
+       "router_id": "rtr_22222222222222222222222222222222",
+       "router_name": "Router 2"
+      }
+     },
+     "spans_in": false
+    },
+    {
+     "id": "tmm_c15814eb888655d0",
+     "ts": 1800000780.0,
+     "source": "tm_clients",
+     "kind": "client_session",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_clients.client_session",
+     "text": null,
+     "params": {
+      "band": 5,
+      "roam": 1
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m6",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "session",
+     "end": 1800000840.0,
+     "end_state": "closed",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_85926e9581ae53c0",
+     "ts": 1800000600.0,
+     "source": "tm_clients",
+     "kind": "client_session",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "fleet": false,
+     "title_key": "tm_clients.client_session",
+     "text": null,
+     "params": {
+      "band": 5,
+      "blips": 1
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m4",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "session",
+     "end": 1800000780.0,
+     "end_state": "closed",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    }
+   ],
+   "sources": [
+    {
+     "id": "tm_index",
+     "state": "ok",
+     "reason": null,
+     "count": 2,
+     "oldest": 1800001620.0,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "ok",
+     "reason": null,
+     "count": 4,
+     "oldest": 1800000600.0,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    }
+   ],
+   "omitted_client_marks": 0,
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null,
+   "spanning": [
+    {
+     "id": "tmm_121c50256841b25f",
+     "ts": 1800000060.0,
+     "source": "tm_index",
+     "kind": "router_down",
+     "group": "infrastructure",
+     "severity": "warning",
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "fleet": false,
+     "title_key": "tm_index.router_down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m3",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "timeout",
+     "end": null,
+     "end_state": "open",
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": true
+    },
+    {
+     "id": "tmm_caf4358c336a203f",
+     "ts": 1800000000.0,
+     "source": "tm_clients",
+     "kind": "client_session",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "fleet": false,
+     "title_key": "tm_clients.client_session",
+     "text": null,
+     "params": {
+      "band": 5,
+      "gaps": 3
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m2",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "session",
+     "end": null,
+     "end_state": "open",
+     "client": "tmc_11154ea545af3e29",
+     "client_name": "tablet-kueche",
+     "peers": null,
+     "spans_in": true
+    }
+   ],
+   "spanning_truncated": false
+  }
+ },
+ "timeline_page1": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "marks": [
+    {
+     "id": "tmm_55d012a7ecb9e8f5",
+     "ts": 1800001920.0,
+     "source": "tm_index",
+     "kind": "router_up",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_index.router_up",
+     "text": null,
+     "params": {
+      "duration_s": 300
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m9",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "reachable",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_516cbfd64bfed514",
+     "ts": 1800001620.0,
+     "source": "tm_index",
+     "kind": "router_down",
+     "group": "infrastructure",
+     "severity": "warning",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_index.router_down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m8",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "timeout",
+     "end": 1800001920.0,
+     "end_state": "closed",
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_75a3b00d429b53fe",
+     "ts": 1800000840.0,
+     "source": "tm_clients",
+     "kind": "client_disconnect",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_clients.client_disconnect",
+     "text": null,
+     "params": {
+      "timed": 1
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m7",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "unknown",
+     "end": null,
+     "end_state": null,
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    }
+   ],
+   "sources": [
+    {
+     "id": "tm_index",
+     "state": "ok",
+     "reason": null,
+     "count": 2,
+     "oldest": 1800001620.0,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "ok",
+     "reason": null,
+     "count": 1,
+     "oldest": 1800000840.0,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    }
+   ],
+   "omitted_client_marks": 0,
+   "truncated": true,
+   "next_until": 1800000840.0,
+   "next_cursor": "1800000840000:tmm_75a3b00d429b53fe",
+   "spanning": [
+    {
+     "id": "tmm_121c50256841b25f",
+     "ts": 1800000060.0,
+     "source": "tm_index",
+     "kind": "router_down",
+     "group": "infrastructure",
+     "severity": "warning",
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "fleet": false,
+     "title_key": "tm_index.router_down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m3",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "timeout",
+     "end": null,
+     "end_state": "open",
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": true
+    },
+    {
+     "id": "tmm_caf4358c336a203f",
+     "ts": 1800000000.0,
+     "source": "tm_clients",
+     "kind": "client_session",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "fleet": false,
+     "title_key": "tm_clients.client_session",
+     "text": null,
+     "params": {
+      "band": 5,
+      "gaps": 3
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m2",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "session",
+     "end": null,
+     "end_state": "open",
+     "client": "tmc_11154ea545af3e29",
+     "client_name": "tablet-kueche",
+     "peers": null,
+     "spans_in": true
+    }
+   ],
+   "spanning_truncated": false
+  }
+ },
+ "timeline_page2": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "marks": [
+    {
+     "id": "tmm_ae471cb5ff939bb9",
+     "ts": 1800000780.0,
+     "source": "tm_clients",
+     "kind": "client_roam",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_clients.client_roam",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m5",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "roam",
+     "end": null,
+     "end_state": null,
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": {
+      "before": {
+       "router_id": "rtr_11111111111111111111111111111111",
+       "router_name": "Router 1"
+      },
+      "after": {
+       "router_id": "rtr_22222222222222222222222222222222",
+       "router_name": "Router 2"
+      }
+     },
+     "spans_in": false
+    },
+    {
+     "id": "tmm_c15814eb888655d0",
+     "ts": 1800000780.0,
+     "source": "tm_clients",
+     "kind": "client_session",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_clients.client_session",
+     "text": null,
+     "params": {
+      "band": 5,
+      "roam": 1
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m6",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "session",
+     "end": 1800000840.0,
+     "end_state": "closed",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_85926e9581ae53c0",
+     "ts": 1800000600.0,
+     "source": "tm_clients",
+     "kind": "client_session",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "fleet": false,
+     "title_key": "tm_clients.client_session",
+     "text": null,
+     "params": {
+      "band": 5,
+      "blips": 1
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m4",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "session",
+     "end": 1800000780.0,
+     "end_state": "closed",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    }
+   ],
+   "sources": [
+    {
+     "id": "tm_index",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "ok",
+     "reason": null,
+     "count": 3,
+     "oldest": 1800000600.0,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    }
+   ],
+   "omitted_client_marks": 0,
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null,
+   "spanning": [],
+   "spanning_truncated": false
+  }
+ },
+ "timeline_spans_cut": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "marks": [
+    {
+     "id": "tmm_55d012a7ecb9e8f5",
+     "ts": 1800001920.0,
+     "source": "tm_index",
+     "kind": "router_up",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_index.router_up",
+     "text": null,
+     "params": {
+      "duration_s": 300
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m9",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "reachable",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_516cbfd64bfed514",
+     "ts": 1800001620.0,
+     "source": "tm_index",
+     "kind": "router_down",
+     "group": "infrastructure",
+     "severity": "warning",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_index.router_down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m8",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "timeout",
+     "end": 1800001920.0,
+     "end_state": "closed",
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_75a3b00d429b53fe",
+     "ts": 1800000840.0,
+     "source": "tm_clients",
+     "kind": "client_disconnect",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_clients.client_disconnect",
+     "text": null,
+     "params": {
+      "timed": 1
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m7",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "unknown",
+     "end": null,
+     "end_state": null,
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_ae471cb5ff939bb9",
+     "ts": 1800000780.0,
+     "source": "tm_clients",
+     "kind": "client_roam",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_clients.client_roam",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m5",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "roam",
+     "end": null,
+     "end_state": null,
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": {
+      "before": {
+       "router_id": "rtr_11111111111111111111111111111111",
+       "router_name": "Router 1"
+      },
+      "after": {
+       "router_id": "rtr_22222222222222222222222222222222",
+       "router_name": "Router 2"
+      }
+     },
+     "spans_in": false
+    },
+    {
+     "id": "tmm_c15814eb888655d0",
+     "ts": 1800000780.0,
+     "source": "tm_clients",
+     "kind": "client_session",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_clients.client_session",
+     "text": null,
+     "params": {
+      "band": 5,
+      "roam": 1
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m6",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "session",
+     "end": 1800000840.0,
+     "end_state": "closed",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_85926e9581ae53c0",
+     "ts": 1800000600.0,
+     "source": "tm_clients",
+     "kind": "client_session",
+     "group": "clients",
+     "severity": "info",
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "fleet": false,
+     "title_key": "tm_clients.client_session",
+     "text": null,
+     "params": {
+      "band": 5,
+      "blips": 1
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m4",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "session",
+     "end": 1800000780.0,
+     "end_state": "closed",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    }
+   ],
+   "sources": [
+    {
+     "id": "tm_index",
+     "state": "ok",
+     "reason": null,
+     "count": 2,
+     "oldest": 1800001620.0,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "ok",
+     "reason": null,
+     "count": 4,
+     "oldest": 1800000600.0,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    }
+   ],
+   "omitted_client_marks": 0,
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null,
+   "spanning": [
+    {
+     "id": "tmm_121c50256841b25f",
+     "ts": 1800000060.0,
+     "source": "tm_index",
+     "kind": "router_down",
+     "group": "infrastructure",
+     "severity": "warning",
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "fleet": false,
+     "title_key": "tm_index.router_down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m3",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "timeout",
+     "end": null,
+     "end_state": "open",
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": true
+    }
+   ],
+   "spanning_truncated": true
+  }
+ },
+ "timeline_bad_cursor": {
+  "status": 400,
+  "body": {
+   "message": "The request is not valid",
+   "code": "invalid_request",
+   "details": {
+    "field": "cursor",
+    "reason": "out_of_range"
+   }
+  }
+ },
+ "timeline_user": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "marks": [
+    {
+     "id": "tmm_55d012a7ecb9e8f5",
+     "ts": 1800001920.0,
+     "source": "tm_index",
+     "kind": "router_up",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_index.router_up",
+     "text": null,
+     "params": {
+      "duration_s": 300
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m9",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "reachable",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_516cbfd64bfed514",
+     "ts": 1800001620.0,
+     "source": "tm_index",
+     "kind": "router_down",
+     "group": "infrastructure",
+     "severity": "warning",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_index.router_down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m8",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "timeout",
+     "end": 1800001920.0,
+     "end_state": "closed",
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    }
+   ],
+   "sources": [
+    {
+     "id": "tm_index",
+     "state": "ok",
+     "reason": null,
+     "count": 2,
+     "oldest": 1800001620.0,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "off",
+     "reason": "admin_only",
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "off",
+     "reason": "admin_only",
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    }
+   ],
+   "omitted_client_marks": 0,
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null,
+   "spanning": [
+    {
+     "id": "tmm_121c50256841b25f",
+     "ts": 1800000060.0,
+     "source": "tm_index",
+     "kind": "router_down",
+     "group": "infrastructure",
+     "severity": "warning",
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "fleet": false,
+     "title_key": "tm_index.router_down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m3",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "timeout",
+     "end": null,
+     "end_state": "open",
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": true
+    }
+   ],
+   "spanning_truncated": false
+  }
+ },
+ "sessions_user": {
+  "status": 403,
+  "body": {
+   "message": "This is available to administrators only",
+   "code": "authorization_denied",
+   "details": {}
+  }
+ },
+ "sessions": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "reason": null,
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "recording": true,
+   "sessions": [
+    {
+     "id": "tmm_c15814eb888655d0",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "start": 1800000780.0,
+     "end": 1800000840.0,
+     "end_state": "closed",
+     "band": 5,
+     "params": {
+      "band": 5,
+      "roam": 1
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_85926e9581ae53c0",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "start": 1800000600.0,
+     "end": 1800000780.0,
+     "end_state": "closed",
+     "band": 5,
+     "params": {
+      "band": 5,
+      "blips": 1
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_caf4358c336a203f",
+     "client": "tmc_11154ea545af3e29",
+     "client_name": "tablet-kueche",
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "start": 1800000000.0,
+     "end": null,
+     "end_state": "open",
+     "band": 5,
+     "params": {
+      "band": 5,
+      "gaps": 3
+     },
+     "derived": false
+    }
+   ],
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null
+  }
+ },
+ "sessions_page1": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "reason": null,
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "recording": true,
+   "sessions": [
+    {
+     "id": "tmm_c15814eb888655d0",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "start": 1800000780.0,
+     "end": 1800000840.0,
+     "end_state": "closed",
+     "band": 5,
+     "params": {
+      "band": 5,
+      "roam": 1
+     },
+     "derived": false
+    }
+   ],
+   "truncated": true,
+   "next_until": 1800000780.0,
+   "next_cursor": "1800000780000:tmm_c15814eb888655d0"
+  }
+ },
+ "sessions_page2": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "reason": null,
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "recording": true,
+   "sessions": [
+    {
+     "id": "tmm_85926e9581ae53c0",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "start": 1800000600.0,
+     "end": 1800000780.0,
+     "end_state": "closed",
+     "band": 5,
+     "params": {
+      "band": 5,
+      "blips": 1
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_caf4358c336a203f",
+     "client": "tmc_11154ea545af3e29",
+     "client_name": "tablet-kueche",
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "start": 1800000000.0,
+     "end": null,
+     "end_state": "open",
+     "band": 5,
+     "params": {
+      "band": 5,
+      "gaps": 3
+     },
+     "derived": false
+    }
+   ],
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null
+  }
+ },
+ "sessions_client": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "reason": null,
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "recording": true,
+   "sessions": [
+    {
+     "id": "tmm_c15814eb888655d0",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "start": 1800000780.0,
+     "end": 1800000840.0,
+     "end_state": "closed",
+     "band": 5,
+     "params": {
+      "band": 5,
+      "roam": 1
+     },
+     "derived": false
+    },
+    {
+     "id": "tmm_85926e9581ae53c0",
+     "client": "tmc_f3e24c9bafa1ce4d",
+     "client_name": null,
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "start": 1800000600.0,
+     "end": 1800000780.0,
+     "end_state": "closed",
+     "band": 5,
+     "params": {
+      "band": 5,
+      "blips": 1
+     },
+     "derived": false
+    }
+   ],
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null
+  }
+ },
+ "sessions_empty": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "reason": null,
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1799740800.0,
+    "until": 1799913600.0
+   },
+   "recording": true,
+   "sessions": [],
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null
+  }
+ },
+ "sessions_bad_request": {
+  "status": 400,
+  "body": {
+   "message": "The request is not valid",
+   "code": "invalid_request",
+   "details": {
+    "field": "client",
+    "reason": "invalid"
+   }
+  }
+ },
+ "sessions_unavailable": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "unavailable",
+   "reason": "not_running",
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "recording": false,
+   "sessions": [],
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null
+  }
+ },
+ "sessions_not_loaded": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "unavailable",
+   "reason": "not_loaded",
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "recording": false,
+   "sessions": [],
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null
+  }
+ },
+ "sessions_clients_off": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "clients_off",
+   "reason": null,
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "recording": false,
+   "sessions": [],
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null
+  }
+ },
+ "timeline_clients_off": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "ok",
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": 1800000600.0,
+    "until": 1800002101.0
+   },
+   "marks": [
+    {
+     "id": "tmm_55d012a7ecb9e8f5",
+     "ts": 1800001920.0,
+     "source": "tm_index",
+     "kind": "router_up",
+     "group": "infrastructure",
+     "severity": "info",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_index.router_up",
+     "text": null,
+     "params": {
+      "duration_s": 300
+     },
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m9",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "reachable",
+     "end": null,
+     "end_state": null,
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    },
+    {
+     "id": "tmm_516cbfd64bfed514",
+     "ts": 1800001620.0,
+     "source": "tm_index",
+     "kind": "router_down",
+     "group": "infrastructure",
+     "severity": "warning",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_index.router_down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m8",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "timeout",
+     "end": 1800001920.0,
+     "end_state": "closed",
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    }
+   ],
+   "sources": [
+    {
+     "id": "tm_index",
+     "state": "ok",
+     "reason": null,
+     "count": 2,
+     "oldest": 1800001620.0,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    },
+    {
+     "id": "tm_clients",
+     "state": "off",
+     "reason": "clients_off",
+     "count": 0,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0
+    }
+   ],
+   "omitted_client_marks": 0,
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null,
+   "spanning": [
+    {
+     "id": "tmm_121c50256841b25f",
+     "ts": 1800000060.0,
+     "source": "tm_index",
+     "kind": "router_down",
+     "group": "infrastructure",
+     "severity": "warning",
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "fleet": false,
+     "title_key": "tm_index.router_down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m3",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "timeout",
+     "end": null,
+     "end_state": "open",
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": true
+    }
+   ],
+   "spanning_truncated": false
+  }
+ },
+ "sessions_off": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "status": "off",
+   "reason": null,
+   "generated_at": 1800002100.0,
+   "window": {
+    "from": null,
+    "until": null
+   },
+   "recording": false,
+   "sessions": [],
+   "truncated": false,
+   "next_until": null,
+   "next_cursor": null
+  }
+ }
+}

@@ -6,16 +6,16 @@ Stand: 2026-11-21 · Version: v1.50.0
 
 ## Backlog
 
-### Network Time Machine (Plan `docs/plans/2026-11-21-network-time-machine.md`, 1.50.0)
+### Network Time Machine (Plan `docs/plans/2026-11-21-network-time-machine.md`, 1.50.0 / 1.51.0)
 
 Entwicklerdoku: `docs/time-machine.md`.
 
 - [x] **Phase A** Leseschicht: Route `…/enterprise/timemachine/timeline`, ein Schalter für alle
       Router, Diagnose-Block, Enterprise-Tab „Zeitreise“ (1.50.0).
-- [ ] **Phase B** Eigener Index: Marken für Ausfälle, HA-Lücken, Kanal/DFS, Uplink und
-      Fingerabdruck, Verweis-Marken für Störungen und Konfiguration, Kontrollpunkte.
-- [ ] **Phase C** Client-Sitzungen über 24 h hinaus, mit eigenem Schalter, Rechten und
-      „Client vergessen“.
+- [x] **Phase B** Eigener Index: Marken für Ausfälle, HA-Lücken, Kanal/DFS, Uplink und
+      Fingerabdruck, Verweis-Marken für Störungen und Konfiguration, Kontrollpunkte (1.51.0).
+- [x] **Phase C** Client-Sitzungen über 24 h hinaus, mit eigenem Schalter, Rechten und
+      „Client vergessen“; Panel-Ansicht „Client-Sitzungen“ (1.51.0).
 - [ ] **Phase D** „Zustand zum Zeitpunkt T“ und Vergleich zweier Zeitpunkte.
 - [ ] **Phase E** Client-Marken der Module demselben Client zuordnen (nie über `cli_`-Werte);
       Export.
@@ -28,8 +28,13 @@ Entwicklerdoku: `docs/time-machine.md`.
       und ohne `until` (ältere dann `cut: unreachable`); das Zeitbudget unterbricht die
       synchronen Lesefunktionen der Module nicht; Modulschlüssel des Core nur nach Namen
       vergeben.
-- [ ] **Im Browser und in einer echten Instanz prüfen** (Tab „Zeitreise“ bei 360/768/1280 px,
-      hell/dunkel; Rechte als Nicht-Admin). Bisher nur Tests mit Mocks und Render-Tests.
+- [ ] **Bekannte Grenzen von 1.51.0:** solange die Time Machine aus ist, wird nichts gekürzt;
+      offene Intervalle werden nicht nach 14 Tagen gekürzt; mehr ins Fenster reichende
+      Intervalle als `limit` werden abgeschnitten; „Client vergessen“ nur im eigenen Verlauf;
+      im Tab keine Bedienung für „Client vergessen“ / „Verlauf löschen“.
+- [ ] **Im Browser und in einer echten Instanz prüfen** (Tab „Zeitreise“ mit beiden Ansichten
+      bei 360/768/1280 px, hell/dunkel; Rechte als Nicht-Admin; Ausschalten löscht die
+      Client-Verläufe in der echten Datei). Bisher nur Tests mit Mocks und Render-Tests.
 
 ### Bekannte Grenzen aus 1.49.4
 
