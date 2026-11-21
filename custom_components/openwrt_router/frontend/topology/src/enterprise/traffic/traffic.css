@@ -1,0 +1,21 @@
+/* Traffic Analytics tab (enterprise/traffic). Builds on config.css and
+   wifi.css (both injected next to this one); only what they lack is here.
+   Unknown stays grey and italic (`.wifi-unknown`), never green. Narrow
+   layout down to 360 px: one column, cards instead of tables, long values
+   wrap, nothing makes the page scroll sideways. */
+
+.trf { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.trf-cov { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px; min-width: 0; }
+.trf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; min-width: 0; }
+.trf-bar { position: relative; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.06); overflow: hidden; min-width: 0; }
+.trf-bar__fill { position: absolute; inset: 0 auto 0 0; background: #93c5fd; }
+.trf-bar--warn .trf-bar__fill { background: var(--amber); }
+.trf-chart__line--up { stroke: #c4b5fd; }
+.trf-chart__dot--up { fill: #c4b5fd; }
+.trf-days { list-style: none; display: flex; flex-direction: column; gap: 2px; padding: 0; margin: 0; min-width: 0; }
+.trf-day { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 12px; min-width: 0; }
+.trf-day__ts { color: var(--text-secondary); flex: 1 1 200px; min-width: 0; }
+
+@media (max-width: 600px) {
+  .trf-grid { grid-template-columns: 1fr; }
+}
