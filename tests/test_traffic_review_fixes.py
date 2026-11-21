@@ -11,8 +11,10 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+import test_traffic_history as th_tests
 import test_traffic_views as tv_tests
 from core_testkit import USER_ID, FakeDisks, drain
+from core_testkit import make_hass as core_make_hass
 from test_traffic_engine import (
     RID,
     RID2,
@@ -25,6 +27,11 @@ from test_traffic_engine import (
 )
 
 from custom_components.openwrt_router import traffic_collector as tc
+from custom_components.openwrt_router import traffic_store
+from custom_components.openwrt_router.const import (
+    TRAFFIC_COARSE_STORE_KEY,
+    TRAFFIC_FINE_STORE_KEY,
+)
 from custom_components.openwrt_router.coordinator import (
     TRAFFIC_MAX_DEVICES,
     traffic_device_counters,
@@ -39,6 +46,7 @@ from custom_components.openwrt_router.traffic_const import (
     OPT_OFFLOAD_PROBE,
     REASON_DEVICES_OMITTED,
 )
+from custom_components.openwrt_router.traffic_engine import async_release_traffic
 from custom_components.openwrt_router.traffic_flows import (
     FlowStore,
     normalise_collector_flow,
@@ -490,3 +498,42 @@ def test_fine_store_newer_than_coarse_store_loses_no_rolled_bucket() -> None:
     assert hour_bytes(again, end) == hour_bytes(hist, end)
     again.compact(end)
     assert hour_bytes(again, end) == hour_bytes(hist, end)
+
+
+# --- T7: the size brake never empties the stored history --------------------------------
+
+
+async def test_over_size_fine_write_right_after_start_keeps_the_stored_file(
+    disks: FakeDisks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hass = core_make_hass()
+    engine, coord = await th_tests._engine(hass, on=True)
+    await th_tests._run_polls(engine, coord, hass, 90)
+    disks.flush_delayed()
+    stored = json.loads(json.dumps(disks[TRAFFIC_FINE_STORE_KEY].data["data"]))
+    assert stored["history"]["points"]
+    await async_release_traffic(hass, "e1")
+    # restart, and the very first write is over the size limit
+    hass2 = core_make_hass()
+    engine2, _coord2 = await th_tests._engine(hass2, on=True)
+    monkeypatch.setattr(traffic_store, "TRAFFIC_FINE_STORE_MAX_BYTES", 10)
+    payload = engine2.store.fine_payload()
+    assert payload == stored  # the file on disk, never {}
+    assert engine2.store.counters["save_over_size"] == 1
+
+
+async def test_over_size_coarse_write_right_after_start_keeps_the_stored_history(
+    disks: FakeDisks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hass = core_make_hass()
+    engine, coord = await th_tests._engine(hass, on=True)
+    await th_tests._run_polls(engine, coord, hass, 150)
+    disks.flush_delayed()
+    await async_release_traffic(hass, "e1")
+    stored = json.loads(json.dumps(disks[TRAFFIC_COARSE_STORE_KEY].data["data"]))
+    assert stored["history"]["points"]
+    hass2 = core_make_hass()
+    engine2, _coord2 = await th_tests._engine(hass2, on=True)
+    monkeypatch.setattr(traffic_store, "TRAFFIC_COARSE_STORE_MAX_BYTES", 10)
+    payload = engine2.store.coarse_payload()
+    assert payload["history"] == stored["history"]

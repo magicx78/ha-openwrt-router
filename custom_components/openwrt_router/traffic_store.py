@@ -165,6 +165,7 @@ class TrafficStore:
         """
         fine_section: Any = None
         stored_baselines: Any = None
+        loaded: dict[str, Any] | None = None
         try:
             if self._fine is None:
                 self._fine = core_store.create_store(
@@ -184,6 +185,8 @@ class TrafficStore:
             data = result.data or {}
             fine_section = data.get("history")
             stored_baselines = data.get("baselines")
+            if isinstance(result.data, dict) and result.data:
+                loaded = result.data
         except Exception as err:  # noqa: BLE001 - start without the fine tier
             self.counters["load_failed_fine"] += 1
             _LOGGER.warning(
@@ -197,7 +200,9 @@ class TrafficStore:
             _LOGGER.debug("Traffic baselines not restored (%s)", type(err).__name__)
         self.history = history
         self.baselines = baselines
-        self._last_fine = None
+        # The file as read counts as the last good payload: a first write
+        # over the size limit keeps it instead of writing {} (review T7).
+        self._last_fine = loaded
         return invalid
 
     # -- payloads ------------------------------------------------------------------------
