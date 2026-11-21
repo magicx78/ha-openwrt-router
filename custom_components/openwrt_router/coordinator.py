@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -100,6 +100,7 @@ from .const import (
     LOG_STATUS_OK,
     LOG_STATUS_PENDING,
     NOTIFICATION_FAILURE_THRESHOLD,
+    OPTION_WIFI_RF_ENABLED,
     PRESENCE_STALE_AFTER_S,
     RADIO_KEY_BAND,
     RADIO_KEY_IS_GUEST,
@@ -839,6 +840,13 @@ class OpenWrtCoordinator(DataUpdateCoordinator[OpenWrtCoordinatorData]):
                 data.ap_interfaces = []
 
             # --- STA Interface Details (WiFi repeater / mesh backhaul) ---
+            # Per-device iwinfo reads only with WiFi RF on; off, the 1.47.1
+            # calls (1.49.2). Read each poll so an options change applies.
+            options = getattr(self._entry, "options", None)
+            self.api.wifi_rf_sta_detail = (
+                isinstance(options, Mapping)
+                and options.get(OPTION_WIFI_RF_ENABLED) is True
+            )
             try:
                 data.sta_interfaces = await self.api.get_sta_interface_details()
             except Exception as err:  # noqa: BLE001

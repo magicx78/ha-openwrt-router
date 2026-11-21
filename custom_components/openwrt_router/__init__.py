@@ -66,6 +66,7 @@ from .net_engine import (
     async_unload_net_intelligence,
 )
 from .ssl_util import ssl_context_for_protocol
+from .wifi_id_repair import async_remove_duplicate_wifi_entities
 
 # Enterprise core: imported here, not inside the setup functions. HA imports
 # the integration package in the executor, so the ~300 ms import of the core
@@ -593,6 +594,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> b
         )
     )
     entry.async_on_unload(partial(channel_plan.unregister, entry.entry_id))
+
+    # 1.49.2: drop the ifname-keyed duplicates of the Wi-Fi switches (and the
+    # radio sensors) that 1.48.0-1.49.1 registered, before the platforms
+    # bring the original switches back. Never blocks the setup.
+    try:
+        async_remove_duplicate_wifi_entities(
+            hass, entry.entry_id, coordinator.data.wifi_radios
+        )
+    except Exception as err:  # noqa: BLE001 - cleanup must not fail setup
+        _LOGGER.warning(
+            "Cleanup of duplicate Wi-Fi entities skipped (%s)", type(err).__name__
+        )
 
     # Forward setup to all platforms (sensor, switch, device_tracker, button)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

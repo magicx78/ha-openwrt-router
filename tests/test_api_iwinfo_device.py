@@ -3,10 +3,11 @@
 rpcd's iwinfo plugin answers ``iwinfo info {}`` with UBUS_STATUS_INVALID_ARGUMENT
 (status 2, "Invalid argument" in the ubus CLI); it never returned the flat
 dict keyed by interface name that the old fallback paths expected and the
-conftest mock still pretends. The fallback paths of ``get_wifi_status`` and
-the STA detection now enumerate ``iwinfo devices`` and ask per device; the
-STA detection reuses what ``get_ap_interface_details`` read in the same poll
-so no extra call is made on an AP-only router.
+conftest mock still pretends. Since 1.49.2 ``get_wifi_status`` makes that
+1.47.1 call again (its UCI fallback gives the Wi-Fi switch unique_ids, see
+test_wifi_switch_ids_v1492.py); only the STA detection with WiFi RF on
+enumerates ``iwinfo devices`` and asks per device, reusing what
+``get_ap_interface_details`` read in the same poll.
 
 The emulator below answers like rpcd: status 2 for a missing ``device``.
 """
@@ -19,7 +20,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from custom_components.openwrt_router.api import OpenWrtAPI
-from custom_components.openwrt_router.const import RADIO_KEY_IFNAME
 
 UBUS_OK = 0
 UBUS_INVALID_ARGUMENT = 2
@@ -97,25 +97,33 @@ def _info_calls(calls: list) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_wifi_status_iwinfo_fallback_asks_per_device():
+async def test_wifi_status_makes_the_1_47_1_call_and_falls_back_to_uci():
+    """1.49.2: get_wifi_status asks ``iwinfo info {}`` again, as 1.47.1 did.
+
+    rpcd rejects it, so the radios come from UCI with their section names,
+    which are the unique_ids of the Wi-Fi switches. Asking per device here
+    (1.48.0-1.49.1) changed those unique_ids to kernel ifnames.
+    """
     calls: list = []
     api = _api(calls)
-    api.get_uci_wireless = AsyncMock(return_value={})
+    api.get_uci_wireless = AsyncMock(
+        return_value={
+            "radio1": {".type": "wifi-device", "band": "5g"},
+            "lan_5g": {".type": "wifi-iface", "device": "radio1", "ssid": "net"},
+        }
+    )
     radios = await api.get_wifi_status()
-    assert {r[RADIO_KEY_IFNAME] for r in radios} == set(_INFO)
-    assert api._wifi_method == "iwinfo"
-    assert all("device" in args for args in _info_calls(calls))
-    # The cached fast path uses the same per-device form.
-    calls.clear()
-    again = await api.get_wifi_status()
-    assert {r[RADIO_KEY_IFNAME] for r in again} == set(_INFO)
-    assert _info_calls(calls) and all("device" in a for a in _info_calls(calls))
+    assert [r["uci_section"] for r in radios] == ["lan_5g"]
+    assert api._wifi_method == "uci"
+    assert _info_calls(calls) == [{}]
+    assert ("iwinfo", "devices", {}) not in calls
 
 
 @pytest.mark.asyncio
 async def test_sta_detection_finds_the_uplink_via_iwinfo():
     calls: list = []
     api = _api(calls)
+    api.wifi_rf_sta_detail = True  # per-device reads only with WiFi RF on
     api.get_uci_wireless = AsyncMock(return_value={})
     sta = await api.get_sta_interface_details()
     assert [s["ifname"] for s in sta] == ["phy1-sta0"]
@@ -128,6 +136,7 @@ async def test_sta_detection_finds_the_uplink_via_iwinfo():
 async def test_sta_detection_reuses_the_ap_details_of_the_same_poll():
     calls: list = []
     api = _api(calls)
+    api.wifi_rf_sta_detail = True  # per-device reads only with WiFi RF on
     api._hostapd_ifaces = list(_INFO)  # from iwinfo devices, STA included
     await api.get_ap_interface_details()
     before = len(_info_calls(calls))
@@ -140,6 +149,21 @@ async def test_sta_detection_reuses_the_ap_details_of_the_same_poll():
     calls.clear()
     await api.get_sta_interface_details()
     assert ("iwinfo", "devices", {}) in calls
+
+
+@pytest.mark.asyncio
+async def test_sta_detection_with_rf_off_makes_the_1_47_1_calls():
+    calls: list = []
+    api = _api(calls)
+    api._hostapd_ifaces = list(_INFO)
+    await api.get_ap_interface_details()
+    calls.clear()
+    api.get_uci_wireless = AsyncMock(
+        return_value={"up": {".type": "wifi-iface", "mode": "sta", "ssid": "u"}}
+    )
+    sta = await api.get_sta_interface_details()
+    assert calls == [("iwinfo", "info", {})]  # rejected by rpcd, then UCI
+    assert [(s["ifname"], s["mac"]) for s in sta] == [("up", "")]
 
 
 @pytest.mark.asyncio
