@@ -1002,3 +1002,16 @@ TRAFFIC_UID_INFIX = "_traffic_"
 UID_FLEET_TRAFFIC_CLIENT_PREFIX = f"{FLEET_UID_PREFIX}traffic_client_"
 TRAFFIC_CLIENT_SENSORS_MAX = 20
 # --- Ende Traffic Analytics ---
+
+
+# --- Network Time Machine (Phase A) ---
+# A read layer over the modules that already keep history (tm_sources,
+# tm_query, tm_views): no store, no router call, no listener, no task.
+# ONE fleet-wide switch, off by default. It lives in the options of every
+# router entry (the options flow writes the value through to all entries);
+# the Time Machine is on while any entry has it on.
+OPTION_TIME_MACHINE_ENABLED = "time_machine_enabled"
+DEFAULT_TIME_MACHINE_ENABLED = False
+DATA_TIME_MACHINE_VIEWS_BOUND = f"{DOMAIN}_time_machine_views_bound"
+DATA_TIME_MACHINE_STATS = f"{DOMAIN}_time_machine_stats"  # memory only
+# --- Ende Network Time Machine ---

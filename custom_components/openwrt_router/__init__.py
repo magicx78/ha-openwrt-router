@@ -1042,3 +1042,37 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
 
 
 # --- Ende Traffic Analytics ---
+
+
+# --- Network Time Machine (Phase A) ---
+# A pure read layer (tm_sources, tm_query, tm_views), wired like the modules
+# above by wrapping the setup: it only registers its GET route, once per HA
+# instance (off, the default, the route answers ``status: off``). It adds no
+# coordinator listener, no store, no task and no entity, so there is nothing
+# to release on unload. Every error stays here and is logged by type only;
+# a setup never fails because of it.
+try:
+    from . import tm_views as _tm_views
+except Exception:  # noqa: BLE001 - the routers work without it
+    _tm_views = None  # type: ignore[assignment]
+
+_async_setup_entry_traffic = async_setup_entry
+
+
+@wraps(_async_setup_entry_traffic)
+async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Set up a config entry, then make sure the Time Machine route exists."""
+    ok = await _async_setup_entry_traffic(hass, entry)
+    if ok is not False and _tm_views is not None:
+        try:
+            _tm_views.async_register_time_machine_views(hass)
+        except Exception as err:
+            _LOGGER.warning(
+                "Time Machine route setup failed (%s); the router works without it",
+                type(err).__name__,
+            )
+            _LOGGER.debug("Time Machine route setup error", exc_info=err)
+    return ok
+
+
+# --- Ende Network Time Machine ---

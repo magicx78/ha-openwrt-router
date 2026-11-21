@@ -35,6 +35,7 @@ from typing import Any, Final
 
 from homeassistant.core import HomeAssistant
 
+from .const import OPTION_TIME_MACHINE_ENABLED
 from .tm_sources import (
     KIND_GROUP,
     KINDS,
@@ -48,6 +49,7 @@ from .tm_sources import (
     SourceResult,
     async_read_source,
     build_router_map,
+    domain_entries,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -112,6 +114,15 @@ class Stats:
             "last_duration_ms": self.last_duration_ms,
             "last_marks": self.last_marks,
         }
+
+
+def time_machine_enabled(hass: HomeAssistant) -> bool:
+    """The fleet-wide switch: on while any router entry has it on."""
+    return any(
+        isinstance(getattr(entry, "options", None), Mapping)
+        and entry.options.get(OPTION_TIME_MACHINE_ENABLED) is True
+        for entry in domain_entries(hass)
+    )
 
 
 # --- query ------------------------------------------------------------------------------
@@ -310,4 +321,5 @@ __all__ = [
     "merge",
     "off_body",
     "parse_query",
+    "time_machine_enabled",
 ]
