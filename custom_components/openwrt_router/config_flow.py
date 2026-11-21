@@ -215,6 +215,10 @@ class OpenWrtOptionsFlow(OptionsFlow):
             # schedule tick, so no update listener and no reload.
             schema = schema.extend(_config_manager_option_fields(opts))
             # --- end configuration manager options
+        # --- WiFi RF Intelligence (1.48.0): always offered, all off by
+        # default; read on every poll, so no update listener and no reload.
+        schema = schema.extend(_wifi_rf_option_fields(opts))
+        # --- end WiFi RF Intelligence
         return self.async_show_form(step_id="init", data_schema=schema)
 
 
@@ -242,6 +246,38 @@ def _config_manager_option_fields(opts: Any) -> dict[Any, Any]:
 
 
 # --- end configuration manager options
+
+
+# --- WiFi RF Intelligence (1.48.0) ---
+def _wifi_rf_option_fields(opts: Any) -> dict[Any, Any]:
+    """Switches and cadence of the WiFi RF module, odd stored values fall back."""
+    from .const import (
+        DEFAULT_WIFI_RF_EVERY_N_POLLS,
+        OPTION_WIFI_RF_EVERY_N_POLLS,
+        WIFI_RF_EVERY_N_POLLS_MAX,
+        WIFI_RF_EVERY_N_POLLS_MIN,
+        WIFI_RF_SWITCH_OPTIONS,
+    )
+
+    fields: dict[Any, Any] = {
+        vol.Optional(key, default=opts.get(key) is True): bool
+        for key in WIFI_RF_SWITCH_OPTIONS
+    }
+    every = opts.get(OPTION_WIFI_RF_EVERY_N_POLLS, DEFAULT_WIFI_RF_EVERY_N_POLLS)
+    if (
+        isinstance(every, bool)
+        or not isinstance(every, int)
+        or not WIFI_RF_EVERY_N_POLLS_MIN <= every <= WIFI_RF_EVERY_N_POLLS_MAX
+    ):
+        every = DEFAULT_WIFI_RF_EVERY_N_POLLS
+    fields[vol.Optional(OPTION_WIFI_RF_EVERY_N_POLLS, default=every)] = vol.All(
+        vol.Coerce(int),
+        vol.Range(min=WIFI_RF_EVERY_N_POLLS_MIN, max=WIFI_RF_EVERY_N_POLLS_MAX),
+    )
+    return fields
+
+
+# --- end WiFi RF Intelligence
 
 
 def _offer_config_backup_option(hass: Any, opts: Any) -> bool:

@@ -823,3 +823,42 @@ UID_FLEET_SECURITY_WIFI_AUTH_FAILURES = (
 )
 UID_FLEET_SECURITY_COVERAGE = f"{FLEET_UID_PREFIX}security_coverage"
 # --- end Security Center part 2
+
+# --- WiFi RF Intelligence (1.48.0) ---
+# Per-entry options (options flow), all OFF by default. Read on every poll,
+# so saving them needs no reload. With wifi_rf_enabled off nothing of the
+# module runs and the router sees not a single extra call.
+OPTION_WIFI_RF_ENABLED = "wifi_rf_enabled"
+OPTION_WIFI_RF_GET_STATUS = "wifi_rf_get_status"  # hostapd.<if> get_status
+OPTION_WIFI_RF_ASSOCLIST = "wifi_rf_assoclist"  # iwinfo assoclist
+OPTION_WIFI_RF_LISTS = "wifi_rf_lists_at_start"  # iwinfo freqlist/txpowerlist
+OPTION_WIFI_RF_SURVEY = "wifi_rf_survey"  # iwinfo survey (needs rf.survey right)
+OPTION_WIFI_RF_EVERY_N_POLLS = "wifi_rf_every_n_polls"
+WIFI_RF_SWITCH_OPTIONS = (
+    OPTION_WIFI_RF_ENABLED,
+    OPTION_WIFI_RF_GET_STATUS,
+    OPTION_WIFI_RF_ASSOCLIST,
+    OPTION_WIFI_RF_LISTS,
+    OPTION_WIFI_RF_SURVEY,
+)
+DEFAULT_WIFI_RF_EVERY_N_POLLS = 5
+WIFI_RF_EVERY_N_POLLS_MIN = 1
+WIFI_RF_EVERY_N_POLLS_MAX = 60
+# Extra calls of one kind never run more often than this per router and
+# radio, whatever N says (a 1-poll cadence at a 60 s poll stays at 60 s).
+WIFI_RF_MIN_FETCH_INTERVAL_S = 55.0
+# Overall time limit of one round of extra calls of one router.
+WIFI_RF_ROUND_TIMEOUT_S = 20.0
+# Capability probes after an error back off up to this long.
+WIFI_RF_PROBE_BACKOFF_MAX_S = 3600.0
+DATA_WIFI_RF_CENTER = f"{DOMAIN}_wifi_rf_center"
+DATA_WIFI_RF_VIEWS_BOUND = f"{DOMAIN}_wifi_rf_views_bound"
+WIFI_RF_STORE_KEY = f"{DOMAIN}.wifi_rf"
+WIFI_RF_STORE_VERSION = 1
+WIFI_RF_SAVE_DELAY_SECONDS = 300
+# Hard store limits: each series has its own quota, nothing is evicted.
+WIFI_RF_MAX_RADIOS = 64
+WIFI_RF_MAX_HOURLY_BUCKETS = 8 * 24  # per radio and series (8 days)
+WIFI_RF_MAX_DAILY_BUCKETS = 31  # per radio and series
+WIFI_RF_MAX_STORE_BYTES = 2_000_000
+# --- end WiFi RF Intelligence

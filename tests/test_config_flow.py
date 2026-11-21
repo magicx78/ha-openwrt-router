@@ -404,6 +404,13 @@ class TestNoSwitchOrFritzboxSteps:
             "extended_wifi_sensors",
             "topology_port_debug",
             "topology_panel_all_users",
+            # WiFi RF Intelligence (1.48.0): always offered, all off.
+            "wifi_rf_enabled",
+            "wifi_rf_get_status",
+            "wifi_rf_assoclist",
+            "wifi_rf_lists_at_start",
+            "wifi_rf_survey",
+            "wifi_rf_every_n_polls",
         }
         assert not any("fritzbox" in k for k in keys)
 
