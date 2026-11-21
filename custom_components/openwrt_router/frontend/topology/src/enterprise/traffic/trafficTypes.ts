@@ -146,6 +146,8 @@ export interface AnomalySummary {
 export interface RouterRow {
   routerId: string;
   devices: number | null;
+  /** Netdevs over the per-router cap, not measured (null: older backend). */
+  devicesOmitted: number | null;
   stations: number | null;
   conntrackCount: number | null;
 }

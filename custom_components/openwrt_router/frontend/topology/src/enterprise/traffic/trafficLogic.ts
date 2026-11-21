@@ -331,7 +331,13 @@ function parseVlan(o: Obj): VlanRow {
 function parseRouter(o: Obj): RouterRow | null {
   const id = str(o.router_id);
   if (!id) return null;
-  return { routerId: id, devices: n(o.devices), stations: n(o.stations), conntrackCount: n(o.conntrack_count) };
+  return {
+    routerId: id,
+    devices: n(o.devices),
+    devicesOmitted: n(o.devices_omitted),
+    stations: n(o.stations),
+    conntrackCount: n(o.conntrack_count),
+  };
 }
 
 function parseHistory(o: Obj | null): HistoryInfo | null {
@@ -783,6 +789,9 @@ export function pointLabel(p: { scope: string | null; device: string | null; vla
 
 // ── Reason texts ─────────────────────────────────────────────────────────
 
+/** Netdevs measured per router (backend MAX_DEVICES_PER_ROUTER). */
+export const DEVICES_PER_ROUTER_MAX = 64;
+
 export const REASON_TEXT: Record<string, string> = {
   disabled: 'Modul ausgeschaltet',
   core_missing: 'Enterprise Core läuft nicht',
@@ -875,7 +884,15 @@ export const REASON_TEXT: Record<string, string> = {
   dsa_port_counters_unverified: 'Portzähler (DSA) nicht geprüft',
   sysfs_fallback: 'Ersatzquelle sysfs',
   half_duplex_rx_tx_share_the_link: 'Halbduplex: rx und tx teilen sich den Link',
+  devices_omitted_over_cap: `Mehr als ${DEVICES_PER_ROUTER_MAX} Netzwerkgeräte: nicht alle gemessen`,
+  dropped_feeds: 'Flow-Quellen über der Obergrenze verdrängt',
 };
+
+/** "Mehr als 64 Netzwerkgeräte: N nicht gemessen", or null when none was left out. */
+export function devicesOmittedText(count: number | null | undefined): string | null {
+  if (count == null || !Number.isFinite(count) || count <= 0) return null;
+  return `Mehr als ${DEVICES_PER_ROUTER_MAX} Netzwerkgeräte: ${fmtCount(count)} nicht gemessen`;
+}
 
 /** German text of a reason code; an unknown code is shown as a code, scrubbed. */
 export function reasonText(code: string | null | undefined): string {

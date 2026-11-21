@@ -364,6 +364,7 @@ def overview(engine: Any) -> dict[str, Any]:
             {
                 "router_id": rid,
                 "devices": st.devices,
+                "devices_omitted": st.devices_omitted,
                 "stations": st.stations,
                 "conntrack_count": st.conntrack_count,
             }
@@ -373,6 +374,7 @@ def overview(engine: Any) -> dict[str, Any]:
             **dict(engine.series.dropped()),
             "dropped_snapshots": engine.counters.get("dropped_snapshots", 0),
             "stations_dropped": engine.counters.get("stations_dropped", 0),
+            "dropped_feeds": engine.flows.counters.get("dropped_feeds", 0),
         },
         "history": {
             "profile": engine.history_profile,

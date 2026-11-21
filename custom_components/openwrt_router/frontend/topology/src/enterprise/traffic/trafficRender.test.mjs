@@ -299,3 +299,14 @@ test('grid facts keep values whole; the collector select is styled like the othe
   assert.match(css, /\.trf-grid \.wifi-fact__value \{ flex: 1 1 auto; \}/);
   assert.match(css, /\.trf-field select \{[^}]*background: var\(--surface-raised\)[^}]*color: var\(--text-primary\)|\.trf-field select \{[^}]*color: var\(--text-primary\)[^}]*background: var\(--surface-raised\)/);
 });
+
+test('router row names the netdevs over the cap, and only then (1.49.3)', () => {
+  const raw = S.overviewReady();
+  raw.routers[0].devices_omitted = 17;
+  raw.drops = { dropped_feeds: 2 };
+  const ov = html(h(M.TrafficOverview, { overview: M.parseOverview(raw) }));
+  assert.match(ov, /Mehr als 64 Netzwerkgeräte: 17 nicht gemessen/);
+  assert.match(ov, /Verworfen: Flow-Quellen[^<]*2/);
+  const plain = html(h(M.TrafficOverview, { overview: M.parseOverview(S.overviewReady()) }));
+  assert.doesNotMatch(plain, /Netzwerkgeräte/);
+});
