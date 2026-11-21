@@ -562,7 +562,7 @@ test('sessions: the router name keeps its full text in the title, the client its
 
 const CSS_FILES = ['../../topology.css', '../config/config.css', '../wifi/wifi.css', 'timemachine.css'];
 
-function parseCss(src, media = null, out = []) {
+function parseCss(src, media = null, out = [], container = null) {
   src = src.replace(/\/\*[\s\S]*?\*\//g, '');
   let i = 0;
   while (i < src.length) {
@@ -574,13 +574,16 @@ function parseCss(src, media = null, out = []) {
     const body = src.slice(open + 1, j - 1);
     if (head.startsWith('@media')) {
       const w = /max-width:\s*(\d+)px/.exec(head);
-      parseCss(body, w ? Number(w[1]) : Infinity, out);
+      parseCss(body, w ? Number(w[1]) : Infinity, out, container);
+    } else if (head.startsWith('@container')) {
+      // an unnamed query (@container (max-width: …)) asks the nearest size container: '*'
+      parseCss(body, media, out, /^@container\s+([a-z][\w-]*)\s*\(/i.exec(head)?.[1] ?? '*');
     } else if (!head.startsWith('@')) {
       const decls = body.split(';').map(d => d.trim()).filter(Boolean).map(d => {
         const k = d.indexOf(':');
         return [d.slice(0, k).trim(), d.slice(k + 1).trim()];
       });
-      for (const sel of head.split(',').map(x => x.trim()).filter(Boolean)) out.push({ sel, decls, media, order: out.length });
+      for (const sel of head.split(',').map(x => x.trim()).filter(Boolean)) out.push({ sel, decls, media, container, order: out.length });
     }
     i = j;
   }
@@ -639,6 +642,7 @@ function computed(rules, el, width) {
   const win = {};
   for (const r of rules) {
     if (r.media !== null && width > r.media) continue;
+    if (r.container !== null) continue; // container queries: see containerTraps
     const { chain, spec } = r.parsed;
     if (!matches(chain, el)) continue;
     for (const [k, v] of r.decls) {
@@ -680,6 +684,36 @@ function columnTraps(rules, html, width) {
   return bad;
 }
 
+/**
+ * Elements a rule inside `@container <name>` is written for, but which have
+ * no ancestor that is a container of that name: the query never applies to
+ * them (second browser review: the block before the window sat beside the
+ * tmlist container and kept its six columns at 360 px).
+ */
+function containerTraps(rules, html) {
+  const bad = new Set();
+  const names = el => {
+    const c = computed(rules, el, 1280);
+    const v = c['container-name']?.val ?? c.container?.val?.split('/')[0];
+    return v ? v.trim().split(/\s+/) : [];
+  };
+  const isContainer = el => {
+    const c = computed(rules, el, 1280);
+    return /inline-size|size/.test(c['container-type']?.val ?? c.container?.val ?? '');
+  };
+  const walk = el => {
+    for (const r of rules) {
+      if (r.container === null || el.tag === '#root' || !matches(r.parsed.chain, el)) continue;
+      let a = el.parent;
+      while (a && a.tag !== '#root' && !(r.container === '*' ? isContainer(a) : names(a).includes(r.container))) a = a.parent;
+      if (!a || a.tag === '#root') bad.add(`${el.classes.join('.')} outside @container ${r.container} ("${r.sel}")`);
+    }
+    el.children.forEach(walk);
+  };
+  walk(parseHtml(html));
+  return [...bad].sort();
+}
+
 function everyScreen() {
   const api = { timeline: () => new Promise(noop), sessions: () => new Promise(noop) };
   const sw = view => h(M.ViewSwitch, { view, onView: noop });
@@ -696,6 +730,19 @@ function everyScreen() {
     sessions: sessions(sessionsState('sessions_page1'), { viewSwitch: sw('sessions') }),
     clientsOff: sessions(sessionsState('sessions_clients_off'), { viewSwitch: sw('sessions') }),
     unavailable: sessions(sessionsState('sessions_unavailable'), { viewSwitch: sw('sessions') }),
+    user: screenC(loadedC('timeline_user')),
+    timelineFull: screenC(loadedC('timeline'), { viewSwitch: sw('timeline') }),
+    timelineOlder: screenC(loadedC('timeline_page1', { pages: ['timeline_page2'] })),
+    clientsOffTimeline: screenC(loadedC('timeline_clients_off')),
+    partial: screen(loaded('partial')),
+    empty: screen(loaded('empty')),
+    admin: screen(loaded('admin')),
+    sessionsAll: sessions(sessionsState('sessions'), { viewSwitch: sw('sessions') }),
+    sessionsOlder: sessions(sessionsState('sessions_page1', { pages: ['sessions_page2'] })),
+    sessionsEmpty: sessions(sessionsState('sessions_empty')),
+    sessionsNotLoaded: sessions(sessionsState('sessions_not_loaded')),
+    sessionsOff: sessions(sessionsState('sessions_off')),
+    sessionsError: sessions(sessionsState(null, { error: apiError('sessions_bad_request') })),
   };
 }
 
@@ -724,4 +771,64 @@ test('no item of a column flex box gets a fixed flex-basis (the 260 px view swit
   assert.notEqual(without, tm);
   const traps = columnTraps(loadRules({ 'timemachine.css': without }), screens.loading, 1280);
   assert.deepEqual(traps, ['tm-chips.tm-views @1280px: flex-basis 260px from ".tm-chips"']);
+});
+
+test('every rule inside @container reaches its elements: they sit in a container of that name', () => {
+  const rules = loadRules();
+  assert.ok(rules.some(r => r.container === 'tmlist') && rules.some(r => r.container === 'tmsessions'));
+  const screens = everyScreen();
+  for (const [name, html] of Object.entries(screens)) assert.deepEqual(containerTraps(rules, html), [], name);
+  // the rows really are under the queries: marks of the block, of the list, and sessions
+  const tree = parseHtml(screens.timelineFull);
+  const all = (el, cls, out = []) => { if (el.classes.includes(cls)) out.push(el); el.children.forEach(c => all(c, cls, out)); return out; };
+  const marks = all(tree, 'tm-mark');
+  assert.ok(marks.length >= 8);
+  const up = (el, cls) => { for (let a = el.parent; a; a = a.parent) if (a.classes.includes(cls)) return a; return null; };
+  for (const m of marks) assert.ok(up(m, 'tm-timeline'), 'every mark inside .tm-timeline');
+  assert.equal(marks.filter(m => up(m, 'tm-spans')).length, 2);
+  // the state before the fix (container on .tm-list, the block beside it) is red, for exactly the block
+  const tm = readFileSync(join(here, 'timemachine.css'), 'utf8');
+  const old = tm
+    .replace('.tm-timeline { display: flex; flex-direction: column; gap: 10px; min-width: 0; container: tmlist / inline-size; }', '.tm-timeline { display: flex; }')
+    .replace('.tm-list { display: flex; flex-direction: column; gap: 10px; min-width: 0; }', '.tm-list { display: flex; flex-direction: column; gap: 10px; min-width: 0; container: tmlist / inline-size; }');
+  assert.notEqual(old, tm);
+  const traps = containerTraps(loadRules({ 'timemachine.css': old }), screens.timelineFull);
+  assert.ok(traps.length > 0);
+  for (const t of traps) assert.match(t, /^tm-mark(__\w+)? outside @container tmlist/, t);
+  assert.ok(traps.includes('tm-mark outside @container tmlist (".tm-mark")'));
+  assert.ok(traps.includes('tm-mark outside @container tmlist (".tm-spans .tm-mark")'));
+  assert.ok(traps.includes('tm-mark__main outside @container tmlist (".tm-mark__main")'));
+  // ... and so are the marks of the list fine in that old state: only the block is hit
+  assert.equal(marks.filter(m => !up(m, 'tm-spans')).length, marks.length - 2);
+});
+
+test('after a refused cursor "Ältere laden" is gone until a new first page (both views)', () => {
+  const refused = apiError('timeline_bad_cursor');
+  let t = loadedC('timeline_page1');
+  t = M.listReducer(t, { type: 'start', seq: 2, more: true });
+  t = M.listReducer(t, { type: 'fail', gen: 0, seq: 2, more: true, error: refused });
+  assert.equal(t.cursorRefused, true);
+  const html = screenC(t);
+  assert.ok(text(html).includes('Die Stelle zum Weiterblättern liegt nicht mehr im Zeitfenster.'));
+  assert.ok(!text(html).includes('Ältere laden'));
+  // "Aktualisieren": a new first page brings a fresh cursor and the button again
+  t = M.listReducer(M.listReducer(t, { type: 'start', seq: 3, more: false }),
+    { type: 'first', gen: 0, seq: 3, answer: M.parseTimeline(FC.timeline_page1.body), query: qOf(M.parseTimeline(FC.timeline_page1.body)) });
+  assert.equal(t.cursorRefused, false);
+  assert.ok(text(screenC(t)).includes('Ältere laden'));
+  assert.ok(!text(screenC(t)).includes('Weiterblättern'));
+  // sessions
+  let s = sessionsState('sessions_page1');
+  s = M.sessionReducer(s, { type: 'start', seq: 2, more: true });
+  s = M.sessionReducer(s, { type: 'fail', gen: 0, seq: 2, more: true, error: new M.TmApiError(400, 'invalid_request', { field: 'cursor', reason: 'invalid' }) });
+  assert.ok(!text(sessions(s)).includes('Ältere laden'));
+  assert.ok(text(sessions(s)).includes('Ungültige Stelle zum Weiterblättern.'));
+  s = M.sessionReducer(M.sessionReducer(s, { type: 'start', seq: 3, more: false }),
+    { type: 'first', gen: 0, seq: 3, answer: M.parseSessions(FC.sessions_page1.body), query: qOf(M.parseSessions(FC.sessions_page1.body)) });
+  assert.ok(text(sessions(s)).includes('Ältere laden'));
+  // another failure of an older page (503) keeps the button: it can be tried again
+  let o = M.listReducer(loadedC('timeline_page1'), { type: 'start', seq: 2, more: true });
+  o = M.listReducer(o, { type: 'fail', gen: 0, seq: 2, more: true, error: new M.TmApiError(503, 'x') });
+  assert.equal(o.cursorRefused, false);
+  assert.ok(text(screenC(o)).includes('Ältere laden'));
 });

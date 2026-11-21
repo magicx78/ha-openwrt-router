@@ -327,11 +327,14 @@ export interface ListState {
   moreError: unknown;
   /** A refresh started the list anew (more new marks than a page); until dismissed. */
   restarted: boolean;
+  /** The server refused the cursor (400, field cursor): no "Ältere laden" until a new first page. */
+  cursorRefused: boolean;
 }
 
 export const LIST_INIT: ListState = {
   gen: 0, firstSeq: 0, moreSeq: 0, head: null, marks: [], older: false, nextCursor: null, cursorQuery: null,
   topUntil: null, truncated: false, loading: false, loadingMore: false, error: null, moreError: null, restarted: false,
+  cursorRefused: false,
 };
 
 export type ListAction =
@@ -379,12 +382,14 @@ export function listReducer(s: ListState, a: ListAction): ListState {
           loading: false, error: null,
         };
       }
-      const kept = s.older || s.loadingMore;
+      // a refused cursor is never joined to: the new first page starts the list (no notice)
+      const kept = (s.older || s.loadingMore) && !s.cursorRefused;
       if (!kept || !reaches(t.nextCursor, s.topUntil)) {
-        const stop = s.loadingMore ? { moreSeq: -1, loadingMore: false, moreError: null } : {};
+        const stop = s.loadingMore || s.cursorRefused ? { moreSeq: -1, loadingMore: false, moreError: null } : {};
         return {
           ...s, ...stop, head: t, marks: t.marks, older: false, nextCursor: t.nextCursor, cursorQuery: a.query,
           topUntil: a.query.until, truncated: t.truncated, loading: false, error: null, restarted: kept || s.restarted,
+          cursorRefused: false,
         };
       }
       // joined: the older pages keep their cursor and window; marks that left the window go
@@ -403,7 +408,9 @@ export function listReducer(s: ListState, a: ListAction): ListState {
     }
     case 'fail':
       if (a.gen !== s.gen || a.seq !== (a.more ? s.moreSeq : s.firstSeq)) return s;
-      return a.more ? { ...s, loadingMore: false, moreError: a.error } : { ...s, loading: false, error: a.error };
+      return a.more
+        ? { ...s, loadingMore: false, moreError: a.error, cursorRefused: s.cursorRefused || isCursorRefusal(a.error) }
+        : { ...s, loading: false, error: a.error };
     default:
       return s;
   }
@@ -560,12 +567,14 @@ export interface SessionListState {
   error: unknown;
   moreError: unknown;
   restarted: boolean;
+  /** As in ListState: the cursor was refused, no older page until a new first page. */
+  cursorRefused: boolean;
 }
 
 export const SESSION_LIST_INIT: SessionListState = {
   gen: 0, firstSeq: 0, moreSeq: 0, head: null, sessions: [], older: false, nextCursor: null, cursorQuery: null,
   topUntil: null, truncated: false,
-  loading: false, loadingMore: false, error: null, moreError: null, restarted: false,
+  loading: false, loadingMore: false, error: null, moreError: null, restarted: false, cursorRefused: false,
 };
 
 export type SessionListAction =
@@ -596,12 +605,14 @@ export function sessionReducer(s: SessionListState, a: SessionListAction): Sessi
           loading: false, error: null, loadingMore: false, moreSeq: s.loadingMore ? -1 : s.moreSeq,
         };
       }
-      const kept = s.older || s.loadingMore;
+      // a refused cursor is never joined to: the new first page starts the list (no notice)
+      const kept = (s.older || s.loadingMore) && !s.cursorRefused;
       if (!kept || !reaches(t.nextCursor, s.topUntil)) {
-        const stop = s.loadingMore ? { moreSeq: -1, loadingMore: false, moreError: null } : {};
+        const stop = s.loadingMore || s.cursorRefused ? { moreSeq: -1, loadingMore: false, moreError: null } : {};
         return {
           ...s, ...stop, head: t, sessions: t.sessions, older: false, nextCursor: t.nextCursor, cursorQuery: a.query,
           topUntil: a.query.until, truncated: t.truncated, loading: false, error: null, restarted: kept || s.restarted,
+          cursorRefused: false,
         };
       }
       const from = t.from ?? a.query.from;
@@ -618,7 +629,9 @@ export function sessionReducer(s: SessionListState, a: SessionListAction): Sessi
     }
     case 'fail':
       if (a.gen !== s.gen || a.seq !== (a.more ? s.moreSeq : s.firstSeq)) return s;
-      return a.more ? { ...s, loadingMore: false, moreError: a.error } : { ...s, loading: false, error: a.error };
+      return a.more
+        ? { ...s, loadingMore: false, moreError: a.error, cursorRefused: s.cursorRefused || isCursorRefusal(a.error) }
+        : { ...s, loading: false, error: a.error };
     default:
       return s;
   }
@@ -1019,6 +1032,11 @@ export function dayGroups(marks: readonly Mark[], nowMs: number): DayGroup[] {
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────
+
+/** 400 with field `cursor`: sending the same cursor again would be refused again. */
+export function isCursorRefusal(err: unknown): boolean {
+  return err instanceof TmApiError && err.status === 400 && err.details?.field === 'cursor';
+}
 
 export class TmApiError extends Error {
   readonly status: number | null;

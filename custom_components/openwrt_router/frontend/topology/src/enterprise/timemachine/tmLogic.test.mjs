@@ -13,7 +13,7 @@ import {
   CUT_TEXT, DEFAULT_FILTERS, LIST_INIT, SOURCE_IDS, TAB_ID, TAB_ORDER, TAB_TITLE, TmApiError,
   adminOnlySources, countText, dayGroups, dayLabel, dedupe, errorInfo, filterKey, firstQuery, groupsOf, isFallbackTitle,
   clientsOff, isoUtc, listReducer, mergeMarks, olderQuery, omittedText, paramsText, parseTimeline, queryString, rememberRouters,
-  reaches, routerOptions, routerText, severityView, shouldPoll, sourcePill, standText, timeText, titleOf, visibleMarks,
+  isCursorRefusal, reaches, routerOptions, routerText, severityView, shouldPoll, sourcePill, standText, timeText, titleOf, visibleMarks,
 } from './tmLogic.ts';
 import { TITLE_TEXT } from './tmTexts.ts';
 
@@ -454,4 +454,33 @@ test('errors map from status and field only', () => {
   for (const err of [new TmApiError(500, 'internal'), new TmApiError(503, ''), new TmApiError(null, 'not_connected'), new TypeError('Failed to fetch')]) {
     assert.deepEqual(errorInfo(err), { kind: 'failed', message: 'Die Zeitleiste konnte nicht geladen werden.', retry: true });
   }
+});
+
+test('a refused cursor (400, field cursor) blocks older pages until a new first page, which starts the list', () => {
+  const refused = new TmApiError(400, 'invalid_request', { field: 'cursor', reason: 'out_of_range' });
+  assert.equal(isCursorRefusal(refused), true);
+  assert.equal(isCursorRefusal(new TmApiError(400, 'invalid_request', { field: 'limit' })), false);
+  assert.equal(isCursorRefusal(new TmApiError(503, 'x')), false);
+  assert.equal(isCursorRefusal(new Error('x')), false);
+  let s = first(start(LIST_INIT, 1), 1, page([rm('a', 100), rm('b', 99)], '99000', 101));
+  s = listReducer(start(s, 2, true), { type: 'older', gen: 0, seq: 2, answer: page([rm('c', 98)], '98000', 101) });
+  s = start(s, 3, true);
+  s = listReducer(s, { type: 'fail', gen: 0, seq: 3, more: true, error: refused });
+  assert.equal(s.cursorRefused, true);
+  assert.equal(s.moreError, refused);
+  assert.equal(s.nextCursor, '98000'); // kept, but the view offers no "Ältere laden" with it
+  // a new first page that would join is not joined to the refused cursor: the list starts anew, without the notice
+  s = first(start(s, 4), 4, page([rm('x', 101), rm('a', 100)], '100000', 102));
+  assert.deepEqual(s.marks.map(m => m.id), ['x', 'a']);
+  assert.equal(s.nextCursor, '100000');
+  assert.equal(s.cursorQuery.until, 102);
+  assert.equal(s.cursorRefused, false);
+  assert.equal(s.moreError, null);
+  assert.equal(s.restarted, false);
+  // any other failure of an older page keeps the cursor usable
+  let o = first(start(LIST_INIT, 1), 1, page([rm('a', 100)], '100000', 101));
+  o = listReducer(start(o, 2, true), { type: 'fail', gen: 0, seq: 2, more: true, error: new TmApiError(503, 'x') });
+  assert.equal(o.cursorRefused, false);
+  // a new filter clears it
+  assert.equal(listReducer(s, { type: 'filters' }).cursorRefused, false);
 });

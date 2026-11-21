@@ -598,7 +598,10 @@ dass keine MAC, IP, kein Hostname des Modells und kein Geheimnis in einer Antwor
   jetzt), „Dauer …“ (`closed`), „Ende unbekannt“ (`unknown`). Bei `spanning_truncated` steht
   darunter „Weitere laufen seit vor dem Zeitfenster; Zeitfenster oder Filter enger wählen.“
   Der Block bleibt beim Nachladen älterer Seiten stehen und wird nur durch eine neue erste
-  Seite ersetzt; Filter wechseln leert ihn. Die Zähler („n von m Marken“) zählen ihn mit, die
+  Seite ersetzt; Filter wechseln leert ihn. Block und Liste stehen in einem gemeinsamen
+  Größen-Container `.tm-timeline` (`tmlist`); der Block wird schon unter 920 px Breite zu
+  Karten (die Liste unter 860 px), weil seine Zeitspalte 4,5em breiter ist: am letzten
+  Zeilen-Kipppunkt ist seine Titelspalte 284,75 px, die der Liste 281 px. Die Zähler („n von m Marken“) zählen ihn mit, die
   Quell-Pills nicht (sie kommen vom Server und zählen `marks`).
 - **Blättern mit Cursor** (Zeitleiste und Sitzungen): „Ältere laden“ schickt dasselbe
   Fenster und dieselben Filter wie die erste Seite plus `cursor=<next_cursor>` (ohne
@@ -606,8 +609,10 @@ dass keine MAC, IP, kein Hostname des Modells und kein Geheimnis in einer Antwor
   Cursor gehört zu der Abfrage, mit der er kam (`cursorQuery` im Zustand). Ein abgelehnter
   Cursor (400, Feld `cursor`, Grund `out_of_range` bzw. `invalid`) erscheint als „Die Stelle
   zum Weiterblättern liegt nicht mehr im Zeitfenster. Bitte „Aktualisieren“.“ bzw.
-  „Ungültige Stelle zum Weiterblättern. …“, ohne „Erneut versuchen“ (derselbe Cursor würde
-  wieder abgelehnt).
+  „Ungültige Stelle zum Weiterblättern. …“, ohne „Erneut versuchen“; auch „Ältere laden“ ist
+  dann ausgeblendet (`cursorRefused`), bis eine neue erste Seite (Aktualisieren oder der
+  60-s-Abruf) die Liste neu beginnt, ohne Hinweis „Die Liste beginnt neu“ (derselbe Cursor
+  würde wieder abgelehnt).
 - **Anschluss nach einer Aktualisierung** (`reaches` in `tmLogic.ts`): Eine neue erste Seite
   wird nur vor die geladenen älteren Seiten gesetzt, wenn ihr Ende die geladene Liste
   erreicht. Ihr `next_cursor` muss dafür bis an das `until` der ersten Seite reichen, auf der
@@ -632,7 +637,8 @@ dass keine MAC, IP, kein Hostname des Modells und kein Geheimnis in einer Antwor
   erhalten). Zeitfenster-Chips, Router-Auswahl und „Client“ („Alle Clients“ und die Clients
   der geladenen Sitzungen). Liste nach Beginn absteigend, nach Tagen gruppiert; je Zeile
   Beginn, „Dauer …“ / „noch verbunden“ / „Ende unbekannt“, Client, Router, Band („2,4 GHz“,
-  „5 GHz“, „6 GHz“; Spalte 7em, umbrochen wird nur zwischen Wörtern), „n Wechsel“ bei
+  „5 GHz“, „6 GHz“; Spalte 8.5em, in der Zeile ohne Umbruch, „Band unbekannt“ braucht
+  102,9 px von 106,25 px; in Karten wieder mit Umbruch), „n Wechsel“ bei
   `params.roam` > 0. Lange Routernamen in der Zeile höchstens zwei Zeilen
   (`-webkit-line-clamp: 2`, voller Name im `title`), in Karten ganz. Unter 700 px
   Containerbreite Karten. „Ältere laden“ über `cursor`/`next_cursor`; `truncated` ohne
@@ -656,13 +662,16 @@ dass keine MAC, IP, kein Hostname des Modells und kein Geheimnis in einer Antwor
   zum Zeitpunkt“, kein Export, keine Sprünge in andere Tabs.
 - **Nach der Browser-Prüfung** (vor dem Merge von 1.51.0): Der Umschalter stand im
   Spalten-Flex `.cfg` und erbte von `.tm-chips` `flex: 1 1 260px`, wurde also 260 px hoch;
-  `.tm-chips.tm-views { flex: 0 0 auto; }` behebt das. Fokusrahmen nur im Tab
+  `.tm-chips.tm-views { flex: 0 0 auto; }` behebt das. Zweite Prüfung: Der Block vor dem
+  Fenster lag neben dem Container `tmlist` und behielt bei 360 px sein Sechs-Spalten-Raster
+  (Titelspalte 0 px); jetzt im gemeinsamen Container (oben). Fokusrahmen nur im Tab
   (`.tm …:focus-visible`, `#60a5fa`, 7,32:1 auf `#0c1225`; vorher `--border-focus` 2,16:1);
   die anderen Tabs bleiben unverändert.
 - Tests: `tmSessions.test.mjs` (Logik), `tmLogic.test.mjs` (Cursor, Anschluss),
   `tmRender.test.mjs` (Darstellung aus `tmFixtureClients.json`, dazu eine kleine Kaskade über
   die geladenen Stylesheets, die für jedes Element in einem Spalten-Flex die wirksame
-  `flex-basis` prüft), `tmLayout.test.mjs` (Raster, Karten, Bandspalte, Fokuskontrast,
+  `flex-basis` prüft und für jede Regel in `@container <name>`, dass ihre Elemente einen
+  Vorfahren mit diesem Container-Namen haben), `tmLayout.test.mjs` (Raster, Karten, Bandspalte, Fokuskontrast,
   Zeilenbegrenzung).
 
 ## 15. Phase B: eigener Verlauf
@@ -1072,7 +1081,7 @@ Dienst-Registry: keines, beide, leeres Feld, nur `mac`, nur `client`, ungültige
 
 ## 19. Panel für B/C (1.51.0)
 
-Das Panel ist mit 1.51.0 nachgezogen (Abschnitt 14.3, `_PANEL_VERSION` `20261121-timemachine4`).
+Das Panel ist mit 1.51.0 nachgezogen (Abschnitt 14.3, `_PANEL_VERSION` `20261121-timemachine5`).
 Es liest nur die Routen `timeline` und `sessions` und fügt nichts hinzu. Offen für eine spätere
 Version: „Zustand zum Zeitpunkt“ aus den Checkpoints, Export, Sprünge über `ref` in die
 Quell-Tabs, Bedienelemente für die Aktionen aus Abschnitt 18.

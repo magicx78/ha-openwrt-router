@@ -332,15 +332,16 @@ export function TimeMachineScreen({ state, filters, hidden, routers, nowMs, view
         {noSource ? null : firstLoad
           ? <Spinner text={LOADING_TEXT} />
           : (
-            <>
+            // one size container (tmlist) around the block and the list: both get the cards
+            <div className="tm-timeline">
               <SpansBlock marks={shownSpans} cut={head.spanningTruncated} nowMs={nowMs} />
               {hiddenOnly
                 ? <div className="cfg-empty tm-empty tm-hidden-only">{HIDDEN_ONLY_TEXT}</div>
                 : <TimelineList marks={shown} total={state.marks.length} spans={spanning.length} nowMs={nowMs} />}
-            </>
+            </div>
           )}
         {state.moreError !== null && <ErrorBox error={state.moreError} onRetry={onMore} />}
-        {!noSource && !firstLoad && state.nextCursor !== null && (
+        {!noSource && !firstLoad && state.nextCursor !== null && !state.cursorRefused && (
           <div className="tm-more">
             <button type="button" className="diag-btn cfg-btn" disabled={state.loadingMore} onClick={onMore}>Ältere laden</button>
             {state.loadingMore && <span className="cfg-spinner"><span className="cfg-spinner__dot" />lädt …</span>}
@@ -496,7 +497,7 @@ export function SessionsScreen({ state, filters, routers, clients, nowMs, viewSw
               </div>
             )}
         {state.moreError !== null && <ErrorBox of="sessions" error={state.moreError} onRetry={onMore} />}
-        {!firstLoad && state.nextCursor !== null && (
+        {!firstLoad && state.nextCursor !== null && !state.cursorRefused && (
           <div className="tm-more">
             <button type="button" className="diag-btn cfg-btn" disabled={state.loadingMore} onClick={onMore}>Ältere laden</button>
             {state.loadingMore && <span className="cfg-spinner"><span className="cfg-spinner__dot" />lädt …</span>}

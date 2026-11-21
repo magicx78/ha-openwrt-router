@@ -22,8 +22,13 @@ const rule = sel => {
   return m[1];
 };
 
-test('the list is a size container', () => {
-  assert.match(rule('.tm-list'), /container: tmlist \/ inline-size;/);
+test('the block before the window and the list share one size container', () => {
+  // 1.51.0 browser review: on .tm-list alone, the block beside it never became cards
+  assert.match(rule('.tm-timeline'), /container: tmlist \/ inline-size;/);
+  assert.doesNotMatch(rule('.tm-list'), /container/);
+  const wrap = /<div className="tm-timeline">([\s\S]*?)<\/div>\n\s*\)\}/.exec(tsx);
+  assert.ok(wrap, 'wrapper in the markup');
+  assert.ok(wrap[1].includes('<SpansBlock') && wrap[1].includes('<TimelineList'));
 });
 
 test('below the width a row needs, every mark is a wrapping card with the title on its own line', () => {
@@ -49,7 +54,11 @@ test('nothing forces a sideways scroll', () => {
   assert.match(rule('.tm-mark'), /minmax\(0, 1fr\)/);
   for (const sel of ['.tm-filter', '.tm-chips', '.tm-sources', '.tm-more']) assert.match(rule(sel), /flex-wrap: wrap;/, sel);
   assert.doesNotMatch(css, /overflow-x:\s*(auto|scroll)/);
-  assert.doesNotMatch(css, /white-space: nowrap/);
+  // nowrap only where a fixed column is measured to hold its text: the band
+  // cell of a session row ("Band unbekannt", see the band test); never in the
+  // timeline, and the session cards let it wrap again
+  const nowrap = [...css.matchAll(/([^{}\n]+)\{[^}]*white-space: nowrap;/g)].map(m => m[1].trim());
+  assert.deepEqual(nowrap, ['.tm-session__band']);
   assert.match(rule('.tm-chip'), /white-space: normal;/);
   // sum of the fixed columns stays under the breakpoint (12.5px font)
   const cols = /grid-template-columns: ([^;]+);/.exec(rule('.tm-mark'))[1];
@@ -160,13 +169,17 @@ test('the view switch and the restart notice wrap like the rest', () => {
 
 test('sessions: the band column holds "Band unbekannt" without breaking inside a word', () => {
   const cols = /grid-template-columns: ([^;]+);/.exec(rule('.tm-session'))[1];
-  assert.equal(cols, '5em 9.5em minmax(0, 1fr) 9em 7em 6em');
+  assert.equal(cols, '5em 9.5em minmax(0, 1fr) 9em 8.5em 6em');
   const band = Number(/([\d.]+)em [\d.]+em$/.exec(cols)[1]);
-  assert.ok(band >= 7, `band column ${band}em`);
+  // second browser review: "Band unbekannt" needs 102.9 px in 12.5 px (Firefox); 7em (87.5 px) broke it at the space
+  assert.ok(band * 12.5 >= 102.9 + 2, `band column ${band * 12.5} px`);
+  assert.match(rule('.tm-session__band'), /white-space: nowrap;/);
+  const cards = /@container tmsessions \(max-width: (\d+)px\) \{([\s\S]*?)\n\}/.exec(css)[2];
+  assert.match(cards, /\.tm-session__band \{ white-space: normal; \}/);
   // .tm breaks anywhere (no sideways scroll); the band cell breaks between words only
   assert.match(rule('.tm'), /overflow-wrap: anywhere;/);
   assert.match(rule('.tm-session__band'), /overflow-wrap: normal;/);
-  assert.ok(css.indexOf('.tm-session__band { overflow-wrap: normal; }') > css.indexOf('.tm {'));
+  assert.ok(css.indexOf('.tm-session__band { overflow-wrap: normal; white-space: nowrap; }') > css.indexOf('.tm {'));
   // the longer word "unbekannt" (9 letters, at most 0.62em each in 12.5 px) fits the 7em column
   assert.ok(9 * 0.62 < band);
 });
@@ -205,4 +218,23 @@ test('sessions: a long router name takes at most two lines in a row, all of it i
   assert.match(m[2], /\.tm-session__router \{ display: block; -webkit-line-clamp: unset; line-clamp: none; overflow: visible; \}/);
   // the whole name stays reachable in the title
   assert.match(tsx, /<span className="tm-session__router" title=\{router\}>\{router\}<\/span>/);
+});
+
+test('the block before the window turns into cards early enough: its title column never narrower than the list’s', () => {
+  const FONT = 12.5, PAD = 20, GAPS = 5 * 12;
+  const fixed = sel => [...(/grid-template-columns: ([^;]+);/.exec(rule(sel))[1]).matchAll(/([\d.]+)em/g)]
+    .reduce((x, m) => x + Number(m[1]), 0) * FONT;
+  const list = Number(/@container tmlist \(max-width: (\d+)px\) \{\n  \.tm-mark \{/.exec(css)[1]);
+  const block = Number(/@container tmlist \(max-width: (\d+)px\) \{\n  \.tm-spans \.tm-mark \{/.exec(css)[1]);
+  assert.equal(list, 860);
+  assert.equal(block, 920);
+  const listTitle = (list + 1) - PAD - GAPS - fixed('.tm-mark');
+  const blockTitle = (block + 1) - PAD - GAPS - fixed('.tm-spans .tm-mark');
+  assert.equal(listTitle, 281);
+  assert.equal(blockTitle, 284.75);
+  assert.ok(blockTitle >= listTitle);
+  // and the cards of the block have the list's card shape
+  const q = /@container tmlist \(max-width: 920px\) \{([\s\S]*?)\n\}/.exec(css)[1];
+  assert.match(q, /\.tm-spans \.tm-mark \{ display: flex; flex-wrap: wrap;/);
+  assert.match(q, /\.tm-spans \.tm-mark__main \{ flex: 1 1 100%;/);
 });

@@ -24,7 +24,7 @@ gespeichert werden MAC- und IP-Adressen, Hostnamen, SSIDs, Netdev-Namen und frei
 Grenzen: 14 Tage Aufbewahrung, Kontingente Infrastruktur 3000 / Verweise 2000 / Clients
 10000 Marken, die einander nie verdrängen, höchstens 200 Marken je Client und Tag, Datei
 höchstens 2,5 MB (voller Speicher gemessen 1,63 MB). Entwicklerdoku: `docs/time-machine.md`,
-Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine4`.
+Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine5`.
 
 ### Hinzugefügt
 
@@ -66,10 +66,11 @@ Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine4`.
   der bisherigen Dauer („noch offen, bisher 2 Tage 3 Std.“, „Dauer …“, „Ende unbekannt“);
   bei `spanning_truncated` der Satz „Weitere laufen seit vor dem Zeitfenster; Zeitfenster
   oder Filter enger wählen.“ Der Block bleibt beim Nachladen stehen und wird nur von einer
-  neuen ersten Seite ersetzt. **„Ältere laden“** blättert mit `cursor=<next_cursor>` im
+  neuen ersten Seite ersetzt; bei schmaler Liste wird er wie die Liste zu Karten. **„Ältere laden“** blättert mit `cursor=<next_cursor>` im
   selben Fenster und mit denselben Filtern (ohne `spans`), bis `next_cursor` fehlt; nie mehr
   über `until=next_until`. Ein abgelehnter Cursor (400, Feld `cursor`) erscheint als „Die
-  Stelle zum Weiterblättern liegt nicht mehr im Zeitfenster. Bitte „Aktualisieren“.“
+  Stelle zum Weiterblättern liegt nicht mehr im Zeitfenster. Bitte „Aktualisieren“.“;
+  „Ältere laden“ ist dann ausgeblendet, bis eine neue erste Seite geladen ist.
   Titel für alle Arten des eigenen Verlaufs (32 neue, Test); Clients als „Client <Name>“ oder
   „Client ·a1ce4d“, nie als MAC, das volle Pseudonym `tmc_…` steht im Tooltip (für „Client
   vergessen“ mit `client`); Wechsel „von Router 1 nach Router 2“; Art-Chip „Clients“. Neue
@@ -128,11 +129,9 @@ Abschnitte 14.3 und 15–19. Panel-Version `20261121-timemachine4`.
   HA-Recorder.
 - Nach einem Absturz ist der Beginn der HA-Lücke nur auf etwa 15–20 min genau.
 - **Nicht an einer echten Instanz und nicht auf Routern geprüft**; alle Aussagen stammen aus
-  Tests mit Mocks. Der Tab wurde vor dem Merge headless in Firefox bei 360, 768 und 1280 px
-  geprüft; dazu node-Tests (Logik, serverseitiges Rendern, Stylesheet und wirksame
-  Flex-Regeln).
-- TODO(Koordinator): hier eintragen, welche späteren Teile des Tabs nur durch Tests belegt
-  und nicht im Browser angesehen sind.
+  Tests mit Mocks. Der Tab wurde vor dem Merge dreimal headless in Firefox bei 360, 768 und
+  1280 px geprüft (dunkles Thema, Testserver mit nachgebildeten Antworten); das helle Thema
+  und eine echte Instanz nicht.
 
 ## [1.50.0] - 2026-11-21
 
