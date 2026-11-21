@@ -553,3 +553,97 @@ async def async_get_config_entry_diagnostics(
 
 
 # --- Ende Traffic Analytics ---
+
+
+# --- Network Time Machine (Phase A) ---
+# The fleet-wide timeline as one more block ("time_machine"): the switch,
+# this entry's option, the fixed limits, per source the state, reason and
+# mark count of the last 24 h (an admin read through the Phase A adapters;
+# the marks are counted and dropped here, never shown or written) and the
+# in-memory request counters. No mark, text, router id, MAC, IP, host name,
+# SSID or netdev name. Off: only the switch, no source is read. A failure
+# here never fails the download.
+_async_get_config_entry_diagnostics_traffic = async_get_config_entry_diagnostics
+
+
+async def _async_time_machine_summary(
+    hass: HomeAssistant, entry: OpenWrtConfigEntry
+) -> dict[str, Any]:
+    """Time Machine switch, source states and counters; never fails."""
+    try:
+        from collections.abc import Mapping
+
+        from .const import DATA_TIME_MACHINE_STATS, OPTION_TIME_MACHINE_ENABLED
+        from .tm_query import (
+            API_VERSION,
+            DEFAULT_LIMIT,
+            DEFAULT_WINDOW_S,
+            MAX_LIMIT,
+            MAX_WINDOW_S,
+            Stats,
+            time_machine_enabled,
+        )
+        from .tm_sources import (
+            SOURCE_BUDGET_S,
+            SOURCE_IDS,
+            SOURCE_MARK_CAP,
+            ReadRequest,
+            async_read_source,
+            build_router_map,
+        )
+
+        if not time_machine_enabled(hass):
+            return {"enabled": False}
+        options = getattr(entry, "options", None)
+        now = time.time()
+        req = ReadRequest(now - DEFAULT_WINDOW_S, now, True, now)
+        routers = build_router_map(hass)
+        sources: dict[str, Any] = {}
+        for source in SOURCE_IDS:
+            result = await async_read_source(hass, source, req, routers)
+            sources[source] = {
+                "state": result.state,
+                "reason": result.reason,
+                "count": len(result.marks),
+                "truncated": result.truncated,
+                "omitted_client_marks": result.omitted_client,
+            }
+        stats = hass.data.get(DATA_TIME_MACHINE_STATS)
+        if not isinstance(stats, Stats):
+            stats = Stats()
+        return _redact(
+            {
+                "enabled": True,
+                "entry_enabled": isinstance(options, Mapping)
+                and options.get(OPTION_TIME_MACHINE_ENABLED) is True,
+                "api_version": API_VERSION,
+                "window_s": DEFAULT_WINDOW_S,
+                "limits": {
+                    "default_window_s": DEFAULT_WINDOW_S,
+                    "max_window_s": MAX_WINDOW_S,
+                    "default_limit": DEFAULT_LIMIT,
+                    "max_limit": MAX_LIMIT,
+                    "source_mark_cap": SOURCE_MARK_CAP,
+                    "source_budget_s": SOURCE_BUDGET_S,
+                },
+                "sources": sources,
+                "counters": stats.as_dict(),
+            }
+        )
+    except Exception as err:  # noqa: BLE001 - the download must not fail
+        _LOGGER.debug("Time Machine diagnostics failed: %s", type(err).__name__)
+        return {"loaded": False, "error": True}
+
+
+@_sec_wraps(_async_get_config_entry_diagnostics_traffic)
+async def async_get_config_entry_diagnostics(
+    hass: HomeAssistant,
+    entry: OpenWrtConfigEntry,
+) -> dict[str, Any]:
+    """Diagnostics of the entry plus the Network Time Machine block."""
+    diagnostics = await _async_get_config_entry_diagnostics_traffic(hass, entry)
+    diagnostics["time_machine"] = await _async_time_machine_summary(hass, entry)
+    return diagnostics
+
+
+# --- Ende Network Time Machine ---
