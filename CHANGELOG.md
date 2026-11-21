@@ -4,6 +4,55 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+Network Time Machine, Phasen B und C (geplant als 1.51.0; Entwicklerdoku
+`docs/time-machine.md`, Abschnitte 15–19). Weiterhin **standardmäßig aus**; wer nichts
+einschaltet, merkt vom Update nichts (kein Store, kein Listener, keine Aufgabe, kein
+Router-Aufruf, keine Entität; Test). Das Panel ist noch nicht angepasst.
+
+### Hinzugefügt
+
+- **Eigener Verlauf (Phase B).** Bei eingeschalteter Time Machine ein eigener Speicher
+  `openwrt_router.time_machine` mit Router-Ausfällen und Flottenausfällen als Intervall mit
+  Ende, Beobachtungslücken, HA-Lücken (sauber/unsauber), Kanal- und DFS-Wechseln, fehlenden
+  Funkmodulen, Uplink- und Rollenwechseln, Änderungen des Konfigurations-Fingerabdrucks,
+  Verweisen auf Audit-Einträge (bleiben sichtbar, wenn der Audit-Ring sie verdrängt hat),
+  Uhrsprüngen und täglichen Checkpoints. Nur aus Coordinator-Daten und Modul-Ereignissen, kein
+  zusätzlicher Router-Aufruf (Test vergleicht die Aufrufliste zweier Polls mit allem an und
+  allem aus). 14 Tage, Kontingente Infrastruktur 3000 / Verweise 2000 / Clients 10000, die
+  einander nie verdrängen, Datei höchstens 2,5 MB (voller Speicher gemessen 1,63 MB);
+  verzögertes, gebündeltes Schreiben. Kaputte oder neuere Datei bleibt als `.bak`, offene
+  Intervalle enden nach einem Neustart als „Ende unbekannt“.
+- **Client-Verläufe (Phase C)** hinter dem eigenen Schalter `time_machine_clients`
+  (Standard aus, einer für alle Router): Sessions je Client mit Router, Band, Roaming und
+  Trennungen aus der Client-Stabilität. Clients nur als Pseudonym `tmc_…`, Hostname nur für
+  Administratoren und nur, solange die Client-Stabilität den Client kennt (nie gespeichert);
+  höchstens 200 Marken je Client und Tag, danach zusammengefasst. **Ausschalten löscht alle
+  gespeicherten Client-Verläufe**; das Ausschalten der Time Machine ebenso.
+- **Route `GET …/enterprise/timemachine/sessions`** (nur Administratoren): Sessions, die ein
+  Fenster überlappen, Filter `client`, `router_id`, Blättern über `next_until`.
+- **Zeitleiste:** neue Quellen `tm_index`, `tm_refs` (nur Admins), `tm_clients` (nur Admins);
+  additive Felder je Marke `code`, `end`, `end_state`, `client`, `client_name`, `peers` und je
+  Quelle `duplicates`; Grund `clients_off`. Doppelte werden entfernt: das Audit gewinnt über
+  seinen Verweis, der eigene Verlauf über gleiche NI-Ereignisse, solange er lief. `v` bleibt 1.
+- **Aktionen** `openwrt_router.time_machine_forget_client` (`mac`) und
+  `openwrt_router.time_machine_clear_history` (`clients_only`), nur für Administratoren.
+- Diagnose: Schalter, Zähler und Grenzen des eigenen Verlaufs.
+
+### Geändert
+
+- `client_engine.py` / `client_history.py`: Beobachter für Übergänge und Vergessen
+  (`add_transition_listener`); ohne Beobachter unverändert, mit Beobachter gleiche Buchungen
+  (Test), Fehler eines Beobachters erreichen die Historie nicht.
+- `net_engine.py`: schreibgeschützte Eigenschaft `topology`.
+
+### Behoben
+
+- Zeitleiste: Vorfälle von Network Intelligence werden ganz gelesen, auch wenn mehr aktive und
+  bestätigte Vorfälle gespeichert sind als die Obergrenze für behobene (Lesegrenze an die
+  tatsächliche Zahl gebunden; Test).
+- Die wirkungslose Konstante `SOURCE_MARK_CAP` und ihr Diagnosewert `source_mark_cap` sind
+  entfernt.
+
 ## [1.50.0] - 2026-11-21
 
 Network Time Machine, Phase A: eine Zeitleiste, die die Ereignisse vorhandener Module auf eine
