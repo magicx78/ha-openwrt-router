@@ -121,3 +121,35 @@ def test_a_cut_off_count_is_unknown_for_the_sensor_and_ni() -> None:
     assert _sensor_value(full) == 27
     assert infra_snapshot(cut).conntrack is None
     assert infra_snapshot(full).conntrack == 27
+
+
+# --- 1.49.3 review: F1 (truncation of rpcd's single read) and F2 (no count) -----
+
+
+def _rpcd_read(table: str, size: int = 4096) -> str:
+    """rpcd's one read() of procfs: the kernel hands out whole lines only."""
+    out = ""
+    for line in table.splitlines(keepends=True):
+        if len(out) + len(line) > size:
+            break
+        out += line
+    return out
+
+
+async def test_f1_a_whole_line_read_below_4000_bytes_is_still_cut_off() -> None:
+    """Before: ends on a newline and < 4000 bytes, so it counted as complete."""
+    long_line = LINE.replace("use=2", "use=2 " + "x" * 160)  # about 300 bytes
+    table = _rpcd_read(long_line * 100)
+    assert table.endswith("\n") and len(table) < 4000
+    api = make_api(table)
+    await api.get_active_connections()
+    assert api.last_conntrack_count_complete is False
+
+
+async def test_f1_a_read_with_room_for_another_line_is_complete() -> None:
+    table = LINE * 20  # about 3 KB: the next line would still have fitted
+    assert len(table) < 4096 - 600
+    api = make_api(table)
+    assert await api.get_active_connections() == 20
+    assert api.last_conntrack_count_complete is True
+
